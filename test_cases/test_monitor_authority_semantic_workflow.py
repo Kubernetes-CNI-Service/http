@@ -1654,6 +1654,71 @@ class MonitorAuthoritySemanticWorkflowTests(unittest.TestCase):
                     "late durability failure left a candidate or rollback name",
                 )
 
+    def test_native_runtime_rejected_publication_failed_restore_cold_reentry_holds(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            destination = root / "http-ztp-listeners.conf"
+            original = b"Listen 192.0.2.9:80\n"
+            destination.write_bytes(original)
+            destination.chmod(0o640)
+            owner = destination.stat().st_ino
+            operation = r'''
+import importlib.util, json, os, sys
+from pathlib import Path
+from types import SimpleNamespace
+repo, destination = map(Path, sys.argv[1:3])
+spec = importlib.util.spec_from_file_location('native_cold_load', repo / 'DAY0-Prepare/11-load.py')
+load = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = load
+spec.loader.exec_module(load)
+from ztp_service_runtime import SystemdRuntimeBackend
+commands = []
+def private_command(command, **kwargs):
+    commands.append(command)
+    assert command[:3] == ['systemctl', 'is-active', '--quiet'] or command[-2:] == ['apache2ctl', 'configtest'], command
+    return SimpleNamespace(returncode=3 if command[0] == 'systemctl' else 1,
+                           stdout='', stderr='independent syntax rejection')
+backend = SystemdRuntimeBackend(command_runner=private_command)
+assert backend.is_active('apache2') is False
+real_replace = os.replace
+def failed_restore(source, target):
+    if Path(source).suffix in ('.rollback', '.recovery'):
+        raise OSError('independent restore rename rejection')
+    return real_replace(source, target)
+if sys.argv[3] == 'writer':
+    os.replace = failed_restore
+try:
+    load.publish_native_apache_listener_config(('192.0.2.40',), destination=destination,
+                                             command_runner=backend._run)
+except load.LoadError as exc:
+    expected = '旧配置回滚失败' if sys.argv[3] == 'writer' else '滞留 rollback/recovery'
+    assert expected in str(exc), str(exc)
+else:
+    raise AssertionError('publication or cold reentry incorrectly succeeded')
+finally:
+    os.replace = real_replace
+assert len(commands) == (2 if sys.argv[3] == 'writer' else 1), commands
+print(json.dumps({'commands': commands, 'held': True}))
+'''
+            for phase in ("writer", "cold", "cold"):
+                result = subprocess.run(
+                    [sys.executable, "-B", "-c", operation, str(ROOT),
+                     str(destination), phase],
+                    capture_output=True, text=True, check=False, timeout=30,
+                )
+                self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+                self.assertTrue(json.loads(result.stdout)["held"])
+                authorities = list(root.glob(f".{destination.name}.*.rollback"))
+                self.assertEqual(1, len(authorities), "cold LOAD lost original A authority")
+                self.assertEqual(original, authorities[0].read_bytes())
+                self.assertEqual(owner, authorities[0].stat().st_ino)
+                self.assertEqual(0o640, stat.S_IMODE(authorities[0].stat().st_mode))
+                self.assertNotEqual(owner, destination.stat().st_ino)
+                if phase == "writer":
+                    partial_b = destination.read_bytes()
+                else:
+                    self.assertEqual(partial_b, destination.read_bytes())
+
     def test_native_listener_candidate_metadata_is_durable_before_publication(
         self,
     ) -> None:

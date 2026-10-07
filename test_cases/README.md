@@ -520,6 +520,15 @@ A runtime 及四个 DHCP 文件。逐次写前再核总 authority；原文件 mo
 这仍不是 Q 已提交后的 B 收口、完整共享写集、旧 A 显式健康激活、root/Linux/断电见证；
 原故障诊断闸门及正式 related/full/check 仍单独验收，不以局部 PASS 代替。
 
+Native Apache listener 发布后的恢复 rename 失败时，finally 不得删除仍存在的原 A
+rollback/recovery hardlink。独立 direct 覆盖 configtest 拒绝、首次目录同步失败及
+退休前目录同步失败后的恢复 rename 拒绝；真实 LOAD publisher→runtime backend
+语法拒绝→两个全新 LOAD 的 workflow 要求保留原 A inode/字节/模式，后续发布在首写
+及 configtest 前 HOLD。原成功回滚、成功 B 清理和 cleanup durability unknown 合同
+不变。此窄修不是 listener 的完整 WAL 写前绑定、离线恢复/凭据退休入口或整个 main
+健康收口；configtest/systemctl 是私有命令端口，不执行真实服务动作。root/Linux、
+断电、完整 R22 及正式 proof 仍独立验收。
+
 R22 跨项目恢复不能在 P 链接和 manifest 恢复后、旧 A runtime 恢复之前删除 WAL。
 原 WAL 的 descriptor、身份和完整字节须持有到 runtime 恢复返回，再复核停服/锁、
 P/Q 盘面及 Q 父提交前像，只有全部通过才退休凭据；异常或进程死亡保留 WAL。

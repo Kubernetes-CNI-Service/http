@@ -12640,7 +12640,7 @@ def publish_native_apache_listener_config(
     command_runner=run,
     dry_run: bool = False,
 ) -> None:
-    """Atomically publish exact Native listeners and roll back failed syntax."""
+    """Publish exact listeners; retain original A if rollback cannot complete."""
     rendered = render_native_apache_listener_config(
         service_ips, port=port
     ).encode("utf-8")
@@ -12770,10 +12770,16 @@ def publish_native_apache_listener_config(
         raise
     finally:
         candidate.unlink(missing_ok=True)
-        if backup_linked:
-            backup.unlink(missing_ok=True)
-        if recovery_linked:
-            recovery.unlink(missing_ok=True)
+        # Once B is visible, an unsuccessful restore must not consume the
+        # remaining original A hardlink.  The next publisher already fences
+        # these names before any write; only a verified offline recovery may
+        # resolve them.  Pre-publication cleanup and committed-B cleanup keep
+        # their existing contract.
+        if not published or committed:
+            if backup_linked:
+                backup.unlink(missing_ok=True)
+            if recovery_linked:
+                recovery.unlink(missing_ok=True)
 
 
 def _reload_apache_if_active(

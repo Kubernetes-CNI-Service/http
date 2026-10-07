@@ -914,6 +914,68 @@ def write_shared_artifact_receipt(
 
 
 class ReleaseTransactionTests(unittest.TestCase):
+    def test_native_listener_failed_rollback_retains_original_a_authority(self):
+        original = b"Listen 192.0.2.9:80\n"
+        for phase in ("configtest", "publication-sync", "retirement-sync"):
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory() as name:
+                root = Path(name)
+                destination = root / "http-ztp-listeners.conf"
+                destination.write_bytes(original)
+                destination.chmod(0o640)
+                owner = destination.stat()
+                replace = LOAD.os.replace
+                sync = LOAD._fsync_parent_directory
+                synchronizations = []
+                rollback_attempts = []
+
+                def failed_restore(source, target):
+                    if Path(source).suffix in (".rollback", ".recovery"):
+                        rollback_attempts.append(Path(source))
+                        raise OSError("independent rollback rename failure")
+                    return replace(source, target)
+
+                def injected_sync(path):
+                    synchronizations.append(Path(path))
+                    fail_at = {"publication-sync": 1, "retirement-sync": 2}.get(phase)
+                    if len(synchronizations) == fail_at:
+                        raise OSError("independent publication durability failure")
+                    return sync(path)
+
+                def configtest(_command):
+                    if phase == "configtest":
+                        raise LOAD.LoadError("independent syntax rejection")
+
+                with mock.patch.object(LOAD.os, "replace", side_effect=failed_restore), \
+                        mock.patch.object(LOAD, "_fsync_parent_directory", side_effect=injected_sync):
+                    with self.assertRaisesRegex(LOAD.LoadError, "旧配置回滚失败"):
+                        LOAD.publish_native_apache_listener_config(
+                            ("192.0.2.40",), destination=destination,
+                            command_runner=configtest,
+                        )
+                self.assertTrue(rollback_attempts, "fault missed the actual restore")
+                authorities = list(root.glob(f".{destination.name}.*.rollback")) + list(
+                    root.glob(f".{destination.name}.*.recovery")
+                )
+                self.assertEqual(1, len(authorities), "failed rollback destroyed the only A copy")
+                authority = authorities[0]
+                self.assertEqual(original, authority.read_bytes())
+                held = authority.stat()
+                self.assertEqual(
+                    (owner.st_dev, owner.st_ino, owner.st_uid, owner.st_gid, 0o640),
+                    (held.st_dev, held.st_ino, held.st_uid, held.st_gid,
+                     stat.S_IMODE(held.st_mode)),
+                )
+                self.assertNotEqual(owner.st_ino, destination.stat().st_ino)
+                current = destination.read_bytes()
+                command = mock.Mock(side_effect=AssertionError("reentry ran configtest"))
+                with self.assertRaisesRegex(LOAD.LoadError, "滞留 rollback/recovery"):
+                    LOAD.publish_native_apache_listener_config(
+                        ("198.51.100.20",), destination=destination, command_runner=command,
+                    )
+                command.assert_not_called()
+                self.assertEqual(current, destination.read_bytes())
+                self.assertEqual(original, authority.read_bytes())
+
     def test_project_switch_snapshots_materialized_latest_behind_rebound_output_link(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

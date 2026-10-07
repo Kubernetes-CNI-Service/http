@@ -1983,6 +1983,7 @@
         "infra/*",
         "tools/control-auth.py",
         "tools/deployment_lock.py",
+        "tools/ztp_service_runtime.py",
         "tools/finished_bundle.py",
         "tools/finish-project.py",
         "tools/finished_project_state.py",
@@ -1991,6 +1992,7 @@
       ],
       "tests": [
         "test_cases.test_ops_deployment_review",
+        "test_cases.test_monitor_authority_semantic_workflow",
         "test_cases.test_load_release_transaction",
         "test_cases.test_dhcp_optional_workflow",
         "test_cases.test_apache_publication_boundary",
