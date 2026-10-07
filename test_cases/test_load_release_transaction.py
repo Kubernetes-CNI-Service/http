@@ -3761,6 +3761,47 @@ class ReleaseTransactionTests(unittest.TestCase):
         self.assertEqual(captured["replacement_inode"], captured["replacement"].stat().st_ino)
         backend.start.assert_not_called()
 
+    def test_setup_q_comparison_parent_rebind_with_same_stage_blocks_install(self) -> None:
+        (*state, journal, descriptor, backend) = self._prepare_cross_project_setup_crash()
+        project = state[1].resolve()
+        output = project / "99-output-ztp"
+        output.mkdir()
+        target = output / "optimize"
+        original_register = LOAD._register_setup_switch_created_directory
+        captured = {}
+
+        def replace_parent_after_registration(*args, **kwargs):
+            result = original_register(*args, **kwargs)
+            staged = Path(args[2])
+            captured["wal"] = journal.read_bytes()
+            captured["stage_identity"] = (staged.stat().st_dev, staged.stat().st_ino)
+            retained = output.with_name("retained-output-parent")
+            output.rename(retained)
+            output.mkdir()
+            (retained / staged.name).rename(staged)
+            captured["stage"] = staged
+            captured["replacement_parent"] = output.stat().st_ino
+            return result
+
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "_register_setup_switch_created_directory",
+                                  side_effect=replace_parent_after_registration), \
+                mock.patch.object(LOAD, "_setup_switch_rename_directory_noreplace",
+                                  wraps=LOAD._setup_switch_rename_directory_noreplace) as install:
+            with self.assertRaisesRegex(LOAD.LoadError, "Q comparison.*parent.*changed"):
+                LOAD.ensure_setup_switch_q_comparison_directory(
+                    journal, target, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend,
+                )
+        install.assert_not_called()
+        self.assertFalse(os.path.lexists(target), "same staged inode licensed a different parent")
+        self.assertEqual(captured["wal"], journal.read_bytes())
+        self.assertEqual(captured["stage_identity"],
+                         (captured["stage"].stat().st_dev, captured["stage"].stat().st_ino))
+        self.assertEqual(captured["replacement_parent"], output.stat().st_ino)
+        self.assertTrue(output.with_name("retained-output-parent").is_dir())
+        backend.start.assert_not_called()
+
     def test_setup_q_comparison_absent_reentry_syncs_parent_before_wal_retirement(self) -> None:
         (*state, journal, descriptor, backend) = self._prepare_cross_project_setup_crash()
         project = state[1].resolve()

@@ -953,6 +953,54 @@ os.replace = replace_registered_q_stage
                                 staged.stat().st_ino)
             self.assertFalse((root / "service-started").exists())
 
+    def test_real_setup_q_comparison_parent_rebind_with_same_stage_blocks_install(self):
+        with tempfile.TemporaryDirectory(prefix="r22-q-parent-registration-rebind-") as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, _p, q, _common, _p_only, _q_only, _manifest, _before, hook, barrier, _home = fixture
+            output = q / "99-output-ztp"
+            output.mkdir()
+            site = hook / "sitecustomize.py"
+            site.write_text(site.read_text(encoding="utf-8") + """
+import json
+previous_q_parent_replace = os.replace
+def replace_registered_q_parent(source, destination, *args, **kwargs):
+    result = previous_q_parent_replace(source, destination, *args, **kwargs)
+    journal = Path(os.environ['HTTP_TEST_Q_STAGE_WAL'])
+    marker = journal.parent / 'q-parent-rebound'
+    if Path(destination) == journal and not marker.exists():
+        evidence = journal.read_bytes()
+        rows = json.loads(evidence)['body'].get('q_created_directories', [])
+        if rows:
+            staged = Path(rows[0]['staged'])
+            output = staged.parent
+            retained = output.with_name('retained-output-parent')
+            output.rename(retained)
+            output.mkdir()
+            (retained / staged.name).rename(staged)
+            marker.write_bytes(evidence)
+    return result
+os.replace = replace_registered_q_parent
+""", encoding="utf-8")
+            journal = root / "ztp/.setup-switch-journal.json"
+            with mock.patch.dict(os.environ, {"HTTP_TEST_Q_STAGE_WAL": str(journal)}):
+                result = self._run_private_load_setup_switch(
+                    fixture, prepare_journal=True,
+                    first_link_prefix=str(root / "ztp/optimize/q-sample") + os.sep,
+                )
+            self.assertEqual(24, result.returncode, result.stdout + result.stderr)
+            self.assertFalse(os.path.lexists(output / "optimize"),
+                             "WAL-owned staged inode was installed into an unowned parent")
+            self.assertRegex(result.stdout + result.stderr, "Q comparison.*parent.*changed")
+            self.assertFalse(barrier.exists(), "parent rebind reached sample publication")
+            evidence = (journal.parent / "q-parent-rebound").read_bytes()
+            self.assertEqual(evidence, journal.read_bytes())
+            row = json.loads(evidence)["body"]["q_created_directories"][0]
+            staged = Path(row["staged"])
+            self.assertEqual((row["dev"], row["ino"]), (staged.stat().st_dev, staged.stat().st_ino))
+            self.assertNotEqual(row["parent"]["ino"], output.stat().st_ino)
+            self.assertEqual(row["parent"]["ino"], output.with_name("retained-output-parent").stat().st_ino)
+            self.assertFalse((root / "service-started").exists())
+
     def _assert_real_setup_q_comparison_directory_recovery(self, *, replace_target):
         with tempfile.TemporaryDirectory(prefix="r22-q-comparison-dir-") as name:
             fixture = self._private_setup_switch_fixture(Path(name))

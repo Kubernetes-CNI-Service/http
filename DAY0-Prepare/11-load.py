@@ -6797,6 +6797,19 @@ def ensure_setup_switch_q_comparison_directory(
     if (path != expected or path.parent.resolve(strict=True) != path.parent
             or not stat.S_ISDIR(path.parent.lstat().st_mode)):
         raise LoadError("Q comparison directory requires its exact real output parent")
+    # The original stage inode alone is not install authority: it can be
+    # moved into a replacement directory after its WAL row is published.
+    # Freeze the writer's parent before registration, rather than adopting a
+    # new lookup after that boundary. Unknown owners retain the stage/WAL.
+    parent_identity = _setup_switch_link_parent_identity(path)
+
+    def require_original_parent():
+        try:
+            if _setup_switch_link_parent_identity(path) != parent_identity:
+                raise ValueError("registered output parent differs")
+        except (OSError, ValueError, RuntimeError) as exc:
+            raise LoadError(f"Q comparison parent owner changed; HOLD: {exc}") from exc
+
     try:
         current = path.lstat()
     except FileNotFoundError:
@@ -6822,18 +6835,22 @@ def ensure_setup_switch_q_comparison_directory(
     )
     # Use the identity captured into the durable row, not a new name lookup
     # that could adopt an unrelated inode installed after registration.
+    require_original_parent()
     staged_now = staged.lstat()
     if (not stat.S_ISDIR(staged_now.st_mode)
             or (staged_now.st_dev, staged_now.st_ino, stat.S_IMODE(staged_now.st_mode))
             != (created.st_dev, created.st_ino, stat.S_IMODE(created.st_mode))):
         raise LoadError("Q comparison staged owner changed before install; HOLD")
+    require_original_parent()
     _setup_switch_rename_directory_noreplace(staged, path)
+    require_original_parent()
     installed = path.lstat()
     if (not stat.S_ISDIR(installed.st_mode)
             or (installed.st_dev, installed.st_ino, stat.S_IMODE(installed.st_mode))
             != (created.st_dev, created.st_ino, stat.S_IMODE(created.st_mode))):
         raise LoadError("Q comparison installed directory owner changed; HOLD")
     _fsync_parent_directory(path.parent)
+    require_original_parent()
     return True
 
 
