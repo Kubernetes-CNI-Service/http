@@ -858,3 +858,10 @@ P 阶段在绑定的 macOS CPython 3.9 环境中，把独立审定的依赖文�
 六次意图计数、真实子进程退出／重启、部分记录与外来对象拒绝。六次意图不证明真实尝试
 上界：固定 launcher 的单次消费、spreadsheet-wide 锁、新鲜准入、History/fence 与 COMPLETE
 仍须完成；组件无重置／清理／在线发送权限，不代表 REQ7 整体完成。对应真机卡保持 NOT RUN。
+
+`test_cases.test_req7_metadata_capacity` 另验证固定只读 metadata search 与真实 TLS、
+十四表身份解码、每 sheet 和独立 spreadsheet 池的永久栅／enrollment／其他元数据／
+未决预留核算。UTF-8 字节计数是保守计量；溢出 STOP_CAPACITY，未溢出仍
+VISIBLE_ONLY_UNPROVED，因为别的 Cloud 项目的 PROJECT 元数据可能不可见。
+可见空池、响应完整、相同 fence id 或未溢出都不是完整库存、COMPLETE 或发送许可；
+预留不清除，栅不回收，容量不承诺剩余天数。库未安装，真机部分仍 NOT RUN。

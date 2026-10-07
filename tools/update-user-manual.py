@@ -51,6 +51,7 @@ REQ7_CONTROLLED_TRANSPORT_LIBRARIES = frozenset({
     "monitor/issue_tracker_online_whitelist_read.py",
     "monitor/issue_tracker_mutation_rejection.py",
     "monitor/issue_tracker_attempt_journal.py",
+    "monitor/issue_tracker_metadata_capacity.py",
 })
 
 RUNTIME_PATTERNS = (
@@ -550,7 +551,7 @@ def script_profile(root: Path, relative: str) -> dict[str, str]:
             success = "本地 direct/workflow 通过不授予在线发送或写入资格，不证明部署环境、完整准入或整个 REQ7。"
             recovery = "任何身份、坐标、响应或终止不确定时 HOLD；保留锁和证据，不刷新重放、不伪造 APPLIED。"
             if relative == "monitor/issue_tracker_tls_inputs.py":
-                scenario = "验证固定 held-FD 受控 CA、原生 TLS/hostname 与一次 OAuth POST／Sheets GET；非 200 和重定向拒绝。"
+                scenario = "验证固定 held-FD 受控 CA、原生 TLS/hostname 与一次 OAuth POST／Sheets GET／固定只读 metadata search POST；非 200 和重定向拒绝。"
                 inputs = "固定 /etc/ssl/certs/ca-certificates.crt 的持有字节及受控请求；不加载环境信任目录或代理。"
                 example = "python3 -B -m unittest -v test_cases.test_req7_tls_inputs  # 仅开发测试"
             elif relative == "monitor/issue_tracker_attempt_supervision.py":
@@ -572,6 +573,11 @@ def script_profile(root: Path, relative: str) -> dict[str, str]:
                 inputs = "ACTIVE 本地 writer token、单元标识和不超过 1 MiB 的冻结字节；它们不是合格 Sheets batch 或发送能力。"
                 recovery = "计数耗尽、部分／外来文件、字节变化或 fsync 失败均 HOLD，保留证据；无清理、重置或新单元接管。"
                 example = "python3 -B -m unittest -v test_cases.test_req7_attempt_journal  # 仅开发测试"
+            elif relative == "monitor/issue_tracker_metadata_capacity.py":
+                scenario = "有界只读 metadata search；按各 sheet 与独立 spreadsheet 池核永久栅、enrollment、其他元数据及未决预留。"
+                inputs = "同一目标的十四表身份、完整可见查询与显式预留；UTF-8 字节保守计量，不从不可见 PROJECT 元数据推导空池。"
+                recovery = "溢出 STOP_CAPACITY，非溢出仍 VISIBLE_ONLY_UNPROVED／HOLD；不是发送许可，不清除预留、不回收栅、不承诺剩余天数。"
+                example = "python3 -B -m unittest -v test_cases.test_req7_metadata_capacity  # 仅开发测试"
             elif relative == "monitor/issue_tracker_mutation_rejection.py":
                 scenario = "只观察四类完整一致 HTTP/JSON 错误，其他情况 UNKNOWN；六次内的任一 UNKNOWN 不被后续拒绝清除。"
                 inputs = "有界原始响应和完整性声明；它们不证明响应来自承载请求的原生连接，也不是 durable journal。"

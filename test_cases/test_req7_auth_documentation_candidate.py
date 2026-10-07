@@ -40,7 +40,8 @@ class Req7AuthDocumentationCandidateTests(unittest.TestCase):
                  ("monitor/issue_tracker_sheets_read_decode.py", "userEnteredValue", "test_cases.test_req7_sheets_read_decode"),
                  ("monitor/issue_tracker_online_whitelist_read.py", "冻结本地", "test_cases.test_req7_online_whitelist_read"),
                  ("monitor/issue_tracker_mutation_rejection.py", "UNKNOWN", "test_cases.test_req7_mutation_rejection"),
-                 ("monitor/issue_tracker_attempt_journal.py", "六次", "test_cases.test_req7_attempt_journal"))
+                 ("monitor/issue_tracker_attempt_journal.py", "六次", "test_cases.test_req7_attempt_journal"),
+                 ("monitor/issue_tracker_metadata_capacity.py", "永久栅", "test_cases.test_req7_metadata_capacity"))
         for path, scenario, test_module in cases:
             with self.subTest(path=path):
                 profile = module.script_profile(ROOT, path)

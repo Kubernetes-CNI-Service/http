@@ -2076,6 +2076,14 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - 证据：保存精确命令/退出码、完整物理顺序日志、前后 stat/inode/SHA、启动前 monotonic 时间、阶段耗时、持有锁的 FD/session 归属、截止期、TERM/KILL/reap/会话不存在和父死子存的独立见证。私有响应和诊断不进入公开日志；局部原生慢读 PASS 不代表整个 REQ7 或生产权限。
 - 故障注入、清理与风险：注入启动失败、DNS/慢读、pipe 关闭、监督器死亡和无法终止；保持原预算/行为断言。本地夹具已独立复现并修正已回收 leader 的同号存活 group 被误认为信号权限；首次检查之后、异常清理和 TERM/KILL 升级之前也必须重新确认活 leader 的 session/group 归属，不能把首次检查缓存为永久信号权限。真实 PID 重用仍 NOT RUN，必须验证不向该不确定 group 发信号、终止未确认保持 HOLD。实际临时 flock 的终止被拒工作流必须保持其他候选无法取得锁，直到本卡确证拥有的子进程完成清理。只终止本卡确证拥有的隔离会话，不能向外部 PID/group 发信号；清理不确定保持 HOLD，由授权责任人恢复隔离快照并重核锁。不得以 PID 重用、过期锁、超时宽限或重发来隐藏 UNKNOWN。
 
+## TC-REAL-REQ7-METADATA-CAPACITY-001 — 永久栅与可见容量的保守核算
+
+- Case ID：`TC-REAL-REQ7-METADATA-CAPACITY-001`；类型：real-environment / read-only API / G1；对应 C-19。状态：**NOT RUN / REAL_ENV REQUIRED**。`monitor/issue_tracker_metadata_capacity.py` 是未安装库；本地 direct 和实际 TLS → 固定 read-only search → 十四表身份 → 容量核算 workflow 只使用私有 fake 服务，不是发送许可。
+- 前置条件与权限：另获 owner 精确 Stage O 副本及只读调用授权；完整固定 launcher、30 秒整体 read budget、依赖/CA、每次目标与准入复核及 spreadsheet-wide owner 已证后才可接入。固定 search 返回的 PROJECT 元数据只覆盖发起调用的 Cloud 项目；他项目元数据可不可见，HTTP 完整不等于全球完整库存，未闭合时保持 VISIBLE_ONLY_UNPROVED，不以空查询或缺少记录允许写入。
+- 步骤与独立预期：保留永久栅，无自动回收；按 metadataKey/metadataValue 实际表示、enrollment、其他可见元数据和全部未决预留分别核每 sheet 30000 与 spreadsheet 30000 字符池。UTF-8 字节保守计量并明确单位；row/column 归属各自 sheet，不混作全表总池。原生 id 冲突、未知位置、重复或畸形内容 HOLD，溢出 STOP_CAPACITY；相同 id 和字节仅避免双重容量计费，不证明 COMPLETE、不清除预留。
+- 证据与风险：记录精确 HEAD/tree/manifest/Python/平台、完整有界 read 与旧前缀、前后 stat/inode/大小/SHA、物理顺序和 END、逐池 usage/reservation/remaining、不可见 PROJECT 风险及库存完整性证明缺口；无秘密正文、nonce 或 token。不可见使用量、外部编辑与读写间竞态不由本地观察闭合。
+- 故障注入与清理：在精确授权副本测试 enrollment/他方 metadata/未知预留、Unicode、各池临界与超限、部分响应/redirect/non200，不触碰真实业务数据。只清理本卡创建的私有 fixture；不删除未知永久栅、真实 journal 或预留，不以重试/改目标/释放 owner 消除不确定性。无法安全执行仍 NOT RUN。
+
 ## TC-REAL-REQ7-NATIVE-READ-WHITELIST-001 — 精确字面列与每单元同规则读核
 
 - Case ID：`TC-REAL-REQ7-NATIVE-READ-WHITELIST-001`；类型：real-environment / read-only API / whitelist；对应 C-7/C-8/C-24。状态：**NOT RUN / REAL_ENV REQUIRED**。本地先决为 `test_req7_sheets_read_plan`、`test_req7_sheets_read_decode`、`test_req7_online_whitelist_read` direct 和真实 TLS/read-plan/grid-decoder/本地 held-workbook workflow 全绿。对应 `monitor/issue_tracker_sheets_read_plan.py`、`monitor/issue_tracker_sheets_read_decode.py`、`monitor/issue_tracker_online_whitelist_read.py` 均为未安装库，不是在线发送入口、APPLIED 回执或新鲜准入许可。

@@ -166,15 +166,20 @@ class CompleteTokenResponse:
 
 
 def _native_complete_read(prepared):
-    """One exchange for a previously fixed OAuth POST or Sheets GET shape.
+    """One fixed OAuth POST, Sheets GET or read-only metadata-search POST.
 
     Internal only: this is not a URL-taking transport API or target authority.
-    The two uninstalled callers construct their immutable shapes themselves.
+    Uninstalled callers construct their immutable fixed shapes themselves.
     Complete here means intact bounded HTTP, not a valid Sheets observation.
     """
     connection = None; failed = False
     try:
-        if (prepared.host, prepared.method) not in (("oauth2.googleapis.com", "POST"), ("sheets.googleapis.com", "GET")):
+        if (prepared.host, prepared.method) == ("sheets.googleapis.com", "POST"):
+            # Not a generic Sheets POST allowance: only the exact typed,
+            # bounded read-only search path/body can reach a native connection.
+            from monitor.issue_tracker_metadata_capacity import _validate_plan
+            _validate_plan(prepared)
+        elif (prepared.host, prepared.method) not in (("oauth2.googleapis.com", "POST"), ("sheets.googleapis.com", "GET")):
             raise TlsInputHold()
         context, _identity = controlled_tls_context()
         connection = http.client.HTTPSConnection(prepared.host, timeout=prepared.budget_seconds, context=context)
