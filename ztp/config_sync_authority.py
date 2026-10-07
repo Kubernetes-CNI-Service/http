@@ -18,6 +18,7 @@ import os
 from pathlib import Path
 import re
 import stat
+from types import MappingProxyType
 import uuid
 
 
@@ -167,16 +168,25 @@ class ManagedInitialMethodCycle:
             os.close(descriptor)
         self._check_project()
 
+    def _input_snapshot(self, paths):
+        """One bounded capture supplies both validation bytes and identities."""
+        images, snapshot = [], {}
+        for path in paths:
+            image, raw = self._image(path, content=True)
+            images.append(image)
+            snapshot[str(path)] = (image[0], image[1][7], raw)
+        return images, MappingProxyType(snapshot)
+
     def _inputs(self):
         self._check_project()
         paths = [self.cache, self.cache.with_name(self.cache.name + ".sha256"),
                  self.csv, self.p2p, self.tool / "01-global.yaml"]
         key_paths = sorted((self.tool / "publickey").glob("*.pub"))
         paths.extend(key_paths)
-        images = [self._image(path) for path in paths]
+        images, snapshot = self._input_snapshot(paths)
         # Fresh parser/profile validation is required too, not merely an old checksum.
         candidate = self.initial.load_target_cache(self.cache, self.csv, self.p2p,
-                                                   public_key_tool=self.tool)
+                                                   public_key_tool=self.tool, input_snapshot=snapshot)
         if candidate is None or candidate[1] != self.targets:
             raise AuthorityError("managed initial current cache/input contract differs")
         self._check_project()
@@ -282,12 +292,11 @@ class InitialMethodMonitorInputs(ManagedInitialMethodCycle):
                  self.csv, self.p2p, self.tool / "01-global.yaml"]
         key_paths = sorted((self.tool / "publickey").glob("*.pub"))
         paths.extend(key_paths)
-        before = [self._image(path) for path in paths]
-        cache_image, raw = self._image(self.cache, content=True)
-        if cache_image != before[0]:
-            raise AuthorityError("initial monitor cache changed before profile decoding")
+        before, snapshot = self._input_snapshot(paths)
+        raw = snapshot[str(self.cache)][2]
         profile = json.loads(raw.decode("utf-8"), object_pairs_hook=_members)
-        candidate = initial.load_target_cache(self.cache, self.csv, self.p2p, public_key_tool=self.tool)
+        candidate = initial.load_target_cache(self.cache, self.csv, self.p2p,
+                                              public_key_tool=self.tool, input_snapshot=snapshot)
         if candidate is None:
             raise AuthorityError("initial monitor current profile contract is unavailable")
         self.targets = candidate[1]

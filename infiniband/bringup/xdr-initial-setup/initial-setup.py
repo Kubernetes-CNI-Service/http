@@ -38,7 +38,9 @@ import zipfile
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from contextlib import contextmanager
+from collections.abc import Mapping
 from pathlib import Path
+from types import MappingProxyType
 from typing import Callable, Optional
 
 
@@ -972,16 +974,64 @@ def _public_key_fingerprint(line: str) -> str:
     ).rstrip(b"=").decode("ascii")
 
 
-def _public_key_profile(tool: Path, *, validate_with_ssh_keygen: bool = True
+class _CacheInputSnapshot:
+    """Closed immutable bytes/mtime/canonical-name inputs from a held reader.
+
+    This optional management-host path never reopens project data. Missing or
+    malformed members reject the cache; they cannot fall back to live paths.
+    The disconnected leaf's ordinary filesystem parser is unchanged.
+    """
+    def __init__(self, values):
+        if not isinstance(values, Mapping):
+            raise ValueError("cache input snapshot must be a mapping")
+        images = {}
+        for name, value in values.items():
+            if (not isinstance(name, str) or not Path(name).is_absolute()
+                    or ".." in Path(name).parts or type(value) is not tuple or len(value) != 3
+                    or not isinstance(value[0], str) or not Path(value[0]).is_absolute()
+                    or ".." in Path(value[0]).parts or type(value[1]) is not int or value[1] < 0
+                    or type(value[2]) is not bytes or not 0 < len(value[2]) <= 8 * 1024 * 1024):
+                raise ValueError("invalid bounded cache input snapshot member")
+            images[name] = value
+        self.images = MappingProxyType(images)
+
+    def image(self, path):
+        try:
+            return self.images[str(path)]
+        except KeyError as exc:
+            raise ValueError("cache input snapshot member is missing") from exc
+
+    def read(self, path):
+        return self.image(path)[2]
+
+    def mtime_ns(self, path):
+        return self.image(path)[1]
+
+    def canonical(self, path):
+        return self.image(path)[0]
+
+    def is_file(self, path):
+        return str(path) in self.images
+
+    def public_keys(self, tool):
+        directory = tool / "publickey"
+        return sorted(Path(name) for name in self.images
+                      if Path(name).parent == directory and Path(name).name.endswith(".pub"))
+
+
+def _public_key_profile(tool: Path, *, validate_with_ssh_keygen: bool = True,
+                        input_snapshot: Optional[_CacheInputSnapshot] = None
                         ) -> list[dict[str, str]]:
     directory = tool / "publickey"
-    if not directory.is_dir():
+    if input_snapshot is None and not directory.is_dir():
         return []
     result: list[dict[str, str]] = []
     validator: Optional[str] = None
-    for path in sorted(directory.glob("*.pub")):
+    paths = input_snapshot.public_keys(tool) if input_snapshot is not None else sorted(directory.glob("*.pub"))
+    for path in paths:
         try:
-            source = path.read_text(encoding="utf-8")
+            source = (input_snapshot.read(path).decode("utf-8") if input_snapshot is not None
+                      else path.read_text(encoding="utf-8"))
         except (OSError, UnicodeError) as exc:
             raise SetupError(f"cannot read public key {path.name}: {exc}") from exc
         if not source.strip():
@@ -1071,7 +1121,8 @@ def _cache_authority(ib_csv: Path, p2p: Path,
 
 
 def _valid_cache_authority(payload: dict, ib_csv: Path, p2p: Path,
-                           global_file: Optional[Path]) -> bool:
+                           global_file: Optional[Path], *,
+                           input_snapshot: Optional[_CacheInputSnapshot] = None) -> bool:
     authority = payload.get("cache_authority")
     if not isinstance(authority, dict) or set(authority) != {
         "ib_csv_sha256", "p2p_sha256", "global_sha256", "generator",
@@ -1095,14 +1146,17 @@ def _valid_cache_authority(payload: dict, ib_csv: Path, p2p: Path,
         return False
     if (payload.get("global") is None) != (authority["global_sha256"] is None):
         return False
+    def input_hash(path):
+        return (hashlib.sha256(input_snapshot.read(path)).hexdigest() if input_snapshot is not None
+                else _file_sha256(path))
     if (
-        authority["ib_csv_sha256"] != _file_sha256(ib_csv)
-        or authority["p2p_sha256"] != _file_sha256(p2p)
+        authority["ib_csv_sha256"] != input_hash(ib_csv)
+        or authority["p2p_sha256"] != input_hash(p2p)
         or authority["generator_sha256"] != _file_sha256(_SELF_SOURCE_PATH)
     ):
         return False
-    if global_file is not None and global_file.is_file():
-        if authority["global_sha256"] != _file_sha256(global_file):
+    if global_file is not None and (input_snapshot.is_file(global_file) if input_snapshot is not None else global_file.is_file()):
+        if authority["global_sha256"] != input_hash(global_file):
             return False
     return True
 
@@ -1110,16 +1164,23 @@ def _valid_cache_authority(payload: dict, ib_csv: Path, p2p: Path,
 def load_target_cache(cache_path: Path, ib_csv: Path,
                       p2p: Path, *, public_key_tool: Optional[Path] = None,
                       validate_public_keys_with_ssh_keygen: bool = False,
-                      allow_baked_missing_global: bool = False
+                      allow_baked_missing_global: bool = False,
+                      input_snapshot=None
                       ) -> Optional[tuple[int, list[Target]]]:
     try:
-        if cache_path.stat().st_mtime < max(ib_csv.stat().st_mtime, p2p.stat().st_mtime):
+        captured = _CacheInputSnapshot(input_snapshot) if input_snapshot is not None else None
+        def mtime(path):
+            return captured.mtime_ns(path) / 1000000000 if captured is not None else path.stat().st_mtime
+        def mtime_ns(path):
+            return captured.mtime_ns(path) if captured is not None else path.stat().st_mtime_ns
+        if mtime(cache_path) < max(mtime(ib_csv), mtime(p2p)):
             return None
         checksum_path = cache_path.with_name(cache_path.name + ".sha256")
-        if cache_path.stat().st_mtime_ns > checksum_path.stat().st_mtime_ns:
+        if mtime_ns(cache_path) > mtime_ns(checksum_path):
             return None
-        raw_cache = cache_path.read_bytes()
-        checksum_fields = checksum_path.read_text(encoding="ascii").split()
+        raw_cache = captured.read(cache_path) if captured is not None else cache_path.read_bytes()
+        checksum_fields = (captured.read(checksum_path).decode("ascii") if captured is not None
+                           else checksum_path.read_text(encoding="ascii")).split()
         if len(checksum_fields) != 2 or checksum_fields[1] != cache_path.name:
             return None
         if not re.fullmatch(r"[0-9a-f]{64}", checksum_fields[0]):
@@ -1132,30 +1193,36 @@ def load_target_cache(cache_path: Path, ib_csv: Path,
         if payload.get("ib_csv") != str(ib_csv) or payload.get("p2p") != str(p2p):
             return None
         current_global = public_key_tool / "01-global.yaml" if public_key_tool else None
-        if not _valid_cache_authority(payload, ib_csv, p2p, current_global):
+        if captured is not None and current_global is not None:
+            captured.read(current_global)  # Required capture, never a live fallback.
+        if not _valid_cache_authority(payload, ib_csv, p2p, current_global, input_snapshot=captured):
             return None
         if "global" not in payload or "services" not in payload or "public_keys" not in payload:
             return None
         _validate_cache_profile(payload)
         if public_key_tool is not None:
             global_file = public_key_tool / "01-global.yaml"
-            if global_file.is_file():
-                if payload["global"] != str(global_file.resolve()):
+            if (captured.is_file(global_file) if captured is not None else global_file.is_file()):
+                canonical = captured.canonical(global_file) if captured is not None else str(global_file.resolve())
+                if payload["global"] != canonical:
                     return None
-                if global_file.stat().st_mtime_ns > cache_path.stat().st_mtime_ns:
+                if mtime_ns(global_file) > mtime_ns(cache_path):
                     return None
             elif payload["global"] is not None and not allow_baked_missing_global:
                 return None
             source_dir = public_key_tool / "publickey"
-            if source_dir.is_dir() and any(
-                path.stat().st_mtime_ns > cache_path.stat().st_mtime_ns
-                for path in source_dir.glob("*.pub")
+            source_available = captured is not None or source_dir.is_dir()
+            paths = captured.public_keys(public_key_tool) if captured is not None else source_dir.glob("*.pub")
+            if source_available and any(
+                mtime_ns(path) > mtime_ns(cache_path)
+                for path in paths
             ):
                 return None
-            if source_dir.is_dir() or not allow_baked_missing_global:
+            if source_available or not allow_baked_missing_global:
                 if _public_key_profile(
                     public_key_tool,
                     validate_with_ssh_keygen=validate_public_keys_with_ssh_keygen,
+                    input_snapshot=captured,
                 ) != payload["public_keys"]:
                     return None
         targets = [

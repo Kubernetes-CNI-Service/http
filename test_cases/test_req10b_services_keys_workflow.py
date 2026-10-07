@@ -298,6 +298,52 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
         cache = root / "out/targets.json"
         return root, tool, global_path, ib_csv, p2p, pubdir, cache, laptop, management
 
+    def test_f02_initial_profile_parser_never_reopens_rebound_foreign_inputs(self):
+        """A safe snapshot cannot authorize a later unguarded pathname read."""
+        authority = load_script("f02_initial_parser_snapshot_boundary", ROOT / "ztp/config_sync_authority.py")
+        for case in ("cache", "csv", "p2p", "global", "key", "fifo"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory).resolve()
+                root, tool, global_file, csv_path, p2p, pubdir, cache, _, _ = self.fixture(str(base / "project"))
+                self.assertEqual(0, self.run_initial(tool, csv_path, p2p, cache, "--generate-json"))
+                paths = {"cache": cache, "csv": csv_path, "p2p": p2p,
+                         "global": global_file, "key": pubdir / "mgmt-server.pub", "fifo": csv_path}
+                victim = paths[case]
+                original_stat = victim.stat()
+                foreign = base / "foreign-input"
+                foreign_bytes = b"INDEPENDENT FOREIGN INPUT: MUST NOT BE OPENED\n"
+                foreign.write_bytes(foreign_bytes)
+                # Do not accidentally short-circuit the original parser's
+                # freshness checks; the fault is a read after safe capture.
+                os.utime(foreign, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+                original_parser = self.initial.load_target_cache
+                original_open = Path.open
+                rebound, forbidden_reads = [], []
+                def rebind_then_parse(*args, **kwargs):
+                    if not rebound:
+                        rebound.append(True)
+                        victim.unlink()
+                        if case == "fifo":
+                            os.mkfifo(victim)
+                            os.utime(victim, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+                        else:
+                            victim.symlink_to(foreign)
+                    return original_parser(*args, **kwargs)
+                def reject_foreign_open(path, *args, **kwargs):
+                    if path.resolve() == foreign or (case == "fifo" and path == victim):
+                        forbidden_reads.append(str(path))
+                        raise AssertionError("profile parser reopened a foreign input after safe capture")
+                    return original_open(path, *args, **kwargs)
+                with mock.patch.object(self.initial, "load_target_cache", side_effect=rebind_then_parse), \
+                        mock.patch.object(Path, "open", reject_foreign_open), \
+                        self.assertRaises((authority.AuthorityError, OSError, ValueError)):
+                    authority.InitialMethodMonitorInputs(root.resolve(), self.initial, tool.resolve(),
+                                                         cache, csv_path, p2p)
+                self.assertTrue(rebound, "the actual cache parser boundary must be exercised")
+                self.assertEqual([], forbidden_reads)
+                self.assertEqual(foreign_bytes, foreign.read_bytes())
+                self.assertFalse((root / "99-output-ztp/configuration-methods").exists())
+
     def test_f02_managed_main_pending_precedes_writes_and_failed_cycle_revokes(self):
         authority = load_script("f02_managed_initial_main_authority", ROOT / "ztp/config_sync_authority.py")
         cycle_type = getattr(authority, "ManagedInitialMethodCycle", None)

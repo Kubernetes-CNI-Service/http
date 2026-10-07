@@ -143,6 +143,10 @@ direct 覆盖漂移、冲突、期望中途修改、密钥替换和不安全文�
 并检查全部输出路径和现有父目录仍属于该显式项目；外部 CSV/P2P、cache/report 或 snapshot
 不得先落下输出再报错。该准入只用于显式方法周期，不改变单文件离线 leaf 的路径合同。
 由 owned/single-link/no-follow 有限读取绑定，重新验证 cache/parser 后再次核验输入与项目根。
+受管 writer 和只读 initial monitor 的 cache/parser 只消费同一次 held 读取捕获的
+有限 bytes、mtime 与 canonical 名称，不重新打开项目路径；缺失或坏快照不回退文件系统。
+缓存、CSV、P2P、global、公钥在捕获后被换绑到外部文件或 FIFO 的真实解析负例必须拒绝，
+保留外部字节且不发布方法权威。默认离线 leaf 仍使用原路径解析合同。
 操作前 pending，完成后同会话观察及发布后重读；失败撤销自己的当前代次，不触碰新写者。
 默认单文件离线入口不依赖后端、不产生方法权威；REQ10B 密钥探针和 REQ10C 的 cron 条件不变。
 initial-setup 消费端原语 `apply_current_initial_method_authority` 只消费操作前捕获的已完成本地代次，

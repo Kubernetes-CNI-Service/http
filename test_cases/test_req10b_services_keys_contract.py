@@ -35,6 +35,47 @@ class Req10BServicesKeysContractTests(unittest.TestCase):
     def test_target_cache_version_is_four(self) -> None:
         self.assertEqual(4, self.initial.TARGET_CACHE_VERSION)
 
+    def test_f02_cache_snapshot_missing_member_never_falls_back_to_filesystem(self):
+        """A finite immutable input map is closed, not a best-effort read cache."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            cache, csv_path, p2p = (root / name for name in ("cache.json", "ib.csv", "p2p.dot"))
+            snapshot = {str(cache): (str(cache), 1000000000, b"{}")}
+            with mock.patch.object(Path, "open", side_effect=AssertionError("snapshot fallback opened filesystem")):
+                self.assertIsNone(self.initial.load_target_cache(
+                    cache, csv_path, p2p, input_snapshot=snapshot))
+            for malformed in (None, True, (str(cache), True, b"{}"),
+                              ("relative/path", 1000000000, b"{}"),
+                              (str(cache), 1000000000, "not bytes")):
+                with self.subTest(malformed=malformed), mock.patch.object(
+                        Path, "open", side_effect=AssertionError("malformed snapshot fallback")):
+                    self.assertIsNone(self.initial.load_target_cache(
+                        cache, csv_path, p2p, input_snapshot={str(cache): malformed}))
+
+    def test_f02_cache_snapshot_freezes_bytes_names_times_and_exact_byte_bound(self):
+        snapshot_type = getattr(self.initial, "_CacheInputSnapshot", None)
+        self.assertTrue(callable(snapshot_type))
+        root = Path("/independent/project")
+        cache, key = root / "cache.json", root / "tool/publickey/management.pub"
+        literal = b"independent captured bytes"
+        images = {str(cache): (str(cache), 1000000000, literal),
+                  str(key): (str(root / "owned-keys/management.pub"), 2000000000, b"independent key bytes")}
+        with mock.patch.object(Path, "open", side_effect=AssertionError("captured snapshot reopened a path")):
+            captured = snapshot_type(images)
+            images[str(cache)] = (str(root / "foreign"), 9000000000, b"later caller mutation")
+            self.assertEqual(literal, captured.read(cache))
+            self.assertEqual(str(cache), captured.canonical(cache))
+            self.assertEqual(1000000000, captured.mtime_ns(cache))
+            with self.assertRaises(TypeError):
+                captured.images[str(cache)] = (str(root / "foreign"), 9000000000, b"later internal mutation")
+            self.assertEqual([key], captured.public_keys(root / "tool"))
+            with self.assertRaises(ValueError): captured.read(root / "missing")
+            maximum = b"x" * (8 * 1024 * 1024)
+            self.assertEqual(maximum, snapshot_type({str(cache): (str(cache), 0, maximum)}).read(cache))
+            for invalid in (b"", maximum + b"x"):
+                with self.subTest(size=len(invalid)), self.assertRaises(ValueError):
+                    snapshot_type({str(cache): (str(cache), 0, invalid)})
+
     def test_f02_initial_method_compares_own_batch_identity_day0_services_and_keys(self):
         observe = getattr(self.initial, "observe_managed_initial_configuration", None)
         self.assertTrue(callable(observe), "key possession alone is not current method configuration proof")
