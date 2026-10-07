@@ -4787,20 +4787,52 @@ class BackupAuthenticationContractTests(unittest.TestCase):
                 encoding="utf-8",
             )
             fake_scan.chmod(0o755)
+            # The fake executable is Python code owned by this test, not stock
+            # OpenSSH. Its behavior must not come from an ambient PATH Python.
+            ambient_marker = root / "ambient-python-ran"
+            ambient_python = fake_bin / "python3"
+            ambient_python.write_text(
+                "#!/bin/sh\n: > \"$SCAN_AMBIENT_MARKER\"\nexit 73\n",
+                encoding="utf-8",
+            )
+            ambient_python.chmod(0o700)
             environment = dict(os.environ)
             environment.update({
                 "PATH": str(fake_bin) + os.pathsep + environment.get("PATH", ""),
                 "SCAN_RECORD": str(record),
                 "SCAN_LEADER": str(leader_file),
                 "SCAN_CHILD": str(child_file),
+                "SCAN_AMBIENT_MARKER": str(ambient_marker),
+                "SCAN_MODE": "valid",
                 "WRAPPED_SECRET": "prefix-" + self.SECRET + "-suffix",
                 "ZTP_BACKUP_PASSWORD": self.SECRET,
             })
+            spawn = _fixture_interpreter_popen(
+                subprocess.Popen, fake_scan, os.path.realpath(sys.executable),
+            )
+            real_bounded = self.backup._run_bounded_process
+
+            def recorded_bounded(*args, **kwargs):
+                completed = real_bounded(*args, **kwargs)
+                if os.environ.get("SCAN_MODE") == "valid" and completed.returncode != 0:
+                    self.fail(
+                        "private keyscan fixture failed: exit=%s stderr_bytes=%s stderr_sha256=%s"
+                        % (completed.returncode, len((completed.stderr or "").encode()),
+                           hashlib.sha256((completed.stderr or "").encode()).hexdigest())
+                    )
+                return completed
+
+            def invoke_scan(*args, **kwargs):
+                with mock.patch.object(self.backup.subprocess, "Popen", side_effect=spawn), \
+                        mock.patch.object(self.backup, "_run_bounded_process", side_effect=recorded_bounded):
+                    return self.backup._scan_offered_host_key(*args, **kwargs)
+
             with mock.patch.dict(os.environ, environment, clear=True):
-                raw = self.backup._scan_offered_host_key(
+                raw = invoke_scan(
                     self.TARGET, 5, self.SECRET,
                 )
             self.assertEqual(f"{self.TARGET} ssh-ed25519 {offered_blob}", raw)
+            self.assertFalse(ambient_marker.exists())
             first = json.loads(record.read_text(encoding="utf-8").splitlines()[0])
             self.assertEqual([], first["secret_env_keys"])
             self.assertEqual(
@@ -4816,13 +4848,13 @@ class BackupAuthenticationContractTests(unittest.TestCase):
                 with self.subTest(mode=mode), mock.patch.dict(
                     os.environ, environment, clear=True,
                 ), self.assertRaises((RuntimeError, ValueError)):
-                    self.backup._scan_offered_host_key(
+                    invoke_scan(
                         self.TARGET, 5, self.SECRET,
                     )
 
             environment["SCAN_MODE"] = "mixed"
             with mock.patch.dict(os.environ, environment, clear=True):
-                matching = self.backup._scan_offered_host_key(
+                matching = invoke_scan(
                     self.TARGET, 5, self.SECRET,
                     key_type="ssh-ed25519",
                 )
@@ -4838,7 +4870,7 @@ class BackupAuthenticationContractTests(unittest.TestCase):
                 with self.subTest(mode=mode), mock.patch.dict(
                     os.environ, environment, clear=True,
                 ), self.assertRaises((RuntimeError, ValueError)):
-                    self.backup._scan_offered_host_key(
+                    invoke_scan(
                         self.TARGET, 5, self.SECRET,
                         key_type="ssh-ed25519",
                     )
@@ -4847,7 +4879,7 @@ class BackupAuthenticationContractTests(unittest.TestCase):
             started = time.monotonic()
             with mock.patch.dict(os.environ, environment, clear=True), \
                     self.assertRaises((RuntimeError, ValueError)):
-                self.backup._scan_offered_host_key(
+                invoke_scan(
                     self.TARGET, 5, self.SECRET,
                 )
             self.assertLess(time.monotonic() - started, 1.5)

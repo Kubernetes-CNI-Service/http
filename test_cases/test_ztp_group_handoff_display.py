@@ -20,6 +20,26 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def private_collector_environment(commands, temporary, platform, health):
+    # Hardware commands are fixtures, not macOS executable-launch benchmarks.
+    # BASH_ENV is loaded by both the real collector and its real nested bash -c
+    # calls. Keep immutable fixture configuration outside the collector's TMPDIR
+    # so the original exact cleanup assertions still cover every worker file.
+    functions = commands / "private-hardware-functions.sh"
+    functions.write_text(
+        "hostname() { printf 'Fixture-Switch01\\n'; }\n"
+        "nv() { case \"$*\" in\n"
+        " 'show platform') printf 'system-type    %s\\n' \"$TEST_F02_PLATFORM\" ;;\n"
+        " 'show system health') if [ -n \"$TEST_F02_HEALTH\" ]; then printf 'status      %s\\n' \"$TEST_F02_HEALTH\"; fi ;;\n"
+        " *) : ;; esac; }\n"
+        "timedatectl() { :; }\ndf() { :; }\nfree() { :; }\ntop() { :; }\nuptime() { :; }\nclagctl() { :; }\n"
+    )
+    functions.chmod(0o600)
+    return {**os.environ, "PATH": str(commands) + ":/usr/bin:/bin", "BASH_ENV": str(functions),
+            "TMPDIR": str(temporary), "TEST_F02_PLATFORM": platform,
+            "TEST_F02_HEALTH": health, "PS4": "+info-stage:${SECONDS}: "}
+
+
 def load_module(name: str, path: Path):
     spec = importlib.util.spec_from_file_location(name, path)
     if spec is None or spec.loader is None:
@@ -55,6 +75,25 @@ EXPECTED_NINE_STAGES = (
 
 
 class CompletionDisplayParityTests(unittest.TestCase):
+    def test_private_hardware_fixture_survives_nested_bash_without_dispatching_executable_shims(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); commands = root / "bin"; temporary = root / "tmp"
+            commands.mkdir(); temporary.mkdir()
+            for name in ("hostname", "nv", "timedatectl", "df", "free", "top", "uptime", "clagctl"):
+                path = commands / name
+                path.write_text("#!/bin/sh\nexit 91\n")
+                path.chmod(0o700)
+            environment = private_collector_environment(commands, temporary, "SN5600", "Not OK")
+            result = subprocess.run(["/bin/bash", "-c",
+                                     "hostname; nv show platform; nv show system health; "
+                                     "timedatectl && df -PT && free -b && top -bn2 -d 1 && uptime -p && clagctl"],
+                                    env=environment, cwd=root, stdin=subprocess.DEVNULL,
+                                    capture_output=True, text=True, timeout=3)
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual("Fixture-Switch01\nsystem-type    SN5600\nstatus      Not OK\n", result.stdout)
+            self.assertEqual("", result.stderr)
+            self.assertEqual(commands / "private-hardware-functions.sh", Path(environment["BASH_ENV"]))
+
     def test_source_change_is_a_snapshot_change_without_a_new_generation(self):
         row = self.complete_fixture()
         row["configuration_source_observation"] = {
@@ -160,9 +199,7 @@ class CompletionDisplayParityTests(unittest.TestCase):
                         path = commands / name
                         path.write_text("#!/bin/sh\nexit 0\n")
                         path.chmod(0o700)
-                    environment = {**os.environ, "PATH": str(commands) + ":/usr/bin:/bin",
-                                   "TMPDIR": str(temporary), "TEST_F02_PLATFORM": platform,
-                                   "TEST_F02_HEALTH": health, "PS4": "+info-stage:${SECONDS}: "}
+                    environment = private_collector_environment(commands, temporary, platform, health)
                     try:
                         collected = subprocess.run(["/bin/bash", "-x", str(ROOT / "ethernet/monitor/sw-info.sh")], cwd=project,
                                                    env=environment, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=8)

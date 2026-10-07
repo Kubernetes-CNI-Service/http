@@ -147,7 +147,7 @@ terminate_monitor_authority_capture_holders() {
 
 
 def test_timeout_shell() -> str:
-    return r'''
+    body = r'''
 timeout() {
   local timeout_seconds ready_file
   [[ "$1" == --signal=KILL ]] || return 125
@@ -184,6 +184,10 @@ raise SystemExit(command_rc if command_rc >= 0 else 128-command_rc)' \
     "$timeout_seconds" "$ready_file" "$@" <&0 >&1 2>&2
 }
 '''
+    # A portable timeout fixture must bind the current proof interpreter, not
+    # macOS's /usr/bin/python3 developer-tools dispatch shim. Keep the original
+    # readiness, wait, kill/reap and deadline contract unchanged.
+    return body.replace("/usr/bin/python3 -c", shlex.quote(os.path.realpath(sys.executable)) + " -B -c")
 
 
 def failed_capture_holder_cleanup_shell() -> str:
@@ -193,6 +197,11 @@ terminate_monitor_authority_capture_holders() {
   return 1
 }
 '''
+
+
+def private_python_fixture_command(path: Path) -> str:
+    """Run an owned fake producer with the proof's native interpreter."""
+    return shlex.quote(os.path.realpath(sys.executable)) + " -B " + shlex.quote(os.fspath(path))
 
 
 def run_shell(
@@ -215,6 +224,15 @@ def run_shell(
             input=body, timeout=float(timeout_seconds),
         )
     except subprocess.TimeoutExpired as timeout_error:
+        # A descendant can retain captured pipes after the shell was reaped.
+        # Its old PID is no longer authority to signal a process group. The
+        # caller separately owns and cleans its recorded detached fake PIDs.
+        if process.poll() is not None:
+            for stream in (process.stdin, process.stdout, process.stderr):
+                if stream is not None:
+                    stream.close()
+            process.wait(timeout=2.0)
+            raise timeout_error
         try:
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
@@ -324,6 +342,9 @@ class MonitorAuthoritySemanticWorkflowTests(unittest.TestCase):
         process.args = ["/bin/bash"]
         process.pid = 4242
         process.returncode = -signal.SIGKILL
+        # This case represents a still-live timed-out session; the separate
+        # reaped-session case must never signal its stale identifier.
+        process.poll.return_value = None
         process.communicate.side_effect = (
             subprocess.TimeoutExpired(process.args, 15.0),
             ("", ""),
@@ -2499,7 +2520,7 @@ exit 9
                 harness = capture + f'''
 monitor_authority_result_directory() {{ printf '%s\\n' {shlex.quote(temporary)}; }}
 if capture_monitor_authority_decision \
-    {shlex.quote(os.fspath(helper))} {shlex.quote(os.fspath(holder_pid_file))}; then
+    {private_python_fixture_command(helper)} {shlex.quote(os.fspath(holder_pid_file))}; then
   capture_state=accepted
   capture_rc=0
 else
@@ -2709,7 +2730,7 @@ printf 'capture=%s rc=%s token=<%s>\\n' \
 export HTTP_ZTP_TEST_TIMEOUT_READY_FILE={shlex.quote(os.fspath(holder_pid_file))}
 monitor_authority_result_directory() {{ printf '%s\\n' {shlex.quote(temporary)}; }}
 if capture_monitor_authority_decision \
-    {shlex.quote(os.fspath(helper))} {shlex.quote(os.fspath(holder_pid_file))}; then
+    {private_python_fixture_command(helper)} {shlex.quote(os.fspath(holder_pid_file))}; then
   capture_state=accepted
   capture_rc=0
 else
@@ -2740,6 +2761,40 @@ printf 'capture=%s rc=%s token=<%s>\\n' \
                 self.assertEqual(
                     [], list(result_root.glob("http-ztp-monitor-decision.*")),
                 )
+
+    def test_portable_timeout_binds_current_native_python_without_system_launcher_dispatch(self) -> None:
+        interpreter = shlex.quote(os.path.realpath(sys.executable))
+        body = test_timeout_shell()
+        self.assertIn(interpreter + " -B -c", body)
+        self.assertNotIn("/usr/bin/python3 -c", body)
+        self.assertIn("deadline=time.monotonic()+2.0", body)
+        self.assertIn("command.kill()", body)
+        self.assertIn("command_rc=command.wait()", body)
+
+    def test_private_python_fixture_command_ignores_ambient_shebang_dispatch(self) -> None:
+        helper = self.sandbox / "poisoned-shebang-fixture.py"
+        helper.write_text("#!/missing/fixture-interpreter\nprint('private-body')\n", encoding="utf-8")
+        helper.chmod(0o700)
+        command = private_python_fixture_command(helper)
+        self.assertEqual(shlex.quote(os.path.realpath(sys.executable)) + " -B " + shlex.quote(str(helper)), command)
+        result = run_shell(command + "\n", timeout_seconds=3)
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("private-body\n", result.stdout)
+
+    def test_shell_timeout_never_signals_an_already_reaped_session_identifier(self) -> None:
+        process = mock.Mock()
+        process.pid = 987654321
+        process.poll.return_value = 0
+        process.communicate.side_effect = subprocess.TimeoutExpired(["/bin/bash"], 3)
+        with mock.patch.object(subprocess, "Popen", return_value=process), \
+                mock.patch.object(os, "killpg", side_effect=PermissionError("stale session")) as kill_group:
+            with self.assertRaises(subprocess.TimeoutExpired):
+                run_shell(":\n", timeout_seconds=3)
+        kill_group.assert_not_called()
+        process.kill.assert_not_called()
+        process.wait.assert_called_once_with(timeout=2.0)
+        for stream in (process.stdin, process.stdout, process.stderr):
+            stream.close.assert_called_once()
 
     def test_portable_timeout_missing_readiness_kills_and_reaps_command(self) -> None:
         """A failed readiness barrier must not abandon a live command."""
