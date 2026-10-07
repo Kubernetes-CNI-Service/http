@@ -5969,7 +5969,11 @@ def _atomic_restore_setup_link(
             temporary.unlink()
 
 
-def _atomic_restore_setup_manifest(state: ActiveSetupState) -> None:
+def _atomic_restore_setup_manifest(
+    state: ActiveSetupState, *, require_authority: Callable[[], None] | None = None,
+) -> None:
+    if require_authority is not None:
+        require_authority()
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=f".{MANIFEST.name}.rollback.", dir=MANIFEST.parent,
     )
@@ -5983,6 +5987,8 @@ def _atomic_restore_setup_manifest(state: ActiveSetupState) -> None:
             os.fchmod(stream.fileno(), state.manifest_mode)
             stream.flush()
             os.fsync(stream.fileno())
+        if require_authority is not None:
+            require_authority()
         os.replace(temporary, MANIFEST)
         parent_descriptor = os.open(MANIFEST.parent, os.O_RDONLY)
         try:
@@ -8552,7 +8558,9 @@ def _recover_setup_switch_journal_snapshot(
         require_journal_unchanged()
         _setup_switch_q_local_link_states(body)
         if os.readlink(path) != row["before"]:
-            _atomic_restore_setup_link(path, row["before"])
+            _atomic_restore_setup_link(
+                path, row["before"], require_authority=require_journal_unchanged,
+            )
     for source, backup, has_backup in expected_directories:
         require_journal_unchanged()
         authority = materialized_owners[source]
@@ -8578,7 +8586,9 @@ def _recover_setup_switch_journal_snapshot(
         require_journal_unchanged()
         if before is not None:
             if not (path.is_symlink() and os.readlink(path) == before):
-                _atomic_restore_setup_link(path, before)
+                _atomic_restore_setup_link(
+                    path, before, require_authority=require_journal_unchanged,
+                )
         elif os.path.lexists(path):
             if not path.is_symlink() or os.readlink(path) != after:
                 raise LoadError(f"setup switch Q-only link changed during recovery: {path}")
@@ -8605,7 +8615,7 @@ def _recover_setup_switch_journal_snapshot(
         _fsync_parent_directory(_setup_switch_created_directory_sync_parent(body, row))
     if current_manifest != (state.manifest, state.manifest_mode):
         require_journal_unchanged()
-        _atomic_restore_setup_manifest(state)
+        _atomic_restore_setup_manifest(state, require_authority=require_journal_unchanged)
     verified = snapshot_active_setup_state(expected_project=state.project)
     if verified.manifest != state.manifest or verified.links != state.links:
         raise LoadError("setup switch P post-verify failed; journal retained")

@@ -1304,8 +1304,8 @@ spec.loader.exec_module(load)
 load.active_managed_services = lambda *args, **kwargs: ()
 restore = load._atomic_restore_setup_link
 injected = []
-def rebind_parent_after_known_p_write(path, raw_target):
-    restore(path, raw_target)
+def rebind_parent_after_known_p_write(path, raw_target, **guard):
+    restore(path, raw_target, **guard)
     if path == common and not injected:
         parent = directory.parent
         retained = parent.with_name('retained-recovery-parent')
@@ -3488,6 +3488,121 @@ finally:
             self.assertEqual(original, retained.read_bytes())
             self.assertEqual(b"operator replacement evidence\n", journal.read_bytes())
             self.assertFalse((root / "service-started").exists())
+
+    def _assert_real_setup_restore_stage_authority_holds(self, surface, kind):
+        with tempfile.TemporaryDirectory(prefix="r22-real-restore-stage-") as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, _p, q, common, _p_only, _q_only, manifest, _before, *_rest = fixture
+            for relative in (
+                "tools/lldp-analyze-tool/99-output-p2p",
+                "tools/lldp-analyze-tool/99-output-monitor",
+                "tools/ibdiagnet-analyze-tool/99-output-p2p",
+            ):
+                leaf = root / relative
+                if leaf.is_dir() and not leaf.is_symlink():
+                    shutil.rmtree(leaf)
+            latest = q / "99-output-eth/latest"
+            if surface == "q-local":
+                output = latest.parent
+                output.mkdir()
+                releases = [output / value for value in (
+                    "20261005_110000_combine", "20261005_120000_combine",
+                )]
+                for release in releases:
+                    release.mkdir()
+                    (release / ".published-complete").write_bytes(b"complete\n")
+                    (release / "leaf.yaml").write_bytes(b"hostname: independent-q\n")
+                latest.symlink_to(releases[0].name)
+            first = self._run_private_load_setup_switch(
+                fixture, prepare_journal=False, auto_prepare_journal=True,
+                kill_after_replace=manifest,
+            )
+            self.assertEqual(23, first.returncode, first.stdout + first.stderr)
+            target = manifest if surface == "manifest" else latest if surface == "q-local" else common
+            target_owner = target.lstat().st_ino
+            target_value = target.read_bytes() if surface == "manifest" else os.readlink(target)
+            journal = root / "ztp/.setup-switch-journal.json"
+            wal = journal.read_bytes()
+            recovery = r'''
+import importlib.util, json, os, stat, sys
+from pathlib import Path
+from types import SimpleNamespace
+root, surface, kind, target = Path(sys.argv[1]), sys.argv[2], sys.argv[3], Path(sys.argv[4])
+spec = importlib.util.spec_from_file_location('cold_setup_stage_guard', root / 'DAY0-Prepare/11-load.py')
+load = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = load
+spec.loader.exec_module(load)
+load.active_managed_services = lambda *args, **kwargs: ()
+journal = root / 'ztp/.setup-switch-journal.json'
+body = json.loads(journal.read_bytes())['body']
+injected, symlink, sync = [], Path.symlink_to, os.fsync
+def drift():
+    if kind == 'wal':
+        value, owner = journal.read_bytes(), journal.stat().st_ino
+        journal.rename(root / 'held-original-restore-stage-wal')
+        journal.write_bytes(value)
+        journal.chmod(0o600)
+        assert owner != journal.stat().st_ino
+    else:
+        parent = Path(body['q_parent_preimage']['path'])
+        assert not os.path.lexists(parent)
+        parent.parent.mkdir(parents=True, exist_ok=True)
+        parent.write_bytes(b'independent Q parent during cold stage\n')
+    injected.append(True)
+def staged_link(path, raw, *args, **kwargs):
+    result = symlink(path, raw, *args, **kwargs)
+    if surface != 'manifest' and path.parent == target.parent and path.name.startswith('.' + target.name + '.setup-rollback.') and not injected:
+        drift()
+    return result
+def staged_file(fd):
+    result = sync(fd)
+    if surface == 'manifest' and stat.S_ISREG(os.fstat(fd).st_mode) and not injected:
+        drift()
+    return result
+Path.symlink_to, os.fsync = staged_link, staged_file
+fd = load.acquire_deployment_lock(exclusive=True)
+try:
+    try:
+        load.recover_setup_switch_journal(journal, deployment_lock_descriptor=fd,
+            services_quiesced=True, runtime_backend=SimpleNamespace(name='supervisor'))
+    except load.LoadError as error:
+        expected = 'journal changed' if kind == 'wal' else 'Q parent changed'
+        assert injected == [True] and expected in str(error), str(error)
+        print('R22_COLD_SETUP_RESTORE_STAGE_HELD')
+        raise SystemExit(7)
+    else:
+        raise AssertionError('cold stage consumed changed authority')
+finally:
+    load.release_deployment_lock(fd)
+'''
+            second = subprocess.run(
+                [sys.executable, "-B", "-c", recovery, str(root), surface, kind, str(target)],
+                cwd=root, capture_output=True, text=True, check=False, timeout=30,
+            )
+            self.assertEqual(7, second.returncode, second.stdout + second.stderr)
+            self.assertIn("R22_COLD_SETUP_RESTORE_STAGE_HELD", second.stdout)
+            self.assertEqual(target_owner, target.lstat().st_ino,
+                             "cold staged recovery replaced the target after authority drift")
+            self.assertEqual(target_value, target.read_bytes() if surface == "manifest" else os.readlink(target))
+            self.assertEqual(wal, journal.read_bytes())
+            self.assertFalse(list(target.parent.glob(f".{target.name}.setup-rollback.*")))
+            self.assertFalse(list(manifest.parent.glob(f".{manifest.name}.rollback.*")))
+            self.assertFalse((root / "service-started").exists())
+
+    def test_real_setup_shared_link_cold_restore_stage_holds_wal_and_q(self):
+        for kind in ("wal", "q"):
+            with self.subTest(kind=kind):
+                self._assert_real_setup_restore_stage_authority_holds("shared", kind)
+
+    def test_real_setup_q_local_cold_restore_stage_holds_wal_and_q(self):
+        for kind in ("wal", "q"):
+            with self.subTest(kind=kind):
+                self._assert_real_setup_restore_stage_authority_holds("q-local", kind)
+
+    def test_real_setup_manifest_cold_restore_stage_holds_wal_and_q(self):
+        for kind in ("wal", "q"):
+            with self.subTest(kind=kind):
+                self._assert_real_setup_restore_stage_authority_holds("manifest", kind)
 
     def test_real_setup_q_manifest_commit_cold_recovers_p_and_original_logs(self):
         """Q manifest publication and successful SETUP must retain P recovery bytes."""

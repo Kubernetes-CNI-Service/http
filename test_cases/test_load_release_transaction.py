@@ -3457,6 +3457,132 @@ class ReleaseTransactionTests(unittest.TestCase):
             )
         return state, context
 
+    def _assert_setup_restore_stage_keeps_total_authority(self, kind, surface):
+        state, context = self._prepare_persisted_a_runtime_switch()
+        _p, q, common = state[:3]
+        manifest, journal, descriptor, backend = state[7], *state[-3:]
+        target = common
+        if surface == "q-local":
+            target, releases = self._q_local_latest_fixture(q)
+            after = releases[1]
+            with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+                LOAD.register_setup_switch_q_local_latest(
+                    journal, target, after, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend,
+                )
+            target.unlink()
+            target.symlink_to(after.name)
+            # WAL rows use the physical Darwin /private/var namespace;
+            # match the actual helper's staged parent, not its /var alias.
+            target = target.parent.resolve(strict=True) / target.name
+        elif surface == "manifest":
+            common.unlink()
+            common.symlink_to(os.path.relpath(state[5], common.parent))
+            state[3].unlink()
+            candidate = (f"# setup manifest — proj: {q}\n{common}\n").encode()
+            with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+                LOAD.register_setup_switch_manifest(
+                    journal, candidate, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend,
+                )
+            manifest.write_bytes(candidate)
+            target = manifest
+        if surface != "manifest":
+            common.unlink()
+            common.symlink_to(os.path.relpath(state[5], common.parent))
+        frozen_wal = journal.read_bytes()
+        frozen_target = (target.lstat().st_ino,
+                         target.read_bytes() if surface == "manifest" else os.readlink(target))
+        runtime = self.ztp / "ztp-bootstrap_oob.sh"
+        runtime.write_bytes(b"independent partial B must not be restored\n")
+        authority = (journal if kind == "wal" else context.runtime_receipt / "receipt.json"
+                     if kind == "a" else q / "99-output-ztp/current-release.json")
+        original = authority.read_bytes() if kind != "q" else None
+        retained = self.root / "held-original-setup-stage-authority"
+        injected = []
+
+        def drift():
+            if kind == "q":
+                authority.parent.mkdir(parents=True, exist_ok=True)
+                authority.write_bytes(b"independent Q parent commit marker\n")
+            else:
+                owner = authority.lstat().st_ino
+                authority.rename(retained)
+                authority.write_bytes(original)
+                authority.chmod(0o600 if kind == "wal" else 0o644)
+                self.assertNotEqual(owner, authority.lstat().st_ino)
+            injected.append(authority.lstat().st_ino)
+
+        symlink, sync = Path.symlink_to, os.fsync
+
+        def after_stage(path, raw, *args, **kwargs):
+            result = symlink(path, raw, *args, **kwargs)
+            if (surface != "manifest" and path.parent == target.parent
+                    and path.name.startswith(f".{target.name}.setup-rollback.") and not injected):
+                drift()
+            return result
+
+        def after_stage_sync(fd):
+            result = sync(fd)
+            if surface == "manifest" and stat.S_ISREG(os.fstat(fd).st_mode) and not injected:
+                drift()
+            return result
+
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(Path, "symlink_to", after_stage), \
+                mock.patch.object(LOAD.os, "fsync", side_effect=after_stage_sync):
+            with self.assertRaises(LOAD.LoadError):
+                LOAD.recover_setup_switch_journal(
+                    journal, deployment_lock_descriptor=descriptor, services_quiesced=True,
+                    runtime_backend=backend, restore_runtime_from_wal=True,
+                )
+        self.assertEqual(1, len(injected), "the intended private stage boundary was not reached")
+        self.assertEqual(frozen_target[0], target.lstat().st_ino,
+                         "stage drift licensed shared namespace replacement")
+        self.assertEqual(frozen_target[1], target.read_bytes() if surface == "manifest" else os.readlink(target))
+        self.assertEqual(b"independent partial B must not be restored\n", runtime.read_bytes())
+        self.assertEqual(frozen_wal, journal.read_bytes())
+        self.assertFalse(list(target.parent.glob(f".{target.name}.setup-rollback.*")))
+        self.assertFalse(list(manifest.parent.glob(f".{manifest.name}.rollback.*")))
+        if original is not None:
+            self.assertEqual(original, retained.read_bytes())
+            self.assertEqual(injected[0], authority.lstat().st_ino)
+        backend.start.assert_not_called()
+
+    def test_setup_shared_link_restore_stage_holds_wal_a_and_q_authority(self):
+        for kind in ("wal", "a", "q"):
+            with self.subTest(kind=kind):
+                # Each subtest owns fresh projects, receipt, lock and WAL.
+                fixture = ReleaseTransactionTests()
+                fixture.setUp()
+                try:
+                    fixture._assert_setup_restore_stage_keeps_total_authority(kind, "shared")
+                finally:
+                    fixture.doCleanups()
+                    fixture.tearDown()
+
+    def test_setup_q_local_restore_stage_holds_wal_a_and_q_authority(self):
+        for kind in ("wal", "a", "q"):
+            with self.subTest(kind=kind):
+                fixture = ReleaseTransactionTests()
+                fixture.setUp()
+                try:
+                    fixture._assert_setup_restore_stage_keeps_total_authority(kind, "q-local")
+                finally:
+                    fixture.doCleanups()
+                    fixture.tearDown()
+
+    def test_setup_manifest_restore_stage_holds_wal_a_and_q_authority(self):
+        for kind in ("wal", "a", "q"):
+            with self.subTest(kind=kind):
+                fixture = ReleaseTransactionTests()
+                fixture.setUp()
+                try:
+                    fixture._assert_setup_restore_stage_keeps_total_authority(kind, "manifest")
+                finally:
+                    fixture.doCleanups()
+                    fixture.tearDown()
+
     def test_setup_wal_persists_exact_a_runtime_authority_before_q_write(self):
         state, context = self._prepare_persisted_a_runtime_switch()
         record = json.loads(state[-3].read_bytes())["body"]["a_runtime"]
@@ -4958,8 +5084,8 @@ class ReleaseTransactionTests(unittest.TestCase):
             evidence = journal.read_bytes()
             restore = LOAD._atomic_restore_setup_link
             observed = []
-            def mutate_after_p_link(path, target):
-                restore(path, target)
+            def mutate_after_p_link(path, target, **guard):
+                restore(path, target, **guard)
                 observed.append(path)
                 self.assertTrue(source.is_dir() and not source.is_symlink())
                 (source / "report.csv").write_bytes(b"unknown post-restore report\n")
@@ -5354,8 +5480,8 @@ class ReleaseTransactionTests(unittest.TestCase):
         restore = LOAD._atomic_restore_setup_link
         injected = []
 
-        def rebind_after_known_p_write(path, raw_target):
-            restore(path, raw_target)
+        def rebind_after_known_p_write(path, raw_target, **guard):
+            restore(path, raw_target, **guard)
             if path == common and not injected:
                 parent.rename(retained)
                 parent.mkdir()
