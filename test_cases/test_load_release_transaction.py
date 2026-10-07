@@ -3366,7 +3366,7 @@ class ReleaseTransactionTests(unittest.TestCase):
         finally:
             LOAD.discard_prepared_release(prepared)
 
-    def _publish_a_with_runtime_rollback_receipt(self, *, prepare_receipt=True):
+    def _publish_a_with_runtime_rollback_receipt(self, *, prepare_receipt=True, original_upgrade_policy=None):
         parent = LOAD.validate_and_publish_release(self.project, self.inputs)
         output = self.project / "99-output-ztp"
         generation = LOAD.stage_pinned_generation(
@@ -3376,11 +3376,23 @@ class ReleaseTransactionTests(unittest.TestCase):
         LOAD.commit_pinned_generation(
             self.project, generation, expected_current=None,
         )
-        for name, content in {
+        runtime_payloads = {
             "ztp-bootstrap_oob.sh": b"A oob bootstrap\n",
             "ztp-bootstrap_oobofoob.sh": b"A oobofoob bootstrap\n",
             "ztp.json": b'{"release":"A"}\n',
-        }.items():
+        }
+        if original_upgrade_policy is not None:
+            # Independent literal fixture policies, before receipt publication.
+            policies = {
+                "disabled": (b'ZTP_UPGRADE_ENABLED="false"\n',) * 2,
+                "enabled": (b'ZTP_UPGRADE_ENABLED="true"\n',) * 2,
+                "mixed": (b'ZTP_UPGRADE_ENABLED="true"\n', b'ZTP_UPGRADE_ENABLED="false"\n'),
+                "duplicate": (b'ZTP_UPGRADE_ENABLED="false"\nZTP_UPGRADE_ENABLED="false"\n',) * 2,
+            }
+            for name, policy in zip(("ztp-bootstrap_oob.sh", "ztp-bootstrap_oobofoob.sh"),
+                                    policies[original_upgrade_policy]):
+                runtime_payloads[name] += policy
+        for name, content in runtime_payloads.items():
             (self.ztp / name).write_bytes(content)
         publickeys = self.ztp / "config/publickey"
         publickeys.mkdir(parents=True)
@@ -5068,7 +5080,8 @@ class ReleaseTransactionTests(unittest.TestCase):
         self.assertFalse(os.path.lexists(journal), "verified complete restore must retire its own WAL")
         backend.start.assert_not_called()
 
-    def _prepare_persisted_a_runtime_switch(self, *, managed_key=False, prefix=False):
+    def _prepare_persisted_a_runtime_switch(self, *, managed_key=False, prefix=False,
+                                          original_upgrade_policy=None, qualified_inputs=False):
         private_root = mock.patch.object(LOAD, "HTTP_ROOT", self.root.resolve())
         private_root.start()
         self.addCleanup(private_root.stop)
@@ -5085,10 +5098,19 @@ class ReleaseTransactionTests(unittest.TestCase):
                 "path": str(self.root.resolve() / "r22-prefix"), "target": str(self.ztp),
             }))
         self.global_file.write_text(yaml.safe_dump(document, sort_keys=False))
+        if original_upgrade_policy is not None or qualified_inputs:
+            # Existing minimal disk-only fixtures stay unchanged. Selection
+            # fixtures freeze a complete, independently literal subnet CSV.
+            self.subnet_file.write_text(
+                "shared_network,subnet,netmask,range_start,range_end,routers,"
+                "ztp_service_ip,cumulus_profile,nvos_ztp\n"
+                "net,192.0.2.0,255.255.255.0,192.0.2.20,192.0.2.30,192.0.2.1,"
+                "192.0.2.2,oob,no\n")
         if managed_key:
             generation, receipt = self._publish_a_with_managed_key_receipt()
         else:
-            _parent, generation, receipt = self._publish_a_with_runtime_rollback_receipt()
+            _parent, generation, receipt = self._publish_a_with_runtime_rollback_receipt(
+                original_upgrade_policy=original_upgrade_policy)
         state = self._prepare_cross_project_setup_crash()
         p, q, common = state[:3]
         journal, descriptor, backend = state[-3:]
@@ -5532,6 +5554,116 @@ class ReleaseTransactionTests(unittest.TestCase):
 
     def test_q_manifest_publication_does_not_adopt_wal_replaced_at_intent_parent_sync(self):
         self._assert_q_manifest_publication_stage_holds_authority("wal", boundary="wal-parent")
+
+    def test_setup_wal_binds_original_a_receipt_payload_owners(self):
+        state, context = self._prepare_persisted_a_runtime_switch(original_upgrade_policy="disabled")
+        record = json.loads(state[-3].read_bytes())["body"]["a_runtime"]["receipt_inventory"]
+        source = context.runtime_receipt / "files/ztp-bootstrap_oob.sh"
+        self.assertEqual(str(context.runtime_receipt), record["path"])
+        self.assertEqual(source.lstat().st_ino, record["tree"]["files/ztp-bootstrap_oob.sh"]["ino"])
+        self.assertEqual(sha256(source), record["tree"]["files/ztp-bootstrap_oob.sh"]["sha256"])
+        state[-1].start.assert_not_called()
+
+    def test_original_a_selection_uses_sealed_inputs_and_original_disabled_policy(self):
+        state, context = self._prepare_persisted_a_runtime_switch(original_upgrade_policy="disabled")
+        journal, _descriptor, backend = state[-3:]
+        before = journal.read_bytes()
+        self.global_file.write_bytes(b"independent invalid changed P global\n")
+        (self.ztp / "ztp-bootstrap_oob.sh").write_bytes(b'B runtime\nZTP_UPGRADE_ENABLED="true"\n')
+        inputs, policy = LOAD._setup_switch_a_operator_selection(json.loads(before)["body"])
+        generation = context.project / "99-output-ztp" / context.selector_target
+        self.assertEqual(generation / "inputs/global", inputs.global_file)
+        self.assertEqual(generation / "inputs/devices", inputs.devices_file)
+        self.assertEqual(generation / "inputs/subnet", inputs.subnet_file)
+        self.assertEqual(generation / "inputs/p2p", inputs.p2p_file)
+        self.assertEqual(("all", "all", frozenset({"eth"}), "disabled"),
+                         (inputs.deployment_scope, inputs.switch_scope, inputs.device_types, policy))
+        self.assertTrue(inputs.settings.http_enabled)
+        self.assertTrue(inputs.settings.dhcp_enabled)
+        self.assertEqual(self.root.resolve(), inputs.settings.http_root)
+        self.assertEqual(before, journal.read_bytes())
+        backend.start.assert_not_called()
+
+    def test_original_a_selection_keeps_explicit_enabled_policy(self):
+        state, _context = self._prepare_persisted_a_runtime_switch(original_upgrade_policy="enabled")
+        before = state[-3].read_bytes()
+        _inputs, policy = LOAD._setup_switch_a_operator_selection(json.loads(before)["body"])
+        self.assertEqual("enabled", policy)
+        self.assertEqual(before, state[-3].read_bytes())
+        state[-1].start.assert_not_called()
+
+    def test_original_a_selection_rechecks_receipt_owner_after_deep_input_read(self):
+        state, context = self._prepare_persisted_a_runtime_switch(original_upgrade_policy="disabled")
+        journal = state[-3]
+        before = journal.read_bytes()
+        native = LOAD.load_global
+        source = context.runtime_receipt / "files/ztp-bootstrap_oob.sh"
+        held = self.root / "held-late-original-A-bootstrap-snapshot"
+        owner = source.lstat()
+        def replace_after_input_read(*args, **kwargs):
+            result = native(*args, **kwargs)
+            source.rename(held)
+            source.write_bytes(held.read_bytes())
+            source.chmod(stat.S_IMODE(owner.st_mode))
+            os.utime(source, ns=(owner.st_atime_ns, owner.st_mtime_ns))
+            return result
+        with mock.patch.object(LOAD, "load_global", side_effect=replace_after_input_read):
+            with self.assertRaisesRegex(LOAD.LoadError, "A.*authority|A.*HOLD"):
+                LOAD._setup_switch_a_operator_selection(json.loads(before)["body"])
+        self.assertEqual(before, journal.read_bytes())
+        self.assertEqual(owner.st_ino, held.lstat().st_ino)
+        self.assertNotEqual(owner.st_ino, source.lstat().st_ino)
+        state[-1].start.assert_not_called()
+
+    def test_original_a_selection_refuses_unknown_mixed_duplicate_policy(self):
+        for policy in (None, "mixed", "duplicate"):
+            with self.subTest(policy=policy):
+                fixture = ReleaseTransactionTests()
+                fixture.setUp()
+                try:
+                    state, _context = fixture._prepare_persisted_a_runtime_switch(
+                        original_upgrade_policy=policy, qualified_inputs=True)
+                    before = state[-3].read_bytes()
+                    with fixture.assertRaisesRegex(LOAD.LoadError, "A.*policy|policy.*A"):
+                        LOAD._setup_switch_a_operator_selection(json.loads(before)["body"])
+                    fixture.assertEqual(before, state[-3].read_bytes())
+                    state[-1].start.assert_not_called()
+                finally:
+                    fixture.doCleanups()
+                    fixture.tearDown()
+
+    def test_original_a_selection_refuses_legacy_missing_owner_inventory(self):
+        state, _context = self._prepare_persisted_a_runtime_switch(original_upgrade_policy="disabled")
+        before = state[-3].read_bytes()
+        for field in ("generation", "receipt_inventory"):
+            body = json.loads(before)["body"]
+            body["a_runtime"].pop(field, None)
+            with self.subTest(field=field), self.assertRaisesRegex(LOAD.LoadError, "A.*qualification|qualification.*A"):
+                LOAD._setup_switch_a_operator_selection(body)
+        self.assertEqual(before, state[-3].read_bytes())
+        state[-1].start.assert_not_called()
+
+    def test_original_a_receipt_same_byte_replacement_holds_selection_and_restore(self):
+        state, context = self._prepare_persisted_a_runtime_switch(original_upgrade_policy="disabled")
+        journal, descriptor, backend = state[-3:]
+        before = journal.read_bytes()
+        source = context.runtime_receipt / "files/ztp-bootstrap_oob.sh"
+        held = self.root / "held-original-A-bootstrap-snapshot"
+        owner = source.lstat()
+        source.rename(held)
+        source.write_bytes(held.read_bytes())
+        source.chmod(stat.S_IMODE(owner.st_mode))
+        os.utime(source, ns=(owner.st_atime_ns, owner.st_mtime_ns))
+        self.assertNotEqual(owner.st_ino, source.lstat().st_ino)
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            with self.assertRaisesRegex(LOAD.LoadError, "A.*authority|A.*HOLD"):
+                LOAD.recover_setup_switch_journal(journal, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend, restore_runtime_from_wal=True)
+        with self.assertRaisesRegex(LOAD.LoadError, "A.*authority|A.*HOLD"):
+            LOAD._setup_switch_a_operator_selection(json.loads(before)["body"])
+        self.assertEqual(before, journal.read_bytes())
+        self.assertEqual(owner.st_ino, held.lstat().st_ino)
+        backend.start.assert_not_called()
 
     def test_setup_wal_binds_original_a_generation_and_input_owners(self):
         state, context = self._prepare_persisted_a_runtime_switch()

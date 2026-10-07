@@ -1,5 +1,37 @@
 # 脚本变更影响测试
 
+## 2026-10-08 R22 原 A receipt payload 与封存选择候选
+
+基于 TEST `a1556854a22737799793b563480d53d15538cc4e`。新 WAL 冻结原 receipt
+完整 inode/元数据/SHA 树，冷恢复及只读选择重核原 payload owner。独立负例确认
+原来同字节新 bootstrap 备份会被恢复接受并退休 WAL：1 FAIL/exit1，原日志
+`outputs/test-diagnostics/r22-original-a-receipt-replacement-restore-red.log`，
+inode161192406/size127851，SHA256
+`976cad25971fdb727b970cb714218945a4418c8370d9379c5a0ef66eae8355c6`。
+选择从 sealed generation 输入重建 settings/scope/types，从原 receipt 唯一、一致
+bootstrap 声明取升级策略；当前 P/Q global、flat B bootstrap、新参数不参与。
+缺 inventory、缺策略、混合或重复策略拒绝，不授予服务/恢复写入/退休权限。
+
+新 direct 首轮缺 API/inventory 的 6 tests/9 ERROR 日志保留；实现首轮的
+3 FAIL/2 ERROR 定位为新选择夹具沿用旧磁盘恢复用的不完整 subnet CSV，未弱化
+原生产校验。只将新选择夹具补成独立合法 CSV、原 disk-only 夹具不变后，
+6 tests OK/0.787s：`r22-original-a-selection-legal-inputs-green.log`，
+inode161207086/size129555，SHA256
+`d672fce8111e0a5fd491433330a191c1c4a8f84fda50d9d7d1a3fbf5a29edd60`。
+晚换 snapshot owner direct 与真实 LOAD→SETUP 写后 SIGKILL→全新 LOAD 只读 A
+选择 2 tests OK/12.753s，`r22-original-a-selection-cold-workflow-green.log`，
+inode161220966/size127654，SHA256
+`091dbdcfb901490883f21e71ed02c22ebf53ff76299cbb6fe59de6a2fecc1b54`。
+完整实际退出/冻结一致/物理 END 与前后 stat 已核；这些是有界回归而非 full proof。
+原 A 镜像写前备份、已提交 B 的完整持久补偿恢复、显式 A 健康和 REAL_ENV 仍待完成。
+
+最后 LOAD 全模块、report direct/workflow、文档及五处真实强杀/原 A 选择/B 健康
+回归 593 tests OK/172.181s：`r22-a-selection-receipt-final-regression.log`，
+inode161276326/size320395，SHA256
+`3e2dd31744e8a92f5742da0dba47964efb08ac6bc3c9ebf430d19137578fc2df`。
+实际 exit0、冻结一致、完整 Ran/OK/END 物理顺序，stat 与旧前缀 SHA 已核。
+批准 ledger 未改，仍非正式 related/full/check，不称完整 R22 或真机完成。
+
 ## 2026-10-08 原 A owner、显式 monitor 围栏与完整失败诊断候选
 
 基于 `bb391ee50f511451acbb4c4332b80352e16999fb`。此前正式 related argv

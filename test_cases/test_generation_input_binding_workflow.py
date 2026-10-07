@@ -574,6 +574,78 @@ finally:
             with self.subTest(kind=kind):
                 self._assert_real_persisted_a_runtime_switch(False, late_authority="file-stage-" + kind)
 
+    def test_real_setup_death_cold_reads_original_a_selection_not_current_sources(self):
+        fixture = RELEASE_FIXTURE.ReleaseTransactionTests()
+        fixture.setUp()
+        try:
+            state, context = fixture._prepare_persisted_a_runtime_switch(original_upgrade_policy="disabled")
+            root, q, common = fixture.root.resolve(), state[1], state[2]
+            journal, descriptor, _backend = state[-3:]
+            shutil.copytree(ROOT / "tools", root / "tools")
+            (root / "ztp/optimize").mkdir()
+            shutil.copy2(ROOT / "ztp/optimize/sample_links.py", root / "ztp/optimize/sample_links.py")
+            for name in ("11-load.py", "01-a-setup.py"):
+                shutil.copy2(ROOT / "DAY0-Prepare" / name, root / "DAY0-Prepare" / name)
+            RELEASE_FIXTURE.LOAD.release_deployment_lock(descriptor)
+            fixture._cleanups = [item for item in fixture._cleanups
+                                 if item[0] != RELEASE_FIXTURE.LOAD.release_deployment_lock]
+            before = (journal.lstat().st_ino, journal.read_bytes())
+            child = r'''
+import importlib.util, json, os, signal, sys
+from pathlib import Path
+from types import SimpleNamespace
+root, q, common, phase = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3]), sys.argv[4]
+def script(name):
+    spec = importlib.util.spec_from_file_location('original_a_selection_' + name, root / 'DAY0-Prepare' / (name + '.py'))
+    api = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = api
+    spec.loader.exec_module(api)
+    return api
+load, setup = script('11-load'), script('01-a-setup')
+load.active_managed_services = lambda *a, **k: ()
+def forbidden(*a, **k):
+    raise AssertionError('read-only A selection must not start or retire')
+backend = SimpleNamespace(name='supervisor', start=forbidden)
+load.service_runtime_backend = lambda: backend
+fd = load.acquire_deployment_lock(exclusive=True)
+setup._SETUP_SWITCH_WAL_CONTEXT = (vars(load), fd)
+try:
+    if phase == 'writer':
+        setup._register_setup_switch_link_before_write(str(common), str(q / '01-global.yaml'))
+        common.unlink()
+        common.symlink_to(os.path.relpath(q / '01-global.yaml', common.parent))
+        (root / 'ztp/ztp-bootstrap_oob.sh').write_bytes(b'B bootstrap\nZTP_UPGRADE_ENABLED="true"\n')
+        os.kill(os.getpid(), signal.SIGKILL)
+    journal = root / 'ztp/.setup-switch-journal.json'
+    before = (journal.lstat().st_ino, journal.read_bytes())
+    body = load._setup_switch_prepared_registration_body((before[1], 0o600))
+    (Path(body['old_project']['path']) / '01-global.yaml').write_bytes(b'changed invalid current P source\n')
+    inputs, policy = load._setup_switch_a_operator_selection(body)
+    generation = Path(body['old_project']['path']) / '99-output-ztp' / body['a_runtime']['selector_target']
+    assert inputs.global_file == generation / 'inputs/global'
+    assert inputs.subnet_file == generation / 'inputs/subnet'
+    assert inputs.settings.service_ips == ('192.0.2.2',)
+    assert inputs.device_types == frozenset({'eth'})
+    assert (inputs.deployment_scope, inputs.switch_scope, policy) == ('all', 'all', 'disabled')
+    assert before == (journal.lstat().st_ino, journal.read_bytes())
+    print('ORIGINAL_A_SELECTION_FROM_SEALED_GENERATION_OK')
+finally:
+    load.release_deployment_lock(fd)
+'''
+            argv = [sys.executable, "-B", "-c", child, str(root), str(q), str(common)]
+            writer = subprocess.run(argv + ["writer"], capture_output=True, text=True, timeout=30, check=False)
+            self.assertEqual(-9, writer.returncode, writer.stdout + writer.stderr)
+            mixed_link = os.readlink(common)
+            reader = subprocess.run(argv + ["reader"], capture_output=True, text=True, timeout=30, check=False)
+            self.assertEqual(0, reader.returncode, reader.stdout + reader.stderr)
+            self.assertIn("ORIGINAL_A_SELECTION_FROM_SEALED_GENERATION_OK", reader.stdout)
+            self.assertEqual(before, (journal.lstat().st_ino, journal.read_bytes()))
+            self.assertEqual(mixed_link, os.readlink(common))
+            self.assertEqual(context.setup_state.manifest, state[7].read_bytes())
+        finally:
+            fixture.doCleanups()
+            fixture.tearDown()
+
     def test_real_setup_a_generation_replacement_holds_before_shared_write(self):
         self._assert_real_a_generation_owner_hold("setup")
 

@@ -6559,36 +6559,40 @@ def _decode_setup_switch_journal(payload: bytes) -> dict[str, object]:
         runtime = body["a_runtime"]
         runtime_fields = {"selector_target", "receipt_directory", "receipt_parent", "receipt_file",
                           "yaml_link_parents"}
-        if isinstance(runtime, dict) and "generation" in runtime:
-            runtime_fields.add("generation")
+        for inventory in ("generation", "receipt_inventory"):
+            if isinstance(runtime, dict) and inventory in runtime:
+                runtime_fields.add(inventory)
         exact_fields(runtime, runtime_fields, "A runtime")
-        if "generation" in runtime:
-            generation = runtime["generation"]
-            exact_fields(generation, {"path", "parent", "tree"}, "A generation")
-            exact_fields(generation["parent"], directory_fields, "A generation parent")
+        for inventory, label in (("generation", "A generation"),
+                                 ("receipt_inventory", "A receipt inventory")):
+            if inventory not in runtime:
+                continue
+            generation = runtime[inventory]
+            exact_fields(generation, {"path", "parent", "tree"}, label)
+            exact_fields(generation["parent"], directory_fields, label + " parent")
             tree = generation["tree"]
             if (not isinstance(generation["path"], str)
                     or not Path(generation["path"]).is_absolute()
                     or os.path.normpath(generation["path"]) != generation["path"]
                     or not isinstance(tree, dict) or "" not in tree or len(tree) > 4096):
-                raise ValueError("invalid A generation owner inventory")
+                raise ValueError(f"invalid {label} owner inventory")
             for relative, entry in tree.items():
                 if (not isinstance(relative, str) or relative and (
                         os.path.isabs(relative) or os.path.normpath(relative) != relative
                         or ".." in Path(relative).parts)):
-                    raise ValueError("invalid A generation tree name")
+                    raise ValueError(f"invalid {label} tree name")
                 fields = {"kind", "dev", "ino", "mode", "uid", "gid"}
                 if isinstance(entry, dict) and entry.get("kind") == "file":
                     fields |= {"size", "mtime_ns", "ctime_ns", "sha256"}
                 elif not isinstance(entry, dict) or entry.get("kind") != "directory":
-                    raise ValueError("unsupported A generation entry")
-                exact_fields(entry, fields, "A generation tree")
+                    raise ValueError(f"unsupported {label} entry")
+                exact_fields(entry, fields, label + " tree")
                 if (any(type(value) is not int or value < 0 for field, value in entry.items()
                         if field not in {"kind", "sha256"})
                         or entry["kind"] == "file" and (
                             not isinstance(entry["sha256"], str)
                             or re.fullmatch(r"[0-9a-f]{64}", entry["sha256"]) is None)):
-                    raise ValueError("invalid A generation file identity")
+                    raise ValueError(f"invalid {label} file identity")
         parents = runtime["yaml_link_parents"]
         if (not isinstance(parents, dict) or set(parents) -
                 {"99-output-eth/latest", "99-output-ib_nvl/latest"}):
@@ -7564,7 +7568,8 @@ def _setup_switch_a_generation_authority(context):
     return dict(path=str(generation), parent=parent_owner, tree=tree)
 
 
-def _setup_switch_runtime_authority(context, *, verify_active=False, include_generation=True):
+def _setup_switch_runtime_authority(context, *, verify_active=False, include_generation=True,
+                                    include_receipt_inventory=True):
     """Freeze the exact A receipt owner, never infer A from a newest directory."""
     try:
         project = context.project.resolve(strict=True)
@@ -7601,6 +7606,14 @@ def _setup_switch_runtime_authority(context, *, verify_active=False, include_gen
                                  "sha256": hashlib.sha256(opened[0]).hexdigest()}}
         if include_generation:
             result["generation"] = _setup_switch_a_generation_authority(context)
+        if include_receipt_inventory:
+            inventory_parent = _setup_switch_link_parent_identity(directory)
+            result["receipt_inventory"] = dict(path=str(directory), parent=inventory_parent,
+                                               tree=_setup_switch_comparison_tree(directory))
+            # Bind every snapshot inode, not just receipt.json's digest.
+            _load_runtime_rollback_receipt(project, directory)
+            if inventory_parent != _setup_switch_link_parent_identity(directory):
+                raise ValueError("A receipt payload parent changed while freezing")
         return result
     except (OSError, RuntimeError, ValueError, TypeError, KeyError, LoadError) as exc:
         raise LoadError(f"setup switch A runtime authority is invalid: {exc}") from exc
@@ -7624,11 +7637,63 @@ def _setup_switch_runtime_context(body, state=None):
         context = CrossProjectRollbackContext(
             state.project, record["selector_target"], Path(record["receipt_directory"]["path"]), state,
         )
-        if _setup_switch_runtime_authority(context, include_generation="generation" in record) != record:
+        if _setup_switch_runtime_authority(context, include_generation="generation" in record,
+                include_receipt_inventory="receipt_inventory" in record) != record:
             raise ValueError("A receipt owner or bytes differ from WAL")
         return context
     except (OSError, ValueError, TypeError, KeyError, LoadError) as exc:
         raise LoadError(f"setup switch A runtime authority changed; HOLD: {exc}") from exc
+
+
+def _setup_switch_a_operator_selection(body):
+    """Read original A inputs/policy only; this grants no restore/start authority.
+
+    Current P/Q source files, flat B bootstrap and a new invocation's flags
+    cannot choose A. Legacy stopped-recovery receipts remain unqualified for
+    activation. Recheck original owners after every input/policy deep read.
+    """
+    record = body.get("a_runtime")
+    if (not isinstance(record, dict) or "generation" not in record
+            or "receipt_inventory" not in record):
+        raise LoadError("original A selection requires original owner qualification; HOLD")
+    context = _setup_switch_runtime_context(body)
+    try:
+        generation = context.project / "99-output-ztp" / context.selector_target
+        parent = json.loads(_read_rollback_regular(generation / "current-release.json")[0])
+        paths = {key: generation / "inputs" / key for key in parent["inputs"]}
+        effective = parent.get("generated_inputs", {}).get("effective_devices")
+        if effective is not None:
+            paths["effective_devices"] = generation / "inputs/effective_devices"
+        settings = apply_subnet_service_ips(load_global(paths["global"],
+            switch_scope=parent["switch_scope"]), paths["subnet"])
+        device_types = load_device_types(paths["devices"], settings.schema_version,
+                                        switch_scope=parent["switch_scope"])
+        receipt = _load_runtime_rollback_receipt(context.project, context.runtime_receipt)
+        policies = []
+        for name in ("ztp-bootstrap_oob.sh", "ztp-bootstrap_oobofoob.sh"):
+            if receipt["frozen_files"][name]["state"] == "missing":
+                continue  # One endpoint may legitimately not have been rendered.
+            opened = _read_rollback_regular(context.runtime_receipt / "files" / name)
+            text = opened[0].decode("utf-8")
+            assignments = re.findall(r'^[ \t]*(?:export[ \t]+)?ZTP_UPGRADE_ENABLED[ \t]*=.*$',
+                                     text, flags=re.MULTILINE)
+            if len(assignments) != 1 or re.fullmatch(r'ZTP_UPGRADE_ENABLED="(?:true|false)"', assignments[0]) is None:
+                raise LoadError("original A bootstrap policy is unknown or ambiguous; HOLD")
+            policies.append("enabled" if assignments[0] == 'ZTP_UPGRADE_ENABLED="true"' else "disabled")
+        if not policies or len(set(policies)) != 1:
+            raise LoadError("original A bootstrap policy is missing or inconsistent; HOLD")
+        inputs = ProjectInputs(global_file=paths["global"], devices_file=paths["devices"],
+            subnet_file=paths["subnet"], p2p_file=paths["p2p"], settings=settings,
+            device_types=device_types, pubkeys=tuple(ZTP_DIR / "config/publickey" / name
+                                                     for name in sorted(receipt["publickeys"])),
+            deployment_scope=parent["deployment_scope"], switch_scope=parent["switch_scope"],
+            air_topology_policy=paths.get("air_topology_policy"),
+            mini_devices_file=paths.get("mini_air_devices"), effective_devices_file=paths.get("effective_devices"),
+            effective_devices_sha256=effective.get("sha256") if effective else None)
+        _setup_switch_runtime_context(body)
+        return inputs, policies[0]
+    except (OSError, UnicodeError, ValueError, TypeError, KeyError) as exc:
+        raise LoadError(f"original A selection is invalid; HOLD: {exc}") from exc
 
 
 def register_setup_switch_journal_link(

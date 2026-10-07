@@ -1634,6 +1634,8 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 ## TC-REAL-R22-GENERATION-INPUT-ABA-001 — 跨进程输入换代与多输出一致性
 
+- 2026-10-08 A receipt payload owner 与原选择基础：在本卡既有可丢弃隔离 VM、可恢复快照、停服/排他锁/其他写者静默前提下，WAL 冻结原 A receipt 全树 owner；恢复/只读选择拒绝同字节新 bootstrap/key 快照，保留原 WAL 和外来对象。见证首写前冻结、输入深读后晚换绑、SETUP 强杀及新 LOAD 重读时的原 FD/名称/父目录/inode/ctime/SHA、原升级策略和零服务启动/退休；当前 P/Q 文件及新参数不得改选 A。缺失、重复、混合策略或 legacy 无 payload inventory 必须 HOLD；NVOS-only 旧凭据不猜策略。清理只恢复经负责人确认的本卡隔离快照，完整保留未知对象与原证据，不在 live 注入。本地 direct/真实多脚本 workflow 不证明原 A 镜像备份、已提交 B 的完整 A 恢复、显式健康激活、root/Linux/断电或 DEV ACK，仍 OPEN。
+
 - 2026-10-08 原 A generation owner 与 native 显式入口候选：新 WAL 在首个 Q 共享写前绑定原 A sealed generation、父身份及输入/制品有界树的 inode/元数据/SHA；同字节、恢复 mtime 的新输入 inode 或克隆 generation 均 HOLD，不删除原 WAL/未知对象。legacy WAL 不获新 A 激活权限。显式恢复/B 续发布/激活/退休入口在 Apache/DHCP 已停止后仍先停 native monitor 写者；停止失败先于任何 WAL 写入。TEST direct 与真实 LOAD→SETUP 写前/强杀→新 LOAD 冷恢复为本地 RED→GREEN，native 四入口停止失败与反向变异另测；实际服务端口仍是替身，当前正式 proof 未完成。
   现场仅在本卡原授权的可丢弃隔离 VM、可恢复卷快照、完整原 A/P/Q/generation/receipt/WAL、排他部署锁及其它同 UID 写者静默下执行。分别在原 owner 捕获、Q 首写前、SETUP 写后进程死亡、恢复预检及 native monitor 停止边界注入换 inode/换目录/ABA/停止错误，独立封存 FD 与名称身份、ctime/模式/所有者/摘要、原 WAL 及服务 PID/监听、每次拒绝和写入的物理顺序；不得用内容一致代替原 owner 或用 Apache/DHCP 停止代替 monitor 停止。封存后由负责人仅按核实隔离快照恢复，不删未知对象、不自动回 A、不对 live 注入。此局部检查不证明任意非合作写者原子隔离、B 提交后的完整 A 恢复、旧 A 显式健康激活、root/Linux/断电/C2 或 DEV ACK，本卡仍 OPEN。
 

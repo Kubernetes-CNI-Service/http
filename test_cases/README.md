@@ -557,6 +557,13 @@ inode、mode/uid/gid/mtime/ctime 和 SHA；同字节新输入 inode 或克隆 ge
 强杀/冷恢复测试与 native 入口反向变异检查独立表达这些合同。此处不证明旧 A
 显式激活、已提交 B 的完整 A 恢复或 Linux/断电/DEV ACK；正式 full/check 仍待完成。
 
+新 WAL 同时绑定 A receipt 的完整 payload 树，不能仅以 receipt.json 的 inode/SHA
+接受同字节新 bootstrap/key 备份。只读 A 选择必须从原 sealed inputs 重建设置、scope
+和设备集合，并从原 receipt 中唯一、明确且相互一致的 bootstrap 升级声明取策略。
+当前 P/Q 输入、当前 flat B bootstrap 或新一次 LOAD 的参数都不是原 A 依据；深读
+后再次核原 owner。缺原 inventory、缺策略、冲突或重复声明先 HOLD。此基础 API
+不授予镜像恢复、服务启动或 WAL 退休权限；旧 NVOS-only/未知策略凭据不猜测补资格。
+
 同一模块还覆盖端到端 deployment scope：默认 `all` 同时生成 Production/AIR；`prod` 只发布
 Production Cumulus/IB/NVL；`air` 只发布 AIR DHCP/YAML/release，并只临时渲染 AIR full profile
 实际引用的 Production 来源；单独指定 `mini` 会自动选择 AIR scope 和 `eth`，显式 `prod+mini`
