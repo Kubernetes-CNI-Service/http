@@ -5955,6 +5955,7 @@ def _atomic_restore_setup_link(
 ) -> None:
     if require_authority is not None:
         require_authority()
+    _require_no_pending_setup_link_stage(path)
     parent_identity = _setup_switch_link_parent_identity(path)
     temporary = path.parent / (
         f".{path.name}.setup-rollback.{os.getpid()}.{secrets.token_hex(8)}"
@@ -6174,29 +6175,37 @@ def _require_no_pending_setup_manifest_stage() -> None:
     Read-only publication callbacks run while their own stage is held, so this
     fence belongs at restore entry/retirement, not inside those callbacks.
     """
+    _require_no_pending_setup_stage(MANIFEST, f".{MANIFEST.name}.rollback.", "manifest")
+
+
+def _require_no_pending_setup_link_stage(path: Path) -> None:
+    """Preserve unbound link stages; a new random name cannot erase evidence."""
+    _require_no_pending_setup_stage(path, f".{path.name}.setup-rollback.", "link")
+
+
+def _require_no_pending_setup_stage(path: Path, prefix: str, kind: str) -> None:
     descriptor = -1
     try:
-        parent = _setup_switch_link_parent_identity(MANIFEST)
+        parent = _setup_switch_link_parent_identity(path)
         descriptor = os.open(parent["path"], os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
                              | getattr(os, "O_NOFOLLOW", 0))
         held = os.fstat(descriptor)
         if (not stat.S_ISDIR(held.st_mode)
                 or (held.st_dev, held.st_ino) != (parent["dev"], parent["ino"])):
-            raise LoadError("setup manifest stage parent changed; HOLD")
-        prefix = f".{MANIFEST.name}.rollback."
+            raise LoadError(f"setup {kind} stage parent changed; HOLD")
         with os.scandir(descriptor) as entries:
             for count, entry in enumerate(entries, 1):
                 if count > 4096:
-                    raise LoadError("setup manifest stage inspection exceeded its bound; HOLD")
+                    raise LoadError(f"setup {kind} stage inspection exceeded its bound; HOLD")
                 if entry.name.startswith(prefix):
-                    raise LoadError(f"pending setup manifest stage: {entry.name}; HOLD; preserve incident evidence")
+                    raise LoadError(f"pending setup {kind} stage: {entry.name}; HOLD; preserve incident evidence")
         after = os.fstat(descriptor)
-        if (parent != _setup_switch_link_parent_identity(MANIFEST)
+        if (parent != _setup_switch_link_parent_identity(path)
                 or any(getattr(held, field) != getattr(after, field)
                        for field in ("st_dev", "st_ino", "st_mtime_ns", "st_ctime_ns"))):
-            raise LoadError("setup manifest stage parent changed during inspection; HOLD")
+            raise LoadError(f"setup {kind} stage parent changed during inspection; HOLD")
     except (OSError, ValueError, RuntimeError) as exc:
-        raise LoadError(f"setup manifest stage inspection failed; HOLD: {exc}") from exc
+        raise LoadError(f"setup {kind} stage inspection failed; HOLD: {exc}") from exc
     finally:
         if descriptor >= 0:
             os.close(descriptor)
@@ -8724,6 +8733,23 @@ def _recover_setup_switch_journal_snapshot(
         _setup_switch_prepare_infra_log_recovery(infra_rows[0], q_project)
         if infra_rows else None
     )
+    def require_no_link_stages() -> None:
+        # These names come from the validated WAL, not a recursive/glob
+        # discovery of mutable projects. Proven removed Q-only parents cannot
+        # contain a surviving stage; their absence already passed preflight.
+        absent_parents = {path for path, _staged, present, _row
+                          in _setup_switch_created_directory_states(body) if present is None}
+        paths = {Path(row["path"]) for row in rows
+                 if Path(row["path"]).parent not in absent_parents}
+        paths.update(path for path, _row in q_local_states)
+        for path in sorted(paths):
+            _require_no_pending_setup_link_stage(path)
+
+    # verify_only runs inside a publication callback holding its own stage.
+    # Normal cold recovery checks the complete validated link set before its
+    # first mutation, even if a managed name is already at P on reentry.
+    if not verify_only:
+        require_no_link_stages()
     if inspect_only:
         require_journal_unchanged()
         return "prepared-known-disk-state"
@@ -8878,6 +8904,7 @@ def _recover_setup_switch_journal_snapshot(
     # default finalization behavior; automatic child failure recovery does not.
     if not retain_journal:
         _require_no_pending_setup_manifest_stage()
+        require_no_link_stages()
         require_journal_unchanged()
         journal.unlink()
         _fsync_parent_directory(journal.parent)

@@ -1101,6 +1101,73 @@ finally:
                 self.assertFalse(os.path.lexists(q_only))
                 self.assertFalse((root / "service-started").exists())
 
+    def test_real_setup_death_fresh_load_holds_unknown_link_stage(self):
+        for kind in ("file", "dangling-link", "late"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory(prefix="r22-link-orphan-cold-") as name:
+                fixture = self._private_setup_switch_fixture(Path(name))
+                root, _p, _q, common, p_only, q_only, manifest, before, *_rest = fixture
+                first = self._run_private_load_setup_switch(fixture, prepare_journal=True)
+                self.assertEqual(23, first.returncode, first.stdout + first.stderr)
+                journal = root / "ztp/.setup-switch-journal.json"
+                wal_before = (journal.lstat().st_ino, journal.read_bytes())
+                q_before = (common.lstat().st_ino, os.readlink(common), manifest.lstat().st_ino, manifest.read_bytes())
+                orphan = common.parent / f".{common.name}.setup-rollback.independent-orphan"
+                if kind == "file":
+                    orphan.write_bytes(b"unknown prior link stage\n")
+                elif kind == "dangling-link":
+                    orphan.symlink_to("independent-absent-operator-object")
+                orphan_before = orphan.lstat().st_ino if kind != "late" else None
+                recovery = r'''
+import importlib.util, sys
+from pathlib import Path
+from types import SimpleNamespace
+root, orphan, kind = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
+spec = importlib.util.spec_from_file_location('fresh_link_orphan_load', root / 'DAY0-Prepare/11-load.py')
+load = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = load
+spec.loader.exec_module(load)
+load.active_managed_services = lambda *args, **kwargs: ()
+if kind == 'late':
+    snapshot = load.snapshot_active_setup_state
+    def late_orphan(*args, **kwargs):
+        state = snapshot(*args, **kwargs)
+        orphan.write_bytes(b'unknown prior link stage\n')
+        (root / 'late-stage-inode').write_text(str(orphan.lstat().st_ino))
+        return state
+    load.snapshot_active_setup_state = late_orphan
+fd = load.acquire_deployment_lock(exclusive=True)
+try:
+    try:
+        load.recover_setup_switch_journal(root / 'ztp/.setup-switch-journal.json',
+            deployment_lock_descriptor=fd, services_quiesced=True,
+            runtime_backend=SimpleNamespace(name='supervisor'))
+    except load.LoadError as exc:
+        assert 'link stage' in str(exc), str(exc)
+        print('EXPECTED LINK ORPHAN HOLD:', exc)
+        raise SystemExit(7)
+finally:
+    load.release_deployment_lock(fd)
+'''
+                second = subprocess.run([sys.executable, "-B", "-c", recovery, str(root), str(orphan), kind],
+                    cwd=root, capture_output=True, text=True, check=False, timeout=30)
+                self.assertEqual(7, second.returncode, second.stdout + second.stderr)
+                self.assertEqual(wal_before, (journal.lstat().st_ino, journal.read_bytes()))
+                if kind == "late":
+                    self.assertEqual(int((root / "late-stage-inode").read_text()), orphan.lstat().st_ino)
+                    self.assertEqual(before["common"], os.readlink(common))
+                    self.assertEqual(before["manifest"], manifest.read_bytes())
+                    self.assertEqual(before["p_only"], os.readlink(p_only))
+                else:
+                    self.assertEqual(orphan_before, orphan.lstat().st_ino)
+                    self.assertEqual(q_before, (common.lstat().st_ino, os.readlink(common), manifest.lstat().st_ino, manifest.read_bytes()))
+                    self.assertFalse(os.path.lexists(p_only))
+                if kind == "dangling-link":
+                    self.assertEqual("independent-absent-operator-object", os.readlink(orphan))
+                else:
+                    self.assertEqual(b"unknown prior link stage\n", orphan.read_bytes())
+                self.assertFalse(os.path.lexists(q_only))
+                self.assertFalse((root / "service-started").exists())
+
     def test_real_load_setup_child_sigkill_then_fresh_load_restores_p(self):
         """The real setup child dies after Q's first link, before Q manifest."""
         with tempfile.TemporaryDirectory(prefix="r22-real-setup-kill-") as name:

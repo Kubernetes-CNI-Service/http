@@ -2984,6 +2984,61 @@ class ReleaseTransactionTests(unittest.TestCase):
                     retained.unlink()
                 path.unlink()  # Only this test's independently identified injected object.
 
+    def test_setup_link_restore_holds_preexisting_orphan_stage(self):
+        target = self.ztp / "independent-managed-link"
+        target.symlink_to("independent-Q-target")
+        orphan = target.parent / f".{target.name}.setup-rollback.independent-orphan"
+        orphan.symlink_to("independent-absent-operator-object")
+        before = (target.lstat().st_ino, os.readlink(target), orphan.lstat().st_ino)
+        with mock.patch.object(LOAD.os, "replace", wraps=os.replace) as replace:
+            with self.assertRaises(LOAD.LoadError):
+                LOAD._atomic_restore_setup_link(target, "independent-P-target")
+            replace.assert_not_called()
+        self.assertEqual(before, (target.lstat().st_ino, os.readlink(target), orphan.lstat().st_ino))
+        self.assertEqual("independent-absent-operator-object", os.readlink(orphan))
+
+    def test_setup_wal_cold_recovery_holds_link_orphan_before_any_write(self):
+        state = self._prepare_cross_project_setup_crash()
+        common, target, manifest, journal, descriptor, backend = state[2], state[5], state[7], state[10], state[11], state[12]
+        common.unlink()
+        common.symlink_to(os.path.relpath(target, common.parent))
+        orphan = common.parent / f".{common.name}.setup-rollback.independent-orphan"
+        orphan.write_bytes(b"unknown prior link stage\n")
+        before = (common.lstat().st_ino, os.readlink(common), manifest.lstat().st_ino,
+                  manifest.read_bytes(), journal.lstat().st_ino, journal.read_bytes(), orphan.lstat().st_ino)
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "_atomic_restore_setup_link", wraps=LOAD._atomic_restore_setup_link) as restore:
+            with self.assertRaises(LOAD.LoadError):
+                LOAD.recover_setup_switch_journal(journal, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend)
+            restore.assert_not_called()
+        self.assertEqual(before, (common.lstat().st_ino, os.readlink(common), manifest.lstat().st_ino,
+                  manifest.read_bytes(), journal.lstat().st_ino, journal.read_bytes(), orphan.lstat().st_ino))
+        self.assertEqual(b"unknown prior link stage\n", orphan.read_bytes())
+
+    def test_setup_wal_retirement_holds_link_orphan_arriving_after_p_verify(self):
+        state = self._prepare_cross_project_setup_crash()
+        common, manifest, journal, descriptor, backend = state[2], state[7], state[10], state[11], state[12]
+        wal_before = (journal.lstat().st_ino, journal.read_bytes())
+        orphan = common.parent / f".{common.name}.setup-rollback.independent-late"
+        snapshot, observed = LOAD.snapshot_active_setup_state, []
+        def late_orphan(*args, **kwargs):
+            result = snapshot(*args, **kwargs)
+            orphan.write_bytes(b"late unknown link stage\n")
+            observed.append(orphan.lstat().st_ino)
+            return result
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "snapshot_active_setup_state", side_effect=late_orphan):
+            with self.assertRaises(LOAD.LoadError):
+                LOAD.recover_setup_switch_journal(journal, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend)
+        self.assertEqual(1, len(observed), "independent P postverify boundary not reached")
+        self.assertEqual(wal_before, (journal.lstat().st_ino, journal.read_bytes()))
+        self.assertEqual(observed[0], orphan.lstat().st_ino)
+        self.assertEqual(b"late unknown link stage\n", orphan.read_bytes())
+        self.assertEqual(state[8], manifest.read_bytes())
+        backend.start.assert_not_called()
+
     def test_setup_manifest_restore_holds_preexisting_orphan_stage(self):
         manifest = self.ztp / ".setup_manifest"
         manifest.write_bytes(b"independent Q manifest remains\n")

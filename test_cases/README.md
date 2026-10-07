@@ -221,6 +221,15 @@ LOAD→SETUP→parent primitive→旧 API 负例保留 Q 与原凭据。该 work
 自有暂存清理仍须执行。这是有写者静默前提的名称复核，不是持有 symlink FD 或原子
 compare-and-replace/unlink，不证明任意 ABA/非合作写者免疫、孤儿暂存自动收口或完整 R22。
 
+已留存的未知链接暂存还须阻断后续恢复：link helper 创建新暂存前，以及非 verify-only
+WAL 冷恢复首写前和退休前，对已验证 WAL 的链接行及 Q-local latest 名称进行有界只读盘点。
+普通文件、目录或悬空链接均不得因前缀而被删除或忽略；父身份变化、不可读或超过 4096
+条目保持 HOLD。退休前重新验证已登记 Q-only 目录的确切缺席，不能把正常移除自有目录
+误报为扫描错误；已恢复 P 也不能授权消费晚到的未知暂存。direct 和真实 SETUP 强杀→
+新 LOAD 分别覆盖首写前及 P 后核验后残留，原正常冷恢复仍须执行。此围栏仅覆盖验证过
+的 WAL 链接名称和 helper 的目标，不是无 WAL 新 LOAD 全树孤儿盘点、未知对象自动收口、
+完整 runtime 写集或成功 B finalizer；root/Linux/断电、旧 A 显式激活与正式超时闸门仍未闭。
+
 Q 已有的 ETH/NVOS `latest` 软链接须在首次共享写入前单独记录原始链接文字、
 旧/新真实完成目录和父目录身份，不混入 P manifest，也不当作原本缺席的 Q-only 名称。
 SETUP 通过 Q 的物理父目录写入，稳定共享入口仍保留原有相对链接合同；替换后同步父目录。
