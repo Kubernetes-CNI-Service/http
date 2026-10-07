@@ -916,6 +916,12 @@ ETH/IB RAW、原绑定和预留记录的十个图像屏障完成后才写 INITIA
 这是未安装的单个 pending 单元保守预留，不是完整跨单元结算、行容量／metadata
 预留、新鲜准入、来源鉴别、COMPLETE 或发送许可；真机卡 NOT RUN。
 
+原始 enrollment journal 的 sheet ID 必须保持 native int；即使 NONCES／HEADER／
+INITIALIZED 被一致重哈希，bool 或浮点数的 Python 相等别名仍 HOLD，不自动修复。
+`test_cases.test_req7_enrollment_journal` 保留原始数字 ID 合同及篡改证据。
+global／enrollment／History 夹具的 canonical sys.modules 与父包别名同步，
+避免改变执行顺序后从旧包别名取得已撤销 owner 的 token registry；生产检查不放宽。
+
 `test_cases.test_req7_history_preread_journal` 在实际 spreadsheet owner 与已初始化
 且计数为 0 的全局 action/wire journal 内保存原始全尾响应、容量与
 `history_last_row_before_send`。RAW/HEADER 的六个图像屏障后才能写 marker；

@@ -64,7 +64,8 @@ def _nonce_rows(rows,header):
     if type(rows) is not list or len(rows)!=4: raise EnrollmentHold()
     values=[]
     for title,item in zip(_TITLES,rows):
-        if (type(item) is not list or len(item)!=3 or item[:2]!=[title,mapping[title]]
+        if (type(item) is not list or len(item)!=3 or type(item[0]) is not str or type(item[1]) is not int
+                or item[:2]!=[title,mapping[title]]
                 or type(item[2]) is not str or re.fullmatch(r"[0-9a-f]{64}",item[2]) is None):
             raise EnrollmentHold()
         values.append(item[2])

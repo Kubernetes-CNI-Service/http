@@ -24,7 +24,12 @@ def load():
     if not SOURCE.is_file(): raise AssertionError('spreadsheet-wide durable UNKNOWN/attempt journal missing')
     spec = importlib.util.spec_from_file_location('monitor.issue_tracker_global_attempt_journal', SOURCE)
     module = importlib.util.module_from_spec(spec); sys.modules[spec.name] = module
-    spec.loader.exec_module(module); return module
+    spec.loader.exec_module(module)
+    # Match Python's normal canonical import: dependent journals must not
+    # retain a package alias pointing at an older owner/token registry.
+    import monitor
+    monitor.issue_tracker_global_attempt_journal = module
+    return module
 
 
 def unit(**changes):

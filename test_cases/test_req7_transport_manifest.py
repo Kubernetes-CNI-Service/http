@@ -30,6 +30,20 @@ SCRIPTS = {
 
 
 class Req7TransportManifestCandidateTests(unittest.TestCase):
+    def test_durable_fixture_package_aliases_track_current_owner_and_journal_modules(self):
+        import monitor
+        from test_cases.test_req7_spreadsheet_owner import load as owner_load
+        from test_cases.test_req7_global_attempt_journal import load as global_load
+        from test_cases.test_req7_enrollment_journal import load as nonce_load
+        from test_cases.test_req7_history_preread_journal import load as before_load
+        owner = owner_load(); global_module = global_load(); nonce_module = nonce_load(); before_module = before_load()
+        self.assertIs(global_module, getattr(monitor, 'issue_tracker_global_attempt_journal', None))
+        self.assertIs(nonce_module, getattr(monitor, 'issue_tracker_enrollment_journal', None))
+        self.assertIs(before_module, getattr(monitor, 'issue_tracker_history_preread_journal', None))
+        self.assertIs(owner, global_module.ownership)
+        self.assertIs(global_module, before_module.global_journal)
+        self.assertIs(owner, before_module.ownership)
+
     def test_composer_fixture_keeps_canonical_class_identity_across_repeated_loads(self):
         from test_cases.test_req7_send_unit import load, inputs
         first = load(); unit = first.freeze_send_unit(**inputs())

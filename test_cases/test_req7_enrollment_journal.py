@@ -24,7 +24,10 @@ def load():
     if not SOURCE.is_file(): raise AssertionError("REQ7 journal-authoritative enrollment nonces missing")
     spec=importlib.util.spec_from_file_location("monitor.issue_tracker_enrollment_journal",SOURCE)
     module=importlib.util.module_from_spec(spec); sys.modules[spec.name]=module
-    spec.loader.exec_module(module); return module
+    spec.loader.exec_module(module)
+    import monitor
+    monitor.issue_tracker_enrollment_journal = module
+    return module
 
 
 class Req7EnrollmentJournalDirectTests(unittest.TestCase):
@@ -131,6 +134,28 @@ with fixture(pathlib.Path(sys.argv[1])),owner.spreadsheet_owner(binding()) as to
                     else: (store/"NONCES").chmod(0o644)
                     with self.assertRaises(self.module.EnrollmentHold): self.inspect(token)
                     self.assertTrue(store.exists())
+
+    def test_coherent_rehash_cannot_alias_native_integer_sheet_id_with_bool_or_float(self):
+        canonical = lambda value: (json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':')) + '\n').encode()
+        for native, alias in ((1, True), (0, False), (101, 101.0)):
+            with self.subTest(native=native, alias_type=type(alias).__name__), tempfile.TemporaryDirectory(prefix='req7-nonce-type-') as directory:
+                root = Path(directory).resolve(); state = root / 'var/lib/http-ztp-container/issue-tracker'; state.mkdir(parents=True, mode=0o700)
+                store = state / self.store.name
+                identity = replace(self.identity, sheet_ids=tuple((title, native if title == 'ETH&IB Switch' else sid)
+                                                                for title, sid in self.identity.sheet_ids))
+                with fixture(root), self.owner.spreadsheet_owner(binding()) as token:
+                    self.module.prepare_enrollment_journal(token, binding(), identity)
+                    rows = json.loads((store / 'NONCES').read_bytes()); rows[0][1] = alias
+                    raw = canonical(rows); (store / 'NONCES').write_bytes(raw)
+                    header = json.loads((store / 'HEADER').read_bytes()); header['nonces_sha256'] = hashlib.sha256(raw).hexdigest()
+                    header_raw = canonical(header); (store / 'HEADER').write_bytes(header_raw)
+                    (store / 'INITIALIZED').write_bytes(canonical({'schema_version': 1, 'state': 'INITIALIZED',
+                        'header_sha256': hashlib.sha256(header_raw).hexdigest()}))
+                    before = {path.name: path.read_bytes() for path in store.iterdir()}
+                    with self.assertRaises(self.module.EnrollmentHold) as caught:
+                        self.module.inspect_enrollment_journal(token, binding(), identity)
+                    self.assertIsNone(caught.exception.__context__)
+                    self.assertEqual(before, {path.name: path.read_bytes() for path in store.iterdir()})
 
     def test_compiled_unit_must_match_both_original_journal_nonces_and_actual_sheet_ids(self):
         from test_cases.test_req7_send_unit import inputs

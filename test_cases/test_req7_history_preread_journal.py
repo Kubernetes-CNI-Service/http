@@ -25,7 +25,10 @@ def load():
     if not SOURCE.is_file(): raise AssertionError('immutable History pre-send journal missing')
     spec = importlib.util.spec_from_file_location('monitor.issue_tracker_history_preread_journal', SOURCE)
     module = importlib.util.module_from_spec(spec); sys.modules[spec.name] = module
-    spec.loader.exec_module(module); return module
+    spec.loader.exec_module(module)
+    import monitor
+    monitor.issue_tracker_history_preread_journal = module
+    return module
 
 
 class Req7HistoryPrereadJournalDirectTests(unittest.TestCase):
