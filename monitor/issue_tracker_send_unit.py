@@ -262,6 +262,88 @@ def freeze_receipted_prod_source_unit(qualified, store, *, http_root, settings,
     return result
 
 
+def freeze_observed_receipted_source_updates(qualified, store, *, http_root, settings,
+                                           whitelist_snapshot, whitelist_path, metadata,
+                                           expected_template_sha256, local_generation_id,
+                                           business_reads, history_plan, history_response,
+                                           writer_token=None, **unit_binding):
+    """Compile ALL active updates from original full discovery/exact-row reads.
+
+    Derive coordinates, typed tool-cell before-images and the combined business
+    /History read digest; no caller placements, values or preread override. No
+    fallback insert, key selection or silent batching. Original C5/C6 receipts
+    remain revalidated under their real owner. Read images do not establish
+    authentication, freshness, template/enrollment, reservations, CAS or send
+    authority; a fixed launcher and original durable read-image journal remain
+    necessary. This uninstalled compiler creates no intent or transport.
+    """
+    failed = False
+    try:
+        from urllib.parse import urlsplit
+        from monitor.issue_tracker_local_commit import _owner
+        from monitor.issue_tracker_local_workbook_commit import _source_rows
+        from monitor.issue_tracker_manifest import freeze_prod_stage_l_manifest
+        from monitor.issue_tracker_online_cells import source_tool_values
+        from monitor.issue_tracker_sheets_read_decode import observe_active_row, decode_history_tail, _geometry
+
+        names = {'spreadsheet_id', 'sheet', 'sheet_id', 'history_sheet_id', 'target_nonce',
+                 'history_nonce', 'audits', 'occupied_metadata_ids'}
+        if (set(unit_binding) != names or type(unit_binding['sheet']) is not str
+                or unit_binding['sheet'] not in _FAMILY or type(business_reads) is not tuple
+                or not 1 <= len(business_reads) <= 1000): raise SendUnitHold()
+        owner = _owner(writer_token)
+        if str(owner.project) != str(store.project_identity): raise SendUnitHold()
+        context = dict(http_root=http_root, settings=settings, whitelist_snapshot=whitelist_snapshot,
+                       whitelist_path=whitelist_path, metadata=metadata,
+                       expected_template_sha256=expected_template_sha256, writer_token=writer_token)
+        manifest, manifest_id = freeze_prod_stage_l_manifest(qualified, store, **context)
+        operations = [item for item in json.loads(manifest)['operations']
+                      if item['activity_key'][0] == _FAMILY[unit_binding['sheet']]]
+        if len(operations) != len(business_reads): raise SendUnitHold()
+        cabling, switch = _source_rows(qualified)
+        sources = {row.activity_key: row for row in (*cabling, *switch)}
+        if len(sources) != len(cabling) + len(switch): raise SendUnitHold()
+
+        def read_images():
+            history = decode_history_tail(history_plan, history_response, sheet_id=unit_binding['history_sheet_id'])
+            if urlsplit(history_plan.path).path != '/v4/spreadsheets/' + unit_binding['spreadsheet_id']:
+                raise SendUnitHold()
+            placements, images = [], []
+            for operation, reading in zip(operations, business_reads):
+                if (type(reading) is not dict or set(reading) != {'operation_id', 'discovery_plan', 'discovery_response', 'row_plan', 'row_response'}
+                        or reading['operation_id'] != operation['operation_id']): raise SendUnitHold()
+                target, title, _ = _geometry(reading['row_plan'])
+                if target != unit_binding['spreadsheet_id'] or title != unit_binding['sheet']: raise SendUnitHold()
+                observed = observe_active_row(reading['discovery_plan'], reading['discovery_response'],
+                    reading['row_plan'], reading['row_response'], sheet_id=unit_binding['sheet_id'],
+                    activity_key=tuple(operation['activity_key']))
+                values = source_tool_values(sources[tuple(operation['activity_key'])], 'update')
+                cells = {column: dict(value) for _index, column, value in observed.cells}
+                placements.append({'operation_id': operation['operation_id'], 'action': 'update',
+                    'row_index': observed.row_index, 'reserved_id': None,
+                    'observed_values': {column: cells[column] for column in values}})
+                images.append({'operation_id': operation['operation_id'], 'discovery_path': reading['discovery_plan'].path,
+                    'discovery_sha256': observed.discovery_sha256, 'row_path': reading['row_plan'].path,
+                    'row_sha256': observed.row_sha256})
+            image = _canonical({'schema_version': 1, 'spreadsheet_id': unit_binding['spreadsheet_id'],
+                'sheet': unit_binding['sheet'], 'sheet_id': unit_binding['sheet_id'],
+                'history_sheet_id': unit_binding['history_sheet_id'], 'history_path': history_plan.path,
+                'history_sha256': history.source_sha256, 'business': images})
+            return tuple(placements), hashlib.sha256(image).hexdigest(), history
+
+        placements, digest, history = read_images()
+        result = freeze_receipted_prod_source_unit(qualified, store, local_generation_id=local_generation_id,
+            placements=placements, preread_sha256=digest, **context, **unit_binding)
+        if (read_images() != (placements, digest, history)
+                or freeze_prod_stage_l_manifest(qualified, store, **context) != (manifest, manifest_id)
+                or history.last_data_row_index + result.history_rows_expected >= history.row_count):
+            raise SendUnitHold()
+        _owner(writer_token)
+    except Exception: failed = True
+    if failed: raise SendUnitHold()
+    return result
+
+
 def _freeze(manifest, manifest_id, generation_id, publish_id, spreadsheet_id,
             sheet, sheet_id, history_sheet_id, target_nonce, history_nonce,
             preread_sha256, business, audits, occupied_metadata_ids):

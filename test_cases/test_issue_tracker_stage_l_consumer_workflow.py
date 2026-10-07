@@ -70,6 +70,9 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
     def test_actual_protected_workbook_receipt_admission_bind_all_source_units_and_reject_drift(self):
         self._exercise_real_protected_three_panel_fixture(skip_history=False, receipted_source_probe=True)
 
+    def test_actual_receipt_source_and_full_row_images_derive_all_update_coordinates_and_preread(self):
+        self._exercise_real_protected_three_panel_fixture(skip_history=False, observed_source_probe=True)
+
     def test_two_real_cycles_keep_keys_and_commit_latest_business_values(self):
         self._exercise_real_protected_three_panel_fixture(
             skip_history=False, two_cycle_changed_latest=True,
@@ -426,7 +429,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         selected_panel_empty=False, manual_channel_bridge=False,
         source_identity_probe=False, two_cycle_changed_latest=False,
         settings_channel_probe=False, settings_channel_fault=False,
-        panel_counts_probe=False, source_unit_probe=False, receipted_source_probe=False,
+        panel_counts_probe=False, source_unit_probe=False, receipted_source_probe=False, observed_source_probe=False,
         complete_preview_probe=False,
         complete_preview_source_race=False,
         complete_preview_cgi=False,
@@ -1404,6 +1407,95 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             self.assertEqual(digest, committed.receipt.manifest_id)
             self.assertEqual(hashlib.sha256(committed.prepared.xlsx_bytes).hexdigest(),
                              committed.receipt.published_sha256)
+            if observed_source_probe:
+                import monitor.issue_tracker_send_unit as compiler
+                from monitor.issue_tracker_sheets_read_plan import prepare_activity_sheet_read, prepare_sheets_read, prepare_history_tail_read
+                from monitor.issue_tracker_online_target import OnlineTargetBinding
+                from monitor.issue_tracker_sdk_authentication import AuthenticatedToken
+                from test_cases.test_req7_activity_discovery import sheet_document, exact_row_document, switch_row, cabling_row, literal
+                from test_cases.test_req7_sheets_read_decode import response
+                self.assertTrue(hasattr(compiler, 'freeze_observed_receipted_source_updates'), 'protected receipt/source must derive rows from original read images')
+                binding = OnlineTargetBinding('synthetic_spreadsheet_id_0001', 'a' * 64, 'b' * 64)
+                credential = AuthenticatedToken('synthetic.private-token', time.time() + 3600)
+                history_plan = prepare_history_tail_read(binding, credential)
+                history_raw = response({'spreadsheetId': binding.spreadsheet_id, 'sheets': [{
+                    'properties': {'sheetId': 105, 'title': 'Update_History', 'sheetType': 'GRID',
+                        'gridProperties': {'rowCount': 100, 'columnCount': 5}},
+                    'data': [{'startRow': 2, 'startColumn': 0}]}]})
+                before_generations_observed = tuple(sorted(generation_root.iterdir()))
+                for sheet, family, sid in (('ETH&IB Switch', 'switch', 101), ('ETH Cabling', 'eth_cabling', 102), ('IB Cabling', 'ib_cabling', 103)):
+                    candidates = tuple(item for item in qualified.candidates if item.activity_key[0] == family)
+                    rows = []
+                    for index, candidate in enumerate(candidates):
+                        key = candidate.activity_key
+                        row = switch_row('NV%05d' % (43001 + index)) if family == 'switch' else cabling_row('NV%05d' % (43001 + index))
+                        if family == 'switch':
+                            row['F'] = literal(key[1]); row['L'] = literal('[MONITOR][%s][%s] old independent evidence' % key[2:])
+                        else:
+                            for column, value in zip(('K', 'L', 'F'), key[1:]): row[column] = literal(value)
+                        rows.append(row)
+                    source = sheet_document(sheet, rows, row_count=len(rows) + 4)
+                    source['sheets'][0]['properties']['sheetId'] = sid
+                    discovery_plan = prepare_activity_sheet_read(binding, credential, sheet=sheet)
+                    raw_discovery = response(source)
+                    reads = []
+                    for index, candidate in enumerate(candidates):
+                        exact = exact_row_document(sheet, rows[index], index + 2)
+                        exact['sheets'][0]['properties']['sheetId'] = sid
+                        reads.append({'operation_id': candidate.operation_id, 'discovery_plan': discovery_plan,
+                            'discovery_response': raw_discovery, 'row_plan': prepare_sheets_read(binding, credential,
+                                mode='row_rectangle', sheet=sheet, first_row=index + 3), 'row_response': response(exact)})
+                    options = dict(local_generation_id=committed.receipt.generation_id, spreadsheet_id=binding.spreadsheet_id,
+                        sheet=sheet, sheet_id=sid, history_sheet_id=105, target_nonce='c' * 64, history_nonce='d' * 64,
+                        audits=(), occupied_metadata_ids=())
+                    with tracker_writer(project, self.publication) as token:
+                        def compile_observed(**changes):
+                            return compiler.freeze_observed_receipted_source_updates(qualified, self.store, metadata=metadata,
+                                expected_template_sha256=self.snapshot.workbook_sha256, writer_token=token, **args,
+                                **{**options, 'business_reads': tuple(reads), 'history_plan': history_plan, 'history_response': history_raw, **changes})
+                        unit = compile_observed()
+                        action = json.loads(unit.action_preimage)
+                        self.assertEqual(committed.receipt.generation_id, action['identity']['generation_id'])
+                        self.assertEqual(committed.receipt.published_sha256, action['identity']['publish_id'])
+                        self.assertNotEqual('e' * 64, action['preread_sha256'])
+                        requests = json.loads(unit.wire_bytes)['requests']
+                        updates = [item['updateCells'] for item in requests if 'updateCells' in item]
+                        self.assertEqual(set(range(2, len(rows) + 2)), {item['start']['rowIndex'] for item in updates})
+                        for item in updates:
+                            self.assertEqual(sid, item['start']['sheetId'])
+                            self.assertEqual('userEnteredValue', item['fields'])
+                            self.assertNotEqual(0, item['start']['columnIndex'])
+                        with self.assertRaises(compiler.SendUnitHold): compile_observed(preread_sha256='e' * 64)
+                        with self.assertRaises(compiler.SendUnitHold): compile_observed(placements=())
+                        with self.assertRaises(compiler.SendUnitHold): compile_observed(business_reads=tuple(reads[:-1]))
+                        foreign_history = json.loads(history_raw.data)
+                        foreign_history['spreadsheetId'] = 'foreign_spreadsheet_id_0002'
+                        with self.assertRaises(compiler.SendUnitHold): compile_observed(history_response=response(foreign_history))
+                        full_history = json.loads(history_raw.data)
+                        full_history['sheets'][0]['properties']['gridProperties']['rowCount'] = 3
+                        full_history['sheets'][0]['data'][0]['rowData'] = [{'values': [{'userEnteredValue': literal('occupied original tail')}]}]
+                        with self.assertRaises(compiler.SendUnitHold): compile_observed(history_response=response(full_history))
+                        original_row = reads[0]['row_response']
+                        drift = json.loads(original_row.data)
+                        drift['sheets'][0]['data'][0]['rowData'][0]['values'][0] = {'userEnteredValue': literal('NV99999')}
+                        reads[0]['row_response'] = response(drift)
+                        try:
+                            with self.assertRaises(compiler.SendUnitHold): compile_observed()
+                        finally: reads[0]['row_response'] = original_row
+                        def change_row_during_freeze(*freeze_args, **freeze_kwargs):
+                            result = real_freeze(*freeze_args, **freeze_kwargs)
+                            reads[0]['row_response'] = response(drift)
+                            return result
+                        real_freeze = compiler.freeze_receipted_prod_source_unit
+                        try:
+                            with mock.patch.object(compiler, 'freeze_receipted_prod_source_unit', side_effect=change_row_during_freeze):
+                                with self.assertRaises(compiler.SendUnitHold): compile_observed()
+                        finally: reads[0]['row_response'] = original_row
+                self.assertEqual(before_generations_observed, tuple(sorted(generation_root.iterdir())))
+                self.assertEqual(original_template, self.template.read_bytes())
+                self.assertFalse((project / '.tracker/remote-actions').exists())
+                self.assertFalse((project / '.tracker/remote-attempts').exists())
+                return
             if receipted_source_probe:
                 import monitor.issue_tracker_send_unit as compiler
                 generation_id = committed.receipt.generation_id

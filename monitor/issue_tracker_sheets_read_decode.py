@@ -55,6 +55,19 @@ class ObservedActivitySheet:
 
 
 @dataclass(frozen=True)
+class ObservedActiveRow:
+    """An unchanged key/coordinate across two read images, never a send permit."""
+    sheet_id: int
+    sheet_title: str
+    activity_key: tuple = field(repr=False)
+    row_index: int
+    nv_id: str = field(repr=False)
+    cells: tuple = field(repr=False)
+    discovery_sha256: str
+    row_sha256: str
+
+
+@dataclass(frozen=True)
 class ObservedSheetsGrid:
     sheet_id: int
     sheet_title: str
@@ -302,6 +315,11 @@ def discover_activity_sheet(plan, response, *, sheet_id, activity_key):
     rowCount. Original IDs across ALL observed rows contribute to NV maximum,
     including Closed and unrelated keys. No reservation/allocation or permit.
     """
+    return _activity_sheet_image(plan, response, sheet_id=sheet_id, activity_key=activity_key)[0]
+
+
+def _activity_sheet_image(plan, response, *, sheet_id, activity_key):
+    """Keep the original typed explicit-column image for exact-row comparison."""
     from dataclasses import replace
     from monitor.issue_tracker_sheets_read_plan import PreparedSheetsRead, _FIELDS, _HISTORY_TAIL_FIELDS
     failed = conflict = False
@@ -335,6 +353,40 @@ def discover_activity_sheet(plan, response, *, sheet_id, activity_key):
         window, maximum, identifiers = _classify_activity(ObservedSheetsGrid(sheet_id, title, cells, digest), geometry, activity_key)
         result = ObservedActivitySheet(sheet_id, title, activity_key, window.active_rows, window.closed_rows,
             window.first_row_index, window.last_row_index, capacity['rowCount'], maximum, digest, identifiers)
+    except OnlineActivityConflict: conflict = True
+    except Exception: failed = True
+    if conflict: raise OnlineActivityConflict()
+    if failed: raise SheetsDecodeHold()
+    return result, cells, target
+
+
+def observe_active_row(discovery_plan, discovery_response, row_plan, row_response, *, sheet_id, activity_key):
+    """Derive the update coordinate from a complete key read, then recheck it.
+
+    ALL discovery columns (not only the key) must match the exact original row
+    rectangle, including ID, Status, evidence and Cabling peer sides. Retain all
+    original typed row cells so formulas and operator columns are not replaced
+    by literals. No coordinate override, paging, insertion, ID allocation or
+    fallback search is accepted. Two non-atomic GETs are still not freshness,
+    source/admission/enrollment/reservation authority, CAS or COMPLETE.
+    """
+    failed = conflict = False
+    try:
+        discovery, original, target = _activity_sheet_image(discovery_plan, discovery_response,
+            sheet_id=sheet_id, activity_key=activity_key)
+        if len(discovery.active_rows) != 1: raise SheetsDecodeHold()
+        index, identifier = discovery.active_rows[0]
+        row_target, title, geometry = _geometry(row_plan)
+        final = 20 if discovery.sheet_title == 'ETH&IB Switch' else 28
+        if (row_target != target or title != discovery.sheet_title
+                or geometry != {(index, 0): (index, final)}): raise SheetsDecodeHold()
+        row = decode_sheets_read(row_plan, row_response)
+        if row.sheet_id != discovery.sheet_id or row.sheet_title != discovery.sheet_title: raise SheetsDecodeHold()
+        observed = {(position, column): value for position, column, value in row.cells}
+        for position, column, value in original:
+            if position == index and observed.get((position, column)) != value: raise SheetsDecodeHold()
+        result = ObservedActiveRow(discovery.sheet_id, title, activity_key, index, identifier,
+            row.cells, discovery.source_sha256, row.source_sha256)
     except OnlineActivityConflict: conflict = True
     except Exception: failed = True
     if conflict: raise OnlineActivityConflict()

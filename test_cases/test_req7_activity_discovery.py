@@ -161,6 +161,97 @@ def sheet_document(sheet, rows, row_count=7):
 CAPACITY_FIELDS = 'spreadsheetId,sheets(properties(sheetId,title,sheetType,gridProperties(rowCount,columnCount)),data(startRow,startColumn,rowData(values(userEnteredValue))))'
 
 
+def exact_row_document(sheet, row, index=6):
+    width = 21 if sheet == 'ETH&IB Switch' else 29
+    cells = [{} for _ in range(width)]
+    def column(letter):
+        result = 0
+        for char in letter: result = result * 26 + ord(char) - 64
+        return result - 1
+    for letter, value in row.items(): cells[column(letter)] = {'userEnteredValue': value}
+    return {'spreadsheetId': 'synthetic_spreadsheet_id_0001', 'sheets': [{
+        'properties': {'sheetId': 17, 'title': sheet}, 'data': [{'startRow': index,
+        'startColumn': 0, 'rowData': [{'values': cells}]}]}]}
+
+
+class Req7ActiveRowBindingDirectTests(unittest.TestCase):
+    setUp = Req7ActivityDiscoveryDirectTests.setUp
+
+    def inputs(self, sheet='ETH&IB Switch'):
+        row = switch_row('NV40017') if sheet == 'ETH&IB Switch' else cabling_row('NV40017')
+        key = ('switch', 'switch-1', 'down', 'fabric') if sheet == 'ETH&IB Switch' else (
+            'eth_cabling' if sheet == 'ETH Cabling' else 'ib_cabling', 'switch-1', 'swp1', 'Link Down')
+        source = sheet_document(sheet, [{}, {}, {}, {}, row])
+        exact = exact_row_document(sheet, row)
+        return key, source, exact
+
+    def observe(self, key, source, exact, *, sheet='ETH&IB Switch', discovery=None, rectangle=None):
+        self.assertTrue(hasattr(self.module, 'observe_active_row'), 'original full discovery/exact-row binding missing')
+        return self.module.observe_active_row(
+            discovery or self.planner.prepare_activity_sheet_read(self.binding, self.token, sheet=sheet), grids.response(source),
+            rectangle or self.planner.prepare_sheets_read(self.binding, self.token, mode='row_rectangle', sheet=sheet, first_row=7),
+            grids.response(exact), sheet_id=17, activity_key=key)
+
+    def test_row_coordinate_and_original_id_derive_from_full_key_then_exact_rectangle_for_every_family(self):
+        for sheet in ('ETH&IB Switch', 'ETH Cabling', 'IB Cabling'):
+            key, source, exact = self.inputs(sheet)
+            result = self.observe(key, source, exact, sheet=sheet)
+            self.assertEqual((17, sheet, key, 6, 'NV40017'),
+                (result.sheet_id, result.sheet_title, result.activity_key, result.row_index, result.nv_id))
+            cells = {column: dict(value) for index, column, value in result.cells}
+            self.assertEqual({'stringValue': 'NV40017'}, cells['A'])
+            self.assertEqual(21 if sheet == 'ETH&IB Switch' else 29, len(cells))
+            self.assertEqual(hashlib.sha256(grids.response(source).data).hexdigest(), result.discovery_sha256)
+            self.assertEqual(hashlib.sha256(grids.response(exact).data).hexdigest(), result.row_sha256)
+            with self.assertRaises(AttributeError): result.row_index = 2
+            for name in ('mutation_permit', 'complete', 'insert_allowed', 'applied'): self.assertFalse(hasattr(result, name))
+            self.assertNotIn('switch-1', repr(result)); self.assertNotIn('NV40017', repr(result))
+
+    def test_any_discovery_column_drift_including_peer_description_status_or_id_holds_without_retargeting(self):
+        for sheet, columns in (('ETH&IB Switch', ('A', 'F', 'L', 'N')),
+                               ('ETH Cabling', ('A', 'F', 'G', 'K', 'L', 'Q', 'R', 'U')),
+                               ('IB Cabling', ('A', 'F', 'G', 'K', 'L', 'Q', 'R', 'U'))):
+            key, source, exact = self.inputs(sheet)
+            for letter in columns:
+                index = ord(letter) - 65
+                for replacement in ({'stringValue': 'different'}, {'formulaValue': '=private_sentinel()'}, {}):
+                    changed = deepcopy(exact)
+                    changed['sheets'][0]['data'][0]['rowData'][0]['values'][index] = {'userEnteredValue': replacement}
+                    with self.subTest(sheet=sheet, column=letter):
+                        with self.assertRaises(self.module.SheetsDecodeHold) as caught:
+                            self.observe(key, source, changed, sheet=sheet)
+                        self.assertIsNone(caught.exception.__context__)
+                        self.assertNotIn('private_sentinel', str(caught.exception))
+
+    def test_wrong_row_wrong_target_wrong_sheet_and_partial_discovery_cannot_be_active_row_binding(self):
+        key, source, exact = self.inputs()
+        variants = []
+        changed = deepcopy(exact); changed['sheets'][0]['data'][0]['startRow'] = 2; variants.append(changed)
+        changed = deepcopy(exact); changed['sheets'][0]['properties']['sheetId'] = 18; variants.append(changed)
+        changed = deepcopy(exact); changed['spreadsheetId'] = 'foreign_spreadsheet_id_0002'; variants.append(changed)
+        for changed in variants:
+            with self.assertRaises(self.module.SheetsDecodeHold): self.observe(key, source, changed)
+        for first, last in ((3, 7), (3, 5002)):
+            plan = self.planner.prepare_sheets_read(self.binding, self.token, mode='discovery', sheet='ETH&IB Switch', first_row=first, last_row=last)
+            with self.assertRaises(self.module.SheetsDecodeHold): self.observe(key, source, exact, discovery=plan)
+        for row in ({}, switch_row('NV40017', 'Closed')):
+            with self.assertRaises(self.module.SheetsDecodeHold): self.observe(key, sheet_document('ETH&IB Switch', [row]), exact)
+        with self.assertRaises(self.module.OnlineActivityConflict):
+            self.observe(key, sheet_document('ETH&IB Switch', [switch_row('NV40016'), {}, {}, {}, switch_row('NV40017')]), exact)
+
+    def test_exact_row_keeps_formula_numeric_bool_and_operator_cells_without_treating_them_as_tool_values(self):
+        key, source, exact = self.inputs()
+        cells = exact['sheets'][0]['data'][0]['rowData'][0]['values']
+        for index in (3, 4, 6, 7): cells[index] = {'userEnteredValue': {'formulaValue': '=original_lookup()'}}
+        cells[8] = {}; cells[12] = {'userEnteredValue': {'numberValue': 0}}
+        cells[14] = {'userEnteredValue': {'boolValue': False}}
+        observed = self.observe(key, source, exact)
+        values = {column: dict(value) for _index, column, value in observed.cells}
+        self.assertEqual({'formulaValue': '=original_lookup()'}, values['D'])
+        self.assertEqual({}, values['I']); self.assertEqual({'numberValue': 0}, values['M'])
+        self.assertEqual({'boolValue': False}, values['O'])
+
+
 class Req7ActivitySheetDirectTests(unittest.TestCase):
     # Existing finite-window tests remain a separate contract. Only new cases
     # use the same-response capacity-clipped full-body plan below.
@@ -293,6 +384,39 @@ class Req7ActivityDiscoveryNativeWorkflowTests(unittest.TestCase):
                                                    sheet_id=sid, activity_key=key)
             self.assertEqual((), seen.active_rows); maxima.append(seen.maximum_nv_id)
         self.assertEqual([30017, 60000], maxima)
+
+    def test_original_full_discovery_and_exact_native_row_bind_actual_literal_update_for_all_families(self):
+        from monitor.issue_tracker_online_cells import encode_tool_cells
+        planner, decoder, binding, token = self.native_inputs()
+        for sheet in ('ETH&IB Switch', 'ETH Cabling', 'IB Cabling'):
+            row = switch_row('NV40017') if sheet == 'ETH&IB Switch' else cabling_row('NV40017')
+            key = ('switch', 'switch-1', 'down', 'fabric') if sheet == 'ETH&IB Switch' else (
+                'eth_cabling' if sheet == 'ETH Cabling' else 'ib_cabling', 'switch-1', 'swp1', 'Link Down')
+            source = sheet_document(sheet, [{}, {}, {}, {}, row])
+            exact = exact_row_document(sheet, row)
+            discovery_plan = planner.prepare_activity_sheet_read(binding, token, sheet=sheet)
+            row_plan = planner.prepare_sheets_read(binding, token, mode='row_rectangle', sheet=sheet, first_row=7)
+            raw_discovery, _ = self.native_read(self.module.NativeActivitySheetReadUnit(binding, token, sheet=sheet), source)
+            raw_row, _ = self.native_read(self.module.NativeSheetsReadUnit(binding, token, mode='row_rectangle', sheet=sheet, first_row=7), exact)
+            self.assertTrue(hasattr(decoder, 'observe_active_row'), 'native original-image active-row binding missing')
+            observed = decoder.observe_active_row(discovery_plan, raw_discovery, row_plan, raw_row, sheet_id=17, activity_key=key)
+            self.assertEqual((6, 'NV40017'), (observed.row_index, observed.nv_id))
+            original = {column: dict(value) for _index, column, value in observed.cells}
+            intended = {'L': 'new literal evidence'} if sheet == 'ETH&IB Switch' else {
+                'G': 'new literal evidence', 'M': 'actual-a', 'N': 'actual-port', 'S': 'actual-z', 'T': 'z-port'}
+            encoded = encode_tool_cells(observed.sheet_title, observed.sheet_id, 'update', intended,
+                row_index=observed.row_index, observed_values={column: original[column] for column in intended})
+            requests = json.loads(encoded.requests_json)
+            self.assertEqual([11] if sheet == 'ETH&IB Switch' else [6, 12, 18],
+                [request['updateCells']['start']['columnIndex'] for request in requests])
+            for request in requests:
+                update = request['updateCells']
+                self.assertEqual({'sheetId': 17, 'rowIndex': 6, 'columnIndex': update['start']['columnIndex']}, update['start'])
+                self.assertEqual('userEnteredValue', update['fields'])
+                for value in update['rows'][0]['values']: self.assertEqual({'stringValue'}, set(value['userEnteredValue']))
+            # Encoder creates bytes only; the original ID and every source image remain unchanged.
+            self.assertEqual({'stringValue': 'NV40017'}, original['A'])
+            self.assertEqual(exact_row_document(sheet, row), exact)
 
     def test_real_native_one_get_planner_decoder_and_classifier_preserve_closed_id_and_active_key(self):
         from test_cases.test_req7_sdk_authentication import load as load_auth

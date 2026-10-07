@@ -927,6 +927,20 @@ COMPLETE、APPLIED、新鲜准入或 UNKNOWN 清除。未安装；真机卡 NOT 
 完整读的最大值和原始 ID 集合，但本读取器没有分配或持久预留。真实 TLS 全键读 → 精确行矩形 → 字面 L-only
 encoder 验证既有线上 ID 不重写；仍不是新鲜准入、CAS、模板权威或发送许可。
 
+`observe_active_row` 从完整容量活动键发现派生唯一活动行，再对精确行矩形逐项
+复核全部发现列，包括原始 ID、Status、描述和 Cabling 对侧；位移、Closed、重复键、
+部分发现或任一原始 typed 值漂移拒绝，不回退另找行。保留完整 A:U／A:AC 单行
+typed 原像，不能把公式、数字、布尔或操作员字段强制转换为业务字面值。
+`freeze_observed_receipted_source_updates` 将真实 C5 来源、原始 admitted C6 receipt、
+全部业务发现／精确行以及完整 History 原像串联；全部活动更新的坐标和 tool-cell
+before-image 直接派生，combined preread 摘要绑定原始读路径与原始响应摘要。
+调用方不得覆盖 placements、业务文字或 preread；原像组批前后漂移、History 容量
+不足或目标不符 HOLD。三个 family 的真实 producer／资格／工作簿提交／receipt／
+行复核／literal encoder／批次 workflow 不创建 remote journal 或发送。
+这是未安装的全活动更新编译路径，不是插入／空闲 Switch 行或 Cabling 尾预留、
+durable 业务原像 journal、nonce／模板权威、新鲜准入、固定 launcher、COMPLETE，
+也不代表 REQ7 整体完成；真机卡保持 NOT RUN。
+
 `test_cases.test_req7_nv_reservation` 将两张 Cabling 固定完整容量读取、原始 enrollment、
 实际 spreadsheet owner 和 C17 共享分配器串联，Closed／无关行 ID 参与最高值，
 下一 ID 严格高于两表；没有种子、跨表重复或编号耗尽时拒绝且不创建图像。
