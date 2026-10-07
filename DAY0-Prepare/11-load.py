@@ -5974,21 +5974,48 @@ def _atomic_restore_setup_manifest(
 ) -> None:
     if require_authority is not None:
         require_authority()
+    parent_identity = _setup_switch_link_parent_identity(MANIFEST)
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=f".{MANIFEST.name}.rollback.", dir=MANIFEST.parent,
     )
     temporary = Path(temporary_name)
+    held_descriptor = -1
+    staged_identity = None
+    fields = ("st_dev", "st_ino", "st_mode", "st_nlink", "st_size",
+              "st_mtime_ns", "st_ctime_ns")
+
+    def require_owned_stage() -> None:
+        try:
+            named, held = temporary.lstat(), os.fstat(held_descriptor)
+            if (staged_identity is None
+                    or parent_identity != _setup_switch_link_parent_identity(MANIFEST)
+                    or any(getattr(staged_identity, field) != getattr(named, field)
+                           or getattr(staged_identity, field) != getattr(held, field)
+                           for field in fields)
+                    or _read_rollback_regular(temporary) != (state.manifest, state.manifest_mode)):
+                raise LoadError("staged manifest identity or bytes changed")
+            after = temporary.lstat()
+            if any(getattr(staged_identity, field) != getattr(after, field) for field in fields):
+                raise LoadError("staged manifest changed while checking")
+        except (OSError, ValueError, RuntimeError) as exc:
+            raise LoadError(f"setup manifest stage is not the held candidate; HOLD: {exc}") from exc
+
     try:
         with os.fdopen(descriptor, "wb") as stream:
+            held_descriptor = os.dup(stream.fileno())
             stream.write(state.manifest)
             # Persist the final P mode on the same held inode as its bytes.
             # chmod after fsync leaves recovery metadata outside the durable
             # file boundary even if the manifest name's parent is synced.
             os.fchmod(stream.fileno(), state.manifest_mode)
             stream.flush()
+            # Capture before fsync: a hook/interruption there must not license
+            # adoption of a same-name inode or same-inode changed payload.
+            staged_identity = os.fstat(held_descriptor)
             os.fsync(stream.fileno())
         if require_authority is not None:
             require_authority()
+        require_owned_stage()
         os.replace(temporary, MANIFEST)
         parent_descriptor = os.open(MANIFEST.parent, os.O_RDONLY)
         try:
@@ -5996,8 +6023,19 @@ def _atomic_restore_setup_manifest(
         finally:
             os.close(parent_descriptor)
     finally:
-        if os.path.exists(temporary):
-            temporary.unlink()
+        try:
+            if os.path.lexists(temporary):
+                try:
+                    require_owned_stage()
+                except LoadError:
+                    # An unknown stage is incident evidence, not ours to
+                    # delete merely because its name has our prefix.
+                    pass
+                else:
+                    temporary.unlink()
+        finally:
+            if held_descriptor >= 0:
+                os.close(held_descriptor)
 
 
 def restore_active_setup_state(

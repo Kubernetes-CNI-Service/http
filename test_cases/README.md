@@ -192,6 +192,13 @@ SETUP 登记新链接、实体 latest 或 infra/logs 写集时，也必须在替
 P manifest/链接及实体目录；候选临时 WAL 只清理自己的名字。该守卫不是原子
 compare-and-replace，仍要求排他锁及其它写者静默，不提供新写集、恢复或激活授权。
 
+P manifest 恢复与 WAL 内 Q manifest 发布的暂存文件也必须持有原 FD，在最终 mode/字节
+flush 后、fsync 前冻结身份，并在 replace 前复核暂存名称、持有 inode、父目录及独立预期
+字节。同步边界的换 inode或同 inode改写须 HOLD，不能将外来暂存发布到 manifest；失败
+清理只删除仍能证明自有的暂存，未知/未完成身份的对象保留为事件证据。direct 与真实
+LOAD→SETUP workflow 覆盖这两类注入，既有同步失败与正常冷恢复仍须执行。这不是非合作
+写者免疫或完整 R22 验收；现场前提、未闭项及正式诊断闸门继续适用。
+
 Q 已有的 ETH/NVOS `latest` 软链接须在首次共享写入前单独记录原始链接文字、
 旧/新真实完成目录和父目录身份，不混入 P manifest，也不当作原本缺席的 Q-only 名称。
 SETUP 通过 Q 的物理父目录写入，稳定共享入口仍保留原有相对链接合同；替换后同步父目录。

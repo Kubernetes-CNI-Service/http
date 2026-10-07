@@ -2896,6 +2896,48 @@ class ReleaseTransactionTests(unittest.TestCase):
         self.assertEqual(state.manifest, manifest.read_bytes())
         self.assertEqual(0o640, stat.S_IMODE(manifest.stat().st_mode))
 
+    def test_setup_manifest_restore_rejects_foreign_staged_inode_or_bytes(self):
+        for kind in ("inode", "bytes"):
+            with self.subTest(kind=kind):
+                manifest = self.ztp / ".setup_manifest"
+                manifest.write_bytes(b"independent mixed Q manifest\n")
+                target_before = (manifest.lstat().st_ino, manifest.read_bytes())
+                retained = self.ztp / "held-original-manifest-stage"
+                state = SimpleNamespace(manifest=b"independent frozen P manifest\n", manifest_mode=0o640)
+                sync = os.fsync
+                injected = []
+
+                def foreign_stage(fd):
+                    result = sync(fd)
+                    info = os.fstat(fd)
+                    stages = list(manifest.parent.glob(f".{manifest.name}.rollback.*"))
+                    for path in stages:
+                        if path.lstat().st_ino == info.st_ino and not injected:
+                            if kind == "inode":
+                                path.rename(retained)
+                            path.write_bytes(b"independent foreign staged bytes\n")
+                            path.chmod(0o640)
+                            injected.append((path, path.lstat().st_ino))
+                    return result
+
+                caught = None
+                with mock.patch.object(LOAD, "MANIFEST", manifest), \
+                        mock.patch.object(os, "fsync", side_effect=foreign_stage):
+                    try:
+                        LOAD._atomic_restore_setup_manifest(state)
+                    except LOAD.LoadError as exc:
+                        caught = exc
+                self.assertEqual(1, len(injected), "owned staged manifest was not reached")
+                self.assertIsInstance(caught, LOAD.LoadError, "foreign staging must HOLD before replace")
+                self.assertEqual(target_before, (manifest.lstat().st_ino, manifest.read_bytes()))
+                path, owner = injected[0]
+                self.assertEqual(owner, path.lstat().st_ino, "cleanup removed a foreign stage")
+                self.assertEqual(b"independent foreign staged bytes\n", path.read_bytes())
+                if kind == "inode":
+                    self.assertEqual(state.manifest, retained.read_bytes())
+                    retained.unlink()
+                path.unlink()  # Only this test's independently identified injected object.
+
     def test_setup_manifest_file_sync_failure_preserves_q_before_replace(self) -> None:
         manifest = self.ztp / ".setup_manifest"
         evidence = b"Q manifest remains on sync failure\n"

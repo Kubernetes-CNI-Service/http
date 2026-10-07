@@ -3676,6 +3676,68 @@ os.fsync = drift_manifest_publication
                     self.assertFalse(list(manifest.parent.glob(f".{manifest.name}.rollback.*")))
                     self.assertFalse((root / "service-started").exists())
 
+    def test_real_setup_q_manifest_publication_preserves_foreign_staged_owner(self):
+        for kind in ("inode", "bytes"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory(prefix="r22-manifest-stage-owner-") as name:
+                fixture = self._private_setup_switch_fixture(Path(name))
+                root, _p, _q, common, _p_only, _q_only, manifest, before, hook, _barrier, _home = fixture
+                for relative in (
+                    "tools/lldp-analyze-tool/99-output-p2p",
+                    "tools/lldp-analyze-tool/99-output-monitor",
+                    "tools/ibdiagnet-analyze-tool/99-output-p2p",
+                ):
+                    leaf = root / relative
+                    if leaf.is_dir() and not leaf.is_symlink():
+                        shutil.rmtree(leaf)
+                hook_file = hook / "sitecustomize.py"
+                hook_file.write_text(hook_file.read_text() + f'''
+import json, stat
+root, kind = Path({str(root)!r}), {kind!r}
+manifest = root / 'ztp/.setup_manifest'
+observed = root / 'manifest-stage-owner-evidence.json'
+original_sync = os.fsync
+def change_stage_owner(fd):
+    result = original_sync(fd)
+    info = os.fstat(fd)
+    if stat.S_ISREG(info.st_mode) and not observed.exists():
+        for path in manifest.parent.glob('.' + manifest.name + '.rollback.*'):
+            if path.lstat().st_ino != info.st_ino:
+                continue
+            journal = root / 'ztp/.setup-switch-journal.json'
+            common = root / 'ztp/config/cumulus/template/01-global.yaml'
+            evidence = {{'manifest_ino': manifest.lstat().st_ino,
+                        'common_ino': common.lstat().st_ino, 'common': os.readlink(common),
+                        'wal': journal.read_text(), 'stage': str(path)}}
+            if kind == 'inode':
+                path.rename(root / 'held-original-manifest-stage')
+            path.write_bytes(b'independent foreign Q manifest stage\\n')
+            path.chmod(0o644)
+            evidence['stage_ino'] = path.lstat().st_ino
+            observed.write_text(json.dumps(evidence))
+            break
+    return result
+os.fsync = change_stage_owner
+''', encoding="utf-8")
+                result = self._run_private_load_setup_switch(
+                    fixture, prepare_journal=False, auto_prepare_journal=True,
+                    kill_after_replace=root / "never-replaced",
+                )
+                observed = root / "manifest-stage-owner-evidence.json"
+                self.assertTrue(observed.is_file(), result.stdout + result.stderr)
+                evidence = json.loads(observed.read_text())
+                self.assertEqual((evidence["manifest_ino"], before["manifest"]),
+                                 (manifest.lstat().st_ino, manifest.read_bytes()),
+                                 "real publisher replaced P using a foreign stage")
+                self.assertEqual(24, result.returncode, result.stdout + result.stderr)
+                self.assertEqual((evidence["common_ino"], evidence["common"]),
+                                 (common.lstat().st_ino, os.readlink(common)))
+                self.assertEqual(evidence["wal"], (root / "ztp/.setup-switch-journal.json").read_text())
+                stage = Path(evidence["stage"])
+                self.assertEqual(evidence["stage_ino"], stage.lstat().st_ino,
+                                 "HOLD cleanup deleted or consumed the foreign stage")
+                self.assertEqual(b"independent foreign Q manifest stage\n", stage.read_bytes())
+                self.assertFalse((root / "service-started").exists())
+
     def test_real_setup_q_manifest_commit_cold_recovers_p_and_original_logs(self):
         """Q manifest publication and successful SETUP must retain P recovery bytes."""
         for death_at_manifest in (True, False):
