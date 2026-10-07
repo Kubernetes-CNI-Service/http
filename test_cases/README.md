@@ -514,6 +514,9 @@ A runtime 及四个 DHCP 文件。逐次写前再核总 authority；原文件 mo
 外层校验和正确但嵌套分组字段缺失/类型错误也须写前 HOLD；不能漏出原始 KeyError
 而逃出显式 CLI 的拒绝边界。direct 与真实写后 SIGKILL→新 CLI 的缺字段反例先失败
 再补异常归一，原 P/部分 B、WAL 和事务不变，仍无服务动作。
+分组恢复本身也覆盖首 DHCP 文件 A replace 后、父目录 sync 前失败/强杀：保留已合法
+恢复的 P/A runtime 与首个 A 文件、其余 B 和全部证据，下一进程补齐恢复及同步后才成功；
+两次新 CLI 重入保持停止，不把进程死亡当作断电证明。
 这仍不是 Q 已提交后的 B 收口、完整共享写集、旧 A 显式健康激活、root/Linux/断电见证；
 原故障诊断闸门及正式 related/full/check 仍单独验收，不以局部 PASS 代替。
 

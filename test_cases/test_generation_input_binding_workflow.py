@@ -4776,12 +4776,16 @@ finally:
     def test_real_setup_then_dhcp_writer_death_cli_holds_malformed_group_binding(self):
         self._real_dhcp_writer_death_group_recovery(cli=True, fault="malformed-binding")
 
+    def test_real_setup_dhcp_restore_death_before_directory_sync_cold_reenters(self):
+        self._real_dhcp_writer_death_group_recovery(cli=True, recovery_death=True)
+
     def test_real_setup_then_dhcp_writer_death_group_recovery_holds_foreign_evidence(self):
         for fault in ("receipt-owner", "second-transaction", "restore-stage", "parent-b-visible"):
             with self.subTest(fault=fault):
                 self._real_dhcp_writer_death_group_recovery(fault=fault)
 
-    def _real_dhcp_writer_death_group_recovery(self, *, fault=None, cli=False, shapes=False):
+    def _real_dhcp_writer_death_group_recovery(self, *, fault=None, cli=False, shapes=False,
+                                            recovery_death=False):
         fixture = RELEASE_FIXTURE.ReleaseTransactionTests()
         fixture.setUp()
         try:
@@ -4819,11 +4823,22 @@ try:
         (root / 'ztp/ztp-bootstrap_oob.sh').write_bytes(b'independent partial B runtime\n')
         shapes = sys.argv[6] == 'shapes'
         assert_private_dhcp_transaction_retention(load, root, q,
-            'bound-setup-kill-last' if shapes else 'bound-setup-kill-first', setup_guard=guard, a_shapes=shapes)
+            'bound-setup-kill-last' if shapes or sys.argv[7] == 'recovery-death' else 'bound-setup-kill-first',
+            setup_guard=guard, a_shapes=shapes)
         raise AssertionError('writer did not die at real first B install')
     names = ('dhcpd.conf', 'dhcpd_eth.hosts', 'dhcpd_ib.hosts', 'dhcpd_nvl.hosts')
     runtime = root / 'private-etc-dhcp'
     load.dhcp_file_mappings = lambda *a: {q / 'independent-dhcp-B' / n: runtime / n for n in names}
+    if sys.argv[5] == 'kill-recovery':
+        original_sync = load._fsync_parent_directory
+        def kill_after_a_replace_before_sync(path):
+            if Path(path) == runtime:
+                assert (runtime / 'dhcpd.conf').read_bytes() == b'independent-A:dhcpd.conf\n'
+                for name in names[1:]:
+                    assert (runtime / name).read_bytes() == (q / 'independent-dhcp-B' / name).read_bytes()
+                os.kill(os.getpid(), 9)
+            return original_sync(path)
+        load._fsync_parent_directory = kill_after_a_replace_before_sync
     if sys.argv[5] == 'cli':
         load.release_deployment_lock(fd)
         fd = None
@@ -4855,7 +4870,8 @@ finally:
 '''
             command = [sys.executable, "-B", "-c", operation, str(root), str(q), str(common), str(ROOT)]
             shape_arg = "shapes" if shapes else "files"
-            writer = subprocess.run(command + ["writer", shape_arg], capture_output=True, text=True, timeout=30)
+            death_arg = "recovery-death" if recovery_death else "normal"
+            writer = subprocess.run(command + ["writer", shape_arg, death_arg], capture_output=True, text=True, timeout=30)
             self.assertEqual(-9, writer.returncode, writer.stdout + writer.stderr)
             before = journal.read_bytes()
             self.assertNotEqual(state[9][common], os.readlink(common))
@@ -4888,7 +4904,7 @@ finally:
                 p_before = {path: os.readlink(path) for path in state[9]}
                 runtime_before = {path: path.read_bytes() for path in runtime.iterdir() if path.is_file()}
                 bootstrap_before = (root / "ztp/ztp-bootstrap_oob.sh").read_bytes()
-                recovery = subprocess.run(command + ["cli" if cli else "recover", shape_arg], capture_output=True, text=True, timeout=30)
+                recovery = subprocess.run(command + ["cli" if cli else "recover", shape_arg, death_arg], capture_output=True, text=True, timeout=30)
                 self.assertNotEqual(0, recovery.returncode, recovery.stdout + recovery.stderr)
                 self.assertIn("HOLD", recovery.stderr)
                 self.assertEqual(p_before, {path: os.readlink(path) for path in state[9]})
@@ -4898,8 +4914,18 @@ finally:
                 self.assertTrue((transaction / "a-preimage.json").is_file())
                 self.assertFalse((root / "service-started").exists())
                 return
+            if recovery_death:
+                killed = subprocess.run(command + ["kill-recovery", shape_arg, death_arg],
+                                        capture_output=True, text=True, timeout=30)
+                self.assertEqual(-9, killed.returncode, killed.stdout + killed.stderr)
+                self.assertEqual(state[9], {path: os.readlink(path) for path in state[9]})
+                self.assertEqual(before, journal.read_bytes())
+                self.assertEqual(b"independent-A:dhcpd.conf\n", (runtime / "dhcpd.conf").read_bytes())
+                for name in ("dhcpd_eth.hosts", "dhcpd_ib.hosts", "dhcpd_nvl.hosts"):
+                    self.assertEqual((q / "independent-dhcp-B" / name).read_bytes(), (runtime / name).read_bytes())
+                self.assertFalse((root / "service-started").exists())
             for _ in range(2):
-                recovery = subprocess.run(command + ["cli" if cli else "recover", shape_arg], capture_output=True, text=True, timeout=30)
+                recovery = subprocess.run(command + ["cli" if cli else "recover", shape_arg, death_arg], capture_output=True, text=True, timeout=30)
                 self.assertEqual(0, recovery.returncode, recovery.stdout + recovery.stderr)
                 self.assertIn("R22_BOUND_DHCP_GROUP_RESTORED_STOPPED_A", recovery.stdout)
                 self.assertEqual(state[9], {path: os.readlink(path) for path in state[9]})

@@ -3972,6 +3972,9 @@ class ReleaseTransactionTests(unittest.TestCase):
     def test_setup_dhcp_group_recovery_restores_original_link_and_missing_leaf(self):
         self._setup_dhcp_group_restore_partial_b(shapes=True)
 
+    def test_setup_dhcp_group_recovery_failed_directory_sync_reenters_partial_a(self):
+        self._setup_dhcp_group_restore_partial_b(restore_sync_fault=True)
+
     def test_setup_dhcp_group_recovery_rejects_foreign_evidence_before_p_write(self):
         for fault in ("receipt-owner", "second-transaction", "restore-stage", "parent-b-visible"):
             with self.subTest(fault=fault):
@@ -3986,7 +3989,8 @@ class ReleaseTransactionTests(unittest.TestCase):
     def test_setup_dhcp_group_recovery_malformed_binding_is_hold_not_raw_error(self):
         self._setup_dhcp_group_restore_partial_b(fault="malformed-binding")
 
-    def _setup_dhcp_group_restore_partial_b(self, *, cli=False, fault=None, shapes=False):
+    def _setup_dhcp_group_restore_partial_b(self, *, cli=False, fault=None, shapes=False,
+                                          restore_sync_fault=False):
         state, _context = self._prepare_persisted_a_runtime_switch()
         journal, descriptor, backend = state[-3:]
         guard = dict(deployment_lock_descriptor=descriptor, services_quiesced=True,
@@ -3998,7 +4002,7 @@ class ReleaseTransactionTests(unittest.TestCase):
             runtime = self.root.resolve() / "private-etc-dhcp"
             names = ("dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts", "dhcpd_nvl.hosts")
             (runtime / "dhcpd.conf").write_bytes((state[1] / "independent-dhcp-B/dhcpd.conf").read_bytes())
-            if shapes:
+            if shapes or restore_sync_fault:
                 for name in names[1:]:
                     if os.path.lexists(runtime / name):
                         (runtime / name).unlink()
@@ -4063,6 +4067,30 @@ class ReleaseTransactionTests(unittest.TestCase):
                         for writer in forbidden:
                             writer.assert_not_called()
                 else:
+                    if restore_sync_fault:
+                        injected = []
+                        original_sync = LOAD._fsync_parent_directory
+
+                        def fail_first_dhcp_directory_sync(path):
+                            if Path(path) == runtime and not injected:
+                                injected.append(path)
+                                raise OSError("independent restored DHCP namespace sync failure")
+                            return original_sync(path)
+
+                        with mock.patch.object(LOAD, "_fsync_parent_directory",
+                                               side_effect=fail_first_dhcp_directory_sync):
+                            with self.assertRaisesRegex(OSError, "independent restored DHCP namespace sync failure"):
+                                LOAD.recover_setup_switch_journal(
+                                    journal, restore_runtime_from_wal=True, recover_dhcp_group=True,
+                                    requested_new_project=state[1], **guard,
+                                )
+                        self.assertEqual(1, len(injected))
+                        self.assertEqual(before, journal.read_bytes())
+                        self.assertEqual(b"independent-A:dhcpd.conf\n", (runtime / "dhcpd.conf").read_bytes())
+                        for name in names[1:]:
+                            self.assertEqual((state[1] / "independent-dhcp-B" / name).read_bytes(),
+                                             (runtime / name).read_bytes())
+                        backend.start.assert_not_called()
                     result = LOAD.recover_setup_switch_journal(
                         journal, restore_runtime_from_wal=True, recover_dhcp_group=True,
                         requested_new_project=state[1], **guard,
