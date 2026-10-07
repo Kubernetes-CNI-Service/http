@@ -1,5 +1,75 @@
 # 脚本变更影响测试
 
+## 2026-10-08 原 A owner、显式 monitor 围栏与完整失败诊断候选
+
+基于 `bb391ee50f511451acbb4c4332b80352e16999fb`。此前正式 related argv
+执行 canonical full-suite discovery，**不是显式 `--all` proof**：5122 tests，
+3 FAIL/2 ERROR/5 SKIP，4291.847s，实际 exit1、冻结一致、自动 ledger 未变。
+原日志 `outputs/test-diagnostics/r22-bb391ee-related.log`，inode159437998，
+size880352，SHA256 `99c289678b474eb3ec48a8733750888010310aaed4806136537f9ea487f47467`。
+全部原断言/失败保留：Apache 字面调用检查未识别 guarded 调用；两个 monitor
+检查暴露显式 native 入口缺停止门禁及扁平 main 检查未区分独立终止入口；K
+子进程 ready 超过原 5s，Stage-L 的真实 sysctl boot 查询超过原 2s。
+后二者原始 OS/调度原因**待核**，不能从后来 PASS 推断已解决。
+
+新 A WAL 冻结 sealed generation/输入 owner 的 5 个独立 RED 失败后，6 direct
+与 2 真实 LOAD/SETUP workflow GREEN，日志 `r22-original-a-generation-owner-green.log`，
+8 OK/5.591s，inode160620737/size130608，SHA256
+`70938ff044f7d629d57467e75920ebd453c061ac8e019548f9cdb810066a137b`。
+legacy 仅保留停服磁盘恢复，不授予新 A 激活资格。显式四种 native 入口停止
+失败测试先 RED，加入停止门禁及独立终止分支/native 后端条件 oracle；漏停、
+错误条件、吞异常返回成功的反向变异仍被拒绝。Apache 改为独立行为顺序及
+auth 拒绝合同，不依赖具体包装写法。19 OK/48.744s，
+`r22-explicit-native-monitor-stop-scoped-green.log`，inode160666976/size132143，
+SHA256 `9f649432c6d92aee3ac466b15c69c43bbb724078edb0342e342b1eb045610b56`。
+
+原样 K/Stage-L 模块组仅是有界前序模块诊断，32 OK/489.292s，
+`full-failure-k-stage-l-original-prefix-diagnostic.log`，inode160669339/size132697，
+SHA256 `a7cd9678385d649c75afd3f608f837ddaff838f54fbefbf0c855cba8ac46ed04`；
+它不等于完整 full 的全部前序条件，更不关闭原时限失败。追加独立负例确认 K
+ready 失败未回收自有子进程、worker boot 查询超时越过本地 HOLD：3 tests
+1 FAIL/1 ERROR，`full-failure-clock-k-cleanup-contract-red.log`，inode160678502/size130480，
+SHA256 `f9d4bd2de66638697a0b62207db1fcfde8638a96ef13d6289e8ee91b1db4bd7e`。
+修复后35 OK/1.515s，`full-failure-clock-k-cleanup-contract-green.log`，
+inode160679091/size132516，SHA256
+`062045cf294bed210136ba7e3852f7fd52dad24bb50b77f3456ce5fb9b910fdb`。
+K 保留原 5s/10s 与双独立进程只一提交的全部断言；只观察/回收自己创建的 Popen。
+Stage-L 保留真实原命令与 2s，workflow 将 getter 放回真实 worker 调用内并在
+清理前取证；时钟异常只能在 C6 前 HOLD，正常真实 receipt 断言仍执行。
+这些日志完整 END/退出及前后 stat 已核，均不是正式 related/full/check。
+扩大整模块回归已完成：A/输入/发布/report/monitor/Apache/文档 848 tests OK，
+1039.640s；`r22-a-generation-native-full-module-regression.log`，
+inode160685499/size390046，SHA256
+`70d88fd80eead4212ff1116ac01fea102b308c374d9fc9de188e8e00485c53fc`。
+K/store/worker/真实 Stage-L/超时取证六模块 59 tests OK，546.865s；
+`full-failure-clock-k-real-workflow-regression.log`，inode160876632/size137436，
+SHA256 `5d94187a07677a8a50eed35d2326e5ccc1f38a0a3d8ad21aaf0e76e9527e5c35`。
+两者实际 exit0、冻结一致、完整物理 END，前后 stat/原已读前缀一致。
+它们是隔离夹具的有界诊断，并非正式 runner 并行性能优化或 full proof。
+
+随后补充 K ready 失败时已经退出的子进程 stderr 证据：独立负例 1 FAIL/exit1，
+`full-failure-k-reaped-stderr-red.log`，inode161183072/size128422，SHA256
+`b57a315212262fdba89fea0b5f37f96bcfabc4ed868d228a5d16988ccc33f8a9`。
+回收后仅输出各自子进程的 4096-byte stdout/stderr、截断标记和退出码，明确
+`capture_phase=after_cleanup`，不伪装为清理前现场、不替换原失败；正常成功不输出。
+四模块 37 OK/1.551s，`full-failure-k-reaped-stderr-green.log`，
+inode161183089/size133407，SHA256
+`ff5444b681c925a25186d61b0b40e8bfeef777b123a6031219c8fa99616f11dd`，
+实际 exit0、冻结一致、完整 END/stat 已核。正式批准、完整旧 A 激活仍待完成；
+原 OS/调度时限原因仍待核，不得据局部 PASS 盲目重跑 full 或套旧证明。
+
+提交前独立运行文档 catalog 暴露测试导入顺序依赖：旧 `load_script` 未加脚本
+兄弟模块路径，单独运行 `ModuleNotFoundError: project_contract`，0 tests/1 ERROR，
+实际 exit1；原日志 `documentation-catalog-independent-loader-red.log`，
+inode161191393/size128496，SHA256
+`d7cff06fd663eff3bd8417185a734dfbae15260c3d973425f06c6864f8c51d9a`。
+测试加载改用既有 `load_path` 的有限兄弟路径作用域；新增全新 Python 进程证明
+不借用此前 tools 路径、结束不泄漏路径。生产导入代码及原文档断言未改。
+24 tests OK/8.185s，`documentation-catalog-independent-loader-green.log`，
+inode161191409/size130943，SHA256
+`3074a10fffdb636663740d49a03c46768d4c63e375c05c0aae8fb0dde8455c1d`，
+实际 exit0、冻结一致、完整 END/stat 已核；仍非正式 full/check。
+
 ## 2026-10-08 R22 普通 LOAD 原 B 最终门禁接入候选
 
 基于 `6f5b16e44ff499d11ad05e145756e6c2e79578f2`，普通 LOAD 已持原

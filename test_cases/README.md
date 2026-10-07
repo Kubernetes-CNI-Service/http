@@ -549,6 +549,14 @@ A receipt 加载与恢复 API，真实 LOAD→SETUP 强杀→新 LOAD workflow �
 期间注入 ABA，要求首个恢复写入前拒绝并保留 WAL/混合盘面。该校验仅覆盖读取窗口，
 不承诺任意非合作同 UID 写者免疫，也不代替完整旧 A 显式安全激活或 REAL_ENV 验收。
 
+R22 新 WAL 还在首个 Q 共享写前冻结原 A 的不可变 generation、父目录及输入/制品
+inode、mode/uid/gid/mtime/ctime 和 SHA；同字节新输入 inode 或克隆 generation 必须 HOLD，
+不借原 receipt 内容一致接受新 owner。legacy WAL 仅保留既有停服磁盘恢复能力，
+不补造显式 A 激活资格。显式恢复、B 续发布/激活/退休入口即使 Apache/DHCP 已停止，
+仍须先停 native monitor 写者；失败不得进入 WAL 写入。direct 和真实 LOAD/SETUP
+强杀/冷恢复测试与 native 入口反向变异检查独立表达这些合同。此处不证明旧 A
+显式激活、已提交 B 的完整 A 恢复或 Linux/断电/DEV ACK；正式 full/check 仍待完成。
+
 同一模块还覆盖端到端 deployment scope：默认 `all` 同时生成 Production/AIR；`prod` 只发布
 Production Cumulus/IB/NVL；`air` 只发布 AIR DHCP/YAML/release，并只临时渲染 AIR full profile
 实际引用的 Production 来源；单独指定 `mini` 会自动选择 AIR scope 和 `eth`，显式 `prod+mini`

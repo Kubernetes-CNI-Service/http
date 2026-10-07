@@ -1425,11 +1425,85 @@ def structural_calls(
 def assert_quiesce_structurally_precedes_reachable_sink(
     testcase: unittest.TestCase, tree: ast.AST, entry_name: str,
     known_sinks: set[str], stop_names: set[str] | None = None,
+    *, terminal_dispatch_entry: bool = False,
 ) -> None:
     functions = production_functions(tree)
     reachable = transitive_sink_callers(tree, known_sinks)
     function = functions[entry_name]
     accepted_stops = stop_names or {"stop_native_ztp_monitors"}
+    if entry_name == "main":
+        # Terminal explicit-operation branches are independent native entries,
+        # not an excuse to borrow the ordinary LOAD's later stop. Prove each
+        # actual callee first, then analyze the ordinary path separately.
+        explicit_entries = (
+            ("_activate_setup_switch_entrypoint", "activate_setup_publication", "resume_setup_retirement"),
+            ("_recover_setup_switch_entrypoint", "recover_setup_switch", "resume_setup_publication"),
+        )
+        ordinary = copy.deepcopy(function)
+        for callee, first_flag, second_flag in explicit_entries:
+            if callee not in functions:
+                continue
+            expected_guard = ast.parse(
+                f"getattr(args, {first_flag!r}, False) or getattr(args, {second_flag!r}, False)",
+                mode="eval",
+            ).body
+            branches = [statement for statement in ordinary.body
+                        if isinstance(statement, ast.If)
+                        and any(isinstance(call, ast.Call) and called_name(call) == callee
+                                for call in _walk_local_scope(statement))]
+            testcase.assertEqual(1, len(branches), "explicit native dispatcher must be unique")
+            branch = branches[0]
+            testcase.assertEqual(ast.dump(expected_guard, include_attributes=False),
+                                 ast.dump(branch.test, include_attributes=False))
+            testcase.assertEqual([], branch.orelse)
+            testcase.assertEqual(1, len(branch.body))
+            terminal = branch.body[0]
+            testcase.assertIsInstance(terminal, ast.Return)
+            testcase.assertIsInstance(terminal.value, ast.Call)
+            testcase.assertEqual(callee, called_name(terminal.value))
+            testcase.assertEqual([], terminal.value.keywords)
+            testcase.assertEqual(["Name(id='args', ctx=Load())"],
+                                 [ast.dump(arg, include_attributes=False) for arg in terminal.value.args])
+            assert_quiesce_structurally_precedes_reachable_sink(
+                testcase, tree, callee, known_sinks, stop_names=accepted_stops,
+                terminal_dispatch_entry=True)
+            ordinary.body.remove(branch)
+        function = ordinary
+    if terminal_dispatch_entry:
+        # Only the literal `return helper(args)` above proves that a helper's
+        # failed return cannot fall through into an ordinary LOAD mutation.
+        # Generic handlers that return remain untrusted by the original oracle.
+        function = copy.deepcopy(function)
+        blocks = [statement for statement in function.body if isinstance(statement, ast.Try)]
+        testcase.assertEqual(1, len(blocks))
+        block = blocks[0]
+        testcase.assertIs(block, function.body[-1])
+        testcase.assertTrue(block.handlers)
+        for handler in block.handlers:
+            terminal = handler.body[-1]
+            testcase.assertIsInstance(terminal, ast.Return)
+            testcase.assertIsInstance(terminal.value, ast.Constant)
+            testcase.assertEqual(1, terminal.value.value)
+            testcase.assertFalse(any(isinstance(call, ast.Call) and called_name(call) in reachable
+                for statement in handler.body for call in _walk_local_scope(statement)),
+                "failed explicit operation must not write in its handler")
+            handler.body[-1] = ast.Raise(exc=None, cause=None)
+        testcase.assertFalse(any(isinstance(call, ast.Call) and called_name(call) in reachable
+            for statement in block.finalbody for call in _walk_local_scope(statement)),
+            "failed explicit operation must not write in final cleanup")
+        native_stops = [statement for statement in block.body if isinstance(statement, ast.If)
+            and any(isinstance(call, ast.Call) and called_name(call) in accepted_stops
+                    for call in _walk_local_scope(statement))]
+        testcase.assertEqual(1, len(native_stops))
+        native_guard = native_stops[0]
+        testcase.assertEqual(ast.dump(ast.parse("backend.name == 'systemd'", mode="eval").body,
+                                     include_attributes=False),
+                             ast.dump(native_guard.test, include_attributes=False))
+        testcase.assertEqual([], native_guard.orelse)
+        testcase.assertEqual(1, len(native_guard.body))
+        testcase.assertEqual("stop_native_ztp_monitors(HTTP_ROOT)",
+                             ast.unparse(native_guard.body[0]))
+        native_guard.test = ast.Constant(value=True)
     try_types = (ast.Try,) + tuple(
         node_type for node_type in (getattr(ast, "TryStar", None),)
         if node_type is not None
@@ -2256,6 +2330,7 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
             "DAY0-Prepare/02-unsetup.py": {"main"},
             "DAY0-Prepare/11-load.py": {
                 "main", "quiesce_services", "stop_other_ztp_monitors",
+                "_activate_setup_switch_entrypoint", "_recover_setup_switch_entrypoint",
             },
             "DAY0-Prepare/13-unload.py": {"stop_monitor"},
             "tools/deployment_prewrite_guard.py": {"quiesce_for_source_update"},
@@ -4019,6 +4094,31 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
             assert_quiesce_structurally_precedes_reachable_sink(
                 self, false_conjunct, "_main_locked", {"publish"},
             )
+
+    def test_explicit_load_dispatcher_oracle_rejects_stop_and_terminal_mutants(self) -> None:
+        original = ast.parse((ROOT / "DAY0-Prepare/11-load.py").read_text(encoding="utf-8"))
+        assert_quiesce_structurally_precedes_reachable_sink(
+            self, original, "main", {"commit_prepared_release"})
+        for name in ("_activate_setup_switch_entrypoint", "_recover_setup_switch_entrypoint"):
+            for fault in ("remove-stop", "false-native-guard", "successful-error-return"):
+                with self.subTest(entry=name, fault=fault):
+                    tree = copy.deepcopy(original)
+                    entry = production_functions(tree)[name]
+                    block = next(statement for statement in entry.body if isinstance(statement, ast.Try))
+                    if fault == "successful-error-return":
+                        block.handlers[0].body[-1].value = ast.Constant(value=0)
+                    else:
+                        guard = next(statement for statement in block.body
+                            if isinstance(statement, ast.If) and any(
+                                isinstance(call, ast.Call) and called_name(call) == "stop_native_ztp_monitors"
+                                for call in _walk_local_scope(statement)))
+                        if fault == "remove-stop":
+                            guard.body = [ast.Pass()]
+                        else:
+                            guard.test = ast.Constant(value=False)
+                    with self.assertRaises(AssertionError):
+                        assert_quiesce_structurally_precedes_reachable_sink(
+                            self, tree, "main", {"commit_prepared_release"})
 
     def test_sink_reverse_closure_is_quiesced_at_each_supported_native_entry(self) -> None:
         contracts = (

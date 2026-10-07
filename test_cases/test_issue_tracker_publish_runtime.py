@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import unittest
 from unittest import mock
 from types import SimpleNamespace
@@ -11,6 +12,41 @@ from test_cases.test_issue_tracker_switch_runtime import RuntimeWorkerFixture
 
 
 class StageLRuntimeDirectTests(RuntimeWorkerFixture, unittest.TestCase):
+    def test_os_boot_query_timeout_holds_before_c6_without_relabeling_completion(self):
+        from test_cases.test_collection_cycle_persistence import WORKER
+
+        source = {"state": "qualified", "completed_cycles": 2}
+        store = SimpleNamespace(scope="prod", project_identity=self.project)
+        clock_error = subprocess.TimeoutExpired(
+            ["/usr/sbin/sysctl", "-n", "kern.boottime"], 2)
+        with (mock.patch("monitor.issue_tracker_publish_runtime.local_publish_interval",
+                         return_value=(1, "a" * 64)),
+              mock.patch("monitor.issue_tracker_publish_runtime.inspect_stage_l",
+                         return_value=source),
+              mock.patch("monitor.issue_tracker_publish_runtime.commit_qualified_prod_local") as commit,
+              mock.patch.object(WORKER, "_current_boot_identity", side_effect=clock_error),
+              mock.patch.object(WORKER, "_write_status_file") as status):
+            self.assertIsNone(WORKER._publish_stage_l_local_after_completion(store))
+        commit.assert_not_called()
+        self.assertEqual("hold", status.call_args.args[2])
+        self.assertEqual("local_c6_admission_refused", status.call_args.kwargs["reason"])
+        self.assertEqual("disabled_no_send_authority", status.call_args.kwargs["online"])
+        self.assertEqual({"state": "qualified", "completed_cycles": 2}, source)
+        self.assertFalse((self.project / ".tracker/admissions").exists())
+
+    def test_boot_query_keeps_original_two_second_bound_and_same_exception(self):
+        from test_cases.test_collection_cycle_persistence import WORKER
+
+        clock_error = subprocess.TimeoutExpired(
+            ["/usr/sbin/sysctl", "-n", "kern.boottime"], 2)
+        with (mock.patch.object(WORKER.Path, "is_file", return_value=False),
+              mock.patch.object(WORKER.subprocess, "run", side_effect=clock_error) as query):
+            with self.assertRaises(subprocess.TimeoutExpired) as caught:
+                WORKER._current_boot_identity()
+        self.assertIs(clock_error, caught.exception)
+        query.assert_called_once_with(["/usr/sbin/sysctl", "-n", "kern.boottime"],
+                                     text=True, capture_output=True, timeout=2, check=False)
+
     def test_manual_entry_refuses_prior_auto_admission_before_qualification(self):
         from monitor.issue_tracker_publish_runtime import (
             StageLHold, commit_qualified_prod_local,

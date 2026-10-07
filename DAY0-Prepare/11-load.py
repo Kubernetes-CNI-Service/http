@@ -6557,8 +6557,38 @@ def _decode_setup_switch_journal(payload: bytes) -> dict[str, object]:
             raise ValueError("invalid DHCP transaction binding")
     if "a_runtime" in body:
         runtime = body["a_runtime"]
-        exact_fields(runtime, {"selector_target", "receipt_directory", "receipt_parent", "receipt_file",
-                               "yaml_link_parents"}, "A runtime")
+        runtime_fields = {"selector_target", "receipt_directory", "receipt_parent", "receipt_file",
+                          "yaml_link_parents"}
+        if isinstance(runtime, dict) and "generation" in runtime:
+            runtime_fields.add("generation")
+        exact_fields(runtime, runtime_fields, "A runtime")
+        if "generation" in runtime:
+            generation = runtime["generation"]
+            exact_fields(generation, {"path", "parent", "tree"}, "A generation")
+            exact_fields(generation["parent"], directory_fields, "A generation parent")
+            tree = generation["tree"]
+            if (not isinstance(generation["path"], str)
+                    or not Path(generation["path"]).is_absolute()
+                    or os.path.normpath(generation["path"]) != generation["path"]
+                    or not isinstance(tree, dict) or "" not in tree or len(tree) > 4096):
+                raise ValueError("invalid A generation owner inventory")
+            for relative, entry in tree.items():
+                if (not isinstance(relative, str) or relative and (
+                        os.path.isabs(relative) or os.path.normpath(relative) != relative
+                        or ".." in Path(relative).parts)):
+                    raise ValueError("invalid A generation tree name")
+                fields = {"kind", "dev", "ino", "mode", "uid", "gid"}
+                if isinstance(entry, dict) and entry.get("kind") == "file":
+                    fields |= {"size", "mtime_ns", "ctime_ns", "sha256"}
+                elif not isinstance(entry, dict) or entry.get("kind") != "directory":
+                    raise ValueError("unsupported A generation entry")
+                exact_fields(entry, fields, "A generation tree")
+                if (any(type(value) is not int or value < 0 for field, value in entry.items()
+                        if field not in {"kind", "sha256"})
+                        or entry["kind"] == "file" and (
+                            not isinstance(entry["sha256"], str)
+                            or re.fullmatch(r"[0-9a-f]{64}", entry["sha256"]) is None)):
+                    raise ValueError("invalid A generation file identity")
         parents = runtime["yaml_link_parents"]
         if (not isinstance(parents, dict) or set(parents) -
                 {"99-output-eth/latest", "99-output-ib_nvl/latest"}):
@@ -7505,7 +7535,36 @@ def _setup_switch_a_yaml_link_parents(project, receipt):
     return result
 
 
-def _setup_switch_runtime_authority(context, *, verify_active=False):
+def _setup_switch_a_generation_authority(context):
+    """Bind original immutable A files before Q's first shared write.
+
+    Matching content is not permission to adopt a replacement generation or
+    input inode. This stopped disk qualification alone never starts A.
+    """
+    project = context.project.resolve(strict=True)
+    if (not isinstance(context.selector_target, str)
+            or re.fullmatch(r"generations/[0-9a-f]{20}", context.selector_target) is None):
+        raise LoadError("A generation selector is invalid; HOLD")
+    generation = project / "99-output-ztp" / context.selector_target
+    if generation.resolve(strict=True) != generation:
+        raise LoadError("A generation path is not canonical; HOLD")
+    parent_owner = _setup_switch_link_parent_identity(generation)
+    dhcp = generation / "dhcp"
+    release_id, payloads = _pinned_generation_payloads(project,
+        generation / "current-release.json", dhcp if dhcp.is_dir() else None)
+    if context.selector_target != "generations/" + release_id:
+        raise LoadError("A generation selector differs; HOLD")
+    tree = _setup_switch_comparison_tree(generation)
+    files = {relative: row for relative, row in tree.items() if row["kind"] == "file"}
+    if (set(files) != set(payloads)
+            or any(files[name]["sha256"] != hashlib.sha256(payload).hexdigest()
+                   for name, payload in payloads.items())
+            or parent_owner != _setup_switch_link_parent_identity(generation)):
+        raise LoadError("A generation owner or pinned payload changed; HOLD")
+    return dict(path=str(generation), parent=parent_owner, tree=tree)
+
+
+def _setup_switch_runtime_authority(context, *, verify_active=False, include_generation=True):
     """Freeze the exact A receipt owner, never infer A from a newest directory."""
     try:
         project = context.project.resolve(strict=True)
@@ -7535,11 +7594,14 @@ def _setup_switch_runtime_authority(context, *, verify_active=False):
                 or parent_owner != _setup_switch_directory_identity(directory.parent)
                 or yaml_link_parents != _setup_switch_a_yaml_link_parents(project, receipt)):
             raise ValueError("A receipt changed while freezing")
-        return {"selector_target": selector, "yaml_link_parents": yaml_link_parents,
+        result = {"selector_target": selector, "yaml_link_parents": yaml_link_parents,
                 "receipt_directory": directory_owner,
                 "receipt_parent": parent_owner,
                 "receipt_file": {**{field: getattr(before, "st_" + field) for field in fields},
                                  "sha256": hashlib.sha256(opened[0]).hexdigest()}}
+        if include_generation:
+            result["generation"] = _setup_switch_a_generation_authority(context)
+        return result
     except (OSError, RuntimeError, ValueError, TypeError, KeyError, LoadError) as exc:
         raise LoadError(f"setup switch A runtime authority is invalid: {exc}") from exc
 
@@ -7562,7 +7624,7 @@ def _setup_switch_runtime_context(body, state=None):
         context = CrossProjectRollbackContext(
             state.project, record["selector_target"], Path(record["receipt_directory"]["path"]), state,
         )
-        if _setup_switch_runtime_authority(context) != record:
+        if _setup_switch_runtime_authority(context, include_generation="generation" in record) != record:
             raise ValueError("A receipt owner or bytes differ from WAL")
         return context
     except (OSError, ValueError, TypeError, KeyError, LoadError) as exc:
@@ -15903,6 +15965,10 @@ def _activate_setup_switch_entrypoint(args: argparse.Namespace) -> int:
         descriptor = acquire_deployment_lock(exclusive=True)
         guard = dict(deployment_lock_descriptor=descriptor, services_quiesced=True, runtime_backend=backend)
         _require_runtime_restore_guard(**guard)
+        if backend.name == "systemd":
+            # Stopped Apache/DHCP is not evidence that old native writers
+            # have stopped. Their failure must precede every WAL operation.
+            stop_native_ztp_monitors(HTTP_ROOT)
         _require_no_pending_setup_manifest_stage()
         project = resolve_project(args.project)
         if getattr(args, "resume_setup_retirement", False):
@@ -15931,8 +15997,9 @@ def _activate_setup_switch_entrypoint(args: argparse.Namespace) -> int:
 def _recover_setup_switch_entrypoint(args: argparse.Namespace) -> int:
     """A separate operator recovery, never a regeneration or activation mode.
 
-    Backend state must already be stopped. This operation performs no service
-    mutations and obtains all P/A authority from the held original disk WAL;
+    Apache/DHCP backend state must already be stopped. Native monitor writers
+    are explicitly quiesced before any WAL operation; Apache/DHCP is neither
+    started nor implicitly stopped. All P/A authority comes from the original WAL;
     the operator's project is only an additional exact Q identity constraint.
     """
     descriptor = None
@@ -15965,6 +16032,8 @@ def _recover_setup_switch_entrypoint(args: argparse.Namespace) -> int:
         # held WAL/receipt obligation are independently verified by recovery.
         _require_runtime_restore_guard(deployment_lock_descriptor=descriptor,
                                        services_quiesced=True, runtime_backend=backend)
+        if backend.name == "systemd":
+            stop_native_ztp_monitors(HTTP_ROOT)
         _require_no_pending_setup_manifest_stage()
         if resume_publication:
             guard = dict(deployment_lock_descriptor=descriptor, services_quiesced=True,
@@ -15987,7 +16056,7 @@ def _recover_setup_switch_entrypoint(args: argparse.Namespace) -> int:
             info("原 WAL 绑定的四文件 DHCP 前像已核验恢复；保留 WAL/事务供显式激活与退休，不放行普通 LOAD")
         return 0
     except (LoadError, OSError, ValueError, RuntimeContractError) as exc:
-        print(f"[HOLD] 显式 SETUP 恢复未完成；保留剩余凭据，不启停服务：{exc}", file=sys.stderr)
+        print(f"[HOLD] 显式 SETUP 恢复未完成；保留剩余凭据，不启停 Apache/DHCP：{exc}", file=sys.stderr)
         return 1
     finally:
         close_setup_switch_publication_bundle(publication_token)

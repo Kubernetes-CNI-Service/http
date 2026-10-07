@@ -574,6 +574,106 @@ finally:
             with self.subTest(kind=kind):
                 self._assert_real_persisted_a_runtime_switch(False, late_authority="file-stage-" + kind)
 
+    def test_real_setup_a_generation_replacement_holds_before_shared_write(self):
+        self._assert_real_a_generation_owner_hold("setup")
+
+    def test_real_setup_death_cold_a_generation_replacement_holds_before_restore(self):
+        self._assert_real_a_generation_owner_hold("cold")
+
+    def _assert_real_a_generation_owner_hold(self, phase):
+        fixture = RELEASE_FIXTURE.ReleaseTransactionTests()
+        fixture.setUp()
+        try:
+            state, context = fixture._prepare_persisted_a_runtime_switch()
+            root = fixture.root.resolve()
+            p, q, common = state[:3]
+            journal, descriptor, _backend = state[-3:]
+            shutil.copytree(ROOT / "tools", root / "tools")
+            (root / "ztp/optimize").mkdir()
+            shutil.copy2(ROOT / "ztp/optimize/sample_links.py", root / "ztp/optimize/sample_links.py")
+            for name in ("11-load.py", "01-a-setup.py"):
+                shutil.copy2(ROOT / "DAY0-Prepare" / name, root / "DAY0-Prepare" / name)
+            RELEASE_FIXTURE.LOAD.release_deployment_lock(descriptor)
+            fixture._cleanups = [item for item in fixture._cleanups
+                                 if item[0] != RELEASE_FIXTURE.LOAD.release_deployment_lock]
+            wal_before = (journal.lstat().st_ino, journal.read_bytes())
+            original_link = os.readlink(common)
+            child = r'''
+import importlib.util, json, os, signal, stat, sys
+from pathlib import Path
+from types import SimpleNamespace
+root, q, common, phase = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3]), sys.argv[4]
+def script(name):
+    spec = importlib.util.spec_from_file_location('a_generation_' + name, root / 'DAY0-Prepare' / (name + '.py'))
+    api = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = api
+    spec.loader.exec_module(api)
+    return api
+load, setup = script('11-load'), script('01-a-setup')
+load.active_managed_services = lambda *a, **k: ()
+def forbidden(*a, **k):
+    raise AssertionError('A qualification must not start services')
+backend = SimpleNamespace(name='supervisor', start=forbidden)
+load.service_runtime_backend = lambda: backend
+fd = load.acquire_deployment_lock(exclusive=True)
+setup._SETUP_SWITCH_WAL_CONTEXT = (vars(load), fd)
+def replace_input():
+    body = json.loads((root / 'ztp/.setup-switch-journal.json').read_bytes())['body']
+    source = Path(body['old_project']['path']) / '99-output-ztp' / body['a_runtime']['selector_target'] / 'inputs/global'
+    before = source.lstat()
+    retained = root / 'held-original-A-generation-input'
+    source.rename(retained)
+    source.write_bytes(retained.read_bytes())
+    source.chmod(stat.S_IMODE(before.st_mode))
+    os.utime(source, ns=(before.st_atime_ns, before.st_mtime_ns))
+    assert source.lstat().st_ino != before.st_ino
+if phase in ('setup', 'recover'):
+    replace_input()
+try:
+    if phase in ('setup', 'writer'):
+        setup._register_setup_switch_link_before_write(str(common), str(q / '01-global.yaml'))
+        if phase == 'writer':
+            common.unlink()
+            common.symlink_to(os.path.relpath(q / '01-global.yaml', common.parent))
+            (root / 'ztp/ztp-bootstrap_oob.sh').write_bytes(b'independent partial B runtime\n')
+            os.kill(os.getpid(), signal.SIGKILL)
+    else:
+        load.recover_setup_switch_journal(root / 'ztp/.setup-switch-journal.json',
+            deployment_lock_descriptor=fd, services_quiesced=True, runtime_backend=backend,
+            restore_runtime_from_wal=True)
+except (ValueError, load.LoadError) as exc:
+    assert 'A runtime' in str(exc) or 'A generation' in str(exc), str(exc)
+    print('A_GENERATION_EXPECTED_HOLD', exc)
+    raise SystemExit(7)
+finally:
+    load.release_deployment_lock(fd)
+raise AssertionError('replacement A generation acquired write authority')
+'''
+            argv = [sys.executable, "-B", "-c", child, str(root), str(q), str(common)]
+            if phase == "cold":
+                first = subprocess.run(argv + ["writer"], capture_output=True, text=True,
+                                       check=False, timeout=30)
+                self.assertEqual(-9, first.returncode, first.stdout + first.stderr)
+                before_link = os.readlink(common)
+                before_runtime = (root / "ztp/ztp-bootstrap_oob.sh").read_bytes()
+                operation = "recover"
+            else:
+                before_link = original_link
+                before_runtime = (root / "ztp/ztp-bootstrap_oob.sh").read_bytes()
+                operation = "setup"
+            result = subprocess.run(argv + [operation], capture_output=True, text=True,
+                                    check=False, timeout=30)
+            self.assertEqual(7, result.returncode, result.stdout + result.stderr)
+            self.assertIn("A_GENERATION_EXPECTED_HOLD", result.stdout)
+            self.assertEqual(wal_before, (journal.lstat().st_ino, journal.read_bytes()))
+            self.assertEqual(before_link, os.readlink(common))
+            self.assertEqual(before_runtime, (root / "ztp/ztp-bootstrap_oob.sh").read_bytes())
+            self.assertTrue((root / "held-original-A-generation-input").is_file())
+            self.assertEqual(context.setup_state.manifest, state[7].read_bytes())
+        finally:
+            fixture.doCleanups()
+            fixture.tearDown()
+
     def _assert_real_persisted_a_runtime_switch(self, replace_a_receipt, *, late_authority=None):
         fixture = RELEASE_FIXTURE.ReleaseTransactionTests()
         fixture.setUp()

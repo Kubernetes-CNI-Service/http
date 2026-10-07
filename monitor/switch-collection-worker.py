@@ -975,11 +975,18 @@ def _publish_stage_l_local_after_completion(store):
             return None
         if local_publish_interval(project) != (interval, policy_sha):
             raise StageLHold("automatic local policy changed before C6")
+        try:
+            boot_identity = _current_boot_identity()
+        except (OSError, subprocess.SubprocessError) as exc:
+            # This independent lane must HOLD before C6 on an unavailable
+            # boot witness, not relabel an already durable collection or
+            # substitute a guessed identity after the original 2s timeout.
+            raise StageLHold("automatic local boot clock unavailable") from exc
         result = commit_qualified_prod_local(
             store, http_root=HTTP_ROOT, project=project,
             publication=publication, template_path=template,
             refuse_prior_without_admission=True,
-            auto_admission=(policy_sha, interval, _current_boot_identity(),
+            auto_admission=(policy_sha, interval, boot_identity,
                             time.monotonic_ns()),
         )
         source["publish_every_cycles"] = interval

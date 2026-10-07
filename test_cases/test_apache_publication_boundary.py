@@ -12,6 +12,7 @@ import re
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -544,14 +545,7 @@ class ApachePublicationBoundaryTests(unittest.TestCase):
                     LOAD.verify_control_auth(runtime_backend=backend)
 
         load_source = LOAD_PATH.read_text(encoding="utf-8")
-        preflight = load_source[
-            load_source.index("def preflight_services("):
-            load_source.index("\ndef ztp_url_network_requirements(")
-        ]
-        self.assertLess(
-            preflight.index("verify_control_auth("),
-            preflight.index('sudo_command("apache2ctl", "configtest")'),
-        )
+        self._assert_preflight_auth_before_configtest()
         start = load_source[
             load_source.index("def start_services("):
             load_source.index("\ndef validate_inputs(")
@@ -572,6 +566,67 @@ class ApachePublicationBoundaryTests(unittest.TestCase):
                 function.index("verify_control_auth("),
                 function.index('sudo_command("install"'),
             )
+
+    def _assert_preflight_auth_before_configtest(self) -> None:
+        # The independent contract is call order and fail-closed behavior,
+        # whether a guarded helper is called directly or through a wrapper.
+        for backend_name in ("systemd", "supervisor"):
+            for reject_auth in (False, True):
+                with self.subTest(backend=backend_name, reject_auth=reject_auth):
+                    events = []
+                    backend = mock.Mock()
+                    backend.name = backend_name
+                    inputs = SimpleNamespace(settings=SimpleNamespace(
+                        ztp_enabled=True, dhcp_enabled=False))
+                    def management(*args, **kwargs):
+                        events.append("management")
+                        return True
+                    def plan(*args, **kwargs):
+                        events.append("plan")
+                        return SimpleNamespace(listener_names=())
+                    def availability(*args, **kwargs):
+                        events.append("availability")
+                        return True, False
+                    def authenticate(*args, **kwargs):
+                        events.append("auth")
+                        if reject_auth:
+                            raise LOAD.LoadError("independent auth rejection")
+                    def configtest(command, *, dry_run):
+                        self.assertEqual(["apache2ctl", "configtest"], command)
+                        self.assertFalse(dry_run)
+                        events.append("configtest")
+                    with contextlib.ExitStack() as stack:
+                        for name, callback in (
+                            ("validate_management_host", management),
+                            ("plan_local_dhcp_runtime", plan),
+                            ("supervisor_service_availability", availability),
+                            ("verify_control_auth", authenticate),
+                            ("verify_published_files", lambda *a, **k: events.append("published")),
+                            ("verify_apache_publication_boundary", lambda *a, **k: events.append("boundary")),
+                            ("run", configtest),
+                            ("sudo_command", lambda *parts: list(parts)),
+                        ):
+                            stack.enter_context(mock.patch.object(LOAD, name, side_effect=callback))
+                        def execute():
+                            LOAD.preflight_services(inputs, {}, runtime_backend=backend,
+                                require_authority=lambda: events.append("guard"))
+                        if reject_auth:
+                            with self.assertRaisesRegex(LOAD.LoadError, "independent auth rejection"):
+                                execute()
+                        else:
+                            execute()
+                    prefix = (["management"] if backend_name == "systemd"
+                              else ["plan", "availability"])
+                    expected = ["guard"]
+                    for event in prefix:
+                        expected.extend(["guard", event, "guard"])
+                    expected.extend(["guard", "auth"])
+                    if not reject_auth:
+                        expected.append("guard")
+                        for event in ("published", "boundary", "configtest"):
+                            expected.extend(["guard", event, "guard"])
+                    self.assertEqual(expected, events)
+                    backend.start.assert_not_called()
 
     def test_teardown_preserves_v2_and_auth_or_stops_apache_fail_closed(self) -> None:
         teardown = TEARDOWN.read_text(encoding="utf-8")

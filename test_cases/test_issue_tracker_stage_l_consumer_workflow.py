@@ -25,6 +25,7 @@ from test_cases.test_issue_tracker_local_workbook import fake_workbook
 from test_cases.test_issue_tracker_whitelist_workbook import literal_xlsx
 
 from test_cases.test_issue_tracker_stage_l_consumer import ProdStageLFixture
+from test_cases.subprocess_timeout_evidence import capture_timeout_before_cleanup
 
 
 class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
@@ -308,6 +309,24 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             before_generations = tuple(sorted(generation_root.iterdir()))
             original_template = self.template.read_bytes()
             if automatic_first:
+                original_boot_identity = WORKER._current_boot_identity
+
+                def observed_boot_identity():
+                    if invalid_auto_clock:
+                        return ""
+                    # Preserve the real getter, command and 2s deadline.
+                    # Evidence is attached before subprocess.run() reaps it.
+                    with capture_timeout_before_cleanup(
+                            expected_command=("/usr/sbin/sysctl", "-n", "kern.boottime")):
+                        try:
+                            return original_boot_identity()
+                        except subprocess.TimeoutExpired as exc:
+                            print("STAGE_L_BOOT_PRE_CLEANUP " + json.dumps(
+                                getattr(exc, "prekill_process_evidence", {
+                                    "capture_phase": "unknown", "stage": "unknown"}),
+                                sort_keys=True), file=sys.stderr)
+                            raise
+
                 root_template = self.root / "monitor/Issue_Tracker_Template_v1.xlsx"
                 root_template.parent.mkdir(parents=True, exist_ok=True)
                 root_template.write_bytes(original_template)
@@ -326,8 +345,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                       mock.patch.object(WORKER, "ISSUE_TRACKER_STAGE_L_STATUS_FILE",
                                         stage_status_path),
                       mock.patch.object(WORKER, "_current_boot_identity",
-                                        return_value="" if invalid_auto_clock
-                                        else WORKER._current_boot_identity())):
+                                        side_effect=observed_boot_identity)):
                     result = WORKER._publish_stage_l_local_after_completion(self.store)
                 if automatic_not_due:
                     self.assertIsNone(result)

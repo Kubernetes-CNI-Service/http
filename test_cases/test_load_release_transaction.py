@@ -1251,6 +1251,36 @@ class ReleaseTransactionTests(unittest.TestCase):
         self.assertEqual(token["payload"], retained.read_bytes())
         self.assertEqual(token["payload"], archive.read_bytes())
 
+    def test_explicit_setup_native_monitor_failure_precedes_every_recovery_writer(self):
+        state, _context = self._prepare_persisted_a_runtime_switch()
+        journal, descriptor, _backend = state[-3:]
+        evidence = journal.read_bytes()
+        for flag in ("--activate-setup-publication", "--resume-setup-retirement",
+                     "--recover-setup-switch", "--resume-setup-publication"):
+            with self.subTest(flag=flag), ExitStack() as stack:
+                args = LOAD._build_parser().parse_args([str(state[1]), flag,
+                    "--host-role", "management-server"])
+                stack.enter_context(mock.patch.object(LOAD, "parse_args", return_value=args))
+                stack.enter_context(mock.patch.object(LOAD, "runtime_os", return_value="Linux"))
+                stack.enter_context(mock.patch.object(LOAD, "service_runtime_backend",
+                    return_value=SimpleNamespace(name="systemd")))
+                stack.enter_context(mock.patch.object(LOAD, "active_managed_services", return_value=()))
+                stack.enter_context(mock.patch.object(LOAD, "acquire_deployment_lock", return_value=descriptor))
+                stack.enter_context(mock.patch.object(LOAD, "release_deployment_lock"))
+                stack.enter_context(mock.patch.object(LOAD, "resolve_project", return_value=state[1]))
+                stop = stack.enter_context(mock.patch.object(LOAD, "stop_native_ztp_monitors",
+                    side_effect=LOAD.LoadError("independent monitor stop rejection")))
+                writers = [stack.enter_context(mock.patch.object(LOAD, name,
+                    side_effect=AssertionError("writer reached before monitor stop"))) for name in (
+                    "open_setup_switch_publication_bundle", "recover_setup_switch_journal",
+                    "resume_setup_switch_b_retirement", "resume_setup_switch_publication_bundle",
+                    "activate_setup_switch_b_publication")]
+                self.assertEqual(1, LOAD.main([]))
+                stop.assert_called_once_with(LOAD.HTTP_ROOT)
+                for writer in writers:
+                    writer.assert_not_called()
+                self.assertEqual(evidence, journal.read_bytes())
+
     def test_b_activation_cli_uses_original_selection_and_never_enters_generation(self):
         state, _context, _guard, token, _inputs = self._prepare_published_q_for_stopped_preflight(no_upgrade=True)
         active = set()
@@ -5502,6 +5532,102 @@ class ReleaseTransactionTests(unittest.TestCase):
 
     def test_q_manifest_publication_does_not_adopt_wal_replaced_at_intent_parent_sync(self):
         self._assert_q_manifest_publication_stage_holds_authority("wal", boundary="wal-parent")
+
+    def test_setup_wal_binds_original_a_generation_and_input_owners(self):
+        state, context = self._prepare_persisted_a_runtime_switch()
+        record = json.loads(state[-3].read_bytes())["body"]["a_runtime"]["generation"]
+        generation = context.project / "99-output-ztp" / context.selector_target
+        self.assertEqual(str(generation), record["path"])
+        self.assertEqual(generation.lstat().st_ino, record["tree"][""]["ino"])
+        source = generation / "inputs/global"
+        frozen = record["tree"]["inputs/global"]
+        self.assertEqual(source.lstat().st_ino, frozen["ino"])
+        self.assertEqual(sha256(source), frozen["sha256"])
+        self.assertEqual(source.lstat().st_uid, frozen["uid"])
+        self.assertEqual(source.lstat().st_gid, frozen["gid"])
+        state[-1].start.assert_not_called()
+
+    def _replace_original_a_generation(self, context, kind):
+        generation = context.project / "99-output-ztp" / context.selector_target
+        target = generation / "inputs/global" if kind == "input" else generation
+        owner = target.lstat()
+        retained = self.root.resolve() / ("held-original-A-" + kind)
+        target.rename(retained)
+        if kind == "input":
+            target.write_bytes(retained.read_bytes())
+            target.chmod(stat.S_IMODE(owner.st_mode))
+            os.utime(target, ns=(owner.st_atime_ns, owner.st_mtime_ns))
+        else:
+            shutil.copytree(retained, target)
+        self.assertNotEqual(owner.st_ino, target.lstat().st_ino)
+        return target, retained, owner.st_ino
+
+    def _assert_original_a_generation_replacement_holds(self, kind):
+        state, context = self._prepare_persisted_a_runtime_switch()
+        common, manifest, journal, descriptor, backend = state[2], state[7], *state[-3:]
+        common.unlink()
+        common.symlink_to(os.path.relpath(state[5], common.parent))
+        runtime = self.ztp / "ztp-bootstrap_oob.sh"
+        runtime.write_bytes(b"independent partial B runtime\n")
+        before = (os.readlink(common), manifest.read_bytes(), runtime.read_bytes(), journal.read_bytes())
+        target, retained, inode = self._replace_original_a_generation(context, kind)
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            with self.assertRaisesRegex(LOAD.LoadError, "A runtime|A generation|HOLD"):
+                LOAD.recover_setup_switch_journal(journal, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend, restore_runtime_from_wal=True)
+        self.assertEqual(before, (os.readlink(common), manifest.read_bytes(), runtime.read_bytes(), journal.read_bytes()))
+        self.assertEqual(inode, retained.lstat().st_ino)
+        self.assertTrue(target.exists())
+        backend.start.assert_not_called()
+
+    def test_setup_wal_cold_recovery_holds_same_byte_a_input_replacement(self):
+        self._assert_original_a_generation_replacement_holds("input")
+
+    def test_setup_wal_cold_recovery_holds_cloned_a_generation(self):
+        self._assert_original_a_generation_replacement_holds("generation")
+
+    def test_setup_wal_registration_holds_replaced_a_input_before_q_write(self):
+        state, context = self._prepare_persisted_a_runtime_switch()
+        journal, descriptor, backend = state[-3:]
+        candidate = state[1] / "independent-q-registration"
+        evidence = journal.read_bytes()
+        self._replace_original_a_generation(context, "input")
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            with self.assertRaisesRegex(LOAD.LoadError, "A runtime|A generation|HOLD"):
+                LOAD.register_setup_switch_journal_link(journal, candidate, state[1] / "01-global.yaml",
+                    deployment_lock_descriptor=descriptor, services_quiesced=True, runtime_backend=backend)
+        self.assertEqual(evidence, journal.read_bytes())
+        self.assertFalse(os.path.lexists(candidate))
+        backend.start.assert_not_called()
+
+    def test_setup_wal_unknown_a_generation_field_is_not_ignored(self):
+        state, _context = self._prepare_persisted_a_runtime_switch()
+        journal, descriptor, backend = state[-3:]
+        envelope = json.loads(journal.read_bytes())
+        envelope["body"]["a_runtime"]["generation"]["tree"]["inputs/global"]["start_services"] = True
+        envelope["sha256"] = hashlib.sha256(LOAD._setup_switch_canonical_payload(envelope["body"])).hexdigest()
+        journal.write_bytes(LOAD._setup_switch_canonical_payload(envelope) + b"\n")
+        evidence = journal.read_bytes()
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            with self.assertRaisesRegex(LOAD.LoadError, "unknown.*A generation"):
+                LOAD.recover_setup_switch_journal(journal, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend, restore_runtime_from_wal=True)
+        self.assertEqual(evidence, journal.read_bytes())
+        backend.start.assert_not_called()
+
+    def test_setup_wal_legacy_generation_inventory_keeps_only_stopped_recovery(self):
+        state, _context = self._prepare_persisted_a_runtime_switch()
+        journal, descriptor, backend = state[-3:]
+        envelope = json.loads(journal.read_bytes())
+        envelope["body"]["a_runtime"].pop("generation")
+        envelope["sha256"] = hashlib.sha256(LOAD._setup_switch_canonical_payload(envelope["body"])).hexdigest()
+        journal.write_bytes(LOAD._setup_switch_canonical_payload(envelope) + b"\n")
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            result = LOAD.recover_setup_switch_journal(journal, deployment_lock_descriptor=descriptor,
+                services_quiesced=True, runtime_backend=backend, restore_runtime_from_wal=True)
+        self.assertEqual("restored-p", result)
+        self.assertFalse(os.path.lexists(journal))
+        backend.start.assert_not_called()
 
     def test_setup_wal_persists_exact_a_runtime_authority_before_q_write(self):
         state, context = self._prepare_persisted_a_runtime_switch()

@@ -103,12 +103,9 @@ def _strict_json(path: Path):
 
 
 def load_script():
-    spec = importlib.util.spec_from_file_location("update_root_readme", SCRIPT)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot import {SCRIPT}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    # This module must also run alone: do not borrow a previous test's
+    # production import-path mutation to find the script's sibling helper.
+    return load_path("update_root_readme", SCRIPT)
 
 
 def load_path(name: str, path: Path):
@@ -151,6 +148,25 @@ class DocumentationCatalogTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.catalog = load_script()
+
+    def test_catalog_loader_is_independent_of_prior_tools_import_paths(self):
+        child = r'''
+import sys
+from pathlib import Path
+root = Path.cwd()
+sys.path[:] = [entry for entry in sys.path if Path(entry or '.').resolve() != root / 'tools']
+from test_cases.test_documentation_catalog import load_script
+before = tuple(sys.path)
+module = load_script()
+assert tuple(sys.path) == before, 'loader leaked a helper import path'
+assert callable(module.path_disposition) and module.BEGIN == '<!-- BEGIN GENERATED DOCUMENTATION CATALOG -->'
+print('INDEPENDENT_CATALOG_LOADER_OK')
+'''
+        result = subprocess.run([sys.executable, "-B", "-c", child], cwd=ROOT,
+                                capture_output=True, text=True, timeout=10, check=False)
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertEqual("INDEPENDENT_CATALOG_LOADER_OK\n", result.stdout)
+        self.assertEqual("", result.stderr)
 
     def test_discovery_excludes_outputs_history_details_and_deduplicates_aliases(self):
         with tempfile.TemporaryDirectory() as directory:
