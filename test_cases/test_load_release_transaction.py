@@ -960,7 +960,8 @@ def private_publication_candidates(api, project):
 
 
 class ReleaseTransactionTests(unittest.TestCase):
-    def _prepare_published_q_for_stopped_preflight(self, *, with_image=False):
+    def _prepare_published_q_for_stopped_preflight(self, *, with_image=False, no_upgrade=False,
+                                                  ztp_disabled=False):
         state, context, guard = self._prepare_q_manifest_publication()
         q = state[1]
         for name, source in (("01-global.yaml", self.inputs.global_file),
@@ -971,6 +972,9 @@ class ReleaseTransactionTests(unittest.TestCase):
         (q / "p2p.xlsx").symlink_to("p2p-original.xlsx")
         document = yaml.safe_load((q / "01-global.yaml").read_text())
         document["common"]["mgmt"]["dhcp-server"]["status"] = "disabled"
+        if ztp_disabled:
+            document["common"]["mgmt"]["ztp"]["status"] = "disabled"
+            document["common"]["mgmt"]["http"]["status"] = "enabled"
         if with_image:
             document["switches"][0]["eth"]["version"] = "5.12.0"
         (q / "01-global.yaml").write_text(yaml.safe_dump(document, sort_keys=False))
@@ -982,6 +986,8 @@ class ReleaseTransactionTests(unittest.TestCase):
             p2p_file=q / "p2p-original.xlsx", settings=LOAD.load_global(q / "01-global.yaml"),
             source_identities=None)
         image_options = {}
+        if no_upgrade:
+            image_options = dict(images={}, upgrade_enabled=False)
         if with_image:
             basename = "cumulus-linux-5.12.0-mlx-amd64.bin"
             source = self.root / basename
@@ -1109,6 +1115,198 @@ class ReleaseTransactionTests(unittest.TestCase):
                     original_intent={"policy": "disabled", "files": {}}) as authority:
                 authority()
             expected.assert_not_called()
+
+    def _with_independent_b_health(self, active, *, health_failure=None):
+        stack = ExitStack()
+        self.addCleanup(stack.close)
+        stack.enter_context(mock.patch.object(LOAD, "active_managed_services",
+            side_effect=lambda *a, **kw: tuple(sorted(active))))
+        stack.enter_context(mock.patch.object(LOAD, "preflight_services"))
+        stack.enter_context(mock.patch.object(LOAD.generation_report, "inspect_generation_report"))
+        stack.enter_context(mock.patch.object(LOAD, "plan_local_dhcp_runtime",
+            return_value=SimpleNamespace(endpoint_ips=(), listener_names=())))
+        stack.enter_context(mock.patch.object(LOAD, "supervisor_service_availability", return_value=(True, False)))
+        action = stack.enter_context(mock.patch.object(LOAD, "_runtime_service_action",
+            side_effect=lambda backend, command, name: active.add(name)))
+        probe = stack.enter_context(mock.patch.object(LOAD, "verify_http_publication", side_effect=health_failure))
+        stack.enter_context(mock.patch.object(LOAD, "quiesce_services", side_effect=lambda *a, **kw: active.clear()))
+        return action, probe
+
+    def test_b_success_retirement_archives_original_wal_without_deleting_a(self):
+        state, context, guard, token, inputs = self._prepare_published_q_for_stopped_preflight(no_upgrade=True)
+        receipt_path = context.runtime_receipt / "receipt.json"
+        receipt = receipt_path.read_bytes()
+        active = set()
+        _action, probe = self._with_independent_b_health(active)
+        result = LOAD.activate_setup_switch_b_publication(token, guard=guard, inputs=inputs,
+            images={}, confirmed=True, retire=True)
+        self.assertEqual("b-health-passed-wal-archived", result)
+        probe.assert_called_once()
+        self.assertFalse(os.path.lexists(state[-3]))
+        archives = list(state[-3].parent.glob(".setup-switch-retired-*.json"))
+        self.assertEqual(1, len(archives))
+        self.assertEqual(token["payload"], archives[0].read_bytes())
+        self.assertEqual(receipt, receipt_path.read_bytes())
+        self.assertEqual({"apache2"}, active)
+        LOAD.require_no_pending_setup_switch_journal()
+
+    def test_b_health_rejection_cannot_retire_or_create_a_completion_receipt(self):
+        state, _context, guard, token, inputs = self._prepare_published_q_for_stopped_preflight(no_upgrade=True)
+        active = set()
+        self._with_independent_b_health(active, health_failure=LOAD.LoadError("independent health failure"))
+        with self.assertRaisesRegex(LOAD.LoadError, "independent health failure"):
+            LOAD.activate_setup_switch_b_publication(token, guard=guard, inputs=inputs,
+                images={}, confirmed=True, retire=True)
+        self.assertEqual(token["payload"], state[-3].read_bytes())
+        self.assertEqual([], list(state[-3].parent.glob(".setup-switch-retired-*.json")))
+        self.assertFalse(os.path.lexists(state[-3].parent / ".setup-switch-retirement.json"))
+        self.assertEqual(set(), active)
+
+    def test_b_retirement_interrupted_after_rename_fences_load_and_requires_fresh_health(self):
+        state, _context, guard, token, inputs = self._prepare_published_q_for_stopped_preflight(no_upgrade=True)
+        active = set()
+        _action, probe = self._with_independent_b_health(active)
+        original_sync = LOAD._fsync_parent_directory
+        def interrupt_after_rename(path):
+            if not os.path.lexists(state[-3]):
+                raise OSError("independent retirement sync interruption")
+            original_sync(path)
+        with mock.patch.object(LOAD, "_fsync_parent_directory", side_effect=interrupt_after_rename):
+            with self.assertRaisesRegex(OSError, "independent retirement sync interruption"):
+                LOAD.activate_setup_switch_b_publication(token, guard=guard, inputs=inputs,
+                    images={}, confirmed=True, retire=True)
+        self.assertEqual(set(), active)
+        self.assertTrue((state[-3].parent / ".setup-switch-retirement.json").is_file())
+        with self.assertRaisesRegex(LOAD.LoadError, "retirement|HOLD"):
+            LOAD.require_no_pending_setup_switch_journal()
+        LOAD.close_setup_switch_publication_bundle(token)
+        result = LOAD.resume_setup_switch_b_retirement(state[1], guard=guard, inputs=inputs,
+            images={}, confirmed=True)
+        self.assertEqual("b-health-passed-wal-archived", result)
+        self.assertEqual(2, probe.call_count, "cold reentry must not reuse previous process health")
+        LOAD.require_no_pending_setup_switch_journal()
+
+    def test_b_retirement_foreign_completion_name_is_not_overwritten_or_deleted(self):
+        state, _context, guard, token, inputs = self._prepare_published_q_for_stopped_preflight(no_upgrade=True)
+        marker = state[-3].parent / ".setup-switch-retirement.json"
+        marker.write_bytes(b"independent foreign retirement evidence\n")
+        active = set()
+        action, _probe = self._with_independent_b_health(active)
+        with self.assertRaisesRegex(LOAD.LoadError, "retirement|HOLD"):
+            LOAD.activate_setup_switch_b_publication(token, guard=guard, inputs=inputs,
+                images={}, confirmed=True, retire=True)
+        action.assert_not_called()
+        self.assertEqual(b"independent foreign retirement evidence\n", marker.read_bytes())
+        self.assertEqual(token["payload"], state[-3].read_bytes())
+
+    def test_unknown_original_image_policy_cannot_acquire_retirement_permission(self):
+        state, _context, guard, token, inputs = self._prepare_published_q_for_stopped_preflight()
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "_runtime_service_action") as action:
+            with self.assertRaisesRegex(LOAD.LoadError, "original.*image|HOLD"):
+                LOAD.activate_setup_switch_b_publication(token, guard=guard, inputs=inputs,
+                    images={}, confirmed=True, retire=True)
+            action.assert_not_called()
+        self.assertEqual(token["payload"], state[-3].read_bytes())
+
+    def test_b_native_ztp_disabled_never_starts_http_just_because_http_is_enabled(self):
+        state, _context, guard, token, inputs = self._prepare_published_q_for_stopped_preflight(
+            no_upgrade=True, ztp_disabled=True)
+        guard = dict(guard, runtime_backend=SimpleNamespace(name="systemd"))
+        active = set()
+        action, probe = self._with_independent_b_health(active)
+        result = LOAD.activate_setup_switch_b_publication(token, guard=guard, inputs=inputs,
+            images={}, confirmed=True)
+        self.assertEqual("b-no-services-required-wal-retained", result)
+        action.assert_not_called()
+        probe.assert_not_called()
+        self.assertEqual(set(), active)
+
+    def test_b_cold_retirement_rejects_same_bytes_foreign_archive_before_start(self):
+        state, _context, guard, token, inputs = self._prepare_published_q_for_stopped_preflight(no_upgrade=True)
+        active = set()
+        action, _probe = self._with_independent_b_health(active)
+        original_sync = LOAD._fsync_parent_directory
+        def interrupt(path):
+            if not os.path.lexists(state[-3]):
+                raise OSError("independent archive sync interruption")
+            original_sync(path)
+        with mock.patch.object(LOAD, "_fsync_parent_directory", side_effect=interrupt):
+            with self.assertRaises(OSError):
+                LOAD.activate_setup_switch_b_publication(token, guard=guard, inputs=inputs,
+                    images={}, confirmed=True, retire=True)
+        marker = state[-3].parent / ".setup-switch-retirement.json"
+        original_marker = marker.read_bytes()
+        archive = Path(json.loads(original_marker)["archive"])
+        retained = archive.with_name("independent-owned-archive")
+        archive.rename(retained)
+        archive.write_bytes(retained.read_bytes())
+        archive.chmod(0o600)
+        action.reset_mock()
+        with self.assertRaisesRegex(LOAD.LoadError, "owner.*HOLD"):
+            LOAD.resume_setup_switch_b_retirement(state[1], guard=guard, inputs=inputs,
+                images={}, confirmed=True)
+        action.assert_not_called()
+        self.assertEqual(original_marker, marker.read_bytes())
+        self.assertEqual(token["payload"], retained.read_bytes())
+        self.assertEqual(token["payload"], archive.read_bytes())
+
+    def test_b_activation_cli_uses_original_selection_and_never_enters_generation(self):
+        state, _context, _guard, token, _inputs = self._prepare_published_q_for_stopped_preflight(no_upgrade=True)
+        active = set()
+        _action, probe = self._with_independent_b_health(active)
+        LOAD.close_setup_switch_publication_bundle(token)
+        with mock.patch.object(LOAD, "runtime_os", return_value="Linux"), \
+                mock.patch.object(LOAD, "acquire_deployment_lock", return_value=_guard["deployment_lock_descriptor"]), \
+                mock.patch.object(LOAD, "release_deployment_lock"), \
+                mock.patch.object(LOAD, "HERE", state[1].parent), \
+                mock.patch.object(LOAD, "service_runtime_backend", return_value=SimpleNamespace(name="supervisor")), \
+                mock.patch.object(LOAD, "parse_args", side_effect=lambda argv: LOAD._build_parser().parse_args(argv)), \
+                mock.patch.object(LOAD, "generate_configs", side_effect=AssertionError("must not generate")), \
+                mock.patch.object(LOAD, "validate_inputs", side_effect=AssertionError("must not regenerate selection")), \
+                mock.patch.object(LOAD, "restore_cross_project_rollback_context", side_effect=AssertionError("must not restore A")):
+            self.assertEqual(0, LOAD.main([str(state[1]), "--host-role", "management-server",
+                                         "--activate-setup-publication"]))
+        probe.assert_called_once()
+        self.assertEqual({"apache2"}, active)
+        self.assertFalse(os.path.lexists(state[-3]))
+        LOAD.require_no_pending_setup_switch_journal()
+
+    def test_b_activation_cli_conflicting_modes_and_generation_overrides_hold_before_lock(self):
+        for extra in (("--resume-setup-publication",), ("--resume-setup-retirement",),
+                      ("--recover-setup-switch",), ("--no-upgrade",), ("--dry-run",),
+                      ("--p2p-file", "independent.xlsx"), ("--start-services",)):
+            with self.subTest(extra=extra), \
+                    mock.patch.object(LOAD, "runtime_os", return_value="Linux"), \
+                    mock.patch.object(LOAD, "parse_args", side_effect=lambda argv: LOAD._build_parser().parse_args(argv)), \
+                    mock.patch.object(LOAD, "acquire_deployment_lock") as lock:
+                self.assertEqual(1, LOAD.main([str(self.project), "--host-role", "management-server",
+                    "--activate-setup-publication", *extra]))
+                lock.assert_not_called()
+
+    def test_b_retirement_late_marker_rebind_is_retained_and_b_stops(self):
+        state, _context, guard, token, inputs = self._prepare_published_q_for_stopped_preflight(no_upgrade=True)
+        active = set()
+        self._with_independent_b_health(active)
+        marker = state[-3].parent / ".setup-switch-retirement.json"
+        retained = marker.with_name("independent-original-retirement-marker")
+        original_sync = LOAD._fsync_parent_directory
+        def replace_marker_after_archive_sync(path):
+            original_sync(path)
+            if not os.path.lexists(state[-3]) and not retained.exists():
+                marker.rename(retained)
+                marker.write_bytes(retained.read_bytes())
+                marker.chmod(0o600)
+        with mock.patch.object(LOAD, "_fsync_parent_directory", side_effect=replace_marker_after_archive_sync):
+            with self.assertRaisesRegex(LOAD.LoadError, "marker owner.*HOLD"):
+                LOAD.activate_setup_switch_b_publication(token, guard=guard, inputs=inputs,
+                    images={}, confirmed=True, retire=True)
+        self.assertEqual(set(), active)
+        self.assertEqual(retained.read_bytes(), marker.read_bytes())
+        self.assertNotEqual(retained.stat().st_ino, marker.stat().st_ino)
+        self.assertEqual(token["payload"], token["journal"].read_bytes())
+        with self.assertRaisesRegex(LOAD.LoadError, "retirement|HOLD"):
+            LOAD.require_no_pending_setup_switch_journal()
 
     def test_b_activation_health_failure_stops_and_keeps_original_wal(self):
         state, _context, guard, token, inputs = self._prepare_published_q_for_stopped_preflight()

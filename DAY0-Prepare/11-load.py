@@ -46,6 +46,7 @@ import sys
 import tempfile
 import time
 import zipfile
+import uuid
 
 
 def _preflight_macos_generation_imports() -> None:
@@ -6338,6 +6339,18 @@ def _setup_switch_journal_path() -> Path:
     return MANIFEST.parent / ".setup-switch-journal.json"
 
 
+def _setup_switch_retirement_path() -> Path:
+    return MANIFEST.parent / ".setup-switch-retirement.json"
+
+
+def _require_setup_switch_retirement_absent() -> None:
+    try:
+        _setup_switch_retirement_path().lstat()
+    except FileNotFoundError:
+        return
+    raise LoadError("pending setup switch retirement; HOLD original WAL/archive and receipt")
+
+
 def _require_no_pending_setup_manifest_stage() -> None:
     """An unbound manifest stage is evidence, never license to retire a WAL.
 
@@ -6443,6 +6456,7 @@ def require_no_pending_setup_switch_journal() -> None:
 
 def _require_setup_switch_wal_absent() -> None:
     """WAL-only fence, also safe inside a held manifest staging callback."""
+    _require_setup_switch_retirement_absent()
     journal = _setup_switch_journal_path()
     try:
         journal.lstat()
@@ -7060,8 +7074,12 @@ def open_setup_switch_publication_bundle(project, *, guard):
     This grants no service start, A rollback or evidence retirement. A visible
     parent may only advance its original report/selector, never regenerate B.
     """
+    return _open_setup_switch_publication_bundle(project, guard=guard,
+                                                journal=_setup_switch_journal_path())
+
+
+def _open_setup_switch_publication_bundle(project, *, guard, journal):
     _require_runtime_restore_guard(**guard)
-    journal = _setup_switch_journal_path()
     fd = -1
     receipt_fd = -1
     try:
@@ -14605,19 +14623,29 @@ def _setup_switch_b_preflight_inputs(body, inputs):
 
 
 def activate_setup_switch_b_publication(
-    token, *, guard, inputs: ProjectInputs, images: dict[str, Path], confirmed=False,
+    token, *, guard, inputs: ProjectInputs, images: dict[str, Path], confirmed=False, retire=False,
 ) -> str:
     """Explicit B-only health attempt. Failure stops; A and WAL are never retired."""
     if confirmed is not True:
         raise LoadError("B activation requires explicit confirmation; HOLD")
+    if type(retire) is not bool:
+        raise LoadError("B retirement requires an explicit boolean; HOLD")
+    if "retirement" not in token:
+        _require_setup_switch_retirement_absent()
     require_setup_switch_publication_bundle(token, guard=guard, phase="published")
     body = _setup_switch_prepared_registration_body((token["payload"], 0o600))
+    if retire and body["publication_bundle"].get("image_intent") is None:
+        raise LoadError("B retirement requires original image policy qualification; HOLD")
     qualified = _setup_switch_b_preflight_inputs(body, inputs)
     selected_images = dict(images)
     with _setup_switch_b_image_authority(qualified, selected_images,
             original_intent=body["publication_bundle"].get("image_intent")) as image_authority:
+        def authority():
+            image_authority()
+            if "retirement" in token:
+                _require_setup_switch_retirement_owner(token["retirement"])
         return _activate_setup_switch_b_publication(token, guard=guard, inputs=inputs,
-            images=selected_images, image_authority=image_authority)
+            images=selected_images, image_authority=authority, retire=retire)
 
 
 @contextmanager
@@ -14679,7 +14707,7 @@ def _setup_switch_b_image_authority(inputs, images, *, original_intent):
             os.close(descriptor)
 
 
-def _activate_setup_switch_b_publication(token, *, guard, inputs, images, image_authority):
+def _activate_setup_switch_b_publication(token, *, guard, inputs, images, image_authority, retire=False):
     preflight_setup_switch_b_publication(token, guard=guard, inputs=inputs, images=images,
                                        _additional_authority=image_authority)
     body = _setup_switch_prepared_registration_body((token["payload"], 0o600))
@@ -14701,15 +14729,18 @@ def _activate_setup_switch_b_publication(token, *, guard, inputs, images, image_
     if backend.name == "supervisor":
         http_required, dhcp_required = supervisor_service_availability(qualified, plan)
     elif backend.name == "systemd":
-        http_required = bool(qualified.settings.http_enabled and
+        http_required = bool(qualified.settings.ztp_enabled and qualified.settings.http_enabled and
                              (not qualified.settings.dhcp_enabled or plan.listener_names))
-        dhcp_required = bool(qualified.settings.dhcp_enabled and plan.listener_names)
+        dhcp_required = bool(qualified.settings.ztp_enabled and qualified.settings.dhcp_enabled and plan.listener_names)
     else:
         raise LoadError("B activation runtime backend is unknown; HOLD")
     stopped()
     selected = {name for required, name in ((http_required, "apache2"),
                                             (dhcp_required, "isc-dhcp-server")) if required}
     if not selected:
+        if retire:
+            _retire_setup_switch_b_publication(token, require_authority=stopped)
+            return "b-no-services-required-wal-archived"
         return "b-no-services-required-wal-retained"
     if plan.endpoint_ips:
         ensure_ztp_url_network_ready(qualified)
@@ -14739,6 +14770,8 @@ def _activate_setup_switch_b_publication(token, *, guard, inputs, images, image_
         if set(active_managed_services(backend)) != selected:
             raise LoadError("B selected services did not become healthy/active; HOLD")
         authority()
+        if retire:
+            _retire_setup_switch_b_publication(token, require_authority=authority)
     except BaseException as exc:
         if started:
             try:
@@ -14748,7 +14781,151 @@ def _activate_setup_switch_b_publication(token, *, guard, inputs, images, image_
             except BaseException as stop_exc:
                 raise LoadError(f"B activation failed and stop is unconfirmed; HOLD original WAL: {exc}; {stop_exc}") from exc
         raise
-    return "b-health-passed-wal-retained"
+    return "b-health-passed-wal-archived" if retire else "b-health-passed-wal-retained"
+
+
+def _require_setup_switch_retirement_owner(marker):
+    path = marker["path"]
+    if (marker["parent"] != _setup_switch_link_parent_identity(path)
+            or marker["identity"] != _dhcp_a_preimage_receipt_identity(path.lstat())
+            or marker["identity"] != _dhcp_a_preimage_receipt_identity(os.fstat(marker["descriptor"]))
+            or _read_rollback_regular(path, limit=16384) != (marker["payload"], 0o600)
+            or marker["identity"] != _dhcp_a_preimage_receipt_identity(path.lstat())):
+        raise LoadError("B retirement original marker owner changed; HOLD")
+
+
+def _retire_setup_switch_b_publication(token, *, require_authority):
+    """Only called after this invocation's exact B preflight and health.
+
+    Durably fence the rename first. Keep the original WAL inode and every A
+    backup; never delete recovery evidence. An interrupted rename remains
+    fenced until a stopped cold reader repeats all original B checks/health.
+    """
+    require_authority()
+    _require_no_pending_setup_manifest_stage()
+    marker = token.get("retirement")
+    created = False
+    if marker is None:
+        _require_setup_switch_retirement_absent()
+        journal = token["journal"]
+        if journal != _setup_switch_journal_path():
+            raise LoadError("B retirement does not own the configured WAL name; HOLD")
+        archive = journal.parent / (".setup-switch-retired-" + uuid.uuid4().hex + ".json")
+        body = dict(schema_version=1, journal=str(journal), archive=str(archive),
+            parent=token["parent"], identity=list(token["identity"]),
+            sha256=hashlib.sha256(token["payload"]).hexdigest())
+        payload = _setup_switch_canonical_payload(body) + b"\n"
+        path = _setup_switch_retirement_path()
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        marker = dict(path=path, descriptor=fd, payload=payload, body=body,
+                      parent=_setup_switch_link_parent_identity(path))
+        created = True
+        try:
+            with os.fdopen(os.dup(fd), "wb") as stream:
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+            marker["identity"] = _dhcp_a_preimage_receipt_identity(os.fstat(fd))
+            _require_setup_switch_retirement_owner(marker)
+            _fsync_parent_directory(path.parent)
+        except BaseException:
+            os.close(fd)
+            raise  # Partial/unsynced marker is evidence, never cleanup permission.
+    try:
+        _require_setup_switch_retirement_owner(marker)
+        require_authority()
+        archive = Path(marker["body"]["archive"])
+        if token["journal"] != archive:
+            _setup_switch_rename_directory_noreplace(token["journal"], archive)
+            now = _dhcp_a_preimage_receipt_identity(os.fstat(token["descriptor"]))
+            if now[:8] != token["identity"][:8] or now != _dhcp_a_preimage_receipt_identity(archive.lstat()):
+                raise LoadError("B original WAL archive owner changed; HOLD retirement marker")
+            token["journal"], token["identity"] = archive, now
+        # Also synchronize on cold reentry: the first process may have died
+        # immediately after rename, before persisting the parent namespace.
+        _fsync_parent_directory(archive.parent)
+        require_authority()
+        _require_setup_switch_retirement_owner(marker)
+        marker["path"].unlink()
+        # The complete, qualified archive is already durable before releasing
+        # the new-LOAD fence. Failure here cannot erase its A evidence.
+        _fsync_parent_directory(archive.parent)
+    finally:
+        if created:
+            os.close(marker["descriptor"])
+
+
+def resume_setup_switch_b_retirement(project, *, guard, inputs=None, images=None, confirmed=False):
+    """Stopped explicit reentry; old health is never accepted as permission."""
+    if confirmed is not True:
+        raise LoadError("B retirement reentry requires explicit confirmation; HOLD")
+    _require_runtime_restore_guard(**guard)
+    path = _setup_switch_retirement_path()
+    fd = -1
+    token = None
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0))
+        payload, mode = _read_rollback_regular(path, limit=16384)
+        body = json.loads(payload)
+        if (mode != 0o600 or set(body) != {"schema_version", "journal", "archive", "parent", "identity", "sha256"}
+                or body["schema_version"] != 1 or body["journal"] != str(_setup_switch_journal_path())
+                or not isinstance(body["identity"], list) or len(body["identity"]) != 9
+                or any(type(v) is not int or v < 0 for v in body["identity"])
+                or not isinstance(body["sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", body["sha256"])):
+            raise LoadError("B retirement marker contract is invalid; HOLD")
+        archive = Path(body["archive"])
+        if (archive.parent != path.parent
+                or not re.fullmatch(r"\.setup-switch-retired-[0-9a-f]{32}\.json", archive.name)
+                or body["parent"] != _setup_switch_link_parent_identity(path)):
+            raise LoadError("B retirement original parent/archive selection changed; HOLD")
+        marker = dict(path=path, descriptor=fd, payload=payload, body=body,
+            parent=body["parent"], identity=_dhcp_a_preimage_receipt_identity(os.fstat(fd)))
+        _require_setup_switch_retirement_owner(marker)
+        journal = Path(body["journal"])
+        occupied = [name for name in (journal, archive) if os.path.lexists(name)]
+        if len(occupied) != 1:
+            raise LoadError("B retirement original WAL/archive phase is unknown; HOLD")
+        name = occupied[0]
+        now = _dhcp_a_preimage_receipt_identity(name.lstat())
+        if (list(now[:8]) != body["identity"][:8]
+                or name == journal and list(now) != body["identity"]):
+            raise LoadError("B retirement original WAL/archive owner changed; HOLD")
+        token = _open_setup_switch_publication_bundle(project, guard=guard, journal=name)
+        if (token["phase"] != "published" or token["identity"] != now
+                or hashlib.sha256(token["payload"]).hexdigest() != body["sha256"]):
+            raise LoadError("B retirement original published WAL bytes changed; HOLD")
+        token["retirement"] = marker
+        _require_setup_switch_retirement_owner(marker)
+        if inputs is None or images is None:
+            original_inputs, original_images = _setup_switch_b_operator_selection(token)
+            inputs = original_inputs if inputs is None else inputs
+            images = original_images if images is None else images
+        result = activate_setup_switch_b_publication(token, guard=guard, inputs=inputs,
+            images=images, confirmed=True, retire=True)
+        return result
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        raise LoadError(f"B retirement evidence unavailable; HOLD: {exc}") from exc
+    finally:
+        close_setup_switch_publication_bundle(token)
+        if fd >= 0:
+            os.close(fd)
+
+
+def _setup_switch_b_operator_selection(token):
+    body = _setup_switch_prepared_registration_body((token["payload"], 0o600))
+    bundle = body["publication_bundle"]
+    shared, intent = bundle.get("shared_setup"), bundle.get("image_intent")
+    if shared is None or "input_files" not in shared or intent is None:
+        raise LoadError("explicit B operation lacks original input/image qualification; HOLD")
+    parent = json.loads(base64.b64decode(bundle["parent"]["candidate"]["payload"], validate=True))
+    paths = {key: Path(row["path"]) for key, row in shared["input_files"].items()}
+    inputs = ProjectInputs(global_file=paths["global"], devices_file=paths["devices"],
+        subnet_file=paths["subnet"], p2p_file=paths["p2p"], device_types=frozenset(), pubkeys=(),
+        settings=load_global(paths["global"], switch_scope=parent["switch_scope"]),
+        deployment_scope=parent["deployment_scope"], switch_scope=parent["switch_scope"],
+        air_topology_policy=paths.get("air_topology_policy"),
+        mini_devices_file=paths.get("mini_air_devices"), effective_devices_file=paths.get("effective_devices"))
+    return inputs, {kind: Path(row["source"]["path"]) for kind, row in intent["files"].items()}
 
 
 def preflight_services(
@@ -15557,6 +15734,16 @@ def _build_parser() -> argparse.ArgumentParser:
               "必须预先停服，不生成、不启停服务、不恢复 A、不退休 WAL"),
     )
     parser.add_argument(
+        "--activate-setup-publication", action="store_true",
+        help=("显式尝试原 WAL 已完整发布 B 的健康激活与凭据归档；仅 Linux management-server，"
+              "必须预先停服、不生成；失败确认停服，不自动回 A"),
+    )
+    parser.add_argument(
+        "--resume-setup-retirement", action="store_true",
+        help=("显式收口已中断的 B WAL 归档；仅 Linux management-server，必须预先停服，"
+              "重新核原 B 输入、发布组与健康，不复用旧进程 PASS，不生成或自动回 A"),
+    )
+    parser.add_argument(
         "--host-role", choices=("workstation", "management-server"),
         help="Linux 必须显式声明本机角色；Darwin 默认为 workstation",
     )
@@ -15683,6 +15870,56 @@ def dry_run_next_step(requested_argv: list[str]) -> str:
     )
 
 
+def _activate_setup_switch_entrypoint(args: argparse.Namespace) -> int:
+    descriptor = None
+    token = None
+    try:
+        modes = ("recover_setup_switch", "resume_setup_publication", "activate_setup_publication", "resume_setup_retirement")
+        if sum(bool(getattr(args, name, False)) for name in modes) != 1:
+            raise LoadError("SETUP recovery, resume, activation and retirement are distinct operations; HOLD")
+        host_os = runtime_os()
+        if (host_os.casefold() != "linux"
+                or resolve_host_role(getattr(args, "host_role", None), host_os) != "management-server"):
+            raise LoadError("explicit B operation requires Linux --host-role management-server; HOLD")
+        incompatible = ("dry_run", "start_services", "start_ztp_monitor", "update_passwords", "skip_generate",
+                        "skip_doca", "download_doca", "no_upgrade", "p2p_legacy_columns", "validation_only")
+        if (any(getattr(args, name, False) for name in incompatible)
+                or any(getattr(args, name, None) is not None for name in ("import_configs", "p2p_file", "mini"))
+                or getattr(args, "deployment_scope", "all") != "all"
+                or getattr(args, "switch_scope", None) is not None
+                or getattr(args, "ztp_monitor_scope", "auto") != "auto"
+                or getattr(args, "ztp_monitor_interval", DEFAULT_ZTP_MONITOR_INTERVAL) != DEFAULT_ZTP_MONITOR_INTERVAL
+                or getattr(args, "ssh_dir", _default_ssh_dir()) != _default_ssh_dir()):
+            raise LoadError("explicit B operation forbids generation/start/dry-run selection overrides; HOLD")
+        backend = service_runtime_backend()
+        descriptor = acquire_deployment_lock(exclusive=True)
+        guard = dict(deployment_lock_descriptor=descriptor, services_quiesced=True, runtime_backend=backend)
+        _require_runtime_restore_guard(**guard)
+        _require_no_pending_setup_manifest_stage()
+        project = resolve_project(args.project)
+        if getattr(args, "resume_setup_retirement", False):
+            result = resume_setup_switch_b_retirement(project, guard=guard, confirmed=True)
+        else:
+            _require_setup_switch_retirement_absent()
+            token = open_setup_switch_publication_bundle(project, guard=guard)
+            if token["phase"] != "published":
+                raise LoadError("original B publication must first finish its stopped report/selector resume; HOLD")
+            inputs, images = _setup_switch_b_operator_selection(token)
+            result = activate_setup_switch_b_publication(token, guard=guard, inputs=inputs,
+                images=images, confirmed=True, retire=True)
+        if result not in {"b-health-passed-wal-archived", "b-no-services-required-wal-archived"}:
+            raise LoadError("B operation lacks exact publication/health/archive completion; HOLD")
+        ok("原 B 发布与本次运行条件/健康核验完成；原 WAL 已归档，A receipt/备份保留，未重新生成或自动回 A")
+        return 0
+    except (LoadError, OSError, ValueError, RuntimeContractError) as exc:
+        print(f"[HOLD] 显式 B 操作未完成；保留原 WAL/归档/退休凭据，核验失败停服状态：{exc}", file=sys.stderr)
+        return 1
+    finally:
+        close_setup_switch_publication_bundle(token)
+        if descriptor is not None:
+            release_deployment_lock(descriptor)
+
+
 def _recover_setup_switch_entrypoint(args: argparse.Namespace) -> int:
     """A separate operator recovery, never a regeneration or activation mode.
 
@@ -15756,6 +15993,9 @@ def main(
 ) -> int:
     requested_argv = list(sys.argv[1:] if argv is None else argv)
     args = parse_args(argv)
+    if (getattr(args, "activate_setup_publication", False)
+            or getattr(args, "resume_setup_retirement", False)):
+        return _activate_setup_switch_entrypoint(args)
     if (getattr(args, "recover_setup_switch", False)
             or getattr(args, "resume_setup_publication", False)):
         return _recover_setup_switch_entrypoint(args)

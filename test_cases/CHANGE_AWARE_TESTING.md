@@ -1,5 +1,39 @@
 # 脚本变更影响测试
 
+## 2026-10-07 R22 B 健康收口、凭据归档与显式冷重入候选
+
+基于 `75972966354167b5c8df78e1d84cd2f39f7652c7`，增加
+`--activate-setup-publication`、`--resume-setup-retirement`，仅显式 Linux
+management-server/stopped 操作，不生成或改选输入，不自动回 A。
+成功收口先 fsync 固定退休凭据，再 no-replace 归档原 WAL inode，重核整个发布组，
+同步归档后才释放新 LOAD 门禁；原 A receipt/备份和 WAL 字节保留，不清扫数据。
+归档前后任一中断仍被原 WAL 或固定退休凭据挡住。冷重入核原 owner/字节/父目录，
+且重新执行本进程 B 预检/健康；绝不凭旧进程 PASS 退休。同字节新归档或新退休凭据
+先 HOLD，原外来物保留。native 后端在 ZTP disabled 时不得仅因 HTTP enabled 启动。
+
+独立缺参数 RED 为 5 ERROR/exit1，完整日志 `r22-b-retirement-isolated-red.log`，
+SHA256 `09f3ebce60f89e5b21228afe26843d56f85456082b08b100bb3cdc305264b5bb`；
+native disabled 反例 1 FAIL/exit1，`r22-b-native-disabled-red.log`，SHA256
+`a8c5556246a76d1935ab72ee0d76f9ef47457e4835f94231063dad3e592999dd`。
+7 项边界检查通过，`r22-b-retirement-boundary-green.log`，SHA256
+`2a1d2dd67901f5c2fd501b9486c4efbb21136d28af5eab802ec5cfc14914320e`。
+新增 CLI 缺入口失败、夹具根路径失败和强杀 workflow 输出夹具失败均保留原日志；
+修复夹具后 4 项 direct/真实 LOAD→SETUP→发布强杀→B 健康归档/归档强杀→全新
+Python 显式退休 CLI 通过，`r22-b-retirement-cli-workflow-green.log`，
+inode159306927/size129675，SHA256
+`1525fcc5f7d2ca9cb2191b8720145759a66f50a9105f6a0480681ee25a3a4a23`。
+新进程健康独立写两次见证，不复用第一次通过；测试 backend/HTTP 仍为隔离替身。
+
+扩大回归 581 tests OK，125.948s，实际 exit0、冻结一致：
+`outputs/test-diagnostics/r22-b-retirement-final-regression.log`，
+inode159318118/size312885，SHA256
+`c5e9f3af59807c1587aab10fbd8f9b08c8c10e56088aaf52fc72a35595b57a47`。
+物理 Ran1523/OK1525/actual1596/冻结1597/END1599，读前后 stat 一致。
+生成手册已机械更新并在该回归执行；不是 formal related/full/check，ledger 未手改。
+上一 B 激活 569 项回归 SHA256 为
+`35771698c9f265b92979b8ec4e4590feee4f9fd0adde9c93222d63a91348ea32`。
+旧 A 显式激活、普通 LOAD 的跨项目最终接入和真实 root/断电/DEV ACK 尚未关闭。
+
 ## 2026-10-07 R22 显式 B 激活与原镜像 WAL 候选
 
 基于 `d79d9805a69b6540d37275a9eb1b6d98219ae421`，新增 B-only 激活 API，

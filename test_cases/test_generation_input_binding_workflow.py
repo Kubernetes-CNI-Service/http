@@ -4782,6 +4782,12 @@ finally:
     def test_real_setup_publication_cold_b_health_failure_stops_without_a_restore(self):
         self._real_setup_publication_writer_death("selector", b_preflight="activate-fail")
 
+    def test_real_setup_publication_cold_b_health_archives_original_wal(self):
+        self._real_setup_publication_writer_death("selector", b_preflight="activate-retire")
+
+    def test_real_setup_publication_b_retirement_writer_death_requires_new_process_health(self):
+        self._real_setup_publication_writer_death("selector", b_preflight="activate-retire-death")
+
     def _real_setup_publication_writer_death(self, death_phase, *, resume_cli=False, late_fault=None,
                                             b_preflight=None):
         with tempfile.TemporaryDirectory(prefix="r22-publication-wal-") as name:
@@ -4884,7 +4890,7 @@ os.kill(os.getpid(), signal.SIGKILL)
                 runtime.write_bytes(b"independent unregistered bootstrap\n")
                 runtime.chmod(0o755)
             resume = r'''
-import json, sys
+import json, os, signal, sys
 from pathlib import Path
 from types import SimpleNamespace
 root, q, test_root = map(Path, sys.argv[1:4])
@@ -4909,9 +4915,12 @@ token = None
 try:
     guard = dict(deployment_lock_descriptor=descriptor, services_quiesced=True,
                  runtime_backend=SimpleNamespace(name='supervisor'))
-    token = api.open_setup_switch_publication_bundle(q, guard=guard)
-    before = token['phase']
-    result = api.resume_setup_switch_publication_bundle(token, guard=guard)
+    if sys.argv[5] == 'activate-retire-reentry':
+        before, result = 'published', 'published-stopped-wal-retained'
+    else:
+        token = api.open_setup_switch_publication_bundle(q, guard=guard)
+        before = token['phase']
+        result = api.resume_setup_switch_publication_bundle(token, guard=guard)
     if sys.argv[5].startswith('activate-'):
         parent = json.loads((q / '99-output-ztp/current-release.json').read_bytes())
         paths = parent['input_paths']
@@ -4937,26 +4946,60 @@ try:
         def health(*a, **kw):
             if sys.argv[5] == 'activate-fail':
                 raise api.LoadError('independent cold B health rejection')
+            if sys.argv[5].startswith('activate-retire'):
+                with (root / 'independent-health-witness').open('a') as witness:
+                    witness.write('fresh-process-health\n')
+                    witness.flush()
+                    os.fsync(witness.fileno())
         api.verify_http_publication = health
         def stop(*a, **kw):
             active.clear()
             actions.append(('stop', 'all'))
         api.quiesce_services = stop
         api.restore_cross_project_rollback_context = forbidden
-        original_wal = token['payload']
+        original_wal = token['payload'] if token is not None else None
+        if sys.argv[5] == 'activate-retire-death':
+            original_sync = api._fsync_parent_directory
+            def death_after_archive(path):
+                if not os.path.lexists(api._setup_switch_journal_path()):
+                    os.kill(os.getpid(), signal.SIGKILL)
+                original_sync(path)
+            api._fsync_parent_directory = death_after_archive
         try:
             image = root / 'ztp/image/cumulus/cumulus-linux-5.12.0-mlx-amd64.bin'
-            status = api.activate_setup_switch_b_publication(token, guard=guard, inputs=inputs,
-                images={'eth': image}, confirmed=True)
+            if sys.argv[5] == 'activate-retire-reentry':
+                api.runtime_os = lambda: 'Linux'
+                api.service_runtime_backend = lambda: SimpleNamespace(name='supervisor')
+                api.parse_args = lambda argv: api._build_parser().parse_args(argv)
+                # main must acquire its own lock in this new process.
+                api.release_deployment_lock(descriptor)
+                descriptor = None
+                rc = api.main([str(q), '--host-role', 'management-server', '--resume-setup-retirement'])
+                assert rc == 0, 'explicit cold retirement CLI failed'
+                status = 'b-health-passed-wal-archived'
+            else:
+                status = api.activate_setup_switch_b_publication(token, guard=guard, inputs=inputs,
+                    images={'eth': image}, confirmed=True, retire=sys.argv[5].startswith('activate-retire'))
         except api.LoadError as exc:
             assert sys.argv[5] == 'activate-fail' and 'B health rejection' in str(exc), str(exc)
             assert active == set() and actions == [('start', 'apache2'), ('stop', 'all')], actions
             status = 'b-health-failed-stopped-wal-retained'
         else:
-            assert sys.argv[5] == 'activate-pass', 'B failure was accepted'
+            assert sys.argv[5] in ('activate-pass', 'activate-retire', 'activate-retire-reentry'), 'B failure was accepted'
             assert active == {'apache2'} and actions == [('start', 'apache2')], actions
-            assert status == 'b-health-passed-wal-retained', status
-        assert original_wal == token['journal'].read_bytes()
+            expected_status = ('b-health-passed-wal-archived' if sys.argv[5].startswith('activate-retire')
+                               else 'b-health-passed-wal-retained')
+            assert status == expected_status, status
+        if sys.argv[5].startswith('activate-retire'):
+            assert not os.path.lexists(api._setup_switch_journal_path())
+            assert not os.path.lexists(api._setup_switch_retirement_path())
+            api.require_no_pending_setup_switch_journal()
+            archives = list(api.MANIFEST.parent.glob('.setup-switch-retired-*.json'))
+            assert len(archives) == 1, archives
+            if original_wal is not None:
+                assert original_wal == archives[0].read_bytes()
+        else:
+            assert original_wal == token['journal'].read_bytes()
         print('R22_PREFLIGHT=' + status)
     elif sys.argv[5] != 'none':
         parent = json.loads((q / '99-output-ztp/current-release.json').read_bytes())
@@ -4986,7 +5029,8 @@ try:
             assert status == 'b-preflight-passed-still-stopped-wal-retained', status
         assert original_wal == token['journal'].read_bytes()
         print('R22_PREFLIGHT=' + status)
-    print('R22_RESUME='+json.dumps(dict(before=before, after=token['phase'], result=result)))
+    print('R22_RESUME='+json.dumps(dict(before=before,
+        after=token['phase'] if token is not None else 'published', result=result)))
 finally:
     api.close_setup_switch_publication_bundle(token)
     api.release_deployment_lock(descriptor)
@@ -4995,6 +5039,22 @@ finally:
                                         str(root), str(q), str(ROOT), "cli" if resume_cli else "api",
                                         b_preflight or "none"], cwd=root,
                                        capture_output=True, text=True, check=False, timeout=30)
+            if b_preflight == "activate-retire-death":
+                self.assertEqual(-signal.SIGKILL, recovered.returncode, recovered.stdout + recovered.stderr)
+                marker = manifest.parent / ".setup-switch-retirement.json"
+                self.assertTrue(marker.is_file())
+                original_marker = marker.read_bytes()
+                archive = Path(json.loads(original_marker)["archive"])
+                self.assertEqual(wal, archive.read_bytes())
+                self.assertFalse(os.path.lexists(journal))
+                self.assertEqual(["fresh-process-health"], (root / "independent-health-witness").read_text().splitlines())
+                with self.assertRaisesRegex(api.LoadError, "retirement|HOLD"):
+                    api.require_no_pending_setup_switch_journal()
+                recovered = subprocess.run([sys.executable, "-B", "-c", resume,
+                    str(root), str(q), str(ROOT), "api", "activate-retire-reentry"], cwd=root,
+                    capture_output=True, text=True, check=False, timeout=30)
+                self.assertEqual(["fresh-process-health", "fresh-process-health"],
+                    (root / "independent-health-witness").read_text().splitlines())
             if late_fault is not None:
                 self.assertEqual(1, recovered.returncode, recovered.stdout + recovered.stderr)
                 self.assertIn("HOLD", recovered.stderr)
@@ -5015,13 +5075,22 @@ finally:
                 expected = {"pass": "b-preflight-passed-still-stopped-wal-retained",
                     "late-input": "held-still-stopped-wal-retained",
                     "activate-pass": "b-health-passed-wal-retained",
-                    "activate-fail": "b-health-failed-stopped-wal-retained"}[b_preflight]
+                    "activate-fail": "b-health-failed-stopped-wal-retained",
+                    "activate-retire": "b-health-passed-wal-archived",
+                    "activate-retire-death": "b-health-passed-wal-archived"}[b_preflight]
                 self.assertIn("R22_PREFLIGHT=" + expected, recovered.stdout)
             payload = json.loads(next(line.split("=", 1)[1] for line in recovered.stdout.splitlines()
                                       if line.startswith("R22_RESUME=")))
             self.assertEqual({"before": {"parent": "report", "report": "selector", "selector": "published"}[death_phase],
                               "after": "published", "result": "published-stopped-wal-retained"}, payload)
-            self.assertEqual(wal, journal.read_bytes())
+            if b_preflight and b_preflight.startswith("activate-retire"):
+                self.assertFalse(os.path.lexists(journal))
+                archives = list(manifest.parent.glob(".setup-switch-retired-*.json"))
+                self.assertEqual(1, len(archives))
+                self.assertEqual(wal, archives[0].read_bytes())
+                self.assertFalse(os.path.lexists(manifest.parent / ".setup-switch-retirement.json"))
+            else:
+                self.assertEqual(wal, journal.read_bytes())
             self.assertEqual(parent_bytes, parent_path.read_bytes())
             self.assertEqual(q_manifest, manifest.read_bytes())
             self.assertEqual(binding["selector"]["staged"]["identity"][1],
