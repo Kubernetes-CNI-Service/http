@@ -375,6 +375,7 @@ def script_profile(root: Path, relative: str) -> dict[str, str]:
     is_library = (
         path.name == "__init__.py" or "/lib/" in f"/{relative}"
         or relative in REQ7_READ_ONLY_LIBRARIES
+        or relative == "monitor/issue_tracker_online_target.py"
         or (relative in UNINSTALLED_RUNTIME_COMPONENTS and path.suffix.lower() == ".py")
         or path.name in {
             "_package_common.py", "deployment_lock.py", "deployment_prewrite_guard.py",
@@ -478,6 +479,13 @@ def script_profile(root: Path, relative: str) -> dict[str, str]:
             outputs = "只读逐键观察计数、最新业务值或周期绑定的本地 receipt 事实；不修补历史、不写源数据或在线项目。"
             success = "来源与周期复核完成，返回值仅供状态展示；不授予在线发布资格，不替代 C5/C6 或真机验收。"
             recovery = "证据缺失、顺序断裂、K 或来源身份变化时交由调用者 HOLD；保留原始证据，不伪造零值或手工补写 receipt。"
+        if relative == "monitor/issue_tracker_online_target.py":
+            scenario = "本地验证精确 JSON 字符串枚举及每次项目策略重核；不从配置推导白名单。"
+            prerequisite = "纯函数只检查调用方提供的字节；真实文件权威必须另由固定路径 root held-FD 加载器建立，发送仍须完整准入与传输证明。"
+            inputs = "有界原始白名单字节、schema v2 项目策略和可选旧目标绑定；不读取凭据或真实文件。"
+            outputs = "纯内存精确目标/策略/枚举字节绑定或脱敏 HOLD；无文件修改、网络或发送许可。"
+            success = "通过只表示本次纯校验一致，不授予发送资格，不证明凭据、文件来源、在线写入或整个 REQ7。"
+            recovery = "空白名单、禁用、撤销或身份变化拒绝；保留来源证据，不重定向、不猜测授权。"
         if is_uninstalled:
             direct = "否；这是未安装、未启用的库级接点，不是可直接运行的生产入口。"
             environment = "当前未安装、未启用；未来仅在经真机验收的受管 Linux 环境中按正确身份导入，不是操作员 CLI。"

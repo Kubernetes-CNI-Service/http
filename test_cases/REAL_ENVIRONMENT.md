@@ -1993,6 +1993,14 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - 三来源组合补充：同一隔离真实完成周期必须同时具有 ETH/NVLink Switch、ETH 链接第四 role/P2P 派生和 IB 受保护报告九角色，三者 K/完成摘要/K 设置/W1 模板必须一致；任一角色缺失或不同周期均 HOLD。新增 hermetic 正向工作流使用本地受保护九角色 producer、真实 worker/emitter 完成记录和真实 K/Whitelist 重放，并可测试三面板 C5→C6；它仍以确定性检索替身代替远端 UFM，使用测试工作簿而非 owner 管理的正式模板，不能当成本卡真机或正式工作簿验收。本卡没有真实角色、正式输入与写者静默证据时保持 BLOCKED/NOT RUN。
 - 证据、清理与风险：保留脱敏精确命令/退出码、周期和来源摘要、拒绝原因、前后目录/服务状态、写者静默与独立快照恢复核验；仅回滚隔离副本。真实格式或保护链未证明、发生任何外部写入或没有授权时保持 BLOCKED/NOT RUN。本卡只证明只读来源，不能解除 `TC-REAL-REQ7-IB-CYCLE-BINDING-001` 或本地 C5/C6/线上发布门禁。
 
+## TC-REAL-REQ7-ONLINE-TARGET-001 — 精确目标枚举与每次准入重核
+
+- Case ID：`TC-REAL-REQ7-ONLINE-TARGET-001`；类型：real-environment / fixed-path authority / local-only preflight；对应 C-2/C-7；状态：**NOT RUN / REAL_ENV REQUIRED**。本地 direct `test_issue_tracker_online_target` 与多真实脚本 `test_issue_tracker_online_target_workflow` 只验证纯枚举及真实项目策略校验器，不读取真实凭据、打开网络或签发发送许可。
+- 前置条件：owner 另行明确批准的隔离 Linux VM、可恢复快照、唯一 root worker 与固定 `/var/lib/http-ztp-container/service-account/issue-tracker-spreadsheet-whitelist.json`，真实 root/0700 祖先、常规 root/0600 单链接文件及宿主/容器同路径只读 bind 身份；完整 C-1/C-11 held-FD 加载器、C-12/C-14 传输证明和同树全量证明须先完成。纯字节摘要不建立文件来源权威；缺任一项保持 NOT RUN，不用临时或配置内白名单代替固定权威。
+- 步骤与独立预期：白名单格式固定为顶层 JSON 字符串数组，逐字比较合法 ID，不从配置、嵌套元数据、通配符或大小写归一化生成条目；空数组合法但拒绝全部，重复条目/JSON 键、非字符串、非有限数字、编码和大小错误拒绝。每次尝试重新校验 schema v2 项目策略及当前枚举；禁用或撤销为 STOP，目标、策略或枚举字节变化拒绝旧绑定，不重定向。记录只有类别、计数、布尔、摘要及受限文件身份，不回显 ID 或凭据。此纯绑定本身不能允许发送，也不改变本地工作簿。
+- 故障与证据：在授权隔离副本验证读取前后身份交换、祖先/权限改绑、revocation、目标/枚举变化；持久 SEND-INTENT/retry 集成未完成前不得声称这些负例已有在线流程证明。保留精确 HEAD/tree/命令/退出码、held-FD 身份与前后 SHA、无网络/本地修改的见证和拒绝阶段。
+- 清理与风险：仅回滚该隔离 VM 快照和明确 run-owned 非证据文件，不删除 credential、journal、INTENT/RECEIPT 或历史证明；禁止触碰生产、真实在线表和未授权服务。真实加载器/传输/恢复链任一未证实时不激活线上发布。
+
 ## TC-REAL-REQ7-MANUAL-UI-001 — 三面板手动预览与二次确认
 
 - Case ID：`TC-REAL-REQ7-MANUAL-UI-001`；类型：real-environment / browser / Apache CGI / local-only；状态：**BLOCKED / NOT RUN / REAL_ENV REQUIRED**。自动化先决为 `test_cases.test_issue_tracker_manual_ui` direct、`test_cases.test_issue_tracker_manual_ui_workflow` 多真实脚本 workflow，以及同一逐字节树的正式全量证明。当前 `build_html()` 的生产默认不输出按钮、对话框或 CGI URL；显式测试态验证前端及 K 意图经过真实 CGI/私有队列/worker/LK-P/settings 链，**不**部署、不开放路由、不构成可用的发布按钮。K 控件初始为空且禁止保存，仅精确查询回执才启用；浏览器通过专用 Accept 协商十进制字符串以免大整数被 JSON 舍入，worker 内部仍严格整数。保存消耗已核验 revision 并撤销旧预览；丢失、畸形或不绑定本次 K/revision 的回复保留未知、禁止自动重试，取消后的晚到查询不得恢复写入授权。Node DOM/fetch 为本地确定性替身，不计作真实浏览器或 Apache 验收。

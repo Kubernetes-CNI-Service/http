@@ -222,6 +222,8 @@
         "test_cases.test_issue_tracker_stage_l_status_per_key_contract_workflow",
         "test_cases.test_issue_tracker_whitelist",
         "test_cases.test_issue_tracker_whitelist_workflow",
+        "test_cases.test_issue_tracker_online_target",
+        "test_cases.test_issue_tracker_online_target_workflow",
         "test_cases.test_issue_tracker_k_store",
         "test_cases.test_issue_tracker_k_store_workflow",
         "test_cases.test_issue_tracker_local_commit",
@@ -442,6 +444,7 @@
     "monitor/issue_tracker_ib_per_key_source.py": "monitor/issue_tracker_ib_per_key_source.py",
     "monitor/issue_tracker_receipt_snapshot.py": "monitor/issue_tracker_receipt_snapshot.py",
     "monitor/issue_tracker_whitelist.py": "monitor/issue_tracker_whitelist.py",
+    "monitor/issue_tracker_online_target.py": "monitor/issue_tracker_online_target.py",
     "monitor/issue_tracker_k_store.py": "monitor/issue_tracker_k_store.py",
     "monitor/issue_tracker_local_commit.py": "monitor/issue_tracker_local_commit.py",
     "monitor/issue_tracker_local_recovery.py": "monitor/issue_tracker_local_recovery.py",
@@ -1385,6 +1388,15 @@
       ]
     },
     {
+      "id": "issue_tracker_online_target",
+      "paths": [
+        "monitor/issue_tracker_online_target.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_online_target"
+      ]
+    },
+    {
       "id": "issue_tracker_publish_runtime",
       "paths": [
         "monitor/issue_tracker_publish_runtime.py"
@@ -1642,6 +1654,16 @@
       ],
       "tests": [
         "test_cases.test_issue_tracker_stage_l_consumer_workflow"
+      ]
+    },
+    {
+      "id": "issue_tracker_online_target_from_project_policy",
+      "members": [
+        "monitor/issue_tracker_online_target.py",
+        "tools/project_contract.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_online_target_workflow"
       ]
     },
     {
