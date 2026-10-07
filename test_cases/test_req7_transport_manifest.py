@@ -18,6 +18,7 @@ SCRIPTS = {
     "monitor/issue_tracker_mutation_rejection.py": "test_cases.test_req7_mutation_rejection",
     "monitor/issue_tracker_attempt_journal.py": "test_cases.test_req7_attempt_journal",
     "monitor/issue_tracker_metadata_capacity.py": "test_cases.test_req7_metadata_capacity",
+    "monitor/issue_tracker_send_unit.py": "test_cases.test_req7_send_unit",
 }
 
 

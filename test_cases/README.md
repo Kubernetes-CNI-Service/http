@@ -865,3 +865,12 @@ P 阶段在绑定的 macOS CPython 3.9 环境中，把独立审定的依赖文�
 VISIBLE_ONLY_UNPROVED，因为别的 Cloud 项目的 PROJECT 元数据可能不可见。
 可见空池、响应完整、相同 fence id 或未溢出都不是完整库存、COMPLETE 或发送许可；
 预留不清除，栅不回收，容量不承诺剩余天数。库未安装，真机部分仍 NOT RUN。
+
+`test_cases.test_req7_send_unit` 以独立字面预期验证 C-19 单个有限 batch 的业务 run、
+全部对应五列 Update_History 与一个 SHEET 锚定 DOCUMENT fence；action_digest 非递归，
+完整 outcome、NOOP intended digest 和全部附带 settings 审计均绑定到 manifest。
+全 NOOP 不制造 History/fence/意图，审计保持 pending；请求对象含 History/fence 不超过
+1000，冻结 wire 和 action preimage 各不超过 1 MiB，不静默拆批。
+真实 cell encoder → composer → C-6 owner / immutable journal workflow 验证同字节六次意图
+和改变字节拒绝，不证明真实发送上界、nonce 权威、全表锁、新鲜准入或 COMPLETE。
+31-bit fence 投影可能碰撞，占用时 HOLD 不换 ID；库未安装，真机卡 NOT RUN。

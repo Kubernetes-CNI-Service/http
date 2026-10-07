@@ -52,6 +52,7 @@ REQ7_CONTROLLED_TRANSPORT_LIBRARIES = frozenset({
     "monitor/issue_tracker_mutation_rejection.py",
     "monitor/issue_tracker_attempt_journal.py",
     "monitor/issue_tracker_metadata_capacity.py",
+    "monitor/issue_tracker_send_unit.py",
 })
 
 RUNTIME_PATTERNS = (
@@ -573,6 +574,11 @@ def script_profile(root: Path, relative: str) -> dict[str, str]:
                 inputs = "ACTIVE 本地 writer token、单元标识和不超过 1 MiB 的冻结字节；它们不是合格 Sheets batch 或发送能力。"
                 recovery = "计数耗尽、部分／外来文件、字节变化或 fsync 失败均 HOLD，保留证据；无清理、重置或新单元接管。"
                 example = "python3 -B -m unittest -v test_cases.test_req7_attempt_journal  # 仅开发测试"
+            elif relative == "monitor/issue_tracker_send_unit.py":
+                scenario = "冻结单表业务变更、全部对应 History 与一个永久 fence；非递归 action_digest 绑定完整 outcome 和审计集合。"
+                inputs = "同目标 family 的完整有序 manifest 操作与明确字面值／观察；身份、nonce、占用 ID 只被绑定，未证明准入。"
+                recovery = "缺项、重复、坐标冲突、marker 投影碰撞或 1000 请求／1 MiB 上界越界均 HOLD；不分批、不换 ID；全 NOOP 时审计 pending。"
+                example = "python3 -B -m unittest -v test_cases.test_req7_send_unit  # 仅开发测试"
             elif relative == "monitor/issue_tracker_metadata_capacity.py":
                 scenario = "有界只读 metadata search；按各 sheet 与独立 spreadsheet 池核永久栅、enrollment、其他元数据及未决预留。"
                 inputs = "同一目标的十四表身份、完整可见查询与显式预留；UTF-8 字节保守计量，不从不可见 PROJECT 元数据推导空池。"

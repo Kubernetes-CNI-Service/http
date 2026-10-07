@@ -2076,7 +2076,17 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - 证据：保存精确命令/退出码、完整物理顺序日志、前后 stat/inode/SHA、启动前 monotonic 时间、阶段耗时、持有锁的 FD/session 归属、截止期、TERM/KILL/reap/会话不存在和父死子存的独立见证。私有响应和诊断不进入公开日志；局部原生慢读 PASS 不代表整个 REQ7 或生产权限。
 - 故障注入、清理与风险：注入启动失败、DNS/慢读、pipe 关闭、监督器死亡和无法终止；保持原预算/行为断言。本地夹具已独立复现并修正已回收 leader 的同号存活 group 被误认为信号权限；首次检查之后、异常清理和 TERM/KILL 升级之前也必须重新确认活 leader 的 session/group 归属，不能把首次检查缓存为永久信号权限。真实 PID 重用仍 NOT RUN，必须验证不向该不确定 group 发信号、终止未确认保持 HOLD。实际临时 flock 的终止被拒工作流必须保持其他候选无法取得锁，直到本卡确证拥有的子进程完成清理。只终止本卡确证拥有的隔离会话，不能向外部 PID/group 发信号；清理不确定保持 HOLD，由授权责任人恢复隔离快照并重核锁。不得以 PID 重用、过期锁、超时宽限或重发来隐藏 UNKNOWN。
 
+## TC-REAL-REQ7-IMMUTABLE-SEND-UNIT-001 — 单表不可变 batch / History / 永久 fence
+
+- Case ID：`TC-REAL-REQ7-IMMUTABLE-SEND-UNIT-001`；类型：real-environment / transaction / C-19+C-25+C-26。状态：**NOT RUN / REAL_ENV REQUIRED**。`monitor/issue_tracker_send_unit.py` 是未安装的纯组合库；caller-supplied manifest、坐标、nonce 和 occupied IDs 只被绑定，不是发送许可或完整准入。
+- 风险与目标：禁止跨表原子性假象、遗漏 NOOP outcome／附带审计、递归 action_digest、拆批绕过预算、fence 碰撞后换 ID 或单独 fence 冒充 COMPLETE。业务 run、全部对应 Update_History 五列字面行和一个 SHEET 锚定 DOCUMENT fence 必须同 batch；全 NOOP 审计 pending，不产生发送单元。
+- 前置条件与输入：owner 对精确源码／测试／manifest／Python／平台树签发 Stage L、固定 launcher、真实尝试上界、新鲜准入、spreadsheet-wide owner、enrollment 与容量预留证明；另有一次性表副本的精确 Stage O 授权和人工编辑契约。未满足时 HOLD，不启动凭据或 mutation；本卡不授予部署或在线写权限。
+- 步骤与预期：经受管入口冻结一个合格单表单元，核对最多 1000 请求对象（含 History/fence）、wire 与非递归 action preimage 各最多 1 MiB；同字节 journal 后只通过被批准 launcher 发送。读取原生连接相关响应与目标、History、两份 nonce、永久 fence，按不可变 journal 完整对账；缺项、重复、碰撞、不同单元或摘要不一致均 UNKNOWN／CONFLICT，不换 ID、不清除预留。全 NOOP 不形成 audit-only 单元。
+- 证据：保存精确 HEAD/tree/dirty、stat/inode/大小/SHA256 与完整前缀／END 的日志，manifest/outcome/action/wire 摘要、实际发送业务子集、全部审计 ID、真实 attempt 计数、History 完整行数与类型化摘要；不公开凭据、token、nonce 原文或目标表内容。本地真实 cell encoder → composer → C-6 owner/journal workflow 只证明不可变组合及六次意图，**不证明真实发送上界或 COMPLETE**。
+- 故障注入与清理：owner 批准副本内验证掉线、部分响应、重复 ID、位移和重启，原断言不弱化；未知时保留锁、journal 和预留，不回收永久栅，不擅自删除远端 History／marker；仅退役一次性副本需 owner 另行指令。库本身无网络、重试、安装、清理或解锁入口。
+
 ## TC-REAL-REQ7-METADATA-CAPACITY-001 — 永久栅与可见容量的保守核算
+
 
 - Case ID：`TC-REAL-REQ7-METADATA-CAPACITY-001`；类型：real-environment / read-only API / G1；对应 C-19。状态：**NOT RUN / REAL_ENV REQUIRED**。`monitor/issue_tracker_metadata_capacity.py` 是未安装库；本地 direct 和实际 TLS → 固定 read-only search → 十四表身份 → 容量核算 workflow 只使用私有 fake 服务，不是发送许可。
 - 前置条件与权限：另获 owner 精确 Stage O 副本及只读调用授权；完整固定 launcher、30 秒整体 read budget、依赖/CA、每次目标与准入复核及 spreadsheet-wide owner 已证后才可接入。固定 search 返回的 PROJECT 元数据只覆盖发起调用的 Cloud 项目；他项目元数据可不可见，HTTP 完整不等于全球完整库存，未闭合时保持 VISIBLE_ONLY_UNPROVED，不以空查询或缺少记录允许写入。
