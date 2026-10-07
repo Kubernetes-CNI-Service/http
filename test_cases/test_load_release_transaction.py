@@ -117,7 +117,7 @@ def sha256(path: Path) -> str:
 
 def assert_private_dhcp_transaction_retention(
     api, root: Path, project: Path, outcome: str, *, reenter: bool = False,
-    setup_guard=None, a_shapes=False,
+    setup_guard=None, a_shapes=False, publication_candidates=None,
 ) -> None:
     """Exercise real LOAD filesystem logic; never execute sudo, dhcpd or live writes."""
     root = root.resolve()
@@ -141,7 +141,8 @@ def assert_private_dhcp_transaction_retention(
         (live_dir / "dhcpd_eth.hosts").symlink_to("../independent-original-A-source")
         (live_dir / "dhcpd_nvl.hosts").unlink()
     parent_payload = {"schema_version": 1, "release_id": "independent-B"}
-    candidate = api.prepare_current_release(project, parent_payload)
+    candidate = (api.prepare_current_release(project, parent_payload)
+                 if publication_candidates is None else publication_candidates[0])
     setup_wal = root / "ztp/.setup-switch-journal.json"
     setup_wal_bytes = None
     if outcome in {"success-setup-wal", "success-setup-wal-probe-error"}:
@@ -390,6 +391,8 @@ def assert_private_dhcp_transaction_retention(
                 mock.patch.object(api.os, "fsync", side_effect=sync_parent):
             try:
                 kwargs = {} if setup_guard is None else {"setup_switch_guard": setup_guard}
+                if publication_candidates is not None:
+                    kwargs["setup_publication_token"] = publication_candidates[3]
                 api.mount_and_test_dhcp(parent_candidate=candidate, **kwargs)
             except (api.LoadError, OSError) as exc:
                 if outcome in {"open", "fsync"}:
@@ -913,7 +916,319 @@ def write_shared_artifact_receipt(
     return path
 
 
+def private_publication_candidates(api, project):
+    """Independent four-input schema-2 fixture; no service/runtime commands."""
+    project = project.resolve()
+    sources = {"global": "01-global.yaml", "devices": "02-devices_config.csv",
+               "subnet": "02-dhcp-subnet_config.csv", "p2p": "publication-p2p.xlsx"}
+    selected_p2p = project / "p2p.xlsx"
+    if selected_p2p.exists():
+        sources["p2p"] = selected_p2p.resolve(strict=True).relative_to(project).as_posix()
+    for key, relative in sources.items():
+        path = project / relative
+        if not path.exists():
+            if key == "p2p":
+                workbook = TOPOLOGY.openpyxl.Workbook()
+                workbook.active.append(["independent publication workbook"])
+                workbook.save(path)
+                workbook.close()
+            else:
+                path.write_bytes(("independent publication " + key + "\n").encode())
+    if not os.path.lexists(selected_p2p):
+        selected_p2p.symlink_to(sources["p2p"])
+    hashes = {key: hashlib.sha256((project / relative).read_bytes()).hexdigest()
+              for key, relative in sources.items()}
+    basis = dict(project=project.name, deployment_scope="all", switch_scope="all",
+                 dhcp_status="disabled", inputs=hashes,
+                 input_sources={"p2p": {"path": sources["p2p"], "sha256": hashes["p2p"]}},
+                 components={}, inventory=[])
+    release_id = hashlib.sha256(json.dumps(basis, sort_keys=True, ensure_ascii=False,
+                                          separators=(",", ":")).encode()).hexdigest()[:20]
+    parent = dict(basis, schema_version=2, release_id=release_id, validation="passed",
+                  generated_at="2026-10-07T12:00:00+08:00", input_paths=sources)
+    parent_candidate = api.prepare_current_release(project, parent)
+    generation = api.stage_pinned_generation(project, parent_candidate.temporary, None)
+    report = dict(schema_version=3, record_type="http-v3-public-key-generation-report",
+                  project=project.name, release_id=release_id,
+                  generated_at="2026-10-07T12:00:00+08:00", public_keys=[
+                      dict(role="laptop", name="laptop.pub", algorithm="ssh-ed25519",
+                           fingerprint="SHA256:MiTPEMIPDeIyBsV88xw/beaNZDfLZ3+t8BcYvmzNQqk"),
+                      dict(role="management", name="mgmt-server.pub", algorithm="ssh-ed25519",
+                           fingerprint="SHA256:I+cLpWGbiZDeDs5PZ1FV1vPBwzgMEST7Wjs4BUYKywU")])
+    report_candidate = api.generation_report.prepare_generation_report(project, report)
+    return parent_candidate, report_candidate, generation
+
+
 class ReleaseTransactionTests(unittest.TestCase):
+    def test_publication_cold_reader_rejects_foreign_original_candidates(self):
+        state, _context = self._prepare_persisted_a_runtime_switch()
+        journal, descriptor, backend = state[-3:]
+        parent, report, generation = private_publication_candidates(LOAD, state[1])
+        guard = dict(deployment_lock_descriptor=descriptor, services_quiesced=True, runtime_backend=backend)
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            token = LOAD.register_setup_switch_publication_bundle(parent, report, generation, guard=guard)
+            self.addCleanup(LOAD.close_setup_switch_publication_bundle, token)
+            cold = LOAD.open_setup_switch_publication_bundle(state[1], guard=guard)
+            self.addCleanup(LOAD.close_setup_switch_publication_bundle, cold)
+            self.assertEqual("parent", cold["phase"])
+            with self.assertRaisesRegex(LOAD.LoadError, "already-visible.*HOLD"):
+                LOAD.resume_setup_switch_publication_bundle(cold, guard=guard)
+            evidence = journal.read_bytes()
+            held = report.temporary.with_name(report.temporary.name + ".held-original")
+            report.temporary.rename(held)
+            report.temporary.write_bytes(held.read_bytes())
+            report.temporary.chmod(held.stat().st_mode & 0o777)
+            with self.assertRaisesRegex(LOAD.LoadError, "HOLD"):
+                LOAD.open_setup_switch_publication_bundle(state[1], guard=guard)
+            self.assertEqual(evidence, journal.read_bytes())
+            self.assertEqual(held.read_bytes(), report.temporary.read_bytes())
+            self.assertTrue(parent.temporary.is_file())
+            self.assertFalse(parent.destination.exists())
+            backend.start.assert_not_called()
+
+    def test_publication_guard_rechecks_original_wal_after_generation_inspection(self):
+        state, _context = self._prepare_persisted_a_runtime_switch()
+        journal, descriptor, backend = state[-3:]
+        candidates = private_publication_candidates(LOAD, state[1])
+        guard = dict(deployment_lock_descriptor=descriptor, services_quiesced=True, runtime_backend=backend)
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            token = LOAD.register_setup_switch_publication_bundle(*candidates, guard=guard)
+            self.addCleanup(LOAD.close_setup_switch_publication_bundle, token)
+            tree = LOAD._setup_switch_comparison_tree
+            original = journal.read_bytes()
+            changed = []
+            held = journal.with_name(journal.name + ".held-original")
+            def rebind_after_tree(path):
+                result = tree(path)
+                if not changed:
+                    journal.rename(held)
+                    journal.write_bytes(original)
+                    journal.chmod(0o600)
+                    changed.append(journal.stat().st_ino)
+                return result
+            with mock.patch.object(LOAD, "_setup_switch_comparison_tree", side_effect=rebind_after_tree):
+                with self.assertRaisesRegex(LOAD.LoadError, "HOLD"):
+                    LOAD.require_setup_switch_publication_bundle(token, guard=guard)
+            self.assertEqual(original, journal.read_bytes())
+            self.assertEqual(changed[0], journal.stat().st_ino)
+            self.assertTrue(held.is_file())
+            self.assertTrue(candidates[0].temporary.is_file())
+            self.assertFalse(candidates[0].destination.exists())
+
+    def test_setup_publication_selector_has_persisted_stage_and_cold_resume_keeps_wal(self):
+        state, _context = self._prepare_persisted_a_runtime_switch()
+        journal, descriptor, backend = state[-3:]
+        parent, report, generation = private_publication_candidates(LOAD, state[1])
+        guard = dict(deployment_lock_descriptor=descriptor, services_quiesced=True, runtime_backend=backend)
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            token = LOAD.register_setup_switch_publication_bundle(parent, report, generation, guard=guard)
+            self.addCleanup(LOAD.close_setup_switch_publication_bundle, token)
+            selector = json.loads(journal.read_bytes())["body"]["publication_bundle"]["selector"]
+            self.assertIn("staged", selector, "selector inode was never persisted before its shared replace")
+            staged = Path(selector["staged"]["path"])
+            self.assertTrue(staged.is_symlink())
+            self.assertEqual("generations/" + generation.name, os.readlink(staged))
+            self.assertEqual(staged.lstat().st_ino, selector["staged"]["identity"][1])
+            LOAD.commit_prepared_release(parent, require_authority=lambda:
+                LOAD.require_setup_switch_publication_bundle(token, guard=guard))
+            LOAD.close_setup_switch_publication_bundle(token)
+            evidence = journal.read_bytes()
+            cold = LOAD.open_setup_switch_publication_bundle(state[1], guard=guard)
+            self.addCleanup(LOAD.close_setup_switch_publication_bundle, cold)
+            self.assertEqual("report", cold["phase"])
+            LOAD.resume_setup_switch_publication_bundle(cold, guard=guard)
+            self.assertEqual("published", cold["phase"])
+            self.assertEqual(evidence, journal.read_bytes(), "publication is not B health acceptance or WAL retirement")
+            self.assertEqual(report.payload_sha256, sha256(report.destination))
+            self.assertEqual(selector["staged"]["identity"][1], (state[1] / "99-output-ztp/current").lstat().st_ino)
+            self.assertFalse(os.path.lexists(staged))
+            with self.assertRaisesRegex(LOAD.LoadError, "publication.*HOLD"):
+                LOAD.recover_setup_switch_journal(journal, restore_runtime_from_wal=True, **guard)
+            backend.start.assert_not_called()
+
+    def test_setup_publication_and_dhcp_share_original_extended_wal_owner(self):
+        state, _context = self._prepare_persisted_a_runtime_switch()
+        journal, descriptor, backend = state[-3:]
+        candidates = private_publication_candidates(LOAD, state[1])
+        guard = dict(deployment_lock_descriptor=descriptor, services_quiesced=True, runtime_backend=backend)
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "dhcp_file_mappings", return_value={
+                    self.root / "independent-source": self.root.resolve() / "private-etc-dhcp/dhcpd.conf"}):
+            token = LOAD.register_setup_switch_publication_bundle(*candidates, guard=guard)
+            self.addCleanup(LOAD.close_setup_switch_publication_bundle, token)
+            original_owner = token["identity"]
+            original_descriptor = token["descriptor"]
+            assert_private_dhcp_transaction_retention(
+                LOAD, self.root, state[1], "bound-setup-before-write", setup_guard=guard,
+                publication_candidates=(*candidates, token),
+            )
+            self.assertNotEqual(original_owner, token["identity"])
+            with self.assertRaises(OSError):
+                os.fstat(original_descriptor)
+            self.assertEqual(journal.read_bytes(), token["payload"])
+            body = json.loads(token["payload"])["body"]
+            self.assertIn("dhcp_transaction", body)
+            self.assertIn("publication_bundle", body)
+            LOAD.require_setup_switch_publication_bundle(token, guard=guard, phase="report")
+            LOAD.generation_report.commit_prepared_generation_report(candidates[1], require_authority=lambda:
+                LOAD.require_setup_switch_publication_bundle(token, guard=guard, phase="report"))
+            LOAD.require_setup_switch_publication_bundle(token, guard=guard, phase="selector")
+            receipt = Path(body["dhcp_transaction"]["receipt"])
+            held_receipt = receipt.with_name("independent-original-receipt")
+            receipt.rename(held_receipt)
+            receipt.write_bytes(held_receipt.read_bytes())
+            receipt.chmod(0o600)
+            with self.assertRaisesRegex(LOAD.LoadError, "HOLD"):
+                LOAD.require_setup_switch_publication_bundle(token, guard=guard, phase="selector")
+            self.assertEqual(held_receipt.read_bytes(), receipt.read_bytes())
+            backend.start.assert_not_called()
+
+    def test_main_cross_project_publication_registration_failure_retains_candidates(self):
+        active = self.root / "DAY0-Prepare/active"
+        active.mkdir()
+        context = LOAD.CrossProjectRollbackContext(
+            project=active.resolve(), selector_target="generations/" + "a" * 20,
+            runtime_receipt=active / "99-output-ztp/rollback-receipts" / ("a" * 20),
+            setup_state=mock.sentinel.setup_state,
+        )
+        generation = self.project / "99-output-ztp/generations" / ("b" * 20)
+        with mock.patch.object(LOAD, "prepare_cross_project_rollback_context",
+                               return_value=(None, context)), \
+                mock.patch.object(LOAD, "stage_pinned_generation", return_value=generation), \
+                mock.patch.object(LOAD, "restore_cross_project_rollback_context") as restore, \
+                mock.patch.object(LOAD, "register_setup_switch_publication_bundle",
+                                  side_effect=LOAD.LoadError("publication registration ambiguous; HOLD")) as register:
+            result, caught, candidate, *_rest = self._exercise_main_transaction_failure(
+                LOAD.LoadError("DHCP must not be reached"), active_project_value=active,
+                parent_schema_version=2, failure_at="publication",
+            )
+        self.assertEqual(1, result)
+        self.assertIsNone(caught)
+        register.assert_called_once()
+        self.assertIs(candidate, register.call_args.args[0])
+        self.assertEqual(generation, register.call_args.args[2])
+        self.assertEqual(91, register.call_args.kwargs["guard"]["deployment_lock_descriptor"])
+        self.assertTrue(candidate.temporary.is_file(), "ambiguous WAL registration destroyed its parent candidate")
+        self.assertFalse(candidate.destination.exists())
+        restore.assert_not_called()
+
+    def test_setup_publication_writer_guards_reject_before_report_and_selector_replace(self):
+        for phase in ("report", "selector"):
+            with self.subTest(phase=phase):
+                fixture = ReleaseTransactionTests()
+                fixture.setUp()
+                try:
+                    state, _context = fixture._prepare_persisted_a_runtime_switch()
+                    journal, descriptor, backend = state[-3:]
+                    parent, report, generation = private_publication_candidates(LOAD, state[1])
+                    guard = dict(deployment_lock_descriptor=descriptor, services_quiesced=True,
+                                 runtime_backend=backend)
+                    with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+                        token = LOAD.register_setup_switch_publication_bundle(parent, report, generation, guard=guard)
+                        fixture.addCleanup(LOAD.close_setup_switch_publication_bundle, token)
+                        LOAD.commit_prepared_release(parent, require_authority=lambda:
+                            LOAD.require_setup_switch_publication_bundle(token, guard=guard))
+                        if phase == "selector":
+                            LOAD.generation_report.commit_prepared_generation_report(report)
+                        original = journal.read_bytes()
+                        held = journal.with_name(journal.name + ".original")
+                        journal.rename(held)
+                        journal.write_bytes(original)
+                        journal.chmod(0o600)
+                        check = lambda: LOAD.require_setup_switch_publication_bundle(token, guard=guard, phase=phase)
+                        with self.assertRaisesRegex(LOAD.LoadError, "HOLD"):
+                            if phase == "report":
+                                LOAD.generation_report.commit_prepared_generation_report(report, require_authority=check)
+                            else:
+                                LOAD.commit_pinned_generation(state[1], generation, expected_current=None,
+                                                              require_authority=check)
+                        self.assertEqual(original, journal.read_bytes())
+                        self.assertTrue(held.is_file())
+                        self.assertFalse((state[1] / "99-output-ztp/current").exists())
+                        if phase == "report":
+                            self.assertTrue(report.temporary.is_file())
+                            self.assertFalse(report.destination.exists())
+                        backend.start.assert_not_called()
+                finally:
+                    fixture.doCleanups()
+                    fixture.tearDown()
+
+    def test_setup_publication_bundle_persists_before_parent_and_legacy_recovery_holds(self):
+        state, _context = self._prepare_persisted_a_runtime_switch()
+        journal, descriptor, backend = state[-3:]
+        candidates = private_publication_candidates(LOAD, state[1])
+        guard = dict(deployment_lock_descriptor=descriptor, services_quiesced=True,
+                     runtime_backend=backend)
+        register = getattr(LOAD, "register_setup_switch_publication_bundle", None)
+        self.assertTrue(callable(register), "parent/report/selector have no persisted SETUP write obligation")
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            token = register(*candidates, guard=guard)
+            self.addCleanup(LOAD.close_setup_switch_publication_bundle, token)
+            body = json.loads(journal.read_bytes())["body"]
+            binding = body["publication_bundle"]
+            self.assertEqual({"parent", "report", "generation", "selector"}, set(binding))
+            for key, candidate in zip(("parent", "report"), candidates[:2]):
+                self.assertEqual(str(candidate.destination), binding[key]["destination"])
+                self.assertEqual(str(candidate.temporary), binding[key]["temporary"])
+                self.assertEqual(candidate.temporary.read_bytes(),
+                                 base64.b64decode(binding[key]["candidate"]["payload"]))
+                self.assertEqual(hashlib.sha256(candidate.temporary.read_bytes()).hexdigest(),
+                                 binding[key]["candidate"]["sha256"])
+                self.assertFalse(candidate.destination.exists())
+            self.assertEqual("generations/" + candidates[2].name, binding["selector"]["after"])
+            evidence = journal.read_bytes()
+            with self.assertRaisesRegex(LOAD.LoadError, "publication.*HOLD"):
+                LOAD.recover_setup_switch_journal(journal, restore_runtime_from_wal=True, **guard)
+            self.assertEqual(evidence, journal.read_bytes())
+            self.assertTrue(candidates[0].temporary.is_file())
+            self.assertTrue(candidates[1].temporary.is_file())
+            backend.start.assert_not_called()
+
+    def test_setup_publication_bundle_rejects_late_same_byte_wal_and_candidate_owner(self):
+        for changed in ("wal", "candidate"):
+            with self.subTest(changed=changed):
+                fixture = ReleaseTransactionTests()
+                fixture.setUp()
+                try:
+                    state, _context = fixture._prepare_persisted_a_runtime_switch()
+                    journal, descriptor, backend = state[-3:]
+                    candidates = private_publication_candidates(LOAD, state[1])
+                    guard = dict(deployment_lock_descriptor=descriptor, services_quiesced=True,
+                                 runtime_backend=backend)
+                    register = getattr(LOAD, "register_setup_switch_publication_bundle", None)
+                    self.assertTrue(callable(register), "publication WAL registration is absent")
+                    original_sync = LOAD.os.fsync
+                    injected = []
+
+                    def rebind_at_sync(fd):
+                        result = original_sync(fd)
+                        if not injected and stat.S_ISREG(os.fstat(fd).st_mode):
+                            path = journal if changed == "wal" else candidates[1].temporary
+                            old = path.stat()
+                            held = path.with_name(path.name + ".held-original")
+                            path.rename(held)
+                            path.write_bytes(held.read_bytes())
+                            path.chmod(stat.S_IMODE(old.st_mode))
+                            os.utime(path, ns=(old.st_atime_ns, old.st_mtime_ns))
+                            injected.append((path, path.stat().st_ino, path.read_bytes(), held))
+                        return result
+
+                    with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                            mock.patch.object(LOAD.os, "fsync", side_effect=rebind_at_sync):
+                        with self.assertRaisesRegex(LOAD.LoadError, "HOLD"):
+                            register(*candidates, guard=guard)
+                    self.assertEqual(1, len(injected))
+                    path, inode, content, held = injected[0]
+                    self.assertEqual(inode, path.stat().st_ino)
+                    self.assertEqual(content, path.read_bytes())
+                    self.assertTrue(held.exists())
+                    self.assertFalse(candidates[0].destination.exists())
+                    self.assertFalse(candidates[1].destination.exists())
+                    backend.start.assert_not_called()
+                finally:
+                    fixture.doCleanups()
+                    fixture.tearDown()
+
     def test_native_listener_late_original_rebind_holds_before_backup_or_b_write(self):
         for prior_exists in (True, False):
             with self.subTest(prior_exists=prior_exists), tempfile.TemporaryDirectory() as name:
@@ -1982,7 +2297,7 @@ class ReleaseTransactionTests(unittest.TestCase):
                 result = LOAD.main([] if argv is None else argv)
             except BaseException as exc:  # Assert propagation after cleanup below.
                 caught = exc
-            if failure_at in {"dhcp", "template", "parent_sync"}:
+            if failure_at in {"dhcp", "template", "parent_sync", "publication"}:
                 report_commit.assert_not_called()
             else:
                 report_commit.assert_called_once_with(staged_report)
@@ -2001,11 +2316,16 @@ class ReleaseTransactionTests(unittest.TestCase):
                     published_dir=LOAD.ZTP_DIR / "config/publickey",
                 )
                 report_stage.assert_called_once_with(self.project, report_payload)
-                report_discard.assert_called_once_with(staged_report)
+                if failure_at == "publication":
+                    report_discard.assert_not_called()
+                else:
+                    report_discard.assert_called_once_with(staged_report)
                 expected = [
                     "parent-validate", "parent-stage", "report-build",
                     "report-stage", "dhcp-transaction", "report-discard",
                 ]
+                if failure_at == "publication":
+                    expected = ["parent-validate", "parent-stage", "report-build", "report-stage"]
                 self.assertEqual(expected, transaction_events)
             else:
                 parent_validate.assert_not_called()

@@ -1634,6 +1634,23 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 ## TC-REAL-R22-GENERATION-INPUT-ABA-001 — 跨进程输入换代与多输出一致性
 
+- SETUP 发布组 WAL / 停服冷续提交补充：父记录、report 原前像/候选及
+  generation 完整树在首个发布写前持久登记；selector 使用预先 fsync 的唯一暂存
+  symlink，其原 inode 与 raw target 同时登记。DHCP 义务存在时，扩展原 WAL 并
+  持有原 receipt FD，不允许同字节外来 WAL/receipt 取得权限。direct 覆盖晚换绑、
+  深层 generation 读取后换绑、登记失败保留及未提交父记录禁止续提交；真实私有
+  LOAD→SETUP→发布进程在 parent/report/selector replace 后强杀，再由新进程读取
+  原磁盘证据、续提交原 B report/selector。要求服务保持停止、不重新生成、不回滚
+  P、不退休 WAL，成功结果仅为 `published-stopped-wal-retained`。
+  现场前置为本卡另行授权的隔离 Linux VM、精确代码版本、原 A 与共享目录的
+  root-only 可恢复备份、排他锁和正常写者静默。记录 WAL/receipt/candidate/selector
+  原 FD 与名称 stat/SHA、三处强杀与新进程续提交的物理顺序、完整 END/exit；
+  断电场景需另留 fsync 持久化见证。失败保留原证据、外来对象和所有候选，不以
+  删除同名对象解围；人工按确切备份恢复后核验清理。风险：多处 rename 不是原子
+  group commit，非合作写者仍可能在检查与写之间竞态。此项不授权服务启动，
+  不代表完整共享写集验收、B health finalizer、旧 A 显式安全激活、Linux/root/
+  断电或 DEV ACK 已闭；这些仍 OPEN，局部 PASS 不等于正式 full/check。
+
 - generation report 暂存前像与清理补充：direct 覆盖 prepare 完成后的同 inode
   改写、同字节写回并恢复 mtime，以及 held 输出目录打开后的晚改写，commit/discard
   均须拒绝；真实私有 SETUP→LOAD→report prepare→commit 拒绝→finally discard

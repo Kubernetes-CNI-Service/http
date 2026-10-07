@@ -4914,9 +4914,12 @@ def stage_pinned_generation(
 
 
 def commit_pinned_generation(
-    project: Path, generation: Path, *, expected_current: str | None,
+    project: Path, generation: Path, *, expected_current: str | None, require_authority=None,
+    prepared_selector=None,
 ) -> None:
     """Make one already-frozen generation visible with one atomic link replace."""
+    if require_authority is not None:
+        require_authority()
     output = project.resolve(strict=True) / "99-output-ztp"
     if (generation.parent != output / "generations"
             or not re.fullmatch(r"[0-9a-f]{20}", generation.name)
@@ -4946,15 +4949,23 @@ def commit_pinned_generation(
             != expected_current):
         raise LoadError("generation selector changed before commit")
     target = f"generations/{generation.name}"
-    temporary = output / f".current-{secrets.token_hex(16)}"
+    temporary = (output / f".current-{secrets.token_hex(16)}" if prepared_selector is None
+                 else Path(prepared_selector["path"]))
     temporary_identity = None
     try:
-        temporary.symlink_to(target)
+        if prepared_selector is None:
+            temporary.symlink_to(target)
+        elif (temporary.parent != output or re.fullmatch(r"\.current-[0-9a-f]{32}", temporary.name) is None
+              or _setup_publication_selector(temporary) != {
+                  "identity": prepared_selector["identity"], "target": target}):
+            raise LoadError("persisted selector stage changed; HOLD")
         temporary_identity = temporary.lstat()
         if (not stat.S_ISLNK(temporary_identity.st_mode)
                 or temporary_identity.st_nlink != 1
                 or os.readlink(temporary) != target):
             raise LoadError("generation selector temporary changed before commit")
+        if require_authority is not None:
+            require_authority()
         os.replace(temporary, selector)
         descriptor = os.open(output, os.O_RDONLY)
         try:
@@ -4964,7 +4975,7 @@ def commit_pinned_generation(
     finally:
         # A failed exclusive create grants no ownership of the colliding name.
         # Likewise, a failed replace must not clean up a later foreign object.
-        if temporary_identity is not None:
+        if temporary_identity is not None and prepared_selector is None:
             try:
                 remaining = temporary.lstat()
             except FileNotFoundError:
@@ -6493,7 +6504,7 @@ def _decode_setup_switch_journal(payload: bytes) -> dict[str, object]:
                 "manifest", "manifest_sha256", "manifest_mode", "links", "q_parent_preimage"}
     optional = {"allow_late_q_values", "q_local_links", "created_directories", "q_created_directories",
                 "directories", "infra_logs", "q_manifest_intent", "comparison_transfers", "a_runtime",
-                "dhcp_transaction"}
+                "dhcp_transaction", "publication_bundle"}
     if isinstance(body, dict) and "q_parent_preimage" not in body:
         raise ValueError("journal Q parent preimage is missing; HOLD")
     if (not isinstance(body, dict) or not required <= set(body)
@@ -6511,6 +6522,8 @@ def _decode_setup_switch_journal(payload: bytes) -> dict[str, object]:
         "comparison_transfers": {"source", "source_parent", "destination", "destination_parent", "tree"},
     }
     directory_fields = {"path", "dev", "ino"}
+    if "publication_bundle" in body:
+        _validate_setup_publication_bundle_shape(body["publication_bundle"])
     if "dhcp_transaction" in body:
         binding = body["dhcp_transaction"]
         exact_fields(binding, {"receipt", "identity", "sha256", "body", "staged"}, "DHCP transaction")
@@ -6575,6 +6588,397 @@ def _decode_setup_switch_journal(payload: bytes) -> dict[str, object]:
     # The existing recovery code separately checks schema, checksum, types,
     # exact Q parent preimage, disk state and held authority before any write.
     return envelope
+
+
+def _validate_setup_publication_bundle_shape(bundle):
+    """Closed persisted parent/report/selector contract, never ignored fields."""
+    def fields(value, expected):
+        if not isinstance(value, dict) or set(value) != expected:
+            raise ValueError("unknown or missing publication bundle fields; HOLD")
+
+    def file_record(value):
+        fields(value, {"identity", "sha256", "payload", "mode"})
+        if (not isinstance(value["identity"], list) or len(value["identity"]) != 9
+                or any(type(n) is not int or n < 0 for n in value["identity"])
+                or type(value["mode"]) is not int or value["mode"] not in (0o600, 0o644)
+                or not isinstance(value["payload"], str)
+                or not isinstance(value["sha256"], str)
+                or re.fullmatch(r"[0-9a-f]{64}", value["sha256"]) is None):
+            raise ValueError("invalid publication file binding; HOLD")
+        payload = base64.b64decode(value["payload"], validate=True)
+        if len(payload) > _ROLLBACK_PAYLOAD_LIMIT or hashlib.sha256(payload).hexdigest() != value["sha256"]:
+            raise ValueError("publication payload digest/bound differs; HOLD")
+
+    fields(bundle, {"parent", "report", "generation", "selector"})
+    for key in ("parent", "report"):
+        row = bundle[key]
+        fields(row, {"destination", "temporary", "parent", "candidate", "before"})
+        fields(row["parent"], {"path", "dev", "ino"})
+        file_record(row["candidate"])
+        if row["before"] is not None:
+            file_record(row["before"])
+    fields(bundle["generation"], {"path", "parent", "tree"})
+    fields(bundle["generation"]["parent"], {"path", "dev", "ino"})
+    fields(bundle["selector"], {"path", "parent", "before", "after", "staged"})
+    fields(bundle["selector"]["parent"], {"path", "dev", "ino"})
+    fields(bundle["selector"]["staged"], {"path", "identity", "target"})
+    staged_identity = bundle["selector"]["staged"]["identity"]
+    if (not isinstance(staged_identity, list) or len(staged_identity) != 9
+            or any(type(n) is not int or n < 0 for n in staged_identity)):
+        raise ValueError("invalid publication staged selector identity; HOLD")
+    if bundle["selector"]["before"] is not None:
+        fields(bundle["selector"]["before"], {"identity", "target"})
+        identity = bundle["selector"]["before"]["identity"]
+        if (not isinstance(identity, list) or len(identity) != 9
+                or any(type(n) is not int or n < 0 for n in identity)):
+            raise ValueError("invalid publication selector identity; HOLD")
+
+
+def _setup_publication_file(path, *, missing_ok=False):
+    """Freeze one bounded no-follow file without adopting a read-time owner."""
+    descriptor = -1
+    try:
+        try:
+            before = path.lstat()
+        except FileNotFoundError:
+            if missing_ok:
+                return None
+            raise
+        identity = _dhcp_a_preimage_receipt_identity(before)
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+                             | getattr(os, "O_NONBLOCK", 0))
+        opened = _read_rollback_regular(path, limit=_ROLLBACK_PAYLOAD_LIMIT)
+        if (opened is None or opened[1] not in (0o600, 0o644)
+                or not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+                or identity != _dhcp_a_preimage_receipt_identity(os.fstat(descriptor))
+                or identity != _dhcp_a_preimage_receipt_identity(path.lstat())):
+            raise LoadError("publication file owner changed; HOLD")
+        return {"identity": list(identity), "sha256": hashlib.sha256(opened[0]).hexdigest(),
+                "payload": base64.b64encode(opened[0]).decode("ascii"), "mode": opened[1]}
+    except (OSError, ValueError) as exc:
+        raise LoadError(f"publication file cannot be frozen; HOLD: {exc}") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _setup_publication_selector(path):
+    try:
+        before = path.lstat()
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISLNK(before.st_mode) or before.st_nlink != 1:
+        raise LoadError("publication selector is not an owned link; HOLD")
+    target = os.readlink(path)
+    if (re.fullmatch(r"generations/[0-9a-f]{20}", target) is None
+            or _dhcp_a_preimage_receipt_identity(before) != _dhcp_a_preimage_receipt_identity(path.lstat())):
+        raise LoadError("publication selector target/identity changed; HOLD")
+    return {"identity": list(_dhcp_a_preimage_receipt_identity(before)), "target": target}
+
+
+def _require_setup_publication_state(body, *, phase="parent"):
+    """Authorize only the next declared write, not service start or retirement."""
+    bundle = body["publication_bundle"]
+    _validate_setup_publication_bundle_shape(bundle)
+    project = Path(body["new_project"]["path"])
+    output = project / "99-output-ztp"
+    if phase not in {"parent", "report", "selector", "published"}:
+        raise LoadError("ambiguous publication phase; HOLD")
+    for key, basename in (("parent", "current-release.json"), ("report", "generation-report.json")):
+        row = bundle[key]
+        destination, temporary = Path(row["destination"]), Path(row["temporary"])
+        if (destination != output / basename or temporary.parent != output
+                or not temporary.name.startswith(".current-release." if key == "parent" else ".generation-report.")
+                or not temporary.name.endswith(".tmp")
+                or row["parent"] != _setup_switch_link_parent_identity(destination)
+                or destination.parent.resolve(strict=True) != output):
+            raise LoadError("publication names/parent differ from original Q; HOLD")
+        published = key == "parent" and phase != "parent" or key == "report" and phase in {"selector", "published"}
+        current = _setup_publication_file(destination, missing_ok=True)
+        if published:
+            expected = row["candidate"]
+            # Rename legitimately changes ctime. The original inode, all other
+            # metadata and exact bytes must continue; no byte-only adoption.
+            if (current is None or os.path.lexists(temporary)
+                    or current["identity"][:-1] != expected["identity"][:-1]
+                    or any(current[k] != expected[k] for k in ("sha256", "payload", "mode"))):
+                raise LoadError("publication committed owner differs; HOLD")
+        elif current != row["before"] or _setup_publication_file(temporary) != row["candidate"]:
+            raise LoadError("publication original candidate/preimage changed; HOLD")
+    generation = bundle["generation"]
+    directory = Path(generation["path"])
+    parent = json.loads(base64.b64decode(bundle["parent"]["candidate"]["payload"], validate=True))
+    if (directory != output / "generations" / parent["release_id"]
+            or generation["parent"] != _setup_switch_link_parent_identity(directory)
+            or _setup_switch_comparison_tree(directory) != generation["tree"]
+            or (directory / "current-release.json").read_bytes()
+            != base64.b64decode(bundle["parent"]["candidate"]["payload"], validate=True)):
+        raise LoadError("publication generation changed; HOLD")
+    selector = bundle["selector"]
+    path = Path(selector["path"])
+    if (path != output / "current" or selector["parent"] != _setup_switch_link_parent_identity(path)
+            or selector["after"] != "generations/" + directory.name):
+        raise LoadError("publication selector original preimage changed; HOLD")
+    staged = selector["staged"]
+    temporary = Path(staged["path"])
+    if (temporary.parent != output or re.fullmatch(r"\.current-[0-9a-f]{32}", temporary.name) is None
+            or staged["target"] != selector["after"]):
+        raise LoadError("publication staged selector names differ; HOLD")
+    if phase == "published":
+        installed = _setup_publication_selector(path)
+        if (installed is None or installed["target"] != staged["target"] or os.path.lexists(temporary)
+                or installed["identity"][:-1] != staged["identity"][:-1]):
+            raise LoadError("publication installed selector owner differs; HOLD")
+    elif (_setup_publication_selector(path) != selector["before"]
+          or _setup_publication_selector(temporary) != {"identity": staged["identity"], "target": staged["target"]}):
+        raise LoadError("publication staged selector/preimage changed; HOLD")
+
+
+def require_setup_switch_publication_bundle(token, *, guard, phase="parent"):
+    _require_runtime_restore_guard(**guard)
+    try:
+        journal = token["journal"]
+        def require_original_wal():
+            if (token["parent"] != _setup_switch_link_parent_identity(journal)
+                    or token["identity"] != _dhcp_a_preimage_receipt_identity(journal.lstat())
+                    or token["identity"] != _dhcp_a_preimage_receipt_identity(os.fstat(token["descriptor"]))
+                    or _read_rollback_regular(journal, limit=_SETUP_SWITCH_JOURNAL_LIMIT) != (token["payload"], 0o600)
+                    or token["identity"] != _dhcp_a_preimage_receipt_identity(journal.lstat())
+                    or token["identity"] != _dhcp_a_preimage_receipt_identity(os.fstat(token["descriptor"]))):
+                raise LoadError("publication original WAL owner changed; HOLD")
+        require_original_wal()
+        body = _setup_switch_prepared_registration_body((token["payload"], 0o600))
+        def require_original_directories():
+            if (body["root"] != _setup_switch_directory_identity(HTTP_ROOT)
+                    or any(body[key] != _setup_switch_directory_identity(Path(body[key]["path"]))
+                           for key in ("old_project", "new_project"))):
+                raise LoadError("publication original P/Q/root directory identity changed; HOLD")
+            _setup_switch_runtime_context(body)
+        require_original_directories()
+        if phase == "parent":
+            _require_setup_switch_q_parent_preimage(body)
+        _require_setup_publication_state(body, phase=phase)
+        if "dhcp_transaction" in body:
+            binding = body["dhcp_transaction"]
+            receipt = Path(binding["receipt"])
+            held_receipt = token.get("receipt_descriptor", -1)
+            _require_bound_dhcp_transaction_namespace(binding)
+            if (held_receipt < 0
+                    or list(_dhcp_a_preimage_receipt_identity(os.fstat(held_receipt))) != binding["identity"]
+                    or list(_dhcp_a_preimage_receipt_identity(receipt.lstat())) != binding["identity"]
+                    or _setup_switch_directory_identity(receipt.parent / "staged") != binding["staged"]):
+                raise LoadError("publication original DHCP receipt/staged owner changed; HOLD")
+            payload, mode = _read_rollback_regular(receipt, limit=_ROLLBACK_MARKER_LIMIT)
+            if mode != 0o600 or hashlib.sha256(payload).hexdigest() != binding["sha256"]:
+                raise LoadError("publication original DHCP receipt bytes changed; HOLD")
+            evidence = inspect_dhcp_a_preimage(receipt.parent, runtime_directory=receipt.parent.parent,
+                                             parent_destination=Path(body["publication_bundle"]["parent"]["destination"]))
+            if (evidence["body"] != binding["body"]
+                    or evidence["parent_visibility"] != ("a-visible" if phase == "parent" else "b-visible")
+                    or phase != "parent" and set(evidence["runtime_visibility"].values()) != {"b"}):
+                raise LoadError("publication original DHCP group is not the declared A/B phase; HOLD")
+            # Deep inspection must not lend authority to a replacement receipt
+            # inserted after its opening check, even when its bytes match.
+            if (list(_dhcp_a_preimage_receipt_identity(os.fstat(held_receipt))) != binding["identity"]
+                    or list(_dhcp_a_preimage_receipt_identity(receipt.lstat())) != binding["identity"]):
+                raise LoadError("publication original DHCP receipt owner changed during inspection; HOLD")
+        require_original_wal()
+        require_original_directories()
+        _require_runtime_restore_guard(**guard)
+    except (KeyError, TypeError, ValueError, OSError, RuntimeError) as exc:
+        raise LoadError(f"publication authority invalid; HOLD: {exc}") from exc
+
+
+def close_setup_switch_publication_bundle(token):
+    if token is not None and token["descriptor"] >= 0:
+        os.close(token["descriptor"])
+        token["descriptor"] = -1
+    if token is not None and token.get("receipt_descriptor", -1) >= 0:
+        os.close(token["receipt_descriptor"])
+        token["receipt_descriptor"] = -1
+
+
+def open_setup_switch_publication_bundle(project, *, guard):
+    """Hold the original disk WAL and classify one exact stopped publication state.
+
+    This grants no service start, A rollback or evidence retirement. A visible
+    parent may only advance its original report/selector, never regenerate B.
+    """
+    _require_runtime_restore_guard(**guard)
+    journal = _setup_switch_journal_path()
+    fd = -1
+    receipt_fd = -1
+    try:
+        before = _dhcp_a_preimage_receipt_identity(journal.lstat())
+        fd = os.open(journal, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0))
+        opened = _read_rollback_regular(journal, limit=_SETUP_SWITCH_JOURNAL_LIMIT)
+        body = _setup_switch_prepared_registration_body(opened)
+        if ("publication_bundle" not in body or body["new_project"] != _setup_switch_directory_identity(Path(project))
+                or before != _dhcp_a_preimage_receipt_identity(os.fstat(fd))
+                or before != _dhcp_a_preimage_receipt_identity(journal.lstat())):
+            raise LoadError("publication original disk owner or requested Q differs; HOLD")
+        token = dict(journal=journal, descriptor=fd, identity=before, payload=opened[0],
+                     parent=_setup_switch_link_parent_identity(journal))
+        if "dhcp_transaction" in body:
+            receipt_fd = os.open(Path(body["dhcp_transaction"]["receipt"]), os.O_RDONLY | os.O_NOFOLLOW
+                                 | getattr(os, "O_NONBLOCK", 0))
+            token["receipt_descriptor"] = receipt_fd
+        phases = []
+        for phase in ("parent", "report", "selector", "published"):
+            try:
+                require_setup_switch_publication_bundle(token, guard=guard, phase=phase)
+            except LoadError:
+                continue
+            phases.append(phase)
+        if len(phases) != 1:
+            raise LoadError("publication disk phase unknown or ambiguous; HOLD original WAL and candidates")
+        token["phase"] = phases[0]
+        fd = -1
+        receipt_fd = -1
+        return token
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise LoadError(f"publication disk evidence unavailable; HOLD: {exc}") from exc
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        if receipt_fd >= 0:
+            os.close(receipt_fd)
+
+
+def resume_setup_switch_publication_bundle(token, *, guard):
+    """Complete only a committed parent's original report/selector, still stopped.
+
+    Evidence remains pending until the separate whole-write-set B health
+    acceptance. No service, generation, rollback, network or cleanup occurs.
+    """
+    phase = token["phase"]
+    if phase not in {"report", "selector", "published"}:
+        raise LoadError("publication resume requires an already-visible original B parent; HOLD")
+    require_setup_switch_publication_bundle(token, guard=guard, phase=phase)
+    body = _setup_switch_prepared_registration_body((token["payload"], 0o600))
+    bundle = body["publication_bundle"]
+    # Even a previous replace whose directory sync was interrupted owes sync.
+    output = Path(bundle["parent"]["destination"]).parent
+    _fsync_parent_directory(output)
+    require_setup_switch_publication_bundle(token, guard=guard, phase=phase)
+    if phase == "report":
+        row = bundle["report"]
+        def report_identity(identity):
+            return (identity[0], identity[1], identity[2], identity[5], identity[3], identity[4],
+                    identity[6], identity[7], identity[8])
+        candidate = generation_report.PreparedGenerationReport(
+            destination=Path(row["destination"]), temporary=Path(row["temporary"]),
+            directory_identity=(row["parent"]["dev"], row["parent"]["ino"]),
+            temporary_identity=report_identity(row["candidate"]["identity"]),
+            old_identity=(report_identity(row["before"]["identity"]) if row["before"] is not None else None),
+            payload_sha256=row["candidate"]["sha256"],
+        )
+        generation_report.commit_prepared_generation_report(candidate, require_authority=lambda:
+            require_setup_switch_publication_bundle(token, guard=guard, phase="report"))
+        phase = token["phase"] = "selector"
+    if phase == "selector":
+        selector = bundle["selector"]
+        commit_pinned_generation(Path(body["new_project"]["path"]), Path(bundle["generation"]["path"]),
+            expected_current=(selector["before"]["target"] if selector["before"] is not None else None),
+            require_authority=lambda: require_setup_switch_publication_bundle(token, guard=guard, phase="selector"),
+            prepared_selector=selector["staged"])
+        phase = token["phase"] = "published"
+    _fsync_parent_directory(output)
+    require_setup_switch_publication_bundle(token, guard=guard, phase=phase)
+    return "published-stopped-wal-retained"
+
+
+def register_setup_switch_publication_bundle(parent_candidate, report_candidate, generation, *, guard):
+    """Fsync the complete prospective publication group before its first write."""
+    _require_runtime_restore_guard(**guard)
+    journal = _setup_switch_journal_path()
+    descriptor = staged_fd = -1
+    temporary = None
+    staged_identity = None
+    try:
+        before = _dhcp_a_preimage_receipt_identity(journal.lstat())
+        descriptor = os.open(journal, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0))
+        opened = _read_rollback_regular(journal, limit=_SETUP_SWITCH_JOURNAL_LIMIT)
+        body = dict(_setup_switch_prepared_registration_body(opened))
+        parent = _setup_switch_link_parent_identity(journal)
+        if "publication_bundle" in body or "dhcp_transaction" in body or parent_candidate.committed:
+            raise LoadError("publication registration requires original prewrite Q; HOLD")
+        recover_setup_switch_journal(journal, inspect_only=True, **guard)
+        project = parent_candidate.destination.parent.parent
+        if body["new_project"] != _setup_switch_directory_identity(project):
+            raise LoadError("publication Q differs from original WAL; HOLD")
+        rows = {}
+        for key, candidate in (("parent", parent_candidate), ("report", report_candidate)):
+            rows[key] = {"destination": str(candidate.destination), "temporary": str(candidate.temporary),
+                         "parent": _setup_switch_link_parent_identity(candidate.destination),
+                         "candidate": _setup_publication_file(candidate.temporary),
+                         "before": _setup_publication_file(candidate.destination, missing_ok=True)}
+        report = json.loads(base64.b64decode(rows["report"]["candidate"]["payload"], validate=True))
+        generation_report._validate_report_shape(report, project)
+        if (report["release_id"] != parent_candidate.release_id or generation.name != parent_candidate.release_id
+                or generation_report._report_preimage_identity(report_candidate.temporary.lstat())
+                != report_candidate.temporary_identity
+                or generation_report._existing_report_identity(report_candidate.destination, project)
+                != report_candidate.old_identity):
+            raise LoadError("publication report differs from original preparation; HOLD")
+        _pinned_generation_payloads(project, generation / "current-release.json",
+                                    generation / "dhcp" if (generation / "dhcp").is_dir() else None)
+        selector = project / "99-output-ztp/current"
+        selector_stage = selector.parent / f".current-{secrets.token_hex(16)}"
+        selector_stage.symlink_to("generations/" + generation.name)
+        selector_owner = _setup_publication_selector(selector_stage)
+        _fsync_parent_directory(selector.parent)
+        body["publication_bundle"] = dict(
+            rows, generation={"path": str(generation), "parent": _setup_switch_link_parent_identity(generation),
+                              "tree": _setup_switch_comparison_tree(generation)},
+            selector={"path": str(selector), "parent": _setup_switch_link_parent_identity(selector),
+                      "before": _setup_publication_selector(selector), "after": "generations/" + generation.name,
+                      "staged": dict(selector_owner, path=str(selector_stage))})
+
+        def require_original():
+            _require_runtime_restore_guard(**guard)
+            if (before != _dhcp_a_preimage_receipt_identity(journal.lstat())
+                    or before != _dhcp_a_preimage_receipt_identity(os.fstat(descriptor))
+                    or parent != _setup_switch_link_parent_identity(journal)
+                    or _read_rollback_regular(journal, limit=_SETUP_SWITCH_JOURNAL_LIMIT) != opened):
+                raise LoadError("publication original WAL changed before registration; HOLD")
+            _require_setup_switch_q_parent_preimage(body)
+            _require_setup_publication_state(body)
+
+        require_original()
+        payload = _setup_switch_canonical_payload({"body": body,
+            "sha256": hashlib.sha256(_setup_switch_canonical_payload(body)).hexdigest()}) + b"\n"
+        if len(payload) > _SETUP_SWITCH_JOURNAL_LIMIT:
+            raise LoadError("publication WAL exceeds bound; HOLD")
+        fd, name = tempfile.mkstemp(prefix=".setup-switch-journal.", dir=journal.parent)
+        temporary = Path(name)
+        with os.fdopen(fd, "wb") as stream:
+            staged_fd = os.dup(stream.fileno())
+            stream.write(payload)
+            stream.flush()
+            staged_identity = _dhcp_a_preimage_receipt_identity(os.fstat(staged_fd))
+            os.fsync(stream.fileno())
+        require_original()
+        if (staged_identity != _dhcp_a_preimage_receipt_identity(temporary.lstat())
+                or staged_identity != _dhcp_a_preimage_receipt_identity(os.fstat(staged_fd))
+                or _read_rollback_regular(temporary, limit=_SETUP_SWITCH_JOURNAL_LIMIT) != (payload, 0o600)):
+            raise LoadError("publication registration stage changed; HOLD")
+        os.replace(temporary, journal)
+        token = dict(journal=journal, payload=payload, parent=parent, descriptor=staged_fd,
+                     identity=_dhcp_a_preimage_receipt_identity(os.fstat(staged_fd)))
+        _fsync_parent_directory(journal.parent)
+        require_setup_switch_publication_bundle(token, guard=guard)
+        staged_fd = -1
+        return token
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise LoadError(f"publication registration unconfirmed; HOLD: {exc}") from exc
+    finally:
+        if (temporary is not None and os.path.lexists(temporary) and staged_identity is not None
+                and staged_identity == _dhcp_a_preimage_receipt_identity(temporary.lstat())):
+            temporary.unlink()
+        for fd in (descriptor, staged_fd):
+            if fd >= 0:
+                os.close(fd)
 
 
 def _setup_switch_q_target(target: Path, project: Path) -> Path:
@@ -8828,6 +9232,12 @@ def _recover_setup_switch_journal_snapshot(
     except (KeyError, TypeError, ValueError, UnicodeError, binascii.Error, LoadError) as exc:
         raise LoadError(f"setup switch journal is invalid: {exc}") from exc
     runtime_context = _setup_switch_runtime_context(body, state)
+    if "publication_bundle" in body:
+        # Existing P/A readers have no authority to retire, discard or undo
+        # this publication group, especially after visible Q parent commit.
+        if not inspect_only:
+            raise LoadError("SETUP publication recovery is unresolved; HOLD original WAL and candidates")
+        _require_setup_publication_state(body)
     group_token = None
     if "dhcp_transaction" in body and not recover_dhcp_group:
         # This original write obligation cannot be silently ignored by the
@@ -10264,7 +10674,7 @@ def _restore_setup_switch_dhcp_group(token, guard, require_authority):
         _setup_switch_prepared_registration_body((token[1], 0o600))["dhcp_transaction"])
 
 
-def _register_setup_switch_dhcp_transaction(preimage, parent_candidate, guard):
+def _register_setup_switch_dhcp_transaction(preimage, parent_candidate, guard, *, publication_token=None):
     """Fsync original SETUP -> DHCP ownership before any live B overwrite.
 
     Return held original WAL/receipt descriptors. The caller must keep them
@@ -10287,6 +10697,10 @@ def _register_setup_switch_dhcp_transaction(preimage, parent_candidate, guard):
         opened = _read_rollback_regular(journal, limit=_SETUP_SWITCH_JOURNAL_LIMIT)
         body = dict(_setup_switch_prepared_registration_body(opened))
         wal_parent = _setup_switch_link_parent_identity(journal)
+        if ("publication_bundle" in body) != (publication_token is not None):
+            raise LoadError("SETUP/DHCP publication requires its original held owner; HOLD")
+        if publication_token is not None:
+            require_setup_switch_publication_bundle(publication_token, guard=guard)
         if (not stat.S_ISREG(before[2]) or before[5] != 1
                 or before != _dhcp_a_preimage_receipt_identity(os.fstat(wal_fd))
                 or "dhcp_transaction" in body):
@@ -10322,6 +10736,8 @@ def _register_setup_switch_dhcp_transaction(preimage, parent_candidate, guard):
 
         def require_original():
             _require_runtime_restore_guard(**guard)
+            if publication_token is not None:
+                require_setup_switch_publication_bundle(publication_token, guard=guard)
             if (wal_parent != _setup_switch_link_parent_identity(journal)
                     or before != _dhcp_a_preimage_receipt_identity(journal.lstat())
                     or before != _dhcp_a_preimage_receipt_identity(os.fstat(wal_fd))
@@ -10364,6 +10780,27 @@ def _register_setup_switch_dhcp_transaction(preimage, parent_candidate, guard):
         _fsync_parent_directory(journal.parent)
         token = (journal, payload, installed_identity, wal_parent, staged_fd, preimage, receipt_fd)
         _require_setup_switch_dhcp_transaction(token, guard)
+        if publication_token is not None:
+            # This is the same invocation's verified atomic WAL extension,
+            # not an adoption of a receipt found at a later disk name.
+            extended_fd = os.dup(staged_fd)
+            try:
+                extended_receipt = os.dup(receipt_fd)
+            except BaseException:
+                os.close(extended_fd)
+                raise
+            previous = dict(publication_token)
+            publication_token.update(payload=payload, identity=installed_identity, descriptor=extended_fd,
+                                     receipt_descriptor=extended_receipt)
+            try:
+                require_setup_switch_publication_bundle(publication_token, guard=guard)
+            except BaseException:
+                publication_token.clear()
+                publication_token.update(previous)
+                os.close(extended_fd)
+                os.close(extended_receipt)
+                raise
+            os.close(previous["descriptor"])
         receipt_fd = staged_fd = -1  # ownership transferred only on success
         return token
     except (OSError, ValueError, KeyError, TypeError) as exc:
@@ -10389,6 +10826,8 @@ def _require_setup_switch_dhcp_transaction(token, guard, *, inspect_runtime=True
         raise LoadError("SETUP/DHCP registered WAL owner changed; HOLD")
     body = _setup_switch_prepared_registration_body((payload, 0o600))
     _require_setup_switch_q_parent_preimage(body)
+    if "publication_bundle" in body:
+        _require_setup_publication_state(body)
     _verify_dhcp_a_preimage_receipt(preimage)
     if preimage[2] != _dhcp_a_preimage_receipt_identity(os.fstat(receipt_fd)):
         raise LoadError("SETUP/DHCP registered receipt descriptor changed; HOLD")
@@ -10415,6 +10854,7 @@ def mount_and_test_dhcp(
     *,
     parent_candidate: PreparedParentRelease | None = None,
     setup_switch_guard=None,
+    setup_publication_token=None,
 ) -> None:
     """Validate a staged DHCP set, then install all four files transactionally.
 
@@ -10572,6 +11012,7 @@ def mount_and_test_dhcp(
             setup_binding_attempted = True
             setup_binding = _register_setup_switch_dhcp_transaction(
                 preimage_receipt, parent_candidate, setup_switch_guard,
+                **({"publication_token": setup_publication_token} if setup_publication_token is not None else {}),
             )
 
         try:
@@ -14841,6 +15282,9 @@ def main(
     deployment_lock_descriptor: int | None = None
     parent_candidate: PreparedParentRelease | None = None
     report_candidate = None
+    publication_token = None
+    publication_guard = None
+    publication_registration_attempted = False
     prefix_publication_snapshot: ZtpPrefixPublicationSnapshot | None = None
     dhcp_runtime_plan: DhcpRuntimePlan | None = None
     runtime_backend_instance: ServiceRuntimeBackend | None = None
@@ -15297,6 +15741,16 @@ def main(
             report_candidate = generation_report.prepare_generation_report(
                 project, actual_key_report,
             )
+        if (cross_project_rollback is not None and not args.dry_run
+                and pinned_generation_candidate is not None and report_candidate is not None):
+            failure_phase = "登记完整 SETUP 发布候选 WAL"
+            publication_registration_attempted = True
+            publication_guard = dict(deployment_lock_descriptor=deployment_lock_descriptor,
+                                     services_quiesced=runtime_restore_safe,
+                                     runtime_backend=runtime_backend_instance)
+            publication_token = register_setup_switch_publication_bundle(
+                parent_candidate, report_candidate, pinned_generation_candidate, guard=publication_guard,
+            )
         failure_phase = "统一 release 一致性与 DHCP 事务安装"
         if import_snapshot is not None:
             # The report and candidate preparation can take time.  Never
@@ -15312,6 +15766,7 @@ def main(
             }} if cross_project_rollback is not None and not args.dry_run else {})
             mount_and_test_dhcp(
                 args.dry_run, parent_candidate=parent_candidate, **setup_dhcp_options,
+                **({"setup_publication_token": publication_token} if publication_token is not None else {}),
             )
             release_committed = bool(
                 parent_candidate is not None and parent_candidate.committed
@@ -15323,19 +15778,28 @@ def main(
         if parent_candidate is not None and not parent_candidate.committed:
             # Hosts without a local DHCP install still use the same prepared
             # single-replace parent commit.
-            commit_prepared_release(parent_candidate)
+            commit_prepared_release(parent_candidate, **({"require_authority": lambda:
+                require_setup_switch_publication_bundle(publication_token, guard=publication_guard)}
+                if publication_token is not None else {}))
             release_committed = True
         if report_candidate is not None:
             # Parent and report are two separate atomic replacements, not one
             # transaction.  A crash between them leaves an absent/stale report;
             # the inspector fails closed until a full rerun under this lock.
             failure_phase = "提交本次实际使用公钥报告"
-            generation_report.commit_prepared_generation_report(report_candidate)
+            generation_report.commit_prepared_generation_report(report_candidate, **({"require_authority": lambda:
+                require_setup_switch_publication_bundle(publication_token, guard=publication_guard, phase="report")}
+                if publication_token is not None else {}))
         if pinned_generation_candidate is not None:
             failure_phase = "提交本轮已封存代次指针"
             commit_pinned_generation(
                 project, pinned_generation_candidate,
                 expected_current=previous_selector_target,
+                **({"require_authority": lambda: require_setup_switch_publication_bundle(
+                    publication_token, guard=publication_guard, phase="selector")}
+                   if publication_token is not None else {}),
+                **({"prepared_selector": json.loads(publication_token["payload"])["body"]["publication_bundle"]["selector"]["staged"]}
+                   if publication_token is not None else {}),
             )
 
         failure_phase = "服务启动门禁"
@@ -15429,18 +15893,18 @@ def main(
                 )
             except (LoadError, OSError, subprocess.SubprocessError) as cleanup_exc:
                 cleanup_errors.append(f"服务停止清理失败：{cleanup_exc}")
-        if release_link_snapshot and not release_committed:
+        if release_link_snapshot and not release_committed and not publication_registration_attempted:
             try:
                 restore_release_links(release_link_snapshot)
             except (LoadError, OSError) as rollback_exc:
                 cleanup_errors.append(str(rollback_exc))
-        if prefix_publication_snapshot is not None and not release_committed:
+        if prefix_publication_snapshot is not None and not release_committed and not publication_registration_attempted:
             try:
                 restore_ztp_prefix_publication(prefix_publication_snapshot)
             except (LoadError, OSError) as rollback_exc:
                 cleanup_errors.append(str(rollback_exc))
         if (cross_project_rollback is not None and not release_committed
-                and runtime_mutation_started):
+                and runtime_mutation_started and not publication_registration_attempted):
             try:
                 restore_cross_project_rollback_context(
                     cross_project_rollback,
@@ -15452,7 +15916,7 @@ def main(
             except (LoadError, OSError, ValueError) as rollback_exc:
                 cleanup_errors.append(f"active project runtime rollback failed: {rollback_exc}")
         elif (runtime_rollback_receipt is not None and not release_committed
-              and runtime_mutation_started):
+              and runtime_mutation_started and not publication_registration_attempted):
             try:
                 if previous_selector_target is None:
                     raise LoadError("A runtime rollback selector target is absent")
@@ -15471,7 +15935,9 @@ def main(
                 "[SAFE] 受管服务保持停止，避免运行未完成或跨代配置",
                 file=sys.stderr,
             )
-            if not release_committed and not cleanup_errors:
+            if publication_registration_attempted:
+                print("[STATE] SETUP 发布 WAL 义务未结清；HOLD，保留候选与原 A 证据", file=sys.stderr)
+            elif not release_committed and not cleanup_errors:
                 print(
                     "[SAFE] 未提交 release 的发布状态已回滚",
                     file=sys.stderr,
@@ -15512,7 +15978,7 @@ def main(
         raise
     finally:
         final_cleanup_errors: list[tuple[str, BaseException]] = []
-        if dhcp_candidate_dir is not None and not release_committed:
+        if dhcp_candidate_dir is not None and not release_committed and not publication_registration_attempted:
             try:
                 private_stat = dhcp_candidate_dir.lstat()
                 if (not stat.S_ISDIR(private_stat.st_mode)
@@ -15522,7 +15988,7 @@ def main(
                 shutil.rmtree(dhcp_candidate_dir)
             except BaseException as cleanup_exc:
                 final_cleanup_errors.append(("DHCP 候选暂存清理", cleanup_exc))
-        if inventory_directory is not None and not release_committed:
+        if inventory_directory is not None and not release_committed and not publication_registration_attempted:
             try:
                 # This exact private directory was created by this invocation;
                 # never sweep other runs' directories or a committed authority.
@@ -15534,13 +16000,19 @@ def main(
             except BaseException as cleanup_exc:
                 final_cleanup_errors.append(("派生库存暂存清理", cleanup_exc))
         try:
-            generation_report.discard_prepared_generation_report(report_candidate)
+            if not publication_registration_attempted:
+                generation_report.discard_prepared_generation_report(report_candidate)
         except BaseException as cleanup_exc:
             final_cleanup_errors.append(("公钥报告暂存清理", cleanup_exc))
         try:
-            discard_prepared_release(parent_candidate)
+            if not publication_registration_attempted:
+                discard_prepared_release(parent_candidate)
         except BaseException as cleanup_exc:
             final_cleanup_errors.append(("release 暂存清理", cleanup_exc))
+        try:
+            close_setup_switch_publication_bundle(publication_token)
+        except BaseException as cleanup_exc:
+            final_cleanup_errors.append(("SETUP 发布 WAL 描述符关闭", cleanup_exc))
         try:
             release_deployment_lock(deployment_lock_descriptor)
         except BaseException as cleanup_exc:

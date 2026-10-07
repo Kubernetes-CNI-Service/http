@@ -1,5 +1,40 @@
 # 脚本变更影响测试
 
+## 2026-10-07 R22 发布组 WAL 与停服冷续提交候选
+
+基于 TEST `4e138aa5492372bdc804d2594ae65286a5089bad` 的本地候选，为
+parent/report/generation/selector 统一登记首写前持久义务，原 DHCP receipt 与扩展
+WAL 的 FD 同时保持；main 登记失败不提前消费 report、不自动恢复 P/A、不删候选。
+真实私有 LOAD→SETUP→发布子进程分别在 parent、report、selector 后 SIGKILL，
+新进程从原磁盘 WAL 续提交 report/selector，不生成、不启停服务、不退休 WAL。
+`generation_report` direct 和 lifecycle workflow 映射加入这些独立合同。
+
+完整有界日志均读前后 stat 一致并核物理 END/实际退出与冻结状态：
+
+- `outputs/test-diagnostics/r22-publication-cold-resume-workflow.log`：3 tests OK，
+  exit0；inode158628111/size127708，SHA256
+  `c037b2689826c6bd0164a5f57589d2e4cb5555c4a4fad45300e0a1884370a5da`。
+- `r22-publication-selector-dhcp-green.log`（同目录）：2 tests OK，exit0，
+  inode158626114/size128119，SHA256
+  `708974dd8b93389af0e1f1404ce3664e7faf63b5c71bd8caedb94b3cfdfb356e`。
+- 独立晚换绑反例 `r22-publication-guard-postinspect-red.log`：1 FAIL/exit1，
+  inode158634441/size127842，SHA256
+  `6ad1376454cdf31b7b7294f4d69ff62c49d6071ee8847ab4d5b102b306db1de3`；
+  原 guard 在 generation 深层检查后未再核 WAL。补前后原 FD/名称/字节核验后
+  `r22-publication-guard-postinspect-green.log`：1 OK/exit0，
+  inode158638740/size127219，SHA256
+  `88eeba4f7cf293914149483ff40b4160479ae98a11c9dffad92808daccd95fd9`。
+- 最后本地回归 `r22-publication-final-local-regression.log`：LOAD direct、report
+  contract/workflow 与三处强杀冷续提交 workflow 共 516 tests OK / exit0，
+  48.207s；inode158642442/size292038，SHA256
+  `9684f748c68702e80d511c704013d25a845c9571675979f75bdf5081f7388247`，
+  物理 Ran/OK/ACTUAL/冻结一致/END 顺序完整。随后仅新增本条证据，不套为 full。
+
+上述不是正式 runner/full proof；670 tests 的前一版模块回归也不冒充后续修改的
+精确树证明。完整 B 共享写集/健康 finalizer、原 A 显式激活、Linux/root/断电与
+DEV ACK 仍 OPEN。原 bootstrap40115s/REQ19probe10s 超时原因仍待核，必须按
+失败分析规则收口，不能因单项或有界模块 PASS 直接盲重跑正式 full。
+
 `test_cases/run_related_tests.py` 把每个受管 Python、CGI、Shell 路径映射到直接测试和至少一个
 多脚本 workflow/scenario。关系定义在 `script_test_manifest.json`，上一次测试通过的精确
 SHA-256 保存于 `script_test_approved_hashes.json`。

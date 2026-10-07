@@ -861,7 +861,8 @@
       ],
       "tests": [
         "test_cases.test_generation_report_contract",
-        "test_cases.test_generation_report_workflow"
+        "test_cases.test_generation_report_workflow",
+        "test_cases.test_load_release_transaction"
       ]
     },
     {
@@ -1819,7 +1820,8 @@
         "tools/ssh_key_preparation.py"
       ],
       "tests": [
-        "test_cases.test_generation_report_workflow"
+        "test_cases.test_generation_report_workflow",
+        "test_cases.test_generation_input_binding_workflow"
       ]
     },
     {

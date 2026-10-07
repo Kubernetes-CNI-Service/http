@@ -4753,6 +4753,129 @@ finally:
             reenter=False, outcomes=("preimage-before-write",),
         )
 
+    def test_real_setup_publication_wal_survives_parent_writer_death(self):
+        self._real_setup_publication_writer_death("parent")
+
+    def test_real_setup_publication_cold_resume_after_report_writer_death(self):
+        self._real_setup_publication_writer_death("report")
+
+    def test_real_setup_publication_cold_resume_after_selector_writer_death(self):
+        self._real_setup_publication_writer_death("selector")
+
+    def _real_setup_publication_writer_death(self, death_phase):
+        with tempfile.TemporaryDirectory(prefix="r22-publication-wal-") as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, _p, q, _common, _p_only, _q_only, manifest, _before, *_rest = fixture
+            for relative in ("tools/lldp-analyze-tool/99-output-p2p",
+                             "tools/lldp-analyze-tool/99-output-monitor",
+                             "tools/ibdiagnet-analyze-tool/99-output-p2p"):
+                path = root / relative
+                if path.is_dir() and not path.is_symlink():
+                    shutil.rmtree(path)
+            first = self._run_private_load_setup_switch(
+                fixture, prepare_journal=False, auto_prepare_journal=True,
+                first_link=root / "never-created-link",
+            )
+            self.assertEqual(25, first.returncode, first.stdout + first.stderr)
+            api = load_script("r22_publication_writer_probe", root / "DAY0-Prepare/11-load.py")
+            self.assertTrue(callable(getattr(api, "register_setup_switch_publication_bundle", None)),
+                            "real LOAD cannot register its publication group in the original SETUP WAL")
+            q_manifest = manifest.read_bytes()
+            operation = r'''
+import os, signal, sys
+from pathlib import Path
+from types import SimpleNamespace
+root, q, test_root = map(Path, sys.argv[1:4])
+sys.path.insert(0, str(test_root))
+from test_cases.module_loader import load_script
+from test_cases.test_load_release_transaction import private_publication_candidates
+api = load_script('r22_bound_publication_child', root / 'DAY0-Prepare/11-load.py')
+api.active_managed_services = lambda *args, **kwargs: ()
+descriptor = api.acquire_deployment_lock(exclusive=True)
+guard = dict(deployment_lock_descriptor=descriptor, services_quiesced=True,
+             runtime_backend=SimpleNamespace(name='supervisor'))
+candidates = private_publication_candidates(api, q)
+token = api.register_setup_switch_publication_bundle(*candidates, guard=guard)
+api.commit_prepared_release(candidates[0], require_authority=lambda:
+    api.require_setup_switch_publication_bundle(token, guard=guard))
+if sys.argv[4] in ('report', 'selector'):
+    api.generation_report.commit_prepared_generation_report(candidates[1], require_authority=lambda:
+        api.require_setup_switch_publication_bundle(token, guard=guard, phase='report'))
+if sys.argv[4] == 'selector':
+    import json
+    staged = json.loads(token['payload'])['body']['publication_bundle']['selector']['staged']
+    api.commit_pinned_generation(q, candidates[2], expected_current=None, prepared_selector=staged,
+        require_authority=lambda: api.require_setup_switch_publication_bundle(token, guard=guard, phase='selector'))
+os.kill(os.getpid(), signal.SIGKILL)
+'''
+            child = subprocess.run([sys.executable, "-B", "-c", operation,
+                                    str(root), str(q), str(ROOT), death_phase], cwd=root,
+                                   capture_output=True, text=True, check=False, timeout=30)
+            self.assertEqual(-signal.SIGKILL, child.returncode, child.stdout + child.stderr)
+            journal = root / "ztp/.setup-switch-journal.json"
+            wal = journal.read_bytes()
+            binding = json.loads(wal)["body"]["publication_bundle"]
+            parent_path = Path(binding["parent"]["destination"])
+            parent_bytes = parent_path.read_bytes()
+            self.assertEqual(base64.b64decode(binding["parent"]["candidate"]["payload"]), parent_bytes)
+            self.assertEqual(death_phase == "parent", Path(binding["report"]["temporary"]).exists())
+            self.assertEqual(death_phase != "parent", Path(binding["report"]["destination"]).exists())
+            descriptor = api.acquire_deployment_lock(exclusive=True)
+            try:
+                with mock.patch.object(api, "active_managed_services", return_value=()):
+                    with self.assertRaisesRegex(api.LoadError, "publication.*HOLD"):
+                        api.recover_setup_switch_journal(
+                            journal, restore_runtime_from_wal=True, requested_new_project=q,
+                            deployment_lock_descriptor=descriptor, services_quiesced=True,
+                            runtime_backend=SimpleNamespace(name="supervisor"))
+            finally:
+                api.release_deployment_lock(descriptor)
+            self.assertEqual(wal, journal.read_bytes())
+            self.assertEqual(parent_bytes, parent_path.read_bytes())
+            self.assertEqual(q_manifest, manifest.read_bytes())
+            self.assertFalse((root / "service-started").exists())
+            resume = r'''
+import json, sys
+from pathlib import Path
+from types import SimpleNamespace
+root, q, test_root = map(Path, sys.argv[1:4])
+sys.path.insert(0, str(test_root))
+from test_cases.module_loader import load_script
+api = load_script('r22_cold_publication_reader', root / 'DAY0-Prepare/11-load.py')
+api.active_managed_services = lambda *args, **kwargs: ()
+def forbidden(*args, **kwargs):
+    raise AssertionError('cold publication attempted generation or a service mutation')
+api.start_services = api.quiesce_services = api.generate_configs = forbidden
+descriptor = api.acquire_deployment_lock(exclusive=True)
+token = None
+try:
+    guard = dict(deployment_lock_descriptor=descriptor, services_quiesced=True,
+                 runtime_backend=SimpleNamespace(name='supervisor'))
+    token = api.open_setup_switch_publication_bundle(q, guard=guard)
+    before = token['phase']
+    result = api.resume_setup_switch_publication_bundle(token, guard=guard)
+    print('R22_RESUME='+json.dumps(dict(before=before, after=token['phase'], result=result)))
+finally:
+    api.close_setup_switch_publication_bundle(token)
+    api.release_deployment_lock(descriptor)
+'''
+            recovered = subprocess.run([sys.executable, "-B", "-c", resume,
+                                        str(root), str(q), str(ROOT)], cwd=root,
+                                       capture_output=True, text=True, check=False, timeout=30)
+            self.assertEqual(0, recovered.returncode, recovered.stdout + recovered.stderr)
+            payload = json.loads(next(line.split("=", 1)[1] for line in recovered.stdout.splitlines()
+                                      if line.startswith("R22_RESUME=")))
+            self.assertEqual({"before": {"parent": "report", "report": "selector", "selector": "published"}[death_phase],
+                              "after": "published", "result": "published-stopped-wal-retained"}, payload)
+            self.assertEqual(wal, journal.read_bytes())
+            self.assertEqual(parent_bytes, parent_path.read_bytes())
+            self.assertEqual(q_manifest, manifest.read_bytes())
+            self.assertEqual(binding["selector"]["staged"]["identity"][1],
+                             (q / "99-output-ztp/current").lstat().st_ino)
+            self.assertEqual(binding["report"]["candidate"]["sha256"],
+                             hashlib.sha256(Path(binding["report"]["destination"]).read_bytes()).hexdigest())
+            self.assertFalse((root / "service-started").exists())
+
     def test_real_setup_then_load_binds_dhcp_preimage_before_b_install(self):
         self._real_setup_uncertain_parent_dhcp_evidence(
             reenter=False, bind_setup=True, outcomes=("bound-setup-before-write", "bound-setup-precommit"),

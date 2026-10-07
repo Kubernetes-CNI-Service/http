@@ -440,13 +440,15 @@ def prepare_generation_report(
         os.close(directory_fd)
 
 
-def commit_prepared_generation_report(candidate: PreparedGenerationReport) -> Path:
+def commit_prepared_generation_report(candidate: PreparedGenerationReport, *, require_authority=None) -> Path:
     """Replace only a known-safe governed record, then fsync its directory.
 
     A successful parent commit followed by a failed report commit is not an
     atomic pair.  The inspector will reject that state; the load caller must
     prevent service start and rerun under its lock.
     """
+    if require_authority is not None:
+        require_authority()
     if not isinstance(candidate, PreparedGenerationReport):
         raise GenerationReportError("invalid prepared report candidate")
     project = candidate.destination.parent.parent
@@ -481,6 +483,8 @@ def commit_prepared_generation_report(candidate: PreparedGenerationReport) -> Pa
         if old_identity != candidate.old_identity:
             raise GenerationReportError("existing report changed before commit")
         _require_original_staged_report(candidate, descriptor)
+        if require_authority is not None:
+            require_authority()
         os.replace(
             candidate.temporary.name, REPORT_NAME,
             src_dir_fd=descriptor, dst_dir_fd=descriptor,
