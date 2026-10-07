@@ -184,6 +184,21 @@ exact blob materialize，而非未提交 worktree，故独立工作树目录/生
 不能代表 index clone 已更新。候选先提交使受测 index 字节真正更新，再原样重跑该有界集；
 不改 exact-five、持有 index 权限、断言或时限，不把这次失败称成功。
 
+三文件候选提交 `7f99dacb9972d8f3fcb185aca128d38619ba4734` / tree
+`2f8eeac54c32125b8f5dd52074e3c08f75b2257b` 后，同一76项有界集合完整 OK / exit0，
+原命令、断言、时限不变。日志
+`outputs/test-diagnostics/full-diagnostic-manual-support-repair-committed-bounded.log`，
+inode157661494、size143125、SHA256
+`7a2a2f7d30ebf9c1c07a475941fdf1aa28e3a03efd3119de0d9f03976af06c4b`；
+读前后 stat 相同、旧前缀匹配，物理83行 Ran 76 tests in 68.647s、85行 OK、
+220行 ACTUAL_UNITTEST_EXIT=0、221行 FROZEN_STATE_MATCH=True、223行 DIAGNOSTIC_END=0，
+实际 exec exit0。包含完整 ImpactManifestTests、DocumentationCatalogTests、诊断 helper
+direct，以及真实 upload manifest 与 current-lifecycle no-local public clone 的 exact-five
+packaging workflow。独立原路径、未知路径/映射拒绝、生成一致性、index blob 权限与打包
+合同继续执行；原两轮失败日志不改。ledger 仍为 SHA256
+`19e865c310d16e2a3161a488865c38e66b2aeeb38cd2e09d86d64767243bbe11`，不自动批准、
+不以此局部集替代20项下游完整历史回放、正式 full/check 或原超时根因证明。
+
 全量失败必须先解释原因；单独重跑失败用例通过，只是一次诊断结果，不能据此直接再跑
 full。失败、未知原因、日志缺失或中断仍保持无证明状态，不能以“偶发”“环境”概括未核实的
 缺陷。本规则同样适用于 related 失败后准备进入正式 full 的情况。
