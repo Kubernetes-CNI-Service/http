@@ -1634,6 +1634,8 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 ## TC-REAL-R22-GENERATION-INPUT-ABA-001 — 跨进程输入换代与多输出一致性
 
+- 2026-10-08 普通 LOAD 原 B 服务阶段接入：持原发布 token 的跨项目 LOAD 必须使用 B-only 检查与同次健康归档；未确认则 HOLD 保留原 WAL，不走旧服务启停/自动 A 回滚，也不重复启动。现场在原排他锁、停服和写者静默前提下分别见证正常 LOAD、拒绝确认、native/Supervisor 启动失败、健康失败停服及归档后正常成功门禁。原 listener/boundary 配置不具备 B 条件时必须 HOLD，不借该路径绕过配置资格；未知对象不得清理。新增本地真实 LOAD/SETUP/冷门禁 workflow 的实际 root/backend/HTTP 仍未覆盖，完整 full/check 与旧 A 显式激活、断电、DEV ACK 仍需独立证据，本卡 OPEN。
+
 - 2026-10-07 TEST B 归档/冷重入候选：显式 `--activate-setup-publication` 与 `--resume-setup-retirement` 必须在 Linux management-server、原排他锁、预先停服和其他写者静默条件下执行。固定退休凭据先落盘，再 no-replace 归档原 WAL inode，完整发布组与本次健康通过后才放行新 LOAD；A receipt/备份及原 WAL 字节保留。现场须独立见证 marker fsync 前后、rename 后/目录同步前、门禁解除前的死亡/断电与第三进程重入、原 inode/九字段/父目录/SHA，以及失败后的全部服务停服；同字节外来 archive/marker 必须 HOLD 且不删除。冷重入先人工停服，再重新做原 B 检查和健康，不用上一进程 PASS；不生成、不换输入或镜像策略、不自动启动 A。未知 marker/双重 WAL 名称需封存并由可恢复隔离快照回退，不手工删除来解围。581 项本地回归、真实脚本强杀和隔离 HTTP/backend 两进程见证不是 root 服务、断电、formal full/check 或本卡通过；旧 A 显式安全激活与 DEV ACK 仍 OPEN。
 
 - 2026-10-07 TEST B-only 激活候选：只有原共享发布组、原 Q 输入、原 key/report 与原镜像 WAL 身份均核验后，显式确认才允许尝试 B；命令或健康失败须确认全部受管服务停止，原 WAL/A receipt 不删，不自动启动 A。本地真实 LOAD→SETUP→冷进程续提交与 B 健康失败 workflow 已执行，但 Apache/DHCP/HTTP 探针使用隔离替身；569 项有界回归不是 full proof。现场仍需 Linux 隔离 VM/root-only 可恢复快照、排他锁及其他写者静默，保存镜像注册/父提交/启动/失败停服前后原 fd、名称、父目录、SHA、服务集合和完整 END/退出码；源或发布镜像换绑先 HOLD。未知原镜像 intent 不补办资格；原 no-upgrade 策略独立核验。清理仅恢复已确认隔离快照，保留原 WAL、镜像和 A receipt，不删除未知对象。显式操作员入口、成功退休、旧 A 显式安全激活、断电与 DEV ACK 仍 OPEN，本卡未关闭。

@@ -4788,6 +4788,9 @@ finally:
     def test_real_setup_publication_b_retirement_writer_death_requires_new_process_health(self):
         self._real_setup_publication_writer_death("selector", b_preflight="activate-retire-death")
 
+    def test_real_setup_publication_main_service_gate_accepts_only_original_b(self):
+        self._real_setup_publication_writer_death("selector", b_preflight="activate-retire-gate")
+
     def _real_setup_publication_writer_death(self, death_phase, *, resume_cli=False, late_fault=None,
                                             b_preflight=None):
         with tempfile.TemporaryDirectory(prefix="r22-publication-wal-") as name:
@@ -4977,6 +4980,9 @@ try:
                 rc = api.main([str(q), '--host-role', 'management-server', '--resume-setup-retirement'])
                 assert rc == 0, 'explicit cold retirement CLI failed'
                 status = 'b-health-passed-wal-archived'
+            elif sys.argv[5] == 'activate-retire-gate':
+                status = api.finish_setup_switch_b_service_gate(token, guard=guard,
+                    inputs=inputs, images={'eth': image}, confirmed=True)
             else:
                 status = api.activate_setup_switch_b_publication(token, guard=guard, inputs=inputs,
                     images={'eth': image}, confirmed=True, retire=sys.argv[5].startswith('activate-retire'))
@@ -4985,7 +4991,7 @@ try:
             assert active == set() and actions == [('start', 'apache2'), ('stop', 'all')], actions
             status = 'b-health-failed-stopped-wal-retained'
         else:
-            assert sys.argv[5] in ('activate-pass', 'activate-retire', 'activate-retire-reentry'), 'B failure was accepted'
+            assert sys.argv[5] in ('activate-pass', 'activate-retire', 'activate-retire-reentry', 'activate-retire-gate'), 'B failure was accepted'
             assert active == {'apache2'} and actions == [('start', 'apache2')], actions
             expected_status = ('b-health-passed-wal-archived' if sys.argv[5].startswith('activate-retire')
                                else 'b-health-passed-wal-retained')
@@ -5077,7 +5083,8 @@ finally:
                     "activate-pass": "b-health-passed-wal-retained",
                     "activate-fail": "b-health-failed-stopped-wal-retained",
                     "activate-retire": "b-health-passed-wal-archived",
-                    "activate-retire-death": "b-health-passed-wal-archived"}[b_preflight]
+                    "activate-retire-death": "b-health-passed-wal-archived",
+                    "activate-retire-gate": "b-health-passed-wal-archived"}[b_preflight]
                 self.assertIn("R22_PREFLIGHT=" + expected, recovered.stdout)
             payload = json.loads(next(line.split("=", 1)[1] for line in recovered.stdout.splitlines()
                                       if line.startswith("R22_RESUME=")))

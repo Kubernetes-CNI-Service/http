@@ -14648,6 +14648,14 @@ def activate_setup_switch_b_publication(
             images=selected_images, image_authority=authority, retire=retire)
 
 
+def finish_setup_switch_b_service_gate(token, *, guard, inputs, images, confirmed):
+    if confirmed is not True:
+        raise LoadError("published B still needs explicit B activation; HOLD original WAL; "
+                        "use --activate-setup-publication after stopped verification")
+    return activate_setup_switch_b_publication(token, guard=guard, inputs=inputs,
+                                               images=images, confirmed=True, retire=True)
+
+
 @contextmanager
 def _setup_switch_b_image_authority(inputs, images, *, original_intent):
     """Hold source and published image owners throughout one B health attempt."""
@@ -16542,9 +16550,19 @@ def main(
 
         failure_phase = "服务启动门禁"
         section("服务启动门禁")
-        if not args.dry_run:
+        if publication_token is not None and not args.dry_run:
+            # This exact transaction must complete its original B acceptance;
+            # never fall through to the older start/restore-A service path.
+            should_start = (not runtime_services_available or args.start_services
+                            or confirm_service_start())
+            finish_setup_switch_b_service_gate(publication_token, guard=publication_guard,
+                inputs=inputs, images=images, confirmed=should_start)
             require_no_pending_setup_switch_journal()
-        if not local_services_supported:
+        elif not args.dry_run:
+            require_no_pending_setup_switch_journal()
+        if publication_token is not None and not args.dry_run:
+            info("原 SETUP 发布组 B 本次健康/运行条件核验与 WAL 归档完成；未重复启停服务")
+        elif not local_services_supported:
             if args.start_services:
                 warn(f"{host_os} 不支持本流程的 --start-services，已忽略")
             info(f"{host_os} 配置准备完成；未检查或启动 Apache/ISC DHCP")

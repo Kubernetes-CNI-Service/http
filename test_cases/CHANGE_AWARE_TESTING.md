@@ -1,5 +1,27 @@
 # 脚本变更影响测试
 
+## 2026-10-08 R22 普通 LOAD 原 B 最终门禁接入候选
+
+基于 `6f5b16e44ff499d11ad05e145756e6c2e79578f2`，普通 LOAD 已持原
+publication token 时，跨项目的服务阶段走同一原 B 验收/归档 API；拒绝确认则
+HOLD 并保留 WAL，不使用旧 `start_services`/自动恢复 A 路径，不重复启停服务。
+独立入口缺失 RED 为 2 ERROR/exit1，日志
+`outputs/test-diagnostics/r22-main-publication-service-gate-red.log` 保留。
+两个真实持 WAL direct 与 main 路由边界检查 3 OK/exit0；main 路由夹具将参数与
+callback 合同单列，既有非 publication 路径断言保持原样。
+`r22-main-publication-service-gate-routing.log` 中 0.715s/实际 exit0/冻结一致。
+新增真实 LOAD→SETUP→发布强杀→原 B 服务门禁→健康归档 workflow，仍只以
+隔离替身替代实际服务和 HTTP，原报告/输入/镜像/WAL/归档都实际执行。
+
+扩大回归日志 `outputs/test-diagnostics/r22-main-publication-service-gate-final-regression.log`
+完整保留，585 tests OK，144.260s，inode159377764/size316509，SHA256
+`277c3ca0f60a7673ff0e9ae509ad41001487e4daa18607d254dc8ebbe618da91`。
+物理 Ran1549/OK1551/actual1629/冻结1630/END1632，实际 exit0、冻结一致。
+读前后 stat 一致；旧 inode159377764、size244922 的已读前缀 SHA256
+`da789847c0353749c6add92016698b0ec57db16908e9996bfd9aea1a77c49560`
+保持不变。该结果仅为有界回归，不是正式 related/full/check；旧 A 显式安全激活
+与 Linux/root/断电/DEV ACK 仍未关闭。未手改 ledger，未以旧 proof 套当前树。
+
 ## 2026-10-07 R22 B 健康收口、凭据归档与显式冷重入候选
 
 基于 `75972966354167b5c8df78e1d84cd2f39f7652c7`，增加

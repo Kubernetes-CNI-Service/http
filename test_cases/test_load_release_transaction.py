@@ -1308,6 +1308,58 @@ class ReleaseTransactionTests(unittest.TestCase):
         with self.assertRaisesRegex(LOAD.LoadError, "retirement|HOLD"):
             LOAD.require_no_pending_setup_switch_journal()
 
+    def test_publication_service_gate_decline_retains_wal_without_preflight_or_start(self):
+        state, _context, guard, token, inputs = self._prepare_published_q_for_stopped_preflight(no_upgrade=True)
+        with mock.patch.object(LOAD, "preflight_services") as preflight, \
+                mock.patch.object(LOAD, "_runtime_service_action") as start:
+            with self.assertRaisesRegex(LOAD.LoadError, "explicit B activation|HOLD"):
+                LOAD.finish_setup_switch_b_service_gate(token, guard=guard, inputs=inputs,
+                    images={}, confirmed=False)
+            preflight.assert_not_called()
+            start.assert_not_called()
+        self.assertEqual(token["payload"], state[-3].read_bytes())
+
+    def test_publication_service_gate_confirmation_requires_health_and_archives_original_wal(self):
+        state, _context, guard, token, inputs = self._prepare_published_q_for_stopped_preflight(no_upgrade=True)
+        active = set()
+        action, probe = self._with_independent_b_health(active)
+        result = LOAD.finish_setup_switch_b_service_gate(token, guard=guard, inputs=inputs,
+            images={}, confirmed=True)
+        self.assertEqual("b-health-passed-wal-archived", result)
+        action.assert_called_once()
+        probe.assert_called_once()
+        self.assertFalse(os.path.lexists(state[-3]))
+        self.assertEqual({"apache2"}, active)
+        LOAD.require_no_pending_setup_switch_journal()
+
+    def test_main_dispatches_original_publication_acceptance_without_legacy_start(self):
+        # This isolates main routing; the real held-WAL acceptance contract is
+        # independently exercised above and in the multi-script cold workflow.
+        token = dict(payload=json.dumps({"body": {"publication_bundle": {
+            "selector": {"staged": None}}}}).encode())
+        context = SimpleNamespace(project=self.project.parent / "old",
+            selector_target="generations/" + "a" * 20, runtime_receipt=self.project / "old-receipt")
+        context.project.mkdir()
+        with mock.patch.object(LOAD, "prepare_cross_project_rollback_context", return_value=(None, context)), \
+                mock.patch.object(LOAD, "stage_pinned_generation", return_value=self.project / "new-generation"), \
+                mock.patch.object(LOAD, "register_setup_switch_publication_bundle", return_value=token), \
+                mock.patch.object(LOAD, "require_setup_switch_publication_bundle"), \
+                mock.patch.object(LOAD, "commit_pinned_generation"), \
+                mock.patch.object(LOAD, "close_setup_switch_publication_bundle"), \
+                mock.patch.object(LOAD, "finish_setup_switch_b_service_gate", return_value="b-health-passed-wal-archived") as finish, \
+                mock.patch.object(LOAD, "preflight_services") as legacy_preflight, \
+                mock.patch.object(LOAD, "start_services", side_effect=AssertionError("legacy start must not run")) as legacy_start:
+            result, caught, *_rest = self._exercise_main_transaction_failure(
+                LOAD.LoadError("unused routing probe"), failure_at="completion", parent_schema_version=2,
+                active_project_value=context.project, start_services=True, publication_routing=True)
+        self.assertIsNone(caught)
+        self.assertEqual(0, result)
+        finish.assert_called_once()
+        self.assertIs(token, finish.call_args.args[0])
+        self.assertIs(True, finish.call_args.kwargs["confirmed"])
+        legacy_preflight.assert_not_called()
+        legacy_start.assert_not_called()
+
     def test_b_activation_health_failure_stops_and_keeps_original_wal(self):
         state, _context, guard, token, inputs = self._prepare_published_q_for_stopped_preflight()
         active = set()
@@ -2771,6 +2823,7 @@ class ReleaseTransactionTests(unittest.TestCase):
         activation_action=None,
         after_parent_commit=None,
         start_services: bool = False,
+        publication_routing: bool = False,
     ):
         args = SimpleNamespace(
             skip_doca=False, download_doca=False, dry_run=False,
@@ -2970,6 +3023,11 @@ class ReleaseTransactionTests(unittest.TestCase):
                 caught = exc
             if failure_at in {"dhcp", "template", "parent_sync", "publication"}:
                 report_commit.assert_not_called()
+            elif publication_routing:
+                report_commit.assert_called_once()
+                self.assertEqual((staged_report,), report_commit.call_args.args)
+                self.assertEqual({"require_authority"}, set(report_commit.call_args.kwargs))
+                self.assertTrue(callable(report_commit.call_args.kwargs["require_authority"]))
             else:
                 report_commit.assert_called_once_with(staged_report)
             if authority_failure is None and failure_at != "template":
@@ -2987,7 +3045,7 @@ class ReleaseTransactionTests(unittest.TestCase):
                     published_dir=LOAD.ZTP_DIR / "config/publickey",
                 )
                 report_stage.assert_called_once_with(self.project, report_payload)
-                if failure_at == "publication":
+                if failure_at == "publication" or publication_routing:
                     report_discard.assert_not_called()
                 else:
                     report_discard.assert_called_once_with(staged_report)
@@ -2995,6 +3053,8 @@ class ReleaseTransactionTests(unittest.TestCase):
                     "parent-validate", "parent-stage", "report-build",
                     "report-stage", "dhcp-transaction", "report-discard",
                 ]
+                if publication_routing:
+                    expected.remove("report-discard")
                 if failure_at == "publication":
                     expected = ["parent-validate", "parent-stage", "report-build", "report-stage"]
                 self.assertEqual(expected, transaction_events)
