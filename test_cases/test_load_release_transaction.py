@@ -4249,6 +4249,50 @@ class ReleaseTransactionTests(unittest.TestCase):
         self.assertFalse(os.path.lexists(directory))
         backend.start.assert_not_called()
 
+    def test_setup_created_directory_recovery_parent_drift_blocks_rmdir(self) -> None:
+        state = self._prepare_cross_project_setup_crash()
+        common, new_target, journal, descriptor, backend = state[2], state[5], state[10], state[11], state[12]
+        parent = self.root.resolve() / "infiniband"
+        parent.mkdir(exist_ok=True)
+        directory = parent / "publickey"
+        transaction = SETUP._SetupLinkTransaction([])
+        retained = parent.with_name("retained-recovery-parent")
+        restore = LOAD._atomic_restore_setup_link
+        injected = []
+
+        def rebind_after_known_p_write(path, raw_target):
+            restore(path, raw_target)
+            if path == common and not injected:
+                parent.rename(retained)
+                parent.mkdir()
+                (retained / directory.name).rename(directory)
+                injected.append(True)
+
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(SETUP, "ZTP", str(self.ztp)), \
+                mock.patch.object(SETUP, "_SETUP_SWITCH_WAL_CONTEXT", (vars(LOAD), descriptor)):
+            transaction.ensure_directory(str(directory))
+            original = directory.stat()
+            common.unlink()
+            common.symlink_to(os.path.relpath(new_target, common.parent))
+            evidence = journal.read_bytes()
+            with mock.patch.object(LOAD, "_atomic_restore_setup_link", side_effect=rebind_after_known_p_write):
+                with self.assertRaises(LOAD.LoadError):
+                    LOAD.recover_setup_switch_journal(
+                        journal, deployment_lock_descriptor=descriptor,
+                        services_quiesced=True, runtime_backend=backend,
+                    )
+        self.assertEqual([True], injected, "test did not cross the actual recovery preflight")
+        self.assertTrue(directory.is_dir(), "recovery removed an inode through a rebound parent before HOLD")
+        self.assertEqual((original.st_dev, original.st_ino),
+                         (directory.stat().st_dev, directory.stat().st_ino))
+        row = next(row for row in json.loads(evidence)["body"]["created_directories"]
+                   if row["path"] == str(directory))
+        self.assertEqual(row["parent"]["ino"], retained.stat().st_ino)
+        self.assertNotEqual(row["parent"]["ino"], parent.stat().st_ino)
+        self.assertEqual(evidence, journal.read_bytes())
+        backend.start.assert_not_called()
+
     def test_setup_created_directory_recovery_resumes_after_owned_rmdir(self) -> None:
         (*state, journal, descriptor, backend) = self._prepare_cross_project_setup_crash()
         new_project = state[1]

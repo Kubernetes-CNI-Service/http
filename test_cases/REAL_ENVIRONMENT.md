@@ -1634,6 +1634,8 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 ## TC-REAL-R22-GENERATION-INPUT-ABA-001 — 跨进程输入换代与多输出一致性
 
+- created-directory 冷恢复删除前父身份补充：TEST direct 与真实 LOAD→SETUP 强杀→全新 LOAD，在全写集预检及一个已授权 P 链接恢复之后保留原 `infiniband` 父目录，在原名创建另一目录，再把同一自有 publickey 目录 inode 移入新父。恢复必须在 rmdir 前核原行父身份并 HOLD，不能先删目录再在父同步时拒绝；目录 inode、原/替换父和原 WAL 均保留，服务不启动。该注入在自己的先前 P 恢复之后，可能已有 P 链接回写或 Q 自有子链接清理，须如实记录，不称零先前写入或完整恢复。现场仅限本卡授权隔离快照、完整 P/Q/WAL、持排他锁、明确停服与其它正常写者静默；记录预检、每次已发生的写入、父换绑、rmdir 拒绝顺序，原/现父及目录 stat、WAL 摘要、完整 END/退出码和停服见证。封存后只按已核实快照恢复，不删除未知父或自动回 A；名称复核不是最终检查到 rmdir 的非协作写者原子隔离。本卡继续 OPEN，此窄修不关闭完整写集、B 收口、旧 A 激活、Linux/断电或 DEV ACK，也不解除原失败原因未闭的正式 related/full 重跑闸门。
+
 - 实体 latest 实际 writer 写前复核补充：TEST direct 与真实 LOAD→SETUP 在 `.latest.tmp.<PID>` 链接 WAL 行发布后，用逐字节相同、同样含发布完成标记的新目录替换源 latest 或匹配 release，独立要求在源 rename 前 HOLD，而不是先搬走未知源再依赖冷恢复拒绝。writer 在该登记边界前捕获源/目标/父 dev/ino/mode/uid/gid，并在 rename 前复核身份、完成标记与目录内容匹配；负例须保留源原名、原/替换目录 inode、两份原字节及发布后的 WAL，备份名仍缺席、临时 symlink 屏障不得越过、服务不得启动。现场仅在本卡授权的可恢复隔离快照、排他锁、明确停服与正常写者静默前提下执行，保存行发布/目录换绑/拒绝的物理顺序、目录与父身份、文件/WAL 摘要及完整 END/退出码；封存后由负责人恢复核实的隔离快照，不删除未知对象或自动回 A。本机 direct 首轮非规范 /var 别名输入提前拒绝，不作为缺陷 RED；规范路径 direct 与真实 workflow 原实现 RED→GREEN。此候选不证明最终复核与 rename 之间的非协作写者原子隔离、完整共享写集、B 健康收口、旧 A 显式激活、Linux/断电或 DEV ACK；本卡继续 OPEN，局部 PASS 不替代正式 full/check，原失败原因未闭时仍不得重跑正式 related/full。
 
 - Case ID：`TC-REAL-R22-GENERATION-INPUT-ABA-001`；类型：real-environment / transaction / scenario；对应 R22 的 setup→load→DHCP c1→设备 c2→父 release/activation 输入绑定。状态：**OPEN / NOT RUN / REAL_ENV REQUIRED**。本机自动化先决为 `test_cases.test_generation_input_binding_contract` direct、`test_cases.test_generation_input_binding_workflow` 真实脚本 workflow，以及受影响模块的 manifest 映射与当前整树正式 full/check；局部 GREEN 或当前 RED 均不是本卡通过。

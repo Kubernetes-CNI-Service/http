@@ -793,6 +793,75 @@ os.replace = drift_registered_shared_directory
     def test_real_setup_shared_directory_registered_contents_drift_blocks_install(self):
         self._assert_real_setup_shared_directory_registration_drift_holds("contents")
 
+    def test_real_setup_created_directory_recovery_parent_drift_blocks_rmdir(self):
+        with tempfile.TemporaryDirectory(prefix="r22-recovery-created-parent-") as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, _p, _q, common, _p_only, _q_only, _manifest, _before, _hook, barrier, _home = fixture
+            parent = root / "infiniband"
+            parent.mkdir(exist_ok=True)
+            directory = parent / "publickey"
+            first = self._run_private_load_setup_switch(
+                fixture, prepare_journal=True, first_link_prefix=str(directory) + os.sep,
+            )
+            self.assertEqual(23, first.returncode, first.stdout + first.stderr)
+            self.assertTrue(barrier.is_file())
+            original = directory.stat()
+            journal = root / "ztp/.setup-switch-journal.json"
+            evidence = journal.read_bytes()
+            recovery = """
+import importlib.util
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+root, common, directory = map(Path, sys.argv[1:4])
+spec = importlib.util.spec_from_file_location('fresh_created_parent_recovery', root / 'DAY0-Prepare/11-load.py')
+load = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = load
+spec.loader.exec_module(load)
+load.active_managed_services = lambda *args, **kwargs: ()
+restore = load._atomic_restore_setup_link
+injected = []
+def rebind_parent_after_known_p_write(path, raw_target):
+    restore(path, raw_target)
+    if path == common and not injected:
+        parent = directory.parent
+        retained = parent.with_name('retained-recovery-parent')
+        parent.rename(retained)
+        parent.mkdir()
+        (retained / directory.name).rename(directory)
+        injected.append(True)
+load._atomic_restore_setup_link = rebind_parent_after_known_p_write
+descriptor = load.acquire_deployment_lock(exclusive=True)
+try:
+    try:
+        load.recover_setup_switch_journal(
+            root / 'ztp/.setup-switch-journal.json', deployment_lock_descriptor=descriptor,
+            services_quiesced=True, runtime_backend=SimpleNamespace(name='supervisor'),
+        )
+    except load.LoadError as exc:
+        assert injected == [True], 'parent drift injection did not run'
+        print('CREATED_DIRECTORY_PARENT_DRIFT_HOLD=' + str(exc))
+    else:
+        raise AssertionError('created-directory recovery accepted a rebound parent')
+finally:
+    load.release_deployment_lock(descriptor)
+"""
+            second = subprocess.run(
+                [sys.executable, "-B", "-c", recovery, str(root), str(common), str(directory)],
+                cwd=root, capture_output=True, text=True, check=False, timeout=30,
+            )
+            self.assertEqual(0, second.returncode, second.stdout + second.stderr)
+            self.assertIn("CREATED_DIRECTORY_PARENT_DRIFT_HOLD=", second.stdout)
+            self.assertTrue(directory.is_dir(), "fresh recovery deleted the moved inode before parent HOLD")
+            self.assertEqual((original.st_dev, original.st_ino),
+                             (directory.stat().st_dev, directory.stat().st_ino))
+            row = next(row for row in json.loads(evidence)["body"]["created_directories"]
+                       if row["path"] == str(directory))
+            self.assertEqual(row["parent"]["ino"], parent.with_name("retained-recovery-parent").stat().st_ino)
+            self.assertNotEqual(row["parent"]["ino"], parent.stat().st_ino)
+            self.assertEqual(evidence, journal.read_bytes())
+            self.assertFalse((root / "service-started").exists())
+
     def test_real_setup_new_sample_directory_cold_recovery_restores_absence(self):
         """Sample's empty directory itself belongs to the crash rollback write set."""
         with tempfile.TemporaryDirectory(prefix="r22-sample-dir-cold-") as name:

@@ -8082,6 +8082,11 @@ def _recover_setup_switch_journal_snapshot(
                     or (metadata.st_dev, metadata.st_ino, stat.S_IMODE(metadata.st_mode))
                     != (row["dev"], row["ino"], row["mode"])):
                 raise LoadError("setup switch created directory changed during recovery")
+            # The inode alone does not authorize removal through a different
+            # parent installed after preflight. Reject before rmdir, not only
+            # after that irreversible namespace write at the sync boundary.
+            if row["parent"] != _setup_switch_link_parent_identity(_path):
+                raise LoadError("setup switch created directory parent changed before rmdir; HOLD")
             present.rmdir()
         # A previous recovery may have died after rmdir but before the
         # namespace sync. Known absence is still an outstanding durable write.
