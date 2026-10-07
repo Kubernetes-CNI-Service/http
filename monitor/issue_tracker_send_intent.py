@@ -60,7 +60,9 @@ def _coherent_images(unit, action):
     if type(identity) is not dict or set(identity) != {'schema_version', 'generation_id', 'publish_id',
                                                      'spreadsheet_id', 'sheet', 'sheet_id'}:
         raise SendIntentHold()
-    for digest in (identity['generation_id'], identity['publish_id'], action['manifest_id'],
+    from monitor.issue_tracker_send_unit import _generation_identity
+    _generation_identity(identity['generation_id'])
+    for digest in (identity['publish_id'], action['manifest_id'],
                    action['target_nonce'], action['history_nonce'], action['preread_sha256']):
         if type(digest) is not str or re.fullmatch(r'[0-9a-f]{64}', digest) is None: raise SendIntentHold()
     outcomes = action['outcomes']; decisions = action['decisions']; business = action['business']; audits = action['audits']

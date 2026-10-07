@@ -889,6 +889,10 @@ VISIBLE_ONLY_UNPROVED，因为别的 Cloud 项目的 PROJECT 元数据可能不�
 原文字 NOOP、组批期间来源漂移及伪造 candidate 的拒绝，保持模板／发布目录不变。
 坐标、观察、generation/publication、nonce 和 preread 仍只绑定；不冒充原始预留、
 行身份、C-6 receipt、每次新鲜准入、固定 launcher、真实发送上界或 COMPLETE。
+批次、意图和原始 NV 预留保留实际 C-6 的 `gen-20位序号-32位小写hex` 身份，
+序号必须大于零；不把它改写为任意 64 位摘要。独立候选的摘要身份仍只用于纯组合测试。
+实际 local begin/INTENT/commit → composer → durable intent → 冷进程计数 workflow
+核原 generation／发布摘要与不变 wire；形状正确或 local receipt 均不是在线资格。
 
 `test_cases.test_req7_send_intent` 将真实 composer → C-6 owner → 非递归
 ACTION-PREIMAGE/action_digest → immutable wire journal → 六个冷启动进程的意图计数

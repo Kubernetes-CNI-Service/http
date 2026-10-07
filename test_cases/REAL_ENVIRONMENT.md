@@ -2167,6 +2167,7 @@ ALL 审计行确定唯一 append 窗口（NOOP 无虚构行），精确耗尽可
 
 - Case ID：`TC-REAL-REQ7-IMMUTABLE-SEND-UNIT-001`；类型：real-environment / transaction / C-19+C-25+C-26。状态：**NOT RUN / REAL_ENV REQUIRED**。`monitor/issue_tracker_send_unit.py` 是未安装的纯组合库；caller-supplied manifest、坐标、nonce 和 occupied IDs 只被绑定，不是发送许可或完整准入。
 - 本地受保护来源联动：`freeze_prod_source_unit` 在实际 C-6 owner 下前后重核三个 family 的 C-5 源，真实 SourceRow 决定业务文字与原记录时间；调用方不能覆盖 manifest／业务／时间。真实多脚本 workflow 覆盖三类业务、原文字 NOOP、来源中途漂移与伪造 candidate 拒绝，模板和发布目录不改变。该证据不是坐标／preread 权威、C-6 receipt、新鲜准入、原始预留、真实发送或 COMPLETE；本卡仍 NOT RUN。
+- generation 字节衔接：批次、意图和 NV 预留允许原样绑定 C-6 正序号的 native `gen-…` 名；实际本地 generation／INTENT／commit 到 batch／durable intent／冷进程计数已用私有 fixture 验证。候选摘要身份不是真实 generation，任意合法 native 名亦不证明存在对应 receipt；完整受保护工作簿 receipt、恢复、准入与在线资格仍须独立核验，本卡仍 NOT RUN。
 - 风险与目标：禁止跨表原子性假象、遗漏 NOOP outcome／附带审计、递归 action_digest、拆批绕过预算、fence 碰撞后换 ID 或单独 fence 冒充 COMPLETE。业务 run、全部对应 Update_History 五列字面行和一个 SHEET 锚定 DOCUMENT fence 必须同 batch；全 NOOP 审计 pending，不产生发送单元。
 - 前置条件与输入：owner 对精确源码／测试／manifest／Python／平台树签发 Stage L、固定 launcher、真实尝试上界、新鲜准入、spreadsheet-wide owner、enrollment 与容量预留证明；另有一次性表副本的精确 Stage O 授权和人工编辑契约。未满足时 HOLD，不启动凭据或 mutation；本卡不授予部署或在线写权限。
 - 步骤与预期：经受管入口冻结一个合格单表单元，核对最多 1000 请求对象（含 History/fence）、wire 与非递归 action preimage 各最多 1 MiB；同字节 journal 后只通过被批准 launcher 发送。读取原生连接相关响应与目标、History、两份 nonce、永久 fence，按不可变 journal 完整对账；缺项、重复、碰撞、不同单元或摘要不一致均 UNKNOWN／CONFLICT，不换 ID、不清除预留。全 NOOP 不形成 audit-only 单元。

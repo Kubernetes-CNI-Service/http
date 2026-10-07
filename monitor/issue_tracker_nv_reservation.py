@@ -42,11 +42,13 @@ class NvReservationObservation:
 
 
 def _inputs(token, binding, identity, generation_id, publish_id, sheet, requested_keys):
+    from monitor.issue_tracker_send_unit import _generation_identity
+    _generation_identity(generation_id)
     owner, parent, enrollment_name, original = enrollment._inputs(token, binding, identity)
     observed = enrollment.inspect_enrollment_journal(token, binding, identity)
     if (type(sheet) is not str or sheet not in _FAMILIES
             or any(type(digest) is not str or re.fullmatch(r'[0-9a-f]{64}', digest) is None
-                   for digest in (generation_id, publish_id))
+                   for digest in (publish_id,))
             or type(requested_keys) is not tuple or not 1 <= len(requested_keys) <= 1000):
         raise NvReservationHold()
     keys = tuple(sorted(allocator._key(key) for key in requested_keys))

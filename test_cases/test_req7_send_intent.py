@@ -40,6 +40,41 @@ class Req7SendIntentDirectTests(unittest.TestCase):
         self.pub = self.project / 'publication'; self.pub.mkdir(mode=0o700)
         create_local_commit_store(self.project, self.pub); self.unit = freeze_send_unit(**inputs())
 
+    def test_actual_local_generation_and_receipt_identity_survive_composer_and_intent(self):
+        from monitor.issue_tracker_local_commit import begin_generation, record_intent, commit
+        args = inputs()
+        with writer_owner(self.project, self.pub) as token:
+            generation = begin_generation(token, args['manifest'])
+            record_intent(token, generation, b'private fixture publication, not online authority')
+            receipt = commit(token, generation)
+            args.update(generation_id=generation.generation_id, publish_id=receipt.published_sha256)
+            unit = freeze_send_unit(**args)
+            actual = self.module.prepare_send_intent(token, unit)
+            self.assertEqual(0, actual.attempt_count)
+            action = json.loads((self.project / '.tracker/remote-actions' / unit.unit_id / 'ACTION-PREIMAGE').read_bytes())
+            self.assertEqual(generation.generation_id, action['identity']['generation_id'])
+            self.assertEqual(receipt.published_sha256, action['identity']['publish_id'])
+            self.assertEqual(1, self.module.record_compiled_attempt_intent(token, unit).attempt_count)
+            self.assertFalse(hasattr(actual, 'permit'))
+        program = '''import sys
+from pathlib import Path
+from test_cases.test_req7_send_unit import inputs
+from monitor.issue_tracker_send_unit import freeze_send_unit
+from monitor.issue_tracker_local_commit import writer_owner
+from monitor.issue_tracker_send_intent import record_compiled_attempt_intent
+args = inputs(); args.update(generation_id=sys.argv[3], publish_id=sys.argv[4])
+unit = freeze_send_unit(**args)
+with writer_owner(Path(sys.argv[1]), Path(sys.argv[2])) as owner:
+    observed = record_compiled_attempt_intent(owner, unit)
+    print(observed.attempt_count, observed.outcome)
+'''
+        child = subprocess.run([sys.executable, '-B', '-c', program, str(self.project), str(self.pub),
+            generation.generation_id, receipt.published_sha256], cwd=MAIN,
+            env={**os.environ, 'PYTHONPYCACHEPREFIX': '/tmp/http-test-pyc'}, capture_output=True, text=True, timeout=15)
+        self.assertEqual(0, child.returncode, child.stderr)
+        self.assertEqual('2 UNKNOWN\n', child.stdout)
+        self.assertEqual(unit.wire_bytes, (self.project / '.tracker/remote-attempts' / unit.unit_id / 'WIRE').read_bytes())
+
     def test_action_preimage_and_explicit_digest_are_durable_before_first_attempt(self):
         with writer_owner(self.project, self.pub) as token:
             observation = self.module.prepare_send_intent(token, self.unit)

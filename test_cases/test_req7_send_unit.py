@@ -49,6 +49,18 @@ def inputs(count=2):
 class Req7SendUnitDirectTests(unittest.TestCase):
     def setUp(self): self.module = load()
 
+    def test_native_c6_generation_name_is_preserved_in_the_frozen_identity(self):
+        args = inputs(); args['generation_id'] = 'gen-00000000000000000001-' + '7' * 32
+        unit = self.module.freeze_send_unit(**args)
+        self.assertEqual(args['generation_id'], json.loads(unit.action_preimage)['identity']['generation_id'])
+        other = dict(args); other['generation_id'] = 'gen-00000000000000000002-' + '7' * 32
+        self.assertNotEqual(unit.unit_id, self.module.freeze_send_unit(**other).unit_id)
+        for invalid in ('gen-00000000000000000000-' + '7' * 32, 'gen-1-' + '7' * 32,
+                        'gen-00000000000000000001-' + 'A' * 32, args['generation_id'] + '\n',
+                        args['generation_id'] + '/STATE', True):
+            with self.subTest(invalid=invalid), self.assertRaises(self.module.SendUnitHold):
+                self.module.freeze_send_unit(**{**args, 'generation_id': invalid})
+
     def test_protected_source_compiler_rejects_caller_qualified_images_without_creating_a_unit(self):
         self.assertTrue(hasattr(self.module, 'freeze_prod_source_unit'),
                         'protected source replay must bind literal business values')

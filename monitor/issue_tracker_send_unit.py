@@ -1,8 +1,10 @@
 """Uninstalled C-19 immutable batch composer, NOT an online send/admission API.
 
-Caller-supplied manifests, coordinates, observations, nonces and occupied IDs
-are bound, NOT authenticated as protected qualification/enrollment or global
-capacity. No network, credential, permit, COMPLETE, reservation or receipt.
+The pure freeze_send_unit binds caller images. freeze_prod_source_unit replays
+protected C5 sources, but caller coordinates, observations, local generation,
+nonces and occupied IDs still are NOT authenticated as original receipt,
+enrollment or global capacity. No network, credential, permit, COMPLETE,
+reservation or receipt is created.
 An eventual fixed launcher must be dominated by fresh admission and the
 spreadsheet-wide owner; opaque local intent counting still does not bound sends.
 The 31-bit explicit fence projection can collide: collision means HOLD, never
@@ -62,6 +64,19 @@ def _digest(value):
     return value
 
 
+def _generation_identity(value):
+    """Preserve native C6 names; a well-shaped identity is NOT a receipt.
+
+    Digest-only isolated candidate identities remain representable, never an
+    authority to manufacture/adopt a local generation. Actual receipt/source
+    binding and handoff/recovery still must dominate any transport boundary.
+    """
+    if type(value) is not str: raise SendUnitHold()
+    match = re.fullmatch(r'gen-([0-9]{20})-([0-9a-f]{32})', value)
+    if match is not None and int(match.group(1)) > 0: return value
+    return _digest(value)
+
+
 def _text(value):
     if type(value) is not str or not 1 <= len(value) <= 32768 or "\x00" in value: raise SendUnitHold()
     value.encode("utf-8", "strict")
@@ -111,7 +126,7 @@ def freeze_prod_source_unit(qualified, store, *, http_root, settings,
 
     No caller manifest, business values or timestamp override is accepted.
     Placements are necessary caller coordinates/observations, NOT row identity
-    or allocation authority. Nonces, generation/publication and preread hashes
+    or allocation authority. Nonces, generation/publication and preread identities
     still need original C6/global/reservation binding before any send. This
     uninstalled compiler creates no journal, workbook, permit or transport.
     """
@@ -173,7 +188,8 @@ def _freeze(manifest, manifest_id, generation_id, publish_id, spreadsheet_id,
             or type(audits) is not tuple or len(audits) > 1000
             or type(occupied_metadata_ids) is not tuple or len(occupied_metadata_ids) > 30000):
         raise SendUnitHold()
-    for digest in (generation_id, publish_id, target_nonce, history_nonce, preread_sha256): _digest(digest)
+    _generation_identity(generation_id)
+    for digest in (publish_id, target_nonce, history_nonce, preread_sha256): _digest(digest)
     occupied = set()
     for identifier in occupied_metadata_ids:
         if _identifier(identifier) == 0 or identifier in occupied: raise SendUnitHold()

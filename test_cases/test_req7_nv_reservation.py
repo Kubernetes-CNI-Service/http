@@ -75,6 +75,26 @@ class Req7NvReservationDirectTests(unittest.TestCase):
         self.kw = dict(generation_id='c' * 64, publish_id='d' * 64, sheet='ETH Cabling', requested_keys=KEYS)
 
     def initialize(self, token): return self.enrollment.prepare_enrollment_journal(token, binding(), self.identity)
+
+    def test_original_nv_reservation_binds_an_actual_local_generation_name_without_aliasing(self):
+        from monitor.issue_tracker_local_commit import create_local_commit_store, writer_owner, begin_generation
+        with tempfile.TemporaryDirectory(prefix='req7-real-local-generation-') as folder:
+            project = Path(folder).resolve(); publication = project / 'publication'; publication.mkdir(mode=0o700)
+            create_local_commit_store(project, publication)
+            with writer_owner(project, publication) as local_token:
+                generation = begin_generation(local_token, b'{"schema_version":1}\n')
+                name = generation.generation_id
+        self.kw['generation_id'] = name
+        with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
+            self.initialize(token)
+            self.module = load()
+            result = self.reserve(token)
+            self.assertEqual(((KEYS[0], 'NV30102'), (KEYS[1], 'NV30103')), result.reservations)
+            self.assertEqual(name, json.loads((self.store / 'HEADER').read_bytes())['identity']['generation_id'])
+            self.assertEqual(result, self.inspect(token))
+            with self.assertRaises(self.module.NvReservationHold):
+                self.inspect(token, generation_id=name.replace('00000000000000000001', '00000000000000000002'))
+
     def reserve(self, token, **changes):
         args = dict(self.kw); args.update(changes)
         return self.module.prepare_nv_reservation(token, binding(), self.identity,
