@@ -526,6 +526,12 @@ finally:
             with self.subTest(kind=kind):
                 self._assert_real_persisted_a_runtime_switch(False, late_authority="key-orphan-" + kind)
 
+    def test_real_setup_death_prefix_marker_foreign_stage_is_preserved(self):
+        self._assert_real_persisted_a_runtime_switch(False, late_authority="prefix-stage")
+
+    def test_real_setup_death_prefix_marker_sync_failure_retains_wal_until_retry(self):
+        self._assert_real_persisted_a_runtime_switch(False, late_authority="prefix-sync")
+
     def test_real_setup_death_runtime_file_restore_preserves_foreign_stage(self):
         for kind in ("inode", "bytes", "hold"):
             with self.subTest(kind=kind):
@@ -536,7 +542,10 @@ finally:
         fixture.setUp()
         try:
             managed_key = bool(late_authority and late_authority.startswith("key-orphan-"))
-            state, context = fixture._prepare_persisted_a_runtime_switch(managed_key=managed_key)
+            prefix = bool(late_authority and late_authority.startswith("prefix-"))
+            state, context = fixture._prepare_persisted_a_runtime_switch(managed_key=managed_key, prefix=prefix)
+            prefix_before = ((fixture.root / ".ztp-prefix-publication.json").read_bytes()
+                             if prefix else None)
             root = fixture.root.resolve()
             p, q, common = state[:3]
             journal, descriptor, _backend = state[-3:]
@@ -591,6 +600,8 @@ if sys.argv[4] == 'late' and sys.argv[5].startswith('key-orphan-'):
 if sys.argv[4] == 'late':
     (root / 'ztp/ztp-bootstrap_oobofoob.sh').write_bytes(b'partial B runtime\\n')
     (root / 'ztp/ztp.json').write_bytes(b'partial B runtime\\n')
+    if sys.argv[5].startswith('prefix-'):
+        (root / '.ztp-prefix-publication.json').write_bytes(b'partial B prefix marker\\n')
     if sys.argv[5] == 'latest-sync':
         import json
         p = Path(json.loads((root / 'ztp/.setup-switch-journal.json').read_bytes())['body']['old_project']['path'])
@@ -614,6 +625,87 @@ os.kill(os.getpid(), signal.SIGKILL)
             self.assertEqual(-9, first.returncode, first.stdout + first.stderr)
             evidence = journal.read_bytes()
             mixed = os.readlink(common)
+            if prefix:
+                marker = root / ".ztp-prefix-publication.json"
+                marker_before = (marker.lstat().st_ino, marker.read_bytes())
+                wal_before = (journal.lstat().st_ino, evidence)
+                recovery = r'''
+import importlib.util, json, os, stat, sys
+from pathlib import Path
+from types import SimpleNamespace
+root, kind, phase = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+spec = importlib.util.spec_from_file_location('prefix_cold_load', root / 'DAY0-Prepare/11-load.py')
+load = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = load
+spec.loader.exec_module(load)
+load.active_managed_services = lambda *args, **kwargs: ()
+marker, journal = load.ZTP_PREFIX_MARKER, root / 'ztp/.setup-switch-journal.json'
+body = json.loads(journal.read_bytes())['body']
+receipt = Path(body['a_runtime']['receipt_directory']['path']) / 'receipt.json'
+import base64
+expected = base64.b64decode(json.loads(receipt.read_bytes())['prefix']['marker_b64'])
+sync, parent_sync, injected = os.fsync, load._fsync_parent_directory, []
+def foreign_stage(fd):
+    result = sync(fd)
+    info = os.fstat(fd)
+    if not injected and stat.S_ISREG(info.st_mode):
+        for stage in marker.parent.glob('.' + marker.name + '.rollback.*'):
+            if stage.lstat().st_ino == info.st_ino:
+                stage.rename(root / 'held-original-prefix-stage')
+                stage.write_bytes(b'independent foreign prefix stage\n')
+                stage.chmod(0o640)
+                injected.append(True)
+                (root / 'prefix-stage-evidence.json').write_text(json.dumps({'path': str(stage), 'ino': stage.lstat().st_ino}))
+    return result
+def marker_parent_sync(parent):
+    if parent == marker.parent and marker.read_bytes() == expected:
+        assert journal.is_file(), 'WAL retired before prefix namespace sync'
+        injected.append(True)
+        if phase == 'fault':
+            raise OSError('independent prefix marker parent sync')
+    return parent_sync(parent)
+if kind == 'prefix-stage':
+    os.fsync = foreign_stage
+else:
+    load._fsync_parent_directory = marker_parent_sync
+backend = SimpleNamespace(name='supervisor', start=lambda *args: (_ for _ in ()).throw(AssertionError('service start forbidden')))
+fd = load.acquire_deployment_lock(exclusive=True)
+try:
+    try:
+        load.recover_setup_switch_journal(journal, deployment_lock_descriptor=fd,
+            services_quiesced=True, runtime_backend=backend, restore_runtime_from_wal=True)
+    except load.LoadError as exc:
+        assert injected, 'prefix fault injection was not reached'
+        print('EXPECTED PREFIX HOLD:', exc)
+        raise SystemExit(7)
+    assert phase == 'retry' and injected, 'prefix namespace was not synchronized'
+    assert not journal.exists()
+finally:
+    load.release_deployment_lock(fd)
+'''
+                result = subprocess.run([sys.executable, "-B", "-c", recovery, str(root), late_authority, "fault"],
+                    capture_output=True, text=True, check=False, timeout=30)
+                self.assertEqual(7, result.returncode, result.stdout + result.stderr)
+                self.assertEqual(wal_before, (journal.lstat().st_ino, journal.read_bytes()))
+                if late_authority == "prefix-stage":
+                    self.assertEqual(marker_before, (marker.lstat().st_ino, marker.read_bytes()))
+                    held = json.loads((root / "prefix-stage-evidence.json").read_text())
+                    stage = Path(held["path"])
+                    self.assertTrue(os.path.lexists(stage), "foreign prefix stage was cleaned")
+                    self.assertEqual((held["ino"], b"independent foreign prefix stage\n", 0o640),
+                                     (stage.lstat().st_ino, stage.read_bytes(), stat.S_IMODE(stage.stat().st_mode)))
+                    self.assertEqual(prefix_before, (root / "held-original-prefix-stage").read_bytes())
+                else:
+                    self.assertEqual(prefix_before, marker.read_bytes())
+                    retry = subprocess.run([sys.executable, "-B", "-c", recovery, str(root), late_authority, "retry"],
+                        capture_output=True, text=True, check=False, timeout=30)
+                    self.assertEqual(0, retry.returncode, retry.stdout + retry.stderr)
+                    self.assertFalse(os.path.lexists(journal))
+                    self.assertEqual(prefix_before, marker.read_bytes())
+                self.assertEqual(context.setup_state.manifest, state[7].read_bytes())
+                self.assertEqual(context.setup_state.links, {path: os.readlink(path) for path in context.setup_state.links})
+                self.assertFalse((root / "service-started").exists())
+                return
             if late_authority and late_authority.startswith(("runtime-orphan-", "key-orphan-")):
                 kind = late_authority.removeprefix("key-orphan-" if managed_key else "runtime-orphan-")
                 target = root / ("ztp/config/publickey/laptop.pub" if managed_key else "ztp/ztp-bootstrap_oob.sh")

@@ -3781,12 +3781,22 @@ class ReleaseTransactionTests(unittest.TestCase):
         self.assertFalse(os.path.lexists(journal), "verified complete restore must retire its own WAL")
         backend.start.assert_not_called()
 
-    def _prepare_persisted_a_runtime_switch(self, *, managed_key=False):
+    def _prepare_persisted_a_runtime_switch(self, *, managed_key=False, prefix=False):
         private_root = mock.patch.object(LOAD, "HTTP_ROOT", self.root.resolve())
         private_root.start()
         self.addCleanup(private_root.stop)
         document = yaml.safe_load(self.global_file.read_text())
         document["common"]["mgmt"]["http"]["http_root"] = str(self.root.resolve())
+        if prefix:
+            document["common"]["mgmt"]["ztp"]["ztp_url_prefix"] = "/r22-prefix"
+            marker_patch = mock.patch.object(LOAD, "ZTP_PREFIX_MARKER", self.root / ".ztp-prefix-publication.json")
+            marker_patch.start()
+            self.addCleanup(marker_patch.stop)
+            (self.root / "r22-prefix").symlink_to("ztp")
+            LOAD.ZTP_PREFIX_MARKER.write_text(json.dumps({
+                "schema_version": 1, "prefix": "/r22-prefix",
+                "path": str(self.root.resolve() / "r22-prefix"), "target": str(self.ztp),
+            }))
         self.global_file.write_text(yaml.safe_dump(document, sort_keys=False))
         if managed_key:
             generation, receipt = self._publish_a_with_managed_key_receipt()
@@ -4244,6 +4254,90 @@ class ReleaseTransactionTests(unittest.TestCase):
         self.assertEqual(owner, marker.stat().st_ino)
         self.assertEqual(b"independent original marker\n", marker.read_bytes())
         self.assertFalse(list(marker.parent.glob(f".{marker.name}.rollback.*")))
+
+    def test_guarded_prefix_link_preserves_unknown_legacy_stage(self):
+        path = self.root / "guarded-prefix-link"
+        path.symlink_to("ztp")
+        owner = path.lstat().st_ino
+        stage = path.parent / f".{path.name}.rollback.{os.getpid()}"
+        stage.write_bytes(b"independent earlier prefix evidence\n")
+        stage_owner = stage.lstat().st_ino
+        with mock.patch.object(LOAD, "ZTP_PREFIX_MARKER", self.root / "absent-prefix-marker"):
+            with self.assertRaises(LOAD.LoadError):
+                LOAD.restore_ztp_prefix_publication(
+                    LOAD.ZtpPrefixPublicationSnapshot(marker=None, links={path: ("link", "ztp")}),
+                    require_authority=lambda: None,
+                )
+        self.assertEqual((owner, "ztp"), (path.lstat().st_ino, os.readlink(path)))
+        self.assertEqual((stage_owner, b"independent earlier prefix evidence\n"),
+                         (stage.lstat().st_ino, stage.read_bytes()))
+
+    def test_guarded_prefix_absent_link_reentry_repays_parent_sync(self):
+        path, marker = self.root / "prefix-sync-link", self.ztp / ".prefix-sync-marker"
+        path.symlink_to(self.ztp)
+        snapshot = LOAD.ZtpPrefixPublicationSnapshot(marker=None, links={path: ("missing", None)})
+        with mock.patch.object(LOAD, "ZTP_PREFIX_MARKER", marker):
+            with mock.patch.object(LOAD, "_fsync_parent_directory", side_effect=OSError("prefix parent sync")):
+                with self.assertRaisesRegex(LOAD.LoadError, "prefix parent sync"):
+                    LOAD.restore_ztp_prefix_publication(snapshot, require_authority=lambda: None)
+            self.assertFalse(os.path.lexists(path))
+            with mock.patch.object(LOAD, "_fsync_parent_directory", wraps=LOAD._fsync_parent_directory) as sync:
+                LOAD.restore_ztp_prefix_publication(snapshot, require_authority=lambda: None)
+            self.assertIn(mock.call(path.parent), sync.call_args_list)
+            self.assertIn(mock.call(marker.parent), sync.call_args_list)
+
+    def test_guarded_prefix_marker_rejects_foreign_stage_at_fsync(self):
+        for kind in ("inode", "bytes", "hold"):
+            with self.subTest(kind=kind):
+                marker = self.ztp / (".prefix-stage-" + kind)
+                marker.write_bytes(b"independent old marker\n")
+                before = (marker.lstat().st_ino, marker.read_bytes())
+                sync, injected = os.fsync, []
+                def substitute(fd):
+                    result = sync(fd)
+                    info = os.fstat(fd)
+                    for stage in marker.parent.glob(f".{marker.name}.rollback.*"):
+                        if not injected and stage.lstat().st_ino == info.st_ino:
+                            if kind != "bytes":
+                                stage.rename(self.root / ("held-prefix-stage-" + kind))
+                            stage.write_bytes(b"independent foreign prefix marker\n")
+                            stage.chmod(0o640)
+                            injected.append((stage, stage.lstat().st_ino))
+                    return result
+                def guard():
+                    if injected and kind == "hold":
+                        raise LOAD.LoadError("independent prefix authority HOLD")
+                with mock.patch.object(LOAD, "ZTP_PREFIX_MARKER", marker), mock.patch.object(os, "fsync", side_effect=substitute):
+                    with self.assertRaises(LOAD.LoadError):
+                        LOAD.restore_ztp_prefix_publication(
+                            LOAD.ZtpPrefixPublicationSnapshot(marker=b"independent A marker\n", links={}),
+                            require_authority=guard,
+                        )
+                self.assertEqual(1, len(injected))
+                stage, owner = injected[0]
+                self.assertEqual(before, (marker.lstat().st_ino, marker.read_bytes()))
+                self.assertTrue(os.path.lexists(stage), "foreign marker stage was cleaned")
+                self.assertEqual((owner, b"independent foreign prefix marker\n", 0o640),
+                                 (stage.lstat().st_ino, stage.read_bytes(), stat.S_IMODE(stage.lstat().st_mode)))
+
+    def test_guarded_prefix_marker_mode_is_durable_before_namespace_sync(self):
+        marker = self.ztp / ".prefix-mode"
+        sync, modes = os.fsync, []
+        def observe(fd):
+            info = os.fstat(fd)
+            if stat.S_ISREG(info.st_mode):
+                modes.append(stat.S_IMODE(info.st_mode))
+            return sync(fd)
+        with mock.patch.object(LOAD, "ZTP_PREFIX_MARKER", marker), mock.patch.object(os, "fsync", side_effect=observe):
+            with mock.patch.object(LOAD, "_fsync_parent_directory", wraps=LOAD._fsync_parent_directory) as parent_sync:
+                LOAD.restore_ztp_prefix_publication(
+                    LOAD.ZtpPrefixPublicationSnapshot(marker=b"independent A marker\n", links={}),
+                    require_authority=lambda: None,
+                )
+        self.assertEqual([0o644], modes)
+        parent_sync.assert_called_once_with(marker.parent)
+        self.assertEqual((b"independent A marker\n", 0o644),
+                         (marker.read_bytes(), stat.S_IMODE(marker.stat().st_mode)))
 
     def test_setup_wal_replaced_a_receipt_holds_before_any_p_write(self):
         state, context = self._prepare_persisted_a_runtime_switch()

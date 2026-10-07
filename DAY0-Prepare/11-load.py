@@ -4071,6 +4071,13 @@ def restore_ztp_prefix_publication(
     *, require_authority: Callable[[], None] | None = None,
 ) -> None:
     """Restore the prefix link/marker snapshot after a pre-commit failure."""
+    if require_authority is not None:
+        try:
+            _restore_guarded_ztp_prefix_publication(snapshot, require_authority=require_authority)
+        except OSError as exc:
+            raise LoadError(f"ZTP prefix publication 回滚失败；WAL retained: {exc}") from exc
+        warn("统一 release 未提交；已恢复本次 load 前的 ZTP URL prefix 链接")
+        return
     errors = []
     for path, (kind, target) in snapshot.links.items():
         if require_authority is not None:
@@ -4143,6 +4150,56 @@ def restore_ztp_prefix_publication(
     if errors:
         raise LoadError("ZTP prefix publication 回滚失败：" + "；".join(errors))
     warn("统一 release 未提交；已恢复本次 load 前的 ZTP URL prefix 链接")
+
+
+def _restore_guarded_ztp_prefix_publication(
+    snapshot: ZtpPrefixPublicationSnapshot, *, require_authority: Callable[[], None],
+) -> None:
+    """Use owned recovery stages and repay every prefix namespace sync.
+
+    Keep legacy entry behavior separate. A WAL authority never licenses
+    adoption/deletion of an older fixed-name stage or creation of an unbound
+    parent directory. A failed sync leaves the caller's WAL available for
+    reentry; even known absence still owes the parent sync.
+    """
+    require_authority()
+    for path, (kind, _target) in snapshot.links.items():
+        if kind != "other":
+            _require_no_pending_setup_stage(path, f".{path.name}.rollback.", "prefix link")
+            _require_no_pending_setup_link_stage(path)
+    _require_no_pending_setup_stage(
+        ZTP_PREFIX_MARKER, f".{ZTP_PREFIX_MARKER.name}.rollback.", "prefix marker",
+    )
+    for path, (kind, target) in snapshot.links.items():
+        require_authority()
+        if kind == "other":
+            continue
+        if kind == "missing":
+            if path.is_symlink():
+                if path.resolve() != ZTP_DIR.resolve():
+                    raise LoadError(f"拒绝删除已被外部改写的 prefix 链接：{path}")
+                require_authority()
+                path.unlink()
+            elif os.path.lexists(path):
+                raise LoadError(f"prefix 回滚目标已变成实际文件/目录：{path}")
+            _fsync_parent_directory(path.parent)
+        elif kind == "link" and target is not None:
+            if os.path.lexists(path) and not path.is_symlink():
+                raise LoadError(f"prefix 回滚目标已变成实际文件/目录：{path}")
+            _atomic_restore_setup_link(path, target, require_authority=require_authority)
+        else:
+            raise LoadError(f"未知 prefix snapshot 状态：{kind}")
+    require_authority()
+    if ZTP_PREFIX_MARKER.is_symlink():
+        raise LoadError("prefix marker 已变成符号链接")
+    payload = snapshot.marker
+    record = ({"state": "missing"} if payload is None else {
+        "state": "file", "mode": 0o644, "sha256": hashlib.sha256(payload).hexdigest(),
+    })
+    _restore_receipt_file(
+        ZTP_PREFIX_MARKER, record, payload, require_authority=require_authority,
+        stage_prefix=f".{ZTP_PREFIX_MARKER.name}.rollback.",
+    )
 
 
 def configure_ztp_prefix_publication(
@@ -5642,10 +5699,15 @@ def _load_runtime_rollback_receipt(
 def _restore_receipt_file(
     path: Path, record: dict[str, object], payload: bytes | None,
     *, require_authority: Callable[[], None] | None = None,
+    stage_prefix: str | None = None,
 ) -> None:
+    if stage_prefix is None:
+        stage_prefix = f".{path.name}.rollback-"
+    if stage_prefix not in {f".{path.name}.rollback-", f".{path.name}.rollback."}:
+        raise LoadError("runtime restore stage prefix is invalid; HOLD")
     if require_authority is not None:
         require_authority()
-    _require_no_pending_setup_stage(path, f".{path.name}.rollback-", "runtime file")
+    _require_no_pending_setup_stage(path, stage_prefix, "runtime file")
     if record["state"] == "missing":
         if payload is not None:
             raise LoadError("rollback missing-file record has an unexpected payload")
@@ -5662,7 +5724,7 @@ def _restore_receipt_file(
     if payload is None or hashlib.sha256(payload).hexdigest() != record["sha256"]:
         raise LoadError("rollback receipt payload changed before restore")
     parent_identity = _setup_switch_link_parent_identity(path)
-    descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.rollback-", dir=path.parent)
+    descriptor, name = tempfile.mkstemp(prefix=stage_prefix, dir=path.parent)
     temporary = Path(name)
     held_descriptor = -1
     staged_identity = None

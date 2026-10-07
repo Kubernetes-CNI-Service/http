@@ -451,6 +451,13 @@ flat runtime 已可能先被改写。direct 与真实 SETUP 强杀→新 LOAD �
 key 暂存的零 P/flat 写入，以及 runtime 后核验后晚到 key 暂存阻止 WAL 退休；正常
 managed key 恢复仍保持链接、原源文件和既存权力换绑断言。这只扩大已验证 receipt 的
 暂存名围栏，不完成 YAML/prefix 全写集、B finalizer、旧 A 健康激活或 root 入口验收。
+受 WAL authority 保护的 prefix 恢复另须拒绝旧 `.name.rollback.` 链接暂存，
+新链接复用已验证自有的随机暂存 writer；marker 保持 `.name.rollback.` 名称合同，
+复用持有 FD、fsync 前 mode/字节冻结及发布/清理前身份检查，外来暂存不发布、不删除。
+链接 replace/unlink、marker replace/unlink 与已缺席重入均须同步父目录，失败保留 WAL。
+direct 和真实 SETUP 强杀→新 LOAD 覆盖 marker 换绑及同步失败→第三 LOAD 重入。
+此分支不创建未绑定父目录；未带 authority 的旧入口未改变。尚未完成 prefix 在 P
+首写前/退休前的全部孤儿围栏、任意非合作写者免疫、完整 B finalizer 或旧 A 激活。
 missing 前像的 unlink 和已经缺席的重入也须同步父目录。同步失败不得报成功或退休 WAL。
 direct 覆盖实际模式/同步顺序和写入/删除同步异常；真实 LOAD→SETUP 强杀→新 LOAD
 workflow 使用实际 runtime 文件 writer 注入父目录同步错误，保留 WAL 后在新进程重入。
