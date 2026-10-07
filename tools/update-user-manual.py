@@ -631,7 +631,7 @@ def script_profile(root: Path, relative: str) -> dict[str, str]:
                 example = "python3 -B -m unittest -v test_cases.test_req7_send_intent  # 仅开发测试"
             elif relative == "monitor/issue_tracker_send_unit.py":
                 scenario = "冻结单表业务变更、全部对应 History 与一个永久 fence；非递归 action_digest 绑定完整 outcome 和审计集合。"
-                inputs = "同目标 family 的完整有序 manifest 操作与明确字面值／观察；身份、nonce、占用 ID 只被绑定，未证明准入。"
+                inputs = "受保护 C-5 三类来源可在实际 C-6 owner 内前后重核并生成业务文字／原记录时间，拒绝 caller manifest／业务／时间覆盖；坐标、观察、身份、nonce、占用 ID 仍只被绑定，未证明准入。"
                 recovery = "缺项、重复、坐标冲突、marker 投影碰撞或 1000 请求／1 MiB 上界越界均 HOLD；不分批、不换 ID；全 NOOP 时审计 pending。"
                 example = "python3 -B -m unittest -v test_cases.test_req7_send_unit  # 仅开发测试"
             elif relative == "monitor/issue_tracker_metadata_capacity.py":

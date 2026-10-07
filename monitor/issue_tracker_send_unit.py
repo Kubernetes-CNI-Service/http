@@ -103,6 +103,64 @@ Returned byte strings cannot track later mutation of supplied dictionaries.
     return result
 
 
+def freeze_prod_source_unit(qualified, store, *, http_root, settings,
+                           whitelist_snapshot, whitelist_path, metadata,
+                           expected_template_sha256, placements, writer_token=None,
+                           **unit_binding):
+    """Reverify protected C5 sources and derive ALL business text from them.
+
+    No caller manifest, business values or timestamp override is accepted.
+    Placements are necessary caller coordinates/observations, NOT row identity
+    or allocation authority. Nonces, generation/publication and preread hashes
+    still need original C6/global/reservation binding before any send. This
+    uninstalled compiler creates no journal, workbook, permit or transport.
+    """
+    failed = False
+    try:
+        from monitor.issue_tracker_local_commit import _owner
+        from monitor.issue_tracker_local_workbook_commit import _source_rows
+        from monitor.issue_tracker_manifest import freeze_prod_stage_l_manifest
+        from monitor.issue_tracker_online_cells import source_tool_values
+
+        names = {'generation_id', 'publish_id', 'spreadsheet_id', 'sheet', 'sheet_id',
+                 'history_sheet_id', 'target_nonce', 'history_nonce', 'preread_sha256',
+                 'audits', 'occupied_metadata_ids'}
+        if (set(unit_binding) != names or type(unit_binding['sheet']) is not str
+                or unit_binding['sheet'] not in _FAMILY or type(placements) is not tuple
+                or len(placements) > 1000): raise SendUnitHold()
+        owner = _owner(writer_token)
+        if str(owner.project) != str(store.project_identity): raise SendUnitHold()
+        context = dict(http_root=http_root, settings=settings, whitelist_snapshot=whitelist_snapshot,
+                       whitelist_path=whitelist_path, metadata=metadata,
+                       expected_template_sha256=expected_template_sha256, writer_token=writer_token)
+        manifest, manifest_id = freeze_prod_stage_l_manifest(qualified, store, **context)
+        family = _FAMILY[unit_binding['sheet']]
+        operations = [item for item in json.loads(manifest)['operations'] if item['activity_key'][0] == family]
+        cabling, switch = _source_rows(qualified)
+        by_key = {row.activity_key: row for row in (*cabling, *switch)}
+        if len(by_key) != len(cabling) + len(switch) or len(operations) != len(placements): raise SendUnitHold()
+        placement_image = _canonical(placements)
+        business = []
+        for operation, placement in zip(operations, placements):
+            if (type(placement) is not dict or set(placement) != {
+                    'operation_id', 'action', 'row_index', 'observed_values', 'reserved_id'}
+                    or placement['operation_id'] != operation['operation_id']
+                    or type(placement['action']) is not str or placement['action'] not in ('insert', 'update')):
+                raise SendUnitHold()
+            row = by_key[tuple(operation['activity_key'])]
+            values = source_tool_values(row, placement['action'], reserved_id=placement['reserved_id'])
+            business.append({'operation_id': operation['operation_id'], 'action': placement['action'],
+                'row_index': placement['row_index'], 'observed_values': placement['observed_values'],
+                'values': values, 'recorded_at_utc': row.recorded_at_utc})
+        result = freeze_send_unit(manifest=manifest, manifest_id=manifest_id, business=tuple(business), **unit_binding)
+        if (freeze_prod_stage_l_manifest(qualified, store, **context) != (manifest, manifest_id)
+                or _canonical(placements) != placement_image): raise SendUnitHold()
+        _owner(writer_token)
+    except Exception: failed = True
+    if failed: raise SendUnitHold()
+    return result
+
+
 def _freeze(manifest, manifest_id, generation_id, publish_id, spreadsheet_id,
             sheet, sheet_id, history_sheet_id, target_nonce, history_nonce,
             preread_sha256, business, audits, occupied_metadata_ids):

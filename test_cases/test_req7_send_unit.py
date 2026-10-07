@@ -49,6 +49,25 @@ def inputs(count=2):
 class Req7SendUnitDirectTests(unittest.TestCase):
     def setUp(self): self.module = load()
 
+    def test_protected_source_compiler_rejects_caller_qualified_images_without_creating_a_unit(self):
+        self.assertTrue(hasattr(self.module, 'freeze_prod_source_unit'),
+                        'protected source replay must bind literal business values')
+        bindings = inputs()
+        for name in ('manifest', 'manifest_id', 'business'): bindings.pop(name)
+        with self.assertRaises(self.module.SendUnitHold) as caught:
+            self.module.freeze_prod_source_unit(object(), object(), metadata={}, expected_template_sha256='a' * 64,
+                http_root='/', settings=object(), whitelist_snapshot=object(), whitelist_path='/', placements=(), **bindings)
+        self.assertIsNone(caught.exception.__context__)
+
+    def test_protected_source_compiler_has_no_caller_manifest_business_or_timestamp_override(self):
+        self.assertTrue(hasattr(self.module, 'freeze_prod_source_unit'),
+                        'protected source replay must bind literal business values')
+        for override in ('manifest', 'business', 'recorded_at_utc'):
+            with self.subTest(override=override), self.assertRaises(self.module.SendUnitHold):
+                self.module.freeze_prod_source_unit(object(), object(), metadata={}, expected_template_sha256='a' * 64,
+                    http_root='/', settings=object(), whitelist_snapshot=object(), whitelist_path='/', placements=(),
+                    **{override: b'caller invented image'})
+
     def test_exact_single_batch_contains_literal_cells_all_history_and_one_document_fence(self):
         args = inputs(); unit = self.module.freeze_send_unit(**args)
         document = json.loads(unit.wire_bytes)

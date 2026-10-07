@@ -64,6 +64,9 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
     def test_real_nine_role_ib_and_eth_fourth_role_qualify_and_c5_reject_drift(self):
         self._exercise_real_protected_three_panel_fixture(skip_history=False)
 
+    def test_real_protected_three_panel_sources_compile_literal_units_and_refuse_invented_values(self):
+        self._exercise_real_protected_three_panel_fixture(skip_history=False, source_unit_probe=True)
+
     def test_two_real_cycles_keep_keys_and_commit_latest_business_values(self):
         self._exercise_real_protected_three_panel_fixture(
             skip_history=False, two_cycle_changed_latest=True,
@@ -420,7 +423,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         selected_panel_empty=False, manual_channel_bridge=False,
         source_identity_probe=False, two_cycle_changed_latest=False,
         settings_channel_probe=False, settings_channel_fault=False,
-        panel_counts_probe=False,
+        panel_counts_probe=False, source_unit_probe=False,
         complete_preview_probe=False,
         complete_preview_source_race=False,
         complete_preview_cgi=False,
@@ -888,6 +891,79 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             generation_root = project / ".tracker/generations"
             before_generations = tuple(sorted(generation_root.iterdir()))
             original_template = self.template.read_bytes()
+            if source_unit_probe:
+                from monitor.issue_tracker_send_unit import freeze_prod_source_unit, SendUnitHold
+                for sheet, family, sid in (('ETH&IB Switch', 'switch', 101), ('ETH Cabling', 'eth_cabling', 102),
+                                           ('IB Cabling', 'ib_cabling', 103)):
+                    candidates = tuple(item for item in qualified.candidates if item.activity_key[0] == family)
+                    self.assertTrue(candidates, 'all three real protected families must be exercised')
+                    placements = tuple({'operation_id': item.operation_id, 'action': 'update' if family == 'switch' else 'insert',
+                        'row_index': index + 2 if family == 'switch' else None, 'observed_values': {'L': {}} if family == 'switch' else None,
+                        'reserved_id': None if family == 'switch' else 'NV%05d' % (41001 + index)}
+                        for index, item in enumerate(candidates))
+                    options = dict(generation_id='a' * 64, publish_id='b' * 64,
+                        spreadsheet_id='synthetic_spreadsheet_id_0001', sheet=sheet, sheet_id=sid, history_sheet_id=105,
+                        target_nonce='c' * 64, history_nonce='d' * 64, preread_sha256='e' * 64,
+                        audits=(), occupied_metadata_ids=())
+                    with tracker_writer(project, self.publication) as token:
+                        value = freeze_prod_source_unit(qualified, self.store, metadata=metadata,
+                            expected_template_sha256=self.snapshot.workbook_sha256, placements=placements, writer_token=token,
+                            **args, **options)
+                        image = json.loads(value.action_preimage)
+                        self.assertEqual(digest, image['manifest_id'])
+                        self.assertEqual([item.operation_id for item in candidates], [item['operation_id'] for item in image['business']])
+                        self.assertEqual([list(item.activity_key) for item in candidates], [item['activity_key'] for item in image['business']])
+                        self.assertEqual([item.recorded_at_utc for item in candidates], [item['recorded_at_utc'] for item in image['business']])
+                        for item, candidate in zip(image['business'], candidates):
+                            if family == 'switch':
+                                self.assertEqual({'stringValue': '[MONITOR][%s][%s] [fabric_source=%s] %s' %
+                                    (candidate.activity_key[2], candidate.activity_key[3], candidate.fabric_source, candidate.evidence_description)},
+                                    item['requests'][0]['updateCells']['rows'][0]['values'][0]['userEnteredValue'])
+                            else:
+                                cells = item['requests'][0]['appendCells']['rows'][0]['values']
+                                self.assertEqual({'stringValue': 'ETH' if family == 'eth_cabling' else 'IB'}, cells[4]['userEnteredValue'])
+                                self.assertEqual({'stringValue': 'New'}, cells[20]['userEnteredValue'])
+                                self.assertEqual({'stringValue': candidate.activity_key[3]}, cells[5]['userEnteredValue'])
+                        invented = tuple({**item, 'values': {'L': 'caller invented text'}} for item in placements)
+                        with self.assertRaises(SendUnitHold):
+                            freeze_prod_source_unit(qualified, self.store, metadata=metadata,
+                                expected_template_sha256=self.snapshot.workbook_sha256, placements=invented, writer_token=token, **args, **options)
+                        altered = replace(qualified, candidates=tuple(replace(item, evidence_description='caller invented text')
+                                                                      for item in qualified.candidates))
+                        with self.assertRaises(SendUnitHold):
+                            freeze_prod_source_unit(altered, self.store, metadata=metadata,
+                                expected_template_sha256=self.snapshot.workbook_sha256, placements=placements, writer_token=token, **args, **options)
+                        if family == 'switch':
+                            noop_placements = tuple({**placement, 'observed_values': {'L': {
+                                'stringValue': '[MONITOR][%s][%s] [fabric_source=%s] %s' %
+                                    (candidate.activity_key[2], candidate.activity_key[3], candidate.fabric_source,
+                                     candidate.evidence_description)}}}
+                                for placement, candidate in zip(placements, candidates))
+                            noop = freeze_prod_source_unit(qualified, self.store, metadata=metadata,
+                                expected_template_sha256=self.snapshot.workbook_sha256, placements=noop_placements,
+                                writer_token=token, **args, **options)
+                            self.assertEqual('NO_SEND', noop.outcome)
+                            self.assertEqual(b'', noop.wire_bytes)
+                            self.assertEqual(0, noop.history_rows_expected)
+                            source_path = artifacts['ethernet/prod']['info']
+                            source_before = source_path.read_bytes()
+                            from monitor.issue_tracker_online_cells import source_tool_values as real_values
+                            def drift_after_source_values(*values_args, **values_kwargs):
+                                result = real_values(*values_args, **values_kwargs)
+                                source_path.write_bytes(source_before + b'\nchanged during source compilation\n')
+                                return result
+                            try:
+                                with mock.patch('monitor.issue_tracker_online_cells.source_tool_values',
+                                                side_effect=drift_after_source_values), self.assertRaises(SendUnitHold):
+                                    freeze_prod_source_unit(qualified, self.store, metadata=metadata,
+                                        expected_template_sha256=self.snapshot.workbook_sha256, placements=placements,
+                                        writer_token=token, **args, **options)
+                            finally:
+                                source_path.write_bytes(source_before)
+                    self.assertEqual(before_publication, tuple(sorted(self.publication.iterdir())))
+                    self.assertEqual(before_generations, tuple(sorted(generation_root.iterdir())))
+                    self.assertEqual(original_template, self.template.read_bytes())
+                return
             if selected_manual_panel is not None:
                 selected_body, selected_id = freeze_prod_stage_l_manifest(
                     qualified, self.store, metadata=metadata,

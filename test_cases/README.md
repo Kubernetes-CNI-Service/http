@@ -883,6 +883,12 @@ VISIBLE_ONLY_UNPROVED，因为别的 Cloud 项目的 PROJECT 元数据可能不�
 真实 cell encoder → composer → C-6 owner / immutable journal workflow 验证同字节六次意图
 和改变字节拒绝，不证明真实发送上界、nonce 权威、全表锁、新鲜准入或 COMPLETE。
 31-bit fence 投影可能碰撞，占用时 HOLD 不换 ID；库未安装，真机卡 NOT RUN。
+`freeze_prod_source_unit` 另在实际 C-6 owner 内前后重核三类受保护 C-5 来源，
+由真实 SourceRow 生成业务字面值和原记录时间；不接受 caller manifest、业务文字或时间覆盖。
+真实采集／资格核验 → manifest → 字面 encoder → 冻结 batch workflow 验证三个 family、
+原文字 NOOP、组批期间来源漂移及伪造 candidate 的拒绝，保持模板／发布目录不变。
+坐标、观察、generation/publication、nonce 和 preread 仍只绑定；不冒充原始预留、
+行身份、C-6 receipt、每次新鲜准入、固定 launcher、真实发送上界或 COMPLETE。
 
 `test_cases.test_req7_send_intent` 将真实 composer → C-6 owner → 非递归
 ACTION-PREIMAGE/action_digest → immutable wire journal → 六个冷启动进程的意图计数
