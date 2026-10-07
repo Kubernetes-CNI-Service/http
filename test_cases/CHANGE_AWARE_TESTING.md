@@ -153,6 +153,37 @@ proof。默认 push 只接受 release proof。owner 授权的 AIR/prod 验证可
 
 ## Full proof 失败后的诊断与重跑闸门
 
+2026-10-07 owner 单独批准的一次完整诊断使用当前 `3123e81680bc959c4b714e5b869437622f8a5ba7`
+/ tree `221d43c2a1c8ec37099ac43ae84e41d4b661aadc`，运行
+`python3 -B test_cases/run_related_tests.py --all --no-approve -v`。
+完整原日志 `outputs/test-diagnostics/r22-3123e81-authorized-full-diagnostic.log`，
+inode156760820、size885087、SHA256
+`b8c6538fee43b25849b1a98455335621459f0212c351e3aea1610bd98c5275bc`，
+读前后 stat 相同且已知旧前缀不变。物理第5586行 Ran 5003 tests in 3000.722s，
+5588行 FAILED (failures=20, skipped=5)，5757行 ACTUAL_RUNNER_EXIT=1，
+5762行 FROZEN_STATE_MATCH=True，5764行 DIAGNOSTIC_END=1，实际 exec exit1。
+这不是正式通过证明，也没有批准 ledger 更新。
+
+逐项 traceback 分类为两个可验证的同步遗漏：一项是杀前证据 helper 已显式登记
+tracked_support，但独立完整清单预期遗漏该唯一诊断路径；另外19项是生成手册遗漏
+`test_cases/subprocess_timeout_evidence.py` 和 `test_cases/test_subprocess_timeout_evidence.py`，
+导致目录完整性、生成一致性及其下游公开/打包 workflow 拒绝。修复只补独立路径合同并
+按原生成工具更新维护目录，不从实现自动生成测试预期，不删原失败方法、放大时限或
+改历史锚点。已有 direct 清单/目录断言及真实生成/打包 workflow 作为独立 RED 与回归。
+本次没有捕获原 bootstrap15s/REQ19 probe10s 的再次超时；19项下游手册门禁失败亦不能
+证明其被门禁挡住的历史子流程已通过，因此两个原时限故障的原因仍 unknown。
+修复后的有界回归仅解释本次20项失败，不自动授权另一次 full，不取消上述历史诊断闸门。
+
+首轮修复后有界集运行76项，75项通过、公开 current-lifecycle clone 一项失败；原日志
+`outputs/test-diagnostics/full-diagnostic-manual-support-repair-bounded.log`，inode157628418、
+size146671、SHA256 `7fdb8d9b0ddfb0cbd59b85d01999e7c05f89d6053a10d6f96939c5b8d74ac55e`，
+物理 Ran 76 tests in 66.072s、FAILED (failures=1)、ACTUAL_UNITTEST_EXIT=1、
+FROZEN_STATE_MATCH=True、DIAGNOSTIC_END=1 与实际 exec exit1 一致。其子流程
+仍为513/515的旧手册差异；源码核实 `_copy_public_candidate_held` 从 held index 的
+exact blob materialize，而非未提交 worktree，故独立工作树目录/生成/打包断言已经通过
+不能代表 index clone 已更新。候选先提交使受测 index 字节真正更新，再原样重跑该有界集；
+不改 exact-five、持有 index 权限、断言或时限，不把这次失败称成功。
+
 全量失败必须先解释原因；单独重跑失败用例通过，只是一次诊断结果，不能据此直接再跑
 full。失败、未知原因、日志缺失或中断仍保持无证明状态，不能以“偶发”“环境”概括未核实的
 缺陷。本规则同样适用于 related 失败后准备进入正式 full 的情况。
