@@ -4225,6 +4225,28 @@ class _SetupLinkTransaction:
         if not _directory_trees_identical(path, target):
             raise ValueError("materialized latest 在迁移前已与匹配发布目录不一致")
 
+        # Registering the temporary link crosses another durable-write
+        # boundary. Do not move an owner that replaced either directory
+        # during that registration and discover the drift only afterwards.
+        parent = os.path.dirname(path)
+        parent_identity = os.lstat(parent)
+
+        def require_materialized_writer_preimage():
+            def owner(metadata):
+                return (metadata.st_dev, metadata.st_ino, metadata.st_mode,
+                        metadata.st_uid, metadata.st_gid)
+            try:
+                if owner(os.lstat(parent)) != owner(parent_identity):
+                    raise ValueError("materialized latest parent identity changed")
+                if (owner(os.lstat(path)) != owner(source_identity)
+                        or owner(os.lstat(target)) != owner(target_identity)):
+                    raise ValueError("materialized latest source or target owner changed")
+                if (not _regular_publish_marker(target)
+                        or not _directory_trees_identical(path, target)):
+                    raise ValueError("materialized latest source or target contents changed")
+            except (OSError, ValueError) as exc:
+                raise ValueError(f"materialized latest writer preimage changed; HOLD: {exc}") from exc
+
         rel_target = os.path.relpath(target, os.path.dirname(path))
         temporary = os.path.join(
             os.path.dirname(path), f".{os.path.basename(path)}.tmp.{os.getpid()}"
@@ -4243,6 +4265,7 @@ class _SetupLinkTransaction:
             if registered is None or registered[0] != os.path.realpath(target):
                 raise ValueError("materialized latest 写入缺少精确 WAL 备份登记")
             backup = registered[1]
+            require_materialized_writer_preimage()
             _atomic_rename_noreplace(path, backup)
             _fsync_directory(os.path.dirname(path))
         else:

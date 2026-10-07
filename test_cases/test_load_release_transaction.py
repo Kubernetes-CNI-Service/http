@@ -4419,6 +4419,69 @@ os.kill(os.getpid(), signal.SIGKILL)
         self.assertEqual(old_project, LOAD.active_project())
         backend.start.assert_not_called()
 
+    def _assert_materialized_writer_registration_drift_holds(self, drift):
+        state = self._prepare_cross_project_setup_crash()
+        q, journal, descriptor, backend = state[1], state[10], state[11], state[12]
+        output = q.resolve() / "99-output-eth"
+        latest, release = output / "latest", output / "20261007_090000_combine"
+        payload = b"hostname: independent migration owner\n"
+        for path in (latest, release):
+            path.mkdir(parents=True)
+            (path / ".published-complete").write_bytes(b"complete\n")
+            (path / "leaf.yaml").write_bytes(payload)
+        original_source, original_target = latest.stat(), release.stat()
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            backup = LOAD.register_setup_switch_materialized_directory(
+                journal, latest, release, deployment_lock_descriptor=descriptor,
+                services_quiesced=True, runtime_backend=backend,
+            )
+        transaction = SETUP._SetupLinkTransaction((str(latest),))
+        register = LOAD.register_setup_switch_journal_link
+        captured = {}
+
+        def replace_after_temp_registration(*args, **kwargs):
+            result = register(*args, **kwargs)
+            changed = latest if drift == "source" else release
+            retained = output / "retained-original-migration-owner"
+            changed.rename(retained)
+            changed.mkdir()
+            (changed / ".published-complete").write_bytes(b"complete\n")
+            (changed / "leaf.yaml").write_bytes(payload)
+            captured["wal"] = journal.read_bytes()
+            captured["retained"] = retained
+            captured["replacement_inode"] = changed.stat().st_ino
+            return result
+
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(SETUP, "ZTP", str(self.ztp)), \
+                mock.patch.object(SETUP, "_SETUP_SWITCH_WAL_CONTEXT",
+                                  (vars(LOAD), descriptor, {}, {str(latest): (str(release), str(backup))})), \
+                mock.patch.object(LOAD, "register_setup_switch_journal_link",
+                                  side_effect=replace_after_temp_registration), \
+                mock.patch.object(SETUP, "_atomic_rename_noreplace",
+                                  wraps=SETUP._atomic_rename_noreplace) as rename:
+            with self.assertRaises(ValueError):
+                transaction.migrate_materialized_directory(str(latest), str(release))
+        rename.assert_not_called()
+        self.assertTrue(latest.is_dir(), "writer moved a source after registration drift")
+        self.assertFalse(latest.is_symlink())
+        self.assertFalse(os.path.lexists(backup))
+        changed = latest if drift == "source" else release
+        original = original_source if drift == "source" else original_target
+        self.assertEqual(captured["replacement_inode"], changed.stat().st_ino)
+        self.assertEqual(original.st_ino, captured["retained"].stat().st_ino)
+        self.assertEqual(payload, (changed / "leaf.yaml").read_bytes())
+        self.assertEqual(payload, (captured["retained"] / "leaf.yaml").read_bytes())
+        self.assertEqual(captured["wal"], journal.read_bytes())
+        self.assertEqual([], transaction.materialized_migrations)
+        backend.start.assert_not_called()
+
+    def test_setup_materialized_writer_source_drift_blocks_rename(self):
+        self._assert_materialized_writer_registration_drift_holds("source")
+
+    def test_setup_materialized_writer_target_drift_blocks_rename(self):
+        self._assert_materialized_writer_registration_drift_holds("target")
+
     def test_setup_wal_cold_recovers_registered_materialized_latest_after_rename(self) -> None:
         """A killed directory migration must leave a durable route back to Q's bytes."""
         (

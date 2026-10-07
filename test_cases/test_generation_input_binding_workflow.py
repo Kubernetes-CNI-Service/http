@@ -2201,6 +2201,75 @@ finally:
     def test_real_setup_materialized_temp_death_foreign_owner_blocks_all_restore(self):
         self._assert_materialized_temp_cold_recovery(True)
 
+    def _assert_real_materialized_writer_registration_drift_holds(self, drift):
+        with tempfile.TemporaryDirectory(prefix="r22-materialized-writer-drift-") as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, _p, q, _common, _p_only, _q_only, _manifest, _before, hook, barrier, _home = fixture
+            output = q / "99-output-eth"
+            latest, release = output / "latest", output / "20261007_090000_combine"
+            payload = b"hostname: independent migration owner\n"
+            for path in (latest, release):
+                path.mkdir(parents=True)
+                (path / ".published-complete").write_bytes(b"complete\n")
+                (path / "leaf.yaml").write_bytes(payload)
+            original_source, original_target = latest.stat(), release.stat()
+            site = hook / "sitecustomize.py"
+            site.write_text(site.read_text(encoding="utf-8") + """
+import json
+previous_materialized_replace = os.replace
+def drift_materialized_after_temp_registration(source, destination, *args, **kwargs):
+    result = previous_materialized_replace(source, destination, *args, **kwargs)
+    journal = Path(os.environ['HTTP_TEST_MATERIALIZED_WAL'])
+    marker = journal.parent / 'materialized-writer-drifted'
+    if Path(destination) == journal and not marker.exists():
+        evidence = journal.read_bytes()
+        body = json.loads(evidence)['body']
+        latest = Path(os.environ['HTTP_TEST_MATERIALIZED_SOURCE'])
+        if any(Path(row['path']).parent == latest.parent
+               and Path(row['path']).name.startswith('.latest.tmp.') for row in body['links']):
+            changed = latest if os.environ['HTTP_TEST_MATERIALIZED_DRIFT'] == 'source' else Path(os.environ['HTTP_TEST_MATERIALIZED_TARGET'])
+            changed.rename(latest.parent / 'retained-original-migration-owner')
+            changed.mkdir()
+            (changed / '.published-complete').write_bytes(b'complete\\n')
+            (changed / 'leaf.yaml').write_bytes(b'hostname: independent migration owner\\n')
+            marker.write_bytes(evidence)
+    return result
+os.replace = drift_materialized_after_temp_registration
+""", encoding="utf-8")
+            journal = root / "ztp/.setup-switch-journal.json"
+            with mock.patch.dict(os.environ, {
+                "HTTP_TEST_MATERIALIZED_WAL": str(journal),
+                "HTTP_TEST_MATERIALIZED_SOURCE": str(latest),
+                "HTTP_TEST_MATERIALIZED_TARGET": str(release),
+                "HTTP_TEST_MATERIALIZED_DRIFT": drift,
+            }):
+                result = self._run_private_load_setup_switch(
+                    fixture, prepare_journal=True, first_link_prefix=str(output / ".latest.tmp."),
+                )
+            self.assertEqual(24, result.returncode, result.stdout + result.stderr)
+            self.assertFalse(barrier.exists(), "registration drift reached latest publication")
+            self.assertTrue(latest.is_dir(), "writer renamed a source before its HOLD")
+            self.assertFalse(latest.is_symlink())
+            evidence = (journal.parent / "materialized-writer-drifted").read_bytes()
+            self.assertEqual(evidence, journal.read_bytes())
+            row = next(row for row in json.loads(evidence)["body"]["directories"]
+                       if row["path"] == str(latest))
+            self.assertFalse(os.path.lexists(row["backup"]))
+            retained = output / "retained-original-migration-owner"
+            original = original_source if drift == "source" else original_target
+            self.assertEqual(original.st_ino, retained.stat().st_ino)
+            changed = latest if drift == "source" else release
+            self.assertNotEqual(original.st_ino, changed.stat().st_ino)
+            self.assertEqual(payload, (changed / "leaf.yaml").read_bytes())
+            self.assertEqual(payload, (retained / "leaf.yaml").read_bytes())
+            self.assertFalse((root / "service-started").exists())
+
+    def test_real_setup_materialized_writer_source_drift_blocks_rename(self):
+        self._assert_real_materialized_writer_registration_drift_holds("source")
+
+    def test_real_setup_materialized_writer_target_drift_blocks_rename(self):
+        self._assert_real_materialized_writer_registration_drift_holds("target")
+
     def test_real_setup_materialized_latest_replace_cold_recovers_original_directory(self):
         """LOAD→SETUP death after replacing latest must restore its real Q bytes."""
         with tempfile.TemporaryDirectory(prefix="r22-real-latest-restore-") as name:
