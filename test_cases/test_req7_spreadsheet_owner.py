@@ -27,7 +27,10 @@ def load():
     if not SOURCE.is_file(): raise AssertionError('spreadsheet-wide persistent OS owner missing')
     spec = importlib.util.spec_from_file_location('monitor.issue_tracker_spreadsheet_owner', SOURCE)
     module = importlib.util.module_from_spec(spec); sys.modules[spec.name] = module
-    spec.loader.exec_module(module); return module
+    spec.loader.exec_module(module)
+    import monitor
+    monitor.issue_tracker_spreadsheet_owner = module
+    return module
 
 
 def binding(target=TARGET):
@@ -41,7 +44,7 @@ def fixture(root, fault=None):
     # path, UID, TTL, repair or lock override argument. Native flock is real.
     real_open, real_fstat, real_stat = os.open, os.fstat, os.stat
     def metadata(value):
-        fields = ('st_dev', 'st_ino', 'st_mode', 'st_uid', 'st_gid', 'st_nlink', 'st_size')
+        fields = ('st_dev', 'st_ino', 'st_mode', 'st_uid', 'st_gid', 'st_nlink', 'st_size', 'st_mtime_ns', 'st_ctime_ns')
         result = SimpleNamespace(**{name: getattr(value, name) for name in fields})
         result.st_uid = 0
         if fault == 'uid': result.st_uid = 501
@@ -50,6 +53,7 @@ def fixture(root, fault=None):
         return real_open(root if name == '/' else name, flags, *args, **kwargs)
     with ExitStack() as stack:
         stack.enter_context(mock.patch('os.geteuid', return_value=0))
+        stack.enter_context(mock.patch('os.getuid', return_value=0))
         stack.enter_context(mock.patch('os.open', side_effect=opening))
         stack.enter_context(mock.patch('os.fstat', side_effect=lambda fd: metadata(real_fstat(fd))))
         stack.enter_context(mock.patch('os.stat', side_effect=lambda *a, **k: metadata(real_stat(*a, **k))))

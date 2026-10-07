@@ -55,6 +55,7 @@ REQ7_CONTROLLED_TRANSPORT_LIBRARIES = frozenset({
     "monitor/issue_tracker_send_unit.py",
     "monitor/issue_tracker_send_intent.py",
     "monitor/issue_tracker_spreadsheet_owner.py",
+    "monitor/issue_tracker_global_attempt_journal.py",
 })
 
 RUNTIME_PATTERNS = (
@@ -576,6 +577,12 @@ def script_profile(root: Path, relative: str) -> dict[str, str]:
                 inputs = "ACTIVE 本地 writer token、单元标识和不超过 1 MiB 的冻结字节；它们不是合格 Sheets batch 或发送能力。"
                 recovery = "计数耗尽、部分／外来文件、字节变化或 fsync 失败均 HOLD，保留证据；无清理、重置或新单元接管。"
                 example = "python3 -B -m unittest -v test_cases.test_req7_attempt_journal  # 仅开发测试"
+            elif relative == "monitor/issue_tracker_global_attempt_journal.py":
+                scenario = "在跨项目 spreadsheet owner 内持久绑定 action、wire 与原策略白名单，六次全局 UNKNOWN 意图跨冷启动计数；已有单元保守阻断所有新单元。"
+                inputs = "ACTIVE 全局 owner、typed 原绑定与完整冻结单元；结构一致不证明受保护作业来源、准入或真实发送许可。"
+                outputs = "不可变共享持久原像、链式意图计数或 HOLD；没有清理、重置、解除屏障、COMPLETE 或发送能力。"
+                recovery = "部分 fsync、缺记录、链接／位移、原像漂移或六次耗尽均 HOLD；不补建／接管／回收，六次意图不是六次真实尝试。"
+                example = "python3 -B -m unittest -v test_cases.test_req7_global_attempt_journal  # 仅开发测试"
             elif relative == "monitor/issue_tracker_spreadsheet_owner.py":
                 scenario = "同一 spreadsheet 的跨项目非阻塞 OS 锁；固定私有路径、持有祖先身份、无过期接管，父退出后继承 FD 继续互斥。"
                 inputs = "typed 目标绑定与已独立授权预置的 /var/lib/http-ztp-container/issue-tracker 目录；不接受路径／UID／TTL 覆盖，不创建或修复祖先。"

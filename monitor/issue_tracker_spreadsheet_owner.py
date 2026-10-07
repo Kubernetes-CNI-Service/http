@@ -138,16 +138,21 @@ def spreadsheet_owner(binding):
         if close_failed: raise SpreadsheetOwnerHold()
 
 
-def owner_lock_fd(token, binding):
-    """Borrow a freshly checked CLOEXEC fd; trusted launcher uses pass_fds only."""
+def _validated_owner(token, binding):
+    """Internal fresh root/state binding; callers cannot select another path."""
     failed = False
     try:
         _binding(binding)
         with _GUARD: owner = _ACTIVE[token]
         if owner.binding != binding: raise SpreadsheetOwnerHold()
         _validate(owner)
-        result = owner.lock_fd
+        result = owner
     except (KeyError, OSError, ValueError, TypeError, OverflowError):
         failed = True
     if failed: raise SpreadsheetOwnerHold()
     return result
+
+
+def owner_lock_fd(token, binding):
+    """Borrow a freshly checked CLOEXEC fd; trusted launcher uses pass_fds only."""
+    return _validated_owner(token, binding).lock_fd

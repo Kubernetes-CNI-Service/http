@@ -898,3 +898,14 @@ ACTION-PREIMAGE/action_digest → immutable wire journal → 六个冷启动进�
 实证剩余持有者继续互斥，实际 C-6／action journal 流程不改变 UNKNOWN。
 它不授予发送许可，不证明跨主机、真实 root/container、全局 UNKNOWN/FIFO、durable
 reservation 或受审 launcher 的实际尝试边界，也不代表 REQ7 整体完成。真机卡 NOT RUN。
+
+`test_cases.test_req7_global_attempt_journal` 在实际 spreadsheet-wide owner
+内验证共享持久 action/wire/原绑定、八个初始化 fsync 屏障及六次链式 UNKNOWN
+意图。只有全部八个原像屏障完成后才写 INITIALIZED 及其两个持久屏障；计数前
+持有 FD 重核并同步原 marker，缺失不补建，不能从完整外观的 HEADER 推断完成。
+已有 journal 保守阻断同 spreadsheet 的所有新 generation/publish/sheet；
+原像、计数、链接／名字位移或原策略白名单变化均 HOLD，不补建或重置。六个真实
+冷启动进程共用计数，实际 C-6/action journal 流程保留 UNKNOWN。冷启动夹具继承
+runner 的依赖环境，不冒称 `-I` 隔离传输；六次意图不是六次真实尝试，两个本地
+记录也不是跨 store 原子发送。未安装库无 COMPLETE／清理／联网能力，受保护准入、
+FIFO、预留、单次 capability 和固定 launcher 仍须接入；REQ7 整体未完成，真机 NOT RUN。

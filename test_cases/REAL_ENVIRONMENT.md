@@ -2076,6 +2076,15 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - 证据：保存精确命令/退出码、完整物理顺序日志、前后 stat/inode/SHA、启动前 monotonic 时间、阶段耗时、持有锁的 FD/session 归属、截止期、TERM/KILL/reap/会话不存在和父死子存的独立见证。私有响应和诊断不进入公开日志；局部原生慢读 PASS 不代表整个 REQ7 或生产权限。
 - 故障注入、清理与风险：注入启动失败、DNS/慢读、pipe 关闭、监督器死亡和无法终止；保持原预算/行为断言。本地夹具已独立复现并修正已回收 leader 的同号存活 group 被误认为信号权限；首次检查之后、异常清理和 TERM/KILL 升级之前也必须重新确认活 leader 的 session/group 归属，不能把首次检查缓存为永久信号权限。真实 PID 重用仍 NOT RUN，必须验证不向该不确定 group 发信号、终止未确认保持 HOLD。实际临时 flock 的终止被拒工作流必须保持其他候选无法取得锁，直到本卡确证拥有的子进程完成清理。只终止本卡确证拥有的隔离会话，不能向外部 PID/group 发信号；清理不确定保持 HOLD，由授权责任人恢复隔离快照并重核锁。不得以 PID 重用、过期锁、超时宽限或重发来隐藏 UNKNOWN。
 
+## TC-REAL-REQ7-GLOBAL-ATTEMPT-001 — 共享 UNKNOWN 屏障与全局意图计数
+
+- Case ID：`TC-REAL-REQ7-GLOBAL-ATTEMPT-001`；类型：durable / integration；对应 C-6/C-7/C-14/C-19。状态：**NOT RUN / REAL_ENV REQUIRED**。涉及 `monitor/issue_tracker_global_attempt_journal.py`、`monitor/issue_tracker_spreadsheet_owner.py`、`monitor/issue_tracker_send_intent.py`、`monitor/issue_tracker_local_commit.py`。本地合成 root 元数据、原生 fsync／NOREPLACE／独立进程及多脚本流程不是部署或 REQ7 整体证明。
+- 风险与目标：共享 spreadsheet 私有目录保存完整 action、wire、原目标/策略/白名单及链式 UNKNOWN 意图；已有单元保守阻断任意项目的新 generation/publish/sheet。M=6 是六次意图，真实尝试上界只有在固定受审 launcher 原子单次消费、每次新鲜准入与没有隐藏重发的完整证明后成立。本库不联网，不证明两份 local/global journal 的原子转移、FIFO 或 COMPLETE。
+- 前置条件：owner 另获精确 Stage O/部署授权、共享同 inode 持久根与 root 0700/0600 身份、真实 Linux NOREPLACE/fsync 支持、部署 Python/平台/依赖身份、实际不可变 protected 作业/manifest/nonce、配置白名单、continuity/recovery/reservation 和单次 capability。没有这些前提保持 HOLD；本卡不授权发凭据请求或运行真实 root 写者。
+- 步骤与独立预期：初始化的目录 parent/dir 与三个不可变文件/dir 共八个必要原像屏障全部完成后，才写 INITIALIZED marker 及其 file/dir 两屏障；每次计数前从持有 FD 重核并同步原 marker、folder/parent，不补建缺失 marker，不把原像外观完整当成初始化证明。每次 ATTEMPT 的 file/dir fsync 先于返回。注入各屏障/断电、原像漂移、缺链、链接和位移，部分证据必须保留，不补建/接管/重置。六个冷启动进程累加同一计数；第七次及新单元拒绝；任何 UNKNOWN 不被后来的错误或 operator resend 清除。
+- 证据：精确 HEAD/tree/dirty、命令退出码、完整日志物理顺序与 END、前后 stat/inode/大小/SHA256、原策略白名单和单位全原像身份、真实 parent/file/dir barrier 顺序、共享 namespace、六次冷启动计数和实际发送对应关系。私有目标/数据不公开；单项、局部或意图计数 PASS 不计为普通 full proof 或真实发送证明。
+- 清理与风险：只清理经授权隔离副本与确证自有临时进程；不删除锁、journal、History/fence/预留，不解除 UNKNOWN，不重置计数。无法证明实际尝试边界时只读对账和可见停滞，六次耗尽保持 UNKNOWN。真实断电、Linux/容器 inode 与跨 store 收敛未执行，保持 NOT RUN。
+
 ## TC-REAL-REQ7-SPREADSHEET-OWNER-001 — 跨项目持久 OS 锁与继承 FD
 
 - Case ID：`TC-REAL-REQ7-SPREADSHEET-OWNER-001`；类型：native / integration；对应 C-6/C-14/C-19。状态：**NOT RUN / REAL_ENV REQUIRED**。涉及 `monitor/issue_tracker_spreadsheet_owner.py`、`monitor/issue_tracker_local_commit.py`、`monitor/issue_tracker_send_intent.py`；本地合成 root 元数据、原生 flock／独立进程／继承 FD 与实际 C-6/action journal 不证明部署身份或整个 REQ7。

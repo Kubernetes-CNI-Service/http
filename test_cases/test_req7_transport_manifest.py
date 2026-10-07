@@ -21,6 +21,7 @@ SCRIPTS = {
     "monitor/issue_tracker_send_unit.py": "test_cases.test_req7_send_unit",
     "monitor/issue_tracker_send_intent.py": "test_cases.test_req7_send_intent",
     "monitor/issue_tracker_spreadsheet_owner.py": "test_cases.test_req7_spreadsheet_owner",
+    "monitor/issue_tracker_global_attempt_journal.py": "test_cases.test_req7_global_attempt_journal",
 }
 
 
