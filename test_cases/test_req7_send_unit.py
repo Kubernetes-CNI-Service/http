@@ -21,6 +21,12 @@ def canonical(value):
 def load():
     path = ROOT / "monitor/issue_tracker_send_unit.py"
     if not path.is_file(): raise AssertionError("C-19 immutable unit composer missing")
+    # Mirror normal import identity. Re-executing the composer for each case
+    # splits FrozenSendUnit from the genuine class retained by send-intent;
+    # do not relax production type checks to hide that fixture defect.
+    existing = sys.modules.get("monitor.issue_tracker_send_unit")
+    if existing is not None and Path(existing.__file__).resolve() == path.resolve():
+        return existing
     spec = importlib.util.spec_from_file_location("monitor.issue_tracker_send_unit", path)
     module = importlib.util.module_from_spec(spec); sys.modules[spec.name] = module
     spec.loader.exec_module(module); return module

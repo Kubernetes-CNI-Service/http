@@ -77,8 +77,8 @@ def _inspect(parent, name, folder, base, sheet_id):
     finally: os.close(fd)
     journal._named(parent, name, folder, directory=True)
     if set(os.listdir(folder)) != {'HISTORY-RAW', 'HEADER', 'INITIALIZED'}: raise HistoryPrereadHold()
-    return HistoryPrereadObservation(observed.last_data_row_index, observed.row_count, sheet_id,
-                                     observed.source_sha256, base['action_digest'], base['wire_sha256'])
+    return (HistoryPrereadObservation(observed.last_data_row_index, observed.row_count, sheet_id,
+                                      observed.source_sha256, base['action_digest'], base['wire_sha256']), observed)
 
 
 def prepare_history_preread(token, binding, unit, plan, response):
@@ -110,8 +110,8 @@ def prepare_history_preread(token, binding, unit, plan, response):
     if failed: raise HistoryPrereadHold()
 
 
-def inspect_history_preread(token, binding, unit):
-    """Re-decode private original bytes, never substitute a later tail image."""
+def _read_preread(token, binding, unit):
+    """Re-decode the genuine original image and its boundary under ownership."""
     folder = None; failed = False
     try:
         parent, name, base, sheet_id, _state = _inputs(token, binding, unit)
@@ -126,3 +126,8 @@ def inspect_history_preread(token, binding, unit):
             except OSError: failed = True
     if failed: raise HistoryPrereadHold()
     return result
+
+
+def inspect_history_preread(token, binding, unit):
+    """Re-decode private original bytes, never substitute a later tail image."""
+    return _read_preread(token, binding, unit)[0]

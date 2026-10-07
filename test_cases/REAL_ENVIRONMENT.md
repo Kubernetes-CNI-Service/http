@@ -2112,6 +2112,15 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - 证据：精确 HEAD/tree/dirty、命令/退出码、Python/平台与实际挂载、完整日志物理顺序/END、前后 stat/inode/大小/SHA256、实际两个项目 journal 和锁 FD/session 归属、父死子存、竞争拒绝及最后持有者退出后的恢复互斥；私有 ID 不公开。全局 UNKNOWN/FIFO、分配／预留与实际 M=6 单次 capability 另证，不因拿锁视为完成。
 - 清理与风险：只回收本卡确证自有的隔离子进程和经授权副本；不删除真实锁、journal、History、fence 或 outstanding reservation，不向不确定 PID/group 发信号；无法证明终止或共享命名空间时 HOLD。真实 root、容器和父死子存 Stage O 前提未执行，保持 NOT RUN。
 
+## TC-REAL-REQ7-REMOTE-HISTORY-MATCH-001 — journal/原始 nonce/fence/全部 History 必要对账
+
+- Case ID：`TC-REAL-REQ7-REMOTE-HISTORY-MATCH-001`；类型：integration / transaction / real-environment；对应 C-6/C-19/C-26。状态：**NOT RUN / REAL_ENV REQUIRED**。自动化 `test_cases.test_req7_remote_history_match`；涉及 `monitor/issue_tracker_remote_history_match.py`、global owner/attempt、enrollment、preread、metadata、typed History 和原生 TLS，未安装。本地私有 loopback TLS 与真实自有文件屏障不证明部署身份或整个 REQ7。
+- 风险与目标：仅原始 journal、两份原始 nonce、精确永久 fence、所有实际业务及附带审计行与发送前原像同时匹配，才能产生 MATCHED_OBSERVATION；这不是 COMPLETE、APPLIED 或发送许可，不清除 UNKNOWN、容量预留或审计 pending。
+- 前置条件与输入：另获 owner 精确 Stage O 一次性副本只读授权和实际固定目录/Python/SSL/CA 身份；已初始化实际全表 owner、原始 enrollment、global action/wire 和发送前完整 raw。真实发送、凭据、部署、结算和受审 launcher 未由本卡授权；缺任何前提保持 NOT RUN。
+- 步骤与独立预期：固定原生全尾 GET/metadata search/全尾 GET → 原始 raw 及 before → 已计数 UNKNOWN journal → 两份 nonce与精确 fence → 全行对账。typed 前缀不得改变，容量不得收缩，所有实际业务和审计必须按原顺序完整且无额外行；全 NOOP 不伪造 History。缺 fence UNKNOWN；外来 fence、缺/多/重复/公式/错序行或原像漂移 CONFLICT；部分/截断/重复 JSON/重复 metadata/外来路径 HOLD。
+- 证据：当前精确 HEAD/tree/dirty、执行命令与退出码、Python/平台身份、完整日志及 END、前后 stat/inode/大小/SHA256、原始 raw 摘要与全部行匹配数量、实际 UNKNOWN 保留。原始 History、nonce 与 token 私密，不公开；不得将单项观察提升为正式 full proof。
+- 故障注入与清理：逐项缺失 journal、marker 或原像，变更 before typed 细胞/空洞、不同 fence ID、两份 nonce错配、额外业务/审计/外来 append、断连及重复回调；只回收确证自有临时目录与进程，不删除真实 journal/fence/nonce、不重置计数、不解锁重发。
+
 ## TC-REAL-REQ7-HISTORY-PREREAD-JOURNAL-001 — 不可变发送前 History 原像
 
 - Case ID：`TC-REAL-REQ7-HISTORY-PREREAD-JOURNAL-001`；类型：durable / integration / real-environment；对应 C-6/C-19/C-26。状态：**NOT RUN / REAL_ENV REQUIRED**。涉及 `monitor/issue_tracker_history_preread_journal.py`、`monitor/issue_tracker_global_attempt_journal.py`、`monitor/issue_tracker_spreadsheet_owner.py`、`monitor/issue_tracker_sheets_read_plan.py`、`monitor/issue_tracker_sheets_read_decode.py`、`monitor/issue_tracker_tls_inputs.py`。本地合成 root 元数据、真实文件屏障和私有 TLS 不代表整个 REQ7 或部署身份。

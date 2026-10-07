@@ -24,10 +24,20 @@ SCRIPTS = {
     "monitor/issue_tracker_global_attempt_journal.py": "test_cases.test_req7_global_attempt_journal",
     "monitor/issue_tracker_enrollment_journal.py": "test_cases.test_req7_enrollment_journal",
     "monitor/issue_tracker_history_preread_journal.py": "test_cases.test_req7_history_preread_journal",
+    "monitor/issue_tracker_remote_history_match.py": "test_cases.test_req7_remote_history_match",
 }
 
 
 class Req7TransportManifestCandidateTests(unittest.TestCase):
+    def test_composer_fixture_keeps_canonical_class_identity_across_repeated_loads(self):
+        from test_cases.test_req7_send_unit import load, inputs
+        first = load(); unit = first.freeze_send_unit(**inputs())
+        second = load()
+        self.assertIs(first, second, 'fixture reload must not split the canonical dataclass used by journal checks')
+        self.assertIs(type(unit), second.FrozenSendUnit)
+        from monitor.issue_tracker_send_intent import _projection
+        self.assertEqual(unit.action_digest, _projection(unit)['action_digest'])
+
     def test_template_header_workflow_binds_real_local_format_authority(self):
         manifest = json.loads((ROOT / "test_cases/script_test_manifest.json").read_text())
         self.assertTrue(any({"monitor/issue_tracker_sheets_read_decode.py", "monitor/issue_tracker_sheets_read_plan.py",

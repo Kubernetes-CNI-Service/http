@@ -892,6 +892,15 @@ ACTION-PREIMAGE/action_digest → immutable wire journal → 六个冷启动进�
 真实尝试上界、spreadsheet-wide owner、新鲜准入或 COMPLETE，不代表 REQ7 整体完成。
 真实断电和在线关联部分见 `TC-REAL-REQ7-COMPILED-SEND-INTENT-001`，状态 NOT RUN。
 
+`test_cases.test_req7_remote_history_match` 串联实际 global intent、持久发送前原像、
+原始 target/History nonce、精确 ID/锚点/DOCUMENT 永久 fence，以及全部实际业务和
+附带审计 History 行；原始 typed 前缀、容量、行顺序、完整尾和摘要同时匹配才返回
+MATCHED_OBSERVATION。缺 fence 为 UNKNOWN，外来栅或缺/多/重复/错序/伪造 NOOP
+History 为 CONFLICT；缺原像、异常/部分响应、外来目标或重复 metadata HOLD。
+25000 个 typed cells 只扫描一次，不按行重复扫描。真实私有 TLS 三个只读请求
+验证 planner/transport/decoder → 实际持久 journal → matcher；没有发送、结算、
+COMPLETE、APPLIED、新鲜准入或 UNKNOWN 清除。未安装；真机卡 NOT RUN。
+
 `test_cases.test_req7_history_preread_journal` 在实际 spreadsheet owner 与已初始化
 且计数为 0 的全局 action/wire journal 内保存原始全尾响应、容量与
 `history_last_row_before_send`。RAW/HEADER 的六个图像屏障后才能写 marker；

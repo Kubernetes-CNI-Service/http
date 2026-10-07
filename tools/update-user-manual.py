@@ -58,6 +58,7 @@ REQ7_CONTROLLED_TRANSPORT_LIBRARIES = frozenset({
     "monitor/issue_tracker_global_attempt_journal.py",
     "monitor/issue_tracker_enrollment_journal.py",
     "monitor/issue_tracker_history_preread_journal.py",
+    "monitor/issue_tracker_remote_history_match.py",
 })
 
 RUNTIME_PATTERNS = (
@@ -579,6 +580,12 @@ def script_profile(root: Path, relative: str) -> dict[str, str]:
                 inputs = "ACTIVE 本地 writer token、单元标识和不超过 1 MiB 的冻结字节；它们不是合格 Sheets batch 或发送能力。"
                 recovery = "计数耗尽、部分／外来文件、字节变化或 fsync 失败均 HOLD，保留证据；无清理、重置或新单元接管。"
                 example = "python3 -B -m unittest -v test_cases.test_req7_attempt_journal  # 仅开发测试"
+            elif relative == "monitor/issue_tracker_remote_history_match.py":
+                scenario = "实际全局 journal、发送前完整原像、两份原始 nonce、精确永久 fence、全部实际业务及审计 History 同时对账；typed 旧前缀与精确新尾保持不变。"
+                inputs = "ACTIVE 全表 owner、原 action/wire/nonce、固定完整 metadata 与全尾回应；结构对象不证明受保护来源、新鲜准入或发送许可。"
+                outputs = "MATCHED_OBSERVATION／UNKNOWN／CONFLICT 必要观察，不是 COMPLETE、APPLIED、结算或 UNKNOWN 清除。"
+                recovery = "缺 journal、部分响应、外来路径、重复 metadata HOLD；缺 fence UNKNOWN，错栅或缺／多／错序／伪造 NOOP 行 CONFLICT；禁止重置、清除预留或单凭标记重发。"
+                example = "python3 -B -m unittest -v test_cases.test_req7_remote_history_match  # 仅开发测试"
             elif relative == "monitor/issue_tracker_history_preread_journal.py":
                 scenario = "在真实全表 owner 及全局不可变 journal 内、首个意图前保存完整 History 原始响应与发送前尾边界；冷进程重新解码，UNKNOWN 后不可补建或替换。"
                 inputs = "ACTIVE 全局 owner、同一 action/wire、固定完整全尾响应；不接收可选路径、裸尾行号、修复或发送许可。"
