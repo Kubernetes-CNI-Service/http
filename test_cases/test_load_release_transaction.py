@@ -3802,6 +3802,42 @@ class ReleaseTransactionTests(unittest.TestCase):
         self.assertTrue(output.with_name("retained-output-parent").is_dir())
         backend.start.assert_not_called()
 
+    def test_setup_q_comparison_registered_stage_unknown_child_blocks_install(self) -> None:
+        (*state, journal, descriptor, backend) = self._prepare_cross_project_setup_crash()
+        project = state[1].resolve()
+        (project / "99-output-ztp").mkdir()
+        target = project / "99-output-ztp/optimize"
+        original_register = LOAD._register_setup_switch_created_directory
+        captured = {}
+
+        def populate_after_registration(*args, **kwargs):
+            result = original_register(*args, **kwargs)
+            staged = Path(args[2])
+            captured["wal"] = journal.read_bytes()
+            captured["stage"] = staged
+            captured["stage_identity"] = (staged.stat().st_dev, staged.stat().st_ino)
+            (staged / "unknown-report.csv").write_bytes(b"independent unregistered report\n")
+            return result
+
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "_register_setup_switch_created_directory",
+                                  side_effect=populate_after_registration), \
+                mock.patch.object(LOAD, "_setup_switch_rename_directory_noreplace",
+                                  wraps=LOAD._setup_switch_rename_directory_noreplace) as install:
+            with self.assertRaisesRegex(LOAD.LoadError, "Q comparison.*unregistered children"):
+                LOAD.ensure_setup_switch_q_comparison_directory(
+                    journal, target, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend,
+                )
+        install.assert_not_called()
+        self.assertFalse(os.path.lexists(target), "unknown stage data crossed the install edge")
+        self.assertEqual(captured["wal"], journal.read_bytes())
+        self.assertEqual(captured["stage_identity"],
+                         (captured["stage"].stat().st_dev, captured["stage"].stat().st_ino))
+        self.assertEqual(b"independent unregistered report\n",
+                         (captured["stage"] / "unknown-report.csv").read_bytes())
+        backend.start.assert_not_called()
+
     def test_setup_q_comparison_absent_reentry_syncs_parent_before_wal_retirement(self) -> None:
         (*state, journal, descriptor, backend) = self._prepare_cross_project_setup_crash()
         project = state[1].resolve()

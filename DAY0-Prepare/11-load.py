@@ -6810,6 +6810,16 @@ def ensure_setup_switch_q_comparison_directory(
         except (OSError, ValueError, RuntimeError) as exc:
             raise LoadError(f"Q comparison parent owner changed; HOLD: {exc}") from exc
 
+    def require_empty_directory(candidate):
+        # This row authorizes an empty directory only. Same inode/mode does
+        # not authorize data introduced after registration; never move or
+        # delete such data as if it belonged to this transaction.
+        try:
+            if any(candidate.iterdir()):
+                raise ValueError("unregistered children")
+        except (OSError, ValueError) as exc:
+            raise LoadError(f"Q comparison directory has unregistered children or is unreadable; HOLD: {exc}") from exc
+
     try:
         current = path.lstat()
     except FileNotFoundError:
@@ -6841,6 +6851,7 @@ def ensure_setup_switch_q_comparison_directory(
             or (staged_now.st_dev, staged_now.st_ino, stat.S_IMODE(staged_now.st_mode))
             != (created.st_dev, created.st_ino, stat.S_IMODE(created.st_mode))):
         raise LoadError("Q comparison staged owner changed before install; HOLD")
+    require_empty_directory(staged)
     require_original_parent()
     _setup_switch_rename_directory_noreplace(staged, path)
     require_original_parent()
@@ -6849,8 +6860,10 @@ def ensure_setup_switch_q_comparison_directory(
             or (installed.st_dev, installed.st_ino, stat.S_IMODE(installed.st_mode))
             != (created.st_dev, created.st_ino, stat.S_IMODE(created.st_mode))):
         raise LoadError("Q comparison installed directory owner changed; HOLD")
+    require_empty_directory(path)
     _fsync_parent_directory(path.parent)
     require_original_parent()
+    require_empty_directory(path)
     return True
 
 

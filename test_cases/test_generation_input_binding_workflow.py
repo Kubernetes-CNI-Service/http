@@ -1001,6 +1001,49 @@ os.replace = replace_registered_q_parent
             self.assertEqual(row["parent"]["ino"], output.with_name("retained-output-parent").stat().st_ino)
             self.assertFalse((root / "service-started").exists())
 
+    def test_real_setup_q_comparison_registered_stage_unknown_child_blocks_install(self):
+        with tempfile.TemporaryDirectory(prefix="r22-q-stage-registration-child-") as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, _p, q, _common, _p_only, _q_only, _manifest, _before, hook, barrier, _home = fixture
+            output = q / "99-output-ztp"
+            output.mkdir()
+            site = hook / "sitecustomize.py"
+            site.write_text(site.read_text(encoding="utf-8") + """
+import json
+previous_q_child_replace = os.replace
+def populate_registered_q_stage(source, destination, *args, **kwargs):
+    result = previous_q_child_replace(source, destination, *args, **kwargs)
+    journal = Path(os.environ['HTTP_TEST_Q_STAGE_WAL'])
+    marker = journal.parent / 'q-stage-populated'
+    if Path(destination) == journal and not marker.exists():
+        evidence = journal.read_bytes()
+        rows = json.loads(evidence)['body'].get('q_created_directories', [])
+        if rows:
+            staged = Path(rows[0]['staged'])
+            (staged / 'unknown-report.csv').write_bytes(b'independent unregistered report\\n')
+            marker.write_bytes(evidence)
+    return result
+os.replace = populate_registered_q_stage
+""", encoding="utf-8")
+            journal = root / "ztp/.setup-switch-journal.json"
+            with mock.patch.dict(os.environ, {"HTTP_TEST_Q_STAGE_WAL": str(journal)}):
+                result = self._run_private_load_setup_switch(
+                    fixture, prepare_journal=True,
+                    first_link_prefix=str(root / "ztp/optimize/q-sample") + os.sep,
+                )
+            self.assertEqual(24, result.returncode, result.stdout + result.stderr)
+            self.assertFalse(os.path.lexists(output / "optimize"),
+                             "unregistered report moved into Q before a later HOLD")
+            self.assertRegex(result.stdout + result.stderr, "Q comparison.*unregistered children")
+            self.assertFalse(barrier.exists(), "unknown stage content reached sample publication")
+            evidence = (journal.parent / "q-stage-populated").read_bytes()
+            self.assertEqual(evidence, journal.read_bytes())
+            row = json.loads(evidence)["body"]["q_created_directories"][0]
+            staged = Path(row["staged"])
+            self.assertEqual((row["dev"], row["ino"]), (staged.stat().st_dev, staged.stat().st_ino))
+            self.assertEqual(b"independent unregistered report\n", (staged / "unknown-report.csv").read_bytes())
+            self.assertFalse((root / "service-started").exists())
+
     def _assert_real_setup_q_comparison_directory_recovery(self, *, replace_target):
         with tempfile.TemporaryDirectory(prefix="r22-q-comparison-dir-") as name:
             fixture = self._private_setup_switch_fixture(Path(name))
