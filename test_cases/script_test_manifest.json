@@ -224,6 +224,11 @@
         "test_cases.test_issue_tracker_whitelist_workflow",
         "test_cases.test_issue_tracker_online_target",
         "test_cases.test_issue_tracker_online_target_workflow",
+        "test_cases.test_issue_tracker_credential_shape",
+        "test_cases.test_issue_tracker_credential_fd",
+        "test_cases.test_issue_tracker_online_cells",
+        "test_cases.test_issue_tracker_online_nv_ids",
+        "test_cases.test_issue_tracker_online_rows",
         "test_cases.test_issue_tracker_k_store",
         "test_cases.test_issue_tracker_k_store_workflow",
         "test_cases.test_issue_tracker_local_commit",
@@ -445,6 +450,10 @@
     "monitor/issue_tracker_receipt_snapshot.py": "monitor/issue_tracker_receipt_snapshot.py",
     "monitor/issue_tracker_whitelist.py": "monitor/issue_tracker_whitelist.py",
     "monitor/issue_tracker_online_target.py": "monitor/issue_tracker_online_target.py",
+    "monitor/issue_tracker_credential_shape.py": "monitor/issue_tracker_credential_shape.py",
+    "monitor/issue_tracker_online_cells.py": "monitor/issue_tracker_online_cells.py",
+    "monitor/issue_tracker_online_nv_ids.py": "monitor/issue_tracker_online_nv_ids.py",
+    "monitor/issue_tracker_online_rows.py": "monitor/issue_tracker_online_rows.py",
     "monitor/issue_tracker_k_store.py": "monitor/issue_tracker_k_store.py",
     "monitor/issue_tracker_local_commit.py": "monitor/issue_tracker_local_commit.py",
     "monitor/issue_tracker_local_recovery.py": "monitor/issue_tracker_local_recovery.py",
@@ -1397,6 +1406,26 @@
       ]
     },
     {
+      "id": "issue_tracker_credential_shape",
+      "paths": ["monitor/issue_tracker_credential_shape.py"],
+      "tests": ["test_cases.test_issue_tracker_credential_shape", "test_cases.test_issue_tracker_credential_fd"]
+    },
+    {
+      "id": "issue_tracker_online_cells",
+      "paths": ["monitor/issue_tracker_online_cells.py"],
+      "tests": ["test_cases.test_issue_tracker_online_cells"]
+    },
+    {
+      "id": "issue_tracker_online_nv_ids",
+      "paths": ["monitor/issue_tracker_online_nv_ids.py"],
+      "tests": ["test_cases.test_issue_tracker_online_nv_ids"]
+    },
+    {
+      "id": "issue_tracker_online_rows",
+      "paths": ["monitor/issue_tracker_online_rows.py"],
+      "tests": ["test_cases.test_issue_tracker_online_rows"]
+    },
+    {
       "id": "issue_tracker_publish_runtime",
       "paths": [
         "monitor/issue_tracker_publish_runtime.py"
@@ -1665,6 +1694,26 @@
       "tests": [
         "test_cases.test_issue_tracker_online_target_workflow"
       ]
+    },
+    {
+      "id": "issue_tracker_fixed_fd_inputs_to_exact_target",
+      "members": ["monitor/issue_tracker_credential_shape.py", "monitor/issue_tracker_online_target.py", "tools/project_contract.py"],
+      "tests": ["test_cases.test_issue_tracker_credential_fd"]
+    },
+    {
+      "id": "issue_tracker_source_rows_to_literal_cells",
+      "members": ["monitor/issue_tracker_online_cells.py", "monitor/issue_tracker_local_workbook.py"],
+      "tests": ["test_cases.test_issue_tracker_online_cells"]
+    },
+    {
+      "id": "issue_tracker_two_cabling_sheets_to_shared_nv_plan",
+      "members": ["monitor/issue_tracker_online_nv_ids.py", "monitor/issue_tracker_online_cells.py", "monitor/issue_tracker_local_workbook.py"],
+      "tests": ["test_cases.test_issue_tracker_online_nv_ids"]
+    },
+    {
+      "id": "issue_tracker_reserved_switch_rows_and_postimage",
+      "members": ["monitor/issue_tracker_online_rows.py", "monitor/issue_tracker_online_cells.py", "monitor/issue_tracker_local_workbook.py"],
+      "tests": ["test_cases.test_issue_tracker_online_rows"]
     },
     {
       "id": "issue_tracker_publish_runtime_from_worker_sources",

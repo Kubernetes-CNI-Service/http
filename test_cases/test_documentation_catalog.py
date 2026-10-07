@@ -780,6 +780,26 @@ class DocumentationCatalogTests(unittest.TestCase):
         self.assertIn("held-FD", profile["prerequisite"])
         self.assertNotIn("python3 -B monitor/issue_tracker_online_target.py", profile["example"])
 
+    def test_req7_online_primitives_do_not_advertise_cli_or_send_authority(self):
+        case_guide = (ROOT / "test_cases/README.md").read_text(encoding="utf-8")
+        for name in ("credential_shape", "credential_fd", "online_cells", "online_nv_ids", "online_rows"):
+            self.assertIn(f"test_issue_tracker_{name}.py", case_guide)
+        self.assertIn("不代表 REQ7 整体完成", case_guide)
+        updater = load_path("manual_req7_online_primitives", USER_MANUAL_SCRIPT)
+        for name in ("credential_shape", "online_cells", "online_nv_ids", "online_rows"):
+            relative = f"monitor/issue_tracker_{name}.py"
+            with self.subTest(module=relative):
+                profile = updater.script_profile(ROOT, relative)
+                self.assertTrue(profile["direct"].startswith("否"))
+                self.assertIn("无受支持的独立 CLI", profile["parameters"])
+                self.assertIn("不授予", profile["success"])
+                self.assertNotIn(f"python3 -B {relative}", profile["example"])
+                if name == "credential_shape":
+                    self.assertIn("held-FD", profile["prerequisite"])
+                    self.assertIn("固定路径", profile["inputs"])
+                else:
+                    self.assertIn("候选", profile["outputs"])
+
     def test_f02_generation_authority_is_a_library_not_an_operator_cli(self):
         updater = load_path("manual_f02_generation_library", USER_MANUAL_SCRIPT)
         profile = updater.script_profile(ROOT, "ztp/config_sync_authority.py")

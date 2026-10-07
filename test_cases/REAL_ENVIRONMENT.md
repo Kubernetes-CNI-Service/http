@@ -1993,6 +1993,23 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - 三来源组合补充：同一隔离真实完成周期必须同时具有 ETH/NVLink Switch、ETH 链接第四 role/P2P 派生和 IB 受保护报告九角色，三者 K/完成摘要/K 设置/W1 模板必须一致；任一角色缺失或不同周期均 HOLD。新增 hermetic 正向工作流使用本地受保护九角色 producer、真实 worker/emitter 完成记录和真实 K/Whitelist 重放，并可测试三面板 C5→C6；它仍以确定性检索替身代替远端 UFM，使用测试工作簿而非 owner 管理的正式模板，不能当成本卡真机或正式工作簿验收。本卡没有真实角色、正式输入与写者静默证据时保持 BLOCKED/NOT RUN。
 - 证据、清理与风险：保留脱敏精确命令/退出码、周期和来源摘要、拒绝原因、前后目录/服务状态、写者静默与独立快照恢复核验；仅回滚隔离副本。真实格式或保护链未证明、发生任何外部写入或没有授权时保持 BLOCKED/NOT RUN。本卡只证明只读来源，不能解除 `TC-REAL-REQ7-IB-CYCLE-BINDING-001` 或本地 C5/C6/线上发布门禁。
 
+## TC-REAL-REQ7-FIXED-PRIVATE-INPUTS-001 — 固定路径单次 held-FD 私有输入
+
+- Case ID：`TC-REAL-REQ7-FIXED-PRIVATE-INPUTS-001`；类型：real-environment / native identity / read-only bind；对应 C-1/C-2/C-10/C-11；状态：**NOT RUN / REAL_ENV REQUIRED**。自动化 `test_issue_tracker_credential_shape` 与 `test_issue_tracker_credential_fd` 的 direct 和真实策略／枚举 workflow 仅在拥有的临时树中重映射根目录 open、合成 uid 0 元数据；不代表真 root 身份或真实 RO bind。
+- 前置条件与权限：owner 另行明确授权可丢弃 Linux 容器／VM、私有固定目录与假凭据副本、卷快照、唯一 root worker 和回滚负责人；记录精确源码／测试／manifest／Python／平台及同树证明。未获授权不读取真实凭据，不改挂载、文件属主或权限，不启动容器或服务，不碰 AIR/prod/live；真机未运行不作为本地主树推进门槛。
+- 步骤与独立预期：在授权隔离副本检查 `/var/lib/http-ztp-container/service-account/` root 0700、`cre.json` 与 `issue-tracker-spreadsheet-whitelist.json` root 0600、nlink 1 和同路径 RO bind。非 root 必须在任何 open/read 前拒绝；每级祖先无链接、root 所有且非组／世界可写。相对 held-FD 打开，单次有界 read 后重核文件与每条祖先名字绑定；FIFO、坏权限、硬／软链接、超界、短读、读中修改／替换、关闭失败和缺失内核 flag 均拒绝且不修复、不回退、不重开路径。环境 ADC／私有路径变量不能重定向。
+- 解析与流程预期：原始 Google 下载件仅作为严格有界 mapping 输入；固定 token endpoint／Sheets scope，非默认 universe、delegation、额外 claims、未知字段与重复 JSON 字段拒绝。白名单仅接受精确顶层字符串数组；空数组合法但拒绝所有目标，项目 enabled 配置不能创造枚举，策略或原始字节变化拒绝旧绑定。此部件不验证私钥签名、不导入 SDK、不刷新令牌、不授予发送许可；SDK、传输、真实目标和 Stage O 另证。
+- 证据、故障与清理：只保留脱敏目录／文件／FD 身份、单读调用计数、输入长度／摘要、精确命令与退出码、权限／绑定负例、原像与恢复核验。凭据字节、令牌、私钥、邮箱及匹配值不得进入日志／异常／公开状态；不回传私有 mapping。仅回滚获准的隔离卷快照，核对原件与外部哨兵不变；现场权限、RO bind 或回滚证据缺失仍 NOT RUN。
+
+## TC-REAL-REQ7-ONLINE-CANDIDATE-ROWS-001 — 精确字面列、保留序号及位移检测
+
+- Case ID：`TC-REAL-REQ7-ONLINE-CANDIDATE-ROWS-001`；类型：real-environment / index-addressed API / preservation；对应 C-8/C-17/C-20/C-26；状态：**NOT RUN / REAL_ENV REQUIRED**。本地 `test_issue_tracker_online_cells`、`test_issue_tracker_online_nv_ids`、`test_issue_tracker_online_rows` 同时包含 direct 和真实工作簿投影／源行校验／字面请求 workflow；其纯候选不建立在线读、模板、目标、预留或发送权威。
+- 前置条件与权限：只有完整 Stage L 的鉴权／受控传输／锁／journal／History／fence／UNKNOWN 证明和另获 owner 的 Stage O 副本授权、人工编辑合同、精确枚举、实际 Python／SSL／CA 身份、快照与回滚责任后，才可在批准的一次性副本执行真实请求。目前这些上线条件未完成，不打开网络、不读真实 Google 表格、不改线上表、不宣称整个 REQ7 完成。
+- 输入与独立预期：逐批校验正式本地模板的 14 sheet 同名同序与原始 row-2 多行 header；用显式候选列与精确矩形 userEnteredValue／FORMULA 读建立稳定业务键，重复 active key 拒绝。Switch 有限预留行只在 F、B/C、J..U 都空且未预留时可选，保留 A 的 NV ID、D/E/G/H 公式与 I3 公式／I4:I5002 空余；容量耗尽不造行。实际 ETH/IB Cabling A 列及所有保留预留共同决定下一 NV 序号，无固定魔数、无自动回收，UNKNOWN 拒绝新规划；纯规划尚未实现持久化预留，现场须另证。
+- 写入与回读预期：Switch insert 只写 B/C/F/J/K/L/N、update 只写 L；Cabling insert 用 appendCells，update 只写 G/M/N/S/T 与可选 AC；所有值为 literal stringValue、fields=userEnteredValue。只用精确连续 updateCells start 或显式 appendCells sheetId/rows，不写 range/tableId／公式／人工列，不整表覆写。本地 NOOP 仅是 supplied read 的 OBSERVED-SATISFIED-AT-READ，不是 APPLIED／历史代次回执；本地 workbook 无变化不能删掉完整在线业务意图。
+- 位移与不确定性：写前任何一个 A:U cell／row index 改变拒绝；fake 按文档的 index-addressed 请求实际应用后，工具列不等于 intended literal 或任一保留／公式／人工 cell／row index 不一致报 CONFLICT，原已应用图像仍保留，绝不假称回滚／未写入。该检测非 CAS，只是 best-effort；真实请求后仍需完整 C-19 原始 journal、enrollment、History／fence 与全 outcome／audit 集合证明。纯单元格、序号与行比较不替代这些证明，也不清除 UNKNOWN。
+- 证据、故障与清理：保存脱敏 exact tree／命令／退出码、模板与只读矩形摘要、预留／attempt journal、字段与坐标、前后图像、完整 audit/outcome 集合和负例；注入占用、人工编辑、移行／排序、坏 typed 值、部分观察、重号、容量耗尽与 UNKNOWN，确认拒绝且原始证据不变。只退役批准的可丢弃副本及恢复隔离快照；不宣称生产回滚、真机通过或完整在线发送已实现。
+
 ## TC-REAL-REQ7-ONLINE-TARGET-001 — 精确目标枚举与每次准入重核
 
 - Case ID：`TC-REAL-REQ7-ONLINE-TARGET-001`；类型：real-environment / fixed-path authority / local-only preflight；对应 C-2/C-7；状态：**NOT RUN / REAL_ENV REQUIRED**。本地 direct `test_issue_tracker_online_target` 与多真实脚本 `test_issue_tracker_online_target_workflow` 只验证纯枚举及真实项目策略校验器，不读取真实凭据、打开网络或签发发送许可。

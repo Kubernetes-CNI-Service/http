@@ -50,7 +50,7 @@ class ManualPreviewDirectTests(unittest.TestCase):
             broker.confirm("nvis", "Switch Status", result["token"], confirmation="publish_local")
         self.commit.assert_not_called()
         for bad in ({**detail, "new_count": True}, {**detail, "row_digests": []},
-                    {**detail, "source_files": []}, {**detail, "secret": "credential"},
+                    {**detail, "source_files": []}, {**detail, "secret": "sentinel"},
                     {**detail, "new_count": 2}):
             reader.return_value = {**deepcopy(status), "manual_preview": bad}
             with self.subTest(keys=tuple(bad)), self.assertRaises(ManualPreviewHold):

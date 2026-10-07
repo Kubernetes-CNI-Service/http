@@ -28,6 +28,13 @@ UNINSTALLED_RUNTIME_COMPONENTS = frozenset({
     "monitor/issue_tracker_manual_listener.py",
     "monitor/issue-tracker-control.cgi",
 })
+REQ7_ONLINE_PRIMITIVE_LIBRARIES = frozenset({
+    "monitor/issue_tracker_credential_shape.py",
+    "monitor/issue_tracker_online_cells.py",
+    "monitor/issue_tracker_online_nv_ids.py",
+    "monitor/issue_tracker_online_rows.py",
+})
+
 REQ7_READ_ONLY_LIBRARIES = frozenset({
     "monitor/issue_tracker_ib_per_key_source.py",
     "monitor/issue_tracker_per_key_source.py",
@@ -375,6 +382,7 @@ def script_profile(root: Path, relative: str) -> dict[str, str]:
     is_library = (
         path.name == "__init__.py" or "/lib/" in f"/{relative}"
         or relative in REQ7_READ_ONLY_LIBRARIES
+        or relative in REQ7_ONLINE_PRIMITIVE_LIBRARIES
         or relative == "monitor/issue_tracker_online_target.py"
         or (relative in UNINSTALLED_RUNTIME_COMPONENTS and path.suffix.lower() == ".py")
         or path.name in {
@@ -486,6 +494,19 @@ def script_profile(root: Path, relative: str) -> dict[str, str]:
             outputs = "纯内存精确目标/策略/枚举字节绑定或脱敏 HOLD；无文件修改、网络或发送许可。"
             success = "通过只表示本次纯校验一致，不授予发送资格，不证明凭据、文件来源、在线写入或整个 REQ7。"
             recovery = "空白名单、禁用、撤销或身份变化拒绝；保留来源证据，不重定向、不猜测授权。"
+        if relative in REQ7_ONLINE_PRIMITIVE_LIBRARIES:
+            scenario = "REQ7 本地输入与纯候选校验；不是在线发布入口，不启动服务。"
+            prerequisite = "调用方另证来源、模板、目标、持久化预留和发送合同；本地测试不构成 Stage O 许可。"
+            inputs = "已验证的来源行、typed userEnteredValue 精确矩形、所有保留序号／行预留；不会从局部差异重建未知发送单元。"
+            outputs = "不可变字面单元格／序号／空闲行候选或 HOLD／CONFLICT；不发生文件修改或网络发送。"
+            success = "通过仅表示本次候选校验一致，不授予发送资格，不证明原子提交、完整回执或整个 REQ7。"
+            recovery = "占用、位移、歧义、容量耗尽或 UNKNOWN 拒绝；不覆盖人工／公式列、不回收预留、不伪造回滚。"
+            if relative == "monitor/issue_tracker_credential_shape.py":
+                prerequisite = "未来仅 root worker 调用固定路径 held-FD 读取；目录 root 0700、文件 root 0600、无链接；原生身份／RO bind 尚须单独验证。"
+                inputs = "固定路径 /var/lib/http-ztp-container/service-account/cre.json 与 issue-tracker-spreadsheet-whitelist.json；无 argv／环境路径覆盖。"
+                outputs = "单次 FD 字节解析的私有映射／精确枚举或脱敏 HOLD；不导入认证 SDK、不签名、不刷新令牌或打开网络。"
+                success = "本地 fake held-FD 测试不授予发送资格，也不证明真机身份、SDK 认证、线上发布或整个 REQ7。"
+                recovery = "身份、权限、大小、单读或名字绑定变化拒绝；不自动创建／修复文件，不向日志／异常输出凭据。"
         if is_uninstalled:
             direct = "否；这是未安装、未启用的库级接点，不是可直接运行的生产入口。"
             environment = "当前未安装、未启用；未来仅在经真机验收的受管 Linux 环境中按正确身份导入，不是操作员 CLI。"

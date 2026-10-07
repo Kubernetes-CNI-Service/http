@@ -111,6 +111,16 @@ fail closed，`--check --require-full`、`--list` 与 `--list-suites` 也不能�
 
 ## 新功能、流程和场景的补充规则
 
+`test_issue_tracker_credential_shape.py` 与 `test_issue_tracker_credential_fd.py`
+约束 REQ7 的固定私有输入：held-FD 单次有限读取、目录与文件身份前后复核、严格凭据形状及
+真实目标策略消费。root 元数据仅由私有临时夹具注入，不读取真实凭据，不证明原生 root/RO-bind
+或 Google SDK 身份。`test_issue_tracker_online_cells.py`、`test_issue_tracker_online_nv_ids.py`
+与 `test_issue_tracker_online_rows.py` 将真实本地来源和工作簿接入独立的 literal-cell、共享
+NV 序列及有限 Switch 行候选检查；所有工具/人工占用列、预写入位移和后像冲突均保留断言。
+这些纯候选不发送请求、不持久分配 ID、不授予 permit，也不提供 CAS 或回滚保证；
+它们不代表 REQ7 整体完成。真实 SDK、远端完整模板、journal/fence/History 与传输闭环仍须
+独立落地。相应真实环境卡保持 NOT RUN，单项或局部 PASS 不替代同树正式 full proof。
+
 `test_req19_infra_log_contract.py` 和 `test_req19_infra_log_workflow.py` 覆盖第八个
 `99-output-infra` 骨架、四状态日志根、规范项目归属、无覆盖迁移与中断恢复，以及真实
 setup → deploy/probe/collector 和项目重指后的写者归属。2026-10-07 owner 限定真实目录

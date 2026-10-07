@@ -157,7 +157,7 @@ console.log(JSON.stringify({queries:calls.length}));
         result = browser_settings_script(r'''
 for (const bad of [settings('8','1','committed'), settings('7','0','committed'),
     {...settings('7','1','committed'), replay:'false'},
-    {...settings('7','1','committed'), secret:'hidden'}]) {
+    {...settings('7','1','committed'), secret:'sentinel'}]) {
   replies.push(settings('3','0'));
   await issueTrackerSettingsRead('Switch Status');
   elements['issue-tracker-eth-k'].value='7';
