@@ -1,5 +1,49 @@
 # 脚本变更影响测试
 
+## 2026-10-08 R22 已提交 Q 的停服 P/A/DHCP 分组恢复候选
+
+基于 `4238a79`，未改原 WAL/bundle，也未开放旧 precommit 恢复闸门。原补偿计划
+升级为 schema-2，首写前登记 flat runtime/public key 原 B checkpoint、原 A receipt
+及新暂存 owner；冷重入拒绝未知内容/同字节新 owner，只消费原计划自己的 stage。
+已恢复 Q 前像由原计划授权，不冒称原旧 inode。DHCP 四前像先恢复/同步，随后
+P/A runtime 后核验；部分 Q 只在共享 Q 仍精确未变时继续。证据全部保留，不启动服务。
+共享面更细 owner 资格、原 A 激活/健康退休、formal related/full/check 及 REAL_ENV 仍待。
+
+初始缺 API RED `r22-committed-q-group-disk-red.log`：5 tests / 1 FAIL / 4 ERROR /
+exit1，inode161614808 / size133705 / SHA256
+`0a08802bb4cbf4c63495232c316198f74d412c72e99908d2a3f2aca396d68663`。
+第一候选两项夹具在登记后写入未授权 B runtime，另一 workflow 缺原 A binding，
+均正确 HOLD；日志 `r22-committed-q-group-disk-green.log` 原保留，不称 GREEN。
+修正仅新夹具的先登记 B runtime 顺序、真实 workflow 原 A 凭据后，五项 OK。
+后续独立反例确认 Q 补偿后未知第三方 flat runtime 被旧恢复覆盖：有效 1 FAIL；
+同组 DHCP workflow 的 private owner mapping 未持续安装是夹具错误，分别记录，
+`r22-committed-q-group-cold-obligations-red.log` / inode161624887 / size132274 /
+SHA256 `1b183220940d5cdc289391be52c8479490b26793ec21bca49ab4ceb22d7c0473`，
+3 tests / 2 FAIL / exit1。原断言未弱化，加入持久 runtime stage 后修正。
+
+八项 direct + 三项真实 LOAD→SETUP→Q 提交强杀→新 LOAD 分组恢复/再强杀冷恢复：
+11 tests OK / 43.487s / exit0，`r22-committed-q-group-cold-runtime-stage-regression.log`，
+inode161635999 / size134806 / SHA256
+`e2d55dbb984c56ae6d1938744c121deff537ba95882c79431af88d2f7ce06de9`。
+旧已读 66724-byte 前缀 SHA 一致；前后 stat 稳定；物理 Ran18→OK20→实际退出60→
+冻结一致61→END63=0。此为局部回归，不是正式 full/check。
+
+部分 Q 原计划不能由 group 续接 1 ERROR、未知 runtime stage 未被拒绝 1 FAIL：
+`r22-committed-q-group-partial-plan-orphan-red.log`，inode161643500 / size130566 /
+SHA256 `6612ff0f0bcec7c526f8c1c73e010c703cddbfeb553f1a55f4c8a183b83ee86d`，
+2 tests / exit1。修正后 2 OK / 2.561s / exit0，
+`r22-committed-q-group-partial-plan-orphan-green.log`，inode161650563 / size128350 /
+SHA256 `7828d61b27cc30c6d6840f2d73ed6aba3993365f6100d031c2b7130bea083156`；
+读取前后 stat 一致，实际退出/冻结一致/物理 END 完整。原日志保留，不删除事件对象。
+
+完整 LOAD/release、report direct/workflow、原 B/Q 补偿及新增三项分组冷恢复工作流
+模块回归：598 tests OK / 162.407s / 实际 exit0、冻结一致、物理 END=0。
+`outputs/test-diagnostics/r22-committed-q-group-full-module-regression.log`，
+inode161652153 / size331490 / SHA256
+`65a2d32649d28551dc8fa2b34eabcf0294d3b1cba028a446f410d154ff1149e5`。
+读取前后 stat 一致；物理 Ran1717→OK1719→实际退出1734→冻结一致1735→END1737。
+这是有界模块回归，不是正式 related/full/check，也不是完整 R22 关闭证明。
+
 ## 2026-10-08 R22 已提交 Q 发布记录补偿基础候选
 
 基于 `47d9a98`，独立 direct/真实 LOAD→SETUP→Q parent/report/selector 提交→

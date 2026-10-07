@@ -7146,6 +7146,38 @@ def _require_setup_switch_a_restore_absent():
     raise LoadError("pending A publication compensation; HOLD original WAL and plan")
 
 
+def _setup_switch_compensation_leaf(path):
+    if not os.path.lexists(path):
+        return None
+    if Path(path).is_symlink():
+        return _setup_publication_selector(Path(path))
+    return _setup_publication_file(Path(path), executable_ok=True)
+
+
+def _require_setup_switch_a_stage_inventory(plan, parents):
+    paths = [Path(row["stage"]["path"]) for row in plan["rows"].values() if row["stage"] is not None]
+    paths += [Path(row["stage"]["path"]) for row in plan["runtime"].values() if row["stage"] is not None]
+    allowed = set(paths)
+    if (any(not path.is_absolute() or path.parent not in parents for path in paths)
+            or any(Path(name).parent not in parents for name in plan["runtime"])):
+        raise LoadError("A compensation stage inventory escaped original parent set; HOLD")
+    for parent in parents:
+        fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            owner = _dhcp_a_preimage_receipt_identity(os.fstat(fd))
+            with os.scandir(fd) as entries:
+                for count, entry in enumerate(entries, 1):
+                    if count > 4096:
+                        raise LoadError("A compensation stage inventory exceeds bound; HOLD")
+                    if entry.name.startswith((".r22-a-restore-", ".r22-a-runtime-")) and parent / entry.name not in allowed:
+                        raise LoadError("unplanned A compensation stage retained; HOLD")
+            if (owner != _dhcp_a_preimage_receipt_identity(os.fstat(fd))
+                    or owner != _dhcp_a_preimage_receipt_identity(parent.lstat())):
+                raise LoadError("A compensation stage parent changed during scan; HOLD")
+        finally:
+            os.close(fd)
+
+
 def restore_setup_switch_q_publication(project, *, guard, confirmed=False):
     """Compensate only Q parent/report/selector, stopped, retaining all evidence.
 
@@ -7154,6 +7186,38 @@ def restore_setup_switch_q_publication(project, *, guard, confirmed=False):
     separate durable plan records every new A stage owner before the first
     compensation write. Cold readers never adopt same-byte replacement owners.
     """
+    with _setup_switch_a_compensation_authority(project, guard=guard, confirmed=confirmed,
+                                               restore_publication=True):
+        return "restored-q-publication-stopped-wal-retained"
+
+
+def restore_setup_switch_a_disk(project, *, guard, confirmed=False):
+    """Explicit stopped group compensation, never activation or retirement.
+
+    Keep Q's original durable compensation plan and the original WAL held
+    through every P/A/DHCP write. New Q preimage inodes are plan-owned stages,
+    not the original precommit owners accepted by the legacy recovery API.
+    """
+    if confirmed is not True:
+        raise LoadError("A group restoration requires explicit confirmation; HOLD")
+    _require_runtime_restore_guard(**guard)
+    if not os.path.lexists(_setup_switch_a_restore_path()):
+        restore_setup_switch_q_publication(project, guard=guard, confirmed=True)
+    with _setup_switch_a_compensation_authority(project, guard=guard, confirmed=True,
+                                               restore_publication=False, complete_publication=True) as token:
+        result = recover_setup_switch_journal(token["journal"], **guard,
+            restore_runtime_from_wal=True, requested_new_project=Path(project),
+            recover_dhcp_group=True, _a_compensation=token)
+        token["require"]()
+        token["require_runtime_restored"]()
+        if result not in {"restored-p", "restored-p-a-dhcp-retained"}:
+            raise LoadError("A group restoration did not verify complete stopped state; HOLD")
+        return "restored-p-a-group-stopped-wal-retained"
+
+
+@contextmanager
+def _setup_switch_a_compensation_authority(project, *, guard, confirmed,
+                                          restore_publication, complete_publication=False):
     if confirmed is not True:
         raise LoadError("Q publication compensation requires explicit confirmation; HOLD")
     _require_runtime_restore_guard(**guard)
@@ -7186,12 +7250,14 @@ def restore_setup_switch_q_publication(project, *, guard, confirmed=False):
         def shared_authority():
             wal_authority()
             shared = bundle.get("shared_setup")
-            if (shared is None or _setup_switch_shared_publication_snapshot(body,
+            if restore_publication and (shared is None or _setup_switch_shared_publication_snapshot(body,
                     include_inputs="input_files" in shared) != shared):
                 raise LoadError("A compensation original shared Q owner changed; HOLD")
             _require_setup_publication_images(bundle.get("image_intent"))
         shared_authority()
         if not os.path.lexists(marker):
+            if not restore_publication:
+                raise LoadError("A group restoration requires original Q compensation plan; HOLD")
             _require_no_pending_setup_stage(Path(bundle["selector"]["path"]),
                                            ".r22-a-restore-", "A publication")
             original = _open_setup_switch_publication_bundle(project, guard=guard, journal=journal)
@@ -7199,9 +7265,9 @@ def restore_setup_switch_q_publication(project, *, guard, confirmed=False):
                 phase = original["phase"]
                 if phase == "parent":
                     raise LoadError("Q compensation requires original committed B parent; HOLD")
-                plan = dict(schema_version=1, journal=str(journal), parent=parent,
+                plan = dict(schema_version=2, journal=str(journal), parent=parent,
                     identity=list(wal_before), sha256=hashlib.sha256(opened[0]).hexdigest(),
-                    phase=phase, rows={})
+                    phase=phase, rows={}, runtime={})
                 for key in ("parent", "report", "selector"):
                     row = bundle[key]
                     destination = Path(row["path"] if key == "selector" else row["destination"])
@@ -7231,6 +7297,47 @@ def restore_setup_switch_q_publication(project, *, guard, confirmed=False):
                         if stage["file"]["identity"] != stage_owner:
                             raise LoadError("A compensation stage original owner changed during read; HOLD")
                     plan["rows"][key] = dict(checkpoint=checkpoint, stage=stage)
+                context = _setup_switch_runtime_context(body)
+                if context is not None:
+                    receipt = _load_runtime_rollback_receipt(context.project, context.runtime_receipt)
+                    shared_runtime = bundle["shared_setup"]["flat_runtime"]
+                    records = {ZTP_DIR / name: (record, context.runtime_receipt / "files" / name)
+                               for name, record in receipt["frozen_files"].items()}
+                    key_root = ZTP_DIR / "config/publickey"
+                    for name in set(receipt["publickeys"]) | set(shared_runtime["publickeys"]):
+                        records[key_root / name] = (receipt["publickeys"].get(name, {"state": "missing"}),
+                                                   context.runtime_receipt / "publickeys" / name)
+                    records = {path.parent.resolve(strict=True) / path.name: value for path, value in records.items()}
+                    for directory in {path.parent for path in records}:
+                        _require_no_pending_setup_stage(directory / ".a-plan-probe", ".r22-a-runtime-", "A runtime")
+                    for destination, (record, source) in sorted(records.items()):
+                        checkpoint = _setup_switch_compensation_leaf(destination)
+                        stage = None
+                        if record["state"] != "missing":
+                            path = destination.parent / (".r22-a-runtime-" + uuid.uuid4().hex)
+                            if record["state"] == "link":
+                                path.symlink_to(record["target"])
+                                stage_owner = list(_dhcp_a_preimage_receipt_identity(path.lstat()))
+                            else:
+                                data, mode = _read_rollback_regular(source)
+                                if mode != record["mode"] or hashlib.sha256(data).hexdigest() != record["sha256"]:
+                                    raise LoadError("A compensation original runtime payload differs; HOLD")
+                                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                                with os.fdopen(fd, "wb") as stream:
+                                    os.fchmod(stream.fileno(), mode)
+                                    stream.write(data)
+                                    stream.flush()
+                                    stage_owner = list(_dhcp_a_preimage_receipt_identity(os.fstat(stream.fileno())))
+                                    os.fsync(stream.fileno())
+                                    if stage_owner != list(_dhcp_a_preimage_receipt_identity(os.fstat(stream.fileno()))):
+                                        raise LoadError("A runtime compensation stage changed at sync; HOLD")
+                            stage = dict(path=str(path), file=_setup_switch_compensation_leaf(path))
+                            if stage["file"]["identity"] != stage_owner:
+                                raise LoadError("A runtime compensation original stage owner changed; HOLD")
+                        plan["runtime"][str(destination)] = dict(before=record, checkpoint=checkpoint,
+                            parent=_setup_switch_link_parent_identity(destination), stage=stage)
+                    for directory in {path.parent for path in records}:
+                        _fsync_parent_directory(directory)
                 _fsync_parent_directory(Path(bundle["selector"]["path"]).parent)
                 require_setup_switch_publication_bundle(original, guard=guard, phase=phase)
                 marker_fd = os.open(marker, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
@@ -7263,8 +7370,8 @@ def restore_setup_switch_q_publication(project, *, guard, confirmed=False):
                     result[key] = value
                 return result
             plan = json.loads(payload, object_pairs_hook=unique)
-        if (set(plan) != {"schema_version", "journal", "parent", "identity", "sha256", "phase", "rows", "owner"}
-                or type(plan["schema_version"]) is not int or plan["schema_version"] != 1
+        if (set(plan) != {"schema_version", "journal", "parent", "identity", "sha256", "phase", "rows", "owner", "runtime"}
+                or type(plan["schema_version"]) is not int or plan["schema_version"] != 2
                 or plan["journal"] != str(journal) or plan["parent"] != parent
                 or plan["identity"] != list(wal_before)
                 or plan["sha256"] != hashlib.sha256(opened[0]).hexdigest()
@@ -7282,12 +7389,74 @@ def restore_setup_switch_q_publication(project, *, guard, confirmed=False):
                     or parent != _setup_switch_link_parent_identity(marker)
                     or (payload, 0o600) != _read_rollback_regular(marker, limit=_ROLLBACK_PAYLOAD_LIMIT)):
                 raise LoadError("A compensation original plan owner changed; HOLD")
+            _require_setup_switch_a_stage_inventory(plan, {
+                Path(bundle["selector"]["path"]).parent,
+                ZTP_DIR.resolve(strict=True), (ZTP_DIR / "config/publickey").resolve(strict=True)})
         def same_owner(actual, expected, *, renamed=False):
             if actual is None or expected is None:
                 return actual is expected
             return (set(actual) == set(expected) and actual["identity"][:8] == expected["identity"][:8]
                     and (renamed or actual["identity"] == expected["identity"])
                     and all(actual[key] == expected[key] for key in actual if key != "identity"))
+        def runtime_states():
+            marker_authority()
+            context = _setup_switch_runtime_context(body)
+            expected = {}
+            original = bundle["shared_setup"]["flat_runtime"]
+            if context is not None:
+                receipt = _load_runtime_rollback_receipt(context.project, context.runtime_receipt)
+                expected = {str(ZTP_DIR / name): record for name, record in receipt["frozen_files"].items()}
+                for name in set(receipt["publickeys"]) | set(original["publickeys"]):
+                    expected[str(ZTP_DIR / "config/publickey" / name)] = receipt["publickeys"].get(name, {"state": "missing"})
+                expected = {str(Path(name).parent.resolve(strict=True) / Path(name).name): row
+                            for name, row in expected.items()}
+            if not isinstance(plan["runtime"], dict) or set(plan["runtime"]) != set(expected):
+                raise LoadError("A compensation runtime inventory differs from original receipt; HOLD")
+            result = {}
+            for name, before in expected.items():
+                path, row = Path(name), plan["runtime"][name]
+                if (not isinstance(row, dict) or set(row) != {"before", "checkpoint", "parent", "stage"}
+                        or row["before"] != before or row["parent"] != _setup_switch_link_parent_identity(path)):
+                    raise LoadError("A compensation runtime row/parent differs; HOLD")
+                checkpoint = row["checkpoint"]
+                # Checkpoints are the original publication's flat B owners,
+                # never a new cold observation of the current runtime.
+                bound = (original["files"][path.name]["file"] if path.parent == ZTP_DIR.resolve(strict=True)
+                         else original["publickeys"].get(path.name))
+                if path.parent == ZTP_DIR.resolve(strict=True):
+                    if checkpoint != bound:
+                        raise LoadError("A compensation runtime checkpoint differs from original B; HOLD")
+                elif ((checkpoint is None) != (bound is None)
+                      or checkpoint is not None and checkpoint["identity"] != bound["identity"]):
+                    raise LoadError("A compensation public key checkpoint owner differs; HOLD")
+                stage = row["stage"]
+                after, staged = None, None
+                if before["state"] == "missing":
+                    if stage is not None:
+                        raise LoadError("A runtime original absence has a stage; HOLD")
+                else:
+                    if not isinstance(stage, dict) or set(stage) != {"path", "file"}:
+                        raise LoadError("A runtime compensation stage missing; HOLD")
+                    source = Path(stage["path"])
+                    after = stage["file"]
+                    if (source.parent != path.parent or re.fullmatch(r"\.r22-a-runtime-[0-9a-f]{32}", source.name) is None
+                            or not isinstance(after, dict) or not isinstance(after.get("identity"), list)
+                            or len(after["identity"]) != 9 or any(type(v) is not int or v < 0 for v in after["identity"])
+                            or before["state"] == "link" and (set(after) != {"identity", "target"} or after["target"] != before["target"])
+                            or before["state"] != "link" and (set(after) != {"identity", "payload", "sha256", "mode"}
+                                or after["sha256"] != before["sha256"] or after["mode"] != before["mode"]
+                                or hashlib.sha256(base64.b64decode(after["payload"], validate=True)).hexdigest() != before["sha256"])):
+                        raise LoadError("A runtime compensation stage does not contain original A; HOLD")
+                    staged = _setup_switch_compensation_leaf(source)
+                current = _setup_switch_compensation_leaf(path)
+                if same_owner(current, after, renamed=True) and staged is None:
+                    result[path] = "after"
+                elif same_owner(current, checkpoint) and (stage is None or same_owner(staged, after)):
+                    result[path] = "before"
+                else:
+                    raise LoadError("A compensation runtime destination/stage owner changed; HOLD")
+            marker_authority()
+            return result
         def states():
             marker_authority()
             result = {}
@@ -7338,21 +7507,52 @@ def restore_setup_switch_q_publication(project, *, guard, confirmed=False):
                     raise LoadError("A compensation destination/stage owner changed; HOLD")
             marker_authority()
             return result
-        for key in ("parent", "report", "selector"):
-            phases = states()
-            row = bundle[key]
-            destination = Path(row["path"] if key == "selector" else row["destination"])
-            if phases[key] == "before":
-                stage = plan["rows"][key]["stage"]
-                if stage is None:
-                    if os.path.lexists(destination):
-                        destination.unlink()
+        if restore_publication or complete_publication and set(states().values()) != {"after"}:
+            for key in ("parent", "report", "selector"):
+                if not restore_publication:
+                    # A partial Q compensation may resume only while every
+                    # non-publication surface is still the original exact Q.
+                    # A P/A write cannot have legitimately happened yet.
+                    shared = bundle["shared_setup"]
+                    if _setup_switch_shared_publication_snapshot(body,
+                            include_inputs="input_files" in shared) != shared:
+                        raise LoadError("partial Q compensation shared owner differs; HOLD")
+                runtime_states()
+                phases = states()
+                row = bundle[key]
+                destination = Path(row["path"] if key == "selector" else row["destination"])
+                if phases[key] == "before":
+                    stage = plan["rows"][key]["stage"]
+                    if stage is None:
+                        if os.path.lexists(destination):
+                            destination.unlink()
+                    else:
+                        os.replace(Path(stage["path"]), destination)
+                _fsync_parent_directory(destination.parent)  # Repeat interrupted-sync reentry too.
+        def require_restored_publication():
+            if set(states().values()) != {"after"}:
+                raise LoadError("A compensation final publication state differs; HOLD")
+            runtime_states()
+        def restore_runtime_leaf(path, record, payload):
+            path = Path(path).parent.resolve(strict=True) / Path(path).name
+            require_restored_publication()
+            row = plan["runtime"].get(str(path))
+            if row is None or row["before"] != record:
+                raise LoadError("A runtime restore is not the original planned leaf; HOLD")
+            if runtime_states()[path] == "before":
+                if row["stage"] is None:
+                    if os.path.lexists(path):
+                        path.unlink()
                 else:
-                    os.replace(Path(stage["path"]), destination)
-            _fsync_parent_directory(destination.parent)  # Repeat on interrupted-sync reentry too.
-        if set(states().values()) != {"after"}:
-            raise LoadError("A compensation final publication state differs; HOLD")
-        return "restored-q-publication-stopped-wal-retained"
+                    os.replace(Path(row["stage"]["path"]), path)
+            _fsync_parent_directory(path.parent)
+            require_restored_publication()
+        def require_runtime_restored():
+            if set(runtime_states().values()) != {"after"}:
+                raise LoadError("A compensation runtime completion is unconfirmed; HOLD")
+        require_restored_publication()
+        yield dict(journal=journal, opened=opened, require=require_restored_publication,
+                   restore_runtime_leaf=restore_runtime_leaf, require_runtime_restored=require_runtime_restored)
     except (KeyError, TypeError, ValueError, RuntimeError, OSError) as exc:
         raise LoadError(f"A publication compensation unconfirmed; HOLD: {exc}") from exc
     finally:
@@ -9726,6 +9926,7 @@ def recover_setup_switch_journal(
     _expected_runtime_context: CrossProjectRollbackContext | None = None,
     requested_new_project: Path | None = None,
     recover_dhcp_group: bool = False,
+    _a_compensation=None,
 ) -> str:
     """Verify or restore P from a complete WAL and a known P/Q disk state.
 
@@ -9739,6 +9940,11 @@ def recover_setup_switch_journal(
         services_quiesced=services_quiesced,
         runtime_backend=runtime_backend,
     )
+    if _a_compensation is not None:
+        if (not restore_runtime_from_wal or not recover_dhcp_group
+                or requested_new_project is None):
+            raise LoadError("A compensation requires explicit stopped group recovery; HOLD")
+        _a_compensation["require"]()
     if type(recover_dhcp_group) is not bool or (recover_dhcp_group and (
             not restore_runtime_from_wal or requested_new_project is None)):
         raise LoadError("DHCP group recovery requires explicit disk-only runtime restore and original Q")
@@ -9816,6 +10022,9 @@ def recover_setup_switch_journal(
                 raise LoadError(f"setup switch journal changed during recovery: {exc}") from exc
 
         require_journal_unchanged()
+        if _a_compensation is not None and (journal != _a_compensation["journal"]
+                                            or opened != _a_compensation["opened"]):
+            raise LoadError("A compensation is not this original held WAL; HOLD")
         return _recover_setup_switch_journal_snapshot(
             journal, opened=opened, require_journal_unchanged=require_journal_unchanged,
             verify_only=verify_only, manifest_candidate=manifest_candidate,
@@ -9827,6 +10036,7 @@ def recover_setup_switch_journal(
             expected_runtime_context=_expected_runtime_context,
             requested_new_project=requested_new_project,
             recover_dhcp_group=recover_dhcp_group,
+            a_compensation=_a_compensation,
             runtime_restore_guard=dict(deployment_lock_descriptor=deployment_lock_descriptor,
                                        services_quiesced=services_quiesced, runtime_backend=runtime_backend),
         )
@@ -9850,6 +10060,7 @@ def _recover_setup_switch_journal_snapshot(
     requested_new_project: Path | None = None,
     runtime_restore_guard=None,
     recover_dhcp_group=False,
+    a_compensation=None,
 ) -> str:
     """Recover only from the immutable authority held by the guarded API."""
     if not verify_only:
@@ -9901,9 +10112,15 @@ def _recover_setup_switch_journal_snapshot(
     if "publication_bundle" in body:
         # Existing P/A readers have no authority to retire, discard or undo
         # this publication group, especially after visible Q parent commit.
-        if not inspect_only:
+        if a_compensation is not None:
+            if a_compensation["opened"] != opened or a_compensation["journal"] != journal:
+                raise LoadError("A compensation differs from original publication WAL; HOLD")
+            a_compensation["require"]()
+            retain_journal = True
+        elif not inspect_only:
             raise LoadError("SETUP publication recovery is unresolved; HOLD original WAL and candidates")
-        _require_setup_publication_state(body)
+        else:
+            _require_setup_publication_state(body)
     group_token = None
     if "dhcp_transaction" in body and not recover_dhcp_group:
         # This original write obligation cannot be silently ignored by the
@@ -9914,6 +10131,7 @@ def _recover_setup_switch_journal_snapshot(
         try:
             group_token = _open_setup_switch_dhcp_group(
                 journal, body, opened, runtime_restore_guard, materialized_descriptors,
+                a_compensation=a_compensation,
             )
         except (KeyError, TypeError, ValueError, OSError) as exc:
             # A valid outer checksum is not a complete nested recovery
@@ -9935,6 +10153,7 @@ def _recover_setup_switch_journal_snapshot(
                 runtime_context.project, runtime_context.runtime_receipt,
                 expected_current=runtime_context.selector_target, **runtime_restore_guard,
                 _require_authority=require_authority,
+                _restore_file=a_compensation["restore_runtime_leaf"] if a_compensation is not None else None,
             )
             _require_runtime_restore_guard(**runtime_restore_guard)
 
@@ -9945,11 +10164,15 @@ def _recover_setup_switch_journal_snapshot(
 
     def require_journal_unchanged():
         require_wal_unchanged()
-        _require_setup_switch_q_parent_preimage(body)
+        if a_compensation is not None:
+            a_compensation["require"]()
+        else:
+            _require_setup_switch_q_parent_preimage(body)
         _setup_switch_runtime_context(body, state)
         if group_token is not None:
             _require_bound_dhcp_transaction_namespace(body["dhcp_transaction"])
-            _require_setup_switch_dhcp_transaction(group_token, runtime_restore_guard)
+            _require_setup_switch_dhcp_transaction(group_token, runtime_restore_guard,
+                                                    a_compensation=a_compensation)
         elif recover_dhcp_group:
             require_no_pending_dhcp_transaction()
 
@@ -10258,9 +10481,9 @@ def _recover_setup_switch_journal_snapshot(
         # Keep the original WAL descriptor, bytes and owner through A's runtime
         # restore and postverification. Exception or death must not erase the
         # only persistent P/Q recovery authority just because links are back.
-        after_p_restore(require_authority=require_journal_unchanged)
         if group_token is not None:
             _restore_setup_switch_dhcp_group(group_token, runtime_restore_guard, require_journal_unchanged)
+        after_p_restore(require_authority=require_journal_unchanged)
         require_journal_unchanged()
         if _recover_setup_switch_journal_snapshot(
                 journal, opened=opened,
@@ -10270,6 +10493,7 @@ def _recover_setup_switch_journal_snapshot(
                 expected_new_project=expected_new_project, retain_journal=False,
                 materialized_descriptors=materialized_descriptors,
                 recover_dhcp_group=recover_dhcp_group,
+                a_compensation=a_compensation,
                 runtime_restore_guard=runtime_restore_guard,
         ) != "prepared-p":
             raise LoadError("post-runtime P recovery state is not exact; journal retained")
@@ -10352,6 +10576,7 @@ def restore_runtime_rollback_receipt(
     services_quiesced: bool,
     runtime_backend: ServiceRuntimeBackend | None,
     _require_authority: Callable[[], None] | None = None,
+    _restore_file: Callable[..., None] | None = None,
 ) -> None:
     """Restore A after an uncommitted B generation failure, then verify all.
 
@@ -10450,10 +10675,10 @@ def restore_runtime_rollback_receipt(
             payload_groups[group_name][name] = payload
     _require_runtime_publickey_parent(receipt)
     for name, record in frozen.items():
-        _restore_receipt_file(
-            ZTP_DIR / name, record, payload_groups["files"][name],
-            **authority_guard,
-        )
+        if _restore_file is not None:
+            _restore_file(ZTP_DIR / name, record, payload_groups["files"][name])
+        else:
+            _restore_receipt_file(ZTP_DIR / name, record, payload_groups["files"][name], **authority_guard)
     for extra in set(path.name for path in publickey_dir.glob("*.pub")) - set(key_records):
         _require_runtime_publickey_parent(receipt)
         path = publickey_dir / extra
@@ -10461,10 +10686,17 @@ def restore_runtime_rollback_receipt(
             raise LoadError("rollback publickey target became a directory")
         if _require_authority is not None:
             _require_authority()
-        path.unlink()
+        if _restore_file is not None:
+            _restore_file(path, {"state": "missing"}, None)
+        else:
+            path.unlink()
     for name, record in key_records.items():
         _require_runtime_publickey_parent(receipt)
-        if record["state"] == "link":
+        if _restore_file is not None:
+            if record["state"] == "link":
+                _validate_runtime_key_binding(publickey_dir / name, canonical_project, record)
+            _restore_file(publickey_dir / name, record, payload_groups["publickeys"][name])
+        elif record["state"] == "link":
             _validate_runtime_key_binding(publickey_dir / name, canonical_project, record)
             _atomic_restore_setup_link(publickey_dir / name, record["target"], **authority_guard)
         else:
@@ -11291,7 +11523,7 @@ def _require_no_pending_dhcp_restore_stages(binding):
         _require_no_pending_setup_link_stage(path)
 
 
-def _open_setup_switch_dhcp_group(journal, body, opened, guard, descriptors):
+def _open_setup_switch_dhcp_group(journal, body, opened, guard, descriptors, *, a_compensation=None):
     binding = body["dhcp_transaction"]
     _require_bound_dhcp_transaction_namespace(binding)
     receipt = Path(binding["receipt"])
@@ -11314,7 +11546,7 @@ def _open_setup_switch_dhcp_group(journal, body, opened, guard, descriptors):
     preimage = (receipt, payload, tuple(binding["identity"]))
     token = (journal, opened[0], _dhcp_a_preimage_receipt_identity(os.fstat(wal_fd)),
              _setup_switch_link_parent_identity(journal), wal_fd, preimage, receipt_fd)
-    _require_setup_switch_dhcp_transaction(token, guard)
+    _require_setup_switch_dhcp_transaction(token, guard, a_compensation=a_compensation)
     return token
 
 
@@ -11482,7 +11714,7 @@ def _register_setup_switch_dhcp_transaction(preimage, parent_candidate, guard, *
                 os.close(descriptor)
 
 
-def _require_setup_switch_dhcp_transaction(token, guard, *, inspect_runtime=True):
+def _require_setup_switch_dhcp_transaction(token, guard, *, inspect_runtime=True, a_compensation=None):
     journal, payload, identity, parent, wal_fd, preimage, receipt_fd = token
     _require_runtime_restore_guard(**guard)
     if (parent != _setup_switch_link_parent_identity(journal)
@@ -11491,8 +11723,13 @@ def _require_setup_switch_dhcp_transaction(token, guard, *, inspect_runtime=True
             or _read_rollback_regular(journal, limit=_SETUP_SWITCH_JOURNAL_LIMIT) != (payload, 0o600)):
         raise LoadError("SETUP/DHCP registered WAL owner changed; HOLD")
     body = _setup_switch_prepared_registration_body((payload, 0o600))
-    _require_setup_switch_q_parent_preimage(body)
-    if "publication_bundle" in body:
+    if a_compensation is not None:
+        if a_compensation["journal"] != journal or a_compensation["opened"] != (payload, 0o600):
+            raise LoadError("DHCP compensation requires the same original WAL; HOLD")
+        a_compensation["require"]()
+    else:
+        _require_setup_switch_q_parent_preimage(body)
+    if "publication_bundle" in body and a_compensation is None:
         _require_setup_publication_state(body)
     _verify_dhcp_a_preimage_receipt(preimage)
     if preimage[2] != _dhcp_a_preimage_receipt_identity(os.fstat(receipt_fd)):

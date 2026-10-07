@@ -1066,7 +1066,7 @@ class ReleaseTransactionTests(unittest.TestCase):
 
     def _prepare_published_q_for_stopped_preflight(self, *, with_image=False, no_upgrade=False,
                                                   ztp_disabled=False, seed_q_publication=False,
-                                                  publication_phase="published"):
+                                                  publication_phase="published", partial_runtime=False):
         state, context, guard = self._prepare_q_manifest_publication(seed_q_publication=seed_q_publication)
         q = state[1]
         for name, source in (("01-global.yaml", self.inputs.global_file),
@@ -1103,6 +1103,8 @@ class ReleaseTransactionTests(unittest.TestCase):
             published.parent.mkdir(parents=True)
             published.write_bytes(source.read_bytes())
             image_options["images"] = {"eth": source}
+        if partial_runtime:
+            (self.ztp / "ztp-bootstrap_oob.sh").write_bytes(b"independent partially installed B runtime\n")
         candidates = private_publication_candidates(LOAD, q)
         with mock.patch.object(LOAD, "active_managed_services", return_value=()):
             token = LOAD.register_setup_switch_publication_bundle(*candidates, guard=guard, **image_options)
@@ -1366,6 +1368,175 @@ class ReleaseTransactionTests(unittest.TestCase):
         self.assertEqual((foreign_owner, payload), (path.lstat().st_ino, path.read_bytes()))
         self.assertEqual(frozen, (parent.lstat().st_ino, parent.read_bytes(), journal.read_bytes()))
         self.assertEqual(token["payload"], journal.read_bytes())
+
+    def test_committed_q_group_restore_keeps_original_plan_and_restores_p_a(self):
+        self._committed_q_group_restore(existing=True)
+
+    def test_committed_q_group_restore_missing_q_preimages_reenters_without_retirement(self):
+        self._committed_q_group_restore(existing=False)
+
+    def _committed_q_group_restore(self, *, existing):
+        state, context, guard, token, _inputs = self._prepare_published_q_for_stopped_preflight(
+            seed_q_publication=existing, partial_runtime=True)
+        journal, q = state[-3], state[1]
+        original_wal = (journal.lstat().st_ino, journal.read_bytes())
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "_runtime_service_action") as service:
+            result = LOAD.restore_setup_switch_a_disk(q, guard=guard, confirmed=True)
+            self.assertEqual("restored-p-a-group-stopped-wal-retained", result)
+            self.assertEqual(state[8], state[7].read_bytes())
+            self.assertEqual(state[9], {path: os.readlink(path) for path in state[9]})
+            self.assertEqual(b"A oob bootstrap\n", (self.ztp / "ztp-bootstrap_oob.sh").read_bytes())
+            self.assertEqual(context.selector_target, os.readlink(context.project / "99-output-ztp/current"))
+            marker = journal.parent / ".setup-switch-a-restore.json"
+            original_plan = (marker.lstat().st_ino, marker.read_bytes())
+            LOAD.close_setup_switch_publication_bundle(token)
+            self.assertEqual(result, LOAD.restore_setup_switch_a_disk(q, guard=guard, confirmed=True))
+            self.assertEqual(original_wal, (journal.lstat().st_ino, journal.read_bytes()))
+            self.assertEqual(original_plan, (marker.lstat().st_ino, marker.read_bytes()))
+            service.assert_not_called()
+            with self.assertRaisesRegex(LOAD.LoadError, "pending|HOLD"):
+                LOAD.require_no_pending_setup_switch_journal()
+
+    def test_committed_q_group_restore_refuses_confirmation_before_any_write(self):
+        state, _context, guard, _token, _inputs = self._prepare_published_q_for_stopped_preflight()
+        parent = state[1] / "99-output-ztp/current-release.json"
+        frozen = (state[-3].read_bytes(), state[7].read_bytes(), parent.lstat().st_ino, parent.read_bytes())
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            with self.assertRaisesRegex(LOAD.LoadError, "explicit|HOLD"):
+                LOAD.restore_setup_switch_a_disk(state[1], guard=guard)
+        self.assertEqual(frozen, (state[-3].read_bytes(), state[7].read_bytes(),
+                                 parent.lstat().st_ino, parent.read_bytes()))
+        self.assertFalse(os.path.lexists(state[-3].parent / ".setup-switch-a-restore.json"))
+
+    def test_committed_q_group_restore_rejects_replaced_plan_before_p_write(self):
+        state, _context, guard, _token, _inputs = self._prepare_published_q_for_stopped_preflight()
+        q, journal = state[1], state[-3]
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            LOAD.restore_setup_switch_q_publication(q, guard=guard, confirmed=True)
+            marker = journal.parent / ".setup-switch-a-restore.json"
+            held = marker.with_name("independent-original-a-plan")
+            marker.rename(held)
+            marker.write_bytes(held.read_bytes())
+            marker.chmod(0o600)
+            frozen = (state[7].read_bytes(), os.readlink(state[2]), journal.read_bytes(),
+                      marker.lstat().st_ino, marker.read_bytes())
+            with self.assertRaisesRegex(LOAD.LoadError, "plan.*owner|HOLD"):
+                LOAD.restore_setup_switch_a_disk(q, guard=guard, confirmed=True)
+            self.assertEqual(frozen, (state[7].read_bytes(), os.readlink(state[2]), journal.read_bytes(),
+                                     marker.lstat().st_ino, marker.read_bytes()))
+
+    def test_committed_q_group_restore_reenters_after_original_p_namespace_sync_failure(self):
+        state, context, guard, token, _inputs = self._prepare_published_q_for_stopped_preflight(
+            partial_runtime=True)
+        journal = state[-3]
+        original_wal = (journal.lstat().st_ino, journal.read_bytes())
+        original_sync = LOAD._fsync_parent_directory
+        injected = []
+        def fail_after_original_p_link(path):
+            if (state[2].is_symlink() and os.readlink(state[2]) == state[9][state[2]]
+                    and not injected):
+                injected.append(True)
+                raise OSError("independent restored P namespace sync failure")
+            return original_sync(path)
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            with mock.patch.object(LOAD, "_fsync_parent_directory", side_effect=fail_after_original_p_link):
+                with self.assertRaisesRegex((OSError, LOAD.LoadError), "independent restored P namespace"):
+                    LOAD.restore_setup_switch_a_disk(state[1], guard=guard, confirmed=True)
+            self.assertEqual([True], injected)
+            self.assertEqual(original_wal, (journal.lstat().st_ino, journal.read_bytes()))
+            marker = journal.parent / ".setup-switch-a-restore.json"
+            original_plan = (marker.lstat().st_ino, marker.read_bytes())
+            LOAD.close_setup_switch_publication_bundle(token)
+            self.assertEqual("restored-p-a-group-stopped-wal-retained",
+                             LOAD.restore_setup_switch_a_disk(state[1], guard=guard, confirmed=True))
+            self.assertEqual(context.setup_state.manifest, state[7].read_bytes())
+            self.assertEqual(context.setup_state.links, {path: os.readlink(path) for path in context.setup_state.links})
+            self.assertEqual(b"A oob bootstrap\n", (self.ztp / "ztp-bootstrap_oob.sh").read_bytes())
+            self.assertEqual(original_plan, (marker.lstat().st_ino, marker.read_bytes()))
+
+    def test_committed_q_group_restore_rejects_unknown_flat_runtime_after_q_compensation(self):
+        state, _context, guard, _token, _inputs = self._prepare_published_q_for_stopped_preflight(
+            partial_runtime=True)
+        path = self.ztp / "ztp-bootstrap_oob.sh"
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            LOAD.restore_setup_switch_q_publication(state[1], guard=guard, confirmed=True)
+            path.write_bytes(b"independent unregistered third-party runtime\n")
+            frozen = (state[-3].read_bytes(), state[7].read_bytes(), os.readlink(state[2]), path.read_bytes())
+            with self.assertRaisesRegex(LOAD.LoadError, "runtime.*HOLD|HOLD.*runtime"):
+                LOAD.restore_setup_switch_a_disk(state[1], guard=guard, confirmed=True)
+            self.assertEqual(frozen, (state[-3].read_bytes(), state[7].read_bytes(), os.readlink(state[2]), path.read_bytes()))
+
+    def test_committed_q_group_restore_rejects_same_byte_restored_runtime_owner_on_reentry(self):
+        state, _context, guard, _token, _inputs = self._prepare_published_q_for_stopped_preflight(partial_runtime=True)
+        path = self.ztp / "ztp-bootstrap_oob.sh"
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            LOAD.restore_setup_switch_a_disk(state[1], guard=guard, confirmed=True)
+            metadata, payload = path.lstat(), path.read_bytes()
+            held = path.with_name("independent-original-restored-A-runtime")
+            path.rename(held)
+            path.write_bytes(payload)
+            path.chmod(stat.S_IMODE(metadata.st_mode))
+            os.utime(path, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
+            self.assertNotEqual(metadata.st_ino, path.lstat().st_ino)
+            frozen = (state[-3].read_bytes(), state[7].lstat().st_ino, state[7].read_bytes(),
+                      path.lstat().st_ino, path.read_bytes())
+            with self.assertRaisesRegex(LOAD.LoadError, "runtime.*owner.*HOLD"):
+                LOAD.restore_setup_switch_a_disk(state[1], guard=guard, confirmed=True)
+            self.assertEqual(frozen, (state[-3].read_bytes(), state[7].lstat().st_ino, state[7].read_bytes(),
+                                     path.lstat().st_ino, path.read_bytes()))
+
+    def test_committed_q_group_restore_rejects_same_byte_runtime_stage_before_p_write(self):
+        state, _context, guard, _token, _inputs = self._prepare_published_q_for_stopped_preflight(partial_runtime=True)
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            LOAD.restore_setup_switch_q_publication(state[1], guard=guard, confirmed=True)
+            marker = state[-3].parent / ".setup-switch-a-restore.json"
+            rows = json.loads(marker.read_bytes())["runtime"]
+            row = rows[str(self.ztp.resolve() / "ztp-bootstrap_oob.sh")]
+            stage = Path(row["stage"]["path"])
+            metadata, payload = stage.lstat(), stage.read_bytes()
+            held = stage.with_name("independent-original-runtime-stage")
+            stage.rename(held)
+            stage.write_bytes(payload)
+            stage.chmod(stat.S_IMODE(metadata.st_mode))
+            os.utime(stage, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
+            frozen = (state[-3].read_bytes(), state[7].lstat().st_ino, state[7].read_bytes(),
+                      os.readlink(state[2]), stage.lstat().st_ino, stage.read_bytes())
+            with self.assertRaisesRegex(LOAD.LoadError, "runtime.*owner.*HOLD"):
+                LOAD.restore_setup_switch_a_disk(state[1], guard=guard, confirmed=True)
+            self.assertEqual(frozen, (state[-3].read_bytes(), state[7].lstat().st_ino, state[7].read_bytes(),
+                                     os.readlink(state[2]), stage.lstat().st_ino, stage.read_bytes()))
+
+    def test_committed_q_group_restore_resumes_original_partial_q_compensation(self):
+        state, _context, guard, _token, _inputs = self._prepare_published_q_for_stopped_preflight(
+            seed_q_publication=True, partial_runtime=True)
+        q = state[1]
+        original_sync, injected = LOAD._fsync_parent_directory, []
+        def fail_after_q_parent(path):
+            if (q / "99-output-ztp/current-release.json").read_bytes() == self._original_q_publication["parent"] and not injected:
+                injected.append(True)
+                raise OSError("independent group Q compensation namespace sync failure")
+            return original_sync(path)
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            with mock.patch.object(LOAD, "_fsync_parent_directory", side_effect=fail_after_q_parent):
+                with self.assertRaisesRegex((OSError, LOAD.LoadError), "independent group Q compensation"):
+                    LOAD.restore_setup_switch_a_disk(q, guard=guard, confirmed=True)
+            self.assertEqual([True], injected)
+            marker = state[-3].parent / ".setup-switch-a-restore.json"
+            original_plan = (marker.lstat().st_ino, marker.read_bytes())
+            self.assertEqual("restored-p-a-group-stopped-wal-retained",
+                             LOAD.restore_setup_switch_a_disk(q, guard=guard, confirmed=True))
+            self.assertEqual(original_plan, (marker.lstat().st_ino, marker.read_bytes()))
+
+    def test_q_compensation_refuses_unplanned_runtime_stage_without_consuming_it(self):
+        state, _context, guard, _token, _inputs = self._prepare_published_q_for_stopped_preflight()
+        stage = self.ztp / ".r22-a-runtime-independent-unknown"
+        stage.write_bytes(b"independent unrelated staging evidence\n")
+        frozen = (state[-3].read_bytes(), stage.lstat().st_ino, stage.read_bytes(), state[7].read_bytes())
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            with self.assertRaisesRegex(LOAD.LoadError, "stage.*HOLD"):
+                LOAD.restore_setup_switch_q_publication(state[1], guard=guard, confirmed=True)
+        self.assertEqual(frozen, (state[-3].read_bytes(), stage.lstat().st_ino, stage.read_bytes(), state[7].read_bytes()))
 
     def test_original_no_upgrade_image_policy_does_not_require_a_version(self):
         # The original persisted no-upgrade policy is authoritative; resolving

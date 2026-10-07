@@ -4964,6 +4964,142 @@ finally:
     def test_real_setup_q_compensation_cold_reader_rejects_foreign_plan_owner(self):
         self._real_setup_publication_writer_death("selector", b_preflight="compensate-death-plan-owner")
 
+    def test_real_setup_committed_q_group_cold_restore_returns_p_a_without_service(self):
+        self._real_setup_committed_q_group_restore()
+
+    def test_real_setup_committed_q_dhcp_group_cold_restore_keeps_original_four_file_evidence(self):
+        self._real_setup_committed_q_group_restore(dhcp=True)
+
+    def test_real_setup_committed_q_group_runtime_restore_death_reenters_original_stages(self):
+        self._real_setup_committed_q_group_restore(dhcp=True, runtime_death=True)
+
+    def _real_setup_committed_q_group_restore(self, *, dhcp=False, runtime_death=False):
+        fixture = RELEASE_FIXTURE.ReleaseTransactionTests()
+        fixture.setUp()
+        try:
+            state, context = fixture._prepare_persisted_a_runtime_switch()
+            root, q, common = fixture.root.resolve(), state[1], state[2]
+            journal, descriptor, _backend = state[-3:]
+            shutil.copytree(ROOT / "tools", root / "tools")
+            for name in ("11-load.py", "01-a-setup.py"):
+                shutil.copy2(ROOT / "DAY0-Prepare" / name, root / "DAY0-Prepare" / name)
+            RELEASE_FIXTURE.LOAD.release_deployment_lock(descriptor)
+            fixture._cleanups = [item for item in fixture._cleanups
+                                 if item[0] != RELEASE_FIXTURE.LOAD.release_deployment_lock]
+            script = r'''
+import os, signal, sys
+from pathlib import Path
+from types import SimpleNamespace
+root, q, common, tests = map(Path, sys.argv[1:5])
+sys.path.insert(0, str(tests))
+from test_cases.module_loader import load_script
+from test_cases.test_load_release_transaction import private_publication_candidates, assert_private_dhcp_transaction_retention
+load = load_script('committed_q_group_load', root / 'DAY0-Prepare/11-load.py')
+load.active_managed_services = lambda *a, **kw: ()
+backend = SimpleNamespace(name='supervisor')
+fd = load.acquire_deployment_lock(exclusive=True)
+guard = dict(deployment_lock_descriptor=fd, services_quiesced=True, runtime_backend=backend)
+def forbidden(*a, **kw):
+    raise AssertionError('stopped group restore must not generate or start a service')
+load.start_services = load.quiesce_services = load.generate_configs = forbidden
+try:
+    if sys.argv[5] == 'writer':
+        setup = load_script('committed_q_group_setup', root / 'DAY0-Prepare/01-a-setup.py')
+        load.service_runtime_backend = lambda: backend
+        setup._SETUP_SWITCH_WAL_CONTEXT = (vars(load), fd)
+        setup._register_setup_switch_link_before_write(str(common), str(q / '01-global.yaml'))
+        common.unlink()
+        common.symlink_to(os.path.relpath(q / '01-global.yaml', common.parent))
+        # The other original P-only link is intentionally absent in Q.
+        body = load._setup_switch_prepared_registration_body(load._read_rollback_regular(
+            root / 'ztp/.setup-switch-journal.json', limit=load._SETUP_SWITCH_JOURNAL_LIMIT))
+        for row in body['links']:
+            path = Path(row['path'])
+            if row['after'] is None and os.path.lexists(path):
+                path.unlink()
+        (root / 'ztp/ztp-bootstrap_oob.sh').write_bytes(b'independent installed B runtime\n')
+        manifest = ('# setup manifest — proj: ' + str(q) + '\n' + str(common) + '\n').encode()
+        load.register_setup_switch_manifest(root / 'ztp/.setup-switch-journal.json', manifest,
+                                           _publish_manifest=True, **guard)
+        candidates = private_publication_candidates(load, q)
+        token = load.register_setup_switch_publication_bundle(*candidates, guard=guard)
+        if sys.argv[6] == 'dhcp':
+            assert_private_dhcp_transaction_retention(load, root, q, 'bound-setup-before-write',
+                setup_guard=guard, publication_candidates=(*candidates, token), a_shapes=True)
+            names = ('dhcpd.conf', 'dhcpd_eth.hosts', 'dhcpd_ib.hosts', 'dhcpd_nvl.hosts')
+            load.dhcp_file_mappings = lambda *a: {q / 'independent-dhcp-B' / n: root / 'private-etc-dhcp' / n for n in names}
+        else:
+            load.commit_prepared_release(candidates[0], require_authority=lambda:
+                load.require_setup_switch_publication_bundle(token, guard=guard))
+        load.generation_report.commit_prepared_generation_report(candidates[1], require_authority=lambda:
+            load.require_setup_switch_publication_bundle(token, guard=guard, phase='report'))
+        import json
+        staged = json.loads(token['payload'])['body']['publication_bundle']['selector']['staged']
+        load.commit_pinned_generation(q, candidates[2], expected_current=None, prepared_selector=staged,
+            require_authority=lambda: load.require_setup_switch_publication_bundle(token, guard=guard, phase='selector'))
+        os.kill(os.getpid(), signal.SIGKILL)
+    if sys.argv[6] == 'dhcp':
+        names = ('dhcpd.conf', 'dhcpd_eth.hosts', 'dhcpd_ib.hosts', 'dhcpd_nvl.hosts')
+        runtime = root / 'private-etc-dhcp'
+        load.dhcp_file_mappings = lambda *a: {q / 'independent-dhcp-B' / n: runtime / n for n in names}
+    if sys.argv[5] == 'kill-runtime':
+        original_sync = load._fsync_parent_directory
+        def kill_after_original_a_runtime_replace(path):
+            if (root / 'ztp/ztp-bootstrap_oob.sh').read_bytes() == b'A oob bootstrap\n':
+                os.kill(os.getpid(), signal.SIGKILL)
+            return original_sync(path)
+        load._fsync_parent_directory = kill_after_original_a_runtime_replace
+    status = load.restore_setup_switch_a_disk(q, guard=guard, confirmed=True)
+    assert status == 'restored-p-a-group-stopped-wal-retained', status
+    assert (root / 'ztp/ztp-bootstrap_oob.sh').read_bytes() == b'A oob bootstrap\n'
+    if sys.argv[6] == 'dhcp':
+        assert (runtime / 'dhcpd.conf').read_bytes() == b'independent-A:dhcpd.conf\n'
+        assert (runtime / 'dhcpd_ib.hosts').read_bytes() == b'independent-A:dhcpd_ib.hosts\n'
+        assert os.readlink(runtime / 'dhcpd_eth.hosts') == '../independent-original-A-source'
+        assert not os.path.lexists(runtime / 'dhcpd_nvl.hosts')
+    print('R22_ORIGINAL_GROUP_RESTORED_STOPPED')
+finally:
+    load.release_deployment_lock(fd)
+'''
+            argv = [sys.executable, "-B", "-c", script, str(root), str(q), str(common), str(ROOT)]
+            shape = "dhcp" if dhcp else "no-dhcp"
+            writer = subprocess.run(argv + ["writer", shape], capture_output=True, text=True, check=False, timeout=30)
+            self.assertEqual(-signal.SIGKILL, writer.returncode, writer.stdout + writer.stderr)
+            original_wal = (journal.lstat().st_ino, journal.read_bytes())
+            if dhcp:
+                transaction, = (root / "private-etc-dhcp").glob(".load-dhcp-transaction-*")
+                original_receipt = (transaction.lstat().st_ino,
+                                    (transaction / "a-preimage.json").lstat().st_ino,
+                                    (transaction / "a-preimage.json").read_bytes())
+            if runtime_death:
+                dying = subprocess.run(argv + ["kill-runtime", shape], capture_output=True, text=True,
+                                       check=False, timeout=30)
+                self.assertEqual(-signal.SIGKILL, dying.returncode, dying.stdout + dying.stderr)
+                self.assertEqual(b"A oob bootstrap\n", (root / "ztp/ztp-bootstrap_oob.sh").read_bytes())
+                marker = journal.parent / ".setup-switch-a-restore.json"
+                before_reader_plan = (marker.lstat().st_ino, marker.read_bytes())
+            reader = subprocess.run(argv + ["reader", shape], capture_output=True, text=True, check=False, timeout=30)
+            self.assertEqual(0, reader.returncode, reader.stdout + reader.stderr)
+            self.assertIn("R22_ORIGINAL_GROUP_RESTORED_STOPPED", reader.stdout)
+            self.assertEqual(context.setup_state.manifest, state[7].read_bytes())
+            self.assertEqual(context.setup_state.links, {path: os.readlink(path) for path in context.setup_state.links})
+            marker = journal.parent / ".setup-switch-a-restore.json"
+            original_plan = (marker.lstat().st_ino, marker.read_bytes())
+            if runtime_death:
+                self.assertEqual(before_reader_plan, original_plan)
+            reader2 = subprocess.run(argv + ["reader", shape], capture_output=True, text=True, check=False, timeout=30)
+            self.assertEqual(0, reader2.returncode, reader2.stdout + reader2.stderr)
+            self.assertEqual(original_wal, (journal.lstat().st_ino, journal.read_bytes()))
+            self.assertEqual(original_plan, (marker.lstat().st_ino, marker.read_bytes()))
+            if dhcp:
+                self.assertEqual(original_receipt, (transaction.lstat().st_ino,
+                    (transaction / "a-preimage.json").lstat().st_ino, (transaction / "a-preimage.json").read_bytes()))
+                self.assertTrue((transaction / "backup/dhcpd.conf").is_file())
+                self.assertTrue((transaction / "staged/dhcpd.conf").is_file())
+        finally:
+            fixture.doCleanups()
+            fixture.tearDown()
+
     def test_real_setup_publication_cold_b_health_failure_stops_without_a_restore(self):
         self._real_setup_publication_writer_death("selector", b_preflight="activate-fail")
 
