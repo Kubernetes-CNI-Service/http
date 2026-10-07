@@ -1631,6 +1631,65 @@ class ReleaseTransactionTests(unittest.TestCase):
                 LOAD.restore_setup_switch_a_disk(state[1], guard=guard, confirmed=True)
             self.assertEqual(frozen, (state[-3].read_bytes(), state[7].read_bytes(), os.readlink(state[2]), source.read_bytes()))
 
+    def _assert_committed_q_rejects_replaced_original_a_link(self, relative):
+        state, context, guard, _token, _inputs = self._prepare_published_q_for_stopped_preflight(
+            partial_runtime=True)
+        link = context.project / relative
+        target = os.readlink(link)
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            LOAD.restore_setup_switch_q_publication(state[1], guard=guard, confirmed=True)
+            held = link.with_name("independent-original-A-link")
+            link.rename(held)
+            link.symlink_to(target)
+            self.assertNotEqual(link.lstat().st_ino, held.lstat().st_ino)
+            frozen = (state[-3].read_bytes(), state[7].lstat().st_ino, state[7].read_bytes(),
+                      os.readlink(state[2]), link.lstat().st_ino, os.readlink(link),
+                      (self.ztp / "ztp-bootstrap_oob.sh").read_bytes())
+            with self.assertRaisesRegex(LOAD.LoadError, "A.*(owner|authority).*HOLD|HOLD.*A"):
+                LOAD.restore_setup_switch_a_disk(state[1], guard=guard, confirmed=True)
+            self.assertEqual(frozen, (state[-3].read_bytes(), state[7].lstat().st_ino, state[7].read_bytes(),
+                      os.readlink(state[2]), link.lstat().st_ino, os.readlink(link),
+                      (self.ztp / "ztp-bootstrap_oob.sh").read_bytes()))
+
+    def test_committed_q_group_holds_same_target_original_a_selector_replacement(self):
+        self._assert_committed_q_rejects_replaced_original_a_link("99-output-ztp/current")
+
+    def test_committed_q_group_holds_same_target_original_a_yaml_latest_replacement(self):
+        self._assert_committed_q_rejects_replaced_original_a_link("99-output-eth/latest")
+
+    def test_committed_q_group_preserves_original_a_links_across_cold_reentry(self):
+        state, context, guard, _token, _inputs = self._prepare_published_q_for_stopped_preflight(
+            partial_runtime=True)
+        paths = [context.project / relative for relative in ("99-output-ztp/current", "99-output-eth/latest")]
+        frozen = [(path.lstat().st_ino, path.lstat().st_ctime_ns, os.readlink(path)) for path in paths]
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            for _ in range(2):
+                self.assertEqual("restored-p-a-group-stopped-wal-retained",
+                                 LOAD.restore_setup_switch_a_disk(state[1], guard=guard, confirmed=True))
+                self.assertEqual(frozen, [(path.lstat().st_ino, path.lstat().st_ctime_ns, os.readlink(path)) for path in paths])
+
+    def test_committed_q_group_rejects_original_a_yaml_link_rebound_at_sync(self):
+        state, context, guard, _token, _inputs = self._prepare_published_q_for_stopped_preflight(
+            partial_runtime=True)
+        latest = context.project / "99-output-eth/latest"
+        target, evidence = os.readlink(latest), state[-3].read_bytes()
+        native_sync, injected = LOAD._fsync_parent_directory, []
+        def rebind_at_a_yaml_sync(path):
+            result = native_sync(path)
+            if Path(path) == latest.parent and not injected:
+                latest.rename(latest.with_name("independent-original-at-A-sync"))
+                latest.symlink_to(target)
+                injected.append(latest.lstat().st_ino)
+            return result
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "_fsync_parent_directory", side_effect=rebind_at_a_yaml_sync):
+            with self.assertRaisesRegex(LOAD.LoadError, "A.*(owner|authority).*HOLD|HOLD.*A"):
+                LOAD.restore_setup_switch_a_disk(state[1], guard=guard, confirmed=True)
+        self.assertEqual([latest.lstat().st_ino], injected)
+        self.assertEqual(target, os.readlink(latest))
+        self.assertEqual(evidence, state[-3].read_bytes())
+        state[-1].start.assert_not_called()
+
     def test_original_no_upgrade_image_policy_does_not_require_a_version(self):
         # The original persisted no-upgrade policy is authoritative; resolving
         # an unused version must not reject a legitimate image-free B attempt.
@@ -6315,6 +6374,51 @@ class ReleaseTransactionTests(unittest.TestCase):
         self.assertEqual(sha256(context.runtime_receipt / "receipt.json"), record["receipt_file"]["sha256"])
         self.assertEqual(context.setup_state.manifest, state[7].read_bytes())
         state[-1].start.assert_not_called()
+
+    def test_setup_wal_freezes_original_a_selector_and_yaml_leaf_identities(self):
+        state, context = self._prepare_persisted_a_runtime_switch()
+        record = json.loads(state[-3].read_bytes())["body"]["a_runtime"]
+        selector = context.project / "99-output-ztp/current"
+        metadata = selector.lstat()
+        self.assertEqual(os.readlink(selector), record["selector_owner"]["link"]["target"])
+        self.assertEqual([metadata.st_dev, metadata.st_ino, metadata.st_mode,
+                          metadata.st_uid, metadata.st_gid, metadata.st_nlink, metadata.st_size,
+                          metadata.st_mtime_ns, metadata.st_ctime_ns], record["selector_owner"]["link"]["identity"])
+        for relative, owner in record["yaml_link_owners"].items():
+            leaf = context.project / relative
+            if os.path.lexists(leaf):
+                self.assertEqual(leaf.lstat().st_ino, owner["identity"][1])
+                self.assertEqual(os.readlink(leaf), owner["target"])
+            else:
+                self.assertIsNone(owner)
+
+    def test_setup_wal_legacy_a_leaf_inventory_remains_stopped_disk_only(self):
+        state, _context = self._prepare_persisted_a_runtime_switch()
+        journal, descriptor, backend = state[-3:]
+        envelope = json.loads(journal.read_bytes())
+        for name in ("selector_owner", "yaml_link_owners"):
+            envelope["body"]["a_runtime"].pop(name)
+        envelope["sha256"] = hashlib.sha256(LOAD._setup_switch_canonical_payload(envelope["body"])).hexdigest()
+        journal.write_bytes(LOAD._setup_switch_canonical_payload(envelope) + b"\n")
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            self.assertEqual("restored-p", LOAD.recover_setup_switch_journal(journal,
+                deployment_lock_descriptor=descriptor, services_quiesced=True, runtime_backend=backend,
+                restore_runtime_from_wal=True))
+        backend.start.assert_not_called()
+
+    def test_setup_wal_boolean_a_leaf_identity_is_rejected(self):
+        state, _context = self._prepare_persisted_a_runtime_switch()
+        journal, descriptor, backend = state[-3:]
+        envelope = json.loads(journal.read_bytes())
+        envelope["body"]["a_runtime"]["selector_owner"]["link"]["identity"][1] = True
+        envelope["sha256"] = hashlib.sha256(LOAD._setup_switch_canonical_payload(envelope["body"])).hexdigest()
+        journal.write_bytes(LOAD._setup_switch_canonical_payload(envelope) + b"\n")
+        frozen = (journal.read_bytes(), state[7].read_bytes(), os.readlink(state[2]))
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            with self.assertRaisesRegex(LOAD.LoadError, "owner|invalid|HOLD"):
+                LOAD.recover_setup_switch_journal(journal, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend, restore_runtime_from_wal=True)
+        self.assertEqual(frozen, (journal.read_bytes(), state[7].read_bytes(), os.readlink(state[2])))
 
     def test_setup_wal_bare_recovery_cannot_retire_a_runtime_obligation(self):
         state, _context = self._prepare_persisted_a_runtime_switch()

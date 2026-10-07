@@ -6560,10 +6560,33 @@ def _decode_setup_switch_journal(payload: bytes) -> dict[str, object]:
         runtime = body["a_runtime"]
         runtime_fields = {"selector_target", "receipt_directory", "receipt_parent", "receipt_file",
                           "yaml_link_parents"}
-        for inventory in ("generation", "receipt_inventory"):
+        for inventory in ("generation", "receipt_inventory", "selector_owner", "yaml_link_owners"):
             if isinstance(runtime, dict) and inventory in runtime:
                 runtime_fields.add(inventory)
         exact_fields(runtime, runtime_fields, "A runtime")
+        def a_leaf_owner(owner):
+            if owner is None:
+                return
+            exact_fields(owner, {"identity", "target"}, "A link owner")
+            if (not isinstance(owner["identity"], list) or len(owner["identity"]) != 9
+                    or any(type(value) is not int or value < 0 for value in owner["identity"])
+                    or not isinstance(owner["target"], str) or not owner["target"]
+                    or len(owner["target"].encode("utf-8")) > 4096):
+                raise ValueError("invalid A link owner")
+        if "selector_owner" in runtime:
+            exact_fields(runtime["selector_owner"], {"parent", "link"}, "A selector owner")
+            exact_fields(runtime["selector_owner"]["parent"], directory_fields, "A selector parent")
+            parent = runtime["selector_owner"]["parent"]
+            if (not isinstance(parent["path"], str) or not Path(parent["path"]).is_absolute()
+                    or any(type(parent[field]) is not int or parent[field] < 0 for field in ("dev", "ino"))
+                    or runtime["selector_owner"]["link"] is None):
+                raise ValueError("invalid A selector parent or leaf")
+            a_leaf_owner(runtime["selector_owner"]["link"])
+        if "yaml_link_owners" in runtime:
+            exact_fields(runtime["yaml_link_owners"],
+                         {"99-output-eth/latest", "99-output-ib_nvl/latest"}, "A YAML leaf inventory")
+            for owner in runtime["yaml_link_owners"].values():
+                a_leaf_owner(owner)
         for inventory, label in (("generation", "A generation"),
                                  ("receipt_inventory", "A receipt inventory")):
             if inventory not in runtime:
@@ -7327,7 +7350,7 @@ def _setup_switch_a_compensation_authority(project, *, guard, confirmed,
                     or any(body[key] != _setup_switch_directory_identity(Path(body[key]["path"]))
                            for key in ("old_project", "new_project"))):
                 raise LoadError("A compensation original WAL/root/P/Q owner changed; HOLD")
-            _setup_switch_runtime_context(body)
+            _setup_switch_runtime_context(body, require_original_yaml_owner=True)
         def shared_authority():
             wal_authority()
             _require_setup_switch_compensation_q_evidence(body)
@@ -8207,7 +8230,8 @@ def _setup_switch_a_generation_authority(context):
 
 
 def _setup_switch_runtime_authority(context, *, verify_active=False, include_generation=True,
-                                    include_receipt_inventory=True):
+                                    include_receipt_inventory=True, include_selector_owner=True,
+                                    include_yaml_link_owners=True):
     """Freeze the exact A receipt owner, never infer A from a newest directory."""
     try:
         project = context.project.resolve(strict=True)
@@ -8252,12 +8276,28 @@ def _setup_switch_runtime_authority(context, *, verify_active=False, include_gen
             _load_runtime_rollback_receipt(project, directory)
             if inventory_parent != _setup_switch_link_parent_identity(directory):
                 raise ValueError("A receipt payload parent changed while freezing")
+        if include_selector_owner:
+            leaf = project / "99-output-ztp/current"
+            owner = _setup_switch_compensation_leaf(leaf)
+            if owner is None or set(owner) != {"identity", "target"} or owner["target"] != selector:
+                raise ValueError("A selector no longer names original generation")
+            result["selector_owner"] = dict(parent=_setup_switch_link_parent_identity(leaf), link=owner)
+        if include_yaml_link_owners:
+            owners = {}
+            for relative, row in receipt["yaml_latest"].items():
+                owner = _setup_switch_compensation_leaf(project / relative)
+                if ((row["state"] == "missing" and owner is not None)
+                        or row["state"] == "link" and (owner is None
+                            or set(owner) != {"identity", "target"} or owner["target"] != row["target"])):
+                    raise ValueError("A YAML latest no longer names original state")
+                owners[relative] = owner
+            result["yaml_link_owners"] = owners
         return result
     except (OSError, RuntimeError, ValueError, TypeError, KeyError, LoadError) as exc:
         raise LoadError(f"setup switch A runtime authority is invalid: {exc}") from exc
 
 
-def _setup_switch_runtime_context(body, state=None):
+def _setup_switch_runtime_context(body, state=None, *, require_original_yaml_owner=False):
     record = body.get("a_runtime")
     if record is None:
         return None
@@ -8275,8 +8315,16 @@ def _setup_switch_runtime_context(body, state=None):
         context = CrossProjectRollbackContext(
             state.project, record["selector_target"], Path(record["receipt_directory"]["path"]), state,
         )
+        # Legacy precommit disk restore may recreate YAML links via its own
+        # guarded helper. Original leaf owners qualify committed-Q group/A
+        # activation instead; those paths never rewrite an unchanged A leaf.
+        expected = dict(record)
+        if not require_original_yaml_owner:
+            expected.pop("yaml_link_owners", None)
         if _setup_switch_runtime_authority(context, include_generation="generation" in record,
-                include_receipt_inventory="receipt_inventory" in record) != record:
+                include_receipt_inventory="receipt_inventory" in record,
+                include_selector_owner="selector_owner" in record,
+                include_yaml_link_owners=require_original_yaml_owner and "yaml_link_owners" in record) != expected:
             raise ValueError("A receipt owner or bytes differ from WAL")
         return context
     except (OSError, ValueError, TypeError, KeyError, LoadError) as exc:
@@ -10336,6 +10384,7 @@ def _recover_setup_switch_journal_snapshot(
                 expected_current=runtime_context.selector_target, **runtime_restore_guard,
                 _require_authority=require_authority,
                 _restore_file=a_compensation["restore_runtime_leaf"] if a_compensation is not None else None,
+                _original_yaml_owners=body["a_runtime"].get("yaml_link_owners") if a_compensation is not None else None,
             )
             _require_runtime_restore_guard(**runtime_restore_guard)
 
@@ -10765,6 +10814,7 @@ def restore_runtime_rollback_receipt(
     runtime_backend: ServiceRuntimeBackend | None,
     _require_authority: Callable[[], None] | None = None,
     _restore_file: Callable[..., None] | None = None,
+    _original_yaml_owners=None,
 ) -> None:
     """Restore A after an uncommitted B generation failure, then verify all.
 
@@ -10897,7 +10947,9 @@ def restore_runtime_rollback_receipt(
             record.get("target") if record["state"] == "link" else None
         )
         for relative, record in latest_records.items()
-    }, **authority_guard)
+    }, _original_owners=({canonical_project / relative: owner
+                         for relative, owner in _original_yaml_owners.items()}
+                        if _original_yaml_owners is not None else None), **authority_guard)
     if prefix_snapshot.links or prefix_snapshot.marker is not None:
         restore_ztp_prefix_publication(prefix_snapshot, **authority_guard)
 
@@ -13673,8 +13725,11 @@ def retire_unselected_release_links(
 
 def restore_release_links(
     snapshot: dict[Path, Optional[str]], *, require_authority: Callable[[], None] | None = None,
+    _original_owners=None,
 ) -> None:
     """Restore logical latest links after a pre-commit generation/install failure."""
+    if _original_owners is not None and (require_authority is None or set(_original_owners) != set(snapshot)):
+        raise LoadError("A YAML original owner inventory is not guarded or complete; HOLD")
     errors = []
     for path, target in snapshot.items():
         if require_authority is not None:
@@ -13706,6 +13761,18 @@ def restore_release_links(
                     continue
                 if not stat.S_ISDIR(parent_metadata.st_mode):
                     raise LoadError(f"YAML restore parent is not a real directory: {path.parent}")
+                if _original_owners is not None:
+                    owner = _original_owners[path]
+                    if (owner != _setup_switch_compensation_leaf(path)
+                            or (target is None) != (owner is None)
+                            or owner is not None and owner.get("target") != target):
+                        raise LoadError("A YAML original link owner changed; HOLD")
+                    require_authority()
+                    _fsync_parent_directory(path.parent)
+                    require_authority()
+                    if owner != _setup_switch_compensation_leaf(path):
+                        raise LoadError("A YAML original link owner changed at sync; HOLD")
+                    continue  # Exact original A is not a request to manufacture a new inode.
                 # The guarded runtime phase needs the helper's pre-replace
                 # recheck, parent sync and owned-stage cleanup on HOLD.
                 if target is None:

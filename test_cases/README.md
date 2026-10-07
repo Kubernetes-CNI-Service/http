@@ -604,6 +604,12 @@ schema-3 另登记原 WAL 泛用共享 P 链接与 P manifest 的原 Q checkpoin
 未知 payload/同字节新 input、克隆 generation、同目标新 latest 均 HOLD；legacy
 WAL 不在冷读中重新冻结当前数据作为原证据。
 
+新 WAL 同时绑定原 A selector 的父目录/九字段链接 owner 与 YAML latest 叶子 owner。
+已提交 Q 的分组恢复持续核原叶子，并保持正确 A 链接 inode/ctime 不变，只补父同步；
+同目标替换或同步时换绑必须 HOLD。旧 precommit guarded helper 的恢复行为保持；
+legacy 缺叶子记录不可在冷恢复补登记为新的激活资格。此叶子合同不是原 A 镜像、健康
+激活/归档或正式 full/check 的完成证明。
+
 同一模块还覆盖端到端 deployment scope：默认 `all` 同时生成 Production/AIR；`prod` 只发布
 Production Cumulus/IB/NVL；`air` 只发布 AIR DHCP/YAML/release，并只临时渲染 AIR full profile
 实际引用的 Production 来源；单独指定 `mini` 会自动选择 AIR scope 和 `eth`，显式 `prod+mini`

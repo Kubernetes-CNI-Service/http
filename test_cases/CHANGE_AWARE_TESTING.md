@@ -1,5 +1,36 @@
 # 脚本变更影响测试
 
+## 2026-10-08 R22 原 A selector/YAML latest 叶子资格
+
+基于 `4205737`，两项 direct 与两项真实 LOAD→SETUP→Q 提交强杀→Q 补偿→
+新 LOAD 拒绝同目标新 A selector/latest：4 FAIL / 20.848s / exit1，原断言/日志保留。
+`outputs/test-diagnostics/r22-original-a-leaf-owner-red.log`，inode161867003 / size133541 /
+SHA256 `4b9b518b674c1a6766d7b61dd9c213c51b12384279adb68d574b5faff275d74a`。
+新 WAL 首写前登记原 A selector 的父目录/九字段 owner 与原 YAML latest 叶子 owner。
+已提交 Q 分组恢复全过程检查原叶子，不以同目标新 inode 补办资格；正确原 A latest
+只核验、补父同步，不制造新链接 inode。旧 precommit 恢复仍走原 guarded helper；
+legacy 缺叶子 inventory 不在冷读中补登记，后续激活不能用这种缺资格数据放行。
+
+初候选四项负例 GREEN，但完整模块回归发现旧 helper 无条件重建正确 A latest：
+613 tests / 12 FAIL / 21 ERROR / 189.749s / exit1，
+`r22-original-a-leaf-owner-module-regression.log`，inode161875281 / size421140 /
+SHA256 `8dbba6e00b163e103976ffb29775f9fc76aadcf47dead5e1aba5ff56a485b0a7`。
+该冲突与新增九字段断言错误的 nlink/uid/gid 顺序分别修正，不弱化旧断言或门禁。
+新分组私有原 owner 路径与旧恢复行为分开，补原 inode/ctime 跨冷重入保持及同步时换绑
+负例。修正后的 10 项 direct/workflow OK / 44.771s / exit0，日志
+`r22-original-a-leaf-preservation-regression.log` / inode161939371 / size132951 /
+SHA256 `92961d6d1da99bfed16227dda9e377b54304dc34b39c8a555875f1b40419f02e`。
+
+完整模块回归 615 tests OK / 242.557s / exit0；日志
+`outputs/test-diagnostics/r22-original-a-leaf-preservation-module-regression.log`，
+inode161947950 / size340310 / SHA256
+`88512167f15e675268d21c21ed38bde496221bd1e319beb9f75e30e6805a374d`；
+旧 272985-byte 前缀 SHA256 `c74c22b3efba213710e904d475b2e3f850b453652eefd888d9dc1f88ccc74524`
+不变，前后 stat 相同；物理 Ran1770→OK1772→实际退出1796→冻结一致1797→END1799=0。
+manifest 现有 LOAD direct 与真实 generation-input SETUP/LOAD workflow 映射继续覆盖。
+这是有界模块回归，未生成自动批准 ledger，不是正式 full/check；原 A 镜像/显式健康
+激活/安全归档及 REAL_ENV 仍待，R22 不因此关闭。
+
 ## 2026-10-08 R22 补偿全过程 Q 证据与 Q-local latest owner 候选
 
 基于 `60b7b4a`。三个独立反例：Q 补偿后同字节新 live input、同内容克隆封存 Q

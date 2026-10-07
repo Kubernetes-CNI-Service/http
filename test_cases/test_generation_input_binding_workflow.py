@@ -4985,13 +4985,23 @@ finally:
     def test_real_setup_committed_q_group_cold_rejects_same_byte_q_input(self):
         self._real_setup_committed_q_group_restore(q_fault=True)
 
+    def test_real_setup_committed_q_group_cold_rejects_same_target_a_selector(self):
+        self._real_setup_committed_q_group_restore(a_fault="99-output-ztp/current")
+
+    def test_real_setup_committed_q_group_cold_rejects_same_target_a_yaml_latest(self):
+        self._real_setup_committed_q_group_restore(a_fault="99-output-eth/latest")
+
     def _real_setup_committed_q_group_restore(self, *, dhcp=False, runtime_death=False,
                                              setup_death=False, foreign_setup=False,
-                                             q_local=False, q_fault=False):
+                                             q_local=False, q_fault=False, a_fault=None):
         fixture = RELEASE_FIXTURE.ReleaseTransactionTests()
         fixture.setUp()
         try:
             state, context = fixture._prepare_persisted_a_runtime_switch()
+            original_a_links = {context.project / name: (
+                (context.project / name).lstat().st_ino, (context.project / name).lstat().st_ctime_ns,
+                os.readlink(context.project / name))
+                for name in ("99-output-ztp/current", "99-output-eth/latest")}
             root, q, common = fixture.root.resolve(), state[1], state[2]
             journal, descriptor, _backend = state[-3:]
             shutil.copytree(ROOT / "tools", root / "tools")
@@ -5106,6 +5116,14 @@ try:
             print('R22_FOREIGN_Q_INPUT_REJECTED')
             sys.exit(0)
         raise AssertionError('same-byte new Q input owner must not be adopted')
+    if sys.argv[5] == 'foreign-a-link':
+        try:
+            load.restore_setup_switch_a_disk(q, guard=guard, confirmed=True)
+        except load.LoadError as exc:
+            assert 'A' in str(exc) and ('owner' in str(exc) or 'authority' in str(exc)) and 'HOLD' in str(exc), str(exc)
+            print('R22_FOREIGN_A_LINK_REJECTED')
+            sys.exit(0)
+        raise AssertionError('same-target new original A link owner must not be adopted')
     status = load.restore_setup_switch_a_disk(q, guard=guard, confirmed=True)
     assert status == 'restored-p-a-group-stopped-wal-retained', status
     assert (root / 'ztp/ztp-bootstrap_oob.sh').read_bytes() == b'A oob bootstrap\n'
@@ -5125,25 +5143,29 @@ finally:
                                     capture_output=True, text=True, check=False, timeout=30)
             self.assertEqual(-signal.SIGKILL, writer.returncode, writer.stdout + writer.stderr)
             original_wal = (journal.lstat().st_ino, journal.read_bytes())
-            if q_fault:
+            if q_fault or a_fault:
                 compensation = subprocess.run(argv + ["compensate-q", shape], capture_output=True,
                                               text=True, check=False, timeout=30)
                 self.assertEqual(0, compensation.returncode, compensation.stdout + compensation.stderr)
                 self.assertIn("R22_Q_COMPENSATED_NO_P_WRITE", compensation.stdout)
                 marker = journal.parent / ".setup-switch-a-restore.json"
                 original_plan = (marker.lstat().st_ino, marker.read_bytes())
-                source = q / "01-global.yaml"
+                source = context.project / a_fault if a_fault else q / "01-global.yaml"
                 held = source.with_name("independent-original-cold-Q-input")
-                metadata, payload = source.lstat(), source.read_bytes()
+                metadata = source.lstat()
+                payload = os.readlink(source) if a_fault else source.read_bytes()
                 source.rename(held)
-                source.write_bytes(payload)
-                source.chmod(stat.S_IMODE(metadata.st_mode))
-                os.utime(source, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
+                if a_fault:
+                    source.symlink_to(payload)
+                else:
+                    source.write_bytes(payload)
+                    source.chmod(stat.S_IMODE(metadata.st_mode))
+                    os.utime(source, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
                 frozen = (source.lstat().st_ino, state[7].lstat().st_ino, state[7].read_bytes(), os.readlink(common))
-                rejecting = subprocess.run(argv + ["foreign-q-input", shape], capture_output=True,
+                rejecting = subprocess.run(argv + ["foreign-a-link" if a_fault else "foreign-q-input", shape], capture_output=True,
                                            text=True, check=False, timeout=30)
                 self.assertEqual(0, rejecting.returncode, rejecting.stdout + rejecting.stderr)
-                self.assertIn("R22_FOREIGN_Q_INPUT_REJECTED", rejecting.stdout)
+                self.assertIn("R22_FOREIGN_A_LINK_REJECTED" if a_fault else "R22_FOREIGN_Q_INPUT_REJECTED", rejecting.stdout)
                 self.assertEqual(frozen, (source.lstat().st_ino, state[7].lstat().st_ino, state[7].read_bytes(), os.readlink(common)))
                 self.assertEqual(original_plan, (marker.lstat().st_ino, marker.read_bytes()))
                 self.assertEqual(original_wal, (journal.lstat().st_ino, journal.read_bytes()))
@@ -5176,6 +5198,8 @@ finally:
             self.assertEqual(0, reader2.returncode, reader2.stdout + reader2.stderr)
             self.assertEqual(original_wal, (journal.lstat().st_ino, journal.read_bytes()))
             self.assertEqual(original_plan, (marker.lstat().st_ino, marker.read_bytes()))
+            self.assertEqual(original_a_links, {path: (path.lstat().st_ino, path.lstat().st_ctime_ns, os.readlink(path))
+                                                for path in original_a_links})
             if q_local:
                 self.assertEqual("20261005_110000_combine", os.readlink(q / "99-output-eth/latest"))
                 self.assertEqual(b"hostname: original-Q\n", (q / "99-output-eth/20261005_110000_combine/leaf.yaml").read_bytes())
