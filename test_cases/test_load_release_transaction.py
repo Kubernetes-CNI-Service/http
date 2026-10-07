@@ -2180,6 +2180,133 @@ class ReleaseTransactionTests(unittest.TestCase):
             LOAD.restore_setup_switch_a_disk(state[1], guard=guard, confirmed=True)
         self.assertEqual(original[:8], list(LOAD._dhcp_a_preimage_receipt_identity(LOAD.ZTP_PREFIX_MARKER.lstat()))[:8])
 
+    def test_prefix_parent_mkdir_before_wal_row_cold_recovery_holds_without_p_write(self):
+        state, _context = self._prepare_persisted_a_runtime_switch(prefix=True)
+        journal, descriptor, backend = state[-3:]
+        guard = dict(deployment_lock_descriptor=descriptor, services_quiesced=True, runtime_backend=backend)
+        settings = LOAD.replace(LOAD.load_global(self.global_file), ztp_prefix="/q-nested/inner/ztp")
+        real_sync = LOAD._fsync_parent_directory
+        def die_before_registration(path):
+            if Path(path).name.startswith(".q-nested.setup-"):
+                raise OSError("independent death after mkdir before row publication")
+            return real_sync(path)
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            with mock.patch.object(LOAD, "_fsync_parent_directory", side_effect=die_before_registration):
+                with self.assertRaisesRegex(OSError, "independent death"):
+                    LOAD.prepare_setup_switch_prefix_transaction(settings, guard=guard)
+            stages = list(self.root.glob(".q-nested.setup-*"))
+            self.assertEqual(1, len(stages))
+            body = json.loads(journal.read_bytes())["body"]
+            self.assertFalse(any(row["staged"] == str(stages[0]) for row in body.get("created_directories", [])))
+            frozen = (journal.lstat().st_ino, journal.read_bytes(), state[7].lstat().st_ino,
+                state[7].read_bytes(), os.readlink(state[2]), stages[0].lstat().st_ino,
+                LOAD.ZTP_PREFIX_MARKER.lstat().st_ino, LOAD.ZTP_PREFIX_MARKER.read_bytes())
+            for _ in range(2):
+                with self.assertRaisesRegex(LOAD.LoadError, "prefix.*HOLD|unregistered.*HOLD"):
+                    LOAD.recover_setup_switch_journal(journal, **guard,
+                        restore_runtime_from_wal=True, requested_new_project=state[1])
+                self.assertEqual(frozen, (journal.lstat().st_ino, journal.read_bytes(),
+                    state[7].lstat().st_ino, state[7].read_bytes(), os.readlink(state[2]),
+                    stages[0].lstat().st_ino, LOAD.ZTP_PREFIX_MARKER.lstat().st_ino,
+                    LOAD.ZTP_PREFIX_MARKER.read_bytes()))
+            self.assertFalse(os.path.lexists(self.root / "q-nested"))
+
+    def test_prefix_intent_before_mkdir_recovery_retains_original_a_marker_inode(self):
+        state, _context = self._prepare_persisted_a_runtime_switch(prefix=True)
+        journal, descriptor, backend = state[-3:]
+        guard = dict(deployment_lock_descriptor=descriptor, services_quiesced=True, runtime_backend=backend)
+        settings = LOAD.replace(LOAD.load_global(self.global_file), ztp_prefix="/q-nested/inner/ztp")
+        real_publish = LOAD._publish_setup_switch_prefix_wal
+        def die_after_scope(*args, **kwargs):
+            real_publish(*args, **kwargs)
+            raise OSError("independent death after durable intent before mkdir")
+        original = (LOAD.ZTP_PREFIX_MARKER.lstat().st_ino, LOAD.ZTP_PREFIX_MARKER.read_bytes(),
+                    (self.root / "r22-prefix").lstat().st_ino)
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            with mock.patch.object(LOAD, "_publish_setup_switch_prefix_wal", side_effect=die_after_scope):
+                with self.assertRaisesRegex(OSError, "independent death"):
+                    LOAD.prepare_setup_switch_prefix_transaction(settings, guard=guard)
+            frozen = (journal.lstat().st_ino, journal.read_bytes())
+            self.assertFalse(os.path.lexists(self.root / "q-nested"))
+            with self.assertRaisesRegex(LOAD.LoadError, "prefix preparation.*HOLD|prefix preparation must"):
+                LOAD.prepare_setup_switch_prefix_transaction(settings, guard=guard)
+            for _ in range(2):
+                LOAD.recover_setup_switch_journal(journal, **guard,
+                    restore_runtime_from_wal=True, requested_new_project=state[1])
+                self.assertEqual(original, (LOAD.ZTP_PREFIX_MARKER.lstat().st_ino,
+                    LOAD.ZTP_PREFIX_MARKER.read_bytes(), (self.root / "r22-prefix").lstat().st_ino))
+                self.assertEqual(frozen, (journal.lstat().st_ino, journal.read_bytes()))
+
+    def test_prefix_preparation_forged_scope_holds_before_any_recovery_write(self):
+        for fault in ("missing-root", "ancestry", "root-owner", "unknown", "boolean"):
+            with self.subTest(fault=fault):
+                fixture = ReleaseTransactionTests(); fixture.setUp()
+                try:
+                    state, _context = fixture._prepare_persisted_a_runtime_switch(prefix=True)
+                    journal, descriptor, backend = state[-3:]
+                    guard = dict(deployment_lock_descriptor=descriptor, services_quiesced=True, runtime_backend=backend)
+                    settings = LOAD.replace(LOAD.load_global(fixture.global_file), ztp_prefix="/q-nested/inner/ztp")
+                    real_publish = LOAD._publish_setup_switch_prefix_wal
+                    def die(*args, **kwargs):
+                        real_publish(*args, **kwargs); raise OSError("independent durable intent interruption")
+                    with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+                        with mock.patch.object(LOAD, "_publish_setup_switch_prefix_wal", side_effect=die):
+                            with self.assertRaises(OSError):
+                                LOAD.prepare_setup_switch_prefix_transaction(settings, guard=guard)
+                        envelope = json.loads(journal.read_bytes()); intent = envelope["body"]["prefix_preparation"]
+                        if fault == "missing-root": intent["parents"][0]["before"] = None
+                        elif fault == "ancestry": intent["parents"][1]["path"] = str(fixture.root / "foreign-scope")
+                        elif fault == "root-owner": intent["parents"][0]["before"]["ino"] += 1
+                        elif fault == "unknown": intent["adopt_current"] = True
+                        else: intent["schema_version"] = True
+                        envelope["sha256"] = hashlib.sha256(LOAD._setup_switch_canonical_payload(envelope["body"])).hexdigest()
+                        journal.write_bytes(LOAD._setup_switch_canonical_payload(envelope) + b"\n")
+                        frozen = (journal.read_bytes(), state[7].lstat().st_ino, state[7].read_bytes(),
+                            os.readlink(state[2]), LOAD.ZTP_PREFIX_MARKER.lstat().st_ino)
+                        with self.assertRaises(LOAD.LoadError):
+                            LOAD.recover_setup_switch_journal(journal, **guard,
+                                restore_runtime_from_wal=True, requested_new_project=state[1])
+                        self.assertEqual(frozen, (journal.read_bytes(), state[7].lstat().st_ino,
+                            state[7].read_bytes(), os.readlink(state[2]), LOAD.ZTP_PREFIX_MARKER.lstat().st_ino))
+                finally:
+                    fixture.doCleanups(); fixture.tearDown()
+
+    def test_prefix_preparation_original_parent_drift_blocks_first_mkdir(self):
+        for fault in ("late-missing", "existing-mode", "existing-inode"):
+            with self.subTest(fault=fault):
+                fixture = ReleaseTransactionTests(); fixture.setUp()
+                try:
+                    state, _context = fixture._prepare_persisted_a_runtime_switch(prefix=True)
+                    journal, descriptor, backend = state[-3:]
+                    guard = dict(deployment_lock_descriptor=descriptor, services_quiesced=True, runtime_backend=backend)
+                    parent = fixture.root / "q-nested"
+                    if fault != "late-missing": parent.mkdir(mode=0o755)
+                    settings = LOAD.replace(LOAD.load_global(fixture.global_file), ztp_prefix="/q-nested/inner/ztp")
+                    real_publish = LOAD._publish_setup_switch_prefix_wal
+                    frozen = []
+                    def replace_after_scope(*args, **kwargs):
+                        result = real_publish(*args, **kwargs)
+                        frozen.append((journal.lstat().st_ino, journal.read_bytes()))
+                        if fault == "existing-mode": parent.chmod(0o700)
+                        else:
+                            if fault == "existing-inode": parent.rename(fixture.root / "held-original-prefix-parent")
+                            parent.mkdir(mode=0o755)
+                        return result
+                    original_prefix = (LOAD.ZTP_PREFIX_MARKER.lstat().st_ino, LOAD.ZTP_PREFIX_MARKER.read_bytes())
+                    with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+                        with mock.patch.object(LOAD, "_publish_setup_switch_prefix_wal", side_effect=replace_after_scope):
+                            with self.assertRaisesRegex(LOAD.LoadError, "prefix.*HOLD"):
+                                LOAD.prepare_setup_switch_prefix_transaction(settings, guard=guard)
+                        self.assertEqual(1, len(frozen))
+                        self.assertEqual(frozen[0], (journal.lstat().st_ino, journal.read_bytes()))
+                        self.assertEqual(original_prefix, (LOAD.ZTP_PREFIX_MARKER.lstat().st_ino,
+                            LOAD.ZTP_PREFIX_MARKER.read_bytes()))
+                        self.assertTrue(parent.is_dir())
+                        self.assertFalse(os.path.lexists(parent / "inner"))
+                        self.assertEqual([], list(parent.glob(".inner.setup-*")))
+                finally:
+                    fixture.doCleanups(); fixture.tearDown()
+
     def test_changed_prefix_restoration_removes_only_original_wal_created_nested_parents(self):
         state, _context, guard, _token, _inputs = self._prepare_published_q_for_stopped_preflight(prefix_change="/q-nested/inner/ztp")
         self.assertEqual("../../ztp", os.readlink(self.root / "q-nested/inner/ztp"))

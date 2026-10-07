@@ -1,5 +1,36 @@
 # 脚本变更影响测试
 
+## 2026-10-08 R22 prefix 父创建首写前意图与孤儿拒绝
+
+基于 `d32ea8c`。独立 direct 与真实 LOAD→SETUP 登记→mkdir 后 SIGKILL→新 LOAD
+确认：父 stage 在 mkdir 后、inode 行发布前中断，会被旧冷恢复忽略并退休原 WAL。
+首轮 workflow 误读未完成 Q global 的夹具失败单独保留；用原 P 的合法 global 声明
+新 prefix 后，有效 RED `outputs/test-diagnostics/r22-prefix-parent-preregister-red2.log`
+为 2 FAIL / 3.745s / actual exit1，inode163171140 / size129456 / SHA256
+`b3f240421313f8490128b4ea15a4bd9462a81497b7786c341d8fe2920c343d50`。
+创建任何父 stage/候选前，原 held WAL 先持久登记闭合 prefix/root/声明路径及有界
+有序父清单；原已有父绑定 dev/ino/mode/uid/gid，原缺席不能从晚到目录升级权限。
+只扫描原声明的 `.child.setup-*` 拒绝未知对象，不删除或收编；已登记 stage 的真实
+inode、模式与空状态持续校验。只有意图、尚未创建时也保留 WAL，不允许重新 prepare。
+
+又独立复现仅意图落盘就冷恢复会重建原 A marker/link、丢失原 inode：
+`r22-prefix-intent-original-marker-red.log` 2 tests / 1 FAIL / 0.927s / exit1，
+inode163176637 / size129622 / SHA256
+`f3e30c7b72a13e35474716b539fa9a5632091c452589356087969d912af7f8dd`。
+改为持续核原 A owner、原叶子仅同步不改写。首组合的正常嵌套流程仍有 1 FAIL/1 ERROR：
+`r22-prefix-preregister-boundaries-green.log`，inode163178034 / size135346 / SHA256
+`3caddb4da21c6e01588f8608867e047421bd2a8de8f0450f7d08156356750220`；根因是已登记但
+尚未安装的精确子 stage 被父子项盘点拒绝。只把原行的 stage 纳入资格，并继续逐行
+核 inode/mode/empty，不按前缀放宽。原断言和未通过日志不改。
+
+最终 direct+真实多脚本两处强杀/冷重入、正常嵌套/提交恢复及旧内容/同步边界
+12 OK / 76.628s / actual exit0，完整 `r22-prefix-preregister-final-boundaries.log`，
+inode163186432 / size133966 / SHA256
+`d661bee04dfbc9800720fdbeaab64fa130dc71c67966a9a7de8909717bb19b14`；
+读前后 stat 一致，物理 Ran19→OK21→actual52→冻结一致53→END55=0，原 exec exit0。
+批准 ledger 未改；这是有界回归，不是 related/full proof。原 A 显式安全健康激活、
+证据退休以及 Linux/root/断电/C2/DEV ACK 未闭，继续实现后再正式验证精确树。
+
 ## 2026-10-08 R22 Q 改写 prefix 的原 owner 事务与冷恢复
 
 基于 `ab36589`，首写前登记独立原 A prefix 前像、声明 B 后像、原候选/备份/消费

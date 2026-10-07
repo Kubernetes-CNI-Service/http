@@ -1634,6 +1634,18 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 ## TC-REAL-R22-GENERATION-INPUT-ABA-001 — 跨进程输入换代与多输出一致性
 
+- 2026-10-08 prefix 父创建登记前死亡窗口仍 OPEN：沿本卡另行授权的隔离 VM、
+  精确源码/测试/manifest、root-only 可恢复快照、排他锁、全部服务已停与正常写者
+  静默条件，独立冻结原已有父身份/模式、缺席链、原 A marker/link 和 P/WAL。
+  分别在闭合 prefix 意图持久落盘后且 mkdir 前、父 stage mkdir 后且 inode 行
+  发布前强杀；新 LOAD 不得认领或清理未知 stage，必须首次 P 写前 HOLD 并保留
+  原 WAL。只有意图且无未知对象时，冷恢复核原 A owner、补同步不重建原叶子，
+  两次新进程重入保留原 inode/WAL。另注入晚到缺席父、已有父同名换 inode/改模式、
+  重算摘要后的缺 root/乱祖先/额外字段，须写前拒绝。保存 mkdir/登记/rename/fsync
+  的物理顺序、原/外来 stat/SHA、完整 END/exit、零服务动作；证据封存后仅人工
+  恢复确切隔离快照，不按前缀删除、不在 live 注入。私有 SIGKILL 不证明断电、
+  Linux/root/C2/DEV ACK、旧 A 健康激活或原证据退休；本卡继续 OPEN。
+
 - 2026-10-08 Q 改写 prefix 事务候选仍 OPEN：仅按本卡授权的隔离 VM、精确版本、
   root-only 可恢复快照、排他部署锁、Apache/DHCP 已停与正常写者静默前提见证。
   SETUP/Q manifest 前独立盘点原 A marker/链接父、原 inode/模式/内容、声明 B

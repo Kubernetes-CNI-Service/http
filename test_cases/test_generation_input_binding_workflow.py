@@ -5024,6 +5024,99 @@ finally:
     def test_real_setup_committed_q_group_rejects_same_target_restored_managed_key(self):
         self._real_setup_committed_q_group_restore(managed_key=True, managed_key_fault=True)
 
+    def test_real_setup_prefix_parent_mkdir_death_cold_load_preserves_unknown_stage(self):
+        self._real_setup_prefix_preparation_death()
+
+    def test_real_setup_prefix_intent_death_before_mkdir_preserves_original_a_owners(self):
+        self._real_setup_prefix_preparation_death(at_intent=True)
+
+    def _real_setup_prefix_preparation_death(self, *, at_intent=False):
+        fixture = RELEASE_FIXTURE.ReleaseTransactionTests(); fixture.setUp()
+        try:
+            state, _context = fixture._prepare_persisted_a_runtime_switch(prefix=True)
+            root, q, journal = fixture.root.resolve(), state[1], state[-3]
+            shutil.copytree(ROOT / "tools", root / "tools")
+            (root / "ztp/optimize").mkdir()
+            shutil.copy2(ROOT / "ztp/optimize/sample_links.py", root / "ztp/optimize/sample_links.py")
+            for name in ("11-load.py", "01-a-setup.py"):
+                shutil.copy2(ROOT / "DAY0-Prepare" / name, root / "DAY0-Prepare" / name)
+            RELEASE_FIXTURE.LOAD.release_deployment_lock(state[-2])
+            fixture._cleanups = [item for item in fixture._cleanups
+                if item[0] != RELEASE_FIXTURE.LOAD.release_deployment_lock]
+            child = r'''
+import importlib.util, os, signal, sys
+from pathlib import Path
+from types import SimpleNamespace
+root, q, common = map(Path, sys.argv[1:4])
+def script(name):
+    spec = importlib.util.spec_from_file_location('prefix_orphan_' + name, root / 'DAY0-Prepare' / (name + '.py'))
+    api = importlib.util.module_from_spec(spec); sys.modules[spec.name] = api; spec.loader.exec_module(api)
+    return api
+load = script('11-load')
+load.active_managed_services = lambda *a, **k: ()
+backend = SimpleNamespace(name='supervisor')
+fd = load.acquire_deployment_lock(exclusive=True)
+guard = dict(deployment_lock_descriptor=fd, services_quiesced=True, runtime_backend=backend)
+try:
+    if sys.argv[4].startswith('writer'):
+        setup = script('01-a-setup')
+        setup._SETUP_SWITCH_WAL_CONTEXT = (vars(load), fd)
+        setup._register_setup_switch_link_before_write(str(common), str(q / '01-global.yaml'))
+        real_sync = load._fsync_parent_directory
+        def die(path):
+            if Path(path).name.startswith('.q-nested.setup-'):
+                os.kill(os.getpid(), signal.SIGKILL)
+            return real_sync(path)
+        load._fsync_parent_directory = die
+        if sys.argv[4] == 'writer-intent':
+            real_publish = load._publish_setup_switch_prefix_wal
+            def die_after_intent(*args, **kwargs):
+                real_publish(*args, **kwargs)
+                os.kill(os.getpid(), signal.SIGKILL)
+            load._publish_setup_switch_prefix_wal = die_after_intent
+        import json
+        original_p = Path(json.loads((root / 'ztp/.setup-switch-journal.json').read_bytes())['body']['old_project']['path'])
+        settings = load.replace(load.load_global(original_p / '01-global.yaml'), ztp_prefix='/q-nested/inner/ztp')
+        load.prepare_setup_switch_prefix_transaction(settings, guard=guard)
+        raise AssertionError('mkdir death boundary was not reached')
+    try:
+        load.recover_setup_switch_journal(root / 'ztp/.setup-switch-journal.json', **guard,
+            restore_runtime_from_wal=True, requested_new_project=q)
+    except load.LoadError as exc:
+        assert 'HOLD' in str(exc) and ('prefix' in str(exc) or 'unregistered' in str(exc)), str(exc)
+        print('PREFIX_UNREGISTERED_PARENT_EXPECTED_HOLD'); raise SystemExit(7)
+    if sys.argv[4] == 'reader-intent':
+        print('PREFIX_INTENT_ORIGINAL_A_RESTORED_WAL_RETAINED'); raise SystemExit(0)
+    raise AssertionError('cold recovery adopted/ignored a parent created before WAL row')
+finally:
+    load.release_deployment_lock(fd)
+'''
+            argv = [sys.executable, "-B", "-c", child, str(root), str(q), str(state[2])]
+            first = subprocess.run(argv + ["writer-intent" if at_intent else "writer"], capture_output=True, text=True, timeout=30)
+            self.assertEqual(-signal.SIGKILL, first.returncode, first.stdout + first.stderr)
+            stages = list(root.glob(".q-nested.setup-*")); self.assertEqual(0 if at_intent else 1, len(stages))
+            marker = root / ".ztp-prefix-publication.json"
+            frozen = (journal.lstat().st_ino, journal.read_bytes(), state[7].lstat().st_ino,
+                state[7].read_bytes(), os.readlink(state[2]), stages[0].lstat().st_ino if stages else None,
+                marker.lstat().st_ino, marker.read_bytes())
+            original_prefix = (marker.lstat().st_ino, marker.read_bytes(), (root / "r22-prefix").lstat().st_ino)
+            for _ in range(2):
+                result = subprocess.run(argv + ["reader-intent" if at_intent else "reader"], capture_output=True, text=True, timeout=30)
+                self.assertEqual(0 if at_intent else 7, result.returncode, result.stdout + result.stderr)
+                if at_intent:
+                    self.assertIn("PREFIX_INTENT_ORIGINAL_A_RESTORED_WAL_RETAINED", result.stdout)
+                    self.assertEqual(frozen[:2], (journal.lstat().st_ino, journal.read_bytes()))
+                    self.assertEqual(original_prefix, (marker.lstat().st_ino, marker.read_bytes(),
+                        (root / "r22-prefix").lstat().st_ino))
+                    continue
+                self.assertIn("PREFIX_UNREGISTERED_PARENT_EXPECTED_HOLD", result.stdout)
+                self.assertEqual(frozen, (journal.lstat().st_ino, journal.read_bytes(),
+                    state[7].lstat().st_ino, state[7].read_bytes(), os.readlink(state[2]),
+                    stages[0].lstat().st_ino, marker.lstat().st_ino, marker.read_bytes()))
+            self.assertFalse(os.path.lexists(root / "q-nested"))
+        finally:
+            fixture.doCleanups(); fixture.tearDown()
+
     def test_real_setup_changed_prefix_q_commit_kill_restores_original_a_owners(self):
         self._real_setup_committed_q_group_restore(prefix=True, prefix_change=True)
 

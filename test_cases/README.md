@@ -462,6 +462,10 @@ Q 自建目录恢复后缺席仍按原创建资格核验，不因查找公钥重
 已提交 Q group 的原 A 未变 prefix 另按首写前 WAL 的父/九字段 owner、原 marker
 payload/raw target/缺席核验；不重建正确原对象，也不收编同内容新 inode。同步前后
 持续核原资格；legacy 缺清单保持缺资格。此窄收口不能冒称完整写集或允许原 A 服务激活。
+创建嵌套 prefix 父之前，原 WAL 先持久登记声明路径及有界有序父清单，绑定原已有
+父的 dev/ino/mode/uid/gid 和原缺席；mkdir 后尚未发布 inode 行的未知 stage 须在
+首次 P 写前 HOLD，不认领或删除。只有意图、未创建时也保留 WAL；冷恢复原 A
+marker/link 只核验与同步，不重建原 inode。已登记精确子 stage 继续核 inode/mode/empty。
 与未变清单不同，Q 改写 prefix 必须在 SETUP/Q manifest 前登记闭合的
 `prefix_transaction`：独立原 A 前像、声明的 B postimage、唯一候选/备份/消费见证及
 父目录；嵌套缺席父只通过原 created-directory WAL 安装。普通 prefix writer 有

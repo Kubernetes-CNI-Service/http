@@ -6538,7 +6538,7 @@ def _decode_setup_switch_journal(payload: bytes) -> dict[str, object]:
                 "manifest", "manifest_sha256", "manifest_mode", "links", "q_parent_preimage"}
     optional = {"allow_late_q_values", "q_local_links", "created_directories", "q_created_directories",
                 "directories", "infra_logs", "q_manifest_intent", "comparison_transfers", "a_runtime",
-                "dhcp_transaction", "publication_bundle", "a_image_intent", "prefix_transaction"}
+                "dhcp_transaction", "publication_bundle", "a_image_intent", "prefix_transaction", "prefix_preparation"}
     if isinstance(body, dict) and "q_parent_preimage" not in body:
         raise ValueError("journal Q parent preimage is missing; HOLD")
     if (not isinstance(body, dict) or not required <= set(body)
@@ -6560,6 +6560,8 @@ def _decode_setup_switch_journal(payload: bytes) -> dict[str, object]:
         _validate_setup_publication_bundle_shape(body["publication_bundle"])
     if "prefix_transaction" in body:
         _validate_setup_switch_prefix_transaction(body)
+    if "prefix_preparation" in body:
+        _validate_setup_switch_prefix_preparation(body)
     if body.get("a_image_intent") is not None:
         _validate_setup_switch_image_intent(body["a_image_intent"])
     if "dhcp_transaction" in body:
@@ -8711,6 +8713,7 @@ def _setup_switch_prefix_wal_authority(guard):
                            for key in ("old_project", "new_project"))):
                 raise LoadError("prefix original WAL/root/P/Q owner changed; HOLD")
             _setup_switch_runtime_context(body)
+            _require_setup_switch_prefix_parent_scope(body)
         require()
         yield body, require
     finally:
@@ -8782,27 +8785,153 @@ def _setup_switch_prefix_states(body):
     return states
 
 
+def _setup_switch_prefix_parent_owner(path):
+    metadata = Path(path).lstat()
+    if not stat.S_ISDIR(metadata.st_mode) or Path(path).resolve(strict=True) != Path(path):
+        raise LoadError("prefix preparation parent is not its real canonical directory; HOLD")
+    return dict(dev=metadata.st_dev, ino=metadata.st_ino, mode=metadata.st_mode,
+                uid=metadata.st_uid, gid=metadata.st_gid)
+
+
+def _setup_switch_prefix_parent_paths(root, destination):
+    paths = [root]
+    cursor = root
+    for part in destination.relative_to(root).parts[:-1]:
+        cursor = cursor / part
+        paths.append(cursor)
+    return paths
+
+
+def _validate_setup_switch_prefix_preparation(body):
+    intent = body["prefix_preparation"]
+    root = Path(body["root"]["path"])
+    if (not isinstance(intent, dict) or set(intent) != {"schema_version", "prefix", "destination", "root", "parents"}
+            or type(intent["schema_version"]) is not int or intent["schema_version"] != 1
+            or intent["root"] != body["root"]
+            or _validate_ztp_prefix(intent["prefix"]) != intent["prefix"]
+            or intent["destination"] != str(root / intent["prefix"].lstrip("/"))
+            or not isinstance(intent["parents"], list) or not 1 <= len(intent["parents"]) <= 64):
+        raise ValueError("invalid original prefix preparation intent")
+    expected = _setup_switch_prefix_parent_paths(root, Path(intent["destination"]))
+    if len(expected) != len(intent["parents"]):
+        raise ValueError("prefix preparation parent ancestry differs from declaration")
+    missing = False
+    for path, row in zip(expected, intent["parents"]):
+        if not isinstance(row, dict) or set(row) != {"path", "before"} or row["path"] != str(path):
+            raise ValueError("invalid prefix preparation parent row")
+        owner = row["before"]
+        if owner is None:
+            missing = True
+        elif (missing or not isinstance(owner, dict) or set(owner) != {"dev", "ino", "mode", "uid", "gid"}
+              or any(type(value) is not int or value < 0 for value in owner.values())
+              or not stat.S_ISDIR(owner["mode"])):
+            raise ValueError("invalid original prefix parent owner")
+    original_root = intent["parents"][0]["before"]
+    if original_root is None or any(original_root[key] != body["root"][key] for key in ("dev", "ino")):
+        raise ValueError("prefix preparation root differs from original WAL")
+    transaction = body.get("prefix_transaction")
+    if transaction is not None and any(transaction[key] != intent[key] for key in ("prefix", "destination", "root")):
+        raise ValueError("prefix transaction differs from original preparation intent")
+
+
+def _require_setup_switch_prefix_parent_scope(body):
+    """Refusal scope precedes mkdir; a name never grants ownership of its stage."""
+    if "prefix_preparation" not in body:
+        return
+    try:
+        _validate_setup_switch_prefix_preparation(body)
+        rows = {row["path"]: row for row in body.get("created_directories", [])}
+        known = {Path(row["staged"]) for row in rows.values()}
+        for row in body["prefix_preparation"]["parents"]:
+            path, before = Path(row["path"]), row["before"]
+            if before is not None:
+                if _setup_switch_prefix_parent_owner(path) != before:
+                    raise ValueError("original prefix preparation parent changed")
+            elif os.path.lexists(path):
+                registered = rows.get(str(path))
+                owner = _setup_switch_prefix_parent_owner(path)
+                if (registered is None or any(owner[key] != registered[key] for key in ("dev", "ino"))
+                        or stat.S_IMODE(owner["mode"]) != registered["mode"]
+                        or registered["parent"] != _setup_switch_link_parent_identity(path)):
+                    raise ValueError("unregistered prefix preparation parent")
+            if path == Path(body["root"]["path"]) or not os.path.lexists(path.parent):
+                continue
+            # Previous ordered row already qualified this actual parent. Scan
+            # only the original declared name, not arbitrary user directories.
+            prefix = "." + path.name + ".setup-"
+            if any(child.name.startswith(prefix) and child not in known for child in path.parent.iterdir()):
+                raise ValueError("unregistered prefix preparation parent stage")
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
+        raise LoadError(f"prefix preparation scope is invalid; HOLD: {exc}") from exc
+
+
+def _publish_setup_switch_prefix_wal(body, require):
+    """Publish only a private held candidate, never a late same-byte owner."""
+    payload = _setup_switch_canonical_payload(dict(body=body,
+        sha256=hashlib.sha256(_setup_switch_canonical_payload(body)).hexdigest())) + b"\n"
+    if len(payload) > _SETUP_SWITCH_JOURNAL_LIMIT:
+        raise LoadError("prefix WAL exceeds bounded size; HOLD")
+    journal = _setup_switch_journal_path()
+    fd, name = tempfile.mkstemp(prefix=".setup-switch-journal.", dir=journal.parent)
+    temporary = Path(name)
+    with os.fdopen(fd, "wb") as stream:
+        stream.write(payload); stream.flush()
+        owner = _dhcp_a_preimage_receipt_identity(os.fstat(stream.fileno()))
+        if owner != _dhcp_a_preimage_receipt_identity(temporary.lstat()):
+            raise LoadError("prefix WAL stage changed before sync; HOLD")
+        os.fsync(stream.fileno())
+        if owner != _dhcp_a_preimage_receipt_identity(os.fstat(stream.fileno())):
+            raise LoadError("prefix WAL stage changed at sync; HOLD")
+    require(); _require_setup_switch_prefix_parent_scope(body)
+    if "prefix_transaction" in body:
+        _setup_switch_prefix_states(body)
+    if owner != _dhcp_a_preimage_receipt_identity(temporary.lstat()) or _read_rollback_regular(temporary, limit=_SETUP_SWITCH_JOURNAL_LIMIT) != (payload, 0o600):
+        raise LoadError("prefix WAL stage changed before replace; HOLD")
+    os.replace(temporary, journal)
+    _fsync_parent_directory(journal.parent)
+    return journal
+
+
 def prepare_setup_switch_prefix_transaction(settings, *, guard):
     """Freeze candidates and original leaf backups before SETUP/Q publication."""
     destination = _ztp_prefix_publication_path(settings)
     with _setup_switch_prefix_wal_authority(guard) as (body, require):
-        if "q_manifest_intent" in body or "publication_bundle" in body or "prefix_transaction" in body:
+        if any(key in body for key in ("q_manifest_intent", "publication_bundle", "prefix_transaction", "prefix_preparation")):
             raise LoadError("prefix preparation must precede Q manifest and first prefix write; HOLD")
         _require_setup_switch_a_prefix_owners(body)
         previous = _managed_ztp_prefix_path()
         if destination != ZTP_DIR and os.path.lexists(destination) and previous != destination:
             raise LoadError("prefix destination is occupied without original ownership; HOLD")
-        require()
+        parents = []
+        missing = False
+        for path in _setup_switch_prefix_parent_paths(HTTP_ROOT, destination):
+            if missing or not os.path.lexists(path):
+                missing = True
+                before = None
+            else:
+                before = _setup_switch_prefix_parent_owner(path)
+            parents.append(dict(path=str(path), before=before))
+        body["prefix_preparation"] = dict(schema_version=1, prefix=settings.ztp_prefix,
+            destination=str(destination), root=body["root"], parents=parents)
+        _validate_setup_switch_prefix_preparation(body)
+        # This durable scope is refusal evidence even if mkdir dies before
+        # its inode can be registered. Cold recovery must not erase the WAL.
+        _publish_setup_switch_prefix_wal(body, require)
     cursor = HTTP_ROOT
     for part in destination.relative_to(HTTP_ROOT).parts[:-1]:
         cursor = cursor / part
         if not os.path.lexists(cursor):
             stage = cursor.parent / ("." + cursor.name + ".setup-" + uuid.uuid4().hex)
             owner = stage_setup_switch_created_directory(_setup_switch_journal_path(), cursor, stage, **guard)
-            if (stage.lstat().st_dev, stage.lstat().st_ino) != (owner.st_dev, owner.st_ino):
-                raise LoadError("prefix parent stage changed; HOLD")
-            _setup_switch_rename_directory_noreplace(stage, cursor)
-            _fsync_parent_directory(cursor.parent)
+            with _setup_switch_prefix_wal_authority(guard) as (body, require):
+                require(); _require_setup_switch_prefix_parent_scope(body)
+                _setup_switch_created_directory_states(body)
+                if (stage.lstat().st_dev, stage.lstat().st_ino, stage.lstat().st_mode) != (owner.st_dev, owner.st_ino, owner.st_mode) or any(stage.iterdir()):
+                    raise LoadError("prefix parent stage changed; HOLD")
+                _setup_switch_rename_directory_noreplace(stage, cursor)
+                _fsync_parent_directory(cursor.parent)
+                require(); _require_setup_switch_prefix_parent_scope(body)
+                _setup_switch_created_directory_states(body)
     with _setup_switch_prefix_wal_authority(guard) as (body, require):
         _require_setup_switch_a_prefix_owners(body)
         if any(HTTP_ROOT.glob(".r22-prefix-*")):
@@ -8838,24 +8967,7 @@ def prepare_setup_switch_prefix_transaction(settings, *, guard):
         body["prefix_transaction"] = dict(schema_version=1, prefix=settings.ztp_prefix,
             destination=str(destination), root=body["root"], rows=rows)
         _setup_switch_prefix_states(body)
-        payload = _setup_switch_canonical_payload(dict(body=body,
-            sha256=hashlib.sha256(_setup_switch_canonical_payload(body)).hexdigest())) + b"\n"
-        if len(payload) > _SETUP_SWITCH_JOURNAL_LIMIT:
-            raise LoadError("prefix WAL exceeds bounded size; HOLD")
-        journal = _setup_switch_journal_path()
-        fd, name = tempfile.mkstemp(prefix=".setup-switch-journal.", dir=journal.parent)
-        temporary = Path(name)
-        with os.fdopen(fd, "wb") as stream:
-            stream.write(payload); stream.flush()
-            owner = _dhcp_a_preimage_receipt_identity(os.fstat(stream.fileno()))
-            os.fsync(stream.fileno())
-            if owner != _dhcp_a_preimage_receipt_identity(os.fstat(stream.fileno())):
-                raise LoadError("prefix WAL stage changed at sync; HOLD")
-        require(); _setup_switch_prefix_states(body)
-        if owner != _dhcp_a_preimage_receipt_identity(temporary.lstat()) or _read_rollback_regular(temporary, limit=_SETUP_SWITCH_JOURNAL_LIMIT) != (payload, 0o600):
-            raise LoadError("prefix WAL stage changed before replace; HOLD")
-        os.replace(temporary, journal)
-        _fsync_parent_directory(journal.parent)
+        journal = _publish_setup_switch_prefix_wal(body, require)
     return journal
 
 
@@ -9710,6 +9822,7 @@ def _setup_switch_created_directory_states(body):
         image_parent = Path(body["root"]["path"]) / "ztp"
         known_stages = {Path(row["parent"]["path"]) / Path(row["staged"]).name
                         for row in rows}
+        _require_setup_switch_prefix_parent_scope(body)
         for parent, prefixes in ((image_parent, (".image.setup-",)),
                                  (image_parent / "image", (".cumulus.setup-", ".nvos.setup-"))):
             if not os.path.lexists(parent):
@@ -9750,7 +9863,10 @@ def _setup_switch_created_directory_states(body):
         owned_children = {
             Path(row["path"]) for row in body["links"]
             if row["before"] is None and row["after"] is not None
-        } | {Path(row["path"]) for row in rows}
+        } | {Path(row["path"]) for row in rows} | {Path(row["staged"]) for row in rows}
+        # A registered nested child may still be at its original stage before
+        # the no-replace install. Every such exact row is checked below for
+        # its original inode/mode/empty state; a matching prefix is not enough.
         if "prefix_transaction" in body:
             _validate_setup_switch_prefix_transaction(body)
             owned_children.update(Path(row["path"]) for row in body["prefix_transaction"]["rows"]
@@ -11126,6 +11242,11 @@ def _recover_setup_switch_journal_snapshot(
     except (KeyError, TypeError, ValueError, UnicodeError, binascii.Error, LoadError) as exc:
         raise LoadError(f"setup switch journal is invalid: {exc}") from exc
     runtime_context = _setup_switch_runtime_context(body, state)
+    if "prefix_preparation" in body:
+        _require_setup_switch_prefix_parent_scope(body)
+        if "prefix_transaction" not in body:
+            _require_setup_switch_a_prefix_owners(body)
+        retain_journal = True
     if "prefix_transaction" in body:
         _setup_switch_prefix_states(body)
         # Prefix candidates, original backups and consumed witnesses still
@@ -11177,7 +11298,7 @@ def _recover_setup_switch_journal_snapshot(
                 _require_authority=require_authority,
                 _restore_file=a_compensation["restore_runtime_leaf"] if a_compensation is not None else None,
                 _original_yaml_owners=body["a_runtime"].get("yaml_link_owners") if a_compensation is not None else None,
-                _original_prefix_owners=body["a_runtime"].get("prefix_owners") if a_compensation is not None else None,
+                _original_prefix_owners=body["a_runtime"].get("prefix_owners") if a_compensation is not None or "prefix_preparation" in body else None,
                 _prefix_transaction_body=body if "prefix_transaction" in body else None,
             )
             _require_runtime_restore_guard(**runtime_restore_guard)
@@ -11189,6 +11310,10 @@ def _recover_setup_switch_journal_snapshot(
 
     def require_journal_unchanged():
         require_wal_unchanged()
+        if "prefix_preparation" in body:
+            _require_setup_switch_prefix_parent_scope(body)
+            if "prefix_transaction" not in body:
+                _require_setup_switch_a_prefix_owners(body)
         if "prefix_transaction" in body:
             _setup_switch_prefix_states(body)
         if a_compensation is not None:
