@@ -572,6 +572,16 @@ NVOS 的受支持别名只保留原已选文件名，不在重入时重新寻找
 parent/report/selector 提交后强杀→新 LOAD 的 B 健康流程单独覆盖此合同。
 本地命令/健康端口隔离，不证明真实服务、旧 A 镜像激活或断电验收。
 
+已提交 B 的 Q parent/report/selector 补偿 API 只恢复原 publication bundle 中的 Q
+前像，仍停服、保留原 WAL/bundle、共享 Q 盘面及所有 A/B 证据；不是完整 P/A/DHCP
+恢复。首写前持久计划绑定原 WAL、原阶段、各原 B owner 和新 A 暂存 owner。
+计划自记创建时 dev/ino/mode/uid/gid/nlink，冷重入拒绝同字节新计划 inode；暂存在
+文件 fsync 前冻结创建时 FD 身份，不能在 fsync 后登记外来替代对象。恢复保留原
+mode/uid/gid/mtime，rename 合法改变 inode/ctime；拒绝同字节新目标。每步父同步
+失败或强杀保留计划，新 LOAD 只继续确切原计划且补做目录同步。parent-only 提交
+的未消费 B 暂存不被删除。计划存在阻断 B 激活/退休及普通 LOAD；本基础 API
+不授予服务启动、完整 A 恢复、WAL 退休或 Linux/断电验收。
+
 同一模块还覆盖端到端 deployment scope：默认 `all` 同时生成 Production/AIR；`prod` 只发布
 Production Cumulus/IB/NVL；`air` 只发布 AIR DHCP/YAML/release，并只临时渲染 AIR full profile
 实际引用的 Production 来源；单独指定 `mini` 会自动选择 AIR scope 和 `eth`，显式 `prod+mini`

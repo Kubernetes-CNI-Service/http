@@ -1,5 +1,46 @@
 # 脚本变更影响测试
 
+## 2026-10-08 R22 已提交 Q 发布记录补偿基础候选
+
+基于 `47d9a98`，独立 direct/真实 LOAD→SETUP→Q parent/report/selector 提交→
+恢复中再次 SIGKILL→新 LOAD 要求只补偿原 Q 发布前像，原 WAL/bundle 和共享 Q
+保持不变，不启动服务、不退休证据。持久计划首写前绑定原 WAL、原阶段及每个
+暂存/目标 owner；自记创建时 marker inode，拒绝同字节复制计划的冷重入。
+暂存 FD 在 fsync 前冻结，最终 mode/uid/gid/mtime 按原前像核验；新 inode/ctime
+只允许计划自有 stage 的 rename，未知对象不被消费。parent-only 未消费 B 暂存保留。
+当前仅 Q 发布记录补偿，完整 P/A/shared/DHCP 与 A 健康仍未实现，正式 proof 待完成。
+
+原 API 缺失的合法五项 RED：`r22-q-publication-compensation-valid-red.log`，
+inode161505563/size133915/SHA256 `bcb376d2a3ffdf1c39913573d5f0b189ccca85a610d199fc0d19b7f264e60ae5`，
+5 ERROR / 2.223s / exit1。更早第一轮三项夹具重复创建原 Q P2P alias，原日志保留，
+不算实现 RED；只在新 seeded-Q 私有夹具替换自己的原 alias，并保留旧 Q generation。
+
+候选后续有效反例原样保留：冷计划同字节换 inode 1 FAIL，
+`r22-q-compensation-cold-plan-owner-red.log` / inode161535175 / size127994 /
+SHA256 `dbf6b8f939824a8ab17f926850ed107f5a3d488fddfd39c4de9ee075b5e458b9`；
+parent-only 原缺席 no-op 未被识别完成 1 ERROR，
+`r22-q-compensation-parent-only-red.log` / inode161552288 / size128660 /
+SHA256 `23469319f6ec86e71afc530d8fe5eb77447452fe12768248a667b8162cb9901f`；
+原 mtime 恢复 1 FAIL，`r22-q-compensation-original-mtime-red.log` /
+inode161553373 / size128363 / SHA256 `7530b1cb25c095da2e8abde56803d6f39d3992aaed3e6140943444257fc583a4`；
+stage 文件 fsync 后同字节换 inode 被收编 1 FAIL，
+`r22-q-compensation-stage-sync-owner-red.log` / inode161558366 / size128120 /
+SHA256 `48a1ae5b9b00a392b1b58c6c53594626afaf5c780d9b7157937b58fc1faf89cc`。
+均实际 exit1、冻结一致、有完整物理 FAILED/退出/END；未弱化原失败断言。
+
+最终八项 direct + 三项真实多脚本 workflow 11 OK / 24.863s / exit0：
+`outputs/test-diagnostics/r22-q-compensation-stage-owner-workflow-green.log`，
+inode161558582 / size133423 / SHA256 `2d3b2e5ea5355a2cd9728c8ab75fb0c0f6cd5a996902cc660dff5808eed6132b`。
+前后 stat 一致；物理 Ran18→OK20→实际退出42→冻结一致43→END45=0。
+本地 SIGKILL 不等于断电，私有停服端口不等于 root/Linux 见证；不批准 ledger/full。
+
+完整 LOAD/release、report direct/workflow 及原 B/新 Q 补偿工作流模块回归：
+585 tests OK / 106.806s / 实际 exit0、冻结一致、完整 END=0，
+`outputs/test-diagnostics/r22-q-compensation-full-module-regression.log`，
+inode161565683 / size323391 / SHA256
+`1f960c3a49909b98f72d0fbd228bee7c191d3d1164b7360a4c58b13ebd5e9fae`。
+读取前后 stat 一致；这是有界模块回归，不是正式 related/full/check。
+
 ## 2026-10-08 R22 实际 SETUP 镜像链接验收候选
 
 SETUP 正常发布相对镜像链接，原 publication intent 的普通文件限定阻断该路径；

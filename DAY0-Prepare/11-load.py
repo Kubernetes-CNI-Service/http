@@ -6457,6 +6457,7 @@ def require_no_pending_setup_switch_journal() -> None:
 def _require_setup_switch_wal_absent() -> None:
     """WAL-only fence, also safe inside a held manifest staging callback."""
     _require_setup_switch_retirement_absent()
+    _require_setup_switch_a_restore_absent()
     journal = _setup_switch_journal_path()
     try:
         journal.lstat()
@@ -7070,6 +7071,7 @@ def require_setup_switch_publication_bundle(token, *, guard, phase="parent"):
 
 def _require_setup_switch_publication_bundle(token, *, phase, require_guard):
     require_guard()
+    _require_setup_switch_a_restore_absent()
     try:
         journal = token["journal"]
         def require_original_wal():
@@ -7132,6 +7134,233 @@ def close_setup_switch_publication_bundle(token):
         token["receipt_descriptor"] = -1
 
 
+def _setup_switch_a_restore_path():
+    return MANIFEST.parent / ".setup-switch-a-restore.json"
+
+
+def _require_setup_switch_a_restore_absent():
+    try:
+        _setup_switch_a_restore_path().lstat()
+    except FileNotFoundError:
+        return
+    raise LoadError("pending A publication compensation; HOLD original WAL and plan")
+
+
+def restore_setup_switch_q_publication(project, *, guard, confirmed=False):
+    """Compensate only Q parent/report/selector, stopped, retaining all evidence.
+
+    This is NOT complete P/A restoration, service-start or retirement authority.
+    The original publication bundle remains immutable in its original WAL. A
+    separate durable plan records every new A stage owner before the first
+    compensation write. Cold readers never adopt same-byte replacement owners.
+    """
+    if confirmed is not True:
+        raise LoadError("Q publication compensation requires explicit confirmation; HOLD")
+    _require_runtime_restore_guard(**guard)
+    _require_setup_switch_retirement_absent()
+    marker = _setup_switch_a_restore_path()
+    journal = _setup_switch_journal_path()
+    wal_fd = marker_fd = -1
+    try:
+        wal_before = _dhcp_a_preimage_receipt_identity(journal.lstat())
+        wal_fd = os.open(journal, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0))
+        opened = _read_rollback_regular(journal, limit=_SETUP_SWITCH_JOURNAL_LIMIT)
+        body = _setup_switch_prepared_registration_body(opened)
+        parent = _setup_switch_link_parent_identity(journal)
+        if (body["new_project"] != _setup_switch_directory_identity(Path(project))
+                or "publication_bundle" not in body):
+            raise LoadError("Q compensation requested project/bundle differs; HOLD")
+        bundle = body["publication_bundle"]
+        def wal_authority():
+            _require_runtime_restore_guard(**guard)
+            _require_setup_switch_retirement_absent()
+            if (wal_before != _dhcp_a_preimage_receipt_identity(os.fstat(wal_fd))
+                    or wal_before != _dhcp_a_preimage_receipt_identity(journal.lstat())
+                    or parent != _setup_switch_link_parent_identity(journal)
+                    or opened != _read_rollback_regular(journal, limit=_SETUP_SWITCH_JOURNAL_LIMIT)
+                    or body["root"] != _setup_switch_directory_identity(HTTP_ROOT)
+                    or any(body[key] != _setup_switch_directory_identity(Path(body[key]["path"]))
+                           for key in ("old_project", "new_project"))):
+                raise LoadError("A compensation original WAL/root/P/Q owner changed; HOLD")
+            _setup_switch_runtime_context(body)
+        def shared_authority():
+            wal_authority()
+            shared = bundle.get("shared_setup")
+            if (shared is None or _setup_switch_shared_publication_snapshot(body,
+                    include_inputs="input_files" in shared) != shared):
+                raise LoadError("A compensation original shared Q owner changed; HOLD")
+            _require_setup_publication_images(bundle.get("image_intent"))
+        shared_authority()
+        if not os.path.lexists(marker):
+            _require_no_pending_setup_stage(Path(bundle["selector"]["path"]),
+                                           ".r22-a-restore-", "A publication")
+            original = _open_setup_switch_publication_bundle(project, guard=guard, journal=journal)
+            try:
+                phase = original["phase"]
+                if phase == "parent":
+                    raise LoadError("Q compensation requires original committed B parent; HOLD")
+                plan = dict(schema_version=1, journal=str(journal), parent=parent,
+                    identity=list(wal_before), sha256=hashlib.sha256(opened[0]).hexdigest(),
+                    phase=phase, rows={})
+                for key in ("parent", "report", "selector"):
+                    row = bundle[key]
+                    destination = Path(row["path"] if key == "selector" else row["destination"])
+                    read = _setup_publication_selector if key == "selector" else (
+                        lambda path: _setup_publication_file(path, missing_ok=True))
+                    checkpoint = read(destination)
+                    stage = None
+                    if row["before"] is not None:
+                        path = destination.parent / (".r22-a-restore-" + key + "-" + uuid.uuid4().hex)
+                        if key == "selector":
+                            path.symlink_to(row["before"]["target"])
+                            os.utime(path, ns=(row["before"]["identity"][7],) * 2, follow_symlinks=False)
+                            stage_owner = list(_dhcp_a_preimage_receipt_identity(path.lstat()))
+                        else:
+                            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                            with os.fdopen(fd, "wb") as stream:
+                                os.fchmod(stream.fileno(), row["before"]["mode"])
+                                stream.write(base64.b64decode(row["before"]["payload"], validate=True))
+                                stream.flush()
+                                os.utime(stream.fileno(), ns=(row["before"]["identity"][7],) * 2)
+                                stage_owner = list(_dhcp_a_preimage_receipt_identity(os.fstat(stream.fileno())))
+                                os.fsync(stream.fileno())
+                                if (stage_owner != list(_dhcp_a_preimage_receipt_identity(os.fstat(stream.fileno())))
+                                        or stage_owner != list(_dhcp_a_preimage_receipt_identity(path.lstat()))):
+                                    raise LoadError("A compensation stage original owner changed at sync; HOLD")
+                        stage = dict(path=str(path), file=read(path))
+                        if stage["file"]["identity"] != stage_owner:
+                            raise LoadError("A compensation stage original owner changed during read; HOLD")
+                    plan["rows"][key] = dict(checkpoint=checkpoint, stage=stage)
+                _fsync_parent_directory(Path(bundle["selector"]["path"]).parent)
+                require_setup_switch_publication_bundle(original, guard=guard, phase=phase)
+                marker_fd = os.open(marker, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                # These six fields do not change when our payload is written.
+                # Persist the original created inode, not a cold reader's new
+                # observation of a same-byte replacement marker.
+                plan["owner"] = list(_dhcp_a_preimage_receipt_identity(os.fstat(marker_fd))[:6])
+                payload = _setup_switch_canonical_payload(plan) + b"\n"
+                if len(payload) > _ROLLBACK_PAYLOAD_LIMIT:
+                    raise LoadError("A compensation plan exceeds bound; HOLD staged evidence")
+                with os.fdopen(os.dup(marker_fd), "wb") as stream:
+                    stream.write(payload)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                marker_owner = _dhcp_a_preimage_receipt_identity(os.fstat(marker_fd))
+                _fsync_parent_directory(marker.parent)
+            finally:
+                close_setup_switch_publication_bundle(original)
+        else:
+            marker_fd = os.open(marker, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0))
+            marker_owner = _dhcp_a_preimage_receipt_identity(os.fstat(marker_fd))
+            payload, mode = _read_rollback_regular(marker, limit=_ROLLBACK_PAYLOAD_LIMIT)
+            if mode != 0o600:
+                raise LoadError("A compensation plan mode differs; HOLD")
+            def unique(pairs):
+                result = {}
+                for key, value in pairs:
+                    if key in result:
+                        raise ValueError("duplicate A compensation fields")
+                    result[key] = value
+                return result
+            plan = json.loads(payload, object_pairs_hook=unique)
+        if (set(plan) != {"schema_version", "journal", "parent", "identity", "sha256", "phase", "rows", "owner"}
+                or type(plan["schema_version"]) is not int or plan["schema_version"] != 1
+                or plan["journal"] != str(journal) or plan["parent"] != parent
+                or plan["identity"] != list(wal_before)
+                or plan["sha256"] != hashlib.sha256(opened[0]).hexdigest()
+                or plan["phase"] not in {"report", "selector", "published"}
+                or not isinstance(plan["rows"], dict) or set(plan["rows"]) != {"parent", "report", "selector"}):
+            raise LoadError("A compensation plan does not bind original WAL; HOLD")
+        if (not isinstance(plan["owner"], list) or len(plan["owner"]) != 6
+                or any(type(v) is not int or v < 0 for v in plan["owner"])
+                or plan["owner"] != list(marker_owner[:6])):
+            raise LoadError("A compensation original plan owner differs on cold entry; HOLD")
+        def marker_authority():
+            shared_authority()
+            if (marker_owner != _dhcp_a_preimage_receipt_identity(os.fstat(marker_fd))
+                    or marker_owner != _dhcp_a_preimage_receipt_identity(marker.lstat())
+                    or parent != _setup_switch_link_parent_identity(marker)
+                    or (payload, 0o600) != _read_rollback_regular(marker, limit=_ROLLBACK_PAYLOAD_LIMIT)):
+                raise LoadError("A compensation original plan owner changed; HOLD")
+        def same_owner(actual, expected, *, renamed=False):
+            if actual is None or expected is None:
+                return actual is expected
+            return (set(actual) == set(expected) and actual["identity"][:8] == expected["identity"][:8]
+                    and (renamed or actual["identity"] == expected["identity"])
+                    and all(actual[key] == expected[key] for key in actual if key != "identity"))
+        def states():
+            marker_authority()
+            result = {}
+            for key in ("parent", "report", "selector"):
+                original_row, row = bundle[key], plan["rows"][key]
+                destination = Path(original_row["path"] if key == "selector" else original_row["destination"])
+                if (not isinstance(row, dict) or set(row) != {"checkpoint", "stage"}
+                        or original_row["parent"] != _setup_switch_link_parent_identity(destination)):
+                    raise LoadError("A compensation row/parent differs; HOLD")
+                committed = key == "parent" or key == "report" and plan["phase"] != "report" or (
+                    key == "selector" and plan["phase"] == "published")
+                expected = (original_row["staged"] if key == "selector" else original_row["candidate"]) if committed else original_row["before"]
+                if key == "selector" and committed:
+                    expected = {field: expected[field] for field in ("identity", "target")}
+                if not same_owner(row["checkpoint"], expected, renamed=committed):
+                    raise LoadError("A compensation checkpoint is not original B phase; HOLD")
+                read = _setup_publication_selector if key == "selector" else (
+                    lambda path: _setup_publication_file(path, missing_ok=True))
+                stage = row["stage"]
+                if original_row["before"] is None:
+                    if stage is not None:
+                        raise LoadError("A compensation original absence has a stage; HOLD")
+                    after, staged = None, None
+                else:
+                    if not isinstance(stage, dict) or set(stage) != {"path", "file"}:
+                        raise LoadError("A compensation stage is missing; HOLD")
+                    path = Path(stage["path"])
+                    after = stage["file"]
+                    before = original_row["before"]
+                    if (path.parent != destination.parent
+                            or re.fullmatch(r"\.r22-a-restore-" + key + "-[0-9a-f]{32}", path.name) is None
+                            or not isinstance(after, dict) or set(after) != set(before)
+                            or not isinstance(after["identity"], list) or len(after["identity"]) != 9
+                            or any(type(v) is not int or v < 0 for v in after["identity"])
+                            or after["identity"][2:6] != before["identity"][2:6]
+                            or after["identity"][7] != before["identity"][7]
+                            or any(after[field] != before[field] for field in before if field != "identity")):
+                        raise LoadError("A compensation stage does not contain original preimage; HOLD")
+                    staged = read(path)
+                current = read(destination)
+                # A no-op preimage may retain its exact original owner. Otherwise
+                # the only allowed completion is the plan's own staged inode.
+                if same_owner(current, after, renamed=True) and staged is None:
+                    result[key] = "after"
+                elif same_owner(current, row["checkpoint"]) and (stage is None or same_owner(staged, after)):
+                    result[key] = "before"
+                else:
+                    raise LoadError("A compensation destination/stage owner changed; HOLD")
+            marker_authority()
+            return result
+        for key in ("parent", "report", "selector"):
+            phases = states()
+            row = bundle[key]
+            destination = Path(row["path"] if key == "selector" else row["destination"])
+            if phases[key] == "before":
+                stage = plan["rows"][key]["stage"]
+                if stage is None:
+                    if os.path.lexists(destination):
+                        destination.unlink()
+                else:
+                    os.replace(Path(stage["path"]), destination)
+            _fsync_parent_directory(destination.parent)  # Repeat on interrupted-sync reentry too.
+        if set(states().values()) != {"after"}:
+            raise LoadError("A compensation final publication state differs; HOLD")
+        return "restored-q-publication-stopped-wal-retained"
+    except (KeyError, TypeError, ValueError, RuntimeError, OSError) as exc:
+        raise LoadError(f"A publication compensation unconfirmed; HOLD: {exc}") from exc
+    finally:
+        for descriptor in (marker_fd, wal_fd):
+            if descriptor >= 0:
+                os.close(descriptor)
+
+
 def open_setup_switch_publication_bundle(project, *, guard):
     """Hold the original disk WAL and classify one exact stopped publication state.
 
@@ -7144,6 +7373,7 @@ def open_setup_switch_publication_bundle(project, *, guard):
 
 def _open_setup_switch_publication_bundle(project, *, guard, journal):
     _require_runtime_restore_guard(**guard)
+    _require_setup_switch_a_restore_absent()
     fd = -1
     receipt_fd = -1
     try:

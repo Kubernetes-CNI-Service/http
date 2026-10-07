@@ -1065,14 +1065,17 @@ class ReleaseTransactionTests(unittest.TestCase):
                 self.assertEqual(source, published.resolve(strict=True))
 
     def _prepare_published_q_for_stopped_preflight(self, *, with_image=False, no_upgrade=False,
-                                                  ztp_disabled=False):
-        state, context, guard = self._prepare_q_manifest_publication()
+                                                  ztp_disabled=False, seed_q_publication=False,
+                                                  publication_phase="published"):
+        state, context, guard = self._prepare_q_manifest_publication(seed_q_publication=seed_q_publication)
         q = state[1]
         for name, source in (("01-global.yaml", self.inputs.global_file),
                              ("02-devices_config.csv", self.inputs.devices_file),
                              ("02-dhcp-subnet_config.csv", self.inputs.subnet_file),
                              ("p2p-original.xlsx", self.inputs.p2p_file)):
             (q / name).write_bytes(source.read_bytes())
+        if seed_q_publication:
+            (q / "p2p.xlsx").unlink()  # This fixture's previous Q alias, not an unknown production object.
         (q / "p2p.xlsx").symlink_to("p2p-original.xlsx")
         document = yaml.safe_load((q / "01-global.yaml").read_text())
         document["common"]["mgmt"]["dhcp-server"]["status"] = "disabled"
@@ -1106,12 +1109,15 @@ class ReleaseTransactionTests(unittest.TestCase):
             self.addCleanup(LOAD.close_setup_switch_publication_bundle, token)
             LOAD.commit_prepared_release(candidates[0], require_authority=lambda:
                 LOAD.require_setup_switch_publication_bundle(token, guard=guard))
-            LOAD.generation_report.commit_prepared_generation_report(candidates[1], require_authority=lambda:
-                LOAD.require_setup_switch_publication_bundle(token, guard=guard, phase="report"))
-            selector = json.loads(token["payload"])["body"]["publication_bundle"]["selector"]
-            LOAD.commit_pinned_generation(q, candidates[2], expected_current=None,
-                prepared_selector=selector["staged"], require_authority=lambda:
-                LOAD.require_setup_switch_publication_bundle(token, guard=guard, phase="selector"))
+            if publication_phase != "report":
+                LOAD.generation_report.commit_prepared_generation_report(candidates[1], require_authority=lambda:
+                    LOAD.require_setup_switch_publication_bundle(token, guard=guard, phase="report"))
+            if publication_phase == "published":
+                selector = json.loads(token["payload"])["body"]["publication_bundle"]["selector"]
+                LOAD.commit_pinned_generation(q, candidates[2],
+                    expected_current=self._original_q_publication["selector"] if seed_q_publication else None,
+                    prepared_selector=selector["staged"], require_authority=lambda:
+                    LOAD.require_setup_switch_publication_bundle(token, guard=guard, phase="selector"))
         return state, context, guard, token, inputs
 
     def test_b_stopped_preflight_retains_wal_and_has_no_activation_permission(self):
@@ -1209,6 +1215,157 @@ class ReleaseTransactionTests(unittest.TestCase):
             preflight.assert_not_called()
             action.assert_not_called()
         self.assertEqual(token["payload"], state[-3].read_bytes())
+
+    def test_a_publication_compensation_restores_missing_q_preimages_without_p_write(self):
+        self._a_publication_compensation_preimages(False)
+
+    def test_a_publication_compensation_restores_existing_q_preimages_without_p_write(self):
+        self._a_publication_compensation_preimages(True)
+
+    def _a_publication_compensation_preimages(self, existing):
+        state, context, guard, token, _inputs = self._prepare_published_q_for_stopped_preflight(
+            seed_q_publication=existing)
+        q, journal = state[1], state[-3]
+        frozen = (journal.read_bytes(), state[7].read_bytes(), os.readlink(state[2]),
+                  (context.runtime_receipt / "receipt.json").read_bytes())
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "_runtime_service_action") as start, \
+                mock.patch.object(LOAD, "generate_configs") as generate:
+            result = LOAD.restore_setup_switch_q_publication(q, guard=guard, confirmed=True)
+            self.assertEqual("restored-q-publication-stopped-wal-retained", result)
+            start.assert_not_called()
+            generate.assert_not_called()
+            self.assertEqual(frozen, (journal.read_bytes(), state[7].read_bytes(), os.readlink(state[2]),
+                                    (context.runtime_receipt / "receipt.json").read_bytes()))
+            for key, basename in (("parent", "current-release.json"), ("report", "generation-report.json"),
+                                  ("selector", "current")):
+                path = q / "99-output-ztp" / basename
+                if existing:
+                    self.assertEqual(self._original_q_publication[key],
+                                     os.readlink(path) if key == "selector" else path.read_bytes())
+                    self.assertEqual(1700000000123456789, path.lstat().st_mtime_ns)
+                else:
+                    self.assertFalse(os.path.lexists(path))
+            self.assertTrue((journal.parent / ".setup-switch-a-restore.json").is_file())
+            with self.assertRaisesRegex(LOAD.LoadError, "pending|HOLD"):
+                LOAD.require_no_pending_setup_switch_journal()
+            LOAD.close_setup_switch_publication_bundle(token)
+            self.assertEqual(result, LOAD.restore_setup_switch_q_publication(q, guard=guard, confirmed=True))
+
+    def test_a_publication_compensation_requires_explicit_confirmation(self):
+        state, _context, guard, token, _inputs = self._prepare_published_q_for_stopped_preflight()
+        parent = state[1] / "99-output-ztp/current-release.json"
+        frozen = (state[-3].read_bytes(), parent.lstat().st_ino, parent.read_bytes())
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            with self.assertRaisesRegex(LOAD.LoadError, "explicit|HOLD"):
+                LOAD.restore_setup_switch_q_publication(state[1], guard=guard)
+        self.assertEqual(frozen, (state[-3].read_bytes(), parent.lstat().st_ino, parent.read_bytes()))
+        self.assertFalse(os.path.lexists(state[-3].parent / ".setup-switch-a-restore.json"))
+
+    def test_a_publication_compensation_parent_only_commit_preserves_unconsumed_b_stages(self):
+        state, _context, guard, token, _inputs = self._prepare_published_q_for_stopped_preflight(
+            publication_phase="report")
+        bundle = json.loads(token["payload"])["body"]["publication_bundle"]
+        report_stage, selector_stage = Path(bundle["report"]["temporary"]), Path(bundle["selector"]["staged"]["path"])
+        frozen = (report_stage.lstat().st_ino, report_stage.read_bytes(),
+                  selector_stage.lstat().st_ino, os.readlink(selector_stage), token["payload"])
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            self.assertEqual("restored-q-publication-stopped-wal-retained",
+                             LOAD.restore_setup_switch_q_publication(state[1], guard=guard, confirmed=True))
+        self.assertEqual(frozen, (report_stage.lstat().st_ino, report_stage.read_bytes(),
+                                 selector_stage.lstat().st_ino, os.readlink(selector_stage), state[-3].read_bytes()))
+        for name in ("current-release.json", "generation-report.json", "current"):
+            self.assertFalse(os.path.lexists(state[1] / "99-output-ztp" / name))
+
+    def test_a_publication_compensation_sync_failure_reenters_exact_plan(self):
+        state, _context, guard, _token, _inputs = self._prepare_published_q_for_stopped_preflight(
+            seed_q_publication=True)
+        q, journal = state[1], state[-3]
+        original_sync = LOAD._fsync_parent_directory
+        changed = []
+        def fail_after_first_replace(path):
+            parent = q / "99-output-ztp/current-release.json"
+            if parent.read_bytes() == self._original_q_publication["parent"] and not changed:
+                changed.append(True)
+                raise OSError("independent A publication parent sync failure")
+            original_sync(path)
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            with mock.patch.object(LOAD, "_fsync_parent_directory", side_effect=fail_after_first_replace):
+                with self.assertRaisesRegex((OSError, LOAD.LoadError), "independent A publication"):
+                    LOAD.restore_setup_switch_q_publication(q, guard=guard, confirmed=True)
+            self.assertEqual([True], changed)
+            marker = journal.parent / ".setup-switch-a-restore.json"
+            frozen = (marker.lstat().st_ino, marker.read_bytes(), journal.read_bytes())
+            self.assertEqual("restored-q-publication-stopped-wal-retained",
+                             LOAD.restore_setup_switch_q_publication(q, guard=guard, confirmed=True))
+            self.assertEqual(frozen, (marker.lstat().st_ino, marker.read_bytes(), journal.read_bytes()))
+
+    def test_a_publication_compensation_does_not_adopt_same_byte_completed_owner(self):
+        state, _context, guard, _token, _inputs = self._prepare_published_q_for_stopped_preflight(
+            seed_q_publication=True)
+        q, journal = state[1], state[-3]
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            LOAD.restore_setup_switch_q_publication(q, guard=guard, confirmed=True)
+            parent = q / "99-output-ztp/current-release.json"
+            held = parent.with_name("held-original-restored-q-parent")
+            parent.rename(held)
+            parent.write_bytes(held.read_bytes())
+            parent.chmod(0o644)
+            self.assertNotEqual(parent.lstat().st_ino, held.lstat().st_ino)
+            marker = journal.parent / ".setup-switch-a-restore.json"
+            frozen = (journal.read_bytes(), marker.read_bytes(), parent.lstat().st_ino, parent.read_bytes())
+            with self.assertRaisesRegex(LOAD.LoadError, "owner|HOLD"):
+                LOAD.restore_setup_switch_q_publication(q, guard=guard, confirmed=True)
+            self.assertEqual(frozen, (journal.read_bytes(), marker.read_bytes(), parent.lstat().st_ino,
+                                     parent.read_bytes()))
+
+    def test_a_publication_compensation_rejects_same_byte_plan_replacement_on_cold_entry(self):
+        state, _context, guard, token, _inputs = self._prepare_published_q_for_stopped_preflight()
+        q, journal = state[1], state[-3]
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            LOAD.restore_setup_switch_q_publication(q, guard=guard, confirmed=True)
+            LOAD.close_setup_switch_publication_bundle(token)
+            marker = journal.parent / ".setup-switch-a-restore.json"
+            held = marker.with_name("held-original-a-compensation-plan")
+            marker.rename(held)
+            marker.write_bytes(held.read_bytes())
+            marker.chmod(0o600)
+            self.assertNotEqual(marker.lstat().st_ino, held.lstat().st_ino)
+            frozen = (journal.read_bytes(), marker.lstat().st_ino, marker.read_bytes())
+            with self.assertRaisesRegex(LOAD.LoadError, "plan.*owner|HOLD"):
+                LOAD.restore_setup_switch_q_publication(q, guard=guard, confirmed=True)
+            self.assertEqual(frozen, (journal.read_bytes(), marker.lstat().st_ino, marker.read_bytes()))
+
+    def test_a_publication_compensation_rejects_stage_rebinding_at_file_sync(self):
+        state, _context, guard, token, _inputs = self._prepare_published_q_for_stopped_preflight(
+            seed_q_publication=True)
+        q, journal = state[1], state[-3]
+        parent = q / "99-output-ztp/current-release.json"
+        frozen = (parent.lstat().st_ino, parent.read_bytes(), journal.read_bytes())
+        original_sync = os.fsync
+        observed = []
+        def replace_stage(descriptor):
+            metadata = os.fstat(descriptor)
+            for path in (q / "99-output-ztp").glob(".r22-a-restore-parent-*"):
+                if not observed and path.lstat().st_ino == metadata.st_ino:
+                    payload, before = path.read_bytes(), path.lstat()
+                    held = path.with_name("held-original-a-parent-stage")
+                    path.rename(held)
+                    path.write_bytes(payload)
+                    path.chmod(stat.S_IMODE(before.st_mode))
+                    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+                    observed.append((path, held, path.lstat().st_ino, payload))
+            original_sync(descriptor)
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD.os, "fsync", side_effect=replace_stage):
+            with self.assertRaisesRegex(LOAD.LoadError, "stage.*owner|HOLD"):
+                LOAD.restore_setup_switch_q_publication(q, guard=guard, confirmed=True)
+        self.assertEqual(1, len(observed), "the real A file fsync boundary must be reached")
+        path, held, foreign_owner, payload = observed[0]
+        self.assertNotEqual(path.lstat().st_ino, held.lstat().st_ino)
+        self.assertEqual((foreign_owner, payload), (path.lstat().st_ino, path.read_bytes()))
+        self.assertEqual(frozen, (parent.lstat().st_ino, parent.read_bytes(), journal.read_bytes()))
+        self.assertEqual(token["payload"], journal.read_bytes())
 
     def test_original_no_upgrade_image_policy_does_not_require_a_version(self):
         # The original persisted no-upgrade policy is authoritative; resolving
@@ -1652,8 +1809,8 @@ class ReleaseTransactionTests(unittest.TestCase):
         self.assertEqual(token["payload"], state[-3].read_bytes())
         self.assertEqual(source.read_bytes(), held.read_bytes())
 
-    def _prepare_q_manifest_publication(self):
-        state, context = self._prepare_persisted_a_runtime_switch()
+    def _prepare_q_manifest_publication(self, *, seed_q_publication=False):
+        state, context = self._prepare_persisted_a_runtime_switch(seed_q_publication=seed_q_publication)
         journal, descriptor, backend = state[-3:]
         guard = dict(deployment_lock_descriptor=descriptor, services_quiesced=True, runtime_backend=backend)
         state[2].unlink()
@@ -5185,7 +5342,8 @@ class ReleaseTransactionTests(unittest.TestCase):
         backend.start.assert_not_called()
 
     def _prepare_persisted_a_runtime_switch(self, *, managed_key=False, prefix=False,
-                                          original_upgrade_policy=None, qualified_inputs=False):
+                                          original_upgrade_policy=None, qualified_inputs=False,
+                                          seed_q_publication=False):
         private_root = mock.patch.object(LOAD, "HTTP_ROOT", self.root.resolve())
         private_root.start()
         self.addCleanup(private_root.stop)
@@ -5220,6 +5378,18 @@ class ReleaseTransactionTests(unittest.TestCase):
         journal, descriptor, backend = state[-3:]
         # Replace only this fixture's untouched legacy WAL, before any Q write.
         journal.unlink()
+        if seed_q_publication:
+            parent, report, prior_generation = private_publication_candidates(LOAD, q)
+            LOAD.commit_prepared_release(parent)
+            LOAD.generation_report.commit_prepared_generation_report(report)
+            LOAD.commit_pinned_generation(q, prior_generation, expected_current=None)
+            for name in ("current-release.json", "generation-report.json", "current"):
+                os.utime(q / "99-output-ztp" / name,
+                         ns=(1700000000123456789, 1700000000123456789), follow_symlinks=False)
+            self._original_q_publication = {
+                "parent": parent.destination.read_bytes(),
+                "report": report.destination.read_bytes(),
+                "selector": os.readlink(q / "99-output-ztp/current")}
         context = LOAD.CrossProjectRollbackContext(
             p, "generations/" + generation.name, receipt.resolve(),
             LOAD.snapshot_active_setup_state(expected_project=p),

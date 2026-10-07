@@ -4955,6 +4955,15 @@ finally:
         self._real_setup_publication_writer_death("selector", b_preflight="activate-pass",
                                                 real_image_link=True)
 
+    def test_real_setup_committed_q_publication_compensation_keeps_shared_q_and_wal(self):
+        self._real_setup_publication_writer_death("selector", b_preflight="compensate")
+
+    def test_real_setup_q_compensation_death_cold_reentry_keeps_original_plan(self):
+        self._real_setup_publication_writer_death("selector", b_preflight="compensate-death")
+
+    def test_real_setup_q_compensation_cold_reader_rejects_foreign_plan_owner(self):
+        self._real_setup_publication_writer_death("selector", b_preflight="compensate-death-plan-owner")
+
     def test_real_setup_publication_cold_b_health_failure_stops_without_a_restore(self):
         self._real_setup_publication_writer_death("selector", b_preflight="activate-fail")
 
@@ -5102,6 +5111,18 @@ token = None
 try:
     guard = dict(deployment_lock_descriptor=descriptor, services_quiesced=True,
                  runtime_backend=SimpleNamespace(name='supervisor'))
+    if sys.argv[5].startswith('compensate'):
+        if sys.argv[5].startswith('compensate-death'):
+            original_sync = api._fsync_parent_directory
+            def die_after_parent_unlink(path):
+                if not os.path.lexists(q / '99-output-ztp/current-release.json'):
+                    os.kill(os.getpid(), signal.SIGKILL)
+                original_sync(path)
+            api._fsync_parent_directory = die_after_parent_unlink
+        status = api.restore_setup_switch_q_publication(q, guard=guard, confirmed=True)
+        assert status == 'restored-q-publication-stopped-wal-retained', status
+        print('R22_COMPENSATION=' + status)
+        sys.exit(0)
     if sys.argv[5] == 'activate-retire-reentry':
         before, result = 'published', 'published-stopped-wal-retained'
     else:
@@ -5230,6 +5251,50 @@ finally:
                                         b_preflight or "none",
                                         "image" if real_image_link else "ztp/image/cumulus"], cwd=root,
                                        capture_output=True, text=True, check=False, timeout=30)
+            if b_preflight and b_preflight.startswith("compensate-death"):
+                self.assertEqual(-signal.SIGKILL, recovered.returncode, recovered.stdout + recovered.stderr)
+                marker = journal.parent / ".setup-switch-a-restore.json"
+                marker_owner = (marker.lstat().st_ino, marker.read_bytes())
+                self.assertFalse(os.path.lexists(parent_path))
+                self.assertTrue(Path(binding["report"]["destination"]).is_file())
+                self.assertTrue((q / "99-output-ztp/current").is_symlink())
+                self.assertEqual(wal, journal.read_bytes())
+                if b_preflight == "compensate-death-plan-owner":
+                    retained = marker.with_name("held-original-a-compensation-plan")
+                    marker.rename(retained)
+                    marker.write_bytes(retained.read_bytes())
+                    marker.chmod(0o600)
+                    self.assertNotEqual(marker_owner[0], marker.lstat().st_ino)
+                    foreign_owner = marker.lstat().st_ino
+                    report_path = Path(binding["report"]["destination"])
+                    selector_path = q / "99-output-ztp/current"
+                    remaining = (report_path.lstat().st_ino, report_path.read_bytes(),
+                                 selector_path.lstat().st_ino, os.readlink(selector_path))
+                recovered = subprocess.run([sys.executable, "-B", "-c", resume,
+                    str(root), str(q), str(ROOT), "api", "compensate", "ztp/image/cumulus"], cwd=root,
+                    capture_output=True, text=True, check=False, timeout=30)
+                if b_preflight == "compensate-death-plan-owner":
+                    self.assertEqual(1, recovered.returncode, recovered.stdout + recovered.stderr)
+                    self.assertIn("plan owner", recovered.stderr)
+                    self.assertEqual((foreign_owner, marker_owner[1]), (marker.lstat().st_ino, marker.read_bytes()))
+                    self.assertEqual(marker_owner, (retained.lstat().st_ino, retained.read_bytes()))
+                    self.assertEqual(remaining, (report_path.lstat().st_ino, report_path.read_bytes(),
+                                                selector_path.lstat().st_ino, os.readlink(selector_path)))
+                    self.assertEqual(wal, journal.read_bytes())
+                    self.assertEqual(q_manifest, manifest.read_bytes())
+                    self.assertFalse((root / "service-started").exists())
+                    return
+                self.assertEqual(marker_owner, (marker.lstat().st_ino, marker.read_bytes()))
+            if b_preflight and b_preflight.startswith("compensate"):
+                self.assertEqual(0, recovered.returncode, recovered.stdout + recovered.stderr)
+                self.assertIn("R22_COMPENSATION=restored-q-publication-stopped-wal-retained", recovered.stdout)
+                for basename in ("current-release.json", "generation-report.json", "current"):
+                    self.assertFalse(os.path.lexists(q / "99-output-ztp" / basename))
+                self.assertTrue(Path(binding["generation"]["path"]).is_dir())
+                self.assertEqual(wal, journal.read_bytes())
+                self.assertEqual(q_manifest, manifest.read_bytes())
+                self.assertFalse((root / "service-started").exists())
+                return
             if b_preflight == "activate-retire-death":
                 self.assertEqual(-signal.SIGKILL, recovered.returncode, recovered.stdout + recovered.stderr)
                 marker = manifest.parent / ".setup-switch-retirement.json"
