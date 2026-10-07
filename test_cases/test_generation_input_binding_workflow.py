@@ -4979,8 +4979,15 @@ finally:
     def test_real_setup_committed_q_group_cold_rejects_foreign_p_owner(self):
         self._real_setup_committed_q_group_restore(foreign_setup=True)
 
+    def test_real_setup_committed_q_group_restores_original_q_latest(self):
+        self._real_setup_committed_q_group_restore(q_local=True, setup_death=True)
+
+    def test_real_setup_committed_q_group_cold_rejects_same_byte_q_input(self):
+        self._real_setup_committed_q_group_restore(q_fault=True)
+
     def _real_setup_committed_q_group_restore(self, *, dhcp=False, runtime_death=False,
-                                             setup_death=False, foreign_setup=False):
+                                             setup_death=False, foreign_setup=False,
+                                             q_local=False, q_fault=False):
         fixture = RELEASE_FIXTURE.ReleaseTransactionTests()
         fixture.setUp()
         try:
@@ -5011,6 +5018,21 @@ def forbidden(*a, **kw):
 load.start_services = load.quiesce_services = load.generate_configs = forbidden
 try:
     if sys.argv[5] == 'writer':
+        if len(sys.argv) > 8 and sys.argv[8] == 'q-local':
+            output = q / '99-output-eth'
+            output.mkdir()
+            for raw, payload in (('20261005_110000_combine', b'hostname: original-Q\n'),
+                                 ('20261005_120000_combine', b'hostname: installed-Q\n')):
+                target = output / raw
+                target.mkdir()
+                (target / '.published-complete').write_bytes(b'complete\n')
+                (target / 'leaf.yaml').write_bytes(payload)
+            latest = output / 'latest'
+            latest.symlink_to('20261005_110000_combine')
+            load.register_setup_switch_q_local_latest(root / 'ztp/.setup-switch-journal.json',
+                latest, output / '20261005_120000_combine', **guard)
+            latest.unlink()
+            latest.symlink_to('20261005_120000_combine')
         setup = load_script('committed_q_group_setup', root / 'DAY0-Prepare/01-a-setup.py')
         load.service_runtime_backend = lambda: backend
         setup._SETUP_SWITCH_WAL_CONTEXT = (vars(load), fd)
@@ -5071,6 +5093,19 @@ try:
             print('R22_FOREIGN_P_OWNER_REJECTED')
             sys.exit(0)
         raise AssertionError('foreign same-target P owner must not be adopted')
+    if sys.argv[5] == 'compensate-q':
+        status = load.restore_setup_switch_q_publication(q, guard=guard, confirmed=True)
+        assert status == 'restored-q-publication-stopped-wal-retained', status
+        print('R22_Q_COMPENSATED_NO_P_WRITE')
+        sys.exit(0)
+    if sys.argv[5] == 'foreign-q-input':
+        try:
+            load.restore_setup_switch_a_disk(q, guard=guard, confirmed=True)
+        except load.LoadError as exc:
+            assert 'Q' in str(exc) and 'input' in str(exc) and 'HOLD' in str(exc), str(exc)
+            print('R22_FOREIGN_Q_INPUT_REJECTED')
+            sys.exit(0)
+        raise AssertionError('same-byte new Q input owner must not be adopted')
     status = load.restore_setup_switch_a_disk(q, guard=guard, confirmed=True)
     assert status == 'restored-p-a-group-stopped-wal-retained', status
     assert (root / 'ztp/ztp-bootstrap_oob.sh').read_bytes() == b'A oob bootstrap\n'
@@ -5086,9 +5121,33 @@ finally:
             argv = [sys.executable, "-B", "-c", script, str(root), str(q), str(common), str(ROOT)]
             shape = "dhcp" if dhcp else "no-dhcp"
             original_p_target = context.setup_state.links[common]
-            writer = subprocess.run(argv + ["writer", shape, original_p_target], capture_output=True, text=True, check=False, timeout=30)
+            writer = subprocess.run(argv + ["writer", shape, original_p_target, "q-local" if q_local else "no-q-local"],
+                                    capture_output=True, text=True, check=False, timeout=30)
             self.assertEqual(-signal.SIGKILL, writer.returncode, writer.stdout + writer.stderr)
             original_wal = (journal.lstat().st_ino, journal.read_bytes())
+            if q_fault:
+                compensation = subprocess.run(argv + ["compensate-q", shape], capture_output=True,
+                                              text=True, check=False, timeout=30)
+                self.assertEqual(0, compensation.returncode, compensation.stdout + compensation.stderr)
+                self.assertIn("R22_Q_COMPENSATED_NO_P_WRITE", compensation.stdout)
+                marker = journal.parent / ".setup-switch-a-restore.json"
+                original_plan = (marker.lstat().st_ino, marker.read_bytes())
+                source = q / "01-global.yaml"
+                held = source.with_name("independent-original-cold-Q-input")
+                metadata, payload = source.lstat(), source.read_bytes()
+                source.rename(held)
+                source.write_bytes(payload)
+                source.chmod(stat.S_IMODE(metadata.st_mode))
+                os.utime(source, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
+                frozen = (source.lstat().st_ino, state[7].lstat().st_ino, state[7].read_bytes(), os.readlink(common))
+                rejecting = subprocess.run(argv + ["foreign-q-input", shape], capture_output=True,
+                                           text=True, check=False, timeout=30)
+                self.assertEqual(0, rejecting.returncode, rejecting.stdout + rejecting.stderr)
+                self.assertIn("R22_FOREIGN_Q_INPUT_REJECTED", rejecting.stdout)
+                self.assertEqual(frozen, (source.lstat().st_ino, state[7].lstat().st_ino, state[7].read_bytes(), os.readlink(common)))
+                self.assertEqual(original_plan, (marker.lstat().st_ino, marker.read_bytes()))
+                self.assertEqual(original_wal, (journal.lstat().st_ino, journal.read_bytes()))
+                return
             if dhcp:
                 transaction, = (root / "private-etc-dhcp").glob(".load-dhcp-transaction-*")
                 original_receipt = (transaction.lstat().st_ino,
@@ -5117,6 +5176,10 @@ finally:
             self.assertEqual(0, reader2.returncode, reader2.stdout + reader2.stderr)
             self.assertEqual(original_wal, (journal.lstat().st_ino, journal.read_bytes()))
             self.assertEqual(original_plan, (marker.lstat().st_ino, marker.read_bytes()))
+            if q_local:
+                self.assertEqual("20261005_110000_combine", os.readlink(q / "99-output-eth/latest"))
+                self.assertEqual(b"hostname: original-Q\n", (q / "99-output-eth/20261005_110000_combine/leaf.yaml").read_bytes())
+                self.assertEqual(b"hostname: installed-Q\n", (q / "99-output-eth/20261005_120000_combine/leaf.yaml").read_bytes())
             if dhcp:
                 self.assertEqual(original_receipt, (transaction.lstat().st_ino,
                     (transaction / "a-preimage.json").lstat().st_ino, (transaction / "a-preimage.json").read_bytes()))

@@ -6618,7 +6618,31 @@ def _decode_setup_switch_journal(payload: bytes) -> dict[str, object]:
         if not isinstance(rows, list):
             raise ValueError(f"unknown journal {inventory} inventory shape")
         for row in rows:
-            exact_fields(row, fields, inventory)
+            row_fields = fields
+            if inventory == "q_local_links" and isinstance(row, dict) and ("before_tree" in row or "after_tree" in row):
+                row_fields = fields | {"before_tree", "after_tree"}
+            exact_fields(row, row_fields, inventory)
+            if inventory == "q_local_links" and "before_tree" in row:
+                for key in ("before_tree", "after_tree"):
+                    tree = row[key]
+                    if not isinstance(tree, dict) or "" not in tree or len(tree) > 4096:
+                        raise ValueError("invalid Q-local latest tree inventory")
+                    for relative, entry in tree.items():
+                        if (not isinstance(relative, str) or relative and (
+                                os.path.isabs(relative) or os.path.normpath(relative) != relative
+                                or ".." in Path(relative).parts)):
+                            raise ValueError("invalid Q-local latest tree name")
+                        entry_fields = {"kind", "dev", "ino", "mode", "uid", "gid"}
+                        if isinstance(entry, dict) and entry.get("kind") == "file":
+                            entry_fields |= {"size", "mtime_ns", "ctime_ns", "sha256"}
+                        elif not isinstance(entry, dict) or entry.get("kind") != "directory":
+                            raise ValueError("unsupported Q-local latest tree entry")
+                        exact_fields(entry, entry_fields, "Q-local latest tree")
+                        if (any(type(value) is not int or value < 0 for field, value in entry.items()
+                                if field not in {"kind", "sha256"})
+                                or "sha256" in entry and (not isinstance(entry["sha256"], str)
+                                    or re.fullmatch(r"[0-9a-f]{64}", entry["sha256"]) is None)):
+                            raise ValueError("invalid Q-local latest tree owner")
             for key in ("parent", "source_parent", "destination_parent", "before_target", "after_target"):
                 if key in row:
                     exact_fields(row[key], directory_fields, key)
@@ -7000,13 +7024,15 @@ def _require_setup_publication_state(body, *, phase="parent"):
     _require_setup_publication_images(bundle.get("image_intent"))
 
 
-def _require_setup_publication_images(intent):
+def _require_setup_publication_images(intent, *, restored_paths=()):
     if intent is None:
         return
     try:
         for pair in intent["files"].values():
-            for record in pair.values():
+            for label, record in pair.items():
                 path = Path(record["path"])
+                if label == "published" and path in restored_paths:
+                    continue  # Original held compensation plan checks this P/Q leaf instead.
                 if (record["identity"] != list(_dhcp_a_preimage_receipt_identity(path.lstat()))
                         or record["parent"] != _setup_switch_link_parent_identity(path)):
                     raise LoadError("publication original image owner changed; HOLD")
@@ -7180,7 +7206,27 @@ def _setup_switch_compensation_setup_records(body):
     records[str(MANIFEST)] = dict(before={"state": "file", "mode": body["manifest_mode"],
         "sha256": body["manifest_sha256"], "payload": body["manifest"]},
         checkpoint=shared["manifest"], parent=body["q_manifest_intent"]["parent"])
+    for row in body.get("q_local_links", []):
+        checkpoint = shared["q_local"][row["path"]]["link"]
+        records[row["path"]] = dict(before={"state": "link", "target": row["before"]},
+            checkpoint={key: checkpoint[key] for key in ("identity", "target")}, parent=row["parent"])
     return records
+
+
+def _require_setup_switch_compensation_q_evidence(body):
+    """Restoring A cannot discard or freshly adopt immutable Q evidence."""
+    bundle, shared = body["publication_bundle"], body["publication_bundle"]["shared_setup"]
+    generation = bundle["generation"]
+    path = Path(generation["path"])
+    if (generation["parent"] != _setup_switch_link_parent_identity(path)
+            or _setup_switch_comparison_tree(path) != generation["tree"]):
+        raise LoadError("A compensation original Q generation changed; HOLD")
+    if ("input_files" not in shared
+            or _setup_switch_publication_input_snapshot(body) != shared["input_files"]):
+        raise LoadError("A compensation original Q input owner changed; HOLD")
+    for row in body.get("q_local_links", []):
+        if _setup_switch_comparison_tree(Path(row["path"]).parent / row["after"]) != shared["q_local"][row["path"]]["tree"]:
+            raise LoadError("A compensation original Q latest target changed; HOLD")
 
 
 def _require_setup_switch_a_stage_inventory(plan, parents):
@@ -7284,11 +7330,14 @@ def _setup_switch_a_compensation_authority(project, *, guard, confirmed,
             _setup_switch_runtime_context(body)
         def shared_authority():
             wal_authority()
+            _require_setup_switch_compensation_q_evidence(body)
             shared = bundle.get("shared_setup")
             if restore_publication and (shared is None or _setup_switch_shared_publication_snapshot(body,
                     include_inputs="input_files" in shared) != shared):
                 raise LoadError("A compensation original shared Q owner changed; HOLD")
-            _require_setup_publication_images(bundle.get("image_intent"))
+            _require_setup_publication_images(bundle.get("image_intent"), restored_paths=(
+                {Path(name)
+                 for name in _setup_switch_compensation_setup_records(body)} if not restore_publication else ()))
         shared_authority()
         if not os.path.lexists(marker):
             if not restore_publication:
@@ -8497,6 +8546,8 @@ def _setup_switch_q_local_link_states(body) -> list[tuple[Path, dict]]:
                         or row[phase + "_target"] != _setup_switch_directory_identity(target)):
                     raise ValueError("Q-local complete release identity changed")
                 _read_rollback_regular(target / ".published-complete", limit=_ROLLBACK_MARKER_LIMIT)
+                if phase + "_tree" in row and _setup_switch_comparison_tree(target) != row[phase + "_tree"]:
+                    raise LoadError("original Q-local latest payload owner changed; HOLD")
             info = path.lstat()
             if (not stat.S_ISLNK(info.st_mode) or info.st_nlink != 1
                     or os.readlink(path) not in (row["before"], row["after"])):
@@ -8539,6 +8590,8 @@ def register_setup_switch_q_local_latest(
             "before": os.readlink(path), "after": target.name,
             "before_target": _setup_switch_directory_identity(path.parent / os.readlink(path)),
             "after_target": _setup_switch_directory_identity(target),
+            "before_tree": _setup_switch_comparison_tree(path.parent / os.readlink(path)),
+            "after_tree": _setup_switch_comparison_tree(target),
         }
         rows = body.get("q_local_links", [])
         existing = next((item for item in rows if item["path"] == str(path)), None)
@@ -10535,7 +10588,9 @@ def _recover_setup_switch_journal_snapshot(
     for path, row in q_local_states:
         require_journal_unchanged()
         _setup_switch_q_local_link_states(body)
-        if os.readlink(path) != row["before"]:
+        if a_compensation is not None:
+            a_compensation["restore_setup_leaf"](path)
+        elif os.readlink(path) != row["before"]:
             _atomic_restore_setup_link(
                 path, row["before"], require_authority=require_journal_unchanged,
             )

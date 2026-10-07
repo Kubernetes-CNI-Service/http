@@ -1634,6 +1634,8 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 ## TC-REAL-R22-GENERATION-INPUT-ABA-001 — 跨进程输入换代与多输出一致性
 
+- 2026-10-08 Q 证据续核与 Q-local latest owner 候选：在本卡既有隔离/快照/精确版本/排他锁/停服/写者静默前提下，首写前独立冻结 Q live inputs、sealed generation、Q-local latest before/after 完整树与链接 owner；补偿阶段持续核对。Q 提交强杀、Q-local/P 恢复再强杀后，新 LOAD 只消费原 stage 并补父同步；同字节新 Q input、克隆 generation、同目标新 latest、before/after payload 换绑均 HOLD，原 WAL/计划/旧新 target 与未知对象保留。保存 FD/name/parent/stat/SHA 和完整物理 END/exit，不用当前内容补登记 legacy 权限。清理仅人工恢复本卡已核隔离快照；本地 direct/多脚本不证明原 A 激活/健康退休、其它未覆盖共享面、root/Linux/断电/C2/DEV ACK，仍 OPEN，不在 live 注入。
+
 - 2026-10-08 共享 P 叶子持久 owner 候选：仍沿本卡的隔离 VM、精确版本、可恢复快照、排他锁、停服及写者静默前提。在 schema-3 计划首个补偿写前独立冻结原 P 链接文字/manifest 字节、原 Q checkpoint 与新暂存 FD/inode/父目录；P replace 后父同步前强杀，由新 LOAD 持原计划续接。恢复后注入同目标新链接、同字节新 manifest 和未列入 `.r22-a-setup-*`，必须 HOLD 并保留未知对象、原 WAL/计划/部分盘面，不根据当前内容重建 owner。保存完整 END/exit 与 FD/name/parent/stat/SHA、写入与同步顺序；清理仅人工恢复本卡经核隔离快照。本地 direct/真实多脚本 SIGKILL 尚不证明其它共享面、原 A 健康激活/安全退休、root/Linux/断电/C2 或 DEV ACK，本卡 OPEN，不在 live 注入。
 
 - 2026-10-08 已提交 Q 的停服分组恢复候选：沿本卡原隔离授权、精确版本、root-only 可恢复快照、排他部署锁、服务已停和正常写者静默前提，独立记录 Q parent/report/selector、P manifest/共享链接、flat runtime/public key、四 DHCP 文件及原 WAL/receipt/backup。原 schema-2 补偿计划在首个恢复写前登记原 B checkpoint 和 A 暂存 owner；Q 补偿后、P 链接同步后、首个 flat A replace 后同步前分别受控强杀，再用全新 LOAD 持原计划续接。原计划 inode/字节与原 WAL 不变；未完成目录同步须补做；未知 runtime 内容、同字节新目标/暂存/计划、额外残留必须 HOLD，不消费未知对象。四 DHCP A 前像恢复及同步先于 A runtime 后核验；缺席和原链接形态必须保留，原事务/backup/staged/receipt 不退休。保存完整物理 END/exit、每步 FD/name/parent 身份和 SHA、替换/同步顺序、零真实服务动作及隔离快照恢复核验。本地 direct/多脚本 SIGKILL 仅是候选，不证明所有共享面细粒度 owner、旧 A 显式健康激活/安全退休、root/Linux/断电/C2 或 DEV ACK，本卡仍 OPEN；现场仅人工按已核隔离快照清理，不在 live 注入、不自动回 A。

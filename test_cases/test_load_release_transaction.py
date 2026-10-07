@@ -1066,8 +1066,10 @@ class ReleaseTransactionTests(unittest.TestCase):
 
     def _prepare_published_q_for_stopped_preflight(self, *, with_image=False, no_upgrade=False,
                                                   ztp_disabled=False, seed_q_publication=False,
-                                                  publication_phase="published", partial_runtime=False):
-        state, context, guard = self._prepare_q_manifest_publication(seed_q_publication=seed_q_publication)
+                                                  publication_phase="published", partial_runtime=False,
+                                                  q_local=False):
+        state, context, guard = self._prepare_q_manifest_publication(seed_q_publication=seed_q_publication,
+                                                                   q_local=q_local)
         q = state[1]
         for name, source in (("01-global.yaml", self.inputs.global_file),
                              ("02-devices_config.csv", self.inputs.devices_file),
@@ -1571,6 +1573,64 @@ class ReleaseTransactionTests(unittest.TestCase):
                 LOAD.restore_setup_switch_a_disk(state[1], guard=guard, confirmed=True)
             self.assertEqual(frozen, (state[-3].read_bytes(), path.lstat().st_ino, path.read_bytes(), os.readlink(state[2])))
 
+    def test_committed_q_group_restore_holds_replaced_q_input_before_p_write(self):
+        state, _context, guard, _token, _inputs = self._prepare_published_q_for_stopped_preflight(partial_runtime=True)
+        path = state[1] / "01-global.yaml"
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            LOAD.restore_setup_switch_q_publication(state[1], guard=guard, confirmed=True)
+            held = path.with_name("independent-original-Q-input")
+            metadata, payload = path.lstat(), path.read_bytes()
+            path.rename(held)
+            path.write_bytes(payload)
+            path.chmod(stat.S_IMODE(metadata.st_mode))
+            os.utime(path, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
+            frozen = (state[-3].read_bytes(), state[7].read_bytes(), os.readlink(state[2]), path.lstat().st_ino)
+            with self.assertRaisesRegex(LOAD.LoadError, "Q.*input.*HOLD|HOLD.*input"):
+                LOAD.restore_setup_switch_a_disk(state[1], guard=guard, confirmed=True)
+            self.assertEqual(frozen, (state[-3].read_bytes(), state[7].read_bytes(), os.readlink(state[2]), path.lstat().st_ino))
+
+    def test_committed_q_group_restore_holds_cloned_q_generation_before_p_write(self):
+        state, _context, guard, token, _inputs = self._prepare_published_q_for_stopped_preflight(partial_runtime=True)
+        generation = Path(json.loads(token["payload"])["body"]["publication_bundle"]["generation"]["path"])
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            LOAD.restore_setup_switch_q_publication(state[1], guard=guard, confirmed=True)
+            held = generation.with_name("independent-original-Q-generation")
+            generation.rename(held)
+            shutil.copytree(held, generation)
+            self.assertNotEqual(generation.lstat().st_ino, held.lstat().st_ino)
+            frozen = (state[-3].read_bytes(), state[7].read_bytes(), os.readlink(state[2]), generation.lstat().st_ino)
+            with self.assertRaisesRegex(LOAD.LoadError, "Q.*generation.*HOLD|HOLD.*generation"):
+                LOAD.restore_setup_switch_a_disk(state[1], guard=guard, confirmed=True)
+            self.assertEqual(frozen, (state[-3].read_bytes(), state[7].read_bytes(), os.readlink(state[2]), generation.lstat().st_ino))
+
+    def test_committed_q_group_restore_holds_same_target_restored_q_latest_owner(self):
+        state, _context, guard, _token, _inputs = self._prepare_published_q_for_stopped_preflight(
+            partial_runtime=True, q_local=True)
+        latest = state[1] / "99-output-eth/latest"
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            LOAD.restore_setup_switch_a_disk(state[1], guard=guard, confirmed=True)
+            self.assertEqual("20261005_110000_combine", os.readlink(latest))
+            held = latest.with_name("independent-original-restored-Q-latest")
+            latest.rename(held)
+            latest.symlink_to("20261005_110000_combine")
+            self.assertNotEqual(latest.lstat().st_ino, held.lstat().st_ino)
+            frozen = (state[-3].read_bytes(), state[7].lstat().st_ino, latest.lstat().st_ino, os.readlink(latest))
+            with self.assertRaisesRegex(LOAD.LoadError, "setup.*owner.*HOLD"):
+                LOAD.restore_setup_switch_a_disk(state[1], guard=guard, confirmed=True)
+            self.assertEqual(frozen, (state[-3].read_bytes(), state[7].lstat().st_ino, latest.lstat().st_ino, os.readlink(latest)))
+
+    def test_committed_q_group_restore_holds_changed_original_q_latest_payload(self):
+        state, _context, guard, _token, _inputs = self._prepare_published_q_for_stopped_preflight(
+            partial_runtime=True, q_local=True)
+        source = state[1] / "99-output-eth/20261005_110000_combine/leaf.yaml"
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            LOAD.restore_setup_switch_q_publication(state[1], guard=guard, confirmed=True)
+            source.write_bytes(b"hostname: independent-unregistered-latest-payload\n")
+            frozen = (state[-3].read_bytes(), state[7].read_bytes(), os.readlink(state[2]), source.read_bytes())
+            with self.assertRaisesRegex(LOAD.LoadError, "latest.*HOLD|HOLD.*latest"):
+                LOAD.restore_setup_switch_a_disk(state[1], guard=guard, confirmed=True)
+            self.assertEqual(frozen, (state[-3].read_bytes(), state[7].read_bytes(), os.readlink(state[2]), source.read_bytes()))
+
     def test_original_no_upgrade_image_policy_does_not_require_a_version(self):
         # The original persisted no-upgrade policy is authoritative; resolving
         # an unused version must not reject a legitimate image-free B attempt.
@@ -2013,10 +2073,16 @@ class ReleaseTransactionTests(unittest.TestCase):
         self.assertEqual(token["payload"], state[-3].read_bytes())
         self.assertEqual(source.read_bytes(), held.read_bytes())
 
-    def _prepare_q_manifest_publication(self, *, seed_q_publication=False):
+    def _prepare_q_manifest_publication(self, *, seed_q_publication=False, q_local=False):
         state, context = self._prepare_persisted_a_runtime_switch(seed_q_publication=seed_q_publication)
         journal, descriptor, backend = state[-3:]
         guard = dict(deployment_lock_descriptor=descriptor, services_quiesced=True, runtime_backend=backend)
+        if q_local:
+            latest, releases = self._q_local_latest_fixture(state[1])
+            with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+                LOAD.register_setup_switch_q_local_latest(journal, latest, releases[1], **guard)
+            latest.unlink()
+            latest.symlink_to(releases[1].name)
         state[2].unlink()
         state[2].symlink_to(os.path.relpath(state[5], state[2].parent))
         state[3].unlink()

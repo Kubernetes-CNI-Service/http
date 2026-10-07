@@ -1,5 +1,40 @@
 # 脚本变更影响测试
 
+## 2026-10-08 R22 补偿全过程 Q 证据与 Q-local latest owner 候选
+
+基于 `60b7b4a`。三个独立反例：Q 补偿后同字节新 live input、同内容克隆封存 Q
+generation、恢复后的同目标新 Q-local latest 均被 group 接受，3 FAIL / 9.807s /
+exit1；原日志 `r22-committed-q-group-immutable-q-red.log`，inode161779646 /
+size131135 / SHA256 `90e95f0abe53cb19edf549f9d197f3c08eccaeb8e604c61eaf53d14d2315aab7`。
+group 每个授权边界持续核原 Q input/generation/发布 latest target；Q-local latest
+加入原计划自有 stage，拒绝同目标新 owner。镜像源保持原绑定；仅已在原计划中的
+published 叶子由该计划的 P/Q owner 状态校验，不能在恢复后套用旧 B published inode。
+
+另一独立反例发现 original Q latest 目录 inode 不变但 leaf.yaml 修改仍被恢复接受：
+`r22-committed-q-group-q-latest-tree-red.log` / inode161789401 / size128173 /
+SHA256 `8720a5067ac1339047ea610db424d78bae4b1e9d05de0c60dad75dc08590cc71`，
+1 FAIL / 3.012s / exit1。新注册在首写前冻结 before/after 两棵完整树，冷读拒绝
+owner/字节变更；旧 WAL 不在恢复中补登记新权限。失败断言与原日志全部保留。
+
+三项 direct + 两项真实 LOAD→SETUP→Q 提交强杀→Q-local/P 恢复再强杀→新 LOAD
+续接/同字节 input 换绑拒绝，5 OK / 23.109s / exit0；
+`r22-committed-q-group-immutable-q-workflow-green.log`，inode161785077 / size129754 /
+SHA256 `f4b4ba7647f1824708bd22fadccacdadbbc56f94f0896cfae6365441ec5ffcca`。
+前后 stat 一致；物理 Ran12→OK14→实际退出27→冻结一致28→END30=0。
+四项 direct + 两项真实 workflow 合并回归 6 OK / 25.530s / exit0；
+`r22-committed-q-group-q-latest-tree-workflow-green.log`，inode161789684 / size130379 /
+SHA256 `8956c04497f5a0166e6914ed5c95edc3ae0f50e43b475dccf168df2edf0f8747`；
+物理 Ran13→OK15→实际退出30→冻结一致31→END33=0。
+
+完整 LOAD/release、report direct/workflow、原 B/Q 与 group 多脚本模块回归：
+608 tests OK / 228.162s / exit0；日志
+`outputs/test-diagnostics/r22-committed-q-group-q-evidence-full-module-regression.log`，
+inode161794218 / size336997 / SHA256
+`e976cfe321bfdab481e449c8b4a6c7279dfe0971dc606273889ffe208f21e127`。
+旧 270802-byte 前缀 SHA256 `52bfb03395445c95f92e95a80df5c56befcf81bb52e15c8e7c8254fa7809b0d8`
+不变，前后 stat 一致；物理 Ran1748→OK1750→实际退出1769→冻结一致1770→END1772=0。
+这是有界模块回归；正式 related/full/check 与原 A 激活资格仍待，不以此关闭 R22。
+
 ## 2026-10-08 R22 共享 P 叶子持久 owner 候选
 
 基于 `80d5570`。两项独立反例确认恢复后同目标新 P 链接、同字节新 P manifest

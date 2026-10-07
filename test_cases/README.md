@@ -598,6 +598,12 @@ schema-3 另登记原 WAL 泛用共享 P 链接与 P manifest 的原 Q checkpoin
 实体 latest/comparison 目录仍走独立原 WAL 的目录 owner，不能用软链接叶子还原覆盖。
 这些本地多脚本用例仍不是旧 A 激活或正式 full/check 的完成证明。
 
+分组补偿持续校验原 Q live input 与封存 generation 的 owner/摘要，并保留原 Q
+发布 target 树。Q-local latest 也由原计划暂存 owner 恢复；新 WAL 在首写前登记
+该 latest 的 before/after 完整树，不只信目录 inode 或 `.published-complete` 名称。
+未知 payload/同字节新 input、克隆 generation、同目标新 latest 均 HOLD；legacy
+WAL 不在冷读中重新冻结当前数据作为原证据。
+
 同一模块还覆盖端到端 deployment scope：默认 `all` 同时生成 Production/AIR；`prod` 只发布
 Production Cumulus/IB/NVL；`air` 只发布 AIR DHCP/YAML/release，并只临时渲染 AIR full profile
 实际引用的 Production 来源；单独指定 `mini` 会自动选择 AIR scope 和 `eth`，显式 `prod+mini`
