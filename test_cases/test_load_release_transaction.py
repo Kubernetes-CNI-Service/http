@@ -2441,6 +2441,68 @@ class ReleaseTransactionTests(unittest.TestCase):
         self.assertFalse(os.path.lexists(receipts / generation.name))
         self.assertEqual([], list(receipts.iterdir()))
 
+    def test_runtime_file_restore_holds_preexisting_orphan_stage(self):
+        target = self.ztp / "independent-runtime-file"
+        target.write_bytes(b"independent partial B file\n")
+        orphan = target.parent / f".{target.name}.rollback-independent-orphan"
+        orphan.symlink_to("independent-absent-evidence")
+        before = (target.lstat().st_ino, target.read_bytes(), orphan.lstat().st_ino)
+        payload = b"independent frozen A file\n"
+        record = {"state": "file", "mode": 0o640, "sha256": hashlib.sha256(payload).hexdigest()}
+        with mock.patch.object(os, "replace", wraps=os.replace) as replace:
+            with self.assertRaises(LOAD.LoadError):
+                LOAD._restore_receipt_file(target, record, payload)
+            replace.assert_not_called()
+        self.assertEqual(before, (target.lstat().st_ino, target.read_bytes(), orphan.lstat().st_ino))
+        self.assertEqual("independent-absent-evidence", os.readlink(orphan))
+
+    def test_setup_wal_cold_recovery_holds_runtime_orphan_before_p_write(self):
+        state, context = self._prepare_persisted_a_runtime_switch()
+        common, journal, descriptor, backend = state[2], *state[-3:]
+        common.unlink()
+        common.symlink_to(os.path.relpath(state[5], common.parent))
+        target = self.ztp / "ztp-bootstrap_oob.sh"
+        target.write_bytes(b"independent partial B runtime\n")
+        orphan = target.parent / f".{target.name}.rollback-independent-orphan"
+        orphan.write_bytes(b"unknown earlier runtime stage\n")
+        before = (common.lstat().st_ino, os.readlink(common), target.lstat().st_ino,
+                  target.read_bytes(), journal.lstat().st_ino, journal.read_bytes(), orphan.lstat().st_ino)
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "_atomic_restore_setup_link", wraps=LOAD._atomic_restore_setup_link) as restore:
+            with self.assertRaises(LOAD.LoadError):
+                LOAD.recover_setup_switch_journal(journal, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend, restore_runtime_from_wal=True)
+            restore.assert_not_called()
+        self.assertEqual(before, (common.lstat().st_ino, os.readlink(common), target.lstat().st_ino,
+                  target.read_bytes(), journal.lstat().st_ino, journal.read_bytes(), orphan.lstat().st_ino))
+        self.assertEqual(b"unknown earlier runtime stage\n", orphan.read_bytes())
+        backend.start.assert_not_called()
+
+    def test_setup_wal_retirement_holds_runtime_orphan_after_runtime_restore(self):
+        state, context = self._prepare_persisted_a_runtime_switch()
+        journal, descriptor, backend = state[-3:]
+        target = self.ztp / "ztp-bootstrap_oob.sh"
+        target.write_bytes(b"independent partial B runtime\n")
+        orphan = target.parent / f".{target.name}.rollback-independent-late"
+        before = (journal.lstat().st_ino, journal.read_bytes())
+        restore, injected = LOAD.restore_runtime_rollback_receipt, []
+        def late_orphan(*args, **kwargs):
+            result = restore(*args, **kwargs)
+            orphan.write_bytes(b"unknown stage after runtime postverify\n")
+            injected.append(orphan.lstat().st_ino)
+            return result
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "restore_runtime_rollback_receipt", side_effect=late_orphan):
+            with self.assertRaises(LOAD.LoadError):
+                LOAD.recover_setup_switch_journal(journal, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend, restore_runtime_from_wal=True)
+        self.assertEqual(1, len(injected), "independent runtime postverify boundary not reached")
+        self.assertEqual(before, (journal.lstat().st_ino, journal.read_bytes()))
+        self.assertEqual(injected[0], orphan.lstat().st_ino)
+        self.assertEqual(b"unknown stage after runtime postverify\n", orphan.read_bytes())
+        self.assertEqual(b"A oob bootstrap\n", target.read_bytes())
+        backend.start.assert_not_called()
+
     def test_runtime_receipt_file_preserves_foreign_stage_before_publish_or_cleanup(self):
         for kind in ("inode", "bytes", "hold"):
             with self.subTest(kind=kind):

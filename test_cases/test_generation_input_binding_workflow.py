@@ -516,6 +516,11 @@ finally:
     def test_real_setup_death_disk_only_a_runtime_missing_latest_sync_retry_retains_wal(self):
         self._assert_real_persisted_a_runtime_switch(False, late_authority="latest-sync")
 
+    def test_real_setup_death_runtime_orphan_holds_cold_entry_and_retirement(self):
+        for kind in ("file", "dangling", "late"):
+            with self.subTest(kind=kind):
+                self._assert_real_persisted_a_runtime_switch(False, late_authority="runtime-orphan-" + kind)
+
     def test_real_setup_death_runtime_file_restore_preserves_foreign_stage(self):
         for kind in ("inode", "bytes", "hold"):
             with self.subTest(kind=kind):
@@ -599,6 +604,71 @@ os.kill(os.getpid(), signal.SIGKILL)
             self.assertEqual(-9, first.returncode, first.stdout + first.stderr)
             evidence = journal.read_bytes()
             mixed = os.readlink(common)
+            if late_authority and late_authority.startswith("runtime-orphan-"):
+                kind = late_authority.removeprefix("runtime-orphan-")
+                target = root / "ztp/ztp-bootstrap_oob.sh"
+                orphan = target.parent / f".{target.name}.rollback-independent-orphan"
+                if kind == "file":
+                    orphan.write_bytes(b"independent unknown earlier runtime stage\n")
+                elif kind == "dangling":
+                    orphan.symlink_to("independent-absent-runtime-evidence")
+                before = (common.lstat().st_ino, mixed, state[7].lstat().st_ino,
+                          state[7].read_bytes(), target.lstat().st_ino, target.read_bytes())
+                wal_before = (journal.lstat().st_ino, journal.read_bytes())
+                recovery = r'''
+import importlib.util, json, os, sys
+from pathlib import Path
+from types import SimpleNamespace
+root, kind = Path(sys.argv[1]), sys.argv[2]
+spec = importlib.util.spec_from_file_location('runtime_orphan_cold_load', root / 'DAY0-Prepare/11-load.py')
+load = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = load
+spec.loader.exec_module(load)
+load.active_managed_services = lambda *args, **kwargs: ()
+target = root / 'ztp/ztp-bootstrap_oob.sh'
+orphan = target.parent / ('.' + target.name + '.rollback-independent-orphan')
+if kind == 'late':
+    restore = load.restore_runtime_rollback_receipt
+    def late_orphan(*args, **kwargs):
+        result = restore(*args, **kwargs)
+        orphan.write_bytes(b'independent unknown late runtime stage\n')
+        (root / 'runtime-orphan-injection.json').write_text(json.dumps({'ino': orphan.lstat().st_ino}))
+        return result
+    load.restore_runtime_rollback_receipt = late_orphan
+fd = load.acquire_deployment_lock(exclusive=True)
+try:
+    try:
+        load.recover_setup_switch_journal(root / 'ztp/.setup-switch-journal.json',
+            deployment_lock_descriptor=fd, services_quiesced=True,
+            runtime_backend=SimpleNamespace(name='supervisor'), restore_runtime_from_wal=True)
+    except load.LoadError as exc:
+        print('EXPECTED UNKNOWN RUNTIME STAGE HOLD:', exc)
+        raise SystemExit(7)
+finally:
+    load.release_deployment_lock(fd)
+'''
+                orphan_inode = orphan.lstat().st_ino if kind != "late" else None
+                result = subprocess.run([sys.executable, "-B", "-c", recovery, str(root), kind],
+                    capture_output=True, text=True, check=False, timeout=30)
+                self.assertEqual(7, result.returncode, result.stdout + result.stderr)
+                self.assertEqual(wal_before, (journal.lstat().st_ino, journal.read_bytes()))
+                if kind == "late":
+                    marker = json.loads((root / "runtime-orphan-injection.json").read_text())
+                    self.assertEqual(marker["ino"], orphan.lstat().st_ino)
+                    self.assertEqual(b"independent unknown late runtime stage\n", orphan.read_bytes())
+                    self.assertEqual(b"A oob bootstrap\n", target.read_bytes())
+                    self.assertEqual(context.setup_state.manifest, state[7].read_bytes())
+                    self.assertEqual(context.setup_state.links, {p: os.readlink(p) for p in context.setup_state.links})
+                else:
+                    self.assertEqual(before, (common.lstat().st_ino, os.readlink(common), state[7].lstat().st_ino,
+                                      state[7].read_bytes(), target.lstat().st_ino, target.read_bytes()))
+                    self.assertEqual(orphan_inode, orphan.lstat().st_ino)
+                    if kind == "file":
+                        self.assertEqual(b"independent unknown earlier runtime stage\n", orphan.read_bytes())
+                    else:
+                        self.assertEqual("independent-absent-runtime-evidence", os.readlink(orphan))
+                self.assertFalse((root / "service-started").exists())
+                return
             if late_authority and late_authority.startswith("file-stage-"):
                 recovery = r'''
 import importlib.util, json, os, stat, sys

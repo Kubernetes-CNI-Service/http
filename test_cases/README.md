@@ -438,6 +438,13 @@ R22 runtime 普通文件恢复须在最终模式及文件内容 fsync 后 replac
 保留为事件证据。direct 与真实 SETUP 登记 Q 链接→强杀→新 LOAD 的 A runtime 冷恢复
 覆盖上述两种漂移和 WAL 换绑后错误清理，原同步失败及正常恢复继续执行。这不提供
 未知 runtime 孤儿暂存的后续冷收口、原子 compare-and-replace/unlink 或非合作写者免疫。
+R22 普通文件恢复的未知孤儿另有 fail-closed 入口/退休围栏：仅从已验证 A receipt 的
+frozen files 与普通文件 publickeys 枚举恢复名称，用持有物理父目录 FD 的有界扫描检查
+`.name.rollback-`，不跟随对象、不按前缀清理。普通文件 helper 自身、runtime receipt
+入口/后核验以及现代 WAL 在 P 首次写入前/退休前均拒绝未知暂存，悬空链接同样 HOLD。
+direct 与真实 SETUP 登记 Q 链接→强杀→新 LOAD 覆盖原有普通/悬空暂存及 runtime
+后核验后晚到暂存，保留原 WAL；晚到故障如实记录已发生的 P/A 恢复，不承诺零写入。
+这不是无 WAL 的全树扫描、未知对象归属判定/删除、完整 root/B 健康退休或旧 A 激活。
 missing 前像的 unlink 和已经缺席的重入也须同步父目录。同步失败不得报成功或退休 WAL。
 direct 覆盖实际模式/同步顺序和写入/删除同步异常；真实 LOAD→SETUP 强杀→新 LOAD
 workflow 使用实际 runtime 文件 writer 注入父目录同步错误，保留 WAL 后在新进程重入。
