@@ -942,6 +942,11 @@ VISIBLE_ONLY_UNPROVED，不是新鲜准入、COMPLETE、结算或发送许可；
 原始目标、策略、白名单、unit/action/wire 必须保持绑定；连带重哈希的外来目标
 也拒绝。这不是远端来源鉴别、新鲜准入、网络许可或 COMPLETE；完整业务、审计、
 nonce/fence 对账和受审 launcher 仍需集成，未安装且真机卡 NOT RUN。
+原始 History 容量与冻结 wire 共同确定全部实际业务及 ALL 审计的行预留；
+NOOP 不产生虚构行。typed 空字符串／false 和 gap 的最后占用行均参与尾边界，
+精确余量为 0 可接受，溢出 HOLD。metadata fence 预留前必须先校验这一原始
+行预算并把原 History 摘要／预留窗口绑定入 header；UNKNOWN 和冷进程保持
+同一窗口，无 caller 计数器／新尾替换／额外分配，仍不是当前鲜度、CAS 或许可。
 
 `test_cases.test_req7_history_read` 验证固定 `Update_History` A:E 有界矩形
 （最多 5000 行、2 MiB 响应）的 planner → 实际自有 loopback TLS → typed decoder；

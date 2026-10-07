@@ -35,6 +35,18 @@ class HistoryPrereadObservation:
     wire_sha256: str
 
 
+@dataclass(frozen=True)
+class HistoryAppendReservation:
+    first_row_index: int
+    last_row_index: int
+    rows_reserved: int
+    remaining_rows: int
+    row_count: int
+    source_sha256: str
+    action_digest: str
+    wire_sha256: str
+
+
 def _inputs(token, binding, unit):
     owner, parent, name, header = global_journal._inputs(token, binding, unit)
     state = global_journal.inspect_global_unit(token, binding, unit)
@@ -131,3 +143,31 @@ def _read_preread(token, binding, unit):
 def inspect_history_preread(token, binding, unit):
     """Re-decode private original bytes, never substitute a later tail image."""
     return _read_preread(token, binding, unit)[0]
+
+
+def require_history_append_capacity(token, binding, unit):
+    """Reserve ALL actual business/audit rows from immutable original capacity.
+
+    Global ownership already blocks every new unit. The original before image
+    and original wire durably fix this sole pending unit's row demand; no caller
+    row count, current tail, replacement image or new allocation is accepted.
+    UNKNOWN retains exactly the same reservation, not another append window.
+    This is a capacity condition, NOT current-row freshness, CAS or permission.
+    """
+    failed = False
+    try:
+        original = inspect_history_preread(token, binding, unit)
+        # _read_preread binds the real compiled unit and both immutable wire/
+        # action to the global journal, including all piggyback audit rows and
+        # excluding NOOP business rows. No caller-provided demand is used.
+        rows = unit.history_rows_expected
+        first = original.history_last_row_before_send + 1
+        last = first + rows - 1
+        if type(rows) is not int or not 1 <= rows <= 1000 or not 2 <= first <= last < original.row_count:
+            raise HistoryPrereadHold()
+        result = HistoryAppendReservation(first, last, rows, original.row_count - last - 1,
+            original.row_count, original.source_sha256, original.action_digest, original.wire_sha256)
+        ownership._validated_owner(token, binding)
+    except Exception: failed = True
+    if failed: raise HistoryPrereadHold()
+    return result

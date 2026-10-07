@@ -2131,6 +2131,11 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - 证据：精确 HEAD/tree/dirty、命令及退出码、Python/平台、完整日志及 END、前后 stat/inode/大小/SHA256、marker 的物理屏障顺序、原像摘要和尾边界。History/raw/token 私密，不公开；实际断电与部署身份仅由授权真机证据确认。
 - 故障注入与清理：缺失/截断 raw、链接/权限/位移、额外命名空间、六个屏障逐项失败、重哈希外来目标与 UNKNOWN 后补建均 HOLD；只回收确证自有临时目录和进程，不删除真实 journal、fence、nonce 或解锁重发。
 
+本卡新增本地联测：原始 rowCount／typed 最后占用行与冻结 wire 的全部实际业务＋
+ALL 审计行确定唯一 append 窗口（NOOP 无虚构行），精确耗尽可接受、溢出 HOLD。
+冷进程和 UNKNOWN 不重分配；metadata 预留创建前必须校验 History 预算，并保存
+原 History 摘要／窗口绑定。真实编辑后的鲜度、CAS、认证来源仍 NOT RUN，不是 COMPLETE。
+
 ## TC-REAL-REQ7-BOUNDED-HISTORY-READ-001 — 原始类型的有限 History 回读
 
 - Case ID：`TC-REAL-REQ7-BOUNDED-HISTORY-READ-001`；类型：real-environment / integration；对应 C-8/C-19/C-26。状态：**NOT RUN / REAL_ENV REQUIRED**。涉及 `monitor/issue_tracker_sheets_read_plan.py`、`monitor/issue_tracker_tls_inputs.py`、`monitor/issue_tracker_sheets_read_decode.py`；本地 direct 与原生私有 loopback TLS workflow 已覆盖类型、矩形和一次读取，不证明部署环境或整个 REQ7。

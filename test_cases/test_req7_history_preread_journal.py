@@ -61,6 +61,40 @@ class Req7HistoryPrereadJournalDirectTests(unittest.TestCase):
             with self.assertRaises(module.HistoryPrereadHold): module.prepare_history_preread(token, binding(), self.value, self.plan, self.raw)
             self.assertEqual(self.raw.data, (self.store / 'HISTORY-RAW').read_bytes())
 
+    def test_original_capacity_reserves_all_actual_history_rows_and_survives_unknown_without_reallocation(self):
+        module = load()
+        self.assertTrue(hasattr(module, 'require_history_append_capacity'), 'actual History row reservation missing')
+        with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
+            self.global_journal.prepare_global_unit(token, binding(), self.value)
+            module.prepare_history_preread(token, binding(), self.value, self.plan, self.raw)
+            seen = module.require_history_append_capacity(token, binding(), self.value)
+            self.assertEqual((4, 5, 2, 1, 7), (seen.first_row_index, seen.last_row_index, seen.rows_reserved, seen.remaining_rows, seen.row_count))
+            self.assertEqual(self.value.action_digest, seen.action_digest)
+            for count in range(1, 7):
+                self.global_journal.record_global_attempt_intent(token, binding(), self.value)
+                self.assertEqual(seen, module.require_history_append_capacity(token, binding(), self.value))
+            self.assertFalse(hasattr(seen, 'permit')); self.assertFalse(hasattr(seen, 'complete'))
+
+    def test_history_capacity_full_typed_gap_and_exact_boundary_use_original_not_caller_counter(self):
+        module = load()
+        self.assertTrue(hasattr(module, 'require_history_append_capacity'), 'actual History row reservation missing')
+        for row_count, row_data, expected in ((3, [], None), (4, [], (2, 3, 0)),
+                (5, [{'values': [{'userEnteredValue': {'boolValue': False}}]}], (3, 4, 0)),
+                (5, [{}, {'values': [{}, {}, {}, {}, {'userEnteredValue': {'stringValue': ''}}]}], None)):
+            with self.subTest(row_count=row_count, tail=len(row_data)), tempfile.TemporaryDirectory(prefix='req7-history-capacity-') as directory:
+                root = Path(directory).resolve(); locks = root / 'var/lib/http-ztp-container/issue-tracker'; locks.mkdir(parents=True, mode=0o700)
+                value = tail_document(row_count); value['sheets'][0]['data'][0]['rowData'] = row_data
+                with fixture(root), self.owner.spreadsheet_owner(binding()) as token:
+                    self.global_journal.prepare_global_unit(token, binding(), self.value)
+                    module.prepare_history_preread(token, binding(), self.value, self.plan, response(value))
+                    before = {p.name: p.read_bytes() for p in (locks / self.store.name).iterdir()}
+                    if expected is None:
+                        with self.assertRaises(module.HistoryPrereadHold): module.require_history_append_capacity(token, binding(), self.value)
+                    else:
+                        seen = module.require_history_append_capacity(token, binding(), self.value)
+                        self.assertEqual(expected, (seen.first_row_index, seen.last_row_index, seen.remaining_rows))
+                    self.assertEqual(before, {p.name: p.read_bytes() for p in (locks / self.store.name).iterdir()})
+                    with self.assertRaises(TypeError): module.require_history_append_capacity(token, binding(), self.value, rows=1)
     def test_after_first_intent_no_creation_and_revocation_or_changed_binding_no_adoption(self):
         module = load()
         with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
@@ -198,9 +232,12 @@ class Req7HistoryPrereadNativeWorkflowTests(unittest.TestCase):
         with fixture(self.journal_root), self.owner.spreadsheet_owner(binding()) as token:
             self.global_journal.prepare_global_unit(token, binding(), self.value)
             module.prepare_history_preread(token, binding(), self.value, self.plan, raw)
+            reserved = module.require_history_append_capacity(token, binding(), self.value)
+            self.assertEqual((4, 5, 2, 1), (reserved.first_row_index, reserved.last_row_index, reserved.rows_reserved, reserved.remaining_rows))
             self.global_journal.record_global_attempt_intent(token, binding(), self.value)
             seen = module.inspect_history_preread(token, binding(), self.value)
             self.assertEqual((3, 7), (seen.history_last_row_before_send, seen.row_count))
+            self.assertEqual(reserved, module.require_history_append_capacity(token, binding(), self.value))
             later = tail_document(); later['sheets'][0]['data'][0]['rowData'].append({'values': [{'userEnteredValue': {'stringValue': 'later'}}]})
             with self.assertRaises(module.HistoryPrereadHold): module.prepare_history_preread(token, binding(), self.value, self.plan, response(later))
             self.assertEqual(payload, (self.store / 'HISTORY-RAW').read_bytes())
@@ -211,5 +248,8 @@ if __name__ == '__main__':
         owner = load_owner(); module = load()
         with fixture(Path(sys.argv[2])), owner.spreadsheet_owner(binding()) as token:
             seen = module.inspect_history_preread(token, binding(), unit())
+            reserved = module.require_history_append_capacity(token, binding(), unit())
+            if (reserved.first_row_index, reserved.last_row_index, reserved.rows_reserved, reserved.remaining_rows) != (4, 5, 2, 1):
+                raise AssertionError('original cold-process append reservation changed')
             os.write(1, ('%d %d\n' % (seen.history_last_row_before_send, seen.row_count)).encode())
     else: unittest.main()

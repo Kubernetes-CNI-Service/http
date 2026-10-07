@@ -41,9 +41,11 @@ class MetadataReservationObservation:
 
 
 def _inputs(token, binding, identity, unit):
+    from monitor.issue_tracker_history_preread_journal import require_history_append_capacity
     owner, parent, name, base = global_journal._inputs(token, binding, unit)
     state = global_journal.inspect_global_unit(token, binding, unit)
     enrollment.require_unit_enrollment(token, binding, identity, unit)
+    history = require_history_append_capacity(token, binding, unit)
     original = enrollment.inspect_enrollment_journal(token, binding, identity)
     action = json.loads(unit.action_preimage)
     # _inputs/_projection already require the canonical frozen composer and
@@ -54,7 +56,9 @@ def _inputs(token, binding, identity, unit):
     # Add only that derived discriminator, without changing the frozen wire.
     fence = {**wire_fence, 'location': {'locationType': 'SHEET', **wire_fence['location']}}
     base = {**base, 'enrollment_sha256': original.journal_sha256,
-            'identity_sha256': identity.source_sha256, 'sheet_ids': identity.sheet_ids}
+            'identity_sha256': identity.source_sha256, 'sheet_ids': identity.sheet_ids,
+            'history_source_sha256': history.source_sha256, 'history_first_row_index': history.first_row_index,
+            'history_last_row_index': history.last_row_index, 'history_rows_reserved': history.rows_reserved}
     return parent, owner.lock_name[:-5] + '.metadata', base, state, action['identity']['sheet'], fence
 
 

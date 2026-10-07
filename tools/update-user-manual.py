@@ -603,7 +603,7 @@ def script_profile(root: Path, relative: str) -> dict[str, str]:
             elif relative == "monitor/issue_tracker_history_preread_journal.py":
                 scenario = "在真实全表 owner 及全局不可变 journal 内、首个意图前保存完整 History 原始响应与发送前尾边界；冷进程重新解码，UNKNOWN 后不可补建或替换。"
                 inputs = "ACTIVE 全局 owner、同一 action/wire、固定完整全尾响应；不接收可选路径、裸尾行号、修复或发送许可。"
-                outputs = "私有原始字节及 history_last_row_before_send 必要观察，绑定原目标和单元；不是 COMPLETE、新鲜准入或发送能力。"
+                outputs = "私有原始字节、history_last_row_before_send 及全部实际业务／ALL 审计的原始 append 行预留（NOOP 不虚构行），metadata 预留前校验并绑定；UNKNOWN／冷进程保持同一窗口，不是 COMPLETE、新鲜准入或发送能力。"
                 recovery = "缺 marker、部分屏障、别名、篡改、重哈希外来目标或全局计数链变化 HOLD，禁止回填、重置或清除 UNKNOWN；尚未集成实际 launcher 与完整对账。"
                 example = "python3 -B -m unittest -v test_cases.test_req7_history_preread_journal  # 仅开发测试"
             elif relative == "monitor/issue_tracker_enrollment_journal.py":

@@ -107,6 +107,17 @@ class Req7MetadataReservationDirectTests(unittest.TestCase):
             self.assertEqual(seen, self.inspect(token))
         self.assertEqual(raw, (self.store / 'METADATA-RAW').read_bytes())
 
+    def test_history_capacity_must_fit_all_sent_business_and_all_audits_before_fence_reservation(self):
+        self.module = load()
+        # One NOOP contributes no History row; one actual update PLUS one
+        # settings audit need two rows. Only one row remains in a 3-row sheet.
+        self.empty['sheets'][0]['properties']['gridProperties']['rowCount'] = 3
+        self.assertEqual(2, self.unit.history_rows_expected)
+        with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
+            self.initialize(token)
+            with self.assertRaises(self.module.MetadataReservationHold): self.reserve(token)
+            self.assertFalse(self.store.exists()); self.assertEqual(0, self.global_journal.inspect_global_unit(token, binding(), self.unit).attempt_count)
+
     def test_all_eight_image_barriers_precede_marker_and_partial_quota_never_adopted(self):
         self.module = load(); real = os.fsync
         for boundary in range(1, 9):
@@ -177,7 +188,7 @@ class Req7MetadataReservationWorkflowTests(unittest.TestCase):
         self.assertTrue(any(script in rule['paths'] and test in rule['tests'] for rule in manifest['test_rules']))
         members = {script, 'monitor/issue_tracker_metadata_capacity.py', 'monitor/issue_tracker_global_attempt_journal.py',
             'monitor/issue_tracker_enrollment_journal.py', 'monitor/issue_tracker_spreadsheet_owner.py', 'monitor/issue_tracker_send_intent.py',
-            'monitor/issue_tracker_sheets_read_decode.py', 'monitor/issue_tracker_tls_inputs.py'}
+            'monitor/issue_tracker_history_preread_journal.py', 'monitor/issue_tracker_sheets_read_decode.py', 'monitor/issue_tracker_tls_inputs.py'}
         self.assertTrue(any(members <= set(rule['members']) and test in rule['tests'] for rule in manifest['workflows']))
         self.assertEqual(['issue-tracker-local'], [suite['id'] for suite in manifest['test_suites'] if test in suite['tests']])
         self.assertIn(test, (ROOT / 'test_cases/README.md').read_text())
