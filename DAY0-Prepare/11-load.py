@@ -5955,18 +5955,51 @@ def _atomic_restore_setup_link(
 ) -> None:
     if require_authority is not None:
         require_authority()
+    parent_identity = _setup_switch_link_parent_identity(path)
     temporary = path.parent / (
         f".{path.name}.setup-rollback.{os.getpid()}.{secrets.token_hex(8)}"
     )
+    staged_identity = None
+    fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink",
+              "st_size", "st_mtime_ns", "st_ctime_ns")
+
+    def require_owned_stage() -> None:
+        try:
+            named = temporary.lstat()
+            if (staged_identity is None
+                    or parent_identity != _setup_switch_link_parent_identity(path)
+                    or not stat.S_ISLNK(named.st_mode) or named.st_nlink != 1
+                    or any(getattr(staged_identity, field) != getattr(named, field) for field in fields)
+                    or os.readlink(temporary) != raw_target):
+                raise LoadError("setup link stage ownership or target changed; HOLD")
+            after = temporary.lstat()
+            if any(getattr(staged_identity, field) != getattr(after, field) for field in fields):
+                raise LoadError("setup link stage changed during inspection; HOLD")
+        except (OSError, ValueError, RuntimeError) as exc:
+            raise LoadError(f"setup link stage inspection failed; HOLD: {exc}") from exc
+
     try:
         temporary.symlink_to(raw_target)
+        named = temporary.lstat()
+        if (not stat.S_ISLNK(named.st_mode) or named.st_nlink != 1
+                or os.readlink(temporary) != raw_target):
+            raise LoadError("setup link stage is not the created candidate; HOLD")
+        staged_identity = named
         if require_authority is not None:
             require_authority()
+        require_owned_stage()
         os.replace(temporary, path)
         _fsync_parent_directory(path.parent)
     finally:
         if os.path.lexists(temporary):
-            temporary.unlink()
+            try:
+                require_owned_stage()
+            except LoadError:
+                # The generated name does not license deleting another owner.
+                # Incomplete initial capture also keeps incident evidence.
+                pass
+            else:
+                temporary.unlink()
 
 
 def _atomic_restore_setup_manifest(

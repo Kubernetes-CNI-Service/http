@@ -2864,6 +2864,52 @@ class ReleaseTransactionTests(unittest.TestCase):
             journal, descriptor, backend,
         )
 
+    def test_setup_link_restore_preserves_foreign_stage_before_publish_or_cleanup(self):
+        for kind in ("publish", "hold"):
+            with self.subTest(kind=kind):
+                path = self.ztp / f"private-managed-link-{kind}"
+                path.symlink_to("independent-Q-target")
+                before = (path.lstat().st_ino, os.readlink(path))
+                original = Path.symlink_to
+                injected = []
+
+                def stage_replaced(stage, raw, *args, **kwargs):
+                    result = original(stage, raw, *args, **kwargs)
+                    if stage.name.startswith(f".{path.name}.setup-rollback.") and not injected:
+                        held = stage.with_name(f"held-original-link-stage-{kind}")
+                        stage.rename(held)
+                        if kind == "publish":
+                            original(stage, "independent-foreign-target")
+                        else:
+                            stage.write_bytes(b"independent foreign stage evidence\n")
+                        injected.append((stage, stage.lstat().st_ino, held))
+                    return result
+
+                def authority():
+                    if kind == "hold" and injected:
+                        raise LOAD.LoadError("independent authority rejection after staging")
+
+                caught = None
+                with mock.patch.object(Path, "symlink_to", stage_replaced):
+                    try:
+                        LOAD._atomic_restore_setup_link(path, "independent-P-target", require_authority=authority)
+                    except LOAD.LoadError as exc:
+                        caught = exc
+                self.assertEqual(1, len(injected), "link staging injection was not reached")
+                self.assertIsInstance(caught, LOAD.LoadError)
+                self.assertEqual(before, (path.lstat().st_ino, os.readlink(path)))
+                stage, inode, held = injected[0]
+                self.assertTrue(os.path.lexists(stage), "cleanup consumed the foreign stage")
+                self.assertEqual(inode, stage.lstat().st_ino)
+                self.assertEqual("independent-P-target", os.readlink(held))
+                if kind == "publish":
+                    self.assertEqual("independent-foreign-target", os.readlink(stage))
+                else:
+                    self.assertEqual(b"independent foreign stage evidence\n", stage.read_bytes())
+                stage.unlink()
+                held.unlink()
+                path.unlink()  # Only independently identified private fixture objects.
+
     def test_setup_manifest_restore_syncs_final_mode_before_replace(self) -> None:
         manifest = self.ztp / ".setup_manifest"
         manifest.write_bytes(b"uncommitted Q manifest\n")

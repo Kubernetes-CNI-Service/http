@@ -214,6 +214,13 @@ LOAD→SETUP→parent primitive→旧 API 负例保留 Q 与原凭据。该 work
 复核不是原子 compare-and-write；晚到证据前已发生的自有写入不得称零写入或完整恢复。
 不能删除 WAL 后放行，也不授予旧 A 激活权。
 
+链接恢复的 `.setup-rollback.*` 名称不能自行证明所有权。发布及失败清理前须复核
+捕获的 symlink inode/元数据、准确 raw target 和物理父目录；捕获不完整或对象换绑
+必须 HOLD、保留未知暂存，不把外来对象发布到受管名称。direct 和真实 SETUP 强杀→
+新 LOAD 冷恢复分别覆盖外来链接发布及 WAL 换绑后误删外来普通文件；原正常恢复和
+自有暂存清理仍须执行。这是有写者静默前提的名称复核，不是持有 symlink FD 或原子
+compare-and-replace/unlink，不证明任意 ABA/非合作写者免疫、孤儿暂存自动收口或完整 R22。
+
 Q 已有的 ETH/NVOS `latest` 软链接须在首次共享写入前单独记录原始链接文字、
 旧/新真实完成目录和父目录身份，不混入 P manifest，也不当作原本缺席的 Q-only 名称。
 SETUP 通过 Q 的物理父目录写入，稳定共享入口仍保留原有相对链接合同；替换后同步父目录。

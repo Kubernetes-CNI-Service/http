@@ -3543,6 +3543,78 @@ finally:
             self.assertEqual(b"operator replacement evidence\n", journal.read_bytes())
             self.assertFalse((root / "service-started").exists())
 
+    def test_real_setup_cold_restore_preserves_foreign_link_stage(self):
+        for kind in ("publish", "hold"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory(prefix="r22-foreign-link-stage-") as name:
+                fixture = self._private_setup_switch_fixture(Path(name))
+                root, _p, _q, common, _p_only, _q_only, manifest, before, *_rest = fixture
+                first = self._run_private_load_setup_switch(fixture, prepare_journal=True)
+                self.assertEqual(23, first.returncode, first.stdout + first.stderr)
+                target_before = (common.lstat().st_ino, os.readlink(common))
+                manifest_before = manifest.read_bytes()
+                journal = root / "ztp/.setup-switch-journal.json"
+                wal = journal.read_bytes()
+                recovery = r'''
+import importlib.util, json, os, sys
+from pathlib import Path
+from types import SimpleNamespace
+root, target, kind = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
+spec = importlib.util.spec_from_file_location('foreign_link_stage_load', root / 'DAY0-Prepare/11-load.py')
+load = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = load
+spec.loader.exec_module(load)
+load.active_managed_services = lambda *args, **kwargs: ()
+journal = root / 'ztp/.setup-switch-journal.json'
+original, injected = Path.symlink_to, []
+def stage_replaced(stage, raw, *args, **kwargs):
+    result = original(stage, raw, *args, **kwargs)
+    if stage.parent == target.parent and stage.name.startswith('.' + target.name + '.setup-rollback.') and not injected:
+        held = stage.with_name('held-original-link-stage')
+        stage.rename(held)
+        if kind == 'publish':
+            original(stage, 'independent-foreign-target')
+        else:
+            stage.write_bytes(b'independent foreign stage evidence\n')
+            value = journal.read_bytes()
+            journal.rename(root / 'held-original-link-stage-wal')
+            journal.write_bytes(value)
+            journal.chmod(0o600)
+        injected.append(True)
+        (root / 'link-stage-injection.json').write_text(json.dumps({'path': str(stage), 'ino': stage.lstat().st_ino,
+            'held': str(held), 'wal_ino': journal.lstat().st_ino}))
+    return result
+Path.symlink_to = stage_replaced
+fd = load.acquire_deployment_lock(exclusive=True)
+try:
+    try:
+        load.recover_setup_switch_journal(journal, deployment_lock_descriptor=fd,
+            services_quiesced=True, runtime_backend=SimpleNamespace(name='supervisor'))
+    except load.LoadError as exc:
+        assert injected == [True], str(exc)
+        print('EXPECTED FOREIGN LINK STAGE HOLD:', exc)
+        raise SystemExit(7)
+finally:
+    load.release_deployment_lock(fd)
+'''
+                second = subprocess.run([sys.executable, "-B", "-c", recovery, str(root), str(common), kind],
+                                        cwd=root, capture_output=True, text=True, check=False, timeout=30)
+                marker = json.loads((root / "link-stage-injection.json").read_text())
+                self.assertEqual(7, second.returncode, second.stdout + second.stderr)
+                self.assertEqual(target_before, (common.lstat().st_ino, os.readlink(common)))
+                self.assertEqual(manifest_before, manifest.read_bytes())
+                self.assertEqual(wal, journal.read_bytes())
+                self.assertEqual(marker["wal_ino"], journal.lstat().st_ino)
+                stage, held = Path(marker["path"]), Path(marker["held"])
+                self.assertTrue(os.path.lexists(stage), "cold recovery cleaned another owner's stage")
+                self.assertEqual(marker["ino"], stage.lstat().st_ino)
+                self.assertEqual(before["common"], os.readlink(held))
+                if kind == "publish":
+                    self.assertEqual("independent-foreign-target", os.readlink(stage))
+                else:
+                    self.assertEqual(b"independent foreign stage evidence\n", stage.read_bytes())
+                    self.assertEqual(wal, (root / "held-original-link-stage-wal").read_bytes())
+                self.assertFalse((root / "service-started").exists())
+
     def _assert_real_setup_restore_stage_authority_holds(self, surface, kind):
         with tempfile.TemporaryDirectory(prefix="r22-real-restore-stage-") as name:
             fixture = self._private_setup_switch_fixture(Path(name))
