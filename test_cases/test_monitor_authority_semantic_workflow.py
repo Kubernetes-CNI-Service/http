@@ -149,35 +149,39 @@ terminate_monitor_authority_capture_holders() {
 def test_timeout_shell() -> str:
     return r'''
 timeout() {
-  local timeout_seconds command_pid timer_pid command_rc ready_file
+  local timeout_seconds ready_file
   [[ "$1" == --signal=KILL ]] || return 125
   timeout_seconds=$2
   shift 2
-  "$@" <&0 >&1 2>&2 &
-  command_pid=$!
   ready_file=${HTTP_ZTP_TEST_TIMEOUT_READY_FILE:-}
-  /usr/bin/python3 -c \
-    'import os,signal,sys,time
-ready=sys.argv[3]
-deadline=time.monotonic()+2.0
-while ready and not os.path.exists(ready) and time.monotonic()<deadline:
-    time.sleep(0.005)
-if ready and not os.path.exists(ready):
-    raise SystemExit(125)
-time.sleep(float(sys.argv[1]))
-os.kill(int(sys.argv[2]),signal.SIGKILL)' \
-    "$timeout_seconds" "$command_pid" "$ready_file" \
-    </dev/null >/dev/null 2>&1 &
-  timer_pid=$!
-  if wait "$command_pid" 2>/dev/null; then
-    command_rc=0
-  else
-    command_rc=$?
+  if declare -F "$1" >/dev/null; then
+    export -f "$1"
+    set -- /bin/bash -c '"$@"' http-test-timeout "$@"
   fi
-  kill -KILL "$timer_pid" 2>/dev/null || true
-  wait "$timer_pid" 2>/dev/null || true
-  if [[ "$command_rc" == 137 ]]; then return 124; fi
-  return "$command_rc"
+  /usr/bin/python3 -c \
+    'import os,signal,subprocess,sys,time
+ready=sys.argv[2]
+command=subprocess.Popen(sys.argv[3:],close_fds=False)
+expired=False
+try:
+    deadline=time.monotonic()+2.0
+    while ready and not os.path.exists(ready) and command.poll() is None and time.monotonic()<deadline:
+        time.sleep(0.005)
+    if ready and not os.path.exists(ready) and command.poll() is None:
+        expired=True
+    else:
+        try:
+            command.wait(timeout=float(sys.argv[1]))
+        except subprocess.TimeoutExpired:
+            expired=True
+finally:
+    if command.poll() is None:
+        command.kill()
+    command_rc=command.wait()
+if expired or command_rc == -signal.SIGKILL:
+    raise SystemExit(124)
+raise SystemExit(command_rc if command_rc >= 0 else 128-command_rc)' \
+    "$timeout_seconds" "$ready_file" "$@" <&0 >&1 2>&2
 }
 '''
 
@@ -2736,6 +2740,101 @@ printf 'capture=%s rc=%s token=<%s>\\n' \
                 self.assertEqual(
                     [], list(result_root.glob("http-ztp-monitor-decision.*")),
                 )
+
+    def test_portable_timeout_missing_readiness_kills_and_reaps_command(self) -> None:
+        """A failed readiness barrier must not abandon a live command."""
+        pid_file = self.sandbox / "readiness-command.pid"
+        absent_ready = self.sandbox / "never-ready"
+        command = (
+            "import os,time; from pathlib import Path; "
+            f"Path({str(pid_file)!r}).write_text(str(os.getpid()), encoding='ascii'); "
+            "time.sleep(60)"
+        )
+        harness = test_timeout_shell() + f'''
+export HTTP_ZTP_TEST_TIMEOUT_READY_FILE={shlex.quote(str(absent_ready))}
+if timeout --signal=KILL 0.1 /usr/bin/python3 -c {shlex.quote(command)}; then
+  timeout_rc=0
+else
+  timeout_rc=$?
+fi
+printf 'timeout rc=%s\\n' "$timeout_rc"
+'''
+        try:
+            result = run_shell(harness, timeout_seconds=3)
+            self.assertTrue(pid_file.exists(), result.stderr)
+            command_pid = int(pid_file.read_text(encoding="ascii"))
+            with self.assertRaises(ProcessLookupError):
+                os.kill(command_pid, 0)
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual("timeout rc=124\n", result.stdout)
+            self.assertEqual("", result.stderr)
+        finally:
+            cleanup_recorded_test_processes(pid_file)
+
+    def test_portable_timeout_supervisor_fault_reaps_started_command(self) -> None:
+        """Even a timer/supervisor fault cannot orphan its private command."""
+        pid_file = self.sandbox / "supervisor-fault-command.pid"
+        command = (
+            "import os,time; from pathlib import Path; "
+            f"Path({str(pid_file)!r}).write_text(str(os.getpid()), encoding='ascii'); "
+            "time.sleep(60)"
+        )
+        timeout = test_timeout_shell()
+        checkpoint = "deadline=time.monotonic()+2.0"
+        self.assertEqual(1, timeout.count(checkpoint))
+        timeout = re.sub(
+            r"(?m)^([ ]*)" + re.escape(checkpoint) + r"$",
+            lambda match: (
+                match[1] + "while not os.path.exists(ready):\n"
+                + match[1] + "    time.sleep(0.005)\n"
+                + match[1] + "raise SystemExit(125)"
+            ),
+            timeout,
+        )
+        harness = timeout + f'''
+export HTTP_ZTP_TEST_TIMEOUT_READY_FILE={shlex.quote(str(pid_file))}
+if timeout --signal=KILL 0.1 /usr/bin/python3 -c {shlex.quote(command)}; then
+  timeout_rc=0
+else
+  timeout_rc=$?
+fi
+printf 'timeout rc=%s\\n' "$timeout_rc"
+'''
+        try:
+            result = run_shell(harness, timeout_seconds=3)
+            self.assertTrue(pid_file.exists(), result.stderr)
+            command_pid = int(pid_file.read_text(encoding="ascii"))
+            with self.assertRaises(ProcessLookupError):
+                os.kill(command_pid, 0)
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual("timeout rc=125\n", result.stdout)
+            self.assertEqual("", result.stderr)
+        finally:
+            cleanup_recorded_test_processes(pid_file)
+
+    def test_portable_timeout_preserves_shell_function_io_and_status(self) -> None:
+        """Real shell adapters keep their argument, pipe, diagnostic and status contract."""
+        harness = test_timeout_shell() + r'''
+fixture_command() {
+  local input
+  IFS= read -r input
+  printf 'function=%s input=%s\n' "$1" "$input"
+  printf 'function diagnostic\n' >&2
+  return 7
+}
+if timeout --signal=KILL 1 fixture_command argument <<<'pipe input'; then
+  timeout_rc=0
+else
+  timeout_rc=$?
+fi
+printf 'timeout rc=%s\n' "$timeout_rc"
+'''
+        result = run_shell(harness, timeout_seconds=3)
+        self.assertEqual(0, result.returncode)
+        self.assertEqual(
+            "function=argument input=pipe input\ntimeout rc=7\n", result.stdout,
+        )
+        self.assertEqual("function diagnostic\n", result.stderr)
 
     def test_shared_helper_alone_maps_structured_recovery_decisions(self) -> None:
         warning = CONTROL_AUTH.MONITOR_AUTHORITY_RECOVERY_WARNING + "\n"

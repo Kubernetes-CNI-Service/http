@@ -111,6 +111,20 @@ fail closed，`--check --require-full`、`--list` 与 `--list-suites` 也不能�
 
 ## 新功能、流程和场景的补充规则
 
+`test_req19_infra_log_contract.py` 和 `test_req19_infra_log_workflow.py` 覆盖第八个
+`99-output-infra` 骨架、四状态日志根、规范项目归属、无覆盖迁移与中断恢复，以及真实
+setup → deploy/probe/collector 和项目重指后的写者归属。2026-10-07 owner 限定真实目录
+迁移仅支持同文件系统；源根/父目录、目标根和两侧嵌套对象跨设备时，必须在凭据发布与
+首次转移前明确 `EXDEV`，空源也拒绝，已有恢复凭据和已复制对象保留。设备身份注入不等于
+真实挂载卷、断电或冷启动验收，`TC-REAL-REQ19-INFRA-LOG-RECOVERY-001` 仍 NOT RUN。
+
+shell 采集的便携 timeout 测试替身以同一监督者持有命令、计时和 finally 回收责任；
+就绪屏障失败或监督者自身出错时也必须终止并回收私有命令，不能留下无截止时间的命令。
+`test_monitor_authority_semantic_workflow.py` 以独立的缺失就绪及监督者故障负例约束该清理路径；
+另以固定参数、标准输入/输出/错误和非零状态约束 shell 函数替身的兼容执行。
+原采集时间上界、输出/token 拒绝和 holder 存活断言
+保持不变，不以单项 PASS 推断全量超时的根因已闭合。
+
 `test_config_sync_authority.py` 的方法 V2 后端与手工 replace-config V1 分开：
 本地代次、固定私有 receipt、writer witness 和失败 veto 不依赖 reporter 墙钟。
 V2 最大合法 canonical 成功/失败夹具分别是独立推导的 2270/14134 B，有限 wire
