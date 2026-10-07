@@ -282,6 +282,97 @@ class GenerationInputBindingWorkflowTests(unittest.TestCase):
     def test_real_setup_q_link_registration_holds_replaced_a_runtime_receipt(self):
         self._assert_real_persisted_a_runtime_switch(True)
 
+    def test_real_setup_manifest_holds_a_receipt_replaced_during_wal_stage_sync(self):
+        fixture = RELEASE_FIXTURE.ReleaseTransactionTests()
+        fixture.setUp()
+        try:
+            state, context = fixture._prepare_persisted_a_runtime_switch()
+            root, q, common, old_only = fixture.root.resolve(), state[1], state[2], state[3]
+            journal, descriptor, _backend = state[-3:]
+            shutil.copytree(ROOT / "tools", root / "tools")
+            (root / "ztp/optimize").mkdir()
+            shutil.copy2(ROOT / "ztp/optimize/sample_links.py", root / "ztp/optimize/sample_links.py")
+            for name in ("11-load.py", "01-a-setup.py"):
+                shutil.copy2(ROOT / "DAY0-Prepare" / name, root / "DAY0-Prepare" / name)
+            RELEASE_FIXTURE.LOAD.release_deployment_lock(descriptor)
+            fixture._cleanups = [item for item in fixture._cleanups
+                                 if item[0] != RELEASE_FIXTURE.LOAD.release_deployment_lock]
+            evidence, manifest = journal.read_bytes(), state[7].read_bytes()
+            writer = """
+import importlib.util, json, os, stat, sys
+from pathlib import Path
+from types import SimpleNamespace
+root, q, common, old_only = map(Path, sys.argv[1:5])
+def script(name):
+    spec = importlib.util.spec_from_file_location('late_manifest_' + name, root / 'DAY0-Prepare' / (name + '.py'))
+    api = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = api
+    spec.loader.exec_module(api)
+    return api
+load, setup = script('11-load'), script('01-a-setup')
+load.active_managed_services = lambda *args, **kwargs: ()
+load.service_runtime_backend = lambda: SimpleNamespace(name='supervisor')
+fd = load.acquire_deployment_lock(exclusive=True)
+setup._SETUP_SWITCH_WAL_CONTEXT = (vars(load), fd)
+setup.ZTP = str(root / 'ztp')
+setup.MANIFEST_FILE = str(root / 'ztp/.setup_manifest')
+# Limit the independent low-level fixture to the one actual WAL-owned link;
+# the manifest writer, WAL registration and fsync/replace remain real scripts.
+setup._collect_expected_links = lambda project: [str(common)]
+common.unlink()
+common.symlink_to(os.path.relpath(q / '01-global.yaml', common.parent))
+old_only.unlink()
+journal = root / 'ztp/.setup-switch-journal.json'
+record = json.loads(journal.read_bytes())['body']['a_runtime']
+receipt = Path(record['receipt_directory']['path']) / 'receipt.json'
+original_owner = receipt.stat().st_ino
+real_sync = os.fsync
+injected = []
+def sync(descriptor):
+    result = real_sync(descriptor)
+    owner = os.fstat(descriptor)
+    if not injected and stat.S_ISREG(owner.st_mode):
+        for staged in journal.parent.glob('.setup-switch-journal.*'):
+            info = staged.lstat()
+            if (info.st_dev, info.st_ino) == (owner.st_dev, owner.st_ino):
+                receipt.rename(root / 'held-original-a-receipt')
+                receipt.write_bytes((root / 'held-original-a-receipt').read_bytes())
+                receipt.chmod(0o644)
+                assert original_owner != receipt.stat().st_ino
+                injected.append(True)
+                break
+    return result
+os.fsync = sync
+try:
+    setup._write_manifest(str(q))
+except ValueError as exc:
+    assert injected == [True] and 'runtime' in str(exc), str(exc)
+    print('SETUP_LATE_A_RECEIPT_MANIFEST_HELD')
+    raise SystemExit(7)
+else:
+    print('SETUP_LATE_A_RECEIPT_MANIFEST_WRONGLY_PUBLISHED')
+    raise SystemExit(8)
+finally:
+    os.fsync = real_sync
+    load.release_deployment_lock(fd)
+"""
+            result = subprocess.run(
+                [sys.executable, "-B", "-c", writer, str(root), str(q), str(common), str(old_only)],
+                capture_output=True, text=True, check=False, timeout=30,
+            )
+            self.assertEqual(7, result.returncode, result.stdout + result.stderr)
+            self.assertIn("SETUP_LATE_A_RECEIPT_MANIFEST_HELD", result.stdout)
+            self.assertEqual(evidence, journal.read_bytes())
+            self.assertEqual(manifest, state[7].read_bytes(), "SETUP replaced P manifest after A authority drift")
+            self.assertEqual(os.path.relpath(state[5], common.parent), os.readlink(common))
+            self.assertFalse(os.path.lexists(old_only))
+            self.assertEqual(b"A oob bootstrap\n", (root / "ztp/ztp-bootstrap_oob.sh").read_bytes())
+            self.assertEqual([journal], list(journal.parent.glob(".setup-switch-journal.*")),
+                             "HOLD must preserve the authority and clean only its own intent stage")
+        finally:
+            fixture.doCleanups()
+            fixture.tearDown()
+
     def _assert_real_persisted_a_runtime_switch(self, replace_a_receipt):
         fixture = RELEASE_FIXTURE.ReleaseTransactionTests()
         fixture.setUp()

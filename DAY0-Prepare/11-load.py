@@ -8088,8 +8088,9 @@ def register_setup_switch_manifest(
         services_quiesced=services_quiesced, runtime_backend=runtime_backend,
         verify_only=True, manifest_candidate=candidate,
     )
-    envelope = _decode_setup_switch_journal(opened[0])
-    body = dict(envelope["body"])
+    # Earlier preflight cannot authorize a receipt owner changed after its
+    # return. Bind the actual frozen WAL's A authority before staging intent.
+    body = dict(_setup_switch_prepared_registration_body(opened))
     intent = {
         "bytes": base64.b64encode(candidate).decode("ascii"),
         "sha256": hashlib.sha256(candidate).hexdigest(), "mode": 0o644,
@@ -8117,6 +8118,9 @@ def register_setup_switch_manifest(
                 "st_mtime_ns", "st_ctime_ns"))
                 or _read_rollback_regular(journal, limit=_SETUP_SWITCH_JOURNAL_LIMIT) != opened):
             raise LoadError("setup switch journal changed before manifest registration")
+        # Staging/fsync is an intervening failure/race boundary. A same-byte
+        # foreign receipt must not grant Q intent, even with an unchanged WAL.
+        _setup_switch_runtime_context(body)
         os.replace(temporary, journal)
         _fsync_parent_directory(journal.parent)
     finally:

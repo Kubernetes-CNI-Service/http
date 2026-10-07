@@ -3660,6 +3660,71 @@ class ReleaseTransactionTests(unittest.TestCase):
         self.assertFalse(os.path.lexists(state[4]))
         backend.start.assert_not_called()
 
+    def test_setup_wal_manifest_registration_holds_a_receipt_changed_after_preflight(self):
+        self._assert_manifest_registration_late_a_receipt_held("preflight")
+
+    def test_setup_wal_manifest_registration_holds_a_receipt_changed_during_stage_sync(self):
+        self._assert_manifest_registration_late_a_receipt_held("stage-sync")
+
+    def _assert_manifest_registration_late_a_receipt_held(self, boundary):
+        state, context = self._prepare_persisted_a_runtime_switch()
+        q, common, old_only = state[1:4]
+        journal, descriptor, backend = state[-3:]
+        common.unlink()
+        common.symlink_to(os.path.relpath(state[5], common.parent))
+        old_only.unlink()
+        candidate = (f"# setup manifest — proj: {q}\n{common}\n").encode()
+        evidence, manifest = journal.read_bytes(), state[7].read_bytes()
+        receipt = context.runtime_receipt / "receipt.json"
+        original_owner = receipt.stat().st_ino
+        replacements = []
+
+        def replace_receipt():
+            if replacements:
+                return
+            held = self.root / "held-original-a-receipt"
+            receipt.rename(held)
+            receipt.write_bytes(held.read_bytes())
+            receipt.chmod(0o644)
+            self.assertNotEqual(original_owner, receipt.stat().st_ino)
+            replacements.append(receipt.stat().st_ino)
+
+        real_recover, real_sync = LOAD.recover_setup_switch_journal, os.fsync
+
+        def recover(*args, **kwargs):
+            result = real_recover(*args, **kwargs)
+            if boundary == "preflight":
+                replace_receipt()
+            return result
+
+        def sync(fd):
+            result = real_sync(fd)
+            owner = os.fstat(fd)
+            if boundary == "stage-sync" and stat.S_ISREG(owner.st_mode):
+                for staged in journal.parent.glob(".setup-switch-journal.*"):
+                    info = staged.lstat()
+                    if (info.st_dev, info.st_ino) == (owner.st_dev, owner.st_ino):
+                        replace_receipt()
+                        break
+            return result
+
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "recover_setup_switch_journal", side_effect=recover), \
+                mock.patch.object(LOAD.os, "fsync", side_effect=sync):
+            with self.assertRaisesRegex(LOAD.LoadError, "runtime.*authority"):
+                LOAD.register_setup_switch_manifest(
+                    journal, candidate, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend,
+                )
+        self.assertEqual(1, len(replacements), "injection must reach the intended write boundary")
+        self.assertEqual(evidence, journal.read_bytes(), "foreign A owner authorized a Q manifest intent")
+        self.assertEqual(manifest, state[7].read_bytes())
+        self.assertEqual(os.path.relpath(state[5], common.parent), os.readlink(common))
+        self.assertFalse(os.path.lexists(old_only))
+        self.assertEqual([journal], list(journal.parent.glob(".setup-switch-journal.*")),
+                         "only the preserved authority, not an intent stage, may remain")
+        backend.start.assert_not_called()
+
     def test_cross_project_runtime_restore_failure_retains_original_wal(self) -> None:
         (*state, journal, descriptor, backend) = self._prepare_cross_project_setup_crash()
         p, q, common = state[:3]
