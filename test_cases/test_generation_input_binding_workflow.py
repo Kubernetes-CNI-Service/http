@@ -3861,13 +3861,13 @@ spec.loader.exec_module(load)
 load.active_managed_services = lambda *args, **kwargs: ()
 receipt = root / 'infra/.logs-migration.json'
 restore = load._setup_switch_restore_infra_log_tree
-def replace_before_first_write(snapshot):
+def replace_before_first_write(snapshot, **guard):
     original, before = receipt.read_bytes(), receipt.stat()
     receipt.rename(receipt.with_name('operator-retained-receipt.json'))
     receipt.write_bytes(original)
     receipt.chmod(0o600)
     assert receipt.stat().st_ino != before.st_ino
-    restore(snapshot)
+    restore(snapshot, **guard)
 load._setup_switch_restore_infra_log_tree = replace_before_first_write
 descriptor = load.acquire_deployment_lock(exclusive=True)
 try:
@@ -3929,12 +3929,12 @@ spec.loader.exec_module(load)
 load.active_managed_services = lambda *args, **kwargs: ()
 copy = (root / 'infra/logs').resolve() / 'audit.log'
 restore = load._setup_switch_restore_infra_log_tree
-def replace_before_first_write(snapshot):
+def replace_before_first_write(snapshot, **guard):
     original, before = copy.read_bytes(), copy.stat()
     copy.rename(copy.parent.parent / 'operator-retained-audit.log')
     copy.write_bytes(original)
     assert copy.stat().st_ino != before.st_ino
-    restore(snapshot)
+    restore(snapshot, **guard)
 load._setup_switch_restore_infra_log_tree = replace_before_first_write
 descriptor = load.acquire_deployment_lock(exclusive=True)
 try:
@@ -4036,6 +4036,107 @@ finally:
             self.assertEqual(wal, journal.read_bytes())
             self.assertEqual(mixed, os.readlink(common))
             self.assertEqual(manifest_bytes, manifest.read_bytes())
+            self.assertFalse((root / "service-started").exists())
+
+    def test_real_setup_infra_log_cold_wal_drift_after_unlink_holds_remaining_writes(self):
+        self._assert_real_infra_recovery_late_authority_holds("wal", "pointer-unlink")
+
+    def test_real_setup_infra_log_cold_q_commit_after_rename_holds_remaining_writes(self):
+        self._assert_real_infra_recovery_late_authority_holds("q", "directory-restore")
+
+    def _assert_real_infra_recovery_late_authority_holds(self, kind, boundary):
+        with tempfile.TemporaryDirectory(prefix="r22-infra-total-authority-") as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, _p, q, common, _p_only, _q_only, manifest, _before, _hook, barrier, _home = fixture
+            source = root / "infra/logs"
+            source.mkdir()
+            payload = b"independent P audit evidence for cold recovery\n"
+            (source / "audit.log").write_bytes(payload)
+            owner = source.stat().st_ino
+            first = self._run_private_load_setup_switch(fixture, prepare_journal=True, first_link=source)
+            self.assertEqual(23, first.returncode, first.stdout + first.stderr)
+            self.assertTrue(barrier.is_file())
+            self.assertTrue(source.is_symlink())
+            journal, receipt = root / "ztp/.setup-switch-journal.json", root / "infra/.logs-migration.json"
+            row = json.loads(journal.read_bytes())["body"]["infra_logs"][0]
+            backup, destination = Path(row["backup"]), Path(row["destination"])
+            wal, incident, p_manifest, mixed = journal.read_bytes(), receipt.read_bytes(), manifest.read_bytes(), os.readlink(common)
+            copy_owner = (destination / "audit.log").stat().st_ino
+            recovery = r'''
+import importlib.util, os, sys
+from pathlib import Path
+from types import SimpleNamespace
+root, kind, boundary = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+spec = importlib.util.spec_from_file_location('cold_infra_total_authority', root / 'DAY0-Prepare/11-load.py')
+load = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = load
+spec.loader.exec_module(load)
+load.active_managed_services = lambda *args, **kwargs: ()
+journal, source = root / 'ztp/.setup-switch-journal.json', root / 'infra/logs'
+import json
+body = json.loads(journal.read_bytes())['body']
+destination = Path(body['infra_logs'][0]['destination'])
+sync, injected = load._fsync_parent_directory, []
+def change_after_owned_step(parent):
+    result = sync(parent)
+    reached = (not os.path.lexists(source) if boundary == 'pointer-unlink'
+               else source.is_dir() and not source.is_symlink())
+    if parent == source.parent and reached and not injected:
+        if kind == 'wal':
+            original, before = journal.read_bytes(), journal.stat().st_ino
+            journal.rename(journal.with_name('held-original-infra-wal'))
+            journal.write_bytes(original)
+            journal.chmod(0o600)
+            assert before != journal.stat().st_ino
+        else:
+            marker = Path(body['q_parent_preimage']['path'])
+            assert not os.path.lexists(marker)
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_bytes(b'independent Q commit marker during cold recovery\n')
+        injected.append(True)
+    return result
+load._fsync_parent_directory = change_after_owned_step
+fd = load.acquire_deployment_lock(exclusive=True)
+try:
+    try:
+        load.recover_setup_switch_journal(journal, deployment_lock_descriptor=fd,
+            services_quiesced=True, runtime_backend=SimpleNamespace(name='supervisor'))
+    except load.LoadError as exc:
+        expected = 'journal changed' if kind == 'wal' else 'Q parent changed'
+        assert injected == [True] and expected in str(exc), str(exc)
+        assert (destination / 'audit.log').is_file(), 'drift licensed Q copy deletion'
+        assert (root / 'infra/.logs-migration.json').is_file(), 'drift licensed incident retirement'
+        if boundary == 'pointer-unlink':
+            assert not os.path.lexists(source), 'drift licensed backup restoration'
+        print('R22_INFRA_TOTAL_AUTHORITY_HELD_BETWEEN_WRITES')
+        raise SystemExit(7)
+    else:
+        raise AssertionError('cold recovery consumed an unknown authority')
+finally:
+    load.release_deployment_lock(fd)
+'''
+            result = subprocess.run(
+                [sys.executable, "-B", "-c", recovery, str(root), kind, boundary],
+                cwd=root, capture_output=True, text=True, check=False, timeout=30,
+            )
+            self.assertEqual(7, result.returncode, result.stdout + result.stderr)
+            self.assertIn("R22_INFRA_TOTAL_AUTHORITY_HELD_BETWEEN_WRITES", result.stdout)
+            self.assertEqual(wal, journal.read_bytes())
+            self.assertEqual(incident, receipt.read_bytes())
+            self.assertEqual(p_manifest, manifest.read_bytes())
+            self.assertEqual(mixed, os.readlink(common))
+            self.assertEqual(copy_owner, (destination / "audit.log").stat().st_ino)
+            self.assertEqual(payload, (destination / "audit.log").read_bytes())
+            if boundary == "pointer-unlink":
+                self.assertFalse(os.path.lexists(source))
+                self.assertEqual(owner, backup.stat().st_ino)
+                self.assertEqual(wal, journal.with_name("held-original-infra-wal").read_bytes())
+            else:
+                self.assertEqual(owner, source.stat().st_ino)
+                self.assertFalse(source.is_symlink())
+                self.assertFalse(os.path.lexists(backup))
+                self.assertEqual(b"independent Q commit marker during cold recovery\n",
+                                 (q / "99-output-ztp/current-release.json").read_bytes())
             self.assertFalse((root / "service-started").exists())
 
     def test_real_setup_infra_log_pointer_death_cold_restores_real_directory(self):

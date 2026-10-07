@@ -7981,7 +7981,13 @@ def _setup_switch_prepare_infra_log_recovery(row: dict[str, object], q_project: 
         raise LoadError(f"setup switch infra log state is unknown: {exc}") from exc
 
 
-def _setup_switch_restore_infra_log_tree(state) -> None:
+def _setup_switch_restore_infra_log_tree(
+    state, *, require_authority: Callable[[], None],
+) -> None:
+    """Keep total WAL/Q/A authority through every destructive recovery step."""
+    if not callable(require_authority):
+        raise LoadError("infra log recovery requires a total WAL authority guard")
+    require_authority()
     (source, backup, destination, receipt, entries, directories,
      has_backup, has_receipt, receipt_authority, tree_authority) = state
     _setup_switch_require_infra_receipt(receipt, receipt_authority)
@@ -7990,11 +7996,13 @@ def _setup_switch_restore_infra_log_tree(state) -> None:
         if os.path.islink(source):
             _setup_switch_require_infra_receipt(receipt, receipt_authority)
             _setup_switch_require_infra_copies(state, names=(), directory_names=())
+            require_authority()
             source.unlink()
             tree_authority["source_name"] = None
             _fsync_parent_directory(source.parent)
         _setup_switch_require_infra_receipt(receipt, receipt_authority)
         _setup_switch_require_infra_copies(state, names=(), directory_names=())
+        require_authority()
         _setup_switch_rename_directory_noreplace(backup, source)
         restored = source.lstat()
         if (restored.st_dev, restored.st_ino, restored.st_mode) != tree_authority["source"]:
@@ -8007,6 +8015,7 @@ def _setup_switch_restore_infra_log_tree(state) -> None:
         if os.path.lexists(path):
             _setup_switch_require_infra_receipt(receipt, receipt_authority)
             _setup_switch_require_infra_copies(state, names=(name,), directory_names=())
+            require_authority()
             path.unlink()
             tree_authority["copies"][name] = None
             _fsync_parent_directory(path.parent)
@@ -8015,12 +8024,14 @@ def _setup_switch_restore_infra_log_tree(state) -> None:
         if os.path.lexists(path):
             _setup_switch_require_infra_receipt(receipt, receipt_authority)
             _setup_switch_require_infra_copies(state, names=(), directory_names=(name,))
+            require_authority()
             path.rmdir()
             tree_authority["copy_directories"][name] = None
             _fsync_parent_directory(path.parent)
     if has_receipt:
         _setup_switch_require_infra_receipt(receipt, receipt_authority)
         _setup_switch_require_infra_copies(state)
+        require_authority()
         receipt.unlink()
         _fsync_parent_directory(receipt.parent)
 
@@ -8491,7 +8502,9 @@ def _recover_setup_switch_journal_snapshot(
         return "prepared-p"
     require_journal_unchanged()
     if infra_state is not None:
-        _setup_switch_restore_infra_log_tree(infra_state)
+        _setup_switch_restore_infra_log_tree(
+            infra_state, require_authority=require_journal_unchanged,
+        )
     for source, destination, _phase, _row in comparison_states:
         require_journal_unchanged()
         current = _setup_switch_comparison_transfer_states(body)[0]

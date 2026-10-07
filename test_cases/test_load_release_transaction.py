@@ -5622,8 +5622,9 @@ os.kill(os.getpid(), signal.SIGKILL)
         self.assertNotEqual(original_link, os.readlink(common))
         backend.start.assert_not_called()
 
-    def _prepare_infra_receipt_recovery_owner(self):
-        state = self._prepare_cross_project_setup_crash()
+    def _prepare_infra_receipt_recovery_owner(self, *, state=None):
+        if state is None:
+            state = self._prepare_cross_project_setup_crash()
         q, common, target, journal, descriptor, backend = state[1], state[2], state[5], state[10], state[11], state[12]
         source = self.root.resolve() / "infra/logs"
         source.mkdir(parents=True)
@@ -5652,6 +5653,109 @@ os.kill(os.getpid(), signal.SIGKILL)
         common.symlink_to(os.path.relpath(target, common.parent))
         return state, source, destination, backup, receipt, payload
 
+    def test_setup_infra_recovery_wal_change_before_first_write_holds(self):
+        self._assert_infra_recovery_late_authority_hold("wal", "first-write")
+
+    def test_setup_infra_recovery_wal_change_after_pointer_unlink_holds(self):
+        self._assert_infra_recovery_late_authority_hold("wal", "pointer-unlink")
+
+    def test_setup_infra_recovery_wal_change_after_directory_restore_holds(self):
+        self._assert_infra_recovery_late_authority_hold("wal", "directory-restore")
+
+    def test_setup_infra_recovery_a_change_before_first_write_holds(self):
+        self._assert_infra_recovery_late_authority_hold("a", "first-write")
+
+    def test_setup_infra_recovery_a_change_after_pointer_unlink_holds(self):
+        self._assert_infra_recovery_late_authority_hold("a", "pointer-unlink")
+
+    def test_setup_infra_recovery_a_change_after_directory_restore_holds(self):
+        self._assert_infra_recovery_late_authority_hold("a", "directory-restore")
+
+    def test_setup_infra_recovery_q_commit_before_first_write_holds(self):
+        self._assert_infra_recovery_late_authority_hold("q", "first-write")
+
+    def test_setup_infra_recovery_q_commit_after_pointer_unlink_holds(self):
+        self._assert_infra_recovery_late_authority_hold("q", "pointer-unlink")
+
+    def test_setup_infra_recovery_q_commit_after_directory_restore_holds(self):
+        self._assert_infra_recovery_late_authority_hold("q", "directory-restore")
+
+    def _assert_infra_recovery_late_authority_hold(self, kind, boundary):
+        runtime_state, context = self._prepare_persisted_a_runtime_switch() if kind == "a" else (None, None)
+        state, source, destination, backup, receipt, payload = self._prepare_infra_receipt_recovery_owner(
+            state=runtime_state,
+        )
+        journal, descriptor, backend = state[-3:]
+        wal, incident = journal.read_bytes(), receipt.read_bytes()
+        manifest, mixed = state[7].read_bytes(), os.readlink(state[2])
+        source_owner, copy_owner = backup.stat().st_ino, (destination / "audit.log").stat().st_ino
+        authority = (journal if kind == "wal" else context.runtime_receipt / "receipt.json"
+                     if kind == "a" else state[1].resolve() / "99-output-ztp/current-release.json")
+        prior = authority.read_bytes() if kind != "q" else None
+        prior_owner = authority.stat().st_ino if kind != "q" else None
+        injections = []
+
+        def change_authority():
+            if injections:
+                return
+            if kind == "q":
+                authority.parent.mkdir(parents=True, exist_ok=True)
+                authority.write_bytes(b"independent newly committed Q marker\n")
+            else:
+                authority.rename(authority.with_name("held-original-infra-recovery-authority"))
+                authority.write_bytes(prior)
+                authority.chmod(0o600 if kind == "wal" else 0o644)
+                self.assertNotEqual(prior_owner, authority.stat().st_ino)
+            injections.append(authority.stat().st_ino)
+
+        real_restore, real_sync = LOAD._setup_switch_restore_infra_log_tree, LOAD._fsync_parent_directory
+
+        def restore(snapshot, **guard):
+            if boundary == "first-write":
+                change_authority()
+            return real_restore(snapshot, **guard)
+
+        def sync(parent):
+            result = real_sync(parent)
+            if parent == source.parent:
+                if boundary == "pointer-unlink" and not os.path.lexists(source):
+                    change_authority()
+                elif boundary == "directory-restore" and source.is_dir() and not source.is_symlink():
+                    change_authority()
+            return result
+
+        expected = "journal changed" if kind == "wal" else "runtime.*authority" if kind == "a" else "Q parent changed"
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "_setup_switch_restore_infra_log_tree", side_effect=restore), \
+                mock.patch.object(LOAD, "_fsync_parent_directory", side_effect=sync):
+            with self.assertRaisesRegex(LOAD.LoadError, expected):
+                LOAD.recover_setup_switch_journal(
+                    journal, deployment_lock_descriptor=descriptor, services_quiesced=True,
+                    runtime_backend=backend, restore_runtime_from_wal=(kind == "a"),
+                )
+        self.assertEqual(1, len(injections), "authority drift did not reach the intended recovery step")
+        self.assertTrue((destination / "audit.log").is_file(), "authority drift licensed Q hardlink deletion")
+        self.assertEqual(copy_owner, (destination / "audit.log").stat().st_ino)
+        self.assertEqual(payload, (destination / "audit.log").read_bytes())
+        self.assertTrue(receipt.is_file(), "authority drift licensed migration receipt retirement")
+        self.assertEqual(incident, receipt.read_bytes())
+        self.assertEqual(wal, journal.read_bytes())
+        self.assertEqual(manifest, state[7].read_bytes())
+        self.assertEqual(mixed, os.readlink(state[2]))
+        if boundary == "first-write":
+            self.assertTrue(source.is_symlink(), "authority drift licensed pointer unlink")
+            self.assertEqual(source_owner, backup.stat().st_ino)
+        elif boundary == "pointer-unlink":
+            self.assertFalse(os.path.lexists(source), "authority drift licensed backup rename into P")
+            self.assertEqual(source_owner, backup.stat().st_ino)
+        else:
+            self.assertFalse(source.is_symlink())
+            self.assertEqual(source_owner, source.stat().st_ino)
+            self.assertFalse(os.path.lexists(backup))
+        self.assertEqual(injections[0], authority.stat().st_ino)
+        self.assertEqual(prior if kind != "q" else b"independent newly committed Q marker\n", authority.read_bytes())
+        backend.start.assert_not_called()
+
     def _assert_infra_receipt_owner_change_is_held(self, kind):
         state, source, destination, backup, receipt, payload = self._prepare_infra_receipt_recovery_owner()
         common, manifest, journal, descriptor, backend = state[2], state[7], state[10], state[11], state[12]
@@ -5661,7 +5765,7 @@ os.kill(os.getpid(), signal.SIGKILL)
         restore = LOAD._setup_switch_restore_infra_log_tree
         retained = receipt.with_name("operator-retained-receipt.json")
 
-        def change_receipt(snapshot):
+        def change_receipt(snapshot, **guard):
             if kind == "replacement":
                 receipt.rename(retained)
                 receipt.write_bytes(original)
@@ -5675,7 +5779,7 @@ os.kill(os.getpid(), signal.SIGKILL)
                 self.assertEqual((metadata.st_ino, metadata.st_size, metadata.st_mtime_ns),
                                  (after.st_ino, after.st_size, after.st_mtime_ns))
                 self.assertNotEqual(metadata.st_ctime_ns, after.st_ctime_ns)
-            restore(snapshot)
+            restore(snapshot, **guard)
 
         with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
                 mock.patch.object(LOAD, "_setup_switch_restore_infra_log_tree", side_effect=change_receipt):
@@ -5858,9 +5962,9 @@ os.kill(os.getpid(), signal.SIGKILL)
             copy.write_bytes(payload)
             self.assertNotEqual(original_inode, copy.stat().st_ino)
 
-        def before_first_write(snapshot):
+        def before_first_write(snapshot, **guard):
             replace_copy()
-            restore(snapshot)
+            restore(snapshot, **guard)
 
         def after_rename(old, new):
             rename(old, new)
