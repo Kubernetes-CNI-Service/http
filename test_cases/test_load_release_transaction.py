@@ -5573,6 +5573,72 @@ os.kill(os.getpid(), signal.SIGKILL)
         self.assertEqual(state[9][state[2]], os.readlink(state[2]))
         backend.start.assert_not_called()
 
+    def _assert_materialized_recovery_late_authority_holds(self, kind):
+        state, context = self._prepare_persisted_a_runtime_switch() if kind == "a" else (self._prepare_cross_project_setup_crash(), None)
+        journal, descriptor, backend = state[-3:]
+        output = state[1] / "99-output-eth"
+        latest, release = output / "latest", output / "20261007_070000_combine"
+        for path in (latest, release):
+            path.mkdir(parents=True)
+            (path / ".published-complete").write_bytes(b"complete\n")
+            (path / "leaf.yaml").write_bytes(b"independent original leaf\n")
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            backup = LOAD.register_setup_switch_materialized_directory(
+                journal, latest, release, deployment_lock_descriptor=descriptor,
+                services_quiesced=True, runtime_backend=backend,
+            )
+        latest.rename(backup)
+        latest.symlink_to(release.name)
+        original_owner = backup.stat().st_ino
+        wal, manifest, mixed = journal.read_bytes(), state[7].read_bytes(), os.readlink(state[2])
+        authority = (journal if kind == "wal" else context.runtime_receipt / "receipt.json"
+                     if kind == "a" else state[1].resolve() / "99-output-ztp/current-release.json")
+        original_bytes = authority.read_bytes() if kind != "q" else None
+        injected = []
+        sync = LOAD._fsync_parent_directory
+
+        def drift_after_unlink(parent):
+            sync(parent)
+            if parent == latest.parent and not os.path.lexists(latest) and not injected:
+                if kind == "q":
+                    authority.parent.mkdir(parents=True, exist_ok=True)
+                    authority.write_bytes(b"independent Q commit marker\n")
+                else:
+                    owner = authority.stat().st_ino
+                    authority.rename(authority.with_name("held-original-materialized-authority"))
+                    authority.write_bytes(original_bytes)
+                    authority.chmod(0o600 if kind == "wal" else 0o644)
+                    self.assertNotEqual(owner, authority.stat().st_ino)
+                injected.append(authority.stat().st_ino)
+
+        expected = "journal changed" if kind == "wal" else "runtime.*authority" if kind == "a" else "Q parent changed"
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "_fsync_parent_directory", side_effect=drift_after_unlink):
+            with self.assertRaisesRegex(LOAD.LoadError, expected):
+                LOAD.recover_setup_switch_journal(
+                    journal, deployment_lock_descriptor=descriptor, services_quiesced=True,
+                    runtime_backend=backend, restore_runtime_from_wal=(kind == "a"),
+                )
+        self.assertEqual(1, len(injected), "authority injection boundary was not reached")
+        self.assertFalse(os.path.lexists(latest), "authority drift licensed backup rename into latest")
+        self.assertEqual(original_owner, backup.stat().st_ino)
+        self.assertEqual(b"independent original leaf\n", (backup / "leaf.yaml").read_bytes())
+        self.assertEqual(wal, journal.read_bytes())
+        self.assertEqual(manifest, state[7].read_bytes())
+        self.assertEqual(mixed, os.readlink(state[2]))
+        self.assertEqual(injected[0], authority.stat().st_ino)
+        self.assertEqual(original_bytes if kind != "q" else b"independent Q commit marker\n", authority.read_bytes())
+        backend.start.assert_not_called()
+
+    def test_setup_materialized_recovery_wal_drift_after_unlink_holds_backup(self):
+        self._assert_materialized_recovery_late_authority_holds("wal")
+
+    def test_setup_materialized_recovery_a_drift_after_unlink_holds_backup(self):
+        self._assert_materialized_recovery_late_authority_holds("a")
+
+    def test_setup_materialized_recovery_q_commit_after_unlink_holds_backup(self):
+        self._assert_materialized_recovery_late_authority_holds("q")
+
     def test_setup_materialized_recovery_rechecks_source_link_before_unlink(self) -> None:
         self._assert_materialized_recovery_rechecks_owner("source")
 

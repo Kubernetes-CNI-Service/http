@@ -8532,10 +8532,12 @@ def _recover_setup_switch_journal_snapshot(
         _require_setup_switch_materialized_owners(authority)
         if has_backup:
             if os.path.islink(source):
+                require_journal_unchanged()
                 source.unlink()
                 authority["owners"]["source"] = None
                 _fsync_parent_directory(source.parent)
             _require_setup_switch_materialized_owners(authority)
+            require_journal_unchanged()
             _setup_switch_rename_directory_noreplace(backup, source)
             restored = _setup_switch_materialized_owner(source)
             if restored is None or restored[0][:2] != authority["owners"]["backup"][0][:2]:

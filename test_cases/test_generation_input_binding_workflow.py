@@ -3128,6 +3128,92 @@ finally:
             self.assertEqual(mixed, os.readlink(common))
             self.assertFalse((root / "service-started").exists())
 
+    def test_real_setup_materialized_cold_wal_drift_after_unlink_holds_backup(self):
+        self._assert_real_materialized_cold_authority_holds("wal")
+
+    def test_real_setup_materialized_cold_q_commit_after_unlink_holds_backup(self):
+        self._assert_real_materialized_cold_authority_holds("q")
+
+    def _assert_real_materialized_cold_authority_holds(self, kind):
+        with tempfile.TemporaryDirectory(prefix="r22-materialized-total-authority-") as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, _p, q, common, _p_only, _q_only, manifest, _before, _hook, barrier, _home = fixture
+            output = q / "99-output-eth"
+            latest, release = output / "latest", output / "20261007_070000_combine"
+            for path in (latest, release):
+                path.mkdir(parents=True)
+                (path / ".published-complete").write_bytes(b"complete\n")
+                (path / "leaf.yaml").write_bytes(b"independent original leaf\n")
+            first = self._run_private_load_setup_switch(fixture, prepare_journal=True, kill_after_replace=latest)
+            self.assertEqual(23, first.returncode, first.stdout + first.stderr)
+            self.assertTrue(barrier.is_file())
+            journal = root / "ztp/.setup-switch-journal.json"
+            evidence, manifest_bytes, mixed = journal.read_bytes(), manifest.read_bytes(), os.readlink(common)
+            backup = Path(json.loads(evidence)["body"]["directories"][0]["backup"])
+            original_owner = backup.stat().st_ino
+            recovery = """
+import importlib.util, os, sys
+from pathlib import Path
+from types import SimpleNamespace
+root, latest, backup = map(Path, sys.argv[1:4])
+kind = sys.argv[4]
+spec = importlib.util.spec_from_file_location('fresh_materialized_authority_load', root / 'DAY0-Prepare/11-load.py')
+load = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = load
+spec.loader.exec_module(load)
+load.active_managed_services = lambda *args, **kwargs: ()
+journal = root / 'ztp/.setup-switch-journal.json'
+authority = journal if kind == 'wal' else latest.parent.parent / '99-output-ztp/current-release.json'
+prior = journal.read_bytes()
+sync = load._fsync_parent_directory
+injected = []
+def drift_after_unlink(parent):
+    sync(parent)
+    if parent == latest.parent and not os.path.lexists(latest) and not injected:
+        if kind == 'wal':
+            owner = journal.stat().st_ino
+            journal.rename(journal.with_name('held-original-materialized-authority'))
+            journal.write_bytes(prior)
+            journal.chmod(0o600)
+            assert owner != journal.stat().st_ino
+        else:
+            authority.parent.mkdir(parents=True, exist_ok=True)
+            authority.write_bytes(b'independent Q commit marker\\n')
+        injected.append(authority.stat().st_ino)
+load._fsync_parent_directory = drift_after_unlink
+descriptor = load.acquire_deployment_lock(exclusive=True)
+try:
+    try:
+        load.recover_setup_switch_journal(journal,
+            deployment_lock_descriptor=descriptor, services_quiesced=True,
+            runtime_backend=SimpleNamespace(name='supervisor'))
+    except load.LoadError as error:
+        assert ('journal changed' if kind == 'wal' else 'Q parent changed') in str(error), str(error)
+        assert len(injected) == 1, 'authority injection boundary was not reached'
+        assert not os.path.lexists(latest), 'authority drift licensed backup rename into latest'
+        assert backup.is_dir(), 'original backup was consumed'
+        assert authority.stat().st_ino == injected[0]
+        raise SystemExit(7)
+    raise AssertionError('cold recovery accepted authority drift')
+finally:
+    load.release_deployment_lock(descriptor)
+"""
+            second = subprocess.run([sys.executable, "-B", "-c", recovery, str(root), str(latest), str(backup), kind],
+                                    cwd=root, capture_output=True, text=True, check=False, timeout=30)
+            self.assertEqual(7, second.returncode, second.stdout + second.stderr)
+            self.assertFalse(os.path.lexists(latest))
+            self.assertEqual(original_owner, backup.stat().st_ino)
+            self.assertEqual(b"independent original leaf\n", (backup / "leaf.yaml").read_bytes())
+            self.assertEqual(evidence, journal.read_bytes())
+            if kind == "wal":
+                self.assertEqual(evidence, journal.with_name("held-original-materialized-authority").read_bytes())
+            else:
+                self.assertEqual(b"independent Q commit marker\n",
+                                 (q / "99-output-ztp/current-release.json").read_bytes())
+            self.assertEqual(manifest_bytes, manifest.read_bytes())
+            self.assertEqual(mixed, os.readlink(common))
+            self.assertFalse((root / "service-started").exists())
+
     def test_real_setup_wal_refuses_unowned_infra_log_receipt_before_q_link(self):
         """An existing receipt outside this WAL cannot be inferred as Q-owned."""
         with tempfile.TemporaryDirectory(prefix="r22-real-infra-hold-") as name:
