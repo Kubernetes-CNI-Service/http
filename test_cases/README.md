@@ -889,3 +889,12 @@ ACTION-PREIMAGE/action_digest → immutable wire journal → 六个冷启动进�
 原字面值。拒绝错位、缺 grid、重复、额外列、非 200 和部分响应，不重发、不静默
 截断或分页。它不是完整 History 尾边界、缺行/重复行证明或 COMPLETE，不授予发送
 能力；nonce、fence、不可变 journal 与完整单元对账仍须另证。真机卡 NOT RUN。
+
+`test_cases.test_req7_spreadsheet_owner` 验证未安装的跨项目 spreadsheet-wide
+非阻塞 OS owner：固定 root-only `/var/lib/http-ztp-container/issue-tracker`
+目录必须另行授权预置，目录与锁使用 held-FD/name identity，无 UID／路径／过期覆盖。
+按完整 spreadsheet ID 摘要取持久空锁，同 ID 的不同项目／policy 竞争；不同 ID 隔离。
+退出先撤销 token，仅关闭 FD，不 `LOCK_UN`／不删除，原生独立进程和继承子进程
+实证剩余持有者继续互斥，实际 C-6／action journal 流程不改变 UNKNOWN。
+它不授予发送许可，不证明跨主机、真实 root/container、全局 UNKNOWN/FIFO、durable
+reservation 或受审 launcher 的实际尝试边界，也不代表 REQ7 整体完成。真机卡 NOT RUN。

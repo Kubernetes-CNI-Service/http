@@ -2076,6 +2076,15 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - 证据：保存精确命令/退出码、完整物理顺序日志、前后 stat/inode/SHA、启动前 monotonic 时间、阶段耗时、持有锁的 FD/session 归属、截止期、TERM/KILL/reap/会话不存在和父死子存的独立见证。私有响应和诊断不进入公开日志；局部原生慢读 PASS 不代表整个 REQ7 或生产权限。
 - 故障注入、清理与风险：注入启动失败、DNS/慢读、pipe 关闭、监督器死亡和无法终止；保持原预算/行为断言。本地夹具已独立复现并修正已回收 leader 的同号存活 group 被误认为信号权限；首次检查之后、异常清理和 TERM/KILL 升级之前也必须重新确认活 leader 的 session/group 归属，不能把首次检查缓存为永久信号权限。真实 PID 重用仍 NOT RUN，必须验证不向该不确定 group 发信号、终止未确认保持 HOLD。实际临时 flock 的终止被拒工作流必须保持其他候选无法取得锁，直到本卡确证拥有的子进程完成清理。只终止本卡确证拥有的隔离会话，不能向外部 PID/group 发信号；清理不确定保持 HOLD，由授权责任人恢复隔离快照并重核锁。不得以 PID 重用、过期锁、超时宽限或重发来隐藏 UNKNOWN。
 
+## TC-REAL-REQ7-SPREADSHEET-OWNER-001 — 跨项目持久 OS 锁与继承 FD
+
+- Case ID：`TC-REAL-REQ7-SPREADSHEET-OWNER-001`；类型：native / integration；对应 C-6/C-14/C-19。状态：**NOT RUN / REAL_ENV REQUIRED**。涉及 `monitor/issue_tracker_spreadsheet_owner.py`、`monitor/issue_tracker_local_commit.py`、`monitor/issue_tracker_send_intent.py`；本地合成 root 元数据、原生 flock／独立进程／继承 FD 与实际 C-6/action journal 不证明部署身份或整个 REQ7。
+- 风险与目标：跨项目相同 spreadsheet ID 必须共用一把持久空锁，非阻塞、无 expiry takeover、无路径／UID／TTL 参数；父退出时先撤销 token，仅 close，继承子进程仍持锁；不删除锁，不用 mtime 或 remote marker 当接管权威。跨主机不支持。
+- 前置条件：owner 另行精确授权部署前提和隔离副本 Stage O；受审固定 launcher 与 root worker、唯一主机共享的 `/var/lib/http-ztp-container/issue-tracker` root 0700 目录、每层祖先 root 且无 group/other 写位、锁常规 root 0600/nlink 1/空文件。该库不创建或修复祖先，不能借本卡部署或解锁。host/container 共享同一 inode 的挂载权威必须独立实证；没有共享命名空间便拒绝发送。
+- 步骤与独立预期：两个项目的实际 C-6 owner 可各自持有，但同目标全局竞争者必须 HOLD；不同目标可独立进入。固定子进程继承已验证 FD，监督器死亡／上下文退出不释放子持有的锁，直到真实总预算清理证明其退出；新鲜复核每层祖先及锁 pathname/inode。注入链接、位移、额外字节、权限、重启及长时间锁龄均不得修复／删除／接管。
+- 证据：精确 HEAD/tree/dirty、命令/退出码、Python/平台与实际挂载、完整日志物理顺序/END、前后 stat/inode/大小/SHA256、实际两个项目 journal 和锁 FD/session 归属、父死子存、竞争拒绝及最后持有者退出后的恢复互斥；私有 ID 不公开。全局 UNKNOWN/FIFO、分配／预留与实际 M=6 单次 capability 另证，不因拿锁视为完成。
+- 清理与风险：只回收本卡确证自有的隔离子进程和经授权副本；不删除真实锁、journal、History、fence 或 outstanding reservation，不向不确定 PID/group 发信号；无法证明终止或共享命名空间时 HOLD。真实 root、容器和父死子存 Stage O 前提未执行，保持 NOT RUN。
+
 ## TC-REAL-REQ7-BOUNDED-HISTORY-READ-001 — 原始类型的有限 History 回读
 
 - Case ID：`TC-REAL-REQ7-BOUNDED-HISTORY-READ-001`；类型：real-environment / integration；对应 C-8/C-19/C-26。状态：**NOT RUN / REAL_ENV REQUIRED**。涉及 `monitor/issue_tracker_sheets_read_plan.py`、`monitor/issue_tracker_tls_inputs.py`、`monitor/issue_tracker_sheets_read_decode.py`；本地 direct 与原生私有 loopback TLS workflow 已覆盖类型、矩形和一次读取，不证明部署环境或整个 REQ7。

@@ -54,6 +54,7 @@ REQ7_CONTROLLED_TRANSPORT_LIBRARIES = frozenset({
     "monitor/issue_tracker_metadata_capacity.py",
     "monitor/issue_tracker_send_unit.py",
     "monitor/issue_tracker_send_intent.py",
+    "monitor/issue_tracker_spreadsheet_owner.py",
 })
 
 RUNTIME_PATTERNS = (
@@ -575,6 +576,12 @@ def script_profile(root: Path, relative: str) -> dict[str, str]:
                 inputs = "ACTIVE 本地 writer token、单元标识和不超过 1 MiB 的冻结字节；它们不是合格 Sheets batch 或发送能力。"
                 recovery = "计数耗尽、部分／外来文件、字节变化或 fsync 失败均 HOLD，保留证据；无清理、重置或新单元接管。"
                 example = "python3 -B -m unittest -v test_cases.test_req7_attempt_journal  # 仅开发测试"
+            elif relative == "monitor/issue_tracker_spreadsheet_owner.py":
+                scenario = "同一 spreadsheet 的跨项目非阻塞 OS 锁；固定私有路径、持有祖先身份、无过期接管，父退出后继承 FD 继续互斥。"
+                inputs = "typed 目标绑定与已独立授权预置的 /var/lib/http-ztp-container/issue-tracker 目录；不接受路径／UID／TTL 覆盖，不创建或修复祖先。"
+                outputs = "短生命周期 opaque owner token 和仅固定受审 launcher 可借用的 CLOEXEC 锁 FD；不是在线发送能力。"
+                recovery = "身份位移、链接、外来字节／权限或锁忙时 HOLD；不删除锁、不显式解锁，不以 mtime 接管；UNKNOWN/FIFO 与真实 launcher 仍须另证。"
+                example = "python3 -B -m unittest -v test_cases.test_req7_spreadsheet_owner  # 仅开发测试"
             elif relative == "monitor/issue_tracker_send_intent.py":
                 scenario = "在实际本地 owner 内先持久保存非递归 ACTION-PREIMAGE 和 action/wire 摘要，再保存不可变 wire，最后记录 UNKNOWN 意图。"
                 inputs = "ACTIVE C-6 token 与冻结单表组合；摘要一致不证明 protected 准入、跨项目 spreadsheet 锁或发送许可。"

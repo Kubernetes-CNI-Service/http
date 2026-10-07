@@ -289,7 +289,8 @@
         "test_cases.test_req7_metadata_capacity",
         "test_cases.test_req7_send_unit",
         "test_cases.test_req7_send_intent",
-        "test_cases.test_req7_history_read"
+        "test_cases.test_req7_history_read",
+        "test_cases.test_req7_spreadsheet_owner"
       ]
     },
     {
@@ -614,7 +615,8 @@
     "monitor/issue_tracker_attempt_journal.py": "monitor/issue_tracker_attempt_journal.py",
     "monitor/issue_tracker_metadata_capacity.py": "monitor/issue_tracker_metadata_capacity.py",
     "monitor/issue_tracker_send_unit.py": "monitor/issue_tracker_send_unit.py",
-    "monitor/issue_tracker_send_intent.py": "monitor/issue_tracker_send_intent.py"
+    "monitor/issue_tracker_send_intent.py": "monitor/issue_tracker_send_intent.py",
+    "monitor/issue_tracker_spreadsheet_owner.py": "monitor/issue_tracker_spreadsheet_owner.py"
   },
   "test_rules": [
     {
@@ -1751,6 +1753,11 @@
       "id": "req7_bounded_history_read",
       "paths": ["monitor/issue_tracker_sheets_read_plan.py", "monitor/issue_tracker_sheets_read_decode.py", "monitor/issue_tracker_tls_inputs.py"],
       "tests": ["test_cases.test_req7_history_read"]
+    },
+    {
+      "id": "req7_spreadsheet_wide_owner",
+      "paths": ["monitor/issue_tracker_spreadsheet_owner.py"],
+      "tests": ["test_cases.test_req7_spreadsheet_owner"]
     }
   ],
   "workflows": [
@@ -3204,6 +3211,11 @@
       "id": "req7_native_bounded_history_typed_read",
       "members": ["monitor/issue_tracker_sheets_read_plan.py", "monitor/issue_tracker_sheets_read_decode.py", "monitor/issue_tracker_tls_inputs.py"],
       "tests": ["test_cases.test_req7_history_read"]
+    },
+    {
+      "id": "req7_cross_project_owner_action_journal_native_inheritance",
+      "members": ["monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_send_intent.py", "monitor/issue_tracker_local_commit.py"],
+      "tests": ["test_cases.test_req7_spreadsheet_owner"]
     }
   ],
   "path_rules": [
