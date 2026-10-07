@@ -64,6 +64,11 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
     def test_real_nine_role_ib_and_eth_fourth_role_qualify_and_c5_reject_drift(self):
         self._exercise_real_protected_three_panel_fixture(skip_history=False)
 
+    def test_two_real_cycles_keep_keys_and_commit_latest_business_values(self):
+        self._exercise_real_protected_three_panel_fixture(
+            skip_history=False, two_cycle_changed_latest=True,
+        )
+
     def test_real_protected_eth_and_switch_skips_have_local_audit_history(self):
         self._exercise_real_protected_three_panel_fixture(skip_history=True)
 
@@ -290,7 +295,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         require_first_manual_admission=False, manual_after_manual=False,
         terminal_orphan_probe=False, selected_manual_panel=None,
         selected_panel_empty=False, manual_channel_bridge=False,
-        source_identity_probe=False,
+        source_identity_probe=False, two_cycle_changed_latest=False,
     ):
         from monitor.collection_ib_producer import (
             IbProducerAuthoritySnapshot, parse_ib_producer_authority,
@@ -458,9 +463,11 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                 self.template = root_template
             self.snapshot = read_whitelist_workbook(self.template)
             with tracker_writer(project, self.publication) as token:
-                set_k(token, new_k=1, actor="operator:fixture",
+                set_k(token, new_k=2 if two_cycle_changed_latest else 1,
+                      actor="operator:fixture",
                       recorded_at="2026-09-25T00:01:00Z",
-                      request_id="req7-three-panel-k1", expected_revision=0)
+                      request_id=("req7-three-panel-k2" if two_cycle_changed_latest
+                                  else "req7-three-panel-k1"), expected_revision=0)
                 self.settings = current_k(token)
             args = {"http_root": self.root, "settings": self.settings,
                     "whitelist_snapshot": self.snapshot,
@@ -472,6 +479,37 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                     encoding="utf-8",
                 )
                 self._verify_protected_skip_commit(project, args)
+                return
+            if two_cycle_changed_latest:
+                second_identity = build_collection_cycle_identity(
+                    str(project), "prod", 2, TOKEN_2,
+                )
+                vendor.write_text(
+                    "Switch: 0x1 MF0;leaf01:MQM9700/U1:\n"
+                    ' 1 1[  ] ==( 4X 200 Gbps Active / LinkUp )==> '
+                    '20 1[  ] "server03 mlx5_1"\n', encoding="utf-8",
+                )
+                second_binding = produce_worker_ib_analysis(
+                    second_identity, project_root=project, http_root=self.root,
+                    clock=lambda: dt.datetime(2026, 9, 26, 4, 31,
+                                              tzinfo=dt.timezone.utc),
+                    runner=lambda _argv: self.fail("transport is supplied by fixture"),
+                )
+                from test_cases.test_issue_tracker_switch_info_source import _nvl_info
+                with mock.patch(
+                    "test_cases.test_issue_tracker_switch_runtime_workflow._nvl_info",
+                    side_effect=lambda host, **_kwargs: _nvl_info(host, asic_current="81"),
+                ):
+                    second_cycle, _ = self._cycle(
+                        activity=True, derivation=True,
+                        ib_analysis=second_binding, observed_peer="changed-peer",
+                        fabric_templates={"ethernet/prod": "tan-leaf",
+                                          "nvlink/prod": "border-leaf"},
+                    )
+                self.assertEqual(second_identity["cycle_id"], second_cycle["cycle_id"])
+                self._verify_two_cycle_latest_local_commit(
+                    project, args, (cycle["cycle_id"], second_cycle["cycle_id"]),
+                )
                 return
             qualified = qualify_prod_stage_l(self.store, **args)
             self.assertTrue(qualified.qualified)
@@ -1377,6 +1415,116 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             )
         self.assertIsInstance(no_op, ProdWorkbookNoop)
         self.assertEqual("no_change", no_op.status)
+
+    def _verify_two_cycle_latest_local_commit(self, project, args, cycle_ids):
+        from monitor.issue_tracker_stage_l_consumer import qualify_prod_stage_l
+        from monitor.issue_tracker_manifest import freeze_prod_stage_l_manifest
+        from monitor.issue_tracker_local_workbook_commit import (
+            CommittedProdWorkbook, commit_prod_stage_l_workbook,
+        )
+        from monitor.issue_tracker_publish_runtime import local_publish_interval
+        from monitor.issue_tracker_state_owner import tracker_writer
+        import xml.etree.ElementTree as ET
+
+        qualified = qualify_prod_stage_l(self.store, **args)
+        self.assertTrue(qualified.qualified)
+        self.assertEqual(cycle_ids, qualified.cycle_ids)
+        self.assertEqual(2, self.settings.k)
+        self.assertEqual(4, len(qualified.candidates))
+        by_key = {item.activity_key: item for item in qualified.candidates}
+        self.assertEqual({
+            ("eth_cabling", "leaf-a", "swp1", "Mis-wiring"),
+            ("ib_cabling", "leaf01", "sw1p1", "Mis-wiring"),
+            ("switch", "leaf-a", "fan", "PSU1/FAN1"),
+            ("switch", "nvsw01", "asic_temp", "ASIC1"),
+        }, set(by_key))
+        eth = by_key[("eth_cabling", "leaf-a", "swp1", "Mis-wiring")]
+        ib = by_key[("ib_cabling", "leaf01", "sw1p1", "Mis-wiring")]
+        self.assertEqual(("leaf-a", "swp1", "leaf-z", "swp2"), eth.expected_endpoints)
+        self.assertEqual(("changed-peer", "swp9", "leaf-a", "swp1"), eth.actual_endpoints)
+        # Match the literal planned P2P switch port, not the raw vendor ordinal.
+        self.assertEqual(("leaf01", "sw1p1", "server01", "mlx5_0"), ib.expected_endpoints)
+        self.assertEqual(("leaf01", "sw1p1", "server03", "mlx5_1"), ib.actual_endpoints)
+        asic = by_key[("switch", "nvsw01", "asic_temp", "ASIC1")]
+        self.assertIn("81", asic.evidence_description)
+        self.assertNotIn("75", asic.evidence_description)
+        original_template = self.template.read_bytes()
+        metadata = {
+            "project_id": str(project), "schema_version": 1,
+            "producer_version": "req7-test-producer",
+            "template_contract_version": "v1",
+            "template_sha256": self.snapshot.workbook_sha256,
+        }
+        before = tuple(sorted(self.publication.iterdir()))
+        body, digest = freeze_prod_stage_l_manifest(
+            qualified, self.store, metadata=metadata,
+            expected_template_sha256=self.snapshot.workbook_sha256, **args,
+        )
+        self.assertEqual(before, tuple(sorted(self.publication.iterdir())))
+        self.assertEqual(hashlib.sha256(body).hexdigest(), digest)
+        (project / "01-global.yaml").write_text(
+            "schema_version: 2\ncommon:\n  mgmt:\n"
+            "    issue-tracker:\n      status: disabled\n", encoding="utf-8",
+        )
+        interval, policy_sha = local_publish_interval(project)
+        witness = (policy_sha, interval, "fixture-boot", time.monotonic_ns())
+        with tracker_writer(project, self.publication) as token:
+            committed = commit_prod_stage_l_workbook(
+                token, qualified, self.store, template_path=self.template,
+                metadata=metadata,
+                expected_template_sha256=self.snapshot.workbook_sha256,
+                manual_admission=witness, **args,
+            )
+        self.assertIsInstance(committed, CommittedProdWorkbook)
+        self.assertEqual(3, committed.prepared.source_family_count)
+        self.assertEqual(digest, committed.receipt.manifest_id)
+        self.assertEqual(hashlib.sha256(committed.prepared.xlsx_bytes).hexdigest(),
+                         committed.receipt.published_sha256)
+        generation = project / ".tracker/generations" / committed.generation.generation_id
+        self.assertEqual(body, (generation / "MANIFEST").read_bytes())
+        receipt = json.loads((generation / "RECEIPT").read_bytes())
+        self.assertEqual(digest, receipt["manifest_id"])
+        self.assertEqual(committed.receipt.published_sha256, receipt["published_sha256"])
+        published_bytes = (self.publication / receipt["published"]).read_bytes()
+        self.assertEqual(committed.prepared.xlsx_bytes, published_bytes)
+        self.assertEqual(hashlib.sha256(published_bytes).hexdigest(),
+                         committed.receipt.published_sha256)
+        self.assertEqual(original_template, self.template.read_bytes())
+        ns = {"s": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+
+        def cells(archive, sheet):
+            root = ET.fromstring(archive.read("xl/worksheets/" + sheet))
+            return {node.attrib["r"]: node for node in root.findall(".//s:c", ns)}
+
+        def text_value(node):
+            return "".join(node.itertext())
+
+        with zipfile.ZipFile(BytesIO(original_template)) as template, \
+             zipfile.ZipFile(BytesIO(published_bytes)) as published:
+            for sheet, expected in (
+                ("sheet3.xml", {"M3": "changed-peer", "N3": "swp9",
+                                "S3": "leaf-a", "T3": "swp1"}),
+                ("sheet4.xml", {"M3": "leaf01", "N3": "sw1p1",
+                                "S3": "server03", "T3": "mlx5_1"}),
+            ):
+                actual_cells = cells(published, sheet)
+                for address, expected_value in expected.items():
+                    self.assertEqual(expected_value, text_value(actual_cells[address]), address)
+            old_switch, new_switch = cells(template, "sheet2.xml"), cells(published, "sheet2.xml")
+            for address in ("D3", "E3", "G3", "H3", "I3", "O3", "U3"):
+                self.assertEqual(ET.tostring(old_switch[address]),
+                                 ET.tostring(new_switch[address]), address)
+            for row in range(4, 8):
+                for column in "DEGH":
+                    address = f"{column}{row}"
+                    self.assertEqual(ET.tostring(old_switch[address]),
+                                     ET.tostring(new_switch[address]), address)
+            asic_rows = [address[1:] for address, node in new_switch.items()
+                         if address.startswith("F") and text_value(node) == "nvsw01"]
+            self.assertEqual(1, len(asic_rows))
+            description = text_value(new_switch["L" + asic_rows[0]])
+            self.assertIn("81", description)
+            self.assertNotIn("75", description)
 
     def test_frozen_template_fabric_is_projected_with_strict_type_precedence(self):
         from monitor.issue_tracker_stage_l_consumer import (
