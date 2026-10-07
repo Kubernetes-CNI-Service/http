@@ -1,5 +1,46 @@
 # 脚本变更影响测试
 
+## 2026-10-08 R22 原 DHCP B 首写候选所有权
+
+基于 `c704aea`，新 direct 和真实 LOAD→SETUP→Q 提交强杀→新 LOAD 负例均确认：
+同字节新 B inode 在首个补偿写前会被错误认领为 checkpoint。有效 RED 为
+2 FAIL / 16.684s / exit1，完整 `outputs/test-diagnostics/r22-first-b-dhcp-candidate-owner-red.log`，
+inode162425539 / size130122 / SHA256
+`bc60b4b76ceb3a890182e26e503c4fffb82bc9a123ad3a80020553409b70000e`。
+原断言不变；初轮修复已拒绝，但阶段探测吞掉具体 DHCP owner 原因，原失败日志保留。
+改为阶段独立 owner 先核后，2 OK / 6.618s / exit0，完整
+`r22-first-b-dhcp-candidate-owner-green2.log`（inode162434717 / size128007 / SHA256
+`a0368c8a703fc9e92da461ae91d3b10ae95b65b73b423f35dcf5977a96e50995`）。
+
+原写者在第一个 B 覆盖前持久登记 live A、B 候选和 A restore 候选九字段 owner，
+独立字节/元数据/原父与目录；原缺席为 None。实际覆盖/未提交恢复 rename 消费原
+候选，持续核原 WAL/receipt/backup/清单；新 Q/P/A 补偿只能沿原 B 候选资格。
+候选 fsync/WAL 登记 fsync 换绑、A 捕获后/首 B rename 后同字节 live 替换均 HOLD。
+既有部分 B direct fixture 原先在 A 回滚后复制 B，已改为实际 writer B rename→
+SIGKILL 后接手，保留原恢复断言，而非为合法恢复接受外来 inode。
+7 OK / 24.830s / exit0，完整 `r22-first-b-dhcp-candidate-boundaries-green2.log`，
+inode162437667 / size131585 / SHA256
+`4c7ef00b3fde3cff827cca60bf3c18aadccc63bf28ddf2a298a90fbde131e470`；
+物理 Ran14→OK16→actual42→冻结一致43→END45=0。
+
+legacy 缺候选清单仍会被补办资格的独立 RED：2 tests / 1 FAIL / 7.783s / exit1，
+`r22-first-b-dhcp-candidate-legacy-red.log`（inode162445410 / size129056 / SHA256
+`a642591eec6bd4709bbbfa7e7037a05c568db98d8ba1dd645d7e0f4375374be6`）。
+新资格须在任何补偿 stage/plan/写入前 HOLD；Boolean/额外名称/路径逃逸/原缺席/模式
+闭合字段负例保持。2 OK / 1.816s / exit0，完整 `r22-first-b-dhcp-candidate-legacy-green.log`，
+inode162445823 / size128199 / SHA256
+`0550b1de8cc2da9eb542d09cb5cb17f786961de4229ba088b98e8f37bc751001`。
+真实多脚本 legacy、原 authority 换绑、首写登记、同字节 B、非默认元数据和恢复
+stage 死亡组合回归 6 OK / 79.884s / exit0，完整
+`r22-first-b-dhcp-candidate-workflows-green.log`，inode162446143 / size129787 / SHA256
+`45ef369959adc8042397eea663e20fab81588ab31fad4d810bab9c4293fcd2aa`；
+65257-byte 旧前缀 SHA256 `e3a02797e9b8d26005b967f9a2bd2f1d75d91e458e27e08a5a62a2bd4567c24e`
+不变，物理 Ran13→OK15→actual23→冻结一致24→END26=0。
+以上日志读前后 stat/inode 稳定，实际退出码及完整物理结尾已核；无删/跳/弱化测试，
+manifest 既有 direct/真实 workflow 映射继续适用，ledger 未手改。
+模块回归/正式 related/full/check 另记；旧 A 显式健康激活/归档、root/Linux/断电/C2/
+DEV ACK 未闭，不以局部 PASS 关闭 R22。
+
 ## 2026-10-08 R22 DHCP 补偿 stage 的持久归属
 
 基于 `35d1c5e`，原 DHCP 恢复仅按内容/元数据分类，冷重入错误收编已恢复文件或
@@ -258,6 +299,17 @@ inode161720204 / size333879 / SHA256
 旧 90879-byte 前缀 SHA256 `11865a442687b5a5cecf1ad30b2dd5ad4f5077213f7e96030f71bd91858010e4`
 不变，前后 stat 一致；物理 Ran1731→OK1733→实际退出1750→冻结一致1751→END1753=0。
 这是有界模块回归，不更新自动 ledger，也不是干净精确树正式 full/check。
+
+完整 DHCP first-B candidate 模块回归：三个完整 direct/report 模块与 24 个指定真实
+workflow 共 653 tests OK / 482.623s / exit0；日志
+`outputs/test-diagnostics/r22-first-b-dhcp-candidate-module-regression.log`，
+inode162465880 / size361945 / SHA256
+`4e87fd9737ea506084ad10baa4c1e312f80c6409467068cd6207330a4ff67750`。
+旧 83685-byte 前缀 SHA256
+`82b6507d5218d93124958e20585de5198c1a2b195b3425e1b977a79e6d0f0f44` 不变；
+读取前后 stat 一致，物理 Ran1887→OK1889→实际退出1940→冻结一致1941→END1943=0。
+这是有界回归，不是正式 related/full/check，没有修改批准 ledger。原 A prefix
+叶子恢复资格、显式安全激活与完整共享面收口仍待，不以此关闭 R22。
 
 ## 2026-10-08 R22 已提交 Q 的停服 P/A/DHCP 分组恢复候选
 

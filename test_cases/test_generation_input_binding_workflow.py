@@ -5009,11 +5009,18 @@ finally:
     def test_real_setup_committed_q_group_dhcp_restore_keeps_original_nondefault_metadata(self):
         self._real_setup_committed_q_group_restore(dhcp=True, dhcp_metadata=True)
 
+    def test_real_setup_committed_q_group_rejects_unregistered_same_byte_b_dhcp_before_compensation(self):
+        self._real_setup_committed_q_group_restore(dhcp=True, dhcp_b_fault=True)
+
+    def test_real_setup_committed_q_legacy_dhcp_wal_cannot_mint_b_candidate_qualification(self):
+        self._real_setup_committed_q_group_restore(dhcp=True, dhcp_legacy_fault=True)
+
     def _real_setup_committed_q_group_restore(self, *, dhcp=False, runtime_death=False,
                                              setup_death=False, foreign_setup=False,
                                              q_local=False, q_fault=False, a_fault=None, a_image_fault=False,
                                              a_image=False, dhcp_backup_fault=False, dhcp_live_fault=False,
-                                             dhcp_death=False, dhcp_metadata=False):
+                                             dhcp_death=False, dhcp_metadata=False, dhcp_b_fault=False,
+                                             dhcp_legacy_fault=False):
         fixture = RELEASE_FIXTURE.ReleaseTransactionTests()
         fixture.setUp()
         try:
@@ -5193,6 +5200,14 @@ try:
             print('R22_FOREIGN_RESTORED_DHCP_OWNER_REJECTED')
             sys.exit(0)
         raise AssertionError('same-byte new restored DHCP owner must not be adopted')
+    if sys.argv[5] == 'foreign-dhcp-b':
+        try:
+            load.restore_setup_switch_a_disk(q, guard=guard, confirmed=True)
+        except load.LoadError as exc:
+            assert 'DHCP' in str(exc) and ('owner' in str(exc) or 'candidate' in str(exc)) and 'HOLD' in str(exc), str(exc)
+            print('R22_UNREGISTERED_B_DHCP_OWNER_REJECTED')
+            sys.exit(0)
+        raise AssertionError('same-byte unknown B DHCP owner must not qualify a new compensation plan')
     status = load.restore_setup_switch_a_disk(q, guard=guard, confirmed=True)
     assert status == 'restored-p-a-group-stopped-wal-retained', status
     expected_bootstrap = (b'A oob bootstrap\nZTP_UPGRADE_ENABLED="true"\n'
@@ -5235,6 +5250,36 @@ finally:
                                     capture_output=True, text=True, check=False, timeout=30)
             self.assertEqual(-signal.SIGKILL, writer.returncode, writer.stdout + writer.stderr)
             original_wal = (journal.lstat().st_ino, journal.read_bytes())
+            if dhcp_b_fault or dhcp_legacy_fault:
+                path, held = root / "private-etc-dhcp/dhcpd.conf", root / "independent-held-installed-B-dhcp"
+                if dhcp_b_fault:
+                    metadata, payload = path.lstat(), path.read_bytes()
+                    path.rename(held)
+                    path.write_bytes(payload)
+                    path.chmod(stat.S_IMODE(metadata.st_mode))
+                    os.utime(path, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
+                    self.assertNotEqual(held.lstat().st_ino, path.lstat().st_ino)
+                else:
+                    envelope = json.loads(journal.read_bytes())
+                    del envelope["body"]["dhcp_transaction"]["live_inventory"]
+                    payload = json.dumps(envelope["body"], sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+                    envelope["sha256"] = hashlib.sha256(payload).hexdigest()
+                    journal.write_bytes(json.dumps(envelope, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode() + b"\n")
+                    original_wal = (journal.lstat().st_ino, journal.read_bytes())
+                parent, selector = q / "99-output-ztp/current-release.json", q / "99-output-ztp/current"
+                frozen = (path.lstat().st_ino, path.read_bytes(), state[7].lstat().st_ino, state[7].read_bytes(),
+                    os.readlink(common), parent.lstat().st_ino, parent.read_bytes(), selector.lstat().st_ino,
+                    os.readlink(selector))
+                rejecting = subprocess.run(argv + ["foreign-dhcp-b", shape], capture_output=True,
+                    text=True, check=False, timeout=30)
+                self.assertEqual(0, rejecting.returncode, rejecting.stdout + rejecting.stderr)
+                self.assertIn("R22_UNREGISTERED_B_DHCP_OWNER_REJECTED", rejecting.stdout)
+                self.assertEqual(frozen, (path.lstat().st_ino, path.read_bytes(), state[7].lstat().st_ino,
+                    state[7].read_bytes(), os.readlink(common), parent.lstat().st_ino, parent.read_bytes(),
+                    selector.lstat().st_ino, os.readlink(selector)))
+                self.assertEqual(original_wal, (journal.lstat().st_ino, journal.read_bytes()))
+                self.assertFalse(os.path.lexists(journal.parent / ".setup-switch-a-restore.json"))
+                return
             if q_fault or a_fault or a_image_fault or dhcp_backup_fault:
                 compensation = subprocess.run(argv + ["compensate-q", shape], capture_output=True,
                                               text=True, check=False, timeout=30)

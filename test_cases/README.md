@@ -632,8 +632,16 @@ stage inode（rename 可改变 ctime），同字节恢复文件/同目标链接�
 暂存、Boolean owner 必须 HOLD。恢复父同步失败或强杀后只补原 stage 的后续操作，
 不造新计划、重建暂存或删除证据；旧 schema-3 DHCP 计划缺此资格须 HOLD。
 本阶段 checkpoint 在原发布/receipt 边界验证后，于首个补偿前冻结；它不替代
-B 第一次安装前的候选 inode/覆盖所有权登记。原 B 首写资格、旧 A 显式健康激活/
-安全归档、root/Linux/断电/C2/DEV ACK 与正式 related/full/check 仍待。
+B 第一次安装前的候选 inode/覆盖所有权登记。
+
+原 SETUP 写者现另在首个 B 覆盖前登记 `live_inventory`：四个原 A live owner、
+B 候选及 A 回滚候选九字段 owner/独立字节与元数据、原候选目录/父；原缺席为 None。
+实际覆盖/未提交恢复只 rename 消费这些原 inode，不能由 `install`/冷读制造新的 live
+owner。候选 fsync、WAL 登记 fsync、原 A 捕获后及 B rename 后的同字节换 inode
+均 HOLD，保留原/未知对象；新 Q 补偿必须匹配原 B 候选，而非只核当前内容。
+legacy 缺候选清单不获新 Q/P/A 补偿资格，既有无 bundle 的停服 disk-only 合同不扩权。
+真实 LOAD→SETUP B 写强杀/新 LOAD 恢复覆盖原链接、缺席和目录同步失败重入；
+旧 A 显式健康激活/安全归档、root/Linux/断电/C2/DEV ACK 与正式 related/full/check 仍待。
 
 同一模块还覆盖端到端 deployment scope：默认 `all` 同时生成 Production/AIR；`prod` 只发布
 Production Cumulus/IB/NVL；`air` 只发布 AIR DHCP/YAML/release，并只临时渲染 AIR full profile
