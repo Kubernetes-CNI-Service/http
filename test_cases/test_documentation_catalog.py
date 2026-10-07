@@ -800,6 +800,24 @@ class DocumentationCatalogTests(unittest.TestCase):
                 else:
                     self.assertIn("候选", profile["outputs"])
 
+    def test_req7_sdk_dependency_profile_and_evidence_do_not_claim_sdk_or_image_execution(self):
+        updater = load_path("manual_req7_sdk_dependencies", USER_MANUAL_SCRIPT)
+        relative = "tools/req7_dependency_contract.py"
+        profile = updater.script_profile(ROOT, relative)
+        self.assertTrue(profile["direct"].startswith("否"))
+        self.assertIn("无受支持的独立 CLI", profile["parameters"])
+        for required in ("元数据", "不导入 SDK", "不安装", "不授予"):
+            self.assertIn(required, " ".join(profile.values()))
+        self.assertNotIn(f"python3 -B {relative}", profile["example"])
+        guide = (ROOT / "test_cases/README.md").read_text(encoding="utf-8")
+        for required in ("test_req7_dependency_contract.py", "test_req7_dependency_workflow.py", "Linux wheel"):
+            self.assertIn(required, guide)
+        real = (ROOT / "test_cases/REAL_ENVIRONMENT.md").read_text(encoding="utf-8")
+        card = real.split("## TC-REAL-REQ7-SDK-DEPENDENCIES-001", 1)[-1].split("\n## ", 1)[0]
+        self.assertIn("TC-REAL-REQ7-SDK-DEPENDENCIES-001", real)
+        for required in ("NOT RUN", "aarch64", "x86_64", "CPython 3.12", "清理", "风险"):
+            self.assertIn(required, card)
+
     def test_f02_generation_authority_is_a_library_not_an_operator_cli(self):
         updater = load_path("manual_f02_generation_library", USER_MANUAL_SCRIPT)
         profile = updater.script_profile(ROOT, "ztp/config_sync_authority.py")

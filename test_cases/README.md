@@ -121,6 +121,14 @@ NV 序列及有限 Switch 行候选检查；所有工具/人工占用列、预�
 它们不代表 REQ7 整体完成。真实 SDK、远端完整模板、journal/fence/History 与传输闭环仍须
 独立落地。相应真实环境卡保持 NOT RUN，单项或局部 PASS 不替代同树正式 full proof。
 
+`test_req7_dependency_contract.py` 与 `test_req7_dependency_workflow.py` 约束独立于
+TOPLEVEL-5 的 REQ7 C-14 无 extras 依赖闭包、两个 Linux wheel 架构的精确 artifact/hash、
+固定公开策略/锁的有界无链接读取、读取期间替换拒绝，以及真实 activation/runner 的元数据
+与源码快照绑定。镜像声明使用 `--only-binary=:all: --no-deps --require-hashes`；本地测试
+不构建镜像、不安装依赖、不导入 SDK、不打开网络，不证明 Linux wheel 在 macOS 执行过。
+Python 3.9 开发身份另绑定条件依赖 typing_extensions；正式镜像限定 Linux CPython 3.12。
+这些基础合同不授予令牌或发送许可，不代表 REQ7 整体完成；真实两架构卡保持 NOT RUN。
+
 `test_req19_infra_log_contract.py` 和 `test_req19_infra_log_workflow.py` 覆盖第八个
 `99-output-infra` 骨架、四状态日志根、规范项目归属、无覆盖迁移与中断恢复，以及真实
 setup → deploy/probe/collector 和项目重指后的写者归属。2026-10-07 owner 限定真实目录

@@ -2001,6 +2001,14 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - 解析与流程预期：原始 Google 下载件仅作为严格有界 mapping 输入；固定 token endpoint／Sheets scope，非默认 universe、delegation、额外 claims、未知字段与重复 JSON 字段拒绝。白名单仅接受精确顶层字符串数组；空数组合法但拒绝所有目标，项目 enabled 配置不能创造枚举，策略或原始字节变化拒绝旧绑定。此部件不验证私钥签名、不导入 SDK、不刷新令牌、不授予发送许可；SDK、传输、真实目标和 Stage O 另证。
 - 证据、故障与清理：只保留脱敏目录／文件／FD 身份、单读调用计数、输入长度／摘要、精确命令与退出码、权限／绑定负例、原像与恢复核验。凭据字节、令牌、私钥、邮箱及匹配值不得进入日志／异常／公开状态；不回传私有 mapping。仅回滚获准的隔离卷快照，核对原件与外部哨兵不变；现场权限、RO bind 或回滚证据缺失仍 NOT RUN。
 
+## TC-REAL-REQ7-SDK-DEPENDENCIES-001 — 精确依赖闭包的两架构镜像核验
+
+- Case ID：`TC-REAL-REQ7-SDK-DEPENDENCIES-001`；类型：real-environment / dependency / image-build；对应 REQ7 C-14 / T6-A。状态：**NOT RUN / REAL_ENV REQUIRED**。自动化 `test_req7_dependency_contract.py` direct 与 `test_req7_dependency_workflow.py` 真实校验库 → activation/runner 流程仅证明本地策略/锁及元数据，不代表 SDK 鉴权、Linux wheel 已执行或整个 REQ7 完成。
+- 平台、前置条件与权限：仅另获 owner 精确授权的一次性 Linux CPython 3.12 aarch64 / x86_64 构建环境；准备当前干净 HEAD/tree、manifest、适用同树 full proof 和回滚快照。没有授权不得 build/start/reload/deploy，不读真实凭据或线上表，不操作宿主服务。
+- 步骤与独立预期：分别从当前政策/锁以 wheels-only / no-deps / require-hashes 构建，保存实际选中的六个 artifact 文件名/SHA256、Python/SSL/平台和分发版本；执行 build-time `verify-python-runtime`、`verify-req7-python-runtime`，比对固定独立六包版本和两架构 artifact 预期。注入错误版本、未知架构、缺包、外部来源、篡改 hash，须在 SDK 导入和服务启动前拒绝；改变 image-coupled 策略/锁后旧镜像须拒绝匹配新 live 源码。
+- 证据：保存脱敏命令、完整日志/退出码、前后 stat/inode/大小/SHA、构建上下文和镜像身份、两次源码快照、失败类别及 SDK/网络/服务未启用见证。没有两架构的完整实际结果时保持 NOT RUN，macOS 元数据 PASS 不能替代本卡。
+- 故障注入、清理与风险：版本/锁/来源错误不能放宽、回退到 sdist、自动安装未锁闭包或修改 ledger。仅回滚本卡的一次性隔离构建产物并对比原快照；不删共享镜像、真实项目、凭据或宿主依赖。风险为供应链漂移、架构 artifact 不兼容和误启用在线服务；核验成功仍不授予 Stage O/发布权限。
+
 ## TC-REAL-REQ7-ONLINE-CANDIDATE-ROWS-001 — 精确字面列、保留序号及位移检测
 
 - Case ID：`TC-REAL-REQ7-ONLINE-CANDIDATE-ROWS-001`；类型：real-environment / index-addressed API / preservation；对应 C-8/C-17/C-20/C-26；状态：**NOT RUN / REAL_ENV REQUIRED**。本地 `test_issue_tracker_online_cells`、`test_issue_tracker_online_nv_ids`、`test_issue_tracker_online_rows` 同时包含 direct 和真实工作簿投影／源行校验／字面请求 workflow；其纯候选不建立在线读、模板、目标、预留或发送权威。

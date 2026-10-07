@@ -63,7 +63,9 @@ COPY . /opt/http-ztp/source-tree/
 
 RUN python3 -m venv --system-site-packages /opt/http-ztp/venv \
     && /opt/http-ztp/venv/bin/python -m pip install --no-deps --require-hashes -r /opt/http-ztp/source-tree/requirements-container-top-level.lock \
+    && /opt/http-ztp/venv/bin/python -m pip install --only-binary=:all: --no-deps --require-hashes -r /opt/http-ztp/source-tree/infra/docker/requirements-req7-online.txt \
     && /opt/http-ztp/venv/bin/python /opt/http-ztp/source-tree/infra/docker/activate.py verify-python-runtime \
+    && /opt/http-ztp/venv/bin/python /opt/http-ztp/source-tree/infra/docker/activate.py verify-req7-python-runtime \
     && install -o root -g root -m 0755 \
         /opt/http-ztp/source-tree/infra/docker/activate.py \
         /opt/http-ztp/source-tree/infra/docker/entrypoint.py \

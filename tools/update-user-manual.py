@@ -384,6 +384,7 @@ def script_profile(root: Path, relative: str) -> dict[str, str]:
         or relative in REQ7_READ_ONLY_LIBRARIES
         or relative in REQ7_ONLINE_PRIMITIVE_LIBRARIES
         or relative == "monitor/issue_tracker_online_target.py"
+        or relative == "tools/req7_dependency_contract.py"
         or (relative in UNINSTALLED_RUNTIME_COMPONENTS and path.suffix.lower() == ".py")
         or path.name in {
             "_package_common.py", "deployment_lock.py", "deployment_prewrite_guard.py",
@@ -487,6 +488,13 @@ def script_profile(root: Path, relative: str) -> dict[str, str]:
             outputs = "只读逐键观察计数、最新业务值或周期绑定的本地 receipt 事实；不修补历史、不写源数据或在线项目。"
             success = "来源与周期复核完成，返回值仅供状态展示；不授予在线发布资格，不替代 C5/C6 或真机验收。"
             recovery = "证据缺失、顺序断裂、K 或来源身份变化时交由调用者 HOLD；保留原始证据，不伪造零值或手工补写 receipt。"
+        if relative == "tools/req7_dependency_contract.py":
+            scenario = "REQ7 C-14 公开依赖策略和精确锁校验；不导入 SDK、不安装、不访问网络或启用服务。"
+            prerequisite = "调用方冻结受测源码；固定相对路径无链接、单链接普通文件、有界读取且名字/字节身份复核一致。"
+            inputs = "infra/docker/req7-dependency-policy.json、requirements-req7-online.txt 及当前 Python 的已安装分发元数据。"
+            outputs = "不可变策略/锁 SHA256、平台 wheel 清单与精确版本元数据身份，或脱敏拒绝；不写文件。"
+            success = "仅表示公开依赖合同和元数据一致；不授予发送许可、不证明 Linux wheel 已执行、SDK 鉴权或整个 REQ7。"
+            recovery = "缺包、版本/路径/架构/锁漂移时 fail closed；保留证据，不能自动安装、猜测依赖或手改批准 ledger。"
         if relative == "monitor/issue_tracker_online_target.py":
             scenario = "本地验证精确 JSON 字符串枚举及每次项目策略重核；不从配置推导白名单。"
             prerequisite = "纯函数只检查调用方提供的字节；真实文件权威必须另由固定路径 root held-FD 加载器建立，发送仍须完整准入与传输证明。"

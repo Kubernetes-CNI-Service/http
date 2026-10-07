@@ -165,6 +165,9 @@ REQUIRED_LIFECYCLE_SOURCE_PATHS = (
 )
 IMAGE_COUPLED_SOURCE_PATHS_EXPECTED = (
     "requirements-container-top-level.lock",
+    "infra/docker/req7-dependency-policy.json",
+    "infra/docker/requirements-req7-online.txt",
+    "tools/req7_dependency_contract.py",
     "infra/docker/activate.py",
     "infra/docker/entrypoint.py",
     "infra/docker/healthcheck.py",

@@ -46,6 +46,21 @@ CONTAINER_TOPLEVEL_LOCK_SUPPORT = {
         CONTAINER_TOPLEVEL_LOCK.read_bytes()
     ).hexdigest(),
 }
+from test_cases.test_req7_dependency_contract import (
+    PINS as EXPECTED_REQ7_PINS, policy_bytes as expected_req7_policy_bytes,
+    lock_bytes as expected_req7_lock_bytes,
+)
+EXPECTED_REQ7_IDENTITY = {
+    "policy_sha256": hashlib.sha256(expected_req7_policy_bytes()).hexdigest(),
+    "lock_sha256": hashlib.sha256(expected_req7_lock_bytes()).hexdigest(),
+    "versions": [f"{n}=={v}" for n, v in EXPECTED_REQ7_PINS]
+    + (["typing_extensions==4.16.0"] if sys.version_info[:2] < (3, 11) else []),
+    "linux_artifacts_executed": False,
+}
+CONTAINER_TOPLEVEL_LOCK_SUPPORT.update({
+    "infra/docker/req7-dependency-policy.json": EXPECTED_REQ7_IDENTITY["policy_sha256"],
+    "infra/docker/requirements-req7-online.txt": EXPECTED_REQ7_IDENTITY["lock_sha256"],
+})
 EXPECTED_TEST_SUITES = [
     "repository-governance",
     "packaging-sync",
@@ -928,6 +943,8 @@ class ImpactManifestTests(unittest.TestCase):
                 "infra/docker/logrotate-http-ztp.conf",
                 "infra/docker/rsyslog-dhcp.conf",
                 "infra/docker/runtime-contract.json",
+                "infra/docker/req7-dependency-policy.json",
+                "infra/docker/requirements-req7-online.txt",
                 "infra/docker/supervisord.conf",
                 "tools/lldp-analyze-tool/04-lldp-device-aliases.json",
                 "ztp/config/cumulus/ar_profile_custom.conf",
@@ -1808,6 +1825,7 @@ class ApprovalLedgerTests(unittest.TestCase):
                         "container_toplevel_lock_sha256": hashlib.sha256(
                             CONTAINER_TOPLEVEL_LOCK.read_bytes()
                         ).hexdigest(),
+                        "req7_dependencies": EXPECTED_REQ7_IDENTITY,
                     },
                     "scenario_coverage": {
                         "root-entrypoint-workflow": (
@@ -2018,6 +2036,7 @@ class ApprovalLedgerTests(unittest.TestCase):
                 manifest_sha256="a" * 64,
                 scripts={}, tests={},
                 support={
+                    **CONTAINER_TOPLEVEL_LOCK_SUPPORT,
                     "requirements-container-top-level.lock": original_hash,
                 },
             )
@@ -2079,6 +2098,7 @@ class ApprovalLedgerTests(unittest.TestCase):
                 manifest_sha256="a" * 64,
                 scripts={}, tests={},
                 support={
+                    **CONTAINER_TOPLEVEL_LOCK_SUPPORT,
                     "requirements-container-top-level.lock": original_hash,
                 },
             )
