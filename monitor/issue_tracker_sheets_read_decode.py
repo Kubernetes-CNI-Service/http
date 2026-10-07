@@ -39,6 +39,21 @@ class ObservedActivityWindow:
 
 
 @dataclass(frozen=True)
+class ObservedActivitySheet:
+    """All rows inside this response's capacity, not freshness or permission."""
+    sheet_id: int
+    sheet_title: str
+    activity_key: tuple = field(repr=False)
+    active_rows: tuple = field(repr=False)
+    closed_rows: tuple = field(repr=False)
+    first_row_index: int
+    last_row_index: int
+    row_count: int
+    maximum_nv_id: object
+    source_sha256: str
+
+
+@dataclass(frozen=True)
 class ObservedSheetsGrid:
     sheet_id: int
     sheet_title: str
@@ -154,6 +169,31 @@ def _cell(value):
     return ((key, data),)
 
 
+def _decode_grid_cells(grids, expected):
+    if type(grids) is not list or len(grids) != len(expected): raise SheetsDecodeHold()
+    seen = set(); cells = []
+    for grid in grids:
+        if type(grid) is not dict or not {"startRow"} <= set(grid) <= {"startRow", "startColumn", "rowData"}:
+            raise SheetsDecodeHold()
+        first, start = grid["startRow"], grid.get("startColumn", 0)
+        if (type(first) is not int or type(start) is not int
+                or (first, start) not in expected or (first, start) in seen):
+            raise SheetsDecodeHold()
+        seen.add((first, start)); last, end = expected[(first, start)]
+        rows = grid.get("rowData", [])
+        if type(rows) is not list or len(rows) > last - first + 1: raise SheetsDecodeHold()
+        for offset in range(last - first + 1):
+            row = rows[offset] if offset < len(rows) else {}
+            if type(row) is not dict or not set(row) <= {"values"}: raise SheetsDecodeHold()
+            values = row.get("values", [])
+            if type(values) is not list or len(values) > end - start + 1: raise SheetsDecodeHold()
+            for column in range(start, end + 1):
+                value = values[column - start] if column - start < len(values) else {}
+                cells.append((first + offset, column, _cell(value)))
+    if seen != set(expected): raise SheetsDecodeHold()
+    return tuple((row, _letter(column), value) for row, column, value in sorted(cells))
+
+
 def decode_sheets_read(plan, response):
     """A strict immutable necessary read image, never APPLIED or send eligibility."""
     failed = False
@@ -176,27 +216,7 @@ def decode_sheets_read(plan, response):
                 or type(props["title"]) is not str or props["title"] != title
                 or type(grids) is not list or len(grids) != len(expected)):
             raise SheetsDecodeHold()
-        seen = set(); cells = []
-        for grid in grids:
-            if type(grid) is not dict or not {"startRow"} <= set(grid) <= {"startRow", "startColumn", "rowData"}:
-                raise SheetsDecodeHold()
-            first, start = grid["startRow"], grid.get("startColumn", 0)
-            if (type(first) is not int or type(start) is not int
-                    or (first, start) not in expected or (first, start) in seen):
-                raise SheetsDecodeHold()
-            seen.add((first, start)); last, end = expected[(first, start)]
-            rows = grid.get("rowData", [])
-            if type(rows) is not list or len(rows) > last - first + 1: raise SheetsDecodeHold()
-            for offset in range(last - first + 1):
-                row = rows[offset] if offset < len(rows) else {}
-                if type(row) is not dict or not set(row) <= {"values"}: raise SheetsDecodeHold()
-                values = row.get("values", [])
-                if type(values) is not list or len(values) > end - start + 1: raise SheetsDecodeHold()
-                for column in range(start, end + 1):
-                    value = values[column - start] if column - start < len(values) else {}
-                    cells.append((first + offset, column, _cell(value)))
-        if seen != set(expected): raise SheetsDecodeHold()
-        frozen = tuple((row, _letter(column), value) for row, column, value in sorted(cells))
+        frozen = _decode_grid_cells(grids, expected)
         result = ObservedSheetsGrid(props["sheetId"], title, frozen, hashlib.sha256(source).hexdigest())
     except Exception:
         failed = True
@@ -204,7 +224,7 @@ def decode_sheets_read(plan, response):
     return result
 
 
-def discover_activity_rows(plan, response, *, activity_key):
+def _classify_activity(observed, geometry, activity_key):
     """Classify exact active/Closed matches from original discovery columns.
 
     Row numbers locate necessary follow-up rectangles, not business identity.
@@ -215,7 +235,7 @@ def discover_activity_rows(plan, response, *, activity_key):
     """
     failed = conflict = False
     try:
-        _target, title, geometry = _geometry(plan)
+        title = observed.sheet_title
         if (len(geometry) <= 1 or type(activity_key) is not tuple or len(activity_key) != 4
                 or any(type(part) is not str or not 1 <= len(part) <= 255
                        or any(ord(char) < 32 for char in part) for part in activity_key)):
@@ -228,7 +248,6 @@ def discover_activity_rows(plan, response, *, activity_key):
         if family == "switch" and (any(re.fullmatch(r"[A-Za-z0-9_.-]+", part) is None for part in activity_key[1:3])
                                     or re.fullmatch(r"[A-Za-z0-9_.:/-]+", activity_key[3]) is None):
             raise SheetsDecodeHold()
-        observed = decode_sheets_read(plan, response)
         rows = {}
         for index, column, value in observed.cells: rows.setdefault(index, {})[column] = dict(value)
         def text(cells, column):
@@ -257,12 +276,65 @@ def discover_activity_rows(plan, response, *, activity_key):
                 (closed if status == "Closed" else active).append((index, identifier))
         if len(active) > 1: raise OnlineActivityConflict()
         first = min(key[0] for key in geometry); last = max(value[0] for value in geometry.values())
-        result = ObservedActivityWindow(observed.sheet_id, title, activity_key, tuple(active), tuple(closed),
-                                        first, last, observed.source_sha256)
+        result = (ObservedActivityWindow(observed.sheet_id, title, activity_key, tuple(active), tuple(closed),
+                                        first, last, observed.source_sha256), max((int(value[2:]) for value in seen_ids), default=None))
     except OnlineActivityConflict:
         conflict = True
     except Exception:
         failed = True
+    if conflict: raise OnlineActivityConflict()
+    if failed: raise SheetsDecodeHold()
+    return result
+
+
+def discover_activity_rows(plan, response, *, activity_key):
+    """Finite-window match only; not complete coverage or allocation authority."""
+    _target, _title, geometry = _geometry(plan)
+    return _classify_activity(decode_sheets_read(plan, response), geometry, activity_key)[0]
+
+
+def discover_activity_sheet(plan, response, *, sheet_id, activity_key):
+    """Capacity and full explicit-column images in ONE strictly bounded GET.
+
+    No paging, arbitrary ranges, normalized/formatted keys or trusting a caller
+    rowCount. Original IDs across ALL observed rows contribute to NV maximum,
+    including Closed and unrelated keys. No reservation/allocation or permit.
+    """
+    from dataclasses import replace
+    from monitor.issue_tracker_sheets_read_plan import PreparedSheetsRead, _FIELDS, _HISTORY_TAIL_FIELDS
+    failed = conflict = False
+    try:
+        if type(plan) is not PreparedSheetsRead or type(sheet_id) is not int or not 0 <= sheet_id <= 2147483647:
+            raise SheetsDecodeHold()
+        parsed = urlsplit(plan.path); query = parse_qsl(parsed.query, keep_blank_values=True, strict_parsing=True)
+        if query[:2] != [('includeGridData', 'true'), ('fields', _HISTORY_TAIL_FIELDS)]: raise SheetsDecodeHold()
+        if plan.path != parsed.path + '?' + urlencode(query): raise SheetsDecodeHold()
+        query[1] = ('fields', _FIELDS)
+        target, title, full_geometry = _geometry(replace(plan, path=parsed.path + '?' + urlencode(query)))
+        if len(full_geometry) <= 1 or any(first != 2 or last != 5001 for (first, _start), (last, _end) in full_geometry.items()):
+            raise SheetsDecodeHold()
+        sheets, digest = _template_document(response, target)
+        if len(sheets) != 1: raise SheetsDecodeHold()
+        sheet = sheets[0]
+        if type(sheet) is not dict or set(sheet) != {'properties', 'data'}: raise SheetsDecodeHold()
+        props = sheet['properties']
+        if (type(props) is not dict or set(props) != {'sheetId', 'title', 'sheetType', 'gridProperties'}
+                or _template_property({key: props[key] for key in ('sheetId', 'title')}) != (title, sheet_id)
+                or type(props['sheetType']) is not str or props['sheetType'] != 'GRID'):
+            raise SheetsDecodeHold()
+        capacity = props['gridProperties']
+        if (type(capacity) is not dict or set(capacity) != {'rowCount', 'columnCount'}
+                or type(capacity['rowCount']) is not int or not 3 <= capacity['rowCount'] <= 5002
+                or type(capacity['columnCount']) is not int
+                or not (21 if title == 'ETH&IB Switch' else 29) <= capacity['columnCount'] <= 2147483647):
+            raise SheetsDecodeHold()
+        geometry = {key: (capacity['rowCount'] - 1, end) for key, (_last, end) in full_geometry.items()}
+        cells = _decode_grid_cells(sheet['data'], geometry)
+        window, maximum = _classify_activity(ObservedSheetsGrid(sheet_id, title, cells, digest), geometry, activity_key)
+        result = ObservedActivitySheet(sheet_id, title, activity_key, window.active_rows, window.closed_rows,
+            window.first_row_index, window.last_row_index, capacity['rowCount'], maximum, digest)
+    except OnlineActivityConflict: conflict = True
+    except Exception: failed = True
     if conflict: raise OnlineActivityConflict()
     if failed: raise SheetsDecodeHold()
     return result

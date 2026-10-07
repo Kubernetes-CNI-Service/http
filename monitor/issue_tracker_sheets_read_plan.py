@@ -158,3 +158,19 @@ def prepare_history_tail_read(binding, token):
                        ("ranges", "'Update_History'!A3:E5002")])
     return PreparedSheetsRead(base.host, "/v4/spreadsheets/" + binding.spreadsheet_id + "?" + query,
                               base.method, base.headers, base.body)
+
+
+def prepare_activity_sheet_read(binding, token, *, sheet):
+    """One capacity-bearing explicit-column GET, not a caller-sized window.
+
+    Actual rowCount above 5002 is rejected by the decoder rather than silently
+    paging/truncating. Full observed coverage is not live continuity, CAS,
+    source/admission authority or an allocation/mutation permit.
+    """
+    base = prepare_sheets_read(binding, token, mode='discovery', sheet=sheet, first_row=3, last_row=5002)
+    parsed_query = base.path.split('?', 1)[1]
+    from urllib.parse import parse_qsl
+    query = parse_qsl(parsed_query, strict_parsing=True)
+    query[1] = ('fields', _HISTORY_TAIL_FIELDS)
+    return PreparedSheetsRead(base.host, '/v4/spreadsheets/' + binding.spreadsheet_id + '?' + urlencode(query),
+                              base.method, base.headers, base.body)

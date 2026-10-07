@@ -2088,6 +2088,7 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 ## TC-REAL-REQ7-ACTIVE-CLOSED-DISCOVERY-001 — 完整活动键与原始 Closed 分类
 
 - Case ID：`TC-REAL-REQ7-ACTIVE-CLOSED-DISCOVERY-001`；类型：real-environment / read-only API / integration；对应 C-3/C-8。状态：**NOT RUN / REAL_ENV REQUIRED**。涉及 `monitor/issue_tracker_sheets_read_plan.py`、`monitor/issue_tracker_sheets_read_decode.py`、`monitor/issue_tracker_tls_inputs.py`；本地私有 loopback TLS 与原始 typed grid fixture 不证明部署环境、全表发现或 REQ7 整体完成。
+- 完整容量读补充（NOT RUN）：固定各显式列 `3:5002` 与 GRID rowCount/columnCount 同一次完整 GET；native int 容量 3..5002，Switch 至少 21 列、Cabling 至少 29 列，数据严格剪到实际容量并覆盖末行。溢出/缺容量/多或缺 grid/越界数据 HOLD，不静默分页或扩大阈值。Closed、无关键与末行的原始 A 列全部参与每表 NV 最大值；实际两张 Cabling 读均须成立，不能只凭一张表分配。完整覆盖只代表当次容量内观察，不是新鲜准入、nonce/预留、COMPLETE、CAS 或发送权限。原生全键读 → 精确行矩形 → L-only encoder 仍不联网写入。
 - 风险与目标：必须显式读取 Switch A/F/L/N 与 Cabling A/F/G/K/L/Q/R/U；Status 只有精确原始字面 `Closed` 才排除活动键。保留线上既有 NV ID；重复活动键 CONFLICT，原始 ID／身份／Status 公式、数字或布尔不可强制变为文本。有限窗口未匹配不是全表不存在或插入权限。
 - 前置条件：Stage L 本地 direct 和真实 read-plan → 原生 TLS → grid decoder workflow 全绿；另需 owner 的 Stage O 批准副本及只读许可、实际 Linux Python/SSL/CA 和 SDK 治理身份、14 表及精确表头、完整发现范围／真实尾边界的证据。本卡不授权联网、真实凭据读取、修改或在线启用。
 - 步骤与预期：在精确批准副本核全活动键、Closed 同键历史、不同 A 侧／issue type／Switch category+component、重复活动键和保留 ID；前后精确行矩形不得被此窗口观察替代。任一缺失／重复 grid、Status 非字面或不完整响应 HOLD；不自动分页、扩大范围、分配或覆盖 ID。

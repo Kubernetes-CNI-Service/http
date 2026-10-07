@@ -1,5 +1,6 @@
 """Independent bounded active/Closed observations; never absence or write authority."""
 from copy import deepcopy
+from dataclasses import replace
 import hashlib
 import json
 import unittest
@@ -150,11 +151,148 @@ def replace_mock(status, complete, data):
     return SimpleNamespace(status=status, complete=complete, data=data)
 
 
+def sheet_document(sheet, rows, row_count=7):
+    source = document(sheet, rows)
+    source['sheets'][0]['properties'].update(sheetType='GRID', gridProperties={
+        'rowCount': row_count, 'columnCount': 21 if sheet == 'ETH&IB Switch' else 29})
+    return source
+
+
+CAPACITY_FIELDS = 'spreadsheetId,sheets(properties(sheetId,title,sheetType,gridProperties(rowCount,columnCount)),data(startRow,startColumn,rowData(values(userEnteredValue))))'
+
+
+class Req7ActivitySheetDirectTests(unittest.TestCase):
+    # Existing finite-window tests remain a separate contract. Only new cases
+    # use the same-response capacity-clipped full-body plan below.
+    setUp = Req7ActivityDiscoveryDirectTests.setUp
+    plan = Req7ActivityDiscoveryDirectTests.plan
+    def full_plan(self, sheet='ETH&IB Switch'):
+        self.assertTrue(hasattr(self.planner, 'prepare_activity_sheet_read'), 'capacity-clipped full activity read missing')
+        return self.planner.prepare_activity_sheet_read(self.binding, self.token, sheet=sheet)
+
+    def full_read(self, value, *, sheet='ETH&IB Switch', key=('switch', 'switch-1', 'down', 'fabric'), plan=None, raw=None):
+        self.assertTrue(hasattr(self.module, 'discover_activity_sheet'), 'same-response full activity classifier missing')
+        return self.module.discover_activity_sheet(plan or self.full_plan(sheet), raw or grids.response(value),
+                                                   sheet_id=17, activity_key=key)
+
+    def test_full_capacity_and_original_explicit_columns_are_requested_in_one_fixed_get(self):
+        for sheet, columns in (('ETH&IB Switch', 'AFLN'), ('ETH Cabling', ('A', 'F', 'G', 'K', 'L', 'Q', 'R', 'U')),
+                               ('IB Cabling', ('A', 'F', 'G', 'K', 'L', 'Q', 'R', 'U'))):
+            with mock.patch('socket.socket') as networking: plan = self.full_plan(sheet)
+            networking.assert_not_called()
+            self.assertEqual({'includeGridData': ['true'], 'fields': [CAPACITY_FIELDS],
+                              'ranges': ["'%s'!%s3:%s5002" % (sheet, c, c) for c in columns]}, parse_qs(urlsplit(plan.path).query))
+            self.assertEqual(('GET', b'', 30.0), (plan.method, plan.body, plan.budget_seconds))
+            with self.assertRaises(TypeError): self.planner.prepare_activity_sheet_read(self.binding, self.token, sheet=sheet, last_row=7)
+
+    def test_last_capacity_row_is_not_truncated_and_nv_max_includes_closed_and_unrelated_rows(self):
+        rows = [cabling_row('NV30017', 'Closed'), cabling_row('NV50000', 'Closed'), {}, {}, cabling_row('NV40000')]
+        rows[1]['K'] = literal('unrelated')
+        seen = self.full_read(sheet_document('ETH Cabling', rows), sheet='ETH Cabling', key=('eth_cabling', 'switch-1', 'swp1', 'Link Down'))
+        self.assertEqual((7, 2, 6, 50000), (seen.row_count, seen.first_row_index, seen.last_row_index, seen.maximum_nv_id))
+        self.assertEqual(((6, 'NV40000'),), seen.active_rows); self.assertEqual(((2, 'NV30017'),), seen.closed_rows)
+        self.assertEqual(hashlib.sha256(grids.response(sheet_document('ETH Cabling', rows)).data).hexdigest(), seen.source_sha256)
+        for field in ('permit', 'complete', 'allocation', 'applied'): self.assertFalse(hasattr(seen, field))
+
+    def test_entire_empty_capacity_is_only_absence_observation_no_nonce_reservation_or_permission(self):
+        for size in (3, 5002):
+            seen = self.full_read(sheet_document('ETH&IB Switch', [], size))
+            self.assertEqual((size, 2, size - 1, None), (seen.row_count, seen.first_row_index, seen.last_row_index, seen.maximum_nv_id))
+            self.assertEqual((), seen.active_rows); self.assertEqual((), seen.closed_rows)
+            with self.assertRaises(AttributeError): seen.row_count = 8
+
+    def test_bad_capacity_non_grid_extra_properties_missing_or_over_capacity_column_holds(self):
+        cases = []
+        for value in (True, 2, 5003, '7', 7.0):
+            item = sheet_document('ETH&IB Switch', []); item['sheets'][0]['properties']['gridProperties']['rowCount'] = value; cases.append(item)
+        for value in (True, 20, '21', 21.0, 2147483648):
+            item = sheet_document('ETH&IB Switch', []); item['sheets'][0]['properties']['gridProperties']['columnCount'] = value; cases.append(item)
+        item = sheet_document('ETH&IB Switch', []); item['sheets'][0]['properties']['sheetType'] = 'DATA_SOURCE'; cases.append(item)
+        item = sheet_document('ETH&IB Switch', []); item['sheets'][0]['properties'].pop('gridProperties'); cases.append(item)
+        item = sheet_document('ETH&IB Switch', []); item['sheets'][0]['properties']['extra'] = 1; cases.append(item)
+        item = sheet_document('ETH&IB Switch', []); item['sheets'][0]['data'].pop(); cases.append(item)
+        item = sheet_document('ETH&IB Switch', [switch_row()], 3); item['sheets'][0]['data'][0]['rowData'].append({}); cases.append(item)
+        for item in cases:
+            with self.subTest(item=item), self.assertRaises(self.module.SheetsDecodeHold): self.full_read(item)
+
+    def test_duplicate_active_key_beyond_old_window_is_conflict_and_bad_last_id_holds(self):
+        rows = [switch_row('NV30017'), {}, {}, {}, switch_row('NV30019')]
+        with self.assertRaises(self.module.OnlineActivityConflict): self.full_read(sheet_document('ETH&IB Switch', rows))
+        rows[-1] = switch_row('NV1')
+        with self.assertRaises(self.module.SheetsDecodeHold): self.full_read(sheet_document('ETH&IB Switch', rows))
+        rows[-1] = switch_row('NV30017', 'Closed')
+        with self.assertRaises(self.module.SheetsDecodeHold): self.full_read(sheet_document('ETH&IB Switch', rows))
+
+    def test_finite_discovery_wrong_sheet_target_or_forged_capacity_plan_is_not_full_discovery(self):
+        source = sheet_document('ETH&IB Switch', []); full = self.full_plan()
+        for plan in (self.plan(), replace(full, path=full.path.replace('5002', '7')),
+                     replace(full, host='foreign.invalid'), replace(full, budget_seconds=60.0)):
+            with self.assertRaises(self.module.SheetsDecodeHold): self.full_read(source, plan=plan)
+        source['sheets'][0]['properties']['sheetId'] = 18
+        with self.assertRaises(self.module.SheetsDecodeHold): self.full_read(source)
+        source = sheet_document('ETH&IB Switch', []); source['spreadsheetId'] = 'foreign_spreadsheet_0002'
+        with self.assertRaises(self.module.SheetsDecodeHold): self.full_read(source)
+        raw = grids.response(sheet_document('ETH&IB Switch', []))
+        for response in (replace_mock(200, False, raw.data), replace_mock(503, True, raw.data),
+                         replace_mock(200, True, b'{"sheets":[],"sheets":[]}')):
+            with self.assertRaises(self.module.SheetsDecodeHold): self.full_read({}, raw=response)
+
+
 class Req7ActivityDiscoveryNativeWorkflowTests(unittest.TestCase):
     setUp = plans.Req7SheetsNativeReadWorkflowTests.setUp
     fixture = plans.Req7SheetsNativeReadWorkflowTests.fixture
     certificates = plans.Req7SheetsNativeReadWorkflowTests.certificates
     server = plans.Req7SheetsNativeReadWorkflowTests.server
+
+    def native_inputs(self):
+        from test_cases.test_req7_sdk_authentication import load as load_auth
+        from monitor.issue_tracker_online_target import OnlineTargetBinding
+        import time
+        auth = load_auth()
+        return (plans.load(), grids.load(), OnlineTargetBinding('synthetic_spreadsheet_id_0001', 'a' * 64, 'b' * 64),
+                auth.AuthenticatedToken('sentinel.private-token', time.time() + 3600))
+
+    def native_read(self, unit, value):
+        payload = json.dumps(value).encode()
+        reply = ('HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n' % len(payload)).encode() + payload
+        with self.server(reply, hostname='sheets.googleapis.com', destination='sheets.googleapis.com') as (records, errors), self.fixture():
+            result = unit.send_once()
+            with self.assertRaises(self.module.TlsInputHold): unit.send_once()
+        self.assertEqual([], errors); self.assertEqual(1, len(records)); self.assertEqual(b'', records[0][2])
+        return result, records[0]
+
+    def test_full_capacity_discovery_then_exact_key_row_rectangle_and_literal_update_preserve_id(self):
+        planner, decoder, binding, token = self.native_inputs()
+        source = sheet_document('ETH&IB Switch', [switch_row('NV30000', 'Closed'), {}, {}, {}, switch_row('NV30019')])
+        plan = planner.prepare_activity_sheet_read(binding, token, sheet='ETH&IB Switch')
+        raw, request = self.native_read(self.module.NativeActivitySheetReadUnit(binding, token, sheet='ETH&IB Switch'), source)
+        observed = decoder.discover_activity_sheet(plan, raw, sheet_id=17, activity_key=('switch', 'switch-1', 'down', 'fabric'))
+        self.assertEqual(((6, 'NV30019'),), observed.active_rows); self.assertEqual(((2, 'NV30000'),), observed.closed_rows)
+        self.assertEqual(plan.path, request[0].decode().strip().split(' ')[1])
+        rectangle = grids.row_response(); grid = rectangle['sheets'][0]['data'][0]
+        grid['startRow'] = 6; values = grid['rowData'][0]['values']; values[8] = {}
+        for column, value in switch_row('NV30019').items(): values[ord(column) - 65] = {'userEnteredValue': value}
+        row_plan = planner.prepare_sheets_read(binding, token, mode='row_rectangle', sheet='ETH&IB Switch', first_row=7)
+        row_raw, request = self.native_read(self.module.NativeSheetsReadUnit(binding, token, mode='row_rectangle', sheet='ETH&IB Switch', first_row=7), rectangle)
+        row = decoder.decode_sheets_read(row_plan, row_raw)
+        original = {column: dict(value) for _index, column, value in row.cells}
+        self.assertEqual({'stringValue': 'NV30019'}, original['A']); self.assertEqual({'stringValue': 'switch-1'}, original['F'])
+        from monitor.issue_tracker_online_cells import encode_tool_cells
+        encoded = encode_tool_cells('ETH&IB Switch', 17, 'update', {'L': 'new literal evidence'}, row_index=6, observed_values={'L': original['L']})
+        self.assertEqual([{'updateCells': {'start': {'sheetId': 17, 'rowIndex': 6, 'columnIndex': 11},
+            'rows': [{'values': [{'userEnteredValue': {'stringValue': 'new literal evidence'}}]}], 'fields': 'userEnteredValue'}}], json.loads(encoded.requests_json))
+        self.assertEqual(row_plan.path, request[0].decode().strip().split(' ')[1])
+
+    def test_both_cabling_full_column_a_maxima_include_closed_rows_without_allocating_or_writing(self):
+        planner, decoder, binding, token = self.native_inputs(); maxima = []
+        for sheet, sid, identifier, key in (('ETH Cabling', 17, 'NV30017', ('eth_cabling', 'switch-1', 'swp1', 'Link Down')),
+                                             ('IB Cabling', 18, 'NV60000', ('ib_cabling', 'switch-1', 'swp1', 'Link Down'))):
+            source = sheet_document(sheet, [cabling_row(identifier, 'Closed')]); source['sheets'][0]['properties']['sheetId'] = sid
+            raw, request = self.native_read(self.module.NativeActivitySheetReadUnit(binding, token, sheet=sheet), source)
+            seen = decoder.discover_activity_sheet(planner.prepare_activity_sheet_read(binding, token, sheet=sheet), raw,
+                                                   sheet_id=sid, activity_key=key)
+            self.assertEqual((), seen.active_rows); maxima.append(seen.maximum_nv_id)
+        self.assertEqual([30017, 60000], maxima)
 
     def test_real_native_one_get_planner_decoder_and_classifier_preserve_closed_id_and_active_key(self):
         from test_cases.test_req7_sdk_authentication import load as load_auth
@@ -185,7 +323,7 @@ class Req7ActivityDiscoveryNativeWorkflowTests(unittest.TestCase):
                             and {"monitor/issue_tracker_sheets_read_plan.py","monitor/issue_tracker_sheets_read_decode.py",
                                  "monitor/issue_tracker_tls_inputs.py"}<=set(rule["members"])
                             and "test_cases.test_req7_activity_discovery" in rule["tests"] for rule in manifest["workflows"]))
-        for script in ("monitor/issue_tracker_sheets_read_plan.py","monitor/issue_tracker_sheets_read_decode.py"):
+        for script in ("monitor/issue_tracker_sheets_read_plan.py","monitor/issue_tracker_sheets_read_decode.py","monitor/issue_tracker_tls_inputs.py"):
             self.assertTrue(any(script in rule["paths"] and "test_cases.test_req7_activity_discovery" in rule["tests"]
                                 for rule in manifest["test_rules"]))
         self.assertIn("TC-REAL-REQ7-ACTIVE-CLOSED-DISCOVERY-001",(root/"test_cases/REAL_ENVIRONMENT.md").read_text())

@@ -1775,7 +1775,7 @@
     },
     {
       "id": "req7_active_closed_discovery",
-      "paths": ["monitor/issue_tracker_sheets_read_plan.py", "monitor/issue_tracker_sheets_read_decode.py"],
+      "paths": ["monitor/issue_tracker_sheets_read_plan.py", "monitor/issue_tracker_sheets_read_decode.py", "monitor/issue_tracker_tls_inputs.py"],
       "tests": ["test_cases.test_req7_activity_discovery"]
     },
     {
@@ -3258,7 +3258,7 @@
     },
     {
       "id": "req7_native_active_closed_discovery",
-      "members": ["monitor/issue_tracker_sheets_read_plan.py", "monitor/issue_tracker_sheets_read_decode.py", "monitor/issue_tracker_tls_inputs.py"],
+      "members": ["monitor/issue_tracker_sheets_read_plan.py", "monitor/issue_tracker_sheets_read_decode.py", "monitor/issue_tracker_tls_inputs.py", "monitor/issue_tracker_online_cells.py"],
       "tests": ["test_cases.test_req7_activity_discovery"]
     },
     {

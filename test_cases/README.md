@@ -901,6 +901,13 @@ History 为 CONFLICT；缺原像、异常/部分响应、外来目标或重复 m
 验证 planner/transport/decoder → 实际持久 journal → matcher；没有发送、结算、
 COMPLETE、APPLIED、新鲜准入或 UNKNOWN 清除。未安装；真机卡 NOT RUN。
 
+`test_cases.test_req7_activity_discovery` 另区分 caller 有限窗口和固定完整容量读：
+显式身份/Status 列与 GRID rowCount/columnCount 在同一个 GET 返回；仅容量 3..5002
+接受并完整覆盖到实际末行，溢出、缺 grid、错位和部分响应 HOLD，不分页、不截断。
+全部原始 A 列 NV ID（含 Closed 和无关活动键）参与最大值观察；两张 Cabling 取各自
+完整读的最大值，但没有分配或持久预留。真实 TLS 全键读 → 精确行矩形 → 字面 L-only
+encoder 验证既有线上 ID 不重写；仍不是新鲜准入、CAS、模板权威或发送许可。
+
 `test_cases.test_req7_history_preread_journal` 在实际 spreadsheet owner 与已初始化
 且计数为 0 的全局 action/wire journal 内保存原始全尾响应、容量与
 `history_last_row_before_send`。RAW/HEADER 的六个图像屏障后才能写 marker；
