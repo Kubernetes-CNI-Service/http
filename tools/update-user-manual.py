@@ -42,6 +42,17 @@ REQ7_READ_ONLY_LIBRARIES = frozenset({
     "monitor/issue_tracker_receipt_snapshot.py",
 })
 
+REQ7_CONTROLLED_TRANSPORT_LIBRARIES = frozenset({
+    "monitor/issue_tracker_sdk_authentication.py",
+    "monitor/issue_tracker_tls_inputs.py",
+    "monitor/issue_tracker_attempt_supervision.py",
+    "monitor/issue_tracker_sheets_read_plan.py",
+    "monitor/issue_tracker_sheets_read_decode.py",
+    "monitor/issue_tracker_online_whitelist_read.py",
+    "monitor/issue_tracker_mutation_rejection.py",
+    "monitor/issue_tracker_attempt_journal.py",
+})
+
 RUNTIME_PATTERNS = (
     (
         "DAY0-Prepare/<project>/",
@@ -385,6 +396,7 @@ def script_profile(root: Path, relative: str) -> dict[str, str]:
         or relative in REQ7_ONLINE_PRIMITIVE_LIBRARIES
         or relative == "monitor/issue_tracker_online_target.py"
         or relative == "tools/req7_dependency_contract.py"
+        or relative in REQ7_CONTROLLED_TRANSPORT_LIBRARIES
         or (relative in UNINSTALLED_RUNTIME_COMPONENTS and path.suffix.lower() == ".py")
         or path.name in {
             "_package_common.py", "deployment_lock.py", "deployment_prewrite_guard.py",
@@ -515,6 +527,60 @@ def script_profile(root: Path, relative: str) -> dict[str, str]:
                 outputs = "单次 FD 字节解析的私有映射／精确枚举或脱敏 HOLD；不导入认证 SDK、不签名、不刷新令牌或打开网络。"
                 success = "本地 fake held-FD 测试不授予发送资格，也不证明真机身份、SDK 认证、线上发布或整个 REQ7。"
                 recovery = "身份、权限、大小、单读或名字绑定变化拒绝；不自动创建／修复文件，不向日志／异常输出凭据。"
+        if relative == "monitor/issue_tracker_sdk_authentication.py":
+            direct = "否；这是未安装、未启用的公共 SDK 桥接库，不是操作员 CLI。"
+            environment = "当前未安装、未启用；未来仅由受管 root worker 导入，当前仅做隔离开发验证。"
+            scenario = "用公共 SDK 构造固定 scope 凭据并通过一次回调适配器刷新令牌；不使用 ADC、委托或自签 access JWT。"
+            prerequisite = "SDK 导入前通过精确依赖校验；凭据由 C11 单次固定路径 held-FD 读取；受控 CA、完整传输、监督预算及发送准入须另证。"
+            syntax = "开发测试导入公开函数；无已安装操作员入口。"
+            parameters = "无独立 CLI，也无凭据路径、目标 host/port、代理或 CA 覆盖参数。"
+            inputs = "单次 held-FD 验证后的私有凭据映射和受控请求单元；固定 Sheets scope。"
+            outputs = "私有不可变 token/到期时间或脱敏 HOLD；不是在线写入许可。"
+            success = "本地 fake/direct/workflow 通过不授予发送资格，不证明完整传输、线上可用或整个 REQ7。"
+            recovery = "非 200、不完整响应、异常或第二次回调拒绝；不允许 SDK 隐藏重试，不向日志或异常输出凭据。"
+            example = "python3 -B -m unittest -v test_cases.test_req7_sdk_authentication  # 仅开发测试"
+        elif relative in REQ7_CONTROLLED_TRANSPORT_LIBRARIES:
+            direct = "否；这是未安装、未启用的受控传输／只读库，不是操作员 CLI 或在线发布入口。"
+            environment = "当前未安装、未启用；仅在本地隔离候选中验证，不启动受管服务。"
+            prerequisite = "未来发送须受固定 root launcher、精确部署 Python/SSL/CA 身份、完整总预算监督和每次新鲜准入支配；本地对象不是授权。"
+            syntax = "开发测试导入函数；无已安装操作员入口。"
+            parameters = "无独立 CLI；不提供目标 URL、代理、凭据路径、CA 或重试覆盖开关。"
+            inputs = "严格不可变请求形状、受控响应或本案隔离子进程；不会从旧成功或调用方声明推导发送资格。"
+            outputs = "必要的本地只读观察、不可变 HTTP 字节或已确认／未确认终止状态；不是完整远程结果。"
+            success = "本地 direct/workflow 通过不授予在线发送或写入资格，不证明部署环境、完整准入或整个 REQ7。"
+            recovery = "任何身份、坐标、响应或终止不确定时 HOLD；保留锁和证据，不刷新重放、不伪造 APPLIED。"
+            if relative == "monitor/issue_tracker_tls_inputs.py":
+                scenario = "验证固定 held-FD 受控 CA、原生 TLS/hostname 与一次 OAuth POST／Sheets GET；非 200 和重定向拒绝。"
+                inputs = "固定 /etc/ssl/certs/ca-certificates.crt 的持有字节及受控请求；不加载环境信任目录或代理。"
+                example = "python3 -B -m unittest -v test_cases.test_req7_tls_inputs  # 仅开发测试"
+            elif relative == "monitor/issue_tracker_attempt_supervision.py":
+                scenario = "监督调用方已经启动的自有隔离子进程；固定单调总预算覆盖启动、DNS 和慢速读取。"
+                inputs = "固定受审 launcher 创建的 Popen、启动前单调时钟和类型；子进程须继承已持有的 spreadsheet 锁。"
+                recovery = "未确认终止时 HOLD／升级处置，绝不解锁重发；不接受任意 PID 或启动命令，不清除外来进程。"
+                example = "python3 -B -m unittest -v test_cases.test_req7_attempt_supervision  # 仅开发测试"
+            elif relative == "monitor/issue_tracker_sheets_read_plan.py":
+                scenario = "构造精确发现列、单行矩形、十四表身份及四张 tracker 表头的纯 Sheets GET 请求；不接收任意 A1 范围，不读取宽列或自动分页。"
+                inputs = "typed 目标绑定、私有 token、固定业务 sheet 名和有限行坐标；对象纪律不证明活的来源或准入。"
+                example = "python3 -B -m unittest -v test_cases.test_req7_sheets_read_plan  # 仅开发测试"
+            elif relative == "monitor/issue_tracker_online_whitelist_read.py":
+                scenario = "完整有界 Whitelist 只读结果必须匹配冻结本地规则；不得重筛已应用的本地 manifest。"
+                inputs = "固定六列、原始文本、实际 sheet 行容量和冻结本地 Whitelist；容量超过 10000 行拒绝，不分页掩盖截断。"
+                recovery = "缺失／不可读、规则不同、公式或容量超限时 HOLD；不修改本地快照、不从比较成功推导新鲜准入。"
+                example = "python3 -B -m unittest -v test_cases.test_req7_online_whitelist_read  # 仅开发测试"
+            elif relative == "monitor/issue_tracker_attempt_journal.py":
+                scenario = "在现有本地 owner 锁内持久保存不可变字节及六次意图计数；重启／进程死亡不重置 UNKNOWN。"
+                inputs = "ACTIVE 本地 writer token、单元标识和不超过 1 MiB 的冻结字节；它们不是合格 Sheets batch 或发送能力。"
+                recovery = "计数耗尽、部分／外来文件、字节变化或 fsync 失败均 HOLD，保留证据；无清理、重置或新单元接管。"
+                example = "python3 -B -m unittest -v test_cases.test_req7_attempt_journal  # 仅开发测试"
+            elif relative == "monitor/issue_tracker_mutation_rejection.py":
+                scenario = "只观察四类完整一致 HTTP/JSON 错误，其他情况 UNKNOWN；六次内的任一 UNKNOWN 不被后续拒绝清除。"
+                inputs = "有界原始响应和完整性声明；它们不证明响应来自承载请求的原生连接，也不是 durable journal。"
+                recovery = "不完整、格式不符、前次 UNKNOWN 均 HOLD；不允许重发，不清除预留或证明 APPLIED。"
+                example = "python3 -B -m unittest -v test_cases.test_req7_mutation_rejection  # 仅开发测试"
+            else:
+                scenario = "按精确目标、sheetId 和坐标解码 userEnteredValue；保留原类型，分别核十四表身份和四张 row-2 表头的多行字面值。"
+                inputs = "固定读取形状与完整有界 HTTP 200；不得用 formatted/effectiveValue 替代原值或用缺失 grid 制造空行。"
+                example = "python3 -B -m unittest -v test_cases.test_req7_sheets_read_decode  # 仅开发测试"
         if is_uninstalled:
             direct = "否；这是未安装、未启用的库级接点，不是可直接运行的生产入口。"
             environment = "当前未安装、未启用；未来仅在经真机验收的受管 Linux 环境中按正确身份导入，不是操作员 CLI。"

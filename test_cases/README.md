@@ -845,3 +845,16 @@ P 阶段在绑定的 macOS CPython 3.9 环境中，把独立审定的依赖文�
 只有 `-B test_cases/run_related_tests.py --all -v`、`-B test_cases/run_related_tests.py --suite repository-governance -v` 与 `-B test_cases/run_related_tests.py --all --no-approve -v` 三组精确审定的 runner argv 会在进入顶层 child sandbox 前，由父进程在同一个私有 state root 内预启动受管 loopback OpenSSH fixture。父进程使用固定的 `/usr/sbin/sshd`、`/usr/bin/ssh-keygen` 与 `/usr/bin/ssh-keyscan`，以临时 host key 在 `127.0.0.1` ephemeral port 完成真实 KEX，并用持久 held read-only descriptor 绑定 key、config、manifest 与 daemon log identity；每轮另通过 held root dirfd 对 PID file 做短持有 `NOFOLLOW` open、双 `pread`/`fstat` 与精确 `pid\n` 验证。near-miss、hidden probe 与普通 child 均不得触发或继承该 fixture。父进程只向精确三类 child 传递 routing marker，不传 fixture 路径或 descriptor；child 先认证既有的 exact-nine environment protocol 与 archive、snapshot、`PYTHONHOME` exact-seven dependency descriptor，再从 authenticated `snapshot.parent` 派生固定 sibling 路径并以 `NOFOLLOW` held reads 自行验证 fixture，因此不会增加任何传入 FD。顶层 sandbox profile 另以 literal/subpath 规则禁止 child 及其后代写入、重命名或建立指向 fixture subtree 的可写别名。child 返回或抛出任何异常后，父进程都重新核对 held identity 与 payload，并以有界 TERM→KILL process-group 流程回收 daemon、关闭全部 descriptor、删除 fixture；创建、KEX、认证、内核写保护、回收或清理任一步失败都会阻断正式证明。
 
 这项自动化保证覆盖当前证明进程、child/grandchild 以及其可执行的 snapshot 篡改；它明确不承诺抵御另一个已在运行且拥有同一 UID 的独立恶意进程在 archive 建立窗口内抢占 writable FD。正式证明必须在无不受信任同 UID 进程的专用会话中执行；该剩余边界与人工证据登记在 `REAL_ENVIRONMENT.md`。
+
+`test_req7_sdk_authentication`、`test_req7_tls_inputs`、`test_req7_native_tls_wire` 和
+`test_req7_attempt_supervision` / `test_req7_native_supervised_workflow` 约束公有 SDK、
+固定 CA 与受控原生 TLS、单次回调以及包含启动／DNS／慢读的完整预算。其组件均为未安装库，
+本地仅使用合成密钥及私有 loopback，不读取真实凭据、不安装依赖或开放在线入口。
+`test_req7_sheets_read_plan` / `test_req7_sheets_read_decode` 与
+`test_req7_online_whitelist_read` 固定精确列／坐标、十四表身份、四张 row-2 多行字面表头
+和完整有限 Whitelist；非原子 GET 不构成 enrollment、发送许可或完整格式快照。
+`test_req7_mutation_rejection` 保留四类一致错误之外的 UNKNOWN，后续拒绝不能消除旧 UNKNOWN。
+`test_req7_attempt_journal` 在实际 C-6 owner 内测试不可覆盖字节、file/directory fsync、
+六次意图计数、真实子进程退出／重启、部分记录与外来对象拒绝。六次意图不证明真实尝试
+上界：固定 launcher 的单次消费、spreadsheet-wide 锁、新鲜准入、History/fence 与 COMPLETE
+仍须完成；组件无重置／清理／在线发送权限，不代表 REQ7 整体完成。对应真机卡保持 NOT RUN。

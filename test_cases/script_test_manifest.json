@@ -29,7 +29,9 @@
         "test_cases.test_public_s_phase_workflow",
         "test_cases.test_public_publication_contract",
         "test_cases.test_public_publication_workflow",
-        "test_cases.test_public_publication_v3_overlap"
+        "test_cases.test_public_publication_v3_overlap",
+        "test_cases.test_req7_auth_documentation_candidate",
+        "test_cases.test_req7_transport_manifest"
       ]
     },
     {
@@ -273,7 +275,17 @@
         "test_cases.test_issue_tracker_cabling_projection",
         "test_cases.test_issue_tracker_switch_projection",
         "test_cases.test_issue_tracker_local_workbook_commit",
-        "test_cases.test_issue_tracker_local_workbook_commit_workflow"
+        "test_cases.test_issue_tracker_local_workbook_commit_workflow",
+        "test_cases.test_req7_sdk_authentication",
+        "test_cases.test_req7_tls_inputs",
+        "test_cases.test_req7_attempt_supervision",
+        "test_cases.test_req7_sheets_read_plan",
+        "test_cases.test_req7_sheets_read_decode",
+        "test_cases.test_req7_online_whitelist_read",
+        "test_cases.test_req7_native_tls_wire",
+        "test_cases.test_req7_native_supervised_workflow",
+        "test_cases.test_req7_mutation_rejection",
+        "test_cases.test_req7_attempt_journal"
       ]
     },
     {
@@ -587,13 +599,27 @@
     "ztp/nvue_normalizer.py": "ztp/nvue_normalizer.py",
     "ztp/optimize/feedback.py": "ztp/optimize/feedback.py",
     "ztp/optimize/sample_links.py": "ztp/optimize/sample_links.py",
-    "ztp/templates/ztp-bootstrap.sh": "ztp/templates/ztp-bootstrap.sh"
+    "ztp/templates/ztp-bootstrap.sh": "ztp/templates/ztp-bootstrap.sh",
+    "monitor/issue_tracker_sdk_authentication.py": "monitor/issue_tracker_sdk_authentication.py",
+    "monitor/issue_tracker_tls_inputs.py": "monitor/issue_tracker_tls_inputs.py",
+    "monitor/issue_tracker_attempt_supervision.py": "monitor/issue_tracker_attempt_supervision.py",
+    "monitor/issue_tracker_sheets_read_plan.py": "monitor/issue_tracker_sheets_read_plan.py",
+    "monitor/issue_tracker_sheets_read_decode.py": "monitor/issue_tracker_sheets_read_decode.py",
+    "monitor/issue_tracker_online_whitelist_read.py": "monitor/issue_tracker_online_whitelist_read.py",
+    "monitor/issue_tracker_mutation_rejection.py": "monitor/issue_tracker_mutation_rejection.py",
+    "monitor/issue_tracker_attempt_journal.py": "monitor/issue_tracker_attempt_journal.py"
   },
   "test_rules": [
     {
       "id": "req7_dependency_contract",
-      "paths": ["tools/req7_dependency_contract.py", "infra/docker/activate.py"],
-      "tests": ["test_cases.test_req7_dependency_contract", "test_cases.test_req7_dependency_workflow"]
+      "paths": [
+        "tools/req7_dependency_contract.py",
+        "infra/docker/activate.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_dependency_contract",
+        "test_cases.test_req7_dependency_workflow"
+      ]
     },
     {
       "id": "req14_splitter_hostname_binding_direct",
@@ -996,7 +1022,8 @@
         "test_cases.test_terminal_l2_stp_generation",
         "test_cases.test_v2_project_schema",
         "test_cases.test_v2_generation_flow",
-        "test_cases.test_reference_only_path_disposition"
+        "test_cases.test_reference_only_path_disposition",
+        "test_cases.test_req7_auth_documentation_candidate"
       ]
     },
     {
@@ -1041,13 +1068,21 @@
     },
     {
       "id": "req7_ib_topology_provenance_direct",
-      "paths": ["ztp/config/ib_topology_provenance.py"],
-      "tests": ["test_cases.test_req7_ib_provenance"]
+      "paths": [
+        "ztp/config/ib_topology_provenance.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_ib_provenance"
+      ]
     },
     {
       "id": "req7_ib_cvt_producer_direct",
-      "paths": ["ztp/config/nvos/template/P2P/p2p-to-validation.py"],
-      "tests": ["test_cases.test_req7_ib_provenance_workflow"]
+      "paths": [
+        "ztp/config/nvos/template/P2P/p2p-to-validation.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_ib_provenance_workflow"
+      ]
     },
     {
       "id": "ztp_config_generation",
@@ -1075,13 +1110,24 @@
     },
     {
       "id": "f02_config_sync_generation_direct",
-      "paths": ["ztp/config_sync_authority.py"],
-      "tests": ["test_cases.test_config_sync_authority", "test_cases.test_manual_applied_config"]
+      "paths": [
+        "ztp/config_sync_authority.py"
+      ],
+      "tests": [
+        "test_cases.test_config_sync_authority",
+        "test_cases.test_manual_applied_config"
+      ]
     },
     {
       "id": "f02_config_sync_writer_direct",
-      "paths": ["ztp/manual-ztp.py", "monitor/manual-ztp-worker.py", "DAY0-Prepare/02-unsetup.py"],
-      "tests": ["test_cases.test_config_sync_authority_workflow"]
+      "paths": [
+        "ztp/manual-ztp.py",
+        "monitor/manual-ztp-worker.py",
+        "DAY0-Prepare/02-unsetup.py"
+      ],
+      "tests": [
+        "test_cases.test_config_sync_authority_workflow"
+      ]
     },
     {
       "id": "req8_public_cli_help",
@@ -1417,23 +1463,40 @@
     },
     {
       "id": "issue_tracker_credential_shape",
-      "paths": ["monitor/issue_tracker_credential_shape.py"],
-      "tests": ["test_cases.test_issue_tracker_credential_shape", "test_cases.test_issue_tracker_credential_fd"]
+      "paths": [
+        "monitor/issue_tracker_credential_shape.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_credential_shape",
+        "test_cases.test_issue_tracker_credential_fd"
+      ]
     },
     {
       "id": "issue_tracker_online_cells",
-      "paths": ["monitor/issue_tracker_online_cells.py"],
-      "tests": ["test_cases.test_issue_tracker_online_cells"]
+      "paths": [
+        "monitor/issue_tracker_online_cells.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_online_cells"
+      ]
     },
     {
       "id": "issue_tracker_online_nv_ids",
-      "paths": ["monitor/issue_tracker_online_nv_ids.py"],
-      "tests": ["test_cases.test_issue_tracker_online_nv_ids"]
+      "paths": [
+        "monitor/issue_tracker_online_nv_ids.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_online_nv_ids"
+      ]
     },
     {
       "id": "issue_tracker_online_rows",
-      "paths": ["monitor/issue_tracker_online_rows.py"],
-      "tests": ["test_cases.test_issue_tracker_online_rows"]
+      "paths": [
+        "monitor/issue_tracker_online_rows.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_online_rows"
+      ]
     },
     {
       "id": "issue_tracker_publish_runtime",
@@ -1597,13 +1660,85 @@
         "test_cases.test_req19_infra_log_contract",
         "test_cases.test_req19_infra_log_workflow"
       ]
+    },
+    {
+      "id": "issue_tracker_sdk_authentication",
+      "paths": [
+        "monitor/issue_tracker_sdk_authentication.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_sdk_authentication"
+      ]
+    },
+    {
+      "id": "issue_tracker_tls_inputs",
+      "paths": [
+        "monitor/issue_tracker_tls_inputs.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_tls_inputs"
+      ]
+    },
+    {
+      "id": "issue_tracker_attempt_supervision",
+      "paths": [
+        "monitor/issue_tracker_attempt_supervision.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_attempt_supervision"
+      ]
+    },
+    {
+      "id": "issue_tracker_sheets_read_plan",
+      "paths": [
+        "monitor/issue_tracker_sheets_read_plan.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_sheets_read_plan"
+      ]
+    },
+    {
+      "id": "issue_tracker_sheets_read_decode",
+      "paths": [
+        "monitor/issue_tracker_sheets_read_decode.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_sheets_read_decode"
+      ]
+    },
+    {
+      "id": "issue_tracker_online_whitelist_read",
+      "paths": [
+        "monitor/issue_tracker_online_whitelist_read.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_online_whitelist_read"
+      ]
+    },
+    {
+      "id": "issue_tracker_mutation_rejection",
+      "paths": ["monitor/issue_tracker_mutation_rejection.py"],
+      "tests": ["test_cases.test_req7_mutation_rejection"]
+    },
+    {
+      "id": "issue_tracker_attempt_journal",
+      "paths": ["monitor/issue_tracker_attempt_journal.py"],
+      "tests": ["test_cases.test_req7_attempt_journal"]
     }
   ],
   "workflows": [
     {
       "id": "req7_policy_to_activation_and_full_identity",
-      "members": ["tools/req7_dependency_contract.py", "infra/docker/activate.py", "infra/docker/Dockerfile", "infra/docker/req7-dependency-policy.json", "infra/docker/requirements-req7-online.txt"],
-      "tests": ["test_cases.test_req7_dependency_workflow"]
+      "members": [
+        "tools/req7_dependency_contract.py",
+        "infra/docker/activate.py",
+        "infra/docker/Dockerfile",
+        "infra/docker/req7-dependency-policy.json",
+        "infra/docker/requirements-req7-online.txt"
+      ],
+      "tests": [
+        "test_cases.test_req7_dependency_workflow"
+      ]
     },
     {
       "id": "backup_permission_historical_to_new_collection",
@@ -1712,23 +1847,46 @@
     },
     {
       "id": "issue_tracker_fixed_fd_inputs_to_exact_target",
-      "members": ["monitor/issue_tracker_credential_shape.py", "monitor/issue_tracker_online_target.py", "tools/project_contract.py"],
-      "tests": ["test_cases.test_issue_tracker_credential_fd"]
+      "members": [
+        "monitor/issue_tracker_credential_shape.py",
+        "monitor/issue_tracker_online_target.py",
+        "tools/project_contract.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_credential_fd"
+      ]
     },
     {
       "id": "issue_tracker_source_rows_to_literal_cells",
-      "members": ["monitor/issue_tracker_online_cells.py", "monitor/issue_tracker_local_workbook.py"],
-      "tests": ["test_cases.test_issue_tracker_online_cells"]
+      "members": [
+        "monitor/issue_tracker_online_cells.py",
+        "monitor/issue_tracker_local_workbook.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_online_cells"
+      ]
     },
     {
       "id": "issue_tracker_two_cabling_sheets_to_shared_nv_plan",
-      "members": ["monitor/issue_tracker_online_nv_ids.py", "monitor/issue_tracker_online_cells.py", "monitor/issue_tracker_local_workbook.py"],
-      "tests": ["test_cases.test_issue_tracker_online_nv_ids"]
+      "members": [
+        "monitor/issue_tracker_online_nv_ids.py",
+        "monitor/issue_tracker_online_cells.py",
+        "monitor/issue_tracker_local_workbook.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_online_nv_ids"
+      ]
     },
     {
       "id": "issue_tracker_reserved_switch_rows_and_postimage",
-      "members": ["monitor/issue_tracker_online_rows.py", "monitor/issue_tracker_online_cells.py", "monitor/issue_tracker_local_workbook.py"],
-      "tests": ["test_cases.test_issue_tracker_online_rows"]
+      "members": [
+        "monitor/issue_tracker_online_rows.py",
+        "monitor/issue_tracker_online_cells.py",
+        "monitor/issue_tracker_local_workbook.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_online_rows"
+      ]
     },
     {
       "id": "issue_tracker_publish_runtime_from_worker_sources",
@@ -2658,28 +2816,68 @@
     },
     {
       "id": "f02_config_sync_writer_to_generation_journal",
-      "members": ["ztp/manual-ztp.py", "ztp/config_sync_authority.py", "monitor/manual-ztp-worker.py", "DAY0-Prepare/12-ztp-monitor.py", "DAY0-Prepare/02-unsetup.py", "tools/deployment_lock.py", "tools/finished_project_state.py"],
-      "tests": ["test_cases.test_config_sync_authority_workflow"]
+      "members": [
+        "ztp/manual-ztp.py",
+        "ztp/config_sync_authority.py",
+        "monitor/manual-ztp-worker.py",
+        "DAY0-Prepare/12-ztp-monitor.py",
+        "DAY0-Prepare/02-unsetup.py",
+        "tools/deployment_lock.py",
+        "tools/finished_project_state.py"
+      ],
+      "tests": [
+        "test_cases.test_config_sync_authority_workflow"
+      ]
     },
     {
       "id": "f02_release_mode_to_static_monitor",
-      "members": ["DAY0-Prepare/11-load.py", "DAY0-Prepare/12-ztp-monitor.py", "ztp/dynamic_air_inventory.py"],
-      "tests": ["test_cases.test_config_sync_authority_workflow", "test_cases.test_monitor_stack_review"]
+      "members": [
+        "DAY0-Prepare/11-load.py",
+        "DAY0-Prepare/12-ztp-monitor.py",
+        "ztp/dynamic_air_inventory.py"
+      ],
+      "tests": [
+        "test_cases.test_config_sync_authority_workflow",
+        "test_cases.test_monitor_stack_review"
+      ]
     },
     {
       "id": "f02_bootstrap_applied_source_to_same_connection_monitor",
-      "members": ["ztp/templates/ztp-bootstrap.sh", "ztp/config_sync_authority.py", "ztp/manual-ztp.py", "DAY0-Prepare/12-ztp-monitor.py"],
-      "tests": ["test_cases.test_manual_applied_config", "test_cases.test_ztp_applied_receipt"]
+      "members": [
+        "ztp/templates/ztp-bootstrap.sh",
+        "ztp/config_sync_authority.py",
+        "ztp/manual-ztp.py",
+        "DAY0-Prepare/12-ztp-monitor.py"
+      ],
+      "tests": [
+        "test_cases.test_manual_applied_config",
+        "test_cases.test_ztp_applied_receipt"
+      ]
     },
     {
       "id": "f02_fresh_observation_to_report_completion",
-      "members": ["ztp/config_sync_authority.py", "DAY0-Prepare/12-ztp-monitor.py", "monitor/generate-monitor-html.py"],
-      "tests": ["test_cases.test_ztp_group_handoff_display", "test_cases.test_config_sync_authority_workflow"]
+      "members": [
+        "ztp/config_sync_authority.py",
+        "DAY0-Prepare/12-ztp-monitor.py",
+        "monitor/generate-monitor-html.py"
+      ],
+      "tests": [
+        "test_cases.test_ztp_group_handoff_display",
+        "test_cases.test_config_sync_authority_workflow"
+      ]
     },
     {
       "id": "f02_info_health_without_ztp_completion",
-      "members": ["ethernet/monitor/sw-info.sh", "infiniband/monitor/sw-info.sh", "nvlink/monitor/sw-info.sh", "monitor/generate-monitor-html.py", "DAY0-Prepare/12-ztp-monitor.py"],
-      "tests": ["test_cases.test_ztp_group_handoff_display"]
+      "members": [
+        "ethernet/monitor/sw-info.sh",
+        "infiniband/monitor/sw-info.sh",
+        "nvlink/monitor/sw-info.sh",
+        "monitor/generate-monitor-html.py",
+        "DAY0-Prepare/12-ztp-monitor.py"
+      ],
+      "tests": [
+        "test_cases.test_ztp_group_handoff_display"
+      ]
     },
     {
       "id": "ufm_readonly_discovery_from_inventory_and_leases",
@@ -2876,15 +3074,109 @@
       "tests": [
         "test_cases.test_monitor_writer_quiesce_workflow"
       ]
+    },
+    {
+      "id": "req7_fixed_fd_public_sdk_one_callback",
+      "members": [
+        "monitor/issue_tracker_sdk_authentication.py",
+        "monitor/issue_tracker_credential_shape.py",
+        "tools/req7_dependency_contract.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_sdk_authentication"
+      ]
+    },
+    {
+      "id": "req7_native_tls_public_sdk_no_retry",
+      "members": [
+        "monitor/issue_tracker_tls_inputs.py",
+        "monitor/issue_tracker_sdk_authentication.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_tls_inputs",
+        "test_cases.test_req7_native_tls_wire"
+      ]
+    },
+    {
+      "id": "req7_supervised_native_owned_child_lock",
+      "members": [
+        "monitor/issue_tracker_attempt_supervision.py",
+        "monitor/issue_tracker_tls_inputs.py",
+        "monitor/issue_tracker_sdk_authentication.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_attempt_supervision",
+        "test_cases.test_req7_native_supervised_workflow"
+      ]
+    },
+    {
+      "id": "req7_exact_native_business_read",
+      "members": [
+        "monitor/issue_tracker_sheets_read_plan.py",
+        "monitor/issue_tracker_online_target.py",
+        "monitor/issue_tracker_sdk_authentication.py",
+        "monitor/issue_tracker_tls_inputs.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_sheets_read_plan"
+      ]
+    },
+    {
+      "id": "req7_native_grid_decode_to_switch_row",
+      "members": [
+        "monitor/issue_tracker_sheets_read_decode.py",
+        "monitor/issue_tracker_sheets_read_plan.py",
+        "monitor/issue_tracker_tls_inputs.py",
+        "monitor/issue_tracker_local_workbook.py",
+        "monitor/issue_tracker_online_rows.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_sheets_read_decode"
+      ]
+    },
+    {
+      "id": "req7_native_whitelist_matches_frozen_local",
+      "members": [
+        "monitor/issue_tracker_online_whitelist_read.py",
+        "monitor/issue_tracker_sheets_read_plan.py",
+        "monitor/issue_tracker_sheets_read_decode.py",
+        "monitor/issue_tracker_tls_inputs.py",
+        "monitor/issue_tracker_whitelist.py",
+        "monitor/issue_tracker_whitelist_workbook.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_online_whitelist_read"
+      ]
+    },
+    {
+      "id": "req7_literal_intent_to_sticky_unknown_observation",
+      "members": ["monitor/issue_tracker_online_cells.py", "monitor/issue_tracker_mutation_rejection.py"],
+      "tests": ["test_cases.test_req7_mutation_rejection"]
+    },
+    {
+      "id": "req7_local_owner_immutable_attempt_journal_cold_processes",
+      "members": ["monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_online_cells.py", "monitor/issue_tracker_mutation_rejection.py", "monitor/issue_tracker_attempt_journal.py"],
+      "tests": ["test_cases.test_req7_attempt_journal"]
     }
   ],
   "path_rules": [
     {
-      "paths": ["infra/docker/req7-dependency-policy.json", "infra/docker/requirements-req7-online.txt", "test_cases/run_related_tests.py"],
-      "tests": ["test_cases.test_req7_dependency_contract", "test_cases.test_req7_dependency_workflow", "test_cases.test_change_aware_test_runner", "test_cases.test_ztp_container_runtime"]
+      "paths": [
+        "infra/docker/req7-dependency-policy.json",
+        "infra/docker/requirements-req7-online.txt",
+        "test_cases/run_related_tests.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_dependency_contract",
+        "test_cases.test_req7_dependency_workflow",
+        "test_cases.test_change_aware_test_runner",
+        "test_cases.test_ztp_container_runtime"
+      ]
     },
     {
-      "paths": ["DAY0-Prepare/template/99-output-infra/.gitkeep"],
+      "paths": [
+        "DAY0-Prepare/template/99-output-infra/.gitkeep"
+      ],
       "tests": [
         "test_cases.test_change_aware_test_runner",
         "test_cases.test_public_repository_contract",
@@ -2893,7 +3185,9 @@
       ]
     },
     {
-      "paths": ["test_cases/module_loader.py"],
+      "paths": [
+        "test_cases/module_loader.py"
+      ],
       "tests": [
         "test_cases.test_image_context_safety",
         "test_cases.test_air_link_endpoint_contract",

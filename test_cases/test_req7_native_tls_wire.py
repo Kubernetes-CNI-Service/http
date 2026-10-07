@@ -1,0 +1,205 @@
+"""Actual stdlib TLS/HTTP to an owned loopback fake server, never online OAuth.
+
+Only DNS and root CA-file metadata are synthetic boundaries. HTTPSConnection,
+SSLContext, hostname verification, request generation and response parsing are
+not mocked. No real credential or installed CA is read or modified.
+"""
+from contextlib import contextmanager
+from datetime import datetime, timedelta
+import base64
+import json
+import os
+from pathlib import Path
+import socket
+import ssl
+import sys
+import threading
+import unittest
+from unittest import mock
+from urllib.parse import parse_qs
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import test_req7_tls_inputs as tls_fixtures
+
+
+class Req7NativeTlsWireTests(unittest.TestCase):
+    setUp = tls_fixtures.Req7TlsInputsDirectTests.setUp
+    fixture = tls_fixtures.Req7TlsInputsDirectTests.fixture
+
+    def certificates(self, hostname="oauth2.googleapis.com"):
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        from cryptography.x509.oid import NameOID
+        ca_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Owned local REQ7 wire-test CA")])
+        ca = (x509.CertificateBuilder().subject_name(ca_name).issuer_name(ca_name).public_key(ca_key.public_key())
+              .serial_number(2).not_valid_before(datetime.utcnow() - timedelta(days=1))
+              .not_valid_after(datetime.utcnow() + timedelta(days=1))
+              .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+              .sign(ca_key, hashes.SHA256()))
+        leaf_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        leaf = (x509.CertificateBuilder().subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, hostname)]))
+                .issuer_name(ca_name).public_key(leaf_key.public_key()).serial_number(3)
+                .not_valid_before(datetime.utcnow() - timedelta(days=1)).not_valid_after(datetime.utcnow() + timedelta(days=1))
+                .add_extension(x509.SubjectAlternativeName([x509.DNSName(hostname)]), critical=False)
+                .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+                .sign(ca_key, hashes.SHA256()))
+        self.path.write_bytes(ca.public_bytes(serialization.Encoding.PEM))
+        certificate = self.root / "owned-server.pem"; key = self.root / "owned-server-key.pem"
+        certificate.write_bytes(leaf.public_bytes(serialization.Encoding.PEM))
+        key.write_bytes(leaf_key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                                              serialization.NoEncryption())); key.chmod(0o600)
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(certificate, key)
+        return context
+
+    @contextmanager
+    def server(self, response, hostname="oauth2.googleapis.com", destination="oauth2.googleapis.com"):
+        context = self.certificates(hostname)
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.bind(("127.0.0.1", 0)); listener.listen(1); listener.settimeout(3)
+        address = listener.getsockname(); observations = []; errors = []
+        def serve():
+            try:
+                connection, _peer = listener.accept(); connection.settimeout(3)
+                with connection:
+                    with context.wrap_socket(connection, server_side=True) as transport:
+                        with transport.makefile("rb") as incoming:
+                            request_line = incoming.readline(8193); headers = []
+                            for _ in range(100):
+                                line = incoming.readline(8193)
+                                if line == b"\r\n": break
+                                if not line or len(line) > 8192: raise AssertionError("invalid owned-fixture request")
+                                headers.append(line)
+                            else: raise AssertionError("owned fixture header overflow")
+                            lengths = [int(line.split(b":", 1)[1]) for line in headers if line.lower().startswith(b"content-length:")]
+                            if request_line.startswith(b"GET "):
+                                if lengths not in ([], [0]): raise AssertionError("GET fixture received a body")
+                                body = b""
+                            else:
+                                if len(lengths) != 1 or not 0 <= lengths[0] <= 65536: raise AssertionError("invalid owned fixture length")
+                                body = incoming.read(lengths[0])
+                            observations.append((request_line, tuple(headers), body))
+                        if callable(response): response(transport)
+                        else: transport.sendall(response)
+            except Exception as error: errors.append(error)
+        thread = threading.Thread(target=serve, daemon=True); thread.start()
+        def resolve(host, port, *args, **kwargs):
+            if host != destination or port != 443:
+                raise AssertionError("foreign/online DNS forbidden")
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", address)]
+        try:
+            with mock.patch("socket.getaddrinfo", side_effect=resolve): yield observations, errors
+        finally:
+            listener.close(); thread.join(4)
+            self.assertFalse(thread.is_alive(), "owned TLS fixture must terminate")
+
+    def wire(self):
+        from test_req7_sdk_authentication import load as load_auth
+        auth = load_auth()
+        return auth.TokenWireRequest("https://oauth2.googleapis.com/token", "POST", b"synthetic-body",
+                                     (("Content-Type", "application/x-www-form-urlencoded"),), 0.5)
+
+    def test_actual_verified_tls_post_has_fixed_host_path_no_proxy_and_complete_bounded_response(self):
+        wire = self.wire()
+        with self.server(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}") as (records, errors):
+            with self.fixture(), mock.patch.dict(os.environ, {"HTTPS_PROXY": "http://foreign.invalid:9",
+                                                             "SSL_CERT_FILE": "/foreign/sentinel.pem"}):
+                result = self.module.NativeTokenHttpsUnit().send_once(wire)
+        self.assertEqual([], errors); self.assertEqual(1, len(records))
+        self.assertEqual(b"POST /token HTTP/1.1\r\n", records[0][0])
+        self.assertIn(b"Host: oauth2.googleapis.com\r\n", records[0][1])
+        self.assertEqual(b"synthetic-body", records[0][2])
+        self.assertEqual(200, result.status); self.assertEqual(b"{}", result.data)
+        self.assertIs(True, result.complete); self.assertNotIn("{}", repr(result))
+
+    def test_redirect_and_non200_are_rejected_at_native_boundary_without_second_connection(self):
+        wire = self.wire()
+        for status in (302, 429, 503):
+            reply = ("HTTP/1.1 %d Denied\r\nContent-Length: 2\r\nLocation: https://foreign.invalid/\r\n"
+                     "Connection: close\r\n\r\n{}" % status).encode()
+            with self.subTest(status=status):
+                with self.server(reply) as (records, errors):
+                    with self.fixture(), self.assertRaises(self.module.TlsInputHold) as caught:
+                        self.module.NativeTokenHttpsUnit().send_once(wire)
+                self.assertEqual("req7_tls_input_denied", str(caught.exception))
+                self.assertIsNone(caught.exception.__context__)
+                self.assertEqual(1, len(records)); self.assertEqual([], errors)
+
+    def test_wrong_hostname_refuses_before_any_http_request(self):
+        wire = self.wire()
+        with self.server(b"", hostname="foreign.invalid") as (records, errors):
+            with self.fixture(), self.assertRaises(self.module.TlsInputHold) as caught:
+                self.module.NativeTokenHttpsUnit().send_once(wire)
+        self.assertEqual([], records); self.assertEqual(1, len(errors))
+        self.assertIsInstance(errors[0], ssl.SSLError)
+        self.assertIsNone(caught.exception.__context__)
+
+    def test_duplicate_framing_short_body_and_incomplete_chunks_never_become_complete(self):
+        wire = self.wire()
+        responses = (b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Length: 2\r\n\r\n{}",
+                     b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\n{}",
+                     b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n2\r\n{}\r\n",
+                     b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Length: 2\r\n\r\n0\r\n\r\n")
+        for response in responses:
+            with self.subTest(response_bytes=len(response)), self.server(response) as (records, errors):
+                with self.fixture(), self.assertRaises(self.module.TlsInputHold) as caught:
+                    self.module.NativeTokenHttpsUnit().send_once(wire)
+            self.assertEqual(1, len(records)); self.assertEqual([], errors)
+            self.assertIsNone(caught.exception.__context__)
+
+    def test_close_only_response_cannot_prove_the_intended_body_length(self):
+        # A syntactically complete JSON prefix is not complete HTTP framing.
+        # Refuse an unframed EOF even if its bytes happen to be valid JSON.
+        with self.server(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n{}") as (records, errors):
+            with self.fixture(), self.assertRaises(self.module.TlsInputHold) as caught:
+                self.module.NativeTokenHttpsUnit().send_once(self.wire())
+        self.assertEqual(1, len(records)); self.assertEqual([], errors)
+        self.assertIsNone(caught.exception.__context__)
+
+    def test_public_sdk_does_not_accept_or_retry_an_unframed_native_token_response(self):
+        from test_req7_sdk_authentication import load as load_auth, fresh_info, parsed_info
+        auth = load_auth()
+        credential = auth.credentials_from_validated_info(parsed_info(fresh_info()))
+        adapter = auth.OneShotTokenRequest(self.module.NativeTokenHttpsUnit())
+        payload = b'{"access_token":"sentinel","expires_in":3600}'
+        with self.server(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n" + payload) as (records, errors):
+            with self.fixture():
+                from google.auth.exceptions import TransportError
+                with self.assertRaises(TransportError) as caught: credential.refresh(adapter)
+        self.assertEqual(1, len(records)); self.assertEqual([], errors)
+        self.assertIsNone(caught.exception.__context__); self.assertIsNone(credential.token)
+
+    def test_public_sdk_refresh_crosses_actual_native_tls_unit_and_never_follows_or_retries(self):
+        from test_req7_sdk_authentication import load as load_auth, fresh_info, parsed_info
+        auth = load_auth(); parsed = parsed_info(fresh_info())
+        for status in (200, 302, 503):
+            # The public constructor and dependency gate run before synthetic
+            # CA root remapping. No SDK function or HTTPS internals are patched.
+            credential = auth.credentials_from_validated_info(parsed)
+            adapter = auth.OneShotTokenRequest(self.module.NativeTokenHttpsUnit())
+            payload = b'{"access_token":"sentinel","expires_in":3600}'
+            response = ("HTTP/1.1 %d Synthetic\r\nContent-Length: %d\r\nConnection: close\r\n\r\n" % (
+                status, len(payload))).encode() + payload
+            with self.subTest(status=status):
+                with self.server(response) as (records, errors):
+                    with self.fixture():
+                        if status == 200: credential.refresh(adapter)
+                        else:
+                            from google.auth.exceptions import TransportError
+                            with self.assertRaises(TransportError) as caught: credential.refresh(adapter)
+                            self.assertIsNone(caught.exception.__context__)
+                self.assertEqual([], errors); self.assertEqual(1, len(records))
+                self.assertEqual(b"POST /token HTTP/1.1\r\n", records[0][0])
+                form = parse_qs(records[0][2].decode(), strict_parsing=True)
+                self.assertEqual({"grant_type", "assertion"}, set(form))
+                encoded = form["assertion"][0].split(".")[1]
+                claims = json.loads(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)))
+                self.assertEqual("https://oauth2.googleapis.com/token", claims["aud"])
+                self.assertEqual("https://www.googleapis.com/auth/spreadsheets", claims["scope"])
+                self.assertNotIn("sub", claims)
+                if status == 200: self.assertEqual("sentinel", credential.token)
+
+
+if __name__ == "__main__": unittest.main()
