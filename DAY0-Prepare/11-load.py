@@ -6056,7 +6056,22 @@ def restore_active_setup_state(
         services_quiesced=services_quiesced,
         runtime_backend=runtime_backend,
     )
-    _require_no_pending_setup_manifest_stage()
+    require_no_pending_setup_switch_journal()
+    manifest_parent = _setup_switch_link_parent_identity(MANIFEST)
+
+    def require_legacy_restore_authority() -> None:
+        _require_runtime_restore_guard(
+            deployment_lock_descriptor=deployment_lock_descriptor,
+            services_quiesced=services_quiesced,
+            runtime_backend=runtime_backend,
+        )
+        # The manifest writer holds its own stage during this callback. Scan
+        # for orphan stages only at entry; an arriving WAL always fences us.
+        _require_setup_switch_wal_absent()
+        if manifest_parent != _setup_switch_link_parent_identity(MANIFEST):
+            raise LoadError("legacy setup restore manifest parent changed; HOLD")
+
+    require_legacy_restore_authority()
     old_project = state.project.resolve(strict=True)
     target = current_project.resolve(strict=True)
     if target == old_project:
@@ -6069,6 +6084,7 @@ def restore_active_setup_state(
     if current.project == old_project:
         if current.manifest != expected.manifest or current.links != expected.links:
             raise LoadError("old setup authority is only partially restored")
+        require_legacy_restore_authority()
         return
     if current.project != target:
         raise LoadError("setup rollback current project is neither P nor expected Q")
@@ -6089,20 +6105,24 @@ def restore_active_setup_state(
             raise LoadError(f"setup rollback Q managed link changed before restore: {path}")
 
     for path, raw_target in expected.links.items():
+        require_legacy_restore_authority()
         if not (path.is_symlink() and os.readlink(path) == raw_target):
-            _atomic_restore_setup_link(path, raw_target)
+            _atomic_restore_setup_link(path, raw_target,
+                                       require_authority=require_legacy_restore_authority)
     for path in sorted(
         set(current.links) - set(expected.links),
         key=lambda item: len(item.parts), reverse=True,
     ):
+        require_legacy_restore_authority()
         if not path.is_symlink() or os.readlink(path) != current.links[path]:
             raise LoadError(f"setup rollback target-only link changed during restore: {path}")
         path.unlink()
         _fsync_parent_directory(path.parent)
-    _atomic_restore_setup_manifest(expected)
+    _atomic_restore_setup_manifest(expected, require_authority=require_legacy_restore_authority)
     verified = snapshot_active_setup_state(expected_project=old_project)
     if verified.manifest != expected.manifest or verified.links != expected.links:
         raise LoadError("setup rollback post-verify failed; services remain stopped")
+    require_legacy_restore_authority()
     ok(f"active setup restore verified: {old_project.name}")
 
 
@@ -6156,11 +6176,16 @@ def require_no_pending_setup_switch_journal() -> None:
     symlink, is unresolved evidence. The caller must not delete it or infer
     that either project committed. Production main checks under its lock.
     """
+    _require_setup_switch_wal_absent()
+    _require_no_pending_setup_manifest_stage()
+
+
+def _require_setup_switch_wal_absent() -> None:
+    """WAL-only fence, also safe inside a held manifest staging callback."""
     journal = _setup_switch_journal_path()
     try:
         journal.lstat()
     except FileNotFoundError:
-        _require_no_pending_setup_manifest_stage()
         return
     # Do not use lexists(): it converts permission/type errors to False and
     # would incorrectly authorize project writes with an unreadable WAL path.

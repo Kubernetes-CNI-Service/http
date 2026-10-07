@@ -3792,6 +3792,70 @@ os.fsync = change_stage_owner
                 self.assertEqual(b"independent foreign Q manifest stage\n", stage.read_bytes())
                 self.assertFalse((root / "service-started").exists())
 
+    def test_real_setup_parent_commit_cannot_bypass_wal_via_legacy_restore(self):
+        with tempfile.TemporaryDirectory(prefix="r22-legacy-parent-fence-") as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, p, q, common, p_only, q_only, manifest, before, _hook, _barrier, _home = fixture
+            for relative in ("tools/lldp-analyze-tool/99-output-p2p",
+                             "tools/lldp-analyze-tool/99-output-monitor",
+                             "tools/ibdiagnet-analyze-tool/99-output-p2p"):
+                leaf = root / relative
+                if leaf.is_dir() and not leaf.is_symlink():
+                    shutil.rmtree(leaf)
+            first = self._run_private_load_setup_switch(fixture, prepare_journal=False,
+                auto_prepare_journal=True, kill_after_replace=root / "never-replaced")
+            self.assertEqual(25, first.returncode, first.stdout + first.stderr)
+            # SETUP points at LOAD's not-yet-generated P2P artifacts. Supply
+            # private generator dependencies, not rollback expected values.
+            for value in manifest.read_text().splitlines()[1:]:
+                link = Path(value)
+                if link.is_symlink() and not link.exists():
+                    dependency = link.resolve(strict=False)
+                    dependency.relative_to(q / "99-output-p2p")
+                    dependency.parent.mkdir(parents=True, exist_ok=True)
+                    dependency.write_bytes(b"{}\n")
+            journal = root / "ztp/.setup-switch-journal.json"
+            mixed = (common.lstat().st_ino, os.readlink(common), q_only.lstat().st_ino,
+                     os.readlink(q_only), manifest.lstat().st_ino, manifest.read_bytes(), journal.read_bytes())
+            driver = f'''
+import importlib.util, sys
+from pathlib import Path
+from types import SimpleNamespace
+root, p, q = map(Path, sys.argv[1:4])
+spec = importlib.util.spec_from_file_location('legacy_parent_fence_load', root / 'DAY0-Prepare/11-load.py')
+load = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = load
+spec.loader.exec_module(load)
+load.active_managed_services = lambda *args, **kwargs: ()
+state = load.ActiveSetupState(project=p, manifest={before['manifest']!r}, manifest_mode=0o644,
+    links={{root / 'ztp/config/cumulus/template/01-global.yaml': {before['common']!r},
+            root / 'ztp/config/publickey/p-only.pub': {before['p_only']!r}}})
+descriptor = load.acquire_deployment_lock(exclusive=True)
+try:
+    candidate = load.prepare_current_release(q, {{'schema_version': 1, 'release_id': 'independent-Q-parent'}})
+    load.commit_prepared_release(candidate)
+    try:
+        load.restore_active_setup_state(state, current_project=q, deployment_lock_descriptor=descriptor,
+            services_quiesced=True, runtime_backend=SimpleNamespace(name='supervisor'))
+    except load.LoadError as exc:
+        print('EXPECTED LEGACY WAL HOLD:', exc)
+        raise SystemExit(7)
+finally:
+    load.release_deployment_lock(descriptor)
+'''
+            second = subprocess.run([sys.executable, "-B", "-c", driver, str(root), str(p), str(q)],
+                                    cwd=root, capture_output=True, text=True, check=False)
+            parent = q / "99-output-ztp/current-release.json"
+            self.assertEqual("independent-Q-parent", json.loads(parent.read_bytes())["release_id"])
+            self.assertEqual(mixed, (common.lstat().st_ino, os.readlink(common), q_only.lstat().st_ino if q_only.is_symlink() else None,
+                                    os.readlink(q_only) if q_only.is_symlink() else None, manifest.lstat().st_ino,
+                                    manifest.read_bytes(), journal.read_bytes()),
+                             "legacy API must not roll P back over a pending WAL/visible Q parent")
+            self.assertEqual(7, second.returncode, second.stdout + second.stderr)
+            self.assertIn("pending setup switch WAL:", second.stdout + second.stderr)
+            self.assertFalse(os.path.lexists(p_only))
+            self.assertFalse((root / "service-started").exists())
+
     def test_real_setup_q_manifest_commit_cold_recovers_p_and_original_logs(self):
         """Q manifest publication and successful SETUP must retain P recovery bytes."""
         for death_at_manifest in (True, False):

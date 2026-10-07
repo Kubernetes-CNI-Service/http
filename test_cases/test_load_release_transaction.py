@@ -7702,6 +7702,60 @@ os.kill(os.getpid(), signal.SIGKILL)
         self.assertTrue(journal.is_file())
         backend.start.assert_not_called()
 
+    def _prepare_legacy_setup_restore_with_wal(self):
+        state = self._prepare_cross_project_setup_crash()
+        old, new, common, _old_only, new_only, target, new_target, manifest, _payload, _links, journal, descriptor, backend = state
+        snapshot = LOAD.snapshot_active_setup_state(expected_project=old)
+        self._write_setup_manifest(new, {common: target, new_only: new_target})
+        return state, snapshot
+
+    def test_legacy_setup_restore_cannot_bypass_existing_wal(self):
+        state, snapshot = self._prepare_legacy_setup_restore_with_wal()
+        _old, new, common, _old_only, new_only, _target, _new_target, manifest, _payload, _links, journal, descriptor, backend = state
+        before = (common.lstat().st_ino, os.readlink(common), new_only.lstat().st_ino,
+                  os.readlink(new_only), manifest.lstat().st_ino, manifest.read_bytes(), journal.read_bytes())
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "_atomic_restore_setup_link", wraps=LOAD._atomic_restore_setup_link) as restore:
+            with self.assertRaises(LOAD.LoadError):
+                LOAD.restore_active_setup_state(snapshot, current_project=new,
+                    deployment_lock_descriptor=descriptor, services_quiesced=True, runtime_backend=backend)
+            restore.assert_not_called()
+        self.assertEqual(before, (common.lstat().st_ino, os.readlink(common), new_only.lstat().st_ino,
+                                 os.readlink(new_only), manifest.lstat().st_ino, manifest.read_bytes(), journal.read_bytes()))
+        backend.start.assert_not_called()
+
+    def test_legacy_setup_restore_holds_wal_arriving_at_link_stage(self):
+        state, snapshot = self._prepare_legacy_setup_restore_with_wal()
+        _old, new, common, _old_only, new_only, _target, _new_target, manifest, _payload, _links, journal, descriptor, backend = state
+        wal_bytes = journal.read_bytes()
+        journal.unlink()  # Only this fixture's initial WAL; model a legacy entry without one.
+        before = (common.lstat().st_ino, os.readlink(common), new_only.lstat().st_ino,
+                  os.readlink(new_only), manifest.lstat().st_ino, manifest.read_bytes())
+        original_symlink = os.symlink
+        injected = []
+        def late_wal(source, destination, *args, **kwargs):
+            result = original_symlink(source, destination, *args, **kwargs)
+            if Path(destination).name.startswith(f".{common.name}.setup-rollback.") and not injected:
+                journal.write_bytes(wal_bytes)
+                journal.chmod(0o600)
+                injected.append(journal.lstat().st_ino)
+            return result
+        caught = None
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(os, "symlink", side_effect=late_wal):
+            try:
+                LOAD.restore_active_setup_state(snapshot, current_project=new,
+                    deployment_lock_descriptor=descriptor, services_quiesced=True, runtime_backend=backend)
+            except LOAD.LoadError as exc:
+                caught = exc
+        self.assertEqual(1, len(injected), "first P link stage was not reached")
+        self.assertIsInstance(caught, LOAD.LoadError)
+        self.assertEqual(before, (common.lstat().st_ino, os.readlink(common), new_only.lstat().st_ino,
+                                 os.readlink(new_only), manifest.lstat().st_ino, manifest.read_bytes()))
+        self.assertEqual(injected[0], journal.lstat().st_ino)
+        self.assertEqual(wal_bytes, journal.read_bytes())
+        backend.start.assert_not_called()
+
     def test_cross_project_setup_state_restores_old_links_and_removes_target_only(self) -> None:
         old_project = self.project.resolve()
         new_project = self.root / "DAY0-Prepare/new"

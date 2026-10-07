@@ -205,6 +205,15 @@ LOAD→SETUP workflow 覆盖这两类注入，既有同步失败与正常冷恢�
 在发布回调期间由原 FD/字节复核，不被当作外来残留。direct 与真实 LOAD→SETUP 强杀→
 全新 LOAD 覆盖首写前零恢复写入及 WAL/未知对象保留；不提供自动清除残留的权限。
 
+旧 link-only `restore_active_setup_state` 也不得旁路 pending WAL：入口拒绝所有占用
+WAL 名称的对象，链接暂存/replace、Q-only 删除、manifest 暂存/replace 和成功出口
+复核 WAL 缺席、持锁/明确停服及 manifest 父身份。回调不将自有 manifest stage 误判
+为孤儿；既有无 WAL 正例仍须通过。direct 覆盖既存及链接暂存期间晚到 WAL，真实
+LOAD→SETUP→parent primitive→旧 API 负例保留 Q 与原凭据。该 workflow 使用私有
+合成 P2P 依赖和最小 schema1 parent，不证明完整 B 生成/健康收口或 root 入口。
+复核不是原子 compare-and-write；晚到证据前已发生的自有写入不得称零写入或完整恢复。
+不能删除 WAL 后放行，也不授予旧 A 激活权。
+
 Q 已有的 ETH/NVOS `latest` 软链接须在首次共享写入前单独记录原始链接文字、
 旧/新真实完成目录和父目录身份，不混入 P manifest，也不当作原本缺席的 Q-only 名称。
 SETUP 通过 Q 的物理父目录写入，稳定共享入口仍保留原有相对链接合同；替换后同步父目录。
