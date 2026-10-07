@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import ExitStack, redirect_stdout
 import hashlib
+import errno
 import io
 from itertools import product
 import json
@@ -180,6 +181,117 @@ class Req19InfraLogContractTests(unittest.TestCase):
             self.assertTrue(logs.is_symlink())
             for name, data in payloads.items():
                 self.assertEqual(data, (a / "99-output-infra" / name).read_bytes())
+
+    def test_cross_device_migration_rejected_before_receipt_or_transfer(self):
+        # Device identities are injected, not a claim of physical mount testing.
+        for boundary in ("empty-root", "destination-root", "source-parent", "source-child",
+                         "destination-child", "source-file"):
+            with self.subTest(boundary=boundary), tempfile.TemporaryDirectory(prefix="req19-device-") as tmp:
+                root, logs, a, _ = self.fixture(tmp)
+                logs.mkdir()
+                destination = a / "99-output-infra"
+                payloads = {} if boundary == "empty-root" else {
+                    "first.log": b"independent first log\n",
+                    "clients/second.log": b"independent nested log\n",
+                }
+                for name, payload in payloads.items():
+                    (logs / name).parent.mkdir(parents=True, exist_ok=True)
+                    (logs / name).write_bytes(payload)
+                if boundary == "destination-child":
+                    (destination / "clients").mkdir()
+                foreign_path = {
+                    "empty-root": destination,
+                    "destination-root": destination,
+                    "source-parent": logs.parent,
+                    "source-child": logs / "clients",
+                    "destination-child": destination / "clients",
+                    "source-file": logs / "clients/second.log",
+                }[boundary]
+                original_lstat = os.lstat
+                source_identity = (logs.lstat().st_dev, logs.lstat().st_ino)
+                source_inodes = {name: (logs / name).lstat().st_ino for name in payloads}
+
+                def different_device(path, *args, **kwargs):
+                    info = original_lstat(path, *args, **kwargs)
+                    if os.path.abspath(os.fspath(path)) == str(foreign_path):
+                        values = list(info)
+                        values[2] = source_identity[0] + 100000
+                        return os.stat_result(values)
+                    return info
+
+                with mock.patch.object(SETUP.os, "lstat", side_effect=different_device), \
+                        mock.patch.object(SETUP.os, "link", wraps=os.link) as transfer, \
+                        mock.patch.object(SETUP, "_publish_infra_log_receipt", wraps=SETUP._publish_infra_log_receipt) as publish, \
+                        mock.patch.object(SETUP, "_rename_infra_log_dir_noreplace", wraps=SETUP._rename_infra_log_dir_noreplace) as rename:
+                    with self.assertRaisesRegex(OSError, "同文件系统|跨设备") as rejected:
+                        self.bind(root, a)
+                    self.assertEqual(errno.EXDEV, rejected.exception.errno)
+                    transfer.assert_not_called()
+                    publish.assert_not_called()
+                    rename.assert_not_called()
+                self.assertFalse(logs.is_symlink())
+                self.assertEqual(source_identity, (logs.lstat().st_dev, logs.lstat().st_ino))
+                for name, payload in payloads.items():
+                    self.assertEqual(payload, (logs / name).read_bytes())
+                    self.assertEqual(source_inodes[name], (logs / name).lstat().st_ino)
+                    self.assertFalse(os.path.lexists(destination / name))
+                self.assertFalse(os.path.lexists(root / "infra/.logs-migration.json"))
+                self.assertFalse(os.path.lexists(destination / ".logs-migration-source"))
+
+    def test_cross_device_retry_preserves_existing_receipt_and_partial_copy(self):
+        with tempfile.TemporaryDirectory(prefix="req19-device-retry-") as tmp:
+            root, logs, a, _ = self.fixture(tmp)
+            logs.mkdir()
+            payloads = {"first.log": b"original first\n", "second.log": b"original second\n"}
+            for name, payload in payloads.items():
+                (logs / name).write_bytes(payload)
+            destination = a / "99-output-infra"
+            original_link = os.link
+
+            def interrupt_second(source, target, *args, **kwargs):
+                if Path(source).name == "second.log":
+                    raise OSError("independent transfer interruption")
+                return original_link(source, target, *args, **kwargs)
+
+            with mock.patch.object(SETUP.os, "link", side_effect=interrupt_second):
+                with self.assertRaisesRegex(OSError, "independent transfer interruption"):
+                    self.bind(root, a)
+            receipt = self.assert_recovery_receipt(root, logs, a, payloads)
+            receipt_bytes, receipt_inode = receipt.read_bytes(), receipt.lstat().st_ino
+            copied = destination / "first.log"
+            copied_inode = copied.lstat().st_ino
+            source_inode = logs.lstat().st_ino
+            original_lstat = os.lstat
+
+            def different_device(path, *args, **kwargs):
+                info = original_lstat(path, *args, **kwargs)
+                if os.path.abspath(os.fspath(path)) == str(destination):
+                    values = list(info)
+                    values[2] = original_lstat(logs).st_dev + 100000
+                    return os.stat_result(values)
+                return info
+
+            with mock.patch.object(SETUP.os, "lstat", side_effect=different_device), \
+                    mock.patch.object(SETUP.os, "link", wraps=original_link) as transfer:
+                with self.assertRaisesRegex(OSError, "同文件系统|跨设备") as rejected:
+                    self.bind(root, a)
+                self.assertEqual(errno.EXDEV, rejected.exception.errno)
+                transfer.assert_not_called()
+            self.assertEqual(receipt_bytes, receipt.read_bytes())
+            self.assertEqual(receipt_inode, receipt.lstat().st_ino)
+            self.assertEqual(source_inode, logs.lstat().st_ino)
+            self.assertFalse(logs.is_symlink())
+            self.assertEqual(copied_inode, copied.lstat().st_ino)
+            self.assertEqual(payloads["first.log"], copied.read_bytes())
+            self.assertFalse(os.path.lexists(destination / "second.log"))
+            for name, payload in payloads.items():
+                self.assertEqual(payload, (logs / name).read_bytes())
+            # Returning to the supported topology resumes the original contract.
+            self.bind(root, a)
+            self.assertTrue(logs.is_symlink())
+            self.assertFalse(os.path.lexists(receipt))
+            for name, payload in payloads.items():
+                self.assertEqual(payload, (destination / name).read_bytes())
 
     def test_backup_name_collision_moves_zero_source_bytes(self):
         for variant in ("file", "directory", "symlink"):
@@ -1097,6 +1209,18 @@ class Req19RealEnvironmentDocumentationTests(unittest.TestCase):
         ):
             with self.subTest(expected=expected):
                 self.assertIn(expected, case)
+
+    def test_owner_same_filesystem_scope_is_explicit_without_claiming_real_run(self):
+        case = self.case()
+        for expected in ("2026-10-07", "限定同文件系统", "跨设备明确拒绝",
+                         "凭据发布", "首次转移", "嵌套", "NOT RUN"):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, case)
+        manual = (ROOT / "docs/operations/README.md").read_text(encoding="utf-8")
+        for expected in ("99-output-infra", "仅支持同文件系统", "EXDEV",
+                         "首次转移", "unassigned", "log.owner.project"):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, manual)
 
 
 if __name__ == "__main__":

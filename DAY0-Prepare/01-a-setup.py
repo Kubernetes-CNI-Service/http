@@ -3324,6 +3324,30 @@ OUTPUT_DIRS = [
 ]
 
 
+def _preflight_infra_log_filesystems(source, destination):
+    """Migration is supported only within one filesystem, including subtrees."""
+    source_info = os.lstat(source)
+    device = source_info.st_dev
+    for root in (source, os.path.dirname(source), destination):
+        info = os.lstat(root)
+        if not stat.S_ISDIR(info.st_mode):
+            raise ValueError(f"日志迁移路径必须是真实目录：{root}")
+        if info.st_dev != device:
+            raise OSError(errno.EXDEV, "日志迁移仅支持同文件系统，拒绝跨设备", root)
+    pending = [source, destination]
+    while pending:
+        directory = pending.pop()
+        with os.scandir(directory) as children:
+            for item in children:
+                info = os.lstat(item.path)
+                if info.st_dev != device:
+                    raise OSError(errno.EXDEV, "日志迁移仅支持同文件系统，拒绝跨设备", item.path)
+                # Never traverse links; the existing object/collision preflight
+                # rejects unsafe entries before publishing a recovery receipt.
+                if stat.S_ISDIR(info.st_mode):
+                    pending.append(item.path)
+
+
 def _preflight_infra_log_tree(source, destination, receipt=None):
     """Prove the entire real source tree is safe before any transfer occurs."""
     pending = [source]
@@ -3575,6 +3599,7 @@ def _restore_pending_infra_log_backup(source, destination):
 def _migrate_infra_log_tree(source, destination, relative_target):
     """Copy by no-clobber hardlink, verify, retain the original dir to commit."""
     global _INFRA_LOG_MIGRATION
+    _preflight_infra_log_filesystems(source, destination)
     backup = _infra_log_backup_path(destination)
     if os.path.lexists(backup):
         raise ValueError("日志迁移备份位置冲突")

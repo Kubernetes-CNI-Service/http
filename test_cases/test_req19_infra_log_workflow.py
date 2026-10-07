@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import ExitStack, redirect_stdout
 import fcntl
+import errno
 import io
 import os
 from pathlib import Path
@@ -135,6 +136,50 @@ class Req19InfraLogWorkflowTests(unittest.TestCase):
                  "target": str((a / "99-output-infra").resolve())},
                 observed["infra_log_ownership"],
             )
+
+    def test_cross_device_setup_rejection_preserves_real_preproject_writers_and_probe(self):
+        with tempfile.TemporaryDirectory(prefix="req19-device-flow-") as tmp:
+            root, infra, a, _ = self.fixture(tmp)
+            logs = infra / "logs"
+            logs.mkdir()
+            prior = logs / "infra-setup-20260924_010203.log"
+            prior.write_bytes(b"independent unassigned log\n")
+            destination = a / "99-output-infra"
+            original_lstat = os.lstat
+            original_inode = logs.lstat().st_ino
+
+            def different_device(path, *args, **kwargs):
+                info = original_lstat(path, *args, **kwargs)
+                if os.path.abspath(os.fspath(path)) == str(destination):
+                    values = list(info)
+                    values[2] = original_lstat(logs).st_dev + 100000
+                    return os.stat_result(values)
+                return info
+
+            with mock.patch.object(SETUP.os, "lstat", side_effect=different_device):
+                with self.assertRaisesRegex(OSError, "同文件系统|跨设备") as rejected:
+                    self.setup_project(root, a)
+                self.assertEqual(errno.EXDEV, rejected.exception.errno)
+            self.assertFalse(logs.is_symlink())
+            self.assertEqual(original_inode, logs.lstat().st_ino)
+            self.assertEqual(b"independent unassigned log\n", prior.read_bytes())
+            self.assertFalse(os.path.lexists(infra / ".logs-migration.json"))
+            self.assertEqual([], list(destination.iterdir()))
+            with mock.patch.object(DEPLOY, "SCRIPT_DIR", infra), redirect_stdout(io.StringIO()):
+                self.assertEqual(0, DEPLOY.run_with_log("deploy_infra", lambda: 0))
+            self.assertEqual(1, len(list(logs.glob("deploy_infra-*.log"))))
+            probe = hermetic_probe(infra, Path(tmp))
+            self.assertIn(f"log.file=logs/{prior.name}", probe)
+            with mock.patch.object(CHECK, "SCRIPT_DIR", infra), mock.patch.object(
+                CHECK.subprocess, "run",
+                return_value=subprocess.CompletedProcess(["bash", "-s"], 0, probe, ""),
+            ), redirect_stdout(io.StringIO()):
+                observed = CHECK.collect_local(Path(tmp) / "collected")
+            self.assertEqual(
+                {"kind": "unassigned", "project": None, "target": str(logs.resolve())},
+                observed["infra_log_ownership"],
+            )
+            self.assertEqual([], list(destination.iterdir()))
 
     def test_real_probe_follows_managed_link_but_not_foreign_link(self):
         with tempfile.TemporaryDirectory(prefix="req19-probe-") as tmp:
