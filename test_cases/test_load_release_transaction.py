@@ -2441,6 +2441,50 @@ class ReleaseTransactionTests(unittest.TestCase):
         self.assertFalse(os.path.lexists(receipts / generation.name))
         self.assertEqual([], list(receipts.iterdir()))
 
+    def test_runtime_receipt_file_preserves_foreign_stage_before_publish_or_cleanup(self):
+        for kind in ("inode", "bytes", "hold"):
+            with self.subTest(kind=kind):
+                parent = self.root / f"independent-runtime-stage-{kind}"
+                parent.mkdir()
+                target = parent / "runtime.conf"
+                target.write_bytes(b"independent partial B runtime\n")
+                before = (target.lstat().st_ino, target.read_bytes())
+                payload = b"independent frozen A runtime\n"
+                record = {"state": "file", "mode": 0o640,
+                          "sha256": hashlib.sha256(payload).hexdigest()}
+                sync, injected = os.fsync, []
+                held = parent / "independent-held-stage"
+                def foreign_stage(fd):
+                    result = sync(fd)
+                    info = os.fstat(fd)
+                    if not injected and stat.S_ISREG(info.st_mode):
+                        for stage in parent.glob(f".{target.name}.rollback-*"):
+                            if stage.lstat().st_ino == info.st_ino:
+                                if kind != "bytes":
+                                    stage.rename(held)
+                                stage.write_bytes(b"independent foreign stage evidence\n")
+                                stage.chmod(0o640)
+                                injected.append((stage, stage.lstat().st_ino))
+                    return result
+                def authority():
+                    if kind == "hold" and injected:
+                        raise LOAD.LoadError("independent authority HOLD after foreign stage")
+                caught = None
+                with mock.patch.object(os, "fsync", side_effect=foreign_stage):
+                    try:
+                        LOAD._restore_receipt_file(target, record, payload, require_authority=authority)
+                    except LOAD.LoadError as exc:
+                        caught = exc
+                self.assertEqual(1, len(injected), "runtime stage injection boundary not reached")
+                self.assertIsInstance(caught, LOAD.LoadError, "foreign runtime stage must HOLD")
+                self.assertEqual(before, (target.lstat().st_ino, target.read_bytes()))
+                stage, owner = injected[0]
+                self.assertTrue(os.path.lexists(stage), "cleanup consumed foreign runtime stage")
+                self.assertEqual(owner, stage.lstat().st_ino)
+                self.assertEqual(b"independent foreign stage evidence\n", stage.read_bytes())
+                if kind != "bytes":
+                    self.assertEqual(payload, held.read_bytes())
+
     def test_runtime_receipt_restore_syncs_mode_and_parent_before_return(self) -> None:
         target = self.root / "runtime-restore.pub"
         payload = b"independent A runtime bytes\n"

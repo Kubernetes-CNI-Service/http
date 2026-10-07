@@ -5660,22 +5660,58 @@ def _restore_receipt_file(
         return
     if payload is None or hashlib.sha256(payload).hexdigest() != record["sha256"]:
         raise LoadError("rollback receipt payload changed before restore")
-    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.rollback-", dir=path.parent)
+    parent_identity = _setup_switch_link_parent_identity(path)
+    descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.rollback-", dir=path.parent)
+    temporary = Path(name)
+    held_descriptor = -1
+    staged_identity = None
+    fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink",
+              "st_size", "st_mtime_ns", "st_ctime_ns")
+
+    def require_owned_stage() -> None:
+        try:
+            named, held = temporary.lstat(), os.fstat(held_descriptor)
+            if (staged_identity is None
+                    or parent_identity != _setup_switch_link_parent_identity(path)
+                    or any(getattr(staged_identity, field) != getattr(named, field)
+                           or getattr(staged_identity, field) != getattr(held, field) for field in fields)
+                    or _read_rollback_regular(temporary) != (payload, int(record["mode"]))):
+                raise LoadError("runtime restore stage is not the held candidate; HOLD")
+            after = temporary.lstat()
+            if any(getattr(staged_identity, field) != getattr(after, field) for field in fields):
+                raise LoadError("runtime restore stage changed during inspection; HOLD")
+        except (OSError, ValueError, RuntimeError) as exc:
+            raise LoadError(f"runtime restore stage inspection failed; HOLD: {exc}") from exc
+
     try:
         with os.fdopen(descriptor, "wb") as stream:
+            held_descriptor = os.dup(stream.fileno())
             stream.write(payload)
             os.fchmod(stream.fileno(), int(record["mode"]))
             stream.flush()
+            staged_identity = os.fstat(held_descriptor)
             os.fsync(stream.fileno())
         if os.path.lexists(path) and path.is_dir() and not path.is_symlink():
             raise LoadError(f"rollback target became a directory: {path}")
         if require_authority is not None:
             require_authority()
+        require_owned_stage()
         os.replace(temporary, path)
         _fsync_parent_directory(path.parent)
     finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
+        try:
+            if os.path.lexists(temporary):
+                try:
+                    require_owned_stage()
+                except LoadError:
+                    # Unknown or incompletely captured stages are incident
+                    # evidence, not ours to remove by generated name.
+                    pass
+                else:
+                    temporary.unlink()
+        finally:
+            if held_descriptor >= 0:
+                os.close(held_descriptor)
 
 
 def _verify_rollback_authorities(

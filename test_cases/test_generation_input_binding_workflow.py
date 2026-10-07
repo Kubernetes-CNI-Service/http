@@ -516,6 +516,11 @@ finally:
     def test_real_setup_death_disk_only_a_runtime_missing_latest_sync_retry_retains_wal(self):
         self._assert_real_persisted_a_runtime_switch(False, late_authority="latest-sync")
 
+    def test_real_setup_death_runtime_file_restore_preserves_foreign_stage(self):
+        for kind in ("inode", "bytes", "hold"):
+            with self.subTest(kind=kind):
+                self._assert_real_persisted_a_runtime_switch(False, late_authority="file-stage-" + kind)
+
     def _assert_real_persisted_a_runtime_switch(self, replace_a_receipt, *, late_authority=None):
         fixture = RELEASE_FIXTURE.ReleaseTransactionTests()
         fixture.setUp()
@@ -594,6 +599,75 @@ os.kill(os.getpid(), signal.SIGKILL)
             self.assertEqual(-9, first.returncode, first.stdout + first.stderr)
             evidence = journal.read_bytes()
             mixed = os.readlink(common)
+            if late_authority and late_authority.startswith("file-stage-"):
+                recovery = r'''
+import importlib.util, json, os, stat, sys
+from pathlib import Path
+from types import SimpleNamespace
+root, kind = Path(sys.argv[1]), sys.argv[2]
+spec = importlib.util.spec_from_file_location('foreign_runtime_stage_load', root / 'DAY0-Prepare/11-load.py')
+load = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = load
+spec.loader.exec_module(load)
+load.active_managed_services = lambda *args, **kwargs: ()
+target, journal = root / 'ztp/ztp-bootstrap_oob.sh', root / 'ztp/.setup-switch-journal.json'
+sync, injected = os.fsync, []
+def foreign_stage(fd):
+    result = sync(fd)
+    info = os.fstat(fd)
+    if not injected and stat.S_ISREG(info.st_mode):
+        for stage in target.parent.glob('.' + target.name + '.rollback-*'):
+            if stage.lstat().st_ino == info.st_ino:
+                held = root / 'held-original-runtime-stage'
+                if kind != 'bytes':
+                    stage.rename(held)
+                stage.write_bytes(b'independent foreign runtime stage\n')
+                stage.chmod(0o640)
+                if kind == 'hold':
+                    original = journal.read_bytes()
+                    journal.rename(root / 'held-original-runtime-stage-wal')
+                    journal.write_bytes(original)
+                    journal.chmod(0o600)
+                injected.append(True)
+                (root / 'runtime-stage-injection.json').write_text(json.dumps({
+                    'path': str(stage), 'ino': stage.lstat().st_ino, 'wal_ino': journal.lstat().st_ino}))
+    return result
+os.fsync = foreign_stage
+fd = load.acquire_deployment_lock(exclusive=True)
+try:
+    try:
+        load.recover_setup_switch_journal(journal, deployment_lock_descriptor=fd,
+            services_quiesced=True, runtime_backend=SimpleNamespace(name='supervisor'),
+            restore_runtime_from_wal=True)
+    except load.LoadError as exc:
+        assert injected == [True], str(exc)
+        print('EXPECTED FOREIGN RUNTIME STAGE HOLD:', exc)
+        raise SystemExit(7)
+finally:
+    load.release_deployment_lock(fd)
+'''
+                target = root / "ztp/ztp-bootstrap_oob.sh"
+                target_before = (target.lstat().st_ino, target.read_bytes())
+                kind = late_authority.removeprefix("file-stage-")
+                held = subprocess.run([sys.executable, "-B", "-c", recovery, str(root), kind],
+                    capture_output=True, text=True, check=False, timeout=30)
+                marker = json.loads((root / "runtime-stage-injection.json").read_text())
+                self.assertEqual(7, held.returncode, held.stdout + held.stderr)
+                self.assertEqual(target_before, (target.lstat().st_ino, target.read_bytes()))
+                self.assertEqual(evidence, journal.read_bytes())
+                self.assertEqual(marker["wal_ino"], journal.lstat().st_ino)
+                stage = Path(marker["path"])
+                self.assertTrue(os.path.lexists(stage), "cold recovery cleaned a foreign runtime stage")
+                self.assertEqual(marker["ino"], stage.lstat().st_ino)
+                self.assertEqual(b"independent foreign runtime stage\n", stage.read_bytes())
+                if kind != "bytes":
+                    self.assertEqual(b"A oob bootstrap\n", (root / "held-original-runtime-stage").read_bytes())
+                if kind == "hold":
+                    self.assertEqual(evidence, (root / "held-original-runtime-stage-wal").read_bytes())
+                self.assertEqual(context.setup_state.manifest, state[7].read_bytes())
+                self.assertEqual(context.setup_state.links, {path: os.readlink(path) for path in context.setup_state.links})
+                self.assertFalse((root / "service-started").exists())
+                return
             if late_authority == "latest-sync":
                 recovery = """
 import importlib.util, json, os, sys

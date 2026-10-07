@@ -432,6 +432,12 @@ R22 P manifest 恢复同样须在持有的新文件 FD 上设置最终模式、�
 或磁盘 P/Q 检查，不以此声称完整写集、旧 A 激活或断电验收。
 
 R22 runtime 普通文件恢复须在最终模式及文件内容 fsync 后 replace，再 fsync 父目录；
+暂存文件还须持有创建时 FD，在最终 mode/完整字节 flush 后、fsync 前捕获完整元数据，
+发布前复核父目录、名称、持有 inode 和准确 payload/mode。换 inode、同 inode 改写或
+捕获不完整均 HOLD；失败清理只删除仍能证明自有的暂存，外来/未知对象包括悬空链接
+保留为事件证据。direct 与真实 SETUP 登记 Q 链接→强杀→新 LOAD 的 A runtime 冷恢复
+覆盖上述两种漂移和 WAL 换绑后错误清理，原同步失败及正常恢复继续执行。这不提供
+未知 runtime 孤儿暂存的后续冷收口、原子 compare-and-replace/unlink 或非合作写者免疫。
 missing 前像的 unlink 和已经缺席的重入也须同步父目录。同步失败不得报成功或退休 WAL。
 direct 覆盖实际模式/同步顺序和写入/删除同步异常；真实 LOAD→SETUP 强杀→新 LOAD
 workflow 使用实际 runtime 文件 writer 注入父目录同步错误，保留 WAL 后在新进程重入。
