@@ -24,7 +24,7 @@
       "root-entrypoint-workflow": "NOT COVERED (requires Linux EUID 0 private namespace)"
     },
     "schema_version": 1,
-    "snapshot_sha256": "e315ee0481237a9efc0f8a206e37cd7622bf6aa58c5fa1c9f4f42276f79527ba",
+    "snapshot_sha256": "e7f16be34fc744698dc96bb51c8350de01bd3f1729107684e2a92d47427b3b00",
     "validation_only": {
       "baseline_skipped_tests": [
         "test_cases.test_docker_management_ssh_key.DockerManagementSshKeyWorkflowTests.test_real_deploy_entrypoint_drives_locked_helper_then_11_load",
@@ -41,7 +41,7 @@
       "not_a_release_proof": true
     }
   },
-  "impact_manifest_sha256": "4670e9a03fd8943a31ff69f4b4c4d4d1778d7f5129e802c5e943dc8ada9c2304",
+  "impact_manifest_sha256": "0791867ce9054ae9c9c3fe1307fd2f6915845d8e6fae61cd7cfd72104b745a4b",
   "schema_version": 1,
   "scripts": {
     "DAY0-Prepare/01-a-setup.py": {
@@ -162,7 +162,7 @@
     },
     "monitor/collection_ib_producer.py": {
       "canonical": "monitor/collection_ib_producer.py",
-      "sha256": "ff37f8814f3aa0cd6766223a20ff3c3a10c7f4b4150ec7ab88ac923a93b20175"
+      "sha256": "a594a96b42ec2feb0caf00d1b4150c06914d90fa6caa787b4a719763037b129f"
     },
     "monitor/collection_v2_emitter.py": {
       "canonical": "monitor/collection_v2_emitter.py",
@@ -174,11 +174,11 @@
     },
     "monitor/generate-monitor-html.py": {
       "canonical": "monitor/generate-monitor-html.py",
-      "sha256": "e067a75cc2c53eb39b9b0def5bfd699350aab7331c0154ffba286fa5e807265a"
+      "sha256": "8123a474fba65cd64e0ae4616139740c543c5fc951654cec6b18d8ba997d874c"
     },
     "monitor/issue-tracker-control.cgi": {
       "canonical": "monitor/issue-tracker-control.cgi",
-      "sha256": "a1e424902f2a044069a1151f1e9f7a241906bbf29e647f1788506a5ec38f19a0"
+      "sha256": "7f5074d5f2ce7b3372050fee26a671d07cc80fbcc9b08dc3ff50b43748786609"
     },
     "monitor/issue_tracker_activity_source.py": {
       "canonical": "monitor/issue_tracker_activity_source.py",
@@ -188,21 +188,29 @@
       "canonical": "monitor/issue_tracker_admission.py",
       "sha256": "13544aa76eda0192abdea5140bdb873220d95301e1a6ef95e3f29b368844cee8"
     },
+    "monitor/issue_tracker_credential_shape.py": {
+      "canonical": "monitor/issue_tracker_credential_shape.py",
+      "sha256": "72b95d1e17058c18d088cce365c3de004192c6dff82b541f960d38f806ee3ecc"
+    },
     "monitor/issue_tracker_cycle_source.py": {
       "canonical": "monitor/issue_tracker_cycle_source.py",
-      "sha256": "1d8c37121f8aec6f1c6453dfd468a29d6ec0ef6d23a8b6314a75c32e432c147f"
+      "sha256": "8b6a663695dcbbd01e76a10aae470408d866a99031a2766bc7d0e6a88507dcac"
+    },
+    "monitor/issue_tracker_ib_per_key_source.py": {
+      "canonical": "monitor/issue_tracker_ib_per_key_source.py",
+      "sha256": "42558bdaefeef8a5feb2201be1eafa4835e448c56e216355af94be2c174ec30a"
     },
     "monitor/issue_tracker_ib_runtime.py": {
       "canonical": "monitor/issue_tracker_ib_runtime.py",
-      "sha256": "8a295645e3d057c5e1fd912cbf07986df9c51e0984ebed04c3a04b1c66525cd8"
+      "sha256": "bc15cc5c695b40f83bfefd7126e73370576d430ed0f23bd330e127c962e6535e"
     },
     "monitor/issue_tracker_k_chain.py": {
       "canonical": "monitor/issue_tracker_k_chain.py",
-      "sha256": "822667db5bc475fbc0f3c955fbc959e5e60482153c063d9e76e733e9a38add8c"
+      "sha256": "6abe3640be14280554d32246a993475567ee958ed3e4c1d4809050fbb84b1ded"
     },
     "monitor/issue_tracker_k_store.py": {
       "canonical": "monitor/issue_tracker_k_store.py",
-      "sha256": "c9c6c3cbc7e3ac3afdff15c55d773e42b518c774d385d422d1cf0da08cc2b914"
+      "sha256": "51cb378063ee636106356111d4ec74c3b2feca2e4f152326b78a38ed5af03917"
     },
     "monitor/issue_tracker_local_commit.py": {
       "canonical": "monitor/issue_tracker_local_commit.py",
@@ -218,7 +226,7 @@
     },
     "monitor/issue_tracker_local_workbook_commit.py": {
       "canonical": "monitor/issue_tracker_local_workbook_commit.py",
-      "sha256": "d0ff8709e84f9da3a0b43e677c3ae247ada35e1c2c46e171db2a12e16b7a4f15"
+      "sha256": "0e1c45ce6e2cd9ed462d361a4c3922da8860da3cce37df2d2604138bafa1f81c"
     },
     "monitor/issue_tracker_manifest.py": {
       "canonical": "monitor/issue_tracker_manifest.py",
@@ -226,7 +234,7 @@
     },
     "monitor/issue_tracker_manual_channel.py": {
       "canonical": "monitor/issue_tracker_manual_channel.py",
-      "sha256": "0a0e433880e8ad722d17b762a8fc2b2a33dbe565668913bd7c17003770fd03df"
+      "sha256": "935730503e4166512a777b2ac4a4c75d8c41dffb8bf280e317bae67b0bc55f48"
     },
     "monitor/issue_tracker_manual_listener.py": {
       "canonical": "monitor/issue_tracker_manual_listener.py",
@@ -234,19 +242,43 @@
     },
     "monitor/issue_tracker_manual_preview.py": {
       "canonical": "monitor/issue_tracker_manual_preview.py",
-      "sha256": "7282d0dbdb370089cc132dfc6cbff58301b849034ebe747116dd2c1d0bbfcca4"
+      "sha256": "ac9c6d06b3d25dc15609af69ba0884e9198397fad0cb4d4afa0ccc67954434fd"
+    },
+    "monitor/issue_tracker_online_cells.py": {
+      "canonical": "monitor/issue_tracker_online_cells.py",
+      "sha256": "7fe545202419f674212d22629a57ac7086a78a77df6f1f197c247c7c76cb3eaa"
+    },
+    "monitor/issue_tracker_online_nv_ids.py": {
+      "canonical": "monitor/issue_tracker_online_nv_ids.py",
+      "sha256": "6ffbeeb3dde85bdf455ee27ad8bc60e06259bfa837b4debc42ddf9202f0a972a"
+    },
+    "monitor/issue_tracker_online_rows.py": {
+      "canonical": "monitor/issue_tracker_online_rows.py",
+      "sha256": "cb2ba07d95115ea6786a5702a9c92087afd3d7c469fdc7185aef68784bb3493e"
+    },
+    "monitor/issue_tracker_online_target.py": {
+      "canonical": "monitor/issue_tracker_online_target.py",
+      "sha256": "aa4ed1c69a9a8cebe34108c6dd9ede8763478c1a1c0f94b810d11af00052a4a5"
+    },
+    "monitor/issue_tracker_per_key_source.py": {
+      "canonical": "monitor/issue_tracker_per_key_source.py",
+      "sha256": "a201c4dcccd05c2a6736309a8dc0ea692e2313ff794f984f7437eab12af78579"
     },
     "monitor/issue_tracker_publish_runtime.py": {
       "canonical": "monitor/issue_tracker_publish_runtime.py",
-      "sha256": "b0e872939513b8374f940436fd4106b7accd4919fd554cae80af0c42ff94c800"
+      "sha256": "ecc22087265e308b2c974df05a85f0964c294007a5b896ffc13d1e58dbe00cd8"
     },
     "monitor/issue_tracker_qualification.py": {
       "canonical": "monitor/issue_tracker_qualification.py",
       "sha256": "13b97a35b9f4c0bec554a9590e9f11437972de2bb299d242bd96efaec87a0256"
     },
+    "monitor/issue_tracker_receipt_snapshot.py": {
+      "canonical": "monitor/issue_tracker_receipt_snapshot.py",
+      "sha256": "2644802dc41611ce05e6824e11cbc8efa8ae08a0bf828e43685152b0679bd6ba"
+    },
     "monitor/issue_tracker_stage_l_consumer.py": {
       "canonical": "monitor/issue_tracker_stage_l_consumer.py",
-      "sha256": "a117a188fd9459d0d1a675922fd2cc5930da8d5b551dc0ade1a2f2f7f7f6c901"
+      "sha256": "13e1df34fbe713cb11f0bb05a469f8d9ba435da718f1dbe413009013980c15f8"
     },
     "monitor/issue_tracker_state_owner.py": {
       "canonical": "monitor/issue_tracker_state_owner.py",
@@ -256,9 +288,13 @@
       "canonical": "monitor/issue_tracker_switch_info_source.py",
       "sha256": "9d8d3d3c9085557d630625b61fba35e8f323c100322df556e3541a5423bbe531"
     },
+    "monitor/issue_tracker_switch_per_key_source.py": {
+      "canonical": "monitor/issue_tracker_switch_per_key_source.py",
+      "sha256": "e19c1f8a82b272bd7dfce55db06852a12bef9e374762ca61d64876d160706131"
+    },
     "monitor/issue_tracker_switch_runtime.py": {
       "canonical": "monitor/issue_tracker_switch_runtime.py",
-      "sha256": "9ba7aac83b08e8da9b6a530941c8590b2231a5a99d93c1bcd48770b90a76bc64"
+      "sha256": "b356c9101036af26b24cb631b70e4f4cc1c43bbae6d5fb53fbd4a0486615227a"
     },
     "monitor/issue_tracker_topology_derivation.py": {
       "canonical": "monitor/issue_tracker_topology_derivation.py",
@@ -286,7 +322,7 @@
     },
     "monitor/switch-collection-worker.py": {
       "canonical": "monitor/switch-collection-worker.py",
-      "sha256": "6ee7f27812e1ccccd5a19d75ab8598eb6a39da23760895835235d8d0ab345eb2"
+      "sha256": "352a72ab31a68a50160d3ae50c4a30b58826eff8c6e45699806ab57cb3ffd9a1"
     },
     "monitor/switch_collection_gate.py": {
       "canonical": "monitor/switch_collection_gate.py",
@@ -610,7 +646,7 @@
     },
     "tools/update-user-manual.py": {
       "canonical": "tools/update-user-manual.py",
-      "sha256": "b2128c6752b5ec7857ccad6a389fcd48d786fa4d16387f988b843e9ac7915efc"
+      "sha256": "5970abff744eff3533c0e42290579e74569bc3334fa8e171029552fb03e017d7"
     },
     "tools/ztp_service_runtime.py": {
       "canonical": "tools/ztp_service_runtime.py",
@@ -760,7 +796,7 @@
     "infra/infra-neutral.conf": "238bec3c9be34fc5a7bf097e36012133da4a30b90cabdf17d758796ecdab24f8",
     "requirements-container-top-level.lock": "3532f5208b462243bab779b01eb4deb21638ac05a9390c17ac997ba8d7f24998",
     "requirements-dev.txt": "2047cfeb6e7d7c3b02380624cd212528fb8416cf3e76dd924d2e2cba8567a50a",
-    "test_cases/REAL_ENVIRONMENT.md": "ee56983f07c9a78ca0dabc63ffecc6bba5ceb08336657b6cb8e5fb4a47e67e7f",
+    "test_cases/REAL_ENVIRONMENT.md": "5fe4a5d6893459935df0e054b117f7af46c467e1ea4fb6c4af82ab8d26815a6b",
     "test_cases/audit_public_tree.py": "3c9cefbabdb0eb7816201c67f5c98ac715b1cd8ea81720b6a24659bdaaebfc0f",
     "test_cases/module_loader.py": "ef1e9b44f0272209378788ed6682b8a6a68c95a76a6d545c001ddc4762471ecf",
     "test_cases/monitor_authority_root_warden.py": "f4ac61acc04af33168aa01ba295a74fe036202b9179ad65f10e9db87375a2c4c",
@@ -772,7 +808,7 @@
     "test_cases/splitter_profile_fixture.py": "7b0548d7d15b855278e21456d1ec2b667072d874ba68d527348f185f85d6d75f",
     "test_cases/user_manual_contract.json": "dc0bb8977038e9e326fa73c90fba1e992434752b89861a91d998c9d576eb6881",
     "tools/lldp-analyze-tool/04-lldp-device-aliases.json": "595529fac28098b504d67809026a59ecfa0345375ada9b16057ff069e5179250",
-    "user-manual.html": "6ec19204f2d1a8b055b30ad5035a37a419b6844cceac65ac8673ce68e73d77a4",
+    "user-manual.html": "ee76a4d9d5efbf7d81dc67dd5177c1754a2bcafb75ba933aa0f4fd7ea8e7bc11",
     "ztp/config/cumulus/ar_profile_custom.conf": "9316fe81c3238ef99076ee598abf303c955dc38343df4176ba22bc4c27729c1c",
     "ztp/config/cumulus/default.yaml": "6e3f950a5c964fabbac8106720920d3061e90bf94436f22b6ad049c64c1b5934",
     "ztp/config/cumulus/default_5.16.5.yaml": "6e3f950a5c964fabbac8106720920d3061e90bf94436f22b6ad049c64c1b5934",
@@ -829,7 +865,7 @@
     "test_cases.test_collection_cycle_worker_contract": "d0a078ebb93cfe1ce193226c666d5766860b2d8ed00ae8a301e4496dba442981",
     "test_cases.test_collection_ib_cycle_binding": "cf5152eb5d1a6195b093cf1fce882a5f9f964534743e94e63413ba49c009ad8e",
     "test_cases.test_collection_ib_cycle_binding_workflow": "7a65743ec9b86f18897583b295f94a6e395355072e3d7c46dd28d844b7ab6e2b",
-    "test_cases.test_collection_ib_producer": "6f6d7a8a35743265b3c7f70f573cf2ac34cb1951a08bc3d0b1fcbcda5a0e9b0f",
+    "test_cases.test_collection_ib_producer": "5f01b29e23554b45ed09e4bc6c2917f36fc8ce180580fee96f9d552e8511e5a2",
     "test_cases.test_collection_ib_producer_workflow": "2edea3eb4c126e0eab248f98d2e81ee8cca42955d1bb3a6c40ee6c98d0943b26",
     "test_cases.test_collection_v2_emitter_contract": "b8bdeeea46e8e6803af69fc27e78c7bc809d2b8b9251bf6d49d60d480081821e",
     "test_cases.test_collector_inventory_pubkey": "e7ba6ebe5f7e17446c2db9eaf0a91ebac09e93b5f35a2b3af340fe3369e1f791",
@@ -850,7 +886,7 @@
     "test_cases.test_docker_destructive_confirmation": "19d6611b10ee4e5683af0d64598875b806a9667dd622c2b8cd41c60db566ebe9",
     "test_cases.test_docker_destructive_confirmation_workflow": "b470ede5b50261700ab5bed68e5abe7c5b5caa4f296b6eac270672fdf21d5b54",
     "test_cases.test_docker_management_ssh_key": "deaf89b122463b8a97371f375830902e88e2caa7bca23fff432fa253a736de33",
-    "test_cases.test_documentation_catalog": "fb9eec445bd5ce3b9fb2dbbb1fb70081c725b65f36a2b6c32811efc544b58f3f",
+    "test_cases.test_documentation_catalog": "6fabd44d3b30c40867e81ac47cbe14db126b5c337e23a2992f25d18bb4f0bada",
     "test_cases.test_download_cli_contract": "ea3921e61b8b53251c232de0fae872e7104192ad7fa96f09ead4e8c565cdf18f",
     "test_cases.test_eth_activity_cycle_handoff_workflow": "679e7c02aebf05ed79a4101294da04f09ebceaa6377d9d34c07e357ebf60defe",
     "test_cases.test_eth_jump_duplicate_identity": "75a38d712fb2d2ffe6ed997c434727befbeeb6bf0fc0ab4fda4a3b3ce14d44f6",
@@ -886,42 +922,61 @@
     "test_cases.test_issue_tracker_activity_source_workflow": "cde15769c9fe44d08f8c132b0136e931301b0d5abb1b13e120bc7fdb4924aefe",
     "test_cases.test_issue_tracker_admission": "dcbec852c9337bd0ffb0f18bd7daf7be62f4ccba6afda1a7b183b08327650cb6",
     "test_cases.test_issue_tracker_cabling_projection": "9c1c1283e92ba510d301b326c8456c350f9ecbee36ab2f0b213f7f0591334a5e",
+    "test_cases.test_issue_tracker_credential_fd": "fd5026c2d7028c7e9c80636664d803b148da48f017f2d1fab8eb5f1a94bad44a",
+    "test_cases.test_issue_tracker_credential_shape": "77e0c6995fff81d1a0b569a83e709c384348348911b374e5c4ca2f361c35a106",
     "test_cases.test_issue_tracker_cycle_source": "ebcd03a167b835768a8fc280c8dc5bf38b7f91127fff46bc24694a23b80e6dad",
     "test_cases.test_issue_tracker_cycle_source_workflow": "321ebee054d464b3c6af434d94ca28d73da86395e2599a4cc2e7e4d60463c0d5",
-    "test_cases.test_issue_tracker_ib_runtime": "6a47be652cdda7776846f618e694d770d2c84379e32afa07acd577af44a31500",
+    "test_cases.test_issue_tracker_ib_per_key_source": "2fcb1eb21e779cbbc51bc302ef2ed5a4a84a8ac3c2b7d6267e2199384180ee02",
+    "test_cases.test_issue_tracker_ib_per_key_source_workflow": "ad0c3f31faffd804ba080a65e3d28e670f4483831eda5eee73202c09d6aa9d3f",
+    "test_cases.test_issue_tracker_ib_runtime": "165a6c0b8c836c83a13e850e0a5842a93d47a226831fa709689c795368e3a286",
     "test_cases.test_issue_tracker_ib_runtime_workflow": "0c9a9aff6179de68650569e53d6e12a707b3b833ab83f7365565e0e5ec0073c7",
     "test_cases.test_issue_tracker_k_chain": "a50e75b20c3cb239315821ab33d7fdd0a0f8e16fbfc13d41da066718ab774fd0",
     "test_cases.test_issue_tracker_k_chain_workflow": "642db1c918632e8b1110328459a9bc6568b0432e10fe8ba7189c2a3e27584e99",
-    "test_cases.test_issue_tracker_k_store": "3aa73dd161235b325c03fcbddc446f655cc785fa01f9ba8a26129cf8906a5742",
-    "test_cases.test_issue_tracker_k_store_workflow": "a5ed287315c8b918ea4822f215e1fda628c498cad6c1dc06a23008b54ea48c0c",
+    "test_cases.test_issue_tracker_k_store": "64fce5c81aa44a4136bed870212df9c147d2f9f2046998d7a79537871b1a4283",
+    "test_cases.test_issue_tracker_k_store_workflow": "2dc30f8acdc7d549129c1d6627798b8800e5c5f81e76118196773d283357fcea",
     "test_cases.test_issue_tracker_local_commit": "eddb26a4e6ed98116e7906e5b22d987e77e7eb73ea64982d105d9d2cd70b9579",
-    "test_cases.test_issue_tracker_local_commit_workflow": "0270611465d3991647c2c052549fb70835a86fb8d2f468d404f34f34f17c1162",
+    "test_cases.test_issue_tracker_local_commit_workflow": "6f217819968be44cda3d6ba0976aa50af700d93e02fffdb85843930218d73e0a",
     "test_cases.test_issue_tracker_local_recovery": "3ecfceb7de609ce69604c3ce1db95fb47194c52c6e2ac325bf22cd21376cf3fb",
     "test_cases.test_issue_tracker_local_recovery_workflow": "0b33301319a011b055685edd4e7510e6241ed5a8379d9e305c7523e468bf0baa",
     "test_cases.test_issue_tracker_local_workbook": "e6dde7e3cb668b2dd5abc18bf651c35277a9422165fc558a2ba373c4787eb559",
-    "test_cases.test_issue_tracker_local_workbook_commit": "e79ab7ce7a6ec4d87020450240536a4c7ecf5366228753fb6a645ccb74c54883",
+    "test_cases.test_issue_tracker_local_workbook_commit": "326afe367790dd35fa92ed2107cce1e141a920b85c5a65477f37ebc3e4d8134a",
     "test_cases.test_issue_tracker_local_workbook_commit_workflow": "5cc72887babd4ec8719d8bacf40ad2f248f1fd26b1fe484bfe0c19c634fc0b99",
     "test_cases.test_issue_tracker_local_workbook_workflow": "05d66eae2ba7c1ae7716cb49ffdcf5812df534af9d5f58f51a6467eb13df8165",
     "test_cases.test_issue_tracker_manifest": "8c99d36d2f42bb72f57e9e00e986cc7268af6f89cf5a4786e4dc914ee4b91a08",
     "test_cases.test_issue_tracker_manifest_workflow": "2991c3171ac0e32ea74a77d6e50da9fe5cf4050e286faf35bd329e01a913cc02",
-    "test_cases.test_issue_tracker_manual_channel": "4c2b7da38a093e29bad41feeb7f273fabee557ef1693c37d1a4adecd720f9ea9",
+    "test_cases.test_issue_tracker_manual_channel": "d2d938cb9e66f329714bc4eef7b488dc90a0f98b715adfcbc7f7c0a758113551",
     "test_cases.test_issue_tracker_manual_channel_workflow": "dbeaf6dc41dfbffe2d7375eb01d04ff09815ae041ffded423c0f94eeab3ec693",
     "test_cases.test_issue_tracker_manual_listener": "406bb5163cc468b14e1349295d4d3a2ba1232f7171c98c6769e7718f416bbfd2",
     "test_cases.test_issue_tracker_manual_listener_workflow": "bb70f15eb2291b5717bbc1a9bb2e63381a7b5116804decad5189080028266673",
-    "test_cases.test_issue_tracker_manual_panel_workflow": "cfa5056e1e2274cb15f7d1b4e82ec3e4efd73b74809967dc853d2138483a05e2",
-    "test_cases.test_issue_tracker_manual_preview": "2e3fb5c70daaa06678a538541beaa552ad94852be5869ae742ec84b7bfb5cb4c",
+    "test_cases.test_issue_tracker_manual_panel_workflow": "8509f04a958013cf020e7456e54b3585403d554d9f769b562b33d9f30cddd130",
+    "test_cases.test_issue_tracker_manual_preview": "c6c82de3e90ca36cdd4ed3d2f14314c9c66f25ba8fba9c523b8c2bd030b10360",
     "test_cases.test_issue_tracker_manual_preview_workflow": "625c68eb265f2e91b695a19427039613399b70c2dfb1494db2c8a8e2ac9c5741",
-    "test_cases.test_issue_tracker_manual_ui": "7675c1325a761115079e6704c0db530d4c1829227eb823a363c0e564f0e2eabd",
-    "test_cases.test_issue_tracker_manual_ui_workflow": "2a505d73ed649b246830e50010452a79b69b1b9acce6807a1d2b567116d1dc2c",
-    "test_cases.test_issue_tracker_publish_runtime": "235df18058c0fb1bc11f3650e705f9e227140f9c8123840c8f1fcd13a08e07f0",
+    "test_cases.test_issue_tracker_manual_ui": "800af102af4d4f9c8590e2d46c1c04c8dffead09510dc1abf7e065706d137546",
+    "test_cases.test_issue_tracker_manual_ui_workflow": "de36ccfce52991b257b530cc9efe76ce132e2c89058e8d7387c0b9ff4d580299",
+    "test_cases.test_issue_tracker_online_cells": "895cf4542897b8eebe94d8d447bc5fd909e860b43bd2b0fe9b6d5c22b7bf276b",
+    "test_cases.test_issue_tracker_online_nv_ids": "16f5b28a41719280fefa8af2078abe174aed0174f3686a8e9b29cfa51aa593de",
+    "test_cases.test_issue_tracker_online_rows": "b75d59ce2709008f0388d3f035129f6f660644f17f5e8c35cdeb02648c992331",
+    "test_cases.test_issue_tracker_online_target": "6076605862b607890336c436254e82dc22ab747289d783f9530afd87f927fcaa",
+    "test_cases.test_issue_tracker_online_target_workflow": "5ab3ffb325d63ff519f89714217e9cc0c379b2d85859c9444275efcd50147526",
+    "test_cases.test_issue_tracker_per_key_source": "278739a4bc7b746feba3349808f0e547a2a9e56dc40bd474372b4de04239902d",
+    "test_cases.test_issue_tracker_per_key_source_workflow": "c9479d93ce66372eaa69600a2465a8aa06f96e58a31edf76427d31f7523d5cef",
+    "test_cases.test_issue_tracker_per_key_status_contract": "50d217f75787a20e3690ac5a1fab6008cb61c98d7b114691c3d476c1b7728079",
+    "test_cases.test_issue_tracker_per_key_status_contract_workflow": "b917844d777121bbee66384903c35d2a361bba0fd97982a0f113e3b0151e5595",
+    "test_cases.test_issue_tracker_publish_runtime": "3c20ac53834288e47d7a9ec84f06ab002073cfd0d28a2544cf75d970dc10d6ab",
     "test_cases.test_issue_tracker_publish_runtime_workflow": "a3ba0db234515f53e4a2d7d782c193d3c117e8f8c34940b96c324bfc581c05e8",
     "test_cases.test_issue_tracker_qualification": "1651dda3beb3ed56b24e8ab54b9f0601b179aa0313905031ac3199c100ba4d13",
+    "test_cases.test_issue_tracker_receipt_snapshot": "32cf3c027dd2e8c9766d23722f2cb36eb6f61388c58c2ac7b737e21096e8b20c",
+    "test_cases.test_issue_tracker_receipt_snapshot_workflow": "daaf3376a82169e5e50296e012bca2a5a9e12f09665fc58fe01637efddfdd23c",
     "test_cases.test_issue_tracker_stage_l_consumer": "d66913c54e4332935d622a73cd26e68a63ba93774e7332157b9a284feedb3eef",
-    "test_cases.test_issue_tracker_stage_l_consumer_workflow": "f6074a055d440287b6a6411ea26f0c5ea462362f6e9ddc2582a75a17ca8e1ff6",
+    "test_cases.test_issue_tracker_stage_l_consumer_workflow": "989a4279c6ef48cf000b0c93bc88ff26465ca89a7ec839546d2ca51623cb9327",
+    "test_cases.test_issue_tracker_stage_l_status_per_key_contract": "5c9a70addfdb6b7ff5a2b0e0bbd19fcfe17e3f7dd325a2f989c023368f503104",
+    "test_cases.test_issue_tracker_stage_l_status_per_key_contract_workflow": "953badc5971f12d3bce3ba0d77a44200cc00b0775641fa0e40d7a2c9f34d9e2a",
     "test_cases.test_issue_tracker_state_owner": "d8fed382af9c8b1c66049a39a34f3e150f972e7acd9e35cdb580f588b25d25f2",
     "test_cases.test_issue_tracker_state_owner_workflow": "85cbc5bcef96012ae69c2d118e4af3a64b23064ea34a2a83a1b3456a2d552c16",
     "test_cases.test_issue_tracker_switch_info_source": "81f1b399cb426360958682096b41c9d0b62e788f429fe3ae15b3199c08c00416",
     "test_cases.test_issue_tracker_switch_info_source_workflow": "c56651b7cfb2df4e92fb1f04b951f58e211cac1821a413eb80235f7cea71558b",
+    "test_cases.test_issue_tracker_switch_per_key_source": "817b526f1e7b60f21875fc95866cba11acf53d6bba911744b4de3b8a68294a4c",
+    "test_cases.test_issue_tracker_switch_per_key_source_workflow": "cdfd1d108cf46a943fb89f17775d3aab85e8eb65774505023feb944ed58c8a76",
     "test_cases.test_issue_tracker_switch_projection": "e445025b3db69ed4d5a347b63f611b1ca2e63f0c37fa2765047deb98b9eae1b1",
     "test_cases.test_issue_tracker_switch_runtime": "4b3823d515cbf2afbfea7505fdea98737d369b23d88540b700d2c385a0d6711b",
     "test_cases.test_issue_tracker_switch_runtime_workflow": "663d552dd2ddc2ad4aa632bf37c1987d4a6d7d2a94997a3df641c6d94d07a2e4",
