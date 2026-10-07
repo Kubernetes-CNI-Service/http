@@ -16,6 +16,8 @@ from typing import Optional
 import unittest
 from unittest import mock
 
+from test_cases.subprocess_timeout_evidence import capture_timeout_before_cleanup
+
 
 ROOT = Path(__file__).resolve().parents[1]
 TEMPLATE_PATH = ROOT / "ztp/templates/ztp-bootstrap.sh"
@@ -275,17 +277,22 @@ def run_bootstrap_fetch(
         "TEST_HOME": str(switch_home),
     }
     try:
-        result = subprocess.run(
-            ["bash", str(script)], text=True, capture_output=True,
-            check=False, env=env, timeout=15,
-        )
+        with capture_timeout_before_cleanup(expected_command=["bash", str(script)]):
+            result = subprocess.run(
+                ["bash", str(script)], text=True, capture_output=True,
+                check=False, env=env, timeout=15,
+            )
     except subprocess.TimeoutExpired as error:
+        process_evidence = getattr(error, "prekill_process_evidence", None)
         raise BootstrapFetchTimeout(error, {
             "events": _timeout_event_evidence(events),
             "stdout_tail": _partial_output_tail(error.output),
             "stderr_tail": _partial_output_tail(error.stderr),
             "response_codes": response_codes,
-            "descendant_state": "not captured by subprocess.run; unknown",
+            "descendant_state": (process_evidence.get("descendant_state", "unknown")
+                                 if isinstance(process_evidence, dict)
+                                 else "not captured by subprocess.run; unknown"),
+            "prekill_process": process_evidence,
         }) from error
     lines = events.read_text(encoding="utf-8").splitlines() if events.exists() else []
     return result, lines, state_root, switch_home
@@ -373,6 +380,22 @@ def default_mutations(events: list[str]) -> list[str]:
 
 
 class BootstrapFetchHarnessDiagnosticsTests(unittest.TestCase):
+    def test_timeout_retains_precleanup_snapshot_without_changing_original_failure(self):
+        snapshot = {"capture_phase": "before_cleanup", "pid": 7301, "returncode": None,
+                    "root": {"pid": 7301, "state": "S"}, "descendants": [], "stage": "unknown"}
+        original = subprocess.TimeoutExpired(["bash", "private-script"], 15, output=b"original partial output")
+        original.prekill_process_evidence = snapshot
+        with tempfile.TemporaryDirectory(prefix="bootstrap-precleanup-diagnostic-") as name:
+            with mock.patch.object(subprocess, "run", side_effect=original):
+                with self.assertRaises(subprocess.TimeoutExpired) as caught:
+                    run_bootstrap_fetch(Path(name), response_codes=("401",))
+        diagnostic = caught.exception.bootstrap_diagnostics
+        self.assertIn("prekill_process", diagnostic)
+        self.assertIs(snapshot, diagnostic["prekill_process"])
+        self.assertIs(original, caught.exception.__cause__)
+        self.assertIs(original.output, caught.exception.output)
+        self.assertEqual(15, caught.exception.timeout)
+
     def test_timeout_event_same_inode_aba_is_not_stable_evidence(self):
         with tempfile.TemporaryDirectory() as directory:
             events = Path(directory) / "events.log"

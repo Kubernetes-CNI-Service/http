@@ -176,6 +176,21 @@ full。失败、未知原因、日志缺失或中断仍保持无证明状态，�
    自动生成的 ledger 单独提交、干净树的 `--check --require-full` exit0 才算本地正式
    证明。局部回归和旧树证明不能代替它；本地 proof 不关闭独立 Linux/设备/断电见证卡。
 
+### 原超时子进程的杀前有界证据（仅诊断）
+
+bootstrap 15s 与 REQ19 私有 probe 10s 夹具在 `Popen.communicate()` 原异常边界，
+于 `subprocess.run()` 原 kill/reap 之前记录私有子进程是否已退出、PID、state/comm
+及仍可核父子关系的后代；不记录 argv/environment，也不查询已退出且可能复用的根 PID。
+观察预算 0.75s、最多16个进程，查询失败/超限明确 unknown/partial；不扩大原测试时限、
+不修改 argv/input/check/断言，不杀后代，不替代标准 run 清理。成功路径不执行进程查询。
+观察器异常不能覆盖原 TimeoutExpired；两夹具继续保留原 cmd、timeout、partial output
+和 cause。应用阶段与管道所有者不从进程状态反推，仍可为 unknown。
+
+新增 helper 只用于串行私有夹具的局部 Popen 上下文，已登记 tracked support、path rule
+及三个消费测试模块。新证据只适用于实际捕获它的那一次超时，不能补造历史故障现场；
+原 bootstrap/REQ19 原因未证实，正式 related/full 重跑闸门仍关闭。诊断增强不是实现修复、
+批准 ledger 或 full proof，不因局部 PASS 放行重跑。
+
 ### R22 Q comparison 原缺席目录与恢复中断候选
 
 真实 LOAD→SETUP 强杀的独立负例确认两处边界：暂存 mkdir 后尚无 WAL 行时，

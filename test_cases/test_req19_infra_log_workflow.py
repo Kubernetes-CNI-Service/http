@@ -18,6 +18,7 @@ import unittest
 from unittest import mock
 
 from test_cases.module_loader import load_script
+from test_cases.subprocess_timeout_evidence import capture_timeout_before_cleanup
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -40,10 +41,14 @@ class Req19ProbeTimeout(subprocess.TimeoutExpired):
             if isinstance(value, bytes):
                 return value[-2048:].decode("utf-8", errors="replace")
             return value[-2048:]
+        process_evidence = getattr(original, "prekill_process_evidence", None)
         self.req19_probe_diagnostics = {
             "stdout_tail": tail(original.output), "stderr_tail": tail(original.stderr),
             "stage": "unknown",
-            "descendant_state": "not captured by subprocess.run; unknown",
+            "descendant_state": (process_evidence.get("descendant_state", "unknown")
+                                 if isinstance(process_evidence, dict)
+                                 else "not captured by subprocess.run; unknown"),
+            "prekill_process": process_evidence,
         }
 
     def __str__(self):
@@ -69,10 +74,11 @@ def hermetic_probe(infra: Path, temporary: Path) -> str:
     env = os.environ.copy()
     env.update(INFRA_BASE=str(infra), PATH=f"{fake_bin}:{os.environ.get('PATH', '')}")
     try:
-        result = subprocess.run(
-            ["bash", "-s"], input=CHECK.remote_probe_script(), cwd=infra,
-            env=env, text=True, capture_output=True, check=True, timeout=10,
-        )
+        with capture_timeout_before_cleanup(expected_command=["bash", "-s"]):
+            result = subprocess.run(
+                ["bash", "-s"], input=CHECK.remote_probe_script(), cwd=infra,
+                env=env, text=True, capture_output=True, check=True, timeout=10,
+            )
     except subprocess.TimeoutExpired as error:
         raise Req19ProbeTimeout(error) from error
     if "public.status=not_run" not in result.stdout:
@@ -81,6 +87,25 @@ def hermetic_probe(infra: Path, temporary: Path) -> str:
 
 
 class Req19ProbeDiagnosticTests(unittest.TestCase):
+    def test_probe_timeout_retains_precleanup_snapshot_without_inventing_stage(self):
+        snapshot = {"capture_phase": "before_cleanup", "pid": 7301, "returncode": None,
+                    "root": {"pid": 7301, "state": "S"}, "descendants": [], "stage": "unknown"}
+        original = subprocess.TimeoutExpired(["bash", "-s"], 10, output=b"original partial output")
+        original.prekill_process_evidence = snapshot
+        with tempfile.TemporaryDirectory(prefix="req19-precleanup-diagnostic-") as tmp:
+            infra = Path(tmp) / "infra"
+            infra.mkdir()
+            with mock.patch.object(subprocess, "run", side_effect=original):
+                with self.assertRaises(subprocess.TimeoutExpired) as caught:
+                    hermetic_probe(infra, Path(tmp))
+        diagnostic = caught.exception.req19_probe_diagnostics
+        self.assertIn("prekill_process", diagnostic)
+        self.assertIs(snapshot, diagnostic["prekill_process"])
+        self.assertEqual("unknown", diagnostic["stage"])
+        self.assertIs(original, caught.exception.__cause__)
+        self.assertIs(original.output, caught.exception.output)
+        self.assertEqual(10, caught.exception.timeout)
+
     def test_probe_timeout_preserves_original_failure_and_partial_evidence(self):
         original = subprocess.TimeoutExpired(
             ["bash", "-s"], 10, output=b"private probe stdout\n",
