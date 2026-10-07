@@ -2104,6 +2104,12 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - 证据：精确 HEAD/tree/dirty、命令退出码、完整日志物理顺序与 END、前后 stat/inode/大小/SHA256、原策略白名单和单位全原像身份、真实 parent/file/dir barrier 顺序、共享 namespace、六次冷启动计数和实际发送对应关系。私有目标/数据不公开；单项、局部或意图计数 PASS 不计为普通 full proof 或真实发送证明。
 - 清理与风险：只清理经授权隔离副本与确证自有临时进程；不删除锁、journal、History/fence/预留，不解除 UNKNOWN，不重置计数。无法证明实际尝试边界时只读对账和可见停滞，六次耗尽保持 UNKNOWN。真实断电、Linux/容器 inode 与跨 store 收敛未执行，保持 NOT RUN。
 
+本地 `record_reserved_attempt_intent` 已接通原 enrollment → History 行预算 → actual
+metadata 永久 fence quota → Cabling 新增 NV 预留 → durable count → 全原像重核。
+缺原像不增加计数，计数后的失败保留 UNKNOWN，不回退、替换或修复；六个冷进程重开
+原预留，第七次 HOLD。它仍不授予发送许可，也不证明隐藏 PROJECT 配额、新鲜来源、
+FIFO、每次准入／真实单次 wire；部署与真实断电验收准确保持 NOT RUN。
+
 ## TC-REAL-REQ7-SPREADSHEET-OWNER-001 — 跨项目持久 OS 锁与继承 FD
 
 - Case ID：`TC-REAL-REQ7-SPREADSHEET-OWNER-001`；类型：native / integration；对应 C-6/C-14/C-19。状态：**NOT RUN / REAL_ENV REQUIRED**。涉及 `monitor/issue_tracker_spreadsheet_owner.py`、`monitor/issue_tracker_local_commit.py`、`monitor/issue_tracker_send_intent.py`；本地合成 root 元数据、原生 flock／独立进程／继承 FD 与实际 C-6/action journal 不证明部署身份或整个 REQ7。

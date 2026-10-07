@@ -11,7 +11,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-if len(sys.argv) > 1 and sys.argv[1] == '--owned-inspect':
+if len(sys.argv) > 1 and sys.argv[1] in ('--owned-inspect', '--owned-count'):
     sys.path.insert(0, sys.argv[3]); sys.path.insert(0, str(Path(sys.argv[3]) / 'tools'))
 from test_cases import test_req7_remote_history_match as matching
 from test_cases.test_req7_spreadsheet_owner import fixture, binding, TARGET
@@ -25,7 +25,12 @@ def load():
     if not SOURCE.is_file(): raise AssertionError('durable actual-unit G1 metadata reservation missing')
     spec = importlib.util.spec_from_file_location('monitor.issue_tracker_metadata_reservation', SOURCE)
     module = importlib.util.module_from_spec(spec); sys.modules[spec.name] = module
-    spec.loader.exec_module(module); return module
+    spec.loader.exec_module(module)
+    # Match normal canonical imports after the owned fixture reloads owner /
+    # global journal. Never weaken production token or class identity checks.
+    import monitor
+    monitor.issue_tracker_metadata_reservation = module
+    return module
 
 
 class Req7MetadataReservationDirectTests(unittest.TestCase):
@@ -40,6 +45,14 @@ class Req7MetadataReservationDirectTests(unittest.TestCase):
             plan or self.meta_plan, raw or self.raw)
     def inspect(self, token, **changes):
         return self.module.inspect_metadata_reservation(token, binding(), self.identity, changes.get('unit', self.unit))
+
+    def test_fixture_canonical_metadata_alias_and_original_owner_dependencies_match_current_imports(self):
+        import monitor
+        module = load()
+        self.assertIs(module, monitor.issue_tracker_metadata_reservation)
+        self.assertIs(module.global_journal, self.global_journal)
+        self.assertIs(module.ownership, self.owner)
+        self.assertIs(module.enrollment, self.enrollment)
 
     def test_real_nonce_pools_and_actual_permanent_fence_use_exact_budget_not_caller_reservation(self):
         self.module = load()
@@ -107,6 +120,72 @@ class Req7MetadataReservationDirectTests(unittest.TestCase):
             self.assertEqual(seen, self.inspect(token))
         self.assertEqual(raw, (self.store / 'METADATA-RAW').read_bytes())
 
+    def test_reserved_intent_requires_original_quota_before_count_and_keeps_all_six_identical(self):
+        self.module = load()
+        self.assertTrue(hasattr(self.global_journal, 'record_reserved_attempt_intent'),
+                        'actual reservation chain must dominate counted intent')
+        with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
+            self.initialize(token)
+            with self.assertRaises(self.global_journal.GlobalAttemptHold):
+                self.global_journal.record_reserved_attempt_intent(token, binding(), self.identity, self.unit)
+            self.assertEqual(0, self.global_journal.inspect_global_unit(token, binding(), self.unit).attempt_count)
+            quota = self.reserve(token); image = {p.name: p.read_bytes() for p in self.store.iterdir()}
+            for count in range(1, 7):
+                seen = self.global_journal.record_reserved_attempt_intent(token, binding(), self.identity, self.unit)
+                self.assertEqual((count, 'UNKNOWN', self.unit.action_digest, self.unit.wire_sha256),
+                                 (seen.attempt_count, seen.outcome, seen.action_digest, seen.wire_sha256))
+                self.assertEqual(quota, self.inspect(token))
+                self.assertEqual(image, {p.name: p.read_bytes() for p in self.store.iterdir()})
+                self.assertFalse(hasattr(seen, 'permit')); self.assertFalse(hasattr(seen, 'send_once'))
+            with self.assertRaises(self.global_journal.GlobalAttemptHold):
+                self.global_journal.record_reserved_attempt_intent(token, binding(), self.identity, self.unit)
+            self.assertEqual(6, self.global_journal.inspect_global_unit(token, binding(), self.unit).attempt_count)
+
+    def test_reserved_intent_refuses_each_drifted_original_image_without_increment_or_repair(self):
+        self.module = load()
+        self.assertTrue(hasattr(self.global_journal, 'record_reserved_attempt_intent'),
+                        'actual reservation chain must dominate counted intent')
+        with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
+            self.initialize(token); self.reserve(token)
+            parent = self.state
+            stores = {suffix: parent / (hashlib.sha256(TARGET.encode()).hexdigest() + suffix)
+                      for suffix in ('.enrollment', '.history', '.metadata')}
+            for suffix, name in (('.enrollment', 'NONCES'), ('.history', 'HISTORY-RAW'),
+                                 ('.metadata', 'RESERVATION'), ('.metadata', 'INITIALIZED')):
+                with self.subTest(suffix=suffix, image=name):
+                    path = stores[suffix] / name; raw = path.read_bytes(); path.write_bytes(b'private damaged image')
+                    with self.assertRaises(self.global_journal.GlobalAttemptHold) as caught:
+                        self.global_journal.record_reserved_attempt_intent(token, binding(), self.identity, self.unit)
+                    self.assertIsNone(caught.exception.__context__)
+                    self.assertEqual(b'private damaged image', path.read_bytes())
+                    self.assertEqual(0, self.global_journal.inspect_global_unit(token, binding(), self.unit).attempt_count)
+                    path.write_bytes(raw)
+            changed = replace(self.identity, sheet_ids=tuple((title, 999 if title == 'Update_History' else sid)
+                                                             for title, sid in self.identity.sheet_ids))
+            with self.assertRaises(self.global_journal.GlobalAttemptHold):
+                self.global_journal.record_reserved_attempt_intent(token, binding(), changed, self.unit)
+            self.assertEqual(0, self.global_journal.inspect_global_unit(token, binding(), self.unit).attempt_count)
+        with fixture(self.root), self.assertRaises(self.global_journal.GlobalAttemptHold):
+            self.global_journal.record_reserved_attempt_intent(token, binding(), self.identity, self.unit)
+
+    def test_reserved_intent_post_barrier_failure_keeps_counted_unknown_and_never_returns_permission(self):
+        self.module = load()
+        self.assertTrue(hasattr(self.global_journal, 'record_reserved_attempt_intent'),
+                        'actual reservation chain must dominate counted intent')
+        real = os.fsync
+        journal_store = self.state / (hashlib.sha256(TARGET.encode()).hexdigest() + '.journal')
+        with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
+            self.initialize(token); self.reserve(token)
+            def failing(fd):
+                if (journal_store / 'ATTEMPT-1').exists(): raise OSError('private post-intent barrier failure')
+                return real(fd)
+            with mock.patch('os.fsync', side_effect=failing), self.assertRaises(self.global_journal.GlobalAttemptHold):
+                self.global_journal.record_reserved_attempt_intent(token, binding(), self.identity, self.unit)
+            self.assertTrue((journal_store / 'ATTEMPT-1').exists())
+            self.assertEqual((1, 'UNKNOWN'), (self.global_journal.inspect_global_unit(token, binding(), self.unit).attempt_count,
+                                             self.global_journal.inspect_global_unit(token, binding(), self.unit).outcome))
+            self.assertEqual(1, self.inspect(token).outstanding_reservations)
+
     def test_history_capacity_must_fit_all_sent_business_and_all_audits_before_fence_reservation(self):
         self.module = load()
         # One NOOP contributes no History row; one actual update PLUS one
@@ -170,6 +249,23 @@ class Req7MetadataReservationWorkflowTests(unittest.TestCase):
     reserve = Req7MetadataReservationDirectTests.reserve
     inspect = Req7MetadataReservationDirectTests.inspect
 
+    def test_six_real_cold_processes_reopen_original_reservations_and_seventh_cannot_count(self):
+        self.module = load()
+        with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
+            self.initialize(token); self.reserve(token)
+        image = {p.name: p.read_bytes() for p in self.store.iterdir()}
+        command = [sys.executable, '-B', str(Path(__file__).resolve()), '--owned-count', str(self.root), str(ROOT)]
+        for count in range(1, 7):
+            result = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual(('%d UNKNOWN\n' % count).encode(), result.stdout)
+            self.assertEqual(image, {p.name: p.read_bytes() for p in self.store.iterdir()})
+        result = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
+        self.assertNotEqual(0, result.returncode); self.assertEqual(b'', result.stdout)
+        with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
+            self.assertEqual(6, self.global_journal.inspect_global_unit(token, binding(), self.unit).attempt_count)
+            self.assertEqual(1, self.inspect(token).outstanding_reservations)
+
     def test_actual_cold_process_keeps_quota_unknown_and_original_fence_without_reclamation(self):
         self.module = load()
         with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
@@ -226,7 +322,7 @@ class Req7MetadataReservationNativeWorkflowTests(unittest.TestCase):
         with fixture(setup.root), setup.owner.spreadsheet_owner(binding()) as token:
             setup.initialize(token)
             seen = setup.module.prepare_metadata_reservation(token, binding(), setup.identity, setup.unit, setup.meta_plan, raw)
-            setup.global_journal.record_global_attempt_intent(token, binding(), setup.unit)
+            setup.global_journal.record_reserved_attempt_intent(token, binding(), setup.identity, setup.unit)
             self.assertEqual(seen, setup.inspect(token)); self.assertEqual(29912, next(row[3] for row in seen.pools if row[0] == 101))
             self.assertEqual('UNKNOWN', setup.global_journal.inspect_global_unit(token, binding(), setup.unit).outcome)
         self.assertEqual(('POST ' + setup.meta_plan.path + ' HTTP/1.1\r\n').encode(), record[0])
@@ -234,9 +330,14 @@ class Req7MetadataReservationNativeWorkflowTests(unittest.TestCase):
 
 
 if __name__ == '__main__':
-    if len(sys.argv) > 1 and sys.argv[1] == '--owned-inspect':
+    if len(sys.argv) > 1 and sys.argv[1] in ('--owned-inspect', '--owned-count'):
         case = Req7MetadataReservationDirectTests(); case.setUp(); case.module = load()
         with fixture(Path(sys.argv[2])), case.owner.spreadsheet_owner(binding()) as token:
-            seen = case.inspect(token)
-        print(seen.outcome, seen.outstanding_reservations, next(row[3] for row in seen.pools if row[0] == 101)); case.doCleanups()
+            if sys.argv[1] == '--owned-count':
+                seen = case.global_journal.record_reserved_attempt_intent(token, binding(), case.identity, case.unit)
+                print(seen.attempt_count, seen.outcome)
+            else:
+                seen = case.inspect(token)
+                print(seen.outcome, seen.outstanding_reservations, next(row[3] for row in seen.pools if row[0] == 101))
+        case.doCleanups()
     else: unittest.main()

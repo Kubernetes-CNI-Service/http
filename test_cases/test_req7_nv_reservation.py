@@ -279,6 +279,48 @@ class Req7NvReservationWorkflowTests(unittest.TestCase):
     reserve = Req7NvReservationDirectTests.reserve
     inspect = Req7NvReservationDirectTests.inspect
 
+    def test_original_cabling_nv_and_history_quota_chain_dominate_reserved_intent(self):
+        from test_cases.test_req7_global_attempt_journal import load as global_load
+        from test_cases.test_req7_history_preread_journal import load as history_load
+        from test_cases.test_req7_history_read import tail_document, response
+        from monitor.issue_tracker_send_unit import freeze_send_unit
+        from monitor.issue_tracker_metadata_capacity import prepare_metadata_capacity_read
+        global_journal = global_load(); history = history_load(); self.module = load()
+        from test_cases.test_req7_metadata_reservation import load as quota_load
+        quota = quota_load()  # After this fixture's canonical owner/global reload.
+        for prepare_nv in (False, True):
+            with self.subTest(original_nv=prepare_nv), tempfile.TemporaryDirectory(prefix='req7-reserved-cabling-') as directory:
+                root = Path(directory).resolve(); state = root / 'var/lib/http-ztp-container/issue-tracker'
+                state.mkdir(parents=True, mode=0o700)
+                with fixture(root), self.owner.spreadsheet_owner(binding()) as token:
+                    original = self.initialize(token)
+                    if prepare_nv: expected = self.reserve(token)
+                    value = freeze_send_unit(**cabling_inputs(original.nonces))
+                    global_journal.prepare_global_unit(token, binding(), value)
+                    raw = tail_document(); raw['sheets'][0]['properties']['sheetId'] = 105
+                    history.prepare_history_preread(token, binding(), value,
+                        self.planner.prepare_history_tail_read(self.binding, self.token), response(raw))
+                    nonces = {title: nonce for title, sid, nonce in original.nonces}
+                    metadata = {'matchedDeveloperMetadata': [{'developerMetadata': {
+                        'metadataId': index + 1, 'metadataKey': 'http-ztp-enrollment-v1', 'metadataValue': nonces[title],
+                        'visibility': 'DOCUMENT', 'location': {'locationType': 'SHEET', 'sheetId': sid}}}
+                        for index, (title, sid) in enumerate((('ETH Cabling', 102), ('Update_History', 105)))]}
+                    quota.prepare_metadata_reservation(token, binding(), self.identity, value,
+                        prepare_metadata_capacity_read(self.binding, self.token), response(metadata))
+                    if not prepare_nv:
+                        with self.assertRaises(global_journal.GlobalAttemptHold):
+                            global_journal.record_reserved_attempt_intent(token, binding(), self.identity, value)
+                        self.assertEqual(0, global_journal.inspect_global_unit(token, binding(), value).attempt_count)
+                    else:
+                        observed = global_journal.record_reserved_attempt_intent(token, binding(), self.identity, value)
+                        self.assertEqual((1, 'UNKNOWN'), (observed.attempt_count, observed.outcome))
+                        self.assertEqual(expected, self.module.require_unit_nv_reservation(token, binding(), self.identity, value))
+                        nv_store = state / self.store.name
+                        (nv_store / 'RESERVATIONS').write_bytes(b'damaged original reservation')
+                        with self.assertRaises(global_journal.GlobalAttemptHold):
+                            global_journal.record_reserved_attempt_intent(token, binding(), self.identity, value)
+                        self.assertEqual(1, global_journal.inspect_global_unit(token, binding(), value).attempt_count)
+
     def test_actual_reserved_unit_global_journal_and_unknown_retry_use_identical_original_ids(self):
         from test_cases.test_req7_global_attempt_journal import load as global_load
         from monitor.issue_tracker_send_unit import freeze_send_unit

@@ -615,7 +615,7 @@ def script_profile(root: Path, relative: str) -> dict[str, str]:
             elif relative == "monitor/issue_tracker_global_attempt_journal.py":
                 scenario = "在跨项目 spreadsheet owner 内持久绑定 action、wire 与原策略白名单，六次全局 UNKNOWN 意图跨冷启动计数；已有单元保守阻断所有新单元。"
                 inputs = "ACTIVE 全局 owner、typed 原绑定与完整冻结单元；结构一致不证明受保护作业来源、准入或真实发送许可。"
-                outputs = "不可变共享持久原像、链式意图计数或 HOLD；没有清理、重置、解除屏障、COMPLETE 或发送能力。"
+                outputs = "不可变共享持久原像、链式意图计数或 HOLD；reserved 入口计数前后重核原 enrollment／History 行预算／永久 metadata quota，Cabling 新增还须绑定原 NV 预留；没有清理、重置、解除屏障、COMPLETE 或发送能力。"
                 recovery = "部分 fsync、缺记录、链接／位移、原像漂移或六次耗尽均 HOLD；不补建／接管／回收，六次意图不是六次真实尝试。"
                 example = "python3 -B -m unittest -v test_cases.test_req7_global_attempt_journal  # 仅开发测试"
             elif relative == "monitor/issue_tracker_spreadsheet_owner.py":

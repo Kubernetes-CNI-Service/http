@@ -981,5 +981,11 @@ reservation 或受审 launcher 的实际尝试边界，也不代表 REQ7 整体�
 原像、计数、链接／名字位移或原策略白名单变化均 HOLD，不补建或重置。六个真实
 冷启动进程共用计数，实际 C-6/action journal 流程保留 UNKNOWN。冷启动夹具继承
 runner 的依赖环境，不冒称 `-I` 隔离传输；六次意图不是六次真实尝试，两个本地
-记录也不是跨 store 原子发送。未安装库无 COMPLETE／清理／联网能力，受保护准入、
-FIFO、预留、单次 capability 和固定 launcher 仍须接入；REQ7 整体未完成，真机 NOT RUN。
+记录也不是跨 store 原子发送。`record_reserved_attempt_intent` 在计数前及计数后
+重开并核对同一原 enrollment、History 行预算、实际永久 fence quota，Cabling 新增还
+必须匹配 BOTH 原始列的 NV 预留；缺失／漂移／链接或屏障错误 HOLD。前置失败不计数，
+后置失败保留已计 UNKNOWN，不回退或补建。原计数 primitive 仅记录证据，不授予发送。
+六个真实冷启动进程及实际 TLS 原读取链验证同一预留不会被重分配；这仍不是新鲜
+准入、隐藏 PROJECT 全配额、行连续性、FIFO 或真实 M=6 发送证明。未安装库无
+COMPLETE／清理／联网能力，受保护准入、单次 capability 和固定 launcher 仍须接入；
+REQ7 整体未完成，真机 NOT RUN。

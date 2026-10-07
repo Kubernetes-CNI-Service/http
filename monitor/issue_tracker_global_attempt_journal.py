@@ -161,3 +161,49 @@ def inspect_global_unit(token, binding, unit):
 def record_global_attempt_intent(token, binding, unit):
     """Persist count BEFORE any eventual send, still not a transport capability."""
     return _observe(token, binding, unit, True)
+
+
+def _reserved_images(token, binding, identity, unit):
+    """Reopen actual original stores, not caller-supplied counts or snapshots."""
+    from monitor.issue_tracker_enrollment_journal import require_unit_enrollment, inspect_enrollment_journal
+    from monitor.issue_tracker_history_preread_journal import require_history_append_capacity
+    from monitor.issue_tracker_metadata_reservation import inspect_metadata_reservation
+    from monitor.issue_tracker_nv_reservation import require_unit_nv_reservation
+
+    _inputs(token, binding, unit)
+    require_unit_enrollment(token, binding, identity, unit)
+    original = inspect_enrollment_journal(token, binding, identity)
+    history = require_history_append_capacity(token, binding, unit)
+    quota = inspect_metadata_reservation(token, binding, identity, unit)
+    action = json.loads(unit.action_preimage)
+    nv = None
+    if action['identity']['sheet'] in ('ETH Cabling', 'IB Cabling') and any(
+            item['action'] == 'insert' for item in action['business']):
+        nv = require_unit_nv_reservation(token, binding, identity, unit)
+    ownership._validated_owner(token, binding)
+    return original, history, quota, nv
+
+
+def record_reserved_attempt_intent(token, binding, identity, unit):
+    """Count only after the exact original reservation chain, then recheck it.
+
+    This necessary local gate is NOT a send permit or fresh admission. It does
+    not launch a worker, bound actual wire attempts, discharge hidden PROJECT
+    quota, prove row continuity/FIFO, settle UNKNOWN or grant COMPLETE. The
+    primitive record_global_attempt_intent remains evidence-only and cannot
+    authorize transport. A failed post-count barrier leaves counted UNKNOWN;
+    never decrement, repair, replace a reservation or treat the count as send.
+    """
+    failed = False
+    try:
+        before = inspect_global_unit(token, binding, unit)
+        if before.attempt_count == 6: raise GlobalAttemptHold()
+        images = _reserved_images(token, binding, identity, unit)
+        result = _observe(token, binding, unit, True)
+        if (_reserved_images(token, binding, identity, unit) != images
+                or result.attempt_count != before.attempt_count + 1
+                or inspect_global_unit(token, binding, unit) != result):
+            raise GlobalAttemptHold()
+    except Exception: failed = True
+    if failed: raise GlobalAttemptHold()
+    return result
