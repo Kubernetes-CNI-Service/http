@@ -163,6 +163,45 @@ class GenerationReportWorkflow(unittest.TestCase):
         self.assertFalse(candidate.committed)
         return parent, candidate
 
+    def test_real_setup_load_report_rejects_late_same_inode_preimage_change(self):
+        self.real_setup_publish()
+        parent, parent_candidate = self.real_load_prepare()
+        self.addCleanup(LOAD.discard_prepared_release, parent_candidate)
+        LOAD.commit_prepared_release(parent_candidate)
+        parent_candidate = LOAD.prepare_current_release(self.project, parent)
+        self.addCleanup(LOAD.discard_prepared_release, parent_candidate)
+        helper = report_helper()
+        report = helper.build_report(self.project, parent, published_dir=self.published)
+        original = helper.prepare_generation_report(self.project, report)
+        helper.commit_prepared_generation_report(original)
+        path = original.destination
+        before = path.stat()
+        before_parent = (self.project / "99-output-ztp/current-release.json").read_bytes()
+        candidate = helper.prepare_generation_report(self.project, report)
+        self.addCleanup(helper.discard_prepared_generation_report, candidate)
+        foreign = (json.dumps(dict(report, generated_at="2026-09-24T12:00:09+08:00"),
+                              sort_keys=True) + "\n").encode("utf-8")
+        native_open = helper._open_prepared_directory
+        injections = []
+
+        def open_then_mutate(*args, **kwargs):
+            descriptor = native_open(*args, **kwargs)
+            path.write_bytes(foreign)
+            os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+            injections.append(path.stat().st_ino)
+            return descriptor
+
+        with mock.patch.object(helper, "_open_prepared_directory", side_effect=open_then_mutate):
+            with self.assertRaises(helper.GenerationReportError):
+                helper.commit_prepared_generation_report(candidate)
+        self.assertEqual([before.st_ino], injections)
+        self.assertEqual(before.st_ino, path.stat().st_ino)
+        self.assertEqual(foreign, path.read_bytes())
+        self.assertEqual(before_parent, (self.project / "99-output-ztp/current-release.json").read_bytes())
+        self.assertFalse(parent_candidate.committed)
+        self.assertTrue(candidate.temporary.is_file())
+        self.assertFalse(os.path.lexists(self.project / "99-output-ztp/current"))
+
     def test_real_setup_load_generation_rebound_stage_blocks_report_publication(self):
         self.real_setup_publish()
         parent, parent_candidate = self.real_load_prepare()

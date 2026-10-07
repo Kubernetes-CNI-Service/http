@@ -1634,6 +1634,20 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 ## TC-REAL-R22-GENERATION-INPUT-ABA-001 — 跨进程输入换代与多输出一致性
 
+- generation report 原前像 ABA 补充：direct 在预备后同 inode 写入另一合法报告、
+  同字节写回并恢复原 mtime，以及 commit 打开 held 输出目录后晚改写；真实私有
+  SETUP→LOAD 父记录→report workflow 在 held 目录打开后注入合法报告改写。
+  独立要求拒绝并保留外来 inode/原样字节、未消费的候选，父记录不变且 selector
+  缺席。原实现仅比较 dev/ino，两个方法四处有效 FAIL；workflow 首轮漏已提交父记录
+  的夹具错误日志保留，补实际父提交后重新 RED，不算该夹具错误为生产失败。
+  候选将原 report dev/ino/mode/nlink/uid/gid/size/mtime_ns/ctime_ns 前像绑定到
+  prepare，验证读前后不变并在 held 目录内 replace 前再次核对。现场仅限本卡
+  另行授权的隔离 VM、精确版本、root-only 可恢复快照、排他锁及正常写者静默，
+  留存旧/外来/candidate/parent 身份与 SHA、预备→改写/ABA→再核→拒绝顺序及
+  完整 END/exit；证据封存后按确切快照人工恢复，不删外来文件解围。元数据再核
+  不是非合作写者的原子 compare-and-replace，也不代表 report 持久化 WAL、
+  Q commit 后 B finalizer、旧 A 激活或 Linux/root/断电验收；完整 R22/full 仍 OPEN。
+
 - generation 暂存目录换绑补充：direct 在真实目录 rename 发布后插入同名外来目录，
   以及首 payload 同步失败前移走原目录、插入外来目录；真实私有 SETUP→LOAD→
   report 预备 workflow 在 rename 后注入，要求拒绝后 report/parent 未提交、selector

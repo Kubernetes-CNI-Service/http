@@ -153,6 +153,38 @@ proof。默认 push 只接受 release proof。owner 授权的 AIR/prod 验证可
 
 ## Full proof 失败后的诊断与重跑闸门
 
+### R22 generation report 原前像同 inode 改写与 ABA
+
+独立 direct 在 prepare 后覆盖同 inode 的合法旧报告、同字节写回并恢复原 mtime，
+以及 commit 已持有输出目录后晚改写；真实 SETUP→LOAD→report workflow 覆盖最后
+一个边界，要求拒绝并保留外来 inode/字节、未消费 candidate、父记录与 selector 缺席。
+首轮 direct 三处有效 FAIL，workflow 因夹具未先提交父记录而 ERROR；原日志
+`outputs/test-diagnostics/r22-report-preimage-aba-red.log`，inode157841743、size130513、
+SHA256 `a1c664112fac6808c5208fb599e7bd6d7a4de83ecdf4ba912038c4e5ff838169` 保留。
+补真实父提交与下一候选预备后，原实现两个方法四处有效 FAIL，完整原日志
+`outputs/test-diagnostics/r22-report-preimage-aba-red-parent-bound.log`，inode157842122、
+size129930、SHA256 `623a3a12abb6d07e8b03207691eb6d2dad1001b2b550c40c57d262b892dc214e`；
+物理40行 Ran 2 tests、42行 FAILED(failures=4)、46行 ACTUAL_UNITTEST_EXIT=1、
+47行 FROZEN_STATE_MATCH=True、49行 DIAGNOSTIC_END=1，实际 exec exit1。
+
+原 helper 只按 dev/ino 允许 overwrite。候选将 prepare 的旧 report 前像绑定为
+dev/ino/mode/nlink/uid/gid/size/mtime_ns/ctime_ns；验证读前后元数据一致，commit
+初检及 held 目录内最终 replace 前均对照原绑定，不接受改写后的同 inode。报表 wire
+schema、业务预期、原时限与所有既有断言不变。两个方法 GREEN 原日志
+`outputs/test-diagnostics/r22-report-preimage-aba-green.log`，inode157842619、size127544、
+SHA256 `1f265614c1ee131a920830cab4e3898b2b292121b2e79cd04602238eb0e2219a`，实际 exec exit0。
+
+完整 LOAD、generation report contract/workflow 三模块503项 OK / exit0，原日志
+`outputs/test-diagnostics/r22-report-preimage-aba-modules.log`，inode157843026、size285206、
+SHA256 `caa92a97e77e146ad710650bef56bd197959d3e8faf09a47ed0adde280ad8b01`；
+读前后 dev/inode/size/mtime_ns/ctime_ns 稳定，物理1393行 Ran 503 tests in 30.732s、
+1395行 OK、1419行 ACTUAL_UNITTEST_EXIT=0、1420行 FROZEN_STATE_MATCH=True、
+1422行 DIAGNOSTIC_END=0，实际 exec exit0。manifest 已有 generation_report direct
+与真实 generation_report_lifecycle 映射，REAL_ENV 同卡补前置/证据/清理与风险。
+该窄修是内存 prepare 前像检查，不是 report 完整持久 WAL、非合作写者原子
+compare-and-replace、B finalizer 或旧 A 健康激活；Linux/断电、原 bootstrap/REQ19
+原因与正式 full/check 仍 OPEN，不手改 ledger、不因本次 bounded PASS 盲重跑 full。
+
 ### R22 generation 暂存目录换绑不得递归清理
 
 两个独立 direct 分别在真实目录 rename 后、首 payload 同步失败前，将原暂存名

@@ -276,6 +276,48 @@ class GenerationReportContract(unittest.TestCase):
             helper.inspect_generation_report(self.project, published_dir=self.published)
         self.assertEqual(ad_hoc_bytes, ad_hoc.read_bytes())
 
+    def test_report_commit_rejects_same_inode_preimage_change_and_aba(self):
+        helper, report = self.publish()
+        path = self.output / "generation-report.json"
+        for boundary in ("content", "same-byte-aba", "held-directory"):
+            with self.subTest(boundary=boundary):
+                candidate = helper.prepare_generation_report(self.project, report)
+                self.addCleanup(helper.discard_prepared_generation_report, candidate)
+                before = path.stat()
+                before_bytes = path.read_bytes()
+                changed = dict(report, generated_at="2026-09-24T12:00:09+08:00")
+                foreign = (before_bytes if boundary == "same-byte-aba" else
+                           (json.dumps(changed, sort_keys=True) + "\n").encode("utf-8"))
+                injections = []
+                native_open = helper._open_prepared_directory
+
+                def mutate_original():
+                    path.write_bytes(foreign)
+                    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+                    injections.append(path.stat())
+
+                def open_then_mutate(*args, **kwargs):
+                    descriptor = native_open(*args, **kwargs)
+                    mutate_original()
+                    return descriptor
+
+                if boundary == "held-directory":
+                    with mock.patch.object(helper, "_open_prepared_directory",
+                                           side_effect=open_then_mutate):
+                        with self.assertRaises(helper.GenerationReportError):
+                            helper.commit_prepared_generation_report(candidate)
+                else:
+                    mutate_original()
+                    with self.assertRaises(helper.GenerationReportError):
+                        helper.commit_prepared_generation_report(candidate)
+                self.assertEqual(1, len(injections))
+                self.assertEqual(before.st_ino, injections[0].st_ino)
+                self.assertEqual(before.st_mtime_ns, injections[0].st_mtime_ns)
+                self.assertNotEqual(before.st_ctime_ns, injections[0].st_ctime_ns)
+                self.assertEqual(before.st_ino, path.stat().st_ino)
+                self.assertEqual(foreign, path.read_bytes())
+                self.assertTrue(candidate.temporary.is_file(), "rejected publication consumed its candidate")
+
     def test_prepare_does_not_publish_and_failed_commit_preserves_old_record(self):
         helper, old = self.publish()
         path = self.output / "generation-report.json"

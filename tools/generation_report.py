@@ -77,7 +77,7 @@ class PreparedGenerationReport:
     temporary: Path
     directory_identity: tuple[int, int]
     temporary_identity: tuple[int, int]
-    old_identity: tuple[int, int] | None
+    old_identity: tuple[int, ...] | None
     payload_sha256: str
 
 
@@ -87,6 +87,13 @@ def _identity(metadata: os.stat_result) -> tuple[int, int]:
 
 def _stable_identity(metadata: os.stat_result) -> tuple[int, int, int, int, int]:
     return (metadata.st_dev, metadata.st_ino, metadata.st_size,
+            metadata.st_mtime_ns, metadata.st_ctime_ns)
+
+
+def _report_preimage_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    """A prepared overwrite must not adopt a same-inode write or metadata ABA."""
+    return (metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_nlink,
+            metadata.st_uid, metadata.st_gid, metadata.st_size,
             metadata.st_mtime_ns, metadata.st_ctime_ns)
 
 
@@ -348,13 +355,19 @@ def _open_prepared_directory(output: Path, expected: tuple[int, int]) -> int:
         raise
 
 
-def _existing_report_identity(destination: Path, project: Path) -> tuple[int, int] | None:
-    payload = _read_regular(destination, REPORT_LIMIT, missing_ok=True)
-    if payload is None:
+def _existing_report_identity(destination: Path, project: Path) -> tuple[int, ...] | None:
+    try:
+        before = os.lstat(destination)
+    except FileNotFoundError:
         return None
+    payload = _read_regular(destination, REPORT_LIMIT)
+    assert payload is not None
     old = _decode_record(payload, "existing governed report")
     _validate_report_shape(old, project)
-    return _identity(os.lstat(destination))
+    identity = _report_preimage_identity(before)
+    if identity != _report_preimage_identity(os.lstat(destination)):
+        raise GenerationReportError("existing report changed while validating preimage")
+    return identity
 
 
 def prepare_generation_report(
@@ -464,7 +477,7 @@ def commit_prepared_generation_report(candidate: PreparedGenerationReport) -> Pa
         except FileNotFoundError:
             old_identity = None
         else:
-            old_identity = _identity(old_named)
+            old_identity = _report_preimage_identity(old_named)
         if old_identity != candidate.old_identity:
             raise GenerationReportError("existing report changed before commit")
         os.replace(
