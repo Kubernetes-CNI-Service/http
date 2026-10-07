@@ -2076,6 +2076,15 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - 证据：保存精确命令/退出码、完整物理顺序日志、前后 stat/inode/SHA、启动前 monotonic 时间、阶段耗时、持有锁的 FD/session 归属、截止期、TERM/KILL/reap/会话不存在和父死子存的独立见证。私有响应和诊断不进入公开日志；局部原生慢读 PASS 不代表整个 REQ7 或生产权限。
 - 故障注入、清理与风险：注入启动失败、DNS/慢读、pipe 关闭、监督器死亡和无法终止；保持原预算/行为断言。本地夹具已独立复现并修正已回收 leader 的同号存活 group 被误认为信号权限；首次检查之后、异常清理和 TERM/KILL 升级之前也必须重新确认活 leader 的 session/group 归属，不能把首次检查缓存为永久信号权限。真实 PID 重用仍 NOT RUN，必须验证不向该不确定 group 发信号、终止未确认保持 HOLD。实际临时 flock 的终止被拒工作流必须保持其他候选无法取得锁，直到本卡确证拥有的子进程完成清理。只终止本卡确证拥有的隔离会话，不能向外部 PID/group 发信号；清理不确定保持 HOLD，由授权责任人恢复隔离快照并重核锁。不得以 PID 重用、过期锁、超时宽限或重发来隐藏 UNKNOWN。
 
+## TC-REAL-REQ7-ENROLLMENT-JOURNAL-001 — 共享原始 nonce 与 target/History 双见证
+
+- Case ID：`TC-REAL-REQ7-ENROLLMENT-JOURNAL-001`；类型：durable / integration / real-environment；对应 C-6/C-19。状态：**NOT RUN / REAL_ENV REQUIRED**。涉及 `monitor/issue_tracker_enrollment_journal.py`、`monitor/issue_tracker_spreadsheet_owner.py`、`monitor/issue_tracker_send_intent.py`、`monitor/issue_tracker_metadata_capacity.py`、`monitor/issue_tracker_tls_inputs.py`。本地合成 root 元数据、实际 fsync/flock 和私有只读响应不能替代真实 Stage O 或完整 REQ7。
+- 风险与目标：同 spreadsheet 跨项目只保留一个原始四表 nonce journal，CSPRNG 一次生成，NONCES/HEADER 原像六屏障后才 INITIALIZED；部分 store 缺 marker 必须 HOLD，不能从远端标记反向采纳、重生或修复。target 和 Update_History 都必须原始 SHEET 锚定 DOCUMENT nonce，无缺失／重复／错值；composer 与持久 action 原像保持同 pair。
+- 前置条件：本地 direct 与真实 global owner → nonce journal → composer → C-6 action workflow 通过；部署目录已由精确独立授权 provision，native uid=0/root-only 祖先与 mount、Linux 随机源/NOREPLACE/fsync、SDK/Python/SSL/CA 身份实证；Stage O 只用 owner 批准副本。本卡不授权真机、真实凭据、metadata 创建、联网或在线启用。
+- 步骤与预期：在批准副本及测试自有状态核四 nonce 不同、进程冷重开保持；逐屏障故障、目录／文件替换／链接、随机失败、改 sheetId 或撤销 owner 均 HOLD 且证据保留；完整只读 metadata 搜索缺 History、PROJECT 可见、SPREADSHEET/ROW 锚点、重复或外来 nonce HOLD；后续仍需独立预算／预留、新鲜准入、固定 launcher 与 COMPLETE。
+- 证据：精确 HEAD/tree、manifest、Python/平台、命令和完整日志／退出码，读前后 stat/inode、大小、旧前缀 SHA256、物理顺序／END；只回传摘要和两 nonce_valid 布尔，不输出原 nonce／凭据／token。成功本地观察不是普通发布 full proof。
+- 清理与风险：仅清理测试自有临时 root、CA/socket/thread；生产原始 journal/nonce 永不删除／重置。部署冷断电、真实 root 身份、受控只读批准副本和在线 activation 仍 NOT RUN，任何未证条件不能冒称通过。
+
 ## TC-REAL-REQ7-ACTIVE-CLOSED-DISCOVERY-001 — 完整活动键与原始 Closed 分类
 
 - Case ID：`TC-REAL-REQ7-ACTIVE-CLOSED-DISCOVERY-001`；类型：real-environment / read-only API / integration；对应 C-3/C-8。状态：**NOT RUN / REAL_ENV REQUIRED**。涉及 `monitor/issue_tracker_sheets_read_plan.py`、`monitor/issue_tracker_sheets_read_decode.py`、`monitor/issue_tracker_tls_inputs.py`；本地私有 loopback TLS 与原始 typed grid fixture 不证明部署环境、全表发现或 REQ7 整体完成。

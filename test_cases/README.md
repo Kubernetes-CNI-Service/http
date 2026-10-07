@@ -857,6 +857,11 @@ P 阶段在绑定的 macOS CPython 3.9 环境中，把独立审定的依赖文�
 按完整规范化活动键分类，仅精确字面 `Closed` 排除活动项；重复活动键 CONFLICT，
 不改线上已有 NV ID，不把公式／格式化值当字面。原生 TLS GET → 真实 planner / decoder
 流程仅产出有限窗口观察，空匹配不证明全表不存在、可新增、COMPLETE 或发送许可。
+`test_req7_enrollment_journal` 在实际全表 owner 内生成一次四张表的独立原始 nonce，
+在 folder／NONCES／HEADER 六个屏障完成后写真正 INITIALIZED；冷重开保留，不从远端
+采纳／重生／修复 nonce。真实 composer 与 C-6 action journal 必须绑定同一 target/History
+pair；完整 metadata 只读匹配要求 SHEET 锚定、DOCUMENT 可见、两 nonce 一致且无重复。
+匹配不是新鲜准入、metadata 容量、COMPLETE 或发送能力；库未安装，真机仍 NOT RUN。
 `test_req7_mutation_rejection` 保留四类一致错误之外的 UNKNOWN，后续拒绝不能消除旧 UNKNOWN。
 `test_req7_attempt_journal` 在实际 C-6 owner 内测试不可覆盖字节、file/directory fsync、
 六次意图计数、真实子进程退出／重启、部分记录与外来对象拒绝。六次意图不证明真实尝试

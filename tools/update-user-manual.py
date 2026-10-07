@@ -56,6 +56,7 @@ REQ7_CONTROLLED_TRANSPORT_LIBRARIES = frozenset({
     "monitor/issue_tracker_send_intent.py",
     "monitor/issue_tracker_spreadsheet_owner.py",
     "monitor/issue_tracker_global_attempt_journal.py",
+    "monitor/issue_tracker_enrollment_journal.py",
 })
 
 RUNTIME_PATTERNS = (
@@ -577,6 +578,12 @@ def script_profile(root: Path, relative: str) -> dict[str, str]:
                 inputs = "ACTIVE 本地 writer token、单元标识和不超过 1 MiB 的冻结字节；它们不是合格 Sheets batch 或发送能力。"
                 recovery = "计数耗尽、部分／外来文件、字节变化或 fsync 失败均 HOLD，保留证据；无清理、重置或新单元接管。"
                 example = "python3 -B -m unittest -v test_cases.test_req7_attempt_journal  # 仅开发测试"
+            elif relative == "monitor/issue_tracker_enrollment_journal.py":
+                scenario = "在实际 spreadsheet owner 内一次生成四张业务／History 表的原始 nonce；原像屏障全部完成后才写 INITIALIZED，匹配远端原始 SHEET/DOCUMENT pair。"
+                inputs = "ACTIVE 全局 owner、14 表 typed 只读身份与受保护固定私有目录；不接受调用方 nonce、路径、修复或在线权限。"
+                outputs = "私有不可变 nonce journal 与必要匹配观察；缺 History、重复／外来锚点或 nonce 漂移 HOLD，没有远端写入、COMPLETE 或发送能力。"
+                recovery = "部分落盘、marker 缺失、链接／权限／身份变化保留 HOLD；禁止重生 nonce 或从远端标记反向采纳，配额预留、固定 launcher 与新鲜准入仍需集成。"
+                example = "python3 -B -m unittest -v test_cases.test_req7_enrollment_journal  # 仅开发测试"
             elif relative == "monitor/issue_tracker_global_attempt_journal.py":
                 scenario = "在跨项目 spreadsheet owner 内持久绑定 action、wire 与原策略白名单，六次全局 UNKNOWN 意图跨冷启动计数；已有单元保守阻断所有新单元。"
                 inputs = "ACTIVE 全局 owner、typed 原绑定与完整冻结单元；结构一致不证明受保护作业来源、准入或真实发送许可。"

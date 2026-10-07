@@ -292,7 +292,8 @@
         "test_cases.test_req7_history_read",
         "test_cases.test_req7_spreadsheet_owner",
         "test_cases.test_req7_global_attempt_journal",
-        "test_cases.test_req7_activity_discovery"
+        "test_cases.test_req7_activity_discovery",
+        "test_cases.test_req7_enrollment_journal"
       ]
     },
     {
@@ -619,7 +620,8 @@
     "monitor/issue_tracker_send_unit.py": "monitor/issue_tracker_send_unit.py",
     "monitor/issue_tracker_send_intent.py": "monitor/issue_tracker_send_intent.py",
     "monitor/issue_tracker_spreadsheet_owner.py": "monitor/issue_tracker_spreadsheet_owner.py",
-    "monitor/issue_tracker_global_attempt_journal.py": "monitor/issue_tracker_global_attempt_journal.py"
+    "monitor/issue_tracker_global_attempt_journal.py": "monitor/issue_tracker_global_attempt_journal.py",
+    "monitor/issue_tracker_enrollment_journal.py": "monitor/issue_tracker_enrollment_journal.py"
   },
   "test_rules": [
     {
@@ -1771,6 +1773,11 @@
       "id": "req7_active_closed_discovery",
       "paths": ["monitor/issue_tracker_sheets_read_plan.py", "monitor/issue_tracker_sheets_read_decode.py"],
       "tests": ["test_cases.test_req7_activity_discovery"]
+    },
+    {
+      "id": "req7_enrollment_journal",
+      "paths": ["monitor/issue_tracker_enrollment_journal.py"],
+      "tests": ["test_cases.test_req7_enrollment_journal"]
     }
   ],
   "workflows": [
@@ -3239,6 +3246,11 @@
       "id": "req7_native_active_closed_discovery",
       "members": ["monitor/issue_tracker_sheets_read_plan.py", "monitor/issue_tracker_sheets_read_decode.py", "monitor/issue_tracker_tls_inputs.py"],
       "tests": ["test_cases.test_req7_activity_discovery"]
+    },
+    {
+      "id": "req7_global_original_nonce_composer_action_journal",
+      "members": ["monitor/issue_tracker_enrollment_journal.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_send_intent.py", "monitor/issue_tracker_metadata_capacity.py", "monitor/issue_tracker_tls_inputs.py"],
+      "tests": ["test_cases.test_req7_enrollment_journal"]
     }
   ],
   "path_rules": [
