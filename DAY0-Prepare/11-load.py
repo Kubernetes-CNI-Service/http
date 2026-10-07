@@ -6220,19 +6220,22 @@ def _require_no_pending_setup_link_stage(path: Path) -> None:
     _require_no_pending_setup_stage(path, f".{path.name}.setup-rollback.", "link")
 
 
-def _require_no_pending_runtime_file_stages(receipt: dict[str, object]) -> None:
-    """Scan only the validated A receipt's regular-file recovery names.
+def _require_no_pending_runtime_restore_stages(receipt: dict[str, object]) -> None:
+    """Scan only the validated A receipt's file/key recovery names.
 
     Unknown prior stages have no ownership receipt. Never consume them or
     infer successful recovery from an independently verified managed target.
     The caller holds the deployment lock and keeps other writers quiescent.
     """
     _require_runtime_publickey_parent(receipt)
-    paths = {ZTP_DIR / name for name in receipt["frozen_files"]}
-    paths.update(ZTP_DIR / "config/publickey" / name
-                 for name, record in receipt["publickeys"].items() if record["state"] != "link")
-    for path in sorted(paths):
-        _require_no_pending_setup_stage(path, f".{path.name}.rollback-", "runtime file")
+    stages = {(ZTP_DIR / name, "file") for name in receipt["frozen_files"]}
+    stages.update((ZTP_DIR / "config/publickey" / name, "link" if record["state"] == "link" else "file")
+                  for name, record in receipt["publickeys"].items())
+    for path, kind in sorted(stages):
+        if kind == "link":
+            _require_no_pending_setup_link_stage(path)
+        else:
+            _require_no_pending_setup_stage(path, f".{path.name}.rollback-", "runtime file")
 
 
 def _require_no_pending_setup_stage(path: Path, prefix: str, kind: str) -> None:
@@ -8803,7 +8806,7 @@ def _recover_setup_switch_journal_snapshot(
     if not verify_only:
         require_no_link_stages()
         if runtime_context is not None:
-            _require_no_pending_runtime_file_stages(_load_runtime_rollback_receipt(
+            _require_no_pending_runtime_restore_stages(_load_runtime_rollback_receipt(
                 runtime_context.project, runtime_context.runtime_receipt,
             ))
     if inspect_only:
@@ -8962,7 +8965,7 @@ def _recover_setup_switch_journal_snapshot(
         _require_no_pending_setup_manifest_stage()
         require_no_link_stages()
         if runtime_context is not None:
-            _require_no_pending_runtime_file_stages(_load_runtime_rollback_receipt(
+            _require_no_pending_runtime_restore_stages(_load_runtime_rollback_receipt(
                 runtime_context.project, runtime_context.runtime_receipt,
             ))
         require_journal_unchanged()
@@ -9050,7 +9053,7 @@ def restore_runtime_rollback_receipt(
     output = canonical_project / "99-output-ztp"
     receipt = _load_runtime_rollback_receipt(canonical_project, receipt_directory)
     _require_runtime_publickey_parent(receipt)
-    _require_no_pending_runtime_file_stages(receipt)
+    _require_no_pending_runtime_restore_stages(receipt)
     if active_project() != canonical_project:
         raise LoadError("runtime rollback project is not the active project")
     if expected_current != receipt["selector_target"]:
@@ -9184,7 +9187,7 @@ def restore_runtime_rollback_receipt(
         raise LoadError("rollback selector changed during A restore")
     if _require_authority is not None:
         _require_authority()
-    _require_no_pending_runtime_file_stages(receipt)
+    _require_no_pending_runtime_restore_stages(receipt)
     ok(f"A runtime restore verified: {receipt['release_id']}")
 
 

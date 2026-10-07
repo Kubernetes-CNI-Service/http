@@ -2456,6 +2456,57 @@ class ReleaseTransactionTests(unittest.TestCase):
         self.assertEqual(before, (target.lstat().st_ino, target.read_bytes(), orphan.lstat().st_ino))
         self.assertEqual("independent-absent-evidence", os.readlink(orphan))
 
+    def test_setup_wal_cold_recovery_holds_runtime_key_link_orphan_before_p_write(self):
+        state, context = self._prepare_persisted_a_runtime_switch(managed_key=True)
+        common, journal, descriptor, backend = state[2], *state[-3:]
+        common.unlink()
+        common.symlink_to(os.path.relpath(state[5], common.parent))
+        runtime = self.ztp / "ztp-bootstrap_oob.sh"
+        runtime.write_bytes(b"independent partial B runtime\n")
+        key = self.ztp / "config/publickey/laptop.pub"
+        orphan = key.parent / f".{key.name}.setup-rollback.independent-orphan"
+        orphan.symlink_to("independent-absent-key-evidence")
+        before = (common.lstat().st_ino, os.readlink(common), runtime.lstat().st_ino,
+                  runtime.read_bytes(), journal.lstat().st_ino, journal.read_bytes(),
+                  key.lstat().st_ino, os.readlink(key), orphan.lstat().st_ino)
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "_atomic_restore_setup_link", wraps=LOAD._atomic_restore_setup_link) as restore:
+            with self.assertRaises(LOAD.LoadError):
+                LOAD.recover_setup_switch_journal(journal, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend, restore_runtime_from_wal=True)
+            restore.assert_not_called()
+        self.assertEqual(before, (common.lstat().st_ino, os.readlink(common), runtime.lstat().st_ino,
+                  runtime.read_bytes(), journal.lstat().st_ino, journal.read_bytes(),
+                  key.lstat().st_ino, os.readlink(key), orphan.lstat().st_ino))
+        self.assertEqual("independent-absent-key-evidence", os.readlink(orphan))
+        backend.start.assert_not_called()
+
+    def test_setup_wal_retirement_holds_runtime_key_link_orphan_after_runtime_restore(self):
+        state, context = self._prepare_persisted_a_runtime_switch(managed_key=True)
+        journal, descriptor, backend = state[-3:]
+        key = self.ztp / "config/publickey/laptop.pub"
+        expected_key = os.readlink(key)
+        orphan = key.parent / f".{key.name}.setup-rollback.independent-late"
+        before = (journal.lstat().st_ino, journal.read_bytes())
+        restore, injected = LOAD.restore_runtime_rollback_receipt, []
+        def late_orphan(*args, **kwargs):
+            result = restore(*args, **kwargs)
+            orphan.write_bytes(b"unknown key stage after runtime postverify\n")
+            injected.append(orphan.lstat().st_ino)
+            return result
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "restore_runtime_rollback_receipt", side_effect=late_orphan):
+            with self.assertRaises(LOAD.LoadError):
+                LOAD.recover_setup_switch_journal(journal, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend, restore_runtime_from_wal=True)
+        self.assertEqual(1, len(injected), "independent runtime postverify boundary not reached")
+        self.assertEqual(before, (journal.lstat().st_ino, journal.read_bytes()))
+        self.assertEqual(injected[0], orphan.lstat().st_ino)
+        self.assertEqual(b"unknown key stage after runtime postverify\n", orphan.read_bytes())
+        self.assertEqual(expected_key, os.readlink(key))
+        self.assertEqual(b"A laptop key\n", key.read_bytes())
+        backend.start.assert_not_called()
+
     def test_setup_wal_cold_recovery_holds_runtime_orphan_before_p_write(self):
         state, context = self._prepare_persisted_a_runtime_switch()
         common, journal, descriptor, backend = state[2], *state[-3:]
@@ -3730,14 +3781,17 @@ class ReleaseTransactionTests(unittest.TestCase):
         self.assertFalse(os.path.lexists(journal), "verified complete restore must retire its own WAL")
         backend.start.assert_not_called()
 
-    def _prepare_persisted_a_runtime_switch(self):
+    def _prepare_persisted_a_runtime_switch(self, *, managed_key=False):
         private_root = mock.patch.object(LOAD, "HTTP_ROOT", self.root.resolve())
         private_root.start()
         self.addCleanup(private_root.stop)
         document = yaml.safe_load(self.global_file.read_text())
         document["common"]["mgmt"]["http"]["http_root"] = str(self.root.resolve())
         self.global_file.write_text(yaml.safe_dump(document, sort_keys=False))
-        _parent, generation, receipt = self._publish_a_with_runtime_rollback_receipt()
+        if managed_key:
+            generation, receipt = self._publish_a_with_managed_key_receipt()
+        else:
+            _parent, generation, receipt = self._publish_a_with_runtime_rollback_receipt()
         state = self._prepare_cross_project_setup_crash()
         p, q, common = state[:3]
         journal, descriptor, backend = state[-3:]

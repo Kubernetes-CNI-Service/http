@@ -445,6 +445,12 @@ frozen files 与普通文件 publickeys 枚举恢复名称，用持有物理父�
 direct 与真实 SETUP 登记 Q 链接→强杀→新 LOAD 覆盖原有普通/悬空暂存及 runtime
 后核验后晚到暂存，保留原 WAL；晚到故障如实记录已发生的 P/A 恢复，不承诺零写入。
 这不是无 WAL 的全树扫描、未知对象归属判定/删除、完整 root/B 健康退休或旧 A 激活。
+同一围栏也须纳入 receipt 中的 managed publickey 链接，按链接恢复 writer 的
+`.name.setup-rollback.` 名称检查；不能等恢复 key 时才发现未知暂存，因为 P 和其它
+flat runtime 已可能先被改写。direct 与真实 SETUP 强杀→新 LOAD 覆盖原有普通/悬空
+key 暂存的零 P/flat 写入，以及 runtime 后核验后晚到 key 暂存阻止 WAL 退休；正常
+managed key 恢复仍保持链接、原源文件和既存权力换绑断言。这只扩大已验证 receipt 的
+暂存名围栏，不完成 YAML/prefix 全写集、B finalizer、旧 A 健康激活或 root 入口验收。
 missing 前像的 unlink 和已经缺席的重入也须同步父目录。同步失败不得报成功或退休 WAL。
 direct 覆盖实际模式/同步顺序和写入/删除同步异常；真实 LOAD→SETUP 强杀→新 LOAD
 workflow 使用实际 runtime 文件 writer 注入父目录同步错误，保留 WAL 后在新进程重入。
