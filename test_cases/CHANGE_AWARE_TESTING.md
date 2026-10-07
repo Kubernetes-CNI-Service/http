@@ -176,6 +176,46 @@ full。失败、未知原因、日志缺失或中断仍保持无证明状态，�
    自动生成的 ledger 单独提交、干净树的 `--check --require-full` exit0 才算本地正式
    证明。局部回归和旧树证明不能代替它；本地 proof 不关闭独立 Linux/设备/断电见证卡。
 
+### R22 Q comparison 原缺席目录与恢复中断候选
+
+真实 LOAD→SETUP 强杀的独立负例确认两处边界：暂存 mkdir 后尚无 WAL 行时，
+原恢复会退休 WAL 并留下未知暂存物；已登记 Q 目录 rmdir 后/父同步前强杀，
+下一恢复会退休 WAL 而未同步 Q 父目录。日志
+`outputs/test-diagnostics/r22-q-comparison-boundaries-red.log`，inode147558183、
+size2578、SHA256 `acfcb1f806b145f80225ebb22cbbd11749a81f1643abb25c5d0bfb3965f0e163`，
+含两项真实 workflow FAIL，另外两项是命令误填测试类名的加载 ERROR，后者不作为
+缺陷 RED。正确类名的 direct 在 `r22-q-comparison-boundaries-direct-red.log`
+证实再入未同步；该日志的 orphan direct 用了非规范 /var 相对链接输入，不能作为
+该缺陷 RED。修正输入路径、保留预期后，`r22-q-comparison-orphan-direct-canonical-red.log`
+1 FAIL / exit1，inode147565822、size864、SHA256
+`3542fdad3713a4151c971c57774b1c04c6d89d6437107bee8b879a081a5bf470`，
+原恢复未按未知暂存物拒绝。
+
+候选新增闭合 typed 行、真实 writer 委托与精确 no-replace 安装；未知暂存前缀只
+作 HOLD，已登记目录的缺席也重新同步父目录。八项 direct/真实 workflow 完整
+GREEN / 21.841 秒 / exit0，`r22-q-comparison-boundaries-green.log`，inode147572207、
+size1435、SHA256 `dbfc63565696b177c1bc2e69f204cc6ff4510033ec75803bd775a9e1cee848fb`。
+原断言与全部失败日志保留。补充边界修复之前的三模块435项通过不适用于补充后的
+精确候选，仍需重新模块回归。正式 related/full 闸门继续 CLOSED：历史 bootstrap
+15s 与 REQ19 probe10s 的原失败现场原因未证实，单项或原前序 PASS 不放行 full。
+不改 ledger；本候选不关闭完整 comparison 数据迁移、完整 R22 或 REAL_ENV 卡。
+
+上述目录边界候选三模块完整 439 tests OK / 443.359 秒 / exit0，日志
+`r22-q-comparison-complete-candidate-modules.log`，inode147603806、size135903、SHA256
+`1a9c953c992b65e1936a977b684701f925509260bd0a6b148254fbf8f257f5db`；
+112828字节旧前缀 SHA256 `2a510537eabf5da0a2595b8a8a95e1357bddd18366f0c279b4a88390d45e522f`
+保持，12项源码/测试/文档/manifest/ledger/运行态 manifest 冻结核验全部一致。
+随后审阅发现登记后 inode 捕获风险，439项不适用随后的修复。新增 direct 与真实
+SETUP 换绑负例在 `r22-q-comparison-install-owner-canonical-red.log` 两项 FAIL / exit1，
+inode147816832、size1737、SHA256 `2f64278308457bc47330589c804a17ab061d08a5bf621e59e23940c0a7a82022`，
+证明外来暂存 inode 已被误装入 Q 目标，后续 HOLD 过晚。更早的
+`r22-q-comparison-install-owner-red.log` 中 direct 的空 mock 未执行 rename，产生
+FileNotFoundError，不作为该 direct 的独立 RED；改为 spy 原 primitive，预期不变。
+修复使用登记时捕获的原元数据，在安装前及安装后核 dev/ino/mode；四项 GREEN / 4.065秒 /
+exit0，`r22-q-comparison-install-owner-green.log`，inode147818875、size728、SHA256
+`3a80d14bf19a230d2a2de809f2d5fb546fcaf436654e267a8544844b9a0e5963`。
+最终候选需再核完整 LOAD/optimize 模块及相关真实 workflow；没有正式 related/full 批准。
+
 ### R22 main 未结清 WAL 须在服务启动前 HOLD
 
 仅成功出口拒绝仍允许带未结清 SETUP WAL 的 B 先执行 start_services，再由末尾

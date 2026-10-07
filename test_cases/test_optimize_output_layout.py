@@ -46,6 +46,47 @@ FEEDBACK = load_module("optimize_output_feedback", OPTIMIZE / "feedback.py")
 
 
 class OptimizeOutputLayoutTests(unittest.TestCase):
+    def test_comparison_preparation_delegates_missing_output_before_plain_mkdir(self):
+        with tempfile.TemporaryDirectory(prefix="comparison-owned-output-") as name:
+            root = Path(name).resolve()
+            project, sample = root / "q", root / "q-sample"
+            project.mkdir()
+            target = project / "99-output-ztp/optimize"
+            calls = []
+            def owned_writer(path):
+                self.assertEqual(target, path)
+                self.assertFalse(os.path.lexists(path), "helper wrote before its WAL owner")
+                calls.append(path)
+                path.mkdir(parents=True)
+            result = SAMPLE_LINKS.prepare_comparison_output(
+                sample, project, ensure_directory=owned_writer,
+            )
+            self.assertEqual(target, result)
+            self.assertEqual([target], calls)
+            self.assertTrue(target.is_dir())
+            self.assertFalse(os.path.lexists(sample))
+
+    def test_comparison_owned_writer_failure_does_not_fall_back_to_mkdir(self):
+        with tempfile.TemporaryDirectory(prefix="comparison-rejected-output-") as name:
+            root = Path(name).resolve()
+            project = root / "q"
+            project.mkdir()
+            target = project / "99-output-ztp/optimize"
+            rejected = RuntimeError("independent WAL publication failed")
+            with self.assertRaisesRegex(RuntimeError, "WAL publication failed"):
+                SAMPLE_LINKS.prepare_comparison_output(
+                    root / "q-sample", project,
+                    ensure_directory=mock.Mock(side_effect=rejected),
+                )
+            self.assertFalse(os.path.lexists(target.parent))
+            writer = mock.Mock()
+            SAMPLE_LINKS.prepare_comparison_output(
+                root / "q-sample", project, dry_run=True, report=lambda message: None,
+                ensure_directory=writer,
+            )
+            writer.assert_not_called()
+            self.assertFalse(os.path.lexists(target.parent))
+
     def test_v2_comparison_detects_mlag_runtime_identity_drift_across_sets(self):
         mlag_mac_a = "02:00:00:ff:00:12"
         mlag_mac_b = "02:00:00:ff:00:34"

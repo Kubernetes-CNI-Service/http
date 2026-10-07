@@ -1243,11 +1243,30 @@ def _process_optimize_sample(proj_dir):
     """Create <project>-sample and its managed comparison/input links."""
     sample = sample_directory(os.path.join(ZTP, "optimize"), proj_dir)
     _require_sample_wal_surface(proj_dir, _SETUP_SWITCH_WAL_CONTEXT)
+    def ensure_wal_comparison(comparison):
+        if _LINK_TRANSACTION is None:
+            raise ValueError("Q comparison 目录创建缺少 WAL 事务")
+        load_api, descriptor = _SETUP_SWITCH_WAL_CONTEXT[:2]
+        created = load_api["ensure_setup_switch_q_comparison_directory"](
+            Path(ZTP) / ".setup-switch-journal.json", comparison,
+            deployment_lock_descriptor=descriptor, services_quiesced=True,
+            runtime_backend=load_api["service_runtime_backend"](),
+        )
+        if created:
+            owner = comparison.lstat()
+            _LINK_TRANSACTION.created_directories.append(
+                (str(comparison), owner.st_dev, owner.st_ino),
+            )
+    comparison_options = (
+        {"ensure_directory": ensure_wal_comparison}
+        if _SETUP_SWITCH_WAL_CONTEXT is not None and not _DRY_RUN else {}
+    )
     prepare_comparison_output(
         sample,
         proj_dir,
         dry_run=_DRY_RUN,
         report=lambda message: print(_c(CYAN, f"  {message}")),
+        **comparison_options,
     )
     if _DRY_RUN:
         if not sample.is_dir():

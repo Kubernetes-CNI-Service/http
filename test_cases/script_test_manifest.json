@@ -1723,6 +1723,7 @@
       "members": [
         "DAY0-Prepare/01-a-setup.py",
         "DAY0-Prepare/11-load.py",
+        "ztp/optimize/sample_links.py",
         "ztp/config/cumulus/template/90-c2-generate_configs.py",
         "ztp/config/cumulus/d-hostname2mac.py"
       ],

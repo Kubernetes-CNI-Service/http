@@ -3432,6 +3432,8 @@ class ReleaseTransactionTests(unittest.TestCase):
     def test_setup_sample_directory_has_owned_wal_before_first_shared_link(self) -> None:
         (*state, journal, descriptor, _backend) = self._prepare_cross_project_setup_crash(freeze_q_links=False)
         project = state[1]
+        # Real SETUP prepares the Q project-local output skeleton first.
+        (project / "99-output-ztp").mkdir()
         optimize = self.ztp / "optimize"
         optimize.mkdir()
         sample = optimize / "new-sample"
@@ -3458,6 +3460,241 @@ class ReleaseTransactionTests(unittest.TestCase):
             SETUP._process_optimize_sample(str(project))
         self.assertEqual([True], observed, "sample never used the owned-directory install edge")
         self.assertTrue((sample / "01-global.yaml").is_symlink())
+
+    def test_setup_q_comparison_directory_is_wal_owned_before_sample_link(self) -> None:
+        (*state, journal, descriptor, backend) = self._prepare_cross_project_setup_crash(freeze_q_links=False)
+        project = state[1].resolve()
+        (project / "99-output-ztp").mkdir(exist_ok=True)
+        target = project / "99-output-ztp/optimize"
+        self.assertFalse(os.path.lexists(target))
+        (self.ztp / "optimize").mkdir()
+        real_link = SETUP._make_exact_link
+        observed = []
+
+        def check_write_set(path, destination, **options):
+            rows = json.loads(journal.read_bytes())["body"].get("q_created_directories", [])
+            row = next((item for item in rows if item["path"] == str(target)), None)
+            self.assertIsNotNone(row, "Q comparison mkdir escaped its durable WAL")
+            metadata = target.lstat()
+            self.assertEqual((metadata.st_dev, metadata.st_ino), (row["dev"], row["ino"]))
+            observed.append(True)
+            return real_link(path, destination, **options)
+
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.multiple(SETUP, HTTP_BASE=str(self.root), ZTP=str(self.ztp),
+                                    _DRY_RUN=False, _LINK_TRANSACTION=SETUP._SetupLinkTransaction([]),
+                                    _SETUP_SWITCH_WAL_CONTEXT=(vars(LOAD), descriptor, {}, {})), \
+                mock.patch.object(SETUP, "_make_exact_link", side_effect=check_write_set):
+            SETUP._process_optimize_sample(str(project))
+        self.assertTrue(observed, "no real sample link crossed the Q-directory boundary")
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            self.assertEqual("restored-p", LOAD.recover_setup_switch_journal(
+                journal, deployment_lock_descriptor=descriptor,
+                services_quiesced=True, runtime_backend=backend,
+            ))
+        self.assertFalse(os.path.lexists(target), "Q comparison absence was not restored")
+        self.assertFalse(os.path.lexists(self.ztp / "optimize/new-sample"))
+        backend.start.assert_not_called()
+
+    def test_setup_q_comparison_replacement_fences_all_cold_recovery_writes(self) -> None:
+        (*state, journal, descriptor, backend) = self._prepare_cross_project_setup_crash()
+        project, common = state[1].resolve(), state[2]
+        (project / "99-output-ztp").mkdir(exist_ok=True)
+        target = project / "99-output-ztp/optimize"
+        (self.ztp / "optimize").mkdir()
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.multiple(SETUP, HTTP_BASE=str(self.root), ZTP=str(self.ztp),
+                                    _DRY_RUN=False, _LINK_TRANSACTION=SETUP._SetupLinkTransaction([]),
+                                    _SETUP_SWITCH_WAL_CONTEXT=(vars(LOAD), descriptor, {}, {})):
+            SETUP._process_optimize_sample(str(project))
+        original = target.with_name("original-owned-optimize")
+        target.rename(original)
+        target.mkdir()
+        (target / "unknown-report.csv").write_bytes(b"unrelated owner\n")
+        common.unlink()
+        common.symlink_to(os.path.relpath(project / "01-global.yaml", common.parent))
+        mixed, evidence = os.readlink(common), journal.read_bytes()
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            with self.assertRaisesRegex(LOAD.LoadError, "created directory.*(inode|changed|unknown)"):
+                LOAD.recover_setup_switch_journal(
+                    journal, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend,
+                )
+        self.assertEqual(mixed, os.readlink(common), "unknown Q owner did not fence P writes")
+        self.assertEqual(evidence, journal.read_bytes())
+        self.assertEqual(b"unrelated owner\n", (target / "unknown-report.csv").read_bytes())
+        self.assertTrue(original.is_dir())
+        backend.start.assert_not_called()
+
+    def test_setup_q_comparison_stage_retained_after_unconfirmed_install(self) -> None:
+        (*state, journal, descriptor, backend) = self._prepare_cross_project_setup_crash()
+        project = state[1].resolve()
+        (project / "99-output-ztp").mkdir()
+        target = project / "99-output-ztp/optimize"
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "_setup_switch_rename_directory_noreplace",
+                                  side_effect=LOAD.LoadError("independent Q install fault")):
+            with self.assertRaisesRegex(LOAD.LoadError, "Q install fault"):
+                LOAD.ensure_setup_switch_q_comparison_directory(
+                    journal, target, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend,
+                )
+        row = json.loads(journal.read_bytes())["body"]["q_created_directories"][0]
+        staged = Path(row["staged"])
+        self.assertTrue(staged.is_dir(), "unconfirmed install deleted durable WAL evidence")
+        self.assertEqual((row["dev"], row["ino"]), (staged.stat().st_dev, staged.stat().st_ino))
+        self.assertFalse(os.path.lexists(target))
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            self.assertEqual("restored-p", LOAD.recover_setup_switch_journal(
+                journal, deployment_lock_descriptor=descriptor,
+                services_quiesced=True, runtime_backend=backend,
+            ))
+        self.assertFalse(os.path.lexists(staged))
+        self.assertFalse(os.path.lexists(target))
+        backend.start.assert_not_called()
+
+    def test_setup_q_comparison_creation_is_not_generic_project_mkdir_permission(self) -> None:
+        (*state, journal, descriptor, backend) = self._prepare_cross_project_setup_crash()
+        project = state[1].resolve()
+        output = project / "99-output-ztp"
+        output.mkdir()
+        target = output / "optimize"
+        evidence = journal.read_bytes()
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            with self.assertRaisesRegex(LOAD.LoadError, "exact real output parent"):
+                LOAD.ensure_setup_switch_q_comparison_directory(
+                    journal, output / "unrelated", deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend,
+                )
+            target.mkdir()
+            (target / "operator-report.csv").write_bytes(b"preexisting Q report\n")
+            original = target.stat().st_ino
+            self.assertFalse(LOAD.ensure_setup_switch_q_comparison_directory(
+                journal, target, deployment_lock_descriptor=descriptor,
+                services_quiesced=True, runtime_backend=backend,
+            ))
+        self.assertEqual(evidence, journal.read_bytes())
+        self.assertEqual(original, target.stat().st_ino)
+        self.assertEqual(b"preexisting Q report\n", (target / "operator-report.csv").read_bytes())
+        self.assertFalse(os.path.lexists(output / "unrelated"))
+        backend.start.assert_not_called()
+
+    def test_setup_q_comparison_unregistered_stage_blocks_cold_recovery(self) -> None:
+        (*state, journal, descriptor, backend) = self._prepare_cross_project_setup_crash()
+        project, common = state[1].resolve(), state[2]
+        (project / "99-output-ztp").mkdir()
+        stage = project / "99-output-ztp/.optimize.setup-independent-orphan"
+        stage.mkdir()
+        (stage / "unknown-owner.txt").write_bytes(b"retain unknown owner\n")
+        common.unlink()
+        common.symlink_to(os.path.relpath(state[5], common.parent))
+        evidence, mixed = journal.read_bytes(), os.readlink(common)
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            with self.assertRaisesRegex(LOAD.LoadError, "unregistered Q comparison stage"):
+                LOAD.recover_setup_switch_journal(
+                    journal, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend,
+                )
+        self.assertEqual(evidence, journal.read_bytes())
+        self.assertEqual(mixed, os.readlink(common))
+        self.assertEqual(b"retain unknown owner\n", (stage / "unknown-owner.txt").read_bytes())
+        backend.start.assert_not_called()
+
+    def test_setup_q_comparison_stage_rebind_after_registration_blocks_install(self) -> None:
+        (*state, journal, descriptor, backend) = self._prepare_cross_project_setup_crash()
+        project = state[1].resolve()
+        (project / "99-output-ztp").mkdir()
+        target = project / "99-output-ztp/optimize"
+        original_register = LOAD._register_setup_switch_created_directory
+        captured = {}
+
+        def replace_after_registration(*args, **kwargs):
+            result = original_register(*args, **kwargs)
+            staged = Path(args[2])
+            captured["wal"] = journal.read_bytes()
+            captured["original"] = staged.with_name("original-owned-stage")
+            staged.rename(captured["original"])
+            staged.mkdir()
+            captured["replacement"] = staged
+            captured["replacement_inode"] = staged.stat().st_ino
+            return result
+
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "_register_setup_switch_created_directory",
+                                  side_effect=replace_after_registration), \
+                mock.patch.object(LOAD, "_setup_switch_rename_directory_noreplace",
+                                  wraps=LOAD._setup_switch_rename_directory_noreplace) as install:
+            with self.assertRaisesRegex(LOAD.LoadError, "Q comparison.*owner changed"):
+                LOAD.ensure_setup_switch_q_comparison_directory(
+                    journal, target, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend,
+                )
+        install.assert_not_called()
+        self.assertFalse(os.path.lexists(target))
+        self.assertEqual(captured["wal"], journal.read_bytes())
+        self.assertTrue(captured["original"].is_dir())
+        self.assertEqual(captured["replacement_inode"], captured["replacement"].stat().st_ino)
+        backend.start.assert_not_called()
+
+    def test_setup_q_comparison_absent_reentry_syncs_parent_before_wal_retirement(self) -> None:
+        (*state, journal, descriptor, backend) = self._prepare_cross_project_setup_crash()
+        project = state[1].resolve()
+        (project / "99-output-ztp").mkdir()
+        target = project / "99-output-ztp/optimize"
+        real_sync = LOAD._fsync_parent_directory
+
+        def interrupted_sync(path):
+            if Path(path) == target.parent and not os.path.lexists(target):
+                raise OSError("independent death after Q rmdir before parent sync")
+            return real_sync(path)
+
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            LOAD.ensure_setup_switch_q_comparison_directory(
+                journal, target, deployment_lock_descriptor=descriptor,
+                services_quiesced=True, runtime_backend=backend,
+            )
+            evidence = journal.read_bytes()
+            with mock.patch.object(LOAD, "_fsync_parent_directory", side_effect=interrupted_sync):
+                with self.assertRaisesRegex(OSError, "after Q rmdir"):
+                    LOAD.recover_setup_switch_journal(
+                        journal, deployment_lock_descriptor=descriptor,
+                        services_quiesced=True, runtime_backend=backend,
+                    )
+            self.assertFalse(os.path.lexists(target))
+            self.assertEqual(evidence, journal.read_bytes())
+            with mock.patch.object(LOAD, "_fsync_parent_directory", side_effect=interrupted_sync):
+                with self.assertRaisesRegex(OSError, "after Q rmdir"):
+                    LOAD.recover_setup_switch_journal(
+                        journal, deployment_lock_descriptor=descriptor,
+                        services_quiesced=True, runtime_backend=backend,
+                    )
+            self.assertEqual(evidence, journal.read_bytes(), "unsynced absence retired its WAL")
+            self.assertEqual("restored-p", LOAD.recover_setup_switch_journal(
+                journal, deployment_lock_descriptor=descriptor,
+                services_quiesced=True, runtime_backend=backend,
+            ))
+        self.assertFalse(os.path.lexists(journal))
+        backend.start.assert_not_called()
+
+    def test_setup_q_comparison_new_output_keeps_normal_directory_umask(self) -> None:
+        (*state, journal, descriptor, backend) = self._prepare_cross_project_setup_crash()
+        project = state[1].resolve()
+        (project / "99-output-ztp").mkdir()
+        target = project / "99-output-ztp/optimize"
+        original_mask = os.umask(0o022)
+        try:
+            with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+                self.assertTrue(LOAD.ensure_setup_switch_q_comparison_directory(
+                    journal, target, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend,
+                ))
+        finally:
+            os.umask(original_mask)
+        self.assertEqual(0o755, stat.S_IMODE(target.stat().st_mode),
+                         "WAL staging changed the report output's normal mkdir permissions")
+        row = json.loads(journal.read_bytes())["body"]["q_created_directories"][0]
+        self.assertEqual(0o755, row["mode"])
+        backend.start.assert_not_called()
 
     def test_setup_sample_unknown_cleanup_link_is_preserved_before_any_unlink(self) -> None:
         (*state, journal, descriptor, _backend) = self._prepare_cross_project_setup_crash(freeze_q_links=False)

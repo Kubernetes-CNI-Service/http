@@ -765,6 +765,259 @@ finally:
             self.assertFalse((root / "ztp/.setup-switch-journal.json").exists())
             self.assertFalse((root / "service-started").exists())
 
+    def test_real_setup_q_comparison_directory_death_cold_restores_absence(self):
+        """Q-local comparison mkdir is a persistent write, not a disposable alias."""
+        self._assert_real_setup_q_comparison_directory_recovery(replace_target=False)
+
+    def test_real_setup_q_comparison_directory_replacement_cold_holds_unchanged(self):
+        self._assert_real_setup_q_comparison_directory_recovery(replace_target=True)
+
+    def test_real_setup_q_comparison_death_before_wal_row_holds_orphan(self):
+        with tempfile.TemporaryDirectory(prefix="r22-q-stage-before-row-") as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, _p, q, common, _p_only, _q_only, manifest, _before, hook, barrier, _home = fixture
+            output = q / "99-output-ztp"
+            output.mkdir()
+            site = hook / "sitecustomize.py"
+            site.write_text(site.read_text(encoding="utf-8") + """
+real_mkdir = Path.mkdir
+def interrupted_q_stage_mkdir(path, *args, **kwargs):
+    result = real_mkdir(path, *args, **kwargs)
+    if path.parent == Path(os.environ['HTTP_TEST_Q_OUTPUT']) and path.name.startswith('.optimize.setup-'):
+        Path(os.environ['HTTP_TEST_Q_LINK_BARRIER']).write_bytes(b'Q stage before WAL row\\n')
+        os.kill(os.getpid(), signal.SIGKILL)
+    return result
+Path.mkdir = interrupted_q_stage_mkdir
+""", encoding="utf-8")
+            with mock.patch.dict(os.environ, {"HTTP_TEST_Q_OUTPUT": str(output)}):
+                first = self._run_private_load_setup_switch(
+                    fixture, prepare_journal=True, first_link=root / "never-created-link",
+                )
+            self.assertEqual(23, first.returncode, first.stdout + first.stderr)
+            self.assertEqual(b"Q stage before WAL row\n", barrier.read_bytes())
+            stages = list(output.glob(".optimize.setup-*"))
+            self.assertEqual(1, len(stages))
+            identity = stages[0].stat().st_ino
+            journal = root / "ztp/.setup-switch-journal.json"
+            evidence, manifest_before, mixed = journal.read_bytes(), manifest.read_bytes(), os.readlink(common)
+            self.assertEqual([], json.loads(evidence)["body"].get("q_created_directories", []))
+            recovery = """
+import importlib.util
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+root = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location('fresh_q_stage_orphan', root / 'DAY0-Prepare/11-load.py')
+load = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = load
+spec.loader.exec_module(load)
+load.active_managed_services = lambda *args, **kwargs: ()
+descriptor = load.acquire_deployment_lock(exclusive=True)
+try:
+    try:
+        load.recover_setup_switch_journal(
+            root / 'ztp/.setup-switch-journal.json', deployment_lock_descriptor=descriptor,
+            services_quiesced=True, runtime_backend=SimpleNamespace(name='supervisor'),
+        )
+    except load.LoadError as exc:
+        print('ORPHAN_HOLD:', exc)
+        raise SystemExit(29)
+finally:
+    load.release_deployment_lock(descriptor)
+"""
+            second = subprocess.run([sys.executable, "-B", "-c", recovery, str(root)],
+                                    cwd=root, capture_output=True, text=True, timeout=30)
+            self.assertEqual(29, second.returncode, second.stdout + second.stderr)
+            self.assertIn("unregistered Q comparison stage", second.stdout)
+            self.assertEqual(evidence, journal.read_bytes())
+            self.assertEqual(manifest_before, manifest.read_bytes())
+            self.assertEqual(mixed, os.readlink(common))
+            self.assertEqual(identity, stages[0].stat().st_ino)
+            self.assertFalse((root / "service-started").exists())
+
+    def test_real_setup_q_comparison_rmdir_death_reentry_syncs_before_wal_retirement(self):
+        with tempfile.TemporaryDirectory(prefix="r22-q-dir-reentry-sync-") as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, _p, q, _common, _p_only, _q_only, manifest, before, _hook, barrier, _home = fixture
+            (q / "99-output-ztp").mkdir()
+            target = q / "99-output-ztp/optimize"
+            first = self._run_private_load_setup_switch(
+                fixture, prepare_journal=True, first_link_prefix=str(root / "ztp/optimize/q-sample") + os.sep,
+            )
+            self.assertEqual(23, first.returncode, first.stdout + first.stderr)
+            self.assertTrue(barrier.is_file())
+            journal = root / "ztp/.setup-switch-journal.json"
+            evidence = journal.read_bytes()
+            recovery = """
+import importlib.util
+import os
+import signal
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+root = Path(sys.argv[1])
+target = root / 'DAY0-Prepare/q/99-output-ztp/optimize'
+journal = root / 'ztp/.setup-switch-journal.json'
+spec = importlib.util.spec_from_file_location('fresh_q_rmdir_sync', root / 'DAY0-Prepare/11-load.py')
+load = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = load
+spec.loader.exec_module(load)
+load.active_managed_services = lambda *args, **kwargs: ()
+if sys.argv[2] == 'kill':
+    real_rmdir = Path.rmdir
+    def interrupted_rmdir(path):
+        real_rmdir(path)
+        if path == target:
+            (root / 'q-rmdir-observed').write_bytes(b'Q directory removed\\n')
+            os.kill(os.getpid(), signal.SIGKILL)
+    Path.rmdir = interrupted_rmdir
+else:
+    real_sync = load._fsync_parent_directory
+    def observed_sync(path):
+        if Path(path) == target.parent:
+            assert journal.is_file(), 'Q absence sync happened after WAL retirement'
+            assert not os.path.lexists(target)
+            real_sync(path)
+            (root / 'q-absence-synced').write_bytes(b'parent synced before retirement\\n')
+        else:
+            real_sync(path)
+    load._fsync_parent_directory = observed_sync
+descriptor = load.acquire_deployment_lock(exclusive=True)
+try:
+    assert load.recover_setup_switch_journal(
+        journal, deployment_lock_descriptor=descriptor,
+        services_quiesced=True, runtime_backend=SimpleNamespace(name='supervisor'),
+    ) == 'restored-p'
+finally:
+    load.release_deployment_lock(descriptor)
+"""
+            second = subprocess.run([sys.executable, "-B", "-c", recovery, str(root), "kill"],
+                                    cwd=root, capture_output=True, text=True, timeout=30)
+            self.assertEqual(-9, second.returncode, second.stdout + second.stderr)
+            self.assertEqual(b"Q directory removed\n", (root / "q-rmdir-observed").read_bytes())
+            self.assertFalse(os.path.lexists(target))
+            self.assertEqual(evidence, journal.read_bytes())
+            third = subprocess.run([sys.executable, "-B", "-c", recovery, str(root), "resume"],
+                                   cwd=root, capture_output=True, text=True, timeout=30)
+            self.assertEqual(0, third.returncode, third.stdout + third.stderr)
+            self.assertTrue((root / "q-absence-synced").is_file(),
+                            "cold reentry retired WAL without syncing Q's known absence")
+            self.assertEqual(b"parent synced before retirement\n", (root / "q-absence-synced").read_bytes())
+            self.assertEqual(before["manifest"], manifest.read_bytes())
+            self.assertFalse(os.path.lexists(journal))
+            self.assertFalse((root / "service-started").exists())
+
+    def test_real_setup_q_comparison_registered_stage_rebind_blocks_install(self):
+        with tempfile.TemporaryDirectory(prefix="r22-q-stage-registration-rebind-") as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, _p, q, _common, _p_only, _q_only, _manifest, _before, hook, barrier, _home = fixture
+            output = q / "99-output-ztp"
+            output.mkdir()
+            site = hook / "sitecustomize.py"
+            site.write_text(site.read_text(encoding="utf-8") + """
+import json
+previous_q_replace = os.replace
+def replace_registered_q_stage(source, destination, *args, **kwargs):
+    result = previous_q_replace(source, destination, *args, **kwargs)
+    journal = Path(os.environ['HTTP_TEST_Q_STAGE_WAL'])
+    marker = journal.parent / 'q-stage-rebound'
+    if Path(destination) == journal and not marker.exists():
+        evidence = journal.read_bytes()
+        rows = json.loads(evidence)['body'].get('q_created_directories', [])
+        if rows:
+            staged = Path(rows[0]['staged'])
+            staged.rename(staged.with_name('original-owned-stage'))
+            staged.mkdir()
+            marker.write_bytes(evidence)
+    return result
+os.replace = replace_registered_q_stage
+""", encoding="utf-8")
+            journal = root / "ztp/.setup-switch-journal.json"
+            with mock.patch.dict(os.environ, {"HTTP_TEST_Q_STAGE_WAL": str(journal)}):
+                result = self._run_private_load_setup_switch(
+                    fixture, prepare_journal=True,
+                    first_link_prefix=str(root / "ztp/optimize/q-sample") + os.sep,
+                )
+            self.assertEqual(24, result.returncode, result.stdout + result.stderr)
+            self.assertFalse(os.path.lexists(output / "optimize"),
+                             "unrelated staged inode was installed before the later HOLD")
+            self.assertRegex(result.stdout + result.stderr, "Q comparison.*owner changed")
+            self.assertFalse(barrier.exists(), "unrelated stage escaped into shared sample publication")
+            self.assertFalse(os.path.lexists(output / "optimize"))
+            self.assertTrue((output / "original-owned-stage").is_dir())
+            evidence = (journal.parent / "q-stage-rebound").read_bytes()
+            self.assertEqual(evidence, journal.read_bytes())
+            staged = Path(json.loads(evidence)["body"]["q_created_directories"][0]["staged"])
+            self.assertTrue(staged.is_dir(), "unknown staged replacement was deleted")
+            self.assertNotEqual(json.loads(evidence)["body"]["q_created_directories"][0]["ino"],
+                                staged.stat().st_ino)
+            self.assertFalse((root / "service-started").exists())
+
+    def _assert_real_setup_q_comparison_directory_recovery(self, *, replace_target):
+        with tempfile.TemporaryDirectory(prefix="r22-q-comparison-dir-") as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, _p, q, common, _p_only, _q_only, manifest, before, _hook, barrier, _home = fixture
+            (q / "99-output-ztp").mkdir()
+            target = q / "99-output-ztp/optimize"
+            sample = root / "ztp/optimize/q-sample"
+            self.assertFalse(os.path.lexists(target))
+            first = self._run_private_load_setup_switch(
+                fixture, prepare_journal=True, first_link_prefix=str(sample) + os.sep,
+            )
+            self.assertEqual(23, first.returncode, first.stdout + first.stderr)
+            self.assertTrue(barrier.is_file())
+            self.assertTrue(target.is_dir())
+            journal = root / "ztp/.setup-switch-journal.json"
+            evidence, mixed = journal.read_bytes(), os.readlink(common)
+            manifest_before = manifest.read_bytes()
+            if replace_target:
+                target.rename(target.with_name("original-owned-optimize"))
+                target.mkdir()
+                (target / "unknown-report.csv").write_bytes(b"unrelated owner\n")
+            recovery = """
+import importlib.util
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+root = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location('fresh_q_comparison_directory', root / 'DAY0-Prepare/11-load.py')
+load = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = load
+spec.loader.exec_module(load)
+load.active_managed_services = lambda *args, **kwargs: ()
+descriptor = load.acquire_deployment_lock(exclusive=True)
+try:
+    try:
+        assert load.recover_setup_switch_journal(
+            root / 'ztp/.setup-switch-journal.json', deployment_lock_descriptor=descriptor,
+            services_quiesced=True, runtime_backend=SimpleNamespace(name='supervisor'),
+        ) == 'restored-p'
+    except load.LoadError as exc:
+        print('Q_DIRECTORY_HOLD:', exc)
+        raise SystemExit(29)
+finally:
+    load.release_deployment_lock(descriptor)
+"""
+            second = subprocess.run(
+                [sys.executable, "-B", "-c", recovery, str(root)], cwd=root,
+                capture_output=True, text=True, check=False, timeout=30,
+            )
+            self.assertEqual(29 if replace_target else 0, second.returncode,
+                             second.stdout + second.stderr)
+            if replace_target:
+                self.assertIn("created directory", second.stdout)
+                self.assertEqual(mixed, os.readlink(common))
+                self.assertEqual(manifest_before, manifest.read_bytes())
+                self.assertEqual(evidence, journal.read_bytes())
+                self.assertEqual(b"unrelated owner\n", (target / "unknown-report.csv").read_bytes())
+                self.assertTrue(sample.is_dir())
+            else:
+                self.assertFalse(os.path.lexists(target), "cold recovery lost Q's original absence")
+                self.assertFalse(os.path.lexists(sample))
+                self.assertEqual(before["manifest"], manifest.read_bytes())
+                self.assertFalse(os.path.lexists(journal))
+            self.assertFalse((root / "service-started").exists())
+
     def test_real_setup_inprocess_error_retains_unknown_replacement_and_wal(self):
         with tempfile.TemporaryDirectory(prefix="r22-setup-rollback-hold-") as name:
             fixture = self._private_setup_switch_fixture(Path(name))

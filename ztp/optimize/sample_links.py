@@ -584,7 +584,7 @@ def comparison_output_directory(project_dir):
     return Path(project_dir).resolve() / "99-output-ztp" / "optimize"
 
 
-def ensure_comparison_output_directory(project_dir, dry_run=False, report=print):
+def ensure_comparison_output_directory(project_dir, dry_run=False, report=print, *, ensure_directory=None):
     """Create the project-owned output directory without following symlinks."""
     target = comparison_output_directory(project_dir)
     if target.is_symlink() or (target.exists() and not target.is_dir()):
@@ -592,12 +592,16 @@ def ensure_comparison_output_directory(project_dir, dry_run=False, report=print)
     if dry_run:
         if not target.is_dir():
             report(f"[DRY] mkdir {target}")
+    elif ensure_directory is not None:
+        ensure_directory(target)
+        if target.is_symlink() or not target.is_dir():
+            raise FileExistsError(f"comparison WAL writer 未创建实际目录: {target}")
     else:
         target.mkdir(parents=True, exist_ok=True)
     return target
 
 
-def prepare_comparison_output(sample, project_dir, dry_run=False, report=print):
+def prepare_comparison_output(sample, project_dir, dry_run=False, report=print, *, ensure_directory=None):
     """Migrate a legacy real comparison directory, then prepare its link target.
 
     Older feedback.py releases created ``<project>-sample/comparison`` as a
@@ -611,7 +615,7 @@ def prepare_comparison_output(sample, project_dir, dry_run=False, report=print):
     target = comparison_output_directory(project_dir)
     if legacy.is_symlink() or not legacy.exists():
         return ensure_comparison_output_directory(
-            project_dir, dry_run=dry_run, report=report,
+            project_dir, dry_run=dry_run, report=report, ensure_directory=ensure_directory,
         )
     if not legacy.is_dir():
         raise FileExistsError(f"comparison 链接位置不是目录: {legacy}")
@@ -638,7 +642,7 @@ def prepare_comparison_output(sample, project_dir, dry_run=False, report=print):
         report(f"[MIGRATE] {legacy} -> {target}")
     else:
         legacy.rmdir()
-        ensure_comparison_output_directory(project_dir, report=report)
+        ensure_comparison_output_directory(project_dir, report=report, ensure_directory=ensure_directory)
         report(f"[CLEAN] 移除空旧 comparison 目录: {legacy}")
     return target
 

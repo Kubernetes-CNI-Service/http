@@ -336,6 +336,19 @@ SETUP WAL 的 checksum 也不是“写集完整”证明：恢复、只读核验
 未知 envelope/body/row 字段及任何重复 JSON 键。只有当前 schema2 reader 已实现的
 闭合字段集可进入既有身份/前像/持有凭据核验；未来写集不能被忽略后还原 P 或退休 WAL。
 缺失 Q parent 前像仍须明确 HOLD；该 reader 闸门不提供 B 成功收口或旧 A 激活权限。
+Q comparison 新建目录也属于持久写集。`q_created_directories` 只记录规范 Q 下
+`99-output-ztp/optimize` 的原缺席状态、同父暂存名及准确目录/父身份；必须先登记，
+再 no-replace 安装，普通 mkdir 的 umask 模式不能被暂存机制改为固定0700。
+暂存 mkdir 后、行登记前的死亡可能留下未知 `.optimize.setup-*`：该命名前缀只能
+阻断恢复/核验/登记，不能用作删除或采用权限。既有实体 comparison 的数据迁移
+仍保持原 HOLD；此 typed 行不是任意 Q 目录创建或迁移权限。自有目录 rmdir 后
+恢复再次中断，下一次恢复也必须同步已核父目录的缺席状态，再退休 WAL。
+安装前、安装后须核登记时捕获的原目录 dev/ino/mode，不能重新读取暂存名后把
+晚换绑 inode 当成已登记所有权。检查后与 rename 间的任意非合作写者原子隔离
+不在此保证内；其他同 UID 写者静默仍是前提。
+direct 及真实 LOAD→SETUP 强杀→新 LOAD/恢复再次强杀→第三 LOAD 的 workflow
+保留原断言；manifest 明确包含实际 helper `ztp/optimize/sample_links.py`。
+本地服务端口替身不证明真机停服/启动、Linux 断电、完整 B 收口或旧 A 激活。
 实体 latest 冷恢复不能只在预检时核源/备份 inode：持有原目录、匹配 release 和父目录
 的 NOFOLLOW FD，捕获的原目录/release 必须重新绑定 WAL 中的 dev/ino；在删除 Q 指针、
 备份 rename、恢复后和 WAL 退休前复核名称/持有 FD 的身份与元数据（含 ctime），并核

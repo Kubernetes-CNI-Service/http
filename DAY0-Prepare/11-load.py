@@ -6083,7 +6083,7 @@ def _decode_setup_switch_journal(payload: bytes) -> dict[str, object]:
     body = envelope["body"]
     required = {"schema_version", "phase", "root", "old_project", "new_project",
                 "manifest", "manifest_sha256", "manifest_mode", "links", "q_parent_preimage"}
-    optional = {"allow_late_q_values", "q_local_links", "created_directories",
+    optional = {"allow_late_q_values", "q_local_links", "created_directories", "q_created_directories",
                 "directories", "infra_logs", "q_manifest_intent"}
     if isinstance(body, dict) and "q_parent_preimage" not in body:
         raise ValueError("journal Q parent preimage is missing; HOLD")
@@ -6094,6 +6094,7 @@ def _decode_setup_switch_journal(payload: bytes) -> dict[str, object]:
         "links": {"path", "parent", "before", "after"},
         "q_local_links": {"path", "parent", "before", "after", "before_target", "after_target"},
         "created_directories": {"path", "staged", "parent", "dev", "ino", "mode"},
+        "q_created_directories": {"path", "staged", "parent", "dev", "ino", "mode"},
         "directories": {"path", "parent", "backup", "target", "source_dev", "source_ino",
                         "target_dev", "target_ino"},
         "infra_logs": {"source", "source_parent", "source_dev", "source_ino", "destination",
@@ -6632,6 +6633,20 @@ def register_setup_switch_created_directory(
     deployment_lock_descriptor: int | None,
     services_quiesced: bool, runtime_backend: ServiceRuntimeBackend | None,
 ) -> Path:
+    registered, _owner = _register_setup_switch_created_directory(
+        journal, path, staged, deployment_lock_descriptor=deployment_lock_descriptor,
+        services_quiesced=services_quiesced, runtime_backend=runtime_backend,
+        q_comparison=False,
+    )
+    return registered
+
+
+def _register_setup_switch_created_directory(
+    journal: Path, path: Path, staged: Path, *,
+    deployment_lock_descriptor: int | None,
+    services_quiesced: bool, runtime_backend: ServiceRuntimeBackend | None,
+    q_comparison: bool,
+) -> tuple[Path, os.stat_result]:
     """Freeze an empty private directory's identity before shared installation.
 
     The staged inode remains recovery evidence until the no-replace rename has
@@ -6662,22 +6677,33 @@ def register_setup_switch_created_directory(
             raise ValueError("created directory names are not canonical")
         path.parent.resolve(strict=True).relative_to(HTTP_ROOT.resolve(strict=True))
         physical_path = path.parent.resolve(strict=True) / path.name
-        for project in (body["old_project"]["path"], body["new_project"]["path"]):
-            if os.path.commonpath((str(physical_path), project)) == project:
-                raise ValueError("created shared directory is inside a project")
+        if q_comparison:
+            if (physical_path != Path(body["new_project"]["path"]) / "99-output-ztp/optimize"
+                    or physical_path != path):
+                raise ValueError("Q comparison directory is not its exact canonical output")
+        else:
+            for project in (body["old_project"]["path"], body["new_project"]["path"]):
+                if os.path.commonpath((str(physical_path), project)) == project:
+                    raise ValueError("created shared directory is inside a project")
         try:
             path.lstat()
         except FileNotFoundError:
             pass
         else:
             raise ValueError("created directory target is already occupied")
+        if q_comparison:
+            # Inspect the old WAL before creating this transient object. Cold
+            # recovery treats a stage not yet durably registered as unknown;
+            # a killed mkdir must never license retirement of that WAL.
+            staged.mkdir()
         metadata = staged.lstat()
         if not stat.S_ISDIR(metadata.st_mode) or any(staged.iterdir()):
             raise ValueError("staged created directory is not an empty real directory")
-        rows = body.get("created_directories", [])
+        inventory = "q_created_directories" if q_comparison else "created_directories"
+        rows = body.get(inventory, [])
         if any(row["path"] == str(path) or row["staged"] == str(staged) for row in rows):
             raise ValueError("created directory is already registered")
-        body["created_directories"] = [*rows, {
+        body[inventory] = [*rows, {
             "path": str(path), "staged": str(staged),
             "parent": _setup_switch_link_parent_identity(path),
             "dev": metadata.st_dev, "ino": metadata.st_ino,
@@ -6711,17 +6737,106 @@ def register_setup_switch_created_directory(
     finally:
         if os.path.lexists(temporary):
             temporary.unlink()
-    return journal
+    return journal, metadata
+
+
+def ensure_setup_switch_q_comparison_directory(
+    journal: Path, path: Path, *, deployment_lock_descriptor: int | None,
+    services_quiesced: bool, runtime_backend: ServiceRuntimeBackend | None,
+) -> bool:
+    """Install only Q's previously absent comparison output with a durable row.
+
+    This is not permission to create arbitrary Q directories or migrate legacy
+    comparison data. The real existing Q output parent is required. Keep a
+    staged inode after any uncertain WAL publication; never infer ownership
+    from a late occupied destination. Existing real outputs are not ours.
+    """
+    journal, path = map(Path, (journal, path))
+    _require_runtime_restore_guard(
+        deployment_lock_descriptor=deployment_lock_descriptor,
+        services_quiesced=services_quiesced, runtime_backend=runtime_backend,
+    )
+    if journal != _setup_switch_journal_path():
+        raise LoadError("setup switch journal path is not the configured authority")
+    recover_setup_switch_journal(
+        journal, deployment_lock_descriptor=deployment_lock_descriptor,
+        services_quiesced=services_quiesced, runtime_backend=runtime_backend,
+        inspect_only=True,
+    )
+    opened = _read_rollback_regular(journal, limit=_SETUP_SWITCH_JOURNAL_LIMIT)
+    body = _decode_setup_switch_journal(opened[0])["body"]
+    expected = Path(body["new_project"]["path"]) / "99-output-ztp/optimize"
+    if (path != expected or path.parent.resolve(strict=True) != path.parent
+            or not stat.S_ISDIR(path.parent.lstat().st_mode)):
+        raise LoadError("Q comparison directory requires its exact real output parent")
+    try:
+        current = path.lstat()
+    except FileNotFoundError:
+        current = None
+    if current is not None:
+        if not stat.S_ISDIR(current.st_mode):
+            raise LoadError("Q comparison output is not a real directory")
+        return False
+    # Select a name without a write. Registration performs the exclusive
+    # mkdir after its complete old-WAL inspection and preserves normal umask.
+    for _attempt in range(8):
+        staged = path.with_name(f".optimize.setup-{secrets.token_hex(16)}")
+        if not os.path.lexists(staged):
+            break
+    else:
+        raise LoadError("Q comparison staging names are occupied; HOLD")
+    # Failed registration may have created an unknown stage or published its
+    # row with uncertain directory sync. Retain both kinds of evidence.
+    _registered, created = _register_setup_switch_created_directory(
+        journal, path, staged, deployment_lock_descriptor=deployment_lock_descriptor,
+        services_quiesced=services_quiesced, runtime_backend=runtime_backend,
+        q_comparison=True,
+    )
+    # Use the identity captured into the durable row, not a new name lookup
+    # that could adopt an unrelated inode installed after registration.
+    staged_now = staged.lstat()
+    if (not stat.S_ISDIR(staged_now.st_mode)
+            or (staged_now.st_dev, staged_now.st_ino, stat.S_IMODE(staged_now.st_mode))
+            != (created.st_dev, created.st_ino, stat.S_IMODE(created.st_mode))):
+        raise LoadError("Q comparison staged owner changed before install; HOLD")
+    _setup_switch_rename_directory_noreplace(staged, path)
+    installed = path.lstat()
+    if (not stat.S_ISDIR(installed.st_mode)
+            or (installed.st_dev, installed.st_ino, stat.S_IMODE(installed.st_mode))
+            != (created.st_dev, created.st_ino, stat.S_IMODE(created.st_mode))):
+        raise LoadError("Q comparison installed directory owner changed; HOLD")
+    _fsync_parent_directory(path.parent)
+    return True
 
 
 def _setup_switch_created_directory_states(body):
     """Prevalidate every new shared inode and child before any recovery write."""
     try:
-        rows = body.get("created_directories", [])
+        shared_rows = body.get("created_directories", [])
+        q_rows = body.get("q_created_directories", [])
+        if not isinstance(shared_rows, list) or not isinstance(q_rows, list):
+            raise ValueError("invalid shared/Q directory inventory")
+        rows = [*shared_rows, *q_rows]
         if (not isinstance(rows, list)
                 or len({row["path"] for row in rows}) != len(rows)
                 or len({row["staged"] for row in rows}) != len(rows)):
             raise ValueError("duplicate or invalid directory rows")
+        q_output = Path(body["new_project"]["path"]) / "99-output-ztp"
+        try:
+            output_metadata = q_output.lstat()
+        except FileNotFoundError:
+            output_metadata = None
+        if output_metadata is not None:
+            if (not stat.S_ISDIR(output_metadata.st_mode)
+                    or q_output.resolve(strict=True) != q_output):
+                raise ValueError("Q comparison output parent is not its real canonical directory")
+            known_stages = {Path(row["staged"]) for row in q_rows}
+            # This prefix is only a refusal boundary, never ownership proof.
+            # Do not delete/adopt a stage left before row publication (or an
+            # unrelated object occupying the same reserved namespace).
+            if any(child.name.startswith(".optimize.setup-") and child not in known_stages
+                   for child in q_output.iterdir()):
+                raise ValueError("unregistered Q comparison stage; HOLD")
         owned_children = {
             Path(row["path"]) for row in body["links"]
             if row["before"] is None and row["after"] is not None
@@ -6737,6 +6852,15 @@ def _setup_switch_created_directory_states(body):
                     or any(type(row[key]) is not int for key in ("dev", "ino", "mode"))):
                 raise ValueError("created directory names or parent changed")
             path.parent.resolve(strict=True).relative_to(HTTP_ROOT.resolve(strict=True))
+            physical_path = path.parent.resolve(strict=True) / path.name
+            if row in q_rows:
+                if (path != Path(body["new_project"]["path"]) / "99-output-ztp/optimize"
+                        or physical_path != path):
+                    raise ValueError("Q comparison directory escaped its explicit scope")
+            else:
+                for project in (body["old_project"]["path"], body["new_project"]["path"]):
+                    if os.path.commonpath((str(physical_path), project)) == project:
+                        raise ValueError("created shared directory is inside a project")
             present = []
             for candidate in (path, staged):
                 try:
@@ -7901,7 +8025,12 @@ def _recover_setup_switch_journal_snapshot(
                     != (row["dev"], row["ino"], row["mode"])):
                 raise LoadError("setup switch created directory changed during recovery")
             present.rmdir()
-            _fsync_parent_directory(present.parent)
+        # A previous recovery may have died after rmdir but before the
+        # namespace sync. Known absence is still an outstanding durable write.
+        # Recheck the surviving parent and sync it on every recovery entry.
+        if row["parent"] != _setup_switch_link_parent_identity(_path):
+            raise LoadError("setup switch created directory parent changed before absence sync")
+        _fsync_parent_directory(_path.parent)
     if current_manifest != (state.manifest, state.manifest_mode):
         require_journal_unchanged()
         _atomic_restore_setup_manifest(state)
