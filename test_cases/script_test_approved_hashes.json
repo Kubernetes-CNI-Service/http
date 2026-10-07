@@ -24,7 +24,7 @@
       "root-entrypoint-workflow": "NOT COVERED (requires Linux EUID 0 private namespace)"
     },
     "schema_version": 1,
-    "snapshot_sha256": "6dccb3ac9821bf81154e809b52dcceb31d6fe22013a7b90c8318f6684a4fa273",
+    "snapshot_sha256": "e315ee0481237a9efc0f8a206e37cd7622bf6aa58c5fa1c9f4f42276f79527ba",
     "validation_only": {
       "baseline_skipped_tests": [
         "test_cases.test_docker_management_ssh_key.DockerManagementSshKeyWorkflowTests.test_real_deploy_entrypoint_drives_locked_helper_then_11_load",
@@ -46,7 +46,7 @@
   "scripts": {
     "DAY0-Prepare/01-a-setup.py": {
       "canonical": "DAY0-Prepare/01-a-setup.py",
-      "sha256": "c515a86af01044157a96ce00535ec09282e3a04b2e0da31e4c53a5ddeb08a0a0"
+      "sha256": "aef857531cd4c33b75b361ab0653375fb18d2066c41b1d5f26bcdfb4316d2e02"
     },
     "DAY0-Prepare/02-unsetup.py": {
       "canonical": "DAY0-Prepare/02-unsetup.py",
@@ -738,7 +738,7 @@
     "docs/architecture/README.md": "153837bcd62f49edf8591ceec8b1b6ccefe9a3b5638a91bed6452ac87264a0e4",
     "docs/deployment/BUNDLE_WORKFLOWS.md": "9aeabcfbadd720fb0e3ff53bc86b642d8cc4240b3315a07855f875210ce5de73",
     "docs/deployment/README.md": "7e12ea5ce77afffb8db351a230e32e2c252f332252026eb05b16a6063c05cc25",
-    "docs/operations/README.md": "560c0608221cd332165403a91a1d9b4bdd8a157327628d1fd2b56d1117528d01",
+    "docs/operations/README.md": "8cc2b32322094b5c4d1b4b5c407fb9f510e4fb53083e4a2818a1917f34a4bfd4",
     "docs/reference/README.md": "717f023b3016420b61e8889493fd0e2ab9d0106388483025f8d66dee75c75039",
     "docs/validation/README.md": "2a2ee457e01074db1994363a2f8ed62029a9febb14d7c4ea92243b93ec61d98f",
     "examples/public-project/01-global.yaml.example": "539fc9ba304e21c465e2dcbbb1bdb8e2afb1063d421e3f947b05add144733928",
@@ -760,7 +760,7 @@
     "infra/infra-neutral.conf": "238bec3c9be34fc5a7bf097e36012133da4a30b90cabdf17d758796ecdab24f8",
     "requirements-container-top-level.lock": "3532f5208b462243bab779b01eb4deb21638ac05a9390c17ac997ba8d7f24998",
     "requirements-dev.txt": "2047cfeb6e7d7c3b02380624cd212528fb8416cf3e76dd924d2e2cba8567a50a",
-    "test_cases/REAL_ENVIRONMENT.md": "f2ac3ea24d9cacaa38dcc06ef60ff5614682c744a2de5dfe0f80627f71df138e",
+    "test_cases/REAL_ENVIRONMENT.md": "ee56983f07c9a78ca0dabc63ffecc6bba5ceb08336657b6cb8e5fb4a47e67e7f",
     "test_cases/audit_public_tree.py": "3c9cefbabdb0eb7816201c67f5c98ac715b1cd8ea81720b6a24659bdaaebfc0f",
     "test_cases/module_loader.py": "ef1e9b44f0272209378788ed6682b8a6a68c95a76a6d545c001ddc4762471ecf",
     "test_cases/monitor_authority_root_warden.py": "f4ac61acc04af33168aa01ba295a74fe036202b9179ad65f10e9db87375a2c4c",
@@ -935,7 +935,7 @@
     "test_cases.test_manual_applied_config": "1dc0c5e9872fd5164f170e92b8f94c4ef1ee62b5dd9b934165769476791c4b77",
     "test_cases.test_mlag_evpn_generation": "7eb9edb511bc66c616b214903fbeef5c77df112c27990750fd6fb006a507cd7a",
     "test_cases.test_monitor_authority_entrypoints": "b40ed42fdac6c5fbc8a685514ad69452685e37691d7ada9458b6d5f4e1c302ae",
-    "test_cases.test_monitor_authority_semantic_workflow": "ee72e387dea86534ee49aae1c516e54e13695432bc4f0885e5402548e9828326",
+    "test_cases.test_monitor_authority_semantic_workflow": "d613bf40138cbc4bf17b393d9b673214dc7c22cb36bfbf4ad0cfd4aeae743384",
     "test_cases.test_monitor_authority_source_guard": "bb1fd10fc83f7e4de2ae8c87c39cb5c3fd304fdfbc8a8404087e271d25db156e",
     "test_cases.test_monitor_stack_review": "8509f3f29550edccdf7f8eb0fc9244a1b6187c1c769c755a1ecf8aee9a60ebdf",
     "test_cases.test_monitor_writer_quiesce": "5efe4499c9ccb4f051d914a8584abcc0fc56023ac0bbc734c9c659a8967bed99",
@@ -971,8 +971,8 @@
     "test_cases.test_req10c_auto_workflow": "42da3b376a473575974b5fad24dac0c31f5466ae723d0e5769a0af92220451fd",
     "test_cases.test_req14_active_provenance_workflow": "23fceb66c4ce89b30f3cdf34fa1fad205912a83dddd8fb0b6e51b46f7d22474a",
     "test_cases.test_req14_splitter_hostname_binding": "e17ce6fcfb2939be52f3f6ac042839f2c8ef6ccc835cde6689e0c15c72c14543",
-    "test_cases.test_req19_infra_log_contract": "b70d32d2753109f49e926ec6e24123db2d7d3b3b7978b727b13d0ae58f09d7c9",
-    "test_cases.test_req19_infra_log_workflow": "9aaaae0e87127013d13cf7199717f8398781ea3a2581d31b6bbc3286bb88123f",
+    "test_cases.test_req19_infra_log_contract": "5675f3d645bf70118ab2f816e94c8245e6346d2e5ff2079153b380803ac6acd7",
+    "test_cases.test_req19_infra_log_workflow": "c368030722ae8be76497ec695529a87857eaa41f1791318b1decd209580b30bb",
     "test_cases.test_req22_runtime_contract": "b3a2edcc24c316db393754a52c36eab8187fdb4c89f6935bedb96388c9cb53d0",
     "test_cases.test_req22_setup_contract": "75680f7da3a79b73da1dbf70b920b5e2d09eba16f42d8addc8450a92022f3c85",
     "test_cases.test_req7_ib_provenance": "e3d73ac32b5f4b82b8e4eec83a2a6eb7025154b19c58c0f5d6f1177ba5228595",
