@@ -4997,10 +4997,13 @@ finally:
     def test_real_setup_committed_q_group_cold_qualifies_original_a_image_stage(self):
         self._real_setup_committed_q_group_restore(a_image=True, setup_death=True)
 
+    def test_real_setup_committed_q_group_cold_rejects_same_byte_original_dhcp_backup(self):
+        self._real_setup_committed_q_group_restore(dhcp=True, dhcp_backup_fault=True)
+
     def _real_setup_committed_q_group_restore(self, *, dhcp=False, runtime_death=False,
                                              setup_death=False, foreign_setup=False,
                                              q_local=False, q_fault=False, a_fault=None, a_image_fault=False,
-                                             a_image=False):
+                                             a_image=False, dhcp_backup_fault=False):
         fixture = RELEASE_FIXTURE.ReleaseTransactionTests()
         fixture.setUp()
         try:
@@ -5156,6 +5159,14 @@ try:
             print('R22_FOREIGN_A_IMAGE_REJECTED')
             sys.exit(0)
         raise AssertionError('same-byte new original A image source must not be adopted')
+    if sys.argv[5] == 'foreign-dhcp-backup':
+        try:
+            load.restore_setup_switch_a_disk(q, guard=guard, confirmed=True)
+        except load.LoadError as exc:
+            assert 'DHCP' in str(exc) and 'backup' in str(exc) and ('owner' in str(exc) or 'inventory' in str(exc)) and 'HOLD' in str(exc), str(exc)
+            print('R22_FOREIGN_DHCP_BACKUP_REJECTED')
+            sys.exit(0)
+        raise AssertionError('same-byte new original DHCP backup must not be adopted')
     status = load.restore_setup_switch_a_disk(q, guard=guard, confirmed=True)
     assert status == 'restored-p-a-group-stopped-wal-retained', status
     expected_bootstrap = (b'A oob bootstrap\nZTP_UPGRADE_ENABLED="true"\n'
@@ -5191,18 +5202,24 @@ finally:
                                     capture_output=True, text=True, check=False, timeout=30)
             self.assertEqual(-signal.SIGKILL, writer.returncode, writer.stdout + writer.stderr)
             original_wal = (journal.lstat().st_ino, journal.read_bytes())
-            if q_fault or a_fault or a_image_fault:
+            if q_fault or a_fault or a_image_fault or dhcp_backup_fault:
                 compensation = subprocess.run(argv + ["compensate-q", shape], capture_output=True,
                                               text=True, check=False, timeout=30)
                 self.assertEqual(0, compensation.returncode, compensation.stdout + compensation.stderr)
                 self.assertIn("R22_Q_COMPENSATED_NO_P_WRITE", compensation.stdout)
                 marker = journal.parent / ".setup-switch-a-restore.json"
                 original_plan = (marker.lstat().st_ino, marker.read_bytes())
-                source = (root / "image/cumulus-linux-5.12.0-mlx-amd64.bin" if a_image_fault
+                if dhcp_backup_fault:
+                    wal_body = json.loads(journal.read_bytes())["body"]
+                    source = Path(wal_body["dhcp_transaction"]["body"]["backup"]["path"]) / "dhcpd.conf"
+                else:
+                    source = (root / "image/cumulus-linux-5.12.0-mlx-amd64.bin" if a_image_fault
                           else context.project / a_fault if a_fault else q / "01-global.yaml")
                 held = source.with_name("independent-original-cold-Q-input")
                 metadata = source.lstat()
                 payload = os.readlink(source) if a_fault else source.read_bytes()
+                if dhcp_backup_fault:
+                    held = root / "independent-held-original-dhcp-backup"
                 source.rename(held)
                 if a_fault:
                     source.symlink_to(payload)
@@ -5211,10 +5228,10 @@ finally:
                     source.chmod(stat.S_IMODE(metadata.st_mode))
                     os.utime(source, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
                 frozen = (source.lstat().st_ino, state[7].lstat().st_ino, state[7].read_bytes(), os.readlink(common))
-                rejecting = subprocess.run(argv + ["foreign-a-image" if a_image_fault else "foreign-a-link" if a_fault else "foreign-q-input", shape], capture_output=True,
+                rejecting = subprocess.run(argv + ["foreign-dhcp-backup" if dhcp_backup_fault else "foreign-a-image" if a_image_fault else "foreign-a-link" if a_fault else "foreign-q-input", shape], capture_output=True,
                                            text=True, check=False, timeout=30)
                 self.assertEqual(0, rejecting.returncode, rejecting.stdout + rejecting.stderr)
-                self.assertIn("R22_FOREIGN_A_IMAGE_REJECTED" if a_image_fault else "R22_FOREIGN_A_LINK_REJECTED" if a_fault else "R22_FOREIGN_Q_INPUT_REJECTED", rejecting.stdout)
+                self.assertIn("R22_FOREIGN_DHCP_BACKUP_REJECTED" if dhcp_backup_fault else "R22_FOREIGN_A_IMAGE_REJECTED" if a_image_fault else "R22_FOREIGN_A_LINK_REJECTED" if a_fault else "R22_FOREIGN_Q_INPUT_REJECTED", rejecting.stdout)
                 self.assertEqual(frozen, (source.lstat().st_ino, state[7].lstat().st_ino, state[7].read_bytes(), os.readlink(common)))
                 self.assertEqual(original_plan, (marker.lstat().st_ino, marker.read_bytes()))
                 self.assertEqual(original_wal, (journal.lstat().st_ino, journal.read_bytes()))

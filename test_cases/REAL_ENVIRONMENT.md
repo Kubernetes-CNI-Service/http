@@ -1634,6 +1634,8 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 ## TC-REAL-R22-GENERATION-INPUT-ABA-001 — 跨进程输入换代与多输出一致性
 
+- 2026-10-08 原 DHCP backup 首写前 owner 续补：沿本卡隔离 VM、精确版本、排他锁、明确停服、其它写者静默、独立控制台和可恢复快照前提，在第一个 B DHCP 覆盖前独立记录 backup/父目录及四叶子 FD/name/dev/ino/mode/uid/gid/nlink/size/mtime/ctime/SHA、原缺席和链接文字，核原 WAL 清单已持久登记。登记 fsync、Q 补偿前或分组冷读前，受控保留原对象并换入同字节新文件、同目标新链接或克隆 backup 目录，必须 HOLD、保留 WAL/计划/原备份/未知对象，零服务启动；不得从现名补登记 legacy 缺资格。保存完整 END/exit、注入和写/同步物理顺序及前后像。清理仅由负责人人工恢复已核隔离快照，不在 live 注入、不删未知对象/原证据、不手改 ledger。此窄修仍未见证 live DHCP 完整持久补偿 owner、原 A 显式健康/归档、root/Linux/断电/C2/DEV ACK，本卡 OPEN。
+
 - 2026-10-08 原 A 共享镜像与补偿 stage 归属续补：沿本卡既有隔离 VM、精确版本、排他锁、停服、写者静默和可恢复快照前提，原 intent 源限定为真实 SETUP 的 `image/` 根；历史 HTTP 根 intent 不升级为 A 激活资格。真实 LOAD→SETUP→Q 提交强杀→P 补偿强杀→新 LOAD 只能消费原计划登记的 image stage inode，持续核原 source FD/name/九字段 owner/SHA、原计划与 WAL；同目标第三方发布叶子、借用另一 WAL body 须 HOLD。原 Q-only 父目录删除后再冷重入只按已登记缺席链同步幸存原祖先，不重建、不认领未知目录。保存 stage/原始和恢复 owner、同步物理顺序、完整 END/exit、正反例及封存日志。清理仅人工恢复本卡已核隔离快照，不在 live 注入。此本地续补不是 A 显式健康激活/安全归档、root/Linux/断电/C2/DEV ACK 见证，本卡仍 OPEN。
 
 - 2026-10-08 原 A 镜像资格基础：沿本卡既有隔离 VM/精确版本/可恢复快照、排他锁、停服和其它写者静默前提，在 Q 首写前独立记录 sealed A 输入/receipt 唯一升级策略、原版本/受支持 basename 或唯一 alias、源 FD/name/父目录/九字段 owner/SHA 和真实相对发布叶子。Q 提交强杀/补偿后新 LOAD 只读核原 intent；未知原策略/版本/镜像保持明确不获资格，不能从当前 P/Q 或新参数补办；同字节新源、上下文晚换绑须 HOLD，原 WAL/计划/未知对象保留。保存完整物理 END/exit 与检查顺序；清理只按本卡已核隔离快照人工恢复，不在 live 注入。此基础未覆盖自有 image stage 的补偿归属、A 显式健康激活/安全归档、root/Linux/断电/C2/DEV ACK，本卡仍 OPEN。

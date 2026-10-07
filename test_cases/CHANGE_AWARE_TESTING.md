@@ -1,5 +1,39 @@
 # 脚本变更影响测试
 
+## 2026-10-08 R22 原 DHCP backup 首写前所有权
+
+基于 `c7d5ddd`，独立 direct 与真实 LOAD→SETUP→Q 提交强杀→Q 补偿→新 LOAD
+将原 DHCP backup 保留并换入同字节/模式/mtime 的新 inode；原实现均错误接受。
+有效 RED 为 2 FAIL / 15.770s / exit1，完整
+`outputs/test-diagnostics/r22-original-dhcp-backup-owner-red2.log`，
+inode162265585 / size129990 / SHA256
+`6fd815fb0d610babce2cea1910c93e563231a36cf9d4d9609e9f4f726b0cd780`，
+物理 Ran33→FAILED35→actual44→冻结一致45→END47=1。
+首轮 direct 的私有映射配置错误与真实 workflow 有效失败日志原样保留，
+不将夹具错误当作实现缺陷。
+
+原 WAL 在第一个 B 覆盖前冻结 backup 目录/父和四名称的九字段 owner/缺席。
+登记边界及发布、Q 补偿、分组冷恢复持续要求同一原清单及原内容/元数据；
+不从冷读的当前名称重新登记。闭合 reader 拒绝未知清单、Boolean owner 等，
+legacy 缺清单保持显式缺资格。独立普通文件/链接/目录负例及登记 fsync 换绑
+补齐原断言；真实多脚本映射沿现有 manifest，不删/跳/弱化测试。
+
+初步 direct/真实 workflow GREEN 2 OK / 7.027s / exit0，完整
+`r22-original-dhcp-backup-owner-green.log`（inode162270172 / size127947 / SHA256
+`e0a4c739cc60ba1a1f97ff11150a38d3c4407cbc7e12cb2e7fd3d6de3751fd23`），
+物理 Ran9→OK11→actual17→冻结一致18→END20=0。扩展形状首轮仅 legacy
+断言取 envelope 层而非 body 的夹具错误已修，原日志保留。
+最终模块回归另记；本地局部 PASS 不等于正式 related/full/check，也不关闭
+live DHCP 补偿 owner、旧 A 显式健康激活/归档、root/Linux/断电/C2/DEV ACK。
+
+最终源码/测试/manifest 和治理文档冻结的四模块回归 **631 OK / 252.550s / exit0**，
+`outputs/test-diagnostics/r22-original-dhcp-backup-owner-module-regression.log`，
+inode162276662 / size348565 / SHA256
+`43d12192250e26bc61a66435d1594664bc11e0e20dfcd0001a44412937c3c5c1`；
+279250-byte 旧前缀 SHA256 `d1e9610da5658c00850e48b0ca7c758b374a85053ec8e60f8082025d4a9fb382`
+不变，读取前后 stat/inode 稳定，物理 Ran1823→OK1825→actual1856→
+冻结一致1857→END1859=0。ledger 未更改；这仍是有界模块回归，正式证明待执行。
+
 ## 2026-10-08 R22 原 A 共享镜像源与补偿 stage 归属
 
 基于 `c9c25bc` 的续补，独立测试将真实镜像放在 SETUP 使用的共享 `image/` 根。

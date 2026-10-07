@@ -164,7 +164,7 @@ def assert_private_dhcp_transaction_retention(
     injected, warnings, cleanup, restore_phase, sync_events, installed_b = [], [], [], [], [], []
     backup_sync_events = []
     backup_sync_faults = ("backup-file-sync", "backup-dir-sync", "backup-transaction-sync", "backup-runtime-sync")
-    binding_faults = {"bound-setup-register-wal", "bound-setup-register-receipt", "bound-setup-late-wal",
+    binding_faults = {"bound-setup-register-wal", "bound-setup-register-receipt", "bound-setup-register-backup", "bound-setup-late-wal",
                       "bound-setup-parent-wal"}
 
     def replace_bound_authority(path):
@@ -212,6 +212,17 @@ def assert_private_dhcp_transaction_retention(
                             "st_size", "st_mtime_ns", "st_ctime_ns",
                         )]
                         assert binding["body"] == json.loads(receipt.read_bytes())["body"]
+                        inventory = binding["backup_inventory"]
+                        backup_directory = receipt.parent / "backup"
+                        owner = backup_directory.stat()
+                        assert inventory["directory"] == dict(path=str(backup_directory),
+                            dev=owner.st_dev, ino=owner.st_ino)
+                        for backup_name in names:
+                            original = backup_directory / backup_name
+                            metadata = original.lstat() if os.path.lexists(original) else None
+                            assert inventory["leaves"][backup_name] == (None if metadata is None else
+                                [getattr(metadata, field) for field in ("st_dev", "st_ino", "st_mode",
+                                 "st_uid", "st_gid", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")])
                         for name in names:
                             if a_shapes and name == "dhcpd_eth.hosts":
                                 assert binding["body"]["before"][name]["state"] == "link"
@@ -297,15 +308,22 @@ def assert_private_dhcp_transaction_retention(
 
     def sync_parent(descriptor):
         metadata = os.fstat(descriptor)
-        if outcome in {"bound-setup-register-wal", "bound-setup-register-receipt"} and not injected:
+        if outcome in {"bound-setup-register-wal", "bound-setup-register-receipt", "bound-setup-register-backup"} and not injected:
             for temporary in setup_wal.parent.glob(".setup-switch-journal.*"):
                 if temporary == setup_wal:
                     continue
                 staged = temporary.lstat()
                 if (metadata.st_dev, metadata.st_ino) == (staged.st_dev, staged.st_ino):
+                    transaction = next(live_dir.glob(".load-dhcp-transaction-*"))
                     authority = (setup_wal if outcome == "bound-setup-register-wal" else
-                                 next(live_dir.glob(".load-dhcp-transaction-*")) / "a-preimage.json")
+                                 transaction / "backup/dhcpd.conf" if outcome == "bound-setup-register-backup"
+                                 else transaction / "a-preimage.json")
+                    original_metadata = authority.lstat()
                     replace_bound_authority(authority)
+                    if outcome == "bound-setup-register-backup":
+                        os.utime(authority, ns=(original_metadata.st_atime_ns, original_metadata.st_mtime_ns))
+                        assert api._dhcp_restore_leaf_state(authority) == api._dhcp_restore_leaf_state(
+                            root / ("independent-original-" + authority.name))
                     break
         for transaction in live_dir.glob(".load-dhcp-transaction-*"):
             receipt = transaction / "a-preimage.json"
@@ -416,7 +434,8 @@ def assert_private_dhcp_transaction_retention(
                 elif outcome == "success-setup-wal-probe-error":
                     assert "cleanup cannot confirm SETUP WAL absence" in str(exc) and "HOLD" in str(exc), str(exc)
                 elif outcome in binding_faults:
-                    assert "HOLD" in str(exc) and ("WAL" in str(exc) or "receipt" in str(exc)), str(exc)
+                    assert "HOLD" in str(exc) and ("WAL" in str(exc) or "receipt" in str(exc)
+                        or outcome == "bound-setup-register-backup" and "backup inventory owner" in str(exc)), str(exc)
                 else:
                     raise
             else:
@@ -1068,7 +1087,7 @@ class ReleaseTransactionTests(unittest.TestCase):
                                                   ztp_disabled=False, seed_q_publication=False,
                                                   publication_phase="published", partial_runtime=False,
                                                   q_local=False, original_a_policy=None, original_a_images=False,
-                                                  q_created=False):
+                                                  q_created=False, dhcp=False):
         state, context, guard = self._prepare_q_manifest_publication(seed_q_publication=seed_q_publication,
             q_local=q_local, original_a_policy=original_a_policy, original_a_images=original_a_images,
             q_created=q_created)
@@ -1110,11 +1129,20 @@ class ReleaseTransactionTests(unittest.TestCase):
         if partial_runtime:
             (self.ztp / "ztp-bootstrap_oob.sh").write_bytes(b"independent partially installed B runtime\n")
         candidates = private_publication_candidates(LOAD, q)
-        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), ExitStack() as namespaces:
+            if dhcp:
+                names = ("dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts", "dhcpd_nvl.hosts")
+                namespaces.enter_context(mock.patch.object(LOAD, "dhcp_file_mappings", return_value={
+                    q / "independent-dhcp-B" / name: self.root.resolve() / "private-etc-dhcp" / name
+                    for name in names}))
             token = LOAD.register_setup_switch_publication_bundle(*candidates, guard=guard, **image_options)
             self.addCleanup(LOAD.close_setup_switch_publication_bundle, token)
-            LOAD.commit_prepared_release(candidates[0], require_authority=lambda:
-                LOAD.require_setup_switch_publication_bundle(token, guard=guard))
+            if dhcp:
+                assert_private_dhcp_transaction_retention(LOAD, self.root, q, "bound-setup-before-write",
+                    setup_guard=guard, publication_candidates=(*candidates, token), a_shapes=True)
+            else:
+                LOAD.commit_prepared_release(candidates[0], require_authority=lambda:
+                    LOAD.require_setup_switch_publication_bundle(token, guard=guard))
             if publication_phase != "report":
                 LOAD.generation_report.commit_prepared_generation_report(candidates[1], require_authority=lambda:
                     LOAD.require_setup_switch_publication_bundle(token, guard=guard, phase="report"))
@@ -1375,6 +1403,72 @@ class ReleaseTransactionTests(unittest.TestCase):
 
     def test_committed_q_group_restore_keeps_original_plan_and_restores_p_a(self):
         self._committed_q_group_restore(existing=True)
+
+    def test_committed_q_group_restore_holds_same_byte_replaced_original_dhcp_backup(self):
+        self._committed_q_group_dhcp_backup_fault("file")
+
+    def test_committed_q_group_restore_holds_same_target_replaced_original_dhcp_backup_link(self):
+        self._committed_q_group_dhcp_backup_fault("link")
+
+    def test_committed_q_group_restore_holds_replaced_original_dhcp_backup_directory(self):
+        self._committed_q_group_dhcp_backup_fault("directory")
+
+    def test_setup_wal_original_dhcp_backup_boolean_identity_is_rejected(self):
+        state, _context, _guard, _token, _inputs = self._prepare_published_q_for_stopped_preflight(dhcp=True)
+        original = state[-3].read_bytes()
+        envelope = json.loads(original)
+        envelope["body"]["dhcp_transaction"]["backup_inventory"]["leaves"]["dhcpd.conf"][0] = True
+        envelope["sha256"] = hashlib.sha256(LOAD._setup_switch_canonical_payload(envelope["body"])).hexdigest()
+        with self.assertRaisesRegex(ValueError, "DHCP backup leaf owner"):
+            LOAD._decode_setup_switch_journal(LOAD._setup_switch_canonical_payload(envelope))
+        self.assertEqual(original, state[-3].read_bytes())
+        # A legacy reader contract must remain visibly unqualified, not gain
+        # a new inventory by sampling today's backup namespace.
+        envelope = json.loads(original)
+        del envelope["body"]["dhcp_transaction"]["backup_inventory"]
+        envelope["sha256"] = hashlib.sha256(LOAD._setup_switch_canonical_payload(envelope["body"])).hexdigest()
+        decoded = LOAD._decode_setup_switch_journal(LOAD._setup_switch_canonical_payload(envelope))
+        self.assertNotIn("backup_inventory", decoded["body"]["dhcp_transaction"])
+
+    def _committed_q_group_dhcp_backup_fault(self, fault):
+        state, _context, guard, _token, _inputs = self._prepare_published_q_for_stopped_preflight(dhcp=True)
+        q, journal = state[1], state[-3]
+        runtime = self.root.resolve() / "private-etc-dhcp"
+        names = ("dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts", "dhcpd_nvl.hosts")
+        mappings = {q / "independent-dhcp-B" / name: runtime / name for name in names}
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "dhcp_file_mappings", return_value=mappings):
+            LOAD.restore_setup_switch_q_publication(q, guard=guard, confirmed=True)
+            body = json.loads(journal.read_bytes())["body"]
+            directory = Path(body["dhcp_transaction"]["body"]["backup"]["path"])
+            backup = directory / ("dhcpd_eth.hosts" if fault == "link" else "dhcpd.conf")
+            metadata = backup.lstat()
+            payload = os.readlink(backup) if fault == "link" else backup.read_bytes()
+            held = self.root / "independent-held-original-dhcp-backup"
+            if fault == "directory":
+                directory.rename(held)
+                shutil.copytree(held, directory, symlinks=True)
+                self.assertNotEqual(held.lstat().st_ino, directory.lstat().st_ino)
+            else:
+                backup.rename(held)
+                if fault == "link":
+                    backup.symlink_to(payload)
+                else:
+                    backup.write_bytes(payload)
+                    backup.chmod(stat.S_IMODE(metadata.st_mode))
+                os.utime(backup, ns=(metadata.st_atime_ns, metadata.st_mtime_ns), follow_symlinks=False)
+                self.assertNotEqual(held.lstat().st_ino, backup.lstat().st_ino)
+            def unknown_leaf():
+                return (backup.lstat().st_ino, os.readlink(backup) if fault == "link" else backup.read_bytes())
+            evidence = (state[2].lstat().st_ino, os.readlink(state[2]), state[7].read_bytes(),
+                        (self.ztp / "ztp-bootstrap_oob.sh").read_bytes(), journal.read_bytes(),
+                        unknown_leaf())
+            with self.assertRaisesRegex(LOAD.LoadError, "DHCP.*backup.*(owner|inventory).*HOLD"):
+                LOAD.restore_setup_switch_a_disk(q, guard=guard, confirmed=True)
+            self.assertEqual(evidence, (state[2].lstat().st_ino, os.readlink(state[2]), state[7].read_bytes(),
+                (self.ztp / "ztp-bootstrap_oob.sh").read_bytes(), journal.read_bytes(),
+                unknown_leaf()))
+        state[-1].start.assert_not_called()
 
     def test_committed_q_group_restore_missing_q_preimages_reenters_without_retirement(self):
         self._committed_q_group_restore(existing=False)
@@ -5783,7 +5877,7 @@ class ReleaseTransactionTests(unittest.TestCase):
             self.assertEqual(before, journal.read_bytes())
 
     def test_setup_dhcp_registration_rejects_same_bytes_foreign_wal_and_receipt(self):
-        for outcome in ("bound-setup-register-wal", "bound-setup-register-receipt", "bound-setup-late-wal", "bound-setup-parent-wal"):
+        for outcome in ("bound-setup-register-wal", "bound-setup-register-receipt", "bound-setup-register-backup", "bound-setup-late-wal", "bound-setup-parent-wal"):
             with self.subTest(outcome=outcome):
                 fixture = ReleaseTransactionTests()
                 fixture.setUp()

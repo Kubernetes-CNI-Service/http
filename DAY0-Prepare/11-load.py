@@ -6549,7 +6549,10 @@ def _decode_setup_switch_journal(payload: bytes) -> dict[str, object]:
         _validate_setup_switch_image_intent(body["a_image_intent"])
     if "dhcp_transaction" in body:
         binding = body["dhcp_transaction"]
-        exact_fields(binding, {"receipt", "identity", "sha256", "body", "staged"}, "DHCP transaction")
+        binding_fields = {"receipt", "identity", "sha256", "body", "staged"}
+        if isinstance(binding, dict) and "backup_inventory" in binding:
+            binding_fields.add("backup_inventory")
+        exact_fields(binding, binding_fields, "DHCP transaction")
         exact_fields(binding["staged"], directory_fields, "DHCP staged directory")
         if (not isinstance(binding["receipt"], str) or not Path(binding["receipt"]).is_absolute()
                 or not isinstance(binding["identity"], list) or len(binding["identity"]) != 9
@@ -6558,6 +6561,30 @@ def _decode_setup_switch_journal(payload: bytes) -> dict[str, object]:
                 or not isinstance(binding["sha256"], str)
                 or not re.fullmatch(r"[0-9a-f]{64}", binding["sha256"])):
             raise ValueError("invalid DHCP transaction binding")
+        if "backup_inventory" in binding:
+            inventory = binding["backup_inventory"]
+            exact_fields(inventory, {"directory", "parent", "leaves"}, "DHCP backup inventory")
+            for role in ("directory", "parent"):
+                exact_fields(inventory[role], directory_fields, "DHCP backup " + role)
+                row = inventory[role]
+                if (not isinstance(row["path"], str) or not Path(row["path"]).is_absolute()
+                        or os.path.normpath(row["path"]) != row["path"]
+                        or any(type(row[key]) is not int or row[key] < 0 for key in ("dev", "ino"))):
+                    raise ValueError("invalid DHCP backup directory owner")
+            names = {"dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts", "dhcpd_nvl.hosts"}
+            exact_fields(inventory["leaves"], names, "DHCP backup leaves")
+            exact_fields(binding["body"]["before"], names, "DHCP backup preimages")
+            for name, owner in inventory["leaves"].items():
+                original = binding["body"]["before"][name]
+                if original["state"] == "missing":
+                    if owner is not None:
+                        raise ValueError("missing DHCP backup has an owner")
+                elif (not isinstance(owner, list) or len(owner) != 9
+                        or any(type(value) is not int or value < 0 for value in owner)
+                        or owner[5] != 1
+                        or not (stat.S_ISREG(owner[2]) if original["state"] == "file"
+                                else original["state"] == "link" and stat.S_ISLNK(owner[2]))):
+                    raise ValueError("invalid DHCP backup leaf owner")
     if "a_runtime" in body:
         runtime = body["a_runtime"]
         runtime_fields = {"selector_target", "receipt_directory", "receipt_parent", "receipt_file",
@@ -7155,6 +7182,7 @@ def _require_setup_switch_publication_bundle(token, *, phase, require_guard):
             receipt = Path(binding["receipt"])
             held_receipt = token.get("receipt_descriptor", -1)
             _require_bound_dhcp_transaction_namespace(binding)
+            _require_setup_switch_dhcp_backup_inventory(binding)
             if (held_receipt < 0
                     or list(_dhcp_a_preimage_receipt_identity(os.fstat(held_receipt))) != binding["identity"]
                     or list(_dhcp_a_preimage_receipt_identity(receipt.lstat())) != binding["identity"]
@@ -7358,6 +7386,8 @@ def _setup_switch_a_compensation_authority(project, *, guard, confirmed,
                            for key in ("old_project", "new_project"))):
                 raise LoadError("A compensation original WAL/root/P/Q owner changed; HOLD")
             _setup_switch_runtime_context(body, require_original_yaml_owner=True)
+            if "dhcp_transaction" in body:
+                _require_setup_switch_dhcp_backup_inventory(body["dhcp_transaction"])
         def shared_authority():
             wal_authority()
             _require_setup_switch_compensation_q_evidence(body)
@@ -11924,6 +11954,49 @@ def _restore_setup_switch_dhcp_group(token, guard, require_authority):
         _setup_switch_prepared_registration_body((token[1], 0o600))["dhcp_transaction"])
 
 
+def _setup_switch_dhcp_backup_inventory(binding):
+    """Observe only the original receipt's four backup names, without adoption."""
+    try:
+        backup = Path(binding["body"]["backup"]["path"])
+        directory = _setup_switch_directory_identity(backup)
+        parent = _setup_switch_link_parent_identity(backup)
+        originals = binding["body"]["before"]
+        expected = {name for name, row in originals.items() if row["state"] != "missing"}
+        if set(os.listdir(backup)) != expected:
+            raise LoadError("DHCP original backup inventory names changed; HOLD")
+        leaves = {}
+        for name, original in originals.items():
+            path = backup / name
+            metadata = path.lstat() if os.path.lexists(path) else None
+            owner = list(_dhcp_a_preimage_receipt_identity(metadata)) if metadata else None
+            if metadata is not None and (metadata.st_nlink != 1 or metadata.st_size > _ROLLBACK_PAYLOAD_LIMIT):
+                raise LoadError("DHCP original backup inventory leaf is not bounded/single-link; HOLD")
+            if _dhcp_restore_leaf_state(path) != original:
+                raise LoadError("DHCP original backup inventory bytes/metadata changed; HOLD")
+            after = path.lstat() if os.path.lexists(path) else None
+            if owner != (list(_dhcp_a_preimage_receipt_identity(after)) if after else None):
+                raise LoadError("DHCP original backup leaf owner changed during read; HOLD")
+            leaves[name] = owner
+        if (directory != _setup_switch_directory_identity(backup)
+                or parent != _setup_switch_link_parent_identity(backup)
+                or set(os.listdir(backup)) != expected
+                or any(owner != (list(_dhcp_a_preimage_receipt_identity((backup / name).lstat()))
+                                  if os.path.lexists(backup / name) else None)
+                       for name, owner in leaves.items())):
+            raise LoadError("DHCP original backup inventory owner changed during snapshot; HOLD")
+        return dict(directory=directory, parent=parent, leaves=leaves)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise LoadError(f"DHCP original backup inventory unconfirmed; HOLD: {exc}") from exc
+
+
+def _require_setup_switch_dhcp_backup_inventory(binding):
+    # Legacy receipts retain disk-only compatibility. Never mint original
+    # ownership by reading their present names during cold recovery.
+    original = binding.get("backup_inventory")
+    if original is not None and _setup_switch_dhcp_backup_inventory(binding) != original:
+        raise LoadError("DHCP original backup inventory owner differs from registered WAL; HOLD")
+
+
 def _register_setup_switch_dhcp_transaction(preimage, parent_candidate, guard, *, publication_token=None):
     """Fsync original SETUP -> DHCP ownership before any live B overwrite.
 
@@ -11983,6 +12056,7 @@ def _register_setup_switch_dhcp_transaction(preimage, parent_candidate, guard, *
             "sha256": hashlib.sha256(payload).hexdigest(), "body": evidence["body"],
             "staged": _setup_switch_directory_identity(staged),
         }
+        binding["backup_inventory"] = _setup_switch_dhcp_backup_inventory(binding)
 
         def require_original():
             _require_runtime_restore_guard(**guard)
@@ -12004,6 +12078,7 @@ def _register_setup_switch_dhcp_transaction(preimage, parent_candidate, guard, *
             )
             if current != evidence or binding["staged"] != _setup_switch_directory_identity(staged):
                 raise LoadError("SETUP/DHCP original four-file evidence changed; HOLD")
+            _require_setup_switch_dhcp_backup_inventory(binding)
 
         require_original()
         body["dhcp_transaction"] = binding
@@ -12087,6 +12162,7 @@ def _require_setup_switch_dhcp_transaction(token, guard, *, inspect_runtime=True
     if preimage[2] != _dhcp_a_preimage_receipt_identity(os.fstat(receipt_fd)):
         raise LoadError("SETUP/DHCP registered receipt descriptor changed; HOLD")
     binding = body["dhcp_transaction"]
+    _require_setup_switch_dhcp_backup_inventory(binding)
     if not inspect_runtime:
         backup = preimage[0].parent / "backup"
         before = binding["body"]["before"]

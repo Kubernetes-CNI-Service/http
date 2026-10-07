@@ -620,6 +620,13 @@ inode；第三方同目标链接、借用其它 WAL body 均 HOLD，源 owner �
 owner。已删除的原 Q-only 父目录按原目录登记补同步幸存祖先，不重建、不扫描认领。
 A 显式健康激活/安全归档与正式 proof 仍待。
 
+SETUP/DHCP 首个 B 文件覆盖前，原 WAL 另登记 `backup_inventory`：原 backup
+目录/父目录身份、四个名称的九字段叶子 owner（原缺席为 None）。发布、原 Q
+补偿和分组冷恢复持续核该清单及原字节/元数据；同字节新文件、同目标新链接、
+克隆目录、登记暂存 fsync 中换绑均 HOLD，不删除未知对象、不启动服务。
+旧缺清单的 WAL 不在冷读中补办原 owner；本窄修不证明 live DHCP 补偿暂存的
+完整持久 owner、显式旧 A 激活/退休或正式 related/full/check。
+
 同一模块还覆盖端到端 deployment scope：默认 `all` 同时生成 Production/AIR；`prod` 只发布
 Production Cumulus/IB/NVL；`air` 只发布 AIR DHCP/YAML/release，并只临时渲染 AIR full profile
 实际引用的 Production 来源；单独指定 `mini` 会自动选择 AIR scope 和 `eth`，显式 `prod+mini`
