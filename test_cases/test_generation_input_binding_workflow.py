@@ -373,6 +373,137 @@ finally:
             fixture.doCleanups()
             fixture.tearDown()
 
+    def test_real_setup_q_local_prewrite_holds_late_a_stage_sync(self):
+        self._assert_real_latest_prewrite_holds_late_a("q-local")
+
+    def test_real_setup_materialized_prewrite_holds_late_a_stage_sync(self):
+        self._assert_real_latest_prewrite_holds_late_a("materialized")
+
+    def _assert_real_latest_prewrite_holds_late_a(self, kind):
+        fixture = RELEASE_FIXTURE.ReleaseTransactionTests()
+        fixture.setUp()
+        try:
+            state, context = fixture._prepare_persisted_a_runtime_switch()
+            root, q = fixture.root.resolve(), state[1].resolve()
+            journal, descriptor, backend = state[-3:]
+            # The real generic cleanup also selects this fixture's P latest
+            # export. Freeze its independently specified row before Q starts.
+            public_latest = root / "ztp/config/cumulus/latest_yaml"
+            public_latest.unlink()
+            public_latest.symlink_to(os.path.relpath(state[0] / "99-output-eth/latest", public_latest.parent))
+            physical_links = {path.parent.resolve() / path.name: raw for path, raw in state[9].items()}
+            state[7].write_text(f"# setup manifest — proj: {state[0]}\n"
+                                + "".join(f"{path}\n" for path in physical_links)
+                                + f"{public_latest}\n")
+            journal.unlink()  # untouched private fixture authority only
+            context = RELEASE_FIXTURE.LOAD.CrossProjectRollbackContext(
+                state[0], context.selector_target, context.runtime_receipt,
+                RELEASE_FIXTURE.LOAD.snapshot_active_setup_state(expected_project=state[0]),
+            )
+            with mock.patch.object(RELEASE_FIXTURE.LOAD, "active_managed_services", return_value=()):
+                RELEASE_FIXTURE.LOAD.prepare_setup_switch_journal(
+                    state[0], q, expected_new_links={state[2].parent.resolve() / state[2].name: state[5]},
+                    deployment_lock_descriptor=descriptor, services_quiesced=True,
+                    runtime_backend=backend, runtime_rollback_context=context,
+                )
+            latest, releases = fixture._q_local_latest_fixture(q)
+            if kind == "materialized":
+                latest.unlink()
+                shutil.copytree(releases[1], latest)
+            owner = latest.lstat().st_ino
+            receipt = context.runtime_receipt / "receipt.json"
+            receipt_owner, receipt_bytes = receipt.stat().st_ino, receipt.read_bytes()
+            shutil.copytree(ROOT / "tools", root / "tools")
+            (root / "ztp/optimize").mkdir()
+            shutil.copy2(ROOT / "ztp/optimize/sample_links.py", root / "ztp/optimize/sample_links.py")
+            for name in ("11-load.py", "01-a-setup.py"):
+                shutil.copy2(ROOT / "DAY0-Prepare" / name, root / "DAY0-Prepare" / name)
+            RELEASE_FIXTURE.LOAD.release_deployment_lock(descriptor)
+            fixture._cleanups = [item for item in fixture._cleanups
+                                 if item[0] != RELEASE_FIXTURE.LOAD.release_deployment_lock]
+            evidence, manifest = journal.read_bytes(), state[7].read_bytes()
+            links = {path: os.readlink(path) for path in physical_links}
+            links[public_latest] = os.readlink(public_latest)
+            writer = r'''
+import importlib.util, json, os, stat, sys
+from pathlib import Path
+from types import SimpleNamespace
+root, q = map(Path, sys.argv[1:3])
+def script(name):
+    spec = importlib.util.spec_from_file_location('late_latest_' + name, root / 'DAY0-Prepare' / (name + '.py'))
+    api = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = api
+    spec.loader.exec_module(api)
+    return api
+load, setup = script('11-load'), script('01-a-setup')
+load.active_managed_services = lambda *args, **kwargs: ()
+load.service_runtime_backend = lambda: SimpleNamespace(name='supervisor')
+# Supply the actual copied LOAD module with its stopped service backend;
+# every inventory, resolver, prewrite guard, WAL writer and fsync is real.
+real_run_path = setup.runpy.run_path
+setup.runpy.run_path = lambda path, *args, **kwargs: (vars(load) if Path(path).name == '11-load.py'
+    else real_run_path(path, *args, **kwargs))
+setup.ZTP = str(root / 'ztp')
+setup.MANIFEST_FILE = str(root / 'ztp/.setup_manifest')
+fd = load.acquire_deployment_lock(exclusive=True)
+journal = root / 'ztp/.setup-switch-journal.json'
+record = json.loads(journal.read_bytes())['body']['a_runtime']
+receipt = Path(record['receipt_directory']['path']) / 'receipt.json'
+real_sync, injected = os.fsync, []
+def sync(descriptor):
+    result = real_sync(descriptor)
+    owner = os.fstat(descriptor)
+    if not injected and stat.S_ISREG(owner.st_mode):
+        for staged in journal.parent.glob('.setup-switch-journal.*'):
+            info = staged.lstat()
+            if staged != journal and (info.st_dev, info.st_ino) == (owner.st_dev, owner.st_ino):
+                original = receipt.stat().st_ino
+                receipt.rename(root / 'held-original-latest-a-receipt')
+                receipt.write_bytes((root / 'held-original-latest-a-receipt').read_bytes())
+                receipt.chmod(0o644)
+                assert original != receipt.stat().st_ino
+                injected.append(True)
+                break
+    return result
+os.fsync = sync
+try:
+    setup._require_setup_switch_wal_prewrite(str(q), fd)
+except ValueError as exc:
+    assert injected == [True] and 'runtime' in str(exc), str(exc)
+    print('SETUP_LATEST_LATE_A_PREWRITE_HELD')
+    raise SystemExit(7)
+else:
+    assert injected == [True], 'late A injection did not reach the real prewrite'
+    print('SETUP_LATEST_LATE_A_PREWRITE_WRONGLY_AUTHORIZED')
+    raise SystemExit(8)
+finally:
+    os.fsync = real_sync
+    load.release_deployment_lock(fd)
+'''
+            result = subprocess.run(
+                [sys.executable, "-B", "-c", writer, str(root), str(q)],
+                capture_output=True, text=True, check=False, timeout=30,
+            )
+            self.assertEqual(7, result.returncode, result.stdout + result.stderr)
+            self.assertIn("SETUP_LATEST_LATE_A_PREWRITE_HELD", result.stdout)
+            self.assertEqual(evidence, journal.read_bytes())
+            self.assertEqual(manifest, state[7].read_bytes())
+            self.assertEqual(links, {path: os.readlink(path) for path in links})
+            self.assertEqual(owner, latest.lstat().st_ino)
+            if kind == "materialized":
+                self.assertEqual(b"hostname: q-1\n", (latest / "leaf.yaml").read_bytes())
+            else:
+                self.assertEqual(releases[0].name, os.readlink(latest))
+            self.assertFalse(list(latest.parent.glob(".latest.setup-switch-wal-*")))
+            self.assertNotEqual(receipt_owner, receipt.stat().st_ino)
+            self.assertEqual(receipt_bytes, receipt.read_bytes())
+            self.assertEqual(b"A oob bootstrap\n", (root / "ztp/ztp-bootstrap_oob.sh").read_bytes())
+            self.assertEqual([journal], list(journal.parent.glob(".setup-switch-journal.*")))
+            backend.start.assert_not_called()
+        finally:
+            fixture.doCleanups()
+            fixture.tearDown()
+
     def _assert_real_persisted_a_runtime_switch(self, replace_a_receipt):
         fixture = RELEASE_FIXTURE.ReleaseTransactionTests()
         fixture.setUp()

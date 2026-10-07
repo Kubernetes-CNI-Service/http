@@ -6704,8 +6704,7 @@ def register_setup_switch_q_local_latest(
     before_name = journal.lstat()
     opened = _read_rollback_regular(journal, limit=_SETUP_SWITCH_JOURNAL_LIMIT)
     try:
-        envelope = _decode_setup_switch_journal(opened[0])
-        body = envelope["body"]
+        body = _setup_switch_prepared_registration_body(opened)
         if "q_manifest_intent" in body:
             raise ValueError("Q manifest intent is already frozen")
         q = Path(body["new_project"]["path"])
@@ -6746,6 +6745,7 @@ def register_setup_switch_q_local_latest(
                 "st_dev", "st_ino", "st_mode", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns"))
                 or _read_rollback_regular(journal, limit=_SETUP_SWITCH_JOURNAL_LIMIT) != opened):
             raise LoadError("setup switch journal changed before Q-local registration")
+        _setup_switch_runtime_context(next_body)
         os.replace(temporary, journal)
         _fsync_parent_directory(journal.parent)
     finally:
@@ -6880,6 +6880,7 @@ def _register_setup_switch_created_directory(
                 "st_mtime_ns", "st_ctime_ns"))
                 or _read_rollback_regular(journal, limit=_SETUP_SWITCH_JOURNAL_LIMIT) != opened):
             raise LoadError("setup switch journal changed before directory registration")
+        _setup_switch_runtime_context(body)
         os.replace(temporary, journal)
         _fsync_parent_directory(journal.parent)
     finally:
@@ -7298,6 +7299,7 @@ def register_setup_switch_comparison_transfer(
                     or _read_rollback_regular(journal, limit=_SETUP_SWITCH_JOURNAL_LIMIT) != opened):
                 raise ValueError("comparison WAL changed before registration")
             _setup_switch_comparison_transfer_states(next_body)
+            _setup_switch_runtime_context(next_body)
             os.replace(temporary, journal)
             _fsync_parent_directory(journal.parent)
         finally:
@@ -7381,16 +7383,7 @@ def register_setup_switch_materialized_directory(
     try:
         before_name = journal.lstat()
         opened = _read_rollback_regular(journal, limit=_SETUP_SWITCH_JOURNAL_LIMIT)
-        if opened is None or opened[1] != 0o600:
-            raise ValueError("journal is absent or not private")
-        payload, _mode = opened
-        envelope = _decode_setup_switch_journal(payload)
-        body = envelope["body"]
-        if (not isinstance(body, dict) or body["schema_version"] != 2
-                or body["phase"] != "prepared"
-                or hashlib.sha256(_setup_switch_canonical_payload(body)).hexdigest()
-                != envelope["sha256"]):
-            raise ValueError("journal envelope is invalid")
+        body = _setup_switch_prepared_registration_body(opened)
         new = body["new_project"]
         new_project = Path(new["path"])
         if new != _setup_switch_directory_identity(new_project):
@@ -7466,6 +7459,7 @@ def register_setup_switch_materialized_directory(
                 "st_size", "st_mtime_ns", "st_ctime_ns"))
                 or _read_rollback_regular(journal, limit=_SETUP_SWITCH_JOURNAL_LIMIT) != opened):
             raise LoadError("setup switch journal changed before directory registration")
+        _setup_switch_runtime_context(next_body)
         os.replace(temporary, journal)
         _fsync_parent_directory(journal.parent)
     finally:
@@ -7503,15 +7497,7 @@ def register_setup_switch_infra_log_tree(
     try:
         before_name = journal.lstat()
         opened = _read_rollback_regular(journal, limit=_SETUP_SWITCH_JOURNAL_LIMIT)
-        if opened is None or opened[1] != 0o600:
-            raise ValueError("journal is absent or not private")
-        envelope = _decode_setup_switch_journal(opened[0])
-        body = envelope["body"]
-        if (not isinstance(body, dict) or body["schema_version"] != 2
-                or body["phase"] != "prepared"
-                or hashlib.sha256(_setup_switch_canonical_payload(body)).hexdigest()
-                != envelope["sha256"]):
-            raise ValueError("journal envelope is invalid")
+        body = _setup_switch_prepared_registration_body(opened)
         q_project = Path(body["new_project"]["path"])
         source, destination = Path(source), Path(destination)
         expected_source = HTTP_ROOT.resolve(strict=True) / "infra/logs"
@@ -7570,6 +7556,7 @@ def register_setup_switch_infra_log_tree(
                 "st_size", "st_mtime_ns", "st_ctime_ns"))
                 or _read_rollback_regular(journal, limit=_SETUP_SWITCH_JOURNAL_LIMIT) != opened):
             raise LoadError("setup switch journal changed before infra registration")
+        _setup_switch_runtime_context(next_body)
         os.replace(temporary, journal)
         _fsync_parent_directory(journal.parent)
     finally:

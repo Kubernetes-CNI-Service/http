@@ -3663,6 +3663,126 @@ class ReleaseTransactionTests(unittest.TestCase):
     def test_setup_wal_manifest_registration_holds_a_receipt_changed_after_preflight(self):
         self._assert_manifest_registration_late_a_receipt_held("preflight")
 
+    def test_setup_wal_q_local_registration_holds_late_a_preflight(self):
+        self._assert_writer_registration_late_a_held("q-local", "preflight")
+
+    def test_setup_wal_materialized_registration_holds_late_a_preflight(self):
+        self._assert_writer_registration_late_a_held("materialized", "preflight")
+
+    def test_setup_wal_infra_registration_holds_late_a_preflight(self):
+        self._assert_writer_registration_late_a_held("infra", "preflight")
+
+    def test_setup_wal_q_local_registration_holds_late_a_stage_sync(self):
+        self._assert_writer_registration_late_a_held("q-local", "stage-sync")
+
+    def test_setup_wal_materialized_registration_holds_late_a_stage_sync(self):
+        self._assert_writer_registration_late_a_held("materialized", "stage-sync")
+
+    def test_setup_wal_infra_registration_holds_late_a_stage_sync(self):
+        self._assert_writer_registration_late_a_held("infra", "stage-sync")
+
+    def test_setup_wal_created_registration_holds_late_a_stage_sync(self):
+        self._assert_writer_registration_late_a_held("created", "stage-sync")
+
+    def test_setup_wal_comparison_registration_holds_late_a_stage_sync(self):
+        self._assert_writer_registration_late_a_held("comparison", "stage-sync")
+
+    def test_setup_wal_q_local_idempotent_registration_holds_late_a_preflight(self):
+        self._assert_writer_registration_late_a_held("q-local", "preflight", repeat=True)
+
+    def test_setup_wal_materialized_idempotent_registration_holds_late_a_preflight(self):
+        self._assert_writer_registration_late_a_held("materialized", "preflight", repeat=True)
+
+    def _assert_writer_registration_late_a_held(self, kind, boundary, *, repeat=False):
+        state, context = self._prepare_persisted_a_runtime_switch()
+        q, journal, descriptor, backend = state[1].resolve(), *state[-3:]
+        if kind == "q-local":
+            source, releases = self._q_local_latest_fixture(q)
+            target = releases[1]
+            operation = LOAD.register_setup_switch_q_local_latest
+        elif kind == "materialized":
+            source, target = q / "99-output-eth/latest", q / "99-output-eth/release"
+            operation = LOAD.register_setup_switch_materialized_directory
+        elif kind == "infra":
+            source, target = self.root.resolve() / "infra/logs", q / "99-output-infra"
+            operation = LOAD.register_setup_switch_infra_log_tree
+        elif kind == "comparison":
+            source = self.root.resolve() / "ztp/optimize/new-sample/comparison"
+            target = q / "99-output-ztp/optimize"
+            operation = LOAD.register_setup_switch_comparison_transfer
+        else:
+            source = self.root.resolve() / "ztp/config/later-shared"
+            target = source.with_name(".later-shared.setup-late-a")
+            operation = LOAD.register_setup_switch_created_directory
+        if kind in {"materialized", "infra", "comparison"}:
+            source.mkdir(parents=True)
+            (source / "original.txt").write_bytes(b"independent original writer bytes\n")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if kind != "comparison":
+                target.mkdir()
+            if kind == "materialized":
+                (target / ".published-complete").write_bytes(b"complete\n")
+        elif kind == "created":
+            target.mkdir()
+        guard = dict(deployment_lock_descriptor=descriptor,
+                     services_quiesced=True, runtime_backend=backend)
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            if repeat:
+                operation(journal, source, target, **guard)
+        evidence, manifest = journal.read_bytes(), state[7].read_bytes()
+        links = {path: os.readlink(path) for path in state[9]}
+        source_owner = source.lstat().st_ino if os.path.lexists(source) else None
+        target_owner = target.lstat().st_ino if os.path.lexists(target) else None
+        receipt = context.runtime_receipt / "receipt.json"
+        receipt_bytes, receipt_owner = receipt.read_bytes(), receipt.stat().st_ino
+        replacements = []
+
+        def replace_receipt():
+            if replacements:
+                return
+            receipt.rename(self.root / "held-original-writer-a-receipt")
+            receipt.write_bytes(receipt_bytes)
+            receipt.chmod(0o644)
+            self.assertNotEqual(receipt_owner, receipt.stat().st_ino)
+            replacements.append(receipt.stat().st_ino)
+
+        real_recover, real_sync = LOAD.recover_setup_switch_journal, os.fsync
+
+        def recover(*args, **kwargs):
+            result = real_recover(*args, **kwargs)
+            if boundary == "preflight":
+                replace_receipt()
+            return result
+
+        def sync(fd):
+            result = real_sync(fd)
+            owner = os.fstat(fd)
+            if boundary == "stage-sync" and stat.S_ISREG(owner.st_mode):
+                for staged in journal.parent.glob(".setup-switch-journal.*"):
+                    info = staged.lstat()
+                    if staged != journal and (info.st_dev, info.st_ino) == (owner.st_dev, owner.st_ino):
+                        replace_receipt()
+                        break
+            return result
+
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "recover_setup_switch_journal", side_effect=recover), \
+                mock.patch.object(LOAD.os, "fsync", side_effect=sync):
+            with self.assertRaisesRegex(LOAD.LoadError, "runtime.*authority"):
+                operation(journal, source, target, **guard)
+        self.assertEqual(1, len(replacements), "late A injection did not reach this writer")
+        self.assertEqual(evidence, journal.read_bytes(), "foreign A owner authorized a new WAL row")
+        self.assertEqual(manifest, state[7].read_bytes())
+        self.assertEqual(links, {path: os.readlink(path) for path in links})
+        self.assertEqual(source_owner, source.lstat().st_ino if os.path.lexists(source) else None)
+        self.assertEqual(target_owner, target.lstat().st_ino if os.path.lexists(target) else None)
+        if kind in {"materialized", "infra", "comparison"}:
+            self.assertEqual(b"independent original writer bytes\n", (source / "original.txt").read_bytes())
+        self.assertEqual(receipt_bytes, receipt.read_bytes())
+        self.assertEqual(replacements[0], receipt.stat().st_ino, "HOLD consumed foreign A receipt")
+        self.assertEqual([journal], list(journal.parent.glob(".setup-switch-journal.*")))
+        backend.start.assert_not_called()
+
     def test_setup_wal_manifest_registration_holds_a_receipt_changed_during_stage_sync(self):
         self._assert_manifest_registration_late_a_receipt_held("stage-sync")
 
