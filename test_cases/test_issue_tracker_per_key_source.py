@@ -51,6 +51,30 @@ class EthPerKeySourceTests(unittest.TestCase):
         self.settings = KChainState(1, 3, "9" * 64)
         self.cycles, self.sources, self.link = pair()
 
+    def test_expected_authority_change_has_distinct_typed_hold(self):
+        SOURCE = source(self)
+        for changed in (
+            replace(self.sources[1], derivation=TopologyDerivationWitness(
+                {"topology": "8" * 64}, ())),
+            replace(self.sources[1], links=(replace(
+                self.link, device_b="different-plan-peer"),)),
+        ):
+            with self.subTest(changed=changed):
+                with self.assertRaises(SOURCE.PerKeySourceHold) as caught:
+                    SOURCE.reduce_eth_per_key_sources(
+                        self.cycles, (self.sources[0], changed), self.settings, KEY)
+                self.assertEqual("EthSourceAuthorityChanged",
+                                 type(caught.exception).__name__)
+
+    def test_rebound_cycle_is_not_classified_as_expected_authority_change(self):
+        SOURCE = source(self)
+        with self.assertRaises(SOURCE.PerKeySourceHold) as caught:
+            SOURCE.reduce_eth_per_key_sources(
+                self.cycles, (self.sources[0], replace(
+                    self.sources[1], completion_sha256="4" * 64)),
+                self.settings, KEY)
+        self.assertEqual("PerKeySourceHold", type(caught.exception).__name__)
+
     def test_active_key_window_projects_latest_changed_business_value(self):
         from monitor import issue_tracker_switch_runtime as runtime
         reducer = getattr(runtime, "_persistent_eth_active_links", None)

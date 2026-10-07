@@ -212,7 +212,8 @@ def _stage_l_per_key_panels(store, root, settings, cycles, token):
         IbRuntimeHoldError, read_completed_ib_cycle_report,
     )
     from monitor.issue_tracker_per_key_source import (
-        PerKeySourceHold, _key_for_link, read_prod_eth_per_key_source,
+        EthSourceAuthorityChanged, PerKeySourceHold, _key_for_link,
+        read_prod_eth_per_key_source,
     )
     from monitor.issue_tracker_switch_per_key_source import (
         SwitchPerKeySourceHold, read_prod_switch_per_key_source,
@@ -291,6 +292,14 @@ def _stage_l_per_key_panels(store, root, settings, cycles, token):
                 writer_token=token,
             ),
         ))
+    except EthSourceAuthorityChanged:
+        # Keep the O-4 operator action distinct from waiting for first use or
+        # investigating missing roles. Never expose raw source paths/errors
+        # or invent an observation count across two different authorities.
+        panels["Eth Link Validation"] = {
+            **held("source_authority_changed"),
+            "progress_text": "unknown — source authority changed; confirm input change",
+        }
     except (SwitchRuntimeHoldError, PerKeySourceHold, StageLHold):
         panels["Eth Link Validation"] = held("source_evidence_incomplete")
     try:

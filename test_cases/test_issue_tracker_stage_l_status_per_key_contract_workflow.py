@@ -17,6 +17,39 @@ class StageLPerKeyStatusContractWorkflowTests(ProdStageLFixture):
             publication=self.publication, template_path=self.template,
         )
 
+    def test_real_p2p_authority_switch_is_unknown_not_cold_start_or_missing_source(self):
+        import zipfile
+        from test_cases.test_issue_tracker_topology_derivation_workflow import (
+            _real_chain, P2P,
+        )
+
+        paths, _context = _real_chain(self.root)
+        self._cycle(activity=True, derivation=True)
+        # Change independently selected input bytes, keeping the literal
+        # physical edges the same. Rebuild the real producer provenance;
+        # neither completed roles nor the reader's return values are patched.
+        with zipfile.ZipFile(paths["topology"], "a") as workbook:
+            workbook.writestr("req7-authority-change.txt", b"second selected input\n")
+        P2P._write_splitter_profiles(
+            paths["lldpq"], {}, paths["topology"], paths["inventory"],
+            paths["port_mapping"], expected_hashes=P2P._splitter_source_hashes(
+                paths["topology"], paths["inventory"], paths["port_mapping"],
+            ),
+        )
+        self._cycle(activity=True, derivation=True)
+        status = self._status()
+        panel = status["panels"]["Eth Link Validation"]
+        self.assertEqual("hold", panel["state"])
+        self.assertEqual("source_authority_changed", panel["reason"])
+        self.assertEqual("unknown — source authority changed; confirm input change",
+                         panel["progress_text"])
+        self.assertEqual([], panel["per_key"])
+        self.assertEqual("hold", status["state"])
+        self.assertEqual(0, status["cycle_summary"]["published"])
+        self.assertFalse(status["cycle_summary"]["pending_count_complete"])
+        self.assertEqual("disabled_no_send_authority", status["online"])
+        self.assertEqual((), tuple(self.publication.iterdir()))
+
     def test_real_worker_status_preserves_archive_gap_reason_without_fake_count(self):
         self.two_cycles(activity=True, derivation=True)
         for path in (self.store.start_path(1), self.store.launch_path(1),

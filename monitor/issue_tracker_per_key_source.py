@@ -34,6 +34,10 @@ class PerKeySourceHold(ValueError):
     """Protected source evidence cannot support even a local progress claim."""
 
 
+class EthSourceAuthorityChanged(PerKeySourceHold):
+    """Expected P2P authority changed, not cold start or unreadable evidence."""
+
+
 @dataclass(frozen=True)
 class EthPerKeySourceStatus:
     state: str
@@ -110,7 +114,7 @@ def reduce_eth_per_key_sources(cycles, sources, settings, key):
             # Physical-edge changes are unsafe even if someone reuses a digest.
             frozen_topology = (current_topology["topology"], source.derivation.edges)
             if topology is not None and frozen_topology != topology:
-                raise PerKeySourceHold("ETH P2P derivation changed within K")
+                raise EthSourceAuthorityChanged("ETH P2P derivation changed within K")
             topology = frozen_topology
             activity_hashes.add(source.activity_sha256)
             rows = {}
@@ -124,7 +128,7 @@ def reduce_eth_per_key_sources(cycles, sources, settings, key):
                             link.device_b, link.interface_b)
                 if (item_key in expected_by_key
                         and expected_by_key[item_key] != expected):
-                    raise PerKeySourceHold("ETH expected peer changed within topology")
+                    raise EthSourceAuthorityChanged("ETH expected peer changed within topology")
                 expected_by_key[item_key] = expected
                 rows[item_key] = link
             rows_by_cycle[cycle.cycle_id] = rows
