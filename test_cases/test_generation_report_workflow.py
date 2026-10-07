@@ -163,6 +163,41 @@ class GenerationReportWorkflow(unittest.TestCase):
         self.assertFalse(candidate.committed)
         return parent, candidate
 
+    def test_real_setup_load_generation_rebound_stage_blocks_report_publication(self):
+        self.real_setup_publish()
+        parent, parent_candidate = self.real_load_prepare()
+        self.addCleanup(LOAD.discard_prepared_release, parent_candidate)
+        helper = report_helper()
+        report = helper.build_report(self.project, parent, published_dir=self.published)
+        report_candidate = helper.prepare_generation_report(self.project, report)
+        self.addCleanup(helper.discard_prepared_generation_report, report_candidate)
+        report_stage_bytes = report_candidate.temporary.read_bytes()
+        real_rename = os.rename
+        foreign = []
+
+        def publish_then_rebind(source, destination):
+            real_rename(source, destination)
+            source = Path(source)
+            source.mkdir()
+            (source / "foreign-evidence").write_bytes(b"independent workflow stage evidence\n")
+            foreign.append((source, source.lstat().st_ino, Path(destination)))
+
+        with mock.patch.object(LOAD.os, "rename", side_effect=publish_then_rebind):
+            with self.assertRaises(LOAD.LoadError):
+                LOAD.stage_pinned_generation(self.project, parent_candidate.temporary,
+                                             self.ztp / "config/isc-dhcp-server")
+        self.assertEqual(1, len(foreign))
+        path, inode, installed = foreign[0]
+        self.assertTrue(path.is_dir(), "real LOAD removed foreign generation staging evidence")
+        self.assertEqual(inode, path.lstat().st_ino)
+        self.assertEqual(b"independent workflow stage evidence\n", (path / "foreign-evidence").read_bytes())
+        self.assertTrue((installed / "current-release.json").is_file())
+        self.assertFalse(parent_candidate.committed)
+        self.assertEqual(report_stage_bytes, report_candidate.temporary.read_bytes())
+        output = self.project / "99-output-ztp"
+        self.assertFalse(os.path.lexists(output / "current"))
+        self.assertFalse((output / "generation-report.json").exists())
+
     def test_real_setup_load_report_selector_collision_preserves_foreign_evidence(self):
         self.real_setup_publish()
         parent, parent_candidate = self.real_load_prepare()

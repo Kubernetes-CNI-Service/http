@@ -1634,6 +1634,18 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 ## TC-REAL-R22-GENERATION-INPUT-ABA-001 — 跨进程输入换代与多输出一致性
 
+- generation 暂存目录换绑补充：direct 在真实目录 rename 发布后插入同名外来目录，
+  以及首 payload 同步失败前移走原目录、插入外来目录；真实私有 SETUP→LOAD→
+  report 预备 workflow 在 rename 后注入，要求拒绝后 report/parent 未提交、selector
+  缺席，已安装 generation、外来目录 inode/独立哨兵与移走的原暂存目录保留。
+  原 finally 仅按名称 exists 递归清理，三个方法有效 FAIL。候选持有原暂存目录 FD，
+  清理前再核真实父目录和原 dev/ino；同名换绑 HOLD，不递归删未知树。真实现场仅限
+  本卡另行授权的隔离 VM、精确版本、root-only 可恢复快照、持锁及正常写者静默，
+  记录原/外来/移走/已安装目录 stat 与树 SHA、同步/rename→注入→拒绝→未发布
+  顺序及完整 END/exit。封存后按确切快照人工恢复，不删未知目录解围。该边界检查
+  不保证非合作写者的原子目录删除或目录内部成员所有权，尚未形成 generation 完整
+  持久化 WAL；B finalizer、旧 A 激活、Linux/root/断电及正式 full/check 仍 OPEN。
+
 - generation selector 暂存清理所有权补充：独立 direct 覆盖预先占据随机暂存名的常规
   文件/软链接，以及发布失败前将原自有链接移走、原名换为外来文件；真实私有
   SETUP→LOAD→report 发布→selector 拒绝 workflow 要求外来 inode/字节、原 report

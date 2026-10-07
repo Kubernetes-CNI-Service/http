@@ -153,6 +153,40 @@ proof。默认 push 只接受 release proof。owner 授权的 AIR/prod 验证可
 
 ## Full proof 失败后的诊断与重跑闸门
 
+### R22 generation 暂存目录换绑不得递归清理
+
+两个独立 direct 分别在真实目录 rename 后、首 payload 同步失败前，将原暂存名
+换为外来目录；真实私有 SETUP→LOAD→report 预备 workflow 在 rename 后注入。
+要求外来 inode/独立哨兵、已安装 generation 或移走的原暂存目录保留，且 HOLD、
+不提交 parent/report/selector。原实现仅按名称 exists 调用 rmtree，三个方法有效 FAIL。
+RED `outputs/test-diagnostics/r22-generation-stage-owner-red.log`，inode157776906、
+size129807、SHA256 `20efc3126368785447986d583ea39e5a025b1249cabf081126f1b6824478da70`；
+物理34行 Ran 3 tests、36行 FAILED(failures=3)、41行 ACTUAL_UNITTEST_EXIT=1、
+42行 FROZEN_STATE_MATCH=True、44行 DIAGNOSTIC_END=1，实际 exec exit1。
+
+候选持有原暂存目录 FD，清理前核原 dev/ino 与物理父目录身份；名称换绑保留并 HOLD。
+首轮候选三项日志 `r22-generation-stage-owner-green.log`（inode157781712、size128625、
+SHA256 `167b57dbbccbd4c1f09e77062f238f06ba304dfba85d0b506da32e4a315d0092`）
+exit1，以及首轮501项 `r22-generation-stage-owner-modules.log`（inode157783912、
+size285271、SHA256 `1816e19a5318992f34365786bb45bf4a7dd03c18583b4519baf388f197fa8f4a`）
+exit1 均完整保留。唯一 ERROR 为新增 workflow 使用不存在的
+PreparedGenerationReport.committed 属性；在该轮冻结结束后修为独立暂存报告字节
+前后相等与原正式报告缺席检查，原 HOLD、目录 inode/哨兵、parent/selector 断言不变。
+targeted 重跑3项 OK，日志 `outputs/test-diagnostics/r22-generation-stage-owner-green-rerun.log`，
+inode157809858、size128047、SHA256
+`7e3f93b19b56867fdaf7103ee2299e08360b73b1ede886092cb7765aed2207b3`，实际 exec exit0。
+
+完整 LOAD、generation report contract/workflow 三模块501项 OK / exit0，原日志
+`outputs/test-diagnostics/r22-generation-stage-owner-modules-rerun.log`，inode157810027、
+size284623、SHA256 `242a5f974a8b14be753ada6742de757e8acc30ebd3ccd7c5d9209fea9fceeead`；
+读前后 dev/inode/size/mtime_ns/ctime_ns 稳定，物理1391行 Ran 501 tests in 29.026s、
+1393行 OK、1415行 ACTUAL_UNITTEST_EXIT=0、1416行 FROZEN_STATE_MATCH=True、
+1418行 DIAGNOSTIC_END=0，实际 exec exit0。现有 LOAD direct 与
+generation_report_lifecycle workflow 映射不变，REAL_ENV 同卡补边界/前置/清理风险。
+该窄修不是目录内部任意新增成员的所有权、非合作写者原子隔离或 generation 持久 WAL
+全写集证明；B finalizer、旧 A 激活、原 bootstrap/REQ19 根因、Linux/断电及正式
+full/check 仍 OPEN，不自动批准、不手改 ledger、不从 bounded PASS 跳到 full 重跑。
+
 ### R22 generation selector 暂存对象的清理所有权
 
 独立 direct 要求随机暂存名先被外来常规文件/软链接占据时不删除，另在 selector

@@ -4856,7 +4856,18 @@ def stage_pinned_generation(
             raise LoadError("existing generation differs from the selected parent")
         return destination
     stage = Path(tempfile.mkdtemp(prefix=".load-generation-", dir=generations))
+    stage_parent_identity = _setup_switch_directory_identity(generations)
+    stage_descriptor = os.open(
+        stage, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+    )
+    stage_identity = os.fstat(stage_descriptor)
     try:
+        named_stage = stage.lstat()
+        if (not stat.S_ISDIR(stage_identity.st_mode)
+                or (named_stage.st_dev, named_stage.st_ino)
+                != (stage_identity.st_dev, stage_identity.st_ino)):
+            raise LoadError("generation staging owner changed while opening")
         (stage / "inputs").mkdir(mode=0o755)
         if any(relative.startswith("dhcp/") for relative in payloads):
             (stage / "dhcp").mkdir(mode=0o755)
@@ -4885,8 +4896,20 @@ def stage_pinned_generation(
         finally:
             os.close(descriptor)
     finally:
-        if stage.exists():
-            shutil.rmtree(stage)
+        try:
+            if os.path.lexists(stage):
+                remaining = stage.lstat()
+                held = os.fstat(stage_descriptor)
+                if (not stat.S_ISDIR(remaining.st_mode)
+                        or stage_parent_identity != _setup_switch_directory_identity(generations)
+                        or (remaining.st_dev, remaining.st_ino)
+                        != (stage_identity.st_dev, stage_identity.st_ino)
+                        or (held.st_dev, held.st_ino)
+                        != (stage_identity.st_dev, stage_identity.st_ino)):
+                    raise LoadError("generation staging name rebound; preserve evidence; HOLD")
+                shutil.rmtree(stage)
+        finally:
+            os.close(stage_descriptor)
     return destination
 
 

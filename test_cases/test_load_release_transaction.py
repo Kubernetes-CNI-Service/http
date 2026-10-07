@@ -9179,6 +9179,70 @@ os.kill(os.getpid(), signal.SIGKILL)
         self.assertEqual(a_conf, (generation_a / "dhcp/dhcpd.conf").read_bytes())
         self.assertEqual(a_conf, (flat / "dhcpd.conf").read_bytes())
 
+    def test_generation_stage_rebound_directory_is_retained_after_publish(self) -> None:
+        LOAD.validate_and_publish_release(self.project, self.inputs)
+        output = self.project.resolve(strict=True) / "99-output-ztp"
+        original_parent = (output / "current-release.json").read_bytes()
+        real_rename = os.rename
+        foreign = []
+
+        def publish_then_rebind(source, destination):
+            real_rename(source, destination)
+            source = Path(source)
+            self.assertEqual(output / "generations", source.parent)
+            source.mkdir()
+            (source / "foreign-evidence").write_bytes(b"independent staging evidence\n")
+            foreign.append((source, source.lstat().st_ino, Path(destination)))
+
+        with mock.patch.object(LOAD.os, "rename", side_effect=publish_then_rebind):
+            with self.assertRaises(LOAD.LoadError):
+                LOAD.stage_pinned_generation(self.project, output / "current-release.json",
+                                             self.ztp / "config/isc-dhcp-server")
+        self.assertEqual(1, len(foreign))
+        path, inode, installed = foreign[0]
+        self.assertTrue(path.is_dir(), "generation cleanup removed a foreign directory")
+        self.assertEqual(inode, path.lstat().st_ino)
+        self.assertEqual(b"independent staging evidence\n", (path / "foreign-evidence").read_bytes())
+        self.assertEqual(original_parent, (installed / "current-release.json").read_bytes())
+        self.assertEqual(original_parent, (output / "current-release.json").read_bytes())
+        self.assertFalse(os.path.lexists(output / "current"))
+
+    def test_generation_stage_failed_sync_preserves_rebound_directory(self) -> None:
+        LOAD.validate_and_publish_release(self.project, self.inputs)
+        output = self.project.resolve(strict=True) / "99-output-ztp"
+        real_mkdtemp = tempfile.mkdtemp
+        real_sync = os.fsync
+        stages = []
+        foreign = []
+
+        def capture_stage(*args, **kwargs):
+            path = Path(real_mkdtemp(*args, **kwargs))
+            stages.append(path)
+            return str(path)
+
+        def fail_payload_sync(descriptor):
+            if not foreign and stages and stat.S_ISREG(os.fstat(descriptor).st_mode):
+                stage = stages[0]
+                stage.rename(stage.with_name("independent-held-generation"))
+                stage.mkdir()
+                (stage / "foreign-evidence").write_bytes(b"independent failed-sync evidence\n")
+                foreign.append(stage.lstat().st_ino)
+                raise OSError("independent payload sync failure")
+            return real_sync(descriptor)
+
+        with mock.patch.object(LOAD.tempfile, "mkdtemp", side_effect=capture_stage), \
+                mock.patch.object(LOAD.os, "fsync", side_effect=fail_payload_sync):
+            with self.assertRaises((LOAD.LoadError, OSError)):
+                LOAD.stage_pinned_generation(self.project, output / "current-release.json",
+                                             self.ztp / "config/isc-dhcp-server")
+        self.assertEqual(1, len(foreign))
+        self.assertTrue(stages[0].is_dir(), "failed staging cleaned up a foreign directory")
+        self.assertEqual(foreign[0], stages[0].lstat().st_ino)
+        self.assertEqual(b"independent failed-sync evidence\n",
+                         (stages[0] / "foreign-evidence").read_bytes())
+        self.assertTrue(stages[0].with_name("independent-held-generation").is_dir())
+        self.assertFalse(os.path.lexists(output / "current"))
+
     def test_generation_selector_temp_collision_preserves_foreign_object(self) -> None:
         LOAD.validate_and_publish_release(self.project, self.inputs)
         output = self.project / "99-output-ztp"
