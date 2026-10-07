@@ -6685,13 +6685,27 @@ def register_setup_switch_created_directory(
     return registered
 
 
+def stage_setup_switch_created_directory(
+    journal: Path, path: Path, staged: Path, *,
+    deployment_lock_descriptor: int | None,
+    services_quiesced: bool, runtime_backend: ServiceRuntimeBackend | None,
+) -> os.stat_result:
+    """Inspect the old write set before creating a stage inside an owned parent."""
+    _registered, owner = _register_setup_switch_created_directory(
+        journal, path, staged, deployment_lock_descriptor=deployment_lock_descriptor,
+        services_quiesced=services_quiesced, runtime_backend=runtime_backend,
+        q_comparison=False, create_staged=True,
+    )
+    return owner
+
+
 def _register_setup_switch_created_directory(
     journal: Path, path: Path, staged: Path, *,
     deployment_lock_descriptor: int | None,
     services_quiesced: bool, runtime_backend: ServiceRuntimeBackend | None,
-    q_comparison: bool,
+    q_comparison: bool, create_staged: bool = False,
 ) -> tuple[Path, os.stat_result]:
-    """Freeze an empty private directory's identity before shared installation.
+    """Freeze an empty real directory's identity before shared installation.
 
     The staged inode remains recovery evidence until the no-replace rename has
     installed it.  Neither an existing target nor a different inode is owned.
@@ -6710,7 +6724,15 @@ def _register_setup_switch_created_directory(
         services_quiesced=services_quiesced, runtime_backend=runtime_backend,
         inspect_only=True,
     )
-    body = dict(_decode_setup_switch_journal(opened[0])["body"])
+    # Inspection is not authority for changed bytes between its return and
+    # this writer's first mkdir. Bind the actual reread and original owner.
+    now = journal.lstat()
+    reread = _read_rollback_regular(journal, limit=_SETUP_SWITCH_JOURNAL_LIMIT)
+    if (any(getattr(before, key) != getattr(now, key) for key in (
+            "st_dev", "st_ino", "st_mode", "st_nlink", "st_size",
+            "st_mtime_ns", "st_ctime_ns")) or reread != opened):
+        raise LoadError("setup switch journal changed before directory mkdir; HOLD")
+    body = dict(_setup_switch_prepared_registration_body(reread))
     try:
         if "q_manifest_intent" in body:
             raise ValueError("Q manifest intent already freezes the setup write set")
@@ -6735,11 +6757,11 @@ def _register_setup_switch_created_directory(
             pass
         else:
             raise ValueError("created directory target is already occupied")
-        if q_comparison:
+        if q_comparison or create_staged:
             # Inspect the old WAL before creating this transient object. Cold
             # recovery treats a stage not yet durably registered as unknown;
             # a killed mkdir must never license retirement of that WAL.
-            staged.mkdir()
+            staged.mkdir(mode=0o777)
         metadata = staged.lstat()
         if not stat.S_ISDIR(metadata.st_mode) or any(staged.iterdir()):
             raise ValueError("staged created directory is not an empty real directory")
@@ -6895,6 +6917,18 @@ def _setup_switch_created_directory_states(body):
                 or len({row["path"] for row in rows}) != len(rows)
                 or len({row["staged"] for row in rows}) != len(rows)):
             raise ValueError("duplicate or invalid directory rows")
+        image_parent = Path(body["root"]["path"]) / "ztp"
+        known_stages = {Path(row["parent"]["path"]) / Path(row["staged"]).name
+                        for row in rows}
+        for parent, prefixes in ((image_parent, (".image.setup-",)),
+                                 (image_parent / "image", (".cumulus.setup-", ".nvos.setup-"))):
+            if not os.path.lexists(parent):
+                continue
+            if not stat.S_ISDIR(parent.lstat().st_mode):
+                raise ValueError("shared image directory parent is not real")
+            if any(child.name.startswith(prefixes) and child not in known_stages
+                   for child in parent.iterdir()):
+                raise ValueError("unregistered shared image stage; HOLD")
         q_output = Path(body["new_project"]["path"]) / "99-output-ztp"
         try:
             output_metadata = q_output.lstat()
@@ -6916,17 +6950,32 @@ def _setup_switch_created_directory_states(body):
             if row["before"] is None and row["after"] is not None
         } | {Path(row["path"]) for row in rows}
         states = []
-        for row in rows:
+        absent_owners = {}
+        for row in sorted(rows, key=lambda item: len(Path(item["path"]).parts)):
             path, staged = Path(row["path"]), Path(row["staged"])
             if (not path.is_absolute() or os.path.normpath(str(path)) != str(path)
                     or not staged.is_absolute() or os.path.normpath(str(staged)) != str(staged)
                     or staged.parent != path.parent
                     or not staged.name.startswith(f".{path.name}.setup-")
-                    or row["parent"] != _setup_switch_link_parent_identity(path)
                     or any(type(row[key]) is not int for key in ("dev", "ino", "mode"))):
                 raise ValueError("created directory names or parent changed")
-            path.parent.resolve(strict=True).relative_to(HTTP_ROOT.resolve(strict=True))
-            physical_path = path.parent.resolve(strict=True) / path.name
+            frozen_parent = Path(row["parent"]["path"])
+            if os.path.lexists(path.parent):
+                if row["parent"] != _setup_switch_link_parent_identity(path):
+                    raise ValueError("created directory parent changed")
+                physical_parent = path.parent.resolve(strict=True)
+            else:
+                # Only a previously validated, originally absent WAL-owned
+                # directory may explain a missing parent on cold reentry.
+                # Names/prefixes or an arbitrary absent ancestor are not proof.
+                parent_owner = absent_owners.get(frozen_parent)
+                if (parent_owner is None or row["parent"] != {
+                        "path": str(frozen_parent), "dev": parent_owner["dev"],
+                        "ino": parent_owner["ino"]}):
+                    raise ValueError("created directory missing parent is not WAL-owned")
+                physical_parent = frozen_parent
+            physical_parent.relative_to(HTTP_ROOT.resolve(strict=True))
+            physical_path = physical_parent / path.name
             if row in q_rows:
                 if (path != Path(body["new_project"]["path"]) / "99-output-ztp/optimize"
                         or physical_path != path):
@@ -6951,10 +7000,34 @@ def _setup_switch_created_directory_states(body):
                 present.append(candidate)
             if len(present) > 1:
                 raise ValueError("created directory has conflicting stage and target")
+            if not present:
+                absent_owners[physical_path] = row
             states.append((path, staged, present[0] if present else None, row))
         return states
     except (KeyError, TypeError, ValueError, OSError, RuntimeError) as exc:
         raise LoadError(f"setup switch created directory state is unknown: {exc}") from exc
+
+
+def _setup_switch_created_directory_sync_parent(body, row):
+    """Find a surviving sync owner through only validated absent WAL rows."""
+    states = _setup_switch_created_directory_states(body)
+    absent = {Path(owner["parent"]["path"]) / path.name: owner
+              for path, _staged, present, owner in states if present is None}
+    # Keep the writer's lexical path for the actual sync (including supported
+    # /var aliases). Frozen physical names authorize it, not a new spelling.
+    parent = Path(row["path"]).parent
+    expected = row["parent"]
+    while not os.path.lexists(parent):
+        physical_parent = Path(expected["path"])
+        owner = absent.get(physical_parent)
+        if (owner is None or expected != {
+                "path": str(physical_parent), "dev": owner["dev"], "ino": owner["ino"]}):
+            raise LoadError("created directory absence sync lacks WAL-owned parent; HOLD")
+        expected = owner["parent"]
+        parent = Path(owner["path"]).parent
+    if _setup_switch_link_parent_identity(parent / ".sync-owner") != expected:
+        raise LoadError("created directory surviving sync parent changed; HOLD")
+    return parent
 
 
 def _setup_switch_comparison_tree(path: Path) -> dict[str, object]:
@@ -7068,19 +7141,19 @@ def _setup_switch_comparison_transfer_states(body, held_descriptors=None):
     return states
 
 
-def _setup_switch_comparison_body(opened):
+def _setup_switch_prepared_registration_body(opened):
     """Revalidate the actual reread, not an earlier recovery call's bytes."""
     try:
         if opened is None or opened[1] != 0o600:
-            raise ValueError("comparison WAL is absent or not private")
+            raise ValueError("registration WAL is absent or not private")
         envelope = _decode_setup_switch_journal(opened[0])
         body = envelope["body"]
         if (body["schema_version"] != 2 or body["phase"] != "prepared"
                 or hashlib.sha256(_setup_switch_canonical_payload(body)).hexdigest() != envelope["sha256"]):
-            raise ValueError("comparison WAL checksum/schema/phase is invalid")
+            raise ValueError("registration WAL checksum/schema/phase is invalid")
         return body
     except (ValueError, TypeError, KeyError) as exc:
-        raise LoadError(f"comparison WAL contract changed: {exc}") from exc
+        raise LoadError(f"registration WAL contract changed: {exc}") from exc
 
 
 def register_setup_switch_comparison_transfer(
@@ -7099,7 +7172,7 @@ def register_setup_switch_comparison_transfer(
     try:
         before = journal.lstat()
         opened = _read_rollback_regular(journal, limit=_SETUP_SWITCH_JOURNAL_LIMIT)
-        body = _setup_switch_comparison_body(opened)
+        body = _setup_switch_prepared_registration_body(opened)
         source, destination = Path(source), Path(destination)
         row = {"source": str(source), "source_parent": _setup_switch_link_parent_identity(source),
                "destination": str(destination), "destination_parent": _setup_switch_link_parent_identity(destination),
@@ -7145,7 +7218,7 @@ def validate_setup_switch_comparison_transfer(journal: Path, source: Path, desti
         raise LoadError("comparison transfer journal is not the configured authority")
     recover_setup_switch_journal(journal, inspect_only=True, **guard)
     opened = _read_rollback_regular(journal, limit=_SETUP_SWITCH_JOURNAL_LIMIT)
-    body = _setup_switch_comparison_body(opened)
+    body = _setup_switch_prepared_registration_body(opened)
     states = _setup_switch_comparison_transfer_states(body)
     if len(states) != 1 or states[0][:2] != (Path(source), Path(destination)):
         raise LoadError("sample comparison has no exact transfer WAL")
@@ -8367,9 +8440,7 @@ def _recover_setup_switch_journal_snapshot(
         # A previous recovery may have died after rmdir but before the
         # namespace sync. Known absence is still an outstanding durable write.
         # Recheck the surviving parent and sync it on every recovery entry.
-        if row["parent"] != _setup_switch_link_parent_identity(_path):
-            raise LoadError("setup switch created directory parent changed before absence sync")
-        _fsync_parent_directory(_path.parent)
+        _fsync_parent_directory(_setup_switch_created_directory_sync_parent(body, row))
     if current_manifest != (state.manifest, state.manifest_mode):
         require_journal_unchanged()
         _atomic_restore_setup_manifest(state)

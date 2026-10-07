@@ -402,10 +402,12 @@ os.link = kill_after_infra_hardlink
         kill_after_replace: Path | None = None,
         kill_after_hardlink: Path | None = None,
         omit_common_from_wal: bool = False,
+        publish_images: bool = False,
     ):
         root, p, q, common, _p_only, q_only, _manifest, _before, hook, barrier, home = fixture
         driver = """
 import importlib.util
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -433,6 +435,8 @@ try:
         )
     if prepared == 'corrupt':
         (root / 'ztp/.setup-switch-journal.json').write_bytes(b'{"schema_version":')
+    if sys.argv[8] == 'images':
+        os.umask(0o022)
     try:
         activation_options = (
             {'prepare_switch_wal': True,
@@ -440,7 +444,7 @@ try:
             if prepared == 'auto' else {}
         )
         load.activate_project(
-            q, q / 'p2p.xlsx', strict=False, no_upgrade=True,
+            q, q / 'p2p.xlsx', strict=False, no_upgrade=sys.argv[8] != 'images',
             deployment_lock_descriptor=descriptor, host_role='workstation',
             **activation_options,
         )
@@ -492,7 +496,8 @@ finally:
              str(common), str(q_only),
              "corrupt" if corrupt_journal else "auto" if auto_prepare_journal
              else "yes" if prepare_journal else "no",
-             "yes" if omit_common_from_wal else "no"],
+             "yes" if omit_common_from_wal else "no",
+             "images" if publish_images else "no-images"],
             cwd=root, env=env, capture_output=True, text=True, check=False,
         )
 
@@ -864,6 +869,133 @@ finally:
 
     def test_real_setup_legacy_comparison_transfer_death_cold_restores_reports(self):
         self._exercise_real_comparison_transfer_death("pointer")
+
+    def test_real_setup_shared_image_directory_death_cold_restores_absence(self):
+        self._exercise_shared_image_directory_death(recovery_death=False)
+
+    def test_real_setup_shared_image_nested_directory_recovery_death_reenters(self):
+        self._exercise_shared_image_directory_death(recovery_death=True)
+
+    def test_real_setup_shared_nvos_image_directory_death_cold_restores_absence(self):
+        self._exercise_shared_image_directory_death(
+            recovery_death=False, image_name="nvos-amd64-25.2.1.bin", platform="nvos",
+        )
+
+    def test_real_setup_shared_image_unregistered_stage_death_cold_holds(self):
+        self._exercise_shared_image_directory_death(recovery_death=False, stage_death=True)
+
+    def test_real_setup_shared_image_absent_parent_reentry_replacement_holds(self):
+        self._exercise_shared_image_directory_death(recovery_death=True, replace_parent=True)
+
+    def _exercise_shared_image_directory_death(
+            self, *, recovery_death, stage_death=False, replace_parent=False,
+            image_name="cumulus-linux-5.18.1-mlx-amd64.bin", platform="cumulus"):
+        with tempfile.TemporaryDirectory(prefix="r22-real-image-directories-") as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, _p, _q, common, _p_only, _q_only, manifest, before, _hook, barrier, _home = fixture
+            image = root / "image" / image_name
+            payload = b"independent shared image payload\n"
+            image.write_bytes(payload)
+            directory = root / "ztp/image" / platform
+            self.assertFalse(os.path.lexists(directory.parent))
+            if stage_death:
+                hook = fixture[8] / "sitecustomize.py"
+                hook.write_text(hook.read_text() + "\n" + f"""
+image_sync = os.fsync
+def kill_before_image_stage_row(fd):
+    stages = list(Path({str(root / 'ztp')!r}).glob('.image.setup-*'))
+    if any(stage.is_dir() for stage in stages):
+        Path(os.environ['HTTP_TEST_Q_LINK_BARRIER']).write_bytes(b'unregistered image stage observed\\n')
+        os.kill(os.getpid(), signal.SIGKILL)
+    return image_sync(fd)
+os.fsync = kill_before_image_stage_row
+""")
+            first = self._run_private_load_setup_switch(
+                fixture, prepare_journal=True, publish_images=True,
+                first_link=directory / image.name,
+            )
+            self.assertEqual(23, first.returncode, first.stdout + first.stderr)
+            self.assertTrue(barrier.is_file())
+            if not stage_death:
+                self.assertTrue((directory / image.name).is_symlink())
+                for path in (directory.parent, directory):
+                    self.assertEqual(0o755, stat.S_IMODE(path.stat().st_mode))
+            journal = root / "ztp/.setup-switch-journal.json"
+            evidence = journal.read_bytes()
+            held_manifest, held_common = manifest.read_bytes(), os.readlink(common)
+            recovery = """
+import importlib.util
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+root = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location('fresh_shared_image_load', root / 'DAY0-Prepare/11-load.py')
+load = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = load
+spec.loader.exec_module(load)
+load.active_managed_services = lambda *args, **kwargs: ()
+if len(sys.argv) > 2:
+    import os, signal
+    sync = load._fsync_parent_directory
+    def kill_before_outer_parent_sync(path):
+        if Path(path) == root / 'ztp' and not os.path.lexists(root / 'ztp/image'):
+            (root / 'image-recovery-death.observed').write_bytes(b'image parent removal observed\\n')
+            os.kill(os.getpid(), signal.SIGKILL)
+        return sync(path)
+    load._fsync_parent_directory = kill_before_outer_parent_sync
+descriptor = load.acquire_deployment_lock(exclusive=True)
+try:
+    assert load.recover_setup_switch_journal(
+        root / 'ztp/.setup-switch-journal.json', deployment_lock_descriptor=descriptor,
+        services_quiesced=True, runtime_backend=SimpleNamespace(name='supervisor'),
+    ) == 'restored-p'
+finally:
+    load.release_deployment_lock(descriptor)
+"""
+            if recovery_death:
+                interrupted = subprocess.run([sys.executable, "-B", "-c", recovery, str(root), "kill"],
+                                             cwd=root, capture_output=True, text=True, check=False, timeout=30)
+                self.assertEqual(-signal.SIGKILL, interrupted.returncode, interrupted.stdout + interrupted.stderr)
+                self.assertTrue((root / "image-recovery-death.observed").is_file())
+                self.assertEqual(evidence, journal.read_bytes())
+                self.assertFalse(os.path.lexists(directory.parent))
+            if replace_parent:
+                directory.parent.mkdir()
+                (directory.parent / "unknown-operator.txt").write_bytes(b"unrelated replacement parent\n")
+                replacement = directory.parent.stat()
+                held_manifest, held_common = manifest.read_bytes(), os.readlink(common)
+            if stage_death:
+                stages = list((root / "ztp").glob(".image.setup-*"))
+                self.assertEqual(1, len(stages))
+                stage_owner = stages[0].stat()
+                self.assertEqual([], json.loads(evidence)["body"].get("created_directories", []))
+            second = subprocess.run([sys.executable, "-B", "-c", recovery, str(root)],
+                                    cwd=root, capture_output=True, text=True, check=False, timeout=30)
+            if stage_death or replace_parent:
+                self.assertEqual(1, second.returncode, second.stdout + second.stderr)
+                self.assertIn("LoadError", second.stderr)
+                self.assertEqual(evidence, journal.read_bytes())
+                self.assertEqual(held_manifest, manifest.read_bytes())
+                self.assertEqual(held_common, os.readlink(common))
+                self.assertEqual(payload, image.read_bytes())
+                self.assertFalse((root / "service-started").exists())
+                if stage_death:
+                    self.assertIn("unregistered shared image stage", second.stderr)
+                    self.assertEqual(stage_owner.st_ino, stages[0].stat().st_ino)
+                    self.assertFalse(os.path.lexists(directory.parent))
+                else:
+                    self.assertEqual(replacement.st_ino, directory.parent.stat().st_ino)
+                    self.assertEqual(b"unrelated replacement parent\n",
+                                     (directory.parent / "unknown-operator.txt").read_bytes())
+                return
+            self.assertEqual(0, second.returncode, second.stdout + second.stderr)
+            self.assertFalse(os.path.lexists(directory))
+            self.assertFalse(os.path.lexists(directory.parent))
+            self.assertEqual(payload, image.read_bytes())
+            self.assertEqual(before["manifest"], manifest.read_bytes())
+            self.assertEqual(before["common"], os.readlink(common))
+            self.assertFalse((root / "ztp/.setup-switch-journal.json").exists())
+            self.assertFalse((root / "service-started").exists())
 
     def test_real_setup_legacy_comparison_transfer_rename_death_cold_restores_reports(self):
         self._exercise_real_comparison_transfer_death("rename")

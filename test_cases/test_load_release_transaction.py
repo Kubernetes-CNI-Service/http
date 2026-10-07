@@ -3962,6 +3962,213 @@ class ReleaseTransactionTests(unittest.TestCase):
         self.assertFalse(os.path.lexists(journal))
         backend.start.assert_not_called()
 
+    def test_setup_shared_image_directories_cold_recovery_restores_absence(self) -> None:
+        state = self._prepare_cross_project_setup_crash(freeze_q_links=False)
+        journal, descriptor, backend = state[10], state[11], state[12]
+        image_root = self.root / "image"
+        image_root.mkdir(exist_ok=True)
+        image = image_root / "cumulus-linux-5.18.1-mlx-amd64.bin"
+        image.write_bytes(b"independent shared image payload\n")
+        nvos_image = image_root / "nvos-amd64-25.2.1.bin"
+        nvos_image.write_bytes(b"independent NVOS shared image payload\n")
+        directory = self.ztp.resolve() / "image/cumulus"
+        self.assertFalse(os.path.lexists(directory.parent))
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.multiple(SETUP, HTTP_BASE=str(self.root), ZTP=str(self.ztp),
+                                    IMAGE_DIR=str(image_root), _DRY_RUN=False, _NO_UPGRADE=False,
+                                    _LINK_ERRORS=0, _LINK_TRANSACTION=SETUP._SetupLinkTransaction([]),
+                                    _SETUP_SWITCH_WAL_CONTEXT=(vars(LOAD), descriptor, {}, {})):
+            SETUP._process_bin_files()
+            self.assertTrue((directory / image.name).is_symlink())
+            self.assertTrue((self.ztp / "image/nvos" / nvos_image.name).is_symlink())
+            self.assertEqual("restored-p", LOAD.recover_setup_switch_journal(
+                journal, deployment_lock_descriptor=descriptor,
+                services_quiesced=True, runtime_backend=backend,
+            ))
+        self.assertFalse(os.path.lexists(directory), "WAL left an originally absent platform directory")
+        self.assertFalse(os.path.lexists(directory.parent), "WAL left the originally absent shared image parent")
+        self.assertFalse(os.path.lexists(self.ztp / "image/nvos"))
+        self.assertEqual(b"independent shared image payload\n", image.read_bytes())
+        self.assertEqual(b"independent NVOS shared image payload\n", nvos_image.read_bytes())
+        self.assertFalse(os.path.lexists(journal))
+        backend.start.assert_not_called()
+
+    def test_setup_shared_image_nested_directory_recovery_reentry_restores_absence(self) -> None:
+        state = self._prepare_cross_project_setup_crash(freeze_q_links=False)
+        journal, descriptor, backend = state[10], state[11], state[12]
+        image_root = self.root / "image"
+        image_root.mkdir(exist_ok=True)
+        image = image_root / "cumulus-linux-5.18.1-mlx-amd64.bin"
+        image.write_bytes(b"independent shared image payload\n")
+        directory = self.ztp / "image"
+        guard = dict(deployment_lock_descriptor=descriptor, services_quiesced=True, runtime_backend=backend)
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.multiple(SETUP, HTTP_BASE=str(self.root), ZTP=str(self.ztp),
+                                    IMAGE_DIR=str(image_root), _DRY_RUN=False, _NO_UPGRADE=False,
+                                    _LINK_ERRORS=0, _LINK_TRANSACTION=SETUP._SetupLinkTransaction([]),
+                                    _SETUP_SWITCH_WAL_CONTEXT=(vars(LOAD), descriptor, {}, {})):
+            SETUP._process_bin_files()
+            evidence = journal.read_bytes()
+            sync = LOAD._fsync_parent_directory
+            observed = []
+            def stop_before_outer_parent_sync(path):
+                if Path(path).resolve() == self.ztp.resolve() and not os.path.lexists(directory):
+                    observed.append(path)
+                    raise OSError("independent image outer-parent sync failure")
+                return sync(path)
+            with mock.patch.object(LOAD, "_fsync_parent_directory", side_effect=stop_before_outer_parent_sync):
+                with self.assertRaisesRegex(OSError, "outer-parent sync"):
+                    LOAD.recover_setup_switch_journal(journal, **guard)
+            self.assertTrue(observed)
+            self.assertFalse(os.path.lexists(directory))
+            self.assertEqual(evidence, journal.read_bytes())
+            self.assertEqual("restored-p", LOAD.recover_setup_switch_journal(journal, **guard))
+        self.assertFalse(os.path.lexists(directory))
+        self.assertEqual(b"independent shared image payload\n", image.read_bytes())
+        self.assertFalse(os.path.lexists(journal))
+        backend.start.assert_not_called()
+
+    def test_setup_shared_image_unregistered_stage_cold_recovery_holds(self) -> None:
+        state = self._prepare_cross_project_setup_crash(freeze_q_links=False)
+        journal, descriptor, backend = state[10], state[11], state[12]
+        image_root = self.root / "image"
+        image_root.mkdir(exist_ok=True)
+        (image_root / "cumulus-linux-5.18.1-mlx-amd64.bin").write_bytes(b"independent image\n")
+        captured = []
+        sync = LOAD._fsync_parent_directory
+        def stop_before_stage_registration(path):
+            if Path(path).name.startswith(".image.setup-"):
+                captured.append((Path(path), Path(path).stat(), journal.read_bytes()))
+                raise OSError("independent shared image stage sync failure")
+            return sync(path)
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.multiple(SETUP, HTTP_BASE=str(self.root), ZTP=str(self.ztp),
+                                    IMAGE_DIR=str(image_root), _DRY_RUN=False, _NO_UPGRADE=False,
+                                    _LINK_ERRORS=0, _LINK_TRANSACTION=SETUP._SetupLinkTransaction([]),
+                                    _SETUP_SWITCH_WAL_CONTEXT=(vars(LOAD), descriptor, {}, {})):
+            with mock.patch.object(LOAD, "_fsync_parent_directory", side_effect=stop_before_stage_registration):
+                with self.assertRaisesRegex(OSError, "stage sync failure"):
+                    SETUP._process_bin_files()
+            self.assertEqual(1, len(captured))
+            staged, owner, evidence = captured[0]
+            self.assertEqual([], json.loads(evidence)["body"].get("created_directories", []))
+            with self.assertRaisesRegex(LOAD.LoadError, "unregistered shared image stage"):
+                LOAD.recover_setup_switch_journal(
+                    journal, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend,
+                )
+        self.assertEqual(owner.st_ino, staged.stat().st_ino)
+        self.assertEqual([], list(staged.iterdir()))
+        self.assertFalse(os.path.lexists(self.ztp / "image"))
+        self.assertEqual(evidence, journal.read_bytes())
+        backend.start.assert_not_called()
+
+    def test_setup_shared_image_directories_preserve_public_umask_permissions(self) -> None:
+        state = self._prepare_cross_project_setup_crash(freeze_q_links=False)
+        journal, descriptor, backend = state[10], state[11], state[12]
+        image_root = self.root / "image"
+        image_root.mkdir(exist_ok=True)
+        (image_root / "cumulus-linux-5.18.1-mlx-amd64.bin").write_bytes(b"independent image\n")
+        original_umask = os.umask(0o022)
+        try:
+            with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                    mock.patch.multiple(SETUP, HTTP_BASE=str(self.root), ZTP=str(self.ztp),
+                                        IMAGE_DIR=str(image_root), _DRY_RUN=False, _NO_UPGRADE=False,
+                                        _LINK_ERRORS=0, _LINK_TRANSACTION=SETUP._SetupLinkTransaction([]),
+                                        _SETUP_SWITCH_WAL_CONTEXT=(vars(LOAD), descriptor, {}, {})):
+                SETUP._process_bin_files()
+                for path in (self.ztp / "image", self.ztp / "image/cumulus"):
+                    self.assertEqual(0o755, stat.S_IMODE(path.stat().st_mode),
+                                     "WAL must not make formerly public image directories root-only")
+                LOAD.recover_setup_switch_journal(
+                    journal, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend,
+                )
+        finally:
+            os.umask(original_umask)
+
+    def test_setup_shared_image_stage_registration_rechecks_current_wal_before_mkdir(self) -> None:
+        state = self._prepare_cross_project_setup_crash(freeze_q_links=False)
+        journal, descriptor, backend = state[10], state[11], state[12]
+        path = self.ztp / "image"
+        staged = path.with_name(".image.setup-independent-wal-rebind")
+        recover = LOAD.recover_setup_switch_journal
+        evidence = []
+        def change_after_verified_wal(*args, **kwargs):
+            outcome = recover(*args, **kwargs)
+            envelope = json.loads(journal.read_bytes())
+            envelope["body"]["phase"] = "unknown-independent-phase"
+            changed = json.dumps(envelope, sort_keys=True).encode() + b"\n"
+            journal.write_bytes(changed)
+            evidence.append(changed)
+            return outcome
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "recover_setup_switch_journal", side_effect=change_after_verified_wal):
+            with self.assertRaises(LOAD.LoadError):
+                LOAD.stage_setup_switch_created_directory(
+                    journal, path, staged, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend,
+                )
+        self.assertTrue(evidence)
+        self.assertEqual(evidence[-1], journal.read_bytes())
+        self.assertFalse(os.path.lexists(path))
+        self.assertFalse(os.path.lexists(staged), "changed WAL authorized a directory mkdir")
+        backend.start.assert_not_called()
+
+    def test_setup_shared_image_without_wal_preserves_public_umask_permissions(self) -> None:
+        state = self._prepare_cross_project_setup_crash(freeze_q_links=False)
+        journal = state[10]
+        evidence = journal.read_bytes()
+        image_root = self.root / "image"
+        image_root.mkdir(exist_ok=True)
+        (image_root / "cumulus-linux-5.18.1-mlx-amd64.bin").write_bytes(b"independent image\n")
+        original_umask = os.umask(0o022)
+        try:
+            with mock.patch.multiple(SETUP, HTTP_BASE=str(self.root), ZTP=str(self.ztp),
+                                     IMAGE_DIR=str(image_root), _DRY_RUN=False, _NO_UPGRADE=False,
+                                     _LINK_ERRORS=0, _LINK_TRANSACTION=SETUP._SetupLinkTransaction([]),
+                                     _SETUP_SWITCH_WAL_CONTEXT=None):
+                SETUP._process_bin_files()
+                for path in (self.ztp / "image", self.ztp / "image/cumulus"):
+                    self.assertEqual(0o755, stat.S_IMODE(path.stat().st_mode))
+        finally:
+            os.umask(original_umask)
+        self.assertEqual(evidence, journal.read_bytes())
+
+    def test_setup_shared_image_absent_parent_reentry_replacement_holds(self) -> None:
+        state = self._prepare_cross_project_setup_crash(freeze_q_links=False)
+        journal, descriptor, backend = state[10], state[11], state[12]
+        image_root = self.root / "image"
+        image_root.mkdir(exist_ok=True)
+        (image_root / "cumulus-linux-5.18.1-mlx-amd64.bin").write_bytes(b"independent image\n")
+        directory = self.ztp / "image"
+        sync = LOAD._fsync_parent_directory
+        def stop_after_owned_parent_removal(path):
+            if Path(path).resolve() == self.ztp.resolve() and not os.path.lexists(directory):
+                raise OSError("independent owned image parent sync failure")
+            return sync(path)
+        guard = dict(deployment_lock_descriptor=descriptor, services_quiesced=True, runtime_backend=backend)
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.multiple(SETUP, HTTP_BASE=str(self.root), ZTP=str(self.ztp),
+                                    IMAGE_DIR=str(image_root), _DRY_RUN=False, _NO_UPGRADE=False,
+                                    _LINK_ERRORS=0, _LINK_TRANSACTION=SETUP._SetupLinkTransaction([]),
+                                    _SETUP_SWITCH_WAL_CONTEXT=(vars(LOAD), descriptor, {}, {})):
+            SETUP._process_bin_files()
+            evidence = journal.read_bytes()
+            with mock.patch.object(LOAD, "_fsync_parent_directory", side_effect=stop_after_owned_parent_removal):
+                with self.assertRaisesRegex(OSError, "owned image parent sync failure"):
+                    LOAD.recover_setup_switch_journal(journal, **guard)
+            self.assertFalse(os.path.lexists(directory))
+            directory.mkdir()
+            (directory / "unknown-operator.txt").write_bytes(b"unrelated replacement parent\n")
+            replacement = directory.stat()
+            with self.assertRaises(LOAD.LoadError):
+                LOAD.recover_setup_switch_journal(journal, **guard)
+        self.assertEqual(replacement.st_ino, directory.stat().st_ino)
+        self.assertEqual(b"unrelated replacement parent\n", (directory / "unknown-operator.txt").read_bytes())
+        self.assertEqual(evidence, journal.read_bytes())
+        backend.start.assert_not_called()
+
     def test_setup_comparison_transfer_changed_report_holds_before_move(self) -> None:
         state = self._prepare_cross_project_setup_crash(freeze_q_links=False)
         q, journal, descriptor, backend = state[1].resolve(), state[10], state[11], state[12]

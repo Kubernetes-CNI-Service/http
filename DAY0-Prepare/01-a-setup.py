@@ -503,7 +503,15 @@ def _process_bin_files():
             continue
         img_dir = os.path.join(ZTP, "image", platform)
         if not _DRY_RUN:
-            os.makedirs(img_dir, exist_ok=True)
+            if _LINK_TRANSACTION is not None:
+                # Both originally absent shared directories are write-set
+                # members, not just the image link subsequently registered.
+                _LINK_TRANSACTION.ensure_directory(os.path.join(ZTP, "image"), stage_in_wal=True)
+                _LINK_TRANSACTION.ensure_directory(img_dir, stage_in_wal=True)
+            elif _SETUP_SWITCH_WAL_CONTEXT is not None:
+                raise ValueError("共享镜像目录创建缺少 WAL 事务")
+            else:
+                os.makedirs(img_dir, exist_ok=True)
         _make_link(os.path.join(img_dir, fname), src)
 
 
@@ -4122,7 +4130,7 @@ class _SetupLinkTransaction:
             if os.path.lexists(temporary):
                 os.remove(temporary)
 
-    def ensure_directory(self, path):
+    def ensure_directory(self, path, *, stage_in_wal=False):
         """Create and own one real directory for rollback, or accept an existing one.
 
         A uniquely named empty directory is created first and then installed
@@ -4147,10 +4155,21 @@ class _SetupLinkTransaction:
                 raise ValueError(f"setup 共享目录父目录不是实际目录：{parent}")
         else:
             os.makedirs(parent, exist_ok=True)
-        temporary = tempfile.mkdtemp(
-            prefix=f".{os.path.basename(path)}.setup-{os.getpid()}-", dir=parent,
-        )
-        created = os.lstat(temporary)
+        deferred_stage = stage_in_wal and _SETUP_SWITCH_WAL_CONTEXT is not None
+        if stage_in_wal:
+            temporary = os.path.join(parent, f".{os.path.basename(path)}.setup-{os.getpid()}-{os.urandom(16).hex()}")
+            if deferred_stage:
+                created = None
+            else:
+                # Public image directories retain os.makedirs' normal umask
+                # permissions even when this setup has no cross-project WAL.
+                os.mkdir(temporary, mode=0o777)
+                created = os.lstat(temporary)
+        else:
+            temporary = tempfile.mkdtemp(
+                prefix=f".{os.path.basename(path)}.setup-{os.getpid()}-", dir=parent,
+            )
+            created = os.lstat(temporary)
         installed = False
         wal_registered = False
         wal_registration_attempted = False
@@ -4182,11 +4201,15 @@ class _SetupLinkTransaction:
                 # Registration may replace its journal and then fail fsync.
                 # Keep the staged inode whenever persistence is uncertain.
                 wal_registration_attempted = True
-                load_api["register_setup_switch_created_directory"](
+                operation = ("stage_setup_switch_created_directory" if deferred_stage
+                             else "register_setup_switch_created_directory")
+                registered = load_api[operation](
                     Path(ZTP) / ".setup-switch-journal.json", Path(path), Path(temporary),
                     deployment_lock_descriptor=descriptor, services_quiesced=True,
                     runtime_backend=load_api["service_runtime_backend"](),
                 )
+                if deferred_stage:
+                    created = registered
                 wal_registered = True
             require_wal_directory_owner(temporary)
             try:

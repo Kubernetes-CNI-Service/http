@@ -1634,6 +1634,10 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 ## TC-REAL-R22-GENERATION-INPUT-ABA-001 — 跨进程输入换代与多输出一致性
 
+- 共享镜像候选首轮有界394项回归中的原 `test_setup_created_directory_recovery_resumes_after_owned_rmdir` 失败：同步辅助函数返回物理 `/private/var` 路径，原 writer 的 `/var` 别名路径故障钩子未命中，导致该恢复断言未看到应注入的 OSError。原日志和断言保留；候选改为以冻结物理身份核权、实际同步继续使用已验证 WAL 行的原 lexical parent，嵌套缺席重入也沿各行原 writer 路径到存活父。原单项及新 direct/真实重入3项回归通过只证明此明确修正边界，不能代替整个有界集合，更不能解除其它历史超时的正式 full 闸门。
+
+- 共享镜像目录写集补充：`_process_bin_files` 原先只登记镜像链接，`ztp/image` 及其 `cumulus|nvos` 真实目录的 mkdir 不在 WAL，冷恢复会留下原本不存在的目录。TEST 独立 direct 与真实 LOAD→SETUP→全新 LOAD 先 RED，候选在原 WAL 全集预检后创建并登记暂存 inode，再无覆盖安装，保留普通 umask 的公开目录权限（受控 umask022 预期0755，不能因暂存目录变成0700）。全新 LOAD 按逐层冻结身份恢复原缺席；恢复 rmdir 完外层目录、同步存活父之前再 SIGKILL，另一全新 LOAD 仅可沿已验证缺席的 WAL 目录链补同步，不能猜测任意不存在的父目录。mkdir 后尚未登记行的暂存目录、恢复后无关对象占据原父路径均须 HOLD，保留原 WAL/对象，不启动服务。登记还须在实际 mkdir 前重核当前 WAL 原 inode/字节/私有模式及闭合 schema/phase/checksum；更早的预检成功不能授权之后换入的 WAL。权限与登记前换绑候选分别有独立 RED 原日志；追加 umask 的首次真实 workflow 夹具漏 import os 导致的失败原日志保留，只修夹具依赖、不改原退出码/字节/inode断言。现场前置、清理与风险沿用本卡的精确 P/Q/WAL、持锁停服、正常写者静默及可恢复隔离快照；另留存父链 stat、暂存/安装/rmdir/fsync 的物理顺序和完整 END/退出码。该补充不证明不合作同 UID 写者的最后检查与 namespace write 间原子隔离、完整其它动态写集、旧 A 显式安全激活、Linux/断电或 DEV ACK；本卡仍 OPEN，bounded 回归不解除原超时原因未闭的正式 related/full 闸门。
+
 - comparison 行登记/只读 writer 核验需对实际重新读取的 WAL 再核私有 mode、闭合字段、schema、phase 与 checksum；不能把更早一次 recovery 通过当作之后字节的授权。TEST 在先前验证返回后独立换成未知 phase 且保留旧 checksum，两项候选实现 RED→GREEN；必须 HOLD 并保留换入 WAL 原字节、源报告和目标缺席，不自动签出新的有效 envelope。该负例仅证明指定边界的 fail-closed，不宣称非协作同 UID 写者原子隔离或正式 full。
 
 - comparison 恢复后 WAL 退休门禁：目录已还原，随后某次已授权 P 链接恢复完成后若报告发生变化，须再次核完整 transfer 树并 HOLD，保留 WAL 和变化后的原目录，而不是仅凭此前目录恢复成功退休日志。TEST 新负例的早期非规范路径/已有 P 行登记/相对链接别名夹具错误原日志保留，不算实现 RED；修正为已有 P 行显式登记和物理父目录相对目标后，候选实现确实未拒绝而 RED，再补最终完整树复核。既有断言保持不变；发生过的 P 链接恢复不能冒称零写入。此边界同样不关闭本卡或正式 proof 闸门。
