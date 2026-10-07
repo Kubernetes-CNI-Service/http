@@ -2461,7 +2461,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <dt>作用：</dt><dd>Pure exact-grid read decoding, never publication or mutation authority。</dd>
             <dt>是否直接运行：</dt><dd>否；这是未安装、未启用的受控传输／只读库，不是操作员 CLI 或在线发布入口。</dd>
             <dt>运行环境：</dt><dd>当前未安装、未启用；仅在本地隔离候选中验证，不启动受管服务。</dd>
-            <dt>使用场景：</dt><dd>按精确目标、sheetId 和坐标解码 userEnteredValue；按完整活动键和原始 Status 分类，精确 Closed 排除活动、重复活动键 CONFLICT、已有 NV ID 不改；有限窗口未匹配不是全表不存在或插入许可。分别核十四表身份、四张 row-2 表头及有界 History A:E，回读矩形不是 COMPLETE。</dd>
+            <dt>使用场景：</dt><dd>按精确目标、sheetId 和坐标解码 userEnteredValue；按完整活动键和原始 Status 分类，精确 Closed 排除活动、重复活动键 CONFLICT、已有 NV ID 不改；有限窗口未匹配不是全表不存在或插入许可。History 全尾按同一响应原始行容量拒绝截断，last_data_row_index 为全部 A:E 最后占用行，不推导事务快照、发送许可或 COMPLETE。</dd>
             <dt>前置条件：</dt><dd>未来发送须受固定 root launcher、精确部署 Python/SSL/CA 身份、完整总预算监督和每次新鲜准入支配；本地对象不是授权。</dd>
             <dt>语法/调用方式：</dt><dd>开发测试导入函数；无已安装操作员入口。</dd>
             <dt>主要参数：</dt><dd>无独立 CLI；不提供目标 URL、代理、凭据路径、CA 或重试覆盖开关。</dd>
@@ -2479,7 +2479,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <dt>作用：</dt><dd>Pure C-8 bounded business-sheet read shapes, NOT authority or a sender。</dd>
             <dt>是否直接运行：</dt><dd>否；这是未安装、未启用的受控传输／只读库，不是操作员 CLI 或在线发布入口。</dd>
             <dt>运行环境：</dt><dd>当前未安装、未启用；仅在本地隔离候选中验证，不启动受管服务。</dd>
-            <dt>使用场景：</dt><dd>构造含 Switch N／Cabling U 原始 Status 的精确发现列、单行矩形、十四表身份、四张 tracker 表头及最多 5000 行 History A:E 的纯 Sheets GET 请求；不接收任意 A1 范围，不读取宽列或自动分页，矩形不证明完整尾边界。</dd>
+            <dt>使用场景：</dt><dd>构造含 Switch N／Cabling U 原始 Status 的精确发现列、单行矩形、十四表身份、四张 tracker 表头及最多 5000 行 History A:E 的纯 Sheets GET 请求；固定 A3:E5002 全尾同时请求实际行容量，有限矩形与完整尾分开，不接收任意 A1 范围、不读宽列、不自动分页。</dd>
             <dt>前置条件：</dt><dd>未来发送须受固定 root launcher、精确部署 Python/SSL/CA 身份、完整总预算监督和每次新鲜准入支配；本地对象不是授权。</dd>
             <dt>语法/调用方式：</dt><dd>开发测试导入函数；无已安装操作员入口。</dd>
             <dt>主要参数：</dt><dd>无独立 CLI；不提供目标 URL、代理、凭据路径、CA 或重试覆盖开关。</dd>
@@ -2605,7 +2605,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <dt>作用：</dt><dd>Uninstalled C-12/C-14 TLS inputs and native prototype, not online authority。</dd>
             <dt>是否直接运行：</dt><dd>否；这是未安装、未启用的受控传输／只读库，不是操作员 CLI 或在线发布入口。</dd>
             <dt>运行环境：</dt><dd>当前未安装、未启用；仅在本地隔离候选中验证，不启动受管服务。</dd>
-            <dt>使用场景：</dt><dd>验证固定 held-FD 受控 CA、原生 TLS/hostname 与一次 OAuth POST／Sheets GET／固定只读 metadata search POST；含有界 History A:E，只读矩形不是 COMPLETE；非 200 和重定向拒绝。</dd>
+            <dt>使用场景：</dt><dd>验证固定 held-FD 受控 CA、原生 TLS/hostname 与一次 OAuth POST／Sheets GET／固定只读 metadata search POST；History 全尾与实际行容量同一 GET，超过 5002 拒绝；只读观察不是 COMPLETE，部分响应、非 200 和重定向拒绝且不重发。</dd>
             <dt>前置条件：</dt><dd>未来发送须受固定 root launcher、精确部署 Python/SSL/CA 身份、完整总预算监督和每次新鲜准入支配；本地对象不是授权。</dd>
             <dt>语法/调用方式：</dt><dd>开发测试导入函数；无已安装操作员入口。</dd>
             <dt>主要参数：</dt><dd>无独立 CLI；不提供目标 URL、代理、凭据路径、CA 或重试覆盖开关。</dd>

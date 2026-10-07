@@ -47,6 +47,17 @@ class ObservedSheetsGrid:
 
 
 @dataclass(frozen=True)
+class ObservedHistoryTail:
+    """One bounded whole-body observation; not authority, CAS or COMPLETE."""
+    sheet_id: int
+    sheet_title: str
+    row_count: int
+    last_data_row_index: int
+    cells: tuple = field(repr=False)
+    source_sha256: str
+
+
+@dataclass(frozen=True)
 class ObservedTemplateIdentity:
     spreadsheet_id: str = field(repr=False)
     sheet_ids: tuple
@@ -313,24 +324,75 @@ def decode_history_read(plan, response, *, sheet_id):
         sheet = document["sheets"][0]
         if type(sheet) is not dict or set(sheet) != {"properties", "data"}: raise SheetsDecodeHold()
         if _template_property(sheet["properties"]) != ("Update_History", sheet_id): raise SheetsDecodeHold()
-        grids = sheet["data"]
-        if type(grids) is not list or len(grids) != 1: raise SheetsDecodeHold()
-        grid = grids[0]
-        if (type(grid) is not dict or not {"startRow"} <= set(grid) <= {"startRow", "startColumn", "rowData"}
-                or type(grid["startRow"]) is not int or grid["startRow"] != first - 1
-                or type(grid.get("startColumn", 0)) is not int or grid.get("startColumn", 0) != 0):
+        cells = _history_cells(sheet["data"], first, last)
+        result = ObservedSheetsGrid(sheet_id, "Update_History", cells, hashlib.sha256(response.data).hexdigest())
+    except Exception:
+        failed = True
+    if failed: raise SheetsDecodeHold()
+    return result
+
+
+def _history_cells(grids, first, last):
+    """Project omitted empty fields only inside the explicitly returned grid."""
+    if type(grids) is not list or len(grids) != 1: raise SheetsDecodeHold()
+    grid = grids[0]
+    if (type(grid) is not dict or not {"startRow"} <= set(grid) <= {"startRow", "startColumn", "rowData"}
+            or type(grid["startRow"]) is not int or grid["startRow"] != first - 1
+            or type(grid.get("startColumn", 0)) is not int or grid.get("startColumn", 0) != 0):
+        raise SheetsDecodeHold()
+    rows = grid.get("rowData", [])
+    if type(rows) is not list or len(rows) > last - first + 1: raise SheetsDecodeHold()
+    cells = []
+    for offset in range(last - first + 1):
+        row = rows[offset] if offset < len(rows) else {}
+        if type(row) is not dict or not set(row) <= {"values"}: raise SheetsDecodeHold()
+        values = row.get("values", [])
+        if type(values) is not list or len(values) > 5: raise SheetsDecodeHold()
+        for column in range(5):
+            cells.append((first - 1 + offset, "ABCDE"[column], _cell(values[column] if column < len(values) else {})))
+    return tuple(cells)
+
+
+def decode_history_tail(plan, response, *, sheet_id):
+    """Capacity-clipped A3:E5002 in one complete response; never a partial tail.
+
+    Capacity includes two header rows. All raw A:E cells contribute to the
+    last occupied row, even False/0/formula/explicit empty string. The header
+    boundary is zero-based 1 when all data cells are omitted. This observation
+    is not proof of enrollment, template, read freshness or remote completion.
+    """
+    from monitor.issue_tracker_sheets_read_plan import PreparedSheetsRead, _HISTORY_TAIL_FIELDS
+    failed = False
+    try:
+        if (type(plan) is not PreparedSheetsRead or plan.host != "sheets.googleapis.com"
+                or type(plan.path) is not str or len(plan.path) > 16384 or plan.method != "GET"
+                or type(plan.body) is not bytes or plan.body != b""
+                or type(plan.budget_seconds) is not float or plan.budget_seconds != 30.0
+                or type(sheet_id) is not int or not 0 <= sheet_id <= 2147483647):
             raise SheetsDecodeHold()
-        rows = grid.get("rowData", [])
-        if type(rows) is not list or len(rows) > last - first + 1: raise SheetsDecodeHold()
-        cells = []
-        for offset in range(last - first + 1):
-            row = rows[offset] if offset < len(rows) else {}
-            if type(row) is not dict or not set(row) <= {"values"}: raise SheetsDecodeHold()
-            values = row.get("values", [])
-            if type(values) is not list or len(values) > 5: raise SheetsDecodeHold()
-            for column in range(5):
-                cells.append((first - 1 + offset, "ABCDE"[column], _cell(values[column] if column < len(values) else {})))
-        result = ObservedSheetsGrid(sheet_id, "Update_History", tuple(cells), hashlib.sha256(response.data).hexdigest())
+        parsed = urlsplit(plan.path)
+        match = re.fullmatch(r"/v4/spreadsheets/([A-Za-z0-9_-]{20,4096})", parsed.path)
+        query = [("includeGridData", "true"), ("fields", _HISTORY_TAIL_FIELDS), ("ranges", "'Update_History'!A3:E5002")]
+        if (parsed.scheme or parsed.netloc or parsed.fragment or match is None
+                or plan.path != parsed.path + "?" + urlencode(query)):
+            raise SheetsDecodeHold()
+        sheets, digest = _template_document(response, match.group(1))
+        if len(sheets) != 1: raise SheetsDecodeHold()
+        sheet = sheets[0]
+        if type(sheet) is not dict or set(sheet) != {"properties", "data"}: raise SheetsDecodeHold()
+        props = sheet["properties"]
+        if (type(props) is not dict or set(props) != {"sheetId", "title", "sheetType", "gridProperties"}
+                or _template_property({key: props[key] for key in ("sheetId", "title")}) != ("Update_History", sheet_id)
+                or type(props["sheetType"]) is not str or props["sheetType"] != "GRID"):
+            raise SheetsDecodeHold()
+        capacity = props["gridProperties"]
+        if (type(capacity) is not dict or set(capacity) != {"rowCount", "columnCount"}
+                or type(capacity["rowCount"]) is not int or not 3 <= capacity["rowCount"] <= 5002
+                or type(capacity["columnCount"]) is not int or not 5 <= capacity["columnCount"] <= 2147483647):
+            raise SheetsDecodeHold()
+        cells = _history_cells(sheet["data"], 3, capacity["rowCount"])
+        last = max((row for row, column, entered in cells if entered), default=1)
+        result = ObservedHistoryTail(sheet_id, "Update_History", capacity["rowCount"], last, cells, digest)
     except Exception:
         failed = True
     if failed: raise SheetsDecodeHold()

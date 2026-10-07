@@ -284,6 +284,20 @@ class NativeHistoryReadUnit:
         return _native_complete_read(self._prepared)
 
 
+class NativeHistoryTailReadUnit:
+    """One fixed same-response capacity/raw-tail GET; no mutation authority."""
+    def __init__(self, binding, token):
+        from monitor.issue_tracker_sheets_read_plan import prepare_history_tail_read
+        self._prepared = prepare_history_tail_read(binding, token)
+        self._called = False; self._lock = threading.Lock()
+
+    def send_once(self):
+        with self._lock:
+            used = self._called; self._called = True
+        if used: raise TlsInputHold()
+        return _native_complete_read(self._prepared)
+
+
 class NativeOnlineWhitelistReadUnit:
     """Uninstalled fixed read, no activation, write, refresh or retry authority."""
     def __init__(self, binding, token):

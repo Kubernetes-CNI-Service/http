@@ -896,8 +896,12 @@ ACTION-PREIMAGE/action_digest → immutable wire journal → 六个冷启动进�
 （最多 5000 行、2 MiB 响应）的 planner → 实际自有 loopback TLS → typed decoder；
 仅在明确返回的同一 grid 内补空单元格，保留 formula/number/bool/string 的区别和
 原字面值。拒绝错位、缺 grid、重复、额外列、非 200 和部分响应，不重发、不静默
-截断或分页。它不是完整 History 尾边界、缺行/重复行证明或 COMPLETE，不授予发送
-能力；nonce、fence、不可变 journal 与完整单元对账仍须另证。真机卡 NOT RUN。
+截断或分页。新增固定 `A3:E5002` 全尾形态在同一个 GET 获取 `GRID` 类型、
+`rowCount` 容量和所有 A:E 原始单元格；超过 5002 行容量拒绝，不能接受截断尾。
+`last_data_row_index` 为零基实际最后占用行，完整显式空 grid 为表头边界 1；
+False、0、公式与显式空字符串也算占用。它不是事务快照、新鲜准入、缺行/重复行
+单元对账或 COMPLETE，不授予发送能力；nonce、fence、不可变 journal 与完整
+业务及审计集合仍须另证。真实 TLS 部分响应/溢出不重发，真机卡 NOT RUN。
 
 `test_cases.test_req7_spreadsheet_owner` 验证未安装的跨项目 spreadsheet-wide
 非阻塞 OS owner：固定 root-only `/var/lib/http-ztp-container/issue-tracker`

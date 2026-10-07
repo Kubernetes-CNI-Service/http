@@ -43,6 +43,112 @@ def response(value):
     return SimpleNamespace(status=200, complete=True, data=json.dumps(value, ensure_ascii=True).encode())
 
 
+TAIL_FIELDS = 'spreadsheetId,sheets(properties(sheetId,title,sheetType,gridProperties(rowCount,columnCount)),data(startRow,startColumn,rowData(values(userEnteredValue))))'
+
+
+def tail_document(row_count=7):
+    return {'spreadsheetId': TARGET, 'sheets': [{'properties': {'sheetId': 99, 'title': 'Update_History',
+        'sheetType': 'GRID', 'gridProperties': {'rowCount': row_count, 'columnCount': 5}},
+        'data': [{'startRow': 2, 'rowData': [{}, {'values': [{}, {}, {}, {},
+            {'userEnteredValue': {'stringValue': 'preserve original '}}]}]}]}]}
+
+
+class Req7HistoryTailDirectTests(unittest.TestCase):
+    def setUp(self):
+        self.planner = load('issue_tracker_sheets_read_plan'); self.decoder = load('issue_tracker_sheets_read_decode')
+        self.binding, self.token = inputs()
+
+    def plan(self):
+        self.assertTrue(hasattr(self.planner, 'prepare_history_tail_read'), 'complete bounded History-tail read missing')
+        return self.planner.prepare_history_tail_read(self.binding, self.token)
+
+    def observe(self, value=None, plan=None, raw=None, sheet_id=99):
+        plan = self.plan() if plan is None else plan
+        self.assertTrue(hasattr(self.decoder, 'decode_history_tail'), 'actual same-response capacity/tail decoder missing')
+        return self.decoder.decode_history_tail(plan, raw or response(tail_document() if value is None else value), sheet_id=sheet_id)
+
+    def test_fixed_same_get_capacity_and_entire_finite_body_no_caller_tail_override(self):
+        with mock.patch('socket.socket') as network: plan = self.plan()
+        network.assert_not_called()
+        self.assertEqual({'includeGridData': ['true'], 'fields': [TAIL_FIELDS], 'ranges': ["'Update_History'!A3:E5002"]}, parse_qs(urlsplit(plan.path).query))
+        self.assertEqual(('GET', b'', 30.0), (plan.method, plan.body, plan.budget_seconds))
+        self.assertEqual('/v4/spreadsheets/' + TARGET, urlsplit(plan.path).path)
+        self.assertNotIn('sentinel.private-token', repr(plan))
+        with self.assertRaises(TypeError): self.planner.prepare_history_tail_read(self.binding, self.token, last_row=7)
+
+    def test_tail_is_last_original_occupied_cell_not_formatted_or_first_gap(self):
+        item = tail_document(); rows = item['sheets'][0]['data'][0]['rowData']
+        rows.extend([{}, {}, {'values': [{}, {}, {}, {}, {'userEnteredValue': {'boolValue': False}}]}])
+        seen = self.observe(item)
+        self.assertEqual((99, 'Update_History', 7, 6), (seen.sheet_id, seen.sheet_title, seen.row_count, seen.last_data_row_index))
+        self.assertEqual(25, len(seen.cells))
+        self.assertEqual((6, 'E', (('boolValue', False),)), seen.cells[-1])
+        self.assertEqual((3, 'E', (('stringValue', 'preserve original '),)), seen.cells[9])
+        self.assertEqual(hashlib.sha256(response(item).data).hexdigest(), seen.source_sha256)
+        self.assertNotIn('preserve original', repr(seen)); self.assertFalse(hasattr(seen, 'permit')); self.assertFalse(hasattr(seen, 'complete'))
+        with self.assertRaises(AttributeError): seen.last_data_row_index = 1
+
+    def test_empty_explicit_grid_projects_only_capacity_and_header_boundary(self):
+        for size in (3, 5002):
+            item = tail_document(size); item['sheets'][0]['data'][0].pop('rowData')
+            seen = self.observe(item)
+            self.assertEqual(1, seen.last_data_row_index); self.assertEqual(5 * (size - 2), len(seen.cells))
+            self.assertTrue(all(cell[2] == () for cell in seen.cells))
+        for entered in ({'numberValue': 0}, {'formulaValue': '=FALSE()'}, {'stringValue': ''}):
+            item = tail_document(3); item['sheets'][0]['data'][0]['rowData'] = [{'values': [{'userEnteredValue': entered}]}]
+            self.assertEqual(2, self.observe(item).last_data_row_index)
+
+    def test_capacity_missing_overflow_non_grid_and_non_native_scalar_hold_without_truncation(self):
+        cases = []
+        for count in (True, 2, 5003, '7', 7.0):
+            item = tail_document(); item['sheets'][0]['properties']['gridProperties']['rowCount'] = count; cases.append(item)
+        for count in (True, 4, '5', 5.0, 2147483648):
+            item = tail_document(); item['sheets'][0]['properties']['gridProperties']['columnCount'] = count; cases.append(item)
+        for kind in ('DATA_SOURCE', 'OBJECT', 'GRID ', True):
+            item = tail_document(); item['sheets'][0]['properties']['sheetType'] = kind; cases.append(item)
+        for field in ('gridProperties', 'sheetType'):
+            item = tail_document(); item['sheets'][0]['properties'].pop(field); cases.append(item)
+        for item in cases:
+            with self.subTest(item=item), self.assertRaises(self.decoder.SheetsDecodeHold): self.observe(item)
+
+    def test_partial_window_wrong_identity_duplicate_grid_or_over_capacity_is_not_full_tail(self):
+        plan = self.plan()
+        for forged in (replace(plan, path=plan.path.replace('E5002', 'E7')), replace(plan, host='foreign.invalid'),
+                       replace(plan, method='POST'), replace(plan, body=b'{}'), replace(plan, budget_seconds=60.0),
+                       SimpleNamespace(**plan.__dict__)):
+            with self.assertRaises(self.decoder.SheetsDecodeHold): self.observe(plan=forged)
+        cases = []
+        for field, value in (('startRow', 3), ('startRow', True), ('startColumn', 1), ('startColumn', True)):
+            item = tail_document(); item['sheets'][0]['data'][0][field] = value; cases.append(item)
+        for field, value in (('sheetId', True), ('sheetId', 100), ('title', 'Update_History ')):
+            item = tail_document(); item['sheets'][0]['properties'][field] = value; cases.append(item)
+        for change in (lambda item: item['sheets'][0]['data'].clear(),
+                       lambda item: item['sheets'][0]['data'].append(deepcopy(item['sheets'][0]['data'][0])),
+                       lambda item: item['sheets'][0]['data'][0]['rowData'].extend([{}, {}, {}, {}]),
+                       lambda item: item['sheets'].append(deepcopy(item['sheets'][0]))):
+            item = tail_document(); change(item); cases.append(item)
+        item = tail_document(); item['spreadsheetId'] = 'foreign_spreadsheet_0002'; cases.append(item)
+        for item in cases:
+            with self.assertRaises(self.decoder.SheetsDecodeHold) as caught: self.observe(item)
+            self.assertIsNone(caught.exception.__context__)
+        for sheet_id in (True, -1, '99'):
+            with self.assertRaises(self.decoder.SheetsDecodeHold): self.observe(sheet_id=sheet_id)
+
+    def test_response_partial_duplicate_json_extra_fields_or_effective_value_hold(self):
+        plan = self.plan(); source = response(tail_document())
+        for raw in (SimpleNamespace(status=503, complete=True, data=source.data),
+                    SimpleNamespace(status=200, complete=False, data=source.data),
+                    SimpleNamespace(status=200, complete=True, data=b' ' * (2 * 1024 * 1024 + 1)),
+                    SimpleNamespace(status=200, complete=True, data=b'{"spreadsheetId":"x","spreadsheetId":"x","sheets":[]}')):
+            with self.assertRaises(self.decoder.SheetsDecodeHold): self.observe(plan=plan, raw=raw)
+        for cell in ({'formattedValue': 'text'}, {'effectiveValue': {'stringValue': 'text'}},
+                     {'userEnteredValue': {'stringValue': '\ud800'}}, {'userEnteredValue': {'numberValue': True}}):
+            item = tail_document(); item['sheets'][0]['data'][0]['rowData'][0] = {'values': [cell]}
+            with self.assertRaises(self.decoder.SheetsDecodeHold): self.observe(item)
+        item = tail_document(); item['sheets'][0]['properties']['gridProperties']['unknown'] = 7
+        with self.assertRaises(self.decoder.SheetsDecodeHold): self.observe(item)
+
+
 class Req7HistoryReadDirectTests(unittest.TestCase):
     def setUp(self):
         self.planner = load('issue_tracker_sheets_read_plan'); self.decoder = load('issue_tracker_sheets_read_decode')
@@ -138,6 +244,33 @@ class Req7HistoryReadNativeWorkflowTests(unittest.TestCase):
     from test_cases.test_req7_sheets_read_plan import Req7SheetsNativeReadWorkflowTests as _Fixture
     fixture = _Fixture.fixture; certificates = _Fixture.certificates; server = _Fixture.server
 
+    def test_actual_tls_capacity_and_raw_full_tail_share_one_get_then_unit_is_consumed(self):
+        self.assertTrue(hasattr(self.tls, 'NativeHistoryTailReadUnit'))
+        plan = self.planner.prepare_history_tail_read(self.binding, self.token)
+        payload = response(tail_document()).data
+        wire = ('HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n' % len(payload)).encode() + payload
+        unit = self.tls.NativeHistoryTailReadUnit(self.binding, self.token)
+        with self.server(wire, hostname='sheets.googleapis.com', destination='sheets.googleapis.com') as (records, errors), self.fixture():
+            observed = self.decoder.decode_history_tail(plan, unit.send_once(), sheet_id=99)
+            with self.assertRaises(self.tls.TlsInputHold): unit.send_once()
+        self.assertEqual([], errors); self.assertEqual(1, len(records)); self.assertEqual(b'', records[0][2])
+        self.assertEqual(('GET ' + plan.path + ' HTTP/1.1\r\n').encode(), records[0][0])
+        self.assertEqual((7, 3, 25), (observed.row_count, observed.last_data_row_index, len(observed.cells)))
+        self.assertEqual(hashlib.sha256(payload).hexdigest(), observed.source_sha256)
+
+    def test_actual_tls_overflow_and_partial_body_never_promote_to_tail_or_replay(self):
+        self.assertTrue(hasattr(self.tls, 'NativeHistoryTailReadUnit'))
+        payload = response(tail_document(5003)).data
+        for body, length, error_class in ((payload, len(payload), self.decoder.SheetsDecodeHold),
+                                          (payload[:-1], len(payload), self.tls.TlsInputHold)):
+            wire = ('HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n' % length).encode() + body
+            unit = self.tls.NativeHistoryTailReadUnit(self.binding, self.token)
+            plan = self.planner.prepare_history_tail_read(self.binding, self.token)
+            with self.server(wire, hostname='sheets.googleapis.com', destination='sheets.googleapis.com') as (records, errors), self.fixture():
+                with self.assertRaises(error_class): self.decoder.decode_history_tail(plan, unit.send_once(), sheet_id=99)
+                with self.assertRaises(self.tls.TlsInputHold): unit.send_once()
+            self.assertEqual([], errors); self.assertEqual(1, len(records))
+
     def test_actual_tls_read_bound_history_rectangle_once_preserves_typed_original_bytes(self):
         self.assertTrue(hasattr(self.tls, 'NativeHistoryReadUnit'), 'one-shot native History read missing')
         payload = response(document()).data
@@ -177,7 +310,8 @@ class Req7HistoryReadManifestTests(unittest.TestCase):
         card = (ROOT / 'test_cases/REAL_ENVIRONMENT.md').read_text()
         start = card.index('## TC-REAL-REQ7-BOUNDED-HISTORY-READ-001')
         end = card.find('\n## ', start + 1); card = card[start:] if end == -1 else card[start:end]
-        for term in ('NOT RUN / REAL_ENV REQUIRED', '5000', 'userEnteredValue', '不是 COMPLETE', '前置条件', 'stat/inode', '清理'):
+        for term in ('NOT RUN / REAL_ENV REQUIRED', '5000', 'userEnteredValue', '不是 COMPLETE', '前置条件', 'stat/inode', '清理',
+                     'A3:E5002', 'rowCount', '同一个', '超过 5002', 'last_data_row_index'):
             self.assertIn(term, card)
 
 

@@ -19,6 +19,7 @@ _SHEETS = frozenset(("ETH&IB Switch", "ETH Cabling", "IB Cabling"))
 _FIELDS = "spreadsheetId,sheets(properties(sheetId,title),data(startRow,startColumn,rowData(values(userEnteredValue))))"
 _WL_FIELDS = "spreadsheetId,sheets(properties(sheetId,title,gridProperties(rowCount,columnCount)),data(startRow,startColumn,rowData(values(userEnteredValue))))"
 _TEMPLATE_ID_FIELDS = "spreadsheetId,sheets(properties(sheetId,title))"
+_HISTORY_TAIL_FIELDS = "spreadsheetId,sheets(properties(sheetId,title,sheetType,gridProperties(rowCount,columnCount)),data(startRow,startColumn,rowData(values(userEnteredValue))))"
 _TEMPLATE_HEADER_RANGES = ("'ETH&IB Switch'!A2:U2", "'ETH Cabling'!A2:AC2", "'IB Cabling'!A2:AC2", "'Update_History'!A2:E2")
 
 
@@ -141,5 +142,19 @@ def prepare_history_read(binding, token, *, first_row, last_row):
         raise SheetsReadHold()
     query = urlencode([("includeGridData", "true"), ("fields", _FIELDS),
                        ("ranges", "'Update_History'!A%d:E%d" % (first_row, last_row))])
+    return PreparedSheetsRead(base.host, "/v4/spreadsheets/" + binding.spreadsheet_id + "?" + query,
+                              base.method, base.headers, base.body)
+
+
+def prepare_history_tail_read(binding, token):
+    """Fixed bounded full-body observation, capacity and raw cells in ONE GET.
+
+    The decoder refuses rowCount > 5002 instead of accepting a partial tail.
+    This is not a transactional snapshot, fresh admission or COMPLETE proof;
+    subsequent appends and changes still require journal-bound reconciliation.
+    """
+    base = prepare_sheets_read(binding, token, mode="row_rectangle", sheet="ETH&IB Switch", first_row=3)
+    query = urlencode([("includeGridData", "true"), ("fields", _HISTORY_TAIL_FIELDS),
+                       ("ranges", "'Update_History'!A3:E5002")])
     return PreparedSheetsRead(base.host, "/v4/spreadsheets/" + binding.spreadsheet_id + "?" + query,
                               base.method, base.headers, base.body)

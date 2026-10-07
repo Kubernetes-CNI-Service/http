@@ -2115,6 +2115,7 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 ## TC-REAL-REQ7-BOUNDED-HISTORY-READ-001 — 原始类型的有限 History 回读
 
 - Case ID：`TC-REAL-REQ7-BOUNDED-HISTORY-READ-001`；类型：real-environment / integration；对应 C-8/C-19/C-26。状态：**NOT RUN / REAL_ENV REQUIRED**。涉及 `monitor/issue_tracker_sheets_read_plan.py`、`monitor/issue_tracker_tls_inputs.py`、`monitor/issue_tracker_sheets_read_decode.py`；本地 direct 与原生私有 loopback TLS workflow 已覆盖类型、矩形和一次读取，不证明部署环境或整个 REQ7。
+- 新增全尾自动化：固定 `A3:E5002` 与 `sheetType=GRID`、`gridProperties.rowCount/columnCount` 在同一个完整 GET 返回；拒绝超过 5002 行容量、缺/非整数容量、非 GRID、错位/缺 grid、超过实际容量的 rowData 和部分响应。全部 5000 个数据行上界内原始 A:E 占用决定 `last_data_row_index`（零基）；显式空 grid 为表头边界 1，False/0/公式/显式空 string 也算占用。不能把 caller-supplied row number、有限窗口或静默分页提升为完整尾；该观察不是事务快照或 COMPLETE。
 - 风险与目标：只读 `Update_History` A:E 明确起止行，最多 5000 行及 2 MiB 响应；缺 grid、错位、额外列、非 200 或不完整回应拒绝；保留 `userEnteredValue` 的原始类型与字面值，不将数字、公式、格式化文字或规范化空白冒充五列 stringValue。该矩形观察不是 COMPLETE，不证明整个尾部完整或 unit 的缺行／重复行不存在。
 - 前置条件与输入：另获 owner 精确 Stage O 一次性副本只读权限；先绑定部署 Python/SSL/CA、固定 public SDK、目标 sheet ID、两个 enrollment nonce 与受管不可变 journal 的 before 行、完整当前尾边界。大于有限读取界限 HOLD，不截断，不现场放宽上界；本卡不授权实际凭据或出站。
 - 步骤与独立预期：由固定 launcher 和总预算监督读取已证边界，保存 typed 原像、单元所有实际业务行与全部审计行；比对 journal、完整 outcome mapping、action digest、nonce 和永久 fence 四要件。只因一个矩形一致、200 或 fence 存在不得推进 APPLIED。非 200 与第二次回调都不得额外联网。
