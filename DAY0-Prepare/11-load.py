@@ -12715,6 +12715,20 @@ def publish_native_apache_listener_config(
                     original_metadata.st_gid,
                 )
             os.fsync(stream.fileno())
+        # Candidate creation/sync can take time.  The initial A or missing
+        # snapshot is not permission to adopt an object which arrived during
+        # that interval, even if its bytes and mtime match the original.
+        try:
+            current_original = destination.lstat()
+        except FileNotFoundError:
+            current_original = None
+        except OSError as exc:
+            raise LoadError(f"Apache listener 原前像无法重核；HOLD：{exc}") from exc
+        if ((original_metadata is None) != (current_original is None)
+                or (original_metadata is not None and current_original is not None
+                    and _dhcp_a_preimage_receipt_identity(original_metadata)
+                    != _dhcp_a_preimage_receipt_identity(current_original))):
+            raise LoadError("Apache listener 原前像身份已变化；HOLD，拒绝备份或覆盖")
         if original_exists:
             os.link(destination, backup, follow_symlinks=False)
             backup_linked = True

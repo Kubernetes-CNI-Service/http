@@ -529,6 +529,13 @@ rollback/recovery hardlink。独立 direct 覆盖 configtest 拒绝、首次目�
 健康收口；configtest/systemctl 是私有命令端口，不执行真实服务动作。root/Linux、
 断电、完整 R22 及正式 proof 仍独立验收。
 
+Native listener 候选完成文件同步后，首个 A backup/B 写入之前必须重核原 listener
+的完整 dev/ino/mode/uid/gid/nlink/size/mtime/ctime 前像，原 missing 仍须缺席。
+direct 的同字节新 inode/缺席后外来文件及真实 LOAD→runtime 命令边界负例要求 HOLD、
+原/外来对象不被该发布器覆盖、零 configtest、无 rollback/recovery 名称生成。
+该检查仅补候选准备期间的身份间隔，不承诺检查与 link/replace 间对非协作写者的
+原子隔离，也不补造 listener 的 WAL、断电或整体健康验收权限。
+
 R22 跨项目恢复不能在 P 链接和 manifest 恢复后、旧 A runtime 恢复之前删除 WAL。
 原 WAL 的 descriptor、身份和完整字节须持有到 runtime 恢复返回，再复核停服/锁、
 P/Q 盘面及 Q 父提交前像，只有全部通过才退休凭据；异常或进程死亡保留 WAL。

@@ -914,6 +914,49 @@ def write_shared_artifact_receipt(
 
 
 class ReleaseTransactionTests(unittest.TestCase):
+    def test_native_listener_late_original_rebind_holds_before_backup_or_b_write(self):
+        for prior_exists in (True, False):
+            with self.subTest(prior_exists=prior_exists), tempfile.TemporaryDirectory() as name:
+                root = Path(name)
+                destination = root / "http-ztp-listeners.conf"
+                original = b"Listen 192.0.2.9:80\n"
+                if prior_exists:
+                    destination.write_bytes(original)
+                    destination.chmod(0o640)
+                original_owner = destination.stat() if prior_exists else None
+                held_original = root / "independent-held-original-A"
+                foreign = original if prior_exists else b"independent foreign listener\n"
+                sync = LOAD.os.fsync
+                injections = []
+                command = mock.Mock(side_effect=AssertionError("source HOLD ran configtest"))
+
+                def rebind_after_candidate_sync(descriptor):
+                    result = sync(descriptor)
+                    if not injections and stat.S_ISREG(os.fstat(descriptor).st_mode):
+                        if prior_exists:
+                            destination.rename(held_original)
+                        destination.write_bytes(foreign)
+                        destination.chmod(0o640)
+                        if original_owner is not None:
+                            os.utime(destination, ns=(original_owner.st_atime_ns,
+                                                     original_owner.st_mtime_ns))
+                        injections.append(destination.stat().st_ino)
+                    return result
+
+                with mock.patch.object(LOAD.os, "fsync", side_effect=rebind_after_candidate_sync):
+                    with self.assertRaisesRegex(LOAD.LoadError, "HOLD"):
+                        LOAD.publish_native_apache_listener_config(
+                            ("192.0.2.40",), destination=destination, command_runner=command,
+                        )
+                command.assert_not_called()
+                self.assertEqual(1, len(injections), "fault missed candidate synchronization")
+                self.assertEqual(injections[0], destination.stat().st_ino)
+                self.assertEqual(foreign, destination.read_bytes())
+                self.assertEqual([], list(root.glob(f".{destination.name}.*")))
+                if original_owner is not None:
+                    self.assertEqual(original_owner.st_ino, held_original.stat().st_ino)
+                    self.assertEqual(original, held_original.read_bytes())
+
     def test_native_listener_failed_rollback_retains_original_a_authority(self):
         original = b"Listen 192.0.2.9:80\n"
         for phase in ("configtest", "publication-sync", "retirement-sync"):
