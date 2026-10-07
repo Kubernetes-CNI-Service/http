@@ -1,5 +1,38 @@
 # 脚本变更影响测试
 
+## 2026-10-08 R22 实际 SETUP 镜像链接验收候选
+
+SETUP 正常发布相对镜像链接，原 publication intent 的普通文件限定阻断该路径；
+新增 direct 保留独立原源 inode/摘要、原链接 inode/文字及同字节/同目标替换负例，
+真实 LOAD→SETUP 发布镜像→parent/report/selector 提交后 SIGKILL→新 LOAD B 健康
+验收要求两原 owner 不变。实现只给已绑定发布链接登记显式 `link_target`；普通源
+校验仍不跟随软链接，B 期间持有源 FD、重核原链接/源/父目录。NVOS 保留原合法别名。
+
+前两轮五项 ERROR 源于夹具混用 macOS `/var` 与 `/private/var`，未达到实现验证点；
+原日志 `r22-real-setup-image-link-valid-red.log` 和 `r22-real-setup-image-link-contract-green.log`
+保留，不能作为有效业务 RED/GREEN。统一私有 SETUP 的物理 root/ZTP 后，内存执行
+HEAD `0446b1d` 的原 LOAD 源码，四项在普通文件限制处 ERROR；另一项仅异常文字
+不匹配，不能算允许外来源的业务 FAIL。该 baseline 使用 `-c` 包装执行原源码，
+日志 ARGV 字段是请求的测试列表而非包装 argv，须结合完整诊断命令审计：
+`r22-real-setup-image-link-canonical-fixture-red.log`，inode161434205，size134490，
+SHA256 `575035df331fce690bcd6fb9f3b25c72c996599548d0626194a7067cdcc38d7f`，
+5 tests / 1 FAIL / 4 ERROR / exit1。首候选四项 OK，负例最终路径别名比较 FAIL，
+`r22-real-setup-image-link-canonical-fixture-green.log` 原样保留；只将该比较规范为
+物理路径，未改变 HOLD、原 owner 或源内容断言。
+
+新六项 direct + 真实多脚本冷 B 工作流 7 OK / 7.674s / exit0：
+`outputs/test-diagnostics/r22-real-setup-image-link-workflow-green.log`，inode161439044，
+size129406，SHA256 `4731dfc658370d3aa1ad0b8fbed0c2d22becb5a49b4d319442a5076ef9f6c4ea`。
+读取前后 stat 一致，物理 Ran14→OK16→实际退出24→冻结一致25→END27=0。
+仅局部证据，不更新 ledger，不覆盖真实健康、完整 A 恢复、Linux/断电或正式 full/check。
+
+完整 LOAD/release 与 report direct/workflow 模块、真实镜像发布冷 B、原普通镜像 B
+激活/健康退休/main gate 四项工作流回归 574 OK / 92.763s / exit0：
+`outputs/test-diagnostics/r22-real-image-publication-module-regression.log`，inode161451420，
+size317803，SHA256 `f7f3d2a6f51899c54347b4de7de1a3418b8157875415871f2526eeeade73b25d`。
+前后 stat 稳定；物理 Ran1633→OK1635→实际退出1647→冻结一致1648→END1650=0。
+这是有界模块回归，不是自动批准 related ledger 或干净精确树正式 full proof；后者仍待。
+
 ## 2026-10-08 R22 原 A receipt payload 与封存选择候选
 
 基于 TEST `a1556854a22737799793b563480d53d15538cc4e`。新 WAL 冻结原 receipt

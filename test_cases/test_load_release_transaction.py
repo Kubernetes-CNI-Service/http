@@ -960,6 +960,110 @@ def private_publication_candidates(api, project):
 
 
 class ReleaseTransactionTests(unittest.TestCase):
+    def _real_setup_published_image(self, kind="eth"):
+        basename = ("cumulus-linux-5.12.0-mlx-amd64.bin" if kind == "eth"
+                    else "nvos-amd64-25.02.01.bin")
+        image_root = self.root.resolve() / "image"
+        image_root.mkdir(exist_ok=True)
+        source = image_root / basename
+        source.write_bytes(b"#!/bin/sh\n" + b"independent original image payload\n" * 40000)
+        with (mock.patch.object(SETUP, "IMAGE_DIR", str(image_root)),
+              mock.patch.object(SETUP, "ZTP", str(self.ztp.resolve())),
+              mock.patch.object(SETUP, "HTTP_BASE", str(self.root.resolve())),
+              mock.patch.object(SETUP, "_DRY_RUN", False),
+              mock.patch.object(SETUP, "_NO_UPGRADE", False),
+              mock.patch.object(SETUP, "_LINK_ERRORS", 0),
+              mock.patch.object(SETUP, "_LINK_TRANSACTION", None),
+              mock.patch.object(SETUP, "_SETUP_SWITCH_WAL_CONTEXT", None)):
+            SETUP._process_bin_files()
+            self.assertEqual(0, SETUP._LINK_ERRORS)
+        published = self.ztp / "image" / ("cumulus" if kind == "eth" else "nvos") / basename
+        self.assertTrue(published.is_symlink(), "real SETUP publication must remain a link")
+        self.assertEqual(source, published.resolve(strict=True))
+        return source, published
+
+    def test_publication_image_intent_accepts_real_setup_owned_symlink(self):
+        source, published = self._real_setup_published_image()
+        with mock.patch.object(LOAD, "HTTP_ROOT", self.root.resolve()):
+            intent = LOAD._setup_publication_image_intent({"eth": source}, upgrade_enabled=True)
+        pair = intent["files"]["eth"]
+        self.assertEqual("enabled", intent["policy"])
+        self.assertEqual(os.readlink(published), pair["published"]["link_target"])
+        self.assertEqual(published.lstat().st_ino, pair["published"]["identity"][1])
+        self.assertEqual(source.lstat().st_ino, pair["source"]["identity"][1])
+        self.assertEqual(sha256(source), pair["source"]["sha256"])
+        self.assertEqual(pair["source"]["sha256"], pair["published"]["sha256"])
+        self.assertTrue(published.is_symlink())
+
+    def test_b_image_authority_holds_real_setup_link_and_original_source(self):
+        source, published = self._real_setup_published_image()
+        inputs = LOAD.replace(self.inputs, settings=LOAD.replace(self.inputs.settings,
+                                                                versions={"eth": "5.12.0"}))
+        with mock.patch.object(LOAD, "HTTP_ROOT", self.root.resolve()):
+            intent = LOAD._setup_publication_image_intent({"eth": source}, upgrade_enabled=True)
+            with LOAD._setup_switch_b_image_authority(inputs, {"eth": source}, original_intent=intent) as guard:
+                guard()
+                before = (source.lstat().st_ino, published.lstat().st_ino, os.readlink(published))
+                guard()
+                self.assertEqual(before, (source.lstat().st_ino, published.lstat().st_ino, os.readlink(published)))
+
+    def test_b_image_authority_rejects_same_target_replacement_setup_link(self):
+        source, published = self._real_setup_published_image()
+        inputs = LOAD.replace(self.inputs, settings=LOAD.replace(self.inputs.settings,
+                                                                versions={"eth": "5.12.0"}))
+        with mock.patch.object(LOAD, "HTTP_ROOT", self.root.resolve()):
+            intent = LOAD._setup_publication_image_intent({"eth": source}, upgrade_enabled=True)
+            with LOAD._setup_switch_b_image_authority(inputs, {"eth": source}, original_intent=intent) as guard:
+                raw, owner = os.readlink(published), published.lstat().st_ino
+                held = published.with_name("held-original-published-image-link")
+                published.rename(held)
+                published.symlink_to(raw)
+                self.assertNotEqual(owner, published.lstat().st_ino)
+                with self.assertRaisesRegex(LOAD.LoadError, "image.*HOLD"):
+                    guard()
+                self.assertEqual(owner, held.lstat().st_ino)
+                self.assertEqual(raw, os.readlink(published))
+
+    def test_publication_image_intent_rejects_setup_link_to_unselected_same_byte_source(self):
+        source, published = self._real_setup_published_image()
+        other = self.root / "independent-unselected-image.bin"
+        other.write_bytes(source.read_bytes())
+        published.unlink()
+        published.symlink_to(os.path.relpath(other, published.parent))
+        with mock.patch.object(LOAD, "HTTP_ROOT", self.root.resolve()):
+            with self.assertRaisesRegex(LOAD.LoadError, "image.*(selected|source|HOLD)"):
+                LOAD._setup_publication_image_intent({"eth": source}, upgrade_enabled=True)
+        self.assertEqual(other.resolve(strict=True), published.resolve(strict=True))
+
+    def test_b_image_authority_keeps_original_modern_nvos_alias(self):
+        source, published = self._real_setup_published_image("nvl")
+        inputs = LOAD.replace(self.inputs, device_types=frozenset({"nvl"}),
+                             settings=LOAD.replace(self.inputs.settings, versions={"nvl": "25.02.01"}))
+        with mock.patch.object(LOAD, "HTTP_ROOT", self.root.resolve()):
+            intent = LOAD._setup_publication_image_intent({"nvl": source}, upgrade_enabled=True)
+            with LOAD._setup_switch_b_image_authority(inputs, {"nvl": source}, original_intent=intent) as guard:
+                guard()
+        self.assertEqual("nvos-amd64-25.02.01.bin", source.name)
+        self.assertEqual(source, published.resolve(strict=True))
+
+    def test_b_image_authority_rejects_same_byte_replacement_setup_source(self):
+        source, published = self._real_setup_published_image()
+        inputs = LOAD.replace(self.inputs, settings=LOAD.replace(self.inputs.settings,
+                                                                versions={"eth": "5.12.0"}))
+        with mock.patch.object(LOAD, "HTTP_ROOT", self.root.resolve()):
+            intent = LOAD._setup_publication_image_intent({"eth": source}, upgrade_enabled=True)
+            with LOAD._setup_switch_b_image_authority(inputs, {"eth": source}, original_intent=intent) as guard:
+                raw, original = source.read_bytes(), source.lstat().st_ino
+                held = source.with_name("held-original-image-source")
+                source.rename(held)
+                source.write_bytes(raw)
+                self.assertNotEqual(original, source.lstat().st_ino)
+                with self.assertRaisesRegex(LOAD.LoadError, "image.*HOLD"):
+                    guard()
+                self.assertEqual(raw, source.read_bytes())
+                self.assertEqual(original, held.lstat().st_ino)
+                self.assertEqual(source, published.resolve(strict=True))
+
     def _prepare_published_q_for_stopped_preflight(self, *, with_image=False, no_upgrade=False,
                                                   ztp_disabled=False):
         state, context, guard = self._prepare_q_manifest_publication()

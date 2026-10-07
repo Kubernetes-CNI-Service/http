@@ -6678,8 +6678,17 @@ def _validate_setup_publication_bundle_shape(bundle):
             raise ValueError("invalid publication image policy; HOLD")
         for pair in intent["files"].values():
             fields(pair, {"source", "published"})
-            for record in pair.values():
-                fields(record, {"path", "parent", "identity", "sha256", "size"})
+            for label, record in pair.items():
+                record_fields = {"path", "parent", "identity", "sha256", "size"}
+                if isinstance(record, dict) and "link_target" in record:
+                    if label != "published":
+                        raise ValueError("publication source image cannot be a link; HOLD")
+                    record_fields.add("link_target")
+                    target = record["link_target"]
+                    if (not isinstance(target, str) or not target or len(target) > 4096
+                            or os.path.isabs(target) or any(ord(ch) < 32 for ch in target)):
+                        raise ValueError("invalid publication image link target; HOLD")
+                fields(record, record_fields)
                 fields(record["parent"], {"path", "dev", "ino"})
                 if (not isinstance(record["identity"], list) or len(record["identity"]) != 9
                         or any(type(n) is not int or n < 0 for n in record["identity"])
@@ -7000,6 +7009,10 @@ def _require_setup_publication_images(intent):
                 if (record["identity"] != list(_dhcp_a_preimage_receipt_identity(path.lstat()))
                         or record["parent"] != _setup_switch_link_parent_identity(path)):
                     raise LoadError("publication original image owner changed; HOLD")
+                if "link_target" in record and (
+                        not path.is_symlink() or os.readlink(path) != record["link_target"]
+                        or path.resolve(strict=True) != Path(pair["source"]["path"])):
+                    raise LoadError("publication original image link/source changed; HOLD")
     except OSError as exc:
         raise LoadError(f"publication original image unavailable; HOLD: {exc}") from exc
 
@@ -7021,6 +7034,23 @@ def _setup_publication_image_intent(images, *, upgrade_enabled):
                 raise LoadError("publication image path is outside original HTTP root; HOLD")
             parent = _setup_switch_link_parent_identity(path)
             identity = list(_dhcp_a_preimage_receipt_identity(path.lstat()))
+            if label == "published" and path.is_symlink():
+                target = os.readlink(path)
+                if (os.path.isabs(target) or not target or len(target) > 4096
+                        or any(ord(ch) < 32 for ch in target)
+                        or path.lstat().st_nlink != 1
+                        or path.resolve(strict=True) != Path(pair["source"]["path"])):
+                    raise LoadError("publication image link does not select original source; HOLD")
+                if (identity != list(_dhcp_a_preimage_receipt_identity(path.lstat()))
+                        or parent != _setup_switch_link_parent_identity(path)
+                        or target != os.readlink(path)
+                        or pair["source"]["identity"] != list(_dhcp_a_preimage_receipt_identity(
+                            Path(pair["source"]["path"]).lstat()))):
+                    raise LoadError("publication image link/source changed during registration; HOLD")
+                pair[label] = dict(path=str(path), parent=parent, identity=identity,
+                                   sha256=pair["source"]["sha256"], size=pair["source"]["size"],
+                                   link_target=target)
+                continue
             validate_image(path, source.name)
             digest = _stable_regular_identity(path, "publication image")
             if (identity != list(_dhcp_a_preimage_receipt_identity(path.lstat()))
@@ -14796,23 +14826,40 @@ def _setup_switch_b_image_authority(inputs, images, *, original_intent):
     if expected and (original_intent is None or set(original_intent["files"]) != set(expected)):
         raise LoadError("B original image WAL qualification is missing; HOLD")
     held = []
+    held_links = []
     yielded = False
     try:
         for kind, basename in expected.items():
             source = images[kind]
-            published = ZTP_DIR / "image" / ("cumulus" if kind == "eth" else "nvos") / basename
+            if source.name not in _image_filename_candidates(basename):
+                raise LoadError("B image name differs from original selected version; HOLD")
+            published = ZTP_DIR / "image" / ("cumulus" if kind == "eth" else "nvos") / source.name
             digests = []
             for label, path in (("source", source), ("published", published)):
                 parent = _setup_switch_link_parent_identity(path)
+                original = original_intent["files"][kind][label]
+                if label == "published" and "link_target" in original:
+                    identity = _dhcp_a_preimage_receipt_identity(path.lstat())
+                    if (not stat.S_ISLNK(path.lstat().st_mode) or path.lstat().st_nlink != 1
+                            or original["path"] != str(path.parent.resolve(strict=True) / path.name)
+                            or original["parent"] != parent or original["identity"] != list(identity)
+                            or os.readlink(path) != original["link_target"]
+                            or path.resolve(strict=True) != source.parent.resolve(strict=True) / source.name
+                            or original["sha256"] != digests[0]):
+                        raise LoadError("B published image original link/source differs; HOLD")
+                    held_links.append((path, identity, parent, original["link_target"],
+                                       source.parent.resolve(strict=True) / source.name))
+                    digests.append(digests[0])
+                    continue
                 descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
                                      | getattr(os, "O_NONBLOCK", 0))
                 identity = _dhcp_a_preimage_receipt_identity(os.fstat(descriptor))
                 held.append((path, descriptor, identity, parent))
-                validate_image(path, basename)
+                validate_image(path, source.name)
                 digest = _stable_regular_identity(path, "B image")["sha256"]
                 digests.append(digest)
-                original = original_intent["files"][kind][label]
                 if (original["path"] != str(path.parent.resolve(strict=True) / path.name)
+                        or original["parent"] != parent
                         or original["identity"] != list(identity) or original["sha256"] != digest):
                     raise LoadError("B image differs from original prepublication WAL owner/bytes; HOLD")
                 if (identity != _dhcp_a_preimage_receipt_identity(os.fstat(descriptor))
@@ -14828,6 +14875,11 @@ def _setup_switch_b_image_authority(inputs, images, *, original_intent):
                             or identity != _dhcp_a_preimage_receipt_identity(path.lstat())
                             or parent != _setup_switch_link_parent_identity(path)):
                         raise LoadError("B image original owner or bytes changed; HOLD")
+                for path, identity, parent, target, source in held_links:
+                    if (identity != _dhcp_a_preimage_receipt_identity(path.lstat())
+                            or parent != _setup_switch_link_parent_identity(path)
+                            or os.readlink(path) != target or path.resolve(strict=True) != source):
+                        raise LoadError("B image original link/source changed; HOLD")
             except OSError as exc:
                 raise LoadError(f"B image original authority unavailable; HOLD: {exc}") from exc
         authority()

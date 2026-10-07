@@ -564,6 +564,14 @@ inode、mode/uid/gid/mtime/ctime 和 SHA；同字节新输入 inode 或克隆 ge
 后再次核原 owner。缺原 inventory、缺策略、冲突或重复声明先 HOLD。此基础 API
 不授予镜像恢复、服务启动或 WAL 退休权限；旧 NVOS-only/未知策略凭据不猜测补资格。
 
+SETUP 的共享镜像发布仍为相对软链接。publication WAL 分别绑定原普通源文件和
+原发布链接的完整身份、物理父目录及原链接文字；B 验收持有源文件 FD，并在每个
+健康边界重核链接、源和父目录，不能以同字节源或同目标新链接替代原 owner。
+NVOS 的受支持别名只保留原已选文件名，不在重入时重新寻找其它候选。普通镜像
+校验器仍拒绝源软链接，legacy 普通发布文件兼容；真实 LOAD→SETUP 镜像发布→
+parent/report/selector 提交后强杀→新 LOAD 的 B 健康流程单独覆盖此合同。
+本地命令/健康端口隔离，不证明真实服务、旧 A 镜像激活或断电验收。
+
 同一模块还覆盖端到端 deployment scope：默认 `all` 同时生成 Production/AIR；`prod` 只发布
 Production Cumulus/IB/NVL；`air` 只发布 AIR DHCP/YAML/release，并只临时渲染 AIR full profile
 实际引用的 Production 来源；单独指定 `mini` 会自动选择 AIR scope 和 `eth`，显式 `prod+mini`

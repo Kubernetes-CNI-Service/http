@@ -1634,6 +1634,8 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 ## TC-REAL-R22-GENERATION-INPUT-ABA-001 — 跨进程输入换代与多输出一致性
 
+- 2026-10-08 SETUP 原镜像发布链接验收：仅沿本卡授权的可丢弃隔离 VM、精确版本、root-only 可恢复快照、排他部署锁、停服和正常写者静默前提执行。独立盘点共享普通源文件及其真实 SETUP 相对发布链接的完整 stat、物理父目录、链接文字和源摘要；保存 LOAD→SETUP 镜像发布→parent/report/selector 提交→SIGKILL→新 LOAD B 验收的物理顺序、完整 END/exit。同目标新链接、同字节新源、指向未选源须 HOLD，原 WAL 和未知对象保留；NVOS 别名不得在重入时改选。源校验仍拒绝软链接，不授权全局跟随链接。清理只按人工确认的本卡隔离快照恢复，不在 live 注入，不删未知对象或修改原失败断言。本地健康/命令端口为私有替代，未证明真实 Apache/HTTP、完整 A 镜像恢复/激活、root/Linux/断电或 DEV ACK；仍 OPEN。
+
 - 2026-10-08 A receipt payload owner 与原选择基础：在本卡既有可丢弃隔离 VM、可恢复快照、停服/排他锁/其他写者静默前提下，WAL 冻结原 A receipt 全树 owner；恢复/只读选择拒绝同字节新 bootstrap/key 快照，保留原 WAL 和外来对象。见证首写前冻结、输入深读后晚换绑、SETUP 强杀及新 LOAD 重读时的原 FD/名称/父目录/inode/ctime/SHA、原升级策略和零服务启动/退休；当前 P/Q 文件及新参数不得改选 A。缺失、重复、混合策略或 legacy 无 payload inventory 必须 HOLD；NVOS-only 旧凭据不猜策略。清理只恢复经负责人确认的本卡隔离快照，完整保留未知对象与原证据，不在 live 注入。本地 direct/真实多脚本 workflow 不证明原 A 镜像备份、已提交 B 的完整 A 恢复、显式健康激活、root/Linux/断电或 DEV ACK，仍 OPEN。
 
 - 2026-10-08 原 A generation owner 与 native 显式入口候选：新 WAL 在首个 Q 共享写前绑定原 A sealed generation、父身份及输入/制品有界树的 inode/元数据/SHA；同字节、恢复 mtime 的新输入 inode 或克隆 generation 均 HOLD，不删除原 WAL/未知对象。legacy WAL 不获新 A 激活权限。显式恢复/B 续发布/激活/退休入口在 Apache/DHCP 已停止后仍先停 native monitor 写者；停止失败先于任何 WAL 写入。TEST direct 与真实 LOAD→SETUP 写前/强杀→新 LOAD 冷恢复为本地 RED→GREEN，native 四入口停止失败与反向变异另测；实际服务端口仍是替身，当前正式 proof 未完成。

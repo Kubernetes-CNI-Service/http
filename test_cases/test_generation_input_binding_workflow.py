@@ -4951,6 +4951,10 @@ finally:
     def test_real_setup_publication_cold_b_activation_retains_original_wal(self):
         self._real_setup_publication_writer_death("selector", b_preflight="activate-pass")
 
+    def test_real_setup_image_link_cold_b_activation_retains_original_owners(self):
+        self._real_setup_publication_writer_death("selector", b_preflight="activate-pass",
+                                                real_image_link=True)
+
     def test_real_setup_publication_cold_b_health_failure_stops_without_a_restore(self):
         self._real_setup_publication_writer_death("selector", b_preflight="activate-fail")
 
@@ -4964,7 +4968,7 @@ finally:
         self._real_setup_publication_writer_death("selector", b_preflight="activate-retire-gate")
 
     def _real_setup_publication_writer_death(self, death_phase, *, resume_cli=False, late_fault=None,
-                                            b_preflight=None):
+                                            b_preflight=None, real_image_link=False):
         with tempfile.TemporaryDirectory(prefix="r22-publication-wal-") as name:
             fixture = self._private_setup_switch_fixture(Path(name))
             root, _p, q, _common, _p_only, _q_only, manifest, _before, *_rest = fixture
@@ -4976,7 +4980,7 @@ finally:
                     status="enabled", address="192.0.2.40", http_root=str(root))
                 document["switches"][0]["eth"]["version"] = "5.12.0"
                 (q / "01-global.yaml").write_text(yaml.safe_dump(document, sort_keys=False))
-                image = root / "ztp/image/cumulus/cumulus-linux-5.12.0-mlx-amd64.bin"
+                image = root / ("image" if real_image_link else "ztp/image/cumulus") / "cumulus-linux-5.12.0-mlx-amd64.bin"
                 image.parent.mkdir(parents=True, exist_ok=True)
                 image.write_bytes(b"#!/bin/sh\n" + b"x" * 1048576)
             for relative in ("tools/lldp-analyze-tool/99-output-p2p",
@@ -4988,8 +4992,15 @@ finally:
             first = self._run_private_load_setup_switch(
                 fixture, prepare_journal=False, auto_prepare_journal=True,
                 first_link=root / "never-created-link",
+                publish_images=real_image_link,
             )
             self.assertEqual(25, first.returncode, first.stdout + first.stderr)
+            if real_image_link:
+                published_image = root / "ztp/image/cumulus" / image.name
+                self.assertTrue(published_image.is_symlink(), "actual SETUP must publish the image link")
+                self.assertEqual(image.resolve(strict=True), published_image.resolve(strict=True))
+                image_owners = (image.lstat().st_ino, published_image.lstat().st_ino,
+                                os.readlink(published_image), image.read_bytes())
             if b_preflight and b_preflight.startswith("activate-"):
                 # The report fixture's two independent literal fingerprints
                 # correspond to these public wire bytes, not producer output.
@@ -5014,7 +5025,7 @@ guard = dict(deployment_lock_descriptor=descriptor, services_quiesced=True,
 candidates = private_publication_candidates(api, q)
 image_options = {}
 if sys.argv[5].startswith('activate-'):
-    image_options['images'] = {'eth': root / 'ztp/image/cumulus/cumulus-linux-5.12.0-mlx-amd64.bin'}
+    image_options['images'] = {'eth': root / sys.argv[6] / 'cumulus-linux-5.12.0-mlx-amd64.bin'}
 token = api.register_setup_switch_publication_bundle(*candidates, guard=guard, **image_options)
 api.commit_prepared_release(candidates[0], require_authority=lambda:
     api.require_setup_switch_publication_bundle(token, guard=guard))
@@ -5029,7 +5040,8 @@ if sys.argv[4] == 'selector':
 os.kill(os.getpid(), signal.SIGKILL)
 '''
             child = subprocess.run([sys.executable, "-B", "-c", operation,
-                                    str(root), str(q), str(ROOT), death_phase, b_preflight or "none"], cwd=root,
+                                    str(root), str(q), str(ROOT), death_phase, b_preflight or "none",
+                                    "image" if real_image_link else "ztp/image/cumulus"], cwd=root,
                                    capture_output=True, text=True, check=False, timeout=30)
             self.assertEqual(-signal.SIGKILL, child.returncode, child.stdout + child.stderr)
             journal = root / "ztp/.setup-switch-journal.json"
@@ -5141,7 +5153,7 @@ try:
                 original_sync(path)
             api._fsync_parent_directory = death_after_archive
         try:
-            image = root / 'ztp/image/cumulus/cumulus-linux-5.12.0-mlx-amd64.bin'
+            image = root / sys.argv[6] / 'cumulus-linux-5.12.0-mlx-amd64.bin'
             if sys.argv[5] == 'activate-retire-reentry':
                 api.runtime_os = lambda: 'Linux'
                 api.service_runtime_backend = lambda: SimpleNamespace(name='supervisor')
@@ -5215,7 +5227,8 @@ finally:
 '''
             recovered = subprocess.run([sys.executable, "-B", "-c", resume,
                                         str(root), str(q), str(ROOT), "cli" if resume_cli else "api",
-                                        b_preflight or "none"], cwd=root,
+                                        b_preflight or "none",
+                                        "image" if real_image_link else "ztp/image/cumulus"], cwd=root,
                                        capture_output=True, text=True, check=False, timeout=30)
             if b_preflight == "activate-retire-death":
                 self.assertEqual(-signal.SIGKILL, recovered.returncode, recovered.stdout + recovered.stderr)
@@ -5229,7 +5242,8 @@ finally:
                 with self.assertRaisesRegex(api.LoadError, "retirement|HOLD"):
                     api.require_no_pending_setup_switch_journal()
                 recovered = subprocess.run([sys.executable, "-B", "-c", resume,
-                    str(root), str(q), str(ROOT), "api", "activate-retire-reentry"], cwd=root,
+                    str(root), str(q), str(ROOT), "api", "activate-retire-reentry",
+                    "image" if real_image_link else "ztp/image/cumulus"], cwd=root,
                     capture_output=True, text=True, check=False, timeout=30)
                 self.assertEqual(["fresh-process-health", "fresh-process-health"],
                     (root / "independent-health-witness").read_text().splitlines())
@@ -5249,6 +5263,13 @@ finally:
                     self.assertEqual(q_manifest, held.read_bytes())
                 return
             self.assertEqual(0, recovered.returncode, recovered.stdout + recovered.stderr)
+            if real_image_link:
+                self.assertEqual(image_owners, (image.lstat().st_ino, published_image.lstat().st_ino,
+                                               os.readlink(published_image), image.read_bytes()))
+                image_intent = binding["image_intent"]["files"]["eth"]
+                self.assertEqual(image_owners[0], image_intent["source"]["identity"][1])
+                self.assertEqual(image_owners[1], image_intent["published"]["identity"][1])
+                self.assertEqual(image_owners[2], image_intent["published"]["link_target"])
             if b_preflight:
                 expected = {"pass": "b-preflight-passed-still-stopped-wal-retained",
                     "late-input": "held-still-stopped-wal-retained",
