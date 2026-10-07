@@ -139,6 +139,10 @@ direct 覆盖漂移、冲突、期望中途修改、密钥替换和不安全文�
 显式选择项目内的其他 global/publickey 布局（包括 `99-output-ib_nvl/bringup/xdr-initial-setup`）；
 该目录必须已存在且受当前 UID 所有、不可组/全局写入，外部目录或外链在 leaf 输出前拒绝。
 此选项只选择数据，不加载其中的代码。真实管理 CLI 的五轮流程覆盖缺省及显式布局。
+受管 CLI 在进入 leaf 前取得仓库的共享部署锁，并持有到方法撤销与报告清理结束；
+load/setup/unsetup 的排他锁期间拒绝入口，不在拆除窗口重新授予成功。
+direct 覆盖实际 flock 的共享兼容、排他拒绝、异常释放；真实 unsetup → 撤销 →
+受管 CLI → 链接拆除 workflow 验证同一部署锁，不接触本地主树的运行锁或真实设备。
 受管 leaf 在建立 report/cache/snapshot 或方法代次前，验证 CSV/P2P 的项目内有限输入像，
 并检查全部输出路径和现有父目录仍属于该显式项目；外部 CSV/P2P、cache/report 或 snapshot
 不得先落下输出再报错。该准入只用于显式方法周期，不改变单文件离线 leaf 的路径合同。

@@ -22,6 +22,9 @@ from types import MappingProxyType
 import uuid
 
 
+_HTTP_ROOT = Path(__file__).resolve().parent.parent
+
+
 # v1 has ten fixed members, ASCII hostname <=253, operation ID <=512,
 # generated trigger ID <=512+1+253=766, a
 # uint64 dev:ino namespace, signed-64 generation and a 64-byte digest.
@@ -1584,9 +1587,18 @@ def managed_initial_main(argv=None):
     previous_argv = sys.argv
     sys.modules[spec.name] = initial
     cycle = None
+    deployment_descriptor = None
     try:
         spec.loader.exec_module(initial)
         cycle = ManagedInitialMethodCycle(args.project, initial, tool_input_root=args.tool_inputs)
+        from tools.deployment_lock import DeploymentLockError, acquire_lock_descriptor, release_lock_descriptor
+        try:
+            # Match manual-ztp's shared writer participation. Hold this through
+            # final receipt withdrawal/cleanup, not just device operations, so
+            # load/setup/unsetup cannot detach the project in between them.
+            deployment_descriptor = acquire_lock_descriptor(_HTTP_ROOT, exclusive=False, create=True)
+        except DeploymentLockError as exc:
+            raise AuthorityError("managed initial deployment lock is unavailable") from exc
         forwarded = args.initial_args[1:] if args.initial_args[:1] == ["--"] else args.initial_args
         sys.argv = [str(source), *forwarded]
         return initial.main(method_cycle=cycle)
@@ -1596,17 +1608,25 @@ def managed_initial_main(argv=None):
         return 2
     finally:
         try:
-            if cycle is not None and hasattr(cycle, "targets"):
-                cycle.close()
+            try:
+                if cycle is not None and hasattr(cycle, "targets"):
+                    cycle.close()
+            finally:
+                try:
+                    if getattr(initial, "REPORT_HANDLE", None) is not None:
+                        initial.REPORT_HANDLE.close()
+                finally:
+                    sys.argv = previous_argv
+                    if previous_module is None:
+                        sys.modules.pop(spec.name, None)
+                    else:
+                        sys.modules[spec.name] = previous_module
         finally:
-            if getattr(initial, "REPORT_HANDLE", None) is not None:
-                initial.REPORT_HANDLE.close()
-            sys.argv = previous_argv
-            if previous_module is None:
-                sys.modules.pop(spec.name, None)
-            else:
-                sys.modules[spec.name] = previous_module
+            if deployment_descriptor is not None:
+                release_lock_descriptor(deployment_descriptor)
 
 
 if __name__ == "__main__":
+    import sys
+    sys.path.insert(0, str(_HTTP_ROOT))
     raise SystemExit(managed_initial_main())

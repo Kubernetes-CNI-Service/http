@@ -491,6 +491,7 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
             if managed_entry is not None:
                 # Execute the real CLI loader and freshly loaded main. Replace
                 # ONLY device I/O boundaries, never __file__, profiles or main.
+                stack.enter_context(mock.patch.dict(managed_entry.__globals__, {"_HTTP_ROOT": method_cycle.project}))
                 from importlib.machinery import SourceFileLoader
                 real_exec = SourceFileLoader.exec_module
                 def isolated_device_io(loader, module):

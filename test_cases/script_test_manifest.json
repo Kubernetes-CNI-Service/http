@@ -2426,7 +2426,7 @@
     },
     {
       "id": "f02_config_sync_writer_to_generation_journal",
-      "members": ["ztp/manual-ztp.py", "ztp/config_sync_authority.py", "monitor/manual-ztp-worker.py", "DAY0-Prepare/12-ztp-monitor.py", "DAY0-Prepare/02-unsetup.py"],
+      "members": ["ztp/manual-ztp.py", "ztp/config_sync_authority.py", "monitor/manual-ztp-worker.py", "DAY0-Prepare/12-ztp-monitor.py", "DAY0-Prepare/02-unsetup.py", "tools/deployment_lock.py", "tools/finished_project_state.py"],
       "tests": ["test_cases.test_config_sync_authority_workflow"]
     },
     {

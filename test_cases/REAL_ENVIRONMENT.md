@@ -420,6 +420,9 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
   本地 cache/parser 只消费同一次 owned/no-follow held 读取捕获的有限不可变像；
   cache/CSV/P2P/global/公钥在捕获后换绑外部文件或 FIFO 的负例不得重新打开该路径，
   必须拒绝本轮资格、保留外部字节、不创建方法权威；真机仍保持 NOT RUN。
+  本地实际 unsetup 入口持排他部署锁，受管 initial CLI 必须在叶脚本输出/设备操作前拒绝；
+  正常入口持共享部署锁直到方法收据撤销与报告清理结束，异常退出后释放锁。
+  真机还须验证 load/setup/unsetup 与受管入口的互斥窗口，不据本地锁联测宣称已运行。
 - 前置：owner 精确授权的可恢复 IB 隔离设备、管理主机和输入项目；冻结 HEAD/tree、
   CSV/P2P/global/cache/公钥摘要，管理私钥 owned 0600 single-link，固定 eth0 MAC/IP，
   已授权的 initial-setup 操作；只通过显式项目的管理入口和逐 IB `config_method=initial-setup`

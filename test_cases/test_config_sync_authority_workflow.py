@@ -24,6 +24,76 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ConfigSyncAuthorityWorkflowTests(unittest.TestCase):
+    def test_real_unsetup_excludes_managed_initial_between_withdrawal_and_detachment(self):
+        import sys
+        from importlib.machinery import SourceFileLoader
+        from test_cases.module_loader import load_script
+        from test_cases.test_config_sync_authority import ConfigSyncAuthorityTests
+        from tools.deployment_lock import acquire_lock_descriptor, release_lock_descriptor
+        unsetup = load_script("f02_unsetup_managed_writer_lock", ROOT / "DAY0-Prepare/02-unsetup.py")
+        authority = unsetup.config_sync_authority
+        lock_module = sys.modules[unsetup.deployment_lock.__module__]
+        finish_module = sys.modules[lock_module.assert_writer_allowed.__module__]
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory).resolve() / "http"
+            project = workspace / "DAY0-Prepare/demo"
+            project.mkdir(parents=True)
+            (workspace / "infra").mkdir()
+            root = project / "99-output-ztp/configuration-methods"
+            first = authority.begin_method(root, "leaf1", "first", "first-leaf1", "ztp_monitor_cycle")
+            authority.finish_method(root, first, ConfigSyncAuthorityTests.method_receipt_v2(first))
+            link = workspace / "current-project"
+            link.symlink_to(project)
+            manifest = workspace / "ztp/.setup_manifest"
+            manifest.parent.mkdir()
+            manifest.write_text("owned fixture manifest")
+            entered, attempted = [], []
+            real_exec, real_withdraw = SourceFileLoader.exec_module, authority.withdraw_all
+            def leaf(*, method_cycle):
+                entered.append("leaf")
+                ticket = authority.begin_method(root, "leaf1", "racing", "racing-leaf1", "initial_setup_managed")
+                authority.finish_method(root, ticket, ConfigSyncAuthorityTests.method_receipt_v2(
+                    ticket, type="ib", config_method="initial-setup", trigger_source="initial_setup_managed"))
+                return 0
+            def isolate_leaf(loader, module):
+                real_exec(loader, module)
+                if module.__name__ == "_http_managed_initial_setup":
+                    module.main = leaf
+            def withdraw_then_writer(*args, **kwargs):
+                result = real_withdraw(*args, **kwargs)
+                if kwargs.get("method"):
+                    self.assertTrue(link.is_symlink(), "inject at real withdrawal -> detachment boundary")
+                    self.assertTrue(manifest.exists())
+                    self.assertEqual("failed", authority.read_method_current(root, "leaf1")["state"])
+                    attempted.append(authority.managed_initial_main(["--project", str(project), "--", "--apply", "--yes"]))
+                return result
+            with ExitStack() as stack:
+                for name, value in (("HTTP_BASE", str(workspace)), ("HERE", str(project.parent)), ("MANIFEST_FILE", str(manifest))):
+                    stack.enter_context(mock.patch.object(unsetup, name, value))
+                stack.enter_context(mock.patch.object(authority, "_HTTP_ROOT", workspace, create=True))
+                stack.enter_context(mock.patch.object(finish_module, "FINISH_STATE_ROOT", workspace / "private-finish-state"))
+                stack.enter_context(mock.patch.dict(os.environ, {}, clear=True))
+                stack.enter_context(mock.patch.object(unsetup, "stop_native_ztp_monitors"))
+                stack.enter_context(mock.patch.object(unsetup, "_cleanup_req10c_auto_watch"))
+                stack.enter_context(mock.patch.object(unsetup, "_read_manifest", return_value=([str(link)], str(project))))
+                for name in ("_known_ztp_project_links", "_known_workspace_links", "_project_monitor_csv_links"):
+                    stack.enter_context(mock.patch.object(unsetup, name, return_value=[]))
+                stack.enter_context(mock.patch.object(SourceFileLoader, "exec_module", isolate_leaf))
+                stack.enter_context(mock.patch.object(authority, "withdraw_all", withdraw_then_writer))
+                stdout, stderr = io.StringIO(), io.StringIO()
+                stack.enter_context(mock.patch("sys.stdout", stdout))
+                stack.enter_context(mock.patch("sys.stderr", stderr))
+                result = unsetup.main([str(project), "--yes"])
+            self.assertEqual(0, result, stdout.getvalue() + stderr.getvalue())
+            self.assertEqual([2], attempted, "real exclusive unsetup lock must reject the managed CLI")
+            self.assertEqual([], entered)
+            current = authority.read_method_current(root, "leaf1")
+            self.assertEqual((1, "failed", True), tuple(current[k] for k in ("generation", "state", "veto")))
+            self.assertFalse(link.is_symlink())
+            self.assertFalse(manifest.exists())
+            writer = acquire_lock_descriptor(workspace)
+            release_lock_descriptor(writer)
+
     def test_local_unsetup_withdraws_current_methods_before_detaching_project_links(self):
         from test_cases.module_loader import load_script
         from test_cases.test_config_sync_authority import ConfigSyncAuthorityTests

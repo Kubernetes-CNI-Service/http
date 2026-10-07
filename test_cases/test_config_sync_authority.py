@@ -16,6 +16,79 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ConfigSyncAuthorityTests(unittest.TestCase):
+    def _managed_entry_with_leaf_boundary(self, project, callback):
+        import io
+        from importlib.machinery import SourceFileLoader
+        real_exec = SourceFileLoader.exec_module
+        def isolate_leaf(loader, module):
+            real_exec(loader, module)
+            if module.__name__ == "_http_managed_initial_setup":
+                module.main = callback
+        with mock.patch.object(SourceFileLoader, "exec_module", isolate_leaf), \
+                mock.patch.object(self.authority, "_HTTP_ROOT", project.parent, create=True), \
+                mock.patch("sys.stderr", io.StringIO()):
+            return self.authority.managed_initial_main(["--project", str(project), "--", "--apply", "--yes"])
+
+    def test_managed_initial_rejects_exclusive_deployment_before_leaf_entry(self):
+        from tools.deployment_lock import acquire_lock_descriptor, release_lock_descriptor
+        project = self.root / "project"
+        project.mkdir()
+        entered = []
+        descriptor = acquire_lock_descriptor(self.root)
+        try:
+            result = self._managed_entry_with_leaf_boundary(project, lambda **kw: entered.append("leaf") or 0)
+        finally:
+            release_lock_descriptor(descriptor)
+        self.assertEqual([], entered, "teardown exclusion must precede leaf cache/report/device operations")
+        self.assertEqual(2, result)
+        self.assertEqual([], list(project.iterdir()))
+
+    def test_managed_initial_holds_shared_deployment_through_leaf_and_cleanup(self):
+        import sys
+        from tools.deployment_lock import DeploymentLockError, acquire_lock_descriptor, release_lock_descriptor
+        project = self.root / "project"
+        project.mkdir()
+        for outcome in ("success", "leaf-error", "cleanup-error"):
+            with self.subTest(outcome=outcome):
+                calls = []
+                def assert_shared_lock_held():
+                    other_reader = acquire_lock_descriptor(self.root, exclusive=False)
+                    release_lock_descriptor(other_reader)
+                    writer = None
+                    try:
+                        with self.assertRaises(DeploymentLockError):
+                            writer = acquire_lock_descriptor(self.root)
+                    finally:
+                        release_lock_descriptor(writer)
+                def leaf(*, method_cycle):
+                    assert_shared_lock_held()
+                    calls.append("leaf")
+                    if outcome == "leaf-error":
+                        raise ValueError("isolated leaf failure")
+                    return 0
+                real_close = self.authority.ManagedInitialMethodCycle.close
+                def close(cycle):
+                    assert_shared_lock_held()
+                    calls.append("close")
+                    real_close(cycle)
+                    if outcome == "cleanup-error":
+                        raise ValueError("isolated cleanup failure")
+                previous_argv = sys.argv
+                previous_module = sys.modules.get("_http_managed_initial_setup")
+                with mock.patch.object(self.authority.ManagedInitialMethodCycle, "close", close):
+                    if outcome == "cleanup-error":
+                        with self.assertRaisesRegex(ValueError, "isolated cleanup failure"):
+                            self._managed_entry_with_leaf_boundary(project, leaf)
+                    else:
+                        result = self._managed_entry_with_leaf_boundary(project, leaf)
+                        self.assertEqual(2 if outcome == "leaf-error" else 0, result)
+                self.assertEqual(["leaf", "close"], calls)
+                self.assertIs(previous_argv, sys.argv)
+                self.assertIs(previous_module, sys.modules.get("_http_managed_initial_setup"))
+                writer = acquire_lock_descriptor(self.root)
+                release_lock_descriptor(writer)
+        self.assertEqual([], list(project.iterdir()))
+
     def test_managed_initial_explicit_profile_root_is_owned_project_input_not_executable(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory).resolve()
