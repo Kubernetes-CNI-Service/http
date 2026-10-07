@@ -9,7 +9,6 @@ from dataclasses import dataclass
 import hashlib
 import json
 import os
-import uuid
 from types import SimpleNamespace
 
 from monitor import issue_tracker_local_commit as local
@@ -86,25 +85,6 @@ def _marker(header):
                              'header_sha256': hashlib.sha256(local._canonical(header)).hexdigest()})
 
 
-def _write_raw(folder, raw):
-    # The existing manifest writer is bounded to 1 MiB. A fixed metadata read
-    # has a separate 2 MiB contract; retain every original byte, never truncate
-    # it or increase other writers' limits. Same no-replace/file+folder barriers.
-    if type(raw) is not bytes or not 1 <= len(raw) <= 2 * _LIMIT: raise MetadataReservationHold()
-    name = '.pending-' + uuid.uuid4().hex
-    fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=folder)
-    try:
-        view = memoryview(raw)
-        while view:
-            count = os.write(fd, view)
-            if count <= 0: raise MetadataReservationHold()
-            view = view[count:]
-        os.fsync(fd)
-    finally: os.close(fd)
-    local._rename_new(folder, name, 'METADATA-RAW')
-    os.fsync(folder)
-
-
 def _inspect(token, binding, identity, parent, name, folder, base, sheet, fence):
     from monitor.issue_tracker_metadata_capacity import PreparedMetadataRead, _BODY
     if set(os.listdir(folder)) != _NAMES: raise MetadataReservationHold()
@@ -147,7 +127,7 @@ def prepare_metadata_reservation(token, binding, identity, unit, plan, response)
         reservation = local._canonical(fence); header = _header(base, plan, budget, reservation)
         if len(local._canonical(header)) > 16384: raise MetadataReservationHold()
         folder = global_journal._create_folder(parent, name)
-        _write_raw(folder, response.data)
+        journal._write_read_image(folder, 'METADATA-RAW', response.data)
         local._write_new(folder, 'HEADER', local._canonical(header))
         local._write_new(folder, 'RESERVATION', reservation)
         journal._named(parent, name, folder, directory=True); ownership._validated_owner(token, binding)

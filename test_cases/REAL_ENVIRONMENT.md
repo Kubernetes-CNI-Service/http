@@ -2135,6 +2135,8 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 ALL 审计行确定唯一 append 窗口（NOOP 无虚构行），精确耗尽可接受、溢出 HOLD。
 冷进程和 UNKNOWN 不重分配；metadata 预留创建前必须校验 History 预算，并保存
 原 History 摘要／窗口绑定。真实编辑后的鲜度、CAS、认证来源仍 NOT RUN，不是 COMPLETE。
+完整 2 MiB 原始回应须逐字节保留；不能受 wire／manifest 的 1 MiB 上限误截断，
+也不得扩大那些上限。短写、超限、NOREPLACE 与 file-dir 屏障保留原合同和证据。
 
 ## TC-REAL-REQ7-BOUNDED-HISTORY-READ-001 — 原始类型的有限 History 回读
 

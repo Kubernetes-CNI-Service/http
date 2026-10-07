@@ -14,6 +14,7 @@ import json
 import os
 import re
 import stat
+import uuid
 
 from monitor import issue_tracker_local_commit as local
 
@@ -58,6 +59,31 @@ def _read(parent,name,limit):
     if (before.st_mode & 0o777 != 0o600 or _identity(before)!=_identity(after)):
         raise AttemptJournalHold()
     return raw
+
+
+def _write_read_image(parent, name, raw):
+    """Fixed private original read-image names, distinct from 1 MiB wire.
+
+    Retain the whole bounded 2 MiB read response through no-follow exclusive
+    creation and atomic NOREPLACE with file+directory barriers. Never alter
+    manifest/wire limits, truncate input, overwrite, adopt or repair a partial
+    store. Callers hold and validate their own private owner/directory FDs.
+    """
+    if (type(name) is not str or name not in ('HISTORY-RAW', 'ETH-RAW', 'IB-RAW', 'METADATA-RAW')
+            or type(raw) is not bytes or not 1 <= len(raw) <= 2 * 1024 * 1024):
+        raise AttemptJournalHold()
+    pending = '.pending-' + uuid.uuid4().hex
+    fd = os.open(pending, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=parent)
+    try:
+        view = memoryview(raw)
+        while view:
+            count = os.write(fd, view)
+            if count <= 0: raise AttemptJournalHold()
+            view = view[count:]
+        os.fsync(fd)
+    finally: os.close(fd)
+    local._rename_new(parent, pending, name)
+    os.fsync(parent)
 
 
 def _open(token,unit_id):

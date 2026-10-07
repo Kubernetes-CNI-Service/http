@@ -948,6 +948,11 @@ NOOP 不产生虚构行。typed 空字符串／false 和 gap 的最后占用行�
 行预算并把原 History 摘要／预留窗口绑定入 header；UNKNOWN 和冷进程保持
 同一窗口，无 caller 计数器／新尾替换／额外分配，仍不是当前鲜度、CAS 或许可。
 
+History、两张 Cabling 与 metadata 的原始 RAW 持久化统一使用固定名称的
+2 MiB 有界图像写入器，原字节全部保留、不截断；超限在创建 store 前拒绝。
+短写继续完整落盘，无进度／file-dir barrier 失败保留 partial HOLD；NOREPLACE
+不覆盖旧图像。此独立读取界限不扩大 1 MiB wire／manifest 合同，未知文件名拒绝。
+
 `test_cases.test_req7_history_read` 验证固定 `Update_History` A:E 有界矩形
 （最多 5000 行、2 MiB 响应）的 planner → 实际自有 loopback TLS → typed decoder；
 仅在明确返回的同一 grid 内补空单元格，保留 formula/number/bool/string 的区别和

@@ -96,6 +96,21 @@ class Req7NvReservationDirectTests(unittest.TestCase):
         for private in ('switch-1', 'NV30102'): self.assertNotIn(private, repr(seen))
         for authority in ('permit', 'complete', 'applied', 'send_once'): self.assertFalse(hasattr(seen, authority))
 
+    def test_both_fixed_capacity_responses_retain_full_two_mib_and_reject_overflow_before_store(self):
+        self.module = load()
+        eth = self.eth.data + b' ' * (2 * 1024 * 1024 - len(self.eth.data))
+        ib = self.ib.data + b' ' * (2 * 1024 * 1024 - len(self.ib.data))
+        with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
+            self.initialize(token)
+            self.eth = SimpleNamespace(status=200, complete=True, data=eth + b' ')
+            with self.assertRaises(self.module.NvReservationHold): self.reserve(token)
+            self.assertFalse(self.store.exists())
+            self.eth = SimpleNamespace(status=200, complete=True, data=eth)
+            self.ib = SimpleNamespace(status=200, complete=True, data=ib)
+            seen = self.reserve(token); self.assertEqual(seen, self.inspect(token))
+            self.assertEqual(((KEYS[0], 'NV30102'), (KEYS[1], 'NV30103')), seen.reservations)
+        self.assertEqual(eth, (self.store / 'ETH-RAW').read_bytes()); self.assertEqual(ib, (self.store / 'IB-RAW').read_bytes())
+
     def test_seed_is_observed_not_hardcoded_and_cross_family_max_never_reused(self):
         self.module = load(); self.eth = source('ETH Cabling', ('NV00008',)); self.ib = source('IB Cabling', ())
         self.kw.update(sheet='IB Cabling', requested_keys=(('ib_cabling', 'switch-2', 'p1', 'Link Down'),))

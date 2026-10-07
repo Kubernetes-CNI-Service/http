@@ -69,6 +69,37 @@ class Req7AttemptJournalDirectTests(unittest.TestCase):
             with self.assertRaises(module.AttemptJournalHold): module.prepare_unit(token,"c"*64,BODY)
             self.assertFalse((self.project/".tracker/remote-attempts"/("c"*64)).exists())
 
+    def test_read_image_writer_has_only_fixed_names_and_does_not_expand_wire_or_manifest_limits(self):
+        module = self.module()
+        fd = os.open(self.project, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            before = set(os.listdir(fd))
+            for name, raw in (('WIRE', b'x'), ('HEADER', b'x'), ('../foreign', b'x'),
+                    ('METADATA-RAW', b''), ('METADATA-RAW', bytearray(b'x')),
+                    ('METADATA-RAW', b'x' * (2 * 1024 * 1024 + 1))):
+                with self.subTest(name=name), self.assertRaises(module.AttemptJournalHold): module._write_read_image(fd, name, raw)
+                self.assertEqual(before, set(os.listdir(fd)))
+        finally: os.close(fd)
+        with writer_owner(self.project, self.publication) as token:
+            with self.assertRaises(module.AttemptJournalHold): module.prepare_unit(token, UNIT, b'x' * (1024 * 1024 + 1))
+            self.assertFalse((self.project / '.tracker/remote-attempts').exists())
+
+    def test_read_image_short_writes_noreplace_and_failed_progress_keep_original_evidence(self):
+        module = self.module(); raw = b'original typed read bytes\n' * 1000
+        fd = os.open(self.project, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            actual = os.write
+            with mock.patch('os.write', side_effect=lambda held, view: actual(held, view[:17])):
+                module._write_read_image(fd, 'METADATA-RAW', raw)
+            self.assertEqual(raw, (self.project / 'METADATA-RAW').read_bytes())
+            with self.assertRaises(FileExistsError): module._write_read_image(fd, 'METADATA-RAW', b'replacement')
+            self.assertEqual(raw, (self.project / 'METADATA-RAW').read_bytes())
+            with mock.patch('os.write', return_value=0), self.assertRaises(module.AttemptJournalHold):
+                module._write_read_image(fd, 'HISTORY-RAW', b'incomplete')
+            self.assertFalse((self.project / 'HISTORY-RAW').exists())
+            self.assertGreaterEqual(sum(name.startswith('.pending-') for name in os.listdir(fd)), 2)
+        finally: os.close(fd)
+
     def test_partial_or_foreign_record_and_gap_fail_closed_without_repair(self):
         module=self.module()
         for name,raw in (("ATTEMPT-2",b"{}"),("ATTEMPT-1",b"partial"),("foreign",b"unknown")):

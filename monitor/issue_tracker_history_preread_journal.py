@@ -105,7 +105,7 @@ def prepare_history_preread(token, binding, unit, plan, response):
         if urlsplit(plan.path).path != '/v4/spreadsheets/' + binding.spreadsheet_id: raise HistoryPrereadHold()
         header = _header(base, plan, observed)
         folder = global_journal._create_folder(parent, name)
-        local._write_new(folder, 'HISTORY-RAW', response.data)
+        journal._write_read_image(folder, 'HISTORY-RAW', response.data)
         local._write_new(folder, 'HEADER', local._canonical(header))
         journal._named(parent, name, folder, directory=True)
         ownership._validated_owner(token, binding)

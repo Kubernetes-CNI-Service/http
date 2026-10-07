@@ -590,7 +590,7 @@ def script_profile(root: Path, relative: str) -> dict[str, str]:
                 example = "python3 -B -m unittest -v test_cases.test_req7_metadata_reservation  # 仅开发测试"
             elif relative == "monitor/issue_tracker_nv_reservation.py":
                 scenario = "实际全表 owner 与原始 enrollment 内持久预留两张 Cabling 的共享 NV 编号；Closed／无关行参与最大值，原始编号不重写。"
-                inputs = "两份固定完整容量原始只读响应、同一 generation/publish/目标表和活动键；不接收调用方计数器、种子、路径或替换编号。"
+                inputs = "两份固定完整容量原始只读响应（各最多 2 MiB 且全部字节持久保留）、同一 generation/publish/目标表和活动键；不接收调用方计数器、种子、路径或替换编号。"
                 outputs = "十个图像屏障后保存原 RAW／绑定／编号及 INITIALIZED，冷进程保持原预留；冻结 batch 的全部新增 literal key/NV 和原 nonce 须一致，UNKNOWN 仍绑定原 action/wire；不是 COMPLETE 或在线发送许可。"
                 recovery = "空种子、重复、容量耗尽、部分屏障、原绑定漂移 HOLD；全局 journal 阻止新预留，UNKNOWN 不重分配；未安装，结算与实际 launcher 仍需集成。"
                 example = "python3 -B -m unittest -v test_cases.test_req7_nv_reservation  # 仅开发测试"

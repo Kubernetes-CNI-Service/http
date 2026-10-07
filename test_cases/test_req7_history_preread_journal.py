@@ -108,6 +108,23 @@ class Req7HistoryPrereadJournalDirectTests(unittest.TestCase):
                 with self.assertRaises(module.HistoryPrereadHold): module.prepare_history_preread(fresh, changed, self.value, self.plan, self.raw)
         self.assertFalse(self.store.exists())
 
+    def test_fixed_full_response_retains_all_two_mib_without_manifest_limit_or_truncation(self):
+        from types import SimpleNamespace
+        module = load(); raw = self.raw.data + b' ' * (2 * 1024 * 1024 - len(self.raw.data))
+        with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
+            self.global_journal.prepare_global_unit(token, binding(), self.value)
+            with self.assertRaises(module.HistoryPrereadHold):
+                module.prepare_history_preread(token, binding(), self.value, self.plan,
+                    SimpleNamespace(status=200, complete=True, data=raw + b' '))
+            self.assertFalse(self.store.exists())
+            module.prepare_history_preread(token, binding(), self.value, self.plan,
+                SimpleNamespace(status=200, complete=True, data=raw))
+            seen = module.inspect_history_preread(token, binding(), self.value)
+            self.assertEqual(hashlib.sha256(raw).hexdigest(), seen.source_sha256)
+            self.assertEqual((4, 5), (module.require_history_append_capacity(token, binding(), self.value).first_row_index,
+                                     module.require_history_append_capacity(token, binding(), self.value).last_row_index))
+        self.assertEqual(raw, (self.store / 'HISTORY-RAW').read_bytes())
+
     def test_partial_window_wrong_history_identity_and_partial_response_never_create_image(self):
         module = load()
         item = tail_document(); item['sheets'][0]['properties']['sheetId'] = 98
