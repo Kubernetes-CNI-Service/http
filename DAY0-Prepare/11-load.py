@@ -6614,8 +6614,10 @@ def _validate_setup_publication_bundle_shape(bundle):
             {"parent", "report", "generation", "selector", "shared_setup"}):
         raise ValueError("unknown or missing publication bundle fields; HOLD")
     if bundle.get("shared_setup") is not None:
-        fields(bundle["shared_setup"], {"manifest", "links", "q_local", "directories",
-                                       "comparison", "created", "infra", "flat_runtime"})
+        shared_fields = {"manifest", "links", "q_local", "directories",
+                         "comparison", "created", "infra", "flat_runtime"}
+        if set(bundle["shared_setup"]) not in (shared_fields, shared_fields | {"input_files"}):
+            raise ValueError("unknown or missing publication shared fields; HOLD")
         file_record(bundle["shared_setup"]["manifest"])
     for key in ("parent", "report"):
         row = bundle[key]
@@ -6683,7 +6685,51 @@ def _setup_publication_selector(path):
     return {"identity": list(_dhcp_a_preimage_receipt_identity(before)), "target": target}
 
 
-def _setup_switch_shared_publication_snapshot(body):
+def _setup_switch_publication_input_snapshot(body):
+    """Bind live Q source names and owners to the already sealed parent hashes."""
+    q = Path(body["new_project"]["path"])
+    parent = json.loads(base64.b64decode(
+        body["publication_bundle"]["parent"]["candidate"]["payload"], validate=True))
+    paths = dict(parent["input_paths"])
+    hashes = dict(parent["inputs"])
+    for key, entry in parent.get("generated_inputs", {}).items():
+        if key != "effective_devices":
+            raise LoadError("publication unknown generated input; HOLD")
+        paths[key], hashes[key] = entry["path"], entry["sha256"]
+    if set(paths) != set(hashes):
+        raise LoadError("publication input inventory differs from sealed parent; HOLD")
+    result = {}
+    for key, relative in paths.items():
+        if (not isinstance(relative, str) or Path(relative).is_absolute()
+                or os.path.normpath(relative) != relative or ".." in Path(relative).parts):
+            raise LoadError("publication input name is not canonical Q; HOLD")
+        path = q / relative
+        if path.parent.resolve(strict=True) != path.parent:
+            raise LoadError("publication input parent is not canonical; HOLD")
+        named_parent = _setup_switch_link_parent_identity(path)
+        before = list(_dhcp_a_preimage_receipt_identity(path.lstat()))
+        alias = None
+        if path.is_symlink():
+            alias = dict(identity=before, target=os.readlink(path))
+        target = path.resolve(strict=True)
+        if (not target.is_relative_to(q) or (alias is not None and
+                Path(os.path.abspath(path.parent / alias["target"])) != target)):
+            raise LoadError("publication input source escapes Q; HOLD")
+        target_parent = _setup_switch_link_parent_identity(target)
+        record = _setup_publication_file(target)
+        record.pop("payload")  # Parent/generation already preserve immutable bytes.
+        if (record["sha256"] != hashes[key]
+                or before != list(_dhcp_a_preimage_receipt_identity(path.lstat()))
+                or named_parent != _setup_switch_link_parent_identity(path)
+                or target_parent != _setup_switch_link_parent_identity(target)
+                or (alias is not None and os.readlink(path) != alias["target"])):
+            raise LoadError("publication live input differs from original sealed parent; HOLD")
+        result[key] = dict(path=str(path), parent=named_parent, alias=alias,
+                           target=str(target), target_parent=target_parent, file=record)
+    return result
+
+
+def _setup_switch_shared_publication_snapshot(body, *, include_inputs=True):
     """Freeze only an exact installed Q write set, never a known P/Q mixture.
 
     This is a stopped disk contract, not service health or permission to retire
@@ -6792,6 +6838,8 @@ def _setup_switch_shared_publication_snapshot(body):
             raise LoadError("publication shared manifest changed during inspection; HOLD")
         result = dict(manifest=manifest, links=links, q_local=q_local, directories=directories,
                       comparison=comparison, created=created, infra=infra, flat_runtime=flat_runtime)
+        if include_inputs:
+            result["input_files"] = _setup_switch_publication_input_snapshot(body)
         # Normalize tuples from the existing held-owner inspectors before the
         # first persistence, so cold JSON and same-invocation checks agree.
         return json.loads(_setup_switch_canonical_payload(result))
@@ -6804,7 +6852,8 @@ def _require_setup_publication_state(body, *, phase="parent"):
     bundle = body["publication_bundle"]
     _validate_setup_publication_bundle_shape(bundle)
     if (bundle.get("shared_setup") is not None
-            and _setup_switch_shared_publication_snapshot(body) != bundle["shared_setup"]):
+            and _setup_switch_shared_publication_snapshot(body,
+                include_inputs="input_files" in bundle["shared_setup"]) != bundle["shared_setup"]):
         raise LoadError("publication original shared Q owners or bytes changed; HOLD")
     project = Path(body["new_project"]["path"])
     output = project / "99-output-ztp"
@@ -6859,7 +6908,8 @@ def _require_setup_publication_state(body, *, phase="parent"):
           or _setup_publication_selector(temporary) != {"identity": staged["identity"], "target": staged["target"]}):
         raise LoadError("publication staged selector/preimage changed; HOLD")
     if (bundle.get("shared_setup") is not None
-            and _setup_switch_shared_publication_snapshot(body) != bundle["shared_setup"]):
+            and _setup_switch_shared_publication_snapshot(body,
+                include_inputs="input_files" in bundle["shared_setup"]) != bundle["shared_setup"]):
         raise LoadError("publication shared Q authority changed during deep inspection; HOLD")
 
 
@@ -14420,25 +14470,83 @@ def verify_apache_publication_boundary(*, dry_run: bool = False) -> None:
     ok(f"Apache 静态发布边界已验证：{APACHE_PUBLIC_BOUNDARY_CONF}")
 
 
+def preflight_setup_switch_b_publication(
+    token, *, guard, inputs: ProjectInputs, images: dict[str, Path],
+    dhcp_runtime_plan: DhcpRuntimePlan | None = None,
+) -> str:
+    """Check original published B while stopped; never activate or retire its WAL."""
+    require_setup_switch_publication_bundle(token, guard=guard, phase="published")
+    body = _setup_switch_prepared_registration_body((token["payload"], 0o600))
+    shared = body["publication_bundle"].get("shared_setup")
+    if shared is None or "input_files" not in shared:
+        raise LoadError("B preflight requires original Q input-owner qualification; HOLD")
+    parent = json.loads(base64.b64decode(
+        body["publication_bundle"]["parent"]["candidate"]["payload"], validate=True))
+    fields = dict(global_file="global", devices_file="devices", subnet_file="subnet", p2p_file="p2p",
+                  air_topology_policy="air_topology_policy", mini_devices_file="mini_air_devices",
+                  effective_devices_file="effective_devices")
+    for attribute, key in fields.items():
+        value = getattr(inputs, attribute)
+        row = shared["input_files"].get(key)
+        selected = str(value.parent.resolve(strict=True) / value.name) if value is not None else None
+        if (row is None) != (value is None) or (row is not None and selected != row["path"]):
+            raise LoadError("B preflight input selection differs from original Q; HOLD")
+    if (inputs.deployment_scope != parent["deployment_scope"]
+            or inputs.switch_scope != parent["switch_scope"]):
+        raise LoadError("B preflight scope differs from sealed parent; HOLD")
+
+    def authority():
+        require_setup_switch_publication_bundle(token, guard=guard, phase="published")
+
+    # Cached settings/types supplied by a previous invocation cannot suppress
+    # required checks. Reconstruct them from the original owner-bound sources.
+    settings = apply_subnet_service_ips(load_global(inputs.global_file,
+        switch_scope=parent["switch_scope"]), inputs.subnet_file)
+    device_types = load_device_types(inputs.devices_file, settings.schema_version,
+                                    switch_scope=parent["switch_scope"])
+    qualified = replace(inputs, settings=settings, device_types=device_types,
+        pubkeys=tuple(ZTP_DIR / "config/publickey" / name
+                      for name in sorted(shared["flat_runtime"]["publickeys"])))
+    authority()
+    preflight_services(qualified, images, dhcp_runtime_plan=dhcp_runtime_plan,
+                       runtime_backend=guard["runtime_backend"], require_authority=authority)
+    authority()
+    return "b-preflight-passed-still-stopped-wal-retained"
+
+
 def preflight_services(
     inputs: ProjectInputs, images: dict[str, Path], dry_run: bool = False, *,
     dhcp_runtime_plan: DhcpRuntimePlan | None = None,
     runtime_backend: ServiceRuntimeBackend | None = None,
+    require_authority=None,
 ) -> None:
+    def checked(function, *args, **kwargs):
+        if require_authority is not None:
+            require_authority()
+        result = function(*args, **kwargs)
+        if require_authority is not None:
+            require_authority()
+        return result
+
+    if require_authority is not None:
+        require_authority()
     backend = runtime_backend or service_runtime_backend()
     if backend.name == "supervisor":
-        plan = dhcp_runtime_plan or plan_local_dhcp_runtime(inputs)
-        http_required, dhcp_required = supervisor_service_availability(
+        # Owner-bound cold preflight must derive listeners again; an old
+        # zero-listener plan is not permission to suppress current checks.
+        plan = (checked(plan_local_dhcp_runtime, inputs) if require_authority is not None
+                else dhcp_runtime_plan or checked(plan_local_dhcp_runtime, inputs))
+        http_required, dhcp_required = checked(supervisor_service_availability,
             inputs, plan, dry_run,
         )
         if http_required:
-            verify_control_auth(runtime_backend=backend, dry_run=dry_run)
-            verify_published_files(inputs, images, dry_run=dry_run)
-            verify_apache_publication_boundary(dry_run=dry_run)
-            run(sudo_command("apache2ctl", "configtest"), dry_run=dry_run)
+            checked(verify_control_auth, runtime_backend=backend, dry_run=dry_run)
+            checked(verify_published_files, inputs, images, dry_run=dry_run)
+            checked(verify_apache_publication_boundary, dry_run=dry_run)
+            checked(run, sudo_command("apache2ctl", "configtest"), dry_run=dry_run)
         if dhcp_required:
-            validate_dhcp_output_sources(dhcp_file_mappings())
-            run(
+            checked(validate_dhcp_output_sources, dhcp_file_mappings())
+            checked(run,
                 sudo_command("dhcpd", "-t", "-cf", "/etc/dhcp/dhcpd.conf"),
                 dry_run=dry_run,
             )
@@ -14455,18 +14563,18 @@ def preflight_services(
     if not inputs.settings.ztp_enabled:
         info("global 中 ZTP status=disabled，不启动服务")
         return
-    if not validate_management_host(inputs.settings, dry_run):
+    if not checked(validate_management_host, inputs.settings, dry_run):
         raise LoadError("本机服务启动条件不满足")
-    verify_control_auth(runtime_backend=backend, dry_run=dry_run)
-    verify_published_files(inputs, images, dry_run=dry_run)
-    verify_apache_publication_boundary(dry_run=dry_run)
+    checked(verify_control_auth, runtime_backend=backend, dry_run=dry_run)
+    checked(verify_published_files, inputs, images, dry_run=dry_run)
+    checked(verify_apache_publication_boundary, dry_run=dry_run)
     if inputs.settings.dhcp_enabled:
-        validate_dhcp_output_sources(dhcp_file_mappings())
-        run(
+        checked(validate_dhcp_output_sources, dhcp_file_mappings())
+        checked(run,
             sudo_command("dhcpd", "-t", "-cf", "/etc/dhcp/dhcpd.conf"),
             dry_run=dry_run,
         )
-    run(sudo_command("apache2ctl", "configtest"), dry_run=dry_run)
+    checked(run, sudo_command("apache2ctl", "configtest"), dry_run=dry_run)
     ok(
         "启动前检查通过：公钥、Apache 配置和 HTTP 发布文件均有效"
         + ("；DHCP 配置有效" if inputs.settings.dhcp_enabled else "；DHCP 已禁用")

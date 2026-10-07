@@ -960,6 +960,124 @@ def private_publication_candidates(api, project):
 
 
 class ReleaseTransactionTests(unittest.TestCase):
+    def _prepare_published_q_for_stopped_preflight(self):
+        state, context, guard = self._prepare_q_manifest_publication()
+        q = state[1]
+        for name, source in (("01-global.yaml", self.inputs.global_file),
+                             ("02-devices_config.csv", self.inputs.devices_file),
+                             ("02-dhcp-subnet_config.csv", self.inputs.subnet_file),
+                             ("p2p-original.xlsx", self.inputs.p2p_file)):
+            (q / name).write_bytes(source.read_bytes())
+        (q / "p2p.xlsx").symlink_to("p2p-original.xlsx")
+        document = yaml.safe_load((q / "01-global.yaml").read_text())
+        document["common"]["mgmt"]["dhcp-server"]["status"] = "disabled"
+        (q / "01-global.yaml").write_text(yaml.safe_dump(document, sort_keys=False))
+        (q / "02-dhcp-subnet_config.csv").write_text(
+            "shared_network,subnet,netmask,range_start,range_end,routers,ztp_service_ip,cumulus_profile,nvos_ztp\n"
+            "net,192.0.2.0,255.255.255.0,192.0.2.100,192.0.2.120,192.0.2.1,192.0.2.40,oob,no\n")
+        inputs = LOAD.replace(self.inputs, global_file=q / "01-global.yaml",
+            devices_file=q / "02-devices_config.csv", subnet_file=q / "02-dhcp-subnet_config.csv",
+            p2p_file=q / "p2p-original.xlsx", settings=LOAD.load_global(q / "01-global.yaml"),
+            source_identities=None)
+        candidates = private_publication_candidates(LOAD, q)
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            token = LOAD.register_setup_switch_publication_bundle(*candidates, guard=guard)
+            self.addCleanup(LOAD.close_setup_switch_publication_bundle, token)
+            LOAD.commit_prepared_release(candidates[0], require_authority=lambda:
+                LOAD.require_setup_switch_publication_bundle(token, guard=guard))
+            LOAD.generation_report.commit_prepared_generation_report(candidates[1], require_authority=lambda:
+                LOAD.require_setup_switch_publication_bundle(token, guard=guard, phase="report"))
+            selector = json.loads(token["payload"])["body"]["publication_bundle"]["selector"]
+            LOAD.commit_pinned_generation(q, candidates[2], expected_current=None,
+                prepared_selector=selector["staged"], require_authority=lambda:
+                LOAD.require_setup_switch_publication_bundle(token, guard=guard, phase="selector"))
+        return state, context, guard, token, inputs
+
+    def test_b_stopped_preflight_retains_wal_and_has_no_activation_permission(self):
+        state, _context, guard, token, inputs = self._prepare_published_q_for_stopped_preflight()
+        journal = state[-3]
+        original = journal.read_bytes()
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "preflight_services") as preflight, \
+                mock.patch.object(LOAD, "start_services") as start:
+            result = LOAD.preflight_setup_switch_b_publication(token, guard=guard, inputs=inputs, images={})
+            self.assertEqual("b-preflight-passed-still-stopped-wal-retained", result)
+            preflight.assert_called_once()
+            start.assert_not_called()
+        self.assertEqual(original, journal.read_bytes())
+        self.assertTrue(journal.is_file())
+
+    def test_b_stopped_preflight_rejects_live_input_drift_before_commands(self):
+        state, _context, guard, token, inputs = self._prepare_published_q_for_stopped_preflight()
+        inputs.devices_file.write_bytes(b"independent changed devices after parent publication\n")
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "preflight_services") as preflight:
+            with self.assertRaisesRegex(LOAD.LoadError, "HOLD"):
+                LOAD.preflight_setup_switch_b_publication(token, guard=guard, inputs=inputs, images={})
+            preflight.assert_not_called()
+        self.assertEqual(token["payload"], state[-3].read_bytes())
+
+    def test_b_stopped_preflight_rejects_same_byte_foreign_input_owner(self):
+        state, _context, guard, token, inputs = self._prepare_published_q_for_stopped_preflight()
+        original = inputs.devices_file.with_name("independent-original-devices")
+        inputs.devices_file.rename(original)
+        inputs.devices_file.write_bytes(original.read_bytes())
+        inputs.devices_file.chmod(0o644)
+        self.assertNotEqual(original.lstat().st_ino, inputs.devices_file.lstat().st_ino)
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "preflight_services") as preflight:
+            with self.assertRaisesRegex(LOAD.LoadError, "HOLD"):
+                LOAD.preflight_setup_switch_b_publication(token, guard=guard, inputs=inputs, images={})
+            preflight.assert_not_called()
+        self.assertEqual(token["payload"], state[-3].read_bytes())
+        self.assertEqual(original.read_bytes(), inputs.devices_file.read_bytes())
+
+    def test_b_stopped_preflight_does_not_trust_disabled_cached_settings(self):
+        state, _context, guard, token, inputs = self._prepare_published_q_for_stopped_preflight()
+        forged = LOAD.replace(inputs, settings=LOAD.replace(inputs.settings, ztp_enabled=False),
+                              device_types=frozenset())
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "preflight_services") as preflight:
+            LOAD.preflight_setup_switch_b_publication(token, guard=guard, inputs=forged, images={})
+            qualified = preflight.call_args.args[0]
+            self.assertTrue(qualified.settings.ztp_enabled)
+            self.assertEqual(frozenset({"eth"}), qualified.device_types)
+            self.assertEqual(("192.0.2.40",), qualified.settings.service_ips)
+        self.assertEqual(token["payload"], state[-3].read_bytes())
+
+    def test_b_stopped_preflight_checks_authority_after_each_real_helper(self):
+        state, _context, guard, token, inputs = self._prepare_published_q_for_stopped_preflight()
+        def change_after_auth(**kwargs):
+            inputs.devices_file.write_bytes(b"independent late preflight drift\n")
+        native_guard = dict(guard, runtime_backend=SimpleNamespace(name="systemd"))
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "validate_management_host", return_value=True), \
+                mock.patch.object(LOAD, "verify_control_auth", side_effect=change_after_auth) as auth, \
+                mock.patch.object(LOAD, "verify_published_files") as published, \
+                mock.patch.object(LOAD, "run") as command, \
+                mock.patch.object(LOAD, "start_services") as start:
+            with self.assertRaisesRegex(LOAD.LoadError, "HOLD"):
+                LOAD.preflight_setup_switch_b_publication(token, guard=native_guard, inputs=inputs, images={})
+            auth.assert_called_once()
+            published.assert_not_called()
+            command.assert_not_called()
+            start.assert_not_called()
+        self.assertEqual(token["payload"], state[-3].read_bytes())
+
+    def test_b_stopped_preflight_recomputes_cached_listener_plan(self):
+        state, _context, guard, token, inputs = self._prepare_published_q_for_stopped_preflight()
+        cached, fresh = SimpleNamespace(listener_names=()), SimpleNamespace(listener_names=("eth2",))
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "plan_local_dhcp_runtime", return_value=fresh) as planner, \
+                mock.patch.object(LOAD, "supervisor_service_availability", return_value=(False, False)) as availability, \
+                mock.patch.object(LOAD, "start_services") as start:
+            LOAD.preflight_setup_switch_b_publication(token, guard=guard, inputs=inputs, images={},
+                                                       dhcp_runtime_plan=cached)
+            planner.assert_called_once()
+            self.assertIs(fresh, availability.call_args.args[1])
+            start.assert_not_called()
+        self.assertEqual(token["payload"], state[-3].read_bytes())
+
     def _prepare_q_manifest_publication(self):
         state, context = self._prepare_persisted_a_runtime_switch()
         journal, descriptor, backend = state[-3:]

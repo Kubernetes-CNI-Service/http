@@ -4770,7 +4770,14 @@ finally:
             with self.subTest(fault=fault):
                 self._real_setup_publication_writer_death("parent", late_fault=fault)
 
-    def _real_setup_publication_writer_death(self, death_phase, *, resume_cli=False, late_fault=None):
+    def test_real_setup_publication_cold_stopped_b_preflight_retains_original_wal(self):
+        self._real_setup_publication_writer_death("selector", b_preflight="pass")
+
+    def test_real_setup_publication_cold_stopped_b_preflight_late_input_drift_holds(self):
+        self._real_setup_publication_writer_death("selector", b_preflight="late-input")
+
+    def _real_setup_publication_writer_death(self, death_phase, *, resume_cli=False, late_fault=None,
+                                            b_preflight=None):
         with tempfile.TemporaryDirectory(prefix="r22-publication-wal-") as name:
             fixture = self._private_setup_switch_fixture(Path(name))
             root, _p, q, _common, _p_only, _q_only, manifest, _before, *_rest = fixture
@@ -4881,13 +4888,42 @@ try:
     token = api.open_setup_switch_publication_bundle(q, guard=guard)
     before = token['phase']
     result = api.resume_setup_switch_publication_bundle(token, guard=guard)
+    if sys.argv[5] != 'none':
+        parent = json.loads((q / '99-output-ztp/current-release.json').read_bytes())
+        paths = parent['input_paths']
+        inputs = api.ProjectInputs(global_file=q / paths['global'], devices_file=q / paths['devices'],
+            subnet_file=q / paths['subnet'], p2p_file=q / paths['p2p'], device_types=frozenset(),
+            pubkeys=(), settings=api.load_global(q / paths['global']))
+        trace = []
+        def plan(*args, **kwargs):
+            trace.append('plan')
+            if sys.argv[5] == 'late-input':
+                inputs.devices_file.write_bytes(b'independent drift after first helper\n')
+            return SimpleNamespace(listener_names=())
+        api.plan_local_dhcp_runtime = plan
+        api.supervisor_service_availability = lambda *a, **kw: trace.append('availability') or (False, False)
+        api.run = forbidden
+        original_wal = token['payload']
+        try:
+            status = api.preflight_setup_switch_b_publication(token, guard=guard, inputs=inputs, images={})
+        except api.LoadError as exc:
+            assert sys.argv[5] == 'late-input' and 'HOLD' in str(exc), str(exc)
+            assert trace == ['plan'], trace
+            status = 'held-still-stopped-wal-retained'
+        else:
+            assert sys.argv[5] == 'pass', 'late-input drift was accepted'
+            assert trace == ['plan', 'availability'], trace
+            assert status == 'b-preflight-passed-still-stopped-wal-retained', status
+        assert original_wal == token['journal'].read_bytes()
+        print('R22_PREFLIGHT=' + status)
     print('R22_RESUME='+json.dumps(dict(before=before, after=token['phase'], result=result)))
 finally:
     api.close_setup_switch_publication_bundle(token)
     api.release_deployment_lock(descriptor)
 '''
             recovered = subprocess.run([sys.executable, "-B", "-c", resume,
-                                        str(root), str(q), str(ROOT), "cli" if resume_cli else "api"], cwd=root,
+                                        str(root), str(q), str(ROOT), "cli" if resume_cli else "api",
+                                        b_preflight or "none"], cwd=root,
                                        capture_output=True, text=True, check=False, timeout=30)
             if late_fault is not None:
                 self.assertEqual(1, recovered.returncode, recovered.stdout + recovered.stderr)
@@ -4905,6 +4941,9 @@ finally:
                     self.assertEqual(q_manifest, held.read_bytes())
                 return
             self.assertEqual(0, recovered.returncode, recovered.stdout + recovered.stderr)
+            if b_preflight:
+                self.assertIn("R22_PREFLIGHT=" + ("b-preflight-passed-still-stopped-wal-retained"
+                    if b_preflight == "pass" else "held-still-stopped-wal-retained"), recovered.stdout)
             payload = json.loads(next(line.split("=", 1)[1] for line in recovered.stdout.splitlines()
                                       if line.startswith("R22_RESUME=")))
             self.assertEqual({"before": {"parent": "report", "report": "selector", "selector": "published"}[death_phase],

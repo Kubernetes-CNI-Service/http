@@ -1634,6 +1634,21 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 ## TC-REAL-R22-GENERATION-INPUT-ABA-001 — 跨进程输入换代与多输出一致性
 
+- B 停服预检补充：新发布 WAL 增加原 Q 输入名称、别名/目标、父目录、九字段
+  owner 与封存父记录 SHA 的绑定；旧缺少该绑定的 WAL 仍可停服续提交，但不能
+  取得 B 预检资格。预检重新读取原 settings/device types，逐步骤前后核原组，
+  Supervisor listener 规划必须重算，不能用缓存的 disabled/零 listener 跳过检查。
+  direct 覆盖原输入改写、同字节新 inode、旧缓存及首 helper 后晚改写；私有真实
+  LOAD→SETUP→selector 后强杀→新 LOAD 冷续提交验证仍停服、原 WAL 不变及
+  planner 后漂移必须阻断后续步骤。该 workflow 的 listener/live availability 为
+  注入的隔离对象，不是真实服务健康见证。现场沿用隔离 Linux VM、精确版本、
+  排他锁、正常写者静默、root-only 可恢复原 A/共享树快照的前置；记录输入/别名/
+  WAL/generation 逐阶段 stat/SHA、规划和每条命令完整日志/END/exit、零启动/
+  零退休盘点。失败保持停服并保存全部对象，人工核验确切快照后恢复；风险仍有
+  非合作写者 check/write 竞态及断电持久性。结果只能为
+  `b-preflight-passed-still-stopped-wal-retained`；镜像/真实健康启动、成功退休、
+  原 A 显式激活、Linux/root/断电及 DEV ACK 仍 OPEN。
+
 - SETUP 发布组 WAL / 停服冷续提交补充：父记录、report 原前像/候选及
   generation 完整树在首个发布写前持久登记；selector 使用预先 fsync 的唯一暂存
   symlink，其原 inode 与 raw target 同时登记。DHCP 义务存在时，扩展原 WAL 并

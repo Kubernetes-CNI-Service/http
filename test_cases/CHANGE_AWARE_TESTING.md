@@ -1,5 +1,47 @@
 # 脚本变更影响测试
 
+## 2026-10-07 R22 原 Q 输入绑定与停服 B 预检候选
+
+基于 `72f98c7ff83c4e9637317d8abf9cb2f103fd1f2c`，新增
+`preflight_setup_switch_b_publication`，只在原 parent/report/selector 与共享 Q/WAL
+仍逐身份匹配且保持停服时执行。首发布写前冻结 live input 的名称、alias/target、
+父目录、九字段 owner 和 parent SHA；旧字段集只保留停服续提交兼容，不能借旧
+证明获得新预检资格。重新从原输入读 settings/device types，各 helper/命令前后
+复核，且 Supervisor plan 在 owner-bound 预检中重算；缓存零 listener 不可屏蔽检查。
+
+独立缺入口 RED 为 2 ERROR/exit1（不是通过）：
+`outputs/test-diagnostics/r22-publication-b-stopped-preflight-isolated-red.log`，
+inode158806609/size129147，SHA256
+`07096e540db1b5e2e436d48d96c44b2cbda354ca303c658760efc87e9c03a435`。
+新增缓存 plan 反例 1 FAIL/exit1：`r22-publication-b-stopped-preflight-cached-plan-red.log`，
+inode158867859/size128159，SHA256
+`2b19b508193ab3171321e9f3145a72a0382fc9d0caf264ca5ee59685d6432a7a`。
+修复后该项 1 OK/exit0，日志 `r22-publication-b-stopped-preflight-cached-plan-green.log`，
+inode158873239/size127358，SHA256
+`927a4cf24c8534270175ec1e2614fd4c6bdcc0c1d2ab2bf4055bef658b71d1fe`。
+前五项 direct OK/exit0，日志 `r22-publication-b-stopped-preflight-boundary-tests.log`，
+inode158820875/size129662，SHA256
+`b960b88479d6854dfc22d4b9aec307022741d739c6e8977f02a341082143e9e2`。
+真实 LOAD/SETUP/新进程预检两项 OK/exit0，日志
+`r22-publication-b-stopped-preflight-legal-disabled-workflow.log`，
+inode158853339/size127372，SHA256
+`59b86060465e60dd1d967c458afbbd935919665aea270b3d35459fb53460fb45`。
+物理 Ran/OK 或 FAILED/actual exit/冻结一致/END 顺序完整，读前后 stat 一致。
+其间夹具错误和实现候选失败原日志全部保留；workflow 不放宽 SETUP 原非法组合
+断言，以合法 disabled 项目和隔离 planner/availability 检查边界，并不声称真机健康。
+
+最后 LOAD direct、report contract/workflow、文档 catalog 与七处发布强杀/冷续提交/
+停服预检 workflow 共 557 tests OK，102.602s，实际 exit0、冻结一致；完整日志
+`outputs/test-diagnostics/r22-publication-b-stopped-final-regression.log`，
+inode158875901/size301317，SHA256
+`2fc990f7cb883963995095beda0f6a4d3f4274cd802076f19916cc286f57497a`。
+读前后 stat 稳定，物理 Ran1459/OK1461/actual1528/冻结1529/END1531。
+随后仅补充本条证据；该有界回归不是全量 proof。
+
+该结果仍保留 WAL，不启动、不退休、不授权回 A；镜像发布资格、完整 B health
+finalizer 与原 A 显式激活仍须继续实现。局部 PASS 不等于 runner related/full/check，
+批准 ledger 未手改，REAL_ENV 的 Linux/root/断电/DEV ACK 仍 OPEN。
+
 ## 2026-10-07 R22 发布组 WAL 与停服冷续提交候选
 
 后续基于已提交 `79e21930a3b3ac6d9c4d0d579250107203f7cc79`，增加
