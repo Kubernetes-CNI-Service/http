@@ -624,8 +624,16 @@ SETUP/DHCP 首个 B 文件覆盖前，原 WAL 另登记 `backup_inventory`：原
 目录/父目录身份、四个名称的九字段叶子 owner（原缺席为 None）。发布、原 Q
 补偿和分组冷恢复持续核该清单及原字节/元数据；同字节新文件、同目标新链接、
 克隆目录、登记暂存 fsync 中换绑均 HOLD，不删除未知对象、不启动服务。
-旧缺清单的 WAL 不在冷读中补办原 owner；本窄修不证明 live DHCP 补偿暂存的
-完整持久 owner、显式旧 A 激活/退休或正式 related/full/check。
+旧缺清单的 WAL 不在冷读中补办原 owner。
+
+schema-4 补偿计划另登记 DHCP 四前像及恢复暂存，在第一个 Q/P/A 补偿写前同步；
+保持原 mode/uid/gid/mtime/链接文字，原缺席不造文件。冷重入仅接受计划自己消费的
+stage inode（rename 可改变 ctime），同字节恢复文件/同目标链接的新 inode、未知
+暂存、Boolean owner 必须 HOLD。恢复父同步失败或强杀后只补原 stage 的后续操作，
+不造新计划、重建暂存或删除证据；旧 schema-3 DHCP 计划缺此资格须 HOLD。
+本阶段 checkpoint 在原发布/receipt 边界验证后，于首个补偿前冻结；它不替代
+B 第一次安装前的候选 inode/覆盖所有权登记。原 B 首写资格、旧 A 显式健康激活/
+安全归档、root/Linux/断电/C2/DEV ACK 与正式 related/full/check 仍待。
 
 同一模块还覆盖端到端 deployment scope：默认 `all` 同时生成 Production/AIR；`prod` 只发布
 Production Cumulus/IB/NVL；`air` 只发布 AIR DHCP/YAML/release，并只临时渲染 AIR full profile

@@ -5000,10 +5000,20 @@ finally:
     def test_real_setup_committed_q_group_cold_rejects_same_byte_original_dhcp_backup(self):
         self._real_setup_committed_q_group_restore(dhcp=True, dhcp_backup_fault=True)
 
+    def test_real_setup_committed_q_group_cold_rejects_same_byte_restored_dhcp_owner(self):
+        self._real_setup_committed_q_group_restore(dhcp=True, dhcp_live_fault=True)
+
+    def test_real_setup_committed_q_group_dhcp_restore_death_consumes_original_stages(self):
+        self._real_setup_committed_q_group_restore(dhcp=True, dhcp_death=True)
+
+    def test_real_setup_committed_q_group_dhcp_restore_keeps_original_nondefault_metadata(self):
+        self._real_setup_committed_q_group_restore(dhcp=True, dhcp_metadata=True)
+
     def _real_setup_committed_q_group_restore(self, *, dhcp=False, runtime_death=False,
                                              setup_death=False, foreign_setup=False,
                                              q_local=False, q_fault=False, a_fault=None, a_image_fault=False,
-                                             a_image=False, dhcp_backup_fault=False):
+                                             a_image=False, dhcp_backup_fault=False, dhcp_live_fault=False,
+                                             dhcp_death=False, dhcp_metadata=False):
         fixture = RELEASE_FIXTURE.ReleaseTransactionTests()
         fixture.setUp()
         try:
@@ -5088,7 +5098,8 @@ try:
         token = load.register_setup_switch_publication_bundle(*candidates, guard=guard)
         if sys.argv[6] == 'dhcp':
             assert_private_dhcp_transaction_retention(load, root, q, 'bound-setup-before-write',
-                setup_guard=guard, publication_candidates=(*candidates, token), a_shapes=True)
+                setup_guard=guard, publication_candidates=(*candidates, token), a_shapes=True,
+                a_metadata=len(sys.argv) > 11 and sys.argv[11] == 'a-metadata')
             names = ('dhcpd.conf', 'dhcpd_eth.hosts', 'dhcpd_ib.hosts', 'dhcpd_nvl.hosts')
             load.dhcp_file_mappings = lambda *a: {q / 'independent-dhcp-B' / n: root / 'private-etc-dhcp' / n for n in names}
         else:
@@ -5112,6 +5123,13 @@ try:
                 os.kill(os.getpid(), signal.SIGKILL)
             return original_sync(path)
         load._fsync_parent_directory = kill_after_original_a_runtime_replace
+    if sys.argv[5] == 'kill-dhcp':
+        original_sync = load._fsync_parent_directory
+        def kill_after_original_dhcp_stage_replace(path):
+            if Path(path) == runtime and (runtime / 'dhcpd.conf').read_bytes() == b'independent-A:dhcpd.conf\n':
+                os.kill(os.getpid(), signal.SIGKILL)
+            return original_sync(path)
+        load._fsync_parent_directory = kill_after_original_dhcp_stage_replace
     if sys.argv[5] == 'kill-setup':
         original_sync = load._fsync_parent_directory
         def kill_after_original_p_link_replace(path):
@@ -5167,6 +5185,14 @@ try:
             print('R22_FOREIGN_DHCP_BACKUP_REJECTED')
             sys.exit(0)
         raise AssertionError('same-byte new original DHCP backup must not be adopted')
+    if sys.argv[5] == 'foreign-dhcp-live':
+        try:
+            load.restore_setup_switch_a_disk(q, guard=guard, confirmed=True)
+        except load.LoadError as exc:
+            assert 'DHCP' in str(exc) and ('owner' in str(exc) or 'stage' in str(exc)) and 'HOLD' in str(exc), str(exc)
+            print('R22_FOREIGN_RESTORED_DHCP_OWNER_REJECTED')
+            sys.exit(0)
+        raise AssertionError('same-byte new restored DHCP owner must not be adopted')
     status = load.restore_setup_switch_a_disk(q, guard=guard, confirmed=True)
     assert status == 'restored-p-a-group-stopped-wal-retained', status
     expected_bootstrap = (b'A oob bootstrap\nZTP_UPGRADE_ENABLED="true"\n'
@@ -5189,6 +5215,12 @@ try:
         assert (runtime / 'dhcpd_ib.hosts').read_bytes() == b'independent-A:dhcpd_ib.hosts\n'
         assert os.readlink(runtime / 'dhcpd_eth.hosts') == '../independent-original-A-source'
         assert not os.path.lexists(runtime / 'dhcpd_nvl.hosts')
+        if sys.argv[5] == 'reader-dhcp-metadata':
+            import stat
+            metadata = (runtime / 'dhcpd.conf').lstat()
+            assert stat.S_IMODE(metadata.st_mode) == 0o640
+            assert metadata.st_mtime_ns == 1700000000123456789
+            assert (metadata.st_uid, metadata.st_gid) == (os.getuid(), os.getgid())
     print('R22_ORIGINAL_GROUP_RESTORED_STOPPED')
 finally:
     load.release_deployment_lock(fd)
@@ -5198,7 +5230,8 @@ finally:
             original_p_target = context.setup_state.links[common]
             writer = subprocess.run(argv + ["writer", shape, original_p_target, "q-local" if q_local else "no-q-local",
                                            "a-image" if a_image or a_image_fault else "no-a-image",
-                                           "q-created" if a_image else "no-q-created"],
+                                           "q-created" if a_image else "no-q-created",
+                                           "a-metadata" if dhcp_metadata else "no-a-metadata"],
                                     capture_output=True, text=True, check=False, timeout=30)
             self.assertEqual(-signal.SIGKILL, writer.returncode, writer.stdout + writer.stderr)
             original_wal = (journal.lstat().st_ino, journal.read_bytes())
@@ -5241,17 +5274,24 @@ finally:
                 original_receipt = (transaction.lstat().st_ino,
                                     (transaction / "a-preimage.json").lstat().st_ino,
                                     (transaction / "a-preimage.json").read_bytes())
-            if runtime_death or setup_death:
-                dying = subprocess.run(argv + ["kill-runtime" if runtime_death else "kill-setup", shape, original_p_target], capture_output=True, text=True,
+            if runtime_death or setup_death or dhcp_death:
+                dying = subprocess.run(argv + ["kill-dhcp" if dhcp_death else "kill-runtime" if runtime_death else "kill-setup", shape, original_p_target], capture_output=True, text=True,
                                        check=False, timeout=30)
                 self.assertEqual(-signal.SIGKILL, dying.returncode, dying.stdout + dying.stderr)
-                if runtime_death:
+                if dhcp_death:
+                    plan = json.loads((journal.parent / ".setup-switch-a-restore.json").read_bytes())
+                    self.assertEqual(4, plan["schema_version"])
+                    own = plan["dhcp"][str(root / "private-etc-dhcp/dhcpd.conf")]["stage"]
+                    self.assertFalse(os.path.lexists(own["path"]))
+                    self.assertEqual(own["file"]["identity"][:8], [getattr((root / "private-etc-dhcp/dhcpd.conf").lstat(), field)
+                        for field in ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink", "st_size", "st_mtime_ns")])
+                elif runtime_death:
                     self.assertEqual(b"A oob bootstrap\n", (root / "ztp/ztp-bootstrap_oob.sh").read_bytes())
                 else:
                     self.assertEqual(original_p_target, os.readlink(common))
                 marker = journal.parent / ".setup-switch-a-restore.json"
                 before_reader_plan = (marker.lstat().st_ino, marker.read_bytes())
-            reader_mode = "reader-a-image" if a_image else "reader"
+            reader_mode = "reader-a-image" if a_image else "reader-dhcp-metadata" if dhcp_metadata else "reader"
             reader = subprocess.run(argv + [reader_mode, shape], capture_output=True, text=True, check=False, timeout=30)
             self.assertEqual(0, reader.returncode, reader.stdout + reader.stderr)
             self.assertIn("R22_ORIGINAL_GROUP_RESTORED_STOPPED", reader.stdout)
@@ -5261,8 +5301,25 @@ finally:
             self.assertEqual(context.setup_state.links, {path: os.readlink(path) for path in context.setup_state.links})
             marker = journal.parent / ".setup-switch-a-restore.json"
             original_plan = (marker.lstat().st_ino, marker.read_bytes())
-            if runtime_death or setup_death:
+            if runtime_death or setup_death or dhcp_death:
                 self.assertEqual(before_reader_plan, original_plan)
+            if dhcp_live_fault:
+                path, held = root / "private-etc-dhcp/dhcpd.conf", root / "independent-held-restored-dhcp-owner"
+                metadata, payload = path.lstat(), path.read_bytes()
+                path.rename(held)
+                path.write_bytes(payload)
+                path.chmod(stat.S_IMODE(metadata.st_mode))
+                os.utime(path, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
+                self.assertNotEqual(held.lstat().st_ino, path.lstat().st_ino)
+                frozen = (path.lstat().st_ino, path.read_bytes(), state[7].read_bytes(), os.readlink(common))
+                rejecting = subprocess.run(argv + ["foreign-dhcp-live", shape], capture_output=True,
+                    text=True, check=False, timeout=30)
+                self.assertEqual(0, rejecting.returncode, rejecting.stdout + rejecting.stderr)
+                self.assertIn("R22_FOREIGN_RESTORED_DHCP_OWNER_REJECTED", rejecting.stdout)
+                self.assertEqual(frozen, (path.lstat().st_ino, path.read_bytes(), state[7].read_bytes(), os.readlink(common)))
+                self.assertEqual(original_wal, (journal.lstat().st_ino, journal.read_bytes()))
+                self.assertEqual(original_plan, (marker.lstat().st_ino, marker.read_bytes()))
+                return
             reader2 = subprocess.run(argv + [reader_mode, shape], capture_output=True, text=True, check=False, timeout=30)
             self.assertEqual(0, reader2.returncode, reader2.stdout + reader2.stderr)
             self.assertEqual(original_wal, (journal.lstat().st_ino, journal.read_bytes()))

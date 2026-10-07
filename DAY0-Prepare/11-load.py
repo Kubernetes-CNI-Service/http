@@ -7292,6 +7292,7 @@ def _require_setup_switch_a_stage_inventory(plan, parents):
     paths = [Path(row["stage"]["path"]) for row in plan["rows"].values() if row["stage"] is not None]
     paths += [Path(row["stage"]["path"]) for row in plan["runtime"].values() if row["stage"] is not None]
     paths += [Path(row["stage"]["path"]) for row in plan["setup"].values() if row["stage"] is not None]
+    paths += [Path(row["stage"]["path"]) for row in plan.get("dhcp", {}).values() if row["stage"] is not None]
     paths = [path.parent.resolve(strict=True) / path.name for path in paths]
     allowed = set(paths)
     if (any(not path.is_absolute() or path.parent not in parents for path in paths)
@@ -7307,7 +7308,7 @@ def _require_setup_switch_a_stage_inventory(plan, parents):
                 for count, entry in enumerate(entries, 1):
                     if count > 4096:
                         raise LoadError("A compensation stage inventory exceeds bound; HOLD")
-                    if entry.name.startswith((".r22-a-restore-", ".r22-a-runtime-", ".r22-a-setup-")) and parent / entry.name not in allowed:
+                    if entry.name.startswith((".r22-a-restore-", ".r22-a-runtime-", ".r22-a-setup-", ".r22-a-dhcp-")) and parent / entry.name not in allowed:
                         raise LoadError("unplanned A compensation stage retained; HOLD")
             if (owner != _dhcp_a_preimage_receipt_identity(os.fstat(fd))
                     or owner != _dhcp_a_preimage_receipt_identity(parent.lstat())):
@@ -7349,6 +7350,7 @@ def restore_setup_switch_a_disk(project, *, guard, confirmed=False):
         token["require"]()
         token["require_runtime_restored"]()
         token["require_setup_restored"]()
+        token["require_dhcp_restored"]()
         if result not in {"restored-p", "restored-p-a-dhcp-retained"}:
             raise LoadError("A group restoration did not verify complete stopped state; HOLD")
         return "restored-p-a-group-stopped-wal-retained"
@@ -7409,9 +7411,9 @@ def _setup_switch_a_compensation_authority(project, *, guard, confirmed,
                 phase = original["phase"]
                 if phase == "parent":
                     raise LoadError("Q compensation requires original committed B parent; HOLD")
-                plan = dict(schema_version=3, journal=str(journal), parent=parent,
+                plan = dict(schema_version=4, journal=str(journal), parent=parent,
                     identity=list(wal_before), sha256=hashlib.sha256(opened[0]).hexdigest(),
-                    phase=phase, rows={}, runtime={}, setup={})
+                    phase=phase, rows={}, runtime={}, setup={}, dhcp={})
                 for key in ("parent", "report", "selector"):
                     row = bundle[key]
                     destination = Path(row["path"] if key == "selector" else row["destination"])
@@ -7510,6 +7512,60 @@ def _setup_switch_a_compensation_authority(project, *, guard, confirmed,
                             raise LoadError("A setup stage original owner changed; HOLD")
                         _fsync_parent_directory(path.parent)
                     plan["setup"][name] = dict(original_row, stage=stage)
+                if "dhcp_transaction" in body:
+                    binding = body["dhcp_transaction"]
+                    _require_bound_dhcp_transaction_namespace(binding)
+                    runtime = Path(binding["body"]["runtime"]["path"])
+                    backup = Path(binding["body"]["backup"]["path"])
+                    _require_no_pending_setup_stage(runtime / ".a-plan-probe", ".r22-a-dhcp-", "A DHCP")
+                    for name, record in sorted(binding["body"]["before"].items()):
+                        require_setup_switch_publication_bundle(original, guard=guard, phase=phase)
+                        destination = runtime / name
+                        checkpoint = _setup_switch_dhcp_owned_leaf(destination)
+                        if (checkpoint is None or checkpoint["state"].get("state") != "file"
+                                or checkpoint["state"]["sha256"] != binding["body"]["after_sha256"][name]):
+                            raise LoadError("DHCP compensation initial B checkpoint differs from bound receipt; HOLD")
+                        stage = None
+                        if record["state"] != "missing":
+                            path = runtime / (".r22-a-dhcp-" + uuid.uuid4().hex)
+                            if record["state"] == "link":
+                                path.symlink_to(record["target"])
+                                metadata = path.lstat()
+                                if (metadata.st_uid, metadata.st_gid) != (record["uid"], record["gid"]):
+                                    os.chown(path, record["uid"], record["gid"], follow_symlinks=False)
+                                if stat.S_IMODE(path.lstat().st_mode) != record["mode"]:
+                                    os.chmod(path, record["mode"], follow_symlinks=False)
+                                os.utime(path, ns=(record["mtime_ns"],) * 2, follow_symlinks=False)
+                                stage_owner = list(_dhcp_a_preimage_receipt_identity(path.lstat()))
+                            else:
+                                data, mode = _read_rollback_regular(backup / name, limit=_ROLLBACK_PAYLOAD_LIMIT)
+                                if mode != record["mode"] or hashlib.sha256(data).hexdigest() != record["sha256"]:
+                                    raise LoadError("DHCP compensation original backup differs; HOLD")
+                                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                                with os.fdopen(fd, "wb") as stream:
+                                    metadata = os.fstat(stream.fileno())
+                                    if (metadata.st_uid, metadata.st_gid) != (record["uid"], record["gid"]):
+                                        os.fchown(stream.fileno(), record["uid"], record["gid"])
+                                    os.fchmod(stream.fileno(), mode)
+                                    stream.write(data)
+                                    stream.flush()
+                                    os.utime(stream.fileno(), ns=(record["mtime_ns"],) * 2)
+                                    stage_owner = list(_dhcp_a_preimage_receipt_identity(os.fstat(stream.fileno())))
+                                    os.fsync(stream.fileno())
+                                    if stage_owner != list(_dhcp_a_preimage_receipt_identity(os.fstat(stream.fileno()))):
+                                        raise LoadError("DHCP compensation original stage FD owner changed at sync; HOLD")
+                            stage = dict(path=str(path), file=_setup_switch_dhcp_owned_leaf(path))
+                            if stage["file"] != dict(identity=stage_owner, state=record):
+                                raise LoadError("DHCP compensation original stage name owner changed at sync; HOLD")
+                            _fsync_parent_directory(runtime)
+                        plan["dhcp"][str(destination)] = dict(before=record, checkpoint=checkpoint,
+                            parent=_setup_switch_link_parent_identity(destination), stage=stage)
+                    require_setup_switch_publication_bundle(original, guard=guard, phase=phase)
+                    for name, row in plan["dhcp"].items():
+                        if (_setup_switch_dhcp_owned_leaf(Path(name)) != row["checkpoint"]
+                                or row["stage"] is not None and
+                                   _setup_switch_dhcp_owned_leaf(Path(row["stage"]["path"])) != row["stage"]["file"]):
+                            raise LoadError("DHCP compensation stage/checkpoint owner changed before plan publication; HOLD")
                 require_setup_switch_publication_bundle(original, guard=guard, phase=phase)
                 marker_fd = os.open(marker, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
                 # These six fields do not change when our payload is written.
@@ -7541,8 +7597,13 @@ def _setup_switch_a_compensation_authority(project, *, guard, confirmed,
                     result[key] = value
                 return result
             plan = json.loads(payload, object_pairs_hook=unique)
-        if (set(plan) != {"schema_version", "journal", "parent", "identity", "sha256", "phase", "rows", "owner", "runtime", "setup"}
-                or type(plan["schema_version"]) is not int or plan["schema_version"] != 3
+        plan_fields = {"schema_version", "journal", "parent", "identity", "sha256", "phase", "rows", "owner", "runtime", "setup"}
+        if isinstance(plan, dict) and plan.get("schema_version") == 4:
+            plan_fields.add("dhcp")
+        if (not isinstance(plan, dict) or set(plan) != plan_fields
+                or type(plan["schema_version"]) is not int or plan["schema_version"] not in {3, 4}
+                or not isinstance(plan.get("dhcp", {}), dict)
+                or plan["schema_version"] == 3 and "dhcp_transaction" in body
                 or plan["journal"] != str(journal) or plan["parent"] != parent
                 or plan["identity"] != list(wal_before)
                 or plan["sha256"] != hashlib.sha256(opened[0]).hexdigest()
@@ -7563,6 +7624,8 @@ def _setup_switch_a_compensation_authority(project, *, guard, confirmed,
             _require_setup_switch_a_stage_inventory(plan, {
                 Path(bundle["selector"]["path"]).parent,
                 ZTP_DIR.resolve(strict=True), (ZTP_DIR / "config/publickey").resolve(strict=True),
+                *((Path(body["dhcp_transaction"]["body"]["runtime"]["path"]),)
+                  if "dhcp_transaction" in body else ()),
                 *(Path(name).parent for name in _setup_switch_compensation_setup_records(body))})
         def same_owner(actual, expected, *, renamed=False):
             if actual is None or expected is None:
@@ -7675,6 +7738,52 @@ def _setup_switch_a_compensation_authority(project, *, guard, confirmed,
                     raise LoadError("A compensation setup destination/stage owner changed; HOLD")
             marker_authority()
             return result
+        def dhcp_states():
+            marker_authority()
+            binding = body.get("dhcp_transaction")
+            originals = ({} if binding is None else {str(Path(binding["body"]["runtime"]["path"]) / name): row
+                         for name, row in binding["body"]["before"].items()})
+            rows = plan.get("dhcp", {})
+            if set(rows) != set(originals):
+                raise LoadError("DHCP compensation original plan inventory differs; HOLD")
+            if binding is not None:
+                _require_bound_dhcp_transaction_namespace(binding)
+            result = {}
+            for name, before in originals.items():
+                path, row = Path(name), rows[name]
+                if (not isinstance(row, dict) or set(row) != {"before", "checkpoint", "parent", "stage"}
+                        or row["before"] != before or row["parent"] != _setup_switch_link_parent_identity(path)):
+                    raise LoadError("DHCP compensation original row/parent owner differs; HOLD")
+                checkpoint = row["checkpoint"]
+                def valid_leaf(leaf):
+                    return (isinstance(leaf, dict) and set(leaf) == {"identity", "state"}
+                        and isinstance(leaf["identity"], list) and len(leaf["identity"]) == 9
+                        and all(type(value) is int and value >= 0 for value in leaf["identity"])
+                        and leaf["identity"][5] == 1 and isinstance(leaf["state"], dict))
+                if (not valid_leaf(checkpoint) or checkpoint["state"].get("state") != "file"
+                        or checkpoint["state"].get("sha256") != binding["body"]["after_sha256"][path.name]):
+                    raise LoadError("DHCP compensation original B checkpoint owner is invalid; HOLD")
+                stage, after, staged = row["stage"], None, None
+                if before["state"] == "missing":
+                    if stage is not None:
+                        raise LoadError("DHCP compensation original absence has a stage; HOLD")
+                else:
+                    if not isinstance(stage, dict) or set(stage) != {"path", "file"}:
+                        raise LoadError("DHCP compensation original stage owner is missing; HOLD")
+                    source, after = Path(stage["path"]), stage["file"]
+                    if (source.parent != path.parent or re.fullmatch(r"\.r22-a-dhcp-[0-9a-f]{32}", source.name) is None
+                            or not valid_leaf(after) or after["state"] != before):
+                        raise LoadError("DHCP compensation original stage owner/preimage differs; HOLD")
+                    staged = _setup_switch_dhcp_owned_leaf(source)
+                current = _setup_switch_dhcp_owned_leaf(path)
+                if same_owner(current, after, renamed=True) and staged is None:
+                    result[path] = "after"
+                elif same_owner(current, checkpoint) and (stage is None or same_owner(staged, after)):
+                    result[path] = "before"
+                else:
+                    raise LoadError("DHCP compensation destination/stage owner changed; HOLD")
+            marker_authority()
+            return result
         def states():
             marker_authority()
             result = {}
@@ -7737,6 +7846,7 @@ def _setup_switch_a_compensation_authority(project, *, guard, confirmed,
                         raise LoadError("partial Q compensation shared owner differs; HOLD")
                 runtime_states()
                 setup_states()
+                dhcp_states()
                 phases = states()
                 row = bundle[key]
                 destination = Path(row["path"] if key == "selector" else row["destination"])
@@ -7753,6 +7863,24 @@ def _setup_switch_a_compensation_authority(project, *, guard, confirmed,
                 raise LoadError("A compensation final publication state differs; HOLD")
             runtime_states()
             setup_states()
+            dhcp_states()
+        def restore_dhcp_leaf(path):
+            path = Path(path)
+            require_restored_publication()
+            row = plan.get("dhcp", {}).get(str(path))
+            if row is None:
+                raise LoadError("DHCP compensation requested leaf is not original planned owner; HOLD")
+            if dhcp_states()[path] == "before":
+                if row["stage"] is None:
+                    if os.path.lexists(path):
+                        path.unlink()
+                else:
+                    os.replace(Path(row["stage"]["path"]), path)
+            _fsync_parent_directory(path.parent)
+            require_restored_publication()
+        def require_dhcp_restored():
+            if set(dhcp_states().values()) - {"after"}:
+                raise LoadError("DHCP compensation original stage completion is unconfirmed; HOLD")
         def restore_setup_leaf(path):
             path = Path(path)
             require_restored_publication()
@@ -7829,6 +7957,7 @@ def _setup_switch_a_compensation_authority(project, *, guard, confirmed,
         yield dict(journal=journal, opened=opened, require=require_restored_publication,
                    restore_runtime_leaf=restore_runtime_leaf, require_runtime_restored=require_runtime_restored,
                    restore_setup_leaf=restore_setup_leaf, require_setup_restored=require_setup_restored,
+                   restore_dhcp_leaf=restore_dhcp_leaf, require_dhcp_restored=require_dhcp_restored,
                    require_setup_image_owner=require_setup_image_owner)
     except (KeyError, TypeError, ValueError, RuntimeError, OSError) as exc:
         raise LoadError(f"A publication compensation unconfirmed; HOLD: {exc}") from exc
@@ -10861,7 +10990,8 @@ def _recover_setup_switch_journal_snapshot(
         # restore and postverification. Exception or death must not erase the
         # only persistent P/Q recovery authority just because links are back.
         if group_token is not None:
-            _restore_setup_switch_dhcp_group(group_token, runtime_restore_guard, require_journal_unchanged)
+            _restore_setup_switch_dhcp_group(group_token, runtime_restore_guard, require_journal_unchanged,
+                a_compensation=a_compensation)
         after_p_restore(require_authority=require_journal_unchanged)
         require_journal_unchanged()
         if _recover_setup_switch_journal_snapshot(
@@ -11932,12 +12062,15 @@ def _open_setup_switch_dhcp_group(journal, body, opened, guard, descriptors, *, 
     return token
 
 
-def _restore_setup_switch_dhcp_group(token, guard, require_authority):
+def _restore_setup_switch_dhcp_group(token, guard, require_authority, *, a_compensation=None):
     body = _setup_switch_prepared_registration_body((token[1], 0o600))["dhcp_transaction"]["body"]
     runtime, backup = Path(body["runtime"]["path"]), Path(body["backup"]["path"])
     states = {runtime / name: row for name, row in body["before"].items()}
     for path, row in states.items():
         require_authority()
+        if a_compensation is not None:
+            a_compensation["restore_dhcp_leaf"](path)
+            continue
         if _dhcp_restore_leaf_state(path) == row:
             continue
         if row["state"] == "link":
@@ -11952,6 +12085,21 @@ def _restore_setup_switch_dhcp_group(token, guard, require_authority):
     require_authority()
     _require_no_pending_dhcp_restore_stages(
         _setup_switch_prepared_registration_body((token[1], 0o600))["dhcp_transaction"])
+    if a_compensation is not None:
+        a_compensation["require_dhcp_restored"]()
+
+
+def _setup_switch_dhcp_owned_leaf(path):
+    """Bounded no-follow leaf identity plus independent original metadata/bytes."""
+    metadata = path.lstat() if os.path.lexists(path) else None
+    owner = list(_dhcp_a_preimage_receipt_identity(metadata)) if metadata else None
+    if metadata is not None and (metadata.st_nlink != 1 or metadata.st_size > _ROLLBACK_PAYLOAD_LIMIT):
+        raise LoadError("DHCP compensation leaf owner is not bounded/single-link; HOLD")
+    state = _dhcp_restore_leaf_state(path)
+    after = path.lstat() if os.path.lexists(path) else None
+    if owner != (list(_dhcp_a_preimage_receipt_identity(after)) if after else None):
+        raise LoadError("DHCP compensation leaf owner changed during read; HOLD")
+    return None if owner is None else dict(identity=owner, state=state)
 
 
 def _setup_switch_dhcp_backup_inventory(binding):

@@ -117,7 +117,7 @@ def sha256(path: Path) -> str:
 
 def assert_private_dhcp_transaction_retention(
     api, root: Path, project: Path, outcome: str, *, reenter: bool = False,
-    setup_guard=None, a_shapes=False, publication_candidates=None,
+    setup_guard=None, a_shapes=False, publication_candidates=None, a_metadata=False,
 ) -> None:
     """Exercise real LOAD filesystem logic; never execute sudo, dhcpd or live writes."""
     root = root.resolve()
@@ -140,6 +140,9 @@ def assert_private_dhcp_transaction_retention(
         (live_dir / "dhcpd_eth.hosts").unlink()
         (live_dir / "dhcpd_eth.hosts").symlink_to("../independent-original-A-source")
         (live_dir / "dhcpd_nvl.hosts").unlink()
+    if a_metadata:
+        (live_dir / "dhcpd.conf").chmod(0o640)
+        os.utime(live_dir / "dhcpd.conf", ns=(1700000000123456789,) * 2)
     parent_payload = {"schema_version": 1, "release_id": "independent-B"}
     candidate = (api.prepare_current_release(project, parent_payload)
                  if publication_candidates is None else publication_candidates[0])
@@ -1087,7 +1090,7 @@ class ReleaseTransactionTests(unittest.TestCase):
                                                   ztp_disabled=False, seed_q_publication=False,
                                                   publication_phase="published", partial_runtime=False,
                                                   q_local=False, original_a_policy=None, original_a_images=False,
-                                                  q_created=False, dhcp=False):
+                                                  q_created=False, dhcp=False, dhcp_metadata=False):
         state, context, guard = self._prepare_q_manifest_publication(seed_q_publication=seed_q_publication,
             q_local=q_local, original_a_policy=original_a_policy, original_a_images=original_a_images,
             q_created=q_created)
@@ -1139,7 +1142,8 @@ class ReleaseTransactionTests(unittest.TestCase):
             self.addCleanup(LOAD.close_setup_switch_publication_bundle, token)
             if dhcp:
                 assert_private_dhcp_transaction_retention(LOAD, self.root, q, "bound-setup-before-write",
-                    setup_guard=guard, publication_candidates=(*candidates, token), a_shapes=True)
+                    setup_guard=guard, publication_candidates=(*candidates, token), a_shapes=True,
+                    a_metadata=dhcp_metadata)
             else:
                 LOAD.commit_prepared_release(candidates[0], require_authority=lambda:
                     LOAD.require_setup_switch_publication_bundle(token, guard=guard))
@@ -1412,6 +1416,184 @@ class ReleaseTransactionTests(unittest.TestCase):
 
     def test_committed_q_group_restore_holds_replaced_original_dhcp_backup_directory(self):
         self._committed_q_group_dhcp_backup_fault("directory")
+
+    def test_committed_q_group_restore_rejects_same_byte_restored_dhcp_owner(self):
+        self._committed_q_group_restored_dhcp_owner_fault("dhcpd.conf")
+
+    def test_committed_q_group_restore_rejects_same_target_restored_dhcp_link_owner(self):
+        self._committed_q_group_restored_dhcp_owner_fault("dhcpd_eth.hosts")
+
+    def test_committed_q_group_dhcp_restore_sync_failure_cold_reenters_original_stages(self):
+        state, _context, guard, token, _inputs = self._prepare_published_q_for_stopped_preflight(dhcp=True)
+        q, journal = state[1], state[-3]
+        runtime = self.root.resolve() / "private-etc-dhcp"
+        names = ("dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts", "dhcpd_nvl.hosts")
+        mappings = {q / "independent-dhcp-B" / name: runtime / name for name in names}
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "dhcp_file_mappings", return_value=mappings):
+            LOAD.restore_setup_switch_q_publication(q, guard=guard, confirmed=True)
+            marker = journal.parent / ".setup-switch-a-restore.json"
+            original = (journal.lstat().st_ino, journal.read_bytes(), marker.lstat().st_ino, marker.read_bytes())
+            plan = json.loads(marker.read_bytes())
+            self.assertEqual(4, plan["schema_version"])
+            self.assertEqual({str(runtime / name) for name in names}, set(plan["dhcp"]))
+            for name in names:
+                row = plan["dhcp"][str(runtime / name)]
+                if name == "dhcpd_nvl.hosts":
+                    self.assertEqual({"state": "missing"}, row["before"])
+                    self.assertIsNone(row["stage"])
+                    continue
+                path = Path(row["stage"]["path"])
+                self.assertEqual([getattr(path.lstat(), field) for field in ("st_dev", "st_ino", "st_mode",
+                    "st_uid", "st_gid", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")], row["stage"]["file"]["identity"])
+                if name == "dhcpd_eth.hosts":
+                    self.assertEqual("../independent-original-A-source", os.readlink(path))
+                else:
+                    self.assertEqual(f"independent-A:{name}\n".encode(), path.read_bytes())
+                    self.assertEqual(0o644, stat.S_IMODE(path.lstat().st_mode))
+            failed = []
+            original_sync = LOAD._fsync_parent_directory
+            def fail_consumed_stage_sync(path):
+                if Path(path) == runtime and (runtime / "dhcpd.conf").read_bytes() == b"independent-A:dhcpd.conf\n" and not failed:
+                    failed.append("original DHCP stage consumed before failed parent sync")
+                    raise OSError("independent DHCP consumed-stage directory sync failure")
+                return original_sync(path)
+            with mock.patch.object(LOAD, "_fsync_parent_directory", side_effect=fail_consumed_stage_sync):
+                with self.assertRaisesRegex(LOAD.LoadError, "HOLD.*independent DHCP|independent DHCP.*HOLD"):
+                    LOAD.restore_setup_switch_a_disk(q, guard=guard, confirmed=True)
+            self.assertEqual(1, len(failed))
+            self.assertEqual(original, (journal.lstat().st_ino, journal.read_bytes(), marker.lstat().st_ino, marker.read_bytes()))
+            first = plan["dhcp"][str(runtime / "dhcpd.conf")]["stage"]
+            self.assertFalse(os.path.lexists(first["path"]))
+            self.assertEqual(first["file"]["identity"][:8], [getattr((runtime / "dhcpd.conf").lstat(), field)
+                for field in ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink", "st_size", "st_mtime_ns")])
+            LOAD.close_setup_switch_publication_bundle(token)
+            for _ in range(2):
+                self.assertEqual("restored-p-a-group-stopped-wal-retained",
+                    LOAD.restore_setup_switch_a_disk(q, guard=guard, confirmed=True))
+            for name in names:
+                stage = plan["dhcp"][str(runtime / name)]["stage"]
+                if stage is None:
+                    self.assertFalse(os.path.lexists(runtime / name))
+                else:
+                    self.assertFalse(os.path.lexists(stage["path"]))
+                    self.assertEqual(stage["file"]["identity"][:8], [getattr((runtime / name).lstat(), field)
+                        for field in ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink", "st_size", "st_mtime_ns")])
+            self.assertEqual(original, (journal.lstat().st_ino, journal.read_bytes(), marker.lstat().st_ino, marker.read_bytes()))
+        state[-1].start.assert_not_called()
+
+    def test_committed_q_group_dhcp_stage_replacement_holds_before_p_write(self):
+        self._committed_q_group_dhcp_stage_fault(False)
+
+    def test_committed_q_group_unregistered_dhcp_stage_holds_before_p_write(self):
+        self._committed_q_group_dhcp_stage_fault(True)
+
+    def test_committed_q_group_dhcp_stage_keeps_original_nondefault_metadata(self):
+        state, _context, guard, _token, _inputs = self._prepare_published_q_for_stopped_preflight(
+            dhcp=True, dhcp_metadata=True)
+        q, runtime = state[1], self.root.resolve() / "private-etc-dhcp"
+        names = ("dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts", "dhcpd_nvl.hosts")
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "dhcp_file_mappings", return_value={
+                    q / "independent-dhcp-B" / name: runtime / name for name in names}):
+            LOAD.restore_setup_switch_a_disk(q, guard=guard, confirmed=True)
+            metadata = (runtime / "dhcpd.conf").lstat()
+            self.assertEqual(0o640, stat.S_IMODE(metadata.st_mode))
+            self.assertEqual(1700000000123456789, metadata.st_mtime_ns)
+            self.assertEqual((os.getuid(), os.getgid()), (metadata.st_uid, metadata.st_gid))
+            self.assertEqual(b"independent-A:dhcpd.conf\n", (runtime / "dhcpd.conf").read_bytes())
+
+    def test_committed_q_group_dhcp_stage_boolean_identity_holds_before_p_write(self):
+        self._committed_q_group_dhcp_plan_fault("boolean")
+
+    def test_committed_q_group_legacy_dhcp_plan_does_not_acquire_new_stages(self):
+        self._committed_q_group_dhcp_plan_fault("legacy")
+
+    def _committed_q_group_dhcp_plan_fault(self, fault):
+        state, _context, guard, _token, _inputs = self._prepare_published_q_for_stopped_preflight(dhcp=True)
+        q, journal = state[1], state[-3]
+        runtime = self.root.resolve() / "private-etc-dhcp"
+        names = ("dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts", "dhcpd_nvl.hosts")
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "dhcp_file_mappings", return_value={
+                    q / "independent-dhcp-B" / name: runtime / name for name in names}):
+            LOAD.restore_setup_switch_q_publication(q, guard=guard, confirmed=True)
+            marker = journal.parent / ".setup-switch-a-restore.json"
+            plan = json.loads(marker.read_bytes())
+            if fault == "boolean":
+                plan["dhcp"][str(runtime / "dhcpd.conf")]["stage"]["file"]["identity"][0] = True
+            else:
+                plan["schema_version"] = 3
+                del plan["dhcp"]
+            marker.write_bytes(json.dumps(plan, sort_keys=True, separators=(",", ":")).encode() + b"\n")
+            frozen = (journal.lstat().st_ino, journal.read_bytes(), marker.lstat().st_ino, marker.read_bytes(),
+                state[7].read_bytes(), os.readlink(state[2]))
+            with self.assertRaisesRegex(LOAD.LoadError, "DHCP.*stage.*owner.*HOLD|plan.*original WAL.*HOLD"):
+                LOAD.restore_setup_switch_a_disk(q, guard=guard, confirmed=True)
+            self.assertEqual(frozen, (journal.lstat().st_ino, journal.read_bytes(), marker.lstat().st_ino,
+                marker.read_bytes(), state[7].read_bytes(), os.readlink(state[2])))
+
+    def _committed_q_group_dhcp_stage_fault(self, unknown):
+        state, _context, guard, _token, _inputs = self._prepare_published_q_for_stopped_preflight(dhcp=True)
+        q, journal = state[1], state[-3]
+        runtime = self.root.resolve() / "private-etc-dhcp"
+        names = ("dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts", "dhcpd_nvl.hosts")
+        mappings = {q / "independent-dhcp-B" / name: runtime / name for name in names}
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "dhcp_file_mappings", return_value=mappings):
+            LOAD.restore_setup_switch_q_publication(q, guard=guard, confirmed=True)
+            marker = journal.parent / ".setup-switch-a-restore.json"
+            if unknown:
+                stage = runtime / (".r22-a-dhcp-" + "1" * 32)
+                stage.write_bytes(b"independent unknown stage retained\n")
+            else:
+                stage = Path(json.loads(marker.read_bytes())["dhcp"][str(runtime / "dhcpd.conf")]["stage"]["path"])
+                metadata, payload = stage.lstat(), stage.read_bytes()
+                held = self.root / "independent-held-dhcp-restore-stage"
+                stage.rename(held)
+                stage.write_bytes(payload)
+                stage.chmod(stat.S_IMODE(metadata.st_mode))
+                os.utime(stage, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
+                self.assertNotEqual(held.lstat().st_ino, stage.lstat().st_ino)
+            frozen = (journal.read_bytes(), marker.lstat().st_ino, marker.read_bytes(), state[7].read_bytes(),
+                os.readlink(state[2]), stage.lstat().st_ino, stage.read_bytes())
+            with self.assertRaisesRegex(LOAD.LoadError, "DHCP.*stage.*owner.*HOLD|unplanned.*stage.*HOLD|DHCP.*owner.*HOLD"):
+                LOAD.restore_setup_switch_a_disk(q, guard=guard, confirmed=True)
+            self.assertEqual(frozen, (journal.read_bytes(), marker.lstat().st_ino, marker.read_bytes(), state[7].read_bytes(),
+                os.readlink(state[2]), stage.lstat().st_ino, stage.read_bytes()))
+        state[-1].start.assert_not_called()
+
+    def _committed_q_group_restored_dhcp_owner_fault(self, name):
+        state, _context, guard, _token, _inputs = self._prepare_published_q_for_stopped_preflight(dhcp=True)
+        q, journal = state[1], state[-3]
+        runtime = self.root.resolve() / "private-etc-dhcp"
+        names = ("dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts", "dhcpd_nvl.hosts")
+        mappings = {q / "independent-dhcp-B" / item: runtime / item for item in names}
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "dhcp_file_mappings", return_value=mappings):
+            LOAD.restore_setup_switch_a_disk(q, guard=guard, confirmed=True)
+            marker = journal.parent / ".setup-switch-a-restore.json"
+            path, held = runtime / name, self.root / "independent-held-restored-dhcp-owner"
+            metadata = path.lstat()
+            link = path.is_symlink()
+            payload = os.readlink(path) if link else path.read_bytes()
+            path.rename(held)
+            if link:
+                path.symlink_to(payload)
+            else:
+                path.write_bytes(payload)
+                path.chmod(stat.S_IMODE(metadata.st_mode))
+            os.utime(path, ns=(metadata.st_atime_ns, metadata.st_mtime_ns), follow_symlinks=False)
+            self.assertNotEqual(held.lstat().st_ino, path.lstat().st_ino)
+            frozen = (journal.lstat().st_ino, journal.read_bytes(), marker.lstat().st_ino, marker.read_bytes(),
+                      state[7].read_bytes(), (self.ztp / "ztp-bootstrap_oob.sh").read_bytes(),
+                      path.lstat().st_ino, os.readlink(path) if link else path.read_bytes())
+            with self.assertRaisesRegex(LOAD.LoadError, "DHCP.*(owner|stage).*HOLD"):
+                LOAD.restore_setup_switch_a_disk(q, guard=guard, confirmed=True)
+            self.assertEqual(frozen, (journal.lstat().st_ino, journal.read_bytes(), marker.lstat().st_ino,
+                marker.read_bytes(), state[7].read_bytes(), (self.ztp / "ztp-bootstrap_oob.sh").read_bytes(),
+                path.lstat().st_ino, os.readlink(path) if link else path.read_bytes()))
+        state[-1].start.assert_not_called()
 
     def test_setup_wal_original_dhcp_backup_boolean_identity_is_rejected(self):
         state, _context, _guard, _token, _inputs = self._prepare_published_q_for_stopped_preflight(dhcp=True)

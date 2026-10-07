@@ -1,5 +1,57 @@
 # 脚本变更影响测试
 
+## 2026-10-08 R22 DHCP 补偿 stage 的持久归属
+
+基于 `35d1c5e`，原 DHCP 恢复仅按内容/元数据分类，冷重入错误收编已恢复文件或
+链接的同内容新 inode。独立 direct 两项和真实 LOAD→SETUP→Q 提交强杀→A 组恢复
+→新 LOAD 负例有效 RED 为 **3 FAIL / 32.380s / exit1**，完整
+`outputs/test-diagnostics/r22-restored-dhcp-owned-stage-red.log`，inode162340656 /
+size132391 / SHA256 `fa6d410beee0c0024f2de59850884862624b1708711de7b161a17dd258b03d51`；
+物理 Ran46→FAILED48→actual69→冻结一致70→END72=1。
+
+schema-4 原计划在首个补偿写前持久登记四个 DHCP 的 before、当前 B checkpoint、
+原父与 A stage（九字段 owner/独立内容元数据），未变原缺席保持 None。恢复只消费
+这些暂存，连续核原 WAL/plan/backup、原 namespace、checkpoint/stage；rename
+后仅该 stage 的合法 ctime 变化可接受。拒绝新同字节恢复文件、同目标新链接、替换
+或未知 stage、Boolean owner；旧 schema-3 DHCP 计划不得冷补清单。保持非默认
+mode/uid/gid/mtime，目录同步失败/真实 SIGKILL 后新进程继续原 inode，并再冷读一轮。
+checkpoint 仍是在原 published/receipt 验证后、首个补偿前冻结；此补偿资格不能
+冒称 B 原安装前完整候选 inode/覆盖登记，后者仍是独立未闭边界。
+
+三个原负例 GREEN **3 OK / 23.761s / exit0**，完整
+`r22-restored-dhcp-owned-stage-green.log`（inode162342772 / size129103 / SHA256
+`e558d3315951c85bd2a82469dd1581f4085a8c817948aa96504c3f6ecda4a2b2`），
+物理 Ran10→OK12→actual27→冻结一致28→END30=0。
+同步失败/未知与替换 stage/direct+真实强杀 **4 OK / 33.814s / exit0**，
+`r22-restored-dhcp-owned-stage-boundaries-green.log`（inode162344893 / size129826 /
+SHA256 `90b90d37f7886f70e66f47a778319f2e335ab9e3da082be3e46e59b5a535e925`），
+物理 Ran11→OK13→actual31→冻结一致32→END34=0。
+非默认元数据/direct+真实 workflow、Boolean 与 legacy 负例 **4 OK / 25.679s / exit0**，
+`r22-restored-dhcp-owned-stage-metadata-green.log`（inode162347223 / size129605 /
+SHA256 `8880a514292b63f01cc3f4573c7ab3ac77ed182f2eab5368ab564121a37128ce`），
+物理 Ran11→OK13→actual28→冻结一致29→END31=0。
+各日志均核读取前后 stat/inode 稳定、完整物理结尾和实际退出码，原断言/时限不变。
+最终模块回归另记；现有 manifest direct/多脚本 workflow 映射保持，不手改 ledger。
+原 B 首写 owner、旧 A 显式健康/归档、REAL_ENV 与正式 related/full/check 继续待核。
+
+最终源码/测试/manifest 冻结的三完整模块 + 14 个指定多脚本 workflow 回归
+**639 OK / 312.763s / exit0**，完整
+`outputs/test-diagnostics/r22-restored-dhcp-owned-stage-module-regression.log`，
+inode162350332 / size354348 / SHA256
+`7e606236a86efc31e67b0751d6303477da2167d45246aace86ab1a2f8b9b4139`；
+285033-byte 旧前缀 SHA256 `95b495bdbdfeafde96fc15b949dcc45f0de6a42f7c7aa9edeba221ffb46a4816`
+不变，读取前后 stat/inode 稳定，物理 Ran1870→OK1872→actual1903→
+冻结一致1904→END1906=0。这不是整个 input-binding workflow 模块的全量运行；
+新增 workflow 另有以上独立日志，正式 runner/全量证明仍待。
+
+新增四个真实 workflow 在最终同一候选再次冻结运行 **4 OK / 53.665s / exit0**，
+`outputs/test-diagnostics/r22-restored-dhcp-owned-stage-final-workflow-regression.log`，
+inode162417503 / size128936 / SHA256
+`7201bdd1c5ba4c3eab79d4ddb69686ee2749c48385e57f348b5a08dceb9290b8`，
+读前后 stat/inode 稳定，物理 Ran11→OK13→actual19→冻结一致20→END22=0。
+四项分别是原 backup owner 换绑、恢复后 live owner 换绑、stage rename 后 SIGKILL
+的两次冷恢复、非默认 DHCP 元数据。仍非正式 related/full/check。
+
 ## 2026-10-08 R22 原 DHCP backup 首写前所有权
 
 基于 `c7d5ddd`，独立 direct 与真实 LOAD→SETUP→Q 提交强杀→Q 补偿→新 LOAD
@@ -26,7 +78,8 @@ legacy 缺清单保持显式缺资格。独立普通文件/链接/目录负例�
 最终模块回归另记；本地局部 PASS 不等于正式 related/full/check，也不关闭
 live DHCP 补偿 owner、旧 A 显式健康激活/归档、root/Linux/断电/C2/DEV ACK。
 
-最终源码/测试/manifest 和治理文档冻结的四模块回归 **631 OK / 252.550s / exit0**，
+最终源码/测试/manifest 和治理文档冻结的三完整模块 + 14 个指定 workflow 回归
+**631 OK / 252.550s / exit0**，
 `outputs/test-diagnostics/r22-original-dhcp-backup-owner-module-regression.log`，
 inode162276662 / size348565 / SHA256
 `43d12192250e26bc61a66435d1594664bc11e0e20dfcd0001a44412937c3c5c1`；
