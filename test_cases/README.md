@@ -451,6 +451,10 @@ flat runtime 已可能先被改写。direct 与真实 SETUP 强杀→新 LOAD �
 key 暂存的零 P/flat 写入，以及 runtime 后核验后晚到 key 暂存阻止 WAL 退休；正常
 managed key 恢复仍保持链接、原源文件和既存权力换绑断言。这只扩大已验证 receipt 的
 暂存名围栏，不完成 YAML/prefix 全写集、B finalizer、旧 A 健康激活或 root 入口验收。
+已提交 Q group 的原 A 未变 prefix 另按首写前 WAL 的父/九字段 owner、原 marker
+payload/raw target/缺席核验；不重建正确原对象，也不收编同内容新 inode。同步前后
+持续核原资格；legacy 缺清单保持缺资格。Q 改写 prefix 的完整候选/冷补偿登记仍待，
+此窄收口不能冒称完整写集或允许原 A 服务激活。
 受 WAL authority 保护的 prefix 恢复另须拒绝旧 `.name.rollback.` 链接暂存，
 新链接复用已验证自有的随机暂存 writer；marker 保持 `.name.rollback.` 名称合同，
 复用持有 FD、fsync 前 mode/字节冻结及发布/清理前身份检查，外来暂存不发布、不删除。

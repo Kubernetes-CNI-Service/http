@@ -1190,10 +1190,10 @@ class ReleaseTransactionTests(unittest.TestCase):
                                                   ztp_disabled=False, seed_q_publication=False,
                                                   publication_phase="published", partial_runtime=False,
                                                   q_local=False, original_a_policy=None, original_a_images=False,
-                                                  q_created=False, dhcp=False, dhcp_metadata=False):
+                                                  q_created=False, dhcp=False, dhcp_metadata=False, prefix=False):
         state, context, guard = self._prepare_q_manifest_publication(seed_q_publication=seed_q_publication,
             q_local=q_local, original_a_policy=original_a_policy, original_a_images=original_a_images,
-            q_created=q_created)
+            q_created=q_created, prefix=prefix)
         q = state[1]
         for name, source in (("01-global.yaml", self.inputs.global_file),
                              ("02-devices_config.csv", self.inputs.devices_file),
@@ -1918,6 +1918,120 @@ class ReleaseTransactionTests(unittest.TestCase):
                 LOAD.restore_setup_switch_a_disk(state[1], guard=guard, confirmed=True)
             self.assertEqual(frozen, (state[-3].read_bytes(), state[7].read_bytes(), os.readlink(state[2]), path.read_bytes()))
 
+    def test_committed_q_group_preserves_original_a_prefix_owners_across_cold_reentry(self):
+        state, _context, guard, _token, _inputs = self._prepare_published_q_for_stopped_preflight(prefix=True)
+        paths = (LOAD.ZTP_PREFIX_MARKER, self.root / "r22-prefix")
+        fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+        original = {path: tuple(getattr(path.lstat(), field) for field in fields) for path in paths}
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            for _ in range(2):
+                self.assertEqual("restored-p-a-group-stopped-wal-retained",
+                    LOAD.restore_setup_switch_a_disk(state[1], guard=guard, confirmed=True))
+                self.assertEqual(original, {path: tuple(getattr(path.lstat(), field) for field in fields) for path in paths})
+
+    def test_committed_q_group_rejects_same_content_original_a_prefix_owner_before_p_write(self):
+        for marker in (True, False):
+            with self.subTest(marker=marker):
+                fixture = ReleaseTransactionTests()
+                fixture.setUp()
+                try:
+                    state, _context, guard, _token, _inputs = fixture._prepare_published_q_for_stopped_preflight(prefix=True)
+                    with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+                        LOAD.restore_setup_switch_q_publication(state[1], guard=guard, confirmed=True)
+                        path = LOAD.ZTP_PREFIX_MARKER if marker else fixture.root / "r22-prefix"
+                        metadata = path.lstat()
+                        payload = path.read_bytes() if marker else os.readlink(path)
+                        held = fixture.root / "independent-original-prefix-owner"
+                        path.rename(held)
+                        if marker:
+                            path.write_bytes(payload)
+                            path.chmod(stat.S_IMODE(metadata.st_mode))
+                        else:
+                            path.symlink_to(payload)
+                        os.utime(path, ns=(metadata.st_atime_ns, metadata.st_mtime_ns), follow_symlinks=False)
+                        self.assertNotEqual(metadata.st_ino, path.lstat().st_ino)
+                        plan = state[-3].parent / ".setup-switch-a-restore.json"
+                        frozen = (state[-3].read_bytes(), plan.read_bytes(), state[7].lstat().st_ino,
+                            state[7].read_bytes(), os.readlink(state[2]), path.lstat().st_ino)
+                        with self.assertRaisesRegex(LOAD.LoadError, "prefix.*owner.*HOLD"):
+                            LOAD.restore_setup_switch_a_disk(state[1], guard=guard, confirmed=True)
+                        self.assertEqual(frozen, (state[-3].read_bytes(), plan.read_bytes(), state[7].lstat().st_ino,
+                            state[7].read_bytes(), os.readlink(state[2]), path.lstat().st_ino))
+                        self.assertEqual(payload, path.read_bytes() if marker else os.readlink(path))
+                finally:
+                    fixture.doCleanups()
+                    fixture.tearDown()
+
+    def test_committed_q_group_original_a_prefix_owner_rechecks_after_namespace_sync(self):
+        state, _context, guard, _token, _inputs = self._prepare_published_q_for_stopped_preflight(prefix=True)
+        path, held = LOAD.ZTP_PREFIX_MARKER, self.root / "independent-held-prefix-during-sync"
+        real_sync = LOAD._fsync_parent_directory
+        replaced = []
+        def sync_and_replace(parent):
+            result = real_sync(parent)
+            if not replaced and Path(parent) == self.root:
+                metadata, payload = path.lstat(), path.read_bytes()
+                path.rename(held)
+                path.write_bytes(payload)
+                path.chmod(stat.S_IMODE(metadata.st_mode))
+                os.utime(path, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
+                replaced.append(path.lstat().st_ino)
+            return result
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            LOAD.restore_setup_switch_a_disk(state[1], guard=guard, confirmed=True)
+            original = state[-3].read_bytes()
+            with mock.patch.object(LOAD, "_fsync_parent_directory", side_effect=sync_and_replace):
+                with self.assertRaisesRegex(LOAD.LoadError, "prefix.*owner.*HOLD"):
+                    LOAD.restore_setup_switch_a_disk(state[1], guard=guard, confirmed=True)
+            self.assertEqual([path.lstat().st_ino], replaced)
+            self.assertEqual(held.read_bytes(), path.read_bytes())
+            self.assertEqual(original, state[-3].read_bytes())
+
+    def test_committed_q_group_builtin_prefix_directory_is_bound_not_recreated(self):
+        state, _context, guard, _token, _inputs = self._prepare_published_q_for_stopped_preflight()
+        # The /var alias fixture exposes the real builtin ZTP directory as an
+        # immutable non-link prefix row. Its children are restored separately.
+        before = self.ztp.lstat()
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            self.assertEqual("restored-p-a-group-stopped-wal-retained",
+                LOAD.restore_setup_switch_a_disk(state[1], guard=guard, confirmed=True))
+        after = self.ztp.lstat()
+        self.assertEqual((before.st_dev, before.st_ino, before.st_mode, before.st_uid, before.st_gid),
+                         (after.st_dev, after.st_ino, after.st_mode, after.st_uid, after.st_gid))
+
+    def test_committed_q_group_prefix_owner_legacy_and_malformed_inventories_cannot_mint_qualification(self):
+        for shape in ("legacy", "boolean", "extra", "escape"):
+            with self.subTest(shape=shape):
+                fixture = ReleaseTransactionTests()
+                fixture.setUp()
+                try:
+                    state, _context, guard, _token, _inputs = fixture._prepare_published_q_for_stopped_preflight(prefix=True)
+                    journal = state[-3]
+                    envelope = json.loads(journal.read_bytes())
+                    runtime = envelope["body"]["a_runtime"]
+                    if shape == "legacy":
+                        del runtime["prefix_owners"]
+                    elif shape == "boolean":
+                        runtime["prefix_owners"]["marker"]["leaf"]["identity"][5] = True
+                    elif shape == "extra":
+                        runtime["prefix_owners"]["adopt_current"] = True
+                    else:
+                        runtime["prefix_owners"]["marker"]["path"] += "/../unknown-marker"
+                    payload = json.dumps(envelope["body"], sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+                    envelope["sha256"] = hashlib.sha256(payload).hexdigest()
+                    journal.write_bytes(json.dumps(envelope, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode() + b"\n")
+                    frozen = (journal.read_bytes(), state[7].lstat().st_ino, state[7].read_bytes(),
+                        os.readlink(state[2]), LOAD.ZTP_PREFIX_MARKER.lstat().st_ino)
+                    with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+                        with self.assertRaisesRegex(LOAD.LoadError, "prefix|journal"):
+                            LOAD.restore_setup_switch_a_disk(state[1], guard=guard, confirmed=True)
+                    self.assertEqual(frozen, (journal.read_bytes(), state[7].lstat().st_ino, state[7].read_bytes(),
+                        os.readlink(state[2]), LOAD.ZTP_PREFIX_MARKER.lstat().st_ino))
+                    self.assertFalse(os.path.lexists(journal.parent / ".setup-switch-a-restore.json"))
+                finally:
+                    fixture.doCleanups()
+                    fixture.tearDown()
+
     def test_committed_q_group_restore_rejects_same_byte_restored_runtime_owner_on_reentry(self):
         state, _context, guard, _token, _inputs = self._prepare_published_q_for_stopped_preflight(partial_runtime=True)
         path = self.ztp / "ztp-bootstrap_oob.sh"
@@ -2582,9 +2696,9 @@ class ReleaseTransactionTests(unittest.TestCase):
         self.assertEqual(source.read_bytes(), held.read_bytes())
 
     def _prepare_q_manifest_publication(self, *, seed_q_publication=False, q_local=False,
-                                        original_a_policy=None, original_a_images=False, q_created=False):
+                                        original_a_policy=None, original_a_images=False, q_created=False, prefix=False):
         state, context = self._prepare_persisted_a_runtime_switch(seed_q_publication=seed_q_publication,
-            original_upgrade_policy=original_a_policy, original_images=original_a_images)
+            original_upgrade_policy=original_a_policy, original_images=original_a_images, prefix=prefix)
         journal, descriptor, backend = state[-3:]
         guard = dict(deployment_lock_descriptor=descriptor, services_quiesced=True, runtime_backend=backend)
         if q_local:
@@ -6137,6 +6251,13 @@ class ReleaseTransactionTests(unittest.TestCase):
     def _prepare_persisted_a_runtime_switch(self, *, managed_key=False, prefix=False,
                                           original_upgrade_policy=None, qualified_inputs=False,
                                           seed_q_publication=False, original_images=False):
+        if prefix:
+            # A marker is lexical as well as physical authority. Use the same
+            # canonical private deployment paths as the real cold LOAD child.
+            self.root, self.ztp = self.root.resolve(), self.ztp.resolve()
+            namespace = mock.patch.object(LOAD, "ZTP_DIR", self.ztp)
+            namespace.start()
+            self.addCleanup(namespace.stop)
         private_root = mock.patch.object(LOAD, "HTTP_ROOT", self.root.resolve())
         private_root.start()
         self.addCleanup(private_root.stop)

@@ -1,5 +1,53 @@
 # 脚本变更影响测试
 
+## 2026-10-08 R22 原 A prefix 未变叶子资格
+
+基于 `ff0832a`。独立 direct 和真实 LOAD→SETUP→Q 提交强杀→新 LOAD 证明：
+原 group 接受同字节 marker/同目标链接的新 inode，并重建正确原 A prefix。
+有效 RED 4 tests / 5 FAIL（包含 subTest）/ 29.023s / exit1，完整
+`outputs/test-diagnostics/r22-original-a-prefix-owner-red2.log`，inode162580137 /
+size134398 / SHA256 `0fb36515459f24860d11b3396a0814fefde873f5634b5216e965b95c13ebe044`；
+物理 Ran62→FAILED64→actual83→冻结一致84→END86=1。首轮私有 marker 使用 macOS
+别名而冷 LOAD 使用物理路径的夹具错误日志保留；修正夹具路径，不放宽 marker 合同。
+
+原 WAL 首写前增加 prefix marker/链接父与九字段 owner、原 payload/target/缺席；
+已提交 Q group 从第一补偿前到每次同步后持续核此原清单。正确原 A prefix 仅核验
+并补父同步，不重建，不按内容收编新 inode。Boolean/额外字段/路径逃逸/legacy 缺
+原清单在任何补偿前拒绝。旧 precommit guarded 恢复行为与新 group 资格分开。
+这是原 A **未变** prefix 窄收口；Q 合法改写 prefix 的候选登记、消耗与冷补偿仍待，
+该状态应 HOLD，不能以当前名称补登记资格或由此开启服务。
+
+4 项原 direct/真实 workflow 4 OK / 31.200s / exit0，完整
+`r22-original-a-prefix-owner-green.log`，inode162584626 / size129593 / SHA256
+`82e0667ce20d01e0a6faf52d5d19c1c57d9f5d9b665cd86ad36ad159200a015e`；
+物理 Ran11→OK13→actual27→冻结一致28→END30=0。
+同步换绑、闭合/legacy、真实同目标链接负例 3 OK / 15.262s / exit0，完整
+`r22-original-a-prefix-boundaries-green.log`，inode162589069 / size129754 / SHA256
+`cfb39d98a82b86f82ee5ebeaae9e63117bcdcea80ff4418af120bd416b412262`；
+物理 Ran10→OK12→actual28→冻结一致29→END31=0。读取前后 stat/inode 一致，
+原断言/时限保持；现有 manifest LOAD direct 与真实 input-binding workflow 覆盖。
+首轮三完整模块与 27 个真实 workflow 回归 660 tests / 228 ERROR / 186.796s /
+exit1，原完整 `r22-original-a-prefix-owner-module-regression.log` 保留，inode162593426 /
+size997972 / SHA256 `edf681a50a0f39e2f8d38a7f6e6b4afdea87b40e2fc7075bff3f1b1898821cb8`。
+原因是 receipt 的内置 `/ztp` 为实体目录，而新增 owner 捕获误按普通单链接文件读取；
+不是 228 个独立故障。独立实体目录 direct 先 1 ERROR / exit1，原
+`r22-original-a-prefix-builtin-red.log`（inode162662751 / size130492 / SHA256
+`53fd4b281de535c9d7847a3ca60c2a358c55e1df1b84bd7e4dc1f98f495706be`）。
+修正为原目录 dev/ino/mode/uid/gid 与原父闭合清单；授权子写会改变目录时间，
+不得因此重建或按新目录认领。原恢复断言、测试时限不变。
+实体目录与原 owner/同步换绑/legacy/direct+真实 workflow 8 OK / 50.076s / exit0，
+完整 `r22-original-a-prefix-builtin-and-owner-green.log`，inode162662859 / size133601 /
+SHA256 `541794e1bf41e839188d205a314c19763a1049996e5644a5c80bb694138f7281`；
+物理 Ran15→OK17→actual49→冻结一致50→END52=0，读取前后 stat/inode 一致。
+同一完整三模块与 27 个真实 workflow 原样复核 661 OK / 629.055s / exit0，
+完整 `outputs/test-diagnostics/r22-original-a-prefix-owner-module-regression2.log`，
+inode162677132 / size366052 / SHA256
+`23cbdf135e1dad0e16cdd19761aec62ccb2e7c6da8c4a598bb8f979e99d7b139`；
+84027-byte 旧前缀 SHA256 `92c5b0db6e285c08c29fbda284c08a9ff71c8ea45a9ea4e4f3eb4d129c47a1af`
+不变，物理 Ran1900→OK1902→actual1956→冻结一致1957→END1959=0。
+实际 exec 退出 0，完整读取前后 stat/inode 稳定；ledger 未变。正式 related/full/check
+仍另记，不以此模块证明关闭 R22 或其尚未实现的改写 prefix/原 A 激活边界。
+
 ## 2026-10-08 R22 原 DHCP B 首写候选所有权
 
 基于 `c704aea`，新 direct 和真实 LOAD→SETUP→Q 提交强杀→新 LOAD 负例均确认：

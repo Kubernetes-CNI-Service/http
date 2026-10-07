@@ -5020,13 +5020,16 @@ finally:
                                              q_local=False, q_fault=False, a_fault=None, a_image_fault=False,
                                              a_image=False, dhcp_backup_fault=False, dhcp_live_fault=False,
                                              dhcp_death=False, dhcp_metadata=False, dhcp_b_fault=False,
-                                             dhcp_legacy_fault=False):
+                                             dhcp_legacy_fault=False, prefix=False, prefix_fault=False):
         fixture = RELEASE_FIXTURE.ReleaseTransactionTests()
         fixture.setUp()
         try:
             state, context = fixture._prepare_persisted_a_runtime_switch(
                 original_upgrade_policy="enabled" if a_image_fault or a_image else None,
-                original_images=a_image_fault or a_image)
+                original_images=a_image_fault or a_image, prefix=prefix or prefix_fault)
+            original_prefix = {path: (path.lstat().st_ino, path.lstat().st_ctime_ns)
+                for path in (fixture.root / ".ztp-prefix-publication.json", fixture.root / "r22-prefix")
+                if prefix or prefix_fault}
             original_a_links = {context.project / name: (
                 (context.project / name).lstat().st_ino, (context.project / name).lstat().st_ctime_ns,
                 os.readlink(context.project / name))
@@ -5173,6 +5176,14 @@ try:
             print('R22_FOREIGN_A_LINK_REJECTED')
             sys.exit(0)
         raise AssertionError('same-target new original A link owner must not be adopted')
+    if sys.argv[5] == 'foreign-a-prefix':
+        try:
+            load.restore_setup_switch_a_disk(q, guard=guard, confirmed=True)
+        except load.LoadError as exc:
+            assert 'prefix' in str(exc) and 'owner' in str(exc) and 'HOLD' in str(exc), str(exc)
+            print('R22_FOREIGN_A_PREFIX_REJECTED')
+            sys.exit(0)
+        raise AssertionError('same-content new original A prefix owner must not be adopted')
     if sys.argv[5] == 'foreign-a-image':
         import json
         body = json.loads((root / 'ztp/.setup-switch-journal.json').read_bytes())['body']
@@ -5280,7 +5291,7 @@ finally:
                 self.assertEqual(original_wal, (journal.lstat().st_ino, journal.read_bytes()))
                 self.assertFalse(os.path.lexists(journal.parent / ".setup-switch-a-restore.json"))
                 return
-            if q_fault or a_fault or a_image_fault or dhcp_backup_fault:
+            if q_fault or a_fault or a_image_fault or dhcp_backup_fault or prefix_fault:
                 compensation = subprocess.run(argv + ["compensate-q", shape], capture_output=True,
                                               text=True, check=False, timeout=30)
                 self.assertEqual(0, compensation.returncode, compensation.stdout + compensation.stderr)
@@ -5291,25 +5302,25 @@ finally:
                     wal_body = json.loads(journal.read_bytes())["body"]
                     source = Path(wal_body["dhcp_transaction"]["body"]["backup"]["path"]) / "dhcpd.conf"
                 else:
-                    source = (root / "image/cumulus-linux-5.12.0-mlx-amd64.bin" if a_image_fault
+                    source = (root / "r22-prefix" if prefix_fault == "link" else root / ".ztp-prefix-publication.json" if prefix_fault else root / "image/cumulus-linux-5.12.0-mlx-amd64.bin" if a_image_fault
                           else context.project / a_fault if a_fault else q / "01-global.yaml")
                 held = source.with_name("independent-original-cold-Q-input")
                 metadata = source.lstat()
-                payload = os.readlink(source) if a_fault else source.read_bytes()
+                payload = os.readlink(source) if a_fault or prefix_fault == "link" else source.read_bytes()
                 if dhcp_backup_fault:
                     held = root / "independent-held-original-dhcp-backup"
                 source.rename(held)
-                if a_fault:
+                if a_fault or prefix_fault == "link":
                     source.symlink_to(payload)
                 else:
                     source.write_bytes(payload)
                     source.chmod(stat.S_IMODE(metadata.st_mode))
                     os.utime(source, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
                 frozen = (source.lstat().st_ino, state[7].lstat().st_ino, state[7].read_bytes(), os.readlink(common))
-                rejecting = subprocess.run(argv + ["foreign-dhcp-backup" if dhcp_backup_fault else "foreign-a-image" if a_image_fault else "foreign-a-link" if a_fault else "foreign-q-input", shape], capture_output=True,
+                rejecting = subprocess.run(argv + ["foreign-a-prefix" if prefix_fault else "foreign-dhcp-backup" if dhcp_backup_fault else "foreign-a-image" if a_image_fault else "foreign-a-link" if a_fault else "foreign-q-input", shape], capture_output=True,
                                            text=True, check=False, timeout=30)
                 self.assertEqual(0, rejecting.returncode, rejecting.stdout + rejecting.stderr)
-                self.assertIn("R22_FOREIGN_DHCP_BACKUP_REJECTED" if dhcp_backup_fault else "R22_FOREIGN_A_IMAGE_REJECTED" if a_image_fault else "R22_FOREIGN_A_LINK_REJECTED" if a_fault else "R22_FOREIGN_Q_INPUT_REJECTED", rejecting.stdout)
+                self.assertIn("R22_FOREIGN_A_PREFIX_REJECTED" if prefix_fault else "R22_FOREIGN_DHCP_BACKUP_REJECTED" if dhcp_backup_fault else "R22_FOREIGN_A_IMAGE_REJECTED" if a_image_fault else "R22_FOREIGN_A_LINK_REJECTED" if a_fault else "R22_FOREIGN_Q_INPUT_REJECTED", rejecting.stdout)
                 self.assertEqual(frozen, (source.lstat().st_ino, state[7].lstat().st_ino, state[7].read_bytes(), os.readlink(common)))
                 self.assertEqual(original_plan, (marker.lstat().st_ino, marker.read_bytes()))
                 self.assertEqual(original_wal, (journal.lstat().st_ino, journal.read_bytes()))
@@ -5371,6 +5382,8 @@ finally:
             self.assertEqual(original_plan, (marker.lstat().st_ino, marker.read_bytes()))
             self.assertEqual(original_a_links, {path: (path.lstat().st_ino, path.lstat().st_ctime_ns, os.readlink(path))
                                                 for path in original_a_links})
+            self.assertEqual(original_prefix, {path: (path.lstat().st_ino, path.lstat().st_ctime_ns)
+                                                for path in original_prefix})
             if q_local:
                 self.assertEqual("20261005_110000_combine", os.readlink(q / "99-output-eth/latest"))
                 self.assertEqual(b"hostname: original-Q\n", (q / "99-output-eth/20261005_110000_combine/leaf.yaml").read_bytes())
@@ -5396,6 +5409,15 @@ finally:
         finally:
             fixture.doCleanups()
             fixture.tearDown()
+
+    def test_real_setup_committed_q_group_preserves_original_a_prefix_owners(self):
+        self._real_setup_committed_q_group_restore(prefix=True)
+
+    def test_real_setup_committed_q_group_holds_same_byte_original_a_prefix_marker(self):
+        self._real_setup_committed_q_group_restore(prefix_fault=True)
+
+    def test_real_setup_committed_q_group_holds_same_target_original_a_prefix_link(self):
+        self._real_setup_committed_q_group_restore(prefix_fault="link")
 
     def test_real_setup_publication_cold_b_health_failure_stops_without_a_restore(self):
         self._real_setup_publication_writer_death("selector", b_preflight="activate-fail")

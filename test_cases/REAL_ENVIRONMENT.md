@@ -1634,6 +1634,12 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 ## TC-REAL-R22-GENERATION-INPUT-ABA-001 — 跨进程输入换代与多输出一致性
 
+本地原 A 未变 prefix 已增加首写前 marker/链接父与九字段 owner、原内容/缺席及
+group 同步前后核验；正确对象不重建，同内容换绑、Boolean/未知字段/legacy 缺
+资格拒绝。独立 direct 与真实 LOAD→SETUP→强杀→新 LOAD 是本地回归，不是本卡
+通过；Q 改写 prefix 的完整候选/冷补偿链、旧 A 显式健康激活/归档、Linux/root/
+断电/C2/DEV ACK 仍 OPEN。保留原 WAL/plan/外来对象，不自动清理或启动服务。
+
 - 2026-10-08 原 DHCP B 首写候选所有权续补：仅沿本卡隔离 VM、精确版本、排他锁、停服、其它写者静默、独立控制台及 root-only 可恢复快照前提见证。首个 B 覆盖前独立记录四个原 A live 与 B/A 候选 FD/name/父目录/九字段 owner/模式/uid/gid/mtime/SHA、原链接文字与缺席，核原 WAL 已持久登记；实际 B 覆盖及未提交 A 恢复只消费原候选 inode。候选 fsync、WAL 登记 fsync、原 A 捕获后或 B rename 后，受控保留原对象并换入同字节新 inode，须 HOLD、零后续未授权写入/服务启动/原证据清理。原 writer 在首/末 B rename 后强杀，新 LOAD 只消费原 A 候选并补目录同步，不从现名补登记；legacy 缺清单不获新的 Q/P/A 补偿资格。封存前后 owner、候选消耗、完整物理 END/exit、每次写/同步顺序与断电独立见证。清理仅负责人恢复已核隔离快照，不在 live 注入、不删未知对象/原 WAL/backup/receipt；旧 A 显式健康激活/归档、root/Linux/断电/C2/DEV ACK 仍 OPEN，本地进程 SIGKILL 不是本卡通过。
 
 - 2026-10-08 DHCP 补偿 stage 持久归属续补：沿本卡隔离 VM、精确版本、独立控制台、排他锁、停服、其它写者静默和可恢复快照前提，首个补偿写前见证 schema-4 原计划登记 DHCP 四前像、当前 B checkpoint、原父及 A 暂存 FD/name/九字段 owner/元数据/SHA。在原 stage rename 后、父同步前受控强杀或同步失败；冷读只能继续原 inode，保留原 mode/uid/gid/mtime、链接文字及缺席，不造新 stage/plan、不删 WAL/backup/receipt。另受控换入同字节恢复文件、同目标链接、替换/未知 stage，须在下一 P/A 写前 HOLD、保留未知对象、零服务启动；legacy DHCP plan 不补登记。保存完整 END/exit、原/新 owner 和写/同步物理顺序。清理仅人工恢复本卡已核隔离快照，不在 live 注入、不删除原证据。此阶段不替代 B 原安装前候选 inode 登记；旧 A 显式健康/归档、root/Linux/断电/C2/DEV ACK 尚未见证，本卡 OPEN。

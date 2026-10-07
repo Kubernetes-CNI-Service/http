@@ -6593,10 +6593,12 @@ def _decode_setup_switch_journal(payload: bytes) -> dict[str, object]:
         runtime = body["a_runtime"]
         runtime_fields = {"selector_target", "receipt_directory", "receipt_parent", "receipt_file",
                           "yaml_link_parents"}
-        for inventory in ("generation", "receipt_inventory", "selector_owner", "yaml_link_owners"):
+        for inventory in ("generation", "receipt_inventory", "selector_owner", "yaml_link_owners", "prefix_owners"):
             if isinstance(runtime, dict) and inventory in runtime:
                 runtime_fields.add(inventory)
         exact_fields(runtime, runtime_fields, "A runtime")
+        if "prefix_owners" in runtime:
+            _validate_setup_switch_a_prefix_owners(runtime["prefix_owners"])
         def a_leaf_owner(owner):
             if owner is None:
                 return
@@ -7395,6 +7397,7 @@ def _setup_switch_a_compensation_authority(project, *, guard, confirmed,
                            for key in ("old_project", "new_project"))):
                 raise LoadError("A compensation original WAL/root/P/Q owner changed; HOLD")
             _setup_switch_runtime_context(body, require_original_yaml_owner=True)
+            _require_setup_switch_a_prefix_owners(body)
             if "dhcp_transaction" in body:
                 _require_setup_switch_dhcp_backup_inventory(body["dhcp_transaction"])
         def shared_authority():
@@ -8455,9 +8458,121 @@ def _setup_switch_a_generation_authority(context):
     return dict(path=str(generation), parent=parent_owner, tree=tree)
 
 
+def _validate_setup_switch_a_prefix_owners(inventory):
+    """Closed original prefix evidence; never convert a cold observation into ownership."""
+    if not isinstance(inventory, dict) or set(inventory) != {"marker", "links"}:
+        raise ValueError("invalid original A prefix owner inventory")
+    links = inventory["links"]
+    if not isinstance(links, dict) or len(links) > 32:
+        raise ValueError("invalid original A prefix link inventory")
+    rows = [(inventory["marker"], False)] + [(row, True) for row in links.values()]
+    for row, link in rows:
+        if not isinstance(row, dict) or set(row) != {"path", "parent", "leaf"}:
+            raise ValueError("invalid original A prefix owner row")
+        parent = row["parent"]
+        path = row["path"]
+        if (not isinstance(path, str) or not Path(path).is_absolute() or os.path.normpath(path) != path
+                or not isinstance(parent, dict) or set(parent) != {"path", "dev", "ino"}
+                or parent["path"] != str(Path(path).parent)
+                or any(type(parent[key]) is not int or parent[key] < 0 for key in ("dev", "ino"))):
+            raise ValueError("invalid original A prefix parent owner")
+        leaf = row["leaf"]
+        if leaf is None:
+            continue
+        if not isinstance(leaf, dict):
+            raise ValueError("invalid original A prefix leaf owner")
+        if link and set(leaf) == {"directory"}:
+            directory = leaf["directory"]
+            if (not isinstance(directory, dict) or set(directory) != {"path", "dev", "ino", "mode", "uid", "gid"}
+                    or directory["path"] != path
+                    or any(type(directory[key]) is not int or directory[key] < 0
+                           for key in ("dev", "ino", "mode", "uid", "gid"))
+                    or not stat.S_ISDIR(directory["mode"])):
+                raise ValueError("invalid original A prefix directory owner")
+            continue
+        is_link = link and "target" in leaf
+        fields = {"identity", "target"} if is_link else {"identity", "payload", "sha256", "mode"}
+        if (not isinstance(leaf, dict) or set(leaf) != fields
+                or not isinstance(leaf["identity"], list) or len(leaf["identity"]) != 9
+                or any(type(value) is not int or value < 0 for value in leaf["identity"])
+                or leaf["identity"][5] != 1
+                or not (stat.S_ISLNK(leaf["identity"][2]) if is_link else stat.S_ISREG(leaf["identity"][2]))):
+            raise ValueError("invalid original A prefix leaf owner")
+        if is_link:
+            if not isinstance(leaf["target"], str) or not leaf["target"] or len(leaf["target"].encode()) > 4096:
+                raise ValueError("invalid original A prefix target")
+        elif (type(leaf["mode"]) is not int or leaf["mode"] != stat.S_IMODE(leaf["identity"][2])
+                or not isinstance(leaf["payload"], str) or len(leaf["payload"]) > _ROLLBACK_MARKER_LIMIT * 2
+                or not isinstance(leaf["sha256"], str) or re.fullmatch(r"[0-9a-f]{64}", leaf["sha256"]) is None
+                or hashlib.sha256(base64.b64decode(leaf["payload"], validate=True)).hexdigest() != leaf["sha256"]):
+            raise ValueError("invalid original A prefix marker payload")
+    if any(name != row["path"] for name, row in links.items()):
+        raise ValueError("invalid original A prefix link name")
+
+
+def _setup_switch_a_prefix_owners(receipt):
+    record = receipt["prefix"]
+    def capture(path, *, other=False):
+        path = Path(path).parent.resolve(strict=True) / Path(path).name
+        path.relative_to(HTTP_ROOT.resolve(strict=True))
+        parent = _setup_switch_link_parent_identity(path)
+        if other and path.is_dir() and not path.is_symlink():
+            # Builtin /ztp is a real namespace, not a replaceable leaf. Its
+            # authorized child mutations change directory times, not owner.
+            before = path.lstat()
+            directory = _setup_switch_directory_identity(path)
+            directory.update(mode=before.st_mode, uid=before.st_uid, gid=before.st_gid)
+            after = path.lstat()
+            if any(getattr(before, key) != getattr(after, key)
+                   for key in ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid")):
+                raise LoadError("original A prefix directory owner changed during capture; HOLD")
+            leaf = dict(directory=directory)
+        else:
+            leaf = _setup_switch_compensation_leaf(path)
+        if parent != _setup_switch_link_parent_identity(path):
+            raise LoadError("original A prefix parent owner changed during capture; HOLD")
+        return dict(path=str(path), parent=parent, leaf=leaf)
+    marker = capture(ZTP_PREFIX_MARKER)
+    expected = record["marker_b64"]
+    if ((marker["leaf"] is None) != (expected is None)
+            or marker["leaf"] is not None and marker["leaf"].get("payload") != expected):
+        raise LoadError("original A prefix marker owner/preimage differs; HOLD")
+    links = {}
+    for relative, original in record["links"].items():
+        row = capture(HTTP_ROOT / relative, other=original["kind"] == "other")
+        leaf = row["leaf"]
+        if (original["kind"] not in {"missing", "link", "other"}
+                or original["kind"] == "missing" and leaf is not None
+                or original["kind"] == "other" and (leaf is None or "target" in leaf)
+                or original["kind"] == "link" and (leaf is None
+                    or set(leaf) != {"identity", "target"} or leaf["target"] != original["target"])):
+            raise LoadError("original A prefix link owner/preimage differs; HOLD")
+        links[row["path"]] = row
+    result = dict(marker=marker, links=links)
+    _validate_setup_switch_a_prefix_owners(result)
+    return result
+
+
+def _require_setup_switch_a_prefix_owners(body):
+    runtime = body.get("a_runtime")
+    if runtime is None:
+        return
+    inventory = runtime.get("prefix_owners")
+    if inventory is None:
+        raise LoadError("original A prefix owner qualification was not registered; HOLD")
+    try:
+        _validate_setup_switch_a_prefix_owners(inventory)
+        context = _setup_switch_runtime_context(body)
+        receipt = _load_runtime_rollback_receipt(context.project, context.runtime_receipt)
+        if _setup_switch_a_prefix_owners(receipt) != inventory:
+            raise LoadError("original A prefix owner differs from original WAL; HOLD")
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        raise LoadError(f"original A prefix owner is invalid; HOLD: {exc}") from exc
+
+
 def _setup_switch_runtime_authority(context, *, verify_active=False, include_generation=True,
                                     include_receipt_inventory=True, include_selector_owner=True,
-                                    include_yaml_link_owners=True):
+                                    include_yaml_link_owners=True, include_prefix_owners=True):
     """Freeze the exact A receipt owner, never infer A from a newest directory."""
     try:
         project = context.project.resolve(strict=True)
@@ -8518,6 +8633,8 @@ def _setup_switch_runtime_authority(context, *, verify_active=False, include_gen
                     raise ValueError("A YAML latest no longer names original state")
                 owners[relative] = owner
             result["yaml_link_owners"] = owners
+        if include_prefix_owners:
+            result["prefix_owners"] = _setup_switch_a_prefix_owners(receipt)
         return result
     except (OSError, RuntimeError, ValueError, TypeError, KeyError, LoadError) as exc:
         raise LoadError(f"setup switch A runtime authority is invalid: {exc}") from exc
@@ -8545,12 +8662,14 @@ def _setup_switch_runtime_context(body, state=None, *, require_original_yaml_own
         # guarded helper. Original leaf owners qualify committed-Q group/A
         # activation instead; those paths never rewrite an unchanged A leaf.
         expected = dict(record)
+        expected.pop("prefix_owners", None)  # Mutating Q prefix needs separate original group qualification.
         if not require_original_yaml_owner:
             expected.pop("yaml_link_owners", None)
         if _setup_switch_runtime_authority(context, include_generation="generation" in record,
                 include_receipt_inventory="receipt_inventory" in record,
                 include_selector_owner="selector_owner" in record,
-                include_yaml_link_owners=require_original_yaml_owner and "yaml_link_owners" in record) != expected:
+                include_yaml_link_owners=require_original_yaml_owner and "yaml_link_owners" in record,
+                include_prefix_owners=False) != expected:
             raise ValueError("A receipt owner or bytes differ from WAL")
         return context
     except (OSError, ValueError, TypeError, KeyError, LoadError) as exc:
@@ -10676,6 +10795,7 @@ def _recover_setup_switch_journal_snapshot(
                 _require_authority=require_authority,
                 _restore_file=a_compensation["restore_runtime_leaf"] if a_compensation is not None else None,
                 _original_yaml_owners=body["a_runtime"].get("yaml_link_owners") if a_compensation is not None else None,
+                _original_prefix_owners=body["a_runtime"].get("prefix_owners") if a_compensation is not None else None,
             )
             _require_runtime_restore_guard(**runtime_restore_guard)
 
@@ -11107,6 +11227,7 @@ def restore_runtime_rollback_receipt(
     _require_authority: Callable[[], None] | None = None,
     _restore_file: Callable[..., None] | None = None,
     _original_yaml_owners=None,
+    _original_prefix_owners=None,
 ) -> None:
     """Restore A after an uncommitted B generation failure, then verify all.
 
@@ -11243,7 +11364,21 @@ def restore_runtime_rollback_receipt(
                          for relative, owner in _original_yaml_owners.items()}
                         if _original_yaml_owners is not None else None), **authority_guard)
     if prefix_snapshot.links or prefix_snapshot.marker is not None:
-        restore_ztp_prefix_publication(prefix_snapshot, **authority_guard)
+        if _original_prefix_owners is not None:
+            # This qualified path is a no-op for original A owners. A changed
+            # Q prefix needs a separately registered write/stage inventory;
+            # content equality alone never licenses replacement or deletion.
+            _validate_setup_switch_a_prefix_owners(_original_prefix_owners)
+            if _setup_switch_a_prefix_owners(receipt) != _original_prefix_owners:
+                raise LoadError("original A prefix owner changed before restore; HOLD")
+            for row in [_original_prefix_owners["marker"], *_original_prefix_owners["links"].values()]:
+                if _require_authority is not None:
+                    _require_authority()
+                _fsync_parent_directory(Path(row["parent"]["path"]))
+                if _setup_switch_a_prefix_owners(receipt) != _original_prefix_owners:
+                    raise LoadError("original A prefix owner changed during namespace sync; HOLD")
+        else:
+            restore_ztp_prefix_publication(prefix_snapshot, **authority_guard)
 
     # A multi-path restore is not an atomic selector switch.  Report success
     # only after every surface and the unchanged selector have been rechecked.
