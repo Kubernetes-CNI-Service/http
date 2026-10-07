@@ -24,7 +24,7 @@
       "root-entrypoint-workflow": "NOT COVERED (requires Linux EUID 0 private namespace)"
     },
     "schema_version": 1,
-    "snapshot_sha256": "df8b386c2b96b1867574363a512a749743fb41906eca12223837b034a814887d",
+    "snapshot_sha256": "6dccb3ac9821bf81154e809b52dcceb31d6fe22013a7b90c8318f6684a4fa273",
     "validation_only": {
       "baseline_skipped_tests": [
         "test_cases.test_docker_management_ssh_key.DockerManagementSshKeyWorkflowTests.test_real_deploy_entrypoint_drives_locked_helper_then_11_load",
@@ -41,7 +41,7 @@
       "not_a_release_proof": true
     }
   },
-  "impact_manifest_sha256": "c4dc04b4715d7c5a5a52cda96642300d00f0bb0ef392d95a0045d7ceddffca35",
+  "impact_manifest_sha256": "4670e9a03fd8943a31ff69f4b4c4d4d1778d7f5129e802c5e943dc8ada9c2304",
   "schema_version": 1,
   "scripts": {
     "DAY0-Prepare/01-a-setup.py": {
@@ -662,7 +662,7 @@
     },
     "ztp/config_sync_authority.py": {
       "canonical": "ztp/config_sync_authority.py",
-      "sha256": "10d133e687994c9e1853946d3ce6600c9ea70161bd008018acb237eef87c1419"
+      "sha256": "1ac989efe753c43b6f5f7964d8db6e1225bddd720daede404d6e41ae8fc4e667"
     },
     "ztp/dhcp_runtime_inventory.py": {
       "canonical": "ztp/dhcp_runtime_inventory.py",
@@ -760,7 +760,7 @@
     "infra/infra-neutral.conf": "238bec3c9be34fc5a7bf097e36012133da4a30b90cabdf17d758796ecdab24f8",
     "requirements-container-top-level.lock": "3532f5208b462243bab779b01eb4deb21638ac05a9390c17ac997ba8d7f24998",
     "requirements-dev.txt": "2047cfeb6e7d7c3b02380624cd212528fb8416cf3e76dd924d2e2cba8567a50a",
-    "test_cases/REAL_ENVIRONMENT.md": "cfbab8677c085f59aac9318d296bdf1ce8287444c6952480de15c991dbba3596",
+    "test_cases/REAL_ENVIRONMENT.md": "f2ac3ea24d9cacaa38dcc06ef60ff5614682c744a2de5dfe0f80627f71df138e",
     "test_cases/audit_public_tree.py": "3c9cefbabdb0eb7816201c67f5c98ac715b1cd8ea81720b6a24659bdaaebfc0f",
     "test_cases/module_loader.py": "ef1e9b44f0272209378788ed6682b8a6a68c95a76a6d545c001ddc4762471ecf",
     "test_cases/monitor_authority_root_warden.py": "f4ac61acc04af33168aa01ba295a74fe036202b9179ad65f10e9db87375a2c4c",
@@ -834,8 +834,8 @@
     "test_cases.test_collection_v2_emitter_contract": "b8bdeeea46e8e6803af69fc27e78c7bc809d2b8b9251bf6d49d60d480081821e",
     "test_cases.test_collector_inventory_pubkey": "e7ba6ebe5f7e17446c2db9eaf0a91ebac09e93b5f35a2b3af340fe3369e1f791",
     "test_cases.test_collector_inventory_pubkey_workflow": "f8aea67074085b49488e58959382e6762d38a4ec3c76b5d94b684d46657d20f5",
-    "test_cases.test_config_sync_authority": "fe961a4c8f798c2055612f804054d2b536aae2fceb9fb6489214588953789edf",
-    "test_cases.test_config_sync_authority_workflow": "9ee39a31d4115e0c85c600547f56ea8c264743fe53e8a42544a266f73102d8a2",
+    "test_cases.test_config_sync_authority": "2bd9f5317c07393a19b2b8c5332788bbec3489d7bc9c1c5db8b456f6ae5847bf",
+    "test_cases.test_config_sync_authority_workflow": "37f2a873a7687da475ed1b32c02eb2f2c828efe68a50fdff44a76aeabaed690c",
     "test_cases.test_continuous_interval_handoff_workflow": "bbeeba908269873df3c6ecae9fd8860cf1acca7c6dd45787d24be52109613c4d",
     "test_cases.test_control_auth": "da27975ed095e2c7e88d32f4fd1cf0352a050541a6750b3548b3e5dffa6f092c",
     "test_cases.test_cumulus_snippet_rendering": "a9dc63b808ad3dce40f8ec831bc2ab1b50b5cfdec095280ea1511ec99b1f225c",
@@ -966,7 +966,7 @@
     "test_cases.test_req10b_global_link_contract": "48fc1067d97ea89ee90c66b5350df98827c91cece1fb557bd6cc81bfb8f9395f",
     "test_cases.test_req10b_global_link_workflow": "a5a8521ba84b140f1cd89384964bc04a2e5bcc68d74f91700c5f10ab20681d27",
     "test_cases.test_req10b_services_keys_contract": "b3124ff5e9c0e9c5dbb3d3e3e5e48b0df421cf00fed1c878dbcaa0442b0a14a9",
-    "test_cases.test_req10b_services_keys_workflow": "3541a8b15cc77f4e3f798084a335f09622e18f75da8991b657892e2accf161b0",
+    "test_cases.test_req10b_services_keys_workflow": "1a053caac9793f27cb04d1a2d2ceef4c187fc02f17018f670b7cf7e4649ddce0",
     "test_cases.test_req10c_auto_contract": "ba4b6f85e089160eab61725dba6f85bd1add07f9db8c40f271d830f0c9bb4f64",
     "test_cases.test_req10c_auto_workflow": "42da3b376a473575974b5fad24dac0c31f5466ae723d0e5769a0af92220451fd",
     "test_cases.test_req14_active_provenance_workflow": "23fceb66c4ce89b30f3cdf34fa1fad205912a83dddd8fb0b6e51b46f7d22474a",
