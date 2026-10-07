@@ -2192,6 +2192,10 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - 证据：精确 HEAD/tree/dirty/diff/manifest/Python/平台、执行命令与退出码、前后 stat/inode/大小/SHA256、完整 END 与物理顺序、两份 RAW 摘要、实际 owner/nonce 原绑定、每个屏障、冷进程和 UNKNOWN 原编号见证；不输出凭据或私有业务正文。
 - 清理与风险：只恢复另行授权的隔离副本，保留所有 UNKNOWN 原像／预留／fence；不删除真实 state、不向外部 PID 发信号、不安装或发布。真实断电、卷回滚、在线并发编辑与认证来源保持 NOT RUN。
 
+本卡的新增本地联测还须证明：实际冻结 batch 的每个新增 key/NV 与原始预留集合一致，
+两份 nonce 原绑定保持；混合 update 不触碰 A。缺项、换号、外来键／nonce、不同
+generation/publish 及 UNKNOWN 下改 action/wire 均 HOLD，不计作 COMPLETE 或线上通过。
+
 ## TC-REAL-REQ7-DURABLE-ATTEMPT-JOURNAL-001 — 意图先落盘与跨重启总计数
 
 - Case ID：`TC-REAL-REQ7-DURABLE-ATTEMPT-JOURNAL-001`；类型：real-environment / durable transaction；对应 C-6/C-14/C-19。状态：**NOT RUN / REAL_ENV REQUIRED**。`monitor/issue_tracker_attempt_journal.py` 是未安装的保守本地证据库；direct 与实际 C-6 owner → literal encoder → 意图 journal → 后续拒绝观察，以及真实私有子进程退出／重启 workflow，不证明实际断电或六次真实网络尝试上界。

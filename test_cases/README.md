@@ -915,6 +915,10 @@ ETH/IB RAW、原绑定和预留记录的十个图像屏障完成后才写 INITIA
 重新解码原像并保持同一编号，UNKNOWN 后不换号，既有全局 journal 阻止新预留。
 这是未安装的单个 pending 单元保守预留，不是完整跨单元结算、行容量／metadata
 预留、新鲜准入、来源鉴别、COMPLETE 或发送许可；真机卡 NOT RUN。
+实际冻结 batch 的每个新增 Cabling 行须与原始 key/NV 集合逐项一致，并重新经
+literal encoder 校验；混合 update 不触碰既有 A。缺项、换号、别的 generation／publish、
+外来业务键或 nonce HOLD；global journal 存在后还须匹配原 action/wire，不能用相同
+编号重建不同 UNKNOWN 请求。三者同时匹配仍不是发送能力或 COMPLETE。
 
 原始 enrollment journal 的 sheet ID 必须保持 native int；即使 NONCES／HEADER／
 INITIALIZED 被一致重哈希，bool 或浮点数的 Python 相等别名仍 HOLD，不自动修复。

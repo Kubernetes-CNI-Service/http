@@ -168,3 +168,82 @@ def inspect_nv_reservation(token, binding, identity, *, generation_id, publish_i
             except OSError: failed = True
     if failed: raise NvReservationHold()
     return result
+
+
+def _literal_image(item, target):
+    """Re-encode actual business requests; never trust a matching A alone."""
+    from monitor.issue_tracker_online_cells import encode_tool_cells
+    from monitor.issue_tracker_sheets_read_decode import _letter
+    values = {}; row_index = None
+    for request in item['requests']:
+        if item['action'] == 'insert':
+            if len(item['requests']) != 1 or set(request) != {'appendCells'}: raise NvReservationHold()
+            body = request['appendCells']; start = 0
+            if set(body) != {'sheetId', 'rows', 'fields'} or type(body['sheetId']) is not int or body['sheetId'] != target['sheet_id']:
+                raise NvReservationHold()
+        elif item['action'] == 'update':
+            if set(request) != {'updateCells'}: raise NvReservationHold()
+            body = request['updateCells']
+            if set(body) != {'start', 'rows', 'fields'}: raise NvReservationHold()
+            origin = body['start']
+            if (type(origin) is not dict or set(origin) != {'sheetId', 'rowIndex', 'columnIndex'}
+                    or any(type(origin[key]) is not int for key in origin)
+                    or origin['sheetId'] != target['sheet_id'] or not 0 <= origin['columnIndex'] <= 28
+                    or row_index is not None and row_index != origin['rowIndex']): raise NvReservationHold()
+            row_index = origin['rowIndex']; start = origin['columnIndex']
+        else: raise NvReservationHold()
+        if (body['fields'] != 'userEnteredValue' or type(body['rows']) is not list or len(body['rows']) != 1
+                or type(body['rows'][0]) is not dict or set(body['rows'][0]) != {'values'}): raise NvReservationHold()
+        cells = body['rows'][0]['values']
+        if type(cells) is not list or not 1 <= len(cells) <= 29 or start + len(cells) > 29: raise NvReservationHold()
+        for offset, cell in enumerate(cells):
+            if type(cell) is not dict: raise NvReservationHold()
+            if not cell and item['action'] == 'insert': continue
+            if set(cell) != {'userEnteredValue'}: raise NvReservationHold()
+            entered = cell['userEnteredValue']
+            if type(entered) is not dict or set(entered) != {'stringValue'} or type(entered['stringValue']) is not str:
+                raise NvReservationHold()
+            column = _letter(start + offset)
+            if column in values: raise NvReservationHold()
+            values[column] = entered['stringValue']
+    candidate = encode_tool_cells(target['sheet'], target['sheet_id'], item['action'], values, row_index=row_index)
+    if json.loads(candidate.requests_json) != item['requests'] or candidate.intended_sha256 != item['intended_sha256']:
+        raise NvReservationHold()
+    return values
+
+
+def require_unit_nv_reservation(token, binding, identity, unit):
+    """Bind all actual Cabling inserts to original IDs; no send capability.
+
+Every business image is independently re-encoded, including updates (which
+cannot touch A). All inserts must use exactly the journal's original key/ID
+set and original nonces. A present global journal must bind this exact wire
+and action, so UNKNOWN cannot rebuild a different payload with the same IDs.
+Units with no inserts have no allocation to validate here and remain HOLD.
+"""
+    failed = False
+    try:
+        from monitor.issue_tracker_send_intent import _projection
+        from monitor.issue_tracker_global_attempt_journal import inspect_global_unit
+        _projection(unit); enrollment.require_unit_enrollment(token, binding, identity, unit)
+        action = json.loads(unit.action_preimage); target = action['identity']
+        if target['sheet'] not in _FAMILIES: raise NvReservationHold()
+        inserted = []
+        for item in action['business']:
+            values = _literal_image(item, target)
+            if item['action'] == 'insert':
+                key = allocator._key(tuple(item['activity_key']))
+                if (key[0] != _FAMILIES[target['sheet']] or (values['K'], values['L'], values['F']) != key[1:]):
+                    raise NvReservationHold()
+                inserted.append((key, values['A']))
+        keys = tuple(key for key, _identifier in inserted)
+        result = inspect_nv_reservation(token, binding, identity, generation_id=target['generation_id'],
+            publish_id=target['publish_id'], sheet=target['sheet'], requested_keys=keys)
+        if result.unit_id != unit.unit_id or tuple(sorted(inserted)) != result.reservations: raise NvReservationHold()
+        owner = ownership._validated_owner(token, binding)
+        if owner.lock_name[:-5] + '.journal' in os.listdir(owner.directories[-1][0]):
+            inspect_global_unit(token, binding, unit)
+        ownership._validated_owner(token, binding)
+    except Exception: failed = True
+    if failed: raise NvReservationHold()
+    return result

@@ -41,6 +41,24 @@ def source(sheet, identifiers):
     return grids.response(item)
 
 
+def cabling_inputs(nonces, *, identifiers=('NV30102', 'NV30103')):
+    from test_cases.test_req7_send_unit import inputs
+    args = inputs(); operations = []; business = []
+    for index, (key, identifier) in enumerate(zip(KEYS, identifiers)):
+        operation_id = 'eth_cabling:%04d' % index
+        operations.append({'operation_id': operation_id, 'activity_key': list(key), 'action': 'upsert'})
+        values = {letter: '' for letter in ('A', 'B', 'C', 'D', 'E', 'F', 'G', 'K', 'L', 'M', 'N', 'Q', 'R', 'S', 'T', 'U')}
+        values.update(A=identifier, E='ETH', F=key[3], G='literal evidence', K=key[1], L=key[2], U='New')
+        business.append({'operation_id': operation_id, 'action': 'insert', 'row_index': None, 'values': values,
+            'observed_values': None, 'recorded_at_utc': '2026-10-08T10:00:00Z'})
+    manifest = (json.dumps({'schema_version': 1, 'operations': operations}, sort_keys=True, separators=(',', ':')) + '\n').encode()
+    original = {title: (sid, nonce) for title, sid, nonce in nonces}
+    args.update(manifest=manifest, manifest_id=hashlib.sha256(manifest).hexdigest(), generation_id='c' * 64,
+        publish_id='d' * 64, sheet='ETH Cabling', sheet_id=102, history_sheet_id=105,
+        target_nonce=original['ETH Cabling'][1], history_nonce=original['Update_History'][1], business=tuple(business))
+    return args
+
+
 class Req7NvReservationDirectTests(unittest.TestCase):
     def setUp(self):
         enrollment_tests.Req7EnrollmentJournalDirectTests.setUp(self)
@@ -180,12 +198,90 @@ class Req7NvReservationDirectTests(unittest.TestCase):
             (self.store / 'RESERVATIONS').chmod(0o600)
         with fixture(self.root), self.assertRaises(self.module.NvReservationHold): self.inspect(token)
 
+    def test_actual_compiled_insert_unit_must_use_every_original_reserved_id_and_nonce(self):
+        self.module = load()
+        self.assertTrue(hasattr(self.module, 'require_unit_nv_reservation'), 'durable NV-to-actual-batch binding missing')
+        from monitor.issue_tracker_send_unit import freeze_send_unit
+        with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
+            original = self.initialize(token); expected = self.reserve(token)
+            args = cabling_inputs(original.nonces); unit = freeze_send_unit(**args)
+            observed = self.module.require_unit_nv_reservation(token, binding(), self.identity, unit)
+            self.assertEqual(expected, observed); self.assertEqual(unit.unit_id, observed.unit_id)
+            for identifiers in (('NV30104', 'NV30103'), ('NV30102', 'NV30102'), ('NV30016', 'NV30103')):
+                with self.assertRaises(self.module.NvReservationHold):
+                    self.module.require_unit_nv_reservation(token, binding(), self.identity,
+                        freeze_send_unit(**cabling_inputs(original.nonces, identifiers=identifiers)))
+            for changes in ({'publish_id': 'f' * 64}, {'generation_id': 'f' * 64}, {'target_nonce': 'f' * 64},
+                            {'history_nonce': 'f' * 64}, {'sheet_id': 103}, {'history_sheet_id': 104}):
+                altered = dict(args); altered.update(changes)
+                with self.assertRaises(self.module.NvReservationHold):
+                    self.module.require_unit_nv_reservation(token, binding(), self.identity, freeze_send_unit(**altered))
+            before = {path.name: path.read_bytes() for path in self.store.iterdir()}
+            altered = dict(args); altered['business'] = args['business'][:1]
+            document = json.loads(args['manifest']); document['operations'] = document['operations'][:1]
+            altered['manifest'] = (json.dumps(document, sort_keys=True, separators=(',', ':')) + '\n').encode()
+            altered['manifest_id'] = hashlib.sha256(altered['manifest']).hexdigest()
+            with self.assertRaises(self.module.NvReservationHold):
+                self.module.require_unit_nv_reservation(token, binding(), self.identity, freeze_send_unit(**altered))
+            self.assertEqual(before, {path.name: path.read_bytes() for path in self.store.iterdir()})
+
+    def test_coherent_compiler_cannot_attach_foreign_activity_key_to_reserved_literal_id(self):
+        self.module = load()
+        self.assertTrue(hasattr(self.module, 'require_unit_nv_reservation'), 'durable NV-to-actual-batch binding missing')
+        from monitor.issue_tracker_send_unit import freeze_send_unit
+        with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
+            original = self.initialize(token); self.reserve(token); args = cabling_inputs(original.nonces)
+            args['business'][0]['values']['K'] = 'foreign-node'
+            with self.assertRaises(self.module.NvReservationHold):
+                self.module.require_unit_nv_reservation(token, binding(), self.identity, freeze_send_unit(**args))
+        with fixture(self.root), self.assertRaises(self.module.NvReservationHold):
+            self.module.require_unit_nv_reservation(token, binding(), self.identity, freeze_send_unit(**args))
+
+    def test_mixed_literal_updates_do_not_consume_ids_or_write_existing_a_column(self):
+        self.module = load()
+        from monitor.issue_tracker_send_unit import freeze_send_unit
+        with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
+            original = self.initialize(token); expected = self.reserve(token); args = cabling_inputs(original.nonces)
+            document = json.loads(args['manifest'])
+            document['operations'].append({'operation_id': 'eth_cabling:existing',
+                'activity_key': ['eth_cabling', 'switch-1', 'swp9', 'Link Down'], 'action': 'upsert'})
+            args['manifest'] = (json.dumps(document, sort_keys=True, separators=(',', ':')) + '\n').encode()
+            args['manifest_id'] = hashlib.sha256(args['manifest']).hexdigest()
+            update = {'operation_id': 'eth_cabling:existing', 'action': 'update', 'row_index': 3,
+                'values': {'G': 'new evidence', 'M': 'a', 'N': 'b', 'S': 'c', 'T': 'd'},
+                'observed_values': {column: {} for column in ('G', 'M', 'N', 'S', 'T')},
+                'recorded_at_utc': '2026-10-08T10:00:00Z'}
+            args['business'] += (update,); unit = freeze_send_unit(**args)
+            self.assertEqual(expected, self.module.require_unit_nv_reservation(token, binding(), self.identity, unit))
+            image = json.loads(unit.action_preimage)['business'][-1]['requests']
+            self.assertEqual([6, 12, 18], [item['updateCells']['start']['columnIndex'] for item in image])
+            self.assertEqual(((KEYS[0], 'NV30102'), (KEYS[1], 'NV30103')), expected.reservations)
+
 
 class Req7NvReservationWorkflowTests(unittest.TestCase):
     setUp = Req7NvReservationDirectTests.setUp
     initialize = Req7NvReservationDirectTests.initialize
     reserve = Req7NvReservationDirectTests.reserve
     inspect = Req7NvReservationDirectTests.inspect
+
+    def test_actual_reserved_unit_global_journal_and_unknown_retry_use_identical_original_ids(self):
+        from test_cases.test_req7_global_attempt_journal import load as global_load
+        from monitor.issue_tracker_send_unit import freeze_send_unit
+        global_journal = global_load()
+        self.module = load()
+        self.assertTrue(hasattr(self.module, 'require_unit_nv_reservation'), 'durable NV-to-actual-batch binding missing')
+        with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
+            original = self.initialize(token); first = self.reserve(token)
+            unit = freeze_send_unit(**cabling_inputs(original.nonces))
+            self.assertEqual(first, self.module.require_unit_nv_reservation(token, binding(), self.identity, unit))
+            global_journal.prepare_global_unit(token, binding(), unit)
+            global_journal.record_global_attempt_intent(token, binding(), unit)
+            self.assertEqual(first, self.module.require_unit_nv_reservation(token, binding(), self.identity, unit))
+            altered = cabling_inputs(original.nonces); altered['business'][0]['values']['G'] = 'changed frozen evidence'
+            with self.assertRaises(self.module.NvReservationHold):
+                self.module.require_unit_nv_reservation(token, binding(), self.identity, freeze_send_unit(**altered))
+            self.assertEqual(1, global_journal.inspect_global_unit(token, binding(), unit).attempt_count)
+            self.assertEqual(unit.wire_bytes, (self.state / (hashlib.sha256(TARGET.encode()).hexdigest() + '.journal') / 'WIRE').read_bytes())
 
     def test_native_cold_process_redecodes_both_original_columns_and_keeps_ids_after_unknown(self):
         self.module = load()
@@ -208,7 +304,8 @@ class Req7NvReservationWorkflowTests(unittest.TestCase):
         self.assertTrue(any(script in item['paths'] and test in item['tests'] for item in manifest['test_rules']))
         members = {script, 'monitor/issue_tracker_online_nv_ids.py', 'monitor/issue_tracker_enrollment_journal.py',
             'monitor/issue_tracker_global_attempt_journal.py', 'monitor/issue_tracker_spreadsheet_owner.py',
-            'monitor/issue_tracker_sheets_read_decode.py', 'monitor/issue_tracker_sheets_read_plan.py', 'monitor/issue_tracker_tls_inputs.py'}
+            'monitor/issue_tracker_sheets_read_decode.py', 'monitor/issue_tracker_sheets_read_plan.py', 'monitor/issue_tracker_tls_inputs.py',
+            'monitor/issue_tracker_send_unit.py', 'monitor/issue_tracker_send_intent.py', 'monitor/issue_tracker_online_cells.py'}
         self.assertTrue(any(members <= set(item['members']) and test in item['tests'] for item in manifest['workflows']))
         self.assertEqual(['issue-tracker-local'], [item['id'] for item in manifest['test_suites'] if test in item['tests']])
         self.assertIn(test, (ROOT / 'test_cases/README.md').read_text())
@@ -244,9 +341,12 @@ class Req7NvReservationNativeWorkflowTests(unittest.TestCase):
             self.assertIn(('GET ' + (self.eth_plan if sheet == 'ETH Cabling' else self.ib_plan).path + ' HTTP/1.1').encode(), records[0][0])
         self.eth, self.ib = replies
         with fixture(self.journal_root), self.owner.spreadsheet_owner(binding()) as token:
-            self.initialize(token); seen = self.reserve(token)
+            original = self.initialize(token); seen = self.reserve(token)
             self.assertEqual(((KEYS[0], 'NV30102'), (KEYS[1], 'NV30103')), seen.reservations)
             self.assertEqual(seen, self.inspect(token))
+            from monitor.issue_tracker_send_unit import freeze_send_unit
+            compiled = freeze_send_unit(**cabling_inputs(original.nonces))
+            self.assertEqual(seen, self.module.require_unit_nv_reservation(token, binding(), self.identity, compiled))
         self.assertEqual(tuple(raw.data for raw in originals), tuple(raw.data for raw in replies))
 
 
