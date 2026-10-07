@@ -28,6 +28,12 @@ UNINSTALLED_RUNTIME_COMPONENTS = frozenset({
     "monitor/issue_tracker_manual_listener.py",
     "monitor/issue-tracker-control.cgi",
 })
+REQ7_READ_ONLY_LIBRARIES = frozenset({
+    "monitor/issue_tracker_ib_per_key_source.py",
+    "monitor/issue_tracker_per_key_source.py",
+    "monitor/issue_tracker_switch_per_key_source.py",
+    "monitor/issue_tracker_receipt_snapshot.py",
+})
 
 RUNTIME_PATTERNS = (
     (
@@ -368,6 +374,7 @@ def script_profile(root: Path, relative: str) -> dict[str, str]:
     is_validation_report_helper = relative == "test_cases/validation_unittest.py"
     is_library = (
         path.name == "__init__.py" or "/lib/" in f"/{relative}"
+        or relative in REQ7_READ_ONLY_LIBRARIES
         or (relative in UNINSTALLED_RUNTIME_COMPONENTS and path.suffix.lower() == ".py")
         or path.name in {
             "_package_common.py", "deployment_lock.py", "deployment_prewrite_guard.py",
@@ -463,6 +470,14 @@ def script_profile(root: Path, relative: str) -> dict[str, str]:
         success = "调用者完成后置校验且整个上层事务提交；单个函数返回不等于部署成功。"
         recovery = "让异常向上层 fail closed；保留锁、marker 和原始输入证据，不在库外手工补写。"
         example = f"rg -n \"{path.stem}\" DAY0-Prepare infra monitor tools ztp  # 查找受支持调用者"
+        if relative in REQ7_READ_ONLY_LIBRARIES:
+            environment = "由受管 monitor worker/Stage L 状态流程导入；只读库不单独取得运行或写入权限。"
+            scenario = "读取受保护的当前 K 窗口、逐键连续性或当前周期 C6 receipt 事实，供本地状态投影。"
+            prerequisite = "调用者持有同一项目 owner 锁，并核对当前 K、周期顺序、来源身份和原始受保护证据；不可用时 fail closed。"
+            inputs = "当前 K 链、受保护的已完成周期、Switch/ETH/IB 来源绑定或当前周期的 C6 INTENT/RECEIPT。"
+            outputs = "只读逐键观察计数、最新业务值或周期绑定的本地 receipt 事实；不修补历史、不写源数据或在线项目。"
+            success = "来源与周期复核完成，返回值仅供状态展示；不授予在线发布资格，不替代 C5/C6 或真机验收。"
+            recovery = "证据缺失、顺序断裂、K 或来源身份变化时交由调用者 HOLD；保留原始证据，不伪造零值或手工补写 receipt。"
         if is_uninstalled:
             direct = "否；这是未安装、未启用的库级接点，不是可直接运行的生产入口。"
             environment = "当前未安装、未启用；未来仅在经真机验收的受管 Linux 环境中按正确身份导入，不是操作员 CLI。"

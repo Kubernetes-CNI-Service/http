@@ -577,6 +577,49 @@ class DocumentationCatalogTests(unittest.TestCase):
                 updater.atomic_write(link, "replacement\n")
             self.assertEqual("original\n", target.read_text(encoding="utf-8"))
 
+    def test_req7_source_and_receipt_profiles_are_read_only_libraries_not_cli(self):
+        updater = load_path("manual_req7_read_only_profiles", USER_MANUAL_SCRIPT)
+        paths = (
+            "monitor/issue_tracker_ib_per_key_source.py",
+            "monitor/issue_tracker_per_key_source.py",
+            "monitor/issue_tracker_switch_per_key_source.py",
+            "monitor/issue_tracker_receipt_snapshot.py",
+        )
+        for relative in paths:
+            with self.subTest(path=relative):
+                profile = updater.script_profile(ROOT, relative)
+                self.assertTrue(profile["direct"].startswith("否"))
+                self.assertIn("无受支持的独立 CLI", profile["parameters"])
+                self.assertIn("只读", profile["outputs"])
+                self.assertIn("K", profile["inputs"])
+                self.assertIn("owner", profile["prerequisite"])
+                self.assertIn("不授予在线发布资格", profile["success"])
+                self.assertNotIn("[options]", profile["syntax"])
+                self.assertNotIn("未安装", profile["environment"])
+
+    def test_real_manual_render_preserves_req7_read_only_source_boundaries(self):
+        updater = load_path("manual_req7_read_only_render", USER_MANUAL_SCRIPT)
+        rendered = updater.render_manual(ROOT)
+        for relative in (
+            "monitor/issue_tracker_ib_per_key_source.py",
+            "monitor/issue_tracker_per_key_source.py",
+            "monitor/issue_tracker_switch_per_key_source.py",
+            "monitor/issue_tracker_receipt_snapshot.py",
+        ):
+            with self.subTest(path=relative):
+                match = re.search(
+                    rf'<details[^>]*data-script-reference="{re.escape(relative)}"[^>]*>'
+                    r'(.*?)</details>', rendered, flags=re.DOTALL,
+                )
+                self.assertIsNotNone(match)
+                plain = html.unescape(" ".join(
+                    re.sub(r"<[^>]+>", " ", match.group(1)).split(),
+                ))
+                self.assertIn("是否直接运行： 否", plain)
+                self.assertIn("无受支持的独立 CLI", plain)
+                self.assertIn("不授予在线发布资格", plain)
+                self.assertIn("只读", plain)
+
     def test_user_manual_exhaustively_describes_maintained_files_and_scripts(self):
         from test_cases import test_public_publication_contract as publication
 
