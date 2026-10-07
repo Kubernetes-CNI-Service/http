@@ -720,6 +720,79 @@ finally:
             self.assertFalse((root / "ztp/.setup-switch-journal.json").exists())
             self.assertFalse((root / "service-started").exists())
 
+    def _assert_real_setup_shared_directory_registration_drift_holds(self, drift):
+        with tempfile.TemporaryDirectory(prefix="r22-shared-directory-drift-") as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, _p, _q, _common, _p_only, _q_only, _manifest, _before, hook, barrier, _home = fixture
+            directory = root / "infiniband/publickey"
+            directory.parent.mkdir(exist_ok=True)
+            site = hook / "sitecustomize.py"
+            site.write_text(site.read_text(encoding="utf-8") + """
+import json
+previous_shared_replace = os.replace
+def drift_registered_shared_directory(source, destination, *args, **kwargs):
+    result = previous_shared_replace(source, destination, *args, **kwargs)
+    journal = Path(os.environ['HTTP_TEST_SHARED_WAL'])
+    marker = journal.parent / 'shared-directory-drifted'
+    if Path(destination) == journal and not marker.exists():
+        evidence = journal.read_bytes()
+        rows = json.loads(evidence)['body'].get('created_directories', [])
+        selected = [row for row in rows if row['path'] == os.environ['HTTP_TEST_SHARED_TARGET']]
+        if selected:
+            staged = Path(selected[0]['staged'])
+            drift = os.environ['HTTP_TEST_SHARED_DRIFT']
+            if drift == 'owner':
+                staged.rename(staged.with_name('retained-shared-stage'))
+                staged.mkdir()
+            elif drift == 'parent':
+                parent = staged.parent
+                retained = parent.with_name('retained-shared-parent')
+                parent.rename(retained)
+                parent.mkdir()
+                (retained / staged.name).rename(staged)
+            else:
+                (staged / 'unknown.pub').write_bytes(b'independent unregistered key\\n')
+            marker.write_bytes(evidence)
+    return result
+os.replace = drift_registered_shared_directory
+""", encoding="utf-8")
+            journal = root / "ztp/.setup-switch-journal.json"
+            with mock.patch.dict(os.environ, {"HTTP_TEST_SHARED_WAL": str(journal),
+                                             "HTTP_TEST_SHARED_TARGET": str(directory),
+                                             "HTTP_TEST_SHARED_DRIFT": drift}):
+                result = self._run_private_load_setup_switch(
+                    fixture, prepare_journal=True, first_link_prefix=str(directory) + os.sep,
+                )
+            self.assertEqual(24, result.returncode, result.stdout + result.stderr)
+            self.assertFalse(os.path.lexists(directory), "unknown shared stage was installed before HOLD")
+            self.assertFalse(barrier.exists(), "shared directory drift crossed key publication")
+            evidence = (journal.parent / "shared-directory-drifted").read_bytes()
+            self.assertEqual(evidence, journal.read_bytes())
+            row = next(row for row in json.loads(evidence)["body"]["created_directories"]
+                       if row["path"] == str(directory))
+            staged = Path(row["staged"])
+            self.assertTrue(staged.is_dir())
+            if drift == "owner":
+                self.assertEqual(row["ino"], staged.with_name("retained-shared-stage").stat().st_ino)
+                self.assertNotEqual(row["ino"], staged.stat().st_ino)
+            else:
+                self.assertEqual(row["ino"], staged.stat().st_ino)
+            if drift == "parent":
+                self.assertNotEqual(row["parent"]["ino"], directory.parent.stat().st_ino)
+                self.assertEqual(row["parent"]["ino"], directory.parent.with_name("retained-shared-parent").stat().st_ino)
+            if drift == "contents":
+                self.assertEqual(b"independent unregistered key\n", (staged / "unknown.pub").read_bytes())
+            self.assertFalse((root / "service-started").exists())
+
+    def test_real_setup_shared_directory_registered_owner_drift_blocks_install(self):
+        self._assert_real_setup_shared_directory_registration_drift_holds("owner")
+
+    def test_real_setup_shared_directory_registered_parent_drift_blocks_install(self):
+        self._assert_real_setup_shared_directory_registration_drift_holds("parent")
+
+    def test_real_setup_shared_directory_registered_contents_drift_blocks_install(self):
+        self._assert_real_setup_shared_directory_registration_drift_holds("contents")
+
     def test_real_setup_new_sample_directory_cold_recovery_restores_absence(self):
         """Sample's empty directory itself belongs to the crash rollback write set."""
         with tempfile.TemporaryDirectory(prefix="r22-sample-dir-cold-") as name:

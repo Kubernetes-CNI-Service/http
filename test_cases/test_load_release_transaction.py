@@ -4164,6 +4164,67 @@ class ReleaseTransactionTests(unittest.TestCase):
         self.assertTrue(original.is_dir())
         backend.start.assert_not_called()
 
+    def _assert_setup_shared_directory_registration_drift_holds(self, drift):
+        (*_state, journal, descriptor, backend) = self._prepare_cross_project_setup_crash()
+        parent = self.root / "infiniband"
+        parent.mkdir(exist_ok=True)
+        directory = parent / "publickey"
+        transaction = SETUP._SetupLinkTransaction([])
+        original_register = LOAD.register_setup_switch_created_directory
+        captured = {}
+
+        def drift_after_registration(*args, **kwargs):
+            result = original_register(*args, **kwargs)
+            staged = Path(args[2])
+            captured["wal"] = journal.read_bytes()
+            captured["staged"] = staged
+            captured["registered_inode"] = staged.stat().st_ino
+            if drift == "owner":
+                captured["original"] = staged.with_name("retained-shared-stage")
+                staged.rename(captured["original"])
+                staged.mkdir()
+            elif drift == "parent":
+                captured["original"] = parent.with_name("retained-shared-parent")
+                parent.rename(captured["original"])
+                parent.mkdir()
+                (captured["original"] / staged.name).rename(staged)
+            else:
+                (staged / "unknown.pub").write_bytes(b"independent unregistered key\n")
+            return result
+
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(SETUP, "ZTP", str(self.ztp)), \
+                mock.patch.object(SETUP, "_SETUP_SWITCH_WAL_CONTEXT", (vars(LOAD), descriptor)), \
+                mock.patch.object(LOAD, "register_setup_switch_created_directory",
+                                  side_effect=drift_after_registration), \
+                mock.patch.object(SETUP, "_atomic_rename_noreplace",
+                                  wraps=SETUP._atomic_rename_noreplace) as install:
+            with self.assertRaises(ValueError):
+                transaction.ensure_directory(str(directory))
+        install.assert_not_called()
+        self.assertFalse(os.path.lexists(directory), "drifted shared stage was installed before HOLD")
+        self.assertEqual(captured["wal"], journal.read_bytes())
+        staged = captured["staged"]
+        self.assertTrue(staged.is_dir(), "unknown/shared stage was deleted")
+        if drift == "owner":
+            self.assertEqual(captured["registered_inode"], captured["original"].stat().st_ino)
+            self.assertNotEqual(captured["registered_inode"], staged.stat().st_ino)
+        else:
+            self.assertEqual(captured["registered_inode"], staged.stat().st_ino)
+        if drift == "contents":
+            self.assertEqual(b"independent unregistered key\n", (staged / "unknown.pub").read_bytes())
+        self.assertEqual([], transaction.created_directories)
+        backend.start.assert_not_called()
+
+    def test_setup_shared_directory_registered_owner_drift_blocks_install(self):
+        self._assert_setup_shared_directory_registration_drift_holds("owner")
+
+    def test_setup_shared_directory_registered_parent_drift_blocks_install(self):
+        self._assert_setup_shared_directory_registration_drift_holds("parent")
+
+    def test_setup_shared_directory_registered_contents_drift_blocks_install(self):
+        self._assert_setup_shared_directory_registration_drift_holds("contents")
+
     def test_setup_created_directory_registration_fsync_failure_retains_stage(self) -> None:
         (*_state, journal, descriptor, backend) = self._prepare_cross_project_setup_crash()
         directory = self.ztp / "config/new-key-root"

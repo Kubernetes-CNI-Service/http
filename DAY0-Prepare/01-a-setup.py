@@ -4136,6 +4136,28 @@ class _SetupLinkTransaction:
         installed = False
         wal_registered = False
         wal_registration_attempted = False
+
+        def require_wal_directory_owner(candidate):
+            # An empty-directory WAL row does not authorize a replacement
+            # inode, a rebound parent, or data added after registration.
+            # Refuse before rename; the uncertain stage is evidence, not trash.
+            if not wal_registered:
+                return
+            try:
+                parent_now = os.lstat(parent)
+                if (parent_now.st_dev, parent_now.st_ino, parent_now.st_mode) != (
+                        parent_info.st_dev, parent_info.st_ino, parent_info.st_mode):
+                    raise ValueError("parent changed")
+                owner = os.lstat(candidate)
+                if (not stat.S_ISDIR(owner.st_mode)
+                        or (owner.st_dev, owner.st_ino, owner.st_mode) !=
+                        (created.st_dev, created.st_ino, created.st_mode)):
+                    raise ValueError("owner changed")
+                if any(Path(candidate).iterdir()):
+                    raise ValueError("unregistered contents changed")
+            except (OSError, ValueError) as exc:
+                raise ValueError(f"setup shared directory state changed; HOLD: {exc}") from exc
+
         try:
             if _SETUP_SWITCH_WAL_CONTEXT is not None:
                 load_api, descriptor = _SETUP_SWITCH_WAL_CONTEXT[:2]
@@ -4148,6 +4170,7 @@ class _SetupLinkTransaction:
                     runtime_backend=load_api["service_runtime_backend"](),
                 )
                 wal_registered = True
+            require_wal_directory_owner(temporary)
             try:
                 _atomic_rename_noreplace(temporary, path)
                 installed = True
@@ -4161,6 +4184,7 @@ class _SetupLinkTransaction:
                     raise ValueError(f"setup 管理目录在创建期间被非目录占用：{path}") from exc
                 return False
 
+            require_wal_directory_owner(path)
             metadata = os.lstat(path)
             if ((metadata.st_dev, metadata.st_ino) != (created.st_dev, created.st_ino)
                     or not stat.S_ISDIR(metadata.st_mode)):
@@ -4168,6 +4192,7 @@ class _SetupLinkTransaction:
             self.created_directories.append((path, created.st_dev, created.st_ino))
             if wal_registered:
                 _fsync_directory(parent)
+                require_wal_directory_owner(path)
             return True
         finally:
             if not installed and not wal_registration_attempted and os.path.lexists(temporary):
