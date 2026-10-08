@@ -147,6 +147,62 @@ class Req7RemoteHistoryMatchDirectTests(unittest.TestCase):
             self.assertIsNone(caught.exception.__context__)
             self.assertEqual(retained,{str(p.relative_to(self.state)):p.read_bytes() for p in self.state.rglob('*') if p.is_file()})
 
+    def test_cold_completion_initial_header_read_cannot_adopt_rewritten_header_and_marker(self):
+        """A self-consistent later pair is not the original pair held at entry."""
+        import os
+        from dataclasses import asdict
+        from monitor import issue_tracker_local_commit as local, issue_tracker_attempt_journal as original_io
+        from test_cases.test_req7_sheets_read_decode import header_response
+        module=load()
+        with fixture(self.root),self.owner.spreadsheet_owner(binding()) as token:
+            self.prepare(token)
+            observed=self.observe(module,token)
+            with module._hold_match_originals(token,binding(),self.unit) as (_verify,originals):
+                _owner,_parent,name,base=self.global_journal._inputs(token,binding(),self.unit)
+                proof=self.state/(name[:-len('.journal')]+'.completion'); proof.mkdir(mode=0o700)
+                paths={
+                    'IDENTITY-RAW':self.planner.prepare_template_identity_read(self.binding,self.token_value).path,
+                    'HEADERS-RAW':self.planner.prepare_template_header_read(self.binding,self.token_value).path,
+                    'METADATA-RAW':self.meta_plan.path,'HISTORY-RAW':self.plan.path,
+                }
+                images={'IDENTITY-RAW':response(identity_response()).data,
+                        'HEADERS-RAW':response(header_response()).data,
+                        'METADATA-RAW':response(self.metadata).data,'HISTORY-RAW':response(self.post).data}
+                files={}
+                for name,raw in images.items():
+                    path=proof/name; path.write_bytes(raw); path.chmod(0o600)
+                    files[name]={'identity':list(original_io._identity(os.stat(path))),
+                                 'sha256':hashlib.sha256(raw).hexdigest(),
+                                 'request_path_sha256':hashlib.sha256(paths[name].encode()).hexdigest()}
+                header=local._canonical({'schema_version':1,'unit_id':self.unit.unit_id,'binding':base,
+                    'originals':originals,'folder_identity':list(original_io._identity(os.stat(proof))[:2]),
+                    'matched':asdict(observed),'responses':files})
+                path=proof/'HEADER'; path.write_bytes(header); path.chmod(0o600)
+                marker={'schema_version':1,'unit_id':self.unit.unit_id,
+                    'header_sha256':hashlib.sha256(header).hexdigest(),
+                    'header_identity':list(original_io._identity(os.stat(path))),
+                    'state':'COMPLETE-PRESENT-NOT-APPLIED'}
+                (proof/'COMPLETE').write_bytes(local._canonical(marker)); (proof/'COMPLETE').chmod(0o600)
+            self.assertEqual('COMPLETE-PRESENT-NOT-APPLIED',module.inspect_completion_evidence(token,binding(),self.unit).state)
+            reading=original_io._read; changed=[]; original_stat=path.stat()
+            def read_then_rewrite(folder,name,limit):
+                raw=reading(folder,name,limit)
+                if name=='HEADER' and os.fstat(folder).st_ino==proof.stat().st_ino and not changed:
+                    with path.open('r+b') as held:
+                        held.write(header); held.flush(); os.fsync(held.fileno())
+                    os.utime(path,ns=(original_stat.st_atime_ns,original_stat.st_mtime_ns+1_000_000))
+                    marker['header_identity']=list(original_io._identity(os.stat(path)))
+                    (proof/'COMPLETE').write_bytes(local._canonical(marker))
+                    changed.append(True)
+                return raw
+            with mock.patch.object(original_io,'_read',side_effect=read_then_rewrite):
+                with self.assertRaises(module.RemoteHistoryHold): module.inspect_completion_evidence(token,binding(),self.unit)
+            self.assertEqual([True],changed)
+            self.assertEqual((header,original_stat.st_ino),(path.read_bytes(),path.stat().st_ino))
+            self.assertNotEqual(original_stat.st_mtime_ns,path.stat().st_mtime_ns)
+            self.assertEqual((1,'UNKNOWN'),(self.global_journal.inspect_global_unit(token,binding(),self.unit).attempt_count,
+                                           self.global_journal.inspect_global_unit(token,binding(),self.unit).outcome))
+
     def test_original_count_changed_during_post_read_cannot_escape_as_matched_observation(self):
         module=load()
         with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
@@ -650,6 +706,39 @@ with scoped_fixture(root,owner),owner.spreadsheet_owner(bound) as token:
                 with self.assertRaises(module.RemoteHistoryHold): module.inspect_completion_evidence(owner,bound,unit)
                 self.assertEqual(retained,{p:p.read_bytes() for p in proof.iterdir()})
             if fault=='same-byte-header': self.doCleanups(); self.setUp()
+
+    def test_actual_owned_completion_cold_reader_retains_entry_header_and_marker(self):
+        from contextlib import ExitStack
+        import os
+        from monitor import issue_tracker_local_commit as local, issue_tracker_attempt_journal as original_io
+        from monitor import issue_tracker_global_attempt_journal as journal
+        module=load()
+        with ExitStack() as stack:
+            writer,owner,bound,auth,_config,unit,docs=self.prepare_owned(stack)
+            responses={name:self.read_owned(stack,writer,owner,bound,auth,kind,value)
+                       for name,(kind,value) in docs.items()}
+            module.record_owned_completion_evidence(writer,owner,bound,unit,**responses)
+            proof=self.root/'var/lib/http-ztp-container/issue-tracker'/(hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()+'.completion')
+            path=proof/'HEADER'; header=path.read_bytes(); marker=json.loads((proof/'COMPLETE').read_bytes())
+            reading=original_io._read; changed=[]; original_stat=path.stat()
+            retained={p:p.read_bytes() for p in proof.parent.rglob('*') if p.is_file() and proof not in p.parents}
+            def read_then_rewrite(folder,name,limit):
+                raw=reading(folder,name,limit)
+                if name=='HEADER' and os.fstat(folder).st_ino==proof.stat().st_ino and not changed:
+                    with path.open('r+b') as held:
+                        held.write(header); held.flush(); os.fsync(held.fileno())
+                    os.utime(path,ns=(original_stat.st_atime_ns,original_stat.st_mtime_ns+1_000_000))
+                    marker['header_identity']=list(original_io._identity(path.stat()))
+                    (proof/'COMPLETE').write_bytes(local._canonical(marker)); changed.append(True)
+                return raw
+            with mock.patch.object(original_io,'_read',side_effect=read_then_rewrite):
+                with self.assertRaises(module.RemoteHistoryHold): module.inspect_completion_evidence(owner,bound,unit)
+            self.assertEqual([True],changed)
+            self.assertEqual(retained,{p:p.read_bytes() for p in retained})
+            self.assertEqual((header,original_stat.st_ino),(path.read_bytes(),path.stat().st_ino))
+            self.assertNotEqual(original_stat.st_mtime_ns,path.stat().st_mtime_ns)
+            self.assertEqual((1,'UNKNOWN'),(journal.inspect_global_unit(owner,bound,unit).attempt_count,
+                                           journal.inspect_global_unit(owner,bound,unit).outcome))
 
     def test_cold_completion_replays_raw_semantics_not_a_self_consistent_matched_summary(self):
         """Raw hashes/stat and COMPLETE can agree while the proof rows do not."""

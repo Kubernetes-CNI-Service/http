@@ -411,7 +411,78 @@ def record_owned_completion_evidence(writer_token,owner_token,binding,unit,*,
     return result
 
 
+@contextmanager
+def _hold_completion_originals(owner_token,binding,unit):
+    """Keep the entry proof set pinned through parsing, replay and barriers.
+
+    A later self-consistent HEADER/COMPLETE pair cannot replace the original
+    observation, including same-inode rewrites that do not change directory
+    mtime. All proof descriptors remain held until the consumer returns. This
+    boundary supplies no APPLIED, fresh read, settlement or retry authority.
+    """
+    from monitor import issue_tracker_local_commit as local, issue_tracker_attempt_journal as journal
+    folder=None; held=[]
+    try:
+        owner,parent,name,_base=global_journal._inputs(owner_token,binding,unit)
+        name=name[:-len('.journal')]+'.completion'
+        folder=local._directory(parent,name)
+        journal._named(parent,name,folder,directory=True)
+        directory_identity=journal._identity(os.fstat(folder))
+        names={'HEADER','COMPLETE',*(file for _key,_kind,file in _COMPLETION_READS)}
+        if set(os.listdir(folder))!=names: raise RemoteHistoryHold()
+        for file in sorted(names):
+            fd=os.open(file,local._flags()|os.O_NONBLOCK,dir_fd=folder)
+            held.append((file,fd,None,None))
+            info=local._check(fd,directory=False)
+            journal._named(folder,file,fd,directory=False)
+            identity=journal._identity(info)
+            limit=65536 if file=='HEADER' else (16384 if file=='COMPLETE' else 2*1024*1024)
+            raw=os.pread(fd,limit+1,0)
+            if (not raw or len(raw)>limit or len(raw)!=info.st_size
+                    or journal._identity(os.fstat(fd))!=identity): raise RemoteHistoryHold()
+            journal._named(folder,file,fd,directory=False)
+            held[-1]=(file,fd,identity,raw)
+        def verify():
+            if ownership._validated_owner(owner_token,binding) is not owner: raise RemoteHistoryHold()
+            journal._named(parent,name,folder,directory=True)
+            if journal._identity(os.fstat(folder))!=directory_identity or set(os.listdir(folder))!=names:
+                raise RemoteHistoryHold()
+            for file,fd,identity,raw in held:
+                journal._named(folder,file,fd,directory=False)
+                if (journal._identity(os.fstat(fd))!=identity
+                        or os.pread(fd,len(raw)+1,0)!=raw): raise RemoteHistoryHold()
+                journal._named(folder,file,fd,directory=False)
+                if journal._identity(os.fstat(fd))!=identity: raise RemoteHistoryHold()
+            journal._named(parent,name,folder,directory=True)
+            if journal._identity(os.fstat(folder))!=directory_identity: raise RemoteHistoryHold()
+            ownership._validated_owner(owner_token,binding)
+        verify()
+        yield verify
+        verify()
+    finally:
+        close_failed=False
+        for _file,fd,_identity,_raw in reversed(held):
+            try: os.close(fd)
+            except OSError: close_failed=True
+        if folder is not None:
+            try: os.close(folder)
+            except OSError: close_failed=True
+        if close_failed: raise RemoteHistoryHold()
+
+
 def inspect_completion_evidence(owner_token,binding,unit):
+    """Hold the entry originals through the entire historical proof replay."""
+    failed=False
+    try:
+        with _hold_completion_originals(owner_token,binding,unit) as verify:
+            result=_inspect_completion_evidence(owner_token,binding,unit)
+            verify()
+    except Exception: failed=True
+    if failed: raise RemoteHistoryHold()
+    return result
+
+
+def _inspect_completion_evidence(owner_token,binding,unit):
     """Validate retained originals and complete proof images, no settlement.
 
     Missing/partial evidence never gets backfilled or promoted. Synchronize

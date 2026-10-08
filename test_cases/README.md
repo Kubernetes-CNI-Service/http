@@ -1026,6 +1026,10 @@ stat/inode/SHA 绑定到独立只增不改的 `.completion`。四份 RAW、HEADE
 FIFO、高水位或 settings outbox，也不作为真实源准入、在线激活或正式 full proof；
 这些 REQ7 集成仍待完成。新增真实 TLS→双锁→文件屏障→冷进程回读联测覆盖缺审计、
 复制回应、同字节 HEADER 替换、尾行摘要漂移、计数后变和最终期限失效。
+冷读入口持续持有六份 completion 原文件 FD，从解析前至 RAW 语义重放、fsync 与
+返回之后核原 stat/inode/字节和命名边；HEADER 的同 inode／同字节改写加上同步
+更新的 COMPLETE 也不能被收编为原证据。独立 direct 与实际受监督 TLS→完成落盘→
+冷读 workflow 先复现拒绝断言 RED，修复后仍保留 UNKNOWN，不授予 APPLIED 或重发。
 冷读还须从四份原 RAW 重放模板 identity/headers、nonce、永久 fence 和全部
 History 语义，并逐项核固定读取路径的原摘要；不能只接受重新自洽的 HEADER/
 MATCHED 描述。与 live matcher 共用原 journal/WIRE/前缀对账，但仅构造无凭据的
