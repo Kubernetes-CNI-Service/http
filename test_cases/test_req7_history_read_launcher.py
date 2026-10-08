@@ -186,7 +186,11 @@ raise SystemExit(result)
         """Real fixed FD -> public SDK -> native OAuth TLS -> owned child."""
         from test_req7_sdk_authentication import fresh_info
         from test_req7_token_launcher import Req7FixedTokenLauncherWorkflowTests
-        from monitor import issue_tracker_token_launcher as auth, issue_tracker_sdk_authentication as sdk
+        from monitor import issue_tracker_token_launcher as auth
+        # Canonical reloads in SDK direct tests may leave a stale package
+        # attribute. Scope the actual module used by qualified production
+        # imports; never relax its root-only check or mutate a stale object.
+        sdk=importlib.import_module('monitor.issue_tracker_sdk_authentication')
         stack.enter_context(scoped_fixture(self.root,sdk))
         credential=self.root/'var/lib/http-ztp-container/service-account/cre.json'
         if credential.exists(): original=credential.read_bytes()
@@ -214,6 +218,22 @@ raise SystemExit(result)
             self.assertTrue(children[0].stdout.closed); self.assertTrue(children[0].stderr.closed)
         self.assertEqual([],errors); self.assertEqual(1,len(records)); self.assertEqual(original,credential.read_bytes())
         return value,credential,original
+
+    def test_g1_fixture_patches_current_sdk_not_stale_parent_package_attribute(self):
+        import monitor
+        from monitor import issue_tracker_token_launcher as auth
+        current=importlib.import_module('monitor.issue_tracker_sdk_authentication')
+        # Equivalent to a loader that refreshes sys.modules without updating
+        # the package attribute. No production guard or source is patched.
+        stale=SimpleNamespace(os=os)
+        with ExitStack() as stack:
+            _local,ownership,writer,owner,binding,_token,_config=self.owners(stack)
+            with mock.patch.object(monitor,'issue_tracker_sdk_authentication',stale):
+                value,_credential,_original=self.project_auth(stack,ownership,owner,binding)
+                self.assertEqual(0,current.os.geteuid(),'owned root facade must target the active canonical SDK')
+                self.assertIs(os,stale.os,'a stale module must remain untouched')
+                self.assertEqual(('synthetic-cloud-project',value.credential_sha256),
+                                 auth.require_current_owned_project_token(owner,binding,value))
 
     def test_g1_real_auth_and_metadata_read_share_original_project_not_equal_token_or_copy(self):
         from dataclasses import replace
@@ -322,6 +342,25 @@ raise SystemExit(result)
         self.assertEqual([],errors); self.assertEqual(1,len(records)); self.assertTrue(records[0][0].startswith(b'GET /v4/spreadsheets/'+TARGET.encode()+b'?'))
         self.assertIn(b'Authorization: Bearer owned-private-token\r\n',records[0][1]); self.assertEqual(b'',records[0][2])
         self.assertFalse(hasattr(result,'complete_unit')); self.assertFalse(hasattr(result,'permit'))
+
+    def test_delayed_owned_child_start_keeps_real_read_deadline_and_single_native_request(self):
+        module=load(); body=b'{"spreadsheetId":"synthetic","sheets":[]}'
+        reply=b'HTTP/1.1 200 OK\r\nContent-Length: '+str(len(body)).encode()+b'\r\nConnection: close\r\n\r\n'+body
+        with ExitStack() as stack:
+            _local,_ownership,writer,owner,binding,token,_config=self.owners(stack)
+            with self.server(reply,hostname='sheets.googleapis.com',destination='sheets.googleapis.com') as (records,errors),ExitStack() as launched:
+                port=socket.getaddrinfo('sheets.googleapis.com',443)[0][4][1]
+                # Controlled startup lag exceeds the fixture's transport wait,
+                # but not the unchanged production 30-second read deadline.
+                program='import time\ntime.sleep(3.25)\n'+self.child_fixture(port)
+                calls,children=self.intercept(launched,program,writer,owner,binding)
+                unit=module.OwnedHistoryTailReadUnit(writer,owner,binding,token)
+                result=unit.read_once()
+                self.assertEqual((body,True,1,0),(result.data,result.complete,len(calls),children[0].returncode))
+                self.assertTrue(children[0].stdin.closed); self.assertTrue(children[0].stdout.closed)
+                self.assertTrue(children[0].stderr.closed)
+                with self.assertRaises(module.HistoryReadLauncherHold): unit.read_once()
+            self.assertEqual([],errors); self.assertEqual(1,len(records)); self.assertEqual(b'',records[0][2])
 
     def test_revoked_policy_before_launch_consumes_unit_without_network(self):
         module=load()

@@ -10,6 +10,7 @@ import base64
 import json
 import os
 from pathlib import Path
+import select
 import socket
 import ssl
 import sys
@@ -133,8 +134,15 @@ class Req7NativeTlsWireTests(unittest.TestCase):
         listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         listener.bind(("127.0.0.1", 0)); listener.listen(1); listener.settimeout(3)
         address = listener.getsockname(); observations = []; errors = []
+        stop_read, stop_write = socket.socketpair()
         def serve():
             try:
+                # Client startup/local validation belongs to the caller's
+                # unchanged TOTAL budget, not a fake-server accept deadline.
+                # Wait for an actual pending connection or explicit scope
+                # cancellation. Accept/handshake/body retain their 3s bounds.
+                ready, _write, _error = select.select([listener, stop_read], [], [])
+                if stop_read in ready: return
                 connection, _peer = listener.accept(); connection.settimeout(3)
                 with connection:
                     with context.wrap_socket(connection, server_side=True) as transport:
@@ -165,14 +173,56 @@ class Req7NativeTlsWireTests(unittest.TestCase):
         try:
             with mock.patch("socket.getaddrinfo", side_effect=resolve): yield observations, errors
         finally:
-            listener.close(); thread.join(4)
-            self.assertFalse(thread.is_alive(), "owned TLS fixture must terminate")
+            try:
+                stop_write.sendall(b"x"); thread.join(4)
+                self.assertFalse(thread.is_alive(), "owned TLS fixture must terminate")
+            finally:
+                listener.close(); stop_read.close(); stop_write.close()
 
     def wire(self):
         from test_req7_sdk_authentication import load as load_auth
         auth = load_auth()
         return auth.TokenWireRequest("https://oauth2.googleapis.com/token", "POST", b"synthetic-body",
                                      (("Content-Type", "application/x-www-form-urlencoded"),), 0.5)
+
+    def test_owned_server_does_not_spend_transport_timeout_before_client_start(self):
+        # Independent fixture contract: no connection has started while the
+        # owned launcher performs imports/local checks. A transport deadline
+        # must not run during this phase. Production/client budgets are intact.
+        with self.server(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}") as (records, errors):
+            threading.Event().wait(3.25)
+            self.assertEqual([], records)
+            self.assertEqual([], errors, "idle startup is not a transport timeout")
+            with self.fixture():
+                result = self.module.NativeTokenHttpsUnit().send_once(self.wire())
+        self.assertEqual([], errors); self.assertEqual(1, len(records))
+        self.assertEqual((200, b"{}", True), (result.status, result.data, result.complete))
+
+    def test_owned_idle_server_cleanup_does_not_require_a_client_or_timeout(self):
+        # Observe the actual owned server thread; never enumerate/kill others.
+        native_start = threading.Thread.start
+        threads = []
+        def started(thread):
+            threads.append(thread)
+            return native_start(thread)
+        with mock.patch.object(threading.Thread, 'start', started):
+            with self.server(b"") as (records, errors):
+                self.assertEqual(1, len(threads)); self.assertTrue(threads[0].is_alive())
+        self.assertFalse(threads[0].is_alive())
+        self.assertEqual([], records); self.assertEqual([], errors)
+
+    def test_owned_connected_client_without_tls_still_hits_original_transport_bound(self):
+        with self.server(b"") as (records, errors):
+            address=socket.getaddrinfo('oauth2.googleapis.com',443)[0][4]
+            client=socket.socket(socket.AF_INET,socket.SOCK_STREAM)
+            try:
+                client.connect(address)
+                # A real connection without a TLS handshake must still fail;
+                # readiness synchronization cannot erase the original 3s cap.
+                threading.Event().wait(3.25)
+                self.assertEqual([],records); self.assertEqual(1,len(errors))
+                self.assertIsInstance(errors[0],socket.timeout)
+            finally: client.close()
 
     def test_actual_verified_tls_post_has_fixed_host_path_no_proxy_and_complete_bounded_response(self):
         wire = self.wire()

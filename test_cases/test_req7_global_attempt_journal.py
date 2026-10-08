@@ -39,6 +39,23 @@ def unit(**changes):
 
 
 class Req7GlobalAttemptJournalTests(unittest.TestCase):
+    def test_completion_marker_presence_refuses_new_count_without_claiming_applied(self):
+        with fixture(self.root),self.owner.spreadsheet_owner(binding()) as token:
+            self.module.prepare_global_unit(token,binding(),self.value)
+            self.module.record_global_attempt_intent(token,binding(),self.value)
+            proof=self.locks/(hashlib.sha256(TARGET.encode()).hexdigest()+'.completion')
+            proof.mkdir(mode=0o700)
+            # Deliberately invalid: marker presence is a conservative STOP,
+            # never remote resolution evidence or permission to free a fence.
+            (proof/'COMPLETE').write_bytes(b'not a proof\n'); (proof/'COMPLETE').chmod(0o600)
+            retained={p:p.read_bytes() for p in self.locks.rglob('*') if p.is_file()}
+            with self.assertRaises(self.module.GlobalAttemptHold):
+                self.module.record_global_attempt_intent(token,binding(),self.value)
+            self.assertEqual(retained,{p:p.read_bytes() for p in retained})
+            self.assertFalse((self.store/'ATTEMPT-2').exists())
+            self.assertEqual((1,'UNKNOWN'),(self.module.inspect_global_unit(token,binding(),self.value).attempt_count,
+                                           self.module.inspect_global_unit(token,binding(),self.value).outcome))
+
     def test_original_receipt_namespace_guard_must_precede_any_protected_count(self):
         from monitor import issue_tracker_receipt_snapshot as receipts
         options=dict(qualified_source=None,store=None,writer_token=None,settings=None,
@@ -291,6 +308,22 @@ class Req7GlobalAttemptJournalWorkflowTests(unittest.TestCase):
             self.assertEqual(1,self.module.inspect_global_unit(token,target,self.value).attempt_count)
             with self.assertRaises(self.module.GlobalAttemptHold):
                 with self.module._hold_counted_original_wire(writer,token,target,self.value): self.fail('violated borrow resurrected')
+
+    def test_partial_completion_refuses_wire_claim_before_creating_dispatch(self):
+        with self.counted_wire_owners() as (writer,token,target):
+            proof=self.locks/(hashlib.sha256(TARGET.encode()).hexdigest()+'.completion')
+            proof.mkdir(mode=0o700)
+            # Even an interrupted proof writer must be reconciled; no guessed
+            # COMPLETE, deletion, count reset or transport is allowed here.
+            retained={p:p.read_bytes() for p in self.locks.rglob('*') if p.is_file()}
+            issued=[]
+            with self.assertRaises(self.module.GlobalAttemptHold):
+                with self.module._hold_counted_original_wire(writer,token,target,self.value) as image:
+                    issued.append(image)
+            self.assertEqual([],issued)
+            self.assertFalse((self.locks/(hashlib.sha256(TARGET.encode()).hexdigest()+'.dispatch')).exists())
+            self.assertEqual(retained,{p:p.read_bytes() for p in retained})
+            self.assertEqual(1,self.module.inspect_global_unit(token,target,self.value).attempt_count)
 
     def test_claim_barrier_failure_cannot_yield_or_resurrect_a_consumed_original_count(self):
         from monitor import issue_tracker_local_commit as local

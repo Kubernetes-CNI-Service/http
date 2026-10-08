@@ -103,6 +103,7 @@ def _hold_counted_original_wire(writer_token,token,binding,unit):
     try:
         project = local._owner(writer_token)
         owner,parent,name,base = _inputs(token,binding,unit)
+        _require_no_completion(parent,name)
         original = local._directory(parent,name)
         journal._named(parent,name,original,directory=True)
         count,_previous = _inspect(original,unit,base)
@@ -150,6 +151,7 @@ def _hold_counted_original_wire(writer_token,token,binding,unit):
                 or journal._identity(os.fstat(wire)) != wire_identity
                 or journal._identity(os.fstat(action)) != action_identity): raise GlobalAttemptHold()
         def verify():
+            _require_no_completion(parent,name)
             if (_inspect(original,unit,base)[0] != count
                 or _inspect_wire_claims(claims,original,unit,header)[0] != count
                 or tuple(sorted(os.listdir(claims))) != names
@@ -199,6 +201,27 @@ def _inputs(token, binding, unit):
     header.update(spreadsheet_id=binding.spreadsheet_id, allowlist_sha256=binding.allowlist_sha256,
                   policy_sha256=binding.policy_sha256)
     return owner, owner.directories[-1][0], owner.lock_name[:-5] + '.journal', header
+
+
+def _require_no_completion(parent,journal_name,*,marker_only=False):
+    """Conservative no-resend boundary, not proof of remote settlement.
+
+    An in-progress/partial proof store blocks WIRE claims. Raw diagnostic
+    intent counting is not transport; it additionally refuses any COMPLETE
+    marker, even malformed. Neither absence nor presence grants admission,
+    APPLIED, cleanup, capacity reclamation or a replacement generation.
+    """
+    name=journal_name[:-len('.journal')]+'.completion'
+    if name not in os.listdir(parent): return
+    if not marker_only: raise GlobalAttemptHold()
+    folder=local._directory(parent,name)
+    try:
+        journal._named(parent,name,folder,directory=True)
+        identity=journal._identity(os.fstat(folder))
+        if 'COMPLETE' in os.listdir(folder): raise GlobalAttemptHold()
+        journal._named(parent,name,folder,directory=True)
+        if journal._identity(os.fstat(folder))!=identity: raise GlobalAttemptHold()
+    finally: os.close(folder)
 
 
 def _create_folder(parent, name):
@@ -292,6 +315,7 @@ def _observe(token, binding, unit, append):
         journal._named(parent, name, folder, directory=True)
         count, previous = _inspect(folder, unit, header)
         if append:
+            _require_no_completion(parent,name,marker_only=True)
             if count == 6: raise GlobalAttemptHold()
             _sync_initialization(parent, folder, header)
             ownership._validated_owner(token, binding)
@@ -299,6 +323,7 @@ def _observe(token, binding, unit, append):
             count += 1
             local._write_new(folder, f'ATTEMPT-{count}', local._canonical(
                 {**header, 'attempt_count': count, 'previous_sha256': previous, 'outcome': 'UNKNOWN'}))
+            _require_no_completion(parent,name,marker_only=True)
         journal._named(parent, name, folder, directory=True)
         ownership._validated_owner(token, binding)
         verified, _previous = _inspect(folder, unit, header)

@@ -740,6 +740,29 @@ with scoped_fixture(root,owner),owner.spreadsheet_owner(bound) as token:
             self.assertEqual((1,'UNKNOWN'),(journal.inspect_global_unit(owner,bound,unit).attempt_count,
                                            journal.inspect_global_unit(owner,bound,unit).outcome))
 
+    def test_actual_durable_completion_blocks_new_count_and_original_wire_dispatch(self):
+        from contextlib import ExitStack
+        from monitor import issue_tracker_global_attempt_journal as journal
+        module=load()
+        with ExitStack() as stack:
+            writer,owner,bound,auth,_config,unit,docs=self.prepare_owned(stack)
+            responses={name:self.read_owned(stack,writer,owner,bound,auth,kind,value)
+                       for name,(kind,value) in docs.items()}
+            seen=module.record_owned_completion_evidence(writer,owner,bound,unit,**responses)
+            state=self.root/'var/lib/http-ztp-container/issue-tracker'
+            retained={p:p.read_bytes() for p in state.rglob('*') if p.is_file()}
+            with self.assertRaises(journal.GlobalAttemptHold): journal.record_global_attempt_intent(owner,bound,unit)
+            issued=[]
+            with self.assertRaises(journal.GlobalAttemptHold):
+                with journal._hold_counted_original_wire(writer,owner,bound,unit) as image:
+                    issued.append(image)
+            self.assertEqual([],issued)
+            self.assertFalse((state/(hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()+'.dispatch')).exists())
+            self.assertEqual(retained,{p:p.read_bytes() for p in retained})
+            self.assertEqual(seen,module.inspect_completion_evidence(owner,bound,unit))
+            self.assertEqual((1,'UNKNOWN'),(journal.inspect_global_unit(owner,bound,unit).attempt_count,
+                                           journal.inspect_global_unit(owner,bound,unit).outcome))
+
     def test_cold_completion_replays_raw_semantics_not_a_self_consistent_matched_summary(self):
         """Raw hashes/stat and COMPLETE can agree while the proof rows do not."""
         module=load()

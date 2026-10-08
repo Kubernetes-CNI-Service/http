@@ -1030,6 +1030,11 @@ FIFO、高水位或 settings outbox，也不作为真实源准入、在线激活
 返回之后核原 stat/inode/字节和命名边；HEADER 的同 inode／同字节改写加上同步
 更新的 COMPLETE 也不能被收编为原证据。独立 direct 与实际受监督 TLS→完成落盘→
 冷读 workflow 先复现拒绝断言 RED，修复后仍保留 UNKNOWN，不授予 APPLIED 或重发。
+原始 WIRE handoff 的入口和每次 live CLAIM 核验还拒绝任何已开始的 completion
+目录（含 partial），在创建 dispatch 或启动子进程前停住。存在 COMPLETE 标记时，
+原始诊断计数也拒绝新增 ATTEMPT；无效标记只导致 HOLD，不被解释为 APPLIED。
+真实固定读→完整落盘→原计数／WIRE claim 联测保留原次数、UNKNOWN 与全部原件。
+这些 no-resend 边界不释放全表屏障、FIFO、永久 fence、预留或 outbox。
 冷读还须从四份原 RAW 重放模板 identity/headers、nonce、永久 fence 和全部
 History 语义，并逐项核固定读取路径的原摘要；不能只接受重新自洽的 HEADER/
 MATCHED 描述。与 live matcher 共用原 journal/WIRE/前缀对账，但仅构造无凭据的
@@ -1181,6 +1186,16 @@ HTTP 200 合同不变。`test_req7_native_tls_wire` 对拥有的隔离 TLS 服�
 轻量 mutation 类型位于纯 stdlib read planner；原 token/read 的固定隔离子进程
 不得因此导入 composer 的 YAML/workbook 图。独立 `-I` 负例和原 native 读取／监督
 workflow 覆盖此依赖隔离合同，不添加 ambient fallback 或放宽原超时。
+拥有的 loopback TLS 夹具先用连接 readiness／独立 scope-cancel socket 同步，再执行
+原 3 秒 accept／握手／正文时限；子进程启动／导入／本地检查仍属于原生产 TOTAL，
+不能提前耗尽 fake server 的 transport 时限。独立延迟启动、空闲取消、已连接但不握手
+负例及实际固定读取子进程覆盖此夹具边界；原 30／60 秒监督器和所有断言未放宽。
+这修正已复现的夹具时序缺陷，不证明过去没有启动阶段原证据的超时根因已经闭合。
+G1 认证联测的合成 root facade 只补丁当前 canonical SDK 模块，不采用重载后残留
+的包属性；独立 stale-parent 负例和原顺序认证→项目读取 workflow 验证这一隔离边界。
+SDK 的 canonical 测试重载同时保持 `sys.modules` 与父包属性指向同一新模块；独立
+重复重载测试核两种合法 import 形式逐次一致，不能让旧 root facade／类型残留。
+生产 root-only／原凭据／原 token 来源校验及相关拒绝断言保持不变。
 
 History、两张 Cabling 与 metadata 的原始 RAW 持久化统一使用固定名称的
 2 MiB 有界图像写入器，原字节全部保留、不截断；超限在创建 store 前拒绝。

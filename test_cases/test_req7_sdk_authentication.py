@@ -30,6 +30,9 @@ def load():
     spec = importlib.util.spec_from_file_location("monitor.issue_tracker_sdk_authentication", MODULE)
     module = importlib.util.module_from_spec(spec); sys.modules[spec.name] = module
     spec.loader.exec_module(module)
+    # Match normal qualified-import semantics on every successful test reload.
+    # Package imports must not keep old SDK classes or an old root facade.
+    setattr(sys.modules['monitor'],'issue_tracker_sdk_authentication',module)
     return module
 
 
@@ -67,6 +70,20 @@ class FakeTokenUnit:
 
 class Req7SdkAuthenticationDirectTests(unittest.TestCase):
     def setUp(self): self.module = load()
+
+    def test_canonical_test_reload_keeps_qualified_and_package_imports_identical(self):
+        import importlib
+        import monitor
+        # Native workflows use both legal import forms. A test reload cannot
+        # leave them referring to different SDK classes/root facades.
+        first=load()
+        self.assertIs(first,sys.modules['monitor.issue_tracker_sdk_authentication'])
+        self.assertIs(first,getattr(monitor,'issue_tracker_sdk_authentication',None))
+        second=load()
+        from monitor import issue_tracker_sdk_authentication as package_import
+        self.assertIsNot(first,second)
+        self.assertIs(second,package_import)
+        self.assertIs(second,importlib.import_module('monitor.issue_tracker_sdk_authentication'))
 
     def test_g1_cloud_project_requires_fixed_source_and_native_auth_without_caller_unit(self):
         self.assertTrue(hasattr(self.module, '_fixed_cloud_project_inputs'),

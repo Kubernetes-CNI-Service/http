@@ -2116,6 +2116,8 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 ## TC-REAL-REQ7-GLOBAL-ATTEMPT-001 — 共享 UNKNOWN 屏障与全局意图计数
 
+- 完成流程 no-resend 补充（**NOT RUN / REAL_ENV REQUIRED**）：原始 WIRE handoff 及每次 live CLAIM 检查拒绝已开始的 completion（含 partial），不创建 dispatch／启动子进程；出现 COMPLETE 标记后不新增原始 ATTEMPT，无效标记也只 HOLD、不作远端证明。独立 direct／双锁 workflow 与真实固定读取→完成落盘→拒绝再次计数／claim 的本地回归保留原 UNKNOWN、计数、journal、proof、预留及 outbox；不释放 FIFO／高水位，不授权在线发送。现场另获精确一次性副本和故障注入授权后留存原件 stat/inode/SHA、计数／claim／completion 物理顺序、实际零新增请求及失败后状态；清理只限自有 fixture。没有省略或合并原场景，真实断电与 Stage O 仍未验证，原门禁有效。
+
 - Case ID：`TC-REAL-REQ7-GLOBAL-ATTEMPT-001`；类型：durable / integration；对应 C-6/C-7/C-14/C-19。状态：**NOT RUN / REAL_ENV REQUIRED**。涉及 `monitor/issue_tracker_global_attempt_journal.py`、`monitor/issue_tracker_spreadsheet_owner.py`、`monitor/issue_tracker_send_intent.py`、`monitor/issue_tracker_local_commit.py`。本地合成 root 元数据、原生 fsync／NOREPLACE／独立进程及多脚本流程不是部署或 REQ7 整体证明。
 - 风险与目标：共享 spreadsheet 私有目录保存完整 action、wire、原目标/策略/白名单及链式 UNKNOWN 意图；已有单元保守阻断任意项目的新 generation/publish/sheet。M=6 是六次意图，真实尝试上界只有在固定受审 launcher 原子单次消费、每次新鲜准入与没有隐藏重发的完整证明后成立。本库不联网，不证明两份 local/global journal 的原子转移、FIFO 或 COMPLETE。
 - 前置条件：owner 另获精确 Stage O/部署授权、共享同 inode 持久根与 root 0700/0600 身份、真实 Linux NOREPLACE/fsync 支持、部署 Python/平台/依赖身份、实际不可变 protected 作业/manifest/nonce、配置白名单、continuity/recovery/reservation 和单次 capability。没有这些前提保持 HOLD；本卡不授权发凭据请求或运行真实 root 写者。
