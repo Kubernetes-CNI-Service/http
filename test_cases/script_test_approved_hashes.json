@@ -1,31 +1,4 @@
 {
-  "full_suite_attestation": {
-    "environment": {
-      "container_toplevel_lock_sha256": "3532f5208b462243bab779b01eb4deb21638ac05a9390c17ac997ba8d7f24998",
-      "container_toplevel_versions": [
-        "Jinja2==3.1.6",
-        "openpyxl==3.1.5",
-        "pandas==2.3.3",
-        "PyYAML==6.0.3",
-        "XlsxWriter==3.2.9"
-      ],
-      "machine": "arm64",
-      "platform": "darwin",
-      "python_cache_tag": "cpython-39",
-      "python_executable": "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/bin/python3.9",
-      "python_implementation": "CPython",
-      "python_version": [
-        3,
-        9,
-        6
-      ]
-    },
-    "scenario_coverage": {
-      "root-entrypoint-workflow": "NOT COVERED (requires Linux EUID 0 private namespace)"
-    },
-    "schema_version": 1,
-    "snapshot_sha256": "fe1ed87511cb5c0ba13e8cb7fee1c19f56a076aa9e964c96dd5964ce5002daca"
-  },
   "impact_manifest_sha256": "de5b492474953c4289a9d80d2c13664ddf4fd5f119511d4f78c684ee70b26d64",
   "schema_version": 1,
   "scripts": {
@@ -730,11 +703,11 @@
     "infra/infra-neutral.conf": "238bec3c9be34fc5a7bf097e36012133da4a30b90cabdf17d758796ecdab24f8",
     "requirements-container-top-level.lock": "3532f5208b462243bab779b01eb4deb21638ac05a9390c17ac997ba8d7f24998",
     "requirements-dev.txt": "2047cfeb6e7d7c3b02380624cd212528fb8416cf3e76dd924d2e2cba8567a50a",
-    "test_cases/REAL_ENVIRONMENT.md": "c9e271fa230370a9b0572b432015eb39ea615511196d75f7aaa118241f9e83fd",
+    "test_cases/REAL_ENVIRONMENT.md": "fff413be7586ff24a0a48da71dbd9e1b774af0136c974c995b9fcdffba7a0c25",
     "test_cases/audit_public_tree.py": "82a0c8dbb507f8ee21b1781eba4f4d4e158142a3c7d3c70da8c1cd2e1daae433",
     "test_cases/module_loader.py": "ef1e9b44f0272209378788ed6682b8a6a68c95a76a6d545c001ddc4762471ecf",
     "test_cases/monitor_authority_root_warden.py": "f4ac61acc04af33168aa01ba295a74fe036202b9179ad65f10e9db87375a2c4c",
-    "test_cases/monitor_authority_source_guard.py": "4c3a6a668c98c01fb7822085c2aaffcbafa024fcdbf04b04f6a6566d78797c7b",
+    "test_cases/monitor_authority_source_guard.py": "81cd37cdc33362465132f63900eed5478bbfb34d8811cf404bfe8ca0463df842",
     "test_cases/public_project_fixture.py": "744c3d2b8dc0e1b6c0c64b314e5fe7862684a08ce177c94baa1736a5e5a2aef8",
     "test_cases/run_monitor_authority_entrypoints.sh": "fe081b5f79247da24937f2f3342ab6a9104c88b437ef206f2f39807832b13599",
     "test_cases/run_related_tests.py": "a7733c535e4f58159156ff1650167ae9e8a1c2932e4c511683b32e93d5fa9236",
@@ -896,9 +869,9 @@
     "test_cases.test_load_release_transaction": "a3e3573e0060f67db7ca5bb832e68c63ca5964b2d723245a77f1eee9f8ac6d99",
     "test_cases.test_manual_applied_config": "c9dfc264bcc07e6a7b957ec14053761280bf9072834e49e51bc4c714cb5f8f02",
     "test_cases.test_mlag_evpn_generation": "7eb9edb511bc66c616b214903fbeef5c77df112c27990750fd6fb006a507cd7a",
-    "test_cases.test_monitor_authority_entrypoints": "b40ed42fdac6c5fbc8a685514ad69452685e37691d7ada9458b6d5f4e1c302ae",
+    "test_cases.test_monitor_authority_entrypoints": "3dcaec9f9ce3a2c3f15353ae8a0cd1368220539f01ac2f69d72412776dc57894",
     "test_cases.test_monitor_authority_semantic_workflow": "62f1eb2993672b6908669bb800cd5a4f11323a3abd24741cc4d38e0d884e9bc9",
-    "test_cases.test_monitor_authority_source_guard": "bb1fd10fc83f7e4de2ae8c87c39cb5c3fd304fdfbc8a8404087e271d25db156e",
+    "test_cases.test_monitor_authority_source_guard": "3ac6244635a08701f26fbd8990ccd7120c6a1f00d2dd9eea5533590a5226b50b",
     "test_cases.test_monitor_derived_parent_release": "e9f276926053195a3387a6a7234e3402960a967352253fea25490dab6e6f9717",
     "test_cases.test_monitor_failure_detail_ui": "1052772aa293ae09cb1b85cfc5a66b6482f572e7044ec64294575e3e87c46986",
     "test_cases.test_monitor_failure_detail_workflow": "9036276b066256f239453a21d9d0690b90364dcdef4f32dec9214e777efad6c7",
