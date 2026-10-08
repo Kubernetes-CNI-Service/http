@@ -31,6 +31,27 @@ def load():
 
 
 class Req7HistoryReadLauncherDirectTests(unittest.TestCase):
+    def test_g1_project_read_requires_original_issued_auth_not_decoded_or_caller_project(self):
+        module=load()
+        self.assertTrue(hasattr(module,'OwnedProjectSheetsReadUnit'),
+                        'G1 fixed read must bind the original live Cloud authentication')
+        self.assertTrue(hasattr(module,'require_current_owned_project_read'))
+        from monitor import issue_tracker_token_launcher as auth
+        from monitor.issue_tracker_online_target import OnlineTargetBinding
+        nonce='a'*64
+        value=auth._decode_project_completion(auth._canonical({'schema_version':2,'nonce':nonce,
+            'token':'synthetic-token','expires_at':time.time()+3600,'runtime_warnings':[],
+            'cloud_project_id':'synthetic-cloud-project','credential_sha256':'b'*64}),nonce)
+        binding=OnlineTargetBinding(TARGET,'a'*64,'b'*64)
+        with mock.patch.object(module.subprocess,'Popen') as launch:
+            for candidate in (value,value.token,SimpleNamespace(token=value.token,cloud_project_id=value.cloud_project_id)):
+                with self.subTest(candidate=type(candidate).__name__),self.assertRaises(module.HistoryReadLauncherHold) as caught:
+                    module.OwnedProjectSheetsReadUnit(object(),object(),binding,candidate,read_kind='metadata')
+                self.assertIsNone(caught.exception.__context__)
+            with self.assertRaises(module.HistoryReadLauncherHold):
+                module.require_current_owned_project_read(object(),object(),binding,object(),value,read_kind='metadata')
+            launch.assert_not_called()
+
     def test_unheld_project_or_sheet_refuses_before_launch(self):
         module = load()
         from monitor.issue_tracker_online_target import OnlineTargetBinding
@@ -160,6 +181,126 @@ with ExitStack() as stack:
  result=launcher._history_child(sys.argv[2])
 raise SystemExit(result)
 ''' % (str(self.root),port)
+
+    def project_auth(self,stack,ownership,owner,binding):
+        """Real fixed FD -> public SDK -> native OAuth TLS -> owned child."""
+        from test_req7_sdk_authentication import fresh_info
+        from test_req7_token_launcher import Req7FixedTokenLauncherWorkflowTests
+        from monitor import issue_tracker_token_launcher as auth, issue_tracker_sdk_authentication as sdk
+        stack.enter_context(scoped_fixture(self.root,sdk))
+        credential=self.root/'var/lib/http-ztp-container/service-account/cre.json'
+        if credential.exists(): original=credential.read_bytes()
+        else:
+            info=fresh_info(); info['project_id']='synthetic-cloud-project'
+            original=json.dumps(info).encode(); credential.write_bytes(original); credential.chmod(0o600)
+        body=b'{"access_token":"owned-project-token","expires_in":3600}'
+        reply=b'HTTP/1.1 200 OK\r\nContent-Length: '+str(len(body)).encode()+b'\r\nConnection: close\r\n\r\n'+body
+        with self.server(reply) as (records,errors),ExitStack() as launched:
+            port=socket.getaddrinfo('oauth2.googleapis.com',443)[0][4][1]
+            program=Req7FixedTokenLauncherWorkflowTests.child_fixture(self,port,project_scope=True)
+            native=subprocess.Popen; children=[]
+            def launch(argv,**kwargs):
+                self.assertEqual([str(Path(sys.executable).resolve()),'-I','-B','-c'],argv[:4])
+                self.assertEqual(auth._PROJECT_CHILD_PROGRAM,argv[4]); self.assertEqual(str(ROOT),argv[5])
+                self.assertEqual(7,len(argv)); self.assertEqual({'LC_ALL':'C'},kwargs['env'])
+                self.assertIs(kwargs['stdin'],subprocess.DEVNULL)
+                self.assertEqual((ownership.owner_lock_fd(owner,binding),),kwargs['pass_fds'])
+                changed=list(argv); changed[4]=program
+                child=native(changed,**kwargs); children.append(child); return child
+            launched.enter_context(mock.patch.object(auth,'subprocess',SimpleNamespace(Popen=launch,PIPE=subprocess.PIPE,DEVNULL=subprocess.DEVNULL)))
+            with self.assertWarnsRegex(FutureWarning,'Python version 3.9 past its end of life') if sys.version_info[:2]==(3,9) else ExitStack():
+                value=auth.OwnedProjectTokenRefreshUnit(owner,binding).refresh_once()
+            self.assertEqual(1,len(children)); self.assertEqual(0,children[0].returncode)
+            self.assertTrue(children[0].stdout.closed); self.assertTrue(children[0].stderr.closed)
+        self.assertEqual([],errors); self.assertEqual(1,len(records)); self.assertEqual(original,credential.read_bytes())
+        return value,credential,original
+
+    def test_g1_real_auth_and_metadata_read_share_original_project_not_equal_token_or_copy(self):
+        from dataclasses import replace
+        module=load()
+        self.assertTrue(hasattr(module,'OwnedProjectSheetsReadUnit'))
+        from monitor import issue_tracker_token_launcher as auth
+        with ExitStack() as stack:
+            _local,ownership,writer,owner,binding,_token,config=self.owners(stack)
+            value,credential,original=self.project_auth(stack,ownership,owner,binding)
+            body=b'{"matchedDeveloperMetadata":[]}'
+            reply=b'HTTP/1.1 200 OK\r\nContent-Length: '+str(len(body)).encode()+b'\r\nConnection: close\r\n\r\n'+body
+            with self.server(reply,hostname='sheets.googleapis.com',destination='sheets.googleapis.com') as (records,errors),ExitStack() as launched:
+                port=socket.getaddrinfo('sheets.googleapis.com',443)[0][4][1]
+                calls,children=self.intercept(launched,self.child_fixture(port),writer,owner,binding)
+                unit=module.OwnedProjectSheetsReadUnit(writer,owner,binding,value,read_kind='metadata')
+                result=unit.read_once()
+                plan,project,digest=module.require_current_owned_project_read(writer,owner,binding,result,value,read_kind='metadata')
+                self.assertEqual('synthetic-cloud-project',project); self.assertEqual(hashlib.sha256(original).hexdigest(),digest)
+                self.assertEqual(('Authorization','Bearer owned-project-token'),plan.headers[1])
+                self.assertEqual(body,result.data); self.assertFalse(hasattr(result,'inventory_complete'))
+                for response,authentication in ((replace(result),value),(result,replace(value)),(result,replace(value,cloud_project_id='foreign-cloud-project'))):
+                    with self.assertRaises(module.HistoryReadLauncherHold):
+                        module.require_current_owned_project_read(writer,owner,binding,response,authentication,read_kind='metadata')
+                # A second valid auth acquisition with the same returned token
+                # is not the original auth acquisition bound to this read.
+                second,_credential,_original=self.project_auth(stack,ownership,owner,binding)
+                self.assertEqual(value.token.value,second.token.value)
+                auth.require_current_owned_project_token(owner,binding,value)
+                auth.require_current_owned_project_token(owner,binding,second)
+                with self.assertRaises(module.HistoryReadLauncherHold):
+                    module.require_current_owned_project_read(writer,owner,binding,result,second,read_kind='metadata')
+                with self.assertRaises(module.HistoryReadLauncherHold): unit.read_once()
+                self.assertEqual(1,len(calls)); self.assertEqual(0,children[0].returncode)
+            self.assertEqual([],errors); self.assertEqual(1,len(records)); self.assertEqual(b'{"dataFilters":[{"developerMetadataLookup":{}}]}',records[0][2])
+            self.assertIn(b'Authorization: Bearer owned-project-token\r\n',records[0][1])
+            with mock.patch.object(module,'_monotonic',return_value=time.monotonic()+31),self.assertRaises(module.HistoryReadLauncherHold):
+                module.require_current_owned_project_read(writer,owner,binding,result,value,read_kind='metadata')
+            with mock.patch.object(auth,'time',SimpleNamespace(time=lambda:value.token.expires_at)),self.assertRaises(module.HistoryReadLauncherHold):
+                module.require_current_owned_project_read(writer,owner,binding,result,value,read_kind='metadata')
+            # Even a real legacy read using the exact issued token cannot be
+            # retroactively tagged as an original project-bound read.
+            with self.server(reply,hostname='sheets.googleapis.com',destination='sheets.googleapis.com') as (records,errors),ExitStack() as launched:
+                port=socket.getaddrinfo('sheets.googleapis.com',443)[0][4][1]
+                calls,children=self.intercept(launched,self.child_fixture(port),writer,owner,binding)
+                legacy=module.OwnedSheetsReadUnit(writer,owner,binding,value.token,read_kind='metadata').read_once()
+                module.require_current_owned_read(writer,owner,binding,legacy,read_kind='metadata')
+                with self.assertRaises(module.HistoryReadLauncherHold):
+                    module.require_current_owned_project_read(writer,owner,binding,legacy,value,read_kind='metadata')
+                self.assertEqual(1,len(calls)); self.assertEqual(0,children[0].returncode)
+            self.assertEqual([],errors); self.assertEqual(1,len(records)); self.assertEqual(body,legacy.data)
+            credential.write_bytes(original+b'\n')
+            with self.assertRaises(module.HistoryReadLauncherHold):
+                module.require_current_owned_project_read(writer,owner,binding,result,value,read_kind='metadata')
+            credential.write_bytes(original)
+            config.write_text(json.dumps(document(status='disabled')))
+            with self.assertRaises(module.HistoryReadLauncherHold):
+                module.require_current_owned_project_read(writer,owner,binding,result,value,read_kind='metadata')
+        with self.assertRaises(module.HistoryReadLauncherHold):
+            module.require_current_owned_project_read(writer,owner,binding,result,value,read_kind='metadata')
+
+    def test_g1_credential_drift_before_or_during_read_never_issues_project_observation(self):
+        module=load()
+        self.assertTrue(hasattr(module,'OwnedProjectSheetsReadUnit'))
+        with ExitStack() as stack:
+            _local,ownership,writer,owner,binding,_token,_config=self.owners(stack)
+            value,credential,original=self.project_auth(stack,ownership,owner,binding)
+            unit=module.OwnedProjectSheetsReadUnit(writer,owner,binding,value,read_kind='metadata')
+            credential.write_bytes(original+b'\n')
+            with mock.patch.object(module.subprocess,'Popen') as launch:
+                with self.assertRaises(module.HistoryReadLauncherHold): unit.read_once()
+                with self.assertRaises(module.HistoryReadLauncherHold): unit.read_once()
+                launch.assert_not_called()
+            credential.write_bytes(original)
+            def respond(transport):
+                credential.write_bytes(original+b'\n')
+                transport.sendall(b'HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}')
+            with self.server(respond,hostname='sheets.googleapis.com',destination='sheets.googleapis.com') as (records,errors),ExitStack() as launched:
+                port=socket.getaddrinfo('sheets.googleapis.com',443)[0][4][1]
+                calls,children=self.intercept(launched,self.child_fixture(port),writer,owner,binding)
+                unit=module.OwnedProjectSheetsReadUnit(writer,owner,binding,value,read_kind='metadata')
+                with module._PROJECT_READ_GUARD: before=tuple(module._PROJECT_READS)
+                with self.assertRaises(module.HistoryReadLauncherHold): unit.read_once()
+                with module._PROJECT_READ_GUARD: self.assertEqual(before,tuple(module._PROJECT_READS))
+                with self.assertRaises(module.HistoryReadLauncherHold): unit.read_once()
+                self.assertEqual(1,len(calls)); self.assertEqual(0,children[0].returncode)
+            self.assertEqual([],errors); self.assertEqual(1,len(records)); self.assertEqual(original+b'\n',credential.read_bytes())
+            credential.write_bytes(original)
 
     def test_fixed_private_read_uses_native_tls_once_and_both_locks_remain_held(self):
         module=load(); body=b'{"spreadsheetId":"synthetic","sheets":[]}'

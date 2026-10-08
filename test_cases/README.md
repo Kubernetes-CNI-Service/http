@@ -889,6 +889,14 @@ G1 的固定项目认证补充仍为未安装的必要来源层：独立 v2 私�
 及 30 秒预算不变。owner 已确认专用表／单一 Cloud 项目写 metadata 的限制；
 本层不证明历史隐藏 metadata 不存在，也未接入完整库存、准入或发送边界。
 可见容量计量仍 `VISIBLE_ONLY_UNPROVED`，G1 与 REQ7 整项仍未关闭。
+项目认证来源另与实际固定只读 launcher 接通：`OwnedProjectSheetsReadUnit`
+只消费实际签发的原认证对象，启动前及完整回包后复核固定凭据、原双 owner、
+当前目标策略和原 30 秒截止期；后续消费只接受该次认证与该次原读取对象。
+同值 token 的另一次成功认证、复制／解码对象或使用相同 token 的 legacy 真实读取
+不能取得这份来源登记。公有 SDK→原生 OAuth→双锁→私有 stdin→原生 Sheets
+metadata search 的本地真实流程及读取前／中凭据漂移拒绝均保留原预算、不重试。
+来源接通仍不证明专用表／历史项目排他、不构成原子库存或配额保留、发送许可；
+完整 G1 容量与最终 worker 准入尚未接入，现场卡仍 NOT RUN。
 `test_req7_settings_audit_allocation` 从持有实际项目 ACTIVE 锁的 C25 原始事件链、
 最高 current、INITIALIZED 和逐事件 outbox 投影导出审计行；调用方不能伪造队列、
 revision、时间或内容。双 owner 下把真实非空单元的原始审计固定到项目

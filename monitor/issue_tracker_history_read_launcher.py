@@ -29,6 +29,8 @@ _NONCE = re.compile(r'[0-9a-f]{64}\Z')
 _LIMIT = 2*1024*1024
 _READS = weakref.WeakKeyDictionary()
 _READ_GUARD = threading.Lock()
+_PROJECT_READS = weakref.WeakKeyDictionary()
+_PROJECT_READ_GUARD = threading.Lock()
 _CHILD_PROGRAM = '''import sys
 sys.path[:0]=[sys.argv[1],sys.argv[1]+"/tools"]
 from monitor.issue_tracker_history_read_launcher import _history_child
@@ -82,6 +84,38 @@ def require_current_owned_read(writer_token,owner_token,binding,completion,*,rea
         inspect_project_online_target(writer_token,binding)
         if _monotonic() >= deadline: raise HistoryReadLauncherHold()
         result=plan
+    except Exception: failed=True
+    if failed: raise HistoryReadLauncherHold()
+    return result
+
+
+def require_current_owned_project_read(writer_token,owner_token,binding,completion,authentication,*,
+                                       read_kind,sheet=None,row=None):
+    """Original project-auth acquisition and actual fixed read, not G1 GO.
+
+    Same-valued tokens, decoded objects, other successful auth acquisitions and
+    standalone legacy reads cannot provide this provenance. Both original
+    owners, current target/fixed credentials, token expiry, exact read shape
+    and original read deadline still have to hold. No dedicated-table claim,
+    historical visibility proof, reservation authority or send is supplied.
+    """
+    failed=False
+    try:
+        if type(completion) is not SupervisedSheetsReadCompletion: raise HistoryReadLauncherHold()
+        with _PROJECT_READ_GUARD: original=_PROJECT_READS.get(completion)
+        if authentication is not original or original is None: raise HistoryReadLauncherHold()
+        from monitor.issue_tracker_token_launcher import require_current_owned_project_token
+        project,digest=require_current_owned_project_token(owner_token,binding,original)
+        plan=require_current_owned_read(writer_token,owner_token,binding,completion,
+            read_kind=read_kind,sheet=sheet,row=row)
+        if plan.headers[1]!=('Authorization','Bearer '+original.token.value): raise HistoryReadLauncherHold()
+        if require_current_owned_project_token(owner_token,binding,original)!=(project,digest):
+            raise HistoryReadLauncherHold()
+        # Fixed-source revalidation must not carry the original read past its
+        # deadline or survive project policy/owner revocation in that interval.
+        require_current_owned_read(writer_token,owner_token,binding,completion,
+            read_kind=read_kind,sheet=sheet,row=row)
+        result=plan,project,digest
     except Exception: failed=True
     if failed: raise HistoryReadLauncherHold()
     return result
@@ -214,11 +248,18 @@ class OwnedSheetsReadUnit:
         self._guard=threading.Lock(); self._used=False
 
     def read_once(self):
+        return self._read_once()
+
+    def _read_once(self,*,project_auth=None):
         with self._guard:
             used=self._used; self._used=True
         if used: raise HistoryReadLauncherHold()
         started=time.monotonic(); failed=False; confirmed=False; process=None
         try:
+            if project_auth is not None:
+                from monitor.issue_tracker_token_launcher import require_current_owned_project_token
+                require_current_owned_project_token(self._owner,self._binding,project_auth)
+                if self._token is not project_auth.token: raise HistoryReadLauncherHold()
             from monitor.issue_tracker_local_commit import _owner
             from monitor.issue_tracker_spreadsheet_owner import owner_lock_fd
             from monitor.issue_tracker_online_target import inspect_project_online_target
@@ -246,6 +287,11 @@ class OwnedSheetsReadUnit:
             if _owner(self._writer) is not project or owner_lock_fd(self._owner,self._binding) != sheet_fd:
                 raise HistoryReadLauncherHold(True)
             result=_decode_completion(completion.data,nonce,path_digest)
+            if project_auth is not None:
+                require_current_owned_project_token(self._owner,self._binding,project_auth)
+                inspect_project_online_target(self._writer,self._binding)
+                if _owner(self._writer) is not project or owner_lock_fd(self._owner,self._binding)!=sheet_fd:
+                    raise HistoryReadLauncherHold(True)
             if _monotonic() >= started+_BUDGETS['read']: raise HistoryReadLauncherHold(True)
             # Private identity registry, not dataclass equality or caller hashes.
             # Only this actual successful supervised/fresh-owner launch issues
@@ -253,6 +299,8 @@ class OwnedSheetsReadUnit:
             with _READ_GUARD:
                 _READS[result]=(self._writer,self._owner,self._binding,project,sheet_fd,
                     self._kind,self._sheet,self._row,prepared,result.data,started+_BUDGETS['read'])
+            if project_auth is not None:
+                with _PROJECT_READ_GUARD: _PROJECT_READS[result]=project_auth
         except Exception as error:
             failed=True
             if isinstance(error,AttemptHold): confirmed=error.termination_confirmed
@@ -264,6 +312,23 @@ class OwnedSheetsReadUnit:
                         except OSError: failed=True
         if failed: raise HistoryReadLauncherHold(confirmed)
         return result
+
+
+class OwnedProjectSheetsReadUnit(OwnedSheetsReadUnit):
+    """Fixed read shapes with original owned auth provenance; never a permit."""
+    def __init__(self,writer_token,owner_token,binding,authentication,*,read_kind,sheet=None,row=None):
+        failed=False
+        try:
+            from monitor.issue_tracker_token_launcher import require_current_owned_project_token
+            require_current_owned_project_token(owner_token,binding,authentication)
+            super().__init__(writer_token,owner_token,binding,authentication.token,
+                             read_kind=read_kind,sheet=sheet,row=row)
+        except Exception: failed=True
+        if failed: raise HistoryReadLauncherHold()
+        self._authentication=authentication
+
+    def read_once(self):
+        return self._read_once(project_auth=self._authentication)
 
 
 class OwnedHistoryTailReadUnit(OwnedSheetsReadUnit):
