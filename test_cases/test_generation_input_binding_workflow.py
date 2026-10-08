@@ -5696,6 +5696,9 @@ finally:
     def test_real_setup_publication_b_retirement_writer_death_requires_new_process_health(self):
         self._real_setup_publication_writer_death("selector", b_preflight="activate-retire-death")
 
+    def test_real_setup_publication_retirement_marker_fsync_aba_preserves_wal(self):
+        self._real_setup_publication_writer_death("selector", b_preflight="activate-retire-marker-aba")
+
     def test_real_setup_publication_main_service_gate_accepts_only_original_b(self):
         self._real_setup_publication_writer_death("selector", b_preflight="activate-retire-gate")
 
@@ -5889,6 +5892,20 @@ try:
         api.quiesce_services = stop
         api.restore_cross_project_rollback_context = forbidden
         original_wal = token['payload'] if token is not None else None
+        if sys.argv[5] == 'activate-retire-marker-aba':
+            original_fsync, injected = api.os.fsync, []
+            def marker_aba(fd):
+                original_fsync(fd)
+                marker = api._setup_switch_retirement_path()
+                if not injected and marker.exists() and os.fstat(fd).st_ino == marker.lstat().st_ino:
+                    before, payload = marker.lstat(), marker.read_bytes()
+                    marker.write_bytes(b'independent cold marker ABA\n')
+                    marker.write_bytes(payload)
+                    os.utime(marker, ns=(before.st_atime_ns, before.st_mtime_ns))
+                    assert before.st_ino == marker.lstat().st_ino
+                    assert before.st_ctime_ns != marker.lstat().st_ctime_ns
+                    injected.append(payload)
+            api.os.fsync = marker_aba
         if sys.argv[5] == 'activate-retire-death':
             original_sync = api._fsync_parent_directory
             def death_after_archive(path):
@@ -5915,6 +5932,15 @@ try:
                 status = api.activate_setup_switch_b_publication(token, guard=guard, inputs=inputs,
                     images={'eth': image}, confirmed=True, retire=sys.argv[5].startswith('activate-retire'))
         except api.LoadError as exc:
+            if sys.argv[5] == 'activate-retire-marker-aba':
+                assert 'marker owner' in str(exc) and 'HOLD' in str(exc), str(exc)
+                assert len(injected) == 1
+                assert active == set() and actions == [('start', 'apache2'), ('stop', 'all')], actions
+                assert original_wal == api._setup_switch_journal_path().read_bytes()
+                assert injected[0] == api._setup_switch_retirement_path().read_bytes()
+                assert not list(api.MANIFEST.parent.glob('.setup-switch-retired-*.json'))
+                print('R22_RETIREMENT_MARKER_ABA_HELD_ORIGINAL_WAL')
+                sys.exit(0)
             assert sys.argv[5] == 'activate-fail' and 'B health rejection' in str(exc), str(exc)
             assert active == set() and actions == [('start', 'apache2'), ('stop', 'all')], actions
             status = 'b-health-failed-stopped-wal-retained'
@@ -6017,6 +6043,15 @@ finally:
                 self.assertEqual(wal, journal.read_bytes())
                 self.assertEqual(q_manifest, manifest.read_bytes())
                 self.assertFalse((root / "service-started").exists())
+                return
+            if b_preflight == "activate-retire-marker-aba":
+                self.assertEqual(0, recovered.returncode, recovered.stdout + recovered.stderr)
+                self.assertIn("R22_RETIREMENT_MARKER_ABA_HELD_ORIGINAL_WAL", recovered.stdout)
+                self.assertEqual(wal, journal.read_bytes())
+                self.assertEqual(parent_bytes, parent_path.read_bytes())
+                self.assertEqual(q_manifest, manifest.read_bytes())
+                self.assertTrue((manifest.parent / ".setup-switch-retirement.json").is_file())
+                self.assertEqual([], list(manifest.parent.glob(".setup-switch-retired-*.json")))
                 return
             if b_preflight == "activate-retire-death":
                 self.assertEqual(-signal.SIGKILL, recovered.returncode, recovered.stdout + recovered.stderr)

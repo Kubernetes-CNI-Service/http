@@ -1634,6 +1634,15 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 ## TC-REAL-R22-GENERATION-INPUT-ABA-001 — 跨进程输入换代与多输出一致性
 
+- 2026-10-08 退休 marker 持久化窗口仍待真机见证：在本卡的隔离/root-only
+  快照条件下，对已完成本次 B 健康检查的退休 marker 文件 fsync 边界注入
+  同 inode、同最终字节、恢复 mtime 的 ABA。必须以 fsync 前的原九字段
+  FD/name 身份拒绝，停止本次 B、保留原 WAL 和原 marker，不生成归档、
+  不释放新 LOAD 围栏。再核合法归档中断后的新进程重做健康，不复用旧 PASS。
+  保存前后 stat/ctime/SHA、原断言、真实停服状态、fsync/rename 物理时序；
+  清理仅人工恢复已核私有快照。本地 direct 和真实 SETUP 强杀→新 LOAD
+  负例不构成 Linux/断电或完整 prefix/DHCP/A 证据归档见证。
+
 - 2026-10-08 原 A 显式健康激活仍 OPEN：仅在本卡已授权的可丢弃隔离 VM、
   精确源码/测试/manifest、独立控制台、root-only 可恢复快照、排他部署锁、
   Apache/DHCP 已停及其它正常写者静默条件下执行。Q 首写前独立冻结原 A

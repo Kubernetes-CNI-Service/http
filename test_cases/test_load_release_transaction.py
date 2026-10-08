@@ -3187,6 +3187,35 @@ class ReleaseTransactionTests(unittest.TestCase):
         self.assertEqual({"apache2", "isc-dhcp-server"}, active)
         self.assertEqual(frozen, (state[-3].lstat().st_ino, state[-3].read_bytes()))
 
+    def test_b_retirement_marker_fsync_same_inode_aba_holds_original_wal(self):
+        state, _context, guard, token, inputs = self._prepare_published_q_for_stopped_preflight(no_upgrade=True)
+        active = set()
+        self._with_independent_b_health(active)
+        marker = state[-3].parent / ".setup-switch-retirement.json"
+        original_sync = LOAD.os.fsync
+        injected = []
+        def aba_on_marker_sync(fd):
+            original_sync(fd)
+            if not injected and marker.exists() and os.fstat(fd).st_ino == marker.lstat().st_ino:
+                before, payload = marker.lstat(), marker.read_bytes()
+                marker.write_bytes(b'independent foreign marker bytes\n')
+                marker.write_bytes(payload)
+                os.utime(marker, ns=(before.st_atime_ns, before.st_mtime_ns))
+                injected.append((before, payload))
+                self.assertEqual(before.st_ino, marker.lstat().st_ino)
+                self.assertNotEqual(before.st_ctime_ns, marker.lstat().st_ctime_ns)
+        with mock.patch.object(LOAD.os, "fsync", side_effect=aba_on_marker_sync):
+            with self.assertRaisesRegex(LOAD.LoadError, "marker owner.*HOLD"):
+                LOAD.activate_setup_switch_b_publication(token, guard=guard, inputs=inputs,
+                    images={}, confirmed=True, retire=True)
+        self.assertEqual(1, len(injected))
+        self.assertEqual(set(), active)
+        self.assertEqual(token["payload"], state[-3].read_bytes())
+        self.assertEqual(injected[0][1], marker.read_bytes())
+        self.assertEqual([], list(state[-3].parent.glob(".setup-switch-retired-*.json")))
+        with self.assertRaisesRegex(LOAD.LoadError, "retirement|HOLD"):
+            LOAD.require_no_pending_setup_switch_journal()
+
     def test_b_retirement_late_marker_rebind_is_retained_and_b_stops(self):
         state, _context, guard, token, inputs = self._prepare_published_q_for_stopped_preflight(no_upgrade=True)
         active = set()

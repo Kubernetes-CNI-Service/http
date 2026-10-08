@@ -17185,8 +17185,12 @@ def _retire_setup_switch_b_publication(token, *, require_authority):
             with os.fdopen(os.dup(fd), "wb") as stream:
                 stream.write(payload)
                 stream.flush()
+                # Freeze the bytes' owner before yielding to durability I/O.
+                # A same-inode/mtime-restored ABA during fsync must not mint
+                # a new marker authority from our post-fsync observation.
+                marker["identity"] = _dhcp_a_preimage_receipt_identity(os.fstat(fd))
+                _require_setup_switch_retirement_owner(marker)
                 os.fsync(stream.fileno())
-            marker["identity"] = _dhcp_a_preimage_receipt_identity(os.fstat(fd))
             _require_setup_switch_retirement_owner(marker)
             _fsync_parent_directory(path.parent)
         except BaseException:

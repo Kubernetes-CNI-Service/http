@@ -2790,3 +2790,16 @@ FROZEN_STATE_MATCH=True → DIAGNOSTIC_END=0；读前后 stat 一致，已知旧
 此前暂停中断的 `r22-original-a-cli-boundaries-green.log` 原样保留，不算通过。
 本轮仍是有界诊断，不更新批准 ledger、不替代正式 related/full/check；安全归档、
 Linux/root 服务、断电/C2 和人工 ACK 尚未闭合。
+
+R22 归档后续审计独立复现退休 marker 的 fsync ABA：旧实现 fsync 后才冻结
+owner，接纳同 inode/同字节但 ctime 已变的外来写入，随后错误归档并放行。
+新增 direct 与真实 SETUP→Q 提交强杀→新 LOAD 负例，两项均先 FAIL；
+`r22-retirement-marker-fsync-aba-red.log` inode 163226048、size 129339、SHA256
+`e421c0a057cf3233bc8f8811512520ec84ad82da2c0cd88653afd577ac78c9d7`，
+Ran 2/FAILED 2/ACTUAL_UNITTEST_EXIT=1/FROZEN_STATE_MATCH=True/END=1。
+实现改为 flush 后、fsync 前冻结 FD/name 原 owner，深读并前后重核，原断言未改。
+`r22-retirement-marker-fsync-aba-green.log` inode 163228898、size 130481、SHA256
+`4a2736ed0c34b856b42674d17e5f29f57805e7bdc657fbef3bfff0868ec6217f`，
+7 tests in 18.603s、OK、实际 exit 0、冻结一致、完整 END=0；包含原正常归档、
+晚换绑、归档 rename 后中断与真实新进程再健康。两份日志读前后 stat 一致。
+这只是窄修诊断；不代表完整 A/prefix/DHCP 可恢复安全归档或正式 full proof。
