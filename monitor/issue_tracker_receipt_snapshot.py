@@ -13,7 +13,7 @@ from pathlib import Path
 import re
 
 from monitor.issue_tracker_admission import (
-    AdmissionHold, _EVENT_FIELDS, read_shared_local_admission,
+    AdmissionHold, _EVENT_FIELDS, _ADMISSION, _RETRY, read_shared_local_admission,
 )
 from monitor.issue_tracker_cycle_source import (
     CycleSourceHoldError, read_completed_cycle_evidence,
@@ -53,9 +53,11 @@ def _events(owner):
         return ()
     try:
         names = os.listdir(directory)
+        publication_names={name for name in names if _ADMISSION.fullmatch(name)}
         expected = {f"admission-{number:020d}.json"
-                    for number in range(1, len(names) + 1)}
-        if not names or set(names) != expected:
+                    for number in range(1, len(publication_names) + 1)}
+        if (not publication_names or publication_names != expected
+                or any(_ADMISSION.fullmatch(name) is None and _RETRY.fullmatch(name) is None for name in names)):
             raise LocalReceiptSnapshotHold("shared admission sequence is incomplete")
         return tuple(_json(_read(directory, name)[0], _EVENT_FIELDS)
                      for name in sorted(expected))
@@ -196,7 +198,8 @@ def read_current_cycle_local_receipts(
         events = _events(owner)
         if (latest is None) != (not events):
             raise LocalReceiptSnapshotHold("C6 admission visibility changed")
-        if latest is not None and events[-1] != latest:
+        if latest is not None and any(events[-1][field]!=latest[field] for field in (
+                'generation_id','published_sha256','project_key','scope','policy_sha256','publish_every_cycles')):
             raise LocalReceiptSnapshotHold("C6 admission changed during read")
         k_events = _k_events(owner)
         for event in events:
@@ -208,7 +211,8 @@ def read_current_cycle_local_receipts(
                 settings=settings, whitelist_sha256=whitelist_sha256,
                 qualified_source=qualified_source,
             )
-        if read_completed_cycle_evidence(store) != cycles or current_k(token) != settings:
+        if (read_completed_cycle_evidence(store) != cycles or current_k(token) != settings
+                or _events(owner)!=events or read_shared_local_admission(token,store,image)!=latest):
             raise LocalReceiptSnapshotHold("protected cycle or K changed during read")
         cycle_id = cycles[-1].cycle_id if cycles else None
         generations = tuple(event["generation_id"] for event in events

@@ -1185,6 +1185,18 @@ wire digest；未知、超时或 401/503 不刷新、不重发、不清 UNKNOWN�
 这个库仍未接在线 worker，新鲜 protected source/continuity、shared cadence、
 G1 隐藏 quota、older-cycle R2、FIFO 和 COMPLETE 仍须整链集成；不是功能 GO。
 
+`test_req7_shared_retry_admission` 验证 C23 的必要共享重试屏障：实际原 C6、
+项目／spreadsheet 双 owner、原单元持久次数与 automatic/manual/retry 共用
+collector interval-floor alias。INTENT 先落盘，原次数只增加一次后配对 COUNT；
+任一中断保留 orphan 并阻断所有 lane，不重置次数、不回填。记录实际准入时刻，
+不同 boot 或不可核验 interval HOLD；读取固定原目录及文件 stat/inode/字节，
+相同内容的替换目录不采用。重试推进共享时间／周期锚点但不创建新的 C6，
+不把旧收据算作当前周期新发布，也不绕过 automatic 的 N 个新周期要求。
+新增真实 protected Stage-L 流程在前后核当前 C5/C6 原件与 issued ALL business /
+History、W1/template/nonces，只在屏障内增加一个原次数。该接口仍限定 current-C6；
+固定 launcher 整链、G1 隐藏配额、older-cycle R2、FIFO、COMPLETE 未由此闭合。
+真机卡 `TC-REAL-REQ7-SHARED-RETRY-ADMISSION-001` 为 NOT RUN，不是在线 GO。
+
 `record_original_business_reserved_attempt_intent` 进一步在每次计数前后重开整个
 原始业务 journal（完整家族 manifest、全部发现／占用／精确行，含 NOOP），
 与原 enrollment、History 行预算、metadata 及适用 BOTH Cabling NV 一同核对。

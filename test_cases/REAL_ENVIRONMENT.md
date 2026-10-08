@@ -2288,3 +2288,11 @@ generation/publish 及 UNKNOWN 下改 action/wire 均 HOLD，不计作 COMPLETE 
 - 前置条件、权限：另获 owner 精确 Stage O 隔离副本授权；固定 root worker、跨项目同 spreadsheet 的唯一 OS 锁、继承锁的固定 launcher、每次新鲜准入、不可变完整 batch、双 enrollment 与 COMPLETE 对账闭合后才可接入。当前 API 只使用现有项目 C-6 owner，保守阻止所有新单元；不接受它作为完整 spreadsheet-wide ownership 或发送能力。
 - 步骤与独立预期：WIRE、HEADER 与每次 ATTEMPT 必须以 single-link 0600、目录 0700、no-follow held FD、atomic NOREPLACE 和文件／目录 fsync 保存；返回前后重核 ACTIVE token 和命名目录身份。第七次记录、wire 改变、部分／陌生记录、gap、链接及 barrier 失败必须 HOLD 且保留原像；意图落盘后进程死亡不能重置计数／UNKNOWN。必须独立证明固定发送器一次且仅一次消费每份新意图；六次记录本身不等于六次真实尝试。
 - 证据、清理与风险：记录精确命令／退出码、HEAD/tree/manifest/Python/平台、完整物理顺序日志、前后 stat/inode/大小/SHA 与 END、跨重启链、故障前后字节和计数。部分记录不自动修复或采用，新单元不夺取 UNKNOWN；无清理／重置入口。真实断电、卷回滚、跨项目锁和 orphan 存活保持 NOT RUN；只恢复获准私有隔离副本，禁止删除真实 journal、预留或 fence、禁止向外部 PID 发信号或输出私有 wire。
+
+## TC-REAL-REQ7-SHARED-RETRY-ADMISSION-001 — 原单元重试与 C23 同一准入域
+
+- Case ID：`TC-REAL-REQ7-SHARED-RETRY-ADMISSION-001`；类型：transaction / integration / real-environment；对应 C-19/C-23。状态：**NOT RUN / REAL_ENV REQUIRED**。本地 `test_req7_shared_retry_admission` direct/实际 C6 与双 owner workflow，以及 `test_issue_tracker_stage_l_consumer_workflow` 的真实 protected 源／原生只读／原计数 scenario 不代表现场发送或完整 REQ7。
+- 前置条件与权限：另获 owner 的 Stage O 一次性副本及原私有 state 精确授权。验证 collector alias、实际 clock/boot 身份、唯一项目和 spreadsheet owner、当前 C5/C6、原 ACTION/WIRE、fresh config/W1/template/nonces/ALL business/History 后，才验证必要 shared retry 屏障。固定 launcher 整链、hidden G1、older-cycle R2、FIFO 和 COMPLETE 尚须单独闭合；本卡不授权生产/在线修改。
+- 步骤与独立预期：automatic/manual/retry 只有一个 collector-floor limiter；retry 不受独立 N limiter，但推进共同时间及周期锚点。INTENT 在原 counted attempt 前持久化；COUNT 精确关联原 ATTEMPT SHA。每机会只增加一次，M=6 不重置；断电或异常造成 orphan 时所有 lane HOLD，不回填／采用／修复。重试不得生成 C6、伪造新周期发布或修改原件。实际准入时刻而非早期探测时间入记录；boot 不可核验、目录位移（含相同字节复制）、文件漂移均拒绝。
+- 证据：精确 HEAD/tree/dirty/diff、manifest、ledger、命令／退出码、Python/平台、完整物理顺序及 END、前后 stat/inode/大小/SHA256 与历史前缀；两把锁、实际 collector completion、clock/boot、前后原 C6 四件、原计数及 INTENT/COUNT 屏障逐项见证。保留 FAIL，不输出秘密正文或 token。
+- 故障注入与清理：只在精确批准的隔离副本做 fsync/异常退出、目录位移、计数间源／策略漂移、重启与 exhaustion。保留 UNKNOWN、orphan、原件和预留；不删除真实 state、不安装／发布、不触碰未知 PID、不以冷启动或人工重发清除不确定性。仅清理本卡拥有的临时 fixture；真机断电、boot、并发编辑与卷回滚仍 NOT RUN。

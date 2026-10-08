@@ -35,6 +35,23 @@ SCRIPTS = {
 
 
 class Req7TransportManifestCandidateTests(unittest.TestCase):
+    def test_shared_retry_has_direct_protected_workflow_and_not_run_registration(self):
+        manifest=json.loads((ROOT/'test_cases/script_test_manifest.json').read_text())
+        paths={'monitor/issue_tracker_admission.py','monitor/issue_tracker_global_attempt_journal.py',
+               'monitor/issue_tracker_receipt_snapshot.py'}
+        for path in paths:
+            self.assertTrue(any(path in rule['paths'] and 'test_cases.test_req7_shared_retry_admission' in rule['tests']
+                                for rule in manifest['test_rules']))
+        self.assertTrue(any(paths <= set(rule['members']) and
+            {'test_cases.test_req7_shared_retry_admission','test_cases.test_issue_tracker_stage_l_consumer_workflow'}
+            <= set(rule['tests']) for rule in manifest['workflows']))
+        source=(ROOT/'test_cases/REAL_ENVIRONMENT.md').read_text()
+        start=source.index('## TC-REAL-REQ7-SHARED-RETRY-ADMISSION-001')
+        end=source.find('\n## ',start+1)
+        card=source[start:] if end<0 else source[start:end]
+        for field in ('NOT RUN / REAL_ENV REQUIRED','前置条件','证据','清理','stat/inode','Stage O'):
+            self.assertIn(field,card)
+
     def test_original_fd_mutation_workflow_includes_durable_claim_and_total_supervision(self):
         manifest = json.loads((ROOT/'test_cases/script_test_manifest.json').read_text())
         required = {'monitor/issue_tracker_global_attempt_journal.py','monitor/issue_tracker_spreadsheet_owner.py',

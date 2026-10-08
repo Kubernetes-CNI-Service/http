@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, replace
+from contextlib import ExitStack
 import datetime as dt
 import hashlib
 import json
@@ -107,6 +108,11 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         self._exercise_real_protected_three_panel_fixture(skip_history=False,observed_cabling_insert_probe=True,
             business_preread_probe=True,original_reserved_probe=True,receipted_intent_probe=True,
             owned_read_gates_probe=True,owned_continuity_probe=True)
+
+    def test_actual_protected_sources_native_reads_and_c6_share_retry_admission_without_new_publication(self):
+        self._exercise_real_protected_three_panel_fixture(skip_history=False,observed_cabling_insert_probe=True,
+            business_preread_probe=True,original_reserved_probe=True,receipted_intent_probe=True,
+            owned_read_gates_probe=True,owned_continuity_probe=True,shared_retry_probe=True)
 
     def test_two_real_cycles_keep_keys_and_commit_latest_business_values(self):
         self._exercise_real_protected_three_panel_fixture(
@@ -467,6 +473,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         panel_counts_probe=False, source_unit_probe=False, receipted_source_probe=False, observed_source_probe=False,
         observed_switch_insert_probe=False, observed_cabling_insert_probe=False, business_preread_probe=False, original_reserved_probe=False, receipted_intent_probe=False,
         settings_audit_probe=False, owned_read_gates_probe=False, owned_continuity_probe=False, complete_preview_probe=False,
+        shared_retry_probe=False,
         complete_preview_source_race=False,
         complete_preview_cgi=False,
     ):
@@ -1789,6 +1796,60 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                                             with self.assertRaises(global_journal.GlobalAttemptHold):
                                                 record_owned({**original_bundle,'business_reads':tuple(changed)})
                                             self.assertEqual(0,global_journal.inspect_global_unit(spreadsheet_token,binding,unit).attempt_count)
+                                    if shared_retry_probe:
+                                        from types import SimpleNamespace
+                                        from monitor import issue_tracker_admission as admission
+                                        from monitor.issue_tracker_receipt_snapshot import read_current_cycle_local_receipts
+                                        from tools.project_contract import MIN_CONTINUOUS_INTERVAL_MINUTES
+                                        self.assertEqual(1,record_owned(fresh_bundle()).attempt_count)
+                                        prior=admission.read_shared_local_admission(writer_token,self.store,committed.prepared.xlsx_bytes)
+                                        now=prior['monotonic_ns']+MIN_CONTINUOUS_INTERVAL_MINUTES*60*1_000_000_000
+                                        original_receipts=read_current_cycle_local_receipts(writer_token,self.store,
+                                            expected_template_sha256=self.snapshot.workbook_sha256,settings=args['settings'],
+                                            whitelist_sha256=self.snapshot.whitelist.sha256,qualified_source=qualified)
+                                        bundle=fresh_bundle()
+                                        from monitor import issue_tracker_history_preread_journal as continuity_module
+                                        from monitor import issue_tracker_remote_history_match as gates_module
+                                        phases=[]
+                                        def traced(phase, original):
+                                            def call(*values, **options):
+                                                observed_phase=(phase+('_write' if values[3] else '_read')
+                                                    if phase=='_observe' else phase)
+                                                phases.append((observed_phase,'begin'))
+                                                try: result=original(*values, **options)
+                                                except Exception as exc:
+                                                    frames=[]; trace=exc.__traceback__
+                                                    while trace is not None:
+                                                        frames.append((Path(trace.tb_frame.f_code.co_filename).name,
+                                                            trace.tb_lineno,trace.tb_frame.f_code.co_name))
+                                                        trace=trace.tb_next
+                                                    print('SHARED_RETRY_PHASE_ERROR',observed_phase,type(exc).__name__,frames,flush=True)
+                                                    raise
+                                                phases.append((observed_phase,'complete'))
+                                                return result
+                                            return call
+                                        with ExitStack() as diagnostics:
+                                            diagnostics.enter_context(mock.patch.object(admission,'time',SimpleNamespace(monotonic_ns=lambda:now)))
+                                            for module,name in ((global_journal,'_receipted_original_facts'),
+                                                    (global_journal,'_observe'),
+                                                    (continuity_module,'observe_owned_business_continuity'),
+                                                    (gates_module,'observe_owned_unit_read_gates')):
+                                                diagnostics.enter_context(mock.patch.object(module,name,
+                                                    side_effect=traced(name,getattr(module,name))))
+                                            result=global_journal.record_shared_retry_continuous_owned_attempt_intent(
+                                                spreadsheet_token,binding,unit,qualified_source=qualified,store=self.store,
+                                                writer_token=writer_token,settings=args['settings'],whitelist_snapshot=self.snapshot,
+                                                expected_template_sha256=self.snapshot.workbook_sha256,http_root=self.root,
+                                                whitelist_path=self.template,boot_id=prior['boot_id'],monotonic_ns=now,**bundle)
+                                        self.assertEqual(2,sum(phase==('_receipted_original_facts','complete') for phase in phases))
+                                        self.assertEqual(1,sum(phase==('_observe_write','complete') for phase in phases))
+                                        self.assertEqual((2,'UNKNOWN'),(result.attempt_count,result.outcome))
+                                        self.assertEqual('retry',admission.read_shared_local_admission(writer_token,self.store,committed.prepared.xlsx_bytes)['lane'])
+                                        self.assertEqual(original_receipts,read_current_cycle_local_receipts(writer_token,self.store,
+                                            expected_template_sha256=self.snapshot.workbook_sha256,settings=args['settings'],
+                                            whitelist_sha256=self.snapshot.whitelist.sha256,qualified_source=qualified))
+                                        self.assertEqual(c6_original,{name:(generation_path/name).read_bytes() for name in c6_original})
+                                        return  # this new scenario asserts one complete protected ETH retry, not the fault loop below
                                     for count in range(1, 7):
                                         allocation_fault = settings_audit_probe and sheet == 'ETH Cabling' and count == 6
                                         if owned_read_gates_probe and count == 6:
