@@ -293,6 +293,7 @@
         "test_cases.test_req7_history_read",
         "test_cases.test_req7_spreadsheet_owner",
         "test_cases.test_req7_global_attempt_journal",
+        "test_cases.test_req7_settings_audit_allocation",
         "test_cases.test_req7_activity_discovery",
         "test_cases.test_req7_enrollment_journal",
         "test_cases.test_req7_history_preread_journal",
@@ -627,6 +628,7 @@
     "monitor/issue_tracker_send_intent.py": "monitor/issue_tracker_send_intent.py",
     "monitor/issue_tracker_spreadsheet_owner.py": "monitor/issue_tracker_spreadsheet_owner.py",
     "monitor/issue_tracker_global_attempt_journal.py": "monitor/issue_tracker_global_attempt_journal.py",
+    "monitor/issue_tracker_settings_audit_allocation.py": "monitor/issue_tracker_settings_audit_allocation.py",
     "monitor/issue_tracker_enrollment_journal.py": "monitor/issue_tracker_enrollment_journal.py",
     "monitor/issue_tracker_history_preread_journal.py": "monitor/issue_tracker_history_preread_journal.py",
     "monitor/issue_tracker_remote_history_match.py": "monitor/issue_tracker_remote_history_match.py",
@@ -1788,6 +1790,11 @@
       "id": "req7_global_attempt_journal",
       "paths": ["monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_spreadsheet_owner.py"],
       "tests": ["test_cases.test_req7_global_attempt_journal", "test_cases.test_req7_metadata_reservation", "test_cases.test_req7_history_preread_journal"]
+    },
+    {
+      "id": "req7_settings_audit_allocation",
+      "paths": ["monitor/issue_tracker_settings_audit_allocation.py"],
+      "tests": ["test_cases.test_req7_settings_audit_allocation"]
     },
     {
       "id": "req7_active_closed_discovery",
@@ -3197,6 +3204,11 @@
       "id": "req7_fixed_owned_auth_launcher",
       "members": ["monitor/issue_tracker_token_launcher.py", "monitor/issue_tracker_attempt_supervision.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_credential_shape.py", "monitor/issue_tracker_sdk_authentication.py", "monitor/issue_tracker_tls_inputs.py", "tools/req7_dependency_contract.py"],
       "tests": ["test_cases.test_req7_token_launcher"]
+    },
+    {
+      "id": "req7_original_settings_audit_unit_allocation",
+      "members": ["monitor/issue_tracker_settings_audit_allocation.py", "monitor/issue_tracker_k_store.py", "monitor/issue_tracker_k_chain.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_send_unit.py", "monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_attempt_journal.py"],
+      "tests": ["test_cases.test_req7_settings_audit_allocation", "test_cases.test_issue_tracker_stage_l_consumer_workflow"]
     },
     {
       "id": "req7_supervised_native_owned_child_lock",

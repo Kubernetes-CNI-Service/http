@@ -259,11 +259,14 @@ def record_receipted_original_attempt_intent(
     from monitor.issue_tracker_stage_l_consumer import qualify_prod_stage_l
     from monitor.issue_tracker_local_workbook_commit import _source_rows
     from monitor.issue_tracker_online_target import inspect_project_online_target
+    from monitor.issue_tracker_settings_audit_allocation import inspect_settings_audit_allocation
 
     def originals():
         _inputs(token, binding, unit)
         inspect_project_online_target(writer_token, binding)
         action = json.loads(unit.action_preimage)
+        audits = (inspect_settings_audit_allocation(writer_token, token, binding, unit)
+                  if action['audits'] else b'')
         target = action['identity']
         receipt = _original_receipt_identity(
             qualified_source, store, target['generation_id'], writer_token,
@@ -291,7 +294,7 @@ def record_receipted_original_attempt_intent(
             raise GlobalAttemptHold()
         inspect_project_online_target(writer_token, binding)
         ownership._validated_owner(token, binding)
-        return receipt, actual_source, reservations, business
+        return receipt, actual_source, reservations, business, audits
 
     failed = False
     try:

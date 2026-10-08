@@ -860,6 +860,14 @@ Python 3.9/3.10 EOL 警告以固定 tag 保留并由父进程重新发出，不�
 部署依赖身份的证据。无法确认结束时仍 HOLD，子进程继承的实际 flock 在 owner
 退出后继续阻挡候选。此入口只刷新 token，不授予 mutation、发送尝试计数、
 新鲜 W1/连续性、COMPLETE 或重试许可，REQ7 整体仍未完成，REAL_ENV 仍 NOT RUN。
+`test_req7_settings_audit_allocation` 从持有实际项目 ACTIVE 锁的 C25 原始事件链、
+最高 current、INITIALIZED 和逐事件 outbox 投影导出审计行；调用方不能伪造队列、
+revision、时间或内容。双 owner 下把真实非空单元的原始审计固定到项目
+`.tracker/settings-audit-allocation`，全部 image barriers 后才创建 INITIALIZED，
+拒绝迟于第一次尝试的分配或 partial journal 回填。真实 C5/C6/原始业务 workflow
+在每次计数前后复核实际分配，后失败保留 UNKNOWN 和计数；新 K 事件不改旧 wire，
+全 NOOP/audit-only 不分配也不消费 outbox。当前为保守单单元留存，不提供
+COMPLETE、DELIVERED、outbox 清理或后续单元回收，不能冒称 REQ7 整体完成。
 `test_req7_sheets_read_plan` / `test_req7_sheets_read_decode` 与
 `test_req7_online_whitelist_read` 固定精确列／坐标、十四表身份、四张 row-2 多行字面表头
 和完整有限 Whitelist；非原子 GET 不构成 enrollment、发送许可或完整格式快照。

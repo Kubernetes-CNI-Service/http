@@ -88,6 +88,10 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
     def test_actual_original_c6_receipt_dominates_every_business_count_and_post_count_drift_holds(self):
         self._exercise_real_protected_three_panel_fixture(skip_history=False, observed_cabling_insert_probe=True, business_preread_probe=True, original_reserved_probe=True, receipted_intent_probe=True)
 
+    def test_actual_c25_allocation_dominates_original_c6_counts_and_unknown_retains_audits(self):
+        self._exercise_real_protected_three_panel_fixture(skip_history=False, observed_cabling_insert_probe=True,
+            business_preread_probe=True, original_reserved_probe=True, receipted_intent_probe=True, settings_audit_probe=True)
+
     def test_two_real_cycles_keep_keys_and_commit_latest_business_values(self):
         self._exercise_real_protected_three_panel_fixture(
             skip_history=False, two_cycle_changed_latest=True,
@@ -446,7 +450,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         settings_channel_probe=False, settings_channel_fault=False,
         panel_counts_probe=False, source_unit_probe=False, receipted_source_probe=False, observed_source_probe=False,
         observed_switch_insert_probe=False, observed_cabling_insert_probe=False, business_preread_probe=False, original_reserved_probe=False, receipted_intent_probe=False,
-        complete_preview_probe=False,
+        settings_audit_probe=False, complete_preview_probe=False,
         complete_preview_source_race=False,
         complete_preview_cgi=False,
     ):
@@ -1503,6 +1507,10 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                             def compile_cabling(**changes):
                                 options = dict(local_generation_id=committed.receipt.generation_id, sheet=sheet, business_reads=tuple(reads),
                                     history_plan=history_plan, history_response=history_raw, spreadsheet_token=spreadsheet_token, binding=binding, identity=identity)
+                                if settings_audit_probe and sheet == 'ETH Cabling':
+                                    from monitor.issue_tracker_settings_audit_allocation import pending_settings_audits
+                                    options['audits'] = pending_settings_audits(writer_token)
+                                    self.assertTrue(options['audits'])
                                 options.update(changes)
                                 return compiler.freeze_observed_receipted_cabling_unit(qualified, self.store, metadata=metadata,
                                     expected_template_sha256=self.snapshot.workbook_sha256, writer_token=writer_token, **args, **options)
@@ -1621,6 +1629,24 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                                                 http_root=self.root, whitelist_path=self.template)
                                             options.update(changes)
                                             return global_journal.record_receipted_original_attempt_intent(spreadsheet_token, binding, identity, unit, **options)
+                                        if settings_audit_probe and sheet == 'ETH Cabling':
+                                            from test_cases.test_req7_settings_audit_allocation import load as load_allocation
+                                            allocation_module = load_allocation()
+                                            self.assertTrue(action['audits'])
+                                            # Existing coherent unit + C5/C6 + all reservations still
+                                            # cannot count without ORIGINAL durable C25 assignments.
+                                            with self.assertRaises(global_journal.GlobalAttemptHold): record()
+                                            self.assertEqual(0, global_journal.inspect_global_unit(spreadsheet_token, binding, unit).attempt_count)
+                                            allocation_module.prepare_settings_audit_allocation(writer_token, spreadsheet_token, binding, unit)
+                                            allocation_path = project/'.tracker/settings-audit-allocation'
+                                            allocation_image = {p.name: p.read_bytes() for p in allocation_path.iterdir()}
+                                            assignments_path = allocation_path/'ASSIGNMENTS'
+                                            assignments_path.write_bytes(b'foreign original allocation')
+                                            try:
+                                                with self.assertRaises(global_journal.GlobalAttemptHold): record()
+                                                self.assertEqual(0, global_journal.inspect_global_unit(spreadsheet_token, binding, unit).attempt_count)
+                                                self.assertEqual(b'foreign original allocation', assignments_path.read_bytes())
+                                            finally: assignments_path.write_bytes(allocation_image['ASSIGNMENTS'])
                                         private_allowlist.write_bytes(b'[]\n')
                                         try:
                                             with self.assertRaises(global_journal.GlobalAttemptHold): record()
@@ -1670,9 +1696,10 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                                             self.assertEqual(b'[]\n', private_allowlist.read_bytes())
                                         finally: private_allowlist.write_bytes(allowlist_bytes)  # owned fault only
                                     for count in range(1, 7):
-                                        if receipted_intent_probe and count in (2, 3, 4, 5):
+                                        allocation_fault = settings_audit_probe and sheet == 'ETH Cabling' and count == 6
+                                        if receipted_intent_probe and (count in (2, 3, 4, 5) or allocation_fault):
                                             original_observe = global_journal._observe
-                                            fault_path = {2: private_allowlist, 3: generation_path/'RECEIPT',
+                                            fault_path = assignments_path if allocation_fault else {2: private_allowlist, 3: generation_path/'RECEIPT',
                                                 4: source_path, 5: project/'01-global.yaml'}[count]
                                             original_bytes = fault_path.read_bytes()
                                             def change_after_count(*observe_args, **observe_kwargs):
@@ -1696,6 +1723,9 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                                         record()
                                     if receipted_intent_probe:
                                         self.assertEqual(c6_original, {name: (generation_path/name).read_bytes() for name in c6_original})
+                                    if settings_audit_probe and sheet == 'ETH Cabling':
+                                        self.assertEqual(allocation_image, {p.name: p.read_bytes() for p in allocation_path.iterdir()})
+                                        self.assertTrue(list((project/'.tracker/settings/outbox').iterdir()))
                                 else:
                                     global_journal.record_global_attempt_intent(spreadsheet_token, binding, unit)
                                 self.assertEqual(seen, preread.inspect_business_preread(spreadsheet_token, binding, identity, unit))
