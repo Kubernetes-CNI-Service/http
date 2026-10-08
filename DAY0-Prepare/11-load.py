@@ -6736,12 +6736,12 @@ def _decode_setup_switch_journal(payload: bytes) -> dict[str, object]:
             row_fields = fields
             if inventory == "infra_logs" and isinstance(row, dict) and "original_tree" in row:
                 row_fields = fields | {"original_tree"}
-            if inventory == "q_local_links" and isinstance(row, dict) and ("before_tree" in row or "after_tree" in row):
+            if inventory in {"q_local_links", "directories"} and isinstance(row, dict) and ("before_tree" in row or "after_tree" in row):
                 row_fields = fields | {"before_tree", "after_tree"}
             exact_fields(row, row_fields, inventory)
             if inventory == "infra_logs" and "original_tree" in row:
                 _validate_setup_switch_infra_original_tree(row["original_tree"])
-            if inventory == "q_local_links" and "before_tree" in row:
+            if inventory in {"q_local_links", "directories"} and "before_tree" in row:
                 for key in ("before_tree", "after_tree"):
                     tree = row[key]
                     if not isinstance(tree, dict) or "" not in tree or len(tree) > 4096:
@@ -7023,6 +7023,7 @@ def _setup_switch_shared_publication_snapshot(body, *, include_inputs=True):
                     or _setup_switch_directory_identity(target) != {
                         "path": str(target), "dev": row["target_dev"], "ino": row["target_ino"]}):
                 raise LoadError("publication materialized latest backup/target differs; HOLD")
+            _require_setup_switch_materialized_trees(row, backup, target)
             directories[str(source)] = dict(link=link(source, os.path.relpath(target, source.parent)),
                 backup=_setup_switch_comparison_tree(backup), target=_setup_switch_comparison_tree(target))
         created = {}
@@ -10416,6 +10417,8 @@ def register_setup_switch_materialized_directory(
                 "path": str(source), "parent": parent, "target": str(target),
                 "source_dev": source_info.st_dev, "source_ino": source_info.st_ino,
                 "target_dev": target_info.st_dev, "target_ino": target_info.st_ino,
+                "before_tree": _setup_switch_comparison_tree(source, allow_hardlinks=True),
+                "after_tree": _setup_switch_comparison_tree(target, allow_hardlinks=True),
             }
             if any(existing.get(key) != value for key, value in expected.items()):
                 raise ValueError("materialized latest journal row changed")
@@ -10433,6 +10436,8 @@ def register_setup_switch_materialized_directory(
             "target": str(target), "source_dev": source_info.st_dev,
             "source_ino": source_info.st_ino, "target_dev": target_info.st_dev,
             "target_ino": target_info.st_ino,
+            "before_tree": _setup_switch_comparison_tree(source, allow_hardlinks=True),
+            "after_tree": _setup_switch_comparison_tree(target, allow_hardlinks=True),
         }
         next_body = dict(body)
         next_body["directories"] = [*body.get("directories", []), row]
@@ -10460,6 +10465,7 @@ def register_setup_switch_materialized_directory(
                 or _read_rollback_regular(journal, limit=_SETUP_SWITCH_JOURNAL_LIMIT) != opened):
             raise LoadError("setup switch journal changed before directory registration")
         _setup_switch_runtime_context(next_body)
+        _require_setup_switch_materialized_trees(row, source, target)
         os.replace(temporary, journal)
         _fsync_parent_directory(journal.parent)
     finally:
@@ -10585,6 +10591,18 @@ def _setup_switch_materialized_owner(path: Path):
     return tuple(getattr(before, key) for key in fields), raw
 
 
+def _require_setup_switch_materialized_trees(row, original, target):
+    """Original Q-local member ownership is durable, not a cold-reader guess."""
+    if not {"before_tree", "after_tree"} <= set(row):
+        raise LoadError("materialized original member inventory is missing; HOLD")
+    try:
+        if (row["before_tree"] != _setup_switch_comparison_tree(original, allow_hardlinks=True)
+                or row["after_tree"] != _setup_switch_comparison_tree(target, allow_hardlinks=True)):
+            raise ValueError("original or target member inventory changed")
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise LoadError(f"materialized original tree/member changed; HOLD: {exc}") from exc
+
+
 def _hold_setup_switch_materialized_owners(source, backup, target, has_backup, descriptors, row):
     """Hold original directory inodes through restore; never adopt a new owner."""
     names = {"source": source, "backup": backup, "target": target}
@@ -10611,7 +10629,8 @@ def _hold_setup_switch_materialized_owners(source, backup, target, has_backup, d
     metadata = os.fstat(parent_descriptor)
     parent_owner = (metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_uid, metadata.st_gid)
     state = {"names": names, "owners": owners, "held": held, "parent": parent,
-             "parent_descriptor": parent_descriptor, "parent_owner": parent_owner}
+             "parent_descriptor": parent_descriptor, "parent_owner": parent_owner,
+             "trees": {key: row[key] for key in ("before_tree", "after_tree") if key in row}}
     _require_setup_switch_materialized_owners(state)
     return state
 
@@ -10632,6 +10651,8 @@ def _require_setup_switch_materialized_owners(state):
             if (metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_uid,
                     metadata.st_gid) != state["parent_owner"]:
                 raise ValueError("parent owner changed")
+        original = state["names"]["backup" if state["owners"]["backup"] is not None else "source"]
+        _require_setup_switch_materialized_trees(state["trees"], original, state["names"]["target"])
     except (OSError, ValueError, LoadError) as exc:
         raise LoadError(f"materialized recovery owner changed; HOLD: {exc}") from exc
 

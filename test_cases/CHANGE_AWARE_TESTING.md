@@ -3061,3 +3061,35 @@ OK、actual/END=0，覆盖全部相关 infra direct/workflow、完整文档模�
 读前后 stat/inode 稳定、结果→实际退出→END 顺序核实，ledger 未改。
 这仍是局部回归，非 canonical 批准或完整 R22；实体 latest 成员身份及 B 完整共享证据
 归档继续 tests-first，相关 runner/full/check 和实际 Linux/断电/C2/DEV ACK 均不冒称完成。
+
+### 2026-10-08 R22 实体 latest 原始成员及逐步写前门禁
+
+实体目录原根 inode 与字节相等不能证明成员仍属于原 WAL。新增 direct 与真实
+LOAD→SETUP 指针后强杀→新 LOAD 三项先 RED：`r22-materialized-original-members-red.log`
+inode 163612476、size 3935、SHA256
+`3201e2e0f5e77fffbccd3997024c73dd73ca9d57c885a283a592af76e04f2cf9`，3 tests、3 FAIL、exit/END=1。
+WAL 首写前登记完整 source/target 原树，写前重核；冷恢复及 publication 不从当前同字节
+树补造权限。GREEN 同名 `-green.log` inode 163616597、size 1287、SHA256
+`d89fd2627d5677b7fa3d0597093b14f18a4fa3ed6abd0d49eea956e8764a9ad4`，3 tests、OK、exit/END=0。
+
+临时名登记后两边同字节成员换绑，direct/真实 workflow 两项仍 RED；
+`r22-materialized-writer-members-red.log` inode 163620683、size 3284、SHA256
+`f13066576e8ccf932ef188873b22204b01ed7fdc8322a024f36c3e5170153dc3`，2 FAIL、exit/END=1。
+SETUP rename 前总写集 inspect-only 再核后 GREEN，`-green.log` inode 163622778、size 897、SHA256
+`bc5823dc6fe75f0a4a6e9e84f23b18fbbc75c8903b634e492030e3d33653c4ce`，2 tests、OK、exit/END=0。
+第一组合回归 `r22-original-members-materialized-infra-regressions.log` inode 163624909、size 33556、
+SHA256 `1cfbe9cfd9a9c3eaeb732158fd9583489cd91a3c3cc61520997b720989d9af46`，125 tests、OK、exit/END=0。
+
+不以该局部 PASS 重跑 full；继续独立检查 rename 后/临时 symlink 后边界。新增四项
+direct/真实 workflow 全部 RED：旧实现继续发布 latest。完整日志
+`r22-materialized-writer-publish-boundaries-red.log` inode 163687543、size 6326、SHA256
+`2695a6db8a47fa2b5af429f9cb8a0bf6961fe23cb321fb5b0d940cbd60e41005`，4 tests in 9.063s、4 FAIL、
+exit/END=1。临时链接创建、指针 replace 前及父同步后重核原 WAL 全写集，未知对象
+HOLD 不反向擦除已同步盘面。GREEN `-green.log` inode 163691786、size 1497、SHA256
+`74666a5696f60d7ff2801609d2e43965151b9b2f53ea0d5d5c5ca4775f4d0f03`，4 tests in 7.072s、OK、exit/END=0。
+末轮 `r22-original-members-materialized-infra-publish-regressions.log` inode 163695882、size 34736、
+SHA256 `0d1b0c58d457ebdc5fdac20f1583569f6cf4ac303796074095dd21115ded3184`，129 tests in 136.891s、OK、
+exit/END=0，原 infra/materialized 冷恢复、正常迁移、文档与两完整 REQ23 模块均执行。
+日志读前后 stat/inode 稳定、已知旧前缀摘要一致、物理 Ran/结果/实际退出/END 核实；
+现有 direct/workflow manifest 映射未变，无删跳弱化断言或手改 ledger。本卡仍 OPEN；
+B 完整共享证据归档与正式当前精确树 related/full/check 尚未关闭，局部回归不是正式证明。

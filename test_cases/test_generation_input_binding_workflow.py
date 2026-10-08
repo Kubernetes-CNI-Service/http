@@ -3898,6 +3898,7 @@ finally:
                 (path / ".published-complete").write_bytes(b"complete\n")
                 (path / "leaf.yaml").write_bytes(payload)
             original_source, original_target = latest.stat(), release.stat()
+            original_members = {path: (path / "leaf.yaml").stat().st_ino for path in (latest, release)}
             site = hook / "sitecustomize.py"
             site.write_text(site.read_text(encoding="utf-8") + """
 import json
@@ -3912,6 +3913,16 @@ def drift_materialized_after_temp_registration(source, destination, *args, **kwa
         latest = Path(os.environ['HTTP_TEST_MATERIALIZED_SOURCE'])
         if any(Path(row['path']).parent == latest.parent
                and Path(row['path']).name.startswith('.latest.tmp.') for row in body['links']):
+            if os.environ['HTTP_TEST_MATERIALIZED_DRIFT'] in ('members-after-rename', 'members-after-temp'):
+                return result
+            if os.environ['HTTP_TEST_MATERIALIZED_DRIFT'] == 'members':
+                retained = latest.parent / 'retained-original-migration-owner'
+                retained.mkdir()
+                for index, changed in enumerate((latest, Path(os.environ['HTTP_TEST_MATERIALIZED_TARGET']))):
+                    (changed / 'leaf.yaml').rename(retained / f'leaf-{index}.yaml')
+                    (changed / 'leaf.yaml').write_bytes(b'hostname: independent migration owner\\n')
+                marker.write_bytes(evidence)
+                return result
             changed = latest if os.environ['HTTP_TEST_MATERIALIZED_DRIFT'] == 'source' else Path(os.environ['HTTP_TEST_MATERIALIZED_TARGET'])
             changed.rename(latest.parent / 'retained-original-migration-owner')
             changed.mkdir()
@@ -3920,6 +3931,38 @@ def drift_materialized_after_temp_registration(source, destination, *args, **kwa
             marker.write_bytes(evidence)
     return result
 os.replace = drift_materialized_after_temp_registration
+previous_materialized_fsync, previous_materialized_symlink = os.fsync, os.symlink
+def replace_materialized_moved_members():
+    journal = Path(os.environ['HTTP_TEST_MATERIALIZED_WAL'])
+    marker = journal.parent / 'materialized-writer-drifted'
+    if marker.exists():
+        return
+    latest = Path(os.environ['HTTP_TEST_MATERIALIZED_SOURCE'])
+    if latest.exists() or latest.is_symlink():
+        return
+    evidence = journal.read_bytes()
+    row = next(row for row in json.loads(evidence)['body']['directories'] if row['path'] == str(latest))
+    backup = Path(row['backup'])
+    if not backup.exists():
+        return
+    retained = latest.parent / 'retained-original-migration-owner'
+    retained.mkdir()
+    for index, changed in enumerate((backup, Path(os.environ['HTTP_TEST_MATERIALIZED_TARGET']))):
+        (changed / 'leaf.yaml').rename(retained / f'leaf-{index}.yaml')
+        (changed / 'leaf.yaml').write_bytes(b'hostname: independent migration owner\\n')
+    marker.write_bytes(evidence)
+def drift_materialized_sync(fd):
+    result = previous_materialized_fsync(fd)
+    if os.environ['HTTP_TEST_MATERIALIZED_DRIFT'] == 'members-after-rename':
+        replace_materialized_moved_members()
+    return result
+def drift_materialized_symlink(source, destination, *args, **kwargs):
+    result = previous_materialized_symlink(source, destination, *args, **kwargs)
+    if (os.environ['HTTP_TEST_MATERIALIZED_DRIFT'] == 'members-after-temp'
+            and Path(destination).name.startswith('.latest.tmp.')):
+        replace_materialized_moved_members()
+    return result
+os.fsync, os.symlink = drift_materialized_sync, drift_materialized_symlink
 """, encoding="utf-8")
             journal = root / "ztp/.setup-switch-journal.json"
             with mock.patch.dict(os.environ, {
@@ -3928,25 +3971,49 @@ os.replace = drift_materialized_after_temp_registration
                 "HTTP_TEST_MATERIALIZED_TARGET": str(release),
                 "HTTP_TEST_MATERIALIZED_DRIFT": drift,
             }):
-                result = self._run_private_load_setup_switch(
-                    fixture, prepare_journal=True, first_link_prefix=str(output / ".latest.tmp."),
-                )
+                if drift in ("members-after-rename", "members-after-temp"):
+                    result = self._run_private_load_setup_switch(fixture, prepare_journal=True, kill_after_replace=latest)
+                else:
+                    result = self._run_private_load_setup_switch(
+                        fixture, prepare_journal=True, first_link_prefix=str(output / ".latest.tmp."),
+                    )
             self.assertEqual(24, result.returncode, result.stdout + result.stderr)
             self.assertFalse(barrier.exists(), "registration drift reached latest publication")
-            self.assertTrue(latest.is_dir(), "writer renamed a source before its HOLD")
-            self.assertFalse(latest.is_symlink())
             evidence = (journal.parent / "materialized-writer-drifted").read_bytes()
             self.assertEqual(evidence, journal.read_bytes())
             row = next(row for row in json.loads(evidence)["body"]["directories"]
                        if row["path"] == str(latest))
+            if drift in ("members-after-rename", "members-after-temp"):
+                self.assertFalse(os.path.lexists(latest), "HOLD must stop pointer publication without erasing incident members")
+                backup = Path(row["backup"])
+                self.assertEqual(original_source.st_ino, backup.stat().st_ino)
+                retained = output / "retained-original-migration-owner"
+                for index, changed in enumerate((backup, release)):
+                    expected = original_members[latest if index == 0 else release]
+                    self.assertEqual(expected, (retained / f"leaf-{index}.yaml").stat().st_ino)
+                    self.assertNotEqual(expected, (changed / "leaf.yaml").stat().st_ino)
+                    self.assertEqual(payload, (changed / "leaf.yaml").read_bytes())
+                temps = list(output.glob(".latest.tmp.*"))
+                self.assertEqual(1 if drift == "members-after-temp" else 0, len(temps))
+                self.assertFalse((root / "service-started").exists())
+                return
+            self.assertTrue(latest.is_dir(), "writer renamed a source before its HOLD")
+            self.assertFalse(latest.is_symlink())
             self.assertFalse(os.path.lexists(row["backup"]))
             retained = output / "retained-original-migration-owner"
-            original = original_source if drift == "source" else original_target
-            self.assertEqual(original.st_ino, retained.stat().st_ino)
-            changed = latest if drift == "source" else release
-            self.assertNotEqual(original.st_ino, changed.stat().st_ino)
-            self.assertEqual(payload, (changed / "leaf.yaml").read_bytes())
-            self.assertEqual(payload, (retained / "leaf.yaml").read_bytes())
+            if drift == "members":
+                for index, changed in enumerate((latest, release)):
+                    self.assertEqual(original_members[changed], (retained / f"leaf-{index}.yaml").stat().st_ino)
+                    self.assertNotEqual(original_members[changed], (changed / "leaf.yaml").stat().st_ino)
+                    self.assertEqual(payload, (changed / "leaf.yaml").read_bytes())
+                    self.assertEqual(payload, (retained / f"leaf-{index}.yaml").read_bytes())
+            else:
+                original = original_source if drift == "source" else original_target
+                self.assertEqual(original.st_ino, retained.stat().st_ino)
+                changed = latest if drift == "source" else release
+                self.assertNotEqual(original.st_ino, changed.stat().st_ino)
+                self.assertEqual(payload, (changed / "leaf.yaml").read_bytes())
+                self.assertEqual(payload, (retained / "leaf.yaml").read_bytes())
             self.assertFalse((root / "service-started").exists())
 
     def test_real_setup_materialized_writer_source_drift_blocks_rename(self):
@@ -3954,6 +4021,15 @@ os.replace = drift_materialized_after_temp_registration
 
     def test_real_setup_materialized_writer_target_drift_blocks_rename(self):
         self._assert_real_materialized_writer_registration_drift_holds("target")
+
+    def test_real_setup_materialized_writer_replaced_members_block_rename(self):
+        self._assert_real_materialized_writer_registration_drift_holds("members")
+
+    def test_real_setup_materialized_writer_members_after_rename_block_temp(self):
+        self._assert_real_materialized_writer_registration_drift_holds("members-after-rename")
+
+    def test_real_setup_materialized_writer_members_after_temp_block_pointer(self):
+        self._assert_real_materialized_writer_registration_drift_holds("members-after-temp")
 
     def test_real_setup_materialized_latest_replace_cold_recovers_original_directory(self):
         """LOAD→SETUP death after replacing latest must restore its real Q bytes."""
@@ -4022,6 +4098,70 @@ finally:
             self.assertEqual((original.st_dev, original.st_ino),
                              (latest.stat().st_dev, latest.stat().st_ino))
             self.assertEqual(b"hostname: leaf\n", (latest / "leaf.yaml").read_bytes())
+
+    def test_real_setup_materialized_death_cold_reader_cannot_adopt_backup_members(self):
+        self._real_materialized_original_member_hold(target_member=False)
+
+    def test_real_setup_materialized_death_cold_reader_cannot_adopt_target_members(self):
+        self._real_materialized_original_member_hold(target_member=True)
+
+    def _real_materialized_original_member_hold(self, *, target_member):
+        with tempfile.TemporaryDirectory(prefix="r22-materialized-original-member-") as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, _p, q, common, _p_only, _q_only, manifest, _before, _hook, barrier, _home = fixture
+            output = q / "99-output-eth"
+            latest, target = output / "latest", output / "20261008_130000_combine"
+            payload = b"hostname: independent-original\n"
+            for path in (latest, target):
+                path.mkdir(parents=True)
+                (path / ".published-complete").write_bytes(b"complete\n")
+                (path / "leaf.yaml").write_bytes(payload)
+            first = self._run_private_load_setup_switch(fixture, prepare_journal=True, kill_after_replace=latest)
+            self.assertEqual(23, first.returncode, first.stdout + first.stderr)
+            self.assertTrue(barrier.exists())
+            journal = root / "ztp/.setup-switch-journal.json"
+            row = json.loads(journal.read_bytes())["body"]["directories"][0]
+            backup = Path(row["backup"])
+            leaf = (target if target_member else backup) / "leaf.yaml"
+            original = leaf.stat().st_ino
+            retained = root / "operator-original-leaf.yaml"
+            leaf.rename(retained)
+            leaf.write_bytes(payload)
+            frozen = (journal.read_bytes(), manifest.read_bytes(), os.readlink(latest), os.readlink(common))
+            recovery = """
+import importlib.util, sys
+from pathlib import Path
+from types import SimpleNamespace
+root = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location('cold_materialized_original_member', root / 'DAY0-Prepare/11-load.py')
+load = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = load
+spec.loader.exec_module(load)
+load.active_managed_services = lambda *a, **kw: ()
+descriptor = load.acquire_deployment_lock(exclusive=True)
+try:
+    try:
+        load.recover_setup_switch_journal(root / 'ztp/.setup-switch-journal.json',
+            deployment_lock_descriptor=descriptor, services_quiesced=True,
+            runtime_backend=SimpleNamespace(name='supervisor'))
+    except load.LoadError as error:
+        assert 'materialized' in str(error) and 'HOLD' in str(error), str(error)
+        print('R22_ORIGINAL_MATERIALIZED_MEMBER_HELD')
+    else:
+        raise AssertionError('cold reader adopted a replaced materialized member')
+finally:
+    load.release_deployment_lock(descriptor)
+"""
+            second = subprocess.run([sys.executable, "-B", "-c", recovery, str(root)],
+                                    cwd=root, capture_output=True, text=True, check=False, timeout=30)
+            self.assertEqual(0, second.returncode, second.stdout + second.stderr)
+            self.assertIn("R22_ORIGINAL_MATERIALIZED_MEMBER_HELD", second.stdout)
+            self.assertEqual(frozen, (journal.read_bytes(), manifest.read_bytes(), os.readlink(latest), os.readlink(common)))
+            self.assertEqual(original, retained.stat().st_ino)
+            self.assertNotEqual(original, leaf.stat().st_ino)
+            self.assertEqual(payload, leaf.read_bytes())
+            self.assertTrue(backup.is_dir())
+            self.assertFalse((root / "service-started").exists())
 
     def test_real_setup_materialized_cold_recovery_preserves_backup_replaced_after_unlink(self):
         with tempfile.TemporaryDirectory(prefix="r22-materialized-backup-owner-") as name:

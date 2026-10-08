@@ -4301,6 +4301,21 @@ class _SetupLinkTransaction:
             except (OSError, ValueError) as exc:
                 raise ValueError(f"materialized latest writer preimage changed; HOLD: {exc}") from exc
 
+        def require_materialized_wal_authority():
+            if _SETUP_SWITCH_WAL_CONTEXT is None:
+                return
+            # Requalify the original durable whole write set at every step;
+            # byte equality between two replaced members is not ownership.
+            load_api, descriptor = _SETUP_SWITCH_WAL_CONTEXT[:2]
+            try:
+                load_api["recover_setup_switch_journal"](
+                    Path(ZTP) / ".setup-switch-journal.json",
+                    deployment_lock_descriptor=descriptor, services_quiesced=True,
+                    runtime_backend=load_api["service_runtime_backend"](), inspect_only=True,
+                )
+            except load_api["LoadError"] as exc:
+                raise SetupSwitchAuthorityHold(f"materialized latest 原始成员写前权限变化；HOLD：{exc}") from exc
+
         rel_target = os.path.relpath(target, os.path.dirname(path))
         temporary = os.path.join(
             os.path.dirname(path), f".{os.path.basename(path)}.tmp.{os.getpid()}"
@@ -4320,6 +4335,7 @@ class _SetupLinkTransaction:
                 raise ValueError("materialized latest 写入缺少精确 WAL 备份登记")
             backup = registered[1]
             require_materialized_writer_preimage()
+            require_materialized_wal_authority()
             _atomic_rename_noreplace(path, backup)
             _fsync_directory(os.path.dirname(path))
         else:
@@ -4354,10 +4370,13 @@ class _SetupLinkTransaction:
                 if _SETUP_SWITCH_WAL_CONTEXT is not None:
                     raise ValueError(f"materialized latest 临时位置在登记后被占用：{temporary}")
                 os.remove(temporary)
+            require_materialized_wal_authority()
             os.symlink(rel_target, temporary)
+            require_materialized_wal_authority()
             os.replace(temporary, path)
             if _SETUP_SWITCH_WAL_CONTEXT is not None:
                 _fsync_directory(os.path.dirname(path))
+                require_materialized_wal_authority()
         except BaseException:
             if _SETUP_SWITCH_WAL_CONTEXT is not None:
                 # SETUP's outer guarded WAL rollback owns the entire mixed

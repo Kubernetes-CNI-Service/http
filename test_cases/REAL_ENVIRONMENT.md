@@ -1634,6 +1634,18 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 ## TC-REAL-R22-GENERATION-INPUT-ABA-001 — 跨进程输入换代与多输出一致性
 
+- 2026-10-08 实体 latest 原始成员补充，仍 OPEN / NOT RUN：沿本卡原授权隔离 VM、
+  精确版本、root-only 可恢复快照、原排他锁、明确停服和正常写者静默条件，在 WAL
+  首写前记录 source/target 完整原树。分别在临时名登记后、源 rename/父同步后、
+  临时 symlink 后及指针发布后强杀再由新 LOAD 冷读的边界，把原叶子移到核实留存名，
+  在 backup 或 target（含两者同时）创建同字节新 inode。须在下一写前 HOLD，保留
+  原 WAL/manifest/mixed links、原留存 inode、未知新成员以及已同步 rename 的盘面；
+  不发布下一指针、不反向清理部分证据、不启动服务。保存原/替换九字段 stat、摘要、
+  source/backup/target/父目录身份与登记→rename→sync→注入→HOLD→END/exit 物理顺序。
+  封存后仅由负责人按已核隔离快照恢复，不在 live 注入、不删证据解围。逐边界再核
+  不是非合作写者原子隔离；本地 direct/真实 workflow GREEN 不关闭完整 B 共享证据
+  归档、Linux/断电/C2/DEV ACK，也不替代当前精确树正式 related/full/check。
+
 - 2026-10-08 实体 infra/logs 原始成员补充，仍 OPEN / NOT RUN：在本卡的授权隔离
   VM、精确版本、root-only 可恢复快照、原排他锁、明确停服和正常写者静默前提下，
   原 WAL 登记完整目录/成员后，由真实 SETUP 迁移并在指针发布后强杀；把原文件

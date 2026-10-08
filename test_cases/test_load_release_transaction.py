@@ -11290,6 +11290,7 @@ os.kill(os.getpid(), signal.SIGKILL)
             (path / ".published-complete").write_bytes(b"complete\n")
             (path / "leaf.yaml").write_bytes(payload)
         original_source, original_target = latest.stat(), release.stat()
+        original_members = {path: (path / "leaf.yaml").stat().st_ino for path in (latest, release)}
         with mock.patch.object(LOAD, "active_managed_services", return_value=()):
             backup = LOAD.register_setup_switch_materialized_directory(
                 journal, latest, release, deployment_lock_descriptor=descriptor,
@@ -11299,8 +11300,38 @@ os.kill(os.getpid(), signal.SIGKILL)
         register = LOAD.register_setup_switch_journal_link
         captured = {}
 
+        def replace_members():
+            retained = output / "retained-original-migration-owner"
+            retained.mkdir()
+            for index, changed in enumerate((Path(backup), release)):
+                (changed / "leaf.yaml").rename(retained / f"leaf-{index}.yaml")
+                (changed / "leaf.yaml").write_bytes(payload)
+            captured.update(wal=journal.read_bytes(), retained=retained)
+
+        sync, symlink = SETUP._fsync_directory, os.symlink
+        def after_rename_sync(path):
+            sync(path)
+            if drift == "members-after-rename" and os.path.lexists(backup) and not captured:
+                replace_members()
+
+        def after_temp_link(*args, **kwargs):
+            result = symlink(*args, **kwargs)
+            if drift == "members-after-temp" and str(args[1]).startswith(str(output / ".latest.tmp.")):
+                replace_members()
+            return result
+
         def replace_after_temp_registration(*args, **kwargs):
             result = register(*args, **kwargs)
+            if drift in ("members-after-rename", "members-after-temp"):
+                return result
+            if drift == "members":
+                retained = output / "retained-original-migration-owner"
+                retained.mkdir()
+                for index, changed in enumerate((latest, release)):
+                    (changed / "leaf.yaml").rename(retained / f"leaf-{index}.yaml")
+                    (changed / "leaf.yaml").write_bytes(payload)
+                captured.update(wal=journal.read_bytes(), retained=retained)
+                return result
             changed = latest if drift == "source" else release
             retained = output / "retained-original-migration-owner"
             changed.rename(retained)
@@ -11318,20 +11349,44 @@ os.kill(os.getpid(), signal.SIGKILL)
                                   (vars(LOAD), descriptor, {}, {str(latest): (str(release), str(backup))})), \
                 mock.patch.object(LOAD, "register_setup_switch_journal_link",
                                   side_effect=replace_after_temp_registration), \
+                mock.patch.object(SETUP, "_fsync_directory", side_effect=after_rename_sync), \
+                mock.patch.object(SETUP.os, "symlink", side_effect=after_temp_link), \
                 mock.patch.object(SETUP, "_atomic_rename_noreplace",
                                   wraps=SETUP._atomic_rename_noreplace) as rename:
             with self.assertRaises(ValueError):
                 transaction.migrate_materialized_directory(str(latest), str(release))
+        if drift in ("members-after-rename", "members-after-temp"):
+            rename.assert_called_once()
+            self.assertFalse(os.path.lexists(latest), "HOLD must prevent latest publication, not undo the owned rename")
+            self.assertEqual(original_source.st_ino, Path(backup).stat().st_ino)
+            for index, changed in enumerate((Path(backup), release)):
+                expected = original_members[latest if index == 0 else release]
+                self.assertEqual(expected, (captured["retained"] / f"leaf-{index}.yaml").stat().st_ino)
+                self.assertNotEqual(expected, (changed / "leaf.yaml").stat().st_ino)
+                self.assertEqual(payload, (changed / "leaf.yaml").read_bytes())
+            temporary = output / f".latest.tmp.{os.getpid()}"
+            self.assertEqual(drift == "members-after-temp", os.path.lexists(temporary))
+            self.assertEqual(captured["wal"], journal.read_bytes())
+            self.assertEqual([], transaction.materialized_migrations)
+            backend.start.assert_not_called()
+            return
         rename.assert_not_called()
         self.assertTrue(latest.is_dir(), "writer moved a source after registration drift")
         self.assertFalse(latest.is_symlink())
         self.assertFalse(os.path.lexists(backup))
-        changed = latest if drift == "source" else release
-        original = original_source if drift == "source" else original_target
-        self.assertEqual(captured["replacement_inode"], changed.stat().st_ino)
-        self.assertEqual(original.st_ino, captured["retained"].stat().st_ino)
-        self.assertEqual(payload, (changed / "leaf.yaml").read_bytes())
-        self.assertEqual(payload, (captured["retained"] / "leaf.yaml").read_bytes())
+        if drift == "members":
+            for index, changed in enumerate((latest, release)):
+                self.assertEqual(original_members[changed], (captured["retained"] / f"leaf-{index}.yaml").stat().st_ino)
+                self.assertNotEqual(original_members[changed], (changed / "leaf.yaml").stat().st_ino)
+                self.assertEqual(payload, (changed / "leaf.yaml").read_bytes())
+                self.assertEqual(payload, (captured["retained"] / f"leaf-{index}.yaml").read_bytes())
+        else:
+            changed = latest if drift == "source" else release
+            original = original_source if drift == "source" else original_target
+            self.assertEqual(captured["replacement_inode"], changed.stat().st_ino)
+            self.assertEqual(original.st_ino, captured["retained"].stat().st_ino)
+            self.assertEqual(payload, (changed / "leaf.yaml").read_bytes())
+            self.assertEqual(payload, (captured["retained"] / "leaf.yaml").read_bytes())
         self.assertEqual(captured["wal"], journal.read_bytes())
         self.assertEqual([], transaction.materialized_migrations)
         backend.start.assert_not_called()
@@ -11341,6 +11396,45 @@ os.kill(os.getpid(), signal.SIGKILL)
 
     def test_setup_materialized_writer_target_drift_blocks_rename(self):
         self._assert_materialized_writer_registration_drift_holds("target")
+
+    def test_setup_materialized_writer_replaced_members_block_rename(self):
+        self._assert_materialized_writer_registration_drift_holds("members")
+
+    def test_setup_materialized_writer_members_after_rename_block_temp(self):
+        self._assert_materialized_writer_registration_drift_holds("members-after-rename")
+
+    def test_setup_materialized_writer_members_after_temp_block_pointer(self):
+        self._assert_materialized_writer_registration_drift_holds("members-after-temp")
+
+    def test_setup_materialized_cold_reader_cannot_adopt_same_bytes_replacement_members(self):
+        state = self._prepare_cross_project_setup_crash()
+        latest = state[1] / "99-output-eth/latest"
+        target = latest.with_name("20261008_130000_combine")
+        payload = b"hostname: independent-original\n"
+        for path in (latest, target):
+            path.mkdir(parents=True)
+            (path / ".published-complete").write_bytes(b"complete\n")
+            (path / "leaf.yaml").write_bytes(payload)
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            backup = LOAD.register_setup_switch_materialized_directory(state[10], latest, target,
+                deployment_lock_descriptor=state[11], services_quiesced=True, runtime_backend=state[12])
+        latest.rename(backup)
+        latest.symlink_to(target.name)
+        leaf = backup / "leaf.yaml"
+        original = leaf.stat().st_ino
+        retained = self.root / "operator-original-leaf.yaml"
+        leaf.rename(retained)
+        leaf.write_bytes(payload)
+        frozen = (state[10].read_bytes(), state[7].read_bytes(), os.readlink(latest))
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            with self.assertRaisesRegex(LOAD.LoadError, "materialized.*(tree|member|inventory).*HOLD"):
+                LOAD.recover_setup_switch_journal(state[10], deployment_lock_descriptor=state[11],
+                    services_quiesced=True, runtime_backend=state[12])
+        self.assertEqual(frozen, (state[10].read_bytes(), state[7].read_bytes(), os.readlink(latest)))
+        self.assertEqual(original, retained.stat().st_ino)
+        self.assertNotEqual(original, leaf.stat().st_ino)
+        self.assertEqual(payload, leaf.read_bytes())
+        state[12].start.assert_not_called()
 
     def test_setup_wal_cold_recovers_registered_materialized_latest_after_rename(self) -> None:
         """A killed directory migration must leave a durable route back to Q's bytes."""
