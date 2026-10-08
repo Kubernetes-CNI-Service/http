@@ -1215,7 +1215,15 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
   `restart_allowed=false` 都不得重启服务。分别在 in-progress marker 与
   committed-cleanup-pending marker 的 write/fsync/unlink/parent-fsync 边界断电复活，保存 distinct
   machine classification；只通过上述同一显式恢复入口重试，禁止手工删 marker。
-- 自动化边界：独立 `.github/workflows/monitor-authority-root.yml` 只接受 `workflow_dispatch`，并且只在
+- 自动化边界：独立 `.github/workflows/monitor-authority-root.yml` 只接受 `workflow_dispatch`。
+  当前 source guard 使用最多 32 个唯一完整 OID 的有限批量读取，保留每个原路径/模式，
+  严格校验二进制协议及原 Git 对象摘要，且所有读取成功前不能创建 export。macOS
+  direct 与真实 Warden 加载/导出工作流已覆盖 SHA-1/SHA-256、后批截断、child 非零、
+  repo/Git 改绑和批间改绑，但没有执行 root namespace。现场在原授权可丢弃 Linux
+  副本保留正常多批导出、代表性后批损坏/改绑零发布、held FD/manifest 与最终封印见证；
+  同机制其它帧组合由自动化承担。记录树/OID/路径模式集合、argv/exit、前后身份/摘要、
+  destination 不存在及只清理私有副本的证据。此补充不改原 full、权限或发布门禁，
+  Linux/root 仍 NOT RUN；不能用微基准代替该证据。该独立作业只在
   GitHub-hosted Ubuntu 24.04 disposable VM 上运行；它绑定一个 exact committed tree 的
   immutable `HEAD^{tree}`。该作业先运行 Linux 全量门禁 `--all --no-approve -v`，再运行
   ordinary `--check` (without `--require-full`)；它不得写批准 ledger，随后重新证明工作树 clean 才可

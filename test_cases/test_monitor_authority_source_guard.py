@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import importlib.util
 import json
@@ -39,6 +40,344 @@ def load_guard():
 
 class MonitorAuthoritySourceGuardTests(unittest.TestCase):
     maxDiff = None
+
+    def _commit_batch_corpus(self):
+        expected = {
+            "objects/%02d" % i: (b"payload/%02d\x00\n" % i, "100644")
+            for i in range(65)
+        }
+        expected.update({
+            "duplicate": (b"payload/00\x00\n", "100644"),
+            "empty": (b"", "100644"),
+            "script": (b"#!/bin/sh\nexit 0\n", "100755"),
+            "link": (b"objects/00", "120000"),
+        })
+        for name, (payload, mode) in expected.items():
+            if mode == "120000":
+                os.symlink(payload.decode("ascii"), self.repo / name)
+            else:
+                self.write(name, payload, 0o755 if mode == "100755" else 0o644)
+        self.git("add", "--all")
+        self.git("commit", "-qm", "independent binary batch corpus")
+        return self.git("rev-parse", "HEAD^{tree}"), expected
+
+    def test_immutable_tree_uses_bounded_unique_object_batches_without_leaf_children(self):
+        tree_id, expected = self._commit_batch_corpus()
+        calls = []
+        original = self.guard._run_git
+
+        def observe(repository, arguments, **kwargs):
+            calls.append((tuple(arguments), kwargs.get("input_bytes")))
+            return original(repository, arguments, **kwargs)
+
+        with mock.patch.object(self.guard, "_run_git", side_effect=observe):
+            actual = self.guard.read_tree(self.repo, tree_id)
+        self.assertEqual(
+            expected, {entry.path: (entry.payload, entry.git_mode) for entry in actual},
+        )
+        self.assertEqual(69, len(actual))
+        expected_ids = list(dict.fromkeys(
+            hashlib.sha1(b"blob " + str(len(payload)).encode("ascii") + b"\x00" + payload).hexdigest()
+            for name, (payload, _mode) in sorted(expected.items())
+        ))
+        self.assertEqual(68, len(expected_ids))
+        self.assertEqual(("ls-tree", "-rz", "--full-tree", "--full-name", tree_id), calls[0][0])
+        batches = calls[1:]
+        self.assertEqual(3, len(batches))
+        self.assertEqual([32, 32, 4], [len(data.splitlines()) for _args, data in batches])
+        self.assertTrue(all(args == ("cat-file", "--batch") for args, _data in batches))
+        self.assertEqual(
+            expected_ids, [line.decode("ascii") for _args, data in batches for line in data.splitlines()],
+        )
+        self.assertTrue(all(data.endswith(b"\n") for _args, data in batches))
+
+    def test_batch_decoder_preserves_literal_empty_binary_and_sha256_objects(self):
+        for algorithm in (hashlib.sha1, hashlib.sha256):
+            payloads = (b"", b"literal\x00\npayload\n", b"\xff\x00binary")
+            pairs = [
+                (algorithm(b"blob " + str(len(payload)).encode("ascii") + b"\x00" + payload).hexdigest(), payload)
+                for payload in payloads
+            ]
+            raw = b"".join(
+                oid.encode("ascii") + b" blob " + str(len(payload)).encode("ascii") + b"\n" + payload + b"\n"
+                for oid, payload in pairs
+            )
+            self.assertEqual(dict(pairs), self.guard._decode_blob_batch(raw, [oid for oid, _payload in pairs]))
+
+    def test_batch_decoder_rejects_unrequested_noncanonical_corrupt_or_incomplete_frames(self):
+        payload = b"literal\x00\npayload\n"
+        oid = hashlib.sha1(b"blob " + str(len(payload)).encode("ascii") + b"\x00" + payload).hexdigest()
+        prefix = oid.encode("ascii") + b" blob "
+        frame = prefix + str(len(payload)).encode("ascii") + b"\n" + payload + b"\n"
+        mutations = (
+            b"", frame[:-1], frame[:-2], frame + b"\n", frame + frame,
+            oid.encode("ascii") + b" missing\n", frame.replace(b" blob ", b" tree ", 1),
+            frame.replace(oid.encode("ascii"), b"f" * 40, 1),
+            prefix + b"0" + str(len(payload)).encode("ascii") + b"\n" + payload + b"\n",
+            prefix + b"+17\n" + payload + b"\n", prefix + b"-1\n" + payload + b"\n",
+            prefix + b" 17\n" + payload + b"\n", prefix + b"999999999999999999999999\n",
+            frame.replace(b"literal", b"Literal"),
+            prefix + b"7" * 128 + b"\n", frame[:-1] + b"\x00",
+        )
+        for raw in mutations:
+            with self.subTest(raw=raw[:100]), self.assertRaises(self.guard.SourceGuardError):
+                self.guard._decode_blob_batch(raw, (oid,))
+        with self.assertRaises(self.guard.SourceGuardError):
+            self.guard._decode_blob_batch(frame + frame, (oid, oid))
+        with self.assertRaises(self.guard.SourceGuardError):
+            self.guard._decode_blob_batch(b"", ())
+
+    def test_blob_batch_transport_preserves_original_execution_guards(self):
+        self.commit_base()
+        oid = hashlib.sha1(b"blob 4\x00data").hexdigest()
+        request = oid.encode("ascii") + b"\n"
+        output = oid.encode("ascii") + b" blob 4\ndata\n"
+        completed = subprocess.CompletedProcess(["git"], 0, stdout=output, stderr=b"")
+        with contextlib.closing(self.guard.hold_repository(self.repo)) as held:
+            with mock.patch.object(self.guard.subprocess, "run", return_value=completed) as runner:
+                self.assertEqual((0, output, b""), self.guard._run_git(
+                    held, ("cat-file", "--batch"), input_bytes=request))
+            options = runner.call_args.kwargs
+            self.assertEqual(request, options["input"])
+            self.assertNotIn("stdin", options, "do not supply stdin and input together")
+            self.assertEqual(30.0, options["timeout"])
+            self.assertTrue(options["close_fds"])
+            self.assertEqual(2, len(options["pass_fds"]))
+            self.assertEqual(held.descriptor, options["pass_fds"][0])
+            self.assertEqual({
+                "HOME": "/nonexistent", "LANG": "C", "LC_ALL": "C", "PATH": "/usr/bin:/bin",
+                "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_NO_REPLACE_OBJECTS": "1", "GIT_TERMINAL_PROMPT": "0",
+            }, options["env"])
+            self.assertEqual(["cat-file", "--batch"], runner.call_args.args[0][-2:])
+            self.assertEqual(
+                "/usr/bin/git" if not sys.platform.startswith("linux") else
+                "/proc/self/fd/" + str(options["pass_fds"][1]),
+                runner.call_args.args[0][0],
+            )
+
+    def test_blob_batch_transport_rejects_open_or_unbounded_stdin_before_child(self):
+        self.commit_base()
+        oid = hashlib.sha1(b"blob 4\x00data").hexdigest().encode("ascii")
+        mutations = [
+            b"", oid, b"\n", oid + b"\n\n", oid + b"\r\n",
+            oid.upper() + b"\n", oid[:-1] + b"\n", b"g" * 40 + b"\n",
+            oid + b"\x00\n", b" ".join([oid, oid]) + b"\n",
+            oid + b"\n" + oid + b"\n", bytearray(oid + b"\n"), "not-binary",
+            b"".join(hashlib.sha1(("blob 0\x00" + str(i)).encode()).hexdigest().encode() + b"\n"
+                     for i in range(33)),
+        ]
+        with contextlib.closing(self.guard.hold_repository(self.repo)) as held:
+            for request in mutations:
+                with self.subTest(request=repr(request)[:100]), \
+                        mock.patch.object(self.guard.subprocess, "run") as runner:
+                    with self.assertRaises(self.guard.SourceGuardError):
+                        self.guard._run_git(held, ("cat-file", "--batch"), input_bytes=request)
+                    runner.assert_not_called()
+            with mock.patch.object(self.guard.subprocess, "run") as runner:
+                with self.assertRaises(self.guard.SourceGuardError):
+                    self.guard._run_git(held, ("cat-file", "blob", oid.decode()),
+                                        input_bytes=oid + b"\n")
+                runner.assert_not_called()
+
+    def test_blob_batch_rejects_private_repository_rebind_before_export(self):
+        tree_id = self.commit_base()
+        real_run = self.guard.subprocess.run
+        moved = Path(self.temporary.name) / "rebound-original-repo"
+        destination = Path(self.temporary.name) / "must-not-export"
+        fired = []
+        def rebind(command, **kwargs):
+            completed = real_run(command, **kwargs)
+            if command[-2:] == ["cat-file", "--batch"]:
+                fired.append(True)
+                self.repo.rename(moved)
+                self.repo.mkdir()
+            return completed
+        with mock.patch.object(self.guard.subprocess, "run", side_effect=rebind):
+            with self.assertRaisesRegex(self.guard.SourceGuardError, "source directory identity was rebound"):
+                self.guard.export_tree(self.repo, tree_id, destination,
+                                       required_uid=os.geteuid(), required_gid=os.getegid())
+        self.assertEqual([True], fired)
+        self.assertFalse(os.path.lexists(destination))
+        self.assertEqual(b"literal-value\n", (moved / "data/value.txt").read_bytes())
+
+    def test_corrupt_later_blob_chunk_prevents_any_destination_creation(self):
+        tree_id, expected = self._commit_batch_corpus()
+        original = self.guard._run_git
+        destination = Path(self.temporary.name) / "no-partial-export"
+        batches = []
+        def corrupt(repository, arguments, **kwargs):
+            code, stdout, stderr = original(repository, arguments, **kwargs)
+            if tuple(arguments) == ("cat-file", "--batch"):
+                batches.append(kwargs["input_bytes"])
+                if len(batches) == 2:
+                    stdout = stdout[:-1]
+            return code, stdout, stderr
+        with mock.patch.object(self.guard, "_run_git", side_effect=corrupt):
+            with self.assertRaises(self.guard.SourceGuardError):
+                self.guard.export_tree(self.repo, tree_id, destination,
+                                       required_uid=os.geteuid(), required_gid=os.getegid())
+        self.assertEqual(2, len(batches))
+        self.assertFalse(os.path.lexists(destination))
+        for name, (payload, mode) in expected.items():
+            observed = os.fsencode(os.readlink(self.repo / name)) if mode == "120000" else (self.repo / name).read_bytes()
+            self.assertEqual(payload, observed)
+
+    def test_blob_batch_executable_rebind_is_detected_after_child_before_export(self):
+        self.commit_base()
+        trusted = Path(self.temporary.name) / "private-trusted-exec"
+        trusted.write_bytes(b"private executable identity fixture\n")
+        trusted.chmod(0o755)
+        original_stat = self.guard._metadata_fingerprint(trusted.stat())
+        oid = hashlib.sha1(b"blob 4\x00data").hexdigest()
+        def opened():
+            descriptor = os.open(trusted, os.O_RDONLY | os.O_NOFOLLOW)
+            return descriptor, self.guard._metadata_fingerprint(os.fstat(descriptor))
+        def replace_after_child(command, **kwargs):
+            replacement = trusted.with_name("replacement-exec")
+            replacement.write_bytes(b"private executable identity fixture\n")
+            replacement.chmod(0o755)
+            replacement.replace(trusted)
+            return subprocess.CompletedProcess(command, 0, stdout=oid.encode() + b" blob 4\ndata\n", stderr=b"")
+        with contextlib.closing(self.guard.hold_repository(self.repo)) as held:
+            with mock.patch.object(self.guard, "TRUSTED_GIT_PATH", str(trusted)), \
+                    mock.patch.object(self.guard, "_open_trusted_git", side_effect=opened), \
+                    mock.patch.object(self.guard.subprocess, "run", side_effect=replace_after_child):
+                with self.assertRaisesRegex(self.guard.SourceGuardError, "trusted absolute Git executable identity changed"):
+                    self.guard._run_git(held, ("cat-file", "--batch"),
+                                        input_bytes=oid.encode() + b"\n")
+        self.assertNotEqual(original_stat, self.guard._metadata_fingerprint(trusted.stat()))
+
+    def test_blob_batch_has_the_original_fixed_child_deadline(self):
+        self.commit_base()
+        oid = hashlib.sha1(b"blob 4\x00data").hexdigest()
+        with contextlib.closing(self.guard.hold_repository(self.repo)) as held:
+            with mock.patch.object(self.guard.subprocess, "run",
+                    side_effect=subprocess.TimeoutExpired(["git"], 30.0)) as runner:
+                with self.assertRaisesRegex(self.guard.SourceGuardError, "fixed deadline"):
+                    self.guard._run_git(held, ("cat-file", "--batch"),
+                                        input_bytes=oid.encode() + b"\n")
+            self.assertEqual(30.0, runner.call_args.kwargs["timeout"])
+            self.assertEqual(oid.encode() + b"\n", runner.call_args.kwargs["input"])
+
+    def test_empty_immutable_tree_requires_no_blob_subprocess(self):
+        self.git("commit", "--allow-empty", "-qm", "independent empty tree")
+        tree_id = self.git("rev-parse", "HEAD^{tree}")
+        original = self.guard._run_git
+        calls = []
+
+        def observe(repository, arguments, **kwargs):
+            calls.append((tuple(arguments), kwargs))
+            return original(repository, arguments, **kwargs)
+
+        with mock.patch.object(self.guard, "_run_git", side_effect=observe):
+            self.assertEqual((), self.guard.read_tree(self.repo, tree_id))
+        self.assertEqual(
+            [(("ls-tree", "-rz", "--full-tree", "--full-name", tree_id), {})],
+            calls,
+        )
+
+    def test_batch_decoder_rejects_two_valid_objects_in_wrong_order(self):
+        payloads = (b"independent-first\x00", b"independent-second\n")
+        pairs = [
+            (hashlib.sha1(b"blob " + str(len(payload)).encode("ascii") + b"\x00" + payload).hexdigest(), payload)
+            for payload in payloads
+        ]
+        raw = b"".join(
+            oid.encode("ascii") + b" blob " + str(len(payload)).encode("ascii") + b"\n" + payload + b"\n"
+            for oid, payload in reversed(pairs)
+        )
+        with self.assertRaises(self.guard.SourceGuardError):
+            self.guard._decode_blob_batch(raw, [oid for oid, _payload in pairs])
+
+    def test_blob_batch_rechecks_source_binding_before_next_child(self):
+        tree_id, expected = self._commit_batch_corpus()
+        original_git = self.guard._run_git
+        original_run = self.guard.subprocess.run
+        destination = Path(self.temporary.name) / "forbidden-between-batches-export"
+        moved = Path(self.temporary.name) / "held-original-between-batches"
+        batches = []
+        children = []
+
+        def observe_child(command, **kwargs):
+            if command[-2:] == ["cat-file", "--batch"]:
+                children.append(tuple(command))
+            return original_run(command, **kwargs)
+
+        def replace_between(repository, arguments, **kwargs):
+            result = original_git(repository, arguments, **kwargs)
+            if tuple(arguments) == ("cat-file", "--batch"):
+                batches.append(kwargs["input_bytes"])
+                if len(batches) == 1:
+                    self.repo.rename(moved)
+                    self.repo.mkdir()
+                    (self.repo / "foreign-marker").write_bytes(b"foreign namespace retained\n")
+            return result
+
+        with mock.patch.object(self.guard.subprocess, "run", side_effect=observe_child), \
+                mock.patch.object(self.guard, "_run_git", side_effect=replace_between):
+            with self.assertRaisesRegex(self.guard.SourceGuardError, "source directory identity was rebound"):
+                self.guard.export_tree(
+                    self.repo, tree_id, destination,
+                    required_uid=os.geteuid(), required_gid=os.getegid(),
+                )
+        self.assertEqual(1, len(batches), "do not consume a second batch after a rebind")
+        self.assertEqual(1, len(children), "pre-child identity guard must stop the second Git child")
+        self.assertFalse(os.path.lexists(destination))
+        self.assertEqual(b"foreign namespace retained\n", (self.repo / "foreign-marker").read_bytes())
+        for name, (payload, mode) in expected.items():
+            path = moved / name
+            observed = os.fsencode(os.readlink(path)) if mode == "120000" else path.read_bytes()
+            self.assertEqual(payload, observed)
+
+    def test_real_sha256_repository_preserves_all_paths_and_batch_identity(self):
+        self.repo = Path(self.temporary.name) / "sha256-repository"
+        self.repo.mkdir()
+        self.git("init", "-q", "--object-format=sha256")
+        self.git("config", "user.email", "sha256-batch@example.invalid")
+        self.git("config", "user.name", "Independent SHA256 Batch")
+        tree, expected = self._commit_batch_corpus()
+        self.assertEqual(64, len(tree))
+        original = self.guard._run_git
+        batches = []
+
+        def observe(repository, arguments, **kwargs):
+            if tuple(arguments) == ("cat-file", "--batch"):
+                batches.append(kwargs["input_bytes"])
+            return original(repository, arguments, **kwargs)
+
+        with mock.patch.object(self.guard, "_run_git", side_effect=observe):
+            entries = self.guard.read_tree(self.repo, tree)
+        self.assertEqual(expected, {
+            entry.path: (entry.payload, entry.git_mode) for entry in entries
+        })
+        expected_ids = list(dict.fromkeys(
+            hashlib.sha256(b"blob " + str(len(payload)).encode("ascii") + b"\x00" + payload).hexdigest()
+            for _name, (payload, _mode) in sorted(expected.items())
+        ))
+        self.assertEqual([32, 32, 4], [len(batch.splitlines()) for batch in batches])
+        self.assertEqual(expected_ids, [
+            line.decode("ascii") for batch in batches for line in batch.splitlines()
+        ])
+        self.assertTrue(all(len(entry.blob_id) == 64 for entry in entries))
+
+    def test_failed_blob_child_never_creates_destination_even_with_valid_stdout(self):
+        tree = self.commit_base()
+        destination = Path(self.temporary.name) / "failed-child-no-export"
+        original = self.guard._run_git
+
+        def failed(repository, arguments, **kwargs):
+            code, output, errors = original(repository, arguments, **kwargs)
+            if tuple(arguments) == ("cat-file", "--batch"):
+                return 73, output, b"independent child failure\n"
+            return code, output, errors
+
+        with mock.patch.object(self.guard, "_run_git", side_effect=failed):
+            with self.assertRaisesRegex(self.guard.SourceGuardError, "independent child failure"):
+                self.guard.export_tree(self.repo, tree, destination,
+                    required_uid=os.geteuid(), required_gid=os.getegid())
+        self.assertFalse(os.path.lexists(destination))
+        self.assertEqual(b"literal-value\n", (self.repo / "data/value.txt").read_bytes())
 
     def setUp(self):
         self.guard = load_guard()

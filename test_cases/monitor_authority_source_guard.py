@@ -362,7 +362,11 @@ def _git_executable_path(descriptor: int) -> str:
 def _run_git(
     repo: HeldRepository,
     arguments: Sequence[str],
+    *, input_bytes: bytes | None = None,
 ) -> tuple[int, bytes, bytes]:
+    input_options = {"stdin": subprocess.DEVNULL} if input_bytes is None else {
+        "input": _validated_blob_batch_input(arguments, input_bytes),
+    }
     repo.verify_binding()
     git_descriptor, git_identity = _open_trusted_git()
     command = [
@@ -373,7 +377,7 @@ def _run_git(
     try:
         result = subprocess.run(
             command,
-            stdin=subprocess.DEVNULL,
+            **input_options,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             check=False,
@@ -644,6 +648,78 @@ def _validate_symlinks(entries: Sequence[TreeEntry]) -> None:
             resolve(entry.path)
 
 
+def _decode_blob_batch(raw: bytes, object_ids: Sequence[str]) -> dict[str, bytes]:
+    """Consume only the requested, hash-verified, closed Git blob protocol."""
+    expected = tuple(_validate_object_id(oid, "batch blob ID") for oid in object_ids)
+    if not 1 <= len(expected) <= 32 or len(set(expected)) != len(expected):
+        raise _fail("Git blob batch request is not bounded and unique")
+    if not isinstance(raw, bytes):
+        raise _fail("Git blob batch output is not bytes")
+    offset = 0
+    payloads: dict[str, bytes] = {}
+    for oid in expected:
+        header_end = raw.find(b"\n", offset, offset + 128)
+        if header_end < 0:
+            raise _fail("Git blob batch header is missing or oversized")
+        fields = raw[offset:header_end].split(b" ")
+        if len(fields) != 3 or fields[:2] != [oid.encode("ascii"), b"blob"]:
+            raise _fail("Git blob batch object identity or type differs")
+        size_bytes = fields[2]
+        if (
+            not size_bytes or not size_bytes.isdigit()
+            or (len(size_bytes) > 1 and size_bytes.startswith(b"0"))
+        ):
+            raise _fail("Git blob batch size is not canonical")
+        size = int(size_bytes)
+        body_start = header_end + 1
+        if size > len(raw) - body_start - 1:
+            raise _fail("Git blob batch payload is truncated")
+        body_end = body_start + size
+        if raw[body_end:body_end + 1] != b"\n":
+            raise _fail("Git blob batch separator is missing")
+        payload = raw[body_start:body_end]
+        if _git_object_digest(payload, len(oid)) != oid:
+            raise _fail("Git blob batch payload does not match object ID")
+        payloads[oid] = payload
+        offset = body_end + 1
+    if offset != len(raw):
+        raise _fail("Git blob batch contains unexpected trailing bytes")
+    return payloads
+
+
+def _validated_blob_batch_input(arguments: Sequence[str], input_bytes: bytes) -> bytes:
+    """Permit closed immutable-object requests only, never arbitrary child stdin."""
+    if tuple(arguments) != ("cat-file", "--batch") or not isinstance(input_bytes, bytes):
+        raise _fail("Git blob batch transport arguments are not closed")
+    if not input_bytes.endswith(b"\n") or len(input_bytes) > 32 * 65:
+        raise _fail("Git blob batch input is missing its terminator or oversized")
+    lines = input_bytes[:-1].split(b"\n")
+    if not 1 <= len(lines) <= 32:
+        raise _fail("Git blob batch request count is outside its fixed bound")
+    try:
+        ids = tuple(_validate_object_id(line.decode("ascii", "strict"), "batch blob ID") for line in lines)
+    except UnicodeError as exc:
+        raise _fail("Git blob batch input is not ASCII") from exc
+    if len(set(ids)) != len(ids):
+        raise _fail("Git blob batch input contains duplicate requests")
+    return input_bytes
+
+
+def _read_blob_batches(repository: HeldRepository, entries: Sequence[TreeEntry]) -> dict[str, bytes]:
+    # Deduplicate object reads only. Every original path/mode remains in the result.
+    ids = tuple(dict.fromkeys(entry.blob_id for entry in entries))
+    payloads: dict[str, bytes] = {}
+    for offset in range(0, len(ids), 32):
+        batch = ids[offset:offset + 32]
+        request = b"".join(oid.encode("ascii") + b"\n" for oid in batch)
+        code, raw, stderr = _run_git(repository, ("cat-file", "--batch"), input_bytes=request)
+        if code:
+            diagnostic = stderr[:512].decode("utf-8", "replace").strip()
+            raise _fail(f"Git object command failed: {diagnostic or code}")
+        payloads.update(_decode_blob_batch(raw, batch))
+    return payloads
+
+
 def read_tree(
     repo: os.PathLike[str] | str | HeldRepository,
     tree_id: str,
@@ -665,13 +741,8 @@ def read_tree(
             records = []
         entries = validate_entries(parse_ls_tree_record(record) for record in records)
 
-        populated: list[TreeEntry] = []
-        for entry in entries:
-            payload = _git(repository, ("cat-file", "blob", entry.blob_id))
-            actual_id = _git_object_digest(payload, len(entry.blob_id))
-            if actual_id != entry.blob_id:
-                raise _fail(f"Git blob bytes do not match object ID: {entry.path}")
-            populated.append(replace(entry, payload=payload))
+        payloads = _read_blob_batches(repository, entries)
+        populated = [replace(entry, payload=payloads[entry.blob_id]) for entry in entries]
         result = validate_entries(populated)
         _validate_symlinks(result)
         return result
