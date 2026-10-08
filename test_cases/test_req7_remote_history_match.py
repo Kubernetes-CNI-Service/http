@@ -1,6 +1,6 @@
 """Independent all-business/all-audit reconciliation, not sending or APPLIED."""
 from copy import deepcopy
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from dataclasses import replace
 import hashlib
 import importlib.util
@@ -15,7 +15,7 @@ from types import SimpleNamespace
 
 import test_cases
 ROOT = Path(test_cases.__file__).resolve().parents[1]
-from test_cases.test_req7_spreadsheet_owner import load as load_owner, fixture, binding, TARGET
+from test_cases.test_req7_spreadsheet_owner import load as load_owner, fixture, binding, TARGET, scoped_fixture
 from test_cases.test_req7_global_attempt_journal import load as load_global
 from test_cases.test_req7_history_preread_journal import load as load_before
 from test_cases.test_req7_enrollment_journal import load as load_enrollment
@@ -1982,6 +1982,380 @@ with scoped_fixture(root,owner),owner.spreadsheet_owner(bound) as token:
             with self.assertRaises(module.RemoteHistoryHold):
                 module.observe_owned_unit_read_gates(writer,owner,bound,unit,whitelist_snapshot=snapshot,**{**images,'metadata_response':read})
             self.assertEqual((1,'UNKNOWN'),(journal.inspect_global_unit(owner,bound,unit).attempt_count,journal.inspect_global_unit(owner,bound,unit).outcome))
+
+
+    def assert_native_completed_k_hold(self,bound):
+        from dataclasses import asdict
+        import subprocess
+        program='''import sys,json,hashlib
+from pathlib import Path
+sys.path[:0]=[sys.argv[1],sys.argv[1]+"/tools"]
+from monitor import issue_tracker_state_owner as state,issue_tracker_spreadsheet_owner as sheet
+from test_cases.test_req7_spreadsheet_owner import scoped_fixture
+from monitor.issue_tracker_online_target import OnlineTargetBinding
+from monitor.issue_tracker_send_unit import _original_unit
+root=Path(sys.argv[2]); project=root/'project'; bound=OnlineTargetBinding(**json.loads(sys.stdin.buffer.read()))
+folder=root/'var/lib/http-ztp-container/issue-tracker'/(hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()+'.journal')
+unit=_original_unit((folder/'ACTION-PREIMAGE').read_bytes(),(folder/'WIRE').read_bytes())
+try:
+ with scoped_fixture(root,sheet),state.tracker_writer(project,project/'publication',completed_binding=bound,completed_unit=unit):
+  raise AssertionError('failed write adopted as cold K authority')
+except state.TrackerStateHold: print('HOLD')
+'''
+        result=subprocess.run([sys.executable,'-B','-c',program,str(ROOT),str(self.root)],
+            input=json.dumps(asdict(bound)).encode(),stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=10)
+        self.assertEqual(0,result.returncode,result.stderr)
+        self.assertEqual(b'HOLD\n',result.stdout)
+    def actual_delivered_k_pair(self):
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        with ExitStack() as scope:
+            writer,sheet,bound,unit=self.completed(scope)
+            allocation.record_completed_settings_delivery(writer,sheet,bound,unit)
+            outbox=self.root/'project/.tracker/settings/outbox'
+            (outbox/'0.json').rename(self.root/'preserved-k-change-projection')
+        return bound,unit
+
+    def change_after_delivery(self,state,token,**changes):
+        args=dict(new_k=6,actor='operator:fixture',recorded_at='2026-10-08T10:01:00Z',
+                  request_id='write-after-delivery',expected_revision=0)
+        args.update(changes)
+        return state.set_k(token,**args)
+
+    def test_native_cold_completed_writer_changes_k_and_replays_without_parent_context(self):
+        from dataclasses import asdict
+        import subprocess
+        bound,unit=self.actual_delivered_k_pair(); tracker=self.root/'project/.tracker'
+        old=(tracker/'settings/events/0.json').read_bytes()
+        program='''import sys,json,hashlib
+from pathlib import Path
+sys.path[:0]=[sys.argv[1],sys.argv[1]+"/tools"]
+from monitor import issue_tracker_state_owner as state,issue_tracker_spreadsheet_owner as sheet
+from test_cases.test_req7_spreadsheet_owner import scoped_fixture
+from monitor.issue_tracker_online_target import OnlineTargetBinding
+from monitor.issue_tracker_send_unit import _original_unit
+root=Path(sys.argv[2]); project=root/'project'; bound=OnlineTargetBinding(**json.loads(sys.stdin.buffer.read()))
+folder=root/'var/lib/http-ztp-container/issue-tracker'/(hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()+'.journal')
+unit=_original_unit((folder/'ACTION-PREIMAGE').read_bytes(),(folder/'WIRE').read_bytes())
+with scoped_fixture(root,sheet),state.tracker_writer(project,project/'publication',completed_binding=bound,completed_unit=unit) as token:
+ for unused in range(2):
+  result=state.set_k(token,new_k=6,actor='operator:fixture',recorded_at='2026-10-08T10:01:00Z',request_id='cold-write-after-delivery',expected_revision=0)
+  print(result.revision,result.k,result.replay)
+ value=state.current_k(token); print(value.revision,value.k)
+'''
+        cold=subprocess.run([sys.executable,'-B','-c',program,str(ROOT),str(self.root)],
+            input=json.dumps(asdict(bound)).encode(),stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=10)
+        self.assertEqual(0,cold.returncode,cold.stderr)
+        self.assertEqual(b'1 6 False\n1 6 True\n1 6\n',cold.stdout)
+        payload={'new_k':6,'actor':'operator:fixture','expected_revision':0,'request_id':'cold-write-after-delivery'}
+        expected=canonical({'schema_version':1,'revision':1,'type':'set_k','old_k':3,'new_k':6,
+            'actor':'operator:fixture','recorded_at':'2026-10-08T10:01:00Z','request_id':'cold-write-after-delivery',
+            'payload_sha256':hashlib.sha256(canonical(payload)).hexdigest(),
+            'predecessor_sha256':hashlib.sha256(old).hexdigest()})
+        self.assertEqual(expected,(tracker/'settings/events/1.json').read_bytes())
+        self.assertEqual(old,(tracker/'settings/events/0.json').read_bytes())
+        self.assertFalse((tracker/'settings/outbox/0.json').exists())
+        self.assertEqual({'events','outbox','current'},{p.name for p in (tracker/'settings').iterdir()})
+        self.assertEqual(unit.wire_bytes,(self.root/'var/lib/http-ztp-container/issue-tracker'/
+            (hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()+'.journal')/'WIRE').read_bytes())
+
+    def test_actual_completed_pair_commits_new_event_pointer_outbox_before_ack_and_replays_exactly(self):
+        from monitor import issue_tracker_state_owner as state,issue_tracker_spreadsheet_owner as sheet
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        from monitor.issue_tracker_k_store import KChangeConflict
+        bound,unit=self.actual_delivered_k_pair(); project=self.root/'project'; tracker=project/'.tracker'
+        old=(tracker/'settings/events/0.json').read_bytes()
+        # Literals author the behavioral contract, not the implementation's event.
+        payload={'new_k':6,'actor':'operator:fixture','expected_revision':0,'request_id':'write-after-delivery'}
+        expected=canonical({'schema_version':1,'revision':1,'type':'set_k','old_k':3,'new_k':6,
+            'actor':'operator:fixture','recorded_at':'2026-10-08T10:01:00Z','request_id':'write-after-delivery',
+            'payload_sha256':hashlib.sha256(canonical(payload)).hexdigest(),
+            'predecessor_sha256':hashlib.sha256(old).hexdigest()})
+        digest=hashlib.sha256(expected).hexdigest()
+        archives_before={p.name for p in (tracker/'quarantine').iterdir()}
+        with scoped_fixture(self.root,sheet),state.tracker_writer(project,project/'publication',
+                completed_binding=bound,completed_unit=unit) as token:
+            receipt=self.change_after_delivery(state,token)
+            self.assertEqual((1,6,digest,False),(receipt.revision,receipt.k,receipt.event_sha256,receipt.replay))
+            self.assertEqual(expected,(tracker/'settings/events/1.json').read_bytes())
+            self.assertEqual(canonical({'schema_version':1,'revision':1,'event_sha256':digest}),(tracker/'settings/current').read_bytes())
+            self.assertEqual(canonical({'schema_version':1,'revision':1,'event_sha256':digest}),(tracker/'settings/outbox/1.json').read_bytes())
+            self.assertEqual((1,6),(state.current_k(token).revision,state.current_k(token).k))
+            self.assertFalse((tracker/'settings/outbox/0.json').exists())
+            archives=[p for p in (tracker/'quarantine').iterdir() if p.name not in archives_before]
+            self.assertEqual(2,len(archives),'retain both original pointer and guard recoverably')
+            old_pointer=canonical({'schema_version':1,'revision':0,'event_sha256':hashlib.sha256(old).hexdigest()})
+            pointer_archives=[p for p in archives if p.read_bytes()==old_pointer]
+            self.assertEqual(1,len(pointer_archives),'original current must survive byte-for-byte in quarantine')
+            self.assertEqual(0o600,pointer_archives[0].stat().st_mode & 0o777)
+            archives=[p for p in archives if p not in pointer_archives]
+            self.assertEqual(canonical({'schema_version':1,'request_id':'write-after-delivery',
+                'payload_sha256':hashlib.sha256(canonical(payload)).hexdigest(),'expected_revision':0,
+                'event_sha256':digest,'predecessor_sha256':hashlib.sha256(old).hexdigest()}),archives[0].read_bytes())
+            self.assertEqual(0o600,archives[0].stat().st_mode & 0o777)
+            snapshot={str(p.relative_to(tracker)):p.read_bytes() for p in tracker.rglob('*') if p.is_file()}
+            replay=self.change_after_delivery(state,token)
+            self.assertEqual((1,6,digest,True),(replay.revision,replay.k,replay.event_sha256,replay.replay))
+            for options in ({'new_k':7},{'request_id':'stale-other-request'}):
+                with self.subTest(options=options):
+                    with self.assertRaises(state.TrackerStateHold) as rejected:
+                        self.change_after_delivery(state,token,**options)
+                    # The existing relay uses this typed cause to distinguish
+                    # a proved pre-mutation conflict from a claimed UNKNOWN.
+                    self.assertIsInstance(rejected.exception.__cause__,KChangeConflict)
+            self.assertEqual(snapshot,{str(p.relative_to(tracker)):p.read_bytes() for p in tracker.rglob('*') if p.is_file()})
+            pending=allocation.pending_settings_audits_after_completed_unit(token,
+                state._COMPLETED_READ_CONTEXT[token][0],bound,unit)
+            self.assertEqual(('settings:1:'+digest,),tuple(audit['event_id'] for audit in pending))
+        self.assertEqual(old,(tracker/'settings/events/0.json').read_bytes())
+        self.assertEqual(unit.wire_bytes,(self.root/'var/lib/http-ztp-container/issue-tracker'/
+            (hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()+'.journal')/'WIRE').read_bytes())
+
+    def test_lost_original_delivery_before_change_never_creates_a_new_event(self):
+        from monitor import issue_tracker_state_owner as state,issue_tracker_spreadsheet_owner as sheet
+        bound,unit=self.actual_delivered_k_pair(); project=self.root/'project'; tracker=project/'.tracker'
+        with scoped_fixture(self.root,sheet),self.assertRaises(state.TrackerStateHold):
+            with state.tracker_writer(project,project/'publication',completed_binding=bound,completed_unit=unit) as token:
+                (tracker/'settings-audit-delivery/DELIVERED').rename(self.root/'preserved-k-change-delivery')
+                before={str(p.relative_to(tracker)):p.read_bytes() for p in tracker.rglob('*') if p.is_file()}
+                with self.assertRaises(state.TrackerStateHold): self.change_after_delivery(state,token)
+                self.assertEqual(before,{str(p.relative_to(tracker)):p.read_bytes() for p in tracker.rglob('*') if p.is_file()})
+                self.assertFalse((tracker/'settings/events/1.json').exists())
+
+    def test_each_required_write_barrier_failure_keeps_cold_k_in_hold_without_repair(self):
+        from monitor import issue_tracker_state_owner as state,issue_tracker_spreadsheet_owner as sheet
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        from monitor import issue_tracker_settings_audit_allocation as candidate
+        # Event: temporary-file/installed-parent/held-file; outbox: same three; current:
+        # file/old-pointer source/old-pointer archive/new-pointer parent. All
+        # original eight remain tested; two new archive barriers extend coverage.
+        for boundary in range(1,11):
+            with self.subTest(required_barrier=boundary):
+                case=type(self)('test_lost_original_delivery_before_change_never_creates_a_new_event'); case.setUp()
+                try:
+                    bound,unit=case.actual_delivered_k_pair(); project=case.root/'project'
+                    tracker=project/'.tracker'; reached=[]; active=[False]; count=[0]
+                    native_install=candidate._CompletedSettingsTransition.install; native_fsync=candidate.os.fsync
+                    def install(*args,**options):
+                        active[0]=True
+                        try: return native_install(*args,**options)
+                        finally: active[0]=False
+                    def fsync(fd):
+                        if active[0]:
+                            count[0]+=1
+                            if count[0]==boundary:
+                                reached.append(boundary); raise OSError('owned required K barrier fault')
+                        return native_fsync(fd)
+                    with scoped_fixture(case.root,sheet),self.assertRaises(state.TrackerStateHold):
+                        with state.tracker_writer(project,project/'publication',completed_binding=bound,completed_unit=unit) as token:
+                            with mock.patch.object(candidate._CompletedSettingsTransition,'install',new=install), \
+                                    mock.patch.object(candidate.os,'fsync',side_effect=fsync),self.assertRaises(state.TrackerStateHold):
+                                case.change_after_delivery(state,token)
+                            self.assertEqual([boundary],reached)
+                            with self.assertRaises(state.TrackerStateHold): state.current_k(token)
+                    # A new native owner cannot adopt a coherent-looking tail,
+                    # silently fall back to old K, or restore any projection.
+                    before={str(p.relative_to(tracker)):p.read_bytes() for p in tracker.rglob('*') if p.is_file()}
+                    with scoped_fixture(case.root,sheet),self.assertRaises(state.TrackerStateHold):
+                        with state.tracker_writer(project,project/'publication',completed_binding=bound,completed_unit=unit):
+                            self.fail('failed required barrier became cold K authority')
+                    case.assert_native_completed_k_hold(bound)
+                    self.assertEqual(before,{str(p.relative_to(tracker)):p.read_bytes() for p in tracker.rglob('*') if p.is_file()})
+                    self.assertFalse((tracker/'settings/outbox/0.json').exists())
+                finally: case.doCleanups()
+
+    def test_substituted_pending_name_is_preserved_not_unlinked(self):
+        from monitor import issue_tracker_state_owner as state,issue_tracker_spreadsheet_owner as sheet
+        from monitor import issue_tracker_local_commit as local
+        bound,unit=self.actual_delivered_k_pair(); project=self.root/'project'
+        events=project/'.tracker/settings/events'; native_link=os.link; native_rename=local._rename_new; replaced=[]
+        def replace_pending(parent,temporary,destination):
+            info=os.fstat(parent); directory=events.stat()
+            if not replaced and (info.st_dev,info.st_ino)==(directory.st_dev,directory.st_ino) and destination=='1.json':
+                source=events/temporary
+                if source.exists(): source.rename(self.root/'preserved-original-pending')
+                source.write_bytes(b'owned foreign replacement evidence\n'); source.chmod(0o600)
+                replaced.append(source)
+        def link(source,destination,**options):
+            result=native_link(source,destination,**options)
+            replace_pending(options['src_dir_fd'],source,destination)
+            return result
+        def rename(parent,source,destination,**options):
+            result=native_rename(parent,source,destination,**options)
+            replace_pending(parent,source,destination)
+            return result
+        with scoped_fixture(self.root,sheet),self.assertRaises(state.TrackerStateHold):
+            with state.tracker_writer(project,project/'publication',completed_binding=bound,completed_unit=unit) as token:
+                with mock.patch('os.link',side_effect=link),mock.patch.object(local,'_rename_new',side_effect=rename),self.assertRaises(state.TrackerStateHold):
+                    self.change_after_delivery(state,token)
+                self.assertEqual(1,len(replaced),'must actually reach the installed-parent boundary')
+                self.assertTrue(replaced[0].exists(),'never unlink substituted pending evidence')
+                self.assertEqual(b'owned foreign replacement evidence\n',replaced[0].read_bytes())
+                with self.assertRaises(state.TrackerStateHold): state.current_k(token)
+        tracker=project/'.tracker'
+        before={str(p.relative_to(tracker)):p.read_bytes() for p in tracker.rglob('*') if p.is_file()}
+        self.assert_native_completed_k_hold(bound)
+        self.assertEqual(before,{str(p.relative_to(tracker)):p.read_bytes() for p in tracker.rglob('*') if p.is_file()})
+
+
+    def test_current_replacement_at_native_install_is_preserved_not_overwritten(self):
+        from monitor import issue_tracker_state_owner as state,issue_tracker_spreadsheet_owner as sheet
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        bound,unit=self.actual_delivered_k_pair(); project=self.root/'project'; tracker=project/'.tracker'
+        raw=b'owned foreign unexplained current pointer; preserve evidence\n'
+        current=tracker/'settings/current'; reached=[]; replace=os.replace; rename=allocation.local._rename_new
+        def substitute():
+            if not reached:
+                current.rename(self.root/'preserved-original-current-before-change')
+                current.write_bytes(raw); current.chmod(0o600); reached.append(True)
+        def replaced(source,destination,**options):
+            if destination=='current': substitute()
+            return replace(source,destination,**options)
+        def moved(parent,source,destination,**options):
+            if source=='current': substitute()
+            return rename(parent,source,destination,**options)
+        with scoped_fixture(self.root,sheet),self.assertRaises(state.TrackerStateHold):
+            with state.tracker_writer(project,project/'publication',completed_binding=bound,completed_unit=unit) as token:
+                with mock.patch.object(allocation.os,'replace',side_effect=replaced), \
+                        mock.patch.object(allocation.local,'_rename_new',side_effect=moved),self.assertRaises(state.TrackerStateHold):
+                    self.change_after_delivery(state,token)
+                self.assertEqual([True],reached,'owned native boundary must execute')
+                self.assertEqual(1,sum(p.read_bytes()==raw for p in tracker.rglob('*') if p.is_file()),
+                    'never overwrite an unexplained replacement current object')
+                with self.assertRaises(state.TrackerStateHold): state.current_k(token)
+        self.assert_native_completed_k_hold(bound)
+
+    def test_current_inserted_after_original_move_is_preserved_without_ack(self):
+        from monitor import issue_tracker_state_owner as state,issue_tracker_spreadsheet_owner as sheet
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        bound,unit=self.actual_delivered_k_pair(); project=self.root/'project'; tracker=project/'.tracker'
+        current=tracker/'settings/current'; old=current.read_bytes()
+        foreign=b'owned late current insertion; never replace\n'; reached=[]
+        rename=allocation.local._rename_new
+        def moved(parent,source,destination,**options):
+            result=rename(parent,source,destination,**options)
+            if source=='current':
+                current.write_bytes(foreign); current.chmod(0o600); reached.append(True)
+            return result
+        with scoped_fixture(self.root,sheet),self.assertRaises(state.TrackerStateHold):
+            with state.tracker_writer(project,project/'publication',completed_binding=bound,completed_unit=unit) as token:
+                with mock.patch.object(allocation.local,'_rename_new',side_effect=moved),self.assertRaises(state.TrackerStateHold):
+                    self.change_after_delivery(state,token)
+                self.assertEqual([True],reached,'must reach recoverable old-pointer move')
+                self.assertEqual(foreign,current.read_bytes())
+                self.assertEqual(1,sum(p.read_bytes()==old for p in (tracker/'quarantine').iterdir() if p.is_file()))
+                with self.assertRaises(state.TrackerStateHold): state.current_k(token)
+        self.assert_native_completed_k_hold(bound)
+
+    def test_existing_guard_archive_is_never_overwritten_and_change_is_not_acknowledged(self):
+        from types import SimpleNamespace
+        from monitor import issue_tracker_state_owner as state,issue_tracker_spreadsheet_owner as sheet
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        bound,unit=self.actual_delivered_k_pair(); project=self.root/'project'; tracker=project/'.tracker'
+        foreign=tracker/'quarantine'/('completed-K-change-guard-'+'f'*32)
+        raw=b'owned pre-existing archive evidence\n'; foreign.write_bytes(raw); foreign.chmod(0o600)
+        identity=(foreign.stat().st_dev,foreign.stat().st_ino)
+        finish=allocation._CompletedSettingsTransition.finish; reached=[]
+        def collision(*args,**options):
+            reached.append(True)
+            with mock.patch.object(allocation.uuid,'uuid4',return_value=SimpleNamespace(hex='f'*32)):
+                return finish(*args,**options)
+        with scoped_fixture(self.root,sheet),self.assertRaises(state.TrackerStateHold):
+            with state.tracker_writer(project,project/'publication',completed_binding=bound,completed_unit=unit) as token:
+                with mock.patch.object(allocation._CompletedSettingsTransition,'finish',new=collision),self.assertRaises(state.TrackerStateHold):
+                    self.change_after_delivery(state,token)
+                self.assertEqual([True],reached)
+                self.assertEqual(raw,foreign.read_bytes())
+                self.assertEqual(identity,(foreign.stat().st_dev,foreign.stat().st_ino))
+                with self.assertRaises(state.TrackerStateHold): state.current_k(token)
+        self.assert_native_completed_k_hold(bound)
+
+    def test_substituted_guard_is_preserved_at_final_cleanup(self):
+        from monitor import issue_tracker_state_owner as state,issue_tracker_spreadsheet_owner as sheet
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        bound,unit=self.actual_delivered_k_pair(); project=self.root/'project'
+        reached=[]; unlink=os.unlink; rename=allocation.local._rename_new
+        raw=b'owned foreign unresolved guard; preserve bytes\n'
+        def insert(name):
+            if str(name).startswith('.pending-K-change-') and not reached:
+                guard=project/'.tracker/settings'/name
+                guard.rename(self.root/'preserved-original-k-guard')
+                guard.write_bytes(raw); guard.chmod(0o600); reached.append(name)
+        def substituted_unlink(name,*args,**options):
+            insert(name); return unlink(name,*args,**options)
+        def substituted_move(parent,name,destination,**options):
+            insert(name); return rename(parent,name,destination,**options)
+        with scoped_fixture(self.root,sheet),self.assertRaises(state.TrackerStateHold):
+            with state.tracker_writer(project,project/'publication',completed_binding=bound,completed_unit=unit) as token:
+                with mock.patch.object(allocation.os,'unlink',side_effect=substituted_unlink), \
+                        mock.patch.object(allocation.local,'_rename_new',side_effect=substituted_move),self.assertRaises(state.TrackerStateHold):
+                    self.change_after_delivery(state,token)
+                self.assertEqual(1,len(reached),'owned substitution boundary must execute')
+                preserved=[p for p in (project/'.tracker').rglob('*') if p.is_file() and p.read_bytes()==raw]
+                self.assertEqual(1,len(preserved),'never delete a substituted unresolved guard, even after recoverable move')
+                with self.assertRaises(state.TrackerStateHold): state.current_k(token)
+        self.assert_native_completed_k_hold(bound)
+
+    def test_guard_boundaries_and_post_write_authority_loss_retain_cold_hold(self):
+        from monitor import issue_tracker_state_owner as state,issue_tracker_spreadsheet_owner as sheet
+        from monitor import issue_tracker_settings_audit_allocation as candidate
+        for fault in ('intent-file','intent-parent','intent-cleanup','intent-archive','delivery-loss','pointer-rebind','final-proof-close'):
+            with self.subTest(fault=fault):
+                case=type(self)('test_lost_original_delivery_before_change_never_creates_a_new_event'); case.setUp()
+                try:
+                    bound,unit=case.actual_delivered_k_pair(); project=case.root/'project'; tracker=project/'.tracker'
+                    native_begin=candidate._CompletedSettingsTransition.begin; native_finish=candidate._CompletedSettingsTransition.finish
+                    native_install=candidate._CompletedSettingsTransition.install; native_fsync=candidate.os.fsync
+                    native_pair=candidate._hold_completed_k_pair
+                    active=[False]; count=[0]; reached=[]
+                    def begin(*args,**options):
+                        active[0]=fault in ('intent-file','intent-parent')
+                        try: return native_begin(*args,**options)
+                        finally: active[0]=False
+                    def finish(*args,**options):
+                        active[0]=fault in ('intent-cleanup','intent-archive')
+                        try: return native_finish(*args,**options)
+                        finally: active[0]=False
+                    def fsync(fd):
+                        if active[0]:
+                            count[0]+=1
+                            limit=2 if fault in ('intent-parent','intent-archive') else 1
+                            if count[0]==limit:
+                                reached.append(fault); raise OSError('owned unresolved K guard fault')
+                        return native_fsync(fd)
+                    def install(transition,scope,parent,name,raw,**options):
+                        result=native_install(transition,scope,parent,name,raw,**options)
+                        if name=='current' and fault in ('delivery-loss','pointer-rebind'):
+                            reached.append(fault)
+                            if fault=='delivery-loss':
+                                (tracker/'settings-audit-delivery/DELIVERED').rename(case.root/'preserved-mid-write-delivery')
+                            else:
+                                current=tracker/'settings/current'; replacement=case.root/'same-byte-current'
+                                replacement.write_bytes(current.read_bytes()); replacement.chmod(0o600)
+                                current.rename(case.root/'preserved-mid-write-current'); replacement.rename(current)
+                        return result
+                    @contextmanager
+                    def pair(*args,**options):
+                        with native_pair(*args,**options) as result:
+                            yield result
+                            if fault=='final-proof-close':
+                                reached.append(fault)
+                                (tracker/'settings-audit-delivery/DELIVERED').rename(case.root/'preserved-final-write-delivery')
+                    with scoped_fixture(case.root,sheet),self.assertRaises(state.TrackerStateHold):
+                        with state.tracker_writer(project,project/'publication',completed_binding=bound,completed_unit=unit) as token:
+                            with mock.patch.object(candidate._CompletedSettingsTransition,'begin',new=begin), \
+                                    mock.patch.object(candidate._CompletedSettingsTransition,'finish',new=finish), \
+                                    mock.patch.object(candidate._CompletedSettingsTransition,'install',new=install), \
+                                    mock.patch.object(candidate,'_hold_completed_k_pair',new=pair), \
+                                    mock.patch.object(candidate.os,'fsync',side_effect=fsync),self.assertRaises(state.TrackerStateHold):
+                                case.change_after_delivery(state,token)
+                            self.assertEqual([fault],reached)
+                            with self.assertRaises(state.TrackerStateHold): state.current_k(token)
+                    before={str(p.relative_to(tracker)):p.read_bytes() for p in tracker.rglob('*') if p.is_file()}
+                    case.assert_native_completed_k_hold(bound)
+                    self.assertEqual(before,{str(p.relative_to(tracker)):p.read_bytes() for p in tracker.rglob('*') if p.is_file()})
+                    self.assertTrue(any(p.name.startswith('.pending-K-change-') for p in (tracker/'settings').iterdir()))
+                    self.assertFalse((tracker/'settings/outbox/0.json').exists())
+                finally: case.doCleanups()
 
 
 class Req7RemoteHistoryManifestTests(unittest.TestCase):

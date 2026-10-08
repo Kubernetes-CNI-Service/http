@@ -35,6 +35,50 @@ def load():
 
 
 class Req7SettingsAuditAllocationTests(unittest.TestCase):
+    def test_native_current_install_never_overwrites_substituted_evidence(self):
+        from contextlib import ExitStack
+        from types import SimpleNamespace
+        with local.writer_owner(self.project,self.publication) as token,ExitStack() as scope:
+            transition=self.module._CompletedSettingsTransition(scope,local._owner(token),SimpleNamespace(event_ids=()))
+            payload={'new_k':6,'actor':'operator:fixture','expected_revision':0,'request_id':'native-pointer'}
+            event=canonical({'schema_version':1,'revision':1,'type':'set_k','old_k':3,'new_k':6,
+                'actor':'operator:fixture','recorded_at':'2026-10-08T10:01:00Z','request_id':'native-pointer',
+                'payload_sha256':hashlib.sha256(canonical(payload)).hexdigest(),
+                'predecessor_sha256':hashlib.sha256(self.event0).hexdigest()})
+            pointer=canonical({'schema_version':1,'revision':1,'event_sha256':hashlib.sha256(event).hexdigest()})
+            transition.begin(scope,b'owned private unresolved pointer intent\n')
+            transition.install(scope,transition.events,'1.json',event); transition.stage=1
+            transition.install(scope,transition.outbox,'1.json',pointer); transition.stage=2
+            transition.verify()
+            current=self.project/'.tracker/settings/current'; foreign=b'owned foreign pointer; preserve native evidence\n'
+            replace=os.replace; rename=local._rename_new; reached=[]
+            def insert():
+                if not reached:
+                    current.rename(self.root/'preserved-native-old-current')
+                    current.write_bytes(foreign); current.chmod(0o600); reached.append(True)
+            def replaced(source,destination,**options):
+                if destination=='current': insert()
+                return replace(source,destination,**options)
+            def moved(parent,source,destination,**options):
+                if source=='current': insert()
+                return rename(parent,source,destination,**options)
+            with mock.patch.object(os,'replace',side_effect=replaced),mock.patch.object(local,'_rename_new',side_effect=moved):
+                try: transition.install(scope,transition.settings,'current',pointer,replace=True)
+                except (OSError,ValueError): pass
+            self.assertEqual([True],reached)
+            self.assertEqual(1,sum(p.read_bytes()==foreign for p in (self.project/'.tracker').rglob('*') if p.is_file()),
+                'native install must never overwrite an unproved replacement object')
+
+    def test_completed_k_change_requires_actual_complete_delivery_before_any_write(self):
+        with self.owners() as (writer,sheet):
+            value=self.unit(); self.prepare(writer,sheet,value); before=self.image()
+            for actual_writer,actual_sheet in ((writer,sheet),(object(),sheet),(writer,object())):
+                with self.subTest(writer=actual_writer is writer,sheet=actual_sheet is sheet),self.assertRaises(self.module.SettingsAuditHold):
+                    self.module.apply_completed_k_change(actual_writer,actual_sheet,binding(),value,
+                        new_k=6,actor='operator:fixture',recorded_at='2026-10-08T10:01:00Z',
+                        request_id='unproved-change',expected_revision=0)
+            self.assertEqual(before,self.image())
+
     def test_current_k_reader_requires_actual_original_completion_delivery_pair(self):
         with self.owners() as (writer,sheet):
             value=self.unit(); self.prepare(writer,sheet,value)

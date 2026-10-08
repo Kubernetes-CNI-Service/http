@@ -2237,6 +2237,12 @@ ALL 审计行确定唯一 append 窗口（NOOP 无虚构行），精确耗尽可
 
 ## TC-REAL-REQ7-IMMUTABLE-SEND-UNIT-001 — 单表不可变 batch / History / 永久 fence
 
+- K current 无覆盖提交补充（**NOT RUN / REAL_ENV REQUIRED**）：保留全部原八个 event/outbox/current 屏障场景，另加旧指针移动后的源目录与 quarantine 屏障（合计十个安装屏障）、移动前原名被替换、移动后陌生 current 插入，以及暖／冷拒绝收养 partial 场景。正常提交将持有的原指针 NOREPLACE 归档，逐字节保留且两目录同步，再 NOREPLACE 安装新 current；不得覆盖陌生对象、回滚事件、补建交付投影或 ACK 失败。证据含各原件与归档 before/after stat/inode/SHA、完整屏障物理顺序和新进程 HOLD，清理只限确证自有夹具。未省略或合并原场景；确认人为本轮 owner 指令，替代证据为独立 direct 与真实成对 native/TLS/cold workflow。真实断电、设备／卷持久性及在线 worker 仍未验证，不标通过，不扩大既有现场授权、研发确认或发布范围。
+
+- K guard 收尾补充（**NOT RUN / REAL_ENV REQUIRED**）：保留原 guard 替换件、既有归档目的名碰撞、原子 NOREPLACE 移动后 settings／quarantine 两个目录屏障失败、最终证明丢失和冷恢复场景。成功后仅归档原 guard，不删除名称替换件；任一异常不 ACK，保留 partial／归档与持久 STOP，原事件、已冻结单元及 UNKNOWN 不回滚或释放。前后 stat/inode/SHA、屏障物理顺序和新进程证据沿用本卡要求。没有删减或合并原场景；确认人为本轮 owner 指令，替代证据为本地独立预期和 native 双 owner／TLS／冷进程故障流程；真实断电、实际卷持久性及线上 worker 仍未验证，不标通过，不扩展原现场授权、研发确认或发布范围。
+
+- 完成配对 K 写入补充（**NOT RUN / REAL_ENV REQUIRED**）：沿用本卡原精确副本与环境授权，保留正常原 COMPLETE/DELIVERED 后 K 更新、精确请求重放／冲突、八个 event/outbox/current 提交屏障、未决 guard 的 file/parent 与清理屏障、代表性中断、冷恢复、证明丢失和同字节指针替换场景。immutable event／投影使用原子 NOREPLACE，保留 temporary-file／installed-parent／held-file 三屏障；安装后临时名称被替换时必须保留替换件并 HOLD，不按不再可信的临时名称删除。新 K 只在全部必需屏障及原件最终复核后确认；失败保留 partial 与 guard，暖／冷 owner 不采用 coherent-looking tail、不回退旧 K、不补建已交付投影、不改变旧 ACTION/WIRE 或 UNKNOWN。保存精确树／命令／退出码／Python／平台、完整 END／物理顺序、前后 stat/inode/大小/SHA、锁生命周期和每个 barrier 的原证据，只清理确证自有夹具。未缩减或合并原场景，确认人为本轮 owner 指令；本地 native/fsync 故障与新进程不能冒充断电、真实 Cloud 或设备验收。残余风险含真实持久性、默认 root worker／可信 relay 接入、后续 outbox 清理与全表结算，均未验证；原现场授权、必要研发确认及发布门禁保持有效，不新增真实环境权限。
+
 - 完成配对 writer scope 补充（**NOT RUN / REAL_ENV REQUIRED**）：在本卡已有精确现场授权内验证项目锁→固定 spreadsheet 锁的获取顺序、暖／冷重新核原 ACTION/WIRE/COMPLETE/DELIVERED 和启动见证、每次 K 读取及正常 scope 收尾再核、异常保留与关闭前撤销、部分／伪造上下文和收尾证明丢失拒绝。保留完整前后 stat/inode/SHA 与锁生命周期、零补建／重发／清理证据，只清理确证自有 fixture。本地独立原预期、真实 TLS/native/cold workflow 不代表真机、断电或在线默认 worker；不增加 K 写入或发布权限，不删减／合并原场景，未验证范围及风险含实际设备持久性、真实 Cloud、默认 worker 与后续清理／K 写入闭环，原现场授权、必要研发确认及生产门禁保持有效。
 
 - 统一 K 读取原配对补充（**NOT RUN / REAL_ENV REQUIRED**）：在本卡原精确环境授权下，核完整 COMPLETE／DELIVERED、固定启动见证及原 settings 仍由双 owner 持有。保留已交付投影缺失后的最高已提交 K、后续事件投影仍必需、冷进程重新获取实际锁／ACTION／WIRE、部分／假／失效上下文和缺交付证明拒绝，以及返回前同字节 current 替换拒绝的现场场景；保存前后原件 inode/stat/SHA、完整原始日志与物理顺序、零补建／重发／清理见证。只清理确证自有 fixture，不变更真实原件或计数。独立本地固定 TLS、native 文件和冷进程证据不代表真实 Cloud、设备或断电；本补充不删减／合并任何原场景、不标通过，残余风险含真实持久屏障、默认 worker／清理／K 写入闭环和生产发布未验证，原研发确认、现场授权及发布门禁保持有效。

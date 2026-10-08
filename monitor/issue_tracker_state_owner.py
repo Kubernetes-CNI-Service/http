@@ -51,7 +51,7 @@ def tracker_writer(project, publication, *, completed_binding=None, completed_un
 
     Context is scoped to this actual owner, revalidated on each K read and
     revoked before either owner closes. No cleanup or extra settings-write
-    permission; the existing local C6 capability is not online admission.
+    permission by itself; the existing local C6 capability is not online admission.
     """
     with ExitStack() as stack:
         try:
@@ -119,6 +119,11 @@ def set_k(token, *, new_k, actor, recorded_at, request_id, expected_revision):
     """Commit a K event under the same LK-P token; actor trust is external."""
     try:
         owner = _owner(token)
+        context = _COMPLETED_READ_CONTEXT.get(token)
+        if context is not None:
+            from monitor.issue_tracker_settings_audit_allocation import apply_completed_k_change
+            return apply_completed_k_change(token,*context,new_k=new_k,actor=actor,
+                recorded_at=recorded_at,request_id=request_id,expected_revision=expected_revision)
         return apply_local_k_change(
             _root(owner.project), new_k=new_k, actor=actor,
             recorded_at=recorded_at, request_id=request_id,

@@ -8,6 +8,7 @@ journal, authorizes a source or releases UNKNOWN/FIFO/admission barriers.
 import hashlib
 import json
 import os
+import uuid
 from contextlib import contextmanager, ExitStack
 from dataclasses import dataclass
 
@@ -624,3 +625,267 @@ def read_current_k_after_completed_unit(writer_token,spreadsheet_token,binding,u
             except OSError: failed=True
     if failed: raise SettingsAuditHold()
     return result
+@contextmanager
+def _hold_completed_k_pair(token,sheet,bound,unit):
+    from monitor import issue_tracker_remote_history_match as completion
+    with ExitStack() as scope:
+        match,_=scope.enter_context(completion._hold_match_originals(sheet,bound,unit))
+        proof=scope.enter_context(completion._hold_completion_originals(sheet,bound,unit))
+        seen=completion.inspect_completion_evidence(sheet,bound,unit)
+        with _hold_delivery_authority(token,sheet,bound,unit,inspect_delivered=True) as (owner,raw,delivered,verify):
+            verify()
+        start,header=scope.enter_context(_hold_delivery_start(owner,raw))
+        folder=local._directory(owner.root_fd,_DELIVERY_FOLDER)
+        scope.callback(os.close,folder)
+        delivery=scope.enter_context(_hold_delivery_files(owner,folder,header))
+        original,allocation_header,assignments=_originals(token,sheet,bound,unit,delivered_event_ids=delivered.event_ids)
+        if original is not owner: raise SettingsAuditHold()
+        allocated=local._directory(owner.root_fd,_FOLDER); scope.callback(os.close,allocated)
+        allocation=scope.enter_context(_hold_allocation_originals(owner.root_fd,allocated,allocation_header,assignments))
+        def guard():
+            if local._owner(token) is not owner: raise SettingsAuditHold()
+            ownership._validated_owner(sheet,bound)
+            match(); proof(); start(); delivery(); allocation()
+            if completion.inspect_completion_evidence(sheet,bound,unit)!=seen: raise SettingsAuditHold()
+            match(); proof(); start(); delivery(); allocation()
+        guard(); yield owner,delivered,guard; guard()
+
+class _CompletedSettingsTransition:
+    def __init__(self,scope,owner,delivered):
+        self.owner=owner; self.delivered=delivered; self.stage=0; self.added=[]
+        self.directories=[]; self.files=[]; self.intent=None; self.intent_removed=False
+        self.scope=scope; self.archive=None; self.guard_archive=None; self.pointer_archive=None
+        self.archive_moved_names=set()
+        def directory(parent,name):
+            fd=local._directory(parent,name); scope.callback(os.close,fd)
+            journal._named(parent,name,fd,directory=True)
+            self.directories.append((parent,name,fd,journal._identity(os.fstat(fd))[:5]))
+            return fd
+        def file(parent,name):
+            fd=os.open(name,local._flags(),dir_fd=parent); scope.callback(os.close,fd)
+            info=local._check(fd,directory=False); journal._named(parent,name,fd,directory=False)
+            raw=os.pread(fd,16385,0)
+            if len(raw)!=info.st_size or len(raw)>16384: raise SettingsAuditHold()
+            self.files.append((parent,name,fd,journal._identity(info),raw))
+            return raw
+        self.settings=directory(owner.root_fd,'settings')
+        self.events=directory(self.settings,'events'); self.outbox=directory(self.settings,'outbox')
+        if set(os.listdir(self.settings))!={'events','outbox','current'}: raise SettingsAuditHold()
+        self.event_names=set(os.listdir(self.events)); self.outbox_names=set(os.listdir(self.outbox))
+        if (not self.event_names or any(settings._EVENT_NAME.fullmatch(n) is None for n in self.event_names)
+                or not self.outbox_names <= self.event_names): raise SettingsAuditHold()
+        self.images={int(n[:-5]):file(self.events,n) for n in sorted(self.event_names)}
+        self.pointer=file(self.settings,'current'); self.old_pointer=self.files[-1]
+        initialized=file(owner.root_fd,'INITIALIZED')
+        self.state=chain.validate_k_chain_snapshot(self.images,self.pointer,initialized)
+        missing={f'settings:{rev}:'+hashlib.sha256(raw).hexdigest() for rev,raw in self.images.items()
+                 if f'{rev}.json' not in self.outbox_names}
+        if not missing<=set(delivered.event_ids): raise SettingsAuditHold()
+        for name in sorted(self.outbox_names):
+            raw=file(self.outbox,name); rev=int(name[:-5])
+            if raw!=chain._canonical_line({'schema_version':1,'revision':rev,
+                    'event_sha256':hashlib.sha256(self.images[rev]).hexdigest()}): raise SettingsAuditHold()
+        self.name=f'{self.state.revision+1}.json'; self.verify()
+    def verify(self):
+        for parent,name,fd,identity in self.directories:
+            local._check(fd,directory=True); journal._named(parent,name,fd,directory=True)
+            if journal._identity(os.fstat(fd))[:5]!=identity: raise SettingsAuditHold()
+        expected={'events','outbox','current'}
+        if self.intent is not None and not self.intent_removed: expected.add(self.intent[1])
+        if set(os.listdir(self.settings))!=expected: raise SettingsAuditHold()
+        if set(os.listdir(self.events))!=self.event_names|({self.name} if self.stage>=1 else set()): raise SettingsAuditHold()
+        if set(os.listdir(self.outbox))!=self.outbox_names|({self.name} if self.stage>=2 else set()): raise SettingsAuditHold()
+        for entry in self.files+self.added+([self.intent] if self.intent is not None else []):
+            parent,name,fd,identity,raw=entry
+            if self.intent_removed and entry is self.intent:
+                # The guard was recoverably moved, never deleted by pathname.
+                continue
+            if self.stage==3 and entry is self.old_pointer:
+                # The retained original pointer is now in private quarantine;
+                # validate that exact archive below, never unlink its name.
+                if self.pointer_archive is None: raise SettingsAuditHold()
+                continue
+            local._check(fd,directory=False); journal._named(parent,name,fd,directory=False)
+            if journal._identity(os.fstat(fd))!=identity or os.pread(fd,16385,0)!=raw: raise SettingsAuditHold()
+            journal._named(parent,name,fd,directory=False)
+        if self.archive is not None:
+            local._check(self.archive,directory=True)
+            journal._named(self.owner.root_fd,'quarantine',self.archive,directory=True)
+            if (journal._identity(os.fstat(self.archive))[:5]!=self.archive_identity
+                    or set(os.listdir(self.archive))!=self.archive_names|self.archive_moved_names):
+                raise SettingsAuditHold()
+            for name,fd,identity in self.archive_files:
+                local._check(fd,directory=False); journal._named(self.archive,name,fd,directory=False)
+                if journal._identity(os.fstat(fd))!=identity: raise SettingsAuditHold()
+        for archived in (self.guard_archive,self.pointer_archive):
+            if archived is None: continue
+            parent,name,fd,identity,raw=archived
+            local._check(fd,directory=False); journal._named(parent,name,fd,directory=False)
+            if journal._identity(os.fstat(fd))!=identity or os.pread(fd,16385,0)!=raw: raise SettingsAuditHold()
+    def _open_archive(self):
+        if self.archive is not None: return
+        self.archive=local._directory(self.owner.root_fd,'quarantine')
+        self.scope.callback(os.close,self.archive)
+        journal._named(self.owner.root_fd,'quarantine',self.archive,directory=True)
+        self.archive_identity=journal._identity(os.fstat(self.archive))[:5]
+        if os.fstat(self.archive).st_dev!=os.fstat(self.settings).st_dev: raise SettingsAuditHold()
+        self.archive_names=set(os.listdir(self.archive)); self.archive_files=[]
+        for name in sorted(self.archive_names):
+            fd=os.open(name,local._flags(),dir_fd=self.archive); self.scope.callback(os.close,fd)
+            info=local._check(fd,directory=False); journal._named(self.archive,name,fd,directory=False)
+            self.archive_files.append((name,fd,journal._identity(info)))
+    def begin(self,scope,raw):
+        # A persisted guard makes even a coherent-looking failed pointer update
+        # unadoptable by existing warm/cold strict settings readers.
+        name='.pending-K-change-'+uuid.uuid4().hex
+        fd=os.open(name,os.O_RDWR|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW|os.O_CLOEXEC,
+                   0o600,dir_fd=self.settings)
+        scope.callback(os.close,fd)
+        remaining=memoryview(raw)
+        while remaining:
+            wrote=os.write(fd,remaining)
+            if wrote<=0: raise SettingsAuditHold()
+            remaining=remaining[wrote:]
+        os.fsync(fd); os.fsync(self.settings)
+        local._check(fd,directory=False); journal._named(self.settings,name,fd,directory=False)
+        if os.pread(fd,16385,0)!=raw: raise SettingsAuditHold()
+        self.intent=(self.settings,name,fd,journal._identity(os.fstat(fd)),raw)
+        self.intent_removed=False; self.verify()
+    def finish(self):
+        self.verify()
+        # These bytes come from retained, rechecked immutable file descriptors.
+        images=dict(self.images)
+        images[self.state.revision+1]=self.added[0][4]
+        initialized=next(entry[4] for entry in self.files if entry[1]=='INITIALIZED')
+        chain.validate_k_chain_snapshot(images,self.added[2][4],initialized)
+        # A held original check followed by unlink would erase a replacement
+        # inserted at the last pathname boundary. Retain the actual object in
+        # the existing private same-device quarantine, atomically NOREPLACE.
+        self._open_archive()
+        self.verify()
+        self.archive_name='completed-K-change-guard-'+uuid.uuid4().hex
+        parent,name,fd,identity,raw=self.intent
+        local._rename_new(parent,name,self.archive_name,destination_parent=self.archive)
+        # Even a post-rename identity/barrier failure must retain a fresh STOP
+        # guard; never overwrite or remove the object that was actually moved.
+        self.intent_removed=True
+        self.archive_moved_names.add(self.archive_name)
+        journal._named(self.archive,self.archive_name,fd,directory=False)
+        info=journal._identity(os.fstat(fd))
+        if info[:-1]!=identity[:-1] or os.pread(fd,16385,0)!=raw: raise SettingsAuditHold()
+        self.guard_archive=(self.archive,self.archive_name,fd,info,raw)
+        os.fsync(self.settings); os.fsync(self.archive)
+        self.verify()
+    def retain_failed_guard(self,scope):
+        if self.intent is None or not self.intent_removed: return
+        # Never roll back committed evidence or overwrite a foreign guard. A
+        # one-shot cleanup failure is conservatively recorded as unresolved.
+        parent,name,fd,identity,raw=self.intent
+        journal._named(self.owner.root_fd,'settings',self.settings,directory=True)
+        self.begin(scope,raw)
+    def install(self,scope,parent,name,raw,*,replace=False):
+        temporary='.pending-'+uuid.uuid4().hex
+        fd=os.open(temporary,os.O_RDWR|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW|os.O_CLOEXEC,0o600,dir_fd=parent)
+        scope.callback(os.close,fd)
+        remaining=memoryview(raw)
+        while remaining:
+            wrote=os.write(fd,remaining)
+            if wrote<=0: raise SettingsAuditHold()
+            remaining=remaining[wrote:]
+        os.fsync(fd); journal._named(parent,temporary,fd,directory=False)
+        if os.pread(fd,16385,0)!=raw: raise SettingsAuditHold()
+        if replace:
+            if parent!=self.settings or name!='current' or self.pointer_archive is not None:
+                raise SettingsAuditHold()
+            self._open_archive()
+            archived='completed-K-change-current-'+uuid.uuid4().hex
+            old_parent,old_name,old_fd,identity,old_raw=self.old_pointer
+            local._rename_new(old_parent,old_name,archived,destination_parent=self.archive)
+            self.archive_moved_names.add(archived)
+            journal._named(self.archive,archived,old_fd,directory=False)
+            info=journal._identity(os.fstat(old_fd))
+            if info[:-1]!=identity[:-1] or os.pread(old_fd,16385,0)!=old_raw: raise SettingsAuditHold()
+            self.pointer_archive=(self.archive,archived,old_fd,info,old_raw)
+            # Both old-pointer namespaces must be durable before installing the
+            # new current. Any collision preserves the actual foreign object.
+            os.fsync(parent); os.fsync(self.archive)
+            local._rename_new(parent,temporary,name)
+            local._check(fd,directory=False); journal._named(parent,name,fd,directory=False)
+            os.fsync(parent)
+        else:
+            # No unlink-by-inode exists for an interveningly replaced temporary
+            # pathname. Atomically install without replacing an existing name,
+            # then retain/recheck this exact installed FD across both barriers.
+            local._rename_new(parent,temporary,name)
+            local._check(fd,directory=False); journal._named(parent,name,fd,directory=False)
+            os.fsync(parent)
+            journal._named(parent,name,fd,directory=False); os.fsync(fd)
+        local._check(fd,directory=False); journal._named(parent,name,fd,directory=False)
+        if os.pread(fd,16385,0)!=raw: raise SettingsAuditHold()
+        self.added.append((parent,name,fd,journal._identity(os.fstat(fd)),raw))
+
+def _apply_completed_k_change(token,sheet,bound,unit,*,new_k,actor,recorded_at,request_id,expected_revision):
+    chain._positive_int(new_k); chain._actor(actor); chain._time(recorded_at)
+    chain._request_id(request_id); chain._revision(expected_revision)
+    if actor=='system:default': raise SettingsAuditHold()
+    payload=chain._canonical_line({'new_k':new_k,'actor':actor,
+        'expected_revision':expected_revision,'request_id':request_id})
+    payload_digest=hashlib.sha256(payload).hexdigest()
+    with ExitStack() as scope:
+        pair_scope=ExitStack(); scope.callback(pair_scope.close)
+        owner,delivered,proof=pair_scope.enter_context(_hold_completed_k_pair(token,sheet,bound,unit))
+        before=_CompletedSettingsTransition(scope,owner,delivered)
+        for rev,raw in before.images.items():
+            row=chain._parse(raw,chain._EVENT_KEYS)
+            if row['request_id']==request_id:
+                if rev==0 or row['payload_sha256']!=payload_digest: raise settings.KChangeConflict('request payload conflict')
+                proof(); before.verify(); pair_scope.close(); before.verify()
+                return settings.KStoreReceipt(rev,row['new_k'],hashlib.sha256(raw).hexdigest(),replay=True)
+        if expected_revision!=before.state.revision: raise settings.KChangeConflict('stale expected revision')
+        revision=before.state.revision+1
+        event=chain._canonical_line({'schema_version':1,'revision':revision,'type':'set_k','old_k':before.state.k,
+            'new_k':new_k,'actor':actor,'recorded_at':recorded_at,'request_id':request_id,
+            'payload_sha256':payload_digest,'predecessor_sha256':before.state.event_sha256})
+        digest=hashlib.sha256(event).hexdigest()
+        pointer=chain._canonical_line({'schema_version':1,'revision':revision,'event_sha256':digest})
+        intent=chain._canonical_line({'schema_version':1,'request_id':request_id,
+            'payload_sha256':payload_digest,'expected_revision':expected_revision,
+            'event_sha256':digest,'predecessor_sha256':before.state.event_sha256})
+        proof(); before.verify(); before.begin(scope,intent); proof()
+        try:
+            for parent,name,raw,stage,replace in ((before.events,before.name,event,1,False),
+                    (before.outbox,before.name,pointer,2,False),(before.settings,'current',pointer,3,True)):
+                proof(); before.verify()
+                before.install(scope,parent,name,raw,replace=replace); before.stage=stage
+                before.verify(); proof()
+            before.verify(); proof(); before.finish(); proof()
+            with _hold_settings_originals(token,delivered_event_ids=delivered.event_ids) as (images,verify):
+                events,current,initialized,_=images
+                state=chain.validate_k_chain_snapshot(events,current,initialized)
+                if (state.revision,state.k,state.event_sha256)!=(revision,new_k,digest): raise SettingsAuditHold()
+                verify(); before.verify(); proof()
+                # Recheck/close the paired original proof while the transition
+                # FDs are still alive, so a final-scope failure retains STOP too.
+                pair_scope.close(); before.verify(); verify()
+        except BaseException:
+            before.retain_failed_guard(scope)
+            raise
+        return settings.KStoreReceipt(revision,new_k,digest)
+
+
+def apply_completed_k_change(token,sheet,bound,unit,*,new_k,actor,recorded_at,request_id,expected_revision):
+    """Local K mutation under the actual original COMPLETE/DELIVERED pair.
+
+    No consumed-ID override, cleanup, resend, UNKNOWN release or actor trust
+    is granted. A failed required write retains a persistent unexplained guard;
+    ordinary readers and fresh completed-pair owners must both HOLD on it.
+    """
+    try:
+        return _apply_completed_k_change(token,sheet,bound,unit,new_k=new_k,actor=actor,
+            recorded_at=recorded_at,request_id=request_id,expected_revision=expected_revision)
+    except settings.KChangeConflict:
+        # The established relay completes only proved pre-mutation conflicts;
+        # unsafe state/barriers remain claimed UNKNOWN, not completed HOLD.
+        raise
+    except Exception as exc:
+        raise SettingsAuditHold() from exc

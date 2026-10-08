@@ -962,7 +962,27 @@ DELIVERED、启动见证与 settings 范围中返回最高已提交 K。缺失�
 `require_current_k` 及正常 scope 收尾都重新核完整原配对，不缓存 K 或 consumed IDs。
 上下文只属于实际 token，在任一 owner 关闭前撤销；调用方异常原样保留，正常收尾
 证明丢失则 HOLD。冷进程重读原 ACTION/WIRE 并重新获锁；部分／伪造上下文拒绝。
-不修复投影，不执行清理，不增加 settings 写入权限，也不等于默认在线 worker 接入。
+该 scope 本身不修复投影或执行写入／清理，也不等于默认在线 worker 接入。
+`set_k` 另在此实际配对 scope 内重新持有原 COMPLETE、DELIVERED、启动见证与分配，
+验证最高原链、请求 payload／重放及 expected revision，按独立预期提交新 immutable event、
+必需投影和最高 current；原已冻结 ACTION/WIRE 不变，后续新事件仍 pending。
+immutable event／投影以已有原子 NOREPLACE 原语安装，保留 temporary-file／
+installed-parent／held-file 三屏障，不按可被替换的临时名称 unlink。安装后重新出现
+的 pending 名称必须保留并 HOLD，不能删除替换件；全部既有故障断言仍执行。
+current 同样不使用覆盖替换：将持有的原指针原子 NOREPLACE 移入既有私有 quarantine，
+重核原 FD／字节并同步源和归档目录，再 NOREPLACE 安装新指针及同步 settings。
+中途替换原指针或在移动后插入陌生 current 均保留实际对象，HOLD 而不 ACK。
+变更前持久化未决 guard，所有十个 event/outbox/current 屏障完成前不清除；任一屏障、
+原件身份／证明或收尾失败均 HOLD 并保留未决证据，暖读取和新 native 进程不采用
+coherent-looking tail、不回退旧 K、不恢复已交付投影。清理 guard 的故障保守保留 STOP，
+成功收尾把原 guard 原子 NOREPLACE 移至既有私有 quarantine 并完成两目录屏障，不按
+临时名称 unlink；替换件保留且 HOLD，归档／证明收尾失败保留新的未决 STOP。
+不修补事件或对外发送。原无上下文的 K store 仍严格；actor 信任仍由调用方 relay 另行
+证明，本地接口不授权 root／CGI 激活、outbox 清理、UNKNOWN／FIFO／高水位释放。
+`test_req7_settings_audit_allocation` direct 与 `test_req7_remote_history_match` 的实际
+双 owner／固定 TLS／冷进程 workflow 保留独立事件字节、幂等重放、全部原八个与新增
+两个指针归档提交屏障，以及原指针／guard 替换证据不丢失和
+guard 屏障／收尾故障预期；不替代正式 full/check、现场断电或 REQ7 整项验收。
 独立的 ETH/IB cabling 夹具分别获取其合成 token 和读取计划，不沿用前一夹具已过期
 的 token；TTL 和生产过期拒绝不变。新增受控墙钟跨窗口测试不冒充休眠或断电见证。
 计划失败仅追加阶段、类型一致性及剩余有效秒数，不输出 token、header、ID 或业务内容。
