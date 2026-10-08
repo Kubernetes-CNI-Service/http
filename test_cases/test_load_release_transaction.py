@@ -1864,11 +1864,12 @@ class ReleaseTransactionTests(unittest.TestCase):
                                                   publication_phase="published", partial_runtime=False,
                                                   q_local=False, original_a_policy=None, original_a_images=False,
                                                   q_created=False, dhcp=False, dhcp_metadata=False, prefix=False,
-                                                  managed_key=False, prefix_change=False, qualified_a_health=False):
+                                                  managed_key=False, prefix_change=False, qualified_a_health=False,
+                                                  materialized=False):
         state, context, guard = self._prepare_q_manifest_publication(seed_q_publication=seed_q_publication,
             q_local=q_local, original_a_policy=original_a_policy, original_a_images=original_a_images,
             q_created=q_created, prefix=prefix or prefix_change, managed_key=managed_key,
-            prefix_change=prefix_change, qualified_a_health=qualified_a_health)
+            prefix_change=prefix_change, qualified_a_health=qualified_a_health, materialized=materialized)
         q = state[1]
         for name, source in (("01-global.yaml", self.inputs.global_file),
                              ("02-devices_config.csv", self.inputs.devices_file),
@@ -2830,6 +2831,39 @@ class ReleaseTransactionTests(unittest.TestCase):
             for name in ('dhcpd.conf', 'dhcpd_eth.hosts', 'dhcpd_ib.hosts', 'dhcpd_nvl.hosts')}))
         return state, context, guard, token, inputs, active, action, probe
 
+    def test_b_materialized_retirement_archives_original_backup_without_live_authority(self):
+        state, _context, guard, token, inputs = self._prepare_published_q_for_stopped_preflight(
+            materialized=True, no_upgrade=True, original_a_policy='disabled')
+        original = json.loads(token['payload'])['body']
+        row = original['directories'][0]
+        backup = Path(row['backup'])
+        frozen = (backup.stat().st_ino, (backup / 'leaf.yaml').stat().st_ino,
+                  (backup / 'leaf.yaml').read_bytes(), token['payload'])
+        active = set(); _action, probe = self._with_independent_b_health(active)
+        self.assertEqual('b-health-passed-wal-archived', LOAD.activate_setup_switch_b_publication(
+            token, guard=guard, inputs=inputs, images={}, confirmed=True, retire=True))
+        self.assertEqual(1, probe.call_count)
+        self.assertFalse(os.path.lexists(backup), 'B released WAL while leaving materialized evidence live')
+        archive = next(self.ztp.glob('.setup-switch-b-retired-*'))
+        marker = json.loads((archive / 'retirement.json').read_bytes())
+        self.assertEqual('B', marker['role']); self.assertNotIn('plan', marker)
+        self.assertEqual(1, len(marker['materialized']))
+        mapping = marker['materialized'][0]
+        self.assertEqual(str(backup), mapping['path'])
+        retained = archive / mapping['basename']
+        self.assertEqual(frozen[:3], (retained.stat().st_ino, (retained / 'leaf.yaml').stat().st_ino,
+                                     (retained / 'leaf.yaml').read_bytes()))
+        self.assertEqual(frozen[3], (archive / 'journal.json').read_bytes())
+        # Historical evidence must neither inspect nor consume a future live owner.
+        backup.mkdir(); (backup / 'operator.txt').write_bytes(b'independent future owner\n')
+        future = backup.stat().st_ino
+        LOAD.require_no_pending_setup_switch_journal()
+        self.assertEqual(future, backup.stat().st_ino)
+        self.assertEqual(b'independent future owner\n', (backup / 'operator.txt').read_bytes())
+        (retained / 'leaf.yaml').write_bytes(b'changed archived evidence\n')
+        with self.assertRaisesRegex(LOAD.LoadError, 'materialized.*HOLD'):
+            LOAD.require_no_pending_setup_switch_journal()
+
     def test_b_cold_retirement_malformed_discriminator_is_hold_not_uncaught_error(self):
         state, _context, guard, token, inputs = self._prepare_published_q_for_stopped_preflight(no_upgrade=True)
         with mock.patch.object(LOAD, 'active_managed_services', return_value=()), \
@@ -2843,6 +2877,71 @@ class ReleaseTransactionTests(unittest.TestCase):
                         LOAD.resume_setup_switch_b_retirement(state[1], guard=guard, inputs=inputs,
                             images={}, confirmed=True)
                     self.assertEqual(frozen, (marker.lstat().st_ino, marker.read_bytes(), state[-3].read_bytes()))
+
+    def _pending_b_materialized_archive(self):
+        state, _context, guard, token, inputs = self._prepare_published_q_for_stopped_preflight(
+            materialized=True, no_upgrade=True, original_a_policy='disabled')
+        active = set(); action, probe = self._with_independent_b_health(active)
+        marker, sync = LOAD._setup_switch_retirement_path(), LOAD._fsync_parent_directory
+        def interrupted(parent):
+            sync(parent)
+            if marker.exists() and list(marker.parent.glob('.setup-switch-b-retired-*/materialized-*')):
+                raise OSError('independent original materialized archive sync interruption')
+        with mock.patch.object(LOAD, '_fsync_parent_directory', side_effect=interrupted):
+            with self.assertRaisesRegex(LOAD.LoadError, 'independent original materialized archive sync') as caught:
+                LOAD.activate_setup_switch_b_publication(token, guard=guard, inputs=inputs,
+                    images={}, confirmed=True, retire=True)
+        self.assertIsInstance(caught.exception.__cause__, OSError)
+        self.assertEqual(set(), active); self.assertEqual(1, probe.call_count)
+        self.assertEqual(token['payload'], state[-3].read_bytes())
+        LOAD.close_setup_switch_publication_bundle(token)
+        return state, guard, inputs, marker, action, probe
+
+    def test_b_materialized_archive_interruption_requires_fresh_health_before_retirement(self):
+        state, guard, inputs, marker, _action, probe = self._pending_b_materialized_archive()
+        frozen = (state[-3].stat().st_ino, state[-3].read_bytes())
+        self.assertEqual('b-health-passed-wal-archived', LOAD.resume_setup_switch_b_retirement(
+            state[1], guard=guard, inputs=inputs, images={}, confirmed=True))
+        self.assertEqual(2, probe.call_count)
+        archive = next(marker.parent.glob('.setup-switch-b-retired-*'))
+        self.assertEqual(frozen, ((archive / 'journal.json').stat().st_ino, (archive / 'journal.json').read_bytes()))
+        LOAD.require_no_pending_setup_switch_journal()
+
+    def test_b_materialized_pending_mutants_hold_before_health_without_adopting_members(self):
+        state, guard, inputs, marker, action, _probe = self._pending_b_materialized_archive()
+        payload = marker.read_bytes(); body = json.loads(payload)
+        archive = Path(body['archive']['path'])
+        for fault in ('missing-map', 'wrong-role', 'unknown-field', 'wrong-owner', 'unknown-object'):
+            with self.subTest(fault=fault):
+                extra = None
+                changed = json.loads(payload)
+                if fault == 'missing-map': changed.pop('materialized')
+                elif fault == 'wrong-role': changed['role'] = 'A'
+                elif fault == 'unknown-field': changed['materialized'][0]['accept_current'] = True
+                elif fault == 'wrong-owner': changed['materialized'][0]['identity'][1] += 1
+                else:
+                    extra = archive / 'unknown-evidence'; extra.write_bytes(b'KEEP\n')
+                if extra is None:
+                    marker.write_bytes(json.dumps(changed).encode()); marker.chmod(0o600)
+                frozen = (marker.read_bytes(), state[-3].read_bytes(), action.call_count)
+                with mock.patch.object(LOAD, 'preflight_services', side_effect=AssertionError('unknown archive entered health')):
+                    with self.assertRaisesRegex(LOAD.LoadError, 'HOLD'):
+                        LOAD.resume_setup_switch_b_retirement(state[1], guard=guard, inputs=inputs, images={}, confirmed=True)
+                self.assertEqual(frozen, (marker.read_bytes(), state[-3].read_bytes(), action.call_count))
+                if extra is not None:
+                    self.assertEqual(b'KEEP\n', extra.read_bytes()); extra.unlink()
+                else: marker.write_bytes(payload); marker.chmod(0o600)
+        retained = archive / body['materialized'][0]['basename']
+        leaf = retained / 'leaf.yaml'; original = leaf.stat().st_ino
+        saved = self.root / 'operator-original-materialized-leaf'; leaf.rename(saved)
+        leaf.write_bytes(saved.read_bytes())
+        frozen = (marker.read_bytes(), state[-3].read_bytes(), action.call_count)
+        with mock.patch.object(LOAD, 'preflight_services', side_effect=AssertionError('replacement member entered health')):
+            with self.assertRaisesRegex(LOAD.LoadError, 'materialized.*HOLD'):
+                LOAD.resume_setup_switch_b_retirement(state[1], guard=guard, inputs=inputs, images={}, confirmed=True)
+        self.assertEqual(frozen, (marker.read_bytes(), state[-3].read_bytes(), action.call_count))
+        self.assertEqual(original, saved.stat().st_ino); self.assertNotEqual(original, leaf.stat().st_ino)
+        self.assertEqual(saved.read_bytes(), leaf.read_bytes())
 
     def test_b_listener_rebind_after_first_start_stops_and_retains_original_wal(self):
         state, _context, guard, token, inputs = self._prepare_published_q_for_stopped_preflight(no_upgrade=True)
@@ -4125,12 +4224,25 @@ class ReleaseTransactionTests(unittest.TestCase):
 
     def _prepare_q_manifest_publication(self, *, seed_q_publication=False, q_local=False,
                                         original_a_policy=None, original_a_images=False, q_created=False, prefix=False,
-                                        managed_key=False, prefix_change=False, qualified_a_health=False):
+                                        managed_key=False, prefix_change=False, qualified_a_health=False,
+                                        materialized=False):
         state, context = self._prepare_persisted_a_runtime_switch(seed_q_publication=seed_q_publication,
             original_upgrade_policy=original_a_policy, original_images=original_a_images, prefix=prefix,
-            managed_key=managed_key, qualified_a_health=qualified_a_health)
+            managed_key=managed_key, qualified_a_health=qualified_a_health, canonical_paths=materialized)
         journal, descriptor, backend = state[-3:]
         guard = dict(deployment_lock_descriptor=descriptor, services_quiesced=True, runtime_backend=backend)
+        if materialized:
+            output = state[1].resolve() / '99-output-eth'
+            output.mkdir(exist_ok=True)
+            latest, target = output / 'latest', output / '20261008_140000_combine'
+            for path in (latest, target):
+                path.mkdir()
+                (path / '.published-complete').write_bytes(b'complete\n')
+                (path / 'leaf.yaml').write_bytes(b'independent materialized evidence\n')
+            with mock.patch.object(LOAD, 'active_managed_services', return_value=()):
+                backup = LOAD.register_setup_switch_materialized_directory(journal, latest, target, **guard)
+            latest.rename(backup)
+            latest.symlink_to(target.name)
         if prefix_change:
             settings = LOAD.replace(LOAD.load_global(self.global_file), ztp_prefix=prefix_change if isinstance(prefix_change, str) else "/q-prefix")
             with mock.patch.object(LOAD, "active_managed_services", return_value=()):
@@ -7706,8 +7818,9 @@ class ReleaseTransactionTests(unittest.TestCase):
 
     def _prepare_persisted_a_runtime_switch(self, *, managed_key=False, prefix=False,
                                           original_upgrade_policy=None, qualified_inputs=False,
-                                          seed_q_publication=False, original_images=False, qualified_a_health=False):
-        if prefix or managed_key:
+                                          seed_q_publication=False, original_images=False, qualified_a_health=False,
+                                          canonical_paths=False):
+        if prefix or managed_key or canonical_paths:
             # A marker is lexical as well as physical authority. Use the same
             # canonical private deployment paths as the real cold LOAD child;
             # managed key WAL row names must use those paths too.

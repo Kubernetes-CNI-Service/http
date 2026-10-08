@@ -1634,6 +1634,19 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 ## TC-REAL-R22-GENERATION-INPUT-ABA-001 — 跨进程输入换代与多输出一致性
 
+- 2026-10-08 B 实体 latest 证据归档补充，仍 OPEN / NOT RUN：原隔离 VM、精确版本、
+  root-only 可恢复快照、排他锁、正常写者静默且启动前明确停服条件不变。Q manifest/
+  parent/report/selector 完整提交后，显式 B 激活须本次真实预检与健康通过，role-B
+  marker 写入原 WAL 所有 materialized backup 的原名/父身份/九字段 owner；把完整
+  原目录同 inode 移入私有归档，WAL 之后、marker 最后。首次 backup rename/父同步
+  后强杀及受控断电，再以新 LOAD 明确续做，必须重做本次健康，不借上次 PASS。
+  缺映射、错角色、未知字段/对象、同字节新成员或证据改变都 HOLD；失败停服，
+  原 WAL、marker、已归档证据和未知对象完整保留。保存原/归档目录与成员 inode、
+  bytes/hash/mtime/ctime、FD/name stat、健康 PID、rename/fsync/END 顺序。已完成的
+  历史证据仅读私有归档，旧 live backup 名出现新对象不得借用或删除。封存后仅人工
+  按核实快照恢复，不在 live 注入。此窄修不关闭实体 infra/logs 备份/receipt 归档及
+  Q 可写日志与 P 不可变证据隔离，也不证明 Linux/断电/C2/DEV ACK 或正式 full/check。
+
 - 2026-10-08 实体 latest 原始成员补充，仍 OPEN / NOT RUN：沿本卡原授权隔离 VM、
   精确版本、root-only 可恢复快照、原排他锁、明确停服和正常写者静默条件，在 WAL
   首写前记录 source/target 完整原树。分别在临时名登记后、源 rename/父同步后、

@@ -5315,6 +5315,14 @@ finally:
         self._real_setup_committed_q_group_restore(dhcp=True, prefix=True, prefix_change='/q-prefix',
                                                  b_health='retire-death-dhcp')
 
+    def test_real_setup_b_retirement_archives_original_materialized_backup(self):
+        self._real_setup_committed_q_group_restore(dhcp=True, prefix=True, prefix_change='/q-prefix',
+                                                 b_health=True, materialized=True)
+
+    def test_real_setup_b_materialized_archive_rename_death_cold_cli_requires_fresh_health(self):
+        self._real_setup_committed_q_group_restore(dhcp=True, prefix=True, prefix_change='/q-prefix',
+                                                 b_health='retire-death-materialized', materialized=True)
+
     def _real_setup_committed_q_group_restore(self, *, dhcp=False, runtime_death=False,
                                              setup_death=False, foreign_setup=False,
                                              q_local=False, q_fault=False, a_fault=None, a_image_fault=False,
@@ -5323,7 +5331,8 @@ finally:
                                              dhcp_legacy_fault=False, prefix=False, prefix_fault=False,
                                              managed_key=False, managed_key_death=False, managed_key_fault=False,
                                              prefix_change=False, prefix_death=False, a_health=False,
-                                             plan_fsync_aba=False, dhcp_staged_fault=False, b_health=False):
+                                             plan_fsync_aba=False, dhcp_staged_fault=False, b_health=False,
+                                             materialized=False):
         fixture = RELEASE_FIXTURE.ReleaseTransactionTests()
         fixture.setUp()
         try:
@@ -5413,6 +5422,17 @@ try:
         setup = load_script('committed_q_group_setup', root / 'DAY0-Prepare/01-a-setup.py')
         load.service_runtime_backend = lambda: backend
         setup._SETUP_SWITCH_WAL_CONTEXT = (vars(load), fd)
+        if len(sys.argv) > 15 and sys.argv[15] == 'materialized':
+            output = q / '99-output-eth'
+            output.mkdir(exist_ok=True)
+            latest, target = output / 'latest', output / '20261008_140000_combine'
+            for path in (latest, target):
+                path.mkdir()
+                (path / '.published-complete').write_bytes(b'complete\n')
+                (path / 'leaf.yaml').write_bytes(b'independent materialized evidence\n')
+            backup = load.register_setup_switch_materialized_directory(root / 'ztp/.setup-switch-journal.json', latest, target, **guard)
+            setup._SETUP_SWITCH_WAL_CONTEXT = (vars(load), fd, {}, {str(latest): (str(target), str(backup))})
+            setup._SetupLinkTransaction((str(latest),)).migrate_materialized_directory(str(latest), str(target))
         setup._register_setup_switch_link_before_write(str(common), str(q / '01-global.yaml'))
         key_links = []
         if len(sys.argv) > 12 and sys.argv[12] == 'managed-key':
@@ -5636,7 +5656,7 @@ try:
             print('R22_A_PLAN_FSYNC_ABA_HELD_BEFORE_RESTORE')
             sys.exit(0)
         raise AssertionError('A plan fsync ABA licensed restoration')
-    if sys.argv[5] in ('reader-b-typed', 'reader-b-death', 'reader-b-resume'):
+    if sys.argv[5] in ('reader-b-typed', 'reader-b-death', 'reader-b-death-materialized', 'reader-b-resume'):
         import json
         from unittest import mock
         journal = root / 'ztp/.setup-switch-journal.json'
@@ -5659,10 +5679,12 @@ try:
                 with (root / 'b-retirement-health-witness').open('a') as out:
                     out.write(str(os.getpid()) + '\n'); out.flush(); os.fsync(out.fileno())
             load.verify_http_publication = witnessed_health
-            if sys.argv[5] == 'reader-b-death':
+            if sys.argv[5] in ('reader-b-death', 'reader-b-death-materialized'):
                 def die(parent):
                     sync(parent)
-                    if pending.exists() and list(journal.parent.glob('.setup-switch-b-retired-*/dhcp-transaction')):
+                    pattern = ('.setup-switch-b-retired-*/materialized-*' if sys.argv[5] == 'reader-b-death-materialized'
+                               else '.setup-switch-b-retired-*/dhcp-transaction')
+                    if pending.exists() and list(journal.parent.glob(pattern)):
                         os.kill(os.getpid(), signal.SIGKILL)
                 load._fsync_parent_directory = die
             with private_a_health_ports(load, root, publication_prefix='q-prefix') as commands, \
@@ -5682,6 +5704,16 @@ try:
             assert (archive / 'dhcp-transaction/a-preimage.json').lstat().st_ino == original['identity'][1]
             assert not os.path.lexists(journal) and not os.path.lexists(original['body']['transaction']['path'])
             assert not os.path.lexists(load._setup_switch_a_restore_path())
+            if body.get('directories'):
+                rows = marker['materialized']
+                assert {row['path'] for row in rows} == {row['backup'] for row in body['directories']}
+                for row in rows:
+                    original = next(entry for entry in body['directories'] if entry['backup'] == row['path'])
+                    retained = archive / row['basename']
+                    assert not os.path.lexists(row['path']), 'B left original materialized backup live'
+                    assert retained.lstat().st_ino == original['source_ino']
+                    assert (retained / 'leaf.yaml').lstat().st_ino == original['before_tree']['leaf.yaml']['ino']
+                    assert (retained / 'leaf.yaml').read_bytes() == b'independent materialized evidence\n'
             load.require_no_pending_setup_switch_journal()
             print('R22_ORIGINAL_B_FULL_TYPED_EVIDENCE_ARCHIVED_FRESH_HEALTH')
             sys.exit(0)
@@ -5826,19 +5858,29 @@ finally:
                                            "a-metadata" if dhcp_metadata else "no-a-metadata",
                                            "managed-key" if managed_key or a_health or b_health else "no-managed-key",
                                            (prefix_change if isinstance(prefix_change, str) else "/q-prefix") if prefix_change else "unchanged-prefix",
-                                           'b-typed' if b_health else 'no-b-typed'],
+                                           'b-typed' if b_health else 'no-b-typed',
+                                           'materialized' if materialized else 'no-materialized'],
                                     capture_output=True, text=True, check=False, timeout=30)
             self.assertEqual(-signal.SIGKILL, writer.returncode, writer.stdout + writer.stderr)
             original_wal = (journal.lstat().st_ino, journal.read_bytes())
             if b_health:
-                reader = subprocess.run(argv + ['reader-b-death' if b_health == 'retire-death-dhcp' else 'reader-b-typed', shape], capture_output=True,
+                reader_mode = ('reader-b-death-materialized' if b_health == 'retire-death-materialized' else
+                               'reader-b-death' if b_health == 'retire-death-dhcp' else 'reader-b-typed')
+                reader = subprocess.run(argv + [reader_mode, shape], capture_output=True,
                     text=True, check=False, timeout=120)
-                if b_health == 'retire-death-dhcp':
+                if b_health in ('retire-death-dhcp', 'retire-death-materialized'):
                     self.assertEqual(-signal.SIGKILL, reader.returncode, reader.stdout + reader.stderr)
                     self.assertEqual(original_wal, (journal.lstat().st_ino, journal.read_bytes()))
                     pending = journal.parent / '.setup-switch-retirement.json'
                     archive = Path(json.loads(pending.read_bytes())['archive']['path'])
-                    self.assertTrue((archive / 'dhcp-transaction').is_dir())
+                    if b_health == 'retire-death-materialized':
+                        mappings = json.loads(pending.read_bytes())['materialized']
+                        self.assertEqual(1, len(mappings))
+                        self.assertTrue((archive / mappings[0]['basename']).is_dir())
+                        self.assertFalse(os.path.lexists(mappings[0]['path']))
+                        self.assertFalse((archive / 'dhcp-transaction').exists())
+                    else:
+                        self.assertTrue((archive / 'dhcp-transaction').is_dir())
                     self.assertFalse(os.path.lexists(archive / 'journal.json'))
                     with self.assertRaises(RELEASE_FIXTURE.LOAD.LoadError):
                         RELEASE_FIXTURE.LOAD.require_no_pending_setup_switch_journal()

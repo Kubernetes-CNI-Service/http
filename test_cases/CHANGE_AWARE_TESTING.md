@@ -3093,3 +3093,37 @@ exit/END=0，原 infra/materialized 冷恢复、正常迁移、文档与两完�
 日志读前后 stat/inode 稳定、已知旧前缀摘要一致、物理 Ran/结果/实际退出/END 核实；
 现有 direct/workflow manifest 映射未变，无删跳弱化断言或手改 ledger。本卡仍 OPEN；
 B 完整共享证据归档与正式当前精确树 related/full/check 尚未关闭，局部回归不是正式证明。
+
+### 2026-10-08 R22 B 实体 latest 完整证据退休
+
+原 B 退休只归档 WAL/prefix/DHCP，遗漏 materialized backup。新增独立 direct 与真实
+SETUP→Q manifest/parent 提交后强杀→新 LOAD 显式 B CLI 两项先 RED：
+`r22-b-materialized-archive-red.log` inode 163763004、size 5242、SHA256
+`1da0752101b4a87106962abbeedc04e96c4bbca624d0cfacf3ef843c6196b763`，2 tests in 9.015s、2 FAIL、exit/END=1。
+role-B schema3 追加闭合、最多 64 项的原 WAL materialized 映射；同 inode 完整目录归档
+前后核验原完整成员树。published 读视图仅映射本次 B 原证据，不能获得 A 恢复权限；
+完成后的历史检查只读归档，不读取或删除未来 old backup 名下的新对象。WAL 后移、
+marker 最后移，原九字段名字/FD、完整字节及既有健康/停服围栏继续保持。
+
+首轮 `r22-b-materialized-archive-green.log` inode 163765192、size 6440、SHA256
+`4f7a76fd1fc069e46bafdfb5e68f2201f37261d6747f7ce869a0a734e9b42d7b`，2 tests、1 FAIL/1 ERROR、exit/END=1：
+原 private direct 夹具未像真实部署使用 canonical 根；深检查第二次 shared snapshot
+遗漏 B 物理映射参数，误读已移走原名。夹具在最初捕获 P/WAL 前使用 canonical path，
+生产校验不放宽；两次完整 snapshot 均传 B 映射。修正途中一次缩进错误完整保存为
+`-green-corrected.log` inode 163767542、size 2662、SHA256
+`75c2848a0bd08c51ba8f0050e2d9d9e8e6b9ad21b253389686f73359039f9d9d`，导入即失败、exit/END=1，
+未声称执行了案例。修正后 `-green-corrected2.log` inode 163767590、size 1443、SHA256
+`514ee74ce5289518e525d0241e2b62fc0b12fb5b6f84c569125c050e7ed66239`，2 tests in 9.056s、OK、exit/END=0。
+
+扩展九项 `-boundaries.log` inode 163770656、size 6655、SHA256
+`833ca88d94a72e95e9fff4eeb797073408a7f469d5ec7ce1b643b6303b18d52c`，9 tests in 45.596s、1 FAIL、exit/END=1：
+替换归档成员已 HOLD，但 phase classifier 抹掉具体原始原因。保持原拒绝/证据/零健康
+断言和精确 materialized 错误断言，在 cold reentry 进入 phase classifier 之前再核
+原完整目录归档。最终 `-boundaries-qualified.log` inode 163778867、size 5715、SHA256
+`c71206fdf667a1dae635740cfdc92c9a7333d6cb715225643164fcd36e80b150`，9 tests in 45.321s、OK、exit/END=0：
+含归档后未来 live 对象不借用、归档被改即拒绝、首次 rename/父同步后死亡→全新 CLI
+重做健康、缺映射/错角色/未知字段/owner/未知对象/同字节新成员负例及原 prefix/DHCP
+冷归档回归。所有完整日志 stat/inode 读前后稳定、物理结果→退出→END 保留，无删跳
+弱化断言、延长 timeout 或手改 ledger。现有 manifest direct/真实 workflow 覆盖不变。
+实体 infra/logs hardlink 与将来的 Q 写入必须先安全隔离，再完成原备份/receipt 归档；
+该缺口与当前精确树正式 related/full/check 尚未关闭，不能把此窄修称为完整 R22 或真机验收。
