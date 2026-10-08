@@ -133,6 +133,20 @@ class Req7RemoteHistoryMatchDirectTests(unittest.TestCase):
             self.prepare(token, attempt=False)
             with self.assertRaises(module.RemoteHistoryHold): self.observe(module, token)
 
+    def test_unissued_response_objects_cannot_write_durable_completion_evidence(self):
+        module=load()
+        self.assertTrue(hasattr(module,'record_owned_completion_evidence'),
+                        'C19 needs retained evidence from the actual owned read bridge, not a caller MATCHED flag')
+        with fixture(self.root),self.owner.spreadsheet_owner(binding()) as token:
+            self.prepare(token)
+            retained={str(p.relative_to(self.state)):p.read_bytes() for p in self.state.rglob('*') if p.is_file()}
+            with self.assertRaises(module.RemoteHistoryHold) as caught:
+                module.record_owned_completion_evidence(object(),token,binding(),self.unit,
+                    identity_response=response(identity_response()),headers_response=response({}),
+                    metadata_response=response(self.metadata),history_response=response(self.post))
+            self.assertIsNone(caught.exception.__context__)
+            self.assertEqual(retained,{str(p.relative_to(self.state)):p.read_bytes() for p in self.state.rglob('*') if p.is_file()})
+
     def test_original_count_changed_during_post_read_cannot_escape_as_matched_observation(self):
         module=load()
         with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
@@ -547,6 +561,204 @@ class Req7OwnedHistoryMatchWorkflowTests(unittest.TestCase):
             # Each subcase needs a genuinely new owned state, never an adopted
             # UNKNOWN or a hand-reset original counter.
             if fault=='count': self.doCleanups(); self.setUp()
+
+    def test_actual_owned_complete_proof_is_durable_but_never_applied_or_barrier_release(self):
+        module=load()
+        self.assertTrue(hasattr(module,'record_owned_completion_evidence'),
+                        'fixed issued reads must persist ALL proof rows and original journal identities')
+        from contextlib import ExitStack
+        from monitor import issue_tracker_global_attempt_journal as journal
+        with ExitStack() as stack:
+            writer,owner,bound,auth,_config,unit,docs=self.prepare_owned(stack)
+            responses={name:self.read_owned(stack,writer,owner,bound,auth,kind,value)
+                       for name,(kind,value) in docs.items()}
+            state=self.root/'var/lib/http-ztp-container/issue-tracker'
+            retained={p:p.read_bytes() for p in state.rglob('*') if p.is_file()}
+            seen=module.record_owned_completion_evidence(writer,owner,bound,unit,**responses)
+            self.assertEqual(('COMPLETE-PRESENT-NOT-APPLIED',1,2),(seen.state,seen.attempt_count,seen.history_rows_matched))
+            self.assertFalse(hasattr(seen,'permit')); self.assertFalse(hasattr(seen,'applied'))
+            proof=state/(hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()+'.completion')
+            self.assertEqual({'IDENTITY-RAW','HEADERS-RAW','METADATA-RAW','HISTORY-RAW','HEADER','COMPLETE'},
+                             {p.name for p in proof.iterdir()})
+            for name,file in (('identity_response','IDENTITY-RAW'),('headers_response','HEADERS-RAW'),
+                              ('metadata_response','METADATA-RAW'),('history_response','HISTORY-RAW')):
+                self.assertEqual(responses[name].data,(proof/file).read_bytes())
+            self.assertEqual(retained,{p:p.read_bytes() for p in retained})
+            self.assertEqual(seen,module.inspect_completion_evidence(owner,bound,unit))
+            with self.assertRaises(module.RemoteHistoryHold):
+                module.record_owned_completion_evidence(writer,owner,bound,unit,**responses)
+            self.assertEqual((1,'UNKNOWN'),(journal.inspect_global_unit(owner,bound,unit).attempt_count,
+                                           journal.inspect_global_unit(owner,bound,unit).outcome))
+            with self.assertRaises(journal.GlobalAttemptHold): journal.prepare_global_unit(owner,bound,unit)
+        # No live read registry, shared Python object, old token or inherited
+        # lock FD survives. The child reads the actual retained original store.
+        import subprocess
+        program='''import sys,json,hashlib
+from pathlib import Path
+sys.path[:0]=[sys.argv[1],sys.argv[1]+"/tools"]
+from test_cases.test_req7_spreadsheet_owner import scoped_fixture
+from monitor import issue_tracker_spreadsheet_owner as owner, issue_tracker_remote_history_match as match
+from monitor.issue_tracker_online_target import OnlineTargetBinding
+from monitor.issue_tracker_send_unit import _original_unit
+root=Path(sys.argv[2]); bound=OnlineTargetBinding(**json.loads(sys.stdin.buffer.read()))
+path=root/'var/lib/http-ztp-container/issue-tracker'/(hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()+'.journal')
+unit=_original_unit((path/'ACTION-PREIMAGE').read_bytes(),(path/'WIRE').read_bytes())
+with scoped_fixture(root,owner),owner.spreadsheet_owner(bound) as token:
+ seen=match.inspect_completion_evidence(token,bound,unit)
+ print(seen.state,seen.attempt_count,seen.history_rows_matched)
+'''
+        from dataclasses import asdict
+        cold=subprocess.run([sys.executable,'-B','-c',program,str(ROOT),str(self.root)],
+            input=json.dumps(asdict(bound)).encode(),stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=10)
+        self.assertEqual(0,cold.returncode,cold.stderr)
+        self.assertEqual(b'COMPLETE-PRESENT-NOT-APPLIED 1 2\n',cold.stdout)
+
+    def test_completion_header_original_identity_and_history_extent_cannot_be_substituted(self):
+        module=load()
+        from contextlib import ExitStack
+        from monitor import issue_tracker_local_commit as local
+        for fault in ('same-byte-header','history-extent'):
+            with self.subTest(fault=fault),ExitStack() as stack:
+                writer,owner,bound,auth,_config,unit,docs=self.prepare_owned(stack)
+                responses={name:self.read_owned(stack,writer,owner,bound,auth,kind,value)
+                           for name,(kind,value) in docs.items()}
+                module.record_owned_completion_evidence(writer,owner,bound,unit,**responses)
+                proof=self.root/'var/lib/http-ztp-container/issue-tracker'/(hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()+'.completion')
+                path=proof/'HEADER'; original=path.read_bytes()
+                if fault=='same-byte-header':
+                    path.rename(self.root/'preserved-completion-header'); path.write_bytes(original); path.chmod(0o600)
+                else:
+                    doc=json.loads(original); doc['matched']['history_last_row_after_read']+=1
+                    raw=local._canonical(doc); path.write_bytes(raw)
+                    marker=json.loads((proof/'COMPLETE').read_bytes()); marker['header_sha256']=hashlib.sha256(raw).hexdigest()
+                    if 'header_identity' in marker:
+                        from monitor import issue_tracker_attempt_journal as original_io
+                        marker['header_identity']=list(original_io._identity(path.stat()))
+                    (proof/'COMPLETE').write_bytes(local._canonical(marker))
+                retained={p:p.read_bytes() for p in proof.iterdir()}
+                with self.assertRaises(module.RemoteHistoryHold): module.inspect_completion_evidence(owner,bound,unit)
+                self.assertEqual(retained,{p:p.read_bytes() for p in proof.iterdir()})
+            if fault=='same-byte-header': self.doCleanups(); self.setUp()
+
+    def test_owned_completion_missing_audit_forged_read_and_failed_barrier_never_install_marker(self):
+        module=load()
+        self.assertTrue(hasattr(module,'record_owned_completion_evidence'),'durable C19 writer missing')
+        from contextlib import ExitStack
+        from monitor import issue_tracker_local_commit as local
+        with ExitStack() as stack:
+            writer,owner,bound,auth,_config,unit,docs=self.prepare_owned(stack)
+            responses={name:self.read_owned(stack,writer,owner,bound,auth,kind,value)
+                       for name,(kind,value) in docs.items()}
+            proof=self.root/'var/lib/http-ztp-container/issue-tracker'/(hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()+'.completion')
+            missing=deepcopy(docs['history_response'][1]); missing['sheets'][0]['data'][0]['rowData'].pop()
+            changed=self.read_owned(stack,writer,owner,bound,auth,'history_tail',missing)
+            for options in ({**responses,'history_response':changed},
+                            {**responses,'metadata_response':replace(responses['metadata_response'])}):
+                with self.assertRaises(module.RemoteHistoryHold):
+                    module.record_owned_completion_evidence(writer,owner,bound,unit,**options)
+                self.assertFalse(proof.exists())
+            actual=local._write_new
+            def failed_header_barrier(folder,name,raw):
+                actual(folder,name,raw)
+                if name=='HEADER': raise OSError('owned fixture failed HEADER directory barrier')
+            with mock.patch.object(local,'_write_new',side_effect=failed_header_barrier):
+                with self.assertRaises(module.RemoteHistoryHold):
+                    module.record_owned_completion_evidence(writer,owner,bound,unit,**responses)
+            self.assertTrue((proof/'HEADER').is_file()); self.assertFalse((proof/'COMPLETE').exists())
+            before={p:p.read_bytes() for p in proof.iterdir()}
+            with self.assertRaises(module.RemoteHistoryHold): module.inspect_completion_evidence(owner,bound,unit)
+            with self.assertRaises(module.RemoteHistoryHold):
+                module.record_owned_completion_evidence(writer,owner,bound,unit,**responses)
+            self.assertEqual(before,{p:p.read_bytes() for p in proof.iterdir()})
+
+    def test_completion_marker_never_precedes_any_required_raw_header_or_directory_barrier(self):
+        module=load()
+        from contextlib import ExitStack
+        import os
+        # New-folder parent+folder, all four raw file+folder barriers,
+        # HEADER file+folder, then explicit folder+parent synchronization.
+        for boundary in range(1,15):
+            with self.subTest(boundary=boundary),ExitStack() as stack:
+                writer,owner,bound,auth,_config,unit,docs=self.prepare_owned(stack)
+                responses={name:self.read_owned(stack,writer,owner,bound,auth,kind,value)
+                           for name,(kind,value) in docs.items()}
+                proof=self.root/'var/lib/http-ztp-container/issue-tracker'/(hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()+'.completion')
+                actual=os.fsync; calls=[]
+                def fail_at(fd):
+                    # Matching first synchronizes the pre-existing preread
+                    # and nonce stores (nine barriers). A failure there has
+                    # created NO partial completion to forbid on the next
+                    # read-only retry. Count only this NEW store's barriers,
+                    # from its actual mkdir, not global fsync ordinals.
+                    if proof.exists():
+                        calls.append(fd)
+                        if len(calls)==boundary: raise OSError('owned fixture interruption')
+                    return actual(fd)
+                with mock.patch('os.fsync',side_effect=fail_at),self.assertRaises(module.RemoteHistoryHold):
+                    module.record_owned_completion_evidence(writer,owner,bound,unit,**responses)
+                self.assertEqual(boundary,len(calls)); self.assertFalse((proof/'COMPLETE').exists())
+                original={str(p.relative_to(proof)):p.read_bytes() for p in proof.rglob('*') if p.is_file()}
+                with self.assertRaises(module.RemoteHistoryHold): module.inspect_completion_evidence(owner,bound,unit)
+                with self.assertRaises(module.RemoteHistoryHold):
+                    module.record_owned_completion_evidence(writer,owner,bound,unit,**responses)
+                self.assertEqual(original,{str(p.relative_to(proof)):p.read_bytes() for p in proof.rglob('*') if p.is_file()})
+            if boundary!=14: self.doCleanups(); self.setUp()
+
+    def test_completion_keeps_original_count_through_header_barrier_and_final_owned_deadline(self):
+        module=load()
+        from contextlib import ExitStack
+        from monitor import issue_tracker_local_commit as local, issue_tracker_global_attempt_journal as journal
+        from monitor import issue_tracker_history_read_launcher as reads
+        import time
+        for fault in ('count-after-header','deadline-after-header'):
+            with self.subTest(fault=fault),ExitStack() as stack:
+                writer,owner,bound,auth,_config,unit,docs=self.prepare_owned(stack)
+                responses={name:self.read_owned(stack,writer,owner,bound,auth,kind,value)
+                           for name,(kind,value) in docs.items()}
+                actual=local._write_new; changed=[]
+                def after_header(folder,name,raw):
+                    actual(folder,name,raw)
+                    if name=='HEADER' and not changed:
+                        changed.append(True)
+                        if fault=='count-after-header': journal.record_global_attempt_intent(owner,bound,unit)
+                with mock.patch.object(local,'_write_new',side_effect=after_header), \
+                        mock.patch.object(reads,'_monotonic',side_effect=lambda:time.monotonic()+(31 if changed and fault=='deadline-after-header' else 0)):
+                    with self.assertRaises(module.RemoteHistoryHold):
+                        module.record_owned_completion_evidence(writer,owner,bound,unit,**responses)
+                self.assertEqual([True],changed)
+                proof=self.root/'var/lib/http-ztp-container/issue-tracker'/(hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()+'.completion')
+                self.assertFalse((proof/'COMPLETE').exists())
+                self.assertEqual((2 if fault=='count-after-header' else 1,'UNKNOWN'),
+                    (journal.inspect_global_unit(owner,bound,unit).attempt_count,journal.inspect_global_unit(owner,bound,unit).outcome))
+            if fault=='count-after-header': self.doCleanups(); self.setUp()
+
+    def test_completion_writer_cannot_return_after_final_inspection_deadline_or_namespace_drift(self):
+        module=load()
+        from contextlib import ExitStack
+        from monitor import issue_tracker_history_read_launcher as reads
+        import time
+        for fault in ('deadline','completion-directory'):
+            with self.subTest(fault=fault),ExitStack() as stack:
+                writer,owner,bound,auth,_config,unit,docs=self.prepare_owned(stack)
+                responses={name:self.read_owned(stack,writer,owner,bound,auth,kind,value)
+                           for name,(kind,value) in docs.items()}
+                actual=module.inspect_completion_evidence; changed=[]
+                proof=self.root/'var/lib/http-ztp-container/issue-tracker'/(hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()+'.completion')
+                def finish_then_change(*args,**options):
+                    seen=actual(*args,**options); changed.append(True)
+                    if fault=='completion-directory':
+                        originals={p.name:p.read_bytes() for p in proof.iterdir()}
+                        proof.rename(self.root/'preserved-completion-original'); proof.mkdir(mode=0o700)
+                        for name,raw in originals.items():
+                            path=proof/name; path.write_bytes(raw); path.chmod(0o600)
+                    return seen
+                with mock.patch.object(module,'inspect_completion_evidence',side_effect=finish_then_change), \
+                        mock.patch.object(reads,'_monotonic',side_effect=lambda:time.monotonic()+(31 if changed and fault=='deadline' else 0)):
+                    with self.assertRaises(module.RemoteHistoryHold):
+                        module.record_owned_completion_evidence(writer,owner,bound,unit,**responses)
+                self.assertEqual([True],changed)
+                self.assertTrue((proof/'COMPLETE').is_file(),'retained historical evidence is never deleted on late failure')
+            if fault=='deadline': self.doCleanups(); self.setUp()
 
     def test_actual_issued_match_cannot_escape_after_matching_original_count_changes(self):
         from contextlib import ExitStack

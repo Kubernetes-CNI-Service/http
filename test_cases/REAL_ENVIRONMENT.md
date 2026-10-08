@@ -2160,6 +2160,8 @@ pread，检查 mode/uid/nlink/大小和前后身份，原一致性不重编译�
 
 ## TC-REAL-REQ7-REMOTE-HISTORY-MATCH-001 — journal/原始 nonce/fence/全部 History 必要对账
 
+- 持久原始完成证据补充（**NOT RUN / REAL_ENV REQUIRED**）：实际双 owner 固定 identity/headers/metadata/History 四份完整回应须在整个文件写入期间保持原签发、原期限、当前固定策略与原 journal/nonce/History 身份。独立只增不改 `.completion` 中四份 RAW、HEADER、目录和父目录的十四个前置 fsync 全成功后才写 COMPLETE。逐屏障中断、缺审计、复制对象、同字节 HEADER 替换、尾行摘要漂移、HEADER 后计数变化或期限失效须 HOLD，partial 原样保留，不补建、不覆盖。现场前置须另获原件只读与一次性副本故障注入授权；证据留存完整执行物理顺序、每个原件 inode/SHA、RAW/HEADER/marker 摘要及冷进程回读身份。清理只限自有隔离 fixture，不删真实原件、nonce/fence、预留、UNKNOWN 或计数。冷读只返回 `COMPLETE-PRESENT-NOT-APPLIED` 历史观察；不是 COMPLETE→APPLIED、FIFO/high-water/outbox 结算、发送准入或在线激活证明，仍有非原子读取与隐藏 PROJECT 库存未证明的风险。
+
 - 新鲜计数读门补充（**NOT RUN / REAL_ENV REQUIRED**）：实际固定 identity/headers/W1/metadata 四次原始读取须在原始 C5/C6 计数前后保持双 owner、策略和原期限。W1 ID 与十四表身份匹配，规则等于冻结本地快照，双原 nonce 正确，无已有 fence／可见溢出。复制回应拒绝；期限在 durable 计数之后失效时保留 UNKNOWN 和原计数。现场证据须保留固定请求、原回应摘要、原始预留绑定及故障阶段，清理仅获准隔离副本；非原子读、隐藏 PROJECT、真实业务/History 连续性和 mutation 风险不闭合，不授予发送许可。
 
 - 固定原始读取桥补充（**NOT RUN / REAL_ENV REQUIRED**）：模板 identity/四表 headers、metadata search 和完整 History tail 仅接受受监督固定入口实际签发对象，原双 owner、当前策略、原始参数/正文及原 30 秒期限在匹配前后同时有效。真实拥有的 loopback 测试保留 UNKNOWN，拒绝复制对象、漂移表头、缺少审计、解析后期限到期和策略撤销。现场须独立记录该来源链及四次非原子读取限制；不提升隐藏 PROJECT 库存完整性或授权 mutation/COMPLETE，清理与风险沿用本卡。

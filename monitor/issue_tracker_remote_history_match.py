@@ -7,7 +7,7 @@ objects remain necessary inputs, not authenticated source/admission authority;
 The owned-read bridge below establishes actual fixed-read provenance, current
 dual owners and typed template observations, not durable settlement authority.
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from contextlib import contextmanager
 import hashlib
 import json
@@ -50,6 +50,20 @@ class OwnedUnitReadGateObservation:
     whitelist_sha256: str
     enrollment_sha256: str
     capacity_outcome: str
+
+
+@dataclass(frozen=True)
+class CompletionEvidenceObservation:
+    """Durable original proof-set observation, NOT APPLIED or a send permit.
+
+    No global barrier, reservation, FIFO/high-water or settings outbox consumer
+    accepts this value. Those transitions need their own integrated authority.
+    """
+    state: str
+    attempt_count: int
+    history_rows_matched: int
+    unit_id: str
+    header_sha256: str
 
 
 def _fence(unit, identity, response):
@@ -128,7 +142,11 @@ def _hold_match_originals(token,binding,unit):
                 if journal._identity(os.fstat(folder))!=directory_identity: raise RemoteHistoryHold()
             ownership._validated_owner(token,binding)
         verify()
-        yield
+        witness={name:{'directory_identity':list(directory_identity),
+                      'files':{entry:{'identity':list(identity),'sha256':hashlib.sha256(raw).hexdigest()}
+                               for entry,(raw,identity) in files.items()}}
+                 for name,_folder,directory_identity,files in held}
+        yield verify,witness
         verify()
     finally:
         close_failed=False
@@ -233,6 +251,192 @@ def _observe_owned_remote_history_unit(writer_token, owner_token, binding, unit,
         for kind, response in responses:
             require_current_owned_read(writer_token, owner_token, binding, response, read_kind=kind)
     except Exception: failed = True
+    if failed: raise RemoteHistoryHold()
+    return result
+
+
+_COMPLETION_READS=(('identity_response','template_identity','IDENTITY-RAW'),
+                   ('headers_response','template_headers','HEADERS-RAW'),
+                   ('metadata_response','metadata','METADATA-RAW'),
+                   ('history_response','history_tail','HISTORY-RAW'))
+
+
+def record_owned_completion_evidence(writer_token,owner_token,binding,unit,*,
+                                     identity_response,headers_response,metadata_response,history_response):
+    """Persist a complete matched proof set, NEVER clear UNKNOWN or resend.
+
+    Only actual fixed-read objects under the current dual acquisitions may
+    enter. No caller observation/plan/path/COMPLETE flag is accepted. A retained
+    partial store is HOLD; no recovery, adoption, overwrite or cleanup here.
+    COMPLETE is written only AFTER all raw/header barriers and revalidation.
+    The downstream APPLIED/high-water/FIFO/outbox transition is not implemented
+    by this necessary local evidence API. Online activation remains separate.
+    """
+    from monitor import issue_tracker_local_commit as local, issue_tracker_attempt_journal as journal
+    from monitor.issue_tracker_history_read_launcher import require_current_owned_read
+    folder=None; failed=False
+    try:
+        project=local._owner(writer_token)
+        responses=dict(identity_response=identity_response,headers_response=headers_response,
+                       metadata_response=metadata_response,history_response=history_response)
+        with _hold_match_originals(owner_token,binding,unit) as (verify,originals):
+            observed=observe_owned_remote_history_unit(writer_token,owner_token,binding,unit,**responses)
+            if observed.state!='MATCHED_OBSERVATION': raise RemoteHistoryHold()
+            owner,parent,name,base=global_journal._inputs(owner_token,binding,unit)
+            name=name[:-len('.journal')]+'.completion'
+            def live():
+                if local._owner(writer_token) is not project: raise RemoteHistoryHold()
+                if ownership._validated_owner(owner_token,binding) is not owner: raise RemoteHistoryHold()
+                for key,kind,_file in _COMPLETION_READS:
+                    require_current_owned_read(writer_token,owner_token,binding,responses[key],read_kind=kind)
+                verify()
+            live()
+            if name in os.listdir(parent): raise RemoteHistoryHold()
+            folder=global_journal._create_folder(parent,name)
+            files={}
+            for key,kind,file in _COMPLETION_READS:
+                raw=responses[key].data
+                if file in ('METADATA-RAW','HISTORY-RAW'): journal._write_read_image(folder,file,raw)
+                else: local._write_new(folder,file,raw)
+                files[file]={'identity':list(journal._identity(os.stat(file,dir_fd=folder,follow_symlinks=False))),
+                             'sha256':hashlib.sha256(raw).hexdigest(),
+                             'request_path_sha256':responses[key].request_path_sha256}
+            header={'schema_version':1,'unit_id':unit.unit_id,'binding':base,'originals':originals,
+                    'folder_identity':list(journal._identity(os.fstat(folder))[:2]),
+                    'matched':asdict(observed),'responses':files}
+            header_raw=local._canonical(header)
+            local._write_new(folder,'HEADER',header_raw)
+            header_identity=list(journal._identity(os.stat('HEADER',dir_fd=folder,follow_symlinks=False)))
+            # Recheck all files, original journal count/images and issued-read
+            # deadlines after their actual durability barriers, before marker.
+            journal._named(parent,name,folder,directory=True)
+            for key,_kind,file in _COMPLETION_READS:
+                if (journal._read(folder,file,2*1024*1024)!=responses[key].data
+                        or list(journal._identity(os.stat(file,dir_fd=folder,follow_symlinks=False)))!=files[file]['identity']):
+                    raise RemoteHistoryHold()
+            if (journal._read(folder,'HEADER',65536)!=header_raw
+                    or list(journal._identity(os.stat('HEADER',dir_fd=folder,follow_symlinks=False)))!=header_identity):
+                raise RemoteHistoryHold()
+            os.fsync(folder); os.fsync(parent)
+            live()
+            journal._named(parent,name,folder,directory=True)
+            marker_raw=local._canonical({'schema_version':1,'unit_id':unit.unit_id,
+                'header_sha256':hashlib.sha256(header_raw).hexdigest(),
+                'header_identity':header_identity,'state':'COMPLETE-PRESENT-NOT-APPLIED'})
+            local._write_new(folder,'COMPLETE',marker_raw)
+            live()
+            directory_identity=journal._identity(os.fstat(folder))
+            originals_saved={file:(responses[key].data,files[file]['identity'])
+                             for key,_kind,file in _COMPLETION_READS}
+            originals_saved['HEADER']=(header_raw,header_identity)
+            originals_saved['COMPLETE']=(marker_raw,list(journal._identity(os.stat('COMPLETE',dir_fd=folder,follow_symlinks=False))))
+            result=inspect_completion_evidence(owner_token,binding,unit)
+            # The historical reader must not let the writer return after its
+            # actual original read deadline or proof namespace is displaced.
+            live(); journal._named(parent,name,folder,directory=True)
+            if journal._identity(os.fstat(folder))!=directory_identity or set(os.listdir(folder))!=set(originals_saved):
+                raise RemoteHistoryHold()
+            for file,saved in originals_saved.items():
+                if (journal._read(folder,file,2*1024*1024),list(journal._identity(os.stat(file,dir_fd=folder,follow_symlinks=False))))!=saved:
+                    raise RemoteHistoryHold()
+            live(); journal._named(parent,name,folder,directory=True)
+            if journal._identity(os.fstat(folder))!=directory_identity: raise RemoteHistoryHold()
+    except Exception: failed=True
+    finally:
+        if folder is not None:
+            try: os.close(folder)
+            except OSError: failed=True
+    if failed: raise RemoteHistoryHold()
+    return result
+
+
+def inspect_completion_evidence(owner_token,binding,unit):
+    """Validate retained originals and complete proof images, no settlement.
+
+    Missing/partial evidence never gets backfilled or promoted. Synchronize
+    the original complete store under the owner; mere marker existence does
+    not prove its barriers completed. No fresh remote state is asserted by
+    this historical observation, and the UNKNOWN journal remains immutable.
+    """
+    from monitor import issue_tracker_local_commit as local, issue_tracker_attempt_journal as journal
+    folder=None; failed=False
+    try:
+        with _hold_match_originals(owner_token,binding,unit) as (verify,originals):
+            owner,parent,name,base=global_journal._inputs(owner_token,binding,unit)
+            name=name[:-len('.journal')]+'.completion'
+            folder=local._directory(parent,name)
+            journal._named(parent,name,folder,directory=True)
+            if set(os.listdir(folder))!={'HEADER','COMPLETE',*(file for _key,_kind,file in _COMPLETION_READS)}:
+                raise RemoteHistoryHold()
+            identity=journal._identity(os.fstat(folder))
+            raw=journal._read(folder,'HEADER',65536)
+            header=json.loads(raw.decode('utf-8'),object_pairs_hook=metadata._pairs,parse_constant=metadata._nonfinite)
+            if (set(header)!={'schema_version','unit_id','binding','originals','folder_identity','matched','responses'}
+                    or local._canonical(header)!=raw or type(header['schema_version']) is not int
+                    or header['schema_version']!=1 or header['unit_id']!=unit.unit_id
+                    or local._canonical(header['binding'])!=local._canonical(base)
+                    or local._canonical(header['originals'])!=local._canonical(originals)
+                    or local._canonical(header['folder_identity'])!=local._canonical(list(identity[:2]))):
+                raise RemoteHistoryHold()
+            matched=header['matched']
+            state=global_journal.inspect_global_unit(owner_token,binding,unit)
+            preread,_original=before._read_preread(owner_token,binding,unit)
+            if (set(matched)!=set(RemoteHistoryObservation.__dataclass_fields__)
+                    or matched['state']!='MATCHED_OBSERVATION' or matched['fence_present'] is not True
+                    or matched['target_nonce_valid'] is not True or matched['history_nonce_valid'] is not True
+                    or type(matched['attempt_count']) is not int or matched['attempt_count']!=state.attempt_count
+                    or type(matched['history_rows_expected']) is not int or matched['history_rows_expected']!=unit.history_rows_expected
+                    or type(matched['history_rows_matched']) is not int or matched['history_rows_matched']!=unit.history_rows_expected
+                    or type(matched['history_last_row_before_send']) is not int
+                    or matched['history_last_row_before_send']!=preread.history_last_row_before_send
+                    or type(matched['history_last_row_after_read']) is not int
+                    or matched['history_last_row_after_read']!=preread.history_last_row_before_send+unit.history_rows_expected
+                    or matched['action_digest']!=unit.action_digest or matched['wire_sha256']!=unit.wire_sha256):
+                raise RemoteHistoryHold()
+            expected_files={file for _key,_kind,file in _COMPLETION_READS}
+            if type(header['responses']) is not dict or set(header['responses'])!=expected_files: raise RemoteHistoryHold()
+            snapshots={}
+            for file in sorted(expected_files|{'HEADER','COMPLETE'}):
+                image=journal._read(folder,file,2*1024*1024)
+                file_identity=list(journal._identity(os.stat(file,dir_fd=folder,follow_symlinks=False)))
+                if file in expected_files:
+                    facts=header['responses'][file]
+                    if (type(facts) is not dict or set(facts)!={'identity','sha256','request_path_sha256'}
+                            or local._canonical(facts['identity'])!=local._canonical(file_identity)
+                            or facts['sha256']!=hashlib.sha256(image).hexdigest()
+                            or type(facts['request_path_sha256']) is not str
+                            or len(facts['request_path_sha256'])!=64
+                            or any(letter not in '0123456789abcdef' for letter in facts['request_path_sha256'])):
+                        raise RemoteHistoryHold()
+                snapshots[file]=(image,file_identity)
+            digest=hashlib.sha256(raw).hexdigest()
+            if snapshots['COMPLETE'][0]!=local._canonical({'schema_version':1,'unit_id':unit.unit_id,
+                    'header_sha256':digest,'header_identity':snapshots['HEADER'][1],
+                    'state':'COMPLETE-PRESENT-NOT-APPLIED'}): raise RemoteHistoryHold()
+            if (matched['metadata_sha256']!=header['responses']['METADATA-RAW']['sha256']
+                    or matched['history_sha256']!=header['responses']['HISTORY-RAW']['sha256']): raise RemoteHistoryHold()
+            for file in sorted(snapshots):
+                fd=os.open(file,local._flags()|os.O_NONBLOCK,dir_fd=folder)
+                try:
+                    journal._named(folder,file,fd,directory=False)
+                    if list(journal._identity(os.fstat(fd)))!=snapshots[file][1]: raise RemoteHistoryHold()
+                    os.fsync(fd)
+                finally: os.close(fd)
+            os.fsync(folder); os.fsync(parent)
+            verify(); journal._named(parent,name,folder,directory=True)
+            if journal._identity(os.fstat(folder))!=identity or set(os.listdir(folder))!=set(snapshots): raise RemoteHistoryHold()
+            for file,saved in snapshots.items():
+                if (journal._read(folder,file,2*1024*1024),list(journal._identity(os.stat(file,dir_fd=folder,follow_symlinks=False))))!=saved:
+                    raise RemoteHistoryHold()
+            verify(); journal._named(parent,name,folder,directory=True)
+            if journal._identity(os.fstat(folder))!=identity: raise RemoteHistoryHold()
+            result=CompletionEvidenceObservation('COMPLETE-PRESENT-NOT-APPLIED',state.attempt_count,
+                matched['history_rows_matched'],unit.unit_id,digest)
+    except Exception: failed=True
+    finally:
+        if folder is not None:
+            try: os.close(folder)
+            except OSError: failed=True
     if failed: raise RemoteHistoryHold()
     return result
 

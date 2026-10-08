@@ -962,7 +962,7 @@ ACTION-PREIMAGE/action_digest → immutable wire journal → 六个冷启动进�
 MATCHED_OBSERVATION。整个 matcher 和最终 issued-read 门禁期间持续持有原 global
 count/WIRE、History preread、enrollment 目录，并前后核全部原文件的 stat/inode/字节
 及命名边。读后加次数、同字节替换文件／目录均 HOLD，保留实际 UNKNOWN，不采用
-替代原像。这仍不是 durable COMPLETE 或释放 FIFO 的依据。
+替代原像。纯 matcher 仍不写 durable COMPLETE，也不是释放 FIFO 的依据。
 缺 fence 为 UNKNOWN，外来栅或缺/多/重复/错序/伪造 NOOP
 History 为 CONFLICT；缺原像、异常/部分响应、外来目标或重复 metadata HOLD。
 25000 个 typed cells 只扫描一次，不按行重复扫描。真实私有 TLS 三个只读请求
@@ -974,6 +974,17 @@ History 全尾四份响应；不接收 caller plan/identity/freshness 标志。�
 私有 TLS → 严格模板解析 → 原 journal 对账覆盖副本伪造、表头漂移、缺审计、
 解析后超期和策略撤销；四次只读仍非原子快照，隐藏 metadata 库存仍未证明，
 匹配不结算、不清除 UNKNOWN，不授予发送权限。
+
+`record_owned_completion_evidence` 另从实际双 owner 签发的四份原始读取重新匹配，
+将 identity/headers/metadata/完整 History RAW 与全部原 journal/nonce/History 原像
+stat/inode/SHA 绑定到独立只增不改的 `.completion`。四份 RAW、HEADER、目录与父目录
+屏障全部成功，原计数/策略/读取期限仍成立后才写 COMPLETE 标记。十四个前置屏障
+逐项中断均保留 partial/HOLD；不补建、不覆盖、不收走 UNKNOWN。冷进程在原 OS owner
+下同步并核原文件、HEADER inode、marker/header 摘要与完整 History extent，仅返回
+`COMPLETE-PRESENT-NOT-APPLIED` 历史证据观察。它没有消费者可释放全表屏障、预留、
+FIFO、高水位或 settings outbox，也不作为真实源准入、在线激活或正式 full proof；
+这些 REQ7 集成仍待完成。新增真实 TLS→双锁→文件屏障→冷进程回读联测覆盖缺审计、
+复制回应、同字节 HEADER 替换、尾行摘要漂移、计数后变和最终期限失效。
 
 `test_cases.test_req7_activity_discovery` 另区分 caller 有限窗口和固定完整容量读：
 显式身份/Status 列与 GRID rowCount/columnCount 在同一个 GET 返回；仅容量 3..5002
