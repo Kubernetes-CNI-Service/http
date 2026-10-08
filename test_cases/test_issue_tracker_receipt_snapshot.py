@@ -34,6 +34,33 @@ class CurrentCycleReceiptSnapshotDirectTests(ProdStageLFixture):
         self.assertEqual(0, snapshot.published)
         self.assertEqual((), snapshot.generation_ids)
 
+    def test_proved_empty_history_has_no_original_receipts_or_send_authority(self):
+        from monitor import issue_tracker_receipt_snapshot as receipts
+        self.assertTrue(callable(getattr(receipts, "read_local_receipt_history", None)),
+                        "historical original receipt reader is absent")
+        self._cycle(activity=True, derivation=True)
+        with tracker_writer(self.project, self.publication) as token:
+            result = receipts.read_local_receipt_history(
+                token, self.store, expected_template_sha256=self.snapshot.workbook_sha256,
+                settings=self.settings, whitelist_sha256=self.snapshot.whitelist.sha256)
+        self.assertEqual("RECEIPT-HISTORY-PRESENT-NOT-ELIGIBILITY", result.state)
+        self.assertEqual((), result.receipts)
+        self.assertFalse(hasattr(result, "permit"))
+
+    def test_history_requires_actual_active_owner_not_caller_fact(self):
+        from monitor import issue_tracker_receipt_snapshot as receipts
+        self.assertTrue(callable(getattr(receipts, "read_local_receipt_history", None)),
+                        "historical original receipt reader is absent")
+        self._cycle(activity=True, derivation=True)
+        with tracker_writer(self.project, self.publication) as token:
+            pass
+        for owner in (None, object(), token):
+            with self.subTest(owner=type(owner).__name__), self.assertRaises(
+                    receipts.LocalReceiptSnapshotHold):
+                receipts.read_local_receipt_history(
+                    owner, self.store, expected_template_sha256=self.snapshot.workbook_sha256,
+                    settings=self.settings, whitelist_sha256=self.snapshot.whitelist.sha256)
+
     def test_c6_receipt_without_shared_admission_is_hold_not_zero(self):
         from monitor.issue_tracker_local_commit import (
             begin_generation, commit, record_intent,

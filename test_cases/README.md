@@ -1247,3 +1247,15 @@ root-only allowlist FD 读取器。非 root、伪造或已撤销 owner、缺少�
 独立项目 owner／固定读取器 workflow 核这些边界；native root/RO-bind 仍 NOT RUN。
 这不替代实时远端 W1／template／nonce 连续性、cadence、固定单次 launcher
 或真实发送证明，REQ7 整体仍未完成。
+
+`read_local_receipt_history` 在实际 ACTIVE 项目 owner 下读取完整已准入 C6
+历史，包括最新周期之后仍保留的旧周期原 RECEIPT；不把旧回执累计到当前
+周期 published。全程持有 admission、generations 四件、原发布 XLSX 与 K
+events/outbox/current 的目录／文件 FD，复核完整 stat、身份及字节；调用真实
+共享链、受保护周期窗口与原 generation recovery。相同内容的文件／目录替换、
+未持锁、未终结回执、当前周期缺 C5 重放均 HOLD；不补写、修复或重新生成原件。
+返回 `RECEIPT-HISTORY-PRESENT-NOT-ELIGIBILITY`，只是历史原件观察，不是
+旧周期 R2 的来源重新资格化、fresh admission、实际发送、FIFO 或 COMPLETE。
+原 current-cycle reader 合同不变；真实 worker/emitter→C5/C6 多脚本联测
+覆盖旧回执仍可观察、当前计数为零及所有原件／名字替换。REQ7 整体仍未完成，
+现场卡 `TC-REAL-REQ7-PER-KEY-STATUS-001` 保持 NOT RUN。

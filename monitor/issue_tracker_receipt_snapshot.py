@@ -7,6 +7,7 @@ the function neither creates a generation nor repairs incomplete evidence.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from contextlib import contextmanager
 import hashlib
 import os
 from pathlib import Path
@@ -34,6 +35,20 @@ class CurrentCycleLocalReceipts:
     cycle_id: str | None
     published: int
     generation_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class HistoricalLocalReceipt:
+    generation_id: str
+    cycle_id: str
+    published_sha256: str
+    manifest_id: str
+
+
+@dataclass(frozen=True)
+class LocalReceiptHistory:
+    state: str
+    receipts: tuple[HistoricalLocalReceipt, ...]
 
 
 _SHA = re.compile(r"[0-9a-f]{64}\Z")
@@ -224,3 +239,144 @@ def read_current_cycle_local_receipts(
         if isinstance(exc, LocalReceiptSnapshotHold):
             raise
         raise LocalReceiptSnapshotHold("current-cycle local receipt is unsafe") from exc
+
+
+@contextmanager
+def _hold_history_originals(token):
+    """Pin actual C6/admission/K originals, never accept a caller snapshot.
+
+    Hold directory AND file descriptors through native recovery/chain reads.
+    Identical-byte replacement is not the original evidence. Only these fixed
+    namespaces and their original published XLSX names are inspected; no
+    journal mutation, repair, discovery outside the owner or path override.
+    """
+    from monitor import issue_tracker_local_commit as local
+    from monitor.issue_tracker_attempt_journal import _identity, _named
+
+    owner = _owner(token)
+    directories, files, missing, fds = [], [], [], []
+
+    def file(parent, name, limit):
+        fd = os.open(name, local._flags(), dir_fd=parent)
+        fds.append(fd)
+        _named(parent, name, fd, directory=False)
+        before = _identity(os.fstat(fd))
+        raw, info = _read(parent, name, limit)
+        if _identity(info) != before or _identity(os.fstat(fd)) != before:
+            raise LocalReceiptSnapshotHold("historical original changed during read")
+        _named(parent, name, fd, directory=False)
+        files.append((parent, name, fd, before, raw, limit))
+
+    def directory(parent, name, children):
+        fd = _directory(parent, name)
+        fds.append(fd)
+        _named(parent, name, fd, directory=True)
+        info = _identity(os.fstat(fd))
+        names = frozenset(os.listdir(fd))
+        directories.append((parent, name, fd, info, names))
+        for entry in sorted(names):
+            if entry in children:
+                directory(fd, entry, children[entry])
+            else:
+                file(fd, entry, 1024 * 1024 if entry == "MANIFEST" else local._MAX_DOC)
+        return fd
+
+    def verify():
+        _owner(token)
+        for parent, name in missing:
+            if name in os.listdir(parent):
+                raise LocalReceiptSnapshotHold("historical namespace appeared during read")
+        for parent, name, fd, info, names in directories:
+            _named(parent, name, fd, directory=True)
+            if _identity(os.fstat(fd)) != info or frozenset(os.listdir(fd)) != names:
+                raise LocalReceiptSnapshotHold("historical original directory changed")
+        for parent, name, fd, info, raw, limit in files:
+            _named(parent, name, fd, directory=False)
+            current, read_info = _read(parent, name, limit)
+            if (current != raw or _identity(read_info) != info
+                    or _identity(os.fstat(fd)) != info):
+                raise LocalReceiptSnapshotHold("historical original file changed")
+            _named(parent, name, fd, directory=False)
+        _owner(token)
+
+    try:
+        try:
+            directory(owner.root_fd, "admissions", {})
+        except FileNotFoundError:
+            # Only an absent top-level journal may prove an empty history.
+            if "admissions" in os.listdir(owner.root_fd):
+                raise
+            missing.append((owner.root_fd, "admissions"))
+        gen = _directory(owner.root_fd, "generations")
+        fds.append(gen)
+        _named(owner.root_fd, "generations", gen, directory=True)
+        names = frozenset(os.listdir(gen))
+        if any(_GEN.fullmatch(name) is None for name in names):
+            raise LocalReceiptSnapshotHold("historical generation name is unsafe")
+        directories.append((owner.root_fd, "generations", gen, _identity(os.fstat(gen)), names))
+        for name in sorted(names):
+            directory(gen, name, {})
+            file(owner.publication_fd, local._published_name(name, "xlsx"),
+                 local._prepared_limit("xlsx"))
+        directory(owner.root_fd, "settings", {"events": {}, "outbox": {}})
+        verify()
+        yield verify
+        verify()
+    finally:
+        for fd in reversed(fds):
+            os.close(fd)
+
+
+def read_local_receipt_history(
+    token, store, *, expected_template_sha256, settings, whitelist_sha256,
+    qualified_source=None,
+) -> LocalReceiptHistory:
+    """Observe ALL original admitted C6 receipts, including older cycles.
+
+    Not retry eligibility: historical manifests bind the original protected
+    K windows, but old business sources still require independent requalification
+    by a future R2 consumer. Never count these as current-cycle publications,
+    mint a send capability, clear UNKNOWN or reconstruct a caller receipt.
+    """
+    from monitor import issue_tracker_local_commit as local
+
+    failed = False
+    try:
+        with _hold_history_originals(token) as verify:
+            context = dict(expected_template_sha256=expected_template_sha256,
+                           settings=settings, whitelist_sha256=whitelist_sha256,
+                           qualified_source=qualified_source)
+            current = read_current_cycle_local_receipts(token, store, **context)
+            owner = _owner(token)
+            events = _events(owner)
+            originals = []
+            gen = _directory(owner.root_fd, "generations")
+            try:
+                for event in events:
+                    fd = _directory(gen, event["generation_id"])
+                    try:
+                        state = _json(_read(fd, "STATE")[0])
+                        receipt = _json(_read(fd, "RECEIPT")[0])
+                        generation = local.Generation(event["generation_id"],
+                            state["sequence"], state["manifest_id"], token)
+                        observed = local.inspect_local_generation(owner.project,
+                            owner.publication, generation, token=token)
+                        if (observed.status != "RECEIPT-PRESENT-NOT-ELIGIBILITY"
+                                or receipt["manifest_id"] != state["manifest_id"]):
+                            raise LocalReceiptSnapshotHold("historical original recovery refused")
+                        originals.append(HistoricalLocalReceipt(event["generation_id"],
+                            event["cycle_id"], event["published_sha256"], state["manifest_id"]))
+                    finally:
+                        os.close(fd)
+            finally:
+                os.close(gen)
+            if (read_current_cycle_local_receipts(token, store, **context) != current
+                    or _events(_owner(token)) != events):
+                raise LocalReceiptSnapshotHold("historical cycle chain changed during read")
+            verify()
+            result = LocalReceiptHistory("RECEIPT-HISTORY-PRESENT-NOT-ELIGIBILITY", tuple(originals))
+    except Exception:
+        failed = True
+    if failed:
+        raise LocalReceiptSnapshotHold("historical original receipt is unsafe")
+    return result
