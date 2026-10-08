@@ -16,6 +16,7 @@ from monitor import issue_tracker_global_attempt_journal as global_journal
 from monitor import issue_tracker_spreadsheet_owner as ownership
 
 _FOLDER = 'settings-audit-allocation'
+_WITNESS = 'SETTINGS-AUDIT-ALLOCATED'
 _LIMIT = 1024 * 1024
 
 
@@ -99,8 +100,18 @@ def _marker(header, assignments):
         'assignments_sha256': hashlib.sha256(assignments).hexdigest()})
 
 
+def _witness(header, assignments):
+    # Separate from the deletable unit directory: an attempted allocation is
+    # never first use again, even if its final marker/folder disappears.
+    return local._canonical({'schema_version': 1, 'state': 'ALLOCATION-STARTED',
+        'header_sha256': hashlib.sha256(header).hexdigest(),
+        'assignments_sha256': hashlib.sha256(assignments).hexdigest()})
+
+
 def _inspect(parent, folder, header, assignments):
-    if (set(os.listdir(folder)) != {'HEADER', 'ASSIGNMENTS', 'INITIALIZED'}
+    if (journal._read(parent, _WITNESS, 16384) != _witness(header, assignments)
+            or any(name.startswith('.pending-') for name in os.listdir(parent))
+            or set(os.listdir(folder)) != {'HEADER', 'ASSIGNMENTS', 'INITIALIZED'}
             or journal._read(folder, 'HEADER', 16384) != header
             or journal._read(folder, 'ASSIGNMENTS', _LIMIT) != assignments
             or journal._read(folder, 'INITIALIZED', 16384) != _marker(header, assignments)):
@@ -130,7 +141,13 @@ def _observe(writer_token, spreadsheet_token, binding, unit, *, create):
             # Allocation must precede ANY attempt; UNKNOWN never gains audits.
             if global_journal.inspect_global_unit(spreadsheet_token, binding, unit).attempt_count != 0:
                 raise SettingsAuditHold()
-            if _FOLDER in os.listdir(owner.root_fd): raise SettingsAuditHold()
+            names = set(os.listdir(owner.root_fd))
+            if (_FOLDER in names or _WITNESS in names
+                    or any(name.startswith('.pending-') for name in names)):
+                raise SettingsAuditHold()
+            # Witness file+parent barriers BEFORE directory creation; a crash
+            # leaves the witness or unexplained pending file, never adoption.
+            local._write_new(owner.root_fd, _WITNESS, _witness(header, assignments))
             folder = global_journal._create_folder(owner.root_fd, _FOLDER)
             local._write_new(folder, 'HEADER', header)
             local._write_new(folder, 'ASSIGNMENTS', assignments)
@@ -139,7 +156,7 @@ def _observe(writer_token, spreadsheet_token, binding, unit, *, create):
             if global_journal.inspect_global_unit(spreadsheet_token, binding, unit).attempt_count != 0:
                 raise SettingsAuditHold()
             journal._named(owner.root_fd, _FOLDER, folder, directory=True)
-            # ALL six image barriers precede the initialization marker.
+            # ALL eight witness+image barriers precede the unit marker.
             local._write_new(folder, 'INITIALIZED', _marker(header, assignments))
         else:
             folder = local._directory(owner.root_fd, _FOLDER)

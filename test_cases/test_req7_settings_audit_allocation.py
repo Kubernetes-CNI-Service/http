@@ -3,9 +3,12 @@ from contextlib import contextmanager
 from copy import deepcopy
 import hashlib
 import importlib
+from importlib import metadata as distribution_metadata
 import json
 import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -157,6 +160,17 @@ class Req7SettingsAuditAllocationTests(unittest.TestCase):
                 self.module.prepare_settings_audit_allocation(writer, sheet, binding(), value)
             self.assertEqual(before, self.image()); self.assertFalse(self.allocation.exists())
 
+    def test_disappeared_entire_allocation_folder_cannot_be_recreated_at_count_zero(self):
+        value = self.unit()
+        with self.owners() as (writer, sheet):
+            self.prepare(writer, sheet, value)
+            self.allocation.rename(self.root/'preserved-original-allocation')
+            before = self.image()
+            with self.assertRaises(self.module.SettingsAuditHold):
+                self.module.prepare_settings_audit_allocation(writer, sheet, binding(), value)
+            self.assertEqual(before, self.image()); self.assertFalse(self.allocation.exists())
+            self.assertEqual(0, self.global_journal.inspect_global_unit(sheet, binding(), value).attempt_count)
+
     def test_revoked_project_and_spreadsheet_owners_do_not_create_or_repair(self):
         value = self.unit()
         with self.owners() as (writer, sheet):
@@ -195,9 +209,9 @@ class Req7SettingsAuditAllocationTests(unittest.TestCase):
                         self.assertEqual(0, case.global_journal.inspect_global_unit(sheet, binding(), value).attempt_count)
                 finally: case.doCleanups()
 
-    def test_all_six_pre_marker_barrier_failures_leave_unadoptable_evidence(self):
+    def test_all_eight_witness_and_pre_marker_barrier_failures_leave_unadoptable_evidence(self):
         native_fsync = os.fsync
-        for boundary in range(1, 7):
+        for boundary in range(1, 9):
             with self.subTest(boundary=boundary):
                 case = type(self)('test_pending_projection_comes_from_exact_actual_event_and_retains_outbox'); case.setUp()
                 try:
@@ -211,7 +225,12 @@ class Req7SettingsAuditAllocationTests(unittest.TestCase):
                             return native_fsync(fd)
                         with mock.patch.object(case.module.os, 'fsync', side_effect=fsync), self.assertRaises(case.module.SettingsAuditHold):
                             case.module.prepare_settings_audit_allocation(writer, sheet, binding(), value)
-                        self.assertTrue(case.allocation.is_dir()); self.assertFalse((case.allocation/'INITIALIZED').exists())
+                        # Independent physical order: two witness barriers,
+                        # then mkdir parent/folder, then both evidence files.
+                        self.assertEqual(boundary >= 3, case.allocation.is_dir())
+                        self.assertFalse((case.allocation/'INITIALIZED').exists())
+                        self.assertTrue((case.project/'.tracker/SETTINGS-AUDIT-ALLOCATED').exists()
+                            or any(p.name.startswith('.pending-') for p in (case.project/'.tracker').iterdir()))
                         before = case.image()
                         with self.assertRaises(case.module.SettingsAuditHold): case.module.inspect_settings_audit_allocation(writer, sheet, binding(), value)
                         with self.assertRaises(case.module.SettingsAuditHold): case.module.prepare_settings_audit_allocation(writer, sheet, binding(), value)
@@ -243,7 +262,7 @@ class Req7SettingsAuditAllocationTests(unittest.TestCase):
         self.assertTrue(any(required <= set(row['members']) and test in row['tests'] for row in manifest['workflows']))
         self.assertIn('settings-audit-allocation', (ROOT / 'test_cases/REAL_ENVIRONMENT.md').read_text())
 
-    def test_marker_follows_six_image_barriers_and_inspection_sync_failure_holds(self):
+    def test_marker_follows_eight_witness_image_barriers_and_inspection_sync_failure_holds(self):
         value = self.unit(); native_fsync = os.fsync; observed = []
         with self.owners() as (writer, sheet):
             self.global_journal.prepare_global_unit(sheet, binding(), value)
@@ -252,14 +271,66 @@ class Req7SettingsAuditAllocationTests(unittest.TestCase):
                 return native_fsync(fd)
             with mock.patch.object(self.module.os, 'fsync', side_effect=fsync):
                 self.module.prepare_settings_audit_allocation(writer, sheet, binding(), value)
-            self.assertEqual(11, len(observed))
-            self.assertTrue(all('INITIALIZED' not in row for row in observed[:6]))
-            self.assertEqual({'HEADER', 'ASSIGNMENTS'}, observed[5])
+            self.assertEqual(13, len(observed))
+            self.assertTrue(all('INITIALIZED' not in row for row in observed[:8]))
+            self.assertEqual({'HEADER', 'ASSIGNMENTS'}, observed[7])
             before = self.image()
             with mock.patch.object(self.module.os, 'fsync', side_effect=OSError('owned re-sync failure')):
                 with self.assertRaises(self.module.SettingsAuditHold):
                     self.module.inspect_settings_audit_allocation(writer, sheet, binding(), value)
             self.assertEqual(before, self.image())
+
+    def test_missing_corrupt_or_linked_external_witness_never_authorizes_or_repairs(self):
+        for fault in ('missing', 'corrupt', 'alias'):
+            with self.subTest(fault=fault):
+                case = type(self)('test_pending_projection_comes_from_exact_actual_event_and_retains_outbox'); case.setUp()
+                try:
+                    value = case.unit()
+                    with case.owners() as (writer, sheet):
+                        case.prepare(writer, sheet, value)
+                        witness = case.project/'.tracker/SETTINGS-AUDIT-ALLOCATED'
+                        witness.rename(case.root/'preserved-witness')
+                        if fault == 'corrupt': witness.write_bytes(b'foreign'); witness.chmod(0o600)
+                        elif fault == 'alias': witness.symlink_to(case.root/'preserved-witness')
+                        before = case.image()
+                        with self.assertRaises(case.module.SettingsAuditHold):
+                            case.module.inspect_settings_audit_allocation(writer, sheet, binding(), value)
+                        with self.assertRaises(case.module.SettingsAuditHold):
+                            case.module.prepare_settings_audit_allocation(writer, sheet, binding(), value)
+                        self.assertEqual(before, case.image())
+                finally: case.doCleanups()
+
+    def test_real_cold_process_reopens_original_allocated_audit_and_unknown_count(self):
+        value = self.unit()
+        with self.owners() as (writer, sheet):
+            self.prepare(writer, sheet, value)
+            self.global_journal.record_global_attempt_intent(sheet, binding(), value)
+            expected = hashlib.sha256((self.allocation/'ASSIGNMENTS').read_bytes()).hexdigest()
+        before = self.image()
+        # -I must remain isolated. Add ONLY the measured installed PyYAML
+        # distribution root at this owned fixture boundary, not user-site or
+        # a production fallback/installation/interpreter identity assertion.
+        yaml_root = Path(distribution_metadata.distribution('PyYAML').locate_file('')).resolve(strict=True)
+        child = '''import sys, pathlib, hashlib
+sys.path[:0]=[sys.argv[1],sys.argv[1]+"/tools",sys.argv[3]]
+from monitor import issue_tracker_local_commit as local, issue_tracker_settings_audit_allocation as audit
+from monitor import issue_tracker_spreadsheet_owner as owner, issue_tracker_global_attempt_journal as journal
+from test_cases.test_req7_spreadsheet_owner import scoped_fixture, binding
+from test_cases.test_req7_send_unit import inputs, load
+root=pathlib.Path(sys.argv[2]); project=root/"project"
+with local.writer_owner(project, project/"99-output-monitor") as writer, scoped_fixture(root,owner), owner.spreadsheet_owner(binding()) as sheet:
+    args=inputs(); args["audits"]=audit.pending_settings_audits(writer)
+    unit=load().freeze_send_unit(**args)
+    original=audit.inspect_settings_audit_allocation(writer,sheet,binding(),unit)
+    state=journal.inspect_global_unit(sheet,binding(),unit)
+    assert (state.attempt_count,state.outcome)==(1,"UNKNOWN")
+    print(hashlib.sha256(original).hexdigest())
+'''
+        result = subprocess.run([sys.executable, '-I', '-B', '-c', child, str(ROOT), str(self.root), str(yaml_root)],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            cwd=ROOT, timeout=10, env={'LC_ALL': 'C', 'PYTHONPYCACHEPREFIX': '/tmp/http-test-pyc'})
+        self.assertEqual(0, result.returncode, result.stderr.decode('utf-8', 'replace'))
+        self.assertEqual((expected+'\n').encode(), result.stdout); self.assertEqual(before, self.image())
 
 
 if __name__ == '__main__': unittest.main()

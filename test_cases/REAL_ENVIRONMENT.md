@@ -2194,6 +2194,8 @@ ALL 审计行确定唯一 append 窗口（NOOP 无虚构行），精确耗尽可
 - 证据：保存精确 HEAD/tree/dirty、stat/inode/大小/SHA256 与完整前缀／END 的日志，manifest/outcome/action/wire 摘要、实际发送业务子集、全部审计 ID、真实 attempt 计数、History 完整行数与类型化摘要；不公开凭据、token、nonce 原文或目标表内容。本地真实 cell encoder → composer → C-6 owner/journal workflow 只证明不可变组合及六次意图，**不证明真实发送上界或 COMPLETE**。
 - 故障注入与清理：owner 批准副本内验证掉线、部分响应、重复 ID、位移和重启，原断言不弱化；未知时保留锁、journal 和预留，不回收永久栅，不擅自删除远端 History／marker；仅退役一次性副本需 owner 另行指令。库本身无网络、重试、安装、清理或解锁入口。
 
+- C25 分配留存的外部见证补充（**NOT RUN**）：实际项目 `.tracker/SETTINGS-AUDIT-ALLOCATED` 的 file/parent barriers 必须先于分配目录创建。分配目录整体丢失、见证被移走／篡改／链接或根目录出现未解释 pending 均 HOLD；不能把它们解释为首用、清理或重建许可。保留外部见证、原目录及所有 partial 原像，不恢复／覆盖真实原件。本地独立删除和逐 barrier 故障注入不代表现场抗删除或发布证明。
+
 ## TC-REAL-REQ7-METADATA-CAPACITY-001 — 永久栅与可见容量的保守核算
 
 

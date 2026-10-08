@@ -864,10 +864,15 @@ Python 3.9/3.10 EOL 警告以固定 tag 保留并由父进程重新发出，不�
 最高 current、INITIALIZED 和逐事件 outbox 投影导出审计行；调用方不能伪造队列、
 revision、时间或内容。双 owner 下把真实非空单元的原始审计固定到项目
 `.tracker/settings-audit-allocation`，全部 image barriers 后才创建 INITIALIZED，
+根目录的外部 `SETTINGS-AUDIT-ALLOCATED` 见证先于分配目录创建并持久化；
+目录整体丢失、见证缺失／损坏／链接或未解释 pending 文件均 HOLD，不当作首用重建。
 拒绝迟于第一次尝试的分配或 partial journal 回填。真实 C5/C6/原始业务 workflow
 在每次计数前后复核实际分配，后失败保留 UNKNOWN 和计数；新 K 事件不改旧 wire，
 全 NOOP/audit-only 不分配也不消费 outbox。当前为保守单单元留存，不提供
 COMPLETE、DELIVERED、outbox 清理或后续单元回收，不能冒称 REQ7 整体完成。
+原分配／UNKNOWN 的实际冷进程回读保留 `-I -B`；本机隔离 fixture 仅在测试启动
+边界注入实测 PyYAML distribution root，不注入整个 user-site，不提供生产依赖
+fallback，也不把该本地回读当作容器解释器、SDK 或真机资格证明。
 `test_req7_sheets_read_plan` / `test_req7_sheets_read_decode` 与
 `test_req7_online_whitelist_read` 固定精确列／坐标、十四表身份、四张 row-2 多行字面表头
 和完整有限 Whitelist；非原子 GET 不构成 enrollment、发送许可或完整格式快照。
