@@ -2140,6 +2140,15 @@ pread，检查 mode/uid/nlink/大小和前后身份，原一致性不重编译�
 不是现场或生产固定 launcher 的发送准入证明。部署还须验证实际 Linux/SDK/CA
 身份、orphan 继承和 shared cadence/新鲜准入；本卡继续 NOT RUN。
 
+## TC-REAL-REQ7-COUNTED-MUTATION-LAUNCHER-001 — 原次数固定子进程监督
+
+- Case ID：`TC-REAL-REQ7-COUNTED-MUTATION-LAUNCHER-001`；类型：native / durable / integration；对应 C-6/C-14/C-19。状态：**NOT RUN / REAL_ENV REQUIRED**。涉及 `monitor/issue_tracker_mutation_launcher.py`、global attempt journal、local commit、spreadsheet owner、send unit/intent、TLS 和 attempt supervision。
+- 风险与目标：原 CLAIM context 的当前 process-local 对象只能启动一次固定子进程；复制、失效、启动错误不能恢复；实际原 ACTION/WIRE、双锁 FD 继承，凭据仅 bounded stdin，不以调用者 FD/hash tuple 冒充发行证据。原次数不重置，任何不确定结果保持 UNKNOWN。
+- 前置条件：owner 精确 Stage O/部署授权、可信受审固定 worker 与部署 Python/SSL/CA/SDK、实际 root 单链接私有原像与锁。新鲜 protected sources/config/W1/template/continuity、shared cadence、G1 全配额和 recovery 必须另在启动器之前闭合；本卡/私有启动器不代替这些门禁，不授权真实联网或 root 写者。
+- 步骤与独立预期：验证固定 program/cwd/剥离环境与 ≤32 KiB private input；每个原次数的 durable CLAIM 与实际一次 native request 关联，六次耗尽拒绝第七次；401/3xx/429/5xx、startup/error/slow DNS/TLS/body 不刷新重发。实际 60 秒单调 TOTAL 包括 Popen 到终止及后置检查；无法确认 child/group 结束保持 HOLD，sheet lock 的继承存活不受父失效解除；原映射/次数/策略漂移拒绝。
+- 证据：精确 HEAD/tree/dirty、manifest/ledger、命令/Python/平台、完整日志 END 与退出码、前后 stat/inode/大小/SHA256；私有输入无泄漏、真实一次请求/原字节哈希/CLAIM 链、60 秒阶段和确证终止、双 owner FD 与遗留 child 的排斥。成功 ACK 不证明 APPLIED，单项/本地假服务不冒充普通 full proof、整个 REQ7 或真实部署。
+- 故障注入与清理：仅经授权的隔离真实服务副本、全量 Stage O 见证；本地只清理自有临时 children/groups/fixtures，不删除锁、原 journal/CLAIM/reservation，不解除 UNKNOWN，不重置次数，不向其他树回流。真实 Linux/生产 orphan/断电和在线 activation 未执行，保持 NOT RUN。
+
 ## TC-REAL-REQ7-SPREADSHEET-OWNER-001 — 跨项目持久 OS 锁与继承 FD
 
 - Case ID：`TC-REAL-REQ7-SPREADSHEET-OWNER-001`；类型：native / integration；对应 C-6/C-14/C-19。状态：**NOT RUN / REAL_ENV REQUIRED**。涉及 `monitor/issue_tracker_spreadsheet_owner.py`、`monitor/issue_tracker_local_commit.py`、`monitor/issue_tracker_send_intent.py`；本地合成 root 元数据、原生 flock／独立进程／继承 FD 与实际 C-6/action journal 不证明部署身份或整个 REQ7。

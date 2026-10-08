@@ -1174,6 +1174,17 @@ FD 不关闭。真实冷进程、失败注入及原像逐字节不变覆盖实�
 程序/DNS/CA 重定向仅存在 test-owned fixture，尚不能冒充生产固定 launcher、
 shared cadence 或新鲜发送准入闭合；REQ7 整体仍未完成，现场 NOT RUN。
 
+`test_cases.test_req7_mutation_launcher` 验证未安装的私有固定启动器：只有实际
+双 owner 下原 CLAIM context 发出的当前对象可消费，dataclass 复制、context
+失效、重复调用及启动失败不能再 Popen。固定 `-I -B` 子进程／cwd／剥离环境，
+凭据只用 ≤32 KiB 私有 stdin；原 ACTION/WIRE 与两把锁按 FD 继承，不允许
+URL／程序／CA／body／PID／budget 覆盖。完整响应须精确关联 nonce、原次数和
+wire digest；未知、超时或 401/503 不刷新、不重发、不清 UNKNOWN。
+原 60 秒 TOTAL 包含启动、输入、DNS/TLS/body 和终止；未确证终止显式 HOLD。
+真实自有 TLS 流程覆盖单次领取、六个原次数最多六个同字节请求及慢 body 终止。
+这个库仍未接在线 worker，新鲜 protected source/continuity、shared cadence、
+G1 隐藏 quota、older-cycle R2、FIFO 和 COMPLETE 仍须整链集成；不是功能 GO。
+
 `record_original_business_reserved_attempt_intent` 进一步在每次计数前后重开整个
 原始业务 journal（完整家族 manifest、全部发现／占用／精确行，含 NOOP），
 与原 enrollment、History 行预算、metadata 及适用 BOTH Cabling NV 一同核对。

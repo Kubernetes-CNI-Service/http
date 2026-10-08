@@ -12,11 +12,16 @@ from dataclasses import dataclass, field
 import hashlib
 import json
 import os
+import threading
+import weakref
 
 from monitor import issue_tracker_local_commit as local
 from monitor import issue_tracker_attempt_journal as journal
 from monitor import issue_tracker_spreadsheet_owner as ownership
 from monitor import issue_tracker_send_intent as compiled
+
+_LIVE_WIRE_CLAIMS = weakref.WeakKeyDictionary()
+_WIRE_CLAIM_GUARD = threading.Lock()
 
 
 class GlobalAttemptHold(ValueError):
@@ -31,13 +36,38 @@ class GlobalIntentObservation:
     outcome: str
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True,eq=False)
 class CountedOriginalWireObservation:
     """Borrowed CLOEXEC read-only FD, NOT fresh admission or a send permit."""
     attempt_count: int
     wire_sha256: str
     fd: int = field(repr=False)
     action_fd: int = field(repr=False)
+
+
+def _require_original_wire_launch(writer_token,token,binding,unit,image,*,consume):
+    """Original active object only; a coherent/copyable FD tuple is not issued.
+
+    Consume before Popen, including startup/final validation failure. Durable
+    CLAIM already forbids cold reuse. This adds no fresh cadence/quota authority.
+    """
+    failed = False
+    try:
+        if type(image) is not CountedOriginalWireObservation: raise GlobalAttemptHold()
+        with _WIRE_CLAIM_GUARD:
+            issued = _LIVE_WIRE_CLAIMS.get(image)
+            if issued is None: raise GlobalAttemptHold()
+            writer,owner,target,original,wire,action,count,verify,used = issued
+            if (writer is not writer_token or owner is not token or target != binding or original is not unit
+                    or type(image.fd) is not int or image.fd != wire
+                    or type(image.action_fd) is not int or image.action_fd != action
+                    or type(image.attempt_count) is not int or image.attempt_count != count
+                    or image.wire_sha256 != unit.wire_sha256
+                    or (consume and used) or (not consume and not used)): raise GlobalAttemptHold()
+            if consume: _LIVE_WIRE_CLAIMS[image] = issued[:-1]+(True,)
+        verify()
+    except Exception: failed = True
+    if failed: raise GlobalAttemptHold()
 
 
 def _inspect_wire_claims(claims, original, unit, header):
@@ -69,7 +99,7 @@ def _hold_counted_original_wire(writer_token,token,binding,unit):
     close/modify it. A caller/post-check failure retains consumed UNKNOWN.
     Real fresh admission, shared cadence and quota must dominate any launcher.
     """
-    original = claims = wire = action = None; wire_identity = action_identity = None; failed = False
+    original = claims = wire = action = image = None; wire_identity = action_identity = None; failed = False
     try:
         project = local._owner(writer_token)
         owner,parent,name,base = _inputs(token,binding,unit)
@@ -119,8 +149,8 @@ def _hold_counted_original_wire(writer_token,token,binding,unit):
         if (local._owner(writer_token) is not project or ownership._validated_owner(token,binding) is not owner
                 or journal._identity(os.fstat(wire)) != wire_identity
                 or journal._identity(os.fstat(action)) != action_identity): raise GlobalAttemptHold()
-        yield CountedOriginalWireObservation(count,unit.wire_sha256,wire,action)
-        if (_inspect(original,unit,base)[0] != count
+        def verify():
+            if (_inspect(original,unit,base)[0] != count
                 or _inspect_wire_claims(claims,original,unit,header)[0] != count
                 or tuple(sorted(os.listdir(claims))) != names
                 or tuple(journal._identity(os.stat(item,dir_fd=claims,follow_symlinks=False)) for item in names) != identities
@@ -129,13 +159,21 @@ def _hold_counted_original_wire(writer_token,token,binding,unit):
                 or os.pread(action,1024*1024+1,0) != unit.action_preimage
                 or journal._identity(os.fstat(action)) != action_identity
                 or local._owner(writer_token) is not project or ownership._validated_owner(token,binding) is not owner):
-            raise GlobalAttemptHold()
-        journal._named(original,'WIRE',wire,directory=False)
-        journal._named(original,'ACTION-PREIMAGE',action,directory=False)
-        journal._named(parent,name,original,directory=True)
-        journal._named(parent,claim_name,claims,directory=True)
+                raise GlobalAttemptHold()
+            journal._named(original,'WIRE',wire,directory=False)
+            journal._named(original,'ACTION-PREIMAGE',action,directory=False)
+            journal._named(parent,name,original,directory=True)
+            journal._named(parent,claim_name,claims,directory=True)
+        verify()
+        image = CountedOriginalWireObservation(count,unit.wire_sha256,wire,action)
+        with _WIRE_CLAIM_GUARD:
+            _LIVE_WIRE_CLAIMS[image] = (writer_token,token,binding,unit,wire,action,count,verify,False)
+        yield image
+        verify()
     except Exception: failed = True
     finally:
+        if image is not None:
+            with _WIRE_CLAIM_GUARD: _LIVE_WIRE_CLAIMS.pop(image,None)
         for held,identity in ((wire,wire_identity),(action,action_identity)):
             if held is None: continue
             try:
