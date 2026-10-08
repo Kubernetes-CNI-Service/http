@@ -4979,6 +4979,18 @@ finally:
     def test_real_setup_committed_q_kill_cold_original_a_cli_health_keeps_original_wal(self):
         self._real_setup_committed_q_group_restore(prefix=True, a_health="cli")
 
+    def test_real_setup_committed_q_kill_cold_original_a_archives_plan_and_wal(self):
+        self._real_setup_committed_q_group_restore(prefix=True, a_health="retire")
+
+    def test_real_setup_committed_q_kill_cold_a_retirement_cli_archives_original_inodes(self):
+        self._real_setup_committed_q_group_restore(prefix=True, a_health="retire-cli")
+
+    def test_real_setup_a_archive_rename_death_cold_repeats_health_and_retains_inodes(self):
+        self._real_setup_committed_q_group_restore(prefix=True, a_health="retire-death")
+
+    def test_real_setup_a_archive_rename_death_cold_http_failure_keeps_fence(self):
+        self._real_setup_committed_q_group_restore(prefix=True, a_health="retire-death-http-failure")
+
     def test_real_setup_committed_q_dhcp_group_cold_restore_keeps_original_four_file_evidence(self):
         self._real_setup_committed_q_group_restore(dhcp=True)
 
@@ -5437,6 +5449,18 @@ try:
         guard['runtime_backend'] = backend
         load.active_managed_services = genuine_active
         failure = sys.argv[5] == 'reader-a-health-http-failure'
+        if sys.argv[5] == 'reader-a-health-retire-death':
+            real_probe, real_sync = load.verify_http_publication, load._fsync_parent_directory
+            def witnessed_health(*args, **kwargs):
+                real_probe(*args, **kwargs)
+                with (root / 'a-retirement-health-witness').open('a') as witness:
+                    witness.write(str(os.getpid()) + '\n'); witness.flush(); os.fsync(witness.fileno())
+            def die_after_original_wal_rename(path):
+                real_sync(path)
+                if (root / 'ztp/.setup-switch-retirement.json').exists() and list(journal.parent.glob('.setup-switch-a-retired-*/journal.json')):
+                    os.kill(os.getpid(), signal.SIGKILL)
+            load.verify_http_publication = witnessed_health
+            load._fsync_parent_directory = die_after_original_wal_rename
         with private_a_health_ports(load, root, http_status=503 if failure else None) as commands, \
                 mock.patch.object(load, 'runtime_os', return_value='Linux'):
             if failure:
@@ -5451,20 +5475,38 @@ try:
                                    ('stop', 'isc-dhcp-server'), ('stop', 'apache2')], actions
                 print('R22_ORIGINAL_A_HTTP_FAILURE_OWNED_STOP_WAL_RETAINED')
             else:
-                if sys.argv[5] == 'reader-a-health-cli':
+                if sys.argv[5] in ('reader-a-health-cli', 'reader-a-health-retire-cli'):
                     load.release_deployment_lock(fd)
                     fd = None  # main must acquire its own real exclusive lock.
                     with mock.patch.object(load, 'service_runtime_backend', return_value=backend):
-                        assert load.main([str(q), '--host-role', 'management-server', '--activate-setup-a']) == 0
+                        flag = '--retire-setup-a' if sys.argv[5] == 'reader-a-health-retire-cli' else '--activate-setup-a'
+                        assert load.main([str(q), '--host-role', 'management-server', flag]) == 0
                 else:
-                    status = load.activate_setup_switch_a_publication(q, guard=guard, confirmed=True)
-                    assert status == 'a-health-passed-wal-retained', status
+                    status = load.activate_setup_switch_a_publication(q, guard=guard, confirmed=True,
+                        retire=sys.argv[5] in ('reader-a-health-retire', 'reader-a-health-retire-death'))
+                    assert status == ('a-health-passed-evidence-archived' if sys.argv[5] in ('reader-a-health-retire', 'reader-a-health-retire-death')
+                                      else 'a-health-passed-wal-retained'), status
                 assert actions == [('start', 'apache2'), ('start', 'isc-dhcp-server')], actions
                 assert active == {'apache2', 'isc-dhcp-server'}
                 print('R22_ORIGINAL_A_EXPLICIT_HEALTH_WAL_RETAINED')
             assert any(argv[0] == 'curl' for argv in commands), commands
-        assert frozen == (journal.lstat().st_ino, journal.read_bytes())
-        assert frozen_plan == (plan.lstat().st_ino, plan.read_bytes())
+        if sys.argv[5] in ('reader-a-health-retire', 'reader-a-health-retire-cli'):
+            import stat
+            archives = list(journal.parent.glob('.setup-switch-a-retired-*'))
+            assert len(archives) == 1
+            archive = archives[0]
+            assert stat.S_IMODE(archive.lstat().st_mode) == 0o700
+            assert set(os.listdir(archive)) == {'journal.json', 'a-restore.json', 'retirement.json'}
+            assert frozen == ((archive / 'journal.json').lstat().st_ino, (archive / 'journal.json').read_bytes())
+            assert frozen_plan == ((archive / 'a-restore.json').lstat().st_ino, (archive / 'a-restore.json').read_bytes())
+            assert json.loads((archive / 'retirement.json').read_bytes())['role'] == 'A'
+            assert not os.path.lexists(journal) and not os.path.lexists(plan)
+            assert not os.path.lexists(load._setup_switch_retirement_path())
+            load.require_no_pending_setup_switch_journal()
+            print('R22_ORIGINAL_A_PLAN_WAL_ARCHIVED_WITH_ROLE')
+        else:
+            assert frozen == (journal.lstat().st_ino, journal.read_bytes())
+            assert frozen_plan == (plan.lstat().st_ino, plan.read_bytes())
     if sys.argv[5] == 'reader-a-image':
         import json
         body = json.loads((root / 'ztp/.setup-switch-journal.json').read_bytes())['body']
@@ -5604,10 +5646,98 @@ finally:
                     self.assertEqual(original_p_target, os.readlink(common))
                 marker = journal.parent / ".setup-switch-a-restore.json"
                 before_reader_plan = (marker.lstat().st_ino, marker.read_bytes())
-            reader_mode = ("reader-plan-fsync-aba" if plan_fsync_aba else "reader-a-health-http-failure" if a_health == "http-failure" else "reader-a-health-cli" if a_health == "cli" else "reader-a-health"
+            reader_mode = ("reader-plan-fsync-aba" if plan_fsync_aba else "reader-a-health-retire-death" if str(a_health).startswith('retire-death') else "reader-a-health-retire-cli" if a_health == "retire-cli" else "reader-a-health-retire" if a_health == "retire" else "reader-a-health-http-failure" if a_health == "http-failure" else "reader-a-health-cli" if a_health == "cli" else "reader-a-health"
                            if a_health else "reader-a-image" if a_image else "reader-dhcp-metadata" if dhcp_metadata else "reader")
             reader = subprocess.run(argv + [reader_mode, shape], capture_output=True, text=True, check=False,
                                     timeout=120 if a_health else 30)
+            if str(a_health).startswith('retire-death'):
+                self.assertEqual(-signal.SIGKILL, reader.returncode, reader.stdout + reader.stderr)
+                retirement = journal.parent / '.setup-switch-retirement.json'
+                original_marker = (retirement.lstat().st_ino, retirement.read_bytes())
+                archive = Path(json.loads(retirement.read_bytes())['archive']['path'])
+                self.assertEqual(original_wal, ((archive / 'journal.json').lstat().st_ino,
+                                               (archive / 'journal.json').read_bytes()))
+                self.assertFalse(os.path.lexists(journal))
+                plan_path = journal.parent / '.setup-switch-a-restore.json'
+                frozen_plan = (plan_path.lstat().st_ino, plan_path.read_bytes())
+                first_health = (root / 'a-retirement-health-witness').read_text().splitlines()
+                self.assertEqual(1, len(first_health))
+                retry = r'''
+import json, os, sys
+from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
+root, q, test_root = map(Path, sys.argv[1:4])
+sys.path.insert(0, str(test_root))
+from test_cases.module_loader import load_script
+from test_cases.test_load_release_transaction import private_a_health_ports
+api = load_script('fresh_a_retirement_retry', root / 'DAY0-Prepare/11-load.py')
+active, actions = set(), []
+def start(name): active.add(name); actions.append(('start', name))
+def stop(name): active.discard(name); actions.append(('stop', name))
+backend = SimpleNamespace(name='supervisor', is_active=lambda name: name in active, start=start, stop=stop)
+fd = api.acquire_deployment_lock(exclusive=True)
+guard = dict(deployment_lock_descriptor=fd, services_quiesced=True, runtime_backend=backend)
+failure = sys.argv[4] == 'failure'
+try:
+    real_probe = api.verify_http_publication
+    def fresh_probe(*args, **kwargs):
+        real_probe(*args, **kwargs)
+        with (root / 'a-retirement-health-witness').open('a') as witness:
+            witness.write(str(os.getpid()) + '\n'); witness.flush(); os.fsync(witness.fileno())
+    api.verify_http_publication = fresh_probe
+    with private_a_health_ports(api, root, http_status=503 if failure else None), mock.patch.object(api, 'runtime_os', return_value='Linux'):
+        api.release_deployment_lock(fd)
+        fd = None  # The public resume CLI must acquire its own exclusive lock.
+        try:
+            with mock.patch.object(api, 'service_runtime_backend', return_value=backend):
+                result = api.main([str(q), '--host-role', 'management-server', '--resume-setup-a-retirement'])
+            if failure:
+                assert result == 1, result
+                assert active == set() and actions == [('start', 'apache2'), ('start', 'isc-dhcp-server'),
+                                                      ('stop', 'isc-dhcp-server'), ('stop', 'apache2')], actions
+                print('R22_A_ARCHIVE_COLD_HTTP_FAILURE_FENCE_RETAINED')
+            else:
+                assert result == 0, result
+        except api.LoadError as exc:
+            assert failure and 'private original A HTTP probe failed' in str(exc), str(exc)
+            assert active == set() and actions == [('start', 'apache2'), ('start', 'isc-dhcp-server'),
+                                                  ('stop', 'isc-dhcp-server'), ('stop', 'apache2')], actions
+            print('R22_A_ARCHIVE_COLD_HTTP_FAILURE_FENCE_RETAINED')
+        else:
+            if not failure:
+                assert active == {'apache2', 'isc-dhcp-server'}
+                assert actions == [('start', 'apache2'), ('start', 'isc-dhcp-server')], actions
+                api.require_no_pending_setup_switch_journal()
+                print('R22_A_ARCHIVE_NEW_PROCESS_FRESH_HEALTH')
+finally:
+    if fd is not None:
+        api.release_deployment_lock(fd)
+'''
+                retried = subprocess.run([sys.executable, '-B', '-c', retry, str(root), str(q), str(ROOT),
+                    'failure' if a_health.endswith('http-failure') else 'success'], cwd=root,
+                    capture_output=True, text=True, check=False, timeout=120)
+                self.assertEqual(0, retried.returncode, retried.stdout + retried.stderr)
+                self.assertEqual(original_wal, ((archive / 'journal.json').lstat().st_ino,
+                                               (archive / 'journal.json').read_bytes()))
+                if a_health.endswith('http-failure'):
+                    self.assertIn('R22_A_ARCHIVE_COLD_HTTP_FAILURE_FENCE_RETAINED', retried.stdout)
+                    self.assertIn('private original A HTTP probe failed', retried.stderr)
+                    self.assertIn('[HOLD]', retried.stderr)
+                    self.assertEqual(original_marker, (retirement.lstat().st_ino, retirement.read_bytes()))
+                    self.assertEqual(frozen_plan, (plan_path.lstat().st_ino, plan_path.read_bytes()))
+                    self.assertEqual(first_health, (root / 'a-retirement-health-witness').read_text().splitlines())
+                else:
+                    self.assertIn('R22_A_ARCHIVE_NEW_PROCESS_FRESH_HEALTH', retried.stdout)
+                    witnesses = (root / 'a-retirement-health-witness').read_text().splitlines()
+                    self.assertEqual(2, len(witnesses)); self.assertNotEqual(witnesses[0], witnesses[1])
+                    self.assertEqual(frozen_plan, ((archive / 'a-restore.json').lstat().st_ino,
+                                                  (archive / 'a-restore.json').read_bytes()))
+                    self.assertFalse(os.path.lexists(retirement)); self.assertFalse(os.path.lexists(plan_path))
+                self.assertEqual(context.setup_state.manifest, state[7].read_bytes())
+                self.assertEqual(original_a_links, {path: (path.lstat().st_ino, path.lstat().st_ctime_ns, os.readlink(path))
+                                                    for path in original_a_links})
+                return
             self.assertEqual(0, reader.returncode, reader.stdout + reader.stderr)
             if plan_fsync_aba:
                 self.assertIn("R22_A_PLAN_FSYNC_ABA_HELD_BEFORE_RESTORE", reader.stdout)
@@ -5631,6 +5761,8 @@ finally:
                     self.assertEqual(own_key, (leaf.with_name("laptop.pub").lstat().st_ino,
                                               os.readlink(leaf.with_name("laptop.pub"))))
             marker = journal.parent / ".setup-switch-a-restore.json"
+            if a_health in ("retire", "retire-cli"):
+                marker = next(journal.parent.glob('.setup-switch-a-retired-*')) / 'a-restore.json'
             original_plan = (marker.lstat().st_ino, marker.read_bytes())
             if managed_key_fault:
                 leaf = root / "ztp/config/publickey/laptop.pub"
@@ -5668,7 +5800,15 @@ finally:
             if a_health:
                 self.assertIn("R22_ORIGINAL_A_HTTP_FAILURE_OWNED_STOP_WAL_RETAINED" if a_health == "http-failure"
                               else "R22_ORIGINAL_A_EXPLICIT_HEALTH_WAL_RETAINED", reader.stdout)
-                self.assertEqual(original_wal, (journal.lstat().st_ino, journal.read_bytes()))
+                if a_health in ("retire", "retire-cli"):
+                    self.assertIn("R22_ORIGINAL_A_PLAN_WAL_ARCHIVED_WITH_ROLE", reader.stdout)
+                    self.assertFalse(os.path.lexists(journal))
+                    archives = list(journal.parent.glob('.setup-switch-a-retired-*'))
+                    self.assertEqual(1, len(archives))
+                    self.assertEqual(original_wal, ((archives[0] / 'journal.json').lstat().st_ino,
+                                                   (archives[0] / 'journal.json').read_bytes()))
+                else:
+                    self.assertEqual(original_wal, (journal.lstat().st_ino, journal.read_bytes()))
                 self.assertEqual(original_a_links, {path: (path.lstat().st_ino, path.lstat().st_ctime_ns, os.readlink(path))
                                                     for path in original_a_links})
                 return

@@ -1093,7 +1093,7 @@ def private_a_health_ports(api, root, *, http_status=None):
     HTTP probes reach a real local server, never the declared external IP.
     """
     root = root.resolve()
-    ports = root / "private-a-health-ports"; ports.mkdir()
+    ports = Path(tempfile.mkdtemp(prefix="private-a-health-ports-", dir=root))
     helper = ports / "control-auth.py"
     helper.write_bytes((ROOT / "tools/control-auth.py").read_bytes())
     boundary = ports / "apache-ztp.conf"
@@ -1154,6 +1154,143 @@ class ReleaseTransactionTests(unittest.TestCase):
         def stop(name): active.discard(name); actions.append(("stop", name))
         backend = SimpleNamespace(name="supervisor", is_active=lambda name: name in active, start=start, stop=stop)
         return state, context, {**guard, "runtime_backend": backend}, active, actions
+
+    def test_a_explicit_retirement_archives_original_plan_wal_with_a_role(self):
+        state, _context, guard, active, actions = self._restored_a_activation_fixture()
+        journal, plan = state[-3], LOAD._setup_switch_a_restore_path()
+        before = {path.name: (path.lstat().st_ino, path.read_bytes()) for path in (journal, plan)}
+        with private_a_health_ports(LOAD, self.root), mock.patch.object(LOAD, 'runtime_os', return_value='Linux'):
+            status = LOAD.activate_setup_switch_a_publication(state[1], guard=guard, confirmed=True, retire=True)
+        self.assertEqual('a-health-passed-evidence-archived', status)
+        self.assertEqual([('start', 'apache2'), ('start', 'isc-dhcp-server')], actions)
+        self.assertEqual({'apache2', 'isc-dhcp-server'}, active)
+        self.assertFalse(os.path.lexists(journal))
+        self.assertFalse(os.path.lexists(plan))
+        self.assertFalse(os.path.lexists(LOAD._setup_switch_retirement_path()))
+        archives = list(journal.parent.glob('.setup-switch-a-retired-*'))
+        self.assertEqual(1, len(archives))
+        archive = archives[0]
+        self.assertEqual(0o700, stat.S_IMODE(archive.lstat().st_mode))
+        self.assertEqual({'journal.json', 'a-restore.json', 'retirement.json'}, set(os.listdir(archive)))
+        for old, new in ((journal, archive / 'journal.json'), (plan, archive / 'a-restore.json')):
+            self.assertEqual(before[old.name], (new.lstat().st_ino, new.read_bytes()))
+        marker = json.loads((archive / 'retirement.json').read_bytes())
+        self.assertEqual('A', marker['role'])
+        self.assertEqual(2, marker['schema_version'])
+        self.assertEqual(str(journal), marker['journal']['path'])
+        self.assertEqual(str(plan), marker['plan']['path'])
+        LOAD.require_no_pending_setup_switch_journal()
+        # A later unrelated incident may legitimately reuse the live names;
+        # historical, completed evidence must not bind those new objects.
+        journal.write_bytes(b'independent later incident WAL\n')
+        journal.chmod(0o600)
+        plan.write_bytes(b'independent later incident plan\n')
+        plan.chmod(0o600)
+        LOAD._require_completed_setup_switch_a_archives()
+        with self.assertRaises(LOAD.LoadError):
+            LOAD.require_no_pending_setup_switch_journal()
+        for old, new in ((journal, archive / 'journal.json'), (plan, archive / 'a-restore.json')):
+            self.assertEqual(before[old.name], (new.lstat().st_ino, new.read_bytes()))
+
+    def test_a_retirement_pending_marker_and_archived_owner_mutants_hold_before_health(self):
+        state, _context, guard, active, actions = self._restored_a_activation_fixture()
+        journal, plan = state[-3], LOAD._setup_switch_a_restore_path()
+        original_wal, original_plan = journal.read_bytes(), plan.read_bytes()
+        marker = LOAD._setup_switch_retirement_path()
+        real_sync = LOAD._fsync_parent_directory
+        def interrupt(path):
+            real_sync(path)
+            if marker.exists() and list(journal.parent.glob('.setup-switch-a-retired-*/journal.json')):
+                raise OSError('independent A archive rename interruption')
+        with private_a_health_ports(LOAD, self.root), mock.patch.object(LOAD, 'runtime_os', return_value='Linux'), \
+                mock.patch.object(LOAD, '_fsync_parent_directory', side_effect=interrupt):
+            with self.assertRaisesRegex(LOAD.LoadError, 'HOLD.*independent A archive rename interruption') as caught:
+                LOAD.activate_setup_switch_a_publication(state[1], guard=guard, confirmed=True, retire=True)
+        cause = caught.exception
+        while cause.__cause__ is not None:
+            cause = cause.__cause__
+        self.assertIsInstance(cause, OSError)
+        self.assertEqual('independent A archive rename interruption', str(cause))
+        self.assertEqual(set(), active)
+        self.assertEqual([('start', 'apache2'), ('start', 'isc-dhcp-server'),
+                          ('stop', 'isc-dhcp-server'), ('stop', 'apache2')], actions)
+        archive = next(journal.parent.glob('.setup-switch-a-retired-*'))
+        self.assertEqual(original_wal, (archive / 'journal.json').read_bytes())
+        self.assertEqual(original_plan, plan.read_bytes())
+        marker_payload = marker.read_bytes()
+        with LOAD._open_setup_switch_a_retirement() as retirement:
+            with LOAD._setup_switch_a_compensation_authority(state[1], guard=guard, confirmed=True,
+                    restore_publication=False, _retirement=retirement) as readonly:
+                for name in ('restore_runtime_leaf', 'restore_setup_leaf', 'restore_dhcp_leaf'):
+                    with self.assertRaisesRegex(LOAD.LoadError, 'read-only.*HOLD'):
+                        readonly[name](plan, None, None)
+                readonly['require']()
+            with self.assertRaisesRegex(LOAD.LoadError, 'read-only.*HOLD'):
+                with LOAD._setup_switch_a_compensation_authority(state[1], guard=guard, confirmed=True,
+                        restore_publication=True, _retirement=retirement):
+                    self.fail('archive inspection granted restoration')
+        for fault in ('role', 'boolean-schema', 'unknown', 'marker-inode', 'wal-inode',
+                      'directory-mode', 'unknown-object'):
+            with self.subTest(fault=fault):
+                held = None
+                if fault in ('role', 'boolean-schema', 'unknown'):
+                    body = json.loads(marker_payload)
+                    if fault == 'role': body['role'] = 'B'
+                    elif fault == 'boolean-schema': body['schema_version'] = True
+                    else: body['adopt_current'] = True
+                    marker.write_bytes(json.dumps(body).encode()); marker.chmod(0o600)
+                elif fault in ('marker-inode', 'wal-inode'):
+                    path = marker if fault == 'marker-inode' else archive / 'journal.json'
+                    held = self.root / ('independent-held-' + fault)
+                    metadata, payload = path.lstat(), path.read_bytes()
+                    path.rename(held); path.write_bytes(payload); path.chmod(0o600)
+                    os.utime(path, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
+                elif fault == 'directory-mode': archive.chmod(0o755)
+                else: (archive / 'independent-foreign-object').write_bytes(b'not registered\n')
+                frozen = (marker.read_bytes(), (archive / 'journal.json').read_bytes(), plan.read_bytes(), tuple(actions))
+                with mock.patch.object(LOAD, 'runtime_os', return_value='Linux'), \
+                        mock.patch.object(LOAD, 'preflight_services', side_effect=AssertionError('unqualified A archive entered health')):
+                    reason = ('marker owner.*HOLD' if fault == 'marker-inode' else
+                              'artifact owner/bytes.*HOLD' if fault == 'wal-inode' else 'HOLD')
+                    with self.assertRaisesRegex(LOAD.LoadError, reason):
+                        LOAD.resume_setup_switch_a_retirement(state[1], guard=guard, confirmed=True)
+                self.assertEqual(frozen, (marker.read_bytes(), (archive / 'journal.json').read_bytes(), plan.read_bytes(), tuple(actions)))
+                if held is not None:
+                    path.unlink(); held.rename(path)
+                elif fault == 'directory-mode': archive.chmod(0o700)
+                elif fault == 'unknown-object': (archive / 'independent-foreign-object').unlink()
+                else: marker.write_bytes(marker_payload); marker.chmod(0o600)
+        self.assertEqual(set(), active)
+        self.assertEqual(original_wal, (archive / 'journal.json').read_bytes())
+        self.assertEqual(original_plan, plan.read_bytes())
+        with self.assertRaises(LOAD.LoadError): LOAD.require_no_pending_setup_switch_journal()
+
+    def test_a_retirement_marker_fsync_aba_holds_before_any_evidence_rename(self):
+        state, _context, guard, active, actions = self._restored_a_activation_fixture()
+        journal, plan = state[-3], LOAD._setup_switch_a_restore_path()
+        original = {path: (path.lstat().st_ino, path.read_bytes()) for path in (journal, plan)}
+        marker = LOAD._setup_switch_retirement_path()
+        real_sync, injected = LOAD.os.fsync, []
+        def aba(fd):
+            real_sync(fd)
+            if not injected and marker.exists() and os.fstat(fd).st_ino == marker.lstat().st_ino:
+                before, payload = marker.lstat(), marker.read_bytes()
+                marker.write_bytes(b'independent foreign bytes\n'); marker.write_bytes(payload)
+                os.utime(marker, ns=(before.st_atime_ns, before.st_mtime_ns))
+                self.assertEqual(before.st_ino, marker.lstat().st_ino)
+                self.assertNotEqual(before.st_ctime_ns, marker.lstat().st_ctime_ns)
+                injected.append(payload)
+        with private_a_health_ports(LOAD, self.root), mock.patch.object(LOAD, 'runtime_os', return_value='Linux'), \
+                mock.patch.object(LOAD.os, 'fsync', side_effect=aba):
+            with self.assertRaisesRegex(LOAD.LoadError, 'marker owner.*HOLD'):
+                LOAD.activate_setup_switch_a_publication(state[1], guard=guard, confirmed=True, retire=True)
+        self.assertEqual(1, len(injected)); self.assertEqual(injected[0], marker.read_bytes())
+        self.assertEqual(original, {path: (path.lstat().st_ino, path.read_bytes()) for path in original})
+        archive = next(journal.parent.glob('.setup-switch-a-retired-*'))
+        self.assertEqual([], os.listdir(archive)); self.assertEqual(set(), active)
+        self.assertEqual([('start', 'apache2'), ('start', 'isc-dhcp-server'),
+                          ('stop', 'isc-dhcp-server'), ('stop', 'apache2')], actions)
+        with self.assertRaises(LOAD.LoadError): LOAD.require_no_pending_setup_switch_journal()
 
     def test_a_explicit_activation_rejects_partial_group_without_restoring_or_starting(self):
         state, _context, guard, _token, _inputs = self._prepare_published_q_for_stopped_preflight(
@@ -3117,7 +3254,8 @@ class ReleaseTransactionTests(unittest.TestCase):
         journal, descriptor, _backend = state[-3:]
         evidence = journal.read_bytes()
         for flag in ("--activate-setup-publication", "--resume-setup-retirement",
-                     "--recover-setup-switch", "--resume-setup-publication", "--activate-setup-a"):
+                     "--recover-setup-switch", "--resume-setup-publication", "--activate-setup-a",
+                     "--retire-setup-a", "--resume-setup-a-retirement"):
             with self.subTest(flag=flag), ExitStack() as stack:
                 args = LOAD._build_parser().parse_args([str(state[1]), flag,
                     "--host-role", "management-server"])
@@ -3135,7 +3273,8 @@ class ReleaseTransactionTests(unittest.TestCase):
                     side_effect=AssertionError("writer reached before monitor stop"))) for name in (
                     "open_setup_switch_publication_bundle", "recover_setup_switch_journal",
                     "resume_setup_switch_b_retirement", "resume_setup_switch_publication_bundle",
-                    "activate_setup_switch_b_publication", "activate_setup_switch_a_publication")]
+                    "activate_setup_switch_b_publication", "activate_setup_switch_a_publication",
+                    "resume_setup_switch_a_retirement")]
                 self.assertEqual(1, LOAD.main([]))
                 stop.assert_called_once_with(LOAD.HTTP_ROOT)
                 for writer in writers:
@@ -3211,6 +3350,58 @@ class ReleaseTransactionTests(unittest.TestCase):
         self.assertEqual([("start", "apache2"), ("start", "isc-dhcp-server")], actions)
         self.assertEqual({"apache2", "isc-dhcp-server"}, active)
         self.assertEqual(frozen, (state[-3].lstat().st_ino, state[-3].read_bytes()))
+
+    def test_a_retirement_cli_conflicts_and_wrong_role_hold_before_lock(self):
+        modes = ('--retire-setup-a', '--resume-setup-a-retirement')
+        for flag in modes:
+            for extra in (('--activate-setup-a',), ('--activate-setup-publication',),
+                          ('--resume-setup-retirement',), ('--recover-setup-switch',),
+                          ('--resume-setup-publication',),
+                          ((modes[1] if flag == modes[0] else modes[0]),),
+                          ('--dry-run',), ('--start-services',), ('--import-configs',),
+                          ('--p2p-file', 'independent.xlsx')):
+                with self.subTest(flag=flag, extra=extra), \
+                        mock.patch.object(LOAD, 'runtime_os', return_value='Linux'), \
+                        mock.patch.object(LOAD, 'acquire_deployment_lock') as lock:
+                    self.assertEqual(1, LOAD.main([str(self.project), '--host-role',
+                                                  'management-server', flag, *extra]))
+                    lock.assert_not_called()
+            for platform, role in (('Darwin', 'workstation'), ('Linux', 'workstation')):
+                with self.subTest(flag=flag, platform=platform), \
+                        mock.patch.object(LOAD, 'runtime_os', return_value=platform), \
+                        mock.patch.object(LOAD, 'acquire_deployment_lock') as lock:
+                    self.assertEqual(1, LOAD.main([str(self.project), '--host-role', role, flag]))
+                    lock.assert_not_called()
+
+    def test_a_retirement_cli_selects_only_explicit_a_operation_and_exact_success(self):
+        # This dispatch contract is independent of the archive implementation;
+        # direct archive and real cold workflow exercise its disk/health gates.
+        for flag, function in (('--retire-setup-a', 'activate_setup_switch_a_publication'),
+                               ('--resume-setup-a-retirement', 'resume_setup_switch_a_retirement')):
+            for result, expected in (('a-health-passed-evidence-archived', 0),
+                                     ('a-no-services-required-evidence-archived', 0),
+                                     ('a-health-passed-wal-retained', 1),
+                                     ('b-health-passed-wal-archived', 1), (None, 1)):
+                with self.subTest(flag=flag, result=result), ExitStack() as stack:
+                    for name, value in (('runtime_os', 'Linux'),
+                                        ('service_runtime_backend', SimpleNamespace(name='supervisor')),
+                                        ('acquire_deployment_lock', 17), ('resolve_project', self.project)):
+                        stack.enter_context(mock.patch.object(LOAD, name, return_value=value))
+                    stack.enter_context(mock.patch.object(LOAD, 'release_deployment_lock'))
+                    stack.enter_context(mock.patch.object(LOAD, '_require_runtime_restore_guard'))
+                    stack.enter_context(mock.patch.object(LOAD, '_require_no_pending_setup_manifest_stage'))
+                    called = stack.enter_context(mock.patch.object(LOAD, function, return_value=result))
+                    for name in ('generate_configs', 'validate_inputs', 'start_services',
+                                 'open_setup_switch_publication_bundle', 'activate_setup_switch_b_publication',
+                                 'restore_cross_project_rollback_context'):
+                        stack.enter_context(mock.patch.object(LOAD, name, side_effect=AssertionError('unexpected ' + name)))
+                    self.assertEqual(expected, LOAD.main([str(self.project), '--host-role',
+                                                         'management-server', flag]))
+                    guard = dict(deployment_lock_descriptor=17, services_quiesced=True,
+                                 runtime_backend=LOAD.service_runtime_backend.return_value)
+                    keywords = dict(guard=guard, confirmed=True)
+                    if flag == '--retire-setup-a': keywords['retire'] = True
+                    called.assert_called_once_with(self.project, **keywords)
 
     def test_b_retirement_marker_fsync_same_inode_aba_holds_original_wal(self):
         state, _context, guard, token, inputs = self._prepare_published_q_for_stopped_preflight(no_upgrade=True)

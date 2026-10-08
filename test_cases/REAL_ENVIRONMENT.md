@@ -1649,6 +1649,21 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
   原生服务继续停服。保存完整 FD/name/stat/ctime/字节和物理时序，清理仅
   人工恢复已核隔离快照。本地 direct 和真实强杀后冷恢复负例不是断电证明。
 
+- 2026-10-08 原 A typed WAL/计划归档窄门禁仍 OPEN：沿本卡原隔离 VM、精确版本、
+  独立控制台、root-only 可恢复快照、原排他锁、预先停服和其它写者静默前提执行。
+  无 DHCP 事务/非空 prefix 写集的已完整恢复 A，显式 `--retire-setup-a`；在 WAL
+  原 inode rename 后强杀/断电，再人工确认停服并由全新 LOAD 的
+  `--resume-setup-a-retirement` 重核原完整组及本次真实健康。独立保存原 WAL/plan
+  FD/name/父身份/九字段/SHA 与归档 inode/字节，role=A/schema-2 marker、0700 目录
+  及精确对象清单、文件与父同步的物理顺序。marker fsync ABA、外来 marker/WAL inode、
+  错误角色、未知对象/目录换绑均 HOLD；只读归档检查不能授予恢复写。503 必须确认逆序
+  停止本次实际尝试服务，保留 pending marker、原 WAL/计划，不从上一进程 PASS 退休。
+  final marker rename 后同步前死亡须在普通 LOAD 写前补同步；孤立目录不能自动认领。
+  完成历史归档不绑定下一独立事务的新 live 名称，但新 WAL 围栏必须仍然有效。
+  清理仅负责人按已核隔离快照人工恢复，不按前缀删除未知对象、不在 live 注入。
+  当前本地私有 HTTP/backend/SIGKILL 的分批证据不是本卡通过、正式 full/check，
+  未覆盖完整 prefix/DHCP 证据归档、实际 Linux/root/断电/C2 或 DEV ACK。
+
 - 2026-10-08 原 A 显式健康激活仍 OPEN：仅在本卡已授权的可丢弃隔离 VM、
   精确源码/测试/manifest、独立控制台、root-only 可恢复快照、排他部署锁、
   Apache/DHCP 已停及其它正常写者静默条件下执行。Q 首写前独立冻结原 A

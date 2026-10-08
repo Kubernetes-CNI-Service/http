@@ -1107,3 +1107,19 @@ HTTP 失败及非本次启动服务混入。每个服务/健康边界重查原 A
 503 拒绝。私有 fixture 只替换 OS 命令端口与服务状态，不替代 publication/auth/配置/规划逻辑；
 不构成 root/systemd/Apache/DHCP 真机或断电见证。A/B 全写集的可恢复安全归档是另一门禁，
 不能因本地激活通过而宣称 R22 完成，真机合同见 `TC-REAL-R22-GENERATION-INPUT-ABA-001`。
+
+### R22 原 A WAL/恢复计划的 typed 归档窄门禁
+
+`--retire-setup-a` 和 `--resume-setup-a-retirement` 与仅健康激活、A 恢复、B 激活及 B
+退休是互斥操作。Linux management-server 必须预先停服；入口取得独占锁，并在任何 WAL
+操作之前停止 native monitor。每次续退休重新核原 A 完整恢复组、原输入/镜像/公钥、配置、
+动态 listener 和真实健康，不以旧进程 PASS 授权。失败仅停止本次尝试启动的服务，保留围栏。
+
+当前窄门禁只处理没有 DHCP 事务和非空 prefix 写集的已恢复 A；其它情形仍 HOLD，不能
+据此称完整 R22 归档完成。私有 0700 归档和 role=A 的 schema-2 marker 持久绑定原
+WAL/恢复计划的 inode、元数据、摘要及原父，no-replace 移动原 inode，不重写原字节。
+中断可由新 LOAD 根据 typed 映射只读核验、重新健康后续接；该只读上下文不能授予恢复写。
+完成归档保留精确三对象，未知对象/外来 inode/错误角色/未完成或孤立目录保持 HOLD。
+历史归档只核自己的原归档对象，不绑定下一事务重用的 live 名称；新事务仍受自己的 WAL
+围栏约束。创建意图之前的孤立目录不能自动认领或清理。私有 HTTP/SIGKILL 回归不替代
+正式 related/full/check、Linux/root/断电、完整 prefix/DHCP 归档或人工 ACK。

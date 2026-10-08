@@ -6463,6 +6463,7 @@ def require_no_pending_setup_switch_journal() -> None:
     """
     _require_setup_switch_wal_absent()
     _require_no_pending_setup_manifest_stage()
+    _require_completed_setup_switch_a_archives()
     if any(HTTP_ROOT.glob(".r22-prefix-*")):
         raise LoadError("prefix evidence has no current original WAL; HOLD")
 
@@ -7422,23 +7423,38 @@ def restore_setup_switch_a_disk(project, *, guard, confirmed=False):
 @contextmanager
 def _setup_switch_a_compensation_authority(project, *, guard, confirmed,
                                           restore_publication, complete_publication=False,
-                                          _require_runtime_guard=None):
+                                          _require_runtime_guard=None, _retirement=None):
     if confirmed is not True:
         raise LoadError("Q publication compensation requires explicit confirmation; HOLD")
-    _require_runtime_restore_guard(**guard)
     if _require_runtime_guard is not None and (not callable(_require_runtime_guard)
             or restore_publication or complete_publication):
         raise LoadError("A activation guard may only inspect an already restored group; HOLD")
-    _require_setup_switch_retirement_absent()
+    if _require_runtime_guard is None:
+        _require_runtime_restore_guard(**guard)
+    else:
+        _require_runtime_guard()
+    if _retirement is not None and (restore_publication or complete_publication):
+        raise LoadError("A retirement evidence is read-only, not compensation authority; HOLD")
     marker = _setup_switch_a_restore_path()
     journal = _setup_switch_journal_path()
+    logical_journal = journal
+    if _retirement is None:
+        _require_setup_switch_retirement_absent()
+    else:
+        _require_setup_switch_a_retirement_owner(_retirement)
+        journal = _setup_switch_a_retirement_artifact(_retirement, 'journal')
+        marker = _setup_switch_a_retirement_artifact(_retirement, 'plan')
+    marker_parent = _setup_switch_link_parent_identity(marker)
     wal_fd = marker_fd = -1
     try:
         wal_before = _dhcp_a_preimage_receipt_identity(journal.lstat())
         wal_fd = os.open(journal, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0))
         opened = _read_rollback_regular(journal, limit=_SETUP_SWITCH_JOURNAL_LIMIT)
         body = _setup_switch_prepared_registration_body(opened)
-        parent = _setup_switch_link_parent_identity(journal)
+        parent = (_setup_switch_link_parent_identity(journal) if _retirement is None
+                  else _retirement['body']['parent'])
+        original_wal_owner = (list(wal_before) if _retirement is None
+                              else _retirement['body']['journal']['identity'])
         if (body["new_project"] != _setup_switch_directory_identity(Path(project))
                 or "publication_bundle" not in body):
             raise LoadError("Q compensation requested project/bundle differs; HOLD")
@@ -7450,10 +7466,17 @@ def _setup_switch_a_compensation_authority(project, *, guard, confirmed,
                 _require_runtime_restore_guard(**guard)
             else:
                 _require_runtime_guard()
-            _require_setup_switch_retirement_absent()
+            if _retirement is None:
+                _require_setup_switch_retirement_absent()
+            else:
+                _require_setup_switch_a_retirement_owner(_retirement)
+                if (journal != _setup_switch_a_retirement_artifact(_retirement, 'journal')
+                        or marker != _setup_switch_a_retirement_artifact(_retirement, 'plan')):
+                    raise LoadError("A retirement evidence phase changed during deep read; HOLD")
             if (wal_before != _dhcp_a_preimage_receipt_identity(os.fstat(wal_fd))
                     or wal_before != _dhcp_a_preimage_receipt_identity(journal.lstat())
-                    or parent != _setup_switch_link_parent_identity(journal)
+                    or (parent != _setup_switch_link_parent_identity(journal) if _retirement is None
+                        else parent != _setup_switch_link_parent_identity(logical_journal))
                     or opened != _read_rollback_regular(journal, limit=_SETUP_SWITCH_JOURNAL_LIMIT)
                     or body["root"] != _setup_switch_directory_identity(HTTP_ROOT)
                     or any(body[key] != _setup_switch_directory_identity(Path(body[key]["path"]))
@@ -7685,8 +7708,8 @@ def _setup_switch_a_compensation_authority(project, *, guard, confirmed,
                 or type(plan["schema_version"]) is not int or plan["schema_version"] not in {3, 4}
                 or not isinstance(plan.get("dhcp", {}), dict)
                 or plan["schema_version"] == 3 and "dhcp_transaction" in body
-                or plan["journal"] != str(journal) or plan["parent"] != parent
-                or plan["identity"] != list(wal_before)
+                or plan["journal"] != str(logical_journal) or plan["parent"] != parent
+                or plan["identity"] != original_wal_owner
                 or plan["sha256"] != hashlib.sha256(opened[0]).hexdigest()
                 or plan["phase"] not in {"report", "selector", "published"}
                 or not isinstance(plan["rows"], dict) or set(plan["rows"]) != {"parent", "report", "selector"}):
@@ -7699,7 +7722,7 @@ def _setup_switch_a_compensation_authority(project, *, guard, confirmed,
             shared_authority()
             if (marker_owner != _dhcp_a_preimage_receipt_identity(os.fstat(marker_fd))
                     or marker_owner != _dhcp_a_preimage_receipt_identity(marker.lstat())
-                    or parent != _setup_switch_link_parent_identity(marker)
+                    or marker_parent != _setup_switch_link_parent_identity(marker)
                     or (payload, 0o600) != _read_rollback_regular(marker, limit=_ROLLBACK_PAYLOAD_LIMIT)):
                 raise LoadError("A compensation original plan owner changed; HOLD")
             _require_setup_switch_a_stage_inventory(plan, {
@@ -8049,11 +8072,17 @@ def _setup_switch_a_compensation_authority(project, *, guard, confirmed,
                 raise LoadError("original A image setup stage owner differs; HOLD")
             require_restored_publication()
         require_restored_publication()
-        yield dict(journal=journal, opened=opened, require=require_restored_publication,
+        token = dict(journal=journal, opened=opened, require=require_restored_publication,
                    restore_runtime_leaf=restore_runtime_leaf, require_runtime_restored=require_runtime_restored,
                    restore_setup_leaf=restore_setup_leaf, require_setup_restored=require_setup_restored,
                    restore_dhcp_leaf=restore_dhcp_leaf, require_dhcp_restored=require_dhcp_restored,
                    require_setup_image_owner=require_setup_image_owner)
+        if _retirement is not None:
+            def readonly(*args, **kwargs):
+                raise LoadError("A archived evidence is read-only, not restoration permission; HOLD")
+            for name in ('restore_runtime_leaf', 'restore_setup_leaf', 'restore_dhcp_leaf'):
+                token[name] = readonly
+        yield token
     except (KeyError, TypeError, ValueError, RuntimeError, OSError) as exc:
         raise LoadError(f"A publication compensation unconfirmed; HOLD: {exc}") from exc
     finally:
@@ -16858,7 +16887,247 @@ def _require_setup_switch_a_complete_disk_group(body, compensation):
     compensation["require"]()
 
 
-def activate_setup_switch_a_publication(project, *, guard, confirmed=False, retire=False):
+def _setup_switch_a_archive_directory(path):
+    path = Path(path)
+    before = path.lstat()
+    if (not stat.S_ISDIR(before.st_mode) or path.resolve(strict=True) != path
+            or stat.S_IMODE(before.st_mode) != 0o700 or before.st_uid != os.geteuid()):
+        raise LoadError("A retirement archive is not a private original directory; HOLD")
+    return dict(path=str(path), dev=before.st_dev, ino=before.st_ino,
+                mode=stat.S_IMODE(before.st_mode), uid=before.st_uid, gid=before.st_gid)
+
+
+def _validate_setup_switch_a_retirement(body):
+    if (not isinstance(body, dict) or set(body) != {'schema_version', 'role', 'parent', 'archive',
+            'journal', 'plan', 'owner'} or type(body['schema_version']) is not int
+            or body['schema_version'] != 2 or body['role'] != 'A'
+            or not isinstance(body['owner'], list) or len(body['owner']) != 6
+            or any(type(v) is not int or v < 0 for v in body['owner'])):
+        raise LoadError("A retirement marker role/contract is invalid; HOLD")
+    archive = body['archive']
+    if (not isinstance(archive, dict) or set(archive) != {'path', 'dev', 'ino', 'mode', 'uid', 'gid'}
+            or not isinstance(archive['path'], str)
+            or any(type(archive[k]) is not int or archive[k] < 0 for k in ('dev', 'ino', 'mode', 'uid', 'gid'))
+            or Path(archive['path']).parent != MANIFEST.parent
+            or re.fullmatch(r'\.setup-switch-a-retired-[0-9a-f]{32}', Path(archive['path']).name) is None
+            or archive != _setup_switch_a_archive_directory(Path(archive['path']))
+            or body['parent'] != _setup_switch_link_parent_identity(_setup_switch_journal_path())):
+        raise LoadError("A retirement original archive/parent changed; HOLD")
+    for key, path in (('journal', _setup_switch_journal_path()), ('plan', _setup_switch_a_restore_path())):
+        row = body[key]
+        if (not isinstance(row, dict) or set(row) != {'path', 'identity', 'sha256'}
+                or row['path'] != str(path) or not isinstance(row['identity'], list)
+                or len(row['identity']) != 9 or any(type(v) is not int or v < 0 for v in row['identity'])
+                or not stat.S_ISREG(row['identity'][2]) or stat.S_IMODE(row['identity'][2]) != 0o600
+                or row['identity'][5] != 1 or not isinstance(row['sha256'], str)
+                or re.fullmatch(r'[0-9a-f]{64}', row['sha256']) is None):
+            raise LoadError("A retirement original artifact contract is invalid; HOLD")
+
+
+def _require_setup_switch_a_retirement_owner(marker):
+    _validate_setup_switch_a_retirement(marker['body'])
+    if list(marker['identity'][:6]) != marker['body']['owner']:
+        raise LoadError("A retirement original marker owner differs; HOLD")
+    _require_setup_switch_retirement_owner(marker)
+    archive = Path(marker['body']['archive']['path'])
+    allowed = {'journal.json', 'a-restore.json'}
+    if marker['path'] == archive / 'retirement.json':
+        allowed.add('retirement.json')
+    elif marker['path'] != _setup_switch_retirement_path():
+        raise LoadError("A retirement marker name differs; HOLD")
+    before = _dhcp_a_preimage_receipt_identity(archive.lstat())
+    if set(os.listdir(archive)) - allowed:
+        raise LoadError("A retirement archive contains unregistered objects; HOLD")
+    if before != _dhcp_a_preimage_receipt_identity(archive.lstat()):
+        raise LoadError("A retirement archive changed during inventory; HOLD")
+
+
+def _setup_switch_a_retirement_artifact(marker, role, *, completed=False):
+    if role not in {'journal', 'plan'}:
+        raise LoadError("A retirement artifact role is unknown; HOLD")
+    row = marker['body'][role]
+    source = Path(row['path'])
+    destination = Path(marker['body']['archive']['path']) / ('journal.json' if role == 'journal' else 'a-restore.json')
+    if completed and marker['path'] != destination.parent / 'retirement.json':
+        raise LoadError("A completed-archive view cannot qualify pending retirement; HOLD")
+    names = [path for path in ((destination,) if completed else (source, destination)) if os.path.lexists(path)]
+    if len(names) != 1:
+        raise LoadError("A retirement artifact original/archived phase is unknown; HOLD")
+    path = names[0]
+    before = list(_dhcp_a_preimage_receipt_identity(path.lstat()))
+    payload, mode = _read_rollback_regular(path, limit=_SETUP_SWITCH_JOURNAL_LIMIT)
+    if (before[:8] != row['identity'][:8] or path == source and before != row['identity']
+            or mode != 0o600 or hashlib.sha256(payload).hexdigest() != row['sha256']
+            or before != list(_dhcp_a_preimage_receipt_identity(path.lstat()))):
+        raise LoadError("A retirement original artifact owner/bytes changed; HOLD")
+    return path
+
+
+@contextmanager
+def _open_setup_switch_a_retirement(path=None):
+    path = _setup_switch_retirement_path() if path is None else Path(path)
+    fd = -1
+    try:
+        before = _dhcp_a_preimage_receipt_identity(path.lstat())
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, 'O_NONBLOCK', 0))
+        payload, mode = _read_rollback_regular(path, limit=16384)
+        def unique(pairs):
+            result = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError('duplicate A retirement fields')
+                result[key] = value
+            return result
+        body = json.loads(payload, object_pairs_hook=unique)
+        if mode != 0o600:
+            raise LoadError("A retirement marker mode differs; HOLD")
+        marker = dict(path=path, descriptor=fd, payload=payload, body=body, identity=before,
+                      parent=_setup_switch_link_parent_identity(path))
+        _require_setup_switch_a_retirement_owner(marker)
+        yield marker
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise LoadError(f"A retirement evidence unconfirmed; HOLD: {exc}") from exc
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
+def _require_completed_setup_switch_a_archives():
+    parent = MANIFEST.parent
+    before = _dhcp_a_preimage_receipt_identity(parent.lstat())
+    fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        if before != _dhcp_a_preimage_receipt_identity(os.fstat(fd)):
+            raise LoadError("A archive inspection parent changed; HOLD")
+        paths = []
+        with os.scandir(fd) as entries:
+            for index, entry in enumerate(entries):
+                if index >= 4096:
+                    raise LoadError("A retirement archive scan exceeds bound; HOLD")
+                if entry.name.startswith('.setup-switch-a-retired-'):
+                    paths.append(parent / entry.name)
+        for path in sorted(paths):
+            with _open_setup_switch_a_retirement(path / 'retirement.json') as marker:
+                if (set(os.listdir(path)) != {'journal.json', 'a-restore.json', 'retirement.json'}
+                        or any(_setup_switch_a_retirement_artifact(marker, role, completed=True).parent != path
+                               for role in ('journal', 'plan'))):
+                    raise LoadError("A retirement archive is incomplete; HOLD")
+                # Completed history does not bind names reused by a new WAL.
+                # Persist an interrupted final namespace before new LOAD writes.
+                _fsync_parent_directory(path)
+                _fsync_parent_directory(path.parent)
+                _require_setup_switch_a_retirement_owner(marker)
+                for role in ('journal', 'plan'):
+                    _setup_switch_a_retirement_artifact(marker, role, completed=True)
+        if (before != _dhcp_a_preimage_receipt_identity(os.fstat(fd))
+                or before != _dhcp_a_preimage_receipt_identity(parent.lstat())):
+            raise LoadError("A archive inspection parent changed during scan; HOLD")
+    finally:
+        os.close(fd)
+
+
+def _retire_setup_switch_a_publication(project, *, guard, require_runtime_guard,
+                                      require_authority, plan, retirement=None):
+    """Archive the qualified original A WAL/plan; never delete either inode.
+
+    Full prefix/DHCP inventories are deliberately a separate typed gate.
+    This read-only compensation context cannot grant any recovery writer.
+    """
+    require_authority()
+    if retirement is None:
+        _require_completed_setup_switch_a_archives()
+        journal, a_plan = _setup_switch_journal_path(), _setup_switch_a_restore_path()
+        rows = {}
+        for key, path in (('journal', journal), ('plan', a_plan)):
+            before = _dhcp_a_preimage_receipt_identity(path.lstat())
+            payload, mode = _read_rollback_regular(path, limit=_SETUP_SWITCH_JOURNAL_LIMIT)
+            require_authority()
+            if (mode != 0o600 or before != _dhcp_a_preimage_receipt_identity(path.lstat())):
+                raise LoadError("A retirement original artifact changed before intent; HOLD")
+            rows[key] = dict(path=str(path), identity=list(before), sha256=hashlib.sha256(payload).hexdigest())
+        archive = journal.parent / ('.setup-switch-a-retired-' + uuid.uuid4().hex)
+        archive.mkdir(mode=0o700)
+        # A death before marker publication leaves an orphan fenced by the
+        # original WAL and the bounded completed-archive inventory gate.
+        archive_owner = _setup_switch_a_archive_directory(archive)
+        _fsync_parent_directory(archive)
+        _fsync_parent_directory(archive.parent)
+        require_authority()
+        marker_path = _setup_switch_retirement_path()
+        fd = os.open(marker_path, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        try:
+            body = dict(schema_version=2, role='A', parent=_setup_switch_link_parent_identity(journal),
+                        archive=archive_owner, **rows,
+                        owner=list(_dhcp_a_preimage_receipt_identity(os.fstat(fd))[:6]))
+            payload = _setup_switch_canonical_payload(body) + b'\n'
+            with os.fdopen(os.dup(fd), 'wb') as out:
+                out.write(payload); out.flush()
+                marker = dict(path=marker_path, descriptor=fd, payload=payload, body=body,
+                              identity=_dhcp_a_preimage_receipt_identity(os.fstat(fd)),
+                              parent=_setup_switch_link_parent_identity(marker_path))
+                _require_setup_switch_a_retirement_owner(marker)
+                os.fsync(out.fileno())
+                _require_setup_switch_a_retirement_owner(marker)
+            _fsync_parent_directory(marker_path.parent)
+            _require_setup_switch_a_retirement_owner(marker)
+        finally:
+            os.close(fd)
+    path = _setup_switch_retirement_path()
+    with _open_setup_switch_a_retirement(path) as marker:
+        def qualified():
+            require_runtime_guard()
+            _require_setup_switch_a_retirement_owner(marker)
+            with _setup_switch_a_compensation_authority(project, guard=guard, confirmed=True,
+                    restore_publication=False, _require_runtime_guard=require_runtime_guard,
+                    _retirement=marker) as compensation:
+                original = _setup_switch_prepared_registration_body(compensation['opened'])
+                if ('dhcp_transaction' in original or original.get('prefix_transaction', {}).get('rows')):
+                    raise LoadError("A prefix/DHCP typed archive inventory is missing; HOLD")
+                _require_setup_switch_a_complete_disk_group(original, compensation)
+                _require_setup_switch_a_health_publication(original)
+                with _setup_switch_a_image_authority(original, compensation=compensation) as selected:
+                    selected['require']()
+                    if plan_local_dhcp_runtime(selected['inputs']) != plan:
+                        raise LoadError("A retirement listener plan changed; HOLD")
+                    selected['require']()
+                compensation['require']()
+            require_runtime_guard()
+        qualified()
+        archive = Path(marker['body']['archive']['path'])
+        for role, basename in (('journal', 'journal.json'), ('plan', 'a-restore.json')):
+            qualified()
+            source = _setup_switch_a_retirement_artifact(marker, role)
+            destination = archive / basename
+            if source != destination:
+                _setup_switch_rename_directory_noreplace(source, destination)
+            _fsync_parent_directory(archive)
+            _fsync_parent_directory(source.parent)
+            qualified()
+        qualified()
+        destination = archive / 'retirement.json'
+        _setup_switch_rename_directory_noreplace(path, destination)
+        now = _dhcp_a_preimage_receipt_identity(os.fstat(marker['descriptor']))
+        if (now[:8] != marker['identity'][:8]
+                or now != _dhcp_a_preimage_receipt_identity(destination.lstat())):
+            raise LoadError("A retirement original marker archive owner changed; HOLD")
+        marker.update(path=destination, identity=now, parent=_setup_switch_link_parent_identity(destination))
+        _require_setup_switch_a_retirement_owner(marker)
+        _fsync_parent_directory(archive)
+        _fsync_parent_directory(path.parent)
+        _require_setup_switch_a_retirement_owner(marker)
+        require_runtime_guard()
+
+
+def resume_setup_switch_a_retirement(project, *, guard, confirmed=False):
+    if confirmed is not True:
+        raise LoadError("A retirement requires explicit fresh stopped activation; HOLD")
+    _require_runtime_restore_guard(**guard)
+    with _open_setup_switch_a_retirement() as marker:
+        return activate_setup_switch_a_publication(project, guard=guard, confirmed=True,
+                                                   retire=True, _retirement=marker)
+
+
+def activate_setup_switch_a_publication(project, *, guard, confirmed=False, retire=False, _retirement=None):
     """Explicit original A health; never restore, regenerate or implicitly fall back.
 
     The original WAL and compensation plan remain durable fences. Typed A
@@ -16867,8 +17136,8 @@ def activate_setup_switch_a_publication(project, *, guard, confirmed=False, reti
     """
     if confirmed is not True:
         raise LoadError("A activation requires explicit confirmation; HOLD")
-    if type(retire) is not bool or retire:
-        raise LoadError("A evidence requires explicit qualified retirement archive; HOLD")
+    if type(retire) is not bool or _retirement is not None and not retire:
+        raise LoadError("A evidence retirement requires explicit qualification; HOLD")
     _require_runtime_restore_guard(**guard)
     backend = guard["runtime_backend"]
     attempted = []
@@ -16878,8 +17147,10 @@ def activate_setup_switch_a_publication(project, *, guard, confirmed=False, reti
         if not current <= set(attempted):
             raise LoadError("unexpected managed services during explicit A activation; HOLD")
     with _setup_switch_a_compensation_authority(project, guard=guard, confirmed=True,
-            restore_publication=False, _require_runtime_guard=service_guard) as compensation:
+            restore_publication=False, _require_runtime_guard=service_guard, _retirement=_retirement) as compensation:
         body = _setup_switch_prepared_registration_body(compensation["opened"])
+        if retire and ('dhcp_transaction' in body or body.get('prefix_transaction', {}).get('rows')):
+            raise LoadError("A prefix/DHCP evidence requires full typed retirement inventory; HOLD")
         def disk_authority():
             service_guard()
             _require_setup_switch_a_complete_disk_group(body, compensation)
@@ -16936,6 +17207,10 @@ def activate_setup_switch_a_publication(project, *, guard, confirmed=False, reti
                 if set(active_managed_services(backend, host_role="management-server")) != selected:
                     raise LoadError("A selected services did not become healthy/active; HOLD")
                 authority()
+                if retire:
+                    _retire_setup_switch_a_publication(project, guard=guard,
+                        require_runtime_guard=service_guard, require_authority=authority,
+                        plan=plan, retirement=_retirement)
             except BaseException as exc:
                 stop_errors = []
                 for service in reversed(attempted):
@@ -16952,6 +17227,8 @@ def activate_setup_switch_a_publication(project, *, guard, confirmed=False, reti
                     raise LoadError(f"A activation failed and stop is unconfirmed; HOLD original WAL: {exc}; "
                                     + "; ".join(stop_errors)) from exc
                 raise
+    if retire:
+        return "a-health-passed-evidence-archived" if selected else "a-no-services-required-evidence-archived"
     return "a-health-passed-wal-retained" if selected else "a-no-services-required-wal-retained"
 
 
@@ -18113,6 +18390,16 @@ def _build_parser() -> argparse.ArgumentParser:
               "必须预先停服，不生成、不补偿、不借用 B 退休；保留原 WAL/恢复计划"),
     )
     parser.add_argument(
+        "--retire-setup-a", action="store_true",
+        help=("显式健康激活完整恢复的原 A 并归档原 WAL/计划；仅 Linux management-server，"
+              "必须预先停服；缺少完整 typed 证据则 HOLD，不生成或借用 B 退休"),
+    )
+    parser.add_argument(
+        "--resume-setup-a-retirement", action="store_true",
+        help=("显式续接原 A 已中断的证据归档；仅 Linux management-server，必须预先停服，"
+              "重新核原 A 完整组与本次健康，不复用旧进程 PASS、不生成、不恢复写"),
+    )
+    parser.add_argument(
         "--activate-setup-publication", action="store_true",
         help=("显式尝试原 WAL 已完整发布 B 的健康激活与凭据归档；仅 Linux management-server，"
               "必须预先停服、不生成；失败确认停服，不自动回 A"),
@@ -18254,7 +18541,7 @@ def _activate_setup_switch_entrypoint(args: argparse.Namespace) -> int:
     token = None
     try:
         modes = ("recover_setup_switch", "resume_setup_publication", "activate_setup_publication",
-                 "resume_setup_retirement", "activate_setup_a")
+                 "resume_setup_retirement", "activate_setup_a", "retire_setup_a", "resume_setup_a_retirement")
         if sum(bool(getattr(args, name, False)) for name in modes) != 1:
             raise LoadError("SETUP recovery, resume, activation and retirement are distinct operations; HOLD")
         host_os = runtime_os()
@@ -18281,6 +18568,15 @@ def _activate_setup_switch_entrypoint(args: argparse.Namespace) -> int:
             stop_native_ztp_monitors(HTTP_ROOT)
         _require_no_pending_setup_manifest_stage()
         project = resolve_project(args.project)
+        if getattr(args, "retire_setup_a", False) or getattr(args, "resume_setup_a_retirement", False):
+            if getattr(args, "resume_setup_a_retirement", False):
+                result = resume_setup_switch_a_retirement(project, guard=guard, confirmed=True)
+            else:
+                result = activate_setup_switch_a_publication(project, guard=guard, confirmed=True, retire=True)
+            if result not in {"a-health-passed-evidence-archived", "a-no-services-required-evidence-archived"}:
+                raise LoadError("A retirement lacks exact restored group/fresh health/archive completion; HOLD")
+            ok("原 A 完整恢复组与本次健康核验完成；原 inode/字节已归档，未生成、未恢复写或借用 B 退休")
+            return 0
         if getattr(args, "activate_setup_a", False):
             result = activate_setup_switch_a_publication(project, guard=guard, confirmed=True)
             if result not in {"a-health-passed-wal-retained", "a-no-services-required-wal-retained"}:
@@ -18388,7 +18684,9 @@ def main(
     args = parse_args(argv)
     if (getattr(args, "activate_setup_publication", False)
             or getattr(args, "resume_setup_retirement", False)
-            or getattr(args, "activate_setup_a", False)):
+            or getattr(args, "activate_setup_a", False)
+            or getattr(args, "retire_setup_a", False)
+            or getattr(args, "resume_setup_a_retirement", False)):
         return _activate_setup_switch_entrypoint(args)
     if (getattr(args, "recover_setup_switch", False)
             or getattr(args, "resume_setup_publication", False)):

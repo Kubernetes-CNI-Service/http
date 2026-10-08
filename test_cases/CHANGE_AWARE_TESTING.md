@@ -2814,3 +2814,45 @@ fsync 后仍使用原身份核验；不修改原预期，不删除被换代的�
 `e6b5b8c46c899471d74deffa116139bac1ef7b13b6a8f0bc9cc7064512401ba1`
 5 tests in 101.237s、OK、actual exit 0、冻结一致、END=0，包含原完整恢复、
 runtime 和 P 恢复中断再进入。两份日志读前后 stat 一致。仍非正式 runner proof。
+
+### 2026-10-08 R22 原 A typed WAL/计划归档及 CLI 窄修
+
+独立 direct 和真实 LOAD→SETUP→Q 提交强杀→新 LOAD 预期原 WAL/计划 inode 与字节
+进入 role=A、0700 的精确归档，不删除证据，不借用 B 退休。有效 RED
+`r22-a-typed-archive-red2.log` SHA256
+`c59f77062c7ddf5bf1f15f59ae6830ee90b08264cce47d488d5849e64a50907f`
+为 2 tests、1 ERROR/1 FAIL、actual/END=1；原实现明确拒绝 retire，缺少归档实现。
+完成历史归档不应借用下一事务的新 live 名称；新增独立负例有效 RED 为
+`r22-a-completed-archive-next-incident-red.log` SHA256
+`5f035bff984bd9b0e0da58694b589ae8489d58702913a2f4157903accca1e7a7`，
+1 test、1 ERROR、actual/END=1。实现区分已完成只读历史与仍严格 xor 的 pending 阶段，
+用 held dirfd 有界扫描、核原对象并补目录同步；新事务自身围栏不解除。
+
+新增两项公开 CLI 原先缺失，`r22-a-retirement-cli-red.log` inode 163281264、size 223394、
+SHA256 `b1a447014e56b0f20fa8bcd38d6ab9f5cbc23c59ff3ec9a1f6b81f9475d0bfb9`
+为 4 tests、1 FAIL/36 参数子场景 ERROR；实现后同组
+`r22-a-retirement-cli-green.log` inode 163283663、size 135228、SHA256
+`6c58a4ad10ffe898ba830d852dfe08a222759f02af37c78a8a4df1533f5bf014`
+为 4 tests in 9.896s、OK、actual/END=0、冻结一致。覆盖互斥参数/错误角色在锁前
+拒绝、原 A 专属调用及精确成功状态、native 停止失败先于七入口写者、独立 dispatcher 变异。
+
+完整边界批次 `r22-a-retirement-cli-workflow-boundaries.log` inode 163286934、size 137205、
+SHA256 `5854c50bfaa27c8f652f8cdfb59de02b873e26966c552b2e84a966f30aa21be9`
+为 7 tests in 563.439s、1 FAIL、actual/END=1、冻结一致；不是一份全通过记录。
+其中 marker fsync 同 inode ABA 拒绝、真实 CLI 归档、WAL rename 后强杀/新 CLI 重做
+健康并保留原 inode、冷 CLI 真实 503 逆序停服且保留围栏，以及两个 native oracle 均通过。
+唯一失败是 WAL clone 负例漏了 Linux OS 端口适配，先遇到 Darwin 角色拒绝，未到预期
+artifact-owner 分支；不改拒绝原因和原对象不变断言，只补该夹具适配，且持有原 WAL 放在
+归档外，避免未知对象拒绝掩盖 inode 拒绝。只重跑受影响整项：
+`r22-a-retirement-archive-owner-port-corrected.log` inode 163293944、size 130583、SHA256
+`33568b70c02adc163092e202e30c0064d12e77e3fabb5cee807a42761dd47721`
+为 1 test in 80.294s、OK、actual/END=0、冻结一致；包括角色/Boolean/未知字段、
+marker/WAL 外来 inode、目录模式、未知对象与只读 token 不授予任何恢复写。
+
+此前 `r22-a-typed-archive-boundaries.log` 的 7 tests/1 ERROR 原样保留：同步注入 OSError
+依 API 合同包装为 HOLD，但新夹具预期裸异常，因而未执行后续负例；修正为核 HOLD 和
+最内层原 OSError cause。另一次 positive workflow 的外层夹具在成功归档后仍 lstat
+旧 plan 名称的 ERROR 也保留，仅新归档分支改核归档原计划，旧 retained 断言不改。
+上述各最终日志均读前后 stat 一致，已知旧前缀 SHA 一致，物理 Ran→结果→actual exit→
+冻结一致→END 顺序完整。只是分批有界证据，批准 ledger 未变，不能合成为正式 runner
+通过；完整 prefix/DHCP typed 归档、root/Linux/断电/C2、DEV ACK 仍 OPEN。
