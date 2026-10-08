@@ -400,12 +400,51 @@ def _reject_import_yaml_nulls(value: object, *, location: str = "$") -> None:
             _reject_import_yaml_nulls(child, location=f"{location}[{index}]")
 
 
+def _require_import_selection_binding(selected: ImportConfigSelection) -> None:
+    """Qualify both held input directories and their current logical names."""
+    if selected.directory_fd < 0 or selected.root_fd < 0:
+        raise LoadError("import-configs source descriptor is already closed")
+    try:
+        if _import_root_alias_identity(selected.root_path) != selected.root_alias_identity:
+            raise LoadError("import-configs root alias changed during load")
+        root = os.fstat(selected.root_fd)
+        named_root = selected.root_path.stat()
+        if (not stat.S_ISDIR(named_root.st_mode)
+                or (root.st_dev, root.st_ino) != selected.root_identity
+                or (named_root.st_dev, named_root.st_ino) != selected.root_identity):
+            raise LoadError("import-configs root target changed during load")
+        child = os.stat(selected.name, dir_fd=selected.root_fd, follow_symlinks=False)
+        held = os.fstat(selected.directory_fd)
+        if (not stat.S_ISDIR(child.st_mode)
+                or (child.st_dev, child.st_ino) != selected.directory_identity
+                or (held.st_dev, held.st_ino) != selected.directory_identity):
+            raise LoadError("selected import-configs directory changed during load")
+        if selected.automatic:
+            names = tuple(sorted(name for name in os.listdir(selected.root_fd)
+                                 if _import_set_name(name)))
+            if names != selected.eligible_names:
+                raise LoadError(
+                    "import-configs latest selection changed during load；"
+                    "请重新运行 load 以使用最新配置目录"
+                )
+    except OSError as exc:
+        raise LoadError(f"cannot recheck import-configs source binding: {exc}") from exc
+
+
+def _import_member_owner(metadata: os.stat_result) -> tuple[int, ...]:
+    # Atime is intentionally excluded: the qualified read itself can change it.
+    return (metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_uid,
+            metadata.st_gid, metadata.st_nlink, metadata.st_size,
+            metadata.st_mtime_ns, metadata.st_ctime_ns)
+
+
 def preflight_import_configs(
     selected: ImportConfigSelection, devices_file: Path,
 ) -> ImportedConfigSnapshot:
     """Read only fd-bound input bytes and reject an incomplete foreign set."""
     publisher = _import_publisher_module()
     try:
+        _require_import_selection_binding(selected)
         devices = publisher.load_csv(str(devices_file), switch_scope="eth")
         names = tuple(sorted(os.listdir(selected.directory_fd)))
         if not names or len(names) > 10000:
@@ -418,6 +457,7 @@ def preflight_import_configs(
             raise LoadError("import-configs has no Cumulus devices in the CSV")
         copied: list[tuple[str, bytes]] = []
         identities: list[tuple[str, int, int, int, int, int]] = []
+        original_owners: dict[str, tuple[int, ...]] = {}
         seen: set[str] = set()
         total = 0
         for name in names:
@@ -441,7 +481,7 @@ def preflight_import_configs(
             )
             try:
                 opened = os.fstat(fd)
-                if (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino):
+                if _import_member_owner(opened) != _import_member_owner(metadata):
                     raise LoadError(f"import-configs member changed while opening: {name!r}")
                 with os.fdopen(os.dup(fd), "rb") as stream:
                     data = stream.read(8 * 1024 * 1024 + 1)
@@ -458,7 +498,8 @@ def preflight_import_configs(
                 name, after.st_dev, after.st_ino, after.st_size,
                 after.st_mtime_ns, after.st_ctime_ns,
             )
-            if identity != after_identity:
+            if (identity != after_identity
+                    or _import_member_owner(metadata) != _import_member_owner(after)):
                 raise LoadError(f"import-configs member changed while reading: {name!r}")
             try:
                 document = publisher._strict_yaml_load(io.StringIO(data.decode("utf-8")))
@@ -473,6 +514,7 @@ def preflight_import_configs(
                     raise LoadError(f"imported Cumulus YAML address differs from CSV: {name!r} {iface}")
             copied.append((name, data))
             identities.append(identity)
+            original_owners[name] = _import_member_owner(metadata)
             seen.add(host)
             total += len(data)
             if total > 256 * 1024 * 1024:
@@ -481,6 +523,17 @@ def preflight_import_configs(
         if missing:
             raise LoadError("import-configs is missing Cumulus hosts: "
                             + ", ".join(sorted(missing)[:10]))
+        # Parsing is an input read boundary, not authority to keep using an
+        # earlier list or a detached directory. Qualify the complete original
+        # set again after the last parser/checker has returned.
+        _require_import_selection_binding(selected)
+        if tuple(sorted(os.listdir(selected.directory_fd))) != names:
+            raise LoadError("import-configs member inventory changed while reading")
+        for name in names:
+            current = os.stat(name, dir_fd=selected.directory_fd, follow_symlinks=False)
+            if _import_member_owner(current) != original_owners[name]:
+                raise LoadError(f"import-configs member owner changed while reading: {name!r}")
+        _require_import_selection_binding(selected)
         basis = {
             "source_name": selected.name,
             "root_alias": selected.root_alias_identity,
@@ -503,29 +556,7 @@ def assert_import_source_unchanged(
     devices_file: Path,
 ) -> None:
     """Recheck alias, chosen dir, set inventory and bytes before publication."""
-    if selected.directory_fd < 0 or selected.root_fd < 0:
-        raise LoadError("import-configs source descriptor is already closed")
     try:
-        if _import_root_alias_identity(selected.root_path) != selected.root_alias_identity:
-            raise LoadError("import-configs root alias changed during load")
-        root = os.fstat(selected.root_fd)
-        if (root.st_dev, root.st_ino) != selected.root_identity:
-            raise LoadError("import-configs root changed during load")
-        child = os.stat(selected.name, dir_fd=selected.root_fd,
-                        follow_symlinks=False)
-        held = os.fstat(selected.directory_fd)
-        if (not stat.S_ISDIR(child.st_mode)
-                or (child.st_dev, child.st_ino) != selected.directory_identity
-                or (held.st_dev, held.st_ino) != selected.directory_identity):
-            raise LoadError("selected import-configs directory changed during load")
-        if selected.automatic:
-            names = tuple(sorted(name for name in os.listdir(selected.root_fd)
-                                 if _import_set_name(name)))
-            if names != selected.eligible_names:
-                raise LoadError(
-                    "import-configs latest selection changed during load；"
-                    "请重新运行 load 以使用最新配置目录"
-                )
         again = preflight_import_configs(selected, devices_file)
         if again != snapshot:
             raise LoadError("import-configs member identity or bytes changed during load")

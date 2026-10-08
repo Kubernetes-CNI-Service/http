@@ -33,6 +33,15 @@ MONITOR = load_script("req23_import_workflow_monitor", ROOT / "DAY0-Prepare/12-z
 
 class ImportedConfigurationWorkflow(unittest.TestCase):
     def test_real_children_import_publish_parent_and_activate_without_rewriting_source(self):
+        self._real_children_import_transaction()
+
+    def test_real_children_rebound_alias_target_refuses_parent_and_restores_dhcp(self):
+        self._real_children_import_transaction(source_mutation="alias-target")
+
+    def test_real_children_late_unknown_member_refuses_parent_and_restores_dhcp(self):
+        self._real_children_import_transaction(source_mutation="unknown-member")
+
+    def _real_children_import_transaction(self, *, source_mutation=None):
         private_parent = os.environ.get("R22_TEST_PRIVATE_ROOT")
         with tempfile.TemporaryDirectory(prefix="req23-import-", dir=private_parent) as name:
             private = Path(name).resolve()
@@ -77,7 +86,12 @@ class ImportedConfigurationWorkflow(unittest.TestCase):
                 old = LOAD.validate_and_publish_release(project, validated)
                 self.assertNotIn("imported_configs", old)
 
-                source = project / "import-configs" / "20261003_101112"
+                import_root = project / "import-configs"
+                if source_mutation == "alias-target":
+                    import_root.mkdir()
+                    import_root.rename(project / "operator-source")
+                    import_root.symlink_to(project / "operator-source", target_is_directory=True)
+                source = import_root / "20261003_101112"
                 source.mkdir(parents=True)
                 current = (ztp / "config/cumulus/latest_yaml").resolve(strict=True)
                 devices = PUBLISHER.load_csv(
@@ -171,8 +185,20 @@ class ImportedConfigurationWorkflow(unittest.TestCase):
                 candidate = LOAD.prepare_current_release(project, new)
                 newer = project / "import-configs" / "20261004_000000"
                 syntax_checks = []
+                final_check_armed = False
+                publisher = LOAD._import_publisher_module()
+                original_parser = publisher._strict_yaml_load
+
+                def mutate_during_final_source_parse(stream):
+                    nonlocal final_check_armed
+                    document = original_parser(stream)
+                    if final_check_armed and source_mutation == "unknown-member":
+                        final_check_armed = False
+                        (source / "unknown.yaml").write_bytes(b"# foreign late member\n")
+                    return document
 
                 def fake_dhcp_run(command, **_kwargs):
+                    nonlocal final_check_armed
                     operation = command[0]
                     if operation == "install":
                         if "-d" in command:
@@ -187,7 +213,13 @@ class ImportedConfigurationWorkflow(unittest.TestCase):
                     elif operation == "dhcpd":
                         syntax_checks.append(command[-1])
                         if command[-1] == "/etc/dhcp/dhcpd.conf":
-                            newer.mkdir()
+                            if source_mutation == "alias-target":
+                                (project / "operator-source").rename(project / "held-original-source")
+                                (project / "operator-source").mkdir()
+                            elif source_mutation == "unknown-member":
+                                final_check_armed = True
+                            else:
+                                newer.mkdir()
                     else:
                         self.fail(f"unexpected DHCP command: {command!r}")
 
@@ -205,8 +237,13 @@ class ImportedConfigurationWorkflow(unittest.TestCase):
                             LOAD, "sudo_command", side_effect=lambda *args: list(args),
                         ), mock.patch.object(
                             LOAD, "run", side_effect=fake_dhcp_run,
+                        ), mock.patch.object(
+                            publisher, "_strict_yaml_load", side_effect=mutate_during_final_source_parse,
                         ):
-                            with self.assertRaisesRegex(LOAD.LoadError, "重新运行 load"):
+                            expected = ("重新运行 load" if source_mutation is None
+                                        else "import-configs.*root" if source_mutation == "alias-target"
+                                        else "import-configs.*inventory")
+                            with self.assertRaisesRegex(LOAD.LoadError, expected):
                                 LOAD.mount_and_test_dhcp(parent_candidate=candidate)
                     self.assertEqual(2, len(syntax_checks))
                     self.assertFalse(candidate.committed)
@@ -216,6 +253,16 @@ class ImportedConfigurationWorkflow(unittest.TestCase):
                             f"old:{destination.name}\n",
                             destination.read_text(encoding="utf-8"),
                         )
+                    if source_mutation == "alias-target":
+                        self.assertTrue(import_root.is_symlink())
+                        self.assertEqual([], list((project / "operator-source").iterdir()))
+                        held_source = project / "held-original-source" / source.name
+                        self.assertEqual(source_before, {
+                            entry.name: hashlib.sha256(entry.read_bytes()).hexdigest()
+                            for entry in held_source.iterdir()
+                        })
+                    elif source_mutation == "unknown-member":
+                        self.assertEqual(b"# foreign late member\n", (source / "unknown.yaml").read_bytes())
                 finally:
                     LOAD.discard_prepared_release(candidate)
 

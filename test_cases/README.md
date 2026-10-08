@@ -1161,3 +1161,13 @@ B 使用独立 role=B/schema-3、0700 私有 `.setup-switch-b-retired-*` 目录�
 有界验证完成的 B 历史归档，只绑定自己的原归档名字，不绑定后来重用的 live 名称。
 13 项本地 direct/真实 LOAD→SETUP→提交 Q 强杀→冷 CLI/归档强杀→新 CLI 记录在
 CHANGE_AWARE_TESTING；不构成正式 related/full/check、实际 root/Linux/断电/C2 或 DEV ACK。
+
+### REQ23 导入源资格的读后闭合
+
+`import-configs` 可以是操作者目录别名，但软链自身 inode/文字未变不等于实体目标仍是原目录。
+LOAD 在预检读前、最后 YAML 解析后和资格返回前，核持有根与当前解析目标、原选中目录及
+自动选择的命名集合；显式选择旧套件仍允许无关更新套件出现。最后解析后再核完整成员名与
+每个原单链接文件的 dev/ino、mode、uid/gid、nlink、size、mtime/ctime（不含读操作改变的 atime）。
+目录换绑、晚插未知件、同字节新 inode 或解析期间新最新套件均拒绝，不借已读快照提交 parent。
+direct 和真实生成/子发布→最终 DHCP 安装→parent 门禁 workflow 验证拒绝并恢复四个旧 DHCP
+文件、保留旧 parent 和操作者来源；局部证据不构成 formal full 或真实设备导入验收。

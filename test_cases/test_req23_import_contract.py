@@ -211,6 +211,87 @@ class ImportSelectorTests(unittest.TestCase):
                         selected, snapshot, project / "02-devices_config.csv",
                     )
 
+    def test_final_check_rejects_rebound_target_of_unchanged_import_alias(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary)
+            self._source(project)
+            target = project / "operator-source"
+            (project / "import-configs").rename(target)
+            (project / "import-configs").symlink_to(target, target_is_directory=True)
+            with LOAD.select_import_config_set(project, "") as selected:
+                snapshot = LOAD.preflight_import_configs(
+                    selected, project / "02-devices_config.csv",
+                )
+                original_alias = (project / "import-configs").lstat().st_ino
+                target.rename(project / "original-held-source")
+                target.mkdir()
+                self.assertEqual(original_alias,
+                                 (project / "import-configs").lstat().st_ino)
+                self.assertNotEqual(selected.root_identity[1], target.stat().st_ino)
+                with self.assertRaisesRegex(LOAD.LoadError, "import-configs.*root"):
+                    LOAD.assert_import_source_unchanged(
+                        selected, snapshot, project / "02-devices_config.csv",
+                    )
+                self.assertEqual(snapshot.files, (("leaf01.yaml", HOST_YAML),))
+                self.assertEqual([], list(target.iterdir()))
+
+    def test_final_check_requalifies_selection_and_all_members_after_parsing(self):
+        for mutation in ("unknown-member", "member-clone", "selected-dir", "alias-target",
+                         "newest-set"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temporary:
+                project = Path(temporary)
+                source = self._source(project)
+                target = project / "operator-source"
+                (project / "import-configs").rename(target)
+                (project / "import-configs").symlink_to(target, target_is_directory=True)
+                source = target / source.name
+                with LOAD.select_import_config_set(project, "") as selected:
+                    snapshot = LOAD.preflight_import_configs(
+                        selected, project / "02-devices_config.csv",
+                    )
+                    publisher = LOAD._import_publisher_module()
+                    original = publisher._strict_yaml_load
+                    def mutate_after_member_read(stream):
+                        document = original(stream)
+                        if mutation == "unknown-member":
+                            (source / "unknown.yaml").write_bytes(HOST_YAML)
+                        elif mutation == "member-clone":
+                            member = source / "leaf01.yaml"
+                            member.rename(project / "original-member.yaml")
+                            member.write_bytes(HOST_YAML)
+                        elif mutation == "selected-dir":
+                            source.rename(target / "original-selected-dir")
+                            source.mkdir()
+                        elif mutation == "alias-target":
+                            target.rename(project / "original-held-root")
+                            target.mkdir()
+                        else:
+                            (target / "20261004_000000").mkdir()
+                        return document
+                    with mock.patch.object(publisher, "_strict_yaml_load",
+                                           side_effect=mutate_after_member_read):
+                        with self.assertRaises(LOAD.LoadError):
+                            LOAD.assert_import_source_unchanged(
+                                selected, snapshot, project / "02-devices_config.csv",
+                            )
+
+    def test_explicit_alias_selection_allows_a_newer_set_without_reselecting(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary)
+            self._source(project)
+            target = project / "operator-source"
+            (project / "import-configs").rename(target)
+            (project / "import-configs").symlink_to(target, target_is_directory=True)
+            with LOAD.select_import_config_set(project, "20261003_101112") as selected:
+                snapshot = LOAD.preflight_import_configs(
+                    selected, project / "02-devices_config.csv",
+                )
+                (target / "20261004_000000").mkdir()
+                LOAD.assert_import_source_unchanged(
+                    selected, snapshot, project / "02-devices_config.csv",
+                )
+                self.assertEqual(snapshot.files, (("leaf01.yaml", HOST_YAML),))
+
     def test_auto_selection_is_rechecked_at_parent_atomic_commit(self):
         with tempfile.TemporaryDirectory() as temporary:
             project = Path(temporary)

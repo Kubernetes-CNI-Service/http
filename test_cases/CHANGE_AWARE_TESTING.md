@@ -2994,3 +2994,34 @@ ABA/换绑、legacy 缺资格 HOLD、原窄归档兼容、真实 LOAD→SETUP→
 B CLI，以及首个 DHCP 归档强杀→新 resume CLI，两次独立真实私有 HTTP PID。
 各完整日志读前后 stat/inode 稳定且 Ran→结果→actual→冻结→END 顺序完整，原 120s
 期限保留。仅为本地候选，批准 ledger 未改，正式 related/full/check 与真机见证仍待完成。
+
+### 2026-10-08 REQ23 原导入根及完整成员的读后资格
+
+R22 源码已提交 `8effa37` 后的 canonical related 因本轮独立复现 REQ23 缺陷而主动中断，
+不是测试 PASS 或完整 full：`r22-8effa37-related.log` inode 163416994、size 130326、SHA256
+`6e6c53f780db4ca691a1082e84acc1bf5b0548855c9a8a5e6c06a8a43f8f5cb2`，实际/END=1，
+保留原 KeyboardInterrupt、冻结一致及干净状态；approved ledger 摘要仍为
+`19e865c310d16e2a3161a488865c38e66b2aeeb38cd2e09d86d64767243bbe11`。
+没有把中断日志或此前局部通过提升为 proof，也不重跑马上会因 REQ23 修复失效的旧树。
+
+有效 RED `req23-final-source-boundary-red.log` inode 163440494、size 7498、SHA256
+`1c2180143690f1cc9f95f7d20e038581ff7af3f08128914f7954fe3b8d7293f8`，5 tests in 18.633s、
+8 FAIL（含五个独立 subtest）、实际/END=1：不变软链的实体根换绑未拒绝；最后 YAML
+解析后未知成员、同字节新 inode、选中目录换绑、根换绑、新最新套件被返回的快照漏掉。
+两条真实多脚本 import 生成/子发布→四文件 DHCP→parent 流程也错误提交；显式选择旧套件
+正例通过。原断言独立固定拒绝、旧 parent/四文件恢复与操作者来源不变。
+
+修复预检读前/读后原 selection 的持有根和当前逻辑目标、选中目录与自动集合；最后解析后
+完整清单精确匹配，每个原成员九字段复核（含 nlink、不含 atime）。不从新对象反签快照、
+不改自动/显式选择合同、parent 原子替换或 DHCP 恢复合同。五项有界 GREEN
+`req23-final-source-boundary-green.log` inode 163445902、size 2414、SHA256
+`49a6130767d16599c98c179348c488b5d86ab64f7a0c55a240d6f01016f8a03d`，5 tests in 13.662s、
+OK、实际/END=0；完整日志读前后 stat 稳定、物理 Ran→结果→实际退出→END 完整。
+manifest 的 LOAD/SETUP direct 和 import release 多脚本 workflow 映射沿用；待整模块和
+canonical runner 的当前精确树资格，非 full/check 或真实设备验收。REQ23 现场卡仍 OPEN。
+
+随后两整个 REQ23 模块 `req23-final-source-modules.log` inode 163453037、size 4422、SHA256
+`b3036da669f9a841302d7a4c8d6363e18c2a2dc5b0600318fb1e0447d7ed0c97`，23 tests in 21.112s、
+OK、实际/END=0、全部受跟踪字节冻结一致；包括原自动最新/显式旧套件、坏件、输入来源漂移、
+输出不可覆盖、真实 child/parent/报告/activation/monitor 正例及三种最终 DHCP 回滚场景。
+此为完整模块回归而非治理批准；后续必须由 canonical runner 生成当前精确树的正式证明。
