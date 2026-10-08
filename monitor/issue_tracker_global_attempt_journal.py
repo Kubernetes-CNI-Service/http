@@ -308,3 +308,40 @@ def record_receipted_original_attempt_intent(
     except Exception: failed = True
     if failed: raise GlobalAttemptHold()
     return result
+
+
+def record_owned_receipted_attempt_intent(
+    token, binding, unit, *, qualified_source, store, writer_token,
+    settings, whitelist_snapshot, expected_template_sha256, http_root, whitelist_path,
+    identity_response, headers_response, whitelist_response, metadata_response,
+):
+    """Issued live read gates around the original C5/C6 durable count, NOT GO.
+
+    No caller template identity/plan/freshness flag is accepted. W1 equality,
+    strict template headers, both original enrollment nonces and absence of an
+    existing unit fence must survive the original protected count. Read expiry
+    or post-count policy drift retains UNKNOWN, never rolls back a count. This
+    observation still does not prove hidden PROJECT quota, fresh business/History
+    rows, older-cycle R2, shared cadence or any actual mutation/COMPLETE permit.
+    """
+    from monitor.issue_tracker_remote_history_match import observe_owned_unit_read_gates
+
+    def gates():
+        return observe_owned_unit_read_gates(
+            writer_token, token, binding, unit, whitelist_snapshot=whitelist_snapshot.whitelist,
+            identity_response=identity_response, headers_response=headers_response,
+            whitelist_response=whitelist_response, metadata_response=metadata_response)
+
+    failed = False
+    try:
+        original_gates = gates()
+        result = record_receipted_original_attempt_intent(
+            token, binding, original_gates.identity, unit, qualified_source=qualified_source,
+            store=store, writer_token=writer_token, settings=settings,
+            whitelist_snapshot=whitelist_snapshot, expected_template_sha256=expected_template_sha256,
+            http_root=http_root, whitelist_path=whitelist_path)
+        if gates() != original_gates or inspect_global_unit(token,binding,unit) != result:
+            raise GlobalAttemptHold()
+    except Exception: failed = True
+    if failed: raise GlobalAttemptHold()
+    return result

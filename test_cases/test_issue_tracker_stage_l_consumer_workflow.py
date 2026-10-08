@@ -92,6 +92,14 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         self._exercise_real_protected_three_panel_fixture(skip_history=False, observed_cabling_insert_probe=True,
             business_preread_probe=True, original_reserved_probe=True, receipted_intent_probe=True, settings_audit_probe=True)
 
+    def test_actual_native_read_gates_dominate_original_c6_count_and_expiry_retains_unknown(self):
+        from monitor import issue_tracker_global_attempt_journal as journal
+        self.assertTrue(hasattr(journal, 'record_owned_receipted_attempt_intent'),
+                        'actual issued W1/template/nonces must dominate original protected C6 count')
+        self._exercise_real_protected_three_panel_fixture(skip_history=False, observed_cabling_insert_probe=True,
+            business_preread_probe=True, original_reserved_probe=True, receipted_intent_probe=True,
+            owned_read_gates_probe=True)
+
     def test_two_real_cycles_keep_keys_and_commit_latest_business_values(self):
         self._exercise_real_protected_three_panel_fixture(
             skip_history=False, two_cycle_changed_latest=True,
@@ -450,7 +458,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         settings_channel_probe=False, settings_channel_fault=False,
         panel_counts_probe=False, source_unit_probe=False, receipted_source_probe=False, observed_source_probe=False,
         observed_switch_insert_probe=False, observed_cabling_insert_probe=False, business_preread_probe=False, original_reserved_probe=False, receipted_intent_probe=False,
-        settings_audit_probe=False, complete_preview_probe=False,
+        settings_audit_probe=False, owned_read_gates_probe=False, complete_preview_probe=False,
         complete_preview_source_race=False,
         complete_preview_cgi=False,
     ):
@@ -1695,9 +1703,72 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                                             self.assertEqual(0, global_journal.inspect_global_unit(spreadsheet_token, binding, unit).attempt_count)
                                             self.assertEqual(b'[]\n', private_allowlist.read_bytes())
                                         finally: private_allowlist.write_bytes(allowlist_bytes)  # owned fault only
+                                    if owned_read_gates_probe:
+                                        from test_cases.test_req7_remote_history_match import Req7OwnedHistoryMatchWorkflowTests, load as load_read_gates
+                                        from test_cases.test_req7_sheets_read_decode import header_response
+                                        from test_cases.test_req7_online_whitelist_read import document as whitelist_document
+                                        from monitor import issue_tracker_history_read_launcher as fixed_reads
+                                        read_gates = load_read_gates()
+                                        self.assertIs(read_gates.global_journal, global_journal)
+                                        self.assertIs(read_gates.enrollment, sys.modules['monitor.issue_tracker_enrollment_journal'])
+                                        self.assertIs(read_gates.ownership, owner_module)
+                                        import xml.etree.ElementTree as ET
+                                        native_fixture = Req7OwnedHistoryMatchWorkflowTests()
+                                        native_fixture.root = global_root
+                                        native_fixture.path = global_root/'etc/ssl/certs/ca-certificates.crt'
+                                        native_fixture.path.parent.mkdir(parents=True)
+                                        native_fixture.addCleanup = self.addCleanup
+                                        # Read actual fixture cells, not a whitelist generated
+                                        # from the implementation's normalized digest/rules.
+                                        namespace = '{http://schemas.openxmlformats.org/spreadsheetml/2006/main}'
+                                        with zipfile.ZipFile(self.template) as archive:
+                                            original_sheet = ET.fromstring(archive.read('xl/worksheets/sheet13.xml'))
+                                        literal_rows = []
+                                        for original_row in original_sheet.find(namespace+'sheetData'):
+                                            cells = [None]*6
+                                            for cell in original_row:
+                                                self.assertEqual('inlineStr',cell.get('t'))
+                                                self.assertIsNone(cell.find(namespace+'f'))
+                                                column = ord(cell.get('r')[0])-ord('A')
+                                                self.assertTrue(0 <= column < 6)
+                                                cells[column] = ''.join(cell.itertext())
+                                            literal_rows.append(tuple(cells))
+                                        whitelist_doc = whitelist_document(())
+                                        whitelist_doc['sheets'][0]['properties']['sheetId'] = dict(identity.sheet_ids)['Whitelist']
+                                        whitelist_doc['sheets'][0]['data'][0]['rowData'] = [
+                                            {'values': [{} if value is None else {'userEnteredValue': {'stringValue': value}}
+                                                        for value in row[:6]]} for row in literal_rows]
+                                        def fresh_bundle():
+                                            return {name:native_fixture.read_owned(private_context,writer_token,spreadsheet_token,
+                                                binding,credential,kind,doc,raw_body=response(doc).data) for name,kind,doc in (
+                                                    ('identity_response','template_identity',identity_response()),
+                                                    ('headers_response','template_headers',header_response()),
+                                                    ('whitelist_response','whitelist',whitelist_doc),
+                                                    ('metadata_response','metadata',json.loads(quota_raw.data)))}
+                                        def record_owned(bundle):
+                                            return global_journal.record_owned_receipted_attempt_intent(
+                                                spreadsheet_token,binding,unit,qualified_source=qualified,store=self.store,
+                                                writer_token=writer_token,settings=args['settings'],whitelist_snapshot=self.snapshot,
+                                                expected_template_sha256=self.snapshot.workbook_sha256,http_root=self.root,
+                                                whitelist_path=self.template,**bundle)
+                                        original_bundle = fresh_bundle()
+                                        for name in original_bundle:
+                                            with self.subTest(copied_read=name),self.assertRaises(global_journal.GlobalAttemptHold):
+                                                record_owned({**original_bundle,name:replace(original_bundle[name])})
+                                            self.assertEqual(0,global_journal.inspect_global_unit(spreadsheet_token,binding,unit).attempt_count)
                                     for count in range(1, 7):
                                         allocation_fault = settings_audit_probe and sheet == 'ETH Cabling' and count == 6
-                                        if receipted_intent_probe and (count in (2, 3, 4, 5) or allocation_fault):
+                                        if owned_read_gates_probe and count == 6:
+                                            bundle = fresh_bundle(); expired = [False]
+                                            original_counter = global_journal.record_receipted_original_attempt_intent
+                                            def finish_after_read_deadline(*counter_args,**counter_kwargs):
+                                                result = original_counter(*counter_args,**counter_kwargs)
+                                                expired[0] = True; return result
+                                            with mock.patch.object(global_journal,'record_receipted_original_attempt_intent',side_effect=finish_after_read_deadline), \
+                                                    mock.patch.object(fixed_reads,'_monotonic',side_effect=lambda:time.monotonic()+(31 if expired[0] else 0)):
+                                                with self.assertRaises(global_journal.GlobalAttemptHold): record_owned(bundle)
+                                            intent = global_journal.inspect_global_unit(spreadsheet_token,binding,unit)
+                                        elif receipted_intent_probe and (count in (2, 3, 4, 5) or allocation_fault):
                                             original_observe = global_journal._observe
                                             fault_path = assignments_path if allocation_fault else {2: private_allowlist, 3: generation_path/'RECEIPT',
                                                 4: source_path, 5: project/'01-global.yaml'}[count]
@@ -1714,7 +1785,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                                                 with self.assertRaises(global_journal.GlobalAttemptHold): record()
                                                 self.assertEqual(count, global_journal.inspect_global_unit(spreadsheet_token, binding, unit).attempt_count)
                                             finally: fault_path.write_bytes(original_bytes)  # fault fixture only, no production recovery
-                                        else: intent = record()
+                                        else: intent = record_owned(fresh_bundle()) if owned_read_gates_probe else record()
                                         self.assertEqual((count, 'UNKNOWN'), (intent.attempt_count, intent.outcome))
                                         self.assertFalse(hasattr(intent, 'permit')); self.assertFalse(hasattr(intent, 'complete'))
                                         self.assertEqual(seen, preread.inspect_business_preread(spreadsheet_token, binding, identity, unit))

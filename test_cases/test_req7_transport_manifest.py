@@ -34,6 +34,35 @@ SCRIPTS = {
 
 
 class Req7TransportManifestCandidateTests(unittest.TestCase):
+    def test_owned_read_gate_fixture_uses_current_canonical_journal_registries(self):
+        import monitor
+        from test_cases.test_req7_global_attempt_journal import load as global_load
+        from test_cases.test_req7_enrollment_journal import load as enrollment_load
+        from test_cases.test_req7_remote_history_match import load as gate_load
+        global_module = global_load(); enrollment_module = enrollment_load()
+        gate = gate_load()
+        self.assertIs(gate, getattr(monitor, 'issue_tracker_remote_history_match', None))
+        self.assertIs(gate.global_journal, global_module)
+        self.assertIs(gate.enrollment, enrollment_module)
+        self.assertIs(gate.ownership, monitor.issue_tracker_spreadsheet_owner)
+
+    def test_original_count_workflow_covers_actual_owned_read_gates(self):
+        manifest = json.loads((ROOT / 'test_cases/script_test_manifest.json').read_text())
+        required = {'monitor/issue_tracker_global_attempt_journal.py',
+                    'monitor/issue_tracker_remote_history_match.py',
+                    'monitor/issue_tracker_history_read_launcher.py',
+                    'monitor/issue_tracker_online_whitelist_read.py',
+                    'monitor/issue_tracker_attempt_supervision.py',
+                    'monitor/issue_tracker_tls_inputs.py'}
+        workflow = next(item for item in manifest['workflows']
+                        if item['id'] == 'req7_protected_original_receipt_business_count')
+        self.assertTrue(required <= set(workflow['members']))
+        self.assertIn('test_cases.test_issue_tracker_stage_l_consumer_workflow', workflow['tests'])
+        self.assertIn('test_cases.test_req7_global_attempt_journal', workflow['tests'])
+        matching = next(item for item in manifest['workflows']
+                        if item['id'] == 'req7_native_history_nonce_fence_actual_journal_match')
+        self.assertIn('monitor/issue_tracker_online_whitelist_read.py', matching['members'])
+
     def test_durable_fixture_package_aliases_track_current_owner_and_journal_modules(self):
         import monitor
         from test_cases.test_req7_spreadsheet_owner import load as owner_load

@@ -41,6 +41,15 @@ class RemoteHistoryObservation:
     history_sha256: str
 
 
+@dataclass(frozen=True)
+class OwnedUnitReadGateObservation:
+    """Necessary live read checks, not a mutation permit or globally free quota."""
+    identity: object
+    whitelist_sha256: str
+    enrollment_sha256: str
+    capacity_outcome: str
+
+
 def _fence(unit, identity, response):
     """Presence of the exact ID/image, not any z=1 or substituted fence ID."""
     doc = json.loads(response.data.decode('utf-8', 'strict'), object_pairs_hook=metadata._pairs,
@@ -135,5 +144,42 @@ def observe_owned_remote_history_unit(writer_token, owner_token, binding, unit, 
         for kind, response in responses:
             require_current_owned_read(writer_token, owner_token, binding, response, read_kind=kind)
     except Exception: failed = True
+    if failed: raise RemoteHistoryHold()
+    return result
+
+
+def observe_owned_unit_read_gates(writer_token, owner_token, binding, unit, *,
+                                  whitelist_snapshot, identity_response, headers_response,
+                                  whitelist_response, metadata_response):
+    """Fresh original W1/template/nonces under actual dual owners, not GO.
+
+    Read-only metadata inventory still cannot see other PROJECT scopes. Reject
+    visible overflow, and any already-present unit fence must be reconciled,
+    never turned into a new counted send here. Full row/History continuity,
+    original C5/C6/cadence/reservations and the fixed mutation permit are separate.
+    """
+    failed=False
+    try:
+        from monitor.issue_tracker_history_read_launcher import require_current_owned_read
+        from monitor.issue_tracker_online_whitelist_read import compare_online_whitelist_read
+        responses=(('template_identity',identity_response),('template_headers',headers_response),
+                   ('whitelist',whitelist_response),('metadata',metadata_response))
+        plans=tuple(require_current_owned_read(writer_token,owner_token,binding,response,read_kind=kind)
+                    for kind,response in responses)
+        identity=decode.decode_template_identity(plans[0],identity_response)
+        decode.decode_template_headers(plans[1],headers_response,identity)
+        whitelist=compare_online_whitelist_read(plans[2],whitelist_response,whitelist_snapshot)
+        if whitelist.sheet_id != dict(identity.sheet_ids)['Whitelist']: raise RemoteHistoryHold()
+        global_journal.inspect_global_unit(owner_token,binding,unit)
+        enrollment.require_unit_enrollment(owner_token,binding,identity,unit)
+        action=json.loads(unit.action_preimage)
+        pair=enrollment.observe_enrollment_pair(owner_token,binding,identity,plans[3],metadata_response,
+                                                sheet=action['identity']['sheet'])
+        capacity=metadata.observe_metadata_capacity(plans[3],metadata_response,identity,reservations=())
+        if capacity.outcome=='STOP_CAPACITY' or _fence(unit,identity,metadata_response)[0]: raise RemoteHistoryHold()
+        for kind,response in responses:
+            require_current_owned_read(writer_token,owner_token,binding,response,read_kind=kind)
+        result=OwnedUnitReadGateObservation(identity,whitelist.rules_sha256,pair.journal_sha256,capacity.outcome)
+    except Exception: failed=True
     if failed: raise RemoteHistoryHold()
     return result

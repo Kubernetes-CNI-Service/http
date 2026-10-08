@@ -2135,6 +2135,8 @@ FIFO、每次准入／真实单次 wire；部署与真实断电验收准确保�
 
 ## TC-REAL-REQ7-REMOTE-HISTORY-MATCH-001 — journal/原始 nonce/fence/全部 History 必要对账
 
+- 新鲜计数读门补充（**NOT RUN / REAL_ENV REQUIRED**）：实际固定 identity/headers/W1/metadata 四次原始读取须在原始 C5/C6 计数前后保持双 owner、策略和原期限。W1 ID 与十四表身份匹配，规则等于冻结本地快照，双原 nonce 正确，无已有 fence／可见溢出。复制回应拒绝；期限在 durable 计数之后失效时保留 UNKNOWN 和原计数。现场证据须保留固定请求、原回应摘要、原始预留绑定及故障阶段，清理仅获准隔离副本；非原子读、隐藏 PROJECT、真实业务/History 连续性和 mutation 风险不闭合，不授予发送许可。
+
 - 固定原始读取桥补充（**NOT RUN / REAL_ENV REQUIRED**）：模板 identity/四表 headers、metadata search 和完整 History tail 仅接受受监督固定入口实际签发对象，原双 owner、当前策略、原始参数/正文及原 30 秒期限在匹配前后同时有效。真实拥有的 loopback 测试保留 UNKNOWN，拒绝复制对象、漂移表头、缺少审计、解析后期限到期和策略撤销。现场须独立记录该来源链及四次非原子读取限制；不提升隐藏 PROJECT 库存完整性或授权 mutation/COMPLETE，清理与风险沿用本卡。
 
 - Case ID：`TC-REAL-REQ7-REMOTE-HISTORY-MATCH-001`；类型：integration / transaction / real-environment；对应 C-6/C-19/C-26。状态：**NOT RUN / REAL_ENV REQUIRED**。自动化 `test_cases.test_req7_remote_history_match`；涉及 `monitor/issue_tracker_remote_history_match.py`、global owner/attempt、enrollment、preread、metadata、typed History 和原生 TLS，未安装。本地私有 loopback TLS 与真实自有文件屏障不证明部署身份或整个 REQ7。
@@ -2145,6 +2147,8 @@ FIFO、每次准入／真实单次 wire；部署与真实断电验收准确保�
 - 故障注入与清理：逐项缺失 journal、marker 或原像，变更 before typed 细胞/空洞、不同 fence ID、两份 nonce错配、额外业务/审计/外来 append、断连及重复回调；只回收确证自有临时目录与进程，不删除真实 journal/fence/nonce、不重置计数、不解锁重发。
 
 ## TC-REAL-REQ7-HISTORY-PREREAD-JOURNAL-001 — 不可变发送前 History 原像
+
+- 原计数联动补充（**NOT RUN / REAL_ENV REQUIRED**）：原始模板 identity RAW 摘要须与 metadata reservation HEADER 一致，不以 JSON 重序列化或语义相等绕过；固定 W1/template/nonces 前后观察是必要条件，不能替代原业务/History journal、真实新鲜读和 COMPLETE。私有 TLS 与真实原 C5/C6 workflow 的全六次计数、计数后到期 UNKNOWN 只属本地见证，现场前置／证据／清理／风险沿用本卡。
 
 - 原 C5 值投影补充（**NOT RUN**）：双 owner 计数必须从受保护 C5 的实际重放结果派生工具列，逐项核原 manifest 全部操作、原业务 wire、NOOP 决策和发送项 UTC；只凭 action/preread 哈希自洽或调用方 typed 行不构成来源证明。缺失／重复／源值或发送时间漂移前置 HOLD 不计数，UNKNOWN 后不重新组批。现场前置需另获受保护源与原 journal 只读及隔离故障注入权限；证据保留原件 inode/SHA、真实重放与计数前后物理顺序。清理仅撤销自有 fixture 注入，不修复或删除真实原件／UNKNOWN；本地独立 Switch 和真实 ETH／IB 多脚本测试不冒称真机通过。
 

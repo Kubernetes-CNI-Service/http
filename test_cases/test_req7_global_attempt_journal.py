@@ -45,6 +45,25 @@ class Req7GlobalAttemptJournalTests(unittest.TestCase):
         self.locks.mkdir(parents=True, mode=0o700); self.value = unit()
         self.store = self.locks / (hashlib.sha256(TARGET.encode()).hexdigest() + '.journal')
 
+    def test_owned_counter_rejects_unissued_reads_before_protected_chain(self):
+        from types import SimpleNamespace
+        self.assertTrue(hasattr(self.module, 'record_owned_receipted_attempt_intent'),
+                        'fresh original read gates must precede protected C6 count')
+        with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
+            self.module.prepare_global_unit(token,binding(),self.value)
+            forged = SimpleNamespace(status=200,complete=True,data=b'{}')
+            options = dict(qualified_source=None,store=None,writer_token=None,settings=None,
+                           whitelist_snapshot=SimpleNamespace(whitelist=None),expected_template_sha256='a'*64,
+                           http_root=self.root,whitelist_path=self.root/'not-a-template',
+                           identity_response=forged,headers_response=forged,
+                           whitelist_response=forged,metadata_response=forged)
+            with mock.patch.object(self.module,'record_receipted_original_attempt_intent') as protected:
+                with self.assertRaises(self.module.GlobalAttemptHold) as caught:
+                    self.module.record_owned_receipted_attempt_intent(token,binding(),self.value,**options)
+                protected.assert_not_called()
+            self.assertIsNone(caught.exception.__context__)
+            self.assertEqual(0,self.module.inspect_global_unit(token,binding(),self.value).attempt_count)
+
     def test_action_wire_and_header_are_immutable_before_six_global_unknown_intents(self):
         with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
             self.module.prepare_global_unit(token, binding(), self.value)

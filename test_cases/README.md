@@ -1084,6 +1084,16 @@ UNKNOWN 联测保持原始预留，不发送网络；只有必要原件观察，
 admission、per-key FIFO settlement、受审 launcher、COMPLETE 或整个 REQ7。
 真机仍 NOT RUN。
 
+`record_owned_receipted_attempt_intent` 在原始 C5/C6 计数前后核对实际固定读取器
+签发的模板 identity、四表 headers、W1 六列与 metadata；W1 sheet ID 必须等于
+十四表 identity 中的 Whitelist，规则须等于冻结本地快照，不重新筛选业务。
+双 enrollment 必须保持原 nonce，已有 fence 或可见容量溢出拒绝新计数。
+原始 metadata 预留绑定原始 identity 响应字节摘要，不能用重新序列化的图像替代。
+复制的 completion 不具来源权威；计数后原 30 秒期限到期仍保留 UNKNOWN 和原计数，
+不能回滚。真实双 owner／固定私有 TLS → 原始 receipt／来源／预留 → C6 流程
+检验此边界；可见库存仍 VISIBLE_ONLY_UNPROVED，不是隐藏 PROJECT 配额、新鲜业务／
+History 连续性、共享节流、真实 mutation、COMPLETE 或整个 REQ7 验收。
+
 History、两张 Cabling 与 metadata 的原始 RAW 持久化统一使用固定名称的
 2 MiB 有界图像写入器，原字节全部保留、不截断；超限在创建 store 前拒绝。
 短写继续完整落盘，无进度／file-dir barrier 失败保留 partial HOLD；NOREPLACE

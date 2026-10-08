@@ -31,7 +31,10 @@ def load():
     if not path.is_file(): raise AssertionError('journal/nonce/fence/all-History matcher missing')
     spec = importlib.util.spec_from_file_location('monitor.issue_tracker_remote_history_match', path)
     module = importlib.util.module_from_spec(spec); sys.modules[spec.name] = module
-    spec.loader.exec_module(module); return module
+    spec.loader.exec_module(module)
+    import monitor
+    monitor.issue_tracker_remote_history_match = module
+    return module
 
 
 class Req7RemoteHistoryMatchDirectTests(unittest.TestCase):
@@ -266,10 +269,11 @@ class Req7OwnedHistoryMatchWorkflowTests(unittest.TestCase):
     setUp = _Fixture.setUp; certificates = _Fixture.certificates; server = _Fixture.server
     owners = _Fixture.owners; intercept = _Fixture.intercept; child_fixture = _Fixture.child_fixture
 
-    def read_owned(self, stack, writer, owner, binding, token, kind, value):
+    def read_owned(self, stack, writer, owner, binding, token, kind, value, *, raw_body=None):
         from monitor import issue_tracker_history_read_launcher as reads
         import socket
-        body = json.dumps(value, separators=(',', ':')).encode()
+        body = json.dumps(value, separators=(',', ':')).encode() if raw_body is None else raw_body
+        self.assertIs(type(body),bytes)
         reply = b'HTTP/1.1 200 OK\r\nContent-Length: ' + str(len(body)).encode() + b'\r\nConnection: close\r\n\r\n' + body
         with self.server(reply, hostname='sheets.googleapis.com', destination='sheets.googleapis.com') as (records, errors):
             port = socket.getaddrinfo('sheets.googleapis.com', 443)[0][4][1]
@@ -385,6 +389,54 @@ class Req7OwnedHistoryMatchWorkflowTests(unittest.TestCase):
                 seen=actual(*args,**kwargs); config.write_text(json.dumps(document(status='disabled'))); return seen
             with mock.patch.object(module,'observe_remote_history_unit',side_effect=revoke):
                 with self.assertRaises(module.RemoteHistoryHold): module.observe_owned_remote_history_unit(writer,owner,bound,unit,**responses)
+
+    def test_owned_whitelist_template_nonce_and_visible_capacity_read_gates_are_not_a_permit(self):
+        module=load()
+        self.assertTrue(hasattr(module,'observe_owned_unit_read_gates'),'original W1/template/enrollment read gate bridge missing')
+        from contextlib import ExitStack
+        from monitor.issue_tracker_whitelist import freeze_whitelist_sheet
+        from test_cases.test_req7_online_whitelist_read import document as whitelist_document, HEADER
+        from monitor import issue_tracker_global_attempt_journal as journal
+        snapshot=freeze_whitelist_sheet([HEADER,(None,None,None,None,'leaf-01',None),
+                                        (None,None,None,None,'spine-*',None)])
+        with ExitStack() as stack:
+            writer,owner,bound,auth,_config,unit,docs=self.prepare_owned(stack)
+            meta=deepcopy(docs['metadata_response'][1]); meta['matchedDeveloperMetadata'].pop()
+            whitelist_doc=whitelist_document(); whitelist_doc['spreadsheetId']=bound.spreadsheet_id
+            whitelist_doc['sheets'][0]['properties']['sheetId']=112
+            images={name:self.read_owned(stack,writer,owner,bound,auth,kind,value) for name,(kind,value) in
+                    {'identity_response':docs['identity_response'],'headers_response':docs['headers_response'],
+                     'metadata_response':('metadata',meta),'whitelist_response':('whitelist',whitelist_doc)}.items()}
+            observed=module.observe_owned_unit_read_gates(writer,owner,bound,unit,whitelist_snapshot=snapshot,**images)
+            self.assertEqual(snapshot.sha256,observed.whitelist_sha256)
+            self.assertEqual('VISIBLE_ONLY_UNPROVED',observed.capacity_outcome)
+            self.assertFalse(hasattr(observed,'permit')); self.assertFalse(hasattr(observed,'applied'))
+            self.assertEqual(1,journal.inspect_global_unit(owner,bound,unit).attempt_count)
+            wrong_sheet=deepcopy(whitelist_doc); wrong_sheet['sheets'][0]['properties']['sheetId']=113
+            read=self.read_owned(stack,writer,owner,bound,auth,'whitelist',wrong_sheet)
+            with self.assertRaises(module.RemoteHistoryHold):
+                module.observe_owned_unit_read_gates(writer,owner,bound,unit,whitelist_snapshot=snapshot,**{**images,'whitelist_response':read})
+            for name in images:
+                with self.subTest(copy=name),self.assertRaises(module.RemoteHistoryHold):
+                    module.observe_owned_unit_read_gates(writer,owner,bound,unit,whitelist_snapshot=snapshot,**{**images,name:replace(images[name])})
+            changed=deepcopy(whitelist_doc); changed['sheets'][0]['data'][0]['rowData'][1]['values'][4]['userEnteredValue']['stringValue']='new-unapproved-device-rule'
+            read=self.read_owned(stack,writer,owner,bound,auth,'whitelist',changed)
+            with self.assertRaises(module.RemoteHistoryHold):
+                module.observe_owned_unit_read_gates(writer,owner,bound,unit,whitelist_snapshot=snapshot,**{**images,'whitelist_response':read})
+            read=self.read_owned(stack,writer,owner,bound,auth,'metadata',docs['metadata_response'][1])
+            with self.assertRaises(module.RemoteHistoryHold):
+                module.observe_owned_unit_read_gates(writer,owner,bound,unit,whitelist_snapshot=snapshot,**{**images,'metadata_response':read})
+            bad=deepcopy(meta); bad['matchedDeveloperMetadata'][0]['developerMetadata']['metadataValue']='f'*64
+            read=self.read_owned(stack,writer,owner,bound,auth,'metadata',bad)
+            with self.assertRaises(module.RemoteHistoryHold):
+                module.observe_owned_unit_read_gates(writer,owner,bound,unit,whitelist_snapshot=snapshot,**{**images,'metadata_response':read})
+            overflow=deepcopy(meta); overflow['matchedDeveloperMetadata'].append({'developerMetadata': {
+                'metadataId':9000,'metadataKey':'x','metadataValue':'a'*30000,'visibility':'DOCUMENT',
+                'location':{'locationType':'SHEET','sheetId':101}}})
+            read=self.read_owned(stack,writer,owner,bound,auth,'metadata',overflow)
+            with self.assertRaises(module.RemoteHistoryHold):
+                module.observe_owned_unit_read_gates(writer,owner,bound,unit,whitelist_snapshot=snapshot,**{**images,'metadata_response':read})
+            self.assertEqual((1,'UNKNOWN'),(journal.inspect_global_unit(owner,bound,unit).attempt_count,journal.inspect_global_unit(owner,bound,unit).outcome))
 
 
 class Req7RemoteHistoryManifestTests(unittest.TestCase):
