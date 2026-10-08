@@ -1171,3 +1171,15 @@ LOAD 在预检读前、最后 YAML 解析后和资格返回前，核持有根与
 目录换绑、晚插未知件、同字节新 inode 或解析期间新最新套件均拒绝，不借已读快照提交 parent。
 direct 和真实生成/子发布→最终 DHCP 安装→parent 门禁 workflow 验证拒绝并恢复四个旧 DHCP
 文件、保留旧 parent 和操作者来源；局部证据不构成 formal full 或真实设备导入验收。
+
+### R22 实体 infra/logs 原始成员资格
+
+跨项目 SETUP 首次迁移实体日志之前，LOAD 将完整原目录成员名、每个文件/子目录原
+dev/ino/mode/uid/gid 和文件 size/mtime/SHA 写入 WAL。冷恢复不能从当前 receipt、
+当前同字节替换文件或晚插入的新成员补造原始权限；缺少原树记录的旧 infra WAL 必须 HOLD。
+硬链接迁移及清理会合法改变 nlink/ctime，因此它们不作为跨迁移阶段的固定值；每次实际
+读取仍前后核全部身份，包括 nlink/ctime，恢复写前继续核原 WAL 和全部持有权限。
+正常嵌套重复硬链接必须在原 WAL 登记前存在；晚改 receipt 不授权新的成员。
+direct 与真实 LOAD→SETUP 指针发布后强杀→全新 LOAD 负例均保留原/替换文件、WAL、
+receipt、P manifest 和 mixed links，零恢复写、零服务启动。局部回归不等于正式 full/check；
+B 完整归档、实体 latest 全成员资格及 Linux/断电见证继续单独核验。

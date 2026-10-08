@@ -7114,6 +7114,65 @@ finally:
             self.assertEqual(payload, copied.read_bytes())
             self.assertFalse((root / "service-started").exists())
 
+    def test_real_setup_infra_death_cold_reader_cannot_adopt_replaced_original_members(self):
+        """The independent producer's original inodes survive a fresh reader."""
+        with tempfile.TemporaryDirectory(prefix="r22-infra-original-owner-") as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, _p, q, common, _p_only, _q_only, manifest, _before, _hook, barrier, _home = fixture
+            source = root / "infra/logs"
+            source.mkdir()
+            payload = b"independent original P log member\n"
+            (source / "audit.log").write_bytes(payload)
+            original = (source / "audit.log").stat().st_ino
+            first = self._run_private_load_setup_switch(fixture, prepare_journal=True, first_link=source)
+            self.assertEqual(23, first.returncode, first.stdout + first.stderr)
+            self.assertTrue(barrier.is_file())
+            destination = q / "99-output-infra"
+            backup = destination / ".logs-migration-source"
+            retained = root / "operator-original-audit.log"
+            (backup / "audit.log").rename(retained)
+            (destination / "audit.log").unlink()
+            (backup / "audit.log").write_bytes(payload)
+            os.link(backup / "audit.log", destination / "audit.log")
+            self.assertNotEqual(original, (backup / "audit.log").stat().st_ino)
+            receipt, journal = root / "infra/.logs-migration.json", root / "ztp/.setup-switch-journal.json"
+            frozen = (receipt.read_bytes(), journal.read_bytes(), os.readlink(source),
+                      os.readlink(common), manifest.read_bytes())
+            recovery = """
+import importlib.util, sys
+from pathlib import Path
+from types import SimpleNamespace
+root = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location('cold_original_member_load', root / 'DAY0-Prepare/11-load.py')
+load = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = load
+spec.loader.exec_module(load)
+load.active_managed_services = lambda *args, **kwargs: ()
+descriptor = load.acquire_deployment_lock(exclusive=True)
+try:
+    try:
+        load.recover_setup_switch_journal(root / 'ztp/.setup-switch-journal.json',
+            deployment_lock_descriptor=descriptor, services_quiesced=True,
+            runtime_backend=SimpleNamespace(name='supervisor'))
+    except load.LoadError as error:
+        assert 'infra' in str(error) and 'original' in str(error), str(error)
+        print('R22_ORIGINAL_INFRA_MEMBER_HELD')
+    else:
+        raise AssertionError('cold reader adopted a replacement original log inode')
+finally:
+    load.release_deployment_lock(descriptor)
+"""
+            second = subprocess.run([sys.executable, "-B", "-c", recovery, str(root)],
+                                    cwd=root, capture_output=True, text=True, check=False, timeout=30)
+            self.assertEqual(0, second.returncode, second.stdout + second.stderr)
+            self.assertIn("R22_ORIGINAL_INFRA_MEMBER_HELD", second.stdout)
+            self.assertEqual(frozen, (receipt.read_bytes(), journal.read_bytes(), os.readlink(source),
+                                     os.readlink(common), manifest.read_bytes()))
+            self.assertEqual(original, retained.stat().st_ino)
+            self.assertEqual(payload, (backup / "audit.log").read_bytes())
+            self.assertEqual(payload, (destination / "audit.log").read_bytes())
+            self.assertFalse((root / "service-started").exists())
+
     def test_real_setup_infra_log_death_cold_recovery_preserves_replaced_q_copy(self):
         """Only the receipt-bound original hardlink has Q cleanup authority."""
         with tempfile.TemporaryDirectory(prefix="r22-infra-copy-owner-") as name:

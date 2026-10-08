@@ -6734,9 +6734,13 @@ def _decode_setup_switch_journal(payload: bytes) -> dict[str, object]:
             raise ValueError(f"unknown journal {inventory} inventory shape")
         for row in rows:
             row_fields = fields
+            if inventory == "infra_logs" and isinstance(row, dict) and "original_tree" in row:
+                row_fields = fields | {"original_tree"}
             if inventory == "q_local_links" and isinstance(row, dict) and ("before_tree" in row or "after_tree" in row):
                 row_fields = fields | {"before_tree", "after_tree"}
             exact_fields(row, row_fields, inventory)
+            if inventory == "infra_logs" and "original_tree" in row:
+                _validate_setup_switch_infra_original_tree(row["original_tree"])
             if inventory == "q_local_links" and "before_tree" in row:
                 for key in ("before_tree", "after_tree"):
                     tree = row[key]
@@ -10117,7 +10121,8 @@ def _setup_switch_created_directory_sync_parent(body, row):
     return parent
 
 
-def _setup_switch_comparison_tree(path: Path) -> dict[str, object]:
+def _setup_switch_comparison_tree(path: Path, *, allow_hardlinks=False,
+                                  bind_file_ctime=True) -> dict[str, object]:
     """Freeze a bounded regular-file tree via held, no-follow directory FDs.
 
     Directory ctime is deliberately not a payload identity: our authorized
@@ -10131,7 +10136,8 @@ def _setup_switch_comparison_tree(path: Path) -> dict[str, object]:
     def walk(parent_fd, name, relative):
         named = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
         directory = stat.S_ISDIR(named.st_mode)
-        if not directory and (not stat.S_ISREG(named.st_mode) or named.st_nlink != 1):
+        if not directory and (not stat.S_ISREG(named.st_mode)
+                              or not allow_hardlinks and named.st_nlink != 1):
             raise ValueError("comparison entry is not a real directory/single-link regular file")
         descriptor = os.open(name, flags | (getattr(os, "O_DIRECTORY", 0) if directory
                                             else getattr(os, "O_NONBLOCK", 0)), dir_fd=parent_fd)
@@ -10158,6 +10164,8 @@ def _setup_switch_comparison_tree(path: Path) -> dict[str, object]:
                     digest.update(chunk)
                 entry.update(size=before.st_size, mtime_ns=before.st_mtime_ns,
                              ctime_ns=before.st_ctime_ns, sha256=digest.hexdigest())
+                if not bind_file_ctime:
+                    del entry["ctime_ns"]
             after = os.fstat(descriptor)
             current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
             if any(getattr(before, key) != getattr(after, key)
@@ -10523,6 +10531,8 @@ def register_setup_switch_infra_log_tree(
             "destination_dev": destination_info.st_dev,
             "destination_ino": destination_info.st_ino,
             "backup": str(backup), "receipt": str(receipt),
+            "original_tree": _setup_switch_comparison_tree(
+                source, allow_hardlinks=True, bind_file_ctime=False),
         }
         next_body = dict(body, infra_logs=[row])
         next_payload = _setup_switch_canonical_payload({
@@ -10549,6 +10559,9 @@ def register_setup_switch_infra_log_tree(
                 or _read_rollback_regular(journal, limit=_SETUP_SWITCH_JOURNAL_LIMIT) != opened):
             raise LoadError("setup switch journal changed before infra registration")
         _setup_switch_runtime_context(next_body)
+        if row["original_tree"] != _setup_switch_comparison_tree(
+                source, allow_hardlinks=True, bind_file_ctime=False):
+            raise LoadError("infra log original inventory changed before WAL registration; HOLD")
         os.replace(temporary, journal)
         _fsync_parent_directory(journal.parent)
     finally:
@@ -10789,11 +10802,41 @@ def _setup_switch_require_infra_copies(state, *, names=None, directory_names=Non
         raise LoadError(f"infra log copy changed: {exc}") from exc
 
 
+def _validate_setup_switch_infra_original_tree(tree):
+    """Closed durable producer inventory, never inferred from a cold receipt.
+
+    Our hardlink creation/removal changes nlink and ctime, but never member
+    dev/ino/mode/uid/gid/size/mtime/hash. Each individual read still pins the
+    complete owner including nlink/ctime before and after reading.
+    """
+    if not isinstance(tree, dict) or "" not in tree or len(tree) > 4096:
+        raise ValueError("infra log original inventory is missing or unbounded; HOLD")
+    for relative, entry in tree.items():
+        if (not isinstance(relative, str) or relative and (
+                os.path.isabs(relative) or os.path.normpath(relative) != relative
+                or ".." in Path(relative).parts)):
+            raise ValueError("infra log original inventory has an unsafe name; HOLD")
+        fields = {"kind", "dev", "ino", "mode", "uid", "gid"}
+        if isinstance(entry, dict) and entry.get("kind") == "file":
+            fields |= {"size", "mtime_ns", "sha256"}
+        elif not isinstance(entry, dict) or entry.get("kind") != "directory":
+            raise ValueError("infra log original inventory has an unsupported owner; HOLD")
+        if (set(entry) != fields or any(type(value) is not int or value < 0
+                for field, value in entry.items() if field not in {"kind", "sha256"})
+                or entry["kind"] == "file" and (not isinstance(entry["sha256"], str)
+                    or re.fullmatch(r"[0-9a-f]{64}", entry["sha256"]) is None)):
+            raise ValueError("infra log original inventory has an invalid owner; HOLD")
+    if tree[""].get("kind") != "directory":
+        raise ValueError("infra log original inventory lacks its directory root; HOLD")
+
+
 def _setup_switch_prepare_infra_log_recovery(row: dict[str, object], q_project: Path):
     """Validate the entire receipt-bound P directory and Q copy before writing."""
     if not isinstance(row, dict):
         raise LoadError("setup switch infra log row is not an object")
     try:
+        original_inventory = row.get("original_tree")
+        _validate_setup_switch_infra_original_tree(original_inventory)
         source, destination = Path(row["source"]), Path(row["destination"])
         backup, receipt = Path(row["backup"]), Path(row["receipt"])
         if (source != HTTP_ROOT.resolve(strict=True) / "infra/logs"
@@ -10833,6 +10876,9 @@ def _setup_switch_prepare_infra_log_recovery(row: dict[str, object], q_project: 
                 raise ValueError("infra log source identity changed")
             original_tree = source
             original_tree_info = source_info
+        if original_inventory != _setup_switch_comparison_tree(
+                original_tree, allow_hardlinks=True, bind_file_ctime=False):
+            raise ValueError("infra log original member identity/inventory changed")
         receipt_parent = _setup_switch_link_parent_identity(receipt)
         receipt_identity = _setup_switch_infra_receipt_identity(receipt)
         opened = _read_rollback_regular(
@@ -10950,6 +10996,9 @@ def _setup_switch_prepare_infra_log_recovery(row: dict[str, object], q_project: 
                 elif not stat.S_ISREG(metadata.st_mode):
                     raise ValueError("infra log Q file changed type")
         _setup_switch_require_infra_receipt(receipt, receipt_authority)
+        if original_inventory != _setup_switch_comparison_tree(
+                original_tree, allow_hardlinks=True, bind_file_ctime=False):
+            raise ValueError("infra log original member identity/inventory changed while qualifying")
         tree_authority = {
             "source": (original_tree_info.st_dev, original_tree_info.st_ino,
                        original_tree_info.st_mode),

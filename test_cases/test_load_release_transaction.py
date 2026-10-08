@@ -11590,7 +11590,7 @@ os.kill(os.getpid(), signal.SIGKILL)
         self.assertNotEqual(original_link, os.readlink(common))
         backend.start.assert_not_called()
 
-    def _prepare_infra_receipt_recovery_owner(self, *, state=None):
+    def _prepare_infra_receipt_recovery_owner(self, *, state=None, nested_hardlinks=False):
         if state is None:
             state = self._prepare_cross_project_setup_crash()
         q, common, target, journal, descriptor, backend = state[1], state[2], state[5], state[10], state[11], state[12]
@@ -11599,6 +11599,9 @@ os.kill(os.getpid(), signal.SIGKILL)
         original = source.stat()
         payload = b"independent P audit bytes\n"
         (source / "audit.log").write_bytes(payload)
+        if nested_hardlinks:
+            (source / "nested").mkdir()
+            os.link(source / "audit.log", source / "nested/sibling.log")
         destination = q.resolve() / "99-output-infra"
         destination.mkdir()
         with mock.patch.object(LOAD, "active_managed_services", return_value=()):
@@ -11615,14 +11618,135 @@ os.kill(os.getpid(), signal.SIGKILL)
         }) + "\n", encoding="utf-8")
         receipt.chmod(0o600)
         os.link(source / "audit.log", destination / "audit.log")
+        if nested_hardlinks:
+            (destination / "nested").mkdir()
+            os.link(source / "audit.log", destination / "nested/sibling.log")
+            document = json.loads(receipt.read_bytes())
+            document["directories"] = ["nested"]
+            document["entries"]["nested/sibling.log"] = {
+                "size": len(payload), "sha256": hashlib.sha256(payload).hexdigest(),
+            }
+            receipt.write_text(json.dumps(document) + "\n", encoding="utf-8")
         source.rename(backup)
         source.symlink_to(os.path.relpath(destination, source.parent))
         common.unlink()
         common.symlink_to(os.path.relpath(target, common.parent))
         return state, source, destination, backup, receipt, payload
 
+    def test_setup_infra_cold_recovery_cannot_adopt_same_bytes_replacement_members(self):
+        state, source, destination, backup, receipt, payload = self._prepare_infra_receipt_recovery_owner()
+        original = backup / "audit.log"
+        retained = self.root / "operator-original-audit.log"
+        original_owner = original.stat().st_ino
+        original.rename(retained)
+        (destination / "audit.log").unlink()
+        original.write_bytes(payload)
+        os.link(original, destination / "audit.log")
+        self.assertNotEqual(original_owner, original.stat().st_ino)
+        frozen = (state[10].read_bytes(), receipt.read_bytes(), os.readlink(source),
+                  os.readlink(state[2]), state[7].read_bytes())
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            with self.assertRaisesRegex(LOAD.LoadError, "infra.*original.*(identity|inventory|owner)"):
+                LOAD.recover_setup_switch_journal(state[10], deployment_lock_descriptor=state[11],
+                    services_quiesced=True, runtime_backend=state[12])
+        self.assertEqual(frozen, (state[10].read_bytes(), receipt.read_bytes(), os.readlink(source),
+                                 os.readlink(state[2]), state[7].read_bytes()))
+        self.assertEqual(original_owner, retained.stat().st_ino)
+        self.assertEqual(payload, original.read_bytes())
+        state[12].start.assert_not_called()
+
     def test_setup_infra_recovery_wal_change_before_first_write_holds(self):
         self._assert_infra_recovery_late_authority_hold("wal", "first-write")
+
+    def test_setup_infra_legacy_wal_cannot_mint_original_member_identity(self):
+        state, source, destination, backup, receipt, payload = self._prepare_infra_receipt_recovery_owner()
+        envelope = json.loads(state[10].read_bytes())
+        del envelope["body"]["infra_logs"][0]["original_tree"]
+        # Independent legacy fixture: absence is not permission to adopt today's files.
+        envelope["sha256"] = hashlib.sha256(json.dumps(envelope["body"], sort_keys=True,
+            separators=(",", ":"), ensure_ascii=True).encode("ascii")).hexdigest()
+        state[10].write_bytes(json.dumps(envelope, sort_keys=True, separators=(",", ":")).encode() + b"\n")
+        frozen = (state[10].read_bytes(), receipt.read_bytes(), os.readlink(source),
+                  os.readlink(state[2]), state[7].read_bytes())
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            with self.assertRaisesRegex(LOAD.LoadError, "infra.*original.*inventory.*HOLD"):
+                LOAD.recover_setup_switch_journal(state[10], deployment_lock_descriptor=state[11],
+                    services_quiesced=True, runtime_backend=state[12])
+        self.assertEqual(frozen, (state[10].read_bytes(), receipt.read_bytes(), os.readlink(source),
+                                 os.readlink(state[2]), state[7].read_bytes()))
+        self.assertEqual(payload, (backup / "audit.log").read_bytes())
+        self.assertEqual(payload, (destination / "audit.log").read_bytes())
+        state[12].start.assert_not_called()
+
+    def test_setup_infra_receipt_cannot_add_unregistered_original_member(self):
+        state, source, destination, backup, receipt, _payload = self._prepare_infra_receipt_recovery_owner()
+        foreign = b"independent late operator evidence, do not delete\n"
+        (backup / "unknown.log").write_bytes(foreign)
+        os.link(backup / "unknown.log", destination / "unknown.log")
+        document = json.loads(receipt.read_bytes())
+        document["entries"]["unknown.log"] = {"size": len(foreign),
+            "sha256": hashlib.sha256(foreign).hexdigest()}
+        receipt.write_text(json.dumps(document) + "\n")
+        frozen = (state[10].read_bytes(), receipt.read_bytes(), os.readlink(source),
+                  os.readlink(state[2]), state[7].read_bytes())
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            with self.assertRaisesRegex(LOAD.LoadError, "infra.*original.*inventory"):
+                LOAD.recover_setup_switch_journal(state[10], deployment_lock_descriptor=state[11],
+                    services_quiesced=True, runtime_backend=state[12])
+        self.assertEqual(frozen, (state[10].read_bytes(), receipt.read_bytes(), os.readlink(source),
+                                 os.readlink(state[2]), state[7].read_bytes()))
+        self.assertEqual(foreign, (backup / "unknown.log").read_bytes())
+        self.assertEqual(foreign, (destination / "unknown.log").read_bytes())
+        state[12].start.assert_not_called()
+
+    def test_setup_infra_registration_rejects_special_original_members_before_wal_write(self):
+        state = self._prepare_cross_project_setup_crash()
+        source = self.root.resolve() / "infra/logs"
+        source.mkdir(parents=True)
+        foreign = self.root / "operator-evidence"
+        foreign.write_bytes(b"independent original external evidence\n")
+        (source / "escape").symlink_to(foreign)
+        destination = state[1].resolve() / "99-output-infra"
+        destination.mkdir()
+        wal = state[10].read_bytes()
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            with self.assertRaisesRegex(LOAD.LoadError, "infra registration.*not a real"):
+                LOAD.register_setup_switch_infra_log_tree(state[10], source, destination,
+                    deployment_lock_descriptor=state[11], services_quiesced=True, runtime_backend=state[12])
+        self.assertEqual(wal, state[10].read_bytes())
+        self.assertEqual(str(foreign), os.readlink(source / "escape"))
+        self.assertEqual(b"independent original external evidence\n", foreign.read_bytes())
+        state[12].start.assert_not_called()
+
+    def test_setup_infra_original_members_are_rechecked_before_wal_replace(self):
+        state = self._prepare_cross_project_setup_crash()
+        source = self.root.resolve() / "infra/logs"
+        source.mkdir(parents=True)
+        payload = b"independent before-first-write original log\n"
+        (source / "audit.log").write_bytes(payload)
+        destination = state[1].resolve() / "99-output-infra"
+        destination.mkdir()
+        wal = state[10].read_bytes()
+        original = (source / "audit.log").stat().st_ino
+        retained = self.root / "operator-original-audit.log"
+        context = LOAD._setup_switch_runtime_context
+        def replace_after_snapshot(body, *args, **kwargs):
+            result = context(body, *args, **kwargs)
+            if body.get("infra_logs"):
+                (source / "audit.log").rename(retained)
+                (source / "audit.log").write_bytes(payload)
+            return result
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "_setup_switch_runtime_context", side_effect=replace_after_snapshot):
+            with self.assertRaisesRegex(LOAD.LoadError, "infra.*original.*inventory.*HOLD"):
+                LOAD.register_setup_switch_infra_log_tree(state[10], source, destination,
+                    deployment_lock_descriptor=state[11], services_quiesced=True, runtime_backend=state[12])
+        self.assertEqual(wal, state[10].read_bytes())
+        self.assertEqual(original, retained.stat().st_ino)
+        self.assertNotEqual(original, (source / "audit.log").stat().st_ino)
+        self.assertFalse(os.path.lexists(destination / ".logs-migration-source"))
+        self.assertFalse(os.path.lexists(source.parent / ".logs-migration.json"))
+        state[12].start.assert_not_called()
 
     def test_setup_infra_recovery_wal_change_after_pointer_unlink_holds(self):
         self._assert_infra_recovery_late_authority_hold("wal", "pointer-unlink")
@@ -12040,18 +12164,9 @@ os.kill(os.getpid(), signal.SIGKILL)
                 LOAD._setup_switch_infra_file_signature(path)
 
     def test_setup_infra_nested_duplicate_hardlinks_restore_without_false_aba(self):
-        state, source, destination, backup, receipt, payload = self._prepare_infra_receipt_recovery_owner()
+        state, source, destination, backup, receipt, payload = self._prepare_infra_receipt_recovery_owner(
+            nested_hardlinks=True)
         original_inode = backup.stat().st_ino
-        (backup / "nested").mkdir()
-        (destination / "nested").mkdir()
-        os.link(backup / "audit.log", backup / "nested/sibling.log")
-        os.link(backup / "audit.log", destination / "nested/sibling.log")
-        document = json.loads(receipt.read_bytes())
-        document["directories"] = ["nested"]
-        document["entries"]["nested/sibling.log"] = {
-            "size": len(payload), "sha256": hashlib.sha256(payload).hexdigest(),
-        }
-        receipt.write_text(json.dumps(document) + "\n", encoding="utf-8")
         journal, descriptor, backend = state[10:]
         with mock.patch.object(LOAD, "active_managed_services", return_value=()):
             LOAD.recover_setup_switch_journal(
@@ -12183,7 +12298,7 @@ os.kill(os.getpid(), signal.SIGKILL)
         stolen = outside / "stolen.log"
         payload = b"outside bytes\n"
         stolen.write_bytes(payload)
-        (source / "escape").symlink_to(outside, target_is_directory=True)
+        (source / "escape").mkdir()
         destination = new_project.resolve() / "99-output-infra"
         destination.mkdir()
         with mock.patch.object(LOAD, "active_managed_services", return_value=()):
@@ -12192,6 +12307,8 @@ os.kill(os.getpid(), signal.SIGKILL)
                 deployment_lock_descriptor=descriptor,
                 services_quiesced=True, runtime_backend=backend,
             )
+        (source / "escape").rmdir()
+        (source / "escape").symlink_to(outside, target_is_directory=True)
         receipt = self.root.resolve() / "infra/.logs-migration.json"
         receipt.write_text(json.dumps({
             "schema_version": 1,

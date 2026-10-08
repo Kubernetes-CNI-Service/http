@@ -3025,3 +3025,39 @@ canonical runner 的当前精确树资格，非 full/check 或真实设备验收
 OK、实际/END=0、全部受跟踪字节冻结一致；包括原自动最新/显式旧套件、坏件、输入来源漂移、
 输出不可覆盖、真实 child/parent/报告/activation/monitor 正例及三种最终 DHCP 回滚场景。
 此为完整模块回归而非治理批准；后续必须由 canonical runner 生成当前精确树的正式证明。
+
+### 2026-10-08 R22 实体日志原始成员与生成手册修复
+
+`b2d514d` 的 related 已出现 `test_v3_generated_manual_workflow_keeps_role_bound_examples`
+原断言 FAIL。只读生成差异确认遗漏 A 的三个新增参数，生成器机械更新对应一行，未改
+断言、角色例子或 parser 合同。同时独立私有目录复现冷 reader 将同字节新日志 inode
+认作原始成员并误删 WAL，故只向本任务的确切 unittest 子 PID 63115（父 63093）发送
+SIGINT，未运行完整剩余套件。原 related 完整保留至实际 END：inode 163461662、
+size 168128、SHA256 `bc6c4660d48e5ac5e4d9ffba03e73ee5a1c3235b5ef3e2a4af11670a3c515f4f`，
+actual/END=1、源码冻结、ledger 未变；这是已见失败且主动中断的结果，不是完整 full proof。
+
+新增 direct 与真实 LOAD→SETUP 指针发布后强杀→新 LOAD 两项有效 RED：
+`r22-infra-original-members-red.log` inode 163540413、size 2501、SHA256
+`c6938ff083d046974bc6ea70f27d1b2a65fe3bf4e5aded21c1646242fe9b68d1`，2 tests in 3.997s、
+2 FAIL、actual/END=1；原实现接受并恢复了新 inode。WAL 首写前持久保存完整原树，
+登记 replace 前及冷读前后重核，不从当前 receipt 补造资格；旧记录缺原树 HOLD。
+两项 GREEN `r22-infra-original-members-green.log` inode 163542452、size 1004、SHA256
+`50e2450124183ab947022d070b3992cc09a9e040f9e6d644da12b6ea147b5763`，2 tests in 4.274s、OK、
+actual/END=0。原 file ctime/nlink 会被合法 hardlink 改变，跨阶段固定原 inode/其它
+metadata/hash，每次读取仍全部前后复核；comparison 默认单链接/ctime 合同不变。
+
+初轮扩展 `r22-infra-original-members-regressions.log` inode 163544519、size 27460、SHA256
+`b75138e5c8b88e9ac30d5e837f6523298391e39ef80360fd7ebff7d1e6073184`，92 tests in 93.838s、
+3 ERROR、actual/END=1：新注入器未转发第二个上下文参数；旧正例在登记后才增加嵌套
+成员；旧恶意软链夹具在登记前已非法，现已提前被拒绝。修注入器转发参数；正例把同一
+嵌套成员放到登记前，全部原恢复/同 inode/字节/清理/停服断言不变；冷负例在合法原
+目录登记后再换为软链，全部原 HOLD/不碰外部文件/WAL/manifest 断言保留，新增初始
+特殊成员写前拒绝负例。未改实现为接纳晚出现的原成员，未改 timeout 或删跳测试。
+
+修正扩展 `r22-infra-original-members-regressions-corrected.log` inode 163578017、size 22895、
+SHA256 `1ceab064fe890cf642f2140b1fe36c96bcd50b637726d39a1b071655fc4c22f7`，94 tests in 80.512s、
+OK、actual/END=0，覆盖全部相关 infra direct/workflow、完整文档模块与两完整 REQ23 模块，
+新增旧 WAL HOLD、receipt 不能扩大原成员、登记 replace 前成员换绑负例。所有完整日志
+读前后 stat/inode 稳定、结果→实际退出→END 顺序核实，ledger 未改。
+这仍是局部回归，非 canonical 批准或完整 R22；实体 latest 成员身份及 B 完整共享证据
+归档继续 tests-first，相关 runner/full/check 和实际 Linux/断电/C2/DEV ACK 均不冒称完成。

@@ -1634,6 +1634,19 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 ## TC-REAL-R22-GENERATION-INPUT-ABA-001 — 跨进程输入换代与多输出一致性
 
+- 2026-10-08 实体 infra/logs 原始成员补充，仍 OPEN / NOT RUN：在本卡的授权隔离
+  VM、精确版本、root-only 可恢复快照、原排他锁、明确停服和正常写者静默前提下，
+  原 WAL 登记完整目录/成员后，由真实 SETUP 迁移并在指针发布后强杀；把原文件
+  移入已核留存名，在 backup 与 Q 复制名创建同字节新 inode，另测 receipt 增加未知
+  成员。全新 LOAD 必须在首个恢复写前 HOLD，不删除 WAL/receipt/原留存文件/外来对象，
+  P manifest 和 mixed links 保持，服务零启动。无原成员记录的旧 WAL 不从现场目录
+  补造资格；正常嵌套重复硬链接在登记前建立，冷恢复须保留原目录和文件 inode。
+  保存登记→hardlink→rename→指针→强杀→外来对象→冷 HOLD 的物理顺序、原/替换
+  dev/ino/mode/uid/gid/nlink/size/mtime/ctime/SHA、完整 END/exit 及零写盘点。
+  封存后只由负责人按确切快照恢复，不在 live 注入，不删证据解围。合法 hardlink
+  会改变 nlink/ctime；本地逐读再核不构成非合作写者原子隔离或断电见证，也不关闭
+  完整 B 归档、其它共享写集、C2/Linux/DEV ACK 或当前树 formal full/check。
+
 - 2026-10-08 退休 marker 持久化窗口仍待真机见证：在本卡的隔离/root-only
   快照条件下，对已完成本次 B 健康检查的退休 marker 文件 fsync 边界注入
   同 inode、同最终字节、恢复 mtime 的 ABA。必须以 fsync 前的原九字段
