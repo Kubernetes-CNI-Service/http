@@ -1436,15 +1436,15 @@ def assert_quiesce_structurally_precedes_reachable_sink(
         # not an excuse to borrow the ordinary LOAD's later stop. Prove each
         # actual callee first, then analyze the ordinary path separately.
         explicit_entries = (
-            ("_activate_setup_switch_entrypoint", "activate_setup_publication", "resume_setup_retirement"),
-            ("_recover_setup_switch_entrypoint", "recover_setup_switch", "resume_setup_publication"),
+            ("_activate_setup_switch_entrypoint", ("activate_setup_publication", "resume_setup_retirement", "activate_setup_a")),
+            ("_recover_setup_switch_entrypoint", ("recover_setup_switch", "resume_setup_publication")),
         )
         ordinary = copy.deepcopy(function)
-        for callee, first_flag, second_flag in explicit_entries:
+        for callee, flags in explicit_entries:
             if callee not in functions:
                 continue
             expected_guard = ast.parse(
-                f"getattr(args, {first_flag!r}, False) or getattr(args, {second_flag!r}, False)",
+                " or ".join(f"getattr(args, {flag!r}, False)" for flag in flags),
                 mode="eval",
             ).body
             branches = [statement for statement in ordinary.body

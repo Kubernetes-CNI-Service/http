@@ -1634,6 +1634,25 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 ## TC-REAL-R22-GENERATION-INPUT-ABA-001 — 跨进程输入换代与多输出一致性
 
+- 2026-10-08 原 A 显式健康激活仍 OPEN：仅在本卡已授权的可丢弃隔离 VM、
+  精确源码/测试/manifest、独立控制台、root-only 可恢复快照、排他部署锁、
+  Apache/DHCP 已停及其它正常写者静默条件下执行。Q 首写前独立冻结原 A
+  parent/report 文件的父身份、九字段 owner、原字节及 receipt 绑定；原完整
+  P/A/shared/DHCP 分组恢复后，显式执行 `11-load.py <Q> --host-role
+  management-server --activate-setup-a`。该命令不生成、不补偿、不自动回 A，
+  不借用 B 退休资格，成功仍保留原 WAL/恢复计划及全部原备份。
+  实际见证原 sealed 输入/唯一升级策略/镜像、两把不同合法公钥及原 source
+  inode/ctime/摘要、report 与发布边界、真实 Apache/DHCP 配置和本地 listener
+  名称/ifindex/endpoint、服务 PID/监听及 HTTP HEAD；每个深读/启动/HTTP 边界
+  重核原权限。注入原报告同字节新 inode、公钥原源 ABA、预检时有效接口换绑、
+  启动部分成功和真实 HTTP 503；只停止本次实际尝试启动的服务，外来未尝试服务
+  不得收编或停止，停服未确认必须 HOLD。native monitor 停止失败须先于任何
+  WAL 操作，参数冲突/错误角色在锁和服务动作前拒绝。保存原/新 FD/name/parent/
+  stat/SHA、完整物理 END/exit、启动及逆序停服时序、零生成/隐式恢复/证据删除。
+  清理仅负责人按已核隔离快照人工恢复，不在 live 注入、不按前缀删除未知对象。
+  本地 direct 与真实 LOAD→SETUP→SIGKILL→新 LOAD 的私有 loopback/命令端口
+  测试不证明 Linux/root 的 auth/daemon、断电/C2、证据安全归档或 DEV ACK。
+
 - 2026-10-08 prefix 父创建登记前死亡窗口仍 OPEN：沿本卡另行授权的隔离 VM、
   精确源码/测试/manifest、root-only 可恢复快照、排他锁、全部服务已停与正常写者
   静默条件，独立冻结原已有父身份/模式、缺席链、原 A marker/link 和 P/WAL。

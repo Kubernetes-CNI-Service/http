@@ -4967,6 +4967,15 @@ finally:
     def test_real_setup_committed_q_group_cold_restore_returns_p_a_without_service(self):
         self._real_setup_committed_q_group_restore()
 
+    def test_real_setup_committed_q_kill_cold_original_a_explicit_health_retains_wal(self):
+        self._real_setup_committed_q_group_restore(prefix=True, a_health=True)
+
+    def test_real_setup_committed_q_kill_cold_original_a_http_failure_stops_owned_services(self):
+        self._real_setup_committed_q_group_restore(prefix=True, a_health="http-failure")
+
+    def test_real_setup_committed_q_kill_cold_original_a_cli_health_keeps_original_wal(self):
+        self._real_setup_committed_q_group_restore(prefix=True, a_health="cli")
+
     def test_real_setup_committed_q_dhcp_group_cold_restore_keeps_original_four_file_evidence(self):
         self._real_setup_committed_q_group_restore(dhcp=True)
 
@@ -5133,13 +5142,14 @@ finally:
                                              dhcp_death=False, dhcp_metadata=False, dhcp_b_fault=False,
                                              dhcp_legacy_fault=False, prefix=False, prefix_fault=False,
                                              managed_key=False, managed_key_death=False, managed_key_fault=False,
-                                             prefix_change=False, prefix_death=False):
+                                             prefix_change=False, prefix_death=False, a_health=False):
         fixture = RELEASE_FIXTURE.ReleaseTransactionTests()
         fixture.setUp()
         try:
             state, context = fixture._prepare_persisted_a_runtime_switch(
                 original_upgrade_policy="enabled" if a_image_fault or a_image else None,
-                original_images=a_image_fault or a_image, prefix=prefix or prefix_fault, managed_key=managed_key)
+                original_images=a_image_fault or a_image, prefix=prefix or prefix_fault, managed_key=managed_key,
+                qualified_a_health=bool(a_health))
             original_prefix = {path: (path.lstat().st_ino, path.lstat().st_ctime_ns)
                 for path in (fixture.root / ".ztp-prefix-publication.json", fixture.root / "r22-prefix")
                 if prefix or prefix_fault}
@@ -5162,8 +5172,9 @@ from types import SimpleNamespace
 root, q, common, tests = map(Path, sys.argv[1:5])
 sys.path.insert(0, str(tests))
 from test_cases.module_loader import load_script
-from test_cases.test_load_release_transaction import private_publication_candidates, assert_private_dhcp_transaction_retention
+from test_cases.test_load_release_transaction import private_publication_candidates, assert_private_dhcp_transaction_retention, private_a_health_ports
 load = load_script('committed_q_group_load', root / 'DAY0-Prepare/11-load.py')
+genuine_active = load.active_managed_services
 load.active_managed_services = lambda *a, **kw: ()
 backend = SimpleNamespace(name='supervisor')
 fd = load.acquire_deployment_lock(exclusive=True)
@@ -5378,8 +5389,52 @@ try:
     status = load.restore_setup_switch_a_disk(q, guard=guard, confirmed=True)
     assert status == 'restored-p-a-group-stopped-wal-retained', status
     expected_bootstrap = (b'A oob bootstrap\nZTP_UPGRADE_ENABLED="true"\n'
-                          if sys.argv[5] == 'reader-a-image' else b'A oob bootstrap\n')
+                          if sys.argv[5] == 'reader-a-image' else
+                          b'A oob bootstrap\nZTP_UPGRADE_ENABLED="false"\n'
+                          if sys.argv[5].startswith('reader-a-health') else b'A oob bootstrap\n')
     assert (root / 'ztp/ztp-bootstrap_oob.sh').read_bytes() == expected_bootstrap
+    if sys.argv[5].startswith('reader-a-health'):
+        import json
+        from unittest import mock
+        journal = root / 'ztp/.setup-switch-journal.json'
+        frozen = (journal.lstat().st_ino, journal.read_bytes())
+        plan = root / 'ztp/.setup-switch-a-restore.json'
+        frozen_plan = (plan.lstat().st_ino, plan.read_bytes())
+        active, actions = set(), []
+        def start(name): active.add(name); actions.append(('start', name))
+        def stop(name): active.discard(name); actions.append(('stop', name))
+        backend = SimpleNamespace(name='supervisor', is_active=lambda name: name in active, start=start, stop=stop)
+        guard['runtime_backend'] = backend
+        load.active_managed_services = genuine_active
+        failure = sys.argv[5] == 'reader-a-health-http-failure'
+        with private_a_health_ports(load, root, http_status=503 if failure else None) as commands, \
+                mock.patch.object(load, 'runtime_os', return_value='Linux'):
+            if failure:
+                try:
+                    load.activate_setup_switch_a_publication(q, guard=guard, confirmed=True)
+                except load.LoadError as exc:
+                    assert 'private original A HTTP probe failed' in str(exc), str(exc)
+                else:
+                    raise AssertionError('real private HTTP failure did not block A')
+                assert active == set()
+                assert actions == [('start', 'apache2'), ('start', 'isc-dhcp-server'),
+                                   ('stop', 'isc-dhcp-server'), ('stop', 'apache2')], actions
+                print('R22_ORIGINAL_A_HTTP_FAILURE_OWNED_STOP_WAL_RETAINED')
+            else:
+                if sys.argv[5] == 'reader-a-health-cli':
+                    load.release_deployment_lock(fd)
+                    fd = None  # main must acquire its own real exclusive lock.
+                    with mock.patch.object(load, 'service_runtime_backend', return_value=backend):
+                        assert load.main([str(q), '--host-role', 'management-server', '--activate-setup-a']) == 0
+                else:
+                    status = load.activate_setup_switch_a_publication(q, guard=guard, confirmed=True)
+                    assert status == 'a-health-passed-wal-retained', status
+                assert actions == [('start', 'apache2'), ('start', 'isc-dhcp-server')], actions
+                assert active == {'apache2', 'isc-dhcp-server'}
+                print('R22_ORIGINAL_A_EXPLICIT_HEALTH_WAL_RETAINED')
+            assert any(argv[0] == 'curl' for argv in commands), commands
+        assert frozen == (journal.lstat().st_ino, journal.read_bytes())
+        assert frozen_plan == (plan.lstat().st_ino, plan.read_bytes())
     if sys.argv[5] == 'reader-a-image':
         import json
         body = json.loads((root / 'ztp/.setup-switch-journal.json').read_bytes())['body']
@@ -5405,7 +5460,8 @@ try:
             assert (metadata.st_uid, metadata.st_gid) == (os.getuid(), os.getgid())
     print('R22_ORIGINAL_GROUP_RESTORED_STOPPED')
 finally:
-    load.release_deployment_lock(fd)
+    if fd is not None:
+        load.release_deployment_lock(fd)
 '''
             argv = [sys.executable, "-B", "-c", script, str(root), str(q), str(common), str(ROOT)]
             shape = "dhcp" if dhcp else "no-dhcp"
@@ -5414,7 +5470,7 @@ finally:
                                            "a-image" if a_image or a_image_fault else "no-a-image",
                                            "q-created" if a_image else "no-q-created",
                                            "a-metadata" if dhcp_metadata else "no-a-metadata",
-                                           "managed-key" if managed_key else "no-managed-key",
+                                           "managed-key" if managed_key or a_health else "no-managed-key",
                                            (prefix_change if isinstance(prefix_change, str) else "/q-prefix") if prefix_change else "unchanged-prefix"],
                                     capture_output=True, text=True, check=False, timeout=30)
             self.assertEqual(-signal.SIGKILL, writer.returncode, writer.stdout + writer.stderr)
@@ -5518,8 +5574,10 @@ finally:
                     self.assertEqual(original_p_target, os.readlink(common))
                 marker = journal.parent / ".setup-switch-a-restore.json"
                 before_reader_plan = (marker.lstat().st_ino, marker.read_bytes())
-            reader_mode = "reader-a-image" if a_image else "reader-dhcp-metadata" if dhcp_metadata else "reader"
-            reader = subprocess.run(argv + [reader_mode, shape], capture_output=True, text=True, check=False, timeout=30)
+            reader_mode = ("reader-a-health-http-failure" if a_health == "http-failure" else "reader-a-health-cli" if a_health == "cli" else "reader-a-health"
+                           if a_health else "reader-a-image" if a_image else "reader-dhcp-metadata" if dhcp_metadata else "reader")
+            reader = subprocess.run(argv + [reader_mode, shape], capture_output=True, text=True, check=False,
+                                    timeout=120 if a_health else 30)
             self.assertEqual(0, reader.returncode, reader.stdout + reader.stderr)
             self.assertIn("R22_ORIGINAL_GROUP_RESTORED_STOPPED", reader.stdout)
             if a_image:
@@ -5571,6 +5629,13 @@ finally:
                 self.assertEqual(frozen, (path.lstat().st_ino, path.read_bytes(), state[7].read_bytes(), os.readlink(common)))
                 self.assertEqual(original_wal, (journal.lstat().st_ino, journal.read_bytes()))
                 self.assertEqual(original_plan, (marker.lstat().st_ino, marker.read_bytes()))
+                return
+            if a_health:
+                self.assertIn("R22_ORIGINAL_A_HTTP_FAILURE_OWNED_STOP_WAL_RETAINED" if a_health == "http-failure"
+                              else "R22_ORIGINAL_A_EXPLICIT_HEALTH_WAL_RETAINED", reader.stdout)
+                self.assertEqual(original_wal, (journal.lstat().st_ino, journal.read_bytes()))
+                self.assertEqual(original_a_links, {path: (path.lstat().st_ino, path.lstat().st_ctime_ns, os.readlink(path))
+                                                    for path in original_a_links})
                 return
             reader2 = subprocess.run(argv + [reader_mode, shape], capture_output=True, text=True, check=False, timeout=30)
             self.assertEqual(0, reader2.returncode, reader2.stdout + reader2.stderr)

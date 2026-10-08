@@ -6610,12 +6610,15 @@ def _decode_setup_switch_journal(payload: bytes) -> dict[str, object]:
         runtime = body["a_runtime"]
         runtime_fields = {"selector_target", "receipt_directory", "receipt_parent", "receipt_file",
                           "yaml_link_parents"}
-        for inventory in ("generation", "receipt_inventory", "selector_owner", "yaml_link_owners", "prefix_owners"):
+        for inventory in ("generation", "receipt_inventory", "selector_owner", "yaml_link_owners", "prefix_owners", "health_publication"):
             if isinstance(runtime, dict) and inventory in runtime:
                 runtime_fields.add(inventory)
         exact_fields(runtime, runtime_fields, "A runtime")
         if "prefix_owners" in runtime:
             _validate_setup_switch_a_prefix_owners(runtime["prefix_owners"])
+        if "health_publication" in runtime:
+            _validate_setup_switch_a_health_publication(runtime["health_publication"],
+                                                       Path(body["old_project"]["path"]))
         def a_leaf_owner(owner):
             if owner is None:
                 return
@@ -7418,10 +7421,14 @@ def restore_setup_switch_a_disk(project, *, guard, confirmed=False):
 
 @contextmanager
 def _setup_switch_a_compensation_authority(project, *, guard, confirmed,
-                                          restore_publication, complete_publication=False):
+                                          restore_publication, complete_publication=False,
+                                          _require_runtime_guard=None):
     if confirmed is not True:
         raise LoadError("Q publication compensation requires explicit confirmation; HOLD")
     _require_runtime_restore_guard(**guard)
+    if _require_runtime_guard is not None and (not callable(_require_runtime_guard)
+            or restore_publication or complete_publication):
+        raise LoadError("A activation guard may only inspect an already restored group; HOLD")
     _require_setup_switch_retirement_absent()
     marker = _setup_switch_a_restore_path()
     journal = _setup_switch_journal_path()
@@ -7439,7 +7446,10 @@ def _setup_switch_a_compensation_authority(project, *, guard, confirmed,
             raise LoadError("DHCP original B candidate ownership was not registered; HOLD")
         bundle = body["publication_bundle"]
         def wal_authority():
-            _require_runtime_restore_guard(**guard)
+            if _require_runtime_guard is None:
+                _require_runtime_restore_guard(**guard)
+            else:
+                _require_runtime_guard()
             _require_setup_switch_retirement_absent()
             if (wal_before != _dhcp_a_preimage_receipt_identity(os.fstat(wal_fd))
                     or wal_before != _dhcp_a_preimage_receipt_identity(journal.lstat())
@@ -9057,7 +9067,8 @@ def _require_setup_switch_a_prefix_owners(body):
 
 def _setup_switch_runtime_authority(context, *, verify_active=False, include_generation=True,
                                     include_receipt_inventory=True, include_selector_owner=True,
-                                    include_yaml_link_owners=True, include_prefix_owners=True):
+                                    include_yaml_link_owners=True, include_prefix_owners=True,
+                                    include_health_publication=True):
     """Freeze the exact A receipt owner, never infer A from a newest directory."""
     try:
         project = context.project.resolve(strict=True)
@@ -9120,6 +9131,14 @@ def _setup_switch_runtime_authority(context, *, verify_active=False, include_gen
             result["yaml_link_owners"] = owners
         if include_prefix_owners:
             result["prefix_owners"] = _setup_switch_a_prefix_owners(receipt)
+        if include_health_publication:
+            health = {}
+            for key, filename in (("parent", "current-release.json"), ("report", "generation-report.json")):
+                leaf = project / "99-output-ztp" / filename
+                health[key] = dict(path=str(leaf), parent=_setup_switch_link_parent_identity(leaf),
+                                   leaf=_setup_switch_compensation_leaf(leaf))
+            _validate_setup_switch_a_health_publication(health, project)
+            result["health_publication"] = health
         return result
     except (OSError, RuntimeError, ValueError, TypeError, KeyError, LoadError) as exc:
         raise LoadError(f"setup switch A runtime authority is invalid: {exc}") from exc
@@ -9154,11 +9173,44 @@ def _setup_switch_runtime_context(body, state=None, *, require_original_yaml_own
                 include_receipt_inventory="receipt_inventory" in record,
                 include_selector_owner="selector_owner" in record,
                 include_yaml_link_owners=require_original_yaml_owner and "yaml_link_owners" in record,
-                include_prefix_owners=False) != expected:
+                include_prefix_owners=False,
+                include_health_publication="health_publication" in record) != expected:
             raise ValueError("A receipt owner or bytes differ from WAL")
         return context
     except (OSError, ValueError, TypeError, KeyError, LoadError) as exc:
         raise LoadError(f"setup switch A runtime authority changed; HOLD: {exc}") from exc
+
+
+def _validate_setup_switch_a_health_publication(inventory, project):
+    """Original parent/report names and nine-field owners, captured before Q."""
+    if not isinstance(inventory, dict) or set(inventory) != {"parent", "report"}:
+        raise ValueError("invalid original A health publication inventory")
+    for key, filename in (("parent", "current-release.json"), ("report", "generation-report.json")):
+        row = inventory[key]
+        if not isinstance(row, dict) or row.get("path") != str(project / "99-output-ztp" / filename):
+            raise ValueError("original A health publication path differs")
+        _validate_setup_switch_a_prefix_owners(dict(marker=row, links={}))
+
+
+def _require_setup_switch_a_health_publication(body):
+    record = body.get("a_runtime", {})
+    inventory = record.get("health_publication")
+    if inventory is None:
+        raise LoadError("original A health publication qualification is missing; HOLD")
+    project = Path(body["old_project"]["path"])
+    try:
+        _validate_setup_switch_a_health_publication(inventory, project)
+        context = _setup_switch_runtime_context(body, require_original_yaml_owner=True)
+        receipt = _load_runtime_rollback_receipt(project, context.runtime_receipt)
+        for key, row in inventory.items():
+            leaf = row["leaf"]
+            if (leaf is None or receipt["unchanged_authorities"][key] !=
+                    dict(state="file", sha256=leaf["sha256"])
+                    or row["parent"] != _setup_switch_link_parent_identity(Path(row["path"]))
+                    or leaf != _setup_switch_compensation_leaf(Path(row["path"]))):
+                raise LoadError("original A health parent/report owner or receipt differs; HOLD")
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        raise LoadError(f"original A health publication is unqualified; HOLD: {exc}") from exc
 
 
 def _setup_switch_a_operator_selection(body):
@@ -16748,6 +16800,152 @@ def _setup_switch_b_preflight_inputs(body, inputs):
                       for name in sorted(shared["flat_runtime"]["publickeys"])))
 
 
+def _require_setup_switch_a_complete_disk_group(body, compensation):
+    """Read-only completion gate: activation must not finish a partial restore."""
+    compensation["require"]()
+    compensation["require_runtime_restored"]()
+    compensation["require_setup_restored"]()
+    compensation["require_dhcp_restored"]()
+    context = _setup_switch_runtime_context(body)
+    receipt = _load_runtime_rollback_receipt(context.project, context.runtime_receipt)
+    _require_runtime_publickey_parent(receipt)
+    for name, record in receipt["publickeys"].items():
+        if record["state"] == "link":
+            # The consumed publication stage binds the link inode, not the
+            # original source. Recheck its receipt-bound ctime/bytes as well.
+            _validate_runtime_key_binding(ZTP_DIR / "config/publickey" / name,
+                                          context.project, record)
+    if _read_rollback_regular(MANIFEST, limit=_SETUP_MANIFEST_LIMIT) != (
+            base64.b64decode(body["manifest"], validate=True), body["manifest_mode"]):
+        raise LoadError("original A activation requires exact restored P manifest; HOLD")
+    if any(present is not None for _path, _stage, present, _row
+           in _setup_switch_created_directory_states(body)):
+        raise LoadError("original A created-directory restoration is incomplete; HOLD")
+    if any(os.readlink(path) != row["before"]
+           for path, row in _setup_switch_q_local_link_states(body)):
+        raise LoadError("original A Q-local latest restoration is incomplete; HOLD")
+    if any(phase != "original" for _source, _destination, phase, _row
+           in _setup_switch_comparison_transfer_states(body)):
+        raise LoadError("original A comparison restoration is incomplete; HOLD")
+    if "prefix_preparation" in body:
+        _require_setup_switch_prefix_parent_scope(body)
+    if "prefix_transaction" in body:
+        if any(phase not in {"original", "restored"} for _row, phase in _setup_switch_prefix_states(body)):
+            raise LoadError("original A prefix restoration is incomplete; HOLD")
+    _require_setup_switch_a_prefix_owners(body)
+    for row in body.get("directories", []):
+        source, backup, target = (Path(row[key]) for key in ("path", "backup", "target"))
+        source_owner, target_owner = (_setup_switch_materialized_owner(path) for path in (source, target))
+        if (os.path.lexists(backup) or source_owner is None or target_owner is None
+                or not stat.S_ISDIR(source_owner[0][2]) or not stat.S_ISDIR(target_owner[0][2])
+                or source_owner[0][:2] != (row["source_dev"], row["source_ino"])
+                or target_owner[0][:2] != (row["target_dev"], row["target_ino"])
+                or row["parent"] != _setup_switch_link_parent_identity(source)):
+            raise LoadError("original A materialized latest restoration is incomplete; HOLD")
+    for row in body.get("infra_logs", []):
+        state = _setup_switch_prepare_infra_log_recovery(row, Path(body["new_project"]["path"]))
+        if state[6] or state[7] or any(value is not None for value in state[9]["copies"].values()):
+            raise LoadError("original A infra/logs restoration is incomplete; HOLD")
+    compensation["require"]()
+
+
+def activate_setup_switch_a_publication(project, *, guard, confirmed=False, retire=False):
+    """Explicit original A health; never restore, regenerate or implicitly fall back.
+
+    The original WAL and compensation plan remain durable fences. Typed A
+    evidence archival is a separate gate; this API cannot use B retirement.
+    Only services actually attempted by this invocation may be stopped.
+    """
+    if confirmed is not True:
+        raise LoadError("A activation requires explicit confirmation; HOLD")
+    if type(retire) is not bool or retire:
+        raise LoadError("A evidence requires explicit qualified retirement archive; HOLD")
+    _require_runtime_restore_guard(**guard)
+    backend = guard["runtime_backend"]
+    attempted = []
+    def service_guard():
+        _require_runtime_lock_guard(guard["deployment_lock_descriptor"])
+        current = set(active_managed_services(backend, host_role="management-server"))
+        if not current <= set(attempted):
+            raise LoadError("unexpected managed services during explicit A activation; HOLD")
+    with _setup_switch_a_compensation_authority(project, guard=guard, confirmed=True,
+            restore_publication=False, _require_runtime_guard=service_guard) as compensation:
+        body = _setup_switch_prepared_registration_body(compensation["opened"])
+        def disk_authority():
+            service_guard()
+            _require_setup_switch_a_complete_disk_group(body, compensation)
+            _require_setup_switch_a_health_publication(body)
+            service_guard()
+        disk_authority()
+        with _setup_switch_a_image_authority(body, compensation=compensation) as selected_a:
+            inputs, images = selected_a["inputs"], selected_a["images"]
+            plan = None
+            def authority():
+                disk_authority()
+                selected_a["require"]()
+                if plan is not None and plan_local_dhcp_runtime(inputs) != plan:
+                    raise LoadError("original A listener plan changed during activation; HOLD")
+                disk_authority()
+            authority()
+            try:
+                generation_report.inspect_generation_report(Path(body["old_project"]["path"]),
+                    published_dir=ZTP_DIR / "config/publickey")
+            except generation_report.GenerationReportError as exc:
+                raise LoadError(f"original A key/report content is not qualified; HOLD: {exc}") from exc
+            authority()
+            # Both listener planning and every genuine preflight helper are
+            # fresh and guarded; an earlier health result grants no authority.
+            plan = plan_local_dhcp_runtime(inputs)
+            authority()
+            preflight_services(inputs, images, runtime_backend=backend,
+                               require_authority=authority)
+            authority()
+            if backend.name == "supervisor":
+                http_required, dhcp_required = supervisor_service_availability(inputs, plan)
+            elif backend.name == "systemd":
+                http_required = bool(inputs.settings.ztp_enabled and inputs.settings.http_enabled and
+                                     (not inputs.settings.dhcp_enabled or plan.listener_names))
+                dhcp_required = bool(inputs.settings.ztp_enabled and inputs.settings.dhcp_enabled and plan.listener_names)
+            else:
+                raise LoadError("A activation runtime backend is unknown; HOLD")
+            authority()
+            selected = {name for required, name in ((http_required, "apache2"),
+                                                    (dhcp_required, "isc-dhcp-server")) if required}
+            if plan.endpoint_ips:
+                ensure_ztp_url_network_ready(inputs)
+                authority()
+            try:
+                for service in sorted(selected):
+                    authority()
+                    attempted.append(service)  # A failed command may partially start it.
+                    _runtime_service_action(backend, "start", service)
+                    authority()
+                if http_required:
+                    authority()
+                    verify_http_publication(inputs, images, False)
+                    authority()
+                if set(active_managed_services(backend, host_role="management-server")) != selected:
+                    raise LoadError("A selected services did not become healthy/active; HOLD")
+                authority()
+            except BaseException as exc:
+                stop_errors = []
+                for service in reversed(attempted):
+                    try:
+                        _require_runtime_lock_guard(guard["deployment_lock_descriptor"])
+                        _runtime_service_action(backend, "stop", service)
+                    except BaseException as stop_exc:
+                        stop_errors.append(str(stop_exc))
+                try:
+                    _require_runtime_restore_guard(**guard)
+                except BaseException as stop_exc:
+                    stop_errors.append(str(stop_exc))
+                if stop_errors:
+                    raise LoadError(f"A activation failed and stop is unconfirmed; HOLD original WAL: {exc}; "
+                                    + "; ".join(stop_errors)) from exc
+                raise
+    return "a-health-passed-wal-retained" if selected else "a-no-services-required-wal-retained"
+
+
 def activate_setup_switch_b_publication(
     token, *, guard, inputs: ProjectInputs, images: dict[str, Path], confirmed=False, retire=False,
 ) -> str:
@@ -17897,6 +18095,11 @@ def _build_parser() -> argparse.ArgumentParser:
               "必须预先停服，不生成、不启停服务、不恢复 A、不退休 WAL"),
     )
     parser.add_argument(
+        "--activate-setup-a", action="store_true",
+        help=("显式健康激活原 WAL 中已完整恢复的 A；仅 Linux management-server，"
+              "必须预先停服，不生成、不补偿、不借用 B 退休；保留原 WAL/恢复计划"),
+    )
+    parser.add_argument(
         "--activate-setup-publication", action="store_true",
         help=("显式尝试原 WAL 已完整发布 B 的健康激活与凭据归档；仅 Linux management-server，"
               "必须预先停服、不生成；失败确认停服，不自动回 A"),
@@ -18037,13 +18240,14 @@ def _activate_setup_switch_entrypoint(args: argparse.Namespace) -> int:
     descriptor = None
     token = None
     try:
-        modes = ("recover_setup_switch", "resume_setup_publication", "activate_setup_publication", "resume_setup_retirement")
+        modes = ("recover_setup_switch", "resume_setup_publication", "activate_setup_publication",
+                 "resume_setup_retirement", "activate_setup_a")
         if sum(bool(getattr(args, name, False)) for name in modes) != 1:
             raise LoadError("SETUP recovery, resume, activation and retirement are distinct operations; HOLD")
         host_os = runtime_os()
         if (host_os.casefold() != "linux"
                 or resolve_host_role(getattr(args, "host_role", None), host_os) != "management-server"):
-            raise LoadError("explicit B operation requires Linux --host-role management-server; HOLD")
+            raise LoadError("explicit SETUP activation requires Linux --host-role management-server; HOLD")
         incompatible = ("dry_run", "start_services", "start_ztp_monitor", "update_passwords", "skip_generate",
                         "skip_doca", "download_doca", "no_upgrade", "p2p_legacy_columns", "validation_only")
         if (any(getattr(args, name, False) for name in incompatible)
@@ -18053,7 +18257,7 @@ def _activate_setup_switch_entrypoint(args: argparse.Namespace) -> int:
                 or getattr(args, "ztp_monitor_scope", "auto") != "auto"
                 or getattr(args, "ztp_monitor_interval", DEFAULT_ZTP_MONITOR_INTERVAL) != DEFAULT_ZTP_MONITOR_INTERVAL
                 or getattr(args, "ssh_dir", _default_ssh_dir()) != _default_ssh_dir()):
-            raise LoadError("explicit B operation forbids generation/start/dry-run selection overrides; HOLD")
+            raise LoadError("explicit SETUP activation forbids generation/start/dry-run selection overrides; HOLD")
         backend = service_runtime_backend()
         descriptor = acquire_deployment_lock(exclusive=True)
         guard = dict(deployment_lock_descriptor=descriptor, services_quiesced=True, runtime_backend=backend)
@@ -18064,6 +18268,12 @@ def _activate_setup_switch_entrypoint(args: argparse.Namespace) -> int:
             stop_native_ztp_monitors(HTTP_ROOT)
         _require_no_pending_setup_manifest_stage()
         project = resolve_project(args.project)
+        if getattr(args, "activate_setup_a", False):
+            result = activate_setup_switch_a_publication(project, guard=guard, confirmed=True)
+            if result not in {"a-health-passed-wal-retained", "a-no-services-required-wal-retained"}:
+                raise LoadError("A operation lacks exact restored group/health completion; HOLD")
+            ok("原 A 完整恢复组与本次运行条件/健康核验完成；原 WAL/恢复计划保留，未生成或借用 B 退休")
+            return 0
         if getattr(args, "resume_setup_retirement", False):
             result = resume_setup_switch_b_retirement(project, guard=guard, confirmed=True)
         else:
@@ -18079,7 +18289,7 @@ def _activate_setup_switch_entrypoint(args: argparse.Namespace) -> int:
         ok("原 B 发布与本次运行条件/健康核验完成；原 WAL 已归档，A receipt/备份保留，未重新生成或自动回 A")
         return 0
     except (LoadError, OSError, ValueError, RuntimeContractError) as exc:
-        print(f"[HOLD] 显式 B 操作未完成；保留原 WAL/归档/退休凭据，核验失败停服状态：{exc}", file=sys.stderr)
+        print(f"[HOLD] 显式 SETUP 激活操作未完成；保留原 WAL/归档/恢复凭据，核验失败停服状态：{exc}", file=sys.stderr)
         return 1
     finally:
         close_setup_switch_publication_bundle(token)
@@ -18164,7 +18374,8 @@ def main(
     requested_argv = list(sys.argv[1:] if argv is None else argv)
     args = parse_args(argv)
     if (getattr(args, "activate_setup_publication", False)
-            or getattr(args, "resume_setup_retirement", False)):
+            or getattr(args, "resume_setup_retirement", False)
+            or getattr(args, "activate_setup_a", False)):
         return _activate_setup_switch_entrypoint(args)
     if (getattr(args, "recover_setup_switch", False)
             or getattr(args, "resume_setup_publication", False)):

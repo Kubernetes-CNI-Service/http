@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import base64
 import csv
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from contextlib import redirect_stderr, redirect_stdout
 import hashlib
+import http.server
 import importlib.util
 import inspect
 import ipaddress
@@ -21,9 +22,11 @@ import stat
 import subprocess
 from types import SimpleNamespace
 import tempfile
+import threading
 import unittest
 from unittest import mock
 import zipfile
+from urllib.parse import urlsplit
 
 import yaml
 
@@ -1081,7 +1084,265 @@ def private_publication_candidates(api, project):
     return parent_candidate, report_candidate, generation
 
 
+@contextmanager
+def private_a_health_ports(api, root, *, http_status=None):
+    """Private command/network ports, not Linux/root auth or daemon witnesses.
+
+    Genuine preflight helpers still inspect helper bytes, boundary SHA, wire
+    keys and publication files. Only OS command/host addresses are adapted.
+    HTTP probes reach a real local server, never the declared external IP.
+    """
+    root = root.resolve()
+    ports = root / "private-a-health-ports"; ports.mkdir()
+    helper = ports / "control-auth.py"
+    helper.write_bytes((ROOT / "tools/control-auth.py").read_bytes())
+    boundary = ports / "apache-ztp.conf"
+    boundary.write_bytes((ROOT / "infra/docker/apache-ztp.conf").read_bytes())
+    class Handler(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *args, **kwargs): super().__init__(*args, directory=str(root), **kwargs)
+        def log_message(self, *args): pass
+        def do_HEAD(self):
+            if http_status is None:
+                return super().do_HEAD()
+            self.send_response(http_status); self.end_headers()
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
+    calls = []
+    def command(argv, *, dry_run=False, **kwargs):
+        assert not dry_run, "A qualification cannot be dry-run"
+        argv = list(argv); calls.append(argv)
+        if (argv == [str(helper), "validate"] or argv == ["apache2ctl", "configtest"]
+                or argv == ["dhcpd", "-t", "-cf", "/etc/dhcp/dhcpd.conf"]):
+            return None  # Explicit OS command port; no real auth/daemon claim.
+        if argv[:4] == ["curl", "-fsSI", "--max-time", "5"] and len(argv) == 5:
+            url = urlsplit(argv[4])
+            assert url.scheme == "http" and url.hostname == "192.0.2.2" and url.path.startswith("/r22-prefix/"), argv
+            result = subprocess.run(argv[:4] + [f"http://127.0.0.1:{server.server_port}" + url.path],
+                capture_output=True, text=True, timeout=8, check=False)
+            if result.returncode: raise api.LoadError("private original A HTTP probe failed: " + result.stderr)
+            return None
+        raise AssertionError("unexpected host command: " + repr(argv))
+    links = [{"ifindex": 2, "ifname": "eth-test", "flags": ["UP", "BROADCAST", "MULTICAST", "LOWER_UP"],
+              "operstate": "UP", "link_type": "ether"}]
+    addresses = [{"ifindex": 2, "ifname": "eth-test", "addr_info": [{"family": "inet",
+        "local": "192.0.2.2", "prefixlen": 24, "scope": "global"}]}]
+    try:
+        with ExitStack() as stack:
+            for name, value in (("CONTROL_AUTH_SOURCE", ROOT / "tools/control-auth.py"),
+                                ("CONTROL_AUTH_CONTAINER_HELPER", helper),
+                                ("APACHE_PUBLIC_BOUNDARY_CONF", boundary)):
+                stack.enter_context(mock.patch.object(api, name, value))
+            stack.enter_context(mock.patch.object(api, "run", side_effect=command))
+            stack.enter_context(mock.patch.object(api, "sudo_command", side_effect=lambda *args: list(args)))
+            stack.enter_context(mock.patch.object(api, "local_ipv4_addresses", return_value={"192.0.2.2"}))
+            stack.enter_context(mock.patch.object(api, "_local_ipv4_assignments", return_value={"192.0.2.2": {("eth-test", 24)}}))
+            stack.enter_context(mock.patch.object(api, "_local_ip_json_snapshots", return_value=(links, addresses)))
+            yield calls
+    finally:
+        server.shutdown(); server.server_close(); thread.join(timeout=5)
+        assert not thread.is_alive(), "private HTTP thread did not stop"
+
+
 class ReleaseTransactionTests(unittest.TestCase):
+    def _restored_a_activation_fixture(self, *, qualified=True):
+        state, context, guard, _token, _inputs = self._prepare_published_q_for_stopped_preflight(
+            prefix=True, original_a_policy="disabled", qualified_a_health=qualified)
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            LOAD.restore_setup_switch_a_disk(state[1], guard=guard, confirmed=True)
+        active, actions = set(), []
+        def start(name): active.add(name); actions.append(("start", name))
+        def stop(name): active.discard(name); actions.append(("stop", name))
+        backend = SimpleNamespace(name="supervisor", is_active=lambda name: name in active, start=start, stop=stop)
+        return state, context, {**guard, "runtime_backend": backend}, active, actions
+
+    def test_a_explicit_activation_rejects_partial_group_without_restoring_or_starting(self):
+        state, _context, guard, _token, _inputs = self._prepare_published_q_for_stopped_preflight(
+            prefix=True, qualified_a_health=True)
+        frozen = (state[-3].lstat().st_ino, state[-3].read_bytes(), state[7].read_bytes(), os.readlink(state[2]))
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "preflight_services") as preflight, \
+                mock.patch.object(LOAD, "_runtime_service_action") as action:
+            with self.assertRaisesRegex(LOAD.LoadError, "original Q compensation plan.*HOLD"):
+                LOAD.activate_setup_switch_a_publication(state[1], guard=guard, confirmed=True)
+            preflight.assert_not_called(); action.assert_not_called()
+        self.assertEqual(frozen, (state[-3].lstat().st_ino, state[-3].read_bytes(), state[7].read_bytes(), os.readlink(state[2])))
+        self.assertFalse(LOAD._setup_switch_a_restore_path().exists())
+
+    def test_a_explicit_activation_rejects_original_missing_report_before_health(self):
+        state, _context, guard, active, actions = self._restored_a_activation_fixture(qualified=False)
+        self.assertIsNone(json.loads(state[-3].read_bytes())["body"]["a_runtime"]["health_publication"]["report"]["leaf"])
+        with mock.patch.object(LOAD, "runtime_os", return_value="Linux"), \
+                mock.patch.object(LOAD, "preflight_services") as preflight:
+            with self.assertRaisesRegex(LOAD.LoadError, "health.*HOLD"):
+                LOAD.activate_setup_switch_a_publication(state[1], guard=guard, confirmed=True)
+            preflight.assert_not_called()
+        self.assertEqual([], actions); self.assertEqual(set(), active)
+
+    def test_a_explicit_activation_rejects_same_byte_foreign_original_report(self):
+        state, _context, guard, active, actions = self._restored_a_activation_fixture()
+        report = state[0] / "99-output-ztp/generation-report.json"
+        before = report.lstat(); held = report.with_name("independent-original-report")
+        report.rename(held); report.write_bytes(held.read_bytes()); report.chmod(stat.S_IMODE(before.st_mode))
+        os.utime(report, ns=(before.st_atime_ns, before.st_mtime_ns))
+        frozen = (state[-3].lstat().st_ino, state[-3].read_bytes(), report.lstat().st_ino)
+        with mock.patch.object(LOAD, "runtime_os", return_value="Linux"), \
+                mock.patch.object(LOAD, "preflight_services") as preflight:
+            with self.assertRaisesRegex(LOAD.LoadError, "runtime authority.*HOLD|health.*HOLD"):
+                LOAD.activate_setup_switch_a_publication(state[1], guard=guard, confirmed=True)
+            preflight.assert_not_called()
+        self.assertEqual([], actions); self.assertEqual(set(), active)
+        self.assertEqual(frozen, (state[-3].lstat().st_ino, state[-3].read_bytes(), report.lstat().st_ino))
+
+    def test_a_explicit_activation_failed_start_stops_only_actually_attempted_service(self):
+        state, _context, guard, active, actions = self._restored_a_activation_fixture()
+        def failed_start(name):
+            active.add(name); actions.append(("start", name))
+            raise LOAD.LoadError("independent partially successful start failed")
+        guard["runtime_backend"].start = failed_start
+        frozen = (state[-3].lstat().st_ino, state[-3].read_bytes())
+        with private_a_health_ports(LOAD, self.root) as commands, \
+                mock.patch.object(LOAD, "runtime_os", return_value="Linux"):
+            with self.assertRaisesRegex(LOAD.LoadError, "independent partially successful start failed"):
+                LOAD.activate_setup_switch_a_publication(state[1], guard=guard, confirmed=True)
+        self.assertEqual([("start", "apache2"), ("stop", "apache2")], actions)
+        self.assertEqual(set(), active)
+        self.assertFalse(any(argv[0] == "curl" for argv in commands))
+        self.assertEqual(frozen, (state[-3].lstat().st_ino, state[-3].read_bytes()))
+
+    def test_a_explicit_activation_does_not_adopt_selected_but_unattempted_service(self):
+        state, _context, guard, active, actions = self._restored_a_activation_fixture()
+        def foreign_dhcp_after_apache(name):
+            active.update({name, "isc-dhcp-server"}); actions.append(("start", name))
+        guard["runtime_backend"].start = foreign_dhcp_after_apache
+        frozen = (state[-3].lstat().st_ino, state[-3].read_bytes())
+        with private_a_health_ports(LOAD, self.root) as commands, \
+                mock.patch.object(LOAD, "runtime_os", return_value="Linux"):
+            with self.assertRaisesRegex(LOAD.LoadError, "stop is unconfirmed.*HOLD"):
+                LOAD.activate_setup_switch_a_publication(state[1], guard=guard, confirmed=True)
+        self.assertEqual([("start", "apache2"), ("stop", "apache2")], actions)
+        self.assertEqual({"isc-dhcp-server"}, active, "foreign service must never be stopped/adopted")
+        self.assertFalse(any(argv[0] == "curl" for argv in commands))
+        self.assertEqual(frozen, (state[-3].lstat().st_ino, state[-3].read_bytes()))
+
+    def test_original_a_health_publication_closed_scope_rejects_forged_rows(self):
+        state, _context = self._prepare_persisted_a_runtime_switch(prefix=True, qualified_a_health=True)
+        original = json.loads(state[-3].read_bytes())
+        for fault in ("unknown-field", "other-project", "symlink-report", "wrong-mode", "bool-identity"):
+            with self.subTest(fault=fault):
+                envelope = json.loads(json.dumps(original)); inventory = envelope["body"]["a_runtime"]["health_publication"]
+                if fault == "unknown-field": inventory["late-adoption"] = True
+                elif fault == "other-project": inventory["report"]["path"] = str(state[1] / "99-output-ztp/generation-report.json")
+                elif fault == "symlink-report": inventory["report"]["leaf"] = {"identity": inventory["report"]["leaf"]["identity"], "target": "foreign-report"}
+                elif fault == "wrong-mode": inventory["report"]["leaf"]["mode"] = 0o777
+                else: inventory["report"]["leaf"]["identity"][0] = True
+                envelope["sha256"] = hashlib.sha256(LOAD._setup_switch_canonical_payload(envelope["body"])).hexdigest()
+                with self.assertRaises(ValueError):
+                    LOAD._decode_setup_switch_journal(json.dumps(envelope).encode())
+        self.assertEqual(original, json.loads(state[-3].read_bytes()))
+
+    def test_a_explicit_activation_real_http_failure_stops_attempted_services_in_reverse(self):
+        state, _context, guard, active, actions = self._restored_a_activation_fixture()
+        frozen = (state[-3].lstat().st_ino, state[-3].read_bytes())
+        with private_a_health_ports(LOAD, self.root, http_status=503) as commands, \
+                mock.patch.object(LOAD, "runtime_os", return_value="Linux"):
+            with self.assertRaisesRegex(LOAD.LoadError, "private original A HTTP probe failed"):
+                LOAD.activate_setup_switch_a_publication(state[1], guard=guard, confirmed=True)
+        self.assertTrue(any(argv[0] == "curl" for argv in commands))
+        self.assertEqual([("start", "apache2"), ("start", "isc-dhcp-server"),
+                          ("stop", "isc-dhcp-server"), ("stop", "apache2")], actions)
+        self.assertEqual(set(), active)
+        self.assertEqual(frozen, (state[-3].lstat().st_ino, state[-3].read_bytes()))
+
+    def test_a_explicit_activation_original_key_aba_after_start_stops_and_retains_wal(self):
+        state, _context, guard, active, actions = self._restored_a_activation_fixture()
+        source = state[0] / "laptop.pub"
+        def change_source(name):
+            active.add(name); actions.append(("start", name))
+            before, payload = source.lstat(), source.read_bytes()
+            source.write_bytes(b"independent ABA payload\n"); source.write_bytes(payload)
+            os.utime(source, ns=(before.st_atime_ns, before.st_mtime_ns))
+            self.assertNotEqual(before.st_ctime_ns, source.lstat().st_ctime_ns)
+        guard["runtime_backend"].start = change_source
+        frozen = (state[-3].lstat().st_ino, state[-3].read_bytes())
+        with private_a_health_ports(LOAD, self.root) as commands, \
+                mock.patch.object(LOAD, "runtime_os", return_value="Linux"):
+            with self.assertRaisesRegex(LOAD.LoadError, "publickey.*source|public key.*source|authority.*HOLD"):
+                LOAD.activate_setup_switch_a_publication(state[1], guard=guard, confirmed=True)
+        self.assertEqual([("start", "apache2"), ("stop", "apache2")], actions)
+        self.assertEqual(set(), active)
+        self.assertFalse(any(argv[0] == "curl" for argv in commands))
+        self.assertEqual(frozen, (state[-3].lstat().st_ino, state[-3].read_bytes()))
+
+    def test_a_explicit_activation_listener_rebind_during_preflight_refuses_start(self):
+        state, _context, guard, active, actions = self._restored_a_activation_fixture()
+        current_index = [2]
+        def snapshots(**_kwargs):
+            return ([dict(ifindex=current_index[0], ifname="eth-test",
+                          flags=["UP", "BROADCAST", "MULTICAST", "LOWER_UP"],
+                          operstate="UP", link_type="ether")],
+                    [dict(ifindex=current_index[0], ifname="eth-test", addr_info=[dict(
+                        family="inet", local="192.0.2.2", prefixlen=24, scope="global")])])
+        frozen = (state[-3].lstat().st_ino, state[-3].read_bytes())
+        with private_a_health_ports(LOAD, self.root) as commands, \
+                mock.patch.object(LOAD, "runtime_os", return_value="Linux"):
+            command_port = LOAD.run.side_effect
+            def rebind_during_configtest(argv, **kwargs):
+                result = command_port(argv, **kwargs)
+                if list(argv) == ["apache2ctl", "configtest"]:
+                    current_index[0] = 3
+                return result
+            with mock.patch.object(LOAD, "run", side_effect=rebind_during_configtest), \
+                    mock.patch.object(LOAD, "_local_ip_json_snapshots", side_effect=snapshots):
+                with self.assertRaisesRegex(LOAD.LoadError, "listener.*changed.*HOLD"):
+                    LOAD.activate_setup_switch_a_publication(state[1], guard=guard, confirmed=True)
+        self.assertIn(["apache2ctl", "configtest"], commands)
+        self.assertEqual([], actions); self.assertEqual(set(), active)
+        self.assertFalse(any(argv[0] == "curl" for argv in commands))
+        self.assertEqual(frozen, (state[-3].lstat().st_ino, state[-3].read_bytes()))
+
+    def test_original_a_health_fixture_uses_real_distinct_keys_and_receipt_bound_report(self):
+        state, _context = self._prepare_persisted_a_runtime_switch(prefix=True, qualified_a_health=True)
+        from test_cases.test_ssh_key_preparation_contract import fingerprint, public_line
+        report = LOAD.generation_report.inspect_generation_report(state[0], published_dir=self.ztp / "config/publickey")
+        self.assertEqual([fingerprint(public_line("ssh-ed25519", seed, name)) for name, seed in
+            (("laptop.pub", 31), ("mgmt-server.pub", 47))], [row["fingerprint"] for row in report["public_keys"]])
+        receipt = json.loads((_context.runtime_receipt / "receipt.json").read_bytes())
+        self.assertEqual({"state": "file", "sha256": hashlib.sha256(
+            (state[0] / "99-output-ztp/generation-report.json").read_bytes()).hexdigest()}, receipt["unchanged_authorities"]["report"])
+
+    def test_a_explicit_activation_requires_confirmation_before_health_or_service(self):
+        state, _context, guard, _token, _inputs = self._prepare_published_q_for_stopped_preflight(
+            prefix=True, qualified_a_health=True)
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "preflight_services") as preflight, \
+                mock.patch.object(LOAD, "_runtime_service_action") as action:
+            with self.assertRaisesRegex(LOAD.LoadError, "explicit confirmation|HOLD"):
+                LOAD.activate_setup_switch_a_publication(state[1], guard=guard)
+            preflight.assert_not_called(); action.assert_not_called()
+
+    def test_a_explicit_activation_qualifies_original_keys_report_and_private_http(self):
+        state, _context, guard, _token, _inputs = self._prepare_published_q_for_stopped_preflight(
+            prefix=True, qualified_a_health=True)
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            LOAD.restore_setup_switch_a_disk(state[1], guard=guard, confirmed=True)
+        journal = state[-3]
+        frozen = (journal.lstat().st_ino, journal.read_bytes())
+        active, actions = set(), []
+        def start(name): active.add(name); actions.append(("start", name))
+        def stop(name): active.discard(name); actions.append(("stop", name))
+        backend = SimpleNamespace(name="supervisor", is_active=lambda name: name in active, start=start, stop=stop)
+        guard = {**guard, "runtime_backend": backend}
+        with private_a_health_ports(LOAD, self.root) as commands, \
+                mock.patch.object(LOAD, "runtime_os", return_value="Linux"):
+            result = LOAD.activate_setup_switch_a_publication(state[1], guard=guard, confirmed=True)
+        self.assertEqual("a-health-passed-wal-retained", result)
+        self.assertEqual([("start", "apache2"), ("start", "isc-dhcp-server")], actions)
+        self.assertEqual({"apache2", "isc-dhcp-server"}, active)
+        self.assertTrue(any(argv == ["apache2ctl", "configtest"] for argv in commands))
+        self.assertTrue(any(argv == ["dhcpd", "-t", "-cf", "/etc/dhcp/dhcpd.conf"] for argv in commands))
+        self.assertTrue(any(argv[0] == "curl" for argv in commands))
+        self.assertEqual(frozen, (journal.lstat().st_ino, journal.read_bytes()))
+
     def _real_setup_published_image(self, kind="eth"):
         basename = ("cumulus-linux-5.12.0-mlx-amd64.bin" if kind == "eth"
                     else "nvos-amd64-25.02.01.bin")
@@ -1191,11 +1452,11 @@ class ReleaseTransactionTests(unittest.TestCase):
                                                   publication_phase="published", partial_runtime=False,
                                                   q_local=False, original_a_policy=None, original_a_images=False,
                                                   q_created=False, dhcp=False, dhcp_metadata=False, prefix=False,
-                                                  managed_key=False, prefix_change=False):
+                                                  managed_key=False, prefix_change=False, qualified_a_health=False):
         state, context, guard = self._prepare_q_manifest_publication(seed_q_publication=seed_q_publication,
             q_local=q_local, original_a_policy=original_a_policy, original_a_images=original_a_images,
             q_created=q_created, prefix=prefix or prefix_change, managed_key=managed_key,
-            prefix_change=prefix_change)
+            prefix_change=prefix_change, qualified_a_health=qualified_a_health)
         q = state[1]
         for name, source in (("01-global.yaml", self.inputs.global_file),
                              ("02-devices_config.csv", self.inputs.devices_file),
@@ -2831,7 +3092,7 @@ class ReleaseTransactionTests(unittest.TestCase):
         journal, descriptor, _backend = state[-3:]
         evidence = journal.read_bytes()
         for flag in ("--activate-setup-publication", "--resume-setup-retirement",
-                     "--recover-setup-switch", "--resume-setup-publication"):
+                     "--recover-setup-switch", "--resume-setup-publication", "--activate-setup-a"):
             with self.subTest(flag=flag), ExitStack() as stack:
                 args = LOAD._build_parser().parse_args([str(state[1]), flag,
                     "--host-role", "management-server"])
@@ -2849,7 +3110,7 @@ class ReleaseTransactionTests(unittest.TestCase):
                     side_effect=AssertionError("writer reached before monitor stop"))) for name in (
                     "open_setup_switch_publication_bundle", "recover_setup_switch_journal",
                     "resume_setup_switch_b_retirement", "resume_setup_switch_publication_bundle",
-                    "activate_setup_switch_b_publication")]
+                    "activate_setup_switch_b_publication", "activate_setup_switch_a_publication")]
                 self.assertEqual(1, LOAD.main([]))
                 stop.assert_called_once_with(LOAD.HTTP_ROOT)
                 for writer in writers:
@@ -2888,6 +3149,43 @@ class ReleaseTransactionTests(unittest.TestCase):
                 self.assertEqual(1, LOAD.main([str(self.project), "--host-role", "management-server",
                     "--activate-setup-publication", *extra]))
                 lock.assert_not_called()
+
+    def test_a_activation_cli_conflicts_and_wrong_role_hold_before_lock(self):
+        for extra in (("--activate-setup-publication",), ("--resume-setup-retirement",),
+                      ("--recover-setup-switch",), ("--resume-setup-publication",),
+                      ("--no-upgrade",), ("--dry-run",), ("--start-services",),
+                      ("--import-configs",), ("--p2p-file", "independent.xlsx")):
+            with self.subTest(extra=extra), \
+                    mock.patch.object(LOAD, "runtime_os", return_value="Linux"), \
+                    mock.patch.object(LOAD, "acquire_deployment_lock") as lock:
+                self.assertEqual(1, LOAD.main([str(self.project), "--host-role", "management-server",
+                    "--activate-setup-a", *extra]))
+                lock.assert_not_called()
+        for platform, role in (("Darwin", "workstation"), ("Linux", "workstation")):
+            with self.subTest(platform=platform, role=role), \
+                    mock.patch.object(LOAD, "runtime_os", return_value=platform), \
+                    mock.patch.object(LOAD, "acquire_deployment_lock") as lock:
+                self.assertEqual(1, LOAD.main([str(self.project), "--host-role", role, "--activate-setup-a"]))
+                lock.assert_not_called()
+
+    def test_a_activation_cli_keeps_wal_and_never_enters_generation_or_b(self):
+        state, _context, guard, active, actions = self._restored_a_activation_fixture()
+        frozen = (state[-3].lstat().st_ino, state[-3].read_bytes())
+        with private_a_health_ports(LOAD, self.root), ExitStack() as stack:
+            stack.enter_context(mock.patch.object(LOAD, "runtime_os", return_value="Linux"))
+            stack.enter_context(mock.patch.object(LOAD, "acquire_deployment_lock",
+                return_value=guard["deployment_lock_descriptor"]))
+            stack.enter_context(mock.patch.object(LOAD, "release_deployment_lock"))
+            stack.enter_context(mock.patch.object(LOAD, "HERE", state[1].parent))
+            stack.enter_context(mock.patch.object(LOAD, "service_runtime_backend", return_value=guard["runtime_backend"]))
+            for name in ("generate_configs", "validate_inputs", "start_services",
+                         "open_setup_switch_publication_bundle", "activate_setup_switch_b_publication",
+                         "restore_cross_project_rollback_context"):
+                stack.enter_context(mock.patch.object(LOAD, name, side_effect=AssertionError("unexpected " + name)))
+            self.assertEqual(0, LOAD.main([str(state[1]), "--host-role", "management-server", "--activate-setup-a"]))
+        self.assertEqual([("start", "apache2"), ("start", "isc-dhcp-server")], actions)
+        self.assertEqual({"apache2", "isc-dhcp-server"}, active)
+        self.assertEqual(frozen, (state[-3].lstat().st_ino, state[-3].read_bytes()))
 
     def test_b_retirement_late_marker_rebind_is_retained_and_b_stops(self):
         state, _context, guard, token, inputs = self._prepare_published_q_for_stopped_preflight(no_upgrade=True)
@@ -3125,10 +3423,10 @@ class ReleaseTransactionTests(unittest.TestCase):
 
     def _prepare_q_manifest_publication(self, *, seed_q_publication=False, q_local=False,
                                         original_a_policy=None, original_a_images=False, q_created=False, prefix=False,
-                                        managed_key=False, prefix_change=False):
+                                        managed_key=False, prefix_change=False, qualified_a_health=False):
         state, context = self._prepare_persisted_a_runtime_switch(seed_q_publication=seed_q_publication,
             original_upgrade_policy=original_a_policy, original_images=original_a_images, prefix=prefix,
-            managed_key=managed_key)
+            managed_key=managed_key, qualified_a_health=qualified_a_health)
         journal, descriptor, backend = state[-3:]
         guard = dict(deployment_lock_descriptor=descriptor, services_quiesced=True, runtime_backend=backend)
         if prefix_change:
@@ -3145,7 +3443,7 @@ class ReleaseTransactionTests(unittest.TestCase):
         state[2].symlink_to(os.path.relpath(state[5], state[2].parent))
         state[3].unlink()
         key_links = []
-        if managed_key:
+        if managed_key or qualified_a_health:
             for name in ("laptop.pub", "mgmt-server.pub"):
                 link = self.ztp / "config/publickey" / name
                 link.unlink()
@@ -4976,9 +5274,22 @@ class ReleaseTransactionTests(unittest.TestCase):
         finally:
             LOAD.discard_prepared_release(prepared)
 
-    def _publish_a_with_runtime_rollback_receipt(self, *, prepare_receipt=True, original_upgrade_policy=None):
+    def _publish_a_with_runtime_rollback_receipt(self, *, prepare_receipt=True, original_upgrade_policy=None,
+                                                qualified_health=False):
         parent = LOAD.validate_and_publish_release(self.project, self.inputs)
         output = self.project / "99-output-ztp"
+        if qualified_health:
+            from test_cases.test_ssh_key_preparation_contract import public_line
+            published = self.ztp / "config/publickey"
+            published.mkdir(parents=True)
+            for name, seed in (("laptop.pub", 31), ("mgmt-server.pub", 47)):
+                source = self.project / name
+                source.write_bytes(public_line("ssh-ed25519", seed, name)); source.chmod(0o644)
+                (published / name).symlink_to(os.path.relpath(source.resolve(), published.resolve()))
+            record = LOAD.generation_report.build_report(self.project.resolve(), parent,
+                published_dir=published.resolve())
+            report = LOAD.generation_report.prepare_generation_report(self.project.resolve(), record)
+            LOAD.generation_report.commit_prepared_generation_report(report)
         generation = LOAD.stage_pinned_generation(
             self.project, output / "current-release.json",
             self.ztp / "config/isc-dhcp-server",
@@ -5005,9 +5316,10 @@ class ReleaseTransactionTests(unittest.TestCase):
         for name, content in runtime_payloads.items():
             (self.ztp / name).write_bytes(content)
         publickeys = self.ztp / "config/publickey"
-        publickeys.mkdir(parents=True)
-        (publickeys / "laptop.pub").write_bytes(b"A laptop key\n")
-        (publickeys / "mgmt-server.pub").write_bytes(b"A management key\n")
+        if not qualified_health:
+            publickeys.mkdir(parents=True)
+            (publickeys / "laptop.pub").write_bytes(b"A laptop key\n")
+            (publickeys / "mgmt-server.pub").write_bytes(b"A management key\n")
         receipt = (LOAD.prepare_runtime_rollback_receipt(self.project, generation)
                    if prepare_receipt else None)
         return parent, generation, receipt
@@ -6692,7 +7004,7 @@ class ReleaseTransactionTests(unittest.TestCase):
 
     def _prepare_persisted_a_runtime_switch(self, *, managed_key=False, prefix=False,
                                           original_upgrade_policy=None, qualified_inputs=False,
-                                          seed_q_publication=False, original_images=False):
+                                          seed_q_publication=False, original_images=False, qualified_a_health=False):
         if prefix or managed_key:
             # A marker is lexical as well as physical authority. Use the same
             # canonical private deployment paths as the real cold LOAD child;
@@ -6727,7 +7039,9 @@ class ReleaseTransactionTests(unittest.TestCase):
                 "path": str(self.root.resolve() / "r22-prefix"), "target": str(self.ztp),
             }))
         self.global_file.write_text(yaml.safe_dump(document, sort_keys=False))
-        if original_upgrade_policy is not None or qualified_inputs:
+        if qualified_a_health:
+            original_upgrade_policy = "disabled"
+        if original_upgrade_policy is not None or qualified_inputs or qualified_a_health:
             # Existing minimal disk-only fixtures stay unchanged. Selection
             # fixtures freeze a complete, independently literal subnet CSV.
             self.subnet_file.write_text(
@@ -6739,10 +7053,10 @@ class ReleaseTransactionTests(unittest.TestCase):
             generation, receipt = self._publish_a_with_managed_key_receipt()
         else:
             _parent, generation, receipt = self._publish_a_with_runtime_rollback_receipt(
-                original_upgrade_policy=original_upgrade_policy)
+                original_upgrade_policy=original_upgrade_policy, qualified_health=qualified_a_health)
         extra_images = ({published: source} if original_images else {})
         extra_keys = ({self.ztp / "config/publickey" / name: self.project / name
-                       for name in ("laptop.pub", "mgmt-server.pub")} if managed_key else {})
+                       for name in ("laptop.pub", "mgmt-server.pub")} if managed_key or qualified_a_health else {})
         state = self._prepare_cross_project_setup_crash(extra_old_links={**extra_images, **extra_keys})
         p, q, common = state[:3]
         journal, descriptor, backend = state[-3:]

@@ -2763,3 +2763,30 @@ macOS/Python 3.9 环境独立重跑两次，分别为 135.575 秒和 135.096 秒
 此处使用的是 Python 标准库跨 POSIX 平台支持的 `Popen.wait(timeout)`；上述
 运行证据来自 macOS，Linux 真机/容器还需单独验证。首次相关测试尝试在受限沙箱
 因 AF_INET loopback preflight 返回 2，不能算测试失败或证明。
+
+### 2026-10-08 R22 原 A 健康入口的独立负例与边界修复
+
+原 A 恢复后的启动流程新增独立 direct 与真实 LOAD→SETUP→已提交 Q 强杀→新 LOAD
+冷恢复 workflow。首轮 13 项边界测试真实暴露公钥源 ABA：恢复 stage 的 link 身份检查没有
+重新检查原 rollback receipt 绑定的公钥源 ctime；原断言保留，完整日志
+`outputs/test-diagnostics/r22-original-a-health-boundaries.log` SHA256
+`8eca3a41964bdd41efe085120983369e1a97ec20fa55cbc130d3645793561ed5`
+为 13 tests、1 FAIL、exit 1。完整恢复组现在每个激活边界重查该源身份。
+
+第二个有效 RED 在 genuine 配置预检后把合格 listener 的 ifindex 从 2 改为 3，旧入口仍启动；
+`r22-original-a-listener-rebind-red2.log` SHA256
+`f4e7b887128d638de29b43186052f7d8fbf51e0ae2aa30f309af183bc1717776`
+为 1 test、1 FAIL、exit 1。现在每个边界重算 plan 并与本次原 plan 严格比较。
+`--activate-setup-a` 入口缺失的有效 RED（11 个参数子场景 ERROR）也保留于
+`r22-original-a-cli-red.log` SHA256
+`d0e85c6f7c3d7c166f63d13eed485a81a6139fd3c6dc28b6b643b54273d68cef`。
+
+修复后的 8 项回归覆盖上述两项负例、CLI 冲突/角色拒绝、真实健康正例、native monitor
+失败先于写者、独立 dispatcher 突变 oracle，以及真实强杀后的 A CLI 冷进入。
+`r22-original-a-cli-boundaries-resumed.log` inode 163216077、size 140250、SHA256
+`b0b7076e443b6e5c94afe8fa2848f29dac82acc58ef1a5c9f9fdeec4735d6fe0`
+完整物理顺序为 Ran 8 tests in 265.322s → OK → ACTUAL_UNITTEST_EXIT=0 →
+FROZEN_STATE_MATCH=True → DIAGNOSTIC_END=0；读前后 stat 一致，已知旧前缀 SHA 一致。
+此前暂停中断的 `r22-original-a-cli-boundaries-green.log` 原样保留，不算通过。
+本轮仍是有界诊断，不更新批准 ledger、不替代正式 related/full/check；安全归档、
+Linux/root 服务、断电/C2 和人工 ACK 尚未闭合。

@@ -1091,3 +1091,19 @@ P 阶段在绑定的 macOS CPython 3.9 环境中，把独立审定的依赖文�
 只有 `-B test_cases/run_related_tests.py --all -v`、`-B test_cases/run_related_tests.py --suite repository-governance -v` 与 `-B test_cases/run_related_tests.py --all --no-approve -v` 三组精确审定的 runner argv 会在进入顶层 child sandbox 前，由父进程在同一个私有 state root 内预启动受管 loopback OpenSSH fixture。父进程使用固定的 `/usr/sbin/sshd`、`/usr/bin/ssh-keygen` 与 `/usr/bin/ssh-keyscan`，以临时 host key 在 `127.0.0.1` ephemeral port 完成真实 KEX，并用持久 held read-only descriptor 绑定 key、config、manifest 与 daemon log identity；每轮另通过 held root dirfd 对 PID file 做短持有 `NOFOLLOW` open、双 `pread`/`fstat` 与精确 `pid\n` 验证。near-miss、hidden probe 与普通 child 均不得触发或继承该 fixture。父进程只向精确三类 child 传递 routing marker，不传 fixture 路径或 descriptor；child 先认证既有的 exact-nine environment protocol 与 archive、snapshot、`PYTHONHOME` exact-seven dependency descriptor，再从 authenticated `snapshot.parent` 派生固定 sibling 路径并以 `NOFOLLOW` held reads 自行验证 fixture，因此不会增加任何传入 FD。顶层 sandbox profile 另以 literal/subpath 规则禁止 child 及其后代写入、重命名或建立指向 fixture subtree 的可写别名。child 返回或抛出任何异常后，父进程都重新核对 held identity 与 payload，并以有界 TERM→KILL process-group 流程回收 daemon、关闭全部 descriptor、删除 fixture；创建、KEX、认证、内核写保护、回收或清理任一步失败都会阻断正式证明。
 
 这项自动化保证覆盖当前证明进程、child/grandchild 以及其可执行的 snapshot 篡改；它明确不承诺抵御另一个已在运行且拥有同一 UID 的独立恶意进程在 archive 建立窗口内抢占 writable FD。正式证明必须在无不受信任同 UID 进程的专用会话中执行；该剩余边界与人工证据登记在 `REAL_ENVIRONMENT.md`。
+
+### R22 原 A 显式健康激活
+
+`11-load.py Q --host-role management-server --activate-setup-a` 是独立的 Linux 管理服务器
+入口：预先停服、取得独占锁并停止原生 monitor 写者后，只检查原 WAL 已完整恢复的 A。
+它不生成、不补偿半成品、不选择最新项目、不进入 B 激活或 B 退休；成功仍保留原 WAL 和
+A 恢复计划。原 A 的 parent/report 物理身份须在 Q 写入前登记，并和原 rollback receipt
+逐项匹配；旧 WAL 缺少这份资格时 HOLD，不能用当前观察补签。
+
+direct 测试独立覆盖公钥源同 inode/同字节 ABA、预检期间 listener ifindex 换绑、部分启动、
+HTTP 失败及非本次启动服务混入。每个服务/健康边界重查原 A、公钥源身份和本次动态 plan；
+失败仅逆序停止本次尝试启动的服务，无法确认全部停服则保留证据并 HOLD。真实多脚本 workflow
+运行 LOAD→SETUP→已提交 Q 强杀→新 LOAD 冷恢复→A API/CLI，并覆盖真实私有 HTTP 的成功和
+503 拒绝。私有 fixture 只替换 OS 命令端口与服务状态，不替代 publication/auth/配置/规划逻辑；
+不构成 root/systemd/Apache/DHCP 真机或断电见证。A/B 全写集的可恢复安全归档是另一门禁，
+不能因本地激活通过而宣称 R22 完成，真机合同见 `TC-REAL-R22-GENERATION-INPUT-ABA-001`。
