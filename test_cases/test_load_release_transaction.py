@@ -11797,7 +11797,7 @@ os.kill(os.getpid(), signal.SIGKILL)
         self.assertNotEqual(original_link, os.readlink(common))
         backend.start.assert_not_called()
 
-    def _prepare_infra_receipt_recovery_owner(self, *, state=None, nested_hardlinks=False):
+    def _prepare_infra_receipt_recovery_owner(self, *, state=None, nested_hardlinks=False, before_pointer=False):
         if state is None:
             state = self._prepare_cross_project_setup_crash()
         q, common, target, journal, descriptor, backend = state[1], state[2], state[5], state[10], state[11], state[12]
@@ -11834,11 +11834,137 @@ os.kill(os.getpid(), signal.SIGKILL)
                 "size": len(payload), "sha256": hashlib.sha256(payload).hexdigest(),
             }
             receipt.write_text(json.dumps(document) + "\n", encoding="utf-8")
-        source.rename(backup)
-        source.symlink_to(os.path.relpath(destination, source.parent))
-        common.unlink()
-        common.symlink_to(os.path.relpath(target, common.parent))
+        if not before_pointer:
+            source.rename(backup)
+            source.symlink_to(os.path.relpath(destination, source.parent))
+            common.unlink()
+            common.symlink_to(os.path.relpath(target, common.parent))
         return state, source, destination, backup, receipt, payload
+
+    def test_setup_infra_detach_unregistered_clone_death_holds_without_consuming_p(self):
+        self._assert_infra_detach_sync_interruption('before-registration')
+
+    def test_setup_infra_detached_reentry_after_receipt_unlink_keeps_original_p(self):
+        state, source, destination, _backup, receipt, payload = self._prepare_infra_receipt_recovery_owner(before_pointer=True)
+        journal, descriptor, backend = state[-3:]
+        original = (source.stat().st_ino, (source / 'audit.log').stat().st_ino)
+        parent_sync, injected = LOAD._fsync_parent_directory, []
+        def die_after_receipt_unlink(parent):
+            result = parent_sync(parent)
+            if parent == receipt.parent and not receipt.exists():
+                injected.append(True); raise OSError('independent receipt unlink sync death')
+            return result
+        with mock.patch.object(LOAD, 'active_managed_services', return_value=()):
+            LOAD.detach_setup_switch_infra_log_copies(journal, deployment_lock_descriptor=descriptor,
+                services_quiesced=True, runtime_backend=backend)
+            with mock.patch.object(LOAD, '_fsync_parent_directory', side_effect=die_after_receipt_unlink):
+                with self.assertRaisesRegex(OSError, 'receipt unlink'):
+                    LOAD.recover_setup_switch_journal(journal, deployment_lock_descriptor=descriptor,
+                        services_quiesced=True, runtime_backend=backend)
+            self.assertEqual([True], injected); self.assertFalse(receipt.exists()); self.assertTrue(journal.exists())
+            self.assertEqual([], list(destination.iterdir()))
+            self.assertEqual('restored-p', LOAD.recover_setup_switch_journal(journal,
+                deployment_lock_descriptor=descriptor, services_quiesced=True, runtime_backend=backend))
+        self.assertEqual(original, (source.stat().st_ino, (source / 'audit.log').stat().st_ino))
+        self.assertEqual(payload, (source / 'audit.log').read_bytes()); self.assertFalse(journal.exists())
+        backend.start.assert_not_called()
+
+    def test_setup_infra_original_hardlinks_cannot_authorize_q_manifest(self):
+        state, source, _destination, _backup, _receipt, _payload = self._prepare_infra_receipt_recovery_owner()
+        state[3].unlink()
+        state[4].symlink_to(os.path.relpath(state[6], state[4].parent))
+        candidate = (f'# setup manifest — proj: {state[1].resolve()}\n{source}\n{state[2]}\n').encode()
+        journal, descriptor, backend = state[-3:]; frozen = journal.read_bytes()
+        with mock.patch.object(LOAD, 'active_managed_services', return_value=()):
+            with self.assertRaisesRegex(LOAD.LoadError, 'infra.*independent'):
+                LOAD.recover_setup_switch_journal(journal, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend, verify_only=True, manifest_candidate=candidate)
+        self.assertEqual(frozen, journal.read_bytes()); backend.start.assert_not_called()
+
+    def test_setup_infra_detach_registered_clone_death_cold_restores_p(self):
+        self._assert_infra_detach_sync_interruption('after-registration')
+
+    def test_setup_infra_detach_installed_clone_death_cold_restores_p(self):
+        self._assert_infra_detach_sync_interruption('after-installation')
+
+    def _assert_infra_detach_sync_interruption(self, boundary):
+        state, source, destination, backup, receipt, payload = self._prepare_infra_receipt_recovery_owner(before_pointer=True)
+        original = (source.stat().st_ino, (source / 'audit.log').stat().st_ino)
+        journal, descriptor, backend = state[-3:]
+        wal = journal.read_bytes(); frozen_receipt = receipt.read_bytes()
+        sync, parent_sync, replace = LOAD.os.fsync, LOAD._fsync_parent_directory, LOAD.os.replace
+        injected = []
+        def sync_clone(fd):
+            result = sync(fd)
+            if boundary == 'before-registration' and not injected and any(
+                    p.name.startswith('.r22-infra-detach-') and p.stat().st_ino == os.fstat(fd).st_ino
+                    for p in destination.iterdir()):
+                injected.append(True); raise OSError('independent clone sync death before registration')
+            return result
+        def sync_registration(parent):
+            result = parent_sync(parent)
+            if (boundary == 'after-registration' and not injected and parent == journal.parent
+                    and json.loads(journal.read_bytes())['body']['infra_logs'][0].get('independent_copies')):
+                injected.append(True); raise OSError('independent WAL sync death before installation')
+            return result
+        def replace_then_die(old, new, *args, **kwargs):
+            result = replace(old, new, *args, **kwargs)
+            if boundary == 'after-installation' and Path(old).name.startswith('.r22-infra-detach-'):
+                injected.append(True); raise OSError('independent clone installation death')
+            return result
+        with mock.patch.object(LOAD, 'active_managed_services', return_value=()), \
+                mock.patch.object(LOAD.os, 'fsync', side_effect=sync_clone), \
+                mock.patch.object(LOAD, '_fsync_parent_directory', side_effect=sync_registration), \
+                mock.patch.object(LOAD.os, 'replace', side_effect=replace_then_die):
+            with self.assertRaisesRegex(OSError, 'independent'):
+                LOAD.detach_setup_switch_infra_log_copies(journal, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend)
+        self.assertEqual([True], injected)
+        self.assertEqual(original, (source.stat().st_ino, (source / 'audit.log').stat().st_ino))
+        self.assertEqual(payload, (source / 'audit.log').read_bytes())
+        self.assertEqual(frozen_receipt, receipt.read_bytes())
+        self.assertFalse(os.path.lexists(backup))
+        stages = list(destination.glob('.r22-infra-detach-*'))
+        with mock.patch.object(LOAD, 'active_managed_services', return_value=()):
+            if boundary == 'before-registration':
+                self.assertEqual(1, len(stages)); self.assertEqual(wal, journal.read_bytes())
+                with self.assertRaisesRegex(LOAD.LoadError, 'infra.*unowned'):
+                    LOAD.recover_setup_switch_journal(journal, deployment_lock_descriptor=descriptor,
+                        services_quiesced=True, runtime_backend=backend)
+                self.assertEqual(payload, stages[0].read_bytes())
+                self.assertEqual(frozen_receipt, receipt.read_bytes())
+                self.assertEqual(payload, (destination / 'audit.log').read_bytes())
+            else:
+                self.assertEqual('restored-p', LOAD.recover_setup_switch_journal(journal,
+                    deployment_lock_descriptor=descriptor, services_quiesced=True, runtime_backend=backend))
+                self.assertFalse(journal.exists()); self.assertFalse(receipt.exists())
+                self.assertEqual([], list(destination.iterdir()))
+        self.assertEqual(original, (source.stat().st_ino, (source / 'audit.log').stat().st_ino))
+        backend.start.assert_not_called()
+
+    def test_setup_infra_detach_same_bytes_stage_rebind_at_sync_never_registers(self):
+        state, source, destination, _backup, receipt, payload = self._prepare_infra_receipt_recovery_owner(before_pointer=True)
+        journal, descriptor, backend = state[-3:]
+        wal, incident = journal.read_bytes(), receipt.read_bytes()
+        sync, changed = LOAD.os.fsync, []
+        retained = self.root / 'operator-original-exclusive-clone'
+        def rebind_at_sync(fd):
+            result = sync(fd)
+            candidates = [p for p in destination.iterdir() if p.name.startswith('.r22-infra-detach-')]
+            if not changed and candidates and candidates[0].stat().st_ino == os.fstat(fd).st_ino:
+                p = candidates[0]; metadata = p.stat(); p.rename(retained)
+                p.write_bytes(payload); p.chmod(stat.S_IMODE(metadata.st_mode))
+                os.utime(p, ns=(metadata.st_atime_ns, metadata.st_mtime_ns)); changed.append(p)
+            return result
+        with mock.patch.object(LOAD, 'active_managed_services', return_value=()), \
+                mock.patch.object(LOAD.os, 'fsync', side_effect=rebind_at_sync):
+            with self.assertRaisesRegex(LOAD.LoadError, 'clone.*changed.*HOLD'):
+                LOAD.detach_setup_switch_infra_log_copies(journal, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend)
+        self.assertEqual(1, len(changed)); self.assertNotEqual(retained.stat().st_ino, changed[0].stat().st_ino)
+        self.assertEqual(payload, retained.read_bytes()); self.assertEqual(payload, changed[0].read_bytes())
+        self.assertEqual(wal, journal.read_bytes()); self.assertEqual(incident, receipt.read_bytes())
+        self.assertFalse(source.is_symlink()); backend.start.assert_not_called()
 
     def test_setup_infra_cold_recovery_cannot_adopt_same_bytes_replacement_members(self):
         state, source, destination, backup, receipt, payload = self._prepare_infra_receipt_recovery_owner()
@@ -11864,6 +11990,35 @@ os.kill(os.getpid(), signal.SIGKILL)
 
     def test_setup_infra_writer_replaced_original_member_holds_before_receipt_or_copy(self):
         self._assert_infra_writer_original_member_holds(after_receipt=False)
+
+    def test_setup_infra_writer_detaches_q_before_pointer_without_mutating_p(self):
+        state = self._prepare_cross_project_setup_crash()
+        source = self.root.resolve() / 'infra/logs'; source.mkdir(parents=True)
+        payload = b'independent original P log, retained until explicit retirement\n'
+        (source / 'audit.log').write_bytes(payload)
+        original = (source / 'audit.log').stat().st_ino
+        destination = state[1].resolve() / '99-output-infra'; destination.mkdir()
+        journal, descriptor, backend = state[-3:]
+        with mock.patch.object(LOAD, 'active_managed_services', return_value=()):
+            backup = LOAD.register_setup_switch_infra_log_tree(journal, source, destination,
+                deployment_lock_descriptor=descriptor, services_quiesced=True, runtime_backend=backend)
+            with mock.patch.object(SETUP, 'HTTP_BASE', str(self.root.resolve())), \
+                    mock.patch.object(SETUP, 'ZTP', str(self.ztp)), \
+                    mock.patch.object(SETUP, '_SETUP_SWITCH_WAL_CONTEXT', (vars(LOAD), descriptor)):
+                SETUP._migrate_infra_log_tree(str(source), str(destination), os.path.relpath(destination, source.parent))
+        self.assertTrue(source.is_symlink())
+        self.assertEqual(original, (backup / 'audit.log').stat().st_ino)
+        self.assertNotEqual(original, (destination / 'audit.log').stat().st_ino,
+                            'Q writes must not change original P evidence')
+        self.assertEqual(payload, (destination / 'audit.log').read_bytes())
+        self.assertEqual(1, (destination / 'audit.log').stat().st_nlink)
+        clones = json.loads(journal.read_bytes())['body']['infra_logs'][0]['independent_copies']
+        self.assertEqual({'audit.log'}, set(clones))
+        self.assertEqual((destination / 'audit.log').stat().st_ino, clones['audit.log']['identity'][1])
+        self.assertFalse(os.path.lexists(destination / clones['audit.log']['stage']))
+        with (destination / 'audit.log').open('ab') as stream: stream.write(b'future Q appended bytes\n')
+        self.assertEqual(payload, (backup / 'audit.log').read_bytes())
+        backend.start.assert_not_called()
 
     def test_setup_infra_writer_member_after_receipt_holds_before_copy(self):
         self._assert_infra_writer_original_member_holds(after_receipt=True)

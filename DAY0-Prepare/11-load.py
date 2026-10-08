@@ -6734,13 +6734,15 @@ def _decode_setup_switch_journal(payload: bytes) -> dict[str, object]:
             raise ValueError(f"unknown journal {inventory} inventory shape")
         for row in rows:
             row_fields = fields
-            if inventory == "infra_logs" and isinstance(row, dict) and "original_tree" in row:
-                row_fields = fields | {"original_tree"}
+            if inventory == "infra_logs" and isinstance(row, dict):
+                row_fields = fields | ({"original_tree", "independent_copies"} & set(row))
             if inventory in {"q_local_links", "directories"} and isinstance(row, dict) and ("before_tree" in row or "after_tree" in row):
                 row_fields = fields | {"before_tree", "after_tree"}
             exact_fields(row, row_fields, inventory)
             if inventory == "infra_logs" and "original_tree" in row:
                 _validate_setup_switch_infra_original_tree(row["original_tree"])
+            if inventory == "infra_logs" and "independent_copies" in row:
+                _validate_setup_switch_infra_independent_copies(row)
             if inventory in {"q_local_links", "directories"} and "before_tree" in row:
                 for key in ("before_tree", "after_tree"):
                     tree = row[key]
@@ -7041,6 +7043,7 @@ def _setup_switch_shared_publication_snapshot(body, *, include_inputs=True, _b_r
             state = _setup_switch_prepare_infra_log_recovery(row, q)
             if not state[6] or not state[7]:
                 raise LoadError("publication infra logs have incomplete migration evidence; HOLD")
+            _require_setup_switch_infra_detached(row, state)
             infra[row["source"]] = dict(link=link(state[0], os.path.relpath(state[2], state[0].parent)),
                 receipt=_setup_publication_file(state[3]), owners=state[9])
         flat_files = {}
@@ -10583,6 +10586,126 @@ def register_setup_switch_infra_log_tree(
     return backup
 
 
+def detach_setup_switch_infra_log_copies(
+    journal: Path, *, deployment_lock_descriptor: int | None,
+    services_quiesced: bool, runtime_backend: ServiceRuntimeBackend | None,
+) -> None:
+    """Detach Q before its manifest, retaining original P and durable clone owners.
+
+    A clone created but not registered at death is unknown evidence: cold
+    readers HOLD, never adopt or remove it. Registration uses a read-only
+    candidate inspector while the original WAL FD/bytes remain held; it does
+    not grant a generic permission to accept unregistered destination names.
+    """
+    guard = dict(deployment_lock_descriptor=deployment_lock_descriptor,
+                 services_quiesced=services_quiesced, runtime_backend=runtime_backend)
+    if Path(journal) != _setup_switch_journal_path():
+        raise LoadError('infra detachment does not own configured WAL; HOLD')
+    def inspect():
+        return recover_setup_switch_journal(Path(journal), inspect_only=True, **guard)
+    inspect()
+    with _setup_switch_prefix_wal_authority(guard) as (body, require):
+        if any(key in body for key in ('q_manifest_intent', 'publication_bundle')):
+            raise LoadError('infra detachment must precede original Q manifest; HOLD')
+        rows = body.get('infra_logs', [])
+        if len(rows) != 1:
+            raise LoadError('infra detachment lacks one original migration; HOLD')
+        names = sorted(name for name, entry in rows[0]['original_tree'].items()
+                       if entry['kind'] == 'file')
+        require()
+    for name in names:
+        inspect()
+        clone_fd = source_fd = -1
+        try:
+            with _setup_switch_prefix_wal_authority(guard) as (body, require):
+                row = body['infra_logs'][0]
+                state = _setup_switch_prepare_infra_log_recovery(row, Path(body['new_project']['path']))
+                if state[6] or not state[7] or state[9]['copies'].get(name) is None:
+                    raise LoadError('infra detachment requires original source and complete Q hardlinks; HOLD')
+                destination, original = state[2], state[0] / name
+                target = destination / name
+                clone = row.get('independent_copies', {}).get(name)
+                if clone is None:
+                    require(); inspect()
+                    source_fd = os.open(original, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                    before = _dhcp_a_preimage_receipt_identity(os.fstat(source_fd))
+                    if (before != _dhcp_a_preimage_receipt_identity(original.lstat())
+                            or not stat.S_ISREG(before[2])):
+                        raise LoadError('infra original source changed before clone; HOLD')
+                    expected = row['original_tree'][name]
+                    stage = destination / ('.r22-infra-detach-' + uuid.uuid4().hex)
+                    clone_fd = os.open(stage, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                    digest, size = hashlib.sha256(), 0
+                    while chunk := os.read(source_fd, 1024 * 1024):
+                        digest.update(chunk); size += len(chunk)
+                        cursor = memoryview(chunk)
+                        while cursor:
+                            written = os.write(clone_fd, cursor)
+                            if written <= 0: raise LoadError('infra clone short write; HOLD')
+                            cursor = cursor[written:]
+                    if (before != _dhcp_a_preimage_receipt_identity(os.fstat(source_fd))
+                            or before != _dhcp_a_preimage_receipt_identity(original.lstat())
+                            or size != expected['size'] or digest.hexdigest() != expected['sha256']):
+                        raise LoadError('infra original changed while copying; HOLD')
+                    clone_info = os.fstat(clone_fd)
+                    if (clone_info.st_uid, clone_info.st_gid) != (expected['uid'], expected['gid']):
+                        os.fchown(clone_fd, expected['uid'], expected['gid'])
+                    os.fchmod(clone_fd, stat.S_IMODE(expected['mode']))
+                    os.utime(clone_fd, ns=(os.fstat(source_fd).st_atime_ns, expected['mtime_ns']))
+                    identity = list(_dhcp_a_preimage_receipt_identity(os.fstat(clone_fd)))
+                    clone = dict(stage=stage.name, identity=identity, size=size, sha256=digest.hexdigest())
+                    next_row = dict(row, independent_copies=dict(row.get('independent_copies', {}), **{name: clone}))
+                    next_body = dict(body, infra_logs=[next_row])
+                    next_payload = _setup_switch_canonical_payload(dict(body=next_body,
+                        sha256=hashlib.sha256(_setup_switch_canonical_payload(next_body)).hexdigest())) + b'\n'
+                    def qualified_candidate():
+                        require()
+                        if (identity != list(_dhcp_a_preimage_receipt_identity(os.fstat(clone_fd)))
+                                or identity != list(_dhcp_a_preimage_receipt_identity(stage.lstat()))
+                                or before != _dhcp_a_preimage_receipt_identity(os.fstat(source_fd))
+                                or before != _dhcp_a_preimage_receipt_identity(original.lstat())):
+                            raise LoadError('infra original or exclusive clone changed before WAL publication; HOLD')
+                        held = []
+                        try:
+                            _recover_setup_switch_journal_snapshot(Path(journal), opened=(next_payload, 0o600),
+                                require_journal_unchanged=require, verify_only=False, manifest_candidate=None,
+                                inspect_only=True, expected_old_state=None, expected_new_project=None,
+                                retain_journal=False, materialized_descriptors=held, runtime_restore_guard=guard)
+                        finally:
+                            for descriptor in reversed(held): os.close(descriptor)
+                        require()
+                    qualified_candidate()
+                    os.fsync(clone_fd); qualified_candidate()
+                    _fsync_parent_directory(destination); qualified_candidate()
+                    _publish_setup_switch_prefix_wal(next_body, qualified_candidate)
+                else:
+                    stage = destination / clone['stage']
+                    require()
+            # The old WAL is now consumed by our own durable replacement.
+            # Continue only through a fresh inspector of that registered owner.
+            inspect()
+            if os.path.lexists(stage):
+                if clone_fd < 0: clone_fd = os.open(stage, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                identity = clone['identity']
+                if (identity != list(_dhcp_a_preimage_receipt_identity(os.fstat(clone_fd)))
+                        or identity != list(_dhcp_a_preimage_receipt_identity(stage.lstat()))):
+                    raise LoadError('infra registered clone changed before installation; HOLD')
+                inspect()
+                os.replace(stage, target)
+                installed = list(_dhcp_a_preimage_receipt_identity(os.fstat(clone_fd)))
+                if (installed[:8] != identity[:8]
+                        or installed != list(_dhcp_a_preimage_receipt_identity(target.lstat()))):
+                    raise LoadError('infra installed clone is not original exclusive owner; HOLD')
+                inspect(); _fsync_parent_directory(target.parent); inspect()
+                if (installed != list(_dhcp_a_preimage_receipt_identity(os.fstat(clone_fd)))
+                        or installed != list(_dhcp_a_preimage_receipt_identity(target.lstat()))):
+                    raise LoadError('infra installed clone changed during sync; HOLD')
+        finally:
+            if source_fd >= 0: os.close(source_fd)
+            if clone_fd >= 0: os.close(clone_fd)
+    inspect()
+
+
 def _setup_switch_materialized_owner(path: Path):
     """Freeze a lexical owner, including ctime, without following a leaf link."""
     try:
@@ -10798,6 +10921,19 @@ def _setup_switch_require_infra_copies(state, *, names=None, directory_names=Non
         original_tree = backup if os.path.lexists(backup) else source
         if authority["source"] != _setup_switch_infra_directory_owner(original_tree):
             raise ValueError("original directory identity differs from preflight")
+        if authority.get('original_tree') is not None and authority['original_tree'] != _setup_switch_comparison_tree(
+                original_tree, allow_hardlinks=True, bind_file_ctime=False):
+            raise ValueError('complete original member inventory changed')
+        for name, expected in authority.get('stages', {}).items():
+            stage = destination / name
+            observed = (list(_dhcp_a_preimage_receipt_identity(stage.lstat()))
+                        if os.path.lexists(stage) else None)
+            if observed != expected:
+                raise ValueError('independent stage owner differs from preflight')
+            if observed is not None:
+                _info, signature = _setup_switch_infra_file_signature(stage)
+                if signature != authority['stage_signatures'][name]:
+                    raise ValueError('independent stage bytes differ from original WAL')
         checked_names = tuple(entries) if names is None else tuple(names)
         checked_directories = set(directories if directory_names is None else directory_names)
         for name in (*checked_names, *tuple(checked_directories)):
@@ -10824,7 +10960,9 @@ def _setup_switch_require_infra_copies(state, *, names=None, directory_names=Non
             else:
                 target_info, target_signature = _setup_switch_infra_file_signature(target)
                 if (expected != _setup_switch_infra_file_owner(target_info)
-                        or target_signature != entries[name]):
+                        or target_signature != entries[name]
+                        or authority.get('copy_exact', {}).get(name) is not None
+                        and authority['copy_exact'][name] != list(_dhcp_a_preimage_receipt_identity(target_info))):
                     raise ValueError("Q hardlink owner or bytes differ from preflight")
     except (OSError, RuntimeError, ValueError, KeyError, LoadError) as exc:
         raise LoadError(f"infra log copy changed: {exc}") from exc
@@ -10856,6 +10994,37 @@ def _validate_setup_switch_infra_original_tree(tree):
             raise ValueError("infra log original inventory has an invalid owner; HOLD")
     if tree[""].get("kind") != "directory":
         raise ValueError("infra log original inventory lacks its directory root; HOLD")
+
+
+def _validate_setup_switch_infra_independent_copies(row):
+    """Only producer-held exclusive clone identities may extend the WAL."""
+    copies = row['independent_copies']
+    tree = row.get('original_tree')
+    _validate_setup_switch_infra_original_tree(tree)
+    if not isinstance(copies, dict) or len(copies) > 4096:
+        raise ValueError('infra independent copy inventory is unbounded; HOLD')
+    stages, owners = set(), set()
+    for name, clone in copies.items():
+        original = tree.get(name)
+        if (not isinstance(original, dict) or original.get('kind') != 'file'
+                or name == '.gitkeep' or not isinstance(clone, dict)
+                or set(clone) != {'stage', 'identity', 'size', 'sha256'}
+                or not isinstance(clone['stage'], str)
+                or re.fullmatch(r'\.r22-infra-detach-[0-9a-f]{32}', clone['stage']) is None
+                or clone['stage'] in stages or clone['stage'] in tree):
+            raise ValueError('infra independent copy names/fields are invalid; HOLD')
+        identity = clone['identity']
+        if (not isinstance(identity, list) or len(identity) != 9
+                or any(type(value) is not int or value < 0 for value in identity)
+                or not stat.S_ISREG(identity[2]) or identity[5] != 1
+                or tuple(identity[:2]) in owners
+                or tuple(identity[:2]) == (original['dev'], original['ino'])
+                or identity[2:5] != [original[key] for key in ('mode', 'uid', 'gid')]
+                or identity[6:8] != [original['size'], original['mtime_ns']]
+                or type(clone['size']) is not int or clone['size'] != original['size']
+                or clone['sha256'] != original['sha256']):
+            raise ValueError('infra independent copy differs from original producer inventory; HOLD')
+        stages.add(clone['stage']); owners.add(tuple(identity[:2]))
 
 
 def _setup_switch_prepare_infra_log_recovery(row: dict[str, object], q_project: Path):
@@ -10970,7 +11139,31 @@ def _setup_switch_prepare_infra_log_recovery(row: dict[str, object], q_project: 
             if observed_files != set(entries) or observed_directories != set(directories):
                 raise ValueError("infra log source inventory changed after receipt")
         source_directories, copy_directories = {}, {}
-        source_files, copies = {}, {}
+        source_files, copies, copy_exact = {}, {}, {}
+        independent = row.get('independent_copies', {})
+        if 'independent_copies' in row:
+            _validate_setup_switch_infra_independent_copies(row)
+        if opened is None and independent:
+            # A recovery may have synced receipt unlink and died before WAL
+            # retirement. Only complete original cleanup is an eligible
+            # reentry, never a newly observed receipt or destination owner.
+            if any(os.path.lexists(destination / name) or os.path.lexists(destination / clone['stage'])
+                   for name, clone in independent.items()):
+                raise ValueError('missing original receipt with remaining independent copy/stage; HOLD')
+            independent = {}
+        if set(independent) - set(entries):
+            raise ValueError('independent copy lacks its original receipt entry')
+        stages, stage_signatures = {}, {}
+        for name, clone in independent.items():
+            stage = destination / clone['stage']
+            stages[clone['stage']] = None
+            stage_signatures[clone['stage']] = {key: clone[key] for key in ('size', 'sha256')}
+            if os.path.lexists(stage):
+                stage_info, signature = _setup_switch_infra_file_signature(stage)
+                if (list(_dhcp_a_preimage_receipt_identity(stage_info)) != clone['identity']
+                        or signature != stage_signatures[clone['stage']]):
+                    raise ValueError('independent stage identity/bytes changed')
+                stages[clone['stage']] = clone['identity']
         for name in directories:
             original_dir = original_tree / name
             if not stat.S_ISDIR(original_dir.lstat().st_mode):
@@ -10997,14 +11190,19 @@ def _setup_switch_prepare_infra_log_recovery(row: dict[str, object], q_project: 
             target = destination / name
             if os.path.lexists(target):
                 target_info, target_signature = _setup_switch_infra_file_signature(target)
-                if ((original_info.st_dev, original_info.st_ino)
-                        != (target_info.st_dev, target_info.st_ino)
-                        or target_signature != expected):
-                    raise ValueError("infra log Q hardlink changed")
+                hardlink = (original_info.st_dev, original_info.st_ino) == (target_info.st_dev, target_info.st_ino)
+                clone = independent.get(name)
+                detached = (clone is not None and list(_dhcp_a_preimage_receipt_identity(target_info))[:8]
+                            == clone['identity'][:8])
+                if (not (hardlink or detached) or target_signature != expected
+                        or clone is not None and hardlink and stages[clone['stage']] is None
+                        or detached and stages[clone['stage']] is not None):
+                    raise ValueError("infra log Q original hardlink/independent copy changed")
                 copies[name] = _setup_switch_infra_file_owner(target_info)
+                if detached: copy_exact[name] = list(_dhcp_a_preimage_receipt_identity(target_info))
             elif has_backup and os.path.islink(source):
                 raise ValueError("published infra log pointer has a missing Q entry")
-        allowed = set(entries) | set(directories) | {".gitkeep"}
+        allowed = set(entries) | set(directories) | {".gitkeep"} | set(stages)
         for current, subdirs, files in os.walk(destination, followlinks=False):
             for name in (*tuple(subdirs), *files):
                 path = Path(current) / name
@@ -11041,6 +11239,8 @@ def _setup_switch_prepare_infra_log_recovery(row: dict[str, object], q_project: 
             "source_directories": source_directories,
             "copy_directories": copy_directories,
             "source_files": source_files, "copies": copies,
+            "copy_exact": copy_exact, "stages": stages, "stage_signatures": stage_signatures,
+            "original_tree": original_inventory,
         }
         state = (source, backup, destination, receipt, entries, directories,
                  has_backup, opened is not None, receipt_authority, tree_authority)
@@ -11048,6 +11248,17 @@ def _setup_switch_prepare_infra_log_recovery(row: dict[str, object], q_project: 
         return state
     except (OSError, RuntimeError, TypeError, ValueError, KeyError, LoadError) as exc:
         raise LoadError(f"setup switch infra log state is unknown: {exc}") from exc
+
+
+def _require_setup_switch_infra_detached(row, state):
+    original = {name for name, entry in row['original_tree'].items() if entry['kind'] == 'file'}
+    independent = row.get('independent_copies', {})
+    if (not state[6] or not state[7] or set(independent) != original
+            or set(state[4]) != original or set(state[9]['copy_exact']) != original
+            or any(value is not None for value in state[9]['stages'].values())):
+        raise LoadError('infra independent copies are not completely installed before Q publication; HOLD')
+    _setup_switch_require_infra_receipt(state[3], state[8])
+    _setup_switch_require_infra_copies(state)
 
 
 def _setup_switch_restore_infra_log_tree(
@@ -11087,6 +11298,15 @@ def _setup_switch_restore_infra_log_tree(
             require_authority()
             path.unlink()
             tree_authority["copies"][name] = None
+            _fsync_parent_directory(path.parent)
+    for name in sorted(tree_authority.get('stages', {})):
+        path = destination / name
+        if os.path.lexists(path):
+            _setup_switch_require_infra_receipt(receipt, receipt_authority)
+            _setup_switch_require_infra_copies(state)
+            require_authority()
+            path.unlink()
+            tree_authority['stages'][name] = None
             _fsync_parent_directory(path.parent)
     for name in sorted(directories, key=lambda value: (-value.count(os.sep), value)):
         path = destination / name
@@ -11743,6 +11963,8 @@ def _recover_setup_switch_journal_snapshot(
         return "prepared-known-disk-state"
     if verify_only:
         if manifest_candidate is not None:
+            if infra_state is not None:
+                _require_setup_switch_infra_detached(infra_rows[0], infra_state)
             if any(phase != "linked" for _source, _destination, phase, _row in comparison_states):
                 raise LoadError("comparison transfer precommit is not exact Q")
             if any(os.readlink(path) != row["after"] for path, row in q_local_states):

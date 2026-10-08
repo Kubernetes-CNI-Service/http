@@ -3966,6 +3966,15 @@ def _migrate_infra_log_tree(source, destination, relative_target):
                 or _infra_log_file_signature(target_file) != expected):
             raise ValueError(f"日志迁移目标校验失败：{relative}")
 
+    if _SETUP_SWITCH_WAL_CONTEXT is not None:
+        load_api, descriptor = _SETUP_SWITCH_WAL_CONTEXT[:2]
+        try:
+            load_api['detach_setup_switch_infra_log_copies'](
+                Path(ZTP) / '.setup-switch-journal.json',
+                deployment_lock_descriptor=descriptor, services_quiesced=True,
+                runtime_backend=load_api['service_runtime_backend']())
+        except load_api['LoadError'] as exc:
+            raise SetupSwitchAuthorityHold(f'infra logs 独立副本权限变化；HOLD: {exc}') from exc
     identity = os.lstat(source)
     if ((identity.st_dev, identity.st_ino)
             != (receipt["source"]["dev"], receipt["source"]["ino"])):

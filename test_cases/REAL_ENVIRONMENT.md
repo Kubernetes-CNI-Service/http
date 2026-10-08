@@ -1634,6 +1634,20 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 ## TC-REAL-R22-GENERATION-INPUT-ABA-001 — 跨进程输入换代与多输出一致性
 
+- 2026-10-08 infra/logs 独立 Q 副本补充，仍 OPEN / NOT RUN：在本卡原授权可恢复
+  隔离 VM、精确版本、排他锁、停服与正常写者静默条件下，记录 P 原日志树与第一份
+  Q hardlink；SETUP 在源目录 rename/指针和 Q manifest 前，逐项建立独立单链接副本，
+  保留原 mode/uid/gid/mtime/字节，并将独占 clone 原始九字段身份及签名写入 WAL，
+  WAL 同步后才消费对应 hardlink。副本写入绝不能改变 P 备份字节/inode。分别在
+  clone fsync、WAL 父同步、clone 目标替换、冷恢复 receipt unlink 后强杀；全新
+  reader 对未登记暂存保持 HOLD，对原已登记 stage/clone 可恢复 P 原目录/文件 inode；
+  receipt 已缺席仅在完整原 cleanup、所有登记副本与 stage 均缺席时收口。另见证
+  同字节暂存换 inode、未知字段/名字、原成员/父目录变化均不登记或不删除；旧仅有
+  hardlink WAL 仍可安全恢复，但不得用于新 Q manifest/B 激活。保存每一步物理顺序、
+  原/暂存/目标/WAL/receipt 九字段与 SHA、完整 END/退出和停服见证，封存后按已核实
+  快照恢复；未知 stage 不自动清理，最后检查到 rename 非协作写者原子隔离未证明。
+  B backup/receipt 全归档、Linux/断电/C2/DEV ACK、正式当前树 related/full/check 仍未闭。
+
 - 2026-10-08 infra/logs writer 原始成员写前门禁补充，仍 OPEN / NOT RUN：沿本卡
   原隔离 VM、可恢复快照、精确版本、排他锁、已停服务与正常写者静默前提，分别在
   WAL 登记完成后、真实 receipt 独占创建并同步返回后，保留原日志文件 inode，在同名

@@ -7598,6 +7598,15 @@ finally:
 
     def test_real_setup_infra_log_pointer_death_cold_restores_real_directory(self):
         """LOAD→SETUP death after real log migration restores exact old bytes."""
+        self._assert_real_infra_pointer_death_cold_restore(require_independence=False)
+
+    def test_real_setup_infra_detached_pointer_death_cold_restores_original_file_inode(self):
+        self._assert_real_infra_pointer_death_cold_restore(require_independence=True)
+
+    def test_real_setup_infra_detached_receipt_unlink_death_new_reader_finishes_p(self):
+        self._assert_real_infra_pointer_death_cold_restore(require_independence=True, receipt_death=True)
+
+    def _assert_real_infra_pointer_death_cold_restore(self, *, require_independence, receipt_death=False):
         with tempfile.TemporaryDirectory(prefix="r22-real-infra-restore-") as name:
             fixture = self._private_setup_switch_fixture(Path(name))
             root, _p, q, common, p_only, q_only, manifest, before, _hook, barrier, _home = fixture
@@ -7606,6 +7615,7 @@ finally:
             payload = b"P-era audit bytes\n"
             (logs / "audit.log").write_bytes(payload)
             original = logs.stat()
+            original_file = (logs / 'audit.log').stat().st_ino
             first = self._run_private_load_setup_switch(
                 fixture, prepare_journal=True, first_link=logs,
             )
@@ -7621,6 +7631,14 @@ finally:
             backup = Path(rows[0]["backup"])
             self.assertEqual((original.st_dev, original.st_ino),
                              (backup.stat().st_dev, backup.stat().st_ino))
+            if require_independence:
+                self.assertEqual(original_file, (backup / 'audit.log').stat().st_ino)
+                self.assertNotEqual(original_file, (destination / 'audit.log').stat().st_ino,
+                                    'actual SETUP cannot publish a Q hardlink to original P')
+                copies = rows[0]['independent_copies']
+                self.assertEqual({'audit.log'}, set(copies))
+                self.assertEqual((destination / 'audit.log').stat().st_ino, copies['audit.log']['identity'][1])
+                self.assertFalse(os.path.lexists(destination / copies['audit.log']['stage']))
             receipt = root / "infra/.logs-migration.json"
             self.assertTrue(receipt.is_file())
 
@@ -7639,6 +7657,15 @@ spec.loader.exec_module(load)
 load.active_managed_services = lambda *args, **kwargs: ()
 descriptor = load.acquire_deployment_lock(exclusive=True)
 try:
+    if len(sys.argv) > 2:
+        import os, signal
+        sync = load._fsync_parent_directory
+        def die_after_receipt_unlink(parent):
+            result = sync(parent)
+            if parent == root / 'infra' and not (root / 'infra/.logs-migration.json').exists():
+                os.kill(os.getpid(), signal.SIGKILL)
+            return result
+        load._fsync_parent_directory = die_after_receipt_unlink
     outcome = load.recover_setup_switch_journal(
         root / 'ztp/.setup-switch-journal.json',
         deployment_lock_descriptor=descriptor, services_quiesced=True,
@@ -7650,10 +7677,17 @@ finally:
     load.release_deployment_lock(descriptor)
 """
             second = subprocess.run(
-                [sys.executable, "-B", "-c", recovery, str(root)],
+                [sys.executable, "-B", "-c", recovery, str(root), *(['receipt-death'] if receipt_death else [])],
                 cwd=root, capture_output=True, text=True, check=False,
             )
-            self.assertEqual(0, second.returncode, second.stdout + second.stderr)
+            if receipt_death:
+                self.assertEqual(-9, second.returncode, second.stdout + second.stderr)
+                self.assertFalse(receipt.exists()); self.assertTrue(journal.exists())
+                third = subprocess.run([sys.executable, '-B', '-c', recovery, str(root)],
+                    cwd=root, capture_output=True, text=True, check=False, timeout=30)
+                self.assertEqual(0, third.returncode, third.stdout + third.stderr)
+            else:
+                self.assertEqual(0, second.returncode, second.stdout + second.stderr)
             self.assertEqual(before["manifest"], manifest.read_bytes())
             self.assertEqual(before["common"], os.readlink(common))
             self.assertEqual(before["p_only"], os.readlink(p_only))
@@ -7662,6 +7696,8 @@ finally:
             self.assertEqual((original.st_dev, original.st_ino),
                              (logs.stat().st_dev, logs.stat().st_ino))
             self.assertEqual(payload, (logs / "audit.log").read_bytes())
+            if require_independence:
+                self.assertEqual(original_file, (logs / 'audit.log').stat().st_ino)
             self.assertFalse(os.path.lexists(destination / "audit.log"))
             self.assertFalse(os.path.lexists(backup))
             self.assertFalse(os.path.lexists(receipt))
@@ -7670,6 +7706,112 @@ finally:
 
     def test_real_setup_infra_writer_replaced_original_member_holds_before_receipt_or_copy(self):
         self._assert_real_infra_writer_original_member_holds(after_receipt=False)
+
+    def test_real_setup_infra_clone_sync_death_cold_holds_unregistered_stage(self):
+        self._assert_real_infra_detach_death('clone-sync')
+
+    def test_real_setup_infra_clone_wal_sync_death_cold_removes_original_registered_stage(self):
+        self._assert_real_infra_detach_death('wal-sync')
+
+    def test_real_setup_infra_clone_replace_death_cold_removes_original_installed_copy(self):
+        self._assert_real_infra_detach_death('replace')
+
+    def _assert_real_infra_detach_death(self, boundary):
+        with tempfile.TemporaryDirectory(prefix='r22-real-infra-detach-') as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, _p, q, common, p_only, q_only, manifest, before, hook, barrier, _home = fixture
+            source = root / 'infra/logs'; source.mkdir()
+            payload = b'independent original P detached workflow bytes\n'
+            (source / 'audit.log').write_bytes(payload)
+            original = (source.stat().st_ino, (source / 'audit.log').stat().st_ino)
+            destination = q / '99-output-infra'; journal = root / 'ztp/.setup-switch-journal.json'
+            site = hook / 'sitecustomize.py'
+            site.write_text(site.read_text() + r'''
+import json, stat
+detach_sync, detach_replace = os.fsync, os.replace
+def detached_boundary_death():
+    path = Path(os.environ['HTTP_TEST_Q_LINK_BARRIER'])
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        os.write(fd, (os.environ['HTTP_TEST_INFRA_DETACH_DEATH'] + '\n').encode())
+        detach_sync(fd)
+    finally: os.close(fd)
+    os.kill(os.getpid(), signal.SIGKILL)
+def sync_detached_stage(fd):
+    result = detach_sync(fd)
+    boundary = os.environ['HTTP_TEST_INFRA_DETACH_DEATH']
+    root = Path(os.environ['HTTP_TEST_INFRA_DETACH_ROOT'])
+    journal = root / 'ztp/.setup-switch-journal.json'
+    destination = root / 'DAY0-Prepare/q/99-output-infra'
+    if journal.exists() and destination.exists():
+        stages = list(destination.glob('.r22-infra-detach-*'))
+        metadata = os.fstat(fd)
+        if (boundary == 'clone-sync' and stages
+                and metadata.st_ino == stages[0].stat().st_ino):
+            detached_boundary_death()
+        if (boundary == 'wal-sync' and stages and stat.S_ISDIR(metadata.st_mode)
+                and metadata.st_ino == journal.parent.stat().st_ino
+                and json.loads(journal.read_bytes())['body'].get('infra_logs', [{}])[0].get('independent_copies')):
+            detached_boundary_death()
+    return result
+def replace_detached_stage(old, new, *args, **kwargs):
+    result = detach_replace(old, new, *args, **kwargs)
+    if (os.environ['HTTP_TEST_INFRA_DETACH_DEATH'] == 'replace'
+            and Path(old).name.startswith('.r22-infra-detach-')):
+        detached_boundary_death()
+    return result
+os.fsync, os.replace = sync_detached_stage, replace_detached_stage
+''', encoding='utf-8')
+            with mock.patch.dict(os.environ, {'HTTP_TEST_INFRA_DETACH_DEATH': boundary,
+                                             'HTTP_TEST_INFRA_DETACH_ROOT': str(root)}):
+                result = self._run_private_load_setup_switch(fixture, prepare_journal=True,
+                    kill_after_hardlink=destination / 'not-the-injected-boundary')
+            self.assertEqual(23, result.returncode, result.stdout + result.stderr)
+            self.assertEqual((boundary + '\n').encode(), barrier.read_bytes())
+            self.assertEqual(original, (source.stat().st_ino, (source / 'audit.log').stat().st_ino))
+            self.assertFalse(source.is_symlink()); self.assertEqual(before['manifest'], manifest.read_bytes())
+            self.assertEqual(payload, (source / 'audit.log').read_bytes())
+            incident = root / 'infra/.logs-migration.json'
+            wal, receipt = journal.read_bytes(), incident.read_bytes()
+            stages = list(destination.glob('.r22-infra-detach-*'))
+            self.assertEqual(0 if boundary == 'replace' else 1, len(stages))
+            if boundary != 'clone-sync':
+                self.assertEqual({'audit.log'}, set(json.loads(wal)['body']['infra_logs'][0]['independent_copies']))
+            recovery = r'''
+import importlib.util, sys
+from pathlib import Path
+from types import SimpleNamespace
+root, boundary = Path(sys.argv[1]), sys.argv[2]
+spec = importlib.util.spec_from_file_location('cold_detach_load', root / 'DAY0-Prepare/11-load.py')
+load = importlib.util.module_from_spec(spec);sys.modules[spec.name] = load;spec.loader.exec_module(load)
+load.active_managed_services = lambda *a, **k: ()
+fd = load.acquire_deployment_lock(exclusive=True)
+try:
+    try:
+        result = load.recover_setup_switch_journal(root / 'ztp/.setup-switch-journal.json',
+            deployment_lock_descriptor=fd, services_quiesced=True, runtime_backend=SimpleNamespace(name='supervisor'))
+    except load.LoadError as exc:
+        assert boundary == 'clone-sync' and 'unowned' in str(exc), str(exc)
+        print('ORIGINAL_UNREGISTERED_CLONE_HELD');raise SystemExit(7)
+    assert boundary != 'clone-sync' and result == 'restored-p', repr(result)
+    print('ORIGINAL_DETACHED_COPY_COLD_RESTORED')
+finally: load.release_deployment_lock(fd)
+'''
+            cold = subprocess.run([sys.executable, '-B', '-c', recovery, str(root), boundary],
+                cwd=root, capture_output=True, text=True, check=False, timeout=30)
+            self.assertEqual(7 if boundary == 'clone-sync' else 0, cold.returncode, cold.stdout + cold.stderr)
+            self.assertEqual(original, (source.stat().st_ino, (source / 'audit.log').stat().st_ino))
+            self.assertEqual(payload, (source / 'audit.log').read_bytes())
+            self.assertFalse((root / 'service-started').exists())
+            if boundary == 'clone-sync':
+                self.assertEqual(wal, journal.read_bytes()); self.assertEqual(receipt, incident.read_bytes())
+                self.assertEqual(payload, stages[0].read_bytes())
+                self.assertEqual(payload, (destination / 'audit.log').read_bytes())
+            else:
+                self.assertFalse(journal.exists()); self.assertFalse(incident.exists())
+                self.assertEqual([], [p for p in destination.iterdir() if p.name != '.gitkeep'])
+                self.assertEqual(before['common'], os.readlink(common))
+                self.assertEqual(before['p_only'], os.readlink(p_only)); self.assertFalse(os.path.lexists(q_only))
 
     def test_real_setup_infra_writer_member_after_receipt_holds_before_copy(self):
         self._assert_real_infra_writer_original_member_holds(after_receipt=True)

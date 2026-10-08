@@ -3150,3 +3150,35 @@ SHA256 `e6d0a63dd44fbf2acbdb96e36e9e0cfa8f344fa57c27ef55976244b9f2ad6ce5`，2 te
 `0e186acf5379bbbf044c2fda9103ab11c27a7743e92304076ed5ced833ee828a` 不变，物理 Ran→OK→退出→END 已核实。
 现有 manifest direct/workflow 映射未变；未手改 ledger。该局部回归不是正式证明；
 Q 独立副本及 B 原 backup/receipt 归档继续推进，真机卡仍 OPEN。
+
+### 2026-10-08 R22 Q 日志副本与原 P 证据隔离
+
+独立 direct 与真实 LOAD→SETUP 指针强杀→新 LOAD 恢复，先证明旧 Q 与 P 仍为同 inode：
+`r22-infra-independent-copies-red.log` inode 163949557、size 2561、SHA256
+`a1a01af9e7fad5ef0f0b108f03357239466a5d45cffb3df35b1b449908b5b2e4`，2 tests、2 FAIL、exit/END=1。
+候选在 Q manifest 前复制原已绑定字节，独占 stage 九字段身份在 fsync 前捕获、前后
+复核；原 WAL FD/字节不变的只读 candidate inspector 全检查后才登记并同步 WAL，
+再替换 Q hardlink。未知 stage 保留/HOLD，冷恢复只消费登记 inode，不收编冷读当前对象。
+`-green.log` inode 163952393、size 931、SHA256
+`141bdded8ce3ebf2a9e9875ac5832d999813145f44a60fe5aa3b50ed1872e214`，2 tests、OK、exit/END=0。
+
+首轮 11 项死亡/换绑边界均通过：`r22-infra-independent-copy-boundaries.log` inode
+163954792、size 3745、SHA256 `c9aeb62001d917c205144ebf28c13c3620d2552450ef659485ce5588c2531490`，
+11 tests in 21.909s、OK、exit/END=0。继续独立复现 receipt 删除后重入 ERROR 与原 hardlink
+仍被 manifest 接受 FAIL；初始 manifest 夹具另一 P-only 链接尚未切换，提前拒绝，原日志
+`r22-infra-independent-reentry-manifest-red.log` inode 163964850、size 3325、SHA256
+`c95b387aabbf929729ba6c239248eb6653d8332f03b8d18d01729ff68c8566c2` 保留，不称该提前拒绝为缺陷复现。
+完成声明的 Q 链接后，`-qualified-red.log` inode 163964998、size 3113、SHA256
+`cfb1063402d0728d188d0c2bf33333682008fb20475add787a39e824df4a872a`，2 tests、1 FAIL/1 ERROR、exit/END=1。
+修复限制 receipt 缺席重入为确切完整 cleanup；manifest 与 sealed publication 均要求原始
+完整独立副本、零残留 stage。未弱化原断言。增加实际 receipt unlink 强杀→第三个
+新 LOAD 收口：`r22-infra-independent-complete-boundaries.log` inode 163965388、size 4633、
+SHA256 `2a808d9aad96a1f26faa5436ee456d11ed47437494fe79434d056b71df066aa0`，14 tests in 22.385s、OK、exit/END=0。
+
+整批原 infra/materialized、文档、完整 REQ23/REQ19 回归：
+`r22-infra-independent-all-regressions.log` inode 163977665、size 48835、SHA256
+`b7fd937ff2bb3fc6a8068d25a056304b700da3c87fa92fed4a121f232bbd2422`，202 tests in 213.131s、OK、exit/END=0。
+前后 stat/inode 稳定、已知 27948 字节前缀 SHA256
+`9858d213ca1cf0d261e48c4990865962727c962fe592808b1041cd437abc4711` 不变，物理结果/实际退出/END 完整。
+manifest direct/workflow 映射沿用；ledger 未修改，局部回归不替代正式 related/full/check。
+B 原备份/receipt 全归档继续推进，本卡真机/断电仍 OPEN。
