@@ -985,6 +985,14 @@ stat/inode/SHA 绑定到独立只增不改的 `.completion`。四份 RAW、HEADE
 FIFO、高水位或 settings outbox，也不作为真实源准入、在线激活或正式 full proof；
 这些 REQ7 集成仍待完成。新增真实 TLS→双锁→文件屏障→冷进程回读联测覆盖缺审计、
 复制回应、同字节 HEADER 替换、尾行摘要漂移、计数后变和最终期限失效。
+冷读还须从四份原 RAW 重放模板 identity/headers、nonce、永久 fence 和全部
+History 语义，并逐项核固定读取路径的原摘要；不能只接受重新自洽的 HEADER/
+MATCHED 描述。与 live matcher 共用原 journal/WIRE/前缀对账，但仅构造无凭据的
+历史 decoder 输入，不签发新 HTTP 回应、读取期限或远端新鲜性。六个独立篡改
+子项在原始 fixture 内同步改 RAW/摘要/stat/marker，仍须 HOLD 且不改变原文件。
+真实读取夹具 ERROR 保留原异常与原时限，另只输出读取种类、服务端接收次数/
+错误类型和自有子进程退出码；不记录 token、请求头或响应正文，单独复跑通过
+不得据此关闭原始联测失败的根因。
 
 `test_cases.test_req7_activity_discovery` 另区分 caller 有限窗口和固定完整容量读：
 显式身份/Status 列与 GRID rowCount/columnCount 在同一个 GET 返回；仅容量 3..5002

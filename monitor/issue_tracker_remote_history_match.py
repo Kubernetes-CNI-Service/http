@@ -12,7 +12,7 @@ from contextlib import contextmanager
 import hashlib
 import json
 import os
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlencode
 
 from monitor import issue_tracker_global_attempt_journal as global_journal
 from monitor import issue_tracker_history_preread_journal as before
@@ -176,15 +176,31 @@ def _observe_remote_history_unit(token, binding, unit, identity, metadata_plan, 
     """
     failed = False
     try:
+        # Preserve the original bounded/coherent unit boundary before parsing
+        # any caller unit bytes; the shared matcher rechecks after decoding.
         state = global_journal.inspect_global_unit(token, binding, unit)
         if state.attempt_count < 1: raise RemoteHistoryHold()
-        preread, original = before._read_preread(token, binding, unit)
+        before._read_preread(token, binding, unit)
         enrollment.require_unit_enrollment(token, binding, identity, unit)
         action = json.loads(unit.action_preimage)
         pair = enrollment.observe_enrollment_pair(token, binding, identity, metadata_plan, metadata_response,
                                                   sheet=action['identity']['sheet'])
         if urlsplit(history_plan.path).path != '/v4/spreadsheets/' + binding.spreadsheet_id: raise RemoteHistoryHold()
         post = decode.decode_history_tail(history_plan, history_response, sheet_id=action['history_sheet_id'])
+        result = _match_original_decoded_images(token,binding,unit,identity,pair,metadata_response,post)
+    except Exception: failed = True
+    if failed: raise RemoteHistoryHold()
+    return result
+
+
+def _match_original_decoded_images(token,binding,unit,identity,pair,metadata_response,post):
+    """Shared live/cold semantic matcher, never freshness or send authority."""
+    failed=False
+    try:
+        state = global_journal.inspect_global_unit(token, binding, unit)
+        if state.attempt_count < 1: raise RemoteHistoryHold()
+        preread, original = before._read_preread(token, binding, unit)
+        enrollment.require_unit_enrollment(token, binding, identity, unit)
         fence_present, foreign_fence = _fence(unit, identity, metadata_response)
         # Coherence was checked against actual global immutable ACTION/WIRE,
         # including full outcomes and ALL audit rows, before interpreting it.
@@ -259,6 +275,51 @@ _COMPLETION_READS=(('identity_response','template_identity','IDENTITY-RAW'),
                    ('headers_response','template_headers','HEADERS-RAW'),
                    ('metadata_response','metadata','METADATA-RAW'),
                    ('history_response','history_tail','HISTORY-RAW'))
+
+
+@dataclass(frozen=True)
+class _RetainedReadImage:
+    """Historical decoder input only; NEVER an issued/live HTTP response.
+
+    200/complete describe the original writer's required accepted-read contract,
+    not a new transport result. No read registry, headers, token or launcher
+    accepts this private image; cold replay does not assert current remote state.
+    """
+    data: bytes
+    status: int = 200
+    complete: bool = True
+
+
+def _replay_completion_raw_images(token,binding,unit,header,snapshots):
+    """Recompute all proof semantics from original RAW, not stored MATCHED.
+
+    Build only fixed decoder GET geometries, with EMPTY headers/no credentials.
+    Verify each actual recorded path digest against its canonical read family.
+    Metadata nonce decoding is pure; do not invent authentication to call the
+    live HTTP validator. The original journal/WIRE/prefix dominate matching.
+    """
+    from monitor import issue_tracker_sheets_read_plan as plans
+    prefix='/v4/spreadsheets/'+binding.spreadsheet_id
+    paths={
+        'IDENTITY-RAW':prefix+'?'+urlencode([('includeGridData','false'),('fields',plans._TEMPLATE_ID_FIELDS)]),
+        'HEADERS-RAW':prefix+'?'+urlencode([('includeGridData','true'),('fields',plans._FIELDS),
+            *(('ranges',value) for value in plans._TEMPLATE_HEADER_RANGES)]),
+        'HISTORY-RAW':prefix+'?'+urlencode([('includeGridData','true'),('fields',plans._HISTORY_TAIL_FIELDS),
+            ('ranges',"'Update_History'!A3:E5002")]),
+        'METADATA-RAW':prefix+'/developerMetadata:search?'+urlencode({'fields':metadata._FIELDS}),
+    }
+    for file,path in paths.items():
+        if header['responses'][file]['request_path_sha256']!=hashlib.sha256(path.encode('utf-8')).hexdigest():
+            raise RemoteHistoryHold()
+    def plan(file): return plans.PreparedSheetsRead('sheets.googleapis.com',paths[file],'GET',(),b'')
+    def image(file): return _RetainedReadImage(snapshots[file][0])
+    identity=decode.decode_template_identity(plan('IDENTITY-RAW'),image('IDENTITY-RAW'))
+    decode.decode_template_headers(plan('HEADERS-RAW'),image('HEADERS-RAW'),identity)
+    action=json.loads(unit.action_preimage)
+    pair=enrollment._observe_enrollment_image(token,binding,identity,snapshots['METADATA-RAW'][0],
+                                              sheet=action['identity']['sheet'])
+    post=decode.decode_history_tail(plan('HISTORY-RAW'),image('HISTORY-RAW'),sheet_id=action['history_sheet_id'])
+    return _match_original_decoded_images(token,binding,unit,identity,pair,image('METADATA-RAW'),post)
 
 
 def record_owned_completion_evidence(writer_token,owner_token,binding,unit,*,
@@ -415,6 +476,10 @@ def inspect_completion_evidence(owner_token,binding,unit):
                     'state':'COMPLETE-PRESENT-NOT-APPLIED'}): raise RemoteHistoryHold()
             if (matched['metadata_sha256']!=header['responses']['METADATA-RAW']['sha256']
                     or matched['history_sha256']!=header['responses']['HISTORY-RAW']['sha256']): raise RemoteHistoryHold()
+            replayed=_replay_completion_raw_images(owner_token,binding,unit,header,snapshots)
+            if (replayed.state!='MATCHED_OBSERVATION'
+                    or local._canonical(asdict(replayed))!=local._canonical(matched)):
+                raise RemoteHistoryHold()
             for file in sorted(snapshots):
                 fd=os.open(file,local._flags()|os.O_NONBLOCK,dir_fd=folder)
                 try:

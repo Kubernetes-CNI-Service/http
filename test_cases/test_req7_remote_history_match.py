@@ -378,16 +378,27 @@ class Req7OwnedHistoryMatchWorkflowTests(unittest.TestCase):
         body = json.dumps(value, separators=(',', ':')).encode() if raw_body is None else raw_body
         self.assertIs(type(body),bytes)
         reply = b'HTTP/1.1 200 OK\r\nContent-Length: ' + str(len(body)).encode() + b'\r\nConnection: close\r\n\r\n' + body
-        with self.server(reply, hostname='sheets.googleapis.com', destination='sheets.googleapis.com') as (records, errors):
-            port = socket.getaddrinfo('sheets.googleapis.com', 443)[0][4][1]
-            from contextlib import ExitStack
-            with ExitStack() as launched:
-                calls, children = self.intercept(launched, self.child_fixture(port), writer, owner, binding)
-                result = reads.OwnedSheetsReadUnit(writer, owner, binding, token, read_kind=kind, sheet=sheet, row=row).read_once()
-                self.assertEqual((1, 0, body), (len(calls), children[0].returncode, result.data))
-            self.assertEqual([], errors); self.assertEqual(1, len(records))
-            method = b'POST ' if kind == 'metadata' else b'GET '
-            self.assertTrue(records[0][0].startswith(method + b'/v4/spreadsheets/' + binding.spreadsheet_id.encode()))
+        records=errors=children=None
+        try:
+            with self.server(reply, hostname='sheets.googleapis.com', destination='sheets.googleapis.com') as (records, errors):
+                port = socket.getaddrinfo('sheets.googleapis.com', 443)[0][4][1]
+                from contextlib import ExitStack
+                with ExitStack() as launched:
+                    calls, children = self.intercept(launched, self.child_fixture(port), writer, owner, binding)
+                    result = reads.OwnedSheetsReadUnit(writer, owner, binding, token, read_kind=kind, sheet=sheet, row=row).read_once()
+                    self.assertEqual((1, 0, body), (len(calls), children[0].returncode, result.data))
+                self.assertEqual([], errors); self.assertEqual(1, len(records))
+                method = b'POST ' if kind == 'metadata' else b'GET '
+                self.assertTrue(records[0][0].startswith(method + b'/v4/spreadsheets/' + binding.spreadsheet_id.encode()))
+        except reads.HistoryReadLauncherHold:
+            # Preserve the original ERROR and all strict timing/behavioral
+            # checks. Only non-secret phase facts survive owned-fixture cleanup;
+            # never print the token, argv, HTTP headers or response body.
+            print('OWNED_READ_FAILURE_PHASE',kind,
+                  'server_records',None if records is None else len(records),
+                  'server_errors',None if errors is None else [type(error).__name__ for error in errors],
+                  'child_returncodes',None if children is None else [child.returncode for child in children],flush=True)
+            raise
         return result
 
     def prepare_owned(self, stack):
@@ -639,6 +650,53 @@ with scoped_fixture(root,owner),owner.spreadsheet_owner(bound) as token:
                 with self.assertRaises(module.RemoteHistoryHold): module.inspect_completion_evidence(owner,bound,unit)
                 self.assertEqual(retained,{p:p.read_bytes() for p in proof.iterdir()})
             if fault=='same-byte-header': self.doCleanups(); self.setUp()
+
+    def test_cold_completion_replays_raw_semantics_not_a_self_consistent_matched_summary(self):
+        """Raw hashes/stat and COMPLETE can agree while the proof rows do not."""
+        module=load()
+        from contextlib import ExitStack
+        from monitor import issue_tracker_local_commit as local, issue_tracker_attempt_journal as original_io
+        faults=('fence','nonce','identity','headers','history','request-path')
+        for number,fault in enumerate(faults):
+            with self.subTest(fault=fault),ExitStack() as stack:
+                writer,owner,bound,auth,_config,unit,docs=self.prepare_owned(stack)
+                responses={name:self.read_owned(stack,writer,owner,bound,auth,kind,value)
+                           for name,(kind,value) in docs.items()}
+                module.record_owned_completion_evidence(writer,owner,bound,unit,**responses)
+                proof=self.root/'var/lib/http-ztp-container/issue-tracker'/(hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()+'.completion')
+                header=json.loads((proof/'HEADER').read_bytes())
+                if fault=='request-path':
+                    header['responses']['HISTORY-RAW']['request_path_sha256']='0'*64
+                else:
+                    file={'fence':'METADATA-RAW','nonce':'METADATA-RAW','identity':'IDENTITY-RAW',
+                          'headers':'HEADERS-RAW','history':'HISTORY-RAW'}[fault]
+                    raw=json.loads((proof/file).read_bytes())
+                    if fault in ('fence','nonce'):
+                        entries=raw['matchedDeveloperMetadata']
+                        chosen=next(entry['developerMetadata'] for entry in entries
+                                    if (entry['developerMetadata']['metadataKey']=='z')==(fault=='fence'))
+                        chosen['metadataValue']='different-original-value'
+                    elif fault=='identity':
+                        raw['sheets'][0]['properties']['title']='different-template-title'
+                    elif fault=='headers':
+                        raw['sheets'][0]['data'][0]['rowData'][0]['values'][0]['userEnteredValue']={'stringValue':'different header'}
+                    else:
+                        raw['sheets'][0]['data'][0]['rowData'].pop()
+                    image=local._canonical(raw); (proof/file).write_bytes(image)
+                    header['responses'][file]['sha256']=hashlib.sha256(image).hexdigest()
+                    header['responses'][file]['identity']=list(original_io._identity((proof/file).stat()))
+                    if file=='METADATA-RAW': header['matched']['metadata_sha256']=hashlib.sha256(image).hexdigest()
+                    if file=='HISTORY-RAW': header['matched']['history_sha256']=hashlib.sha256(image).hexdigest()
+                image=local._canonical(header); (proof/'HEADER').write_bytes(image)
+                marker=json.loads((proof/'COMPLETE').read_bytes())
+                marker['header_sha256']=hashlib.sha256(image).hexdigest()
+                marker['header_identity']=list(original_io._identity((proof/'HEADER').stat()))
+                (proof/'COMPLETE').write_bytes(local._canonical(marker))
+                retained={path.name:path.read_bytes() for path in proof.iterdir()}
+                with self.assertRaises(module.RemoteHistoryHold):
+                    module.inspect_completion_evidence(owner,bound,unit)
+                self.assertEqual(retained,{path.name:path.read_bytes() for path in proof.iterdir()})
+            if number<len(faults)-1: self.doCleanups(); self.setUp()
 
     def test_owned_completion_missing_audit_forged_read_and_failed_barrier_never_install_marker(self):
         module=load()

@@ -164,14 +164,33 @@ def observe_enrollment_pair(token,binding,identity,plan,response,*,sheet):
     """Exact visible pair only; marker presence alone never proves COMPLETE."""
     failed=False
     try:
-        from monitor.issue_tracker_metadata_capacity import _validate_plan,_entry,_pairs,_nonfinite
+        from monitor.issue_tracker_metadata_capacity import _validate_plan
         if (type(sheet) is not str or sheet not in _TITLES[:3] or _validate_plan(plan)!=binding.spreadsheet_id
                 or type(response.status) is not int or response.status!=200 or response.complete is not True
                 or type(response.data) is not bytes or not 1<=len(response.data)<=2*1024*1024):
             raise EnrollmentHold()
+        result=_observe_enrollment_image(token,binding,identity,response.data,sheet=sheet)
+    except Exception: failed=True
+    if failed: raise EnrollmentHold()
+    return result
+
+
+def _observe_enrollment_image(token,binding,identity,raw,*,sheet):
+    """Pure retained-image nonce matching, NOT HTTP/auth/freshness proof.
+
+    The live caller above validates the actual request and complete response.
+    A cold COMPLETE reader must separately bind its original RAW bytes and
+    fixed request digest; no artificial bearer token or HTTP plan is needed
+    to recheck the same metadata semantics against the actual local journal.
+    """
+    failed=False
+    try:
+        from monitor.issue_tracker_metadata_capacity import _entry,_pairs,_nonfinite
+        if (type(sheet) is not str or sheet not in _TITLES[:3]
+                or type(raw) is not bytes or not 1<=len(raw)<=2*1024*1024): raise EnrollmentHold()
         observed=inspect_enrollment_journal(token,binding,identity)
         expected={sid:nonce for title,sid,nonce in observed.nonces}; title_ids=dict(identity.sheet_ids)
-        document=json.loads(response.data.decode("utf-8","strict"),object_pairs_hook=_pairs,parse_constant=_nonfinite)
+        document=json.loads(raw.decode("utf-8","strict"),object_pairs_hook=_pairs,parse_constant=_nonfinite)
         if type(document) is not dict or not set(document)<={"matchedDeveloperMetadata"}: raise EnrollmentHold()
         entries=document.get("matchedDeveloperMetadata",[])
         if type(entries) is not list or len(entries)>30000: raise EnrollmentHold()
@@ -188,7 +207,7 @@ def observe_enrollment_pair(token,binding,identity,plan,response,*,sheet):
                 found.add(sid)
         if not {title_ids[sheet],title_ids["Update_History"]}<=found: raise EnrollmentHold()
         ownership._validated_owner(token,binding)
-        result=ObservedEnrollmentPair(True,True,observed.journal_sha256,hashlib.sha256(response.data).hexdigest())
+        result=ObservedEnrollmentPair(True,True,observed.journal_sha256,hashlib.sha256(raw).hexdigest())
     except Exception: failed=True
     if failed: raise EnrollmentHold()
     return result
