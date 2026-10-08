@@ -599,3 +599,28 @@ def pending_settings_audits_after_completed_unit(writer_token,spreadsheet_token,
             except OSError: failed=True
     if failed: raise SettingsAuditHold()
     return result
+
+
+def read_current_k_after_completed_unit(writer_token,spreadsheet_token,binding,unit):
+    """Highest original K under the same complete delivery pair; read only.
+
+    No caller-provided consumed IDs, old-K fallback, file repair, cleanup,
+    publication or release permission. Ordinary K readers remain strict.
+    """
+    folder=None; failed=False
+    try:
+        with _hold_delivery_authority(writer_token,spreadsheet_token,binding,unit,inspect_delivered=True) as (owner,raw,delivered,verify):
+            with _hold_delivery_start(owner,raw) as (start_verify,raw):
+                folder=local._directory(owner.root_fd,_DELIVERY_FOLDER)
+                with _hold_delivery_files(owner,folder,raw) as delivery_verify:
+                    with _hold_settings_originals(writer_token,delivered_event_ids=delivered.event_ids) as (images,settings_verify):
+                        events,current,initialized,_outbox=images
+                        result=chain.validate_k_chain_snapshot(events,current,initialized)
+                        verify(); start_verify(); delivery_verify(); settings_verify()
+    except Exception: failed=True
+    finally:
+        if folder is not None:
+            try: os.close(folder)
+            except OSError: failed=True
+    if failed: raise SettingsAuditHold()
+    return result

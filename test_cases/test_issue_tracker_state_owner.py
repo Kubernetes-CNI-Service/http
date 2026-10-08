@@ -25,6 +25,18 @@ PREPARED = b"scratch-workbook-projection\n"
 
 
 class TrackerStateOwnerTests(unittest.TestCase):
+    def test_qualified_k_context_cannot_be_partial_or_replace_actual_owners(self):
+        self.initialize()
+        with tracker_writer(self.project,self.publication) as token:
+            before={str(p.relative_to(self.root)):p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
+            for context in ({'spreadsheet_token':object()},
+                            {'binding':object(),'completed_unit':object()},
+                            {'spreadsheet_token':object(),'binding':object(),'completed_unit':object()}):
+                with self.subTest(context_keys=tuple(context)),self.assertRaises(TrackerStateHold):
+                    current_k(token,**context)
+            self.assertEqual((0,3),(current_k(token).revision,current_k(token).k))
+            self.assertEqual(before,{str(p.relative_to(self.root)):p.read_bytes() for p in self.root.rglob('*') if p.is_file()})
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="tracker-shared-owner-")
         self.addCleanup(self.temp.cleanup)

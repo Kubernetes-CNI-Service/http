@@ -56,10 +56,20 @@ def tracker_writer(project, publication):
         yield token
 
 
-def current_k(token):
-    """Read highest complete K while the caller's single LK-P token is live."""
+def current_k(token, *, spreadsheet_token=None, binding=None, completed_unit=None):
+    """Read highest K; missing delivered projections require the actual paired owners.
+
+    No context keeps the ordinary strict contract. Partial/fake/expired context
+    cannot authorize missing projections. This is not an online send permission.
+    """
     try:
         owner = _owner(token)
+        context=(spreadsheet_token,binding,completed_unit)
+        if any(item is not None for item in context):
+            if any(item is None for item in context):
+                raise TrackerStateHold("incomplete original delivery context")
+            from monitor.issue_tracker_settings_audit_allocation import read_current_k_after_completed_unit
+            return read_current_k_after_completed_unit(token,spreadsheet_token,binding,completed_unit)
         return read_local_k_store(_root(owner.project), token=token)
     except (LocalCommitHold, KChainHoldError, OSError, TypeError, ValueError) as exc:
         raise TrackerStateHold("shared settings read refused") from exc

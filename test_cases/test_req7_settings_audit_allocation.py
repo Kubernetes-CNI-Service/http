@@ -35,6 +35,14 @@ def load():
 
 
 class Req7SettingsAuditAllocationTests(unittest.TestCase):
+    def test_current_k_reader_requires_actual_original_completion_delivery_pair(self):
+        with self.owners() as (writer,sheet):
+            value=self.unit(); self.prepare(writer,sheet,value)
+            before=self.image()
+            with self.assertRaises(self.module.SettingsAuditHold):
+                self.module.read_current_k_after_completed_unit(writer,sheet,binding(),value)
+            self.assertEqual(before,self.image())
+
     def test_absent_outbox_without_actual_complete_delivered_pair_never_becomes_pending_success(self):
         with self.owners() as (writer,sheet):
             value=self.unit(); self.prepare(writer,sheet,value)

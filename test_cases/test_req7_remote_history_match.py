@@ -1,5 +1,6 @@
 """Independent all-business/all-audit reconciliation, not sending or APPLIED."""
 from copy import deepcopy
+from contextlib import ExitStack
 from dataclasses import replace
 import hashlib
 import importlib.util
@@ -679,6 +680,123 @@ class Req7OwnedHistoryMatchWorkflowTests(unittest.TestCase):
     def test_start_parent_first_barrier_failure_retains_stop(self): self.start_barrier_fault(2)
     def test_start_held_file_barrier_failure_retains_stop(self): self.start_barrier_fault(3)
     def test_start_held_parent_barrier_failure_retains_stop(self): self.start_barrier_fault(4)
+
+    def test_current_pointer_replacement_after_qualified_read_never_escapes_as_k(self):
+        from contextlib import contextmanager
+        from unittest import mock
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        from monitor import issue_tracker_state_owner as state_owner
+        with ExitStack() as stack:
+            writer, owner, bound, unit = self.completed(stack)
+            allocation.record_completed_settings_delivery(writer, owner, bound, unit)
+            tracker=self.root/'project/.tracker'
+            (tracker/'settings/outbox/0.json').rename(self.root/'preserved-final-k-projection')
+            current=tracker/'settings/current'
+            replacement=self.root/'replacement-current'; replacement.write_bytes(current.read_bytes())
+            replacement.chmod(0o600)
+            original=allocation._hold_delivery_files; reached=[]
+            @contextmanager
+            def after_observation(*args,**options):
+                with original(*args,**options) as verify:
+                    yield verify
+                    # The returned state was already computed, but its outer
+                    # original proof/settings scope has not returned yet.
+                    current.rename(self.root/'preserved-original-current')
+                    replacement.rename(current); reached.append(True)
+            with mock.patch.object(allocation,'_hold_delivery_files',side_effect=after_observation), self.assertRaises(state_owner.TrackerStateHold):
+                state_owner.current_k(writer, spreadsheet_token=owner, binding=bound, completed_unit=unit)
+            self.assertEqual([True],reached)
+            self.assertEqual((self.root/'preserved-original-current').read_bytes(),current.read_bytes())
+
+    def test_fresh_dual_owner_process_reads_original_k_after_delivered_projection_loss(self):
+        from dataclasses import asdict
+        import json
+        import subprocess
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        with ExitStack() as stack:
+            writer, owner, bound, unit = self.completed(stack)
+            allocation.record_completed_settings_delivery(writer, owner, bound, unit)
+            projection=self.root/'project/.tracker/settings/outbox/0.json'
+            projection.rename(self.root/'preserved-cold-k-projection')
+        program='''import sys,json,hashlib
+from pathlib import Path
+sys.path[:0]=[sys.argv[1],sys.argv[1]+"/tools"]
+from monitor import issue_tracker_state_owner as state
+from test_cases.test_req7_spreadsheet_owner import scoped_fixture
+from monitor import issue_tracker_spreadsheet_owner as owner,issue_tracker_local_commit as local
+from monitor.issue_tracker_online_target import OnlineTargetBinding
+from monitor.issue_tracker_send_unit import _original_unit
+root=Path(sys.argv[2]); bound=OnlineTargetBinding(**json.loads(sys.stdin.buffer.read()))
+store=root/'var/lib/http-ztp-container/issue-tracker'/(hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()+'.journal')
+unit=_original_unit((store/'ACTION-PREIMAGE').read_bytes(),(store/'WIRE').read_bytes())
+with local.writer_owner(root/'project',root/'project/publication') as writer,scoped_fixture(root,owner),owner.spreadsheet_owner(bound) as token:
+ seen=state.current_k(writer,spreadsheet_token=token,binding=bound,completed_unit=unit)
+ print(seen.revision,seen.k)
+'''
+        cold=subprocess.run([sys.executable,'-B','-c',program,str(ROOT),str(self.root)],
+            input=json.dumps(asdict(bound)).encode(),stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=10)
+        self.assertEqual(0,cold.returncode,cold.stderr)
+        self.assertEqual(b'0 3\n',cold.stdout)
+        self.assertFalse(projection.exists()); self.assertTrue((self.root/'preserved-cold-k-projection').is_file())
+
+    def test_partial_forged_or_expired_delivery_context_never_returns_k(self):
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        from monitor import issue_tracker_state_owner as state_owner
+        with ExitStack() as stack:
+            writer, owner, bound, unit = self.completed(stack)
+            allocation.record_completed_settings_delivery(writer, owner, bound, unit)
+            projection = self.root / 'project/.tracker/settings/outbox/0.json'
+            projection.rename(self.root / 'preserved-unqualified-projection')
+            for context in ({'spreadsheet_token': owner},
+                            {'spreadsheet_token': object(), 'binding': bound, 'completed_unit': unit},
+                            {'spreadsheet_token': owner, 'binding': bound, 'completed_unit': object()}):
+                with self.subTest(context_keys=tuple(context)), self.assertRaises(state_owner.TrackerStateHold):
+                    state_owner.current_k(writer, **context)
+        with self.assertRaises(state_owner.TrackerStateHold):
+            state_owner.current_k(writer, spreadsheet_token=owner, binding=bound, completed_unit=unit)
+        self.assertFalse(projection.exists())
+
+    def test_missing_delivery_never_makes_highest_k_usable(self):
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        from monitor import issue_tracker_state_owner as state_owner
+        with ExitStack() as stack:
+            writer, owner, bound, unit = self.completed(stack)
+            allocation.record_completed_settings_delivery(writer, owner, bound, unit)
+            tracker=self.root/'project/.tracker'
+            (tracker/'settings-audit-delivery/DELIVERED').rename(self.root/'preserved-k-delivery')
+            (tracker/'settings/outbox/0.json').rename(self.root/'preserved-k-projection')
+            original={str(p.relative_to(self.root)):p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
+            with self.assertRaises(state_owner.TrackerStateHold):
+                state_owner.current_k(writer, spreadsheet_token=owner, binding=bound, completed_unit=unit)
+            self.assertEqual(original,{str(p.relative_to(self.root)):p.read_bytes() for p in self.root.rglob('*') if p.is_file()})
+
+    def test_original_pair_reads_highest_k_without_restoring_delivered_projection(self):
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        from monitor import issue_tracker_state_owner as state_owner
+        from monitor import issue_tracker_k_store as settings
+        with ExitStack() as stack:
+            writer, owner, bound, unit = self.completed(stack)
+            # Actual immutable revision 1 remains unconsumed. Highest K=4 is
+            # independently authored, never derived from the delivery result.
+            settings.apply_local_k_change(self.root / 'project/.tracker', token=writer,
+                new_k=4, actor='operator:fixture', recorded_at='2026-10-08T10:01:00Z',
+                request_id='change-1', expected_revision=0)
+            allocation.record_completed_settings_delivery(writer, owner, bound, unit)
+            projection = self.root / 'project/.tracker/settings/outbox/0.json'
+            projection.rename(self.root / 'preserved-projection-for-k-read')
+            original = {str(p.relative_to(self.root)): p.read_bytes()
+                        for p in self.root.rglob('*') if p.is_file()}
+            with self.assertRaises(state_owner.TrackerStateHold):
+                state_owner.current_k(writer)
+            seen = state_owner.current_k(writer, spreadsheet_token=owner,
+                binding=bound, completed_unit=unit)
+            self.assertEqual((1, 4), (seen.revision, seen.k))
+            self.assertEqual(original, {str(p.relative_to(self.root)): p.read_bytes()
+                        for p in self.root.rglob('*') if p.is_file()})
+            self.assertFalse(projection.exists())
+            self.assertTrue((projection.parent / '1.json').is_file())
+            observed = self.current_global_state(owner, bound, unit)
+            self.assertEqual((1, 'UNKNOWN'), (observed.attempt_count, observed.outcome))
 
     def test_actual_complete_and_delivered_allow_only_their_absent_projection(self):
         from contextlib import ExitStack

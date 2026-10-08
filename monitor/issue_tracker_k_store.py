@@ -1,8 +1,9 @@
 """Fail-closed local C-25 settings-event store, not an authenticated relay.
 
-The caller must still supply a trusted actor, and publication / audit delivery
-remain blocked until the relay, durable COMPLETE proof, and allocation journal
-are implemented.  This module never opens a network connection or sends audit.
+The caller must still supply a trusted actor. This ordinary store does not
+consume a COMPLETE/DELIVERED context; a qualified read separately revalidates
+both original owners and proofs in the settings-audit bridge. Neither API
+grants publication or cleanup. This module never connects or sends audit.
 """
 
 from __future__ import annotations
@@ -250,8 +251,8 @@ def _state(root_fd):
         state = validate_k_chain_snapshot(events, current, initialized)
         expected_outbox = {f"{index}.json" for index in events}
         if set(os.listdir(outbox_fd)) != expected_outbox:
-            # No COMPLETE+DELIVERED verifier exists yet, so every event must
-            # retain its pending projection. Never guess that a missing one sent.
+            # This ordinary reader has no original completed-delivery context:
+            # every event must retain its projection. Never guess that it sent.
             raise KChainHoldError("settings outbox projection missing or unexplained")
         for index, raw in events.items():
             projection = _parse(_read(outbox_fd, f"{index}.json"), _OUTBOX_KEYS)

@@ -951,6 +951,12 @@ ABSENT-VALID 或 PARTIAL-VALID，暖／冷读均不补建或重发。缺失交�
 见证、有效原 COMPLETE，或缺失后续未交付 K 的投影均 HOLD；普通 pending、分配
 和计数读取仍严格要求所有投影。后续 K 仍 pending。不执行清理，不释放全表 UNKNOWN、FIFO、
 高水位或新单元资格；普通未带完成证明的 pending 读取仍不是发送权威。
+统一 `current_k` 的显式双 owner／binding／原 unit 只读入口在同一 held 原 COMPLETE、
+DELIVERED、启动见证与 settings 范围中返回最高已提交 K。缺失旧交付投影不能造成
+旧 K 回退；后续待交付事件仍须保留其投影。部分／伪造／已失效上下文、缺交付证明
+或返回前同字节 current 替换均拒绝；普通无上下文入口仍严格要求全部投影。
+真实冷进程获取双 owner 并重读原 ACTION/WIRE，不采用父进程缓存。此显式只读入口
+不等于默认 worker 接入，不授权 K 写入、outbox 清理、发送或全局状态释放。
 独立的 ETH/IB cabling 夹具分别获取其合成 token 和读取计划，不沿用前一夹具已过期
 的 token；TTL 和生产过期拒绝不变。新增受控墙钟跨窗口测试不冒充休眠或断电见证。
 计划失败仅追加阶段、类型一致性及剩余有效秒数，不输出 token、header、ID 或业务内容。
