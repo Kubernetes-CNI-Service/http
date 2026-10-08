@@ -1156,6 +1156,15 @@ runner 的依赖环境，不冒称 `-I` 隔离传输；六次意图不是六次�
 COMPLETE／清理／联网能力，受保护准入、单次 capability 和固定 launcher 仍须接入；
 REQ7 整体未完成，真机 NOT RUN。
 
+原持久 WIRE 的私有 `_hold_counted_original_wire` 交接在实际项目／spreadsheet
+双 owner 内，先同步原初始化证据，再写独立 NOREPLACE/fsync 的链式 CLAIM，
+然后才借出原只读 CLOEXEC FD。重复领取、冷进程复用、缺失旧 CLAIM 前缀和
+部分初始化均 HOLD，不重建原像或回退次数。领取失败及后置漂移保留消费后的
+UNKNOWN；元数据漂移拒绝但关闭仍属原 inode 的 FD，被违反借用后重用的外来
+FD 不关闭。真实冷进程、失败注入及原像逐字节不变覆盖实际多脚本流程。
+隔离子进程只核 ACTION/WIRE 一致性，不导入父侧 YAML/workbook 编译依赖。
+这些仍是必要交接证据，不是新鲜准入、共享 cadence、隐藏 quota 或 M=6 发送证明。
+
 `record_original_business_reserved_attempt_intent` 进一步在每次计数前后重开整个
 原始业务 journal（完整家族 manifest、全部发现／占用／精确行，含 NOOP），
 与原 enrollment、History 行预算、metadata 及适用 BOTH Cabling NV 一同核对。

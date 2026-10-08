@@ -34,6 +34,22 @@ SCRIPTS = {
 
 
 class Req7TransportManifestCandidateTests(unittest.TestCase):
+    def test_isolated_original_wire_coherence_needs_no_yaml_or_workbook_dependency(self):
+        # A fixed mutation child checks original ACTION/WIRE, never compiles
+        # sources. Its isolated graph must not require parent-only dependencies.
+        code = ('import sys; sys.path.insert(0,'+repr(str(ROOT))+'); '
+                'from monitor.issue_tracker_send_unit import FrozenSendUnit; '
+                'from monitor.issue_tracker_send_intent import _projection; '
+                '\ntry: _projection(None)\n'
+                'except ValueError: pass\n'
+                'else: raise AssertionError("incoherent original accepted")\n'
+                'assert "yaml" not in sys.modules\n'
+                'assert "openpyxl" not in sys.modules\n'
+                'assert "monitor.issue_tracker_manifest" not in sys.modules\n')
+        result = subprocess.run([sys.executable,'-I','-B','-c',code],stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,timeout=10)
+        self.assertEqual(0,result.returncode,result.stderr)
+
     def test_isolated_read_transport_does_not_import_the_heavy_mutation_composer(self):
         # Existing fixed token/read children expose only their governed SDK
         # closure. A new write shape must not add YAML/workbook imports to them.

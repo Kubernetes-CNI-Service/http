@@ -17,7 +17,6 @@ import json
 import re
 
 from monitor.issue_tracker_online_cells import encode_tool_cells
-from monitor.issue_tracker_manifest import _runtime_operation, _validated_operations
 
 _FAMILY = {"ETH&IB Switch": "switch", "ETH Cabling": "eth_cabling", "IB Cabling": "ib_cabling"}
 _SHA = re.compile(r"[0-9a-f]{64}\Z")
@@ -634,6 +633,9 @@ def freeze_observed_receipted_cabling_unit(qualified, store, *, http_root, setti
 def _freeze(manifest, manifest_id, generation_id, publish_id, spreadsheet_id,
             sheet, sheet_id, history_sheet_id, target_nonce, history_nonce,
             preread_sha256, business, audits, occupied_metadata_ids):
+    # Source compilation is parent-only. Original ACTION/WIRE coherence in
+    # the fixed isolated child must not import YAML/workbook source loaders.
+    from monitor.issue_tracker_manifest import _runtime_operation, _validated_operations
     if (type(manifest) is not bytes or not 1 <= len(manifest) <= _MAX_BODY
             or hashlib.sha256(manifest).hexdigest() != _digest(manifest_id)
             or type(spreadsheet_id) is not str or re.fullmatch(r"[A-Za-z0-9_-]{20,4096}", spreadsheet_id) is None

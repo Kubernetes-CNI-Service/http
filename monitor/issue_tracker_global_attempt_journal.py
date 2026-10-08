@@ -7,7 +7,8 @@ network here. A typed/coherent unit is not authenticated job/admission authority
 nor does an intent alone bound real sends: fixed launcher, single consumption,
 fresh checks, reservations, FIFO and COMPLETE still need integration.
 """
-from dataclasses import dataclass
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 import hashlib
 import json
 import os
@@ -28,6 +29,116 @@ class GlobalIntentObservation:
     wire_sha256: str
     action_digest: str
     outcome: str
+
+
+@dataclass(frozen=True)
+class CountedOriginalWireObservation:
+    """Borrowed CLOEXEC read-only FD, NOT fresh admission or a send permit."""
+    attempt_count: int
+    wire_sha256: str
+    fd: int = field(repr=False)
+
+
+def _inspect_wire_claims(claims, original, unit, header):
+    if (journal._read(claims,'HEADER',16384) != local._canonical(header)
+            or journal._read(claims,'INITIALIZED',16384) != _initialization(header)):
+        raise GlobalAttemptHold()
+    names = set(os.listdir(claims)); count = len(names)-2
+    if not 0 <= count <= 6 or names != {'HEADER','INITIALIZED',*(f'CLAIM-{i}' for i in range(1,count+1))}:
+        raise GlobalAttemptHold()
+    previous = hashlib.sha256(local._canonical(header)).hexdigest()
+    for index in range(1,count+1):
+        raw = journal._read(claims,f'CLAIM-{index}',16384)
+        expected = {'schema_version':1,'unit_id':unit.unit_id,'wire_sha256':unit.wire_sha256,
+            'attempt_count':index,'original_intent_sha256':hashlib.sha256(journal._read(original,f'ATTEMPT-{index}',16384)).hexdigest(),
+            'previous_sha256':previous,'outcome':'CONSUMED_UNKNOWN_NOT_SEND_PROOF'}
+        if raw != local._canonical(expected): raise GlobalAttemptHold()
+        previous = hashlib.sha256(raw).hexdigest()
+    return count,previous
+
+
+@contextmanager
+def _hold_counted_original_wire(writer_token,token,binding,unit):
+    """Consume this original count once BEFORE eventual child launch.
+
+    Private necessary handoff only: no Popen/socket/permission or counter reset.
+    Both actual owners remain held. Immutable dispatch records survive cold
+    owners, never backfill a missing/partial prefix, and cannot prove a send.
+    Borrow the original read-only WIRE FD only inside this context; do not
+    close/modify it. A caller/post-check failure retains consumed UNKNOWN.
+    Real fresh admission, shared cadence and quota must dominate any launcher.
+    """
+    original = claims = wire = None; wire_identity = None; failed = False
+    try:
+        project = local._owner(writer_token)
+        owner,parent,name,base = _inputs(token,binding,unit)
+        original = local._directory(parent,name)
+        journal._named(parent,name,original,directory=True)
+        count,_previous = _inspect(original,unit,base)
+        if not count: raise GlobalAttemptHold()
+        wire = os.open('WIRE',local._flags()|os.O_NONBLOCK,dir_fd=original)
+        journal._named(original,'WIRE',wire,directory=False)
+        wire_identity = journal._identity(os.fstat(wire))
+        if os.pread(wire,1024*1024+1,0) != unit.wire_bytes: raise GlobalAttemptHold()
+        header = {'schema_version':1,'unit_id':unit.unit_id,'wire_sha256':unit.wire_sha256,
+            'action_digest':unit.action_digest,'journal_header_sha256':hashlib.sha256(local._canonical(base)).hexdigest(),
+            'wire_identity':wire_identity}
+        claim_name = owner.lock_name[:-5]+'.dispatch'
+        if claim_name not in os.listdir(parent):
+            if count != 1: raise GlobalAttemptHold()
+            claims = _create_folder(parent,claim_name)
+            local._write_new(claims,'HEADER',local._canonical(header))
+            # Never mark initialized before every prior image barrier succeeds.
+            local._write_new(claims,'INITIALIZED',_initialization(header))
+        else: claims = local._directory(parent,claim_name)
+        journal._named(parent,claim_name,claims,directory=True)
+        used,previous = _inspect_wire_claims(claims,original,unit,header)
+        if used != count-1: raise GlobalAttemptHold()
+        _sync_initialization(parent,claims,header)
+        if local._owner(writer_token) is not project or ownership._validated_owner(token,binding) is not owner:
+            raise GlobalAttemptHold()
+        journal._named(original,'WIRE',wire,directory=False)
+        if journal._identity(os.fstat(wire)) != wire_identity: raise GlobalAttemptHold()
+        local._write_new(claims,f'CLAIM-{count}',local._canonical({'schema_version':1,
+            'unit_id':unit.unit_id,'wire_sha256':unit.wire_sha256,'attempt_count':count,
+            'original_intent_sha256':hashlib.sha256(journal._read(original,f'ATTEMPT-{count}',16384)).hexdigest(),
+            'previous_sha256':previous,'outcome':'CONSUMED_UNKNOWN_NOT_SEND_PROOF'}))
+        if _inspect_wire_claims(claims,original,unit,header)[0] != count: raise GlobalAttemptHold()
+        names = tuple(sorted(os.listdir(claims)))
+        identities = tuple(journal._identity(os.stat(item,dir_fd=claims,follow_symlinks=False)) for item in names)
+        if _inspect(original,unit,base)[0] != count: raise GlobalAttemptHold()
+        journal._named(parent,name,original,directory=True)
+        journal._named(parent,claim_name,claims,directory=True)
+        if (local._owner(writer_token) is not project or ownership._validated_owner(token,binding) is not owner
+                or journal._identity(os.fstat(wire)) != wire_identity): raise GlobalAttemptHold()
+        yield CountedOriginalWireObservation(count,unit.wire_sha256,wire)
+        if (_inspect(original,unit,base)[0] != count
+                or _inspect_wire_claims(claims,original,unit,header)[0] != count
+                or tuple(sorted(os.listdir(claims))) != names
+                or tuple(journal._identity(os.stat(item,dir_fd=claims,follow_symlinks=False)) for item in names) != identities
+                or os.pread(wire,1024*1024+1,0) != unit.wire_bytes
+                or journal._identity(os.fstat(wire)) != wire_identity
+                or local._owner(writer_token) is not project or ownership._validated_owner(token,binding) is not owner):
+            raise GlobalAttemptHold()
+        journal._named(original,'WIRE',wire,directory=False)
+        journal._named(parent,name,original,directory=True)
+        journal._named(parent,claim_name,claims,directory=True)
+    except Exception: failed = True
+    finally:
+        if wire is not None:
+            try:
+                # Never close a foreign FD that replaced a violated borrow.
+                # Full metadata drift is still HOLD above, but it does not
+                # transfer ownership of this descriptor to a different inode.
+                # Close our original even after chmod/write; never a reused FD.
+                if wire_identity is None or journal._identity(os.fstat(wire))[:2] == wire_identity[:2]: os.close(wire)
+                else: failed = True
+            except OSError: failed = True
+        for handle in (claims,original):
+            if handle is not None:
+                try: os.close(handle)
+                except OSError: failed = True
+    if failed: raise GlobalAttemptHold()
 
 
 def _inputs(token, binding, unit):

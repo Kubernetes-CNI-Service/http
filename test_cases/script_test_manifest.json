@@ -3324,6 +3324,11 @@
       "tests": ["test_cases.test_req7_global_attempt_journal"]
     },
     {
+      "id": "req7_original_count_once_claim_cold_owner_coherence",
+      "members": ["monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_send_unit.py", "monitor/issue_tracker_send_intent.py", "monitor/issue_tracker_attempt_journal.py", "monitor/issue_tracker_local_commit.py"],
+      "tests": ["test_cases.test_req7_global_attempt_journal", "test_cases.test_req7_transport_manifest", "test_cases.test_req7_send_unit", "test_cases.test_req7_send_intent"]
+    },
+    {
       "id": "req7_native_active_closed_discovery",
       "members": ["monitor/issue_tracker_sheets_read_plan.py", "monitor/issue_tracker_sheets_read_decode.py", "monitor/issue_tracker_tls_inputs.py", "monitor/issue_tracker_online_cells.py", "monitor/issue_tracker_send_unit.py", "monitor/issue_tracker_manifest.py", "monitor/issue_tracker_local_workbook_commit.py", "monitor/issue_tracker_receipt_snapshot.py", "monitor/issue_tracker_admission.py", "monitor/issue_tracker_local_commit.py"],
       "tests": ["test_cases.test_req7_activity_discovery", "test_cases.test_issue_tracker_stage_l_consumer_workflow"]

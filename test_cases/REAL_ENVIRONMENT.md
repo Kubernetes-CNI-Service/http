@@ -2126,6 +2126,13 @@ metadata 永久 fence quota → Cabling 新增 NV 预留 → durable count → �
 原预留，第七次 HOLD。它仍不授予发送许可，也不证明隐藏 PROJECT 配额、新鲜来源、
 FIFO、每次准入／真实单次 wire；部署与真实断电验收准确保持 NOT RUN。
 
+本地原 WIRE 私有交接在双 owner 下先 NOREPLACE/fsync 固化 CLAIM 链再借出
+原只读 CLOEXEC FD；同一原次数只消费一次，真实冷进程不能恢复已消费次数。
+部分领取、barrier 中断、元数据／inode 漂移拒绝并保留 UNKNOWN，不补建旧前缀。
+清理必须关闭仍属本次的原 FD，不关闭重用外来 FD；原 ACTION/WIRE/ATTEMPT
+不改变。现场还须见证 CLAIM 与唯一固定子进程及新鲜准入对应关系、断电窗口和
+实际 M=6 上界；未执行，仍 NOT RUN，不授予网络或生产写权限。
+
 ## TC-REAL-REQ7-SPREADSHEET-OWNER-001 — 跨项目持久 OS 锁与继承 FD
 
 - Case ID：`TC-REAL-REQ7-SPREADSHEET-OWNER-001`；类型：native / integration；对应 C-6/C-14/C-19。状态：**NOT RUN / REAL_ENV REQUIRED**。涉及 `monitor/issue_tracker_spreadsheet_owner.py`、`monitor/issue_tracker_local_commit.py`、`monitor/issue_tracker_send_intent.py`；本地合成 root 元数据、原生 flock／独立进程／继承 FD 与实际 C-6/action journal 不证明部署身份或整个 REQ7。

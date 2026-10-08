@@ -1,4 +1,5 @@
 """Independent global UNKNOWN barriers and native cold-process intent limits."""
+from contextlib import contextmanager, ExitStack
 from dataclasses import replace
 import hashlib
 import importlib.util
@@ -11,7 +12,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-if len(sys.argv) > 1 and sys.argv[1] == '--owned-retry':
+if len(sys.argv) > 1 and sys.argv[1] in ('--owned-retry','--owned-wire-claim'):
     sys.path.insert(0, sys.argv[3]); sys.path.insert(0, str(Path(sys.argv[3]) / 'tools'))
 import test_cases
 ROOT = Path(test_cases.__file__).resolve().parents[1]
@@ -38,6 +39,19 @@ def unit(**changes):
 
 
 class Req7GlobalAttemptJournalTests(unittest.TestCase):
+    def test_original_wire_claim_requires_actual_both_owners_before_any_dispatch_store(self):
+        self.assertTrue(hasattr(self.module,'_hold_counted_original_wire'),'durable single-use original WIRE handoff missing')
+        with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
+            self.module.prepare_global_unit(token,binding(),self.value)
+            self.module.record_global_attempt_intent(token,binding(),self.value)
+            retained = {p.name:p.read_bytes() for p in self.store.iterdir()}
+            with mock.patch.object(self.module,'_create_folder') as creating:
+                with self.assertRaises(self.module.GlobalAttemptHold) as caught:
+                    with self.module._hold_counted_original_wire(None,token,binding(),self.value): self.fail('no writer')
+                creating.assert_not_called()
+            self.assertIsNone(caught.exception.__context__)
+            self.assertEqual(retained,{p.name:p.read_bytes() for p in self.store.iterdir()})
+
     def setUp(self):
         self.owner = load_owner(); self.module = load()
         self.temp = tempfile.TemporaryDirectory(prefix='req7-global-unknown-'); self.addCleanup(self.temp.cleanup)
@@ -220,6 +234,115 @@ class Req7GlobalAttemptJournalTests(unittest.TestCase):
 class Req7GlobalAttemptJournalWorkflowTests(unittest.TestCase):
     setUp = Req7GlobalAttemptJournalTests.setUp
 
+    @contextmanager
+    def counted_wire_owners(self):
+        from test_cases.test_req7_history_read_launcher import Req7HistoryReadLauncherWorkflowTests as native
+        self.root = self.root/'owned-claim-boundary'; self.root.mkdir()
+        self.locks = self.root/'var/lib/http-ztp-container/issue-tracker'
+        self.store = self.locks/(hashlib.sha256(TARGET.encode()).hexdigest()+'.journal')
+        with ExitStack() as stack:
+            _local,_owner,writer,sheet_token,target,_credential,_config = native.owners(self,stack,target_id=TARGET)
+            self.module.prepare_global_unit(sheet_token,target,self.value)
+            self.module.record_global_attempt_intent(sheet_token,target,self.value)
+            yield writer,sheet_token,target
+
+    def test_wire_metadata_drift_holds_but_closes_its_original_owned_descriptor(self):
+        with self.counted_wire_owners() as (writer,token,target):
+            with self.assertRaises(self.module.GlobalAttemptHold):
+                with self.module._hold_counted_original_wire(writer,token,target,self.value) as image:
+                    os.chmod(self.store/'WIRE',0o400)
+            # Rejecting mutable metadata must not leak the still-owned inode FD.
+            try:
+                with self.assertRaises(OSError): os.fstat(image.fd)
+            finally:
+                try: os.close(image.fd)
+                except OSError: pass
+            dispatch = self.locks/(hashlib.sha256(TARGET.encode()).hexdigest()+'.dispatch')
+            self.assertEqual('CONSUMED_UNKNOWN_NOT_SEND_PROOF',json.loads((dispatch/'CLAIM-1').read_bytes())['outcome'])
+            self.assertTrue((self.store/'ATTEMPT-1').is_file())
+            self.assertFalse((self.store/'ATTEMPT-2').exists())
+
+    def test_violated_wire_borrow_never_closes_a_foreign_reused_descriptor(self):
+        foreign = os.open(self.root/'foreign-owned',os.O_CREAT|os.O_EXCL|os.O_RDWR,0o600)
+        self.addCleanup(os.close,foreign)
+        with self.counted_wire_owners() as (writer,token,target):
+            with self.assertRaises(self.module.GlobalAttemptHold):
+                with self.module._hold_counted_original_wire(writer,token,target,self.value) as image:
+                    os.close(image.fd); os.dup2(foreign,image.fd)
+            try:
+                self.assertEqual(os.fstat(foreign).st_ino,os.fstat(image.fd).st_ino)
+            finally: os.close(image.fd)
+            self.assertEqual(1,self.module.inspect_global_unit(token,target,self.value).attempt_count)
+            with self.assertRaises(self.module.GlobalAttemptHold):
+                with self.module._hold_counted_original_wire(writer,token,target,self.value): self.fail('violated borrow resurrected')
+
+    def test_claim_barrier_failure_cannot_yield_or_resurrect_a_consumed_original_count(self):
+        from monitor import issue_tracker_local_commit as local
+        with self.counted_wire_owners() as (writer,token,target):
+            original = {p.name:p.read_bytes() for p in self.store.iterdir()}
+            writing = local._write_new
+            def failed_barrier(folder,name,data):
+                writing(folder,name,data)
+                if name == 'CLAIM-1': raise OSError('owned interruption after durable claim')
+            with mock.patch.object(local,'_write_new',side_effect=failed_barrier):
+                with self.assertRaises(self.module.GlobalAttemptHold) as caught:
+                    with self.module._hold_counted_original_wire(writer,token,target,self.value): self.fail('unconfirmed claim yielded')
+            self.assertIsNone(caught.exception.__context__)
+            self.assertEqual(original,{p.name:p.read_bytes() for p in self.store.iterdir()})
+            with self.assertRaises(self.module.GlobalAttemptHold):
+                with self.module._hold_counted_original_wire(writer,token,target,self.value): self.fail('consumed interrupted claim retried')
+
+    def test_cold_process_claim_consumes_original_once_and_never_rebuilds_or_recounts(self):
+        with self.counted_wire_owners() as (_writer,_token,target):
+            original = {p.name:p.read_bytes() for p in self.store.iterdir()}
+        command = [sys.executable,'-B',str(Path(__file__).resolve()),'--owned-wire-claim',str(self.root),str(ROOT)]
+        raw = json.dumps(vars(target),sort_keys=True,separators=(',',':')).encode()
+        first = subprocess.run(command,input=raw,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=10)
+        self.assertEqual(0,first.returncode,first.stderr)
+        self.assertEqual(b'1 '+self.value.wire_sha256.encode()+b'\n',first.stdout)
+        second = subprocess.run(command,input=raw,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=10)
+        self.assertEqual(3,second.returncode,second.stderr); self.assertEqual(b'held\n',second.stdout)
+        self.assertEqual(original,{p.name:p.read_bytes() for p in self.store.iterdir()})
+
+    def test_actual_dual_owner_original_wire_claim_is_once_per_durable_count_and_survives_cold_owner(self):
+        self.assertTrue(hasattr(self.module,'_hold_counted_original_wire'),'durable original WIRE claim missing')
+        from contextlib import ExitStack
+        from test_cases.test_req7_history_read_launcher import Req7HistoryReadLauncherWorkflowTests as native
+        from test_cases.test_req7_spreadsheet_owner import scoped_fixture
+        from monitor import issue_tracker_local_commit as local
+        # The native dual-owner fixture provisions its own fixed state root.
+        self.root = self.root/'owned-wire-workflow'; self.root.mkdir()
+        self.locks = self.root/'var/lib/http-ztp-container/issue-tracker'
+        self.store = self.locks/(hashlib.sha256(TARGET.encode()).hexdigest()+'.journal')
+        with ExitStack() as stack:
+            _local,owner,writer,sheet_token,target,_credential,_config = native.owners(self,stack,target_id=TARGET)
+            # Use this test's matching literal binding in both original stores;
+            # target's actual policy hash differs from binding()'s fixture hash.
+            self.module.prepare_global_unit(sheet_token,target,self.value)
+            before = {p.name:p.read_bytes() for p in self.store.iterdir()}
+            with self.assertRaises(self.module.GlobalAttemptHold):
+                with self.module._hold_counted_original_wire(writer,sheet_token,target,self.value): self.fail('unattempted')
+            self.assertEqual(before,{p.name:p.read_bytes() for p in self.store.iterdir()})
+            for count in range(1,7):
+                self.module.record_global_attempt_intent(sheet_token,target,self.value)
+                with self.module._hold_counted_original_wire(writer,sheet_token,target,self.value) as image:
+                    self.assertEqual((count,self.value.wire_sha256),(image.attempt_count,image.wire_sha256))
+                    self.assertEqual(self.value.wire_bytes,os.pread(image.fd,1024*1024+1,0))
+                    self.assertFalse(os.get_inheritable(image.fd)); self.assertFalse(hasattr(image,'permit'))
+                    with self.assertRaises(self.module.GlobalAttemptHold):
+                        with self.module._hold_counted_original_wire(writer,sheet_token,target,self.value): self.fail('duplicate claim')
+                with self.assertRaises(OSError): os.fstat(image.fd)
+            self.assertEqual((6,'UNKNOWN'),(self.module.inspect_global_unit(sheet_token,target,self.value).attempt_count,
+                                           self.module.inspect_global_unit(sheet_token,target,self.value).outcome))
+            saved_target = target
+        # A fresh ownership acquisition cannot resurrect consumed count 6.
+        project = self.root/'project'; publication = project/'publication'
+        with local.writer_owner(project,publication) as writer:
+            with scoped_fixture(self.root,self.owner),self.owner.spreadsheet_owner(saved_target) as sheet_token:
+                with self.assertRaises(self.module.GlobalAttemptHold):
+                    with self.module._hold_counted_original_wire(writer,sheet_token,saved_target,self.value): self.fail('cold reuse')
+
+
     def test_six_native_cold_process_intents_share_one_global_count_and_new_unit_is_blocked(self):
         with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
             self.module.prepare_global_unit(token, binding(), self.value)
@@ -255,7 +378,21 @@ class Req7GlobalAttemptJournalWorkflowTests(unittest.TestCase):
 
 
 if __name__ == '__main__':
-    if len(sys.argv) > 1 and sys.argv[1] == '--owned-retry':
+    if len(sys.argv) > 1 and sys.argv[1] == '--owned-wire-claim':
+        from monitor import issue_tracker_local_commit as local
+        from monitor.issue_tracker_online_target import OnlineTargetBinding
+        from test_cases.test_req7_spreadsheet_owner import scoped_fixture
+        owner = load_owner(); module = load(); root = Path(sys.argv[2]); value = unit()
+        target = OnlineTargetBinding(**json.loads(sys.stdin.buffer.read(16385)))
+        try:
+            with local.writer_owner(root/'project',root/'project/publication') as writer:
+                with scoped_fixture(root,owner),owner.spreadsheet_owner(target) as token:
+                    with module._hold_counted_original_wire(writer,token,target,value) as image:
+                        if os.pread(image.fd,1024*1024+1,0) != value.wire_bytes: raise AssertionError('original differs')
+                        os.write(1,('%d %s\n'%(image.attempt_count,image.wire_sha256)).encode())
+        except module.GlobalAttemptHold:
+            os.write(1,b'held\n'); raise SystemExit(3)
+    elif len(sys.argv) > 1 and sys.argv[1] == '--owned-retry':
         owner = load_owner(); module = load()
         try:
             with fixture(Path(sys.argv[2])), owner.spreadsheet_owner(binding()) as token:
