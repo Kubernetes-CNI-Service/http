@@ -1121,7 +1121,7 @@ def private_publication_candidates(api, project):
 
 
 @contextmanager
-def private_a_health_ports(api, root, *, http_status=None):
+def private_a_health_ports(api, root, *, http_status=None, publication_prefix='r22-prefix'):
     """Private command/network ports, not Linux/root auth or daemon witnesses.
 
     Genuine preflight helpers still inspect helper bytes, boundary SHA, wire
@@ -1152,7 +1152,7 @@ def private_a_health_ports(api, root, *, http_status=None):
             return None  # Explicit OS command port; no real auth/daemon claim.
         if argv[:4] == ["curl", "-fsSI", "--max-time", "5"] and len(argv) == 5:
             url = urlsplit(argv[4])
-            assert url.scheme == "http" and url.hostname == "192.0.2.2" and url.path.startswith("/r22-prefix/"), argv
+            assert url.scheme == "http" and url.hostname == "192.0.2.2" and url.path.startswith('/' + publication_prefix + '/'), argv
             result = subprocess.run(argv[:4] + [f"http://127.0.0.1:{server.server_port}" + url.path],
                 capture_output=True, text=True, timeout=8, check=False)
             if result.returncode: raise api.LoadError("private original A HTTP probe failed: " + result.stderr)
@@ -2819,6 +2819,188 @@ class ReleaseTransactionTests(unittest.TestCase):
                 LOAD.activate_setup_switch_b_publication(token, guard=guard, inputs=inputs,
                     images={}, confirmed=True, retire=True)
             activate.assert_not_called()
+
+    def _b_typed_retirement_fixture(self):
+        state, context, guard, token, inputs = self._prepare_published_q_for_stopped_preflight(
+            prefix_change=True, dhcp=True, no_upgrade=True, original_a_policy='disabled')
+        active = set(); action, probe = self._with_independent_b_health(active)
+        stack = ExitStack(); self.addCleanup(stack.close)
+        stack.enter_context(mock.patch.object(LOAD, 'dhcp_file_mappings', return_value={
+            state[1] / 'independent-dhcp-B' / name: self.root.resolve() / 'private-etc-dhcp' / name
+            for name in ('dhcpd.conf', 'dhcpd_eth.hosts', 'dhcpd_ib.hosts', 'dhcpd_nvl.hosts')}))
+        return state, context, guard, token, inputs, active, action, probe
+
+    def test_b_cold_retirement_malformed_discriminator_is_hold_not_uncaught_error(self):
+        state, _context, guard, token, inputs = self._prepare_published_q_for_stopped_preflight(no_upgrade=True)
+        with mock.patch.object(LOAD, 'active_managed_services', return_value=()), \
+                mock.patch.object(LOAD, 'preflight_services', side_effect=AssertionError('malformed marker entered health')):
+            marker = LOAD._setup_switch_retirement_path()
+            for payload in (b'[]', b'true', b'null', b'not-json', b'{}'):
+                with self.subTest(payload=payload):
+                    marker.write_bytes(payload); marker.chmod(0o600)
+                    frozen = (marker.lstat().st_ino, marker.read_bytes(), state[-3].read_bytes())
+                    with self.assertRaisesRegex(LOAD.LoadError, 'HOLD'):
+                        LOAD.resume_setup_switch_b_retirement(state[1], guard=guard, inputs=inputs,
+                            images={}, confirmed=True)
+                    self.assertEqual(frozen, (marker.lstat().st_ino, marker.read_bytes(), state[-3].read_bytes()))
+
+    def test_b_listener_rebind_after_first_start_stops_and_retains_original_wal(self):
+        state, _context, guard, token, inputs = self._prepare_published_q_for_stopped_preflight(no_upgrade=True)
+        active = set(); _action, probe = self._with_independent_b_health(active)
+        plan = [SimpleNamespace(endpoint_ips=(), listener_names=())]
+        def start(_backend, command, name):
+            self.assertEqual('start', command); active.add(name)
+            plan[0] = SimpleNamespace(endpoint_ips=('192.0.2.99',), listener_names=('independent-rebound',))
+        frozen = (state[-3].lstat().st_ino, state[-3].read_bytes())
+        with mock.patch.object(LOAD, 'plan_local_dhcp_runtime', side_effect=lambda *a: plan[0]), \
+                mock.patch.object(LOAD, '_runtime_service_action', side_effect=start):
+            with self.assertRaisesRegex(LOAD.LoadError, 'listener.*HOLD'):
+                LOAD.activate_setup_switch_b_publication(token, guard=guard, inputs=inputs,
+                    images={}, confirmed=True, retire=True)
+        self.assertEqual(set(), active); probe.assert_not_called()
+        self.assertEqual(frozen, (state[-3].lstat().st_ino, state[-3].read_bytes()))
+        self.assertFalse(os.path.lexists(LOAD._setup_switch_retirement_path()))
+
+    def test_b_typed_retirement_first_dhcp_rename_interruption_requires_fresh_health(self):
+        state, _context, guard, token, inputs, active, _action, probe = self._b_typed_retirement_fixture()
+        frozen = (state[-3].lstat().st_ino, state[-3].read_bytes())
+        marker, sync = LOAD._setup_switch_retirement_path(), LOAD._fsync_parent_directory
+        def interrupt(parent):
+            sync(parent)
+            if marker.exists() and list(marker.parent.glob('.setup-switch-b-retired-*/dhcp-transaction')):
+                raise OSError('independent B first DHCP archive sync interruption')
+        with mock.patch.object(LOAD, '_fsync_parent_directory', side_effect=interrupt):
+            with self.assertRaisesRegex(LOAD.LoadError, 'HOLD.*independent B first DHCP archive') as caught:
+                LOAD.activate_setup_switch_b_publication(token, guard=guard, inputs=inputs,
+                    images={}, confirmed=True, retire=True)
+        self.assertIsInstance(caught.exception.__cause__, OSError)
+        self.assertEqual('independent B first DHCP archive sync interruption', str(caught.exception.__cause__))
+        self.assertEqual(set(), active); self.assertEqual(1, probe.call_count)
+        self.assertEqual(frozen, (state[-3].lstat().st_ino, state[-3].read_bytes()))
+        LOAD.close_setup_switch_publication_bundle(token)
+        self.assertEqual('b-health-passed-wal-archived', LOAD.resume_setup_switch_b_retirement(
+            state[1], guard=guard, inputs=inputs, images={}, confirmed=True))
+        self.assertEqual(2, probe.call_count)
+        archive = next(marker.parent.glob('.setup-switch-b-retired-*'))
+        self.assertEqual(frozen, ((archive / 'journal.json').lstat().st_ino, (archive / 'journal.json').read_bytes()))
+        LOAD.require_no_pending_setup_switch_journal()
+
+    def test_b_typed_pending_archive_mutants_hold_before_fresh_health(self):
+        state, _context, guard, token, inputs, active, action, _probe = self._b_typed_retirement_fixture()
+        marker, sync = LOAD._setup_switch_retirement_path(), LOAD._fsync_parent_directory
+        def interrupt(parent):
+            sync(parent)
+            if marker.exists() and list(marker.parent.glob('.setup-switch-b-retired-*/dhcp-transaction')):
+                raise OSError('independent B pending evidence boundary')
+        with mock.patch.object(LOAD, '_fsync_parent_directory', side_effect=interrupt):
+            with self.assertRaisesRegex(LOAD.LoadError, 'HOLD.*independent B pending') as caught:
+                LOAD.activate_setup_switch_b_publication(token, guard=guard, inputs=inputs,
+                    images={}, confirmed=True, retire=True)
+        self.assertIsInstance(caught.exception.__cause__, OSError)
+        self.assertEqual('independent B pending evidence boundary', str(caught.exception.__cause__))
+        LOAD.close_setup_switch_publication_bundle(token)
+        payload = marker.read_bytes(); original = json.loads(payload); archive = Path(original['archive']['path'])
+        for fault in ('role', 'boolean-schema', 'unknown-field', 'missing-prefix-row', 'directory-mode',
+                      'unknown-object', 'foreign-staged-inode', 'absent-prefix-occupied'):
+            with self.subTest(fault=fault):
+                held = extra = None
+                if fault in ('role', 'boolean-schema', 'unknown-field', 'missing-prefix-row'):
+                    changed = json.loads(payload)
+                    if fault == 'role': changed['role'] = 'A'
+                    elif fault == 'boolean-schema': changed['schema_version'] = True
+                    elif fault == 'unknown-field': changed['approve_current'] = True
+                    else: changed['prefix'].pop()
+                    marker.write_bytes(json.dumps(changed).encode()); marker.chmod(0o600)
+                elif fault == 'directory-mode': archive.chmod(0o755)
+                elif fault == 'foreign-staged-inode':
+                    source = archive / 'dhcp-transaction/staged/dhcpd_ib.hosts'; metadata = source.lstat()
+                    held = self.root / 'independent-original-B-staged'; source.rename(held)
+                    source.write_bytes(held.read_bytes()); source.chmod(stat.S_IMODE(metadata.st_mode))
+                    os.utime(source, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
+                else:
+                    extra = (archive / 'independent-foreign-object' if fault == 'unknown-object' else
+                             Path(next(row['path'] for row in original['prefix'] if row['leaf'] is None)))
+                    extra.write_bytes(b'independent B unknown object\n')
+                frozen = (marker.read_bytes(), state[-3].read_bytes(), action.call_count)
+                with mock.patch.object(LOAD, 'preflight_services', side_effect=AssertionError('unqualified B entered health')):
+                    with self.assertRaisesRegex(LOAD.LoadError, 'HOLD'):
+                        LOAD.resume_setup_switch_b_retirement(state[1], guard=guard, inputs=inputs,
+                            images={}, confirmed=True)
+                self.assertEqual(frozen, (marker.read_bytes(), state[-3].read_bytes(), action.call_count))
+                self.assertEqual(set(), active)
+                if held is not None: source.unlink(); held.rename(source)
+                if extra is not None: self.assertEqual(b'independent B unknown object\n', extra.read_bytes()); extra.unlink()
+                if fault == 'directory-mode': archive.chmod(0o700)
+                marker.write_bytes(payload); marker.chmod(0o600)
+
+    def test_b_typed_marker_fsync_aba_holds_before_any_original_rename(self):
+        state, _context, guard, token, inputs, active, _action, _probe = self._b_typed_retirement_fixture()
+        marker, sync, injected = LOAD._setup_switch_retirement_path(), LOAD.os.fsync, []
+        original = json.loads(token['payload'])['body']
+        transaction = Path(original['dhcp_transaction']['body']['transaction']['path'])
+        frozen = (state[-3].lstat().st_ino, state[-3].read_bytes(), transaction.lstat().st_ino)
+        def aba(fd):
+            sync(fd)
+            if not injected and marker.exists() and os.fstat(fd).st_ino == marker.lstat().st_ino:
+                metadata, payload = marker.lstat(), marker.read_bytes()
+                marker.write_bytes(b'independent same inode writer\n'); marker.write_bytes(payload)
+                os.utime(marker, ns=(metadata.st_atime_ns, metadata.st_mtime_ns)); injected.append(True)
+        with mock.patch.object(LOAD.os, 'fsync', side_effect=aba):
+            with self.assertRaisesRegex(LOAD.LoadError, 'marker owner.*HOLD'):
+                LOAD.activate_setup_switch_b_publication(token, guard=guard, inputs=inputs,
+                    images={}, confirmed=True, retire=True)
+        self.assertEqual([True], injected); self.assertEqual(set(), active)
+        self.assertEqual(frozen, (state[-3].lstat().st_ino, state[-3].read_bytes(), transaction.lstat().st_ino))
+        self.assertEqual([], list(next(marker.parent.glob('.setup-switch-b-retired-*')).iterdir()))
+
+    def test_b_retirement_archives_original_prefix_and_dhcp_transaction_with_role(self):
+        state, context, guard, token, inputs = self._prepare_published_q_for_stopped_preflight(
+            prefix_change=True, dhcp=True, no_upgrade=True, original_a_policy='disabled')
+        original = json.loads(token['payload'])['body']
+        transaction = Path(original['dhcp_transaction']['body']['transaction']['path'])
+        tree = {str(path.relative_to(transaction)): (path.lstat().st_ino,
+                    os.readlink(path) if path.is_symlink() else path.read_bytes() if path.is_file() else None)
+                for path in [transaction, *transaction.rglob('*')]}
+        prefix = {raw: LOAD._setup_switch_compensation_leaf(Path(raw))
+                  for row in original['prefix_transaction']['rows']
+                  for raw in (row['candidate']['path'], row['backup'], row['retained'])}
+        live = {str(path): LOAD._setup_switch_compensation_leaf(path)
+                for path in (self.root / 'q-prefix', LOAD.ZTP_PREFIX_MARKER,
+                             *[self.root / 'private-etc-dhcp' / name for name in
+                               ('dhcpd.conf', 'dhcpd_eth.hosts', 'dhcpd_ib.hosts', 'dhcpd_nvl.hosts')])}
+        active = set(); _action, probe = self._with_independent_b_health(active)
+        with mock.patch.object(LOAD, 'dhcp_file_mappings', return_value={
+                state[1] / 'independent-dhcp-B' / name: self.root.resolve() / 'private-etc-dhcp' / name
+                for name in ('dhcpd.conf', 'dhcpd_eth.hosts', 'dhcpd_ib.hosts', 'dhcpd_nvl.hosts')}):
+            result = LOAD.activate_setup_switch_b_publication(token, guard=guard, inputs=inputs,
+                images={}, confirmed=True, retire=True)
+        self.assertEqual('b-health-passed-wal-archived', result)
+        probe.assert_called_once()
+        archives = list(state[-3].parent.glob('.setup-switch-b-retired-*'))
+        self.assertEqual(1, len(archives)); archive = archives[0]
+        marker = json.loads((archive / 'retirement.json').read_bytes())
+        self.assertEqual(('B', 3), (marker['role'], marker['schema_version']))
+        self.assertNotIn('plan', marker)
+        self.assertEqual(token['payload'], (archive / 'journal.json').read_bytes())
+        self.assertEqual(original['dhcp_transaction']['body']['transaction']['ino'],
+                         (archive / 'dhcp-transaction').lstat().st_ino)
+        self.assertEqual(tree, {str(path.relative_to(archive / 'dhcp-transaction')):
+            (path.lstat().st_ino, os.readlink(path) if path.is_symlink() else path.read_bytes() if path.is_file() else None)
+            for path in [archive / 'dhcp-transaction', *(archive / 'dhcp-transaction').rglob('*')]})
+        self.assertEqual(set(prefix), {row['path'] for row in marker['prefix']})
+        expected = {'journal.json', 'retirement.json', 'dhcp-transaction'}
+        for row in marker['prefix']:
+            self.assertFalse(os.path.lexists(row['path']))
+            if prefix[row['path']] is not None:
+                expected.add(row['basename']); moved = LOAD._setup_switch_compensation_leaf(archive / row['basename'])
+                self.assertEqual(prefix[row['path']]['identity'][:8], moved['identity'][:8])
+                self.assertEqual({k:v for k,v in prefix[row['path']].items() if k != 'identity'},
+                                 {k:v for k,v in moved.items() if k != 'identity'})
+        self.assertEqual(expected, set(os.listdir(archive)))
+        self.assertEqual(live, {raw: LOAD._setup_switch_compensation_leaf(Path(raw)) for raw in live})
+        self.assertFalse(os.path.lexists(transaction)); self.assertFalse(os.path.lexists(state[-3]))
+        self.assertFalse(os.path.lexists(LOAD._setup_switch_a_restore_path()))
+        LOAD.require_no_pending_setup_switch_journal()
 
     def test_prefix_transaction_rejects_same_target_foreign_b_before_any_a_compensation(self):
         state, _context, guard, _token, _inputs = self._prepare_published_q_for_stopped_preflight(prefix_change=True)

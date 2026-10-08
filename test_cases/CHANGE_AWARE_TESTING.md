@@ -2957,3 +2957,40 @@ B 发布组漏洞独立有效 direct RED `r22-b-published-staged-owner-qualified
 `8ac3fa560e5e11e17a4ac674e213736fd80b3abe41cdcfe5008a2e70f3d999ca`
 一致，物理 Ran→OK→actual→冻结→END 完整。只有本地有界证据，approved ledger 未改，
 不是 canonical related/full/check。B 完整退休归档、Linux/root/断电/C2、DEV ACK 仍 OPEN。
+
+### 2026-10-08 B prefix/DHCP typed 退休与冷 CLI 候选
+
+独立 direct 首轮 RED 在旧 prefix 退休门禁拒绝；真实 workflow 前三轮夹具分别无效 Q YAML、
+未正确定位该夹具修改、覆盖 P2P 软链接，原日志全部保留，不冒称有效生产 RED。修正为
+独立合法 Q 输入并保留 P2P 来源链接后，真实流程发现 B 激活服务查询未声明 host role，
+Linux 在首个 start 之前拒绝：`r22-b-full-typed-archive-qualified-red4.log` inode 163394757、
+size 132262、SHA256 `8f7702678669989a1cb6c8f2896603e06c10f99678588e0dc8b36f3657f2f9bb`，
+2 tests、1 FAIL/1 ERROR、actual/END=1。源修复显式管理服务器角色，不伪造 Linux/root 见证。
+
+新 B role/schema-3 只读映射绑定原 WAL、完整 prefix 原证据和整棵 DHCP 原事务；保留
+原 inode/字节，no-replace、source/归档 XOR、marker 原 owner 先于 fsync、每次真实写与
+同步后重新完整资格。B marker 不含 A plan，不授予 A 恢复或自动回 A。无辅助证据的原
+schema-1 路径保留，原 legacy prefix 缺资格 HOLD 断言照常执行。
+
+初次九项边界 `r22-b-full-typed-archive-boundaries.log` inode 163402269、size 143433、
+SHA256 `21f5a3df556d942b820c3c7034cb9b82166a3bad0061820e57ef06fcd9971782`
+为 9 tests、2 FAIL/2 ERROR、actual/END=1：同步注入按 API 合同包装 HOLD 而新夹具预期
+裸 OSError；workflow 实际 Q 配置前缀与新增 Q 指针不一致。只修正新夹具明确 Q 配置和
+核 HOLD 包装及原始 OSError cause，不改生产预期或 deadline。修正九项日志 inode
+163406759、size 132513、SHA256 `257025c15325af229603a8d9d6abbe6bf2d63303ab2abaf92609879dfd05655d`
+为 9 tests in 25.979s、OK、actual/END=0。
+
+进一步独立 RED `r22-b-cold-discriminator-listener-red.log` inode 163411332、size 132549、
+SHA256 `601e384a6fccb9f4b077cdab871e78ffd90638a2a872c8c51dd4553e23f36bb5`
+为 2 tests、1 FAIL/4 ERROR、actual/END=1：畸形冷 discriminator 抛未包装异常，B 首个
+start 后 listener 换绑未阻断。修复闭合 JSON/重复键/严格整数 schema 与 HOLD 包装，
+每个后续实际服务/HTTP/退休边界重查动态 plan 并在深读后重核整组，不借旧健康。
+
+最终 `r22-b-full-typed-archive-final-boundaries.log` inode 163411588、size 134990、SHA256
+`9df8deee4d6f93e6c136df9a6bf4522ffd0badf87db4bd582f48a0a91b0717df`
+为 13 tests in 31.233s、OK、actual/END=0、冻结一致：direct 完整 prefix/DHCP/WAL
+原证据归档、首个 DHCP rename 中断后新健康、八类冷负例、typed 与原 schema-1 marker
+ABA/换绑、legacy 缺资格 HOLD、原窄归档兼容、真实 LOAD→SETUP→提交 Q 强杀→全新显式
+B CLI，以及首个 DHCP 归档强杀→新 resume CLI，两次独立真实私有 HTTP PID。
+各完整日志读前后 stat/inode 稳定且 Ran→结果→actual→冻结→END 顺序完整，原 120s
+期限保留。仅为本地候选，批准 ledger 未改，正式 related/full/check 与真机见证仍待完成。

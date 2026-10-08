@@ -1674,6 +1674,18 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
   完整 typed 归档资格。当前 7 项本地 direct/多脚本证据不替代正式 full/check 或真机见证，
   DHCP 整棵事务归档及本卡仍 OPEN。
 
+- 2026-10-08 B prefix/DHCP typed 退休仍待真机见证：沿本卡原隔离/root-only 快照/精确
+  版本/独立控制台/排他锁/停服/其它写者静默前提，完成 Q 原 manifest/shared/group
+  校验后显式 B 预检与本次真实健康，使用 role=B/schema-3 独立 0700 归档，不生成 A
+  恢复计划。保存原 WAL、prefix backup/retained/缺席行、整个原 DHCP 事务与最后 marker
+  的原 inode/字节/link target、FD/name/父身份、rename/fsync 顺序。首个 DHCP rename
+  后强杀/断电，全新 `--resume-setup-retirement` 必须自取锁并重新健康，留存两个独立
+  PID。启动后 listener 换绑须逆序停本次服务并 HOLD；marker fsync ABA、畸形/重复/
+  Boolean 字段、角色不符、缺 prefix 行、未知归档对象、staged clone 或晚占缺席名
+  均在下一条健康命令前 HOLD。普通新 LOAD 拒绝孤立或不完整归档，不认领或清理未知对象。
+  清理仅人工按已核快照恢复。13 项本地 direct/真实多脚本私有 HTTP/SIGKILL 是候选边界
+  证据，不替代 canonical related/full/check、Linux/root/断电/C2 或 DEV ACK；本卡 OPEN。
+
 - 2026-10-08 原 A 整棵 DHCP typed 归档仍待真机见证：沿本卡原隔离 VM、精确版本、
   root-only 可恢复快照、排他锁、停服和写者静默前提，原生产者必须登记 staged/backup/live
   原清单。保留原事务目录、receipt、四个子目录与各原 leaf 的身份/字节/link target、

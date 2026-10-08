@@ -6464,6 +6464,7 @@ def require_no_pending_setup_switch_journal() -> None:
     _require_setup_switch_wal_absent()
     _require_no_pending_setup_manifest_stage()
     _require_completed_setup_switch_a_archives()
+    _require_completed_setup_switch_b_archives()
     if any(HTTP_ROOT.glob(".r22-prefix-*")):
         raise LoadError("prefix evidence has no current original WAL; HOLD")
 
@@ -7198,6 +7199,13 @@ def _require_setup_switch_publication_bundle(token, *, phase, require_guard):
                 raise LoadError("publication original WAL owner changed; HOLD")
         require_original_wal()
         body = _setup_switch_prepared_registration_body((token["payload"], 0o600))
+        retirement = token.get('typed_b_retirement')
+        if retirement is not None:
+            if phase != 'published':
+                raise LoadError('B typed retirement is published read-only authority; HOLD')
+            _require_setup_switch_b_retirement_owner(retirement)
+            if _setup_switch_b_retirement_journal(retirement) != journal:
+                raise LoadError('B typed retirement WAL mapping differs; HOLD')
         def require_original_directories():
             if (body["root"] != _setup_switch_directory_identity(HTTP_ROOT)
                     or any(body[key] != _setup_switch_directory_identity(Path(body[key]["path"]))
@@ -7206,12 +7214,17 @@ def _require_setup_switch_publication_bundle(token, *, phase, require_guard):
             _setup_switch_runtime_context(body)
         require_original_directories()
         if "prefix_transaction" in body:
-            _require_setup_switch_prefix_published(body)
+            _require_setup_switch_prefix_published(body, _b_retirement=retirement)
         if phase == "parent":
             _require_setup_switch_q_parent_preimage(body)
         _require_setup_publication_state(body, phase=phase)
         if "dhcp_transaction" in body:
             binding = body["dhcp_transaction"]
+            if retirement is not None:
+                _require_setup_switch_b_retirement_dhcp(retirement, body, token)
+                require_original_wal(); require_original_directories(); require_guard()
+                _require_setup_switch_b_retirement_owner(retirement)
+                return
             receipt = Path(binding["receipt"])
             held_receipt = token.get("receipt_descriptor", -1)
             _require_bound_dhcp_transaction_namespace(binding)
@@ -8112,7 +8125,7 @@ def open_setup_switch_publication_bundle(project, *, guard):
                                                 journal=_setup_switch_journal_path())
 
 
-def _open_setup_switch_publication_bundle(project, *, guard, journal):
+def _open_setup_switch_publication_bundle(project, *, guard, journal, _b_retirement=None):
     _require_runtime_restore_guard(**guard)
     _require_setup_switch_a_restore_absent()
     fd = -1
@@ -8128,14 +8141,23 @@ def _open_setup_switch_publication_bundle(project, *, guard, journal):
             raise LoadError("publication original disk owner or requested Q differs; HOLD")
         token = dict(journal=journal, descriptor=fd, identity=before, payload=opened[0],
                      parent=_setup_switch_link_parent_identity(journal))
+        if _b_retirement is not None:
+            _require_setup_switch_b_retirement_owner(_b_retirement)
+            if _setup_switch_b_retirement_journal(_b_retirement) != journal:
+                raise LoadError('B typed cold WAL selection differs; HOLD')
+            token['typed_b_retirement'] = _b_retirement
+            token['retirement'] = _b_retirement
         if "dhcp_transaction" in body:
-            receipt_fd = os.open(Path(body["dhcp_transaction"]["receipt"]), os.O_RDONLY | os.O_NOFOLLOW
+            receipt = (Path(body['dhcp_transaction']['receipt']) if _b_retirement is None else
+                       _setup_switch_a_dhcp_archive_artifact(_b_retirement, body) / 'a-preimage.json')
+            receipt_fd = os.open(receipt, os.O_RDONLY | os.O_NOFOLLOW
                                  | getattr(os, "O_NONBLOCK", 0))
             token["receipt_descriptor"] = receipt_fd
             # Ownership is independent of the publication phase. Preserve its
             # precise HOLD cause instead of swallowing it in phase probes.
-            _require_setup_switch_dhcp_staged_inventory(body['dhcp_transaction'])
-            _require_setup_switch_dhcp_live_inventory(body["dhcp_transaction"])
+            if _b_retirement is None:
+                _require_setup_switch_dhcp_staged_inventory(body['dhcp_transaction'])
+                _require_setup_switch_dhcp_live_inventory(body["dhcp_transaction"])
         phases = []
         for phase in ("parent", "report", "selector", "published"):
             try:
@@ -8780,17 +8802,20 @@ def _setup_switch_prefix_wal_authority(guard):
         os.close(descriptor)
 
 
-def _setup_switch_prefix_states(body, *, _retirement=None):
+def _setup_switch_prefix_states(body, *, _retirement=None, _b_retirement=None):
     """Only original owners and witnessed no-replace consumption qualify."""
     transaction = body["prefix_transaction"]
     _validate_setup_switch_prefix_transaction(body)
     states = []
-    archived = ({} if _retirement is None else
-                _setup_switch_a_prefix_archive_rows(_retirement, body))
+    if _retirement is not None and _b_retirement is not None:
+        raise LoadError('prefix retirement roles cannot be combined; HOLD')
+    mapped = _retirement if _b_retirement is None else _b_retirement
+    archived = ({} if mapped is None else _setup_switch_a_prefix_archive_rows(mapped, body)
+                if _b_retirement is None else _setup_switch_b_prefix_archive_rows(mapped, body))
     def evidence_leaf(raw):
-        if _retirement is None:
+        if mapped is None:
             return _setup_switch_compensation_leaf(Path(raw)), False
-        path = _setup_switch_a_prefix_archive_artifact(_retirement, archived[raw])
+        path = _setup_switch_a_prefix_archive_artifact(mapped, archived[raw])
         return (None if path is None else _setup_switch_compensation_leaf(path)), path is not None and str(path) != raw
     evidence = {raw for row in transaction["rows"]
                 for raw in (row["candidate"]["path"], row["backup"], row["retained"])}
@@ -9065,9 +9090,9 @@ def _apply_setup_switch_prefix_transaction(settings, *, guard):
         return Path(transaction["destination"])
 
 
-def _require_setup_switch_prefix_published(body):
+def _require_setup_switch_prefix_published(body, *, _b_retirement=None):
     if any(phase != ("installed" if row["after"] is not None else "retained")
-           for row, phase in _setup_switch_prefix_states(body)):
+           for row, phase in _setup_switch_prefix_states(body, _b_retirement=_b_retirement)):
         raise LoadError("prefix B publication is incomplete; HOLD")
 
 
@@ -16991,10 +17016,17 @@ def _setup_switch_a_archive_directory(path):
 
 
 def _validate_setup_switch_a_retirement(body):
-    required = {'schema_version', 'role', 'parent', 'archive', 'journal', 'plan', 'owner'}
+    return _validate_typed_setup_switch_retirement(body, role='A')
+
+
+def _validate_typed_setup_switch_retirement(body, *, role):
+    if role not in {'A', 'B'}:
+        raise LoadError('typed retirement role is unknown; HOLD')
+    required = {'schema_version', 'role', 'parent', 'archive', 'journal', 'owner'}
+    if role == 'A': required.add('plan')
     if (not isinstance(body, dict) or not required <= set(body) or set(body) - required - {'prefix', 'dhcp'}
             or type(body['schema_version']) is not int
-            or body['schema_version'] != 2 or body['role'] != 'A'
+            or body['schema_version'] != (2 if role == 'A' else 3) or body['role'] != role
             or not isinstance(body['owner'], list) or len(body['owner']) != 6
             or any(type(v) is not int or v < 0 for v in body['owner'])):
         raise LoadError("A retirement marker role/contract is invalid; HOLD")
@@ -17003,11 +17035,13 @@ def _validate_setup_switch_a_retirement(body):
             or not isinstance(archive['path'], str)
             or any(type(archive[k]) is not int or archive[k] < 0 for k in ('dev', 'ino', 'mode', 'uid', 'gid'))
             or Path(archive['path']).parent != MANIFEST.parent
-            or re.fullmatch(r'\.setup-switch-a-retired-[0-9a-f]{32}', Path(archive['path']).name) is None
+            or re.fullmatch(r'\.setup-switch-' + role.lower() + r'-retired-[0-9a-f]{32}', Path(archive['path']).name) is None
             or archive != _setup_switch_a_archive_directory(Path(archive['path']))
             or body['parent'] != _setup_switch_link_parent_identity(_setup_switch_journal_path())):
         raise LoadError("A retirement original archive/parent changed; HOLD")
-    for key, path in (('journal', _setup_switch_journal_path()), ('plan', _setup_switch_a_restore_path())):
+    artifacts = [('journal', _setup_switch_journal_path())]
+    if role == 'A': artifacts.append(('plan', _setup_switch_a_restore_path()))
+    for key, path in artifacts:
         row = body[key]
         if (not isinstance(row, dict) or set(row) != {'path', 'identity', 'sha256'}
                 or row['path'] != str(path) or not isinstance(row['identity'], list)
@@ -17609,7 +17643,12 @@ def activate_setup_switch_b_publication(
     if retire and body["publication_bundle"].get("image_intent") is None:
         raise LoadError("B retirement requires original image policy qualification; HOLD")
     if retire and body.get("prefix_transaction", {}).get("rows"):
-        raise LoadError("prefix evidence requires explicit qualified retirement archive; HOLD")
+        if body.get('a_image_intent') is None or body.get('a_runtime') is None:
+            raise LoadError("prefix evidence requires explicit qualified retirement archive; HOLD")
+    if retire and 'dhcp_transaction' in body:
+        _require_setup_switch_a_dhcp_evidence(body['dhcp_transaction'],
+            _setup_switch_a_dhcp_archive_artifact(token['typed_b_retirement'], body)
+            if 'typed_b_retirement' in token else Path(body['dhcp_transaction']['body']['transaction']['path']))
     qualified = _setup_switch_b_preflight_inputs(body, inputs)
     selected_images = dict(images)
     with _setup_switch_b_image_authority(qualified, selected_images,
@@ -17757,13 +17796,18 @@ def _activate_setup_switch_b_publication(token, *, guard, inputs, images, image_
 
     def activation_guard():
         _require_runtime_lock_guard(guard["deployment_lock_descriptor"])
-        current = set(active_managed_services(backend))
+        current = set(active_managed_services(backend, host_role='management-server'))
         if not current <= selected:
             raise LoadError("unexpected managed services during explicit B activation; HOLD")
     def authority():
         image_authority()
         _require_setup_switch_publication_bundle(token, phase="published",
                                                 require_guard=activation_guard)
+        if plan_local_dhcp_runtime(qualified) != plan:
+            raise LoadError('B activation listener plan changed; HOLD')
+        # Listener discovery is read-only but may yield to another writer.
+        # Its result cannot authorize a subsequent command with stale owners.
+        _require_setup_switch_publication_bundle(token, phase='published', require_guard=activation_guard)
         image_authority()
     started = False
     try:
@@ -17776,7 +17820,7 @@ def _activate_setup_switch_b_publication(token, *, guard, inputs, images, image_
             authority()
             verify_http_publication(qualified, images, False)
             authority()
-        if set(active_managed_services(backend)) != selected:
+        if set(active_managed_services(backend, host_role='management-server')) != selected:
             raise LoadError("B selected services did not become healthy/active; HOLD")
         authority()
         if retire:
@@ -17803,6 +17847,232 @@ def _require_setup_switch_retirement_owner(marker):
         raise LoadError("B retirement original marker owner changed; HOLD")
 
 
+def _require_setup_switch_b_retirement_owner(marker):
+    _validate_typed_setup_switch_retirement(marker['body'], role='B')
+    if list(marker['identity'][:6]) != marker['body']['owner']:
+        raise LoadError('B typed retirement original marker owner differs; HOLD')
+    _require_setup_switch_retirement_owner(marker)
+    archive = Path(marker['body']['archive']['path'])
+    allowed = {'journal.json'} | {row['basename'] for row in marker['body'].get('prefix', [])
+                                  if row['leaf'] is not None}
+    if 'dhcp' in marker['body']: allowed.add('dhcp-transaction')
+    if marker['path'] == archive / 'retirement.json': allowed.add('retirement.json')
+    elif marker['path'] != _setup_switch_retirement_path():
+        raise LoadError('B typed retirement marker name differs; HOLD')
+    before = _dhcp_a_preimage_receipt_identity(archive.lstat())
+    with os.scandir(archive) as entries:
+        for index, entry in enumerate(entries):
+            if index >= len(allowed) or entry.name not in allowed:
+                raise LoadError('B typed retirement archive contains unregistered objects; HOLD')
+    if before != _dhcp_a_preimage_receipt_identity(archive.lstat()):
+        raise LoadError('B typed retirement archive changed during inventory; HOLD')
+
+
+def _setup_switch_b_retirement_journal(marker, *, completed=False):
+    _require_setup_switch_b_retirement_owner(marker)
+    # The artifact reader is phase-neutral: original WAL bytes/inode only.
+    # Role B is independently qualified above; there is no A restore plan.
+    return _setup_switch_a_retirement_artifact(marker, 'journal', completed=completed)
+
+
+def _setup_switch_b_prefix_archive_rows(marker, body):
+    _require_setup_switch_b_retirement_owner(marker)
+    rows = {row['path']: row for row in marker['body'].get('prefix', [])}
+    expected = {}
+    for row in body.get('prefix_transaction', {}).get('rows', []):
+        expected[row['candidate']['path']] = None
+        expected[row['backup']] = row['before']
+        expected[row['retained']] = row['candidate']['leaf'] if row['after'] is None else None
+    if set(rows) != set(expected):
+        raise LoadError('B typed prefix lacks exact original WAL inventory; HOLD')
+    for raw, original in expected.items():
+        leaf = rows[raw]['leaf']
+        if (leaf is None) != (original is None) or (leaf is not None and
+                (set(leaf) != set(original) or leaf['identity'][:8] != original['identity'][:8]
+                 or any(leaf[k] != original[k] for k in original if k != 'identity'))):
+            raise LoadError('B typed prefix original owner/bytes differs from WAL; HOLD')
+    return rows
+
+
+def _require_setup_switch_b_retirement_dhcp(marker, body, token):
+    binding = body['dhcp_transaction']
+    _require_bound_dhcp_transaction_namespace(binding)
+    transaction = _setup_switch_a_dhcp_archive_artifact(marker, body)
+    receipt = transaction / 'a-preimage.json'
+    descriptor = token.get('receipt_descriptor', -1)
+    if descriptor < 0 or list(_dhcp_a_preimage_receipt_identity(os.fstat(descriptor))) != binding['identity']:
+        raise LoadError('B typed DHCP original receipt descriptor changed; HOLD')
+    inventory = binding['live_inventory']
+    runtime = Path(binding['body']['runtime']['path'])
+    for name, row in inventory['after'].items():
+        if not _setup_switch_dhcp_same_leaf(_setup_switch_dhcp_owned_leaf(runtime / name),
+                row['file'], renamed=True):
+            raise LoadError('B typed DHCP installed runtime owner/bytes changed; HOLD')
+    _require_bound_dhcp_transaction_namespace(binding)
+    _setup_switch_a_dhcp_archive_artifact(marker, body)
+    if (list(_dhcp_a_preimage_receipt_identity(os.fstat(descriptor))) != binding['identity']
+            or list(_dhcp_a_preimage_receipt_identity(receipt.lstat())) != binding['identity']):
+        raise LoadError('B typed DHCP original receipt changed during read; HOLD')
+
+
+@contextmanager
+def _open_setup_switch_b_typed_retirement(path=None):
+    path = _setup_switch_retirement_path() if path is None else Path(path)
+    fd = -1
+    try:
+        before = _dhcp_a_preimage_receipt_identity(path.lstat())
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, 'O_NONBLOCK', 0))
+        payload, mode = _read_rollback_regular(path, limit=16384)
+        def unique(pairs):
+            result = {}
+            for key, value in pairs:
+                if key in result: raise ValueError('duplicate B typed retirement field')
+                result[key] = value
+            return result
+        if mode != 0o600: raise LoadError('B typed retirement marker mode differs; HOLD')
+        body = json.loads(payload, object_pairs_hook=unique)
+        marker = dict(path=path, descriptor=fd, payload=payload, body=body, identity=before,
+                      parent=_setup_switch_link_parent_identity(path))
+        _require_setup_switch_b_retirement_owner(marker)
+        yield marker
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        raise LoadError(f'B typed retirement evidence unconfirmed; HOLD: {exc}') from exc
+    finally:
+        if fd >= 0: os.close(fd)
+
+
+def _require_completed_setup_switch_b_archives():
+    parent = MANIFEST.parent
+    before = _dhcp_a_preimage_receipt_identity(parent.lstat())
+    fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        if before != _dhcp_a_preimage_receipt_identity(os.fstat(fd)):
+            raise LoadError('B typed archive scan original parent changed; HOLD')
+        paths = []
+        with os.scandir(fd) as entries:
+            for index, entry in enumerate(entries):
+                if index >= 4096: raise LoadError('B typed archive scan exceeds bound; HOLD')
+                if entry.name.startswith('.setup-switch-b-retired-'): paths.append(parent / entry.name)
+        for path in sorted(paths):
+            with _open_setup_switch_b_typed_retirement(path / 'retirement.json') as marker:
+                def qualified():
+                    journal = _setup_switch_b_retirement_journal(marker, completed=True)
+                    original = _setup_switch_prepared_registration_body(
+                        _read_rollback_regular(journal, limit=_SETUP_SWITCH_JOURNAL_LIMIT))
+                    rows = _setup_switch_b_prefix_archive_rows(marker, original)
+                    expected = {'journal.json', 'retirement.json'}
+                    if 'dhcp' in marker['body']: expected.add('dhcp-transaction')
+                    expected.update(row['basename'] for row in rows.values() if row['leaf'] is not None)
+                    if set(os.listdir(path)) != expected:
+                        raise LoadError('B typed completed archive is incomplete; HOLD')
+                    for row in rows.values():
+                        _setup_switch_a_prefix_archive_artifact(marker, row, completed=True)
+                    _setup_switch_a_dhcp_archive_artifact(marker, original, completed=True)
+                    _require_setup_switch_b_retirement_owner(marker)
+                qualified()
+                _fsync_parent_directory(path); _fsync_parent_directory(parent)
+                qualified()
+        if (before != _dhcp_a_preimage_receipt_identity(os.fstat(fd))
+                or before != _dhcp_a_preimage_receipt_identity(parent.lstat())):
+            raise LoadError('B typed archive scan parent changed during read; HOLD')
+    finally:
+        os.close(fd)
+
+
+def _retire_setup_switch_b_typed_publication(token, *, require_authority):
+    require_authority(); _require_no_pending_setup_manifest_stage()
+    original = _setup_switch_prepared_registration_body((token['payload'], 0o600))
+    marker = token.get('typed_b_retirement')
+    if marker is None:
+        _require_setup_switch_retirement_absent()
+        _require_completed_setup_switch_b_archives()
+        journal = token['journal']
+        if journal != _setup_switch_journal_path():
+            raise LoadError('B typed retirement does not own configured WAL name; HOLD')
+        prefix = []
+        if 'prefix_transaction' in original:
+            _require_setup_switch_prefix_published(original)
+            sources = sorted(raw for row in original['prefix_transaction']['rows']
+                for raw in (row['candidate']['path'], row['backup'], row['retained']))
+            prefix = [dict(path=raw, parent=original['root'],
+                leaf=_setup_switch_compensation_leaf(Path(raw)), basename=f'prefix-{index:03d}')
+                for index, raw in enumerate(sources)]
+        dhcp = None
+        if 'dhcp_transaction' in original:
+            binding = original['dhcp_transaction']; transaction = Path(binding['body']['transaction']['path'])
+            _require_setup_switch_a_dhcp_evidence(binding, transaction)
+            dhcp = dict(path=str(transaction), parent=binding['body']['runtime'],
+                        identity=list(_dhcp_a_preimage_receipt_identity(transaction.lstat())))
+        wal = dict(path=str(journal), identity=list(token['identity']),
+                   sha256=hashlib.sha256(token['payload']).hexdigest())
+        require_authority()
+        for row in prefix:
+            if _setup_switch_compensation_leaf(Path(row['path'])) != row['leaf']:
+                raise LoadError('B typed prefix changed during inventory; HOLD')
+        if dhcp is not None and list(_dhcp_a_preimage_receipt_identity(transaction.lstat())) != dhcp['identity']:
+            raise LoadError('B typed DHCP transaction changed during inventory; HOLD')
+        archive = journal.parent / ('.setup-switch-b-retired-' + uuid.uuid4().hex)
+        archive.mkdir(mode=0o700)
+        owner = _setup_switch_a_archive_directory(archive)
+        _fsync_parent_directory(archive); _fsync_parent_directory(archive.parent)
+        require_authority()
+        path = _setup_switch_retirement_path()
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        try:
+            body = dict(schema_version=3, role='B', parent=token['parent'], archive=owner,
+                        journal=wal, prefix=prefix, owner=list(_dhcp_a_preimage_receipt_identity(os.fstat(fd))[:6]))
+            if dhcp is not None: body['dhcp'] = dhcp
+            payload = _setup_switch_canonical_payload(body) + b'\n'
+            with os.fdopen(os.dup(fd), 'wb') as out:
+                out.write(payload); out.flush()
+                marker = dict(path=path, descriptor=fd, payload=payload, body=body,
+                    parent=_setup_switch_link_parent_identity(path), identity=_dhcp_a_preimage_receipt_identity(os.fstat(fd)))
+                _require_setup_switch_b_retirement_owner(marker)
+                _setup_switch_b_prefix_archive_rows(marker, original)
+                _setup_switch_a_dhcp_archive_artifact(marker, original)
+                os.fsync(out.fileno()); _require_setup_switch_b_retirement_owner(marker)
+            _fsync_parent_directory(path.parent); _require_setup_switch_b_retirement_owner(marker)
+        finally:
+            os.close(fd)
+    with _open_setup_switch_b_typed_retirement() as marker:
+        token['typed_b_retirement'] = marker; token['retirement'] = marker
+        archive = Path(marker['body']['archive']['path'])
+        def qualified():
+            _require_setup_switch_b_retirement_owner(marker)
+            _setup_switch_b_prefix_archive_rows(marker, original)
+            _setup_switch_a_dhcp_archive_artifact(marker, original)
+            require_authority()
+        operations = []
+        if 'dhcp' in marker['body']:
+            operations.append((lambda: _setup_switch_a_dhcp_archive_artifact(marker, original),
+                               archive / 'dhcp-transaction', Path(marker['body']['dhcp']['parent']['path'])))
+        for row in marker['body'].get('prefix', []):
+            if row['leaf'] is not None:
+                operations.append((lambda row=row: _setup_switch_a_prefix_archive_artifact(marker, row),
+                                   archive / row['basename'], HTTP_ROOT))
+        operations.append((lambda: _setup_switch_b_retirement_journal(marker), archive / 'journal.json', archive.parent))
+        qualified()
+        for inspect_original, destination, source_parent in operations:
+            source = inspect_original()
+            if source != destination:
+                _setup_switch_rename_directory_noreplace(source, destination)
+                if destination.name == 'journal.json':
+                    now = _dhcp_a_preimage_receipt_identity(os.fstat(token['descriptor']))
+                    if now[:8] != token['identity'][:8] or now != _dhcp_a_preimage_receipt_identity(destination.lstat()):
+                        raise LoadError('B typed original WAL archive owner changed; HOLD')
+                    token.update(journal=destination, identity=now, parent=_setup_switch_link_parent_identity(destination))
+            _fsync_parent_directory(archive); _fsync_parent_directory(source_parent); qualified()
+        destination = archive / 'retirement.json'
+        _setup_switch_rename_directory_noreplace(marker['path'], destination)
+        now = _dhcp_a_preimage_receipt_identity(os.fstat(marker['descriptor']))
+        if now[:8] != marker['identity'][:8] or now != _dhcp_a_preimage_receipt_identity(destination.lstat()):
+            raise LoadError('B typed original marker archive owner changed; HOLD')
+        marker.update(path=destination, identity=now, parent=_setup_switch_link_parent_identity(destination))
+        _require_setup_switch_b_retirement_owner(marker)
+        _fsync_parent_directory(archive); _fsync_parent_directory(archive.parent); qualified()
+        token.pop('typed_b_retirement'); token.pop('retirement')
+
+
 def _retire_setup_switch_b_publication(token, *, require_authority):
     """Only called after this invocation's exact B preflight and health.
 
@@ -17810,6 +18080,10 @@ def _retire_setup_switch_b_publication(token, *, require_authority):
     backup; never delete recovery evidence. An interrupted rename remains
     fenced until a stopped cold reader repeats all original B checks/health.
     """
+    original = _setup_switch_prepared_registration_body((token['payload'], 0o600))
+    if ('typed_b_retirement' in token or 'dhcp_transaction' in original
+            or original.get('prefix_transaction', {}).get('rows')):
+        return _retire_setup_switch_b_typed_publication(token, require_authority=require_authority)
     require_authority()
     _require_no_pending_setup_manifest_stage()
     marker = token.get("retirement")
@@ -17874,6 +18148,35 @@ def resume_setup_switch_b_retirement(project, *, guard, inputs=None, images=None
         raise LoadError("B retirement reentry requires explicit confirmation; HOLD")
     _require_runtime_restore_guard(**guard)
     path = _setup_switch_retirement_path()
+    try:
+        discriminator, mode = _read_rollback_regular(path, limit=16384)
+        def unique(pairs):
+            result = {}
+            for key, value in pairs:
+                if key in result: raise ValueError('duplicate B retirement discriminator field')
+                result[key] = value
+            return result
+        header = json.loads(discriminator, object_pairs_hook=unique)
+        if (mode != 0o600 or not isinstance(header, dict) or type(header.get('schema_version')) is not int
+                or header['schema_version'] not in (1, 3)):
+            raise LoadError('B retirement marker discriminator is invalid; HOLD')
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        raise LoadError(f'B retirement marker discriminator unavailable; HOLD: {exc}') from exc
+    if header['schema_version'] == 3:
+        with _open_setup_switch_b_typed_retirement() as marker:
+            token = None
+            try:
+                journal = _setup_switch_b_retirement_journal(marker)
+                token = _open_setup_switch_publication_bundle(project, guard=guard, journal=journal,
+                                                             _b_retirement=marker)
+                if inputs is None or images is None:
+                    original_inputs, original_images = _setup_switch_b_operator_selection(token)
+                    inputs = original_inputs if inputs is None else inputs
+                    images = original_images if images is None else images
+                return activate_setup_switch_b_publication(token, guard=guard, inputs=inputs,
+                                                          images=images, confirmed=True, retire=True)
+            finally:
+                close_setup_switch_publication_bundle(token)
     fd = -1
     token = None
     try:
@@ -17881,7 +18184,8 @@ def resume_setup_switch_b_retirement(project, *, guard, inputs=None, images=None
         payload, mode = _read_rollback_regular(path, limit=16384)
         body = json.loads(payload)
         if (mode != 0o600 or set(body) != {"schema_version", "journal", "archive", "parent", "identity", "sha256"}
-                or body["schema_version"] != 1 or body["journal"] != str(_setup_switch_journal_path())
+                or type(body["schema_version"]) is not int or body["schema_version"] != 1
+                or body["journal"] != str(_setup_switch_journal_path())
                 or not isinstance(body["identity"], list) or len(body["identity"]) != 9
                 or any(type(v) is not int or v < 0 for v in body["identity"])
                 or not isinstance(body["sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", body["sha256"])):

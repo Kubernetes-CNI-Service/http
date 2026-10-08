@@ -5168,6 +5168,13 @@ finally:
     def test_real_setup_q_commit_staged_dhcp_clone_holds_cold_before_b_preflight(self):
         self._real_setup_committed_q_group_restore(dhcp=True, dhcp_staged_fault='b-preflight')
 
+    def test_real_setup_q_commit_death_cold_b_typed_retirement_preserves_full_evidence(self):
+        self._real_setup_committed_q_group_restore(dhcp=True, prefix=True, prefix_change='/q-prefix', b_health=True)
+
+    def test_real_setup_first_b_dhcp_archive_rename_death_cold_cli_requires_fresh_health(self):
+        self._real_setup_committed_q_group_restore(dhcp=True, prefix=True, prefix_change='/q-prefix',
+                                                 b_health='retire-death-dhcp')
+
     def _real_setup_committed_q_group_restore(self, *, dhcp=False, runtime_death=False,
                                              setup_death=False, foreign_setup=False,
                                              q_local=False, q_fault=False, a_fault=None, a_image_fault=False,
@@ -5176,14 +5183,21 @@ finally:
                                              dhcp_legacy_fault=False, prefix=False, prefix_fault=False,
                                              managed_key=False, managed_key_death=False, managed_key_fault=False,
                                              prefix_change=False, prefix_death=False, a_health=False,
-                                             plan_fsync_aba=False, dhcp_staged_fault=False):
+                                             plan_fsync_aba=False, dhcp_staged_fault=False, b_health=False):
         fixture = RELEASE_FIXTURE.ReleaseTransactionTests()
         fixture.setUp()
         try:
             state, context = fixture._prepare_persisted_a_runtime_switch(
-                original_upgrade_policy="enabled" if a_image_fault or a_image else None,
+                original_upgrade_policy="enabled" if a_image_fault or a_image else 'disabled' if b_health else None,
                 original_images=a_image_fault or a_image, prefix=prefix or prefix_fault, managed_key=managed_key,
-                qualified_a_health=bool(a_health))
+                qualified_a_health=bool(a_health or b_health))
+            if b_health:
+                for name in ('01-global.yaml', '02-devices_config.csv', '02-dhcp-subnet_config.csv',
+                             'laptop.pub', 'mgmt-server.pub'):
+                    (state[1] / name).write_bytes((context.project / name).read_bytes())
+                document = yaml.safe_load((state[1] / '01-global.yaml').read_text())
+                document['common']['mgmt']['ztp']['ztp_url_prefix'] = '/q-prefix'
+                (state[1] / '01-global.yaml').write_text(yaml.safe_dump(document, sort_keys=False))
             original_prefix = {path: (path.lstat().st_ino, path.lstat().st_ctime_ns)
                 for path in (fixture.root / ".ztp-prefix-publication.json", fixture.root / "r22-prefix")
                 if prefix or prefix_fault}
@@ -5287,7 +5301,9 @@ try:
             path = Path(row['path'])
             if row['after'] is None and os.path.lexists(path):
                 path.unlink()
-        (root / 'ztp/ztp-bootstrap_oob.sh').write_bytes(b'independent installed B runtime\n')
+        b_typed = len(sys.argv) > 14 and sys.argv[14] == 'b-typed'
+        (root / 'ztp/ztp-bootstrap_oob.sh').write_bytes(b'independent installed B runtime\n' +
+            (b'ZTP_UPGRADE_ENABLED="false"\n' if b_typed else b''))
         manifest = ('# setup manifest — proj: ' + str(q) + '\n' + str(common) + '\n'
                     + ''.join(str(path) + '\n' for path in key_links)
                     + (str(image_link) + '\n' if len(sys.argv) > 9 and sys.argv[9] == 'a-image' else '')
@@ -5297,7 +5313,8 @@ try:
         if prefix_change:
             load.configure_ztp_prefix_publication(settings, setup_guard=guard)
         candidates = private_publication_candidates(load, q)
-        token = load.register_setup_switch_publication_bundle(*candidates, guard=guard)
+        token = load.register_setup_switch_publication_bundle(*candidates, guard=guard,
+            **(dict(images={}, upgrade_enabled=False) if b_typed else {}))
         if sys.argv[6] == 'dhcp':
             assert_private_dhcp_transaction_retention(load, root, q, 'bound-setup-before-write',
                 setup_guard=guard, publication_candidates=(*candidates, token), a_shapes=True,
@@ -5479,6 +5496,57 @@ try:
             print('R22_A_PLAN_FSYNC_ABA_HELD_BEFORE_RESTORE')
             sys.exit(0)
         raise AssertionError('A plan fsync ABA licensed restoration')
+    if sys.argv[5] in ('reader-b-typed', 'reader-b-death', 'reader-b-resume'):
+        import json
+        from unittest import mock
+        journal = root / 'ztp/.setup-switch-journal.json'
+        pending = load._setup_switch_retirement_path()
+        wal = journal
+        if sys.argv[5] == 'reader-b-resume':
+            with load._open_setup_switch_b_typed_retirement() as marker:
+                wal = load._setup_switch_b_retirement_journal(marker)
+        frozen = (wal.lstat().st_ino, wal.read_bytes())
+        active, actions = set(), []
+        def start(name): active.add(name); actions.append(('start', name))
+        def stop(name): active.discard(name); actions.append(('stop', name))
+        backend = SimpleNamespace(name='supervisor', is_active=lambda name: name in active, start=start, stop=stop)
+        guard['runtime_backend'] = backend; load.active_managed_services = genuine_active
+        token = None
+        try:
+            probe, sync = load.verify_http_publication, load._fsync_parent_directory
+            def witnessed_health(*args, **kwargs):
+                probe(*args, **kwargs)
+                with (root / 'b-retirement-health-witness').open('a') as out:
+                    out.write(str(os.getpid()) + '\n'); out.flush(); os.fsync(out.fileno())
+            load.verify_http_publication = witnessed_health
+            if sys.argv[5] == 'reader-b-death':
+                def die(parent):
+                    sync(parent)
+                    if pending.exists() and list(journal.parent.glob('.setup-switch-b-retired-*/dhcp-transaction')):
+                        os.kill(os.getpid(), signal.SIGKILL)
+                load._fsync_parent_directory = die
+            with private_a_health_ports(load, root, publication_prefix='q-prefix') as commands, \
+                    mock.patch.object(load, 'runtime_os', return_value='Linux'), \
+                    mock.patch.object(load, 'service_runtime_backend', return_value=backend):
+                load.release_deployment_lock(fd); fd = None
+                flag = '--resume-setup-retirement' if sys.argv[5] == 'reader-b-resume' else '--activate-setup-publication'
+                assert load.main([str(q), '--host-role', 'management-server', flag]) == 0
+                assert any(argv[0] == 'curl' for argv in commands), commands
+            archives = list(journal.parent.glob('.setup-switch-b-retired-*')); assert len(archives) == 1
+            archive = archives[0]
+            assert frozen == ((archive / 'journal.json').lstat().st_ino, (archive / 'journal.json').read_bytes())
+            marker = json.loads((archive / 'retirement.json').read_bytes())
+            assert marker['schema_version'] == 3 and marker['role'] == 'B' and 'plan' not in marker
+            body = json.loads(frozen[1])['body']; original = body['dhcp_transaction']
+            assert (archive / 'dhcp-transaction').lstat().st_ino == original['body']['transaction']['ino']
+            assert (archive / 'dhcp-transaction/a-preimage.json').lstat().st_ino == original['identity'][1]
+            assert not os.path.lexists(journal) and not os.path.lexists(original['body']['transaction']['path'])
+            assert not os.path.lexists(load._setup_switch_a_restore_path())
+            load.require_no_pending_setup_switch_journal()
+            print('R22_ORIGINAL_B_FULL_TYPED_EVIDENCE_ARCHIVED_FRESH_HEALTH')
+            sys.exit(0)
+        finally:
+            load.close_setup_switch_publication_bundle(token)
     status = load.restore_setup_switch_a_disk(q, guard=guard, confirmed=True)
     assert status == 'restored-p-a-group-stopped-wal-retained', status
     expected_bootstrap = (b'A oob bootstrap\nZTP_UPGRADE_ENABLED="true"\n'
@@ -5616,11 +5684,31 @@ finally:
                                            "a-image" if a_image or a_image_fault else "no-a-image",
                                            "q-created" if a_image else "no-q-created",
                                            "a-metadata" if dhcp_metadata else "no-a-metadata",
-                                           "managed-key" if managed_key or a_health else "no-managed-key",
-                                           (prefix_change if isinstance(prefix_change, str) else "/q-prefix") if prefix_change else "unchanged-prefix"],
+                                           "managed-key" if managed_key or a_health or b_health else "no-managed-key",
+                                           (prefix_change if isinstance(prefix_change, str) else "/q-prefix") if prefix_change else "unchanged-prefix",
+                                           'b-typed' if b_health else 'no-b-typed'],
                                     capture_output=True, text=True, check=False, timeout=30)
             self.assertEqual(-signal.SIGKILL, writer.returncode, writer.stdout + writer.stderr)
             original_wal = (journal.lstat().st_ino, journal.read_bytes())
+            if b_health:
+                reader = subprocess.run(argv + ['reader-b-death' if b_health == 'retire-death-dhcp' else 'reader-b-typed', shape], capture_output=True,
+                    text=True, check=False, timeout=120)
+                if b_health == 'retire-death-dhcp':
+                    self.assertEqual(-signal.SIGKILL, reader.returncode, reader.stdout + reader.stderr)
+                    self.assertEqual(original_wal, (journal.lstat().st_ino, journal.read_bytes()))
+                    pending = journal.parent / '.setup-switch-retirement.json'
+                    archive = Path(json.loads(pending.read_bytes())['archive']['path'])
+                    self.assertTrue((archive / 'dhcp-transaction').is_dir())
+                    self.assertFalse(os.path.lexists(archive / 'journal.json'))
+                    with self.assertRaises(RELEASE_FIXTURE.LOAD.LoadError):
+                        RELEASE_FIXTURE.LOAD.require_no_pending_setup_switch_journal()
+                    reader = subprocess.run(argv + ['reader-b-resume', shape], capture_output=True,
+                        text=True, check=False, timeout=120)
+                    witness = (root / 'b-retirement-health-witness').read_text().splitlines()
+                    self.assertEqual(2, len(witness)); self.assertNotEqual(witness[0], witness[1])
+                self.assertEqual(0, reader.returncode, reader.stdout + reader.stderr)
+                self.assertIn('R22_ORIGINAL_B_FULL_TYPED_EVIDENCE_ARCHIVED_FRESH_HEALTH', reader.stdout)
+                return
             if dhcp_staged_fault:
                 binding = json.loads(original_wal[1])['body']['dhcp_transaction']
                 source = Path(binding['staged']['path']) / 'dhcpd_ib.hosts'

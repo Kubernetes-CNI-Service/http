@@ -1115,7 +1115,8 @@ HTTP 失败及非本次启动服务混入。每个服务/健康边界重查原 A
 强杀后的全新 resume 必须重新健康；外来同目标 inode、缺失清单、Boolean owner、
 晚占缺席名拒绝且不清理。缺席行没有写入，不重复重开整组；每个真实 rename 前后及
 最终完成仍完整重验。direct/真实 workflow 的局部记录见 CHANGE_AWARE_TESTING，
-不是正式 full/check；原 A 的完整 DHCP typed 归档已有下述本地候选，B 完整退休继续待完成。
+不是正式 full/check；原 A 的完整 DHCP typed 归档已有下述本地候选，B 的 prefix/DHCP
+原证据 typed 退休已有下述独立角色候选，仍待正式相关/全量治理验证。
 
 DHCP 原生产者已增加 staged 四文件与目录九字段登记候选，先于首个 B rename；WAL
 fsync 与每次 B 写重核原身份。冷恢复不能把同字节 clone、同 inode ABA、目录权限变更
@@ -1143,4 +1144,20 @@ WAL/恢复计划的 inode、元数据、摘要及原父，no-replace 移动原 i
 完成归档保留精确三核心对象及已登记的 prefix 实体和整棵原 DHCP 事务，未知对象/外来 inode/错误角色/未完成或孤立目录保持 HOLD。
 历史归档只核自己的原归档对象，不绑定下一事务重用的 live 名称；新事务仍受自己的 WAL
 围栏约束。创建意图之前的孤立目录不能自动认领或清理。私有 HTTP/SIGKILL 回归不替代
-正式 related/full/check、Linux/root/断电、B 完整退休归档或人工 ACK。
+正式 related/full/check、Linux/root/断电或人工 ACK。
+
+### R22 B prefix/DHCP 原证据 typed 退休候选
+
+B 使用独立 role=B/schema-3、0700 私有 `.setup-switch-b-retired-*` 目录：只 no-replace
+移入原 WAL、prefix 原 backup/retained 证据及整棵原 DHCP 事务，最终保留原 marker。
+它没有 A 恢复计划，不能借用 A 补偿资格；旧 prefix 缺原资格仍在健康前 HOLD。无辅助
+写集的 schema-1 原 WAL 归档兼容路径保留。完整 Q manifest/shared/group、原输入、镜像、
+公钥与动态 listener 检查仍执行；每个实际归档写/同步前后核 source/归档 XOR、原身份与
+原字节。B 激活服务状态查询明确 management-server，启动后 listener 换绑停本次服务并 HOLD。
+
+首个 DHCP rename 强杀后，全新 `--resume-setup-retirement` CLI 自取独占锁、预先停服、
+重新预检/真实私有 HTTP，不能采用上次 PID 的 PASS。畸形/重复/Boolean marker、错误角色、
+不完整 prefix、未知对象、外来 staged inode、晚占缺席名均拒绝且保留证据。普通新 LOAD
+有界验证完成的 B 历史归档，只绑定自己的原归档名字，不绑定后来重用的 live 名称。
+13 项本地 direct/真实 LOAD→SETUP→提交 Q 强杀→冷 CLI/归档强杀→新 CLI 记录在
+CHANGE_AWARE_TESTING；不构成正式 related/full/check、实际 root/Linux/断电/C2 或 DEV ACK。
