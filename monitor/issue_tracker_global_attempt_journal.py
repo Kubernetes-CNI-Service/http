@@ -559,14 +559,17 @@ def record_shared_retry_continuous_owned_attempt_intent(
             before=inspect_global_unit(token,binding,unit)
             if not 1<=before.attempt_count<6: raise GlobalAttemptHold()
             original=facts()
-            image=_latest_receipted_prod_xlsx(writer_token,expected_template_sha256)
-            with _hold_shared_retry_opportunity(writer_token,token,binding,unit,store,image,
-                                                 boot_id=boot_id,monotonic_ns=monotonic_ns):
-                verify_audits()
-                result=_observe(token,binding,unit,True)
-                verify_audits()
-            if (facts()!=original or result.attempt_count!=before.attempt_count+1
-                    or inspect_global_unit(token,binding,unit)!=result): raise GlobalAttemptHold()
+            with _hold_reserved_quota_originals(token,binding,original[1].identity,unit) as verify_quota:
+                image=_latest_receipted_prod_xlsx(writer_token,expected_template_sha256)
+                with _hold_shared_retry_opportunity(writer_token,token,binding,unit,store,image,
+                                                     boot_id=boot_id,monotonic_ns=monotonic_ns):
+                    verify_audits(); verify_quota()
+                    result=_observe(token,binding,unit,True)
+                    # Reject original-quota loss before pairing retry COUNT.
+                    # Never repair an orphan or roll back the durable attempt.
+                    verify_audits(); verify_quota()
+                if (facts()!=original or result.attempt_count!=before.attempt_count+1
+                        or inspect_global_unit(token,binding,unit)!=result): raise GlobalAttemptHold()
     except Exception: failed=True
     if failed: raise GlobalAttemptHold()
     return result

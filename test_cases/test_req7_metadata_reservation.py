@@ -254,6 +254,50 @@ class Req7MetadataReservationDirectTests(unittest.TestCase):
                     self.assertEqual(image,{p.name:p.read_bytes() for p in store.iterdir()})
                     self.assertEqual(quota,self.inspect(token))
 
+    def test_shared_retry_count_cannot_adopt_same_byte_quota_header_after_count(self):
+        # Isolate the quota/count boundary with real owner, journal and quota.
+        # Protected C5/live-read/cadence integration is asserted separately by
+        # the actual Stage-L multi-script workflow, not by these stubs.
+        from contextlib import nullcontext
+        from types import SimpleNamespace
+        from monitor import issue_tracker_admission as admission
+        from monitor import issue_tracker_history_preread_journal as continuity
+        from monitor import issue_tracker_remote_history_match as gates
+        from monitor import issue_tracker_local_workbook_commit as publications
+        self.module=load()
+        with fixture(self.root),self.owner.spreadsheet_owner(binding()) as token:
+            self.initialize(token); self.reserve(token)
+            self.assertEqual(1,self.global_journal.record_reserved_attempt_intent(
+                token,binding(),self.identity,self.unit).attempt_count)
+            path=self.store/'HEADER'; raw=path.read_bytes(); inode=path.stat().st_ino
+            preserved=self.root/'owned-original-retry-quota-header'; injected=[]
+            original=self.global_journal._observe
+            def replace_after_retry(*values,**options):
+                result=original(*values,**options)
+                if values[3]:
+                    path.rename(preserved); path.write_bytes(raw); path.chmod(0o600)
+                    injected.append(result.attempt_count)
+                return result
+            with mock.patch.object(self.global_journal,'_hold_receipted_audit_originals',
+                        return_value=nullcontext(lambda:None)), \
+                    mock.patch.object(continuity,'observe_owned_business_continuity',return_value=('owned-continuity',)), \
+                    mock.patch.object(gates,'observe_owned_unit_read_gates',return_value=SimpleNamespace(identity=self.identity)), \
+                    mock.patch.object(self.global_journal,'_receipted_original_facts',return_value=('owned-original-facts',)), \
+                    mock.patch.object(publications,'_latest_receipted_prod_xlsx',return_value=b'owned-publication'), \
+                    mock.patch.object(admission,'_hold_shared_retry_opportunity',return_value=nullcontext()), \
+                    mock.patch.object(self.global_journal,'_observe',side_effect=replace_after_retry), \
+                    self.assertRaises(self.global_journal.GlobalAttemptHold):
+                self.global_journal.record_shared_retry_continuous_owned_attempt_intent(token,binding(),self.unit,
+                    writer_token=None,identity_response=None,history_response=None,business_reads=(),
+                    qualified_source=None,store=None,settings=None,whitelist_snapshot=SimpleNamespace(whitelist=None),
+                    expected_template_sha256='a'*64,http_root=self.root,whitelist_path=self.root/'not-used',
+                    headers_response=None,whitelist_response=None,metadata_response=None,
+                    boot_id='owned-boot',monotonic_ns=1)
+            self.assertEqual([2],injected); self.assertNotEqual(inode,path.stat().st_ino)
+            seen=self.global_journal.inspect_global_unit(token,binding(),self.unit)
+            self.assertEqual((2,'UNKNOWN'),(seen.attempt_count,seen.outcome))
+            self.assertEqual(raw,path.read_bytes()); self.assertEqual(raw,preserved.read_bytes())
+
     def test_reserved_intent_refuses_each_drifted_original_image_without_increment_or_repair(self):
         self.module = load()
         self.assertTrue(hasattr(self.global_journal, 'record_reserved_attempt_intent'),

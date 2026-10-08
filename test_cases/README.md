@@ -1291,6 +1291,11 @@ quota 原目录和四件原文件 FD，并在计数前后及退出范围时复�
 及两份原像，不采用替换件、不回退或重建。这是原 reservation 的必要连续性，
 不证明历史排他、完整 G1 库存、发送许可或 COMPLETE。
 
+共享 retry 同样持有原配额目录／四件 FD，但继续使用其专用 INTENT/COUNT
+事务，不套用会拒绝新增 retry 记录的普通 admission guard。持久次数增加后
+原配额身份丢失必须在配对 retry COUNT 前 HOLD；保留未配对 INTENT、次数、
+UNKNOWN、C6、业务、C25 和 outbox 原像，不以补建配对或回滚来清除故障。
+
 配额冷进程联测保留原 argv、5 秒预算和六次 UNKNOWN／第七次拒绝断言。
 原生子进程记录 fixture import/setup、source load、owner、count 和 cleanup
 阶段，父进程超时保留原 TimeoutExpired 与完整 partial stdout/stderr；

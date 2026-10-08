@@ -2286,6 +2286,8 @@ generation/publish 及 UNKNOWN 下改 action/wire 均 HOLD，不计作 COMPLETE 
 
 ## TC-REAL-REQ7-METADATA-RESERVATION-001 — 原 batch 的永久 fence 持久预算
 
+- 共享 retry 原配额补充（**NOT RUN / REAL_ENV REQUIRED**）：保留正常 retry 及持久次数增加后原配额 HEADER 同字节替换的场景；后置身份丢失须在配对 COUNT 前 HOLD，保留未配对 INTENT、已计 UNKNOWN、C6／业务／C25／outbox 原像，后续所有 lane 保持阻断，不补建或回滚。本地 direct 只隔离原 quota/count 边界，实际 C5/C6→原读取→共享事务 workflow 才见证跨脚本行为；均不证明断电、真实 Cloud、旧周期 R2 或发送准入。没有删减或合并既有场景，本卡原授权、证据、清理和未验证风险保持不变。
+
 - 原配额计数连续性补充（**NOT RUN / REAL_ENV REQUIRED**）：现场须保留正常计数、计数前原件缺失及持久计数后同字节替换目录／HEADER 的独立预期；后置替换必须 HOLD，并保留已计 UNKNOWN、原配额和替换前后证据，不回退或重建。本地 direct、六个冷进程及真实受保护 C5/C6 workflow 只验证自有隔离夹具中的原 FD 身份连续性，不冒充断电、真实设备、历史排他或完整 G1 库存验收。未省略或合并原场景；保留本卡原授权、证据及清理边界，未验证范围和残余风险仍为原卡所列。
 
 - 原项目认证与读取接线补充（**NOT RUN / REAL_ENV REQUIRED**）：本地 direct 及真实固定 FD→SDK/OAuth→监督 template/metadata 读取→原 global/enrollment/History→quota 工作流只证明来源支配原 reservation。保留原卡前置、精确授权及现场范围，另留存脱敏认证与原读取关联、落盘前拒绝和落盘后过期仍保留原 quota 的安全状态；不记录 token／JWT／私钥。quota 冷回读不是历史排他／完整库存或 COMPLETE；G1 与 worker 准入未验证。未省略或合并原场景、不授予真实 root／Cloud／项目操作，清理仍限确证自有隔离夹具。

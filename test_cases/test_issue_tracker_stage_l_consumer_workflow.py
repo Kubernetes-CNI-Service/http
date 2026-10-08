@@ -114,6 +114,12 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             settings_audit_probe=True, owned_read_gates_probe=True, owned_continuity_probe=True,
             shared_retry_probe=True, allocation_retry_identity_probe=True)
 
+    def test_same_byte_quota_replacement_after_shared_retry_keeps_unpaired_intent_and_unknown(self):
+        self._exercise_real_protected_three_panel_fixture(skip_history=False,observed_cabling_insert_probe=True,
+            business_preread_probe=True,original_reserved_probe=True,receipted_intent_probe=True,
+            settings_audit_probe=True,owned_read_gates_probe=True,owned_continuity_probe=True,
+            shared_retry_probe=True,quota_retry_identity_probe=True)
+
     def test_each_independent_c25_sheet_fixture_acquires_a_fresh_synthetic_credential(self):
         # Separate fixtures must not inherit an earlier fixture's expired
         # token. Preserve the production expiry contract and its 3600s TTL.
@@ -506,7 +512,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         observed_switch_insert_probe=False, observed_cabling_insert_probe=False, business_preread_probe=False, original_reserved_probe=False, receipted_intent_probe=False,
         settings_audit_probe=False, owned_read_gates_probe=False, owned_continuity_probe=False, complete_preview_probe=False,
         shared_retry_probe=False, allocation_original_identity_probe=False, allocation_retry_identity_probe=False,
-        receipt_admission_rebind_probe=False,quota_namespace_rebind_probe=False,
+        receipt_admission_rebind_probe=False,quota_namespace_rebind_probe=False,quota_retry_identity_probe=False,
         before_cabling_fixture=None,
         complete_preview_source_race=False,
         complete_preview_cgi=False,
@@ -1854,16 +1860,20 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                                             expected_template_sha256=self.snapshot.workbook_sha256,settings=args['settings'],
                                             whitelist_sha256=self.snapshot.whitelist.sha256,qualified_source=qualified)
                                         bundle=fresh_bundle()
-                                        if allocation_retry_identity_probe:
+                                        if allocation_retry_identity_probe or quota_retry_identity_probe:
                                             original_observe=global_journal._observe
-                                            raw=assignments_path.read_bytes(); inode=assignments_path.stat().st_ino
-                                            preserved=allocation_path.parent/'owned-original-retry-assignments'
+                                            quota_path=state/(hashlib.sha256(binding.spreadsheet_id.encode('ascii')).hexdigest()+'.metadata')
+                                            quota_image={p.name:p.read_bytes() for p in quota_path.iterdir()}
+                                            fault_path=quota_path/'HEADER' if quota_retry_identity_probe else assignments_path
+                                            raw=fault_path.read_bytes(); inode=fault_path.stat().st_ino
+                                            preserved=(project/'owned-original-retry-quota-header' if quota_retry_identity_probe
+                                                else allocation_path.parent/'owned-original-retry-assignments')
                                             injected=[]
                                             def replace_after_retry(*values,**options):
                                                 result=original_observe(*values,**options)
                                                 if values[3]:
-                                                    assignments_path.rename(preserved)
-                                                    assignments_path.write_bytes(raw); assignments_path.chmod(0o600)
+                                                    fault_path.rename(preserved)
+                                                    fault_path.write_bytes(raw); fault_path.chmod(0o600)
                                                     injected.append(result.attempt_count)
                                                 return result
                                             with mock.patch.object(admission,'time',SimpleNamespace(monotonic_ns=lambda:now)), \
@@ -1875,11 +1885,12 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                                                         expected_template_sha256=self.snapshot.workbook_sha256,http_root=self.root,
                                                         whitelist_path=self.template,boot_id=prior['boot_id'],monotonic_ns=now,**bundle)
                                             self.assertEqual([2],injected)
-                                            self.assertNotEqual(inode,assignments_path.stat().st_ino)
-                                            self.assertEqual(raw,preserved.read_bytes()); self.assertEqual(raw,assignments_path.read_bytes())
+                                            self.assertNotEqual(inode,fault_path.stat().st_ino)
+                                            self.assertEqual(raw,preserved.read_bytes()); self.assertEqual(raw,fault_path.read_bytes())
                                             intent=global_journal.inspect_global_unit(spreadsheet_token,binding,unit)
                                             self.assertEqual((2,'UNKNOWN'),(intent.attempt_count,intent.outcome))
                                             self.assertEqual(allocation_image,{p.name:p.read_bytes() for p in allocation_path.iterdir()})
+                                            self.assertEqual(quota_image,{p.name:p.read_bytes() for p in quota_path.iterdir()})
                                             self.assertTrue(list((project/'.tracker/settings/outbox').iterdir()))
                                             admissions=project/'.tracker/admissions'
                                             self.assertTrue(list(admissions.glob('retry-*-intent.json')))
