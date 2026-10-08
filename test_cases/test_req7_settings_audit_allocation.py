@@ -35,6 +35,47 @@ def load():
 
 
 class Req7SettingsAuditAllocationTests(unittest.TestCase):
+    def test_delivery_direct_rejects_unproved_complete_without_creating_local_success(self):
+        self.assertTrue(hasattr(self.module,'record_completed_settings_delivery'),
+                        'original allocation is not delivery: validate COMPLETE before the local record')
+        with self.owners() as (writer,sheet):
+            value=self.unit(); self.prepare(writer,sheet,value)
+            before=self.image()
+            with self.assertRaises(self.module.SettingsAuditHold):
+                self.module.record_completed_settings_delivery(writer,sheet,binding(),value)
+            self.assertEqual(before,self.image())
+            self.assertFalse((self.project/'.tracker/settings-audit-delivery').exists())
+            self.assertEqual((self.audit0,),self.module.pending_settings_audits(writer))
+
+    def test_initial_allocation_cannot_omit_an_already_committed_pending_event(self):
+        with self.owners() as (writer,sheet):
+            settings.apply_local_k_change(self.project/'.tracker',token=writer,new_k=4,
+                actor='operator:fixture',recorded_at='2026-10-08T10:01:00Z',request_id='change-1',expected_revision=0)
+            value=self.unit()  # Deliberately retains only independently authored revision 0.
+            self.global_journal.prepare_global_unit(sheet,binding(),value)
+            original=self.image()
+            with self.assertRaises(self.module.SettingsAuditHold):
+                self.module.prepare_settings_audit_allocation(writer,sheet,binding(),value)
+            self.assertEqual(original,self.image()); self.assertFalse(self.allocation.exists())
+            self.assertFalse((self.project/'.tracker/SETTINGS-AUDIT-ALLOCATED').exists())
+
+    def test_initial_allocation_persists_all_committed_events_in_original_revision_order(self):
+        payload={'new_k':4,'actor':'operator:fixture','expected_revision':0,'request_id':'change-1'}
+        event1=canonical({'schema_version':1,'revision':1,'type':'set_k','old_k':3,'new_k':4,
+            'actor':'operator:fixture','recorded_at':'2026-10-08T10:01:00Z','request_id':'change-1',
+            'payload_sha256':hashlib.sha256(canonical(payload)).hexdigest(),
+            'predecessor_sha256':hashlib.sha256(self.event0).hexdigest()})
+        audit1={'event_id':'settings:1:'+hashlib.sha256(event1).hexdigest(),
+            'recorded_at_utc':'2026-10-08T10:01:00Z','details':event1.decode().rstrip('\n')}
+        with self.owners() as (writer,sheet):
+            settings.apply_local_k_change(self.project/'.tracker',token=writer,new_k=4,
+                actor='operator:fixture',recorded_at='2026-10-08T10:01:00Z',request_id='change-1',expected_revision=0)
+            value=self.unit(audits=(self.audit0,audit1)); self.prepare(writer,sheet,value)
+            self.assertEqual([{'revision':0,'event_sha256':hashlib.sha256(self.event0).hexdigest(),'audit':self.audit0},
+                              {'revision':1,'event_sha256':hashlib.sha256(event1).hexdigest(),'audit':audit1}],
+                             json.loads((self.allocation/'ASSIGNMENTS').read_bytes()))
+            self.assertEqual((self.audit0,audit1),self.module.pending_settings_audits(writer))
+
     def setUp(self):
         self.module = load()
         self.composer = load_composer()

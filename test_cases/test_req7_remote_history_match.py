@@ -4,6 +4,7 @@ from dataclasses import replace
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -462,7 +463,7 @@ class Req7OwnedHistoryMatchWorkflowTests(unittest.TestCase):
             raise
         return result
 
-    def prepare_owned(self, stack):
+    def prepare_owned(self, stack, *, settings_audits=None):
         from monitor import issue_tracker_history_read_launcher as reads
         from monitor import issue_tracker_global_attempt_journal as journal, issue_tracker_enrollment_journal as enroll
         from monitor import issue_tracker_history_preread_journal as preread, issue_tracker_sheets_read_decode as decode
@@ -475,7 +476,12 @@ class Req7OwnedHistoryMatchWorkflowTests(unittest.TestCase):
         arguments.update(spreadsheet_id=bound.spreadsheet_id, sheet_id=101, history_sheet_id=105,
                          target_nonce='a'*64, history_nonce='d'*64)
         arguments['business'][0]['observed_values'] = {'L': {'stringValue': 'down'}}
-        arguments['audits'] = ({'event_id': 'settings:001', 'recorded_at_utc': '2026-10-08T10:00:00Z', 'details': 'K=3'},)
+        arguments['audits'] = (({'event_id': 'settings:001', 'recorded_at_utc': '2026-10-08T10:00:00Z', 'details': 'K=3'},)
+                              if settings_audits is None else settings_audits)
+        if settings_audits is not None:
+            from monitor import issue_tracker_k_store as settings
+            settings.initialize_local_k_store(self.root/'project/.tracker',token=writer,
+                initialized_at='2026-10-08T10:00:00Z',acquisition_id='first-use')
         unit = freeze_send_unit(**arguments)
         empty = tail_document(12); empty['spreadsheetId'] = bound.spreadsheet_id
         empty['sheets'][0]['properties']['sheetId'] = 105; empty['sheets'][0]['data'][0]['rowData'] = []
@@ -486,6 +492,10 @@ class Req7OwnedHistoryMatchWorkflowTests(unittest.TestCase):
         with mock.patch('secrets.token_hex', side_effect=['a'*64, 'b'*64, 'c'*64, 'd'*64]):
             enroll.prepare_enrollment_journal(owner, bound, identity)
         journal.prepare_global_unit(owner, bound, unit)
+        if settings_audits is not None:
+            from test_cases.test_req7_settings_audit_allocation import load as load_allocation
+            allocation=load_allocation()
+            allocation.prepare_settings_audit_allocation(writer,owner,bound,unit)
         preread.prepare_history_preread(owner, bound, unit, original_plan, original_read)
         journal.record_global_attempt_intent(owner, bound, unit)
         common = {'schema_version': 1, 'unit_id': unit.unit_id, 'manifest_id': arguments['manifest_id'],
@@ -495,9 +505,10 @@ class Req7OwnedHistoryMatchWorkflowTests(unittest.TestCase):
         intended = hashlib.sha256(canonical({'sheet':'ETH&IB Switch','sheet_id':101,'action':'update',
                                              'row_index':3,'values':{'L':{'stringValue':'down'}}})).hexdigest()
         expected_rows = [('2026-10-08T10:00:00Z', 'ETH&IB Switch', 'update', 'switch:0001',
-                          canonical({**common, 'operation_id':'switch:0001', 'intended_sha256':intended}).decode().rstrip('\n')),
-                         ('2026-10-08T10:00:00Z', 'ETH&IB Switch', 'settings-audit', 'settings:001',
-                          canonical({**common, 'event_id':'settings:001', 'event_details':'K=3'}).decode().rstrip('\n'))]
+                          canonical({**common, 'operation_id':'switch:0001', 'intended_sha256':intended}).decode().rstrip('\n'))]
+        expected_rows += [(audit['recorded_at_utc'],'ETH&IB Switch','settings-audit',audit['event_id'],
+            canonical({**common,'event_id':audit['event_id'],'event_details':audit['details']}).decode().rstrip('\n'))
+            for audit in arguments['audits']]
         post = deepcopy(empty)
         post['sheets'][0]['data'][0]['rowData'] = [{'values':[{'userEnteredValue':{'stringValue':text}} for text in row]} for row in expected_rows]
         meta = {'matchedDeveloperMetadata':[
@@ -510,6 +521,371 @@ class Req7OwnedHistoryMatchWorkflowTests(unittest.TestCase):
         docs = {'identity_response':('template_identity',identity_doc),'headers_response':('template_headers',headers_doc),
                 'metadata_response':('metadata',meta),'history_response':('history_tail',post)}
         return writer, owner, bound, auth, config, unit, docs
+
+    def test_canonical_owner_reload_then_actual_audit_allocation_uses_current_registries(self):
+        from contextlib import ExitStack
+        from test_cases.test_req7_settings_audit_allocation import load as load_allocation
+        from test_cases.test_req7_spreadsheet_owner import load as load_owner
+        from test_cases.test_req7_global_attempt_journal import load as load_global
+        from test_cases.test_req7_enrollment_journal import load as load_enrollment
+        from test_cases.test_req7_history_preread_journal import load as load_preread
+        import json
+        allocation=load_allocation()
+        previous=(allocation.ownership,allocation.global_journal)
+        current=(load_owner(),load_global())
+        load_enrollment(); load_preread()
+        self.assertIsNot(previous[0],current[0])
+        self.assertIsNot(previous[1],current[1])
+        with ExitStack() as stack:
+            writer,owner,bound,_auth,_config,unit,_docs=self.prepare_owned(
+                stack,settings_audits=(self.settings_audit_oracle(),))
+            self.assertIs(allocation.ownership,current[0])
+            self.assertIs(allocation.global_journal,current[1])
+            self.assertEqual((self.settings_audit_oracle()['event_id'],),
+                tuple(row['audit']['event_id'] for row in json.loads(
+                    allocation.inspect_settings_audit_allocation(writer,owner,bound,unit))))
+
+    def current_global_state(self,owner,bound,unit):
+        # Earlier real workflow fixtures intentionally reload the canonical
+        # owner/global modules. An import-time fixture reference
+        # must not interrogate a token issued by the newer owner registry.
+        from monitor import issue_tracker_global_attempt_journal as current
+        return current.inspect_global_unit(owner,bound,unit)
+
+    def completed(self,stack):
+        module=load(); audit=self.settings_audit_oracle()
+        writer,owner,bound,auth,_config,unit,docs=self.prepare_owned(stack,settings_audits=(audit,))
+        responses={name:self.read_owned(stack,writer,owner,bound,auth,kind,value)
+                   for name,(kind,value) in docs.items()}
+        module.record_owned_completion_evidence(writer,owner,bound,unit,**responses)
+        return writer,owner,bound,unit
+
+    def test_original_delivery_directory_loss_cannot_restart_first_use(self):
+        from contextlib import ExitStack
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        module=load(); audit=self.settings_audit_oracle()
+        with ExitStack() as stack:
+            writer,owner,bound,auth,_config,unit,docs=self.prepare_owned(stack,settings_audits=(audit,))
+            responses={name:self.read_owned(stack,writer,owner,bound,auth,kind,value)
+                       for name,(kind,value) in docs.items()}
+            module.record_owned_completion_evidence(writer,owner,bound,unit,**responses)
+            allocation.record_completed_settings_delivery(writer,owner,bound,unit)
+            delivery=self.root/'project/.tracker/settings-audit-delivery'
+            preserved=self.root/'preserved-original-delivery'
+            original={p.name:p.read_bytes() for p in delivery.iterdir()}
+            delivery.rename(preserved)
+            with self.assertRaises(allocation.SettingsAuditHold):
+                allocation.record_completed_settings_delivery(writer,owner,bound,unit)
+            self.assertFalse(delivery.exists(),'lost original delivery is never first use again')
+            self.assertEqual(original,{p.name:p.read_bytes() for p in preserved.iterdir()})
+            self.assertEqual((1,'UNKNOWN'),(self.current_global_state(owner,bound,unit).attempt_count,
+                                           self.current_global_state(owner,bound,unit).outcome))
+
+    def test_first_witness_zero_write_retains_stop_name_before_directory(self):
+        from contextlib import ExitStack
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        with ExitStack() as stack:
+            writer,owner,bound,unit=self.completed(stack)
+            started=self.root/'project/.tracker/SETTINGS-AUDIT-DELIVERY-STARTED'
+            write=os.write
+            def failing(fd,image):
+                if started.exists() and os.fstat(fd).st_ino==started.stat().st_ino: return 0
+                return write(fd,image)
+            with mock.patch('os.write',side_effect=failing),self.assertRaises(allocation.SettingsAuditHold):
+                allocation.record_completed_settings_delivery(writer,owner,bound,unit)
+            self.assertEqual(b'',started.read_bytes())
+            self.assertFalse((started.parent/'settings-audit-delivery').exists())
+            with self.assertRaises(allocation.SettingsAuditHold):
+                allocation.record_completed_settings_delivery(writer,owner,bound,unit)
+
+    def test_original_witness_handoff_precedes_any_delivery_directory(self):
+        from contextlib import ExitStack
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        with ExitStack() as stack:
+            writer,owner,bound,unit=self.completed(stack)
+            started=self.root/'project/.tracker/SETTINGS-AUDIT-DELIVERY-STARTED'
+            writing=allocation._write_delivery_file; changed=[]
+            def write_then_replace(parent,name,image):
+                result=writing(parent,name,image)
+                if name=='SETTINGS-AUDIT-DELIVERY-STARTED':
+                    raw=started.read_bytes(); started.rename(self.root/'preserved-original-start')
+                    started.write_bytes(raw); started.chmod(0o600); changed.append(True)
+                return result
+            with mock.patch.object(allocation,'_write_delivery_file',side_effect=write_then_replace),\
+                    self.assertRaises(allocation.SettingsAuditHold):
+                allocation.record_completed_settings_delivery(writer,owner,bound,unit)
+            self.assertEqual([True],changed)
+            self.assertFalse((started.parent/'settings-audit-delivery').exists())
+
+    def test_witness_replacement_after_header_never_commits_delivered(self):
+        from contextlib import ExitStack
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        with ExitStack() as stack:
+            writer,owner,bound,unit=self.completed(stack)
+            started=self.root/'project/.tracker/SETTINGS-AUDIT-DELIVERY-STARTED'
+            writing=allocation._write_delivery_file; changed=[]
+            def write_then_replace(parent,name,image):
+                result=writing(parent,name,image)
+                if name=='HEADER':
+                    raw=started.read_bytes(); started.rename(self.root/'preserved-original-start')
+                    started.write_bytes(raw); started.chmod(0o600); changed.append(True)
+                return result
+            with mock.patch.object(allocation,'_write_delivery_file',side_effect=write_then_replace),\
+                    self.assertRaises(allocation.SettingsAuditHold):
+                allocation.record_completed_settings_delivery(writer,owner,bound,unit)
+            self.assertEqual([True],changed)
+            self.assertFalse((started.parent/'settings-audit-delivery/DELIVERED').exists())
+
+    def test_cold_same_byte_witness_is_not_the_recorded_original(self):
+        from contextlib import ExitStack
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        with ExitStack() as stack:
+            writer,owner,bound,unit=self.completed(stack)
+            allocation.record_completed_settings_delivery(writer,owner,bound,unit)
+            started=self.root/'project/.tracker/SETTINGS-AUDIT-DELIVERY-STARTED'
+            image=started.read_bytes(); started.rename(self.root/'preserved-original-start')
+            started.write_bytes(image); started.chmod(0o600)
+            for observe in (allocation.inspect_completed_settings_delivery,
+                            allocation.pending_settings_audits_after_completed_unit):
+                with self.subTest(observer=observe.__name__),self.assertRaises(allocation.SettingsAuditHold):
+                    observe(writer,owner,bound,unit)
+
+    def start_barrier_fault(self,boundary):
+        from contextlib import ExitStack
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        with ExitStack() as stack:
+            writer,owner,bound,unit=self.completed(stack)
+            started=self.root/'project/.tracker/SETTINGS-AUDIT-DELIVERY-STARTED'
+            delivery=started.parent/'settings-audit-delivery'
+            sync=os.fsync; reached=[]
+            def failing(fd):
+                if started.exists() and not delivery.exists():
+                    info=os.fstat(fd)
+                    if any((p.stat().st_dev,p.stat().st_ino)==(info.st_dev,info.st_ino)
+                           for p in (started,started.parent)):
+                        reached.append(fd)
+                        if len(reached)==boundary: raise OSError('owned start witness barrier fault')
+                return sync(fd)
+            with mock.patch('os.fsync',side_effect=failing),self.assertRaises(allocation.SettingsAuditHold):
+                allocation.record_completed_settings_delivery(writer,owner,bound,unit)
+            self.assertEqual(boundary,len(reached)); self.assertTrue(started.is_file())
+            self.assertFalse(delivery.exists())
+            image=started.read_bytes()
+            with self.assertRaises(allocation.SettingsAuditHold):
+                allocation.record_completed_settings_delivery(writer,owner,bound,unit)
+            self.assertEqual(image,started.read_bytes()); self.assertFalse(delivery.exists())
+
+    def test_start_file_first_barrier_failure_retains_stop(self): self.start_barrier_fault(1)
+    def test_start_parent_first_barrier_failure_retains_stop(self): self.start_barrier_fault(2)
+    def test_start_held_file_barrier_failure_retains_stop(self): self.start_barrier_fault(3)
+    def test_start_held_parent_barrier_failure_retains_stop(self): self.start_barrier_fault(4)
+
+    def settings_audit_oracle(self):
+        # Literal original EVENT contract, never derived from allocation/delivery.
+        payload={'new_k':3,'actor':'system:default','expected_revision':None,'request_id':'first-use'}
+        event=canonical({'schema_version':1,'revision':0,'type':'init','old_k':None,'new_k':3,
+            'actor':'system:default','recorded_at':'2026-10-08T10:00:00Z','request_id':'first-use',
+            'payload_sha256':hashlib.sha256(canonical(payload)).hexdigest(),'predecessor_sha256':None})
+        return {'event_id':'settings:0:'+hashlib.sha256(event).hexdigest(),
+            'recorded_at_utc':'2026-10-08T10:00:00Z','details':event.decode().rstrip('\n')}
+
+    def test_actual_complete_then_delivered_binds_original_audits_and_preserves_outbox_unknown(self):
+        from contextlib import ExitStack
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        from monitor import issue_tracker_global_attempt_journal as journal
+        module=load(); audit=self.settings_audit_oracle()
+        self.assertTrue(hasattr(allocation,'record_completed_settings_delivery'),
+            'C25 needs durable DELIVERED only after a validated original COMPLETE proof')
+        with ExitStack() as stack:
+            writer,owner,bound,auth,_config,unit,docs=self.prepare_owned(stack,settings_audits=(audit,))
+            original={p:p.read_bytes() for p in (self.root/'project/.tracker/settings').rglob('*') if p.is_file()}
+            responses={name:self.read_owned(stack,writer,owner,bound,auth,kind,value)
+                       for name,(kind,value) in docs.items()}
+            module.record_owned_completion_evidence(writer,owner,bound,unit,**responses)
+            seen=allocation.record_completed_settings_delivery(writer,owner,bound,unit)
+            self.assertEqual(('DELIVERED-PRESENT-OUTBOX-RETAINED',unit.unit_id,(audit['event_id'],)),
+                             (seen.state,seen.unit_id,seen.event_ids))
+            self.assertFalse(hasattr(seen,'permit'))
+            self.assertEqual(original,{p:p.read_bytes() for p in original})
+            self.assertEqual((1,'UNKNOWN'),(journal.inspect_global_unit(owner,bound,unit).attempt_count,
+                                           journal.inspect_global_unit(owner,bound,unit).outcome))
+            self.assertEqual(seen,allocation.inspect_completed_settings_delivery(writer,owner,bound,unit))
+            with self.assertRaises(allocation.SettingsAuditHold):
+                allocation.record_completed_settings_delivery(writer,owner,bound,unit)
+        # A cold interpreter uses only the retained original unit/allocation/
+        # COMPLETE pair and freshly acquired real local locks, no live registry.
+        import subprocess
+        from dataclasses import asdict
+        program='''import sys,json,hashlib
+from pathlib import Path
+sys.path[:0]=[sys.argv[1],sys.argv[1]+"/tools"]
+from test_cases.test_req7_spreadsheet_owner import scoped_fixture
+from monitor import issue_tracker_spreadsheet_owner as owner, issue_tracker_local_commit as local
+from monitor import issue_tracker_global_attempt_journal as journal, issue_tracker_settings_audit_allocation as audit
+from monitor.issue_tracker_online_target import OnlineTargetBinding
+from monitor.issue_tracker_send_unit import _original_unit
+root=Path(sys.argv[2]); bound=OnlineTargetBinding(**json.loads(sys.stdin.buffer.read()))
+path=root/'var/lib/http-ztp-container/issue-tracker'/(hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()+'.journal')
+unit=_original_unit((path/'ACTION-PREIMAGE').read_bytes(),(path/'WIRE').read_bytes())
+with local.writer_owner(root/'project',root/'project/publication') as writer, scoped_fixture(root,owner),owner.spreadsheet_owner(bound) as token:
+ seen=audit.inspect_completed_settings_delivery(writer,token,bound,unit)
+ state=journal.inspect_global_unit(token,bound,unit)
+ print(seen.state,len(seen.event_ids),state.attempt_count,state.outcome)
+'''
+        cold=subprocess.run([sys.executable,'-B','-c',program,str(ROOT),str(self.root)],
+            input=json.dumps(asdict(bound)).encode(),stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=10)
+        self.assertEqual(0,cold.returncode,cold.stderr)
+        self.assertEqual(b'DELIVERED-PRESENT-OUTBOX-RETAINED 1 1 UNKNOWN\n',cold.stdout)
+
+    def test_settings_delivery_missing_or_nonsemantic_complete_never_consumes_event(self):
+        from contextlib import ExitStack
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        module=load(); audit=self.settings_audit_oracle()
+        self.assertTrue(hasattr(allocation,'record_completed_settings_delivery'),
+            'C25 must reject unproved COMPLETE before writing any delivery record')
+        for fault in ('missing','corrupt-history'):
+            with self.subTest(fault=fault),ExitStack() as stack:
+                writer,owner,bound,auth,_config,unit,docs=self.prepare_owned(stack,settings_audits=(audit,))
+                if fault=='corrupt-history':
+                    responses={name:self.read_owned(stack,writer,owner,bound,auth,kind,value)
+                               for name,(kind,value) in docs.items()}
+                    module.record_owned_completion_evidence(writer,owner,bound,unit,**responses)
+                    proof=self.root/'var/lib/http-ztp-container/issue-tracker'/(hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()+'.completion')
+                    (proof/'HISTORY-RAW').write_bytes(b'{"not":"the original full History"}')
+                original={p:p.read_bytes() for p in (self.root/'project/.tracker').rglob('*') if p.is_file()}
+                with self.assertRaises(allocation.SettingsAuditHold):
+                    allocation.record_completed_settings_delivery(writer,owner,bound,unit)
+                self.assertEqual(original,{p:p.read_bytes() for p in original})
+                self.assertFalse((self.root/'project/.tracker/settings-audit-delivery').exists())
+                self.assertEqual((audit,),allocation.pending_settings_audits(writer))
+            if fault=='missing': self.doCleanups(); self.setUp()
+
+    def test_delivery_header_original_cannot_change_before_delivered_commit(self):
+        from contextlib import ExitStack
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        module=load(); audit=self.settings_audit_oracle()
+        with ExitStack() as stack:
+            writer,owner,bound,auth,_config,unit,docs=self.prepare_owned(stack,settings_audits=(audit,))
+            responses={name:self.read_owned(stack,writer,owner,bound,auth,kind,value)
+                       for name,(kind,value) in docs.items()}
+            module.record_owned_completion_evidence(writer,owner,bound,unit,**responses)
+            delivery=self.root/'project/.tracker/settings-audit-delivery'
+            writing=allocation._write_delivery_file; changed=[]
+            def written_then_rebound(parent,name,raw):
+                result=writing(parent,name,raw)
+                if name=='HEADER' and not changed:
+                    path=delivery/'HEADER'; image=path.read_bytes()
+                    path.rename(self.root/'preserved-delivery-header')
+                    path.write_bytes(image); path.chmod(0o600); changed.append(True)
+                return result
+            with mock.patch.object(allocation,'_write_delivery_file',side_effect=written_then_rebound), \
+                    self.assertRaises(allocation.SettingsAuditHold):
+                allocation.record_completed_settings_delivery(writer,owner,bound,unit)
+            self.assertEqual([True],changed)
+            self.assertFalse((delivery/'DELIVERED').exists(),
+                             'never commit DELIVERED after its HEADER original was replaced')
+            self.assertEqual((audit,),allocation.pending_settings_audits(writer))
+
+    def test_delivery_barrier_failure_retains_partial_without_adoption_cleanup_or_resend(self):
+        from contextlib import ExitStack
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        from monitor import issue_tracker_global_attempt_journal as journal
+        import os
+        audit=self.settings_audit_oracle()
+        for boundary in range(1,7):
+            with self.subTest(boundary=boundary),ExitStack() as stack:
+                module=load()
+                writer,owner,bound,auth,_config,unit,docs=self.prepare_owned(stack,settings_audits=(audit,))
+                responses={name:self.read_owned(stack,writer,owner,bound,auth,kind,value)
+                           for name,(kind,value) in docs.items()}
+                module.record_owned_completion_evidence(writer,owner,bound,unit,**responses)
+                delivery=self.root/'project/.tracker/settings-audit-delivery'
+                sync=os.fsync; reached=[]
+                def failing(fd):
+                    if delivery.exists():
+                        info=os.fstat(fd)
+                        candidates=[delivery.parent,delivery,*delivery.iterdir()]
+                        if any((p.stat().st_dev,p.stat().st_ino)==(info.st_dev,info.st_ino) for p in candidates):
+                            reached.append(fd)
+                            if len(reached)==boundary: raise OSError('owned delivery barrier fault')
+                    return sync(fd)
+                original={p:p.read_bytes() for p in (self.root/'project/.tracker/settings').rglob('*') if p.is_file()}
+                with mock.patch('os.fsync',side_effect=failing),self.assertRaises(allocation.SettingsAuditHold):
+                    allocation.record_completed_settings_delivery(writer,owner,bound,unit)
+                self.assertEqual(boundary,len(reached)); self.assertTrue(delivery.is_dir())
+                if boundary<=4: self.assertFalse((delivery/'DELIVERED').exists())
+                retained={p:p.read_bytes() for p in delivery.iterdir()}
+                with self.assertRaises(allocation.SettingsAuditHold):
+                    allocation.record_completed_settings_delivery(writer,owner,bound,unit)
+                self.assertEqual(retained,{p:p.read_bytes() for p in delivery.iterdir()})
+                self.assertEqual(original,{p:p.read_bytes() for p in original})
+                self.assertEqual((audit,),allocation.pending_settings_audits(writer))
+                self.assertEqual((1,'UNKNOWN'),(journal.inspect_global_unit(owner,bound,unit).attempt_count,
+                                               journal.inspect_global_unit(owner,bound,unit).outcome))
+            if boundary!=6: self.doCleanups(); self.setUp()
+
+    def test_delivery_cold_reader_missing_partial_alias_and_changed_complete_hold(self):
+        from contextlib import ExitStack
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        import os
+        audit=self.settings_audit_oracle()
+        faults=('missing-marker','changed-header','same-byte-header','header-alias','partial-namespace','changed-complete')
+        for index,fault in enumerate(faults):
+            with self.subTest(fault=fault),ExitStack() as stack:
+                module=load()
+                writer,owner,bound,auth,_config,unit,docs=self.prepare_owned(stack,settings_audits=(audit,))
+                responses={name:self.read_owned(stack,writer,owner,bound,auth,kind,value)
+                           for name,(kind,value) in docs.items()}
+                module.record_owned_completion_evidence(writer,owner,bound,unit,**responses)
+                allocation.record_completed_settings_delivery(writer,owner,bound,unit)
+                delivery=self.root/'project/.tracker/settings-audit-delivery'
+                saved=self.root/'preserved-delivery-original'
+                if fault=='missing-marker': (delivery/'DELIVERED').rename(saved)
+                elif fault=='changed-header': (delivery/'HEADER').write_bytes(b'{}\n')
+                elif fault in ('same-byte-header','header-alias'):
+                    image=(delivery/'HEADER').read_bytes(); (delivery/'HEADER').rename(saved)
+                    if fault=='same-byte-header': (delivery/'HEADER').write_bytes(image); (delivery/'HEADER').chmod(0o600)
+                    else: os.link(saved,delivery/'HEADER')
+                elif fault=='partial-namespace': (delivery/'unexpected').write_bytes(b'partial\n')
+                else:
+                    proof=self.root/'var/lib/http-ztp-container/issue-tracker'/(hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()+'.completion')
+                    (proof/'COMPLETE').write_bytes(b'{}\n')
+                original={p:p.read_bytes() for p in (self.root/'project/.tracker/settings').rglob('*') if p.is_file()}
+                with self.assertRaises(allocation.SettingsAuditHold):
+                    allocation.inspect_completed_settings_delivery(writer,owner,bound,unit)
+                with self.assertRaises(allocation.SettingsAuditHold):
+                    allocation.pending_settings_audits_after_completed_unit(writer,owner,bound,unit)
+                self.assertEqual(original,{p:p.read_bytes() for p in original})
+                self.assertEqual((audit,),allocation.pending_settings_audits(writer))
+            if index+1<len(faults): self.doCleanups(); self.setUp()
+
+    def test_completed_unit_pending_projection_excludes_only_original_delivered_events_not_later_k(self):
+        from contextlib import ExitStack
+        from monitor import issue_tracker_settings_audit_allocation as allocation, issue_tracker_k_store as settings
+        module=load(); audit=self.settings_audit_oracle()
+        self.assertTrue(hasattr(allocation,'pending_settings_audits_after_completed_unit'),
+            'retained outbox of a verified delivered audit is cleanup-only, never pending resend')
+        with ExitStack() as stack:
+            writer,owner,bound,auth,_config,unit,docs=self.prepare_owned(stack,settings_audits=(audit,))
+            responses={name:self.read_owned(stack,writer,owner,bound,auth,kind,value)
+                       for name,(kind,value) in docs.items()}
+            module.record_owned_completion_evidence(writer,owner,bound,unit,**responses)
+            allocation.record_completed_settings_delivery(writer,owner,bound,unit)
+            self.assertEqual((),allocation.pending_settings_audits_after_completed_unit(writer,owner,bound,unit))
+            settings.apply_local_k_change(self.root/'project/.tracker',token=writer,new_k=4,
+                actor='operator:fixture',recorded_at='2026-10-08T10:01:00Z',request_id='change-1',expected_revision=0)
+            # Literal independent revision 1; not generated from the pending API.
+            payload={'new_k':4,'actor':'operator:fixture','expected_revision':0,'request_id':'change-1'}
+            # Existing independent K-chain contract names accepted changes set_k.
+            event=canonical({'schema_version':1,'revision':1,'type':'set_k','old_k':3,'new_k':4,
+                'actor':'operator:fixture','recorded_at':'2026-10-08T10:01:00Z','request_id':'change-1',
+                'payload_sha256':hashlib.sha256(canonical(payload)).hexdigest(),
+                'predecessor_sha256':hashlib.sha256((audit['details']+'\n').encode()).hexdigest()})
+            expected={'event_id':'settings:1:'+hashlib.sha256(event).hexdigest(),
+                'recorded_at_utc':'2026-10-08T10:01:00Z','details':event.decode().rstrip('\n')}
+            self.assertEqual((expected,),allocation.pending_settings_audits_after_completed_unit(writer,owner,bound,unit))
+            self.assertEqual([audit['event_id']],list(allocation.inspect_completed_settings_delivery(writer,owner,bound,unit).event_ids))
+            self.assertEqual(['0.json','1.json'],sorted(p.name for p in (self.root/'project/.tracker/settings/outbox').iterdir()))
 
     def test_actual_owned_all_business_and_history_continuity_includes_noop_and_preserves_unknown(self):
         from monitor import issue_tracker_history_preread_journal as before

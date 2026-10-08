@@ -914,8 +914,8 @@ revision、时间或内容。双 owner 下把真实非空单元的原始审计�
 目录整体丢失、见证缺失／损坏／链接或未解释 pending 文件均 HOLD，不当作首用重建。
 拒绝迟于第一次尝试的分配或 partial journal 回填。真实 C5/C6/原始业务 workflow
 在每次计数前后复核实际分配，后失败保留 UNKNOWN 和计数；新 K 事件不改旧 wire，
-全 NOOP/audit-only 不分配也不消费 outbox。当前为保守单单元留存，不提供
-COMPLETE、DELIVERED、outbox 清理或后续单元回收，不能冒称 REQ7 整体完成。
+全 NOOP/audit-only 不分配也不消费 outbox。当前为保守单单元留存；原分配本身
+不证明 COMPLETE/DELIVERED，不提供 outbox 清理或后续单元回收，不能冒称 REQ7 整体完成。
 原分配／UNKNOWN 的实际冷进程回读保留 `-I -B`；本机隔离 fixture 仅在测试启动
 边界注入实测 PyYAML distribution root，不注入整个 user-site，不提供生产依赖
 fallback，也不把该本地回读当作容器解释器、SDK 或真机资格证明。
@@ -933,6 +933,21 @@ COMPLETE/DELIVERED、outbox 消费、发送或在线 worker 激活。
 这不是清理或重试许可。独立 direct 覆盖八类原件及计数前后两种状态，真实
 Stage-L/C5/C6 workflow 覆盖普通计数和共享重试后的同字节替换，保留原字节故障测试。
 此身份快照仅绑定本次观察／计数窗口，不是跨冷进程的永久 inode 登记或现场证明。
+实际 COMPLETE→C25 桥另在双 owner 下持有原分配、settings、全局 journal、
+enrollment、History preread 与全部完成 proof 原件，重放完整语义并完成屏障后，
+先独占写目录外 `.tracker/SETTINGS-AUDIT-DELIVERY-STARTED` 固定见证，
+再向独占 `.tracker/settings-audit-delivery` 写原 HEADER 与后置 DELIVERED。
+见证的首写原身份持续到 marker 和返回；冷读从 HEADER 重新核见证身份。
+目录位移、首字节或四个见证屏障失败均保留 STOP，不能再次按首次交付补建。
+HEADER 的首写原身份持续到提交及返回；missing／partial／链接／同字节替换或
+原 COMPLETE 不成立均 HOLD，不回填、不采用。六个提交屏障故障保留 partial、
+原 outbox 和 UNKNOWN 计数。真实固定 TLS→原事件分配→全证明→DELIVERED→
+冷进程读取覆盖本地跨脚本闭环，不代表 Cloud 或断电验证。
+首次分配必须包含 ALL 已提交待审计事件，不能漏行；后续 K 不改旧分配。
+`pending_settings_audits_after_completed_unit` 仅在上述原 COMPLETE/DELIVERED 对
+重新核验并持续持有原件时，排除该单元原 event IDs；残留 outbox 投影为 cleanup-only，
+后续 K 仍 pending。不执行清理或接纳缺失投影，不释放全表 UNKNOWN、FIFO、
+高水位或新单元资格；普通未带完成证明的 pending 读取仍不是发送权威。
 独立的 ETH/IB cabling 夹具分别获取其合成 token 和读取计划，不沿用前一夹具已过期
 的 token；TTL 和生产过期拒绝不变。新增受控墙钟跨窗口测试不冒充休眠或断电见证。
 计划失败仅追加阶段、类型一致性及剩余有效秒数，不输出 token、header、ID 或业务内容。
