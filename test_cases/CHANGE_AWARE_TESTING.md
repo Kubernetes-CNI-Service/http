@@ -330,6 +330,52 @@ manifest 不变：两个模块已在 repository-governance suite 和相关 path 
 W1 本身会执行 `tools/update-user-manual.py --check`。本文件的改动在 runner 中属于未知路径，按规则
 要求 canonical full。以上都不签发批准、不改 ledger；正式状态只看集成后的 full/check。
 
+### 2026-10-09 再审与候选判定
+
+> 合入 DEV 注（2026-10-25）：本小节原文是 http-test 树（TEST）上的判定记录，表中读数、日志与 SHA256 都是 http-test 的历史证据，DEV 没有运行这些测试。表中「已落地」指 TEST 树：在 DEV，「精确 proof 复用」与 pre-push 门没有随本批合入（随 11-load 批另行裁定），macOS load 仍按 AGENTS.md 现行合同执行全量测试；本批合入 DEV 的是 invocation-local catalog（M04）、Git 不可变对象批量读取（M03）与 collection worker 早退出唤醒（M02）。
+
+再次核对的执行链为：真实部署选择器/完整 manifest → 源码、测试与 support snapshot
+→ 选测/环境/只读 Git 与 loopback preflight → 原 canonical unittest discovery
+→ 成功后重读 manifest/snapshot → 环境复核 → 原子 ledger 发布及发布后复核/失败回滚。
+macOS load 仅对 check 的 4/5 运行一次 full；sync/package/pre-push 仅复核现有证明。
+每个重核边界有独立的漂移/失败合同，不能把同一次读取跨测试或提交边界复用。
+
+| 候选 | 同工作量证据或边界 | 本轮决定 |
+| --- | --- | --- |
+| 单次 manifest 的测试目录发现 | 五轮交替；同一工作树的完整 manifest 和 snapshot 相同；184 次扫描变为 2 次，中位数 0.379906→0.115989 秒 | 落地 invocation-local catalog；每条引用仍实时检查 regular/non-symlink，结尾全目录重扫；不跨运行缓存 |
+| Git 不可变对象批量读取 | 已提交最终字节的三轮交替：69 叶/68 OID，blob child 69→3；1.030374→0.060535 秒；路径/模式/OID/字节相同 | 已落地；不放大固定 32 对象上限、不改历史源码 |
+| collection child 的早退出唤醒 | 已落地的 bounded wait；原取消、清理、总 deadline 保留 | 保留；不缩短真实超时或删除等待负例 |
+| 精确 proof 复用 | load 先 check，只有 4/5 full；项目输入不进入代码 proof；sync/package 不重复 full | 已落地；保留操作末端逐字节检查，不把安全错误当 cache miss |
+| 两个轻量模块并行 | 11 原案例/三轮交替；native 限制实验单进程 0.408341 秒，双 worker 0.395331 秒，双 worker 串行 0.683555 秒 | 不接入正式 runner；约 13ms 不证明 full 收益，不能用双启动的串行值夸大基线 |
+| 单文件 SHA 缓冲区调整 | 462 条 regular 路径、七轮交替、每条摘要相同；1MiB/64KiB/16KiB 中位数 0.068527/0.070711/0.070280 秒 | 保持 1MiB；另外两种实测更慢 |
+| mtime/stat 驱动哈希缓存、alias 合并 | proof 必须发现同 inode/mtime 的 ABA、链接及来源变化 | 不采用；不能用 metadata 替代原字节检查 |
+| 复用已导入生产模块或修改导入路径 | module loader 保留 fresh module 与生产模块 lazy import 路径；当前 manifest profile 的三个 selector 加载合计约 0.040 秒 | 不改；没有完整 full 热点证据支持承担跨案例状态污染风险 |
+| 历史 P replay 合并、删掉重复 case ID | 固定历史 SHA、原 fixture/进程边界和 discovery 出现次数是被测合同 | 不采用；不以优化改写历史合同或去重真实执行次数 |
+| 移除 fsync、批间身份校验或发布末端重核 | 冷恢复、unknown-object 保留、held-FD/权限和可回滚证明依赖这些边界 | 不采用；不削弱恢复能力换速度 |
+| 并行 SHA、扩大有状态 suite 并发 | 当前普通 SHA 阶段约 0.1 秒；固定历史回放、共享锁/项目与真实 loopback 的完整隔离尚未证实 | 不引入线程/进程池；小工作量不抵启动/调度成本，重型 suite 不因名字而获隔离资格 |
+| 可选逐案例计时与只读 profile | 现有 validation-only 计时是观测能力，不是加速；普通 proof 路径、结果与精确例外不变 | 保留现有接口；不能把计时/采样诊断冒充正式优化或通过 |
+
+这不是对 full 总耗时的同比承诺。最近普通正式基线为 5,578 tests / 8,816.975 秒 /
+OK (skipped=5)，而新候选增加独立测试；整体比较须列出版本、工作量与运行条件变化，
+不能把不同测试数的墙钟差归因到 manifest 微基准。当前 runner 变化按既有 path rule
+要求 canonical full；执行显式 `--all -v` 会同时覆盖受影响 direct/workflow 并由 runner
+自动签发精确 full ledger，不再先为同一候选重复跑一轮隐式 full。
+
+新 catalog 的原字节 RED 两项均为 2 != 184；原失败输出保留于
+`outputs/test-diagnostics/catalog-original-red.log`，SHA256
+`7e4e71ff962fff50f29976335d09b8318548c947c78a981a4c5a074245f60c05`。
+direct、真实 sync/image/archive 三个选择器的 CLI workflow、陈旧叶子拒绝和末端
+inventory 漂移拒绝均保留；三个治理模块共 102 tests / OK / exit0，日志
+`catalog-modules-green.log` SHA256
+`36e3e440faf3d37013efc83ff877f924184ee8707dd77108142c7c46180b85e6`。
+五轮 catalog 微基准 `catalog-paired-benchmark.log` SHA256
+`4f23b546c3b2479142c7ff08188a74600d6b3d409a54e7924427aa5128754780`；
+SHA 缓冲区诊断 `hash-buffer-benchmark.log` SHA256
+`24684c280451447d2f223241da75031632c4177745d110c4c3d3a3bda5e83c63`。
+这些是诊断证据，不签发批准；正式状态只看最终源码提交、自动 ledger 和当前 full/check。
+AIR simulation 必须验证最终同版 receipt/源码和项目身份，不能用本机 fixture 或历史跳板
+示例代替当前目标确认，也不因本次优化批准生产部署、服务切换或网络写入。
+
 ### 2026-09-29 第二轮：collection worker 的结束唤醒
 
 完整计时文件 `/tmp/http-full-timings-20260929-codex-test-dba95de.jsonl` 中，

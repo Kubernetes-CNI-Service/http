@@ -452,12 +452,17 @@ def _string_list(value: object, label: str, *, allow_empty: bool = False) -> lis
     return list(value)
 
 
-def _validate_test_ids(root: Path, values: Iterable[str], label: str) -> None:
-    available = discover_tests(root)
+def _validate_test_ids(
+    root: Path, values: Iterable[str], label: str,
+    *, available: Mapping[str, Path] | None = None,
+) -> None:
+    if available is None:
+        available = discover_tests(root)
     for test_id in values:
         if not TEST_ID_RE.fullmatch(test_id):
             raise ImpactError(f"{label} has unsafe/non-module test id: {test_id}")
-        if test_id not in available:
+        path = available.get(test_id)
+        if path is None or not path.is_file() or path.is_symlink():
             raise ImpactError(f"{label} references missing test module: {test_id}")
 
 
@@ -734,8 +739,12 @@ def load_and_validate_manifest(root: Path, manifest_path: Path) -> dict:
     if manifest.get("schema_version") != 1:
         raise ImpactError("impact manifest schema_version must be 1")
 
+    # Invocation-local inventory only. Each reference is checked at use, and
+    # the complete catalog is rediscovered below; never cache across cycles.
+    available_tests = discover_tests(root)
+
     baseline = _string_list(manifest.get("baseline_tests"), "baseline_tests")
-    _validate_test_ids(root, baseline, "baseline_tests")
+    _validate_test_ids(root, baseline, "baseline_tests", available=available_tests)
 
     test_suites = manifest.get("test_suites")
     if not isinstance(test_suites, list) or not test_suites:
@@ -757,10 +766,12 @@ def load_and_validate_manifest(root: Path, manifest_path: Path) -> dict:
         if not isinstance(description, str) or not description.strip():
             raise ImpactError(f"test_suites.{suite_id}.description must be non-empty")
         tests = _string_list(suite.get("tests"), f"test_suites.{suite_id}.tests")
-        _validate_test_ids(root, tests, f"test_suites.{suite_id}.tests")
+        _validate_test_ids(
+            root, tests, f"test_suites.{suite_id}.tests", available=available_tests,
+        )
         for test_id in tests:
             suite_membership.setdefault(test_id, []).append(suite_id)
-    discovered_tests = set(discover_tests(root))
+    discovered_tests = set(available_tests)
     tests_without_suite = sorted(discovered_tests - set(suite_membership))
     if tests_without_suite:
         raise ImpactError(
@@ -812,7 +823,9 @@ def load_and_validate_manifest(root: Path, manifest_path: Path) -> dict:
         rule_ids.add(rule_id)
         patterns = _string_list(rule.get("paths"), f"test_rules.{rule_id}.paths")
         tests = _string_list(rule.get("tests"), f"test_rules.{rule_id}.tests")
-        _validate_test_ids(root, tests, f"test_rules.{rule_id}.tests")
+        _validate_test_ids(
+            root, tests, f"test_rules.{rule_id}.tests", available=available_tests,
+        )
         if not any(path_matches(path, patterns) for path in actual_scripts):
             raise ImpactError(f"test rule matches no source script: {rule_id}")
 
@@ -830,7 +843,9 @@ def load_and_validate_manifest(root: Path, manifest_path: Path) -> dict:
         workflow_ids.add(flow_id)
         patterns = _string_list(workflow.get("members"), f"workflows.{flow_id}.members")
         tests = _string_list(workflow.get("tests"), f"workflows.{flow_id}.tests")
-        _validate_test_ids(root, tests, f"workflows.{flow_id}.tests")
+        _validate_test_ids(
+            root, tests, f"workflows.{flow_id}.tests", available=available_tests,
+        )
         matched = [path for path in actual_scripts if path_matches(path, patterns)]
         distinct_targets = {actual_scripts[path] for path in matched}
         if len(distinct_targets) < 2:
@@ -870,7 +885,9 @@ def load_and_validate_manifest(root: Path, manifest_path: Path) -> dict:
         )
         if not tests and not rule.get("full_suite", False):
             raise ImpactError(f"path_rules[{index}] needs tests or full_suite=true")
-        _validate_test_ids(root, tests, f"path_rules[{index}].tests")
+        _validate_test_ids(
+            root, tests, f"path_rules[{index}].tests", available=available_tests,
+        )
 
     tracked_support = _string_list(
         manifest.get("tracked_support", []), "tracked_support",
@@ -892,6 +909,8 @@ def load_and_validate_manifest(root: Path, manifest_path: Path) -> dict:
     for normalized in normalized_support:
         if normalized not in complete_support:
             sha256_support_path(root, normalized)
+    if discover_tests(root) != available_tests:
+        raise ImpactError("test module inventory changed during manifest validation")
     return manifest
 
 
