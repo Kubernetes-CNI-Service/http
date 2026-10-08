@@ -223,6 +223,37 @@ class Req7MetadataReservationDirectTests(unittest.TestCase):
                 self.global_journal.record_reserved_attempt_intent(token, binding(), self.identity, self.unit)
             self.assertEqual(6, self.global_journal.inspect_global_unit(token, binding(), self.unit).attempt_count)
 
+    def test_reserved_count_cannot_adopt_same_byte_quota_replacement_after_count(self):
+        self.module=load()
+        for fault in ('directory','HEADER'):
+            with self.subTest(fault=fault),tempfile.TemporaryDirectory(prefix='req7-count-quota-original-') as directory:
+                root=Path(directory).resolve(); state=root/'var/lib/http-ztp-container/issue-tracker'
+                state.mkdir(parents=True,mode=0o700); store=state/self.store.name
+                with fixture(root),self.owner.spreadsheet_owner(binding()) as token:
+                    self.initialize(token); quota=self.reserve(token)
+                    image={p.name:p.read_bytes() for p in store.iterdir()}
+                    original=self.global_journal._observe; injected=[]
+                    def replaced_after_count(*args,**kwargs):
+                        result=original(*args,**kwargs)
+                        if args[3]:
+                            if fault=='directory':
+                                store.rename(root/'preserved-quota'); store.mkdir(mode=0o700)
+                                for name,raw in image.items():
+                                    path=store/name; path.write_bytes(raw); path.chmod(0o600)
+                            else:
+                                path=store/'HEADER'; path.rename(root/'preserved-HEADER')
+                                path.write_bytes(image['HEADER']); path.chmod(0o600)
+                            injected.append(result.attempt_count)
+                        return result
+                    with mock.patch.object(self.global_journal,'_observe',side_effect=replaced_after_count), \
+                            self.assertRaises(self.global_journal.GlobalAttemptHold):
+                        self.global_journal.record_reserved_attempt_intent(token,binding(),self.identity,self.unit)
+                    self.assertEqual([1],injected)
+                    self.assertEqual((1,'UNKNOWN'),tuple(getattr(self.global_journal.inspect_global_unit(
+                        token,binding(),self.unit),name) for name in ('attempt_count','outcome')))
+                    self.assertEqual(image,{p.name:p.read_bytes() for p in store.iterdir()})
+                    self.assertEqual(quota,self.inspect(token))
+
     def test_reserved_intent_refuses_each_drifted_original_image_without_increment_or_repair(self):
         self.module = load()
         self.assertTrue(hasattr(self.global_journal, 'record_reserved_attempt_intent'),

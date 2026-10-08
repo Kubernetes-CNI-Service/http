@@ -345,6 +345,24 @@ def _reserved_images(token, binding, identity, unit):
     return original, history, quota, nv
 
 
+@contextmanager
+def _hold_reserved_quota_originals(token,binding,identity,unit):
+    """Retain the actual quota directory/four image FDs across durable count.
+
+    Content equality after reopening is not original-namespace continuity.
+    This does not create a quota, reclaim UNKNOWN or establish G1 inventory.
+    """
+    from monitor import issue_tracker_metadata_reservation as quota
+    folder=None
+    try:
+        parent,name,_base,_state,_sheet,_fence=quota._inputs(token,binding,identity,unit)
+        folder=local._directory(parent,name)
+        with quota._hold_quota_originals(parent,name,folder) as verify:
+            yield verify
+    finally:
+        if folder is not None: os.close(folder)
+
+
 def record_reserved_attempt_intent(token, binding, identity, unit):
     """Count only after the exact original reservation chain, then recheck it.
 
@@ -357,14 +375,17 @@ def record_reserved_attempt_intent(token, binding, identity, unit):
     """
     failed = False
     try:
-        before = inspect_global_unit(token, binding, unit)
-        if before.attempt_count == 6: raise GlobalAttemptHold()
-        images = _reserved_images(token, binding, identity, unit)
-        result = _observe(token, binding, unit, True)
-        if (_reserved_images(token, binding, identity, unit) != images
-                or result.attempt_count != before.attempt_count + 1
-                or inspect_global_unit(token, binding, unit) != result):
-            raise GlobalAttemptHold()
+        with _hold_reserved_quota_originals(token,binding,identity,unit) as verify_quota:
+            before = inspect_global_unit(token, binding, unit)
+            if before.attempt_count == 6: raise GlobalAttemptHold()
+            images = _reserved_images(token, binding, identity, unit)
+            verify_quota()
+            result = _observe(token, binding, unit, True)
+            verify_quota()
+            if (_reserved_images(token, binding, identity, unit) != images
+                    or result.attempt_count != before.attempt_count + 1
+                    or inspect_global_unit(token, binding, unit) != result):
+                raise GlobalAttemptHold()
     except Exception: failed = True
     if failed: raise GlobalAttemptHold()
     return result
@@ -387,13 +408,16 @@ def record_original_business_reserved_attempt_intent(token, binding, identity, u
 
     failed = False
     try:
-        before = inspect_global_unit(token, binding, unit)
-        if before.attempt_count == 6: raise GlobalAttemptHold()
-        images = originals()
-        result = _observe(token, binding, unit, True)
-        if (originals() != images or result.attempt_count != before.attempt_count + 1
-                or inspect_global_unit(token, binding, unit) != result):
-            raise GlobalAttemptHold()
+        with _hold_reserved_quota_originals(token,binding,identity,unit) as verify_quota:
+            before = inspect_global_unit(token, binding, unit)
+            if before.attempt_count == 6: raise GlobalAttemptHold()
+            images = originals()
+            verify_quota()
+            result = _observe(token, binding, unit, True)
+            verify_quota()
+            if (originals() != images or result.attempt_count != before.attempt_count + 1
+                    or inspect_global_unit(token, binding, unit) != result):
+                raise GlobalAttemptHold()
     except Exception: failed = True
     if failed: raise GlobalAttemptHold()
     return result
@@ -478,13 +502,14 @@ def record_receipted_original_attempt_intent(
     failed = False
     try:
         with _hold_receipted_audit_originals(writer_token,token,binding,unit) as verify_audits, \
-                _hold_history_originals(writer_token) as verify_receipts:
+                _hold_history_originals(writer_token) as verify_receipts, \
+                _hold_reserved_quota_originals(token,binding,identity,unit) as verify_quota:
             before = inspect_global_unit(token, binding, unit)
             if before.attempt_count == 6: raise GlobalAttemptHold()
             images = originals()
-            verify_audits(); verify_receipts()
+            verify_audits(); verify_receipts(); verify_quota()
             result = _observe(token, binding, unit, True)
-            verify_audits(); verify_receipts()
+            verify_audits(); verify_receipts(); verify_quota()
             if (originals() != images or result.attempt_count != before.attempt_count + 1
                     or inspect_global_unit(token, binding, unit) != result):
                 raise GlobalAttemptHold()

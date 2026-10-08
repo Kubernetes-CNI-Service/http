@@ -1285,6 +1285,12 @@ settings/events/outbox/current 的原目录／文件 FD 至最后复核；同字
 guard 不用于会新增 INTENT/COUNT 的共享 retry，后者仍走既有专用事务；
 这里没有授予历史 R2、settlement 或发送能力。
 
+原配额计数（普通、原业务以及受保护 C6）还在整个持久计数范围内持有
+quota 原目录和四件原文件 FD，并在计数前后及退出范围时复核身份。
+同字节替换目录或 HEADER 也必须 HOLD；计数后发现替换保留原次数、UNKNOWN
+及两份原像，不采用替换件、不回退或重建。这是原 reservation 的必要连续性，
+不证明历史排他、完整 G1 库存、发送许可或 COMPLETE。
+
 配额冷进程联测保留原 argv、5 秒预算和六次 UNKNOWN／第七次拒绝断言。
 原生子进程记录 fixture import/setup、source load、owner、count 和 cleanup
 阶段，父进程超时保留原 TimeoutExpired 与完整 partial stdout/stderr；

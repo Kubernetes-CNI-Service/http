@@ -94,6 +94,11 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             business_preread_probe=True,original_reserved_probe=True,receipted_intent_probe=True,
             receipt_admission_rebind_probe=True)
 
+    def test_same_byte_original_quota_replacement_during_protected_count_is_hold(self):
+        self._exercise_real_protected_three_panel_fixture(skip_history=False,observed_cabling_insert_probe=True,
+            business_preread_probe=True,original_reserved_probe=True,receipted_intent_probe=True,
+            quota_namespace_rebind_probe=True)
+
     def test_actual_c25_allocation_dominates_original_c6_counts_and_unknown_retains_audits(self):
         self._exercise_real_protected_three_panel_fixture(skip_history=False, observed_cabling_insert_probe=True,
             business_preread_probe=True, original_reserved_probe=True, receipted_intent_probe=True, settings_audit_probe=True)
@@ -501,7 +506,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         observed_switch_insert_probe=False, observed_cabling_insert_probe=False, business_preread_probe=False, original_reserved_probe=False, receipted_intent_probe=False,
         settings_audit_probe=False, owned_read_gates_probe=False, owned_continuity_probe=False, complete_preview_probe=False,
         shared_retry_probe=False, allocation_original_identity_probe=False, allocation_retry_identity_probe=False,
-        receipt_admission_rebind_probe=False,
+        receipt_admission_rebind_probe=False,quota_namespace_rebind_probe=False,
         before_cabling_fixture=None,
         complete_preview_source_race=False,
         complete_preview_cgi=False,
@@ -1929,10 +1934,12 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                                         return  # this new scenario asserts one complete protected ETH retry, not the fault loop below
                                     for count in range(1, 7):
                                         allocation_fault = settings_audit_probe and sheet == 'ETH Cabling' and count == 6
-                                        if receipt_admission_rebind_probe and count==1:
-                                            target=project/'.tracker/admissions/admission-00000000000000000001.json'
+                                        if (receipt_admission_rebind_probe or quota_namespace_rebind_probe) and count==1:
+                                            target=(state/(hashlib.sha256(binding.spreadsheet_id.encode('ascii')).hexdigest()+'.metadata')/'HEADER'
+                                                if quota_namespace_rebind_probe else
+                                                project/'.tracker/admissions/admission-00000000000000000001.json')
                                             raw=target.read_bytes(); inode=target.stat().st_ino
-                                            preserved=project/'owned-original-c6-admission'; injected=[]
+                                            preserved=project/('owned-original-quota-header' if quota_namespace_rebind_probe else 'owned-original-c6-admission'); injected=[]
                                             original_observe=global_journal._observe
                                             def replace_after_count(*values,**options):
                                                 result=original_observe(*values,**options)
