@@ -499,7 +499,26 @@ def _hold_shared_retry_opportunity(writer_token,sheet_token,binding,unit,store,p
                 'original_generation_id':action['generation_id'],'original_publish_id':action['publish_id'],
                 'previous_sha256':hashlib.sha256(_canonical(prior)).hexdigest()}
         raw=_canonical(intent); intent_name=f'retry-{sequence:020d}-intent.json'
+        def before_original_count(expected_names):
+            # Sampling and durable creation can both cross a namespace race.
+            # Recheck the held original edge at each boundary, never adopt a
+            # byte-identical replacement or enter the counter on an orphan.
+            _named(project.root_fd,'admissions',directory,directory=True)
+            if (_owner(writer_token) is not project
+                    or global_journal.ownership._validated_owner(sheet_token,binding) is not sheet
+                    or set(os.listdir(directory))!=expected_names
+                    or any((held_read(directory,item,16*1024),
+                        _identity(os.stat(item,dir_fd=directory,follow_symlinks=False)))!=saved
+                        for item,saved in originals.items())
+                    or global_journal.inspect_global_unit(sheet_token,binding,unit)!=before):
+                raise AdmissionHold('shared retry changed before original count')
+        before_original_count(set(names))
+        if _identity(os.fstat(directory))!=directory_identity:
+            raise AdmissionHold('shared retry directory changed before intent')
         _write_new(directory,intent_name,raw)
+        before_original_count(set(names)|{intent_name})
+        if held_read(directory,intent_name,16*1024)!=raw:
+            raise AdmissionHold('shared retry intent changed before original count')
         yield
         if global_journal.inspect_global_unit(sheet_token,binding,unit).attempt_count!=count:
             raise AdmissionHold("retry original count not completed exactly once")

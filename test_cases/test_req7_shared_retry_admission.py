@@ -214,6 +214,59 @@ class SharedRetryAdmissionWorkflowTests(unittest.TestCase):
             self.assertEqual({'admission-00000000000000000001.json'},
                 {p.name for p in (self.root/'project/.tracker/admissions').iterdir()})
 
+    def test_final_clock_directory_displacement_is_rejected_before_intent_or_original_count(self):
+        with ExitStack() as stack:
+            admission,local,journal,writer,owner,target,unit,store,image,start,clock=self.owned(stack)
+            samples=[]
+            current=self.root/'project/.tracker/admissions'
+            preserved=self.root/'preserved-admissions-at-final-clock'
+            original={p.name:p.read_bytes() for p in current.iterdir()}
+            def sample():
+                samples.append(True)
+                if len(samples)==2:
+                    current.rename(preserved)
+                    current.mkdir(mode=0o700)
+                    for name,raw in original.items():
+                        path=current/name; path.write_bytes(raw); path.chmod(0o600)
+                return start+FLOOR_NS
+            clock.monotonic_ns=sample
+            with self.assertRaises(admission.AdmissionHold):
+                with admission._hold_shared_retry_opportunity(writer,owner,target,unit,store,image,
+                        boot_id='owned-boot',monotonic_ns=start+FLOOR_NS):
+                    journal.record_global_attempt_intent(owner,target,unit)
+            self.assertEqual(2,len(samples))
+            self.assertEqual(1,journal.inspect_global_unit(owner,target,unit).attempt_count)
+            for folder in (preserved,current):
+                self.assertEqual(original,{p.name:p.read_bytes() for p in folder.iterdir()})
+
+    def test_intent_write_directory_displacement_retains_orphan_without_original_count(self):
+        with ExitStack() as stack:
+            admission,local,journal,writer,owner,target,unit,store,image,start,clock=self.owned(stack)
+            clock.monotonic_ns=lambda:start+FLOOR_NS
+            writing=admission._write_new; displaced=[]
+            current=self.root/'project/.tracker/admissions'
+            preserved=self.root/'preserved-admissions-after-intent'
+            original={p.name:p.read_bytes() for p in current.iterdir()}
+            def write_then_displace(directory,name,raw):
+                result=writing(directory,name,raw)
+                if name.endswith('-intent.json'):
+                    current.rename(preserved)
+                    current.mkdir(mode=0o700)
+                    for entry,image in original.items():
+                        path=current/entry; path.write_bytes(image); path.chmod(0o600)
+                    displaced.append(True)
+                return result
+            with mock.patch.object(admission,'_write_new',side_effect=write_then_displace):
+                with self.assertRaises(admission.AdmissionHold):
+                    with admission._hold_shared_retry_opportunity(writer,owner,target,unit,store,image,
+                            boot_id='owned-boot',monotonic_ns=start+FLOOR_NS):
+                        journal.record_global_attempt_intent(owner,target,unit)
+            self.assertEqual([True],displaced)
+            self.assertEqual(1,journal.inspect_global_unit(owner,target,unit).attempt_count)
+            self.assertEqual(original,{p.name:p.read_bytes() for p in current.iterdir()})
+            self.assertEqual(set(original)|{'retry-00000000000000000001-intent.json'},
+                             {p.name for p in preserved.iterdir()})
+
     def test_retry_and_next_real_c6_publication_share_one_floor_without_counting_retry_as_c6(self):
         from monitor.issue_tracker_receipt_snapshot import _events
         with ExitStack() as stack:
