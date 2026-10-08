@@ -850,6 +850,16 @@ P 阶段在绑定的 macOS CPython 3.9 环境中，把独立审定的依赖文�
 `test_req7_attempt_supervision` / `test_req7_native_supervised_workflow` 约束公有 SDK、
 固定 CA 与受控原生 TLS、单次回调以及包含启动／DNS／慢读的完整预算。其组件均为未安装库，
 本地仅使用合成密钥及私有 loopback，不读取真实凭据、不安装依赖或开放在线入口。
+`test_req7_token_launcher` 约束未安装的固定 auth-only 子进程入口：不接收调用方
+argv/URL/凭据路径/预算，固定 `-I -B`、清空继承环境、DEVNULL stdin、新 session、
+仅 pass_fds 借用原 spreadsheet 锁。启动前开始 30 秒总预算，单次消费及 nonce
+关联的严格有界私有输出；凭据/JWT/token 不进入 argv、环境或公开诊断。公有 SDK
+和实际 stdlib HTTPS/TLS 到拥有的 loopback 正向及 401/503 负向均不重发。已知
+Python 3.9/3.10 EOL 警告以固定 tag 保留并由父进程重新发出，不转发任意私有警告。
+本地子进程的 SDK user-site 路径仅在测试启动边界显式注入，不是生产隔离解释器或
+部署依赖身份的证据。无法确认结束时仍 HOLD，子进程继承的实际 flock 在 owner
+退出后继续阻挡候选。此入口只刷新 token，不授予 mutation、发送尝试计数、
+新鲜 W1/连续性、COMPLETE 或重试许可，REQ7 整体仍未完成，REAL_ENV 仍 NOT RUN。
 `test_req7_sheets_read_plan` / `test_req7_sheets_read_decode` 与
 `test_req7_online_whitelist_read` 固定精确列／坐标、十四表身份、四张 row-2 多行字面表头
 和完整有限 Whitelist；非原子 GET 不构成 enrollment、发送许可或完整格式快照。

@@ -2072,6 +2072,8 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 ## TC-REAL-REQ7-TOTAL-ATTEMPT-LOCK-001 — 固定启动器、完整预算与孤儿写者锁
 
+- 固定 auth-only 入口补充（**NOT RUN / REAL_ENV REQUIRED**）：`monitor/issue_tracker_token_launcher.py` 的真实持锁 → 固定隔离 child → root-only 单次凭据读 → 公有 SDK → 原生 HTTPS 单次请求 → nonce 关联完整私有 token 输出 → 已结束 session 本地工作流，不接受外部程序、URL、凭据路径或预算。合成 root/凭据/CA、明确测试依赖目录与 loopback DNS 只在拥有的夹具边界，不代表 native root/CPython 3.12/两架构部署依赖、真实凭据、CA/DNS 或 Stage O。前置条件仍为本卡独立授权、干净精确树和当前证明。现场必须核隔离 interpreter/已批准依赖可导入且无 ambient fallback、环境清空、borrowed CLOEXEC 锁仅 pass_fds 继承、启动耗时纳入总预算、原 warning 保留、401/503 不重试、私有输出无泄露与父死子存期间 exclusion；证据与清理沿用本卡，不能用本地有界 auth 入口声称 mutation launcher、新鲜准入、COMPLETE 或整个 REQ7 已验收。
+
 - Case ID：`TC-REAL-REQ7-TOTAL-ATTEMPT-LOCK-001`；类型：real-environment / owned process / transaction；对应 C-6/C-14/C-19。状态：**NOT RUN / REAL_ENV REQUIRED**。本地先决为 `test_req7_attempt_supervision` direct 与 `test_req7_native_supervised_workflow` 实际慢 TLS 正文及在实际 HTTPS 栈内阻塞的测试 DNS → 实际 30 秒监督器 → 继承临时 flock workflow 全绿；DNS 仅为拥有的阻塞夹具，不使用真实解析端点。本地拥有的假子进程和锁不证明生产固定启动器、真实 root/孤儿写者或在线准入。
 - 前置条件、平台与权限：仅另获 owner 精确隔离系统和 Stage O 授权；记录当前树与 Linux 身份、固定审计启动器及已持有 spreadsheet OS 锁。`monitor/issue_tracker_attempt_supervision.py` 当前只监督调用方已拥有的新 session 子进程，不接受 PID/命令、不启动生产服务、不释放锁、不授予重发许可；必须先完成固定启动器、当前策略/枚举/来源/模板准入与 durable SEND_INTENT 集成。
 - 步骤与独立预期：时钟必须在启动前开始；token/read/mutation 的完整预算分别 30/30/60 秒，包含启动、DNS、握手、报头、正文。慢读成功不能重置预算；响应 pipe EOF 不代表写者停止；stdout 超界、stderr、非零退出、异常或超时均为 HOLD。只有确认拥有的整个会话结束，才能判定清理完成；无法确认时继续持锁且不能发送下一单元。真实杀死测试副本监督父进程后，继承锁的子进程存活期间其他候选不能取得锁。
