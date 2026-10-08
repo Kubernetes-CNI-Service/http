@@ -946,7 +946,10 @@ HEADER 的首写原身份持续到提交及返回；missing／partial／链接�
 首次分配必须包含 ALL 已提交待审计事件，不能漏行；后续 K 不改旧分配。
 `pending_settings_audits_after_completed_unit` 仅在上述原 COMPLETE/DELIVERED 对
 重新核验并持续持有原件时，排除该单元原 event IDs；残留 outbox 投影为 cleanup-only，
-后续 K 仍 pending。不执行清理或接纳缺失投影，不释放全表 UNKNOWN、FIFO、
+只有该已重新核验配对的精确原 event IDs 可以缺失投影；全部或部分缺失分别返回
+ABSENT-VALID 或 PARTIAL-VALID，暖／冷读均不补建或重发。缺失交付 marker、启动
+见证、有效原 COMPLETE，或缺失后续未交付 K 的投影均 HOLD；普通 pending、分配
+和计数读取仍严格要求所有投影。后续 K 仍 pending。不执行清理，不释放全表 UNKNOWN、FIFO、
 高水位或新单元资格；普通未带完成证明的 pending 读取仍不是发送权威。
 独立的 ETH/IB cabling 夹具分别获取其合成 token 和读取计划，不沿用前一夹具已过期
 的 token；TTL 和生产过期拒绝不变。新增受控墙钟跨窗口测试不冒充休眠或断电见证。

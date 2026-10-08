@@ -680,6 +680,134 @@ class Req7OwnedHistoryMatchWorkflowTests(unittest.TestCase):
     def test_start_held_file_barrier_failure_retains_stop(self): self.start_barrier_fault(3)
     def test_start_held_parent_barrier_failure_retains_stop(self): self.start_barrier_fault(4)
 
+    def test_actual_complete_and_delivered_allow_only_their_absent_projection(self):
+        from contextlib import ExitStack
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        with ExitStack() as stack:
+            writer,owner,bound,unit=self.completed(stack)
+            allocation.record_completed_settings_delivery(writer,owner,bound,unit)
+            projection=self.root/'project/.tracker/settings/outbox/0.json'
+            retained=self.root/'preserved-original-delivered-projection'
+            projection.rename(retained)
+            # C25 K5-C's literal expectation: an absent delivered projection is
+            # valid only with the actual COMPLETE+DELIVERED pair. No cleanup
+            # implementation or resending is faked by this owned loss fixture.
+            self.assertEqual((),allocation.pending_settings_audits_after_completed_unit(writer,owner,bound,unit))
+            self.assertEqual('DELIVERED-PRESENT-OUTBOX-ABSENT-VALID',
+                allocation.inspect_completed_settings_delivery(writer,owner,bound,unit).state)
+            self.assertTrue(retained.is_file()); self.assertFalse(projection.exists())
+            self.assertEqual((1,'UNKNOWN'),(self.current_global_state(owner,bound,unit).attempt_count,
+                                           self.current_global_state(owner,bound,unit).outcome))
+
+    def test_partial_delivered_projection_pair_never_changes_original_audit_set(self):
+        from contextlib import ExitStack
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        from monitor import issue_tracker_k_store as settings
+        event0=self.settings_audit_oracle()
+        payload={'new_k':4,'actor':'operator:fixture','expected_revision':0,'request_id':'change-1'}
+        event=canonical({'schema_version':1,'revision':1,'type':'set_k','old_k':3,'new_k':4,
+            'actor':'operator:fixture','recorded_at':'2026-10-08T10:01:00Z','request_id':'change-1',
+            'payload_sha256':hashlib.sha256(canonical(payload)).hexdigest(),
+            'predecessor_sha256':hashlib.sha256((event0['details']+'\n').encode()).hexdigest()})
+        event1={'event_id':'settings:1:'+hashlib.sha256(event).hexdigest(),
+            'recorded_at_utc':'2026-10-08T10:01:00Z','details':event.decode().rstrip('\n')}
+        initialize=settings.initialize_local_k_store
+        def initialized_then_change(root,**options):
+            receipt=initialize(root,**options)
+            settings.apply_local_k_change(root,token=options['token'],new_k=4,
+                actor='operator:fixture',recorded_at='2026-10-08T10:01:00Z',
+                request_id='change-1',expected_revision=0)
+            return receipt
+        with ExitStack() as stack:
+            with mock.patch.object(settings,'initialize_local_k_store',side_effect=initialized_then_change):
+                writer,owner,bound,auth,_config,unit,docs=self.prepare_owned(stack,settings_audits=(event0,event1))
+            responses={name:self.read_owned(stack,writer,owner,bound,auth,kind,value)
+                       for name,(kind,value) in docs.items()}
+            load().record_owned_completion_evidence(writer,owner,bound,unit,**responses)
+            allocation.record_completed_settings_delivery(writer,owner,bound,unit)
+            projection=self.root/'project/.tracker/settings/outbox/0.json'
+            projection.rename(self.root/'preserved-original-projection-0')
+            observed=allocation.inspect_completed_settings_delivery(writer,owner,bound,unit)
+            self.assertEqual(('DELIVERED-PRESENT-OUTBOX-PARTIAL-VALID',(event0['event_id'],event1['event_id'])),
+                (observed.state,observed.event_ids))
+            self.assertEqual((),allocation.pending_settings_audits_after_completed_unit(writer,owner,bound,unit))
+            self.assertFalse(projection.exists())
+            self.assertTrue((projection.parent/'1.json').is_file())
+            self.assertEqual((1,'UNKNOWN'),(self.current_global_state(owner,bound,unit).attempt_count,
+                                           self.current_global_state(owner,bound,unit).outcome))
+
+    def absence_denied(self,fault):
+        from contextlib import ExitStack
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        with ExitStack() as stack:
+            writer,owner,bound,unit=self.completed(stack)
+            allocation.record_completed_settings_delivery(writer,owner,bound,unit)
+            tracker=self.root/'project/.tracker'
+            projection=tracker/'settings/outbox/0.json'
+            if fault=='later-unproved-event':
+                from monitor import issue_tracker_k_store as settings
+                settings.apply_local_k_change(tracker,token=writer,new_k=4,actor='operator:fixture',
+                    recorded_at='2026-10-08T10:01:00Z',request_id='change-1',expected_revision=0)
+                projection=tracker/'settings/outbox/1.json'
+            elif fault=='missing-delivered':
+                (tracker/'settings-audit-delivery/DELIVERED').rename(self.root/'preserved-marker')
+            elif fault=='missing-start':
+                (tracker/'SETTINGS-AUDIT-DELIVERY-STARTED').rename(self.root/'preserved-start')
+            elif fault=='changed-complete':
+                proof=self.root/'var/lib/http-ztp-container/issue-tracker'/(hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()+'.completion')
+                (proof/'HISTORY-RAW').write_bytes(b'{"not":"the matched original History"}')
+            else: raise AssertionError('unknown independent fault')
+            projection.rename(self.root/'preserved-projection')
+            original={str(p.relative_to(self.root)):p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
+            for observe in (allocation.inspect_completed_settings_delivery,
+                            allocation.pending_settings_audits_after_completed_unit):
+                with self.subTest(observer=observe.__name__),self.assertRaises(allocation.SettingsAuditHold):
+                    observe(writer,owner,bound,unit)
+            self.assertEqual(original,{str(p.relative_to(self.root)):p.read_bytes() for p in self.root.rglob('*') if p.is_file()})
+            self.assertFalse(projection.exists())
+
+    def test_missing_delivery_never_excuses_absent_projection(self): self.absence_denied('missing-delivered')
+    def test_missing_start_never_excuses_absent_projection(self): self.absence_denied('missing-start')
+    def test_nonsemantic_complete_never_excuses_absent_projection(self): self.absence_denied('changed-complete')
+    def test_later_undelivered_event_still_requires_its_projection(self): self.absence_denied('later-unproved-event')
+
+    def test_actual_cold_pair_retains_missing_delivered_projection_without_resend(self):
+        from contextlib import ExitStack
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        from dataclasses import asdict
+        import json
+        import subprocess
+        with ExitStack() as stack:
+            writer,owner,bound,unit=self.completed(stack)
+            allocation.record_completed_settings_delivery(writer,owner,bound,unit)
+            projection=self.root/'project/.tracker/settings/outbox/0.json'
+            projection.rename(self.root/'preserved-cold-projection')
+        # Parent owners are closed before a fresh interpreter acquires its own
+        # locks. Native original files, not a copied object or cached registry.
+        program='''import sys,json,hashlib
+from pathlib import Path
+sys.path[:0]=[sys.argv[1],sys.argv[1]+"/tools"]
+from monitor import issue_tracker_settings_audit_allocation as allocation
+from test_cases.test_req7_spreadsheet_owner import scoped_fixture
+from monitor import issue_tracker_spreadsheet_owner as owner,issue_tracker_local_commit as local
+from monitor import issue_tracker_global_attempt_journal as journal
+from monitor.issue_tracker_online_target import OnlineTargetBinding
+from monitor.issue_tracker_send_unit import _original_unit
+root=Path(sys.argv[2]); bound=OnlineTargetBinding(**json.loads(sys.stdin.buffer.read()))
+store=root/'var/lib/http-ztp-container/issue-tracker'/(hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()+'.journal')
+unit=_original_unit((store/'ACTION-PREIMAGE').read_bytes(),(store/'WIRE').read_bytes())
+with local.writer_owner(root/'project',root/'project/publication') as writer,scoped_fixture(root,owner),owner.spreadsheet_owner(bound) as token:
+ seen=allocation.inspect_completed_settings_delivery(writer,token,bound,unit)
+ pending=allocation.pending_settings_audits_after_completed_unit(writer,token,bound,unit)
+ state=journal.inspect_global_unit(token,bound,unit)
+ print(seen.state,len(pending),state.attempt_count,state.outcome)
+'''
+        cold=subprocess.run([sys.executable,'-B','-c',program,str(ROOT),str(self.root)],input=json.dumps(asdict(bound)).encode(),
+            stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=10)
+        self.assertEqual(0,cold.returncode,cold.stderr)
+        self.assertEqual(b'DELIVERED-PRESENT-OUTBOX-ABSENT-VALID 0 1 UNKNOWN\n',cold.stdout)
+        self.assertFalse(projection.exists()); self.assertTrue((self.root/'preserved-cold-projection').is_file())
+
     def settings_audit_oracle(self):
         # Literal original EVENT contract, never derived from allocation/delivery.
         payload={'new_k':3,'actor':'system:default','expected_revision':None,'request_id':'first-use'}

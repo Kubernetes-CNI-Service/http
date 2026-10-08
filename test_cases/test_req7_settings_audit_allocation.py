@@ -35,6 +35,20 @@ def load():
 
 
 class Req7SettingsAuditAllocationTests(unittest.TestCase):
+    def test_absent_outbox_without_actual_complete_delivered_pair_never_becomes_pending_success(self):
+        with self.owners() as (writer,sheet):
+            value=self.unit(); self.prepare(writer,sheet,value)
+            projection=self.project/'.tracker/settings/outbox/0.json'
+            projection.rename(self.root/'preserved-unproved-projection')
+            before=self.image()
+            for observer in (self.module.inspect_completed_settings_delivery,
+                             self.module.pending_settings_audits_after_completed_unit):
+                with self.subTest(observer=observer.__name__),self.assertRaises(self.module.SettingsAuditHold):
+                    observer(writer,sheet,binding(),value)
+            with self.assertRaises(self.module.SettingsAuditHold):
+                self.module.pending_settings_audits(writer)
+            self.assertEqual(before,self.image()); self.assertFalse(projection.exists())
+
     def test_delivery_direct_rejects_unproved_complete_without_creating_local_success(self):
         self.assertTrue(hasattr(self.module,'record_completed_settings_delivery'),
                         'original allocation is not delivery: validate COMPLETE before the local record')

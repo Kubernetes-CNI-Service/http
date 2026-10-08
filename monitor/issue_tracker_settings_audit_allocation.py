@@ -30,12 +30,16 @@ class SettingsAuditHold(ValueError):
 
 
 @contextmanager
-def _hold_settings_originals(writer_token):
+def _hold_settings_originals(writer_token,*,delivered_event_ids=()):
     """Keep original FD identities/bytes/names across reads and allocation.
 
     Same-byte replacement is not an immutable original. Root directory mtime
     is deliberately not frozen: allocation legitimately adds its own witness
     there, but INITIALIZED and the named settings subtree remain pinned.
+    Internal completed-delivery inspection may provisionally read absent
+    projections ONLY for exact original unit event IDs. No public observation
+    escapes until the paired original COMPLETE and DELIVERED is also validated;
+    ordinary readers, allocation and mutation-count paths stay strict.
     """
     owner = local._owner(writer_token)
     held = []
@@ -64,10 +68,13 @@ def _hold_settings_originals(writer_token):
         events,names=directory(folder,'events')
         outbox,outbox_names=directory(folder,'outbox')
         if (not names or any(settings._EVENT_NAME.fullmatch(name) is None for name in names)
-                or outbox_names != names):
+                or not outbox_names <= names):
             raise SettingsAuditHold()
         raw_events={int(name[:-5]):file(events,name) for name in sorted(names)}
-        raw_outbox={int(name[:-5]):file(outbox,name) for name in sorted(names)}
+        missing={f'settings:{revision}:'+hashlib.sha256(raw).hexdigest()
+                 for revision,raw in raw_events.items() if f'{revision}.json' not in outbox_names}
+        if not missing <= set(delivered_event_ids): raise SettingsAuditHold()
+        raw_outbox={int(name[:-5]):file(outbox,name) for name in sorted(outbox_names)}
         current=file(folder,'current'); initialized=file(owner.root_fd,'INITIALIZED')
         def verify():
             if local._owner(writer_token) is not owner: raise SettingsAuditHold()
@@ -91,16 +98,16 @@ def _hold_settings_originals(writer_token):
         if close_failed: raise SettingsAuditHold()
 
 
-def _settings(writer_token):
+def _settings(writer_token,*,delivered_event_ids=()):
     """Observe pinned originals, never accept a caller queue/snapshot."""
-    with _hold_settings_originals(writer_token) as (images,verify):
+    with _hold_settings_originals(writer_token,delivered_event_ids=delivered_event_ids) as (images,verify):
         raw_events,current,initialized,raw_outbox=images
         chain.validate_k_chain_snapshot(raw_events, current, initialized)
         result = []
         for revision, raw in sorted(raw_events.items()):
             digest = hashlib.sha256(raw).hexdigest()
             expected = chain._canonical_line({'schema_version': 1, 'revision': revision, 'event_sha256': digest})
-            if raw_outbox[revision] != expected: raise SettingsAuditHold()
+            if revision in raw_outbox and raw_outbox[revision] != expected: raise SettingsAuditHold()
             event = chain._parse(raw, chain._EVENT_KEYS)
             result.append((revision, digest, {'event_id': f'settings:{revision}:{digest}',
                 'recorded_at_utc': event['recorded_at'], 'details': raw.decode('utf-8').rstrip('\n')}))
@@ -117,13 +124,13 @@ def pending_settings_audits(writer_token):
     return result
 
 
-def _originals(writer_token, spreadsheet_token, binding, unit):
+def _originals(writer_token, spreadsheet_token, binding, unit,*,delivered_event_ids=()):
     owner = local._owner(writer_token)
     _sheet_owner, _parent, _name, header = global_journal._inputs(spreadsheet_token, binding, unit)
     global_journal.inspect_global_unit(spreadsheet_token, binding, unit)
     audits = json.loads(unit.action_preimage.decode('utf-8'))['audits']
     if not audits: raise SettingsAuditHold()
-    actual = {row[2]['event_id']: row for row in _settings(writer_token)}
+    actual = {row[2]['event_id']: row for row in _settings(writer_token,delivered_event_ids=delivered_event_ids)}
     selected = []
     for audit in audits:
         revision, digest, original = actual[audit['event_id']]
@@ -232,7 +239,7 @@ def _sync_marker(parent, folder, header, assignments):
 
 
 @contextmanager
-def _hold_counted_audit_originals(writer_token, spreadsheet_token, binding, unit):
+def _hold_counted_audit_originals(writer_token, spreadsheet_token, binding, unit,*,delivered_event_ids=()):
     """Keep the same original settings/allocation through one durable count.
 
     Read-only necessary scope, not admission, persistent inode enrollment or
@@ -240,8 +247,8 @@ def _hold_counted_audit_originals(writer_token, spreadsheet_token, binding, unit
     """
     folder=None; failed=False
     try:
-        with _hold_settings_originals(writer_token) as (_images,verify_settings):
-            owner,header,assignments=_originals(writer_token,spreadsheet_token,binding,unit)
+        with _hold_settings_originals(writer_token,delivered_event_ids=delivered_event_ids) as (_images,verify_settings):
+            owner,header,assignments=_originals(writer_token,spreadsheet_token,binding,unit,delivered_event_ids=delivered_event_ids)
             folder=local._directory(owner.root_fd,_FOLDER)
             with _hold_allocation_originals(owner.root_fd,folder,header,assignments) as verify_allocation:
                 _inspect(owner.root_fd,folder,header,assignments)
@@ -348,7 +355,7 @@ class SettingsDeliveryObservation:
 
 
 @contextmanager
-def _hold_delivery_authority(writer_token,spreadsheet_token,binding,unit):
+def _hold_delivery_authority(writer_token,spreadsheet_token,binding,unit,*,inspect_delivered=False):
     """Pin both actual owners, original allocation and the WHOLE C19 proof.
 
     No caller observation, digest or purported success can stand in for the
@@ -359,13 +366,19 @@ def _hold_delivery_authority(writer_token,spreadsheet_token,binding,unit):
     folder=None
     try:
         with ExitStack() as scope:
-            audit_verify=scope.enter_context(_hold_counted_audit_originals(writer_token,spreadsheet_token,binding,unit))
             match_verify,_journal_originals=scope.enter_context(completion._hold_match_originals(spreadsheet_token,binding,unit))
             proof_verify=scope.enter_context(completion._hold_completion_originals(spreadsheet_token,binding,unit))
             seen=completion.inspect_completion_evidence(spreadsheet_token,binding,unit)
             if seen.state!='COMPLETE-PRESENT-NOT-APPLIED' or seen.unit_id!=unit.unit_id:
                 raise SettingsAuditHold()
-            owner,header,assignments=_originals(writer_token,spreadsheet_token,binding,unit)
+            # Internal image readability only, never a sending/cleanup permit.
+            # ALL actual proof originals remain held. Public consumers must
+            # additionally validate the original durable DELIVERED pair before
+            # yielding any pending result; creation/count paths remain strict.
+            delivered_ids=tuple(row['event_id'] for row in json.loads(unit.action_preimage.decode('utf-8'))['audits']) if inspect_delivered else ()
+            audit_verify=scope.enter_context(_hold_counted_audit_originals(writer_token,spreadsheet_token,binding,unit,
+                                                                          delivered_event_ids=delivered_ids))
+            owner,header,assignments=_originals(writer_token,spreadsheet_token,binding,unit,delivered_event_ids=delivered_ids)
             _sheet,parent,name,_binding=global_journal._inputs(spreadsheet_token,binding,unit)
             name=name[:-len('.journal')]+'.completion'
             folder=local._directory(parent,name)
@@ -379,7 +392,12 @@ def _hold_delivery_authority(writer_token,spreadsheet_token,binding,unit):
                 'completion_directory_identity':list(journal._identity(os.fstat(folder))[:2]),
                 'completion_originals':proof_files})
             selected=json.loads(assignments.decode('utf-8'))
-            result=SettingsDeliveryObservation('DELIVERED-PRESENT-OUTBOX-RETAINED',unit.unit_id,
+            with _hold_settings_originals(writer_token,delivered_event_ids=delivered_ids) as (images,settings_verify):
+                present=sum(row['revision'] in images[3] for row in selected)
+                settings_verify()
+            projection_state=('RETAINED' if present==len(selected) else
+                              'ABSENT-VALID' if present==0 else 'PARTIAL-VALID')
+            result=SettingsDeliveryObservation('DELIVERED-PRESENT-OUTBOX-'+projection_state,unit.unit_id,
                                                tuple(row['audit']['event_id'] for row in selected))
             def verify():
                 audit_verify(); match_verify(); proof_verify()
@@ -509,7 +527,7 @@ def _hold_delivery_files(owner,folder,raw,*,written=None):
 def _completed_settings_delivery(writer_token,spreadsheet_token,binding,unit,*,create):
     folder=None; failed=False; scope=ExitStack(); header_verify=None
     try:
-        with _hold_delivery_authority(writer_token,spreadsheet_token,binding,unit) as (owner,raw,result,verify):
+        with _hold_delivery_authority(writer_token,spreadsheet_token,binding,unit,inspect_delivered=not create) as (owner,raw,result,verify):
             written=None; started=None
             if create:
                 if (_DELIVERY_FOLDER in os.listdir(owner.root_fd) or _DELIVERY_STARTED in os.listdir(owner.root_fd)
@@ -558,18 +576,21 @@ def pending_settings_audits_after_completed_unit(writer_token,spreadsheet_token,
     """ALL committed events MINUS this actual original COMPLETE/DELIVERED pair.
 
     Only the retained one-unit journal is supported. A remaining delivered
-    projection is cleanup-only, not a resend source; no cleanup, new allocation,
+    projection is cleanup-only, not a resend source. Only this revalidated pair
+    excuses its exact missing projection; subsequent events still require theirs.
+    No cleanup, new allocation,
     general historical settlement or UNKNOWN release is performed here. The
     unqualified pending reader alone is not an integrated sending authority.
     """
     folder=None; failed=False
     try:
-        with _hold_delivery_authority(writer_token,spreadsheet_token,binding,unit) as (owner,raw,delivered,verify):
+        with _hold_delivery_authority(writer_token,spreadsheet_token,binding,unit,inspect_delivered=True) as (owner,raw,delivered,verify):
             with _hold_delivery_start(owner,raw) as (start_verify,raw):
                 folder=local._directory(owner.root_fd,_DELIVERY_FOLDER)
                 with _hold_delivery_files(owner,folder,raw) as delivery_verify:
                     consumed=set(delivered.event_ids)
-                    result=tuple(dict(row[2]) for row in _settings(writer_token) if row[2]['event_id'] not in consumed)
+                    result=tuple(dict(row[2]) for row in _settings(writer_token,delivered_event_ids=delivered.event_ids)
+                                 if row[2]['event_id'] not in consumed)
                     verify(); start_verify(); delivery_verify()
     except Exception: failed=True
     finally:
