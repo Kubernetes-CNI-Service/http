@@ -4,7 +4,8 @@ Only MATCHED_OBSERVATION when an actual counted global unit, original durable
 preimage, both original enrollment nonces, exact permanent fence and ALL sent
 business/audit rows agree. No send/clear/reset/high-water mutation. Remote read
 objects remain necessary inputs, not authenticated source/admission authority;
-an eventual audited launcher/settlement bridge must establish those separately.
+The owned-read bridge below establishes actual fixed-read provenance, current
+dual owners and typed template observations, not durable settlement authority.
 """
 from dataclasses import dataclass
 import hashlib
@@ -102,6 +103,37 @@ def observe_remote_history_unit(token, binding, unit, identity, metadata_plan, m
             pair.target_nonce_valid, pair.history_nonce_valid, len(expected), matched,
             old_tail, post.last_data_row_index, unit.action_digest, unit.wire_sha256,
             hashlib.sha256(metadata_response.data).hexdigest(), post.source_sha256)
+    except Exception: failed = True
+    if failed: raise RemoteHistoryHold()
+    return result
+
+
+def observe_owned_remote_history_unit(writer_token, owner_token, binding, unit, *,
+                                      identity_response, headers_response, metadata_response, history_response):
+    """Actual fixed-read observations → original journal matching, never APPLIED.
+
+    No caller plan/identity/freshness flag is accepted. Each original completion
+    must still be issued under these exact actual owner acquisitions, original
+    deadline and current fixed target files, before AND after the whole match.
+    Four reads are non-atomic observations, not a remote snapshot or CAS; the
+    original matcher retains UNKNOWN/CONFLICT and never rewrites the journals.
+    Metadata visibility accounting is not upgraded to globally complete here.
+    """
+    failed = False
+    try:
+        from monitor.issue_tracker_history_read_launcher import require_current_owned_read
+        responses = (('template_identity', identity_response), ('template_headers', headers_response),
+                     ('metadata', metadata_response), ('history_tail', history_response))
+        plans = tuple(require_current_owned_read(writer_token, owner_token, binding, response, read_kind=kind)
+                      for kind, response in responses)
+        identity = decode.decode_template_identity(plans[0], identity_response)
+        decode.decode_template_headers(plans[1], headers_response, identity)
+        result = observe_remote_history_unit(owner_token, binding, unit, identity,
+                                             plans[2], metadata_response, plans[3], history_response)
+        # A matching response must not escape after local ownership/policy or
+        # any original observation deadline becomes invalid during parsing.
+        for kind, response in responses:
+            require_current_owned_read(writer_token, owner_token, binding, response, read_kind=kind)
     except Exception: failed = True
     if failed: raise RemoteHistoryHold()
     return result

@@ -19,11 +19,19 @@ TARGET = 'synthetic_spreadsheet_id_0001'
 FIELDS = 'spreadsheetId,sheets(properties(sheetId,title),data(startRow,startColumn,rowData(values(userEnteredValue))))'
 
 
-def load(name):
-    path = ROOT / 'monitor' / (name + '.py')
-    spec = importlib.util.spec_from_file_location('monitor.' + name, path)
-    module = importlib.util.module_from_spec(spec); sys.modules[spec.name] = module
-    spec.loader.exec_module(module); return module
+def load(name, *, path=None):
+    path = ROOT / 'monitor' / (name + '.py') if path is None else path
+    import monitor
+    qualified='monitor.'+name
+    module=sys.modules.get(qualified)
+    if module is None or Path(module.__file__).resolve()!=path.resolve():
+        spec = importlib.util.spec_from_file_location(qualified, path)
+        module = importlib.util.module_from_spec(spec); sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+    # Match a normal import: package attribute and sys.modules must refer to
+    # the same actual module. Never weaken production exact-class contracts.
+    setattr(monitor,name,module)
+    return module
 
 
 def inputs():
@@ -58,6 +66,23 @@ class Req7HistoryTailDirectTests(unittest.TestCase):
         self.planner = load('issue_tracker_sheets_read_plan'); self.decoder = load('issue_tracker_sheets_read_decode')
         self.binding, self.token = inputs()
 
+    def test_fixture_loader_preserves_normal_import_and_native_class_identity(self):
+        import importlib
+        import monitor
+        for name in ('issue_tracker_sheets_read_plan','issue_tracker_sheets_read_decode','issue_tracker_metadata_capacity'):
+            first=load(name); second=load(name)
+            self.assertIs(first,second,'fixture must not manufacture a second native class identity')
+            self.assertIs(second,importlib.import_module('monitor.'+name))
+            self.assertIs(second,getattr(monitor,name))
+        from test_cases.test_req7_sheets_read_plan import load as plan_loader
+        from test_cases.test_req7_sheets_read_decode import load as decode_loader
+        from test_cases.test_req7_metadata_capacity import load as metadata_loader
+        for name,loader in (('issue_tracker_sheets_read_plan',plan_loader),
+                            ('issue_tracker_sheets_read_decode',decode_loader),('issue_tracker_metadata_capacity',metadata_loader)):
+            first=load(name); second=loader()
+            self.assertIs(first,second)
+            self.assertIs(second,loader())
+            self.assertIs(second,getattr(monitor,name))
     def plan(self):
         self.assertTrue(hasattr(self.planner, 'prepare_history_tail_read'), 'complete bounded History-tail read missing')
         return self.planner.prepare_history_tail_read(self.binding, self.token)

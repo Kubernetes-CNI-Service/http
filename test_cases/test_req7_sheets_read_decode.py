@@ -18,9 +18,8 @@ MODULE = Path(__file__).resolve().parents[1] / "monitor/issue_tracker_sheets_rea
 
 def load():
     if not MODULE.is_file(): raise AssertionError("REQ7 complete bound Sheets read decoder missing")
-    spec = importlib.util.spec_from_file_location("monitor.issue_tracker_sheets_read_decode", MODULE)
-    module = importlib.util.module_from_spec(spec); sys.modules[spec.name] = module
-    spec.loader.exec_module(module); return module
+    from test_cases.test_req7_history_read import load as canonical_loader
+    return canonical_loader('issue_tracker_sheets_read_decode',path=MODULE)
 
 
 def row_response():

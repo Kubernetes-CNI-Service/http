@@ -2135,6 +2135,8 @@ FIFO、每次准入／真实单次 wire；部署与真实断电验收准确保�
 
 ## TC-REAL-REQ7-REMOTE-HISTORY-MATCH-001 — journal/原始 nonce/fence/全部 History 必要对账
 
+- 固定原始读取桥补充（**NOT RUN / REAL_ENV REQUIRED**）：模板 identity/四表 headers、metadata search 和完整 History tail 仅接受受监督固定入口实际签发对象，原双 owner、当前策略、原始参数/正文及原 30 秒期限在匹配前后同时有效。真实拥有的 loopback 测试保留 UNKNOWN，拒绝复制对象、漂移表头、缺少审计、解析后期限到期和策略撤销。现场须独立记录该来源链及四次非原子读取限制；不提升隐藏 PROJECT 库存完整性或授权 mutation/COMPLETE，清理与风险沿用本卡。
+
 - Case ID：`TC-REAL-REQ7-REMOTE-HISTORY-MATCH-001`；类型：integration / transaction / real-environment；对应 C-6/C-19/C-26。状态：**NOT RUN / REAL_ENV REQUIRED**。自动化 `test_cases.test_req7_remote_history_match`；涉及 `monitor/issue_tracker_remote_history_match.py`、global owner/attempt、enrollment、preread、metadata、typed History 和原生 TLS，未安装。本地私有 loopback TLS 与真实自有文件屏障不证明部署身份或整个 REQ7。
 - 风险与目标：仅原始 journal、两份原始 nonce、精确永久 fence、所有实际业务及附带审计行与发送前原像同时匹配，才能产生 MATCHED_OBSERVATION；这不是 COMPLETE、APPLIED 或发送许可，不清除 UNKNOWN、容量预留或审计 pending。
 - 前置条件与输入：另获 owner 精确 Stage O 一次性副本只读授权和实际固定目录/Python/SSL/CA 身份；已初始化实际全表 owner、原始 enrollment、global action/wire 和发送前完整 raw。真实发送、凭据、部署、结算和受审 launcher 未由本卡授权；缺任何前提保持 NOT RUN。

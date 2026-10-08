@@ -964,6 +964,12 @@ History 为 CONFLICT；缺原像、异常/部分响应、外来目标或重复 m
 25000 个 typed cells 只扫描一次，不按行重复扫描。真实私有 TLS 三个只读请求
 验证 planner/transport/decoder → 实际持久 journal → matcher；没有发送、结算、
 COMPLETE、APPLIED、新鲜准入或 UNKNOWN 清除。未安装；真机卡 NOT RUN。
+固定双 owner 入口另要求原始签发的模板 identity/headers、metadata search 和
+History 全尾四份响应；不接收 caller plan/identity/freshness 标志。原形态、
+原 30 秒 deadline、双锁与当前固定策略在解析前后均重新核验。真实受监督
+私有 TLS → 严格模板解析 → 原 journal 对账覆盖副本伪造、表头漂移、缺审计、
+解析后超期和策略撤销；四次只读仍非原子快照，隐藏 metadata 库存仍未证明，
+匹配不结算、不清除 UNKNOWN，不授予发送权限。
 
 `test_cases.test_req7_activity_discovery` 另区分 caller 有限窗口和固定完整容量读：
 显式身份/Status 列与 GRID rowCount/columnCount 在同一个 GET 返回；仅容量 3..5002

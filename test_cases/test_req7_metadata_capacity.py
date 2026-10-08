@@ -24,9 +24,8 @@ def load():
     decoder()
     path = Path(__file__).resolve().parents[1] / "monitor/issue_tracker_metadata_capacity.py"
     if not path.is_file(): raise AssertionError("REQ7 permanent-fence budget observer missing")
-    spec = importlib.util.spec_from_file_location("monitor.issue_tracker_metadata_capacity", path)
-    module = importlib.util.module_from_spec(spec); sys.modules[spec.name] = module
-    spec.loader.exec_module(module); return module
+    from test_cases.test_req7_history_read import load as canonical_loader
+    return canonical_loader('issue_tracker_metadata_capacity',path=path)
 
 
 def entry(identifier, key="z", value="1", *, sheet=101, visibility="DOCUMENT"):

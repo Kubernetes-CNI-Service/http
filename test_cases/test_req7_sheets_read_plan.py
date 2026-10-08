@@ -19,9 +19,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 def load():
     if not MODULE.is_file(): raise AssertionError("REQ7 fixed Sheets read-plan helper missing")
-    spec = importlib.util.spec_from_file_location("monitor.issue_tracker_sheets_read_plan", MODULE)
-    module = importlib.util.module_from_spec(spec); sys.modules[spec.name] = module
-    spec.loader.exec_module(module); return module
+    from test_cases.test_req7_history_read import load as canonical_loader
+    return canonical_loader('issue_tracker_sheets_read_plan',path=MODULE)
 
 
 class Req7SheetsReadPlanDirectTests(unittest.TestCase):

@@ -260,6 +260,133 @@ class Req7RemoteHistoryNativeWorkflowTests(unittest.TestCase):
         self.assertEqual(setup.meta_plan.body, second[2])
 
 
+class Req7OwnedHistoryMatchWorkflowTests(unittest.TestCase):
+    # Reuse owned native fixtures, not inherited test methods/discovery.
+    from test_cases.test_req7_history_read_launcher import Req7HistoryReadLauncherWorkflowTests as _Fixture
+    setUp = _Fixture.setUp; certificates = _Fixture.certificates; server = _Fixture.server
+    owners = _Fixture.owners; intercept = _Fixture.intercept; child_fixture = _Fixture.child_fixture
+
+    def read_owned(self, stack, writer, owner, binding, token, kind, value):
+        from monitor import issue_tracker_history_read_launcher as reads
+        import socket
+        body = json.dumps(value, separators=(',', ':')).encode()
+        reply = b'HTTP/1.1 200 OK\r\nContent-Length: ' + str(len(body)).encode() + b'\r\nConnection: close\r\n\r\n' + body
+        with self.server(reply, hostname='sheets.googleapis.com', destination='sheets.googleapis.com') as (records, errors):
+            port = socket.getaddrinfo('sheets.googleapis.com', 443)[0][4][1]
+            from contextlib import ExitStack
+            with ExitStack() as launched:
+                calls, children = self.intercept(launched, self.child_fixture(port), writer, owner, binding)
+                result = reads.OwnedSheetsReadUnit(writer, owner, binding, token, read_kind=kind).read_once()
+                self.assertEqual((1, 0, body), (len(calls), children[0].returncode, result.data))
+            self.assertEqual([], errors); self.assertEqual(1, len(records))
+            method = b'POST ' if kind == 'metadata' else b'GET '
+            self.assertTrue(records[0][0].startswith(method + b'/v4/spreadsheets/' + binding.spreadsheet_id.encode()))
+        return result
+
+    def prepare_owned(self, stack):
+        from monitor import issue_tracker_history_read_launcher as reads
+        from monitor import issue_tracker_global_attempt_journal as journal, issue_tracker_enrollment_journal as enroll
+        from monitor import issue_tracker_history_preread_journal as preread, issue_tracker_sheets_read_decode as decode
+        from monitor.issue_tracker_send_unit import freeze_send_unit
+        from test_cases.test_req7_sheets_read_decode import header_response
+        _local, _ownership, writer, owner, bound, auth, config = self.owners(stack)
+        identity_doc = identity_response(); identity_doc['spreadsheetId'] = bound.spreadsheet_id
+        headers_doc = header_response(); headers_doc['spreadsheetId'] = bound.spreadsheet_id
+        arguments = send_inputs()
+        arguments.update(spreadsheet_id=bound.spreadsheet_id, sheet_id=101, history_sheet_id=105,
+                         target_nonce='a'*64, history_nonce='d'*64)
+        arguments['business'][0]['observed_values'] = {'L': {'stringValue': 'down'}}
+        arguments['audits'] = ({'event_id': 'settings:001', 'recorded_at_utc': '2026-10-08T10:00:00Z', 'details': 'K=3'},)
+        unit = freeze_send_unit(**arguments)
+        empty = tail_document(12); empty['spreadsheetId'] = bound.spreadsheet_id
+        empty['sheets'][0]['properties']['sheetId'] = 105; empty['sheets'][0]['data'][0]['rowData'] = []
+        original_read = self.read_owned(stack, writer, owner, bound, auth, 'history_tail', empty)
+        original_plan = reads.require_current_owned_read(writer, owner, bound, original_read, read_kind='history_tail')
+        identity_plan = reads._prepare(bound, auth, 'template_identity', None, None)
+        identity = decode.decode_template_identity(identity_plan, response(identity_doc))
+        with mock.patch('secrets.token_hex', side_effect=['a'*64, 'b'*64, 'c'*64, 'd'*64]):
+            enroll.prepare_enrollment_journal(owner, bound, identity)
+        journal.prepare_global_unit(owner, bound, unit)
+        preread.prepare_history_preread(owner, bound, unit, original_plan, original_read)
+        journal.record_global_attempt_intent(owner, bound, unit)
+        common = {'schema_version': 1, 'unit_id': unit.unit_id, 'manifest_id': arguments['manifest_id'],
+                  'generation_id': 'a'*64, 'publish_id': 'b'*64, 'action_digest': unit.action_digest,
+                  'outcome_mapping_sha256': unit.outcome_mapping_sha256, 'target_nonce': 'a'*64,
+                  'history_nonce': 'd'*64, 'preread_sha256': 'e'*64}
+        intended = hashlib.sha256(canonical({'sheet':'ETH&IB Switch','sheet_id':101,'action':'update',
+                                             'row_index':3,'values':{'L':{'stringValue':'down'}}})).hexdigest()
+        expected_rows = [('2026-10-08T10:00:00Z', 'ETH&IB Switch', 'update', 'switch:0001',
+                          canonical({**common, 'operation_id':'switch:0001', 'intended_sha256':intended}).decode().rstrip('\n')),
+                         ('2026-10-08T10:00:00Z', 'ETH&IB Switch', 'settings-audit', 'settings:001',
+                          canonical({**common, 'event_id':'settings:001', 'event_details':'K=3'}).decode().rstrip('\n'))]
+        post = deepcopy(empty)
+        post['sheets'][0]['data'][0]['rowData'] = [{'values':[{'userEnteredValue':{'stringValue':text}} for text in row]} for row in expected_rows]
+        meta = {'matchedDeveloperMetadata':[
+            {'developerMetadata':{'metadataId':1,'metadataKey':'http-ztp-enrollment-v1','metadataValue':'a'*64,
+                                  'visibility':'DOCUMENT','location':{'locationType':'SHEET','sheetId':101}}},
+            {'developerMetadata':{'metadataId':2,'metadataKey':'http-ztp-enrollment-v1','metadataValue':'d'*64,
+                                  'visibility':'DOCUMENT','location':{'locationType':'SHEET','sheetId':105}}},
+            {'developerMetadata':{'metadataId':unit.fence_metadata_id,'metadataKey':'z','metadataValue':'1',
+                                  'visibility':'DOCUMENT','location':{'locationType':'SHEET','sheetId':101}}}]}
+        docs = {'identity_response':('template_identity',identity_doc),'headers_response':('template_headers',headers_doc),
+                'metadata_response':('metadata',meta),'history_response':('history_tail',post)}
+        return writer, owner, bound, auth, config, unit, docs
+
+    def test_actual_fixed_dual_owner_native_reads_feed_original_whole_match_without_settlement(self):
+        module = load()
+        self.assertTrue(hasattr(module,'observe_owned_remote_history_unit'),'actual issued-read matcher bridge missing')
+        from contextlib import ExitStack
+        from monitor import issue_tracker_global_attempt_journal as journal
+        with ExitStack() as stack:
+            writer, owner, bound, auth, _config, unit, docs = self.prepare_owned(stack)
+            original = {p:p.read_bytes() for p in (self.root/'var/lib/http-ztp-container/issue-tracker').rglob('*') if p.is_file()}
+            responses = {name:self.read_owned(stack,writer,owner,bound,auth,kind,value) for name,(kind,value) in docs.items()}
+            seen = module.observe_owned_remote_history_unit(writer,owner,bound,unit,**responses)
+            self.assertEqual(('MATCHED_OBSERVATION',2,2,1),(seen.state,seen.history_rows_expected,seen.history_rows_matched,seen.attempt_count))
+            self.assertEqual((1,'UNKNOWN'),(journal.inspect_global_unit(owner,bound,unit).attempt_count,journal.inspect_global_unit(owner,bound,unit).outcome))
+            self.assertFalse(hasattr(seen,'permit')); self.assertFalse(hasattr(seen,'applied'))
+            self.assertEqual(original,{p:p.read_bytes() for p in (self.root/'var/lib/http-ztp-container/issue-tracker').rglob('*') if p.is_file()})
+            for name in responses:
+                forged = {**responses,name:replace(responses[name])}
+                with self.subTest(copy=name),mock.patch.object(module,'observe_remote_history_unit') as matcher:
+                    with self.assertRaises(module.RemoteHistoryHold): module.observe_owned_remote_history_unit(writer,owner,bound,unit,**forged)
+                    matcher.assert_not_called()
+            from test_cases.test_issue_tracker_online_target import document
+            _config.write_text(json.dumps(document(status='disabled')))
+            with self.assertRaises(module.RemoteHistoryHold): module.observe_owned_remote_history_unit(writer,owner,bound,unit,**responses)
+
+    def test_actual_issued_bad_header_missing_audit_and_final_policy_revocation_are_not_completion(self):
+        module=load()
+        self.assertTrue(hasattr(module,'observe_owned_remote_history_unit'),'actual issued-read matcher bridge missing')
+        from contextlib import ExitStack
+        with ExitStack() as stack:
+            writer,owner,bound,auth,config,unit,docs=self.prepare_owned(stack)
+            responses={name:self.read_owned(stack,writer,owner,bound,auth,kind,value) for name,(kind,value) in docs.items()}
+            bad_header=deepcopy(docs['headers_response'][1]); bad_header['sheets'][0]['data'][0]['rowData'][0]['values'][0]['userEnteredValue']['stringValue']='foreign header'
+            changed=self.read_owned(stack,writer,owner,bound,auth,'template_headers',bad_header)
+            with mock.patch.object(module,'observe_remote_history_unit') as matcher:
+                with self.assertRaises(module.RemoteHistoryHold): module.observe_owned_remote_history_unit(writer,owner,bound,unit,**{**responses,'headers_response':changed})
+                matcher.assert_not_called()
+            missing=deepcopy(docs['history_response'][1]); missing['sheets'][0]['data'][0]['rowData'].pop()
+            changed=self.read_owned(stack,writer,owner,bound,auth,'history_tail',missing)
+            seen=module.observe_owned_remote_history_unit(writer,owner,bound,unit,**{**responses,'history_response':changed})
+            self.assertEqual(('CONFLICT',2,1),(seen.state,seen.history_rows_expected,seen.history_rows_matched))
+            from monitor import issue_tracker_history_read_launcher as reads
+            import time
+            actual=module.observe_remote_history_unit; expired=[False]
+            def finish_after_deadline(*args,**kwargs):
+                seen=actual(*args,**kwargs); expired[0]=True; return seen
+            with mock.patch.object(module,'observe_remote_history_unit',side_effect=finish_after_deadline), \
+                    mock.patch.object(reads,'_monotonic',side_effect=lambda:time.monotonic()+(31 if expired[0] else 0)):
+                with self.assertRaises(module.RemoteHistoryHold): module.observe_owned_remote_history_unit(writer,owner,bound,unit,**responses)
+            from test_cases.test_issue_tracker_online_target import document
+            actual=module.observe_remote_history_unit
+            def revoke(*args,**kwargs):
+                seen=actual(*args,**kwargs); config.write_text(json.dumps(document(status='disabled'))); return seen
+            with mock.patch.object(module,'observe_remote_history_unit',side_effect=revoke):
+                with self.assertRaises(module.RemoteHistoryHold): module.observe_owned_remote_history_unit(writer,owner,bound,unit,**responses)
+
+
 class Req7RemoteHistoryManifestTests(unittest.TestCase):
     def test_direct_native_workflow_primary_suite_and_not_run_card_bind_real_dependencies(self):
         registry = json.loads((ROOT / 'test_cases/script_test_manifest.json').read_text())
@@ -268,6 +395,8 @@ class Req7RemoteHistoryManifestTests(unittest.TestCase):
         self.assertTrue(any(script in rule['paths'] and test in rule['tests'] for rule in registry['test_rules']))
         dependencies = {script, 'monitor/issue_tracker_history_preread_journal.py', 'monitor/issue_tracker_global_attempt_journal.py',
             'monitor/issue_tracker_enrollment_journal.py', 'monitor/issue_tracker_spreadsheet_owner.py',
+            'monitor/issue_tracker_history_read_launcher.py', 'monitor/issue_tracker_local_commit.py',
+            'monitor/issue_tracker_online_target.py', 'monitor/issue_tracker_attempt_supervision.py',
             'monitor/issue_tracker_metadata_capacity.py', 'monitor/issue_tracker_sheets_read_decode.py', 'monitor/issue_tracker_tls_inputs.py'}
         self.assertTrue(any(dependencies <= set(rule['members']) and test in rule['tests'] for rule in registry['workflows']))
         self.assertEqual(['issue-tracker-local'], [suite['id'] for suite in registry['test_suites'] if test in suite['tests']])
