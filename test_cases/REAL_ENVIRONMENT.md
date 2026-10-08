@@ -2072,6 +2072,8 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 ## TC-REAL-REQ7-TOTAL-ATTEMPT-LOCK-001 — 固定启动器、完整预算与孤儿写者锁
 
+- 枚举只读形态补充（**NOT RUN / REAL_ENV REQUIRED**）：同一固定入口现接 Whitelist、模板 identity/headers、活动、插入占用、精确单行、History tail 与固定只读 metadata search；真实 W1/模板/continuity 及 metadata 可见性仍须本卡和相关原有卡的独立授权与现场见证。拥有的原生 TLS 工作流只验证单次 GET/固定只读 POST 与解析边界，不证明其他 PROJECT 隐藏 metadata 使用量完整、发送准入或 COMPLETE。证据与异常清理沿用本卡，原始 30 秒/2 MiB 限额保持不变。
+
 - 固定 History-tail 读取入口补充（**NOT RUN / REAL_ENV REQUIRED**）：`monitor/issue_tracker_history_read_launcher.py` 在实际项目 ACTIVE 与 spreadsheet owner 下，于读取前后重新核策略/固定白名单；固定 `-I -B` child 仅继承两锁、清空环境、私有 stdin、单次原生固定 GET、nonce/path/body 关联完整私有响应，不接受 URL/程序/路径/预算覆盖。部署需另核 native root、隔离解释器、CA/DNS、两锁继承、总预算/输入背压/拒绝终止与策略变化见证。证据、精确授权、故障清理和风险沿用本卡；本地受控 loopback 不证明在线许可、typed History/continuity 或 COMPLETE，此观察不能解除 UNKNOWN。
 
 - 私有输入通道补充（**NOT RUN / REAL_ENV REQUIRED**）：本地实际 stdin pipe 的分段非阻塞写入、EOF、满管道背压和原有总预算到期均纳入监督器；实际子进程输入 → 拥有的 loopback 原生 TLS 单请求 → 完整响应工作流验证正文逐字节一致和父锁保留。部署须另外见证固定 child 的输入协议、无 argv/env/private-log 泄露、背压/提前关闭/总时限故障和继承锁；不提高预算，不把私有输入当 mutation WIRE 或发送授权。证据、精确授权与清理沿用本卡，本地通过不改变真机 NOT RUN。

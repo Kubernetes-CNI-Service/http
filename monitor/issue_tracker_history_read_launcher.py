@@ -1,10 +1,10 @@
-"""Uninstalled fixed History-tail read, not reconciliation or send authority.
+"""Uninstalled fixed Sheets reads, not reconciliation or send authority.
 
 An actual ACTIVE project owner and spreadsheet owner dominate this one-use
 launch. Current fixed-file target policy/allowlist are reopened before and after
 the read. Both borrowed locks pass to the isolated child. Token/request input is
 private bounded stdin under the original 30-second budget, never argv/env.
-Only the fixed bounded History GET is available: no URL, ranges, program,
+Only enumerated fixed bounded read shapes are available: no URL, ranges, program,
 credential path, PID, timeout, mutation, refresh, replay or activation override.
 Correlated complete HTTP bytes are an observation, not typed History matches,
 enrollment continuity, COMPLETE/APPLIED, a retry permit or deployment proof.
@@ -40,7 +40,7 @@ class HistoryReadLauncherHold(ValueError):
 
 
 @dataclass(frozen=True)
-class SupervisedHistoryTailCompletion:
+class SupervisedSheetsReadCompletion:
     data: bytes = field(repr=False)
     request_path_sha256: str
     status: int = 200
@@ -70,30 +70,65 @@ def _decode_completion(raw, nonce, path_digest):
                 or type(value['body_bytes']) is not int or not body or value['body_bytes'] != len(body)
                 or value['body_sha256'] != hashlib.sha256(body).hexdigest()):
             raise HistoryReadLauncherHold(True)
-        result=SupervisedHistoryTailCompletion(body,path_digest)
+        result=SupervisedSheetsReadCompletion(body,path_digest)
     except Exception: failed=True
     if failed: raise HistoryReadLauncherHold(True)
     return result
 
 
+def _prepare(binding,token,kind,sheet,row):
+    from monitor import issue_tracker_sheets_read_plan as plans
+    fixed={'history_tail':plans.prepare_history_tail_read,'whitelist':plans.prepare_online_whitelist_read,
+           'template_identity':plans.prepare_template_identity_read,'template_headers':plans.prepare_template_header_read}
+    if type(kind) is not str: raise HistoryReadLauncherHold()
+    if kind in fixed:
+        if sheet is not None or row is not None: raise HistoryReadLauncherHold()
+        return fixed[kind](binding,token)
+    if kind in ('activity','insertion'):
+        if row is not None: raise HistoryReadLauncherHold()
+        function=plans.prepare_activity_sheet_read if kind=='activity' else plans.prepare_insertion_sheet_read
+        return function(binding,token,sheet=sheet)
+    if kind=='row':
+        return plans.prepare_sheets_read(binding,token,mode='row_rectangle',sheet=sheet,first_row=row)
+    if kind=='metadata':
+        if sheet is not None or row is not None: raise HistoryReadLauncherHold()
+        from monitor.issue_tracker_metadata_capacity import prepare_metadata_capacity_read
+        return prepare_metadata_capacity_read(binding,token)
+    raise HistoryReadLauncherHold()
+
+
 def _parse_request(raw,nonce):
     from monitor.issue_tracker_online_target import OnlineTargetBinding
     from monitor.issue_tracker_sdk_authentication import AuthenticatedToken
-    from monitor.issue_tracker_sheets_read_plan import prepare_history_tail_read
     if (type(raw) is not bytes or not 1 <= len(raw) <= 32768
             or type(nonce) is not str or _NONCE.fullmatch(nonce) is None): raise HistoryReadLauncherHold()
     value=json.loads(raw.decode('ascii'))
     if (type(value) is not dict or set(value) != {'schema_version','nonce','spreadsheet_id','policy_sha256',
-                                                'allowlist_sha256','token','expires_at'}
-            or _canonical(value) != raw or type(value['schema_version']) is not int or value['schema_version'] != 1
+                                                'allowlist_sha256','token','expires_at','read_kind','sheet','row'}
+            or _canonical(value) != raw or type(value['schema_version']) is not int or value['schema_version'] != 2
             or value['nonce'] != nonce): raise HistoryReadLauncherHold()
     binding=OnlineTargetBinding(value['spreadsheet_id'],value['allowlist_sha256'],value['policy_sha256'])
     token=AuthenticatedToken(value['token'],value['expires_at'])
-    return binding,token,prepare_history_tail_read(binding,token)
+    return binding,token,_prepare(binding,token,value['read_kind'],value['sheet'],value['row'])
+
+
+def _native_read(binding,token,kind,sheet,row):
+    # Reconstruct only the validated fixed planner shape inside the child.
+    from monitor import issue_tracker_tls_inputs as tls
+    fixed={'history_tail':tls.NativeHistoryTailReadUnit,'whitelist':tls.NativeOnlineWhitelistReadUnit,
+           'template_identity':tls.NativeTemplateIdentityReadUnit,'template_headers':tls.NativeTemplateHeaderReadUnit}
+    if kind in fixed: return fixed[kind](binding,token).send_once()
+    if kind=='activity': return tls.NativeActivitySheetReadUnit(binding,token,sheet=sheet).send_once()
+    if kind=='insertion': return tls.NativeInsertionSheetReadUnit(binding,token,sheet=sheet).send_once()
+    if kind=='row': return tls.NativeSheetsReadUnit(binding,token,mode='row_rectangle',sheet=sheet,first_row=row).send_once()
+    if kind=='metadata':
+        from monitor.issue_tracker_metadata_capacity import NativeMetadataCapacityReadUnit
+        return NativeMetadataCapacityReadUnit(binding,token).send_once()
+    raise HistoryReadLauncherHold()
 
 
 def _history_child(nonce):
-    """Internal entry: fixed root guard, private input, one native GET, no retry."""
+    """Internal entry: root guard, private input, one fixed native read, no retry."""
     failed=False
     try:
         if type(nonce) is not str or _NONCE.fullmatch(nonce) is None or os.geteuid() != 0:
@@ -105,8 +140,8 @@ def _history_child(nonce):
             raw.extend(chunk)
             if len(raw)>32768: raise HistoryReadLauncherHold()
         binding,token,prepared=_parse_request(bytes(raw),nonce)
-        from monitor.issue_tracker_tls_inputs import NativeHistoryTailReadUnit
-        response=NativeHistoryTailReadUnit(binding,token).send_once()
+        value=json.loads(bytes(raw).decode('ascii'))
+        response=_native_read(binding,token,value['read_kind'],value['sheet'],value['row'])
         if (type(response.status) is not int or response.status != 200 or response.complete is not True
                 or type(response.data) is not bytes or not response.data): raise HistoryReadLauncherHold()
         path_digest=hashlib.sha256(prepared.path.encode('ascii')).hexdigest()
@@ -125,18 +160,18 @@ def _history_child(nonce):
     return 1 if failed else 0
 
 
-class OwnedHistoryTailReadUnit:
+class OwnedSheetsReadUnit:
     """One observed response under actual dual owners; no COMPLETE authority."""
-    def __init__(self,writer_token,owner_token,binding,token):
+    def __init__(self,writer_token,owner_token,binding,token,*,read_kind,sheet=None,row=None):
         failed=False
         try:
             from monitor.issue_tracker_local_commit import _owner
             from monitor.issue_tracker_spreadsheet_owner import owner_lock_fd
-            from monitor.issue_tracker_sheets_read_plan import prepare_history_tail_read
-            _owner(writer_token); owner_lock_fd(owner_token,binding); prepare_history_tail_read(binding,token)
+            _owner(writer_token); owner_lock_fd(owner_token,binding); _prepare(binding,token,read_kind,sheet,row)
         except Exception: failed=True
         if failed: raise HistoryReadLauncherHold()
         self._writer=writer_token; self._owner=owner_token; self._binding=binding; self._token=token
+        self._kind=read_kind; self._sheet=sheet; self._row=row
         self._guard=threading.Lock(); self._used=False
 
     def read_once(self):
@@ -151,9 +186,10 @@ class OwnedHistoryTailReadUnit:
             project=_owner(self._writer); sheet_fd=owner_lock_fd(self._owner,self._binding)
             inspect_project_online_target(self._writer,self._binding)
             nonce=secrets.token_hex(32)
-            raw=_canonical({'schema_version':1,'nonce':nonce,'spreadsheet_id':self._binding.spreadsheet_id,
+            raw=_canonical({'schema_version':2,'nonce':nonce,'spreadsheet_id':self._binding.spreadsheet_id,
                             'policy_sha256':self._binding.policy_sha256,'allowlist_sha256':self._binding.allowlist_sha256,
-                            'token':self._token.value,'expires_at':self._token.expires_at})
+                            'token':self._token.value,'expires_at':self._token.expires_at,
+                            'read_kind':self._kind,'sheet':self._sheet,'row':self._row})
             _binding,_token,prepared=_parse_request(raw,nonce)
             path_digest=hashlib.sha256(prepared.path.encode('ascii')).hexdigest()
             executable=str(Path(sys.executable).resolve(strict=True))
@@ -183,3 +219,9 @@ class OwnedHistoryTailReadUnit:
                         except OSError: failed=True
         if failed: raise HistoryReadLauncherHold(confirmed)
         return result
+
+
+class OwnedHistoryTailReadUnit(OwnedSheetsReadUnit):
+    """Convenience entry without a caller-selected shape, still read-only."""
+    def __init__(self,writer_token,owner_token,binding,token):
+        super().__init__(writer_token,owner_token,binding,token,read_kind='history_tail')

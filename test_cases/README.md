@@ -862,6 +862,12 @@ P 阶段在绑定的 macOS CPython 3.9 环境中，把独立审定的依赖文�
 不截断或扩大限额。401/重定向/失效 token/输入或响应破坏均不重发。
 此入口未安装，只给完整 HTTP 观察；不验证 typed History、nonce 连续性、
 fence 匹配或 COMPLETE/APPLIED，不授予 mutation/R2/在线激活权限。
+同一固定只读 child 也承载八种枚举形态：History tail、完整 Whitelist、十四表
+identity、四表 headers、活动列、插入占用列、精确单行和固定 metadata search。
+参数仅允许规定的表与 typed 行号，不接受任意范围或 URL；metadata POST 仅是
+固定只读 search，不是 batchUpdate。真实双锁 → 私有输入 → 原生 TLS → W1 规则
+比较、模板解析和可见 metadata 计量工作流仍不授予准入；后者始终
+VISIBLE_ONLY_UNPROVED，不能把不可见的其他 PROJECT 使用量说成零。
 `test_req7_token_launcher` 约束未安装的固定 auth-only 子进程入口：不接收调用方
 argv/URL/凭据路径/预算，固定 `-I -B`、清空继承环境、DEVNULL stdin、新 session、
 仅 pass_fds 借用原 spreadsheet 锁。启动前开始 30 秒总预算，单次消费及 nonce

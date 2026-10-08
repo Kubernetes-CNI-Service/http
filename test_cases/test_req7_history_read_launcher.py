@@ -71,10 +71,11 @@ class Req7HistoryReadLauncherDirectTests(unittest.TestCase):
 
     def test_fixed_child_invalid_private_input_never_reaches_native_send(self):
         module=load(); nonce='a'*64
-        image={'schema_version':1,'nonce':nonce,'spreadsheet_id':TARGET,'policy_sha256':'b'*64,
-               'allowlist_sha256':'c'*64,'token':'synthetic-token','expires_at':time.time()+3600}
+        image={'schema_version':2,'nonce':nonce,'spreadsheet_id':TARGET,'policy_sha256':'b'*64,
+               'allowlist_sha256':'c'*64,'token':'synthetic-token','expires_at':time.time()+3600,
+               'read_kind':'history_tail','sheet':None,'row':None}
         raw=(json.dumps(image,sort_keys=True,separators=(',',':'))+'\n').encode()
-        variants=[b'',b'{}\n',raw+raw,b'x'*32769,raw.replace(b'"schema_version":1',b'"schema_version":true')]
+        variants=[b'',b'{}\n',raw+raw,b'x'*32769,raw.replace(b'"schema_version":2',b'"schema_version":true')]
         for key,bad in (('nonce','d'*64),('token','private\r\nheader'),('expires_at',True),
                         ('expires_at',0),('spreadsheet_id','../foreign'),('policy_sha256',False)):
             wrong=dict(image); wrong[key]=bad
@@ -288,6 +289,111 @@ raise SystemExit(result)
                  'monitor/issue_tracker_spreadsheet_owner.py','monitor/issue_tracker_attempt_supervision.py',
                  'monitor/issue_tracker_sheets_read_plan.py','monitor/issue_tracker_tls_inputs.py'}
         self.assertTrue(any(members <= set(rule['members']) and name in rule['tests'] for rule in manifest['workflows']))
+
+    def test_all_required_fixed_read_shapes_share_supervision_and_private_input(self):
+        module=load()
+        self.assertTrue(hasattr(module,'OwnedSheetsReadUnit'),'other fixed reads still lack supervised dual-owner entry')
+        with ExitStack() as stack:
+            _local,ownership,writer,owner,binding,token,_config=self.owners(stack)
+            cases=(('history_tail',None,None,"'Update_History'!A3:E5002",'GET'),
+                   ('whitelist',None,None,"'Whitelist'!A1:F10000",'GET'),
+                   ('template_identity',None,None,None,'GET'),
+                   ('template_headers',None,None,"'ETH&IB Switch'!A2:U2",'GET'),
+                   ('activity','ETH Cabling',None,"'ETH Cabling'!A3:A5002",'GET'),
+                   ('insertion','IB Cabling',None,"'IB Cabling'!AC3:AC5002",'GET'),
+                   ('row','ETH&IB Switch',7,"'ETH&IB Switch'!A7:U7",'GET'),
+                   ('metadata',None,None,None,'POST'))
+            from urllib.parse import parse_qs,urlsplit
+            for kind,sheet,row,expected_range,method in cases:
+                # Owned child validates the actual private input with the real
+                # planner and emits its exact path correlation. Not native TLS;
+                # separate native cases below establish the wire boundaries.
+                program='''import sys,os,hashlib
+sys.path[:0]=[sys.argv[1],sys.argv[1]+"/tools"]
+from monitor import issue_tracker_history_read_launcher as entry
+binding,token,plan=entry._parse_request(sys.stdin.buffer.read(),sys.argv[2])
+body=b'{"owned":"shape"}'
+header=entry._canonical({'schema_version':1,'nonce':sys.argv[2],'request_path_sha256':hashlib.sha256(plan.path.encode('ascii')).hexdigest(),'status':200,'body_sha256':hashlib.sha256(body).hexdigest(),'body_bytes':len(body)})
+os.write(1,header+body)
+'''
+                with self.subTest(kind=kind), ExitStack() as owned_stack:
+                    calls,children=self.intercept(owned_stack,program,writer,owner,binding)
+                    unit=module.OwnedSheetsReadUnit(writer,owner,binding,token,read_kind=kind,sheet=sheet,row=row)
+                    result=unit.read_once(); self.assertEqual(b'{"owned":"shape"}',result.data)
+                    plan=module._prepare(binding,token,kind,sheet,row)
+                    query=parse_qs(urlsplit(plan.path).query)
+                    self.assertEqual(method,plan.method); self.assertEqual('sheets.googleapis.com',plan.host)
+                    if expected_range is not None: self.assertIn(expected_range,query['ranges'])
+                    if kind=='template_identity': self.assertNotIn('ranges',query)
+                    if kind=='metadata':
+                        self.assertTrue(urlsplit(plan.path).path.endswith('/developerMetadata:search'))
+                        self.assertEqual(b'{"dataFilters":[{"developerMetadataLookup":{}}]}',plan.body)
+                    self.assertEqual(1,len(calls)); self.assertEqual(0,children[0].returncode)
+                    with self.assertRaises(module.HistoryReadLauncherHold): unit.read_once()
+                    ownership.owner_lock_fd(owner,binding)
+
+    def test_arbitrary_kind_sheet_row_or_url_never_launches(self):
+        module=load()
+        self.assertTrue(hasattr(module,'OwnedSheetsReadUnit'),'strict fixed read dispatch missing')
+        with ExitStack() as stack:
+            _local,_ownership,writer,owner,binding,token,_config=self.owners(stack)
+            with mock.patch.object(module.subprocess,'Popen') as launch:
+                for kind,sheet,row in (('mutation',None,None),('https://foreign.invalid/',None,None),
+                                       ('history_tail','ETH Cabling',None),('whitelist',None,3),
+                                       ('activity','foreign',None),('insertion','ETH Cabling',True),
+                                       ('row','IB Cabling',True),('row','IB Cabling',2),('row','IB Cabling',None)):
+                    with self.subTest(kind=kind),self.assertRaises(module.HistoryReadLauncherHold):
+                        module.OwnedSheetsReadUnit(writer,owner,binding,token,read_kind=kind,sheet=sheet,row=row)
+                launch.assert_not_called()
+
+    def test_actual_supervised_native_whitelist_template_and_readonly_metadata_are_typed_not_admission(self):
+        module=load()
+        from test_req7_online_whitelist_read import document as whitelist_document, HEADER
+        from test_req7_sheets_read_decode import identity_response, header_response, TEMPLATE_SHEETS, HEADERS
+        from monitor import issue_tracker_sheets_read_decode as decode, issue_tracker_online_whitelist_read as whitelist
+        from monitor import issue_tracker_metadata_capacity as metadata
+        from monitor.issue_tracker_whitelist import freeze_whitelist_sheet
+        local_rules=freeze_whitelist_sheet([HEADER,(None,None,None,None,'leaf-01',None),
+                                          (None,None,None,None,'spine-*',None)])
+        expected_local=local_rules.canonical_bytes; identity=None; seen_kinds=[]
+        documents=[('whitelist',whitelist_document()),('template_identity',identity_response()),
+                   ('template_headers',header_response()),('metadata',{})]
+        with ExitStack() as stack:
+            _local,ownership,writer,owner,binding,token,_config=self.owners(stack)
+            for kind,value in documents:
+                if kind!='metadata': value['spreadsheetId']=TARGET
+                body=json.dumps(value,separators=(',',':')).encode()
+                reply=b'HTTP/1.1 200 OK\r\nContent-Length: '+str(len(body)).encode()+b'\r\nConnection: close\r\n\r\n'+body
+                with self.subTest(kind=kind),self.server(reply,hostname='sheets.googleapis.com',destination='sheets.googleapis.com') as (records,errors),ExitStack() as launched:
+                    port=socket.getaddrinfo('sheets.googleapis.com',443)[0][4][1]
+                    calls,children=self.intercept(launched,self.child_fixture(port),writer,owner,binding)
+                    unit=module.OwnedSheetsReadUnit(writer,owner,binding,token,read_kind=kind)
+                    result=unit.read_once(); plan=module._prepare(binding,token,kind,None,None)
+                    self.assertEqual(body,result.data); self.assertEqual(1,len(calls)); self.assertEqual(0,children[0].returncode)
+                    if kind=='whitelist':
+                        observed=whitelist.compare_online_whitelist_read(plan,result,local_rules)
+                        self.assertEqual(local_rules.sha256,observed.rules_sha256)
+                        self.assertEqual(expected_local,local_rules.canonical_bytes)
+                    elif kind=='template_identity':
+                        identity=decode.decode_template_identity(plan,result)
+                        self.assertEqual(tuple((title,100+i) for i,title in enumerate(TEMPLATE_SHEETS)),identity.sheet_ids)
+                    elif kind=='template_headers':
+                        observed=decode.decode_template_headers(plan,result,identity)
+                        self.assertEqual(tuple((title,len(header)) for title,header in HEADERS.items()),observed.checked_headers)
+                    else:
+                        observed=metadata.observe_metadata_capacity(plan,result,identity,reservations=())
+                        self.assertEqual('VISIBLE_ONLY_UNPROVED',observed.outcome)
+                        self.assertFalse(observed.inventory_complete)
+                    ownership.owner_lock_fd(owner,binding); seen_kinds.append(kind)
+                self.assertEqual([],errors); self.assertEqual(1,len(records))
+                self.assertIn(b'Host: sheets.googleapis.com\r\n',records[0][1])
+                if kind=='metadata':
+                    self.assertTrue(records[0][0].startswith(b'POST /v4/spreadsheets/'+TARGET.encode()+b'/developerMetadata:search?'))
+                    self.assertEqual(b'{"dataFilters":[{"developerMetadataLookup":{}}]}',records[0][2])
+                else:
+                    self.assertTrue(records[0][0].startswith(b'GET /v4/spreadsheets/'+TARGET.encode()+b'?'))
+                    self.assertEqual(b'',records[0][2])
+            self.assertEqual(['whitelist','template_identity','template_headers','metadata'],seen_kinds)
 
 
 if __name__=='__main__': unittest.main()
