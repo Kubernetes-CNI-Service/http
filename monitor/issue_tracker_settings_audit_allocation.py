@@ -7,6 +7,7 @@ repairs a partial journal, authorizes a source, or proves remote delivery.
 import hashlib
 import json
 import os
+from contextlib import contextmanager
 
 from monitor import issue_tracker_local_commit as local
 from monitor import issue_tracker_attempt_journal as journal
@@ -24,43 +25,83 @@ class SettingsAuditHold(ValueError):
     def __init__(self): super().__init__('req7_settings_audit_unproved')
 
 
-def _settings(writer_token):
-    """Reopen actual original settings, never accept a caller queue/snapshot."""
+@contextmanager
+def _hold_settings_originals(writer_token):
+    """Keep original FD identities/bytes/names across reads and allocation.
+
+    Same-byte replacement is not an immutable original. Root directory mtime
+    is deliberately not frozen: allocation legitimately adds its own witness
+    there, but INITIALIZED and the named settings subtree remain pinned.
+    """
     owner = local._owner(writer_token)
-    opened = []
+    held = []
     try:
-        folder = local._directory(owner.root_fd, 'settings'); opened.append(folder)
-        if set(os.listdir(folder)) != {'events', 'outbox', 'current'}: raise SettingsAuditHold()
-        events = local._directory(folder, 'events'); opened.append(events)
-        outbox = local._directory(folder, 'outbox'); opened.append(outbox)
-        names = set(os.listdir(events))
+        def directory(parent,name):
+            descriptor=local._directory(parent,name)
+            held.append((parent,name,descriptor,True,None,None))
+            journal._named(parent,name,descriptor,directory=True)
+            identity=journal._identity(os.fstat(descriptor)); names=set(os.listdir(descriptor))
+            if journal._identity(os.fstat(descriptor))!=identity: raise SettingsAuditHold()
+            held[-1]=(parent,name,descriptor,True,identity,names)
+            return descriptor,names
+        def file(parent,name):
+            descriptor=os.open(name,local._flags(),dir_fd=parent)
+            held.append((parent,name,descriptor,False,None,None))
+            info=local._check(descriptor,directory=False)
+            journal._named(parent,name,descriptor,directory=False)
+            identity=journal._identity(info)
+            raw=os.pread(descriptor,16385,0)
+            if len(raw)>16384 or len(raw)!=info.st_size or journal._identity(os.fstat(descriptor))!=identity:
+                raise SettingsAuditHold()
+            held[-1]=(parent,name,descriptor,False,identity,raw)
+            return raw
+        folder,settings_names=directory(owner.root_fd,'settings')
+        if settings_names!={'events','outbox','current'}: raise SettingsAuditHold()
+        events,names=directory(folder,'events')
+        outbox,outbox_names=directory(folder,'outbox')
         if (not names or any(settings._EVENT_NAME.fullmatch(name) is None for name in names)
-                or set(os.listdir(outbox)) != names):
+                or outbox_names != names):
             raise SettingsAuditHold()
-        raw_events = {int(name[:-5]): journal._read(events, name, 16384) for name in names}
-        current = journal._read(folder, 'current', 16384)
-        initialized = journal._read(owner.root_fd, 'INITIALIZED', 16384)
+        raw_events={int(name[:-5]):file(events,name) for name in sorted(names)}
+        raw_outbox={int(name[:-5]):file(outbox,name) for name in sorted(names)}
+        current=file(folder,'current'); initialized=file(owner.root_fd,'INITIALIZED')
+        def verify():
+            if local._owner(writer_token) is not owner: raise SettingsAuditHold()
+            for parent,name,descriptor,is_directory,identity,image in held:
+                local._check(descriptor,directory=is_directory)
+                journal._named(parent,name,descriptor,directory=is_directory)
+                if journal._identity(os.fstat(descriptor))!=identity: raise SettingsAuditHold()
+                if (set(os.listdir(descriptor)) if is_directory else os.pread(descriptor,16385,0))!=image:
+                    raise SettingsAuditHold()
+                journal._named(parent,name,descriptor,directory=is_directory)
+                if journal._identity(os.fstat(descriptor))!=identity: raise SettingsAuditHold()
+            local._owner(writer_token)
+        verify()
+        yield (raw_events,current,initialized,raw_outbox),verify
+        verify()
+    finally:
+        close_failed=False
+        for _parent,_name,descriptor,_directory,_identity,_image in reversed(held):
+            try: os.close(descriptor)
+            except OSError: close_failed=True
+        if close_failed: raise SettingsAuditHold()
+
+
+def _settings(writer_token):
+    """Observe pinned originals, never accept a caller queue/snapshot."""
+    with _hold_settings_originals(writer_token) as (images,verify):
+        raw_events,current,initialized,raw_outbox=images
         chain.validate_k_chain_snapshot(raw_events, current, initialized)
         result = []
         for revision, raw in sorted(raw_events.items()):
             digest = hashlib.sha256(raw).hexdigest()
             expected = chain._canonical_line({'schema_version': 1, 'revision': revision, 'event_sha256': digest})
-            if journal._read(outbox, f'{revision}.json', 16384) != expected: raise SettingsAuditHold()
+            if raw_outbox[revision] != expected: raise SettingsAuditHold()
             event = chain._parse(raw, chain._EVENT_KEYS)
             result.append((revision, digest, {'event_id': f'settings:{revision}:{digest}',
                 'recorded_at_utc': event['recorded_at'], 'details': raw.decode('utf-8').rstrip('\n')}))
-        if (set(os.listdir(events)) != names or set(os.listdir(outbox)) != names
-                or set(os.listdir(folder)) != {'events', 'outbox', 'current'}
-                or journal._read(folder, 'current', 16384) != current
-                or journal._read(owner.root_fd, 'INITIALIZED', 16384) != initialized):
-            raise SettingsAuditHold()
-        journal._named(folder, 'events', events, directory=True)
-        journal._named(folder, 'outbox', outbox, directory=True)
-        journal._named(owner.root_fd, 'settings', folder, directory=True)
-        local._owner(writer_token)
+        verify()
         return tuple(result)
-    finally:
-        for descriptor in reversed(opened): os.close(descriptor)
 
 
 def pending_settings_audits(writer_token):
@@ -133,10 +174,11 @@ def _sync_marker(parent, folder, header, assignments):
     finally: os.close(descriptor)
 
 
-def _observe(writer_token, spreadsheet_token, binding, unit, *, create):
+def _observe_held(writer_token, spreadsheet_token, binding, unit, *, create, verify_settings):
     folder = None; failed = False
     try:
         owner, header, assignments = _originals(writer_token, spreadsheet_token, binding, unit)
+        verify_settings()
         if create:
             # Allocation must precede ANY attempt; UNKNOWN never gains audits.
             if global_journal.inspect_global_unit(spreadsheet_token, binding, unit).attempt_count != 0:
@@ -156,6 +198,7 @@ def _observe(writer_token, spreadsheet_token, binding, unit, *, create):
             if global_journal.inspect_global_unit(spreadsheet_token, binding, unit).attempt_count != 0:
                 raise SettingsAuditHold()
             journal._named(owner.root_fd, _FOLDER, folder, directory=True)
+            verify_settings()
             # ALL eight witness+image barriers precede the unit marker.
             local._write_new(folder, 'INITIALIZED', _marker(header, assignments))
         else:
@@ -169,6 +212,7 @@ def _observe(writer_token, spreadsheet_token, binding, unit, *, create):
         _inspect(owner.root_fd, folder, header, assignments)
         if create and global_journal.inspect_global_unit(spreadsheet_token, binding, unit).attempt_count != 0:
             raise SettingsAuditHold()
+        verify_settings()
     except Exception: failed = True
     finally:
         if folder is not None:
@@ -176,6 +220,17 @@ def _observe(writer_token, spreadsheet_token, binding, unit, *, create):
             except OSError: failed = True
     if failed: raise SettingsAuditHold()
     return assignments
+
+
+def _observe(writer_token, spreadsheet_token, binding, unit, *, create):
+    failed=False
+    try:
+        with _hold_settings_originals(writer_token) as (_images,verify):
+            result=_observe_held(writer_token,spreadsheet_token,binding,unit,
+                                 create=create,verify_settings=verify)
+    except Exception: failed=True
+    if failed: raise SettingsAuditHold()
+    return result
 
 
 def prepare_settings_audit_allocation(writer_token, spreadsheet_token, binding, unit):

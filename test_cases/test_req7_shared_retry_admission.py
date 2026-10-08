@@ -61,11 +61,35 @@ class SharedRetryAdmissionWorkflowTests(unittest.TestCase):
     from test_cases.test_req7_native_tls_wire import Req7NativeTlsWireTests as native
     setUp=native.setUp
 
+    def test_prior_owner_fixture_reload_preserves_actual_registry_and_revokes_original_owner(self):
+        from test_cases.test_req7_spreadsheet_owner import load as load_owner
+        from test_cases.test_req7_global_attempt_journal import load as load_journal
+        previous_owner = load_owner()
+        previous_journal = load_journal()
+        self.assertIs(previous_journal.ownership, previous_owner)
+        ownership = load_owner()
+        self.assertIsNot(ownership, previous_owner)
+        with ExitStack() as stack:
+            admission,local,journal,writer,owner,target,unit,store,image,start,clock=self.owned(stack)
+            self.assertIs(journal.ownership, ownership)
+            self.assertIsNotNone(ownership._validated_owner(owner,target))
+            self.assertEqual((1,'UNKNOWN'),
+                (journal.inspect_global_unit(owner,target,unit).attempt_count,
+                 journal.inspect_global_unit(owner,target,unit).outcome))
+            with self.assertRaises(ownership.SpreadsheetOwnerHold):
+                ownership._validated_owner(object(),target)
+        with self.assertRaises(ownership.SpreadsheetOwnerHold):
+            ownership._validated_owner(owner,target)
+
     def owned(self,stack):
         from test_cases.test_req7_history_read_launcher import Req7HistoryReadLauncherWorkflowTests as reads
         from test_cases.test_req7_send_unit import load as load_unit, inputs, TARGET
         from monitor import issue_tracker_admission as admission, issue_tracker_global_attempt_journal as journal
         local,ownership,writer,owner,target,_token,_config=reads.owners(self,stack,target_id=TARGET)
+        # A preceding native workflow may reload the canonical owner module.
+        # Scope this fixture's journal to the actual held owner's registry;
+        # retain all production token, binding and native FD checks unchanged.
+        stack.enter_context(mock.patch.object(journal,'ownership',ownership))
         cycle=SimpleNamespace(qualifying=True,cycle_id='actual-owned-cycle',completion_sha256='a'*64,
                               project_key='owned-project',scope='prod')
         store=SimpleNamespace(project_key='owned-project',scope='prod')

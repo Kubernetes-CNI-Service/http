@@ -895,6 +895,12 @@ COMPLETE、DELIVERED、outbox 清理或后续单元回收，不能冒称 REQ7 �
 原分配／UNKNOWN 的实际冷进程回读保留 `-I -B`；本机隔离 fixture 仅在测试启动
 边界注入实测 PyYAML distribution root，不注入整个 user-site，不提供生产依赖
 fallback，也不把该本地回读当作容器解释器、SDK 或真机资格证明。
+pending 读取及分配的整个调用另保持原 settings/events/outbox/current/INITIALIZED
+目录和文件 FD；核对原完整 stat/inode、字节与命名空间，同字节替换也 HOLD。
+分配前后及 INITIALIZED 之前必须核同一原像，不得通过重新打开当前路径来采用
+替换件。根目录允许本调用新增自己的分配见证，但不允许替换原 settings 子树。
+原 allocation/outbox/journal 不回填、不清除；这只补原件稳定性，不授予
+COMPLETE/DELIVERED、outbox 消费、发送或在线 worker 激活。
 `test_req7_sheets_read_plan` / `test_req7_sheets_read_decode` 与
 `test_req7_online_whitelist_read` 固定精确列／坐标、十四表身份、四张 row-2 多行字面表头
 和完整有限 Whitelist；非原子 GET 不构成 enrollment、发送许可或完整格式快照。

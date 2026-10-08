@@ -89,6 +89,58 @@ class Req7SettingsAuditAllocationTests(unittest.TestCase):
             self.assertEqual((self.audit0,), self.module.pending_settings_audits(writer))
         self.assertEqual(before, self.image()); self.assertFalse(self.allocation.exists())
 
+    def test_pending_never_adopts_same_byte_replaced_original_settings_files(self):
+        for relative in ('settings/events/0.json','settings/outbox/0.json','settings/current','INITIALIZED',
+                         'settings/events','settings/outbox','settings'):
+            with self.subTest(original=relative):
+                case=type(self)('test_pending_projection_comes_from_exact_actual_event_and_retains_outbox'); case.setUp()
+                try:
+                    path=case.project/'.tracker'/relative; preserved=case.root/'preserved-settings-original'
+                    validate=case.module.chain.validate_k_chain_snapshot; changed=[]
+                    def validated_then_replaced(*args,**kwargs):
+                        result=validate(*args,**kwargs)
+                        if not changed:
+                            if path.is_dir():
+                                import shutil
+                                path.rename(preserved); shutil.copytree(preserved,path)
+                            else:
+                                image=path.read_bytes(); path.rename(preserved); path.write_bytes(image); path.chmod(0o600)
+                            changed.append(True)
+                        return result
+                    with local.writer_owner(case.project,case.publication) as writer, \
+                            mock.patch.object(case.module.chain,'validate_k_chain_snapshot',side_effect=validated_then_replaced):
+                        with self.assertRaises(case.module.SettingsAuditHold): case.module.pending_settings_audits(writer)
+                    self.assertEqual([True],changed)
+                    self.assertFalse(case.allocation.exists())
+                    if path.is_dir():
+                        self.assertEqual({str(p.relative_to(preserved)):p.read_bytes() for p in preserved.rglob('*') if p.is_file()},
+                                         {str(p.relative_to(path)):p.read_bytes() for p in path.rglob('*') if p.is_file()})
+                    else: self.assertEqual(preserved.read_bytes(),path.read_bytes())
+                finally: case.doCleanups()
+
+    def test_actual_allocation_pins_original_event_before_final_marker(self):
+        value=self.unit(); native_write=local._write_new
+        with self.owners() as (writer,sheet):
+            self.global_journal.prepare_global_unit(sheet,binding(),value)
+            path=self.project/'.tracker/settings/events/0.json'; preserved=self.root/'preserved-allocation-event'
+            changed=[]
+            def write_then_replace(parent,name,raw):
+                result=native_write(parent,name,raw)
+                if name=='ASSIGNMENTS' and not changed:
+                    image=path.read_bytes(); path.rename(preserved); path.write_bytes(image); path.chmod(0o600)
+                    changed.append(True)
+                return result
+            with mock.patch.object(local,'_write_new',side_effect=write_then_replace):
+                with self.assertRaises(self.module.SettingsAuditHold):
+                    self.module.prepare_settings_audit_allocation(writer,sheet,binding(),value)
+            self.assertEqual([True],changed)
+            self.assertFalse((self.allocation/'INITIALIZED').exists())
+            # Existing independent global journal contract: no attempted wire
+            # is not UNKNOWN. Rejection must leave this original zero count.
+            self.assertEqual((0,'UNATTEMPTED_OBSERVATION'),(self.global_journal.inspect_global_unit(sheet,binding(),value).attempt_count,
+                                            self.global_journal.inspect_global_unit(sheet,binding(),value).outcome))
+            self.assertEqual(self.event0,(self.project/'.tracker/settings/events/0.json').read_bytes())
+
     def test_real_settings_composer_global_intents_keep_allocation_and_new_event_pending(self):
         value = self.unit()
         with self.owners() as (writer, sheet):
