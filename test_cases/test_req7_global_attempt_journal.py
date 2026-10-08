@@ -292,6 +292,15 @@ class Req7GlobalAttemptJournalWorkflowTests(unittest.TestCase):
             with self.assertRaises(self.module.GlobalAttemptHold):
                 with self.module._hold_counted_original_wire(writer,token,target,self.value): self.fail('consumed interrupted claim retried')
 
+    def test_counted_handoff_borrows_original_action_fd_not_a_rebuilt_or_current_source_image(self):
+        with self.counted_wire_owners() as (writer,token,target):
+            with self.module._hold_counted_original_wire(writer,token,target,self.value) as image:
+                self.assertTrue(hasattr(image,'action_fd'),'isolated handoff needs held original ACTION, not recompilation')
+                self.assertEqual((self.store/'ACTION-PREIMAGE').stat().st_ino,os.fstat(image.action_fd).st_ino)
+                self.assertEqual(self.value.action_preimage,os.pread(image.action_fd,1024*1024+1,0))
+                self.assertFalse(os.get_inheritable(image.action_fd))
+            with self.assertRaises(OSError): os.fstat(image.action_fd)
+
     def test_cold_process_claim_consumes_original_once_and_never_rebuilds_or_recounts(self):
         with self.counted_wire_owners() as (_writer,_token,target):
             original = {p.name:p.read_bytes() for p in self.store.iterdir()}

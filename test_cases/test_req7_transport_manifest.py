@@ -34,6 +34,16 @@ SCRIPTS = {
 
 
 class Req7TransportManifestCandidateTests(unittest.TestCase):
+    def test_original_fd_mutation_workflow_includes_durable_claim_and_total_supervision(self):
+        manifest = json.loads((ROOT/'test_cases/script_test_manifest.json').read_text())
+        required = {'monitor/issue_tracker_global_attempt_journal.py','monitor/issue_tracker_spreadsheet_owner.py',
+                    'monitor/issue_tracker_send_unit.py','monitor/issue_tracker_send_intent.py',
+                    'monitor/issue_tracker_local_commit.py','monitor/issue_tracker_tls_inputs.py',
+                    'monitor/issue_tracker_attempt_supervision.py','monitor/issue_tracker_mutation_rejection.py'}
+        self.assertTrue(any(required <= set(rule['members']) and
+                            'test_cases.test_req7_native_supervised_workflow' in rule['tests']
+                            for rule in manifest['workflows']))
+
     def test_isolated_original_wire_coherence_needs_no_yaml_or_workbook_dependency(self):
         # A fixed mutation child checks original ACTION/WIRE, never compiles
         # sources. Its isolated graph must not require parent-only dependencies.

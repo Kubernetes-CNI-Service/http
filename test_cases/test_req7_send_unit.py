@@ -49,6 +49,22 @@ def inputs(count=2):
 class Req7SendUnitDirectTests(unittest.TestCase):
     def setUp(self): self.module = load()
 
+    def test_original_action_wire_rehydration_checks_coherence_without_recompiling_sources(self):
+        self.assertTrue(hasattr(self.module,'_original_unit'),'original images must not recompile current sources')
+        original = self.module.freeze_send_unit(**inputs())
+        with mock.patch.object(self.module,'_freeze',side_effect=AssertionError('no source recompilation')):
+            rebuilt = self.module._original_unit(original.action_preimage,original.wire_bytes)
+        self.assertEqual(original,rebuilt)
+        self.assertEqual((('switch:0000','WIRE-CANDIDATE'),('switch:0001','WIRE-CANDIDATE')),rebuilt.outcomes)
+        self.assertEqual(2,rebuilt.history_rows_expected)
+        for action,wire in ((original.action_preimage,b'{}'),(b'{}',original.wire_bytes),
+                            (original.action_preimage+b' ',original.wire_bytes),
+                            (original.action_preimage,b'x'*(1024*1024+1)),
+                            (b'x'*(1024*1024+1),original.wire_bytes)):
+            with self.subTest(action_size=len(action),wire_size=len(wire)):
+                with self.assertRaises(self.module.SendUnitHold) as caught: self.module._original_unit(action,wire)
+                self.assertIsNone(caught.exception.__context__)
+
     def test_fixed_mutation_shape_binds_whole_original_batch_and_has_no_url_or_budget_override(self):
         self.assertTrue(hasattr(self.module, 'prepare_mutation_request'), 'fixed immutable mutation shape missing')
         from monitor.issue_tracker_online_target import OnlineTargetBinding

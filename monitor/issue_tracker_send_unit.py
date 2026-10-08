@@ -43,6 +43,32 @@ class FrozenSendUnit:
     outcome: str
 
 
+def _original_unit(action_preimage,wire_bytes):
+    """Coherent original images only; never current source recompilation.
+
+    Private isolated-child representation, NOT protected source/admission
+    authority. The caller must hand off actual held original journal images.
+    No chunking, canonical rewriting, missing-field adoption or action repair.
+    """
+    failed = False
+    try:
+        if any(type(raw) is not bytes or not 1 <= len(raw) <= _MAX_BODY
+               for raw in (action_preimage,wire_bytes)): raise SendUnitHold()
+        action = json.loads(action_preimage.decode('utf-8','strict'),object_pairs_hook=_pairs,parse_constant=_nonfinite)
+        if type(action) is not dict or _canonical(action) != action_preimage: raise SendUnitHold()
+        unit_id = hashlib.sha256(_canonical(action['identity'])).hexdigest()
+        outcomes = tuple(tuple(pair) for pair in action['outcomes'])
+        result = FrozenSendUnit(unit_id,wire_bytes,hashlib.sha256(wire_bytes).hexdigest(),
+            action_preimage,hashlib.sha256(action_preimage).hexdigest(),outcomes,
+            hashlib.sha256(_canonical(action['outcomes'])).hexdigest(),
+            (int(unit_id[:8],16)&0x7fffffff) or 1,len(action['business'])+len(action['audits']),(), 'WIRE-CANDIDATE')
+        from monitor.issue_tracker_send_intent import _projection
+        _projection(result)
+    except Exception: failed = True
+    if failed: raise SendUnitHold()
+    return result
+
+
 def prepare_mutation_request(binding, token, unit):
     """Whole coherent C19 image, fixed batchUpdate path; no URL/body override.
 

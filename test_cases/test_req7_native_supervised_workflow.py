@@ -6,6 +6,8 @@ The test uses the actual 30-second total budget, not an increased socket timeout
 or a mocked monotonic clock. Full deployment/native DNS identity remains NOT RUN.
 """
 import fcntl
+import hashlib
+import json
 import os
 from pathlib import Path
 import signal
@@ -21,7 +23,7 @@ CANDIDATE = Path(__file__).resolve().parents[1]
 # Explicit test-only bootstrap for Python -I. The partial candidate deliberately
 # does not copy the governed main package; the parent supplies its owning test
 # package root. No production launcher accepts this argument or a source root.
-if len(sys.argv) > 1 and sys.argv[1] in ("--owned-fixture-child", "--owned-fixture-input-child", "--owned-fixture-dns-child", "--owned-fixture-import-check"):
+if len(sys.argv) > 1 and sys.argv[1] in ("--owned-fixture-child", "--owned-fixture-input-child", "--owned-fixture-dns-child", "--owned-fixture-mutation-child", "--owned-fixture-import-check"):
     package_root = sys.argv[2] if sys.argv[1] == "--owned-fixture-import-check" else sys.argv[4]
     sys.path.insert(0, package_root)
     sys.path.insert(0, str(Path(package_root) / "tools"))
@@ -90,10 +92,113 @@ def owned_blocked_dns_fixture_child():
     os.write(1, result.data)
 
 
+def owned_original_mutation_fixture_child():
+    # Test-owned isolated program only. Production TLS/FD/coherence and parent
+    # supervision are real; only local DNS and root/CA metadata are synthetic.
+    from monitor import issue_tracker_tls_inputs as tls
+    from monitor.issue_tracker_online_target import OnlineTargetBinding
+    from monitor.issue_tracker_sdk_authentication import AuthenticatedToken
+    raw = sys.stdin.buffer.read(32769)
+    if len(raw) > 32768: raise AssertionError('private input limit unchanged')
+    value = json.loads(raw)
+    if set(value) != {'binding','token','expires_at'}: raise AssertionError('no body/program/URL override')
+    target = OnlineTargetBinding(**value['binding'])
+    token = AuthenticatedToken(value['token'],value['expires_at'])
+    fixture = object.__new__(tls_fixtures.Req7TlsInputsDirectTests)
+    fixture.root = Path(sys.argv[2]); fixture.path = fixture.root/'etc/ssl/certs/ca-certificates.crt'
+    port = int(sys.argv[3]); action_fd,wire_fd = int(sys.argv[5]),int(sys.argv[6])
+    def resolve(host,endpoint,*args,**kwargs):
+        if (host,endpoint) != ('sheets.googleapis.com',443): raise AssertionError('foreign destination')
+        return [(socket.AF_INET,socket.SOCK_STREAM,6,'',('127.0.0.1',port))]
+    with fixture.fixture(), mock.patch('socket.getaddrinfo',side_effect=resolve):
+        native = tls.NativeOriginalSheetsMutationUnit(target,token,action_fd,wire_fd)
+        observed = native.send_once()
+        try: native.send_once()
+        except tls.TlsInputHold: pass
+        else: raise AssertionError('one object resent original')
+    if 'yaml' in sys.modules or 'openpyxl' in sys.modules: raise AssertionError('parent-only dependencies in child')
+    os.write(1,json.dumps(vars(observed),sort_keys=True,separators=(',',':')).encode()+b'\n')
+
+
 class Req7NativeSupervisedWorkflowTests(unittest.TestCase):
     setUp = tls_fixtures.Req7TlsInputsDirectTests.setUp
     certificates = wire_fixtures.Req7NativeTlsWireTests.certificates
     fixture = tls_fixtures.Req7TlsInputsDirectTests.fixture
+    server = wire_fixtures.Req7NativeTlsWireTests.server
+
+    def original_mutation(self,stack,*,large=False):
+        from test_cases.test_req7_history_read_launcher import Req7HistoryReadLauncherWorkflowTests as owners
+        from test_cases.test_req7_global_attempt_journal import load as load_global
+        from test_cases.test_req7_send_unit import load as load_unit, inputs, TARGET
+        local,ownership,writer,owner,target,token,_config = owners.owners(self,stack,target_id=TARGET)
+        arguments = inputs(20 if large else 2)
+        if large: arguments['business'] = tuple({**item,'values':{'L':'x'*4096}} for item in arguments['business'])
+        value = load_unit().freeze_send_unit(**arguments); journal = load_global()
+        journal.prepare_global_unit(owner,target,value); journal.record_global_attempt_intent(owner,target,value)
+        image = stack.enter_context(journal._hold_counted_original_wire(writer,owner,target,value))
+        raw = json.dumps({'binding':vars(target),'token':token.value,'expires_at':token.expires_at},sort_keys=True,separators=(',',':')).encode()
+        self.assertLessEqual(len(raw),32768); self.assertNotIn(value.wire_bytes,raw)
+        locks = (local._owner(writer).lock_fd,ownership.owner_lock_fd(owner,target))
+        contenders = tuple(os.open(self.root/'project/.tracker/LOCK' if index==0 else
+            self.root/'var/lib/http-ztp-container/issue-tracker'/(hashlib.sha256(TARGET.encode()).hexdigest()+'.lock'),os.O_RDWR)
+            for index in range(2))
+        for fd in contenders: stack.callback(os.close,fd)
+        return journal,owner,target,value,image,raw,locks,contenders
+
+    def launch_original_fixture(self,port,image,locks):
+        started = time.monotonic()
+        child = subprocess.Popen([sys.executable,'-I','-B',str(Path(__file__).resolve()),
+            '--owned-fixture-mutation-child',str(self.root),str(port),str(tls_fixtures.ROOT),str(image.action_fd),str(image.fd)],
+            stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,close_fds=True,
+            start_new_session=True,pass_fds=locks+(image.action_fd,image.fd),env={'LC_ALL':'C'})
+        self.addCleanup(cleanup_owned_fixture_child,child)
+        return child,started
+
+    def test_real_isolated_large_original_mutation_consumes_claim_once_with_dual_locks_and_no_resend(self):
+        from contextlib import ExitStack
+        supervision = supervision_fixtures.load()
+        reply = b'HTTP/1.1 401 Denied\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}'
+        with self.server(reply,hostname='sheets.googleapis.com',destination='sheets.googleapis.com',request_limit=1024*1024) as (records,errors), ExitStack() as stack:
+            port = socket.getaddrinfo('sheets.googleapis.com',443)[0][4][1]
+            journal,owner,target,value,image,raw,locks,contenders = self.original_mutation(stack,large=True)
+            self.assertGreater(len(value.wire_bytes),65536)
+            child,started = self.launch_original_fixture(port,image,locks)
+            completion = supervision.supervise_owned_attempt(child,started_monotonic=started,kind='mutation',request_bytes=raw)
+            self.assertTrue(completion.termination_confirmed); self.assertEqual(0,child.returncode)
+            result = json.loads(completion.data)
+            self.assertEqual({'status':401,'wire_sha256':value.wire_sha256,'response_sha256':hashlib.sha256(b'{}').hexdigest(),'outcome':'UNKNOWN'},result)
+            for fd in contenders:
+                with self.assertRaises(BlockingIOError): fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            self.assertEqual(1,journal.inspect_global_unit(owner,target,value).attempt_count)
+            self.assertFalse((self.root/'var/lib/http-ztp-container/issue-tracker'/(hashlib.sha256(target.spreadsheet_id.encode()).hexdigest()+'.journal')/'ATTEMPT-2').exists())
+        self.assertEqual([],errors); self.assertEqual(1,len(records))
+        self.assertEqual(b'POST /v4/spreadsheets/synthetic_spreadsheet_id_0001:batchUpdate HTTP/1.1\r\n',records[0][0])
+        self.assertEqual(value.wire_bytes,records[0][2]); self.assertEqual(22,len(json.loads(records[0][2])['requests']))
+
+    def test_real_original_mutation_slow_body_is_killed_at_total_60_seconds_and_keeps_unknown(self):
+        from contextlib import ExitStack
+        supervision = supervision_fixtures.load(); stop = threading.Event(); reached = threading.Event()
+        def slow(transport):
+            transport.sendall(b'HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{')
+            reached.set(); stop.wait(75)
+        try:
+            with self.server(slow,hostname='sheets.googleapis.com',destination='sheets.googleapis.com') as (records,errors), ExitStack() as stack:
+                port = socket.getaddrinfo('sheets.googleapis.com',443)[0][4][1]
+                journal,owner,target,value,image,raw,locks,contenders = self.original_mutation(stack)
+                child,started = self.launch_original_fixture(port,image,locks)
+                try:
+                    with self.assertRaises(supervision.AttemptHold) as caught:
+                        supervision.supervise_owned_attempt(child,started_monotonic=started,kind='mutation',request_bytes=raw)
+                finally: stop.set()
+                self.assertTrue(reached.is_set(),'actual original batch did not reach slow native TLS response')
+                self.assertTrue(caught.exception.termination_confirmed); self.assertIsNotNone(child.poll())
+                elapsed = time.monotonic()-started
+                self.assertGreaterEqual(elapsed,59.5); self.assertLess(elapsed,63.0)
+                for fd in contenders:
+                    with self.assertRaises(BlockingIOError): fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+                self.assertEqual((1,'UNKNOWN'),(journal.inspect_global_unit(owner,target,value).attempt_count,journal.inspect_global_unit(owner,target,value).outcome))
+            self.assertEqual([],errors); self.assertEqual(1,len(records)); self.assertEqual(value.wire_bytes,records[0][2])
+        finally: stop.set()
 
     def test_private_input_eof_precedes_one_native_tls_request_and_completion_retains_parent_lock(self):
         supervision = supervision_fixtures.load(); context = self.certificates()
@@ -264,5 +369,6 @@ class Req7NativeSupervisedWorkflowTests(unittest.TestCase):
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] in ("--owned-fixture-child", "--owned-fixture-input-child"): owned_fixture_child()
     elif len(sys.argv) > 1 and sys.argv[1] == "--owned-fixture-dns-child": owned_blocked_dns_fixture_child()
+    elif len(sys.argv) > 1 and sys.argv[1] == "--owned-fixture-mutation-child": owned_original_mutation_fixture_child()
     elif len(sys.argv) > 1 and sys.argv[1] == "--owned-fixture-import-check": print("owned-fixture-import-ok")
     else: unittest.main()

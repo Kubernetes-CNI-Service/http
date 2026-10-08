@@ -46,6 +46,31 @@ def public_ca():
 
 
 class Req7TlsInputsDirectTests(unittest.TestCase):
+    def test_original_mutation_fd_shape_is_readonly_bounded_and_consumed_on_metadata_failure(self):
+        self.assertTrue(hasattr(self.module,'NativeOriginalSheetsMutationUnit'),'held original image native boundary missing')
+        from test_cases.test_req7_send_unit import load as load_unit, inputs, TARGET
+        from monitor.issue_tracker_online_target import OnlineTargetBinding
+        from monitor.issue_tracker_sdk_authentication import AuthenticatedToken
+        import time
+        unit = load_unit().freeze_send_unit(**inputs())
+        target = OnlineTargetBinding(TARGET,'a'*64,'b'*64)
+        credential = AuthenticatedToken('sentinel.private-token',time.time()+3600)
+        action = self.root/'ACTION'; wire = self.root/'WIRE'
+        action.write_bytes(unit.action_preimage); wire.write_bytes(unit.wire_bytes)
+        action.chmod(0o600); wire.chmod(0o600)
+        a = os.open(action,os.O_RDONLY); w = os.open(wire,os.O_RDONLY); writable = os.open(wire,os.O_RDWR)
+        for fd in (a,w,writable): self.addCleanup(os.close,fd)
+        with self.fixture(), mock.patch.object(self.module,'controlled_tls_context') as ca, mock.patch('http.client.HTTPSConnection') as connecting:
+            for fds in ((a,a),(a,writable),(True,w),(0,w)):
+                with self.assertRaises(self.module.TlsInputHold): self.module.NativeOriginalSheetsMutationUnit(target,credential,*fds)
+            native = self.module.NativeOriginalSheetsMutationUnit(target,credential,a,w)
+            wire.chmod(0o400)
+            with self.assertRaises(self.module.TlsInputHold) as caught: native.send_once()
+            self.assertIsNone(caught.exception.__context__)
+            wire.chmod(0o600)
+            with self.assertRaises(self.module.TlsInputHold): native.send_once()
+            ca.assert_not_called(); connecting.assert_not_called()
+
     def test_native_mutation_revalidates_fixed_shape_before_ca_or_connection(self):
         self.assertTrue(hasattr(self.module,'NativeSheetsMutationUnit'),'fixed one-shot native mutation unit missing')
         from dataclasses import replace

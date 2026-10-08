@@ -6,6 +6,7 @@ default/system-directory/environment trust is loaded. Local owned-file tests
 do not prove deployment Python/SSL/CA identity or any handshake/deadline.
 """
 from dataclasses import dataclass, field
+import fcntl
 import hashlib
 import http.client
 import math
@@ -269,6 +270,51 @@ class NativeSheetsMutationUnit:
             observed = observe_rejection(response.status,response.data,complete=response.complete)
             result = NativeMutationObservation(response.status,self._prepared.wire_sha256,
                 observed.body_sha256,observed.outcome)
+        except Exception: failed = True
+        if failed: raise TlsInputHold()
+        return result
+
+
+class NativeOriginalSheetsMutationUnit(NativeSheetsMutationUnit):
+    """Uninstalled borrowed original FD boundary, NOT an admission entry.
+
+    Original read-only private ACTION/WIRE <=1 MiB each; one held pread per
+    image, no source/path reopening, no body input/URL/CA/budget override.
+    The fixed parent still must supervise TOTAL 60 seconds, retain both locks
+    and consume a fresh governed opportunity plus original count once. This
+    boundary alone establishes neither provenance nor a durable send permit.
+    """
+    def __init__(self,binding,token,action_fd,wire_fd):
+        failed = False
+        try:
+            if (os.geteuid() != 0 or any(type(fd) is not int or fd < 3 for fd in (action_fd,wire_fd))
+                    or action_fd == wire_fd): raise TlsInputHold()
+            originals = []; images = []
+            for fd in (action_fd,wire_fd):
+                before = os.fstat(fd)
+                if (not stat.S_ISREG(before.st_mode) or before.st_uid != 0 or before.st_mode & 0o777 != 0o600
+                        or before.st_nlink != 1 or not 1 <= before.st_size <= 1024*1024
+                        or fcntl.fcntl(fd,fcntl.F_GETFL)&os.O_ACCMODE != os.O_RDONLY): raise TlsInputHold()
+                raw = os.pread(fd,1024*1024+1,0)
+                if len(raw) != before.st_size or _file_identity(os.fstat(fd)) != _file_identity(before): raise TlsInputHold()
+                originals.append((fd,_file_identity(before))); images.append(raw)
+            from monitor.issue_tracker_send_unit import _original_unit
+            super().__init__(binding,token,_original_unit(*images))
+            self._originals = tuple(originals); self._original_guard = threading.Lock(); self._original_used = False
+        except Exception: failed = True
+        if failed: raise TlsInputHold()
+
+    def send_once(self):
+        with self._original_guard:
+            used = self._original_used; self._original_used = True
+        if used: raise TlsInputHold()
+        failed = False
+        try:
+            for fd,identity in self._originals:
+                if _file_identity(os.fstat(fd)) != identity: raise TlsInputHold()
+            result = super().send_once()
+            for fd,identity in self._originals:
+                if _file_identity(os.fstat(fd)) != identity: raise TlsInputHold()
         except Exception: failed = True
         if failed: raise TlsInputHold()
         return result

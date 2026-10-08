@@ -1165,6 +1165,15 @@ FD 不关闭。真实冷进程、失败注入及原像逐字节不变覆盖实�
 隔离子进程只核 ACTION/WIRE 一致性，不导入父侧 YAML/workbook 编译依赖。
 这些仍是必要交接证据，不是新鲜准入、共享 cadence、隐藏 quota 或 M=6 发送证明。
 
+交接同时借出原 ACTION-PREIMAGE FD。`NativeOriginalSheetsMutationUnit` 对两个
+原只读、私有、单链接、受限 regular FD 各 pread 一次，检查前后精确身份，
+从原 ACTION/WIRE 恢复一致性投影，不重编译源文件、不重开路径；失败和元数据
+变化消费一次对象，不重发。真实 `-I` 子进程多脚本 fixture 继承双锁和这两个 FD，
+以固定 TLS 发出 >64 KiB 的完整批次，不扩大 32 KiB 私有控制输入；401 不刷新，
+真实慢 body 在原 60 秒 TOTAL 边界终止，原次数保持 UNKNOWN、父侧双锁保持。
+程序/DNS/CA 重定向仅存在 test-owned fixture，尚不能冒充生产固定 launcher、
+shared cadence 或新鲜发送准入闭合；REQ7 整体仍未完成，现场 NOT RUN。
+
 `record_original_business_reserved_attempt_intent` 进一步在每次计数前后重开整个
 原始业务 journal（完整家族 manifest、全部发现／占用／精确行，含 NOOP），
 与原 enrollment、History 行预算、metadata 及适用 BOTH Cabling NV 一同核对。

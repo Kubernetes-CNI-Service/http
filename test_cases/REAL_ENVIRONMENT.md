@@ -2133,6 +2133,13 @@ FIFO、每次准入／真实单次 wire；部署与真实断电验收准确保�
 不改变。现场还须见证 CLAIM 与唯一固定子进程及新鲜准入对应关系、断电窗口和
 实际 M=6 上界；未执行，仍 NOT RUN，不授予网络或生产写权限。
 
+本地同时借出原 ACTION FD，native 原像边界每个只读 private regular FD 仅一次
+pread，检查 mode/uid/nlink/大小和前后身份，原一致性不重编译源文件。真实自有
+隔离子进程／TLS fixture 已覆盖完整大批次、私有输入 ≤32 KiB、原 60 秒 TOTAL
+慢响应终止、原次数保留 UNKNOWN、父侧双锁和 401 无重发；仅 CA/UID/DNS 合成，
+不是现场或生产固定 launcher 的发送准入证明。部署还须验证实际 Linux/SDK/CA
+身份、orphan 继承和 shared cadence/新鲜准入；本卡继续 NOT RUN。
+
 ## TC-REAL-REQ7-SPREADSHEET-OWNER-001 — 跨项目持久 OS 锁与继承 FD
 
 - Case ID：`TC-REAL-REQ7-SPREADSHEET-OWNER-001`；类型：native / integration；对应 C-6/C-14/C-19。状态：**NOT RUN / REAL_ENV REQUIRED**。涉及 `monitor/issue_tracker_spreadsheet_owner.py`、`monitor/issue_tracker_local_commit.py`、`monitor/issue_tracker_send_intent.py`；本地合成 root 元数据、原生 flock／独立进程／继承 FD 与实际 C-6/action journal 不证明部署身份或整个 REQ7。
