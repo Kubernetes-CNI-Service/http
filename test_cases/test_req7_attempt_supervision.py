@@ -1,5 +1,6 @@
 """Owned real child processes; no sockets, real locks, credentials or online activation."""
 import fcntl
+import hashlib
 import importlib.util
 import os
 from pathlib import Path
@@ -43,9 +44,9 @@ class Req7AttemptSupervisionDirectTests(unittest.TestCase):
                 for stream in (child.stdin, child.stdout, child.stderr):
                     if stream is not None: stream.close()
 
-    def child(self, program, pass_fds=()):
+    def child(self, program, pass_fds=(), *, private_input=False):
         process = subprocess.Popen([sys.executable, "-I", "-B", "-c", program],
-                                   stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                   stdin=subprocess.PIPE if private_input else subprocess.DEVNULL, stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE, start_new_session=True,
                                    close_fds=True, pass_fds=pass_fds)
         self.children.append(process); return process
@@ -83,6 +84,58 @@ class Req7AttemptSupervisionDirectTests(unittest.TestCase):
         self.assertIs(True, result.termination_confirmed); self.assertEqual(0, process.returncode)
         self.assertNotIn("synthetic-complete-response", repr(result))
         with self.assertRaises(AttributeError): result.data = b"foreign"
+
+    def test_private_input_is_written_once_nonblocking_then_eof_before_complete_response(self):
+        request = b'private-input-' * 1800
+        started = time.monotonic()
+        child = self.child('import sys,os,hashlib; data=sys.stdin.buffer.read(); os.write(1,hashlib.sha256(data).hexdigest().encode())', private_input=True)
+        result = self.module.supervise_owned_attempt(child, started_monotonic=started, kind='read', request_bytes=request)
+        self.assertEqual(hashlib.sha256(request).hexdigest().encode(), result.data)
+        self.assertIs(True, child.stdin.closed); self.assertEqual(0, child.returncode)
+        self.assertNotIn('private-input', repr(result))
+        with self.assertRaises(self.module.AttemptHold):
+            self.module.supervise_owned_attempt(child, started_monotonic=started, kind='read', request_bytes=request)
+
+    def fill_private_pipe(self, child):
+        fd = child.stdin.fileno(); os.set_blocking(fd, False); total = 0
+        while total <= 1024 * 1024:
+            try: total += os.write(fd, b'owned-backpressure' * 256)
+            except BlockingIOError: return fd, total
+        self.fail('native owned pipe never established backpressure')
+
+    def test_stdin_backpressure_is_inside_original_total_budget_and_reaps_owned_child(self):
+        child = self.child('import time; time.sleep(100)', private_input=True)
+        fd, total = self.fill_private_pipe(child); self.assertGreater(total, 0)
+        native_write = os.write; written = []
+        def write(descriptor, raw):
+            if descriptor == fd: written.append(bytes(raw))
+            return native_write(descriptor, raw)
+        started = time.monotonic()
+        with mock.patch.object(self.module.os, 'write', side_effect=write), self.assertRaises(self.module.AttemptHold) as caught:
+            self.module.supervise_owned_attempt(child, started_monotonic=started-29.8, kind='read', request_bytes=b'private-input')
+        self.assertLess(time.monotonic()-started, 3)
+        self.assertEqual([], written); self.assertIs(True, caught.exception.termination_confirmed)
+        self.assertIsNone(caught.exception.__context__); self.assertIsNotNone(child.poll()); self.assertTrue(child.stdin.closed)
+
+    def test_invalid_private_input_or_missing_pipe_refuses_before_signals(self):
+        child = self.child('import time; time.sleep(100)', private_input=True)
+        for request in (b'', 'private', bytearray(b'private'), b'x'*32769, True):
+            with self.subTest(type=type(request).__name__), mock.patch.object(self.module.os, 'killpg') as kill, self.assertRaises(self.module.AttemptHold):
+                self.module.supervise_owned_attempt(child, started_monotonic=time.monotonic(), kind='read', request_bytes=request)
+            kill.assert_not_called(); self.assertIsNone(child.poll())
+        without_pipe = self.child('import time; time.sleep(100)')
+        with mock.patch.object(self.module.os, 'killpg') as kill, self.assertRaises(self.module.AttemptHold):
+            self.module.supervise_owned_attempt(without_pipe, started_monotonic=time.monotonic(), kind='read', request_bytes=b'private')
+        kill.assert_not_called(); self.assertIsNone(without_pipe.poll())
+
+    def test_closed_private_reader_cannot_promote_early_output_to_completion(self):
+        child = self.child('import os,time; os.close(0); os.write(1,b"early-private-response"); time.sleep(100)', private_input=True)
+        self.assertEqual([child.stdout], select.select([child.stdout], [], [], 3)[0])
+        with self.assertRaises(self.module.AttemptHold) as caught:
+            self.module.supervise_owned_attempt(child, started_monotonic=time.monotonic(), kind='read', request_bytes=b'private-input')
+        self.assertTrue(caught.exception.termination_confirmed); self.assertTrue(child.stdin.closed)
+        self.assertIsNotNone(child.poll()); self.assertIsNone(caught.exception.__context__)
+        self.assertNotIn('private', str(caught.exception))
 
     def test_leader_reaped_after_admission_cannot_authorize_cleanup_signals(self):
         process = self.child('import time; time.sleep(100)')
@@ -185,6 +238,33 @@ class Req7AttemptLockWorkflowTests(unittest.TestCase):
     setUp = Req7AttemptSupervisionDirectTests.setUp
     child = Req7AttemptSupervisionDirectTests.child
     cleanup = Req7AttemptSupervisionDirectTests.cleanup
+    fill_private_pipe = Req7AttemptSupervisionDirectTests.fill_private_pipe
+
+    def test_private_input_backpressure_unconfirmed_termination_preserves_inherited_lock(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'owned-private-input-sheet.lock'
+            held = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:
+                child = self.child('import os,time; os.write(1,b"ready"); time.sleep(100)', (held,), private_input=True)
+                self.assertEqual([child.stdout], select.select([child.stdout], [], [], 3)[0])
+                self.assertEqual(b'ready', child.stdout.read(5))
+                self.fill_private_pipe(child)
+            finally: os.close(held)
+            contender = os.open(path, os.O_RDWR); native_kill = os.killpg
+            def denied(group, operation):
+                if operation == 0: return native_kill(group, operation)
+                raise PermissionError('owned test termination denied')
+            try:
+                with mock.patch('os.killpg', side_effect=denied), self.assertRaises(self.module.AttemptHold) as caught:
+                    self.module.supervise_owned_attempt(child, started_monotonic=time.monotonic()-30, kind='read', request_bytes=b'private-request')
+                self.assertFalse(caught.exception.termination_confirmed); self.assertIsNone(child.poll())
+                self.assertTrue(child.stdin.closed); self.assertIsNone(caught.exception.__context__)
+                with self.assertRaises(BlockingIOError): fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                self.assertEqual(child.pid, os.getpgid(child.pid)); self.assertEqual(child.pid, os.getsid(child.pid))
+                native_kill(child.pid, signal.SIGKILL); child.wait(timeout=3)
+                fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally: os.close(contender)
 
     def test_failed_termination_keeps_inherited_sheet_lock_until_owned_cleanup(self):
         with tempfile.TemporaryDirectory() as directory:

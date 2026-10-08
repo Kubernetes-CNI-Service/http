@@ -12,6 +12,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 import unittest
 from unittest import mock
@@ -20,7 +21,7 @@ CANDIDATE = Path(__file__).resolve().parents[1]
 # Explicit test-only bootstrap for Python -I. The partial candidate deliberately
 # does not copy the governed main package; the parent supplies its owning test
 # package root. No production launcher accepts this argument or a source root.
-if len(sys.argv) > 1 and sys.argv[1] in ("--owned-fixture-child", "--owned-fixture-dns-child", "--owned-fixture-import-check"):
+if len(sys.argv) > 1 and sys.argv[1] in ("--owned-fixture-child", "--owned-fixture-input-child", "--owned-fixture-dns-child", "--owned-fixture-import-check"):
     package_root = sys.argv[2] if sys.argv[1] == "--owned-fixture-import-check" else sys.argv[4]
     sys.path.insert(0, package_root)
     sys.path.insert(0, str(Path(package_root) / "tools"))
@@ -42,7 +43,8 @@ def cleanup_owned_fixture_child(child):
             except ProcessLookupError: pass
         child.wait(timeout=3)
     finally:
-        for stream in (child.stdout, child.stderr): stream.close()
+        for stream in (child.stdin, child.stdout, child.stderr):
+            if stream is not None: stream.close()
 
 
 def owned_fixture_child():
@@ -56,7 +58,12 @@ def owned_fixture_child():
         if (host, endpoint) != ("oauth2.googleapis.com", 443):
             raise AssertionError("online/foreign DNS forbidden in owned test child")
         return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port))]
-    wire = auth.TokenWireRequest("https://oauth2.googleapis.com/token", "POST", b"synthetic-body",
+    body = b"synthetic-body"
+    if sys.argv[1] == "--owned-fixture-input-child":
+        body = sys.stdin.buffer.read(32769)
+        if body != b"owned-private-request" * 900:
+            raise AssertionError("owned private request differs or lacks bounded EOF")
+    wire = auth.TokenWireRequest("https://oauth2.googleapis.com/token", "POST", body,
                                 (("Content-Type", "application/x-www-form-urlencoded"),), 30.0)
     with fixture.fixture(), mock.patch("socket.getaddrinfo", side_effect=resolve):
         result = tls.NativeTokenHttpsUnit().send_once(wire)
@@ -87,6 +94,51 @@ class Req7NativeSupervisedWorkflowTests(unittest.TestCase):
     setUp = tls_fixtures.Req7TlsInputsDirectTests.setUp
     certificates = wire_fixtures.Req7NativeTlsWireTests.certificates
     fixture = tls_fixtures.Req7TlsInputsDirectTests.fixture
+
+    def test_private_input_eof_precedes_one_native_tls_request_and_completion_retains_parent_lock(self):
+        supervision = supervision_fixtures.load(); context = self.certificates()
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.bind(("127.0.0.1", 0)); listener.listen(1); listener.settimeout(5)
+        self.addCleanup(listener.close)
+        path = self.root / 'owned-private-input.lock'
+        held = os.open(path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+        self.addCleanup(os.close, held); fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        contender = os.open(path, os.O_RDWR); self.addCleanup(os.close, contender)
+        request = b'owned-private-request' * 900; seen = []; failures = []
+        def serve():
+            try:
+                connection, _peer = listener.accept(); connection.settimeout(5)
+                with context.wrap_socket(connection, server_side=True) as transport:
+                    with transport.makefile('rb') as incoming:
+                        self.assertEqual(b'POST /token HTTP/1.1\r\n', incoming.readline(8193))
+                        headers = []
+                        for _ in range(100):
+                            line = incoming.readline(8193)
+                            if line == b'\r\n': break
+                            self.assertTrue(line); headers.append(line)
+                        else: self.fail('owned headers exceed independent bound')
+                        self.assertIn(b'Host: oauth2.googleapis.com\r\n', headers)
+                        sizes = [int(line.split(b':', 1)[1]) for line in headers if line.lower().startswith(b'content-length:')]
+                        self.assertEqual([len(request)], sizes)
+                        seen.append(incoming.read(len(request))); self.assertEqual(request, seen[0])
+                    with self.assertRaises(BlockingIOError): fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    transport.sendall(b'HTTP/1.1 200 OK\r\nContent-Length: 18\r\nConnection: close\r\n\r\nowned-tls-response')
+            except BaseException as exc: failures.append(exc)
+        thread = threading.Thread(target=serve, daemon=True); thread.start()
+        started = time.monotonic()
+        child = subprocess.Popen([sys.executable, '-I', '-B', str(Path(__file__).resolve()),
+                                  '--owned-fixture-input-child', str(self.root), str(listener.getsockname()[1]),
+                                  str(tls_fixtures.ROOT)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE, close_fds=True, start_new_session=True, pass_fds=(held,))
+        self.addCleanup(cleanup_owned_fixture_child, child)
+        try:
+            result = supervision.supervise_owned_attempt(child, started_monotonic=started, kind='read', request_bytes=request)
+        finally: thread.join(6)
+        self.assertFalse(thread.is_alive()); self.assertEqual([], failures)
+        self.assertEqual([request], seen); self.assertEqual(b'owned-tls-response', result.data)
+        self.assertTrue(result.termination_confirmed); self.assertTrue(child.stdin.closed); self.assertEqual(0, child.returncode)
+        self.assertNotIn('owned-private-request', repr(result))
+        with self.assertRaises(BlockingIOError): fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
     def test_isolated_fixture_bootstrap_imports_the_owning_package_without_ambient_sys_path(self):
         result = subprocess.run([sys.executable, "-I", "-B", str(Path(__file__).resolve()),
@@ -210,7 +262,7 @@ class Req7NativeSupervisedWorkflowTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "--owned-fixture-child": owned_fixture_child()
+    if len(sys.argv) > 1 and sys.argv[1] in ("--owned-fixture-child", "--owned-fixture-input-child"): owned_fixture_child()
     elif len(sys.argv) > 1 and sys.argv[1] == "--owned-fixture-dns-child": owned_blocked_dns_fixture_child()
     elif len(sys.argv) > 1 and sys.argv[1] == "--owned-fixture-import-check": print("owned-fixture-import-ok")
     else: unittest.main()

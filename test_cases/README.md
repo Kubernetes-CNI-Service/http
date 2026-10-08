@@ -850,6 +850,11 @@ P 阶段在绑定的 macOS CPython 3.9 环境中，把独立审定的依赖文�
 `test_req7_attempt_supervision` / `test_req7_native_supervised_workflow` 约束公有 SDK、
 固定 CA 与受控原生 TLS、单次回调以及包含启动／DNS／慢读的完整预算。其组件均为未安装库，
 本地仅使用合成密钥及私有 loopback，不读取真实凭据、不安装依赖或开放在线入口。
+监督器的可选私有 stdin 限定原生 bytes 1–32768 字节，以非阻塞分段写入和 EOF
+纳入启动前开始的同一总预算；管道背压不能阻塞父进程或刷新截止期。错误、提前
+关闭和未完整输入均 HOLD，无重发、无私有诊断泄露、不释放 borrowed 锁。
+实际输入 → 单次原生 TLS → 完整响应 → 已结束 session 工作流仍使用合成数据，
+此通道不是 mutation WIRE、固定读取入口或在线准入证明。
 `test_req7_token_launcher` 约束未安装的固定 auth-only 子进程入口：不接收调用方
 argv/URL/凭据路径/预算，固定 `-I -B`、清空继承环境、DEVNULL stdin、新 session、
 仅 pass_fds 借用原 spreadsheet 锁。启动前开始 30 秒总预算，单次消费及 nonce

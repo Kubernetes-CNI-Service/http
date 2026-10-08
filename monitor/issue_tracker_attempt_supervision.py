@@ -19,6 +19,7 @@ import weakref
 
 _BUDGETS = {"token": 30.0, "read": 30.0, "mutation": 60.0}
 _RESPONSE_LIMIT = 2 * 1024 * 1024
+_PRIVATE_INPUT_LIMIT = 32768
 _USED = weakref.WeakKeyDictionary()
 _GUARD = threading.Lock()
 
@@ -72,12 +73,14 @@ def _stop_owned_group(process):
     return process.poll() is not None and not _group_alive(process.pid)
 
 
-def supervise_owned_attempt(process, *, started_monotonic, kind):
+def supervise_owned_attempt(process, *, started_monotonic, kind, request_bytes=None):
     """One bounded private response; uncertain termination is explicit HOLD.
 
 The fixed total budget includes time already spent starting the child; socket
 timeouts cannot restart it. No complete response is returned until the owned
-child/session is absent. Callers retain their lock on every uncertain path.
+child/session is absent. Optional bounded private input is written nonblocking
+under this same original deadline, then closed to deliver EOF. It is not a
+mutation wire channel or authority. Callers retain their lock on uncertain paths.
 """
     now = time.monotonic()
     if (type(kind) is not str or kind not in _BUDGETS
@@ -86,7 +89,9 @@ child/session is absent. Callers retain their lock on every uncertain path.
             # negative timestamp only shortens the remaining budget. Bound
             # native integers before isfinite's float conversion can overflow.
             or not -sys.float_info.max <= started_monotonic <= now or not math.isfinite(started_monotonic)
-            or type(process) is not subprocess.Popen or process.stdout is None or process.stderr is None):
+            or type(process) is not subprocess.Popen or process.stdout is None or process.stderr is None
+            or (request_bytes is not None and (type(request_bytes) is not bytes
+                or not 1 <= len(request_bytes) <= _PRIVATE_INPUT_LIMIT or process.stdin is None))):
         raise AttemptHold()
     owned = False
     try:
@@ -109,16 +114,32 @@ child/session is absent. Callers retain their lock on every uncertain path.
     deadline = started_monotonic + _BUDGETS[kind]
     data = bytearray(); failed = False; confirmed = False
     selector = None
+    input_cursor = 0
     try:
         selector = selectors.DefaultSelector()
         for channel, stream in (("response", process.stdout), ("error", process.stderr)):
             os.set_blocking(stream.fileno(), False)
             selector.register(stream, selectors.EVENT_READ, channel)
+        if request_bytes is not None:
+            os.set_blocking(process.stdin.fileno(), False)
+            selector.register(process.stdin, selectors.EVENT_WRITE, "request")
         while selector.get_map() or process.poll() is None:
             remaining = deadline - time.monotonic()
             if remaining <= 0: raise AttemptHold()
             events = selector.select(min(remaining, 0.05))
             for key, _event in events:
+                if time.monotonic() >= deadline: raise AttemptHold()
+                if key.data == "request":
+                    try:
+                        written = os.write(key.fileobj.fileno(), request_bytes[input_cursor:input_cursor + 4096])
+                    except BlockingIOError:
+                        continue
+                    if written <= 0: raise AttemptHold()
+                    input_cursor += written
+                    if input_cursor == len(request_bytes):
+                        selector.unregister(key.fileobj)
+                        key.fileobj.close()
+                    continue
                 limit = min(65536, _RESPONSE_LIMIT + 1 - len(data)) if key.data == "response" else 1
                 chunk = os.read(key.fileobj.fileno(), limit)
                 if not chunk:
@@ -128,7 +149,8 @@ child/session is absent. Callers retain their lock on every uncertain path.
                 else:
                     data.extend(chunk)
                     if len(data) > _RESPONSE_LIMIT: raise AttemptHold()
-        if time.monotonic() > deadline or process.returncode != 0 or not data or _group_alive(process.pid):
+        if (time.monotonic() > deadline or process.returncode != 0 or not data or _group_alive(process.pid)
+                or (request_bytes is not None and input_cursor != len(request_bytes))):
             raise AttemptHold()
         confirmed = True
         result = SupervisedCompletion(bytes(data))
@@ -144,7 +166,8 @@ child/session is absent. Callers retain their lock on every uncertain path.
         if selector is not None:
             try: selector.close()
             except OSError: failed = True
-        for stream in (process.stdout, process.stderr):
+        streams = (process.stdout, process.stderr) + ((process.stdin,) if request_bytes is not None else ())
+        for stream in streams:
             try: stream.close()
             except OSError: failed = True
     if failed:
