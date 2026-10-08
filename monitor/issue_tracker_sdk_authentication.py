@@ -7,6 +7,7 @@ the caller must separately prove target admission, CA and the supervised unit.
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import hashlib
 import json
 import math
 import os
@@ -226,3 +227,47 @@ def refresh_validated_service_account(parsed, unit):
 def refresh_fixed_service_account(unit):
     """Fixed root reader -> public constructor -> one callback -> private token."""
     return _refresh(credentials_from_fixed_file(), unit)
+
+
+def _fixed_cloud_project_inputs():
+    """Original fixed credential bytes/project, not a caller claim or permit.
+
+    This additional G1 observation uses the existing C11 reader and no new
+    path. It neither asserts inventory completeness nor proves a dedicated
+    spreadsheet, historical exclusivity or current target admission.
+    """
+    failed=False
+    try:
+        if os.geteuid()!=0: raise AuthenticationHold()
+        from monitor.issue_tracker_credential_shape import _read_private_file
+        raw=_read_private_file('cre.json')
+        parsed=parse_service_account_info(raw)
+        project=parsed.mapping.get('project_id')
+        if (type(project) is not str
+                or re.fullmatch(r'[a-z][a-z0-9-]{4,28}[a-z0-9]',project) is None):
+            raise AuthenticationHold()
+        result=parsed,project,hashlib.sha256(raw).hexdigest()
+    except Exception: failed=True
+    if failed: raise AuthenticationHold()
+    return result
+
+
+def _refresh_fixed_cloud_project():
+    """Fixed native OAuth only; no supplied unit, path, URL or token source.
+
+    The supervised fixed child must relay/issue this observation. A tuple or
+    typed token copied by a caller is NOT live project authentication evidence.
+    The ordinary mapping-only/legacy refresh contracts remain unchanged.
+    """
+    failed=False
+    try:
+        parsed,project,digest=_fixed_cloud_project_inputs()
+        credential=credentials_from_validated_info(parsed)
+        if type(credential.project_id) is not str or credential.project_id!=project:
+            raise AuthenticationHold()
+        from monitor.issue_tracker_tls_inputs import NativeTokenHttpsUnit
+        token=_refresh(credential,NativeTokenHttpsUnit())
+        result=token,project,digest
+    except Exception: failed=True
+    if failed: raise AuthenticationHold()
+    return result

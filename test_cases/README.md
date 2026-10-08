@@ -882,6 +882,13 @@ Python 3.9/3.10 EOL 警告以固定 tag 保留并由父进程重新发出，不�
 部署依赖身份的证据。无法确认结束时仍 HOLD，子进程继承的实际 flock 在 owner
 退出后继续阻挡候选。此入口只刷新 token，不授予 mutation、发送尝试计数、
 新鲜 W1/连续性、COMPLETE 或重试许可，REQ7 整体仍未完成，REAL_ENV 仍 NOT RUN。
+G1 的固定项目认证补充仍为未安装的必要来源层：独立 v2 私有协议只从固定
+`cre.json` 的原字节、严格 project_id、公有 SDK 和固定原生 OAuth 返回项目身份，
+不接收 caller unit。实际监督 child 成功后才登记原 completion 对象／owner／PID；
+复制、独立解码、owner 撤销、过期和固定凭据项目／字节漂移均 HOLD。原 v1 合同
+及 30 秒预算不变。owner 已确认专用表／单一 Cloud 项目写 metadata 的限制；
+本层不证明历史隐藏 metadata 不存在，也未接入完整库存、准入或发送边界。
+可见容量计量仍 `VISIBLE_ONLY_UNPROVED`，G1 与 REQ7 整项仍未关闭。
 `test_req7_settings_audit_allocation` 从持有实际项目 ACTIVE 锁的 C25 原始事件链、
 最高 current、INITIALIZED 和逐事件 outbox 投影导出审计行；调用方不能伪造队列、
 revision、时间或内容。双 owner 下把真实非空单元的原始审计固定到项目

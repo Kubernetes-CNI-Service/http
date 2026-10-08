@@ -68,6 +68,29 @@ class FakeTokenUnit:
 class Req7SdkAuthenticationDirectTests(unittest.TestCase):
     def setUp(self): self.module = load()
 
+    def test_g1_cloud_project_requires_fixed_source_and_native_auth_without_caller_unit(self):
+        self.assertTrue(hasattr(self.module, '_fixed_cloud_project_inputs'),
+                        'G1 cannot infer authentication project from visible metadata')
+        self.assertTrue(hasattr(self.module, '_refresh_fixed_cloud_project'),
+                        'G1 project-scoped auth needs the actual fixed native OAuth path')
+        from monitor import issue_tracker_credential_shape as private
+        with mock.patch.object(self.module.os, 'geteuid', return_value=501), \
+                mock.patch.object(private, '_read_private_file') as reader:
+            with self.assertRaises(self.module.AuthenticationHold): self.module._fixed_cloud_project_inputs()
+            reader.assert_not_called()
+        mapping=fresh_info()
+        for project in (None, True, 7, '', 'foreign project', '../synthetic-cloud', 'synthetic-cloud\n'):
+            altered=dict(mapping)
+            if project is not None: altered['project_id']=project
+            with self.subTest(project_type=type(project).__name__), \
+                    mock.patch.object(self.module.os, 'geteuid', return_value=0), \
+                    mock.patch.object(private, '_read_private_file', return_value=json.dumps(altered).encode()) as reader, \
+                    mock.patch.object(self.module, '_sdk') as sdk:
+                with self.assertRaises(self.module.AuthenticationHold) as caught: self.module._fixed_cloud_project_inputs()
+                self.assertIsNone(caught.exception.__context__)
+                self.assertEqual([mock.call('cre.json')],reader.call_args_list); sdk.assert_not_called()
+        with self.assertRaises(TypeError): self.module._refresh_fixed_cloud_project(FakeTokenUnit())
+
     def test_native_source_root_is_not_rebound_by_the_test_loader(self):
         self.assertEqual(MODULE.resolve().parents[1], self.module.SOURCE_ROOT)
 

@@ -28,6 +28,39 @@ def load():
 
 
 class Req7TokenLauncherDirectTests(unittest.TestCase):
+    def test_g1_project_protocol_is_separate_and_decoding_or_copying_does_not_issue_authority(self):
+        self.assertTrue(hasattr(load(), '_decode_project_completion'),
+                        'G1 needs project identity from the actual supervised auth child')
+        module=load(); nonce='a'*64
+        image={'schema_version':2,'nonce':nonce,'token':'synthetic-token',
+               'expires_at':time.time()+3600,'runtime_warnings':[],
+               'cloud_project_id':'synthetic-cloud-project','credential_sha256':'b'*64}
+        raw=module._canonical(image); value=module._decode_project_completion(raw,nonce)
+        self.assertEqual('synthetic-cloud-project',value.cloud_project_id)
+        self.assertEqual('b'*64,value.credential_sha256)
+        self.assertNotIn('synthetic-token',repr(value)); self.assertNotIn('synthetic-cloud-project',repr(value))
+        self.assertFalse(hasattr(value,'permit')); self.assertFalse(hasattr(value,'inventory_complete'))
+        with self.assertRaises(module.TokenLauncherHold): module._decode_completion(raw,nonce)
+        from monitor import issue_tracker_credential_shape as private
+        with mock.patch.object(private,'_read_private_file') as reader:
+            with self.assertRaises(module.TokenLauncherHold) as caught:
+                module.require_current_owned_project_token(object(),binding(),value)
+            self.assertIsNone(caught.exception.__context__); reader.assert_not_called()
+        for field,bad in (('schema_version',1),('cloud_project_id',True),('cloud_project_id',''),
+                           ('cloud_project_id','foreign project'),('credential_sha256','b'*63),
+                           ('credential_sha256',True),('nonce','c'*64),('expires_at',0)):
+            altered=dict(image); altered[field]=bad
+            with self.subTest(field=field),self.assertRaises(module.TokenLauncherHold):
+                module._decode_project_completion(module._canonical(altered),nonce)
+
+    def test_g1_project_unit_requires_actual_owner_before_credential_or_child(self):
+        module=load()
+        self.assertTrue(hasattr(module,'OwnedProjectTokenRefreshUnit'))
+        from monitor import issue_tracker_credential_shape as private
+        with mock.patch.object(private,'_read_private_file') as reader, mock.patch.object(module.subprocess,'Popen') as launch:
+            with self.assertRaises(module.TokenLauncherHold): module.OwnedProjectTokenRefreshUnit(object(),binding())
+            reader.assert_not_called(); launch.assert_not_called()
+
     def test_unheld_owner_refuses_before_child_creation_or_credential_import(self):
         module = load()
         for token in (None, object(), {'owner': 'caller'}):
@@ -87,11 +120,11 @@ class Req7FixedTokenLauncherWorkflowTests(unittest.TestCase):
         token = stack.enter_context(ownership.spreadsheet_owner(binding()))
         return ownership, token
 
-    def intercept(self, stack, program=None, *, token=None, ownership=None):
+    def intercept(self, stack, program=None, *, token=None, ownership=None, project_scope=False):
         module = load(); native = subprocess.Popen; observed = []; children = []
         def launch(argv, **kwargs):
             self.assertEqual([str(Path(sys.executable).resolve()), '-I', '-B', '-c'], argv[:4])
-            self.assertEqual(module._CHILD_PROGRAM, argv[4])
+            self.assertEqual(module._PROJECT_CHILD_PROGRAM if project_scope else module._CHILD_PROGRAM, argv[4])
             self.assertEqual(str(ROOT), argv[5]); self.assertRegex(argv[6], r'^[0-9a-f]{64}$')
             self.assertEqual(7, len(argv))
             self.assertIs(kwargs['stdin'], subprocess.DEVNULL)
@@ -248,14 +281,14 @@ class Req7FixedTokenLauncherWorkflowTests(unittest.TestCase):
                          'monitor/issue_tracker_credential_shape.py','monitor/issue_tracker_sdk_authentication.py',
                          'monitor/issue_tracker_tls_inputs.py','tools/req7_dependency_contract.py'} <= set(workflow['members']))
 
-    def child_fixture(self, port):
+    def child_fixture(self, port, *, project_scope=False):
         # Inject only fixed-file ownership/path and DNS at owned boundaries.
         # Public SDK, signing, one-shot adapter, HTTPS/SSL and supervision stay real.
         from importlib import metadata
         names=('google-auth','cryptography','cffi','pyasn1-modules','pyasn1','pycparser')
         if sys.version_info[:2] < (3,11): names += ('typing_extensions',)
         dependency_roots = sorted({str(metadata.distribution(name).locate_file('')) for name in names})
-        return '''import sys, os, socket
+        program='''import sys, os, socket
 sys.path[:0]=[sys.argv[1],sys.argv[1]+"/tools"]
 sys.path.extend(%r)
 from types import SimpleNamespace
@@ -287,6 +320,82 @@ with ExitStack() as stack:
     result=launcher._token_child(sys.argv[2])
 raise SystemExit(result)
 ''' % (dependency_roots, str(self.root), port)
+        return program.replace('launcher._token_child(sys.argv[2])','launcher._project_token_child(sys.argv[2])') if project_scope else program
+
+    def test_g1_real_fixed_sdk_tls_child_issues_owner_bound_project_not_copyable_or_stale(self):
+        from dataclasses import replace
+        import hashlib
+        from types import SimpleNamespace
+        from test_req7_sdk_authentication import fresh_info
+        from monitor import issue_tracker_credential_shape as private_module
+        module=load()
+        self.assertTrue(hasattr(module,'OwnedProjectTokenRefreshUnit'),
+                        'dedicated-project contract needs original live auth provenance')
+        directory=self.root/'var/lib/http-ztp-container/service-account'
+        directory.mkdir(parents=True,mode=0o700); directory.chmod(0o700)
+        credential=directory/'cre.json'
+        info=fresh_info(); info['project_id']='synthetic-cloud-project'
+        original=json.dumps(info).encode(); credential.write_bytes(original); credential.chmod(0o600)
+        payload=b'{"access_token":"synthetic-token","expires_in":3600}'
+        reply=('HTTP/1.1 200 Synthetic\r\nContent-Length: %d\r\nConnection: close\r\n\r\n'%len(payload)).encode()+payload
+        with self.server(reply) as (records,errors),ExitStack() as stack:
+            ownership,owner=self.owner(stack)
+            observed,children=self.intercept(stack,self.child_fixture(socket_address_port(),project_scope=True),
+                token=owner,ownership=ownership,project_scope=True)
+            unit=module.OwnedProjectTokenRefreshUnit(owner,binding())
+            with self.assertWarnsRegex(FutureWarning,'Python version 3.9 past its end of life') if sys.version_info[:2]==(3,9) else ExitStack():
+                value=unit.refresh_once()
+            self.assertEqual('synthetic-cloud-project',value.cloud_project_id)
+            self.assertEqual(hashlib.sha256(original).hexdigest(),value.credential_sha256)
+            self.assertEqual('synthetic-token',value.token.value)
+            with self.assertRaises(module.TokenLauncherHold): unit.refresh_once()
+            # Synthetic root metadata only at the existing fixed-file reader;
+            # genuine FD reads and the issued object/owner registry stay real.
+            stack.enter_context(scoped_fixture(self.root,private_module))
+            sdk_module=importlib.import_module('monitor.issue_tracker_sdk_authentication')
+            stack.enter_context(scoped_fixture(self.root,sdk_module))
+            self.assertEqual(('synthetic-cloud-project',hashlib.sha256(original).hexdigest()),
+                module.require_current_owned_project_token(owner,binding(),value))
+            for forged in (replace(value),replace(value,cloud_project_id='foreign-cloud-project')):
+                with self.assertRaises(module.TokenLauncherHold): module.require_current_owned_project_token(owner,binding(),forged)
+            with self.assertRaises(module.TokenLauncherHold): module.require_current_owned_project_token(object(),binding(),value)
+            with mock.patch.object(module,'os',SimpleNamespace(getpid=lambda:os.getpid()+1)),self.assertRaises(module.TokenLauncherHold):
+                module.require_current_owned_project_token(owner,binding(),value)
+            changed=dict(info); changed['project_id']='foreign-cloud-project'
+            credential.write_bytes(json.dumps(changed).encode())
+            with self.assertRaises(module.TokenLauncherHold): module.require_current_owned_project_token(owner,binding(),value)
+            credential.write_bytes(original)
+            self.assertEqual(('synthetic-cloud-project',hashlib.sha256(original).hexdigest()),
+                module.require_current_owned_project_token(owner,binding(),value))
+            with mock.patch.object(module,'time',SimpleNamespace(time=lambda:value.token.expires_at)),self.assertRaises(module.TokenLauncherHold):
+                module.require_current_owned_project_token(owner,binding(),value)
+            self.assertEqual(1,len(observed)); self.assertEqual(0,children[0].returncode)
+        with self.assertRaises(module.TokenLauncherHold): module.require_current_owned_project_token(owner,binding(),value)
+        self.assertEqual([],errors); self.assertEqual(1,len(records)); self.assertEqual(original,credential.read_bytes())
+
+    def test_g1_auth_rejection_keeps_one_real_oauth_attempt_without_project_issue_or_retry(self):
+        from test_req7_sdk_authentication import fresh_info
+        module=load()
+        directory=self.root/'var/lib/http-ztp-container/service-account'
+        directory.mkdir(parents=True,mode=0o700); directory.chmod(0o700)
+        credential=directory/'cre.json'; info=fresh_info(); info['project_id']='synthetic-cloud-project'
+        original=json.dumps(info).encode(); credential.write_bytes(original); credential.chmod(0o600)
+        for status in (401,503):
+            payload=b'{"error":"temporarily_unavailable"}'
+            reply=('HTTP/1.1 %d Synthetic\r\nContent-Length: %d\r\nConnection: close\r\n\r\n'%(status,len(payload))).encode()+payload
+            with self.subTest(status=status),self.server(reply) as (records,errors),ExitStack() as stack:
+                ownership,owner=self.owner(stack)
+                observed,children=self.intercept(stack,self.child_fixture(socket_address_port(),project_scope=True),
+                    token=owner,ownership=ownership,project_scope=True)
+                unit=module.OwnedProjectTokenRefreshUnit(owner,binding())
+                with module._PROJECT_GUARD: before=tuple(module._PROJECT_TOKENS)
+                with self.assertRaises(module.TokenLauncherHold) as caught: unit.refresh_once()
+                self.assertIsNone(caught.exception.__context__)
+                self.assertIs(True,caught.exception.termination_confirmed)
+                with self.assertRaises(module.TokenLauncherHold): unit.refresh_once()
+                with module._PROJECT_GUARD: self.assertEqual(before,tuple(module._PROJECT_TOKENS))
+                self.assertEqual(1,len(observed)); self.assertEqual(1,children[0].returncode)
+            self.assertEqual([],errors); self.assertEqual(1,len(records)); self.assertEqual(original,credential.read_bytes())
 
     def test_fixed_auth_child_uses_real_sdk_native_tls_and_one_inherited_lock(self):
         module = load()
