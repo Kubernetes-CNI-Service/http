@@ -10,6 +10,8 @@ from dataclasses import dataclass
 import hashlib
 import json
 import os
+import base64
+import uuid
 from types import SimpleNamespace
 from urllib.parse import urlsplit
 
@@ -169,5 +171,277 @@ def require_history_append_capacity(token, binding, unit):
             original.row_count, original.source_sha256, original.action_digest, original.wire_sha256)
         ownership._validated_owner(token, binding)
     except Exception: failed = True
+    if failed: raise HistoryPrereadHold()
+    return result
+
+
+@dataclass(frozen=True)
+class BusinessPrereadObservation:
+    operations_retained: int
+    noop_operations: int
+    preread_sha256: str
+    source_sha256: str
+    action_digest: str
+    wire_sha256: str
+
+
+_BUSINESS_LIMIT = 16 * 1024 * 1024
+_READ_FIELDS = {'operation_id', 'discovery_plan', 'discovery_response', 'occupancy_plan',
+                'occupancy_response', 'row_plan', 'row_response'}
+
+
+def _pack_business(reads):
+    """Only fixed GET paths and entire bounded raw bodies; never auth headers.
+
+    Deduplicate shared images without truncation or silent chunking. The whole
+    envelope has a distinct finite 16 MiB bound; each response remains 2 MiB.
+    """
+    if type(reads) is not tuple or not 1 <= len(reads) <= 1000: raise HistoryPrereadHold()
+    images, operations, known = [], [], {}
+    for reading in reads:
+        if type(reading) is not dict or set(reading) != _READ_FIELDS: raise HistoryPrereadHold()
+        references = {'operation_id': reading['operation_id']}
+        for role in ('discovery', 'occupancy', 'row'):
+            plan, response = reading[role+'_plan'], reading[role+'_response']
+            if role == 'row' and plan is None and response is None:
+                references[role] = None; continue
+            if (type(plan) is not PreparedSheetsRead or plan.host != 'sheets.googleapis.com' or plan.method != 'GET'
+                    or type(plan.path) is not str or not 1 <= len(plan.path) <= 16384 or plan.body != b''
+                    or type(plan.budget_seconds) is not float or plan.budget_seconds != 30.0
+                    or type(response.status) is not int or response.status != 200 or response.complete is not True
+                    or type(response.data) is not bytes or not 1 <= len(response.data) <= 2*1024*1024): raise HistoryPrereadHold()
+            key = (plan.path, response.data)
+            if key not in known:
+                known[key] = len(images)
+                images.append({'path': plan.path, 'raw_base64': base64.b64encode(response.data).decode('ascii')})
+                if sum(len(item['raw_base64']) + len(item['path']) for item in images) > _BUSINESS_LIMIT: raise HistoryPrereadHold()
+            references[role] = known[key]
+        operations.append(references)
+    raw = local._canonical({'schema_version': 1, 'images': images, 'operations': operations})
+    if len(raw) > _BUSINESS_LIMIT: raise HistoryPrereadHold()
+    return raw
+
+
+def _unpack_business(raw):
+    value = json.loads(raw.decode('utf-8'), object_pairs_hook=local._pairs)
+    if (type(value) is not dict or set(value) != {'schema_version', 'images', 'operations'}
+            or type(value['schema_version']) is not int or value['schema_version'] != 1
+            or type(value['images']) is not list or not 1 <= len(value['images']) <= 3000
+            or type(value['operations']) is not list or not 1 <= len(value['operations']) <= 1000): raise HistoryPrereadHold()
+    images = []
+    for item in value['images']:
+        if type(item) is not dict or set(item) != {'path', 'raw_base64'}: raise HistoryPrereadHold()
+        images.append((PreparedSheetsRead('sheets.googleapis.com', item['path'], 'GET', (), b''),
+            SimpleNamespace(status=200, complete=True, data=base64.b64decode(item['raw_base64'], validate=True))))
+    reads = []
+    for operation in value['operations']:
+        if type(operation) is not dict or set(operation) != {'operation_id', 'discovery', 'occupancy', 'row'}: raise HistoryPrereadHold()
+        reading = {'operation_id': operation['operation_id']}
+        for role in ('discovery', 'occupancy', 'row'):
+            index = operation[role]
+            if role == 'row' and index is None: plan, response = None, None
+            else:
+                if type(index) is not int or not 0 <= index < len(images): raise HistoryPrereadHold()
+                plan, response = images[index]
+            reading[role+'_plan'], reading[role+'_response'] = plan, response
+        reads.append(reading)
+    result = tuple(reads)
+    if _pack_business(result) != raw: raise HistoryPrereadHold()
+    return result
+
+
+def _request_literals(item, sheet_id, row_index):
+    """Extract only literal cells; real C8 re-encoding below checks exact runs."""
+    from monitor.issue_tracker_online_cells import _column
+    values = {}
+    for request in item['requests']:
+        if type(request) is not dict or len(request) != 1: raise HistoryPrereadHold()
+        if row_index is None:
+            body = request['appendCells']; start = 0
+            if set(body) != {'sheetId', 'rows', 'fields'} or type(body['sheetId']) is not int or body['sheetId'] != sheet_id: raise HistoryPrereadHold()
+        else:
+            body = request['updateCells']; position = body['start']
+            if (set(body) != {'start', 'rows', 'fields'} or set(position) != {'sheetId', 'rowIndex', 'columnIndex'}
+                    or any(type(position[name]) is not int for name in position)
+                    or position['sheetId'] != sheet_id or position['rowIndex'] != row_index): raise HistoryPrereadHold()
+            start = position['columnIndex']
+        if (body['fields'] != 'userEnteredValue' or type(body['rows']) is not list or len(body['rows']) != 1
+                or set(body['rows'][0]) != {'values'}): raise HistoryPrereadHold()
+        for offset, cell in enumerate(body['rows'][0]['values']):
+            if cell == {} and row_index is None: continue
+            if (type(cell) is not dict or set(cell) != {'userEnteredValue'}
+                    or type(cell['userEnteredValue']) is not dict or set(cell['userEnteredValue']) != {'stringValue'}): raise HistoryPrereadHold()
+            column = start + offset
+            letter = next((name for name in (*tuple(chr(65+i) for i in range(26)), 'AA', 'AB', 'AC') if _column(name) == column), None)
+            if letter is None or letter in values: raise HistoryPrereadHold()
+            values[letter] = cell['userEnteredValue']['stringValue']
+    return values
+
+
+def _business_image(token, binding, identity, unit, manifest, reads):
+    from monitor.issue_tracker_enrollment_journal import require_unit_enrollment
+    from monitor.issue_tracker_nv_reservation import require_unit_nv_reservation
+    from monitor.issue_tracker_manifest import _validated_operations, _runtime_operation
+    from monitor.issue_tracker_online_cells import encode_tool_cells
+    require_unit_enrollment(token, binding, identity, unit)
+    original_history = inspect_history_preread(token, binding, unit)
+    _owner, parent, _name, _base = global_journal._inputs(token, binding, unit)
+    history_folder = local._directory(parent, _name[:-8]+'.history')
+    try: history_path = json.loads(journal._read(history_folder, 'HEADER', 16384))['read_path']
+    finally: os.close(history_folder)
+    action = json.loads(unit.action_preimage); target = action['identity']; sheet, sid = target['sheet'], target['sheet_id']
+    if (type(manifest) is not bytes or not 1 <= len(manifest) <= 1024*1024
+            or hashlib.sha256(manifest).hexdigest() != action['manifest_id']): raise HistoryPrereadHold()
+    document = json.loads(manifest.decode('utf-8'), object_pairs_hook=local._pairs)
+    if (local._canonical(document) != manifest or type(document['operations']) is not list or len(document['operations']) > 1000
+            or type(document['schema_version']) is not int or document['schema_version'] != 1): raise HistoryPrereadHold()
+    family = {'ETH&IB Switch': 'switch', 'ETH Cabling': 'eth_cabling', 'IB Cabling': 'ib_cabling'}[sheet]
+    operations = [op for op in _validated_operations(document['operations'], 'original business', validator=_runtime_operation) if op['activity_key'][0] == family]
+    if len(operations) != len(reads) or len(operations) != len(action['decisions']): raise HistoryPrereadHold()
+    missing, shared, classified = [], None, []
+    for operation, reading in zip(operations, reads):
+        key = tuple(operation['activity_key'])
+        if operation['operation_id'] != reading['operation_id']: raise HistoryPrereadHold()
+        found, cells, actual_target = decode._activity_sheet_image(reading['discovery_plan'], reading['discovery_response'], sheet_id=sid, activity_key=key)
+        occupied, capacity, occupancy_sha = decode._insertion_sheet_image(reading['occupancy_plan'], reading['occupancy_response'], sheet_id=sid, title=sheet, target=binding.spreadsheet_id)
+        originals = {(index, column): value for index, column, value in occupied}
+        if actual_target != binding.spreadsheet_id or found.sheet_title != sheet or capacity != found.row_count or any(originals.get((index, column)) != value for index, column, value in cells): raise HistoryPrereadHold()
+        current = (reading['discovery_plan'].path, found.source_sha256, reading['occupancy_plan'].path, occupancy_sha)
+        if shared is not None and shared != current: raise HistoryPrereadHold()
+        shared = current
+        if not found.active_rows: missing.append(key)
+        classified.append((operation, reading, found))
+    nv = require_unit_nv_reservation(token, binding, identity, unit) if sheet != 'ETH&IB Switch' and missing else None
+    if nv is not None and (nv.eth_source_sha256 if sheet == 'ETH Cabling' else nv.ib_source_sha256) != shared[1]: raise HistoryPrereadHold()
+    sent = {item['operation_id']: item for item in action['business']}; reservations, images, noops = [], [], 0
+    for (operation, reading, found), decision in zip(classified, action['decisions']):
+        if decision['operation_id'] != operation['operation_id']: raise HistoryPrereadHold()
+        action_type = 'update' if found.active_rows else 'insert'; key = tuple(operation['activity_key'])
+        if action_type == 'update':
+            seen = decode.observe_active_row(reading['discovery_plan'], reading['discovery_response'], reading['row_plan'], reading['row_response'], sheet_id=sid, activity_key=key)
+        else:
+            seen = decode.observe_insertion_position(reading['discovery_plan'], reading['discovery_response'], reading['occupancy_plan'], reading['occupancy_response'], sheet_id=sid, activity_key=key,
+                reserved_row_indexes=tuple(reservations) if sheet == 'ETH&IB Switch' else (), append_rows=1 if sheet == 'ETH&IB Switch' else len(missing), row_plan=reading['row_plan'], row_response=reading['row_response'])
+        if sheet == 'ETH&IB Switch' or action_type == 'update':
+            if seen.row_index in reservations: raise HistoryPrereadHold()
+            reservations.append(seen.row_index)
+        row_index = None if sheet != 'ETH&IB Switch' and action_type == 'insert' else seen.row_index
+        original_cells = {column: dict(value) for _index, column, value in seen.cells}
+        item = sent.get(operation['operation_id'])
+        if item is None:
+            if action_type != 'update' or decision['outcome'] != 'OBSERVED-SATISFIED-AT-READ': raise HistoryPrereadHold()
+            columns = ('L',) if sheet == 'ETH&IB Switch' else ('G', 'M', 'N', 'S', 'T')
+            if any(set(original_cells[column]) != {'stringValue'} for column in columns): raise HistoryPrereadHold()
+            values = {column: original_cells[column]['stringValue'] for column in columns}; noops += 1
+        else:
+            if item['activity_key'] != operation['activity_key'] or item['action'] != action_type: raise HistoryPrereadHold()
+            values = _request_literals(item, sid, row_index)
+            if row_index is None and values['A'] != dict(nv.reservations)[key]: raise HistoryPrereadHold()
+        encoded = encode_tool_cells(sheet, sid, action_type, values, row_index=row_index,
+            observed_values=None if row_index is None else {column: original_cells[column] for column in values})
+        if encoded.intended_sha256 != decision['intended_sha256'] or encoded.outcome != decision['outcome'] or (item is not None and json.loads(encoded.requests_json) != item['requests']): raise HistoryPrereadHold()
+        image = {'operation_id': operation['operation_id'], 'discovery_path': reading['discovery_plan'].path,
+            'discovery_sha256': found.source_sha256, 'occupancy_path': reading['occupancy_plan'].path,
+            'occupancy_sha256': shared[3], 'row_path': reading['row_plan'].path if row_index is not None else None, 'row_sha256': seen.row_sha256}
+        if sheet != 'ETH&IB Switch': image['append_start_row_index'] = seen.row_index if action_type == 'insert' else None
+        images.append(image)
+    combined = {'schema_version': 1, 'spreadsheet_id': binding.spreadsheet_id, 'sheet': sheet, 'sheet_id': sid,
+        'history_sheet_id': original_history.history_sheet_id, 'history_path': history_path, 'history_sha256': original_history.source_sha256, 'business': images}
+    if sheet != 'ETH&IB Switch': combined['nv_journal_sha256'] = nv.journal_sha256 if nv else None
+    digest = hashlib.sha256(local._canonical(combined)).hexdigest()
+    if digest != action['preread_sha256'] or inspect_history_preread(token, binding, unit) != original_history: raise HistoryPrereadHold()
+    return len(operations), noops, digest
+
+
+def _write_business_image(folder, raw):
+    # Narrow fixed filename/bound; never broaden the original 1 MiB wire or
+    # four-name 2 MiB raw-image writer. Partial files remain fail-closed.
+    if type(raw) is not bytes or not 1 <= len(raw) <= _BUSINESS_LIMIT: raise HistoryPrereadHold()
+    pending = '.pending-'+uuid.uuid4().hex
+    fd = os.open(pending, os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW|os.O_CLOEXEC, 0o600, dir_fd=folder)
+    try:
+        view = memoryview(raw)
+        while view:
+            count = os.write(fd, view)
+            if count <= 0: raise HistoryPrereadHold()
+            view = view[count:]
+        os.fsync(fd)
+    finally: os.close(fd)
+    local._rename_new(folder, pending, 'BUSINESS-RAW'); os.fsync(folder)
+
+
+def _business_inputs(token, binding, unit):
+    _owner, parent, name, base = global_journal._inputs(token, binding, unit)
+    state = global_journal.inspect_global_unit(token, binding, unit)
+    return parent, name[:-8]+'.business', base, state
+
+
+def _inspect_business(token, binding, identity, unit, parent, name, folder, base):
+    if set(os.listdir(folder)) != {'MANIFEST', 'BUSINESS-RAW', 'HEADER', 'INITIALIZED'}: raise HistoryPrereadHold()
+    names = ('MANIFEST', 'BUSINESS-RAW', 'HEADER', 'INITIALIZED')
+    originals = tuple(journal._identity(os.stat(item, dir_fd=folder, follow_symlinks=False)) for item in names)
+    manifest = journal._read(folder, 'MANIFEST', 1024*1024); raw = journal._read(folder, 'BUSINESS-RAW', _BUSINESS_LIMIT)
+    count, noops, digest = _business_image(token, binding, identity, unit, manifest, _unpack_business(raw))
+    header = {**base, 'preread_sha256': digest, 'source_sha256': hashlib.sha256(raw).hexdigest(), 'operations_retained': count, 'noop_operations': noops}
+    if journal._read(folder, 'HEADER', 16384) != local._canonical(header): raise HistoryPrereadHold()
+    global_journal._sync_initialization(parent, folder, header)
+    journal._named(parent, name, folder, directory=True)
+    if set(os.listdir(folder)) != {'MANIFEST', 'BUSINESS-RAW', 'HEADER', 'INITIALIZED'}: raise HistoryPrereadHold()
+    ownership._validated_owner(token, binding)
+    # Observation spans decoding and final durability/owner checks. Reopening
+    # current bytes alone cannot detect same-byte pathname replacement; retain
+    # original inode/stat identities too, and never silently adopt the new file.
+    if (journal._read(folder, 'MANIFEST', 1024*1024) != manifest
+            or journal._read(folder, 'BUSINESS-RAW', _BUSINESS_LIMIT) != raw
+            or journal._read(folder, 'HEADER', 16384) != local._canonical(header)
+            or journal._read(folder, 'INITIALIZED', 16384) != _marker(header)
+            or _business_image(token, binding, identity, unit, manifest, _unpack_business(raw)) != (count, noops, digest)
+            or tuple(journal._identity(os.stat(item, dir_fd=folder, follow_symlinks=False)) for item in names) != originals): raise HistoryPrereadHold()
+    journal._named(parent, name, folder, directory=True)
+    return BusinessPrereadObservation(count, noops, digest, header['source_sha256'], unit.action_digest, unit.wire_sha256)
+
+
+def prepare_business_preread(token, binding, identity, unit, *, manifest, business_reads, **claims):
+    """NEW original observation, before ATTEMPT-1; not provenance/send authority.
+
+    Re-decode ALL original operations including NOOP, bind original History,
+    enrollment/NV and exact frozen action/wire. No regeneration after UNKNOWN,
+    arbitrary coordinate/credential storage, row settlement or COMPLETE.
+    """
+    folder = None; failed = False
+    try:
+        parent, name, base, state = _business_inputs(token, binding, unit)
+        if claims or state.attempt_count or name in os.listdir(parent): raise HistoryPrereadHold()
+        raw = _pack_business(business_reads); reads = _unpack_business(raw)
+        count, noops, digest = _business_image(token, binding, identity, unit, manifest, reads)
+        header = {**base, 'preread_sha256': digest, 'source_sha256': hashlib.sha256(raw).hexdigest(), 'operations_retained': count, 'noop_operations': noops}
+        folder = global_journal._create_folder(parent, name)
+        local._write_new(folder, 'MANIFEST', manifest); _write_business_image(folder, raw)
+        local._write_new(folder, 'HEADER', local._canonical(header))
+        if (_pack_business(business_reads) != raw or _business_image(token, binding, identity, unit, manifest, reads) != (count, noops, digest)
+                or global_journal.inspect_global_unit(token, binding, unit) != state): raise HistoryPrereadHold()
+        journal._named(parent, name, folder, directory=True); ownership._validated_owner(token, binding)
+        local._write_new(folder, 'INITIALIZED', _marker(header))
+        _inspect_business(token, binding, identity, unit, parent, name, folder, base)
+    except Exception: failed = True
+    finally:
+        if folder is not None:
+            try: os.close(folder)
+            except OSError: failed = True
+    if failed: raise HistoryPrereadHold()
+
+
+def inspect_business_preread(token, binding, identity, unit):
+    """Cold re-decode from genuine originals only, never re-read current rows."""
+    folder = None; failed = False
+    try:
+        parent, name, base, _state = _business_inputs(token, binding, unit)
+        folder = local._directory(parent, name); journal._named(parent, name, folder, directory=True)
+        result = _inspect_business(token, binding, identity, unit, parent, name, folder, base)
+    except Exception: failed = True
+    finally:
+        if folder is not None:
+            try: os.close(folder)
+            except OSError: failed = True
     if failed: raise HistoryPrereadHold()
     return result

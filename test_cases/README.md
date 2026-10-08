@@ -1019,6 +1019,20 @@ NOOP 不产生虚构行。typed 空字符串／false 和 gap 的最后占用行�
 行预算并把原 History 摘要／预留窗口绑定入 header；UNKNOWN 和冷进程保持
 同一窗口，无 caller 计数器／新尾替换／额外分配，仍不是当前鲜度、CAS 或许可。
 
+`prepare_business_preread` 在同一实际全表 owner、计数 0 的 global journal、
+原始 enrollment 与 History 原像内，保存完整家族 manifest 和全部业务读像，
+包括 NOOP 操作的完整键／占用／精确行。共享原件按路径和完整字节去重，
+不保存认证 headers；逐回应保持 2 MiB，整个独立 envelope 上限 16 MiB，
+不扩大 wire／manifest 的 1 MiB 界限、不截断或分批。
+八个原件 file／dir 屏障之后才写 marker，partial 永不采用／回填。
+冷进程重解码原件，核实际原始 nonce／NV、坐标、C8 literal 重编码、
+NOOP typed 意图、组合 preread SHA 与冻结 action／wire；UNKNOWN 不重读当前
+源来重组旧批次。最终 marker 屏障内的原件改写或同字节新 inode 替换亦 HOLD。
+真实 C5／C6 receipt → 双 owner／双表 NV → 混合 Cabling 组批 → 原件 journal →
+UNKNOWN 联测保持原始预留，不发送网络；只有必要原件观察，不证明 fresh
+admission、per-key FIFO settlement、受审 launcher、COMPLETE 或整个 REQ7。
+真机仍 NOT RUN。
+
 History、两张 Cabling 与 metadata 的原始 RAW 持久化统一使用固定名称的
 2 MiB 有界图像写入器，原字节全部保留、不截断；超限在创建 store 前拒绝。
 短写继续完整落盘，无进度／file-dir barrier 失败保留 partial HOLD；NOREPLACE

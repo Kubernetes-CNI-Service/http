@@ -195,6 +195,243 @@ class Req7HistoryPrereadJournalDirectTests(unittest.TestCase):
             with self.assertRaises(module.HistoryPrereadHold): module.inspect_history_preread(token, binding(), self.value)
 
 
+class Req7BusinessPrereadJournalDirectTests(unittest.TestCase):
+    def setUp(self):
+        from test_cases.test_req7_enrollment_journal import load as load_enrollment
+        from test_cases.test_req7_send_unit import inputs as unit_inputs
+        from test_cases.test_req7_sheets_read_decode import response as grid_response, identity_response
+        from test_cases.test_req7_activity_discovery import sheet_document, insertion_document, exact_row_document, switch_row, literal
+        self.owner = load_owner(); self.enrollment = load_enrollment(); self.global_journal = load_global()
+        self.planner = load_read('issue_tracker_sheets_read_plan')
+        decoder = load_read('issue_tracker_sheets_read_decode')
+        import monitor
+        monitor.issue_tracker_sheets_read_plan = self.planner
+        monitor.issue_tracker_sheets_read_decode = decoder
+        self.module = load(); self.target, credential = inputs()
+        self.identity = decoder.decode_template_identity(self.planner.prepare_template_identity_read(self.target, credential), grid_response(identity_response()))
+        self.temp = tempfile.TemporaryDirectory(prefix='req7-business-preread-'); self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve(); self.locks = self.root/'var/lib/http-ztp-container/issue-tracker'
+        self.locks.mkdir(parents=True, mode=0o700)
+        self.store = self.locks/(hashlib.sha256(TARGET.encode()).hexdigest()+'.business')
+        self.args = unit_inputs(); self.manifest = self.args['manifest']; rows = []
+        for i in range(2):
+            row = switch_row('NV%05d' % (10001+i)); row['F'] = literal('node%04d' % i)
+            row['L'] = literal('[MONITOR][down][fabric] old'); rows.append(row)
+        discovered = sheet_document('ETH&IB Switch', rows); occupied = insertion_document('ETH&IB Switch', rows)
+        for item in (discovered, occupied): item['sheets'][0]['properties']['sheetId'] = 101
+        discovery_plan = self.planner.prepare_activity_sheet_read(self.target, credential, sheet='ETH&IB Switch')
+        occupancy_plan = self.planner.prepare_insertion_sheet_read(self.target, credential, sheet='ETH&IB Switch')
+        self.reads = []
+        for i in range(2):
+            exact = exact_row_document('ETH&IB Switch', rows[i], i+2); exact['sheets'][0]['properties']['sheetId'] = 101
+            self.reads.append(dict(operation_id='switch:%04d' % i, discovery_plan=discovery_plan, discovery_response=grid_response(discovered),
+                occupancy_plan=occupancy_plan, occupancy_response=grid_response(occupied),
+                row_plan=self.planner.prepare_sheets_read(self.target, credential, mode='row_rectangle', sheet='ETH&IB Switch', first_row=i+3), row_response=grid_response(exact)))
+        self.plan = self.planner.prepare_history_tail_read(self.target, credential)
+        history = tail_document(); history['sheets'][0]['properties']['sheetId'] = 105; self.raw = grid_response(history)
+        image = {'schema_version': 1, 'spreadsheet_id': TARGET, 'sheet': 'ETH&IB Switch', 'sheet_id': 101, 'history_sheet_id': 105,
+            'history_path': self.plan.path, 'history_sha256': hashlib.sha256(self.raw.data).hexdigest(),
+            'business': [{'operation_id': reading['operation_id'], 'discovery_path': discovery_plan.path,
+                'discovery_sha256': hashlib.sha256(reading['discovery_response'].data).hexdigest(), 'occupancy_path': occupancy_plan.path,
+                'occupancy_sha256': hashlib.sha256(reading['occupancy_response'].data).hexdigest(),
+                'row_path': reading['row_plan'].path, 'row_sha256': hashlib.sha256(reading['row_response'].data).hexdigest()} for reading in self.reads]}
+        self.digest = hashlib.sha256((json.dumps(image, ensure_ascii=False, sort_keys=True, separators=(',', ':'))+'\n').encode()).hexdigest()
+
+    def initialize(self, token):
+        from monitor.issue_tracker_send_unit import freeze_send_unit
+        original = self.enrollment.prepare_enrollment_journal(token, binding(), self.identity)
+        nonces = {title: nonce for title, _sid, nonce in original.nonces}
+        business = [dict(item) for item in self.args['business']]
+        business[0]['values'] = {'L': '[MONITOR][down][fabric] old'}
+        business[1]['values'] = {'L': '[MONITOR][down][fabric] new'}
+        for item in business: item['observed_values'] = {'L': {'stringValue': '[MONITOR][down][fabric] old'}}
+        self.value = freeze_send_unit(**{**self.args, 'business': tuple(business), 'sheet_id': 101, 'history_sheet_id': 105,
+            'target_nonce': nonces['ETH&IB Switch'], 'history_nonce': nonces['Update_History'], 'preread_sha256': self.digest})
+        self.global_journal.prepare_global_unit(token, binding(), self.value)
+        self.module.prepare_history_preread(token, binding(), self.value, self.plan, self.raw)
+
+    def prepare(self, token, **changes):
+        options = dict(manifest=self.manifest, business_reads=tuple(self.reads)); options.update(changes)
+        return self.module.prepare_business_preread(token, binding(), self.identity, self.value, **options)
+
+    def test_full_original_including_noop_survives_unknown_without_credentials_or_reconstruction(self):
+        self.assertTrue(hasattr(self.module, 'prepare_business_preread'), 'durable original business images missing')
+        with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
+            self.initialize(token); self.prepare(token)
+            seen = self.module.inspect_business_preread(token, binding(), self.identity, self.value)
+            self.assertEqual((2, 1, self.digest), (seen.operations_retained, seen.noop_operations, seen.preread_sha256))
+            self.assertEqual(self.value.action_digest, seen.action_digest); self.assertEqual(self.value.wire_sha256, seen.wire_sha256)
+            self.assertEqual({'MANIFEST', 'BUSINESS-RAW', 'HEADER', 'INITIALIZED'}, set(os.listdir(self.store)))
+            self.assertEqual(self.manifest, (self.store/'MANIFEST').read_bytes())
+            before = {path.name: path.read_bytes() for path in self.store.iterdir()}
+            for data in before.values():
+                self.assertNotIn(b'Bearer', data); self.assertNotIn(b'synthetic.private', data)
+            for count in range(1, 7):
+                self.global_journal.record_global_attempt_intent(token, binding(), self.value)
+                self.assertEqual(seen, self.module.inspect_business_preread(token, binding(), self.identity, self.value))
+            with self.assertRaises(self.module.HistoryPrereadHold): self.prepare(token)
+            self.assertEqual(before, {path.name: path.read_bytes() for path in self.store.iterdir()})
+            for name in ('permit', 'complete', 'applied', 'send_once'): self.assertFalse(hasattr(seen, name))
+
+    def test_mismatched_original_digest_missing_noop_reordered_or_credential_claims_never_create(self):
+        self.assertTrue(hasattr(self.module, 'prepare_business_preread'), 'durable original business images missing')
+        with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
+            self.initialize(token)
+            for changed in ({'manifest': self.manifest+b' '}, {'business_reads': tuple(self.reads[1:])},
+                            {'business_reads': tuple(reversed(self.reads))}, {'row_reservations': (2, 3)}):
+                with self.subTest(fields=tuple(changed)), self.assertRaises(self.module.HistoryPrereadHold): self.prepare(token, **changed)
+                self.assertFalse(self.store.exists())
+            original = self.reads[0]['row_response']
+            self.reads[0]['row_response'] = type(original)(status=200, complete=True, data=original.data+b' ')
+            try:
+                with self.assertRaises(self.module.HistoryPrereadHold): self.prepare(token)
+            finally: self.reads[0]['row_response'] = original
+            self.assertFalse(self.store.exists())
+
+    def test_eight_business_image_barriers_precede_marker_and_partial_store_never_adopted(self):
+        real_fsync = os.fsync
+        for boundary in range(1, 9):
+            with self.subTest(boundary=boundary), tempfile.TemporaryDirectory(prefix='req7-business-barrier-') as directory:
+                self.root = Path(directory).resolve(); self.locks = self.root/'var/lib/http-ztp-container/issue-tracker'
+                self.locks.mkdir(parents=True, mode=0o700); self.store = self.locks/(hashlib.sha256(TARGET.encode()).hexdigest()+'.business')
+                with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
+                    self.initialize(token); calls = []
+                    def failing(fd):
+                        if self.store.exists():
+                            calls.append(fd)
+                            if len(calls) == boundary: raise OSError('private original image barrier fault')
+                        return real_fsync(fd)
+                    with mock.patch('os.fsync', side_effect=failing), self.assertRaises(self.module.HistoryPrereadHold): self.prepare(token)
+                    self.assertTrue(self.store.is_dir()); self.assertFalse((self.store/'INITIALIZED').exists())
+                    before = {path.name: path.read_bytes() for path in self.store.iterdir()}
+                    with self.assertRaises(self.module.HistoryPrereadHold): self.module.inspect_business_preread(token, binding(), self.identity, self.value)
+                    with self.assertRaises(self.module.HistoryPrereadHold): self.prepare(token)
+                    self.assertEqual(before, {path.name: path.read_bytes() for path in self.store.iterdir()})
+
+    def test_original_aliases_mode_bytes_marker_global_history_nonce_or_extra_names_hold_without_repair(self):
+        for fault in ('raw', 'manifest', 'header', 'marker', 'mode', 'symlink', 'hardlink', 'extra', 'global', 'history', 'nonces'):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory(prefix='req7-business-tamper-') as directory:
+                self.root = Path(directory).resolve(); self.locks = self.root/'var/lib/http-ztp-container/issue-tracker'
+                self.locks.mkdir(parents=True, mode=0o700); stem = hashlib.sha256(TARGET.encode()).hexdigest(); self.store = self.locks/(stem+'.business')
+                with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
+                    self.initialize(token); self.prepare(token)
+                    if fault == 'mode': (self.store/'BUSINESS-RAW').chmod(0o644)
+                    elif fault in ('symlink', 'hardlink'):
+                        (self.store/'BUSINESS-RAW').rename(self.root/'preserved')
+                        if fault == 'symlink': (self.store/'BUSINESS-RAW').symlink_to(self.root/'preserved')
+                        else: os.link(self.root/'preserved', self.store/'BUSINESS-RAW')
+                    elif fault == 'extra': (self.store/'foreign').write_bytes(b'foreign')
+                    elif fault in ('global', 'history', 'nonces'):
+                        folder, name = {'global': ('.journal', 'WIRE'), 'history': ('.history', 'HISTORY-RAW'), 'nonces': ('.enrollment', 'NONCES')}[fault]
+                        (self.locks/(stem+folder)/name).write_bytes(b'foreign')
+                    else: (self.store/{'raw': 'BUSINESS-RAW', 'manifest': 'MANIFEST', 'header': 'HEADER', 'marker': 'INITIALIZED'}[fault]).write_bytes(b'foreign')
+                    before = {path.name: path.read_bytes() for path in self.store.iterdir()}
+                    with self.assertRaises(self.module.HistoryPrereadHold) as caught: self.module.inspect_business_preread(token, binding(), self.identity, self.value)
+                    self.assertIsNone(caught.exception.__context__)
+                    self.assertEqual(before, {path.name: path.read_bytes() for path in self.store.iterdir()})
+
+    def test_creation_after_unknown_or_revoked_owner_never_backfills_or_changes_bindings(self):
+        with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
+            self.initialize(token); self.global_journal.record_global_attempt_intent(token, binding(), self.value)
+            with self.assertRaises(self.module.HistoryPrereadHold): self.prepare(token)
+            self.assertFalse(self.store.exists())
+        with fixture(self.root), self.assertRaises(self.module.HistoryPrereadHold): self.prepare(token)
+        with fixture(self.root), self.owner.spreadsheet_owner(replace(binding(), policy_sha256='f'*64)) as fresh:
+            with self.assertRaises(self.module.HistoryPrereadHold): self.module.inspect_business_preread(fresh, replace(binding(), policy_sha256='f'*64), self.identity, self.value)
+        self.assertFalse(self.store.exists())
+
+    def test_raw_change_during_final_marker_barrier_cannot_return_an_original_observation(self):
+        with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
+            self.initialize(token); self.prepare(token)
+            real_sync = self.global_journal._sync_initialization
+            def change_after_image_decode(parent, folder, header):
+                real_sync(parent, folder, header)
+                (self.store/'BUSINESS-RAW').write_bytes(b'changed during original observation')
+            with mock.patch.object(self.global_journal, '_sync_initialization', side_effect=change_after_image_decode):
+                with self.assertRaises(self.module.HistoryPrereadHold):
+                    self.module.inspect_business_preread(token, binding(), self.identity, self.value)
+            self.assertEqual(b'changed during original observation', (self.store/'BUSINESS-RAW').read_bytes())
+
+    def test_same_bytes_new_inode_during_marker_barrier_is_not_the_original_read_image(self):
+        with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
+            self.initialize(token); self.prepare(token)
+            original = (self.store/'BUSINESS-RAW').read_bytes(); original_inode = (self.store/'BUSINESS-RAW').stat().st_ino
+            real_sync = self.global_journal._sync_initialization
+            def replace_after_image_decode(parent, folder, header):
+                real_sync(parent, folder, header)
+                (self.store/'BUSINESS-RAW').rename(self.root/'preserved-original')
+                (self.store/'BUSINESS-RAW').write_bytes(original); (self.store/'BUSINESS-RAW').chmod(0o600)
+            with mock.patch.object(self.global_journal, '_sync_initialization', side_effect=replace_after_image_decode):
+                with self.assertRaises(self.module.HistoryPrereadHold):
+                    self.module.inspect_business_preread(token, binding(), self.identity, self.value)
+            self.assertNotEqual(original_inode, (self.store/'BUSINESS-RAW').stat().st_ino)
+            self.assertEqual(original, (self.store/'BUSINESS-RAW').read_bytes())
+
+    def test_shared_originals_deduplicate_whole_bytes_but_each_raw_and_aggregate_bounds_fail_closed(self):
+        from copy import deepcopy
+        self.assertTrue(hasattr(self.module, '_pack_business'), 'bounded original envelope missing')
+        packed = self.module._pack_business(tuple(self.reads)); image = json.loads(packed)
+        self.assertEqual(4, len(image['images']))
+        self.assertEqual(image['operations'][0]['discovery'], image['operations'][1]['discovery'])
+        self.assertEqual(image['operations'][0]['occupancy'], image['operations'][1]['occupancy'])
+        mutated = deepcopy(self.reads)
+        for i, reading in enumerate(mutated):
+            for j, role in enumerate(('discovery', 'occupancy', 'row')):
+                original = reading[role+'_response']; raw = original.data+b' '*(2*1024*1024-len(original.data)-i*3-j)+b' '*(i*3+j)
+                # A different valid-whitespace suffix preserves JSON while
+                # making every image distinct; no implementation-derived bound.
+                raw = raw[:-1]+(b'\t' if (i*3+j)%2 else b'\n')
+                reading[role+'_response'] = type(original)(status=200, complete=True, data=raw)
+        # Distinct bodies for shared paths as well, to exercise whole envelope.
+        mutated[1]['discovery_response'].data = mutated[1]['discovery_response'].data[:-2]+b'\t\t'
+        mutated[1]['occupancy_response'].data = mutated[1]['occupancy_response'].data[:-2]+b'\n\n'
+        with self.assertRaises(self.module.HistoryPrereadHold): self.module._pack_business(tuple(mutated))
+        oversized = dict(self.reads[0]); original = oversized['row_response']
+        oversized['row_response'] = type(original)(status=200, complete=True, data=b' '*(2*1024*1024+1))
+        with self.assertRaises(self.module.HistoryPrereadHold): self.module._pack_business((oversized,))
+
+
+class Req7BusinessPrereadJournalWorkflowTests(unittest.TestCase):
+    setUp = Req7BusinessPrereadJournalDirectTests.setUp
+    initialize = Req7BusinessPrereadJournalDirectTests.initialize
+    prepare = Req7BusinessPrereadJournalDirectTests.prepare
+
+    def test_manifest_maps_original_source_global_nonce_nv_and_business_workflow(self):
+        manifest = json.loads((ROOT/'test_cases/script_test_manifest.json').read_text())
+        required = {'monitor/issue_tracker_history_preread_journal.py', 'monitor/issue_tracker_send_unit.py',
+            'monitor/issue_tracker_global_attempt_journal.py', 'monitor/issue_tracker_enrollment_journal.py',
+            'monitor/issue_tracker_nv_reservation.py', 'monitor/issue_tracker_local_workbook_commit.py',
+            'monitor/issue_tracker_manifest.py', 'monitor/issue_tracker_receipt_snapshot.py'}
+        self.assertTrue(any(required <= set(workflow['members']) and
+            {'test_cases.test_req7_history_preread_journal', 'test_cases.test_issue_tracker_stage_l_consumer_workflow'} <= set(workflow['tests'])
+            for workflow in manifest['workflows']))
+        self.assertIn('prepare_business_preread', (ROOT/'test_cases/README.md').read_text())
+
+    def test_native_cold_process_reopens_exact_original_all_operations_after_unknown(self):
+        with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
+            self.initialize(token); self.prepare(token); self.global_journal.record_global_attempt_intent(token, binding(), self.value)
+        code = '''import sys,json,pathlib,hashlib,os
+sys.path.insert(0,sys.argv[2]); sys.path.insert(0,str(pathlib.Path(sys.argv[2])/'tools'))
+from test_cases.test_req7_spreadsheet_owner import load as load_owner,fixture,binding
+from test_cases.test_req7_history_preread_journal import load
+from monitor.issue_tracker_send_unit import FrozenSendUnit
+from monitor.issue_tracker_sheets_read_decode import ObservedTemplateIdentity
+owner=load_owner(); module=load(); root=pathlib.Path(sys.argv[1]); stem=hashlib.sha256(binding().spreadsheet_id.encode()).hexdigest()
+folder=root/'var/lib/http-ztp-container/issue-tracker'/(stem+'.journal'); raw=(folder/'ACTION-PREIMAGE').read_bytes(); wire=(folder/'WIRE').read_bytes()
+action=json.loads(raw); header=json.loads((folder/'HEADER').read_bytes()); outcomes=tuple(tuple(x) for x in action['outcomes'])
+canonical=lambda value:(json.dumps(value,ensure_ascii=False,sort_keys=True,separators=(',',':'))+'\\n').encode()
+unit=FrozenSendUnit(header['unit_id'],wire,header['wire_sha256'],raw,header['action_digest'],outcomes,hashlib.sha256(canonical(action['outcomes'])).hexdigest(),(int(header['unit_id'][:8],16)&0x7fffffff) or 1,len(action['business'])+len(action['audits']),(),'WIRE-CANDIDATE')
+identity=ObservedTemplateIdentity(binding().spreadsheet_id,tuple(tuple(x) for x in json.loads(sys.argv[3])),'a'*64)
+with fixture(root),owner.spreadsheet_owner(binding()) as token:
+ seen=module.inspect_business_preread(token,binding(),identity,unit)
+ os.write(1,('%d %d %s\\n'%(seen.operations_retained,seen.noop_operations,seen.preread_sha256)).encode())
+'''
+        result = subprocess.run([sys.executable, '-B', '-c', code, str(self.root), str(ROOT), json.dumps(self.identity.sheet_ids)],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(('2 1 '+self.digest+'\n').encode(), result.stdout)
+
+
 class Req7HistoryPrereadJournalWorkflowTests(unittest.TestCase):
     setUp = Req7HistoryPrereadJournalDirectTests.setUp
 

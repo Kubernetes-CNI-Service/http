@@ -79,6 +79,9 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
     def test_actual_source_receipt_and_original_two_sheet_nv_derive_mixed_cabling_units(self):
         self._exercise_real_protected_three_panel_fixture(skip_history=False, observed_cabling_insert_probe=True)
 
+    def test_actual_receipted_cabling_unit_retains_original_business_images_across_unknown(self):
+        self._exercise_real_protected_three_panel_fixture(skip_history=False, observed_cabling_insert_probe=True, business_preread_probe=True)
+
     def test_two_real_cycles_keep_keys_and_commit_latest_business_values(self):
         self._exercise_real_protected_three_panel_fixture(
             skip_history=False, two_cycle_changed_latest=True,
@@ -436,7 +439,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         source_identity_probe=False, two_cycle_changed_latest=False,
         settings_channel_probe=False, settings_channel_fault=False,
         panel_counts_probe=False, source_unit_probe=False, receipted_source_probe=False, observed_source_probe=False,
-        observed_switch_insert_probe=False, observed_cabling_insert_probe=False,
+        observed_switch_insert_probe=False, observed_cabling_insert_probe=False, business_preread_probe=False,
         complete_preview_probe=False,
         complete_preview_source_race=False,
         complete_preview_cgi=False,
@@ -1551,6 +1554,28 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                                 with self.assertRaises(compiler.SendUnitHold): compile_cabling()
                             finally: ids_path.write_bytes(saved_ids)
                             stem = hashlib.sha256(binding.spreadsheet_id.encode()).hexdigest()
+                            if business_preread_probe:
+                                from test_cases.test_req7_global_attempt_journal import load as load_global
+                                from test_cases.test_req7_history_preread_journal import load as load_preread
+                                # Mirror canonical imports after this fixture's
+                                # owner reload; never relax real owner registries.
+                                global_journal = load_global(); preread = load_preread()
+                                self.assertIs(global_journal.ownership, owner_module)
+                                self.assertIs(preread.ownership, owner_module)
+                                self.assertTrue(hasattr(preread, 'prepare_business_preread'), 'original C5/C6 business images must survive cold/UNKNOWN')
+                                global_journal.prepare_global_unit(spreadsheet_token, binding, unit)
+                                preread.prepare_history_preread(spreadsheet_token, binding, unit, history_plan, history_raw)
+                                preread.prepare_business_preread(spreadsheet_token, binding, identity, unit, manifest=body, business_reads=tuple(reads))
+                                seen = preread.inspect_business_preread(spreadsheet_token, binding, identity, unit)
+                                self.assertEqual((len(candidates), 0, action['preread_sha256']), (seen.operations_retained, seen.noop_operations, seen.preread_sha256))
+                                retained = {path.name: path.read_bytes() for path in (state/(stem+'.business')).iterdir()}
+                                global_journal.record_global_attempt_intent(spreadsheet_token, binding, unit)
+                                self.assertEqual(seen, preread.inspect_business_preread(spreadsheet_token, binding, identity, unit))
+                                with self.assertRaises(preread.HistoryPrereadHold):
+                                    preread.prepare_business_preread(spreadsheet_token, binding, identity, unit, manifest=body, business_reads=tuple(reads))
+                                self.assertEqual(retained, {path.name: path.read_bytes() for path in (state/(stem+'.business')).iterdir()})
+                                self.assertEqual(before, {path.name: path.read_bytes() for path in (state/(stem+'.nv')).iterdir()})
+                                continue
                             blocked = state/(stem+'.journal'); blocked.mkdir(mode=0o700)
                             with self.assertRaises(compiler.SendUnitHold): compile_cabling()
                             self.assertEqual([], list(blocked.iterdir()))

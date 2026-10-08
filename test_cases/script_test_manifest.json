@@ -3311,6 +3311,11 @@
       "tests": ["test_cases.test_req7_history_preread_journal"]
     },
     {
+      "id": "req7_original_business_preread_source_and_unknown",
+      "members": ["monitor/issue_tracker_history_preread_journal.py", "monitor/issue_tracker_send_unit.py", "monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_attempt_journal.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_local_workbook_commit.py", "monitor/issue_tracker_manifest.py", "monitor/issue_tracker_receipt_snapshot.py", "monitor/issue_tracker_enrollment_journal.py", "monitor/issue_tracker_nv_reservation.py", "monitor/issue_tracker_online_cells.py", "monitor/issue_tracker_sheets_read_plan.py", "monitor/issue_tracker_sheets_read_decode.py"],
+      "tests": ["test_cases.test_req7_history_preread_journal", "test_cases.test_issue_tracker_stage_l_consumer_workflow"]
+    },
+    {
       "id": "req7_native_history_nonce_fence_actual_journal_match",
       "members": ["monitor/issue_tracker_remote_history_match.py", "monitor/issue_tracker_history_preread_journal.py", "monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_enrollment_journal.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_metadata_capacity.py", "monitor/issue_tracker_send_unit.py", "monitor/issue_tracker_sheets_read_plan.py", "monitor/issue_tracker_sheets_read_decode.py", "monitor/issue_tracker_tls_inputs.py"],
       "tests": ["test_cases.test_req7_remote_history_match"]

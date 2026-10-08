@@ -2001,12 +2001,12 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <dt>作用：</dt><dd>Uninstalled immutable pre-send History image under the spreadsheet owner。</dd>
             <dt>是否直接运行：</dt><dd>否；这是未安装、未启用的受控传输／只读库，不是操作员 CLI 或在线发布入口。</dd>
             <dt>运行环境：</dt><dd>当前未安装、未启用；仅在本地隔离候选中验证，不启动受管服务。</dd>
-            <dt>使用场景：</dt><dd>在真实全表 owner 及全局不可变 journal 内、首个意图前保存完整 History 原始响应与发送前尾边界；冷进程重新解码，UNKNOWN 后不可补建或替换。</dd>
+            <dt>使用场景：</dt><dd>在真实全表 owner 及全局不可变 journal 内、首个意图前保存完整 History 原始响应与发送前尾边界，以及整个家族 manifest／全部原始业务读像（含 NOOP）；冷进程重新解码，UNKNOWN 后不可补建或替换。</dd>
             <dt>前置条件：</dt><dd>未来发送须受固定 root launcher、精确部署 Python/SSL/CA 身份、完整总预算监督和每次新鲜准入支配；本地对象不是授权。</dd>
             <dt>语法/调用方式：</dt><dd>开发测试导入函数；无已安装操作员入口。</dd>
             <dt>主要参数：</dt><dd>无独立 CLI；不提供目标 URL、代理、凭据路径、CA 或重试覆盖开关。</dd>
-            <dt>输入：</dt><dd>ACTIVE 全局 owner、同一 action/wire、固定完整全尾响应；不接收可选路径、裸尾行号、修复或发送许可。</dd>
-            <dt>输出/状态：</dt><dd>私有原始字节、history_last_row_before_send 及全部实际业务／ALL 审计的原始 append 行预留（NOOP 不虚构行），metadata 预留前校验并绑定；UNKNOWN／冷进程保持同一窗口，不是 COMPLETE、新鲜准入或发送能力。</dd>
+            <dt>输入：</dt><dd>ACTIVE 全局 owner、同一 action/wire、原始 nonce／适用 NV／History、完整键／占用／精确行；不接收可选路径、裸尾行号、修复或发送许可。不保存认证 header；单回应 2 MiB、去重后的业务 envelope 16 MiB，wire／manifest 仍 1 MiB。</dd>
+            <dt>输出/状态：</dt><dd>私有原始字节、history_last_row_before_send 及全部实际业务／ALL 审计的原始 append 行预留（NOOP 不虚构行），metadata 预留前校验并绑定；原始业务坐标、literal／NOOP typed 意图与组合摘要核冻结 action／wire，最终屏障内改写或同字节新 inode HOLD；UNKNOWN／冷进程保持同一窗口，不是 COMPLETE、新鲜准入或发送能力。</dd>
             <dt>成功判据：</dt><dd>本地 direct/workflow 通过不授予在线发送或写入资格，不证明部署环境、完整准入或整个 REQ7。</dd>
             <dt>失败恢复：</dt><dd>缺 marker、部分屏障、别名、篡改、重哈希外来目标或全局计数链变化 HOLD，禁止回填、重置或清除 UNKNOWN；尚未集成实际 launcher 与完整对账。</dd>
           </dl>
