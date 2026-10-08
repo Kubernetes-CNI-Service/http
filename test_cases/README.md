@@ -1074,3 +1074,12 @@ runner 的依赖环境，不冒称 `-I` 隔离传输；六次意图不是六次�
 准入、隐藏 PROJECT 全配额、行连续性、FIFO 或真实 M=6 发送证明。未安装库无
 COMPLETE／清理／联网能力，受保护准入、单次 capability 和固定 launcher 仍须接入；
 REQ7 整体未完成，真机 NOT RUN。
+
+`record_original_business_reserved_attempt_intent` 进一步在每次计数前后重开整个
+原始业务 journal（完整家族 manifest、全部发现／占用／精确行，含 NOOP），
+与原 enrollment、History 行预算、metadata 及适用 BOTH Cabling NV 一同核对。
+原件缺失／漂移在前置 HOLD 时不新增计数；后置失败保留计数及 UNKNOWN，
+不回退、不补建或重新编译。六个独立冷进程保持同一原件，第七次不能计数；
+真实 C5/C6 Cabling 混合组批联测贯穿完整原链。
+这仍仅是必要的持久意图，不是 fresh admission、隐藏 PROJECT 配额证明、
+FIFO settlement、实际 M=6 发送上限、发送许可或 COMPLETE；真机 NOT RUN。

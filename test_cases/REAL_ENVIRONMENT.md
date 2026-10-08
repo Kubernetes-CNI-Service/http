@@ -2132,6 +2132,8 @@ FIFO、每次准入／真实单次 wire；部署与真实断电验收准确保�
 
 ## TC-REAL-REQ7-HISTORY-PREREAD-JOURNAL-001 — 不可变发送前 History 原像
 
+- 原件计数门禁补充（**NOT RUN**）：每次原始业务 reserved intent 在持久计数前后重核完整业务原件、原 enrollment／History／metadata／适用 BOTH NV，缺失或漂移不补建，前置不计数、后置保留 UNKNOWN。六个实际冷进程／C5-C6 Cabling 本地链不代表真实尝试 M=6、隐藏 PROJECT 配额、当前鲜度或 COMPLETE。需授权真机身份后按本卡屏障／inode／SHA 留证；只清理自有 fixture，不删除真实原件或 UNKNOWN。
+
 - 业务原像补充（**NOT RUN**）：同一全表 owner／计数 0 的原始 global unit、十四表 nonce、History 与适用 NV 下保存整个家族 manifest、全部原始发现／占用／精确行（含 NOOP）。单回应 2 MiB，去重后的独立 envelope 16 MiB，wire／manifest 仍 1 MiB；不保存认证 header、静默分批或截断。八个 file／dir 屏障后才写 marker；真实 C5/C6 receipt 与双表 NV 联动后，UNKNOWN／冷进程只重解码原件；末段原件改写、同字节新 inode、链接／权限／额外文件、nonce／History／NV 漂移均 HOLD。仅必要观察，不是 COMPLETE／新鲜准入／行结算／受审发送。证据继续按下列 stat/inode、SHA、完整日志、原屏障物理顺序留存；清理仅自有 fixture，真实原件与 UNKNOWN 永不删除；真实断电及 Stage O 未运行。
 
 - Case ID：`TC-REAL-REQ7-HISTORY-PREREAD-JOURNAL-001`；类型：durable / integration / real-environment；对应 C-6/C-19/C-26。状态：**NOT RUN / REAL_ENV REQUIRED**。涉及 `monitor/issue_tracker_history_preread_journal.py`、`monitor/issue_tracker_global_attempt_journal.py`、`monitor/issue_tracker_spreadsheet_owner.py`、`monitor/issue_tracker_sheets_read_plan.py`、`monitor/issue_tracker_sheets_read_decode.py`、`monitor/issue_tracker_tls_inputs.py`。本地合成 root 元数据、真实文件屏障和私有 TLS 不代表整个 REQ7 或部署身份。

@@ -82,6 +82,9 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
     def test_actual_receipted_cabling_unit_retains_original_business_images_across_unknown(self):
         self._exercise_real_protected_three_panel_fixture(skip_history=False, observed_cabling_insert_probe=True, business_preread_probe=True)
 
+    def test_actual_receipted_cabling_original_chain_dominates_reserved_count(self):
+        self._exercise_real_protected_three_panel_fixture(skip_history=False, observed_cabling_insert_probe=True, business_preread_probe=True, original_reserved_probe=True)
+
     def test_two_real_cycles_keep_keys_and_commit_latest_business_values(self):
         self._exercise_real_protected_three_panel_fixture(
             skip_history=False, two_cycle_changed_latest=True,
@@ -439,7 +442,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         source_identity_probe=False, two_cycle_changed_latest=False,
         settings_channel_probe=False, settings_channel_fault=False,
         panel_counts_probe=False, source_unit_probe=False, receipted_source_probe=False, observed_source_probe=False,
-        observed_switch_insert_probe=False, observed_cabling_insert_probe=False, business_preread_probe=False,
+        observed_switch_insert_probe=False, observed_cabling_insert_probe=False, business_preread_probe=False, original_reserved_probe=False,
         complete_preview_probe=False,
         complete_preview_source_race=False,
         complete_preview_cgi=False,
@@ -1569,7 +1572,27 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                                 seen = preread.inspect_business_preread(spreadsheet_token, binding, identity, unit)
                                 self.assertEqual((len(candidates), 0, action['preread_sha256']), (seen.operations_retained, seen.noop_operations, seen.preread_sha256))
                                 retained = {path.name: path.read_bytes() for path in (state/(stem+'.business')).iterdir()}
-                                global_journal.record_global_attempt_intent(spreadsheet_token, binding, unit)
+                                if original_reserved_probe:
+                                    from test_cases.test_req7_metadata_reservation import load as load_quota
+                                    from monitor.issue_tracker_metadata_capacity import prepare_metadata_capacity_read
+                                    quota_module = load_quota()
+                                    quota_raw = response({'matchedDeveloperMetadata': [
+                                        {'developerMetadata': {'metadataId': index+1, 'metadataKey': 'http-ztp-enrollment-v1',
+                                            'metadataValue': nonce, 'visibility': 'DOCUMENT',
+                                            'location': {'locationType': 'SHEET', 'sheetId': sheet_id}}}
+                                        for index, (_title, sheet_id, nonce) in enumerate(original.nonces)]})
+                                    quota = quota_module.prepare_metadata_reservation(spreadsheet_token, binding, identity, unit,
+                                        prepare_metadata_capacity_read(binding, credential), quota_raw)
+                                    self.assertTrue(hasattr(global_journal, 'record_original_business_reserved_attempt_intent'), 'complete original chain must dominate counted intent')
+                                    for count in range(1, 7):
+                                        intent = global_journal.record_original_business_reserved_attempt_intent(spreadsheet_token, binding, identity, unit)
+                                        self.assertEqual((count, 'UNKNOWN'), (intent.attempt_count, intent.outcome))
+                                        self.assertEqual(seen, preread.inspect_business_preread(spreadsheet_token, binding, identity, unit))
+                                        self.assertEqual(quota, quota_module.inspect_metadata_reservation(spreadsheet_token, binding, identity, unit))
+                                    with self.assertRaises(global_journal.GlobalAttemptHold):
+                                        global_journal.record_original_business_reserved_attempt_intent(spreadsheet_token, binding, identity, unit)
+                                else:
+                                    global_journal.record_global_attempt_intent(spreadsheet_token, binding, unit)
                                 self.assertEqual(seen, preread.inspect_business_preread(spreadsheet_token, binding, identity, unit))
                                 with self.assertRaises(preread.HistoryPrereadHold):
                                     preread.prepare_business_preread(spreadsheet_token, binding, identity, unit, manifest=body, business_reads=tuple(reads))

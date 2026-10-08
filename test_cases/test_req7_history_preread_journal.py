@@ -391,10 +391,126 @@ class Req7BusinessPrereadJournalDirectTests(unittest.TestCase):
         with self.assertRaises(self.module.HistoryPrereadHold): self.module._pack_business((oversized,))
 
 
+class Req7OriginalBusinessReservedIntentDirectTests(unittest.TestCase):
+    setUp = Req7BusinessPrereadJournalDirectTests.setUp
+    initialize = Req7BusinessPrereadJournalDirectTests.initialize
+    prepare = Req7BusinessPrereadJournalDirectTests.prepare
+
+    def quota(self, token):
+        from test_cases.test_req7_metadata_reservation import load as load_quota
+        capacity = load_read('issue_tracker_metadata_capacity')
+        self.quota_module = load_quota()
+        original = self.enrollment.inspect_enrollment_journal(token, binding(), self.identity)
+        raw = response({'matchedDeveloperMetadata': [
+            {'developerMetadata': {'metadataId': index+1, 'metadataKey': 'http-ztp-enrollment-v1',
+                'metadataValue': nonce, 'visibility': 'DOCUMENT',
+                'location': {'locationType': 'SHEET', 'sheetId': sid}}}
+            for index, (_title, sid, nonce) in enumerate(original.nonces)]})
+        target, credential = inputs()
+        return self.quota_module.prepare_metadata_reservation(token, binding(), self.identity, self.value,
+            capacity.prepare_metadata_capacity_read(target, credential), raw)
+
+    def record(self, token):
+        self.assertTrue(hasattr(self.global_journal, 'record_original_business_reserved_attempt_intent'),
+            'original complete business images must dominate every counted attempt')
+        return self.global_journal.record_original_business_reserved_attempt_intent(token, binding(), self.identity, self.value)
+
+    def test_missing_original_business_holds_before_count_and_all_six_keep_originals(self):
+        self.assertTrue(hasattr(self.global_journal, 'record_original_business_reserved_attempt_intent'),
+            'original complete business images must dominate every counted attempt')
+        with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
+            self.initialize(token); quota = self.quota(token)
+            with self.assertRaises(self.global_journal.GlobalAttemptHold): self.record(token)
+            self.assertEqual(0, self.global_journal.inspect_global_unit(token, binding(), self.value).attempt_count)
+            self.prepare(token); original = {path.name: path.read_bytes() for path in self.store.iterdir()}
+            for count in range(1, 7):
+                seen = self.record(token)
+                self.assertEqual((count, 'UNKNOWN'), (seen.attempt_count, seen.outcome))
+                self.assertEqual((2, 1, self.digest), tuple(getattr(self.module.inspect_business_preread(
+                    token, binding(), self.identity, self.value), field)
+                    for field in ('operations_retained', 'noop_operations', 'preread_sha256')))
+                self.assertEqual(quota, self.quota_module.inspect_metadata_reservation(token, binding(), self.identity, self.value))
+                self.assertEqual(original, {path.name: path.read_bytes() for path in self.store.iterdir()})
+                for name in ('permit', 'send_once', 'complete'): self.assertFalse(hasattr(seen, name))
+            with self.assertRaises(self.global_journal.GlobalAttemptHold): self.record(token)
+            self.assertEqual(6, self.global_journal.inspect_global_unit(token, binding(), self.value).attempt_count)
+
+    def test_each_business_original_or_partial_marker_holds_without_count_or_repair(self):
+        self.assertTrue(hasattr(self.global_journal, 'record_original_business_reserved_attempt_intent'),
+            'original complete business images must dominate every counted attempt')
+        with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
+            self.initialize(token); self.quota(token); self.prepare(token)
+            for name in ('MANIFEST', 'BUSINESS-RAW', 'HEADER', 'INITIALIZED'):
+                with self.subTest(name=name):
+                    path = self.store/name; saved = path.read_bytes(); path.write_bytes(b'foreign original')
+                    try:
+                        with self.assertRaises(self.global_journal.GlobalAttemptHold): self.record(token)
+                        self.assertEqual(b'foreign original', path.read_bytes())
+                        self.assertEqual(0, self.global_journal.inspect_global_unit(token, binding(), self.value).attempt_count)
+                    finally: path.write_bytes(saved)
+
+    def test_post_count_business_drift_keeps_unknown_and_never_authorizes_or_repairs(self):
+        self.assertTrue(hasattr(self.global_journal, 'record_original_business_reserved_attempt_intent'),
+            'original complete business images must dominate every counted attempt')
+        with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
+            self.initialize(token); self.quota(token); self.prepare(token)
+            original = self.global_journal._observe
+            def drift(*args, **kwargs):
+                result = original(*args, **kwargs)
+                if args[3]: (self.store/'BUSINESS-RAW').write_bytes(b'changed after durable count')
+                return result
+            with mock.patch.object(self.global_journal, '_observe', side_effect=drift):
+                with self.assertRaises(self.global_journal.GlobalAttemptHold): self.record(token)
+            self.assertEqual((1, 'UNKNOWN'), tuple(getattr(self.global_journal.inspect_global_unit(
+                token, binding(), self.value), field) for field in ('attempt_count', 'outcome')))
+            self.assertEqual(b'changed after durable count', (self.store/'BUSINESS-RAW').read_bytes())
+            with self.assertRaises(self.global_journal.GlobalAttemptHold): self.record(token)
+            self.assertEqual(1, self.global_journal.inspect_global_unit(token, binding(), self.value).attempt_count)
+
+
 class Req7BusinessPrereadJournalWorkflowTests(unittest.TestCase):
     setUp = Req7BusinessPrereadJournalDirectTests.setUp
     initialize = Req7BusinessPrereadJournalDirectTests.initialize
     prepare = Req7BusinessPrereadJournalDirectTests.prepare
+    quota = Req7OriginalBusinessReservedIntentDirectTests.quota
+
+    def test_six_native_cold_processes_count_only_complete_original_business_and_reservations(self):
+        with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
+            self.initialize(token); self.quota(token); self.prepare(token)
+        original = {path.name: path.read_bytes() for path in self.store.iterdir()}
+        code = '''import sys,json,pathlib,hashlib,os
+sys.path.insert(0,sys.argv[2]); sys.path.insert(0,str(pathlib.Path(sys.argv[2])/'tools'))
+from test_cases.test_req7_spreadsheet_owner import load as load_owner,fixture,binding
+from test_cases.test_req7_global_attempt_journal import load as load_global
+from test_cases.test_req7_history_preread_journal import load
+from test_cases.test_req7_enrollment_journal import load as load_enrollment
+from test_cases.test_req7_metadata_reservation import load as load_quota
+from monitor.issue_tracker_send_unit import FrozenSendUnit
+from monitor.issue_tracker_sheets_read_decode import ObservedTemplateIdentity
+owner=load_owner(); global_journal=load_global(); load_enrollment(); load(); load_quota()
+root=pathlib.Path(sys.argv[1]); stem=hashlib.sha256(binding().spreadsheet_id.encode()).hexdigest()
+parent=root/'var/lib/http-ztp-container/issue-tracker'; folder=parent/(stem+'.journal')
+raw=(folder/'ACTION-PREIMAGE').read_bytes(); wire=(folder/'WIRE').read_bytes()
+action=json.loads(raw); header=json.loads((folder/'HEADER').read_bytes()); outcomes=tuple(tuple(x) for x in action['outcomes'])
+canonical=lambda value:(json.dumps(value,ensure_ascii=False,sort_keys=True,separators=(',',':'))+'\\n').encode()
+unit=FrozenSendUnit(header['unit_id'],wire,header['wire_sha256'],raw,header['action_digest'],outcomes,hashlib.sha256(canonical(action['outcomes'])).hexdigest(),(int(header['unit_id'][:8],16)&0x7fffffff) or 1,len(action['business'])+len(action['audits']),(),'WIRE-CANDIDATE')
+quota=json.loads((parent/(stem+'.metadata')/'HEADER').read_bytes())
+identity=ObservedTemplateIdentity(binding().spreadsheet_id,tuple(tuple(x) for x in quota['sheet_ids']),quota['identity_sha256'])
+with fixture(root),owner.spreadsheet_owner(binding()) as token:
+ try: seen=global_journal.record_original_business_reserved_attempt_intent(token,binding(),identity,unit)
+ except global_journal.GlobalAttemptHold:
+  if global_journal.inspect_global_unit(token,binding(),unit).attempt_count!=6: raise
+  os.write(1,b'EXHAUSTED UNKNOWN\\n')
+ else: os.write(1,('%d UNKNOWN\\n'%seen.attempt_count).encode())
+'''
+        for count in range(1, 8):
+            result = subprocess.run([sys.executable, '-B', '-c', code, str(self.root), str(ROOT)],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual(('%d UNKNOWN\n' % count).encode() if count <= 6 else b'EXHAUSTED UNKNOWN\n', result.stdout)
+            self.assertEqual(original, {path.name: path.read_bytes() for path in self.store.iterdir()})
+        self.assertEqual({'ACTION-PREIMAGE', 'WIRE', 'HEADER', 'INITIALIZED',
+            *(f'ATTEMPT-{count}' for count in range(1, 7))}, set(os.listdir(self.locks/(hashlib.sha256(TARGET.encode()).hexdigest()+'.journal'))))
 
     def test_manifest_maps_original_source_global_nonce_nv_and_business_workflow(self):
         manifest = json.loads((ROOT/'test_cases/script_test_manifest.json').read_text())
@@ -406,6 +522,11 @@ class Req7BusinessPrereadJournalWorkflowTests(unittest.TestCase):
             {'test_cases.test_req7_history_preread_journal', 'test_cases.test_issue_tracker_stage_l_consumer_workflow'} <= set(workflow['tests'])
             for workflow in manifest['workflows']))
         self.assertIn('prepare_business_preread', (ROOT/'test_cases/README.md').read_text())
+        self.assertTrue(any(required | {'monitor/issue_tracker_metadata_reservation.py',
+            'monitor/issue_tracker_metadata_capacity.py'} <= set(workflow['members']) and
+            workflow['id'] == 'req7_original_business_source_reservations_count'
+            for workflow in manifest['workflows']))
+        self.assertIn('record_original_business_reserved_attempt_intent', (ROOT/'test_cases/README.md').read_text())
 
     def test_native_cold_process_reopens_exact_original_all_operations_after_unknown(self):
         with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:

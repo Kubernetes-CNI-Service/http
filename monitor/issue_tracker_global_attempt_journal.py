@@ -207,3 +207,32 @@ def record_reserved_attempt_intent(token, binding, identity, unit):
     except Exception: failed = True
     if failed: raise GlobalAttemptHold()
     return result
+
+
+def record_original_business_reserved_attempt_intent(token, binding, identity, unit):
+    """Bind ALL original business images to the necessary reservation count.
+
+    This is still evidence, NOT fresh admission, a launcher capability, FIFO
+    settlement or COMPLETE. Never recreate a missing original. A post-count
+    failure retains UNKNOWN; quota's hidden PROJECT limitation is unchanged.
+    """
+    from monitor.issue_tracker_history_preread_journal import inspect_business_preread
+
+    def originals():
+        reservations = _reserved_images(token, binding, identity, unit)
+        business = inspect_business_preread(token, binding, identity, unit)
+        ownership._validated_owner(token, binding)
+        return reservations, business
+
+    failed = False
+    try:
+        before = inspect_global_unit(token, binding, unit)
+        if before.attempt_count == 6: raise GlobalAttemptHold()
+        images = originals()
+        result = _observe(token, binding, unit, True)
+        if (originals() != images or result.attempt_count != before.attempt_count + 1
+                or inspect_global_unit(token, binding, unit) != result):
+            raise GlobalAttemptHold()
+    except Exception: failed = True
+    if failed: raise GlobalAttemptHold()
+    return result
