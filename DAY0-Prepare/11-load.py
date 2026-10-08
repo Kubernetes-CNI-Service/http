@@ -7040,6 +7040,9 @@ def _setup_switch_shared_publication_snapshot(body, *, include_inputs=True, _b_r
             created[str(path)] = _setup_switch_directory_identity(path)
         infra = {}
         for row in body.get("infra_logs", []):
+            if _b_retirement is not None:
+                infra[row['source']] = _setup_switch_b_infra_publication_snapshot(_b_retirement, body, row)
+                continue
             state = _setup_switch_prepare_infra_log_recovery(row, q)
             if not state[6] or not state[7]:
                 raise LoadError("publication infra logs have incomplete migration evidence; HOLD")
@@ -17354,7 +17357,7 @@ def _validate_typed_setup_switch_retirement(body, *, role):
         raise LoadError('typed retirement role is unknown; HOLD')
     required = {'schema_version', 'role', 'parent', 'archive', 'journal', 'owner'}
     if role == 'A': required.add('plan')
-    optional = {'prefix', 'dhcp'} | ({'materialized'} if role == 'B' else set())
+    optional = {'prefix', 'dhcp'} | ({'materialized', 'infra'} if role == 'B' else set())
     if (not isinstance(body, dict) or not required <= set(body) or set(body) - required - optional
             or type(body['schema_version']) is not int
             or body['schema_version'] != (2 if role == 'A' else 3) or body['role'] != role
@@ -17396,6 +17399,26 @@ def _validate_typed_setup_switch_retirement(body, *, role):
                 or not stat.S_ISDIR(row['identity'][2]) or stat.S_IMODE(row['identity'][2]) != 0o755
                 or row['identity'][3:5] != [row['parent']['uid'], row['parent']['gid']]):
             raise LoadError('A DHCP retirement original directory contract is invalid; HOLD')
+    if 'infra' in body:
+        infra = body['infra']
+        if not isinstance(infra, dict) or set(infra) != {'backup', 'receipt'}:
+            raise LoadError('B infra retirement inventory is not closed; HOLD')
+        for key, basename in (('backup', '.logs-migration-source'), ('receipt', '.logs-migration.json')):
+            row = infra[key]
+            fields = {'path', 'parent', 'identity'} | ({'sha256'} if key == 'receipt' else set())
+            if (not isinstance(row, dict) or set(row) != fields
+                    or not isinstance(row['path'], str) or not Path(row['path']).is_absolute()
+                    or os.path.normpath(row['path']) != row['path'] or Path(row['path']).name != basename
+                    or not isinstance(row['parent'], dict) or set(row['parent']) != {'path', 'dev', 'ino'}
+                    or row['parent']['path'] != str(Path(row['path']).parent)
+                    or any(type(row['parent'][k]) is not int or row['parent'][k] < 0 for k in ('dev', 'ino'))
+                    or not isinstance(row['identity'], list) or len(row['identity']) != 9
+                    or any(type(v) is not int or v < 0 for v in row['identity'])
+                    or key == 'backup' and not stat.S_ISDIR(row['identity'][2])
+                    or key == 'receipt' and (not stat.S_ISREG(row['identity'][2])
+                        or stat.S_IMODE(row['identity'][2]) != 0o600 or row['identity'][5] != 1
+                        or not isinstance(row['sha256'], str) or re.fullmatch(r'[0-9a-f]{64}', row['sha256']) is None)):
+                raise LoadError('B infra retirement original name/owner contract differs; HOLD')
     materialized = body.get('materialized', [])
     if not isinstance(materialized, list) or len(materialized) > 64:
         raise LoadError('B materialized retirement inventory is not bounded; HOLD')
@@ -18205,6 +18228,7 @@ def _require_setup_switch_b_retirement_owner(marker):
     allowed = {'journal.json'} | {row['basename'] for row in marker['body'].get('prefix', [])
                                   if row['leaf'] is not None}
     if 'dhcp' in marker['body']: allowed.add('dhcp-transaction')
+    if 'infra' in marker['body']: allowed.update({'infra-backup', 'infra-receipt.json'})
     allowed.update(row['basename'] for row in marker['body'].get('materialized', []))
     if marker['path'] == archive / 'retirement.json': allowed.add('retirement.json')
     elif marker['path'] != _setup_switch_retirement_path():
@@ -18282,6 +18306,138 @@ def _setup_switch_b_materialized_archive_artifact(marker, row, original, *, comp
     return path
 
 
+def _setup_switch_b_infra_archive_rows(marker, body):
+    """Bind a role-B map to the original WAL, not a newly observed receipt."""
+    _require_setup_switch_b_retirement_owner(marker)
+    originals = body.get('infra_logs', [])
+    mapping = marker['body'].get('infra')
+    if len(originals) > 1 or bool(originals) != (mapping is not None):
+        raise LoadError('B infra retirement lacks exact original WAL inventory; HOLD')
+    if not originals:
+        return None
+    row = originals[0]
+    try:
+        root = row['original_tree']['']
+        sealed = body['publication_bundle']['shared_setup']['infra'][row['source']]
+        owners = sealed['owners']
+        files = {name for name, entry in row['original_tree'].items() if entry['kind'] == 'file'}
+        if files or 'independent_copies' in row:
+            _validate_setup_switch_infra_independent_copies(row)
+        if (mapping['backup']['path'] != row['backup'] or mapping['receipt']['path'] != row['receipt']
+                or mapping['backup']['parent'] != dict(path=row['destination'], dev=row['destination_dev'], ino=row['destination_ino'])
+                or mapping['receipt']['parent'] != row['source_parent']
+                or mapping['backup']['identity'][:5] != [root[k] for k in ('dev', 'ino', 'mode', 'uid', 'gid')]
+                or mapping['backup']['identity'][:3] != owners['source']
+                or (root['dev'], root['ino']) != (row['source_dev'], row['source_ino'])
+                or mapping['receipt']['identity'] != sealed['receipt']['identity']
+                or mapping['receipt']['sha256'] != sealed['receipt']['sha256']
+                or set(row.get('independent_copies', {})) != files or set(owners['copy_exact']) != files
+                or any(value is not None for value in owners['stages'].values())):
+            raise ValueError('original backup, receipt or detached-copy owners differ')
+    except (KeyError, TypeError, ValueError) as exc:
+        raise LoadError(f'B infra retirement original WAL qualification differs; HOLD: {exc}') from exc
+    return mapping
+
+
+def _setup_switch_b_infra_archive_artifacts(marker, body, *, completed=False):
+    mapping = _setup_switch_b_infra_archive_rows(marker, body)
+    if mapping is None:
+        return {}
+    archive = Path(marker['body']['archive']['path'])
+    if completed and marker['path'] != archive / 'retirement.json':
+        raise LoadError('B completed infra view cannot qualify a pending marker; HOLD')
+    original = body['infra_logs'][0]
+    sealed = body['publication_bundle']['shared_setup']['infra'][original['source']]['receipt']
+    result = {}
+    for key, basename in (('backup', 'infra-backup'), ('receipt', 'infra-receipt.json')):
+        row = mapping[key]
+        source, destination = Path(row['path']), archive / basename
+        # Completed archives never inspect later generations' live names.
+        names = [path for path in ((destination,) if completed else (source, destination)) if os.path.lexists(path)]
+        if len(names) != 1:
+            raise LoadError('B infra original/archived phase is unknown; HOLD')
+        path = names[0]
+        before = list(_dhcp_a_preimage_receipt_identity(path.lstat()))
+        if (path.resolve(strict=True) != path or before[:8] != row['identity'][:8]
+                or path == source and (before != row['identity']
+                    or row['parent'] != _setup_switch_link_parent_identity(source))):
+            raise LoadError('B infra original archive owner changed; HOLD')
+        if key == 'backup':
+            if (not stat.S_ISDIR(before[2]) or _setup_switch_comparison_tree(
+                    path, allow_hardlinks=True, bind_file_ctime=False) != original['original_tree']):
+                raise LoadError('B infra original archive member bytes changed; HOLD')
+        else:
+            observed = _setup_publication_file(path)
+            if (observed['identity'] != before or observed['identity'][:8] != sealed['identity'][:8]
+                    or any(observed[k] != sealed[k] for k in sealed if k != 'identity')):
+                raise LoadError('B infra original archive receipt bytes changed; HOLD')
+        if before != list(_dhcp_a_preimage_receipt_identity(path.lstat())):
+            raise LoadError('B infra original archive changed during inspection; HOLD')
+        result[key] = path
+    return result
+
+
+def _setup_switch_b_infra_publication_snapshot(marker, body, row):
+    """Read-only B archive view. It cannot authorize A compensation writes."""
+    sealed = body['publication_bundle']['shared_setup']['infra'][row['source']]
+    owners = sealed['owners']
+    source, destination = Path(row['source']), Path(row['destination'])
+    artifacts = _setup_switch_b_infra_archive_artifacts(marker, body)
+    destination_before = _dhcp_a_preimage_receipt_identity(destination.lstat())
+    normalize = lambda value: json.loads(_setup_switch_canonical_payload(value))
+    if (row['source_parent'] != _setup_switch_link_parent_identity(source)
+            or row['destination_parent'] != _setup_switch_link_parent_identity(destination)
+            or normalize(_setup_switch_infra_directory_owner(destination)) != owners['destination']
+            or normalize(_setup_switch_infra_source_owner(source)) != owners['source_name']
+            or sealed['link'] != dict(parent=_setup_switch_link_parent_identity(source),
+                identity=list(_dhcp_a_preimage_receipt_identity(source.lstat())),
+                target=os.readlink(source))):
+        raise LoadError('B infra installed Q pointer/root differs from original publication; HOLD')
+    for name, expected in owners['copy_directories'].items():
+        if normalize(_setup_switch_infra_directory_owner(destination / name)) != expected:
+            raise LoadError('B infra installed Q directory differs; HOLD')
+    for name, clone in row.get('independent_copies', {}).items():
+        if os.path.lexists(destination / clone['stage']):
+            raise LoadError('B infra published Q gained an unconsumed stage; HOLD')
+        info, signature = _setup_switch_infra_file_signature(destination / name)
+        if (list(_dhcp_a_preimage_receipt_identity(info)) != owners['copy_exact'][name]
+                or list(_dhcp_a_preimage_receipt_identity(info))[:8] != clone['identity'][:8]
+                or list(_dhcp_a_preimage_receipt_identity((destination / name).lstat())) != owners['copy_exact'][name]
+                or signature != {key: clone[key] for key in ('size', 'sha256')}):
+            raise LoadError('B infra installed Q member owner/bytes differs; HOLD')
+    allowed = set(owners['copy_exact']) | set(owners['copy_directories']) | {'.gitkeep'}
+    observed = set()
+    for current, subdirs, files in os.walk(destination, followlinks=False):
+        for name in (*tuple(subdirs), *files):
+            path = Path(current) / name
+            if path == artifacts['backup']:
+                subdirs.remove(name)
+                continue
+            relative = os.path.relpath(path, destination)
+            if relative not in allowed:
+                raise LoadError('B infra Q inventory gained an unregistered object; HOLD')
+            observed.add(relative)
+            if relative == '.gitkeep' and not stat.S_ISREG(path.lstat().st_mode):
+                raise LoadError('B infra Q .gitkeep changed type; HOLD')
+    if not (allowed - {'.gitkeep'}) <= observed:
+        raise LoadError('B infra Q inventory lost an original member; HOLD')
+    if (normalize(_setup_switch_infra_directory_owner(destination)) != owners['destination']
+            or normalize(_setup_switch_infra_source_owner(source)) != owners['source_name']):
+        raise LoadError('B infra installed Q changed during inspection; HOLD')
+    _setup_switch_b_infra_archive_artifacts(marker, body)
+    for name, expected in owners['copy_directories'].items():
+        if normalize(_setup_switch_infra_directory_owner(destination / name)) != expected:
+            raise LoadError('B infra Q directory changed during inspection; HOLD')
+    for name, expected in owners['copy_exact'].items():
+        if list(_dhcp_a_preimage_receipt_identity((destination / name).lstat())) != expected:
+            raise LoadError('B infra Q member changed during inspection; HOLD')
+    if destination_before != _dhcp_a_preimage_receipt_identity(destination.lstat()):
+        raise LoadError('B infra Q inventory changed during inspection; HOLD')
+    # Only our registered evidence renames may change ctime. Return the
+    # original sealed logical record after qualifying its physical owners.
+    return sealed
+
+
 def _require_setup_switch_b_retirement_dhcp(marker, body, token):
     binding = body['dhcp_transaction']
     _require_bound_dhcp_transaction_namespace(binding)
@@ -18349,7 +18505,9 @@ def _require_completed_setup_switch_b_archives():
                         _read_rollback_regular(journal, limit=_SETUP_SWITCH_JOURNAL_LIMIT))
                     rows = _setup_switch_b_prefix_archive_rows(marker, original)
                     materialized = _setup_switch_b_materialized_archive_rows(marker, original)
+                    infra = _setup_switch_b_infra_archive_artifacts(marker, original, completed=True)
                     expected = {'journal.json', 'retirement.json'}
+                    if infra: expected.update({'infra-backup', 'infra-receipt.json'})
                     if 'dhcp' in marker['body']: expected.add('dhcp-transaction')
                     expected.update(row['basename'] for row in rows.values() if row['leaf'] is not None)
                     expected.update(row['basename'] for row in materialized.values())
@@ -18402,7 +18560,22 @@ def _retire_setup_switch_b_typed_publication(token, *, require_authority):
             identity=list(_dhcp_a_preimage_receipt_identity(Path(row['backup']).lstat())),
             basename=f'materialized-{index:03d}')
             for index, row in enumerate(sorted(original.get('directories', []), key=lambda row: row['backup']))]
+        infra = None
+        if original.get('infra_logs'):
+            if len(original['infra_logs']) != 1:
+                raise LoadError('B infra original inventory is not singular; HOLD')
+            row = original['infra_logs'][0]
+            sealed = original['publication_bundle']['shared_setup']['infra'][row['source']]['receipt']
+            infra = dict(backup=dict(path=row['backup'],
+                parent=dict(path=row['destination'], dev=row['destination_dev'], ino=row['destination_ino']),
+                identity=list(_dhcp_a_preimage_receipt_identity(Path(row['backup']).lstat()))),
+                receipt=dict(path=row['receipt'], parent=row['source_parent'],
+                    identity=sealed['identity'], sha256=sealed['sha256']))
         require_authority()
+        if infra is not None:
+            for row in infra.values():
+                if row['identity'] != list(_dhcp_a_preimage_receipt_identity(Path(row['path']).lstat())):
+                    raise LoadError('B infra original evidence changed during inventory; HOLD')
         for row in materialized:
             if row['identity'] != list(_dhcp_a_preimage_receipt_identity(Path(row['path']).lstat())):
                 raise LoadError('B materialized original backup changed during inventory; HOLD')
@@ -18423,6 +18596,7 @@ def _retire_setup_switch_b_typed_publication(token, *, require_authority):
                         journal=wal, prefix=prefix, owner=list(_dhcp_a_preimage_receipt_identity(os.fstat(fd))[:6]))
             if dhcp is not None: body['dhcp'] = dhcp
             if materialized: body['materialized'] = materialized
+            if infra is not None: body['infra'] = infra
             payload = _setup_switch_canonical_payload(body) + b'\n'
             if len(payload) > 16384:
                 raise LoadError('B typed retirement marker exceeds the original bounded reader; HOLD')
@@ -18434,6 +18608,7 @@ def _retire_setup_switch_b_typed_publication(token, *, require_authority):
                 _setup_switch_b_prefix_archive_rows(marker, original)
                 _setup_switch_a_dhcp_archive_artifact(marker, original)
                 _setup_switch_b_materialized_archive_rows(marker, original)
+                _setup_switch_b_infra_archive_artifacts(marker, original)
                 os.fsync(out.fileno()); _require_setup_switch_b_retirement_owner(marker)
             _fsync_parent_directory(path.parent); _require_setup_switch_b_retirement_owner(marker)
         finally:
@@ -18448,8 +18623,14 @@ def _retire_setup_switch_b_typed_publication(token, *, require_authority):
             rows = _setup_switch_b_materialized_archive_rows(marker, original)
             for row in original.get('directories', []):
                 _setup_switch_b_materialized_archive_artifact(marker, rows[row['backup']], row)
+            _setup_switch_b_infra_archive_artifacts(marker, original)
             require_authority()
         operations = []
+        infra = _setup_switch_b_infra_archive_rows(marker, original)
+        if infra is not None:
+            for key, basename in (('backup', 'infra-backup'), ('receipt', 'infra-receipt.json')):
+                operations.append((lambda key=key: _setup_switch_b_infra_archive_artifacts(marker, original)[key],
+                    archive / basename, Path(infra[key]['parent']['path'])))
         rows = _setup_switch_b_materialized_archive_rows(marker, original)
         for row in original.get('directories', []):
             mapping = rows[row['backup']]
@@ -18466,6 +18647,7 @@ def _retire_setup_switch_b_typed_publication(token, *, require_authority):
         operations.append((lambda: _setup_switch_b_retirement_journal(marker), archive / 'journal.json', archive.parent))
         qualified()
         for inspect_original, destination, source_parent in operations:
+            qualified()
             source = inspect_original()
             if source != destination:
                 _setup_switch_rename_directory_noreplace(source, destination)
@@ -18474,7 +18656,8 @@ def _retire_setup_switch_b_typed_publication(token, *, require_authority):
                     if now[:8] != token['identity'][:8] or now != _dhcp_a_preimage_receipt_identity(destination.lstat()):
                         raise LoadError('B typed original WAL archive owner changed; HOLD')
                     token.update(journal=destination, identity=now, parent=_setup_switch_link_parent_identity(destination))
-            _fsync_parent_directory(archive); _fsync_parent_directory(source_parent); qualified()
+            qualified(); _fsync_parent_directory(archive); qualified()
+            _fsync_parent_directory(source_parent); qualified()
         destination = archive / 'retirement.json'
         _setup_switch_rename_directory_noreplace(marker['path'], destination)
         now = _dhcp_a_preimage_receipt_identity(os.fstat(marker['descriptor']))
@@ -18495,7 +18678,8 @@ def _retire_setup_switch_b_publication(token, *, require_authority):
     """
     original = _setup_switch_prepared_registration_body((token['payload'], 0o600))
     if ('typed_b_retirement' in token or 'dhcp_transaction' in original
-            or original.get('prefix_transaction', {}).get('rows') or original.get('directories')):
+            or original.get('prefix_transaction', {}).get('rows') or original.get('directories')
+            or original.get('infra_logs')):
         return _retire_setup_switch_b_typed_publication(token, require_authority=require_authority)
     require_authority()
     _require_no_pending_setup_manifest_stage()
@@ -18585,6 +18769,7 @@ def resume_setup_switch_b_retirement(project, *, guard, inputs=None, images=None
                 rows = _setup_switch_b_materialized_archive_rows(marker, original)
                 for row in original.get('directories', []):
                     _setup_switch_b_materialized_archive_artifact(marker, rows[row['backup']], row)
+                _setup_switch_b_infra_archive_artifacts(marker, original)
                 token = _open_setup_switch_publication_bundle(project, guard=guard, journal=journal,
                                                              _b_retirement=marker)
                 if inputs is None or images is None:

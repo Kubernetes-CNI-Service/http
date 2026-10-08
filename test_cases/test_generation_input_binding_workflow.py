@@ -5323,6 +5323,22 @@ finally:
         self._real_setup_committed_q_group_restore(dhcp=True, prefix=True, prefix_change='/q-prefix',
                                                  b_health='retire-death-materialized', materialized=True)
 
+    def test_real_setup_b_retirement_archives_original_infra_backup_and_receipt(self):
+        self._real_setup_committed_q_group_restore(dhcp=True, prefix=True, prefix_change='/q-prefix',
+                                                 b_health=True, materialized=True, infra=True)
+
+    def test_real_setup_b_infra_archive_rename_death_cold_cli_requires_fresh_health(self):
+        self._real_setup_committed_q_group_restore(dhcp=True, prefix=True, prefix_change='/q-prefix',
+                                                 b_health='retire-death-infra', materialized=True, infra=True)
+
+    def test_real_setup_q_commit_independent_infra_cold_a_restores_original_members(self):
+        self._real_setup_committed_q_group_restore(dhcp=True, prefix=True, prefix_change='/q-prefix',
+                                                 materialized=True, infra=True)
+
+    def test_real_setup_b_retirement_archives_empty_original_infra_directory_and_receipt(self):
+        self._real_setup_committed_q_group_restore(dhcp=True, prefix=True, prefix_change='/q-prefix',
+                                                 b_health=True, materialized=True, infra='empty')
+
     def _real_setup_committed_q_group_restore(self, *, dhcp=False, runtime_death=False,
                                              setup_death=False, foreign_setup=False,
                                              q_local=False, q_fault=False, a_fault=None, a_image_fault=False,
@@ -5332,14 +5348,14 @@ finally:
                                              managed_key=False, managed_key_death=False, managed_key_fault=False,
                                              prefix_change=False, prefix_death=False, a_health=False,
                                              plan_fsync_aba=False, dhcp_staged_fault=False, b_health=False,
-                                             materialized=False):
+                                             materialized=False, infra=False):
         fixture = RELEASE_FIXTURE.ReleaseTransactionTests()
         fixture.setUp()
         try:
             state, context = fixture._prepare_persisted_a_runtime_switch(
                 original_upgrade_policy="enabled" if a_image_fault or a_image else 'disabled' if b_health else None,
                 original_images=a_image_fault or a_image, prefix=prefix or prefix_fault, managed_key=managed_key,
-                qualified_a_health=bool(a_health or b_health))
+                qualified_a_health=bool(a_health or b_health), canonical_paths=infra)
             if b_health:
                 for name in ('01-global.yaml', '02-devices_config.csv', '02-dhcp-subnet_config.csv',
                              'laptop.pub', 'mgmt-server.pub'):
@@ -5422,6 +5438,14 @@ try:
         setup = load_script('committed_q_group_setup', root / 'DAY0-Prepare/01-a-setup.py')
         load.service_runtime_backend = lambda: backend
         setup._SETUP_SWITCH_WAL_CONTEXT = (vars(load), fd)
+        infra = len(sys.argv) > 16 and sys.argv[16] in ('infra', 'empty-infra')
+        if infra:
+            original_logs = root / 'infra/logs'; original_logs.mkdir(parents=True)
+            if sys.argv[16] != 'empty-infra':
+                (original_logs / 'audit.log').write_bytes(b'independent original P archival log\n')
+            destination = q / '99-output-infra'; destination.mkdir()
+            load.register_setup_switch_infra_log_tree(root / 'ztp/.setup-switch-journal.json',
+                original_logs, destination, **guard)
         if len(sys.argv) > 15 and sys.argv[15] == 'materialized':
             output = q / '99-output-eth'
             output.mkdir(exist_ok=True)
@@ -5433,6 +5457,8 @@ try:
             backup = load.register_setup_switch_materialized_directory(root / 'ztp/.setup-switch-journal.json', latest, target, **guard)
             setup._SETUP_SWITCH_WAL_CONTEXT = (vars(load), fd, {}, {str(latest): (str(target), str(backup))})
             setup._SetupLinkTransaction((str(latest),)).migrate_materialized_directory(str(latest), str(target))
+        if infra:
+            setup._migrate_infra_log_tree(str(original_logs), str(destination), os.path.relpath(destination, original_logs.parent))
         setup._register_setup_switch_link_before_write(str(common), str(q / '01-global.yaml'))
         key_links = []
         if len(sys.argv) > 12 and sys.argv[12] == 'managed-key':
@@ -5465,6 +5491,7 @@ try:
         (root / 'ztp/ztp-bootstrap_oob.sh').write_bytes(b'independent installed B runtime\n' +
             (b'ZTP_UPGRADE_ENABLED="false"\n' if b_typed else b''))
         manifest = ('# setup manifest — proj: ' + str(q) + '\n' + str(common) + '\n'
+                    + (str(original_logs) + '\n' if infra else '')
                     + ''.join(str(path) + '\n' for path in key_links)
                     + (str(image_link) + '\n' if len(sys.argv) > 9 and sys.argv[9] == 'a-image' else '')
                     + (str(q_only_link) + '\n' if len(sys.argv) > 10 and sys.argv[10] == 'q-created' else '')).encode()
@@ -5656,7 +5683,7 @@ try:
             print('R22_A_PLAN_FSYNC_ABA_HELD_BEFORE_RESTORE')
             sys.exit(0)
         raise AssertionError('A plan fsync ABA licensed restoration')
-    if sys.argv[5] in ('reader-b-typed', 'reader-b-death', 'reader-b-death-materialized', 'reader-b-resume'):
+    if sys.argv[5] in ('reader-b-typed', 'reader-b-death', 'reader-b-death-materialized', 'reader-b-death-infra', 'reader-b-resume'):
         import json
         from unittest import mock
         journal = root / 'ztp/.setup-switch-journal.json'
@@ -5679,10 +5706,11 @@ try:
                 with (root / 'b-retirement-health-witness').open('a') as out:
                     out.write(str(os.getpid()) + '\n'); out.flush(); os.fsync(out.fileno())
             load.verify_http_publication = witnessed_health
-            if sys.argv[5] in ('reader-b-death', 'reader-b-death-materialized'):
+            if sys.argv[5] in ('reader-b-death', 'reader-b-death-materialized', 'reader-b-death-infra'):
                 def die(parent):
                     sync(parent)
                     pattern = ('.setup-switch-b-retired-*/materialized-*' if sys.argv[5] == 'reader-b-death-materialized'
+                               else '.setup-switch-b-retired-*/infra-backup' if sys.argv[5] == 'reader-b-death-infra'
                                else '.setup-switch-b-retired-*/dhcp-transaction')
                     if pending.exists() and list(journal.parent.glob(pattern)):
                         os.kill(os.getpid(), signal.SIGKILL)
@@ -5714,6 +5742,28 @@ try:
                     assert retained.lstat().st_ino == original['source_ino']
                     assert (retained / 'leaf.yaml').lstat().st_ino == original['before_tree']['leaf.yaml']['ino']
                     assert (retained / 'leaf.yaml').read_bytes() == b'independent materialized evidence\n'
+            if body.get('infra_logs'):
+                original = body['infra_logs'][0]
+                assert set(marker['infra']) == {'backup', 'receipt'}
+                assert not os.path.lexists(original['backup']), 'B left original infra backup live'
+                assert not os.path.lexists(original['receipt']), 'B left original infra incident receipt live'
+                retained, incident = archive / 'infra-backup', archive / 'infra-receipt.json'
+                assert retained.stat().st_ino == original['source_ino']
+                empty_infra = len(sys.argv) > 7 and sys.argv[7] == 'empty-infra'
+                if empty_infra:
+                    assert list(retained.iterdir()) == [] and set(original['original_tree']) == {''}
+                    assert not original.get('independent_copies')
+                else:
+                    assert (retained / 'audit.log').stat().st_ino == original['original_tree']['audit.log']['ino']
+                    assert (retained / 'audit.log').read_bytes() == b'independent original P archival log\n'
+                sealed = body['publication_bundle']['shared_setup']['infra'][original['source']]['receipt']
+                import base64
+                assert incident.stat().st_ino == sealed['identity'][1]
+                assert incident.read_bytes() == base64.b64decode(sealed['payload'])
+                if not empty_infra:
+                    with (Path(original['destination']) / 'audit.log').open('ab') as stream:
+                        stream.write(b'future active Q log appended bytes\n')
+                    assert (retained / 'audit.log').read_bytes() == b'independent original P archival log\n'
             load.require_no_pending_setup_switch_journal()
             print('R22_ORIGINAL_B_FULL_TYPED_EVIDENCE_ARCHIVED_FRESH_HEALTH')
             sys.exit(0)
@@ -5859,21 +5909,31 @@ finally:
                                            "managed-key" if managed_key or a_health or b_health else "no-managed-key",
                                            (prefix_change if isinstance(prefix_change, str) else "/q-prefix") if prefix_change else "unchanged-prefix",
                                            'b-typed' if b_health else 'no-b-typed',
-                                           'materialized' if materialized else 'no-materialized'],
+                                           'materialized' if materialized else 'no-materialized',
+                                           'empty-infra' if infra == 'empty' else 'infra' if infra else 'no-infra'],
                                     capture_output=True, text=True, check=False, timeout=30)
             self.assertEqual(-signal.SIGKILL, writer.returncode, writer.stdout + writer.stderr)
             original_wal = (journal.lstat().st_ino, journal.read_bytes())
             if b_health:
-                reader_mode = ('reader-b-death-materialized' if b_health == 'retire-death-materialized' else
+                reader_mode = ('reader-b-death-infra' if b_health == 'retire-death-infra' else
+                               'reader-b-death-materialized' if b_health == 'retire-death-materialized' else
                                'reader-b-death' if b_health == 'retire-death-dhcp' else 'reader-b-typed')
-                reader = subprocess.run(argv + [reader_mode, shape], capture_output=True,
+                reader = subprocess.run(argv + [reader_mode, shape] + (['empty-infra'] if infra == 'empty' else []), capture_output=True,
                     text=True, check=False, timeout=120)
-                if b_health in ('retire-death-dhcp', 'retire-death-materialized'):
+                if b_health in ('retire-death-dhcp', 'retire-death-materialized', 'retire-death-infra'):
                     self.assertEqual(-signal.SIGKILL, reader.returncode, reader.stdout + reader.stderr)
                     self.assertEqual(original_wal, (journal.lstat().st_ino, journal.read_bytes()))
                     pending = journal.parent / '.setup-switch-retirement.json'
                     archive = Path(json.loads(pending.read_bytes())['archive']['path'])
-                    if b_health == 'retire-death-materialized':
+                    if b_health == 'retire-death-infra':
+                        mapping = json.loads(pending.read_bytes())['infra']
+                        self.assertEqual({'backup', 'receipt'}, set(mapping))
+                        self.assertTrue((archive / 'infra-backup').is_dir())
+                        self.assertFalse(os.path.lexists(mapping['backup']['path']))
+                        self.assertTrue(Path(mapping['receipt']['path']).is_file())
+                        self.assertFalse((archive / 'infra-receipt.json').exists())
+                        self.assertFalse((archive / 'dhcp-transaction').exists())
+                    elif b_health == 'retire-death-materialized':
                         mappings = json.loads(pending.read_bytes())['materialized']
                         self.assertEqual(1, len(mappings))
                         self.assertTrue((archive / mappings[0]['basename']).is_dir())

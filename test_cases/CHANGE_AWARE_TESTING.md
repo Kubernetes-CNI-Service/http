@@ -3182,3 +3182,46 @@ SHA256 `2a808d9aad96a1f26faa5436ee456d11ed47437494fe79434d056b71df066aa0`，14 t
 `9858d213ca1cf0d261e48c4990865962727c962fe592808b1041cd437abc4711` 不变，物理结果/实际退出/END 完整。
 manifest direct/workflow 映射沿用；ledger 未修改，局部回归不替代正式 related/full/check。
 B 原备份/receipt 全归档继续推进，本卡真机/断电仍 OPEN。
+
+### 2026-10-08 R22 B 原 infra 备份与 receipt 归档
+
+direct 与真实 LOAD→SETUP→Q manifest/parent/report/selector→强杀→新 B CLI 独立证明：
+旧 B 健康退休没有归档原 infra backup/receipt。`r22-b-infra-archive-red.log` inode
+164064534、size 5276、SHA256 `174d3f9981f3a8f5774bfbd882d4714ab80398371a5f7193cac473397e88536d`，
+2 tests in 11.074s、2 FAIL、实际 exit/END=1，原断言与完整日志保留。
+B schema3 增加专用闭合原 owner 映射，原 receipt bytes/SHA 和独立副本必须对应原 WAL
+sealed publication；只读 B 物理视图与 A 恢复写权限分离。原 backup/receipt 无覆盖归档
+先于 latest/DHCP/prefix/WAL，WAL 最后、marker 收口；每个操作重核完整原权限。
+已完成归档扫描只看归档，不借用未来 live 同名对象或变化的 Q。正向两项
+`r22-b-infra-archive-green.log` inode 164067923、size 1442、SHA256
+`a2c25004acde7b2c35ce6e111054b631b51c6bfbd2712b962a0163506d723c3f`，2 tests in 10.760s、OK、exit/END=0。
+
+十项首批边界 `r22-b-infra-archive-boundaries.log` inode 164070083、size 6101、SHA256
+`4de3912257ffce56e4f604c2ff112f233ecf6d7f90f18b162b7757b753e04bc7`，10 tests in 84.418s、OK、exit/END=0：
+含 backup/receipt 首次归档同步中断、fresh health 重入、缺映射/错角色/未知字段/owner/
+SHA/未知归档对象、同字节新 receipt/P/Q 成员拒绝，真实首次 backup 归档强杀后新 CLI
+双 PID 健康见证，以及实际 Q 提交后 A 冷恢复原 infra 成员。另独立 direct 注入最后
+Q signature 返回后改写，候选快照错误返回旧 sealed 记录：
+`r22-b-infra-snapshot-read-drift-red.log` inode 164076469、size 1611、SHA256
+`cfb8084bf078132743acb70159a568b48d9b753db1b9b2d3d80f7a272f4c84c1`，1 test、1 FAIL、exit/END=1。
+保持断言补读取末尾原 owner/目录稳定性检查；`-green.log` inode 164077584、size 971、
+SHA256 `11c6259a93c206ca7fcb8a90b3f02e87bec9f54ad840999853f48b5a78c512eb`，1 test in 1.671s、OK、exit/END=0。
+所有上述日志读前后 stat/inode 稳定，boundaries 已知旧 3058 字节前缀 SHA256
+`18797ab5e5ecc080070a6e6521039088fd052b88ab7f6264677f0d12b5ed6c3c` 未变，物理 Ran→结果→实际 exit→END 完整。
+沿用原 manifest direct/真实 workflow 映射；没有增加跳过、延长期限、删除断言或手改 ledger。
+此处只列局部回归，正式相关/full/check 仍须当前精确树执行；真机卡仍 OPEN。
+
+上述候选完整 infra/materialized、文档、REQ23 与 REQ19 局部回归
+`r22-b-infra-archive-all-regressions.log` inode 164077788、size 57188、SHA256
+`f9d83f67e3cda7bbee394a9479fc693e5f9297b0582337291f6258f53881c2ca`，216 tests in 288.265s、OK、exit/END=0；
+旧 48018 字节前缀 SHA256 `57ae970b6395dbb220e4356bce124161811d9da148e13fdd5d545be7c0feb3bd` 未变。
+继续审查空原日志树：实际 producer 无文件就没有 clone map，B 不应补造 owner 或误拒绝。
+direct＋真实完整提交/B CLI 的 `r22-b-infra-empty-archive-red.log` inode 164171842、size 6738、
+SHA256 `7f0d565d21c53eeb5e81c4c6be288c122e75df73c8f0a6f5cfe508d582a0cbd3`，2 tests in 8.439s、
+1 FAIL/1 ERROR、exit/END=1，明确原因为 B 无条件索引缺席的 independent_copies，不是超时。
+仅当原文件集合与 sealed copy_exact 都为空时，允许原缺席 clone map；非空原成员仍
+执行原闭合 owner 校验。`-green.log` inode 164173823、size 1470、SHA256
+`5b99b43a3a46ee015e05dcddf8237a42f34c4181f95237532d45169750198919`，2 tests in 11.642s、OK、exit/END=0。
+新两项保留空原备份目录 inode、原 receipt inode/字节、没有伪造 clone 的独立预期。
+全部读前后 stat/inode、物理 Ran/结果/实际 exit/END 已核实；216 项的先前候选不是
+最后两行空集修正后的全量证明，须继续正式 runner。原所有失败日志/断言均保留。

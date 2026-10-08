@@ -1865,11 +1865,11 @@ class ReleaseTransactionTests(unittest.TestCase):
                                                   q_local=False, original_a_policy=None, original_a_images=False,
                                                   q_created=False, dhcp=False, dhcp_metadata=False, prefix=False,
                                                   managed_key=False, prefix_change=False, qualified_a_health=False,
-                                                  materialized=False):
+                                                  materialized=False, infra=False):
         state, context, guard = self._prepare_q_manifest_publication(seed_q_publication=seed_q_publication,
             q_local=q_local, original_a_policy=original_a_policy, original_a_images=original_a_images,
             q_created=q_created, prefix=prefix or prefix_change, managed_key=managed_key,
-            prefix_change=prefix_change, qualified_a_health=qualified_a_health, materialized=materialized)
+            prefix_change=prefix_change, qualified_a_health=qualified_a_health, materialized=materialized, infra=infra)
         q = state[1]
         for name, source in (("01-global.yaml", self.inputs.global_file),
                              ("02-devices_config.csv", self.inputs.devices_file),
@@ -2863,6 +2863,165 @@ class ReleaseTransactionTests(unittest.TestCase):
         (retained / 'leaf.yaml').write_bytes(b'changed archived evidence\n')
         with self.assertRaisesRegex(LOAD.LoadError, 'materialized.*HOLD'):
             LOAD.require_no_pending_setup_switch_journal()
+
+    def test_b_infra_retirement_archives_original_backup_receipt_not_future_live_names(self):
+        state, _context, guard, token, inputs = self._prepare_published_q_for_stopped_preflight(
+            infra=True, no_upgrade=True, original_a_policy='disabled')
+        original = json.loads(token['payload'])['body']; row = original['infra_logs'][0]
+        backup, receipt, destination = (Path(row[key]) for key in ('backup', 'receipt', 'destination'))
+        frozen = (backup.stat().st_ino, (backup / 'audit.log').stat().st_ino,
+                  (backup / 'audit.log').read_bytes(), receipt.stat().st_ino, receipt.read_bytes(), token['payload'])
+        active = set(); _action, probe = self._with_independent_b_health(active)
+        self.assertEqual('b-health-passed-wal-archived', LOAD.activate_setup_switch_b_publication(
+            token, guard=guard, inputs=inputs, images={}, confirmed=True, retire=True))
+        self.assertEqual(1, probe.call_count)
+        self.assertFalse(os.path.lexists(backup), 'B left original infra backup under live Q')
+        self.assertFalse(os.path.lexists(receipt), 'B left original pending receipt live')
+        archive = next(self.ztp.glob('.setup-switch-b-retired-*'))
+        marker = json.loads((archive / 'retirement.json').read_bytes())
+        self.assertEqual('B', marker['role']); self.assertNotIn('plan', marker)
+        self.assertEqual({'backup', 'receipt'}, set(marker['infra']))
+        retained, incident = archive / 'infra-backup', archive / 'infra-receipt.json'
+        self.assertEqual(frozen[:5], (retained.stat().st_ino, (retained / 'audit.log').stat().st_ino,
+            (retained / 'audit.log').read_bytes(), incident.stat().st_ino, incident.read_bytes()))
+        self.assertEqual(frozen[5], (archive / 'journal.json').read_bytes())
+        backup.mkdir(); (backup / 'operator.log').write_bytes(b'independent future backup name\n')
+        receipt.write_bytes(b'independent future receipt name\n')
+        with (destination / 'audit.log').open('ab') as stream: stream.write(b'future Q log append\n')
+        LOAD.require_no_pending_setup_switch_journal()
+        self.assertEqual(frozen[2], (retained / 'audit.log').read_bytes())
+        self.assertEqual(b'independent future backup name\n', (backup / 'operator.log').read_bytes())
+        self.assertEqual(b'independent future receipt name\n', receipt.read_bytes())
+        (retained / 'audit.log').write_bytes(b'unknown changed original archival evidence\n')
+        with self.assertRaisesRegex(LOAD.LoadError, 'infra.*HOLD'):
+            LOAD.require_no_pending_setup_switch_journal()
+
+    def _pending_b_infra_archive(self, basename='infra-backup'):
+        state, _context, guard, token, inputs = self._prepare_published_q_for_stopped_preflight(
+            infra=True, no_upgrade=True, original_a_policy='disabled')
+        active = set(); action, probe = self._with_independent_b_health(active)
+        marker, sync = LOAD._setup_switch_retirement_path(), LOAD._fsync_parent_directory
+        def interrupted(parent):
+            sync(parent)
+            if marker.exists() and list(marker.parent.glob('.setup-switch-b-retired-*/' + basename)):
+                raise OSError('independent original infra archive sync interruption')
+        with mock.patch.object(LOAD, '_fsync_parent_directory', side_effect=interrupted):
+            with self.assertRaisesRegex(LOAD.LoadError, 'independent original infra archive sync') as caught:
+                LOAD.activate_setup_switch_b_publication(token, guard=guard, inputs=inputs,
+                    images={}, confirmed=True, retire=True)
+        self.assertIsInstance(caught.exception.__cause__, OSError)
+        self.assertEqual(set(), active); self.assertEqual(1, probe.call_count)
+        self.assertEqual(token['payload'], state[-3].read_bytes())
+        LOAD.close_setup_switch_publication_bundle(token)
+        return state, guard, inputs, marker, action, probe
+
+    def test_b_infra_empty_original_directory_archives_without_inventing_clone_owners(self):
+        state, _context, guard, token, inputs = self._prepare_published_q_for_stopped_preflight(
+            infra='empty', no_upgrade=True, original_a_policy='disabled')
+        row = json.loads(token['payload'])['body']['infra_logs'][0]
+        self.assertEqual({''}, set(row['original_tree']))
+        self.assertFalse(row.get('independent_copies'))
+        backup, receipt = Path(row['backup']), Path(row['receipt'])
+        frozen = (backup.stat().st_ino, receipt.stat().st_ino, receipt.read_bytes())
+        active = set(); _action, probe = self._with_independent_b_health(active)
+        self.assertEqual('b-health-passed-wal-archived', LOAD.activate_setup_switch_b_publication(
+            token, guard=guard, inputs=inputs, images={}, confirmed=True, retire=True))
+        self.assertEqual(1, probe.call_count)
+        archive = next(self.ztp.glob('.setup-switch-b-retired-*'))
+        self.assertEqual([], list((archive / 'infra-backup').iterdir()))
+        self.assertEqual(frozen, ((archive / 'infra-backup').stat().st_ino,
+            (archive / 'infra-receipt.json').stat().st_ino, (archive / 'infra-receipt.json').read_bytes()))
+        LOAD.require_no_pending_setup_switch_journal()
+
+    def test_b_infra_backup_rename_interruption_requires_fresh_health(self):
+        self._assert_b_infra_archive_reentry('infra-backup')
+
+    def test_b_infra_receipt_rename_interruption_requires_fresh_health(self):
+        self._assert_b_infra_archive_reentry('infra-receipt.json')
+
+    def _assert_b_infra_archive_reentry(self, basename):
+        state, guard, inputs, marker, _action, probe = self._pending_b_infra_archive(basename)
+        body = json.loads(marker.read_bytes()); archive = Path(body['archive']['path'])
+        original = json.loads(state[-3].read_bytes())['body']['infra_logs'][0]
+        self.assertTrue((archive / basename).exists())
+        self.assertFalse((archive / 'journal.json').exists())
+        frozen = (state[-3].stat().st_ino, state[-3].read_bytes())
+        self.assertEqual('b-health-passed-wal-archived', LOAD.resume_setup_switch_b_retirement(
+            state[1], guard=guard, inputs=inputs, images={}, confirmed=True))
+        self.assertEqual(2, probe.call_count)
+        self.assertEqual(frozen, ((archive / 'journal.json').stat().st_ino, (archive / 'journal.json').read_bytes()))
+        self.assertEqual(original['source_ino'], (archive / 'infra-backup').stat().st_ino)
+        self.assertEqual(b'independent original P archival log\n', (archive / 'infra-backup/audit.log').read_bytes())
+        LOAD.require_no_pending_setup_switch_journal()
+
+    def test_b_infra_pending_unknown_mapping_or_members_hold_before_health(self):
+        state, guard, inputs, marker, action, _probe = self._pending_b_infra_archive()
+        payload = marker.read_bytes(); body = json.loads(payload); archive = Path(body['archive']['path'])
+        for fault in ('missing-map', 'wrong-role', 'unknown-field', 'wrong-owner', 'wrong-sha', 'unknown-object'):
+            with self.subTest(fault=fault):
+                extra = None; changed = json.loads(payload)
+                if fault == 'missing-map': changed.pop('infra')
+                elif fault == 'wrong-role': changed['role'] = 'A'
+                elif fault == 'unknown-field': changed['infra']['accept_current'] = True
+                elif fault == 'wrong-owner': changed['infra']['backup']['identity'][1] += 1
+                elif fault == 'wrong-sha': changed['infra']['receipt']['sha256'] = '0' * 64
+                else:
+                    extra = archive / 'unknown-evidence'; extra.write_bytes(b'KEEP\n')
+                if extra is None: marker.write_bytes(json.dumps(changed).encode()); marker.chmod(0o600)
+                frozen = (marker.read_bytes(), state[-3].read_bytes(), action.call_count)
+                with mock.patch.object(LOAD, 'preflight_services', side_effect=AssertionError('unknown infra entered health')):
+                    with self.assertRaisesRegex(LOAD.LoadError, 'HOLD'):
+                        LOAD.resume_setup_switch_b_retirement(state[1], guard=guard, inputs=inputs, images={}, confirmed=True)
+                self.assertEqual(frozen, (marker.read_bytes(), state[-3].read_bytes(), action.call_count))
+                if extra is not None: self.assertEqual(b'KEEP\n', extra.read_bytes()); extra.unlink()
+                else: marker.write_bytes(payload); marker.chmod(0o600)
+        self.assertFalse((archive / 'journal.json').exists())
+
+    def test_b_infra_pending_foreign_receipt_holds_before_health(self):
+        self._assert_b_infra_foreign_owner_hold('receipt')
+
+    def test_b_infra_pending_foreign_archived_member_holds_before_health(self):
+        self._assert_b_infra_foreign_owner_hold('archived-member')
+
+    def test_b_infra_pending_foreign_q_member_holds_before_health(self):
+        self._assert_b_infra_foreign_owner_hold('installed-q-member')
+
+    def test_b_infra_physical_snapshot_does_not_return_sealed_record_after_q_read_drift(self):
+        state, _guard, _inputs, path, _action, _probe = self._pending_b_infra_archive()
+        original = json.loads(state[-3].read_bytes())['body']; row = original['infra_logs'][0]
+        target = Path(row['destination']) / 'audit.log'
+        signature = LOAD._setup_switch_infra_file_signature; injected = []
+        def after_read(candidate):
+            observed = signature(candidate)
+            if Path(candidate) == target and not injected:
+                with target.open('ab') as out: out.write(b'independent drift after last Q read\n')
+                injected.append(target.stat().st_ino)
+            return observed
+        frozen = (path.read_bytes(), state[-3].read_bytes())
+        with LOAD._open_setup_switch_b_typed_retirement() as marker, \
+                mock.patch.object(LOAD, '_setup_switch_infra_file_signature', side_effect=after_read):
+            with self.assertRaisesRegex(LOAD.LoadError, 'infra.*HOLD'):
+                LOAD._setup_switch_b_infra_publication_snapshot(marker, original, row)
+        self.assertEqual(1, len(injected))
+        self.assertEqual(frozen, (path.read_bytes(), state[-3].read_bytes()))
+
+    def _assert_b_infra_foreign_owner_hold(self, fault):
+        state, guard, inputs, marker, action, _probe = self._pending_b_infra_archive()
+        body = json.loads(marker.read_bytes()); archive = Path(body['archive']['path'])
+        path = (Path(body['infra']['receipt']['path']) if fault == 'receipt' else
+            archive / 'infra-backup/audit.log' if fault == 'archived-member' else
+            Path(body['infra']['backup']['parent']['path']) / 'audit.log')
+        held = self.root / ('operator-original-infra-' + fault)
+        metadata = path.stat(); path.rename(held); path.write_bytes(held.read_bytes())
+        path.chmod(stat.S_IMODE(metadata.st_mode)); os.utime(path, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
+        self.assertNotEqual(held.stat().st_ino, path.stat().st_ino)
+        frozen = (marker.read_bytes(), state[-3].read_bytes(), action.call_count)
+        with mock.patch.object(LOAD, 'preflight_services', side_effect=AssertionError('foreign infra owner entered health')):
+            with self.assertRaisesRegex(LOAD.LoadError, 'HOLD'):
+                LOAD.resume_setup_switch_b_retirement(state[1], guard=guard, inputs=inputs, images={}, confirmed=True)
+        self.assertEqual(frozen, (marker.read_bytes(), state[-3].read_bytes(), action.call_count))
+        self.assertEqual(held.read_bytes(), path.read_bytes())
+        self.assertFalse((archive / 'journal.json').exists())
 
     def test_b_cold_retirement_malformed_discriminator_is_hold_not_uncaught_error(self):
         state, _context, guard, token, inputs = self._prepare_published_q_for_stopped_preflight(no_upgrade=True)
@@ -4225,10 +4384,10 @@ class ReleaseTransactionTests(unittest.TestCase):
     def _prepare_q_manifest_publication(self, *, seed_q_publication=False, q_local=False,
                                         original_a_policy=None, original_a_images=False, q_created=False, prefix=False,
                                         managed_key=False, prefix_change=False, qualified_a_health=False,
-                                        materialized=False):
+                                        materialized=False, infra=False):
         state, context = self._prepare_persisted_a_runtime_switch(seed_q_publication=seed_q_publication,
             original_upgrade_policy=original_a_policy, original_images=original_a_images, prefix=prefix,
-            managed_key=managed_key, qualified_a_health=qualified_a_health, canonical_paths=materialized)
+            managed_key=managed_key, qualified_a_health=qualified_a_health, canonical_paths=materialized or infra)
         journal, descriptor, backend = state[-3:]
         guard = dict(deployment_lock_descriptor=descriptor, services_quiesced=True, runtime_backend=backend)
         if materialized:
@@ -4241,6 +4400,18 @@ class ReleaseTransactionTests(unittest.TestCase):
                 (path / 'leaf.yaml').write_bytes(b'independent materialized evidence\n')
             with mock.patch.object(LOAD, 'active_managed_services', return_value=()):
                 backup = LOAD.register_setup_switch_materialized_directory(journal, latest, target, **guard)
+        if infra:
+            source = self.root.resolve() / 'infra/logs'; source.mkdir(parents=True)
+            if infra != 'empty':
+                (source / 'audit.log').write_bytes(b'independent original P archival log\n')
+            destination = state[1].resolve() / '99-output-infra'; destination.mkdir()
+            with mock.patch.object(LOAD, 'active_managed_services', return_value=()):
+                LOAD.register_setup_switch_infra_log_tree(journal, source, destination, **guard)
+                with mock.patch.object(SETUP, 'HTTP_BASE', str(self.root.resolve())), \
+                        mock.patch.object(SETUP, 'ZTP', str(self.ztp)), \
+                        mock.patch.object(SETUP, '_SETUP_SWITCH_WAL_CONTEXT', (vars(LOAD), descriptor)):
+                    SETUP._migrate_infra_log_tree(str(source), str(destination), os.path.relpath(destination, source.parent))
+        if materialized:
             latest.rename(backup)
             latest.symlink_to(target.name)
         if prefix_change:
@@ -4275,6 +4446,7 @@ class ReleaseTransactionTests(unittest.TestCase):
                 q_link.symlink_to(os.path.relpath(target, q_link.parent))
         manifest = ("# setup manifest — proj: " + str(state[1].resolve()) + "\n"
                     + str(state[2]) + "\n"
+                    + (str(source) + '\n' if infra else '')
                     + "".join(str(path) + "\n" for path in key_links)
                     + (str(q_link) + "\n" if q_created else "")
                     + (str(self.ztp / "image/cumulus/cumulus-linux-5.12.0-mlx-amd64.bin") + "\n"

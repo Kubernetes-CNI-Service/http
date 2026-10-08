@@ -1634,6 +1634,27 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 ## TC-REAL-R22-GENERATION-INPUT-ABA-001 — 跨进程输入换代与多输出一致性
 
+- 2026-10-08 B 原 infra 备份/receipt 全证据归档补充，真机仍 OPEN / NOT RUN：
+  沿本卡已授权隔离 VM、精确版本、排他锁、明确停服与正常写者静默前提，保存完整
+  原 WAL、P 日志树、独立 Q 副本、原 receipt、latest/DHCP/prefix 证据及 root-only
+  可恢复卷快照。B schema3 专用 map 必须逐项绑定原 WAL 的源/父目录、原九字段
+  backup/receipt owner 与 receipt SHA；不得从冷读当前对象补造映射，不得借 A plan
+  权力。实际 Q manifest/parent/report/selector 提交后强杀，由全新 B CLI 完成原输入、
+  制品、runtime、HTTP 健康复核；先将原 backup/receipt 无覆盖迁入固定私有归档名，
+  再迁移其它原证据，WAL 最后、marker 收口。不删除原证据或重写 receipt 的原路径。
+  分别在 backup/receipt rename、两父目录同步、WAL/marker 归档边界注入错误、进程死亡
+  和受控断电；全新 resume 必须重复本次健康，旧健康不是权限。另注入缺映射、错角色、
+  未知字段、同字节新 receipt/P 成员/Q 成员、Q 最后读取后改写及未知归档对象，要求
+  HOLD、保留原 WAL/marker/未知对象、未进入健康或启动。已完成归档仅核原归档，不检查
+  后续 live 同名 backup/receipt，也不得将未来 Q 追加写带回 P；原归档变更仍 HOLD。
+  同时见证真正空原日志树：原 producer 无文件、无 clone map 时，只归档原空目录与
+  原 receipt，不补造副本 owner；非空树缺 clone map 仍须拒绝。
+  另实际 Q 提交后新 A reader 还原原 P 日志目录及成员 inode，保持停服、不自动激活。
+  保存原/现/retained 九字段、完整字节 SHA、每次 rename/fsync/拒绝/重入的物理顺序、
+  完整 END/实际退出及独立停服见证。封存后仅由负责人核对确切对象并恢复登记快照，
+  不在 live 注入，不删未知对象解围。本机 direct/真实多脚本 PASS 不替代当前精确树
+  related/full/check、Linux/断电/C2/DEV ACK；最后名称核验不是原子非合作写者隔离。
+
 - 2026-10-08 infra/logs 独立 Q 副本补充，仍 OPEN / NOT RUN：在本卡原授权可恢复
   隔离 VM、精确版本、排他锁、停服与正常写者静默条件下，记录 P 原日志树与第一份
   Q hardlink；SETUP 在源目录 rename/指针和 Q manifest 前，逐项建立独立单链接副本，
