@@ -868,6 +868,10 @@ identity、四表 headers、活动列、插入占用列、精确单行和固定 
 固定只读 search，不是 batchUpdate。真实双锁 → 私有输入 → 原生 TLS → W1 规则
 比较、模板解析和可见 metadata 计量工作流仍不授予准入；后者始终
 VISIBLE_ONLY_UNPROVED，不能把不可见的其他 PROJECT 使用量说成零。
+后续读核只接受固定入口实际签发的原始 completion 对象，重新核原双 owner、
+精确读取形态及 native 参数类型、未改变的原始响应、当前策略和原 30 秒截止期。
+相等的 dataclass 副本、独立协议解码结果或 caller 摘要不能建立读取来源；
+该进程内来源登记不是持久证据、远端原子快照、发送许可或 COMPLETE。
 `test_req7_token_launcher` 约束未安装的固定 auth-only 子进程入口：不接收调用方
 argv/URL/凭据路径/预算，固定 `-I -B`、清空继承环境、DEVNULL stdin、新 session、
 仅 pass_fds 借用原 spreadsheet 锁。启动前开始 30 秒总预算，单次消费及 nonce

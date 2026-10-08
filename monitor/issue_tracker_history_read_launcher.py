@@ -20,12 +20,15 @@ import subprocess
 import sys
 import threading
 import time
+import weakref
 from time import monotonic as _monotonic
 from monitor.issue_tracker_attempt_supervision import supervise_owned_attempt, AttemptHold, _BUDGETS
 
 _SOURCE_ROOT = Path(__file__).resolve().parents[1]
 _NONCE = re.compile(r'[0-9a-f]{64}\Z')
 _LIMIT = 2*1024*1024
+_READS = weakref.WeakKeyDictionary()
+_READ_GUARD = threading.Lock()
 _CHILD_PROGRAM = '''import sys
 sys.path[:0]=[sys.argv[1],sys.argv[1]+"/tools"]
 from monitor.issue_tracker_history_read_launcher import _history_child
@@ -39,13 +42,49 @@ class HistoryReadLauncherHold(ValueError):
         self.termination_confirmed = termination_confirmed
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class SupervisedSheetsReadCompletion:
     data: bytes = field(repr=False)
     request_path_sha256: str
     status: int = 200
     complete: bool = True
     termination_confirmed: bool = True
+
+
+def require_current_owned_read(writer_token,owner_token,binding,completion,*,read_kind,sheet=None,row=None):
+    """Original process-local issued observation only, NOT a mutation permit.
+
+    Equality, caller-built dataclasses/digests or standalone protocol decoding
+    do not establish a read. Recheck exact actual owner acquisitions, immutable
+    response/shape, original bounded observation deadline and fresh target files.
+    No persisted authority, refresh, send, CAS, remote continuity or COMPLETE.
+    """
+    failed=False
+    try:
+        if type(completion) is not SupervisedSheetsReadCompletion: raise HistoryReadLauncherHold()
+        with _READ_GUARD: issued=_READS.get(completion)
+        if issued is None: raise HistoryReadLauncherHold()
+        writer,owner,original_binding,project,sheet_fd,kind,original_sheet,original_row,plan,data,deadline=issued
+        if (writer_token is not writer or owner_token is not owner or binding != original_binding
+                or read_kind != kind or sheet != original_sheet or row != original_row
+                or type(read_kind) is not str or type(sheet) is not type(original_sheet)
+                or type(row) is not type(original_row)
+                or type(completion.data) is not bytes or completion.data != data
+                or type(completion.status) is not int or completion.status != 200
+                or completion.complete is not True or completion.termination_confirmed is not True
+                or completion.request_path_sha256 != hashlib.sha256(plan.path.encode('ascii')).hexdigest()
+                or _monotonic() >= deadline): raise HistoryReadLauncherHold()
+        from monitor.issue_tracker_local_commit import _owner
+        from monitor.issue_tracker_spreadsheet_owner import owner_lock_fd
+        from monitor.issue_tracker_online_target import inspect_project_online_target
+        if _owner(writer_token) is not project or owner_lock_fd(owner_token,binding) != sheet_fd:
+            raise HistoryReadLauncherHold()
+        inspect_project_online_target(writer_token,binding)
+        if _monotonic() >= deadline: raise HistoryReadLauncherHold()
+        result=plan
+    except Exception: failed=True
+    if failed: raise HistoryReadLauncherHold()
+    return result
 
 
 def _canonical(value):
@@ -208,6 +247,12 @@ class OwnedSheetsReadUnit:
                 raise HistoryReadLauncherHold(True)
             result=_decode_completion(completion.data,nonce,path_digest)
             if _monotonic() >= started+_BUDGETS['read']: raise HistoryReadLauncherHold(True)
+            # Private identity registry, not dataclass equality or caller hashes.
+            # Only this actual successful supervised/fresh-owner launch issues
+            # a bounded process-local read observation. Decoding alone does not.
+            with _READ_GUARD:
+                _READS[result]=(self._writer,self._owner,self._binding,project,sheet_fd,
+                    self._kind,self._sheet,self._row,prepared,result.data,started+_BUDGETS['read'])
         except Exception as error:
             failed=True
             if isinstance(error,AttemptHold): confirmed=error.termination_confirmed

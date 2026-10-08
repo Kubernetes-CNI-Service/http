@@ -346,6 +346,55 @@ os.write(1,header+body)
                         module.OwnedSheetsReadUnit(writer,owner,binding,token,read_kind=kind,sheet=sheet,row=row)
                 launch.assert_not_called()
 
+    def test_only_original_issued_read_under_current_exact_owners_and_shape_can_supply_plan(self):
+        module=load()
+        self.assertTrue(hasattr(module,'require_current_owned_read'),'private read provenance bridge missing')
+        from dataclasses import replace
+        with ExitStack() as stack:
+            _local,_ownership,writer,owner,binding,token,config=self.owners(stack)
+            program='''import sys,os,hashlib
+sys.path[:0]=[sys.argv[1],sys.argv[1]+"/tools"]
+from monitor import issue_tracker_history_read_launcher as entry
+binding,token,plan=entry._parse_request(sys.stdin.buffer.read(),sys.argv[2])
+body=b'{"owned":"history"}'
+header=entry._canonical({'schema_version':1,'nonce':sys.argv[2],'request_path_sha256':hashlib.sha256(plan.path.encode('ascii')).hexdigest(),'status':200,'body_sha256':hashlib.sha256(body).hexdigest(),'body_bytes':len(body)})
+os.write(1,header+body)
+'''
+            self.intercept(stack,program,writer,owner,binding)
+            result=module.OwnedHistoryTailReadUnit(writer,owner,binding,token).read_once()
+            plan=module.require_current_owned_read(writer,owner,binding,result,read_kind='history_tail')
+            self.assertEqual(result.request_path_sha256,hashlib.sha256(plan.path.encode('ascii')).hexdigest())
+            for candidate in (replace(result),SimpleNamespace(data=result.data,status=200,complete=True),
+                              module._decode_completion((json.dumps({'schema_version':1,'nonce':'a'*64,
+                                  'request_path_sha256':result.request_path_sha256,'status':200,
+                                  'body_sha256':hashlib.sha256(result.data).hexdigest(),'body_bytes':len(result.data)},
+                                  sort_keys=True,separators=(',',':'))+'\n').encode()+result.data,'a'*64,result.request_path_sha256)):
+                with self.subTest(type=type(candidate).__name__),self.assertRaises(module.HistoryReadLauncherHold):
+                    module.require_current_owned_read(writer,owner,binding,candidate,read_kind='history_tail')
+            for changed in ({'writer_token':object()},{'owner_token':object()}, {'read_kind':'metadata'},
+                            {'sheet':'ETH Cabling'},{'row':3}):
+                arguments={'writer_token':writer,'owner_token':owner,'binding':binding,'completion':result,
+                           'read_kind':'history_tail',**changed}
+                with self.subTest(changed=list(changed)),self.assertRaises(module.HistoryReadLauncherHold):
+                    module.require_current_owned_read(**arguments)
+            with mock.patch.object(module,'_monotonic',return_value=time.monotonic()+31):
+                with self.assertRaises(module.HistoryReadLauncherHold):
+                    module.require_current_owned_read(writer,owner,binding,result,read_kind='history_tail')
+            original=result.data
+            object.__setattr__(result,'data',b'{"different":"response"}')
+            with self.assertRaises(module.HistoryReadLauncherHold):
+                module.require_current_owned_read(writer,owner,binding,result,read_kind='history_tail')
+            object.__setattr__(result,'data',original)
+            row_read=module.OwnedSheetsReadUnit(writer,owner,binding,token,read_kind='row',sheet='ETH Cabling',row=7).read_once()
+            module.require_current_owned_read(writer,owner,binding,row_read,read_kind='row',sheet='ETH Cabling',row=7)
+            with self.assertRaises(module.HistoryReadLauncherHold):
+                module.require_current_owned_read(writer,owner,binding,row_read,read_kind='row',sheet='ETH Cabling',row=7.0)
+            config.write_text(json.dumps(document(status='disabled')))
+            with self.assertRaises(module.HistoryReadLauncherHold):
+                module.require_current_owned_read(writer,owner,binding,result,read_kind='history_tail')
+        with self.assertRaises(module.HistoryReadLauncherHold):
+            module.require_current_owned_read(writer,owner,binding,result,read_kind='history_tail')
+
     def test_actual_supervised_native_whitelist_template_and_readonly_metadata_are_typed_not_admission(self):
         module=load()
         from test_req7_online_whitelist_read import document as whitelist_document, HEADER
@@ -368,7 +417,8 @@ os.write(1,header+body)
                     port=socket.getaddrinfo('sheets.googleapis.com',443)[0][4][1]
                     calls,children=self.intercept(launched,self.child_fixture(port),writer,owner,binding)
                     unit=module.OwnedSheetsReadUnit(writer,owner,binding,token,read_kind=kind)
-                    result=unit.read_once(); plan=module._prepare(binding,token,kind,None,None)
+                    result=unit.read_once()
+                    plan=module.require_current_owned_read(writer,owner,binding,result,read_kind=kind)
                     self.assertEqual(body,result.data); self.assertEqual(1,len(calls)); self.assertEqual(0,children[0].returncode)
                     if kind=='whitelist':
                         observed=whitelist.compare_online_whitelist_read(plan,result,local_rules)
