@@ -998,6 +998,18 @@ direct 与真实双 owner／TLS／原 C19／native 冷进程 workflow 保留正�
 pending、精确重放、两个屏障、替换／碰撞／EXDEV 和故障安全状态的独立预期。
 本地接口不等于默认 worker 接入、真实 Cloud／断电或 REQ7 整项完成；现场卡仍 NOT RUN。
 
+`tracker_settings_writer` 只在真实设置工厂中接入原件发现：先取得实际 LK-P；无交付声明
+仍走严格普通 K 链，不初始化缺失状态。已有交付声明时，持续持有分配 HEADER 和原始
+ACTION-PREIMAGE／WIRE 的 FD、命名、完整 stat 与字节；HEADER 仅定位候选 binding，
+随后必须取得真实 spreadsheet owner 并证明原 COMPLETE／DELIVERED／启动见证及分配。
+不能从 caller flag、旧缓存、同字节替换或重编译获得缺失投影的权威。每次读写及内部
+K 提交边界前后重新验证该原件作用域；写入中丢失原件须保留 STOP／已提交尾部，不 ACK。
+作用域结束前撤销上下文；认证 principal／UTC 仍由既有可信 relay 产生，精确请求重放
+不重复事件。独立 direct 与真实工厂／双 owner／C19／TLS／native 冷进程 workflow 固定
+正常、无交付／UNKNOWN、缺件、错误 binding、同字节替换、提交中断、冷恢复与故障安全
+状态。此接入不替换发布／来源 owner、不安装在线服务、不释放 UNKNOWN 或授权发送；
+全量证明及真实设备／Cloud／断电验收仍未完成，不以本地 PASS 标为通过。
+
 `test_req7_sheets_read_plan` / `test_req7_sheets_read_decode` 与
 `test_req7_online_whitelist_read` 固定精确列／坐标、十四表身份、四张 row-2 多行字面表头
 和完整有限 Whitelist；非原子 GET 不构成 enrollment、发送许可或完整格式快照。

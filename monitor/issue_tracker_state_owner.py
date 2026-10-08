@@ -18,6 +18,7 @@ from monitor.issue_tracker_local_commit import (
 
 
 _COMPLETED_READ_CONTEXT = {}
+_COMPLETED_ORIGINAL_GUARDS = {}
 
 
 class TrackerStateHold(ValueError):
@@ -78,6 +79,48 @@ def tracker_writer(project, publication, *, completed_binding=None, completed_un
             _COMPLETED_READ_CONTEXT.pop(token,None)
 
 
+def _verify_settings_originals(token):
+    try:
+        verify = _COMPLETED_ORIGINAL_GUARDS.get(token)
+        if verify is not None:
+            verify()
+    except (OSError, TypeError, ValueError, KeyError) as exc:
+        raise TrackerStateHold("settings held original changed") from exc
+
+
+@contextmanager
+def tracker_settings_writer(project, publication):
+    """Reopen local settings through actual originals, never caller delivery flags.
+
+    Acquire LK-P first, and only a durable delivery claim can trigger discovery
+    of the actual spreadsheet owner and original COMPLETE/DELIVERED pair.
+    No claim preserves the ordinary strict K contract. This does not initialize
+    missing state, grant online authority or replace publication/source owners.
+    """
+    with ExitStack() as stack:
+        token = None
+        try:
+            token = stack.enter_context(writer_owner(project, publication))
+            from monitor.issue_tracker_settings_audit_allocation import _hold_discovered_completed_settings
+            context, verify = stack.enter_context(_hold_discovered_completed_settings(token))
+            _COMPLETED_ORIGINAL_GUARDS[token] = verify
+            if context is not None:
+                _COMPLETED_READ_CONTEXT[token] = context
+            current_k(token)
+        except (LocalCommitHold, KChainHoldError, OSError, TypeError, ValueError, KeyError) as exc:
+            _COMPLETED_ORIGINAL_GUARDS.pop(token, None)
+            _COMPLETED_READ_CONTEXT.pop(token, None)
+            raise TrackerStateHold("settings original discovery refused") from exc
+        try:
+            yield token
+            current_k(token)
+        finally:
+            # Revoke before the original pair and project owner close, on every
+            # exit. Caller exceptions are not relabeled as ownership failures.
+            _COMPLETED_ORIGINAL_GUARDS.pop(token, None)
+            _COMPLETED_READ_CONTEXT.pop(token, None)
+
+
 def current_k(token, *, spreadsheet_token=None, binding=None, completed_unit=None):
     """Read highest K; missing delivered projections require the actual paired owners.
 
@@ -85,6 +128,7 @@ def current_k(token, *, spreadsheet_token=None, binding=None, completed_unit=Non
     cannot authorize missing projections. This is not an online send permission.
     """
     try:
+        _verify_settings_originals(token)
         owner = _owner(token)
         context=(spreadsheet_token,binding,completed_unit)
         if all(item is None for item in context):
@@ -94,8 +138,11 @@ def current_k(token, *, spreadsheet_token=None, binding=None, completed_unit=Non
             if any(item is None for item in context):
                 raise TrackerStateHold("incomplete original delivery context")
             from monitor.issue_tracker_settings_audit_allocation import read_current_k_after_completed_unit
-            return read_current_k_after_completed_unit(token,spreadsheet_token,binding,completed_unit)
-        return read_local_k_store(_root(owner.project), token=token)
+            result = read_current_k_after_completed_unit(token,spreadsheet_token,binding,completed_unit)
+        else:
+            result = read_local_k_store(_root(owner.project), token=token)
+        _verify_settings_originals(token)
+        return result
     except (LocalCommitHold, KChainHoldError, OSError, TypeError, ValueError) as exc:
         raise TrackerStateHold("shared settings read refused") from exc
 
@@ -118,16 +165,20 @@ def require_current_k(token, project, publication, expected):
 def set_k(token, *, new_k, actor, recorded_at, request_id, expected_revision):
     """Commit a K event under the same LK-P token; actor trust is external."""
     try:
+        _verify_settings_originals(token)
         owner = _owner(token)
         context = _COMPLETED_READ_CONTEXT.get(token)
         if context is not None:
             from monitor.issue_tracker_settings_audit_allocation import apply_completed_k_change
-            return apply_completed_k_change(token,*context,new_k=new_k,actor=actor,
+            result = apply_completed_k_change(token,*context,new_k=new_k,actor=actor,
                 recorded_at=recorded_at,request_id=request_id,expected_revision=expected_revision)
-        return apply_local_k_change(
-            _root(owner.project), new_k=new_k, actor=actor,
-            recorded_at=recorded_at, request_id=request_id,
-            expected_revision=expected_revision, token=token,
-        )
+        else:
+            result = apply_local_k_change(
+                _root(owner.project), new_k=new_k, actor=actor,
+                recorded_at=recorded_at, request_id=request_id,
+                expected_revision=expected_revision, token=token,
+            )
+        _verify_settings_originals(token)
+        return result
     except (LocalCommitHold, KChainHoldError, OSError, TypeError, ValueError) as exc:
         raise TrackerStateHold("shared settings change refused") from exc

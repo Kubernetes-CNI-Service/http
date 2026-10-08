@@ -2599,6 +2599,236 @@ with scoped_fixture(root,sheet),state.tracker_writer(project,project/'publicatio
                     allocation.cleanup_completed_settings_outbox(token,state._COMPLETED_READ_CONTEXT[token][0],bound,unit)
                 self.assertEqual(before,{str(p.relative_to(tracker)):p.read_bytes() for p in tracker.rglob('*') if p.is_file()})
 
+    def setup_discovered_settings_cleaned(self):
+        from monitor import issue_tracker_state_owner as state,issue_tracker_spreadsheet_owner as sheet
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        from monitor.issue_tracker_manual_preview import make_protected_stage_l_broker
+        bound,unit=self.retained_delivery()
+        project=self.root/'project'; publication=project/'99-output-monitor'
+        publication.mkdir(mode=0o700)
+        with scoped_fixture(self.root,sheet),state.tracker_writer(project,publication,
+                completed_binding=bound,completed_unit=unit) as token:
+            allocation.cleanup_completed_settings_outbox(token,state._COMPLETED_READ_CONTEXT[token][0],bound,unit)
+        return project,publication,bound,unit
+
+    def test_discovered_actual_pair_reads_and_writes_highest_without_caller_context(self):
+        from monitor import issue_tracker_state_owner as state,issue_tracker_spreadsheet_owner as sheet
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        from monitor.issue_tracker_manual_preview import make_protected_stage_l_broker
+        project,publication,bound,unit=self.setup_discovered_settings_cleaned(); tracker=project/'.tracker'
+        original=(tracker/'settings/events/0.json').read_bytes()
+        with scoped_fixture(self.root,sheet):
+            with state.tracker_settings_writer(project,publication) as token:
+                self.assertEqual((0,3),(state.current_k(token).revision,state.current_k(token).k))
+                receipt=state.set_k(token,new_k=6,actor='operator:fixture',recorded_at='2026-10-09T00:00:00Z',
+                    request_id='factory-new-k',expected_revision=0)
+                self.assertEqual((1,6,False),(receipt.revision,receipt.k,receipt.replay))
+            self.assertEqual({},state._COMPLETED_READ_CONTEXT)
+            self.assertEqual({},state._COMPLETED_ORIGINAL_GUARDS)
+            with state.tracker_settings_writer(project,publication) as token:
+                self.assertEqual((1,6),(state.current_k(token).revision,state.current_k(token).k))
+        self.assertEqual(original,(tracker/'settings/events/0.json').read_bytes())
+        self.assertFalse((tracker/'settings/outbox/0.json').exists())
+        self.assertTrue((tracker/'settings/outbox/1.json').is_file())
+        self.assertEqual(unit.wire_bytes,(self.root/'var/lib/http-ztp-container/issue-tracker'/
+            (hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()+'.journal')/'WIRE').read_bytes())
+
+    def test_discovery_missing_delivery_refuses_before_any_k_change(self):
+        from monitor import issue_tracker_state_owner as state,issue_tracker_spreadsheet_owner as sheet
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        from monitor.issue_tracker_manual_preview import make_protected_stage_l_broker
+        project,publication,bound,unit=self.setup_discovered_settings_cleaned(); tracker=project/'.tracker'
+        (tracker/'settings-audit-delivery/DELIVERED').rename(self.root/'preserved-delivery')
+        saved={str(p.relative_to(tracker)):p.read_bytes() for p in tracker.rglob('*') if p.is_file()}
+        with scoped_fixture(self.root,sheet),self.assertRaises(state.TrackerStateHold):
+            with state.tracker_settings_writer(project,publication):
+                self.fail('missing actual delivery must not yield a writer')
+        self.assertEqual(saved,{str(p.relative_to(tracker)):p.read_bytes() for p in tracker.rglob('*') if p.is_file()})
+        self.assertEqual({},state._COMPLETED_READ_CONTEXT)
+        self.assertEqual({},state._COMPLETED_ORIGINAL_GUARDS)
+
+    def test_discovered_header_replacement_is_rejected_on_each_read_not_only_scope_exit(self):
+        from monitor import issue_tracker_state_owner as state,issue_tracker_spreadsheet_owner as sheet
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        from monitor.issue_tracker_manual_preview import make_protected_stage_l_broker
+        project,publication,bound,unit=self.setup_discovered_settings_cleaned(); tracker=project/'.tracker'
+        header=tracker/'settings-audit-allocation/HEADER'
+        with scoped_fixture(self.root,sheet):
+            with self.assertRaises(state.TrackerStateHold):
+                with state.tracker_settings_writer(project,publication) as token:
+                    replacement=self.root/'same-byte-discovery-header'
+                    replacement.write_bytes(header.read_bytes()); replacement.chmod(0o600)
+                    header.rename(self.root/'preserved-discovery-header'); replacement.rename(header)
+                    with self.assertRaises(state.TrackerStateHold): state.current_k(token)
+        self.assertFalse((tracker/'settings/events/1.json').exists())
+        self.assertEqual({},state._COMPLETED_READ_CONTEXT)
+        self.assertEqual({},state._COMPLETED_ORIGINAL_GUARDS)
+
+    def test_discovered_header_replacement_blocks_k_write_before_event_commit(self):
+        from monitor import issue_tracker_state_owner as state,issue_tracker_spreadsheet_owner as sheet
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        from monitor.issue_tracker_manual_preview import make_protected_stage_l_broker
+        project,publication,bound,unit=self.setup_discovered_settings_cleaned(); tracker=project/'.tracker'
+        header=tracker/'settings-audit-allocation/HEADER'
+        with scoped_fixture(self.root,sheet):
+            with self.assertRaises(state.TrackerStateHold):
+                with state.tracker_settings_writer(project,publication) as token:
+                    replacement=self.root/'same-byte-discovery-header'
+                    replacement.write_bytes(header.read_bytes()); replacement.chmod(0o600)
+                    header.rename(self.root/'preserved-discovery-header'); replacement.rename(header)
+                    with self.assertRaises(state.TrackerStateHold):
+                        state.set_k(token,new_k=6,actor='operator:fixture',recorded_at='2026-10-09T00:00:00Z',
+                            request_id='discovery-rebind-must-not-write',expected_revision=0)
+        self.assertFalse((tracker/'settings/events/1.json').exists(),'lost held original must stop before commit')
+        self.assertEqual({},state._COMPLETED_READ_CONTEXT)
+        self.assertEqual({},state._COMPLETED_ORIGINAL_GUARDS)
+
+    def test_mid_write_discovery_original_loss_retains_stop_not_coherent_success(self):
+        from monitor import issue_tracker_state_owner as state,issue_tracker_spreadsheet_owner as sheet
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        from monitor.issue_tracker_manual_preview import make_protected_stage_l_broker
+        project,publication,bound,unit=self.setup_discovered_settings_cleaned(); tracker=project/'.tracker'
+        header=tracker/'settings-audit-allocation/HEADER'
+        installed=allocation._CompletedSettingsTransition.install; reached=[]
+        def changed_after_event(transition,scope,parent,name,raw,**options):
+            result=installed(transition,scope,parent,name,raw,**options)
+            if parent==transition.events:
+                replacement=self.root/'same-byte-mid-write-header'
+                replacement.write_bytes(header.read_bytes()); replacement.chmod(0o600)
+                header.rename(self.root/'preserved-mid-write-header'); replacement.rename(header)
+                reached.append(True)
+            return result
+        with scoped_fixture(self.root,sheet),self.assertRaises(state.TrackerStateHold):
+            with state.tracker_settings_writer(project,publication) as token:
+                with mock.patch.object(allocation._CompletedSettingsTransition,'install',new=changed_after_event):
+                    with self.assertRaises(state.TrackerStateHold):
+                        state.set_k(token,new_k=6,actor='operator:fixture',recorded_at='2026-10-09T00:00:00Z',
+                            request_id='discovery-mid-write',expected_revision=0)
+                self.assertEqual([True],reached)
+                self.assertTrue((tracker/'settings/events/1.json').is_file())
+                self.assertTrue(any(p.name.startswith('.pending-K-change-') for p in (tracker/'settings').iterdir()))
+        with scoped_fixture(self.root,sheet),self.assertRaises(state.TrackerStateHold):
+            with state.tracker_settings_writer(project,publication):
+                self.fail('retained STOP must reject fresh owner')
+
+    def test_caller_exception_is_preserved_and_context_revoked(self):
+        from monitor import issue_tracker_state_owner as state,issue_tracker_spreadsheet_owner as sheet
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        from monitor.issue_tracker_manual_preview import make_protected_stage_l_broker
+        project,publication,bound,unit=self.setup_discovered_settings_cleaned()
+        error=RuntimeError('owned caller exception')
+        with scoped_fixture(self.root,sheet),self.assertRaises(RuntimeError) as seen:
+            with state.tracker_settings_writer(project,publication):
+                raise error
+        self.assertIs(error,seen.exception)
+        self.assertEqual({},state._COMPLETED_READ_CONTEXT)
+        self.assertEqual({},state._COMPLETED_ORIGINAL_GUARDS)
+
+    def test_discovery_cold_reader_needs_only_project_not_parent_binding_or_unit(self):
+        from monitor import issue_tracker_state_owner as state,issue_tracker_spreadsheet_owner as sheet
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        from monitor.issue_tracker_manual_preview import make_protected_stage_l_broker
+        import subprocess
+        project,publication,bound,unit=self.setup_discovered_settings_cleaned()
+        with scoped_fixture(self.root,sheet),state.tracker_settings_writer(project,publication) as token:
+            state.set_k(token,new_k=6,actor='operator:fixture',recorded_at='2026-10-09T00:00:00Z',
+                request_id='cold-discovered-k',expected_revision=0)
+        program='''from pathlib import Path
+import sys
+from monitor import issue_tracker_state_owner as state,issue_tracker_spreadsheet_owner as sheet
+from test_cases.test_req7_spreadsheet_owner import scoped_fixture
+root=Path(sys.argv[1]); project=root/'project'
+assert state._COMPLETED_READ_CONTEXT=={}
+assert state._COMPLETED_ORIGINAL_GUARDS=={}
+with scoped_fixture(root,sheet),state.tracker_settings_writer(project,project/'99-output-monitor') as token:
+ value=state.current_k(token); print(value.revision,value.k)
+assert state._COMPLETED_READ_CONTEXT=={}
+assert state._COMPLETED_ORIGINAL_GUARDS=={}
+print('context-revoked')
+'''
+        cold=subprocess.run([sys.executable,'-B','-c',program,str(self.root)],cwd=ROOT,
+                            stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=20)
+        self.assertEqual(0,cold.returncode,cold.stderr)
+        self.assertEqual(b'1 6\ncontext-revoked\n',cold.stdout)
+        self.assertFalse((project/'.tracker/settings/outbox/0.json').exists())
+
+    def test_no_delivery_claim_keeps_ordinary_pending_k_update_and_frozen_unknown(self):
+        from monitor import issue_tracker_state_owner as state,issue_tracker_spreadsheet_owner as sheet
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        from monitor.issue_tracker_manual_preview import make_protected_stage_l_broker
+        from contextlib import ExitStack
+        with ExitStack() as stack:
+            writer,owner,bound,auth,config,unit,docs=self.prepare_owned(stack,settings_audits=(self.settings_audit_oracle(),))
+        project=self.root/'project'; publication=project/'99-output-monitor'; publication.mkdir(mode=0o700)
+        tracker=project/'.tracker'; assignments=(tracker/'settings-audit-allocation/ASSIGNMENTS').read_bytes()
+        with state.tracker_settings_writer(project,publication) as token:
+            self.assertNotIn(token,state._COMPLETED_READ_CONTEXT)
+            receipt=state.set_k(token,new_k=6,actor='operator:fixture',recorded_at='2026-10-09T00:00:00Z',
+                request_id='still-unknown-k',expected_revision=0)
+            self.assertEqual((1,6,False),(receipt.revision,receipt.k,receipt.replay))
+        self.assertEqual(assignments,(tracker/'settings-audit-allocation/ASSIGNMENTS').read_bytes())
+        self.assertTrue((tracker/'settings/outbox/0.json').is_file())
+        self.assertTrue((tracker/'settings/outbox/1.json').is_file())
+        self.assertFalse((tracker/'settings-audit-delivery').exists())
+        self.assertEqual(unit.wire_bytes,(self.root/'var/lib/http-ztp-container/issue-tracker'/
+            (hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()+'.journal')/'WIRE').read_bytes())
+
+    def test_discovery_changed_binding_cannot_gain_original_pair_authority(self):
+        from monitor import issue_tracker_state_owner as state,issue_tracker_spreadsheet_owner as sheet
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        from monitor.issue_tracker_manual_preview import make_protected_stage_l_broker
+        import json
+        project,publication,bound,unit=self.setup_discovered_settings_cleaned(); tracker=project/'.tracker'
+        header=tracker/'settings-audit-allocation/HEADER'; altered=json.loads(header.read_bytes())
+        altered['policy_sha256']='f'*64
+        header.write_bytes(allocation.local._canonical(altered))
+        saved={str(p.relative_to(tracker)):p.read_bytes() for p in tracker.rglob('*') if p.is_file()}
+        with scoped_fixture(self.root,sheet),self.assertRaises(state.TrackerStateHold):
+            with state.tracker_settings_writer(project,publication):
+                self.fail('a plausible binding in local HEADER is only a candidate locator')
+        self.assertEqual(saved,{str(p.relative_to(tracker)):p.read_bytes() for p in tracker.rglob('*') if p.is_file()})
+        self.assertFalse((tracker/'settings/events/1.json').exists())
+
+    def test_discovery_missing_original_wire_cannot_recompile_or_restore(self):
+        from monitor import issue_tracker_state_owner as state,issue_tracker_spreadsheet_owner as sheet
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        from monitor.issue_tracker_manual_preview import make_protected_stage_l_broker
+        project,publication,bound,unit=self.setup_discovered_settings_cleaned(); tracker=project/'.tracker'
+        original=(self.root/'var/lib/http-ztp-container/issue-tracker'/
+            (hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()+'.journal')/'WIRE')
+        original.rename(self.root/'preserved-original-wire')
+        saved={str(p.relative_to(tracker)):p.read_bytes() for p in tracker.rglob('*') if p.is_file()}
+        with scoped_fixture(self.root,sheet),self.assertRaises(state.TrackerStateHold):
+            with state.tracker_settings_writer(project,publication):
+                self.fail('missing original wire must not yield a settings writer')
+        self.assertEqual(saved,{str(p.relative_to(tracker)):p.read_bytes() for p in tracker.rglob('*') if p.is_file()})
+        self.assertFalse(original.exists())
+
+    def test_real_manual_factory_reopens_pair_and_preserves_authenticated_replay(self):
+        from monitor import issue_tracker_state_owner as state,issue_tracker_spreadsheet_owner as sheet
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        from monitor.issue_tracker_manual_preview import make_protected_stage_l_broker
+        project,publication,bound,unit=self.setup_discovered_settings_cleaned(); tracker=project/'.tracker'
+        store=SimpleNamespace(scope='prod',project_identity=str(project),root_status_dir=str(self.root/'monitor/status'))
+        template=self.root/'monitor/Issue_Tracker_Template_v1.xlsx'
+        def broker():
+            return make_protected_stage_l_broker(store,http_root=self.root,project=project,publication=publication,
+                template_path=template,boot_id='fixture-boot')
+        with scoped_fixture(self.root,sheet):
+            first=broker()
+            self.assertEqual((0,3),(first.settings('nvis','Switch Status')['revision'],first.settings('nvis','Switch Status')['k']))
+            changed=first.set_k('nvis','Switch Status',new_k=6,expected_revision=0,request_id='a'*32)
+            self.assertEqual(('committed',1,6,False),(changed['settings'],changed['revision'],changed['k'],changed['replay']))
+            saved={str(p.relative_to(tracker)):p.read_bytes() for p in tracker.rglob('*') if p.is_file()}
+            replay=broker().set_k('nvis','Switch Status',new_k=6,expected_revision=0,request_id='a'*32)
+            self.assertEqual({**changed,'replay':True},replay)
+            self.assertEqual(saved,{str(p.relative_to(tracker)):p.read_bytes() for p in tracker.rglob('*') if p.is_file()})
+        event=__import__('json').loads((tracker/'settings/events/1.json').read_bytes())
+        self.assertEqual(('operator:nvis',3,6,'a'*32),(event['actor'],event['old_k'],event['new_k'],event['request_id']))
+        self.assertFalse((tracker/'settings/outbox/0.json').exists())
+        self.assertEqual({},state._COMPLETED_READ_CONTEXT)
+        self.assertEqual({},state._COMPLETED_ORIGINAL_GUARDS)
+
 class Req7RemoteHistoryManifestTests(unittest.TestCase):
     def test_direct_native_workflow_primary_suite_and_not_run_card_bind_real_dependencies(self):
         registry = json.loads((ROOT / 'test_cases/script_test_manifest.json').read_text())

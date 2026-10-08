@@ -211,14 +211,14 @@ def make_protected_stage_l_broker(
     from datetime import datetime, timezone
     from monitor.issue_tracker_k_store import KChangeConflict
     from monitor.issue_tracker_state_owner import (
-        TrackerStateHold, current_k, set_k, tracker_writer,
+        TrackerStateHold, current_k, set_k, tracker_settings_writer,
     )
 
     def settings_owner():
         runtime._paths(store, http_root, project, publication, template_path)
         if store.scope != "prod":
             raise ManualPreviewHold("settings relay is not bound to production scope")
-        return tracker_writer(project, publication)
+        return tracker_settings_writer(project, publication)
 
     def read_settings():
         with settings_owner() as token:

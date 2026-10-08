@@ -629,6 +629,10 @@ def read_current_k_after_completed_unit(writer_token,spreadsheet_token,binding,u
 @contextmanager
 def _hold_completed_k_pair(token,sheet,bound,unit):
     from monitor import issue_tracker_remote_history_match as completion
+    from monitor import issue_tracker_state_owner as state_owner
+    # Capture once. The discovery's own initial pair precedes enrollment, so
+    # inner transaction pairs revalidate its held originals without recursion.
+    outer=state_owner._COMPLETED_ORIGINAL_GUARDS.get(token)
     with ExitStack() as scope:
         match,_=scope.enter_context(completion._hold_match_originals(sheet,bound,unit))
         proof=scope.enter_context(completion._hold_completion_originals(sheet,bound,unit))
@@ -644,12 +648,79 @@ def _hold_completed_k_pair(token,sheet,bound,unit):
         allocated=local._directory(owner.root_fd,_FOLDER); scope.callback(os.close,allocated)
         allocation=scope.enter_context(_hold_allocation_originals(owner.root_fd,allocated,allocation_header,assignments))
         def guard():
+            if outer is not None: outer()
             if local._owner(token) is not owner: raise SettingsAuditHold()
             ownership._validated_owner(sheet,bound)
             match(); proof(); start(); delivery(); allocation()
             if completion.inspect_completion_evidence(sheet,bound,unit)!=seen: raise SettingsAuditHold()
             match(); proof(); start(); delivery(); allocation()
+            if outer is not None: outer()
         guard(); yield owner,delivered,guard; guard()
+
+@contextmanager
+def _hold_discovered_completed_settings(writer):
+    """Discover coordinates from held local originals, then prove the whole pair."""
+    from monitor.issue_tracker_online_target import OnlineTargetBinding
+    from monitor.issue_tracker_send_unit import _original_unit,_pairs,_nonfinite
+    owner=local._owner(writer)
+    with ExitStack() as scope:
+        held=[]
+        def directory(parent,name):
+            fd=local._directory(parent,name); scope.callback(os.close,fd)
+            info=local._check(fd,directory=True); journal._named(parent,name,fd,directory=True)
+            held.append((parent,name,fd,True,journal._identity(info),None))
+            return fd
+        def file(parent,name,limit):
+            fd=os.open(name,local._flags(),dir_fd=parent); scope.callback(os.close,fd)
+            info=local._check(fd,directory=False); journal._named(parent,name,fd,directory=False)
+            raw=os.pread(fd,limit+1,0)
+            if not raw or len(raw)!=info.st_size or len(raw)>limit:
+                raise SettingsAuditHold()
+            held.append((parent,name,fd,False,journal._identity(info),raw))
+            return raw
+        def verify():
+            if local._owner(writer) is not owner: raise SettingsAuditHold()
+            for parent,name,fd,is_directory,identity,raw in held:
+                local._check(fd,directory=is_directory)
+                journal._named(parent,name,fd,directory=is_directory)
+                if journal._identity(os.fstat(fd))!=identity: raise SettingsAuditHold()
+                if not is_directory and os.pread(fd,len(raw)+1,0)!=raw:
+                    raise SettingsAuditHold()
+                journal._named(parent,name,fd,directory=is_directory)
+                if journal._identity(os.fstat(fd))!=identity: raise SettingsAuditHold()
+        markers={_DELIVERY_FOLDER,_DELIVERY_STARTED}
+        if not markers.intersection(os.listdir(owner.root_fd)):
+            # No durable delivery claim: preserve the ordinary strict K contract.
+            def strict_verify():
+                if markers.intersection(os.listdir(owner.root_fd)):
+                    raise SettingsAuditHold()
+                verify()
+            yield None,strict_verify
+            strict_verify()
+            return
+        folder=directory(owner.root_fd,_FOLDER)
+        raw=file(folder,'HEADER',16384)
+        header=json.loads(raw.decode('utf-8','strict'),object_pairs_hook=_pairs,parse_constant=_nonfinite)
+        if type(header) is not dict or local._canonical(header)!=raw:
+            raise SettingsAuditHold()
+        project,tracker=os.fstat(owner.project_fd),os.fstat(owner.root_fd)
+        if (header['project_identity']!=[project.st_dev,project.st_ino]
+                or header['tracker_identity']!=[tracker.st_dev,tracker.st_ino]):
+            raise SettingsAuditHold()
+        bound=OnlineTargetBinding(header['spreadsheet_id'],header['allowlist_sha256'],header['policy_sha256'])
+        sheet=scope.enter_context(ownership.spreadsheet_owner(bound))
+        sheet_owner=ownership._validated_owner(sheet,bound)
+        parent=sheet_owner.directories[-1][0]
+        unit_folder=directory(parent,sheet_owner.lock_name[:-5]+'.journal')
+        unit=_original_unit(file(unit_folder,'ACTION-PREIMAGE',_LIMIT),
+                            file(unit_folder,'WIRE',_LIMIT))
+        _owner,_delivered,pair_verify=scope.enter_context(_hold_completed_k_pair(writer,sheet,bound,unit))
+        if _owner is not owner: raise SettingsAuditHold()
+        def original_verify():
+            verify(); pair_verify(); verify()
+        original_verify()
+        yield (sheet,bound,unit),original_verify
+        original_verify()
 
 class _CompletedSettingsTransition:
     def __init__(self,scope,owner,delivered):

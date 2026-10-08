@@ -25,6 +25,35 @@ PREPARED = b"scratch-workbook-projection\n"
 
 
 class TrackerStateOwnerTests(unittest.TestCase):
+    def test_settings_discovery_never_bootstraps_absent_state(self):
+        from monitor import issue_tracker_state_owner as state
+        before={str(p.relative_to(self.project)):p.read_bytes() for p in self.project.rglob('*') if p.is_file()}
+        with self.assertRaises(TrackerStateHold):
+            with state.tracker_settings_writer(self.project,self.publication):
+                self.fail('settings discovery must not initialize a missing tracker')
+        self.assertFalse(self.root.exists())
+        self.assertEqual(before,{str(p.relative_to(self.project)):p.read_bytes() for p in self.project.rglob('*') if p.is_file()})
+
+    def test_settings_discovery_without_delivery_keeps_one_actual_lk_p_and_pending_k(self):
+        from monitor import issue_tracker_state_owner as state
+        self.initialize()
+        with state.tracker_settings_writer(self.project,self.publication) as token:
+            self.assertEqual((0,3),(current_k(token).revision,current_k(token).k))
+            self.assertNotIn(token,state._COMPLETED_READ_CONTEXT)
+            self.assertIn(token,state._COMPLETED_ORIGINAL_GUARDS)
+            with self.assertRaises(TrackerStateHold):
+                with tracker_writer(self.project,self.publication):
+                    self.fail('a second writer acquired the same project')
+            changed=set_k(token,new_k=5,actor='operator:fixture',recorded_at=T1,
+                          request_id='discovered-ordinary-k',expected_revision=0)
+            self.assertEqual((1,5),(changed.revision,changed.k))
+            self.assertTrue((self.root/'settings/outbox/0.json').is_file())
+            self.assertTrue((self.root/'settings/outbox/1.json').is_file())
+        self.assertEqual({},state._COMPLETED_READ_CONTEXT)
+        self.assertEqual({},state._COMPLETED_ORIGINAL_GUARDS)
+        with self.assertRaises(TrackerStateHold): current_k(token)
+
+
     def test_completed_writer_rejects_partial_or_forged_context_without_mutation(self):
         self.initialize()
         before={str(p.relative_to(self.root)):p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
