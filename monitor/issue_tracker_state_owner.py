@@ -17,6 +17,9 @@ from monitor.issue_tracker_local_commit import (
 )
 
 
+_COMPLETED_READ_CONTEXT = {}
+
+
 class TrackerStateHold(ValueError):
     """A shared local state authority is missing, incomplete, or unsafe."""
 
@@ -43,17 +46,36 @@ def initialize_tracker_state(project, publication, *, initialized_at, acquisitio
 
 
 @contextmanager
-def tracker_writer(project, publication):
-    """Hold the C-6 owner and validate K authority before exposing its token."""
+def tracker_writer(project, publication, *, completed_binding=None, completed_unit=None):
+    """Acquire project THEN spreadsheet for an explicit original completed unit.
+
+    Context is scoped to this actual owner, revalidated on each K read and
+    revoked before either owner closes. No cleanup or extra settings-write
+    permission; the existing local C6 capability is not online admission.
+    """
     with ExitStack() as stack:
         try:
             token = stack.enter_context(writer_owner(project, publication))
-            read_local_k_store(_root(project), token=token)
+            if completed_binding is None and completed_unit is None:
+                read_local_k_store(_root(project), token=token)
+            else:
+                if completed_binding is None or completed_unit is None:
+                    raise TrackerStateHold("incomplete original completed-unit context")
+                from monitor.issue_tracker_spreadsheet_owner import spreadsheet_owner
+                sheet = stack.enter_context(spreadsheet_owner(completed_binding))
+                current_k(token, spreadsheet_token=sheet, binding=completed_binding,
+                          completed_unit=completed_unit)
+                _COMPLETED_READ_CONTEXT[token] = (sheet,completed_binding,completed_unit)
         except (LocalCommitHold, KChainHoldError, OSError, TypeError, ValueError) as exc:
             raise TrackerStateHold("shared tracker writer is incomplete or unsafe") from exc
         # ExitStack closes/revokes on every body exit, but never relabels the
         # caller's exception as a tracker-state failure.
-        yield token
+        try:
+            yield token
+            if token in _COMPLETED_READ_CONTEXT:
+                current_k(token)  # Final revalidation, not a cached successful K.
+        finally:
+            _COMPLETED_READ_CONTEXT.pop(token,None)
 
 
 def current_k(token, *, spreadsheet_token=None, binding=None, completed_unit=None):
@@ -65,6 +87,9 @@ def current_k(token, *, spreadsheet_token=None, binding=None, completed_unit=Non
     try:
         owner = _owner(token)
         context=(spreadsheet_token,binding,completed_unit)
+        if all(item is None for item in context):
+            context=_COMPLETED_READ_CONTEXT.get(token,context)
+            spreadsheet_token,binding,completed_unit=context
         if any(item is not None for item in context):
             if any(item is None for item in context):
                 raise TrackerStateHold("incomplete original delivery context")

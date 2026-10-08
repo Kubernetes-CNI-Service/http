@@ -681,6 +681,77 @@ class Req7OwnedHistoryMatchWorkflowTests(unittest.TestCase):
     def test_start_held_file_barrier_failure_retains_stop(self): self.start_barrier_fault(3)
     def test_start_held_parent_barrier_failure_retains_stop(self): self.start_barrier_fault(4)
 
+    def test_fresh_writer_scope_recovers_k_without_parent_registry_or_resend(self):
+        from dataclasses import asdict
+        import json
+        import subprocess
+        bound,_unit,projection=self.original_completed_writer_pair()
+        program='''import sys,json,hashlib
+from pathlib import Path
+sys.path[:0]=[sys.argv[1],sys.argv[1]+"/tools"]
+from monitor import issue_tracker_state_owner as state,issue_tracker_spreadsheet_owner as sheet
+from test_cases.test_req7_spreadsheet_owner import scoped_fixture
+from monitor.issue_tracker_online_target import OnlineTargetBinding
+from monitor.issue_tracker_send_unit import _original_unit
+root=Path(sys.argv[2]); project=root/'project'; bound=OnlineTargetBinding(**json.loads(sys.stdin.buffer.read()))
+folder=root/'var/lib/http-ztp-container/issue-tracker'/(hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()+'.journal')
+unit=_original_unit((folder/'ACTION-PREIMAGE').read_bytes(),(folder/'WIRE').read_bytes())
+with scoped_fixture(root,sheet),state.tracker_writer(project,project/'publication',completed_binding=bound,completed_unit=unit) as token:
+ value=state.current_k(token); print(value.revision,value.k)
+try: state.current_k(token)
+except state.TrackerStateHold: print('REVOKED')
+else: raise AssertionError('expired owner still reads K')
+'''
+        cold=subprocess.run([sys.executable,'-B','-c',program,str(ROOT),str(self.root)],
+            input=json.dumps(asdict(bound)).encode(),stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=10)
+        self.assertEqual(0,cold.returncode,cold.stderr)
+        self.assertEqual(b'0 3\nREVOKED\n',cold.stdout)
+        self.assertFalse(projection.exists()); self.assertTrue((self.root/'preserved-completed-writer-projection').is_file())
+
+    def original_completed_writer_pair(self):
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        with ExitStack() as stack:
+            writer,sheet,bound,unit=self.completed(stack)
+            allocation.record_completed_settings_delivery(writer,sheet,bound,unit)
+            projection=self.root/'project/.tracker/settings/outbox/0.json'
+            projection.rename(self.root/'preserved-completed-writer-projection')
+        return bound,unit,projection
+
+    def test_scoped_writer_reads_original_k_and_revokes_without_repair(self):
+        from monitor import issue_tracker_state_owner as state
+        from monitor import issue_tracker_spreadsheet_owner as sheet
+        from test_cases.test_req7_spreadsheet_owner import scoped_fixture
+        bound,unit,projection=self.original_completed_writer_pair()
+        original={str(p.relative_to(self.root)):p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
+        project=self.root/'project'
+        with scoped_fixture(self.root,sheet),state.tracker_writer(project,project/'publication',
+                completed_binding=bound,completed_unit=unit) as token:
+            # Ordinary current_k inside this qualified scope must perform a
+            # fresh proof read; no caller-provided consumed-ID list or snapshot.
+            self.assertEqual((0,3),(state.current_k(token).revision,state.current_k(token).k))
+            state.require_current_k(token,project,project/'publication',state.current_k(token))
+        with self.assertRaises(state.TrackerStateHold): state.current_k(token)
+        self.assertEqual(original,{str(p.relative_to(self.root)):p.read_bytes() for p in self.root.rglob('*') if p.is_file()})
+        self.assertFalse(projection.exists())
+
+    def test_caller_exception_survives_and_final_proof_loss_revokes_scope(self):
+        from monitor import issue_tracker_state_owner as state
+        from monitor import issue_tracker_spreadsheet_owner as sheet
+        from test_cases.test_req7_spreadsheet_owner import scoped_fixture
+        bound,unit,_projection=self.original_completed_writer_pair(); project=self.root/'project'
+        class CallerFailure(Exception): pass
+        with scoped_fixture(self.root,sheet),self.assertRaises(CallerFailure):
+            with state.tracker_writer(project,project/'publication',completed_binding=bound,completed_unit=unit) as token:
+                self.assertEqual(3,state.current_k(token).k)
+                raise CallerFailure('owned caller body fault')
+        with self.assertRaises(state.TrackerStateHold): state.current_k(token)
+        with scoped_fixture(self.root,sheet),self.assertRaises(state.TrackerStateHold):
+            with state.tracker_writer(project,project/'publication',completed_binding=bound,completed_unit=unit) as token:
+                self.assertEqual(3,state.current_k(token).k)
+                (project/'.tracker/settings-audit-delivery/DELIVERED').rename(self.root/'preserved-final-writer-delivery')
+        with self.assertRaises(state.TrackerStateHold): state.current_k(token)
+
+
     def test_current_pointer_replacement_after_qualified_read_never_escapes_as_k(self):
         from contextlib import contextmanager
         from unittest import mock

@@ -957,6 +957,12 @@ DELIVERED、启动见证与 settings 范围中返回最高已提交 K。缺失�
 或返回前同字节 current 替换均拒绝；普通无上下文入口仍严格要求全部投影。
 真实冷进程获取双 owner 并重读原 ACTION/WIRE，不采用父进程缓存。此显式只读入口
 不等于默认 worker 接入，不授权 K 写入、outbox 清理、发送或全局状态释放。
+显式 `tracker_writer(completed_binding=..., completed_unit=...)` 先获取原项目 owner，
+再获取固定根目录下的原 spreadsheet owner；初始、每次 `current_k`／
+`require_current_k` 及正常 scope 收尾都重新核完整原配对，不缓存 K 或 consumed IDs。
+上下文只属于实际 token，在任一 owner 关闭前撤销；调用方异常原样保留，正常收尾
+证明丢失则 HOLD。冷进程重读原 ACTION/WIRE 并重新获锁；部分／伪造上下文拒绝。
+不修复投影，不执行清理，不增加 settings 写入权限，也不等于默认在线 worker 接入。
 独立的 ETH/IB cabling 夹具分别获取其合成 token 和读取计划，不沿用前一夹具已过期
 的 token；TTL 和生产过期拒绝不变。新增受控墙钟跨窗口测试不冒充休眠或断电见证。
 计划失败仅追加阶段、类型一致性及剩余有效秒数，不输出 token、header、ID 或业务内容。

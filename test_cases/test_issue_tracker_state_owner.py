@@ -25,6 +25,19 @@ PREPARED = b"scratch-workbook-projection\n"
 
 
 class TrackerStateOwnerTests(unittest.TestCase):
+    def test_completed_writer_rejects_partial_or_forged_context_without_mutation(self):
+        self.initialize()
+        before={str(p.relative_to(self.root)):p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
+        for context in ({'completed_binding':object()},
+                        {'completed_unit':object()},
+                        {'completed_binding':object(),'completed_unit':object()}):
+            with self.subTest(context_keys=tuple(context)),self.assertRaises(TrackerStateHold):
+                with tracker_writer(self.project,self.publication,**context):
+                    self.fail('unproved writer became usable')
+        self.assertEqual(before,{str(p.relative_to(self.root)):p.read_bytes() for p in self.root.rglob('*') if p.is_file()})
+        with tracker_writer(self.project,self.publication) as token:
+            self.assertEqual((0,3),(current_k(token).revision,current_k(token).k))
+
     def test_qualified_k_context_cannot_be_partial_or_replace_actual_owners(self):
         self.initialize()
         with tracker_writer(self.project,self.publication) as token:
