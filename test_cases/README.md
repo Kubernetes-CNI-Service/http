@@ -1100,3 +1100,13 @@ config／W1／cadence、固定 launcher、真实发送、FIFO 或 COMPLETE；REQ
 缺失、重复、NOOP 值／发送值／发送时间漂移均 HOLD，不修改原件或重新组批。
 独立 Switch 正向／篡改测试及真实 ETH／IB 原始 C5/C6 多脚本流程覆盖这一边界；
 本接口仍仅返回必要观察，无发送许可、COMPLETE 或整项验收能力。
+
+`inspect_project_online_target` 在实际 ACTIVE 项目 owner 下，通过 held 项目 FD
+单次有界读取当前 `01-global.yaml`，调用严格 YAML／策略校验，再消费固定
+root-only allowlist FD 读取器。非 root、伪造或已撤销 owner、缺少旧精确 binding、
+不安全文件、短读、读中替换／改写、disabled／撤销／目标或 N 变化都 HOLD，
+不读取凭据、不接受路径或 caller document 覆盖。C6 计数接口在原链核验前后使用
+此观察，撤销前置不计数，后置错误保留已计 UNKNOWN。真实 ETH／IB 原链与
+独立项目 owner／固定读取器 workflow 核这些边界；native root/RO-bind 仍 NOT RUN。
+这不替代实时远端 W1／template／nonce 连续性、cadence、固定单次 launcher
+或真实发送证明，REQ7 整体仍未完成。

@@ -1363,7 +1363,8 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                              tuple(sorted(generation_root.iterdir())))
             (project / "01-global.yaml").write_text(
                 "schema_version: 2\ncommon:\n  mgmt:\n"
-                "    issue-tracker:\n      status: disabled\n"
+                "    issue-tracker:\n" + ("      status: enabled\n      spreadsheet_id: synthetic_spreadsheet_id_0001\n"
+                    if receipted_intent_probe else "      status: disabled\n")
                 + ("      publish_every_cycles: 3\n"
                    if manual_after_manual else ""),
                 encoding="utf-8",
@@ -1443,6 +1444,12 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                 from test_cases.test_req7_nv_reservation import load as load_nv
                 self.assertTrue(hasattr(compiler, 'freeze_observed_receipted_cabling_unit'), 'Cabling compiler must bind original source/receipt and durable IDs')
                 binding = OnlineTargetBinding('synthetic_spreadsheet_id_0001', 'a'*64, 'b'*64)
+                if receipted_intent_probe:
+                    from monitor import issue_tracker_credential_shape as private_inputs, issue_tracker_online_target as current_target
+                    from tools.project_contract import safe_load_global_yaml
+                    allowlist_bytes = b'["synthetic_spreadsheet_id_0001"]\n'
+                    binding = current_target.bind_online_target(safe_load_global_yaml((project/'01-global.yaml').read_text()),
+                        current_target.freeze_target_allowlist(allowlist_bytes))
                 credential = AuthenticatedToken('synthetic.private-token', time.time()+3600)
                 identity = decode_template_identity(prepare_template_identity_read(binding, credential), response(identity_response()))
                 history_plan = prepare_history_tail_read(binding, credential)
@@ -1478,7 +1485,15 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                     with tempfile.TemporaryDirectory(prefix='req7-real-cabling-unit-') as directory:
                         global_root = Path(directory).resolve(); state = global_root/'var/lib/http-ztp-container/issue-tracker'
                         state.mkdir(parents=True, mode=0o700); owner_module = load_owner(); enrollment_module = load_enrollment(); nv_module = load_nv()
-                        with tracker_writer(project, self.publication) as writer_token, scoped_fixture(global_root, owner_module), owner_module.spreadsheet_owner(binding) as spreadsheet_token:
+                        from contextlib import ExitStack
+                        with tracker_writer(project, self.publication) as writer_token, scoped_fixture(global_root, owner_module), owner_module.spreadsheet_owner(binding) as spreadsheet_token, ExitStack() as private_context:
+                            if receipted_intent_probe:
+                                private_directory = global_root/'var/lib/http-ztp-container/service-account'
+                                private_directory.mkdir(mode=0o700)
+                                private_allowlist = private_directory/'issue-tracker-spreadsheet-whitelist.json'
+                                private_allowlist.write_bytes(allowlist_bytes); private_allowlist.chmod(0o600)
+                                private_context.enter_context(scoped_fixture(global_root, private_inputs))
+                                private_context.enter_context(scoped_fixture(global_root, current_target))
                             original = enrollment_module.prepare_enrollment_journal(spreadsheet_token, binding, identity)
                             nv_args = dict(generation_id=committed.receipt.generation_id, publish_id=committed.receipt.published_sha256,
                                 sheet=sheet, requested_keys=requested)
@@ -1606,6 +1621,12 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                                                 http_root=self.root, whitelist_path=self.template)
                                             options.update(changes)
                                             return global_journal.record_receipted_original_attempt_intent(spreadsheet_token, binding, identity, unit, **options)
+                                        private_allowlist.write_bytes(b'[]\n')
+                                        try:
+                                            with self.assertRaises(global_journal.GlobalAttemptHold): record()
+                                            self.assertEqual(0, global_journal.inspect_global_unit(spreadsheet_token, binding, unit).attempt_count)
+                                            self.assertEqual(b'[]\n', private_allowlist.read_bytes())
+                                        finally: private_allowlist.write_bytes(allowlist_bytes)
                                         for changes in ({'writer_token': None}, {'qualified_source': replace(qualified, observations_sha256='f'*64)},
                                                         {'expected_template_sha256': 'f'*64}):
                                             with self.assertRaises(global_journal.GlobalAttemptHold): record(**changes)
@@ -1638,11 +1659,22 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                                             self.assertEqual(0, global_journal.inspect_global_unit(spreadsheet_token, binding, unit).attempt_count)
                                             self.assertEqual(source_before+b'\nchanged during original barrier\n', source_path.read_bytes())
                                         finally: source_path.write_bytes(source_before)  # owned fixture only
+                                        actual_source_projection = preread.inspect_business_source_projection
+                                        def revoke_during_business(*inspect_args, **inspect_kwargs):
+                                            result = actual_source_projection(*inspect_args, **inspect_kwargs)
+                                            private_allowlist.write_bytes(b'[]\n'); return result
+                                        try:
+                                            with mock.patch.object(preread, 'inspect_business_source_projection', side_effect=revoke_during_business):
+                                                with self.assertRaises(global_journal.GlobalAttemptHold): record()
+                                            self.assertEqual(0, global_journal.inspect_global_unit(spreadsheet_token, binding, unit).attempt_count)
+                                            self.assertEqual(b'[]\n', private_allowlist.read_bytes())
+                                        finally: private_allowlist.write_bytes(allowlist_bytes)  # owned fault only
                                     for count in range(1, 7):
-                                        if receipted_intent_probe and count in (3, 4):
+                                        if receipted_intent_probe and count in (2, 3, 4, 5):
                                             original_observe = global_journal._observe
-                                            fault_path = generation_path/'RECEIPT' if count == 3 else source_path
-                                            original_bytes = c6_original['RECEIPT'] if count == 3 else source_before
+                                            fault_path = {2: private_allowlist, 3: generation_path/'RECEIPT',
+                                                4: source_path, 5: project/'01-global.yaml'}[count]
+                                            original_bytes = fault_path.read_bytes()
                                             def change_after_count(*observe_args, **observe_kwargs):
                                                 result = original_observe(*observe_args, **observe_kwargs)
                                                 if observe_args[3]: fault_path.write_bytes(b'changed after durable count')

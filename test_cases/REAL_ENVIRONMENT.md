@@ -1995,6 +1995,8 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 ## TC-REAL-REQ7-FIXED-PRIVATE-INPUTS-001 — 固定路径单次 held-FD 私有输入
 
+- 当前项目／计数联动补充（**NOT RUN**）：在实际 ACTIVE LK-P 与全表 owner 下，单次 held 项目 FD 读取 `01-global.yaml`，重核原 inode/stat/name，消费固定 allowlist FD 读取器，不接收 caller document/path 或环境覆盖。目标／N／原 allowlist 字节变化、撤销、缺失、读中改写或替换均 HOLD；计数前拒绝不新增意图，计数后失败保留 UNKNOWN 与原件，不重新组批。本地真实 C5/C6 ETH／IB 六次计数故障流程和项目锁／固定 FD workflow 只合成读取边界 root 元数据；原 C6 使用本机真实身份。现场另获隔离读取／故障注入权限后留存双锁、当前策略／allowlist 身份、完整屏障顺序和退出码；只撤销自有故障，不修复／删除真实原件或 UNKNOWN。native root、RO bind、实际在线发送和整项仍须另证。
+
 - Case ID：`TC-REAL-REQ7-FIXED-PRIVATE-INPUTS-001`；类型：real-environment / native identity / read-only bind；对应 C-1/C-2/C-10/C-11；状态：**NOT RUN / REAL_ENV REQUIRED**。自动化 `test_issue_tracker_credential_shape` 与 `test_issue_tracker_credential_fd` 的 direct 和真实策略／枚举 workflow 仅在拥有的临时树中重映射根目录 open、合成 uid 0 元数据；不代表真 root 身份或真实 RO bind。
 - 前置条件与权限：owner 另行明确授权可丢弃 Linux 容器／VM、私有固定目录与假凭据副本、卷快照、唯一 root worker 和回滚负责人；记录精确源码／测试／manifest／Python／平台及同树证明。未获授权不读取真实凭据，不改挂载、文件属主或权限，不启动容器或服务，不碰 AIR/prod/live；真机未运行不作为本地主树推进门槛。
 - 步骤与独立预期：在授权隔离副本检查 `/var/lib/http-ztp-container/service-account/` root 0700、`cre.json` 与 `issue-tracker-spreadsheet-whitelist.json` root 0600、nlink 1 和同路径 RO bind。非 root 必须在任何 open/read 前拒绝；每级祖先无链接、root 所有且非组／世界可写。相对 held-FD 打开，单次有界 read 后重核文件与每条祖先名字绑定；FIFO、坏权限、硬／软链接、超界、短读、读中修改／替换、关闭失败和缺失内核 flag 均拒绝且不修复、不回退、不重开路径。环境 ADC／私有路径变量不能重定向。

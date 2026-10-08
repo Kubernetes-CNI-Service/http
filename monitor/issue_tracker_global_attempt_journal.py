@@ -248,18 +248,21 @@ def record_receipted_original_attempt_intent(
     STATE/MANIFEST/INTENT/RECEIPT through recovery and shared admissions; replay
     actual protected C5 sources rather than trust a caller's digest projection. Bind
     generation, published image and manifest to the immutable action, alongside
-    ALL retained business and reservations. No caller receipt, compilation or
+    ALL retained business and reservations, current locked project policy and
+    fixed held-FD target allowlist. No caller receipt, compilation or
     missing-original repair. This conservative current-cycle observation does
-    NOT authorize older-cycle R2, fresh config/W1/cadence, transport, COMPLETE
+    NOT authorize older-cycle R2, live W1/template/nonce continuity or cadence, transport, COMPLETE
     or FIFO. A failed post-count check leaves UNKNOWN and never rolls back.
     """
     from monitor.issue_tracker_send_unit import _original_receipt_identity
     from monitor.issue_tracker_history_preread_journal import inspect_business_preread, inspect_business_source_projection
     from monitor.issue_tracker_stage_l_consumer import qualify_prod_stage_l
     from monitor.issue_tracker_local_workbook_commit import _source_rows
+    from monitor.issue_tracker_online_target import inspect_project_online_target
 
     def originals():
         _inputs(token, binding, unit)
+        inspect_project_online_target(writer_token, binding)
         action = json.loads(unit.action_preimage)
         target = action['identity']
         receipt = _original_receipt_identity(
@@ -286,6 +289,7 @@ def record_receipted_original_attempt_intent(
                 qualified_source, store, target['generation_id'], writer_token,
                 settings, whitelist_snapshot, expected_template_sha256) != receipt:
             raise GlobalAttemptHold()
+        inspect_project_online_target(writer_token, binding)
         ownership._validated_owner(token, binding)
         return receipt, actual_source, reservations, business
 

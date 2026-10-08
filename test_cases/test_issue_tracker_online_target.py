@@ -5,7 +5,11 @@ import hashlib
 import importlib
 import importlib.util
 import json
+import os
+from pathlib import Path
+from types import SimpleNamespace
 import unittest
+from unittest import mock
 
 
 TARGET = "Synthetic_Approved_Target_0001"
@@ -24,6 +28,32 @@ class OnlineTargetDirectTests(unittest.TestCase):
         name = "monitor.issue_tracker_online_target"
         self.assertIsNotNone(importlib.util.find_spec(name), "C-2 target loader is missing")
         self.module = importlib.import_module(name)
+
+    def test_current_project_target_requires_live_owner_and_exact_old_binding_before_any_input(self):
+        self.assertTrue(hasattr(self.module, 'inspect_project_online_target'),
+            'current policy and fixed allowlist must be reopened under the actual project owner')
+        bound = self.module.bind_online_target(document(),
+            self.module.freeze_target_allowlist(json.dumps([TARGET]).encode()))
+        from monitor import issue_tracker_credential_shape as private
+        for token in (None, object(), SimpleNamespace(held=True, project=Path('/'))):
+            with self.subTest(token=type(token).__name__), mock.patch.object(self.module.os, 'geteuid', return_value=0), mock.patch.object(private, 'read_target_allowlist') as reader:
+                with self.assertRaises(self.module.OnlineTargetHold) as caught:
+                    self.module.inspect_project_online_target(token, bound)
+                reader.assert_not_called()
+                self.assertIsNone(caught.exception.__context__)
+                self.assertNotIn(TARGET, str(caught.exception))
+
+    def test_nonroot_or_missing_old_binding_refuses_before_any_open(self):
+        from monitor import issue_tracker_credential_shape as private
+        bound = self.module.bind_online_target(document(),
+            self.module.freeze_target_allowlist(json.dumps([TARGET]).encode()))
+        for euid, expected in ((501, bound), (0, None), (0, {'spreadsheet_id': TARGET})):
+            with self.subTest(euid=euid, expected=type(expected).__name__), mock.patch.object(
+                    self.module.os, 'geteuid', return_value=euid), mock.patch.object(
+                    self.module.os, 'open') as opening, mock.patch.object(private, 'read_target_allowlist') as reader:
+                with self.assertRaises(self.module.OnlineTargetHold):
+                    self.module.inspect_project_online_target(object(), expected)
+                opening.assert_not_called(); reader.assert_not_called()
 
     def test_exact_array_freezes_original_file_digest_without_normalizing_ids(self):
         raw = (' [ "' + TARGET + '", "' + OTHER + '" ]\n').encode()

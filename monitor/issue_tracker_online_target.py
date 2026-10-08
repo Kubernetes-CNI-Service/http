@@ -1,10 +1,11 @@
-"""Pure REQ7 C-2/C-7 target checks; neither file authority nor send permission.
+"""REQ7 C-2/C-7 target checks and locked current-input observation, not send.
 
 The file format is an exact top-level JSON array of spreadsheet ID strings.
-Bytes must eventually come from the C-1/C-11 fixed-path, root-only held-FD
-reader. This module does not implement that reader, import authentication
-SDKs, open a connection, or activate online publication. Hashes bind bytes;
-they do not establish their provenance or authorize a wire attempt.
+The pure parser/binder cannot establish file provenance. The separate current
+project observation consumes the existing C-1/C-11 fixed-path root-only FD
+reader and actual ACTIVE project owner; native root/RO-bind remains REAL_ENV.
+No authentication SDK import, connection or online activation. Hashes alone
+never establish provenance or authorize a wire attempt.
 """
 
 from __future__ import annotations
@@ -12,7 +13,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import hashlib
 import json
+import os
 import re
+import stat
 
 
 _ID = re.compile(r"[A-Za-z0-9_-]{20,}\Z")
@@ -103,3 +106,49 @@ def bind_online_target(global_document, allowlist, *, expected=None):
     if target not in allowlist.spreadsheet_ids:
         raise OnlineTargetHold("target_not_allowlisted")
     return current
+
+
+def inspect_project_online_target(writer_token, expected):
+    """Reopen current project policy and the fixed root-only enumeration.
+
+    The actual ACTIVE project owner supplies the held project FD, never a
+    caller path/document. Read 01-global.yaml once, recheck held/named metadata
+    and ownership after the independent fixed allowlist reader. No retarget,
+    fallback, repair, credential read or network. This observation is necessary
+    but NOT sufficient for fresh admission, W1/template/nonce continuity,
+    cadence, an inherited-lock launcher, a send capability or COMPLETE.
+    """
+    from monitor.issue_tracker_local_commit import _owner
+    from monitor.issue_tracker_credential_shape import read_target_allowlist
+    from tools.project_contract import safe_load_global_yaml
+
+    fd = None; failed = False
+    def identity(info):
+        return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid,
+                info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    try:
+        if (type(expected) is not OnlineTargetBinding or os.geteuid() != 0
+                or any(not hasattr(os, flag) for flag in ('O_NOFOLLOW', 'O_CLOEXEC', 'O_NONBLOCK'))):
+            raise OnlineTargetHold('current_target_binding_unproved')
+        owner = _owner(writer_token)
+        fd = os.open('01-global.yaml', os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK,
+            dir_fd=owner.project_fd)
+        before = os.fstat(fd)
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != 0 or before.st_mode & 0o022
+                or before.st_nlink != 1 or not 1 <= before.st_size <= 1024*1024):
+            raise OnlineTargetHold('current_target_binding_unproved')
+        raw = os.read(fd, 1024*1024+1)
+        if len(raw) != before.st_size: raise OnlineTargetHold('current_target_binding_unproved')
+        document = safe_load_global_yaml(raw.decode('utf-8', 'strict'))
+        result = bind_online_target(document, read_target_allowlist(), expected=expected)
+        if (identity(os.fstat(fd)) != identity(before)
+                or identity(os.stat('01-global.yaml', dir_fd=owner.project_fd, follow_symlinks=False)) != identity(before)
+                or _owner(writer_token) is not owner):
+            raise OnlineTargetHold('current_target_binding_unproved')
+    except Exception: failed = True
+    finally:
+        if fd is not None:
+            try: os.close(fd)
+            except OSError: failed = True
+    if failed: raise OnlineTargetHold('current_target_binding_unproved')
+    return result
