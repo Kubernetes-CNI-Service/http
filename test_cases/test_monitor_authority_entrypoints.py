@@ -1364,6 +1364,101 @@ class MonitorAuthorityEntrypointRunnerContracts(unittest.TestCase):
 
 
 class MonitorAuthorityWardenContracts(unittest.TestCase):
+    def _private_batch_source(self, root):
+        source = root / "source"
+        source.mkdir()
+        environment = {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1",
+                       "GIT_TERMINAL_PROMPT": "0", "HOME": str(root),
+                       "LANG": "C", "LC_ALL": "C", "PATH": "/usr/bin:/bin"}
+        def git(*args):
+            return subprocess.run(["/usr/bin/git", "-c", "commit.gpgsign=false",
+                                   "-c", "core.hooksPath=/dev/null", "-C", str(source), *args],
+                env=environment, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, check=True, timeout=10.0).stdout.decode().strip()
+        git("init", "-q")
+        git("config", "user.name", "Private Batch Source")
+        git("config", "user.email", "private-batch@example.invalid")
+        expected = {"objects/%02d" % i: (b"workflow/%02d\x00\n" % i, "100644") for i in range(65)}
+        expected.update({"duplicate": (b"workflow/00\x00\n", "100644"),
+                         "empty": (b"", "100644"),
+                         "script": (b"#!/bin/sh\nexit 0\n", "100755"),
+                         "link": (b"objects/00", "120000")})
+        for name, (payload, mode) in expected.items():
+            leaf = source / name
+            leaf.parent.mkdir(parents=True, exist_ok=True)
+            if mode == "120000":
+                leaf.symlink_to(payload.decode("ascii"))
+            else:
+                leaf.write_bytes(payload)
+                leaf.chmod(0o755 if mode == "100755" else 0o644)
+        git("add", "--all")
+        git("commit", "-qm", "literal multi-chunk workflow corpus")
+        return source, git("rev-parse", "HEAD^{tree}"), expected
+
+    def test_real_warden_guard_exports_exact_bytes_with_bounded_git_chunks(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            source, tree, expected = self._private_batch_source(root)
+            guard = self.warden._load_source_guard()
+            self.assertEqual(SOURCE_GUARD, Path(guard.__file__))
+            original = guard._run_git
+            batches = []
+            def observe(repo, args, **kwargs):
+                if tuple(args) == ("cat-file", "--batch"):
+                    batches.append(kwargs["input_bytes"])
+                return original(repo, args, **kwargs)
+            destination = root / "export"
+            with contextlib.closing(guard.hold_repository(source)) as repository:
+                guard.require_clean_head_tree(repository, tree)
+                with mock.patch.object(guard, "_run_git", side_effect=observe):
+                    manifest = guard.export_tree(repository, tree, destination,
+                        required_uid=os.geteuid(), required_gid=os.getegid())
+                guard.verify_export(destination, manifest, expected_tree_id=tree,
+                    required_uid=os.geteuid(), required_gid=os.getegid())
+            self.assertEqual([32, 32, 4], [len(batch.splitlines()) for batch in batches])
+            entries = json.loads(manifest)["entries"]
+            self.assertEqual(set(expected), {entry["path"] for entry in entries})
+            for entry in entries:
+                payload, mode = expected[entry["path"]]
+                self.assertEqual(mode, entry["git_mode"])
+                self.assertEqual(hashlib.sha256(payload).hexdigest(), entry["sha256"])
+                leaf = destination / entry["path"]
+                self.assertEqual(payload, os.fsencode(os.readlink(leaf)) if mode == "120000" else leaf.read_bytes())
+            with contextlib.closing(guard.hold_export(destination, manifest, expected_tree_id=tree,
+                    required_uid=os.geteuid(), required_gid=os.getegid(), require_readonly=False)) as held:
+                held.verify()
+                (destination / "objects/00").write_bytes(b"changed-after-consumption\n")
+                with self.assertRaises(guard.SourceGuardError):
+                    held.verify()
+
+    def test_real_warden_guard_corrupt_chunk_cannot_create_an_export(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            source, tree, expected = self._private_batch_source(root)
+            guard = self.warden._load_source_guard()
+            original = guard._run_git
+            batches = []
+            def corrupt(repo, args, **kwargs):
+                code, output, errors = original(repo, args, **kwargs)
+                if tuple(args) == ("cat-file", "--batch"):
+                    batches.append(kwargs["input_bytes"])
+                    if len(batches) == 2:
+                        output = output[:-1]
+                return code, output, errors
+            destination = root / "must-not-publish"
+            with contextlib.closing(guard.hold_repository(source)) as repository:
+                guard.require_clean_head_tree(repository, tree)
+                with mock.patch.object(guard, "_run_git", side_effect=corrupt):
+                    with self.assertRaises(guard.SourceGuardError):
+                        guard.export_tree(repository, tree, destination,
+                            required_uid=os.geteuid(), required_gid=os.getegid())
+                guard.require_clean_head_tree(repository, tree)
+            self.assertEqual(2, len(batches))
+            self.assertFalse(os.path.lexists(destination))
+            for name, (payload, mode) in expected.items():
+                leaf = source / name
+                self.assertEqual(payload, os.fsencode(os.readlink(leaf)) if mode == "120000" else leaf.read_bytes())
+
     def setUp(self):
         self.warden = load_warden()
 

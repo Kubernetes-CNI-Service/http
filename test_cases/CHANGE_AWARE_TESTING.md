@@ -2680,8 +2680,10 @@ REAL_ENV 原 R22 卡继续 OPEN；同项目 mutable 源漂移和未知额外公�
 
 ## Full proof 性能诊断记录
 
-本节只记录测量方法与优化判定，不改变上面的测试和证明门禁。正式 full proof 仍须由
-`run_related_tests.py --all`（或明确授权的 `--all --validation-only`）执行；独立诊断
+本节只记录测量方法与优化判定，不改变上面的测试和证明门禁。正式 full proof 由治理
+runner 执行完整 canonical suite 才能产生；显式 `--all` 或变更选测实际覆盖完整 suite
+均可满足 runner 的完整性条件。本任务最终验收仍显式执行 `--all -v`，不以局部结果代替。
+明确授权的 `--all --validation-only` 只产生验证证明，不能替代普通发布证明。独立诊断
 不能生成、替代或延长证明，不能跳过测试、修改断言或手工更新批准账本。
 
 先前会话报告过一次 3,785 tests、2,897.740 秒的全量运行，但原始逐测试日志未保存，
@@ -2722,16 +2724,71 @@ PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m test_cases.validation_unitt
 将 `UNIQUE` 换成本次运行的唯一标识；两个输出文件都不能预先存在。可用
 `jq -s 'sort_by(.duration_seconds) | reverse | .[:20]' /tmp/http-full-timings-UNIQUE.jsonl`
 查看最慢案例。记录命令、UTC 时间、HEAD、Python/平台身份、完整结果与计时文件、
-`Ran ... in ...` 摘要及其他重型进程。先核对 `tests_run` 等于计时行数且 ID 无重复；
-否则不形成新基线。该诊断不执行正式 runner 的 preflight/approval 流程，也不更新 ledger。
+`Ran ... in ...` 摘要及其他重型进程。先核对 `tests_run` 等于计时行数，并与 canonical
+discovery 的案例出现次数逐项匹配；导入 TestCase 可能让相同 ID 在不同模块重复出现，
+必须保留这些真实次数，不能去重或把重复 ID 当作遗漏。现有计时协议仅记录 ID/耗时，
+不能据此猜测 discovery 来源模块；出现次数或完成边界不完整则不形成新基线。
+该诊断不执行正式 runner 的 preflight/approval 流程，也不更新 ledger。
 
 下一迭代先依据当前 V3 的实测热点和微基准评估优化。已通过可选计时安全透传给正式
 `--all --validation-only`，让一次本来就要运行的治理套件同时留下诊断数据；这只增加
 测量能力，**不是提速**。不得因计时输出修改三项已知 FAIL 判定或 proof 输入输出。
-当前 V3 的另一个候选热点是约 499 个 Git 对象逐个启动 `git cat-file --batch`；批量读取
-可能改变对象被替换时的可见性，未做前后微基准和恶意改写/竞态负例前不得落地。
+早期约 499 个对象的逐次子进程观察不得直接归因到当前代码；固定历史 P 回放保持原 SHA
+和安全合同不变。下面的优化只针对当前 `monitor_authority_source_guard.read_tree`，
+不修改历史回放或其超时。
 十个逻辑 suite 不是隔离证明：测试会创建仓库临时项目、monitor 锁、loopback sshd 和
 Git 检出，在证明共享写入、端口、引用及结果合并边界安全前，不启用 suite 并行。
+
+### 2026-10-08 当前 source guard 的不可变对象批量读取
+
+独立 direct 与真实 Warden→source guard→export/manifest→held export 流程先 RED：
+69 个叶子/68 个唯一对象的字面夹具在旧实现触发 69 次 blob 子进程。
+新实现最多每批 32 个唯一完整 OID，闭合 stdin 后执行有限 `cat-file --batch`；
+只合并对象读取，保留全部路径、模式和 symlink。空树不启动 blob 子进程。
+逐帧校验 OID、blob 类型、规范长度、分隔符、完整消费和原 SHA-1/SHA-256 Git 摘要，
+拒绝重复/额外/错序/损坏/截断帧。真实 SHA-256 私有仓库也保留全部路径与对象身份。
+可信 Git held FD、封闭环境、repo/Git 名称前后身份校验、原 30 秒 child deadline 不变；
+批间改绑也在下一 child 启动前拒绝。所有对象验证在创建 destination 前完成，
+第二批损坏、child 非零和身份漂移不能发布部分 export。
+
+RED 完整日志 `outputs/test-diagnostics/git-batch-red.log` 的 SHA256 为
+`63a6292bb42b423114de84b049ee9dad30e0a3a7fae1754ca03fdf49cd8612c6`。
+三个相关模块诊断回归 124 tests / OK (skipped=1) / exit0，日志
+`git-batch-modules-green.log` SHA256
+`7d51b16d6c165b465bfc45c85e4ea46409b771e25342e32a15c20813591c0e83`；
+这不代表正式 related/full，也不证明 Linux/root 真机流程。
+同树三轮交替微基准绑定基线 HEAD `2a7e046d05c3cc5e8d5321f19666eb75a04e8048`，
+读取 blob child 69→3（全部 Git child 70→4），独立核对路径/模式/OID/字节摘要相等。
+当次中位数 1.118547→0.066909 秒；完整诊断日志
+`outputs/test-diagnostics/git-batch-paired-benchmark.log` SHA256
+`988407d57dcc4f5a805fe8cab7b98540d77eb641c03d148359f90734b4f6f354`。
+只报告这个操作的微基准，不推算 canonical full 的总收益。补充 SHA-256/child 拒绝
+测试最初有语法笔误，原失败日志保留为 `git-batch-sha256-refusal.log`，
+修正语法而不改预期后通过；正式证明须覆盖最终完整测试字节。
+补充后的三个模块与文档回归 174 tests / OK (skipped=2) / exit0，日志
+`outputs/test-diagnostics/git-batch-final-modules-docs.log` SHA256
+`8734b620c497614f80e348c5fd5bf7668ec56c7c54e724ee15a6a90776bd13e1`。
+正式批准状态仍以最终 committed bytes、runner 自动 ledger 和 full/check 为准。
+
+批量读取尚不授权 root 流程执行或部署：同版 Linux/root held-FD/namespace 场景仍需
+按 REAL_ENVIRONMENT 原卡代表性验证。并行 suite 仍未启用；必须先证明实际独立资源、
+完整出现次数/fixture 顺序与故障收敛，并在空闲同版环境测到收益，不能把逻辑 suite
+分类或临时目录名称当作隔离证明。
+
+隔离并行的诊断试验仅选已读取的两个轻量模块（snippet 8 案例、normalizer 3 案例），
+独立保留全部 11 个字面 case ID、原断言、private cwd/TMPDIR；Python audit 拒绝文件
+写入、子进程、网络及信号副作用，但不能宣称覆盖 native syscall 或完整 OS 隔离。
+初次封闭 worker 缺少原运行时 PyYAML，原错误日志保留；明确绑定父进程的绝对 import
+paths 后才比较同环境工作量，未更改测试预期或安装依赖。三轮交替测得单进程端到端
+中位数 0.388255 秒、双 worker 并行 0.376937 秒、双 worker 串行 0.649919 秒，
+而这些案例的纯执行仅约 0.006 秒。并行对单进程的约 0.011 秒差异不证明 full 收益，
+更不能用人为双 worker 串行的启动开销作夸大基线。完整诊断
+`outputs/test-diagnostics/parallel-gate-same-runtime.log` SHA256
+`e08621640d23ba68ca522bf6849d4e6d2e23ba87ab3358d428933841234acb6f`。
+据此本轮不把 `--jobs` 接入治理 runner；并行实现仍未落地，后续若识别可观的可隔离
+重型 workload，必须先闭合传递来源、资源/原超时、canonical 重复出现次数、fixture
+顺序及 worker 崩溃/报告缺失/清理失败门禁，再 tests-first 实现和同版 full/check。
+此诊断既不产生批准，也不改变既有串行套件、历史 P 或外部验收。
 
 ### 2026-09-29 第二轮：collection worker 的结束唤醒
 
