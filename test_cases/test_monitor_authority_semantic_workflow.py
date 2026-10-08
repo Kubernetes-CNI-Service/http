@@ -161,17 +161,19 @@ timeout() {
   /usr/bin/python3 -c \
     'import os,signal,subprocess,sys,time
 ready=sys.argv[2]
+budget_deadline=time.monotonic()+float(sys.argv[1])
 command=subprocess.Popen(sys.argv[3:],close_fds=False)
 expired=False
 try:
     deadline=time.monotonic()+2.0
+    deadline=min(deadline,budget_deadline)
     while ready and not os.path.exists(ready) and command.poll() is None and time.monotonic()<deadline:
         time.sleep(0.005)
     if ready and not os.path.exists(ready) and command.poll() is None:
         expired=True
     else:
         try:
-            command.wait(timeout=float(sys.argv[1]))
+            command.wait(timeout=max(0.0,budget_deadline-time.monotonic()))
         except subprocess.TimeoutExpired:
             expired=True
 finally:
@@ -186,7 +188,7 @@ raise SystemExit(command_rc if command_rc >= 0 else 128-command_rc)' \
 '''
     # A portable timeout fixture must bind the current proof interpreter, not
     # macOS's /usr/bin/python3 developer-tools dispatch shim. Keep the original
-    # readiness, wait, kill/reap and deadline contract unchanged.
+    # readiness barrier within the requested timeout, with kill/reap intact.
     return body.replace("/usr/bin/python3 -c", shlex.quote(os.path.realpath(sys.executable)) + " -B -c")
 
 
@@ -2761,6 +2763,30 @@ printf 'capture=%s rc=%s token=<%s>\\n' \
                 self.assertEqual(
                     [], list(result_root.glob("http-ztp-monitor-decision.*")),
                 )
+
+    def test_portable_timeout_readiness_cannot_extend_the_requested_reader_deadline(self) -> None:
+        # A never-ready producer must consume the requested timeout, not a
+        # separate two-second readiness allowance followed by another timer.
+        # Owned child, no detached holder or foreign PID; retain the original
+        # FIFO case's .75 reader / 2 total / 3 outer bounds unchanged.
+        with tempfile.TemporaryDirectory() as directory:
+            ready = Path(directory) / 'never-ready'
+            command = (shlex.quote(os.path.realpath(sys.executable))
+                       + " -B -c 'import time; time.sleep(10)'")
+            harness = test_timeout_shell() + f'''
+export HTTP_ZTP_TEST_TIMEOUT_READY_FILE={shlex.quote(os.fspath(ready))}
+timeout --signal=KILL 0.75 {command}
+printf 'timeout=%s\\n' "$?"
+'''
+            started = time.monotonic()
+            result = run_shell(harness, timeout_seconds=3)
+            elapsed = time.monotonic() - started
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual('timeout=124\n', result.stdout)
+            self.assertEqual('', result.stderr)
+            self.assertFalse(ready.exists())
+            self.assertGreaterEqual(elapsed, 0.70)
+            self.assertLess(elapsed, 1.5, 'readiness must be inside the .75-second timeout')
 
     def test_portable_timeout_binds_current_native_python_without_system_launcher_dispatch(self) -> None:
         interpreter = shlex.quote(os.path.realpath(sys.executable))
