@@ -2803,3 +2803,14 @@ Ran 2/FAILED 2/ACTUAL_UNITTEST_EXIT=1/FROZEN_STATE_MATCH=True/END=1。
 7 tests in 18.603s、OK、实际 exit 0、冻结一致、完整 END=0；包含原正常归档、
 晚换绑、归档 rename 后中断与真实新进程再健康。两份日志读前后 stat 一致。
 这只是窄修诊断；不代表完整 A/prefix/DHCP 可恢复安全归档或正式 full proof。
+
+A 补偿计划的同类 fsync ABA 也独立复现：旧实现接纳 fsync 后新 ctime 并开始恢复。
+`r22-a-plan-fsync-aba-red.log` inode 163234034、size 129585、SHA256
+`2b2bcdc99abc1deac4cf0a5b8d65f76f8091642208fc19f583b28ba5799d3a2d`
+完整为 2 tests、2 FAIL、actual exit 1、冻结一致、END=1；direct 与真实强杀后
+新 LOAD 均执行到错误恢复。实现改为 flush 后先冻结并核 FD/name/parent/字节，
+fsync 后仍使用原身份核验；不修改原预期，不删除被换代的计划和 stage。
+`r22-a-plan-fsync-aba-green.log` inode 163235974、size 129312、SHA256
+`e6b5b8c46c899471d74deffa116139bac1ef7b13b6a8f0bc9cc7064512401ba1`
+5 tests in 101.237s、OK、actual exit 0、冻结一致、END=0，包含原完整恢复、
+runtime 和 P 恢复中断再进入。两份日志读前后 stat 一致。仍非正式 runner proof。

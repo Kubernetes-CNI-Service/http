@@ -1643,6 +1643,12 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
   清理仅人工恢复已核私有快照。本地 direct 和真实 SETUP 强杀→新 LOAD
   负例不构成 Linux/断电或完整 prefix/DHCP/A 证据归档见证。
 
+- 同日 A 补偿计划 fsync ABA 仍待真机见证：上述条件下在原计划 flush 后、
+  fsync 返回前同 inode 改写并恢复原字节/mtime，必须用 fsync 前九字段身份
+  HOLD，保留原计划/WAL/stage，P/shared/Q publication 均不得开始补偿；
+  原生服务继续停服。保存完整 FD/name/stat/ctime/字节和物理时序，清理仅
+  人工恢复已核隔离快照。本地 direct 和真实强杀后冷恢复负例不是断电证明。
+
 - 2026-10-08 原 A 显式健康激活仍 OPEN：仅在本卡已授权的可丢弃隔离 VM、
   精确源码/测试/manifest、独立控制台、root-only 可恢复快照、排他部署锁、
   Apache/DHCP 已停及其它正常写者静默条件下执行。Q 首写前独立冻结原 A

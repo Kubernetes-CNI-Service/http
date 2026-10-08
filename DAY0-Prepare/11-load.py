@@ -7650,8 +7650,17 @@ def _setup_switch_a_compensation_authority(project, *, guard, confirmed,
                 with os.fdopen(os.dup(marker_fd), "wb") as stream:
                     stream.write(payload)
                     stream.flush()
+                    marker_owner = _dhcp_a_preimage_receipt_identity(os.fstat(marker_fd))
+                    if (marker_owner != _dhcp_a_preimage_receipt_identity(marker.lstat())
+                            or parent != _setup_switch_link_parent_identity(marker)
+                            or (payload, 0o600) != _read_rollback_regular(marker, limit=_ROLLBACK_PAYLOAD_LIMIT)):
+                        raise LoadError("A compensation original plan owner changed before fsync; HOLD")
                     os.fsync(stream.fileno())
-                marker_owner = _dhcp_a_preimage_receipt_identity(os.fstat(marker_fd))
+                if (marker_owner != _dhcp_a_preimage_receipt_identity(os.fstat(marker_fd))
+                        or marker_owner != _dhcp_a_preimage_receipt_identity(marker.lstat())
+                        or parent != _setup_switch_link_parent_identity(marker)
+                        or (payload, 0o600) != _read_rollback_regular(marker, limit=_ROLLBACK_PAYLOAD_LIMIT)):
+                    raise LoadError("A compensation original plan owner changed during fsync; HOLD")
                 _fsync_parent_directory(marker.parent)
             finally:
                 close_setup_switch_publication_bundle(original)

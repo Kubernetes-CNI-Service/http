@@ -4967,6 +4967,9 @@ finally:
     def test_real_setup_committed_q_group_cold_restore_returns_p_a_without_service(self):
         self._real_setup_committed_q_group_restore()
 
+    def test_real_setup_committed_q_a_plan_fsync_aba_holds_before_restore(self):
+        self._real_setup_committed_q_group_restore(plan_fsync_aba=True)
+
     def test_real_setup_committed_q_kill_cold_original_a_explicit_health_retains_wal(self):
         self._real_setup_committed_q_group_restore(prefix=True, a_health=True)
 
@@ -5142,7 +5145,8 @@ finally:
                                              dhcp_death=False, dhcp_metadata=False, dhcp_b_fault=False,
                                              dhcp_legacy_fault=False, prefix=False, prefix_fault=False,
                                              managed_key=False, managed_key_death=False, managed_key_fault=False,
-                                             prefix_change=False, prefix_death=False, a_health=False):
+                                             prefix_change=False, prefix_death=False, a_health=False,
+                                             plan_fsync_aba=False):
         fixture = RELEASE_FIXTURE.ReleaseTransactionTests()
         fixture.setUp()
         try:
@@ -5386,6 +5390,32 @@ try:
             print('R22_UNREGISTERED_B_DHCP_OWNER_REJECTED')
             sys.exit(0)
         raise AssertionError('same-byte unknown B DHCP owner must not qualify a new compensation plan')
+    if sys.argv[5] == 'reader-plan-fsync-aba':
+        marker = root / 'ztp/.setup-switch-a-restore.json'
+        journal = root / 'ztp/.setup-switch-journal.json'
+        parent = q / '99-output-ztp/current-release.json'
+        frozen = (journal.read_bytes(), common.lstat().st_ino, os.readlink(common), parent.read_bytes())
+        original_sync, injected = load.os.fsync, []
+        def plan_aba(fd):
+            original_sync(fd)
+            if not injected and marker.exists() and os.fstat(fd).st_ino == marker.lstat().st_ino:
+                before, payload = marker.lstat(), marker.read_bytes()
+                marker.write_bytes(b'independent cold A plan writer\n')
+                marker.write_bytes(payload)
+                os.utime(marker, ns=(before.st_atime_ns, before.st_mtime_ns))
+                assert before.st_ino == marker.lstat().st_ino
+                assert before.st_ctime_ns != marker.lstat().st_ctime_ns
+                injected.append(payload)
+        load.os.fsync = plan_aba
+        try:
+            load.restore_setup_switch_a_disk(q, guard=guard, confirmed=True)
+        except load.LoadError as exc:
+            assert 'plan owner' in str(exc) and 'HOLD' in str(exc), str(exc)
+            assert len(injected) == 1 and injected[0] == marker.read_bytes()
+            assert frozen == (journal.read_bytes(), common.lstat().st_ino, os.readlink(common), parent.read_bytes())
+            print('R22_A_PLAN_FSYNC_ABA_HELD_BEFORE_RESTORE')
+            sys.exit(0)
+        raise AssertionError('A plan fsync ABA licensed restoration')
     status = load.restore_setup_switch_a_disk(q, guard=guard, confirmed=True)
     assert status == 'restored-p-a-group-stopped-wal-retained', status
     expected_bootstrap = (b'A oob bootstrap\nZTP_UPGRADE_ENABLED="true"\n'
@@ -5574,11 +5604,16 @@ finally:
                     self.assertEqual(original_p_target, os.readlink(common))
                 marker = journal.parent / ".setup-switch-a-restore.json"
                 before_reader_plan = (marker.lstat().st_ino, marker.read_bytes())
-            reader_mode = ("reader-a-health-http-failure" if a_health == "http-failure" else "reader-a-health-cli" if a_health == "cli" else "reader-a-health"
+            reader_mode = ("reader-plan-fsync-aba" if plan_fsync_aba else "reader-a-health-http-failure" if a_health == "http-failure" else "reader-a-health-cli" if a_health == "cli" else "reader-a-health"
                            if a_health else "reader-a-image" if a_image else "reader-dhcp-metadata" if dhcp_metadata else "reader")
             reader = subprocess.run(argv + [reader_mode, shape], capture_output=True, text=True, check=False,
                                     timeout=120 if a_health else 30)
             self.assertEqual(0, reader.returncode, reader.stdout + reader.stderr)
+            if plan_fsync_aba:
+                self.assertIn("R22_A_PLAN_FSYNC_ABA_HELD_BEFORE_RESTORE", reader.stdout)
+                self.assertEqual(original_wal, (journal.lstat().st_ino, journal.read_bytes()))
+                self.assertTrue((journal.parent / ".setup-switch-a-restore.json").is_file())
+                return
             self.assertIn("R22_ORIGINAL_GROUP_RESTORED_STOPPED", reader.stdout)
             if a_image:
                 self.assertIn("R22_ORIGINAL_A_IMAGE_STAGE_QUALIFIED", reader.stdout)

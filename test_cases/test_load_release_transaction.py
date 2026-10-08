@@ -2825,6 +2825,31 @@ class ReleaseTransactionTests(unittest.TestCase):
                 LOAD.restore_setup_switch_a_disk(state[1], guard=guard, confirmed=True)
             self.assertEqual(frozen, (state[-3].read_bytes(), path.lstat().st_ino, path.read_bytes(), os.readlink(state[2])))
 
+    def test_committed_q_a_plan_fsync_aba_holds_before_any_restoration(self):
+        state, _context, guard, token, _inputs = self._prepare_published_q_for_stopped_preflight()
+        marker = state[-3].parent / ".setup-switch-a-restore.json"
+        frozen = (state[-3].read_bytes(), state[7].lstat().st_ino, state[7].read_bytes(),
+                  os.readlink(state[2]), (state[1] / '99-output-ztp/current-release.json').read_bytes())
+        original_sync, injected = LOAD.os.fsync, []
+        def plan_aba(fd):
+            original_sync(fd)
+            if not injected and marker.exists() and os.fstat(fd).st_ino == marker.lstat().st_ino:
+                before, payload = marker.lstat(), marker.read_bytes()
+                marker.write_bytes(b'independent A plan writer\n')
+                marker.write_bytes(payload)
+                os.utime(marker, ns=(before.st_atime_ns, before.st_mtime_ns))
+                injected.append(payload)
+                self.assertEqual(before.st_ino, marker.lstat().st_ino)
+                self.assertNotEqual(before.st_ctime_ns, marker.lstat().st_ctime_ns)
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD.os, "fsync", side_effect=plan_aba):
+            with self.assertRaisesRegex(LOAD.LoadError, "plan owner.*HOLD"):
+                LOAD.restore_setup_switch_a_disk(state[1], guard=guard, confirmed=True)
+        self.assertEqual(1, len(injected))
+        self.assertEqual(injected[0], marker.read_bytes())
+        self.assertEqual(frozen, (state[-3].read_bytes(), state[7].lstat().st_ino, state[7].read_bytes(),
+                                 os.readlink(state[2]), (state[1] / '99-output-ztp/current-release.json').read_bytes()))
+
     def test_committed_q_group_restore_holds_replaced_q_input_before_p_write(self):
         state, _context, guard, _token, _inputs = self._prepare_published_q_for_stopped_preflight(partial_runtime=True)
         path = state[1] / "01-global.yaml"
