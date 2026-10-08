@@ -250,6 +250,21 @@ def _original_receipt_identity(qualified, store, generation_id, token, settings,
         expected_template_sha256=template_sha256, settings=settings,
         whitelist_sha256=snapshot.whitelist.sha256, qualified_source=qualified)
     if type(generation_id) is not str or generation_id not in observed.generation_ids: raise SendUnitHold()
+    return _read_original_generation_identity(generation_id, token)
+
+
+def _read_original_generation_identity(generation_id, token):
+    """Raw original C6 recovery/identity, not admission or historical eligibility.
+
+    Private callers must first validate the actual complete admission chain and
+    native source window. Keep fresh compilers on the current-cycle wrapper;
+    this reader must never reconstruct a generation or grant send authority.
+    """
+    import os
+    from monitor import issue_tracker_local_commit as local
+    from monitor.issue_tracker_receipt_snapshot import _GEN
+    if type(generation_id) is not str or _GEN.fullmatch(generation_id) is None:
+        raise SendUnitHold()
     owner = local._owner(token)
     generations = local._directory(owner.root_fd, 'generations')
     try:

@@ -29,6 +29,134 @@ from test_cases.test_issue_tracker_stage_l_consumer import ProdStageLFixture
 
 
 class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
+    def test_original_unknown_unit_retries_after_a_new_real_cycle_without_recompile(self):
+        self._exercise_original_unknown_retry()
+
+    def test_same_byte_original_c6_replacement_after_old_retry_count_keeps_unpaired_intent(self):
+        self._exercise_original_unknown_retry(replace_c6_after_count=True)
+
+    def test_same_byte_current_high_water_replacement_after_old_retry_count_keeps_unpaired_intent(self):
+        self._exercise_original_unknown_retry(replace_input_after_count='high_water')
+
+    def test_same_byte_policy_replacement_after_old_retry_count_keeps_unpaired_intent(self):
+        self._exercise_original_unknown_retry(replace_input_after_count='policy')
+
+    def test_same_byte_w1_replacement_after_old_retry_count_keeps_unpaired_intent(self):
+        self._exercise_original_unknown_retry(replace_input_after_count='w1')
+
+    def _exercise_original_unknown_retry(self, *, replace_c6_after_count=False, replace_input_after_count=None):
+        from test_cases import test_req7_global_attempt_journal as journal_fixture
+        from monitor.collection_ib_producer import produce_worker_ib_analysis
+        from tools.project_contract import build_collection_cycle_identity
+        from test_cases.test_collection_cycle_persistence import TOKEN_2
+        from monitor.issue_tracker_cycle_source import read_completed_cycle_evidence
+
+        native_load = journal_fixture.load
+        advanced = []
+        faults = []
+        class OwnedRetryFaultObserved(Exception):
+            pass
+
+        def with_original_count_boundary():
+            module = native_load()
+            first = module.record_continuous_owned_attempt_intent
+            retry = module.record_shared_retry_continuous_owned_attempt_intent
+
+            def first_then_new_cycle(*args, **kwargs):
+                result = first(*args, **kwargs)
+                self.assertEqual((1, 'UNKNOWN'), (result.attempt_count, result.outcome))
+                before = read_completed_cycle_evidence(self.store)
+                self.assertEqual(1, len(before))
+                identity = build_collection_cycle_identity(str(self.project), 'prod', 2, TOKEN_2)
+                ib = produce_worker_ib_analysis(identity, project_root=self.project,
+                    http_root=self.root,
+                    clock=lambda: dt.datetime(2026, 9, 26, 4, 31, tzinfo=dt.timezone.utc),
+                    runner=lambda _argv: self.fail('transport must remain the owned fixture'))
+                cycle, _ = self._cycle(activity=True, derivation=True, ib_analysis=ib,
+                    observed_peer='newer-not-original-peer', additional_eth_activity=True,
+                    fabric_templates={'ethernet/prod': 'tan-leaf', 'nvlink/prod': 'border-leaf'})
+                self.assertEqual(identity['cycle_id'], cycle['cycle_id'])
+                self.assertNotEqual(before[-1].cycle_id, cycle['cycle_id'])
+                advanced.append(True)
+                return result
+
+            def check_original_retry(*args, **kwargs):
+                unit = args[2]
+                wire, action = unit.wire_bytes, unit.action_preimage
+                image = {p.relative_to(self.project).as_posix(): p.read_bytes()
+                         for p in (self.project / '.tracker/generations').rglob('*') if p.is_file()}
+                if not replace_c6_after_count and replace_input_after_count is None:
+                    from monitor.issue_tracker_remote_history_match import observe_owned_unit_read_gates
+                    gates = observe_owned_unit_read_gates(kwargs['writer_token'], args[0], args[1], unit,
+                        whitelist_snapshot=kwargs['whitelist_snapshot'].whitelist,
+                        identity_response=kwargs['identity_response'], headers_response=kwargs['headers_response'],
+                        whitelist_response=kwargs['whitelist_response'], metadata_response=kwargs['metadata_response'])
+                    ordinary = {key:kwargs[key] for key in ('qualified_source','store','writer_token',
+                        'settings','whitelist_snapshot','expected_template_sha256','http_root','whitelist_path')}
+                    with self.assertRaises(module.GlobalAttemptHold):
+                        module.record_receipted_original_attempt_intent(
+                            args[0], args[1], gates.identity, unit, **ordinary)
+                    retained = module.inspect_global_unit(*args[:3])
+                    self.assertEqual((1, 'UNKNOWN'), (retained.attempt_count, retained.outcome))
+                    self.assertEqual([], list((self.project / '.tracker/admissions').glob('retry-*-intent.json')))
+                if replace_c6_after_count or replace_input_after_count is not None:
+                    manifest = self.project / '.tracker/generations' / json.loads(action)['identity']['generation_id'] / 'MANIFEST'
+                    if replace_input_after_count is not None:
+                        manifest = {'high_water':self.store.witness_path,
+                                    'policy':self.project/'01-global.yaml', 'w1':self.template}[replace_input_after_count]
+                    raw, inode = manifest.read_bytes(), manifest.stat().st_ino
+                    mode = manifest.stat().st_mode & 0o777
+                    preserved = self.project / 'owned-original-old-retry-manifest'
+                    observe = module._observe
+                    def replace_after_count(*values, **options):
+                        result = observe(*values, **options)
+                        if values[3]:
+                            self.assertEqual((2, 'UNKNOWN'), (result.attempt_count, result.outcome))
+                            manifest.rename(preserved)
+                            manifest.write_bytes(raw); manifest.chmod(mode)
+                            faults.append(True)
+                        return result
+                    with mock.patch.object(module, '_observe', side_effect=replace_after_count):
+                        with self.assertRaises(module.GlobalAttemptHold):
+                            retry(*args, **kwargs)
+                    self.assertEqual([True], faults, 'reach the actual original durable second count')
+                    retained = module.inspect_global_unit(*args[:3])
+                    self.assertEqual((2, 'UNKNOWN'), (retained.attempt_count, retained.outcome))
+                    self.assertEqual((wire, action), (unit.wire_bytes, unit.action_preimage))
+                    self.assertEqual(raw, manifest.read_bytes()); self.assertEqual(raw, preserved.read_bytes())
+                    self.assertNotEqual(inode, manifest.stat().st_ino)
+                    self.assertTrue(list((self.project / '.tracker/admissions').glob('retry-*-intent.json')))
+                    self.assertEqual([], list((self.project / '.tracker/admissions').glob('retry-*-count.json')))
+                    self.assertEqual(image, {p.relative_to(self.project).as_posix(): p.read_bytes()
+                        for p in (self.project / '.tracker/generations').rglob('*') if p.is_file()})
+                    self.assertFalse(hasattr(retained, 'send_authority'))
+                    raise OwnedRetryFaultObserved()
+                result = retry(*args, **kwargs)
+                self.assertEqual((2, 'UNKNOWN'), (result.attempt_count, result.outcome))
+                self.assertEqual((wire, action), (unit.wire_bytes, unit.action_preimage))
+                self.assertEqual(image, {p.relative_to(self.project).as_posix(): p.read_bytes()
+                    for p in (self.project / '.tracker/generations').rglob('*') if p.is_file()})
+                self.assertFalse(hasattr(result, 'send_authority'))
+                return result
+
+            module.record_continuous_owned_attempt_intent = first_then_new_cycle
+            module.record_shared_retry_continuous_owned_attempt_intent = check_original_retry
+            return module
+
+        with mock.patch.object(journal_fixture, 'load', side_effect=with_original_count_boundary):
+            def exercise():
+                self._exercise_real_protected_three_panel_fixture(skip_history=False,
+                    observed_cabling_insert_probe=True, business_preread_probe=True,
+                    original_reserved_probe=True, receipted_intent_probe=True,
+                    owned_read_gates_probe=True, owned_continuity_probe=True, shared_retry_probe=True)
+            if replace_c6_after_count or replace_input_after_count is not None:
+                with self.assertRaises(OwnedRetryFaultObserved):
+                    exercise()
+            else:
+                exercise()
+        self.assertEqual([True], advanced)
+
+
     def _exercise_timed_out_boot_probe(self, **options):
         from test_cases.test_collection_cycle_persistence import WORKER
 

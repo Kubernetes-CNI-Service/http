@@ -59,6 +59,29 @@ class ProdStageLFixture(unittest.TestCase):
 
 
 class ProdStageLConsumerDirectTests(ProdStageLFixture):
+    def test_original_replay_rejects_record_directory_swap_back_even_with_all_original_files_restored(self):
+        import shutil
+        from monitor import issue_tracker_stage_l_consumer as consumer
+        self.two_cycles(activity=True, derivation=True)
+        (self.project/'01-global.yaml').write_bytes(b'schema_version: 2\ncommon: {}\n')
+        records = self.store.records_dir
+        inode = records.stat().st_ino
+        images = {p.name:(p.stat().st_ino,p.read_bytes()) for p in records.iterdir()}
+        original = self.project/'owned-swapped-back-original-records'
+        clone = self.project/'owned-swapped-back-clone-records'
+        shutil.copytree(records, clone)
+        with self.assertRaises(consumer.StageLConsumerHold):
+            with consumer._hold_original_replay_inputs(self.store,self.project,self.template) as verify:
+                records.rename(original)
+                clone.rename(records)
+                records.rename(clone)
+                original.rename(records)
+                self.assertEqual(inode, records.stat().st_ino)
+                self.assertEqual(images,{p.name:(p.stat().st_ino,p.read_bytes()) for p in records.iterdir()})
+                verify()
+        self.assertEqual(inode, records.stat().st_ino)
+        self.assertEqual(images,{p.name:(p.stat().st_ino,p.read_bytes()) for p in records.iterdir()})
+
     def test_original_replay_pins_record_directory_before_first_namespace_read(self):
         from pathlib import Path
         from monitor import issue_tracker_stage_l_consumer as consumer

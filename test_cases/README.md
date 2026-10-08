@@ -1454,5 +1454,21 @@ native 三面板 C5 回放期间有效，返回前撤销，当前
 receipt 计数和共享链始终用完整真实 store，不把旧回执计入最新周期。
 返回仅为 intent，不创建 generation/RECEIPT、不计 retry、不发 mutation，不证明
 R2 新鲜准入、M=6、FIFO/APPLIED/COMPLETE、默认线上 worker 或 REQ7 整体完成。
+
+原 UNKNOWN 的 shared retry 现在回放实际已准入 C6 的原窗口，而不是把它当作
+当前周期的新编译资格；新单元编译仍限定当前周期。原 ACTION/WIRE、计数和 C6
+不重建。worker 全链／高水位、策略和 W1 输入先以原 FD/stat/字节固定，覆盖
+计数及 COUNT 配对；INTENT 已落盘后才固定 C6/准入原件命名空间，计数后漂移
+必须在 COUNT 前拒绝并保留 UNKNOWN、计数及 orphan，不回滚或回填。
+历史 native 回放的完整输入／K 校验保留在同步回放的前后边界，内部每次 record
+访问仍核 ACTIVE owner、实际 collection gate 和原窗口边界。原件 FD 始终持有，
+同字节替换或换回由原 stat/ctime 校验拒绝；不放宽实际签发读取的原 30 秒期限。
+独立新周期后的原单元重试、计数后同字节 C6 替换、窗口内策略换回测试覆盖这些
+本地边界；仍不代表隐藏 PROJECT G1、真实发送上界、FIFO/COMPLETE、正式 full
+证明或整个 REQ7 完成。真机／断电范围见对应 REAL_ENV 卡并保持 NOT RUN。
 独立 direct 与真实 K=2 C5/C6→新周期→原来源回放 workflow 保留这些边界，
 真机、断电和真实 Cloud 仍 NOT RUN；不得以本地 PASS 替代当前精确树 full/check。
+普通原 C6 计数入口继续限定 current-cycle，旧周期原件只由 shared retry 的
+专用路径重放，不扩大普通计数合同。完整 worker records 目录还固定原始完整
+stat（含 ctime）；目录换出再换回，即使原 inode、文件及字节全部恢复也 HOLD。
+独立 direct 和实际 native 窗口流程覆盖该恢复式替换；不修改计数、期限或断言。

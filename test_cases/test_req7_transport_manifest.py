@@ -35,6 +35,19 @@ SCRIPTS = {
 
 
 class Req7TransportManifestCandidateTests(unittest.TestCase):
+    def test_old_c6_retry_workflow_registers_actual_source_producers_and_original_unit_identity(self):
+        manifest=json.loads((ROOT/'test_cases/script_test_manifest.json').read_text())
+        workflow=next(item for item in manifest['workflows']
+                      if item['id']=='req7_shared_retry_original_count_and_protected_c6')
+        required={'monitor/issue_tracker_send_unit.py','monitor/collection_ib_producer.py',
+                  'monitor/collection_ib_cycle_binding.py','monitor/issue_tracker_ib_runtime.py',
+                  'monitor/issue_tracker_switch_runtime.py','monitor/issue_tracker_state_owner.py',
+                  'monitor/issue_tracker_whitelist_workbook.py'}
+        self.assertTrue(required <= set(workflow['members']),
+                        'register real old-source replay and raw original generation identity edges')
+        self.assertIn('test_cases.test_req7_global_attempt_journal',workflow['tests'])
+        self.assertIn('test_cases.test_issue_tracker_stage_l_consumer_workflow',workflow['tests'])
+
     def test_shared_retry_has_direct_protected_workflow_and_not_run_registration(self):
         manifest=json.loads((ROOT/'test_cases/script_test_manifest.json').read_text())
         paths={'monitor/issue_tracker_admission.py','monitor/issue_tracker_global_attempt_journal.py',

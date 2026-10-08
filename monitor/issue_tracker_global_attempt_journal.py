@@ -457,11 +457,13 @@ def record_original_business_reserved_attempt_intent(token, binding, identity, u
 def _receipted_original_facts(
     token, binding, identity, unit, *, qualified_source, store, writer_token,
     settings, whitelist_snapshot, expected_template_sha256, http_root, whitelist_path,
+    _shared_retry=False,
 ):
-    """Read-only original protected current-cycle facts, never admission."""
-    from monitor.issue_tracker_send_unit import _original_receipt_identity
+    """Read-only actual original C5/C6 facts, never admission or recompilation."""
+    from monitor.issue_tracker_send_unit import _original_receipt_identity, _read_original_generation_identity
     from monitor.issue_tracker_history_preread_journal import inspect_business_preread, inspect_business_source_projection
-    from monitor.issue_tracker_stage_l_consumer import qualify_prod_stage_l
+    from monitor.issue_tracker_stage_l_consumer import qualify_prod_stage_l, replay_original_receipted_prod_source
+    from monitor.issue_tracker_cycle_source import read_completed_cycle_evidence
     from monitor.issue_tracker_local_workbook_commit import _source_rows
     from monitor.issue_tracker_online_target import inspect_project_online_target
     from monitor.issue_tracker_settings_audit_allocation import inspect_settings_audit_allocation
@@ -472,29 +474,39 @@ def _receipted_original_facts(
     audits = (inspect_settings_audit_allocation(writer_token, token, binding, unit)
               if action['audits'] else b'')
     target = action['identity']
-    receipt = _original_receipt_identity(
-        qualified_source, store, target['generation_id'], writer_token,
-        settings, whitelist_snapshot, expected_template_sha256)
-    if receipt[:3] != (target['generation_id'], target['publish_id'], action['manifest_id']):
-        raise GlobalAttemptHold()
-    actual_source = qualify_prod_stage_l(
-        store, http_root=http_root, settings=settings,
+    cycles = read_completed_cycle_evidence(store)
+    if not cycles or not qualified_source.cycle_ids: raise GlobalAttemptHold()
+    older = qualified_source.cycle_ids[-1] != cycles[-1].cycle_id
+    if older and _shared_retry is not True: raise GlobalAttemptHold()
+    arguments = dict(http_root=http_root, settings=settings,
         whitelist_snapshot=whitelist_snapshot, whitelist_path=whitelist_path,
         writer_token=writer_token)
+    def source():
+        if older:
+            return replay_original_receipted_prod_source(store, **arguments,
+                expected_template_sha256=expected_template_sha256,
+                local_generation_id=target['generation_id'])
+        return qualify_prod_stage_l(store, **arguments)
+    def receipt_identity():
+        if older:
+            return _read_original_generation_identity(target['generation_id'], writer_token)
+        return _original_receipt_identity(qualified_source, store, target['generation_id'],
+            writer_token, settings, whitelist_snapshot, expected_template_sha256)
+    # A caller's old qualified object does not establish provenance. Replay
+    # the actual admitted original before observing its raw C6 identity.
+    actual_source = source()
     if actual_source != qualified_source: raise GlobalAttemptHold()
+    receipt = receipt_identity()
+    if receipt[:3] != (target['generation_id'], target['publish_id'], action['manifest_id']):
+        raise GlobalAttemptHold()
     reservations = _reserved_images(token, binding, identity, unit)
     business = inspect_business_preread(token, binding, identity, unit)
     cabling_rows, switch_rows = _source_rows(actual_source)
     if inspect_business_source_projection(token, binding, identity, unit, (*cabling_rows, *switch_rows)) != business:
         raise GlobalAttemptHold()
-    if qualify_prod_stage_l(
-            store, http_root=http_root, settings=settings,
-            whitelist_snapshot=whitelist_snapshot, whitelist_path=whitelist_path,
-            writer_token=writer_token) != actual_source:
+    if source() != actual_source or read_completed_cycle_evidence(store) != cycles:
         raise GlobalAttemptHold()
-    if _original_receipt_identity(
-            qualified_source, store, target['generation_id'], writer_token,
-            settings, whitelist_snapshot, expected_template_sha256) != receipt:
+    if receipt_identity() != receipt:
         raise GlobalAttemptHold()
     inspect_project_online_target(writer_token, binding)
     ownership._validated_owner(token, binding)
@@ -555,18 +567,22 @@ def record_shared_retry_continuous_owned_attempt_intent(
     http_root,whitelist_path,headers_response,whitelist_response,metadata_response,
     boot_id,monotonic_ns,
 ):
-    """Current-C6 R2 count shares the automatic/manual limiter; not GO.
+    """Original admitted C6 R2 count shares the automatic/manual limiter; not GO.
 
     Actual issued reads and original C5/C6/reservations dominate the durable
     opportunity INTENT. Counter executes once inside it, then pairs with the
     exact original ATTEMPT before all fresh facts are checked again. Failure
     never rolls back count, deletes an orphan or clears UNKNOWN. Hidden G1,
-    older-cycle provenance, fixed launcher/FIFO/COMPLETE still must dominate GO.
+    fixed launcher/FIFO/COMPLETE still must dominate GO.
     """
     from monitor.issue_tracker_admission import _hold_shared_retry_opportunity
     from monitor.issue_tracker_history_preread_journal import observe_owned_business_continuity
     from monitor.issue_tracker_remote_history_match import observe_owned_unit_read_gates
     from monitor.issue_tracker_local_workbook_commit import _latest_receipted_prod_xlsx
+    from monitor.issue_tracker_stage_l_consumer import _hold_original_replay_inputs
+    from monitor.issue_tracker_receipt_snapshot import _hold_history_originals
+    from monitor.issue_tracker_send_unit import _read_original_generation_identity
+    from pathlib import Path
     def facts():
         continuity=observe_owned_business_continuity(writer_token,token,binding,unit,
             identity_response=identity_response,history_response=history_response,business_reads=business_reads)
@@ -576,7 +592,7 @@ def record_shared_retry_continuous_owned_attempt_intent(
         originals=_receipted_original_facts(token,binding,gates.identity,unit,
             qualified_source=qualified_source,store=store,writer_token=writer_token,settings=settings,
             whitelist_snapshot=whitelist_snapshot,expected_template_sha256=expected_template_sha256,
-            http_root=http_root,whitelist_path=whitelist_path)
+            http_root=http_root,whitelist_path=whitelist_path,_shared_retry=True)
         if (observe_owned_business_continuity(writer_token,token,binding,unit,
                 identity_response=identity_response,history_response=history_response,business_reads=business_reads)!=continuity
                 or observe_owned_unit_read_gates(writer_token,token,binding,unit,
@@ -586,7 +602,8 @@ def record_shared_retry_continuous_owned_attempt_intent(
         return continuity,gates,originals
     failed=False
     try:
-        with _hold_receipted_audit_originals(writer_token,token,binding,unit) as verify_audits:
+        with _hold_original_replay_inputs(store,Path(store.project_identity),whitelist_path) as verify_inputs, \
+                _hold_receipted_audit_originals(writer_token,token,binding,unit) as verify_audits:
             before=inspect_global_unit(token,binding,unit)
             if not 1<=before.attempt_count<6: raise GlobalAttemptHold()
             original=facts()
@@ -594,13 +611,22 @@ def record_shared_retry_continuous_owned_attempt_intent(
                 image=_latest_receipted_prod_xlsx(writer_token,expected_template_sha256)
                 with _hold_shared_retry_opportunity(writer_token,token,binding,unit,store,image,
                                                      boot_id=boot_id,monotonic_ns=monotonic_ns):
-                    verify_audits(); verify_quota()
-                    result=_observe(token,binding,unit,True)
-                    # Reject original-quota loss before pairing retry COUNT.
-                    # Never repair an orphan or roll back the durable attempt.
-                    verify_audits(); verify_quota()
+                    # The opportunity INTENT is already durable. Pin its exact
+                    # namespace now; close before the legitimate paired COUNT.
+                    # Semantic admission replay must not adopt an orphan here.
+                    with _hold_history_originals(writer_token) as verify_receipts:
+                        def verify_originals():
+                            verify_inputs(); verify_receipts(); verify_audits(); verify_quota()
+                            if _read_original_generation_identity(original[2][0][0],writer_token) != original[2][0]:
+                                raise GlobalAttemptHold()
+                        verify_originals()
+                        result=_observe(token,binding,unit,True)
+                        # Post-count drift preserves UNKNOWN and an unpaired
+                        # opportunity, never repairs or rolls back the counter.
+                        verify_originals()
                 if (facts()!=original or result.attempt_count!=before.attempt_count+1
                         or inspect_global_unit(token,binding,unit)!=result): raise GlobalAttemptHold()
+                verify_inputs()
     except Exception: failed=True
     if failed: raise GlobalAttemptHold()
     return result

@@ -1014,6 +1014,7 @@ def _hold_original_replay_inputs(store, project, whitelist_path):
         stack.callback(os.close, record_parent)
         record_info = _check(record_parent, directory=True, private=False)
         parents[records] = (record_parent, directory_identity(record_info))
+        record_identity = _identity(record_info)
         record_names = frozenset(os.listdir(record_parent))
         paths = [(Path(store.witness_path), 16 * 1024 * 1024)]
         paths += [(records / name, 16 * 1024 * 1024) for name in sorted(record_names)]
@@ -1049,6 +1050,8 @@ def _hold_original_replay_inputs(store, project, whitelist_path):
                     os.close(current)
             if frozenset(os.listdir(parents[records][0])) != record_names:
                 raise StageLConsumerHold('current worker record namespace changed')
+            if _identity(os.fstat(record_parent)) != record_identity:
+                raise StageLConsumerHold('current worker record namespace changed and was restored')
             for parent, name, fd, identity, raw in files:
                 if (_identity(os.fstat(fd)) != identity
                         or _identity(os.stat(name, dir_fd=parent, follow_symlinks=False)) != identity
@@ -1137,9 +1140,14 @@ def replay_original_receipted_prod_source(
                 def guard():
                     if not active:
                         raise StageLConsumerHold('original replay view has expired')
-                    if _owner(writer_token) is not owner or current_k(writer_token) != settings:
-                        raise StageLConsumerHold('original replay owner or K changed')
-                    input_guard()
+                    if _owner(writer_token) is not owner:
+                        raise StageLConsumerHold('original replay owner changed')
+                    store._require_gate()
+                    # Full settings/worker/W1 originals remain descriptor-pinned
+                    # across this synchronous native walk. Reparse K and verify
+                    # every original at its return boundary, not for each of the
+                    # thousands of internal record-access calls. Native source
+                    # readers still re-read and validate their actual bytes.
 
                 class OriginalWindow:
                     project_identity = store.project_identity
@@ -1187,6 +1195,8 @@ def replay_original_receipted_prod_source(
                         return store._validate_completion_record(*args)
 
                 try:
+                    input_guard()
+                    original_guard()
                     result = qualify_prod_stage_l(OriginalWindow(), **arguments)
                     for field, expected in (
                         ('cycle_ids', list(result.cycle_ids)),
@@ -1209,6 +1219,9 @@ def replay_original_receipted_prod_source(
                             or read_whitelist_workbook(whitelist_path) != whitelist_snapshot):
                         raise StageLConsumerHold('original replay chain changed before return')
                     guard()
+                    if current_k(writer_token) != settings:
+                        raise StageLConsumerHold('original replay K changed before return')
+                    input_guard()
                     original_guard()
                 finally:
                     active = False

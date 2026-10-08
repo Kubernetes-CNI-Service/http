@@ -39,6 +39,85 @@ def unit(**changes):
 
 
 class Req7GlobalAttemptJournalTests(unittest.TestCase):
+    def test_ordinary_receipted_count_cannot_enter_older_cycle_replay(self):
+        from contextlib import nullcontext
+        from types import SimpleNamespace
+        from monitor import issue_tracker_cycle_source as cycles
+        from monitor import issue_tracker_stage_l_consumer as consumer
+        from monitor import issue_tracker_receipt_snapshot as receipts
+        from monitor import issue_tracker_online_target as targets
+        from monitor import issue_tracker_send_unit as send_unit
+        qualified = SimpleNamespace(cycle_ids=('original-cycle',))
+        options = dict(qualified_source=qualified, store=object(), writer_token=None,
+            settings=None, whitelist_snapshot=None, expected_template_sha256='a'*64,
+            http_root=self.root, whitelist_path=self.root/'absent')
+        with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
+            self.module.prepare_global_unit(token, binding(), self.value)
+            self.module.record_global_attempt_intent(token, binding(), self.value)
+            with ExitStack() as patches:
+                patches.enter_context(mock.patch.object(receipts, '_hold_history_originals',
+                    side_effect=lambda *a: nullcontext(lambda: None)))
+                patches.enter_context(mock.patch.object(self.module, '_hold_receipted_audit_originals',
+                    side_effect=lambda *a: nullcontext(lambda: None)))
+                patches.enter_context(mock.patch.object(self.module, '_hold_reserved_quota_originals',
+                    side_effect=lambda *a: nullcontext(lambda: None)))
+                patches.enter_context(mock.patch.object(targets, 'inspect_project_online_target'))
+                patches.enter_context(mock.patch.object(cycles, 'read_completed_cycle_evidence',
+                    return_value=(SimpleNamespace(cycle_id='newer-cycle'),)))
+                replay = patches.enter_context(mock.patch.object(consumer, 'replay_original_receipted_prod_source',
+                    return_value=qualified))
+                patches.enter_context(mock.patch.object(send_unit, '_read_original_generation_identity',
+                    side_effect=self.module.GlobalAttemptHold()))
+                with self.assertRaises(self.module.GlobalAttemptHold):
+                    self.module.record_receipted_original_attempt_intent(
+                        token, binding(), object(), self.value, **options)
+                replay.assert_not_called()
+            retained = self.module.inspect_global_unit(token, binding(), self.value)
+            self.assertEqual((1, 'UNKNOWN'), (retained.attempt_count, retained.outcome))
+            self.assertFalse((self.store/'ATTEMPT-2').exists())
+
+    def test_shared_retry_pins_worker_and_policy_inputs_before_any_facts_or_opportunity(self):
+        from contextlib import nullcontext
+        from types import SimpleNamespace
+        from monitor import issue_tracker_stage_l_consumer as consumer
+        from monitor import issue_tracker_admission as admission
+        from monitor import issue_tracker_history_preread_journal as continuity
+        from monitor import issue_tracker_remote_history_match as gates
+        from monitor import issue_tracker_local_workbook_commit as workbooks
+        gate = SimpleNamespace(identity=object())
+        with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
+            self.module.prepare_global_unit(token, binding(), self.value)
+            self.module.record_global_attempt_intent(token, binding(), self.value)
+            with ExitStack() as patches:
+                inputs_guard = patches.enter_context(mock.patch.object(consumer, '_hold_original_replay_inputs',
+                    side_effect=consumer.StageLConsumerHold('missing original namespace')))
+                facts = patches.enter_context(mock.patch.object(self.module, '_receipted_original_facts',
+                    return_value=('unchanged original',)))
+                opportunity = patches.enter_context(mock.patch.object(admission, '_hold_shared_retry_opportunity',
+                    side_effect=lambda *a, **kw: nullcontext()))
+                patches.enter_context(mock.patch.object(self.module, '_hold_receipted_audit_originals',
+                    side_effect=lambda *a: nullcontext(lambda: None)))
+                patches.enter_context(mock.patch.object(self.module, '_hold_reserved_quota_originals',
+                    side_effect=lambda *a: nullcontext(lambda: None)))
+                patches.enter_context(mock.patch.object(continuity, 'observe_owned_business_continuity',
+                    return_value='unchanged issued continuity'))
+                patches.enter_context(mock.patch.object(gates, 'observe_owned_unit_read_gates', return_value=gate))
+                patches.enter_context(mock.patch.object(workbooks, '_latest_receipted_prod_xlsx', return_value=b'original'))
+                with self.assertRaises(self.module.GlobalAttemptHold):
+                    self.module.record_shared_retry_continuous_owned_attempt_intent(
+                        token, binding(), self.value, writer_token=None, identity_response=None,
+                        history_response=None, business_reads=(), qualified_source=None, store=SimpleNamespace(project_identity=self.root),
+                        settings=None, whitelist_snapshot=SimpleNamespace(whitelist=None),
+                        expected_template_sha256='a'*64, http_root=self.root, whitelist_path=self.root/'absent',
+                        headers_response=None, whitelist_response=None, metadata_response=None,
+                        boot_id='owned-test-boot', monotonic_ns=1)
+                inputs_guard.assert_called_once()
+                facts.assert_not_called()
+                opportunity.assert_not_called()
+            observation = self.module.inspect_global_unit(token, binding(), self.value)
+            self.assertEqual((1, 'UNKNOWN'), (observation.attempt_count, observation.outcome))
+            self.assertFalse((self.store/'ATTEMPT-2').exists())
+
     def test_completion_start_witness_refuses_fresh_journal_even_without_proof_directory(self):
         witness=self.locks/(hashlib.sha256(TARGET.encode()).hexdigest()+'.completion-started')
         witness.write_bytes(b'interrupted completion witness\n'); witness.chmod(0o600)

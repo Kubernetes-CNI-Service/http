@@ -386,6 +386,70 @@ class CurrentCycleReceiptSnapshotWorkflowTests(ProdStageLFixture):
                 self.assertEqual(before, read_completed_cycle_evidence(self.store))
         self._old_two_cycle_receipt_fixture(probe)
 
+    def test_old_replay_detects_same_byte_policy_swap_and_restore_during_native_window_walk(self):
+        from monitor import issue_tracker_stage_l_consumer as consumer
+
+        def probe(original):
+            policy = self.project / '01-global.yaml'
+            raw = policy.read_bytes()
+            backup = self.project / 'owned-replay-original-policy'
+            replacement = self.project / 'owned-replay-policy-copy'
+            native = consumer.qualify_prod_stage_l
+            reached = []
+            def swap_and_restore(view, **kwargs):
+                read = view._read_witness
+                def mutate():
+                    if not reached:
+                        replacement.write_bytes(raw); replacement.chmod(policy.stat().st_mode & 0o777)
+                        policy.rename(backup); replacement.rename(policy)
+                        policy.rename(replacement); backup.rename(policy)
+                        reached.append(True)
+                    return read()
+                with mock.patch.object(view, '_read_witness', side_effect=mutate):
+                    return native(view, **kwargs)
+            with tracker_writer(self.project, self.publication) as token:
+                with mock.patch.object(consumer, 'qualify_prod_stage_l', side_effect=swap_and_restore):
+                    with self.assertRaises(consumer.StageLConsumerHold):
+                        consumer.replay_original_receipted_prod_source(
+                            self.store, **self._original_replay_args(token, original))
+                self.assertEqual([True], reached, 'fault must enter the real native window walk')
+            self.assertEqual(raw, policy.read_bytes()); self.assertEqual(raw, replacement.read_bytes())
+        self._old_two_cycle_receipt_fixture(probe)
+
+    def test_old_replay_detects_original_record_directory_swap_and_restore_during_native_window_walk(self):
+        from monitor import issue_tracker_stage_l_consumer as consumer
+
+        def probe(original):
+            records = self.store.records_dir
+            inode = records.stat().st_ino
+            images = {p.name:(p.stat().st_ino,p.read_bytes()) for p in records.iterdir()}
+            backup = self.project/'owned-native-replay-original-records'
+            clone = self.project/'owned-native-replay-clone-records'
+            shutil.copytree(records, clone)
+            native = consumer.qualify_prod_stage_l
+            reached = []
+            def swap_and_restore(view, **kwargs):
+                read = view._read_witness
+                def mutate():
+                    if not reached:
+                        records.rename(backup); clone.rename(records)
+                        records.rename(clone); backup.rename(records)
+                        reached.append(True)
+                    return read()
+                with mock.patch.object(view, '_read_witness', side_effect=mutate):
+                    return native(view, **kwargs)
+            with tracker_writer(self.project,self.publication) as token:
+                with mock.patch.object(consumer,'qualify_prod_stage_l',side_effect=swap_and_restore):
+                    with self.assertRaises(consumer.StageLConsumerHold):
+                        consumer.replay_original_receipted_prod_source(
+                            self.store, **self._original_replay_args(token,original))
+                self.assertEqual([True],reached,'fault must enter the actual native window walk')
+            self.assertEqual(inode, records.stat().st_ino)
+            self.assertEqual(images,{p.name:(p.stat().st_ino,p.read_bytes()) for p in records.iterdir()})
+            self.assertEqual({name:raw for name,(_ino,raw) in images.items()},
+                             {p.name:p.read_bytes() for p in clone.iterdir()})
+        self._old_two_cycle_receipt_fixture(probe)
+
     def test_old_replay_pins_current_high_water_even_when_original_window_is_unchanged(self):
         from monitor import issue_tracker_stage_l_consumer as consumer
 
