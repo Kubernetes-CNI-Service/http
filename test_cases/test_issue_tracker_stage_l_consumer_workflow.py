@@ -85,6 +85,9 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
     def test_actual_receipted_cabling_original_chain_dominates_reserved_count(self):
         self._exercise_real_protected_three_panel_fixture(skip_history=False, observed_cabling_insert_probe=True, business_preread_probe=True, original_reserved_probe=True)
 
+    def test_actual_original_c6_receipt_dominates_every_business_count_and_post_count_drift_holds(self):
+        self._exercise_real_protected_three_panel_fixture(skip_history=False, observed_cabling_insert_probe=True, business_preread_probe=True, original_reserved_probe=True, receipted_intent_probe=True)
+
     def test_two_real_cycles_keep_keys_and_commit_latest_business_values(self):
         self._exercise_real_protected_three_panel_fixture(
             skip_history=False, two_cycle_changed_latest=True,
@@ -442,7 +445,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         source_identity_probe=False, two_cycle_changed_latest=False,
         settings_channel_probe=False, settings_channel_fault=False,
         panel_counts_probe=False, source_unit_probe=False, receipted_source_probe=False, observed_source_probe=False,
-        observed_switch_insert_probe=False, observed_cabling_insert_probe=False, business_preread_probe=False, original_reserved_probe=False,
+        observed_switch_insert_probe=False, observed_cabling_insert_probe=False, business_preread_probe=False, original_reserved_probe=False, receipted_intent_probe=False,
         complete_preview_probe=False,
         complete_preview_source_race=False,
         complete_preview_cgi=False,
@@ -1584,13 +1587,74 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                                     quota = quota_module.prepare_metadata_reservation(spreadsheet_token, binding, identity, unit,
                                         prepare_metadata_capacity_read(binding, credential), quota_raw)
                                     self.assertTrue(hasattr(global_journal, 'record_original_business_reserved_attempt_intent'), 'complete original chain must dominate counted intent')
+                                    record = lambda: global_journal.record_original_business_reserved_attempt_intent(spreadsheet_token, binding, identity, unit)
+                                    if receipted_intent_probe:
+                                        self.assertTrue(hasattr(global_journal, 'record_receipted_original_attempt_intent'), 'protected original C6 chain must dominate each counted intent')
+                                        def record(**changes):
+                                            options = dict(qualified_source=qualified, store=self.store, writer_token=writer_token,
+                                                settings=args['settings'], whitelist_snapshot=self.snapshot,
+                                                expected_template_sha256=self.snapshot.workbook_sha256,
+                                                http_root=self.root, whitelist_path=self.template)
+                                            options.update(changes)
+                                            return global_journal.record_receipted_original_attempt_intent(spreadsheet_token, binding, identity, unit, **options)
+                                        for changes in ({'writer_token': None}, {'qualified_source': replace(qualified, observations_sha256='f'*64)},
+                                                        {'expected_template_sha256': 'f'*64}):
+                                            with self.assertRaises(global_journal.GlobalAttemptHold): record(**changes)
+                                            self.assertEqual(0, global_journal.inspect_global_unit(spreadsheet_token, binding, unit).attempt_count)
+                                        generation_path = project/'.tracker/generations'/committed.receipt.generation_id
+                                        c6_original = {name: (generation_path/name).read_bytes() for name in ('STATE', 'MANIFEST', 'INTENT', 'RECEIPT')}
+                                        for name, raw in c6_original.items():
+                                            path = generation_path/name; path.write_bytes(b'foreign C6 original')
+                                            try:
+                                                with self.assertRaises(global_journal.GlobalAttemptHold): record()
+                                                self.assertEqual(0, global_journal.inspect_global_unit(spreadsheet_token, binding, unit).attempt_count)
+                                                self.assertEqual(b'foreign C6 original', path.read_bytes())
+                                            finally: path.write_bytes(raw)  # undo this owned fixture fault only
+                                        source_path = artifacts['ethernet/prod']['info']
+                                        source_before = source_path.read_bytes()
+                                        source_path.write_bytes(source_before+b'\nchanged original producer source\n')
+                                        try:
+                                            with self.assertRaises(global_journal.GlobalAttemptHold): record()
+                                            self.assertEqual(0, global_journal.inspect_global_unit(spreadsheet_token, binding, unit).attempt_count)
+                                            self.assertEqual(source_before+b'\nchanged original producer source\n', source_path.read_bytes())
+                                        finally: source_path.write_bytes(source_before)  # owned producer fault only
+                                        actual_business_inspect = preread.inspect_business_preread
+                                        def change_source_after_business(*inspect_args, **inspect_kwargs):
+                                            result = actual_business_inspect(*inspect_args, **inspect_kwargs)
+                                            source_path.write_bytes(source_before+b'\nchanged during original barrier\n')
+                                            return result
+                                        try:
+                                            with mock.patch.object(preread, 'inspect_business_preread', side_effect=change_source_after_business):
+                                                with self.assertRaises(global_journal.GlobalAttemptHold): record()
+                                            self.assertEqual(0, global_journal.inspect_global_unit(spreadsheet_token, binding, unit).attempt_count)
+                                            self.assertEqual(source_before+b'\nchanged during original barrier\n', source_path.read_bytes())
+                                        finally: source_path.write_bytes(source_before)  # owned fixture only
                                     for count in range(1, 7):
-                                        intent = global_journal.record_original_business_reserved_attempt_intent(spreadsheet_token, binding, identity, unit)
+                                        if receipted_intent_probe and count in (3, 4):
+                                            original_observe = global_journal._observe
+                                            fault_path = generation_path/'RECEIPT' if count == 3 else source_path
+                                            original_bytes = c6_original['RECEIPT'] if count == 3 else source_before
+                                            def change_after_count(*observe_args, **observe_kwargs):
+                                                result = original_observe(*observe_args, **observe_kwargs)
+                                                if observe_args[3]: fault_path.write_bytes(b'changed after durable count')
+                                                return result
+                                            try:
+                                                with mock.patch.object(global_journal, '_observe', side_effect=change_after_count):
+                                                    with self.assertRaises(global_journal.GlobalAttemptHold): record()
+                                                intent = global_journal.inspect_global_unit(spreadsheet_token, binding, unit)
+                                                self.assertEqual(b'changed after durable count', fault_path.read_bytes())
+                                                with self.assertRaises(global_journal.GlobalAttemptHold): record()
+                                                self.assertEqual(count, global_journal.inspect_global_unit(spreadsheet_token, binding, unit).attempt_count)
+                                            finally: fault_path.write_bytes(original_bytes)  # fault fixture only, no production recovery
+                                        else: intent = record()
                                         self.assertEqual((count, 'UNKNOWN'), (intent.attempt_count, intent.outcome))
+                                        self.assertFalse(hasattr(intent, 'permit')); self.assertFalse(hasattr(intent, 'complete'))
                                         self.assertEqual(seen, preread.inspect_business_preread(spreadsheet_token, binding, identity, unit))
                                         self.assertEqual(quota, quota_module.inspect_metadata_reservation(spreadsheet_token, binding, identity, unit))
                                     with self.assertRaises(global_journal.GlobalAttemptHold):
-                                        global_journal.record_original_business_reserved_attempt_intent(spreadsheet_token, binding, identity, unit)
+                                        record()
+                                    if receipted_intent_probe:
+                                        self.assertEqual(c6_original, {name: (generation_path/name).read_bytes() for name in c6_original})
                                 else:
                                     global_journal.record_global_attempt_intent(spreadsheet_token, binding, unit)
                                 self.assertEqual(seen, preread.inspect_business_preread(spreadsheet_token, binding, identity, unit))

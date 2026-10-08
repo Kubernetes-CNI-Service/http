@@ -236,3 +236,64 @@ def record_original_business_reserved_attempt_intent(token, binding, identity, u
     except Exception: failed = True
     if failed: raise GlobalAttemptHold()
     return result
+
+
+def record_receipted_original_attempt_intent(
+    token, binding, identity, unit, *, qualified_source, store, writer_token,
+    settings, whitelist_snapshot, expected_template_sha256, http_root, whitelist_path,
+):
+    """Require original protected current-cycle C6 facts around durable count.
+
+    Hold BOTH original project and spreadsheet owners. Reopen original C6
+    STATE/MANIFEST/INTENT/RECEIPT through recovery and shared admissions; replay
+    actual protected C5 sources rather than trust a caller's digest projection. Bind
+    generation, published image and manifest to the immutable action, alongside
+    ALL retained business and reservations. No caller receipt, compilation or
+    missing-original repair. This conservative current-cycle observation does
+    NOT authorize older-cycle R2, fresh config/W1/cadence, transport, COMPLETE
+    or FIFO. A failed post-count check leaves UNKNOWN and never rolls back.
+    """
+    from monitor.issue_tracker_send_unit import _original_receipt_identity
+    from monitor.issue_tracker_history_preread_journal import inspect_business_preread
+    from monitor.issue_tracker_stage_l_consumer import qualify_prod_stage_l
+
+    def originals():
+        _inputs(token, binding, unit)
+        action = json.loads(unit.action_preimage)
+        target = action['identity']
+        receipt = _original_receipt_identity(
+            qualified_source, store, target['generation_id'], writer_token,
+            settings, whitelist_snapshot, expected_template_sha256)
+        if receipt[:3] != (target['generation_id'], target['publish_id'], action['manifest_id']):
+            raise GlobalAttemptHold()
+        actual_source = qualify_prod_stage_l(
+            store, http_root=http_root, settings=settings,
+            whitelist_snapshot=whitelist_snapshot, whitelist_path=whitelist_path,
+            writer_token=writer_token)
+        if actual_source != qualified_source: raise GlobalAttemptHold()
+        reservations = _reserved_images(token, binding, identity, unit)
+        business = inspect_business_preread(token, binding, identity, unit)
+        if qualify_prod_stage_l(
+                store, http_root=http_root, settings=settings,
+                whitelist_snapshot=whitelist_snapshot, whitelist_path=whitelist_path,
+                writer_token=writer_token) != actual_source:
+            raise GlobalAttemptHold()
+        if _original_receipt_identity(
+                qualified_source, store, target['generation_id'], writer_token,
+                settings, whitelist_snapshot, expected_template_sha256) != receipt:
+            raise GlobalAttemptHold()
+        ownership._validated_owner(token, binding)
+        return receipt, actual_source, reservations, business
+
+    failed = False
+    try:
+        before = inspect_global_unit(token, binding, unit)
+        if before.attempt_count == 6: raise GlobalAttemptHold()
+        images = originals()
+        result = _observe(token, binding, unit, True)
+        if (originals() != images or result.attempt_count != before.attempt_count + 1
+                or inspect_global_unit(token, binding, unit) != result):
+            raise GlobalAttemptHold()
+    except Exception: failed = True
+    if failed: raise GlobalAttemptHold()
+    return result

@@ -468,6 +468,35 @@ class Req7OriginalBusinessReservedIntentDirectTests(unittest.TestCase):
             self.assertEqual(1, self.global_journal.inspect_global_unit(token, binding(), self.value).attempt_count)
 
 
+class Req7ReceiptedOriginalIntentDirectTests(unittest.TestCase):
+    setUp = Req7BusinessPrereadJournalDirectTests.setUp
+    initialize = Req7BusinessPrereadJournalDirectTests.initialize
+    prepare = Req7BusinessPrereadJournalDirectTests.prepare
+    quota = Req7OriginalBusinessReservedIntentDirectTests.quota
+
+    def test_structural_caller_receipt_or_unheld_writer_never_counts_complete_business(self):
+        from types import SimpleNamespace
+        self.assertTrue(hasattr(self.global_journal, 'record_receipted_original_attempt_intent'),
+            'original protected C6 receipt must dominate counted business intent')
+        with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
+            self.initialize(token); self.quota(token); self.prepare(token)
+            originals = {path.name: path.read_bytes() for path in self.store.iterdir()}
+            for writer in (None, object(), SimpleNamespace(project=self.root, held=True)):
+                with self.subTest(writer=type(writer).__name__):
+                    with self.assertRaises(self.global_journal.GlobalAttemptHold):
+                        self.global_journal.record_receipted_original_attempt_intent(
+                            token, binding(), self.identity, self.value,
+                            qualified_source=SimpleNamespace(qualified=True, mode='prod-runtime-protected-v1'),
+                            store=SimpleNamespace(project_identity=self.root, scope='prod'),
+                            writer_token=writer, settings=SimpleNamespace(k=1),
+                            whitelist_snapshot=SimpleNamespace(whitelist=SimpleNamespace(sha256='a'*64)),
+                            expected_template_sha256='a'*64, http_root=self.root,
+                            whitelist_path=self.root/'owned-template.xlsx')
+                    self.assertEqual(0, self.global_journal.inspect_global_unit(token, binding(), self.value).attempt_count)
+                    self.assertEqual(originals, {path.name: path.read_bytes() for path in self.store.iterdir()})
+            self.assertFalse((self.root/'.tracker/generations').exists())
+
+
 class Req7BusinessPrereadJournalWorkflowTests(unittest.TestCase):
     setUp = Req7BusinessPrereadJournalDirectTests.setUp
     initialize = Req7BusinessPrereadJournalDirectTests.initialize
@@ -527,6 +556,11 @@ with fixture(root),owner.spreadsheet_owner(binding()) as token:
             workflow['id'] == 'req7_original_business_source_reservations_count'
             for workflow in manifest['workflows']))
         self.assertIn('record_original_business_reserved_attempt_intent', (ROOT/'test_cases/README.md').read_text())
+        self.assertTrue(any(workflow['id'] == 'req7_protected_original_receipt_business_count' and
+            required | {'monitor/issue_tracker_admission.py', 'monitor/issue_tracker_cycle_source.py',
+                        'monitor/issue_tracker_stage_l_consumer.py', 'monitor/issue_tracker_state_owner.py'} <= set(workflow['members'])
+            for workflow in manifest['workflows']))
+        self.assertIn('record_receipted_original_attempt_intent', (ROOT/'test_cases/README.md').read_text())
 
     def test_native_cold_process_reopens_exact_original_all_operations_after_unknown(self):
         with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:

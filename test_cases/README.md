@@ -1083,3 +1083,12 @@ REQ7 整体未完成，真机 NOT RUN。
 真实 C5/C6 Cabling 混合组批联测贯穿完整原链。
 这仍仅是必要的持久意图，不是 fresh admission、隐藏 PROJECT 配额证明、
 FIFO settlement、实际 M=6 发送上限、发送许可或 COMPLETE；真机 NOT RUN。
+
+`record_receipted_original_attempt_intent` 在双 owner 下，进一步于每次计数前后
+通过实际 recovery／共享 admission／受保护 C5 重放重开原始 C6 四件，并把
+generation／published SHA／manifest ID 与原 ACTION 精确绑定。伪造 receipt、
+未持有 LK-P、源／模板漂移、任一原件损坏前置不计数；后置失败保留 UNKNOWN。
+原件不补建，不重新编译 wire。真实 ETH／IB 混合组批执行六次计数与第七次拒绝，
+含计数后 receipt 漂移。本接口保守限定 current-cycle，不证明旧周期 R2、fresh
+config／W1／cadence、固定 launcher、真实发送、FIFO 或 COMPLETE；REQ7 整体
+仍未完成，真机 NOT RUN。
