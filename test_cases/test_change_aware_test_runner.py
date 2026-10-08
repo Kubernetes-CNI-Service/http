@@ -186,6 +186,80 @@ def assert_static_jinja_closure(template_root: Path, governed: set[str]) -> None
 
 
 class ImpactManifestTests(unittest.TestCase):
+    def test_manifest_catalog_is_bounded_and_rechecked_per_invocation(self):
+        with mock.patch.object(
+            RUNNER, "discover_tests", wraps=RUNNER.discover_tests,
+        ) as discover:
+            first = RUNNER.load_and_validate_manifest(ROOT, MANIFEST_PATH)
+            self.assertEqual(2, discover.call_count)
+            second = RUNNER.load_and_validate_manifest(ROOT, MANIFEST_PATH)
+            self.assertEqual(4, discover.call_count)
+        self.assertEqual(first, second)
+
+    def test_catalog_cli_keeps_real_selectors_and_ledger_unchanged(self):
+        ledger = ROOT / "test_cases/script_test_approved_hashes.json"
+        before = ledger.read_bytes()
+        output = io.StringIO()
+        with (
+            redirect_stdout(output),
+            mock.patch.object(RUNNER, "discover_tests", wraps=RUNNER.discover_tests) as discover,
+            mock.patch.object(
+                RUNNER, "_load_deployment_selector", wraps=RUNNER._load_deployment_selector,
+            ) as selectors,
+        ):
+            self.assertEqual(0, RUNNER.main(["--list-suites"]))
+        self.assertEqual(2, discover.call_count)
+        self.assertEqual(
+            ["tools/sync-code.py", "infra/docker/activate.py", "tools/_package_common.py"],
+            [call.args[1] for call in selectors.call_args_list],
+        )
+        self.assertEqual(before, ledger.read_bytes())
+        for suite_id in EXPECTED_TEST_SUITES:
+            self.assertIn(suite_id, output.getvalue())
+
+    def test_cached_test_reference_rechecks_actual_leaf_at_use(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "test_probe.py"
+            path.write_text("# independent probe\n", encoding="utf-8")
+            available = {"test_cases.test_probe": path}
+            RUNNER._validate_test_ids(
+                root, available, "probe", available=available,
+            )
+            path.unlink()
+            for kind in ("missing", "symlink", "directory"):
+                with self.subTest(kind=kind):
+                    if kind == "symlink":
+                        target = root / "target.py"
+                        target.write_text("# different leaf\n", encoding="utf-8")
+                        path.symlink_to(target)
+                    elif kind == "directory":
+                        path.mkdir()
+                    with self.assertRaisesRegex(RUNNER.ImpactError, "missing test module"):
+                        RUNNER._validate_test_ids(
+                            root, available, "probe", available=available,
+                        )
+                    if kind == "symlink":
+                        path.unlink()
+
+    def test_catalog_end_rescan_rejects_added_removed_and_rebound_mapping(self):
+        original = RUNNER.discover_tests(ROOT)
+        for kind in ("added", "removed", "rebound"):
+            changed = dict(original)
+            key = sorted(original)[0]
+            if kind == "added":
+                changed["test_cases.test_unmapped_private_probe"] = ROOT / "test_cases/probe.py"
+            elif kind == "removed":
+                changed.pop(key)
+            else:
+                changed[key] = ROOT / "test_cases/different_probe.py"
+            with (
+                self.subTest(kind=kind),
+                mock.patch.object(RUNNER, "discover_tests", side_effect=[original, changed]),
+                self.assertRaisesRegex(RUNNER.ImpactError, "inventory changed"),
+            ):
+                RUNNER.load_and_validate_manifest(ROOT, MANIFEST_PATH)
+
     @staticmethod
     def _write_hostile_deployment_selectors(
         root: Path,
