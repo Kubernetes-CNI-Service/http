@@ -1444,3 +1444,15 @@ events/outbox/current 的目录／文件 FD，复核完整 stat、身份及字�
 原 current-cycle reader 合同不变；真实 worker/emitter→C5/C6 多脚本联测
 覆盖旧回执仍可观察、当前计数为零及所有原件／名字替换。REQ7 整体仍未完成，
 现场卡 `TC-REAL-REQ7-PER-KEY-STATUS-001` 保持 NOT RUN。
+
+`replay_original_receipted_prod_source` 只对真实已准入旧 C6 重新资格化其原
+连续 K 窗口：截止周期来自实际 admission/MANIFEST，K/W1 必须仍与当前合同
+相符；调用方不能提供 cutoff、历史快照或重建原件。全程持有所有 C6/准入/K
+原件及当前完整 worker 链、策略/W1 的 FD、stat、字节和名字；记录目录必须
+先持有原 FD 再首次读取名字，同字节文件或目录替换也 HOLD。私有只读视图只在
+native 三面板 C5 回放期间有效，返回前撤销，当前
+receipt 计数和共享链始终用完整真实 store，不把旧回执计入最新周期。
+返回仅为 intent，不创建 generation/RECEIPT、不计 retry、不发 mutation，不证明
+R2 新鲜准入、M=6、FIFO/APPLIED/COMPLETE、默认线上 worker 或 REQ7 整体完成。
+独立 direct 与真实 K=2 C5/C6→新周期→原来源回放 workflow 保留这些边界，
+真机、断电和真实 Cloud 仍 NOT RUN；不得以本地 PASS 替代当前精确树 full/check。

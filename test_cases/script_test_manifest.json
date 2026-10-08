@@ -2243,6 +2243,12 @@
         "monitor/issue_tracker_stage_l_consumer.py",
         "monitor/issue_tracker_publish_runtime.py",
         "monitor/issue_tracker_cycle_source.py",
+        "monitor/issue_tracker_ib_runtime.py",
+        "monitor/collection_ib_cycle_binding.py",
+        "monitor/collection_ib_producer.py",
+        "monitor/issue_tracker_switch_runtime.py",
+        "monitor/issue_tracker_state_owner.py",
+        "monitor/issue_tracker_whitelist_workbook.py",
         "monitor/switch-collection-worker.py"
       ],
       "tests": [

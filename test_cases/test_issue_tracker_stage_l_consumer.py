@@ -59,6 +59,114 @@ class ProdStageLFixture(unittest.TestCase):
 
 
 class ProdStageLConsumerDirectTests(ProdStageLFixture):
+    def test_original_replay_pins_record_directory_before_first_namespace_read(self):
+        from pathlib import Path
+        from monitor import issue_tracker_stage_l_consumer as consumer
+        self.two_cycles(activity=True, derivation=True)
+        (self.project / '01-global.yaml').write_bytes(b'schema_version: 2\ncommon: {}\n')
+        records = self.store.records_dir
+        original = records.stat()
+        image = {p.name: (p.read_bytes(), p.stat().st_mode & 0o777)
+                 for p in records.iterdir()}
+        backup = self.project / 'owned-original-record-directory'
+        abandoned = self.project / 'owned-replacement-record-directory'
+        native_listdir = os.listdir
+        reached = []
+
+        def replace_after_first_namespace_read(path):
+            names = native_listdir(path)
+            if isinstance(path, int):
+                info = os.fstat(path)
+                selected = (info.st_dev, info.st_ino) == (original.st_dev, original.st_ino)
+            else:
+                selected = Path(path) == records
+            if selected and not reached:
+                records.rename(backup)
+                records.mkdir(mode=original.st_mode & 0o777)
+                for name, (raw, mode) in image.items():
+                    member = records / name
+                    member.write_bytes(raw)
+                    member.chmod(mode)
+                reached.append(True)
+            return names
+
+        try:
+            with mock.patch.object(consumer.os, 'listdir', side_effect=replace_after_first_namespace_read):
+                with self.assertRaises(consumer.StageLConsumerHold):
+                    with consumer._hold_original_replay_inputs(self.store, self.project, self.template) as verify:
+                        verify()
+            self.assertEqual([True], reached, 'fault must follow the real first namespace read')
+            self.assertNotEqual(original.st_ino, records.stat().st_ino)
+            for name, (raw, _mode) in image.items():
+                self.assertEqual(raw, (backup / name).read_bytes())
+                self.assertEqual(raw, (records / name).read_bytes())
+        finally:
+            if backup.exists():
+                records.rename(abandoned)
+                backup.rename(records)
+        self.assertEqual(original.st_ino, records.stat().st_ino)
+
+    def test_original_replay_input_scope_holds_named_policy_whitelist_and_full_current_chain(self):
+        from monitor import issue_tracker_stage_l_consumer as consumer
+        self.two_cycles(activity=True, derivation=True)
+        policy = self.project / '01-global.yaml'
+        policy.write_bytes(b'schema_version: 2\ncommon: {}\n')
+        paths = (policy, self.template, self.store.witness_path,
+                 self.store.completion_path(2))
+        for number, path in enumerate(paths):
+            with self.subTest(original=path.name):
+                raw = path.read_bytes()
+                inode = path.stat().st_ino
+                backup = self.project / ('owned-pin-original-' + str(number))
+                replacement = self.project / ('owned-pin-replacement-' + str(number))
+                replacement.write_bytes(raw)
+                replacement.chmod(path.stat().st_mode & 0o777)
+                try:
+                    with self.assertRaises(consumer.StageLConsumerHold):
+                        with consumer._hold_original_replay_inputs(self.store, self.project, self.template) as verify:
+                            path.rename(backup)
+                            replacement.rename(path)
+                            self.assertNotEqual(inode, path.stat().st_ino)
+                            verify()
+                    self.assertEqual(raw, path.read_bytes())
+                    self.assertEqual(raw, backup.read_bytes())
+                finally:
+                    if backup.exists():
+                        path.rename(replacement)
+                        backup.rename(path)
+                self.assertEqual(inode, path.stat().st_ino)
+
+    def test_original_source_replay_refuses_unreceipted_generation_without_creating_evidence(self):
+        from monitor import issue_tracker_stage_l_consumer as consumer
+        before = {p.relative_to(self.project).as_posix(): p.read_bytes()
+                  for p in (self.project / '.tracker').rglob('*') if p.is_file()}
+        with tracker_writer(self.project, self.publication) as token:
+            with mock.patch.object(consumer, 'qualify_prod_stage_l') as native:
+                with self.assertRaises(consumer.StageLConsumerHold):
+                    consumer.replay_original_receipted_prod_source(
+                        self.store, http_root=self.root, settings=current_k(token),
+                        whitelist_snapshot=self.snapshot, whitelist_path=self.template,
+                        expected_template_sha256=self.snapshot.workbook_sha256,
+                        local_generation_id='gen-00000000000000000001-' + 'a' * 32,
+                        writer_token=token)
+                native.assert_not_called()
+        self.assertEqual(before, {p.relative_to(self.project).as_posix(): p.read_bytes()
+            for p in (self.project / '.tracker').rglob('*') if p.is_file()})
+
+    def test_original_source_replay_refuses_released_owner_before_native_reads(self):
+        from monitor import issue_tracker_stage_l_consumer as consumer
+        with tracker_writer(self.project, self.publication) as token:
+            settings = current_k(token)
+        with mock.patch.object(consumer, 'qualify_prod_stage_l') as native:
+            with self.assertRaises(consumer.StageLConsumerHold):
+                consumer.replay_original_receipted_prod_source(
+                    self.store, http_root=self.root, settings=settings,
+                    whitelist_snapshot=self.snapshot, whitelist_path=self.template,
+                    expected_template_sha256=self.snapshot.workbook_sha256,
+                    local_generation_id='gen-00000000000000000001-' + 'a' * 32,
+                    writer_token=token)
+            native.assert_not_called()
+
     def test_source_file_identity_requires_regular_named_bytes_and_records_mtime(self):
         from monitor.issue_tracker_stage_l_consumer import (
             StageLConsumerHold, _bound_source_file,

@@ -10,6 +10,7 @@ online send permit.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from contextlib import contextmanager, ExitStack
 from datetime import datetime, timezone
 import hashlib
 import os
@@ -987,6 +988,237 @@ def qualify_prod_stage_l(
         if isinstance(exc, StageLConsumerHold):
             raise
         raise StageLConsumerHold("prod Stage L qualification is unsafe") from exc
+
+
+@contextmanager
+def _hold_original_replay_inputs(store, project, whitelist_path):
+    """Hold the FULL current worker chain and fixed policy/W1 input names.
+
+    Historical projection does not exempt later cycles or accept same-byte
+    replacement. Reopen each absolute parent without aliases, and retain the
+    original descriptor, stat and bytes through the entire native replay.
+    """
+    from monitor.issue_tracker_local_commit import _flags, _open_absolute_directory, _check
+    from monitor.issue_tracker_attempt_journal import _identity
+
+    with ExitStack() as stack:
+        parents, files = {}, []
+        records = Path(store.records_dir)
+
+        def directory_identity(info):
+            return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid)
+
+        # Pin the directory BEFORE observing its namespace. A path-based first
+        # list followed by a reopen could silently adopt a same-byte replacement.
+        record_parent = _open_absolute_directory(records)
+        stack.callback(os.close, record_parent)
+        record_info = _check(record_parent, directory=True, private=False)
+        parents[records] = (record_parent, directory_identity(record_info))
+        record_names = frozenset(os.listdir(record_parent))
+        paths = [(Path(store.witness_path), 16 * 1024 * 1024)]
+        paths += [(records / name, 16 * 1024 * 1024) for name in sorted(record_names)]
+        paths += [(project / '01-global.yaml', 1024 * 1024),
+                  (Path(whitelist_path), 32 * 1024 * 1024)]
+
+        for path, limit in paths:
+            if path.parent not in parents:
+                parent = _open_absolute_directory(path.parent)
+                stack.callback(os.close, parent)
+                info = _check(parent, directory=True, private=False)
+                parents[path.parent] = (parent, directory_identity(info))
+            parent = parents[path.parent][0]
+            fd = os.open(path.name, _flags(), dir_fd=parent)
+            stack.callback(os.close, fd)
+            info = _check(fd, directory=False, private=False)
+            if not 0 < info.st_size <= limit:
+                raise StageLConsumerHold('original replay input exceeds its bounded contract')
+            raw = os.pread(fd, limit + 1, 0)
+            if len(raw) != info.st_size:
+                raise StageLConsumerHold('original replay input changed during read')
+            files.append((parent, path.name, fd, _identity(info), raw))
+
+        def verify():
+            store._require_gate()
+            for path, (fd, identity) in parents.items():
+                current = _open_absolute_directory(path)
+                try:
+                    if (directory_identity(os.fstat(fd)) != identity
+                            or directory_identity(os.fstat(current)) != identity):
+                        raise StageLConsumerHold('original replay input parent was replaced')
+                finally:
+                    os.close(current)
+            if frozenset(os.listdir(parents[records][0])) != record_names:
+                raise StageLConsumerHold('current worker record namespace changed')
+            for parent, name, fd, identity, raw in files:
+                if (_identity(os.fstat(fd)) != identity
+                        or _identity(os.stat(name, dir_fd=parent, follow_symlinks=False)) != identity
+                        or os.pread(fd, len(raw) + 1, 0) != raw):
+                    raise StageLConsumerHold('original replay input identity or bytes changed')
+            store._require_gate()
+
+        verify()
+        yield verify
+        verify()
+
+
+def replay_original_receipted_prod_source(
+    store, *, http_root, settings, whitelist_snapshot, whitelist_path,
+    expected_template_sha256, local_generation_id, writer_token,
+) -> ProdStageLQualifiedSet:
+    """Requalify ONE actual older admitted C6 against its original K window.
+
+    No caller cutoff or historical source snapshot is accepted. The private
+    revoked store view is used only for native C5 requalification; history,
+    recovery and current cadence always consume the complete real store. This
+    returns intent, not R2 eligibility, a retry count, a new receipt or a permit.
+    """
+    from monitor import issue_tracker_receipt_snapshot as receipts
+    from monitor.issue_tracker_whitelist_workbook import read_whitelist_workbook
+    from monitor.issue_tracker_manifest import _runtime_skip
+    from tools.project_contract import collection_cycle_project_key
+
+    active = False
+    try:
+        owner = _owner(writer_token)
+        project = Path(store.project_identity)
+        root = Path(http_root)
+        key = collection_cycle_project_key(str(project))
+        status = root / 'monitor/status'
+        cycle_dir = status / 'collection-cycles' / key / 'prod/switch_collection'
+        if (not root.is_absolute() or root.resolve(strict=True) != root
+                or owner.project != project
+                or owner.publication != project / '99-output-monitor'
+                or store.scope != 'prod' or store.project_key != key
+                or Path(store.root_status_dir) != status
+                or Path(store.records_dir) != cycle_dir / 'records'
+                or Path(store.witness_path) != cycle_dir / 'high-water.json'
+                or type(settings) is not KChainState or current_k(writer_token) != settings
+                or type(whitelist_snapshot) is not WorkbookWhitelistSnapshot
+                or expected_template_sha256 != whitelist_snapshot.workbook_sha256
+                or read_whitelist_workbook(whitelist_path) != whitelist_snapshot
+                or type(local_generation_id) is not str
+                or receipts._GEN.fullmatch(local_generation_id) is None):
+            raise StageLConsumerHold('original replay owner, path, K or W1 is unproved')
+        arguments = dict(http_root=root, settings=settings,
+                         whitelist_snapshot=whitelist_snapshot,
+                         whitelist_path=whitelist_path, writer_token=writer_token)
+        with receipts._hold_history_originals(writer_token) as original_guard:
+            with _hold_original_replay_inputs(store, project, whitelist_path) as input_guard:
+                cycles = read_completed_cycle_evidence(store)
+                events = receipts._events(owner)
+                selected = tuple(e for e in events if e['generation_id'] == local_generation_id)
+                if len(selected) != 1:
+                    raise StageLConsumerHold('original C6 has no unique actual admission')
+                event = selected[0]
+                template, source = receipts._manifest_source(owner, local_generation_id)
+                receipts._validate_source(source, event, cycles, receipts._k_events(owner),
+                    template_sha256=template, expected_template_sha256=expected_template_sha256,
+                    settings=settings, whitelist_sha256=whitelist_snapshot.whitelist.sha256,
+                    qualified_source=None)
+                if (not cycles or event['cycle_id'] == cycles[-1].cycle_id
+                        or source['k'] != settings.k
+                        or source['k_event_sha256'] != settings.event_sha256
+                        or source['whitelist_sha256'] != whitelist_snapshot.whitelist.sha256):
+                    raise StageLConsumerHold('older C6 does not match the current K/W1 contract')
+                cutoff = next(c.sequence for c in cycles if c.cycle_id == event['cycle_id'])
+                groups = store._record_groups()
+                history_context = dict(expected_template_sha256=expected_template_sha256,
+                    settings=settings, whitelist_sha256=whitelist_snapshot.whitelist.sha256)
+                # A later current-cycle C6 still needs its own native replay.
+                if any(e['cycle_id'] == cycles[-1].cycle_id for e in events):
+                    history_context['qualified_source'] = qualify_prod_stage_l(store, **arguments)
+                history = receipts.read_local_receipt_history(writer_token, store, **history_context)
+                if sum(r.generation_id == local_generation_id for r in history.receipts) != 1:
+                    raise StageLConsumerHold('original C6 recovery is unproved')
+                original_guard()
+                input_guard()
+                active = True
+
+                def guard():
+                    if not active:
+                        raise StageLConsumerHold('original replay view has expired')
+                    if _owner(writer_token) is not owner or current_k(writer_token) != settings:
+                        raise StageLConsumerHold('original replay owner or K changed')
+                    input_guard()
+
+                class OriginalWindow:
+                    project_identity = store.project_identity
+                    project_key = store.project_key
+                    scope = store.scope
+                    root_status_dir = store.root_status_dir
+                    records_dir = store.records_dir
+
+                    def _require_gate(self):
+                        guard()
+
+                    def _read_witness(self):
+                        guard()
+                        return cutoff
+
+                    def _record_groups(self):
+                        guard()
+                        return {n: dict(groups[n]) for n in range(1, cutoff + 1)}
+
+                    def _path(self, sequence, kind):
+                        guard()
+                        if type(sequence) is not int or not 1 <= sequence <= cutoff:
+                            raise StageLConsumerHold('sequence is outside the original admitted window')
+                        return groups[sequence][kind]
+
+                    def start_path(self, sequence):
+                        return self._path(sequence, 'start')
+
+                    def launch_path(self, sequence):
+                        return self._path(sequence, 'launch')
+
+                    def completion_path(self, sequence):
+                        return self._path(sequence, 'completion')
+
+                    def _validate_start_record(self, *args):
+                        guard()
+                        return store._validate_start_record(*args)
+
+                    def _validate_launch_record(self, *args):
+                        guard()
+                        return store._validate_launch_record(*args)
+
+                    def _validate_completion_record(self, *args):
+                        guard()
+                        return store._validate_completion_record(*args)
+
+                try:
+                    result = qualify_prod_stage_l(OriginalWindow(), **arguments)
+                    for field, expected in (
+                        ('cycle_ids', list(result.cycle_ids)),
+                        ('completion_sha256', list(result.completion_sha256)),
+                        ('source_authority_sha256', result.source_authority_sha256),
+                        ('observations_sha256', result.observations_sha256),
+                        ('k_event_sha256', result.k_event_sha256),
+                        ('whitelist_sha256', result.whitelist_sha256),
+                        ('project_key', result.project_key), ('scope', result.scope),
+                        ('mode', result.mode), ('k', result.k),
+                        ('recorded_at_utc', result.recorded_at_utc),
+                        ('whitelist_skips', [_runtime_skip(s) for s in result.whitelist_skips]),
+                    ):
+                        if source[field] != expected:
+                            raise StageLConsumerHold('native replay differs from original C6 source')
+                    if (type(result) is not ProdStageLQualifiedSet or result.qualified is not True
+                            or result.template_sha256 != template
+                            or read_completed_cycle_evidence(store) != cycles
+                            or receipts.read_local_receipt_history(writer_token, store, **history_context) != history
+                            or read_whitelist_workbook(whitelist_path) != whitelist_snapshot):
+                        raise StageLConsumerHold('original replay chain changed before return')
+                    guard()
+                    original_guard()
+                finally:
+                    active = False
+        return result
+    except (OSError, TypeError, KeyError, IndexError, AttributeError, RuntimeError, ValueError) as exc:
+        if isinstance(exc, StageLConsumerHold):
+            raise
+        raise StageLConsumerHold('original receipted source replay is unsafe') from exc
+    finally:
+        active = False
 
 
 def require_complete_stage_l_sources(

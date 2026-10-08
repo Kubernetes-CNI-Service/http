@@ -3,6 +3,7 @@
 import unittest
 import importlib.util
 import hashlib
+import json
 import os
 import shutil
 from unittest import mock
@@ -244,6 +245,205 @@ class CurrentCycleReceiptSnapshotWorkflowTests(ProdStageLFixture):
                             os.rename(backup, target)
                     self.assertEqual(before, target.stat().st_ino)
         self._old_receipt_fixture(probe)
+
+
+    def _original_replay_args(self, token, original):
+        return dict(http_root=self.root, settings=current_k(token),
+                    whitelist_snapshot=self.snapshot, whitelist_path=self.template,
+                    expected_template_sha256=self.snapshot.workbook_sha256,
+                    local_generation_id=original.receipt.generation_id,
+                    writer_token=token)
+
+    def _old_two_cycle_receipt_fixture(self, probe):
+        """Native K=2 C5/C6 over cycles 1+2, then protected cycle 3 without C6.
+
+        Keep the existing K=1 fixture and all its assertions untouched. The
+        independent replay contract requires an actual two-cycle original,
+        not changing its expected K to match the one-cycle fixture.
+        """
+        import datetime as dt
+        from monitor import issue_tracker_local_workbook_commit as workbooks
+        from monitor.collection_ib_producer import produce_worker_ib_analysis
+        from test_cases import test_issue_tracker_switch_runtime_workflow as switch_fixture
+        from tools.project_contract import build_collection_cycle_identity
+        verifier = source_workflow.ProdStageLConsumerWorkflowTests._verify_two_cycle_latest_local_commit
+        commit = workbooks.commit_prod_stage_l_workbook
+        originals = []
+
+        def capture_commit(*args, **kwargs):
+            result = commit(*args, **kwargs)
+            originals.append(result)
+            return result
+
+        def finish_original_and_advance(project, arguments, cycle_ids):
+            with mock.patch.object(workbooks, 'commit_prod_stage_l_workbook', side_effect=capture_commit):
+                verifier(self, project, arguments, cycle_ids)
+            self.assertEqual(1, len(originals))
+            identity = build_collection_cycle_identity(
+                str(project), 'prod', 3, '33333333333343338333333333333333')
+            binding = produce_worker_ib_analysis(
+                identity, project_root=project, http_root=self.root,
+                clock=lambda: dt.datetime(2026, 9, 26, 4, 42, tzinfo=dt.timezone.utc),
+                runner=lambda _argv: self.fail('transport is supplied by owned fixture'))
+            # Existing two-cycle source fixture deliberately has only TOKEN_1
+            # and TOKEN_2. Supply a distinct, literal third worker-mint input;
+            # do not weaken the native duplicate-token rejection.
+            with mock.patch.object(switch_fixture, 'TOKEN_2', identity['run_token']):
+                cycle, _ = self._cycle(
+                    activity=True, derivation=True, observed_peer='later-peer', ib_analysis=binding,
+                    fabric_templates={'ethernet/prod': 'tan-leaf', 'nvlink/prod': 'border-leaf'})
+            self.assertEqual(identity['cycle_id'], cycle['cycle_id'])
+            probe(originals[0])
+
+        with mock.patch.object(self, '_verify_two_cycle_latest_local_commit',
+                               side_effect=finish_original_and_advance, create=True):
+            self._exercise_real_protected_three_panel_fixture(
+                skip_history=False, two_cycle_changed_latest=True)
+
+    def _tracker_images(self):
+        return {p.relative_to(self.project).as_posix():
+                (p.stat().st_ino, hashlib.sha256(p.read_bytes()).hexdigest())
+                for p in (self.project / '.tracker').rglob('*') if p.is_file()}
+
+    def test_actual_old_c6_replays_its_original_protected_window_without_new_receipt_or_send(self):
+        from monitor import issue_tracker_stage_l_consumer as consumer
+        from monitor.issue_tracker_cycle_source import read_completed_cycle_evidence
+        from monitor.issue_tracker_receipt_snapshot import read_current_cycle_local_receipts
+
+        def probe(original):
+            generation = self.project / '.tracker/generations' / original.receipt.generation_id
+            raw = (generation / 'MANIFEST').read_bytes()
+            source = json.loads(raw)['qualified_source']
+            with tracker_writer(self.project, self.publication) as token:
+                before_cycles = read_completed_cycle_evidence(self.store)
+                self.assertNotEqual(source['cycle_ids'][-1], before_cycles[-1].cycle_id)
+                self.assertEqual(2, source['k'])
+                self.assertEqual(2, len(source['cycle_ids']))
+                images = self._tracker_images()
+                result = consumer.replay_original_receipted_prod_source(
+                    self.store, **self._original_replay_args(token, original))
+                self.assertIs(type(result), consumer.ProdStageLQualifiedSet)
+                self.assertEqual(tuple(source['cycle_ids']), result.cycle_ids)
+                self.assertEqual(tuple(source['completion_sha256']), result.completion_sha256)
+                self.assertEqual(source['source_authority_sha256'], result.source_authority_sha256)
+                self.assertEqual(source['observations_sha256'], result.observations_sha256)
+                self.assertEqual(source['k_event_sha256'], result.k_event_sha256)
+                self.assertEqual('prod-runtime-protected-v1', result.mode)
+                self.assertEqual('prod', result.scope)
+                self.assertFalse(hasattr(result, 'permit'))
+                self.assertFalse(hasattr(result, 'send_authority'))
+                self.assertEqual(before_cycles, read_completed_cycle_evidence(self.store),
+                                 'historical projection must not escape replay scope')
+                current = read_current_cycle_local_receipts(token, self.store,
+                    expected_template_sha256=self.snapshot.workbook_sha256,
+                    settings=current_k(token), whitelist_sha256=self.snapshot.whitelist.sha256)
+                self.assertEqual((0, ()), (current.published, current.generation_ids))
+            self.assertEqual(images, self._tracker_images())
+            self.assertEqual(raw, (generation / 'MANIFEST').read_bytes())
+        self._old_two_cycle_receipt_fixture(probe)
+
+    def test_old_replay_refuses_unproved_generation_config_and_owner_before_native_qualification(self):
+        from dataclasses import replace
+        from monitor import issue_tracker_stage_l_consumer as consumer
+
+        def probe(original):
+            before = self._tracker_images()
+            with tracker_writer(self.project, self.publication) as token:
+                args = self._original_replay_args(token, original)
+                variants = (
+                    {'local_generation_id': 'gen-00000000000000000099-' + 'f' * 32},
+                    {'expected_template_sha256': '0' * 64},
+                    {'settings': replace(args['settings'], k=3)},
+                    {'writer_token': object()},
+                )
+                with mock.patch.object(consumer, 'qualify_prod_stage_l') as native:
+                    for variant in variants:
+                        with self.subTest(invalid=tuple(variant)), self.assertRaises(consumer.StageLConsumerHold):
+                            consumer.replay_original_receipted_prod_source(self.store, **{**args, **variant})
+                native.assert_not_called()
+            self.assertEqual(before, self._tracker_images())
+        self._old_two_cycle_receipt_fixture(probe)
+
+    def test_old_replay_scoped_cycle_view_is_revoked_on_return(self):
+        from monitor import issue_tracker_stage_l_consumer as consumer
+        from monitor.issue_tracker_cycle_source import read_completed_cycle_evidence
+
+        def probe(original):
+            native = consumer.qualify_prod_stage_l
+            views = []
+            def capture_view(store, **kwargs):
+                self.assertIsNot(store, self.store)
+                views.append(store)
+                return native(store, **kwargs)
+            with tracker_writer(self.project, self.publication) as token:
+                before = read_completed_cycle_evidence(self.store)
+                with mock.patch.object(consumer, 'qualify_prod_stage_l', side_effect=capture_view):
+                    consumer.replay_original_receipted_prod_source(
+                        self.store, **self._original_replay_args(token, original))
+                self.assertEqual(1, len(views))
+                with self.assertRaises(ValueError):
+                    read_completed_cycle_evidence(views[0])
+                self.assertEqual(before, read_completed_cycle_evidence(self.store))
+        self._old_two_cycle_receipt_fixture(probe)
+
+    def test_old_replay_pins_current_high_water_even_when_original_window_is_unchanged(self):
+        from monitor import issue_tracker_stage_l_consumer as consumer
+
+        def probe(original):
+            witness = self.store.witness_path
+            raw = witness.read_bytes()
+            native = consumer.qualify_prod_stage_l
+            reached = []
+            def replace_current_witness(*args, **kwargs):
+                result = native(*args, **kwargs)
+                replacement = witness.with_name('owned-replay-new-witness')
+                replacement.write_bytes(raw)
+                replacement.chmod(witness.stat().st_mode & 0o777)
+                witness.rename(self.project / 'owned-original-current-witness')
+                replacement.rename(witness)
+                reached.append(True)
+                return result
+            with tracker_writer(self.project, self.publication) as token:
+                with mock.patch.object(consumer, 'qualify_prod_stage_l', side_effect=replace_current_witness):
+                    with self.assertRaises(consumer.StageLConsumerHold):
+                        consumer.replay_original_receipted_prod_source(
+                            self.store, **self._original_replay_args(token, original))
+                self.assertEqual([True], reached)
+            self.assertEqual(raw, witness.read_bytes())
+            self.assertEqual(raw, (self.project / 'owned-original-current-witness').read_bytes())
+        self._old_two_cycle_receipt_fixture(probe)
+
+    def test_old_replay_does_not_adopt_same_byte_manifest_replacement_after_native_qualification(self):
+        from monitor import issue_tracker_stage_l_consumer as consumer
+        from monitor.issue_tracker_cycle_source import read_completed_cycle_evidence
+
+        def probe(original):
+            manifest = self.project / '.tracker/generations' / original.receipt.generation_id / 'MANIFEST'
+            raw = manifest.read_bytes()
+            native = consumer.qualify_prod_stage_l
+            reached = []
+            def replace_after_native(*args, **kwargs):
+                result = native(*args, **kwargs)
+                replacement = manifest.with_name('owned-replay-replacement')
+                replacement.write_bytes(raw)
+                replacement.chmod(0o600)
+                preserved = self.project / 'owned-old-replay-original-manifest'
+                manifest.rename(preserved)
+                replacement.rename(manifest)
+                reached.append(True)
+                return result
+            with tracker_writer(self.project, self.publication) as token:
+                before_cycles = read_completed_cycle_evidence(self.store)
+                with mock.patch.object(consumer, 'qualify_prod_stage_l', side_effect=replace_after_native):
+                    with self.assertRaises(consumer.StageLConsumerHold):
+                        consumer.replay_original_receipted_prod_source(
+                            self.store, **self._original_replay_args(token, original))
+                self.assertEqual([True], reached, 'fault must reach actual protected native replay')
+                self.assertEqual(before_cycles, read_completed_cycle_evidence(self.store))
+            self.assertEqual(raw, manifest.read_bytes())
+            self.assertEqual(raw, (self.project / 'owned-old-replay-original-manifest').read_bytes())
+        self._old_two_cycle_receipt_fixture(probe)
+
 
 
 if __name__ == "__main__":
