@@ -3906,9 +3906,23 @@ def _restore_pending_infra_log_backup(source, destination):
     _rename_infra_log_dir_noreplace(backup, source)
 
 
+def _require_infra_log_wal_authority():
+    if _SETUP_SWITCH_WAL_CONTEXT is None:
+        return
+    load_api, descriptor = _SETUP_SWITCH_WAL_CONTEXT[:2]
+    try:
+        load_api['recover_setup_switch_journal'](
+            Path(ZTP) / '.setup-switch-journal.json',
+            deployment_lock_descriptor=descriptor, services_quiesced=True,
+            runtime_backend=load_api['service_runtime_backend'](), inspect_only=True)
+    except load_api['LoadError'] as exc:
+        raise SetupSwitchAuthorityHold(f'infra logs 原始成员写前权限变化；HOLD: {exc}') from exc
+
+
 def _migrate_infra_log_tree(source, destination, relative_target):
     """Copy by no-clobber hardlink, verify, retain the original dir to commit."""
     global _INFRA_LOG_MIGRATION
+    _require_infra_log_wal_authority()
     backup = _infra_log_backup_path(destination)
     if os.path.lexists(backup):
         raise ValueError("日志迁移备份位置冲突")
@@ -3917,7 +3931,9 @@ def _migrate_infra_log_tree(source, destination, relative_target):
         _preflight_empty_log_destination(destination)
         inventory = _preflight_infra_log_tree(source, destination)
         receipt = _infra_log_receipt_document(source, destination, inventory)
+        _require_infra_log_wal_authority()
         _publish_infra_log_receipt(receipt)
+        _require_infra_log_wal_authority()
     else:
         _verify_infra_log_receipt(receipt, source, destination)
         inventory = _preflight_infra_log_tree(source, destination, receipt)
@@ -3929,7 +3945,9 @@ def _migrate_infra_log_tree(source, destination, relative_target):
         if kind == "dir":
             target = os.path.join(destination, relative)
             if not os.path.lexists(target):
+                _require_infra_log_wal_authority()
                 os.mkdir(target)
+                _require_infra_log_wal_authority()
             elif not stat.S_ISDIR(os.lstat(target).st_mode):
                 raise ValueError(f"日志迁移目录冲突：{relative}")
     for relative in sorted(receipt["entries"]):
@@ -3939,7 +3957,9 @@ def _migrate_infra_log_tree(source, destination, relative_target):
         if _infra_log_file_signature(source_file) != expected:
             raise ValueError(f"日志迁移源内容已变化：{relative}")
         if not os.path.lexists(target_file):
+            _require_infra_log_wal_authority()
             os.link(source_file, target_file, follow_symlinks=False)
+            _require_infra_log_wal_authority()
         source_info, target_info = os.lstat(source_file), os.lstat(target_file)
         if ((source_info.st_dev, source_info.st_ino)
                 != (target_info.st_dev, target_info.st_ino)
@@ -3952,13 +3972,25 @@ def _migrate_infra_log_tree(source, destination, relative_target):
         raise ValueError("日志迁移原目录身份发生变化")
     if os.path.lexists(backup):
         raise ValueError("日志迁移备份位置冲突")
+    _require_infra_log_wal_authority()
     _rename_infra_log_dir_noreplace(source, backup)
     try:
+        if _SETUP_SWITCH_WAL_CONTEXT is not None:
+            _fsync_directory(os.path.dirname(source))
+            _fsync_directory(os.path.dirname(backup))
+        _require_infra_log_wal_authority()
         moved = os.lstat(backup)
         if (moved.st_dev, moved.st_ino) != (identity.st_dev, identity.st_ino):
             raise ValueError("日志迁移备份未保留原目录身份")
         os.symlink(relative_target, source)
+        if _SETUP_SWITCH_WAL_CONTEXT is not None:
+            _fsync_directory(os.path.dirname(source))
+        _require_infra_log_wal_authority()
     except BaseException:
+        if _SETUP_SWITCH_WAL_CONTEXT is not None:
+            # The global guarded WAL restore owns the mixed state. An unknown
+            # member may not license eager per-name reversal of this rename.
+            raise
         if not os.path.lexists(source) and os.path.lexists(backup):
             _rename_infra_log_dir_noreplace(backup, source)
         raise

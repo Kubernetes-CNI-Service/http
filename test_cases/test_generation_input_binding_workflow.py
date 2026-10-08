@@ -7668,6 +7668,69 @@ finally:
             self.assertFalse(os.path.lexists(journal))
             self.assertFalse((root / "service-started").exists())
 
+    def test_real_setup_infra_writer_replaced_original_member_holds_before_receipt_or_copy(self):
+        self._assert_real_infra_writer_original_member_holds(after_receipt=False)
+
+    def test_real_setup_infra_writer_member_after_receipt_holds_before_copy(self):
+        self._assert_real_infra_writer_original_member_holds(after_receipt=True)
+
+    def _assert_real_infra_writer_original_member_holds(self, *, after_receipt):
+        with tempfile.TemporaryDirectory(prefix='r22-infra-writer-original-') as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, _p, q, _common, _p_only, _q_only, manifest, before, hook, barrier, _home = fixture
+            source = root / 'infra/logs'; source.mkdir()
+            payload = b'independent original infra writer\n'
+            (source / 'audit.log').write_bytes(payload)
+            original = (source / 'audit.log').stat().st_ino
+            site = hook / 'sitecustomize.py'
+            site.write_text(site.read_text() + r'''
+import json, sys
+def mutate_original_infra_once():
+    journal = Path(os.environ['HTTP_TEST_ORIGINAL_INFRA_WAL'])
+    marker = journal.parent / 'infra-writer-original-replaced'
+    if not marker.exists():
+        evidence = journal.read_bytes()
+        body = json.loads(evidence)['body']
+        if body.get('infra_logs'):
+            path = Path(body['infra_logs'][0]['source']) / 'audit.log'
+            path.rename(journal.parent.parent / 'operator-original-writer.log')
+            path.write_bytes(b'independent original infra writer\n')
+            marker.write_bytes(evidence)
+def replace_original_infra_at_writer_call(frame, event, arg):
+    if not frame.f_code.co_filename.endswith('01-a-setup.py'):
+        return
+    before = (event == 'call' and frame.f_code.co_name == '_migrate_infra_log_tree'
+              and os.environ['HTTP_TEST_INFRA_AFTER_RECEIPT'] == 'no')
+    after = (event == 'return' and frame.f_code.co_name == '_publish_infra_log_receipt'
+             and os.environ['HTTP_TEST_INFRA_AFTER_RECEIPT'] == 'yes')
+    if before or after:
+        mutate_original_infra_once()
+sys.setprofile(replace_original_infra_at_writer_call)
+''', encoding='utf-8')
+            journal = root / 'ztp/.setup-switch-journal.json'
+            with mock.patch.dict(os.environ, {'HTTP_TEST_ORIGINAL_INFRA_WAL': str(journal),
+                                             'HTTP_TEST_INFRA_AFTER_RECEIPT': 'yes' if after_receipt else 'no'}):
+                result = self._run_private_load_setup_switch(fixture, prepare_journal=True,
+                    kill_after_hardlink=q / '99-output-infra/audit.log')
+            self.assertEqual(24, result.returncode, result.stdout + result.stderr)
+            self.assertFalse(barrier.exists(), 'replaced original was copied before HOLD')
+            frozen = (journal.parent / 'infra-writer-original-replaced').read_bytes()
+            self.assertEqual(frozen, journal.read_bytes())
+            self.assertEqual(before['manifest'], manifest.read_bytes())
+            self.assertEqual(original, (root / 'operator-original-writer.log').stat().st_ino)
+            self.assertNotEqual(original, (source / 'audit.log').stat().st_ino)
+            self.assertEqual(payload, (source / 'audit.log').read_bytes())
+            self.assertEqual(payload, (root / 'operator-original-writer.log').read_bytes())
+            self.assertFalse(source.is_symlink())
+            self.assertFalse((q / '99-output-infra/.logs-migration-source').exists())
+            receipt = root / 'infra/.logs-migration.json'
+            if after_receipt:
+                self.assertEqual({'size': len(payload), 'sha256': hashlib.sha256(payload).hexdigest()},
+                                 json.loads(receipt.read_bytes())['entries']['audit.log'])
+            else: self.assertFalse(receipt.exists())
+            self.assertFalse((q / '99-output-infra/audit.log').exists())
+            self.assertFalse((root / 'service-started').exists())
+
     def test_real_setup_infra_log_partial_copy_death_cold_removes_owned_hardlink(self):
         """Receipt plus an interrupted first Q hardlink can restore exact P."""
         with tempfile.TemporaryDirectory(prefix="r22-real-infra-copy-") as name:

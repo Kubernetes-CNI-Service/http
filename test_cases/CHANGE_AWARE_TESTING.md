@@ -3127,3 +3127,26 @@ marker 最后移，原九字段名字/FD、完整字节及既有健康/停服围
 弱化断言、延长 timeout 或手改 ledger。现有 manifest direct/真实 workflow 覆盖不变。
 实体 infra/logs hardlink 与将来的 Q 写入必须先安全隔离，再完成原备份/receipt 归档；
 该缺口与当前精确树正式 related/full/check 尚未关闭，不能把此窄修称为完整 R22 或真机验收。
+
+### 2026-10-08 R22 infra/logs 原始成员 writer 边界
+
+WAL 登记后同字节新 inode 替换原日志，旧 SETUP 仍复制该未知对象；direct 和真实
+LOAD→SETUP 两项 RED（`r22-infra-writer-original-red.log`，inode 163787776、size 2788、
+SHA256 `e6d0a63dd44fbf2acbdb96e36e9e0cfa8f344fa57c27ef55976244b9f2ad6ce5`，2 tests、2 FAIL、exit/END=1）。
+全 WAL inspect 门禁覆盖 receipt、mkdir/link、源 rename、指针前后；未知 mixed 盘面
+不再自动 eager 反向 rename。首轮 GREEN 的真实夹具在首次 WAL 登记捕获过早，后续
+合法登记改变 WAL，原断言失败并保留日志；改到实际迁移调用前后未改证据保留断言。
+两项最终 GREEN 日志 `-green-writer-boundary.log` inode 163793489、size 965、SHA256
+`e01e2229b1acb62f499d657b8c8a6d9a6c4ba6d8ae257ace1f17441284cf2327`，2 tests、OK、exit/END=0。
+
+追加 receipt 后原成员换 inode 两项，并执行原 infra/materialized、文档、完整 REQ23
+及 REQ19 模块。首轮 `r22-original-members-infra-writer-boundaries-regressions.log` inode
+163795944、size 46556、SHA256 `e40d0f553efd6293ebfda839fb058007b4e66ca0aec2490a7c827b1ee0e93b39`，
+190 tests、1 FAIL、exit/END=1：新 workflow 错误拦截 os.replace，但真实 receipt 是
+独占创建+fsync，故未注入。改为实际发布函数 return 屏障，不改变任何原预期或时限。
+修正整轮 `-regressions-corrected.log` inode 163871676、size 45183、SHA256
+`bf110fda2b1f6ce6032a287896c5db6ffde9664a18e3e7ffb2d59147e647d3c0`，190 tests in 178.130s、OK、exit/END=0。
+读前后 stat 稳定、原 25706 字节前缀 SHA256
+`0e186acf5379bbbf044c2fda9103ab11c27a7743e92304076ed5ced833ee828a` 不变，物理 Ran→OK→退出→END 已核实。
+现有 manifest direct/workflow 映射未变；未手改 ledger。该局部回归不是正式证明；
+Q 独立副本及 B 原 backup/receipt 归档继续推进，真机卡仍 OPEN。

@@ -1634,6 +1634,17 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 ## TC-REAL-R22-GENERATION-INPUT-ABA-001 — 跨进程输入换代与多输出一致性
 
+- 2026-10-08 infra/logs writer 原始成员写前门禁补充，仍 OPEN / NOT RUN：沿本卡
+  原隔离 VM、可恢复快照、精确版本、排他锁、已停服务与正常写者静默前提，分别在
+  WAL 登记完成后、真实 receipt 独占创建并同步返回后，保留原日志文件 inode，在同名
+  创建逐字节相同的另一 inode。真实 SETUP 必须在 receipt 前或第一份 Q 副本前 HOLD；
+  后者应保留已合法写出的原 receipt，不冒称零先前写入。保存注入屏障、原/新成员
+  dev/ino/完整元数据与 SHA、WAL/receipt/manifest、完整退出 END 和未启动服务见证。
+  writer 在每次 mkdir/link、目录迁移、指针发布前后检查完整 WAL 盘面；未知状态不能
+  获得 eager 反向 rename 权限。封存后仅按核实快照恢复，不删除未知对象解围。
+  本机 direct 与实际 LOAD→SETUP workflow 先 RED 后 GREEN；局部回归不替代当前
+  精确树 related/full/check，也不关闭 Q hardlink 隔离、B 全证据归档、Linux/断电或 DEV ACK。
+
 - 2026-10-08 B 实体 latest 证据归档补充，仍 OPEN / NOT RUN：原隔离 VM、精确版本、
   root-only 可恢复快照、排他锁、正常写者静默且启动前明确停服条件不变。Q manifest/
   parent/report/selector 完整提交后，显式 B 激活须本次真实预检与健康通过，role-B

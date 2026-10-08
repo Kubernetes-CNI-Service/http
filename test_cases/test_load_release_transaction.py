@@ -11862,6 +11862,55 @@ os.kill(os.getpid(), signal.SIGKILL)
         self.assertEqual(payload, original.read_bytes())
         state[12].start.assert_not_called()
 
+    def test_setup_infra_writer_replaced_original_member_holds_before_receipt_or_copy(self):
+        self._assert_infra_writer_original_member_holds(after_receipt=False)
+
+    def test_setup_infra_writer_member_after_receipt_holds_before_copy(self):
+        self._assert_infra_writer_original_member_holds(after_receipt=True)
+
+    def _assert_infra_writer_original_member_holds(self, *, after_receipt):
+        state = self._prepare_cross_project_setup_crash()
+        source = self.root.resolve() / 'infra/logs'
+        source.mkdir(parents=True)
+        payload = b'independent original infra writer\n'
+        (source / 'audit.log').write_bytes(payload)
+        destination = state[1].resolve() / '99-output-infra'; destination.mkdir()
+        journal, descriptor, backend = state[-3:]
+        with mock.patch.object(LOAD, 'active_managed_services', return_value=()):
+            backup = LOAD.register_setup_switch_infra_log_tree(journal, source, destination,
+                deployment_lock_descriptor=descriptor, services_quiesced=True, runtime_backend=backend)
+        saved = self.root / 'operator-original-writer.log'
+        original = (source / 'audit.log').stat().st_ino
+        def mutate():
+            (source / 'audit.log').rename(saved); (source / 'audit.log').write_bytes(payload)
+        publish_receipt = SETUP._publish_infra_log_receipt
+        def publish_then_mutate(document):
+            result = publish_receipt(document)
+            if after_receipt: mutate()
+            return result
+        if not after_receipt: mutate()
+        frozen = journal.read_bytes()
+        with mock.patch.object(LOAD, 'active_managed_services', return_value=()), \
+                mock.patch.object(SETUP, 'HTTP_BASE', str(self.root.resolve())), \
+                mock.patch.object(SETUP, 'ZTP', str(self.ztp)), \
+                mock.patch.object(SETUP, '_SETUP_SWITCH_WAL_CONTEXT', (vars(LOAD), descriptor)), \
+                mock.patch.object(SETUP, '_publish_infra_log_receipt', side_effect=publish_then_mutate) as publish:
+            with self.assertRaisesRegex(ValueError, 'infra.*HOLD'):
+                SETUP._migrate_infra_log_tree(str(source), str(destination), os.path.relpath(destination, source.parent))
+        if after_receipt:
+            publish.assert_called_once()
+            receipt = self.root.resolve() / 'infra/.logs-migration.json'
+            self.assertEqual({'size': len(payload), 'sha256': hashlib.sha256(payload).hexdigest()},
+                             json.loads(receipt.read_bytes())['entries']['audit.log'])
+        else: publish.assert_not_called()
+        self.assertEqual(frozen, journal.read_bytes())
+        self.assertEqual(original, saved.stat().st_ino)
+        self.assertNotEqual(original, (source / 'audit.log').stat().st_ino)
+        self.assertEqual(payload, saved.read_bytes()); self.assertEqual(payload, (source / 'audit.log').read_bytes())
+        self.assertFalse(source.is_symlink()); self.assertFalse(os.path.lexists(backup))
+        self.assertEqual([], list(destination.iterdir()))
+        backend.start.assert_not_called()
+
     def test_setup_infra_recovery_wal_change_before_first_write_holds(self):
         self._assert_infra_recovery_late_authority_hold("wal", "first-write")
 
