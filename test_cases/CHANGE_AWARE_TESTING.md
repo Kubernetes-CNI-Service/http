@@ -3225,3 +3225,46 @@ SHA256 `7f0d565d21c53eeb5e81c4c6be288c122e75df73c8f0a6f5cfe508d582a0cbd3`，2 te
 新两项保留空原备份目录 inode、原 receipt inode/字节、没有伪造 clone 的独立预期。
 全部读前后 stat/inode、物理 Ran/结果/实际 exit/END 已核实；216 项的先前候选不是
 最后两行空集修正后的全量证明，须继续正式 runner。原所有失败日志/断言均保留。
+
+### 2026-10-08 原全量失败的因果分析与测试边界修复
+
+原 `ff86c7e` / tree `fdf998f6375fc40f9e4282f1634b6f516ef54cff` 的 related
+选择为 canonical full-suite：5558 tests in 8708.356s，1 FAIL / 2 ERROR / 5 SKIP，
+实际 exit/END=1，runner 未更新批准。原日志
+`outputs/test-diagnostics/r22-req23-ff86c7e-related.log` inode 164175878、size 820316、
+SHA256 `b669022fc2a4d0f38e52b3485db68d55e57d1b37c48eb465a62585370e4dfb6f`
+保留，不用单项复跑 GREEN 替代失败分析或正式证明。
+
+1. managed-key late orphan 夹具先写入未登记 flat P key，正确的通用 WAL 门禁先拒绝，
+   根本没有达到晚到 runtime orphan 注入点。晚到测试改用原 WAL 已登记的 exact Q
+   link；独立增加原 flat 替换 direct/真实多进程负例，保持原字节/inode、零恢复/零启动
+   预期。孤儿测试必须出现精确拒绝原因，不能用任意早拒绝冒充目标分支通过。
+2. materialized temp collision direct 夹具传空 LOAD API，真实写前重资格先 KeyError，
+   没到冲突。补齐独立 API double 并断言锁、停服、backend、inspect_only、原源/backup
+   inode、两次资格顺序；另外真实 LOAD→SETUP→冷 LOAD 在已登记 temp 被未知对象
+   抢占时证明原 WAL 不变、原 backup inode 保留、未知对象不删除且冷恢复 HOLD。
+   double 仅证明 direct 调用边界，不冒充真实 WAL reader。
+3. Monitor 原单项 GREEN 不闭因果：向原 holder 启动阶段注入 1 秒延迟，在三个真实
+   shell 入口均复现 PID 缺失而 capture 已拒绝的同型失败；诊断日志
+   `ff86c7e-monitor-startup-cause-red.log` inode 165314269、size 2776、SHA256
+   `87c2bb65e9323791c2896acfaa91ee799a9c8f472bd042c63f523f06679ab6c4`，
+   1 test / 3 FAIL、exit/END=1。修正为 fixture 先 arming、实际 capture FIFO 再握手，
+   核原 Popen PID、escaped session、held/named FIFO dev/ino；保留 0.75 秒 reader、
+   外层 3 秒与实测小于 2 秒边界，仍模拟清理失败且要求活跃 holder 后 fail closed。
+   增加 0/1 秒启动对照；生产 shell 与计时器不改、不等待 readiness。原失败时的
+   OS 启动耗时未记录，不能宣称已证明具体 OS 调度原因。
+
+扩大回归覆盖完整 setup-switch、Monitor、REQ23 两模块，以及相关 R22 direct 和真实
+跨脚本正负例，104 tests in 151.227s、OK、exit/END=0、CODE_FREEZE_MATCH=True。
+日志 `outputs/test-diagnostics/ff86c7e-full-cause-repair-regression.log` inode 165324852、
+size 27781、SHA256 `7f86a72329dd08ae954c373c68dda126db598a9809c295d9030782c794dc2a8f`；
+旧 6883 字节前缀 SHA256
+`5e2eb7d3aaa2cde3515781e996e5ec16762181299fdebfae780f5e00e81749d7` 未变。
+此回归不是批准或正式 full。上述模块保持既有 manifest direct/workflow 映射，没有忽略
+路径、新生产脚本、删跳弱化断言或手改 ledger。review/commit 后执行当前树正式 full；
+相关选择本身若为全量，单次明确 `--all -v` 覆盖该超集，不为了两个名称重复跑完整 discovery。
+只有 runner 成功自动产生的 ledger 才单独提交，并以 `--check --require-full` 复核。
+
+现场验证按 `REAL_ENVIRONMENT.md` 顶部 owner 确认的风险分级矩阵缩减：合并等价重复
+组合，暂缓本轮高成本物理断电，保留核心 Linux/root/恢复/安全状态与真实设备边界。
+缩减现场计划不缩减本地自动化或 full/check，也不新增任何现场 PASS 或部署授权。

@@ -1,5 +1,27 @@
 # Real-environment acceptance cases
 
+## 2026-10-08 owner 确认的现场验证缩减范围
+
+owner 在 TEST 会话明确要求采用此前建议的代表性验证并将规则加入周期任务。
+以下是**验收计划缩减**，不是执行证据、测试豁免或部署授权；本文件旧卡片的详细
+故障清单继续作为自动化/扩展场景目录，不再要求现场逐项穷举同机制组合。
+本地独立预期、direct、真实跨脚本 workflow、现有测试及精确树正式 full/check 不变。
+
+| 范围 | 现场保留 | 合并或暂缓 | 替代证据与剩余风险 |
+| --- | --- | --- | --- |
+| R22 正常流程 | Linux/root 实际 LOAD→SETUP→Q 提交/健康，以及旧 A 显式激活；确认共享写集与服务状态 | 相同故障机制的对象/错误组合不重复穷举 | 当前版本 direct/workflow/manifest 与 full/check；本地夹具不能证明真实 uid、服务及文件系统行为 |
+| R22 中断/冷恢复 | 四个代表性窗口：首个共享写之后、Q manifest 提交后且健康确认前、旧 A 部分恢复、归档部分完成；由新进程恢复，核对原 inode/字节、WAL/receipt、未知对象保留与不误启动 | 同一持久状态和恢复路径的其它 rename/write/fsync 插入点合并；不同提交状态不得互相替代 | 引用对应窗口的自动化与原日志，并说明等价性；仍保留权限、数据丢失、不可恢复写入和核心恢复能力负例 |
+| 物理断电/特殊硬件/长周期 | 保留未验证范围和风险登记 | 本轮现场计划暂缓高成本物理断电，不作为本地落地或本地 full 的前置；特殊硬件/长周期同样列待确认暂缓 | SIGKILL/正常重启只能证明进程恢复，不能证明掉电持久性、磁盘写缓存或 torn write；不宣称通过或永久免责，后续生产风险接受须另有明确确认 |
+| C2 与 DEV ACK | 实际使用 C2 时保留同代消费者与失败安全状态代表性见证；保留研发对 exact 版本/合同/残余风险的 ACK | 未使用 C2 的额外现场组合不成为当前本地证明的执行要求；不推断整个 C2 已验收 | 本地 C2 测试与精确版本记录；未取得实际见证/ACK 的部分仍 OPEN，不擅自跨会话协调 |
+| REQ23 | 真实 Linux 导入最新与显式旧套件、default 排除、child/parent/report 同源，以及真实测试设备取回；保留来源身份、错误选择和最终提交/DHCP 回滚三类代表性拒绝 | 同一拒绝机制的字段排列、成员/别名和平台重复组合由已覆盖自动化承担，不逐项现场重演 | direct 与真实多脚本 workflow、完整 full/check；模拟取回不证明真实设备行为，Linux/设备授权仍单独取得 |
+| 后续类似需求/修复 | 正常流程、关键提交边界、代表性中断、冷恢复和失败安全状态 | 仅在机制、持久状态和恢复路径等价且已有自动化覆盖时合并重复现场组合；不同权限/数据风险不合并 | 每次记录保留/合并/暂缓项、理由、版本化替代证据、残余风险与确认人；未确认风险不标为已接受 |
+
+确认人：本任务 owner；确认来源：2026-10-08 当前 TEST 会话“记得把你前面建议的
+验证范围做缩减”。确认的是上述计划，现场执行结果仍 NOT RUN。执行者须把每个
+代表性窗口实际覆盖的旧卡片步骤、等价理由和日志逐项登记；不能凭低概率省略需求核心
+恢复、数据/权限边界或服务误启动验证。已有真实证据可同版引用，但不得套用旧 full proof。
+本轮不执行任何服务器、服务/网络变更或部署；原现场授权、可恢复快照与发布门禁不变。
+
 ## TC-REAL-MONITOR-LOOPBACK-PROXY-001 — 本机 SSH stdio 监控代理
 
 - 类型：real-environment / browser / SSH；状态：**OPEN / NOT RUN / REAL_ENV REQUIRED**。
@@ -887,6 +909,11 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 ## TC-REAL-MONITOR-AUTHORITY-001 — 固定 Monitor cache authority 与生命周期保留
 
+- 2026-10-08 本地 reader 夹具修正：私有 escaped holder 先准备完成，再经实际 capture
+  FIFO 握手持有真实 stdout FD；PID/session 与 FIFO dev/ino 均独立核对。保留 reader
+  0.75 秒、外层 3 秒及实测小于 2 秒的原边界，并加入 1 秒启动延迟对照。此准备阶段
+  不延后生产计时器，不证明原失败时 OS 的确切调度原因；现场仍需实际 Linux timeout、
+  进程组和拒绝清理的代表性见证，不以本地 fixture 代替 root 生命周期或物理断电。
 - 前置条件：隔离 Ubuntu 22.04/24.04 Native 与 local-rootful Docker contract-3 管理服务器各一套；
   `www-data` 的 uid/gid 均须为 33，已保存 Apache/systemd/Supervisor、container/image ID、相关
   mount、`/var/lib/http-ztp` 和目标 authority 的初始 `stat`/inode/hash。只能由获批 root 操作员
@@ -1633,6 +1660,13 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - 证据与清理：保存脱敏精确 argv/exit、两次语法检查和启动前门禁、stage/live 文件 dev/ino/mode/size/SHA、release/manifest、服务 PID/监听与失败回滚时间线；仅恢复隔离项目及 VM 快照并核对前像。没有真实 AppArmor/ISC DHCP 正负见证、完整回滚或 owner 现场授权时保持 NOT RUN，不宣称生产验收。
 
 ## TC-REAL-R22-GENERATION-INPUT-ABA-001 — 跨进程输入换代与多输出一致性
+
+- 2026-10-08 全量失败边界补充：未列入 WAL 的 flat 公钥替换须在 P/Q 资格门禁拒绝，
+  不进入 runtime restore；已登记的合法 Q key link 才用于晚到 orphan/retirement 场景。
+  两类 direct/真实 LOAD→SETUP→冷 LOAD 负例分开保留。真实 materialized latest
+  临时名在 WAL 登记与源 rename 后被未知对象抢占时，须保留原 WAL、原 backup inode
+  及未知字节，并阻断冷恢复，不能从当前对象补造 owner。现场按顶部四个代表性窗口
+  合并等价组合，本地自动化不缩减；仍不宣称 Linux/root、掉电/C2/DEV ACK 已通过。
 
 - 2026-10-08 B 原 infra 备份/receipt 全证据归档补充，真机仍 OPEN / NOT RUN：
   沿本卡已授权隔离 VM、精确版本、排他锁、明确停服与正常写者静默前提，保存完整

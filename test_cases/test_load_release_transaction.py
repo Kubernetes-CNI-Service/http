@@ -6714,6 +6714,28 @@ class ReleaseTransactionTests(unittest.TestCase):
         self.assertEqual(b"A laptop key\n", key.read_bytes())
         backend.start.assert_not_called()
 
+    def test_setup_wal_unregistered_flat_key_holds_before_any_restore(self):
+        state, _context = self._prepare_persisted_a_runtime_switch(managed_key=True)
+        common, journal, descriptor, backend = state[2], *state[-3:]
+        common.unlink()
+        common.symlink_to(os.path.relpath(state[5], common.parent))
+        key = self.ztp / "config/publickey/laptop.pub"
+        key.unlink()
+        key.write_bytes(b"independent unregistered flat key\n")
+        before = (journal.lstat().st_ino, journal.read_bytes(), common.lstat().st_ino,
+                  os.readlink(common), key.lstat().st_ino, key.read_bytes())
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "_atomic_restore_setup_link") as links, \
+                mock.patch.object(LOAD, "restore_runtime_rollback_receipt") as runtime:
+            with self.assertRaisesRegex(LOAD.LoadError, "current link is not an approved P/Q value"):
+                LOAD.recover_setup_switch_journal(journal, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend, restore_runtime_from_wal=True)
+            links.assert_not_called()
+            runtime.assert_not_called()
+        self.assertEqual(before, (journal.lstat().st_ino, journal.read_bytes(), common.lstat().st_ino,
+                                 os.readlink(common), key.lstat().st_ino, key.read_bytes()))
+        backend.start.assert_not_called()
+
     def test_setup_wal_cold_recovery_holds_runtime_orphan_before_p_write(self):
         state, context = self._prepare_persisted_a_runtime_switch()
         common, journal, descriptor, backend = state[2], *state[-3:]

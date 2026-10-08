@@ -15,6 +15,7 @@ import json
 import os
 from pathlib import Path
 import re
+import select
 import shutil
 import shlex
 import signal
@@ -189,6 +190,73 @@ terminate_monitor_authority_capture_holders() {
   return 1
 }
 '''
+
+
+@contextmanager
+def armed_stdout_holder(root: Path, *, startup_delay: float = 0.0):
+    """Prepare a real escaped writer before measuring the unchanged reader bound.
+
+    Interpreter/fork startup is not evidence that the target reader boundary
+    was reached. The armed process acquires the *actual* capture FIFO only
+    when the real shell calls the handshake helper. No timeout timer waits
+    for readiness, and the capture has its original 0.75/3/2 second bounds.
+    """
+    if startup_delay not in (0.0, 1.0):
+        raise ValueError("holder startup delay is outside the fixed fixture matrix")
+    control, ready = root / "holder-control.fifo", root / "holder-ready.fifo"
+    os.mkfifo(control, 0o600)
+    os.mkfifo(ready, 0o600)
+    pid_file = root / "holder.pid"
+    helper = root / "attach-holder.sh"
+    helper.write_text("#!/bin/bash\nset -eu\n"
+        'directories=("$1"/http-ztp-monitor-decision.*)\n'
+        '[[ ${#directories[@]} == 1 && -d "${directories[0]}" ]]\n'
+        'printf "%s\\n" "${directories[0]}" >"$1/holder-control.fifo"\n'
+        'IFS= read -r holder_pid <"$1/holder-ready.fifo"\n'
+        '[[ "$holder_pid" =~ ^[1-9][0-9]*$ ]]\n', encoding="utf-8")
+    helper.chmod(0o700)
+    program = r'''
+import json, os, signal, stat, sys, time
+from pathlib import Path
+root = Path(sys.argv[1])
+time.sleep(float(sys.argv[2]))
+os.write(1, b'ARMED\n')
+with (root / 'holder-control.fifo').open() as control:
+    directory = Path(control.readline().rstrip('\n'))
+assert directory.parent == root and directory.name.startswith('http-ztp-monitor-decision.')
+descriptor = os.open(directory / 'stdout.pipe', os.O_WRONLY)
+os.dup2(descriptor, 1)
+os.close(descriptor)
+held, named = os.fstat(1), (directory / 'stdout.pipe').stat()
+assert stat.S_ISFIFO(held.st_mode)
+assert (held.st_dev, held.st_ino) == (named.st_dev, named.st_ino)
+(root / 'held-capture-fifo.json').write_text(json.dumps({
+    'pid': os.getpid(), 'session': os.getsid(0), 'path': str(directory / 'stdout.pipe'),
+    'held': [held.st_dev, held.st_ino], 'named': [named.st_dev, named.st_ino]}))
+(root / 'holder.pid').write_text(str(os.getpid()), encoding='ascii')
+os.write(1, b'restart-allowed:complete;reset-invalid-cache=false')
+with (root / 'holder-ready.fifo').open('w') as ready:
+    ready.write(str(os.getpid()) + '\n')
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+while True:
+    time.sleep(60)
+'''
+    process = subprocess.Popen([sys.executable, "-B", "-c", program, str(root), str(startup_delay)],
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        start_new_session=True, cwd=ROOT)
+    try:
+        if not select.select([process.stdout], [], [], 3.0)[0]:
+            raise AssertionError("private holder did not arm within the fixture setup bound")
+        if os.read(process.stdout.fileno(), 6) != b"ARMED\n":
+            raise AssertionError("private holder exited before arming")
+        yield helper, pid_file, process.pid
+    finally:
+        # The original Popen remains unreaped until termination: never signal
+        # a PID read from incident bytes after its process has been reaped.
+        process.kill()
+        process.wait(timeout=2.0)
+        process.stdout.close()
+        pid_file.unlink(missing_ok=True)
 
 
 def run_shell(
@@ -2782,40 +2850,12 @@ printf 'capture=%s rc=%s token=<%s>\\n' \
             ROOT / "infra/infra-teardown.sh",
             ROOT / "infra/docker/deploy.sh",
         )
-        token = "restart-allowed:complete;reset-invalid-cache=false"
-        for script in scripts:
-            with self.subTest(script=script.name), tempfile.TemporaryDirectory() as temporary:
+        for script, startup_delay in ((script, delay) for script in scripts for delay in (0.0, 1.0)):
+            with self.subTest(script=script.name, startup_delay=startup_delay), \
+                    tempfile.TemporaryDirectory() as temporary, \
+                    armed_stdout_holder(Path(temporary), startup_delay=startup_delay) as armed:
                 result_root = Path(temporary)
-                helper = result_root / "unkillable-holder.py"
-                holder_pid_file = result_root / "holder.pid"
-                helper.write_text(
-                    "#!/usr/bin/python3\n"
-                    "import os\n"
-                    "from pathlib import Path\n"
-                    "import signal\n"
-                    "import sys\n"
-                    "import time\n"
-                    f"os.write(1, {token.encode()!r})\n"
-                    "ready_read, ready_write = os.pipe()\n"
-                    "first = os.fork()\n"
-                    "if first:\n"
-                    "    os.close(ready_write)\n"
-                    "    os.read(ready_read, 1)\n"
-                    "    os._exit(0)\n"
-                    "os.close(ready_read)\n"
-                    "os.setsid()\n"
-                    "second = os.fork()\n"
-                    "if second:\n"
-                    "    os._exit(0)\n"
-                    "Path(sys.argv[1]).write_text(str(os.getpid()), encoding='ascii')\n"
-                    "os.write(ready_write, b'1')\n"
-                    "os.close(ready_write)\n"
-                    "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
-                    "while True:\n"
-                    "    time.sleep(60)\n",
-                    encoding="utf-8",
-                )
-                helper.chmod(0o755)
+                helper, holder_pid_file, original_holder_pid = armed
                 capture = (
                     decision_capture_shell(script, portable=False)
                     + failed_capture_holder_cleanup_shell()
@@ -2833,7 +2873,7 @@ printf 'capture=%s rc=%s token=<%s>\\n' \
                 harness = capture + f'''
 monitor_authority_result_directory() {{ printf '%s\\n' {shlex.quote(temporary)}; }}
 if capture_monitor_authority_decision \
-    {shlex.quote(os.fspath(helper))} {shlex.quote(os.fspath(holder_pid_file))}; then
+    {shlex.quote(os.fspath(helper))} {shlex.quote(temporary)}; then
   capture_state=accepted
   capture_rc=0
 else
@@ -2844,18 +2884,23 @@ printf 'capture=%s rc=%s token=<%s>\\n' \
   "$capture_state" "$capture_rc" "$monitor_authority_decision"
 '''
                 started = time.monotonic()
-                holder_pid = None
-                try:
-                    result = run_shell(harness, timeout_seconds=3)
-                    elapsed = time.monotonic() - started
-                    self.assertTrue(
-                        holder_pid_file.exists(),
-                        f"stdout={result.stdout!r} stderr={result.stderr!r}",
-                    )
-                    holder_pid = int(holder_pid_file.read_text(encoding="ascii"))
-                    os.kill(holder_pid, 0)
-                finally:
-                    cleanup_recorded_test_processes(holder_pid_file)
+                result = run_shell(harness, timeout_seconds=3)
+                elapsed = time.monotonic() - started
+                self.assertTrue(
+                    holder_pid_file.exists(),
+                    f"stdout={result.stdout!r} stderr={result.stderr!r}",
+                )
+                holder_pid = int(holder_pid_file.read_text(encoding="ascii"))
+                self.assertEqual(original_holder_pid, holder_pid)
+                os.kill(holder_pid, 0)
+                held = json.loads((result_root / "held-capture-fifo.json").read_text())
+                self.assertEqual(holder_pid, held["pid"])
+                self.assertEqual(holder_pid, held["session"], "holder must escape the capture command group")
+                self.assertEqual(held["held"], held["named"])
+                held_path = Path(held["path"])
+                self.assertEqual(result_root, held_path.parent.parent)
+                self.assertEqual("stdout.pipe", held_path.name)
+                self.assertTrue(held_path.parent.name.startswith("http-ztp-monitor-decision."))
                 self.assertGreaterEqual(elapsed, 0.20)
                 self.assertLess(elapsed, 2.0)
                 self.assertEqual(0, result.returncode, result.stderr)

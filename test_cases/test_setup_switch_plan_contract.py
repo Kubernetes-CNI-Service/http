@@ -116,6 +116,32 @@ class SetupSwitchPlanContractTests(unittest.TestCase):
         transaction = self.setup._SetupLinkTransaction((str(latest),))
         real_symlink = os.symlink
         registered = []
+        qualified = []
+        descriptor = object()
+        backend = object()
+
+        class IndependentLoadError(Exception):
+            pass
+
+        def qualify(journal, **guard):
+            # This direct double checks the caller's write boundary; the
+            # cross-process workflow tests exercise the actual WAL reader.
+            self.assertEqual(self.root / "ztp/.setup-switch-journal.json", journal)
+            self.assertEqual({"deployment_lock_descriptor": descriptor,
+                              "services_quiesced": True, "runtime_backend": backend,
+                              "inspect_only": True}, guard)
+            self.assertEqual([str(temporary)], registered)
+            owner = latest if not qualified else backup
+            self.assertEqual((original.st_dev, original.st_ino),
+                             (owner.stat().st_dev, owner.stat().st_ino))
+            self.assertEqual(b"hostname: independent-leaf\n", (owner / "leaf.yaml").read_bytes())
+            self.assertEqual(b"hostname: independent-leaf\n", (release / "leaf.yaml").read_bytes())
+            self.assertFalse(os.path.lexists(temporary))
+            qualified.append(owner)
+
+        context = ({"recover_setup_switch_journal": qualify,
+                    "service_runtime_backend": lambda: backend,
+                    "LoadError": IndependentLoadError}, descriptor, context[2], context[3])
 
         def register(path, target):
             self.assertEqual(str(temporary), path)
@@ -128,6 +154,8 @@ class SetupSwitchPlanContractTests(unittest.TestCase):
         def collide(source, destination, *args, **kwargs):
             self.assertEqual(str(temporary), destination)
             self.assertEqual([str(temporary)], registered)
+            self.assertEqual([latest, backup], qualified,
+                             "both guarded write boundaries must precede collision")
             temporary.write_bytes(b"LATE UNRELATED OBJECT\n")
             return real_symlink(source, destination, *args, **kwargs)
 
@@ -138,6 +166,7 @@ class SetupSwitchPlanContractTests(unittest.TestCase):
             with self.assertRaises(FileExistsError):
                 transaction.migrate_materialized_directory(str(latest), str(release))
         self.assertEqual(b"LATE UNRELATED OBJECT\n", temporary.read_bytes())
+        self.assertEqual([latest, backup], qualified)
         self.assertFalse(os.path.lexists(latest), "only guarded WAL recovery may restore")
         self.assertEqual((original.st_dev, original.st_ino),
                          (backup.stat().st_dev, backup.stat().st_ino))

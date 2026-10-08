@@ -526,6 +526,9 @@ finally:
             with self.subTest(kind=kind):
                 self._assert_real_persisted_a_runtime_switch(False, late_authority="key-orphan-" + kind)
 
+    def test_real_setup_death_unregistered_flat_key_holds_before_runtime_restore(self):
+        self._assert_real_persisted_a_runtime_switch(False, late_authority="key-orphan-flat")
+
     def test_real_setup_death_prefix_marker_foreign_stage_is_preserved(self):
         self._assert_real_persisted_a_runtime_switch(False, late_authority="prefix-stage")
 
@@ -805,7 +808,13 @@ common.symlink_to(os.path.relpath(q / '01-global.yaml', common.parent))
 if sys.argv[4] == 'late' and sys.argv[5].startswith('key-orphan-'):
     key = root / 'ztp/config/publickey/laptop.pub'
     key.unlink()
-    key.write_bytes(b'partial B flat key\\n')
+    if sys.argv[5] == 'key-orphan-flat':
+        key.write_bytes(b'partial B flat key\\n')
+    else:
+        # The original WAL already declares this exact Q target. A flat
+        # replacement is a different, earlier rejection boundary, not a
+        # valid starting state for runtime orphan/retirement coverage.
+        key.symlink_to(os.path.relpath(q / key.name, key.parent))
 if sys.argv[4] == 'late':
     (root / 'ztp/ztp-bootstrap_oobofoob.sh').write_bytes(b'partial B runtime\\n')
     (root / 'ztp/ztp.json').write_bytes(b'partial B runtime\\n')
@@ -1179,7 +1188,7 @@ load.active_managed_services = lambda *args, **kwargs: ()
 target = root / ('ztp/config/publickey/laptop.pub' if managed_key else 'ztp/ztp-bootstrap_oob.sh')
 orphan = target.parent / ('.' + target.name + ('.setup-rollback.independent-orphan' if managed_key
                                             else '.rollback-independent-orphan'))
-if kind == 'late':
+if kind in ('late', 'flat'):
     restore = load.restore_runtime_rollback_receipt
     def late_orphan(*args, **kwargs):
         result = restore(*args, **kwargs)
@@ -1199,12 +1208,21 @@ try:
 finally:
     load.release_deployment_lock(fd)
 '''
-                orphan_inode = orphan.lstat().st_ino if kind != "late" else None
+                orphan_inode = orphan.lstat().st_ino if kind in ("file", "dangling") else None
                 result = subprocess.run([sys.executable, "-B", "-c", recovery, str(root), kind,
                                          "key" if managed_key else "file"],
                     capture_output=True, text=True, check=False, timeout=30)
                 self.assertEqual(7, result.returncode, result.stdout + result.stderr)
                 self.assertEqual(wal_before, (journal.lstat().st_ino, journal.read_bytes()))
+                if kind == "flat":
+                    self.assertIn("current link is not an approved P/Q value", result.stdout)
+                    self.assertFalse((root / "runtime-orphan-injection.json").exists())
+                    self.assertFalse(os.path.lexists(orphan))
+                    self.assertFalse(target.is_symlink())
+                    self.assertEqual(b"partial B flat key\n", target.read_bytes())
+                else:
+                    self.assertIn("pending setup " + ("link" if managed_key else "runtime file") + " stage:",
+                                  result.stdout)
                 if kind == "late":
                     marker = json.loads((root / "runtime-orphan-injection.json").read_text())
                     self.assertEqual(marker["ino"], orphan.lstat().st_ino)
@@ -1219,6 +1237,9 @@ finally:
                     self.assertEqual(runtime_before, (runtime.lstat().st_ino, runtime.read_bytes()))
                     self.assertEqual(before, (common.lstat().st_ino, os.readlink(common), state[7].lstat().st_ino,
                                       state[7].read_bytes(), target.lstat().st_ino, target.read_bytes()))
+                    if kind == "flat":
+                        self.assertFalse((root / "service-started").exists())
+                        return
                     self.assertEqual(orphan_inode, orphan.lstat().st_ino)
                     if kind == "file":
                         self.assertEqual(b"independent unknown earlier runtime stage\n", orphan.read_bytes())
@@ -3798,7 +3819,7 @@ finally:
     def _assert_materialized_temp_cold_recovery(self, foreign_owner):
         with tempfile.TemporaryDirectory(prefix="r22-real-materialized-temp-") as name:
             fixture = self._private_setup_switch_fixture(Path(name))
-            root, _p, q, common, p_only, q_only, manifest, before, _hook, barrier, _home = fixture
+            root, _p, q, common, p_only, q_only, manifest, before, hook, barrier, _home = fixture
             output = q / "99-output-eth"
             latest, release = output / "latest", output / "20261007_010000_combine"
             for path in (latest, release):
@@ -3806,23 +3827,54 @@ finally:
                 (path / ".published-complete").write_bytes(b"complete\n")
                 (path / "leaf.yaml").write_bytes(b"hostname: independent-leaf\n")
             original = latest.stat()
-            first = self._run_private_load_setup_switch(
-                fixture, prepare_journal=True,
-                first_link_prefix=str(output / ".latest.tmp."),
-            )
-            self.assertEqual(23, first.returncode, first.stdout + first.stderr)
+            if foreign_owner == "collision":
+                site = hook / "sitecustomize.py"
+                site.write_text(site.read_text(encoding="utf-8") + r'''
+import json
+previous_collision_symlink = os.symlink
+def collide_materialized_temporary(source, destination, *args, **kwargs):
+    path = Path(os.path.abspath(destination))
+    prefix = os.environ.get('HTTP_TEST_FIRST_Q_LINK_PREFIX')
+    if prefix and str(path).startswith(prefix):
+        # The private fixture path is explicitly carried by the injector;
+        # never inspect a checkout or adopt an undeclared live name.
+        journal = Path(os.environ['HTTP_TEST_COLLISION_WAL'])
+        evidence = journal.read_bytes()
+        body = json.loads(evidence)['body']
+        assert any(row['path'] == str(path) for row in body['links'])
+        row = next(row for row in body['directories'] if row['path'] == str(path.parent / 'latest'))
+        assert Path(row['backup']).is_dir() and not (path.parent / 'latest').exists()
+        path.write_bytes(b'UNRELATED RECOVERY OBJECT\n')
+        Path(os.environ['HTTP_TEST_Q_LINK_BARRIER']).write_text(str(path) + '\n')
+        (journal.parent / 'collision-wal-evidence').write_bytes(evidence)
+    return previous_collision_symlink(source, destination, *args, **kwargs)
+os.symlink = collide_materialized_temporary
+''', encoding="utf-8")
+            with mock.patch.dict(os.environ, {
+                    "HTTP_TEST_COLLISION_WAL": str(root / "ztp/.setup-switch-journal.json")}):
+                first = self._run_private_load_setup_switch(
+                    fixture, prepare_journal=True,
+                    first_link_prefix=str(output / ".latest.tmp."),
+                )
+            self.assertEqual(24 if foreign_owner == "collision" else 23,
+                             first.returncode, first.stdout + first.stderr)
             temporary = Path(barrier.read_text().strip())
             self.assertEqual(output, temporary.parent)
-            self.assertEqual(release.name, os.readlink(temporary))
+            if foreign_owner == "collision":
+                self.assertEqual(b"UNRELATED RECOVERY OBJECT\n", temporary.read_bytes())
+            else:
+                self.assertEqual(release.name, os.readlink(temporary))
             self.assertFalse(os.path.lexists(latest))
             journal = root / "ztp/.setup-switch-journal.json"
             evidence = journal.read_bytes()
+            if foreign_owner == "collision":
+                self.assertEqual(evidence, (journal.parent / "collision-wal-evidence").read_bytes())
             row = json.loads(evidence)["body"]["directories"][0]
             backup = Path(row["backup"])
             self.assertEqual((original.st_dev, original.st_ino),
                              (backup.stat().st_dev, backup.stat().st_ino))
             mixed = os.readlink(common)
-            if foreign_owner:
+            if foreign_owner and foreign_owner != "collision":
                 temporary.unlink()
                 temporary.write_bytes(b"UNRELATED RECOVERY OBJECT\n")
             recovery = """
@@ -3885,6 +3937,9 @@ finally:
 
     def test_real_setup_materialized_temp_death_foreign_owner_blocks_all_restore(self):
         self._assert_materialized_temp_cold_recovery(True)
+
+    def test_real_setup_materialized_temp_collision_preserves_original_wal_and_blocks_cold_restore(self):
+        self._assert_materialized_temp_cold_recovery("collision")
 
     def _assert_real_materialized_writer_registration_drift_holds(self, drift):
         with tempfile.TemporaryDirectory(prefix="r22-materialized-writer-drift-") as name:
