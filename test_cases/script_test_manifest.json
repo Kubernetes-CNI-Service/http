@@ -3291,6 +3291,11 @@
       "tests": ["test_cases.test_req7_activity_discovery"]
     },
     {
+      "id": "req7_original_owner_source_switch_insert",
+      "members": ["monitor/issue_tracker_send_unit.py", "monitor/issue_tracker_manifest.py", "monitor/issue_tracker_local_workbook_commit.py", "monitor/issue_tracker_receipt_snapshot.py", "monitor/issue_tracker_admission.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_sheets_read_plan.py", "monitor/issue_tracker_sheets_read_decode.py", "monitor/issue_tracker_enrollment_journal.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_online_cells.py"],
+      "tests": ["test_cases.test_issue_tracker_stage_l_consumer_workflow", "test_cases.test_req7_send_unit", "test_cases.test_req7_spreadsheet_owner"]
+    },
+    {
       "id": "req7_global_original_nonce_composer_action_journal",
       "members": ["monitor/issue_tracker_enrollment_journal.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_send_intent.py", "monitor/issue_tracker_metadata_capacity.py", "monitor/issue_tracker_tls_inputs.py"],
       "tests": ["test_cases.test_req7_enrollment_journal"]

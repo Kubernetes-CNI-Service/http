@@ -952,6 +952,19 @@ appendCells 的多脚本 workflow 不发 mutation，不改 lookup／参考／操
 已知预留集合不是原始 journal 权威，观察的容量／坐标不是 CAS 或新鲜发送许可；
 仍缺持久原像／预留与真实来源组批、发送和 COMPLETE 集成，不代表 REQ7 整体完成。
 
+`freeze_observed_receipted_switch_unit` 将真实 C5 来源、原始 admitted C6 receipt、
+实际 C6 owner 和 spreadsheet owner、原始十四表 enrollment 联到 Switch 单元。
+target／History sheetId 与 nonce 来自原始 journal，不接受 caller 覆盖；存在任何
+同一 spreadsheet 的未决 journal／预留／原像命名空间时拒绝新组批，不能借新代重建
+UNKNOWN。所有操作必须共用原始完整发现／占用像，逐项派生更新或新增，新增在单元内
+选择不同预置空闲行；全部值和原记录时间来自真实 SourceRow，编译后再核来源、
+receipt、nonce、原读像及 History 容量。真实 producer → 资格 → workbook commit →
+双 owner／原 nonce → 混合 L-only 更新和 literal 新增 workflow 不写远端。
+局部 root 元数据仅在 ownership 模块的测试 OS 边界合成，其他 C6／来源模块保持
+实际路径和 UID；native flock／FD／fsync 不替换，真机仍 NOT RUN。
+单元内候选行分配尚不是 durable 原始预留；组合原像 journal、Cabling 插入组批、
+每次远端模板／enrollment 连续性、新鲜准入、受审发送与 COMPLETE 仍未闭合。
+
 `test_cases.test_req7_nv_reservation` 将两张 Cabling 固定完整容量读取、原始 enrollment、
 实际 spreadsheet owner 和 C17 共享分配器串联，Closed／无关行 ID 参与最高值，
 下一 ID 严格高于两表；没有种子、跨表重复或编号耗尽时拒绝且不创建图像。

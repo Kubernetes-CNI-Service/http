@@ -49,6 +49,18 @@ def inputs(count=2):
 class Req7SendUnitDirectTests(unittest.TestCase):
     def setUp(self): self.module = load()
 
+    def test_observed_switch_compiler_cannot_accept_caller_nonce_coordinate_or_business_claims(self):
+        self.assertTrue(hasattr(self.module,'freeze_observed_receipted_switch_unit'),'original lock/enrollment Switch insert compiler missing')
+        for claim in ({}, {'target_nonce':'c'*64}, {'placements':()}, {'sheet_id':101}, {'preread_sha256':'e'*64}):
+            with self.subTest(claim=claim):
+                with self.assertRaises(self.module.SendUnitHold) as caught:
+                    self.module.freeze_observed_receipted_switch_unit(object(),object(),http_root='/',settings=object(),
+                        whitelist_snapshot=object(),whitelist_path='/',metadata={},expected_template_sha256='a'*64,
+                        local_generation_id='gen-00000000000000000001-'+'1'*32,business_reads=(),
+                        history_plan=object(),history_response=object(),spreadsheet_token=object(),
+                        binding=object(),identity=object(),**claim)
+                self.assertIsNone(caught.exception.__context__)
+
     def test_observed_receipted_update_compiler_cannot_take_caller_coordinate_values_or_preread_claims(self):
         self.assertTrue(hasattr(self.module, 'freeze_observed_receipted_source_updates'), 'original full row images must derive source placements')
         for claim in ({}, {'placements': ()}, {'preread_sha256': 'e' * 64}, {'business': ()}):

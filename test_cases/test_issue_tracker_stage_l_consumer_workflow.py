@@ -73,6 +73,9 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
     def test_actual_receipt_source_and_full_row_images_derive_all_update_coordinates_and_preread(self):
         self._exercise_real_protected_three_panel_fixture(skip_history=False, observed_source_probe=True)
 
+    def test_actual_source_receipt_global_owner_and_original_enrollment_derive_switch_inserts(self):
+        self._exercise_real_protected_three_panel_fixture(skip_history=False, observed_switch_insert_probe=True)
+
     def test_two_real_cycles_keep_keys_and_commit_latest_business_values(self):
         self._exercise_real_protected_three_panel_fixture(
             skip_history=False, two_cycle_changed_latest=True,
@@ -430,6 +433,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         source_identity_probe=False, two_cycle_changed_latest=False,
         settings_channel_probe=False, settings_channel_fault=False,
         panel_counts_probe=False, source_unit_probe=False, receipted_source_probe=False, observed_source_probe=False,
+        observed_switch_insert_probe=False,
         complete_preview_probe=False,
         complete_preview_source_race=False,
         complete_preview_cgi=False,
@@ -1407,6 +1411,91 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             self.assertEqual(digest, committed.receipt.manifest_id)
             self.assertEqual(hashlib.sha256(committed.prepared.xlsx_bytes).hexdigest(),
                              committed.receipt.published_sha256)
+            if observed_switch_insert_probe:
+                import tempfile
+                import monitor.issue_tracker_send_unit as compiler
+                from monitor.issue_tracker_sheets_read_plan import prepare_activity_sheet_read, prepare_insertion_sheet_read, prepare_sheets_read, prepare_history_tail_read, prepare_template_identity_read
+                from monitor.issue_tracker_sheets_read_decode import decode_template_identity
+                from monitor.issue_tracker_online_target import OnlineTargetBinding
+                from monitor.issue_tracker_sdk_authentication import AuthenticatedToken
+                from test_cases.test_req7_activity_discovery import sheet_document, insertion_document, exact_row_document, reserved_switch_row, literal
+                from test_cases.test_req7_sheets_read_decode import response, identity_response
+                from test_cases.test_req7_spreadsheet_owner import load as load_owner, scoped_fixture
+                from test_cases.test_req7_enrollment_journal import load as load_enrollment
+                self.assertTrue(hasattr(compiler,'freeze_observed_receipted_switch_unit'),'original receipt, owner and enrollment must derive Switch inserts')
+                binding = OnlineTargetBinding('synthetic_spreadsheet_id_0001','a'*64,'b'*64)
+                credential = AuthenticatedToken('synthetic.private-token',time.time()+3600)
+                identity = decode_template_identity(prepare_template_identity_read(binding,credential),response(identity_response()))
+                candidates = tuple(item for item in qualified.candidates if item.activity_key[0] == 'switch')
+                self.assertGreater(len(candidates),1)
+                rows = [reserved_switch_row(index) for index in range(2,len(candidates)+5)]
+                rows[0]['M'] = {'boolValue':False}
+                key = candidates[0].activity_key
+                rows[1].update({'F':literal(key[1]),'L':literal('[MONITOR][%s][%s] old evidence'%key[2:]),'N':literal('New')})
+                source = sheet_document('ETH&IB Switch',rows,len(rows)+2); source['sheets'][0]['properties']['sheetId'] = 101
+                occupancy = insertion_document('ETH&IB Switch',rows,len(rows)+2); occupancy['sheets'][0]['properties']['sheetId'] = 101
+                discovery_plan = prepare_activity_sheet_read(binding,credential,sheet='ETH&IB Switch')
+                occupancy_plan = prepare_insertion_sheet_read(binding,credential,sheet='ETH&IB Switch')
+                reads = []
+                for offset,candidate in enumerate(candidates):
+                    index = offset+3
+                    exact = exact_row_document('ETH&IB Switch',rows[index-2],index); exact['sheets'][0]['properties']['sheetId'] = 101
+                    reads.append({'operation_id':candidate.operation_id,'discovery_plan':discovery_plan,'discovery_response':response(source),
+                        'occupancy_plan':occupancy_plan,'occupancy_response':response(occupancy),
+                        'row_plan':prepare_sheets_read(binding,credential,mode='row_rectangle',sheet='ETH&IB Switch',first_row=index+1),
+                        'row_response':response(exact)})
+                history_plan = prepare_history_tail_read(binding,credential)
+                history_response = response({'spreadsheetId':binding.spreadsheet_id,'sheets':[{'properties':{'sheetId':105,'title':'Update_History',
+                    'sheetType':'GRID','gridProperties':{'rowCount':100,'columnCount':5}},'data':[{'startRow':2,'startColumn':0}]}]})
+                with tempfile.TemporaryDirectory(prefix='req7-real-switch-insert-') as directory:
+                    global_root = Path(directory).resolve(); state = global_root/'var/lib/http-ztp-container/issue-tracker'
+                    state.mkdir(parents=True,mode=0o700); owner_module = load_owner(); enrollment_module = load_enrollment()
+                    with tracker_writer(project,self.publication) as writer_token, scoped_fixture(global_root,owner_module), owner_module.spreadsheet_owner(binding) as spreadsheet_token:
+                        original = enrollment_module.prepare_enrollment_journal(spreadsheet_token,binding,identity)
+                        def compile_switch(**changes):
+                            options = dict(local_generation_id=committed.receipt.generation_id,business_reads=tuple(reads),history_plan=history_plan,
+                                history_response=history_response,spreadsheet_token=spreadsheet_token,binding=binding,identity=identity,audits=(),occupied_metadata_ids=())
+                            options.update(changes)
+                            return compiler.freeze_observed_receipted_switch_unit(qualified,self.store,metadata=metadata,
+                                expected_template_sha256=self.snapshot.workbook_sha256,writer_token=writer_token,**args,**options)
+                        unit = compile_switch(); action = json.loads(unit.action_preimage)
+                        self.assertEqual(committed.receipt.generation_id,action['identity']['generation_id'])
+                        self.assertEqual(committed.receipt.published_sha256,action['identity']['publish_id'])
+                        nonces = {title:nonce for title,sid,nonce in original.nonces}
+                        self.assertEqual(nonces['ETH&IB Switch'],action['target_nonce']); self.assertEqual(nonces['Update_History'],action['history_nonce'])
+                        self.assertEqual(['update']+['insert']*(len(candidates)-1),[item['action'] for item in action['business']])
+                        updates = [item['updateCells'] for item in json.loads(unit.wire_bytes)['requests'] if 'updateCells' in item]
+                        self.assertEqual(set(range(3,len(candidates)+3)),{item['start']['rowIndex'] for item in updates})
+                        for item in updates:
+                            self.assertEqual(101,item['start']['sheetId']); self.assertNotIn(item['start']['columnIndex'],(0,3,4,6,7,8,12,14,15,16,17,18,19,20))
+                        for claim in ({'target_nonce':'c'*64},{'placements':()},{'sheet_id':101},{'preread_sha256':'e'*64},{'business_reads':tuple(reads[:-1])}):
+                            with self.assertRaises(compiler.SendUnitHold): compile_switch(**claim)
+                        with self.assertRaises(compiler.SendUnitHold): compile_switch(spreadsheet_token=object())
+                        changed_identity = replace(identity,sheet_ids=tuple((title,150 if title=='ETH&IB Switch' else sid) for title,sid in identity.sheet_ids))
+                        with self.assertRaises(compiler.SendUnitHold): compile_switch(identity=changed_identity)
+                        saved = reads[1]['row_response']; drift = json.loads(saved.data)
+                        drift['sheets'][0]['data'][0]['rowData'][0]['values'][12] = {'userEnteredValue':literal('operator drift')}
+                        reads[1]['row_response'] = response(drift)
+                        try:
+                            with self.assertRaises(compiler.SendUnitHold): compile_switch()
+                        finally: reads[1]['row_response'] = saved
+                        real_freeze = compiler.freeze_receipted_prod_source_unit
+                        def change_row_during_compilation(*freeze_args,**freeze_kwargs):
+                            result = real_freeze(*freeze_args,**freeze_kwargs)
+                            reads[1]['row_response'] = response(drift)
+                            return result
+                        try:
+                            with mock.patch.object(compiler,'freeze_receipted_prod_source_unit',side_effect=change_row_during_compilation):
+                                with self.assertRaises(compiler.SendUnitHold): compile_switch()
+                        finally: reads[1]['row_response'] = saved
+                        stem = hashlib.sha256(binding.spreadsheet_id.encode()).hexdigest()
+                        blocked = state/(stem+'.journal'); blocked.mkdir(mode=0o700)
+                        with self.assertRaises(compiler.SendUnitHold): compile_switch()
+                        self.assertEqual([],list(blocked.iterdir()))
+                        self.assertEqual({stem+'.lock',stem+'.enrollment',stem+'.journal'},{path.name for path in state.iterdir()})
+                self.assertEqual(original_template,self.template.read_bytes())
+                self.assertFalse((project/'.tracker/remote-actions').exists()); self.assertFalse((project/'.tracker/remote-attempts').exists())
+                return
             if observed_source_probe:
                 import monitor.issue_tracker_send_unit as compiler
                 from monitor.issue_tracker_sheets_read_plan import prepare_activity_sheet_read, prepare_sheets_read, prepare_history_tail_read

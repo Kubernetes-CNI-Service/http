@@ -60,6 +60,26 @@ def fixture(root, fault=None):
         yield
 
 
+@contextmanager
+def scoped_fixture(root, module):
+    """Synthetic root metadata ONLY at the ownership module's OS boundary.
+
+    C6/source/workbook modules keep their actual OS identities and absolute
+    paths. Native flock/FD/fsync remain real; this fixture grants no root or
+    real-environment proof and does not mutate the shared os module.
+    """
+    facade = SimpleNamespace(**{name: getattr(os, name) for name in dir(os)})
+    def metadata(value):
+        fields = ('st_dev','st_ino','st_mode','st_uid','st_gid','st_nlink','st_size','st_mtime_ns','st_ctime_ns')
+        result = SimpleNamespace(**{name: getattr(value,name) for name in fields}); result.st_uid = 0
+        return result
+    facade.geteuid = lambda: 0
+    facade.open = lambda name, flags, *args, **kwargs: os.open(root if name == '/' else name, flags, *args, **kwargs)
+    facade.fstat = lambda fd: metadata(os.fstat(fd))
+    facade.stat = lambda *args, **kwargs: metadata(os.stat(*args, **kwargs))
+    with mock.patch.object(module, 'os', facade): yield
+
+
 class Req7SpreadsheetOwnerTests(unittest.TestCase):
     def setUp(self):
         self.module = load(); self.temp = tempfile.TemporaryDirectory(prefix='req7-sheet-owner-')
@@ -82,6 +102,18 @@ class Req7SpreadsheetOwnerTests(unittest.TestCase):
                 self.assertNotEqual(fd, self.module.owner_lock_fd(other, binding(TARGET + '_other')))
             with self.assertRaises(self.module.SpreadsheetOwnerHold): self.module.owner_lock_fd(token, different_project)
         with self.assertRaises(self.module.SpreadsheetOwnerHold): self.module.owner_lock_fd(token, binding())
+
+    def test_scoped_synthetic_root_fixture_keeps_shared_os_and_native_identity_unchanged(self):
+        real_uid, real_euid, actual_stat = os.getuid(), os.geteuid(), self.root.stat()
+        with scoped_fixture(self.root, self.module), self.module.spreadsheet_owner(binding()) as token:
+            self.assertEqual(real_uid, os.getuid()); self.assertEqual(real_euid, os.geteuid())
+            self.assertEqual(actual_stat.st_uid, self.root.stat().st_uid)
+            fd = self.module.owner_lock_fd(token,binding())
+            self.assertEqual(real_uid, os.fstat(fd).st_uid)
+            self.assertIsNot(self.module.os, os)
+            with self.assertRaises(self.module.SpreadsheetOwnerHold):
+                with self.module.spreadsheet_owner(binding()): self.fail('native flock exclusion bypassed')
+        self.assertIs(self.module.os, os)
 
     def test_fixed_root_missing_or_nonroot_never_creates_repairs_or_uses_environment_override(self):
         with mock.patch('os.geteuid', return_value=501), mock.patch('os.open') as opening:
