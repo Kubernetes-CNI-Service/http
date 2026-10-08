@@ -345,3 +345,34 @@ def record_owned_receipted_attempt_intent(
     except Exception: failed = True
     if failed: raise GlobalAttemptHold()
     return result
+
+
+def record_continuous_owned_attempt_intent(
+    token,binding,unit,*,writer_token,identity_response,history_response,business_reads,
+    qualified_source,store,settings,whitelist_snapshot,expected_template_sha256,
+    http_root,whitelist_path,headers_response,whitelist_response,metadata_response,
+):
+    """Actual ALL business/History reads around original C6 count, not GO.
+
+    Never recompile an UNKNOWN unit, ignore NOOP, reset a count, settle a fence
+    or accept a caller freshness flag. Post-count expiry/drift keeps UNKNOWN.
+    Shared cadence, actual one-use mutation and hidden PROJECT quota remain
+    separate requirements, so this necessary counter yields no send capability.
+    """
+    from monitor.issue_tracker_history_preread_journal import observe_owned_business_continuity
+    def continuity():
+        return observe_owned_business_continuity(writer_token,token,binding,unit,
+            identity_response=identity_response,history_response=history_response,business_reads=business_reads)
+    failed = False
+    try:
+        original = continuity()
+        result = record_owned_receipted_attempt_intent(token,binding,unit,
+            qualified_source=qualified_source,store=store,writer_token=writer_token,
+            settings=settings,whitelist_snapshot=whitelist_snapshot,
+            expected_template_sha256=expected_template_sha256,http_root=http_root,whitelist_path=whitelist_path,
+            identity_response=identity_response,headers_response=headers_response,
+            whitelist_response=whitelist_response,metadata_response=metadata_response)
+        if continuity() != original or inspect_global_unit(token,binding,unit) != result: raise GlobalAttemptHold()
+    except Exception: failed = True
+    if failed: raise GlobalAttemptHold()
+    return result

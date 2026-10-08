@@ -484,3 +484,89 @@ def inspect_business_source_projection(token, binding, identity, unit, source_ro
             except OSError: failed = True
     if failed: raise HistoryPrereadHold()
     return result
+
+
+def observe_owned_business_continuity(writer_token, owner_token, binding, unit, *,
+                                      identity_response, history_response, business_reads):
+    """Fresh actual fixed reads versus ALL immutable originals, never GO.
+
+    Includes NOOP and operator cells, retains original coordinates/action/wire.
+    Conservative whole-response equality (ignoring JSON serialization only)
+    refuses any edit or changed capacity, rather than rebuilding after UNKNOWN.
+    Non-atomic reads cannot supply CAS, hidden quota, cadence or COMPLETE.
+    No caller plan, identity, row coordinate or freshness flag is accepted.
+    """
+    folder = None; history_folder = None; failed = False
+    try:
+        from monitor.issue_tracker_history_read_launcher import require_current_owned_read
+        def issued(response, kind, *, sheet=None, row=None):
+            return require_current_owned_read(writer_token,owner_token,binding,response,
+                                              read_kind=kind,sheet=sheet,row=row)
+        identity_plan = issued(identity_response,'template_identity')
+        history_plan = issued(history_response,'history_tail')
+        identity = decode.decode_template_identity(identity_plan,identity_response)
+        parent,name,base,state = _business_inputs(owner_token,binding,unit)
+        folder = local._directory(parent,name); journal._named(parent,name,folder,directory=True)
+        names = ('MANIFEST','BUSINESS-RAW','HEADER','INITIALIZED')
+        identities = tuple(journal._identity(os.stat(item,dir_fd=folder,follow_symlinks=False)) for item in names)
+        result = _inspect_business(owner_token,binding,identity,unit,parent,name,folder,base)
+        raw = journal._read(folder,'BUSINESS-RAW',_BUSINESS_LIMIT)
+        originals = _unpack_business(raw)
+        if type(business_reads) is not tuple or len(business_reads) != len(originals): raise HistoryPrereadHold()
+        action = json.loads(unit.action_preimage); sheet = action['identity']['sheet']
+        history_name = name[:-9]+'.history'
+        history_folder = local._directory(parent,history_name)
+        journal._named(parent,history_name,history_folder,directory=True)
+        history_names = ('HISTORY-RAW','HEADER','INITIALIZED')
+        history_identities = tuple(journal._identity(os.stat(item,dir_fd=history_folder,follow_symlinks=False)) for item in history_names)
+        old_history,old_tail = _read_preread(owner_token,binding,unit)
+        new_tail = decode.decode_history_tail(history_plan,history_response,sheet_id=action['history_sheet_id'])
+        if (new_tail.row_count != old_tail.row_count or new_tail.last_data_row_index != old_tail.last_data_row_index
+                or new_tail.cells != old_tail.cells): raise HistoryPrereadHold()
+        def document(body):
+            value = json.loads(body.decode('utf-8','strict'),object_pairs_hook=decode._pairs,parse_constant=decode._nonfinite)
+            # Canonical bytes distinguish JSON booleans/numbers/string types.
+            return json.dumps(value,ensure_ascii=False,sort_keys=True,separators=(',',':'),allow_nan=False).encode('utf-8')
+        checks = []
+        for original,current in zip(originals,business_reads):
+            fields = {'operation_id','discovery_response','occupancy_response','row_response'}
+            if (type(current) is not dict or set(current) != fields
+                    or current['operation_id'] != original['operation_id']): raise HistoryPrereadHold()
+            for role,kind in (('discovery','activity'),('occupancy','insertion'),('row','row')):
+                plan,response = original[role+'_plan'],current[role+'_response']
+                if plan is None:
+                    if role != 'row' or response is not None: raise HistoryPrereadHold()
+                    continue
+                row = None
+                if role == 'row':
+                    _target,title,geometry = decode._geometry(plan)
+                    if title != sheet or len(geometry) != 1: raise HistoryPrereadHold()
+                    (first,_column),(last,_end) = next(iter(geometry.items()))
+                    if first != last: raise HistoryPrereadHold()
+                    row = first+1
+                actual_plan = issued(response,kind,sheet=sheet,row=row)
+                if (actual_plan.path != plan.path
+                        or document(response.data) != document(original[role+'_response'].data)): raise HistoryPrereadHold()
+                checks.append((response,kind,row))
+        # Originals and acquisition identity must survive the entire observation.
+        for response,kind,row in checks: issued(response,kind,sheet=sheet,row=row)
+        issued(identity_response,'template_identity'); issued(history_response,'history_tail')
+        if (_inspect_business(owner_token,binding,identity,unit,parent,name,folder,base) != result
+                or _read_preread(owner_token,binding,unit) != (old_history,old_tail)
+                or global_journal.inspect_global_unit(owner_token,binding,unit) != state
+                or journal._read(folder,'BUSINESS-RAW',_BUSINESS_LIMIT) != raw
+                or tuple(journal._identity(os.stat(item,dir_fd=folder,follow_symlinks=False)) for item in names) != identities
+                or tuple(journal._identity(os.stat(item,dir_fd=history_folder,follow_symlinks=False)) for item in history_names) != history_identities):
+            raise HistoryPrereadHold()
+        journal._named(parent,name,folder,directory=True)
+        journal._named(parent,history_name,history_folder,directory=True)
+        for response,kind,row in checks: issued(response,kind,sheet=sheet,row=row)
+        issued(identity_response,'template_identity'); issued(history_response,'history_tail')
+    except Exception: failed = True
+    finally:
+        for handle in (folder,history_folder):
+            if handle is not None:
+                try: os.close(handle)
+                except OSError: failed = True
+    if failed: raise HistoryPrereadHold()
+    return result

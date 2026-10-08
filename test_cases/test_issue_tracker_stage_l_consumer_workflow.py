@@ -100,6 +100,14 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             business_preread_probe=True, original_reserved_probe=True, receipted_intent_probe=True,
             owned_read_gates_probe=True)
 
+    def test_actual_live_all_business_and_history_continuity_dominate_original_c6_count(self):
+        from monitor import issue_tracker_global_attempt_journal as journal
+        self.assertTrue(hasattr(journal,'record_continuous_owned_attempt_intent'),
+                        'actual fixed ALL-business/History observations must gate original C6 count')
+        self._exercise_real_protected_three_panel_fixture(skip_history=False,observed_cabling_insert_probe=True,
+            business_preread_probe=True,original_reserved_probe=True,receipted_intent_probe=True,
+            owned_read_gates_probe=True,owned_continuity_probe=True)
+
     def test_two_real_cycles_keep_keys_and_commit_latest_business_values(self):
         self._exercise_real_protected_three_panel_fixture(
             skip_history=False, two_cycle_changed_latest=True,
@@ -458,7 +466,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         settings_channel_probe=False, settings_channel_fault=False,
         panel_counts_probe=False, source_unit_probe=False, receipted_source_probe=False, observed_source_probe=False,
         observed_switch_insert_probe=False, observed_cabling_insert_probe=False, business_preread_probe=False, original_reserved_probe=False, receipted_intent_probe=False,
-        settings_audit_probe=False, owned_read_gates_probe=False, complete_preview_probe=False,
+        settings_audit_probe=False, owned_read_gates_probe=False, owned_continuity_probe=False, complete_preview_probe=False,
         complete_preview_source_race=False,
         complete_preview_cgi=False,
     ):
@@ -1739,22 +1747,47 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                                             {'values': [{} if value is None else {'userEnteredValue': {'stringValue': value}}
                                                         for value in row[:6]]} for row in literal_rows]
                                         def fresh_bundle():
-                                            return {name:native_fixture.read_owned(private_context,writer_token,spreadsheet_token,
+                                            bundle = {name:native_fixture.read_owned(private_context,writer_token,spreadsheet_token,
                                                 binding,credential,kind,doc,raw_body=response(doc).data) for name,kind,doc in (
                                                     ('identity_response','template_identity',identity_response()),
                                                     ('headers_response','template_headers',header_response()),
                                                     ('whitelist_response','whitelist',whitelist_doc),
                                                     ('metadata_response','metadata',json.loads(quota_raw.data)))}
+                                            if owned_continuity_probe:
+                                                bundle['history_response'] = native_fixture.read_owned(private_context,writer_token,spreadsheet_token,
+                                                    binding,credential,'history_tail',json.loads(history_raw.data),raw_body=history_raw.data)
+                                                current = {}
+                                                for role,kind in (('discovery','activity'),('occupancy','insertion')):
+                                                    raw = reads[0][role+'_response'].data
+                                                    current[role+'_response'] = native_fixture.read_owned(private_context,writer_token,spreadsheet_token,
+                                                        binding,credential,kind,json.loads(raw),raw_body=raw,sheet=sheet)
+                                                bundle['business_reads'] = tuple({'operation_id':reading['operation_id'],**current,
+                                                    'row_response':None if reading['row_response'] is None else native_fixture.read_owned(
+                                                        private_context,writer_token,spreadsheet_token,binding,credential,'row',
+                                                        json.loads(reading['row_response'].data),raw_body=reading['row_response'].data,sheet=sheet,row=3)}
+                                                    for reading in reads)
+                                            return bundle
                                         def record_owned(bundle):
-                                            return global_journal.record_owned_receipted_attempt_intent(
+                                            counting = (global_journal.record_continuous_owned_attempt_intent if owned_continuity_probe
+                                                        else global_journal.record_owned_receipted_attempt_intent)
+                                            return counting(
                                                 spreadsheet_token,binding,unit,qualified_source=qualified,store=self.store,
                                                 writer_token=writer_token,settings=args['settings'],whitelist_snapshot=self.snapshot,
                                                 expected_template_sha256=self.snapshot.workbook_sha256,http_root=self.root,
                                                 whitelist_path=self.template,**bundle)
                                         original_bundle = fresh_bundle()
                                         for name in original_bundle:
+                                            if name == 'business_reads': continue  # completions inside tuple are checked below
                                             with self.subTest(copied_read=name),self.assertRaises(global_journal.GlobalAttemptHold):
                                                 record_owned({**original_bundle,name:replace(original_bundle[name])})
+                                            self.assertEqual(0,global_journal.inspect_global_unit(spreadsheet_token,binding,unit).attempt_count)
+                                        if owned_continuity_probe:
+                                            with self.assertRaises(global_journal.GlobalAttemptHold):
+                                                record_owned({**original_bundle,'business_reads':original_bundle['business_reads'][1:]})
+                                            changed = [dict(item) for item in original_bundle['business_reads']]
+                                            changed[0]['discovery_response'] = replace(changed[0]['discovery_response'])
+                                            with self.assertRaises(global_journal.GlobalAttemptHold):
+                                                record_owned({**original_bundle,'business_reads':tuple(changed)})
                                             self.assertEqual(0,global_journal.inspect_global_unit(spreadsheet_token,binding,unit).attempt_count)
                                     for count in range(1, 7):
                                         allocation_fault = settings_audit_probe and sheet == 'ETH Cabling' and count == 6

@@ -196,6 +196,18 @@ class Req7HistoryPrereadJournalDirectTests(unittest.TestCase):
 
 
 class Req7BusinessPrereadJournalDirectTests(unittest.TestCase):
+    def test_owned_continuity_refuses_forged_response_before_reading_originals(self):
+        from types import SimpleNamespace
+        self.assertTrue(hasattr(self.module, 'observe_owned_business_continuity'),
+                        'issued current ALL-business gate missing')
+        forged = SimpleNamespace(status=200,complete=True,data=b'{}')
+        with mock.patch.object(self.module,'_business_inputs') as originals:
+            with self.assertRaises(self.module.HistoryPrereadHold) as caught:
+                self.module.observe_owned_business_continuity(None,None,self.target,object(),
+                    identity_response=forged,history_response=forged,business_reads=())
+            originals.assert_not_called()
+        self.assertIsNone(caught.exception.__context__)
+
     def setUp(self):
         from test_cases.test_req7_enrollment_journal import load as load_enrollment
         from test_cases.test_req7_send_unit import inputs as unit_inputs

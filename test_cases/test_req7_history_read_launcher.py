@@ -93,17 +93,17 @@ class Req7HistoryReadLauncherWorkflowTests(unittest.TestCase):
     certificates = native_fixture.Req7NativeTlsWireTests.certificates
     server = native_fixture.Req7NativeTlsWireTests.server
 
-    def owners(self,stack):
+    def owners(self,stack,*,target_id=TARGET):
         from monitor import issue_tracker_spreadsheet_owner as ownership, issue_tracker_online_target as target
         from monitor import issue_tracker_credential_shape as private, issue_tracker_local_commit as local
         self.root=self.root.resolve()
         project=self.root/'project'; project.mkdir(); publication=project/'publication'; publication.mkdir()
         local.create_local_commit_store(project,publication)
-        config=project/'01-global.yaml'; config.write_text(json.dumps(document(cycles=3))); config.chmod(0o644)
+        config=project/'01-global.yaml'; config.write_text(json.dumps(document(target=target_id,cycles=3))); config.chmod(0o644)
         credential_dir=self.root/'var/lib/http-ztp-container/service-account'; credential_dir.mkdir(parents=True,mode=0o700)
-        listing=credential_dir/'issue-tracker-spreadsheet-whitelist.json'; listing.write_text(json.dumps([TARGET])); listing.chmod(0o600)
+        listing=credential_dir/'issue-tracker-spreadsheet-whitelist.json'; listing.write_text(json.dumps([target_id])); listing.chmod(0o600)
         locks=self.root/'var/lib/http-ztp-container/issue-tracker'; locks.mkdir(mode=0o700)
-        binding=target.bind_online_target(document(cycles=3),target.freeze_target_allowlist(listing.read_bytes()))
+        binding=target.bind_online_target(document(target=target_id,cycles=3),target.freeze_target_allowlist(listing.read_bytes()))
         for module in (ownership,target,private): stack.enter_context(scoped_fixture(self.root,module))
         writer=stack.enter_context(local.writer_owner(project,publication))
         owner=stack.enter_context(ownership.spreadsheet_owner(binding))

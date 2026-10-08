@@ -64,6 +64,24 @@ class Req7GlobalAttemptJournalTests(unittest.TestCase):
             self.assertIsNone(caught.exception.__context__)
             self.assertEqual(0,self.module.inspect_global_unit(token,binding(),self.value).attempt_count)
 
+    def test_continuous_counter_refuses_unissued_history_before_any_intent(self):
+        from types import SimpleNamespace
+        self.assertTrue(hasattr(self.module,'record_continuous_owned_attempt_intent'),
+                        'ALL live business/History continuity must dominate original count')
+        forged = SimpleNamespace(status=200,complete=True,data=b'{}')
+        with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
+            self.module.prepare_global_unit(token,binding(),self.value)
+            with mock.patch.object(self.module,'record_owned_receipted_attempt_intent') as counting:
+                with self.assertRaises(self.module.GlobalAttemptHold) as caught:
+                    self.module.record_continuous_owned_attempt_intent(token,binding(),self.value,
+                        writer_token=None,identity_response=forged,history_response=forged,business_reads=(),
+                        qualified_source=None,store=None,settings=None,whitelist_snapshot=None,
+                        expected_template_sha256='a'*64,http_root=self.root,whitelist_path=self.root/'absent',
+                        headers_response=forged,whitelist_response=forged,metadata_response=forged)
+                counting.assert_not_called()
+            self.assertIsNone(caught.exception.__context__)
+            self.assertEqual(0,self.module.inspect_global_unit(token,binding(),self.value).attempt_count)
+
     def test_action_wire_and_header_are_immutable_before_six_global_unknown_intents(self):
         with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
             self.module.prepare_global_unit(token, binding(), self.value)

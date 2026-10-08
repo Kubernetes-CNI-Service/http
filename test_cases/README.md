@@ -1094,6 +1094,15 @@ admission、per-key FIFO settlement、受审 launcher、COMPLETE 或整个 REQ7�
 检验此边界；可见库存仍 VISIBLE_ONLY_UNPROVED，不是隐藏 PROJECT 配额、新鲜业务／
 History 连续性、共享节流、真实 mutation、COMPLETE 或整个 REQ7 验收。
 
+`observe_owned_business_continuity` 用当前双 owner 签发的固定 identity、全 History、
+完整发现／占用／精确行读取逐项比较持久化原件，包含全部 NOOP 和操作者列。
+只忽略 JSON 序列化差异，保留类型、全响应、容量和尾边界；漏项、重排、复制回应、
+编辑或原文件同字节新 inode 均 HOLD。坐标从原件固定请求派生，不接受 caller plan／row。
+前后重核原文件身份、全局计数、策略和原 30 秒期限，不重组 UNKNOWN 或缩小 batch。
+`record_continuous_owned_attempt_intent` 将此门放在真实 W1/template/nonces 和原 C5/C6
+计数前后；后置失败保留已落盘的 UNKNOWN／计数。真实双家族原始来源和原生固定 TLS
+workflow 验证边界，仍不是共享 cadence、隐藏 PROJECT 库存或一次性发送／COMPLETE 权威。
+
 History、两张 Cabling 与 metadata 的原始 RAW 持久化统一使用固定名称的
 2 MiB 有界图像写入器，原字节全部保留、不截断；超限在创建 store 前拒绝。
 短写继续完整落盘，无进度／file-dir barrier 失败保留 partial HOLD；NOREPLACE

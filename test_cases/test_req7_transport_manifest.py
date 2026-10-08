@@ -49,6 +49,7 @@ class Req7TransportManifestCandidateTests(unittest.TestCase):
     def test_original_count_workflow_covers_actual_owned_read_gates(self):
         manifest = json.loads((ROOT / 'test_cases/script_test_manifest.json').read_text())
         required = {'monitor/issue_tracker_global_attempt_journal.py',
+                    'monitor/issue_tracker_history_preread_journal.py',
                     'monitor/issue_tracker_remote_history_match.py',
                     'monitor/issue_tracker_history_read_launcher.py',
                     'monitor/issue_tracker_online_whitelist_read.py',
@@ -62,6 +63,8 @@ class Req7TransportManifestCandidateTests(unittest.TestCase):
         matching = next(item for item in manifest['workflows']
                         if item['id'] == 'req7_native_history_nonce_fence_actual_journal_match')
         self.assertIn('monitor/issue_tracker_online_whitelist_read.py', matching['members'])
+        self.assertIn('monitor/issue_tracker_history_preread_journal.py', matching['members'])
+        self.assertIn('monitor/issue_tracker_history_read_launcher.py', matching['members'])
 
     def test_durable_fixture_package_aliases_track_current_owner_and_journal_modules(self):
         import monitor

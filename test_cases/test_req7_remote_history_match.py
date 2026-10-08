@@ -269,7 +269,7 @@ class Req7OwnedHistoryMatchWorkflowTests(unittest.TestCase):
     setUp = _Fixture.setUp; certificates = _Fixture.certificates; server = _Fixture.server
     owners = _Fixture.owners; intercept = _Fixture.intercept; child_fixture = _Fixture.child_fixture
 
-    def read_owned(self, stack, writer, owner, binding, token, kind, value, *, raw_body=None):
+    def read_owned(self, stack, writer, owner, binding, token, kind, value, *, raw_body=None, sheet=None, row=None):
         from monitor import issue_tracker_history_read_launcher as reads
         import socket
         body = json.dumps(value, separators=(',', ':')).encode() if raw_body is None else raw_body
@@ -280,7 +280,7 @@ class Req7OwnedHistoryMatchWorkflowTests(unittest.TestCase):
             from contextlib import ExitStack
             with ExitStack() as launched:
                 calls, children = self.intercept(launched, self.child_fixture(port), writer, owner, binding)
-                result = reads.OwnedSheetsReadUnit(writer, owner, binding, token, read_kind=kind).read_once()
+                result = reads.OwnedSheetsReadUnit(writer, owner, binding, token, read_kind=kind, sheet=sheet, row=row).read_once()
                 self.assertEqual((1, 0, body), (len(calls), children[0].returncode, result.data))
             self.assertEqual([], errors); self.assertEqual(1, len(records))
             method = b'POST ' if kind == 'metadata' else b'GET '
@@ -335,6 +335,93 @@ class Req7OwnedHistoryMatchWorkflowTests(unittest.TestCase):
         docs = {'identity_response':('template_identity',identity_doc),'headers_response':('template_headers',headers_doc),
                 'metadata_response':('metadata',meta),'history_response':('history_tail',post)}
         return writer, owner, bound, auth, config, unit, docs
+
+    def test_actual_owned_all_business_and_history_continuity_includes_noop_and_preserves_unknown(self):
+        from monitor import issue_tracker_history_preread_journal as before
+        self.assertTrue(hasattr(before, 'observe_owned_business_continuity'),
+                        'fresh ALL business including NOOP and original History must be checked under actual owners')
+        from contextlib import ExitStack
+        from test_cases.test_req7_history_preread_journal import Req7BusinessPrereadJournalDirectTests
+        from monitor.issue_tracker_send_unit import freeze_send_unit
+        prototype = Req7BusinessPrereadJournalDirectTests()
+        prototype.setUp(); self.addCleanup(prototype.doCleanups)
+        before = prototype.module
+        from monitor import issue_tracker_global_attempt_journal as journal, issue_tracker_enrollment_journal as enroll
+        with ExitStack() as stack:
+            _local, _ownership, writer, owner, bound, auth, _config = self.owners(stack,target_id=TARGET)
+            original = enroll.prepare_enrollment_journal(owner, bound, prototype.identity)
+            nonces = {title: nonce for title, _sid, nonce in original.nonces}
+            business = [dict(item) for item in prototype.args['business']]
+            business[0]['values'] = {'L': '[MONITOR][down][fabric] old'}
+            business[1]['values'] = {'L': '[MONITOR][down][fabric] new'}
+            for item in business: item['observed_values'] = {'L': {'stringValue': '[MONITOR][down][fabric] old'}}
+            unit = freeze_send_unit(**{**prototype.args, 'business': tuple(business), 'sheet_id': 101, 'history_sheet_id': 105,
+                'target_nonce': nonces['ETH&IB Switch'], 'history_nonce': nonces['Update_History'], 'preread_sha256': prototype.digest})
+            journal.prepare_global_unit(owner,bound,unit)
+            before.prepare_history_preread(owner,bound,unit,prototype.plan,prototype.raw)
+            before.prepare_business_preread(owner,bound,prototype.identity,unit,
+                manifest=prototype.manifest,business_reads=tuple(prototype.reads))
+            journal.record_global_attempt_intent(owner,bound,unit)
+            state = self.root/'var/lib/http-ztp-container/issue-tracker'
+            retained = {str(path.relative_to(state)):path.read_bytes() for path in state.rglob('*') if path.is_file()}
+            identity_read = self.read_owned(stack,writer,owner,bound,auth,'template_identity',identity_response())
+            history_read = self.read_owned(stack,writer,owner,bound,auth,'history_tail',json.loads(prototype.raw.data))
+            common = {}
+            for role,kind in (('discovery','activity'),('occupancy','insertion')):
+                common[role+'_response'] = self.read_owned(stack,writer,owner,bound,auth,kind,
+                    json.loads(prototype.reads[0][role+'_response'].data),sheet='ETH&IB Switch')
+            current = tuple({'operation_id':reading['operation_id'],**common,
+                'row_response':self.read_owned(stack,writer,owner,bound,auth,'row',json.loads(reading['row_response'].data),
+                    sheet='ETH&IB Switch',row=index+3)} for index,reading in enumerate(prototype.reads))
+            options = dict(identity_response=identity_read,history_response=history_read,business_reads=current)
+            observed = before.observe_owned_business_continuity(writer,owner,bound,unit,**options)
+            self.assertEqual((2,1,prototype.digest),(observed.operations_retained,observed.noop_operations,observed.preread_sha256))
+            self.assertFalse(hasattr(observed,'permit')); self.assertFalse(hasattr(observed,'complete'))
+            variants = [dict(identity_response=replace(identity_read)),dict(history_response=replace(history_read)),
+                        dict(business_reads=current[1:]),dict(business_reads=tuple(reversed(current)))]
+            for index in range(2):
+                for name in common.keys() | {'row_response'}:
+                    changed = [dict(item) for item in current]; changed[index][name] = replace(current[index][name])
+                    variants.append(dict(business_reads=tuple(changed)))
+            # Operator edit on the NOOP row cannot silently remove its original decision.
+            noop = deepcopy(json.loads(prototype.reads[0]['row_response'].data))
+            noop['sheets'][0]['data'][0]['rowData'][0]['values'][11]['userEnteredValue'] = {'stringValue':'operator changed NOOP'}
+            read = self.read_owned(stack,writer,owner,bound,auth,'row',noop,sheet='ETH&IB Switch',row=3)
+            changed = [dict(item) for item in current]; changed[0]['row_response'] = read
+            variants.append(dict(business_reads=tuple(changed)))
+            history = deepcopy(json.loads(prototype.raw.data))
+            history['sheets'][0]['properties']['gridProperties']['rowCount'] += 1
+            variants.append(dict(history_response=self.read_owned(stack,writer,owner,bound,auth,'history_tail',history)))
+            for changes in variants:
+                with self.subTest(changes=tuple(changes)), self.assertRaises(before.HistoryPrereadHold) as caught:
+                    before.observe_owned_business_continuity(writer,owner,bound,unit,**{**options,**changes})
+                self.assertIsNone(caught.exception.__context__)
+            # Same-byte new inode is not the retained original image. Cover
+            # replacement just after initial decoding, not only later reads.
+            import os
+            business_path = state/(hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()+'.business')/'BUSINESS-RAW'
+            preserved = self.root/'preserved-owned-business-original'
+            original_raw = business_path.read_bytes(); original_inspect = before._inspect_business
+            rebound = [False]
+            def replace_after_original_decode(*args,**kwargs):
+                result = original_inspect(*args,**kwargs)
+                if not rebound[0]:
+                    business_path.rename(preserved); business_path.write_bytes(original_raw); business_path.chmod(0o600)
+                    rebound[0] = True
+                return result
+            try:
+                with mock.patch.object(before,'_inspect_business',side_effect=replace_after_original_decode):
+                    with self.assertRaises(before.HistoryPrereadHold):
+                        before.observe_owned_business_continuity(writer,owner,bound,unit,**options)
+            finally:
+                if rebound[0]: os.replace(preserved,business_path)  # restore only this owned synthetic original
+            from monitor import issue_tracker_history_read_launcher as fixed_reads
+            with mock.patch.object(fixed_reads,'_monotonic',return_value=__import__('time').monotonic()+31):
+                with self.assertRaises(before.HistoryPrereadHold):
+                    before.observe_owned_business_continuity(writer,owner,bound,unit,**options)
+            self.assertEqual((1,'UNKNOWN'),(journal.inspect_global_unit(owner,bound,unit).attempt_count,
+                                          journal.inspect_global_unit(owner,bound,unit).outcome))
+            self.assertEqual(retained,{str(path.relative_to(state)):path.read_bytes() for path in state.rglob('*') if path.is_file()})
 
     def test_actual_fixed_dual_owner_native_reads_feed_original_whole_match_without_settlement(self):
         module = load()
