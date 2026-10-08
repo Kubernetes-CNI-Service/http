@@ -1,17 +1,28 @@
 """Actual original nonces/global unit plus durable G1 budget, not admission."""
 from dataclasses import replace
+from contextlib import redirect_stderr
 import hashlib
 import importlib.util
+from io import StringIO
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
+
+def _cold_phase(phase,**values):
+    print('REQ7_METADATA_CHILD_PHASE '+json.dumps({'phase':phase,
+        'monotonic':time.monotonic(),'wall_ns':time.time_ns(),**values},sort_keys=True),
+        file=sys.stderr,flush=True)
+
+
 if len(sys.argv) > 1 and sys.argv[1] in ('--owned-inspect', '--owned-count'):
+    _cold_phase('before_fixture_imports')
     sys.path.insert(0, sys.argv[3]); sys.path.insert(0, str(Path(sys.argv[3]) / 'tools'))
 from test_cases import test_req7_remote_history_match as matching
 from test_cases.test_req7_spreadsheet_owner import fixture, binding, TARGET
@@ -45,6 +56,39 @@ class Req7MetadataReservationDirectTests(unittest.TestCase):
             plan or self.meta_plan, raw or self.raw)
     def inspect(self, token, **changes):
         return self.module.inspect_metadata_reservation(token, binding(), self.identity, changes.get('unit', self.unit))
+
+    def test_cold_timeout_preserves_original_error_budget_and_partial_phase_evidence(self):
+        self.assertTrue('_run_owned_count_child' in globals(),'cold count timeout evidence wrapper missing')
+        command=['fixed-test-python','-B','fixed-test-entry','--owned-count','owned-root',str(ROOT)]
+        partial=b'REQ7_METADATA_CHILD_PHASE {"phase":"before_count"}\n'
+        failure=subprocess.TimeoutExpired(command,5,output=b'partial count',stderr=partial)
+        evidence=StringIO()
+        with mock.patch.object(subprocess,'run',side_effect=failure) as run,redirect_stderr(evidence):
+            with self.assertRaises(subprocess.TimeoutExpired) as caught:
+                _run_owned_count_child(command,4)
+        self.assertIs(failure,caught.exception)
+        run.assert_called_once_with(command,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE,timeout=5)
+        entries=[json.loads(line.split(' ',1)[1]) for line in evidence.getvalue().splitlines()]
+        self.assertEqual(['spawn_begin','timeout'],[entry['phase'] for entry in entries])
+        self.assertEqual([4,4],[entry['count'] for entry in entries])
+        self.assertEqual('partial count',entries[-1]['stdout'])
+        self.assertEqual(partial.decode(),entries[-1]['stderr'])
+
+    def test_owned_cold_entry_cleans_fixture_after_the_original_counter_error(self):
+        self.assertTrue('_owned_metadata_child' in globals(),'cold entry lacks guaranteed fixture cleanup')
+        failure=RuntimeError('independent cold count fault')
+        case=mock.MagicMock(); case.owner.spreadsheet_owner.return_value.__enter__=mock.Mock(return_value=object())
+        case.owner.spreadsheet_owner.return_value.__exit__=mock.Mock(return_value=False)
+        case.global_journal.record_reserved_attempt_intent.side_effect=failure
+        with mock.patch(__name__+'.Req7MetadataReservationDirectTests',return_value=case), \
+                mock.patch(__name__+'.load',return_value=object()),mock.patch(__name__+'.fixture') as scoped:
+            scoped.return_value.__enter__=mock.Mock(return_value=None)
+            scoped.return_value.__exit__=mock.Mock(return_value=False)
+            with self.assertRaises(RuntimeError) as caught:
+                _owned_metadata_child('--owned-count',self.root)
+        self.assertIs(failure,caught.exception)
+        case.doCleanups.assert_called_once_with()
 
     def test_project_reservation_requires_live_original_reads_before_any_durable_write(self):
         self.module=load()
@@ -294,11 +338,11 @@ class Req7MetadataReservationWorkflowTests(unittest.TestCase):
         image = {p.name: p.read_bytes() for p in self.store.iterdir()}
         command = [sys.executable, '-B', str(Path(__file__).resolve()), '--owned-count', str(self.root), str(ROOT)]
         for count in range(1, 7):
-            result = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
+            result = _run_owned_count_child(command,count)
             self.assertEqual(0, result.returncode, result.stderr)
             self.assertEqual(('%d UNKNOWN\n' % count).encode(), result.stdout)
             self.assertEqual(image, {p.name: p.read_bytes() for p in self.store.iterdir()})
-        result = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
+        result = _run_owned_count_child(command,7)
         self.assertNotEqual(0, result.returncode); self.assertEqual(b'', result.stdout)
         with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
             self.assertEqual(6, self.global_journal.inspect_global_unit(token, binding(), self.unit).attempt_count)
@@ -502,15 +546,47 @@ class Req7MetadataReservationNativeWorkflowTests(unittest.TestCase):
         self.assertEqual(setup.meta_plan.body, record[2]); self.assertFalse(seen.inventory_complete)
 
 
-if __name__ == '__main__':
-    if len(sys.argv) > 1 and sys.argv[1] in ('--owned-inspect', '--owned-count'):
-        case = Req7MetadataReservationDirectTests(); case.setUp(); case.module = load()
-        with fixture(Path(sys.argv[2])), case.owner.spreadsheet_owner(binding()) as token:
-            if sys.argv[1] == '--owned-count':
+def _run_owned_count_child(command,count):
+    """Keep the original command, 5s budget and error; retain native phases."""
+    started=time.monotonic()
+    def phase(name,**fields):
+        print('REQ7_METADATA_PARENT_PHASE '+json.dumps({'phase':name,'count':count,
+            'monotonic':time.monotonic(),'wall_ns':time.time_ns(),
+            'elapsed':time.monotonic()-started,**fields},sort_keys=True),file=sys.stderr,flush=True)
+    def text(value):
+        return value.decode('utf-8','backslashreplace') if isinstance(value,bytes) else (value or '')
+    phase('spawn_begin')
+    try:
+        result=subprocess.run(command,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE,timeout=5)
+    except subprocess.TimeoutExpired as exc:
+        phase('timeout',stdout=text(exc.output),stderr=text(exc.stderr))
+        raise
+    phase('return',exit=result.returncode,stdout=text(result.stdout),stderr=text(result.stderr))
+    return result
+
+
+def _owned_metadata_child(mode,root):
+    case=Req7MetadataReservationDirectTests()
+    try:
+        _cold_phase('fixture_setup_begin'); case.setUp(); _cold_phase('fixture_setup_end')
+        case.module=load(); _cold_phase('source_loaded')
+        with fixture(root),case.owner.spreadsheet_owner(binding()) as token:
+            _cold_phase('owner_entered')
+            if mode=='--owned-count':
+                _cold_phase('before_count')
                 seen = case.global_journal.record_reserved_attempt_intent(token, binding(), case.identity, case.unit)
+                _cold_phase('after_count',count=seen.attempt_count,outcome=seen.outcome)
                 print(seen.attempt_count, seen.outcome)
             else:
                 seen = case.inspect(token)
                 print(seen.outcome, seen.outstanding_reservations, next(row[3] for row in seen.pools if row[0] == 101))
+    finally:
         case.doCleanups()
+        _cold_phase('fixture_cleanup_end')
+
+
+if __name__ == '__main__':
+    if len(sys.argv) > 1 and sys.argv[1] in ('--owned-inspect', '--owned-count'):
+        _owned_metadata_child(sys.argv[1],Path(sys.argv[2]))
     else: unittest.main()

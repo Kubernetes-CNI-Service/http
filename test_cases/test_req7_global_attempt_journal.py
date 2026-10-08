@@ -39,6 +39,22 @@ def unit(**changes):
 
 
 class Req7GlobalAttemptJournalTests(unittest.TestCase):
+    def test_original_receipt_namespace_guard_must_precede_any_protected_count(self):
+        from monitor import issue_tracker_receipt_snapshot as receipts
+        options=dict(qualified_source=None,store=None,writer_token=None,settings=None,
+                     whitelist_snapshot=None,expected_template_sha256='a'*64,
+                     http_root=self.root,whitelist_path=self.root/'absent')
+        with fixture(self.root),self.owner.spreadsheet_owner(binding()) as token:
+            self.module.prepare_global_unit(token,binding(),self.value)
+            with mock.patch.object(receipts,'_hold_history_originals',side_effect=receipts.LocalReceiptSnapshotHold('original missing')) as guard, \
+                    mock.patch.object(self.module,'_receipted_original_facts',return_value=('unchanged diagnostic image',)) as facts:
+                with self.assertRaises(self.module.GlobalAttemptHold) as caught:
+                    self.module.record_receipted_original_attempt_intent(token,binding(),object(),self.value,**options)
+                guard.assert_called_once_with(None); facts.assert_not_called()
+            self.assertIsNone(caught.exception.__context__)
+            self.assertEqual(0,self.module.inspect_global_unit(token,binding(),self.value).attempt_count)
+            self.assertFalse((self.store/'ATTEMPT-1').exists())
+
     def test_original_wire_claim_requires_actual_both_owners_before_any_dispatch_store(self):
         self.assertTrue(hasattr(self.module,'_hold_counted_original_wire'),'durable single-use original WIRE handoff missing')
         with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:

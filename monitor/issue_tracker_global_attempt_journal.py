@@ -468,6 +468,7 @@ def record_receipted_original_attempt_intent(
     UNKNOWN, repair, count reset or rollback; post-count drift retains UNKNOWN.
     Still no older-cycle R2, cadence, transport, COMPLETE or FIFO authority.
     """
+    from monitor.issue_tracker_receipt_snapshot import _hold_history_originals
     def originals():
         return _receipted_original_facts(token,binding,identity,unit,
             qualified_source=qualified_source,store=store,writer_token=writer_token,settings=settings,
@@ -476,13 +477,14 @@ def record_receipted_original_attempt_intent(
 
     failed = False
     try:
-        with _hold_receipted_audit_originals(writer_token,token,binding,unit) as verify_audits:
+        with _hold_receipted_audit_originals(writer_token,token,binding,unit) as verify_audits, \
+                _hold_history_originals(writer_token) as verify_receipts:
             before = inspect_global_unit(token, binding, unit)
             if before.attempt_count == 6: raise GlobalAttemptHold()
             images = originals()
-            verify_audits()
+            verify_audits(); verify_receipts()
             result = _observe(token, binding, unit, True)
-            verify_audits()
+            verify_audits(); verify_receipts()
             if (originals() != images or result.attempt_count != before.attempt_count + 1
                     or inspect_global_unit(token, binding, unit) != result):
                 raise GlobalAttemptHold()

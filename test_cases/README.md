@@ -1278,6 +1278,18 @@ generation／published SHA／manifest ID 与原 ACTION 精确绑定。伪造 rec
 含计数后 receipt 漂移。本接口保守限定 current-cycle，不证明旧周期 R2、fresh
 config／W1／cadence、固定 launcher、真实发送、FIFO 或 COMPLETE；REQ7 整体
 仍未完成，真机 NOT RUN。
+普通受保护计数还持续持有 admission、generation 四件、原发布 XLSX 和
+settings/events/outbox/current 的原目录／文件 FD 至最后复核；同字节替换
+原 admission 不能因前后内容相同被采用。前置原件缺失零计数，计数后替换
+仍保留已计 UNKNOWN、两份证据和原配额，不修复或回滚。此只读 namespace
+guard 不用于会新增 INTENT/COUNT 的共享 retry，后者仍走既有专用事务；
+这里没有授予历史 R2、settlement 或发送能力。
+
+配额冷进程联测保留原 argv、5 秒预算和六次 UNKNOWN／第七次拒绝断言。
+原生子进程记录 fixture import/setup、source load、owner、count 和 cleanup
+阶段，父进程超时保留原 TimeoutExpired 与完整 partial stdout/stderr；
+测试夹具在异常路径也执行 finally 清理。这些仅为本地诊断与隔离证据，
+不延长预算、不自动重试，也不把诊断复跑 PASS 作为原超时根因闭合。
 
 `inspect_business_source_projection` 把完整原件中每一项 wire 和 NOOP 的 C8 工具列
 与重放源行派生的值比较，并核发送项的原 UTC 时间。调用方 typed 行本身不提供

@@ -2179,6 +2179,8 @@ pread，检查 mode/uid/nlink/大小和前后身份，原一致性不重编译�
 
 ## TC-REAL-REQ7-HISTORY-PREREAD-JOURNAL-001 — 不可变发送前 History 原像
 
+- 普通 C6 计数原 namespace 补充（**NOT RUN / REAL_ENV REQUIRED**）：从原链读取前到最终计数后核持续持有 admission、generation 四件、原 XLSX、settings/events/outbox/current 的原目录／文件 FD。同字节 admission 原件替换必须 HOLD，不采用新 inode；前置失败零计数、后置失败保留原次数和 UNKNOWN、原件及替换件、原 quota/outbox。现场沿用原精确授权、前置、清理和风险，保存实际双 owner、所有原件 stat/inode/SHA 和 barrier 物理顺序。本地真实受保护 C5/C6 workflow 不是真机／断电／发送证据；未省略、合并或标通过原场景。共享 retry 新增 INTENT/COUNT 仍由原专用事务核验，本补充不证明旧周期 R2 或整项完成。
+
 - 新鲜完整连续性补充（**NOT RUN / REAL_ENV REQUIRED**）：实际双 owner 和固定原生读取覆盖完整业务／NOOP、发现／占用／原坐标行和全 History，在原始 C5/C6 计数前后比较全部类型化数据／操作者列、容量与尾边界。漏项、重排、复制回应、修改、期限到期或原文件同字节新 inode 都 HOLD；后置失败保留原 UNKNOWN／计数，不重组、不回滚。现场前置须另获原件只读与隔离注入授权，保存实际读取 provenance、原件 inode／SHA、原 wire、全计数链和故障物理顺序，清理仅自有副本。非原子读、无 CAS、隐藏 PROJECT 配额、共享 cadence 和真实 mutation／COMPLETE 仍未关闭；不授权在线操作。
 
 - 原计数联动补充（**NOT RUN / REAL_ENV REQUIRED**）：原始模板 identity RAW 摘要须与 metadata reservation HEADER 一致，不以 JSON 重序列化或语义相等绕过；固定 W1/template/nonces 前后观察是必要条件，不能替代原业务/History journal、真实新鲜读和 COMPLETE。私有 TLS 与真实原 C5/C6 workflow 的全六次计数、计数后到期 UNKNOWN 只属本地见证，现场前置／证据／清理／风险沿用本卡。

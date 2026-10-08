@@ -89,6 +89,11 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
     def test_actual_original_c6_receipt_dominates_every_business_count_and_post_count_drift_holds(self):
         self._exercise_real_protected_three_panel_fixture(skip_history=False, observed_cabling_insert_probe=True, business_preread_probe=True, original_reserved_probe=True, receipted_intent_probe=True)
 
+    def test_same_byte_original_c6_admission_replacement_after_count_is_hold_not_success(self):
+        self._exercise_real_protected_three_panel_fixture(skip_history=False,observed_cabling_insert_probe=True,
+            business_preread_probe=True,original_reserved_probe=True,receipted_intent_probe=True,
+            receipt_admission_rebind_probe=True)
+
     def test_actual_c25_allocation_dominates_original_c6_counts_and_unknown_retains_audits(self):
         self._exercise_real_protected_three_panel_fixture(skip_history=False, observed_cabling_insert_probe=True,
             business_preread_probe=True, original_reserved_probe=True, receipted_intent_probe=True, settings_audit_probe=True)
@@ -496,6 +501,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         observed_switch_insert_probe=False, observed_cabling_insert_probe=False, business_preread_probe=False, original_reserved_probe=False, receipted_intent_probe=False,
         settings_audit_probe=False, owned_read_gates_probe=False, owned_continuity_probe=False, complete_preview_probe=False,
         shared_retry_probe=False, allocation_original_identity_probe=False, allocation_retry_identity_probe=False,
+        receipt_admission_rebind_probe=False,
         before_cabling_fixture=None,
         complete_preview_source_race=False,
         complete_preview_cgi=False,
@@ -1923,7 +1929,30 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                                         return  # this new scenario asserts one complete protected ETH retry, not the fault loop below
                                     for count in range(1, 7):
                                         allocation_fault = settings_audit_probe and sheet == 'ETH Cabling' and count == 6
-                                        if allocation_original_identity_probe and sheet == 'ETH Cabling' and count == 1:
+                                        if receipt_admission_rebind_probe and count==1:
+                                            target=project/'.tracker/admissions/admission-00000000000000000001.json'
+                                            raw=target.read_bytes(); inode=target.stat().st_ino
+                                            preserved=project/'owned-original-c6-admission'; injected=[]
+                                            original_observe=global_journal._observe
+                                            def replace_after_count(*values,**options):
+                                                result=original_observe(*values,**options)
+                                                if values[3]:
+                                                    target.rename(preserved); target.write_bytes(raw); target.chmod(0o600)
+                                                    injected.append(result.attempt_count)
+                                                return result
+                                            with mock.patch.object(global_journal,'_observe',side_effect=replace_after_count):
+                                                with self.assertRaises(global_journal.GlobalAttemptHold): record()
+                                            self.assertEqual([1],injected)
+                                            self.assertNotEqual(inode,target.stat().st_ino)
+                                            self.assertEqual(raw,target.read_bytes()); self.assertEqual(raw,preserved.read_bytes())
+                                            intent=global_journal.inspect_global_unit(spreadsheet_token,binding,unit)
+                                            self.assertEqual((1,'UNKNOWN'),(intent.attempt_count,intent.outcome))
+                                            self.assertEqual(c6_original,{name:(generation_path/name).read_bytes() for name in c6_original})
+                                            self.assertEqual(seen,preread.inspect_business_preread(spreadsheet_token,binding,identity,unit))
+                                            self.assertEqual(quota,quota_module.inspect_metadata_reservation(spreadsheet_token,binding,identity,unit))
+                                            self.assertTrue(list((project/'.tracker/settings/outbox').iterdir()))
+                                            return  # this independent fault keeps its retained originals; no fixture repair/retry
+                                        elif allocation_original_identity_probe and sheet == 'ETH Cabling' and count == 1:
                                             original_observe = global_journal._observe
                                             original_bytes = assignments_path.read_bytes()
                                             original_inode = assignments_path.stat().st_ino
