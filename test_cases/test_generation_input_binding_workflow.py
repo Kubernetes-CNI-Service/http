@@ -4988,6 +4988,12 @@ finally:
     def test_real_setup_changed_prefix_commit_death_cold_a_retirement_preserves_original_evidence(self):
         self._real_setup_committed_q_group_restore(prefix=True, prefix_change=True, a_health="retire-cli")
 
+    def test_real_setup_q_commit_death_cold_a_dhcp_retirement_keeps_complete_original_transaction(self):
+        self._real_setup_committed_q_group_restore(dhcp=True, prefix=True, a_health='retire-cli')
+
+    def test_real_setup_first_dhcp_archive_rename_death_cold_cli_rechecks_fresh_health(self):
+        self._real_setup_committed_q_group_restore(dhcp=True, prefix=True, a_health='retire-death-dhcp')
+
     def test_real_setup_changed_prefix_first_archive_rename_death_rechecks_new_process_health(self):
         self._real_setup_committed_q_group_restore(prefix=True, prefix_change=True, a_health="retire-death-prefix")
 
@@ -5158,6 +5164,9 @@ finally:
 
     def test_real_setup_q_commit_staged_dhcp_clone_holds_cold_before_a_plan(self):
         self._real_setup_committed_q_group_restore(dhcp=True, dhcp_staged_fault=True)
+
+    def test_real_setup_q_commit_staged_dhcp_clone_holds_cold_before_b_preflight(self):
+        self._real_setup_committed_q_group_restore(dhcp=True, dhcp_staged_fault='b-preflight')
 
     def _real_setup_committed_q_group_restore(self, *, dhcp=False, runtime_death=False,
                                              setup_death=False, foreign_setup=False,
@@ -5422,13 +5431,18 @@ try:
             print('R22_FOREIGN_RESTORED_DHCP_OWNER_REJECTED')
             sys.exit(0)
         raise AssertionError('same-byte new restored DHCP owner must not be adopted')
-    if sys.argv[5] == 'foreign-dhcp-staged':
+    if sys.argv[5] in ('foreign-dhcp-staged', 'foreign-dhcp-b-staged'):
         try:
-            load.restore_setup_switch_a_disk(q, guard=guard, confirmed=True)
+            if sys.argv[5] == 'foreign-dhcp-b-staged':
+                token = load.open_setup_switch_publication_bundle(q, guard=guard)
+                load.close_setup_switch_publication_bundle(token)
+            else:
+                load.restore_setup_switch_a_disk(q, guard=guard, confirmed=True)
         except load.LoadError as exc:
             assert 'DHCP' in str(exc) and 'staged' in str(exc) and 'owner' in str(exc) and 'HOLD' in str(exc), str(exc)
             assert not os.path.lexists(root / 'ztp/.setup-switch-a-restore.json')
-            print('R22_ORIGINAL_STAGED_DHCP_OWNER_REJECTED_BEFORE_A_PLAN')
+            print('R22_ORIGINAL_STAGED_DHCP_OWNER_REJECTED_BEFORE_B_PREFLIGHT' if sys.argv[5] == 'foreign-dhcp-b-staged'
+                  else 'R22_ORIGINAL_STAGED_DHCP_OWNER_REJECTED_BEFORE_A_PLAN')
             sys.exit(0)
         raise AssertionError('same-byte foreign staged DHCP owner was adopted by cold LOAD')
     if sys.argv[5] == 'foreign-dhcp-b':
@@ -5495,8 +5509,9 @@ try:
             def die_after_original_wal_rename(path):
                 real_sync(path)
                 prefix_boundary = len(sys.argv) > 7 and sys.argv[7] == 'prefix-boundary'
+                dhcp_boundary = len(sys.argv) > 7 and sys.argv[7] == 'dhcp-boundary'
                 archived = list(journal.parent.glob('.setup-switch-a-retired-*/' +
-                    ('prefix-*' if prefix_boundary else 'journal.json')))
+                    ('prefix-*' if prefix_boundary else 'dhcp-transaction' if dhcp_boundary else 'journal.json')))
                 if (root / 'ztp/.setup-switch-retirement.json').exists() and archived:
                     os.kill(os.getpid(), signal.SIGKILL)
             load.verify_http_publication = witnessed_health
@@ -5538,6 +5553,11 @@ try:
             assert stat.S_IMODE(archive.lstat().st_mode) == 0o700
             expected_names = {'journal.json', 'a-restore.json', 'retirement.json'}
             original_body = json.loads(frozen[1])['body']
+            if 'dhcp_transaction' in original_body:
+                expected_names.add('dhcp-transaction')
+                original_transaction = original_body['dhcp_transaction']['body']['transaction']
+                assert (archive / 'dhcp-transaction').lstat().st_ino == original_transaction['ino']
+                assert not os.path.lexists(original_transaction['path'])
             prefix_rows = original_body.get('prefix_transaction', {}).get('rows', [])
             if prefix_rows:
                 typed = json.loads((archive / 'retirement.json').read_bytes())['prefix']
@@ -5549,7 +5569,7 @@ try:
                     if row['leaf'] is not None:
                         expected_names.add(row['basename'])
                         assert (archive / row['basename']).lstat().st_ino == row['leaf']['identity'][1]
-                assert len(expected_names) == 6
+                assert len(expected_names) == (7 if 'dhcp_transaction' in original_body else 6)
             assert set(os.listdir(archive)) == expected_names
             assert frozen == ((archive / 'journal.json').lstat().st_ino, (archive / 'journal.json').read_bytes())
             assert frozen_plan == ((archive / 'a-restore.json').lstat().st_ino, (archive / 'a-restore.json').read_bytes())
@@ -5611,10 +5631,12 @@ finally:
                 self.assertNotEqual(held.lstat().st_ino, source.lstat().st_ino)
                 frozen = (state[7].read_bytes(), os.readlink(common),
                     (q / '99-output-ztp/current-release.json').read_bytes(), source.lstat().st_ino)
-                rejecting = subprocess.run(argv + ['foreign-dhcp-staged', shape], capture_output=True,
+                rejecting = subprocess.run(argv + ['foreign-dhcp-b-staged' if dhcp_staged_fault == 'b-preflight'
+                    else 'foreign-dhcp-staged', shape], capture_output=True,
                     text=True, check=False, timeout=30)
                 self.assertEqual(0, rejecting.returncode, rejecting.stdout + rejecting.stderr)
-                self.assertIn('R22_ORIGINAL_STAGED_DHCP_OWNER_REJECTED_BEFORE_A_PLAN', rejecting.stdout)
+                self.assertIn('R22_ORIGINAL_STAGED_DHCP_OWNER_REJECTED_BEFORE_B_PREFLIGHT' if dhcp_staged_fault == 'b-preflight'
+                    else 'R22_ORIGINAL_STAGED_DHCP_OWNER_REJECTED_BEFORE_A_PLAN', rejecting.stdout)
                 self.assertEqual(frozen, (state[7].read_bytes(), os.readlink(common),
                     (q / '99-output-ztp/current-release.json').read_bytes(), source.lstat().st_ino))
                 self.assertEqual(original_wal, (journal.lstat().st_ino, journal.read_bytes()))
@@ -5724,7 +5746,8 @@ finally:
                            if a_health else "reader-a-image" if a_image else "reader-dhcp-metadata" if dhcp_metadata else "reader")
             try:
                 reader = subprocess.run(argv + [reader_mode, shape] +
-                                        (['prefix-boundary'] if a_health == 'retire-death-prefix' else []),
+                                        (['prefix-boundary'] if a_health == 'retire-death-prefix' else
+                                         ['dhcp-boundary'] if a_health == 'retire-death-dhcp' else []),
                                         capture_output=True, text=True, check=False,
                                         timeout=120 if a_health else 30)
             except subprocess.TimeoutExpired as exc:
@@ -5743,11 +5766,17 @@ finally:
                 retirement = journal.parent / '.setup-switch-retirement.json'
                 original_marker = (retirement.lstat().st_ino, retirement.read_bytes())
                 archive = Path(json.loads(retirement.read_bytes())['archive']['path'])
-                wal_location = journal if a_health == 'retire-death-prefix' else archive / 'journal.json'
+                wal_location = journal if a_health in ('retire-death-prefix', 'retire-death-dhcp') else archive / 'journal.json'
                 self.assertEqual(original_wal, (wal_location.lstat().st_ino, wal_location.read_bytes()))
                 if a_health == 'retire-death-prefix':
                     self.assertFalse(os.path.lexists(archive / 'journal.json'))
                     self.assertEqual(1, len(list(archive.glob('prefix-*'))))
+                elif a_health == 'retire-death-dhcp':
+                    self.assertFalse(os.path.lexists(archive / 'journal.json'))
+                    self.assertFalse(os.path.lexists(transaction))
+                    self.assertEqual(original_receipt, ((archive / 'dhcp-transaction').lstat().st_ino,
+                        (archive / 'dhcp-transaction/a-preimage.json').lstat().st_ino,
+                        (archive / 'dhcp-transaction/a-preimage.json').read_bytes()))
                 else:
                     self.assertFalse(os.path.lexists(journal))
                 plan_path = journal.parent / '.setup-switch-a-restore.json'
@@ -5756,6 +5785,7 @@ finally:
                 self.assertEqual(1, len(first_health))
                 retry = r'''
 import json, os, sys
+from contextlib import ExitStack
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -5778,7 +5808,13 @@ try:
         with (root / 'a-retirement-health-witness').open('a') as witness:
             witness.write(str(os.getpid()) + '\n'); witness.flush(); os.fsync(witness.fileno())
     api.verify_http_publication = fresh_probe
-    with private_a_health_ports(api, root, http_status=503 if failure else None), mock.patch.object(api, 'runtime_os', return_value='Linux'):
+    with ExitStack() as stack:
+        stack.enter_context(private_a_health_ports(api, root, http_status=503 if failure else None))
+        stack.enter_context(mock.patch.object(api, 'runtime_os', return_value='Linux'))
+        if sys.argv[5] == 'dhcp':
+            names = ('dhcpd.conf', 'dhcpd_eth.hosts', 'dhcpd_ib.hosts', 'dhcpd_nvl.hosts')
+            stack.enter_context(mock.patch.object(api, 'dhcp_file_mappings', return_value={
+                q / 'independent-dhcp-B' / name: root / 'private-etc-dhcp' / name for name in names}))
         api.release_deployment_lock(fd)
         fd = None  # The public resume CLI must acquire its own exclusive lock.
         try:
@@ -5807,7 +5843,7 @@ finally:
         api.release_deployment_lock(fd)
 '''
                 retried = subprocess.run([sys.executable, '-B', '-c', retry, str(root), str(q), str(ROOT),
-                    'failure' if a_health.endswith('http-failure') else 'success'], cwd=root,
+                    'failure' if a_health.endswith('http-failure') else 'success', shape], cwd=root,
                     capture_output=True, text=True, check=False, timeout=120)
                 self.assertEqual(0, retried.returncode, retried.stdout + retried.stderr)
                 self.assertEqual(original_wal, ((archive / 'journal.json').lstat().st_ino,
@@ -5899,6 +5935,12 @@ finally:
                     self.assertEqual(1, len(archives))
                     self.assertEqual(original_wal, ((archives[0] / 'journal.json').lstat().st_ino,
                                                    (archives[0] / 'journal.json').read_bytes()))
+                    if dhcp:
+                        archived_transaction = archives[0] / 'dhcp-transaction'
+                        self.assertEqual(original_receipt, (archived_transaction.lstat().st_ino,
+                            (archived_transaction / 'a-preimage.json').lstat().st_ino,
+                            (archived_transaction / 'a-preimage.json').read_bytes()))
+                        self.assertFalse(os.path.lexists(transaction))
                 else:
                     self.assertEqual(original_wal, (journal.lstat().st_ino, journal.read_bytes()))
                 self.assertEqual(original_a_links, {path: (path.lstat().st_ino, path.lstat().st_ctime_ns, os.readlink(path))

@@ -1115,23 +1115,32 @@ HTTP 失败及非本次启动服务混入。每个服务/健康边界重查原 A
 强杀后的全新 resume 必须重新健康；外来同目标 inode、缺失清单、Boolean owner、
 晚占缺席名拒绝且不清理。缺席行没有写入，不重复重开整组；每个真实 rename 前后及
 最终完成仍完整重验。direct/真实 workflow 的局部记录见 CHANGE_AWARE_TESTING，
-不是正式 full/check；DHCP 完整 typed 归档及 B 完整退休继续待完成。
+不是正式 full/check；原 A 的完整 DHCP typed 归档已有下述本地候选，B 完整退休继续待完成。
 
 DHCP 原生产者已增加 staged 四文件与目录九字段登记候选，先于首个 B rename；WAL
 fsync 与每次 B 写重核原身份。冷恢复不能把同字节 clone、同 inode ABA、目录权限变更
 认作原证据。闭合记录拒绝 Boolean/未知/缺项；旧 WAL 不从当前文件补原所有权。本地
-direct/真实 workflow 边界记录不表示整棵 DHCP 事务已经可退休或具备正式证明。
+direct/真实 workflow 边界记录本身不授予整棵 DHCP 事务退休资格。B 已发布组及冷打开也必须
+重核 staged 原身份，在 B 预检之前拒绝同字节外来 inode。
+
+原 A DHCP 归档候选只接受原生产者完整 staged/backup/live 清单：原事务目录、原 receipt、
+四个子目录及每个原文件/原始 link target 都逐项核身份、字节与精确名字集合；live-candidates
+必须为空，restore-candidates 保留原证据。整个原事务 no-replace 移到唯一归档名，WAL
+逻辑路径与原始字节不改；pending 映射要求源/归档恰有一处，完成历史归档不认领未来同名源。
+缺记录、未知对象、晚占缺席名、丢失或外来 restore inode 在任何健康命令之前 HOLD。
+真实首个 DHCP 归档 rename 强杀后，新显式 CLI 必须重新健康，不能借用上一进程 PASS。
+13 项 direct/真实多脚本边界记录见 CHANGE_AWARE_TESTING；不是 approved related/full。
 
 `--retire-setup-a` 和 `--resume-setup-a-retirement` 与仅健康激活、A 恢复、B 激活及 B
 退休是互斥操作。Linux management-server 必须预先停服；入口取得独占锁，并在任何 WAL
 操作之前停止 native monitor。每次续退休重新核原 A 完整恢复组、原输入/镜像/公钥、配置、
 动态 listener 和真实健康，不以旧进程 PASS 授权。失败仅停止本次尝试启动的服务，保留围栏。
 
-当前窄门禁处理没有 DHCP 事务、prefix 为空或具备完整原映射的已恢复 A；其它情形仍 HOLD，不能
+当前窄门禁处理没有 DHCP 事务或具备完整原 DHCP 清单、prefix 为空或具备完整原映射的已恢复 A；其它情形仍 HOLD，不能
 据此称完整 R22 归档完成。私有 0700 归档和 role=A 的 schema-2 marker 持久绑定原
 WAL/恢复计划的 inode、元数据、摘要及原父，no-replace 移动原 inode，不重写原字节。
 中断可由新 LOAD 根据 typed 映射只读核验、重新健康后续接；该只读上下文不能授予恢复写。
-完成归档保留精确三核心对象及已登记的 prefix 实体，未知对象/外来 inode/错误角色/未完成或孤立目录保持 HOLD。
+完成归档保留精确三核心对象及已登记的 prefix 实体和整棵原 DHCP 事务，未知对象/外来 inode/错误角色/未完成或孤立目录保持 HOLD。
 历史归档只核自己的原归档对象，不绑定下一事务重用的 live 名称；新事务仍受自己的 WAL
 围栏约束。创建意图之前的孤立目录不能自动认领或清理。私有 HTTP/SIGKILL 回归不替代
-正式 related/full/check、Linux/root/断电、完整 prefix/DHCP 归档或人工 ACK。
+正式 related/full/check、Linux/root/断电、B 完整退休归档或人工 ACK。

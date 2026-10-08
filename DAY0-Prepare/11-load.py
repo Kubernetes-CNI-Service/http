@@ -7216,6 +7216,7 @@ def _require_setup_switch_publication_bundle(token, *, phase, require_guard):
             held_receipt = token.get("receipt_descriptor", -1)
             _require_bound_dhcp_transaction_namespace(binding)
             _require_setup_switch_dhcp_backup_inventory(binding)
+            _require_setup_switch_dhcp_staged_inventory(binding)
             _require_setup_switch_dhcp_live_inventory(binding)
             if (held_receipt < 0
                     or list(_dhcp_a_preimage_receipt_identity(os.fstat(held_receipt))) != binding["identity"]
@@ -7489,8 +7490,11 @@ def _setup_switch_a_compensation_authority(project, *, guard, confirmed,
             _setup_switch_runtime_context(body, require_original_yaml_owner=True)
             _require_setup_switch_a_prefix_owners(body, _retirement=_retirement)
             if "dhcp_transaction" in body:
-                _require_setup_switch_dhcp_backup_inventory(body["dhcp_transaction"])
-                _require_setup_switch_dhcp_staged_inventory(body["dhcp_transaction"])
+                if _retirement is None:
+                    _require_setup_switch_dhcp_backup_inventory(body["dhcp_transaction"])
+                    _require_setup_switch_dhcp_staged_inventory(body["dhcp_transaction"])
+                else:
+                    _setup_switch_a_dhcp_archive_artifact(_retirement, body)
         def shared_authority():
             wal_authority()
             _require_setup_switch_compensation_q_evidence(body)
@@ -7876,8 +7880,9 @@ def _setup_switch_a_compensation_authority(project, *, guard, confirmed,
                 if live is not None and not _setup_switch_dhcp_same_leaf(
                         checkpoint, live["after"][path.name]["file"], renamed=True):
                     raise LoadError("DHCP compensation checkpoint differs from original B candidate owner; HOLD")
-                _require_setup_switch_dhcp_live_inventory(binding, inspect_runtime=False,
-                    require_committed_b=True)
+                if _retirement is None:
+                    _require_setup_switch_dhcp_live_inventory(binding, inspect_runtime=False,
+                        require_committed_b=True)
                 stage, after, staged = row["stage"], None, None
                 if before["state"] == "missing":
                     if stage is not None:
@@ -8129,6 +8134,7 @@ def _open_setup_switch_publication_bundle(project, *, guard, journal):
             token["receipt_descriptor"] = receipt_fd
             # Ownership is independent of the publication phase. Preserve its
             # precise HOLD cause instead of swallowing it in phase probes.
+            _require_setup_switch_dhcp_staged_inventory(body['dhcp_transaction'])
             _require_setup_switch_dhcp_live_inventory(body["dhcp_transaction"])
         phases = []
         for phase in ("parent", "report", "selector", "published"):
@@ -16986,7 +16992,7 @@ def _setup_switch_a_archive_directory(path):
 
 def _validate_setup_switch_a_retirement(body):
     required = {'schema_version', 'role', 'parent', 'archive', 'journal', 'plan', 'owner'}
-    if (not isinstance(body, dict) or not required <= set(body) or set(body) - required - {'prefix'}
+    if (not isinstance(body, dict) or not required <= set(body) or set(body) - required - {'prefix', 'dhcp'}
             or type(body['schema_version']) is not int
             or body['schema_version'] != 2 or body['role'] != 'A'
             or not isinstance(body['owner'], list) or len(body['owner']) != 6
@@ -17010,6 +17016,21 @@ def _validate_setup_switch_a_retirement(body):
                 or row['identity'][5] != 1 or not isinstance(row['sha256'], str)
                 or re.fullmatch(r'[0-9a-f]{64}', row['sha256']) is None):
             raise LoadError("A retirement original artifact contract is invalid; HOLD")
+    if 'dhcp' in body:
+        row = body['dhcp']
+        if (not isinstance(row, dict) or set(row) != {'path', 'parent', 'identity'}
+                or not isinstance(row['path'], str) or not Path(row['path']).is_absolute()
+                or re.fullmatch(r'\.load-dhcp-transaction-[0-9]+-[0-9a-f]{16}', Path(row['path']).name) is None
+                or not isinstance(row['parent'], dict)
+                or set(row['parent']) != {'path', 'dev', 'ino', 'mode', 'uid', 'gid'}
+                or row['parent']['path'] != str(Path(row['path']).parent)
+                or any(type(row['parent'][k]) is not int or row['parent'][k] < 0
+                       for k in ('dev', 'ino', 'mode', 'uid', 'gid'))
+                or not isinstance(row['identity'], list) or len(row['identity']) != 9
+                or any(type(v) is not int or v < 0 for v in row['identity'])
+                or not stat.S_ISDIR(row['identity'][2]) or stat.S_IMODE(row['identity'][2]) != 0o755
+                or row['identity'][3:5] != [row['parent']['uid'], row['parent']['gid']]):
+            raise LoadError('A DHCP retirement original directory contract is invalid; HOLD')
     prefix = body.get('prefix', [])
     if not isinstance(prefix, list) or len(prefix) > 9:
         raise LoadError("A retirement prefix inventory is not bounded; HOLD")
@@ -17030,6 +17051,114 @@ def _validate_setup_switch_a_retirement(body):
             dict(path=str(ZTP_PREFIX_MARKER), parent=row['parent'], leaf=None),
             links={row['path']: dict(path=row['path'], parent=row['parent'], leaf=leaf)}
                   if leaf is not None and 'target' in leaf else {}))
+
+
+def _require_setup_switch_a_dhcp_evidence(binding, transaction):
+    """Read only original, closed WAL owners through a physical archive view."""
+    if not {'staged_inventory', 'backup_inventory', 'live_inventory'} <= set(binding):
+        raise LoadError('A DHCP original typed inventory is missing; HOLD')
+    _validate_setup_switch_dhcp_staged_inventory(binding)
+    _validate_setup_switch_dhcp_live_inventory(binding)
+    logical = Path(binding['body']['transaction']['path'])
+    transaction = Path(transaction)
+    before = _dhcp_a_preimage_receipt_identity(transaction.lstat())
+    original = binding['body']['transaction']
+    if (transaction.resolve(strict=True) != transaction or not stat.S_ISDIR(before[2])
+            or dict(path=str(logical), dev=before[0], ino=before[1], mode=stat.S_IMODE(before[2]),
+                    uid=before[3], gid=before[4]) != original):
+        raise LoadError('A DHCP original transaction owner changed; HOLD')
+    fd = os.open(transaction, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    held = []
+    checkpoints = []
+    try:
+        if before != _dhcp_a_preimage_receipt_identity(os.fstat(fd)):
+            raise LoadError('A DHCP original transaction descriptor changed; HOLD')
+        names = {'a-preimage.json', 'backup', 'staged', 'live-candidates', 'restore-candidates'}
+        if set(os.listdir(fd)) != names:
+            raise LoadError('A DHCP original transaction contains unregistered objects; HOLD')
+        receipt = transaction / 'a-preimage.json'
+        payload, mode = _read_rollback_regular(receipt, limit=_ROLLBACK_PAYLOAD_LIMIT)
+        if (mode != 0o600 or list(_dhcp_a_preimage_receipt_identity(receipt.lstat())) != binding['identity']
+                or hashlib.sha256(payload).hexdigest() != binding['sha256']
+                or json.loads(payload)['body'] != binding['body']):
+            raise LoadError('A DHCP original receipt owner/bytes changed; HOLD')
+        inventory, backup = binding['live_inventory'], binding['backup_inventory']
+        expected_parent = {k: original[k] for k in ('path', 'dev', 'ino')}
+        if (backup['parent'] != expected_parent or inventory['parent'] != expected_parent
+                or binding['body']['backup']['path'] != str(logical / 'backup')):
+            raise LoadError('A DHCP original child parent inventory differs; HOLD')
+        for role in ('backup', 'staged', 'live-candidates', 'restore-candidates'):
+            path = transaction / role
+            child = os.open(role, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            owner = _dhcp_a_preimage_receipt_identity(os.fstat(child))
+            held.append((child, path, owner))
+            if owner != _dhcp_a_preimage_receipt_identity(path.lstat()):
+                raise LoadError('A DHCP original child descriptor changed; HOLD')
+            if role == 'staged':
+                if list(owner) != binding['staged_inventory']['directory']['identity']:
+                    raise LoadError('A DHCP original staged directory owner changed; HOLD')
+                leaves = binding['staged_inventory']['leaves']
+            elif role == 'backup':
+                declared = binding['body']['backup']
+                if (dict(path=str(logical / role), dev=owner[0], ino=owner[1], mode=stat.S_IMODE(owner[2]),
+                         uid=owner[3], gid=owner[4]) != declared
+                        or backup['directory'] != {k: declared[k] for k in ('path', 'dev', 'ino')}):
+                    raise LoadError('A DHCP original backup directory owner changed; HOLD')
+                leaves = {name: (None if leaf is None else dict(identity=leaf, state=binding['body']['before'][name]))
+                          for name, leaf in backup['leaves'].items()}
+            else:
+                key = 'directory' if role == 'live-candidates' else 'restore_directory'
+                if (inventory[key] != dict(path=str(logical / role), dev=owner[0], ino=owner[1])
+                        or stat.S_IMODE(owner[2]) != (0o755 if role == 'live-candidates' else 0o700)
+                        or list(owner[3:5]) != [original['uid'], original['gid']]):
+                    raise LoadError('A DHCP original candidate directory owner changed; HOLD')
+                leaves = ({} if role == 'live-candidates' else
+                          {name: None if row is None else row['file'] for name, row in inventory['restore'].items()})
+            if set(os.listdir(child)) != {name for name, row in leaves.items() if row is not None}:
+                raise LoadError('A DHCP original child inventory names changed; HOLD')
+            for name, leaf in leaves.items():
+                if _setup_switch_dhcp_owned_leaf(path / name) != leaf:
+                    raise LoadError('A DHCP original child leaf owner/bytes changed; HOLD')
+                checkpoints.append((path / name, leaf))
+        for path, leaf in checkpoints:
+            if _setup_switch_dhcp_owned_leaf(path) != leaf:
+                raise LoadError('A DHCP original leaf changed during archive read; HOLD')
+        if (list(_dhcp_a_preimage_receipt_identity(receipt.lstat())) != binding['identity']
+                or (payload, mode) != _read_rollback_regular(receipt, limit=_ROLLBACK_PAYLOAD_LIMIT)):
+            raise LoadError('A DHCP original receipt changed during archive read; HOLD')
+        for child, path, owner in held:
+            if (owner != _dhcp_a_preimage_receipt_identity(os.fstat(child))
+                    or owner != _dhcp_a_preimage_receipt_identity(path.lstat())):
+                raise LoadError('A DHCP original child changed during archive read; HOLD')
+        if (before != _dhcp_a_preimage_receipt_identity(os.fstat(fd))
+                or before != _dhcp_a_preimage_receipt_identity(transaction.lstat()) or set(os.listdir(fd)) != names):
+            raise LoadError('A DHCP original transaction changed during archive read; HOLD')
+    finally:
+        for child, _path, _owner in held: os.close(child)
+        os.close(fd)
+
+
+def _setup_switch_a_dhcp_archive_artifact(marker, body, *, completed=False):
+    binding = body.get('dhcp_transaction')
+    row = marker['body'].get('dhcp')
+    if binding is None:
+        if row is not None: raise LoadError('A DHCP archive lacks an original WAL transaction; HOLD')
+        return None
+    if row is None: raise LoadError('A DHCP typed archive inventory is missing; HOLD')
+    source = Path(binding['body']['transaction']['path'])
+    destination = Path(marker['body']['archive']['path']) / 'dhcp-transaction'
+    if row['path'] != str(source) or row['parent'] != binding['body']['runtime']:
+        raise LoadError('A DHCP archive original namespace differs from WAL; HOLD')
+    if completed and marker['path'] != destination.parent / 'retirement.json':
+        raise LoadError('A completed DHCP view cannot qualify pending retirement; HOLD')
+    names = [p for p in ((destination,) if completed else (source, destination)) if os.path.lexists(p)]
+    if len(names) != 1: raise LoadError('A DHCP original/archive phase is unknown; HOLD')
+    path = names[0]
+    owner = list(_dhcp_a_preimage_receipt_identity(path.lstat()))
+    if owner[:8] != row['identity'][:8] or path == source and owner != row['identity']:
+        raise LoadError('A DHCP original archive directory checkpoint changed; HOLD')
+    _require_setup_switch_a_dhcp_evidence(binding, path)
+    return path
 
 
 def _setup_switch_a_prefix_archive_rows(marker, body):
@@ -17090,6 +17219,8 @@ def _require_setup_switch_a_retirement_owner(marker):
     _require_setup_switch_retirement_owner(marker)
     archive = Path(marker['body']['archive']['path'])
     allowed = {'journal.json', 'a-restore.json'}
+    if 'dhcp' in marker['body']:
+        allowed.add('dhcp-transaction')
     allowed.update(row['basename'] for row in marker['body'].get('prefix', []) if row['leaf'] is not None)
     if marker['path'] == archive / 'retirement.json':
         allowed.add('retirement.json')
@@ -17171,6 +17302,8 @@ def _require_completed_setup_switch_a_archives():
                 prefix = marker['body'].get('prefix', [])
                 expected_names = {'journal.json', 'a-restore.json', 'retirement.json'} | {
                     row['basename'] for row in prefix if row['leaf'] is not None}
+                if 'dhcp' in marker['body']:
+                    expected_names.add('dhcp-transaction')
                 if (set(os.listdir(path)) != expected_names
                         or any(_setup_switch_a_retirement_artifact(marker, role, completed=True).parent != path
                                for role in ('journal', 'plan'))):
@@ -17179,6 +17312,7 @@ def _require_completed_setup_switch_a_archives():
                 original = _setup_switch_prepared_registration_body(
                     _read_rollback_regular(archived_wal, limit=_SETUP_SWITCH_JOURNAL_LIMIT))
                 _setup_switch_a_prefix_archive_rows(marker, original)
+                _setup_switch_a_dhcp_archive_artifact(marker, original, completed=True)
                 for row in prefix:
                     _setup_switch_a_prefix_archive_artifact(marker, row, completed=True)
                 # Completed history does not bind names reused by a new WAL.
@@ -17190,6 +17324,7 @@ def _require_completed_setup_switch_a_archives():
                     _setup_switch_a_retirement_artifact(marker, role, completed=True)
                 for row in prefix:
                     _setup_switch_a_prefix_archive_artifact(marker, row, completed=True)
+                _setup_switch_a_dhcp_archive_artifact(marker, original, completed=True)
         if (before != _dhcp_a_preimage_receipt_identity(os.fstat(fd))
                 or before != _dhcp_a_preimage_receipt_identity(parent.lstat())):
             raise LoadError("A archive inspection parent changed during scan; HOLD")
@@ -17201,7 +17336,7 @@ def _retire_setup_switch_a_publication(project, *, guard, require_runtime_guard,
                                       require_authority, plan, retirement=None):
     """Archive the qualified original A WAL/plan; never delete either inode.
 
-    Prefix evidence is individually bound; DHCP remains a separate typed gate.
+    Prefix and complete DHCP evidence are individually bound to the original WAL.
     This read-only compensation context cannot grant any recovery writer.
     """
     require_authority()
@@ -17218,16 +17353,37 @@ def _retire_setup_switch_a_publication(project, *, guard, require_runtime_guard,
                 prefix.append(dict(path=raw, parent=original['root'],
                     leaf=_setup_switch_compensation_leaf(Path(raw)), basename=f'prefix-{index:03d}'))
             _setup_switch_prefix_states(original)
-        require_authority()
+        dhcp = None
+        if 'dhcp_transaction' in original:
+            binding = original['dhcp_transaction']
+            transaction = Path(binding['body']['transaction']['path'])
+            _require_setup_switch_a_dhcp_evidence(binding, transaction)
+            dhcp = dict(path=str(transaction), parent=binding['body']['runtime'],
+                        identity=list(_dhcp_a_preimage_receipt_identity(transaction.lstat())))
+            _require_setup_switch_a_dhcp_evidence(binding, transaction)
         journal, a_plan = _setup_switch_journal_path(), _setup_switch_a_restore_path()
         rows = {}
         for key, path in (('journal', journal), ('plan', a_plan)):
             before = _dhcp_a_preimage_receipt_identity(path.lstat())
             payload, mode = _read_rollback_regular(path, limit=_SETUP_SWITCH_JOURNAL_LIMIT)
-            require_authority()
             if (mode != 0o600 or before != _dhcp_a_preimage_receipt_identity(path.lstat())):
                 raise LoadError("A retirement original artifact changed before intent; HOLD")
             rows[key] = dict(path=str(path), identity=list(before), sha256=hashlib.sha256(payload).hexdigest())
+        # These are read-only snapshots, not writes. Bracket the whole closed
+        # inventory with full authority, then recheck each captured owner so
+        # no earlier row can change while another is read. This qualification
+        # is still before the FIRST archive/intent mutation.
+        require_authority()
+        for row in rows.values():
+            if list(_dhcp_a_preimage_receipt_identity(Path(row['path']).lstat())) != row['identity']:
+                raise LoadError('A retirement original artifact changed during inventory; HOLD')
+        for row in prefix:
+            if _setup_switch_compensation_leaf(Path(row['path'])) != row['leaf']:
+                raise LoadError('A retirement original prefix changed during inventory; HOLD')
+        if dhcp is not None:
+            _require_setup_switch_a_dhcp_evidence(binding, transaction)
+            if list(_dhcp_a_preimage_receipt_identity(transaction.lstat())) != dhcp['identity']:
+                raise LoadError('A DHCP original transaction changed during inventory; HOLD')
         archive = journal.parent / ('.setup-switch-a-retired-' + uuid.uuid4().hex)
         archive.mkdir(mode=0o700)
         # A death before marker publication leaves an orphan fenced by the
@@ -17242,6 +17398,8 @@ def _retire_setup_switch_a_publication(project, *, guard, require_runtime_guard,
             body = dict(schema_version=2, role='A', parent=_setup_switch_link_parent_identity(journal),
                         archive=archive_owner, prefix=prefix, **rows,
                         owner=list(_dhcp_a_preimage_receipt_identity(os.fstat(fd))[:6]))
+            if dhcp is not None:
+                body['dhcp'] = dhcp
             payload = _setup_switch_canonical_payload(body) + b'\n'
             with os.fdopen(os.dup(fd), 'wb') as out:
                 out.write(payload); out.flush()
@@ -17264,8 +17422,6 @@ def _retire_setup_switch_a_publication(project, *, guard, require_runtime_guard,
                     restore_publication=False, _require_runtime_guard=require_runtime_guard,
                     _retirement=marker) as compensation:
                 original = _setup_switch_prepared_registration_body(compensation['opened'])
-                if 'dhcp_transaction' in original:
-                    raise LoadError("A DHCP typed archive inventory is missing; HOLD")
                 _require_setup_switch_a_complete_disk_group(original, compensation)
                 _require_setup_switch_a_health_publication(original)
                 with _setup_switch_a_image_authority(original, compensation=compensation) as selected:
@@ -17275,35 +17431,33 @@ def _retire_setup_switch_a_publication(project, *, guard, require_runtime_guard,
                     selected['require']()
                 compensation['require']()
             require_runtime_guard()
-        qualified()
         archive = Path(marker['body']['archive']['path'])
+        original = _setup_switch_prepared_registration_body(_read_rollback_regular(
+            _setup_switch_a_retirement_artifact(marker, 'journal'), limit=_SETUP_SWITCH_JOURNAL_LIMIT))
+        operations = []
+        if 'dhcp' in marker['body']:
+            operations.append((lambda: _setup_switch_a_dhcp_archive_artifact(marker, original),
+                archive / 'dhcp-transaction', Path(marker['body']['dhcp']['parent']['path'])))
         for row in marker['body'].get('prefix', []):
-            if row['leaf'] is None:
-                # Absence is already part of every complete group check.
-                # Recheck its exact two names, but do not reopen the whole
-                # disk/image authority when this row performs no mutation.
-                _require_setup_switch_a_retirement_owner(marker)
-                _setup_switch_a_prefix_archive_artifact(marker, row)
-                continue
-            qualified()
-            source = _setup_switch_a_prefix_archive_artifact(marker, row)
-            if source is not None:
-                destination = archive / row['basename']
-                if source != destination:
-                    _setup_switch_rename_directory_noreplace(source, destination)
-                _fsync_parent_directory(archive)
-                _fsync_parent_directory(HTTP_ROOT)
-                qualified()
+            if row['leaf'] is not None:
+                operations.append((lambda row=row: _setup_switch_a_prefix_archive_artifact(marker, row),
+                    archive / row['basename'], HTTP_ROOT))
         for role, basename in (('journal', 'journal.json'), ('plan', 'a-restore.json')):
-            qualified()
-            source = _setup_switch_a_retirement_artifact(marker, role)
-            destination = archive / basename
+            operations.append((lambda role=role: _setup_switch_a_retirement_artifact(marker, role),
+                archive / basename, Path(marker['body'][role]['path']).parent))
+        # The post-sync full qualification of one operation is also the
+        # immediately preceding full qualification of the next. There is no
+        # other callback or write between them; each original source is still
+        # checked again just before its own no-replace rename. Absence rows
+        # remain obligations of EVERY complete group qualification.
+        qualified()
+        for inspect_original, destination, original_parent in operations:
+            source = inspect_original()
             if source != destination:
                 _setup_switch_rename_directory_noreplace(source, destination)
             _fsync_parent_directory(archive)
-            _fsync_parent_directory(source.parent)
+            _fsync_parent_directory(original_parent)
             qualified()
-        qualified()
         destination = archive / 'retirement.json'
         _setup_switch_rename_directory_noreplace(path, destination)
         now = _dhcp_a_preimage_receipt_identity(os.fstat(marker['descriptor']))
@@ -17350,7 +17504,11 @@ def activate_setup_switch_a_publication(project, *, guard, confirmed=False, reti
             restore_publication=False, _require_runtime_guard=service_guard, _retirement=_retirement) as compensation:
         body = _setup_switch_prepared_registration_body(compensation["opened"])
         if retire and 'dhcp_transaction' in body:
-            raise LoadError("A DHCP evidence requires full typed retirement inventory; HOLD")
+            if _retirement is None:
+                _require_setup_switch_a_dhcp_evidence(body['dhcp_transaction'],
+                    Path(body['dhcp_transaction']['body']['transaction']['path']))
+            else:
+                _setup_switch_a_dhcp_archive_artifact(_retirement, body)
         def disk_authority():
             service_guard()
             _require_setup_switch_a_complete_disk_group(body, compensation)
@@ -17361,7 +17519,11 @@ def activate_setup_switch_a_publication(project, *, guard, confirmed=False, reti
             inputs, images = selected_a["inputs"], selected_a["images"]
             plan = None
             def authority():
-                disk_authority()
+                # The capsule qualification is strictly read-only. The full
+                # disk group check AFTER it is the final gate before every
+                # real preflight/service/HTTP operation, catching any owner
+                # rebound during these reads. The initial complete group gate
+                # above remains mandatory before opening the image capsule.
                 selected_a["require"]()
                 if plan is not None and plan_local_dhcp_runtime(inputs) != plan:
                     raise LoadError("original A listener plan changed during activation; HOLD")

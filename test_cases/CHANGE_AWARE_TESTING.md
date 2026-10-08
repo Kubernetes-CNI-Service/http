@@ -2913,3 +2913,47 @@ SHA256 `156bb371a58c6d7c71966351bac49d72b7555e00385e69b552ea7511f4bfd91f`
 窗口 clone/ABA、闭合字段负例，以及真实 SETUP 强杀后新 LOAD 在 A 计划前拒绝。
 保留原日志/断言，读前后 stat 稳定且物理顺序完整；只为候选边界证据，approved ledger
 未改，不是正式 related/full/check。下一步整棵 DHCP 事务的原证据 typed 归档和冷重入。
+
+### 2026-10-08 原 A 完整 DHCP typed 归档与 B staged 发布门禁
+
+独立原 A 归档 RED `r22-a-dhcp-typed-archive-red.log` inode 163337299、size 131235、
+SHA256 `93bacfb0ea1b864a21681d2ed786e298a51f57aac1c474317184af3da9a1a0a7`
+为 2 tests、1 FAIL/1 ERROR、actual/END=1。候选绑定原事务根、原 receipt、四个子目录、
+完整 staged/backup/live 清单与 restore 原文件：精确集合、原身份/字节/link target，
+whole-directory no-replace 归档；源/归档 XOR，完成历史不绑定未来 live 重用名字。
+只读归档权限不能授权 A 恢复写；缺旧原记录仍 HOLD，不从冷观察补签。
+
+初次候选 `r22-a-dhcp-typed-archive-green.log` SHA256
+`63641d820cd45673f61f779f7d5530f01dd1eda75182b17b71b9cda40f1984ff`
+实际为 2 tests/1 ERROR（真实 workflow 原 120s 超时），并非全部 GREEN。未改期限的阶段
+诊断 `r22-a-dhcp-archive-phase-diagnosis.log` SHA256
+`ffe0453fed86aaa6b6870860559c550eff6030cf809f9071dce007cd17cd42aa`
+显示 reader 118.663s：恢复 21.77s、预检约 31s、HTTP 0.051s、退休约 40s，退休前重复
+整组检查 61 次。只合并退休相邻边界的第一版仍失败，原日志
+`r22-a-dhcp-archive-qualified-boundaries.log` SHA256
+`ab010b3e239dee31ad2c61d0deb37afe0ba14e7b2dcce8dacc05a756e437f596`
+为 9 tests/1 ERROR、actual/END=1。未从单项通过盲重跑 full，未推断 OS/并发根因。
+
+进一步修正只读 image 资格检查与连续无写入快照的重复整组重开：保留初次完整核验、每个
+实际 OS/预检/服务/HTTP 操作之前的最终完整核验、每次 rename/fsync 后完整核验及下一次
+实际写前原 source 身份检查。缺席义务仍由每次整组资格验证，不缓存旧健康或原所有权。
+新增独立只读 image 返回后 DHCP 同字节 inode 换绑测试，必须在第一条健康命令之前拒绝；
+原 120s 期限不变。最终同 workflow reader 77.833s 是诊断数据，不是正式 runner 优化证明。
+
+B 发布组漏洞独立有效 direct RED `r22-b-published-staged-owner-qualified-red.log` SHA256
+`3d1f792835833185f948379d65dd92e6b8678f0cd8bb38e134a009d4ce3b8017`
+实际进入禁止的预检；真实 Q 提交强杀后冷打开 RED
+`r22-b-published-staged-owner-workflow-red.log` SHA256
+`6361d56394d523b1248a2ae2dc94b9c36dd26fb89eb41af98db9d5bd43719820`
+实际接受 staged clone。原首版 fixture 缺 version 的日志保留，不作为有效 RED。
+实现把原 staged 清单检查放到 B 发布整组与 cold open 的 phase 探测之前，保留精确 cause。
+
+最终 `r22-a-dhcp-archive-boundary-coalescence.log` inode 163367069、size 168871、SHA256
+`398ed5f5af5aedb3990bac4bcd9f47fa4fb6d66601ef00a73d0bf5bdaa06c5f6`
+为 13 tests in 645.965s、OK、actual/END=0、冻结一致：完整 DHCP 原 inode/字节归档、
+四个健康前负例、marker fsync ABA、listener 换绑、B staged direct/真实 cold 拒绝、
+真实 A DHCP CLI、首个 DHCP/prefix rename 强杀后新 CLI 两次独立真实私有 HTTP 健康。
+读前后 stat/inode 稳定，旧前缀 71407 字节 SHA256
+`8ac3fa560e5e11e17a4ac674e213736fd80b3abe41cdcfe5008a2e70f3d999ca`
+一致，物理 Ran→OK→actual→冻结→END 完整。只有本地有界证据，approved ledger 未改，
+不是 canonical related/full/check。B 完整退休归档、Linux/root/断电/C2、DEV ACK 仍 OPEN。

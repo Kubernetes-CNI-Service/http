@@ -1674,6 +1674,18 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
   完整 typed 归档资格。当前 7 项本地 direct/多脚本证据不替代正式 full/check 或真机见证，
   DHCP 整棵事务归档及本卡仍 OPEN。
 
+- 2026-10-08 原 A 整棵 DHCP typed 归档仍待真机见证：沿本卡原隔离 VM、精确版本、
+  root-only 可恢复快照、排他锁、停服和写者静默前提，原生产者必须登记 staged/backup/live
+  原清单。保留原事务目录、receipt、四个子目录与各原 leaf 的身份/字节/link target、
+  精确名字集合和缺席义务；已恢复 A 的归档只 no-replace 移动整个原事务，不能重写 WAL
+  或原证据。首个 DHCP 归档 rename 后强杀/断电，全新显式 resume CLI 必须重新预检、
+  listener/镜像/公钥/HTTP 健康，留存两次独立进程及文件/父同步物理顺序。未知根对象、
+  backup 缺席名晚占、restore 缺项或同字节外来 inode 均须在健康命令前 HOLD；pending
+  源/归档必须恰有一处。B 发布组冷打开的 staged clone 也须在 B 预检前 HOLD。
+  清理仅人工按已核快照恢复，旧 WAL 不补签。13 项本地私有 HTTP/backend/SIGKILL
+  边界证据不是正式 related/full/check、本卡 Linux/root/断电/C2 或 DEV ACK；B 完整
+  typed 退休仍待完成。本卡仍 OPEN。
+
 - 2026-10-08 原 A prefix typed 归档候选仍 OPEN：先独立登记原 WAL 每行的 candidate/backup/retained
   三个名字、父身份、原 leaf 或缺席义务。已完整恢复 A 后只 no-replace rename 原证据
   inode，原 WAL/计划/指针字节不改；在首个 prefix rename 后强杀/断电，由全新显式

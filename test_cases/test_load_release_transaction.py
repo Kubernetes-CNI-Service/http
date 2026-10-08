@@ -1180,16 +1180,158 @@ def private_a_health_ports(api, root, *, http_status=None):
 
 
 class ReleaseTransactionTests(unittest.TestCase):
-    def _restored_a_activation_fixture(self, *, qualified=True, prefix_change=False):
+    def _restored_a_activation_fixture(self, *, qualified=True, prefix_change=False, dhcp=False):
         state, context, guard, _token, _inputs = self._prepare_published_q_for_stopped_preflight(
-            prefix=True, prefix_change=prefix_change, original_a_policy="disabled", qualified_a_health=qualified)
-        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            prefix=True, prefix_change=prefix_change, dhcp=dhcp, original_a_policy="disabled", qualified_a_health=qualified)
+        with ExitStack() as stack:
+            stack.enter_context(mock.patch.object(LOAD, 'active_managed_services', return_value=()))
+            if dhcp:
+                names = ('dhcpd.conf', 'dhcpd_eth.hosts', 'dhcpd_ib.hosts', 'dhcpd_nvl.hosts')
+                stack.enter_context(mock.patch.object(LOAD, 'dhcp_file_mappings', return_value={
+                    state[1] / 'independent-dhcp-B' / name: self.root.resolve() / 'private-etc-dhcp' / name for name in names}))
             LOAD.restore_setup_switch_a_disk(state[1], guard=guard, confirmed=True)
         active, actions = set(), []
         def start(name): active.add(name); actions.append(("start", name))
         def stop(name): active.discard(name); actions.append(("stop", name))
         backend = SimpleNamespace(name="supervisor", is_active=lambda name: name in active, start=start, stop=stop)
         return state, context, {**guard, "runtime_backend": backend}, active, actions
+
+    def test_a_retirement_archives_complete_original_dhcp_transaction_without_rewriting(self):
+        state, _context, guard, active, actions = self._restored_a_activation_fixture(dhcp=True)
+        journal, plan = state[-3], LOAD._setup_switch_a_restore_path()
+        original_core = {p: (p.lstat().st_ino, p.read_bytes()) for p in (journal, plan)}
+        binding = json.loads(journal.read_bytes())['body']['dhcp_transaction']
+        transaction = Path(binding['body']['transaction']['path'])
+        names = ('dhcpd.conf', 'dhcpd_eth.hosts', 'dhcpd_ib.hosts', 'dhcpd_nvl.hosts')
+        originals = {}
+        for path in [transaction, *sorted(transaction.rglob('*'))]:
+            originals[str(path.relative_to(transaction))] = (path.lstat().st_ino,
+                'directory' if path.is_dir() and not path.is_symlink() else
+                os.readlink(path) if path.is_symlink() else path.read_bytes())
+        self.assertEqual({'a-preimage.json', 'backup', 'staged', 'live-candidates', 'restore-candidates'},
+                         set(os.listdir(transaction)))
+        runtime = self.root.resolve() / 'private-etc-dhcp'
+        frozen_runtime = {n: (None if not os.path.lexists(runtime / n) else
+            ( (runtime / n).lstat().st_ino, os.readlink(runtime / n) if (runtime / n).is_symlink()
+              else (runtime / n).read_bytes())) for n in names}
+        with private_a_health_ports(LOAD, self.root), mock.patch.object(LOAD, 'runtime_os', return_value='Linux'), \
+                mock.patch.object(LOAD, 'dhcp_file_mappings', return_value={state[1] / 'independent-dhcp-B' / n: runtime / n for n in names}):
+            self.assertEqual('a-health-passed-evidence-archived',
+                LOAD.activate_setup_switch_a_publication(state[1], guard=guard, confirmed=True, retire=True))
+        archive = next(journal.parent.glob('.setup-switch-a-retired-*'))
+        archived = archive / 'dhcp-transaction'
+        self.assertEqual({'journal.json', 'a-restore.json', 'retirement.json', 'dhcp-transaction'}, set(os.listdir(archive)))
+        self.assertFalse(os.path.lexists(transaction))
+        for relative, expected in originals.items():
+            path = archived / relative
+            self.assertEqual(expected, (path.lstat().st_ino,
+                'directory' if path.is_dir() and not path.is_symlink() else
+                os.readlink(path) if path.is_symlink() else path.read_bytes()))
+        for old, new in ((journal, archive / 'journal.json'), (plan, archive / 'a-restore.json')):
+            self.assertEqual(original_core[old], (new.lstat().st_ino, new.read_bytes()))
+        self.assertEqual(frozen_runtime, {n: (None if not os.path.lexists(runtime / n) else
+            ((runtime / n).lstat().st_ino, os.readlink(runtime / n) if (runtime / n).is_symlink()
+             else (runtime / n).read_bytes())) for n in names})
+        LOAD.require_no_pending_setup_switch_journal()
+        self.assertEqual({'apache2', 'isc-dhcp-server'}, active)
+        self.assertEqual([('start', 'apache2'), ('start', 'isc-dhcp-server')], actions)
+
+    def _assert_a_dhcp_retirement_foreign_evidence_holds_before_health(self, fault):
+        state, _context, guard, active, actions = self._restored_a_activation_fixture(dhcp=True)
+        journal, plan = state[-3], LOAD._setup_switch_a_restore_path()
+        frozen = {p: (p.lstat().st_ino, p.read_bytes()) for p in (journal, plan)}
+        binding = json.loads(journal.read_bytes())['body']['dhcp_transaction']
+        transaction = Path(binding['body']['transaction']['path'])
+        if fault == 'unknown':
+            (transaction / 'independent-foreign-object').write_bytes(b'never registered\n')
+        elif fault == 'absence':
+            self.assertEqual('missing', binding['body']['before']['dhcpd_nvl.hosts']['state'])
+            (transaction / 'backup/dhcpd_nvl.hosts').write_bytes(b'late unowned\n')
+        else:
+            path = transaction / 'restore-candidates/dhcpd_ib.hosts'
+            held = self.root / 'independent-held-original-restore'
+            metadata, payload = path.lstat(), path.read_bytes()
+            path.rename(held)
+            if fault == 'clone':
+                path.write_bytes(payload); path.chmod(stat.S_IMODE(metadata.st_mode))
+                os.utime(path, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
+                self.assertNotEqual(held.lstat().st_ino, path.lstat().st_ino)
+        names = ('dhcpd.conf', 'dhcpd_eth.hosts', 'dhcpd_ib.hosts', 'dhcpd_nvl.hosts')
+        with mock.patch.object(LOAD, 'runtime_os', return_value='Linux'), \
+                mock.patch.object(LOAD, 'dhcp_file_mappings', return_value={state[1] / 'independent-dhcp-B' / n:
+                    self.root.resolve() / 'private-etc-dhcp' / n for n in names}), \
+                mock.patch.object(LOAD, 'preflight_services', side_effect=AssertionError('foreign evidence entered health')):
+            with self.assertRaisesRegex(LOAD.LoadError, 'DHCP.*HOLD'):
+                LOAD.activate_setup_switch_a_publication(state[1], guard=guard, confirmed=True, retire=True)
+        self.assertEqual(frozen, {p: (p.lstat().st_ino, p.read_bytes()) for p in frozen})
+        self.assertEqual([], actions); self.assertEqual(set(), active)
+        self.assertFalse(os.path.lexists(LOAD._setup_switch_retirement_path()))
+        self.assertEqual([], list(journal.parent.glob('.setup-switch-a-retired-*')))
+
+    def test_a_dhcp_retirement_unknown_transaction_object_holds_before_health(self):
+        self._assert_a_dhcp_retirement_foreign_evidence_holds_before_health('unknown')
+
+    def test_a_dhcp_retirement_original_backup_absence_occupied_holds_before_health(self):
+        self._assert_a_dhcp_retirement_foreign_evidence_holds_before_health('absence')
+
+    def test_a_dhcp_retirement_missing_original_restore_candidate_holds_before_health(self):
+        self._assert_a_dhcp_retirement_foreign_evidence_holds_before_health('missing')
+
+    def test_a_dhcp_retirement_same_bytes_foreign_restore_inode_holds_before_health(self):
+        self._assert_a_dhcp_retirement_foreign_evidence_holds_before_health('clone')
+
+    def test_b_published_group_rejects_same_bytes_foreign_staged_file_before_health(self):
+        state, _context, guard, token, inputs = self._prepare_published_q_for_stopped_preflight(dhcp=True, no_upgrade=True)
+        binding = json.loads(state[-3].read_bytes())['body']['dhcp_transaction']
+        path = Path(binding['staged']['path']) / 'dhcpd_ib.hosts'
+        metadata, payload = path.lstat(), path.read_bytes()
+        held = self.root / 'independent-original-published-B-staged-file'
+        path.rename(held); path.write_bytes(payload); path.chmod(stat.S_IMODE(metadata.st_mode))
+        os.utime(path, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
+        self.assertNotEqual(held.lstat().st_ino, path.lstat().st_ino)
+        original = (state[-3].lstat().st_ino, state[-3].read_bytes(), state[7].read_bytes())
+        names = ('dhcpd.conf', 'dhcpd_eth.hosts', 'dhcpd_ib.hosts', 'dhcpd_nvl.hosts')
+        with mock.patch.object(LOAD, 'active_managed_services', return_value=()), \
+                mock.patch.object(LOAD, 'dhcp_file_mappings', return_value={state[1] / 'independent-dhcp-B' / n:
+                    self.root.resolve() / 'private-etc-dhcp' / n for n in names}), \
+                mock.patch.object(LOAD, 'preflight_services', side_effect=AssertionError('foreign B staged owner entered health')):
+            with self.assertRaisesRegex(LOAD.LoadError, 'DHCP staged original owner.*HOLD'):
+                LOAD.activate_setup_switch_b_publication(token, guard=guard, inputs=inputs,
+                    images={}, confirmed=True)
+        self.assertEqual(original, (state[-3].lstat().st_ino, state[-3].read_bytes(), state[7].read_bytes()))
+
+    def test_a_readonly_image_qualification_dhcp_rebind_holds_before_first_health_command(self):
+        state, _context, guard, active, actions = self._restored_a_activation_fixture(dhcp=True)
+        journal = state[-3]
+        original = (journal.lstat().st_ino, journal.read_bytes())
+        runtime = self.root.resolve() / 'private-etc-dhcp'
+        path = runtime / 'dhcpd_ib.hosts'
+        original_image_authority = LOAD._setup_switch_a_image_authority
+        injected = []
+        @contextmanager
+        def adversarial_readonly_image(*args, **kwargs):
+            with original_image_authority(*args, **kwargs) as selected:
+                original_require = selected['require']
+                def require():
+                    original_require()
+                    if not injected:
+                        metadata, payload = path.lstat(), path.read_bytes()
+                        path.rename(self.root / 'independent-held-original-A-live-DHCP')
+                        path.write_bytes(payload); path.chmod(stat.S_IMODE(metadata.st_mode))
+                        os.utime(path, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
+                        self.assertNotEqual(metadata.st_ino, path.lstat().st_ino)
+                        injected.append(path.lstat().st_ino)
+                yield {**selected, 'require': require}
+        names = ('dhcpd.conf', 'dhcpd_eth.hosts', 'dhcpd_ib.hosts', 'dhcpd_nvl.hosts')
+        with mock.patch.object(LOAD, 'runtime_os', return_value='Linux'), \
+                mock.patch.object(LOAD, 'dhcp_file_mappings', return_value={state[1] / 'independent-dhcp-B' / n:
+                    runtime / n for n in names}), \
+                mock.patch.object(LOAD, '_setup_switch_a_image_authority', side_effect=adversarial_readonly_image), \
+                mock.patch.object(LOAD, 'preflight_services', side_effect=AssertionError('unqualified A entered OS commands')):
+            with self.assertRaisesRegex(LOAD.LoadError, 'DHCP.*owner.*HOLD'):
+                LOAD.activate_setup_switch_a_publication(state[1], guard=guard, confirmed=True)
+        self.assertEqual(1, len(injected)); self.assertEqual([], actions); self.assertEqual(set(), active)
+        self.assertEqual(original, (journal.lstat().st_ino, journal.read_bytes()))
 
     def test_a_explicit_retirement_archives_original_plan_wal_with_a_role(self):
         state, _context, guard, active, actions = self._restored_a_activation_fixture()
