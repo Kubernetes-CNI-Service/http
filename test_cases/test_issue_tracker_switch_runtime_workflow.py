@@ -214,7 +214,7 @@ class ProdSwitchSourceWorkflowTests(unittest.TestCase):
 
     def _cycle(self, *, dynamic_eth=False, activity=False, derivation=False,
                observed_peer="foreign-z", fabric_templates=None,
-               ib_analysis=None):
+               ib_analysis=None, additional_eth_activity=False):
         token = TOKEN_1 if self.store._read_witness() is None else TOKEN_2
         with mock.patch.object(WORKER, "_mint_cycle_run_token", return_value=token):
             identity = self.store.allocate_start(process_inspector=lambda _binding: "dead")
@@ -344,18 +344,28 @@ class ProdSwitchSourceWorkflowTests(unittest.TestCase):
                 report.parent.mkdir(parents=True, exist_ok=True)
                 report.write_bytes(b"literal-prod-link-report")
                 args.activity = Path(frozen_activity["sidecar_path"])
+                records = ({
+                    "device_a": "leaf-a", "interface_a": "swp1",
+                    "device_b": "leaf-z", "interface_b": "swp2",
+                    "status": "WRONG_PEER", "dot_line": 2 if derivation else 1,
+                    "observation_a": {"remote_host": observed_peer, "remote_port": "swp9"},
+                    "observation_b": {"remote_host": "leaf-a", "remote_port": "swp1"},
+                },)
+                if additional_eth_activity:
+                    if not derivation: raise AssertionError('second literal edge requires actual topology derivation')
+                    records += ({
+                        "device_a": "leaf-b", "interface_a": "swp3",
+                        "device_b": "leaf-c", "interface_b": "swp4",
+                        "status": "WRONG_PEER", "dot_line": 3,
+                        "observation_a": {"remote_host": "foreign-c", "remote_port": "swp10"},
+                        "observation_b": {"remote_host": "leaf-b", "remote_port": "swp3"},
+                    },)
                 write_eth_activity_evidence(
                     args.activity, sources=sources,
                     source_sha256={role: hashlib.sha256(path.read_bytes()).hexdigest()
                                    for role, path in sources.items()},
                     report_path=report,
-                    result_records=({
-                        "device_a": "leaf-a", "interface_a": "swp1",
-                        "device_b": "leaf-z", "interface_b": "swp2",
-                        "status": "WRONG_PEER", "dot_line": 2 if derivation else 1,
-                        "observation_a": {"remote_host": observed_peer, "remote_port": "swp9"},
-                        "observation_b": {"remote_host": "leaf-a", "remote_port": "swp1"},
-                    },),
+                    result_records=records,
                     cycle_binding=validate_worker_eth_activity_context(context),
                 )
             with mock.patch.object(EMITTER, "ROOT", self.root):

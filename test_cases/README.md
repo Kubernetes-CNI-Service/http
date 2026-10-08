@@ -962,8 +962,22 @@ receipt、nonce、原读像及 History 容量。真实 producer → 资格 → w
 双 owner／原 nonce → 混合 L-only 更新和 literal 新增 workflow 不写远端。
 局部 root 元数据仅在 ownership 模块的测试 OS 边界合成，其他 C6／来源模块保持
 实际路径和 UID；native flock／FD／fsync 不替换，真机仍 NOT RUN。
-单元内候选行分配尚不是 durable 原始预留；组合原像 journal、Cabling 插入组批、
+单元内候选行分配尚不是 durable 原始预留；组合原像 journal、
 每次远端模板／enrollment 连续性、新鲜准入、受审发送与 COMPLETE 仍未闭合。
+
+`freeze_observed_receipted_cabling_unit` 将实际 C5／admitted C6 receipt、双 owner、
+原始十四表 enrollment 与 C17 两表 NV journal 串联，完整家族不得拆选。
+共享原始键／全部 A..AC 占用像决定 active 更新或 missing／Closed 新增；
+全部新增键恰好匹配当前原始 generation／publication 的持久 NV 预留，
+目标发现像 SHA 必须等于 NV journal 保留的 ETH／IB 原始列像 SHA。
+既有 ID 不写，新行以 literal appendCells 追加在所有操作者／工具占用后，
+全部新增行一起核原始容量，禁止复用中间空隙或 caller ID／坐标／nonce。
+真实两家族来源每家族两个独立活动键 → 原始工作簿 receipt → 双 owner／
+两表最高 NV39999 → 单元内更新＋NV40000 新增 workflow，不创建网络发送或
+新 NV journal。既有原始 reservation 和任何 UNKNOWN 全局 journal 均保留；
+后者拒绝 NEW 组批。组批中途原像漂移、原 NV 被篡改、容量不足均 HOLD。
+本入口不证明业务 preread durable journal／行预留、每次新鲜准入、CAS、
+受审 launcher 或 COMPLETE，不代表整个 REQ7 完成；真机仍 NOT RUN。
 
 `test_cases.test_req7_nv_reservation` 将两张 Cabling 固定完整容量读取、原始 enrollment、
 实际 spreadsheet owner 和 C17 共享分配器串联，Closed／无关行 ID 参与最高值，

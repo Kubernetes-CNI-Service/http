@@ -455,6 +455,148 @@ def freeze_observed_receipted_switch_unit(qualified, store, *, http_root, settin
     return result
 
 
+def freeze_observed_receipted_cabling_unit(qualified, store, *, http_root, settings,
+                                         whitelist_snapshot, whitelist_path, metadata,
+                                         expected_template_sha256, local_generation_id, sheet,
+                                         business_reads, history_plan, history_response,
+                                         spreadsheet_token, binding, identity, audits=(),
+                                         occupied_metadata_ids=(), writer_token=None, **claims):
+    """NEW Cabling unit from original C5/C6, both owners and retained C17 IDs.
+
+    All family operations share one complete original key/occupancy image.
+    Active updates keep their IDs; missing/Closed keys append after ALL occupied
+    columns, using exactly the original two-sheet NV reservation for the actual
+    receipted generation/publication. No caller allocations/coordinates/nonces,
+    retry reconstruction, new reservation, remote freshness, sender or COMPLETE.
+    """
+    failed = False
+    try:
+        import os
+        from urllib.parse import urlsplit
+        from monitor.issue_tracker_local_commit import _owner
+        from monitor.issue_tracker_local_workbook_commit import _source_rows
+        from monitor.issue_tracker_manifest import freeze_prod_stage_l_manifest
+        from monitor.issue_tracker_online_cells import source_tool_values
+        from monitor.issue_tracker_spreadsheet_owner import _validated_owner
+        from monitor.issue_tracker_enrollment_journal import inspect_enrollment_journal
+        from monitor.issue_tracker_nv_reservation import inspect_nv_reservation, require_unit_nv_reservation
+        from monitor.issue_tracker_sheets_read_decode import (
+            _activity_sheet_image, _insertion_sheet_image, observe_active_row,
+            observe_insertion_position, decode_history_tail)
+
+        if (claims or type(sheet) is not str or sheet not in ('ETH Cabling', 'IB Cabling')
+                or type(business_reads) is not tuple or not 1 <= len(business_reads) <= 1000): raise SendUnitHold()
+        local_owner = _owner(writer_token)
+        if str(local_owner.project) != str(store.project_identity): raise SendUnitHold()
+        context = dict(http_root=http_root, settings=settings, whitelist_snapshot=whitelist_snapshot,
+            whitelist_path=whitelist_path, metadata=metadata, expected_template_sha256=expected_template_sha256,
+            writer_token=writer_token)
+        manifest, manifest_id = freeze_prod_stage_l_manifest(qualified, store, **context)
+        receipt = _original_receipt_identity(qualified, store, local_generation_id, writer_token,
+            settings, whitelist_snapshot, expected_template_sha256)
+        if receipt[2] != manifest_id: raise SendUnitHold()
+        operations = [item for item in json.loads(manifest)['operations'] if item['activity_key'][0] == _FAMILY[sheet]]
+        if len(operations) != len(business_reads): raise SendUnitHold()
+        cabling, switch = _source_rows(qualified)
+        sources = {row.activity_key: row for row in (*cabling, *switch)}
+        if len(sources) != len(cabling) + len(switch): raise SendUnitHold()
+
+        def original_state(keys=None):
+            owner = _validated_owner(spreadsheet_token, binding)
+            stem = owner.lock_name[:-5]
+            names = {name for name in os.listdir(owner.directories[-1][0]) if name.startswith(stem + '.')}
+            expected = {stem+'.lock', stem+'.enrollment'}
+            if keys is None:
+                if names not in (expected, expected | {stem+'.nv'}): raise SendUnitHold()
+            elif keys:
+                if names != expected | {stem+'.nv'}: raise SendUnitHold()
+            elif names != expected: raise SendUnitHold()
+            enrolled = inspect_enrollment_journal(spreadsheet_token, binding, identity)
+            reserved = None if not keys else inspect_nv_reservation(spreadsheet_token, binding, identity,
+                generation_id=receipt[0], publish_id=receipt[1], sheet=sheet, requested_keys=keys)
+            return enrolled, reserved
+
+        enrolled, _ = original_state()
+        nonces = {title: (sid, nonce) for title, sid, nonce in enrolled.nonces}
+        sid, target_nonce = nonces[sheet]; history_sid, history_nonce = nonces['Update_History']
+
+        def read_images():
+            history = decode_history_tail(history_plan, history_response, sheet_id=history_sid)
+            if urlsplit(history_plan.path).path != '/v4/spreadsheets/'+binding.spreadsheet_id: raise SendUnitHold()
+            classified, shared, missing = [], None, []
+            for operation, reading in zip(operations, business_reads):
+                if (type(reading) is not dict or set(reading) != {'operation_id', 'discovery_plan', 'discovery_response',
+                        'occupancy_plan', 'occupancy_response', 'row_plan', 'row_response'}
+                        or reading['operation_id'] != operation['operation_id']): raise SendUnitHold()
+                key = tuple(operation['activity_key'])
+                discovery, original_cells, target = _activity_sheet_image(reading['discovery_plan'], reading['discovery_response'],
+                    sheet_id=sid, activity_key=key)
+                if target != binding.spreadsheet_id or discovery.sheet_title != sheet: raise SendUnitHold()
+                occupancy, capacity, occupancy_sha = _insertion_sheet_image(reading['occupancy_plan'], reading['occupancy_response'],
+                    sheet_id=sid, title=sheet, target=target)
+                cells = {(index, letter): value for index, letter, value in occupancy}
+                if capacity != discovery.row_count or any(cells.get((index, letter)) != value for index, letter, value in original_cells):
+                    raise SendUnitHold()
+                current = (reading['discovery_plan'].path, discovery.source_sha256, reading['occupancy_plan'].path, occupancy_sha)
+                if shared is not None and current != shared: raise SendUnitHold()
+                shared = current
+                if not discovery.active_rows: missing.append(key)
+                classified.append((operation, reading, discovery))
+            keys = tuple(missing)
+            original = original_state(keys)
+            if original[0] != enrolled: raise SendUnitHold()
+            reservation = original[1]
+            if keys and (reservation.eth_source_sha256 if sheet == 'ETH Cabling' else reservation.ib_source_sha256) != shared[1]:
+                raise SendUnitHold()
+            allocations = {} if reservation is None else dict(reservation.reservations)
+            placements, images, used = [], [], set()
+            for operation, reading, discovery in classified:
+                key = tuple(operation['activity_key'])
+                if discovery.active_rows:
+                    action = 'update'
+                    observed = observe_active_row(reading['discovery_plan'], reading['discovery_response'],
+                        reading['row_plan'], reading['row_response'], sheet_id=sid, activity_key=key)
+                    if observed.row_index in used: raise SendUnitHold()
+                    used.add(observed.row_index)
+                    values = source_tool_values(sources[key], action)
+                    cells = {letter: dict(value) for _index, letter, value in observed.cells}
+                    placement = dict(row_index=observed.row_index, reserved_id=None,
+                        observed_values={letter: cells[letter] for letter in values})
+                else:
+                    action = 'insert'
+                    observed = observe_insertion_position(reading['discovery_plan'], reading['discovery_response'],
+                        reading['occupancy_plan'], reading['occupancy_response'], sheet_id=sid, activity_key=key,
+                        reserved_row_indexes=(), append_rows=len(keys), row_plan=reading['row_plan'], row_response=reading['row_response'])
+                    placement = dict(row_index=None, reserved_id=allocations[key], observed_values=None)
+                placements.append({'operation_id': operation['operation_id'], 'action': action, **placement})
+                images.append({'operation_id': operation['operation_id'], 'discovery_path': reading['discovery_plan'].path,
+                    'discovery_sha256': discovery.source_sha256, 'occupancy_path': reading['occupancy_plan'].path,
+                    'occupancy_sha256': observed.occupancy_sha256 if action == 'insert' else shared[3],
+                    'row_path': reading['row_plan'].path if action == 'update' else None,
+                    'row_sha256': observed.row_sha256, 'append_start_row_index': observed.row_index if action == 'insert' else None})
+            image = _canonical({'schema_version': 1, 'spreadsheet_id': binding.spreadsheet_id, 'sheet': sheet,
+                'sheet_id': sid, 'history_sheet_id': history_sid, 'history_path': history_plan.path,
+                'history_sha256': history.source_sha256, 'nv_journal_sha256': reservation.journal_sha256 if reservation else None,
+                'business': images})
+            return tuple(placements), hashlib.sha256(image).hexdigest(), history, original, keys
+
+        placements, digest, history, original, keys = read_images()
+        result = freeze_receipted_prod_source_unit(qualified, store, local_generation_id=local_generation_id,
+            placements=placements, preread_sha256=digest, spreadsheet_id=binding.spreadsheet_id, sheet=sheet,
+            sheet_id=sid, history_sheet_id=history_sid, target_nonce=target_nonce, history_nonce=history_nonce,
+            audits=audits, occupied_metadata_ids=occupied_metadata_ids, **context)
+        if keys and require_unit_nv_reservation(spreadsheet_token, binding, identity, result) != original[1]: raise SendUnitHold()
+        if (read_images() != (placements, digest, history, original, keys)
+                or freeze_prod_stage_l_manifest(qualified, store, **context) != (manifest, manifest_id)
+                or _original_receipt_identity(qualified, store, local_generation_id, writer_token,
+                    settings, whitelist_snapshot, expected_template_sha256) != receipt
+                or history.last_data_row_index + result.history_rows_expected >= history.row_count): raise SendUnitHold()
+        _owner(writer_token); _validated_owner(spreadsheet_token, binding)
+    except Exception: failed = True
+    if failed: raise SendUnitHold()
+    return result
+
+
 def _freeze(manifest, manifest_id, generation_id, publish_id, spreadsheet_id,
             sheet, sheet_id, history_sheet_id, target_nonce, history_nonce,
             preread_sha256, business, audits, occupied_metadata_ids):

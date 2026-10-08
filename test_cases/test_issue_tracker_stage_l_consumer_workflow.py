@@ -76,6 +76,9 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
     def test_actual_source_receipt_global_owner_and_original_enrollment_derive_switch_inserts(self):
         self._exercise_real_protected_three_panel_fixture(skip_history=False, observed_switch_insert_probe=True)
 
+    def test_actual_source_receipt_and_original_two_sheet_nv_derive_mixed_cabling_units(self):
+        self._exercise_real_protected_three_panel_fixture(skip_history=False, observed_cabling_insert_probe=True)
+
     def test_two_real_cycles_keep_keys_and_commit_latest_business_values(self):
         self._exercise_real_protected_three_panel_fixture(
             skip_history=False, two_cycle_changed_latest=True,
@@ -433,7 +436,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         source_identity_probe=False, two_cycle_changed_latest=False,
         settings_channel_probe=False, settings_channel_fault=False,
         panel_counts_probe=False, source_unit_probe=False, receipted_source_probe=False, observed_source_probe=False,
-        observed_switch_insert_probe=False,
+        observed_switch_insert_probe=False, observed_cabling_insert_probe=False,
         complete_preview_probe=False,
         complete_preview_source_race=False,
         complete_preview_cgi=False,
@@ -492,6 +495,9 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                 sheet.write(0, col, item)
             for col, item in enumerate(("leaf01", "sw1p1", "server01", "mlx5_0")):
                 sheet.write(1, col, item)
+            if observed_cabling_insert_probe:
+                for col, item in enumerate(("leaf01", "sw1p2", "server03", "mlx5_2")):
+                    sheet.write(2, col, item)
         (project / "p2p.xlsx").symlink_to(selected.name)
         (setup / "p2p.xlsx").symlink_to(
             "../../../../../DAY0-Prepare/fabric-a/p2p.xlsx")
@@ -532,7 +538,9 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         vendor.write_text(
             "Switch: 0x1 MF0;leaf01:MQM9700/U1:\n"
             ' 1 1[  ] ==( 4X 200 Gbps Active / LinkUp )==> '
-            '20 1[  ] "server02 mlx5_1"\n', encoding="utf-8",
+            '20 1[  ] "server02 mlx5_1"\n' + (
+                ' 1 2[  ] ==( 4X 200 Gbps Active / LinkUp )==> 21 2[  ] "server04 mlx5_3"\n'
+                if observed_cabling_insert_probe else ''), encoding="utf-8",
         )
         protected = self.root / "synthetic-root-attestation"
         protected.mkdir(mode=0o700)
@@ -587,6 +595,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                     activity=True, derivation=True, ib_analysis=binding,
                     fabric_templates={"ethernet/prod": "tan-leaf",
                                       "nvlink/prod": "border-leaf"},
+                    additional_eth_activity=observed_cabling_insert_probe,
                 )
             self.assertEqual(identity["cycle_id"], cycle["cycle_id"])
             self.publication = project / "99-output-monitor"
@@ -660,7 +669,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                                if selected_panel_empty else
                                {"Switch Status", "Eth Link Validation",
                                 "IB Link Validation"})
-            expected_count = 2 if selected_panel_empty else 4
+            expected_count = 2 if selected_panel_empty else (6 if observed_cabling_insert_probe else 4)
             self.assertEqual(expected_panels,
                              {item.panel for item in qualified.candidates})
             self.assertEqual(expected_count, len(qualified.candidates))
@@ -1411,6 +1420,144 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             self.assertEqual(digest, committed.receipt.manifest_id)
             self.assertEqual(hashlib.sha256(committed.prepared.xlsx_bytes).hexdigest(),
                              committed.receipt.published_sha256)
+            if observed_cabling_insert_probe:
+                import tempfile
+                import monitor.issue_tracker_send_unit as compiler
+                from monitor.issue_tracker_sheets_read_plan import prepare_activity_sheet_read, prepare_insertion_sheet_read, prepare_sheets_read, prepare_history_tail_read, prepare_template_identity_read
+                from monitor.issue_tracker_sheets_read_decode import decode_template_identity
+                from monitor.issue_tracker_online_target import OnlineTargetBinding
+                from monitor.issue_tracker_sdk_authentication import AuthenticatedToken
+                from test_cases.test_req7_activity_discovery import sheet_document, insertion_document, exact_row_document, cabling_row, literal
+                from test_cases.test_req7_sheets_read_decode import identity_response, response
+                from test_cases.test_req7_spreadsheet_owner import load as load_owner, scoped_fixture
+                from test_cases.test_req7_enrollment_journal import load as load_enrollment
+                from test_cases.test_req7_nv_reservation import load as load_nv
+                self.assertTrue(hasattr(compiler, 'freeze_observed_receipted_cabling_unit'), 'Cabling compiler must bind original source/receipt and durable IDs')
+                binding = OnlineTargetBinding('synthetic_spreadsheet_id_0001', 'a'*64, 'b'*64)
+                credential = AuthenticatedToken('synthetic.private-token', time.time()+3600)
+                identity = decode_template_identity(prepare_template_identity_read(binding, credential), response(identity_response()))
+                history_plan = prepare_history_tail_read(binding, credential)
+                history_raw = response({'spreadsheetId': binding.spreadsheet_id, 'sheets': [{'properties': {'sheetId': 105,
+                    'title': 'Update_History', 'sheetType': 'GRID', 'gridProperties': {'rowCount': 100, 'columnCount': 5}},
+                    'data': [{'startRow': 2, 'startColumn': 0}]}]})
+                for sheet, family, sid, other_sheet, other_sid in (('ETH Cabling', 'eth_cabling', 102, 'IB Cabling', 103),
+                                                                  ('IB Cabling', 'ib_cabling', 103, 'ETH Cabling', 102)):
+                    candidates = tuple(item for item in qualified.candidates if item.activity_key[0] == family)
+                    self.assertGreater(len(candidates), 1)
+                    row = cabling_row('NV30016'); key = candidates[0].activity_key
+                    row.update({column: literal(value) for column, value in zip(('K', 'L', 'F'), key[1:])})
+                    closed = cabling_row('NV30017', 'Closed'); key = candidates[-1].activity_key
+                    closed.update({column: literal(value) for column, value in zip(('K', 'L', 'F'), key[1:])})
+                    rows = [row, closed, {'V': {'boolValue': False}}]
+                    discovery = sheet_document(sheet, rows, 100); discovery['sheets'][0]['properties']['sheetId'] = sid
+                    occupancy = insertion_document(sheet, rows, 100); occupancy['sheets'][0]['properties']['sheetId'] = sid
+                    other = cabling_row('NV39999', 'Closed'); other['K'] = literal('unrelated-original-seed')
+                    other_raw = sheet_document(other_sheet, [other], 100); other_raw['sheets'][0]['properties']['sheetId'] = other_sid
+                    discovery_plan = prepare_activity_sheet_read(binding, credential, sheet=sheet)
+                    occupancy_plan = prepare_insertion_sheet_read(binding, credential, sheet=sheet)
+                    other_plan = prepare_activity_sheet_read(binding, credential, sheet=other_sheet)
+                    original_read = response(discovery); other_read = response(other_raw)
+                    reads = []
+                    for offset, candidate in enumerate(candidates):
+                        exact = exact_row_document(sheet, rows[0], 2); exact['sheets'][0]['properties']['sheetId'] = sid
+                        reads.append({'operation_id': candidate.operation_id, 'discovery_plan': discovery_plan,
+                            'discovery_response': original_read, 'occupancy_plan': occupancy_plan, 'occupancy_response': response(occupancy),
+                            'row_plan': prepare_sheets_read(binding, credential, mode='row_rectangle', sheet=sheet, first_row=3) if offset == 0 else None,
+                            'row_response': response(exact) if offset == 0 else None})
+                    requested = tuple(item.activity_key for item in candidates[1:])
+                    expected = tuple((key, 'NV%05d' % (40000+index)) for index, key in enumerate(sorted(requested)))
+                    with tempfile.TemporaryDirectory(prefix='req7-real-cabling-unit-') as directory:
+                        global_root = Path(directory).resolve(); state = global_root/'var/lib/http-ztp-container/issue-tracker'
+                        state.mkdir(parents=True, mode=0o700); owner_module = load_owner(); enrollment_module = load_enrollment(); nv_module = load_nv()
+                        with tracker_writer(project, self.publication) as writer_token, scoped_fixture(global_root, owner_module), owner_module.spreadsheet_owner(binding) as spreadsheet_token:
+                            original = enrollment_module.prepare_enrollment_journal(spreadsheet_token, binding, identity)
+                            nv_args = dict(generation_id=committed.receipt.generation_id, publish_id=committed.receipt.published_sha256,
+                                sheet=sheet, requested_keys=requested)
+                            pair = (discovery_plan, original_read, other_plan, other_read) if sheet == 'ETH Cabling' else (other_plan, other_read, discovery_plan, original_read)
+                            reservation = nv_module.prepare_nv_reservation(spreadsheet_token, binding, identity, *pair, **nv_args)
+                            self.assertEqual(expected, reservation.reservations)
+                            def compile_cabling(**changes):
+                                options = dict(local_generation_id=committed.receipt.generation_id, sheet=sheet, business_reads=tuple(reads),
+                                    history_plan=history_plan, history_response=history_raw, spreadsheet_token=spreadsheet_token, binding=binding, identity=identity)
+                                options.update(changes)
+                                return compiler.freeze_observed_receipted_cabling_unit(qualified, self.store, metadata=metadata,
+                                    expected_template_sha256=self.snapshot.workbook_sha256, writer_token=writer_token, **args, **options)
+                            before = {path.name: path.read_bytes() for path in (state/(hashlib.sha256(binding.spreadsheet_id.encode()).hexdigest()+'.nv')).iterdir()}
+                            unit = compile_cabling(); action = json.loads(unit.action_preimage)
+                            self.assertEqual(['update']+['insert']*(len(candidates)-1), [item['action'] for item in action['business']])
+                            self.assertEqual(committed.receipt.generation_id, action['identity']['generation_id'])
+                            self.assertEqual(committed.receipt.published_sha256, action['identity']['publish_id'])
+                            nonces = {title: nonce for title, _sid, nonce in original.nonces}
+                            self.assertEqual(nonces[sheet], action['target_nonce']); self.assertEqual(nonces['Update_History'], action['history_nonce'])
+                            independent_read_image = {'schema_version': 1, 'spreadsheet_id': binding.spreadsheet_id, 'sheet': sheet,
+                                'sheet_id': sid, 'history_sheet_id': 105, 'history_path': history_plan.path,
+                                'history_sha256': hashlib.sha256(history_raw.data).hexdigest(), 'nv_journal_sha256': reservation.journal_sha256,
+                                'business': [{'operation_id': candidate.operation_id, 'discovery_path': discovery_plan.path,
+                                    'discovery_sha256': hashlib.sha256(original_read.data).hexdigest(), 'occupancy_path': occupancy_plan.path,
+                                    'occupancy_sha256': hashlib.sha256(reads[index]['occupancy_response'].data).hexdigest(),
+                                    'row_path': reads[index]['row_plan'].path if index == 0 else None,
+                                    'row_sha256': hashlib.sha256(reads[index]['row_response'].data).hexdigest() if index == 0 else None,
+                                    'append_start_row_index': None if index == 0 else 5}
+                                    for index, candidate in enumerate(candidates)]}
+                            self.assertEqual(hashlib.sha256((json.dumps(independent_read_image, ensure_ascii=False, sort_keys=True,
+                                separators=(',', ':'))+'\n').encode()).hexdigest(), action['preread_sha256'])
+                            requests = json.loads(unit.wire_bytes)['requests']
+                            appends = [item['appendCells'] for item in requests if 'appendCells' in item and item['appendCells']['sheetId'] == sid]
+                            self.assertEqual(len(candidates)-1, len(appends))
+                            self.assertEqual([dict(expected)[item.activity_key] for item in candidates[1:]],
+                                [item['rows'][0]['values'][0]['userEnteredValue']['stringValue'] for item in appends])
+                            for item in appends:
+                                self.assertEqual({'sheetId', 'rows', 'fields'}, set(item))
+                                for index in (7, 8, 9, 14, 15): self.assertEqual({}, item['rows'][0]['values'][index])
+                            for item in requests:
+                                if 'updateCells' in item:
+                                    self.assertEqual(2, item['updateCells']['start']['rowIndex']); self.assertNotEqual(0, item['updateCells']['start']['columnIndex'])
+                            self.assertEqual(reservation, nv_module.require_unit_nv_reservation(spreadsheet_token, binding, identity, unit))
+                            for claims in ({'reserved_ids': ('NV99999',)}, {'placements': ()}, {'target_nonce': 'c'*64}, {'business_reads': tuple(reads[:-1])}, {'sheet': 'ETH&IB Switch'}):
+                                with self.assertRaises(compiler.SendUnitHold): compile_cabling(**claims)
+                            saved = reads[-1]['discovery_response']; changed = json.loads(saved.data)
+                            changed['sheets'][0]['data'][0]['rowData'][0]['values'][0] = {'userEnteredValue': literal('Closed')}
+                            reads[-1]['discovery_response'] = response(changed)
+                            try:
+                                with self.assertRaises(compiler.SendUnitHold): compile_cabling()
+                            finally: reads[-1]['discovery_response'] = saved
+                            saved_occupancy = tuple(reading['occupancy_response'] for reading in reads)
+                            full = json.loads(saved_occupancy[0].data)
+                            for grid in full['sheets'][0]['data']:
+                                if grid['startColumn'] == 21:
+                                    grid['rowData'] = [{}, {}, {'values': [{'userEnteredValue': {'boolValue': False}}]}] + [{}]*94 + [
+                                        {'values': [{'userEnteredValue': literal('operator at capacity boundary')}]}]
+                            for reading in reads: reading['occupancy_response'] = response(full)
+                            try:
+                                with self.assertRaises(compiler.SendUnitHold): compile_cabling()
+                            finally:
+                                for reading, original_response in zip(reads, saved_occupancy): reading['occupancy_response'] = original_response
+                            real_freeze = compiler.freeze_receipted_prod_source_unit
+                            drift = json.loads(saved_occupancy[-1].data)
+                            for grid in drift['sheets'][0]['data']:
+                                if grid['startColumn'] == 21: grid['rowData'][2]['values'][0] = {'userEnteredValue': literal('changed during compile')}
+                            def change_occupancy_during_freeze(*freeze_args, **freeze_kwargs):
+                                result = real_freeze(*freeze_args, **freeze_kwargs)
+                                reads[-1]['occupancy_response'] = response(drift)
+                                return result
+                            try:
+                                with mock.patch.object(compiler, 'freeze_receipted_prod_source_unit', side_effect=change_occupancy_during_freeze):
+                                    with self.assertRaises(compiler.SendUnitHold): compile_cabling()
+                            finally: reads[-1]['occupancy_response'] = saved_occupancy[-1]
+                            stem = hashlib.sha256(binding.spreadsheet_id.encode()).hexdigest()
+                            ids_path = state/(stem+'.nv')/'RESERVATIONS'; saved_ids = ids_path.read_bytes()
+                            ids_path.write_bytes(saved_ids.replace(b'NV40000', b'NV99999'))
+                            try:
+                                with self.assertRaises(compiler.SendUnitHold): compile_cabling()
+                            finally: ids_path.write_bytes(saved_ids)
+                            stem = hashlib.sha256(binding.spreadsheet_id.encode()).hexdigest()
+                            blocked = state/(stem+'.journal'); blocked.mkdir(mode=0o700)
+                            with self.assertRaises(compiler.SendUnitHold): compile_cabling()
+                            self.assertEqual([], list(blocked.iterdir()))
+                            self.assertEqual(before, {path.name: path.read_bytes() for path in (state/(stem+'.nv')).iterdir()})
+                self.assertEqual(original_template, self.template.read_bytes())
+                self.assertFalse((project/'.tracker/remote-actions').exists()); self.assertFalse((project/'.tracker/remote-attempts').exists())
+                return
             if observed_switch_insert_probe:
                 import tempfile
                 import monitor.issue_tracker_send_unit as compiler

@@ -2167,6 +2167,8 @@ ALL 审计行确定唯一 append 窗口（NOOP 无虚构行），精确耗尽可
 
 ## TC-REAL-REQ7-IMMUTABLE-SEND-UNIT-001 — 单表不可变 batch / History / 永久 fence
 
+- Cabling 来源组批补充（**NOT RUN**）：真实每家族两个键的 producer／资格／原始 admitted C6 workbook receipt 与双 owner、十四表 enrollment、两表原始 NV reservation 联动；活动更新不写 A，missing／Closed 以实际原始最高 ID 之后的持久预留追加，所有 A..AC 操作者占用参与尾边界和整组容量；共用原始读像，拒绝 caller ID／坐标／nonce，原像中途变化、篡改 NV、容量不足或未决全局 journal 均 HOLD，保留证据不发 mutation。本地 synthetic root 元数据仅作用于 ownership 测试边界；durable 业务原像／行预留、每次远端模板／enrollment／新鲜准入、固定 launcher 与 COMPLETE 尚未闭合，不是真机或发布证明。
+
 - Case ID：`TC-REAL-REQ7-IMMUTABLE-SEND-UNIT-001`；类型：real-environment / transaction / C-19+C-25+C-26。状态：**NOT RUN / REAL_ENV REQUIRED**。`monitor/issue_tracker_send_unit.py` 是未安装的纯组合库；caller-supplied manifest、坐标、nonce 和 occupied IDs 只被绑定，不是发送许可或完整准入。
 - 本地受保护来源联动：`freeze_prod_source_unit` 在实际 C-6 owner 下前后重核三个 family 的 C-5 源，真实 SourceRow 决定业务文字与原记录时间；调用方不能覆盖 manifest／业务／时间。真实多脚本 workflow 覆盖三类业务、原文字 NOOP、来源中途漂移与伪造 candidate 拒绝，模板和发布目录不改变。该证据不是坐标／preread 权威、C-6 receipt、新鲜准入、原始预留、真实发送或 COMPLETE；本卡仍 NOT RUN。
 - generation 字节衔接：批次、意图和 NV 预留允许原样绑定 C-6 正序号的 native `gen-…` 名；实际本地 generation／INTENT／commit 到 batch／durable intent／冷进程计数已用私有 fixture 验证。候选摘要身份不是真实 generation，任意合法 native 名亦不证明存在对应 receipt；完整受保护工作簿 receipt、恢复、准入与在线资格仍须独立核验，本卡仍 NOT RUN。
