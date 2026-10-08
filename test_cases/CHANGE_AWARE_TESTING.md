@@ -2886,3 +2886,30 @@ rename 强杀→全新显式 resume 再健康，原 WAL/计划 inode 字节及�
 上述日志读前后 stat 和已知旧前缀一致、冻结一致、物理 Ran→OK→actual→END 完整。
 仅为分批候选证据，批准 ledger 未变，不是正式 related/full/check；DHCP 完整 typed
 归档、B 的完整退休、root/Linux/断电/C2、DEV ACK 仍未据此关闭。
+
+### 2026-10-08 R22 DHCP staged 原所有权候选
+
+完整事务归档审计发现旧 WAL 仅绑定 staged 目录 dev/ino，没有四个内部文件原身份。
+独立 direct RED `r22-dhcp-original-staged-direct-red.log` inode 163324148、size 130607、
+SHA256 `156bb371a58c6d7c71966351bac49d72b7555e00385e69b552ea7511f4bfd91f`
+为 2 tests、2 FAIL、actual/END=1：首个真实 B rename 前没有原记录，同字节新 inode
+被冷 A 恢复接受。真实 LOAD→SETUP→Q 提交强杀→全新 LOAD 的 RED
+`r22-dhcp-original-staged-workflow-red.log` inode 163324728、size 128300、SHA256
+`b8ee1ccd0070af136eb8a72b8898deca8140047aa2bd7fcdc1f24848b69a5b4b`
+为 1 test、1 FAIL、actual/END=1，同样发生错误接受。
+
+新原生产者记录四个严格 regular/单链接/0644 staged 文件的九字段与元数据/摘要，并在
+登记 WAL fsync 前后及 B 每次写前后重核。进一步独立收紧 staged 目录的原九字段，
+`r22-dhcp-staged-directory-owner-red.log` inode 163329325、size 130828、SHA256
+`438965e663231199d81d0ae500dd70ffd14a6f0590ce02d0b0ebc9a5697a7bf9`
+为 2 tests、2 FAIL、actual/END=1：仅三字段目录身份不能拒绝 mode 变更。实现保存并
+重核原目录九字段、0755/原 uid/gid 与原父，拒绝 Boolean/未知/缺项/越界/元数据冲突。
+旧 WAL 的 disk-only 兼容不生成新的原身份，未获得完整归档资格。
+
+最终边界批次 `r22-dhcp-staged-owner-boundaries.log` inode 163332506、size 131478、SHA256
+`b617a8ce3769a6271d9fa5915babc0ff5c2daf7dea06ffd95e578977df77a46f`
+为 7 tests in 9.884s、OK、actual/END=0、冻结一致：首写前独立原值、冷同字节 clone、
+目录 mode 改变、同 inode ABA（原目录九字段不变，避免其它门禁掩盖）、登记 fsync
+窗口 clone/ABA、闭合字段负例，以及真实 SETUP 强杀后新 LOAD 在 A 计划前拒绝。
+保留原日志/断言，读前后 stat 稳定且物理顺序完整；只为候选边界证据，approved ledger
+未改，不是正式 related/full/check。下一步整棵 DHCP 事务的原证据 typed 归档和冷重入。

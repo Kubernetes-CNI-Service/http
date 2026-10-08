@@ -121,6 +121,7 @@ def sha256(path: Path) -> str:
 def assert_private_dhcp_transaction_retention(
     api, root: Path, project: Path, outcome: str, *, reenter: bool = False,
     setup_guard=None, a_shapes=False, publication_candidates=None, a_metadata=False,
+    require_staged_inventory=False,
 ) -> None:
     """Exercise real LOAD filesystem logic; never execute sudo, dhcpd or live writes."""
     root = root.resolve()
@@ -177,7 +178,8 @@ def assert_private_dhcp_transaction_retention(
     backup_sync_faults = ("backup-file-sync", "backup-dir-sync", "backup-transaction-sync", "backup-runtime-sync")
     binding_faults = {"bound-setup-register-wal", "bound-setup-register-receipt", "bound-setup-register-backup", "bound-setup-late-wal",
                       "bound-setup-parent-wal", "bound-setup-candidate-sync", "bound-setup-candidate-register",
-                      "bound-setup-candidate-live-a", "bound-setup-installed-b-owner"}
+                      "bound-setup-candidate-live-a", "bound-setup-installed-b-owner",
+                      "bound-setup-staged-register", "bound-setup-staged-aba"}
 
     def replace_bound_authority(path):
         held = root / ("independent-original-" + path.name)
@@ -332,13 +334,27 @@ def assert_private_dhcp_transaction_retention(
                                                 else expected_b["dhcpd.conf"])
                     break
         if outcome in {"bound-setup-register-wal", "bound-setup-register-receipt", "bound-setup-register-backup",
-                       "bound-setup-candidate-register"} and not injected:
+                       "bound-setup-candidate-register", "bound-setup-staged-register",
+                       "bound-setup-staged-aba"} and not injected:
             for temporary in setup_wal.parent.glob(".setup-switch-journal.*"):
                 if temporary == setup_wal:
                     continue
                 staged = temporary.lstat()
                 if (metadata.st_dev, metadata.st_ino) == (staged.st_dev, staged.st_ino):
                     transaction = next(live_dir.glob(".load-dhcp-transaction-*"))
+                    if outcome in {'bound-setup-staged-register', 'bound-setup-staged-aba'}:
+                        authority = transaction / 'staged/dhcpd_ib.hosts'
+                        original_metadata, original_payload = authority.lstat(), authority.read_bytes()
+                        if outcome == 'bound-setup-staged-register': replace_bound_authority(authority)
+                        else:
+                            authority.write_bytes(b'independent staged file ABA\n')
+                            authority.write_bytes(original_payload)
+                            injected.append(outcome)
+                            assert authority.lstat().st_ino == original_metadata.st_ino
+                            assert authority.lstat().st_ctime_ns != original_metadata.st_ctime_ns
+                        os.utime(authority, ns=(original_metadata.st_atime_ns, original_metadata.st_mtime_ns))
+                        assert authority.read_bytes() == original_payload
+                        break
                     authority = (setup_wal if outcome == "bound-setup-register-wal" else
                                  transaction / "backup/dhcpd.conf" if outcome == "bound-setup-register-backup"
                                  else transaction / "live-candidates/dhcpd.conf" if outcome == "bound-setup-candidate-register"
@@ -426,6 +442,26 @@ def assert_private_dhcp_transaction_retention(
             inventory = binding["live_inventory"]
             if not installed_b:
                 first_install_inventory.append(inventory)
+                if require_staged_inventory:
+                    assert 'staged_inventory' in binding, 'original four staged owners must be registered before first B rename'
+                    staged_inventory = binding['staged_inventory']
+                    assert set(staged_inventory) == {'directory', 'parent', 'leaves'}
+                    staged = source.parent.parent / 'staged'
+                    assert staged_inventory['directory'] == dict(path=str(staged),
+                        identity=[getattr(staged.lstat(), field) for field in owner_fields])
+                    assert staged_inventory['parent'] == dict(path=str(staged.parent), dev=staged.parent.lstat().st_dev, ino=staged.parent.lstat().st_ino)
+                    assert set(staged_inventory['leaves']) == set(names)
+                    for name in names:
+                        original = staged / name
+                        payload = expected_b[name]
+                        if name == 'dhcpd.conf':
+                            for included in names[1:]:
+                                payload = payload.replace(('/etc/dhcp/' + included).encode(), str(staged / included).encode())
+                        assert original.read_bytes() == payload
+                        expected_leaf = dict(identity=[getattr(original.lstat(), field) for field in owner_fields],
+                            state=dict(state='file', mode=0o644, uid=os.getuid(), gid=os.getgid(),
+                                mtime_ns=original.lstat().st_mtime_ns, size=len(payload), sha256=hashlib.sha256(payload).hexdigest()))
+                        assert staged_inventory['leaves'][name] == expected_leaf
                 assert set(inventory) == {"directory", "restore_directory", "parent", "before", "after", "restore"}
                 receipt = source.parent.parent / "a-preimage.json"
                 assert binding["receipt"] == str(receipt)
@@ -7440,6 +7476,90 @@ class ReleaseTransactionTests(unittest.TestCase):
             assert_private_dhcp_transaction_retention(
                 LOAD, self.root, state[1], "bound-setup-before-write", setup_guard=guard,
             )
+
+    def test_setup_wal_registers_original_four_staged_dhcp_leaves_before_first_b_rename(self):
+        state, _context = self._prepare_persisted_a_runtime_switch()
+        _journal, descriptor, backend = state[-3:]
+        guard = dict(deployment_lock_descriptor=descriptor, services_quiesced=True, runtime_backend=backend)
+        with mock.patch.object(LOAD, 'active_managed_services', return_value=()):
+            assert_private_dhcp_transaction_retention(LOAD, self.root, state[1], 'bound-setup-before-write',
+                setup_guard=guard, require_staged_inventory=True)
+
+    def test_committed_q_dhcp_staged_same_byte_new_inode_holds_before_a_plan_or_restore(self):
+        self._committed_q_dhcp_staged_owner_fault('leaf')
+
+    def test_committed_q_dhcp_staged_directory_mode_change_holds_before_a_plan(self):
+        self._committed_q_dhcp_staged_owner_fault('directory-mode')
+
+    def test_committed_q_dhcp_staged_same_inode_aba_holds_before_a_plan(self):
+        self._committed_q_dhcp_staged_owner_fault('leaf-aba')
+
+    def test_setup_dhcp_staged_registration_fsync_owner_change_and_aba_hold_before_b(self):
+        for outcome in ('bound-setup-staged-register', 'bound-setup-staged-aba'):
+            with self.subTest(outcome=outcome):
+                fixture = ReleaseTransactionTests(); fixture.setUp()
+                try:
+                    state, _context = fixture._prepare_persisted_a_runtime_switch()
+                    journal, descriptor, backend = state[-3:]
+                    original = (journal.lstat().st_ino, journal.read_bytes())
+                    guard = dict(deployment_lock_descriptor=descriptor, services_quiesced=True, runtime_backend=backend)
+                    with mock.patch.object(LOAD, 'active_managed_services', return_value=()):
+                        assert_private_dhcp_transaction_retention(LOAD, fixture.root, state[1], outcome, setup_guard=guard)
+                    self.assertEqual(original, (journal.lstat().st_ino, journal.read_bytes()))
+                    backend.start.assert_not_called()
+                finally:
+                    fixture.doCleanups(); fixture.tearDown()
+
+    def test_setup_dhcp_staged_inventory_closed_contract_rejects_boolean_and_unknown_owners(self):
+        state, _context, _guard, _token, _inputs = self._prepare_published_q_for_stopped_preflight(dhcp=True)
+        original = json.loads(state[-3].read_bytes())['body']['dhcp_transaction']
+        for fault in ('directory-boolean', 'leaf-boolean', 'unknown', 'missing', 'outside', 'mode'):
+            with self.subTest(fault=fault):
+                binding = json.loads(json.dumps(original))
+                row = binding['staged_inventory']
+                if fault == 'directory-boolean': row['directory']['identity'][0] = True
+                elif fault == 'leaf-boolean': row['leaves']['dhcpd.conf']['identity'][0] = True
+                elif fault == 'unknown': row['leaves']['dhcpd.conf']['adopt_current'] = True
+                elif fault == 'missing': row['leaves'].pop('dhcpd_ib.hosts')
+                elif fault == 'outside': row['directory']['path'] = str(self.root / 'independent-unregistered-staged')
+                else: row['leaves']['dhcpd.conf']['state']['mode'] = 0o600
+                with self.assertRaises(ValueError): LOAD._validate_setup_switch_dhcp_staged_inventory(binding)
+
+    def _committed_q_dhcp_staged_owner_fault(self, fault):
+        state, _context, guard, _token, _inputs = self._prepare_published_q_for_stopped_preflight(dhcp=True)
+        q, journal = state[1], state[-3]
+        binding = json.loads(journal.read_bytes())['body']['dhcp_transaction']
+        leaf = Path(binding['staged']['path']) / 'dhcpd_ib.hosts'
+        held = self.root / 'independent-held-original-staged-dhcp'
+        metadata, payload = leaf.lstat(), leaf.read_bytes()
+        if fault == 'leaf':
+            leaf.rename(held); leaf.write_bytes(payload); leaf.chmod(stat.S_IMODE(metadata.st_mode))
+            os.utime(leaf, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
+            self.assertNotEqual(held.lstat().st_ino, leaf.lstat().st_ino)
+        elif fault == 'leaf-aba':
+            directory = LOAD._dhcp_a_preimage_receipt_identity(leaf.parent.lstat())
+            leaf.write_bytes(b'independent same inode staged ABA\n'); leaf.write_bytes(payload)
+            os.utime(leaf, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
+            self.assertEqual(metadata.st_ino, leaf.lstat().st_ino)
+            self.assertNotEqual(metadata.st_ctime_ns, leaf.lstat().st_ctime_ns)
+            self.assertEqual(directory, LOAD._dhcp_a_preimage_receipt_identity(leaf.parent.lstat()))
+        else:
+            self.assertEqual(0o755, stat.S_IMODE(leaf.parent.lstat().st_mode))
+            leaf.parent.chmod(0o700)
+        frozen = (journal.read_bytes(), state[7].read_bytes(), os.readlink(state[2]),
+                  (q / '99-output-ztp/current-release.json').read_bytes())
+        runtime = self.root.resolve() / 'private-etc-dhcp'
+        names = ('dhcpd.conf', 'dhcpd_eth.hosts', 'dhcpd_ib.hosts', 'dhcpd_nvl.hosts')
+        with mock.patch.object(LOAD, 'active_managed_services', return_value=()), \
+                mock.patch.object(LOAD, 'dhcp_file_mappings', return_value={q / 'independent-dhcp-B' / n: runtime / n for n in names}):
+            with self.assertRaisesRegex(LOAD.LoadError, 'DHCP.*staged.*owner.*HOLD'):
+                LOAD.restore_setup_switch_a_disk(q, guard=guard, confirmed=True)
+        self.assertEqual(frozen, (journal.read_bytes(), state[7].read_bytes(), os.readlink(state[2]),
+                                 (q / '99-output-ztp/current-release.json').read_bytes()))
+        self.assertFalse(os.path.lexists(LOAD._setup_switch_a_restore_path()))
+        self.assertEqual(payload, leaf.read_bytes())
+        if fault == 'leaf': self.assertEqual(payload, held.read_bytes())
+        elif fault == 'directory-mode': self.assertEqual(0o700, stat.S_IMODE(leaf.parent.lstat().st_mode))
 
     def test_setup_bound_dhcp_precommit_restore_retains_grouped_evidence(self):
         state, _context = self._prepare_persisted_a_runtime_switch()

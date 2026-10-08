@@ -6572,6 +6572,8 @@ def _decode_setup_switch_journal(payload: bytes) -> dict[str, object]:
             binding_fields.add("backup_inventory")
         if isinstance(binding, dict) and "live_inventory" in binding:
             binding_fields.add("live_inventory")
+        if isinstance(binding, dict) and "staged_inventory" in binding:
+            binding_fields.add("staged_inventory")
         exact_fields(binding, binding_fields, "DHCP transaction")
         exact_fields(binding["staged"], directory_fields, "DHCP staged directory")
         if (not isinstance(binding["receipt"], str) or not Path(binding["receipt"]).is_absolute()
@@ -6607,6 +6609,8 @@ def _decode_setup_switch_journal(payload: bytes) -> dict[str, object]:
                     raise ValueError("invalid DHCP backup leaf owner")
         if "live_inventory" in binding:
             _validate_setup_switch_dhcp_live_inventory(binding)
+        if "staged_inventory" in binding:
+            _validate_setup_switch_dhcp_staged_inventory(binding)
     if "a_runtime" in body:
         runtime = body["a_runtime"]
         runtime_fields = {"selector_target", "receipt_directory", "receipt_parent", "receipt_file",
@@ -7486,6 +7490,7 @@ def _setup_switch_a_compensation_authority(project, *, guard, confirmed,
             _require_setup_switch_a_prefix_owners(body, _retirement=_retirement)
             if "dhcp_transaction" in body:
                 _require_setup_switch_dhcp_backup_inventory(body["dhcp_transaction"])
+                _require_setup_switch_dhcp_staged_inventory(body["dhcp_transaction"])
         def shared_authority():
             wal_authority()
             _require_setup_switch_compensation_q_evidence(body)
@@ -12877,6 +12882,76 @@ def _setup_switch_dhcp_owned_leaf(path):
     return None if owner is None else dict(identity=owner, state=state)
 
 
+def _validate_setup_switch_dhcp_staged_inventory(binding):
+    inventory = binding['staged_inventory']
+    names = {'dhcpd.conf', 'dhcpd_eth.hosts', 'dhcpd_ib.hosts', 'dhcpd_nvl.hosts'}
+    if (not isinstance(inventory, dict) or set(inventory) != {'directory', 'parent', 'leaves'}
+            or not isinstance(inventory['leaves'], dict) or set(inventory['leaves']) != names):
+        raise ValueError('invalid DHCP staged original inventory fields')
+    transaction = binding['body']['transaction']
+    parent, directory = inventory['parent'], inventory['directory']
+    if (not isinstance(parent, dict) or set(parent) != {'path', 'dev', 'ino'}
+            or parent != {k: transaction[k] for k in ('path', 'dev', 'ino')}
+            or any(type(parent[k]) is not int or parent[k] < 0 for k in ('dev', 'ino'))
+            or not isinstance(directory, dict) or set(directory) != {'path', 'identity'}
+            or not isinstance(directory['path'], str)
+            or directory['path'] != str(Path(transaction['path']) / 'staged')):
+        raise ValueError('invalid DHCP staged original directory namespace')
+    owner = directory['identity']
+    if (not isinstance(owner, list) or len(owner) != 9 or any(type(v) is not int or v < 0 for v in owner)
+            or not stat.S_ISDIR(owner[2]) or stat.S_IMODE(owner[2]) != 0o755
+            or owner[3:5] != [transaction['uid'], transaction['gid']]
+            or binding['staged'] != dict(path=directory['path'], dev=owner[0], ino=owner[1])):
+        raise ValueError('invalid DHCP staged original directory owner')
+    for leaf in inventory['leaves'].values():
+        if not isinstance(leaf, dict) or set(leaf) != {'identity', 'state'}:
+            raise ValueError('invalid DHCP staged original leaf fields')
+        owner, state = leaf['identity'], leaf['state']
+        if (not isinstance(owner, list) or len(owner) != 9
+                or any(type(v) is not int or v < 0 for v in owner)
+                or not stat.S_ISREG(owner[2]) or owner[5] != 1
+                or not isinstance(state, dict) or set(state) != {
+                    'state', 'mode', 'uid', 'gid', 'mtime_ns', 'size', 'sha256'}
+                or state['state'] != 'file'
+                or any(type(state[k]) is not int or state[k] < 0
+                       for k in ('mode', 'uid', 'gid', 'mtime_ns', 'size'))
+                or state['mode'] != stat.S_IMODE(owner[2]) or state['mode'] != 0o644
+                or state['uid'] != owner[3] or state['gid'] != owner[4]
+                or state['mtime_ns'] != owner[7] or state['size'] != owner[6]
+                or state['size'] > _ROLLBACK_PAYLOAD_LIMIT
+                or not isinstance(state['sha256'], str) or not re.fullmatch(r'[0-9a-f]{64}', state['sha256'])):
+            raise ValueError('invalid DHCP staged original leaf owner/metadata')
+
+
+def _setup_switch_dhcp_staged_inventory(binding):
+    """Observe only the four original producer-staged files, before B writes."""
+    try:
+        staged = Path(binding['staged']['path'])
+        names = {'dhcpd.conf', 'dhcpd_eth.hosts', 'dhcpd_ib.hosts', 'dhcpd_nvl.hosts'}
+        before = _dhcp_a_preimage_receipt_identity(staged.lstat())
+        directory = dict(path=str(staged), identity=list(before))
+        parent = _setup_switch_link_parent_identity(staged)
+        if staged.is_symlink() or staged.resolve(strict=True) != staged or set(os.listdir(staged)) != names:
+            raise LoadError('DHCP staged original directory owner/names changed; HOLD')
+        leaves = {name: _setup_switch_dhcp_owned_leaf(staged / name) for name in sorted(names)}
+        observed = dict(directory=directory, parent=parent, leaves=leaves)
+        _validate_setup_switch_dhcp_staged_inventory({**binding, 'staged_inventory': observed})
+        if (before != _dhcp_a_preimage_receipt_identity(staged.lstat())
+                or parent != _setup_switch_link_parent_identity(staged) or set(os.listdir(staged)) != names
+                or leaves != {name: _setup_switch_dhcp_owned_leaf(staged / name) for name in sorted(names)}):
+            raise LoadError('DHCP staged original owner changed during snapshot; HOLD')
+        return observed
+    except (OSError, KeyError, TypeError, ValueError) as exc:
+        raise LoadError(f'DHCP staged original owner inspection unconfirmed; HOLD: {exc}') from exc
+
+
+def _require_setup_switch_dhcp_staged_inventory(binding):
+    original = binding.get('staged_inventory')
+    # Legacy disk-only recovery never manufactures original file ownership.
+    if original is not None and _setup_switch_dhcp_staged_inventory(binding) != original:
+        raise LoadError('DHCP staged original owner differs from registered WAL; HOLD')
+
+
 def _setup_switch_dhcp_backup_inventory(binding):
     """Observe only the original receipt's four backup names, without adoption."""
     try:
@@ -13197,6 +13272,7 @@ def _register_setup_switch_dhcp_transaction(preimage, parent_candidate, guard, *
             "staged": _setup_switch_directory_identity(staged),
         }
         binding["backup_inventory"] = _setup_switch_dhcp_backup_inventory(binding)
+        binding['staged_inventory'] = _setup_switch_dhcp_staged_inventory(binding)
         if live_inventory is not None:
             binding["live_inventory"] = live_inventory
             _validate_setup_switch_dhcp_live_inventory(binding)
@@ -13223,6 +13299,7 @@ def _register_setup_switch_dhcp_transaction(preimage, parent_candidate, guard, *
             if current != evidence or binding["staged"] != _setup_switch_directory_identity(staged):
                 raise LoadError("SETUP/DHCP original four-file evidence changed; HOLD")
             _require_setup_switch_dhcp_backup_inventory(binding)
+            _require_setup_switch_dhcp_staged_inventory(binding)
             _require_setup_switch_dhcp_live_inventory(binding)
 
         require_original()
@@ -13308,6 +13385,7 @@ def _require_setup_switch_dhcp_transaction(token, guard, *, inspect_runtime=True
         raise LoadError("SETUP/DHCP registered receipt descriptor changed; HOLD")
     binding = body["dhcp_transaction"]
     _require_setup_switch_dhcp_backup_inventory(binding)
+    _require_setup_switch_dhcp_staged_inventory(binding)
     _require_setup_switch_dhcp_live_inventory(binding, inspect_runtime=inspect_runtime and a_compensation is None,
         require_committed_b=a_compensation is not None)
     if not inspect_runtime:

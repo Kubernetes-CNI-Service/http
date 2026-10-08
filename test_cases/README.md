@@ -1117,6 +1117,11 @@ HTTP 失败及非本次启动服务混入。每个服务/健康边界重查原 A
 最终完成仍完整重验。direct/真实 workflow 的局部记录见 CHANGE_AWARE_TESTING，
 不是正式 full/check；DHCP 完整 typed 归档及 B 完整退休继续待完成。
 
+DHCP 原生产者已增加 staged 四文件与目录九字段登记候选，先于首个 B rename；WAL
+fsync 与每次 B 写重核原身份。冷恢复不能把同字节 clone、同 inode ABA、目录权限变更
+认作原证据。闭合记录拒绝 Boolean/未知/缺项；旧 WAL 不从当前文件补原所有权。本地
+direct/真实 workflow 边界记录不表示整棵 DHCP 事务已经可退休或具备正式证明。
+
 `--retire-setup-a` 和 `--resume-setup-a-retirement` 与仅健康激活、A 恢复、B 激活及 B
 退休是互斥操作。Linux management-server 必须预先停服；入口取得独占锁，并在任何 WAL
 操作之前停止 native monitor。每次续退休重新核原 A 完整恢复组、原输入/镜像/公钥、配置、

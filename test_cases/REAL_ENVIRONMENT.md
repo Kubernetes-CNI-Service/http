@@ -1664,6 +1664,16 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
   当前本地私有 HTTP/backend/SIGKILL 的分批证据不是本卡通过、正式 full/check，
   未覆盖完整 prefix/DHCP 证据归档、实际 Linux/root/断电/C2 或 DEV ACK。
 
+- 2026-10-08 DHCP staged 原所有权仍待真机见证：在本卡原隔离/root-only/排他锁/停服/
+  其它写者静默前提下，首个 B rename 前由原生产者把四个 staged 文件及目录的九字段
+  原身份、元数据/摘要与原父同步入 WAL。登记文件 fsync 窗口替换同字节 inode 或同 inode
+  ABA 并恢复字节/mtime，必须在 B 首写前 HOLD、原 WAL 与 A 保持不变；Q 已提交后
+  新 LOAD 遇 staged 文件/目录换绑、权限改变、ABA 或不闭合清单，须在 A 计划/补偿前
+  HOLD，不根据冷观察补原身份。保存 FD/name/九字段/ctime/SHA、原父、写入和 fsync
+  物理时序、停服与外部哨兵。清理仅人工按已核隔离快照恢复；缺记录的旧 WAL 不获得
+  完整 typed 归档资格。当前 7 项本地 direct/多脚本证据不替代正式 full/check 或真机见证，
+  DHCP 整棵事务归档及本卡仍 OPEN。
+
 - 2026-10-08 原 A prefix typed 归档候选仍 OPEN：先独立登记原 WAL 每行的 candidate/backup/retained
   三个名字、父身份、原 leaf 或缺席义务。已完整恢复 A 后只 no-replace rename 原证据
   inode，原 WAL/计划/指针字节不改；在首个 prefix rename 后强杀/断电，由全新显式

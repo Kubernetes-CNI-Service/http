@@ -5156,6 +5156,9 @@ finally:
     def test_real_setup_changed_nested_prefix_cold_restore_reenters_after_parent_removal(self):
         self._real_setup_committed_q_group_restore(prefix=True, prefix_change="/q-nested/inner/ztp")
 
+    def test_real_setup_q_commit_staged_dhcp_clone_holds_cold_before_a_plan(self):
+        self._real_setup_committed_q_group_restore(dhcp=True, dhcp_staged_fault=True)
+
     def _real_setup_committed_q_group_restore(self, *, dhcp=False, runtime_death=False,
                                              setup_death=False, foreign_setup=False,
                                              q_local=False, q_fault=False, a_fault=None, a_image_fault=False,
@@ -5164,7 +5167,7 @@ finally:
                                              dhcp_legacy_fault=False, prefix=False, prefix_fault=False,
                                              managed_key=False, managed_key_death=False, managed_key_fault=False,
                                              prefix_change=False, prefix_death=False, a_health=False,
-                                             plan_fsync_aba=False):
+                                             plan_fsync_aba=False, dhcp_staged_fault=False):
         fixture = RELEASE_FIXTURE.ReleaseTransactionTests()
         fixture.setUp()
         try:
@@ -5419,6 +5422,15 @@ try:
             print('R22_FOREIGN_RESTORED_DHCP_OWNER_REJECTED')
             sys.exit(0)
         raise AssertionError('same-byte new restored DHCP owner must not be adopted')
+    if sys.argv[5] == 'foreign-dhcp-staged':
+        try:
+            load.restore_setup_switch_a_disk(q, guard=guard, confirmed=True)
+        except load.LoadError as exc:
+            assert 'DHCP' in str(exc) and 'staged' in str(exc) and 'owner' in str(exc) and 'HOLD' in str(exc), str(exc)
+            assert not os.path.lexists(root / 'ztp/.setup-switch-a-restore.json')
+            print('R22_ORIGINAL_STAGED_DHCP_OWNER_REJECTED_BEFORE_A_PLAN')
+            sys.exit(0)
+        raise AssertionError('same-byte foreign staged DHCP owner was adopted by cold LOAD')
     if sys.argv[5] == 'foreign-dhcp-b':
         try:
             load.restore_setup_switch_a_disk(q, guard=guard, confirmed=True)
@@ -5589,6 +5601,26 @@ finally:
                                     capture_output=True, text=True, check=False, timeout=30)
             self.assertEqual(-signal.SIGKILL, writer.returncode, writer.stdout + writer.stderr)
             original_wal = (journal.lstat().st_ino, journal.read_bytes())
+            if dhcp_staged_fault:
+                binding = json.loads(original_wal[1])['body']['dhcp_transaction']
+                source = Path(binding['staged']['path']) / 'dhcpd_ib.hosts'
+                metadata, payload = source.lstat(), source.read_bytes()
+                held = root / 'independent-held-original-staged-dhcp'
+                source.rename(held); source.write_bytes(payload); source.chmod(stat.S_IMODE(metadata.st_mode))
+                os.utime(source, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
+                self.assertNotEqual(held.lstat().st_ino, source.lstat().st_ino)
+                frozen = (state[7].read_bytes(), os.readlink(common),
+                    (q / '99-output-ztp/current-release.json').read_bytes(), source.lstat().st_ino)
+                rejecting = subprocess.run(argv + ['foreign-dhcp-staged', shape], capture_output=True,
+                    text=True, check=False, timeout=30)
+                self.assertEqual(0, rejecting.returncode, rejecting.stdout + rejecting.stderr)
+                self.assertIn('R22_ORIGINAL_STAGED_DHCP_OWNER_REJECTED_BEFORE_A_PLAN', rejecting.stdout)
+                self.assertEqual(frozen, (state[7].read_bytes(), os.readlink(common),
+                    (q / '99-output-ztp/current-release.json').read_bytes(), source.lstat().st_ino))
+                self.assertEqual(original_wal, (journal.lstat().st_ino, journal.read_bytes()))
+                self.assertEqual(payload, source.read_bytes()); self.assertEqual(payload, held.read_bytes())
+                self.assertFalse(os.path.lexists(journal.parent / '.setup-switch-a-restore.json'))
+                return
             if prefix_death:
                 dying = subprocess.run(argv + ["kill-prefix-restore", shape], capture_output=True,
                     text=True, check=False, timeout=30)
