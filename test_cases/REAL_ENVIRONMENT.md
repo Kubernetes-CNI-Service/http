@@ -2284,6 +2284,8 @@ generation/publish 及 UNKNOWN 下改 action/wire 均 HOLD，不计作 COMPLETE 
 
 ## TC-REAL-REQ7-METADATA-RESERVATION-001 — 原 batch 的永久 fence 持久预算
 
+- 原项目认证与读取接线补充（**NOT RUN / REAL_ENV REQUIRED**）：本地 direct 及真实固定 FD→SDK/OAuth→监督 template/metadata 读取→原 global/enrollment/History→quota 工作流只证明来源支配原 reservation。保留原卡前置、精确授权及现场范围，另留存脱敏认证与原读取关联、落盘前拒绝和落盘后过期仍保留原 quota 的安全状态；不记录 token／JWT／私钥。quota 冷回读不是历史排他／完整库存或 COMPLETE；G1 与 worker 准入未验证。未省略或合并原场景、不授予真实 root／Cloud／项目操作，清理仍限确证自有隔离夹具。
+
 - Case ID：`TC-REAL-REQ7-METADATA-RESERVATION-001`；类型：real-environment / durable transaction；对应 G-1/C-19。状态：**NOT RUN / REAL_ENV REQUIRED**。`monitor/issue_tracker_metadata_reservation.py` 未安装；本地 direct、真实私有 TLS 固定读取及冷进程只是原始可见字符池预算见证，不是 COMPLETE、在线准入或发送许可。
 - 前置条件：另获 owner 精确 Stage O 隔离副本授权；预置全表私有 state、原始全部模板 ID／双 enrollment、真实 owner 和 global action/wire，首个 intent 前完成固定完整 metadata 读取。源鉴别、新鲜准入、隐藏 PROJECT 使用量、行容量、受审 launcher 和跨单元结算须单独闭合；不创建真实目录、凭据或在线修改。
 - 步骤与独立预期：实际 immutable batch 的 fence ID/key/value/目标表确定唯一预留；两份 nonce 可见预算各为 86，z=1 为 2，sheet 与 spreadsheet 各自 30000 池。容量溢出、已存在同 ID（包括相同图像）、部分响应、原 nonce 错误、foreign target 必须在创建 state 前 HOLD；八个图像屏障全部完成后才写 INITIALIZED。部分屏障不采用，冷进程及 UNKNOWN 不换 fence、不回填／清理／释放配额。链接、marker 缺失、重哈希替换 reservation HOLD。

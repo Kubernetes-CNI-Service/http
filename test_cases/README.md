@@ -897,6 +897,15 @@ G1 的固定项目认证补充仍为未安装的必要来源层：独立 v2 私�
 metadata search 的本地真实流程及读取前／中凭据漂移拒绝均保留原预算、不重试。
 来源接通仍不证明专用表／历史项目排他、不构成原子库存或配额保留、发送许可；
 完整 G1 容量与最终 worker 准入尚未接入，现场卡仍 NOT RUN。
+`prepare_owned_project_metadata_reservation` 把该原认证／原实际 template 与 metadata
+读取接入既有 durable quota：模板身份从原读取解码，永久栅及保留量只从原 global
+unit、enrollment 与 History journal 导出，不接收 caller identity、plan、项目声明或
+reservation 列表。复制、过期及来源不一致在落盘前 HOLD；落盘后原读取过期仍
+保留全部原 reservation，不撤销、重建或返回发送许可。冷回读保留原可见计量合同，
+不能把持久化 quota 当作认证来源、历史排他或完整库存证明；整项仍 OPEN。
+quota 原目录及四个原文件 FD 保持到最终校验／内部来源复核结束；同字节目录或
+HEADER／RESERVATION／METADATA-RAW／INITIALIZED 替换不能通过重新读取而被采用。
+晚失败不删除原始或替换后的证据，也不增加发送次数。
 `test_req7_settings_audit_allocation` 从持有实际项目 ACTIVE 锁的 C25 原始事件链、
 最高 current、INITIALIZED 和逐事件 outbox 投影导出审计行；调用方不能伪造队列、
 revision、时间或内容。双 owner 下把真实非空单元的原始审计固定到项目

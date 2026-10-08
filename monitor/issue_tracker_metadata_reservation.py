@@ -6,6 +6,7 @@ Hidden PROJECT metadata is still unproved: this is NOT admission, COMPLETE,
 reclamation or transport permission. No network, expiry, reset or cleanup.
 """
 from dataclasses import dataclass
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -85,6 +86,44 @@ def _marker(header):
                              'header_sha256': hashlib.sha256(local._canonical(header)).hexdigest()})
 
 
+@contextmanager
+def _hold_quota_originals(parent,name,folder):
+    """Pin the original quota namespace/images through final inspection.
+
+    Identical-byte replacements are not the retained originals. This context
+    never creates, adopts, repairs or deletes any image; all descriptors are
+    closed on both successful and failed inspection.
+    """
+    held=[]
+    try:
+        journal._named(parent,name,folder,directory=True)
+        directory_identity=journal._identity(os.fstat(folder))
+        if set(os.listdir(folder))!=_NAMES: raise MetadataReservationHold()
+        for entry in sorted(_NAMES):
+            fd=os.open(entry,local._flags(),dir_fd=folder)
+            held.append((entry,fd,None))
+            journal._named(folder,entry,fd,directory=False)
+            held[-1]=(entry,fd,journal._identity(os.fstat(fd)))
+        def verify():
+            journal._named(parent,name,folder,directory=True)
+            if journal._identity(os.fstat(folder))!=directory_identity or set(os.listdir(folder))!=_NAMES:
+                raise MetadataReservationHold()
+            for entry,fd,identity in held:
+                journal._named(folder,entry,fd,directory=False)
+                if journal._identity(os.fstat(fd))!=identity: raise MetadataReservationHold()
+            journal._named(parent,name,folder,directory=True)
+            if journal._identity(os.fstat(folder))!=directory_identity: raise MetadataReservationHold()
+        verify()
+        yield verify
+        verify()
+    finally:
+        failed=False
+        for _entry,fd,_identity in reversed(held):
+            try: os.close(fd)
+            except OSError: failed=True
+        if failed: raise MetadataReservationHold()
+
+
 def _inspect(token, binding, identity, parent, name, folder, base, sheet, fence):
     from monitor.issue_tracker_metadata_capacity import PreparedMetadataRead, _BODY
     if set(os.listdir(folder)) != _NAMES: raise MetadataReservationHold()
@@ -119,6 +158,11 @@ def _inspect(token, binding, identity, parent, name, folder, base, sheet, fence)
 
 def prepare_metadata_reservation(token, binding, identity, unit, plan, response):
     """New actual-unit image before any intent; partial state cannot be adopted."""
+    return _prepare_metadata_reservation(token,binding,identity,unit,plan,response)
+
+
+def _prepare_metadata_reservation(token,binding,identity,unit,plan,response,*,revalidate=None):
+    """Keep original quota FDs through internal final source revalidation."""
     folder = None; failed = False
     try:
         parent, name, base, state, sheet, fence = _inputs(token, binding, identity, unit)
@@ -134,13 +178,50 @@ def prepare_metadata_reservation(token, binding, identity, unit, plan, response)
         # Folder+parent and three file+folder pairs: all eight image barriers
         # must precede INITIALIZED. Interrupted stores remain retained HOLD.
         local._write_new(folder, 'INITIALIZED', _marker(header))
-        result = _inspect(token, binding, identity, parent, name, folder, base, sheet, fence)
-        ownership._validated_owner(token, binding)
+        with _hold_quota_originals(parent,name,folder):
+            result = _inspect(token, binding, identity, parent, name, folder, base, sheet, fence)
+            if revalidate is not None: revalidate()
+            ownership._validated_owner(token, binding)
     except Exception: failed = True
     finally:
         if folder is not None:
             try: os.close(folder)
             except OSError: failed = True
+    if failed: raise MetadataReservationHold()
+    return result
+
+
+def prepare_owned_project_metadata_reservation(writer_token,owner_token,binding,authentication,unit,*,
+                                               identity_response,metadata_response):
+    """Actual project reads -> original unit's retained quota, NOT admission.
+
+    No caller identity, plan, Cloud project, reservation list or freshness flag.
+    The fixed owned auth/read registry and original typed template establish
+    provenance; the existing actual global/enrollment/History journal derives
+    the fence and keeps its permanent reservation. Late expiry/revocation
+    retains any written quota and returns HOLD, never rollback/reset or GO.
+    Dedicated-table/historical exclusivity is NOT inferred from these reads;
+    even an empty exact response remains VISIBLE_ONLY_UNPROVED.
+    """
+    failed=False
+    try:
+        from monitor.issue_tracker_history_read_launcher import require_current_owned_project_read
+        from monitor.issue_tracker_sheets_read_decode import decode_template_identity
+        def current():
+            identity_plan,project,digest=require_current_owned_project_read(
+                writer_token,owner_token,binding,identity_response,authentication,read_kind='template_identity')
+            metadata_plan,metadata_project,metadata_digest=require_current_owned_project_read(
+                writer_token,owner_token,binding,metadata_response,authentication,read_kind='metadata')
+            if (metadata_project,metadata_digest)!=(project,digest): raise MetadataReservationHold()
+            return identity_plan,metadata_plan
+        identity_plan,metadata_plan=current()
+        identity=decode_template_identity(identity_plan,identity_response)
+        current()
+        # Revalidate inside the primitive's held-original scope, not after it
+        # has closed and a same-byte quota replacement could be freshly read.
+        result=_prepare_metadata_reservation(owner_token,binding,identity,unit,metadata_plan,
+                                             metadata_response,revalidate=current)
+    except Exception: failed=True
     if failed: raise MetadataReservationHold()
     return result
 
@@ -151,8 +232,9 @@ def inspect_metadata_reservation(token, binding, identity, unit):
     try:
         parent, name, base, _state, sheet, fence = _inputs(token, binding, identity, unit)
         folder = local._directory(parent, name); journal._named(parent, name, folder, directory=True)
-        result = _inspect(token, binding, identity, parent, name, folder, base, sheet, fence)
-        ownership._validated_owner(token, binding)
+        with _hold_quota_originals(parent,name,folder):
+            result = _inspect(token, binding, identity, parent, name, folder, base, sheet, fence)
+            ownership._validated_owner(token, binding)
     except Exception: failed = True
     finally:
         if folder is not None:

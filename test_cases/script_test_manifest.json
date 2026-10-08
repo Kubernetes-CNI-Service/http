@@ -3415,8 +3415,8 @@
     },
     {
       "id": "req7_native_metadata_actual_unit_durable_quota_cold_process",
-      "members": ["monitor/issue_tracker_metadata_reservation.py", "monitor/issue_tracker_metadata_capacity.py", "monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_enrollment_journal.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_send_intent.py", "monitor/issue_tracker_history_preread_journal.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_attempt_journal.py", "monitor/issue_tracker_sheets_read_decode.py", "monitor/issue_tracker_tls_inputs.py"],
-      "tests": ["test_cases.test_req7_metadata_reservation"]
+      "members": ["monitor/issue_tracker_metadata_reservation.py", "monitor/issue_tracker_metadata_capacity.py", "monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_enrollment_journal.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_send_intent.py", "monitor/issue_tracker_history_preread_journal.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_attempt_journal.py", "monitor/issue_tracker_sheets_read_decode.py", "monitor/issue_tracker_tls_inputs.py", "monitor/issue_tracker_token_launcher.py", "monitor/issue_tracker_history_read_launcher.py", "monitor/issue_tracker_sdk_authentication.py", "monitor/issue_tracker_credential_shape.py", "monitor/issue_tracker_online_target.py"],
+      "tests": ["test_cases.test_req7_metadata_reservation", "test_cases.test_req7_history_read_launcher", "test_cases.test_req7_token_launcher"]
     }
   ],
   "path_rules": [

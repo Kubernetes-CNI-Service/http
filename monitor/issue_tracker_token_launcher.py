@@ -30,7 +30,7 @@ sys.path[:0]=[sys.argv[1],sys.argv[1]+"/tools"]
 from monitor.issue_tracker_token_launcher import _token_child
 raise SystemExit(_token_child(sys.argv[2]))
 '''
-_PROJECT_CHILD_PROGRAM = _CHILD_PROGRAM.replace('_token_child(', '_project_token_child(')
+_PROJECT_CHILD_PROGRAM = _CHILD_PROGRAM.replace('_token_child', '_project_token_child')
 _PROJECT_TOKENS = weakref.WeakKeyDictionary()
 _PROJECT_GUARD = threading.Lock()
 _NONCE = re.compile(r'[0-9a-f]{64}\Z')

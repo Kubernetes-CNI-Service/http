@@ -28,6 +28,23 @@ def load():
 
 
 class Req7TokenLauncherDirectTests(unittest.TestCase):
+    def test_fixed_project_program_executes_its_imported_entry_without_traceback_or_input_reads(self):
+        module=load()
+        # Execute the shipped entry text under -I, not a fixture that invokes
+        # launcher._project_token_child directly and hides import-name drift.
+        prelude='''import sys
+sys.path[:0]=[sys.argv[1],sys.argv[1]+"/tools"]
+from types import SimpleNamespace
+from monitor import issue_tracker_token_launcher as launcher
+launcher.os=SimpleNamespace(geteuid=lambda:501)
+'''
+        result=subprocess.run([str(Path(sys.executable).resolve()),'-I','-B','-c',
+            prelude+module._PROJECT_CHILD_PROGRAM,str(ROOT),'a'*64],stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,stderr=subprocess.PIPE,env={'LC_ALL':'C'},timeout=5)
+        self.assertEqual(1,result.returncode)
+        self.assertEqual(b'',result.stdout)
+        self.assertEqual(b'',result.stderr,'fixed nonroot denial must not fail at an unimported entry symbol')
+
     def test_g1_project_protocol_is_separate_and_decoding_or_copying_does_not_issue_authority(self):
         self.assertTrue(hasattr(load(), '_decode_project_completion'),
                         'G1 needs project identity from the actual supervised auth child')
@@ -320,7 +337,8 @@ with ExitStack() as stack:
     result=launcher._token_child(sys.argv[2])
 raise SystemExit(result)
 ''' % (dependency_roots, str(self.root), port)
-        return program.replace('launcher._token_child(sys.argv[2])','launcher._project_token_child(sys.argv[2])') if project_scope else program
+        entry=load()._PROJECT_CHILD_PROGRAM if project_scope else load()._CHILD_PROGRAM
+        return program.replace('result=launcher._token_child(sys.argv[2])','exec(%r)'%entry)
 
     def test_g1_real_fixed_sdk_tls_child_issues_owner_bound_project_not_copyable_or_stale(self):
         from dataclasses import replace

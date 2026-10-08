@@ -46,6 +46,17 @@ class Req7MetadataReservationDirectTests(unittest.TestCase):
     def inspect(self, token, **changes):
         return self.module.inspect_metadata_reservation(token, binding(), self.identity, changes.get('unit', self.unit))
 
+    def test_project_reservation_requires_live_original_reads_before_any_durable_write(self):
+        self.module=load()
+        self.assertTrue(hasattr(self.module,'prepare_owned_project_metadata_reservation'),
+                        'G1 budget must derive its fence from an actual unit and original project reads')
+        with mock.patch.object(self.module,'_prepare_metadata_reservation') as writing:
+            with self.assertRaises(self.module.MetadataReservationHold) as caught:
+                self.module.prepare_owned_project_metadata_reservation(object(),object(),binding(),object(),self.unit,
+                    identity_response=object(),metadata_response=self.raw)
+            self.assertIsNone(caught.exception.__context__); writing.assert_not_called()
+        self.assertFalse(self.store.exists())
+
     def test_fixture_canonical_metadata_alias_and_original_owner_dependencies_match_current_imports(self):
         import monitor
         module = load()
@@ -71,6 +82,33 @@ class Req7MetadataReservationDirectTests(unittest.TestCase):
         self.assertEqual({'METADATA-RAW', 'HEADER', 'RESERVATION', 'INITIALIZED'}, set(os.listdir(self.store)))
         for name in ('permit', 'complete', 'applied', 'send_once'): self.assertFalse(hasattr(seen, name))
         self.assertNotIn('sentinel.private-token', repr(seen)); self.assertNotIn(b'sentinel.private-token', (self.store / 'HEADER').read_bytes())
+
+    def test_original_quota_directory_or_image_rebinding_after_inspection_cannot_return_success(self):
+        self.module=load()
+        for fault in ('directory','HEADER','RESERVATION','METADATA-RAW','INITIALIZED'):
+            with self.subTest(fault=fault),tempfile.TemporaryDirectory(prefix='req7-quota-original-return-') as directory:
+                root=Path(directory).resolve(); state=root/'var/lib/http-ztp-container/issue-tracker'
+                state.mkdir(parents=True,mode=0o700); store=state/self.store.name
+                with fixture(root),self.owner.spreadsheet_owner(binding()) as token:
+                    self.initialize(token); inspect=self.module._inspect; changed=[]
+                    def inspected_then_rebind(*args,**kwargs):
+                        result=inspect(*args,**kwargs)
+                        if not changed:
+                            changed.append(True)
+                            if fault=='directory':
+                                original={p.name:p.read_bytes() for p in store.iterdir()}
+                                store.rename(root/'preserved-quota'); store.mkdir(mode=0o700)
+                                for name,raw in original.items():
+                                    path=store/name; path.write_bytes(raw); path.chmod(0o600)
+                            else:
+                                path=store/fault; raw=path.read_bytes()
+                                path.rename(root/('preserved-'+fault)); path.write_bytes(raw); path.chmod(0o600)
+                        return result
+                    with mock.patch.object(self.module,'_inspect',side_effect=inspected_then_rebind),self.assertRaises(self.module.MetadataReservationHold):
+                        self.module.prepare_metadata_reservation(token,binding(),self.identity,self.unit,self.meta_plan,self.raw)
+                    self.assertEqual([True],changed)
+                    self.assertTrue((store/'INITIALIZED').exists(),'late failure retains original and replacement evidence')
+                    self.assertEqual(0,self.global_journal.inspect_global_unit(token,binding(),self.unit).attempt_count)
 
     def test_overflow_existing_fence_bad_nonce_partial_or_foreign_read_never_creates_store(self):
         self.module = load()
@@ -292,6 +330,141 @@ class Req7MetadataReservationWorkflowTests(unittest.TestCase):
         end = cards.find('\n## ', start + 1); card = cards[start:] if end == -1 else cards[start:end]
         for term in ('NOT RUN / REAL_ENV REQUIRED', script, '前置条件', '证据', 'stat/inode', '清理', '不是 COMPLETE'):
             self.assertIn(term, card)
+
+
+class Req7MetadataReservationProjectWorkflowTests(unittest.TestCase):
+    from test_cases.test_req7_history_read_launcher import Req7HistoryReadLauncherWorkflowTests as _Fixture
+    setUp=_Fixture.setUp; certificates=_Fixture.certificates; server=_Fixture.server
+    owners=_Fixture.owners; intercept=_Fixture.intercept; child_fixture=_Fixture.child_fixture
+    project_auth=_Fixture.project_auth
+
+    def read_project(self,stack,writer,owner,bound,authentication,kind,value):
+        from contextlib import ExitStack
+        import socket
+        from monitor import issue_tracker_history_read_launcher as reads
+        body=json.dumps(value,separators=(',',':')).encode()
+        reply=b'HTTP/1.1 200 OK\r\nContent-Length: '+str(len(body)).encode()+b'\r\nConnection: close\r\n\r\n'+body
+        with self.server(reply,hostname='sheets.googleapis.com',destination='sheets.googleapis.com') as (records,errors),ExitStack() as launched:
+            port=socket.getaddrinfo('sheets.googleapis.com',443)[0][4][1]
+            calls,children=self.intercept(launched,self.child_fixture(port),writer,owner,bound)
+            result=reads.OwnedProjectSheetsReadUnit(writer,owner,bound,authentication,read_kind=kind).read_once()
+            self.assertEqual(1,len(calls)); self.assertEqual(0,children[0].returncode)
+        self.assertEqual([],errors); self.assertEqual(1,len(records)); self.assertEqual(body,result.data)
+        self.assertIn(b'Authorization: Bearer owned-project-token\r\n',records[0][1])
+        return result
+
+    def prepare_original(self,stack):
+        from monitor import issue_tracker_global_attempt_journal as journal, issue_tracker_enrollment_journal as enrollment
+        from monitor import issue_tracker_history_preread_journal as preread, issue_tracker_sheets_read_decode as decode
+        from monitor import issue_tracker_history_read_launcher as reads
+        from test_cases.test_req7_send_unit import inputs
+        from monitor.issue_tracker_send_unit import freeze_send_unit
+        _local,ownership,writer,owner,bound,_token,config=self.owners(stack)
+        authentication,credential,original=self.project_auth(stack,ownership,owner,bound)
+        document=matching.identity_response(); document['spreadsheetId']=bound.spreadsheet_id
+        identity_read=self.read_project(stack,writer,owner,bound,authentication,'template_identity',document)
+        identity_plan,_project,_digest=reads.require_current_owned_project_read(writer,owner,bound,identity_read,authentication,read_kind='template_identity')
+        identity=decode.decode_template_identity(identity_plan,identity_read)
+        with mock.patch('secrets.token_hex',side_effect=['a'*64,'b'*64,'c'*64,'d'*64]):
+            enrollment.prepare_enrollment_journal(owner,bound,identity)
+        arguments=inputs(); arguments.update(spreadsheet_id=bound.spreadsheet_id,sheet_id=101,history_sheet_id=105,
+            target_nonce='a'*64,history_nonce='d'*64)
+        unit=freeze_send_unit(**arguments); journal.prepare_global_unit(owner,bound,unit)
+        history=matching.tail_document(12); history['spreadsheetId']=bound.spreadsheet_id
+        history['sheets'][0]['properties']['sheetId']=105; history['sheets'][0]['data'][0]['rowData']=[]
+        history_read=self.read_project(stack,writer,owner,bound,authentication,'history_tail',history)
+        history_plan,_project,_digest=reads.require_current_owned_project_read(writer,owner,bound,history_read,authentication,read_kind='history_tail')
+        preread.prepare_history_preread(owner,bound,unit,history_plan,history_read)
+        metadata={'matchedDeveloperMetadata':[
+            {'developerMetadata':{'metadataId':1,'metadataKey':'http-ztp-enrollment-v1','metadataValue':'a'*64,
+                'visibility':'DOCUMENT','location':{'locationType':'SHEET','sheetId':101}}},
+            {'developerMetadata':{'metadataId':2,'metadataKey':'http-ztp-enrollment-v1','metadataValue':'d'*64,
+                'visibility':'DOCUMENT','location':{'locationType':'SHEET','sheetId':105}}}]}
+        return writer,owner,bound,authentication,identity_read,identity,unit,metadata,credential,original
+
+    def test_real_project_reads_original_unit_fence_reservation_never_infer_hidden_inventory_or_clear_unknown(self):
+        from contextlib import ExitStack
+        module=load()
+        self.assertTrue(hasattr(module,'prepare_owned_project_metadata_reservation'))
+        with ExitStack() as stack:
+            writer,owner,bound,auth,identity_read,identity,unit,metadata,credential,original=self.prepare_original(stack)
+            metadata_read=self.read_project(stack,writer,owner,bound,auth,'metadata',metadata)
+            store=self.root/'var/lib/http-ztp-container/issue-tracker'/(hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()+'.metadata')
+            for images in ((replace(identity_read),metadata_read),(identity_read,replace(metadata_read))):
+                with self.assertRaises(module.MetadataReservationHold):
+                    module.prepare_owned_project_metadata_reservation(writer,owner,bound,auth,unit,
+                        identity_response=images[0],metadata_response=images[1])
+                self.assertFalse(store.exists())
+            seen=module.prepare_owned_project_metadata_reservation(writer,owner,bound,auth,unit,
+                identity_response=identity_read,metadata_response=metadata_read)
+            self.assertEqual('VISIBLE_ONLY_UNPROVED',seen.outcome); self.assertIs(False,seen.inventory_complete)
+            self.assertEqual((101,86,2,29912),next(row for row in seen.pools if row[0]==101))
+            self.assertEqual(1,seen.outstanding_reservations); self.assertEqual(unit.fence_metadata_id,seen.fence_metadata_id)
+            self.assertFalse(hasattr(seen,'permit')); self.assertFalse(hasattr(seen,'send_once'))
+            retained={path.name:path.read_bytes() for path in store.iterdir()}
+            self.assertNotIn(b'owned-project-token',retained['HEADER'])
+            module.global_journal.record_reserved_attempt_intent(owner,bound,identity,unit)
+            self.assertEqual((1,'UNKNOWN'),(module.global_journal.inspect_global_unit(owner,bound,unit).attempt_count,
+                                          module.global_journal.inspect_global_unit(owner,bound,unit).outcome))
+            self.assertEqual(seen,module.inspect_metadata_reservation(owner,bound,identity,unit))
+            with self.assertRaises(module.MetadataReservationHold):
+                module.prepare_owned_project_metadata_reservation(writer,owner,bound,auth,unit,
+                    identity_response=identity_read,metadata_response=metadata_read)
+            self.assertEqual(retained,{path.name:path.read_bytes() for path in store.iterdir()})
+            self.assertEqual(original,credential.read_bytes())
+
+    def test_project_read_expiry_after_quota_barrier_keeps_reservation_without_permission_or_reset(self):
+        from contextlib import ExitStack
+        from monitor import issue_tracker_history_read_launcher as reads
+        import time
+        module=load()
+        self.assertTrue(hasattr(module,'prepare_owned_project_metadata_reservation'))
+        with ExitStack() as stack:
+            writer,owner,bound,auth,identity_read,identity,unit,metadata,_credential,_original=self.prepare_original(stack)
+            metadata_read=self.read_project(stack,writer,owner,bound,auth,'metadata',metadata)
+            native=module._inspect; finished=[]
+            def inspect_then_expire(*args,**kwargs):
+                result=native(*args,**kwargs); finished.append(True); return result
+            with mock.patch.object(module,'_inspect',side_effect=inspect_then_expire), \
+                    mock.patch.object(reads,'_monotonic',side_effect=lambda:time.monotonic()+(31 if finished else 0)):
+                with self.assertRaises(module.MetadataReservationHold):
+                    module.prepare_owned_project_metadata_reservation(writer,owner,bound,auth,unit,
+                        identity_response=identity_read,metadata_response=metadata_read)
+            self.assertEqual([True],finished)
+            store=self.root/'var/lib/http-ztp-container/issue-tracker'/(hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()+'.metadata')
+            self.assertEqual({'METADATA-RAW','HEADER','RESERVATION','INITIALIZED'},set(os.listdir(store)))
+            self.assertIs(False,module.inspect_metadata_reservation(owner,bound,identity,unit).inventory_complete)
+            self.assertEqual(0,module.global_journal.inspect_global_unit(owner,bound,unit).attempt_count)
+            retained={path.name:path.read_bytes() for path in store.iterdir()}
+            with self.assertRaises(module.MetadataReservationHold):
+                module.prepare_owned_project_metadata_reservation(writer,owner,bound,auth,unit,
+                    identity_response=identity_read,metadata_response=metadata_read)
+            self.assertEqual(retained,{path.name:path.read_bytes() for path in store.iterdir()})
+
+    def test_project_final_source_revalidation_cannot_adopt_identical_replaced_quota_namespace(self):
+        from contextlib import ExitStack
+        from monitor import issue_tracker_history_read_launcher as reads
+        module=load()
+        with ExitStack() as stack:
+            writer,owner,bound,auth,identity_read,_identity,unit,metadata,_credential,_original=self.prepare_original(stack)
+            metadata_read=self.read_project(stack,writer,owner,bound,auth,'metadata',metadata)
+            store=self.root/'var/lib/http-ztp-container/issue-tracker'/(hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()+'.metadata')
+            current=reads.require_current_owned_project_read; changed=[]
+            def fresh_read_then_replace(*args,**kwargs):
+                result=current(*args,**kwargs)
+                if (store/'INITIALIZED').exists() and not changed:
+                    changed.append(True); originals={p.name:p.read_bytes() for p in store.iterdir()}
+                    store.rename(self.root/'preserved-original-quota'); store.mkdir(mode=0o700)
+                    for name,raw in originals.items():
+                        path=store/name; path.write_bytes(raw); path.chmod(0o600)
+                return result
+            with mock.patch.object(reads,'require_current_owned_project_read',side_effect=fresh_read_then_replace),self.assertRaises(module.MetadataReservationHold):
+                module.prepare_owned_project_metadata_reservation(writer,owner,bound,auth,unit,
+                    identity_response=identity_read,metadata_response=metadata_read)
+            self.assertEqual([True],changed)
+            self.assertEqual({p.name:p.read_bytes() for p in (self.root/'preserved-original-quota').iterdir()},
+                             {p.name:p.read_bytes() for p in store.iterdir()})
+            self.assertEqual(0,module.global_journal.inspect_global_unit(owner,bound,unit).attempt_count)
 
 
 class Req7MetadataReservationNativeWorkflowTests(unittest.TestCase):
