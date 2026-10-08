@@ -1092,3 +1092,11 @@ generation／published SHA／manifest ID 与原 ACTION 精确绑定。伪造 rec
 含计数后 receipt 漂移。本接口保守限定 current-cycle，不证明旧周期 R2、fresh
 config／W1／cadence、固定 launcher、真实发送、FIFO 或 COMPLETE；REQ7 整体
 仍未完成，真机 NOT RUN。
+
+`inspect_business_source_projection` 把完整原件中每一项 wire 和 NOOP 的 C8 工具列
+与重放源行派生的值比较，并核发送项的原 UTC 时间。调用方 typed 行本身不提供
+来源权威；上述双 owner 计数接口只能从实际 `qualify_prod_stage_l` 重放结果派生行，
+不得以哈希自洽的业务原件替代真实 C5 值。源行必须逐键覆盖原 manifest 全部操作，
+缺失、重复、NOOP 值／发送值／发送时间漂移均 HOLD，不修改原件或重新组批。
+独立 Switch 正向／篡改测试及真实 ETH／IB 原始 C5/C6 多脚本流程覆盖这一边界；
+本接口仍仅返回必要观察，无发送许可、COMPLETE 或整项验收能力。

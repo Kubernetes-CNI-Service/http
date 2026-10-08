@@ -468,6 +468,99 @@ class Req7OriginalBusinessReservedIntentDirectTests(unittest.TestCase):
             self.assertEqual(1, self.global_journal.inspect_global_unit(token, binding(), self.value).attempt_count)
 
 
+class Req7BusinessSourceProjectionDirectTests(unittest.TestCase):
+    setUp = Req7BusinessPrereadJournalDirectTests.setUp
+    initialize = Req7BusinessPrereadJournalDirectTests.initialize
+    prepare = Req7BusinessPrereadJournalDirectTests.prepare
+
+    def matching_originals(self, token):
+        from monitor.issue_tracker_local_workbook import SwitchSourceWorkbookRow
+        from monitor.issue_tracker_send_unit import freeze_send_unit
+        # Independent literal oracle, not source_tool_values or copied encoder
+        # output. Both original NOOP and transmitted L are governed by C8.
+        old = '[MONITOR][down][fabric] [fabric_source=type] old'
+        new = '[MONITOR][down][fabric] [fabric_source=type] new'
+        for reading in self.reads:
+            for role in ('discovery', 'occupancy', 'row'):
+                original = reading[role+'_response']
+                reading[role+'_response'] = type(original)(status=200, complete=True,
+                    data=original.data.replace(b'[MONITOR][down][fabric] old', old.encode()))
+        image = {'schema_version': 1, 'spreadsheet_id': TARGET, 'sheet': 'ETH&IB Switch',
+            'sheet_id': 101, 'history_sheet_id': 105, 'history_path': self.plan.path,
+            'history_sha256': hashlib.sha256(self.raw.data).hexdigest(),
+            'business': [{'operation_id': reading['operation_id'],
+                **{role+'_path': reading[role+'_plan'].path for role in ('discovery', 'occupancy', 'row')},
+                **{role+'_sha256': hashlib.sha256(reading[role+'_response'].data).hexdigest()
+                   for role in ('discovery', 'occupancy', 'row')}} for reading in self.reads]}
+        self.digest = hashlib.sha256((json.dumps(image, ensure_ascii=False, sort_keys=True,
+            separators=(',', ':'))+'\n').encode()).hexdigest()
+        original = self.enrollment.prepare_enrollment_journal(token, binding(), self.identity)
+        nonces = {title: nonce for title, _sid, nonce in original.nonces}
+        business = tuple({**item, 'values': {'L': value},
+            'observed_values': {'L': {'stringValue': old}}}
+            for item, value in zip(self.args['business'], (old, new)))
+        self.value = freeze_send_unit(**{**self.args, 'business': business,
+            'sheet_id': 101, 'history_sheet_id': 105, 'target_nonce': nonces['ETH&IB Switch'],
+            'history_nonce': nonces['Update_History'], 'preread_sha256': self.digest})
+        self.global_journal.prepare_global_unit(token, binding(), self.value)
+        self.module.prepare_history_preread(token, binding(), self.value, self.plan, self.raw)
+        self.prepare(token)
+        return tuple(SwitchSourceWorkbookRow(activity_key=('switch', 'node%04d'%i, 'down', 'fabric'),
+            evidence_description=description, fabric='Compute', fabric_source='type', priority='P2',
+            recorded_at_utc='2026-10-08T10:00:00Z') for i, description in enumerate(('old', 'new')))
+
+    def test_all_source_values_noop_and_timestamp_match_without_recompiling_unknown(self):
+        with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
+            rows = self.matching_originals(token)
+            originals = {path.name: path.read_bytes() for path in self.store.iterdir()}
+            observed = self.module.inspect_business_preread(token, binding(), self.identity, self.value)
+            for count in range(7):
+                self.assertEqual(observed, self.module.inspect_business_source_projection(
+                    token, binding(), self.identity, self.value, rows))
+                self.assertEqual((2, 1, self.digest), (observed.operations_retained,
+                    observed.noop_operations, observed.preread_sha256))
+                self.assertEqual(originals, {path.name: path.read_bytes() for path in self.store.iterdir()})
+                if count < 6: self.global_journal.record_global_attempt_intent(token, binding(), self.value)
+            self.assertEqual((6, 'UNKNOWN'), tuple(getattr(self.global_journal.inspect_global_unit(
+                token, binding(), self.value), field) for field in ('attempt_count', 'outcome')))
+            for name in ('permit', 'complete', 'applied'): self.assertFalse(hasattr(observed, name))
+
+    def test_missing_duplicate_untyped_noop_sent_value_or_sent_time_holds_without_count(self):
+        with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
+            rows = self.matching_originals(token)
+            originals = {path.name: path.read_bytes() for path in self.store.iterdir()}
+            changed = (None, (), list(rows), rows[:1], rows+(rows[0],), (object(), rows[1]),
+                (replace(rows[0], evidence_description='changed NOOP'), rows[1]),
+                (rows[0], replace(rows[1], evidence_description='changed transmitted L')),
+                (rows[0], replace(rows[1], recorded_at_utc='2026-10-08T10:01:00Z')),
+                (rows[0], replace(rows[1], activity_key=('switch', 'foreign', 'down', 'fabric'))))
+            for index, candidate in enumerate(changed):
+                with self.subTest(case=index), self.assertRaises(self.module.HistoryPrereadHold) as caught:
+                    self.module.inspect_business_source_projection(token, binding(), self.identity, self.value, candidate)
+                self.assertIsNone(caught.exception.__context__)
+                self.assertEqual(0, self.global_journal.inspect_global_unit(token, binding(), self.value).attempt_count)
+                self.assertEqual(originals, {path.name: path.read_bytes() for path in self.store.iterdir()})
+
+    def test_structurally_coherent_original_wire_cannot_substitute_for_required_source_values(self):
+        from monitor.issue_tracker_local_workbook import SwitchSourceWorkbookRow
+        self.assertTrue(hasattr(self.module, 'inspect_business_source_projection'),
+            'ALL original decisions must match actual requalified source values')
+        source_rows = tuple(SwitchSourceWorkbookRow(activity_key=('switch', 'node%04d'%index, 'down', 'fabric'),
+            evidence_description='independently required source', fabric='Compute', fabric_source='type',
+            priority='P2', recorded_at_utc='2026-10-08T10:00:00Z') for index in range(2))
+        with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
+            self.initialize(token); self.prepare(token)
+            # Existing fixture contains one coherent NOOP and one coherent wire
+            # but neither literal L matches the independently required source.
+            self.assertEqual((2, 1), tuple(getattr(self.module.inspect_business_preread(
+                token, binding(), self.identity, self.value), key) for key in ('operations_retained', 'noop_operations')))
+            original = {path.name: path.read_bytes() for path in self.store.iterdir()}
+            with self.assertRaises(self.module.HistoryPrereadHold):
+                self.module.inspect_business_source_projection(token, binding(), self.identity, self.value, source_rows)
+            self.assertEqual(0, self.global_journal.inspect_global_unit(token, binding(), self.value).attempt_count)
+            self.assertEqual(original, {path.name: path.read_bytes() for path in self.store.iterdir()})
+
+
 class Req7ReceiptedOriginalIntentDirectTests(unittest.TestCase):
     setUp = Req7BusinessPrereadJournalDirectTests.setUp
     initialize = Req7BusinessPrereadJournalDirectTests.initialize
@@ -558,9 +651,11 @@ with fixture(root),owner.spreadsheet_owner(binding()) as token:
         self.assertIn('record_original_business_reserved_attempt_intent', (ROOT/'test_cases/README.md').read_text())
         self.assertTrue(any(workflow['id'] == 'req7_protected_original_receipt_business_count' and
             required | {'monitor/issue_tracker_admission.py', 'monitor/issue_tracker_cycle_source.py',
-                        'monitor/issue_tracker_stage_l_consumer.py', 'monitor/issue_tracker_state_owner.py'} <= set(workflow['members'])
+                        'monitor/issue_tracker_stage_l_consumer.py', 'monitor/issue_tracker_state_owner.py',
+                        'monitor/issue_tracker_local_workbook.py', 'monitor/issue_tracker_online_cells.py'} <= set(workflow['members'])
             for workflow in manifest['workflows']))
         self.assertIn('record_receipted_original_attempt_intent', (ROOT/'test_cases/README.md').read_text())
+        self.assertIn('inspect_business_source_projection', (ROOT/'test_cases/README.md').read_text())
 
     def test_native_cold_process_reopens_exact_original_all_operations_after_unknown(self):
         with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:

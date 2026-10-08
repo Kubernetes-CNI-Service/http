@@ -254,8 +254,9 @@ def record_receipted_original_attempt_intent(
     or FIFO. A failed post-count check leaves UNKNOWN and never rolls back.
     """
     from monitor.issue_tracker_send_unit import _original_receipt_identity
-    from monitor.issue_tracker_history_preread_journal import inspect_business_preread
+    from monitor.issue_tracker_history_preread_journal import inspect_business_preread, inspect_business_source_projection
     from monitor.issue_tracker_stage_l_consumer import qualify_prod_stage_l
+    from monitor.issue_tracker_local_workbook_commit import _source_rows
 
     def originals():
         _inputs(token, binding, unit)
@@ -273,6 +274,9 @@ def record_receipted_original_attempt_intent(
         if actual_source != qualified_source: raise GlobalAttemptHold()
         reservations = _reserved_images(token, binding, identity, unit)
         business = inspect_business_preread(token, binding, identity, unit)
+        cabling_rows, switch_rows = _source_rows(actual_source)
+        if inspect_business_source_projection(token, binding, identity, unit, (*cabling_rows, *switch_rows)) != business:
+            raise GlobalAttemptHold()
         if qualify_prod_stage_l(
                 store, http_root=http_root, settings=settings,
                 whitelist_snapshot=whitelist_snapshot, whitelist_path=whitelist_path,

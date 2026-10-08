@@ -278,11 +278,11 @@ def _request_literals(item, sheet_id, row_index):
     return values
 
 
-def _business_image(token, binding, identity, unit, manifest, reads):
+def _business_image(token, binding, identity, unit, manifest, reads, *, source_rows=None):
     from monitor.issue_tracker_enrollment_journal import require_unit_enrollment
     from monitor.issue_tracker_nv_reservation import require_unit_nv_reservation
     from monitor.issue_tracker_manifest import _validated_operations, _runtime_operation
-    from monitor.issue_tracker_online_cells import encode_tool_cells
+    from monitor.issue_tracker_online_cells import encode_tool_cells, source_tool_values
     require_unit_enrollment(token, binding, identity, unit)
     original_history = inspect_history_preread(token, binding, unit)
     _owner, parent, _name, _base = global_journal._inputs(token, binding, unit)
@@ -296,7 +296,15 @@ def _business_image(token, binding, identity, unit, manifest, reads):
     if (local._canonical(document) != manifest or type(document['operations']) is not list or len(document['operations']) > 1000
             or type(document['schema_version']) is not int or document['schema_version'] != 1): raise HistoryPrereadHold()
     family = {'ETH&IB Switch': 'switch', 'ETH Cabling': 'eth_cabling', 'IB Cabling': 'ib_cabling'}[sheet]
-    operations = [op for op in _validated_operations(document['operations'], 'original business', validator=_runtime_operation) if op['activity_key'][0] == family]
+    all_operations = _validated_operations(document['operations'], 'original business', validator=_runtime_operation)
+    operations = [op for op in all_operations if op['activity_key'][0] == family]
+    sources = None
+    if source_rows is not None:
+        if type(source_rows) is not tuple or not 1 <= len(source_rows) <= 1000: raise HistoryPrereadHold()
+        sources = {row.activity_key: row for row in source_rows}
+        if (len(sources) != len(source_rows) or set(sources) != {tuple(op['activity_key']) for op in all_operations}):
+            raise HistoryPrereadHold()
+        for row in source_rows: source_tool_values(row, 'update')
     if len(operations) != len(reads) or len(operations) != len(action['decisions']): raise HistoryPrereadHold()
     missing, shared, classified = [], None, []
     for operation, reading in zip(operations, reads):
@@ -337,6 +345,12 @@ def _business_image(token, binding, identity, unit, manifest, reads):
             if item['activity_key'] != operation['activity_key'] or item['action'] != action_type: raise HistoryPrereadHold()
             values = _request_literals(item, sid, row_index)
             if row_index is None and values['A'] != dict(nv.reservations)[key]: raise HistoryPrereadHold()
+        if sources is not None:
+            source = sources[key]
+            required = source_tool_values(source, action_type,
+                reserved_id=dict(nv.reservations)[key] if row_index is None else None)
+            if values != required or (item is not None and item['recorded_at_utc'] != source.recorded_at_utc):
+                raise HistoryPrereadHold()
         encoded = encode_tool_cells(sheet, sid, action_type, values, row_index=row_index,
             observed_values=None if row_index is None else {column: original_cells[column] for column in values})
         if encoded.intended_sha256 != decision['intended_sha256'] or encoded.outcome != decision['outcome'] or (item is not None and json.loads(encoded.requests_json) != item['requests']): raise HistoryPrereadHold()
@@ -376,12 +390,12 @@ def _business_inputs(token, binding, unit):
     return parent, name[:-8]+'.business', base, state
 
 
-def _inspect_business(token, binding, identity, unit, parent, name, folder, base):
+def _inspect_business(token, binding, identity, unit, parent, name, folder, base, *, source_rows=None):
     if set(os.listdir(folder)) != {'MANIFEST', 'BUSINESS-RAW', 'HEADER', 'INITIALIZED'}: raise HistoryPrereadHold()
     names = ('MANIFEST', 'BUSINESS-RAW', 'HEADER', 'INITIALIZED')
     originals = tuple(journal._identity(os.stat(item, dir_fd=folder, follow_symlinks=False)) for item in names)
     manifest = journal._read(folder, 'MANIFEST', 1024*1024); raw = journal._read(folder, 'BUSINESS-RAW', _BUSINESS_LIMIT)
-    count, noops, digest = _business_image(token, binding, identity, unit, manifest, _unpack_business(raw))
+    count, noops, digest = _business_image(token, binding, identity, unit, manifest, _unpack_business(raw), source_rows=source_rows)
     header = {**base, 'preread_sha256': digest, 'source_sha256': hashlib.sha256(raw).hexdigest(), 'operations_retained': count, 'noop_operations': noops}
     if journal._read(folder, 'HEADER', 16384) != local._canonical(header): raise HistoryPrereadHold()
     global_journal._sync_initialization(parent, folder, header)
@@ -395,7 +409,7 @@ def _inspect_business(token, binding, identity, unit, parent, name, folder, base
             or journal._read(folder, 'BUSINESS-RAW', _BUSINESS_LIMIT) != raw
             or journal._read(folder, 'HEADER', 16384) != local._canonical(header)
             or journal._read(folder, 'INITIALIZED', 16384) != _marker(header)
-            or _business_image(token, binding, identity, unit, manifest, _unpack_business(raw)) != (count, noops, digest)
+            or _business_image(token, binding, identity, unit, manifest, _unpack_business(raw), source_rows=source_rows) != (count, noops, digest)
             or tuple(journal._identity(os.stat(item, dir_fd=folder, follow_symlinks=False)) for item in names) != originals): raise HistoryPrereadHold()
     journal._named(parent, name, folder, directory=True)
     return BusinessPrereadObservation(count, noops, digest, header['source_sha256'], unit.action_digest, unit.wire_sha256)
@@ -438,6 +452,31 @@ def inspect_business_preread(token, binding, identity, unit):
         parent, name, base, _state = _business_inputs(token, binding, unit)
         folder = local._directory(parent, name); journal._named(parent, name, folder, directory=True)
         result = _inspect_business(token, binding, identity, unit, parent, name, folder, base)
+    except Exception: failed = True
+    finally:
+        if folder is not None:
+            try: os.close(folder)
+            except OSError: failed = True
+    if failed: raise HistoryPrereadHold()
+    return result
+
+
+def inspect_business_source_projection(token, binding, identity, unit, source_rows):
+    """Compare ALL original wire/NOOP values with a supplied source projection.
+
+    Typed rows alone are NOT provenance. The original-count gate must first
+    replay protected C5, derive these rows itself, and recheck after inspection.
+    Re-decode original four files and original coordinates/nonces/NV only;
+    compare real C8 source values and original timestamps without recompiling,
+    modifying or shrinking wire/decisions after UNKNOWN. No remote read,
+    permit, fresh admission, APPLIED, settlement or COMPLETE is issued.
+    """
+    folder = None; failed = False
+    try:
+        if source_rows is None: raise HistoryPrereadHold()
+        parent, name, base, _state = _business_inputs(token, binding, unit)
+        folder = local._directory(parent, name); journal._named(parent, name, folder, directory=True)
+        result = _inspect_business(token, binding, identity, unit, parent, name, folder, base, source_rows=source_rows)
     except Exception: failed = True
     finally:
         if folder is not None:

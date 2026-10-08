@@ -1590,6 +1590,15 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                                     record = lambda: global_journal.record_original_business_reserved_attempt_intent(spreadsheet_token, binding, identity, unit)
                                     if receipted_intent_probe:
                                         self.assertTrue(hasattr(global_journal, 'record_receipted_original_attempt_intent'), 'protected original C6 chain must dominate each counted intent')
+                                        self.assertTrue(hasattr(preread, 'inspect_business_source_projection'), 'replayed C5 source values must bind ALL original wire and NOOP decisions')
+                                        from monitor.issue_tracker_local_workbook_commit import _source_rows
+                                        cabling_source, switch_source = _source_rows(qualified)
+                                        source_rows = (*cabling_source, *switch_source)
+                                        self.assertEqual(seen, preread.inspect_business_source_projection(spreadsheet_token, binding, identity, unit, source_rows))
+                                        changed_rows = tuple(replace(row, evidence_description='caller invented original values') for row in source_rows)
+                                        with self.assertRaises(preread.HistoryPrereadHold):
+                                            preread.inspect_business_source_projection(spreadsheet_token, binding, identity, unit, changed_rows)
+                                        self.assertEqual(0, global_journal.inspect_global_unit(spreadsheet_token, binding, unit).attempt_count)
                                         def record(**changes):
                                             options = dict(qualified_source=qualified, store=self.store, writer_token=writer_token,
                                                 settings=args['settings'], whitelist_snapshot=self.snapshot,

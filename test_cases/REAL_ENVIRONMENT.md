@@ -2132,6 +2132,8 @@ FIFO、每次准入／真实单次 wire；部署与真实断电验收准确保�
 
 ## TC-REAL-REQ7-HISTORY-PREREAD-JOURNAL-001 — 不可变发送前 History 原像
 
+- 原 C5 值投影补充（**NOT RUN**）：双 owner 计数必须从受保护 C5 的实际重放结果派生工具列，逐项核原 manifest 全部操作、原业务 wire、NOOP 决策和发送项 UTC；只凭 action/preread 哈希自洽或调用方 typed 行不构成来源证明。缺失／重复／源值或发送时间漂移前置 HOLD 不计数，UNKNOWN 后不重新组批。现场前置需另获受保护源与原 journal 只读及隔离故障注入权限；证据保留原件 inode/SHA、真实重放与计数前后物理顺序。清理仅撤销自有 fixture 注入，不修复或删除真实原件／UNKNOWN；本地独立 Switch 和真实 ETH／IB 多脚本测试不冒称真机通过。
+
 - 原始 C6 计数联动补充（**NOT RUN**）：双 owner 下经真实 recovery／共享 admission／C5 重放，四件 STATE／MANIFEST／INTENT／RECEIPT 的原 inode、SHA、generation、published image 和 manifest 必须在计数前后与冻结 action 一致。缺失／篡改／伪造源前置不计数；后置损坏保留计数及 UNKNOWN，不回退、补建或重新组批。本地 ETH／IB 真实多脚本联测含逐件损坏与计数后漂移；仅 current-cycle 必要观察，旧周期 R2、新鲜准入、实际 M=6／固定 launcher／COMPLETE 仍未证明。真机需另获原件只读及隔离故障注入权限，留存双 owner／inode／SHA／每个原件与计数屏障的完整物理顺序；只撤销自有 fixture 注入，不修复或删除真实 receipt／UNKNOWN。
 
 - 原件计数门禁补充（**NOT RUN**）：每次原始业务 reserved intent 在持久计数前后重核完整业务原件、原 enrollment／History／metadata／适用 BOTH NV，缺失或漂移不补建，前置不计数、后置保留 UNKNOWN。六个实际冷进程／C5-C6 Cabling 本地链不代表真实尝试 M=6、隐藏 PROJECT 配额、当前鲜度或 COMPLETE。需授权真机身份后按本卡屏障／inode／SHA 留证；只清理自有 fixture，不删除真实原件或 UNKNOWN。
