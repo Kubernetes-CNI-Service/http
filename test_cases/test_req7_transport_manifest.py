@@ -13,6 +13,7 @@ SCRIPTS = {
     "monitor/issue_tracker_tls_inputs.py": "test_cases.test_req7_tls_inputs",
     "monitor/issue_tracker_attempt_supervision.py": "test_cases.test_req7_attempt_supervision",
     "monitor/issue_tracker_token_launcher.py": "test_cases.test_req7_token_launcher",
+    "monitor/issue_tracker_history_read_launcher.py": "test_cases.test_req7_history_read_launcher",
     "monitor/issue_tracker_sheets_read_plan.py": "test_cases.test_req7_sheets_read_plan",
     "monitor/issue_tracker_sheets_read_decode.py": "test_cases.test_req7_sheets_read_decode",
     "monitor/issue_tracker_online_whitelist_read.py": "test_cases.test_req7_online_whitelist_read",

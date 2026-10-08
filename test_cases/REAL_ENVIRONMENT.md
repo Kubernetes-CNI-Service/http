@@ -2072,6 +2072,8 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 ## TC-REAL-REQ7-TOTAL-ATTEMPT-LOCK-001 — 固定启动器、完整预算与孤儿写者锁
 
+- 固定 History-tail 读取入口补充（**NOT RUN / REAL_ENV REQUIRED**）：`monitor/issue_tracker_history_read_launcher.py` 在实际项目 ACTIVE 与 spreadsheet owner 下，于读取前后重新核策略/固定白名单；固定 `-I -B` child 仅继承两锁、清空环境、私有 stdin、单次原生固定 GET、nonce/path/body 关联完整私有响应，不接受 URL/程序/路径/预算覆盖。部署需另核 native root、隔离解释器、CA/DNS、两锁继承、总预算/输入背压/拒绝终止与策略变化见证。证据、精确授权、故障清理和风险沿用本卡；本地受控 loopback 不证明在线许可、typed History/continuity 或 COMPLETE，此观察不能解除 UNKNOWN。
+
 - 私有输入通道补充（**NOT RUN / REAL_ENV REQUIRED**）：本地实际 stdin pipe 的分段非阻塞写入、EOF、满管道背压和原有总预算到期均纳入监督器；实际子进程输入 → 拥有的 loopback 原生 TLS 单请求 → 完整响应工作流验证正文逐字节一致和父锁保留。部署须另外见证固定 child 的输入协议、无 argv/env/private-log 泄露、背压/提前关闭/总时限故障和继承锁；不提高预算，不把私有输入当 mutation WIRE 或发送授权。证据、精确授权与清理沿用本卡，本地通过不改变真机 NOT RUN。
 
 - 固定 auth-only 入口补充（**NOT RUN / REAL_ENV REQUIRED**）：`monitor/issue_tracker_token_launcher.py` 的真实持锁 → 固定隔离 child → root-only 单次凭据读 → 公有 SDK → 原生 HTTPS 单次请求 → nonce 关联完整私有 token 输出 → 已结束 session 本地工作流，不接受外部程序、URL、凭据路径或预算。合成 root/凭据/CA、明确测试依赖目录与 loopback DNS 只在拥有的夹具边界，不代表 native root/CPython 3.12/两架构部署依赖、真实凭据、CA/DNS 或 Stage O。前置条件仍为本卡独立授权、干净精确树和当前证明。现场必须核隔离 interpreter/已批准依赖可导入且无 ambient fallback、环境清空、borrowed CLOEXEC 锁仅 pass_fds 继承、启动耗时纳入总预算、原 warning 保留、401/503 不重试、私有输出无泄露与父死子存期间 exclusion；证据与清理沿用本卡，不能用本地有界 auth 入口声称 mutation launcher、新鲜准入、COMPLETE 或整个 REQ7 已验收。

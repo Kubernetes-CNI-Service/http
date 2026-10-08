@@ -855,6 +855,13 @@ P 阶段在绑定的 macOS CPython 3.9 环境中，把独立审定的依赖文�
 关闭和未完整输入均 HOLD，无重发、无私有诊断泄露、不释放 borrowed 锁。
 实际输入 → 单次原生 TLS → 完整响应 → 已结束 session 工作流仍使用合成数据，
 此通道不是 mutation WIRE、固定读取入口或在线准入证明。
+`test_req7_history_read_launcher` 将固定 History-tail GET 接入实际双 owner：
+启动前和完整响应后重新读取当前项目策略及固定白名单，私有输入仅经 stdin，
+固定隔离 child 继承两把实际锁并在同一 30 秒总预算内返回 nonce/path/body 摘要
+关联响应。整个私有输出（报头加原始正文）沿用 2 MiB 上限；接近上限时拒绝，
+不截断或扩大限额。401/重定向/失效 token/输入或响应破坏均不重发。
+此入口未安装，只给完整 HTTP 观察；不验证 typed History、nonce 连续性、
+fence 匹配或 COMPLETE/APPLIED，不授予 mutation/R2/在线激活权限。
 `test_req7_token_launcher` 约束未安装的固定 auth-only 子进程入口：不接收调用方
 argv/URL/凭据路径/预算，固定 `-I -B`、清空继承环境、DEVNULL stdin、新 session、
 仅 pass_fds 借用原 spreadsheet 锁。启动前开始 30 秒总预算，单次消费及 nonce
