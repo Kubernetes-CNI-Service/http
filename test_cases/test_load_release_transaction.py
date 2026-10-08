@@ -1144,9 +1144,9 @@ def private_a_health_ports(api, root, *, http_status=None):
 
 
 class ReleaseTransactionTests(unittest.TestCase):
-    def _restored_a_activation_fixture(self, *, qualified=True):
+    def _restored_a_activation_fixture(self, *, qualified=True, prefix_change=False):
         state, context, guard, _token, _inputs = self._prepare_published_q_for_stopped_preflight(
-            prefix=True, original_a_policy="disabled", qualified_a_health=qualified)
+            prefix=True, prefix_change=prefix_change, original_a_policy="disabled", qualified_a_health=qualified)
         with mock.patch.object(LOAD, "active_managed_services", return_value=()):
             LOAD.restore_setup_switch_a_disk(state[1], guard=guard, confirmed=True)
         active, actions = set(), []
@@ -1291,6 +1291,103 @@ class ReleaseTransactionTests(unittest.TestCase):
         self.assertEqual([('start', 'apache2'), ('start', 'isc-dhcp-server'),
                           ('stop', 'isc-dhcp-server'), ('stop', 'apache2')], actions)
         with self.assertRaises(LOAD.LoadError): LOAD.require_no_pending_setup_switch_journal()
+
+    def test_a_retirement_archives_complete_original_prefix_evidence_without_rewriting(self):
+        state, _context, guard, active, actions = self._restored_a_activation_fixture(prefix_change=True)
+        journal = state[-3]
+        body = json.loads(journal.read_bytes())['body']
+        originals = {}
+        for row in body['prefix_transaction']['rows']:
+            for raw in (row['candidate']['path'], row['backup'], row['retained']):
+                path = Path(raw)
+                originals[raw] = (None if not os.path.lexists(path) else
+                    (path.lstat().st_ino, os.readlink(path) if path.is_symlink() else path.read_bytes()))
+        self.assertEqual(3, sum(owner is not None for owner in originals.values()))
+        old_prefix = {path: (path.lstat().st_ino, os.readlink(path) if path.is_symlink() else path.read_bytes())
+                      for path in (self.root / 'r22-prefix', LOAD.ZTP_PREFIX_MARKER)}
+        with private_a_health_ports(LOAD, self.root), mock.patch.object(LOAD, 'runtime_os', return_value='Linux'):
+            self.assertEqual('a-health-passed-evidence-archived',
+                LOAD.activate_setup_switch_a_publication(state[1], guard=guard, confirmed=True, retire=True))
+        archive = next(journal.parent.glob('.setup-switch-a-retired-*'))
+        marker = json.loads((archive / 'retirement.json').read_bytes())
+        self.assertEqual(set(originals), {row['path'] for row in marker['prefix']})
+        self.assertEqual(9, len(marker['prefix']))
+        expected_names = {'journal.json', 'a-restore.json', 'retirement.json'}
+        for row in marker['prefix']:
+            self.assertFalse(os.path.lexists(row['path']))
+            owner = originals[row['path']]
+            archived = archive / row['basename']
+            if owner is None:
+                self.assertIsNone(row['leaf']); self.assertFalse(os.path.lexists(archived))
+            else:
+                expected_names.add(row['basename'])
+                self.assertEqual(owner, (archived.lstat().st_ino,
+                    os.readlink(archived) if archived.is_symlink() else archived.read_bytes()))
+        self.assertEqual(expected_names, set(os.listdir(archive)))
+        self.assertEqual(old_prefix, {path: (path.lstat().st_ino,
+            os.readlink(path) if path.is_symlink() else path.read_bytes()) for path in old_prefix})
+        self.assertFalse(os.path.lexists(self.root / 'q-prefix'))
+        LOAD.require_no_pending_setup_switch_journal()
+        self.assertEqual({'apache2', 'isc-dhcp-server'}, active)
+        self.assertEqual([('start', 'apache2'), ('start', 'isc-dhcp-server')], actions)
+
+    def test_a_prefix_retirement_cold_foreign_leaf_and_inventory_hold_before_health(self):
+        state, _context, guard, active, actions = self._restored_a_activation_fixture(prefix_change=True)
+        journal, plan = state[-3], LOAD._setup_switch_a_restore_path()
+        original_wal, original_plan = journal.read_bytes(), plan.read_bytes()
+        marker = LOAD._setup_switch_retirement_path()
+        real_sync = LOAD._fsync_parent_directory
+        def interrupt(path):
+            real_sync(path)
+            if marker.exists():
+                archive = Path(json.loads(marker.read_bytes())['archive']['path'])
+                if any(p.name.startswith('prefix-') for p in archive.iterdir()):
+                    raise OSError('independent first prefix archive interruption')
+        with private_a_health_ports(LOAD, self.root), mock.patch.object(LOAD, 'runtime_os', return_value='Linux'), \
+                mock.patch.object(LOAD, '_fsync_parent_directory', side_effect=interrupt):
+            with self.assertRaisesRegex(LOAD.LoadError, 'HOLD.*independent first prefix archive interruption'):
+                LOAD.activate_setup_switch_a_publication(state[1], guard=guard, confirmed=True, retire=True)
+        self.assertEqual(set(), active)
+        self.assertEqual([('start', 'apache2'), ('start', 'isc-dhcp-server'),
+                          ('stop', 'isc-dhcp-server'), ('stop', 'apache2')], actions)
+        marker_payload = marker.read_bytes()
+        body = json.loads(marker_payload)
+        archive = Path(body['archive']['path'])
+        original_leaf, = [p for p in archive.iterdir() if p.name.startswith('prefix-')]
+        held = self.root / 'independent-held-original-prefix'
+        original_leaf.rename(held)
+        if held.is_symlink(): original_leaf.symlink_to(os.readlink(held))
+        else:
+            original_leaf.write_bytes(held.read_bytes()); original_leaf.chmod(stat.S_IMODE(held.lstat().st_mode))
+        os.utime(original_leaf, ns=(held.lstat().st_atime_ns, held.lstat().st_mtime_ns), follow_symlinks=False)
+        self.assertNotEqual(held.lstat().st_ino, original_leaf.lstat().st_ino)
+        for fault in ('foreign-inode', 'missing-inventory', 'boolean-owner', 'absent-name-occupied'):
+            with self.subTest(fault=fault):
+                extra = None
+                if fault != 'foreign-inode' and os.path.lexists(held):
+                    original_leaf.unlink(); held.rename(original_leaf)
+                changed = json.loads(marker_payload)
+                if fault == 'missing-inventory': changed['prefix'].pop()
+                elif fault == 'boolean-owner': changed['prefix'][0]['parent']['ino'] = True
+                elif fault == 'absent-name-occupied':
+                    extra = Path(next(row['path'] for row in body['prefix'] if row['leaf'] is None))
+                    extra.write_bytes(b'independent unregistered late object\n')
+                if fault in ('missing-inventory', 'boolean-owner'):
+                    marker.write_bytes(json.dumps(changed).encode()); marker.chmod(0o600)
+                frozen = (journal.read_bytes(), plan.read_bytes(), marker.read_bytes(), tuple(actions),
+                          original_leaf.lstat().st_ino)
+                with mock.patch.object(LOAD, 'runtime_os', return_value='Linux'), \
+                        mock.patch.object(LOAD, 'preflight_services', side_effect=AssertionError('foreign prefix entered health')):
+                    reason = ('prefix original artifact owner/bytes.*HOLD' if fault == 'foreign-inode' else 'HOLD')
+                    with self.assertRaisesRegex(LOAD.LoadError, reason):
+                        LOAD.resume_setup_switch_a_retirement(state[1], guard=guard, confirmed=True)
+                self.assertEqual(frozen, (journal.read_bytes(), plan.read_bytes(), marker.read_bytes(), tuple(actions),
+                                         original_leaf.lstat().st_ino))
+                if extra is not None:
+                    self.assertEqual(b'independent unregistered late object\n', extra.read_bytes()); extra.unlink()
+                marker.write_bytes(marker_payload); marker.chmod(0o600)
+        self.assertEqual(original_wal, journal.read_bytes())
+        self.assertEqual(original_plan, plan.read_bytes())
 
     def test_a_explicit_activation_rejects_partial_group_without_restoring_or_starting(self):
         state, _context, guard, _token, _inputs = self._prepare_published_q_for_stopped_preflight(

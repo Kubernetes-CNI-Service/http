@@ -4985,6 +4985,12 @@ finally:
     def test_real_setup_committed_q_kill_cold_a_retirement_cli_archives_original_inodes(self):
         self._real_setup_committed_q_group_restore(prefix=True, a_health="retire-cli")
 
+    def test_real_setup_changed_prefix_commit_death_cold_a_retirement_preserves_original_evidence(self):
+        self._real_setup_committed_q_group_restore(prefix=True, prefix_change=True, a_health="retire-cli")
+
+    def test_real_setup_changed_prefix_first_archive_rename_death_rechecks_new_process_health(self):
+        self._real_setup_committed_q_group_restore(prefix=True, prefix_change=True, a_health="retire-death-prefix")
+
     def test_real_setup_a_archive_rename_death_cold_repeats_health_and_retains_inodes(self):
         self._real_setup_committed_q_group_restore(prefix=True, a_health="retire-death")
 
@@ -5190,6 +5196,25 @@ sys.path.insert(0, str(tests))
 from test_cases.module_loader import load_script
 from test_cases.test_load_release_transaction import private_publication_candidates, assert_private_dhcp_transaction_retention, private_a_health_ports
 load = load_script('committed_q_group_load', root / 'DAY0-Prepare/11-load.py')
+if os.environ.get('R22_WORKFLOW_STACK_DIAGNOSTICS') == '1' and sys.argv[5].startswith('reader'):
+    import time
+    started = time.monotonic()
+    def timed_port(name):
+        original = getattr(load, name)
+        count = 0
+        def observe(*args, **kwargs):
+            nonlocal count
+            count += 1
+            number = count
+            print('R22_PHASE_BEGIN', name, number, round(time.monotonic() - started, 3), flush=True)
+            try:
+                return original(*args, **kwargs)
+            finally:
+                print('R22_PHASE_END', name, number, round(time.monotonic() - started, 3), flush=True)
+        setattr(load, name, observe)
+    for name in ('restore_setup_switch_a_disk', 'preflight_services', 'verify_http_publication',
+                 '_retire_setup_switch_a_publication', '_require_setup_switch_a_complete_disk_group'):
+        timed_port(name)
 genuine_active = load.active_managed_services
 load.active_managed_services = lambda *a, **kw: ()
 backend = SimpleNamespace(name='supervisor')
@@ -5457,7 +5482,10 @@ try:
                     witness.write(str(os.getpid()) + '\n'); witness.flush(); os.fsync(witness.fileno())
             def die_after_original_wal_rename(path):
                 real_sync(path)
-                if (root / 'ztp/.setup-switch-retirement.json').exists() and list(journal.parent.glob('.setup-switch-a-retired-*/journal.json')):
+                prefix_boundary = len(sys.argv) > 7 and sys.argv[7] == 'prefix-boundary'
+                archived = list(journal.parent.glob('.setup-switch-a-retired-*/' +
+                    ('prefix-*' if prefix_boundary else 'journal.json')))
+                if (root / 'ztp/.setup-switch-retirement.json').exists() and archived:
                     os.kill(os.getpid(), signal.SIGKILL)
             load.verify_http_publication = witnessed_health
             load._fsync_parent_directory = die_after_original_wal_rename
@@ -5496,7 +5524,21 @@ try:
             assert len(archives) == 1
             archive = archives[0]
             assert stat.S_IMODE(archive.lstat().st_mode) == 0o700
-            assert set(os.listdir(archive)) == {'journal.json', 'a-restore.json', 'retirement.json'}
+            expected_names = {'journal.json', 'a-restore.json', 'retirement.json'}
+            original_body = json.loads(frozen[1])['body']
+            prefix_rows = original_body.get('prefix_transaction', {}).get('rows', [])
+            if prefix_rows:
+                typed = json.loads((archive / 'retirement.json').read_bytes())['prefix']
+                expected_sources = {raw for row in prefix_rows for raw in
+                                    (row['candidate']['path'], row['backup'], row['retained'])}
+                assert {row['path'] for row in typed} == expected_sources
+                for row in typed:
+                    assert not os.path.lexists(row['path'])
+                    if row['leaf'] is not None:
+                        expected_names.add(row['basename'])
+                        assert (archive / row['basename']).lstat().st_ino == row['leaf']['identity'][1]
+                assert len(expected_names) == 6
+            assert set(os.listdir(archive)) == expected_names
             assert frozen == ((archive / 'journal.json').lstat().st_ino, (archive / 'journal.json').read_bytes())
             assert frozen_plan == ((archive / 'a-restore.json').lstat().st_ino, (archive / 'a-restore.json').read_bytes())
             assert json.loads((archive / 'retirement.json').read_bytes())['role'] == 'A'
@@ -5648,16 +5690,34 @@ finally:
                 before_reader_plan = (marker.lstat().st_ino, marker.read_bytes())
             reader_mode = ("reader-plan-fsync-aba" if plan_fsync_aba else "reader-a-health-retire-death" if str(a_health).startswith('retire-death') else "reader-a-health-retire-cli" if a_health == "retire-cli" else "reader-a-health-retire" if a_health == "retire" else "reader-a-health-http-failure" if a_health == "http-failure" else "reader-a-health-cli" if a_health == "cli" else "reader-a-health"
                            if a_health else "reader-a-image" if a_image else "reader-dhcp-metadata" if dhcp_metadata else "reader")
-            reader = subprocess.run(argv + [reader_mode, shape], capture_output=True, text=True, check=False,
-                                    timeout=120 if a_health else 30)
+            try:
+                reader = subprocess.run(argv + [reader_mode, shape] +
+                                        (['prefix-boundary'] if a_health == 'retire-death-prefix' else []),
+                                        capture_output=True, text=True, check=False,
+                                        timeout=120 if a_health else 30)
+            except subprocess.TimeoutExpired as exc:
+                # Preserve the deadline and original exception; emit the owned
+                # child's captured diagnostics before unittest's huge argv.
+                for label, payload in (('stdout', exc.stdout), ('stderr', exc.stderr)):
+                    if payload:
+                        print('R22_READER_TIMEOUT_' + label.upper(), flush=True)
+                        print(payload.decode(errors='replace') if isinstance(payload, bytes) else payload, flush=True)
+                raise
+            if os.environ.get('R22_WORKFLOW_STACK_DIAGNOSTICS') == '1':
+                print(reader.stdout, flush=True)
+                print(reader.stderr, flush=True)
             if str(a_health).startswith('retire-death'):
                 self.assertEqual(-signal.SIGKILL, reader.returncode, reader.stdout + reader.stderr)
                 retirement = journal.parent / '.setup-switch-retirement.json'
                 original_marker = (retirement.lstat().st_ino, retirement.read_bytes())
                 archive = Path(json.loads(retirement.read_bytes())['archive']['path'])
-                self.assertEqual(original_wal, ((archive / 'journal.json').lstat().st_ino,
-                                               (archive / 'journal.json').read_bytes()))
-                self.assertFalse(os.path.lexists(journal))
+                wal_location = journal if a_health == 'retire-death-prefix' else archive / 'journal.json'
+                self.assertEqual(original_wal, (wal_location.lstat().st_ino, wal_location.read_bytes()))
+                if a_health == 'retire-death-prefix':
+                    self.assertFalse(os.path.lexists(archive / 'journal.json'))
+                    self.assertEqual(1, len(list(archive.glob('prefix-*'))))
+                else:
+                    self.assertFalse(os.path.lexists(journal))
                 plan_path = journal.parent / '.setup-switch-a-restore.json'
                 frozen_plan = (plan_path.lstat().st_ino, plan_path.read_bytes())
                 first_health = (root / 'a-retirement-health-witness').read_text().splitlines()

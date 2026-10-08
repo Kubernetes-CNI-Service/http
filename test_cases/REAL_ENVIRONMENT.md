@@ -1664,6 +1664,14 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
   当前本地私有 HTTP/backend/SIGKILL 的分批证据不是本卡通过、正式 full/check，
   未覆盖完整 prefix/DHCP 证据归档、实际 Linux/root/断电/C2 或 DEV ACK。
 
+- 2026-10-08 原 A prefix typed 归档候选仍 OPEN：先独立登记原 WAL 每行的 candidate/backup/retained
+  三个名字、父身份、原 leaf 或缺席义务。已完整恢复 A 后只 no-replace rename 原证据
+  inode，原 WAL/计划/指针字节不改；在首个 prefix rename 后强杀/断电，由全新显式
+  resume 进程重做真实健康。缺失清单、外来同目标 inode、Boolean owner、缺席名被占、
+  未登记对象均 HOLD 且不清理。每个实际 rename 前后完整校验；缺席行无写入，仅核其
+  两个名字，仍受随后完整组校验约束。保留完整时序、前后 inode/字节/SHA、两次独立
+  健康 PID、真实逆序停服及快照核验。当前 direct/私有 HTTP/SIGKILL workflow 仅为
+  本地候选证据，DHCP 完整归档及本卡 Linux/root/断电/C2/DEV ACK 继续 OPEN。
 - 2026-10-08 原 A 显式健康激活仍 OPEN：仅在本卡已授权的可丢弃隔离 VM、
   精确源码/测试/manifest、独立控制台、root-only 可恢复快照、排他部署锁、
   Apache/DHCP 已停及其它正常写者静默条件下执行。Q 首写前独立冻结原 A

@@ -1110,6 +1110,13 @@ HTTP 失败及非本次启动服务混入。每个服务/健康边界重查原 A
 
 ### R22 原 A WAL/恢复计划的 typed 归档窄门禁
 
+2026-10-08 本地候选增加原 prefix 写集：精确登记三行共九个证据名字与原身份/缺席，
+仅归档三个尚存原 inode，保留原始字节/link target、WAL 和计划。首个 prefix rename
+强杀后的全新 resume 必须重新健康；外来同目标 inode、缺失清单、Boolean owner、
+晚占缺席名拒绝且不清理。缺席行没有写入，不重复重开整组；每个真实 rename 前后及
+最终完成仍完整重验。direct/真实 workflow 的局部记录见 CHANGE_AWARE_TESTING，
+不是正式 full/check；DHCP 完整 typed 归档及 B 完整退休继续待完成。
+
 `--retire-setup-a` 和 `--resume-setup-a-retirement` 与仅健康激活、A 恢复、B 激活及 B
 退休是互斥操作。Linux management-server 必须预先停服；入口取得独占锁，并在任何 WAL
 操作之前停止 native monitor。每次续退休重新核原 A 完整恢复组、原输入/镜像/公钥、配置、

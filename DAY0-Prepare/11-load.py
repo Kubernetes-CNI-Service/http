@@ -7483,7 +7483,7 @@ def _setup_switch_a_compensation_authority(project, *, guard, confirmed,
                            for key in ("old_project", "new_project"))):
                 raise LoadError("A compensation original WAL/root/P/Q owner changed; HOLD")
             _setup_switch_runtime_context(body, require_original_yaml_owner=True)
-            _require_setup_switch_a_prefix_owners(body)
+            _require_setup_switch_a_prefix_owners(body, _retirement=_retirement)
             if "dhcp_transaction" in body:
                 _require_setup_switch_dhcp_backup_inventory(body["dhcp_transaction"])
         def shared_authority():
@@ -8078,6 +8078,7 @@ def _setup_switch_a_compensation_authority(project, *, guard, confirmed,
                    restore_dhcp_leaf=restore_dhcp_leaf, require_dhcp_restored=require_dhcp_restored,
                    require_setup_image_owner=require_setup_image_owner)
         if _retirement is not None:
+            token['retirement'] = _retirement
             def readonly(*args, **kwargs):
                 raise LoadError("A archived evidence is read-only, not restoration permission; HOLD")
             for name in ('restore_runtime_leaf', 'restore_setup_leaf', 'restore_dhcp_leaf'):
@@ -8768,11 +8769,18 @@ def _setup_switch_prefix_wal_authority(guard):
         os.close(descriptor)
 
 
-def _setup_switch_prefix_states(body):
+def _setup_switch_prefix_states(body, *, _retirement=None):
     """Only original owners and witnessed no-replace consumption qualify."""
     transaction = body["prefix_transaction"]
     _validate_setup_switch_prefix_transaction(body)
     states = []
+    archived = ({} if _retirement is None else
+                _setup_switch_a_prefix_archive_rows(_retirement, body))
+    def evidence_leaf(raw):
+        if _retirement is None:
+            return _setup_switch_compensation_leaf(Path(raw)), False
+        path = _setup_switch_a_prefix_archive_artifact(_retirement, archived[raw])
+        return (None if path is None else _setup_switch_compensation_leaf(path)), path is not None and str(path) != raw
     evidence = {raw for row in transaction["rows"]
                 for raw in (row["candidate"]["path"], row["backup"], row["retained"])}
     if any(str(path) not in evidence for path in HTTP_ROOT.glob(".r22-prefix-*")):
@@ -8810,11 +8818,11 @@ def _setup_switch_prefix_states(body):
                 raise LoadError("prefix original parent is unknown; HOLD")
             _setup_switch_created_directory_states(body)
         live = _setup_switch_compensation_leaf(path)
-        stage = _setup_switch_compensation_leaf(Path(row["candidate"]["path"]))
-        backup = _setup_switch_compensation_leaf(Path(row["backup"]))
-        retained = _setup_switch_compensation_leaf(Path(row["retained"]))
+        stage, stage_archived = evidence_leaf(row["candidate"]["path"])
+        backup, _backup_archived = evidence_leaf(row["backup"])
+        retained, _retained_archived = evidence_leaf(row["retained"])
         before, candidate = row["before"], row["candidate"]["leaf"]
-        if matches(live, before) and matches(stage, candidate) and backup is None and retained is None:
+        if matches(live, before) and matches(stage, candidate, moved=stage_archived) and backup is None and retained is None:
             phase = "original"
         elif live is None and matches(backup, before, moved=True) and matches(stage, candidate) and retained is None:
             phase = "backed-up"
@@ -9081,7 +9089,7 @@ def _setup_switch_prefix_sync_parent(body, row):
     return _setup_switch_created_directory_sync_parent(body, created)
 
 
-def _require_setup_switch_a_prefix_owners(body):
+def _require_setup_switch_a_prefix_owners(body, *, _retirement=None):
     runtime = body.get("a_runtime")
     if runtime is None:
         return
@@ -9091,7 +9099,7 @@ def _require_setup_switch_a_prefix_owners(body):
     try:
         _validate_setup_switch_a_prefix_owners(inventory)
         if "prefix_transaction" in body:
-            _setup_switch_prefix_states(body)
+            _setup_switch_prefix_states(body, _retirement=_retirement)
             return
         if any(HTTP_ROOT.glob(".r22-prefix-*")):
             raise LoadError("prefix unregistered original evidence; HOLD")
@@ -16868,9 +16876,10 @@ def _require_setup_switch_a_complete_disk_group(body, compensation):
     if "prefix_preparation" in body:
         _require_setup_switch_prefix_parent_scope(body)
     if "prefix_transaction" in body:
-        if any(phase not in {"original", "restored"} for _row, phase in _setup_switch_prefix_states(body)):
+        if any(phase not in {"original", "restored"} for _row, phase in
+               _setup_switch_prefix_states(body, _retirement=compensation.get('retirement'))):
             raise LoadError("original A prefix restoration is incomplete; HOLD")
-    _require_setup_switch_a_prefix_owners(body)
+    _require_setup_switch_a_prefix_owners(body, _retirement=compensation.get('retirement'))
     for row in body.get("directories", []):
         source, backup, target = (Path(row[key]) for key in ("path", "backup", "target"))
         source_owner, target_owner = (_setup_switch_materialized_owner(path) for path in (source, target))
@@ -16898,8 +16907,9 @@ def _setup_switch_a_archive_directory(path):
 
 
 def _validate_setup_switch_a_retirement(body):
-    if (not isinstance(body, dict) or set(body) != {'schema_version', 'role', 'parent', 'archive',
-            'journal', 'plan', 'owner'} or type(body['schema_version']) is not int
+    required = {'schema_version', 'role', 'parent', 'archive', 'journal', 'plan', 'owner'}
+    if (not isinstance(body, dict) or not required <= set(body) or set(body) - required - {'prefix'}
+            or type(body['schema_version']) is not int
             or body['schema_version'] != 2 or body['role'] != 'A'
             or not isinstance(body['owner'], list) or len(body['owner']) != 6
             or any(type(v) is not int or v < 0 for v in body['owner'])):
@@ -16922,6 +16932,77 @@ def _validate_setup_switch_a_retirement(body):
                 or row['identity'][5] != 1 or not isinstance(row['sha256'], str)
                 or re.fullmatch(r'[0-9a-f]{64}', row['sha256']) is None):
             raise LoadError("A retirement original artifact contract is invalid; HOLD")
+    prefix = body.get('prefix', [])
+    if not isinstance(prefix, list) or len(prefix) > 9:
+        raise LoadError("A retirement prefix inventory is not bounded; HOLD")
+    names = set()
+    for index, row in enumerate(prefix):
+        if (not isinstance(row, dict) or set(row) != {'path', 'parent', 'leaf', 'basename'}
+                or not isinstance(row['path'], str) or Path(row['path']).parent != HTTP_ROOT
+                or not Path(row['path']).name.startswith('.r22-prefix-')
+                or row['path'] in names or row['basename'] != f'prefix-{index:03d}'
+                or row['parent'] != _setup_switch_directory_identity(HTTP_ROOT)):
+            raise LoadError("A retirement prefix original name/parent differs; HOLD")
+        names.add(row['path'])
+        leaf = row['leaf']
+        if leaf is not None and not isinstance(leaf, dict):
+            raise LoadError("A retirement prefix leaf contract is invalid; HOLD")
+        original_row = dict(path=row['path'], parent=row['parent'], leaf=leaf)
+        _validate_setup_switch_a_prefix_owners(dict(marker=original_row if leaf is None or 'target' not in leaf else
+            dict(path=str(ZTP_PREFIX_MARKER), parent=row['parent'], leaf=None),
+            links={row['path']: dict(path=row['path'], parent=row['parent'], leaf=leaf)}
+                  if leaf is not None and 'target' in leaf else {}))
+
+
+def _setup_switch_a_prefix_archive_rows(marker, body):
+    """Bind every logical name to the original WAL, never a current observation."""
+    _require_setup_switch_a_retirement_owner(marker)
+    rows = marker['body'].get('prefix', [])
+    expected = {}
+    transaction = body.get('prefix_transaction', {}).get('rows', [])
+    for row in transaction:
+        expected[row['candidate']['path']] = (row['candidate']['leaf'], False)
+        expected[row['backup']] = (row['before'], True)
+        expected[row['retained']] = (row['candidate']['leaf'], True)
+    if set(expected) != {row['path'] for row in rows}:
+        raise LoadError("A retirement prefix lacks exact original WAL inventory; HOLD")
+    result = {row['path']: row for row in rows}
+    for row in rows:
+        leaf, moved = expected[row['path']]
+        original = row['leaf']
+        if original is not None and (leaf is None or set(original) != set(leaf)
+                or any(original[key] != leaf[key] for key in leaf if key != 'identity')
+                or original['identity'][:8 if moved else 9] != leaf['identity'][:8 if moved else 9]):
+            raise LoadError("A retirement prefix original owner/bytes differs from WAL; HOLD")
+    for row in transaction:
+        if (result[row['backup']]['leaf'] is not None or
+                (result[row['candidate']['path']]['leaf'] is None) == (result[row['retained']]['leaf'] is None)):
+            raise LoadError("A retirement prefix is not a complete original/restored phase; HOLD")
+    return result
+
+
+def _setup_switch_a_prefix_archive_artifact(marker, row, *, completed=False):
+    source = Path(row['path'])
+    archive = Path(marker['body']['archive']['path'])
+    destination = archive / row['basename']
+    if completed and marker['path'] != archive / 'retirement.json':
+        raise LoadError("A completed prefix view cannot qualify pending retirement; HOLD")
+    names = [path for path in ((destination,) if completed else (source, destination)) if os.path.lexists(path)]
+    if row['leaf'] is None:
+        if names:
+            raise LoadError("A retirement prefix original absence changed; HOLD")
+        return None
+    if len(names) != 1:
+        raise LoadError("A retirement prefix original/archived phase is unknown; HOLD")
+    path = names[0]
+    leaf = _setup_switch_compensation_leaf(path)
+    expected = row['leaf']
+    if (leaf is None or set(leaf) != set(expected)
+            or any(leaf[key] != expected[key] for key in expected if key != 'identity')
+            or leaf['identity'][:8] != expected['identity'][:8]
+            or path == source and leaf['identity'] != expected['identity']):
+        raise LoadError("A retirement prefix original artifact owner/bytes changed; HOLD")
+    return path
 
 
 def _require_setup_switch_a_retirement_owner(marker):
@@ -16931,6 +17012,7 @@ def _require_setup_switch_a_retirement_owner(marker):
     _require_setup_switch_retirement_owner(marker)
     archive = Path(marker['body']['archive']['path'])
     allowed = {'journal.json', 'a-restore.json'}
+    allowed.update(row['basename'] for row in marker['body'].get('prefix', []) if row['leaf'] is not None)
     if marker['path'] == archive / 'retirement.json':
         allowed.add('retirement.json')
     elif marker['path'] != _setup_switch_retirement_path():
@@ -17008,10 +17090,19 @@ def _require_completed_setup_switch_a_archives():
                     paths.append(parent / entry.name)
         for path in sorted(paths):
             with _open_setup_switch_a_retirement(path / 'retirement.json') as marker:
-                if (set(os.listdir(path)) != {'journal.json', 'a-restore.json', 'retirement.json'}
+                prefix = marker['body'].get('prefix', [])
+                expected_names = {'journal.json', 'a-restore.json', 'retirement.json'} | {
+                    row['basename'] for row in prefix if row['leaf'] is not None}
+                if (set(os.listdir(path)) != expected_names
                         or any(_setup_switch_a_retirement_artifact(marker, role, completed=True).parent != path
                                for role in ('journal', 'plan'))):
                     raise LoadError("A retirement archive is incomplete; HOLD")
+                archived_wal = _setup_switch_a_retirement_artifact(marker, 'journal', completed=True)
+                original = _setup_switch_prepared_registration_body(
+                    _read_rollback_regular(archived_wal, limit=_SETUP_SWITCH_JOURNAL_LIMIT))
+                _setup_switch_a_prefix_archive_rows(marker, original)
+                for row in prefix:
+                    _setup_switch_a_prefix_archive_artifact(marker, row, completed=True)
                 # Completed history does not bind names reused by a new WAL.
                 # Persist an interrupted final namespace before new LOAD writes.
                 _fsync_parent_directory(path)
@@ -17019,6 +17110,8 @@ def _require_completed_setup_switch_a_archives():
                 _require_setup_switch_a_retirement_owner(marker)
                 for role in ('journal', 'plan'):
                     _setup_switch_a_retirement_artifact(marker, role, completed=True)
+                for row in prefix:
+                    _setup_switch_a_prefix_archive_artifact(marker, row, completed=True)
         if (before != _dhcp_a_preimage_receipt_identity(os.fstat(fd))
                 or before != _dhcp_a_preimage_receipt_identity(parent.lstat())):
             raise LoadError("A archive inspection parent changed during scan; HOLD")
@@ -17030,12 +17123,24 @@ def _retire_setup_switch_a_publication(project, *, guard, require_runtime_guard,
                                       require_authority, plan, retirement=None):
     """Archive the qualified original A WAL/plan; never delete either inode.
 
-    Full prefix/DHCP inventories are deliberately a separate typed gate.
+    Prefix evidence is individually bound; DHCP remains a separate typed gate.
     This read-only compensation context cannot grant any recovery writer.
     """
     require_authority()
     if retirement is None:
         _require_completed_setup_switch_a_archives()
+        original = _setup_switch_prepared_registration_body(
+            _read_rollback_regular(_setup_switch_journal_path(), limit=_SETUP_SWITCH_JOURNAL_LIMIT))
+        prefix = []
+        if 'prefix_transaction' in original:
+            _setup_switch_prefix_states(original)
+            sources = sorted(raw for row in original['prefix_transaction']['rows']
+                for raw in (row['candidate']['path'], row['backup'], row['retained']))
+            for index, raw in enumerate(sources):
+                prefix.append(dict(path=raw, parent=original['root'],
+                    leaf=_setup_switch_compensation_leaf(Path(raw)), basename=f'prefix-{index:03d}'))
+            _setup_switch_prefix_states(original)
+        require_authority()
         journal, a_plan = _setup_switch_journal_path(), _setup_switch_a_restore_path()
         rows = {}
         for key, path in (('journal', journal), ('plan', a_plan)):
@@ -17057,7 +17162,7 @@ def _retire_setup_switch_a_publication(project, *, guard, require_runtime_guard,
         fd = os.open(marker_path, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         try:
             body = dict(schema_version=2, role='A', parent=_setup_switch_link_parent_identity(journal),
-                        archive=archive_owner, **rows,
+                        archive=archive_owner, prefix=prefix, **rows,
                         owner=list(_dhcp_a_preimage_receipt_identity(os.fstat(fd))[:6]))
             payload = _setup_switch_canonical_payload(body) + b'\n'
             with os.fdopen(os.dup(fd), 'wb') as out:
@@ -17081,8 +17186,8 @@ def _retire_setup_switch_a_publication(project, *, guard, require_runtime_guard,
                     restore_publication=False, _require_runtime_guard=require_runtime_guard,
                     _retirement=marker) as compensation:
                 original = _setup_switch_prepared_registration_body(compensation['opened'])
-                if ('dhcp_transaction' in original or original.get('prefix_transaction', {}).get('rows')):
-                    raise LoadError("A prefix/DHCP typed archive inventory is missing; HOLD")
+                if 'dhcp_transaction' in original:
+                    raise LoadError("A DHCP typed archive inventory is missing; HOLD")
                 _require_setup_switch_a_complete_disk_group(original, compensation)
                 _require_setup_switch_a_health_publication(original)
                 with _setup_switch_a_image_authority(original, compensation=compensation) as selected:
@@ -17094,6 +17199,23 @@ def _retire_setup_switch_a_publication(project, *, guard, require_runtime_guard,
             require_runtime_guard()
         qualified()
         archive = Path(marker['body']['archive']['path'])
+        for row in marker['body'].get('prefix', []):
+            if row['leaf'] is None:
+                # Absence is already part of every complete group check.
+                # Recheck its exact two names, but do not reopen the whole
+                # disk/image authority when this row performs no mutation.
+                _require_setup_switch_a_retirement_owner(marker)
+                _setup_switch_a_prefix_archive_artifact(marker, row)
+                continue
+            qualified()
+            source = _setup_switch_a_prefix_archive_artifact(marker, row)
+            if source is not None:
+                destination = archive / row['basename']
+                if source != destination:
+                    _setup_switch_rename_directory_noreplace(source, destination)
+                _fsync_parent_directory(archive)
+                _fsync_parent_directory(HTTP_ROOT)
+                qualified()
         for role, basename in (('journal', 'journal.json'), ('plan', 'a-restore.json')):
             qualified()
             source = _setup_switch_a_retirement_artifact(marker, role)
@@ -17149,8 +17271,8 @@ def activate_setup_switch_a_publication(project, *, guard, confirmed=False, reti
     with _setup_switch_a_compensation_authority(project, guard=guard, confirmed=True,
             restore_publication=False, _require_runtime_guard=service_guard, _retirement=_retirement) as compensation:
         body = _setup_switch_prepared_registration_body(compensation["opened"])
-        if retire and ('dhcp_transaction' in body or body.get('prefix_transaction', {}).get('rows')):
-            raise LoadError("A prefix/DHCP evidence requires full typed retirement inventory; HOLD")
+        if retire and 'dhcp_transaction' in body:
+            raise LoadError("A DHCP evidence requires full typed retirement inventory; HOLD")
         def disk_authority():
             service_guard()
             _require_setup_switch_a_complete_disk_group(body, compensation)

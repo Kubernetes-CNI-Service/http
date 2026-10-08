@@ -2856,3 +2856,33 @@ marker/WAL 外来 inode、目录模式、未知对象与只读 token 不授予�
 上述各最终日志均读前后 stat 一致，已知旧前缀 SHA 一致，物理 Ran→结果→actual exit→
 冻结一致→END 顺序完整。只是分批有界证据，批准 ledger 未变，不能合成为正式 runner
 通过；完整 prefix/DHCP typed 归档、root/Linux/断电/C2、DEV ACK 仍 OPEN。
+
+### 2026-10-08 R22 原 A prefix typed 归档与冷重入候选
+
+原 WAL 的三个 prefix 行分别封闭 candidate/backup/retained 三个名字，归档 marker
+逐项绑定原父、原 leaf/缺席义务和唯一 basename。完成 A 后保留三个原证据 inode 与
+字节/原始 link target，原 WAL/计划不重写；cold read-only 映射不能授予任何恢复写。
+有效 RED `r22-a-prefix-typed-archive-red.log` SHA256
+`6efa93c689d67957882dbe3c7010d504b1e928a57e317988a58d629d5d63797f`
+为 2 tests、1 ERROR/1 FAIL、actual/END=1，旧入口明确拒绝非空 prefix 写集。
+
+初次 GREEN 批次 direct 通过但 workflow 120 秒超时，原失败日志 SHA256
+`c22c1063da3e0bb672d336f8ee6cd588cfc35649a6eea107e6aae481b25e199c` 保留。
+原样诊断 `r22-a-prefix-cold-phase-diagnosis.log` inode 163311673、size 171289、SHA256
+`1f6d12abac6d0d982287728a0eadb6e4ff51d9c4d755cd1f325e9c46c55ce8bb`
+定位：恢复 13.247s、HTTP 探针 0.064s、归档从 60.902s 开始，缺席行仍重复完整深校验，
+每轮约 3 秒，至 120 秒仍在归档。没有从局部通过直接重跑 full，也未归因未经证实的
+OS/并发原因。实现只去除无写入缺席行的冗余整组重开：仍逐名核缺席，真实 rename
+前后和最终完成仍完整重验。原 120 秒期限、原 inode/字节/健康断言不变。
+
+受影响真实冷 CLI workflow `r22-a-prefix-cold-phase-corrected.log` inode 163314048、
+size 127235、SHA256 `46fa044bac3aaded5ea1dbf0b76f2d5893c4930dcf9e64313a8dc1d0b5821bda`
+为 1 test in 104.886s、OK、actual/END=0。随后新增完整边界批次
+`r22-a-prefix-archive-boundaries.log` inode 163317812、size 131052、SHA256
+`de889d3611f4bd03a3403fe5c98130e650b636cd063477584296d3d2a4e5928b`
+为 2 tests in 243.342s、OK、actual/END=0：direct 冷入口拒绝外来 inode、缺失清单、
+Boolean owner、晚占缺席名；真实 SETUP→Q 提交强杀→新 LOAD 恢复/健康→首个 prefix
+rename 强杀→全新显式 resume 再健康，原 WAL/计划 inode 字节及两次不同健康 PID 均核对。
+上述日志读前后 stat 和已知旧前缀一致、冻结一致、物理 Ran→OK→actual→END 完整。
+仅为分批候选证据，批准 ledger 未变，不是正式 related/full/check；DHCP 完整 typed
+归档、B 的完整退休、root/Linux/断电/C2、DEV ACK 仍未据此关闭。
