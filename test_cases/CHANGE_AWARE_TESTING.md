@@ -2697,7 +2697,9 @@ macOS load 仅对 check 的 4/5 运行一次 full；sync/package/pre-push 仅复
 | 两个轻量模块并行 | 11 原案例/三轮交替；native 限制实验单进程 0.408341 秒，双 worker 0.395331 秒，双 worker 串行 0.683555 秒 | 不接入正式 runner；约 13ms 不证明 full 收益，不能用双启动的串行值夸大基线 |
 | 单文件 SHA 缓冲区调整 | 462 条 regular 路径、七轮交替、每条摘要相同；1MiB/64KiB/16KiB 中位数 0.068527/0.070711/0.070280 秒 | 保持 1MiB；另外两种实测更慢 |
 | mtime/stat 驱动哈希缓存、alias 合并 | proof 必须发现同 inode/mtime 的 ABA、链接及来源变化 | 不采用；不能用 metadata 替代原字节检查 |
-| 复用已导入生产模块或修改导入路径 | module loader 保留 fresh module 与生产模块 lazy import 路径；当前 manifest profile 的三个 selector 加载合计约 0.040 秒 | 不改；没有完整 full 热点证据支持承担跨案例状态污染风险 |
+| 复用已导入生产模块或修改导入路径 | module loader 保留 fresh module 与生产模块 lazy import 路径；当前 manifest profile 的三个 selector 加载合计约 0.040 秒 | 不缓存模块/namespace；下方纯编译结果缓存是独立方案，不复用运行对象 |
+| 纯编译结果缓存 | 五轮交替，每轮真实 LOAD/SETUP 共 12 次 fresh import；完整函数 code 字段相同；0.595356→0.123089 秒 | 每次重读源字节，最多 8 项、单源 2MiB；只缓存 code，每次重新执行新模块；不读取或写入磁盘 pyc |
+| 私有 HTTP 测试服务器退出轮询 | 五轮交替，相同真实 HEAD、原 curl 超时与完整线程清理；单上下文 0.523734→0.078972 秒 | 仅测试服务器 poll_interval 0.5→0.05 秒；生产健康重试/deadline、真实网络请求和清理断言不变 |
 | 历史 P replay 合并、删掉重复 case ID | 固定历史 SHA、原 fixture/进程边界和 discovery 出现次数是被测合同 | 不采用；不以优化改写历史合同或去重真实执行次数 |
 | 移除 fsync、批间身份校验或发布末端重核 | 冷恢复、unknown-object 保留、held-FD/权限和可回滚证明依赖这些边界 | 不采用；不削弱恢复能力换速度 |
 | 并行 SHA、扩大有状态 suite 并发 | 当前普通 SHA 阶段约 0.1 秒；固定历史回放、共享锁/项目与真实 loopback 的完整隔离尚未证实 | 不引入线程/进程池；小工作量不抵启动/调度成本，重型 suite 不因名字而获隔离资格 |
@@ -2729,6 +2731,72 @@ runner 执行完整 canonical suite 才能产生；显式 `--all` 或变更选�
 均可满足 runner 的完整性条件。本任务最终验收仍显式执行 `--all -v`，不以局部结果代替。
 明确授权的 `--all --validation-only` 只产生验证证明，不能替代普通发布证明。独立诊断
 不能生成、替代或延长证明，不能跳过测试、修改断言或手工更新批准账本。
+
+### 2026-10-09 当前源码执行与纯编译缓存
+
+实测发现 `-B` 只阻止 pyc 写入，并不阻止读取时间戳有效的旧 pyc。同长度源码改写后
+恢复 mtime，原 loader、canonical discovery、测试的生产依赖、部署 selector、clean
+authority 及 runner 启动的 project contract 都能执行旧值。先保留独立字面预期的 RED，
+再修实现；不能以 source snapshot 正确推断执行的代码也正确。
+
+共享 loader 每次通过 SourceFileLoader 读取当前源字节，以完整 bytes、实际 filename 和
+optimization 为 key；有界 LRU 只保留不可变 code，超过 2MiB 的源仍正常编译但不缓存。
+每次保持原 ModuleSpec、package 信息、fresh module/globals/classes，以及生产模块声明的
+lazy import 路径。删源、同 metadata 改源、坏语法、编码/future flags、路径差异、驱逐及
+大源不缓存都有独立 direct；不缓存已导入模块、执行结果、文件 metadata 或可变对象。
+
+runner 的 selector/clean authority 直接编译当前 bytes。同步治理依赖导入使用一次性私有
+字节码 namespace 并恢复原 sys.pycache_prefix；ordinary 与 validation-only 测试子进程
+各获唯一、空、0700 缓存目录，原 argv/discovery/环境版本闸门、stdin 隔离及精确例外不变。
+原 operator cache 和环境变量不删除、不覆盖；正常结束及 child 创建异常均清理自有目录。
+这不承诺任意同 UID 恶意写者隔离或在长驻进程中热重载所有已加载依赖；正式 proof 仍用
+当前提交的新 CLI/测试进程，保留每个原字节与环境重核、fsync 和 ledger 回滚边界。
+
+新增测试模块还改变维护文件 inventory。提交前文档回归原样发现 `user-manual.html`
+未收录该模块而 FAIL；日志 `exact-source-final-governance-docs.log`，SHA256
+`c43f0d2f7b3550266378f99240bd26a623fc79b6b0ce39e8834ab473da81aa13`。
+保持完整性与生成一致性原断言，用既有 `tools/update-user-manual.py` 重新生成其自动块，
+再复核；不忽略新增测试路径，也不在这个原因未修复时启动正式 full。
+
+原 loader RED：`exact-source-loader-red.log`，9 tests / 2 FAIL / exit1，SHA256
+`cc224cbdb06ba0cabcc2cd7f60ad1bf7260fb8ceee024a3f0fd41ff5e29fcd91`。
+runner RED：`proof-source-bytecode-red.log`，4 methods / 6 FAIL（含 subtests）/ exit1，
+SHA256 `70132719bba43a376ae3faa7427926fd4fa50d9aef69c4d22c10b44308dd7774`；
+依赖补充 RED：`proof-source-dependency-red.log`，7 methods / 2 FAIL / exit1，SHA256
+`030fef8ab5a4e619e85570db5667a4f420e5adb4660e21dcac5e26e2319fe625`。
+治理、发布门禁、loader 与真实 R22/REQ23 workflow 六模块最终诊断回归为 402 tests /
+2707.341 秒 / OK / exit0，完整日志 `proof-source-dependency-green.log`，SHA256
+`e04072889aa448e1071a948ad96e95df6063383166f8b881dd74efda546737d7`。
+此局部回归不签发整树 proof。
+
+纯编译五轮基准 `exact-source-loader-paired-benchmark2.log`，SHA256
+`f9c469f1d6f670b3499a6e368ec73cc93c9f13265a067c6de73069e56d647001`；
+每轮含两个 cold compile 和十个 hit，同一空 pyc namespace、先预热两侧依赖、每次新模块，
+源码/ledger 不变。首次诊断使用 marshal 序列化当 code canonical oracle 而失败；完整
+`exact-source-loader-paired-benchmark.log` 原样保留，SHA256
+`86b1157e4455d4a2a015bfadda2763f83cefc913ea898d0a351228d75f1d5cd4`。
+调查确认序列化的 interning/reference 编码不同，而所有非 callable co_* 字段及嵌套 code
+相同；最终比较全部这些字段，不删除或放松受管测试断言。
+
+HTTP 基准 `private-http-poll-paired.log`，SHA256
+`3b8468be6c90d199b3cda9e63a6a3a6a250864b5e9c5c2d5ac13e6fdd51b2dc4`。
+新 direct 以真实 200/503 HEAD、原 curl 参数、退出后的线程及关闭 socket 检查先 RED：
+`private-http-poll-red.log`，SHA256
+`5cbc1990b292935d0f6529a949ac1398f8d11c1bf1437776ed7f275c5966dd55`。
+仅改私有 fixture 的 serve_forever poll，真实 LOAD→SETUP→新 LOAD 的成功和 HTTP 失败
+流程继续保留；不改生产等待、故障注入窗口、旧历史 SHA 或测试出现次数。
+补丁后的 direct、完整原 DHCP 事务退休及两个真实归档中断/冷健康 workflow 共 4 tests /
+OK / exit0，完整日志 `private-http-poll-green.log`，SHA256
+`cf296c0c592b398e0a8567489c0f10d74f391e944de6a746bebc7371e5f19daa`。
+手册生成修正后的治理/direct/目录回归 66 tests / OK (skipped=1) / exit0；唯一 skip
+仍是 public checkout 缺 private docs，日志 `exact-source-final-governance-docs2.log`，
+SHA256 `84f7295a049c38a6f8d02f4cfd4d6428fe78be37f5904b783732f568d9a1d8fc`。
+
+这些数字只表示对应操作的同工作量测量，不能加总、外推为 full 收益。最终普通 full 的
+工作量会新增 direct 案例，须另列版本、实际测试数/跳过/耗时和完整退出证据。治理文件
+变化按原 path rule 选择 canonical full，因此提交源码/测试/说明后只跑一次显式
+`--all -v`，同时覆盖 related/direct/workflow；成功后仅提交 runner 自动 ledger，再
+`--check --require-full`。失败先保存并查明因果；单项 PASS 不授权盲重跑 full。
 
 先前会话报告过一次 3,785 tests、2,897.740 秒的全量运行，但原始逐测试日志未保存，
 此处未复核；它只是历史参考，**不是可审计计时基线**。人工观察到

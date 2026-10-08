@@ -10,6 +10,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import py_compile
 import shutil
 import socket
 import subprocess
@@ -47,6 +48,142 @@ HISTORICAL = {
 
 def module_path(root, name):
     return root / (name.replace(".", "/") + ".py")
+
+
+class ExactSourceExecutionTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="proof-source-cache-")
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name).resolve()
+        (self.root / "test_cases").mkdir()
+        (self.root / "test_cases/__init__.py").write_text("", encoding="utf-8")
+        self.cache = self.root / "operator-cache"
+        self.cache.mkdir()
+
+    def stale_bytecode(self, path, before, after):
+        self.assertEqual(len(before), len(after))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(before)
+        original = path.stat()
+        with mock.patch.object(sys, "pycache_prefix", str(self.cache)):
+            py_compile.compile(str(path), doraise=True)
+        path.write_bytes(after)
+        os.utime(path, ns=(original.st_atime_ns, original.st_mtime_ns))
+        self.assertEqual(original.st_size, path.stat().st_size)
+        self.assertEqual(original.st_mtime_ns, path.stat().st_mtime_ns)
+
+    def real_child(self, selection):
+        real_run = subprocess.run
+        with mock.patch.dict(os.environ, {"PYTHONPYCACHEPREFIX": str(self.cache)}), \
+                mock.patch.object(RUNNER.subprocess, "run", side_effect=lambda command, **kwargs: real_run(
+                    command, capture_output=True, text=True, **kwargs,
+                )):
+            return RUNNER.run_selection(self.root, selection, False)
+
+    def test_canonical_discovery_cannot_pass_using_stale_test_bytecode(self):
+        path = self.root / "test_cases/test_literal.py"
+        before = (
+            b"import unittest\nclass Literal(unittest.TestCase):\n"
+            b"    def test_current_source(self):\n        self.assertEqual(1, 1)\n"
+        )
+        self.stale_bytecode(path, before, before.replace(b"(1, 1)", b"(1, 2)"))
+        for full in (False, True):
+            with self.subTest(full=full):
+                self.assertEqual(1, self.real_child(RUNNER.Selection(
+                    tests={"test_cases.test_literal"}, full_suite=full,
+                )))
+
+    def test_current_test_cannot_import_stale_production_dependency(self):
+        self.stale_bytecode(self.root / "fixture_source.py", b"VALUE = 1\n", b"VALUE = 2\n")
+        (self.root / "test_cases/test_literal.py").write_text(
+            "import unittest, fixture_source\nclass Literal(unittest.TestCase):\n"
+            "    def test_current_source(self):\n        self.assertEqual(2, fixture_source.VALUE)\n",
+            encoding="utf-8",
+        )
+        for full in (False, True):
+            with self.subTest(full=full):
+                self.assertEqual(0, self.real_child(RUNNER.Selection(
+                    tests={"test_cases.test_literal"}, full_suite=full,
+                )))
+
+    def test_selector_and_clean_authority_read_current_bytes_not_timestamp_cache(self):
+        paths = (self.root / "tools/selector.py", self.root / "test_cases/test_public_publication_workflow.py")
+        for path in paths:
+            self.stale_bytecode(path, b"VALUE = 1\n", b"VALUE = 2\n")
+        with mock.patch.object(sys, "pycache_prefix", str(self.cache)):
+            selector = RUNNER._load_deployment_selector(self.root, "tools/selector.py", "literal_source_selector")
+            authority = RUNNER._load_preflight_authority(self.root)
+        self.assertEqual(2, selector.VALUE)
+        self.assertEqual(2, authority.VALUE)
+
+    def test_selector_dependency_reads_current_source_in_private_cache_namespace(self):
+        self.stale_bytecode(self.root / "tools/fixture_dependency.py", b"VALUE = 1\n", b"VALUE = 2\n")
+        (self.root / "tools/selector.py").write_text(
+            "from fixture_dependency import VALUE\n", encoding="utf-8",
+        )
+        self.addCleanup(sys.modules.pop, "fixture_dependency", None)
+        with mock.patch.object(sys, "pycache_prefix", str(self.cache)):
+            selector = RUNNER._load_deployment_selector(
+                self.root, "tools/selector.py", "literal_dependency_selector",
+            )
+            self.assertEqual(str(self.cache), sys.pycache_prefix)
+        self.assertEqual(2, selector.VALUE)
+
+    def test_runner_bootstrap_contract_reads_current_source_not_operator_bytecode(self):
+        path = self.root / "test_cases/run_related_tests.py"
+        path.write_bytes((ROOT / "test_cases/run_related_tests.py").read_bytes())
+        self.stale_bytecode(
+            self.root / "tools/project_contract.py",
+            b"def path_disposition(path): return 1\n",
+            b"def path_disposition(path): return 2\n",
+        )
+        command = [
+            sys.executable, "-B", "-c",
+            "import test_cases.run_related_tests as r; print(r.path_disposition('literal'))",
+        ]
+        environment = os.environ.copy()
+        environment["PYTHONPYCACHEPREFIX"] = str(self.cache)
+        child = subprocess.run(command, cwd=self.root, env=environment,
+                               capture_output=True, text=True, check=False)
+        self.assertEqual(0, child.returncode, child.stderr)
+        self.assertEqual("2\n", child.stdout)
+
+    def test_private_child_cache_is_removed_when_subprocess_raises(self):
+        seen = []
+
+        def child(command, **kwargs):
+            seen.append(Path(kwargs["env"]["PYTHONPYCACHEPREFIX"]))
+            raise OSError("literal child creation failure")
+
+        with mock.patch.object(RUNNER.subprocess, "run", side_effect=child):
+            with self.assertRaisesRegex(OSError, "literal child creation failure"):
+                RUNNER.run_selection(self.root, RUNNER.Selection(tests={D}), False)
+        self.assertEqual(1, len(seen))
+        self.assertFalse(seen[0].exists())
+
+    def test_each_child_cache_is_private_unique_cleaned_and_does_not_touch_operator_cache(self):
+        sentinel = self.cache / "operator-sentinel"
+        sentinel.write_bytes(b"literal operator cache")
+        seen = []
+
+        def child(command, **kwargs):
+            cache = Path(kwargs["env"]["PYTHONPYCACHEPREFIX"])
+            self.assertNotEqual(self.cache, cache)
+            self.assertTrue(cache.is_dir())
+            self.assertEqual(0o700, cache.stat().st_mode & 0o777)
+            self.assertEqual([], list(cache.iterdir()))
+            seen.append(cache)
+            return subprocess.CompletedProcess(command, 1)
+
+        with mock.patch.dict(os.environ, {"PYTHONPYCACHEPREFIX": str(self.cache)}), \
+                mock.patch.object(RUNNER.subprocess, "run", side_effect=child):
+            for _ in range(2):
+                self.assertEqual(1, RUNNER.run_selection(self.root, RUNNER.Selection(tests={D}), False))
+            self.assertEqual(1, RUNNER.run_validation_selection(self.root, RUNNER.Selection(full_suite=True), False))
+            self.assertEqual(str(self.cache), os.environ["PYTHONPYCACHEPREFIX"])
+        self.assertEqual(3, len(set(seen)))
+        self.assertTrue(all(not path.exists() for path in seen))
+        self.assertEqual(b"literal operator cache", sentinel.read_bytes())
 
 
 class PreflightFixture(unittest.TestCase):

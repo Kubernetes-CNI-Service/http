@@ -13,6 +13,7 @@
       "description": "仓库入口、测试治理、公开边界和文档目录合同",
       "tests": [
         "test_cases.test_runner_preflight",
+        "test_cases.test_module_loader_contract",
         "test_cases.test_subprocess_timeout_evidence",
         "test_cases.test_all_script_entrypoints",
         "test_cases.test_change_aware_test_runner",
@@ -2596,6 +2597,9 @@
     {
       "paths": ["test_cases/module_loader.py"],
       "tests": [
+        "test_cases.test_module_loader_contract",
+        "test_cases.test_generation_input_binding_workflow",
+        "test_cases.test_req23_import_workflow",
         "test_cases.test_image_context_safety",
         "test_cases.test_air_link_endpoint_contract",
         "test_cases.test_flow_release_platform_matrix",

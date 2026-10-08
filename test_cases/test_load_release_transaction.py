@@ -1142,7 +1142,11 @@ def private_a_health_ports(api, root, *, http_status=None, publication_prefix='r
                 return super().do_HEAD()
             self.send_response(http_status); self.end_headers()
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
+    # Bound idle teardown latency without replacing real HEAD requests or any
+    # production health, curl, cleanup or child deadline.
+    thread = threading.Thread(target=server.serve_forever,
+                              kwargs={"poll_interval": 0.05}, daemon=True)
+    thread.start()
     calls = []
     def command(argv, *, dry_run=False, **kwargs):
         assert not dry_run, "A qualification cannot be dry-run"
@@ -1177,6 +1181,38 @@ def private_a_health_ports(api, root, *, http_status=None, publication_prefix='r
     finally:
         server.shutdown(); server.server_close(); thread.join(timeout=5)
         assert not thread.is_alive(), "private HTTP thread did not stop"
+
+
+class PrivateHttpFixtureContractTests(unittest.TestCase):
+    def test_bounded_poll_keeps_real_head_success_failure_and_closed_socket(self):
+        original = http.server.ThreadingHTTPServer.serve_forever
+        observed, servers, finished = [], [], []
+
+        def serve(server, poll_interval=0.5):
+            observed.append(poll_interval)
+            servers.append(server)
+            try:
+                return original(server, poll_interval=poll_interval)
+            finally:
+                finished.append(server)
+
+        with tempfile.TemporaryDirectory(prefix="private-http-contract-") as directory:
+            root = Path(directory)
+            (root / "r22-prefix").mkdir()
+            (root / "r22-prefix/health.txt").write_bytes(b"literal health evidence\n")
+            command = ["curl", "-fsSI", "--max-time", "5",
+                       "http://192.0.2.2/r22-prefix/health.txt"]
+            with mock.patch.object(http.server.ThreadingHTTPServer, "serve_forever", serve):
+                with private_a_health_ports(LOAD, root) as positive:
+                    LOAD.run(command)
+                self.assertEqual([command], positive)
+                with private_a_health_ports(LOAD, root, http_status=503) as negative:
+                    with self.assertRaisesRegex(LOAD.LoadError, "private original A HTTP probe failed"):
+                        LOAD.run(command)
+                self.assertEqual([command], negative)
+        self.assertEqual([0.05, 0.05], observed)
+        self.assertEqual(servers, finished)
+        self.assertEqual([-1, -1], [server.fileno() for server in servers])
 
 
 class ReleaseTransactionTests(unittest.TestCase):

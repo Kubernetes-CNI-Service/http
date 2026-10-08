@@ -9,10 +9,12 @@ atomically record the exact source/test hashes that were verified.
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 import fnmatch
 import hashlib
 import importlib.util
+from importlib.machinery import SourceFileLoader
 from importlib import metadata as importlib_metadata
 import json
 import os
@@ -28,10 +30,23 @@ import time
 from typing import Callable, Iterable, Mapping, Sequence
 
 
+@contextmanager
+def _private_bytecode_namespace():
+    """Ignore operator bytecode for synchronous governance dependency imports."""
+    previous = sys.pycache_prefix
+    with tempfile.TemporaryDirectory(prefix="http-governance-import-pyc-") as directory:
+        sys.pycache_prefix = directory
+        try:
+            yield
+        finally:
+            sys.pycache_prefix = previous
+
+
 TOOLS_DIRECTORY = Path(__file__).resolve().parents[1] / "tools"
 if os.fspath(TOOLS_DIRECTORY) not in sys.path:
     sys.path.insert(0, os.fspath(TOOLS_DIRECTORY))
-from project_contract import path_disposition  # noqa: E402
+with _private_bytecode_namespace():
+    from project_contract import path_disposition  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -261,6 +276,16 @@ def discover_tests(root: Path) -> dict[str, Path]:
     }
 
 
+def _exec_current_source(spec, module) -> None:
+    """Execute source bytes, never timestamp-approved disk bytecode."""
+    if not isinstance(spec.loader, SourceFileLoader):
+        raise ImpactError("authority requires a source file loader")
+    filename = spec.loader.get_filename(spec.name)
+    source = spec.loader.get_data(filename)
+    code = compile(source, filename, "exec", dont_inherit=True)
+    exec(code, module.__dict__)
+
+
 def _load_deployment_selector(root: Path, relative: str, module_name: str):
     path = root / relative
     try:
@@ -285,7 +310,8 @@ def _load_deployment_selector(root: Path, relative: str, module_name: str):
         sys.path.insert(0, tools_path)
     sys.modules[module_name] = module
     try:
-        spec.loader.exec_module(module)
+        with _private_bytecode_namespace():
+            _exec_current_source(spec, module)
     except Exception as exc:
         raise ImpactError(
             f"deployment selector load/configuration error for {relative}: {exc}"
@@ -1293,7 +1319,8 @@ def _load_preflight_authority(root: Path):
     previous = sys.modules.get(name)
     sys.modules[name] = module
     try:
-        spec.loader.exec_module(module)
+        with _private_bytecode_namespace():
+            _exec_current_source(spec, module)
     finally:
         if previous is None:
             sys.modules.pop(name, None)
@@ -1484,14 +1511,18 @@ def run_selection(root: Path, selection: Selection, verbose: bool) -> int:
             command.append("-v")
         command.extend(sorted(selection.tests))
     environment = os.environ.copy()
-    environment.setdefault("PYTHONPYCACHEPREFIX", "/tmp/http-related-test-pyc")
-    result = subprocess.run(
-        command,
-        cwd=root,
-        env=environment,
-        stdin=subprocess.DEVNULL,
-        check=False,
-    )
+    # -B prevents bytecode writes, not reads. A fresh private namespace keeps
+    # canonical discovery and dependency imports bound to current source bytes
+    # without deleting or trusting the operator's existing cache.
+    with tempfile.TemporaryDirectory(prefix="http-related-test-pyc-") as directory:
+        environment["PYTHONPYCACHEPREFIX"] = directory
+        result = subprocess.run(
+            command,
+            cwd=root,
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            check=False,
+        )
     return 0 if result.returncode == 0 else 1
 
 
@@ -1571,7 +1602,9 @@ def run_validation_selection(
         if timings_path is not None:
             command.extend(("--timings", str(timings_path)))
         environment = os.environ.copy()
-        environment.setdefault("PYTHONPYCACHEPREFIX", "/tmp/http-related-test-pyc")
+        cache = Path(directory) / "pycache"
+        cache.mkdir(mode=0o700)
+        environment["PYTHONPYCACHEPREFIX"] = str(cache)
         completed = subprocess.run(
             command, cwd=root, env=environment, stdin=subprocess.DEVNULL,
             check=False,
