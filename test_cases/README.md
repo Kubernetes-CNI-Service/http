@@ -998,7 +998,7 @@ direct 与真实双 owner／TLS／原 C19／native 冷进程 workflow 保留正�
 pending、精确重放、两个屏障、替换／碰撞／EXDEV 和故障安全状态的独立预期。
 本地接口不等于默认 worker 接入、真实 Cloud／断电或 REQ7 整项完成；现场卡仍 NOT RUN。
 
-`tracker_settings_writer` 只在真实设置工厂中接入原件发现：先取得实际 LK-P；无交付声明
+`tracker_settings_writer` 在真实设置工厂及默认 prod 只读状态入口接入原件发现：先取得实际 LK-P；无交付声明
 仍走严格普通 K 链，不初始化缺失状态。已有交付声明时，持续持有分配 HEADER 和原始
 ACTION-PREIMAGE／WIRE 的 FD、命名、完整 stat 与字节；HEADER 仅定位候选 binding，
 随后必须取得真实 spreadsheet owner 并证明原 COMPLETE／DELIVERED／启动见证及分配。
@@ -1009,6 +1009,14 @@ K 提交边界前后重新验证该原件作用域；写入中丢失原件须保
 正常、无交付／UNKNOWN、缺件、错误 binding、同字节替换、提交中断、冷恢复与故障安全
 状态。此接入不替换发布／来源 owner、不安装在线服务、不释放 UNKNOWN 或授权发送；
 全量证明及真实设备／Cloud／断电验收仍未完成，不以本地 PASS 标为通过。
+
+默认 prod `inspect_stage_l` 与真实 worker 状态入口在合法交付投影归档后读取最高 K，
+仍保持 pending／来源资格／本地 receipt 的原合同和 `disabled_no_send_authority`。
+独立 direct 验证缺失 tracker 不初始化、错误 scope 不读来源；实际多脚本流程验证正常
+暖／冷读取、后续 pending 与原 WIRE 保持、缺失交付证明 HOLD，以及真实 per-key 来源
+读取后同字节替换分配 HEADER 时不能返回成功。真实 worker 写出的只是状态文件；
+AIR、完整手动 preview 与 C6 提交仍使用原 owner，不借此放宽来源、发布或发送准入。
+这组本地自动化不覆盖旧周期 R2、APPLIED／FIFO／高水位或默认在线发送闭环。
 
 `test_req7_sheets_read_plan` / `test_req7_sheets_read_decode` 与
 `test_req7_online_whitelist_read` 固定精确列／坐标、十四表身份、四张 row-2 多行字面表头

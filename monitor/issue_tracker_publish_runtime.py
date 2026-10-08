@@ -21,7 +21,7 @@ from monitor.issue_tracker_manifest import (
     _runtime_skip, selected_panel_decision_sha256,
 )
 from monitor.issue_tracker_state_owner import (
-    TrackerStateHold, current_k, tracker_writer,
+    TrackerStateHold, current_k, tracker_writer, tracker_settings_writer,
 )
 from monitor.issue_tracker_switch_runtime import (
     SwitchRuntimeHoldError, read_switch_runtime_window,
@@ -463,7 +463,10 @@ def inspect_stage_l(store, *, http_root, project, publication, template_path):
             return status
         if store.scope != "prod":
             raise StageLHold("Stage L scope is unsupported")
-        with tracker_writer(project, publication) as token:
+        # Read-only status may recover K from continuously held originals
+        # after legal delivered-projection archive. This does not change the
+        # separate C6 commit owner or confer publication/send authority.
+        with tracker_settings_writer(project, publication) as token:
             settings = current_k(token)
             snapshot = read_whitelist_workbook(template)
             try:

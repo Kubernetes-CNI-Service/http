@@ -430,6 +430,152 @@ class Req7RemoteHistoryNativeWorkflowTests(unittest.TestCase):
 
 
 class Req7OwnedHistoryMatchWorkflowTests(unittest.TestCase):
+    @contextmanager
+    def _default_recovery_store(self, project):
+        from test_cases.test_collection_cycle_persistence import WORKER
+        gate=WORKER.CollectionGate(str(project),'prod',status_dir=self.root/'monitor/status',
+                                  enforce_cooldown=False,lane='collection')
+        with gate as held:
+            self.assertTrue(held.decision.allowed)
+            yield WORKER.CollectionCycleStore(gate=held)
+
+    def _default_recovery_args(self, project, publication):
+        from test_cases.test_issue_tracker_whitelist_workbook import literal_xlsx
+        template=self.root/'monitor/Issue_Tracker_Template_v1.xlsx'
+        template.parent.mkdir(parents=True,exist_ok=True)
+        template.write_bytes(literal_xlsx())
+        return dict(http_root=self.root,project=project,publication=publication,
+                    template_path=template)
+
+    def _default_recovery_images(self, project):
+        return {str(p.relative_to(project)):(p.stat().st_ino,hashlib.sha256(p.read_bytes()).hexdigest())
+                for p in project.rglob('*') if p.is_file()}
+
+    def test_default_pending_status_reopens_original_delivery_without_online_authority(self):
+        from monitor import issue_tracker_publish_runtime as runtime,issue_tracker_spreadsheet_owner as sheet
+        project,publication,bound,unit=self.setup_discovered_settings_cleaned()
+        args=self._default_recovery_args(project,publication); before=self._default_recovery_images(project)
+        with scoped_fixture(self.root,sheet),self._default_recovery_store(project) as store:
+            status=runtime.inspect_stage_l(store,**args)
+        self.assertEqual(('pending',0,3,0),
+                         (status['state'],status['completed_cycles'],status['k'],status['k_revision']))
+        self.assertEqual('disabled_no_send_authority',status['online'])
+        self.assertEqual([],status['window_cycle_ids'])
+        self.assertEqual(0,status['cycle_summary']['published'])
+        self.assertEqual(before,self._default_recovery_images(project))
+        self.assertFalse((project/'.tracker/settings/outbox/0.json').exists())
+        self.assertEqual((),tuple(publication.iterdir()))
+
+    def test_default_pending_status_uses_newest_k_but_preserves_later_pending_and_old_wire(self):
+        from monitor import issue_tracker_publish_runtime as runtime,issue_tracker_spreadsheet_owner as sheet
+        from monitor import issue_tracker_state_owner as state
+        project,publication,bound,unit=self.setup_discovered_settings_cleaned()
+        args=self._default_recovery_args(project,publication)
+        with scoped_fixture(self.root,sheet):
+            with state.tracker_settings_writer(project,publication) as token:
+                state.set_k(token,new_k=6,actor='operator:fixture',recorded_at='2026-10-09T00:00:00Z',
+                            request_id='default-local-recovery',expected_revision=0)
+            before=self._default_recovery_images(project)
+            with self._default_recovery_store(project) as store:
+                status=runtime.inspect_stage_l(store,**args)
+        self.assertEqual(('pending',6,1),(status['state'],status['k'],status['k_revision']))
+        self.assertEqual('disabled_no_send_authority',status['online'])
+        self.assertEqual(before,self._default_recovery_images(project))
+        self.assertTrue((project/'.tracker/settings/outbox/1.json').is_file())
+        wire=self.root/'var/lib/http-ztp-container/issue-tracker'/(
+            hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()+'.journal')/'WIRE'
+        self.assertEqual(unit.wire_bytes,wire.read_bytes())
+
+    def test_real_worker_status_entry_reads_pending_after_legal_projection_archive(self):
+        import json
+        from test_cases.test_collection_cycle_persistence import WORKER
+        from monitor import issue_tracker_spreadsheet_owner as sheet
+        project,publication,bound,unit=self.setup_discovered_settings_cleaned()
+        self._default_recovery_args(project,publication); before=self._default_recovery_images(project)
+        status_path=self.root/'monitor/status/issue-tracker-stage-l.status.json'
+        with scoped_fixture(self.root,sheet),self._default_recovery_store(project) as store:
+            with mock.patch.object(WORKER,'HTTP_ROOT',self.root), \
+                    mock.patch.object(WORKER,'STATUS_DIR',status_path.parent), \
+                    mock.patch.object(WORKER,'ISSUE_TRACKER_STAGE_L_STATUS_FILE',status_path):
+                WORKER._publish_stage_l_status_after_completion(store)
+        status=json.loads(status_path.read_bytes())
+        self.assertEqual(('pending',0,3,0),
+                         (status['state'],status['completed_cycles'],status['k'],status['k_revision']))
+        self.assertEqual('disabled_no_send_authority',status['online'])
+        self.assertEqual(0,status['cycle_summary']['published'])
+        self.assertEqual(before,self._default_recovery_images(project))
+        self.assertFalse((project/'.tracker/settings/outbox/0.json').exists())
+
+    def test_default_status_missing_delivery_is_hold_without_recreation(self):
+        from monitor import issue_tracker_publish_runtime as runtime,issue_tracker_spreadsheet_owner as sheet
+        project,publication,bound,unit=self.setup_discovered_settings_cleaned()
+        args=self._default_recovery_args(project,publication)
+        delivery=project/'.tracker/settings-audit-delivery/DELIVERED'
+        saved=delivery.read_bytes(); delivery.rename(self.root/'preserved-default-local-delivery')
+        before=self._default_recovery_images(project)
+        with scoped_fixture(self.root,sheet),self._default_recovery_store(project) as store:
+            with self.assertRaises(runtime.StageLHold): runtime.inspect_stage_l(store,**args)
+        self.assertEqual(before,self._default_recovery_images(project))
+        self.assertEqual(saved,(self.root/'preserved-default-local-delivery').read_bytes())
+        self.assertFalse(delivery.exists())
+        self.assertFalse((project/'.tracker/settings/outbox/0.json').exists())
+
+    def test_native_cold_default_status_needs_no_parent_delivery_context(self):
+        import subprocess
+        import sys
+        from test_cases.test_req7_remote_history_match import ROOT
+        project,publication,bound,unit=self.setup_discovered_settings_cleaned()
+        self._default_recovery_args(project,publication)
+        before=self._default_recovery_images(project)
+        program='''from pathlib import Path
+import sys
+from monitor import issue_tracker_publish_runtime as runtime,issue_tracker_state_owner as state
+from monitor import issue_tracker_spreadsheet_owner as sheet
+from test_cases.test_req7_spreadsheet_owner import scoped_fixture
+from test_cases.test_collection_cycle_persistence import WORKER
+root=Path(sys.argv[1]); project=root/'project'
+assert state._COMPLETED_READ_CONTEXT=={}
+assert state._COMPLETED_ORIGINAL_GUARDS=={}
+with scoped_fixture(root,sheet),WORKER.CollectionGate(str(project),'prod',
+ status_dir=root/'monitor/status',enforce_cooldown=False,lane='collection') as held:
+ assert held.decision.allowed
+ store=WORKER.CollectionCycleStore(gate=held)
+ status=runtime.inspect_stage_l(store,http_root=root,project=project,
+  publication=project/'99-output-monitor',template_path=root/'monitor/Issue_Tracker_Template_v1.xlsx')
+ print(status['state'],status['completed_cycles'],status['k'],status['k_revision'],status['online'])
+assert state._COMPLETED_READ_CONTEXT=={}
+assert state._COMPLETED_ORIGINAL_GUARDS=={}
+print('context-revoked')
+'''
+        cold=subprocess.run([sys.executable,'-B','-c',program,str(self.root)],cwd=ROOT,
+                            stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=20)
+        self.assertEqual(0,cold.returncode,cold.stderr)
+        self.assertEqual(b'pending 0 3 0 disabled_no_send_authority\ncontext-revoked\n',cold.stdout)
+        self.assertEqual(before,self._default_recovery_images(project))
+        self.assertFalse((project/'.tracker/settings/outbox/0.json').exists())
+
+    def test_default_status_same_byte_header_replacement_during_native_panels_cannot_return_success(self):
+        from monitor import issue_tracker_publish_runtime as runtime,issue_tracker_spreadsheet_owner as sheet
+        project,publication,bound,unit=self.setup_discovered_settings_cleaned()
+        args=self._default_recovery_args(project,publication)
+        header=project/'.tracker/settings-audit-allocation/HEADER'
+        original=header.read_bytes(); reached=[]; native=runtime._stage_l_per_key_panels
+        def replace_after_panels(*a,**kw):
+            result=native(*a,**kw)
+            replacement=self.root/'same-byte-default-local-header'
+            replacement.write_bytes(original); replacement.chmod(0o600)
+            header.rename(self.root/'preserved-default-local-header'); replacement.rename(header)
+            reached.append(True)
+            return result
+        with scoped_fixture(self.root,sheet),self._default_recovery_store(project) as store:
+            with mock.patch.object(runtime,'_stage_l_per_key_panels',side_effect=replace_after_panels):
+                with self.assertRaises(runtime.StageLHold): runtime.inspect_stage_l(store,**args)
+        self.assertEqual([True],reached)
+        self.assertEqual(original,header.read_bytes())
+        self.assertEqual(original,(self.root/'preserved-default-local-header').read_bytes())
+        self.assertFalse((project/'.tracker/settings/outbox/0.json').exists())
+
+
     # Reuse owned native fixtures, not inherited test methods/discovery.
     from test_cases.test_req7_history_read_launcher import Req7HistoryReadLauncherWorkflowTests as _Fixture
     setUp = _Fixture.setUp; certificates = _Fixture.certificates; server = _Fixture.server

@@ -13,6 +13,48 @@ from test_cases.test_issue_tracker_switch_runtime import RuntimeWorkerFixture
 
 
 class StageLRuntimeDirectTests(RuntimeWorkerFixture, unittest.TestCase):
+    def test_default_prod_status_never_initializes_absent_tracker(self):
+        import os
+        from pathlib import Path
+        import tempfile
+        from types import SimpleNamespace
+        from monitor import issue_tracker_publish_runtime as runtime
+        with tempfile.TemporaryDirectory(prefix='req7-default-local-no-state-') as directory:
+            root=Path(os.path.realpath(directory)); project=root/'project'; project.mkdir()
+            publication=project/'99-output-monitor'; publication.mkdir()
+            template=root/'monitor/Issue_Tracker_Template_v1.xlsx'
+            template.parent.mkdir(); template.write_bytes(b'unreadable until actual owner proved')
+            store=SimpleNamespace(scope='prod',project_identity=str(project),root_status_dir=str(root/'monitor/status'))
+            with mock.patch.object(runtime,'read_whitelist_workbook') as policy, \
+                    mock.patch.object(runtime,'read_completed_cycle_evidence') as sources:
+                with self.assertRaises(runtime.StageLHold):
+                    runtime.inspect_stage_l(store,http_root=root,project=project,
+                                            publication=publication,template_path=template)
+            policy.assert_not_called(); sources.assert_not_called()
+            self.assertFalse((project/'.tracker').exists())
+            self.assertEqual((),tuple(publication.iterdir()))
+
+    def test_unsupported_scope_refuses_before_reading_policy_or_sources(self):
+        import os
+        from pathlib import Path
+        import tempfile
+        from types import SimpleNamespace
+        from monitor import issue_tracker_publish_runtime as runtime
+        with tempfile.TemporaryDirectory(prefix='req7-default-local-scope-') as directory:
+            root=Path(os.path.realpath(directory)); project=root/'project'; project.mkdir()
+            publication=project/'99-output-monitor'; publication.mkdir()
+            template=root/'monitor/Issue_Tracker_Template_v1.xlsx'
+            store=SimpleNamespace(scope='unsupported',project_identity=str(project),root_status_dir=str(root/'monitor/status'))
+            with mock.patch.object(runtime,'read_whitelist_workbook') as policy, \
+                    mock.patch.object(runtime,'read_completed_cycle_evidence') as sources:
+                with self.assertRaises(runtime.StageLHold):
+                    runtime.inspect_stage_l(store,http_root=root,project=project,
+                                            publication=publication,template_path=template)
+            policy.assert_not_called(); sources.assert_not_called()
+            self.assertFalse((project/'.tracker').exists())
+            self.assertEqual((),tuple(publication.iterdir()))
+
+
     def test_complete_manual_snapshot_rejects_unknown_panel_before_source_or_lock(self):
         from monitor.issue_tracker_publish_runtime import inspect_manual_stage_l_preview
         from monitor.issue_tracker_manual_preview import ManualPreviewHold
