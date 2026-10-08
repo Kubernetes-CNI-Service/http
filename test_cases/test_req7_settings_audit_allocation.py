@@ -35,6 +35,14 @@ def load():
 
 
 class Req7SettingsAuditAllocationTests(unittest.TestCase):
+    def test_cleanup_requires_actual_complete_delivery_pair_before_any_move(self):
+        with self.owners() as (writer,sheet):
+            value=self.unit(); self.prepare(writer,sheet,value); before=self.image()
+            for actual_writer,actual_sheet in ((writer,sheet),(object(),sheet),(writer,object())):
+                with self.subTest(writer=actual_writer is writer,sheet=actual_sheet is sheet),self.assertRaises(self.module.SettingsAuditHold):
+                    self.module.cleanup_completed_settings_outbox(actual_writer,actual_sheet,binding(),value)
+            self.assertEqual(before,self.image())
+
     def test_native_current_install_never_overwrites_substituted_evidence(self):
         from contextlib import ExitStack
         from types import SimpleNamespace

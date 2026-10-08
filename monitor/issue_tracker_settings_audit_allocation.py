@@ -2,8 +2,9 @@
 
 This conservative first journal retains one unit per project. The delivery
 bridge requires the actual original C19 COMPLETE proof before its durable
-DELIVERED record; it never sends, cleans an outbox event, repairs a partial
-journal, authorizes a source or releases UNKNOWN/FIFO/admission barriers.
+DELIVERED record. A separate paired cleanup archives only those delivered
+projections; it never sends, deletes originals, repairs a partial journal,
+authorizes a source or releases UNKNOWN/FIFO/admission barriers.
 """
 import hashlib
 import json
@@ -871,6 +872,97 @@ def _apply_completed_k_change(token,sheet,bound,unit,*,new_k,actor,recorded_at,r
             before.retain_failed_guard(scope)
             raise
         return settings.KStoreReceipt(revision,new_k,digest)
+
+
+class _CompletedOutboxCleanup(_CompletedSettingsTransition):
+    """Recoverably archive only projections bound to the original delivered unit."""
+    def __init__(self,scope,owner,delivered):
+        # Base construction calls verify before the archive scope exists.
+        self.cleanup_archive=None
+        self.archived=set()
+        super().__init__(scope,owner,delivered)
+        self.cleanup_archive=local._directory(owner.root_fd,'quarantine')
+        scope.callback(os.close,self.cleanup_archive)
+        journal._named(owner.root_fd,'quarantine',self.cleanup_archive,directory=True)
+        self.cleanup_archive_identity=journal._identity(os.fstat(self.cleanup_archive))[:5]
+        if os.fstat(self.cleanup_archive).st_dev!=os.fstat(self.outbox).st_dev:
+            raise SettingsAuditHold()
+        self.cleanup_archive_names=set(os.listdir(self.cleanup_archive))
+        self.cleanup_archive_files=[]
+        for name in sorted(self.cleanup_archive_names):
+            fd=os.open(name,local._flags(),dir_fd=self.cleanup_archive)
+            scope.callback(os.close,fd)
+            info=local._check(fd,directory=False)
+            journal._named(self.cleanup_archive,name,fd,directory=False)
+            self.cleanup_archive_files.append((name,fd,journal._identity(info)))
+        self.verify()
+
+    def verify(self):
+        super().verify()
+        if self.cleanup_archive is None:
+            return
+        local._check(self.cleanup_archive,directory=True)
+        journal._named(self.owner.root_fd,'quarantine',self.cleanup_archive,directory=True)
+        if (journal._identity(os.fstat(self.cleanup_archive))[:5]!=self.cleanup_archive_identity
+                or set(os.listdir(self.cleanup_archive))!=self.cleanup_archive_names|self.archived):
+            raise SettingsAuditHold()
+        for name,fd,identity in self.cleanup_archive_files:
+            local._check(fd,directory=False)
+            journal._named(self.cleanup_archive,name,fd,directory=False)
+            if journal._identity(os.fstat(fd))!=identity:
+                raise SettingsAuditHold()
+
+    def move_original(self,entry):
+        parent,name,fd,identity,raw=entry
+        self.verify()
+        destination='completed-settings-'+uuid.uuid4().hex+'-'+name
+        # NOREPLACE preserves existing archives. A substituted source may move
+        # but is never erased; acknowledgement requires the retained original FD.
+        local._rename_new(parent,name,destination,destination_parent=self.cleanup_archive)
+        local._check(fd,directory=False)
+        journal._named(self.cleanup_archive,destination,fd,directory=False)
+        info=journal._identity(os.fstat(fd))
+        if info[:-1]!=identity[:-1] or os.pread(fd,16385,0)!=raw:
+            raise SettingsAuditHold()
+        self.files[self.files.index(entry)]=(self.cleanup_archive,destination,fd,info,raw)
+        self.outbox_names.remove(name)
+        self.archived.add(destination)
+        self.verify()
+        os.fsync(parent)
+        os.fsync(self.cleanup_archive)
+        self.verify()
+
+
+def cleanup_completed_settings_outbox(token,sheet,bound,unit):
+    """Archive actual delivered projections, never resend or release a unit.
+
+    Requires both actual owners and their original COMPLETE/DELIVERED evidence.
+    Failure retains moved originals without acknowledgement. Replay only syncs
+    existing directories; it cannot manufacture missing evidence or projections.
+    """
+    try:
+        with ExitStack() as scope:
+            pair=ExitStack()
+            scope.callback(pair.close)
+            owner,delivered,proof=pair.enter_context(_hold_completed_k_pair(token,sheet,bound,unit))
+            transition=_CompletedOutboxCleanup(scope,owner,delivered)
+            selected={f'{rev}.json' for rev,raw in transition.images.items()
+                if 'settings:'+str(rev)+':'+hashlib.sha256(raw).hexdigest() in delivered.event_ids}
+            entries=[entry for entry in transition.files
+                if entry[0]==transition.outbox and entry[1] in selected]
+            for entry in entries:
+                proof(); transition.verify()
+                transition.move_original(entry)
+                proof(); transition.verify()
+            os.fsync(transition.outbox); os.fsync(transition.cleanup_archive)
+            proof(); transition.verify()
+            result=inspect_completed_settings_delivery(token,sheet,bound,unit)
+            if result.state!='DELIVERED-PRESENT-OUTBOX-ABSENT-VALID':
+                raise SettingsAuditHold()
+            proof(); transition.verify(); pair.close(); transition.verify()
+            return result
+    except Exception as exc:
+        raise SettingsAuditHold() from exc
 
 
 def apply_completed_k_change(token,sheet,bound,unit,*,new_k,actor,recorded_at,request_id,expected_revision):

@@ -2358,6 +2358,247 @@ with scoped_fixture(root,sheet),state.tracker_writer(project,project/'publicatio
                 finally: case.doCleanups()
 
 
+    def retained_delivery(self):
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        with ExitStack() as stack:
+            writer,sheet,bound,unit=self.completed(stack)
+            allocation.record_completed_settings_delivery(writer,sheet,bound,unit)
+        return bound,unit
+
+    def test_cleanup_only_original_delivered_projection_preserves_later_pending_and_replays(self):
+        from monitor import issue_tracker_state_owner as state,issue_tracker_spreadsheet_owner as sheet
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        bound,unit=self.retained_delivery(); project=self.root/'project'; tracker=project/'.tracker'
+        projection=(tracker/'settings/outbox/0.json').read_bytes()
+        immutable=(tracker/'settings/events/0.json').read_bytes()
+        with scoped_fixture(self.root,sheet),state.tracker_writer(project,project/'publication',completed_binding=bound,completed_unit=unit) as token:
+            later=state.set_k(token,new_k=6,actor='operator:fixture',recorded_at='2026-10-08T10:02:00Z',request_id='cleanup-later-event',expected_revision=0)
+            pending=(tracker/'settings/outbox/1.json').read_bytes()
+            old_quarantine={p.name for p in (tracker/'quarantine').iterdir()}
+            original_sheet=state._COMPLETED_READ_CONTEXT[token][0]
+            result=allocation.cleanup_completed_settings_outbox(token,original_sheet,bound,unit)
+            self.assertEqual('DELIVERED-PRESENT-OUTBOX-ABSENT-VALID',result.state)
+            self.assertEqual(unit.unit_id,result.unit_id)
+            self.assertEqual(('settings:0:'+hashlib.sha256(immutable).hexdigest(),),result.event_ids)
+            self.assertFalse((tracker/'settings/outbox/0.json').exists())
+            self.assertEqual(pending,(tracker/'settings/outbox/1.json').read_bytes())
+            self.assertEqual(('settings:1:'+later.event_sha256,),tuple(row['event_id'] for row in allocation.pending_settings_audits_after_completed_unit(token,original_sheet,bound,unit)))
+            self.assertEqual((1,6),(state.current_k(token).revision,state.current_k(token).k))
+            before={str(p.relative_to(tracker)):p.read_bytes() for p in tracker.rglob('*') if p.is_file()}
+            self.assertEqual(result,allocation.cleanup_completed_settings_outbox(token,original_sheet,bound,unit))
+            self.assertEqual(before,{str(p.relative_to(tracker)):p.read_bytes() for p in tracker.rglob('*') if p.is_file()})
+        archives=[p for p in (tracker/'quarantine').iterdir() if p.name not in old_quarantine]
+        self.assertEqual(1,len(archives),'cleanup is recoverable, never deletion of substituted evidence')
+        self.assertEqual(projection,archives[0].read_bytes())
+        self.assertEqual(0o600,archives[0].stat().st_mode & 0o777)
+        self.assertEqual(immutable,(tracker/'settings/events/0.json').read_bytes())
+        self.assertEqual(unit.wire_bytes,(self.root/'var/lib/http-ztp-container/issue-tracker'/
+            (hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()+'.journal')/'WIRE').read_bytes())
+
+    def test_partial_delivered_pair_cleans_only_remaining_original_projection(self):
+        from monitor import issue_tracker_k_store as settings,issue_tracker_state_owner as state
+        from monitor import issue_tracker_spreadsheet_owner as sheet,issue_tracker_settings_audit_allocation as allocation
+        from test_cases.test_req7_remote_history_match import canonical,load
+        event0=self.settings_audit_oracle()
+        payload={'new_k':4,'actor':'operator:fixture','expected_revision':0,'request_id':'change-1'}
+        image=canonical({'schema_version':1,'revision':1,'type':'set_k','old_k':3,'new_k':4,
+            'actor':'operator:fixture','recorded_at':'2026-10-08T10:01:00Z','request_id':'change-1',
+            'payload_sha256':hashlib.sha256(canonical(payload)).hexdigest(),
+            'predecessor_sha256':hashlib.sha256((event0['details']+'\n').encode()).hexdigest()})
+        event1={'event_id':'settings:1:'+hashlib.sha256(image).hexdigest(),
+            'recorded_at_utc':'2026-10-08T10:01:00Z','details':image.decode().rstrip('\n')}
+        initialize=settings.initialize_local_k_store
+        def initialize_and_change(root,**options):
+            receipt=initialize(root,**options)
+            settings.apply_local_k_change(root,token=options['token'],new_k=4,actor='operator:fixture',
+                recorded_at='2026-10-08T10:01:00Z',request_id='change-1',expected_revision=0)
+            return receipt
+        with ExitStack() as stack:
+            with mock.patch.object(settings,'initialize_local_k_store',side_effect=initialize_and_change):
+                writer,owner,bound,auth,_config,unit,docs=self.prepare_owned(stack,settings_audits=(event0,event1))
+            responses={name:self.read_owned(stack,writer,owner,bound,auth,kind,value)
+                for name,(kind,value) in docs.items()}
+            load().record_owned_completion_evidence(writer,owner,bound,unit,**responses)
+            allocation.record_completed_settings_delivery(writer,owner,bound,unit)
+            tracker=self.root/'project/.tracker'; missing=tracker/'settings/outbox/0.json'
+            missing.rename(self.root/'preserved-partial-cleanup-projection')
+        original_projection=(tracker/'settings/outbox/1.json').read_bytes()
+        with scoped_fixture(self.root,sheet),state.tracker_writer(self.root/'project',self.root/'project/publication',
+                completed_binding=bound,completed_unit=unit) as token:
+            owner=state._COMPLETED_READ_CONTEXT[token][0]
+            seen=allocation.cleanup_completed_settings_outbox(token,owner,bound,unit)
+            self.assertEqual(('DELIVERED-PRESENT-OUTBOX-ABSENT-VALID',(event0['event_id'],event1['event_id'])),(seen.state,seen.event_ids))
+            self.assertEqual([],[p.name for p in (tracker/'settings/outbox').iterdir()])
+            self.assertEqual((1,4),(state.current_k(token).revision,state.current_k(token).k))
+            self.assertEqual(1,sum(p.read_bytes()==original_projection for p in (tracker/'quarantine').iterdir()))
+            later=state.set_k(token,new_k=6,actor='operator:fixture',recorded_at='2026-10-08T10:02:00Z',request_id='partial-cleanup-later',expected_revision=1)
+            self.assertEqual(('settings:2:'+later.event_sha256,),tuple(row['event_id'] for row in allocation.pending_settings_audits_after_completed_unit(token,owner,bound,unit)))
+            self.assertEqual((2,6),(state.current_k(token).revision,state.current_k(token).k))
+        self.assertEqual(image,(tracker/'settings/events/1.json').read_bytes())
+        self.assertFalse(missing.exists()); self.assertTrue((self.root/'preserved-partial-cleanup-projection').exists())
+
+    def test_native_cold_cleanup_and_replay_read_original_pair_without_parent_context(self):
+        from dataclasses import asdict
+        import json
+        import subprocess
+        bound,unit=self.retained_delivery(); tracker=self.root/'project/.tracker'
+        event=(tracker/'settings/events/0.json').read_bytes()
+        projection=(tracker/'settings/outbox/0.json').read_bytes()
+        program='''import sys,json,hashlib,importlib.util
+from pathlib import Path
+sys.path[:0]=[sys.argv[1],sys.argv[1]+"/tools"]
+from monitor import issue_tracker_state_owner as state,issue_tracker_spreadsheet_owner as sheet
+from monitor import issue_tracker_settings_audit_allocation as allocation
+from test_cases.test_req7_spreadsheet_owner import scoped_fixture
+from monitor.issue_tracker_online_target import OnlineTargetBinding
+from monitor.issue_tracker_send_unit import _original_unit
+root=Path(sys.argv[2]); project=root/'project'; tracker=project/'.tracker'
+bound=OnlineTargetBinding(**json.loads(sys.stdin.buffer.read()))
+folder=root/'var/lib/http-ztp-container/issue-tracker'/(hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()+'.journal')
+unit=_original_unit((folder/'ACTION-PREIMAGE').read_bytes(),(folder/'WIRE').read_bytes())
+with scoped_fixture(root,sheet),state.tracker_writer(project,project/'publication',completed_binding=bound,completed_unit=unit) as token:
+ owner=state._COMPLETED_READ_CONTEXT[token][0]
+ result=allocation.cleanup_completed_settings_outbox(token,owner,bound,unit)
+ value=state.current_k(token); pending=allocation.pending_settings_audits_after_completed_unit(token,owner,bound,unit)
+ print(result.state,value.revision,value.k,len(pending))
+ before={str(p.relative_to(tracker)):p.read_bytes() for p in tracker.rglob('*') if p.is_file()}
+ again=allocation.cleanup_completed_settings_outbox(token,owner,bound,unit)
+ print(result==again,before=={str(p.relative_to(tracker)):p.read_bytes() for p in tracker.rglob('*') if p.is_file()})
+'''
+        cold=subprocess.run([sys.executable,'-B','-c',program,str(ROOT),str(self.root)],
+            input=json.dumps(asdict(bound)).encode(),stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=10)
+        self.assertEqual(0,cold.returncode,cold.stderr)
+        self.assertEqual(b'DELIVERED-PRESENT-OUTBOX-ABSENT-VALID 0 3 0\nTrue True\n',cold.stdout)
+        self.assertEqual(event,(tracker/'settings/events/0.json').read_bytes())
+        self.assertFalse((tracker/'settings/outbox/0.json').exists())
+        self.assertEqual(1,sum(p.read_bytes()==projection for p in (tracker/'quarantine').iterdir()))
+        self.assertEqual(unit.wire_bytes,(self.root/'var/lib/http-ztp-container/issue-tracker'/
+            (hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()+'.journal')/'WIRE').read_bytes())
+
+    def test_each_cleanup_directory_barrier_fails_without_ack_or_resend(self):
+        from monitor import issue_tracker_state_owner as state,issue_tracker_spreadsheet_owner as sheet
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        for boundary in (1,2):
+            with self.subTest(boundary=boundary):
+                case=type(self)('test_missing_original_delivery_never_cleans_any_projection'); case.setUp()
+                try:
+                    bound,unit=case.retained_delivery(); project=case.root/'project'; tracker=project/'.tracker'
+                    projection=(tracker/'settings/outbox/0.json').read_bytes()
+                    original={str(p.relative_to(tracker)):p.read_bytes() for p in (tracker/'settings/events').iterdir()}
+                    native_move=allocation._CompletedOutboxCleanup.move_original; fsync=os.fsync
+                    active=[False]; count=[0]; reached=[]
+                    def move(*args,**options):
+                        active[0]=True
+                        try: return native_move(*args,**options)
+                        finally: active[0]=False
+                    def fail(fd):
+                        if active[0]:
+                            count[0]+=1
+                            if count[0]==boundary:
+                                reached.append(boundary); raise OSError('owned cleanup directory barrier fault')
+                        return fsync(fd)
+                    with scoped_fixture(case.root,sheet),state.tracker_writer(project,project/'publication',completed_binding=bound,completed_unit=unit) as token:
+                        with mock.patch.object(allocation._CompletedOutboxCleanup,'move_original',new=move), \
+                                mock.patch.object(os,'fsync',side_effect=fail),self.assertRaises(allocation.SettingsAuditHold):
+                            allocation.cleanup_completed_settings_outbox(token,state._COMPLETED_READ_CONTEXT[token][0],bound,unit)
+                        self.assertEqual([boundary],reached)
+                        self.assertFalse((tracker/'settings/outbox/0.json').exists())
+                        self.assertEqual(1,sum(p.read_bytes()==projection for p in (tracker/'quarantine').iterdir()))
+                        self.assertEqual((0,3),(state.current_k(token).revision,state.current_k(token).k))
+                        self.assertEqual((),allocation.pending_settings_audits_after_completed_unit(token,state._COMPLETED_READ_CONTEXT[token][0],bound,unit))
+                        seen=allocation.cleanup_completed_settings_outbox(token,state._COMPLETED_READ_CONTEXT[token][0],bound,unit)
+                        self.assertEqual('DELIVERED-PRESENT-OUTBOX-ABSENT-VALID',seen.state)
+                        self.assertEqual(original,{str(p.relative_to(tracker)):p.read_bytes() for p in (tracker/'settings/events').iterdir()})
+                finally: case.doCleanups()
+
+    def test_delivery_loss_after_move_preserves_archives_and_cold_hold(self):
+        from monitor import issue_tracker_state_owner as state,issue_tracker_spreadsheet_owner as sheet
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        bound,unit=self.retained_delivery(); project=self.root/'project'; tracker=project/'.tracker'
+        raw=(tracker/'settings/outbox/0.json').read_bytes(); rename=allocation.local._rename_new; reached=[]
+        def lose(parent,name,destination,**options):
+            result=rename(parent,name,destination,**options)
+            if name=='0.json':
+                (tracker/'settings-audit-delivery/DELIVERED').rename(self.root/'preserved-mid-cleanup-delivery')
+                reached.append(name)
+            return result
+        with scoped_fixture(self.root,sheet),self.assertRaises(state.TrackerStateHold):
+            with state.tracker_writer(project,project/'publication',completed_binding=bound,completed_unit=unit) as token:
+                with mock.patch.object(allocation.local,'_rename_new',side_effect=lose),self.assertRaises(allocation.SettingsAuditHold):
+                    allocation.cleanup_completed_settings_outbox(token,state._COMPLETED_READ_CONTEXT[token][0],bound,unit)
+                self.assertEqual(['0.json'],reached)
+                self.assertEqual(1,sum(p.read_bytes()==raw for p in (tracker/'quarantine').iterdir()))
+                with self.assertRaises(state.TrackerStateHold): state.current_k(token)
+        before={str(p.relative_to(tracker)):p.read_bytes() for p in tracker.rglob('*') if p.is_file()}
+        self.assert_native_completed_k_hold(bound)
+        self.assertEqual(before,{str(p.relative_to(tracker)):p.read_bytes() for p in tracker.rglob('*') if p.is_file()})
+
+    def test_substituted_projection_is_preserved_and_never_acknowledged(self):
+        from monitor import issue_tracker_state_owner as state,issue_tracker_spreadsheet_owner as sheet
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        bound,unit=self.retained_delivery(); project=self.root/'project'; tracker=project/'.tracker'
+        projection=tracker/'settings/outbox/0.json'; original=projection.read_bytes()
+        foreign=b'owned foreign projection evidence; never erase\n'; rename=allocation.local._rename_new; reached=[]
+        def replaced(parent,name,destination,**options):
+            if name=='0.json':
+                projection.rename(self.root/'preserved-cleanup-original-projection')
+                projection.write_bytes(foreign); projection.chmod(0o600); reached.append(name)
+            return rename(parent,name,destination,**options)
+        with scoped_fixture(self.root,sheet),state.tracker_writer(project,project/'publication',completed_binding=bound,completed_unit=unit) as token:
+            with mock.patch.object(allocation.local,'_rename_new',side_effect=replaced),self.assertRaises(allocation.SettingsAuditHold):
+                allocation.cleanup_completed_settings_outbox(token,state._COMPLETED_READ_CONTEXT[token][0],bound,unit)
+            self.assertEqual(['0.json'],reached)
+            self.assertEqual(original,(self.root/'preserved-cleanup-original-projection').read_bytes())
+            self.assertEqual(1,sum(p.read_bytes()==foreign for p in (tracker/'quarantine').iterdir()))
+            self.assertEqual((0,3),(state.current_k(token).revision,state.current_k(token).k))
+
+    def test_existing_archive_collision_refuses_before_projection_move(self):
+        from types import SimpleNamespace
+        from monitor import issue_tracker_state_owner as state,issue_tracker_spreadsheet_owner as sheet
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        bound,unit=self.retained_delivery(); project=self.root/'project'; tracker=project/'.tracker'
+        foreign=tracker/'quarantine'/('completed-settings-'+'f'*32+'-0.json')
+        foreign.write_bytes(b'owned pre-existing archive evidence\n'); foreign.chmod(0o600)
+        identity=(foreign.stat().st_dev,foreign.stat().st_ino); image=foreign.read_bytes()
+        projection=(tracker/'settings/outbox/0.json').read_bytes()
+        with scoped_fixture(self.root,sheet),state.tracker_writer(project,project/'publication',completed_binding=bound,completed_unit=unit) as token:
+            with mock.patch.object(allocation.uuid,'uuid4',return_value=SimpleNamespace(hex='f'*32)),self.assertRaises(allocation.SettingsAuditHold):
+                allocation.cleanup_completed_settings_outbox(token,state._COMPLETED_READ_CONTEXT[token][0],bound,unit)
+            self.assertEqual(image,foreign.read_bytes())
+            self.assertEqual(identity,(foreign.stat().st_dev,foreign.stat().st_ino))
+            self.assertEqual(projection,(tracker/'settings/outbox/0.json').read_bytes())
+            self.assertEqual((0,3),(state.current_k(token).revision,state.current_k(token).k))
+
+    def test_cross_device_move_is_rejected_without_copy_delete_or_ack(self):
+        import errno
+        from monitor import issue_tracker_state_owner as state,issue_tracker_spreadsheet_owner as sheet
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        bound,unit=self.retained_delivery(); project=self.root/'project'; tracker=project/'.tracker'
+        rename=allocation.local._rename_new; reached=[]
+        def exdev(parent,name,destination,**options):
+            if name=='0.json':
+                reached.append(name); raise OSError(errno.EXDEV,'owned native cross-device rejection')
+            return rename(parent,name,destination,**options)
+        with scoped_fixture(self.root,sheet),state.tracker_writer(project,project/'publication',completed_binding=bound,completed_unit=unit) as token:
+            before={str(p.relative_to(tracker)):p.read_bytes() for p in tracker.rglob('*') if p.is_file()}
+            with mock.patch.object(allocation.local,'_rename_new',side_effect=exdev),self.assertRaises(allocation.SettingsAuditHold):
+                allocation.cleanup_completed_settings_outbox(token,state._COMPLETED_READ_CONTEXT[token][0],bound,unit)
+            self.assertEqual(['0.json'],reached)
+            self.assertEqual(before,{str(p.relative_to(tracker)):p.read_bytes() for p in tracker.rglob('*') if p.is_file()})
+            self.assertEqual((0,3),(state.current_k(token).revision,state.current_k(token).k))
+
+    def test_missing_original_delivery_never_cleans_any_projection(self):
+        from monitor import issue_tracker_state_owner as state,issue_tracker_spreadsheet_owner as sheet
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        bound,unit=self.retained_delivery(); project=self.root/'project'; tracker=project/'.tracker'
+        with scoped_fixture(self.root,sheet),self.assertRaises(state.TrackerStateHold):
+            with state.tracker_writer(project,project/'publication',completed_binding=bound,completed_unit=unit) as token:
+                (tracker/'settings-audit-delivery/DELIVERED').rename(self.root/'preserved-cleanup-delivery')
+                before={str(p.relative_to(tracker)):p.read_bytes() for p in tracker.rglob('*') if p.is_file()}
+                with self.assertRaises(allocation.SettingsAuditHold):
+                    allocation.cleanup_completed_settings_outbox(token,state._COMPLETED_READ_CONTEXT[token][0],bound,unit)
+                self.assertEqual(before,{str(p.relative_to(tracker)):p.read_bytes() for p in tracker.rglob('*') if p.is_file()})
+
 class Req7RemoteHistoryManifestTests(unittest.TestCase):
     def test_direct_native_workflow_primary_suite_and_not_run_card_bind_real_dependencies(self):
         registry = json.loads((ROOT / 'test_cases/script_test_manifest.json').read_text())

@@ -986,6 +986,18 @@ guard 屏障／收尾故障预期；不替代正式 full/check、现场断电或
 独立的 ETH/IB cabling 夹具分别获取其合成 token 和读取计划，不沿用前一夹具已过期
 的 token；TTL 和生产过期拒绝不变。新增受控墙钟跨窗口测试不冒充休眠或断电见证。
 计划失败仅追加阶段、类型一致性及剩余有效秒数，不输出 token、header、ID 或业务内容。
+`cleanup_completed_settings_outbox` 是独立的显式双 owner 接口，不是上述读取／K 写入
+接口的隐含副作用。持续持有原 COMPLETE／DELIVERED／启动见证／分配及最高 settings
+原件，仅将该单元精确 event IDs 的残留投影原子 NOREPLACE 移至既有私有同设备
+quarantine，保留 inode／0600／字节并同步源与归档目录后才确认；后续 pending 不动。
+不存在的旧投影只允许原交付证明解释；重放仅重新同步既有目录，不补件、不重发。
+归档碰撞、EXDEV、源替换、任一目录屏障或证明收尾失败不 ACK；实际移动的对象保留，
+不 copy/delete、不回滚、不释放 UNKNOWN／FIFO／高水位。已持久交付且原投影已移动后，
+K／pending 观察可合法返回 ABSENT-VALID；这不把失败清理计为成功。证明丢失则暖／冷 HOLD。
+direct 与真实双 owner／TLS／原 C19／native 冷进程 workflow 保留正常、部分缺失、后续
+pending、精确重放、两个屏障、替换／碰撞／EXDEV 和故障安全状态的独立预期。
+本地接口不等于默认 worker 接入、真实 Cloud／断电或 REQ7 整项完成；现场卡仍 NOT RUN。
+
 `test_req7_sheets_read_plan` / `test_req7_sheets_read_decode` 与
 `test_req7_online_whitelist_read` 固定精确列／坐标、十四表身份、四张 row-2 多行字面表头
 和完整有限 Whitelist；非原子 GET 不构成 enrollment、发送许可或完整格式快照。
