@@ -2166,6 +2166,7 @@ pread，检查 mode/uid/nlink/大小和前后身份，原一致性不重编译�
 
 - Case ID：`TC-REAL-REQ7-REMOTE-HISTORY-MATCH-001`；类型：integration / transaction / real-environment；对应 C-6/C-19/C-26。状态：**NOT RUN / REAL_ENV REQUIRED**。自动化 `test_cases.test_req7_remote_history_match`；涉及 `monitor/issue_tracker_remote_history_match.py`、global owner/attempt、enrollment、preread、metadata、typed History 和原生 TLS，未安装。本地私有 loopback TLS 与真实自有文件屏障不证明部署身份或整个 REQ7。
 - 风险与目标：仅原始 journal、两份原始 nonce、精确永久 fence、所有实际业务及附带审计行与发送前原像同时匹配，才能产生 MATCHED_OBSERVATION；这不是 COMPLETE、APPLIED 或发送许可，不清除 UNKNOWN、容量预留或审计 pending。
+- 原件窗口补充（**NOT RUN / REAL_ENV REQUIRED**）：从匹配前到最终 issued-read 门禁完成，持续持有原 global journal、History preread 和 enrollment 的目录 FD，核全部原文件 stat/inode/字节及命名边。解析中或匹配后新增 ATTEMPT、同字节 WIRE/History/NONCES 文件或目录替换均 HOLD，保留实际计数、UNKNOWN 和被替换原件，不回滚／采用。现场须另获精确隔离注入授权，按本卡证据规则保留窗口前后身份和故障阶段；清理只限自有 fixture，真实 journal/nonce/fence 不删除。
 - 前置条件与输入：另获 owner 精确 Stage O 一次性副本只读授权和实际固定目录/Python/SSL/CA 身份；已初始化实际全表 owner、原始 enrollment、global action/wire 和发送前完整 raw。真实发送、凭据、部署、结算和受审 launcher 未由本卡授权；缺任何前提保持 NOT RUN。
 - 步骤与独立预期：固定原生全尾 GET/metadata search/全尾 GET → 原始 raw 及 before → 已计数 UNKNOWN journal → 两份 nonce与精确 fence → 全行对账。typed 前缀不得改变，容量不得收缩，所有实际业务和审计必须按原顺序完整且无额外行；全 NOOP 不伪造 History。缺 fence UNKNOWN；外来 fence、缺/多/重复/公式/错序行或原像漂移 CONFLICT；部分/截断/重复 JSON/重复 metadata/外来路径 HOLD。
 - 证据：当前精确 HEAD/tree/dirty、执行命令与退出码、Python/平台身份、完整日志及 END、前后 stat/inode/大小/SHA256、原始 raw 摘要与全部行匹配数量、实际 UNKNOWN 保留。原始 History、nonce 与 token 私密，不公开；不得将单项观察提升为正式 full proof。

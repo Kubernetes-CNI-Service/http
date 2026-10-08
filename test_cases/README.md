@@ -959,7 +959,11 @@ ACTION-PREIMAGE/action_digest → immutable wire journal → 六个冷启动进�
 `test_cases.test_req7_remote_history_match` 串联实际 global intent、持久发送前原像、
 原始 target/History nonce、精确 ID/锚点/DOCUMENT 永久 fence，以及全部实际业务和
 附带审计 History 行；原始 typed 前缀、容量、行顺序、完整尾和摘要同时匹配才返回
-MATCHED_OBSERVATION。缺 fence 为 UNKNOWN，外来栅或缺/多/重复/错序/伪造 NOOP
+MATCHED_OBSERVATION。整个 matcher 和最终 issued-read 门禁期间持续持有原 global
+count/WIRE、History preread、enrollment 目录，并前后核全部原文件的 stat/inode/字节
+及命名边。读后加次数、同字节替换文件／目录均 HOLD，保留实际 UNKNOWN，不采用
+替代原像。这仍不是 durable COMPLETE 或释放 FIFO 的依据。
+缺 fence 为 UNKNOWN，外来栅或缺/多/重复/错序/伪造 NOOP
 History 为 CONFLICT；缺原像、异常/部分响应、外来目标或重复 metadata HOLD。
 25000 个 typed cells 只扫描一次，不按行重复扫描。真实私有 TLS 三个只读请求
 验证 planner/transport/decoder → 实际持久 journal → matcher；没有发送、结算、

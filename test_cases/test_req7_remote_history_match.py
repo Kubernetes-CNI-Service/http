@@ -133,6 +133,95 @@ class Req7RemoteHistoryMatchDirectTests(unittest.TestCase):
             self.prepare(token, attempt=False)
             with self.assertRaises(module.RemoteHistoryHold): self.observe(module, token)
 
+    def test_original_count_changed_during_post_read_cannot_escape_as_matched_observation(self):
+        module=load()
+        with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
+            self.prepare(token)
+            decode_tail=module.decode.decode_history_tail; changed=[]
+            def decoding(plan,raw,**options):
+                result=decode_tail(plan,raw,**options)
+                if raw.data==response(self.post).data and not changed:
+                    self.global_journal.record_global_attempt_intent(token,binding(),self.unit)
+                    changed.append(True)
+                return result
+            with mock.patch.object(module.decode,'decode_history_tail',side_effect=decoding):
+                with self.assertRaises(module.RemoteHistoryHold): self.observe(module,token)
+            self.assertEqual([True],changed)
+            self.assertEqual((2,'UNKNOWN'),(self.global_journal.inspect_global_unit(token,binding(),self.unit).attempt_count,
+                                           self.global_journal.inspect_global_unit(token,binding(),self.unit).outcome))
+
+    def test_byte_identical_original_wire_replacement_during_match_is_not_adopted(self):
+        self._identical_original_replacement('.journal','WIRE')
+
+    def test_byte_identical_original_history_replacement_during_match_is_not_adopted(self):
+        self._identical_original_replacement('.history','HISTORY-RAW')
+
+    def test_byte_identical_original_nonce_replacement_during_match_is_not_adopted(self):
+        self._identical_original_replacement('.enrollment','NONCES')
+
+    def test_original_wire_replaced_during_initial_pin_read_is_not_adopted(self):
+        module=load()
+        from monitor import issue_tracker_attempt_journal as original_io
+        with fixture(self.root),self.owner.spreadsheet_owner(binding()) as token:
+            self.prepare(token)
+            path=self.state/(hashlib.sha256(TARGET.encode()).hexdigest()+'.journal')/'WIRE'
+            raw=path.read_bytes(); preserved=self.root/'preserved-wire-at-initial-pin'
+            reading=original_io._read; changed=[]
+            def read_then_replace(folder,name,limit):
+                result=reading(folder,name,limit)
+                if name=='WIRE' and not changed:
+                    path.rename(preserved); path.write_bytes(raw); path.chmod(0o600)
+                    changed.append(True)
+                return result
+            with mock.patch.object(original_io,'_read',side_effect=read_then_replace):
+                with self.assertRaises(module.RemoteHistoryHold): self.observe(module,token)
+            self.assertEqual([True],changed)
+            self.assertEqual(raw,path.read_bytes()); self.assertEqual(raw,preserved.read_bytes())
+            self.assertEqual(1,self.global_journal.inspect_global_unit(token,binding(),self.unit).attempt_count)
+
+    def test_original_wire_same_inode_rewrite_during_initial_pin_read_is_not_adopted(self):
+        module=load()
+        from monitor import issue_tracker_attempt_journal as original_io
+        import os
+        with fixture(self.root),self.owner.spreadsheet_owner(binding()) as token:
+            self.prepare(token)
+            path=self.state/(hashlib.sha256(TARGET.encode()).hexdigest()+'.journal')/'WIRE'
+            raw=path.read_bytes(); original=path.stat()
+            reading=original_io._read; changed=[]
+            def read_then_rewrite(folder,name,limit):
+                result=reading(folder,name,limit)
+                if name=='WIRE' and not changed:
+                    with path.open('r+b') as held:
+                        held.write(raw); held.flush(); os.fsync(held.fileno())
+                    os.utime(path,ns=(original.st_atime_ns,original.st_mtime_ns+1_000_000))
+                    changed.append(True)
+                return result
+            with mock.patch.object(original_io,'_read',side_effect=read_then_rewrite):
+                with self.assertRaises(module.RemoteHistoryHold): self.observe(module,token)
+            self.assertEqual([True],changed)
+            self.assertEqual((raw,original.st_ino),(path.read_bytes(),path.stat().st_ino))
+            self.assertEqual(1,self.global_journal.inspect_global_unit(token,binding(),self.unit).attempt_count)
+
+    def _identical_original_replacement(self,suffix,name):
+        module=load()
+        with fixture(self.root),self.owner.spreadsheet_owner(binding()) as token:
+            self.prepare(token)
+            path=self.state/(hashlib.sha256(TARGET.encode()).hexdigest()+suffix)/name
+            original=path.read_bytes(); preserved=self.root/('preserved-original-'+name)
+            decode_tail=module.decode.decode_history_tail; changed=[]
+            def decoding(plan,raw,**options):
+                result=decode_tail(plan,raw,**options)
+                if raw.data==response(self.post).data and not changed:
+                    path.rename(preserved); path.write_bytes(original); path.chmod(0o600)
+                    changed.append(True)
+                return result
+            with mock.patch.object(module.decode,'decode_history_tail',side_effect=decoding):
+                with self.assertRaises(module.RemoteHistoryHold): self.observe(module,token)
+            self.assertEqual([True],changed)
+            self.assertEqual(original,preserved.read_bytes()); self.assertEqual(original,path.read_bytes())
+            self.assertEqual((1,'UNKNOWN'),(self.global_journal.inspect_global_unit(token,binding(),self.unit).attempt_count,
+                                           self.global_journal.inspect_global_unit(token,binding(),self.unit).outcome))
+
     def test_counted_unit_without_original_preread_cannot_match_or_create_preread(self):
         module = load()
         with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
@@ -422,6 +511,63 @@ class Req7OwnedHistoryMatchWorkflowTests(unittest.TestCase):
             self.assertEqual((1,'UNKNOWN'),(journal.inspect_global_unit(owner,bound,unit).attempt_count,
                                           journal.inspect_global_unit(owner,bound,unit).outcome))
             self.assertEqual(retained,{str(path.relative_to(state)):path.read_bytes() for path in state.rglob('*') if path.is_file()})
+
+    def test_actual_issued_match_rejects_original_count_and_history_namespace_drift(self):
+        from contextlib import ExitStack
+        from monitor import issue_tracker_global_attempt_journal as journal
+        module=load()
+        for fault in ('count','history-directory'):
+            with self.subTest(fault=fault),ExitStack() as stack:
+                writer,owner,bound,auth,_config,unit,docs=self.prepare_owned(stack)
+                responses={name:self.read_owned(stack,writer,owner,bound,auth,kind,value)
+                           for name,(kind,value) in docs.items()}
+                current=self.root/'var/lib/http-ztp-container/issue-tracker'/(hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()+'.history')
+                preserved=self.root/'preserved-issued-match-history'
+                original={p.name:p.read_bytes() for p in current.iterdir()}
+                decoding=module.decode.decode_history_tail; changed=[]
+                def decode_then_change(plan,raw,**options):
+                    result=decoding(plan,raw,**options)
+                    if raw is responses['history_response'] and not changed:
+                        if fault=='count': journal.record_global_attempt_intent(owner,bound,unit)
+                        else:
+                            current.rename(preserved); current.mkdir(mode=0o700)
+                            for name,image in original.items():
+                                path=current/name; path.write_bytes(image); path.chmod(0o600)
+                        changed.append(True)
+                    return result
+                with mock.patch.object(module.decode,'decode_history_tail',side_effect=decode_then_change):
+                    with self.assertRaises(module.RemoteHistoryHold):
+                        module.observe_owned_remote_history_unit(writer,owner,bound,unit,**responses)
+                self.assertEqual([True],changed)
+                seen=journal.inspect_global_unit(owner,bound,unit)
+                self.assertEqual((2 if fault=='count' else 1,'UNKNOWN'),(seen.attempt_count,seen.outcome))
+                if fault=='history-directory':
+                    self.assertEqual(original,{p.name:p.read_bytes() for p in preserved.iterdir()})
+                    self.assertEqual(original,{p.name:p.read_bytes() for p in current.iterdir()})
+            # Each subcase needs a genuinely new owned state, never an adopted
+            # UNKNOWN or a hand-reset original counter.
+            if fault=='count': self.doCleanups(); self.setUp()
+
+    def test_actual_issued_match_cannot_escape_after_matching_original_count_changes(self):
+        from contextlib import ExitStack
+        from monitor import issue_tracker_global_attempt_journal as journal
+        module=load()
+        with ExitStack() as stack:
+            writer,owner,bound,auth,_config,unit,docs=self.prepare_owned(stack)
+            responses={name:self.read_owned(stack,writer,owner,bound,auth,kind,value)
+                       for name,(kind,value) in docs.items()}
+            matching=module.observe_remote_history_unit; changed=[]
+            def matched_then_changed(*args,**options):
+                result=matching(*args,**options)
+                self.assertEqual('MATCHED_OBSERVATION',result.state)
+                journal.record_global_attempt_intent(owner,bound,unit); changed.append(True)
+                return result
+            with mock.patch.object(module,'observe_remote_history_unit',side_effect=matched_then_changed):
+                with self.assertRaises(module.RemoteHistoryHold):
+                    module.observe_owned_remote_history_unit(writer,owner,bound,unit,**responses)
+            self.assertEqual([True],changed)
+            self.assertEqual((2,'UNKNOWN'),(journal.inspect_global_unit(owner,bound,unit).attempt_count,
+                                           journal.inspect_global_unit(owner,bound,unit).outcome))
 
     def test_actual_fixed_dual_owner_native_reads_feed_original_whole_match_without_settlement(self):
         module = load()

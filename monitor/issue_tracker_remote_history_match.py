@@ -8,8 +8,10 @@ The owned-read bridge below establishes actual fixed-read provenance, current
 dual owners and typed template observations, not durable settlement authority.
 """
 from dataclasses import dataclass
+from contextlib import contextmanager
 import hashlib
 import json
+import os
 from urllib.parse import urlsplit
 
 from monitor import issue_tracker_global_attempt_journal as global_journal
@@ -74,7 +76,80 @@ def _rows(cells, first, last):
     return tuple(tuple(grouped[row]) for row in range(first, last + 1))
 
 
+@contextmanager
+def _hold_match_originals(token,binding,unit):
+    """Pin original count, History and nonces across the WHOLE observation.
+
+    Same-byte replacement is not the retained original; an added attempt is
+    not the count we matched. Only held private original directories/files,
+    never refreshed/adopted images, may survive this context. No writes or
+    COMPLETE authority are supplied by this necessary snapshot boundary.
+    """
+    from monitor import issue_tracker_local_commit as local
+    from monitor import issue_tracker_attempt_journal as journal
+    held=[]
+    try:
+        owner,parent,original_name,_header=global_journal._inputs(token,binding,unit)
+        prefix=original_name[:-len('.journal')]
+        for suffix in ('.journal','.history','.enrollment'):
+            name=prefix+suffix
+            folder=local._directory(parent,name)
+            held.append((name,folder,None,None))
+            journal._named(parent,name,folder,directory=True)
+            directory_identity=journal._identity(os.fstat(folder))
+            names=set(os.listdir(folder))
+            if suffix=='.journal':
+                count=len(names)-4
+                expected={'ACTION-PREIMAGE','WIRE','HEADER','INITIALIZED',
+                          *(f'ATTEMPT-{index}' for index in range(1,count+1))}
+                if not 1<=count<=6: raise RemoteHistoryHold()
+            elif suffix=='.history': expected={'HISTORY-RAW','HEADER','INITIALIZED'}
+            else: expected={'NONCES','HEADER','INITIALIZED'}
+            if names!=expected: raise RemoteHistoryHold()
+            files={}
+            for entry in sorted(names):
+                identity_before=journal._identity(os.stat(entry,dir_fd=folder,follow_symlinks=False))
+                raw=journal._read(folder,entry,2*1024*1024)
+                if journal._identity(os.stat(entry,dir_fd=folder,follow_symlinks=False))!=identity_before:
+                    raise RemoteHistoryHold()
+                files[entry]=(raw,identity_before)
+            held[-1]=(name,folder,directory_identity,files)
+        def verify():
+            if ownership._validated_owner(token,binding) is not owner: raise RemoteHistoryHold()
+            for name,folder,directory_identity,files in held:
+                journal._named(parent,name,folder,directory=True)
+                if (journal._identity(os.fstat(folder))!=directory_identity
+                        or set(os.listdir(folder))!=set(files)
+                        or any((journal._read(folder,entry,2*1024*1024),
+                            journal._identity(os.stat(entry,dir_fd=folder,follow_symlinks=False)))!=saved
+                            for entry,saved in files.items())):
+                    raise RemoteHistoryHold()
+                journal._named(parent,name,folder,directory=True)
+                if journal._identity(os.fstat(folder))!=directory_identity: raise RemoteHistoryHold()
+            ownership._validated_owner(token,binding)
+        verify()
+        yield
+        verify()
+    finally:
+        close_failed=False
+        for _name,folder,_identity,_files in reversed(held):
+            try: os.close(folder)
+            except OSError: close_failed=True
+        if close_failed: raise RemoteHistoryHold()
+
+
 def observe_remote_history_unit(token, binding, unit, identity, metadata_plan, metadata_response, history_plan, history_response):
+    failed=False
+    try:
+        with _hold_match_originals(token,binding,unit):
+            result=_observe_remote_history_unit(token,binding,unit,identity,metadata_plan,
+                                                metadata_response,history_plan,history_response)
+    except Exception: failed=True
+    if failed: raise RemoteHistoryHold()
+    return result
+
+
+def _observe_remote_history_unit(token, binding, unit, identity, metadata_plan, metadata_response, history_plan, history_response):
     """One conservative whole proof-set observation; no durable settlement.
 
     Fixed full-tail reads only, original prefix unchanged, exact ordered new
@@ -119,6 +194,20 @@ def observe_remote_history_unit(token, binding, unit, identity, metadata_plan, m
 
 def observe_owned_remote_history_unit(writer_token, owner_token, binding, unit, *,
                                       identity_response, headers_response, metadata_response, history_response):
+    """Keep original proof inputs pinned through the final issued-read gates."""
+    failed=False
+    try:
+        with _hold_match_originals(owner_token,binding,unit):
+            result=_observe_owned_remote_history_unit(writer_token,owner_token,binding,unit,
+                identity_response=identity_response,headers_response=headers_response,
+                metadata_response=metadata_response,history_response=history_response)
+    except Exception: failed=True
+    if failed: raise RemoteHistoryHold()
+    return result
+
+
+def _observe_owned_remote_history_unit(writer_token, owner_token, binding, unit, *,
+                                       identity_response, headers_response, metadata_response, history_response):
     """Actual fixed-read observations → original journal matching, never APPLIED.
 
     No caller plan/identity/freshness flag is accepted. Each original completion
