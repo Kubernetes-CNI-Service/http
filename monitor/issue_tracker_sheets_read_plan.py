@@ -42,6 +42,25 @@ class PreparedSheetsRead:
     budget_seconds: float = 30.0
 
 
+@dataclass(frozen=True)
+class PreparedSheetsMutation:
+    """Fixed shape only, NOT admission/permit. Keep read-child imports stdlib-only.
+
+    The separate original composer creates and validates this necessary
+    whole-batch projection. Read/token children never import that heavy graph.
+    """
+    host: str
+    path: str = field(repr=False)
+    method: str
+    body: bytes = field(repr=False)
+    headers: tuple = field(repr=False)
+    wire_sha256: str
+    binding: object = field(repr=False)
+    token: object = field(repr=False)
+    unit: object = field(repr=False)
+    budget_seconds: float = 60.0
+
+
 def prepare_sheets_read(binding, token, *, mode, sheet, first_row, last_row=None):
     """Exact columns or one exact row; discovery windows have a finite 5000-row cap.
 

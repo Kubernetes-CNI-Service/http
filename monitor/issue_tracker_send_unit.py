@@ -44,6 +44,40 @@ class FrozenSendUnit:
     outcome: str
 
 
+def prepare_mutation_request(binding, token, unit):
+    """Whole coherent C19 image, fixed batchUpdate path; no URL/body override.
+
+    The existing compiler/journal projection enforces <=1 MiB and <=1000
+    requests, including History/fence. Structural coherence does not prove
+    original sources, durable one-use consumption, cadence or hidden quota.
+    This uninstalled shape creates no socket/journal and grants no authority.
+    """
+    failed = False
+    try:
+        from monitor.issue_tracker_sheets_read_plan import prepare_template_identity_read, PreparedSheetsMutation
+        from monitor.issue_tracker_send_intent import _projection
+        base = prepare_template_identity_read(binding,token)
+        _projection(unit)
+        if json.loads(unit.action_preimage)['identity']['spreadsheet_id'] != binding.spreadsheet_id:
+            raise SendUnitHold()
+        result = PreparedSheetsMutation(base.host,'/v4/spreadsheets/'+binding.spreadsheet_id+':batchUpdate',
+            'POST',unit.wire_bytes,base.headers+(('Content-Type','application/json'),),
+            unit.wire_sha256,binding,token,unit)
+    except Exception: failed = True
+    if failed: raise SendUnitHold()
+    return result
+
+
+def _validate_mutation_request(prepared):
+    # Revalidate before native connection creation, including token expiry.
+    # Dataclass equality alone would accept bool/int as the fixed float budget.
+    from monitor.issue_tracker_sheets_read_plan import PreparedSheetsMutation
+    if (type(prepared) is not PreparedSheetsMutation or type(prepared.budget_seconds) is not float
+            or prepared.budget_seconds != 60.0
+            or prepared != prepare_mutation_request(prepared.binding,prepared.token,prepared.unit)):
+        raise SendUnitHold()
+
+
 def _canonical(value):
     return (json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n").encode("utf-8", "strict")
 

@@ -46,6 +46,44 @@ def public_ca():
 
 
 class Req7TlsInputsDirectTests(unittest.TestCase):
+    def test_native_mutation_revalidates_fixed_shape_before_ca_or_connection(self):
+        self.assertTrue(hasattr(self.module,'NativeSheetsMutationUnit'),'fixed one-shot native mutation unit missing')
+        from dataclasses import replace
+        from test_cases.test_req7_send_unit import load as load_unit, inputs, TARGET
+        from monitor.issue_tracker_online_target import OnlineTargetBinding
+        from monitor.issue_tracker_sdk_authentication import AuthenticatedToken
+        import time
+        composer = load_unit(); unit = composer.freeze_send_unit(**inputs())
+        binding = OnlineTargetBinding(TARGET,'a'*64,'b'*64)
+        token = AuthenticatedToken('sentinel.private-token',time.time()+3600)
+        original = composer.prepare_mutation_request(binding,token,unit)
+        for changes in ({'host':'foreign.invalid'}, {'path':'/foreign'}, {'method':'GET'},
+                        {'body':b'{}'}, {'headers':()}, {'budget_seconds':True}, {'budget_seconds':61},
+                        {'wire_sha256':'f'*64}):
+            native = self.module.NativeSheetsMutationUnit(binding,token,unit)
+            native._prepared = replace(original,**changes)
+            with self.subTest(fields=tuple(changes)), mock.patch.object(self.module,'controlled_tls_context') as ca:
+                with mock.patch('http.client.HTTPSConnection') as connect:
+                    with self.assertRaises(self.module.TlsInputHold) as caught: native.send_once()
+                    self.assertIsNone(caught.exception.__context__)
+                    with self.assertRaises(self.module.TlsInputHold): native.send_once()
+                    ca.assert_not_called(); connect.assert_not_called()
+
+    def test_low_level_mutation_type_cannot_fall_through_to_read_or_oauth_branch(self):
+        from dataclasses import replace
+        from test_cases.test_req7_send_unit import load as load_unit, inputs, TARGET
+        from monitor.issue_tracker_online_target import OnlineTargetBinding
+        from monitor.issue_tracker_sdk_authentication import AuthenticatedToken
+        import time
+        composer = load_unit()
+        plan = composer.prepare_mutation_request(OnlineTargetBinding(TARGET,'a'*64,'b'*64),
+            AuthenticatedToken('sentinel.private-token',time.time()+3600),composer.freeze_send_unit(**inputs()))
+        for changes in ({'method':'GET'}, {'host':'oauth2.googleapis.com','path':'/token'}):
+            with self.subTest(fields=tuple(changes)), mock.patch.object(self.module,'controlled_tls_context') as ca:
+                with mock.patch('http.client.HTTPSConnection') as connect:
+                    with self.assertRaises(self.module.TlsInputHold): self.module._native_complete_read(replace(plan,**changes))
+                    ca.assert_not_called(); connect.assert_not_called()
+
     def setUp(self):
         self.module = load(); self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name); self.path = self.root / "etc/ssl/certs/ca-certificates.crt"

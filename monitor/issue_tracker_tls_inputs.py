@@ -166,17 +166,23 @@ class CompleteTokenResponse:
 
 
 def _native_complete_read(prepared):
-    """One fixed OAuth POST, Sheets GET or read-only metadata-search POST.
+    """One fixed OAuth POST, Sheets GET, metadata search or typed whole batch.
 
     Internal only: this is not a URL-taking transport API or target authority.
     Uninstalled callers construct their immutable fixed shapes themselves.
     Complete here means intact bounded HTTP, not a valid Sheets observation.
     """
-    connection = None; failed = False
+    connection = None; failed = False; mutation = False
     try:
-        if (prepared.host, prepared.method) == ("sheets.googleapis.com", "POST"):
-            # Not a generic Sheets POST allowance: only the exact typed,
-            # bounded read-only search path/body can reach a native connection.
+        from monitor.issue_tracker_sheets_read_plan import PreparedSheetsMutation
+        if type(prepared) is PreparedSheetsMutation:
+            # Check type FIRST: tampered host/method must not select the GET
+            # or OAuth branch and escape the immutable mutation contract.
+            from monitor.issue_tracker_send_unit import _validate_mutation_request
+            _validate_mutation_request(prepared); mutation = True
+        elif (prepared.host, prepared.method) == ("sheets.googleapis.com", "POST"):
+            # Every other Sheets POST must satisfy the separate exact typed
+            # read-only search contract, never a generic mutation allowance.
             from monitor.issue_tracker_metadata_capacity import _validate_plan
             _validate_plan(prepared)
         elif (prepared.host, prepared.method) not in (("oauth2.googleapis.com", "POST"), ("sheets.googleapis.com", "GET")):
@@ -188,7 +194,8 @@ def _native_complete_read(prepared):
         connection.request(prepared.method, prepared.path, body=prepared.body, headers=dict(prepared.headers))
         response = connection.getresponse()
         status = response.status; pairs = tuple(response.getheaders())
-        if type(status) is not int or status != 200 or len(pairs) > 100: raise TlsInputHold()
+        if (type(status) is not int or (not mutation and status != 200)
+                or (mutation and not 200 <= status <= 599) or len(pairs) > 100): raise TlsInputHold()
         total = 0; unique = {}
         for name, value in pairs:
             if (type(name) is not str or re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]{1,256}", name) is None
@@ -221,6 +228,50 @@ def _native_complete_read(prepared):
             except Exception: failed = True
     if failed: raise TlsInputHold()
     return result
+
+
+@dataclass(frozen=True)
+class NativeMutationObservation:
+    """Intact same-connection syntax only; no APPLIED/COMPLETE or retry right."""
+    status: int
+    wire_sha256: str
+    response_sha256: object
+    outcome: str
+
+
+class NativeSheetsMutationUnit:
+    """Uninstalled native whole-batch prototype, NOT an online entry/permit.
+
+    One object consumes at most one request, even after error. The fixed
+    supervised launcher must separately enforce 60 seconds TOTAL, original
+    held WIRE and durable one-use count, actual dual ownership, fresh gates,
+    shared cadence and capacity. No CLI, refresh, resend or override ships.
+    Socket timeout alone is NOT a total budget or durable attempt proof.
+    """
+    def __init__(self,binding,token,unit):
+        from monitor.issue_tracker_send_unit import prepare_mutation_request
+        failed = False
+        try: self._prepared = prepare_mutation_request(binding,token,unit)
+        except Exception: failed = True
+        if failed: raise TlsInputHold()
+        self._called = False; self._lock = threading.Lock()
+
+    def send_once(self):
+        with self._lock:
+            used = self._called; self._called = True
+        if used: raise TlsInputHold()
+        failed = False
+        try:
+            from monitor.issue_tracker_send_unit import _validate_mutation_request
+            from monitor.issue_tracker_mutation_rejection import observe_rejection
+            _validate_mutation_request(self._prepared)
+            response = _native_complete_read(self._prepared)
+            observed = observe_rejection(response.status,response.data,complete=response.complete)
+            result = NativeMutationObservation(response.status,self._prepared.wire_sha256,
+                observed.body_sha256,observed.outcome)
+        except Exception: failed = True
+        if failed: raise TlsInputHold()
+        return result
 
 
 class NativeTokenHttpsUnit:

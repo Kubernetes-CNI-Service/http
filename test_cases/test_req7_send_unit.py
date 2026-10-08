@@ -49,6 +49,49 @@ def inputs(count=2):
 class Req7SendUnitDirectTests(unittest.TestCase):
     def setUp(self): self.module = load()
 
+    def test_fixed_mutation_shape_binds_whole_original_batch_and_has_no_url_or_budget_override(self):
+        self.assertTrue(hasattr(self.module, 'prepare_mutation_request'), 'fixed immutable mutation shape missing')
+        from monitor.issue_tracker_online_target import OnlineTargetBinding
+        from monitor.issue_tracker_sdk_authentication import AuthenticatedToken
+        import time
+        binding = OnlineTargetBinding(TARGET, 'a'*64, 'b'*64)
+        token = AuthenticatedToken('sentinel.private-token', time.time()+3600)
+        unit = self.module.freeze_send_unit(**inputs())
+        with mock.patch('socket.socket') as networking:
+            plan = self.module.prepare_mutation_request(binding, token, unit)
+        networking.assert_not_called()
+        self.assertEqual(('sheets.googleapis.com', '/v4/spreadsheets/synthetic_spreadsheet_id_0001:batchUpdate',
+                          'POST', 60.0), (plan.host, plan.path, plan.method, plan.budget_seconds))
+        self.assertEqual(unit.wire_bytes, plan.body)
+        self.assertEqual((('Accept','application/json'),('Authorization','Bearer sentinel.private-token'),
+                          ('Content-Type','application/json')), plan.headers)
+        self.assertEqual(unit.wire_sha256, plan.wire_sha256)
+        self.assertNotIn('sentinel.private-token', repr(plan)); self.assertNotIn(TARGET, repr(plan))
+        self.assertFalse(hasattr(plan, 'permit')); self.assertFalse(hasattr(plan, 'send_once'))
+        for override in ({'url':'https://foreign.invalid'}, {'budget_seconds':120}, {'body':b'{}'}):
+            with self.assertRaises(TypeError): self.module.prepare_mutation_request(binding, token, unit, **override)
+
+    def test_fixed_mutation_shape_refuses_retarget_expiry_incoherence_and_oversize_without_network(self):
+        self.assertTrue(hasattr(self.module, 'prepare_mutation_request'))
+        from dataclasses import replace
+        from monitor.issue_tracker_online_target import OnlineTargetBinding
+        from monitor.issue_tracker_sdk_authentication import AuthenticatedToken
+        import time
+        binding = OnlineTargetBinding(TARGET, 'a'*64, 'b'*64)
+        token = AuthenticatedToken('sentinel.private-token', time.time()+3600)
+        unit = self.module.freeze_send_unit(**inputs())
+        variants = ((replace(binding,spreadsheet_id='different_target_id_0001'),token,unit),
+                    (binding,replace(token,expires_at=time.time()-1),unit),
+                    (binding,replace(token,value='private\r\nHeader: injected'),unit),
+                    (binding,token,replace(unit,wire_bytes=b'{}')),
+                    (binding,token,replace(unit,wire_bytes=b'x'*(1024*1024+1))),
+                    (binding,token,object()))
+        for target,credential,value in variants:
+            with self.subTest(target=target.spreadsheet_id), mock.patch('socket.socket') as networking:
+                with self.assertRaises(self.module.SendUnitHold) as caught:
+                    self.module.prepare_mutation_request(target,credential,value)
+                self.assertIsNone(caught.exception.__context__); networking.assert_not_called()
+
     def test_observed_cabling_compiler_refuses_caller_allocations_coordinates_and_nonces(self):
         self.assertTrue(hasattr(self.module, 'freeze_observed_receipted_cabling_unit'), 'original Cabling NV/source compiler missing')
         for claim in ({}, {'reserved_ids': ('NV40000',)}, {'placements': ()}, {'target_nonce': 'c'*64}, {'publish_id': 'b'*64}):

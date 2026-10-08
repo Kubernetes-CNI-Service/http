@@ -34,6 +34,30 @@ SCRIPTS = {
 
 
 class Req7TransportManifestCandidateTests(unittest.TestCase):
+    def test_isolated_read_transport_does_not_import_the_heavy_mutation_composer(self):
+        # Existing fixed token/read children expose only their governed SDK
+        # closure. A new write shape must not add YAML/workbook imports to them.
+        code = ('import sys; sys.path.insert(0,'+repr(str(ROOT))+'); '
+                'from unittest import mock; from monitor import issue_tracker_tls_inputs as tls; '
+                'plan=tls.PreparedTokenRequest("oauth2.googleapis.com","/token","POST",b"x",(),30.0); '
+                '\nwith mock.patch.object(tls,"controlled_tls_context",side_effect=ValueError("owned stop before CA/network")) as ca:\n'
+                '    try: tls._native_complete_read(plan)\n'
+                '    except tls.TlsInputHold: pass\n'
+                '    ca.assert_called_once_with()\n'
+                'assert "monitor.issue_tracker_send_unit" not in sys.modules\n')
+        result = subprocess.run([sys.executable,'-I','-B','-c',code],stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,timeout=10)
+        self.assertEqual(0,result.returncode,result.stderr)
+
+    def test_fixed_native_mutation_workflow_binds_original_composer_coherence_and_error_decoder(self):
+        manifest = json.loads((ROOT/'test_cases/script_test_manifest.json').read_text())
+        members = {'monitor/issue_tracker_send_unit.py','monitor/issue_tracker_send_intent.py',
+                   'monitor/issue_tracker_sheets_read_plan.py','monitor/issue_tracker_sdk_authentication.py',
+                   'monitor/issue_tracker_tls_inputs.py','monitor/issue_tracker_mutation_rejection.py'}
+        self.assertTrue(any(members <= set(rule['members'])
+                            and 'test_cases.test_req7_native_tls_wire' in rule['tests']
+                            for rule in manifest['workflows']), 'actual immutable batch/native HTTP/rejection workflow missing')
+
     def test_owned_read_gate_fixture_uses_current_canonical_journal_registries(self):
         import monitor
         from test_cases.test_req7_global_attempt_journal import load as global_load

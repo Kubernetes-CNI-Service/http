@@ -1103,6 +1103,17 @@ History 连续性、共享节流、真实 mutation、COMPLETE 或整个 REQ7 验
 计数前后；后置失败保留已落盘的 UNKNOWN／计数。真实双家族原始来源和原生固定 TLS
 workflow 验证边界，仍不是共享 cadence、隐藏 PROJECT 库存或一次性发送／COMPLETE 权威。
 
+`prepare_mutation_request` 只从完整且自洽的原 C19 单元派生固定 batchUpdate POST，
+不接受 URL／body／预算覆盖；原 1 MiB／1000 requests（含 History/fence）限额保持。
+未安装 `NativeSheetsMutationUnit` 原型在创建连接前重核形态和 token 期限，每对象
+最多单次原生请求；完整同连接响应仅供 rejection 语法观察，200／redirect／401／
+quota／server error 都不证明 APPLIED，framing 缺失或冲突拒绝。读取和鉴权的原
+HTTP 200 合同不变。`test_req7_native_tls_wire` 对拥有的隔离 TLS 服务验证这些边界，
+不是受监督总 60 秒、持久单次消费、共享 cadence／隐藏配额或在线 GO 的证明。
+轻量 mutation 类型位于纯 stdlib read planner；原 token/read 的固定隔离子进程
+不得因此导入 composer 的 YAML/workbook 图。独立 `-I` 负例和原 native 读取／监督
+workflow 覆盖此依赖隔离合同，不添加 ambient fallback 或放宽原超时。
+
 History、两张 Cabling 与 metadata 的原始 RAW 持久化统一使用固定名称的
 2 MiB 有界图像写入器，原字节全部保留、不截断；超限在创建 store 前拒绝。
 短写继续完整落盘，无进度／file-dir barrier 失败保留 partial HOLD；NOREPLACE

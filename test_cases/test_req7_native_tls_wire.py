@@ -26,6 +26,79 @@ class Req7NativeTlsWireTests(unittest.TestCase):
     setUp = tls_fixtures.Req7TlsInputsDirectTests.setUp
     fixture = tls_fixtures.Req7TlsInputsDirectTests.fixture
 
+    def mutation(self):
+        self.assertTrue(hasattr(self.module,'NativeSheetsMutationUnit'),'fixed native mutation unit missing')
+        from test_cases.test_req7_send_unit import load as load_unit, inputs, TARGET
+        from monitor.issue_tracker_online_target import OnlineTargetBinding
+        from monitor.issue_tracker_sdk_authentication import AuthenticatedToken
+        import time
+        unit = load_unit().freeze_send_unit(**inputs())
+        return self.module.NativeSheetsMutationUnit(OnlineTargetBinding(TARGET,'a'*64,'b'*64),
+            AuthenticatedToken('sentinel.private-token',time.time()+3600),unit),unit
+
+    def test_actual_fixed_batch_post_keeps_original_wire_and_only_correlated_rejection_observation(self):
+        import hashlib
+        for status,name,expected in ((200,None,'UNKNOWN'),(400,'INVALID_ARGUMENT','DEFINITE_REJECTION'),
+                                     (403,'PERMISSION_DENIED','DEFINITE_REJECTION'),(404,'NOT_FOUND','DEFINITE_REJECTION'),
+                                     (403,'NOT_FOUND','UNKNOWN')):
+            native,unit = self.mutation()
+            body = b'{}' if name is None else json.dumps({'error':{'code':status,'status':name}}).encode()
+            response = ('HTTP/1.1 %d Synthetic\r\nContent-Length: %d\r\nConnection: close\r\n\r\n' % (status,len(body))).encode()+body
+            with self.subTest(status=status,name=name), self.server(response,hostname='sheets.googleapis.com',destination='sheets.googleapis.com') as (records,errors):
+                with self.fixture(), mock.patch.dict(os.environ,{'HTTPS_PROXY':'http://foreign.invalid:9'}):
+                    result = native.send_once()
+                    with self.assertRaises(self.module.TlsInputHold): native.send_once()
+            self.assertEqual([],errors); self.assertEqual(1,len(records))
+            self.assertEqual(b'POST /v4/spreadsheets/synthetic_spreadsheet_id_0001:batchUpdate HTTP/1.1\r\n',records[0][0])
+            self.assertEqual(unit.wire_bytes,records[0][2])
+            self.assertEqual((status,unit.wire_sha256,hashlib.sha256(body).hexdigest(),expected),
+                (result.status,result.wire_sha256,result.response_sha256,result.outcome))
+            self.assertFalse(hasattr(result,'permit')); self.assertFalse(hasattr(result,'applied'))
+            self.assertNotIn('sentinel.private-token',repr(result))
+
+    def test_native_mutation_redirect_auth_quota_and_server_errors_never_refresh_follow_or_resend(self):
+        for status in (302,401,429,503):
+            native,_unit = self.mutation()
+            response = ('HTTP/1.1 %d Denied\r\nContent-Length: 2\r\nLocation: https://foreign.invalid/\r\nConnection: close\r\n\r\n{}' % status).encode()
+            with self.subTest(status=status), self.server(response,hostname='sheets.googleapis.com',destination='sheets.googleapis.com') as (records,errors):
+                with self.fixture():
+                    result = native.send_once()
+                    with self.assertRaises(self.module.TlsInputHold): native.send_once()
+            self.assertEqual((status,'UNKNOWN'),(result.status,result.outcome))
+            self.assertEqual(1,len(records)); self.assertEqual([],errors)
+
+    def test_native_mutation_incomplete_or_conflicting_framing_never_becomes_rejection(self):
+        body = b'{"error":{"code":403,"status":"PERMISSION_DENIED"}}'
+        replies = (b'HTTP/1.1 403 Denied\r\nConnection: close\r\n\r\n'+body,
+                   b'HTTP/1.1 403 Denied\r\nContent-Length: 999\r\nConnection: close\r\n\r\n'+body,
+                   b'HTTP/1.1 403 Denied\r\nContent-Length: 2\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}',
+                   b'HTTP/1.1 403 Denied\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n2\r\n{}\r\n')
+        for response in replies:
+            native,_unit = self.mutation()
+            with self.subTest(bytes=len(response)), self.server(response,hostname='sheets.googleapis.com',destination='sheets.googleapis.com') as (records,errors):
+                with self.fixture(), self.assertRaises(self.module.TlsInputHold) as caught: native.send_once()
+                self.assertIsNone(caught.exception.__context__)
+                with self.assertRaises(self.module.TlsInputHold): native.send_once()
+            self.assertEqual(1,len(records)); self.assertEqual([],errors)
+
+    def test_native_whole_batch_larger_than_private_stdin_limit_is_not_split_or_truncated(self):
+        from test_cases.test_req7_send_unit import load as load_unit, inputs, TARGET
+        from monitor.issue_tracker_online_target import OnlineTargetBinding
+        from monitor.issue_tracker_sdk_authentication import AuthenticatedToken
+        import time
+        arguments = inputs(20)
+        arguments['business'] = tuple({**item,'values':{'L':'x'*4096}} for item in arguments['business'])
+        unit = load_unit().freeze_send_unit(**arguments)
+        self.assertGreater(len(unit.wire_bytes),65536); self.assertLessEqual(len(unit.wire_bytes),1024*1024)
+        native = self.module.NativeSheetsMutationUnit(OnlineTargetBinding(TARGET,'a'*64,'b'*64),
+            AuthenticatedToken('sentinel.private-token',time.time()+3600),unit)
+        with self.server(b'HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}',
+                         hostname='sheets.googleapis.com',destination='sheets.googleapis.com',request_limit=1024*1024) as (records,errors):
+            with self.fixture(): result = native.send_once()
+        self.assertEqual([],errors); self.assertEqual(1,len(records)); self.assertEqual(unit.wire_bytes,records[0][2])
+        self.assertEqual(22,len(json.loads(records[0][2])['requests']))
+        self.assertEqual('UNKNOWN',result.outcome)
+
     def certificates(self, hostname="oauth2.googleapis.com"):
         from cryptography import x509
         from cryptography.hazmat.primitives import hashes, serialization
@@ -55,7 +128,7 @@ class Req7NativeTlsWireTests(unittest.TestCase):
         return context
 
     @contextmanager
-    def server(self, response, hostname="oauth2.googleapis.com", destination="oauth2.googleapis.com"):
+    def server(self, response, hostname="oauth2.googleapis.com", destination="oauth2.googleapis.com", *, request_limit=65536):
         context = self.certificates(hostname)
         listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         listener.bind(("127.0.0.1", 0)); listener.listen(1); listener.settimeout(3)
@@ -78,7 +151,7 @@ class Req7NativeTlsWireTests(unittest.TestCase):
                                 if lengths not in ([], [0]): raise AssertionError("GET fixture received a body")
                                 body = b""
                             else:
-                                if len(lengths) != 1 or not 0 <= lengths[0] <= 65536: raise AssertionError("invalid owned fixture length")
+                                if len(lengths) != 1 or not 0 <= lengths[0] <= request_limit: raise AssertionError("invalid owned fixture length")
                                 body = incoming.read(lengths[0])
                             observations.append((request_line, tuple(headers), body))
                         if callable(response): response(transport)
