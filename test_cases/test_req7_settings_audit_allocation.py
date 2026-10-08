@@ -141,6 +141,44 @@ class Req7SettingsAuditAllocationTests(unittest.TestCase):
                                             self.global_journal.inspect_global_unit(sheet,binding(),value).outcome))
             self.assertEqual(self.event0,(self.project/'.tracker/settings/events/0.json').read_bytes())
 
+    def test_allocation_call_never_adopts_same_byte_replaced_assignment_originals(self):
+        for mode in ('create','inspect'):
+            for name in ('HEADER','ASSIGNMENTS','INITIALIZED','SETTINGS-AUDIT-ALLOCATED'):
+                with self.subTest(mode=mode,original=name):
+                    case=type(self)('test_pending_projection_comes_from_exact_actual_event_and_retains_outbox'); case.setUp()
+                    try:
+                        value=case.unit()
+                        with case.owners() as (writer,sheet):
+                            case.global_journal.prepare_global_unit(sheet,binding(),value)
+                            if mode=='inspect':
+                                case.module.prepare_settings_audit_allocation(writer,sheet,binding(),value)
+                            path=(case.project/'.tracker'/name if name=='SETTINGS-AUDIT-ALLOCATED'
+                                  else case.allocation/name)
+                            preserved=case.root/'preserved-assignment-original'
+                            synchronize=case.module._sync_marker; changed=[]; retained=[]
+                            def synchronize_then_replace(*args,**kwargs):
+                                result=synchronize(*args,**kwargs)
+                                if not changed:
+                                    retained.append(case.image())
+                                    image=path.read_bytes(); before=path.stat().st_ino
+                                    path.rename(preserved); path.write_bytes(image); path.chmod(0o600)
+                                    self.assertNotEqual(before,path.stat().st_ino)
+                                    changed.append(True)
+                                return result
+                            operation=(case.module.prepare_settings_audit_allocation if mode=='create'
+                                       else case.module.inspect_settings_audit_allocation)
+                            with mock.patch.object(case.module,'_sync_marker',side_effect=synchronize_then_replace):
+                                with self.assertRaises(case.module.SettingsAuditHold):
+                                    operation(writer,sheet,binding(),value)
+                            self.assertEqual([True],changed)
+                            self.assertEqual(preserved.read_bytes(),path.read_bytes())
+                            self.assertEqual(retained,[case.image()],'HOLD must not repair or remove retained evidence')
+                            self.assertEqual((0,'UNATTEMPTED_OBSERVATION'),
+                                (case.global_journal.inspect_global_unit(sheet,binding(),value).attempt_count,
+                                 case.global_journal.inspect_global_unit(sheet,binding(),value).outcome))
+                            self.assertEqual(['0.json'],sorted(p.name for p in (case.project/'.tracker/settings/outbox').iterdir()))
+                    finally: case.doCleanups()
+
     def test_real_settings_composer_global_intents_keep_allocation_and_new_event_pending(self):
         value = self.unit()
         with self.owners() as (writer, sheet):
@@ -169,6 +207,37 @@ class Req7SettingsAuditAllocationTests(unittest.TestCase):
                 self.module.prepare_settings_audit_allocation(writer, sheet, binding(), value)
             with self.assertRaises(self.module.SettingsAuditHold):
                 self.module.inspect_settings_audit_allocation(writer, sheet, binding(), self.unit(publish_id='f'*64))
+
+    def test_count_scope_pins_all_originals_and_preserves_zero_or_durable_unknown(self):
+        self.assertTrue(hasattr(self.module, '_hold_counted_audit_originals'),
+                        'original C25 identity must remain held across the durable counter')
+        for counted in (False, True):
+            for relative in ('settings/events/0.json','settings/outbox/0.json','settings/current','INITIALIZED',
+                             'settings-audit-allocation/HEADER','settings-audit-allocation/ASSIGNMENTS',
+                             'settings-audit-allocation/INITIALIZED','SETTINGS-AUDIT-ALLOCATED'):
+                with self.subTest(counted=counted,original=relative):
+                    case=type(self)('test_pending_projection_comes_from_exact_actual_event_and_retains_outbox'); case.setUp()
+                    try:
+                        value=case.unit()
+                        with case.owners() as (writer,sheet):
+                            case.prepare(writer,sheet,value)
+                            before=case.image(); path=case.project/'.tracker'/relative
+                            raw=path.read_bytes(); inode=path.stat().st_ino
+                            preserved=case.root/'owned-original-count-scope'
+                            with self.assertRaises(case.module.SettingsAuditHold):
+                                with case.module._hold_counted_audit_originals(writer,sheet,binding(),value) as verify:
+                                    verify()
+                                    if counted: case.global_journal.record_global_attempt_intent(sheet,binding(),value)
+                                    path.rename(preserved); path.write_bytes(raw); path.chmod(0o600)
+                                    verify()
+                            self.assertNotEqual(inode,path.stat().st_ino)
+                            self.assertEqual(raw,preserved.read_bytes()); self.assertEqual(raw,path.read_bytes())
+                            self.assertEqual(before,case.image(),'rejection must not repair retained originals')
+                            actual=case.global_journal.inspect_global_unit(sheet,binding(),value)
+                            self.assertEqual((1,'UNKNOWN') if counted else (0,'UNATTEMPTED_OBSERVATION'),
+                                             (actual.attempt_count,actual.outcome))
+                            self.assertEqual(['0.json'],sorted(p.name for p in (case.project/'.tracker/settings/outbox').iterdir()))
+                    finally: case.doCleanups()
 
     def test_unassigned_or_forged_audit_rows_cannot_allocate(self):
         for field, bad in (('event_id', 'invented-event'), ('details', '{}'),

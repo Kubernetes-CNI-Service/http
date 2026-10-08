@@ -160,6 +160,59 @@ def _inspect(parent, folder, header, assignments):
     journal._named(parent, _FOLDER, folder, directory=True)
 
 
+@contextmanager
+def _hold_allocation_originals(parent, folder, header, assignments):
+    """Pin completed allocation originals through synchronization/rechecks.
+
+    This is a per-observation snapshot, not persistent inode enrollment or
+    permission to adopt an incomplete allocation or to send/consume an audit.
+    """
+    opened=[]
+    try:
+        journal._named(parent,_FOLDER,folder,directory=True)
+        identity=journal._identity(os.fstat(folder))
+        names={'HEADER','ASSIGNMENTS','INITIALIZED'}
+        if set(os.listdir(folder))!=names: raise SettingsAuditHold()
+        for directory,name,expected,limit in (
+                (parent,_WITNESS,_witness(header,assignments),16384),
+                (folder,'HEADER',header,16384),
+                (folder,'ASSIGNMENTS',assignments,_LIMIT),
+                (folder,'INITIALIZED',_marker(header,assignments),16384)):
+            fd=os.open(name,local._flags(),dir_fd=directory)
+            opened.append((directory,name,fd,None,expected,limit))
+            info=local._check(fd,directory=False)
+            original=journal._identity(info)
+            opened[-1]=(directory,name,fd,original,expected,limit)
+            journal._named(directory,name,fd,directory=False)
+            if (info.st_size!=len(expected) or os.pread(fd,limit+1,0)!=expected
+                    or journal._identity(os.fstat(fd))!=original): raise SettingsAuditHold()
+        def verify():
+            journal._named(parent,_FOLDER,folder,directory=True)
+            if (journal._identity(os.fstat(folder))!=identity
+                    or set(os.listdir(folder))!=names): raise SettingsAuditHold()
+            for directory,name,fd,original,expected,limit in opened:
+                journal._named(directory,name,fd,directory=False)
+                if (journal._identity(os.fstat(fd))!=original
+                        or os.pread(fd,limit+1,0)!=expected): raise SettingsAuditHold()
+                journal._named(directory,name,fd,directory=False)
+                if journal._identity(os.fstat(fd))!=original: raise SettingsAuditHold()
+            journal._named(parent,_FOLDER,folder,directory=True)
+            if (journal._identity(os.fstat(folder))!=identity
+                    or set(os.listdir(folder))!=names): raise SettingsAuditHold()
+        verify()
+        yield verify
+        verify()
+    finally:
+        failed=False
+        for _directory,_name,fd,original,_expected,_limit in reversed(opened):
+            try:
+                if original is not None and journal._identity(os.fstat(fd))[:2]!=original[:2]:
+                    failed=True  # never close a foreign descriptor reused at this number
+                else: os.close(fd)
+            except OSError: failed=True
+        if failed: raise SettingsAuditHold()
+
+
 def _sync_marker(parent, folder, header, assignments):
     # Confirm the original post-image-barrier marker and its durability; never
     # create a missing one or use a coherent-looking partial image as authority.
@@ -172,6 +225,36 @@ def _sync_marker(parent, folder, header, assignments):
         os.fsync(descriptor); os.fsync(folder); os.fsync(parent)
         journal._named(folder, 'INITIALIZED', descriptor, directory=False)
     finally: os.close(descriptor)
+
+
+@contextmanager
+def _hold_counted_audit_originals(writer_token, spreadsheet_token, binding, unit):
+    """Keep the same original settings/allocation through one durable count.
+
+    Read-only necessary scope, not admission, persistent inode enrollment or
+    recovery. A post-count failure retains UNKNOWN; never repair or roll back.
+    """
+    folder=None; failed=False
+    try:
+        with _hold_settings_originals(writer_token) as (_images,verify_settings):
+            owner,header,assignments=_originals(writer_token,spreadsheet_token,binding,unit)
+            folder=local._directory(owner.root_fd,_FOLDER)
+            with _hold_allocation_originals(owner.root_fd,folder,header,assignments) as verify_allocation:
+                _inspect(owner.root_fd,folder,header,assignments)
+                def verify():
+                    verify_settings()
+                    if local._owner(writer_token) is not owner: raise SettingsAuditHold()
+                    ownership._validated_owner(spreadsheet_token,binding)
+                    verify_allocation()
+                verify()
+                yield verify
+                verify()
+    except Exception: failed=True
+    finally:
+        if folder is not None:
+            try: os.close(folder)
+            except OSError: failed=True
+    if failed: raise SettingsAuditHold()
 
 
 def _observe_held(writer_token, spreadsheet_token, binding, unit, *, create, verify_settings):
@@ -203,16 +286,19 @@ def _observe_held(writer_token, spreadsheet_token, binding, unit, *, create, ver
             local._write_new(folder, 'INITIALIZED', _marker(header, assignments))
         else:
             folder = local._directory(owner.root_fd, _FOLDER)
-        _inspect(owner.root_fd, folder, header, assignments)
-        _sync_marker(owner.root_fd, folder, header, assignments)
-        if _originals(writer_token, spreadsheet_token, binding, unit)[1:] != (header, assignments):
-            raise SettingsAuditHold()
-        ownership._validated_owner(spreadsheet_token, binding)
-        local._owner(writer_token)
-        _inspect(owner.root_fd, folder, header, assignments)
-        if create and global_journal.inspect_global_unit(spreadsheet_token, binding, unit).attempt_count != 0:
-            raise SettingsAuditHold()
-        verify_settings()
+        with _hold_allocation_originals(owner.root_fd,folder,header,assignments) as verify_allocation:
+            _inspect(owner.root_fd, folder, header, assignments)
+            _sync_marker(owner.root_fd, folder, header, assignments)
+            verify_allocation()
+            if _originals(writer_token, spreadsheet_token, binding, unit)[1:] != (header, assignments):
+                raise SettingsAuditHold()
+            ownership._validated_owner(spreadsheet_token, binding)
+            local._owner(writer_token)
+            _inspect(owner.root_fd, folder, header, assignments)
+            if create and global_journal.inspect_global_unit(spreadsheet_token, binding, unit).attempt_count != 0:
+                raise SettingsAuditHold()
+            verify_settings()
+            verify_allocation()
     except Exception: failed = True
     finally:
         if folder is not None:

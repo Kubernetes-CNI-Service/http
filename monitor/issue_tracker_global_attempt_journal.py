@@ -446,6 +446,18 @@ def _receipted_original_facts(
     return receipt, actual_source, reservations, business, audits
 
 
+@contextmanager
+def _hold_receipted_audit_originals(writer_token, token, binding, unit):
+    """Keep original C25 identities, not two separately reopened snapshots."""
+    _inputs(token,binding,unit)
+    if json.loads(unit.action_preimage)['audits']:
+        from monitor.issue_tracker_settings_audit_allocation import _hold_counted_audit_originals
+        with _hold_counted_audit_originals(writer_token,token,binding,unit) as verify:
+            yield verify
+    else:
+        yield lambda: None
+
+
 def record_receipted_original_attempt_intent(
     token, binding, identity, unit, *, qualified_source, store, writer_token,
     settings, whitelist_snapshot, expected_template_sha256, http_root, whitelist_path,
@@ -464,13 +476,16 @@ def record_receipted_original_attempt_intent(
 
     failed = False
     try:
-        before = inspect_global_unit(token, binding, unit)
-        if before.attempt_count == 6: raise GlobalAttemptHold()
-        images = originals()
-        result = _observe(token, binding, unit, True)
-        if (originals() != images or result.attempt_count != before.attempt_count + 1
-                or inspect_global_unit(token, binding, unit) != result):
-            raise GlobalAttemptHold()
+        with _hold_receipted_audit_originals(writer_token,token,binding,unit) as verify_audits:
+            before = inspect_global_unit(token, binding, unit)
+            if before.attempt_count == 6: raise GlobalAttemptHold()
+            images = originals()
+            verify_audits()
+            result = _observe(token, binding, unit, True)
+            verify_audits()
+            if (originals() != images or result.attempt_count != before.attempt_count + 1
+                    or inspect_global_unit(token, binding, unit) != result):
+                raise GlobalAttemptHold()
     except Exception: failed = True
     if failed: raise GlobalAttemptHold()
     return result
@@ -513,15 +528,18 @@ def record_shared_retry_continuous_owned_attempt_intent(
         return continuity,gates,originals
     failed=False
     try:
-        before=inspect_global_unit(token,binding,unit)
-        if not 1<=before.attempt_count<6: raise GlobalAttemptHold()
-        original=facts()
-        image=_latest_receipted_prod_xlsx(writer_token,expected_template_sha256)
-        with _hold_shared_retry_opportunity(writer_token,token,binding,unit,store,image,
-                                             boot_id=boot_id,monotonic_ns=monotonic_ns):
-            result=_observe(token,binding,unit,True)
-        if (facts()!=original or result.attempt_count!=before.attempt_count+1
-                or inspect_global_unit(token,binding,unit)!=result): raise GlobalAttemptHold()
+        with _hold_receipted_audit_originals(writer_token,token,binding,unit) as verify_audits:
+            before=inspect_global_unit(token,binding,unit)
+            if not 1<=before.attempt_count<6: raise GlobalAttemptHold()
+            original=facts()
+            image=_latest_receipted_prod_xlsx(writer_token,expected_template_sha256)
+            with _hold_shared_retry_opportunity(writer_token,token,binding,unit,store,image,
+                                                 boot_id=boot_id,monotonic_ns=monotonic_ns):
+                verify_audits()
+                result=_observe(token,binding,unit,True)
+                verify_audits()
+            if (facts()!=original or result.attempt_count!=before.attempt_count+1
+                    or inspect_global_unit(token,binding,unit)!=result): raise GlobalAttemptHold()
     except Exception: failed=True
     if failed: raise GlobalAttemptHold()
     return result

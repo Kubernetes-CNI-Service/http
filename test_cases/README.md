@@ -901,6 +901,17 @@ pending 读取及分配的整个调用另保持原 settings/events/outbox/curren
 替换件。根目录允许本调用新增自己的分配见证，但不允许替换原 settings 子树。
 原 allocation/outbox/journal 不回填、不清除；这只补原件稳定性，不授予
 COMPLETE/DELIVERED、outbox 消费、发送或在线 worker 激活。
+已完成分配的 HEADER、ASSIGNMENTS、INITIALIZED 和外部见证也保持原只读 FD，
+穿过同步和最终复核；同字节替换不能被重开路径采用。受保护普通计数及共享重试
+另在原 C5/C6、业务、预留和审计的前后复核之间持续持有 settings 与分配原件，
+计数前身份漂移不计数，持久计数后的漂移保留 UNKNOWN，不回滚或修补。
+共享重试的后计数拒绝保留未配对 admission INTENT，所有后续 lane HOLD；
+这不是清理或重试许可。独立 direct 覆盖八类原件及计数前后两种状态，真实
+Stage-L/C5/C6 workflow 覆盖普通计数和共享重试后的同字节替换，保留原字节故障测试。
+此身份快照仅绑定本次观察／计数窗口，不是跨冷进程的永久 inode 登记或现场证明。
+独立的 ETH/IB cabling 夹具分别获取其合成 token 和读取计划，不沿用前一夹具已过期
+的 token；TTL 和生产过期拒绝不变。新增受控墙钟跨窗口测试不冒充休眠或断电见证。
+计划失败仅追加阶段、类型一致性及剩余有效秒数，不输出 token、header、ID 或业务内容。
 `test_req7_sheets_read_plan` / `test_req7_sheets_read_decode` 与
 `test_req7_online_whitelist_read` 固定精确列／坐标、十四表身份、四张 row-2 多行字面表头
 和完整有限 Whitelist；非原子 GET 不构成 enrollment、发送许可或完整格式快照。

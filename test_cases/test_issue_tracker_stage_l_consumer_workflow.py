@@ -93,6 +93,28 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         self._exercise_real_protected_three_panel_fixture(skip_history=False, observed_cabling_insert_probe=True,
             business_preread_probe=True, original_reserved_probe=True, receipted_intent_probe=True, settings_audit_probe=True)
 
+    def test_actual_c25_assignment_original_survives_the_entire_durable_count(self):
+        self._exercise_real_protected_three_panel_fixture(skip_history=False, observed_cabling_insert_probe=True,
+            business_preread_probe=True, original_reserved_probe=True, receipted_intent_probe=True,
+            settings_audit_probe=True, allocation_original_identity_probe=True)
+
+    def test_actual_c25_assignment_replacement_after_shared_retry_keeps_terminal_unknown(self):
+        self._exercise_real_protected_three_panel_fixture(skip_history=False, observed_cabling_insert_probe=True,
+            business_preread_probe=True, original_reserved_probe=True, receipted_intent_probe=True,
+            settings_audit_probe=True, owned_read_gates_probe=True, owned_continuity_probe=True,
+            shared_retry_probe=True, allocation_retry_identity_probe=True)
+
+    def test_each_independent_c25_sheet_fixture_acquires_a_fresh_synthetic_credential(self):
+        # Separate fixtures must not inherit an earlier fixture's expired
+        # token. Preserve the production expiry contract and its 3600s TTL.
+        clock=[time.time()]
+        def starting(sheet):
+            if sheet=='IB Cabling': clock[0]+=7200
+        with mock.patch('monitor.issue_tracker_sheets_read_plan.time.time',side_effect=lambda:clock[0]):
+            self._exercise_real_protected_three_panel_fixture(skip_history=False, observed_cabling_insert_probe=True,
+                business_preread_probe=True, original_reserved_probe=True, receipted_intent_probe=True,
+                settings_audit_probe=True, before_cabling_fixture=starting)
+
     def test_actual_native_read_gates_dominate_original_c6_count_and_expiry_retains_unknown(self):
         from monitor import issue_tracker_global_attempt_journal as journal
         self.assertTrue(hasattr(journal, 'record_owned_receipted_attempt_intent'),
@@ -473,7 +495,8 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         panel_counts_probe=False, source_unit_probe=False, receipted_source_probe=False, observed_source_probe=False,
         observed_switch_insert_probe=False, observed_cabling_insert_probe=False, business_preread_probe=False, original_reserved_probe=False, receipted_intent_probe=False,
         settings_audit_probe=False, owned_read_gates_probe=False, owned_continuity_probe=False, complete_preview_probe=False,
-        shared_retry_probe=False,
+        shared_retry_probe=False, allocation_original_identity_probe=False, allocation_retry_identity_probe=False,
+        before_cabling_fixture=None,
         complete_preview_source_race=False,
         complete_preview_cgi=False,
     ):
@@ -1477,14 +1500,18 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                     allowlist_bytes = b'["synthetic_spreadsheet_id_0001"]\n'
                     binding = current_target.bind_online_target(safe_load_global_yaml((project/'01-global.yaml').read_text()),
                         current_target.freeze_target_allowlist(allowlist_bytes))
-                credential = AuthenticatedToken('synthetic.private-token', time.time()+3600)
-                identity = decode_template_identity(prepare_template_identity_read(binding, credential), response(identity_response()))
-                history_plan = prepare_history_tail_read(binding, credential)
-                history_raw = response({'spreadsheetId': binding.spreadsheet_id, 'sheets': [{'properties': {'sheetId': 105,
-                    'title': 'Update_History', 'sheetType': 'GRID', 'gridProperties': {'rowCount': 100, 'columnCount': 5}},
-                    'data': [{'startRow': 2, 'startColumn': 0}]}]})
                 for sheet, family, sid, other_sheet, other_sid in (('ETH Cabling', 'eth_cabling', 102, 'IB Cabling', 103),
                                                                   ('IB Cabling', 'ib_cabling', 103, 'ETH Cabling', 102)):
+                    if before_cabling_fixture is not None: before_cabling_fixture(sheet)
+                    # Each sheet below owns a separate native fixture/lock
+                    # period. Acquire its synthetic credential/read plans here,
+                    # never extend or ignore an earlier period's token expiry.
+                    credential = AuthenticatedToken('synthetic.private-token', time.time()+3600)
+                    identity = decode_template_identity(prepare_template_identity_read(binding, credential), response(identity_response()))
+                    history_plan = prepare_history_tail_read(binding, credential)
+                    history_raw = response({'spreadsheetId': binding.spreadsheet_id, 'sheets': [{'properties': {'sheetId': 105,
+                        'title': 'Update_History', 'sheetType': 'GRID', 'gridProperties': {'rowCount': 100, 'columnCount': 5}},
+                        'data': [{'startRow': 2, 'startColumn': 0}]}]})
                     candidates = tuple(item for item in qualified.candidates if item.activity_key[0] == family)
                     self.assertGreater(len(candidates), 1)
                     row = cabling_row('NV30016'); key = candidates[0].activity_key
@@ -1496,9 +1523,17 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                     occupancy = insertion_document(sheet, rows, 100); occupancy['sheets'][0]['properties']['sheetId'] = sid
                     other = cabling_row('NV39999', 'Closed'); other['K'] = literal('unrelated-original-seed')
                     other_raw = sheet_document(other_sheet, [other], 100); other_raw['sheets'][0]['properties']['sheetId'] = other_sid
-                    discovery_plan = prepare_activity_sheet_read(binding, credential, sheet=sheet)
-                    occupancy_plan = prepare_insertion_sheet_read(binding, credential, sheet=sheet)
-                    other_plan = prepare_activity_sheet_read(binding, credential, sheet=other_sheet)
+                    try:
+                        discovery_plan = prepare_activity_sheet_read(binding, credential, sheet=sheet)
+                        occupancy_plan = prepare_insertion_sheet_read(binding, credential, sheet=sheet)
+                        other_plan = prepare_activity_sheet_read(binding, credential, sheet=other_sheet)
+                    except Exception as exc:
+                        # Safe phase facts only; no credential/header/body/ID.
+                        print('CABLING_FIXTURE_PLAN_ERROR',sheet,type(exc).__name__,{
+                            'binding_class_current':type(binding) is sys.modules['monitor.issue_tracker_online_target'].OnlineTargetBinding,
+                            'token_class_current':type(credential) is sys.modules['monitor.issue_tracker_sdk_authentication'].AuthenticatedToken,
+                            'expires_in_seconds':credential.expires_at-time.time()},flush=True)
+                        raise
                     original_read = response(discovery); other_read = response(other_raw)
                     reads = []
                     for offset, candidate in enumerate(candidates):
@@ -1808,6 +1843,42 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                                             expected_template_sha256=self.snapshot.workbook_sha256,settings=args['settings'],
                                             whitelist_sha256=self.snapshot.whitelist.sha256,qualified_source=qualified)
                                         bundle=fresh_bundle()
+                                        if allocation_retry_identity_probe:
+                                            original_observe=global_journal._observe
+                                            raw=assignments_path.read_bytes(); inode=assignments_path.stat().st_ino
+                                            preserved=allocation_path.parent/'owned-original-retry-assignments'
+                                            injected=[]
+                                            def replace_after_retry(*values,**options):
+                                                result=original_observe(*values,**options)
+                                                if values[3]:
+                                                    assignments_path.rename(preserved)
+                                                    assignments_path.write_bytes(raw); assignments_path.chmod(0o600)
+                                                    injected.append(result.attempt_count)
+                                                return result
+                                            with mock.patch.object(admission,'time',SimpleNamespace(monotonic_ns=lambda:now)), \
+                                                    mock.patch.object(global_journal,'_observe',side_effect=replace_after_retry):
+                                                with self.assertRaises(global_journal.GlobalAttemptHold):
+                                                    global_journal.record_shared_retry_continuous_owned_attempt_intent(
+                                                        spreadsheet_token,binding,unit,qualified_source=qualified,store=self.store,
+                                                        writer_token=writer_token,settings=args['settings'],whitelist_snapshot=self.snapshot,
+                                                        expected_template_sha256=self.snapshot.workbook_sha256,http_root=self.root,
+                                                        whitelist_path=self.template,boot_id=prior['boot_id'],monotonic_ns=now,**bundle)
+                                            self.assertEqual([2],injected)
+                                            self.assertNotEqual(inode,assignments_path.stat().st_ino)
+                                            self.assertEqual(raw,preserved.read_bytes()); self.assertEqual(raw,assignments_path.read_bytes())
+                                            intent=global_journal.inspect_global_unit(spreadsheet_token,binding,unit)
+                                            self.assertEqual((2,'UNKNOWN'),(intent.attempt_count,intent.outcome))
+                                            self.assertEqual(allocation_image,{p.name:p.read_bytes() for p in allocation_path.iterdir()})
+                                            self.assertTrue(list((project/'.tracker/settings/outbox').iterdir()))
+                                            admissions=project/'.tracker/admissions'
+                                            self.assertTrue(list(admissions.glob('retry-*-intent.json')))
+                                            self.assertEqual([],list(admissions.glob('retry-*-count.json')))
+                                            retained={p.name:p.read_bytes() for p in admissions.iterdir()}
+                                            with self.assertRaises(admission.AdmissionHold):
+                                                admission.read_shared_local_admission(writer_token,self.store,committed.prepared.xlsx_bytes)
+                                            self.assertEqual(retained,{p.name:p.read_bytes() for p in admissions.iterdir()})
+                                            self.assertEqual(c6_original,{name:(generation_path/name).read_bytes() for name in c6_original})
+                                            return
                                         from monitor import issue_tracker_history_preread_journal as continuity_module
                                         from monitor import issue_tracker_remote_history_match as gates_module
                                         phases=[]
@@ -1852,7 +1923,37 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                                         return  # this new scenario asserts one complete protected ETH retry, not the fault loop below
                                     for count in range(1, 7):
                                         allocation_fault = settings_audit_probe and sheet == 'ETH Cabling' and count == 6
-                                        if owned_read_gates_probe and count == 6:
+                                        if allocation_original_identity_probe and sheet == 'ETH Cabling' and count == 1:
+                                            original_observe = global_journal._observe
+                                            original_bytes = assignments_path.read_bytes()
+                                            original_inode = assignments_path.stat().st_ino
+                                            preserved = allocation_path.parent/'owned-original-assignments'
+                                            replaced = allocation_path.parent/'owned-replaced-assignments'
+                                            injected = []
+                                            def replace_after_count(*observe_args, **observe_kwargs):
+                                                result = original_observe(*observe_args, **observe_kwargs)
+                                                if observe_args[3]:
+                                                    assignments_path.rename(preserved)
+                                                    assignments_path.write_bytes(original_bytes)
+                                                    assignments_path.chmod(0o600)
+                                                    injected.append(result.attempt_count)
+                                                return result
+                                            try:
+                                                with mock.patch.object(global_journal, '_observe', side_effect=replace_after_count):
+                                                    with self.assertRaises(global_journal.GlobalAttemptHold): record()
+                                                self.assertEqual([1], injected)
+                                                self.assertNotEqual(original_inode, assignments_path.stat().st_ino)
+                                                self.assertEqual(original_bytes, assignments_path.read_bytes())
+                                                self.assertEqual(original_bytes, preserved.read_bytes())
+                                                intent = global_journal.inspect_global_unit(spreadsheet_token, binding, unit)
+                                                self.assertEqual((1, 'UNKNOWN'), (intent.attempt_count, intent.outcome))
+                                                self.assertEqual(allocation_image, {p.name: p.read_bytes() for p in allocation_path.iterdir()})
+                                                self.assertTrue(list((project/'.tracker/settings/outbox').iterdir()))
+                                            finally:
+                                                if preserved.exists():
+                                                    assignments_path.rename(replaced)
+                                                    preserved.rename(assignments_path)  # owned fixture only; no production repair
+                                        elif owned_read_gates_probe and count == 6:
                                             bundle = fresh_bundle(); expired = [False]
                                             original_counter = global_journal.record_receipted_original_attempt_intent
                                             def finish_after_read_deadline(*counter_args,**counter_kwargs):
