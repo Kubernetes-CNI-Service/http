@@ -159,6 +159,10 @@ class Req7RemoteHistoryMatchDirectTests(unittest.TestCase):
             observed=self.observe(module,token)
             with module._hold_match_originals(token,binding(),self.unit) as (_verify,originals):
                 _owner,_parent,name,base=self.global_journal._inputs(token,binding(),self.unit)
+                start=self.state/(name[:-len('.journal')]+'.completion-started')
+                start.write_bytes(local._canonical({'schema_version':1,'unit_id':self.unit.unit_id,'binding':base,
+                    'originals_sha256':hashlib.sha256(local._canonical(originals)).hexdigest(),
+                    'state':'COMPLETION-STARTED-NOT-APPLIED'})); start.chmod(0o600)
                 proof=self.state/(name[:-len('.journal')]+'.completion'); proof.mkdir(mode=0o700)
                 paths={
                     'IDENTITY-RAW':self.planner.prepare_template_identity_read(self.binding,self.token_value).path,
@@ -175,6 +179,7 @@ class Req7RemoteHistoryMatchDirectTests(unittest.TestCase):
                                  'sha256':hashlib.sha256(raw).hexdigest(),
                                  'request_path_sha256':hashlib.sha256(paths[name].encode()).hexdigest()}
                 header=local._canonical({'schema_version':1,'unit_id':self.unit.unit_id,'binding':base,
+                    'start_witness_identity':list(original_io._identity(os.stat(start))),
                     'originals':originals,'folder_identity':list(original_io._identity(os.stat(proof))[:2]),
                     'matched':asdict(observed),'responses':files})
                 path=proof/'HEADER'; path.write_bytes(header); path.chmod(0o600)
@@ -763,6 +768,58 @@ with scoped_fixture(root,owner),owner.spreadsheet_owner(bound) as token:
             self.assertEqual((1,'UNKNOWN'),(journal.inspect_global_unit(owner,bound,unit).attempt_count,
                                            journal.inspect_global_unit(owner,bound,unit).outcome))
 
+    def test_displaced_completion_cannot_reset_count_claim_or_restart_proof_after_cold_acquisition(self):
+        from contextlib import ExitStack
+        from monitor import issue_tracker_global_attempt_journal as journal
+        module=load()
+        with ExitStack() as stack:
+            writer,owner,bound,auth,_config,unit,docs=self.prepare_owned(stack)
+            responses={name:self.read_owned(stack,writer,owner,bound,auth,kind,value)
+                       for name,(kind,value) in docs.items()}
+            module.record_owned_completion_evidence(writer,owner,bound,unit,**responses)
+            state=self.root/'var/lib/http-ztp-container/issue-tracker'
+            key=hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()
+            proof=state/(key+'.completion'); saved=self.root/'preserved-completion-proof'
+            proof.rename(saved)  # Recoverable owned fault; no deletion.
+            retained={p:p.read_bytes() for p in state.rglob('*') if p.is_file()}
+            original={p:p.read_bytes() for p in saved.iterdir()}
+            with self.assertRaises(journal.GlobalAttemptHold): journal.record_global_attempt_intent(owner,bound,unit)
+            issued=[]
+            with self.assertRaises(journal.GlobalAttemptHold):
+                with journal._hold_counted_original_wire(writer,owner,bound,unit) as image: issued.append(image)
+            self.assertEqual([],issued); self.assertFalse((state/(key+'.dispatch')).exists())
+            with self.assertRaises(module.RemoteHistoryHold):
+                module.record_owned_completion_evidence(writer,owner,bound,unit,**responses)
+            self.assertFalse(proof.exists())
+            self.assertEqual(retained,{p:p.read_bytes() for p in retained})
+            self.assertEqual(original,{p:p.read_bytes() for p in original})
+            self.assertEqual((1,'UNKNOWN'),(journal.inspect_global_unit(owner,bound,unit).attempt_count,
+                                           journal.inspect_global_unit(owner,bound,unit).outcome))
+        # A genuinely cold interpreter/acquisition cannot depend on a live
+        # read registry or reconstruct a send permission from a missing folder.
+        import subprocess
+        from dataclasses import asdict
+        program='''import sys,json,hashlib
+from pathlib import Path
+sys.path[:0]=[sys.argv[1],sys.argv[1]+"/tools"]
+from test_cases.test_req7_spreadsheet_owner import scoped_fixture
+from monitor import issue_tracker_spreadsheet_owner as owner, issue_tracker_global_attempt_journal as journal
+from monitor.issue_tracker_online_target import OnlineTargetBinding
+from monitor.issue_tracker_send_unit import _original_unit
+root=Path(sys.argv[2]); bound=OnlineTargetBinding(**json.loads(sys.stdin.buffer.read()))
+path=root/'var/lib/http-ztp-container/issue-tracker'/(hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()+'.journal')
+unit=_original_unit((path/'ACTION-PREIMAGE').read_bytes(),(path/'WIRE').read_bytes())
+with scoped_fixture(root,owner),owner.spreadsheet_owner(bound) as token:
+ try: journal.record_global_attempt_intent(token,bound,unit)
+ except journal.GlobalAttemptHold: pass
+ else: raise AssertionError('cold count reset')
+ seen=journal.inspect_global_unit(token,bound,unit)
+ print(seen.attempt_count,seen.outcome)
+'''
+        cold=subprocess.run([sys.executable,'-B','-c',program,str(ROOT),str(self.root)],
+            input=json.dumps(asdict(bound)).encode(),stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=10)
+        self.assertEqual(0,cold.returncode,cold.stderr); self.assertEqual(b'1 UNKNOWN\n',cold.stdout)
+
     def test_cold_completion_replays_raw_semantics_not_a_self_consistent_matched_summary(self):
         """Raw hashes/stat and COMPLETE can agree while the proof rows do not."""
         module=load()
@@ -873,6 +930,186 @@ with scoped_fixture(root,owner),owner.spreadsheet_owner(bound) as token:
                     module.record_owned_completion_evidence(writer,owner,bound,unit,**responses)
                 self.assertEqual(original,{str(p.relative_to(proof)):p.read_bytes() for p in proof.rglob('*') if p.is_file()})
             if boundary!=14: self.doCleanups(); self.setUp()
+
+    def test_completion_start_witness_barriers_precede_proof_and_block_cold_recreation(self):
+        from contextlib import ExitStack
+        from monitor import issue_tracker_global_attempt_journal as journal
+        import os
+        for boundary in (1,2):
+            with self.subTest(boundary=boundary),ExitStack() as stack:
+                module=load()
+                writer,owner,bound,auth,_config,unit,docs=self.prepare_owned(stack)
+                responses={name:self.read_owned(stack,writer,owner,bound,auth,kind,value)
+                           for name,(kind,value) in docs.items()}
+                state=self.root/'var/lib/http-ztp-container/issue-tracker'
+                key=hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()
+                witness=state/(key+'.completion-started'); proof=state/(key+'.completion')
+                actual=os.fsync; calls=[]
+                def fail_at(fd):
+                    if witness.exists() and not proof.exists():
+                        calls.append(fd)
+                        if len(calls)==boundary: raise OSError('owned witness barrier fault')
+                    return actual(fd)
+                with mock.patch('os.fsync',side_effect=fail_at),self.assertRaises(module.RemoteHistoryHold):
+                    module.record_owned_completion_evidence(writer,owner,bound,unit,**responses)
+                self.assertEqual(boundary,len(calls)); self.assertTrue(witness.is_file()); self.assertFalse(proof.exists())
+                retained={p:p.read_bytes() for p in state.rglob('*') if p.is_file()}
+                with self.assertRaises(journal.GlobalAttemptHold): journal.record_global_attempt_intent(owner,bound,unit)
+                with self.assertRaises(module.RemoteHistoryHold):
+                    module.record_owned_completion_evidence(writer,owner,bound,unit,**responses)
+                self.assertEqual(retained,{p:p.read_bytes() for p in retained}); self.assertFalse(proof.exists())
+                self.assertEqual((1,'UNKNOWN'),(journal.inspect_global_unit(owner,bound,unit).attempt_count,
+                                               journal.inspect_global_unit(owner,bound,unit).outcome))
+            if boundary==1: self.doCleanups(); self.setUp()
+
+    def test_completion_start_pre_rename_short_write_and_file_barrier_failure_are_retained_stop(self):
+        from contextlib import ExitStack
+        from monitor import issue_tracker_global_attempt_journal as journal
+        import os
+        for fault in ('short-write','file-fsync'):
+            with self.subTest(fault=fault),ExitStack() as stack:
+                module=load()
+                writer,owner,bound,auth,_config,unit,docs=self.prepare_owned(stack)
+                responses={name:self.read_owned(stack,writer,owner,bound,auth,kind,value)
+                           for name,(kind,value) in docs.items()}
+                state=self.root/'var/lib/http-ztp-container/issue-tracker'
+                key=hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()
+                witness=state/(key+'.completion-started'); proof=state/(key+'.completion')
+                write=os.write; sync=os.fsync; reached=[]
+                def is_start_file(fd):
+                    info=os.fstat(fd)
+                    return any((path.stat().st_dev,path.stat().st_ino)==(info.st_dev,info.st_ino)
+                               for path in state.iterdir()
+                               if path.name==witness.name or path.name.startswith('.pending-'))
+                def writing(fd,raw):
+                    if fault=='short-write' and is_start_file(fd): reached.append('short-write'); return 0
+                    return write(fd,raw)
+                def syncing(fd):
+                    if fault=='file-fsync' and is_start_file(fd): reached.append('file-fsync'); raise OSError('owned witness file barrier')
+                    return sync(fd)
+                with mock.patch('os.write',side_effect=writing),mock.patch('os.fsync',side_effect=syncing),self.assertRaises(module.RemoteHistoryHold):
+                    module.record_owned_completion_evidence(writer,owner,bound,unit,**responses)
+                self.assertEqual([fault],reached); self.assertFalse(proof.exists())
+                retained={p:p.read_bytes() for p in state.rglob('*') if p.is_file()}
+                with self.assertRaises(journal.GlobalAttemptHold): journal.record_global_attempt_intent(owner,bound,unit)
+                self.assertTrue(witness.is_file(),'even partial witness bytes must retain the fixed STOP name')
+                with self.assertRaises(module.RemoteHistoryHold):
+                    module.record_owned_completion_evidence(writer,owner,bound,unit,**responses)
+                self.assertEqual(retained,{p:p.read_bytes() for p in retained}); self.assertFalse(proof.exists())
+                self.assertEqual((1,'UNKNOWN'),(journal.inspect_global_unit(owner,bound,unit).attempt_count,
+                                               journal.inspect_global_unit(owner,bound,unit).outcome))
+            if fault=='short-write': self.doCleanups(); self.setUp()
+
+    def test_completion_start_witness_original_is_held_through_live_and_cold_returns(self):
+        from contextlib import ExitStack
+        from monitor import issue_tracker_local_commit as local, issue_tracker_attempt_journal as original_io
+        import os
+        for phase in ('live','cold'):
+            with self.subTest(phase=phase),ExitStack() as stack:
+                module=load()
+                writer,owner,bound,auth,_config,unit,docs=self.prepare_owned(stack)
+                responses={name:self.read_owned(stack,writer,owner,bound,auth,kind,value)
+                           for name,(kind,value) in docs.items()}
+                state=self.root/'var/lib/http-ztp-container/issue-tracker'
+                key=hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()
+                witness=state/(key+'.completion-started'); proof=state/(key+'.completion')
+                changed=[]
+                def rewrite():
+                    self.assertTrue(witness.is_file(),'completion must first retain an independent start witness')
+                    raw=witness.read_bytes(); saved=witness.stat()
+                    with witness.open('r+b') as held:
+                        held.write(raw); held.flush(); os.fsync(held.fileno())
+                    os.utime(witness,ns=(saved.st_atime_ns,saved.st_mtime_ns+1_000_000))
+                    self.assertEqual((raw,saved.st_ino),(witness.read_bytes(),witness.stat().st_ino))
+                    changed.append(True)
+                if phase=='live':
+                    actual=local._write_new
+                    def written(folder,name,raw):
+                        actual(folder,name,raw)
+                        if name=='HEADER' and not changed: rewrite()
+                    with mock.patch.object(local,'_write_new',side_effect=written),self.assertRaises(module.RemoteHistoryHold):
+                        module.record_owned_completion_evidence(writer,owner,bound,unit,**responses)
+                    self.assertEqual([True],changed); self.assertFalse((proof/'COMPLETE').exists())
+                else:
+                    module.record_owned_completion_evidence(writer,owner,bound,unit,**responses)
+                    actual=original_io._read
+                    def read_then_changed(folder,name,limit):
+                        raw=actual(folder,name,limit)
+                        if name=='HEADER' and not changed: rewrite()
+                        return raw
+                    with mock.patch.object(original_io,'_read',side_effect=read_then_changed),self.assertRaises(module.RemoteHistoryHold):
+                        module.inspect_completion_evidence(owner,bound,unit)
+                    self.assertEqual([True],changed)
+            if phase=='live': self.doCleanups(); self.setUp()
+
+    def test_completion_start_write_barrier_and_reader_handoff_cannot_adopt_changed_original(self):
+        from contextlib import ExitStack
+        import os
+        for fault in ('rewrite-at-first-fsync','rebind-before-reader-entry'):
+            with self.subTest(fault=fault),ExitStack() as stack:
+                module=load()
+                writer,owner,bound,auth,_config,unit,docs=self.prepare_owned(stack)
+                responses={name:self.read_owned(stack,writer,owner,bound,auth,kind,value)
+                           for name,(kind,value) in docs.items()}
+                state=self.root/'var/lib/http-ztp-container/issue-tracker'
+                key=hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()
+                witness=state/(key+'.completion-started'); proof=state/(key+'.completion')
+                changed=[]; sync=os.fsync; entering=module._hold_completion_start
+                def syncing(fd):
+                    if fault=='rewrite-at-first-fsync' and witness.exists() and not proof.exists() and not changed:
+                        info=os.fstat(fd); saved=witness.stat()
+                        if (info.st_dev,info.st_ino)==(saved.st_dev,saved.st_ino):
+                            raw=witness.read_bytes(); changed.append(True)
+                            with witness.open('r+b') as original:
+                                original.write(raw); original.flush(); sync(original.fileno())
+                            os.utime(witness,ns=(saved.st_atime_ns,saved.st_mtime_ns+1_000_000))
+                    return sync(fd)
+                def entering_after_rebind(*args,**options):
+                    if fault=='rebind-before-reader-entry' and not changed:
+                        raw=witness.read_bytes(); witness.rename(self.root/'preserved-start-original')
+                        witness.write_bytes(raw); witness.chmod(0o600); changed.append(True)
+                    return entering(*args,**options)
+                with mock.patch('os.fsync',side_effect=syncing), \
+                        mock.patch.object(module,'_hold_completion_start',side_effect=entering_after_rebind), \
+                        self.assertRaises(module.RemoteHistoryHold):
+                    module.record_owned_completion_evidence(writer,owner,bound,unit,**responses)
+                self.assertEqual([True],changed); self.assertFalse(proof.exists())
+            if fault=='rewrite-at-first-fsync': self.doCleanups(); self.setUp()
+
+    def test_cold_completion_missing_malformed_or_aliased_start_witness_never_adopts_or_resends(self):
+        from contextlib import ExitStack
+        from monitor import issue_tracker_global_attempt_journal as journal
+        import os
+        faults=('missing','bytes','same-bytes-new-inode','symlink','hardlink','public-mode')
+        for number,fault in enumerate(faults):
+            with self.subTest(fault=fault),ExitStack() as stack:
+                module=load()
+                writer,owner,bound,auth,_config,unit,docs=self.prepare_owned(stack)
+                responses={name:self.read_owned(stack,writer,owner,bound,auth,kind,value)
+                           for name,(kind,value) in docs.items()}
+                module.record_owned_completion_evidence(writer,owner,bound,unit,**responses)
+                state=self.root/'var/lib/http-ztp-container/issue-tracker'
+                key=hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()
+                witness=state/(key+'.completion-started'); original=witness.read_bytes()
+                saved=self.root/'preserved-completion-start-witness'
+                if fault=='bytes': witness.write_bytes(b'not matching the original journal\n')
+                elif fault=='public-mode': witness.chmod(0o644)
+                else:
+                    witness.rename(saved)
+                    if fault=='same-bytes-new-inode': witness.write_bytes(original); witness.chmod(0o600)
+                    elif fault=='symlink': witness.symlink_to(saved)
+                    elif fault=='hardlink': os.link(saved,witness)
+                before={p:p.read_bytes() for p in (state/(key+'.completion')).iterdir()}
+                with self.assertRaises(module.RemoteHistoryHold): module.inspect_completion_evidence(owner,bound,unit)
+                with self.assertRaises(journal.GlobalAttemptHold): journal.record_global_attempt_intent(owner,bound,unit)
+                issued=[]
+                with self.assertRaises(journal.GlobalAttemptHold):
+                    with journal._hold_counted_original_wire(writer,owner,bound,unit) as image: issued.append(image)
+                self.assertEqual([],issued); self.assertFalse((state/(key+'.dispatch')).exists())
+                self.assertEqual(before,{p:p.read_bytes() for p in before})
+                self.assertEqual((1,'UNKNOWN'),(journal.inspect_global_unit(owner,bound,unit).attempt_count,
+                                               journal.inspect_global_unit(owner,bound,unit).outcome))
+            if number<len(faults)-1: self.doCleanups(); self.setUp()
 
     def test_completion_keeps_original_count_through_header_barrier_and_final_owned_deadline(self):
         module=load()

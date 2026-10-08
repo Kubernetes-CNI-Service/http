@@ -2116,6 +2116,11 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 ## TC-REAL-REQ7-GLOBAL-ATTEMPT-001 — 共享 UNKNOWN 屏障与全局意图计数
 
+- 启动见证首写边界（**NOT RUN / REAL_ENV REQUIRED**）：NOFOLLOW／CLOEXEC／EXCL 在首字节前建立固定 STOP 名；short write／首个 file fsync 故障须留下固定 partial 见证、无 proof 和原计数 UNKNOWN，不能以未 rename 的临时文件替代防重建边界。独立故障注入实际复现 RED 后保留原断言修正，本地 PASS 不是真实断电证明；原现场场景不缩减，残余风险和现场授权仍如上。
+  - 原件交接补充：首写后 stat 绑定 file／parent fsync 与关闭重开后的 reader FD；同 inode 同字节改写或交接前同字节替换必须在 proof mkdir 前 HOLD，留存原件及新计数／请求为零的证据。本地独立 RED 与真实跨脚本流程不关闭现场卡。
+
+- 冷恢复 no-recreation 补充（**NOT RUN / REAL_ENV REQUIRED**）：完成写者须在 proof mkdir 前完成独立 completion-started 见证的 file／parent fsync；两处失败保留见证、无 proof、UNKNOWN 与原次数，不重建或发送。proof 目录被移走后，独立见证仍阻断再次计数、原 WIRE claim、新 journal 和新 proof；live／cold 全程核原 FD／stat／SHA／命名边及 HEADER 绑定，缺失、同字节替换、链接、权限或改写只 HOLD。本地真实受监督 TLS／多脚本／冷进程与原十四个 proof 屏障回归不冒充断电；本次没有合并、省略或暂缓原自动化场景。现场保留正常完成、见证关键提交边界、代表性中断、冷恢复及故障后零新增请求，另获精确授权后记录原件与清理；残余风险为真实断电／设备／Stage O 未验证，状态保持 NOT RUN，原研发确认及发布门禁有效。
+
 - 完成流程 no-resend 补充（**NOT RUN / REAL_ENV REQUIRED**）：原始 WIRE handoff 及每次 live CLAIM 检查拒绝已开始的 completion（含 partial），不创建 dispatch／启动子进程；出现 COMPLETE 标记后不新增原始 ATTEMPT，无效标记也只 HOLD、不作远端证明。独立 direct／双锁 workflow 与真实固定读取→完成落盘→拒绝再次计数／claim 的本地回归保留原 UNKNOWN、计数、journal、proof、预留及 outbox；不释放 FIFO／高水位，不授权在线发送。现场另获精确一次性副本和故障注入授权后留存原件 stat/inode/SHA、计数／claim／completion 物理顺序、实际零新增请求及失败后状态；清理只限自有 fixture。没有省略或合并原场景，真实断电与 Stage O 仍未验证，原门禁有效。
 
 - Case ID：`TC-REAL-REQ7-GLOBAL-ATTEMPT-001`；类型：durable / integration；对应 C-6/C-7/C-14/C-19。状态：**NOT RUN / REAL_ENV REQUIRED**。涉及 `monitor/issue_tracker_global_attempt_journal.py`、`monitor/issue_tracker_spreadsheet_owner.py`、`monitor/issue_tracker_send_intent.py`、`monitor/issue_tracker_local_commit.py`。本地合成 root 元数据、原生 fsync／NOREPLACE／独立进程及多脚本流程不是部署或 REQ7 整体证明。

@@ -1035,6 +1035,18 @@ FIFO、高水位或 settings outbox，也不作为真实源准入、在线激活
 原始诊断计数也拒绝新增 ATTEMPT；无效标记只导致 HOLD，不被解释为 APPLIED。
 真实固定读→完整落盘→原计数／WIRE claim 联测保留原次数、UNKNOWN 与全部原件。
 这些 no-resend 边界不释放全表屏障、FIFO、永久 fence、预留或 outbox。
+完成写者还在创建 proof 目录前持久化独立的 spreadsheet `completion-started`
+见证（原单元、binding 与原 journal 集合摘要）；file／parent 屏障失败不创建 proof，
+固定见证名在首字节写入前以 NOFOLLOW／CLOEXEC／EXCL 建立；short write 或首个
+file fsync 失败留下 partial 固定名，不能只留下不被 no-resend 检查识别的临时名。
+首写后的原 stat 贯穿 file／parent 屏障及 writer→reader FD 交接；同 inode／同字节
+改写或关闭重开前的同字节替换均不能被收编为原启动见证。
+见证残留不得采用或重建。目录移走后仍拒绝新计数、WIRE claim、新 journal 和新 proof，
+冷进程保留原次数与 UNKNOWN。writer／cold reader 从入口到返回 pin 住见证 FD、
+stat、字节与命名边，并核 HEADER 的原见证身份；缺失、改写、别名或替换一律 HOLD。
+原 partial-proof 的诊断计数漂移测试仍执行并阻止 COMPLETE；这不是发送权限。
+已有无独立见证的历史 proof 不自动迁移或背书。独立 RED、真实固定 TLS→落盘→
+目录移位→冷进程，以及原十四个 proof 屏障测试均保留；不代表断电或在线设备验证。
 冷读还须从四份原 RAW 重放模板 identity/headers、nonce、永久 fence 和全部
 History 语义，并逐项核固定读取路径的原摘要；不能只接受重新自洽的 HEADER/
 MATCHED 描述。与 live matcher 共用原 journal/WIRE/前缀对账，但仅构造无凭据的

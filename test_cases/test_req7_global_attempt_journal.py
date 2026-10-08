@@ -39,6 +39,28 @@ def unit(**changes):
 
 
 class Req7GlobalAttemptJournalTests(unittest.TestCase):
+    def test_completion_start_witness_refuses_fresh_journal_even_without_proof_directory(self):
+        witness=self.locks/(hashlib.sha256(TARGET.encode()).hexdigest()+'.completion-started')
+        witness.write_bytes(b'interrupted completion witness\n'); witness.chmod(0o600)
+        with fixture(self.root),self.owner.spreadsheet_owner(binding()) as token:
+            with self.assertRaises(self.module.GlobalAttemptHold):
+                self.module.prepare_global_unit(token,binding(),self.value)
+        self.assertFalse(self.store.exists())
+        self.assertEqual(b'interrupted completion witness\n',witness.read_bytes())
+
+    def test_completion_start_witness_blocks_count_after_proof_namespace_disappears(self):
+        with fixture(self.root),self.owner.spreadsheet_owner(binding()) as token:
+            self.module.prepare_global_unit(token,binding(),self.value)
+            self.module.record_global_attempt_intent(token,binding(),self.value)
+            witness=self.locks/(hashlib.sha256(TARGET.encode()).hexdigest()+'.completion-started')
+            witness.write_bytes(b'not settlement authority\n'); witness.chmod(0o600)
+            retained={p:p.read_bytes() for p in self.locks.rglob('*') if p.is_file()}
+            with self.assertRaises(self.module.GlobalAttemptHold):
+                self.module.record_global_attempt_intent(token,binding(),self.value)
+            self.assertEqual(retained,{p:p.read_bytes() for p in retained})
+            self.assertEqual((1,'UNKNOWN'),(self.module.inspect_global_unit(token,binding(),self.value).attempt_count,
+                                           self.module.inspect_global_unit(token,binding(),self.value).outcome))
+
     def test_completion_marker_presence_refuses_new_count_without_claiming_applied(self):
         with fixture(self.root),self.owner.spreadsheet_owner(binding()) as token:
             self.module.prepare_global_unit(token,binding(),self.value)

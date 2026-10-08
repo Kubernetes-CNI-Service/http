@@ -211,8 +211,13 @@ def _require_no_completion(parent,journal_name,*,marker_only=False):
     marker, even malformed. Neither absence nor presence grants admission,
     APPLIED, cleanup, capacity reclamation or a replacement generation.
     """
-    name=journal_name[:-len('.journal')]+'.completion'
-    if name not in os.listdir(parent): return
+    key=journal_name[:-len('.journal')]
+    name=key+'.completion'; names=os.listdir(parent)
+    # The sibling survives a lost/displaced proof directory. Even malformed
+    # bytes are only a conservative STOP, never settlement/admission evidence.
+    if key+'.completion-started' in names and (not marker_only or name not in names):
+        raise GlobalAttemptHold()
+    if name not in names: return
     if not marker_only: raise GlobalAttemptHold()
     folder=local._directory(parent,name)
     try:
@@ -282,6 +287,7 @@ def prepare_global_unit(token, binding, unit):
     folder = None; failed = False
     try:
         owner, parent, name, header = _inputs(token, binding, unit)
+        _require_no_completion(parent,name)
         # A retained store is a conservative barrier even before ATTEMPT-1.
         # New generations/sheets/projects cannot bypass it by another key.
         if name in os.listdir(parent): raise GlobalAttemptHold()

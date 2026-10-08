@@ -8,7 +8,7 @@ The owned-read bridge below establishes actual fixed-read provenance, current
 dual owners and typed template observations, not durable settlement authority.
 """
 from dataclasses import dataclass, asdict
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 import hashlib
 import json
 import os
@@ -322,6 +322,71 @@ def _replay_completion_raw_images(token,binding,unit,header,snapshots):
     return _match_original_decoded_images(token,binding,unit,identity,pair,image('METADATA-RAW'),post)
 
 
+def _completion_start_raw(unit,base,originals):
+    """Retained no-recreation witness, not remote success or APPLIED."""
+    from monitor import issue_tracker_local_commit as local
+    return local._canonical({'schema_version':1,'unit_id':unit.unit_id,'binding':base,
+        'originals_sha256':hashlib.sha256(local._canonical(originals)).hexdigest(),
+        'state':'COMPLETION-STARTED-NOT-APPLIED'})
+
+
+def _write_completion_start(parent,name,raw):
+    """Retain the fixed STOP name even BEFORE the first byte/barrier.
+
+    Unlike an ordinary complete image, this witness's partial existence must
+    survive a short write or failed file fsync. No pending-name window, replace,
+    unlink, adoption or valid-proof claim; partial bytes remain conservative.
+    """
+    from monitor import issue_tracker_local_commit as local, issue_tracker_attempt_journal as journal
+    if type(raw) is not bytes or not 1<=len(raw)<=16384: raise RemoteHistoryHold()
+    local._flags()  # Require no-follow/CLOEXEC capability before creating.
+    fd=os.open(name,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW|os.O_CLOEXEC,0o600,dir_fd=parent)
+    try:
+        local._check(fd,directory=False); journal._named(parent,name,fd,directory=False)
+        remaining=memoryview(raw)
+        while remaining:
+            written=os.write(fd,remaining)
+            if written<=0: raise RemoteHistoryHold()
+            remaining=remaining[written:]
+        identity=journal._identity(os.fstat(fd))
+        os.fsync(fd); journal._named(parent,name,fd,directory=False)
+        if journal._identity(os.fstat(fd))!=identity: raise RemoteHistoryHold()
+        os.fsync(parent); journal._named(parent,name,fd,directory=False)
+        if journal._identity(os.fstat(fd))!=identity: raise RemoteHistoryHold()
+    finally: os.close(fd)
+    return identity
+
+
+@contextmanager
+def _hold_completion_start(owner_token,binding,unit,*,expected=None,expected_identity=None):
+    from monitor import issue_tracker_local_commit as local, issue_tracker_attempt_journal as journal
+    fd=None
+    try:
+        owner,parent,name,_base=global_journal._inputs(owner_token,binding,unit)
+        name=name[:-len('.journal')]+'.completion-started'
+        fd=os.open(name,local._flags()|os.O_NONBLOCK,dir_fd=parent)
+        info=local._check(fd,directory=False); identity=journal._identity(info)
+        if expected_identity is not None and identity!=expected_identity: raise RemoteHistoryHold()
+        journal._named(parent,name,fd,directory=False)
+        raw=os.pread(fd,16385,0)
+        if not raw or len(raw)>16384 or len(raw)!=info.st_size or (expected is not None and raw!=expected):
+            raise RemoteHistoryHold()
+        def verify():
+            if ownership._validated_owner(owner_token,binding) is not owner: raise RemoteHistoryHold()
+            journal._named(parent,name,fd,directory=False)
+            if journal._identity(os.fstat(fd))!=identity or os.pread(fd,len(raw)+1,0)!=raw:
+                raise RemoteHistoryHold()
+            journal._named(parent,name,fd,directory=False)
+            if journal._identity(os.fstat(fd))!=identity: raise RemoteHistoryHold()
+        verify()
+        # Cold consumers re-establish the original witness barriers too.
+        os.fsync(fd); os.fsync(parent); verify()
+        yield verify,list(identity)
+        verify()
+    finally:
+        if fd is not None: os.close(fd)
+
+
 def record_owned_completion_evidence(writer_token,owner_token,binding,unit,*,
                                      identity_response,headers_response,metadata_response,history_response):
     """Persist a complete matched proof set, NEVER clear UNKNOWN or resend.
@@ -335,7 +400,7 @@ def record_owned_completion_evidence(writer_token,owner_token,binding,unit,*,
     """
     from monitor import issue_tracker_local_commit as local, issue_tracker_attempt_journal as journal
     from monitor.issue_tracker_history_read_launcher import require_current_owned_read
-    folder=None; failed=False
+    folder=None; failed=False; scope=ExitStack(); start_verify=None
     try:
         project=local._owner(writer_token)
         responses=dict(identity_response=identity_response,headers_response=headers_response,
@@ -344,15 +409,23 @@ def record_owned_completion_evidence(writer_token,owner_token,binding,unit,*,
             observed=observe_owned_remote_history_unit(writer_token,owner_token,binding,unit,**responses)
             if observed.state!='MATCHED_OBSERVATION': raise RemoteHistoryHold()
             owner,parent,name,base=global_journal._inputs(owner_token,binding,unit)
-            name=name[:-len('.journal')]+'.completion'
+            key=name[:-len('.journal')]; name=key+'.completion'; start_name=key+'.completion-started'
             def live():
                 if local._owner(writer_token) is not project: raise RemoteHistoryHold()
                 if ownership._validated_owner(owner_token,binding) is not owner: raise RemoteHistoryHold()
                 for key,kind,_file in _COMPLETION_READS:
                     require_current_owned_read(writer_token,owner_token,binding,responses[key],read_kind=kind)
                 verify()
+                if start_verify is not None: start_verify()
             live()
-            if name in os.listdir(parent): raise RemoteHistoryHold()
+            if name in os.listdir(parent) or start_name in os.listdir(parent): raise RemoteHistoryHold()
+            start_raw=_completion_start_raw(unit,base,originals)
+            # File+parent barriers finish before ANY proof directory exists.
+            # An interrupted witness remains HOLD; never adopt/recreate it.
+            written_start_identity=_write_completion_start(parent,start_name,start_raw)
+            start_verify,start_identity=scope.enter_context(
+                _hold_completion_start(owner_token,binding,unit,expected=start_raw,expected_identity=written_start_identity))
+            live()
             folder=global_journal._create_folder(parent,name)
             files={}
             for key,kind,file in _COMPLETION_READS:
@@ -363,6 +436,7 @@ def record_owned_completion_evidence(writer_token,owner_token,binding,unit,*,
                              'sha256':hashlib.sha256(raw).hexdigest(),
                              'request_path_sha256':responses[key].request_path_sha256}
             header={'schema_version':1,'unit_id':unit.unit_id,'binding':base,'originals':originals,
+                    'start_witness_identity':start_identity,
                     'folder_identity':list(journal._identity(os.fstat(folder))[:2]),
                     'matched':asdict(observed),'responses':files}
             header_raw=local._canonical(header)
@@ -404,6 +478,8 @@ def record_owned_completion_evidence(writer_token,owner_token,binding,unit,*,
             if journal._identity(os.fstat(folder))!=directory_identity: raise RemoteHistoryHold()
     except Exception: failed=True
     finally:
+        try: scope.close()
+        except Exception: failed=True
         if folder is not None:
             try: os.close(folder)
             except OSError: failed=True
@@ -421,9 +497,10 @@ def _hold_completion_originals(owner_token,binding,unit):
     boundary supplies no APPLIED, fresh read, settlement or retry authority.
     """
     from monitor import issue_tracker_local_commit as local, issue_tracker_attempt_journal as journal
-    folder=None; held=[]
+    folder=None; held=[]; scope=ExitStack()
     try:
         owner,parent,name,_base=global_journal._inputs(owner_token,binding,unit)
+        start_verify,_start_identity=scope.enter_context(_hold_completion_start(owner_token,binding,unit))
         name=name[:-len('.journal')]+'.completion'
         folder=local._directory(parent,name)
         journal._named(parent,name,folder,directory=True)
@@ -443,6 +520,7 @@ def _hold_completion_originals(owner_token,binding,unit):
             journal._named(folder,file,fd,directory=False)
             held[-1]=(file,fd,identity,raw)
         def verify():
+            start_verify()
             if ownership._validated_owner(owner_token,binding) is not owner: raise RemoteHistoryHold()
             journal._named(parent,name,folder,directory=True)
             if journal._identity(os.fstat(folder))!=directory_identity or set(os.listdir(folder))!=names:
@@ -456,6 +534,7 @@ def _hold_completion_originals(owner_token,binding,unit):
             journal._named(parent,name,folder,directory=True)
             if journal._identity(os.fstat(folder))!=directory_identity: raise RemoteHistoryHold()
             ownership._validated_owner(owner_token,binding)
+            start_verify()
         verify()
         yield verify
         verify()
@@ -467,6 +546,8 @@ def _hold_completion_originals(owner_token,binding,unit):
         if folder is not None:
             try: os.close(folder)
             except OSError: close_failed=True
+        try: scope.close()
+        except Exception: close_failed=True
         if close_failed: raise RemoteHistoryHold()
 
 
@@ -495,7 +576,7 @@ def _inspect_completion_evidence(owner_token,binding,unit):
     try:
         with _hold_match_originals(owner_token,binding,unit) as (verify,originals):
             owner,parent,name,base=global_journal._inputs(owner_token,binding,unit)
-            name=name[:-len('.journal')]+'.completion'
+            key=name[:-len('.journal')]; name=key+'.completion'; start_name=key+'.completion-started'
             folder=local._directory(parent,name)
             journal._named(parent,name,folder,directory=True)
             if set(os.listdir(folder))!={'HEADER','COMPLETE',*(file for _key,_kind,file in _COMPLETION_READS)}:
@@ -503,12 +584,15 @@ def _inspect_completion_evidence(owner_token,binding,unit):
             identity=journal._identity(os.fstat(folder))
             raw=journal._read(folder,'HEADER',65536)
             header=json.loads(raw.decode('utf-8'),object_pairs_hook=metadata._pairs,parse_constant=metadata._nonfinite)
-            if (set(header)!={'schema_version','unit_id','binding','originals','folder_identity','matched','responses'}
+            if (set(header)!={'schema_version','unit_id','binding','originals','folder_identity','matched','responses','start_witness_identity'}
                     or local._canonical(header)!=raw or type(header['schema_version']) is not int
                     or header['schema_version']!=1 or header['unit_id']!=unit.unit_id
                     or local._canonical(header['binding'])!=local._canonical(base)
                     or local._canonical(header['originals'])!=local._canonical(originals)
-                    or local._canonical(header['folder_identity'])!=local._canonical(list(identity[:2]))):
+                    or local._canonical(header['folder_identity'])!=local._canonical(list(identity[:2]))
+                    or journal._read(parent,start_name,16384)!=_completion_start_raw(unit,base,originals)
+                    or local._canonical(header['start_witness_identity'])!=local._canonical(
+                        list(journal._identity(os.stat(start_name,dir_fd=parent,follow_symlinks=False))))):
                 raise RemoteHistoryHold()
             matched=header['matched']
             state=global_journal.inspect_global_unit(owner_token,binding,unit)
