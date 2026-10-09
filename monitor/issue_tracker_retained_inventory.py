@@ -353,3 +353,53 @@ def _hold_retained_inventory(token, binding):
                 failed = True
     if failed:
         raise RetainedInventoryHold()
+
+
+@contextmanager
+def _hold_retained_applied_keys(writer_token, token, binding):
+    """Join the retained original unit to its actual C6/APPLIED/key pair.
+
+    No caller unit/generation/key set, inventory maximum, FIFO or NEW permit.
+    The reconstructed generation is for historical reading only: it is not
+    registered as an issued mutation handle in the writer's acquisition.
+    Every original remains held through the caller and final checks.
+    """
+    failed = False
+    try:
+        owner = local._owner(writer_token)
+        with ExitStack() as scope:
+            seen, verify_inventory = scope.enter_context(_hold_retained_inventory(token, binding))
+            if 'completion' not in seen.families:
+                raise RetainedInventoryHold()
+            action = local._json(seen.unit.action_preimage)
+            generation_id = action['identity']['generation_id']
+            match = local._GEN.fullmatch(generation_id) if type(generation_id) is str else None
+            if match is None:
+                raise RetainedInventoryHold()
+            sequence = int(match.group(1))
+            if sequence < 1:
+                raise RetainedInventoryHold()
+            # A name/digest-derived handle is not certification. The held C6
+            # reader below replays actual STATE/MANIFEST/INTENT/RECEIPT/XLSX
+            # and both recorded APPLIED pairs before any keys are yielded.
+            generation = local.Generation(generation_id, sequence, action['manifest_id'], writer_token)
+            from monitor import issue_tracker_remote_history_match as remote
+            held_owner, verify_inputs, body, keys = scope.enter_context(
+                remote._hold_original_applied_key_watermark_inputs(writer_token, token, binding, seen.unit, generation))
+            if held_owner is not owner:
+                raise RetainedInventoryHold()
+            names = ('REMOTE-KEY-HIGH-WATER-STARTED-' + seen.unit.unit_id,
+                     'REMOTE-KEY-HIGH-WATER-' + seen.unit.unit_id)
+            verify_keys = scope.enter_context(remote._hold_applied_records(owner.root_fd, names, body,
+                states=('KEY-HIGH-WATER-STARTED', 'KEY-HIGH-WATER')))
+            def verify():
+                if local._owner(writer_token) is not owner:
+                    raise RetainedInventoryHold()
+                verify_inventory(); verify_inputs(); verify_keys()
+            verify()
+            yield keys, verify
+            verify()
+    except Exception:
+        failed = True
+    if failed:
+        raise RetainedInventoryHold()

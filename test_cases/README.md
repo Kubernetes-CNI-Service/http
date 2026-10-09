@@ -1727,3 +1727,20 @@ exit 0, on HEAD 7335587 plus the exact reviewed receiving diff. Its complete
 append-only log preserves the old prefix and physical BEGIN/END identities.
 The failed 196-method log and both bounded RED logs remain diagnostic evidence;
 neither this local sequence nor single-case PASS is a current full proof.
+
+The retained APPLIED-key reader reconstructs the historical generation identity
+only from the held original unit, then joins the actual original C6
+STATE/MANIFEST/INTENT/RECEIPT/published XLSX, COMPLETE proof, APPLIED pair and
+key-watermark pair. A reconstructed reading handle is not registered as an
+issued mutation handle. The caller cannot supply a generation, unit or keys;
+an unissued writer is refused before inventory reading. No original is repaired,
+removed or changed. Only actually sent business keys are returned; NOOP is not
+APPLIED, and the original count=1/UNKNOWN stays unchanged. The main tests first
+failed on the missing API (four independent methods), then the actual owned
+native workflow and the existing inventory module passed together (26 methods).
+The final five-method direct/workflow module additionally rejects same-byte
+replacement of a held key marker or C6 receipt before consumer acceptance.
+All held originals are verified across the consumer and final scope exit.
+This one-unit historical reading is not a global maximum, per-key FIFO,
+multi-unit recovery, G1, NEW permission or default worker activation. Those
+integrated transitions and current exact-tree full/check remain open.
