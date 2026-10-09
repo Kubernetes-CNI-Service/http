@@ -627,8 +627,8 @@ def script_profile(root: Path, relative: str) -> dict[str, str]:
             elif relative == "monitor/issue_tracker_retained_inventory.py":
                 scenario = "持有单个 legacy unit 的全部原件、完整命名空间和原始文件身份；另有 catalog 诊断接口同时持有所有 unit 的原 count／family／共享 nonce 与本项目历史 C6 原件，消费者期间不重新采用新路径；未知未来或 archive 家族保持 HOLD。"
                 inputs = "实际共享 spreadsheet owner；APPLIED-key 观察另需实际 C6 writer owner 与原始 COMPLETE／APPLIED／key-high-water 配对；无 caller unit／generation／keys 覆盖。"
-                outputs = "原始 UNKNOWN 计数、历史 COMPLETE／APPLIED-key 必要只读观察；catalog 中未尝试 unit 不贡献 APPLIED keys，已计数 unit 必须具备真实 COMPLETE／APPLIED／key 配对；原件持续持有的单项目逐 key 最大值与 pending 顺序观察不跨项目比较序号，不证明多个 unit 的完整结算、global maximum、FIFO、G1 或 NEW 权限。"
-                recovery = "部分、外来原件、同字节替换、未识别家族或原 nonce／History／C6 配对不一致均 HOLD，不 yield 部分前缀；不修复、不回填、不清除 UNKNOWN。"
+                outputs = "原始 UNKNOWN 计数、历史 COMPLETE／APPLIED-key 必要只读观察；catalog 中未尝试 unit 不贡献 APPLIED keys，已计数 unit 必须具备真实 COMPLETE／APPLIED／key 配对；原件持续持有的单项目逐 key 最大值与 pending 顺序观察不跨项目比较序号；仅未尝试且更晚 APPLIED 覆盖全部实际候选 key 时可追加不可变 UNSENT disposition，不释放 FIFO，不证明多个 unit 的完整结算、global maximum、FIFO、G1 或 NEW 权限。"
+                recovery = "部分、外来原件、同字节替换、未识别家族或原 nonce／History／C6 配对不一致均 HOLD，不 yield 部分前缀；UNSENT 写前见证与双原 inode 配对持续保留，整对丢失仍 HOLD；不修复、不回填、不清除 UNKNOWN。"
                 example = "python3 -B -m unittest -v test_cases.test_req7_retained_global_inventory test_cases.test_req7_retained_applied_inventory test_cases.test_req7_unit_catalog  # 仅开发测试"
             elif relative == "monitor/issue_tracker_unit_catalog.py":
                 scenario = "在同一真实共享 owner 内追加多个 pending unit 原件及永久位置见证；不计数发送意图、不创建 CLAIM，不覆盖 legacy 原件。"

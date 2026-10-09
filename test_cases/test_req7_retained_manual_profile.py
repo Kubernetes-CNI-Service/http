@@ -62,3 +62,11 @@ class RetainedManualProfileTests(unittest.TestCase):
         self.assertIn('不跨项目比较', profile['outputs'])
         for word in ('UNKNOWN', 'FIFO', 'G1', 'NEW'):
             self.assertIn(word, ' '.join(profile.values()))
+
+    def test_unsent_disposition_requires_later_applied_and_preserves_safe_boundary(self):
+        profile = self.load().script_profile(ROOT, 'monitor/issue_tracker_retained_inventory.py')
+        for word in ('未尝试且更晚 APPLIED', '不释放 FIFO'):
+            self.assertIn(word, profile['outputs'])
+        for word in ('写前见证', '整对丢失', '不修复', 'UNKNOWN'):
+            self.assertIn(word, profile['recovery'])
+        self.assertTrue(profile['direct'].startswith('否'))

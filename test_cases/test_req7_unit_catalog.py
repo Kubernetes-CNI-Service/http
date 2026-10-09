@@ -3,12 +3,13 @@
 This is not complete inventory, original C6, APPLIED, admission or sending.
 """
 from contextlib import ExitStack, contextmanager
-from dataclasses import replace
+from dataclasses import replace, asdict
 import hashlib
 import importlib.util
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -61,7 +62,7 @@ class CatalogAppliedNativeWorkflowTests(unittest.TestCase):
     includes the class, with every original native timing/behavior assertion.
     """
     @contextmanager
-    def completed_and_pending(self, *, reverse_catalog=False):
+    def completed_and_pending(self, *, reverse_catalog=False, cold_handoff=False, older_unsent=False):
         from test_cases import test_req7_remote_history_match as native
         catalog = load()
         case = native.Req7OwnedHistoryMatchWorkflowTests()
@@ -73,10 +74,31 @@ class CatalogAppliedNativeWorkflowTests(unittest.TestCase):
             self.assertTrue(callable(api), 'catalog APPLIED original join missing')
             from monitor import issue_tracker_global_attempt_journal as globals_
             original_prepare = globals_.prepare_global_unit
-            actual_owners = case.owners; genuine = []; originals = []
+            actual_owners = case.owners; genuine = []; originals = []; earlier = []; bound_inputs = []
+            original_begin = catalog.local.begin_generation
             def capture_owners(scope, **kwargs):
                 values = actual_owners(scope, **kwargs)
-                genuine.append(values[2]); return values
+                genuine.append(values[2]); bound_inputs.append(values[4]); return values
+            def allocate_native(writer, manifest):
+                if older_unsent:
+                    # Real local generation 1 existed without an online
+                    # attempt. The admitted native generation 2 is registered
+                    # FIRST, before this retained old unit is indexed. This
+                    # never sends generation 1 behind a later APPLIED value.
+                    self.assertEqual([], earlier)
+                    args = send_inputs(); bound = bound_inputs[0]
+                    self.assertEqual(args['manifest'], manifest)
+                    args.update(spreadsheet_id=bound.spreadsheet_id, sheet_id=101, history_sheet_id=105,
+                                target_nonce='a' * 64, history_nonce='d' * 64)
+                    args['business'][0]['observed_values'] = {'L': {'stringValue': 'down'}}
+                    args['audits'] = ({'event_id': 'settings:001', 'recorded_at_utc': '2026-10-08T10:00:00Z', 'details': 'K=3'},)
+                    old = original_begin(writer, manifest)
+                    catalog.local.record_intent(writer, old, literal_xlsx(), kind='xlsx')
+                    receipt = catalog.local.commit(writer, old)
+                    args.update(generation_id=old.generation_id, publish_id=receipt.published_sha256)
+                    earlier.append(catalog.composer.freeze_send_unit(**args))
+                    self.assertEqual(1, old.sequence)
+                return original_begin(writer, manifest)
             def prepare_both(token, bound, first):
                 self.assertEqual([], originals)
                 writer = genuine[0]
@@ -85,12 +107,16 @@ class CatalogAppliedNativeWorkflowTests(unittest.TestCase):
                                  target_nonce='a' * 64, history_nonce='d' * 64)
                 arguments['business'][0]['observed_values'] = {'L': {'stringValue': 'down'}}
                 arguments['audits'] = ({'event_id': 'settings:001', 'recorded_at_utc': '2026-10-08T10:00:00Z', 'details': 'K=3'},)
-                generation = catalog.local.begin_generation(writer, arguments['manifest'])
-                catalog.local.record_intent(writer, generation, literal_xlsx(), kind='xlsx')
-                receipt = catalog.local.commit(writer, generation)
-                arguments.update(generation_id=generation.generation_id, publish_id=receipt.published_sha256)
-                second = catalog.composer.freeze_send_unit(**arguments)
-                self.assertEqual(2, generation.sequence)
+                if older_unsent:
+                    self.assertEqual(1, len(earlier)); second = earlier[0]
+                    self.assertEqual(2, case.native_generation.sequence)
+                else:
+                    generation = original_begin(writer, arguments['manifest'])
+                    catalog.local.record_intent(writer, generation, literal_xlsx(), kind='xlsx')
+                    receipt = catalog.local.commit(writer, generation)
+                    arguments.update(generation_id=generation.generation_id, publish_id=receipt.published_sha256)
+                    second = catalog.composer.freeze_send_unit(**arguments)
+                    self.assertEqual(2, generation.sequence)
                 for unit_ in ((second, first) if reverse_catalog else (first, second)):
                     catalog.register_pending_unit(token, bound, unit_)
                 for unit_ in (first, second):
@@ -101,11 +127,17 @@ class CatalogAppliedNativeWorkflowTests(unittest.TestCase):
                 # pending units BEFORE its first native attempt. All production
                 # operations, genuine owner tokens and TLS assertions execute.
                 with mock.patch.object(case, 'owners', side_effect=capture_owners), \
-                        mock.patch.object(globals_, 'prepare_global_unit', side_effect=prepare_both):
+                        mock.patch.object(globals_, 'prepare_global_unit', side_effect=prepare_both), \
+                        mock.patch.object(catalog.local, 'begin_generation', side_effect=allocate_native):
                     writer, owner, bound, first = case.prepare_native_completed(scope, remote)
                 self.assertEqual(first, originals[0]); self.assertEqual(2, len(originals))
                 remote.record_owned_applied_evidence(writer, owner, bound, first, generation=case.native_generation)
                 remote.record_owned_applied_key_watermarks(writer, owner, bound, first, generation=case.native_generation)
+                if cold_handoff:
+                    # Finish every original context and release both real
+                    # owners BEFORE an independent process acquires them.
+                    scope.close()
+                case.catalog_release_owners = scope.close
                 yield case, catalog, remote, inventory, api, writer, owner, bound, tuple(originals)
         finally:
             case.doCleanups()
@@ -162,6 +194,66 @@ class CatalogAppliedNativeWorkflowTests(unittest.TestCase):
             self.assertEqual(original, target.read_bytes())
             self.assertEqual(original, (case.root / 'preserved-key-order-original').read_bytes())
 
+    def test_actual_applied_key_order_cold_process_uses_originals_without_parent_handles(self):
+        inventory = load_component('issue_tracker_retained_inventory')
+        self.assertTrue(callable(getattr(inventory, '_hold_catalog_key_order', None)))
+        with self.completed_and_pending(cold_handoff=True) as (case, _catalog, _remote, _inventory, _api, _writer, _owner, bound, _originals):
+            before = original_read_files(case.root)
+            program = '''import importlib.util,json,sys
+from pathlib import Path
+sys.path[:0]=[sys.argv[1],str(Path(sys.argv[1])/'tools')]
+spec=importlib.util.spec_from_file_location('cold_catalog_contract',sys.argv[3])
+tests=importlib.util.module_from_spec(spec); spec.loader.exec_module(tests)
+catalog=tests.load(); inventory=tests.load_component('issue_tracker_retained_inventory')
+from monitor import issue_tracker_spreadsheet_owner as ownership,issue_tracker_global_attempt_journal as globals_
+from monitor.issue_tracker_online_target import OnlineTargetBinding
+from test_cases.test_req7_spreadsheet_owner import scoped_fixture
+root=Path(sys.argv[2]); bound=OnlineTargetBinding(**json.loads(sys.stdin.buffer.read()))
+with catalog.local.writer_owner(root/'project',root/'project/publication') as writer,scoped_fixture(root,ownership),ownership.spreadsheet_owner(bound) as owner:
+ assert catalog.local._owner(writer).handles=={}
+ with inventory._hold_catalog_key_order(writer,owner,bound) as (observed,verify):
+  assert observed.project_identity==(root.joinpath('project').stat().st_dev,root.joinpath('project').stat().st_ino)
+  assert observed.applied_maxima==((('switch','node0001','down','fabric'),1),)
+  assert tuple((sequence,keys) for _unit,sequence,keys in observed.pending_keys)==((2,((('switch','node0001','down','fabric'),1),)),)
+  assert not hasattr(observed,'permit') and not hasattr(observed,'settled')
+  verify()
+ states=globals_.inspect_catalog_global_units(owner,bound)
+ assert tuple((row.attempt_count,row.outcome) for _unit,row in states)==((1,'UNKNOWN'),(0,'UNATTEMPTED_OBSERVATION'))
+ assert catalog.local._owner(writer).handles=={}
+ print('catalog-key-order cold APPLIED original UNKNOWN retained')
+'''
+            root_source = Path(__import__('test_cases').__file__).resolve().parents[1]
+            child = subprocess.run([sys.executable, '-B', '-c', program,
+                str(root_source), str(case.root), str(Path(__file__))],
+                input=json.dumps(asdict(bound)).encode(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
+            self.assertEqual(0, child.returncode, child.stderr)
+            self.assertEqual(b'catalog-key-order cold APPLIED original UNKNOWN retained\n', child.stdout)
+            self.assertEqual(b'', child.stderr)
+            self.assertEqual(before, original_read_files(case.root))
+
+    def test_actual_later_applied_old_unsent_supersession_inputs_hold_all_originals(self):
+        inventory = load_component('issue_tracker_retained_inventory')
+        api = getattr(inventory, '_hold_catalog_unsent_supersession_inputs', None)
+        self.assertTrue(callable(api), 'actual later APPLIED must dominate every key of an old UNSENT unit')
+        with self.completed_and_pending(older_unsent=True) as (case, catalog, _remote, inventory, _api, writer, owner, bound, originals):
+            before = original_read_files(case.root)
+            handles = dict(catalog.local._owner(writer).handles)
+            expected = ((originals[1].unit_id, 1, ((('switch', 'node0001', 'down', 'fabric'), 2),)),)
+            with inventory._hold_catalog_unsent_supersession_inputs(writer, owner, bound) as (candidates, verify):
+                self.assertEqual(expected, candidates); verify()
+            self.assertEqual(before, original_read_files(case.root))
+            self.assertEqual(handles, catalog.local._owner(writer).handles)
+            target = case.root / 'project/.tracker' / ('REMOTE-KEY-HIGH-WATER-' + originals[0].unit_id)
+            raw = target.read_bytes(); reached = []
+            with self.assertRaises(inventory.RetainedInventoryHold):
+                with inventory._hold_catalog_unsent_supersession_inputs(writer, owner, bound) as (candidates, verify):
+                    reached.append(candidates)
+                    target.rename(case.root / 'preserved-supersession-key-original')
+                    target.write_bytes(raw); target.chmod(0o600); verify()
+            self.assertEqual([expected], reached)
+            self.assertEqual(raw, (case.root / 'preserved-supersession-key-original').read_bytes())
+            self.assertEqual(raw, target.read_bytes())
+
     def test_original_applied_first_and_unattempted_second_are_held_without_releasing_unknown(self):
         with self.completed_and_pending() as (case, catalog, _remote, _inventory, api, writer, owner, bound, originals):
             before = original_read_files(case.root)
@@ -178,6 +270,118 @@ class CatalogAppliedNativeWorkflowTests(unittest.TestCase):
             from monitor import issue_tracker_global_attempt_journal as globals_
             self.assertEqual(((1, 'UNKNOWN'), (0, 'UNATTEMPTED_OBSERVATION')),
                              tuple((state.attempt_count, state.outcome) for _unit, state in globals_.inspect_catalog_global_units(owner, bound)))
+
+    def test_actual_unsent_disposition_durable_pair_and_independent_cold_replay(self):
+        inventory = load_component('issue_tracker_retained_inventory')
+        self.assertTrue(callable(getattr(inventory, '_record_catalog_unsent_dispositions', None)),
+                        'UNSENT disposition requires a durable original pair, not a transient comparison')
+        with self.completed_and_pending(older_unsent=True) as (case, catalog, _remote, inventory, _api, writer, owner, bound, originals):
+            before = original_read_files(case.root)
+            expected = ((originals[1].unit_id, 1, ((('switch', 'node0001', 'down', 'fabric'), 2),)),)
+            self.assertEqual(expected, inventory._record_catalog_unsent_dispositions(writer, owner, bound))
+            after = original_read_files(case.root)
+            for name, original in before.items():
+                self.assertEqual(original, after[name])
+            added = set(after) - set(before)
+            self.assertEqual({
+                'project/.tracker/REMOTE-UNSENT-SUPERSESSION-WITNESS-' + originals[1].unit_id,
+                'project/.tracker/REMOTE-UNSENT-SUPERSESSION-STARTED-' + originals[1].unit_id,
+                'project/.tracker/REMOTE-UNSENT-SUPERSESSION-' + originals[1].unit_id}, added)
+            with inventory._hold_catalog_unsent_dispositions(writer, owner, bound) as (seen, verify):
+                self.assertEqual(expected, seen); verify()
+            self.assertEqual(expected, inventory._record_catalog_unsent_dispositions(writer, owner, bound))
+            self.assertEqual(after, original_read_files(case.root))
+            from monitor import issue_tracker_global_attempt_journal as globals_
+            self.assertEqual((1, 0), tuple(state.attempt_count for _unit, state in globals_.inspect_catalog_global_units(owner, bound)))
+            # Close every real parent owner before independent process replay.
+            # Metadata is only a binding selector; the child derives all proof
+            # and dispositions from the fixed original namespaces.
+            # Release via the fixture's own owner contexts, not token registry
+            # mutation. ExitStack callback is supplied by the fixture below.
+            case.catalog_release_owners()
+            before = original_read_files(case.root)
+            program = '''import importlib.util,json,sys
+from pathlib import Path
+sys.path[:0]=[sys.argv[1],str(Path(sys.argv[1])/'tools')]
+spec=importlib.util.spec_from_file_location('cold_catalog_contract',sys.argv[3])
+tests=importlib.util.module_from_spec(spec);spec.loader.exec_module(tests)
+catalog=tests.load();inventory=tests.load_component('issue_tracker_retained_inventory')
+from monitor import issue_tracker_spreadsheet_owner as ownership,issue_tracker_global_attempt_journal as globals_
+from monitor.issue_tracker_online_target import OnlineTargetBinding
+from test_cases.test_req7_spreadsheet_owner import scoped_fixture
+root=Path(sys.argv[2]);bound=OnlineTargetBinding(**json.loads(sys.stdin.buffer.read()))
+with catalog.local.writer_owner(root/'project',root/'project/publication') as writer,scoped_fixture(root,ownership),ownership.spreadsheet_owner(bound) as owner:
+ assert catalog.local._owner(writer).handles=={}
+ with inventory._hold_catalog_unsent_dispositions(writer,owner,bound) as (seen,verify):
+  assert seen==((sys.argv[4],1,((('switch','node0001','down','fabric'),2),)),)
+  verify()
+ assert tuple(state.attempt_count for _unit,state in globals_.inspect_catalog_global_units(owner,bound))==(1,0)
+ assert catalog.local._owner(writer).handles=={}
+ print('UNSENT original disposition cold, UNKNOWN unchanged, no permit')
+'''
+            root_source = Path(__import__('test_cases').__file__).resolve().parents[1]
+            child = subprocess.run([sys.executable, '-B', '-c', program, str(root_source),
+                str(case.root), str(Path(__file__)), originals[1].unit_id], input=json.dumps(asdict(bound)).encode(),
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
+            self.assertEqual(0, child.returncode, child.stderr)
+            self.assertEqual(b'UNSENT original disposition cold, UNKNOWN unchanged, no permit\n', child.stdout)
+            self.assertEqual(b'', child.stderr); self.assertEqual(before, original_read_files(case.root))
+
+    def test_actual_unsent_disposition_rebound_or_partial_pair_never_repairs(self):
+        inventory = load_component('issue_tracker_retained_inventory')
+        self.assertTrue(callable(getattr(inventory, '_record_catalog_unsent_dispositions', None)))
+        for fault in ('same-bytes-new-inode', 'missing-final'):
+            with self.subTest(fault=fault), self.completed_and_pending(older_unsent=True) as (case, _catalog, _remote, inventory, _api, writer, owner, bound, originals):
+                inventory._record_catalog_unsent_dispositions(writer, owner, bound)
+                path = case.root / 'project/.tracker' / ('REMOTE-UNSENT-SUPERSESSION-' + originals[1].unit_id)
+                raw = path.read_bytes(); path.rename(case.root / 'preserved-original-unsent-disposition')
+                if fault == 'same-bytes-new-inode':
+                    path.write_bytes(raw); path.chmod(0o600)
+                before = original_read_files(case.root)
+                with self.assertRaises(inventory.RetainedInventoryHold):
+                    inventory._record_catalog_unsent_dispositions(writer, owner, bound)
+                with self.assertRaises(inventory.RetainedInventoryHold):
+                    with inventory._hold_catalog_unsent_dispositions(writer, owner, bound):
+                        self.fail('rebound or incomplete pair became durable supersession')
+                self.assertEqual(before, original_read_files(case.root))
+                self.assertEqual(raw, (case.root / 'preserved-original-unsent-disposition').read_bytes())
+
+    def test_actual_unsent_disposition_second_rename_interruption_keeps_started_and_pending(self):
+        inventory = load_component('issue_tracker_retained_inventory')
+        self.assertTrue(callable(getattr(inventory, '_record_catalog_unsent_dispositions', None)))
+        with self.completed_and_pending(older_unsent=True) as (case, _catalog, remote, inventory, _api, writer, owner, bound, originals):
+            original_rename = inventory.local._rename_new; renamed = []
+            def stop_second(parent, source, target):
+                if target == 'REMOTE-UNSENT-SUPERSESSION-' + originals[1].unit_id:
+                    raise OSError('owned representative second commit interruption')
+                original_rename(parent, source, target); renamed.append(target)
+            with mock.patch.object(inventory.local, '_rename_new', side_effect=stop_second), self.assertRaises(inventory.RetainedInventoryHold):
+                inventory._record_catalog_unsent_dispositions(writer, owner, bound)
+            tracker = case.root / 'project/.tracker'
+            self.assertEqual(['REMOTE-UNSENT-SUPERSESSION-STARTED-' + originals[1].unit_id], renamed)
+            self.assertFalse((tracker / ('REMOTE-UNSENT-SUPERSESSION-' + originals[1].unit_id)).exists())
+            self.assertEqual(1, len(tuple(tracker.glob('.pending-*'))))
+            before = original_read_files(case.root)
+            with self.assertRaises(inventory.RetainedInventoryHold):
+                inventory._record_catalog_unsent_dispositions(writer, owner, bound)
+            self.assertEqual(before, original_read_files(case.root))
+
+    def test_actual_unsent_disposition_both_record_images_lost_never_first_use(self):
+        inventory = load_component('issue_tracker_retained_inventory')
+        self.assertTrue(callable(getattr(inventory, '_record_catalog_unsent_dispositions', None)))
+        with self.completed_and_pending(older_unsent=True) as (case, _catalog, _remote, inventory, _api, writer, owner, bound, originals):
+            inventory._record_catalog_unsent_dispositions(writer, owner, bound)
+            tracker = case.root / 'project/.tracker'
+            for prefix in ('REMOTE-UNSENT-SUPERSESSION-STARTED-', 'REMOTE-UNSENT-SUPERSESSION-'):
+                name = prefix + originals[1].unit_id
+                (tracker / name).rename(case.root / ('preserved-' + name))
+            before = original_read_files(case.root)
+            with self.assertRaises(inventory.RetainedInventoryHold):
+                inventory._record_catalog_unsent_dispositions(writer, owner, bound)
+            with self.assertRaises(inventory.RetainedInventoryHold):
+                with inventory._hold_catalog_unsent_dispositions(writer, owner, bound):
+                    self.fail('loss of the entire recorded pair became first use')
+            self.assertEqual(before, original_read_files(case.root))
 
     def test_original_applied_key_and_pending_receipt_rebind_revoke_entire_held_catalog(self):
         for fault in ('applied-key', 'pending-receipt'):
@@ -401,6 +605,169 @@ class UnitCatalogTests(unittest.TestCase):
                 self.assertEqual({}, actual_writer.handles); verify()
             self.assertEqual({}, actual_writer.handles)
         self.assertEqual(before, original_read_files(self.root))
+
+    def test_key_order_independent_cold_process_reopens_pending_and_holds_actual_unknown(self):
+        _inventory, _api = self.key_order_api(); globals_ = self.globals_api()
+        with ExitStack() as scope:
+            writer, project, publication = self.local_owner(scope)
+            token = self.owner(scope)
+            originals = tuple(self.c6_unit(writer)[0] for _ in range(2))
+            for original in originals:
+                self.module.register_pending_unit(token, binding(), original)
+                globals_.prepare_global_unit(token, binding(), original)
+        program = '''import importlib.util,sys
+from pathlib import Path
+sys.path[:0]=[sys.argv[1],str(Path(sys.argv[1])/'tools')]
+spec=importlib.util.spec_from_file_location('cold_catalog_contract',sys.argv[3])
+tests=importlib.util.module_from_spec(spec); spec.loader.exec_module(tests)
+catalog=tests.load(); inventory=tests.load_component('issue_tracker_retained_inventory')
+from monitor import issue_tracker_spreadsheet_owner as ownership,issue_tracker_global_attempt_journal as globals_
+from test_cases.test_req7_spreadsheet_owner import scoped_fixture
+root=Path(sys.argv[2]); bound=tests.binding()
+with catalog.local.writer_owner(root/'project',root/'project/publication') as writer,scoped_fixture(root,ownership),ownership.spreadsheet_owner(bound) as owner:
+ assert catalog.local._owner(writer).handles=={}
+ if sys.argv[4]=='pending':
+  with inventory._hold_catalog_key_order(writer,owner,bound) as (observed,verify):
+   assert observed.applied_maxima==()
+   assert tuple((sequence,keys) for _unit,sequence,keys in observed.pending_keys)==(
+    (1,((('switch','node0000','down','fabric'),0),(('switch','node0001','down','fabric'),0))),
+    (2,((('switch','node0000','down','fabric'),0),(('switch','node0001','down','fabric'),0))))
+   verify()
+  print('catalog-key-order cold PENDING original')
+ else:
+  reached=[]
+  try:
+   with inventory._hold_catalog_key_order(writer,owner,bound) as result: reached.append(result)
+  except inventory.RetainedInventoryHold: pass
+  else: raise AssertionError('actual UNKNOWN yielded a cold partial key order')
+  assert reached==[]
+  states=globals_.inspect_catalog_global_units(owner,bound)
+  assert tuple((row.attempt_count,row.outcome) for _unit,row in states)==((1,'UNKNOWN'),(0,'UNATTEMPTED_OBSERVATION'))
+  print('catalog-key-order cold UNKNOWN retained')
+ assert catalog.local._owner(writer).handles=={}
+'''
+        root_source = Path(__import__('test_cases').__file__).resolve().parents[1]
+        def cold(phase):
+            before = original_read_files(self.root)
+            result = subprocess.run([sys.executable, '-B', '-c', program,
+                str(root_source), str(self.root), str(Path(__file__)), phase],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
+            self.assertEqual(0, result.returncode, result.stderr)
+            expected = (b'catalog-key-order cold PENDING original\n' if phase == 'pending'
+                        else b'catalog-key-order cold UNKNOWN retained\n')
+            self.assertEqual(expected, result.stdout); self.assertEqual(b'', result.stderr)
+            self.assertEqual(before, original_read_files(self.root))
+        cold('pending')
+        with ExitStack() as scope:
+            writer = scope.enter_context(self.module.local.writer_owner(project, publication))
+            token = self.owner(scope)
+            globals_.record_global_attempt_intent(token, binding(), originals[0])
+        cold('unknown')
+
+    def test_unsent_supersession_requires_every_sent_candidate_key_strictly_later_applied(self):
+        inventory, _api = self.key_order_api()
+        decide = getattr(inventory, '_superseded_unsent_candidates', None)
+        self.assertTrue(callable(decide), 'C6 supersession needs every key later APPLIED, not later SENT')
+        a = ('switch', 'node0000', 'down', 'fabric')
+        b = ('switch', 'node0001', 'down', 'fabric')
+        # This is only the comparison contract, never original proof.
+        order = inventory.CatalogProjectKeyOrder((7, 11), ((a, 9), (b, 5)), (
+            ('fully-covered', 3, ((a, 9), (b, 5))),
+            ('partial-only', 6, ((a, 9), (b, 5))),
+            ('equal-is-not-later', 5, ((b, 5),)),
+            ('missing-applied', 1, ((('switch', 'other', 'down', 'fabric'), 0),))))
+        self.assertEqual((('fully-covered', 3, ((a, 9), (b, 5))),), decide(order))
+
+    def test_unsent_supersession_unissued_writer_or_caller_claims_never_open_originals(self):
+        inventory, _api = self.key_order_api()
+        api = getattr(inventory, '_hold_catalog_unsent_supersession_inputs', None)
+        self.assertTrue(callable(api), 'supersession must hold actual C6/APPLIED inputs throughout consumption')
+        with mock.patch.object(inventory, '_hold_catalog_key_order') as read:
+            with self.assertRaises(inventory.RetainedInventoryHold):
+                with api(object(), object(), binding()):
+                    self.fail('unissued writer obtained supersession inputs')
+            read.assert_not_called()
+        for claim in ({'settled': True}, {'maxima': ()}, {'sent': True}, {'unit_id': 'caller'}):
+            with self.subTest(claim=tuple(claim)), self.assertRaises(TypeError):
+                api(object(), object(), binding(), **claim)
+
+    def test_unattempted_and_actual_unknown_never_become_supersession_inputs(self):
+        inventory, _api = self.key_order_api(); globals_ = self.globals_api()
+        api = getattr(inventory, '_hold_catalog_unsent_supersession_inputs', None)
+        self.assertTrue(callable(api), 'UNSENT supersession cannot be inferred from a later pending unit')
+        with ExitStack() as scope:
+            writer, _project, _publication = self.local_owner(scope)
+            token = self.owner(scope)
+            originals = tuple(self.c6_unit(writer)[0] for _ in range(2))
+            for original in originals:
+                self.module.register_pending_unit(token, binding(), original)
+                globals_.prepare_global_unit(token, binding(), original)
+            before = original_read_files(self.root)
+            with api(writer, token, binding()) as (candidates, verify):
+                self.assertEqual((), candidates); verify()
+            self.assertEqual(before, original_read_files(self.root))
+            globals_.record_global_attempt_intent(token, binding(), originals[0])
+            before = original_read_files(self.root)
+            with self.assertRaises(inventory.RetainedInventoryHold):
+                with api(writer, token, binding()):
+                    self.fail('actually counted UNKNOWN was called superseded-not-sent')
+            self.assertEqual(before, original_read_files(self.root))
+
+    def test_unsent_disposition_unissued_writer_and_caller_supersession_flags_are_refused(self):
+        inventory, _api = self.key_order_api()
+        read = getattr(inventory, '_hold_catalog_unsent_dispositions', None)
+        record = getattr(inventory, '_record_catalog_unsent_dispositions', None)
+        self.assertTrue(callable(read) and callable(record), 'durable UNSENT disposition needs original-only read/write APIs')
+        with mock.patch.object(inventory, '_hold_catalog_applied_keys') as originals:
+            with self.assertRaises(inventory.RetainedInventoryHold):
+                record(object(), object(), binding())
+            with self.assertRaises(inventory.RetainedInventoryHold):
+                with read(object(), object(), binding()):
+                    self.fail('unissued writer read a durable supersession')
+            originals.assert_not_called()
+        for api in (read, record):
+            for claim in ({'settled': True}, {'maxima': ()}, {'unit_id': 'caller'}, {'record': True}):
+                with self.subTest(api=api.__name__, claim=tuple(claim)), self.assertRaises(TypeError):
+                    api(object(), object(), binding(), **claim)
+
+    def test_unsent_disposition_no_later_applied_never_writes_or_promotes_pending(self):
+        inventory, _api = self.key_order_api(); globals_ = self.globals_api()
+        read = getattr(inventory, '_hold_catalog_unsent_dispositions', None)
+        record = getattr(inventory, '_record_catalog_unsent_dispositions', None)
+        self.assertTrue(callable(read) and callable(record), 'later pending must not manufacture a supersession record')
+        with ExitStack() as scope:
+            writer, _project, _publication = self.local_owner(scope); token = self.owner(scope)
+            originals = tuple(self.c6_unit(writer)[0] for _ in range(2))
+            for original in originals:
+                self.module.register_pending_unit(token, binding(), original)
+                globals_.prepare_global_unit(token, binding(), original)
+            before = original_read_files(self.root)
+            self.assertEqual((), record(writer, token, binding()))
+            with read(writer, token, binding()) as (observed, verify):
+                self.assertEqual((), observed); verify()
+            self.assertEqual(before, original_read_files(self.root))
+            self.assertEqual((0, 0), tuple(state.attempt_count for _unit, state in globals_.inspect_catalog_global_units(token, binding())))
+
+    def test_unsent_disposition_actual_unknown_remains_hold_with_no_new_record(self):
+        inventory, _api = self.key_order_api(); globals_ = self.globals_api()
+        read = getattr(inventory, '_hold_catalog_unsent_dispositions', None)
+        record = getattr(inventory, '_record_catalog_unsent_dispositions', None)
+        self.assertTrue(callable(read) and callable(record), 'UNKNOWN can never become SUPERSEDED-NOT-SENT')
+        with ExitStack() as scope:
+            writer, _project, _publication = self.local_owner(scope); token = self.owner(scope)
+            originals = tuple(self.c6_unit(writer)[0] for _ in range(2))
+            for original in originals:
+                self.module.register_pending_unit(token, binding(), original)
+                globals_.prepare_global_unit(token, binding(), original)
+            globals_.record_global_attempt_intent(token, binding(), originals[0])
+            before = original_read_files(self.root)
+            with self.assertRaises(inventory.RetainedInventoryHold):
+                record(writer, token, binding())
+            with self.assertRaises(inventory.RetainedInventoryHold):
+                with read(writer, token, binding()):
+                    self.fail('UNKNOWN gained a durable not-sent disposition')
+            self.assertEqual(before, original_read_files(self.root))
+            self.assertEqual((1, 0), tuple(state.attempt_count for _unit, state in globals_.inspect_catalog_global_units(token, binding())))
 
     def globals_api(self):
         from monitor import issue_tracker_global_attempt_journal as global_journal

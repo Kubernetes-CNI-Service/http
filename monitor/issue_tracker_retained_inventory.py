@@ -138,6 +138,235 @@ def _hold_catalog_key_order(writer_token, token, binding):
         raise RetainedInventoryHold() from None
 
 
+def _superseded_unsent_candidates(order):
+    """Pure comparison only; no durable disposition or original authority.
+
+    ALL actually sent-candidate keys of an unattempted unit must have a
+    strictly later APPLIED key sequence. A later pending/SENT/UNKNOWN unit,
+    equal sequence, different key or partial coverage never suffices.
+    """
+    if (type(order) is not CatalogProjectKeyOrder
+            or type(order.applied_maxima) is not tuple
+            or type(order.pending_keys) is not tuple):
+        raise RetainedInventoryHold()
+    maxima = {}
+    for pair in order.applied_maxima:
+        if type(pair) is not tuple or len(pair) != 2:
+            raise RetainedInventoryHold()
+        key, sequence = pair
+        if (type(key) is not tuple or len(key) != 4 or key in maxima
+                or any(type(value) is not str or not value for value in key)
+                or type(sequence) is not int or sequence < 1):
+            raise RetainedInventoryHold()
+        maxima[key] = sequence
+    result = []; units = set()
+    for pending in order.pending_keys:
+        if type(pending) is not tuple or len(pending) != 3:
+            raise RetainedInventoryHold()
+        unit_id, sequence, keys = pending
+        if (type(unit_id) is not str or not unit_id or unit_id in units
+                or type(sequence) is not int or sequence < 1
+                or type(keys) is not tuple or not keys):
+            raise RetainedInventoryHold()
+        units.add(unit_id); seen = set()
+        for pair in keys:
+            if type(pair) is not tuple or len(pair) != 2:
+                raise RetainedInventoryHold()
+            key, maximum = pair
+            if (type(key) is not tuple or len(key) != 4 or key in seen
+                    or any(type(value) is not str or not value for value in key)
+                    or type(maximum) is not int or maximum != maxima.get(key, 0)):
+                raise RetainedInventoryHold()
+            seen.add(key)
+        if all(maximum > sequence for _key, maximum in keys):
+            result.append(pending)
+    return tuple(result)
+
+
+@contextmanager
+def _hold_catalog_unsent_supersession_inputs(writer_token, token, binding):
+    """Hold original inputs for a future immutable UNSENT disposition.
+
+    No disposition is written or declared committed here. Counted units
+    cannot enter pending comparisons; an unresolved counted original holds
+    the entire read. This does not change UNKNOWN/count, reclaim originals,
+    release FIFO or issue NEW. The pure tuple alone is never authority.
+    """
+    failed = False
+    try:
+        owner = local._owner(writer_token)
+        with _hold_catalog_key_order(writer_token, token, binding) as (order, verify_inputs):
+            candidates = _superseded_unsent_candidates(order)
+            def verify():
+                if local._owner(writer_token) is not owner:
+                    raise RetainedInventoryHold()
+                verify_inputs()
+            verify()
+            yield candidates, verify
+            verify()
+    except Exception:
+        failed = True
+    if failed:
+        raise RetainedInventoryHold() from None
+
+
+def _unsent_disposition_body(owner, binding, old, rows, recorded=None):
+    """Bind a fixed set of original later APPLIED witnesses, never a live max.
+
+    A newer maximum cannot rewrite an existing immutable disposition. Cold
+    readers replay the originally selected units and their key pair inodes.
+    This one-project body is NOT a global high-water or NEW/FIFO permit.
+    """
+    if old.attempt_count != 0:
+        raise RetainedInventoryHold()
+    action = local._json(old.unit.action_preimage)
+    match = local._GEN.fullmatch(action['identity']['generation_id'])
+    if match is None or int(match.group(1)) < 1:
+        raise RetainedInventoryHold()
+    sequence = int(match.group(1))
+    keys = tuple(sorted(tuple(item['activity_key']) for item in action['business']))
+    if not keys or len(set(keys)) != len(keys):
+        raise RetainedInventoryHold()
+    applied = {row.unit.unit_id: row for row in rows if row.attempt_count}
+    if recorded is None:
+        witnesses = []
+        for key in keys:
+            choices = sorted((later, row.unit.unit_id) for row in applied.values()
+                             for candidate, later in row.key_watermarks
+                             if candidate == key and later > sequence)
+            if not choices:
+                return None, None
+            later, unit_id = choices[0]
+            witnesses.append([list(key), later, unit_id])
+    else:
+        witnesses = recorded.get('witnesses')
+        if type(witnesses) is not list or len(witnesses) != len(keys):
+            raise RetainedInventoryHold()
+        for key, witness in zip(keys, witnesses):
+            if (type(witness) is not list or len(witness) != 3
+                    or witness[0] != list(key) or type(witness[1]) is not int
+                    or witness[1] <= sequence or type(witness[2]) is not str
+                    or witness[2] not in applied
+                    or (key, witness[1]) not in applied[witness[2]].key_watermarks):
+                raise RetainedInventoryHold()
+    references = {}
+    for unit_id in sorted({witness[2] for witness in witnesses}):
+        for prefix in ('REMOTE-KEY-HIGH-WATER-STARTED-', 'REMOTE-KEY-HIGH-WATER-'):
+            name = prefix + unit_id
+            raw, info = local._read(owner.root_fd, name, local._MAX_MANIFEST)
+            references[name] = {'identity': list(journal._identity(info)),
+                                'sha256': hashlib.sha256(raw).hexdigest()}
+    body = {'schema_version': 1, 'disposition': 'SUPERSEDED-NOT-SENT',
+            'spreadsheet_id': binding.spreadsheet_id,
+            'project_identity': list(old.project_identity),
+            'unit_id': old.unit.unit_id, 'generation_id': action['identity']['generation_id'],
+            'sequence': sequence, 'attempt_count': 0,
+            'action_digest': old.unit.action_digest, 'wire_sha256': old.unit.wire_sha256,
+            'witnesses': witnesses, 'applied_key_originals': references}
+    observed = (old.unit.unit_id, sequence,
+                tuple((tuple(key), later) for key, later, _unit_id in witnesses))
+    return body, observed
+
+
+@contextmanager
+def _catalog_unsent_dispositions(writer_token, token, binding, *, record):
+    """One-project append-only disposition; retain C6/count/APPLIED originals.
+
+    STARTED binds both prepared inodes before the final rename. Partial pairs
+    and pending writes survive failure, are never repaired/adopted, and cannot
+    authorize sending. UNKNOWN and its counted journal remain unchanged.
+    """
+    failed = False
+    from monitor import issue_tracker_unit_catalog as catalog
+    intents = catalog._Originals()
+    try:
+        owner = local._owner(writer_token)
+        from monitor import issue_tracker_remote_history_match as remote
+        with ExitStack() as scope:
+            rows, verify_inputs = scope.enter_context(_hold_catalog_applied_keys(writer_token, token, binding))
+            present = set(os.listdir(owner.root_fd))
+            prefixes = ('REMOTE-UNSENT-SUPERSESSION-STARTED-', 'REMOTE-UNSENT-SUPERSESSION-')
+            witness_prefix = 'REMOTE-UNSENT-SUPERSESSION-WITNESS-'
+            states = ('UNSENT-SUPERSESSION-STARTED', 'SUPERSEDED-NOT-SENT')
+            old_rows = tuple(row for row in rows if row.attempt_count == 0)
+            allowed = {prefix + row.unit.unit_id for prefix in (*prefixes, witness_prefix) for row in old_rows}
+            if (any(name.startswith('.pending-') for name in present)
+                    or any(name.startswith(prefixes) and name not in allowed for name in present)):
+                raise RetainedInventoryHold()
+            results = []; validators = []
+            for row in old_rows:
+                names = tuple(prefix + row.unit.unit_id for prefix in prefixes)
+                witness_name = witness_prefix + row.unit.unit_id
+                exists = tuple(name in present for name in (*names, witness_name))
+                if any(exists) and not all(exists):
+                    raise RetainedInventoryHold()
+                recorded = None
+                if all(exists):
+                    raw, _info = local._read(owner.root_fd, names[1], local._MAX_MANIFEST)
+                    recorded = local._json(raw)
+                body, observed = _unsent_disposition_body(owner, binding, row, rows, recorded)
+                if body is None:
+                    continue
+                intent_raw = local._canonical({'schema_version': 1, 'unit_id': row.unit.unit_id,
+                    'state': 'UNSENT-SUPERSESSION-WRITE-STARTED-NOT-AUTHORITY',
+                    'body_sha256': hashlib.sha256(local._canonical(body)).hexdigest()})
+                created_identity = None
+                if not any(exists):
+                    if not record:
+                        raise RetainedInventoryHold()
+                    verify_inputs()
+                    # A fixed STOP witness exists before its first byte. Both
+                    # pair names later disappearing never becomes first use.
+                    # Short writes/fsync failures retain this witness; no
+                    # deletion, repair or adoption of an interrupted creation.
+                    created_identity = remote._write_completion_start(owner.root_fd, witness_name, intent_raw)
+                raw, identity = intents.file(owner.root_fd, witness_name, 16384)
+                if raw != intent_raw or (created_identity is not None and identity != created_identity):
+                    raise RetainedInventoryHold()
+                intents.sync()
+                body = {**body, 'write_witness': {'identity': list(identity),
+                        'sha256': hashlib.sha256(raw).hexdigest()}}
+                def verify_write_inputs():
+                    verify_inputs(); intents.verify()
+                if not any(exists):
+                    scope.enter_context(remote._write_applied_pair(owner.root_fd, names, body,
+                        verify_write_inputs, states=states))
+                validators.append(scope.enter_context(remote._hold_applied_records(owner.root_fd,
+                    names, body, states=states)))
+                results.append(observed)
+            def verify():
+                if local._owner(writer_token) is not owner:
+                    raise RetainedInventoryHold()
+                verify_inputs()
+                intents.verify()
+                for validate in validators:
+                    validate()
+                verify_inputs()
+            verify()
+            yield tuple(results), verify
+            verify()
+    except Exception:
+        failed = True
+    finally:
+        intents.close()
+    if failed:
+        raise RetainedInventoryHold() from None
+
+
+@contextmanager
+def _hold_catalog_unsent_dispositions(writer_token, token, binding):
+    """Cold original-only observation, not FIFO release or NEW admission."""
+    with _catalog_unsent_dispositions(writer_token, token, binding, record=False) as result:
+        yield result
+
+
+def _record_catalog_unsent_dispositions(writer_token, token, binding):
+    """Append genuine later-APPLIED UNSENT pairs; no override or repair."""
+    with _catalog_unsent_dispositions(writer_token, token, binding, record=True) as (result, verify):
+        verify()
+    return result
+
+
 def _unique_names(names):
     if (type(names) is not tuple or len(names) > 256 or any(type(name) is not str for name in names)
             or len(set(names)) != len(names)):

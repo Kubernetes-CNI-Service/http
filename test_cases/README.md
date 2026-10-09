@@ -1802,3 +1802,25 @@ all 79 methods (57.295 seconds, exit 0), including five actual owned TLS workflo
 The reverse overlapping-key catalog case preserves the actual original FIFO
 rejection; it is not a fabricated successful first send. These diagnostics do
 not replace current exact-tree full/check, cross-project inventory or whole REQ7.
+
+The next one-project UNSENT slice requires count=0 and strictly later original
+APPLIED coverage for every actual candidate key. Pending/SENT/equal sequence,
+partial coverage and caller settlement/maxima cannot issue a disposition.
+Its immutable record binds fixed original witness units and key-pair identities;
+new maxima cannot rewrite history. A fixed write-ahead STOP witness plus an
+original dual-inode pair keeps missing/partial/rebound records HOLD without
+repair, first-use recreation or UNKNOWN/count mutation. Independent tests
+exposed whole-pair-loss recreation before the witness fix; the raw failure is
+retained. Main receiving ran11 new methods against the old implementation
+first (11 missing-API FAIL), then catalog → retained inventory → APPLIED →
+manual profile passed93 methods/103.033s/exit0 including11 actual owned TLS and
+cold-process workflows. All old assertions/timing contracts remain. This is
+not FIFO release, global high-water, current NEW/G1/default worker integration,
+wholeREQ7 closure, field acceptance or current exact-tree full/check.
+REAL_ENV stays NOT RUN; no field risk waiver was added.
+
+The prior full24 stale-manual failure entries were diagnosed from original
+tracebacks. After actual manual regeneration, the original documentation/
+upload sequence347 and clean-tree public packaging/capsule/S failure-chain14
+all passed (the latter1424.368s). These are cause-specific workflow evidence,
+not a current full success. REQ10C3 still execute and remain raw known FAIL.
