@@ -73,6 +73,17 @@ _S_HISTORY_TEMP = None
 _S_HISTORY_CHECKOUT = None
 
 
+def tearDownModule():
+    """Release this module's owned historical clone before later modules run."""
+    global _S_HISTORY_TEMP, _S_HISTORY_CHECKOUT
+    owner = _S_HISTORY_TEMP
+    if owner is not None:
+        owner.cleanup()
+        atexit.unregister(owner.cleanup)
+    _S_HISTORY_TEMP = None
+    _S_HISTORY_CHECKOUT = None
+
+
 def _historical_s_checkout() -> Path:
     global _S_HISTORY_TEMP, _S_HISTORY_CHECKOUT
     if _S_HISTORY_CHECKOUT is not None:

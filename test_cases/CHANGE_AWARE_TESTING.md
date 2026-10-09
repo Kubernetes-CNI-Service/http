@@ -1,5 +1,29 @@
 # 脚本变更影响测试
 
+## 2026-10-10 待编号：历史 S 私有夹具的模块生命周期
+
+精确干净 `efc7f4ea605e509d59e9d56371a2e9ee0c7512ea` 的正式 full 完整执行
+5856 tests / 7042.375s / 1 failure / skipped5 / actual exit1；source freeze 一致，
+批准 ledger 未改。原日志 `outputs/test-diagnostics/native-air-efc7f4e-formal-full-after-stat-remedy.log`
+inode177376322 / size858542 / SHA256
+`a448c2583d275ea2f63fdd2b4efd000a420ec7b4274db3c825edf34ae39978e6`，
+物理 Ran6191→FAILED6193→actual6363→freeze6364→END6368=1。
+唯一失败是规范目录原断言发现 S direct 与 workflow 历史 checkout 共 150 个测试文件；
+两夹具旧缓存直到进程退出才清理，所以晚到的规范目录检查仍能看到它们。
+
+先加独立 owned cleanup、cleanup error 传播/保留 owner，以及实际历史 S 两模块
+重放→同进程原目录检查的 workflow。有效 RED
+`history-both-owned-module-lifecycle-independent-red.log` 为 3 tests / 5 failures /
+actual1 / freezeTrue / END1，子 workflow 原目录断言独立复现同样 150 个额外文件，
+SHA256 `c283c22f3e426191dcfa4e73e0c3c6a9916e351f32c155552e0a38e98489f56d`。
+只在两个夹具的模块 teardown 清理各自持有的 TemporaryDirectory，再注销退出回调
+并清空缓存；cleanup 抛错仍报错并保留 owner，不改历史 SHA/断言/重放次数或目录扫描。
+完整目录模块 11 tests / 16.100s / actual0 / freezeTrue / END0，日志
+`history-both-owned-module-lifecycle-independent-green.log` SHA256
+`ddf164b7a2d2368873a0c36217ea3b487e55c638df0b1910380a452923bbf812`。
+这是已定位的夹具生命周期因果修复，尚须新 related、自动 ledger 单独提交及新精确树
+正式 full/check；不将这次局部 PASS 或原失败 full 提升为证明，不授权部署或关闭 AIR。
+
 ## 2026-10-08 R22 prefix 父创建首写前意图与孤儿拒绝
 
 基于 `d32ea8c`。独立 direct 与真实 LOAD→SETUP 登记→mkdir 后 SIGKILL→新 LOAD
