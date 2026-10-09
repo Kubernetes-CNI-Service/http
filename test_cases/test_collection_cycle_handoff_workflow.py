@@ -225,6 +225,10 @@ trace = {
 with (root / "fixture-trace.jsonl").open("a", encoding="utf-8") as stream:
     stream.write(json.dumps(trace, ensure_ascii=False, sort_keys=True) + "\n")
 
+child_evidence = root / ("fixture-child-result-" + slot.replace("/", "-") + ".json")
+child_evidence.write_text(json.dumps({
+    "source_slot": slot, "phase": "full-started",
+}, sort_keys=True), encoding="utf-8")
 completed = subprocess.run(
     ["/bin/bash", *child_arguments], stdout=subprocess.PIPE,
     stderr=subprocess.PIPE, pass_fds=pass_fds, env=os.environ.copy(), check=False,
@@ -380,6 +384,10 @@ if mutate:
             return payload
         mutate_marker(zero_evidence)
 
+child_evidence.write_text(json.dumps({
+    "source_slot": slot, "phase": "full-returned",
+    "returncode": returncode, "stdout": stdout, "stderr": stderr,
+}, sort_keys=True), encoding="utf-8")
 sys.stdout.write(stdout)
 sys.stderr.write(stderr)
 raise SystemExit(returncode)
@@ -774,6 +782,14 @@ class CollectionCycleHandoffWorkflowTests(unittest.TestCase):
                 if line
             ]
             for item in traces:
+                child_evidence = root / (
+                    "fixture-child-result-" + item["source_slot"].replace("/", "-")
+                    + ".json"
+                )
+                item["observed_child"] = (
+                    json.loads(child_evidence.read_text(encoding="utf-8"))
+                    if child_evidence.is_file() else None
+                )
                 observed = {}
                 context = item.get("context")
                 if isinstance(context, dict):
@@ -1063,8 +1079,40 @@ class CollectionCycleHandoffWorkflowTests(unittest.TestCase):
         self.assertTrue(payload["returned"], payload)
         by_slot = {item["source_slot"]: item
                    for item in payload["result"]["outcomes"]}
-        self.assertEqual("accepted", by_slot["infiniband/prod"]["outcome"])
+        self.assertEqual("accepted", by_slot["infiniband/prod"]["outcome"],
+                         {"payload": payload, "traces": traces,
+                          "stderr": completed.stderr})
         self.assertTrue(payload["result"]["summary"]["qualifying"])
+
+    def test_reported_child_failure_evidence_survives_original_fixture_cleanup(self):
+        """Missing-marker evidence must remain attributable after cleanup."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.make_layout(directory)
+            completed, payload, traces = self.run_workflow(
+                root, "prod", "missing_marker", "infiniband/prod"
+            )
+        self.assertFalse(root.exists(), "retain the original private cleanup")
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["returned"], payload)
+        by_slot = {item["source_slot"]: item
+                   for item in payload["result"]["outcomes"]}
+        self.assertEqual("missing_marker", by_slot["infiniband/prod"]["outcome"])
+        self.assertIsNone(payload["result"]["summary"])
+        by_trace = {item["source_slot"]: item for item in traces}
+        trace = by_trace["infiniband/prod"]
+        self.assertIn("observed_child", trace)
+        child = trace["observed_child"]
+        self.assertEqual("infiniband/prod", child["source_slot"])
+        self.assertEqual(0, child["returncode"])
+        self.assertEqual("", child["stderr"])
+        self.assertIn("[IB]", child["stdout"])
+        self.assertNotIn(TASK_RESULT_PREFIX, child["stdout"])
+        self.assertEqual(
+            by_slot["infiniband/prod"]["evidence"]["stdout"]["sha256"],
+            hashlib.sha256(child["stdout"].encode()).hexdigest(),
+        )
+        self.assertIn(TASK_RESULT_PREFIX,
+                      by_trace["nvlink/prod"]["observed_child"]["stdout"])
 
     def test_plan_fd_tamper_and_forged_digest_cannot_qualify(self):
         for mode in ("plan_context_tamper", "plan_context_forged_digest"):
