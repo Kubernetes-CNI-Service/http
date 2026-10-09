@@ -46,6 +46,14 @@ class RetainedInventoryObservation:
     originals: tuple
 
 
+@dataclass(frozen=True)
+class CatalogUnitAppliedKeys:
+    unit: object = field(repr=False)
+    attempt_count: int
+    key_watermarks: tuple
+    project_identity: tuple
+
+
 def _unique_names(names):
     if (type(names) is not tuple or len(names) > 256 or any(type(name) is not str for name in names)
             or len(set(names)) != len(names)):
@@ -124,7 +132,7 @@ def _verify_retained_read_links(namespace, files):
             raise RetainedInventoryHold()
 
 
-def _verify_legacy_read_semantics(stem, namespace, files, directories, unit, binding, parent):
+def _verify_legacy_read_semantics(stem, namespace, files, directories, unit, binding, parent, *, enrollment_name=None):
     """Replay existing read contracts while all inventory originals stay held.
 
     Coherent marker/digest links do not bind a foreign nonce or History unit.
@@ -134,7 +142,7 @@ def _verify_legacy_read_semantics(stem, namespace, files, directories, unit, bin
     folders = {name: folder for name, folder, _identity, _names in directories}
     action = local._json(unit.action_preimage)
     names = {name for name, _family in namespace}
-    enrollment_name = stem + '.enrollment'
+    enrollment_name = stem + '.enrollment' if enrollment_name is None else enrollment_name
     if enrollment_name in names:
         original = local._json(images[enrollment_name + '/HEADER'])
         if set(original) != {'schema_version', 'spreadsheet_id', 'sheet_ids', 'nonces_sha256'}:
@@ -199,7 +207,7 @@ def _verify_legacy_dispatch(stem, namespace, files, directories, unit, state):
         raise RetainedInventoryHold()
 
 
-def _verify_legacy_business_links(stem, namespace, files, unit):
+def _verify_legacy_business_links(stem, namespace, files, unit, *, enrollment_name=None):
     """Necessary original envelope/NOOP coverage, not full cell replay.
 
     Do not fabricate a remote identity observation from enrolled ids to invoke
@@ -210,7 +218,8 @@ def _verify_legacy_business_links(stem, namespace, files, unit):
     names = {entry for entry, _family in namespace}
     if name not in names:
         return
-    if not {stem + '.enrollment', stem + '.history'} <= names:
+    enrollment_name = stem + '.enrollment' if enrollment_name is None else enrollment_name
+    if not {enrollment_name, stem + '.history'} <= names:
         raise RetainedInventoryHold()
     originals = {relative: raw for _directory, _entry, relative, _fd, _identity, raw in files}
     action = local._json(unit.action_preimage)
@@ -242,7 +251,7 @@ def _verify_legacy_business_links(stem, namespace, files, unit):
         raise RetainedInventoryHold()
 
 
-def _verify_legacy_completion(stem, namespace, token, binding, unit, state):
+def _verify_legacy_completion(stem, namespace, token, binding, unit, state, *, enrollment_name=None):
     """Replay the existing retained proof, never trust COMPLETE file shape.
 
     The remote-history reader reopens and holds original start/header/raw images,
@@ -253,7 +262,8 @@ def _verify_legacy_completion(stem, namespace, token, binding, unit, state):
     names = {name for name, _family in namespace}
     if stem + '.completion' not in names:
         return
-    if not {stem + '.enrollment', stem + '.history'} <= names:
+    enrollment_name = stem + '.enrollment' if enrollment_name is None else enrollment_name
+    if not {enrollment_name, stem + '.history'} <= names:
         raise RetainedInventoryHold()
     from monitor import issue_tracker_remote_history_match as remote
     result = remote.inspect_completion_evidence(token, binding, unit)
@@ -353,6 +363,173 @@ def _hold_retained_inventory(token, binding):
                 failed = True
     if failed:
         raise RetainedInventoryHold()
+
+
+@contextmanager
+def _hold_catalog_retained_inventory(token, binding):
+    """Pin EVERY original catalog unit/family plus shared enrollment.
+
+    Fixed namespaces only, no caller units/paths/key sets. Pending units without
+    their original journal/start pair make this complete diagnostic handoff
+    HOLD, not empty/first-use. Replay existing nonce/History/dispatch/business
+    links and any COMPLETE semantics while ALL originals remain held. Other
+    reservation family images are coverage witnesses, not quota/NEW authority.
+    No APPLIED settlement, key maximum, FIFO release or send permit is issued.
+    """
+    directories = []; files = []; failed = False
+    try:
+        with ExitStack() as scope:
+            observations, verify_counts = scope.enter_context(global_journal._hold_catalog_attempts(token, binding))
+            owner = ownership._validated_owner(token, binding)
+            parent = owner.directories[-1][0]; stem = owner.lock_name[:-5]
+            parent_identity = journal._identity(os.fstat(parent))
+            names = set(os.listdir(parent)); shared = stem + '.enrollment'
+            namespace = []
+            if shared in names:
+                namespace.append((shared, 'enrollment'))
+            per_unit = []
+            for unit, state in observations:
+                if state.outcome == 'PENDING_NO_JOURNAL':
+                    raise RetainedInventoryHold()
+                prefix = stem + '.unit-' + unit.unit_id
+                entries = sorted((name, name[len(prefix) + 1:]) for name in names if name.startswith(prefix + '.'))
+                unit_names = {name for name, _family in entries}
+                if (not {prefix + '.journal', prefix + '.journal-started'} <= unit_names
+                        or (prefix + '.completion' in unit_names) != (prefix + '.completion-started' in unit_names)
+                        or any(family not in _FAMILIES or family == 'enrollment' for _name, family in entries)):
+                    raise RetainedInventoryHold()
+                namespace.extend(entries)
+                per_unit.append((unit, state, prefix, tuple(sorted(entries + ([(shared, 'enrollment')] if shared in names else [])))))
+            namespace = tuple(sorted(namespace)); total = 0
+            for name, family in namespace:
+                if family.endswith('-started'):
+                    entries = ((parent, name, name, 16384),)
+                else:
+                    folder = local._directory(parent, name)
+                    directories.append((name, folder, journal._identity(os.fstat(folder)), None))
+                    journal._named(parent, name, folder, directory=True)
+                    identity = journal._identity(os.fstat(folder))
+                    child_names = _family_entries(family, tuple(os.listdir(folder)))
+                    directories[-1] = (name, folder, identity, child_names)
+                    entries = tuple((folder, child, name + '/' + child, _limit(family, child)) for child in child_names)
+                for directory, entry, relative, limit in entries:
+                    fd = os.open(entry, local._flags(), dir_fd=directory)
+                    files.append((directory, entry, relative, fd, journal._identity(os.fstat(fd)), None))
+                    info = local._check(fd, directory=False); journal._named(directory, entry, fd, directory=False)
+                    identity = journal._identity(info); raw = os.pread(fd, limit + 1, 0); total += len(raw)
+                    if not raw or len(raw) > limit or len(raw) != info.st_size or total > _TOTAL_LIMIT:
+                        raise RetainedInventoryHold()
+                    if journal._identity(os.fstat(fd)) != identity:
+                        raise RetainedInventoryHold()
+                    files[-1] = (directory, entry, relative, fd, identity, raw)
+
+            def verify():
+                verify_counts()
+                if (ownership._validated_owner(token, binding) is not owner
+                        or journal._identity(os.fstat(parent)) != parent_identity or set(os.listdir(parent)) != names):
+                    raise RetainedInventoryHold()
+                for name, folder, identity, child_names in directories:
+                    journal._named(parent, name, folder, directory=True)
+                    if journal._identity(os.fstat(folder)) != identity or tuple(sorted(os.listdir(folder))) != child_names:
+                        raise RetainedInventoryHold()
+                for directory, entry, _relative, fd, identity, raw in files:
+                    journal._named(directory, entry, fd, directory=False)
+                    if journal._identity(os.fstat(fd)) != identity or os.pread(fd, len(raw) + 1, 0) != raw:
+                        raise RetainedInventoryHold()
+                verify_counts()
+
+            verify(); _verify_retained_read_links(namespace, files)
+            results = []
+            for unit, state, prefix, entries in per_unit:
+                _verify_legacy_read_semantics(prefix, entries, files, directories, unit, binding, parent, enrollment_name=shared)
+                _verify_legacy_dispatch(prefix, entries, files, directories, unit, state)
+                _verify_legacy_business_links(prefix, entries, files, unit, enrollment_name=shared)
+                _verify_legacy_completion(prefix, entries, token, binding, unit, state, enrollment_name=shared)
+                selected = {name for name, _family in entries}
+                results.append(RetainedInventoryObservation(unit, state.attempt_count,
+                    tuple(family for _name, family in entries),
+                    tuple((relative, identity, hashlib.sha256(raw).hexdigest())
+                          for _directory, _entry, relative, _fd, identity, raw in files
+                          if relative.split('/')[0] in selected)))
+            verify()
+            for _directory, _entry, _relative, fd, _identity, _raw in files:
+                os.fsync(fd)
+            for _name, folder, _identity, _child_names in reversed(directories):
+                os.fsync(folder)
+            os.fsync(parent); verify()
+            yield tuple(results), verify
+            verify()
+    except Exception:
+        failed = True
+    finally:
+        for _directory, _entry, _relative, fd, identity, _raw in reversed(files):
+            if not _close_if_original(fd, identity): failed = True
+        for _name, folder, identity, _child_names in reversed(directories):
+            if not _close_if_original(folder, identity): failed = True
+    if failed:
+        raise RetainedInventoryHold() from None
+
+
+@contextmanager
+def _hold_catalog_applied_keys(writer_token, token, binding):
+    """Hold every unit's real historical C6 and any COMPLETE/APPLIED/key pair.
+
+    Only this genuine writer's project is supported. Pending unattempted units
+    contribute no applied keys. A counted unit without the entire original
+    COMPLETE/APPLIED/key pair makes the whole handoff HOLD, not a partial
+    maximum. Historical generation names are read selectors, never issued
+    mutation handles. No NEW permit, FIFO release or global maximum is issued.
+    """
+    failed = False
+    try:
+        owner = local._owner(writer_token)
+        from monitor import issue_tracker_unit_catalog as catalog
+        from monitor import issue_tracker_remote_history_match as remote
+        with ExitStack() as scope:
+            units, verify_c6 = scope.enter_context(catalog.hold_pending_c6_units(writer_token, token, binding))
+            observations, verify_inventory = scope.enter_context(_hold_catalog_retained_inventory(token, binding))
+            if units != tuple(row.unit for row in observations):
+                raise RetainedInventoryHold()
+            project_identity = journal._identity(os.fstat(owner.project_fd))[:2]
+            validators = []; result = []
+            for row in observations:
+                keys = ()
+                if row.attempt_count:
+                    if 'completion' not in row.families:
+                        raise RetainedInventoryHold()
+                    action = local._json(row.unit.action_preimage)
+                    generation_id = action['identity']['generation_id']
+                    match = local._GEN.fullmatch(generation_id) if type(generation_id) is str else None
+                    if match is None or int(match.group(1)) < 1:
+                        raise RetainedInventoryHold()
+                    generation = local.Generation(generation_id, int(match.group(1)), action['manifest_id'], writer_token)
+                    held_owner, verify_inputs, body, keys = scope.enter_context(
+                        remote._hold_original_applied_key_watermark_inputs(writer_token, token, binding, row.unit, generation))
+                    if held_owner is not owner or tuple(body['project_identity']) != project_identity:
+                        raise RetainedInventoryHold()
+                    names = ('REMOTE-KEY-HIGH-WATER-STARTED-' + row.unit.unit_id,
+                             'REMOTE-KEY-HIGH-WATER-' + row.unit.unit_id)
+                    verify_keys = scope.enter_context(remote._hold_applied_records(owner.root_fd, names, body,
+                        states=('KEY-HIGH-WATER-STARTED', 'KEY-HIGH-WATER')))
+                    validators.extend((verify_inputs, verify_keys))
+                elif 'completion' in row.families:
+                    raise RetainedInventoryHold()
+                result.append(CatalogUnitAppliedKeys(row.unit, row.attempt_count, keys, project_identity))
+            def verify():
+                if (local._owner(writer_token) is not owner
+                        or journal._identity(os.fstat(owner.project_fd))[:2] != project_identity):
+                    raise RetainedInventoryHold()
+                verify_inventory(); verify_c6()
+                for validate in validators:
+                    validate()
+                verify_inventory(); verify_c6()
+            verify()
+            yield tuple(result), verify
+            verify()
+    except Exception:
+        failed = True
+    if failed:
+        raise RetainedInventoryHold() from None
 
 
 @contextmanager

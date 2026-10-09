@@ -1744,3 +1744,46 @@ All held originals are verified across the consumer and final scope exit.
 This one-unit historical reading is not a global maximum, per-key FIFO,
 multi-unit recovery, G1, NEW permission or default worker activation. Those
 integrated transitions and current exact-tree full/check remain open.
+
+### Multiple pending originals and original counted-wire/APPLIED reading
+
+`test_req7_unit_catalog.py` covers the immutable append-only pending catalog
+under the genuine spreadsheet owner, per-unit GLOBAL/History/dispatch original
+names and the one shared enrollment nonce. All old original rules remain.
+Missing catalog with surviving per-unit UNKNOWN cannot become legacy first use;
+partial/tail loss, changed scalar types, later-unit substitution or fsync failure
+refuse the whole handoff. All catalog/count originals dominate actual consumption,
+the last semantic replay and exit. Newly created dispatch HEADER/INITIALIZED
+are held BEFORE the first claim read; only its exact one-CLAIM append may extend
+the namespace. Genuine six-count same-unit retry preserves old CLAIM full stat/raw
+and refuses consumed-count reuse or a seventh intent. These necessary primitives
+do not issue admission or a send permit and never clear UNKNOWN.
+
+Historical C6 reading derives generations only from held actions and never
+reissues mutation handles. The APPLIED join requires genuine writer ownership
+before inventory access and every counted unit's original COMPLETE/APPLIED/key
+pair. Unattempted originals contribute no applied keys; unresolved or foreign
+project originals refuse ALL, not a valid prefix. Independent initial RED logs
+precede each implementation/fault repair. In the owned candidate,38 file-only
+methods,17 unchanged consumers and12 unchanged legacy methods pass. Three actual
+owned TLS workflows also pass: COMPLETE/APPLIED plus a pending native C6 unit,
+held key/pending RECEIPT replacement, and missing APPLIED/key pairs. Main receiving
+has its own initial RED (45 methods, 48 failure entries including subtests), then
+45 PASS including the three actual TLS workflows and four manual-profile tests.
+On the same frozen receiving source/test tree, the original GLOBAL → History →
+retained inventory → APPLIED → catalog → manual/documentation → actual upload
+archive sequence passed all 347 methods (579.553 seconds, exit 0). Real manual
+regeneration and generator --check exit 0 corrected the stale inventory gate.
+Evidence logs are req7-catalog-main-receiving-green-20261010.log and
+req7-catalog-main-original-sequence-and-manual-green-20261010.log in the ignored
+local evidence directory; these diagnostic passes do not update the ledger or
+replace current exact-tree related/full/check or the public child workflows.
+
+The manual-profile tests require uninstalled/no CLI boundaries; changing source
+inventory requires real manual regeneration and original documentation/public
+packaging workflows, not just profile PASS. Current full5281/27FAIL/4SKIP on
+485e7f9 is preserved:24 additional failures trace to stale generated manual;
+the remaining REQ10C3 stay raw FAIL. No assertion/timeout/skip/ledger is weakened.
+This local slice is NOT cross-project/global maximum/FIFO release/current NEW,
+G1/default worker or whole REQ7 closure. Current related/full/check and field
+TC-REAL-REQ7-PENDING-ORIGINAL-CATALOG-001 remain required; onsite NOT RUN.

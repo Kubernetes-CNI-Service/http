@@ -18,6 +18,7 @@
         "test_cases.test_all_script_entrypoints",
         "test_cases.test_change_aware_test_runner",
         "test_cases.test_documentation_catalog",
+        "test_cases.test_req7_retained_manual_profile",
         "test_cases.test_req9_manual_preservation_workflow",
         "test_cases.test_private_documentation_contract",
         "test_cases.test_public_clean_clone_contract",
@@ -304,7 +305,8 @@
         "test_cases.test_req7_nv_reservation",
         "test_cases.test_req7_metadata_reservation",
         "test_cases.test_req7_retained_global_inventory",
-        "test_cases.test_req7_retained_applied_inventory"
+        "test_cases.test_req7_retained_applied_inventory",
+        "test_cases.test_req7_unit_catalog"
       ]
     },
     {
@@ -641,7 +643,8 @@
     "monitor/issue_tracker_remote_history_match.py": "monitor/issue_tracker_remote_history_match.py",
     "monitor/issue_tracker_nv_reservation.py": "monitor/issue_tracker_nv_reservation.py",
     "monitor/issue_tracker_metadata_reservation.py": "monitor/issue_tracker_metadata_reservation.py",
-    "monitor/issue_tracker_retained_inventory.py": "monitor/issue_tracker_retained_inventory.py"
+    "monitor/issue_tracker_retained_inventory.py": "monitor/issue_tracker_retained_inventory.py",
+    "monitor/issue_tracker_unit_catalog.py": "monitor/issue_tracker_unit_catalog.py"
   },
   "test_rules": [
     {
@@ -1850,6 +1853,16 @@
       "id": "req7_retained_original_inventory",
       "paths": ["monitor/issue_tracker_retained_inventory.py", "monitor/issue_tracker_remote_history_match.py", "monitor/issue_tracker_global_attempt_journal.py"],
       "tests": ["test_cases.test_req7_retained_global_inventory", "test_cases.test_req7_retained_applied_inventory"]
+    },
+    {
+      "id": "req7_retained_library_manual_profile",
+      "paths": ["tools/update-user-manual.py"],
+      "tests": ["test_cases.test_req7_retained_manual_profile"]
+    },
+    {
+      "id": "req7_pending_original_unit_catalog",
+      "paths": ["monitor/issue_tracker_unit_catalog.py","monitor/issue_tracker_global_attempt_journal.py","monitor/issue_tracker_remote_history_match.py","monitor/issue_tracker_retained_inventory.py"],
+      "tests": ["test_cases.test_req7_unit_catalog"]
     }
   ],
   "workflows": [
@@ -3441,6 +3454,11 @@
       "id": "req7_retained_enrollment_global_history_originals",
       "members": ["monitor/issue_tracker_retained_inventory.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_attempt_journal.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_enrollment_journal.py", "monitor/issue_tracker_history_preread_journal.py", "monitor/issue_tracker_manifest.py", "monitor/issue_tracker_sheets_read_decode.py", "monitor/issue_tracker_sheets_read_plan.py", "monitor/issue_tracker_remote_history_match.py"],
       "tests": ["test_cases.test_req7_retained_global_inventory", "test_cases.test_req7_retained_applied_inventory"]
+    },
+    {
+      "id": "req7_pending_catalog_shared_owner_native_originals",
+      "members": ["monitor/issue_tracker_unit_catalog.py","monitor/issue_tracker_spreadsheet_owner.py","monitor/issue_tracker_local_commit.py","monitor/issue_tracker_attempt_journal.py","monitor/issue_tracker_send_intent.py","monitor/issue_tracker_send_unit.py","monitor/issue_tracker_remote_history_match.py","monitor/issue_tracker_manifest.py","monitor/issue_tracker_whitelist_workbook.py","monitor/issue_tracker_global_attempt_journal.py","monitor/issue_tracker_enrollment_journal.py","monitor/issue_tracker_retained_inventory.py"],
+      "tests": ["test_cases.test_req7_unit_catalog"]
     }
   ],
   "path_rules": [

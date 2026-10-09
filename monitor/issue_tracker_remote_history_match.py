@@ -428,7 +428,11 @@ def _hold_match_originals(token,binding,unit):
         owner,parent,original_name,_header=global_journal._inputs(token,binding,unit)
         prefix=original_name[:-len('.journal')]
         for suffix in ('.journal','.history','.enrollment'):
-            name=prefix+suffix
+            # GLOBAL/History belong to immutable unit namespaces. Enrollment
+            # nonces belong to the ONE shared spreadsheet owner, not its unit;
+            # derive the original fixed root name from the genuine owner only.
+            # Never create/adopt a per-unit nonce copy or accept caller paths.
+            name=owner.lock_name[:-5]+suffix if suffix=='.enrollment' else prefix+suffix
             folder=local._directory(parent,name)
             held.append((name,folder,None,None))
             journal._named(parent,name,folder,directory=True)
