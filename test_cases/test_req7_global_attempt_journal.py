@@ -39,6 +39,125 @@ def unit(**changes):
 
 
 class Req7GlobalAttemptJournalTests(unittest.TestCase):
+    def test_live_count_verification_rechecks_originals_after_its_semantic_read(self):
+        with Req7GlobalAttemptJournalWorkflowTests.counted_wire_owners(self) as (writer,owner,target):
+            path=self.store/'ATTEMPT-1'; raw=path.read_bytes(); original=path.stat()
+            real_inspect=self.module._inspect; injected=[]; rejected=[]
+            def after_read(*args):
+                result=real_inspect(*args)
+                if not injected:
+                    path.write_bytes(b'x'*len(raw)); path.write_bytes(raw)
+                    os.utime(path,ns=(original.st_atime_ns,original.st_mtime_ns))
+                    injected.append(result[0])
+                return result
+            with self.assertRaises(self.module.GlobalAttemptHold):
+                with self.module._hold_counted_original_wire(writer,owner,target,self.value) as image:
+                    with mock.patch.object(self.module,'_inspect',side_effect=after_read), self.assertRaises(self.module.GlobalAttemptHold):
+                        self.module._require_original_wire_launch(writer,owner,target,self.value,image,consume=True)
+                    rejected.append(True)
+            self.assertEqual([1],injected); self.assertEqual([True],rejected,'reject inside live verification, not only context exit')
+            self.assertEqual(original.st_ino,path.stat().st_ino); self.assertEqual(original.st_mtime_ns,path.stat().st_mtime_ns)
+            self.assertNotEqual(original.st_ctime_ns,path.stat().st_ctime_ns); self.assertEqual(raw,path.read_bytes())
+            seen=self.module.inspect_global_unit(owner,target,self.value)
+            self.assertEqual((1,'UNKNOWN'),(seen.attempt_count,seen.outcome)); self.assertFalse((self.store/'ATTEMPT-2').exists())
+
+    def test_original_images_are_pinned_before_the_first_count_is_interpreted(self):
+        for entry in ('HEADER','INITIALIZED','ATTEMPT-1','WIRE','ACTION-PREIMAGE'):
+            for fault in ('replace','inplace-restore'):
+                with self.subTest(entry=entry,fault=fault), Req7GlobalAttemptJournalWorkflowTests.counted_wire_owners(self) as (writer,owner,target):
+                    path=self.store/entry; raw=path.read_bytes(); initial=path.stat()
+                    real_inspect=self.module._inspect; injected=[]; issued=[]
+                    def after_count(*args):
+                        result=real_inspect(*args)
+                        if not injected:
+                            if fault=='replace':
+                                path.rename(self.locks/('owned-count-read-'+entry))
+                                path.write_bytes(raw); path.chmod(0o600)
+                                self.assertNotEqual(initial.st_ino,path.stat().st_ino)
+                            else:
+                                path.write_bytes(b'x'*len(raw)); path.write_bytes(raw)
+                                os.utime(path,ns=(initial.st_atime_ns,initial.st_mtime_ns))
+                                self.assertEqual(initial.st_ino,path.stat().st_ino)
+                                self.assertEqual(initial.st_mtime_ns,path.stat().st_mtime_ns)
+                                self.assertNotEqual(initial.st_ctime_ns,path.stat().st_ctime_ns)
+                            self.assertEqual(raw,path.read_bytes()); injected.append(result[0])
+                        return result
+                    with mock.patch.object(self.module,'_inspect',side_effect=after_count), self.assertRaises(self.module.GlobalAttemptHold):
+                        with self.module._hold_counted_original_wire(writer,owner,target,self.value) as image:
+                            issued.append(image)
+                    self.assertEqual([1],injected)
+                    self.assertEqual([],issued,'a coherent replacement after count interpretation is not an original launch image')
+                    seen=self.module.inspect_global_unit(owner,target,self.value)
+                    self.assertEqual((1,'UNKNOWN'),(seen.attempt_count,seen.outcome))
+                    self.assertEqual(raw,path.read_bytes()); self.assertFalse((self.store/'ATTEMPT-2').exists())
+
+    def test_live_counted_launch_requires_original_journal_prefix_not_same_byte_replacements(self):
+        for entry in ('HEADER', 'INITIALIZED', 'ATTEMPT-1', 'inplace-restore', 'directory-ABA', 'dispatch-ABA'):
+            with self.subTest(entry=entry), Req7GlobalAttemptJournalWorkflowTests.counted_wire_owners(self) as (writer, owner, target):
+                rejected = []
+                raw_before = {p.name:p.read_bytes() for p in self.store.iterdir()}
+                with self.assertRaises(self.module.GlobalAttemptHold):
+                    with self.module._hold_counted_original_wire(writer, owner, target, self.value) as image:
+                        if entry == 'dispatch-ABA':
+                            dispatch = self.locks/(hashlib.sha256(TARGET.encode()).hexdigest()+'.dispatch')
+                            original = dispatch.stat()
+                            moved = self.locks/'owned-retained-dispatch'
+                            dispatch.rename(moved); moved.rename(dispatch)
+                            self.assertEqual(original.st_ino,dispatch.stat().st_ino)
+                            self.assertNotEqual(original.st_ctime_ns,dispatch.stat().st_ctime_ns)
+                        elif entry == 'directory-ABA':
+                            original = self.store.stat()
+                            moved = self.locks/'owned-retained-journal'
+                            self.store.rename(moved); moved.rename(self.store)
+                            self.assertEqual(original.st_ino, self.store.stat().st_ino)
+                            self.assertNotEqual(original.st_ctime_ns, self.store.stat().st_ctime_ns)
+                        elif entry == 'inplace-restore':
+                            path = self.store/'ATTEMPT-1'; raw = path.read_bytes(); before = path.stat()
+                            path.write_bytes(b'x' * len(raw)); path.write_bytes(raw)
+                            os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+                            self.assertEqual(before.st_ino, path.stat().st_ino)
+                            self.assertEqual(before.st_mtime_ns, path.stat().st_mtime_ns)
+                            self.assertNotEqual(before.st_ctime_ns, path.stat().st_ctime_ns)
+                        else:
+                            path = self.store/entry; raw = path.read_bytes(); inode = path.stat().st_ino
+                            path.rename(self.locks/('owned-retained-'+entry))
+                            path.write_bytes(raw); path.chmod(0o600)
+                            self.assertEqual(raw, path.read_bytes())
+                            self.assertNotEqual(inode, path.stat().st_ino)
+                        with self.assertRaises(self.module.GlobalAttemptHold):
+                            self.module._require_original_wire_launch(writer, owner, target, self.value, image, consume=True)
+                        rejected.append(True)
+                self.assertEqual([True], rejected, 'reject at the live pre-launch boundary, not only context exit')
+                self.assertEqual(raw_before, {p.name:p.read_bytes() for p in self.store.iterdir()})
+                retained = self.module.inspect_global_unit(owner, target, self.value)
+                self.assertEqual((1, 'UNKNOWN'), (retained.attempt_count, retained.outcome))
+                self.assertFalse((self.store/'ATTEMPT-2').exists())
+                dispatch = self.locks/(hashlib.sha256(TARGET.encode()).hexdigest()+'.dispatch')
+                self.assertEqual({'HEADER','INITIALIZED','CLAIM-1'}, {p.name for p in dispatch.iterdir()})
+
+    def test_second_counted_launch_pins_the_earlier_original_attempt_too(self):
+        with Req7GlobalAttemptJournalWorkflowTests.counted_wire_owners(self) as (writer, owner, target):
+            with self.module._hold_counted_original_wire(writer,owner,target,self.value) as image:
+                self.module._require_original_wire_launch(writer,owner,target,self.value,image,consume=True)
+            self.module.record_global_attempt_intent(owner,target,self.value)
+            path = self.store/'ATTEMPT-1'; raw, inode = path.read_bytes(), path.stat().st_ino
+            rejected = []
+            with self.assertRaises(self.module.GlobalAttemptHold):
+                with self.module._hold_counted_original_wire(writer,owner,target,self.value) as image:
+                    self.assertEqual(2,image.attempt_count)
+                    path.rename(self.locks/'owned-retained-earlier-attempt')
+                    path.write_bytes(raw); path.chmod(0o600)
+                    self.assertNotEqual(inode,path.stat().st_ino)
+                    with self.assertRaises(self.module.GlobalAttemptHold):
+                        self.module._require_original_wire_launch(writer,owner,target,self.value,image,consume=True)
+                    rejected.append(True)
+            self.assertEqual([True],rejected,'the newest count alone is not the complete original prefix')
+            retained = self.module.inspect_global_unit(owner,target,self.value)
+            self.assertEqual((2,'UNKNOWN'),(retained.attempt_count,retained.outcome))
+            self.assertEqual(raw,path.read_bytes()); self.assertFalse((self.store/'ATTEMPT-3').exists())
+            dispatch = self.locks/(hashlib.sha256(TARGET.encode()).hexdigest()+'.dispatch')
+            self.assertEqual({'HEADER','INITIALIZED','CLAIM-1','CLAIM-2'}, {p.name for p in dispatch.iterdir()})
+
     def test_ordinary_receipted_count_cannot_enter_older_cycle_replay(self):
         from contextlib import nullcontext
         from types import SimpleNamespace

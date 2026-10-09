@@ -1486,3 +1486,16 @@ HOLD。独立 direct 覆盖三面板投影和拒绝预期；真实 worker/emitte
 C6→新周期→原窗口重放验证 full 来源集合不被裁剪、原周期 published=1 而
 新周期 published=0、原件及状态不改写。此比较不创建收据、计数、准入或许可，
 不证明 M=6/真实发送/FIFO/COMPLETE、历史全量失败根因闭合或整个 REQ7 完成。
+
+原次数启动交接还须持有 HEADER、INITIALIZED 和完整 ATTEMPT 前缀的只读
+原 FD，并固定 journal 与已持久化 dispatch 目录的完整 stat（含 ctime），持续到启动前及发送后检查。
+固定动作、WIRE 和前缀必须先固定原 FD/身份，再首次解释计数；解释完成至
+固定之间的同字节换 inode 或原 inode 写后恢复也不能被收养为有效启动像。
+每次语义计数/CLAIM 重放的前后都须重核已持有的完整原件身份；最后一次
+启动前重放返回时发生的原 inode 字节/mtime 恢复也必须在 Popen 前拒绝，
+不能等实际请求发出后才以退出检查发现漂移。
+同字节替换、原 inode 写后恢复字节/mtime、目录换出再换回均 HOLD；启动前
+必须零 Popen/零请求，发送后发现漂移保留 UNKNOWN、原计数和 consumed CLAIM，
+并准确保留已确证的子进程终止结果，不创建第二次或修复原件。独立 direct 和
+真实原生 TLS/固定子进程 workflow 保留原 60 秒预算及 M=6 测试；这只是
+原件交接安全切片，不是完整准入、G1、FIFO/APPLIED/COMPLETE 或 REQ7 完成证明。

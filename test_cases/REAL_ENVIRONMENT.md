@@ -2156,6 +2156,14 @@ pread，检查 mode/uid/nlink/大小和前后身份，原一致性不重编译�
 
 ## TC-REAL-REQ7-COUNTED-MUTATION-LAUNCHER-001 — 原次数固定子进程监督
 
+- 每次语义重放两侧复核补充（**NOT RUN / REAL_ENV REQUIRED**）：在最后一次 pre-Popen 计数/CLAIM 重放返回边界，原 ATTEMPT 同 inode 写后恢复字节/mtime 仍须零 Popen、零 child、零请求，并保留原 UNKNOWN/count/consumed CLAIM；不得只在发送后的检查拒绝。保存复核前后原 FD/stat/ctime/字节摘要和实际请求计数。替代证据仅为独立 direct 与自有 loopback TLS/固定 child workflow；正常流程、关键提交、中断、冷恢复和失败安全状态全部保留，无省略或合并，真实 Cloud/设备/断电未验证，原授权、确认人要求、清理范围及残余风险不变。
+
+- 首次计数解释窗口补充（**NOT RUN / REAL_ENV REQUIRED**）：动作、WIRE、HEADER、INITIALIZED 和完整 ATTEMPT 前缀须在首次解释计数前固定原 FD/身份；在读取返回边界换 inode 或原 inode 写后恢复字节/mtime，均不得发行 live CLAIM 像、Popen 或请求，原计数及 UNKNOWN 保留。独立 direct 与真实固定 native workflow 是本地替代证据，不证明真实设备或断电；本卡正常/关键提交/代表性中断/冷恢复/失败安全状态全部保留，没有省略或合并，原授权、证据、清理、残余风险及确认要求不变。
+
+- dispatch 目录换出再换回补充：与 journal 目录相同，保留原 inode/全部字节但 ctime 改变也须在 Popen 前拒绝，原 CLAIM/UNKNOWN 保留。实际 owned loopback TLS/固定 child 的零请求回归仅为本地替代证据；本卡仍 NOT RUN，保留全部原场景与残余风险、授权和确认要求。
+
+- 计数原件持续持有补充（**NOT RUN / REAL_ENV REQUIRED**）：在另行精确授权的私有隔离副本保留正常原次数→固定启动、关键 CLAIM/启动/发送后边界、代表性中断、冷恢复和失败安全状态。验证 HEADER、INITIALIZED、完整 ATTEMPT 前缀同字节换 inode、原 inode 写后恢复字节及 mtime、journal 目录换出再换回均拒绝；启动前零 child/请求，已发送后 HOLD 且 UNKNOWN/count/CLAIM 不清除、不回退、不补写、不重发，确证 child 终止状态如实保留。保存原 FD/name/完整 stat（含 ctime）、逐字节前后 SHA、实际请求计数、双锁归属、精确树/命令/Python/平台/完整日志和退出码；清理仅恢复获准自有副本，不处理未知 PID。保留全部原场景，无省略或合并；替代证据为独立 direct 与 owned loopback TLS→固定 isolated child→原次数后置检查 workflow。真实部署、断电、在线请求、M6 整体准入/G1/FIFO/COMPLETE 仍未验证，不标通过；确认沿用 owner 本轮验证纪律，原现场授权、研发确认与发布门禁保持有效，不扩权。
+
 - Case ID：`TC-REAL-REQ7-COUNTED-MUTATION-LAUNCHER-001`；类型：native / durable / integration；对应 C-6/C-14/C-19。状态：**NOT RUN / REAL_ENV REQUIRED**。涉及 `monitor/issue_tracker_mutation_launcher.py`、global attempt journal、local commit、spreadsheet owner、send unit/intent、TLS 和 attempt supervision。
 - 风险与目标：原 CLAIM context 的当前 process-local 对象只能启动一次固定子进程；复制、失效、启动错误不能恢复；实际原 ACTION/WIRE、双锁 FD 继承，凭据仅 bounded stdin，不以调用者 FD/hash tuple 冒充发行证据。原次数不重置，任何不确定结果保持 UNKNOWN。
 - 前置条件：owner 精确 Stage O/部署授权、可信受审固定 worker 与部署 Python/SSL/CA/SDK、实际 root 单链接私有原像与锁。新鲜 protected sources/config/W1/template/continuity、shared cadence、G1 全配额和 recovery 必须另在启动器之前闭合；本卡/私有启动器不代替这些门禁，不授权真实联网或 root 写者。

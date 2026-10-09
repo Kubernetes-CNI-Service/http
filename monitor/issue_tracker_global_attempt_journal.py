@@ -100,14 +100,31 @@ def _hold_counted_original_wire(writer_token,token,binding,unit):
     Real fresh admission, shared cadence and quota must dominate any launcher.
     """
     original = claims = wire = action = image = None; wire_identity = action_identity = None; failed = False
+    prefix_originals = []
     try:
         project = local._owner(writer_token)
         owner,parent,name,base = _inputs(token,binding,unit)
         _require_no_completion(parent,name)
         original = local._directory(parent,name)
         journal._named(parent,name,original,directory=True)
-        count,_previous = _inspect(original,unit,base)
-        if not count: raise GlobalAttemptHold()
+        # The count is witnessed by the immutable ORIGINAL prefix, not merely
+        # coherent bytes reopened after interpreting it. Pin every image and
+        # the namespace BEFORE the first semantic count read, not only CLAIM.
+        original_identity = journal._identity(os.fstat(original))
+        names = set(os.listdir(original)); count = len(names)-4
+        if (not 1 <= count <= 6 or names != {'ACTION-PREIMAGE','WIRE','HEADER','INITIALIZED',
+                *(f'ATTEMPT-{i}' for i in range(1,count+1))}): raise GlobalAttemptHold()
+        for entry in ('HEADER','INITIALIZED',*(f'ATTEMPT-{i}' for i in range(1,count+1))):
+            fd = os.open(entry,local._flags()|os.O_NONBLOCK,dir_fd=original)
+            prefix_originals.append((entry,fd,None))
+            identity = journal._identity(os.fstat(fd))
+            prefix_originals[-1] = (entry,fd,identity)
+            journal._named(original,entry,fd,directory=False)
+            raw = os.pread(fd,16385,0)
+            if (len(raw) > 16384 or len(raw) != identity[6]
+                    or raw != journal._read(original,entry,16384)
+                    or journal._identity(os.fstat(fd)) != identity): raise GlobalAttemptHold()
+        if journal._identity(os.fstat(original)) != original_identity: raise GlobalAttemptHold()
         wire = os.open('WIRE',local._flags()|os.O_NONBLOCK,dir_fd=original)
         journal._named(original,'WIRE',wire,directory=False)
         wire_identity = journal._identity(os.fstat(wire))
@@ -116,6 +133,13 @@ def _hold_counted_original_wire(writer_token,token,binding,unit):
         journal._named(original,'ACTION-PREIMAGE',action,directory=False)
         action_identity = journal._identity(os.fstat(action))
         if os.pread(action,1024*1024+1,0) != unit.action_preimage: raise GlobalAttemptHold()
+        if _inspect(original,unit,base)[0] != count: raise GlobalAttemptHold()
+        for entry,fd,identity in prefix_originals:
+            journal._named(original,entry,fd,directory=False)
+            if journal._identity(os.fstat(fd)) != identity: raise GlobalAttemptHold()
+        if (journal._identity(os.fstat(original)) != original_identity
+                or journal._identity(os.fstat(wire)) != wire_identity
+                or journal._identity(os.fstat(action)) != action_identity): raise GlobalAttemptHold()
         header = {'schema_version':1,'unit_id':unit.unit_id,'wire_sha256':unit.wire_sha256,
             'action_digest':unit.action_digest,'journal_header_sha256':hashlib.sha256(local._canonical(base)).hexdigest(),
             'wire_identity':wire_identity,'action_identity':action_identity}
@@ -142,6 +166,7 @@ def _hold_counted_original_wire(writer_token,token,binding,unit):
             'original_intent_sha256':hashlib.sha256(journal._read(original,f'ATTEMPT-{count}',16384)).hexdigest(),
             'previous_sha256':previous,'outcome':'CONSUMED_UNKNOWN_NOT_SEND_PROOF'}))
         if _inspect_wire_claims(claims,original,unit,header)[0] != count: raise GlobalAttemptHold()
+        claims_identity = journal._identity(os.fstat(claims))
         names = tuple(sorted(os.listdir(claims)))
         identities = tuple(journal._identity(os.stat(item,dir_fd=claims,follow_symlinks=False)) for item in names)
         if _inspect(original,unit,base)[0] != count: raise GlobalAttemptHold()
@@ -152,6 +177,11 @@ def _hold_counted_original_wire(writer_token,token,binding,unit):
                 or journal._identity(os.fstat(action)) != action_identity): raise GlobalAttemptHold()
         def verify():
             _require_no_completion(parent,name)
+            if (journal._identity(os.fstat(original)) != original_identity
+                    or journal._identity(os.fstat(claims)) != claims_identity): raise GlobalAttemptHold()
+            for entry,fd,identity in prefix_originals:
+                journal._named(original,entry,fd,directory=False)
+                if journal._identity(os.fstat(fd)) != identity: raise GlobalAttemptHold()
             if (_inspect(original,unit,base)[0] != count
                 or _inspect_wire_claims(claims,original,unit,header)[0] != count
                 or tuple(sorted(os.listdir(claims))) != names
@@ -166,6 +196,14 @@ def _hold_counted_original_wire(writer_token,token,binding,unit):
             journal._named(original,'ACTION-PREIMAGE',action,directory=False)
             journal._named(parent,name,original,directory=True)
             journal._named(parent,claim_name,claims,directory=True)
+            # Semantic replays above reopen the journal. A held prefix must
+            # still be the original AFTER those reads, including an in-place
+            # byte/mtime restoration during the last pre-Popen verification.
+            for entry,fd,identity in prefix_originals:
+                journal._named(original,entry,fd,directory=False)
+                if journal._identity(os.fstat(fd)) != identity: raise GlobalAttemptHold()
+            if (journal._identity(os.fstat(original)) != original_identity
+                    or journal._identity(os.fstat(claims)) != claims_identity): raise GlobalAttemptHold()
         verify()
         image = CountedOriginalWireObservation(count,unit.wire_sha256,wire,action)
         with _WIRE_CLAIM_GUARD:
@@ -176,7 +214,8 @@ def _hold_counted_original_wire(writer_token,token,binding,unit):
     finally:
         if image is not None:
             with _WIRE_CLAIM_GUARD: _LIVE_WIRE_CLAIMS.pop(image,None)
-        for held,identity in ((wire,wire_identity),(action,action_identity)):
+        for held,identity in ((wire,wire_identity),(action,action_identity),
+                              *((fd,identity) for _entry,fd,identity in prefix_originals)):
             if held is None: continue
             try:
                 # Never close a foreign FD that replaced a violated borrow.

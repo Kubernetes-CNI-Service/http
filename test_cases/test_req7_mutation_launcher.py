@@ -173,6 +173,150 @@ raise SystemExit(result)
             self.assertEqual(1,len(calls)); self.assertEqual(1,journal.inspect_global_unit(owner,target,unit).attempt_count)
         self.assertEqual([],errors); self.assertEqual(1,len(records)); self.assertEqual(unit.wire_bytes,records[0][2])
 
+    def test_same_byte_count_witness_replacement_cannot_start_native_child_or_send(self):
+        module = load()
+        response = b'HTTP/1.1 401 Denied\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}'
+        with self.server(response,hostname='sheets.googleapis.com',destination='sheets.googleapis.com') as (records,errors), ExitStack() as stack:
+            port = socket.getaddrinfo('sheets.googleapis.com',443)[0][4][1]
+            local,ownership,journal,writer,owner,target,token,unit,_image = self.owners(stack,claim=False)
+            path = self.root/'var/lib/http-ztp-container/issue-tracker'/(hashlib.sha256(target.spreadsheet_id.encode()).hexdigest()+'.journal')/'ATTEMPT-1'
+            raw, inode = path.read_bytes(), path.stat().st_ino
+            rejected = []
+            with self.assertRaises(journal.GlobalAttemptHold):
+                with journal._hold_counted_original_wire(writer,owner,target,unit) as image:
+                    calls,children = self.intercept(stack,local,ownership,writer,owner,target,image,port)
+                    path.rename(path.parent.parent/'owned-retained-original-attempt')
+                    path.write_bytes(raw); path.chmod(0o600)
+                    self.assertNotEqual(inode, path.stat().st_ino); self.assertEqual(raw,path.read_bytes())
+                    with self.assertRaises(module.MutationLauncherHold):
+                        module._send_counted_original_once(writer,owner,target,token,unit,image)
+                    self.assertEqual([],calls); self.assertEqual([],children)
+                    rejected.append(True)
+            self.assertEqual([True],rejected,('actual fixed launcher must stop before Popen',len(calls),len(children),len(records)))
+            retained = journal.inspect_global_unit(owner,target,unit)
+            self.assertEqual((1,'UNKNOWN'),(retained.attempt_count,retained.outcome))
+            self.assertFalse((path.parent/'ATTEMPT-2').exists())
+        self.assertEqual([],errors); self.assertEqual([],records)
+
+    def test_count_read_to_pin_replacement_never_reaches_actual_native_launcher(self):
+        module=load()
+        response=b'HTTP/1.1 401 Denied\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}'
+        with self.server(response,hostname='sheets.googleapis.com',destination='sheets.googleapis.com') as (records,errors), ExitStack() as stack:
+            port=socket.getaddrinfo('sheets.googleapis.com',443)[0][4][1]
+            local,ownership,journal,writer,owner,target,token,unit,_image=self.owners(stack,claim=False)
+            path=self.root/'var/lib/http-ztp-container/issue-tracker'/(hashlib.sha256(target.spreadsheet_id.encode()).hexdigest()+'.journal')/'ATTEMPT-1'
+            raw=path.read_bytes(); original=path.stat(); real_inspect=journal._inspect
+            injected=[]; issued=[]; calls=[]; children=[]
+            def after_count(*args):
+                result=real_inspect(*args)
+                if not injected:
+                    path.rename(path.parent.parent/'owned-read-to-pin-attempt')
+                    path.write_bytes(raw); path.chmod(0o600)
+                    injected.append(result[0])
+                return result
+            with mock.patch.object(journal,'_inspect',side_effect=after_count), self.assertRaises(journal.GlobalAttemptHold):
+                with journal._hold_counted_original_wire(writer,owner,target,unit) as image:
+                    issued.append(image)
+                    calls,children=self.intercept(stack,local,ownership,writer,owner,target,image,port)
+                    with self.assertRaises(module.MutationLauncherHold):
+                        module._send_counted_original_once(writer,owner,target,token,unit,image)
+            self.assertEqual([1],injected)
+            self.assertEqual([],issued,('count-read drift must not issue a live image',len(calls),len(children),len(records)))
+            self.assertEqual([],calls); self.assertEqual([],children)
+            self.assertNotEqual(original.st_ino,path.stat().st_ino); self.assertEqual(raw,path.read_bytes())
+            seen=journal.inspect_global_unit(owner,target,unit)
+            self.assertEqual((1,'UNKNOWN'),(seen.attempt_count,seen.outcome))
+            self.assertFalse((path.parent/'ATTEMPT-2').exists())
+        self.assertEqual([],errors); self.assertEqual([],records)
+
+    def test_last_prelaunch_semantic_read_drift_stops_before_actual_native_popen(self):
+        module=load()
+        response=b'HTTP/1.1 401 Denied\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}'
+        with self.server(response,hostname='sheets.googleapis.com',destination='sheets.googleapis.com') as (records,errors), ExitStack() as stack:
+            port=socket.getaddrinfo('sheets.googleapis.com',443)[0][4][1]
+            local,ownership,journal,writer,owner,target,token,unit,_image=self.owners(stack,claim=False)
+            path=self.root/'var/lib/http-ztp-container/issue-tracker'/(hashlib.sha256(target.spreadsheet_id.encode()).hexdigest()+'.journal')/'ATTEMPT-1'
+            raw=path.read_bytes(); original=path.stat(); real_inspect=journal._inspect
+            read_counts=[]; injected=[]; rejected=[]
+            def after_read(*args):
+                result=real_inspect(*args); read_counts.append(result[0])
+                if len(read_counts)==2:
+                    path.write_bytes(b'x'*len(raw)); path.write_bytes(raw)
+                    os.utime(path,ns=(original.st_atime_ns,original.st_mtime_ns))
+                    injected.append(result[0])
+                return result
+            with self.assertRaises(journal.GlobalAttemptHold):
+                with journal._hold_counted_original_wire(writer,owner,target,unit) as image:
+                    calls,children=self.intercept(stack,local,ownership,writer,owner,target,image,port)
+                    with mock.patch.object(journal,'_inspect',side_effect=after_read), self.assertRaises(module.MutationLauncherHold) as caught:
+                        module._send_counted_original_once(writer,owner,target,token,unit,image)
+                    if not caught.exception.termination_confirmed: rejected.append(True)
+            self.assertEqual([1],injected)
+            self.assertEqual([],calls,('final prelaunch drift must cause zero Popen/child/request',len(calls),len(children),len(records)))
+            self.assertEqual([],children); self.assertEqual([True],rejected)
+            self.assertEqual(original.st_ino,path.stat().st_ino); self.assertEqual(original.st_mtime_ns,path.stat().st_mtime_ns)
+            self.assertNotEqual(original.st_ctime_ns,path.stat().st_ctime_ns); self.assertEqual(raw,path.read_bytes())
+            seen=journal.inspect_global_unit(owner,target,unit)
+            self.assertEqual((1,'UNKNOWN'),(seen.attempt_count,seen.outcome)); self.assertFalse((path.parent/'ATTEMPT-2').exists())
+        self.assertEqual([],errors); self.assertEqual([],records)
+
+    def test_count_witness_drift_after_actual_send_keeps_unknown_and_correlated_child_termination(self):
+        module = load(); paths = []; changed = []
+        def reply(transport):
+            path = paths[0]; raw = path.read_bytes(); inode = path.stat().st_ino
+            path.rename(path.parent.parent/'owned-retained-postsend-attempt')
+            path.write_bytes(raw); path.chmod(0o600)
+            changed.append((inode,path.stat().st_ino,raw))
+            transport.sendall(b'HTTP/1.1 401 Denied\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}')
+        with self.server(reply,hostname='sheets.googleapis.com',destination='sheets.googleapis.com') as (records,errors), ExitStack() as stack:
+            port = socket.getaddrinfo('sheets.googleapis.com',443)[0][4][1]
+            local,ownership,journal,writer,owner,target,token,unit,_image = self.owners(stack,claim=False)
+            path = self.root/'var/lib/http-ztp-container/issue-tracker'/(hashlib.sha256(target.spreadsheet_id.encode()).hexdigest()+'.journal')/'ATTEMPT-1'
+            paths.append(path); rejected = []
+            with self.assertRaises(journal.GlobalAttemptHold):
+                with journal._hold_counted_original_wire(writer,owner,target,unit) as image:
+                    calls,children = self.intercept(stack,local,ownership,writer,owner,target,image,port)
+                    with self.assertRaises(module.MutationLauncherHold) as caught:
+                        module._send_counted_original_once(writer,owner,target,token,unit,image)
+                    self.assertTrue(caught.exception.termination_confirmed)
+                    self.assertEqual(1,len(calls)); self.assertEqual(0,children[0].returncode)
+                    rejected.append(True)
+            self.assertEqual([True],rejected,('post-send original drift must not become a valid completion result',len(calls),len(records),len(changed)))
+            self.assertEqual(1,len(changed)); self.assertNotEqual(changed[0][0],changed[0][1])
+            self.assertEqual(changed[0][2],path.read_bytes())
+            retained = journal.inspect_global_unit(owner,target,unit)
+            self.assertEqual((1,'UNKNOWN'),(retained.attempt_count,retained.outcome))
+            self.assertFalse((path.parent/'ATTEMPT-2').exists())
+        self.assertEqual([],errors); self.assertEqual(1,len(records)); self.assertEqual(unit.wire_bytes,records[0][2])
+
+    def test_dispatch_directory_aba_cannot_start_actual_native_child(self):
+        module = load()
+        response = b'HTTP/1.1 401 Denied\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}'
+        with self.server(response,hostname='sheets.googleapis.com',destination='sheets.googleapis.com') as (records,errors), ExitStack() as stack:
+            port = socket.getaddrinfo('sheets.googleapis.com',443)[0][4][1]
+            local,ownership,journal,writer,owner,target,token,unit,_image = self.owners(stack,claim=False)
+            root = self.root/'var/lib/http-ztp-container/issue-tracker'
+            dispatch = root/(hashlib.sha256(target.spreadsheet_id.encode()).hexdigest()+'.dispatch')
+            rejected = []
+            with self.assertRaises(journal.GlobalAttemptHold):
+                with journal._hold_counted_original_wire(writer,owner,target,unit) as image:
+                    calls,children = self.intercept(stack,local,ownership,writer,owner,target,image,port)
+                    original = dispatch.stat(); raw = {p.name:p.read_bytes() for p in dispatch.iterdir()}
+                    moved = root/'owned-retained-dispatch'
+                    dispatch.rename(moved); moved.rename(dispatch)
+                    self.assertEqual(original.st_ino,dispatch.stat().st_ino)
+                    self.assertNotEqual(original.st_ctime_ns,dispatch.stat().st_ctime_ns)
+                    self.assertEqual(raw,{p.name:p.read_bytes() for p in dispatch.iterdir()})
+                    with self.assertRaises(module.MutationLauncherHold):
+                        module._send_counted_original_once(writer,owner,target,token,unit,image)
+                    self.assertEqual([],calls); self.assertEqual([],children); rejected.append(True)
+            self.assertEqual([True],rejected,('dispatch ABA must stop before Popen',len(calls),len(records)))
+            self.assertEqual(raw,{p.name:p.read_bytes() for p in dispatch.iterdir()})
+            self.assertEqual({'HEADER','INITIALIZED','CLAIM-1'},set(raw))
+            retained = journal.inspect_global_unit(owner,target,unit)
+            self.assertEqual((1,'UNKNOWN'),(retained.attempt_count,retained.outcome))
+        self.assertEqual([],errors); self.assertEqual([],records)
+
     def test_six_durable_counts_reach_exactly_six_native_original_requests_without_hidden_resend(self):
         module=load(); total=[]
         with ExitStack() as outer:
