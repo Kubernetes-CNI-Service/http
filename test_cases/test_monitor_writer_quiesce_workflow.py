@@ -7,11 +7,16 @@ import argparse
 import ast
 import copy
 from contextlib import contextmanager
+import fcntl
+import hashlib
 import importlib.util
 import io
+import json
 import os
 from pathlib import Path
+import stat
 import sys
+import tarfile
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -2851,45 +2856,123 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
             "mwq_guard_archive_order", "tools/deployment_prewrite_guard.py",
         )
         events = []
-        bootstrap = mock.Mock()
+        with tempfile.TemporaryDirectory() as temporary:
+            private = Path(temporary).resolve(strict=True)
+            live, staging, state_root = (private / name for name in ("live", "staging", "state"))
+            live.mkdir()
+            staging.mkdir()
+            state_root.mkdir(mode=0o700)
+            lock_path = live / ".deployment.lock"
+            payload = b"# independent archive-order fixture\n"
+            relative = "tools/archive-order-fixture.py"
+            record = {"path": relative, "type": "file", "target": None,
+                      "sha256": hashlib.sha256(payload).hexdigest()}
+            manifest = json.dumps({"schema_version": 1, "files": [record]},
+                                  sort_keys=True).encode("ascii")
+            digest = hashlib.sha256(manifest).hexdigest()
+            members = []
+            for name, contents in ((relative, payload), (guard.SOURCE_MANIFEST_NAME, manifest)):
+                leaf = staging / name
+                leaf.parent.mkdir(parents=True, exist_ok=True)
+                leaf.write_bytes(contents)
+                leaf.chmod(0o644)
+                member = tarfile.TarInfo(name)
+                member.size, member.mode = len(contents), 0o644
+                members.append((member, tuple(name.split("/")), "file"))
 
-        @contextmanager
-        def fake_lock(*_args, **_kwargs):
-            events.append("lock-enter")
-            try:
-                yield
-            finally:
+            original_lock = guard.safe_lock
+            original_marker = guard._write_sync_marker
+            original_overlay = guard._apply_prepared_archive_overlay
+            original_finalize = guard.finalize_source_update
+            held = []
+
+            def assert_same_locked_inode():
+                self.assertEqual(1, len(held))
+                opened, named = os.fstat(held[0]), lock_path.lstat()
+                self.assertEqual((opened.st_dev, opened.st_ino), (named.st_dev, named.st_ino))
+                probe = os.open(lock_path, os.O_RDWR | os.O_NOFOLLOW)
+                try:
+                    with self.assertRaises(BlockingIOError):
+                        fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                finally:
+                    os.close(probe)
+
+            @contextmanager
+            def observed_lock(path, **options):
+                self.assertEqual(lock_path, path)
+                with original_lock(path, **options) as descriptor:
+                    held.append(descriptor)
+                    events.append("lock-enter")
+                    try:
+                        yield descriptor
+                        self.assertFalse(os.path.lexists(live / guard.SYNC_MARKER_NAME))
+                    finally:
+                        held.clear()
                 events.append("lock-exit")
 
-        def quiesce(*_args, **kwargs):
-            self.assertTrue(kwargs["native_requested"])
-            events.append("monitor-stop")
-            return False
+            def quiesce(root, **options):
+                assert_same_locked_inode()
+                self.assertEqual(live, root)
+                self.assertEqual(state_root, options["state_root"])
+                self.assertTrue(options["native_requested"])
+                self.assertFalse(options["docker_requested"])
+                events.append("monitor-stop")
+                return False
 
-        with tempfile.TemporaryDirectory() as temporary:
-            staging = Path(temporary) / "staging"
-            staging.mkdir()
+            def marker(path):
+                assert_same_locked_inode()
+                self.assertEqual(live / guard.SYNC_MARKER_NAME, path)
+                events.append("marker")
+                original_marker(path)
+                self.assertEqual(b"", path.read_bytes())
+
+            def overlay(*args, **options):
+                assert_same_locked_inode()
+                events.append("overlay")
+                return original_overlay(*args, **options)
+
+            def finalize(root, state, old_records, **options):
+                assert_same_locked_inode()
+                self.assertTrue(options["native_requested"])
+                self.assertFalse(options["docker_managed"])
+                plan = options["_native_owner_plan"]
+                self.assertIsInstance(plan, guard._NativeOwnerPlan)
+                self.assertEqual({relative: record}, plan.records)
+                self.assertEqual(manifest, plan.manifest_bytes)
+                self.assertEqual((os.geteuid(), os.getegid()), plan.target)
+                events.append("finalize")
+                original_finalize(root, state, old_records, **options)
+                assert_same_locked_inode()
+                self.assertTrue((live / guard.SYNC_MARKER_NAME).is_file())
+
             with mock.patch.object(
-                guard, "_extract_archive_staging", return_value=(staging, ()),
+                guard, "_extract_archive_staging", return_value=(staging, members),
             ), mock.patch.object(guard, "_live_capacity_authority", return_value=object()), \
-                 mock.patch.object(guard, "ensure_deployment_root", return_value=bootstrap), \
                  mock.patch.object(guard, "_recheck_live_capacity_after_root_creation"), \
-                 mock.patch.object(guard, "safe_lock", fake_lock), \
+                 mock.patch.object(guard, "safe_lock", observed_lock), \
                  mock.patch.object(guard, "quiesce_for_source_update", side_effect=quiesce), \
-                 mock.patch.object(guard, "_write_sync_marker", side_effect=lambda *_a: events.append("marker")), \
-                 mock.patch.object(guard, "_apply_prepared_archive_overlay", side_effect=lambda *_a, **_k: events.append("overlay")), \
-                 mock.patch.object(guard, "finalize_source_update", side_effect=lambda *_a, **_k: events.append("finalize")), \
-                 mock.patch.object(guard, "_safe_unlink"), \
-                 mock.patch.object(guard, "_close_live_capacity_authority"), \
-                 mock.patch.object(guard, "_remove_archive_staging"):
+                 mock.patch.object(guard, "_write_sync_marker", side_effect=marker), \
+                 mock.patch.object(guard, "_apply_prepared_archive_overlay", side_effect=overlay), \
+                 mock.patch.object(guard, "finalize_source_update", side_effect=finalize), \
+                 mock.patch.object(guard, "_close_live_capacity_authority"):
                 self.assertEqual(
                     0,
                     guard.run_locked_archive(
-                        ROOT / ".deployment.lock", ROOT,
-                        Path(temporary) / "payload.tar", "a" * 64, "b" * 64,
-                        runtime="native",
+                        lock_path, live, private / "payload.tar", "a" * 64, digest,
+                        runtime="native", state_root=state_root,
                     ),
                 )
+            self.assertEqual(payload, (live / relative).read_bytes())
+            self.assertEqual(manifest, (live / guard.SOURCE_MANIFEST_NAME).read_bytes())
+            for leaf in (live / relative, live / guard.SOURCE_MANIFEST_NAME):
+                metadata = leaf.lstat()
+                self.assertTrue(stat.S_ISREG(metadata.st_mode))
+                self.assertEqual(1, metadata.st_nlink)
+                self.assertEqual((os.geteuid(), os.getegid()), (metadata.st_uid, metadata.st_gid))
+            self.assertFalse(staging.exists())
+            self.assertEqual([], list(state_root.iterdir()))
+            with original_lock(lock_path):
+                pass  # The actual original holder released its flock.
         self.assertEqual(
             [
                 "lock-enter", "monitor-stop", "marker", "overlay",

@@ -676,6 +676,30 @@ class GateCommandTests(unittest.TestCase):
 
 
 class SyncGateTests(unittest.TestCase):
+    def _exact_native_metadata_holder(self):
+        # A real lock protocol holder, not None masquerading as acquisition.
+        # The production parser consumes independently specified wire bytes.
+        process = SimpleNamespace(
+            poll=lambda: None, stdin=io.StringIO(),
+            stdout=io.StringIO("HTTP_ZTP_NATIVE_METADATA_READY EXACT\n"),
+            stderr=io.StringIO(),
+        )
+        holder = SYNC.RemoteDeploymentLock(process, "/var/www/html/.deployment.lock")
+
+        def ready(readers, writers, errors, timeout):
+            self.assertEqual([process.stdout], readers)
+            self.assertEqual([], writers)
+            self.assertEqual([], errors)
+            self.assertEqual(SYNC.DEPLOYMENT_PREWRITE_TIMEOUT, timeout)
+            return readers, [], []
+
+        return holder, mock.patch.object(SYNC.select, "select", side_effect=ready)
+
+    def _assert_exact_native_read_only_probe(self, holder):
+        self.assertEqual("HTTP_ZTP_NATIVE_METADATA_PROBE\n", holder.process.stdin.getvalue())
+        self.assertFalse(holder.prewrite_ready)
+        self.assertFalse(holder.source_committed)
+
     def _main_patches(self, args: argparse.Namespace, **extra):
         job = SYNC.SyncJob("one", (Path("/tmp/source"),), "/var/www/html/one")
 
@@ -784,7 +808,9 @@ class SyncGateTests(unittest.TestCase):
 
     def test_formal_sync_tests_freezes_authority_and_rechecks_before_remote_lock(self):
         events: list[str] = []
+        holder, readiness = self._exact_native_metadata_holder()
         patches = self._main_patches(sync_args())
+        patches["metadata_readiness"] = readiness
         patches["gate"] = mock.patch.object(
             SYNC, "run_predeploy_test_gate",
             side_effect=lambda: events.append("test-all"),
@@ -814,7 +840,7 @@ class SyncGateTests(unittest.TestCase):
         )
         patches["lock"] = mock.patch.object(
             SYNC, "acquire_remote_deployment_lock",
-            side_effect=lambda _args: events.append("remote-lock") or None,
+            side_effect=lambda _args: events.append("remote-lock") or holder,
         )
         with ExitStack() as stack:
             for patcher in patches.values():
@@ -823,6 +849,7 @@ class SyncGateTests(unittest.TestCase):
             stack.enter_context(redirect_stderr(io.StringIO()))
             result = SYNC.main([])
         self.assertEqual(0, result)
+        self._assert_exact_native_read_only_probe(holder)
         self.assertEqual(
             [
                 "test-all", "freeze-manifest", "freeze-guard",
@@ -836,10 +863,12 @@ class SyncGateTests(unittest.TestCase):
         args = sync_args()
         args.validation_only = True
         patches = self._main_patches(args)
+        holder, readiness = self._exact_native_metadata_holder()
+        patches["metadata_readiness"] = readiness
         patches["gate"] = mock.patch.object(SYNC, "run_predeploy_test_gate")
         patches["approval"] = mock.patch.object(SYNC, "verify_predeploy_test_approval")
         patches["lock"] = mock.patch.object(
-            SYNC, "acquire_remote_deployment_lock", return_value=None,
+            SYNC, "acquire_remote_deployment_lock", return_value=holder,
         )
         with ExitStack() as stack:
             entered = {
@@ -851,6 +880,7 @@ class SyncGateTests(unittest.TestCase):
             self.assertEqual(0, SYNC.main(["customer", "host", "--validation-only"]))
         entered["gate"].assert_called_once_with(validation_only=True)
         entered["approval"].assert_called_once_with(validation_only=True)
+        self._assert_exact_native_read_only_probe(holder)
 
     def test_failed_sync_gate_has_no_remote_side_effect(self):
         patches = self._main_patches(sync_args())

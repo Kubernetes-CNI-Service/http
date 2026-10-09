@@ -2122,6 +2122,84 @@ class ReleaseTransactionTests(unittest.TestCase):
         self.assertEqual(frozen, (state[-3].read_bytes(), parent.lstat().st_ino, parent.read_bytes()))
         self.assertFalse(os.path.lexists(state[-3].parent / ".setup-switch-a-restore.json"))
 
+    def test_a_compensation_read_round_brackets_all_surfaces_without_recursive_fanout(self):
+        state, context, guard, publication, _inputs = self._prepare_published_q_for_stopped_preflight()
+        self.addCleanup(LOAD.close_setup_switch_publication_bundle, publication)
+        original_wal = (state[-3].lstat().st_ino, state[-3].read_bytes())
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            LOAD.restore_setup_switch_q_publication(state[1], guard=guard, confirmed=True)
+            with LOAD._setup_switch_a_compensation_authority(state[1], guard=guard, confirmed=True,
+                    restore_publication=False) as token:
+                original_check = LOAD._require_setup_switch_compensation_q_evidence
+                with mock.patch.object(LOAD, "_require_setup_switch_compensation_q_evidence",
+                                       wraps=original_check) as checks:
+                    token["require"]()
+                    self.assertEqual(2, checks.call_count,
+                        "one read-only round needs fresh authority before and after, not nested fanout")
+                    token["require"]()
+                    self.assertEqual(4, checks.call_count, "a later round must never reuse authority")
+                self.assertEqual(original_wal, (state[-3].lstat().st_ino, state[-3].read_bytes()))
+                self.assertTrue(context.runtime_receipt.is_dir())
+
+    def _a_compensation_read_round_late_authority_fault(self, fault):
+        state, context, guard, publication, _inputs = self._prepare_published_q_for_stopped_preflight()
+        self.addCleanup(LOAD.close_setup_switch_publication_bundle, publication)
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "_runtime_service_action") as service:
+            LOAD.restore_setup_switch_q_publication(state[1], guard=guard, confirmed=True)
+            with LOAD._setup_switch_a_compensation_authority(state[1], guard=guard, confirmed=True,
+                    restore_publication=False) as token:
+                original_leaf = LOAD._setup_switch_compensation_leaf
+                injected = []
+                observed = []
+                def late_fault(path):
+                    result = original_leaf(path)
+                    # This exact manifest leaf is inspected in setup_states,
+                    # after the opening full marker has completed. Earlier
+                    # selector/receipt qualification must not trigger the hook.
+                    if Path(path) == LOAD.MANIFEST and not injected:
+                        self.assertEqual(1, checks.call_count,
+                            "inject between the round's opening and closing authorities")
+                        injected.append(str(path))
+                        if fault == "unknown-stage":
+                            target = self.ztp.resolve() / (".r22-a-runtime-" + "f" * 32)
+                            target.write_bytes(b"independent unregistered stage\n")
+                        else:
+                            target = (state[-3] if fault == "wal-owner" else
+                                      LOAD._setup_switch_a_restore_path() if fault == "plan-owner" else
+                                      context.runtime_receipt / "receipt.json")
+                            metadata, payload = target.lstat(), target.read_bytes()
+                            held = self.root.resolve() / ("independent-held-" + fault)
+                            target.rename(held)
+                            target.write_bytes(payload)
+                            target.chmod(stat.S_IMODE(metadata.st_mode))
+                            os.utime(target, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
+                            self.assertNotEqual(metadata.st_ino, target.lstat().st_ino)
+                        observed.append((target, target.lstat().st_ino, target.read_bytes()))
+                    return result
+                with mock.patch.object(LOAD, "_require_setup_switch_compensation_q_evidence",
+                                       wraps=LOAD._require_setup_switch_compensation_q_evidence) as checks, \
+                        mock.patch.object(LOAD, "_setup_switch_compensation_leaf", side_effect=late_fault), \
+                        mock.patch.object(LOAD.os, "replace", side_effect=AssertionError("read qualification must not write")):
+                    with self.assertRaisesRegex(LOAD.LoadError, "HOLD"):
+                        token["require"]()
+                self.assertEqual(1, len(injected))
+                for path, inode, payload in observed:
+                    self.assertEqual((inode, payload), (path.lstat().st_ino, path.read_bytes()))
+                service.assert_not_called()
+
+    def test_a_compensation_read_round_rejects_late_same_byte_wal_owner(self):
+        self._a_compensation_read_round_late_authority_fault("wal-owner")
+
+    def test_a_compensation_read_round_rejects_late_same_byte_receipt_owner(self):
+        self._a_compensation_read_round_late_authority_fault("receipt-owner")
+
+    def test_a_compensation_read_round_rejects_late_same_byte_plan_owner(self):
+        self._a_compensation_read_round_late_authority_fault("plan-owner")
+
+    def test_a_compensation_read_round_rejects_late_unregistered_stage(self):
+        self._a_compensation_read_round_late_authority_fault("unknown-stage")
+
     def test_a_publication_compensation_parent_only_commit_preserves_unconsumed_b_stages(self):
         state, _context, guard, token, _inputs = self._prepare_published_q_for_stopped_preflight(
             publication_phase="report")
@@ -5758,28 +5836,32 @@ class ReleaseTransactionTests(unittest.TestCase):
                 )
 
     def test_validate_inputs_placeholder_guidance_preserves_explicit_server_role(self):
-        with tempfile.TemporaryDirectory() as directory:
-            project = Path(directory)
-            (project / "01-global.yaml").write_bytes(
-                (ROOT / "DAY0-Prepare/template/01-global.yaml").read_bytes()
-            )
-            args = SimpleNamespace(host_role="management-server")
-            with mock.patch.object(LOAD, "runtime_os", return_value="Linux"):
-                with self.assertRaises(LOAD.LoadError) as caught:
-                    LOAD.validate_inputs(
-                        project, args, allow_management_key_generation=False,
-                    )
-            message = str(caught.exception)
-            expected = (
-                f"DAY0-Prepare/11-load.py {project} --update-passwords "
-                "--host-role=management-server"
-            )
-            self.assertIn(expected, message)
-            parsed = LOAD.parse_args(shlex.split(expected)[1:])
-            self.assertEqual(
-                "management-server",
-                LOAD.resolve_host_role(parsed.host_role, "Linux"),
-            )
+        project = self.project.resolve(strict=True)
+        (project / "01-global.yaml").write_bytes(
+            (ROOT / "DAY0-Prepare/template/01-global.yaml").read_bytes()
+        )
+        self._http_main_public_source_fixture()
+        args = LOAD.parse_args([str(project), "--host-role=management-server"])
+        self.assertFalse(args.dry_run)
+        with self._http_linux_public_ancestor_model(), \
+                mock.patch.object(LOAD, "HTTP_ROOT", self.root.resolve(strict=True)), \
+                mock.patch.object(LOAD, "ZTP_DIR", self.ztp.resolve(strict=True)), \
+                mock.patch.object(LOAD, "runtime_os", return_value="Linux"):
+            with self.assertRaises(LOAD.LoadError) as caught:
+                LOAD.validate_inputs(
+                    project, args, allow_management_key_generation=False,
+                )
+        message = str(caught.exception)
+        expected = (
+            f"DAY0-Prepare/11-load.py {project} --update-passwords "
+            "--host-role=management-server"
+        )
+        self.assertIn(expected, message)
+        parsed = LOAD.parse_args(shlex.split(expected)[1:])
+        self.assertEqual(
+            "management-server",
+            LOAD.resolve_host_role(parsed.host_role, "Linux"),
+        )
 
     def test_validate_inputs_refuses_placeholders_before_downstream_probes(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -15778,6 +15860,10 @@ os.kill(os.getpid(), signal.SIGKILL)
         prepare.assert_not_called()
 
     def test_existing_receipt_is_not_reused_after_flat_a_drift(self) -> None:
+        with self._schema4_real_receipt_producer_for_existing_workflow():
+            self._existing_receipt_is_not_reused_after_flat_a_drift()
+
+    def _existing_receipt_is_not_reused_after_flat_a_drift(self) -> None:
         _parent, _generation, receipt = self._publish_a_with_runtime_rollback_receipt()
         selector_target = os.readlink(self.project / "99-output-ztp/current")
         runtime = self.ztp / "ztp-bootstrap_oob.sh"

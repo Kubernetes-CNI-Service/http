@@ -8048,8 +8048,7 @@ def _setup_switch_a_compensation_authority(project, *, guard, confirmed,
             return (set(actual) == set(expected) and actual["identity"][:8] == expected["identity"][:8]
                     and (renamed or actual["identity"] == expected["identity"])
                     and all(actual[key] == expected[key] for key in actual if key != "identity"))
-        def runtime_states():
-            marker_authority()
+        def inspect_runtime_states():
             context = _setup_switch_runtime_context(body)
             expected = {}
             original = bundle["shared_setup"]["flat_runtime"]
@@ -8105,10 +8104,8 @@ def _setup_switch_a_compensation_authority(project, *, guard, confirmed,
                     result[path] = "before"
                 else:
                     raise LoadError("A compensation runtime destination/stage owner changed; HOLD")
-            marker_authority()
             return result
-        def setup_states():
-            marker_authority()
+        def inspect_setup_states():
             originals = _setup_switch_compensation_setup_records(body)
             if not isinstance(plan["setup"], dict) or set(plan["setup"]) != set(originals):
                 raise LoadError("A compensation setup inventory differs from original WAL; HOLD")
@@ -8151,10 +8148,8 @@ def _setup_switch_a_compensation_authority(project, *, guard, confirmed,
                     result[path] = "before"
                 else:
                     raise LoadError("A compensation setup destination/stage owner changed; HOLD")
-            marker_authority()
             return result
-        def dhcp_states():
-            marker_authority()
+        def inspect_dhcp_states():
             binding = body.get("dhcp_transaction")
             originals = ({} if binding is None else {str(Path(binding["body"]["runtime"]["path"]) / name): row
                          for name, row in binding["body"]["before"].items()})
@@ -8204,10 +8199,8 @@ def _setup_switch_a_compensation_authority(project, *, guard, confirmed,
                     result[path] = "before"
                 else:
                     raise LoadError("DHCP compensation destination/stage owner changed; HOLD")
-            marker_authority()
             return result
-        def states():
-            marker_authority()
+        def inspect_publication_states():
             result = {}
             for key in ("parent", "report", "selector"):
                 original_row, row = bundle[key], plan["rows"][key]
@@ -8254,8 +8247,22 @@ def _setup_switch_a_compensation_authority(project, *, guard, confirmed,
                     result[key] = "before"
                 else:
                     raise LoadError("A compensation destination/stage owner changed; HOLD")
+            return result
+        def qualified_state_read(inspect):
+            # Each standalone read is fresh. These lexical inspectors grant
+            # no mutation authority and are never exported on the token.
+            marker_authority()
+            result = inspect()
             marker_authority()
             return result
+        def runtime_states():
+            return qualified_state_read(inspect_runtime_states)
+        def setup_states():
+            return qualified_state_read(inspect_setup_states)
+        def dhcp_states():
+            return qualified_state_read(inspect_dhcp_states)
+        def states():
+            return qualified_state_read(inspect_publication_states)
         if restore_publication or complete_publication and set(states().values()) != {"after"}:
             for key in ("parent", "report", "selector"):
                 if not restore_publication:
@@ -8281,11 +8288,19 @@ def _setup_switch_a_compensation_authority(project, *, guard, confirmed,
                         os.replace(Path(stage["path"]), destination)
                 _fsync_parent_directory(destination.parent)  # Repeat interrupted-sync reentry too.
         def require_restored_publication():
-            if set(states().values()) != {"after"}:
+            # One read-only round brackets all four surface inventories with
+            # the complete WAL/receipt/Q/plan/stage authority. Do not multiply
+            # that same deep authority through nested standalone wrappers.
+            # No result survives this call: every subsequent write, sync and
+            # external callback still uses the original fresh pre/post gates.
+            marker_authority()
+            publication = inspect_publication_states()
+            inspect_runtime_states()
+            inspect_setup_states()
+            inspect_dhcp_states()
+            marker_authority()
+            if set(publication.values()) != {"after"}:
                 raise LoadError("A compensation final publication state differs; HOLD")
-            runtime_states()
-            setup_states()
-            dhcp_states()
         def restore_dhcp_leaf(path):
             path = Path(path)
             require_restored_publication()
