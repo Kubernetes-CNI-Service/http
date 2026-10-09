@@ -1155,6 +1155,22 @@ MATCHED 描述。与 live matcher 共用原 journal/WIRE/前缀对账，但仅�
 错误类型和自有子进程退出码；不记录 token、请求头或响应正文，单独复跑通过
 不得据此关闭原始联测失败的根因。
 
+`record_owned_applied_evidence` 是另一个尚未接入在线 worker 的历史结算证据边界。
+它要求实际项目 writer 与 spreadsheet 双锁、原生完整 C6 generation/MANIFEST/INTENT/
+RECEIPT/已发布 XLSX，以及逐项重放四份 RAW 的完整原 COMPLETE。全部原件的 held FD、
+stat/inode/字节/命名边和必要屏障持续至返回；不接受 caller COMPLETE 或 generation 标志。
+只有原单元实际发送的业务 operation IDs 记录 APPLIED，完整 outcomes 中的 NOOP 仍保留，
+不成为 APPLIED。独立 `.tracker/REMOTE-APPLIED-STARTED-<unit>` 与
+`REMOTE-APPLIED-<unit>` 在准备时互绑两个原 inode；持有两份首写 FD，STARTED 先提交，
+marker 后提交，均原子 NOREPLACE 并同步父目录。同字节替换、原 C6 收据漂移与 partial
+配对 HOLD，保留 pending/原件，不补建、不回滚。完整配对的冷进程只重新核原件及屏障，
+不依赖父进程对象；最终 parent fsync 失败不 ACK，若两份原文件均完整，后续冷读可以重新
+建立必要屏障，不能补齐部分配对。这些测试包括独立初始 RED、实际加密固定读取、原生
+文件、关键提交故障与独立冷解释器。原 global count/WIRE/UNKNOWN、C6 原文件与 NOOP
+均不修改；该观察不释放 FIFO、预留、quota 或高水位，不授予发送、清栅、在线激活或正式
+证明。REQ7 的消费者整体接入与当前精确树 full/check 仍待完成；现场卡
+`TC-REAL-REQ7-ORIGINAL-APPLIED-001` 如实 NOT RUN，不能冒充断电或真实 Cloud 验收。
+
 `test_cases.test_req7_activity_discovery` 另区分 caller 有限窗口和固定完整容量读：
 显式身份/Status 列与 GRID rowCount/columnCount 在同一个 GET 返回；仅容量 3..5002
 接受并完整覆盖到实际末行，溢出、缺 grid、错位和部分响应 HOLD，不分页、不截断。

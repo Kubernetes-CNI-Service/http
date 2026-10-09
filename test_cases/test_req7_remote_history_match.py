@@ -1,4 +1,4 @@
-"""Independent all-business/all-audit reconciliation, not sending or APPLIED."""
+"""Independent all-business/all-audit reconciliation and original APPLIED evidence."""
 from copy import deepcopy
 from contextlib import ExitStack, contextmanager
 from dataclasses import replace
@@ -148,6 +148,25 @@ class Req7RemoteHistoryMatchDirectTests(unittest.TestCase):
                     metadata_response=response(self.metadata),history_response=response(self.post))
             self.assertIsNone(caught.exception.__context__)
             self.assertEqual(retained,{str(p.relative_to(self.state)):p.read_bytes() for p in self.state.rglob('*') if p.is_file()})
+
+    def test_applied_transition_rejects_caller_generation_without_original_local_owner(self):
+        """C6/C19: a caller's generation or COMPLETE claim grants no settlement."""
+        module=load()
+        self.assertTrue(callable(getattr(module,'record_owned_applied_evidence',None)),
+                        'REQ7 needs a separate original-C6-bound APPLIED transition')
+        with fixture(self.root),self.owner.spreadsheet_owner(binding()) as token:
+            self.prepare(token)
+            retained={str(p.relative_to(self.state)):p.read_bytes()
+                      for p in self.state.rglob('*') if p.is_file()}
+            with self.assertRaises(module.RemoteHistoryHold) as caught:
+                module.record_owned_applied_evidence(object(),token,binding(),self.unit,
+                    generation=SimpleNamespace(generation_id='a'*64,sequence=1,
+                                               manifest_id='c'*64,state='COMPLETE'))
+            self.assertIsNone(caught.exception.__context__)
+            self.assertEqual(retained,{str(p.relative_to(self.state)):p.read_bytes()
+                                     for p in self.state.rglob('*') if p.is_file()})
+            seen=self.global_journal.inspect_global_unit(token,binding(),self.unit)
+            self.assertEqual((1,'UNKNOWN'),(seen.attempt_count,seen.outcome))
 
     def test_cold_completion_initial_header_read_cannot_adopt_rewritten_header_and_marker(self):
         """A self-consistent later pair is not the original pair held at entry."""
@@ -610,7 +629,7 @@ print('context-revoked')
             raise
         return result
 
-    def prepare_owned(self, stack, *, settings_audits=None):
+    def prepare_owned(self, stack, *, settings_audits=None, native_generation=False):
         from monitor import issue_tracker_history_read_launcher as reads
         from monitor import issue_tracker_global_attempt_journal as journal, issue_tracker_enrollment_journal as enroll
         from monitor import issue_tracker_history_preread_journal as preread, issue_tracker_sheets_read_decode as decode
@@ -625,6 +644,14 @@ print('context-revoked')
         arguments['business'][0]['observed_values'] = {'L': {'stringValue': 'down'}}
         arguments['audits'] = (({'event_id': 'settings:001', 'recorded_at_utc': '2026-10-08T10:00:00Z', 'details': 'K=3'},)
                               if settings_audits is None else settings_audits)
+        if native_generation:
+            from test_cases.test_issue_tracker_whitelist_workbook import literal_xlsx
+            generation=_local.begin_generation(writer,arguments['manifest'])
+            _local.record_intent(writer,generation,literal_xlsx(),kind='xlsx')
+            receipt=_local.commit(writer,generation)
+            self.native_generation=generation
+            arguments.update(generation_id=generation.generation_id,
+                             publish_id=receipt.published_sha256)
         if settings_audits is not None:
             from monitor import issue_tracker_k_store as settings
             settings.initialize_local_k_store(self.root/'project/.tracker',token=writer,
@@ -646,7 +673,7 @@ print('context-revoked')
         preread.prepare_history_preread(owner, bound, unit, original_plan, original_read)
         journal.record_global_attempt_intent(owner, bound, unit)
         common = {'schema_version': 1, 'unit_id': unit.unit_id, 'manifest_id': arguments['manifest_id'],
-                  'generation_id': 'a'*64, 'publish_id': 'b'*64, 'action_digest': unit.action_digest,
+                  'generation_id': arguments['generation_id'], 'publish_id': arguments['publish_id'], 'action_digest': unit.action_digest,
                   'outcome_mapping_sha256': unit.outcome_mapping_sha256, 'target_nonce': 'a'*64,
                   'history_nonce': 'd'*64, 'preread_sha256': 'e'*64}
         intended = hashlib.sha256(canonical({'sheet':'ETH&IB Switch','sheet_id':101,'action':'update',
@@ -1523,6 +1550,230 @@ with scoped_fixture(root,owner),owner.spreadsheet_owner(bound) as token:
             input=json.dumps(asdict(bound)).encode(),stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=10)
         self.assertEqual(0,cold.returncode,cold.stderr)
         self.assertEqual(b'COMPLETE-PRESENT-NOT-APPLIED 1 2\n',cold.stdout)
+
+    def test_actual_complete_without_original_c6_generation_cannot_advance_applied(self):
+        """Real issued reads and full History are necessary, not C6 authority."""
+        module=load()
+        with ExitStack() as stack:
+            writer,owner,bound,auth,_config,unit,docs=self.prepare_owned(stack)
+            responses={name:self.read_owned(stack,writer,owner,bound,auth,kind,value)
+                       for name,(kind,value) in docs.items()}
+            observed=module.record_owned_completion_evidence(writer,owner,bound,unit,**responses)
+            self.assertEqual(('COMPLETE-PRESENT-NOT-APPLIED',1,2),
+                             (observed.state,observed.attempt_count,observed.history_rows_matched))
+            roots=(self.root/'project/.tracker',
+                   self.root/'var/lib/http-ztp-container/issue-tracker')
+            retained={p:(p.stat().st_ino,p.read_bytes())
+                      for root in roots for p in root.rglob('*') if p.is_file()}
+            self.assertTrue(callable(getattr(module,'record_owned_applied_evidence',None)),
+                            'REQ7 original completion has no governed APPLIED handoff')
+            # This actual counted unit has only a digest-shaped generation;
+            # there is no committed original native C6 generation/receipt.
+            with self.assertRaises(module.RemoteHistoryHold):
+                module.record_owned_applied_evidence(writer,owner,bound,unit,generation=None)
+            self.assertEqual(retained,{p:(p.stat().st_ino,p.read_bytes())
+                                      for root in roots for p in root.rglob('*') if p.is_file()})
+            historical=self.current_global_state(owner,bound,unit)
+            self.assertEqual((1,'UNKNOWN'),(historical.attempt_count,historical.outcome))
+            self.assertEqual(observed,module.inspect_completion_evidence(owner,bound,unit))
+
+    def test_native_c6_and_complete_record_applied_only_for_sent_business(self):
+        """Full mapping retains NOOP; only genuinely sent operations are APPLIED."""
+        module=load()
+        with ExitStack() as stack:
+            writer,owner,bound,auth,_config,unit,docs=self.prepare_owned(stack,native_generation=True)
+            responses={name:self.read_owned(stack,writer,owner,bound,auth,kind,value)
+                       for name,(kind,value) in docs.items()}
+            module.record_owned_completion_evidence(writer,owner,bound,unit,**responses)
+            roots=(self.root/'project/.tracker/generations',
+                   self.root/'var/lib/http-ztp-container/issue-tracker')
+            retained={p:(p.stat().st_ino,p.read_bytes())
+                      for root in roots for p in root.rglob('*') if p.is_file()}
+            self.assertTrue(callable(getattr(module,'record_owned_applied_evidence',None)),
+                            'complete original C6/History proof needs durable APPLIED evidence')
+            applied=module.record_owned_applied_evidence(writer,owner,bound,unit,
+                                                        generation=self.native_generation)
+            self.assertEqual(('APPLIED',1,('switch:0001',)),
+                             (applied.state,applied.sequence,applied.applied_operation_ids))
+            self.assertEqual(self.native_generation.generation_id,applied.generation_id)
+            self.assertEqual(unit.unit_id,applied.unit_id)
+            self.assertFalse(hasattr(applied,'permit'))
+            self.assertEqual(retained,{p:(p.stat().st_ino,p.read_bytes())
+                                      for root in roots for p in root.rglob('*') if p.is_file()})
+            self.assertEqual(applied,module.inspect_owned_applied_evidence(writer,owner,bound,unit,
+                                                                          generation=self.native_generation))
+            historical=self.current_global_state(owner,bound,unit)
+            self.assertEqual((1,'UNKNOWN'),(historical.attempt_count,historical.outcome))
+            # A duplicate is read-only replay, never a new original marker.
+            tracker=self.root/'project/.tracker'
+            saved={p:(p.stat().st_ino,p.read_bytes()) for p in tracker.rglob('*') if p.is_file()}
+            self.assertEqual(applied,module.record_owned_applied_evidence(writer,owner,bound,unit,
+                                                                         generation=self.native_generation))
+            self.assertEqual(saved,{p:(p.stat().st_ino,p.read_bytes())
+                                   for p in tracker.rglob('*') if p.is_file()})
+
+    def prepare_native_completed(self,stack,module):
+        writer,owner,bound,auth,_config,unit,docs=self.prepare_owned(stack,native_generation=True)
+        responses={name:self.read_owned(stack,writer,owner,bound,auth,kind,value)
+                   for name,(kind,value) in docs.items()}
+        module.record_owned_completion_evidence(writer,owner,bound,unit,**responses)
+        return writer,owner,bound,unit
+
+    def test_applied_live_start_and_marker_substitution_keep_hold_without_adoption(self):
+        """A successful rename is not permission to adopt a replacement inode."""
+        from monitor import issue_tracker_local_commit as local
+        for phase in ('STARTED','MARKER'):
+            with self.subTest(phase=phase),ExitStack() as stack:
+                module=load(); writer,owner,bound,unit=self.prepare_native_completed(stack,module)
+                tracker=self.root/'project/.tracker'; native=local._rename_new; reached=[]
+                target=('REMOTE-APPLIED-STARTED-' if phase=='STARTED' else 'REMOTE-APPLIED-')+unit.unit_id
+                def displace_after_rename(parent,source,name,*args):
+                    result=native(parent,source,name,*args)
+                    if name==target:
+                        path=tracker/name; raw=path.read_bytes()
+                        path.rename(self.root/'preserved-applied-original')
+                        path.write_bytes(raw); path.chmod(0o600); reached.append(True)
+                    return result
+                with mock.patch.object(local,'_rename_new',side_effect=displace_after_rename):
+                    with self.assertRaises(module.RemoteHistoryHold):
+                        module.record_owned_applied_evidence(writer,owner,bound,unit,
+                                                             generation=self.native_generation)
+                self.assertEqual([True],reached)
+                self.assertEqual((tracker/target).read_bytes(),(self.root/'preserved-applied-original').read_bytes())
+                self.assertNotEqual((tracker/target).stat().st_ino,(self.root/'preserved-applied-original').stat().st_ino)
+                if phase=='STARTED': self.assertFalse((tracker/('REMOTE-APPLIED-'+unit.unit_id)).exists())
+                state=self.current_global_state(owner,bound,unit)
+                self.assertEqual((1,'UNKNOWN'),(state.attempt_count,state.outcome))
+            self.doCleanups(); self.setUp()
+
+    def test_applied_cold_same_byte_start_and_marker_are_not_original_pair(self):
+        for prefix in ('REMOTE-APPLIED-STARTED-','REMOTE-APPLIED-'):
+            with self.subTest(prefix=prefix),ExitStack() as stack:
+                module=load(); writer,owner,bound,unit=self.prepare_native_completed(stack,module)
+                module.record_owned_applied_evidence(writer,owner,bound,unit,generation=self.native_generation)
+                tracker=self.root/'project/.tracker'; path=tracker/(prefix+unit.unit_id)
+                raw=path.read_bytes(); path.rename(self.root/'preserved-applied-original')
+                path.write_bytes(raw); path.chmod(0o600)
+                saved={p:(p.stat().st_ino,p.read_bytes()) for p in tracker.rglob('*') if p.is_file()}
+                with self.assertRaises(module.RemoteHistoryHold):
+                    module.inspect_owned_applied_evidence(writer,owner,bound,unit,generation=self.native_generation)
+                with self.assertRaises(module.RemoteHistoryHold):
+                    module.record_owned_applied_evidence(writer,owner,bound,unit,generation=self.native_generation)
+                self.assertEqual(saved,{p:(p.stat().st_ino,p.read_bytes()) for p in tracker.rglob('*') if p.is_file()})
+            self.doCleanups(); self.setUp()
+
+    def test_applied_interrupted_pair_is_retained_and_never_recreated(self):
+        from monitor import issue_tracker_local_commit as local
+        module=load()
+        with ExitStack() as stack:
+            writer,owner,bound,unit=self.prepare_native_completed(stack,module)
+            tracker=self.root/'project/.tracker'; native=local._rename_new; reached=[]
+            def interrupt_marker(parent,source,name,*args):
+                if name=='REMOTE-APPLIED-'+unit.unit_id:
+                    reached.append(True); raise OSError('owned fixture interrupted before marker rename')
+                return native(parent,source,name,*args)
+            with mock.patch.object(local,'_rename_new',side_effect=interrupt_marker):
+                with self.assertRaises(module.RemoteHistoryHold):
+                    module.record_owned_applied_evidence(writer,owner,bound,unit,generation=self.native_generation)
+            self.assertEqual([True],reached)
+            self.assertTrue((tracker/('REMOTE-APPLIED-STARTED-'+unit.unit_id)).is_file())
+            self.assertFalse((tracker/('REMOTE-APPLIED-'+unit.unit_id)).exists())
+            saved={p:(p.stat().st_ino,p.read_bytes()) for p in tracker.rglob('*') if p.is_file()}
+            for api in (module.record_owned_applied_evidence,module.inspect_owned_applied_evidence):
+                with self.assertRaises(module.RemoteHistoryHold): api(writer,owner,bound,unit,generation=self.native_generation)
+            self.assertEqual(saved,{p:(p.stat().st_ino,p.read_bytes()) for p in tracker.rglob('*') if p.is_file()})
+            state=self.current_global_state(owner,bound,unit)
+            self.assertEqual((1,'UNKNOWN'),(state.attempt_count,state.outcome))
+
+    def test_native_applied_cold_process_needs_original_c6_and_complete_not_parent_objects(self):
+        module=load()
+        with ExitStack() as stack:
+            writer,owner,bound,unit=self.prepare_native_completed(stack,module)
+            module.record_owned_applied_evidence(writer,owner,bound,unit,generation=self.native_generation)
+        import subprocess
+        from dataclasses import asdict
+        roots=(self.root/'project/.tracker',self.root/'project/publication',
+               self.root/'var/lib/http-ztp-container/issue-tracker')
+        saved={p:(p.stat().st_ino,p.read_bytes()) for root in roots for p in root.rglob('*') if p.is_file()}
+        program='''import sys,json,hashlib
+from pathlib import Path
+sys.path[:0]=[sys.argv[1],sys.argv[1]+"/tools"]
+from test_cases.test_req7_spreadsheet_owner import scoped_fixture
+from monitor import issue_tracker_spreadsheet_owner as owner,issue_tracker_local_commit as local
+from monitor import issue_tracker_remote_history_match as match,issue_tracker_global_attempt_journal as journal
+from monitor.issue_tracker_online_target import OnlineTargetBinding
+from monitor.issue_tracker_send_unit import _original_unit
+root=Path(sys.argv[2]); bound=OnlineTargetBinding(**json.loads(sys.stdin.buffer.read()))
+path=root/'var/lib/http-ztp-container/issue-tracker'/(hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()+'.journal')
+unit=_original_unit((path/'ACTION-PREIMAGE').read_bytes(),(path/'WIRE').read_bytes())
+action=json.loads(unit.action_preimage); gid=action['identity']['generation_id']
+state=json.loads((root/'project/.tracker/generations'/gid/'STATE').read_bytes())
+with scoped_fixture(root,owner),local.writer_owner(root/'project',root/'project/publication') as writer,owner.spreadsheet_owner(bound) as token:
+ generation=local.Generation(gid,state['sequence'],state['manifest_id'],writer)
+ seen=match.inspect_owned_applied_evidence(writer,token,bound,unit,generation=generation)
+ assert seen==match.record_owned_applied_evidence(writer,token,bound,unit,generation=generation)
+ historical=journal.inspect_global_unit(token,bound,unit)
+ print(seen.state,seen.sequence,','.join(seen.applied_operation_ids),historical.attempt_count,historical.outcome)
+'''
+        child=subprocess.run([sys.executable,'-B','-c',program,str(ROOT),str(self.root)],
+            input=json.dumps(asdict(bound)).encode(),stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=10)
+        self.assertEqual(0,child.returncode,child.stderr)
+        self.assertEqual(b'APPLIED 1 switch:0001 1 UNKNOWN\n',child.stdout)
+        self.assertEqual(saved,{p:(p.stat().st_ino,p.read_bytes()) for root in roots for p in root.rglob('*') if p.is_file()})
+
+    def test_applied_original_c6_loss_during_marker_commit_never_acknowledges(self):
+        from monitor import issue_tracker_local_commit as local
+        module=load()
+        with ExitStack() as stack:
+            writer,owner,bound,unit=self.prepare_native_completed(stack,module)
+            generation=self.root/'project/.tracker/generations'/self.native_generation.generation_id
+            receipt=generation/'RECEIPT'; original=receipt.read_bytes(); native=local._rename_new; reached=[]
+            def displace_receipt_after_marker(parent,source,name,*args):
+                result=native(parent,source,name,*args)
+                if name=='REMOTE-APPLIED-'+unit.unit_id:
+                    receipt.rename(self.root/'preserved-original-c6-receipt')
+                    receipt.write_bytes(original); receipt.chmod(0o600); reached.append(True)
+                return result
+            with mock.patch.object(local,'_rename_new',side_effect=displace_receipt_after_marker):
+                with self.assertRaises(module.RemoteHistoryHold):
+                    module.record_owned_applied_evidence(writer,owner,bound,unit,generation=self.native_generation)
+            self.assertEqual([True],reached)
+            saved={p:(p.stat().st_ino,p.read_bytes()) for p in (self.root/'project/.tracker').rglob('*') if p.is_file()}
+            for api in (module.record_owned_applied_evidence,module.inspect_owned_applied_evidence):
+                with self.assertRaises(module.RemoteHistoryHold): api(writer,owner,bound,unit,generation=self.native_generation)
+            self.assertEqual(saved,{p:(p.stat().st_ino,p.read_bytes()) for p in (self.root/'project/.tracker').rglob('*') if p.is_file()})
+
+    def test_applied_required_file_and_parent_barriers_fail_without_partial_adoption(self):
+        from monitor import issue_tracker_local_commit as local
+        for barrier in range(1,5):
+            with self.subTest(barrier=barrier),ExitStack() as stack:
+                module=load(); writer,owner,bound,unit=self.prepare_native_completed(stack,module)
+                tracker=self.root/'project/.tracker'; native=os.fsync; reached=[]
+                root_id=(tracker.stat().st_dev,tracker.stat().st_ino)
+                def fail_required(fd):
+                    info=os.fstat(fd); identity=(info.st_dev,info.st_ino)
+                    pending={(p.stat().st_dev,p.stat().st_ino) for p in tracker.iterdir() if p.name.startswith('.pending-')}
+                    if identity==root_id or identity in pending:
+                        reached.append(identity)
+                        if len(reached)==barrier: raise OSError('owned required APPLIED barrier failure')
+                    return native(fd)
+                with mock.patch.object(os,'fsync',side_effect=fail_required):
+                    with self.assertRaises(module.RemoteHistoryHold):
+                        module.record_owned_applied_evidence(writer,owner,bound,unit,generation=self.native_generation)
+                self.assertEqual(barrier,len(reached))
+                if barrier<4:
+                    saved={p:(p.stat().st_ino,p.read_bytes()) for p in tracker.rglob('*') if p.is_file()}
+                    for api in (module.record_owned_applied_evidence,module.inspect_owned_applied_evidence):
+                        with self.assertRaises(module.RemoteHistoryHold): api(writer,owner,bound,unit,generation=self.native_generation)
+                    self.assertEqual(saved,{p:(p.stat().st_ino,p.read_bytes()) for p in tracker.rglob('*') if p.is_file()})
+                else:
+                    # Final rename happened. Cold read may re-establish the
+                    # exact complete pair's required barriers, not fill a gap.
+                    seen=module.inspect_owned_applied_evidence(writer,owner,bound,unit,generation=self.native_generation)
+                    self.assertEqual(('APPLIED',('switch:0001',)),(seen.state,seen.applied_operation_ids))
+                state=self.current_global_state(owner,bound,unit)
+                self.assertEqual((1,'UNKNOWN'),(state.attempt_count,state.outcome))
+            self.doCleanups(); self.setUp()
 
     def test_completion_header_original_identity_and_history_extent_cannot_be_substituted(self):
         module=load()

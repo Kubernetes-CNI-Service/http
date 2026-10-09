@@ -660,7 +660,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <tr data-file-path="monitor/issue_tracker_publish_runtime.py"><td><code>monitor/issue_tracker_publish_runtime.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>REQ7 Stage-L status and protected local-only C5-to-C6 entrypoint。 <strong>维护/生成责任：</strong>项目输入由项目维护者编辑；发布链接、receipt、状态和输出只允许对应事务/worker 生成。</td></tr>
             <tr data-file-path="monitor/issue_tracker_qualification.py"><td><code>monitor/issue_tracker_qualification.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Fail-closed, local-fixture-only qualified-operation projection for REQ7 C-5。 <strong>维护/生成责任：</strong>项目输入由项目维护者编辑；发布链接、receipt、状态和输出只允许对应事务/worker 生成。</td></tr>
             <tr data-file-path="monitor/issue_tracker_receipt_snapshot.py"><td><code>monitor/issue_tracker_receipt_snapshot.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Read-only, cycle-bound local C6 publication facts for Stage L status。 <strong>维护/生成责任：</strong>项目输入由项目维护者编辑；发布链接、receipt、状态和输出只允许对应事务/worker 生成。</td></tr>
-            <tr data-file-path="monitor/issue_tracker_remote_history_match.py"><td><code>monitor/issue_tracker_remote_history_match.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Uninstalled journal-bound complete History matching, NOT remote APPLIED。 <strong>维护/生成责任：</strong>项目输入由项目维护者编辑；发布链接、receipt、状态和输出只允许对应事务/worker 生成。</td></tr>
+            <tr data-file-path="monitor/issue_tracker_remote_history_match.py"><td><code>monitor/issue_tracker_remote_history_match.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Uninstalled journal-bound History matching and original settlement evidence。 <strong>维护/生成责任：</strong>项目输入由项目维护者编辑；发布链接、receipt、状态和输出只允许对应事务/worker 生成。</td></tr>
             <tr data-file-path="monitor/issue_tracker_sdk_authentication.py"><td><code>monitor/issue_tracker_sdk_authentication.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Uninstalled C-14 SDK bridge; a wire unit must supply the bounded response。 <strong>维护/生成责任：</strong>项目输入由项目维护者编辑；发布链接、receipt、状态和输出只允许对应事务/worker 生成。</td></tr>
             <tr data-file-path="monitor/issue_tracker_send_intent.py"><td><code>monitor/issue_tracker_send_intent.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Uninstalled durable action/wire binding under the existing private C-6 owner。 <strong>维护/生成责任：</strong>项目输入由项目维护者编辑；发布链接、receipt、状态和输出只允许对应事务/worker 生成。</td></tr>
             <tr data-file-path="monitor/issue_tracker_send_unit.py"><td><code>monitor/issue_tracker_send_unit.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Uninstalled C-19 immutable batch composer, NOT an online send/admission API。 <strong>维护/生成责任：</strong>项目输入由项目维护者编辑；发布链接、receipt、状态和输出只允许对应事务/worker 生成。</td></tr>
@@ -940,7 +940,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <tr data-file-path="test_cases/test_req7_native_tls_wire.py"><td><code>test_cases/test_req7_native_tls_wire.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Actual stdlib TLS/HTTP to an owned loopback fake server, never online OAuth。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_req7_nv_reservation.py"><td><code>test_cases/test_req7_nv_reservation.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Independent C17 durable shared sequence, not an online mutation permit。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_req7_online_whitelist_read.py"><td><code>test_cases/test_req7_online_whitelist_read.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Independent C-24 read-only online Whitelist, never refiltering or admission。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
-            <tr data-file-path="test_cases/test_req7_remote_history_match.py"><td><code>test_cases/test_req7_remote_history_match.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Independent all-business/all-audit reconciliation, not sending or APPLIED。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_req7_remote_history_match.py"><td><code>test_cases/test_req7_remote_history_match.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Independent all-business/all-audit reconciliation and original APPLIED evidence。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_req7_sdk_authentication.py"><td><code>test_cases/test_req7_sdk_authentication.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Independent fake-wire SDK proofs; no real credential, socket or SDK patch。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_req7_send_intent.py"><td><code>test_cases/test_req7_send_intent.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Independent durable nonrecursive action/wire binding; no send authority。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_req7_send_unit.py"><td><code>test_cases/test_req7_send_unit.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Independent immutable C-19 batch composition, not online admission。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
@@ -2509,9 +2509,9 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           <pre><code>rg -n &quot;issue_tracker_receipt_snapshot&quot; DAY0-Prepare infra monitor tools ztp  # 查找受支持调用者</code></pre></div>
         </details>
         <details data-script-reference="monitor/issue_tracker_remote_history_match.py" class="script-reference">
-          <summary><code>monitor/issue_tracker_remote_history_match.py</code> — Uninstalled journal-bound complete History matching, NOT remote APPLIED。</summary>
+          <summary><code>monitor/issue_tracker_remote_history_match.py</code> — Uninstalled journal-bound History matching and original settlement evidence。</summary>
           <div class="script-body"><dl>
-            <dt>作用：</dt><dd>Uninstalled journal-bound complete History matching, NOT remote APPLIED。</dd>
+            <dt>作用：</dt><dd>Uninstalled journal-bound History matching and original settlement evidence。</dd>
             <dt>是否直接运行：</dt><dd>否；这是未安装、未启用的受控传输／只读库，不是操作员 CLI 或在线发布入口。</dd>
             <dt>运行环境：</dt><dd>当前未安装、未启用；仅在本地隔离候选中验证，不启动受管服务。</dd>
             <dt>使用场景：</dt><dd>实际全局 journal、发送前完整原像、两份原始 nonce、精确永久 fence、全部实际业务及审计 History 同时对账；typed 旧前缀与精确新尾保持不变。</dd>
@@ -6813,9 +6813,9 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_req7_online_whitelist_read</code></pre></div>
         </details>
         <details data-script-reference="test_cases/test_req7_remote_history_match.py" class="script-reference">
-          <summary><code>test_cases/test_req7_remote_history_match.py</code> — Independent all-business/all-audit reconciliation, not sending or APPLIED。</summary>
+          <summary><code>test_cases/test_req7_remote_history_match.py</code> — Independent all-business/all-audit reconciliation and original APPLIED evidence。</summary>
           <div class="script-body"><dl>
-            <dt>作用：</dt><dd>Independent all-business/all-audit reconciliation, not sending or APPLIED。</dd>
+            <dt>作用：</dt><dd>Independent all-business/all-audit reconciliation and original APPLIED evidence。</dd>
             <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
             <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
             <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>

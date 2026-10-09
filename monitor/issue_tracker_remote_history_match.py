@@ -1,11 +1,12 @@
-"""Uninstalled journal-bound complete History matching, NOT remote APPLIED.
+"""Uninstalled journal-bound History matching and original settlement evidence.
 
 Only MATCHED_OBSERVATION when an actual counted global unit, original durable
 preimage, both original enrollment nonces, exact permanent fence and ALL sent
 business/audit rows agree. No send/clear/reset/high-water mutation. Remote read
 objects remain necessary inputs, not authenticated source/admission authority;
-The owned-read bridge below establishes actual fixed-read provenance, current
-dual owners and typed template observations, not durable settlement authority.
+The owned-read bridge establishes actual fixed-read provenance. Separate
+APPLIED evidence requires original committed C6 and complete remote proof;
+neither observer grants a send, FIFO, quota or high-water mutation permit.
 """
 from dataclasses import dataclass, asdict
 from contextlib import contextmanager, ExitStack
@@ -64,6 +65,248 @@ class CompletionEvidenceObservation:
     history_rows_matched: int
     unit_id: str
     header_sha256: str
+
+
+@dataclass(frozen=True)
+class AppliedEvidenceObservation:
+    """Historical remote effects only; never a fresh send or quota permit."""
+    state: str
+    generation_id: str
+    sequence: int
+    unit_id: str
+    applied_operation_ids: tuple
+
+
+@contextmanager
+def _hold_applied_generation(writer_token,generation,unit):
+    """Pin original C6 files and published XLSX through the whole handoff.
+
+    Keep this separate from current-cycle qualification: historical completion
+    must not recompile a newer qualified set or reinterpret a frozen retry.
+    Original receipt evidence is necessary here, not online send eligibility.
+    """
+    from monitor import issue_tracker_local_commit as local, issue_tracker_attempt_journal as io
+    from monitor.issue_tracker_send_unit import _read_original_generation_identity
+    generations=folder=None; held=[]
+    try:
+        owner=local._owner(writer_token)
+        if (type(generation) is not local.Generation or type(generation.sequence) is not int
+                or generation.sequence<1): raise RemoteHistoryHold()
+        original=_read_original_generation_identity(generation.generation_id,writer_token)
+        action=local._json(unit.action_preimage)
+        if (original[:3]!=(generation.generation_id,action['identity']['publish_id'],action['manifest_id'])
+                or action['identity']['generation_id']!=generation.generation_id
+                or generation.manifest_id!=action['manifest_id']): raise RemoteHistoryHold()
+        generations=local._directory(owner.root_fd,'generations')
+        folder=local._generation_fd(owner,generation)
+        dir_identity=io._identity(os.fstat(folder))
+        ancestors_identity=io._identity(os.fstat(generations))
+        expected={'STATE','MANIFEST','INTENT','RECEIPT'}
+        if set(os.listdir(folder))!=expected: raise RemoteHistoryHold()
+        snapshots={}
+        receipt=local._json(local._read(folder,'RECEIPT')[0])
+        for parent,name,limit,private in (
+                *((folder,name,1024*1024,True) for name in sorted(expected)),
+                (owner.publication_fd,receipt['published'],local._MAX_XLSX,False)):
+            fd=os.open(name,local._flags()|os.O_NONBLOCK,dir_fd=parent)
+            held.append((parent,name,fd,None,None))
+            info=local._check(fd,directory=False,private=private)
+            io._named(parent,name,fd,directory=False)
+            identity=io._identity(info)
+            raw=os.pread(fd,limit+1,0)
+            if not raw or len(raw)!=info.st_size or len(raw)>limit: raise RemoteHistoryHold()
+            held[-1]=(parent,name,fd,identity,raw)
+            snapshots[name]={'identity':list(identity),'sha256':hashlib.sha256(raw).hexdigest()}
+        def verify():
+            if local._owner(writer_token) is not owner: raise RemoteHistoryHold()
+            io._named(owner.root_fd,'generations',generations,directory=True)
+            io._named(generations,generation.generation_id,folder,directory=True)
+            if (io._identity(os.fstat(generations))!=ancestors_identity
+                    or io._identity(os.fstat(folder))!=dir_identity
+                    or set(os.listdir(folder))!=expected): raise RemoteHistoryHold()
+            for parent,name,fd,identity,raw in held:
+                io._named(parent,name,fd,directory=False)
+                if io._identity(os.fstat(fd))!=identity or os.pread(fd,len(raw)+1,0)!=raw:
+                    raise RemoteHistoryHold()
+            if _read_original_generation_identity(generation.generation_id,writer_token)!=original:
+                raise RemoteHistoryHold()
+            io._named(generations,generation.generation_id,folder,directory=True)
+        verify()
+        state=local._json(next(raw for _parent,name,_fd,_id,raw in held if name=='STATE'))
+        manifest=local._json(next(raw for _parent,name,_fd,_id,raw in held if name=='MANIFEST'))
+        from monitor.issue_tracker_manifest import _validated_operations, _runtime_operation
+        from monitor.issue_tracker_send_unit import _FAMILY
+        operations=_validated_operations(manifest['operations'],'original APPLIED manifest',validator=_runtime_operation)
+        selected=[operation for operation in operations if operation['activity_key'][0]==_FAMILY[action['identity']['sheet']]]
+        if (state['sequence']!=generation.sequence
+                or [op['operation_id'] for op in selected]!=[pair[0] for pair in action['outcomes']]):
+            raise RemoteHistoryHold()
+        keyed={op['operation_id']:op['activity_key'] for op in selected}
+        if any(keyed[row['operation_id']]!=row['activity_key'] for row in action['business']):
+            raise RemoteHistoryHold()
+        for _parent,_name,fd,_identity,_raw in held: os.fsync(fd)
+        os.fsync(folder); os.fsync(generations); os.fsync(owner.publication_fd); verify()
+        facts={'generation_id':generation.generation_id,'sequence':generation.sequence,
+               'manifest_id':generation.manifest_id,'published_sha256':original[1],
+               'generation_directory_identity':list(dir_identity),'files':snapshots}
+        yield owner,verify,facts,tuple(row['operation_id'] for row in action['business'])
+        verify()
+    finally:
+        failed=False
+        for _parent,_name,fd,_identity,_raw in reversed(held):
+            try: os.close(fd)
+            except OSError: failed=True
+        for fd in (folder,generations):
+            if fd is not None:
+                try: os.close(fd)
+                except OSError: failed=True
+        if failed: raise RemoteHistoryHold()
+
+
+@contextmanager
+def _hold_applied_records(parent,names,body):
+    """Never adopt a substituted same-byte marker or partially written pair."""
+    from monitor import issue_tracker_local_commit as local, issue_tracker_attempt_journal as io
+    held=[]
+    try:
+        for name in names:
+            fd=os.open(name,local._flags()|os.O_NONBLOCK,dir_fd=parent)
+            held.append((name,fd,None,None))
+            info=local._check(fd,directory=False)
+            io._named(parent,name,fd,directory=False)
+            identity=io._identity(info)
+            raw=os.pread(fd,local._MAX_MANIFEST+1,0)
+            if not raw or len(raw)!=info.st_size or len(raw)>local._MAX_MANIFEST: raise RemoteHistoryHold()
+            held[-1]=(name,fd,identity,raw)
+        # Both files bind both originally prepared inodes. Neither a cold
+        # same-byte replacement nor the presence of an unpaired marker is a
+        # settlement witness. These identities are not caller supplied.
+        pair={name:list(identity[:2]) for name,_fd,identity,_raw in held}
+        for (_name,_fd,_identity,raw),state in zip(held,('APPLIED-STARTED','APPLIED')):
+            if raw!=local._canonical({**body,'record_identities':pair,'state':state}):
+                raise RemoteHistoryHold()
+        def verify():
+            for name,fd,identity,raw in held:
+                io._named(parent,name,fd,directory=False)
+                if io._identity(os.fstat(fd))!=identity or os.pread(fd,len(raw)+1,0)!=raw:
+                    raise RemoteHistoryHold()
+        verify()
+        for _name,fd,_identity,_raw in held: os.fsync(fd)
+        os.fsync(parent); verify()
+        yield verify
+        verify()
+    finally:
+        failed=False
+        for _name,fd,_identity,_raw in reversed(held):
+            try: os.close(fd)
+            except OSError: failed=True
+        if failed: raise RemoteHistoryHold()
+
+
+@contextmanager
+def _write_applied_pair(parent,names,body,verify_inputs):
+    """Retain BOTH prepared file descriptors through all commits and return.
+
+    A STARTED file commits first and binds the already prepared marker inode.
+    Interruptions retain all partial/pending evidence; no deletion, overwrite,
+    replacement adoption or completion of a partial pair is performed.
+    """
+    from monitor import issue_tracker_local_commit as local, issue_tracker_attempt_journal as io
+    held=[]
+    try:
+        for name in names:
+            temp='.pending-'+local.uuid.uuid4().hex
+            fd=os.open(temp,os.O_RDWR|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW|os.O_CLOEXEC,0o600,dir_fd=parent)
+            held.append([name,temp,fd,None,None])
+            local._check(fd,directory=False)
+            io._named(parent,temp,fd,directory=False)
+        pair={name:list(io._identity(os.fstat(fd))[:2]) for name,_temp,fd,_id,_raw in held}
+        for item,state in zip(held,('APPLIED-STARTED','APPLIED')):
+            raw=local._canonical({**body,'record_identities':pair,'state':state})
+            if len(raw)>local._MAX_MANIFEST: raise RemoteHistoryHold()
+            view=memoryview(raw)
+            while view:
+                count=os.write(item[2],view)
+                if count<=0: raise RemoteHistoryHold()
+                view=view[count:]
+            os.fsync(item[2]); item[3]=io._identity(os.fstat(item[2])); item[4]=raw
+        def verify():
+            verify_inputs()
+            for _name,current,fd,identity,raw in held:
+                io._named(parent,current,fd,directory=False)
+                if io._identity(os.fstat(fd))!=identity or os.pread(fd,len(raw)+1,0)!=raw:
+                    raise RemoteHistoryHold()
+        verify()
+        for item in held:
+            verify()
+            name,temp,fd,identity,raw=item
+            local._rename_new(parent,temp,name)
+            # Only our own retained inode may acquire its final name. Rename
+            # may update ctime; every other original field and bytes survives.
+            io._named(parent,name,fd,directory=False)
+            after=io._identity(os.fstat(fd))
+            if after[:-1]!=identity[:-1] or os.pread(fd,len(raw)+1,0)!=raw:
+                raise RemoteHistoryHold()
+            item[1]=name; item[3]=after
+            os.fsync(parent); verify()
+        yield verify
+        verify()
+    finally:
+        failed=False
+        for _name,_current,fd,_identity,_raw in reversed(held):
+            try: os.close(fd)
+            except OSError: failed=True
+        if failed: raise RemoteHistoryHold()
+
+
+def _owned_applied_evidence(writer_token,owner_token,binding,unit,generation,*,record):
+    from monitor import issue_tracker_local_commit as local
+    failed=False
+    try:
+        with ExitStack() as scope:
+            owner,verify_local,facts,sent=scope.enter_context(_hold_applied_generation(writer_token,generation,unit))
+            verify_proof=scope.enter_context(_hold_completion_originals(owner_token,binding,unit))
+            completion=inspect_completion_evidence(owner_token,binding,unit)
+            _sheet_owner,_parent,_name,base=global_journal._inputs(owner_token,binding,unit)
+            if not sent or completion.state!='COMPLETE-PRESENT-NOT-APPLIED': raise RemoteHistoryHold()
+            def verify():
+                verify_local(); verify_proof()
+                if inspect_completion_evidence(owner_token,binding,unit)!=completion: raise RemoteHistoryHold()
+            verify()
+            body={'schema_version':1,'unit_id':unit.unit_id,'binding':base,'local_generation':facts,
+                  'completion_header_sha256':completion.header_sha256,'attempt_count':completion.attempt_count,
+                  'wire_sha256':unit.wire_sha256,'action_digest':unit.action_digest,
+                  'outcome_mapping_sha256':unit.outcome_mapping_sha256,'applied_operation_ids':list(sent)}
+            started='REMOTE-APPLIED-STARTED-'+unit.unit_id
+            applied='REMOTE-APPLIED-'+unit.unit_id
+            names=set(os.listdir(owner.root_fd))
+            if record and started not in names and applied not in names:
+                # Failed pre-rename evidence is never silently discarded.
+                if any(name.startswith('.pending-') for name in names): raise RemoteHistoryHold()
+                scope.enter_context(_write_applied_pair(owner.root_fd,(started,applied),body,verify))
+            verify_pair=scope.enter_context(_hold_applied_records(owner.root_fd,(started,applied),body))
+            verify(); verify_pair()
+            result=AppliedEvidenceObservation('APPLIED',generation.generation_id,generation.sequence,unit.unit_id,sent)
+        # All held input/record close and final rechecks completed before return.
+    except Exception: failed=True
+    if failed: raise RemoteHistoryHold()
+    return result
+
+
+def record_owned_applied_evidence(writer_token,owner_token,binding,unit,*,generation):
+    """Record complete original C6/remote effects; no resend or FIFO permit.
+
+    This separate journal never mutates UNKNOWN/count/WIRE, C6 originals,
+    permanent fences, settings outbox or per-key high-water. Those consumers
+    must independently bind the durable original record before integration.
+    A duplicate complete pair is only cold-safe read-only replay.
+    """
+    return _owned_applied_evidence(writer_token,owner_token,binding,unit,generation,record=True)
+
+
+def inspect_owned_applied_evidence(writer_token,owner_token,binding,unit,*,generation):
+    """Cold re-establishment of original file/directory barriers, never repair."""
+    return _owned_applied_evidence(writer_token,owner_token,binding,unit,generation,record=False)
 
 
 def _fence(unit, identity, response):

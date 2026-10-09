@@ -2253,6 +2253,16 @@ ALL 审计行确定唯一 append 窗口（NOOP 无虚构行），精确耗尽可
 - 证据：保存精确 HEAD/tree/dirty/manifest/Python/平台、完整日志物理顺序及 END、前后 stat/inode/大小/SHA256、action/wire 摘要、每份 intent 与 barrier 顺序、真实调用次数和冷启动见证；私有 wire、nonce、表内容及凭据不公开。局部 PASS 不代表整个 REQ7 或普通发布证明。
 - 故障注入、清理与风险：仅获准副本或私有卷内注入 action/header/wire/count 各 barrier 失败、断电、命名空间位移和父进程退出；保留部分证据和 UNKNOWN，不补建 action、不删除真实 journal／fence／预留或解锁重发。只回收本卡确证拥有的测试进程和临时副本，实际断电／卷回滚及线上故障仍 NOT RUN。
 
+## TC-REAL-REQ7-ORIGINAL-APPLIED-001 — 原 C6 与完整远端证明的持久结算证据
+
+- Case ID：`TC-REAL-REQ7-ORIGINAL-APPLIED-001`；类型：transaction / recovery / real-environment；对应 C-6/C-19/C-26。自动化：`test_req7_remote_history_match` 的 direct 与真实多脚本 native/TLS/cold-process workflow。状态：**NOT RUN / REAL_ENV REQUIRED**；本地组件不是 REQ7 整体或发布证明。
+- 风险与目标：不得把 caller 标志、摘要形状、NOOP、被替换原件或 partial 当成已结算，不能丢原计数、回滚 UNKNOWN 或重发。边界是原 C6 全套文件/已发布 XLSX→原 COMPLETE 全 RAW/nonce/fence/History→独立历史 APPLIED 配对；尚不释放 FIFO/quota/预留/高水位。
+- 前置条件与权限：另获精确 Stage O 一次性副本、部署 Python/平台、实际 project→spreadsheet 双锁、真实固定读取及断电/设备故障注入授权；本卡不授权真实 SSH、root 管理、线上 mutation、清栅或生产发布。自动化仅使用自有私有 native 文件与本地加密 socket。
+- 步骤与独立预期：验证正常完整原 C6/COMPLETE，仅实际发送业务子集结算，NOOP 原映射不变；准备两份 single-link 0600 记录并互绑原 inode，持有首写 FD，STARTED 后 marker 的 NOREPLACE/file/parent 屏障完成才确认。冷进程重核全部原件/语义/屏障，无父对象、新身份或重新编译来源参与。
+- 故障与恢复：保留两份 file fsync、两次安装 parent fsync、代表性 marker 前中断、暖/冷同字节 inode 替换、提交时原 C6 收据丢失及恢复后安全状态。partial/pending 原件保持 HOLD，不补建、不覆盖、不删除、不自动释放重发；最终安装后 parent fsync 失败不 ACK，完整原配对仅可在重新建立全部必要屏障后读回，不得填补缺项。SIGKILL/native fsync 注入/冷解释器不能冒充断电或真实设备。
+- 证据与清理：留精确 HEAD/tree/dirty/manifest/Python/平台、命令/退出码、原始完整日志 END/物理顺序、前后 stat/inode/SHA、每个 barrier 与锁生命周期、原 count/WIRE/UNKNOWN 不变及零新增发送/清栅/清理见证；不公开凭据、nonce 或业务原文。清理只限确证自有 fixture，不改真实原件。
+- 范围与残余风险：没有删减、跳过、弱化或合并原自动化/现场场景，无新风险接受确认人；本卡登记依据为 owner 2026-10-08 验证指令。替代证据仅为独立本地 direct/真实 workflow，不替代设备/Cloud/断电持久性、在线 worker 消费闭环或当前树 full/check；这些未验证范围全部 NOT RUN，原现场授权、研发确认及发布门禁保持有效。
+
 ## TC-REAL-REQ7-IMMUTABLE-SEND-UNIT-001 — 单表不可变 batch / History / 永久 fence
 
 - K current 无覆盖提交补充（**NOT RUN / REAL_ENV REQUIRED**）：保留全部原八个 event/outbox/current 屏障场景，另加旧指针移动后的源目录与 quarantine 屏障（合计十个安装屏障）、移动前原名被替换、移动后陌生 current 插入，以及暖／冷拒绝收养 partial 场景。正常提交将持有的原指针 NOREPLACE 归档，逐字节保留且两目录同步，再 NOREPLACE 安装新 current；不得覆盖陌生对象、回滚事件、补建交付投影或 ACK 失败。证据含各原件与归档 before/after stat/inode/SHA、完整屏障物理顺序和新进程 HOLD，清理只限确证自有夹具。未省略或合并原场景；确认人为本轮 owner 指令，替代证据为独立 direct 与真实成对 native/TLS/cold workflow。真实断电、设备／卷持久性及在线 worker 仍未验证，不标通过，不扩大既有现场授权、研发确认或发布范围。
