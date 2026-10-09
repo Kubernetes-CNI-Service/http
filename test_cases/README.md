@@ -1787,3 +1787,18 @@ the remaining REQ10C3 stay raw FAIL. No assertion/timeout/skip/ledger is weakene
 This local slice is NOT cross-project/global maximum/FIFO release/current NEW,
 G1/default worker or whole REQ7 closure. Current related/full/check and field
 TC-REAL-REQ7-PENDING-ORIGINAL-CATALOG-001 remain required; onsite NOT RUN.
+
+The next one-project key-order slice retains every original input while folding
+the actual APPLIED key watermarks and listing unattempted native C6 generation/key
+comparisons. Project-local sequences are never compared across projects. Pending
+and NOOP keys do not advance APPLIED; unresolved counted units refuse the entire
+fold. No UNKNOWN clearing, UNSENT disposition, FIFO release, G1 or NEW permission
+is introduced. Its pure arithmetic helper is not original proof; only the held
+reader can observe actual inputs. Existing methods and expectations are retained.
+Main receiving first ran the seven new methods against the old implementation:
+7 methods / 8 failure entries including subtests, missing APIs only. After the
+implementation, catalog → retained inventory → APPLIED → manual profile passed
+all 79 methods (57.295 seconds, exit 0), including five actual owned TLS workflows.
+The reverse overlapping-key catalog case preserves the actual original FIFO
+rejection; it is not a fabricated successful first send. These diagnostics do
+not replace current exact-tree full/check, cross-project inventory or whole REQ7.

@@ -61,7 +61,7 @@ class CatalogAppliedNativeWorkflowTests(unittest.TestCase):
     includes the class, with every original native timing/behavior assertion.
     """
     @contextmanager
-    def completed_and_pending(self):
+    def completed_and_pending(self, *, reverse_catalog=False):
         from test_cases import test_req7_remote_history_match as native
         catalog = load()
         case = native.Req7OwnedHistoryMatchWorkflowTests()
@@ -91,7 +91,7 @@ class CatalogAppliedNativeWorkflowTests(unittest.TestCase):
                 arguments.update(generation_id=generation.generation_id, publish_id=receipt.published_sha256)
                 second = catalog.composer.freeze_send_unit(**arguments)
                 self.assertEqual(2, generation.sequence)
-                for unit_ in (first, second):
+                for unit_ in ((second, first) if reverse_catalog else (first, second)):
                     catalog.register_pending_unit(token, bound, unit_)
                 for unit_ in (first, second):
                     original_prepare(token, bound, unit_)
@@ -109,6 +109,58 @@ class CatalogAppliedNativeWorkflowTests(unittest.TestCase):
                 yield case, catalog, remote, inventory, api, writer, owner, bound, tuple(originals)
         finally:
             case.doCleanups()
+
+    def test_actual_applied_key_maximum_pending_sequence_and_reversed_catalog_fifo_hold(self):
+        for reverse in (False, True):
+            with self.subTest(reverse=reverse):
+                inventory = load_component('issue_tracker_retained_inventory')
+                self.assertTrue(callable(getattr(inventory, '_hold_catalog_key_order', None)),
+                                'actual APPLIED keys must feed the held per-key order consumer')
+                if reverse:
+                    # A later C6 generation registered ahead of the first
+                    # overlapping key is NOT a valid first send. Preserve the
+                    # existing actual FIFO guard; test permutation-independent
+                    # maximum arithmetic separately, not with a fake send.
+                    reached = []
+                    try:
+                        with self.completed_and_pending(reverse_catalog=True) as result:
+                            reached.append(result)
+                    except Exception as error:
+                        from monitor import issue_tracker_global_attempt_journal as actual_globals
+                        self.assertIs(type(error), actual_globals.GlobalAttemptHold)
+                    else:
+                        self.fail('reversed pending key order admitted the first native attempt')
+                    self.assertEqual([], reached)
+                    continue
+                with self.completed_and_pending() as (case, catalog, _remote, inventory, _old, writer, owner, bound, originals):
+                    before = original_read_files(case.root)
+                    handles = dict(catalog.local._owner(writer).handles)
+                    with inventory._hold_catalog_key_order(writer, owner, bound) as (observed, verify):
+                        project = case.root / 'project'
+                        self.assertEqual((project.stat().st_dev, project.stat().st_ino), observed.project_identity)
+                        self.assertEqual(((('switch', 'node0001', 'down', 'fabric'), 1),), observed.applied_maxima)
+                        self.assertEqual(((originals[1].unit_id, 2, ((('switch', 'node0001', 'down', 'fabric'), 1),)),),
+                                         observed.pending_keys)
+                        self.assertFalse(hasattr(observed, 'permit') or hasattr(observed, 'settled'))
+                        verify()
+                    self.assertEqual(handles, catalog.local._owner(writer).handles)
+                    self.assertEqual(before, original_read_files(case.root))
+
+    def test_actual_key_order_consumer_keeps_applied_and_pending_originals_held(self):
+        inventory = load_component('issue_tracker_retained_inventory')
+        self.assertTrue(callable(getattr(inventory, '_hold_catalog_key_order', None)),
+                        'key order cannot outlive its original C6/APPLIED readers')
+        with self.completed_and_pending() as (case, _catalog, _remote, inventory, _old, writer, owner, bound, originals):
+            target = case.root / 'project/.tracker' / ('REMOTE-KEY-HIGH-WATER-' + originals[0].unit_id)
+            original = target.read_bytes(); reached = []
+            with self.assertRaises(inventory.RetainedInventoryHold):
+                with inventory._hold_catalog_key_order(writer, owner, bound) as (observed, verify):
+                    reached.append(observed.applied_maxima)
+                    target.rename(case.root / 'preserved-key-order-original')
+                    target.write_bytes(original); target.chmod(0o600); verify()
+            self.assertEqual([((('switch', 'node0001', 'down', 'fabric'), 1),)], reached)
+            self.assertEqual(original, target.read_bytes())
+            self.assertEqual(original, (case.root / 'preserved-key-order-original').read_bytes())
 
     def test_original_applied_first_and_unattempted_second_are_held_without_releasing_unknown(self):
         with self.completed_and_pending() as (case, catalog, _remote, _inventory, api, writer, owner, bound, originals):
@@ -184,6 +236,95 @@ class UnitCatalogTests(unittest.TestCase):
         api = getattr(inventory, '_hold_catalog_applied_keys', None)
         self.assertTrue(callable(api), 'ALL catalog units must bind actual C6/COMPLETE/APPLIED/key originals')
         return inventory, api
+
+    def key_order_api(self):
+        inventory, _applied = self.applied_api()
+        api = getattr(inventory, '_hold_catalog_key_order', None)
+        self.assertTrue(callable(api), 'key maxima and pending order must use ALL held original APPLIED/C6 units')
+        return inventory, api
+
+    def test_key_maximum_fold_is_order_independent_and_never_counts_unattempted_or_noop_keys(self):
+        inventory, _reading = self.inventory_api()
+        fold = getattr(inventory, '_project_applied_maxima', None)
+        self.assertTrue(callable(fold), 'original APPLIED per-key maximum fold is absent')
+        project = (7, 11)
+        # Pure arithmetic contract only: these constructed observations are
+        # NOT original proof. The actual held reader is tested separately.
+        key_a = ('switch', 'node0001', 'down', 'fabric')
+        key_b = ('switch', 'node0002', 'down', 'fabric')
+        rows = (inventory.CatalogUnitAppliedKeys(None, 1, ((key_a, 9), (key_b, 3)), project),
+                inventory.CatalogUnitAppliedKeys(None, 2, ((key_a, 5),), project),
+                inventory.CatalogUnitAppliedKeys(None, 0, (), project))
+        expected = ((key_a, 9), (key_b, 3))
+        self.assertEqual(expected, fold(rows, project))
+        self.assertEqual(expected, fold(tuple(reversed(rows)), project))
+
+    def test_key_maximum_fold_refuses_cross_project_sequences_and_unattempted_applied_claims(self):
+        inventory, _reading = self.inventory_api()
+        fold = getattr(inventory, '_project_applied_maxima', None)
+        self.assertTrue(callable(fold), 'per-project sequences cannot be compared across project identities')
+        project = (7, 11); key = ('switch', 'node0001', 'down', 'fabric')
+        for row in (inventory.CatalogUnitAppliedKeys(None, 1, ((key, 99),), (7, 12)),
+                    inventory.CatalogUnitAppliedKeys(None, 0, ((key, 99),), project)):
+            with self.subTest(row=row), self.assertRaises(inventory.RetainedInventoryHold):
+                fold((row,), project)
+
+    def test_catalog_key_order_unissued_writer_and_caller_maxima_never_open_originals(self):
+        inventory, api = self.key_order_api()
+        with mock.patch.object(inventory, '_hold_catalog_applied_keys') as reading:
+            with self.assertRaises(inventory.RetainedInventoryHold):
+                with api(object(), object(), binding()):
+                    self.fail('caller obtained original key order without the writer')
+            reading.assert_not_called()
+        for claim in ({'maxima': ()}, {'observations': ()}, {'project_identity': (1, 2)}, {'settled': True}):
+            with self.subTest(claim=tuple(claim)), self.assertRaises(TypeError):
+                api(object(), object(), binding(), **claim)
+
+    def test_catalog_key_order_pending_native_c6_has_no_applied_maximum_or_reissued_handle(self):
+        _inventory, api = self.key_order_api(); globals_ = self.globals_api()
+        with ExitStack() as scope:
+            writer, project, _publication = self.local_owner(scope)
+            token = self.owner(scope)
+            originals = tuple(self.c6_unit(writer)[0] for _ in range(2))
+            for original in originals:
+                self.module.register_pending_unit(token, binding(), original)
+                globals_.prepare_global_unit(token, binding(), original)
+            before = original_read_files(self.root)
+            handles = dict(self.module.local._owner(writer).handles)
+            with api(writer, token, binding()) as (observed, verify):
+                self.assertEqual((project.stat().st_dev, project.stat().st_ino), observed.project_identity)
+                self.assertEqual((), observed.applied_maxima)
+                # This file fixture has TWO manifest keys, unlike the native
+                # completed fixture's one actually-sent key. Literal expected
+                # values come from this independent fixture contract.
+                self.assertEqual(((originals[0].unit_id, 1, ((('switch', 'node0000', 'down', 'fabric'), 0),
+                                                            (('switch', 'node0001', 'down', 'fabric'), 0))),
+                                  (originals[1].unit_id, 2, ((('switch', 'node0000', 'down', 'fabric'), 0),
+                                                            (('switch', 'node0001', 'down', 'fabric'), 0)))),
+                                 observed.pending_keys)
+                self.assertFalse(hasattr(observed, 'permit') or hasattr(observed, 'settled'))
+                verify()
+            self.assertEqual(handles, self.module.local._owner(writer).handles)
+            self.assertEqual(before, original_read_files(self.root))
+
+    def test_catalog_key_order_unknown_cannot_yield_partial_maximum_or_pending_order(self):
+        inventory, api = self.key_order_api(); globals_ = self.globals_api()
+        with ExitStack() as scope:
+            writer, _project, _publication = self.local_owner(scope)
+            token = self.owner(scope)
+            originals = tuple(self.c6_unit(writer)[0] for _ in range(2))
+            for original in originals:
+                self.module.register_pending_unit(token, binding(), original)
+                globals_.prepare_global_unit(token, binding(), original)
+            globals_.record_global_attempt_intent(token, binding(), originals[0])
+            before = original_read_files(self.root); reached = []
+            with self.assertRaises(inventory.RetainedInventoryHold):
+                with api(writer, token, binding()) as result:
+                    reached.append(result)
+            self.assertEqual([], reached)
+            self.assertEqual(before, original_read_files(self.root))
+            self.assertEqual(((1, 'UNKNOWN'), (0, 'UNATTEMPTED_OBSERVATION')),
+                             tuple((row.attempt_count, row.outcome) for _unit, row in globals_.inspect_catalog_global_units(token, binding())))
 
     def test_catalog_applied_unissued_writer_or_caller_settlement_claim_never_reads_inventory(self):
         inventory, api = self.applied_api()

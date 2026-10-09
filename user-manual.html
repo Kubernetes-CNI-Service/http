@@ -2543,7 +2543,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <dt>语法/调用方式：</dt><dd>开发测试导入函数；无已安装操作员入口。</dd>
             <dt>主要参数：</dt><dd>无独立 CLI；不提供目标 URL、代理、凭据路径、CA 或重试覆盖开关。</dd>
             <dt>输入：</dt><dd>实际共享 spreadsheet owner；APPLIED-key 观察另需实际 C6 writer owner 与原始 COMPLETE／APPLIED／key-high-water 配对；无 caller unit／generation／keys 覆盖。</dd>
-            <dt>输出/状态：</dt><dd>原始 UNKNOWN 计数、历史 COMPLETE／APPLIED-key 必要只读观察；catalog 中未尝试 unit 不贡献 APPLIED keys，已计数 unit 必须具备真实 COMPLETE／APPLIED／key 配对；不证明多个 unit 的完整结算、global maximum、FIFO、G1 或 NEW 权限。</dd>
+            <dt>输出/状态：</dt><dd>原始 UNKNOWN 计数、历史 COMPLETE／APPLIED-key 必要只读观察；catalog 中未尝试 unit 不贡献 APPLIED keys，已计数 unit 必须具备真实 COMPLETE／APPLIED／key 配对；原件持续持有的单项目逐 key 最大值与 pending 顺序观察不跨项目比较序号，不证明多个 unit 的完整结算、global maximum、FIFO、G1 或 NEW 权限。</dd>
             <dt>成功判据：</dt><dd>本地 direct/workflow 通过不授予在线发送或写入资格，不证明部署环境、完整准入或整个 REQ7。</dd>
             <dt>失败恢复：</dt><dd>部分、外来原件、同字节替换、未识别家族或原 nonce／History／C6 配对不一致均 HOLD，不 yield 部分前缀；不修复、不回填、不清除 UNKNOWN。</dd>
           </dl>

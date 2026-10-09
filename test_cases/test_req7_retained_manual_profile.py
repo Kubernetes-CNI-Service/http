@@ -55,3 +55,10 @@ class RetainedManualProfileTests(unittest.TestCase):
             self.assertIn(word, ' '.join(profile.values()))
         for word in ('global maximum', 'FIFO', 'G1', 'NEW'):
             self.assertIn(word, profile['outputs'])
+
+    def test_project_key_fold_is_not_cross_project_sequence_or_new_authority(self):
+        profile = self.load().script_profile(ROOT, 'monitor/issue_tracker_retained_inventory.py')
+        self.assertIn('单项目逐 key 最大值', profile['outputs'])
+        self.assertIn('不跨项目比较', profile['outputs'])
+        for word in ('UNKNOWN', 'FIFO', 'G1', 'NEW'):
+            self.assertIn(word, ' '.join(profile.values()))

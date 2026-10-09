@@ -54,6 +54,90 @@ class CatalogUnitAppliedKeys:
     project_identity: tuple
 
 
+@dataclass(frozen=True)
+class CatalogProjectKeyOrder:
+    project_identity: tuple
+    applied_maxima: tuple
+    pending_keys: tuple
+
+
+def _project_applied_maxima(rows, project_identity):
+    """Pure arithmetic over observations, NOT an original proof or permit.
+
+    Sequences are project-scoped: a foreign project's larger number cannot
+    dominate a local key. Only actually APPLIED keys enter this fold. Callers
+    must use the held reader below for any original-evidence observation.
+    """
+    if (type(rows) is not tuple or not rows or type(project_identity) is not tuple
+            or len(project_identity) != 2
+            or any(type(value) is not int or value < 0 for value in project_identity)):
+        raise RetainedInventoryHold()
+    maxima = {}
+    for row in rows:
+        if (type(row) is not CatalogUnitAppliedKeys or row.project_identity != project_identity
+                or type(row.attempt_count) is not int or not 0 <= row.attempt_count <= 6
+                or type(row.key_watermarks) is not tuple
+                or bool(row.key_watermarks) != bool(row.attempt_count)):
+            raise RetainedInventoryHold()
+        seen = set()
+        for pair in row.key_watermarks:
+            if type(pair) is not tuple or len(pair) != 2:
+                raise RetainedInventoryHold()
+            key, sequence = pair
+            if (type(key) is not tuple or len(key) != 4
+                    or any(type(value) is not str or not value for value in key)
+                    or key in seen or type(sequence) is not int or sequence < 1):
+                raise RetainedInventoryHold()
+            seen.add(key)
+            maxima[key] = max(maxima.get(key, 0), sequence)
+    return tuple(sorted(maxima.items()))
+
+
+@contextmanager
+def _hold_catalog_key_order(writer_token, token, binding):
+    """Fold ALL original APPLIED keys while C6/catalog/COMPLETE remain held.
+
+    This one-project observation lists pending generation/key comparisons;
+    it never declares UNKNOWN settled, marks UNSENT superseded, releases FIFO,
+    or admits NEW. An incomplete counted unit refuses the entire fold. No
+    caller maxima, rows, project path, generation or settlement flag is read.
+    """
+    failed = False
+    try:
+        owner = local._owner(writer_token)
+        project_identity = journal._identity(os.fstat(owner.project_fd))[:2]
+        with _hold_catalog_applied_keys(writer_token, token, binding) as (rows, verify_inputs):
+            maxima = _project_applied_maxima(rows, project_identity)
+            maximum_by_key = dict(maxima)
+            pending = []
+            for row in rows:
+                if row.attempt_count:
+                    continue
+                action = local._json(row.unit.action_preimage)
+                generation_id = action['identity']['generation_id']
+                match = local._GEN.fullmatch(generation_id) if type(generation_id) is str else None
+                if match is None or int(match.group(1)) < 1:
+                    raise RetainedInventoryHold()
+                keys = tuple(sorted(tuple(item['activity_key']) for item in action['business']))
+                if not keys or len(set(keys)) != len(keys):
+                    raise RetainedInventoryHold()
+                pending.append((row.unit.unit_id, int(match.group(1)),
+                                tuple((key, maximum_by_key.get(key, 0)) for key in keys)))
+            result = CatalogProjectKeyOrder(project_identity, maxima, tuple(pending))
+            def verify():
+                if (local._owner(writer_token) is not owner
+                        or journal._identity(os.fstat(owner.project_fd))[:2] != project_identity):
+                    raise RetainedInventoryHold()
+                verify_inputs()
+            verify()
+            yield result, verify
+            verify()
+    except Exception:
+        failed = True
+    if failed:
+        raise RetainedInventoryHold() from None
+
+
 def _unique_names(names):
     if (type(names) is not tuple or len(names) > 256 or any(type(name) is not str for name in names)
             or len(set(names)) != len(names)):
