@@ -164,7 +164,7 @@ def _hold_applied_generation(writer_token,generation,unit):
 
 
 @contextmanager
-def _hold_applied_records(parent,names,body):
+def _hold_applied_records(parent,names,body,*,states=('APPLIED-STARTED','APPLIED')):
     """Never adopt a substituted same-byte marker or partially written pair."""
     from monitor import issue_tracker_local_commit as local, issue_tracker_attempt_journal as io
     held=[]
@@ -182,7 +182,8 @@ def _hold_applied_records(parent,names,body):
         # same-byte replacement nor the presence of an unpaired marker is a
         # settlement witness. These identities are not caller supplied.
         pair={name:list(identity[:2]) for name,_fd,identity,_raw in held}
-        for (_name,_fd,_identity,raw),state in zip(held,('APPLIED-STARTED','APPLIED')):
+        if len(states)!=2 or len(held)!=2: raise RemoteHistoryHold()
+        for (_name,_fd,_identity,raw),state in zip(held,states):
             if raw!=local._canonical({**body,'record_identities':pair,'state':state}):
                 raise RemoteHistoryHold()
         def verify():
@@ -204,7 +205,7 @@ def _hold_applied_records(parent,names,body):
 
 
 @contextmanager
-def _write_applied_pair(parent,names,body,verify_inputs):
+def _write_applied_pair(parent,names,body,verify_inputs,*,states=('APPLIED-STARTED','APPLIED')):
     """Retain BOTH prepared file descriptors through all commits and return.
 
     A STARTED file commits first and binds the already prepared marker inode.
@@ -221,7 +222,8 @@ def _write_applied_pair(parent,names,body,verify_inputs):
             local._check(fd,directory=False)
             io._named(parent,temp,fd,directory=False)
         pair={name:list(io._identity(os.fstat(fd))[:2]) for name,_temp,fd,_id,_raw in held}
-        for item,state in zip(held,('APPLIED-STARTED','APPLIED')):
+        if len(states)!=2 or len(held)!=2: raise RemoteHistoryHold()
+        for item,state in zip(held,states):
             raw=local._canonical({**body,'record_identities':pair,'state':state})
             if len(raw)>local._MAX_MANIFEST: raise RemoteHistoryHold()
             view=memoryview(raw)
@@ -307,6 +309,83 @@ def record_owned_applied_evidence(writer_token,owner_token,binding,unit,*,genera
 def inspect_owned_applied_evidence(writer_token,owner_token,binding,unit,*,generation):
     """Cold re-establishment of original file/directory barriers, never repair."""
     return _owned_applied_evidence(writer_token,owner_token,binding,unit,generation,record=False)
+
+
+@contextmanager
+def _hold_original_applied_key_watermark_inputs(writer_token,owner_token,binding,unit,generation):
+    """Retain original C6, COMPLETE and APPLIED throughout key-watermark IO.
+
+    No current qualified-set compilation, journal reset or global NEW release.
+    A returned APPLIED dataclass cannot substitute for these actual originals.
+    """
+    from monitor import issue_tracker_local_commit as local, issue_tracker_attempt_journal as io
+    with ExitStack() as scope:
+        owner,verify_local,facts,sent=scope.enter_context(_hold_applied_generation(writer_token,generation,unit))
+        verify_complete=scope.enter_context(_hold_completion_originals(owner_token,binding,unit))
+        completion=inspect_completion_evidence(owner_token,binding,unit)
+        _sheet_owner,_parent,_name,base=global_journal._inputs(owner_token,binding,unit)
+        if not sent or completion.state!='COMPLETE-PRESENT-NOT-APPLIED': raise RemoteHistoryHold()
+        applied_body={'schema_version':1,'unit_id':unit.unit_id,'binding':base,'local_generation':facts,
+            'completion_header_sha256':completion.header_sha256,'attempt_count':completion.attempt_count,
+            'wire_sha256':unit.wire_sha256,'action_digest':unit.action_digest,
+            'outcome_mapping_sha256':unit.outcome_mapping_sha256,'applied_operation_ids':list(sent)}
+        names=('REMOTE-APPLIED-STARTED-'+unit.unit_id,'REMOTE-APPLIED-'+unit.unit_id)
+        verify_applied=scope.enter_context(_hold_applied_records(owner.root_fd,names,applied_body))
+        def verify():
+            verify_local(); verify_complete(); verify_applied()
+            if inspect_completion_evidence(owner_token,binding,unit)!=completion: raise RemoteHistoryHold()
+        verify()
+        references={}
+        for name in names:
+            raw,info=local._read(owner.root_fd,name,local._MAX_MANIFEST)
+            references[name]={'identity':list(io._identity(info)),'sha256':hashlib.sha256(raw).hexdigest()}
+        action=local._json(unit.action_preimage)
+        keys=tuple((tuple(row['activity_key']),generation.sequence) for row in action['business'])
+        if not keys or len({key for key,_sequence in keys})!=len(keys): raise RemoteHistoryHold()
+        body={'schema_version':1,'unit_id':unit.unit_id,'binding':base,'local_generation':facts,
+            'project_identity':list(io._identity(os.fstat(owner.project_fd))[:2]),
+            'applied_originals':references,'key_watermarks':[[list(key),sequence] for key,sequence in keys]}
+        verify()
+        yield owner,verify,body,keys
+        verify()
+
+
+def _owned_applied_key_watermarks(writer_token,owner_token,binding,unit,generation,*,record):
+    """Immutable per-original-unit evidence; never a spreadsheet admission permit."""
+    failed=False
+    try:
+        with ExitStack() as scope:
+            owner,verify_inputs,body,keys=scope.enter_context(
+                _hold_original_applied_key_watermark_inputs(writer_token,owner_token,binding,unit,generation))
+            names=('REMOTE-KEY-HIGH-WATER-STARTED-'+unit.unit_id,'REMOTE-KEY-HIGH-WATER-'+unit.unit_id)
+            states=('KEY-HIGH-WATER-STARTED','KEY-HIGH-WATER')
+            present=set(os.listdir(owner.root_fd))
+            if record and not any(name in present for name in names):
+                # Never silently discard a failed original pending image.
+                if any(name.startswith('.pending-') for name in present): raise RemoteHistoryHold()
+                scope.enter_context(_write_applied_pair(owner.root_fd,names,body,verify_inputs,states=states))
+            verify_records=scope.enter_context(_hold_applied_records(owner.root_fd,names,body,states=states))
+            verify_inputs(); verify_records()
+            result=keys
+        # All final input/record checks and owned closes dominate return.
+    except Exception: failed=True
+    if failed: raise RemoteHistoryHold()
+    return result
+
+
+def record_owned_applied_key_watermarks(writer_token,owner_token,binding,unit,*,generation):
+    """Durably record only ACTUALLY SENT keys from the original APPLIED unit.
+
+    NOOP is excluded. Original UNKNOWN/count/WIRE and reservations are retained.
+    This per-unit record is necessary input to a future complete FIFO/high-water
+    consumer; it does not prove global maximum or authorize a successor/NEW unit.
+    """
+    return _owned_applied_key_watermarks(writer_token,owner_token,binding,unit,generation,record=True)
+
+
+def inspect_owned_applied_key_watermarks(writer_token,owner_token,binding,unit,*,generation):
+    """Cold original-only observation; absent/partial records are never repaired."""
+    return _owned_applied_key_watermarks(writer_token,owner_token,binding,unit,generation,record=False)
 
 
 def _fence(unit, identity, response):

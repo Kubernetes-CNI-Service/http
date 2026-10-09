@@ -2256,6 +2256,7 @@ ALL 审计行确定唯一 append 窗口（NOOP 无虚构行），精确耗尽可
 ## TC-REAL-REQ7-ORIGINAL-APPLIED-001 — 原 C6 与完整远端证明的持久结算证据
 
 - Case ID：`TC-REAL-REQ7-ORIGINAL-APPLIED-001`；类型：transaction / recovery / real-environment；对应 C-6/C-19/C-26。自动化：`test_req7_remote_history_match` 的 direct 与真实多脚本 native/TLS/cold-process workflow。状态：**NOT RUN / REAL_ENV REQUIRED**；本地组件不是 REQ7 整体或发布证明。
+- 逐单元 key 高水位补充（**NOT RUN**）：在本卡同一精确环境授权下，保留正常实际发送 key/原 sequence 的持久配对、NOOP 排除、COMPLETE-only 拒绝、代表性 marker 前中断保留 pending、同字节 APPLIED 原件替换拒绝和独立冷进程重读。两份 key 记录须互绑首写 inode 并持续核原 C6/COMPLETE/APPLIED 与屏障；部分证据不补建、不覆盖、不删除，原 count/WIRE/UNKNOWN/预留与本地 C6 字节/inode 不变。返回逐单元 key/sequence 不等于所有历史单元的最大高水位，不授予 FIFO/NEW 或发送权。保存原件与 key 配对的 before/after stat/inode/SHA、完整 END/物理顺序、提交屏障及零重发/清栅/清理见证；仅清理确证自有 fixture。没有省略或合并原场景，无新风险接受确认；本地独立 direct/真实 native/TLS/cold-process 替代证据不能冒充断电/设备/Cloud，相关现场、全局消费者及在线 worker 未验证范围继续 NOT RUN，原研发确认、现场授权与发布门禁有效。
 - 风险与目标：不得把 caller 标志、摘要形状、NOOP、被替换原件或 partial 当成已结算，不能丢原计数、回滚 UNKNOWN 或重发。边界是原 C6 全套文件/已发布 XLSX→原 COMPLETE 全 RAW/nonce/fence/History→独立历史 APPLIED 配对；尚不释放 FIFO/quota/预留/高水位。
 - 前置条件与权限：另获精确 Stage O 一次性副本、部署 Python/平台、实际 project→spreadsheet 双锁、真实固定读取及断电/设备故障注入授权；本卡不授权真实 SSH、root 管理、线上 mutation、清栅或生产发布。自动化仅使用自有私有 native 文件与本地加密 socket。
 - 步骤与独立预期：验证正常完整原 C6/COMPLETE，仅实际发送业务子集结算，NOOP 原映射不变；准备两份 single-link 0600 记录并互绑原 inode，持有首写 FD，STARTED 后 marker 的 NOREPLACE/file/parent 屏障完成才确认。冷进程重核全部原件/语义/屏障，无父对象、新身份或重新编译来源参与。

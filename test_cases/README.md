@@ -1171,6 +1171,17 @@ marker 后提交，均原子 NOREPLACE 并同步父目录。同字节替换、�
 证明。REQ7 的消费者整体接入与当前精确树 full/check 仍待完成；现场卡
 `TC-REAL-REQ7-ORIGINAL-APPLIED-001` 如实 NOT RUN，不能冒充断电或真实 Cloud 验收。
 
+`record_owned_applied_key_watermarks` / `inspect_owned_applied_key_watermarks`
+另持续持有原 C6、完整 COMPLETE 与互绑原 inode 的 APPLIED 配对，只从实际发送的
+业务 activity key 和原生 generation sequence 保存不可变的逐单元高水位证据。
+NOOP 不推进；原 UNKNOWN/count/WIRE、预留与 C6 文件不修改。两份独立
+`REMOTE-KEY-HIGH-WATER-STARTED-<unit>` / `REMOTE-KEY-HIGH-WATER-<unit>`
+同样经首写 FD、NOREPLACE 与 file/parent 屏障，partial/pending 不补齐或删除。
+原件替换、COMPLETE-only 与中断必须 HOLD；完整配对的冷进程和重复观察只重新
+核原件/屏障，不改记录。这个返回值不是所有历史单元的最大高水位，也不释放全表
+UNKNOWN/FIFO、授权 NEW/catch-up 或接入在线 worker；全局消费者及精确树 full/check
+仍须完成，现场新增范围沿用同一 NOT RUN 卡，不以局部通过替代正式证明。
+
 `test_cases.test_req7_activity_discovery` 另区分 caller 有限窗口和固定完整容量读：
 显式身份/Status 列与 GRID rowCount/columnCount 在同一个 GET 返回；仅容量 3..5002
 接受并完整覆盖到实际末行，溢出、缺 grid、错位和部分响应 HOLD，不分页、不截断。

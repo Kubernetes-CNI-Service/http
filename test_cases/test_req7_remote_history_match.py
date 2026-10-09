@@ -92,6 +92,23 @@ class Req7RemoteHistoryMatchDirectTests(unittest.TestCase):
             self.meta_plan, response(self.metadata if metadata is None else metadata),
             self.plan, response(self.post if post is None else post))
 
+    def test_unissued_owner_cannot_write_key_watermark_or_alter_original_journal(self):
+        module = load()
+        self.assertTrue(callable(getattr(module, 'record_owned_applied_key_watermarks', None)),
+                        'C6/C19 require original-proof-bound key high-water, not an APPLIED flag')
+        with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
+            self.prepare(token)
+            original = {p: (p.stat().st_ino, p.read_bytes())
+                        for p in self.root.rglob('*') if p.is_file()}
+            with self.assertRaises(module.RemoteHistoryHold) as caught:
+                module.record_owned_applied_key_watermarks(
+                    object(), token, binding(), self.unit,
+                    generation=SimpleNamespace(generation_id='a' * 64, sequence=1, state='APPLIED'),
+                )
+            self.assertIsNone(caught.exception.__context__)
+            self.assertEqual(original, {p: (p.stat().st_ino, p.read_bytes())
+                                        for p in self.root.rglob('*') if p.is_file()})
+
     def test_actual_journals_and_both_nonces_fence_all_sent_and_audit_match_without_clearing_unknown(self):
         module = load()
         with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
@@ -1611,6 +1628,156 @@ with scoped_fixture(root,owner),owner.spreadsheet_owner(bound) as token:
                                                                          generation=self.native_generation))
             self.assertEqual(saved,{p:(p.stat().st_ino,p.read_bytes())
                                    for p in tracker.rglob('*') if p.is_file()})
+
+    def test_native_complete_without_applied_pair_cannot_write_key_watermark(self):
+        module=load()
+        self.assertTrue(callable(getattr(module,'record_owned_applied_key_watermarks',None)),
+                        'C6/C19 COMPLETE alone must not advance key high-water')
+        with ExitStack() as stack:
+            writer,owner,bound,unit=self.prepare_native_completed(stack,module)
+            original={p:(p.stat().st_ino,p.read_bytes())
+                      for p in self.root.rglob('*') if p.is_file()}
+            with self.assertRaises(module.RemoteHistoryHold):
+                module.record_owned_applied_key_watermarks(writer,owner,bound,unit,
+                                                          generation=self.native_generation)
+            self.assertEqual(original,{p:(p.stat().st_ino,p.read_bytes())
+                                       for p in self.root.rglob('*') if p.is_file()})
+            historical=self.current_global_state(owner,bound,unit)
+            self.assertEqual((1,'UNKNOWN'),(historical.attempt_count,historical.outcome))
+
+    def test_native_applied_key_watermark_excludes_noop_and_preserves_original_bundle(self):
+        module=load()
+        self.assertTrue(callable(getattr(module,'record_owned_applied_key_watermarks',None)),
+                        'C6/C19 APPLIED requires durable key high-water before successor admission')
+        self.assertTrue(callable(getattr(module,'inspect_owned_applied_key_watermarks',None)),
+                        'cold/replayed key high-water needs an original-proof-qualified reader')
+        with ExitStack() as stack:
+            writer,owner,bound,unit=self.prepare_native_completed(stack,module)
+            module.record_owned_applied_evidence(writer,owner,bound,unit,
+                                                generation=self.native_generation)
+            roots=(self.root/'project/.tracker/generations',
+                   self.root/'var/lib/http-ztp-container/issue-tracker')
+            original={p:(p.stat().st_ino,p.read_bytes())
+                      for root in roots for p in root.rglob('*') if p.is_file()}
+            # Literal expected key comes from the independently authored fixture:
+            # switch:0000 is NOOP; only switch:0001 genuinely travelled.
+            expected=((('switch','node0001','down','fabric'),1),)
+            seen=module.record_owned_applied_key_watermarks(writer,owner,bound,unit,
+                                                           generation=self.native_generation)
+            self.assertEqual(expected,seen)
+            self.assertEqual(original,{p:(p.stat().st_ino,p.read_bytes())
+                                       for root in roots for p in root.rglob('*') if p.is_file()})
+            tracker=self.root/'project/.tracker'
+            saved={p:(p.stat().st_ino,p.read_bytes()) for p in tracker.rglob('*') if p.is_file()}
+            self.assertEqual(expected,module.inspect_owned_applied_key_watermarks(writer,owner,bound,unit,
+                                                                                  generation=self.native_generation))
+            self.assertEqual(expected,module.record_owned_applied_key_watermarks(writer,owner,bound,unit,
+                                                                                 generation=self.native_generation))
+            self.assertEqual(saved,{p:(p.stat().st_ino,p.read_bytes()) for p in tracker.rglob('*') if p.is_file()})
+            historical=self.current_global_state(owner,bound,unit)
+            self.assertEqual((1,'UNKNOWN'),(historical.attempt_count,historical.outcome))
+
+    def test_key_watermark_same_byte_applied_replacement_never_becomes_new_original(self):
+        module=load()
+        self.assertTrue(callable(getattr(module,'record_owned_applied_key_watermarks',None)),
+                        'C6/C19 key high-water needs actual original APPLIED evidence')
+        with ExitStack() as stack:
+            writer,owner,bound,unit=self.prepare_native_completed(stack,module)
+            module.record_owned_applied_evidence(writer,owner,bound,unit,
+                                                generation=self.native_generation)
+            marker=self.root/'project/.tracker'/('REMOTE-APPLIED-'+unit.unit_id)
+            original=marker.read_bytes(); marker.rename(self.root/'preserved-key-watermark-applied')
+            marker.write_bytes(original); marker.chmod(0o600)
+            retained={p:(p.stat().st_ino,p.read_bytes())
+                      for p in self.root.rglob('*') if p.is_file()}
+            with self.assertRaises(module.RemoteHistoryHold):
+                module.record_owned_applied_key_watermarks(writer,owner,bound,unit,
+                                                          generation=self.native_generation)
+            self.assertEqual(retained,{p:(p.stat().st_ino,p.read_bytes())
+                                       for p in self.root.rglob('*') if p.is_file()})
+            self.assertEqual(original,marker.read_bytes())
+            self.assertNotEqual(marker.stat().st_ino,
+                                (self.root/'preserved-key-watermark-applied').stat().st_ino)
+
+
+    def test_key_watermark_interrupted_marker_keeps_partial_evidence_and_blocks_recreation(self):
+        from monitor import issue_tracker_local_commit as local
+        module=load()
+        self.assertTrue(callable(getattr(module,'record_owned_applied_key_watermarks',None)),
+                        'partial key high-water must block repair and successor admission')
+        with ExitStack() as stack:
+            writer,owner,bound,unit=self.prepare_native_completed(stack,module)
+            module.record_owned_applied_evidence(writer,owner,bound,unit,generation=self.native_generation)
+            tracker=self.root/'project/.tracker'
+            saved={p:(p.stat().st_ino,p.read_bytes()) for p in self.root.rglob('*') if p.is_file()}
+            original=local._rename_new; reached=[]
+            marker='REMOTE-KEY-HIGH-WATER-'+unit.unit_id
+            def interrupt(parent,source,destination,**options):
+                if destination==marker:
+                    reached.append(True)
+                    raise OSError('owned representative key-watermark marker interruption')
+                return original(parent,source,destination,**options)
+            with mock.patch.object(local,'_rename_new',side_effect=interrupt):
+                with self.assertRaises(module.RemoteHistoryHold):
+                    module.record_owned_applied_key_watermarks(writer,owner,bound,unit,
+                                                              generation=self.native_generation)
+            self.assertEqual([True],reached)
+            self.assertTrue((tracker/('REMOTE-KEY-HIGH-WATER-STARTED-'+unit.unit_id)).is_file())
+            self.assertFalse((tracker/marker).exists())
+            self.assertEqual(1,len(list(tracker.glob('.pending-*'))))
+            self.assertEqual(saved,{p:(p.stat().st_ino,p.read_bytes()) for p in saved})
+            retained={p:(p.stat().st_ino,p.read_bytes()) for p in tracker.rglob('*') if p.is_file()}
+            for api in (module.record_owned_applied_key_watermarks,module.inspect_owned_applied_key_watermarks):
+                with self.assertRaises(module.RemoteHistoryHold):
+                    api(writer,owner,bound,unit,generation=self.native_generation)
+            self.assertEqual(retained,{p:(p.stat().st_ino,p.read_bytes())
+                                      for p in tracker.rglob('*') if p.is_file()})
+
+    def test_key_watermark_native_cold_process_reopens_all_originals_without_parent_flags(self):
+        from dataclasses import asdict
+        import subprocess
+        module=load()
+        self.assertTrue(callable(getattr(module,'record_owned_applied_key_watermarks',None)),
+                        'cold high-water must reopen the original durable C6/COMPLETE/APPLIED proof')
+        with ExitStack() as stack:
+            writer,owner,bound,unit=self.prepare_native_completed(stack,module)
+            module.record_owned_applied_evidence(writer,owner,bound,unit,generation=self.native_generation)
+            self.assertEqual(((('switch','node0001','down','fabric'),1),),
+                module.record_owned_applied_key_watermarks(writer,owner,bound,unit,
+                                                          generation=self.native_generation))
+        saved={p:(p.stat().st_ino,p.read_bytes()) for p in self.root.rglob('*') if p.is_file()}
+        program='''import hashlib,importlib.util,json,sys
+from pathlib import Path
+sys.path.insert(0,sys.argv[1])
+from monitor import issue_tracker_local_commit as local,issue_tracker_spreadsheet_owner as owner
+from monitor import issue_tracker_global_attempt_journal as journal
+from monitor.issue_tracker_online_target import OnlineTargetBinding
+from monitor.issue_tracker_send_unit import _original_unit
+from test_cases.test_req7_spreadsheet_owner import scoped_fixture
+spec=importlib.util.spec_from_file_location('monitor.issue_tracker_remote_history_match',sys.argv[3])
+match=importlib.util.module_from_spec(spec); sys.modules[spec.name]=match; spec.loader.exec_module(match)
+import monitor
+monitor.issue_tracker_remote_history_match=match
+root=Path(sys.argv[2]); bound=OnlineTargetBinding(**json.loads(sys.stdin.buffer.read()))
+store=root/'var/lib/http-ztp-container/issue-tracker'/(hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()+'.journal')
+unit=_original_unit((store/'ACTION-PREIMAGE').read_bytes(),(store/'WIRE').read_bytes())
+gid=json.loads(unit.action_preimage)['identity']['generation_id']
+state=json.loads((root/'project/.tracker/generations'/gid/'STATE').read_bytes())
+with local.writer_owner(root/'project',root/'project/publication') as writer,scoped_fixture(root,owner),owner.spreadsheet_owner(bound) as token:
+ generation=local.Generation(gid,state['sequence'],state['manifest_id'],writer)
+ expected=((('switch','node0001','down','fabric'),1),)
+ assert match.inspect_owned_applied_key_watermarks(writer,token,bound,unit,generation=generation)==expected
+ assert match.record_owned_applied_key_watermarks(writer,token,bound,unit,generation=generation)==expected
+ historical=journal.inspect_global_unit(token,bound,unit)
+ assert (historical.attempt_count,historical.outcome)==(1,'UNKNOWN')
+ print('original-key-watermark cold1 UNKNOWN retained')
+'''
+        cold=subprocess.run([sys.executable,'-B','-c',program,str(ROOT),str(self.root),str(Path(module.__file__))],
+            input=json.dumps(asdict(bound)).encode(),stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=20)
+        self.assertEqual(0,cold.returncode,cold.stderr)
+        self.assertEqual(b'original-key-watermark cold1 UNKNOWN retained\n',cold.stdout)
+        self.assertEqual(saved,{p:(p.stat().st_ino,p.read_bytes())
+                                for p in self.root.rglob('*') if p.is_file()})
 
     def prepare_native_completed(self,stack,module):
         writer,owner,bound,auth,_config,unit,docs=self.prepare_owned(stack,native_generation=True)
