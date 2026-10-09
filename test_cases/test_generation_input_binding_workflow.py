@@ -6,7 +6,7 @@ from __future__ import annotations
 import base64
 import copy
 import csv
-from contextlib import redirect_stdout
+from contextlib import contextmanager, redirect_stdout
 import hashlib
 import io
 import json
@@ -275,6 +275,56 @@ def _write_same_inode(path: Path, data: bytes, original: os.stat_result) -> None
 
 class GenerationInputBindingWorkflowTests(unittest.TestCase):
     """LOAD's frozen A authority must survive a real downstream c2 read."""
+
+    @contextmanager
+    def _known_installed_four_dhcp_leaves(self, api, root, ztp):
+        # Opt-in only for the four actual same-project active receipt cases.
+        # Their independent A DHCP fixture is exactly these four literal
+        # payloads, not bytes copied from a selected generation or capture API.
+        payloads = {
+            "dhcpd.conf": b"dhcpd.conf\n",
+            "dhcpd_eth.hosts": b"dhcpd_eth.hosts\n",
+            "dhcpd_ib.hosts": b"dhcpd_ib.hosts\n",
+            "dhcpd_nvl.hosts": b"dhcpd_nvl.hosts\n",
+        }
+        installed = root / "independent-installed-dhcp"
+        installed.mkdir(mode=0o755)
+        installed.chmod(0o755)
+        mapping = {}
+        baseline = {}
+        fields = ("st_dev", "st_ino", "st_mode", "st_nlink", "st_uid",
+                  "st_gid", "st_size", "st_mtime_ns", "st_ctime_ns")
+        for name, payload in payloads.items():
+            leaf = installed / name
+            leaf.write_bytes(payload)
+            leaf.chmod(0o644)
+            metadata = leaf.lstat()
+            baseline[leaf] = tuple(getattr(metadata, field) for field in fields)
+            mapping[ztp / "config/isc-dhcp-server" / name] = leaf
+        with mock.patch.object(api, "dhcp_file_mappings", return_value=mapping):
+            try:
+                yield
+            finally:
+                # Qualification, retry, receipt sync failure, runtime key
+                # restore and its parent-rebind HOLD may not rewrite installed
+                # DHCP. This also guards accidental access to /etc/dhcp.
+                self.assertEqual(set(payloads), {p.name for p in installed.iterdir()})
+                for leaf, expected in baseline.items():
+                    self.assertEqual(payloads[leaf.name], leaf.read_bytes())
+                    self.assertEqual(expected, tuple(
+                        getattr(leaf.lstat(), field) for field in fields
+                    ))
+
+    def _assert_literal_schema4_installed_dhcp(self, record, root):
+        self.assertEqual(4, record["schema_version"])
+        installed = record["selected_dhcp"]["installed"]
+        self.assertEqual(str(root / "independent-installed-dhcp"), installed["directory"]["path"])
+        names = ("dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts", "dhcpd_nvl.hosts")
+        self.assertEqual(set(names), set(installed["leaves"]))
+        for name in names:
+            self.assertEqual("file", installed["leaves"][name]["state"]["state"])
+            self.assertEqual(hashlib.sha256((name + "\n").encode("ascii")).hexdigest(),
+                             installed["leaves"][name]["state"]["sha256"])
 
     def test_real_setup_death_disk_only_a_runtime_restore_uses_wal_not_argv_context(self):
         self._assert_real_persisted_a_runtime_switch(False)
@@ -3197,7 +3247,8 @@ finally:
             SETUP._write_manifest(str(project.resolve()))
         preimage = manifest.read_bytes()
         with mock.patch.multiple(api, HTTP_ROOT=root, MANIFEST=manifest,
-                                 ZTP_PREFIX_MARKER=root / ".prefix-marker"):
+                                 ZTP_PREFIX_MARKER=root / ".prefix-marker"), \
+                self._known_installed_four_dhcp_leaves(api, root, ztp):
             _parent, generation, _receipt = fixture._publish_a_with_runtime_rollback_receipt(prepare_receipt=False)
             selector = project / "99-output-ztp/current"
             expected = os.readlink(selector)
@@ -3241,9 +3292,56 @@ finally:
                 synced.clear()
                 receipt = api.prepare_active_runtime_rollback_receipt(project, expected)
             self.assertEqual(receipts / generation.name, receipt)
+            self._assert_literal_schema4_installed_dhcp(
+                api._load_runtime_rollback_receipt(project, receipt), root,
+            )
             self.assertEqual(preimage, manifest.read_bytes())
             self.assertEqual(expected, os.readlink(selector))
             self.assertFalse((root / "service-started").exists())
+
+    def test_real_setup_dhcp_links_then_repeated_load_freezes_runtime_authority(self):
+        fixture = RELEASE_FIXTURE.ReleaseTransactionTests(
+            methodName="test_runtime_receipt_accepts_only_project_bound_dhcp_publication_links")
+        fixture.setUp()
+        self.addCleanup(fixture.tearDown)
+        api = RELEASE_FIXTURE.LOAD
+        root, project, ztp = fixture.root.resolve(), fixture.project.resolve(), fixture.ztp.resolve()
+        manifest = ztp / ".setup_manifest"
+        document = yaml.safe_load(fixture.global_file.read_text())
+        document["common"]["mgmt"]["http"]["http_root"] = str(root)
+        fixture.global_file.write_text(yaml.safe_dump(document, sort_keys=False))
+        with mock.patch.multiple(api, HTTP_ROOT=root, MANIFEST=manifest,
+                                 ZTP_PREFIX_MARKER=root / ".prefix-marker"), \
+                mock.patch.multiple(SETUP, HTTP_BASE=str(root), ZTP=str(ztp), MANIFEST_FILE=str(manifest),
+                                    _DRY_RUN=False, _LINK_ERRORS=0, _LINK_TRANSACTION=None,
+                                    _SETUP_SWITCH_WAL_CONTEXT=None), \
+                self._known_installed_four_dhcp_leaves(api, root, ztp):
+            _parent, generation, _receipt = fixture._publish_a_with_runtime_rollback_receipt(prepare_receipt=False)
+            published = ztp / "config/isc-dhcp-server"
+            source = project / "99-output-dhcp"
+            source.mkdir(exist_ok=True)
+            links = []
+            for name in DHCP_OUTPUTS:
+                leaf = published / name
+                (source / name).write_bytes(leaf.read_bytes())
+                leaf.unlink()
+                SETUP._make_exact_link(str(leaf), str(source / name))
+                self.assertTrue(leaf.is_symlink())
+                links.append(str(leaf))
+            with mock.patch.object(SETUP, "_collect_expected_links", return_value=links):
+                SETUP._write_manifest(str(project))
+            before = manifest.read_bytes()
+            selector = api.ensure_previous_generation_frozen(project)
+            self.assertEqual(f"generations/{generation.name}", selector)
+            receipt = api.prepare_active_runtime_rollback_receipt(project, selector)
+            self.assertIsNotNone(receipt)
+            record = api._load_runtime_rollback_receipt(project, receipt)
+            self._assert_literal_schema4_installed_dhcp(record, root)
+            api._verify_rollback_authorities(project, record)
+            self.assertEqual(before, manifest.read_bytes())
+            self.assertEqual(selector, os.readlink(project / "99-output-ztp/current"))
+            self.assertEqual({"link"}, {row["state"] for row in record["unchanged_authorities"]["dhcp"].values()})
+            self.assertEqual(receipt, api.prepare_active_runtime_rollback_receipt(project, selector))
 
     def test_real_setup_publickey_links_then_load_receipt_restores_exact_publication(self):
         self._assert_real_setup_publickey_receipt_restore(rebind_plain_parent=False)
@@ -3266,7 +3364,8 @@ finally:
                                  DEPLOYMENT_LOCK=root / ".deployment.lock", ZTP_PREFIX_MARKER=root / ".prefix-marker"), \
                 mock.patch.multiple(SETUP, HTTP_BASE=str(root), ZTP=str(ztp), MANIFEST_FILE=str(manifest),
                                     _DRY_RUN=False, _LINK_ERRORS=0, _LINK_TRANSACTION=None,
-                                    _SETUP_SWITCH_WAL_CONTEXT=None):
+                                    _SETUP_SWITCH_WAL_CONTEXT=None), \
+                self._known_installed_four_dhcp_leaves(api, root, ztp):
             _parent, generation, _receipt = fixture._publish_a_with_runtime_rollback_receipt(prepare_receipt=False)
             for name, payload in (("laptop.pub", b"A laptop key\n"), ("mgmt-server.pub", b"A management key\n")):
                 (project / name).write_bytes(payload)
@@ -3288,6 +3387,9 @@ finally:
             selector = f"generations/{generation.name}"
             receipt = api.prepare_active_runtime_rollback_receipt(project, selector)
             self.assertIsNotNone(receipt)
+            self._assert_literal_schema4_installed_dhcp(
+                api._load_runtime_rollback_receipt(project, receipt), root,
+            )
             receipt_bytes = (receipt / "receipt.json").read_bytes()
             live = ztp / "ztp.json"
             live.write_bytes(b"partial B runtime\n")

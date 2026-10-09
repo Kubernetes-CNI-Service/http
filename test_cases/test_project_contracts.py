@@ -749,7 +749,13 @@ class TemplateContractTests(unittest.TestCase):
             (root / "README.md").write_text("excluded\n", encoding="utf-8")
             (root / "readme.txt").write_text("excluded\n", encoding="utf-8")
             (root / "guide.md").write_text("included\n", encoding="utf-8")
-            selected = sync.matching_files(root, ("*.md", "*.txt"))
+            # Test the external-fixture branch against its own checkout
+            # boundary, even when TMPDIR is inside this process checkout.
+            # Keep the real repository outputs exclusion unchanged.
+            checkout = root / "checkout"
+            checkout.mkdir()
+            with mock.patch.object(sync, "ROOT", checkout):
+                selected = sync.matching_files(root, ("*.md", "*.txt"))
             self.assertEqual((root / "guide.md",), selected)
 
     def test_workspace_artifact_scope_is_explicit_and_never_transferred(self):
@@ -8341,6 +8347,329 @@ class DualYamlPublishContractTests(unittest.TestCase):
             air.write_text(air.read_text().replace("uplink", "drift"), encoding="utf-8")
             with self.assertRaises(ValueError):
                 self.publisher._validate_air_production_yaml_pairs(str(root), devices)
+
+
+
+class SelectedDhcpReleaseContractTests(unittest.TestCase):
+    def setUp(self):
+        from tools import project_contract
+        self.api = project_contract
+        self.temp = tempfile.TemporaryDirectory(prefix="selected-dhcp-")
+        self.addCleanup(self.temp.cleanup)
+        self.project = (Path(self.temp.name) / "customer").resolve()
+        self.project.mkdir()
+        self.output = self.project / "99-output-ztp"
+        self.output.mkdir()
+        self.names = ("dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts", "dhcpd_nvl.hosts")
+        self.expected = dict(zip(self.names, (b"# independent selected B\n", b"host B {}\n", b"", b"")))
+        self.flat = self.project / "99-output-dhcp"
+        self.flat.mkdir()
+        for name in self.names:
+            (self.flat / name).write_bytes(b"# old flat A\n")
+        self.parent = {
+            "schema_version": 2, "validation": "passed", "project": "customer",
+            "deployment_scope": "air", "switch_scope": "eth", "dhcp_status": "enabled",
+            "inputs": {}, "input_sources": {}, "inventory": [], "components": {},
+            "generated_at": "2026-10-09T00:00:00+00:00",
+        }
+        self.manifest = {
+            "release_id": "literal-child-B", "deployment_scope": "air", "switch_scope": "eth",
+            "outputs": {n: {"sha256": hashlib.sha256(b).hexdigest()} for n, b in self.expected.items()},
+        }
+        self._seal()
+
+    def _seal(self, manifest_bytes=None):
+        payload = manifest_bytes or (json.dumps(self.manifest, sort_keys=True) + "\n").encode()
+        self.parent["components"]["dhcp"] = {
+            "release_id": "literal-child-B", "manifest_sha256": hashlib.sha256(payload).hexdigest(),
+        }
+        keys = ("project", "deployment_scope", "switch_scope", "inputs", "input_sources", "components", "inventory")
+        if self.parent["schema_version"] == 2:
+            keys += ("dhcp_status",)
+        self.parent["release_id"] = hashlib.sha256(json.dumps(
+            {k: self.parent[k] for k in keys}, ensure_ascii=False, sort_keys=True,
+            separators=(",", ":")).encode()).hexdigest()[:20]
+        parent_bytes = (json.dumps(self.parent, sort_keys=True) + "\n").encode()
+        (self.output / "current-release.json").write_bytes(parent_bytes)
+        self.generation = self.output / "generations" / self.parent["release_id"]
+        self.generation.mkdir(parents=True, exist_ok=True)
+        (self.generation / "current-release.json").write_bytes(parent_bytes)
+        self.dhcp = self.generation / "dhcp"
+        self.dhcp.mkdir(exist_ok=True)
+        (self.dhcp / "dhcp-release-manifest.json").write_bytes(payload)
+        for name, content in self.expected.items():
+            (self.dhcp / name).write_bytes(content)
+        self.selector = self.output / "current"
+        if os.path.lexists(self.selector):
+            self.selector.unlink()
+        self.selector.symlink_to("generations/" + self.parent["release_id"])
+
+    def _legacy(self, schema=2):
+        self.parent["schema_version"] = schema
+        if schema == 1:
+            self.parent.pop("dhcp_status", None)
+        self._seal()
+        self.selector.unlink()
+        for name, content in self.expected.items():
+            (self.flat / name).write_bytes(content)
+        (self.flat / "dhcp-release-manifest.json").write_bytes((self.dhcp / "dhcp-release-manifest.json").read_bytes())
+        return self.flat / "dhcp-release-manifest.json"
+
+    @contextlib.contextmanager
+    def _selected_leaf_directory_mutation_model(self, *, security_change=None, governed=False):
+        from types import SimpleNamespace
+        directory = self.project if governed else self.project.parent
+        sibling = directory / ("independent-sibling-" + str(security_change or "children"))
+        directory_before = directory.stat()
+        leaf_before = (self.dhcp / "dhcpd.conf").stat()
+        original_read, original_stat, original_fstat = os.read, os.stat, os.fstat
+        namespace = SimpleNamespace(**{name: getattr(os, name) for name in dir(os)})
+        injected = []
+        def metadata(value, *, named):
+            if (not injected or (value.st_dev, value.st_ino)
+                    != (directory_before.st_dev, directory_before.st_ino)):
+                return value
+            fields = {name: getattr(value, name) for name in dir(value) if name.startswith("st_")}
+            # Real sibling mkdir below supplies the event. Deterministic model
+            # makes all ordinary child-bookkeeping fields observable on every
+            # filesystem, without sleeps or weakening security expectations.
+            fields.update(st_nlink=directory_before.st_nlink + 1,
+                          st_size=directory_before.st_size + 1,
+                          st_mtime_ns=directory_before.st_mtime_ns + 1,
+                          st_ctime_ns=directory_before.st_ctime_ns + 1)
+            if security_change == "owner": fields["st_uid"] = directory_before.st_uid + 1000
+            if security_change == "group": fields["st_gid"] = directory_before.st_gid + 1000
+            if security_change == "mode": fields["st_mode"] = directory_before.st_mode ^ 0o100
+            if security_change == "name-rebind" and named: fields["st_ino"] = directory_before.st_ino + 1
+            return SimpleNamespace(**fields)
+        def read(descriptor, limit):
+            payload = original_read(descriptor, limit)
+            observed = original_fstat(descriptor)
+            if (observed.st_dev, observed.st_ino) == (leaf_before.st_dev, leaf_before.st_ino) and not injected:
+                sibling.mkdir(mode=0o700)
+                injected.append(sibling)
+            return payload
+        namespace.read = read
+        namespace.stat = lambda *args, **kwargs: metadata(original_stat(*args, **kwargs), named=True)
+        namespace.fstat = lambda *args, **kwargs: metadata(original_fstat(*args, **kwargs), named=False)
+        with mock.patch.object(self.api, "os", namespace):
+            yield injected
+
+    def test_unrelated_exterior_sibling_mkdir_during_selected_leaf_read_preserves_exact_binding(self):
+        baseline = self.api.open_selected_dhcp_release(self.project).binding
+        originals = {n: ((self.dhcp / n).stat().st_ino, (self.dhcp / n).read_bytes()) for n in self.names}
+        with self._selected_leaf_directory_mutation_model() as injected:
+            selected = self.api.open_selected_dhcp_release(self.project)
+            self.assertEqual(baseline, selected.binding)
+            self.api.recheck_selected_dhcp_release(self.project, baseline)
+        self.assertEqual([self.project.parent / "independent-sibling-children"], injected)
+        self.assertEqual(originals, {n: ((self.dhcp / n).stat().st_ino, (self.dhcp / n).read_bytes()) for n in self.names})
+        self.assertNotIn(str(self.project.parent), selected.binding["records"])
+        for record in selected.binding["records"].values():
+            if "identity" in record:
+                self.assertEqual(9, len(record["identity"]))
+
+    def test_exterior_security_owner_group_mode_and_name_rebind_still_hold(self):
+        for security_change in ("owner", "group", "mode", "name-rebind"):
+            with self.subTest(security_change=security_change):
+                with self._selected_leaf_directory_mutation_model(security_change=security_change) as injected:
+                    with self.assertRaises(ValueError):
+                        self.api.open_selected_dhcp_release(self.project)
+                self.assertEqual([self.project.parent / ("independent-sibling-" + security_change)], injected)
+
+    def test_governed_project_directory_child_metadata_remains_full_nine_field_authority(self):
+        with self._selected_leaf_directory_mutation_model(governed=True) as injected:
+            with self.assertRaises(ValueError):
+                self.api.open_selected_dhcp_release(self.project)
+        self.assertEqual([self.project / "independent-sibling-children"], injected)
+
+    def test_selected_outputs_preserve_old_flat_inode_and_bytes(self):
+        old = {p.name: (p.lstat().st_ino, p.read_bytes()) for p in self.flat.iterdir()}
+        selected = self.api.open_selected_dhcp_release(self.project)
+        self.assertEqual("pinned", selected.mode)
+        self.assertEqual(self.dhcp / "dhcp-release-manifest.json", selected.manifest_path)
+        self.assertEqual(self.expected, {n: p.read_bytes() for n, p in selected.output_paths.items()})
+        self.assertEqual(old, {p.name: (p.lstat().st_ino, p.read_bytes()) for p in self.flat.iterdir()})
+        self.api.recheck_selected_dhcp_release(self.project, selected.binding)
+
+    def test_same_byte_regular_replacement_invalidates_prepared_binding(self):
+        selected = self.api.open_selected_dhcp_release(self.project)
+        path = self.dhcp / "dhcpd_eth.hosts"
+        path.rename(self.project.parent / "held-original")
+        path.write_bytes(self.expected["dhcpd_eth.hosts"])
+        with self.assertRaises(ValueError):
+            self.api.recheck_selected_dhcp_release(self.project, selected.binding)
+
+    def test_same_target_selector_replacement_invalidates_prepared_binding(self):
+        selected = self.api.open_selected_dhcp_release(self.project)
+        target = os.readlink(self.selector)
+        self.selector.rename(self.project.parent / "held-original-selector")
+        self.selector.symlink_to(target)
+        with self.assertRaises(ValueError):
+            self.api.recheck_selected_dhcp_release(self.project, selected.binding)
+
+    def test_generation_directory_rebind_during_held_leaf_read_is_rejected(self):
+        import shutil
+        leaf_inode = (self.dhcp / "dhcpd.conf").lstat().st_ino
+        original_read = os.read
+        fired = []
+        def mutate(descriptor, count):
+            payload = original_read(descriptor, count)
+            if os.fstat(descriptor).st_ino == leaf_inode and not fired:
+                fired.append(True)
+                old = self.project / "held-original-generation"
+                self.generation.rename(old)
+                shutil.copytree(old, self.generation)
+            return payload
+        with mock.patch.object(os, "read", side_effect=mutate):
+            with self.assertRaises(ValueError):
+                self.api.open_selected_dhcp_release(self.project)
+        self.assertEqual([True], fired)
+
+    def test_project_directory_rebind_during_held_leaf_read_is_rejected(self):
+        import shutil
+        leaf_inode = (self.dhcp / "dhcpd.conf").lstat().st_ino
+        original_read = os.read
+        fired = []
+        def mutate(descriptor, count):
+            payload = original_read(descriptor, count)
+            if os.fstat(descriptor).st_ino == leaf_inode and not fired:
+                fired.append(True)
+                old = self.project.parent / "held-original-project"
+                self.project.rename(old)
+                shutil.copytree(old, self.project, symlinks=True)
+            return payload
+        with mock.patch.object(os, "read", side_effect=mutate):
+            with self.assertRaises(ValueError):
+                self.api.open_selected_dhcp_release(self.project)
+        self.assertEqual([True], fired)
+
+    def test_duplicate_json_is_rejected_even_with_matching_manifest_digest(self):
+        payload = (json.dumps(self.manifest, sort_keys=True) + "\n").encode()
+        self._seal(b'{"release_id":"foreign-duplicate",' + payload[1:])
+        with self.assertRaises(ValueError):
+            self.api.open_selected_dhcp_release(self.project)
+
+    def test_extra_manifest_output_is_not_an_approved_inventory(self):
+        self.manifest["outputs"]["dhcpd_extra.hosts"] = {"sha256": hashlib.sha256(b"").hexdigest()}
+        self._seal()
+        with self.assertRaises(ValueError):
+            self.api.open_selected_dhcp_release(self.project)
+
+    def test_extra_empty_directory_is_rejected(self):
+        (self.dhcp / "unknown-empty-directory").mkdir()
+        with self.assertRaises(ValueError):
+            self.api.open_selected_dhcp_release(self.project)
+
+    def test_same_bytes_symlink_or_hardlink_leaf_is_rejected(self):
+        for kind in ("symlink", "hardlink"):
+            with self.subTest(kind=kind):
+                leaf = self.dhcp / "dhcpd_eth.hosts"
+                backup = self.project / ("same-bytes-" + kind)
+                backup.write_bytes(self.expected["dhcpd_eth.hosts"])
+                leaf.unlink()
+                if kind == "symlink":
+                    leaf.symlink_to(backup)
+                else:
+                    os.link(backup, leaf)
+                with self.assertRaises(ValueError):
+                    self.api.open_selected_dhcp_release(self.project)
+                leaf.unlink()
+                leaf.write_bytes(self.expected["dhcpd_eth.hosts"])
+
+    def test_writeable_authority_directory_or_leaf_is_rejected(self):
+        for path in (self.dhcp, self.dhcp / "dhcpd.conf"):
+            with self.subTest(path=path):
+                old = path.lstat().st_mode & 0o777
+                path.chmod(old | 0o022)
+                try:
+                    with self.assertRaises(ValueError):
+                        self.api.open_selected_dhcp_release(self.project)
+                finally:
+                    path.chmod(old)
+
+    def test_actual_project_owner_is_trusted_not_reader_euid(self):
+        with mock.patch.object(os, "geteuid", return_value=987654):
+            self.assertEqual("pinned", self.api.open_selected_dhcp_release(self.project).mode)
+
+    def test_unknown_platform_without_link_descriptor_fails_closed(self):
+        import sys
+        with mock.patch.object(os, "O_PATH", 0, create=True), \
+                mock.patch.object(os, "O_SYMLINK", 0, create=True), \
+                mock.patch.object(sys, "platform", "unsupported-fixture"):
+            with self.assertRaisesRegex(ValueError, "symlink descriptor"):
+                self.api.open_selected_dhcp_release(self.project)
+
+    def test_dangling_selector_never_falls_back_to_valid_flat(self):
+        legacy = self._legacy()
+        self.selector.symlink_to("generations/" + "0" * 20)
+        with self.assertRaises(ValueError):
+            self.api.open_selected_dhcp_release(self.project, legacy_manifest=legacy)
+
+    def test_no_selector_requires_explicit_legacy(self):
+        self._legacy()
+        with self.assertRaises(ValueError):
+            self.api.open_selected_dhcp_release(self.project)
+
+    def test_explicit_legacy_schema1_and_schema2_bind_their_own_basis(self):
+        for schema in (1, 2):
+            with self.subTest(schema=schema):
+                if schema == 2:
+                    self.parent["dhcp_status"] = "enabled"
+                legacy = self._legacy(schema)
+                selected = self.api.open_selected_dhcp_release(self.project, legacy_manifest=legacy)
+                self.assertEqual("legacy", selected.mode)
+                self.assertEqual(legacy, selected.manifest_path)
+                self.api.recheck_selected_dhcp_release(self.project, selected.binding, legacy_manifest=legacy)
+
+    def test_outside_or_alias_legacy_paths_cannot_be_explicitly_authorized(self):
+        self._legacy()
+        outside = self.project.parent / "outside"
+        outside.mkdir()
+        for name in self.names:
+            (outside / name).write_bytes(self.expected[name])
+        (outside / "dhcp-release-manifest.json").write_bytes((self.flat / "dhcp-release-manifest.json").read_bytes())
+        alias = self.project / "alias"
+        alias.symlink_to(self.flat)
+        for manifest in (outside / "dhcp-release-manifest.json", alias / "dhcp-release-manifest.json"):
+            with self.subTest(manifest=manifest):
+                with self.assertRaises(ValueError):
+                    self.api.open_selected_dhcp_release(self.project, legacy_manifest=manifest)
+
+    def test_schema1_cannot_claim_new_dhcp_or_derived_fields(self):
+        legacy = self._legacy(1)
+        path = self.output / "current-release.json"
+        parent = json.loads(path.read_bytes())
+        parent["dhcp_status"] = "enabled"
+        path.write_text(json.dumps(parent))
+        with self.assertRaises(ValueError):
+            self.api.open_selected_dhcp_release(self.project, legacy_manifest=legacy)
+
+    def test_disabled_parent_ignores_flat_but_still_binds_selector(self):
+        self.parent["dhcp_status"] = "disabled"
+        self._seal()
+        self.parent["components"].pop("dhcp")
+        keys = ("project", "deployment_scope", "switch_scope", "dhcp_status", "inputs", "input_sources", "components", "inventory")
+        self.parent["release_id"] = hashlib.sha256(json.dumps(
+            {k: self.parent[k] for k in keys}, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:20]
+        generation = self.output / "generations" / self.parent["release_id"]
+        generation.mkdir()
+        payload = (json.dumps(self.parent, sort_keys=True) + "\n").encode()
+        (generation / "current-release.json").write_bytes(payload)
+        (self.output / "current-release.json").write_bytes(payload)
+        self.selector.unlink()
+        self.selector.symlink_to("generations/" + generation.name)
+        selected = self.api.open_selected_dhcp_release(self.project)
+        self.assertEqual("disabled", selected.mode)
+        self.assertIsNone(selected.manifest_path)
+        self.assertEqual({}, dict(selected.output_paths))
+        self.api.recheck_selected_dhcp_release(self.project, selected.binding)
+
+    def test_wrong_expected_parent_cannot_silently_reselect(self):
+        changed = dict(self.parent)
+        changed["release_id"] = "f" * 20
+        with self.assertRaises(ValueError):
+            self.api.open_selected_dhcp_release(self.project, expected_parent=changed)
 
 
 if __name__ == "__main__":

@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import base64
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import ExitStack, redirect_stderr, redirect_stdout
 import fcntl
 import hashlib
 import importlib.util
@@ -405,6 +405,366 @@ class ExistingProjectKeyNoTouchContract(unittest.TestCase):
 
 
 class SharedSshKeyPreparationContract(unittest.TestCase):
+    def test_initial_public_read_fifo_rebind_cannot_block(self):
+        for boundary in ("source", "target"):
+            with self.subTest(boundary=boundary), tempfile.TemporaryDirectory(prefix="public-read-fifo-") as temporary:
+                project = Path(temporary) / "project"
+                project.mkdir(mode=0o700)
+                source = project.parent / "source.pub"
+                payload = public_line("ssh-ed25519", 31)
+                source.write_bytes(payload)
+                destination = project / "laptop.pub"
+                destination.write_bytes(payload)
+                destination.chmod(0o600)
+                helper = helper_module()
+                original_open = os.open
+                replacement = source if boundary == "source" else destination
+                retired = project.parent / "held-original.pub"
+                fired = []
+
+                def rebind_at_open(path, flags, *args, **kwargs):
+                    if str(path) in (str(replacement), replacement.name) and not fired:
+                        fired.append(True)
+                        replacement.rename(retired)
+                        os.mkfifo(replacement, 0o600)
+                        self.assertTrue(flags & os.O_NONBLOCK, "initial FIFO race must not block open")
+                    return original_open(path, flags, *args, **kwargs)
+
+                proxy = SimpleNamespace(**{field: getattr(os, field) for field in dir(os)})
+                proxy.open = mock.Mock(side_effect=rebind_at_open)
+                with mock.patch.object(helper, "os", proxy):
+                    with self.assertRaises(helper.SshKeyPreparationError):
+                        helper.prepare_project_public_key(project, destination.name, source)
+                self.assertEqual([True], fired)
+                self.assertEqual(payload, retired.read_bytes())
+                self.assertTrue(stat.S_ISFIFO(replacement.lstat().st_mode))
+
+    def test_matching_public_fifo_rebind_is_bounded_without_foreign_mode_write(self):
+        for boundary in ("source", "target"):
+            with self.subTest(boundary=boundary), tempfile.TemporaryDirectory(prefix="public-mode-fifo-") as temporary:
+                project = Path(temporary) / "project"
+                project.mkdir(mode=0o700)
+                source = project.parent / "source.pub"
+                payload = public_line("ssh-ed25519", 31)
+                source.write_bytes(payload)
+                destination = project / "laptop.pub"
+                destination.write_bytes(payload)
+                destination.chmod(0o600)
+                before = destination.stat()
+                helper = helper_module()
+                original_read, original_open = helper._read_project_leaf, os.open
+                replacement = source if boundary == "source" else destination
+                retired = project.parent / "held-original.pub"
+
+                def replace_after_read(*args, **kwargs):
+                    result = original_read(*args, **kwargs)
+                    replacement.rename(retired)
+                    os.mkfifo(replacement, 0o600)
+                    return result
+
+                def bounded_open(path, flags, *args, **kwargs):
+                    is_replacement = str(path) in (str(replacement), replacement.name)
+                    if is_replacement and stat.S_ISFIFO(replacement.lstat().st_mode):
+                        self.assertTrue(flags & os.O_NONBLOCK, "FIFO race must never block open")
+                    return original_open(path, flags, *args, **kwargs)
+
+                proxy = SimpleNamespace(**{field: getattr(os, field) for field in dir(os)})
+                proxy.open = mock.Mock(side_effect=bounded_open)
+                with mock.patch.object(helper, "_read_project_leaf", side_effect=replace_after_read), \
+                        mock.patch.object(helper, "os", proxy):
+                    with self.assertRaises(helper.SshKeyPreparationError):
+                        helper.prepare_project_public_key(project, destination.name, source)
+                held = destination if boundary == "source" else retired
+                self.assertEqual((before.st_ino, 0o600, payload),
+                                 (held.stat().st_ino, stat.S_IMODE(held.stat().st_mode), held.read_bytes()))
+                self.assertTrue(stat.S_ISFIFO(replacement.lstat().st_mode))
+
+    def test_matching_public_0600_converges_owned_inode_without_private_read(self):
+        for name in ("laptop.pub", "mgmt-server.pub"):
+            with self.subTest(name=name), tempfile.TemporaryDirectory(prefix="public-mode-") as temporary:
+                root = Path(temporary)
+                project = root / "project"
+                project.mkdir(mode=0o700)
+                source = root / "source.pub"
+                source.write_bytes(public_line("ssh-ed25519", 31, "source-comment"))
+                destination = project / name
+                payload = public_line("ssh-ed25519", 31, "keep-existing-comment")
+                destination.write_bytes(payload)
+                destination.chmod(0o600)
+                private = project / "id_ed25519"
+                private.write_bytes(b"private-sentinel-must-not-be-opened")
+                private.chmod(0o600)
+                before, private_before = destination.stat(), private.stat()
+                helper = helper_module()
+                native_open, native_chmod, native_sync = os.open, os.fchmod, os.fsync
+                chmods, synced = [], []
+
+                def guarded_open(path, *args, **kwargs):
+                    self.assertNotIn(str(path), (str(private), private.name))
+                    return native_open(path, *args, **kwargs)
+
+                def held_chmod(descriptor, mode):
+                    metadata = os.fstat(descriptor)
+                    chmods.append((metadata.st_ino, mode))
+                    return native_chmod(descriptor, mode)
+
+                def held_sync(descriptor):
+                    metadata = os.fstat(descriptor)
+                    synced.append((metadata.st_ino, stat.S_IMODE(metadata.st_mode)))
+                    return native_sync(descriptor)
+
+                proxy = SimpleNamespace(**{field: getattr(os, field) for field in dir(os)})
+                proxy.open = mock.Mock(side_effect=guarded_open)
+                proxy.fchmod = mock.Mock(side_effect=held_chmod)
+                proxy.fsync = mock.Mock(side_effect=held_sync)
+                with mock.patch.object(helper, "os", proxy), redirect_stdout(io.StringIO()):
+                    self.assertEqual(destination, helper.prepare_project_public_key(project, name, source))
+                self.assertEqual([(before.st_ino, 0o644)], chmods)
+                self.assertIn((before.st_ino, 0o644), synced)
+                self.assertEqual((before.st_dev, before.st_ino),
+                                 (destination.stat().st_dev, destination.stat().st_ino))
+                self.assertEqual(payload, destination.read_bytes())
+                self.assertEqual(0o644, stat.S_IMODE(destination.stat().st_mode))
+                self.assertEqual(0o700, stat.S_IMODE(project.stat().st_mode))
+                self.assertEqual(0o600, stat.S_IMODE(private.stat().st_mode))
+                self.assertEqual((private_before.st_ino, private_before.st_mtime_ns),
+                                 (private.stat().st_ino, private.stat().st_mtime_ns))
+                self.assertEqual(b"private-sentinel-must-not-be-opened", private.read_bytes())
+
+    def test_matching_public_644_is_zero_mode_write_and_source_alias_is_supported(self):
+        with tempfile.TemporaryDirectory(prefix="public-mode-alias-") as temporary:
+            project = Path(temporary)
+            destination = project / "laptop.pub"
+            payload = public_line("ssh-ed25519", 31)
+            destination.write_bytes(payload)
+            destination.chmod(0o600)
+            before = destination.stat()
+            helper = helper_module()
+            with redirect_stdout(io.StringIO()):
+                helper.prepare_project_public_key(project, destination.name, destination)
+            self.assertEqual(0o644, stat.S_IMODE(destination.stat().st_mode))
+            proxy = SimpleNamespace(**{field: getattr(os, field) for field in dir(os)})
+            proxy.fchmod = mock.Mock(side_effect=AssertionError("0644 match must not chmod"))
+            with mock.patch.object(helper, "os", proxy), redirect_stdout(io.StringIO()):
+                helper.prepare_project_public_key(project, destination.name, destination)
+            self.assertEqual(before.st_ino, destination.stat().st_ino)
+            self.assertEqual(payload, destination.read_bytes())
+
+    def test_matching_public_foreign_owner_is_rejected_without_chmod(self):
+        with tempfile.TemporaryDirectory(prefix="public-mode-owner-") as temporary:
+            project = Path(temporary) / "project"
+            project.mkdir(mode=0o700)
+            source = project.parent / "source.pub"
+            source.write_bytes(public_line("ssh-ed25519", 31))
+            destination = project / "laptop.pub"
+            destination.write_bytes(source.read_bytes())
+            destination.chmod(0o600)
+            before = destination.stat()
+            helper = helper_module()
+            native_fstat = os.fstat
+
+            def foreign_fstat(descriptor):
+                metadata = native_fstat(descriptor)
+                if (metadata.st_dev, metadata.st_ino) != (before.st_dev, before.st_ino):
+                    return metadata
+                values = {field: getattr(metadata, field) for field in (
+                    "st_dev", "st_ino", "st_mode", "st_nlink", "st_uid", "st_gid",
+                    "st_size", "st_mtime_ns", "st_ctime_ns")}
+                values[owner_field] = getattr(metadata, owner_field) + 1
+                return SimpleNamespace(**values)
+
+            proxy = SimpleNamespace(**{field: getattr(os, field) for field in dir(os)})
+            proxy.fstat = mock.Mock(side_effect=foreign_fstat)
+            proxy.fchmod = mock.Mock(side_effect=AssertionError("foreign inode must not chmod"))
+            for owner_field in ("st_uid", "st_gid"):
+                with self.subTest(owner_field=owner_field), mock.patch.object(helper, "os", proxy):
+                    with self.assertRaises(helper.SshKeyPreparationError):
+                        helper.prepare_project_public_key(project, destination.name, source)
+            self.assertEqual(before.st_ino, destination.stat().st_ino)
+            self.assertEqual(0o600, stat.S_IMODE(destination.stat().st_mode))
+
+    def test_matching_public_source_change_after_initial_read_is_not_skip_success(self):
+        with tempfile.TemporaryDirectory(prefix="public-mode-source-") as temporary:
+            project = Path(temporary) / "project"
+            project.mkdir(mode=0o700)
+            source = project.parent / "source.pub"
+            original = public_line("ssh-ed25519", 31, "original")
+            changed = public_line("ssh-ed25519", 31, "independent-source-change")
+            source.write_bytes(original)
+            destination = project / "laptop.pub"
+            destination.write_bytes(original)
+            destination.chmod(0o600)
+            helper = helper_module()
+            native_read = helper._read_project_leaf
+
+            def change_source_after_read(*args, **kwargs):
+                result = native_read(*args, **kwargs)
+                source.write_bytes(changed)
+                return result
+
+            with mock.patch.object(helper, "_read_project_leaf", side_effect=change_source_after_read):
+                with self.assertRaises(helper.SshKeyPreparationError):
+                    helper.prepare_project_public_key(project, destination.name, source)
+            self.assertEqual(original, destination.read_bytes())
+            self.assertEqual(0o600, stat.S_IMODE(destination.stat().st_mode))
+            self.assertEqual(changed, source.read_bytes())
+
+    def test_matching_public_rebound_leaf_is_refused_without_foreign_write(self):
+        with tempfile.TemporaryDirectory(prefix="public-mode-rebind-") as temporary:
+            project = Path(temporary) / "project"
+            project.mkdir(mode=0o700)
+            source = project.parent / "source.pub"
+            source.write_bytes(public_line("ssh-ed25519", 31))
+            destination = project / "laptop.pub"
+            destination.write_bytes(source.read_bytes())
+            destination.chmod(0o600)
+            moved = project / "held-original.pub"
+            foreign = project.parent / "foreign.pub"
+            foreign.write_bytes(b"independent foreign evidence\n")
+            foreign.chmod(0o600)
+            helper = helper_module()
+            native_read = helper._read_project_leaf
+
+            def rebind_after_read(*args, **kwargs):
+                result = native_read(*args, **kwargs)
+                destination.rename(moved)
+                destination.symlink_to(foreign)
+                return result
+
+            with mock.patch.object(helper, "_read_project_leaf", side_effect=rebind_after_read):
+                with self.assertRaises(helper.SshKeyPreparationError):
+                    helper.prepare_project_public_key(project, destination.name, source)
+            self.assertTrue(destination.is_symlink())
+            self.assertEqual(0o600, stat.S_IMODE(moved.stat().st_mode))
+            self.assertEqual(b"independent foreign evidence\n", foreign.read_bytes())
+            self.assertEqual(0o600, stat.S_IMODE(foreign.stat().st_mode))
+
+    def test_matching_public_source_or_project_directory_rebind_is_rejected(self):
+        for boundary in ("source-directory", "project-directory"):
+            with self.subTest(boundary=boundary), tempfile.TemporaryDirectory(prefix="public-mode-directory-") as temporary:
+                root = Path(temporary)
+                project = root / "project"
+                project.mkdir(mode=0o700)
+                source_directory = root / "source-directory"
+                source_directory.mkdir(mode=0o700)
+                source = source_directory / "source.pub"
+                original = public_line("ssh-ed25519", 31)
+                source.write_bytes(original)
+                destination = project / "laptop.pub"
+                destination.write_bytes(original)
+                destination.chmod(0o600)
+                before = destination.stat()
+                helper = helper_module()
+                native_read = helper._read_project_leaf
+                retired = root / "retired"
+
+                def rebind_directory_after_read(*args, **kwargs):
+                    result = native_read(*args, **kwargs)
+                    selected = source_directory if boundary == "source-directory" else project
+                    selected.rename(retired)
+                    selected.mkdir(mode=0o700)
+                    leaf = selected / (source.name if boundary == "source-directory" else destination.name)
+                    leaf.write_bytes(original)
+                    leaf.chmod(0o600)
+                    return result
+
+                with mock.patch.object(helper, "_read_project_leaf", side_effect=rebind_directory_after_read):
+                    with self.assertRaises(helper.SshKeyPreparationError):
+                        helper.prepare_project_public_key(project, destination.name, source)
+                held_original = destination if boundary == "source-directory" else retired / destination.name
+                self.assertEqual(original, held_original.read_bytes())
+                self.assertEqual(before.st_ino, held_original.stat().st_ino)
+                self.assertEqual(0o600, stat.S_IMODE(held_original.stat().st_mode))
+                foreign = source if boundary == "source-directory" else destination
+                self.assertEqual(original, foreign.read_bytes())
+                self.assertEqual(0o600, stat.S_IMODE(foreign.stat().st_mode))
+
+    def test_matching_public_hardlink_and_mismatch_remain_fail_closed(self):
+        for condition in ("target-hardlink", "source-hardlink", "mismatch"):
+            with self.subTest(condition=condition), tempfile.TemporaryDirectory(prefix="public-mode-reject-") as temporary:
+                project = Path(temporary) / "project"
+                project.mkdir(mode=0o700)
+                source = project.parent / "source.pub"
+                source.write_bytes(public_line("ssh-ed25519", 31))
+                destination = project / "laptop.pub"
+                payload = public_line("ssh-ed25519", 32 if condition == "mismatch" else 31)
+                destination.write_bytes(payload)
+                destination.chmod(0o600)
+                before = destination.stat()
+                if condition.endswith("hardlink"):
+                    os.link(destination if condition.startswith("target") else source,
+                            project.parent / "extra-link.pub")
+                helper = helper_module()
+                with self.assertRaises(helper.SshKeyPreparationError):
+                    helper.prepare_project_public_key(project, destination.name, source, on_mismatch="reject")
+                self.assertEqual(payload, destination.read_bytes())
+                self.assertEqual(before.st_ino, destination.stat().st_ino)
+                self.assertEqual(0o600, stat.S_IMODE(destination.stat().st_mode))
+
+    def test_matching_public_last_instruction_rebind_only_changes_original_held_inode(self):
+        with tempfile.TemporaryDirectory(prefix="public-mode-fd-rebind-") as temporary:
+            project = Path(temporary) / "project"
+            project.mkdir(mode=0o700)
+            source = project.parent / "source.pub"
+            source.write_bytes(public_line("ssh-ed25519", 31))
+            destination = project / "laptop.pub"
+            payload = source.read_bytes()
+            destination.write_bytes(payload)
+            destination.chmod(0o600)
+            before = destination.stat()
+            moved = project / "original-owned.pub"
+            foreign = project.parent / "foreign.pub"
+            foreign.write_bytes(b"independent foreign bytes\n")
+            foreign.chmod(0o600)
+            foreign_before = foreign.stat()
+            helper = helper_module()
+            native_chmod = os.fchmod
+
+            def rebind_at_chmod(descriptor, mode):
+                self.assertEqual(before.st_ino, os.fstat(descriptor).st_ino)
+                destination.rename(moved)
+                destination.symlink_to(foreign)
+                return native_chmod(descriptor, mode)
+
+            proxy = SimpleNamespace(**{field: getattr(os, field) for field in dir(os)})
+            proxy.fchmod = mock.Mock(side_effect=rebind_at_chmod)
+            narration = io.StringIO()
+            with mock.patch.object(helper, "os", proxy), redirect_stdout(narration):
+                with self.assertRaises(helper.SshKeyPreparationError):
+                    helper.prepare_project_public_key(project, destination.name, source)
+            self.assertEqual("", narration.getvalue())
+            self.assertTrue(destination.is_symlink())
+            self.assertEqual(before.st_ino, moved.stat().st_ino)
+            self.assertEqual(payload, moved.read_bytes())
+            self.assertEqual(0o644, stat.S_IMODE(moved.stat().st_mode))
+            self.assertEqual(foreign_before.st_ino, foreign.stat().st_ino)
+            self.assertEqual(b"independent foreign bytes\n", foreign.read_bytes())
+            self.assertEqual(0o600, stat.S_IMODE(foreign.stat().st_mode))
+
+    def test_matching_public_fsync_failure_is_not_success_or_foreign_rollback(self):
+        with tempfile.TemporaryDirectory(prefix="public-mode-sync-") as temporary:
+            project = Path(temporary) / "project"
+            project.mkdir(mode=0o700)
+            source = project.parent / "source.pub"
+            source.write_bytes(public_line("ssh-ed25519", 31))
+            destination = project / "laptop.pub"
+            payload = source.read_bytes()
+            destination.write_bytes(payload)
+            destination.chmod(0o600)
+            before = destination.stat()
+            helper = helper_module()
+            proxy = SimpleNamespace(**{field: getattr(os, field) for field in dir(os)})
+            proxy.fsync = mock.Mock(side_effect=OSError("independent fsync failure"))
+            narration = io.StringIO()
+            with mock.patch.object(helper, "os", proxy), redirect_stdout(narration):
+                with self.assertRaises(helper.SshKeyPreparationError):
+                    helper.prepare_project_public_key(project, destination.name, source)
+            self.assertEqual("", narration.getvalue())
+            self.assertEqual(payload, destination.read_bytes())
+            self.assertEqual(before.st_ino, destination.stat().st_ino)
+            # An already performed chmod is not rolled back through a pathname.
+            self.assertEqual(0o644, stat.S_IMODE(destination.stat().st_mode))
+
     def test_existing_static_public_types_share_one_identity_parser(self):
         helper = helper_module()
         cases = (
@@ -699,10 +1059,30 @@ class DelegatedSetupPublicKeyContract(unittest.TestCase):
             environment["HTTP_SETUP_KEY_MODE"] = "server-delegated"
         if child_fd is not None:
             environment["HTTP_DEPLOYMENT_LOCK_FD"] = str(child_fd)
+        source_scopes = ExitStack()
+        original_run_path = setup.runpy.run_path
+
+        def load_real_api_with_private_exterior_model(path, *args, **kwargs):
+            api = original_run_path(path, *args, **kwargs)
+            if Path(path).resolve(strict=True) == LOAD_PATH.resolve(strict=True):
+                # Execute the actual LOAD source/config/permission admission.
+                # Only Mac's private exterior ancestors are modelled as a
+                # Linux public namespace, never fixture owners/modes/ACLs.
+                from test_cases.test_load_release_transaction import ReleaseTransactionTests
+                fixture = SimpleNamespace(root=root)
+                source_scopes.enter_context(
+                    ReleaseTransactionTests._http_linux_public_ancestor_model(
+                        fixture, module=api["require_http_project_source_access"].__globals__,
+                    )
+                )
+            return api
+
         try:
             with mock.patch.dict(os.environ, environment), \
                  mock.patch("platform.system", return_value="Linux"), \
                  mock.patch.object(setup, "HTTP_BASE", str(root)), \
+                 mock.patch.object(setup, "ZTP", str(root / "ztp")), \
+                 mock.patch.object(setup.runpy, "run_path", side_effect=load_real_api_with_private_exterior_model), \
                  mock.patch.object(setup, "stop_native_ztp_monitors"), \
                  mock.patch.object(setup, "_initialize_project_from_template"), \
                  mock.patch.object(setup, "_require_delegated_laptop_public_key",
@@ -726,6 +1106,7 @@ class DelegatedSetupPublicKeyContract(unittest.TestCase):
                     outcome = f"return:{result}"
             return outcome, p2p.call_count, key_gate.call_count, output.getvalue()
         finally:
+            source_scopes.close()
             if child_fd is not None:
                 try:
                     os.close(child_fd)
@@ -739,19 +1120,59 @@ class DelegatedSetupPublicKeyContract(unittest.TestCase):
         # setup's log-root lock requires the real infra parent present in a
         # checkout; create it instead of mocking the lock out of the test.
         (root / "infra").mkdir()
+        # This class specifies public-key admission under an enabled HTTP
+        # server. Prepare only its explicit public tree, before key/inode
+        # snapshots; HOME/.ssh and the deployment lock remain private.
+        root.chmod(0o755)
+        public_keys = root / "ztp/config/publickey"
+        public_keys.mkdir(parents=True, mode=0o755)
+        for directory in (root / "ztp", root / "ztp/config", public_keys):
+            directory.chmod(0o755)
         home = root / "server-home"
         (home / ".ssh").mkdir(parents=True, mode=0o700)
         server = public_line("ssh-ed25519", 82, "server")
         (home / ".ssh/id_ed25519.pub").write_bytes(server)
         project = root / "project"
-        project.mkdir(mode=0o700)
+        project.mkdir(mode=0o755)
+        # Independent schema-1 input, not a mocked load_global/gate or a
+        # document derived from implementation output.
+        (project / "01-global.yaml").write_text(
+            "schema_version: 1\n"
+            "common:\n"
+            "  mgmt:\n"
+            "    dhcp-server:\n"
+            "      status: enabled\n"
+            "      package: isc-dhcp-server\n"
+            "    http:\n"
+            "      status: enabled\n"
+            "      package: apache2\n"
+            f"      http_root: {root}\n"
+            "    ztp:\n"
+            "      status: enabled\n"
+            "      ztp_url_prefix: /ztp\n"
+            "  switch:\n"
+            "    system:\n"
+            "      dns: {}\n"
+            "      ntp: {}\n"
+            "      date-time: {}\n"
+            "switches:\n"
+            "- eth:\n"
+            "    system:\n"
+            "      aaa:\n"
+            "        user:\n"
+            "          cumulus:\n"
+            "            hashed-password: '$6$fixture$safe-value'\n",
+            encoding="utf-8",
+        )
         (project / "02-dhcp-subnet_config.csv").write_text(
             "shared_network,subnet,netmask,range_start,range_end,routers,"
             "ztp_service_ip,cumulus_profile,nvos_ztp\n", encoding="utf-8",
         )
         (project / "mgmt-server.pub").write_bytes(server)
+        (project / "mgmt-server.pub").chmod(0o644)
         if laptop is not None:
             (project / "laptop.pub").write_bytes(laptop)
+            (project / "laptop.pub").chmod(0o644)
         return home, project, server
 
     def test_delegated_setup_preserves_real_laptop_without_reading_server_home(self):

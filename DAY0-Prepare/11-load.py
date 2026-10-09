@@ -5378,7 +5378,7 @@ def _validate_runtime_key_binding(path: Path, project: Path, record: dict[str, o
 def _require_runtime_publickey_parent(receipt: dict[str, object]) -> None:
     """A legacy payload digest cannot authorize writes into a rebound directory."""
     expected = receipt.get("publickey_parent")
-    if receipt.get("schema_version") != 3 or not isinstance(expected, dict):
+    if receipt.get("schema_version") not in (3, 4) or not isinstance(expected, dict):
         raise LoadError("rollback public key parent identity is missing; preserve legacy receipt")
     try:
         actual = _setup_switch_link_parent_identity(ZTP_DIR / "config/publickey/.receipt-parent")
@@ -5422,8 +5422,235 @@ def _receipt_authority(path: Path) -> dict[str, object]:
     return {"state": "file", "sha256": hashlib.sha256(payload).hexdigest()}
 
 
+_RUNTIME_DHCP_NAMES = frozenset({
+    "dhcp-release-manifest.json", "dhcpd.conf", "dhcpd_eth.hosts",
+    "dhcpd_ib.hosts", "dhcpd_nvl.hosts",
+})
+
+
+def _runtime_dhcp_link_source(project: Path, path: Path, target: object) -> Path:
+    """Only SETUP's same-name, project-local DHCP publication is admissible."""
+    if (path.parent != ZTP_DIR / "config/isc-dhcp-server"
+            or path.name not in _RUNTIME_DHCP_NAMES
+            or not isinstance(target, str) or not target or os.path.isabs(target)
+            or os.path.normpath(target) != target):
+        raise LoadError("rollback DHCP publication link is invalid")
+    source = project.resolve(strict=True) / "99-output-dhcp" / path.name
+    lexical = Path(os.path.normpath(str(path.parent.resolve(strict=True) / target)))
+    if lexical != source or source.parent.resolve(strict=True) != source.parent:
+        raise LoadError("rollback DHCP publication escaped its owning project")
+    return source
+
+
+def _receipt_dhcp_authority(project: Path, path: Path) -> dict[str, object]:
+    """Bind both a normal SETUP link and its held, nofollow source authority."""
+    try:
+        before = path.lstat()
+        if not stat.S_ISLNK(before.st_mode):
+            return _receipt_authority(path)
+        if before.st_nlink != 1:
+            raise LoadError("rollback DHCP publication is not a single link")
+        parent = _setup_switch_link_parent_identity(path)
+        target = os.readlink(path)
+        source = _runtime_dhcp_link_source(project, path, target)
+        source_parent = _setup_switch_link_parent_identity(source)
+        source_before = source.lstat()
+        opened = _read_rollback_regular(source)
+        source_after = source.lstat()
+        if (opened is None or _import_member_owner(source_before) != _import_member_owner(source_after)
+                or _import_member_owner(before) != _import_member_owner(path.lstat())
+                or os.readlink(path) != target
+                or _setup_switch_link_parent_identity(path) != parent
+                or _setup_switch_link_parent_identity(source) != source_parent):
+            raise LoadError("rollback DHCP publication authority changed while reading")
+        payload, _mode = opened
+        return {"state": "link", "target": target,
+                "sha256": hashlib.sha256(payload).hexdigest(),
+                "identity": list(_import_member_owner(before)),
+                "source_identity": list(_import_member_owner(source_after)),
+                "parent_identity": parent, "source_parent_identity": source_parent}
+    except (OSError, RuntimeError) as exc:
+        raise LoadError(f"rollback DHCP publication cannot be safely read: {exc}") from exc
+
+
+def _validate_receipt_dhcp_authority(project: Path, name: str, record: object) -> None:
+    if not isinstance(record, dict):
+        raise LoadError("rollback receipt DHCP authority record is invalid")
+    digest = record.get("sha256")
+    if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+        raise LoadError("rollback receipt DHCP authority digest is invalid")
+    if record.get("state") == "file" and set(record) == {"state", "sha256"}:
+        return
+    expected = {"state", "sha256", "target", "identity", "source_identity",
+                "parent_identity", "source_parent_identity"}
+    if record.get("state") != "link" or set(record) != expected:
+        raise LoadError("rollback receipt DHCP authority record is invalid")
+    path = ZTP_DIR / "config/isc-dhcp-server" / name
+    source = _runtime_dhcp_link_source(project, path, record["target"])
+    for key, linked in (("identity", True), ("source_identity", False)):
+        owner = record[key]
+        if (not isinstance(owner, list) or len(owner) != 9
+                or any(type(n) is not int or n < 0 for n in owner)
+                or not (stat.S_ISLNK(owner[2]) if linked else stat.S_ISREG(owner[2]))
+                or owner[5] != 1 or owner[6] > _ROLLBACK_PAYLOAD_LIMIT):
+            raise LoadError("rollback receipt DHCP authority identity is invalid")
+    for key, leaf in (("parent_identity", path), ("source_parent_identity", source)):
+        parent = record[key]
+        if (not isinstance(parent, dict) or set(parent) != {"path", "dev", "ino"}
+                or parent.get("path") != str(leaf.parent.resolve(strict=True))
+                or any(type(parent.get(field)) is not int or parent[field] < 0
+                       for field in ("dev", "ino"))):
+            raise LoadError("rollback receipt DHCP authority parent is invalid")
+
+
+def _runtime_installed_dhcp_paths():
+    """Trusted installer names, never receipt-supplied destination paths."""
+    names = {"dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts", "dhcpd_nvl.hosts"}
+    destinations = tuple(dhcp_file_mappings().values())
+    if (len(destinations) != 4 or {path.name for path in destinations} != names
+            or len({path.parent for path in destinations}) != 1
+            or any(not path.is_absolute() or path.parent.resolve(strict=True) != path.parent
+                   for path in destinations)):
+        raise LoadError("installed DHCP owner names are invalid; HOLD")
+    directory = destinations[0].parent.lstat()
+    if not stat.S_ISDIR(directory.st_mode) or directory.st_mode & 0o022:
+        raise LoadError("installed DHCP directory permissions are unsafe; HOLD")
+    return {path.name: path for path in destinations}
+
+
+def _runtime_selected_generation(project, generation):
+    context = CrossProjectRollbackContext(
+        project, "generations/" + generation.name,
+        project / "99-output-ztp/rollback-receipts" / generation.name, None,
+    )
+    return _setup_switch_a_generation_authority(context)
+
+
+def _capture_runtime_selected_dhcp(project, generation):
+    """Qualify selected bytes, installed owners, and historical flat separately."""
+    from project_contract import open_selected_dhcp_release, recheck_selected_dhcp_release
+    try:
+        selected = open_selected_dhcp_release(project)
+    except (ValueError, OSError) as exc:
+        raise LoadError(f"selected DHCP capture unavailable; HOLD: {exc}") from exc
+    if (selected.generation_dir != generation
+            or selected.mode not in {"pinned", "disabled"}):
+        raise LoadError("runtime receipt requires current selected generation; HOLD")
+    immutable = _runtime_selected_generation(project, generation)
+    installed = None
+    if selected.mode == "pinned":
+        paths = _runtime_installed_dhcp_paths()
+        directory = _setup_switch_directory_identity(next(iter(paths.values())).parent)
+        leaves = {name: _setup_switch_dhcp_owned_leaf(path) for name, path in paths.items()}
+        trusted_uid = next(iter(paths.values())).parent.lstat().st_uid
+        if any(row is not None and (row["identity"][3] != trusted_uid
+                                   or row["identity"][2] & 0o022) for row in leaves.values()):
+            raise LoadError("installed DHCP leaf owner/permissions are unsafe; HOLD")
+        if any(row is None or row["state"]["state"] != "file"
+               or row["state"]["sha256"] != selected.output_hashes[name]
+               for name, row in leaves.items()):
+            raise LoadError("installed DHCP differs from selected generation; HOLD")
+        installed = dict(directory=directory, leaves=leaves)
+        if (directory != _setup_switch_directory_identity(next(iter(paths.values())).parent)
+                or trusted_uid != next(iter(paths.values())).parent.lstat().st_uid
+                or leaves != {name: _setup_switch_dhcp_owned_leaf(path)
+                              for name, path in paths.items()}):
+            raise LoadError("installed DHCP owner changed during capture; HOLD")
+    try:
+        recheck_selected_dhcp_release(project, selected.binding)
+    except (ValueError, OSError) as exc:
+        raise LoadError(f"selected DHCP capture changed; HOLD: {exc}") from exc
+    if immutable != _runtime_selected_generation(project, generation):
+        raise LoadError("selected immutable generation changed during capture; HOLD")
+    # Persist the existing immutable-generation owner/tree representation, not
+    # transient project/output directory mtimes that authorized future LOAD
+    # inputs or receipt creation may change. The shared reader still holds and
+    # verifies all nine fields throughout each capture/preflight.
+    return dict(generation=immutable, installed=installed)
+
+
+def _validate_runtime_selected_dhcp(project, receipt):
+    """Schema 4 has no interpretation upgrade for schema 1/2/3 fields."""
+    if receipt["schema_version"] != 4:
+        return
+    qualification = receipt.get("selected_dhcp")
+    if not isinstance(qualification, dict) or set(qualification) != {"generation", "installed"}:
+        raise LoadError("schema4 selected DHCP qualification is incomplete; HOLD")
+    generation = project / "99-output-ztp" / receipt["selector_target"]
+    if (_setup_switch_canonical_payload(qualification["generation"])
+            != _setup_switch_canonical_payload(_runtime_selected_generation(project, generation))):
+        raise LoadError("schema4 selected immutable owner/tree changed; HOLD")
+    frozen_parent = generation_report.decode_release_record(
+        _read_rollback_regular(generation / "current-release.json")[0], "frozen parent")
+    generation_report.validate_parent_release_basis(frozen_parent, project.name)
+    if (frozen_parent["release_id"] != receipt["release_id"]
+            or frozen_parent.get("dhcp_status") != receipt["dhcp_status"]):
+        raise LoadError("schema4 selected parent identity differs; HOLD")
+    installed = qualification["installed"]
+    if receipt["dhcp_status"] == "disabled":
+        if installed is not None:
+            raise LoadError("schema4 disabled DHCP has installed authority; HOLD")
+        return
+    paths = _runtime_installed_dhcp_paths()
+    if (not isinstance(installed, dict) or set(installed) != {"directory", "leaves"}
+            or _setup_switch_canonical_payload(installed["directory"])
+               != _setup_switch_canonical_payload(_setup_switch_directory_identity(
+                   next(iter(paths.values())).parent))
+            or not isinstance(installed["leaves"], dict) or set(installed["leaves"]) != set(paths)):
+        raise LoadError("schema4 installed DHCP directory/inventory differs; HOLD")
+    trusted_uid = next(iter(paths.values())).parent.lstat().st_uid
+    tree = qualification["generation"]["tree"]
+    for name, row in installed["leaves"].items():
+        if not isinstance(row, dict) or set(row) != {"identity", "state"}:
+            raise LoadError("schema4 installed DHCP owner shape differs; HOLD")
+        owner, state = row["identity"], row["state"]
+        if (not isinstance(owner, list) or len(owner) != 9
+                or any(type(value) is not int or value < 0 for value in owner)
+                or owner[5] != 1 or not stat.S_ISREG(owner[2])
+                or not isinstance(state, dict)
+                or set(state) != {"state", "mode", "uid", "gid", "mtime_ns", "size", "sha256"}
+                or state["state"] != "file"
+                or any(type(state[key]) is not int or state[key] < 0
+                       for key in ("mode", "uid", "gid", "mtime_ns", "size"))
+                or state["mode"] != stat.S_IMODE(owner[2])
+                or (state["uid"], state["gid"], state["size"], state["mtime_ns"])
+                   != (owner[3], owner[4], owner[6], owner[7])
+                or state["size"] > _ROLLBACK_PAYLOAD_LIMIT
+                or not isinstance(state["sha256"], str)
+                or re.fullmatch(r"[0-9a-f]{64}", state["sha256"]) is None
+                or state["sha256"] != tree["dhcp/" + name]["sha256"]):
+            raise LoadError("schema4 installed metadata/hash differs from selected bytes; HOLD")
+        if owner[3] != trusted_uid or owner[2] & 0o022:
+            raise LoadError("schema4 installed leaf owner/permissions are unsafe; HOLD")
+
+
+def _verify_active_selected_dhcp(project, receipt):
+    if receipt["schema_version"] != 4:
+        return
+    _validate_runtime_selected_dhcp(project, receipt)
+    generation = project / "99-output-ztp" / receipt["selector_target"]
+    if _capture_runtime_selected_dhcp(project, generation) != receipt["selected_dhcp"]:
+        raise LoadError("schema4 active selected/installed authority changed; HOLD")
+
+
+def _require_setup_switch_dhcp_freeze_basis(body, receipt):
+    """A prewrite register and every cold phase use the same frozen A owners."""
+    if receipt["schema_version"] != 4 or "dhcp_transaction" not in body:
+        return
+    _validate_runtime_selected_dhcp(Path(body["old_project"]["path"]), receipt)
+    installed = receipt["selected_dhcp"]["installed"]
+    binding = body["dhcp_transaction"]
+    live = binding.get("live_inventory")
+    if (installed is None or not isinstance(live, dict)
+            or binding["body"]["runtime"]["path"] != installed["directory"]["path"]
+            or binding["body"]["before"] != {
+                name: row["state"] for name, row in installed["leaves"].items()}
+            or live.get("before") != installed["leaves"]):
+        raise LoadError("SETUP/DHCP A preimage is not schema4 frozen installed A; HOLD")
+
+
 def prepare_runtime_rollback_receipt(
-    project: Path, generation: Path,
+    project: Path, generation: Path, *, capture_selected_dhcp: bool = False,
 ) -> Path:
     """Persist every flat surface needed to recover A after B generation fails.
 
@@ -5477,6 +5704,10 @@ def prepare_runtime_rollback_receipt(
         # A receipt is immutable. Reuse is allowed only after full validation.
         existing = _load_runtime_rollback_receipt(canonical_project, destination)
         _require_runtime_publickey_parent(existing)
+        if capture_selected_dhcp and existing["schema_version"] != 4:
+            raise LoadError("existing legacy receipt cannot satisfy schema4 active capture; HOLD")
+        if capture_selected_dhcp:
+            _verify_active_selected_dhcp(canonical_project, existing)
         return destination
     stage = Path(tempfile.mkdtemp(prefix=".rollback-receipt-", dir=receipts))
     try:
@@ -5533,14 +5764,16 @@ def prepare_runtime_rollback_receipt(
         }
         if dhcp_status == "enabled":
             unchanged["dhcp"] = {
-                name: _receipt_authority(ZTP_DIR / "config/isc-dhcp-server" / name)
+                name: _receipt_dhcp_authority(canonical_project, ZTP_DIR / "config/isc-dhcp-server" / name)
                 for name in (
                     "dhcp-release-manifest.json", "dhcpd.conf",
                     "dhcpd_eth.hosts", "dhcpd_ib.hosts", "dhcpd_nvl.hosts",
                 )
             }
+        selected_qualification = (_capture_runtime_selected_dhcp(canonical_project, generation)
+                                  if capture_selected_dhcp else None)
         receipt = {
-            "schema_version": 3,
+            "schema_version": 4 if capture_selected_dhcp else 3,
             "record_type": "http-ztp-runtime-rollback-receipt",
             "project": canonical_project.name,
             "release_id": release_id,
@@ -5559,6 +5792,8 @@ def prepare_runtime_rollback_receipt(
             },
             "unchanged_authorities": unchanged,
         }
+        if capture_selected_dhcp:
+            receipt["selected_dhcp"] = selected_qualification
         receipt_path = stage / "receipt.json"
         _require_runtime_publickey_parent(receipt)
         _write_rollback_receipt_payload(
@@ -5615,27 +5850,30 @@ def _load_runtime_rollback_receipt(
     try:
         opened = _read_rollback_regular(path, limit=_ROLLBACK_RECEIPT_LIMIT)
         assert opened is not None
-        receipt = json.loads(opened[0].decode("ascii"))
-    except (OSError, UnicodeError, json.JSONDecodeError, LoadError) as exc:
+        receipt = generation_report.decode_release_record(opened[0], "runtime rollback receipt")
+    except (OSError, UnicodeError, json.JSONDecodeError, LoadError,
+            generation_report.GenerationReportError) as exc:
         raise LoadError(f"rollback receipt is incomplete or invalid: {exc}") from exc
     required = {
         "schema_version", "record_type", "project", "release_id",
         "selector_target", "dhcp_status", "frozen_files", "publickeys",
         "yaml_latest", "prefix", "unchanged_authorities",
     }
-    if isinstance(receipt, dict) and receipt.get("schema_version") == 3:
+    if isinstance(receipt, dict) and receipt.get("schema_version") in (3, 4):
         required.add("publickey_parent")
+        if receipt["schema_version"] == 4:
+            required.add("selected_dhcp")
     if (not isinstance(receipt, dict) or set(receipt) != required
             or isinstance(receipt.get("schema_version"), bool)
             or not isinstance(receipt.get("schema_version"), int)
-            or receipt.get("schema_version") not in (1, 2, 3)
+            or receipt.get("schema_version") not in (1, 2, 3, 4)
             or receipt.get("record_type") != "http-ztp-runtime-rollback-receipt"
             or receipt.get("project") != canonical_project.name
             or receipt.get("release_id") != relative.name
             or receipt.get("selector_target") != f"generations/{relative.name}"
             or receipt.get("dhcp_status") not in {"enabled", "disabled"}):
         raise LoadError("rollback receipt is incomplete or invalid")
-    if receipt["schema_version"] == 3:
+    if receipt["schema_version"] in (3, 4):
         parent = receipt["publickey_parent"]
         if (not isinstance(parent, dict) or set(parent) != {"path", "dev", "ino"}
                 or not isinstance(parent.get("path"), str)
@@ -5679,7 +5917,7 @@ def _load_runtime_rollback_receipt(
                 expected_fields |= {"target", "source_identity", "parent_identity"}
                 identity = record.get("source_identity")
                 parent = record.get("parent_identity")
-                if (receipt["schema_version"] not in (2, 3)
+                if (receipt["schema_version"] not in (2, 3, 4)
                         or not isinstance(identity, dict) or set(identity) != set(_RUNTIME_KEY_IDENTITY_FIELDS)
                         or any(isinstance(value, bool) or not isinstance(value, int) for value in identity.values())
                         or not stat.S_ISREG(identity["st_mode"]) or identity["st_nlink"] != 1
@@ -5783,12 +6021,9 @@ def _load_runtime_rollback_receipt(
         }
         if not isinstance(authorities["dhcp"], dict) or set(authorities["dhcp"]) != expected_dhcp:
             raise LoadError("rollback receipt DHCP authority inventory is invalid")
-        for record in authorities["dhcp"].values():
-            if (not isinstance(record, dict) or set(record) != {"state", "sha256"}
-                    or record.get("state") != "file"
-                    or not isinstance(record.get("sha256"), str)
-                    or not re.fullmatch(r"[0-9a-f]{64}", record["sha256"])):
-                raise LoadError("rollback receipt DHCP authority record is invalid")
+        for name, record in authorities["dhcp"].items():
+            _validate_receipt_dhcp_authority(canonical_project, name, record)
+    _validate_runtime_selected_dhcp(canonical_project, receipt)
     return receipt
 
 
@@ -5896,7 +6131,7 @@ def _verify_rollback_authorities(
         if not isinstance(dhcp, dict):
             raise LoadError("rollback receipt DHCP authority is incomplete")
         current = {
-            name: _receipt_authority(ZTP_DIR / "config/isc-dhcp-server" / name)
+            name: _receipt_dhcp_authority(project, ZTP_DIR / "config/isc-dhcp-server" / name)
             for name in dhcp
         }
         if current != dhcp:
@@ -6008,6 +6243,7 @@ def _verify_active_runtime_receipt(
     """Prove a reusable receipt still describes the active flat A exactly."""
     _require_runtime_publickey_parent(receipt)
     _verify_rollback_authorities(project, receipt)
+    _verify_active_selected_dhcp(project, receipt)
     for name, record in receipt["frozen_files"].items():
         if _describe_receipt_file(ZTP_DIR / name) != record:
             raise LoadError("existing rollback receipt no longer matches A runtime")
@@ -6067,9 +6303,13 @@ def prepare_active_runtime_rollback_receipt(
     )
     if os.path.lexists(receipt_path):
         receipt = _load_runtime_rollback_receipt(canonical_project, receipt_path)
+        if receipt["schema_version"] != 4:
+            raise LoadError("legacy receipt remains recovery-only; new active capture requires schema4; HOLD")
         _verify_active_runtime_receipt(canonical_project, receipt_path, receipt)
         return receipt_path
-    receipt_path = prepare_runtime_rollback_receipt(canonical_project, generation)
+    receipt_path = prepare_runtime_rollback_receipt(
+        canonical_project, generation, capture_selected_dhcp=True,
+    )
     receipt = _load_runtime_rollback_receipt(canonical_project, receipt_path)
     _verify_active_runtime_receipt(canonical_project, receipt_path, receipt)
     return receipt_path
@@ -8255,6 +8495,7 @@ def resume_setup_switch_publication_bundle(token, *, guard):
             directory_identity=(row["parent"]["dev"], row["parent"]["ino"]),
             temporary_identity=report_identity(row["candidate"]["identity"]),
             old_identity=(report_identity(row["before"]["identity"]) if row["before"] is not None else None),
+            old_payload_sha256=(row["before"]["sha256"] if row["before"] is not None else None),
             payload_sha256=row["candidate"]["sha256"],
         )
         generation_report.commit_prepared_generation_report(candidate, require_authority=lambda:
@@ -8305,8 +8546,10 @@ def register_setup_switch_publication_bundle(parent_candidate, report_candidate,
         if (report["release_id"] != parent_candidate.release_id or generation.name != parent_candidate.release_id
                 or generation_report._report_preimage_identity(report_candidate.temporary.lstat())
                 != report_candidate.temporary_identity
-                or generation_report._existing_report_identity(report_candidate.destination, project)
-                != report_candidate.old_identity):
+                or generation_report._existing_report_preimage(report_candidate.destination, project)
+                != (report_candidate.old_identity, report_candidate.old_payload_sha256)
+                or (rows["report"]["before"]["sha256"] if rows["report"]["before"] is not None else None)
+                != report_candidate.old_payload_sha256):
             raise LoadError("publication report differs from original preparation; HOLD")
         _pinned_generation_payloads(project, generation / "current-release.json",
                                     generation / "dhcp" if (generation / "dhcp").is_dir() else None)
@@ -9307,6 +9550,8 @@ def _setup_switch_runtime_context(body, state=None, *, require_original_yaml_own
                 include_prefix_owners=False,
                 include_health_publication="health_publication" in record) != expected:
             raise ValueError("A receipt owner or bytes differ from WAL")
+        receipt = _load_runtime_rollback_receipt(context.project, context.runtime_receipt)
+        _require_setup_switch_dhcp_freeze_basis(body, receipt)
         return context
     except (OSError, ValueError, TypeError, KeyError, LoadError) as exc:
         raise LoadError(f"setup switch A runtime authority changed; HOLD: {exc}") from exc
@@ -13641,6 +13886,10 @@ def _register_setup_switch_dhcp_transaction(preimage, parent_candidate, guard, *
             binding["live_inventory"] = live_inventory
             _validate_setup_switch_dhcp_live_inventory(binding)
             _require_setup_switch_dhcp_live_inventory(binding)
+        context = _setup_switch_runtime_context(body)
+        if context is not None:
+            frozen_receipt = _load_runtime_rollback_receipt(context.project, context.runtime_receipt)
+            _require_setup_switch_dhcp_freeze_basis(dict(body, dhcp_transaction=binding), frozen_receipt)
 
         def require_original():
             _require_runtime_restore_guard(**guard)
@@ -17004,6 +17253,135 @@ def verify_http_publication(inputs: ProjectInputs, images: dict[str, Path], dry_
         run(["curl", "-fsSI", "--max-time", "5", url], dry_run=dry_run)
 
 
+def require_http_project_source_access(
+    project: Path, *, http_root: Path | None = None, ztp_dir: Path | None = None,
+) -> None:
+    """Read-only necessary POSIX access gate, never a chmod or HTTP success proof.
+
+    Require every user class to traverse public directories, and declare only
+    the two public-key leaves for early source admission. Native key parsing,
+    output/manifest gates and actual HTTP health remain separately mandatory.
+    Extended ACLs need an explicit separate access contract; do not guess.
+    """
+    root_name, project_name = Path(HTTP_ROOT if http_root is None else http_root), Path(project)
+    ztp_name = Path(ZTP_DIR if ztp_dir is None else ztp_dir)
+    root = root_name.resolve(strict=True)
+    canonical = project_name.resolve(strict=True)
+    if canonical == root or not canonical.is_relative_to(root):
+        raise LoadError("HTTP public project source escapes HTTP_ROOT")
+    directory_fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_ctime_ns")
+    exterior_directory_fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid")
+    leaf_fields = (*directory_fields, "st_nlink", "st_size", "st_mtime_ns")
+    held = []
+    descriptors = []
+    directories = set()
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
+
+    def identity(metadata, fields):
+        return tuple(getattr(metadata, field) for field in fields)
+
+    def open_object(path, *, directory, inside):
+        before = os.lstat(path)
+        mode = stat.S_IMODE(before.st_mode)
+        if directory:
+            if not stat.S_ISDIR(before.st_mode) or mode & 0o111 != 0o111:
+                raise LoadError(f"HTTP public directory is not traversable without permission repair: {path} mode={mode:04o}")
+            if before.st_uid not in (0, os.geteuid()):
+                raise LoadError(f"HTTP public ancestor has foreign owner: {path}")
+            if mode & 0o022 and not (mode & stat.S_ISVTX and before.st_uid == 0 and not inside):
+                raise LoadError(f"HTTP public directory has unqualified writable ancestor: {path}")
+            if inside and (before.st_uid, before.st_gid) != (os.geteuid(), os.getegid()):
+                raise LoadError(f"HTTP public directory owner uid/gid differs from current authority: {path}")
+            selected = directory_fields if inside else exterior_directory_fields
+        else:
+            if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+                    or mode != 0o644
+                    or (before.st_uid, before.st_gid) != (os.geteuid(), os.getegid())):
+                raise LoadError(f"HTTP public key must be owned single-link regular 0644; no implicit repair: {path}")
+            selected = leaf_fields
+        descriptor = os.open(path, flags | (os.O_DIRECTORY if directory else 0))
+        # Record ownership before fstat can fail; not-yet-qualified descriptors
+        # remain ours to close, never an excuse to leak or retry a reused FD.
+        descriptors.append(descriptor)
+        opened = os.fstat(descriptor)
+        held.append((path, descriptor, selected, identity(opened, selected)))
+        if identity(before, selected) != identity(opened, selected):
+            raise LoadError(f"HTTP public object changed while opening: {path}")
+
+    try:
+        # Give a precise root/project/key reason before broader ancestor
+        # admission. No file data, directory children or private key is read.
+        for path in (root, canonical):
+            open_object(path, directory=True, inside=True)
+            directories.add(path)
+        for name in (LAPTOP_PUBKEY_NAME, MANAGEMENT_PUBKEY_NAME):
+            path = canonical / name
+            if os.path.lexists(path):
+                open_object(path, directory=False, inside=True)
+            # An absent initialization placeholder is not approved for HTTP;
+            # Native prepare_pubkeys must later supply exact 0644 authority.
+        if ztp_name.parent.resolve(strict=True) != root:
+            raise LoadError("HTTP public ZTP root is outside the held document root")
+        core_ztp = root / ztp_name.name
+        public_parents = (core_ztp, core_ztp / "config", core_ztp / "config/publickey",
+                          root / "infiniband", root / "infiniband/publickey", root / "image")
+        for path in public_parents:
+            if os.path.lexists(path):
+                if not path.is_relative_to(root):
+                    raise LoadError(f"HTTP public parent escapes HTTP_ROOT: {path}")
+                open_object(path, directory=True, inside=True)
+                directories.add(path)
+        for original in tuple(directories):
+            for parent in original.parents:
+                if parent not in directories:
+                    open_object(parent, directory=True, inside=parent.is_relative_to(root))
+                    directories.add(parent)
+                if len(directories) > 128:
+                    raise LoadError("HTTP public directory access inventory exceeds bound")
+        introspect_acl = getattr(os, "listxattr", None)
+        if not callable(introspect_acl):
+            raise LoadError("HTTP public ACL introspection is unavailable; HOLD")
+        def require_acl_absent(path):
+            try:
+                attributes = introspect_acl(path, follow_symlinks=False)
+            except (NotImplementedError, TypeError) as exc:
+                raise LoadError("HTTP public ACL introspection is unsupported; HOLD") from exc
+            if any(name in attributes for name in ("system.posix_acl_access", "system.posix_acl_default")):
+                raise LoadError(f"HTTP public ACL requires an explicit reader-access contract: {path}")
+        for path, _descriptor, _selected, _baseline in held:
+            require_acl_absent(path)
+        for path, descriptor, selected, baseline in held:
+            if (identity(os.fstat(descriptor), selected) != baseline
+                    or identity(os.lstat(path), selected) != baseline):
+                raise LoadError(f"HTTP public object rebound or permission changed before publication: {path}")
+        if (root_name.resolve(strict=True) != root
+                or project_name.resolve(strict=True) != canonical):
+            raise LoadError("HTTP public root/project alias changed before publication")
+        # Exterior directory ctime is volatile child bookkeeping, not release
+        # authority. Retain a second explicit ACL absence check instead of
+        # interpreting unrelated sibling mkdir as a permission change.
+        for path, _descriptor, _selected, _baseline in held:
+            require_acl_absent(path)
+        for path, descriptor, selected, baseline in held:
+            if (identity(os.fstat(descriptor), selected) != baseline
+                    or identity(os.lstat(path), selected) != baseline):
+                raise LoadError(f"HTTP public object rebound or permission changed before publication: {path}")
+    except OSError as exc:
+        raise LoadError(f"HTTP public source access cannot be safely qualified: {exc}") from exc
+    finally:
+        preserving_exception = sys.exc_info()[0] is not None
+        first_close_error = None
+        for descriptor in reversed(descriptors):
+            try:
+                os.close(descriptor)
+            except OSError as exc:
+                # A failed close may have consumed the number. Do not retry;
+                # continue once over the remaining retained owned descriptors.
+                if first_close_error is None: first_close_error = exc
+        if first_close_error is not None and not preserving_exception:
+            raise LoadError("HTTP public source descriptor close failed; HOLD") from first_close_error
+
+
 def verify_published_files(
     inputs: ProjectInputs, images: dict[str, Path], *, dry_run: bool = False,
 ) -> None:
@@ -19330,6 +19708,8 @@ def validate_inputs(
     settings = load_global(
         global_file, global_data=global_data, switch_scope=switch_scope,
     )
+    if host_role == "management-server" and settings.http_enabled and not args.dry_run:
+        require_http_project_source_access(project)
     placeholder_sections = find_placeholder_password_sections(
         global_data, switch_scope=switch_scope,
     )
@@ -20070,6 +20450,14 @@ def main(
                 "请等待 sync-code.py 打印 [OK] 同步完成后再执行 load；"
                 "若同步进程已异常退出，请先重新完成一次 sync-code.py"
             )
+        # No monitor stop, A freeze, template/password/key mutation or shared
+        # image publication may precede the initial public-source access gate.
+        if local_services_supported and not args.dry_run and project.is_dir() and _meaningful_entries(project):
+            early_http_settings = load_global(project / "01-global.yaml", switch_scope=switch_scope)
+            if early_http_settings.http_enabled:
+                failure_phase = "HTTP public source access prewrite gate"
+                require_http_project_source_access(project)
+
         if import_selector is not None:
             if not project.is_dir() or not _meaningful_entries(project):
                 raise LoadError("--import-configs requires an initialized project")
@@ -20238,6 +20626,8 @@ def main(
         failure_phase = "活动项目 setup 检查/切换"
         # setup is the first post-quiesce operation allowed to rewrite managed
         # links.  Mark before entry because a child failure may be partial.
+        if local_services_supported and inputs.settings.http_enabled and not args.dry_run:
+            require_http_project_source_access(project)
         runtime_mutation_started = local_services_supported and not args.dry_run
         activate_project(
             project, inputs.p2p_file,

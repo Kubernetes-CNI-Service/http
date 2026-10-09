@@ -107,7 +107,7 @@ def _fingerprint(identity: tuple[bytes, bytes]) -> str:
 
 
 def _read_public(path: Path) -> tuple[bytes, os.stat_result]:
-    flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
     fd = -1
     try:
         before = os.lstat(path)
@@ -268,7 +268,7 @@ def _read_project_leaf(directory_fd: int, name: str) -> tuple[bytes, tuple[int, 
         raise SshKeyPreparationError("project public key must be a single-link regular file")
     fd = -1
     try:
-        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory_fd)
         held = os.fstat(fd)
         if (held.st_dev, held.st_ino) != (metadata.st_dev, metadata.st_ino):
             raise SshKeyPreparationError("project public key changed while opening")
@@ -286,6 +286,117 @@ def _read_project_leaf(directory_fd: int, name: str) -> tuple[bytes, tuple[int, 
     finally:
         if fd >= 0:
             os.close(fd)
+
+
+def _converge_matching_project_public_mode(
+    project: Path, directory_fd: int, directory_stat: os.stat_result,
+    name: str, old: tuple[bytes, tuple[int, int]],
+    source: Path, source_data: bytes, source_stat: os.stat_result,
+) -> bool:
+    """Converge only an owned, single-link matching public leaf 0600→0644.
+
+    No bytes are rewritten and no private key or ancestor mode is consulted.
+    This must run before a caller seals project inputs into a WAL/manifest.
+    Held descriptors limit a last-instruction rename race to the original
+    owned inode; any observed race rejects without touching a rebound object.
+    """
+    if name not in PROJECT_PUBLIC_NAMES:
+        raise SshKeyPreparationError("public mode destination is not declared")
+    source_directory_fd = source_fd = target_fd = -1
+    fields = ("st_dev", "st_ino", "st_nlink", "st_uid", "st_gid",
+              "st_mode", "st_size", "st_mtime_ns", "st_ctime_ns")
+    directory_fields = ("st_dev", "st_ino", "st_uid", "st_gid", "st_mode")
+
+    def identity(metadata, selected=fields):
+        return tuple(getattr(metadata, field) for field in selected)
+
+    def read_held(descriptor):
+        data = bytearray()
+        while len(data) <= PUBLIC_KEY_LIMIT:
+            part = os.pread(descriptor, min(8192, PUBLIC_KEY_LIMIT + 1 - len(data)), len(data))
+            if not part:
+                break
+            data.extend(part)
+        if len(data) > PUBLIC_KEY_LIMIT:
+            raise SshKeyPreparationError("public key too large during mode convergence")
+        return bytes(data)
+
+    try:
+        source_directory = os.lstat(source.parent)
+        if (not stat.S_ISDIR(source_directory.st_mode)
+                or source_directory.st_uid != os.geteuid()
+                or directory_stat.st_uid != os.geteuid()):
+            raise SshKeyPreparationError("public mode convergence requires owned directories")
+        flags = (os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+                 | getattr(os, "O_CLOEXEC", 0))
+        source_directory_fd = os.open(source.parent, flags | os.O_DIRECTORY)
+        if identity(os.fstat(source_directory_fd), directory_fields) != identity(source_directory, directory_fields):
+            raise SshKeyPreparationError("source public directory changed while opening")
+        source_fd = os.open(source.name, flags, dir_fd=source_directory_fd)
+        held_source = os.fstat(source_fd)
+        if (identity(held_source) != identity(source_stat)
+                or not stat.S_ISREG(held_source.st_mode)
+                or held_source.st_nlink != 1 or held_source.st_uid != os.geteuid()
+                or read_held(source_fd) != source_data):
+            raise SshKeyPreparationError("source public authority changed before mode convergence")
+        target_fd = os.open(name, flags, dir_fd=directory_fd)
+        held_target = os.fstat(target_fd)
+        if (not stat.S_ISREG(held_target.st_mode) or held_target.st_nlink != 1
+                or held_target.st_uid != os.geteuid()
+                or held_target.st_gid != directory_stat.st_gid
+                or (held_target.st_dev, held_target.st_ino) != old[1]
+                or stat.S_IMODE(held_target.st_mode) not in (0o600, 0o644)
+                or read_held(target_fd) != old[0]):
+            raise SshKeyPreparationError("matching public leaf is not owned single-link 0600/0644 authority")
+        alias = (held_target.st_dev, held_target.st_ino) == (held_source.st_dev, held_source.st_ino)
+        changed = stat.S_IMODE(held_target.st_mode) != 0o644
+
+        def verify(*, after=False):
+            for path, descriptor, baseline in (
+                (project, directory_fd, directory_stat),
+                (source.parent, source_directory_fd, source_directory),
+            ):
+                if (identity(os.fstat(descriptor), directory_fields) != identity(baseline, directory_fields)
+                        or identity(os.lstat(path), directory_fields) != identity(baseline, directory_fields)):
+                    raise SshKeyPreparationError("public directory authority changed during mode convergence")
+            for descriptor, parent_fd, leaf, baseline, payload, is_target in (
+                (source_fd, source_directory_fd, source.name, held_source, source_data, alias),
+                (target_fd, directory_fd, name, held_target, old[0], True),
+            ):
+                held = os.fstat(descriptor)
+                named = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+                selected = tuple(field for field in fields if not (
+                    after and changed and is_target and field in ("st_mode", "st_ctime_ns")))
+                if (identity(held, selected) != identity(baseline, selected)
+                        or identity(named) != identity(held)
+                        or read_held(descriptor) != payload
+                        or identity(os.fstat(descriptor)) != identity(held)
+                        or identity(os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)) != identity(held)):
+                    raise SshKeyPreparationError("public leaf identity or bytes changed during mode convergence")
+                if after and is_target and stat.S_IMODE(held.st_mode) != 0o644:
+                    raise SshKeyPreparationError("matching public leaf final mode is not 0644")
+            # A rebound source ancestor must not silently select another leaf.
+            if identity(os.lstat(source)) != identity(os.fstat(source_fd)):
+                raise SshKeyPreparationError("source public path rebound during mode convergence")
+            for path, descriptor, baseline in (
+                (project, directory_fd, directory_stat),
+                (source.parent, source_directory_fd, source_directory),
+            ):
+                if (identity(os.fstat(descriptor), directory_fields) != identity(baseline, directory_fields)
+                        or identity(os.lstat(path), directory_fields) != identity(baseline, directory_fields)):
+                    raise SshKeyPreparationError("public directory authority changed after held reads")
+
+        verify()
+        if changed:
+            os.fchmod(target_fd, 0o644)
+            os.fsync(target_fd)
+            os.fsync(directory_fd)
+        verify(after=True)
+        return changed
+    finally:
+        for descriptor in (target_fd, source_fd, source_directory_fd):
+            if descriptor >= 0:
+                os.close(descriptor)
 
 
 def prepare_project_public_key(
@@ -331,7 +442,12 @@ def prepare_project_public_key(
         old_data = old[0] if old else b""
         old_identity = _identity(old_data) if old_data else None
         if old_identity == new_identity:
-            print(f"[SKIP] project public key already matches: {destination_name}")
+            changed = _converge_matching_project_public_mode(
+                project, directory_fd, held_directory, destination_name, old,
+                source, source_data, source_stat,
+            )
+            action = "CHANGE mode=0644 bytes/inode preserved" if changed else "SKIP"
+            print(f"[{action}] project public key already matches: {destination_name}")
             return project / destination_name
         if old_identity is not None and on_mismatch == "reject":
             raise SshKeyPreparationError(

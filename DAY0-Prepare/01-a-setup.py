@@ -762,6 +762,16 @@ def _prepare_laptop_public_key(proj_dir):
                 return
             print(_c(CYAN, f"  [DRY] 将准备 laptop.pub ← {selected}"))
             return
+        # A preexisting WAL must retain its exact input permission preimage.
+        # Mode convergence belongs to local --prepare-only before sealing.
+        destination = Path(proj_dir) / "laptop.pub"
+        if _SETUP_SWITCH_WAL_CONTEXT is not None and os.path.lexists(destination):
+            metadata = destination.lstat()
+            if stat.S_IMODE(metadata.st_mode) != 0o644:
+                raise ssh_keys.SshKeyPreparationError(
+                    "WAL-bound laptop.pub permission cannot be repaired in setup; "
+                    "prepare local inputs before sealing the switch journal"
+                )
         selected = ssh_keys.ensure_public_key(ssh_dir, comment="operator@laptop")
         ssh_keys.prepare_project_public_key(Path(proj_dir), "laptop.pub", selected)
     except ssh_keys.SshKeyPreparationError as exc:
@@ -5041,6 +5051,20 @@ def setup(proj_dir, *, server_delegated=False, deployment_lock_descriptor=None):
     """Run setup as one link transaction; any failure restores prior state."""
     global _LINK_TRANSACTION, _INFRA_LOG_MIGRATION, _SETUP_SWITCH_WAL_CONTEXT
     require_project_eligible(Path(proj_dir))
+    if server_delegated and not _DRY_RUN:
+        # Native LOAD has already prepared both roles. Shared SETUP must not
+        # publish public links to an unreadable source or repair its modes.
+        source_api = runpy.run_path(os.path.join(HERE, "11-load.py"))
+        try:
+            settings = source_api["load_global"](
+                Path(proj_dir) / "01-global.yaml", switch_scope=str(_SWITCH_SCOPE),
+            )
+            if settings.http_enabled:
+                source_api["require_http_project_source_access"](
+                    Path(proj_dir), http_root=Path(HTTP_BASE), ztp_dir=Path(ZTP),
+                )
+        except source_api["LoadError"] as exc:
+            raise ValueError(f"delegated SETUP HTTP public source access rejected before shared writes: {exc}") from exc
     # Imported callers must not bypass the CLI fence; check before even
     # creating the infra lock file, then recheck while that lock is held.
     _require_setup_switch_wal_prewrite(proj_dir, deployment_lock_descriptor)

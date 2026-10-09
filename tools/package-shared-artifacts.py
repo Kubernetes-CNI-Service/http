@@ -57,7 +57,7 @@ REQUIRED_OFFLINE_PACKAGES = frozenset({
     "unzip", "nfs-common", "arping", "python3", "python3-yaml",
     "python3-jinja2", "python3-openpyxl", "python3-pandas",
     "python3-xlsxwriter", "openssh-client", "curl", "apache2",
-    "ssl-cert", "isc-dhcp-server", "jq",
+    "ssl-cert", "isc-dhcp-server", "jq", "whois",
 })
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 

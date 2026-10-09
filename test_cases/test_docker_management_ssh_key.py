@@ -3317,6 +3317,15 @@ class DockerManagementSshKeyWorkflowTests(unittest.TestCase):
                 release_lock.assert_called_once_with(91)
 
             (project / "meaningful").write_text("sentinel", encoding="ascii")
+            # This branch asserts project key attestation failure, not an
+            # invalid HTTP publication source. Prepare real public metadata
+            # and a literal enabled global only after the empty-project case.
+            # The final SSH-dir override refusal still exits before this gate.
+            from test_cases.test_ssh_key_preparation_workflow import (
+                prepare_http_enabled_delegated_fixture,
+            )
+            from test_cases.test_load_release_transaction import ReleaseTransactionTests
+            prepare_http_enabled_delegated_fixture(root, project)
             common = (
                 mock.patch.object(loader, "parse_args", return_value=arguments()),
                 mock.patch.object(loader, "runtime_os", return_value="Linux"),
@@ -3341,7 +3350,12 @@ class DockerManagementSshKeyWorkflowTests(unittest.TestCase):
             )
             with common[0], common[1], common[2], common[3], common[4], common[5], \
                  common[6], common[7], common[8], common[9], common[10], \
-                 common[11] as project_attest, common[12] as initialize, common[13]:
+                 common[11] as project_attest, common[12] as initialize, common[13], \
+                 mock.patch.object(loader, "HTTP_ROOT", root), \
+                 mock.patch.object(loader, "ZTP_DIR", root / "ztp"), \
+                 ReleaseTransactionTests._http_linux_public_ancestor_model(
+                     SimpleNamespace(root=root), module=loader,
+                 ):
                 before = DockerManagementSshKeyDirectTests.snapshot(project)
                 self.assertEqual(1, loader.main([]))
                 self.assertEqual(before, DockerManagementSshKeyDirectTests.snapshot(project))

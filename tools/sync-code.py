@@ -1374,6 +1374,28 @@ def acquire_remote_deployment_lock(
     return RemoteDeploymentLock(process=process, path=lock_path)
 
 
+def probe_remote_native_metadata(lock: RemoteDeploymentLock) -> bool:
+    """Read-only same-holder verdict; EOF release repeats exact authority checks."""
+    if lock.prewrite_ready:
+        raise RuntimeError("Native metadata probe must precede prewrite")
+    process = lock.process
+    if process.poll() is not None or process.stdin is None or process.stdout is None:
+        raise RuntimeError("远端 deployment lock 在 Native metadata probe 前已经丢失")
+    process.stdin.write("HTTP_ZTP_NATIVE_METADATA_PROBE\n")
+    process.stdin.flush()
+    ready, _, _ = select.select([process.stdout], [], [], DEPLOYMENT_PREWRITE_TIMEOUT)
+    if not ready:
+        detail = _finish_failed_lock_process(process)
+        raise RuntimeError("Native metadata probe 超时：" + (detail or lock.path))
+    frame = process.stdout.readline().strip()
+    fields = frame.split()
+    if (len(fields) != 2 or fields[0] != "HTTP_ZTP_NATIVE_METADATA_READY"
+            or fields[1] not in {"EXACT", "NEEDS_NORMALIZATION"}):
+        detail = _finish_failed_lock_process(process)
+        raise RuntimeError("Native metadata probe 返回不安全状态：" + (detail or frame or lock.path))
+    return fields[1] == "NEEDS_NORMALIZATION"
+
+
 def prepare_remote_source_write(lock: RemoteDeploymentLock | None) -> bool:
     """Trigger Docker quiesce immediately before the first remote write."""
     if lock is None:
@@ -1488,7 +1510,9 @@ def rsync_command(job: SyncJob, args: argparse.Namespace) -> list[str]:
     # The root receiver owns newly written objects; the locked source-commit
     # guard then normalizes and verifies every exact manifest member, including
     # unchanged objects, before it publishes the new source receipt.
-    transfer_flags = "-rlptDz" if args.runtime == "docker" else "-az"
+    # Receiver ownership is closed under the exact-source holder, not copied
+    # from sender numeric UID/GID. Keep the other archive transport semantics.
+    transfer_flags = "-rlptDz"
     command = [
         "rsync", transfer_flags,
         "--itemize-changes", "--human-readable", "--stats",
@@ -1761,7 +1785,12 @@ def main(argv: list[str] | None = None) -> int:
             p2p_needs_commit = p2p_probe == "NEEDS_TRANSFER"
             changed_jobs = sync_jobs_have_changes(jobs, args)
             placeholder_needed = remote_management_placeholder_needed(project, args)
-            if not (changed_jobs or placeholder_needed or global_plan.changed or p2p_needs_commit):
+            has_content_work = bool(changed_jobs or placeholder_needed or global_plan.changed or p2p_needs_commit)
+            owner_repair_needed = False
+            if not has_content_work and not args.dry_run and args.runtime == "native":
+                assert_remote_deployment_lock(remote_lock)
+                owner_repair_needed = probe_remote_native_metadata(remote_lock)
+            if not has_content_work and not owner_repair_needed:
                 print("[OK] 远端代码/输入已一致，密码哈希已保留；本次同步零写入")
                 return 0
             assert_remote_deployment_lock(remote_lock)
@@ -1775,9 +1804,13 @@ def main(argv: list[str] | None = None) -> int:
                     "远端 prewrite 未建立 Docker rebuild-required 状态；拒绝写入"
                 )
             assert_remote_deployment_lock(remote_lock)
-            ensure_remote_directories(jobs, args)
+            if not owner_repair_needed:
+                ensure_remote_directories(jobs, args)
             assert_remote_deployment_lock(remote_lock)
-            set_remote_sync_marker(args, present=True)
+            if not owner_repair_needed:
+                # Metadata-only Native PREWRITE has already published and
+                # retained the holder's durable marker inode; never replace it.
+                set_remote_sync_marker(args, present=True)
             for job in changed_jobs:
                 assert_remote_deployment_lock(remote_lock)
                 run_job(job, args)
@@ -1790,9 +1823,11 @@ def main(argv: list[str] | None = None) -> int:
                         args, project, staged_p2p, selected_p2p.name, selected_p2p_sha,
                     )
             assert_remote_deployment_lock(remote_lock)
-            ensure_remote_management_placeholder(project, args)
+            if not owner_repair_needed:
+                ensure_remote_management_placeholder(project, args)
             assert_remote_deployment_lock(remote_lock)
-            commit_remote_global(project, args, global_plan)
+            if not owner_repair_needed:
+                commit_remote_global(project, args, global_plan)
             assert_remote_deployment_lock(remote_lock)
             # The holder authenticates the previous receipt, validates the
             # new tree, prunes only receipt-owned stale source, binds the new

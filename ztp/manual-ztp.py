@@ -40,6 +40,8 @@ if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 from project_contract import (
     safe_load_global_yaml,
+    open_selected_dhcp_release,
+    recheck_selected_dhcp_release,
     safe_load_all_yaml_preserving_mac,
     safe_load_yaml_preserving_mac,
     service_url,
@@ -726,7 +728,27 @@ def validate_parent_release_binding(project: Path, device: dict) -> dict[str, st
     verified_dhcp_outputs: dict[str, tuple[Path, str]] = {}
     dhcp: dict = {}
     dhcp_hash = ""
-    if parent_dhcp_status == "disabled":
+    dhcp_manifest_path = DHCP_RELEASE_MANIFEST
+    selected_dhcp = None
+    # A malformed or dangling current is authority, not permission to fall back.
+    # Legacy runtime aliases retain their old contract only when no selector exists.
+    if os.path.lexists(project / "99-output-ztp/current"):
+        try:
+            selected_dhcp = open_selected_dhcp_release(project, expected_parent=parent)
+        except (OSError, ValueError) as exc:
+            raise ManualZtpError(f"selected DHCP authority 无法验证: {exc}") from exc
+    if selected_dhcp is not None:
+        if selected_dhcp.mode == "pinned":
+            dhcp = dict(selected_dhcp.manifest)
+            dhcp_manifest_path = selected_dhcp.manifest_path
+            dhcp_hash = str(dhcp_component["manifest_sha256"])
+            verified_dhcp_outputs = {
+                name: (selected_dhcp.output_paths[name], selected_dhcp.output_hashes[name])
+                for name in ("dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts", "dhcpd_nvl.hosts")
+            }
+        elif selected_dhcp.mode != "disabled":
+            raise ManualZtpError("current selector 不允许 legacy DHCP authority")
+    elif parent_dhcp_status == "disabled":
         if "dhcp" in components:
             raise ManualZtpError("DHCP disabled 统一 release 不允许 DHCP 子 release")
     else:
@@ -876,7 +898,7 @@ def validate_parent_release_binding(project: Path, device: dict) -> dict[str, st
     if parent_dhcp_status == "enabled":
         binding.update({
             "dhcp_release_id": str(dhcp.get("release_id") or ""),
-            "dhcp_manifest_path": str(DHCP_RELEASE_MANIFEST),
+            "dhcp_manifest_path": str(dhcp_manifest_path),
             "dhcp_manifest_sha256": dhcp_hash,
         })
     for name, (output_path, output_hash) in verified_dhcp_outputs.items():
@@ -886,6 +908,12 @@ def validate_parent_release_binding(project: Path, device: dict) -> dict[str, st
     if derived_binding is not None:
         binding["effective_devices_path"] = str(derived_binding[0])
         binding["effective_devices_sha256"] = derived_binding[1]
+    if selected_dhcp is not None:
+        try:
+            recheck_selected_dhcp_release(project, selected_dhcp.binding)
+        except (OSError, ValueError) as exc:
+            raise ManualZtpError(f"selected DHCP authority 预检期间发生变化: {exc}") from exc
+        binding["selected_dhcp_authority_binding"] = dict(selected_dhcp.binding)
     binding["binding_sha256"] = hashlib.sha256(
         json.dumps(binding, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
@@ -894,6 +922,28 @@ def validate_parent_release_binding(project: Path, device: dict) -> dict[str, st
 
 def verify_prepared_release_binding(prepared: dict) -> None:
     """Recheck every committed release artifact immediately before mutation."""
+    try:
+        project = Path(prepared["parent_manifest_path"]).parent.parent
+        qualification = prepared.get("selected_dhcp_authority_binding")
+        if qualification is not None:
+            selected = recheck_selected_dhcp_release(project, qualification)
+            if selected.mode == "pinned":
+                if (prepared.get("dhcp_manifest_path") != str(selected.manifest_path)
+                        or prepared.get("dhcp_release_id") != selected.manifest["release_id"]
+                        or prepared.get("dhcp_manifest_sha256")
+                           != selected.parent["components"]["dhcp"]["manifest_sha256"]):
+                    raise ValueError("prepared pinned manifest qualification differs")
+                for name, expected in selected.output_hashes.items():
+                    key = name.replace(".", "_")
+                    if (prepared.get(f"dhcp_output_{key}_path") != str(selected.output_paths[name])
+                            or prepared.get(f"dhcp_output_{key}_sha256") != expected):
+                        raise ValueError(f"prepared pinned output qualification differs: {name}")
+            elif selected.mode != "disabled" or prepared.get("dhcp_status") != "disabled":
+                raise ValueError("prepared selected DHCP mode differs")
+        elif os.path.lexists(project / "99-output-ztp/current"):
+            raise ValueError("new selector requires selected DHCP preflight qualification")
+    except (KeyError, TypeError, OSError, ValueError) as exc:
+        raise ManualZtpError(f"确认后 selected DHCP authority 变化；请重新预检: {exc}") from exc
     if "effective_devices_path" in prepared or "effective_devices_sha256" in prepared:
         try:
             project = Path(prepared["parent_manifest_path"]).parent.parent
@@ -1807,6 +1857,24 @@ def preflight_one(
     preview/confirm TOCTOU fingerprint.
     """
     release_binding = validate_parent_release_binding(project, device)
+    if release_binding.get("selected_dhcp_authority_binding") is not None:
+        # The first read is admission only: invalid releases create no output.
+        # Reserve this operation's private parents before sampling the final
+        # preflight qualification, as main already does for its stamped run.
+        # Creating a new manual namespace legitimately changes output's full
+        # directory identity. Never reseal an already prepared qualification
+        # after collecting device state or writing the preview evidence.
+        public_output = project.resolve(strict=True) / "99-output-ztp"
+        target_name = Path(os.path.abspath(os.fspath(target_dir)))
+        if (target_name == public_output or not target_name.is_relative_to(public_output)
+                or ".." in target_dir.parts):
+            raise ManualZtpError("selected release preflight evidence escapes project output")
+        parent_fd = _open_receipt_parent(target_name, create=True)
+        try:
+            _assert_receipt_parent_bound(target_name, parent_fd)
+            release_binding = validate_parent_release_binding(project, device)
+        finally:
+            os.close(parent_fd)
     host, interface = connect_and_verify(client, device)
     current = client.run(
         device, host, "nv config show", timeout=client.args.command_timeout,

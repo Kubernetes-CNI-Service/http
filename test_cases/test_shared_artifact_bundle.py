@@ -9,6 +9,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 from pathlib import Path
 import stat
 import subprocess
@@ -32,7 +33,7 @@ REQUIRED_APT_PACKAGES = {
     "unzip", "nfs-common", "arping", "python3", "python3-yaml",
     "python3-jinja2", "python3-openpyxl", "python3-pandas",
     "python3-xlsxwriter", "openssh-client", "curl", "apache2",
-    "ssl-cert", "isc-dhcp-server", "jq",
+    "ssl-cert", "isc-dhcp-server", "jq", "whois",
 }
 
 
@@ -136,12 +137,12 @@ def add_switch_images(repository: Path) -> dict[str, Path]:
     return images
 
 
-def add_apps(repository: Path, platform: str = "ubuntu-24.04/amd64") -> Path:
+def add_apps(repository: Path, platform: str = "ubuntu-24.04/amd64", *, excluded_packages=()) -> Path:
     directory = repository / "apps" / platform
     directory.mkdir(parents=True, exist_ok=True)
     architecture = platform.rsplit("/", 1)[1]
     records = []
-    for name in sorted(REQUIRED_APT_PACKAGES):
+    for name in sorted(REQUIRED_APT_PACKAGES - set(excluded_packages)):
         filename = name.replace(".", "-") + f"_1.0_{architecture}.deb"
         package = directory / filename
         package.write_bytes(("deb:" + name).encode("ascii"))
@@ -243,6 +244,41 @@ def rewrite_bundle_payload(bundle, target: str, payload: bytes) -> None:
 class PackagerDirectTests(unittest.TestCase):
     def setUp(self):
         self.packager = load_script(PACKAGER_PATH, "shared_artifact_packager_contract")
+
+    def test_native_password_backend_is_in_install_and_cache_dependency_closure(self):
+        source = (ROOT / "infra/infra-setup.sh").read_text(encoding="utf-8")
+        declarations = []
+        for name in ("ztp_dependency_packages", "mgmt_cache_packages"):
+            matches = re.findall(r"^" + name + r"=\(\n.*?^\)", source, re.MULTILINE | re.DOTALL)
+            self.assertEqual(1, len(matches))
+            declarations.append(matches[0])
+        self.assertIn('"${ztp_dependency_packages[@]}"', declarations[1])
+        self.assertIn('for pkg in "${ztp_dependency_packages[@]}"; do', source)
+        self.assertIn('cache_mgmt_package_closure "${mgmt_cache_packages[@]}"', source)
+        completed = subprocess.run(
+            ["bash", "-c", "\n".join(declarations) + '\nprintf "%s\\n" "${mgmt_cache_packages[@]}"'],
+            check=True, text=True, capture_output=True,
+        )
+        self.assertIn("whois", completed.stdout.splitlines())
+
+    def test_offline_cache_missing_whois_is_rejected_before_bundle_write(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repository, _project = prepare_repository(Path(temporary))
+            apps = add_apps(repository)
+            index = (apps / "Packages").read_text(encoding="ascii")
+            incomplete = "\n\n".join(stanza for stanza in index.strip().split("\n\n")
+                                      if not stanza.startswith("Package: whois\n")) + "\n\n"
+            (apps / "whois_1.0_amd64.deb").unlink()
+            (apps / "Packages").write_text(incomplete, encoding="ascii")
+            with (apps / "Packages.gz").open("wb") as raw:
+                with gzip.GzipFile(fileobj=raw, mode="wb", mtime=0) as stream:
+                    stream.write(incomplete.encode("ascii"))
+            output = repository / "outputs/artifacts/missing-whois"
+            with self.assertRaisesRegex(self.packager.PackageError, "whois"):
+                self.packager.build_bundle("customer", output=output, repository_root=repository,
+                    no_upgrade=True, apps_platforms=("ubuntu-24.04/amd64",),
+                    installer_path=INSTALLER_PATH, load_script_path=LOAD_PATH)
+            self.assertFalse(output.exists())
 
     def test_cli_is_project_driven_and_large_payloads_are_opt_in(self):
         parser = self.packager.parser()
@@ -725,6 +761,22 @@ class InstallerDirectTests(unittest.TestCase):
     def setUp(self):
         self.packager = load_script(PACKAGER_PATH, "shared_artifact_packager_installer")
         self.installer = load_script(INSTALLER_PATH, "shared_artifact_installer_contract")
+
+    def test_self_consistent_legacy_cache_without_whois_is_not_installable(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repository, _project = prepare_repository(Path(temporary))
+            add_apps(repository, excluded_packages={"whois"})
+            # Explicitly model an untrusted old producer with the independently
+            # specified incomplete contract; the actual verifier must not bless it.
+            with mock.patch.object(self.packager, "REQUIRED_OFFLINE_PACKAGES",
+                                   frozenset(REQUIRED_APT_PACKAGES - {"whois"})):
+                bundle = self.packager.build_bundle("customer",
+                    output=repository / "outputs/artifacts/old-apps", repository_root=repository,
+                    no_upgrade=True, apps_platforms=("ubuntu-24.04/amd64",),
+                    installer_path=INSTALLER_PATH, load_script_path=LOAD_PATH)
+            with self.assertRaisesRegex(self.installer.InstallError, "whois"):
+                self.installer.verify_bundle(bundle.archive, installer_path=bundle.installer,
+                    metadata_path=bundle.metadata, required_uid=os.getuid())
 
     def make_bundle(self, directory: Path):
         repository, _project = prepare_repository(directory)

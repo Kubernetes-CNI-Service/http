@@ -53,6 +53,8 @@ COMMIT_REQUEST = "HTTP_ZTP_COMMIT"
 COMMIT_READY = "HTTP_ZTP_COMMIT_READY"
 DOCKER_REBUILD_REQUIRED = "HTTP_ZTP_DOCKER_REBUILD_REQUIRED"
 NO_MANAGED_DOCKER = "HTTP_ZTP_NO_MANAGED_DOCKER"
+NATIVE_METADATA_REQUEST = "HTTP_ZTP_NATIVE_METADATA_PROBE"
+NATIVE_METADATA_READY = "HTTP_ZTP_NATIVE_METADATA_READY"
 MAX_DEPLOYMENT_EXPANDED_BYTES = 64 * 1024 * 1024 * 1024
 DEPLOYMENT_STAGING_RESERVE_BYTES = 64 * 1024 * 1024
 MAX_TRANSACTION_PARENT_DIRECTORIES = 4096
@@ -2111,6 +2113,446 @@ def begin_source_update(
     return old_records
 
 
+class _NativeOwnerPlan:
+    """Exact no-follow owner authority, retained until the holder is finished.
+
+    Construction and verify are read-only. Every explicit ancestor and regular
+    leaf is retained before the first chown. Linux symlinks additionally retain
+    O_PATH descriptors so owner changes address the bound inode, not its name.
+    """
+
+    def __init__(self, root_fd: int, records: dict[str, dict], manifest_bytes: bytes):
+        self.root_fd = os.dup(root_fd)
+        self.records = records
+        self.manifest_bytes = manifest_bytes
+        self.target = (os.geteuid(), os.getegid())
+        self.directories = {}
+        self.leaves = []
+        self.marker = None
+        self.closed = False
+        entries = {**records, SOURCE_MANIFEST_NAME: {
+            "path": SOURCE_MANIFEST_NAME, "type": "file", "target": None,
+            "sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+        }}
+        parents = {()}
+        for relative in entries:
+            parts = _normalized_archive_parts(relative)
+            parents.update(parts[:length] for length in range(1, len(parts)))
+        if len(parents) > MAX_TRANSACTION_PARENT_DIRECTORIES:
+            self.close()
+            raise GuardError("Native owner authority exceeds the parent budget")
+        try:
+            for parts in sorted(parents, key=lambda value: (len(value), value)):
+                descriptor, _ = _open_relative_parent(
+                    self.root_fd, (*parts, ".native-owner-authority"), create=False,
+                )
+                # Own the FD before any following syscall can fail. A failed
+                # fstat leaves no usable plan, but constructor cleanup still
+                # has exact authority to release this opened descriptor.
+                self.directories[parts] = (descriptor, None)
+                self.directories[parts] = (descriptor, os.fstat(descriptor))
+            for relative, record in sorted(entries.items()):
+                parts = _normalized_archive_parts(relative)
+                parent_fd = self.directories[parts[:-1]][0]
+                before = os.stat(parts[-1], dir_fd=parent_fd, follow_symlinks=False)
+                leaf = {"parts": parts, "record": record, "before": before, "expected": before,
+                        "parent_fd": parent_fd, "fd": -1}
+                self.leaves.append(leaf)
+                if before.st_nlink != 1:
+                    raise GuardError("Native source leaf has unsafe hard links")
+                if record["type"] == "file":
+                    if not stat.S_ISREG(before.st_mode):
+                        raise GuardError("Native source file is not regular")
+                    leaf["fd"] = os.open(
+                        parts[-1], os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+                        | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+                        dir_fd=parent_fd,
+                    )
+                else:
+                    if not stat.S_ISLNK(before.st_mode):
+                        raise GuardError("Native source symlink type changed")
+                    if sys.platform.startswith("linux") and hasattr(os, "O_PATH"):
+                        leaf["fd"] = os.open(
+                            parts[-1], os.O_PATH | os.O_NOFOLLOW
+                            | getattr(os, "O_CLOEXEC", 0), dir_fd=parent_fd,
+                        )
+                    elif (before.st_uid, before.st_gid) != self.target:
+                        raise GuardError("Native symlink owner change requires Linux O_PATH authority")
+            # Independent manifest type/bytes/target checks remain mandatory.
+            _verify_manifest_tree_held(self.root_fd, records, required_owner=None)
+            self.verify(required_owner=None, initial_owners=True)
+        except BaseException:
+            self.close()
+            raise
+
+    @staticmethod
+    def _stable_fields(metadata):
+        return (metadata.st_dev, metadata.st_ino, metadata.st_mode,
+                metadata.st_nlink, metadata.st_size, metadata.st_mtime_ns, metadata.st_ctime_ns)
+
+    def _verify_leaf(self, leaf, required_owner=None, *, initial_owners=False):
+        parts, before = leaf["parts"], leaf["expected"]
+        _assert_relative_parent_identity(self.root_fd, parts, leaf["parent_fd"])
+        named = os.stat(parts[-1], dir_fd=leaf["parent_fd"], follow_symlinks=False)
+        opened = os.fstat(leaf["fd"]) if leaf["fd"] >= 0 else named
+        if (self._stable_fields(named) != self._stable_fields(before)
+                or self._stable_fields(opened) != self._stable_fields(before)):
+            raise GuardError("Native source leaf authority changed: " + "/".join(parts))
+        expected_owner = required_owner
+        if expected_owner is None and initial_owners:
+            expected_owner = (before.st_uid, before.st_gid)
+        if expected_owner is not None and (
+            (named.st_uid, named.st_gid) != expected_owner
+            or (opened.st_uid, opened.st_gid) != expected_owner
+        ):
+            raise GuardError("Native source leaf owner changed: " + "/".join(parts))
+        record = leaf["record"]
+        if record["type"] == "file":
+            maximum = 16 * 1024 * 1024 if "/".join(parts) == SOURCE_MANIFEST_NAME else 1024 ** 3
+            if opened.st_size < 0 or opened.st_size > maximum:
+                raise GuardError("Native source authority exceeds the leaf size budget")
+            digest, offset = hashlib.sha256(), 0
+            while offset < opened.st_size:
+                chunk = os.pread(leaf["fd"], min(1024 * 1024, opened.st_size - offset), offset)
+                if not chunk:
+                    raise GuardError("Native source authority ended during reading")
+                digest.update(chunk)
+                offset += len(chunk)
+            if os.pread(leaf["fd"], 1, offset) or digest.hexdigest() != record["sha256"]:
+                raise GuardError("Native source authority bytes changed: " + "/".join(parts))
+        elif os.readlink(parts[-1], dir_fd=leaf["parent_fd"]) != record["target"]:
+            raise GuardError("Native source link target changed: " + "/".join(parts))
+        after = os.stat(parts[-1], dir_fd=leaf["parent_fd"], follow_symlinks=False)
+        held_after = os.fstat(leaf["fd"]) if leaf["fd"] >= 0 else after
+        if (self._stable_fields(after) != self._stable_fields(before)
+                or self._stable_fields(held_after) != self._stable_fields(before)
+                or (after.st_uid, after.st_gid) != (named.st_uid, named.st_gid)
+                or (held_after.st_uid, held_after.st_gid) != (opened.st_uid, opened.st_gid)):
+            raise GuardError("Native source leaf changed while verifying")
+        _assert_relative_parent_identity(self.root_fd, parts, leaf["parent_fd"])
+
+    def _verify_directories(self, required_owner=None, *, initial_owners=False):
+        for parts, (descriptor, before) in self.directories.items():
+            _assert_relative_parent_identity(self.root_fd, (*parts, ".native-owner-authority"), descriptor)
+            current = os.fstat(descriptor)
+            if (current.st_dev, current.st_ino, current.st_mode, current.st_ctime_ns) != (
+                before.st_dev, before.st_ino, before.st_mode, before.st_ctime_ns
+            ):
+                raise GuardError("Native source ancestor authority changed")
+            expected_owner = required_owner
+            if expected_owner is None and initial_owners:
+                expected_owner = (before.st_uid, before.st_gid)
+            if expected_owner is not None and (current.st_uid, current.st_gid) != expected_owner:
+                raise GuardError("Native source ancestor owner changed")
+
+    def verify(self, *, required_owner, initial_owners=False):
+        if self.closed:
+            raise GuardError("Native owner authority is closed")
+        try:
+            self._verify_directories(required_owner, initial_owners=initial_owners)
+            for leaf in self.leaves:
+                self._verify_leaf(leaf, required_owner, initial_owners=initial_owners)
+            # Preserve the existing independent resolved-link SHA check as well.
+            _verify_manifest_tree_held(self.root_fd, self.records, required_owner=required_owner)
+            self._verify_directories(required_owner, initial_owners=initial_owners)
+        except OSError as exc:
+            raise GuardError(f"Native owner authority verification failed: {exc}") from exc
+
+    def is_exact(self):
+        self.verify(required_owner=None, initial_owners=True)
+        return all((os.fstat(fd).st_uid, os.fstat(fd).st_gid) == self.target
+                   for fd, _before in self.directories.values()) and all(
+            (leaf["expected"].st_uid, leaf["expected"].st_gid) == self.target for leaf in self.leaves)
+
+    def normalize(self):
+        self.verify(required_owner=None, initial_owners=True)
+        if self.target != (os.geteuid(), os.getegid()):
+            raise GuardError("Native effective receiver identity changed")
+        try:
+            for leaf in self.leaves:
+                self._verify_leaf(leaf, initial_owners=True)
+                metadata = os.fstat(leaf["fd"]) if leaf["fd"] >= 0 else leaf["before"]
+                if (metadata.st_uid, metadata.st_gid) != self.target:
+                    if leaf["record"]["type"] == "file":
+                        os.fchown(leaf["fd"], *self.target)
+                    else:
+                        # fchown(O_PATH) fails EBADF. fchownat with EMPTY_PATH
+                        # addresses this exact symlink inode without a path race.
+                        if leaf["fd"] < 0 or not sys.platform.startswith("linux"):
+                            raise GuardError("bound Native symlink chown is unavailable")
+                        import ctypes
+                        libc = ctypes.CDLL(None, use_errno=True)
+                        function = libc.fchownat
+                        function.argtypes = [ctypes.c_int, ctypes.c_char_p,
+                                             ctypes.c_uint, ctypes.c_uint, ctypes.c_int]
+                        function.restype = ctypes.c_int
+                        if function(leaf["fd"], b"", *self.target, 0x1000 | 0x100) != 0:
+                            code = ctypes.get_errno()
+                            raise GuardError("bound Native symlink chown failed: " + os.strerror(code))
+                    after = os.fstat(leaf["fd"])
+                    # Only this successful, bound chown may advance ctime.
+                    # Every other field, owner and byte expectation is unchanged.
+                    if (self._stable_fields(after)[:-1] != self._stable_fields(metadata)[:-1]
+                            or (after.st_uid, after.st_gid) != self.target):
+                        raise GuardError("Native source changed during its bound owner write")
+                    leaf["expected"] = after
+                self._verify_leaf(leaf, self.target)
+                if leaf["record"]["type"] == "file":
+                    os.fsync(leaf["fd"])
+            for parts, (descriptor, before) in self.directories.items():
+                _assert_relative_parent_identity(self.root_fd, (*parts, ".native-owner-authority"), descriptor)
+                current = os.fstat(descriptor)
+                if (current.st_dev, current.st_ino, current.st_mode, current.st_ctime_ns,
+                    current.st_uid, current.st_gid) != (
+                    before.st_dev, before.st_ino, before.st_mode, before.st_ctime_ns,
+                    before.st_uid, before.st_gid
+                ):
+                    raise GuardError("Native source ancestor changed before chown")
+                if (current.st_uid, current.st_gid) != self.target:
+                    os.fchown(descriptor, *self.target)
+                    after = os.fstat(descriptor)
+                    if (after.st_dev, after.st_ino, after.st_mode, after.st_uid, after.st_gid) != (
+                        before.st_dev, before.st_ino, before.st_mode, *self.target
+                    ):
+                        raise GuardError("Native ancestor changed during bound owner write")
+                    self.directories[parts] = (descriptor, after)
+                os.fsync(descriptor)
+            self.verify(required_owner=self.target)
+        except OSError as exc:
+            raise GuardError(f"Native receiver owner normalization failed: {exc}") from exc
+
+    def close(self):
+        if self.closed:
+            return
+        self.closed = True
+        preserving_exception = sys.exc_info()[0] is not None
+        descriptors = []
+        if self.marker is not None:
+            descriptors.append(self.marker[0])
+            self.marker = None
+        for leaf in self.leaves:
+            if leaf["fd"] >= 0:
+                descriptors.append(leaf["fd"])
+                leaf["fd"] = -1
+        for descriptor, _before in reversed(tuple(self.directories.values())):
+            descriptors.append(descriptor)
+        self.directories.clear()
+        descriptors.append(self.root_fd)
+        self.root_fd = -1
+        first_error = None
+        for descriptor in descriptors:
+            try:
+                os.close(descriptor)
+            except OSError as exc:
+                # close() failure can consume the FD; never retry a number
+                # which another thread may already have reused. Continue
+                # releasing every other exact retained authority.
+                if first_error is None:
+                    first_error = exc
+        if first_error is not None and not preserving_exception:
+            raise first_error
+
+
+def _native_marker_present(root_fd: int) -> bool:
+    try:
+        current = os.stat(SYNC_MARKER_NAME, dir_fd=root_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    if not stat.S_ISREG(current.st_mode) or current.st_nlink != 1 or current.st_size != 0:
+        raise GuardError("Native source marker authority is unsafe")
+    return True
+
+
+def _open_native_metadata_probe(http_root: Path, state_root: Path, digest: str):
+    if not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise GuardError("Native metadata probe source digest is invalid")
+    # Never let a Native metadata-only request relabel an owned Docker tree.
+    if _read_deployment_owner(state_root / DEPLOYMENT_OWNER_NAME, http_root):
+        raise GuardError("Native metadata probe cannot normalize a Docker-owned tree")
+    if shutil.which("docker") is not None:
+        container = _inspect_container(subprocess.run)
+        if container is not None:
+            _validate_container_identity(container, http_root)
+            raise GuardError("Native metadata probe requires an explicitly Native tree")
+    root_fd, identity = _open_held_directory(http_root, "Native metadata probe root")
+    plan = None
+    try:
+        manifest_bytes = _held_manifest_bytes(root_fd)
+        if hashlib.sha256(manifest_bytes).hexdigest() != digest:
+            raise GuardError("Native metadata probe manifest differs from approved local bytes")
+        records = _manifest_records_from_bytes(manifest_bytes, SOURCE_MANIFEST_NAME)
+        plan = _NativeOwnerPlan(root_fd, records, manifest_bytes)
+        exact = plan.is_exact() and not _native_marker_present(root_fd)
+        _assert_held_directory_path(http_root, root_fd, identity, "Native metadata probe root")
+        return plan, identity, "EXACT" if exact else "NEEDS_NORMALIZATION"
+    except BaseException:
+        if plan is not None:
+            plan.close()
+        raise
+    finally:
+        os.close(root_fd)
+
+
+def _native_namespace_before(plan, parent_fd):
+    identity = (os.fstat(parent_fd).st_dev, os.fstat(parent_fd).st_ino)
+    matches = []
+    for parts, (descriptor, expected) in plan.directories.items():
+        if (expected.st_dev, expected.st_ino) == identity:
+            current = os.fstat(descriptor)
+            if (current.st_dev, current.st_ino, current.st_mode, current.st_uid,
+                current.st_gid, current.st_ctime_ns) != (
+                expected.st_dev, expected.st_ino, expected.st_mode, expected.st_uid,
+                expected.st_gid, expected.st_ctime_ns
+            ):
+                raise GuardError("Native source ancestor changed before authorized namespace write")
+            matches.append((parts, descriptor, current))
+    return matches
+
+
+def _native_namespace_after(plan, snapshots):
+    # Used only around authenticated marker/stale-member transaction operations,
+    # never a general rebaseline of possibly changed metadata.
+    for parts, descriptor, before in snapshots:
+        _assert_relative_parent_identity(plan.root_fd, (*parts, ".native-owner-authority"), descriptor)
+        after = os.fstat(descriptor)
+        if (after.st_dev, after.st_ino, after.st_mode, after.st_uid, after.st_gid) != (
+            before.st_dev, before.st_ino, before.st_mode, before.st_uid, before.st_gid
+        ):
+            raise GuardError("Native source ancestor changed during authorized namespace write")
+        plan.directories[parts] = (descriptor, after)
+
+
+def _assert_native_marker_held(plan):
+    if plan.marker is None:
+        raise GuardError("Native source commit has no bound failure marker")
+    descriptor, expected = plan.marker
+    opened = os.fstat(descriptor)
+    named = os.stat(SYNC_MARKER_NAME, dir_fd=plan.root_fd, follow_symlinks=False)
+    if (_NativeOwnerPlan._stable_fields(opened) != _NativeOwnerPlan._stable_fields(expected)
+            or _NativeOwnerPlan._stable_fields(named) != _NativeOwnerPlan._stable_fields(expected)
+            or (opened.st_uid, opened.st_gid) != plan.target
+            or (named.st_uid, named.st_gid) != plan.target):
+        raise GuardError("Native failure marker identity/owner changed")
+
+
+def _ensure_native_marker_held(plan):
+    # Never unlink/overwrite an occupied unknown marker slot, nor use root path.
+    if plan.marker is not None:
+        _assert_native_marker_held(plan)
+        os.fsync(plan.marker[0])
+        os.fsync(plan.root_fd)
+        return
+    snapshots = _native_namespace_before(plan, plan.root_fd)
+    descriptor = -1
+    created = False
+    try:
+        try:
+            descriptor = os.open(SYNC_MARKER_NAME, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+                                 | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+                                 dir_fd=plan.root_fd)
+        except FileNotFoundError:
+            descriptor = os.open(SYNC_MARKER_NAME, os.O_RDWR | os.O_CREAT | os.O_EXCL
+                                 | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+                                 0o644, dir_fd=plan.root_fd)
+            created = True
+        status = os.fstat(descriptor)
+        if (not stat.S_ISREG(status.st_mode) or status.st_nlink != 1 or status.st_size != 0
+                or (status.st_uid, status.st_gid) != plan.target or status.st_mode & 0o022):
+            raise GuardError("Native marker must be one receiver-owned empty regular file")
+        plan.marker = (descriptor, status)
+        descriptor = -1
+        _assert_native_marker_held(plan)
+        os.fsync(plan.marker[0])
+        os.fsync(plan.root_fd)
+        if created:
+            _native_namespace_after(plan, snapshots)
+    except OSError as exc:
+        raise GuardError(f"Native failure marker publication failed: {exc}") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _clear_native_marker_held(plan):
+    snapshots = _native_namespace_before(plan, plan.root_fd)
+    _assert_native_marker_held(plan)
+    # Quarantine first; a name rebind after the last stat must never cause an
+    # irreversible unlink of an unknown public marker. The private name is
+    # exclusively guard-owned, random, no-follow and reverified before cleanup.
+    private = _unused_leaf_name(plan.root_fd, SYNC_MARKER_NAME, "old")
+    try:
+        os.rename(SYNC_MARKER_NAME, private, src_dir_fd=plan.root_fd, dst_dir_fd=plan.root_fd)
+        expected = plan.marker[1]
+        named = os.stat(private, dir_fd=plan.root_fd, follow_symlinks=False)
+        held = os.fstat(plan.marker[0])
+        if (_NativeOwnerPlan._stable_fields(named) != _NativeOwnerPlan._stable_fields(held)
+                or _NativeOwnerPlan._stable_fields(held)[:-1] != _NativeOwnerPlan._stable_fields(expected)[:-1]
+                or (named.st_uid, named.st_gid) != plan.target
+                or (held.st_uid, held.st_gid) != plan.target):
+            # link is the existing no-overwrite namespace restoration primitive.
+            # If another object occupies the slot, preserve BOTH objects and
+            # report the retained private recovery path instead of overwriting.
+            try:
+                os.link(private, SYNC_MARKER_NAME, src_dir_fd=plan.root_fd,
+                        dst_dir_fd=plan.root_fd, follow_symlinks=False)
+            except OSError as exc:
+                raise GuardError(f"Native marker rebind; unknown object retained at {private}: {exc}") from exc
+            os.unlink(private, dir_fd=plan.root_fd)
+            raise GuardError("Native marker rebound at final removal; unknown marker restored")
+        # This own rename may advance only the bound marker inode ctime.
+        os.unlink(private, dir_fd=plan.root_fd)
+        os.close(plan.marker[0])
+        plan.marker = None
+    finally:
+        os.fsync(plan.root_fd)
+        _native_namespace_after(plan, snapshots)
+
+
+def _commit_source_update_and_clear_marker(
+    http_root: Path, state_root: Path, old_records: dict[str, dict], *,
+    expected_new_manifest_sha256: str, docker_managed: bool,
+    native_requested: bool = False, _native_owner_plan=None,
+    _ownership_target: tuple[int, int] = (0, 0),
+) -> None:
+    if not native_requested or docker_managed:
+        finalize_source_update(
+            http_root, state_root, old_records,
+            expected_new_manifest_sha256=expected_new_manifest_sha256,
+            docker_managed=docker_managed, _ownership_target=_ownership_target,
+        )
+        _safe_unlink(http_root / SYNC_MARKER_NAME, "source deployment marker")
+        return
+    root_fd, identity = _open_held_directory(http_root, "Native source commit root")
+    plan = _native_owner_plan
+    own_plan = plan is None
+    try:
+        manifest_bytes = _held_manifest_bytes(root_fd)
+        if hashlib.sha256(manifest_bytes).hexdigest() != expected_new_manifest_sha256:
+            raise GuardError("Native source commit differs from local authority")
+        if plan is None:
+            plan = _NativeOwnerPlan(root_fd, _manifest_records_from_bytes(
+                manifest_bytes, SOURCE_MANIFEST_NAME), manifest_bytes)
+        _ensure_native_marker_held(plan)
+        finalize_source_update(
+            http_root, state_root, old_records,
+            expected_new_manifest_sha256=expected_new_manifest_sha256,
+            docker_managed=False, native_requested=True, _native_owner_plan=plan,
+        )
+        plan.verify(required_owner=plan.target)
+        _assert_held_directory_path(http_root, root_fd, identity, "Native source commit root")
+        _clear_native_marker_held(plan)
+        plan.verify(required_owner=plan.target)
+        _assert_held_directory_path(http_root, root_fd, identity, "Native source commit root")
+    except BaseException:
+        if plan is not None:
+            _ensure_native_marker_held(plan)
+        raise
+    finally:
+        if own_plan and plan is not None:
+            plan.close()
+        os.close(root_fd)
+
+
 def finalize_source_update(
     http_root: Path,
     state_root: Path,
@@ -2118,6 +2560,8 @@ def finalize_source_update(
     *,
     expected_new_manifest_sha256: str,
     docker_managed: bool,
+    native_requested: bool = False,
+    _native_owner_plan: Optional[_NativeOwnerPlan] = None,
     _ownership_target: tuple[int, int] = (0, 0),
 ) -> None:
     """Validate/prune the new tree, bind its owner, then clear pending state."""
@@ -2141,6 +2585,7 @@ def finalize_source_update(
             raise GuardError("new source manifest digest does not match local authority")
         _finalize_live_source_update(
             http_root, state_root, old_records, docker_managed=docker_managed,
+            native_requested=native_requested, _native_owner_plan=_native_owner_plan,
             _ownership_target=_ownership_target,
             _root_authority=(root_fd, root_identity),
             _manifest_authority=(manifest_bytes, manifest_digest),
@@ -2160,6 +2605,8 @@ def _finalize_live_source_update(
     old_records: dict[str, dict],
     *,
     docker_managed: bool,
+    native_requested: bool = False,
+    _native_owner_plan: Optional[_NativeOwnerPlan] = None,
     _ownership_target: tuple[int, int] = (0, 0),
     _root_authority: Optional[tuple[int, tuple[int, int]]] = None,
     _manifest_authority: Optional[tuple[bytes, str]] = None,
@@ -2173,6 +2620,8 @@ def _finalize_live_source_update(
     transaction: Optional[_OverlayTransaction] = None
     manifest_parent_fd = -1
     manifest_fd = -1
+    native_plan = None
+    own_native_plan = _native_owner_plan is None
     try:
         _assert_held_directory_path(
             http_root, root_fd, root_identity, "deployment root",
@@ -2196,6 +2645,16 @@ def _finalize_live_source_update(
         new_records = _manifest_records_from_bytes(
             manifest_bytes, SOURCE_MANIFEST_NAME,
         )
+        required_owner = _ownership_target if docker_managed else None
+        if native_requested and not docker_managed:
+            native_plan = _native_owner_plan or _NativeOwnerPlan(root_fd, new_records, manifest_bytes)
+            if (native_plan.records != new_records or native_plan.manifest_bytes != manifest_bytes
+                    or native_plan.target != (os.geteuid(), os.getegid())
+                    or (os.fstat(native_plan.root_fd).st_dev, os.fstat(native_plan.root_fd).st_ino)
+                    != root_identity):
+                raise GuardError("Native finalizer authority differs from this receiver/source tree")
+            native_plan.normalize()
+            required_owner = native_plan.target
         if docker_managed:
             _normalize_manifest_tree_ownership_held(
                 root_fd, new_records,
@@ -2209,29 +2668,48 @@ def _finalize_live_source_update(
         )
         _verify_manifest_tree_held(
             root_fd, new_records,
-            required_owner=_ownership_target if docker_managed else None,
+            required_owner=required_owner,
         )
+        if native_plan is not None:
+            native_plan.verify(required_owner=required_owner)
         stale_relatives = sorted(set(old_records) - set(new_records), reverse=True)
         _validate_transaction_parent_budget(
             _normalized_archive_parts(relative) for relative in stale_relatives
         )
         transaction = _OverlayTransaction(http_root, root_fd, root_identity)
         for relative in stale_relatives:
+            native_snapshots = []
+            if native_plan is not None:
+                native_parent, _ = _open_relative_parent(root_fd, _normalized_archive_parts(relative), create=False)
+                try:
+                    native_snapshots = _native_namespace_before(native_plan, native_parent)
+                finally:
+                    os.close(native_parent)
             _prune_verified_stale_member(
                 http_root, root_fd, root_identity, relative,
                 old_records[relative], transaction,
             )
+            if native_plan is not None:
+                _native_namespace_after(native_plan, native_snapshots)
         _assert_held_manifest_authority(
             root_fd, manifest_parent_fd, manifest_fd, manifest_identity, manifest_bytes,
         )
         _verify_manifest_tree_held(
             root_fd, new_records,
-            required_owner=_ownership_target if docker_managed else None,
+            required_owner=required_owner,
         )
+        if native_plan is not None:
+            native_plan.verify(required_owner=required_owner)
         _assert_held_manifest_authority(
             root_fd, manifest_parent_fd, manifest_fd, manifest_identity, manifest_bytes,
         )
+        native_commit_snapshots = []
+        if native_plan is not None:
+            for entry in transaction.entries:
+                native_commit_snapshots.extend(_native_namespace_before(native_plan, entry["parent_fd"]))
         transaction.commit()
+        if native_plan is not None:
+            _native_namespace_after(native_plan, native_commit_snapshots)
         _assert_held_directory_path(
             http_root, root_fd, root_identity, "deployment root",
         )
@@ -2240,8 +2718,10 @@ def _finalize_live_source_update(
         )
         _verify_manifest_tree_held(
             root_fd, new_records,
-            required_owner=_ownership_target if docker_managed else None,
+            required_owner=required_owner,
         )
+        if native_plan is not None:
+            native_plan.verify(required_owner=required_owner)
         _assert_held_manifest_authority(
             root_fd, manifest_parent_fd, manifest_fd, manifest_identity, manifest_bytes,
         )
@@ -2276,6 +2756,8 @@ def _finalize_live_source_update(
             raise GuardError(f"cannot finalize source update: {exc}") from exc
         raise
     finally:
+        if native_plan is not None and own_native_plan:
+            native_plan.close()
         if transaction is not None:
             transaction.close()
         if manifest_fd >= 0:
@@ -4071,13 +4553,13 @@ def run_locked_archive(
                 http_root, staging, members,
                 expected_new_manifest_sha256=expected_source_manifest_sha256,
             )
-            finalize_source_update(
+            _commit_source_update_and_clear_marker(
                 http_root, state_root, old_records,
                 expected_new_manifest_sha256=expected_source_manifest_sha256,
                 docker_managed=changed,
+                native_requested=runtime == "native" and not changed,
                 _ownership_target=_ownership_target,
             )
-            _safe_unlink(marker, "source deployment marker")
     finally:
         try:
             if root_bootstrap is not None:
@@ -4132,65 +4614,92 @@ def run_lock_holder(
     """Hold a lock, defer disruption until the writer confirms a real write."""
     with safe_lock(lock_path, wait_seconds=wait_seconds):
         print(LOCK_READY, flush=True)
-        request = sys.stdin.readline().strip()
-        if not request:
-            return 0
-        if request != PREWRITE_REQUEST:
-            raise GuardError("invalid prewrite holder request")
-        changed = quiesce_for_source_update(
-            http_root, state_root=state_root,
-            docker_requested=runtime == "docker",
-            native_requested=runtime == "native",
-        )
-        old_records = (
-            begin_source_update(
-                http_root, state_root, expected_source_manifest_sha256,
-            )
-            if changed else {}
-        )
-        # One newline-delimited frame avoids a TextIO/select race in the
-        # caller: readline() may pre-buffer both formerly separate lines,
-        # leaving the file descriptor itself no longer readable for a second
-        # select() even though the second line is already in Python's buffer.
-        print(
-            f"{DOCKER_REBUILD_REQUIRED if changed else NO_MANAGED_DOCKER} "
-            f"{PREWRITE_READY}",
-            flush=True,
-        )
-        # EOF without COMMIT is an aborted writer; its persistent sync marker
-        # remains.  Only an explicit commit validates/prunes/binds the new
-        # receipt and clears that marker while this same lock is held.
+        native_plan = None
+        native_root_identity = None
+        native_status = None
+        prewrite_started = False
         committed = False
-        for incoming in sys.stdin:
-            request = incoming.strip()
-            if not request:
-                continue
-            if request != COMMIT_REQUEST or committed:
-                raise GuardError("unexpected prewrite holder input")
-            try:
-                if not __import__("re").fullmatch(
-                    r"[0-9a-f]{64}", expected_source_manifest_sha256,
-                ):
+        try:
+            while True:
+                incoming = sys.stdin.readline()
+                if incoming == "":
+                    if native_plan is not None and native_status == "EXACT":
+                        native_plan.verify(required_owner=native_plan.target)
+                        _assert_held_directory_path(http_root, native_plan.root_fd,
+                                                    native_root_identity, "Native no-op root")
+                        if _native_marker_present(native_plan.root_fd):
+                            raise GuardError("Native no-op acquired an in-progress source marker")
+                    return 0
+                request = incoming.strip()
+                if not request:
+                    raise GuardError("empty Native/prewrite holder frame")
+                if request == NATIVE_METADATA_REQUEST:
+                    if runtime != "native" or native_plan is not None:
+                        raise GuardError("invalid or repeated Native metadata probe request")
+                    native_plan, native_root_identity, native_status = _open_native_metadata_probe(
+                        http_root, state_root, expected_source_manifest_sha256,
+                    )
+                    print(f"{NATIVE_METADATA_READY} {native_status}", flush=True)
+                    continue
+                if request != PREWRITE_REQUEST:
+                    raise GuardError("invalid prewrite holder request")
+                if native_plan is not None:
+                    native_plan.verify(required_owner=None, initial_owners=True)
+                    _assert_held_directory_path(http_root, native_plan.root_fd,
+                                                native_root_identity, "Native prewrite root")
+                break
+            changed = quiesce_for_source_update(
+                http_root, state_root=state_root,
+                docker_requested=runtime == "docker", native_requested=runtime == "native",
+            )
+            prewrite_started = True
+            old_records = (begin_source_update(http_root, state_root, expected_source_manifest_sha256)
+                           if changed else {})
+            if native_plan is not None:
+                # Owner-only repair has no rsync to publish the first marker;
+                # make the normal failure fence durable before ready/COMMIT.
+                _ensure_native_marker_held(native_plan)
+            print(f"{DOCKER_REBUILD_REQUIRED if changed else NO_MANAGED_DOCKER} {PREWRITE_READY}", flush=True)
+            for incoming in sys.stdin:
+                request = incoming.strip()
+                if not request:
+                    continue
+                if request != COMMIT_REQUEST or committed:
+                    raise GuardError("unexpected prewrite holder input")
+                if not re.fullmatch(r"[0-9a-f]{64}", expected_source_manifest_sha256):
                     raise GuardError("expected source manifest digest is invalid")
-                finalize_source_update(
+                _commit_source_update_and_clear_marker(
                     http_root, state_root, old_records,
                     expected_new_manifest_sha256=expected_source_manifest_sha256,
-                    docker_managed=changed,
+                    docker_managed=changed, native_requested=runtime == "native" and not changed,
+                    _native_owner_plan=native_plan if not changed else None,
                 )
-                _safe_unlink(
-                    http_root / SYNC_MARKER_NAME, "source deployment marker",
-                )
-            except BaseException:
+                if native_plan is not None and not changed:
+                    native_plan.verify(required_owner=native_plan.target)
+                    _assert_held_directory_path(http_root, native_plan.root_fd,
+                                                native_root_identity, "Native commit root")
+                committed = True
+                print(COMMIT_READY, flush=True)
+            if committed and native_plan is not None and not changed:
+                native_plan.verify(required_owner=native_plan.target)
+                _assert_held_directory_path(http_root, native_plan.root_fd,
+                                            native_root_identity, "Native completed root")
+            return 0
+        except BaseException:
+            if prewrite_started:
                 try:
-                    _write_sync_marker(http_root / SYNC_MARKER_NAME)
+                    if native_plan is not None:
+                        _ensure_native_marker_held(native_plan)
+                    elif runtime != "native" or changed:
+                        _write_sync_marker(http_root / SYNC_MARKER_NAME)
+                    # Plain Native source COMMIT uses the held-root wrapper's
+                    # error fence. Never recreate a marker through a rebound path.
                 except GuardError as marker_error:
-                    print(
-                        f"[ERROR] cannot preserve failed source marker: {marker_error}",
-                        file=sys.stderr, flush=True,
-                    )
-                raise
-            committed = True
-            print(COMMIT_READY, flush=True)
+                    print(f"[ERROR] cannot preserve failed source marker: {marker_error}", file=sys.stderr, flush=True)
+            raise
+        finally:
+            if native_plan is not None:
+                native_plan.close()
     return 0
 
 

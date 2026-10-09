@@ -2378,15 +2378,37 @@ class ValidationTimingDiagnosticTests(unittest.TestCase):
             cycle.assert_not_called()
             self.assertEqual("keep\n", existing.read_text(encoding="utf-8"))
 
+    def test_timing_destination_obeys_isolated_checkout_boundary(self):
+        # The temporary parent may itself be inside the process checkout.
+        # This independent checkout still has its own exact path boundary.
+        with tempfile.TemporaryDirectory(prefix="governance-timing-boundary-") as directory:
+            outer = Path(directory).resolve()
+            checkout = outer / "checkout"
+            checkout.mkdir()
+            timing_path = outer / "timings.jsonl"
+            RUNNER.validate_timings_destination(checkout, timing_path)
+            alias = outer / "checkout-alias"
+            alias.symlink_to(checkout, target_is_directory=True)
+            for interior in (checkout / "timings.jsonl", alias / "timings.jsonl"):
+                with self.subTest(interior=interior), self.assertRaisesRegex(
+                    RUNNER.ImpactError, "destination must be outside the repository",
+                ):
+                    RUNNER.validate_timings_destination(checkout, interior)
+            self.assertFalse(timing_path.exists())
+            self.assertFalse((checkout / "timings.jsonl").exists())
+
     def test_governance_runner_preserves_exact_validation_with_opt_in_timings(self):
         selection = RUNNER.Selection(full_suite=True)
         with tempfile.TemporaryDirectory(prefix="governance-timing-workflow-") as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
+            checkout = root / "checkout"
+            checkout.mkdir()
             timing_path = root / "timings.jsonl"
             observed_commands = []
             observed_reports = []
 
             def run_helper(command, **kwargs):
+                self.assertEqual(checkout, kwargs["cwd"])
                 observed_commands.append(list(command))
                 self.assertEqual(
                     [sys.executable, "-B", "-m", "test_cases.validation_unittest"],
@@ -2403,10 +2425,10 @@ class ValidationTimingDiagnosticTests(unittest.TestCase):
             with mock.patch.object(RUNNER, "preflight_selection"), mock.patch.object(
                 RUNNER.subprocess, "run", side_effect=run_helper,
             ), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-                ordinary_code = RUNNER.run_validation_selection(ROOT, selection, False)
+                ordinary_code = RUNNER.run_validation_selection(checkout, selection, False)
                 self.assertFalse(timing_path.exists())
                 timed_code = RUNNER.run_validation_selection(
-                    ROOT, selection, False, timing_path,
+                    checkout, selection, False, timing_path,
                 )
 
             self.assertEqual(0, ordinary_code)

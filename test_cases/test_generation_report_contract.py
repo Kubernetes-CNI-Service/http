@@ -16,6 +16,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -41,6 +42,75 @@ def report_helper():
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+REPORT_IDENTITY_FIELDS = (
+    "st_dev", "st_ino", "st_mode", "st_nlink", "st_uid", "st_gid",
+    "st_size", "st_mtime_ns", "st_ctime_ns",
+)
+
+
+class ReportCtimeCollisionOS:
+    """Independent clock model for one real inode; bytes/IO remain genuine.
+
+    Do not patch global os or the producer's identity/hash predicates. The
+    model represents a filesystem timestamp collision, not an acceptance
+    test of that filesystem or arbitrary same-byte write-history detection.
+    """
+    def __init__(self, before):
+        self.before = before
+
+    def __getattr__(self, name):
+        return getattr(os, name)
+
+    def _observed(self, value):
+        if (value.st_dev, value.st_ino) != (self.before.st_dev, self.before.st_ino):
+            return value
+        class Observed:
+            st_ctime_ns = self.before.st_ctime_ns
+            st_ctime = self.before.st_ctime
+            def __getattr__(self, name):
+                return getattr(value, name)
+        return Observed()
+
+    def lstat(self, *args, **kwargs):
+        return self._observed(os.lstat(*args, **kwargs))
+
+    def stat(self, *args, **kwargs):
+        return self._observed(os.stat(*args, **kwargs))
+
+    def fstat(self, *args, **kwargs):
+        return self._observed(os.fstat(*args, **kwargs))
+
+
+def mutate_report_after_clock_boundary(path, before, payload, *, probe_root):
+    """Establish observable ctime before invoking the tested operation.
+
+    A separate private probe advances the same filesystem's clock first.
+    The target is mutated once; failure to establish the precondition fails
+    explicitly rather than weakening assertions, skipping or retrying tests.
+    """
+    deadline = time.monotonic() + 2.0
+    with tempfile.TemporaryDirectory(prefix="report-clock-", dir=probe_root) as directory:
+        probe = Path(directory) / "clock"
+        probe.write_bytes(b"clock\n")
+        while probe.stat().st_ctime_ns <= before.st_ctime_ns:
+            if time.monotonic() >= deadline:
+                raise AssertionError("report injection filesystem clock did not advance within 2s")
+            time.sleep(0.001)
+            probe.write_bytes(b"clock\n")
+        if probe.stat().st_dev != before.st_dev:
+            raise AssertionError("report clock precondition probe is on a different filesystem")
+        path.write_bytes(payload)
+        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+        observed = path.stat()
+        if (observed.st_ino != before.st_ino or observed.st_dev != before.st_dev
+                or observed.st_mtime_ns != before.st_mtime_ns
+                or observed.st_ctime_ns == before.st_ctime_ns):
+            raise AssertionError("report injection did not establish same inode/restored mtime/changed ctime")
+        if path.read_bytes() != payload:
+            raise AssertionError("report injection did not establish expected independent bytes")
+        return observed
 
 
 def parent_release(project: Path) -> dict[str, object]:
@@ -278,10 +348,15 @@ class GenerationReportContract(unittest.TestCase):
 
     def test_report_commit_rejects_same_inode_preimage_change_and_aba(self):
         helper, report = self.publish()
-        path = self.output / "generation-report.json"
+        original_payload = (self.output / "generation-report.json").read_bytes()
         for boundary in ("content", "same-byte-aba", "held-directory"):
             with self.subTest(boundary=boundary):
-                candidate = helper.prepare_generation_report(self.project, report)
+                project = self.root / ("existing-" + boundary) / self.project.name
+                output = project / "99-output-ztp"
+                output.mkdir(parents=True)
+                path = output / "generation-report.json"
+                path.write_bytes(original_payload)
+                candidate = helper.prepare_generation_report(project, report)
                 self.addCleanup(helper.discard_prepared_generation_report, candidate)
                 before = path.stat()
                 before_bytes = path.read_bytes()
@@ -292,9 +367,8 @@ class GenerationReportContract(unittest.TestCase):
                 native_open = helper._open_prepared_directory
 
                 def mutate_original():
-                    path.write_bytes(foreign)
-                    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
-                    injections.append(path.stat())
+                    injections.append(mutate_report_after_clock_boundary(
+                        path, before, foreign, probe_root=self.root))
 
                 def open_then_mutate(*args, **kwargs):
                     descriptor = native_open(*args, **kwargs)
@@ -342,9 +416,8 @@ class GenerationReportContract(unittest.TestCase):
                         native_open = helper._open_prepared_directory
 
                         def mutate_staged():
-                            path.write_bytes(foreign)
-                            os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
-                            injections.append(path.stat())
+                            injections.append(mutate_report_after_clock_boundary(
+                                path, before, foreign, probe_root=self.root))
 
                         def open_then_mutate(*args, **kwargs):
                             descriptor = native_open(*args, **kwargs)
@@ -369,6 +442,110 @@ class GenerationReportContract(unittest.TestCase):
                         self.assertEqual(before.st_ino, path.stat().st_ino)
                         self.assertEqual(foreign, path.read_bytes())
                         self.assertFalse(destination.exists())
+
+    def test_old_report_same_size_clock_collision_rejects_changed_bytes(self):
+        helper, report = self.publish()
+        payload = (self.output / "generation-report.json").read_bytes()
+        foreign = payload.replace(b"12:00:00+08:00", b"12:00:09+08:00")
+        self.assertNotEqual(payload, foreign)
+        self.assertEqual(len(payload), len(foreign))
+        self.assertEqual("2026-09-24T12:00:09+08:00", json.loads(foreign)["generated_at"])
+        for boundary in ("before", "held-directory", "authority-callback"):
+            with self.subTest(boundary=boundary):
+                project = self.root / ("collision-" + boundary) / self.project.name
+                output = project / "99-output-ztp"
+                output.mkdir(parents=True)
+                path = output / "generation-report.json"
+                path.write_bytes(payload)
+                candidate = helper.prepare_generation_report(project, report)
+                self.addCleanup(helper.discard_prepared_generation_report, candidate)
+                before = path.stat()
+                model = ReportCtimeCollisionOS(before)
+                injected = []
+                native_open = helper._open_prepared_directory
+                def mutate():
+                    path.write_bytes(foreign)
+                    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+                    observed = model.lstat(path)
+                    self.assertEqual(tuple(getattr(before, field) for field in REPORT_IDENTITY_FIELDS),
+                                     tuple(getattr(observed, field) for field in REPORT_IDENTITY_FIELDS))
+                    self.assertNotEqual(hashlib.sha256(payload).hexdigest(),
+                                        hashlib.sha256(path.read_bytes()).hexdigest())
+                    injected.append(path.stat().st_ino)
+                def open_then_mutate(*args, **kwargs):
+                    descriptor = native_open(*args, **kwargs)
+                    mutate()
+                    return descriptor
+                authority_calls = []
+                def authority():
+                    authority_calls.append(True)
+                    if len(authority_calls) == 2:
+                        mutate()
+                with mock.patch.object(helper, "os", model):
+                    if boundary == "before":
+                        mutate()
+                        with self.assertRaises(helper.GenerationReportError):
+                            helper.commit_prepared_generation_report(candidate)
+                    elif boundary == "held-directory":
+                        with mock.patch.object(helper, "_open_prepared_directory", side_effect=open_then_mutate):
+                            with self.assertRaises(helper.GenerationReportError):
+                                helper.commit_prepared_generation_report(candidate)
+                    else:
+                        with self.assertRaises(helper.GenerationReportError):
+                            helper.commit_prepared_generation_report(candidate, require_authority=authority)
+                self.assertEqual([before.st_ino], injected)
+                self.assertEqual(before.st_ino, path.stat().st_ino)
+                self.assertEqual(foreign, path.read_bytes())
+                self.assertTrue(candidate.temporary.is_file())
+
+    def test_old_report_unchanged_clock_collision_model_still_commits(self):
+        helper, report = self.publish()
+        path = self.output / "generation-report.json"
+        candidate = helper.prepare_generation_report(self.project, report)
+        with mock.patch.object(helper, "os", ReportCtimeCollisionOS(path.stat())):
+            self.assertEqual(path, helper.commit_prepared_generation_report(candidate))
+        self.assertEqual(report, json.loads(path.read_bytes()))
+        self.assertFalse(candidate.temporary.exists())
+
+    def test_staged_report_same_size_clock_collision_preserves_foreign_evidence(self):
+        helper = report_helper()
+        report = self.build()
+        for action in ("commit", "discard"):
+            for boundary in ("before", "held-directory"):
+                with self.subTest(action=action, boundary=boundary):
+                    project = self.root / ("staged-collision-" + action + boundary) / self.project.name
+                    output = project / "99-output-ztp"
+                    output.mkdir(parents=True)
+                    candidate = helper.prepare_generation_report(project, report)
+                    path = candidate.temporary
+                    before = path.stat()
+                    payload = path.read_bytes()
+                    foreign = payload.replace(b"12:00:00+08:00", b"12:00:09+08:00")
+                    self.assertNotEqual(payload, foreign)
+                    self.assertEqual(len(payload), len(foreign))
+                    model = ReportCtimeCollisionOS(before)
+                    native_open = helper._open_prepared_directory
+                    def mutate():
+                        path.write_bytes(foreign)
+                        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+                        self.assertEqual(tuple(getattr(before, field) for field in REPORT_IDENTITY_FIELDS),
+                                         tuple(getattr(model.lstat(path), field) for field in REPORT_IDENTITY_FIELDS))
+                    def open_then_mutate(*args, **kwargs):
+                        descriptor = native_open(*args, **kwargs)
+                        mutate()
+                        return descriptor
+                    operation = (helper.commit_prepared_generation_report if action == "commit"
+                                 else helper.discard_prepared_generation_report)
+                    with mock.patch.object(helper, "os", model):
+                        if boundary == "before":
+                            mutate()
+                            with self.assertRaises(helper.GenerationReportError): operation(candidate)
+                        else:
+                            with mock.patch.object(helper, "_open_prepared_directory", side_effect=open_then_mutate):
+                                with self.assertRaises(helper.GenerationReportError): operation(candidate)
+                    self.assertEqual(before.st_ino, path.stat().st_ino)
+                    self.assertEqual(foreign, path.read_bytes())
+                    self.assertFalse(candidate.destination.exists())
 
     def test_prepare_does_not_publish_and_failed_commit_preserves_old_record(self):
         helper, old = self.publish()

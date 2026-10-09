@@ -78,6 +78,7 @@ class PreparedGenerationReport:
     directory_identity: tuple[int, int]
     temporary_identity: tuple[int, ...]
     old_identity: tuple[int, ...] | None
+    old_payload_sha256: str | None
     payload_sha256: str
 
 
@@ -184,18 +185,37 @@ def _project_name(project: Path) -> str:
     return name
 
 
-def _validate_parent(project: Path, parent: dict[str, Any]) -> None:
-    if type(parent.get("schema_version")) is not int or parent["schema_version"] != 2:
-        raise GenerationReportError("parent release must be schema 2")
-    if parent.get("validation") != "passed" or parent.get("project") != _project_name(project):
+
+def release_file_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    """Reuse the existing full nine-field governance identity."""
+    return _report_preimage_identity(metadata)
+
+
+def decode_release_record(payload: bytes, label: str) -> dict[str, Any]:
+    """Decode a bounded payload already read from held authority."""
+    return _decode_record(payload, label)
+
+
+def validate_parent_release_basis(parent: dict[str, Any], project_name: str) -> None:
+    """Validate the exact schema-1/2 canonical basis without report policy."""
+    schema = parent.get("schema_version")
+    if type(schema) is not int or schema not in {1, 2}:
+        raise GenerationReportError("unsupported parent release schema")
+    if parent.get("validation") != "passed" or parent.get("project") != project_name:
         raise GenerationReportError("parent release is not validated for this project")
     release_id = parent.get("release_id")
     if not isinstance(release_id, str) or not _RELEASE_RE.fullmatch(release_id):
         raise GenerationReportError("invalid parent release ID")
+    if schema == 1 and ("dhcp_status" in parent or any(
+            key in parent for key in ("generated_inputs", "imported_configs"))):
+        raise GenerationReportError("legacy parent cannot claim new release fields")
+    if schema == 2 and parent.get("dhcp_status") not in {"enabled", "disabled"}:
+        raise GenerationReportError("invalid parent DHCP status")
     try:
-        basis_keys = PARENT_BASIS + tuple(
-            key for key in ("generated_inputs", "imported_configs") if key in parent
-        )
+        basis_keys = tuple(key for key in PARENT_BASIS
+                           if key != "dhcp_status" or schema == 2)
+        basis_keys += tuple(key for key in ("generated_inputs", "imported_configs")
+                            if key in parent)
         basis = {key: parent[key] for key in basis_keys}
         expected = hashlib.sha256(json.dumps(
             basis, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
@@ -204,6 +224,12 @@ def _validate_parent(project: Path, parent: dict[str, Any]) -> None:
         raise GenerationReportError("incomplete parent release basis") from exc
     if release_id != expected:
         raise GenerationReportError("parent release digest mismatch")
+
+
+def _validate_parent(project: Path, parent: dict[str, Any]) -> None:
+    if type(parent.get("schema_version")) is not int or parent["schema_version"] != 2:
+        raise GenerationReportError("parent release must be schema 2")
+    validate_parent_release_basis(parent, _project_name(project))
     generated_at = parent.get("generated_at")
     if not isinstance(generated_at, str):
         raise GenerationReportError("parent timestamp missing")
@@ -355,19 +381,31 @@ def _open_prepared_directory(output: Path, expected: tuple[int, int]) -> int:
         raise
 
 
-def _existing_report_identity(destination: Path, project: Path) -> tuple[int, ...] | None:
+def _existing_report_preimage(
+    destination: Path, project: Path, *, directory_fd: int | None = None,
+) -> tuple[tuple[int, ...] | None, str | None]:
+    """Bind one bounded, validated old record to both its identity and bytes."""
+    def named():
+        return (os.lstat(destination) if directory_fd is None else os.stat(
+            destination.name, dir_fd=directory_fd, follow_symlinks=False,
+        ))
     try:
-        before = os.lstat(destination)
+        before = named()
     except FileNotFoundError:
-        return None
-    payload = _read_regular(destination, REPORT_LIMIT)
+        return None, None
+    payload = _read_regular(destination, REPORT_LIMIT, directory_fd=directory_fd)
     assert payload is not None
     old = _decode_record(payload, "existing governed report")
     _validate_report_shape(old, project)
     identity = _report_preimage_identity(before)
-    if identity != _report_preimage_identity(os.lstat(destination)):
+    if identity != _report_preimage_identity(named()):
         raise GenerationReportError("existing report changed while validating preimage")
-    return identity
+    return identity, hashlib.sha256(payload).hexdigest()
+
+
+def _existing_report_identity(destination: Path, project: Path) -> tuple[int, ...] | None:
+    """Compatibility accessor; publication must compare the complete preimage."""
+    return _existing_report_preimage(destination, project)[0]
 
 
 def prepare_generation_report(
@@ -383,7 +421,7 @@ def prepare_generation_report(
     output = _output_directory(project)
     directory_identity = _require_directory(output)
     destination = output / REPORT_NAME
-    old_identity = _existing_report_identity(destination, project)
+    old_identity, old_payload_sha256 = _existing_report_preimage(destination, project)
     payload = (json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode("utf-8")
     if len(payload) > REPORT_LIMIT:
         raise GenerationReportError("report exceeds bound")
@@ -421,6 +459,7 @@ def prepare_generation_report(
             destination=destination, temporary=output / temporary_name,
             directory_identity=directory_identity,
             temporary_identity=_report_preimage_identity(observed), old_identity=old_identity,
+            old_payload_sha256=old_payload_sha256,
             payload_sha256=hashlib.sha256(payload).hexdigest(),
         )
     except BaseException:
@@ -451,6 +490,11 @@ def commit_prepared_generation_report(candidate: PreparedGenerationReport, *, re
         require_authority()
     if not isinstance(candidate, PreparedGenerationReport):
         raise GenerationReportError("invalid prepared report candidate")
+    if ((candidate.old_identity is None) != (candidate.old_payload_sha256 is None)
+            or candidate.old_payload_sha256 is not None and (
+                not isinstance(candidate.old_payload_sha256, str)
+                or re.fullmatch(r"[0-9a-f]{64}", candidate.old_payload_sha256) is None)):
+        raise GenerationReportError("invalid prepared old report byte binding")
     project = candidate.destination.parent.parent
     output = _output_directory(project)
     if (_identity(os.lstat(output)) != candidate.directory_identity
@@ -462,8 +506,8 @@ def commit_prepared_generation_report(candidate: PreparedGenerationReport, *, re
         raise GenerationReportError("staged report changed")
     if _report_preimage_identity(os.lstat(candidate.temporary)) != candidate.temporary_identity:
         raise GenerationReportError("staged report identity changed")
-    current_identity = _existing_report_identity(candidate.destination, project)
-    if current_identity != candidate.old_identity:
+    expected_old = candidate.old_identity, candidate.old_payload_sha256
+    if _existing_report_preimage(candidate.destination, project) != expected_old:
         raise GenerationReportError("existing report changed before commit")
     descriptor = _open_prepared_directory(output, candidate.directory_identity)
     try:
@@ -474,17 +518,14 @@ def commit_prepared_generation_report(candidate: PreparedGenerationReport, *, re
                 or not stat.S_ISREG(staged_named.st_mode)
                 or staged_named.st_nlink != 1):
             raise GenerationReportError("staged report changed before commit")
-        try:
-            old_named = os.stat(REPORT_NAME, dir_fd=descriptor, follow_symlinks=False)
-        except FileNotFoundError:
-            old_identity = None
-        else:
-            old_identity = _report_preimage_identity(old_named)
-        if old_identity != candidate.old_identity:
-            raise GenerationReportError("existing report changed before commit")
-        _require_original_staged_report(candidate, descriptor)
         if require_authority is not None:
             require_authority()
+        # The last checks use the held parent and occur after the caller's
+        # authority callback, not only before obtaining the directory FD.
+        if _existing_report_preimage(
+                candidate.destination, project, directory_fd=descriptor) != expected_old:
+            raise GenerationReportError("existing report changed before commit")
+        _require_original_staged_report(candidate, descriptor)
         os.replace(
             candidate.temporary.name, REPORT_NAME,
             src_dir_fd=descriptor, dst_dir_fd=descriptor,

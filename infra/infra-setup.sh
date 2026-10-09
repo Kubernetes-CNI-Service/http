@@ -1006,6 +1006,7 @@ ztp_dependency_packages=(
   python3-xlsxwriter
   openssh-client
   curl
+  whois
 )
 optional_service_packages=(apache2 apache2-utils ssl-cert isc-dhcp-server)
 apache_auth_modules=(

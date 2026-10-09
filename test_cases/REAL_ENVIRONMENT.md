@@ -1,5 +1,147 @@
 # Real-environment acceptance cases
 
+## 2026-10-09 固定 AIR 轮次后的 TEST 候选补充（非正式 proof）
+
+- R22：新增 schema4 收据将 immutable selected DHCP 与历史 flat compatibility publication
+  分开，四个 installed leaf 的原身份/摘要绑定原 WAL 前像；旧 schema3 不在原地升级。
+  四个代表性本地恢复窗口 exit0；另三个真实子进程 SIGKILL→冷恢复/部分恢复重入/
+  显式 recover 保持服务停止测试 3 tests / 18.902s / exit0，日志
+  `outputs/test-diagnostics/schema4-dhcp-three-real-sigkill-workflows.log` SHA-256
+  `0994ebbdeea62d6dda19b6c276717f2be0dfc79bf7242464eeeac0c679e7b7a5`。
+  installed leaf 可写权限/foreign UID 与 JSON float/bool 身份不能自洽冒充原 owner；
+  独立 RED 原日志保留。Linux/root、断电/C2 与 DEV ACK 仍 OPEN，不称 SIGKILL 为断电。
+- MANUAL：真实 LOAD→首次 preflight→confirm 的 final qualification 在本轮合法
+  private evidence parent 预留之后、首次 SSH/设备操作之前取得；不是在设备操作后重封。
+  错误 selector 不创建输出、不发 SSH；既有配置同步模块及 lifecycle 67 tests exit0。
+- 复制验证器：真实 --root 提供的 tools 契约为唯一 import 来源，缺失/foreign cache
+  fail closed，退出恢复原 sys.path/modules。新三项真实 LOAD→独立 cwd 子进程已通过；
+  最早 fixture 缺必需 project 参数的失败不是产品根因证据，原日志保留。
+- HTTP：只读必要 POSIX 准入后复核受管 held directory ctime；外部祖先只绑定
+  dev/ino/mode/UID/GID，并前后明确复核 ACL，不把无关 sibling 创建视为权限漂移。
+  首次 fstat 失败仍关闭新 FD；关闭异常只尝试各 owned FD 一次，保留主失败。
+  缺失/不可调用/不支持的
+  ACL introspection 明确 HOLD，不能把 API 缺失当 ACL-free；不读取 private key 或修权限。
+  本地 ACL/race model 不等于实际 Linux setfacl/www-data HTTP 请求通过。
+- 外部命名空间：共享临时目录新增无关子目录造成 nlink/size/time 变化，不应冒充
+  项目权威换绑。外部祖先只绑定 dev/ino/mode/UID/GID，持有与命名检查使用同一投影；
+  项目、release、selector、manifest 与成员仍保留完整九字段。独立 direct 加真实
+  LOAD→MANUAL workflow 23 tests exit0，日志
+  `outputs/test-diagnostics/selected-exterior-direct-and-real-load-workflow-green.log`
+  SHA-256 `0ebe5392a96efa98a298c0e5fbe3d0b774c9341f70416b614f0ed5423ee5e7f3`。
+- Cumulus 镜像策略：实际 LOAD parent/pinned generation→bootstrap 渲染→VM 消费者
+  仅在实际选中脚本唯一 literal upgrade=false，且当前输入、scope、服务地址、prefix、
+  目标版本、所有者/身份与 runtime 绑定均合格时不要求未使用的 Cumulus 镜像；
+  true 仍检查镜像，未知/重复/冲突策略拒绝，不推导 NVOS 例外。VM 整模块与真实
+  workflow 共 49 tests exit0，日志
+  `outputs/test-diagnostics/cumulus-no-upgrade-service-routing-fixture-green.log`
+  SHA-256 `a43766765fccd91de291b0eaf509cc3b04bacc5153f813d89907c9a26edc1bdf`。
+  旧 service-routing 夹具未渲染 bootstrap 的失败原日志保留；它独立声明 true 分支，
+  不代替真实策略资格测试。上述本地证据均不构成新版本 AIR 或设备验收。
+- Cumulus 正文资格补充：上述 literal 绑定不足以证明不升级，新增独立 RED 确认
+  删除升级保护、添加 image 命令或将策略移入 heredoc 仍可能被旧资格放行。
+  候选只规范 producer 的七个 exact literal 槽及严格 public-key 数据块，正文其它
+  字节必须等于当前可信模板；模板/runtime 的 owner、完整身份及首次 SHA 均末尾重核。
+  不承诺抵御特权写者在 source attestation 之前同时篡改模板和 runtime。
+  VM reader 在 lstat→open 换成实际 FIFO 时 NONBLOCK 后拒绝并关闭 FD，不执行脚本。
+  整 VM 模块及实际 LOAD→render workflow 57 tests / 4.205s / exit0，完整日志
+  `outputs/test-diagnostics/vm-reader-fifo-whole-module-and-real-render-green.log`
+  SHA-256 `3afcec4e52da0402018689dd3b49d483efbb202f40107610972168c632d5bbfe`。
+  初次 whole-body 命令的错误 selector 原日志保留，不算产品失败或通过。
+- HTTP 夹具因果收口：外层适配器原先把所有 root 外目录伪装成 root-owned 755，
+  导致真实归档 named/FD 不一致；只模型精确 canonical root.parents，其它路径/ACL
+  仍真实。listener 的 active A 绑定私有 fixture，monitor 原调用断言在 fixture
+  恢复默认根目录之前执行；未放宽归档/gate、未禁用 HTTP、未删改原 fault oracles。
+  新 HTTP/FD direct、实际 main、归档前置、委托 SETUP、SSH/monitor/Supervisor/report
+  原失败边界共 25 tests / 3.568s / exit0，完整日志
+  `outputs/test-diagnostics/http-causal-final-original-fault-oracles-green.log`
+  SHA-256 `7ab05b2a1fb2098081f89118e24ea9da0fe07425897a53914eb24ecc63fab0db`。
+  原 9 FAIL 与后续 3 FAIL 的完整日志均留存；这些因果检查不是正式 full。
+- schema4 正例工作流前置补齐：原四个实际 SETUP→LOAD 收据工作流未提供安装目录，
+  新合同在真实 installed 四叶资格检查处拒绝；完整原 RED 日志保留。
+  仅这四个正例使用独立 literal DHCP 文件和隔离映射，仍执行真实 capture/reader/gate，
+  不放宽生产 installed 要求或原恢复断言；另核 schema4、四叶摘要以及前后字节/完整
+  九字段不变。四项 / 0.640s / exit0，日志
+  `outputs/test-diagnostics/schema4-installed-positive-workflow-prerequisite-green.log`
+  SHA-256 `ccc23f143c16fedf37d40bf9baaa1494f9c510d4ce235790994cc31deb060f4e`。
+- 本节记录本轮候选，正式 related/full/check 尚待执行；上一 clean 6c206ed 的
+  full/check 不覆盖这些新增字节，提交代码本身也不等于正式 full 通过。
+  固定 AIR 轮次的原失败记录/备份不覆盖、不删除；取得新精确 full/check 后才能进入
+  新固定版本的 AIR 正常 LOAD、重复 LOAD、health/HTTP/设备验证轮次。
+
+## 待编号：Cumulus no-upgrade 的实际 runtime 镜像验证
+
+- 状态：LOCAL CANDIDATE / AIR NOT RUN / FULL-CHECK NOT YET PROVEN；编号待定。
+  本项修复验证器误要求未使用镜像，不免除真实 provision、REQ23 导入/取回或发布门禁。
+- 前置条件：当前精确 committed full/check、同版部署/验证器/tools 摘要，已授权隔离
+  AIR 项目及 root-only 可恢复备份、排他锁/写者静默。冻结 global/subnet/inventory、
+  parent/release/selector、实际 bootstrap bytes/UID/mode/九字段与服务/设备前像。
+- 保留验证：实际 no-upgrade LOAD→SETUP→Q 提交→HTTP bootstrap→代表设备 provision；
+  选中角色脚本唯一 literal false 时无镜像可通过策略项，但所有其余 HTTP、DHCP、
+  identity、worker 与健康项必须执行。隔离 true 对照仍要求正确实际镜像 HTTP HEAD；
+  脚本缺失/重复策略、正文升级保护漂移、非执行策略、错误来源服务地址或 prefix
+  代表负例必须拒绝；仅七个 literal 槽/public-key 数据块可不同，其余正文绑定
+  同版可信模板并重核完整身份与字节 SHA。不能从输入
+  --no-upgrade 参数、保留历史脚本或 mock 值推断资格；NVOS 镜像要求不变。
+- 缩减：同解析与恢复机制的字段排列可由现有 direct/真实 workflow 合并承担；
+  未执行设备行为标 NOT RUN，不能将本地 literal 解析或模拟 HTTP 当真实 provision。
+  保存完整物理 END/exit、同版摘要、前后绑定及实际 HTTP/设备取回证据。
+- 清理与风险：只清理本轮准确列出的隔离部署/fixture，保留原失败日志和恢复备份；
+  未知 bootstrap、版本错配或不完整恢复时保持 HOLD，不以删文件或手改 ledger 通过。
+
+## 待编号：Native HTTP 公共源权限写前拒绝与 delegated SETUP 边界
+
+- 对应缺陷：固定 AIR 6c206ed Native 项目 0700 / public leaf 0600 与实际 HTTP403；
+  本项只登记公共源写前准入，不把 rsync ownership、key helper、Apache 配置或
+  测试私有 fixture 构造错误混为同一缺陷。状态：现场新版本未验证，OPEN。
+- 自动化候选：`test_load_release_transaction.ReleaseTransactionTests` 的
+  `test_http_source_gate_*`、`test_real_delegated_setup_http_*`、
+  `test_real_delegated_setup_enabled_public_source_reaches_original_wal_fence`、
+  `test_real_native_load_private_http_source_rejects_before_monitor_freeze_or_keys`。
+  本地外部祖先 Linux/ACL-free metadata model 不是实际 root/HTTP 证据。
+- 前置条件：当前精确树正式 full/check exit0；同版本代码/输入权威核验；仅已授权
+  AIR 管理 VM root-private 隔离 fixture；完整且校验过的可恢复备份；同 UID/privileged
+  非协作写者在检查—写入窗口静默；不开生产端口、不部署未经证明的候选。
+- 保留范围：正常 Native LOAD→delegated SETUP→实际 HTTP 请求与重复 LOAD；
+  enabled 模式项目755/公钥644正例及项目700/两public叶600各代表性负例；
+  HTTP-disabled700兼容控制；实际 Linux root/www-data、UID/GID、祖先权限/ACL。
+  同故障路径已有自动化充分覆盖的重复组合可记录等价理由合并，不能删除原断言。
+- 成功标准：enabled 不可遍历/不可读源在 monitor停、A freeze、key/template mutation、
+  WAL登记及首个共享发布前拒绝；报准确源路径/权限，原 inode/字节/权限、P清单与
+  link/parent/DHCP/WAL 保持预期安全状态；不递归 chmod/chown、不读私钥或未知对象。
+  disabled 不承担新 HTTP准入职责，但仍执行原输入、密钥与事务安全门禁。
+  正例必须实际请求返回正确已绑定版本的公开公钥内容；POSIX gate PASS不等于HTTP PASS。
+- 证据：HEAD/tree/Python/platform；命令argv、服务/监控前后状态；已知对象dev/ino/
+  mode/owner/nlink/字节SHA；原正常/拒绝完整日志、物理END/退出码与先后stat一致；
+  原控制面已冻结版本与前后运行态、测试是否仅局部模型或实际root witness明确区分。
+- 故障注入：仅隔离 fixture 显式项目/两public叶权限；受控名称rebind/单link负例由
+  本地自动化覆盖。真实 ACL/SELinux/AppArmor、创建缺失公开父目录后的HTTP读取须
+  独立实际见证；未执行写暂缓/OPEN，不用 root os.access 或 SIGKILL 代替其它证据。
+- 清理：仅删除准确归属当前私有验证的 fixture；验证无需/禁止更改真实祖先权限、
+  private key、未知对象和旧WAL preimage；任何异常保留日志/备份/权限证据并停止该轮。
+- 残余风险/确认：必要POSIX门禁不覆盖Apache策略与检查后同UID/特权写者的不可观察
+  ABA历史；原实际事故与新版本见证分开记录；暂缓/风险接受仍需owner明确确认。
+
+
+## Public-key same-identity permission convergence — 待编号现场补充
+
+- 2026-10-09 本地候选证据：原两模块 47 methods / 14 subtest failures RED 保留在
+  `outputs/test-diagnostics/ssh-public-mode-tests-first-red.log`，不是预判。另增首次读取
+  与 matching 复核时 source/target 换成真实 FIFO 的独立负例，安全 open 必须 NONBLOCK
+  并拒绝非 regular；两份 FIFO RED 均保留。实现只改确认过的原公钥 inode，并复核
+  source/project/target 持有身份与字节，file/directory fsync 后才报告成功。
+  扩展四模块 85 tests / 5.260s / exit0，完整日志
+  `outputs/test-diagnostics/ssh-public-mode-and-fifo-green.log` SHA-256
+  `9a3db9cacd89c7aca9292def0cdc84dce090e9f1901ada483f45883dc1dc56fb`。
+  初次候选应用的缩进错误完整日志 `ssh-public-mode-held-green.log` 留存，修正后再测；
+  该失败不算原实现 RED，也不是测试通过。尚无此 dirty 候选的正式 full/check。
+- 状态：OPEN / NOT RUN；仅隔离本地 direct 和 SETUP→config-only LOAD→report fixture 是候选，不能称 Linux/root、Native LOAD、真实 HTTP 或设备验收通过。
+- 前置条件：审核并提交当前精确源码/测试与自动 ledger，正式 full/check exit0；owner 授权的独立 Linux/root 可丢弃项目副本、快照、同 UID 外部写者静默。保存项目、源公钥和两 public 名的 dev/ino/uid/gid/mode/SHA 以及祖先目录权限，private key 不读取。
+- 保留场景：workstation 准备同身份 laptop.pub 0600，源/目标 comment 不同，确认仅原 single-link owned public inode 变成 0644、字节/inode 不换、文件和目录 fsync、private key 与 project 0700 不变；正常 0644 重跑零 mode 写。随后用真正 Linux/root LOAD、SETUP 的 delegated 路径、report 和 HTTP public 请求验证实际读者与报告身份一致。
+- 负例：source/target/目录换绑、foreign uid/gid、hardlink、mismatch(reject)、fsync 失败；不读/不写换绑外部对象，不输出伪 SKIP 成功。fchmod 已发生而 fsync/post-check 失败时，原 owned inode 可能已为 0644，记录 HOLD/未证明耐久，不经路径自动回滚。新草案不能把全部 HTTP 403 归因于 public 0600。
+- WAL 边界：模式归一必须在 --prepare-only / 正式 WAL 与 release 输入封存前；active WAL 的 workstation 模式变更拒绝，不手改或重封 preimage。保留原 R22 real LOAD→SETUP→冷恢复 workflow，验证旧 A 的模式/字节/身份恢复及新 Q publication 的全部 input 权威。delegated SETUP 只读且 Native management public 仍 exact 0644；mgmt 0600 不得偷偷修正后继续。真实已封存 WAL 恢复与 A/B 激活尚待执行，不以 caller-context fixture 冒充。
+- HTTP 边界：project 0700 和不可遍历祖先不得自动 chmod。本补充不实现祖先可遍历性写前门禁；必须另审独立 owner/路径/权限合同，在真实共享写前拒绝不可遍历 public root。Native management 0600 也仍需单独明确输入准备合同。
+- 证据/清理：保存脱敏完整命令/日志/物理 END/exit、前后 identity/SHA/mode、fsync 与正常/拒绝路径，私钥只记录 inode/mode 不读内容。仅清理本卡明确隔离对象，先验证快照可恢复；SIGKILL 不等同断电，现场未执行仍 OPEN。
+
 ## 2026-10-08 owner 确认的现场验证缩减范围
 
 owner 在 TEST 会话明确要求采用此前建议的代表性验证并将规则加入周期任务。
@@ -640,6 +782,17 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 ## TC-REAL-BUNDLE-SHARED-001 — 项目派生 shared artifacts 的选择与安装
 
+- 2026-10-09 待编号 Native 密码后端依赖候选：`whois` 进入原管理端 ZTP 依赖数组，
+  install、offline cache 和 summary 仍共用原数组；shared packager/installer 的离线
+  必需根集合同时要求 whois。独立 native 数组/cache 与缺 whois 包拒绝先 RED 后 GREEN；
+  整 shared bundle direct/workflow 模块 44 tests / exit0，日志
+  `outputs/test-diagnostics/native-whois-closure-green.log` SHA-256
+  `e2a980668f01c505d52fa068bb8705ff6413497baabb221aaa4b0465944df362`。
+  新门禁不能静默认可旧缺 whois 的离线包，须重新生成完整索引/缓存，不能借本修复
+  放宽 Packages/Packages.gz、逐件 SHA 或 installer 检查。这里未安装现场包、未更改
+  密码，也未证实现场 mkpasswd 两种 hash 能力；缺 mkpasswd 不是普通无密码更新 LOAD
+  的 R22 失败或 HTTP 403 根因，本卡真实离线安装/密码验收保持原边界。
+
 - 前置条件：准备 `2026-12-vb-gb300` 项目输入、各平台合法 switch image、完整离线 APT fixture 和
   显式 firmware fixture；源码先完成全量测试与 `--check`。准备隔离目标 root 及已有同名/异内容
   artifact 对照。
@@ -786,6 +939,30 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
   测试 image/container 并恢复外网策略。制品摘要不替代组织批准的来源签名。
 
 ## TC-REAL-VM-ZTP-001 — Ubuntu 24.04 管理 VM 发布后只读验收
+
+- 2026-10-09 待编号验收器候选：独立 direct 使用实际 `infra/infra-setup.sh` 的 V2
+  heredoc，旧验收器拒绝 V2 且接受双版本 marker；RED 日志
+  `outputs/test-diagnostics/vm-apache-current-v2-red.log` 保留。候选仅允许一个精确 V1/V2
+  marker 并原样返回策略字节，整模块 33 tests / exit0；GREEN 日志
+  `vm-apache-current-v2-green.log` SHA-256
+  `046abf07a787f9f851def8636729acdb12417868903db4b37825a300393be126`。
+  旧安装的 V1 与实际源 V2 仍须报漂移，不将兼容解析视为已安装合格；本地 GREEN
+  不改变 OS 默认 24.04，也不关闭 actual Apache、CGI 认证、服务和现场验收。
+  mini 输出选取追加独立 direct 与真实 SETUP 选旧 P2P→LOAD 选择→VM 对照：保留多份
+  历史 AIR JSON 不再误拒绝，选定输出缺失不能退读唯一历史件；摘要读取期间选定
+  P2P 字节改变须拒绝。原三个 RED 加一个漂移 RED 日志分别为
+  `vm-mini-selected-output-red.log` 与 `vm-mini-selected-drift-red.log`；整 VM 模块
+  与既有 P2P workflow 对照共 38 tests / exit0，完整 GREEN 日志
+  `outputs/test-diagnostics/vm-mini-selected-output-green.log` SHA-256
+  `d2b778f2ce8aaef20ebb3a8e799e2d61e55c310b78114162956d19d8f5c4dd55`。
+  该本地选择修复不证明 AIR JSON 的真实硬件拓扑、设备 provision 或服务现场闭环。
+  eth-only 平台门禁补充：真实 LOAD 的规范 parent 只有 Cumulus 时，旧 VM 验收器
+  错误要求 NVOS。交易夹具先补齐 SETUP 的 DHCP compatibility link（原夹具失败日志
+  保留），修正后 RED 只剩缺少 NVOS；按可信非空 scope/inventory 决定必需平台，
+  空清单仍保守要求两族，类型冲突/未知类型和缺失必需 Cumulus 仍失败。完整 VM 模块
+  38 tests / exit0，日志 `outputs/test-diagnostics/vm-eth-scope-runtime-green.log`
+  SHA-256 `3fbcac7010fb39f78a10b94574b57136c26b81512e5d22c6a336836c9343d3c2`。
+  本地候选不是当前精确树正式 proof，也未改变 no-upgrade 镜像验证或现场设备验收。
 
 - 前置条件：在隔离 Ubuntu 24.04 VM 中完成 upload、load 和所需服务启动；两个直连 DHCP
   shared-network 的 service IP 必须分别位于两个独立 vNIC。验收期间不得再次运行 load、
@@ -1669,6 +1846,48 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 ## TC-REAL-R22-GENERATION-INPUT-ABA-001 — 跨进程输入换代与多输出一致性
 
+- 2026-10-09 parent-selected DHCP 共享读取候选：新 direct 首次 18 methods 因共享
+  API 缺失 RED；首轮实现三模块 324 methods 失败的共同因果为 Darwin Python 未导出
+  O_SYMLINK，不是 DHCP 数据通过。核本机 SDK 的公开 ABI 后仅 Darwin 使用该 flag，
+  仍以持有 FD 的完整身份核 symlink，未知平台无安全 primitive 必须拒绝；不得降级
+  为路径 read/stat。补充后 project/report 三模块 325 tests / exit0，完整日志
+  `outputs/test-diagnostics/selected-dhcp-shared-stage-darwin-green.log` SHA-256
+  `69e2ab7213407d227d2959a56d9c208c7a52d447b08b39f15dd30e9e801082df`。
+  固定 parent、selector、generation、DHCP 子 manifest 与四输出持 FD/原九字段身份；
+  旧 flat 字节/inode 保留，坏 selector 不可回退，legacy 必须显式绑定本项目固定目录。
+  该阶段仅共享 API，MANUAL/VM 消费者、LOAD receipt/cold recovery 接入未完成；不得
+  冒称解决现场 pinned B/旧 flat A 不一致或 Linux/root/C2/DEV ACK 验收。
+  后续消费者候选补充：实际 LOAD parent+selector commit→MANUAL 预检/确认与 VM
+  component/runtime/installed 对照，初次 9 methods RED（1 failure/12 errors，包含
+  缺少新 API 的 errors）日志 `selected-dhcp-consumers-red.log` 保留。接入后七个真实
+  多脚本场景加 VM 整模块共 47 tests / exit0，完整日志
+  `outputs/test-diagnostics/selected-dhcp-consumers-green.log` SHA-256
+  `f58737b7948f7569b08271662e16db0ed4ea576f14df7b476dba15b33cee28a8`。
+  pinned B 与旧 flat A 分开，旧 A 字节/inode 不改；prepared qualification 必须复核
+  selector/目录/叶身份，selector 消失或坏链接不能退读 flat。installed 四文件仅要求
+  字节摘要匹配，不要求安装 inode 等于源 inode；允许明确 hash-bound 空 host 文件。
+  disabled 必须验证当前 parent/selector，不能读取陈旧 DHCP。该候选还不是正式
+  full/check 或现场复验；LOAD schema4/持久 WAL 冷恢复、复制到 /tmp 验收器的同版
+  module 定位及完整操作生命周期另验，不以此局部 PASS 冒称 R22 闭合。
+
+- 2026-10-09 AIR Native 重复 LOAD 的 DHCP publication 边界补充（候选，现场复验
+  **OPEN / NOT RUN**）：本任务 owner 授权的 worker-383c250a:21650 管理 VM，项目
+  `2026-12-vb-gb300`，Native/systemd、mini AIR、no-upgrade。在 root-only 完整
+  源码/项目与 `/etc` 恢复备份、排他部署锁、确切 Mac full/check 版本后执行正常
+  Linux root LOAD。原现场第一次启动健康因项目目录0700导致公钥HTTP403，原 LOAD
+  已自动停 Apache/DHCP；修复可遍历权限后，第二次 LOAD 冻结 A 时拒绝 SETUP 正常
+  同名 DHCP 项目软链接。原完整日志保留在 TEST `outputs/test-diagnostics/` 的
+  `air-383c250a-linux-load-owner-fixed.log` 与 `air-383c250a-linux-load-public-path-fixed.log`。
+  本地 direct 与真实 SETUP→LOAD 使用独立预期先复现同样拒绝；候选 receipt 只接受
+  本项目 `99-output-dhcp/` 下同名普通 single-link 源，绑定发布 link、源的九字段
+  identity、两父目录与 SHA，普通 nofollow reader 不放宽。正式复验须在新精确版本
+  full/check 后同步，核正常 LOAD→健康→重复 LOAD、原 receipt 与服务安全状态；
+  同字节新源/新发布 inode、异项目/绝对链接、父目录换绑须 HOLD，未知对象保留。
+  清理仅依据已核 root-private 快照，由负责人显式恢复；不删原 parent/selector/
+  receipt 来跳过冻结，不自动启动 A，不将 SIGKILL 当断电。leaf10 provision 和后续
+  eth2→eth3迁移未完成，MAC、设备应用 receipt、实际 swp36/VLAN119 连通及 eth0/
+  eth4 回退链须独立验证；当前故障发现及本地 GREEN 不关闭 Linux/root/C2/DEV ACK。
+
 - 2026-10-08 全量失败边界补充：未列入 WAL 的 flat 公钥替换须在 P/Q 资格门禁拒绝，
   不进入 runtime restore；已登记的合法 Q key link 才用于晚到 orphan/retirement 场景。
   两类 direct/真实 LOAD→SETUP→冷 LOAD 负例分开保留。真实 materialized latest
@@ -2247,6 +2466,25 @@ group 同步前后核验；正确对象不重建，同内容换绑、Boolean/未
 
 ## TC-REAL-REQ16-GENERATION-REPORT-001 — 实际发布公钥报告与两文件故障窗口
 
+- 2026-10-09 本地候选/待现场复验补充：固定 `6c206ed` 的 Linux/root 私有 27 项报告夹具出现
+  9 个失败断言，原断言和完整日志保留；另一次 24 次私有文件写入诊断确认同长度异字节
+  可以在九字段 stat identity 全部相同的条件下发生。后者是文件系统观察证据，不是
+  report 产品防护通过或漏洞的动态复现。本地候选已分别验证旧报告 preparation 的字节
+  SHA、held-parent 最终提交核验、真实 LOAD publication WAL registration 与冷 resume
+  从原 `before` 收据恢复旧 SHA；未知旧对象、异字节 metadata 碰撞仍 HOLD，外来证据与
+  原 WAL/candidate 不被删除。现有同字节 ABA 注入须先有界证明 ctime 已变化再调用被测
+  操作，超时明确失败，不 skip；同字节且所有观察身份均不变的写历史不可凭 stat/hash
+  识别，不声称新 SHA 门禁能检测任意非协作写者。确定性时间戳模型只用于 direct/真实
+  多脚本私有 workflow，不替代 Linux/root、服务安全状态或断电见证。本地 focused RED 的
+  11 个方法产生 7 个失败断言（含 registration 原先预测已有保护、实际却复现的缺口）；
+  原日志 `outputs/test-diagnostics/generation-report-preimage-focused-red.log` SHA-256
+  `65f69b75f3e155bc70ff363eafa644878c0b1b0ea74b3cf0ef9376e195181fb7` 保留。
+  修复后两完整报告模块及四个 WAL 回归共 39 项 GREEN / exit0；日志
+  `generation-report-preimage-focused-green.log` SHA-256
+  `89dd63b80b20abd163560bafe755f78fb738dd0827f899af51bd329d45ed645f`。
+  这不是当前候选正式 related/full/check 或 Linux/root 新版复验；现场补充仍 NOT RUN，
+  不改变本卡保留/合并/暂缓的外部风险边界，也不以私有 loopback/fixture PASS 关闭本卡。
+
 - Case ID：`TC-REAL-REQ16-GENERATION-REPORT-001`；类型：real-environment / transaction / scenario；
   对应 REQ-16 R16-9。状态：**NOT RUN / REAL_ENV REQUIRED**。本机
   `test_generation_report_contract.py`、`test_generation_report_workflow.py` 与相关 load 事务测试
@@ -2465,3 +2703,14 @@ group 同步前后核验；正确对象不重建，同内容换绑、Boolean/未
 - 负例：最新套件坏件、空/缺/未知/重复/非 Cumulus 成员、软链/硬链、YAML null、CSV 地址不符、导入期间根或子目录换绑、同 inode A→B→A、增添更新名字、输出时间戳冲突，以及在预检、复制、子发布和 parent commit 前故障注入。特别在 DHCP 四文件安装后、parent 原子替换前增添命名更新的套件：无值选择必须拒绝提交并提示重新运行 load，回滚四文件；显式选定旧套件不因新目录出现而自动改选。预期 fail closed，不退选次新、不读取换绑外部字节、不覆盖现有输出，旧 release/`latest_yaml`/受管服务状态按事务合同留存；任何无法证明完整恢复的窗口保持 HOLD/停服。
 - 2026-10-08 本地补充：独立 direct 与真实 LOAD 子生成/发布及最终 DHCP/parent workflow 已覆盖软链自身未变、实体目标换绑；最后 YAML 解析后新增未知件、同字节 member clone、原选中目录换绑或更新自动套件须在返回资格前拒绝。显式旧套件和合法别名正例保留。此本地读后闭合不证明真实非协作同 UID 写者静默、root/Docker 操作或设备取回；本卡仍 OPEN，现场须保存解析/最终提交窗口前后的原目录和逐件身份，不能把局部 GREEN 当作真实验收。
 - 证据与清理：保存脱敏 argv/exit、每阶段前后 inode/size/SHA/链接文字、有序成员快照、release ID 与报告、设备请求/响应、服务状态、写者静默和快照恢复核对。仅清理本卡隔离项目/VM，禁止直接改生产来源或已部署包；缺独立真实 Linux/设备见证时保持 OPEN。
+
+## 待编号 — Native 传输接收端 UID/GID、零内容变化与持锁收尾
+
+- Case ID／对应缺陷：**待编号**；类型：direct / real multi-script workflow / real-environment；适用平台：本地自动化及获准的 Ubuntu 22.04/24.04 Native 管理服务器。状态：**LOCAL CANDIDATE / LINUX ROOT NOT RUN / FULL-CHECK NOT YET PROVEN**。不把 Native 标成 `docker_managed`，不改变受支持 OS 合同；本卡不授予部署、服务或网络变更权限。
+- 本地候选与证据边界：自动化入口为 `test_cases.test_deployment_writer_lock.NativeReceiverOwnerClosureTests`，以及已有 `test_cases.test_deployment_writer_lock`、`test_cases.test_deploy_upload_archive` 和 manifest 的 `package_sync_load` workflow。新增聚焦测试包含真实子进程 guard ↔ sync client 的 EXACT EOF 再验／NEEDS PREWRITE-COMMIT 及真实 archive guard 入口，但外部运行态发现和 quiesce 使用替身；当前接收者 UID/GID 正例及注入的晚变 owner/ctime 拒绝不等于 macOS 上实际外国数值 UID/GID 的 `chown` 见证。聚焦 GREEN、两模块结果或本卡新增文本均不能代替 related 自动 ledger、同一精确干净树正式 full/check，更不能充当新版本 AIR/Linux root 验收。实际状态须附原始日志、物理 END/exit、HEAD/tree 与 proof 精确摘要后更新，不沿用旧版现场结果。
+- 风险、目标与模块边界：`tools/sync-code.py` 保留 rsync archive 的递归／链接／权限／mtime／设备特殊文件／压缩行为，但 Native 传输不带发送端数值 owner/group；`tools/deployment_prewrite_guard.py` 在持锁且 source manifest 逐字节／no-follow 验真后，以 guard 实际有效 UID/GID 闭合受管 regular leaves、Linux O_PATH symlinks、manifest carrier 和明确祖先。source bytes 未变时先只读 probe：EXACT 必须零写，并在 holder EOF 再验；NEEDS 必须走正常 PREWRITE、受控 marker、owner 收敛和 COMMIT。Docker 保留独立 receipt／rebuild／owner 语义。旧 Native inventory 不新增 prune 授权，未列 manifest 的未知旁支保留，不因 metadata-only 清理它们。
+- 前置条件：仅在 owner 另行批准的隔离可丢弃 Linux Native 目标、私有项目与 root-only 可恢复快照内执行；先具备即将验收版本的精确 committed full/check、source manifest/包 SHA、目标 host pin、受管对象 dev/ino/mode/nlink/size/mtime/ctime/UID/GID/SHA、链接文字、root 与所有明确祖先身份、marker、未知旁支哨兵及服务原状态。验证同 UID 外部写者静默并记录 sudo 与非 root 运行身份；foreign UID/GID 必须为隔离夹具数值，不修改真实用户／客户项目。真实 root fchown／Linux O_PATH 与 fchownat 能力不能由 mocks 或普通重启推定。没有这些前提保持 NOT RUN，不在 live 环境补证。
+- 正常步骤与预期：分别走 sync 与 archive 两个真实入口，覆盖 non-root 接收者与经授权的 sudo 接收者；构造受管 regular leaf、符号链接、carrier、祖先各自具有与接收者不同数值 UID/GID 的隔离对象。传输后要求仅精确受管对象 owner 收敛至实际 guard 接收身份，字节／链接目标／原权限不被任意改写，普通公开内容确实可由实际读者访问，unknown sibling 的字节与元数据保持不变，无 Docker receipt。随后相同 source 重跑 EXACT，要求源码／manifest／目录／marker 无创建、删除、chown、chmod 或 mtime/ctime 变化且 release/EOF exit 0；分别保留同字节错误 owner 与既有合法 failure marker，要求只读 probe 判 NEEDS，再在持锁 PREWRITE-COMMIT 完成收敛／清 marker，不能由客户端按 rebound 路径修补或提前返回成功。
+- 代表性拒绝／中断：保留字节变化、hardlink、leaf／祖先／root 换绑、whole-plan 初验后且单对象写前 UID/GID/ctime 晚变、EXACT READY 后至 EOF 的 metadata 漂移，以及最后 marker 清理窗口未知 replacement。预期非零拒绝，不读取换绑外部字节、不归一化未知对象、不删除替换树 marker；失败 fence 只能留在原 held root，未知 marker 不覆盖／不删除，私有隔离名需封存可恢复证据。对资源不足／open、fstat、chown、fsync、close 失败保留原异常及清理证据，不因局部通过直接重跑正式 full；只有根因修复或可核验运行条件变化才允许重跑。
+- 缩减与残余风险：同机制／同恢复路径且已有独立自动化的重复现场排列可记录等价理由后合并，保留两个实际入口、实际 Linux/root owner 写入、代表性关键提交边界、冷恢复及失败安全状态；物理断电不为本 owner 窄修新增穷举要求。R22 原有 Linux/root、实际 C2、断电暂缓及 DEV ACK 和 REQ23 真导入／设备取回的边界仍分别 OPEN；SIGKILL 不等于断电，本卡也不关闭它们。每次保留／合并／暂缓要记录理由、替代证据、残余风险和确认人；未执行不写通过，未明确风险接受不写豁免。
+- 证据、清理与幂等：保存精确脱敏 argv/exit、guard/client/archive 三方物理顺序日志、原始 manifest/归档 SHA、全部受管及 unknown 对象前后 inode/UID/GID/mode/ctime/SHA、marker public/private 身份、服务状态、写者静默与快照恢复核对；只恢复本卡批准的隔离对象，不通过手改 ledger 或删除 unknown sibling 清场。repeat EXACT 与失败后显式恢复分别有完整证据方可登记实测；实际 foreign owner／Linux O_PATH／任一入口／full-check 缺失时继续保留候选或 NOT RUN 状态。

@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import ExitStack, redirect_stderr, redirect_stdout
+from contextlib import ExitStack, contextmanager, redirect_stderr, redirect_stdout
 import fcntl
 import hashlib
 import importlib.util
@@ -51,6 +51,71 @@ def project_with_marker(path: Path, laptop: bytes, management: bytes) -> Path:
         leaf.write_bytes(payload)
         leaf.chmod(0o644)
     return path
+
+
+def prepare_http_enabled_delegated_fixture(root: Path, project: Path) -> None:
+    # Only the two positive delegated workflows call this helper. Keep the
+    # shared project_with_marker() private so negative/key-only tests remain
+    # unchanged. All fixture writes precede key and inode snapshots.
+    root.chmod(0o755)
+    project.chmod(0o755)
+    public_keys = root / "ztp/config/publickey"
+    public_keys.mkdir(parents=True, mode=0o755)
+    for directory in (root / "ztp", root / "ztp/config", public_keys):
+        directory.chmod(0o755)
+    (project / "01-global.yaml").write_text(
+        "schema_version: 1\n"
+        "common:\n"
+        "  mgmt:\n"
+        "    dhcp-server:\n"
+        "      status: enabled\n"
+        "      package: isc-dhcp-server\n"
+        "    http:\n"
+        "      status: enabled\n"
+        "      package: apache2\n"
+        f"      http_root: {root}\n"
+        "    ztp:\n"
+        "      status: enabled\n"
+        "      ztp_url_prefix: /ztp\n"
+        "  switch:\n"
+        "    system:\n"
+        "      dns: {}\n"
+        "      ntp: {}\n"
+        "      date-time: {}\n"
+        "switches:\n"
+        "- eth:\n"
+        "    system:\n"
+        "      aaa:\n"
+        "        user:\n"
+        "          cumulus:\n"
+        "            hashed-password: '$6$fixture$safe-value'\n",
+        encoding="utf-8",
+    )
+
+
+@contextmanager
+def delegated_fixture_source_scope(setup, root: Path):
+    # Real runpy LOAD and real load_global/permission gate remain in use.
+    # Only the fixture's exterior Darwin ancestors receive the Linux public
+    # model; owners, modes and ACLs inside this private root remain real.
+    from test_cases.test_load_release_transaction import ReleaseTransactionTests
+    original_run_path = setup.runpy.run_path
+    with ExitStack() as scopes:
+        def load_real_api(path, *args, **kwargs):
+            api = original_run_path(path, *args, **kwargs)
+            if Path(path).resolve(strict=True) == LOAD_PATH.resolve(strict=True):
+                scopes.enter_context(
+                    ReleaseTransactionTests._http_linux_public_ancestor_model(
+                        SimpleNamespace(root=root),
+                        module=api["require_http_project_source_access"].__globals__,
+                    )
+                )
+            return api
+        scopes.enter_context(mock.patch.object(setup, "ZTP", str(root / "ztp")))
+        scopes.enter_context(mock.patch.object(
+            setup.runpy, "run_path", side_effect=load_real_api,
+        ))
+        yield
 
 
 class SshKeyPreparationWorkflow(unittest.TestCase):
@@ -264,6 +329,7 @@ class SshKeyPreparationWorkflow(unittest.TestCase):
                 root / "project", public_line("ssh-ed25519", 113, "laptop"),
                 public_line("ssh-ed25519", 114, "server"),
             )
+            prepare_http_enabled_delegated_fixture(root, project)
             before = {
                 name: (project / name).read_bytes()
                 for name in ("laptop.pub", "mgmt-server.pub")
@@ -293,6 +359,7 @@ class SshKeyPreparationWorkflow(unittest.TestCase):
             child_fd = os.dup(parent_fd)
             try:
                 with mock.patch.object(loader, "_run_subprocess", side_effect=run_real_setup), \
+                     delegated_fixture_source_scope(setup, root), \
                      mock.patch("platform.system", return_value="Linux"), \
                      mock.patch.object(setup, "HTTP_BASE", str(root)), \
                      mock.patch.dict(
@@ -656,6 +723,7 @@ class SshKeyPreparationWorkflow(unittest.TestCase):
             (laptop_home / ".ssh/id_ed25519.pub").write_bytes(laptop_key)
             (server_home / ".ssh/id_ed25519.pub").write_bytes(server_key)
             project = project_with_marker(root / "project", laptop_key, server_key)
+            prepare_http_enabled_delegated_fixture(root, project)
             laptop_target = project / "laptop.pub"
             management_target = project / "mgmt-server.pub"
             laptop_identity = (laptop_target.stat().st_dev, laptop_target.stat().st_ino)
@@ -682,6 +750,7 @@ class SshKeyPreparationWorkflow(unittest.TestCase):
             child_fd = os.dup(parent_fd)
             try:
                 with mock.patch.dict(os.environ, {"HOME": str(server_home)}), \
+                     delegated_fixture_source_scope(setup, root), \
                      mock.patch("platform.system", return_value="Linux"), \
                      mock.patch.object(loader, "active_project", return_value=None), \
                      mock.patch.object(loader, "supports_local_ztp_services", return_value=True), \

@@ -1645,6 +1645,48 @@ def project_live_management_setup(tree: ast.AST) -> ast.AST:
 
 
 class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
+    def _http_management_load_fixture(self, load, project):
+        """Opt-in source admission for the two real management LOAD cases.
+
+        Keep original monitor/password fault oracles; do not mock the new
+        gate, disable HTTP, or change unrelated private/negative fixtures.
+        """
+        from test_cases.test_load_release_transaction import ReleaseTransactionTests
+        root = project.parent
+        ztp = root / "ztp"
+        ztp.mkdir(mode=0o755)
+        (project / "01-global.yaml").write_text(
+            "schema_version: 1\n"
+            "common:\n"
+            "  mgmt:\n"
+            "    dhcp-server:\n"
+            "      status: enabled\n"
+            "      package: isc-dhcp-server\n"
+            "    http:\n"
+            "      status: enabled\n"
+            "      package: apache2\n"
+            f"      http_root: {root}\n"
+            "    ztp:\n"
+            "      status: enabled\n"
+            "      ztp_url_prefix: /ztp\n"
+            "  switch:\n"
+            "    system:\n"
+            "      dns: {}\n"
+            "      ntp: {}\n"
+            "      date-time: {}\n"
+            "switches:\n"
+            "- eth:\n"
+            "    system:\n"
+            "      aaa:\n"
+            "        user:\n"
+            "          cumulus:\n"
+            "            hashed-password: '$6$fixture$safe-value'\n",
+            encoding="utf-8",
+        )
+        fixture = SimpleNamespace(root=root, project=project, ztp=ztp)
+        ReleaseTransactionTests._http_main_public_source_fixture(fixture)
+        return ReleaseTransactionTests._http_linux_public_ancestor_model(fixture, module=load)
+
     @staticmethod
     def dhcp_main_patches(module, *, events=None):
         record = {
@@ -2125,7 +2167,9 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
             def event(name, result=None):
                 return lambda *_a, **_k: events.append(name) or result
 
-            with mock.patch.object(load, "preflight_password_update_backend"), \
+            with self._http_management_load_fixture(load, project), \
+                 mock.patch.multiple(load, HTTP_ROOT=project.parent, ZTP_DIR=project.parent / "ztp"), \
+                 mock.patch.object(load, "preflight_password_update_backend"), \
                  mock.patch.object(load, "acquire_deployment_lock", return_value=93), \
                  mock.patch.object(load, "release_deployment_lock"), \
                  mock.patch.object(load, "runtime_os", return_value="Linux"), \
@@ -2152,12 +2196,14 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
                 self.assertEqual(1, load.main([
                     str(project), "--update-passwords", "--host-role=management-server",
                 ]))
+                # Assert against the actual runtime root before the fixture
+                # patch exits and restores the repository default.
+                stop.assert_called_once_with(load.HTTP_ROOT)
 
         self.assertEqual(
             ["monitor-stop", "template-write", "password-write", "validate"],
             events,
         )
-        stop.assert_called_once_with(load.HTTP_ROOT)
         main = function_node("DAY0-Prepare/11-load.py", "main")
         self.assertLess(
             first_call_line(main, "stop_native_ztp_monitors"),
@@ -2178,7 +2224,9 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
             project = Path(temporary) / "customer"
             project.mkdir()
             (project / "01-global.yaml").write_text("fixture\n", encoding="utf-8")
-            with mock.patch.object(load, "preflight_password_update_backend"), \
+            with self._http_management_load_fixture(load, project), \
+                 mock.patch.multiple(load, HTTP_ROOT=project.parent, ZTP_DIR=project.parent / "ztp"), \
+                 mock.patch.object(load, "preflight_password_update_backend"), \
                  mock.patch.object(load, "acquire_deployment_lock", return_value=94), \
                  mock.patch.object(load, "release_deployment_lock"), \
                  mock.patch.object(load, "runtime_os", return_value="Linux"), \
@@ -2197,7 +2245,7 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
                 self.assertEqual(1, load.main([
                     str(project), "--update-passwords", "--host-role=management-server",
                 ]))
-        stop.assert_called_once_with(load.HTTP_ROOT)
+                stop.assert_called_once_with(load.HTTP_ROOT)
         template_write.assert_not_called()
         password_write.assert_not_called()
         validate.assert_not_called()

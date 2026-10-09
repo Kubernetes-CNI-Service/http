@@ -26,6 +26,7 @@ from unittest import mock
 
 from test_cases.test_generation_report_contract import (
     LAPTOP_FINGERPRINT, MANAGEMENT_FINGERPRINT, report_helper,
+    REPORT_IDENTITY_FIELDS, ReportCtimeCollisionOS, mutate_report_after_clock_boundary,
 )
 from test_cases import test_load_release_transaction as _load_fixture
 from test_cases.test_ssh_key_preparation_contract import public_line
@@ -186,9 +187,9 @@ class GenerationReportWorkflow(unittest.TestCase):
 
         def open_then_mutate(*args, **kwargs):
             descriptor = native_open(*args, **kwargs)
-            path.write_bytes(foreign)
-            os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
-            injections.append(path.stat().st_ino)
+            injected = mutate_report_after_clock_boundary(
+                path, before, foreign, probe_root=self.fixture.root)
+            injections.append(injected.st_ino)
             return descriptor
 
         with mock.patch.object(helper, "_open_prepared_directory", side_effect=open_then_mutate):
@@ -199,6 +200,51 @@ class GenerationReportWorkflow(unittest.TestCase):
         self.assertEqual(foreign, path.read_bytes())
         self.assertEqual(before_parent, (self.project / "99-output-ztp/current-release.json").read_bytes())
         self.assertFalse(parent_candidate.committed)
+        self.assertTrue(candidate.temporary.is_file())
+        self.assertFalse(os.path.lexists(self.project / "99-output-ztp/current"))
+
+    def test_real_setup_load_report_same_size_clock_collision_blocks_late_commit(self):
+        self.real_setup_publish()
+        parent, parent_candidate = self.real_load_prepare()
+        self.addCleanup(LOAD.discard_prepared_release, parent_candidate)
+        LOAD.commit_prepared_release(parent_candidate)
+        helper = LOAD.generation_report
+        report = helper.build_report(self.project, parent, published_dir=self.published)
+        original = helper.prepare_generation_report(self.project, report)
+        helper.commit_prepared_generation_report(original)
+        path = original.destination
+        payload = path.read_bytes()
+        before = path.stat()
+        old_timestamp = str(report["generated_at"])
+        self.assertRegex(old_timestamp, r"^\d{4}-")
+        foreign_timestamp = ("2001" if old_timestamp.startswith("2000") else "2000") + old_timestamp[4:]
+        foreign = payload.replace(old_timestamp.encode(), foreign_timestamp.encode(), 1)
+        self.assertEqual(foreign_timestamp, json.loads(foreign)["generated_at"])
+        self.assertNotEqual(payload, foreign)
+        self.assertEqual(len(payload), len(foreign))
+        before_parent = parent_candidate.destination.read_bytes()
+        candidate = helper.prepare_generation_report(self.project, report)
+        self.addCleanup(helper.discard_prepared_generation_report, candidate)
+        model = ReportCtimeCollisionOS(before)
+        native_open = helper._open_prepared_directory
+        injected = []
+        def open_then_mutate(*args, **kwargs):
+            descriptor = native_open(*args, **kwargs)
+            path.write_bytes(foreign)
+            os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+            self.assertEqual(tuple(getattr(before, field) for field in REPORT_IDENTITY_FIELDS),
+                             tuple(getattr(model.lstat(path), field) for field in REPORT_IDENTITY_FIELDS))
+            self.assertNotEqual(hashlib.sha256(payload).hexdigest(), hashlib.sha256(path.read_bytes()).hexdigest())
+            injected.append(path.stat().st_ino)
+            return descriptor
+        with mock.patch.object(helper, "os", model), \
+                mock.patch.object(helper, "_open_prepared_directory", side_effect=open_then_mutate):
+            with self.assertRaises(helper.GenerationReportError):
+                helper.commit_prepared_generation_report(candidate)
+        self.assertEqual([before.st_ino], injected)
+        self.assertEqual(before.st_ino, path.stat().st_ino)
+        self.assertEqual(foreign, path.read_bytes())
+        self.assertEqual(before_parent, parent_candidate.destination.read_bytes())
         self.assertTrue(candidate.temporary.is_file())
         self.assertFalse(os.path.lexists(self.project / "99-output-ztp/current"))
 
@@ -374,6 +420,99 @@ class GenerationReportWorkflow(unittest.TestCase):
                 self.assertNotEqual(good, mutant)
                 self.assertTrue(_main_report_order_errors(mutant))
 
+    def test_real_workstation_setup_public_mode_then_load_and_report_preserve_key(self):
+        home = self.fixture.root / "private-operator-home"
+        ssh = home / ".ssh"
+        ssh.mkdir(parents=True, mode=0o700)
+        source = ssh / "id_ed25519.pub"
+        source.write_bytes(public_line("ssh-ed25519", 31, "source-comment"))
+        source.chmod(0o644)
+        private = ssh / "id_ed25519"
+        private.write_bytes(b"private-sentinel-never-read-by-project-preparation")
+        private.chmod(0o600)
+        destination = self.project / "laptop.pub"
+        original = destination.read_bytes()
+        destination.chmod(0o600)
+        self.project.chmod(0o700)
+        before, private_before = destination.stat(), private.stat()
+        native_open = os.open
+
+        def guarded_open(path, *args, **kwargs):
+            self.assertNotIn(str(path), (str(private), private.name))
+            return native_open(path, *args, **kwargs)
+
+        proxy = SimpleNamespace(**{field: getattr(os, field) for field in dir(os)})
+        proxy.open = mock.Mock(side_effect=guarded_open)
+        with mock.patch.object(SETUP.Path, "home", return_value=home), \
+             mock.patch.object(SETUP, "_DRY_RUN", False), \
+             mock.patch.object(SETUP.ssh_keys, "os", proxy), \
+             redirect_stdout(io.StringIO()):
+            SETUP._prepare_laptop_public_key(str(self.project))
+        self.assertEqual(original, destination.read_bytes())
+        self.assertEqual(before.st_ino, destination.stat().st_ino)
+        self.assertEqual(0o644, stat.S_IMODE(destination.stat().st_mode))
+        self.assertEqual(0o700, stat.S_IMODE(self.project.stat().st_mode))
+        self.assertEqual((private_before.st_ino, private_before.st_mtime_ns),
+                         (private.stat().st_ino, private.stat().st_mtime_ns))
+        self.assertEqual(0o600, stat.S_IMODE(private.stat().st_mode))
+        self.real_setup_publish()
+        # Real config-only LOAD preserves key authority; this is not a
+        # root/private-pair or Apache traversability acceptance claim.
+        pubs = LOAD.prepare_pubkeys(self.project, ssh_dir=ssh,
+                                   inject_management_key=False,
+                                   allow_management_key_generation=False)
+        self.assertEqual((self.project / "laptop.pub", self.project / "mgmt-server.pub"), pubs)
+        parent, parent_candidate = self.real_load_prepare()
+        self.addCleanup(LOAD.discard_prepared_release, parent_candidate)
+        helper = report_helper()
+        report = helper.build_report(self.project, parent, published_dir=self.published)
+        candidate = helper.prepare_generation_report(self.project, report)
+        self.addCleanup(helper.discard_prepared_generation_report, candidate)
+        LOAD.commit_prepared_release(parent_candidate)
+        helper.commit_prepared_generation_report(candidate)
+        observed = helper.inspect_generation_report(self.project, published_dir=self.published)
+        self.assertEqual([LAPTOP_FINGERPRINT, MANAGEMENT_FINGERPRINT],
+                         [item["fingerprint"] for item in observed["public_keys"]])
+        self.assertEqual(original, destination.read_bytes())
+        self.assertEqual(before.st_ino, destination.stat().st_ino)
+
+    def test_real_native_load_rejects_management_public_0600_without_normalizing(self):
+        destination = self.project / "mgmt-server.pub"
+        destination.chmod(0o600)
+        before, payload = destination.stat(), destination.read_bytes()
+        self.real_setup_publish()
+        with mock.patch.object(LOAD, "_open_management_pair", side_effect=AssertionError("no private-pair open")):
+            with self.assertRaises(LOAD.LoadError):
+                LOAD.prepare_pubkeys(self.project, ssh_dir=self.fixture.root / "absent-home",
+                                     inject_management_key=True,
+                                     allow_management_key_generation=False)
+        self.assertEqual(payload, destination.read_bytes())
+        self.assertEqual(before.st_ino, destination.stat().st_ino)
+        self.assertEqual(0o600, stat.S_IMODE(destination.stat().st_mode))
+        self.assertFalse((self.project / "99-output-ztp/generation-report.json").exists())
+
+    def test_workstation_setup_rejects_public_mode_change_under_wal_context(self):
+        home = self.fixture.root / "private-wal-operator-home"
+        ssh = home / ".ssh"
+        ssh.mkdir(parents=True, mode=0o700)
+        (ssh / "id_ed25519.pub").write_bytes(public_line("ssh-ed25519", 31))
+        destination = self.project / "laptop.pub"
+        payload = destination.read_bytes()
+        destination.chmod(0o600)
+        before = destination.stat()
+        # This is a caller-fence contract, not an actual durable WAL recovery
+        # scenario. Existing real R22 recovery workflows remain mandatory.
+        with mock.patch.object(SETUP.Path, "home", return_value=home), \
+             mock.patch.object(SETUP, "_DRY_RUN", False), \
+             mock.patch.object(SETUP, "_SETUP_SWITCH_WAL_CONTEXT", ("sealed",)), \
+             redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                SETUP._prepare_laptop_public_key(str(self.project))
+        self.assertEqual(payload, destination.read_bytes())
+        self.assertEqual((before.st_ino, before.st_mode, before.st_ctime_ns),
+                         (destination.stat().st_ino, destination.stat().st_mode, destination.stat().st_ctime_ns))
+        self.assertFalse((self.project / "99-output-ztp/generation-report.json").exists())
+
     def test_real_setup_and_load_parent_bind_report_to_published_public_keys(self):
         self.real_setup_publish()
         parent, parent_candidate = self.real_load_prepare()
@@ -469,6 +608,7 @@ class GenerationReportWorkflow(unittest.TestCase):
 
     def test_main_report_directory_fsync_failure_preserves_primary_and_stops_services(self):
         """Run real parent/report commits in a private project, never host services."""
+        self.fixture._http_main_public_source_fixture()
         self.real_setup_publish()
         with redirect_stdout(io.StringIO()):
             parent = LOAD.validate_and_publish_release(
@@ -529,6 +669,8 @@ class GenerationReportWorkflow(unittest.TestCase):
         result = None
         caught = None
         with ExitStack() as stack:
+            stack.enter_context(mock.patch.object(LOAD, "HTTP_ROOT", self.fixture.root))
+            stack.enter_context(self.fixture._http_linux_public_ancestor_model())
             stack.enter_context(mock.patch.object(LOAD, "parse_args", return_value=args))
             stack.enter_context(mock.patch.object(
                 LOAD, "active_project", return_value=self.project.resolve(),
@@ -614,6 +756,7 @@ class GenerationReportWorkflow(unittest.TestCase):
 
     def test_main_success_path_report_cleanup_failure_cannot_claim_success(self):
         """A final cleanup fault is not a completed load or a parent rollback."""
+        self.fixture._http_main_public_source_fixture()
         self.real_setup_publish()
         with redirect_stdout(io.StringIO()):
             parent = LOAD.validate_and_publish_release(
@@ -668,6 +811,8 @@ class GenerationReportWorkflow(unittest.TestCase):
         result = None
         caught = None
         with ExitStack() as stack:
+            stack.enter_context(mock.patch.object(LOAD, "HTTP_ROOT", self.fixture.root))
+            stack.enter_context(self.fixture._http_linux_public_ancestor_model())
             stack.enter_context(mock.patch.object(LOAD, "parse_args", return_value=args))
             stack.enter_context(mock.patch.object(
                 LOAD, "active_project", return_value=self.project.resolve(),

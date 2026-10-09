@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager, redirect_stderr, redirect_stdout
+from contextlib import ExitStack, contextmanager, redirect_stderr, redirect_stdout
 import errno
 import hashlib
 import importlib.util
@@ -191,10 +191,10 @@ class SyncDeploymentLockTests(unittest.TestCase):
             job, sync_args(runtime="docker", sudo=False),
         )
 
-        self.assertEqual("-az", native[1])
+        self.assertEqual("-rlptDz", native[1])
         self.assertIn("--rsync-path=sudo -n rsync", native)
         self.assertNotIn("--chown=0:0", " ".join(native))
-        self.assertNotIn("-rlptDz", native)
+        self.assertNotIn("-az", native)
         self.assertEqual("-rlptDz", docker_sudo[1])
         self.assertEqual("-rlptDz", docker_root[1])
         self.assertIn("--rsync-path=sudo -n /usr/bin/rsync", docker_sudo)
@@ -1546,6 +1546,7 @@ class SyncDeploymentLockTests(unittest.TestCase):
             mock.patch.object(SYNC, "resolve_project", return_value=project),
             mock.patch.multiple(SYNC,
                 build_jobs=mock.Mock(return_value=[job]),
+                probe_remote_native_metadata=mock.Mock(return_value=False),
                 stage_selected_p2p=mock.Mock(return_value=(
                     project / "Customer P2P.xlsx", Path("/tmp/.p2p-stage-0123456789abcdef.xlsx"), "a" * 64,
                 )),
@@ -4283,11 +4284,24 @@ class ArchiveDeploymentLockTests(unittest.TestCase):
         self.assertEqual(0, completed.returncode, completed.stderr)
         self.assertEqual("large guard started\n", completed.stdout)
 
-    def test_actual_169715_byte_guard_starts_from_short_archive_command(self):
+    def test_fixed_169715_byte_guard_starts_from_short_archive_command(self):
+        # Retain the original AIR failure size as independent input. A source
+        # revision may grow; its byte count is not the deployment contract.
+        prefix = "import argparse\nargparse.ArgumentParser().parse_args()\n"
+        source = prefix + "#" + "x" * (169715 - len(prefix.encode("utf-8")) - 2) + "\n"
+        self.assertEqual(169715, len(source.encode("utf-8")))
+        self._assert_real_guard_short_archive_help(source)
+
+    def test_actual_current_large_guard_starts_from_short_archive_command(self):
         source = (TOOLS / "deployment_prewrite_guard.py").read_text(
             encoding="utf-8",
         )
-        self.assertEqual(169715, len(source.encode("utf-8")))
+        # Independent Linux MAX_ARG_STRLEN regression threshold, not copied
+        # from the current implementation's computed file length.
+        self.assertGreater(len(source.encode("utf-8")), 131072)
+        self._assert_real_guard_short_archive_help(source)
+
+    def _assert_real_guard_short_archive_help(self, source):
         with tempfile.TemporaryDirectory() as directory:
             args = upload_args(
                 deployment_guard_source=source, no_sudo=True,
@@ -4406,6 +4420,537 @@ class ArchiveDeploymentLockTests(unittest.TestCase):
         rendered = output.getvalue()
         self.assertIn("./infra/docker/deploy.sh deploy", rendered)
         self.assertNotIn("python3 11-load.py", rendered)
+
+
+class NativeReceiverOwnerClosureTests(unittest.TestCase):
+    """Independent Native owner contract: no sender IDs or Docker relabeling."""
+
+    def fixture(self, base):
+        root, state = base / "html", base / "state"
+        source, alias = root / "tools/source.py", root / "tools/alias.py"
+        manifest = root / "infra/docker/deployment-source-manifest.json"
+        source.parent.mkdir(parents=True)
+        manifest.parent.mkdir(parents=True)
+        state.mkdir()
+        source.write_bytes(b"VALUE = 41\n")
+        alias.symlink_to("source.py")
+        records = {relative: {"path": relative, "type": kind, "target": target,
+                              "sha256": hashlib.sha256(b"VALUE = 41\n").hexdigest()}
+                   for relative, kind, target in (
+                       ("tools/source.py", "file", None),
+                       ("tools/alias.py", "symlink", "source.py"))}
+        manifest.write_text(json.dumps({"schema_version": 1, "files": list(records.values())})
+                            + "\n", encoding="ascii")
+        (root / ".deployment.lock").touch()
+        return root, state, source, manifest, records
+
+    @contextmanager
+    def plan(self, guard, root, manifest, records):
+        root_fd = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        plan = None
+        try:
+            plan = guard._NativeOwnerPlan(root_fd, records, manifest.read_bytes())
+            yield plan
+        finally:
+            if plan is not None:
+                plan.close()
+            os.close(root_fd)
+
+    def test_parent_fstat_failure_closes_unregistered_fd_without_masking_cause(self):
+        for cleanup_error in (False, True):
+            with self.subTest(cleanup_error=cleanup_error), tempfile.TemporaryDirectory() as directory:
+                guard = guard_module()
+                root, state, source, manifest, records = self.fixture(Path(directory).resolve())
+                payload = manifest.read_bytes()
+                root_fd = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+                original_open_parent = guard._open_relative_parent
+                original_fstat, original_close, original_dup = os.fstat, os.close, os.dup
+                parent_fds, duplicate_fds, close_calls = [], [], []
+                fault = OSError(errno.EIO, "independent parent fstat failure")
+                def open_parent(*args, **kwargs):
+                    result = original_open_parent(*args, **kwargs)
+                    parent_fds.append(result[0])
+                    return result
+                def duplicate(descriptor):
+                    result = original_dup(descriptor)
+                    duplicate_fds.append(result)
+                    return result
+                def fail_parent_fstat(descriptor):
+                    if descriptor in parent_fds:
+                        raise fault
+                    return original_fstat(descriptor)
+                def close_with_ambiguous_error(descriptor):
+                    close_calls.append(descriptor)
+                    original_close(descriptor)
+                    if cleanup_error and descriptor in parent_fds:
+                        raise OSError(errno.EIO, "close error after descriptor consumption")
+                try:
+                    with ExitStack() as stack:
+                        stack.enter_context(mock.patch.object(guard, "_open_relative_parent", side_effect=open_parent))
+                        stack.enter_context(mock.patch.object(guard.os, "dup", side_effect=duplicate))
+                        stack.enter_context(mock.patch.object(guard.os, "fstat", side_effect=fail_parent_fstat))
+                        stack.enter_context(mock.patch.object(guard.os, "close", side_effect=close_with_ambiguous_error))
+                        chown = stack.enter_context(mock.patch.object(guard.os, "fchown"))
+                        with self.assertRaises(OSError) as caught:
+                            guard._NativeOwnerPlan(root_fd, records, payload)
+                        self.assertIs(fault, caught.exception)
+                        chown.assert_not_called()
+                    self.assertEqual(1, len(parent_fds))
+                    self.assertIn(parent_fds[0], close_calls)
+                    for descriptor in set(parent_fds + duplicate_fds):
+                        with self.assertRaises(OSError) as closed:
+                            original_fstat(descriptor)
+                        self.assertEqual(errno.EBADF, closed.exception.errno)
+                    original_fstat(root_fd)  # Borrowed caller FD must remain open.
+                    self.assertFalse((root / guard.SYNC_MARKER_NAME).exists())
+                    self.assertEqual(b"VALUE = 41\n", source.read_bytes())
+                    self.assertEqual(payload, manifest.read_bytes())
+                finally:
+                    original_close(root_fd)
+                    # RED cleanup owns only exact descriptors recorded by this test.
+                    for descriptor in set(parent_fds + duplicate_fds):
+                        try:
+                            original_fstat(descriptor)
+                        except OSError:
+                            continue
+                        original_close(descriptor)
+
+    def test_close_reports_first_error_after_all_fds_and_is_idempotent(self):
+        guard = guard_module()
+        with tempfile.TemporaryDirectory() as directory:
+            root, state, source, manifest, records = self.fixture(Path(directory).resolve())
+            original_close, original_fstat = os.close, os.fstat
+            with self.plan(guard, root, manifest, records) as plan:
+                marker = root / guard.SYNC_MARKER_NAME
+                marker.touch(mode=0o644)
+                marker_fd = os.open(marker, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+                plan.marker = (marker_fd, original_fstat(marker_fd))
+                descriptors = [marker_fd, *(leaf["fd"] for leaf in plan.leaves if leaf["fd"] >= 0),
+                               *(fd for fd, _metadata in plan.directories.values()), plan.root_fd]
+                calls = []
+                fault = OSError(errno.EIO, "independent close failure")
+                def consume_and_fail_first(descriptor):
+                    calls.append(descriptor)
+                    original_close(descriptor)
+                    if descriptor == marker_fd:
+                        raise fault
+                try:
+                    with mock.patch.object(guard.os, "close", side_effect=consume_and_fail_first):
+                        with self.assertRaises(OSError) as caught:
+                            plan.close()
+                        self.assertIs(fault, caught.exception)
+                        self.assertCountEqual(descriptors, calls)
+                        plan.close()
+                        self.assertEqual(len(descriptors), len(calls))
+                    for descriptor in descriptors:
+                        with self.assertRaises(OSError) as closed:
+                            original_fstat(descriptor)
+                        self.assertEqual(errno.EBADF, closed.exception.errno)
+                    self.assertTrue(marker.exists())  # FD cleanup never unlinks authority.
+                finally:
+                    for descriptor in descriptors:
+                        try:
+                            original_fstat(descriptor)
+                        except OSError:
+                            continue
+                        original_close(descriptor)
+
+    def test_owner_free_archive_flags_for_sudo_and_nonroot_receiver(self):
+        job = SYNC.SyncJob("source", (ROOT / "tools",), "/var/www/html/tools")
+        for runtime in ("native", "docker"):
+            for sudo in (True, False):
+                with self.subTest(runtime=runtime, sudo=sudo):
+                    command = SYNC.rsync_command(job, sync_args(runtime=runtime, sudo=sudo))
+                    self.assertEqual("-rlptDz", command[1])
+                    self.assertNotIn("-az", command)
+                    self.assertFalse(any(value.startswith(("--owner", "--group", "--chown",
+                                                            "--usermap", "--groupmap"))
+                                         for value in command))
+                    if runtime == "native" and sudo:
+                        self.assertIn("--rsync-path=sudo -n rsync", command)
+                    if runtime == "native" and not sudo:
+                        self.assertFalse(any(value.startswith("--rsync-path=") for value in command))
+
+    def test_plan_is_readonly_and_exact_normalize_preserves_unknown_sibling(self):
+        guard = guard_module()
+        with tempfile.TemporaryDirectory() as directory:
+            root, state, source, manifest, records = self.fixture(Path(directory).resolve())
+            sibling = source.parent / "operator-unknown.txt"
+            sibling.write_bytes(b"not manifest authority\n")
+            sibling.chmod(0o600)
+            paths = (source, manifest, sibling)
+            frozen = {path: (path.read_bytes(), path.stat().st_mode,
+                             path.stat().st_uid, path.stat().st_gid) for path in paths}
+            with mock.patch.object(guard.os, "fchown") as chown:
+                with self.plan(guard, root, manifest, records) as plan:
+                    self.assertTrue(plan.is_exact())
+                    plan.verify(required_owner=(os.geteuid(), os.getegid()))
+                chown.assert_not_called()
+            with self.plan(guard, root, manifest, records) as plan:
+                plan.normalize()
+                plan.verify(required_owner=(os.geteuid(), os.getegid()))
+            self.assertEqual(frozen, {path: (path.read_bytes(), path.stat().st_mode,
+                                            path.stat().st_uid, path.stat().st_gid) for path in paths})
+            self.assertFalse((state / "deployment-owner.json").exists())
+
+    def test_unapproved_bytes_and_hardlink_refuse_before_first_owner_write(self):
+        guard = guard_module()
+        for defect in ("bytes", "hardlink"):
+            with self.subTest(defect=defect), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory).resolve()
+                root, state, source, manifest, records = self.fixture(base)
+                if defect == "bytes":
+                    source.write_bytes(b"unapproved independent source\n")
+                else:
+                    os.link(source, base / "outside-hardlink")
+                with mock.patch.object(guard.os, "fchown") as chown:
+                    with self.assertRaises(guard.GuardError):
+                        with self.plan(guard, root, manifest, records):
+                            self.fail("unsafe plan was admitted")
+                    chown.assert_not_called()
+
+    def test_retained_leaf_and_ancestor_rebind_refuse_before_first_owner_write(self):
+        guard = guard_module()
+        for defect in ("leaf", "parent", "parent-symlink"):
+            with self.subTest(defect=defect), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory).resolve()
+                root, state, source, manifest, records = self.fixture(base)
+                with self.plan(guard, root, manifest, records) as plan:
+                    if defect == "leaf":
+                        source.unlink()
+                        source.write_bytes(b"VALUE = 41\n")
+                    else:
+                        old = base / "retained-old-tools"
+                        source.parent.rename(old)
+                        if defect == "parent-symlink":
+                            (root / "tools").symlink_to(old, target_is_directory=True)
+                        else:
+                            source.parent.mkdir()
+                            source.write_bytes(b"VALUE = 41\n")
+                            (source.parent / "alias.py").symlink_to("source.py")
+                    with mock.patch.object(guard.os, "fchown") as chown:
+                        with self.assertRaises(guard.GuardError):
+                            plan.normalize()
+                        chown.assert_not_called()
+
+    def test_post_normalize_owner_check_includes_carrier_ancestor_and_leaf(self):
+        guard = guard_module()
+        with tempfile.TemporaryDirectory() as directory:
+            root, state, source, manifest, records = self.fixture(Path(directory).resolve())
+            with self.plan(guard, root, manifest, records) as plan:
+                plan.normalize()
+                targets = [plan.directories[("tools",)][0]]
+                targets.extend(leaf["fd"] for leaf in plan.leaves if leaf["record"]["type"] == "file")
+                original = guard.os.fstat
+                fields = ("st_dev", "st_ino", "st_mode", "st_nlink", "st_size", "st_mtime_ns",
+                          "st_ctime_ns", "st_uid", "st_gid")
+                for descriptor in targets:
+                    def changed(fd, chosen=descriptor):
+                        status = original(fd)
+                        if fd != chosen:
+                            return status
+                        values = {name: getattr(status, name) for name in fields}
+                        values["st_uid"] = os.geteuid() + 1
+                        return SimpleNamespace(**values)
+                    with self.subTest(descriptor=descriptor), mock.patch.object(guard.os, "fstat", side_effect=changed):
+                        with self.assertRaises(guard.GuardError):
+                            plan.verify(required_owner=(os.geteuid(), os.getegid()))
+
+    def test_late_owner_and_ctime_changes_are_not_silently_normalized(self):
+        guard = guard_module()
+        for role in ("leaf", "ancestor"):
+            for field in ("st_uid", "st_ctime_ns"):
+                with self.subTest(role=role, field=field), tempfile.TemporaryDirectory() as directory:
+                    root, state, source, manifest, records = self.fixture(Path(directory).resolve())
+                    with self.plan(guard, root, manifest, records) as plan:
+                        source_leaf = next(leaf for leaf in plan.leaves if leaf["parts"] == ("tools", "source.py"))
+                        selected_fd = (source_leaf["fd"] if role == "leaf"
+                                       else plan.directories[("tools",)][0])
+                        original_fstat, original_verify_leaf = guard.os.fstat, plan._verify_leaf
+                        active = False
+                        visits = 0
+                        fields = ("st_dev", "st_ino", "st_mode", "st_nlink", "st_size",
+                                  "st_mtime_ns", "st_ctime_ns", "st_uid", "st_gid")
+                        def changed(fd):
+                            status = original_fstat(fd)
+                            if not active or fd != selected_fd:
+                                return status
+                            values = {name: getattr(status, name) for name in fields}
+                            values[field] += 1
+                            return SimpleNamespace(**values)
+                        def after_whole_plan(leaf, *args, **kwargs):
+                            nonlocal active, visits
+                            if leaf is source_leaf:
+                                visits += 1
+                                if visits == 2:
+                                    # First visit belongs to whole-plan admission;
+                                    # second is this individual owner write boundary.
+                                    active = True
+                            return original_verify_leaf(leaf, *args, **kwargs)
+                        with mock.patch.object(plan, "_verify_leaf", side_effect=after_whole_plan), \
+                             mock.patch.object(guard.os, "fstat", side_effect=changed), \
+                             mock.patch.object(guard.os, "fchown") as chown:
+                            with self.assertRaises(guard.GuardError):
+                                plan.normalize()
+                            chown.assert_not_called()
+
+    def test_last_root_rebind_cannot_remove_replacement_tree_marker(self):
+        guard = guard_module()
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            root, state, source, manifest, records = self.fixture(base)
+            digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
+            (root / guard.SYNC_MARKER_NAME).touch()
+            retained = base / "retained-real-root"
+            original = guard._clear_native_marker_held
+            def rebind(plan):
+                root.rename(retained)
+                root.mkdir()
+                (root / guard.SYNC_MARKER_NAME).write_bytes(b"unrelated replacement marker\n")
+                return original(plan)
+            with mock.patch.object(guard, "_clear_native_marker_held", side_effect=rebind):
+                with self.assertRaises(guard.GuardError):
+                    guard._commit_source_update_and_clear_marker(
+                        root, state, {}, expected_new_manifest_sha256=digest,
+                        docker_managed=False, native_requested=True,
+                    )
+            self.assertEqual(b"unrelated replacement marker\n", (root / guard.SYNC_MARKER_NAME).read_bytes())
+            self.assertTrue((retained / guard.SYNC_MARKER_NAME).is_file())
+            self.assertEqual(b"VALUE = 41\n", (retained / "tools/source.py").read_bytes())
+
+    def test_marker_rebind_at_final_rename_preserves_unknown_marker(self):
+        guard = guard_module()
+        with tempfile.TemporaryDirectory() as directory:
+            root, state, source, manifest, records = self.fixture(Path(directory).resolve())
+            digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
+            marker = root / guard.SYNC_MARKER_NAME
+            marker.touch()
+            original = guard.os.rename
+            mutated = False
+            def rebind(src, dst, **kwargs):
+                nonlocal mutated
+                if src == guard.SYNC_MARKER_NAME and not mutated:
+                    mutated = True
+                    marker.unlink()
+                    marker.write_bytes(b"unknown final-slot object\n")
+                return original(src, dst, **kwargs)
+            with mock.patch.object(guard.os, "rename", side_effect=rebind):
+                with self.assertRaises(guard.GuardError):
+                    guard._commit_source_update_and_clear_marker(
+                        root, state, {}, expected_new_manifest_sha256=digest,
+                        docker_managed=False, native_requested=True,
+                    )
+            self.assertTrue(mutated)
+            self.assertEqual(b"unknown final-slot object\n", marker.read_bytes())
+            self.assertEqual([], list(state.iterdir()))
+            self.assertFalse(list(root.glob("*.http-ztp-old-*")))
+
+    def test_native_finalizer_ignores_docker_numeric_target(self):
+        guard = guard_module()
+        with tempfile.TemporaryDirectory() as directory:
+            root, state, source, manifest, records = self.fixture(Path(directory).resolve())
+            source_bytes, manifest_bytes = source.read_bytes(), manifest.read_bytes()
+            guard.finalize_source_update(
+                root, state, {}, expected_new_manifest_sha256=hashlib.sha256(manifest_bytes).hexdigest(),
+                docker_managed=False, native_requested=True,
+                _ownership_target=(os.geteuid() + 1, os.getegid() + 1),
+            )
+            self.assertEqual((source_bytes, manifest_bytes), (source.read_bytes(), manifest.read_bytes()))
+            self.assertEqual((os.geteuid(), os.getegid()), (source.stat().st_uid, source.stat().st_gid))
+            self.assertFalse((state / "deployment-owner.json").exists())
+            self.assertFalse((state / "rebuild-required.json").exists())
+
+    def test_post_transaction_carrier_mutation_keeps_failure_marker(self):
+        guard = guard_module()
+        with tempfile.TemporaryDirectory() as directory:
+            root, state, source, manifest, records = self.fixture(Path(directory).resolve())
+            digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
+            (root / guard.SYNC_MARKER_NAME).touch()
+            original = guard._OverlayTransaction.commit
+            def corrupt(transaction):
+                original(transaction)
+                manifest.write_bytes(b"unapproved carrier after transaction commit\n")
+            with mock.patch.object(guard._OverlayTransaction, "commit", corrupt):
+                with self.assertRaises(guard.GuardError):
+                    guard._commit_source_update_and_clear_marker(
+                        root, state, {}, expected_new_manifest_sha256=digest,
+                        docker_managed=False, native_requested=True,
+                    )
+            self.assertTrue((root / guard.SYNC_MARKER_NAME).is_file())
+            self.assertFalse((state / "deployment-owner.json").exists())
+
+    def test_probe_client_rejects_malformed_and_timeout_frames(self):
+        for frame in ("HTTP_ZTP_NATIVE_METADATA_READY UNKNOWN\n", "EXACT\n", "", None):
+            with self.subTest(frame=frame):
+                stdout = io.StringIO(frame or "")
+                process = mock.Mock(stdin=io.StringIO(), stdout=stdout, stderr=io.StringIO())
+                process.poll.return_value = None
+                lock = SYNC.RemoteDeploymentLock(process, "/test/.deployment.lock")
+                ready = [stdout] if frame is not None else []
+                with mock.patch.object(SYNC.select, "select", return_value=(ready, [], [])), \
+                     mock.patch.object(SYNC, "_finish_failed_lock_process", return_value="bounded refusal"):
+                    with self.assertRaises(RuntimeError):
+                        SYNC.probe_remote_native_metadata(lock)
+                self.assertFalse(lock.prewrite_ready)
+                self.assertEqual("HTTP_ZTP_NATIVE_METADATA_PROBE\n", process.stdin.getvalue())
+
+    def test_main_metadata_only_gate_prewrite_and_docker_zero_work(self):
+        for runtime, needs in (("native", False), ("native", True), ("docker", False)):
+            with self.subTest(runtime=runtime, needs=needs):
+                args, lock = sync_args(runtime=runtime), object()
+                project = Path("/tmp/customer")
+                job = SYNC.SyncJob("source", (ROOT / "tools",), "/var/www/html/tools")
+                contexts = (
+                    mock.patch.object(SYNC, "parse_args", return_value=args),
+                    mock.patch.object(SYNC, "validate_args"),
+                    mock.patch.object(SYNC, "resolve_project", return_value=project),
+                    mock.patch.object(SYNC, "build_jobs", return_value=[job]),
+                    mock.patch.object(SYNC, "stage_selected_p2p", return_value=(
+                        project / "Customer P2P.xlsx", Path("/tmp/.p2p-stage.xlsx"), "a" * 64)),
+                    mock.patch.object(SYNC, "remote_p2p_action", return_value="CURRENT"),
+                    mock.patch.object(SYNC, "run_predeploy_test_gate"),
+                    mock.patch.object(SYNC, "verify_predeploy_test_approval"),
+                    mock.patch.object(SYNC.project_contract, "write_deployment_source_manifest",
+                                      side_effect=lambda path: path.write_bytes(b"independent receipt\n")),
+                    mock.patch.object(SYNC.project_contract, "deployment_prewrite_guard_source",
+                                      return_value=b"independent frozen guard\n"),
+                    mock.patch.object(SYNC, "load_frozen_password_contract", return_value=PASSWORD),
+                    mock.patch.object(SYNC, "acquire_remote_deployment_lock", return_value=lock),
+                    mock.patch.object(SYNC, "assert_remote_deployment_lock"),
+                    mock.patch.object(SYNC, "prepare_global_sync", return_value=SimpleNamespace(changed=False)),
+                    mock.patch.object(SYNC, "sync_jobs_have_changes", return_value=()),
+                    mock.patch.object(SYNC, "remote_management_placeholder_needed", return_value=False),
+                )
+                with ExitStack() as stack:
+                    for context in contexts:
+                        stack.enter_context(context)
+                    probe = stack.enter_context(mock.patch.object(SYNC, "probe_remote_native_metadata", return_value=needs))
+                    prewrite = stack.enter_context(mock.patch.object(SYNC, "prepare_remote_source_write", return_value=False))
+                    directories = stack.enter_context(mock.patch.object(SYNC, "ensure_remote_directories"))
+                    marker = stack.enter_context(mock.patch.object(SYNC, "set_remote_sync_marker"))
+                    rsync = stack.enter_context(mock.patch.object(SYNC, "run_job"))
+                    placeholder = stack.enter_context(mock.patch.object(SYNC, "ensure_remote_management_placeholder"))
+                    global_commit = stack.enter_context(mock.patch.object(SYNC, "commit_remote_global"))
+                    source_commit = stack.enter_context(mock.patch.object(SYNC, "commit_remote_source_write"))
+                    release = stack.enter_context(mock.patch.object(SYNC, "release_remote_deployment_lock"))
+                    stack.enter_context(redirect_stdout(io.StringIO()))
+                    stack.enter_context(redirect_stderr(io.StringIO()))
+                    self.assertEqual(0, SYNC.main([]))
+                if runtime == "native":
+                    probe.assert_called_once_with(lock)
+                else:
+                    probe.assert_not_called()
+                if needs:
+                    prewrite.assert_called_once_with(lock)
+                    # The real holder owns the marker; client must not replace
+                    # that bound inode with a redundant SSH path-based marker.
+                    marker.assert_not_called()
+                    directories.assert_not_called()
+                    placeholder.assert_not_called()
+                    global_commit.assert_not_called()
+                    source_commit.assert_called_once_with(lock)
+                else:
+                    for operation in (prewrite, directories, marker, placeholder, global_commit, source_commit):
+                        operation.assert_not_called()
+                rsync.assert_not_called()
+                release.assert_called_once_with(lock)
+
+    def test_real_native_archive_entry_preserves_effective_owner_and_no_docker_state(self):
+        guard = guard_module()
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            root, state, source, manifest, records = self.fixture(base)
+            archive = base / "verified-native-source.tar.gz"
+            with tarfile.open(archive, "w:gz") as output:
+                for relative in ("tools/source.py", "tools/alias.py", guard.SOURCE_MANIFEST_NAME):
+                    output.add(root / relative, arcname=relative, recursive=False)
+            archive_digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+            source_digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
+            with mock.patch.object(guard, "quiesce_for_source_update", return_value=False):
+                self.assertEqual(0, guard.run_locked_archive(
+                    root / ".deployment.lock", root, archive, archive_digest, source_digest,
+                    state_root=state, runtime="native",
+                    _ownership_target=(os.geteuid() + 1, os.getegid() + 1),
+                ))
+            self.assertEqual(b"VALUE = 41\n", source.read_bytes())
+            self.assertEqual((os.geteuid(), os.getegid()), (source.stat().st_uid, source.stat().st_gid))
+            self.assertEqual([], list(state.iterdir()))
+            self.assertFalse((root / guard.SYNC_MARKER_NAME).exists())
+
+    @contextmanager
+    def real_holder(self, root, state, digest):
+        # Only the external monitor/Docker discovery is stubbed. The real guard
+        # flock, Native source bytes/FD plan, protocol, finalizer and client run.
+        script = (
+            "import runpy,sys,pathlib\n"
+            "g=runpy.run_path(sys.argv[1])\n"
+            "f=g['run_lock_holder']; ns=f.__globals__\n"
+            "ns['quiesce_for_source_update']=lambda *a,**k:False\n"
+            "ns['shutil'].which=lambda name:None\n"
+            "raise SystemExit(f(pathlib.Path(sys.argv[2])/'.deployment.lock',"
+            "pathlib.Path(sys.argv[2]),state_root=pathlib.Path(sys.argv[3]),"
+            "runtime='native',expected_source_manifest_sha256=sys.argv[4]))\n"
+        )
+        process = subprocess.Popen([sys.executable, "-B", "-c", script,
+                                    str(TOOLS / "deployment_prewrite_guard.py"), str(root), str(state), digest],
+                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   text=True, bufsize=1)
+        try:
+            ready, _, _ = SYNC.select.select([process.stdout], [], [], 5)
+            self.assertTrue(ready, "real local guard never announced its lock")
+            self.assertEqual("DEPLOYMENT_LOCK_READY\n", process.stdout.readline())
+            yield SYNC.RemoteDeploymentLock(process, str(root / ".deployment.lock"))
+        finally:
+            if process.stdin is not None and not process.stdin.closed:
+                process.stdin.close()
+                process.stdin = None
+            try:
+                process.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.communicate(timeout=5)
+                self.fail("real local guard failed to close in bounded time")
+
+    def test_real_sync_client_guard_exact_is_zero_write_and_eof_rechecks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, state, source, manifest, records = self.fixture(Path(directory).resolve())
+            digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
+            paths = (root, source.parent, source, manifest.parent, manifest)
+            frozen = {path: (path.lstat().st_ino, path.lstat().st_mode,
+                             path.lstat().st_uid, path.lstat().st_gid,
+                             path.lstat().st_mtime_ns, path.lstat().st_ctime_ns) for path in paths}
+            with self.real_holder(root, state, digest) as lock:
+                self.assertFalse(SYNC.probe_remote_native_metadata(lock))
+                self.assertFalse(lock.prewrite_ready)
+                SYNC.release_remote_deployment_lock(lock)
+            self.assertEqual(frozen, {path: (path.lstat().st_ino, path.lstat().st_mode,
+                                             path.lstat().st_uid, path.lstat().st_gid,
+                                             path.lstat().st_mtime_ns, path.lstat().st_ctime_ns) for path in paths})
+            self.assertFalse((root / ".sync-code-in-progress").exists())
+            self.assertEqual([], list(state.iterdir()))
+            with self.real_holder(root, state, digest) as lock:
+                self.assertFalse(SYNC.probe_remote_native_metadata(lock))
+                source.write_bytes(b"unapproved bytes after EXACT\n")
+                with self.assertRaises(RuntimeError):
+                    SYNC.release_remote_deployment_lock(lock)
+
+    def test_real_sync_client_guard_owner_only_recovery_uses_normal_marker_commit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, state, source, manifest, records = self.fixture(Path(directory).resolve())
+            digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
+            (root / ".sync-code-in-progress").touch()
+            before = source.read_bytes(), manifest.read_bytes()
+            with self.real_holder(root, state, digest) as lock:
+                self.assertTrue(SYNC.probe_remote_native_metadata(lock))
+                self.assertFalse(SYNC.prepare_remote_source_write(lock))
+                self.assertTrue((root / ".sync-code-in-progress").is_file())
+                SYNC.commit_remote_source_write(lock)
+                self.assertTrue(lock.source_committed)
+                self.assertFalse(lock.docker_managed)
+                SYNC.release_remote_deployment_lock(lock)
+            self.assertEqual(before, (source.read_bytes(), manifest.read_bytes()))
+            self.assertFalse((root / ".sync-code-in-progress").exists())
+            self.assertEqual([], list(state.iterdir()))
 
 
 if __name__ == "__main__":

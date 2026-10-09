@@ -121,23 +121,29 @@ def sha256(path: Path) -> str:
 def assert_private_dhcp_transaction_retention(
     api, root: Path, project: Path, outcome: str, *, reenter: bool = False,
     setup_guard=None, a_shapes=False, publication_candidates=None, a_metadata=False,
-    require_staged_inventory=False,
+    require_staged_inventory=False, preserve_selected_a=False,
 ) -> None:
     """Exercise real LOAD filesystem logic; never execute sudo, dhcpd or live writes."""
     root = root.resolve()
     source_dir, live_dir = project / "independent-dhcp-B", root / "private-etc-dhcp"
     source_dir.mkdir()
-    live_dir.mkdir()
+    live_dir.mkdir(exist_ok=preserve_selected_a)
     names = ("dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts", "dhcpd_nvl.hosts")
     expected_b = {name: f"independent-B:{name}\n".encode() for name in names}
     expected_b["dhcpd.conf"] = b"# independent-B configuration\n" + b"".join(
         f'include "/etc/dhcp/{name}";\n'.encode() for name in names[1:]
     )
-    expected_a = {name: f"independent-A:{name}\n".encode() for name in names}
+    if preserve_selected_a and (a_shapes or a_metadata or outcome == "precommit-shapes"):
+        raise AssertionError("schema4 original selected owners cannot be rewritten into another fixture shape")
+    expected_a = {name: ((name + "\n").encode() if preserve_selected_a
+                         else f"independent-A:{name}\n".encode()) for name in names}
     mappings = {source_dir / name: live_dir / name for name in names}
     for source, destination in mappings.items():
         source.write_bytes(expected_b[source.name])
-        destination.write_bytes(expected_a[destination.name])
+        if preserve_selected_a:
+            assert destination.read_bytes() == expected_a[destination.name], "original selected A bytes were not installed"
+        else:
+            destination.write_bytes(expected_a[destination.name])
     if outcome == "precommit-shapes" or a_shapes:
         original_link_source = root / "independent-original-A-source"
         original_link_source.write_bytes(expected_a["dhcpd_eth.hosts"])
@@ -4696,6 +4702,128 @@ class ReleaseTransactionTests(unittest.TestCase):
             self.assertTrue(candidates[0].temporary.is_file())
             self.assertFalse(candidates[0].destination.exists())
 
+    def test_report_preimage_registration_rejects_same_size_clock_collision(self):
+        from test_cases.test_generation_report_contract import (
+            REPORT_IDENTITY_FIELDS, ReportCtimeCollisionOS,
+        )
+        state, _context = self._prepare_persisted_a_runtime_switch(seed_q_publication=True)
+        journal, descriptor, backend = state[-3:]
+        parent, report, generation = private_publication_candidates(LOAD, state[1])
+        path = report.destination
+        before, payload = path.stat(), path.read_bytes()
+        timestamp = str(json.loads(payload)["generated_at"])
+        self.assertRegex(timestamp, r"^\d{4}-")
+        foreign_timestamp = ("2001" if timestamp.startswith("2000") else "2000") + timestamp[4:]
+        foreign = payload.replace(timestamp.encode(), foreign_timestamp.encode(), 1)
+        self.assertEqual(foreign_timestamp, json.loads(foreign)["generated_at"])
+        self.assertNotEqual(payload, foreign)
+        self.assertEqual(len(payload), len(foreign))
+        guard = dict(deployment_lock_descriptor=descriptor, services_quiesced=True, runtime_backend=backend)
+        evidence = journal.read_bytes()
+        parent_evidence = parent.destination.read_bytes()
+        model = ReportCtimeCollisionOS(before)
+        path.write_bytes(foreign)
+        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+        self.assertEqual(tuple(getattr(before, field) for field in REPORT_IDENTITY_FIELDS),
+                         tuple(getattr(model.lstat(path), field) for field in REPORT_IDENTITY_FIELDS))
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD.generation_report, "os", model):
+            with self.assertRaises(LOAD.LoadError):
+                LOAD.register_setup_switch_publication_bundle(parent, report, generation, guard=guard)
+        self.assertEqual(evidence, journal.read_bytes())
+        self.assertEqual(parent_evidence, parent.destination.read_bytes())
+        self.assertEqual(before.st_ino, path.stat().st_ino)
+        self.assertEqual(foreign, path.read_bytes())
+        self.assertTrue(parent.temporary.is_file())
+        self.assertTrue(report.temporary.is_file())
+        backend.start.assert_not_called()
+
+    def test_report_preimage_cold_resume_uses_original_wal_byte_binding(self):
+        state, _context = self._prepare_persisted_a_runtime_switch(seed_q_publication=True)
+        journal, descriptor, backend = state[-3:]
+        parent, report, generation = private_publication_candidates(LOAD, state[1])
+        guard = dict(deployment_lock_descriptor=descriptor, services_quiesced=True, runtime_backend=backend)
+        expected_old_hash = hashlib.sha256(report.destination.read_bytes()).hexdigest()
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            token = LOAD.register_setup_switch_publication_bundle(parent, report, generation, guard=guard)
+            self.addCleanup(LOAD.close_setup_switch_publication_bundle, token)
+            row = json.loads(token["payload"])["body"]["publication_bundle"]["report"]
+            self.assertEqual(expected_old_hash, row["before"]["sha256"])
+            LOAD.commit_prepared_release(parent, require_authority=lambda:
+                LOAD.require_setup_switch_publication_bundle(token, guard=guard))
+            LOAD.close_setup_switch_publication_bundle(token)
+            evidence = journal.read_bytes()
+            cold = LOAD.open_setup_switch_publication_bundle(state[1], guard=guard)
+            self.addCleanup(LOAD.close_setup_switch_publication_bundle, cold)
+            self.assertEqual("report", cold["phase"])
+            actual_commit = LOAD.generation_report.commit_prepared_generation_report
+            seen = []
+            def require_original_bytes(candidate, **kwargs):
+                self.assertEqual(expected_old_hash, getattr(candidate, "old_payload_sha256", None))
+                seen.append(candidate)
+                return actual_commit(candidate, **kwargs)
+            with mock.patch.object(LOAD.generation_report, "commit_prepared_generation_report",
+                                   side_effect=require_original_bytes):
+                LOAD.resume_setup_switch_publication_bundle(cold, guard=guard)
+            self.assertEqual(1, len(seen))
+            self.assertEqual("published", cold["phase"])
+            self.assertEqual(evidence, journal.read_bytes())
+            self.assertEqual(report.payload_sha256, sha256(report.destination))
+            backend.start.assert_not_called()
+
+    def test_report_preimage_cold_resume_preserves_foreign_clock_collision_evidence(self):
+        from test_cases.test_generation_report_contract import REPORT_IDENTITY_FIELDS, ReportCtimeCollisionOS
+        state, _context = self._prepare_persisted_a_runtime_switch(seed_q_publication=True)
+        journal, descriptor, backend = state[-3:]
+        parent, report, generation = private_publication_candidates(LOAD, state[1])
+        guard = dict(deployment_lock_descriptor=descriptor, services_quiesced=True, runtime_backend=backend)
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            token = LOAD.register_setup_switch_publication_bundle(parent, report, generation, guard=guard)
+            self.addCleanup(LOAD.close_setup_switch_publication_bundle, token)
+            LOAD.commit_prepared_release(parent, require_authority=lambda:
+                LOAD.require_setup_switch_publication_bundle(token, guard=guard))
+            LOAD.close_setup_switch_publication_bundle(token)
+            cold = LOAD.open_setup_switch_publication_bundle(state[1], guard=guard)
+            self.addCleanup(LOAD.close_setup_switch_publication_bundle, cold)
+            evidence = journal.read_bytes()
+            path, payload = report.destination, report.destination.read_bytes()
+            before = path.stat()
+            timestamp = str(json.loads(payload)["generated_at"])
+            self.assertRegex(timestamp, r"^\d{4}-")
+            foreign_timestamp = ("2001" if timestamp.startswith("2000") else "2000") + timestamp[4:]
+            foreign = payload.replace(timestamp.encode(), foreign_timestamp.encode(), 1)
+            self.assertNotEqual(payload, foreign)
+            self.assertEqual(len(payload), len(foreign))
+            model = ReportCtimeCollisionOS(before)
+            real_commit = LOAD.generation_report.commit_prepared_generation_report
+            injections = []
+            def commit_after_original_wal_guard(candidate, **kwargs):
+                original_authority = kwargs["require_authority"]
+                calls = []
+                def checked_then_injected():
+                    # Do not mock away or loosen original WAL bytes/owner gates.
+                    original_authority()
+                    calls.append(True)
+                    if len(calls) == 2:
+                        path.write_bytes(foreign)
+                        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+                        self.assertEqual(tuple(getattr(before, field) for field in REPORT_IDENTITY_FIELDS),
+                                         tuple(getattr(model.lstat(path), field) for field in REPORT_IDENTITY_FIELDS))
+                        self.assertNotEqual(hashlib.sha256(payload).hexdigest(), hashlib.sha256(path.read_bytes()).hexdigest())
+                        injections.append(path.stat().st_ino)
+                return real_commit(candidate, require_authority=checked_then_injected)
+            with mock.patch.object(LOAD.generation_report, "os", model), \
+                    mock.patch.object(LOAD.generation_report, "commit_prepared_generation_report",
+                                      side_effect=commit_after_original_wal_guard):
+                with self.assertRaises((LOAD.LoadError, LOAD.generation_report.GenerationReportError)):
+                    LOAD.resume_setup_switch_publication_bundle(cold, guard=guard)
+            self.assertEqual([before.st_ino], injections)
+            self.assertEqual(evidence, journal.read_bytes())
+            self.assertEqual(before.st_ino, path.stat().st_ino)
+            self.assertEqual(foreign, path.read_bytes())
+            self.assertTrue(report.temporary.is_file())
+            backend.start.assert_not_called()
+
     def test_setup_publication_selector_has_persisted_stage_and_cold_resume_keeps_wal(self):
         state, _context = self._prepare_persisted_a_runtime_switch()
         journal, descriptor, backend = state[-3:]
@@ -5785,6 +5913,7 @@ class ReleaseTransactionTests(unittest.TestCase):
         start_services: bool = False,
         publication_routing: bool = False,
     ):
+        self._http_main_public_source_fixture()
         args = SimpleNamespace(
             skip_doca=False, download_doca=False, dry_run=False,
             project=str(self.project), no_upgrade=True, p2p_file=None,
@@ -5818,6 +5947,8 @@ class ReleaseTransactionTests(unittest.TestCase):
         caught = None
         result = None
         with ExitStack() as stack:
+            stack.enter_context(mock.patch.object(LOAD, "HTTP_ROOT", self.root))
+            stack.enter_context(self._http_linux_public_ancestor_model())
             stack.enter_context(mock.patch.object(LOAD, "parse_args", return_value=args))
             stack.enter_context(mock.patch.object(
                 LOAD, "active_project",
@@ -6029,6 +6160,765 @@ class ReleaseTransactionTests(unittest.TestCase):
             result, caught, candidate, quiesce, restore_links,
             restore_prefix, release_lock, runtime_backend, runtime_plan,
         )
+
+    def _selected_pinned_b_consumer_fixture(self):
+        # Literal A/B payloads are independent expectations, not producer output.
+        self.project = self.project.resolve()
+        flat = self.project / "99-output-dhcp"
+        flat.mkdir(mode=0o700)
+        runtime = self.ztp / "config/isc-dhcp-server"
+        names = ("dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts",
+                 "dhcpd_nvl.hosts", "dhcp-release-manifest.json")
+        for name in names:
+            (flat / name).write_bytes((runtime / name).read_bytes())
+            (runtime / name).unlink()
+            (runtime / name).symlink_to(flat / name)
+        before = {name: ((flat / name).stat().st_ino, (flat / name).read_bytes())
+                  for name in names}
+        candidate = flat / ".load-dhcp-candidate-0123456789abcdef"
+        candidate.mkdir(mode=0o700)
+        child = json.loads((flat / "dhcp-release-manifest.json").read_text())
+        child["release_id"] = "independent-consumer-dhcp-B"
+        for name in names[:-1]:
+            payload = before[name][1]
+            if name == "dhcpd.conf":
+                payload += b"# independently specified selected B\n"
+            (candidate / name).write_bytes(payload)
+            child["outputs"][name]["sha256"] = hashlib.sha256(payload).hexdigest()
+        (candidate / names[-1]).write_text(json.dumps(child), encoding="utf-8")
+        parent = LOAD.validate_and_publish_release(
+            self.project, self.inputs, publish=False, dhcp_candidate_dir=candidate,
+        )
+        prepared = LOAD.prepare_current_release(
+            self.project, parent, dhcp_candidate_dir=candidate,
+        )
+        generation = LOAD.stage_pinned_generation(
+            self.project, prepared.temporary, candidate,
+        )
+        LOAD.commit_prepared_release(prepared)
+        LOAD.commit_pinned_generation(self.project, generation, expected_current=None)
+        device = {"hostname": "leaf01", "type": "eth", "mac_plain": "020000000001",
+                  "identity_macs": {"eth0": "020000000001"}}
+        return parent, generation, flat, before, device
+
+    def test_real_load_manual_selected_workflow_ignores_unrelated_exterior_sibling_creation(self):
+        import project_contract as selected_authority
+        parent, generation, flat, flat_before, device = self._selected_pinned_b_consumer_fixture()
+        outer = self.project.parent
+        outer_before = outer.stat()
+        leaf_before = (generation / "dhcp/dhcpd.conf").stat()
+        original_read, original_stat, original_fstat = os.read, os.stat, os.fstat
+        namespace = SimpleNamespace(**{name: getattr(os, name) for name in dir(os)})
+        injected = []
+        def changed(value):
+            if not injected or (value.st_dev, value.st_ino) != (outer_before.st_dev, outer_before.st_ino):
+                return value
+            fields = {name: getattr(value, name) for name in dir(value) if name.startswith("st_")}
+            fields.update(st_nlink=outer_before.st_nlink + 1, st_size=outer_before.st_size + 1,
+                          st_mtime_ns=outer_before.st_mtime_ns + 1, st_ctime_ns=outer_before.st_ctime_ns + 1)
+            return SimpleNamespace(**fields)
+        def read(descriptor, limit):
+            payload = original_read(descriptor, limit)
+            observed = original_fstat(descriptor)
+            if (observed.st_dev, observed.st_ino) == (leaf_before.st_dev, leaf_before.st_ino) and not injected:
+                sibling = outer / "independent-other-project-work"
+                sibling.mkdir(mode=0o700)
+                injected.append(sibling)
+            return payload
+        namespace.read = read
+        namespace.stat = lambda *args, **kwargs: changed(original_stat(*args, **kwargs))
+        namespace.fstat = lambda *args, **kwargs: changed(original_fstat(*args, **kwargs))
+        with mock.patch.object(selected_authority, "os", namespace), \
+             mock.patch.object(MANUAL, "DHCP_RELEASE_MANIFEST", self.ztp / "config/isc-dhcp-server/dhcp-release-manifest.json"):
+            binding = MANUAL.validate_parent_release_binding(self.project, device)
+            self.assertEqual("pinned", binding["selected_dhcp_authority_binding"]["mode"])
+            self.assertEqual(parent["release_id"], binding["selected_dhcp_authority_binding"]["release_id"])
+            MANUAL.verify_prepared_release_binding(binding)
+        self.assertEqual([outer / "independent-other-project-work"], injected)
+        self.assertEqual(flat_before, {name: ((flat / name).stat().st_ino, (flat / name).read_bytes()) for name in flat_before})
+        # Full governed identities still reject an independent same-byte leaf
+        # replacement; exterior child bookkeeping is not permission to rebind.
+        leaf = generation / "dhcp/dhcpd.conf"
+        payload = leaf.read_bytes()
+        leaf.rename(leaf.with_name(".independent-original-selected-leaf"))
+        leaf.write_bytes(payload)
+        with self.assertRaises(MANUAL.ManualZtpError):
+            MANUAL.verify_prepared_release_binding(binding)
+
+    def test_selected_load_manual_vm_use_pinned_b_and_keep_old_flat_a(self):
+        from test_cases.test_vm_validation_runner import VM
+        parent, generation, flat, before, device = self._selected_pinned_b_consumer_fixture()
+        with mock.patch.object(MANUAL, "DHCP_RELEASE_MANIFEST",
+                               self.ztp / "config/isc-dhcp-server/dhcp-release-manifest.json"):
+            binding = MANUAL.validate_parent_release_binding(self.project, device)
+            self.assertEqual("independent-consumer-dhcp-B", binding["dhcp_release_id"])
+            self.assertEqual(str(generation / "dhcp/dhcp-release-manifest.json"),
+                             binding["dhcp_manifest_path"])
+            self.assertEqual("pinned", binding["selected_dhcp_authority_binding"]["mode"])
+            MANUAL.verify_prepared_release_binding(binding)
+        errors, checked = VM.component_artifact_errors(self.project, parent)
+        self.assertEqual([], errors)
+        self.assertEqual(1, checked)
+        self.assertEqual([], VM.runtime_pointer_errors(self.root, self.project, parent))
+        installed = self.root / "private-installed-dhcp"
+        installed.mkdir()
+        for name in ("dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts", "dhcpd_nvl.hosts"):
+            (installed / name).write_bytes((generation / "dhcp" / name).read_bytes())
+            self.assertNotEqual((installed / name).stat().st_ino,
+                                (generation / "dhcp" / name).stat().st_ino)
+        self.assertEqual([], VM.installed_dhcp_errors(self.project, parent, installed))
+        self.assertEqual(before, {name: ((flat / name).stat().st_ino,
+                                       (flat / name).read_bytes()) for name in before})
+
+    def test_selected_manual_prepared_rejects_same_target_selector_replacement(self):
+        _parent, _generation, _flat, _before, device = self._selected_pinned_b_consumer_fixture()
+        binding = MANUAL.validate_parent_release_binding(self.project, device)
+        selector = self.project / "99-output-ztp/current"
+        target = os.readlink(selector)
+        old = selector.with_name(".independent-old-selector")
+        selector.rename(old)
+        selector.symlink_to(target)
+        with self.assertRaises(MANUAL.ManualZtpError):
+            MANUAL.verify_prepared_release_binding(binding)
+
+    def test_selected_manual_prepared_rejects_removed_selector_without_legacy_fallback(self):
+        _parent, _generation, _flat, _before, device = self._selected_pinned_b_consumer_fixture()
+        binding = MANUAL.validate_parent_release_binding(self.project, device)
+        (self.project / "99-output-ztp/current").unlink()
+        with self.assertRaises(MANUAL.ManualZtpError):
+            MANUAL.verify_prepared_release_binding(binding)
+
+    def test_selected_consumers_reject_dangling_selector_without_old_flat_fallback(self):
+        from test_cases.test_vm_validation_runner import VM
+        parent, _generation, _flat, _before, device = self._selected_pinned_b_consumer_fixture()
+        selector = self.project / "99-output-ztp/current"
+        selector.unlink()
+        selector.symlink_to("generations/ffffffffffffffffffff")
+        with self.assertRaises(MANUAL.ManualZtpError):
+            MANUAL.validate_parent_release_binding(self.project, device)
+        self.assertTrue(VM.component_artifact_errors(self.project, parent)[0])
+        self.assertTrue(VM.runtime_pointer_errors(self.root, self.project, parent))
+        self.assertTrue(VM.installed_dhcp_errors(self.project, parent, self.root))
+
+    def test_selected_vm_installed_each_of_four_files_must_match_pinned_not_old_flat(self):
+        from test_cases.test_vm_validation_runner import VM
+        parent, generation, flat, _before, _device = self._selected_pinned_b_consumer_fixture()
+        installed = self.root / "private-installed-dhcp"
+        installed.mkdir()
+        names = ("dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts", "dhcpd_nvl.hosts")
+        for name in names:
+            (installed / name).write_bytes((generation / "dhcp" / name).read_bytes())
+        for name in names:
+            with self.subTest(name=name):
+                (installed / name).write_bytes(b"independent installed mismatch\n")
+                errors = VM.installed_dhcp_errors(self.project, parent, installed)
+                self.assertEqual(1, len(errors))
+                self.assertIn(name, errors[0])
+                (installed / name).write_bytes((generation / "dhcp" / name).read_bytes())
+        (installed / "dhcpd.conf").write_bytes((flat / "dhcpd.conf").read_bytes())
+        errors = VM.installed_dhcp_errors(self.project, parent, installed)
+        self.assertEqual(1, len(errors))
+        self.assertIn("dhcpd.conf", errors[0])
+
+    def test_selected_manual_confirmation_ignores_old_flat_drift_but_rejects_pinned_leaf_rebind(self):
+        _parent, generation, flat, _before, device = self._selected_pinned_b_consumer_fixture()
+        binding = MANUAL.validate_parent_release_binding(self.project, device)
+        (flat / "dhcpd.conf").write_bytes(b"unselected A standalone edit\n")
+        MANUAL.verify_prepared_release_binding(binding)
+        leaf = generation / "dhcp/dhcpd.conf"
+        payload = leaf.read_bytes()
+        leaf.rename(leaf.with_name(".independent-old-leaf"))
+        leaf.write_bytes(payload)
+        with self.assertRaises(MANUAL.ManualZtpError):
+            MANUAL.verify_prepared_release_binding(binding)
+
+
+    def test_selected_disabled_parent_manual_and_vm_ignore_stale_flat_dhcp(self):
+        from test_cases.test_vm_validation_runner import VM
+        _parent, _generation, flat, _before, device = self._selected_pinned_b_consumer_fixture()
+        previous = os.readlink(self.project / "99-output-ztp/current")
+        global_value = yaml.safe_load(self.global_file.read_text())
+        global_value["common"]["mgmt"]["dhcp-server"]["status"] = "disabled"
+        self.global_file.write_text(yaml.safe_dump(global_value), encoding="utf-8")
+        inputs = LOAD.replace(self.inputs, settings=LOAD.replace(self.inputs.settings, dhcp_enabled=False))
+        parent = LOAD.validate_and_publish_release(self.project, inputs, publish=False)
+        prepared = LOAD.prepare_current_release(self.project, parent)
+        generation = LOAD.stage_pinned_generation(self.project, prepared.temporary, None)
+        LOAD.commit_prepared_release(prepared)
+        LOAD.commit_pinned_generation(self.project, generation, expected_current=previous)
+        (flat / "dhcpd.conf").write_bytes(b"stale deliberately invalid DHCP\n")
+        binding = MANUAL.validate_parent_release_binding(self.project, device)
+        self.assertEqual("disabled", binding["dhcp_status"])
+        self.assertEqual("disabled", binding["selected_dhcp_authority_binding"]["mode"])
+        self.assertNotIn("dhcp_manifest_path", binding)
+        MANUAL.verify_prepared_release_binding(binding)
+        self.assertEqual([], VM.component_artifact_errors(self.project, parent)[0])
+        self.assertEqual([], VM.runtime_pointer_errors(self.root, self.project, parent))
+
+    def _runtime_schema4_selected_fixture(self):
+        parent, generation, flat, before, _device = self._selected_pinned_b_consumer_fixture()
+        installed = self.root.resolve() / "private-schema4-installed"
+        installed.mkdir(mode=0o700)
+        for name in ("dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts", "dhcpd_nvl.hosts"):
+            (installed / name).write_bytes((generation / "dhcp" / name).read_bytes())
+        mapping = {generation / "dhcp" / name: installed / name
+                   for name in ("dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts", "dhcpd_nvl.hosts")}
+        patcher = mock.patch.object(LOAD, "dhcp_file_mappings", return_value=mapping)
+        patcher.start(); self.addCleanup(patcher.stop)
+        return parent, generation, flat, before, installed
+
+    def test_schema4_capture_binds_selected_b_and_installed_b_not_flat_a(self):
+        parent, generation, flat, before, installed = self._runtime_schema4_selected_fixture()
+        qualification = LOAD._capture_runtime_selected_dhcp(self.project, generation)
+        self.assertEqual(str(generation), qualification["generation"]["path"])
+        expected = hashlib.sha256(
+            before["dhcpd.conf"][1] + b"# independently specified selected B\n").hexdigest()
+        self.assertEqual(expected, qualification["installed"]["leaves"]["dhcpd.conf"]["state"]["sha256"])
+        self.assertNotEqual(before["dhcpd.conf"][1], (installed / "dhcpd.conf").read_bytes())
+        self.assertNotEqual((installed / "dhcpd.conf").stat().st_ino,
+                            (generation / "dhcp/dhcpd.conf").stat().st_ino)
+        self.assertEqual(before, {name: ((flat / name).stat().st_ino,
+                                       (flat / name).read_bytes()) for name in before})
+
+    def test_schema4_capture_rejects_installed_old_flat_a(self):
+        _parent, generation, flat, _before, installed = self._runtime_schema4_selected_fixture()
+        (installed / "dhcpd.conf").write_bytes((flat / "dhcpd.conf").read_bytes())
+        with self.assertRaisesRegex(LOAD.LoadError, "installed DHCP"):
+            LOAD._capture_runtime_selected_dhcp(self.project, generation)
+
+    def test_schema4_capture_rejects_dangling_current_without_flat_fallback(self):
+        _parent, generation, _flat, _before, _installed = self._runtime_schema4_selected_fixture()
+        selector = self.project / "99-output-ztp/current"
+        selector.unlink(); selector.symlink_to("generations/ffffffffffffffffffff")
+        with self.assertRaises(LOAD.LoadError):
+            LOAD._capture_runtime_selected_dhcp(self.project, generation)
+
+    def test_schema4_active_verify_rejects_same_bytes_installed_rebind(self):
+        parent, generation, _flat, _before, installed = self._runtime_schema4_selected_fixture()
+        receipt = dict(schema_version=4, release_id=parent["release_id"],
+                       selector_target="generations/" + generation.name,
+                       dhcp_status="enabled",
+                       selected_dhcp=LOAD._capture_runtime_selected_dhcp(self.project, generation))
+        leaf = installed / "dhcpd.conf"
+        payload = leaf.read_bytes()
+        held = installed / ".independent-held-owner"
+        leaf.rename(held); leaf.write_bytes(payload)
+        with self.assertRaisesRegex(LOAD.LoadError, "changed"):
+            LOAD._verify_active_selected_dhcp(self.project, receipt)
+
+    def test_schema4_parser_closed_inventory_boolean_owner_and_external_runtime_hold(self):
+        parent, generation, _flat, _before, _installed = self._runtime_schema4_selected_fixture()
+        base = dict(schema_version=4, release_id=parent["release_id"],
+                    selector_target="generations/" + generation.name, dhcp_status="enabled",
+                    selected_dhcp=LOAD._capture_runtime_selected_dhcp(self.project, generation))
+        for fault in ("extra", "missing", "boolean", "external"):
+            with self.subTest(fault=fault):
+                receipt = json.loads(json.dumps(base))
+                row = receipt["selected_dhcp"]["installed"]
+                if fault == "extra": row["leaves"]["independent-extra"] = row["leaves"]["dhcpd.conf"]
+                elif fault == "missing": row["leaves"].pop("dhcpd_ib.hosts")
+                elif fault == "boolean": row["leaves"]["dhcpd.conf"]["identity"][0] = True
+                else: row["directory"]["path"] = str(self.root / "unregistered-runtime")
+                with self.assertRaises(LOAD.LoadError):
+                    LOAD._validate_runtime_selected_dhcp(self.project, receipt)
+
+    def test_schema4_wal_freeze_basis_rejects_flat_a_and_same_byte_foreign_owner(self):
+        parent, generation, flat, _before, installed = self._runtime_schema4_selected_fixture()
+        receipt = dict(schema_version=4, release_id=parent["release_id"],
+                       selector_target="generations/" + generation.name, dhcp_status="enabled",
+                       selected_dhcp=LOAD._capture_runtime_selected_dhcp(self.project, generation))
+        owners = receipt["selected_dhcp"]["installed"]["leaves"]
+        body = dict(old_project={"path": str(self.project)}, dhcp_transaction={
+            "body": {"runtime": {"path": str(installed)},
+                     "before": {name: row["state"] for name, row in owners.items()}},
+            "live_inventory": {"before": owners},
+        })
+        LOAD._require_setup_switch_dhcp_freeze_basis(body, receipt)
+        for fault in ("flat", "identity", "missing-live"):
+            with self.subTest(fault=fault):
+                wrong = json.loads(json.dumps(body))
+                if fault == "flat":
+                    wrong["dhcp_transaction"]["body"]["before"]["dhcpd.conf"] = LOAD._dhcp_restore_leaf_state(flat / "dhcpd.conf")
+                elif fault == "identity":
+                    wrong["dhcp_transaction"]["live_inventory"]["before"]["dhcpd.conf"]["identity"][1] += 1
+                else: wrong["dhcp_transaction"].pop("live_inventory")
+                with self.assertRaises(LOAD.LoadError):
+                    LOAD._require_setup_switch_dhcp_freeze_basis(wrong, receipt)
+
+    def test_schema3_runtime_receipt_keeps_original_contract_without_requalification(self):
+        original = {"schema_version": 3, "unchanged_authorities": {"dhcp": {"independent": "old flat"}}}
+        before = json.dumps(original, sort_keys=True)
+        LOAD._validate_runtime_selected_dhcp(self.project, original)
+        LOAD._verify_active_selected_dhcp(self.project, original)
+        LOAD._require_setup_switch_dhcp_freeze_basis({}, original)
+        self.assertEqual(before, json.dumps(original, sort_keys=True))
+
+
+    def _schema4_real_receipt_fixture(self):
+        # Qualify the actual private deployment root before producing and
+        # freezing any parent/input snapshot, never rewrite selected proof.
+        document = yaml.safe_load(self.global_file.read_text())
+        document["common"]["mgmt"]["http"]["http_root"] = str(self.root.resolve())
+        self.global_file.write_text(yaml.safe_dump(document, sort_keys=False))
+        self.inputs = LOAD.replace(self.inputs, settings=LOAD.load_global(self.global_file))
+        parent, generation, flat, before, installed = self._runtime_schema4_selected_fixture()
+        # Production-compatible lexical aliases are qualified before capture.
+        published = self.ztp / "config/isc-dhcp-server"
+        for name in before:
+            alias = published / name
+            alias.unlink()
+            alias.symlink_to(os.path.relpath(flat / name, published.resolve()))
+        for name, payload in {
+            "ztp-bootstrap_oob.sh": b'A oob bootstrap\nZTP_UPGRADE_ENABLED="false"\n',
+            "ztp-bootstrap_oobofoob.sh": b'A oobofoob bootstrap\nZTP_UPGRADE_ENABLED="false"\n',
+            "ztp.json": b'{"release":"A"}\n',
+        }.items():
+            (self.ztp / name).write_bytes(payload)
+        keys = self.ztp / "config/publickey"
+        keys.mkdir(parents=True, exist_ok=True)
+        (keys / "laptop.pub").write_bytes(b"A laptop key\n")
+        (keys / "mgmt-server.pub").write_bytes(b"A management key\n")
+        patcher = mock.patch.object(LOAD, "HTTP_ROOT", self.root.resolve())
+        patcher.start(); self.addCleanup(patcher.stop)
+        return parent, generation, flat, before, installed
+
+    def test_schema4_real_prepare_parser_keeps_selected_installed_and_flat_distinct(self):
+        parent, generation, flat, before, installed = self._schema4_real_receipt_fixture()
+        receipt_path = LOAD.prepare_runtime_rollback_receipt(
+            self.project, generation, capture_selected_dhcp=True)
+        receipt = LOAD._load_runtime_rollback_receipt(self.project, receipt_path)
+        self.assertEqual(4, receipt["schema_version"])
+        expected = hashlib.sha256(
+            before["dhcpd.conf"][1] + b"# independently specified selected B\n").hexdigest()
+        self.assertEqual(expected,
+                         receipt["selected_dhcp"]["installed"]["leaves"]["dhcpd.conf"]["state"]["sha256"])
+        self.assertEqual(hashlib.sha256(before["dhcpd.conf"][1]).hexdigest(),
+                         receipt["unchanged_authorities"]["dhcp"]["dhcpd.conf"]["sha256"])
+        self.assertEqual(parent["release_id"], receipt["release_id"])
+        LOAD._verify_active_runtime_receipt(self.project, receipt_path, receipt)
+        self.assertEqual(before, {name: ((flat / name).stat().st_ino,
+                                       (flat / name).read_bytes()) for name in before})
+
+    def test_schema4_real_prepare_reuse_keeps_original_receipt_owner_and_bytes(self):
+        _parent, generation, _flat, _before, _installed = self._schema4_real_receipt_fixture()
+        path = LOAD.prepare_runtime_rollback_receipt(
+            self.project, generation, capture_selected_dhcp=True)
+        original = ((path / "receipt.json").stat().st_ino, (path / "receipt.json").read_bytes())
+        self.assertEqual(path, LOAD.prepare_runtime_rollback_receipt(
+            self.project, generation, capture_selected_dhcp=True))
+        self.assertEqual(original, ((path / "receipt.json").stat().st_ino,
+                                   (path / "receipt.json").read_bytes()))
+
+    def test_schema4_real_capture_existing_schema3_holds_without_upgrading_proof(self):
+        _parent, generation, _flat, _before, _installed = self._schema4_real_receipt_fixture()
+        path = LOAD.prepare_runtime_rollback_receipt(self.project, generation)
+        original = ((path / "receipt.json").stat().st_ino, (path / "receipt.json").read_bytes())
+        self.assertEqual(3, LOAD._load_runtime_rollback_receipt(self.project, path)["schema_version"])
+        with self.assertRaisesRegex(LOAD.LoadError, "schema4"):
+            LOAD.prepare_runtime_rollback_receipt(self.project, generation, capture_selected_dhcp=True)
+        with mock.patch.object(LOAD, "active_project", return_value=self.project.resolve()):
+            with self.assertRaisesRegex(LOAD.LoadError, "schema4"):
+                LOAD.prepare_active_runtime_rollback_receipt(self.project, "generations/" + generation.name)
+        self.assertEqual(original, ((path / "receipt.json").stat().st_ino,
+                                   (path / "receipt.json").read_bytes()))
+        self.assertEqual(3, LOAD._load_runtime_rollback_receipt(self.project, path)["schema_version"])
+
+    def test_schema4_real_parser_rejects_duplicate_top_level_authority(self):
+        _parent, generation, _flat, _before, _installed = self._schema4_real_receipt_fixture()
+        path = LOAD.prepare_runtime_rollback_receipt(
+            self.project, generation, capture_selected_dhcp=True)
+        file = path / "receipt.json"
+        payload = file.read_bytes()
+        self.assertTrue(payload.lstrip().startswith(b"{"))
+        file.write_bytes(b'{"schema_version":3,' + payload.lstrip()[1:])
+        with self.assertRaisesRegex(LOAD.LoadError, "duplicate|JSON|receipt"):
+            LOAD._load_runtime_rollback_receipt(self.project, path)
+
+    def test_schema4_real_parser_closed_selected_inventory_rejects_external_path(self):
+        _parent, generation, _flat, _before, _installed = self._schema4_real_receipt_fixture()
+        path = LOAD.prepare_runtime_rollback_receipt(
+            self.project, generation, capture_selected_dhcp=True)
+        file = path / "receipt.json"
+        receipt = json.loads(file.read_bytes())
+        receipt["selected_dhcp"]["installed"]["directory"]["path"] = str(self.root / "not-an-installer-runtime")
+        file.write_text(json.dumps(receipt), encoding="ascii")
+        with self.assertRaises(LOAD.LoadError):
+            LOAD._load_runtime_rollback_receipt(self.project, path)
+
+    def test_schema4_frozen_parent_does_not_rebind_when_canonical_parent_becomes_q(self):
+        parent, generation, _flat, _before, _installed = self._schema4_real_receipt_fixture()
+        path = LOAD.prepare_runtime_rollback_receipt(
+            self.project, generation, capture_selected_dhcp=True)
+        receipt = LOAD._load_runtime_rollback_receipt(self.project, path)
+        canonical = self.project / "99-output-ztp/current-release.json"
+        canonical.write_bytes(b'{"release_id":"independent-Q-canonical-parent"}\n')
+        # Disk qualification resolves A's immutable parent, not Q or the live selector.
+        LOAD._validate_runtime_selected_dhcp(self.project, receipt)
+        self.assertEqual(parent["release_id"], receipt["release_id"])
+        self.assertEqual(receipt["selected_dhcp"], LOAD._load_runtime_rollback_receipt(
+            self.project, path)["selected_dhcp"])
+        with self.assertRaises(LOAD.LoadError):
+            LOAD._verify_active_runtime_receipt(self.project, path, receipt)
+
+    def test_schema4_mutable_installed_directory_times_do_not_rebind_frozen_authority(self):
+        _parent, generation, _flat, _before, installed = self._schema4_real_receipt_fixture()
+        path = LOAD.prepare_runtime_rollback_receipt(
+            self.project, generation, capture_selected_dhcp=True)
+        receipt = LOAD._load_runtime_rollback_receipt(self.project, path)
+        marker = installed / ".authorized-transaction-reservation"
+        marker.mkdir(mode=0o700); marker.rmdir()
+        LOAD._validate_runtime_selected_dhcp(self.project, receipt)
+        LOAD._verify_active_selected_dhcp(self.project, receipt)
+        self.assertEqual({"path", "dev", "ino"}, set(receipt["selected_dhcp"]["installed"]["directory"]))
+
+    def _selected_manual_preflight_lifecycle(self, *, reserve_operation=False, invalid_selector=False):
+        _parent, _generation, _flat, _before, device = self._selected_pinned_b_consumer_fixture()
+        device["ip"] = "192.0.2.10"
+        target = self.project / "99-output-ztp/manual-ztp/20261009_010000/leaf01"
+        if reserve_operation:
+            # Same ordering as main: authorized run reservation precedes qualification.
+            target.parent.mkdir(parents=True, mode=0o700)
+        if invalid_selector:
+            selector = self.project / "99-output-ztp/current"
+            selector.unlink(); selector.symlink_to("generations/ffffffffffffffffffff")
+        client = mock.Mock()
+        client.args.command_timeout = 10
+        client.run.return_value = SimpleNamespace(returncode=0, stdout="set: {}\n", stderr="")
+        applied = {"trusted": False, "reason": "independent no prior device receipt",
+                   "fingerprint": "a" * 64}
+        with mock.patch.object(MANUAL, "DHCP_RELEASE_MANIFEST",
+                               self.ztp / "config/isc-dhcp-server/dhcp-release-manifest.json"), \
+                mock.patch.object(MANUAL, "connect_and_verify", return_value=("192.0.2.10", "eth0")), \
+                mock.patch.object(MANUAL, "collect_applied_config", return_value=applied):
+            if invalid_selector:
+                with self.assertRaises(MANUAL.ManualZtpError):
+                    MANUAL.preflight_one(client, self.project, device, target)
+                self.assertFalse(os.path.lexists(target))
+                self.assertFalse(os.path.lexists(target.parents[1]))
+                client.run.assert_not_called()
+                return
+            evidence = MANUAL.preflight_one(client, self.project, device, target)
+            self.assertTrue((target / "preflight.json").is_file())
+            self.assertEqual("pinned", evidence["selected_dhcp_authority_binding"]["mode"])
+            # Confirm must accept its own authorized evidence writes, still
+            # using exact selected/leaf owners; do not weaken full9 assertions.
+            MANUAL.verify_prepared_release_binding(evidence)
+            selector = self.project / "99-output-ztp/current"
+            selector.unlink(); selector.symlink_to("generations/ffffffffffffffffffff")
+            with self.assertRaises(MANUAL.ManualZtpError):
+                MANUAL.verify_prepared_release_binding(evidence)
+
+    def test_selected_real_load_manual_first_preflight_then_confirm(self):
+        self._selected_manual_preflight_lifecycle()
+
+    def test_selected_real_load_manual_main_reserved_stage_preflight_then_confirm(self):
+        self._selected_manual_preflight_lifecycle(reserve_operation=True)
+
+    def test_selected_real_load_manual_invalid_preflight_does_not_reserve_output(self):
+        self._selected_manual_preflight_lifecycle(invalid_selector=True)
+
+    @contextmanager
+    def _schema4_real_receipt_producer_for_existing_workflow(self, *, runtime_directory="private-schema4-installed"):
+        self.root, self.ztp = self.root.resolve(), self.ztp.resolve()
+        installed = self.root / runtime_directory
+        installed.mkdir(mode=0o700)
+        names = ("dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts", "dhcpd_nvl.hosts")
+        mapping = {self.ztp / "config/isc-dhcp-server" / name: installed / name for name in names}
+        producer = LOAD.prepare_runtime_rollback_receipt
+        captured = []
+
+        def real_schema4_receipt(project, generation, **options):
+            # Seed the original installed namespace once, before qualification.
+            # These are independent fixture literals from setUp, not hashes
+            # synthesized from the implementation being asserted.
+            for name in names:
+                leaf = installed / name
+                if not leaf.exists():
+                    leaf.write_bytes((name + "\n").encode("ascii"))
+                self.assertEqual((name + "\n").encode("ascii"), leaf.read_bytes())
+            options["capture_selected_dhcp"] = True
+            path = producer(project, generation, **options)
+            record = LOAD._load_runtime_rollback_receipt(project, path)
+            self.assertEqual(4, record["schema_version"])
+            captured.append((project, path))
+            return path
+
+        with mock.patch.object(LOAD, "dhcp_file_mappings", return_value=mapping), \
+                mock.patch.object(LOAD, "prepare_runtime_rollback_receipt", side_effect=real_schema4_receipt):
+            yield
+            self.assertEqual(1, len(captured), "workflow must actually create one new schema4 receipt")
+            project, receipt = captured[0]
+            self.assertEqual(4, LOAD._load_runtime_rollback_receipt(project, receipt)["schema_version"])
+
+    def test_schema4_workflow_first_shared_write_then_disk_recovery(self):
+        with self._schema4_real_receipt_producer_for_existing_workflow():
+            # Existing independent P-link/bootstrap values and no-start
+            # assertions remain intact; no fixture receipt is rewritten.
+            self.test_setup_wal_disk_only_runtime_restore_recovers_a_and_retires_last()
+
+    def test_schema4_workflow_committed_q_before_health_then_group_restore(self):
+        with self._schema4_real_receipt_producer_for_existing_workflow():
+            self._committed_q_group_restore(existing=False)
+
+    def test_schema4_workflow_partial_p_restore_reentry_preserves_original_plan(self):
+        with self._schema4_real_receipt_producer_for_existing_workflow():
+            self.test_committed_q_group_restore_reenters_after_original_p_namespace_sync_failure()
+
+    def test_schema4_workflow_partial_archive_reentry_requires_fresh_health(self):
+        with self._schema4_real_receipt_producer_for_existing_workflow():
+            self.test_b_materialized_archive_interruption_requires_fresh_health_before_retirement()
+
+    def _copied_vm_selected_contract_workflow(self, fault=None):
+        parent, generation, _flat, _before, _device = self._selected_pinned_b_consumer_fixture()
+        deployment = self.root / "private-deployed-source"
+        deployment.mkdir(mode=0o700)
+        shutil.copytree(ROOT / "tools", deployment / "tools")
+        copied = self.root / "copied-verifier.py"
+        shutil.copy2(ROOT / "test_cases/run_vm_validation.py", copied)
+        working = self.root / "unrelated-working-directory"
+        working.mkdir(mode=0o700)
+        if fault == "missing-contract":
+            (deployment / "tools/project_contract.py").unlink()
+        operation = r'''
+import importlib.util, json, sys, types
+from pathlib import Path
+copied, deployment, project = map(Path, sys.argv[1:4])
+spec = importlib.util.spec_from_file_location("private_copied_validator", copied)
+vm = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = vm
+spec.loader.exec_module(vm)
+args = vm.parse_args([str(project), "--root", str(deployment)])
+vm.configure_validation_deployment_root(args.root)
+if sys.argv[4] == "foreign-cache":
+    foreign = types.ModuleType("tools")
+    foreign.__path__ = [str(copied.parent / "unrelated-working-directory/tools")]
+    sys.modules["tools"] = foreign
+parent = json.loads((project / "99-output-ztp/current-release.json").read_bytes())
+selected = vm.selected_dhcp_authority(project, parent)
+assert selected.mode == "pinned"
+assert selected.manifest["release_id"] == "independent-consumer-dhcp-B"
+assert vm.validated_parent_dhcp_status(project, parent) == "enabled"
+vm._recheck_selected_dhcp_authority(project, selected)
+assert Path(vm.deployment_project_contract().__file__).resolve() == deployment.resolve() / "tools/project_contract.py"
+print("actual-copied-validator-selected-B")
+'''
+        result = subprocess.run([sys.executable, "-B", "-c", operation,
+            str(copied), str(deployment.resolve()), str(self.project), fault or "none"],
+            cwd=working, capture_output=True, text=True, timeout=30)
+        if fault:
+            self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertNotIn("actual-copied-validator-selected-B", result.stdout)
+            expected_reason = "project_contract.py" if fault == "missing-contract" else "foreign cached deployment tools package"
+            self.assertIn(expected_reason, result.stderr)
+            self.assertNotIn("the following arguments are required", result.stderr)
+        else:
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertEqual("actual-copied-validator-selected-B\n", result.stdout)
+        self.assertEqual(parent["release_id"], generation.name)
+
+    def test_real_load_copied_vm_cli_root_from_unrelated_cwd_selects_pinned_b(self):
+        self._copied_vm_selected_contract_workflow()
+
+    def test_real_load_copied_vm_cli_root_missing_contract_does_not_fallback_repo(self):
+        self._copied_vm_selected_contract_workflow("missing-contract")
+
+    def test_real_load_copied_vm_cli_root_foreign_cached_tools_fails_closed(self):
+        self._copied_vm_selected_contract_workflow("foreign-cache")
+
+    def test_schema4_capture_rejects_writable_installed_leaf_even_matching_selected_bytes(self):
+        _parent, generation, _flat, _before, installed = self._runtime_schema4_selected_fixture()
+        (installed / "dhcpd.conf").chmod(0o666)
+        with self.assertRaisesRegex(LOAD.LoadError, "owner|permissions|unsafe"):
+            LOAD._capture_runtime_selected_dhcp(self.project, generation)
+
+    def test_schema4_capture_rejects_foreign_installed_uid_not_calling_euid(self):
+        _parent, generation, _flat, _before, installed = self._runtime_schema4_selected_fixture()
+        reader = LOAD._setup_switch_dhcp_owned_leaf
+        foreign_uid = installed.stat().st_uid + 1
+        def foreign_owner(path):
+            row = reader(path)
+            row["identity"][3] = foreign_uid
+            row["state"]["uid"] = foreign_uid
+            return row
+        with mock.patch.object(LOAD, "_setup_switch_dhcp_owned_leaf", side_effect=foreign_owner):
+            with self.assertRaisesRegex(LOAD.LoadError, "owner|permissions|unsafe"):
+                LOAD._capture_runtime_selected_dhcp(self.project, generation)
+
+    def test_schema4_parser_rejects_self_consistent_writable_or_foreign_installed_owner(self):
+        parent, generation, _flat, _before, installed = self._runtime_schema4_selected_fixture()
+        original = dict(schema_version=4, release_id=parent["release_id"],
+                        selector_target="generations/" + generation.name, dhcp_status="enabled",
+                        selected_dhcp=LOAD._capture_runtime_selected_dhcp(self.project, generation))
+        for fault in ("writable", "foreign"):
+            with self.subTest(fault=fault):
+                receipt = json.loads(json.dumps(original))
+                row = receipt["selected_dhcp"]["installed"]["leaves"]["dhcpd.conf"]
+                if fault == "writable":
+                    row["identity"][2] = stat.S_IFREG | 0o666
+                    row["state"]["mode"] = 0o666
+                else:
+                    row["identity"][3] = installed.stat().st_uid + 1
+                    row["state"]["uid"] = installed.stat().st_uid + 1
+                with self.assertRaisesRegex(LOAD.LoadError, "owner|permissions|unsafe"):
+                    LOAD._validate_runtime_selected_dhcp(self.project, receipt)
+
+    def test_schema4_parser_strict_numeric_generation_and_directory_identity(self):
+        parent, generation, _flat, _before, _installed = self._runtime_schema4_selected_fixture()
+        original = dict(schema_version=4, release_id=parent["release_id"],
+                        selector_target="generations/" + generation.name, dhcp_status="enabled",
+                        selected_dhcp=LOAD._capture_runtime_selected_dhcp(self.project, generation))
+        for fault in ("tree-float", "tree-bool", "generation-parent-float", "runtime-directory-float"):
+            with self.subTest(fault=fault):
+                receipt = json.loads(json.dumps(original))
+                row = receipt["selected_dhcp"]
+                if fault == "tree-float":
+                    entry = next(iter(row["generation"]["tree"].values()))
+                    entry["uid"] = float(entry["uid"])
+                elif fault == "tree-bool":
+                    entry = next(iter(row["generation"]["tree"].values()))
+                    # Boolean identity must be rejected even where True/False
+                    # happens to compare equal to an integer kernel identity.
+                    entry["uid"] = bool(entry["uid"])
+                elif fault == "generation-parent-float":
+                    entry = row["generation"]["parent"]
+                    entry["dev"] = float(entry["dev"])
+                else:
+                    entry = row["installed"]["directory"]
+                    entry["dev"] = float(entry["dev"])
+                with self.assertRaises(LOAD.LoadError):
+                    LOAD._validate_runtime_selected_dhcp(self.project, receipt)
+
+    def _real_load_cumulus_upgrade_policy_fixture(self, enabled):
+        from test_cases.test_vm_validation_runner import VM
+        document = yaml.safe_load(self.global_file.read_text())
+        document["common"]["mgmt"]["http"]["http_root"] = str(self.root.resolve())
+        self.global_file.write_text(yaml.safe_dump(document, sort_keys=False))
+        self.subnet_file.write_text(
+            "shared_network,subnet,netmask,range_start,range_end,routers,"
+            "ztp_service_ip,cumulus_profile,nvos_ztp\n"
+            "net,192.0.2.0,255.255.255.0,192.0.2.100,192.0.2.120,192.0.2.1,"
+            "192.0.2.40,oob,no\n")
+        settings = LOAD.apply_subnet_service_ips(LOAD.load_global(self.global_file), self.subnet_file)
+        self.inputs = LOAD.replace(self.inputs, settings=settings)
+        parent, generation, _flat, _before, _device = self._selected_pinned_b_consumer_fixture()
+        templates = self.ztp / "templates"
+        templates.mkdir()
+        shutil.copy2(ROOT / "ztp/templates/ztp-bootstrap.sh", templates / "ztp-bootstrap.sh")
+        shutil.copy2(ROOT / "ztp/templates/ztp.json", templates / "ztp.json")
+        keys = self.ztp / "config/publickey"
+        keys.mkdir(parents=True)
+        from test_cases.test_ssh_key_preparation_contract import public_line
+        key = keys / "laptop.pub"
+        key.write_bytes(public_line("ssh-ed25519", 31, "independent-upgrade-policy-key"))
+        LOAD.render_ztp_runtime(settings, (key,), frozenset({"eth"}), upgrade_enabled=enabled)
+        return VM, parent, generation, self.ztp / "ztp-bootstrap_oob.sh"
+
+    def test_real_render_vm_no_upgrade_cannot_waive_image_after_executable_body_drift(self):
+        VM, parent, _generation, script = self._real_load_cumulus_upgrade_policy_fixture(False)
+        payload = script.read_bytes()
+        guard = b' && "${ZTP_UPGRADE_ENABLED}" == "true"'
+        self.assertEqual(1, payload.count(guard), "independent real executable upgrade boundary")
+        policy = b'ZTP_UPGRADE_ENABLED="false"\n'
+        for fault, candidate in (
+            ("removed-upgrade-guard", payload.replace(guard, b'')),
+            ("extra-image-command", payload + b'onie-install -fa -i "${USE_IMG_URL}"\n'),
+            ("heredoc-policy", payload.replace(policy, b"cat <<'INDEPENDENT_POLICY'\n" + policy + b'INDEPENDENT_POLICY\n')),
+        ):
+            with self.subTest(fault=fault):
+                script.write_bytes(candidate); script.chmod(0o755)
+                self.assertIn(policy, script.read_bytes())
+                with self.assertRaises(ValueError):
+                    VM.cumulus_runtime_image_required(self.root.resolve(), self.project, parent)
+        script.write_bytes(payload); script.chmod(0o755)
+
+    def test_real_render_vm_no_upgrade_requires_safe_exact_template_authority(self):
+        VM, parent, _generation, script = self._real_load_cumulus_upgrade_policy_fixture(False)
+        template = self.ztp / "templates/ztp-bootstrap.sh"
+        original = template.read_bytes()
+        for fault in ("writable", "symlink", "hardlink", "body-drift"):
+            with self.subTest(fault=fault):
+                sentinel = template.with_name("independent-template-preimage-" + fault)
+                if fault == "writable": template.chmod(0o777)
+                elif fault == "symlink":
+                    template.rename(sentinel); template.symlink_to(sentinel.name)
+                elif fault == "hardlink": os.link(template, sentinel)
+                else: template.write_bytes(original + b'# independent template body changed\n')
+                try:
+                    with self.assertRaises((ValueError, OSError)):
+                        VM.cumulus_runtime_image_required(self.root.resolve(), self.project, parent)
+                finally:
+                    if fault == "symlink": template.unlink(); sentinel.rename(template)
+                    elif fault == "hardlink": sentinel.unlink()
+                    template.write_bytes(original); template.chmod(0o644)
+        self.assertIn(b'ZTP_UPGRADE_ENABLED="false"\n', script.read_bytes())
+
+    def test_real_render_vm_bootstrap_template_hash_recheck_rejects_same_identity_byte_collision(self):
+        VM, parent, _generation, _script = self._real_load_cumulus_upgrade_policy_fixture(False)
+        template = (self.ztp / "templates/ztp-bootstrap.sh").resolve()
+        original_reader = VM.read_regular_bytes
+        reads = []
+        def collision_reader(path, **kwargs):
+            value = original_reader(path, **kwargs)
+            if Path(path) == template:
+                reads.append(Path(path))
+                # Deterministic independent collision model: retain original
+                # namespace identities, return different same-length bytes on
+                # the second read; never depend on filesystem clock granularity.
+                if len(reads) > 1: return value.replace(b'set -euo pipefail', b'set -euO pipefail', 1)
+            return value
+        with mock.patch.object(VM, "read_regular_bytes", side_effect=collision_reader):
+            with self.assertRaisesRegex(ValueError, "bytes|owner"):
+                VM.cumulus_runtime_image_required(self.root.resolve(), self.project, parent)
+        self.assertEqual(2, len(reads), "original template SHA must be rechecked, not copied from metadata")
+
+    def test_real_render_vm_no_upgrade_fifo_bootstrap_cannot_hang_or_waive_image(self):
+        from test_cases.test_vm_validation_runner import VmRegularByteReaderRaceContracts
+        VM, parent, _generation, script = self._real_load_cumulus_upgrade_policy_fixture(False)
+        original = script.read_bytes()
+        with VmRegularByteReaderRaceContracts.owned_fifo_rebind(script.resolve(), self.root) as (attempts, opened, closed, injected):
+            # Run the actual VM policy path: parent/selected authority and
+            # original template qualification remain real, not mocked passes.
+            with self.assertRaisesRegex(ValueError, "打开期间文件发生变化"):
+                VM.cumulus_runtime_image_required(self.root.resolve(), self.project, parent)
+            self.assertEqual(1, len(attempts)); self.assertTrue(attempts[0] & os.O_NONBLOCK)
+            self.assertEqual(1, len(opened)); self.assertEqual(opened, closed)
+            self.assertEqual(1, len(injected))
+        self.assertEqual(original, script.read_bytes())
+
+    def test_real_load_render_false_vm_cumulus_policy_needs_no_image(self):
+        VM, parent, _generation, script = self._real_load_cumulus_upgrade_policy_fixture(False)
+        self.assertIn(b'ZTP_UPGRADE_ENABLED="false"\n', script.read_bytes())
+        self.assertFalse((self.ztp / "image/cumulus").exists())
+        self.assertIs(False, VM.cumulus_runtime_image_required(self.root.resolve(), self.project, parent))
+
+    def test_real_load_render_true_vm_cumulus_policy_still_requires_image(self):
+        VM, parent, _generation, script = self._real_load_cumulus_upgrade_policy_fixture(True)
+        self.assertIn(b'ZTP_UPGRADE_ENABLED="true"\n', script.read_bytes())
+        self.assertIs(True, VM.cumulus_runtime_image_required(self.root.resolve(), self.project, parent))
+
+    def test_real_load_vm_no_upgrade_rejects_selected_bootstrap_binding_faults(self):
+        VM, parent, _generation, script = self._real_load_cumulus_upgrade_policy_fixture(False)
+        payload = script.read_bytes()
+        for fault in ("duplicate-policy", "wrong-host", "wrong-prefix", "writable", "foreign-inode-link"):
+            with self.subTest(fault=fault):
+                script.write_bytes(payload); script.chmod(0o755)
+                if fault == "duplicate-policy": script.write_bytes(payload + b'ZTP_UPGRADE_ENABLED="false"\n')
+                elif fault == "wrong-host":
+                    script.write_bytes(payload.replace(b'ZTP_SERVER_HOST="192.0.2.40"', b'ZTP_SERVER_HOST="192.0.2.99"'))
+                elif fault == "wrong-prefix":
+                    script.write_bytes(payload.replace(b'ZTP_URL_PREFIX="/ztp"', b'ZTP_URL_PREFIX="/other"'))
+                elif fault == "writable": script.chmod(0o777)
+                else:
+                    held = script.with_name("independent-operator-held-bootstrap")
+                    script.rename(held); script.symlink_to(held.name)
+                with self.assertRaises((ValueError, OSError)):
+                    VM.cumulus_runtime_image_required(self.root.resolve(), self.project, parent)
+                if fault == "foreign-inode-link":
+                    script.unlink(); held.rename(script)
+        script.write_bytes(payload); script.chmod(0o755)
+        self.global_file.write_bytes(self.global_file.read_bytes() + b"\n# independent out-of-band input\n")
+        with self.assertRaises((ValueError, OSError)):
+            VM.cumulus_runtime_image_required(self.root.resolve(), self.project, parent)
 
     def test_writes_parent_release_after_all_components_match(self) -> None:
         result = LOAD.validate_and_publish_release(self.project, self.inputs)
@@ -6345,6 +7235,125 @@ class ReleaseTransactionTests(unittest.TestCase):
         receipt = (LOAD.prepare_runtime_rollback_receipt(self.project, generation)
                    if prepare_receipt else None)
         return parent, generation, receipt
+
+    def _publish_a_with_managed_dhcp_receipt(self):
+        root_patch = mock.patch.object(LOAD, "HTTP_ROOT", self.root.resolve())
+        root_patch.start()
+        self.addCleanup(root_patch.stop)
+        document = yaml.safe_load(self.global_file.read_text())
+        document["common"]["mgmt"]["http"]["http_root"] = str(self.root.resolve())
+        self.global_file.write_text(yaml.safe_dump(document, sort_keys=False))
+        _parent, generation, _receipt = self._publish_a_with_runtime_rollback_receipt(prepare_receipt=False)
+        published = self.ztp / "config/isc-dhcp-server"
+        source = self.project / "99-output-dhcp"
+        source.mkdir(exist_ok=True)
+        for name in ("dhcp-release-manifest.json", "dhcpd.conf", "dhcpd_eth.hosts",
+                     "dhcpd_ib.hosts", "dhcpd_nvl.hosts"):
+            leaf = published / name
+            (source / name).write_bytes(leaf.read_bytes())
+            leaf.unlink()
+            leaf.symlink_to(os.path.relpath(source / name, published))
+        return generation, LOAD.prepare_runtime_rollback_receipt(self.project, generation)
+
+    def test_runtime_receipt_accepts_only_project_bound_dhcp_publication_links(self):
+        generation, receipt = self._publish_a_with_managed_dhcp_receipt()
+        record = LOAD._load_runtime_rollback_receipt(self.project, receipt)
+        LOAD._verify_rollback_authorities(self.project, record)
+        for name, binding in record["unchanged_authorities"]["dhcp"].items():
+            self.assertEqual("link", binding["state"])
+            self.assertEqual(os.readlink(self.ztp / "config/isc-dhcp-server" / name), binding["target"])
+            self.assertEqual(hashlib.sha256((generation / "dhcp" / name).read_bytes()).hexdigest(),
+                             binding["sha256"])
+
+    def test_runtime_dhcp_link_same_bytes_new_source_inode_holds(self):
+        generation, receipt = self._publish_a_with_managed_dhcp_receipt()
+        record = LOAD._load_runtime_rollback_receipt(self.project, receipt)
+        source = self.project / "99-output-dhcp/dhcp-release-manifest.json"
+        source.rename(source.with_name("operator-retained-manifest"))
+        source.write_bytes(source.with_name("operator-retained-manifest").read_bytes())
+        before = (receipt / "receipt.json").read_bytes()
+        with self.assertRaises(LOAD.LoadError):
+            LOAD._verify_rollback_authorities(self.project, record)
+        live = self.ztp / "ztp.json"
+        live.write_bytes(b"independent partial B must survive DHCP authority HOLD\n")
+        with mock.patch.object(LOAD, "DEPLOYMENT_LOCK", self.root / ".deployment.lock"), \
+                mock.patch.object(LOAD, "active_project", return_value=self.project.resolve()), \
+                mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            descriptor = LOAD.acquire_deployment_lock(exclusive=True)
+            try:
+                with self.assertRaises(LOAD.LoadError):
+                    LOAD.restore_runtime_rollback_receipt(self.project, receipt,
+                        expected_current=f"generations/{generation.name}",
+                        deployment_lock_descriptor=descriptor, services_quiesced=True,
+                        runtime_backend=SimpleNamespace(name="supervisor"))
+            finally:
+                LOAD.release_deployment_lock(descriptor)
+        self.assertEqual(b"independent partial B must survive DHCP authority HOLD\n", live.read_bytes())
+        self.assertEqual(before, (receipt / "receipt.json").read_bytes())
+
+    def test_runtime_dhcp_link_same_target_new_publication_inode_holds(self):
+        _generation, receipt = self._publish_a_with_managed_dhcp_receipt()
+        record = LOAD._load_runtime_rollback_receipt(self.project, receipt)
+        leaf = self.ztp / "config/isc-dhcp-server/dhcpd.conf"
+        target = os.readlink(leaf)
+        leaf.rename(leaf.with_name("operator-retained-link"))
+        leaf.symlink_to(target)
+        with self.assertRaises(LOAD.LoadError):
+            LOAD._verify_rollback_authorities(self.project, record)
+
+    def test_runtime_dhcp_link_foreign_same_bytes_source_is_not_authority(self):
+        _generation, receipt = self._publish_a_with_managed_dhcp_receipt()
+        record = LOAD._load_runtime_rollback_receipt(self.project, receipt)
+        leaf = self.ztp / "config/isc-dhcp-server/dhcpd.conf"
+        foreign = self.root / "foreign-dhcpd.conf"
+        foreign.write_bytes(leaf.read_bytes())
+        leaf.unlink()
+        leaf.symlink_to(os.path.relpath(foreign, leaf.parent))
+        with self.assertRaises(LOAD.LoadError):
+            LOAD._verify_rollback_authorities(self.project, record)
+        self.assertTrue(foreign.is_file())
+
+    def test_runtime_dhcp_source_rebound_during_held_read_holds(self):
+        _generation, receipt = self._publish_a_with_managed_dhcp_receipt()
+        record = LOAD._load_runtime_rollback_receipt(self.project, receipt)
+        source = self.project / "99-output-dhcp/dhcp-release-manifest.json"
+        real_read = LOAD._read_rollback_regular
+        injected = []
+        def rebind(path, **kwargs):
+            opened = real_read(path, **kwargs)
+            if path == source and not injected:
+                source.rename(source.with_name("operator-held-original"))
+                source.write_bytes(opened[0])
+                injected.append(True)
+            return opened
+        with mock.patch.object(LOAD, "_read_rollback_regular", side_effect=rebind):
+            with self.assertRaises(LOAD.LoadError):
+                LOAD._verify_rollback_authorities(self.project, record)
+        self.assertEqual([True], injected)
+        self.assertTrue(source.with_name("operator-held-original").is_file())
+
+    def test_runtime_dhcp_typed_receipt_rejects_boolean_identity_and_foreign_target(self):
+        _generation, receipt = self._publish_a_with_managed_dhcp_receipt()
+        path = receipt / "receipt.json"
+        original = path.read_bytes()
+        for bad in ("boolean", "absolute", "parent", "legacy", "extra"):
+            with self.subTest(bad=bad):
+                payload = json.loads(original)
+                row = payload["unchanged_authorities"]["dhcp"]["dhcpd.conf"]
+                if bad == "boolean":
+                    row["source_identity"][0] = True
+                elif bad == "absolute":
+                    row["target"] = str(self.project / "99-output-dhcp/dhcpd.conf")
+                elif bad == "parent":
+                    row["source_parent_identity"]["path"] = str(self.root)
+                elif bad == "legacy":
+                    payload["schema_version"] = 2
+                else:
+                    row["unexpected"] = "not ignored"
+                path.write_text(json.dumps(payload))
+                with self.assertRaises(LOAD.LoadError):
+                    LOAD._load_runtime_rollback_receipt(self.project, receipt)
+        path.write_bytes(original)
 
     def _publish_a_with_managed_key_receipt(self):
         _parent, generation, _receipt = self._publish_a_with_runtime_rollback_receipt(prepare_receipt=False)
@@ -7285,6 +8294,637 @@ class ReleaseTransactionTests(unittest.TestCase):
             new_target, new_only_target, manifest, old_manifest, old_links,
             journal, descriptor, backend,
         )
+
+    def _http_main_public_source_fixture(self):
+        """Opt-in positive admission prerequisites, never blanket negative repair.
+
+        Preserve lexical fixture paths and all existing public key bytes/inodes.
+        The private Mac exterior stays untouched; only this fixture's explicit
+        public directories are prepared before the workflow captures its state.
+        """
+        root = self.root.resolve(strict=True)
+        project = self.project.resolve(strict=True)
+        ztp = self.ztp.resolve(strict=True)
+        if not project.is_relative_to(root) or ztp.parent != root:
+            raise AssertionError("positive HTTP fixture escaped its private root")
+        directories = {root, project}
+        directories.update(parent for parent in project.parents if parent.is_relative_to(root))
+        for path in (ztp, ztp / "config", ztp / "config/publickey",
+                     root / "infiniband", root / "infiniband/publickey", root / "image"):
+            if os.path.lexists(path):
+                directories.add(path)
+                directories.update(parent for parent in path.parents if parent.is_relative_to(root))
+        for path in sorted(directories, key=lambda value: len(value.parts)):
+            before = path.lstat()
+            if not stat.S_ISDIR(before.st_mode) or path.resolve(strict=True) != path:
+                raise AssertionError("positive HTTP fixture directory is not an actual contained directory")
+            path.chmod(0o755)
+        from test_cases.test_ssh_key_preparation_contract import public_line
+        for name, seed in (("laptop.pub", 31), ("mgmt-server.pub", 47)):
+            path = project / name
+            if not os.path.lexists(path):
+                path.write_bytes(public_line("ssh-ed25519", seed, name))
+                path.chmod(0o644)
+            before = path.lstat()
+            if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+                    or stat.S_IMODE(before.st_mode) != 0o644):
+                raise AssertionError("positive HTTP fixture key must already be regular single-link 0644")
+
+    @staticmethod
+    def _http_fixture_listxattr():
+        """Real local no-follow enumeration for a Linux-shaped test namespace.
+
+        Darwin Python 3.9 may omit os.listxattr. The SDK's actual ABI is
+        ssize_t listxattr(const char *, char *, size_t, int), with
+        XATTR_NOFOLLOW=0x0001. This is fixture-only, not production ACL support.
+        """
+        native = getattr(os, "listxattr", None)
+        if callable(native):
+            return native
+        import ctypes
+        import errno
+        import sys
+        if sys.platform != "darwin":
+            raise NotImplementedError("real local xattr introspection unavailable")
+        operation = ctypes.CDLL(None, use_errno=True).listxattr
+        operation.argtypes = (ctypes.c_char_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int)
+        operation.restype = ctypes.c_ssize_t
+
+        def enumerate_local(path, *, follow_symlinks=True):
+            encoded = os.fsencode(path)
+            options = 0 if follow_symlinks else 0x0001
+            for _attempt in range(4):
+                size = operation(encoded, None, 0, options)
+                if size < 0:
+                    value = ctypes.get_errno()
+                    raise OSError(value, os.strerror(value), os.fspath(path))
+                if size > 65536:
+                    raise OSError(errno.E2BIG, "fixture xattr inventory exceeds bound", os.fspath(path))
+                if size == 0:
+                    return []
+                buffer = ctypes.create_string_buffer(size)
+                count = operation(encoded, buffer, size, options)
+                if count < 0:
+                    value = ctypes.get_errno()
+                    if value == errno.ERANGE:
+                        continue
+                    raise OSError(value, os.strerror(value), os.fspath(path))
+                payload = buffer.raw[:count]
+                if count > size or not payload.endswith(b"\0"):
+                    raise OSError(errno.EIO, "invalid fixture xattr enumeration", os.fspath(path))
+                return [os.fsdecode(name) for name in payload[:-1].split(b"\0")]
+            raise OSError(errno.ERANGE, "fixture xattr inventory changed repeatedly", os.fspath(path))
+
+        return enumerate_local
+
+    def _http_public_source_fixture(self):
+        # The public namespace is real and inside a private fixture; only its
+        # exterior ancestors are modelled as Linux root-owned 0755 below.
+        self.root = self.root.resolve(strict=True)
+        self.project = self.project.resolve(strict=True)
+        self.ztp = self.ztp.resolve(strict=True)
+        for path in (self.root, self.project.parent, self.project):
+            path.chmod(0o755)
+        # Independently specified synthetic wire format; never an operator key.
+        key_type = b"ssh-ed25519"
+        wire = len(key_type).to_bytes(4, "big") + key_type + (32).to_bytes(4, "big") + bytes([31]) * 32
+        payload = key_type + b" " + base64.b64encode(wire) + b" fixture\n"
+        for name in ("laptop.pub", "mgmt-server.pub"):
+            path = self.project / name
+            path.write_bytes(payload)
+            path.chmod(0o644)
+        return payload
+
+    @contextmanager
+    def _http_linux_public_ancestor_model(self, *, listxattr=None, module=LOAD):
+        # Not Linux/root evidence: model only exterior public ancestor metadata
+        # and exterior ACL-free Linux namespace; all interior xattrs stay real.
+        namespace = SimpleNamespace(**{name: getattr(os, name) for name in dir(os)})
+        original_lstat, original_fstat, original_open = os.lstat, os.fstat, os.open
+        original_close = os.close
+        original_listxattr = ReleaseTransactionTests._http_fixture_listxattr()
+        exterior_fds = set()
+        root = self.root.resolve(strict=True)
+        exterior_ancestors = frozenset(root.parents)
+        def exterior(path):
+            # Only the exact canonical public ancestors visited by the HTTP
+            # gate are Linux-shaped. A /var lexical interior, repo directory,
+            # foreign sibling, relative dir_fd leaf or fd remains real. Do
+            # not resolve an unknown path or assign all outsiders root owner.
+            return isinstance(path, (str, os.PathLike)) and Path(path) in exterior_ancestors
+        def ancestor(metadata):
+            result = {name: getattr(metadata, name) for name in dir(metadata) if name.startswith("st_")}
+            result.update(st_mode=stat.S_IFDIR | 0o755, st_uid=0, st_gid=0)
+            return SimpleNamespace(**result)
+        def lstat(path, *args, **kwargs):
+            value = original_lstat(path, *args, **kwargs)
+            return ancestor(value) if exterior(path) else value
+        def open_file(path, *args, **kwargs):
+            descriptor = original_open(path, *args, **kwargs)
+            if exterior(path): exterior_fds.add(descriptor)
+            else: exterior_fds.discard(descriptor)
+            return descriptor
+        def close_file(descriptor):
+            # Never transfer an ancestor label to a subsequently recycled fd,
+            # including a later Path/io open outside this module namespace.
+            exterior_fds.discard(descriptor)
+            return original_close(descriptor)
+        namespace.lstat = lstat
+        namespace.open = open_file
+        namespace.close = close_file
+        namespace.fstat = lambda fd: ancestor(original_fstat(fd)) if fd in exterior_fds else original_fstat(fd)
+        def attributes(path, *args, **kwargs):
+            if exterior(path):
+                return []
+            return original_listxattr(path, *args, **kwargs)
+        namespace.listxattr = listxattr if listxattr is not None else attributes
+        # runpy returns a copied dict: use the real gate's __globals__ when
+        # modelling a freshly loaded API, not merely its returned api['os'].
+        patcher = (mock.patch.dict(module, {"os": namespace}) if isinstance(module, dict)
+                   else mock.patch.object(module, "os", namespace))
+        with patcher:
+            yield namespace
+
+    def test_http_outer_model_preserves_interior_acl_refusal(self):
+        self._http_main_public_source_fixture()
+        original_listxattr = self._http_fixture_listxattr()
+        project = self.project.resolve(strict=True)
+        before = (project.lstat().st_ino, project.lstat().st_mode, project.lstat().st_ctime_ns)
+        def real_interior_acl(path, *args, **kwargs):
+            if Path(path) == project:
+                return ["system.posix_acl_access"]
+            return original_listxattr(path, *args, **kwargs)
+        with mock.patch.object(os, "listxattr", side_effect=real_interior_acl, create=True), \
+                self._http_linux_public_ancestor_model():
+            with self.assertRaisesRegex(LOAD.LoadError, "ACL requires an explicit"):
+                LOAD.require_http_project_source_access(self.project, http_root=self.root, ztp_dir=self.ztp)
+        self.assertEqual(before, (project.lstat().st_ino, project.lstat().st_mode, project.lstat().st_ctime_ns))
+
+    def test_http_outer_model_keeps_lexical_fixture_archive_parent_authority(self):
+        self._http_main_public_source_fixture()
+        parent = self.ztp  # Preserve /var lexical spelling on Mac intentionally.
+        fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid",
+                  "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+        before = tuple(getattr(parent.lstat(), field) for field in fields)
+        with self._http_linux_public_ancestor_model() as namespace, \
+                mock.patch.object(LOAD, "MANIFEST", parent / ".setup_manifest"):
+            descriptor = namespace.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                self.assertEqual(before, tuple(getattr(namespace.fstat(descriptor), field) for field in fields))
+                self.assertEqual(before, tuple(getattr(namespace.lstat(parent), field) for field in fields))
+            finally:
+                namespace.close(descriptor)
+            # This is the real read-only preflight, not a mocked success.
+            LOAD._require_completed_setup_switch_a_archives()
+        self.assertEqual(before, tuple(getattr(parent.lstat(), field) for field in fields))
+
+    def test_http_outer_model_does_not_grant_root_metadata_to_nonancestor_directory(self):
+        self._http_main_public_source_fixture()
+        with tempfile.TemporaryDirectory(prefix="http-unrelated-authority-") as temporary:
+            unrelated = Path(temporary).resolve(strict=True)
+            unrelated.chmod(0o700)
+            self.assertNotIn(unrelated, self.root.resolve(strict=True).parents)
+            fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_ctime_ns")
+            before = tuple(getattr(unrelated.lstat(), field) for field in fields)
+            with self._http_linux_public_ancestor_model() as namespace:
+                named = namespace.lstat(unrelated)
+                self.assertEqual(0o700, stat.S_IMODE(named.st_mode))
+                self.assertEqual(before, tuple(getattr(named, field) for field in fields))
+                descriptor = namespace.open(unrelated, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                try:
+                    self.assertEqual(before, tuple(getattr(namespace.fstat(descriptor), field) for field in fields))
+                finally:
+                    namespace.close(descriptor)
+            self.assertEqual(before, tuple(getattr(unrelated.lstat(), field) for field in fields))
+
+    def _http_isolated_public_fixture(self):
+        # Own the exterior test ancestor too: never inject into shared /tmp.
+        outer = self.root.resolve(strict=True)
+        document = yaml.safe_load(self.global_file.read_text())
+        self.root = outer / "document-root"
+        self.project = self.root / "DAY0-Prepare/customer"
+        self.ztp = self.root / "ztp"
+        self.project.mkdir(parents=True)
+        self.ztp.mkdir()
+        self.global_file = self.project / "01-global.yaml"
+        document["common"]["mgmt"]["http"]["http_root"] = str(self.root)
+        self.global_file.write_text(yaml.safe_dump(document, sort_keys=False))
+        self._http_public_source_fixture()
+        return outer
+
+    @contextmanager
+    def _http_owned_exterior_mutation_model(self, outer, *, security_change=None):
+        before = outer.stat()
+        injected, acl_reads = [], []
+        sibling = outer / ("unrelated-http-sibling-" + str(security_change or "children"))
+        with self._http_linux_public_ancestor_model() as namespace:
+            old_named, old_held = namespace.lstat, namespace.fstat
+            def changed(metadata, *, named):
+                if not injected or (metadata.st_dev, metadata.st_ino) != (before.st_dev, before.st_ino):
+                    return metadata
+                fields = {key: getattr(metadata, key) for key in dir(metadata) if key.startswith("st_")}
+                fields.update(st_nlink=before.st_nlink + 1, st_size=before.st_size + 1,
+                              st_mtime_ns=before.st_mtime_ns + 1, st_ctime_ns=before.st_ctime_ns + 1)
+                if security_change == "owner": fields["st_uid"] = metadata.st_uid + 1000
+                if security_change == "group": fields["st_gid"] = metadata.st_gid + 1000
+                if security_change == "mode": fields["st_mode"] = metadata.st_mode ^ 0o100
+                if security_change == "name-rebind" and named: fields["st_ino"] = before.st_ino + 1
+                return SimpleNamespace(**fields)
+            def attributes(path, **_kwargs):
+                if Path(path) == outer:
+                    acl_reads.append(path)
+                    if not injected:
+                        sibling.mkdir(mode=0o700)
+                        injected.append(sibling)
+                    elif security_change == "acl":
+                        return ["system.posix_acl_access"]
+                return []
+            namespace.lstat = lambda *args, **kwargs: changed(old_named(*args, **kwargs), named=True)
+            namespace.fstat = lambda *args, **kwargs: changed(old_held(*args, **kwargs), named=False)
+            namespace.listxattr = attributes
+            yield injected, acl_reads
+
+    def test_http_source_exterior_sibling_creation_is_not_permission_or_inode_change(self):
+        outer = self._http_isolated_public_fixture()
+        with self._http_owned_exterior_mutation_model(outer) as (injected, acl_reads):
+            LOAD.require_http_project_source_access(self.project, http_root=self.root, ztp_dir=self.ztp)
+        self.assertEqual([outer / "unrelated-http-sibling-children"], injected)
+        self.assertGreaterEqual(len(acl_reads), 2, "exterior ACL absence must be checked twice")
+        self.assertEqual(0o755, stat.S_IMODE(self.project.stat().st_mode))
+
+    def test_http_source_exterior_owner_group_mode_name_and_late_acl_changes_still_hold(self):
+        outer = self._http_isolated_public_fixture()
+        for fault in ("owner", "group", "mode", "name-rebind", "acl"):
+            with self.subTest(fault=fault):
+                with self._http_owned_exterior_mutation_model(outer, security_change=fault) as (injected, _reads):
+                    with self.assertRaises(LOAD.LoadError):
+                        LOAD.require_http_project_source_access(self.project, http_root=self.root, ztp_dir=self.ztp)
+                self.assertEqual([outer / ("unrelated-http-sibling-" + fault)], injected)
+
+    def test_real_native_load_http_source_sibling_creation_reaches_original_freeze_boundary(self):
+        outer = self._http_isolated_public_fixture()
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with self._http_owned_exterior_mutation_model(outer) as (injected, acl_reads), ExitStack() as stack:
+            stack.enter_context(mock.patch.multiple(LOAD, HTTP_ROOT=self.root, ZTP_DIR=self.ztp, MANIFEST=self.ztp / ".setup_manifest", DEPLOYMENT_LOCK=self.root / ".deployment.lock"))
+            stack.enter_context(mock.patch.object(LOAD, "runtime_os", return_value="Linux"))
+            stack.enter_context(mock.patch.object(LOAD, "service_runtime_backend", return_value=SimpleNamespace(name="systemd")))
+            stack.enter_context(mock.patch.object(LOAD, "validate_runtime_options"))
+            stack.enter_context(mock.patch.object(LOAD, "require_no_pending_dhcp_transaction"))
+            stack.enter_context(mock.patch.object(LOAD, "resolve_project", return_value=self.project))
+            stack.enter_context(mock.patch.object(LOAD, "sync_marker_present", return_value=False))
+            stack.enter_context(mock.patch.object(LOAD, "active_project", return_value=None))
+            monitor = stack.enter_context(mock.patch.object(LOAD, "stop_native_ztp_monitors"))
+            freeze = stack.enter_context(mock.patch.object(LOAD, "ensure_previous_generation_frozen", side_effect=RuntimeError("independent original freeze boundary reached")))
+            later = {name: stack.enter_context(mock.patch.object(LOAD, name, side_effect=AssertionError("beyond independent freeze oracle")))
+                     for name in ("initialize_from_template", "prepare_pubkeys", "ensure_management_key", "activate_project", "configure_ztp_prefix_publication", "generate_configs")}
+            stack.enter_context(redirect_stdout(stdout)); stack.enter_context(redirect_stderr(stderr))
+            result = LOAD.main([str(self.project), "--host-role", "management-server", "--no-upgrade", "--skip-infra"])
+        self.assertEqual(1, result, "the independent freeze oracle intentionally ends this safe private workflow")
+        self.assertIn("independent original freeze boundary reached", stderr.getvalue())
+        self.assertNotIn("held release namespace changed", stderr.getvalue())
+        monitor.assert_called_once_with(self.root)
+        freeze.assert_called_once_with(self.project)
+        for oracle in later.values(): oracle.assert_not_called()
+        self.assertEqual([outer / "unrelated-http-sibling-children"], injected)
+        self.assertGreaterEqual(len(acl_reads), 2)
+
+    def test_http_source_first_fstat_failure_closes_new_fd_without_losing_reason(self):
+        self._http_public_source_fixture()
+        opened, closed = [], []
+        with self._http_linux_public_ancestor_model() as namespace:
+            old_open, old_close = namespace.open, namespace.close
+            def open_fd(*args, **kwargs):
+                descriptor = old_open(*args, **kwargs); opened.append(descriptor); return descriptor
+            def close_fd(descriptor):
+                closed.append(descriptor); old_close(descriptor)
+            namespace.open, namespace.close = open_fd, close_fd
+            namespace.fstat = mock.Mock(side_effect=OSError("independent first fstat failure"))
+            try:
+                with self.assertRaisesRegex(LOAD.LoadError, "independent first fstat failure"):
+                    LOAD.require_http_project_source_access(self.project, http_root=self.root, ztp_dir=self.ztp)
+                self.assertEqual(1, len(opened))
+                self.assertEqual(opened, closed)
+            finally:
+                # Exact private cleanup if the original RED leaks its new FD.
+                for descriptor in opened:
+                    if descriptor not in closed: os.close(descriptor)
+
+    def test_http_source_close_failure_attempts_every_owned_fd_once_and_preserves_primary_failure(self):
+        self._http_public_source_fixture()
+        for primary in (False, True):
+            with self.subTest(primary=primary):
+                opened, closed = [], []
+                with self._http_linux_public_ancestor_model() as namespace:
+                    old_open, old_close = namespace.open, namespace.close
+                    def open_fd(*args, **kwargs):
+                        descriptor = old_open(*args, **kwargs); opened.append(descriptor); return descriptor
+                    def close_fd(descriptor):
+                        closed.append(descriptor); old_close(descriptor)
+                        if len(closed) == 1: raise OSError("independent close consumed descriptor")
+                    namespace.open, namespace.close = open_fd, close_fd
+                    if primary: namespace.listxattr = lambda *_args, **_kwargs: ["system.posix_acl_access"]
+                    try:
+                        with self.assertRaisesRegex(LOAD.LoadError, "ACL" if primary else "close"):
+                            LOAD.require_http_project_source_access(self.project, http_root=self.root, ztp_dir=self.ztp)
+                        self.assertGreater(len(opened), 2)
+                        self.assertEqual(list(reversed(opened)), closed)
+                        self.assertEqual(len(closed), len(set(closed)), "never retry a consumed descriptor number")
+                    finally:
+                        for descriptor in opened:
+                            if descriptor not in closed: os.close(descriptor)
+
+    def test_http_source_gate_accepts_public_posix_namespace_without_mode_or_byte_writes(self):
+        payload = self._http_public_source_fixture()
+        paths = [self.root, self.project.parent, self.project, self.project / "laptop.pub", self.project / "mgmt-server.pub"]
+        private = self.project / "id_ed25519"
+        private.write_bytes(b"private key must not be opened by source admission\n")
+        # Establish the full fixture before freezing directory ctime; creating
+        # the private sentinel is fixture work, not a mutation by the gate.
+        baseline = {p: (p.lstat().st_ino, p.lstat().st_mode, p.lstat().st_ctime_ns) for p in paths}
+        with self._http_linux_public_ancestor_model() as namespace:
+            namespace.fchmod = mock.Mock(side_effect=AssertionError("no chmod authority"))
+            namespace.chown = mock.Mock(side_effect=AssertionError("no chown authority"))
+            namespace.read = mock.Mock(side_effect=AssertionError("no private/public bytes needed"))
+            LOAD.require_http_project_source_access(self.project, http_root=self.root, ztp_dir=self.ztp)
+            namespace.fchmod.assert_not_called()
+            namespace.chown.assert_not_called()
+            namespace.read.assert_not_called()
+        self.assertEqual(baseline, {p: (p.lstat().st_ino, p.lstat().st_mode, p.lstat().st_ctime_ns) for p in paths})
+        self.assertEqual(payload, (self.project / "laptop.pub").read_bytes())
+        self.assertEqual(b"private key must not be opened by source admission\n", private.read_bytes())
+
+    def test_http_source_gate_unavailable_acl_introspection_holds_without_permission_repair(self):
+        self._http_public_source_fixture()
+        paths = (self.root, self.project, self.project / "laptop.pub", self.project / "mgmt-server.pub")
+        baseline = {p: (p.lstat().st_ino, p.lstat().st_mode, p.lstat().st_ctime_ns) for p in paths}
+        for unavailable in ("missing", "noncallable", "unsupported"):
+            with self.subTest(unavailable=unavailable):
+                with self._http_linux_public_ancestor_model() as namespace:
+                    if unavailable == "missing":
+                        del namespace.listxattr
+                    elif unavailable == "noncallable":
+                        namespace.listxattr = None
+                    else:
+                        namespace.listxattr = mock.Mock(side_effect=NotImplementedError("ACL introspection unsupported"))
+                    namespace.fchmod = mock.Mock(side_effect=AssertionError("no permission repair"))
+                    namespace.chown = mock.Mock(side_effect=AssertionError("no owner repair"))
+                    with self.assertRaisesRegex(LOAD.LoadError, "ACL|introspection"):
+                        LOAD.require_http_project_source_access(self.project, http_root=self.root, ztp_dir=self.ztp)
+                    namespace.fchmod.assert_not_called()
+                    namespace.chown.assert_not_called()
+                self.assertEqual(baseline, {p: (p.lstat().st_ino, p.lstat().st_mode, p.lstat().st_ctime_ns) for p in paths})
+
+    def test_http_source_gate_rejects_post_acl_directory_ctime_change_with_same_mode(self):
+        self._http_public_source_fixture()
+        # Deterministic POSIX ACL-race model: changing a named-user ACL can
+        # preserve mode bits while changing the directory's inode ctime.
+        # It is not an actual Linux setfacl or root witness.
+        project_stat = self.project.stat()
+        observed_project, injected = [], []
+        with self._http_linux_public_ancestor_model() as namespace:
+            old_lstat, old_fstat = namespace.lstat, namespace.fstat
+            def changed(metadata):
+                fields = {name: getattr(metadata, name) for name in dir(metadata) if name.startswith("st_")}
+                if injected and (metadata.st_dev, metadata.st_ino) == (project_stat.st_dev, project_stat.st_ino):
+                    fields["st_ctime_ns"] = project_stat.st_ctime_ns + 1
+                return SimpleNamespace(**fields)
+            def acl(path, **_kwargs):
+                if Path(path) == self.project:
+                    observed_project.append(True)
+                    return ["system.posix_acl_access"] if injected else []
+                if Path(path) == self.project.parent and not injected:
+                    self.assertTrue(observed_project, "establish project ACL read before injection")
+                    injected.append(True)
+                return []
+            namespace.lstat = lambda *args, **kwargs: changed(old_lstat(*args, **kwargs))
+            namespace.fstat = lambda *args, **kwargs: changed(old_fstat(*args, **kwargs))
+            namespace.listxattr = acl
+            with self.assertRaisesRegex(LOAD.LoadError, "changed|rebound|ACL"):
+                LOAD.require_http_project_source_access(self.project, http_root=self.root, ztp_dir=self.ztp)
+        self.assertEqual([True], injected)
+        self.assertEqual((project_stat.st_ino, project_stat.st_mode, project_stat.st_ctime_ns),
+                         (self.project.stat().st_ino, self.project.stat().st_mode, self.project.stat().st_ctime_ns))
+
+    def test_http_source_gate_refuses_private_project_and_public_key_without_repair(self):
+        self._http_public_source_fixture()
+        for path, mode in ((self.project, 0o700), (self.project / "laptop.pub", 0o600), (self.project / "mgmt-server.pub", 0o600)):
+            with self.subTest(path=path.name, mode=mode):
+                path.chmod(mode)
+                baseline = (path.lstat().st_ino, path.lstat().st_mode, path.lstat().st_ctime_ns)
+                with self._http_linux_public_ancestor_model():
+                    with self.assertRaisesRegex(LOAD.LoadError, "traversable|0644"):
+                        LOAD.require_http_project_source_access(self.project, http_root=self.root, ztp_dir=self.ztp)
+                self.assertEqual(baseline, (path.lstat().st_ino, path.lstat().st_mode, path.lstat().st_ctime_ns))
+                path.chmod(0o755 if path.is_dir() else 0o644)
+
+    def test_http_source_gate_refuses_private_or_writable_interior_ancestor(self):
+        self._http_public_source_fixture()
+        for mode in (0o750, 0o777):
+            with self.subTest(mode=mode):
+                self.project.parent.chmod(mode)
+                with self._http_linux_public_ancestor_model():
+                    with self.assertRaisesRegex(LOAD.LoadError, "traversable|writable"):
+                        LOAD.require_http_project_source_access(self.project, http_root=self.root, ztp_dir=self.ztp)
+                self.assertEqual(mode, stat.S_IMODE(self.project.parent.stat().st_mode))
+        self.project.parent.chmod(0o755)
+
+    def test_http_source_gate_refuses_public_alias_hardlink_and_acl_ambiguity(self):
+        payload = self._http_public_source_fixture()
+        target = self.project / "laptop.pub"
+        target.unlink()
+        foreign = self.root / "unrelated.pub"
+        foreign.write_bytes(payload)
+        foreign.chmod(0o644)
+        target.symlink_to(foreign)
+        with self._http_linux_public_ancestor_model():
+            with self.assertRaisesRegex(LOAD.LoadError, "single-link"):
+                LOAD.require_http_project_source_access(self.project, http_root=self.root, ztp_dir=self.ztp)
+        target.unlink()
+        os.link(foreign, target)
+        with self._http_linux_public_ancestor_model():
+            with self.assertRaisesRegex(LOAD.LoadError, "single-link"):
+                LOAD.require_http_project_source_access(self.project, http_root=self.root, ztp_dir=self.ztp)
+        target.unlink()
+        target.write_bytes(payload)
+        target.chmod(0o644)
+        with self._http_linux_public_ancestor_model(listxattr=lambda *_a, **_kw: ["system.posix_acl_access"]):
+            with self.assertRaisesRegex(LOAD.LoadError, "ACL"):
+                LOAD.require_http_project_source_access(self.project, http_root=self.root, ztp_dir=self.ztp)
+        self.assertEqual(payload, foreign.read_bytes())
+        self.assertEqual(0o644, stat.S_IMODE(foreign.stat().st_mode))
+
+    def test_http_source_gate_detects_project_permission_change_before_return(self):
+        self._http_public_source_fixture()
+        injected = []
+        def observe(path, **_kwargs):
+            if Path(path) == self.project and not injected:
+                self.project.chmod(0o700)
+                injected.append(True)
+            return []
+        with self._http_linux_public_ancestor_model(listxattr=observe):
+            with self.assertRaisesRegex(LOAD.LoadError, "permission changed"):
+                LOAD.require_http_project_source_access(self.project, http_root=self.root, ztp_dir=self.ztp)
+        self.assertEqual([True], injected)
+        self.assertEqual(0o700, stat.S_IMODE(self.project.stat().st_mode))
+
+    def test_real_delegated_setup_http_source_gate_enabled_rejects_before_wal_or_lock(self):
+        self._http_public_source_fixture()
+        self.project.chmod(0o700)
+        before = self.global_file.read_bytes()
+        with mock.patch.multiple(SETUP, HTTP_BASE=str(self.root), ZTP=str(self.ztp), _DRY_RUN=False), \
+             mock.patch.object(SETUP.runpy, "run_path", return_value=vars(LOAD)), \
+             mock.patch.object(SETUP, "_require_setup_switch_wal_prewrite") as wal, \
+             mock.patch.object(SETUP, "infra_log_root_lock") as lock, \
+             mock.patch.object(SETUP, "_setup_impl") as writer:
+            with self.assertRaisesRegex(ValueError, "HTTP public source access.*traversable"):
+                SETUP.setup(str(self.project), server_delegated=True)
+            wal.assert_not_called()
+            lock.assert_not_called()
+            writer.assert_not_called()
+        self.assertEqual(0o700, stat.S_IMODE(self.project.stat().st_mode))
+        self.assertEqual(before, self.global_file.read_bytes())
+
+    def test_real_delegated_setup_http_disabled_private_project_reaches_original_wal_fence(self):
+        self._http_public_source_fixture()
+        global_data = yaml.safe_load(self.global_file.read_text())
+        global_data["common"]["mgmt"]["http"]["status"] = "disabled"
+        self.global_file.write_text(yaml.safe_dump(global_data))
+        self.project.chmod(0o700)
+        class OriginalWalBoundary(RuntimeError): pass
+        with mock.patch.multiple(SETUP, HTTP_BASE=str(self.root), ZTP=str(self.ztp), _DRY_RUN=False), \
+             mock.patch.object(SETUP.runpy, "run_path", return_value=vars(LOAD)), \
+             mock.patch.object(SETUP, "_require_setup_switch_wal_prewrite", side_effect=OriginalWalBoundary) as wal, \
+             mock.patch.object(SETUP, "infra_log_root_lock") as lock, \
+             mock.patch.object(LOAD, "require_http_project_source_access") as access:
+            with self.assertRaises(OriginalWalBoundary):
+                SETUP.setup(str(self.project), server_delegated=True)
+            access.assert_not_called()
+            wal.assert_called_once_with(str(self.project), None)
+            lock.assert_not_called()
+        self.assertEqual(0o700, stat.S_IMODE(self.project.stat().st_mode))
+
+    def test_real_delegated_setup_enabled_public_source_reaches_original_wal_fence(self):
+        self._http_public_source_fixture()
+        class OriginalWalBoundary(RuntimeError): pass
+        native_access = LOAD.require_http_project_source_access
+        with self._http_linux_public_ancestor_model(), \
+             mock.patch.multiple(SETUP, HTTP_BASE=str(self.root), ZTP=str(self.ztp), _DRY_RUN=False), \
+             mock.patch.object(SETUP.runpy, "run_path", return_value=vars(LOAD)), \
+             mock.patch.object(SETUP, "_require_setup_switch_wal_prewrite", side_effect=OriginalWalBoundary) as wal, \
+             mock.patch.object(LOAD, "require_http_project_source_access", wraps=native_access) as access:
+            with self.assertRaises(OriginalWalBoundary):
+                SETUP.setup(str(self.project), server_delegated=True)
+            access.assert_called_once_with(self.project, http_root=self.root, ztp_dir=self.ztp)
+            wal.assert_called_once_with(str(self.project), None)
+        self.assertEqual(0o755, stat.S_IMODE(self.project.stat().st_mode))
+
+    def test_real_native_load_private_http_source_rejects_before_monitor_freeze_or_keys(self):
+        self._http_public_source_fixture()
+        self.project.chmod(0o700)
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with ExitStack() as stack:
+            stack.enter_context(mock.patch.multiple(LOAD, HTTP_ROOT=self.root, ZTP_DIR=self.ztp, MANIFEST=self.ztp / ".setup_manifest", DEPLOYMENT_LOCK=self.root / ".deployment.lock"))
+            stack.enter_context(mock.patch.object(LOAD, "runtime_os", return_value="Linux"))
+            stack.enter_context(mock.patch.object(LOAD, "service_runtime_backend", return_value=SimpleNamespace(name="systemd")))
+            stack.enter_context(mock.patch.object(LOAD, "validate_runtime_options"))
+            stack.enter_context(mock.patch.object(LOAD, "require_no_pending_dhcp_transaction"))
+            stack.enter_context(mock.patch.object(LOAD, "resolve_project", return_value=self.project))
+            stack.enter_context(mock.patch.object(LOAD, "sync_marker_present", return_value=False))
+            oracles = {name: stack.enter_context(mock.patch.object(LOAD, name, side_effect=AssertionError("shared/source mutation before admission: " + name)))
+                       for name in ("stop_native_ztp_monitors", "ensure_previous_generation_frozen", "initialize_from_template", "prepare_pubkeys", "ensure_management_key", "activate_project", "configure_ztp_prefix_publication", "generate_configs")}
+            stack.enter_context(redirect_stdout(stdout))
+            stack.enter_context(redirect_stderr(stderr))
+            result = LOAD.main([str(self.project), "--host-role", "management-server", "--no-upgrade", "--skip-infra"])
+        self.assertEqual(1, result)
+        self.assertIn("HTTP public source access prewrite gate", stderr.getvalue())
+        self.assertIn("traversable", stderr.getvalue())
+        for oracle in oracles.values(): oracle.assert_not_called()
+        self.assertEqual(0o700, stat.S_IMODE(self.project.stat().st_mode))
+
+    def test_real_load_wal_then_workstation_setup_refuses_public_mode_repair_before_shared_write(self):
+        # macOS's /var alias must not produce two spelling authorities for
+        # a single WAL. Canonicalize the private fixture before LOAD writes it;
+        # production recovery and its exact journal authority stay unchanged.
+        self.root = self.root.resolve(strict=True)
+        self.ztp = self.ztp.resolve(strict=True)
+        (*state, journal, descriptor, backend) = self._prepare_cross_project_setup_crash()
+        p, q, common, old_only, new_only = state[:5]
+        # The private Q fixture is intentionally only at the local key stage.
+        # Later P2P validation is an oracle proving rejection precedes it.
+        (q / "02-dhcp-subnet_config.csv").write_bytes(b"shared_network,subnet\n")
+        laptop = q / "laptop.pub"
+        key_type = b"ssh-ed25519"
+        wire = len(key_type).to_bytes(4, "big") + key_type + (32).to_bytes(4, "big") + bytes([31]) * 32
+        payload = public_line_for_setup = key_type + b" " + base64.b64encode(wire) + b" fixture\n"
+        laptop.write_bytes(payload)
+        laptop.chmod(0o600)
+        home = self.root / "private-workstation-home"
+        ssh = home / ".ssh"
+        ssh.mkdir(parents=True, mode=0o700)
+        (ssh / "id_ed25519.pub").write_bytes(payload)
+        (self.root / "infra").mkdir(exist_ok=True)
+        before = laptop.stat()
+        wal_inode, wal_bytes = journal.stat().st_ino, journal.read_bytes()
+        before_manifest = state[7].read_bytes()
+        old_links = dict(state[9])
+        transcript = io.StringIO()
+        native_fence = SETUP._require_setup_switch_wal_prewrite
+        verified_contexts = []
+
+        def observe_real_fence(*args, **kwargs):
+            context = native_fence(*args, **kwargs)
+            if context is not None:
+                verified_contexts.append(context)
+            return context
+
+        with mock.patch.multiple(SETUP,
+                HTTP_BASE=str(self.root.resolve()), ZTP=str(self.ztp.resolve()),
+                HERE=str(self.root / "DAY0-Prepare"),
+                TOOLS_DIR=str(self.root / "tools"),
+                TEMPLATE_DIR=str(self.root / "DAY0-Prepare/template"),
+                IMAGE_DIR=str(self.root / "image"),
+                P2P_INPUT_LINKS=[str(self.root / name) for name in SETUP.P2P_INPUT_PATHS],
+                P2P_OUTPUT_LINKS=[str(self.root / name) for name in SETUP.P2P_OUTPUT_PATHS],
+                P2P_AIR_JSON_LINK=str(self.root / SETUP.P2P_AIR_PATH),
+                BRINGUP_OUTPUT_MAPPINGS=[(str(self.root / name), target) for name, target in SETUP.BRINGUP_OUTPUT_SPECS],
+                ANALYZER_INPUT_MAPPINGS=[(str(self.root / name), target) for name, target in SETUP.ANALYZER_INPUT_SPECS],
+                ANALYZER_OUTPUT_MAPPINGS=[(str(self.root / name), target) for name, target in SETUP.ANALYZER_OUTPUT_SPECS],
+                _NET_CSV_LINKS=[(str(self.root / name), target) for name, target in SETUP.NETWORK_CSV_MAPPINGS],
+                _CSV_DIR=None, _P2P_FILE=None, _P2P_SOURCE=None,
+                _DRY_RUN=False, _LINK_TRANSACTION=None, _INFRA_LOG_MIGRATION=None,
+                _SETUP_SWITCH_WAL_CONTEXT=None), \
+             mock.patch.object(SETUP.Path, "home", return_value=home), \
+             mock.patch.object(SETUP.runpy, "run_path", return_value=vars(LOAD)), \
+             mock.patch.object(SETUP, "_previous_project_links_to_remove", return_value=list(map(str, old_links))), \
+             mock.patch.object(SETUP, "_initialize_project_from_template"), \
+             mock.patch.object(SETUP, "_select_p2p_source", side_effect=AssertionError("WAL key fence was bypassed")), \
+             mock.patch.object(SETUP, "_require_setup_switch_wal_prewrite", side_effect=observe_real_fence), \
+             mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+             mock.patch.object(LOAD, "service_runtime_backend", return_value=backend), \
+             redirect_stdout(transcript):
+            with self.assertRaises(SystemExit):
+                SETUP.setup(str(q.resolve()), deployment_lock_descriptor=descriptor)
+        self.assertGreaterEqual(len(verified_contexts), 2)
+        self.assertEqual(descriptor, verified_contexts[-1][1])
+        self.assertIn("WAL-bound laptop.pub", transcript.getvalue())
+        self.assertEqual((before.st_ino, before.st_mode, before.st_ctime_ns),
+                         (laptop.stat().st_ino, laptop.stat().st_mode, laptop.stat().st_ctime_ns))
+        self.assertEqual(payload, laptop.read_bytes())
+        self.assertEqual(wal_inode, journal.stat().st_ino)
+        self.assertEqual(wal_bytes, journal.read_bytes())
+        self.assertEqual(before_manifest, state[7].read_bytes())
+        self.assertEqual(old_links, {path: os.readlink(path) for path in old_links})
+        self.assertFalse(os.path.lexists(new_only))
+        self.assertFalse((q / "99-output-ztp/generation-report.json").exists())
+        # A fresh actual LOAD recovery verifies the retained P/WAL, never
+        # generates Q, rewrites key permissions or starts a service.
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            self.assertEqual("prepared-p", LOAD.recover_setup_switch_journal(
+                journal, deployment_lock_descriptor=descriptor,
+                services_quiesced=True, runtime_backend=backend, verify_only=True))
+        self.assertEqual(wal_bytes, journal.read_bytes())
+        self.assertEqual(before.st_mode, laptop.stat().st_mode)
+        backend.start.assert_not_called()
 
     def test_setup_link_restore_preserves_foreign_stage_before_publish_or_cleanup(self):
         for kind in ("publish", "hold"):
@@ -8307,7 +9947,9 @@ class ReleaseTransactionTests(unittest.TestCase):
         self._setup_dhcp_group_restore_partial_b(fault="malformed-binding")
 
     def _setup_dhcp_group_restore_partial_b(self, *, cli=False, fault=None, shapes=False,
-                                          restore_sync_fault=False):
+                                          restore_sync_fault=False, schema4_original_a=False):
+        if schema4_original_a and shapes:
+            raise AssertionError("schema4 exact selected four-file fixture does not authorize shape mutation")
         state, _context = self._prepare_persisted_a_runtime_switch()
         journal, descriptor, backend = state[-3:]
         guard = dict(deployment_lock_descriptor=descriptor, services_quiesced=True,
@@ -8334,12 +9976,14 @@ fd = load.acquire_deployment_lock(exclusive=True)
 guard = dict(deployment_lock_descriptor=fd, services_quiesced=True,
              runtime_backend=SimpleNamespace(name='supervisor'))
 assert_private_dhcp_transaction_retention(load, root, project, sys.argv[4],
-    setup_guard=guard, a_shapes=sys.argv[5] == 'shapes')
+    setup_guard=guard, a_shapes=sys.argv[5] == 'shapes',
+    preserve_selected_a=sys.argv[6] == 'schema4')
 raise AssertionError('original B writer did not reach the real rename/death boundary')
 '''
             writer = subprocess.run([sys.executable, "-B", "-c", operation, str(root), str(state[1]), str(ROOT),
                 "bound-setup-kill-last" if shapes or restore_sync_fault else "bound-setup-kill-first",
-                "shapes" if shapes else "files"], capture_output=True, text=True, timeout=30)
+                "shapes" if shapes else "files", "schema4" if schema4_original_a else "legacy"],
+                capture_output=True, text=True, timeout=30)
             self.assertEqual(-signal.SIGKILL, writer.returncode, writer.stdout + writer.stderr)
             descriptor = LOAD.acquire_deployment_lock(exclusive=True)
             self.addCleanup(LOAD.release_deployment_lock, descriptor)
@@ -8430,7 +10074,8 @@ raise AssertionError('original B writer did not reach the real rename/death boun
                                 )
                         self.assertEqual(1, len(injected))
                         self.assertEqual(before, journal.read_bytes())
-                        self.assertEqual(b"independent-A:dhcpd.conf\n", (runtime / "dhcpd.conf").read_bytes())
+                        self.assertEqual(b"dhcpd.conf\n" if schema4_original_a else b"independent-A:dhcpd.conf\n",
+                                         (runtime / "dhcpd.conf").read_bytes())
                         for name in names[1:]:
                             self.assertEqual((state[1] / "independent-dhcp-B" / name).read_bytes(),
                                              (runtime / name).read_bytes())
@@ -8449,7 +10094,8 @@ raise AssertionError('original B writer did not reach the real rename/death boun
                     for name in ("dhcpd.conf", "dhcpd_ib.hosts"):
                         self.assertEqual(f"independent-A:{name}\n".encode(), (runtime / name).read_bytes())
                 else:
-                    self.assertEqual({name: f"independent-A:{name}\n".encode() for name in names},
+                    self.assertEqual({name: ((name + "\n").encode() if schema4_original_a
+                                             else f"independent-A:{name}\n".encode()) for name in names},
                                      {name: (runtime / name).read_bytes() for name in names})
                 self.assertEqual(before, journal.read_bytes(), "stopped restoration does not retire activation evidence")
                 transaction, = runtime.glob(".load-dhcp-transaction-*")
@@ -8460,6 +10106,18 @@ raise AssertionError('original B writer did not reach the real rename/death boun
                         requested_new_project=state[1], **guard,
                     ))
             backend.start.assert_not_called()
+
+    def test_schema4_real_writer_sigkill_first_leaf_then_group_restore(self):
+        with self._schema4_real_receipt_producer_for_existing_workflow(runtime_directory="private-etc-dhcp"):
+            self._setup_dhcp_group_restore_partial_b(schema4_original_a=True)
+
+    def test_schema4_real_writer_sigkill_all_leaves_partial_a_sync_then_reentry(self):
+        with self._schema4_real_receipt_producer_for_existing_workflow(runtime_directory="private-etc-dhcp"):
+            self._setup_dhcp_group_restore_partial_b(schema4_original_a=True, restore_sync_fault=True)
+
+    def test_schema4_real_writer_sigkill_recover_main_keeps_no_activation_permission(self):
+        with self._schema4_real_receipt_producer_for_existing_workflow(runtime_directory="private-etc-dhcp"):
+            self._setup_dhcp_group_restore_partial_b(schema4_original_a=True, cli=True)
 
     def test_setup_dhcp_group_namespace_rejects_rebound_directory_during_scan(self):
         state, _context = self._prepare_persisted_a_runtime_switch()
@@ -16593,6 +18251,13 @@ os.kill(os.getpid(), signal.SIGKILL)
 
     def test_supervisor_dhcp_only_main_installs_current_release_without_http(self) -> None:
         """The child load must install the DHCP release before hostctl converges it."""
+        # main now reads the actual global before validate_inputs. This case
+        # independently declares DHCP-only, so the real fixture must too.
+        document = yaml.safe_load(self.global_file.read_text(encoding="utf-8"))
+        document["common"]["mgmt"]["http"]["status"] = "disabled"
+        document["common"]["mgmt"]["ztp"]["status"] = "disabled"
+        self.global_file.write_text(yaml.safe_dump(document), encoding="utf-8")
+        private_mode = stat.S_IMODE(self.root.lstat().st_mode)
         (self.project / "99-output-dhcp").mkdir(exist_ok=True)
         args = SimpleNamespace(
             skip_doca=False, download_doca=False, dry_run=False,
@@ -16688,6 +18353,8 @@ os.kill(os.getpid(), signal.SIGKILL)
 
             self.assertEqual(0, LOAD.main([]))
 
+        self.assertEqual(0o700, private_mode)
+        self.assertEqual(private_mode, stat.S_IMODE(self.root.lstat().st_mode))
         validate_http.assert_not_called()
         quiesce.assert_called_once_with(
             False, dhcp_runtime_plan=plan, runtime_backend=backend,
@@ -16827,6 +18494,7 @@ os.kill(os.getpid(), signal.SIGKILL)
             )
 
     def test_listener_plan_failure_precedes_quiesce_and_cleanup_stop(self) -> None:
+        self._http_main_public_source_fixture()
         args = SimpleNamespace(
             skip_doca=False, download_doca=False, dry_run=False,
             project=str(self.project), no_upgrade=True, p2p_file=None,
@@ -16839,6 +18507,14 @@ os.kill(os.getpid(), signal.SIGKILL)
         quiesce = mock.Mock()
         release_lock = mock.Mock()
         with ExitStack() as stack:
+            stack.enter_context(mock.patch.object(LOAD, "HTTP_ROOT", self.root))
+            stack.enter_context(self._http_linux_public_ancestor_model())
+            # This listener-failure fixture has no foreign active project.
+            # Bind A to its own root instead of reading the checkout manifest
+            # after HTTP_ROOT has been scoped to the private publication.
+            stack.enter_context(mock.patch.object(
+                LOAD, "active_project", return_value=self.project.resolve(),
+            ))
             stack.enter_context(mock.patch.object(LOAD, "parse_args", return_value=args))
             stack.enter_context(mock.patch.object(
                 LOAD, "acquire_deployment_lock", return_value=92,
@@ -16865,7 +18541,7 @@ os.kill(os.getpid(), signal.SIGKILL)
             stack.enter_context(mock.patch.object(
                 LOAD, "validate_management_host", return_value=True,
             ))
-            stack.enter_context(mock.patch.object(
+            listener_plan = stack.enter_context(mock.patch.object(
                 LOAD, "plan_local_dhcp_runtime",
                 side_effect=LOAD.LoadError("ambiguous listener fixture"),
             ))
@@ -16874,13 +18550,18 @@ os.kill(os.getpid(), signal.SIGKILL)
             ))
             activate = stack.enter_context(mock.patch.object(LOAD, "activate_project"))
 
-            self.assertEqual(1, LOAD.main([]))
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                self.assertEqual(1, LOAD.main([]))
 
+        listener_plan.assert_called_once()
+        self.assertIn("ambiguous listener fixture", stderr.getvalue())
         quiesce.assert_not_called()
         activate.assert_not_called()
         release_lock.assert_called_once_with(92)
 
     def test_monitor_scope_failure_precedes_quiesce_activation_and_generation(self) -> None:
+        self._http_main_public_source_fixture()
         args = SimpleNamespace(
             skip_doca=False, download_doca=False, dry_run=False,
             project=str(self.project), no_upgrade=True, p2p_file=None,
@@ -16897,6 +18578,8 @@ os.kill(os.getpid(), signal.SIGKILL)
         activate = mock.Mock()
         generate = mock.Mock()
         with ExitStack() as stack:
+            stack.enter_context(mock.patch.object(LOAD, "HTTP_ROOT", self.root))
+            stack.enter_context(self._http_linux_public_ancestor_model())
             stack.enter_context(mock.patch.object(LOAD, "parse_args", return_value=args))
             stack.enter_context(mock.patch.object(
                 LOAD, "acquire_deployment_lock", return_value=94,
@@ -16927,7 +18610,7 @@ os.kill(os.getpid(), signal.SIGKILL)
             stack.enter_context(mock.patch.object(
                 LOAD, "supervisor_service_availability", return_value=(True, True),
             ))
-            stack.enter_context(mock.patch.object(
+            scope = stack.enter_context(mock.patch.object(
                 LOAD, "resolve_ztp_monitor_scope",
                 side_effect=LOAD.LoadError("scope required before mutation"),
             ))
@@ -16942,6 +18625,7 @@ os.kill(os.getpid(), signal.SIGKILL)
         quiesce.assert_not_called()
         activate.assert_not_called()
         generate.assert_not_called()
+        scope.assert_called_once()
         self.assertIn("scope required before mutation", stderr.getvalue())
 
     def test_transaction_failure_reports_phase_safe_state_and_full_rerun(self) -> None:
