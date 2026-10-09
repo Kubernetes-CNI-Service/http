@@ -12,11 +12,11 @@ import tempfile
 import unittest
 from unittest import mock
 
-if len(sys.argv) > 1 and sys.argv[1] in ('--owned-retry','--owned-wire-claim'):
+if len(sys.argv) > 1 and sys.argv[1] in ('--owned-retry','--owned-wire-claim','--owned-start-hold'):
     sys.path.insert(0, sys.argv[3]); sys.path.insert(0, str(Path(sys.argv[3]) / 'tools'))
 import test_cases
 ROOT = Path(test_cases.__file__).resolve().parents[1]
-from test_cases.test_req7_spreadsheet_owner import fixture, binding, TARGET, load as load_owner
+from test_cases.test_req7_spreadsheet_owner import fixture, scoped_fixture, binding, TARGET, load as load_owner
 from test_cases.test_req7_send_unit import inputs
 SOURCE = Path(__file__).resolve().parents[1] / 'monitor/issue_tracker_global_attempt_journal.py'
 
@@ -441,7 +441,9 @@ if receipt._latest_receipted_prod_xlsx is not original:
     def test_initialization_marker_never_precedes_all_eight_image_barriers(self):
         real_fsync = os.fsync; observed = []
         def syncing(fd):
-            observed.append(set(os.listdir(self.store)) if self.store.exists() else set())
+            # The permanent start barriers are tested separately; retain all
+            # original image/INITIALIZED assertions at their original indices.
+            if self.store.exists(): observed.append(set(os.listdir(self.store)))
             real_fsync(fd)
         with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
             with mock.patch('os.fsync', side_effect=syncing): self.module.prepare_global_unit(token, binding(), self.value)
@@ -496,8 +498,10 @@ if receipt._latest_receipted_prod_xlsx is not original:
                 with fixture(root), self.owner.spreadsheet_owner(binding()) as token:
                     calls = []
                     def failing(fd):
-                        calls.append(fd)
-                        if len(calls) == boundary: raise OSError('synthetic private fault')
+                        # Keep the original eight image fault sites unchanged.
+                        if store.exists():
+                            calls.append(fd)
+                            if len(calls) == boundary: raise OSError('synthetic private fault')
                         return real_fsync(fd)
                     with mock.patch('os.fsync', side_effect=failing), self.assertRaises(self.module.GlobalAttemptHold):
                         self.module.prepare_global_unit(token, binding(), self.value)
@@ -544,8 +548,194 @@ if receipt._latest_receipted_prod_xlsx is not original:
             self.assertIn(value, card)
 
 
+    def test_lost_original_unknown_same_unit_cannot_reset_count(self):
+        with fixture(self.root),self.owner.spreadsheet_owner(binding()) as token:
+            self.module.prepare_global_unit(token,binding(),self.value)
+            first=self.module.record_global_attempt_intent(token,binding(),self.value)
+            self.assertEqual((1,"UNKNOWN"),(first.attempt_count,first.outcome))
+            saved={p.name:(p.stat().st_ino,p.read_bytes()) for p in self.store.iterdir()}
+            preserved=self.root/"preserved-original-unknown"
+            self.store.rename(preserved)
+            with self.assertRaises(self.module.GlobalAttemptHold):
+                self.module.prepare_global_unit(token,binding(),self.value)
+            self.assertFalse(self.store.exists(),"namespace loss is not first use")
+            self.assertEqual(saved,{p.name:(p.stat().st_ino,p.read_bytes()) for p in preserved.iterdir()})
+            self.assertIn("ATTEMPT-1",saved)
+
+
+    def test_lost_exhausted_original_cannot_start_different_generation(self):
+        with fixture(self.root),self.owner.spreadsheet_owner(binding()) as token:
+            self.module.prepare_global_unit(token,binding(),self.value)
+            for expected in range(1,7):
+                seen=self.module.record_global_attempt_intent(token,binding(),self.value)
+                self.assertEqual((expected,"UNKNOWN"),(seen.attempt_count,seen.outcome))
+            saved={p.name:(p.stat().st_ino,p.read_bytes()) for p in self.store.iterdir()}
+            preserved=self.root/"preserved-exhausted-original"
+            self.store.rename(preserved)
+            successor=unit(generation_id="c"*64)
+            self.assertNotEqual(self.value.unit_id,successor.unit_id)
+            with self.assertRaises(self.module.GlobalAttemptHold):
+                self.module.prepare_global_unit(token,binding(),successor)
+            self.assertFalse(self.store.exists(),"a new generation is not UNKNOWN resolution")
+            self.assertEqual(saved,{p.name:(p.stat().st_ino,p.read_bytes()) for p in preserved.iterdir()})
+            self.assertIn("ATTEMPT-6",saved)
+
+
+    def test_normal_first_use_keeps_original_count_and_wire(self):
+        with fixture(self.root),self.owner.spreadsheet_owner(binding()) as token:
+            self.module.prepare_global_unit(token,binding(),self.value)
+            original=self.store/"WIRE"
+            before=(original.stat().st_ino,original.read_bytes())
+            seen=self.module.record_global_attempt_intent(token,binding(),self.value)
+            self.assertEqual((1,"UNKNOWN"),(seen.attempt_count,seen.outcome))
+            self.assertEqual(before,(original.stat().st_ino,original.read_bytes()))
+        with fixture(self.root),self.owner.spreadsheet_owner(binding()) as token:
+            seen=self.module.inspect_global_unit(token,binding(),self.value)
+            self.assertEqual((1,"UNKNOWN"),(seen.attempt_count,seen.outcome))
+            self.assertEqual(before,(original.stat().st_ino,original.read_bytes()))
+
+
+    def test_start_witness_file_and_parent_barriers_precede_any_unit_folder(self):
+        for fault in ("zero-write", "file-fsync", "parent-fsync"):
+            with self.subTest(fault=fault),tempfile.TemporaryDirectory(prefix="req7-start-barrier-") as temporary:
+                root=Path(temporary).resolve()
+                locks=root/"var/lib/http-ztp-container/issue-tracker"
+                locks.mkdir(parents=True,mode=0o700)
+                prefix=hashlib.sha256(TARGET.encode()).hexdigest()
+                started=locks/(prefix+".journal-started")
+                store=locks/(prefix+".journal")
+                real_write=os.write; real_sync=os.fsync; reached=[]
+                def write(fd,image):
+                    if started.exists() and os.fstat(fd).st_ino==started.stat().st_ino:
+                        if fault=="zero-write": reached.append(True); return 0
+                    return real_write(fd,image)
+                def sync(fd):
+                    if fault in ("file-fsync", "parent-fsync") and started.exists():
+                        inode=os.fstat(fd).st_ino
+                        if inode==(started.stat().st_ino if fault=="file-fsync" else locks.stat().st_ino):
+                            reached.append(True); raise OSError("owned synthetic barrier failure")
+                    return real_sync(fd)
+                with fixture(root),self.owner.spreadsheet_owner(binding()) as token:
+                    with mock.patch("os.write",side_effect=write),mock.patch("os.fsync",side_effect=sync):
+                        with self.assertRaises(self.module.GlobalAttemptHold):
+                            self.module.prepare_global_unit(token,binding(),self.value)
+                    self.assertEqual([True],reached,"the start barrier must run before journal creation")
+                    self.assertTrue(started.exists(),"partial start remains a conservative STOP")
+                    self.assertFalse(store.exists())
+                    saved=(started.stat().st_ino,started.read_bytes())
+                    with self.assertRaises(self.module.GlobalAttemptHold):
+                        self.module.prepare_global_unit(token,binding(),self.value)
+                    self.assertEqual(saved,(started.stat().st_ino,started.read_bytes()))
+                    self.assertFalse(store.exists())
+
+
+    def test_retained_start_adds_two_barriers_without_erasing_eight_image_barriers(self):
+        real_sync=os.fsync; observed=[]
+        started=self.store.with_name(self.store.name[:-len(".journal")]+".journal-started")
+        def syncing(fd):
+            observed.append((os.fstat(fd).st_ino,
+                set(os.listdir(self.store)) if self.store.exists() else set()))
+            return real_sync(fd)
+        with fixture(self.root),self.owner.spreadsheet_owner(binding()) as token:
+            with mock.patch("os.fsync",side_effect=syncing):
+                self.module.prepare_global_unit(token,binding(),self.value)
+            self.assertEqual(12,len(observed))
+            self.assertEqual([(started.stat().st_ino,set()),(self.locks.stat().st_ino,set())],observed[:2])
+            image=[names for _inode,names in observed[2:]]
+            self.assertEqual(10,len(image))
+            self.assertTrue(all("INITIALIZED" not in names for names in image[:9]))
+            self.assertEqual({"ACTION-PREIMAGE","WIRE","HEADER"},image[7])
+            self.assertEqual({"ACTION-PREIMAGE","WIRE","HEADER","INITIALIZED"},image[9])
+
+
+    def test_all_original_eight_partial_image_barriers_remain_non_adoptable(self):
+        real_sync=os.fsync
+        for boundary in range(1,9):
+            with self.subTest(boundary=boundary),tempfile.TemporaryDirectory(prefix="req7-start-original-barriers-") as temporary:
+                root=Path(temporary).resolve()
+                locks=root/"var/lib/http-ztp-container/issue-tracker"; locks.mkdir(parents=True,mode=0o700)
+                store=locks/self.store.name; calls=[]
+                def failing(fd):
+                    # Preserve the original eight image boundaries exactly;
+                    # the separate start barriers have their own fault test.
+                    if store.exists():
+                        calls.append(fd)
+                        if len(calls)==boundary: raise OSError("owned original image barrier failure")
+                    return real_sync(fd)
+                with fixture(root),self.owner.spreadsheet_owner(binding()) as token:
+                    with mock.patch("os.fsync",side_effect=failing),self.assertRaises(self.module.GlobalAttemptHold):
+                        self.module.prepare_global_unit(token,binding(),self.value)
+                    self.assertEqual(boundary,len(calls)); self.assertTrue(store.is_dir())
+                    with self.assertRaises(self.module.GlobalAttemptHold):
+                        self.module.prepare_global_unit(token,binding(),self.value)
+                    with self.assertRaises(self.module.GlobalAttemptHold):
+                        self.module.record_global_attempt_intent(token,binding(),self.value)
+                    self.assertFalse((store/"ATTEMPT-1").exists())
+
+
+    def test_start_original_handoff_rejects_displacement_before_any_unit_folder(self):
+        for fault in ("lost-name","same-byte-replacement","same-inode-rewrite"):
+            with self.subTest(fault=fault),tempfile.TemporaryDirectory(prefix="req7-start-handoff-") as temporary:
+                root=Path(temporary).resolve()
+                locks=root/"var/lib/http-ztp-container/issue-tracker"; locks.mkdir(parents=True,mode=0o700)
+                prefix=hashlib.sha256(TARGET.encode()).hexdigest()
+                started=locks/(prefix+".journal-started"); store=locks/(prefix+".journal")
+                real_validate=self.owner._validated_owner; injected=[]
+                def after_validation(*args):
+                    owner=real_validate(*args)
+                    if started.exists() and not store.exists() and not injected:
+                        raw=started.read_bytes(); original=started.stat()
+                        if fault in ("lost-name","same-byte-replacement"):
+                            started.rename(root/"preserved-start-original")
+                            if fault=="same-byte-replacement":
+                                started.write_bytes(raw); started.chmod(0o600)
+                                self.assertNotEqual(original.st_ino,started.stat().st_ino)
+                        else:
+                            started.write_bytes(b"x"*len(raw)); started.write_bytes(raw)
+                            os.utime(started,ns=(original.st_atime_ns,original.st_mtime_ns))
+                            self.assertEqual(original.st_ino,started.stat().st_ino)
+                            self.assertEqual(original.st_mtime_ns,started.stat().st_mtime_ns)
+                            self.assertNotEqual(original.st_ctime_ns,started.stat().st_ctime_ns)
+                        injected.append((original.st_ino,raw))
+                    return owner
+                with fixture(root),self.owner.spreadsheet_owner(binding()) as token:
+                    with mock.patch.object(self.owner,"_validated_owner",side_effect=after_validation), \
+                            mock.patch.object(self.module,"_create_folder",wraps=self.module._create_folder) as creating:
+                        with self.assertRaises(self.module.GlobalAttemptHold):
+                            self.module.prepare_global_unit(token,binding(),self.value)
+                    self.assertEqual(1,len(injected)); creating.assert_not_called()
+                    self.assertFalse(store.exists())
+                    retained=started if fault=="same-inode-rewrite" else root/"preserved-start-original"
+                    self.assertEqual(injected[0],(retained.stat().st_ino,retained.read_bytes()))
+
+
 class Req7GlobalAttemptJournalWorkflowTests(unittest.TestCase):
     setUp = Req7GlobalAttemptJournalTests.setUp
+
+    def test_actual_local_intent_and_cold_owner_never_recreate_lost_unknown(self):
+        from monitor import issue_tracker_local_commit as local
+        from monitor import issue_tracker_send_intent as intent
+        project=self.root/"project"; project.mkdir(mode=0o700)
+        publication=project/"publication"; publication.mkdir(mode=0o700)
+        local.create_local_commit_store(project,publication)
+        with local.writer_owner(project,publication) as writer:
+            intent.prepare_send_intent(writer,self.value)
+            local_seen=intent.record_compiled_attempt_intent(writer,self.value)
+            with scoped_fixture(self.root,self.owner),self.owner.spreadsheet_owner(binding()) as token:
+                self.module.prepare_global_unit(token,binding(),self.value)
+                global_seen=self.module.record_global_attempt_intent(token,binding(),self.value)
+            self.assertEqual((1,"UNKNOWN"),(local_seen.attempt_count,local_seen.outcome))
+            self.assertEqual((1,"UNKNOWN"),(global_seen.attempt_count,global_seen.outcome))
+        saved={p.name:(p.stat().st_ino,p.read_bytes()) for p in self.store.iterdir()}
+        preserved=self.root/"preserved-cold-unknown"; self.store.rename(preserved)
+        result=subprocess.run([sys.executable,"-B",str(Path(__file__).resolve()),
+            "--owned-start-hold",str(self.root),str(ROOT)],
+            stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=10)
+        self.assertEqual(0,result.returncode,result.stdout+result.stderr)
+        self.assertEqual(b"GLOBAL HOLD; LOCAL 1 UNKNOWN; NO NEW JOURNAL\n",result.stdout)
+        self.assertFalse(self.store.exists())
+        self.assertEqual(saved,{p.name:(p.stat().st_ino,p.read_bytes()) for p in preserved.iterdir()})
+
 
     @contextmanager
     def counted_wire_owners(self,*,count=1):
@@ -716,8 +906,28 @@ class Req7GlobalAttemptJournalWorkflowTests(unittest.TestCase):
         self.assertTrue((project / '.tracker/remote-attempts' / self.value.unit_id / 'ATTEMPT-1').exists())
 
 
+def cold_hold(root):
+    from monitor import issue_tracker_local_commit as local
+    from monitor import issue_tracker_send_intent as intent
+    owner=load_owner(); module=load(); value=unit()
+    store=root/"var/lib/http-ztp-container/issue-tracker"/(hashlib.sha256(TARGET.encode()).hexdigest()+".journal")
+    with local.writer_owner(root/"project",root/"project/publication") as writer:
+        seen=intent.inspect_send_intent(writer,value)
+        if (seen.attempt_count,seen.outcome)!=(1,"UNKNOWN"): return 5
+        with scoped_fixture(root,owner),owner.spreadsheet_owner(binding()) as token:
+            try:
+                module.prepare_global_unit(token,binding(),value)
+            except module.GlobalAttemptHold:
+                if store.exists(): return 6
+            else: return 4
+        if intent.inspect_send_intent(writer,value).attempt_count!=1: return 7
+    print("GLOBAL HOLD; LOCAL 1 UNKNOWN; NO NEW JOURNAL",flush=True)
+    return 0
+
 if __name__ == '__main__':
-    if len(sys.argv) > 1 and sys.argv[1] == '--owned-wire-claim':
+    if len(sys.argv) > 1 and sys.argv[1] == '--owned-start-hold':
+        raise SystemExit(cold_hold(Path(sys.argv[2]).resolve()))
+    elif len(sys.argv) > 1 and sys.argv[1] == '--owned-wire-claim':
         from monitor import issue_tracker_local_commit as local
         from monitor.issue_tracker_online_target import OnlineTargetBinding
         from test_cases.test_req7_spreadsheet_owner import scoped_fixture

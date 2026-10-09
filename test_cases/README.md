@@ -1377,6 +1377,16 @@ runner 的依赖环境，不冒称 `-I` 隔离传输；六次意图不是六次�
 COMPLETE／清理／联网能力，受保护准入、单次 capability 和固定 launcher 仍须接入；
 REQ7 整体未完成，真机 NOT RUN。
 
+首次初始化在创建 journal 目录前，以独占固定 `.journal-started` 名保留
+GLOBAL-UNIT-STARTED STOP，先完成原文件／parent 两个 fsync 屏障，并持续持有
+原 FD／命名边／完整 stat 到初始化返回；空、partial、改写或被替换见证均 HOLD，
+不补建、覆盖、删除或视为正向许可。原八个图像及两个 INITIALIZED 屏障仍全部执行。
+UNKNOWN journal 位移后，同一单元不能回到零次；M=6 journal 位移后，新 generation
+也不能绕过。独立 direct 故障注入与实际 local intent→global intent→独立冷 owner
+流程保留原次数、UNKNOWN、WIRE 及所有原件。该 STOP 只关闭首次防重建边界，
+不证明完整历史 inventory、APPLIED/FIFO/high-water 最大值或 successor/NEW 准入；
+已有保守屏障不能当作 REQ7 整体完成。现场与断电/设备验收仍 NOT RUN。
+
 原持久 WIRE 的私有 `_hold_counted_original_wire` 交接在实际项目／spreadsheet
 双 owner 内，先同步原初始化证据，再写独立 NOREPLACE/fsync 的链式 CLAIM，
 然后才借出原只读 CLOEXEC FD。重复领取、冷进程复用、缺失旧 CLAIM 前缀和

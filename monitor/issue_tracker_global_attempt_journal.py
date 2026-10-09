@@ -321,6 +321,40 @@ def _sync_initialization(parent, folder, header):
     finally: os.close(fd)
 
 
+@contextmanager
+def _write_global_start(parent, name, raw):
+    """Create the permanent STOP name before any byte or durability barrier.
+
+    Partial/empty witnesses stay retained on failure. They are never positive
+    evidence, repaired, replaced or removed by this initializer.
+    """
+    if type(raw) is not bytes or not 1 <= len(raw) <= 16384:
+        raise GlobalAttemptHold()
+    local._flags()
+    fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                 os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=parent)
+    try:
+        local._check(fd, directory=False)
+        journal._named(parent, name, fd, directory=False)
+        remaining = memoryview(raw)
+        while remaining:
+            written = os.write(fd, remaining)
+            if not 0 < written <= len(remaining): raise GlobalAttemptHold()
+            remaining = remaining[written:]
+        identity = journal._identity(os.fstat(fd))
+        def verify():
+            journal._named(parent, name, fd, directory=False)
+            if journal._identity(os.fstat(fd)) != identity: raise GlobalAttemptHold()
+        os.fsync(fd)
+        verify()
+        os.fsync(parent)
+        verify()
+        yield verify
+        verify()
+    finally:
+        os.close(fd)
+
+
 def prepare_global_unit(token, binding, unit):
     """New coherent images only; never adopt a partial/existing global store."""
     folder = None; failed = False
@@ -329,21 +363,33 @@ def prepare_global_unit(token, binding, unit):
         _require_no_completion(parent,name)
         # A retained store is a conservative barrier even before ATTEMPT-1.
         # New generations/sheets/projects cannot bypass it by another key.
-        if name in os.listdir(parent): raise GlobalAttemptHold()
-        folder = _create_folder(parent, name)
-        local._write_new(folder, 'ACTION-PREIMAGE', unit.action_preimage)
-        local._write_new(folder, 'WIRE', unit.wire_bytes)
-        local._write_new(folder, 'HEADER', local._canonical(header))
-        journal._named(parent, name, folder, directory=True)
-        ownership._validated_owner(token, binding)
-        # Never create this marker until ALL eight required image barriers
-        # succeeded. A failed final HEADER directory fsync otherwise leaves
-        # coherent-looking bytes which must not be adopted by a later owner.
-        local._write_new(folder, 'INITIALIZED', _initialization(header))
-        journal._named(parent, name, folder, directory=True)
-        ownership._validated_owner(token, binding)
-        count, _previous = _inspect(folder, unit, header)
-        if count: raise GlobalAttemptHold()
+        started=name[:-len('.journal')]+'.journal-started'
+        names=set(os.listdir(parent))
+        if name in names or started in names: raise GlobalAttemptHold()
+        # A separate retained STOP precedes the whole unit namespace. Losing
+        # the journal must never turn UNKNOWN or an exhausted count into a
+        # fresh first use. Even empty/malformed/partial STARTED blocks creation;
+        # it is not completion, inventory, high-water or a send permission.
+        with _write_global_start(parent,started,local._canonical({
+            'schema_version':1,'state':'GLOBAL-UNIT-STARTED','unit_id':unit.unit_id,
+            'header_sha256':hashlib.sha256(local._canonical(header)).hexdigest()})) as verify_start:
+            ownership._validated_owner(token,binding)
+            verify_start()
+            folder = _create_folder(parent, name)
+            local._write_new(folder, 'ACTION-PREIMAGE', unit.action_preimage)
+            local._write_new(folder, 'WIRE', unit.wire_bytes)
+            local._write_new(folder, 'HEADER', local._canonical(header))
+            journal._named(parent, name, folder, directory=True)
+            ownership._validated_owner(token, binding)
+            # Never create this marker until ALL eight required image barriers
+            # succeeded. A failed final HEADER directory fsync otherwise leaves
+            # coherent-looking bytes which must not be adopted by a later owner.
+            local._write_new(folder, 'INITIALIZED', _initialization(header))
+            journal._named(parent, name, folder, directory=True)
+            ownership._validated_owner(token, binding)
+            count, _previous = _inspect(folder, unit, header)
+            if count: raise GlobalAttemptHold()
+            verify_start()
     except Exception: failed = True
     finally:
         if folder is not None:
