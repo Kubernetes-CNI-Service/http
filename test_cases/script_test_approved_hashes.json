@@ -1,60 +1,4 @@
 {
-  "full_suite_attestation": {
-    "environment": {
-      "container_toplevel_lock_sha256": "3532f5208b462243bab779b01eb4deb21638ac05a9390c17ac997ba8d7f24998",
-      "container_toplevel_versions": [
-        "Jinja2==3.1.6",
-        "openpyxl==3.1.5",
-        "pandas==2.3.3",
-        "PyYAML==6.0.3",
-        "XlsxWriter==3.2.9"
-      ],
-      "machine": "arm64",
-      "platform": "darwin",
-      "python_cache_tag": "cpython-39",
-      "python_executable": "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/bin/python3.9",
-      "python_implementation": "CPython",
-      "python_version": [
-        3,
-        9,
-        6
-      ],
-      "req7_dependencies": {
-        "linux_artifacts_executed": false,
-        "lock_sha256": "b10a83b5f4b6c767b5dc7c80e0353179f2136fd651a8cb6cc838e23b7692bfbe",
-        "policy_sha256": "4e0fa1652f94999c657e92b0e3d81162538449b6d4c6ceae527580bd47d4cd32",
-        "versions": [
-          "google-auth==2.50.0",
-          "pyasn1-modules==0.4.2",
-          "pyasn1==0.6.4",
-          "cryptography==50.0.1",
-          "cffi==2.0.0",
-          "pycparser==2.23",
-          "typing_extensions==4.16.0"
-        ]
-      }
-    },
-    "scenario_coverage": {
-      "root-entrypoint-workflow": "NOT COVERED (requires Linux EUID 0 private namespace)"
-    },
-    "schema_version": 1,
-    "snapshot_sha256": "860eee766b8fcdeaf934dcfe27b174ab538cd8d52d7acecb960253d7f8baefbb",
-    "validation_only": {
-      "baseline_skipped_tests": [
-        "test_cases.test_docker_management_ssh_key.DockerManagementSshKeyWorkflowTests.test_real_deploy_entrypoint_drives_locked_helper_then_11_load",
-        "test_cases.test_image_context_safety.SyntheticDockerMembershipTests.test_copy_membership_with_each_independent_ignore_entrypoint",
-        "test_cases.test_monitor_authority_entrypoints.MonitorAuthorityRootNamespaceScenario.test_real_root_entrypoint_workflow",
-        "test_cases.test_monitor_stack_review.ControlPlaneTests.test_yaml_backup_memory_socket_is_private_and_inode_pinned"
-      ],
-      "issue": "ISSUE-0016",
-      "known_failed_tests": [
-        "test_cases.test_req10c_auto_workflow.Req10CAutoUnsetupWorkflowTests.test_install_preserves_noncooperating_foreign_cron_or_stops_before_write",
-        "test_cases.test_req10c_auto_workflow.Req10CAutoUnsetupWorkflowTests.test_remove_preserves_noncooperating_foreign_cron_or_stops_before_write",
-        "test_cases.test_req10c_auto_workflow.Req10CAutoUnsetupWorkflowTests.test_unsetup_preserves_noncooperating_foreign_cron_or_stops_before_write"
-      ],
-      "not_a_release_proof": true
-    }
-  },
   "impact_manifest_sha256": "0ffe53c0b319b295dad03941139fe5f25f6f918444d9640346e0283bc0900062",
   "schema_version": 1,
   "scripts": {
@@ -340,7 +284,7 @@
     },
     "monitor/issue_tracker_remote_history_match.py": {
       "canonical": "monitor/issue_tracker_remote_history_match.py",
-      "sha256": "fc8c2050ca9af7949be026eda9619cea0d42f79b3bea9b1f9266481dc154b03a"
+      "sha256": "bcb94036b4d8b640fe3dad7bf15d3a436c744975fe68c2f29fcf23c9eb0c5d3b"
     },
     "monitor/issue_tracker_sdk_authentication.py": {
       "canonical": "monitor/issue_tracker_sdk_authentication.py",
@@ -904,7 +848,7 @@
     "infra/infra-neutral.conf": "238bec3c9be34fc5a7bf097e36012133da4a30b90cabdf17d758796ecdab24f8",
     "requirements-container-top-level.lock": "3532f5208b462243bab779b01eb4deb21638ac05a9390c17ac997ba8d7f24998",
     "requirements-dev.txt": "2047cfeb6e7d7c3b02380624cd212528fb8416cf3e76dd924d2e2cba8567a50a",
-    "test_cases/REAL_ENVIRONMENT.md": "3c30086a3a842c72f8dfce1b0af67f1152cf71c21d5967b66724e3ea41ded186",
+    "test_cases/REAL_ENVIRONMENT.md": "2fb09571cfc562430cc4522b2394f354c0103542ccfdfe6a0d6c522bd30a99f1",
     "test_cases/audit_public_tree.py": "3c9cefbabdb0eb7816201c67f5c98ac715b1cd8ea81720b6a24659bdaaebfc0f",
     "test_cases/module_loader.py": "ef1e9b44f0272209378788ed6682b8a6a68c95a76a6d545c001ddc4762471ecf",
     "test_cases/monitor_authority_root_warden.py": "f4ac61acc04af33168aa01ba295a74fe036202b9179ad65f10e9db87375a2c4c",
@@ -916,7 +860,7 @@
     "test_cases/splitter_profile_fixture.py": "7b0548d7d15b855278e21456d1ec2b667072d874ba68d527348f185f85d6d75f",
     "test_cases/user_manual_contract.json": "dc0bb8977038e9e326fa73c90fba1e992434752b89861a91d998c9d576eb6881",
     "tools/lldp-analyze-tool/04-lldp-device-aliases.json": "595529fac28098b504d67809026a59ecfa0345375ada9b16057ff069e5179250",
-    "user-manual.html": "4bb504a647997a2f8a0107c2ed76f55592cbdeedb0ba8a54e1880b54b36830e2",
+    "user-manual.html": "01fc3dd9df1a7508c60b45f9694bddf0f2e35d5c13d3fd47cae62a3dc63453ce",
     "ztp/config/cumulus/ar_profile_custom.conf": "9316fe81c3238ef99076ee598abf303c955dc38343df4176ba22bc4c27729c1c",
     "ztp/config/cumulus/default.yaml": "6e3f950a5c964fabbac8106720920d3061e90bf94436f22b6ad049c64c1b5934",
     "ztp/config/cumulus/default_5.16.5.yaml": "6e3f950a5c964fabbac8106720920d3061e90bf94436f22b6ad049c64c1b5934",
@@ -1159,7 +1103,7 @@
     "test_cases.test_req7_native_tls_wire": "2aa80143644523a50f5fab21aec1be33f688d2df67bae36c547c327f2e780e99",
     "test_cases.test_req7_nv_reservation": "b67e395eefb7f194890c45bd5db2a10c296dba412aaf4b823b47ac3af37a3463",
     "test_cases.test_req7_online_whitelist_read": "3feb1be8f29de4a8cea3a27b477062a4babf5c3cc70f08afce0a563047d943e6",
-    "test_cases.test_req7_remote_history_match": "7c4165d4d415b48de6aa7542eef56726a6c786299dd23500cd700e0e17bce187",
+    "test_cases.test_req7_remote_history_match": "1d9fd8e4fdf336ccc34e552adf5984702d8cd3bb475be9e516b0963c64b86f76",
     "test_cases.test_req7_sdk_authentication": "5c70835a157c6c6d269a546fc49f60636acd521d647206eeb3be4dbce667cac5",
     "test_cases.test_req7_send_intent": "a1d547c632ff9f236d177118031504ee7cfdd0d60de878a6a79060aea59ab627",
     "test_cases.test_req7_send_unit": "db22a8e549172961c94ea7a6458e982be8f8259f0b4577861d0ce5a75a0f2a34",
