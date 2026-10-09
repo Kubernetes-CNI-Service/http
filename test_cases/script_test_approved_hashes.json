@@ -168,7 +168,7 @@
     },
     "monitor/issue_tracker_global_attempt_journal.py": {
       "canonical": "monitor/issue_tracker_global_attempt_journal.py",
-      "sha256": "6e897f3afa469de73fdce5e61059a94b9a09eaba4f63c4eb196f1e6f12dd17b5"
+      "sha256": "d5e688467c813723cdfb3717748fb8a9d95025dbe773140f6264bd9bd819e81d"
     },
     "monitor/issue_tracker_history_preread_journal.py": {
       "canonical": "monitor/issue_tracker_history_preread_journal.py",
@@ -848,7 +848,7 @@
     "infra/infra-neutral.conf": "238bec3c9be34fc5a7bf097e36012133da4a30b90cabdf17d758796ecdab24f8",
     "requirements-container-top-level.lock": "3532f5208b462243bab779b01eb4deb21638ac05a9390c17ac997ba8d7f24998",
     "requirements-dev.txt": "2047cfeb6e7d7c3b02380624cd212528fb8416cf3e76dd924d2e2cba8567a50a",
-    "test_cases/REAL_ENVIRONMENT.md": "a66e952f44e5686d000aab87f03e6cacccea72bee2ebbffbc44d6d92272fbf4e",
+    "test_cases/REAL_ENVIRONMENT.md": "f2cb0170a2eef1f45965e91fe83c9cc6bed67aca4f9cad48019db7c2f854609e",
     "test_cases/audit_public_tree.py": "3c9cefbabdb0eb7816201c67f5c98ac715b1cd8ea81720b6a24659bdaaebfc0f",
     "test_cases/module_loader.py": "ef1e9b44f0272209378788ed6682b8a6a68c95a76a6d545c001ddc4762471ecf",
     "test_cases/monitor_authority_root_warden.py": "f4ac61acc04af33168aa01ba295a74fe036202b9179ad65f10e9db87375a2c4c",
@@ -1089,7 +1089,7 @@
     "test_cases.test_req7_dependency_contract": "18509d780485ec9f280b87c44d23185960e1dd46a2d8105780afea3e36202397",
     "test_cases.test_req7_dependency_workflow": "3edf03bf9e3ab67dae3d298ede7d5dac622733ef27b777cbd7d0d003d0f0006b",
     "test_cases.test_req7_enrollment_journal": "376527e38d65a0778ad86118cc6d3339544753b54b19c0f2ac1e04ac2b9be54a",
-    "test_cases.test_req7_global_attempt_journal": "8cc8c27feb5380c1b789c867e34a662f32fea85aa6d07786f8a8f78c5e790637",
+    "test_cases.test_req7_global_attempt_journal": "45f53ba279bf05294d17ee07ee336ef73f9249387a0dc1b6e27db18748aa13dc",
     "test_cases.test_req7_history_preread_journal": "91b2d5685ef438d350728025dfe7b6b4337a00c82951467a6ad83bb46b6dc2f8",
     "test_cases.test_req7_history_read": "65416b3489c2f3758276806ddd0b5dd59d40d146ffc3fbf9e684456e58f341f3",
     "test_cases.test_req7_history_read_launcher": "25375d0f0be74c6057ffd499701821dc5c25a247d52d8685f116216810aba41c",
