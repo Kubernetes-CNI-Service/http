@@ -1913,6 +1913,41 @@ def apply_validation_profile(args: argparse.Namespace) -> None:
         )
 
 
+def management_os_identity(system: str, release_text: str) -> str:
+    """Qualify literal Ubuntu host identity without evaluating os-release.
+
+    Only the two identity fields are consumed; ordinary descriptive metadata
+    remains irrelevant. Duplicates and malformed identity cannot authorize a
+    supported version by last-write-wins or by stripping an unmatched quote.
+    This does not change the separate Ubuntu 24.04 Docker image contract.
+    """
+    if system != "Linux":
+        raise ValueError(f"unsupported management OS: system={system}")
+    if not isinstance(release_text, str):
+        raise ValueError("os-release identity must be UTF-8 text")
+    identity: dict[str, str] = {}
+    for line in release_text.splitlines():
+        key, separator, raw = line.partition("=")
+        if key.strip() in {"ID", "VERSION_ID"} and (not separator or key != key.strip()):
+            raise ValueError("malformed os-release identity assignment")
+        if not separator or key not in {"ID", "VERSION_ID"}:
+            continue
+        if key in identity:
+            raise ValueError(f"duplicate os-release identity field: {key}")
+        value = raw.strip()
+        if not re.fullmatch(r'''(?:[A-Za-z0-9_.-]+|"[A-Za-z0-9_.-]+"|'[A-Za-z0-9_.-]+')''', value):
+            raise ValueError(f"malformed literal os-release identity field: {key}")
+        identity[key] = value[1:-1] if value.startswith(('"', "'")) else value
+    if set(identity) != {"ID", "VERSION_ID"}:
+        raise ValueError("os-release requires unique ID and VERSION_ID")
+    if identity["ID"] != "ubuntu" or identity["VERSION_ID"] not in {"22.04", "24.04"}:
+        raise ValueError(
+            f"unsupported management OS: ID={identity['ID']}, "
+            f"VERSION_ID={identity['VERSION_ID']}; require Ubuntu 22.04 or 24.04 / Linux"
+        )
+    return f"Ubuntu {identity['VERSION_ID']} / Linux"
+
+
 def _main_bound_deployment(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     recorder = Recorder()
@@ -1941,25 +1976,14 @@ def _main_bound_deployment(argv: list[str] | None = None) -> int:
     dhcp_status = "enabled"
 
     system = platform.system()
-    os_release: dict[str, str] = {}
     try:
-        for line in Path("/etc/os-release").read_text(encoding="utf-8").splitlines():
-            if "=" in line:
-                key, value = line.split("=", 1)
-                os_release[key] = value.strip().strip('"')
-    except OSError as exc:
+        os_identity = management_os_identity(
+            system, Path("/etc/os-release").read_text(encoding="utf-8"),
+        )
+    except (OSError, UnicodeError, ValueError) as exc:
         recorder.fail("operating-system", str(exc))
     else:
-        if system == "Linux" and os_release.get("ID") == "ubuntu" and os_release.get(
-            "VERSION_ID"
-        ) == "24.04":
-            recorder.passed("operating-system", "Ubuntu 24.04 / Linux")
-        else:
-            recorder.fail(
-                "operating-system",
-                f"system={system}, ID={os_release.get('ID')}, "
-                f"VERSION_ID={os_release.get('VERSION_ID')}",
-            )
+        recorder.passed("operating-system", os_identity)
 
     missing_modules = [
         name for name in REQUIRED_PYTHON_MODULES

@@ -938,7 +938,7 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - 清理与风险：保存两架构 tar/image ID、inspect、source receipt、activation 和网络阻断证据；删除
   测试 image/container 并恢复外网策略。制品摘要不替代组织批准的来源签名。
 
-## TC-REAL-VM-ZTP-001 — Ubuntu 24.04 管理 VM 发布后只读验收
+## TC-REAL-VM-ZTP-001 — Ubuntu 22.04/24.04 管理 VM 发布后只读验收
 
 - 2026-10-09 待编号验收器候选：独立 direct 使用实际 `infra/infra-setup.sh` 的 V2
   heredoc，旧验收器拒绝 V2 且接受双版本 marker；RED 日志
@@ -964,7 +964,30 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
   SHA-256 `3fbcac7010fb39f78a10b94574b57136c26b81512e5d22c6a336836c9343d3c2`。
   本地候选不是当前精确树正式 proof，也未改变 no-upgrade 镜像验证或现场设备验收。
 
-- 前置条件：在隔离 Ubuntu 24.04 VM 中完成 upload、load 和所需服务启动；两个直连 DHCP
+- 2026-10-09 owner 确认的宿主合同变更：接受 Ubuntu 22.04，同时保留 24.04 自动化覆盖。
+  旧固定版本在 Ubuntu 22.04 上的原 OS FAIL 原样保留，不因合同调整补记 PASS；
+  上面的历史候选说明不代表这个新合同已经现场验收。direct 独立表达两版本及
+  不受支持、身份缺失/重复/损坏、不可读的拒绝；真实 LOAD parent→树外复制 verifier
+  workflow 要求消费实际 `--root` contract，parent/输入漂移和缺失实际 contract 仍拒绝。
+  该 scoped workflow 不覆盖 systemd/HTTP/设备全流程，不能当作现场完整 VM PASS。
+  现场仍保存实际 `/etc/os-release`、kernel、精确 verifier/source/proof 身份、完整报告与
+  退出码，并分别登记认证、服务和设备结果。Docker image/容器仍固定 Ubuntu 24.04。
+  独立 RED：`outputs/test-diagnostics/vm-os-22-24-independent-red.log`，5 tests /
+  10 failures / 1 error / exit1，SHA-256
+  `45a4a2ed9b1c57199401cac9659a06573895f21c7c0bc17b6ba360f1ab548197`；
+  修复后同 5 项 direct/workflow exit0，GREEN SHA-256
+  `41bfa0d24604b43cebcb71ec32663e31c3f9cc50cec9ef68057857660f2125c2`。
+  完整 VM 模块回归日志 `outputs/test-diagnostics/vm-os-22-24-complete-module-green.log`
+  SHA-256 `3fc927197d1f4c9d6dbb48fb784b4c840e8c42a2dfa0aec5de92a865bf445451`，
+  exit0；上述日志均核 held stat/具实际退出及完整 END，仍非新精确树正式 full/check。
+  只读复核追加必需身份裸字段（缺少 `=`）的实际 main 独立负例，两字段各在合法
+  赋值前后出现；RED `vm-os-bare-identity-independent-red.log`，1 test / 4 failures /
+  exit1，SHA-256 `ce6fb2e9b37ba40dfee8fd7d90d369554816e1eec009b337f49fbc1c84e3bd48`。
+  拒绝该损坏身份后完整模块 56 tests / exit0，日志
+  `outputs/test-diagnostics/vm-os-bare-identity-complete-module-green.log` SHA-256
+  `b48e9b554d2b442060f39b1b0b00549d9eeb19f9411e024acc13ad97fafc4bfb`；
+  两日志 held stat 稳定、CODE_FREEZE_MATCH=True、实际退出和物理 END 完整。
+- 前置条件：在隔离 Ubuntu 22.04 或 24.04 VM 中完成 upload、load 和所需服务启动；两个直连 DHCP
   shared-network 的 service IP 必须分别位于两个独立 vNIC。验收期间不得再次运行 load、
   sync、更新密码、重启服务或编辑项目输入。
 - `test_cases/` 不进入 upload/sync 包，因此从 Mac 单独复制验收器：

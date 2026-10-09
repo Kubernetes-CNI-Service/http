@@ -1049,10 +1049,17 @@ VLAN ID、地址/prefix/scope、tentative/dadfailed/deprecated 仍严格比较�
 在发布 runtime plan、Apache listener、activation/precommit 或启动服务前失败。真机复现与证据要求登记在
 `TC-REAL-NETWORK-SNAPSHOT-001`。
 
-`run_vm_validation.py` 是 upload/load 完成后的 Ubuntu 24.04 管理 VM 只读验收器。它核对
+`run_vm_validation.py` 是 upload/load 完成后的 Ubuntu 22.04/24.04 管理 VM 只读验收器。它核对
 parent/child release 与输入/制品 hash、DHCP shared-network 到 vNIC 的唯一映射、服务、worker、
 AIR scope 和 mini 清单绑定，但不会运行 load、更新密码、重启服务或修改项目。`test_cases/`
 不进入生产 upload/sync 包，须按 `TC-REAL-VM-ZTP-001` 单独复制到 VM，并把 JSON 报告带回审核。
+
+2026-10-09 owner 确认将 Ubuntu 22.04 纳入上述宿主验收合同，保留 24.04 覆盖。
+OS 门禁只接受 Linux 与唯一、格式正确的 `ID=ubuntu`、`VERSION_ID=22.04|24.04`
+字面身份，报告实际版本；身份缺失、重复、损坏、不可读或不受支持仍为 FAIL。
+独立 direct 与真实 LOAD→树外复制验收器 workflow 保留实际 `--root` contract 来源、
+parent canonical basis 和输入 hash 的拒绝门禁。该变更不降低 Docker 容器的 Ubuntu 24.04
+要求，不豁免 systemd、认证、设备、完整 full/check 或现场证据，也不回写旧轮 OS FAIL。
 
 原生 systemd 的完整验收使用 `--full-systemd --worker-scope prod|air`。完整模式在上述检查之外，
 还会只读编译部署树中的 Python/CGI、对 Shell 执行 `bash -n`，核对 systemd enable/MainPID、

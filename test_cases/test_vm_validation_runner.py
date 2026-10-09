@@ -15,8 +15,10 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 import stat
+import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
 from unittest import mock
 
@@ -70,6 +72,229 @@ def actual_deployment_contract_fixture(root: Path):
             if name == "tools" or name.startswith("tools."):
                 sys.modules.pop(name, None)
         sys.modules.update(previous_modules)
+
+
+class VmOperatingSystemContracts(unittest.TestCase):
+    def actual_os_finding(self, system, payload=None, error=None):
+        """Observe the real main branch without running unrelated VM checks."""
+        class FindingObserved(BaseException):
+            pass
+        observed = []
+        original_read = Path.read_text
+        original_add = VM.Recorder.add
+        def read(path, *args, **kwargs):
+            if path == Path("/etc/os-release"):
+                if error is not None:
+                    raise error
+                return payload
+            return original_read(path, *args, **kwargs)
+        def add(recorder, level, check, detail):
+            original_add(recorder, level, check, detail)
+            if check == "operating-system":
+                observed.append((level, detail))
+                raise FindingObserved()
+        with mock.patch.object(VM.platform, "system", return_value=system), \
+                mock.patch.object(Path, "read_text", read), \
+                mock.patch.object(VM.Recorder, "add", add), \
+                mock.patch("sys.stdout", new=io.StringIO()):
+            with self.assertRaises(FindingObserved):
+                VM.main(["unused-os-probe", "--root", str(ROOT)])
+        self.assertEqual(1, len(observed))
+        return observed[0]
+
+    def test_main_accepts_both_supported_ubuntu_versions_and_reports_actual_version(self):
+        for payload, expected in (
+            ('ID=ubuntu\nVERSION_ID="22.04"\n', "Ubuntu 22.04 / Linux"),
+            ('ID="ubuntu"\nVERSION_ID=24.04\n', "Ubuntu 24.04 / Linux"),
+            ("# independent metadata\nPRETTY_NAME=ignored\nID='ubuntu'\nVERSION_ID='22.04'\nID_LIKE=debian\n",
+             "Ubuntu 22.04 / Linux"),
+        ):
+            with self.subTest(payload=payload):
+                self.assertEqual(("PASS", expected), self.actual_os_finding("Linux", payload))
+
+    def test_main_rejects_unsupported_missing_duplicate_and_malformed_os_identity(self):
+        for system, payload in (
+            ("Linux", 'ID=ubuntu\nVERSION_ID="20.04"\n'),
+            ("Linux", 'ID=ubuntu\nVERSION_ID="26.04"\n'),
+            ("Linux", 'ID=debian\nVERSION_ID="24.04"\n'),
+            ("Darwin", 'ID=ubuntu\nVERSION_ID="24.04"\n'),
+            ("FreeBSD", 'ID=ubuntu\nVERSION_ID="22.04"\n'),
+            ("Linux", 'VERSION_ID="24.04"\n'),
+            ("Linux", 'ID=ubuntu\n'),
+            ("Linux", 'ID=ubuntu\nID=ubuntu\nVERSION_ID="24.04"\n'),
+            ("Linux", 'ID=debian\nID=ubuntu\nVERSION_ID="24.04"\n'),
+            ("Linux", 'ID=ubuntu\nVERSION_ID="20.04"\nVERSION_ID="24.04"\n'),
+            ("Linux", 'ID=ubuntu\nVERSION_ID="24.04"\nVERSION_ID="24.04"\n'),
+            ("Linux", 'ID=ubuntu\nVERSION_ID="24.04\n'),
+            ("Linux", 'ID="ubuntu\nVERSION_ID="24.04"\n'),
+            ("Linux", 'ID=ubuntu\nVERSION_ID="24.04";true\n'),
+            ("Linux", 'ID=ubuntu\nVERSION_ID="$(printf 24.04)"\n'),
+            ("Linux", 'ID=ubuntu\nVERSION_ID=""\n'),
+            ("Linux", 'ID =ubuntu\nVERSION_ID="24.04"\n'),
+            ("Linux", 'ID=ubuntu\n VERSION_ID="24.04"\n'),
+            ("Linux", 'ID=ubuntu\nID =debian\nVERSION_ID="24.04"\n'),
+        ):
+            with self.subTest(system=system, payload=payload):
+                self.assertEqual("FAIL", self.actual_os_finding(system, payload)[0])
+
+    def test_main_rejects_bare_required_identity_before_or_after_valid_assignments(self):
+        valid = 'ID=ubuntu\nVERSION_ID="24.04"\n'
+        for field in ("ID", "VERSION_ID"):
+            for payload in (field + "\n" + valid, valid + field + "\n"):
+                with self.subTest(field=field, payload=payload):
+                    self.assertEqual("FAIL", self.actual_os_finding("Linux", payload)[0])
+
+    def test_main_keeps_unreadable_os_identity_as_failure(self):
+        for error in (OSError("independent os-release read failure"),
+                      UnicodeDecodeError("utf-8", b"\xff", 0, 1, "independent invalid byte")):
+            with self.subTest(error=type(error).__name__):
+                self.assertEqual("FAIL", self.actual_os_finding("Linux", error=error)[0])
+
+
+class VmOperatingSystemWorkflowContracts(unittest.TestCase):
+    # Stop after a real gate finding: this is an OS/LOAD/root workflow,
+    # explicitly not a model of full systemd, HTTP or device acceptance.
+    CHILD = textwrap.dedent(r'''
+        import importlib.util, json, sys
+        from pathlib import Path
+        from unittest import mock
+        copied, root, os_payload, stop_check = sys.argv[1:]
+        spec = importlib.util.spec_from_file_location("independent_copied_vm", copied)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        observed, origins = [], []
+        original_read, original_add = Path.read_text, module.Recorder.add
+        original_contract = module.deployment_project_contract
+        class GateObserved(BaseException):
+            pass
+        def read(path, *args, **kwargs):
+            if path == Path("/etc/os-release"):
+                return os_payload
+            return original_read(path, *args, **kwargs)
+        def contract():
+            actual = original_contract()
+            origins.append(str(Path(actual.__file__).resolve()))
+            return actual
+        def add(recorder, level, check, detail):
+            original_add(recorder, level, check, detail)
+            observed.append({"level": level, "check": check, "detail": detail})
+            if check == stop_check:
+                raise GateObserved()
+        previous_path = sys.path[:]
+        previous_root = module._VALIDATION_DEPLOYMENT_ROOT
+        stopped = False
+        with mock.patch.object(module.platform, "system", return_value="Linux"), \
+                mock.patch.object(Path, "read_text", read), \
+                mock.patch.object(module.Recorder, "add", add), \
+                mock.patch.object(module, "deployment_project_contract", contract):
+            try:
+                module.main(["demo", "--root", root])
+            except GateObserved:
+                stopped = True
+        assert stopped, "requested real gate was not exercised"
+        assert sys.path == previous_path
+        assert module._VALIDATION_DEPLOYMENT_ROOT == previous_root
+        assert not any(name == "tools" or name.startswith("tools.") for name in sys.modules)
+        core = {"operating-system", "parent-release", "release-inputs", "dhcp-mode"}
+        failed = any(row["level"] == "FAIL" and row["check"] in core for row in observed)
+        print("SCOPED_OS_LOAD_EVIDENCE=" + json.dumps({
+            "findings": observed, "origins": origins,
+            "copied": str(Path(module.__file__).resolve()),
+            "root": str(Path(root).resolve()), "scope": "OS_LOAD_ROOT_ONLY_NOT_FULL_VM",
+        }))
+        raise SystemExit(1 if failed else 0)
+    ''')
+
+    @staticmethod
+    def snapshot(root):
+        values = {}
+        for path in root.rglob("*"):
+            metadata = path.lstat()
+            if path.is_symlink():
+                value = os.readlink(path)
+            elif stat.S_ISREG(metadata.st_mode):
+                value = path.read_bytes()
+            else:
+                continue
+            values[path.relative_to(root).as_posix()] = (
+                metadata.st_ino, metadata.st_mode, value,
+            )
+        return values
+
+    def run_copy(self, fixture, payload, stop_check):
+        with tempfile.TemporaryDirectory(prefix="vm-os-copy-") as directory:
+            private = Path(directory).resolve()
+            copied = private / "independent-verifier.py"
+            copied.write_bytes(SCRIPT.read_bytes())
+            copied.chmod(0o600)
+            root = fixture.root.resolve()
+            self.assertFalse(copied.is_relative_to(root))
+            before = self.snapshot(root)
+            result = subprocess.run(
+                [sys.executable, "-B", "-c", self.CHILD, str(copied),
+                 str(root), payload, stop_check], cwd=private, capture_output=True,
+                text=True, timeout=30,
+                env=dict(os.environ, PYTHONPYCACHEPREFIX=str(private / "fresh-pyc")),
+            )
+            self.assertEqual(before, self.snapshot(root), result.stdout + result.stderr)
+            evidence = [line.partition("=")[2] for line in result.stdout.splitlines()
+                        if line.startswith("SCOPED_OS_LOAD_EVIDENCE=")]
+            self.assertEqual(1, len(evidence), result.stdout + result.stderr)
+            record = json.loads(evidence[0])
+            self.assertEqual(str(copied), record["copied"])
+            self.assertEqual(str(root), record["root"])
+            self.assertEqual("OS_LOAD_ROOT_ONLY_NOT_FULL_VM", record["scope"])
+            return result.returncode, record
+
+    def test_copied_verifier_accepts_both_os_with_real_load_parent_and_actual_root_import(self):
+        fixture, parent = VmReleaseAcceptanceTests._real_load_parent(enabled=False)
+        try:
+            with actual_deployment_contract_fixture(fixture.root):
+                for payload, detail in (
+                    ('ID=ubuntu\nVERSION_ID="22.04"\n', "Ubuntu 22.04 / Linux"),
+                    ('ID=ubuntu\nVERSION_ID="24.04"\n', "Ubuntu 24.04 / Linux"),
+                ):
+                    with self.subTest(payload=payload):
+                        code, record = self.run_copy(fixture, payload, "dhcp-mode")
+                        self.assertEqual(0, code, record)
+                        rows = {row["check"]: row for row in record["findings"]}
+                        self.assertEqual({"level": "PASS", "check": "operating-system",
+                                          "detail": detail}, rows["operating-system"])
+                        self.assertEqual("PASS", rows["parent-release"]["level"])
+                        self.assertEqual("release_id=" + parent["release_id"], rows["parent-release"]["detail"])
+                        self.assertEqual("PASS", rows["release-inputs"]["level"])
+                        self.assertEqual("global-bound disabled", rows["dhcp-mode"]["detail"])
+                        self.assertIn(str(fixture.root.resolve() / "tools/project_contract.py"), record["origins"])
+        finally:
+            fixture.tearDown()
+
+    def test_supported_os_does_not_relax_real_parent_input_or_actual_contract_gates(self):
+        for fault, stop_check in (("parent", "parent-release"),
+                                 ("input", "release-inputs"),
+                                 ("contract", "dhcp-mode")):
+            with self.subTest(fault=fault):
+                fixture, parent = VmReleaseAcceptanceTests._real_load_parent(enabled=False)
+                try:
+                    with actual_deployment_contract_fixture(fixture.root):
+                        if fault == "parent":
+                            path = fixture.project / "99-output-ztp/current-release.json"
+                            record = json.loads(path.read_bytes())
+                            record["release_id"] = "0" * 20
+                            path.write_text(json.dumps(record), encoding="utf-8")
+                        elif fault == "input":
+                            fixture.devices_file.write_bytes(fixture.devices_file.read_bytes() + b"\nindependent drift\n")
+                        else:
+                            (fixture.root / "tools/project_contract.py").unlink()
+                        code, record = self.run_copy(fixture, 'ID=ubuntu\nVERSION_ID="24.04"\n', stop_check)
+                        self.assertEqual(1, code, record)
+                        rows = [row for row in record["findings"] if row["check"] == stop_check]
+                        self.assertEqual(1, len(rows), record)
+                        self.assertEqual("FAIL", rows[0]["level"])
+                        if fault == "contract":
+                            self.assertEqual([], record["origins"])
+                finally:
+                    fixture.tearDown()
 
 
 class VmCopiedDeploymentRootContracts(unittest.TestCase):
