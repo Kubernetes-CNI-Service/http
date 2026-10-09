@@ -10,6 +10,7 @@ publishes one run-bound private result for the monitor's UFM-only evidence slot.
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager, ExitStack
 import hashlib
 import json
 import os
@@ -73,6 +74,7 @@ class _ArchiveSourceWitness(NamedTuple):
     parent_identity: tuple[int, int]
     file_identity: tuple[int, int, int, int, int]
     sha256: str
+    ancestor_identity: tuple[tuple[int, int], ...]
 
 
 def _source_archive_witness(path: Path) -> _ArchiveSourceWitness:
@@ -89,15 +91,9 @@ def _source_archive_witness(path: Path) -> _ArchiveSourceWitness:
                 observed.st_mtime_ns, observed.st_ctime_ns)
 
     try:
-        parent_before = path.parent.lstat()
-        if not stat.S_ISDIR(parent_before.st_mode):
-            raise PipelineError("source archive parent is not a real directory")
-        parent_fd = _open_real_dir(path.parent)
-        try:
+        with _hold_real_dir_chain(path.parent) as (parent_fd, verify_parent, ancestors):
             parent_opened = os.fstat(parent_fd)
             parent_identity = (parent_opened.st_dev, parent_opened.st_ino)
-            if parent_identity != (parent_before.st_dev, parent_before.st_ino):
-                raise PipelineError("source archive parent changed before read")
             named_before = os.stat(path.name, dir_fd=parent_fd,
                                    follow_symlinks=False)
             if not stat.S_ISREG(named_before.st_mode) or named_before.st_size <= 0:
@@ -118,14 +114,9 @@ def _source_archive_witness(path: Path) -> _ArchiveSourceWitness:
                     raise PipelineError("source archive changed during read")
             finally:
                 os.close(source_fd)
-            parent_after = path.parent.lstat()
-            if (not stat.S_ISDIR(parent_after.st_mode)
-                    or (parent_after.st_dev, parent_after.st_ino) != parent_identity):
-                raise PipelineError("source archive parent was rebound")
+            verify_parent()
             return _ArchiveSourceWitness(parent_identity, identity(opened),
-                                         digest.hexdigest())
-        finally:
-            os.close(parent_fd)
+                                         digest.hexdigest(), ancestors)
     except OSError as exc:
         raise PipelineError("source archive identity cannot be verified") from exc
 
@@ -169,12 +160,64 @@ def _fsync_directory(path: Path) -> None:
 _DIR_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
 
 
+@contextmanager
+def _hold_real_dir_chain(path: Path):
+    """Hold and recheck every lexical ancestor, without following aliases."""
+    if (not isinstance(path, Path) or not path.is_absolute() or ".." in path.parts
+            or not getattr(os, "O_NOFOLLOW", 0) or not getattr(os, "O_DIRECTORY", 0)):
+        raise PipelineError("directory identity checks are unavailable or path is invalid")
+    descriptors: list[int] = []
+    identities: list[tuple[int, int]] = []
+    names = path.parts[1:]
+    try:
+        descriptors.append(os.open(path.anchor, _DIR_FLAGS))
+        root = os.fstat(descriptors[0])
+        identities.append((root.st_dev, root.st_ino))
+        for name in names:
+            parent_fd = descriptors[-1]
+            named = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            if not stat.S_ISDIR(named.st_mode):
+                raise PipelineError("directory ancestor is not a real directory")
+            descriptor = os.open(name, _DIR_FLAGS, dir_fd=parent_fd)
+            descriptors.append(descriptor)
+            opened = os.fstat(descriptor)
+            if (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino):
+                raise PipelineError("directory ancestor changed before open")
+            identities.append((opened.st_dev, opened.st_ino))
+
+        def verify() -> None:
+            for index, descriptor in enumerate(descriptors):
+                held = os.fstat(descriptor)
+                if (held.st_dev, held.st_ino) != identities[index]:
+                    raise PipelineError("held directory identity changed")
+                if index:
+                    named = os.stat(names[index - 1], dir_fd=descriptors[index - 1],
+                                    follow_symlinks=False)
+                    if (not stat.S_ISDIR(named.st_mode)
+                            or (named.st_dev, named.st_ino) != identities[index]):
+                        raise PipelineError("directory ancestor was rebound")
+
+        verify()
+        yield descriptors[-1], verify, tuple(identities)
+        verify()
+    except OSError as exc:
+        raise PipelineError("directory ancestor identity cannot be verified") from exc
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+
+
 def _open_real_dir(path: Path) -> int:
-    descriptor = os.open(path, _DIR_FLAGS)
-    if not stat.S_ISDIR(os.fstat(descriptor).st_mode):
-        os.close(descriptor)
-        raise PipelineError("UFM output root is not a real directory")
-    return descriptor
+    duplicate = None
+    try:
+        with _hold_real_dir_chain(path) as (descriptor, verify, _identities):
+            duplicate = os.dup(descriptor)
+            verify()
+        return duplicate
+    except BaseException:
+        if duplicate is not None:
+            os.close(duplicate)
+        raise
 
 
 def _open_child_dir(parent_fd: int, name: str) -> int:
@@ -527,12 +570,19 @@ def _run_local_analysis(plan: CollectionPlan, node: str, archive: Path,
     if target.exists() or target.is_symlink():
         raise PipelineError("run-bound result already exists")
 
-    root_fd = _open_real_dir(project_root)
+    root_scope = ExitStack()
     try:
-        stage = Path(tempfile.mkdtemp(prefix=".ufm-handoff-"))
+        root_fd, verify_root, _root_identities = root_scope.enter_context(
+            _hold_real_dir_chain(project_root))
+        # Canonicalize only the newly created, owned private stage (macOS's
+        # tempfile root may itself be a system alias), never caller authority.
+        stage = Path(tempfile.mkdtemp(prefix=".ufm-handoff-")).resolve(strict=True)
     except BaseException:
-        os.close(root_fd)
+        root_scope.close()
         raise
+    def root_still_bound():
+        verify_root()
+        return _same_root_inode(project_root, root_fd)
     cleanup_attempted = False
     try:
         os.chmod(stage, 0o700)
@@ -571,7 +621,7 @@ def _run_local_analysis(plan: CollectionPlan, node: str, archive: Path,
         _fsync_directory(stage)
         run_fd = _prepare_output_parents(root_fd, plan)
         try:
-            if not _same_root_inode(project_root, root_fd):
+            if not root_still_bound():
                 raise PipelineError("project root was rebound during UFM handoff")
             try:
                 os.mkdir(node, 0o700, dir_fd=run_fd)
@@ -584,7 +634,7 @@ def _run_local_analysis(plan: CollectionPlan, node: str, archive: Path,
                 os.fsync(target_fd)
                 final_report = target / report.name
                 final_log = target / log.name
-                if (not _same_root_inode(project_root, root_fd)
+                if (not root_still_bound()
                         or not _result_chain_still_bound(
                             root_fd, plan, node, run_fd, target_fd)):
                     raise PipelineError("UFM result path was rebound before IB provenance")
@@ -620,7 +670,7 @@ def _run_local_analysis(plan: CollectionPlan, node: str, archive: Path,
                         raise PipelineError("published IB analysis provenance differs")
                 except ProvenanceError as exc:
                     raise PipelineError("published IB analysis provenance failed") from exc
-                if (not _same_root_inode(project_root, root_fd)
+                if (not root_still_bound()
                         or not _result_chain_still_bound(
                             root_fd, plan, node, run_fd, target_fd)):
                     raise PipelineError("UFM result path was rebound after IB provenance")
@@ -646,7 +696,7 @@ def _run_local_analysis(plan: CollectionPlan, node: str, archive: Path,
                 os.fsync(target_fd)
                 cleanup_attempted = True
                 shutil.rmtree(stage)
-                if (not _same_root_inode(project_root, root_fd)
+                if (not root_still_bound()
                         or not _result_chain_still_bound(
                             root_fd, plan, node, run_fd, target_fd)):
                     raise PipelineError("UFM result path was rebound before receipt")
@@ -660,7 +710,7 @@ def _run_local_analysis(plan: CollectionPlan, node: str, archive: Path,
                         prepare_panel(dict(receipt))
                     except Exception:
                         raise PipelineError("pre-receipt panel preparation failed") from None
-                if (not _same_root_inode(project_root, root_fd)
+                if (not root_still_bound()
                         or not _result_chain_still_bound(
                             root_fd, plan, node, run_fd, target_fd)):
                     raise PipelineError("UFM result path was rebound during evidence gate")
@@ -700,7 +750,7 @@ def _run_local_analysis(plan: CollectionPlan, node: str, archive: Path,
             if not cleanup_attempted and stage.exists():
                 shutil.rmtree(stage)
         finally:
-            os.close(root_fd)
+            root_scope.close()
 
 
 def _unique_receipt_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -732,8 +782,10 @@ def validated_receipts(project_root: Path, environment: str) -> list[dict[str, s
         return []
     results: list[dict[str, str]] = []
     try:
-        root_fd = _open_real_dir(project_root)
+        root_scope = ExitStack()
         try:
+            root_fd, verify_root, _root_identities = root_scope.enter_context(
+                _hold_real_dir_chain(project_root))
             output_fd = _open_child_dir(root_fd, "99-output-ufm")
             try:
                 runs_fd = _open_child_dir(output_fd, "runs")
@@ -781,6 +833,7 @@ def validated_receipts(project_root: Path, environment: str) -> list[dict[str, s
                                     if _digest_regular_at(node_fd, provenance_name,
                                                           max_bytes=16 * 1024) != provenance_sha:
                                         continue
+                                    verify_root()
                                     if (not _same_root_inode(project_root, root_fd)
                                             or not _result_chain_still_bound(
                                                 root_fd, plan, node, run_fd, node_fd)):
@@ -806,7 +859,7 @@ def validated_receipts(project_root: Path, environment: str) -> list[dict[str, s
             finally:
                 os.close(output_fd)
         finally:
-            os.close(root_fd)
+            root_scope.close()
     except (OSError, ValueError):
         return []
     return results

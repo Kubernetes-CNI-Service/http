@@ -61,6 +61,81 @@ def _write_cvt(path: Path) -> None:
 
 
 class UfmCollectionPipelineWorkflowTests(unittest.TestCase):
+    def test_actual_analysis_refuses_real_output_ancestor_replace_with_original_project_inode(self):
+        plan = COLLECTION.collection_plan('iblinkinfo', RUN_ID)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            vendor = root / 'iblinkinfo.txt'
+            vendor.write_text('Switch: 0x1 MF0;leaf01:MQM9700/U1:\n'
+                ' 10 1[  ] ==( 4X 200 Gbps Active / LinkUp )==> '
+                '20 1[  ] "server01 mlx5_0"\n', encoding='utf-8')
+            ufm = root / 'ufm-private'; ufm.mkdir()
+            archive = COLLECTION.publish_local_archive(plan, vendor, ufm)
+            cvt = root / 'cvt.xlsx'; _write_cvt(cvt)
+            parent = root / 'parent'; project = parent / 'project'
+            project.mkdir(parents=True)
+            original = project.stat().st_ino; reached = []
+            def rebind():
+                moved = root / 'moved-parent'
+                parent.rename(moved); parent.mkdir()
+                (moved / 'project').rename(project)
+                self.assertEqual(original, project.stat().st_ino)
+                reached.append(True)
+            with self.assertRaises(PIPELINE.PipelineError):
+                PIPELINE.run_local_iblinkinfo(plan, 'EXAMPLE-UFM01', archive, cvt, project,
+                                             before_receipt=rebind)
+            self.assertEqual([True], reached)
+            self.assertEqual([], list(project.rglob('receipt.json')))
+            self.assertEqual([], PIPELINE.validated_receipts(project, 'air'))
+            self.assertNotIn(RUN_ID, HTML.render_ufm_evidence_panel(project, 'air'))
+
+    def test_actual_analysis_refuses_source_ancestor_rebind_before_success_receipt(self):
+        plan=COLLECTION.collection_plan('iblinkinfo',RUN_ID)
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory).resolve(); vendor=root/'iblinkinfo.txt'
+            vendor.write_text('Switch: 0x1 MF0;leaf01:MQM9700/U1:\n'
+                ' 10 1[  ] ==( 4X 200 Gbps Active / LinkUp )==> '
+                '20 1[  ] "server01 mlx5_0"\n',encoding='utf-8')
+            parent=root/'source-parent'; ufm=parent/'incoming'; ufm.mkdir(parents=True)
+            archive=COLLECTION.publish_local_archive(plan,vendor,ufm)
+            original=archive.stat().st_ino; original_bytes=archive.read_bytes()
+            cvt=root/'cvt.xlsx'; _write_cvt(cvt)
+            project=root/'project'; project.mkdir(); reached=[]; moved=root/'moved-source'
+            def rebind():
+                parent.rename(moved); parent.symlink_to(moved,target_is_directory=True)
+                self.assertEqual(original,archive.stat().st_ino); reached.append(True)
+            with self.assertRaises(PIPELINE.PipelineError):
+                PIPELINE.run_local_iblinkinfo(plan,'EXAMPLE-UFM01',archive,cvt,project,
+                                             before_receipt=rebind)
+            self.assertEqual([True],reached,'real analysis must reach the last source verification')
+            self.assertEqual(original_bytes,archive.read_bytes())
+            self.assertEqual([],list(project.rglob('receipt.json')))
+            self.assertEqual([],PIPELINE.validated_receipts(project,'air'))
+            self.assertNotIn(RUN_ID,HTML.render_ufm_evidence_panel(project,'air'))
+
+    def test_actual_analysis_refuses_output_ancestor_rebind_before_success_receipt(self):
+        plan=COLLECTION.collection_plan('iblinkinfo',RUN_ID)
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory).resolve(); vendor=root/'iblinkinfo.txt'
+            vendor.write_text('Switch: 0x1 MF0;leaf01:MQM9700/U1:\n'
+                ' 10 1[  ] ==( 4X 200 Gbps Active / LinkUp )==> '
+                '20 1[  ] "server01 mlx5_0"\n',encoding='utf-8')
+            ufm=root/'ufm-private'; ufm.mkdir()
+            archive=COLLECTION.publish_local_archive(plan,vendor,ufm)
+            cvt=root/'cvt.xlsx'; _write_cvt(cvt)
+            parent=root/'parent'; project=parent/'project'; project.mkdir(parents=True)
+            original=project.stat().st_ino; reached=[]; moved=root/'moved-parent'
+            def rebind():
+                parent.rename(moved); parent.symlink_to(moved,target_is_directory=True)
+                self.assertEqual(original,project.stat().st_ino); reached.append(True)
+            with self.assertRaises(PIPELINE.PipelineError):
+                PIPELINE.run_local_iblinkinfo(plan,'EXAMPLE-UFM01',archive,cvt,project,
+                                             before_receipt=rebind)
+            self.assertEqual([True],reached,'real analyzer must reach the publication boundary')
+            self.assertEqual([],list((moved/'project').rglob('receipt.json')))
+            self.assertEqual([],PIPELINE.validated_receipts(project,'air'))
+            self.assertNotIn(RUN_ID,HTML.render_ufm_evidence_panel(project,'air'))
+
     def test_real_analyzer_reader_rejects_node_rebound_after_path_provenance_parse(self):
         plan = COLLECTION.collection_plan("iblinkinfo", RUN_ID)
         with tempfile.TemporaryDirectory() as directory:

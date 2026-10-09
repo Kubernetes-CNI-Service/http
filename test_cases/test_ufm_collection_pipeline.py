@@ -22,6 +22,66 @@ RUN_ID = "20260926-0315-air-0123456789abcdef"
 
 
 class UfmCollectionPipelineTests(unittest.TestCase):
+    def test_archive_witness_rejects_real_ancestor_replace_with_same_leaf_inode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            parent = root / "parent"
+            incoming = parent / "incoming"
+            incoming.mkdir(parents=True)
+            archive = incoming / "owned.tar.gz"
+            archive.write_bytes(b"independent retrieved archive")
+            original = PIPELINE._source_archive_witness(archive)
+            parent.rename(root / "moved")
+            parent.mkdir()
+            (root / "moved" / "incoming").rename(incoming)
+            self.assertEqual(original.parent_identity, (incoming.stat().st_dev, incoming.stat().st_ino))
+            self.assertEqual(original.file_identity[1], archive.stat().st_ino)
+            with self.assertRaises(PIPELINE.PipelineError):
+                PIPELINE._require_source_archive_witness(archive, original)
+
+    def test_archive_witness_refuses_symlink_ancestor_even_when_leaf_inode_matches(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory).resolve(); real=root/'real'; incoming=real/'incoming'
+            incoming.mkdir(parents=True); archive=incoming/'owned.tar.gz'
+            archive.write_bytes(b'independent retrieved archive')
+            witness=PIPELINE._source_archive_witness(archive)
+            alias=root/'alias'; alias.symlink_to(real,target_is_directory=True)
+            self.assertEqual(archive.stat().st_ino,(alias/'incoming'/archive.name).stat().st_ino)
+            with self.assertRaises(PIPELINE.PipelineError):
+                PIPELINE._source_archive_witness(alias/'incoming'/archive.name)
+            PIPELINE._require_source_archive_witness(archive,witness)
+
+    def test_archive_witness_refuses_ancestor_rebind_during_held_file_read(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory).resolve(); parent=root/'parent'; incoming=parent/'incoming'
+            incoming.mkdir(parents=True); archive=incoming/'owned.tar.gz'
+            archive.write_bytes(b'independent retrieved archive')
+            original=archive.stat().st_ino; real_read=os.read; rebound=[]
+            def reading(fd,size):
+                data=real_read(fd,size)
+                if data and os.fstat(fd).st_ino==original and not rebound:
+                    moved=root/'moved'; parent.rename(moved)
+                    parent.symlink_to(moved,target_is_directory=True); rebound.append(True)
+                return data
+            with mock.patch.object(PIPELINE.os,'read',side_effect=reading):
+                with self.assertRaises(PIPELINE.PipelineError):
+                    PIPELINE._source_archive_witness(archive)
+            self.assertEqual([True],rebound)
+            self.assertEqual(original,archive.stat().st_ino)
+
+    def test_output_root_refuses_ancestor_alias_with_same_held_project_inode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory).resolve(); parent=root/'parent'; project=parent/'project'
+            project.mkdir(parents=True); held=PIPELINE._open_real_dir(project)
+            try:
+                self.assertTrue(PIPELINE._same_root_inode(project,held))
+                moved=root/'moved'; parent.rename(moved)
+                parent.symlink_to(moved,target_is_directory=True)
+                self.assertEqual(os.fstat(held).st_ino,project.stat().st_ino)
+                self.assertFalse(PIPELINE._same_root_inode(project,held),
+                                 'same leaf is not authority through a rebound ancestor')
+            finally: os.close(held)
+
     def test_receipt_reader_rejects_node_rebind_after_path_provenance_parse(self):
         plan = PIPELINE.collection_plan("iblinkinfo", RUN_ID)
         with tempfile.TemporaryDirectory() as directory:
@@ -148,7 +208,7 @@ class UfmCollectionPipelineTests(unittest.TestCase):
 
     def test_staged_archive_digest_must_match_independent_source_digest(self):
         with tempfile.TemporaryDirectory() as directory:
-            staged = Path(directory) / "staged.tar.gz"
+            staged = Path(directory).resolve() / "staged.tar.gz"
             staged.write_bytes(b"original source archive bytes")
             expected = hashlib.sha256(b"original source archive bytes").hexdigest()
             self.assertEqual(expected, PIPELINE._require_staged_archive_digest(staged, expected))
