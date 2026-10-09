@@ -97,6 +97,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 
 PREFIX = "[HTTP_ZTP_TASK_RESULT] "
 
@@ -209,11 +210,14 @@ if "--worker-context-fd" in arguments and not force_legacy:
             json.dumps(context, ensure_ascii=False, sort_keys=True,
                        separators=(",", ":")) + "\n"
         ).encode("utf-8")
-    read_fd, write_fd = os.pipe()
-    os.write(write_fd, raw_context)
-    os.close(write_fd)
-    os.dup2(read_fd, descriptor)
-    os.close(read_fd)
+    # Preserve the full original (or deliberately mutated) byte image without
+    # writing into a bounded pipe before the collection reader has started.
+    # The real worker also hands cron an anonymous seekable context FD.
+    with tempfile.TemporaryFile(mode="w+b") as rewritten_context:
+        rewritten_context.write(raw_context)
+        rewritten_context.flush()
+        rewritten_context.seek(0)
+        os.dup2(rewritten_context.fileno(), descriptor)
     pass_fds = (descriptor,)
 else:
     pass_fds = ()
@@ -669,6 +673,92 @@ else:
 
 
 class CollectionCycleHandoffWorkflowTests(unittest.TestCase):
+    def test_boundary_fixture_preserves_large_context_before_starting_reader(self):
+        """Fixture handoff must not fill a pipe before any reader can run."""
+        import shlex
+        raw = canonical_bytes({"literal": "x" * (2 * 1024 * 1024)}) + b"\n"
+        expected = {"bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            area = root / "ethernet/monitor"
+            area.mkdir(parents=True)
+            boundary = root / "boundary.py"
+            boundary.write_text(BOUNDARY_BASH, encoding="utf-8")
+            (root / "fixture-control.json").write_text(
+                '{"mode":"success"}\n', encoding="utf-8")
+            reader = root / "reader.py"
+            reader.write_text(
+                "import hashlib,json,os,sys\n"
+                "fd=int(sys.argv[sys.argv.index('--worker-context-fd')+1])\n"
+                "parts=[]\n"
+                "while True:\n"
+                "    chunk=os.read(fd,65536)\n"
+                "    if not chunk: break\n"
+                "    parts.append(chunk)\n"
+                "raw=b''.join(parts)\n"
+                "print(json.dumps({'bytes':len(raw),'sha256':hashlib.sha256(raw).hexdigest()}))\n",
+                encoding="utf-8")
+            cron = area / "cron.sh"
+            cron.write_text(
+                "#!/bin/bash\nexec " + shlex.quote(sys.executable) + " -B "
+                + shlex.quote(str(reader)) + ' "$@"\n', encoding="utf-8")
+            with tempfile.TemporaryFile(mode="w+b") as context:
+                context.write(raw)
+                context.flush()
+                context.seek(0)
+                process = subprocess.Popen(
+                    [sys.executable, "-B", str(boundary), str(cron),
+                     "--worker-context-fd", str(context.fileno())],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    pass_fds=(context.fileno(),), start_new_session=True,
+                    env={"PATH": "/usr/bin:/bin", "PYTHONDONTWRITEBYTECODE": "1"})
+                try:
+                    stdout, stderr = process.communicate(timeout=5)
+                finally:
+                    if process.poll() is None:
+                        # This is only the session created by this test.
+                        os.killpg(process.pid, signal.SIGKILL)
+                        process.communicate(timeout=5)
+                self.assertEqual(0, process.returncode, stderr)
+                self.assertEqual(expected, json.loads(stdout))
+
+    def test_real_collection_preserves_large_legal_context_and_original_identity(self):
+        """JSON whitespace is legal; the real cron still sees identical fields."""
+        needle = 'original_interruptible = worker["run_interruptible"]'
+        self.assertEqual(1, BOOTSTRAP.count(needle))
+        padding = '''original_json = worker["_canonical_json_line"]
+def large_context_json(value):
+    raw = original_json(value)
+    if isinstance(value, dict) and "target_plan" in value and "artifacts" in value:
+        return raw[:-1] + b" " * (2 * 1024 * 1024) + b"\\n"
+    return raw
+worker["run_collection_slots"].__globals__["_canonical_json_line"] = large_context_json
+'''
+        with tempfile.TemporaryDirectory() as directory, mock.patch(
+                __name__ + ".BOOTSTRAP", BOOTSTRAP.replace(needle, padding + needle)):
+            root = self.make_layout(directory)
+            (root / "ethernet/monitor/eth.csv").write_text(
+                "hostname,type,eth0_ip,eth0_mac\n"
+                "AIR-Leaf01,air,192.0.2.10,02:00:00:00:00:10\n", encoding="utf-8")
+            (root / "ztp/config/isc-dhcp-server/p2p-air.json").write_text(
+                json.dumps({"content": {"nodes": {"AIR-Leaf01": {
+                    "os": "cumulus-vx-5.16.4", "management_interfaces": {
+                        "eth0": {"mac_address": "02:00:00:00:00:10"}}}}}}),
+                encoding="utf-8")
+            (root / "tools/lldp-analyze-tool/99-output-p2p/fixture-lldpq-air.dot").write_text(
+                "digraph air_fixture {}\n", encoding="utf-8")
+            completed, payload, traces = self.run_workflow(root, "air")
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            self.assertIsNotNone(payload, completed.stdout)
+            self.assertTrue(payload["returned"], payload)
+            self.assertIsNotNone(payload["result"]["summary"],
+                                 (payload, completed.stderr))
+            self.assertTrue(payload["result"]["summary"]["qualifying"], payload)
+            self.assertEqual(1, len(traces))
+            self.assertEqual(expected_identity("air"), traces[0]["context"]["identity"])
+            self.assertEqual("ethernet/air", traces[0]["context"]["source_slot"])
+            self.assertEqual("accepted", payload["result"]["outcomes"][0]["outcome"])
+
     def test_fixture_child_python_is_bound_to_current_test_interpreter(self):
         with tempfile.TemporaryDirectory() as directory:
             root = self.make_layout(directory)

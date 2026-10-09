@@ -1064,6 +1064,51 @@ def _hold_original_replay_inputs(store, project, whitelist_path):
         verify()
 
 
+def _require_original_source_projection(source, qualified):
+    """Exact C5 projection only; callers must first replay the real native source.
+
+    Manual C6 preserves all protected source digests, but its W1 decisions and
+    evaluation labels belong only to the selected panel. Never filter or mint
+    a native qualified set here; this comparison grants no receipt or permit.
+    """
+    from monitor.issue_tracker_manifest import _runtime_skip, _RUNTIME_PANELS
+    try:
+        if (type(source) is not dict or type(qualified) is not ProdStageLQualifiedSet
+                or qualified.qualified is not True
+                or qualified.mode != 'prod-runtime-protected-v1'):
+            raise StageLConsumerHold('original native source projection is invalid')
+        skips = [_runtime_skip(item) for item in qualified.whitelist_skips]
+        panel = source.get('selected_panel')
+        if 'selected_panel' in source:
+            if type(panel) is not str or panel not in _RUNTIME_PANELS.values():
+                raise StageLConsumerHold('original manual panel is invalid')
+            skips = [item for item in skips if _RUNTIME_PANELS[item['source']] == panel]
+        expected = {
+            'cycle_ids':list(qualified.cycle_ids),
+            'completion_sha256':list(qualified.completion_sha256),
+            'source_authority_sha256':qualified.source_authority_sha256,
+            'observations_sha256':qualified.observations_sha256,
+            'k_event_sha256':qualified.k_event_sha256,
+            'whitelist_sha256':qualified.whitelist_sha256,
+            'project_key':qualified.project_key, 'scope':qualified.scope,
+            'mode':qualified.mode, 'k':qualified.k,
+            'recorded_at_utc':qualified.recorded_at_utc, 'whitelist_skips':skips,
+        }
+        if 'selected_panel' in source:
+            expected['selected_panel'] = panel
+            expected['panel_evaluation'] = {
+                name: ({'state':'evaluated','whitelist_skips':
+                    'skips-present' if skips else 'no-skips'} if name == panel
+                    else {'state':'not-evaluated-in-this-manifest'})
+                for name in _RUNTIME_PANELS.values()}
+        if type(source.get('k')) is not int or source != expected:
+            raise StageLConsumerHold('native replay differs from original C6 source projection')
+    except (TypeError, KeyError, AttributeError, ValueError) as exc:
+        if isinstance(exc, StageLConsumerHold):
+            raise
+        raise StageLConsumerHold('original source projection is unsafe') from exc
+
+
 def replay_original_receipted_prod_source(
     store, *, http_root, settings, whitelist_snapshot, whitelist_path,
     expected_template_sha256, local_generation_id, writer_token,
@@ -1077,7 +1122,6 @@ def replay_original_receipted_prod_source(
     """
     from monitor import issue_tracker_receipt_snapshot as receipts
     from monitor.issue_tracker_whitelist_workbook import read_whitelist_workbook
-    from monitor.issue_tracker_manifest import _runtime_skip
     from tools.project_contract import collection_cycle_project_key
 
     active = False
@@ -1198,20 +1242,7 @@ def replay_original_receipted_prod_source(
                     input_guard()
                     original_guard()
                     result = qualify_prod_stage_l(OriginalWindow(), **arguments)
-                    for field, expected in (
-                        ('cycle_ids', list(result.cycle_ids)),
-                        ('completion_sha256', list(result.completion_sha256)),
-                        ('source_authority_sha256', result.source_authority_sha256),
-                        ('observations_sha256', result.observations_sha256),
-                        ('k_event_sha256', result.k_event_sha256),
-                        ('whitelist_sha256', result.whitelist_sha256),
-                        ('project_key', result.project_key), ('scope', result.scope),
-                        ('mode', result.mode), ('k', result.k),
-                        ('recorded_at_utc', result.recorded_at_utc),
-                        ('whitelist_skips', [_runtime_skip(s) for s in result.whitelist_skips]),
-                    ):
-                        if source[field] != expected:
-                            raise StageLConsumerHold('native replay differs from original C6 source')
+                    _require_original_source_projection(source, result)
                     if (type(result) is not ProdStageLQualifiedSet or result.qualified is not True
                             or result.template_sha256 != template
                             or read_completed_cycle_evidence(store) != cycles

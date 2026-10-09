@@ -254,6 +254,83 @@ class CurrentCycleReceiptSnapshotWorkflowTests(ProdStageLFixture):
                     local_generation_id=original.receipt.generation_id,
                     writer_token=token)
 
+    def test_old_manual_panel_c6_replays_full_native_sources_but_only_its_original_w1_decisions(self):
+        import datetime as dt
+        import time
+        from monitor import issue_tracker_stage_l_consumer as consumer
+        from monitor.issue_tracker_local_workbook_commit import commit_prod_stage_l_workbook, CommittedProdWorkbook
+        from monitor.issue_tracker_publish_runtime import local_publish_interval
+        from monitor.collection_ib_producer import produce_worker_ib_analysis
+        from tools.project_contract import build_collection_cycle_identity
+        from test_cases.test_collection_cycle_persistence import TOKEN_2
+        from test_cases.test_issue_tracker_local_workbook import fake_workbook
+        from monitor.issue_tracker_cycle_source import read_completed_cycle_evidence
+        from monitor.issue_tracker_receipt_snapshot import read_current_cycle_local_receipts
+        reached = []
+
+        def commit_original_and_advance(project, arguments):
+            self.template.write_bytes(fake_workbook(whitelist_rules=('leaf-a',), reserved_switch_rows=4))
+            self.snapshot = read_whitelist_workbook(self.template)
+            arguments = {**arguments, 'whitelist_snapshot':self.snapshot}
+            qualified = consumer.qualify_prod_stage_l(self.store, **arguments)
+            self.assertEqual({'switch','eth_cabling'}, {s.source for s in qualified.whitelist_skips})
+            metadata = {'project_id':str(project),'schema_version':1,
+                'producer_version':'req7-test-producer','template_contract_version':'v1',
+                'template_sha256':self.snapshot.workbook_sha256}
+            interval, policy = local_publish_interval(project)
+            with tracker_writer(project, self.publication) as token:
+                original = commit_prod_stage_l_workbook(token, qualified, self.store,
+                    template_path=self.template, metadata=metadata,
+                    expected_template_sha256=self.snapshot.workbook_sha256,
+                    selected_panel='Switch Status',
+                    manual_admission=(policy,interval,'fixture-boot',time.monotonic_ns()), **arguments)
+            self.assertIsInstance(original, CommittedProdWorkbook)
+            with tracker_writer(project, self.publication) as token:
+                current = read_current_cycle_local_receipts(token, self.store,
+                    expected_template_sha256=self.snapshot.workbook_sha256,
+                    settings=current_k(token), whitelist_sha256=self.snapshot.whitelist.sha256,
+                    qualified_source=qualified)
+                self.assertEqual(1, current.published)
+                self.assertEqual((original.receipt.generation_id,), current.generation_ids)
+            manifest_path = project/'.tracker/generations'/original.receipt.generation_id/'MANIFEST'
+            manifest_raw = manifest_path.read_bytes()
+            source = json.loads(manifest_raw)['qualified_source']
+            self.assertEqual('Switch Status', source['selected_panel'])
+            self.assertEqual(['switch'], [s['source'] for s in source['whitelist_skips']])
+            self.assertEqual({'state':'not-evaluated-in-this-manifest'},
+                             source['panel_evaluation']['Eth Link Validation'])
+            identity = build_collection_cycle_identity(str(project),'prod',2,TOKEN_2)
+            binding = produce_worker_ib_analysis(identity, project_root=project,http_root=self.root,
+                clock=lambda:dt.datetime(2026,9,26,4,31,tzinfo=dt.timezone.utc),
+                runner=lambda _argv:self.fail('transport supplied by owned fixture'))
+            cycle, _ = self._cycle(activity=True,derivation=True,ib_analysis=binding,
+                observed_peer='later-not-original-peer',
+                fabric_templates={'ethernet/prod':'tan-leaf','nvlink/prod':'border-leaf'})
+            self.assertEqual(identity['cycle_id'],cycle['cycle_id'])
+            images = self._tracker_images()
+            with tracker_writer(project,self.publication) as token:
+                before = read_completed_cycle_evidence(self.store)
+                result = consumer.replay_original_receipted_prod_source(
+                    self.store, **self._original_replay_args(token,original))
+                self.assertEqual(tuple(source['cycle_ids']),result.cycle_ids)
+                self.assertEqual(qualified, result, 'native full set, not a manufactured panel qualification')
+                self.assertEqual({'switch','eth_cabling'}, {s.source for s in result.whitelist_skips})
+                self.assertFalse(hasattr(result,'permit'))
+                current = read_current_cycle_local_receipts(token, self.store,
+                    expected_template_sha256=self.snapshot.workbook_sha256,
+                    settings=current_k(token), whitelist_sha256=self.snapshot.whitelist.sha256)
+                self.assertEqual(0, current.published)
+                self.assertEqual((), current.generation_ids)
+                self.assertEqual(before,read_completed_cycle_evidence(self.store))
+            self.assertEqual(images,self._tracker_images())
+            self.assertEqual(manifest_raw,manifest_path.read_bytes())
+            reached.append(True)
+
+        with mock.patch.object(self,'_verify_protected_skip_commit',
+                               side_effect=commit_original_and_advance,create=True):
+            self._exercise_real_protected_three_panel_fixture(skip_history=True)
+        self.assertEqual([True],reached)
+
     def _old_two_cycle_receipt_fixture(self, probe):
         """Native K=2 C5/C6 over cycles 1+2, then protected cycle 3 without C6.
 

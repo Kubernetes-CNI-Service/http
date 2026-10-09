@@ -831,6 +831,12 @@ busy/cooldown/取消和直接 internal-mode 调用不分配 sequence；SIGKILL �
 cycle 始终 nonqualifying；v2 artifact authority 属后续独立 emitter 批次，不能由本组测试伪造。
 真机/AIR/Production 边界登记于 `TC-REAL-COLLECTION-CYCLE-001`。
 
+采集交接 workflow 的私有 bash 夹具用匿名可定位 FD 保留完整 context 字节，再启动真实 cron，
+不在读者启动前同步填充有容量上限的管道。独立 direct 校验 2 MiB 合法 JSON 的完整字节数与
+SHA-256，真实跨脚本案例校验同样大但字段不变的 context 仍保持原 cycle/slot 身份并取得
+qualifying；原 10 秒 slot、30 秒 workflow 和所有篡改拒绝断言保持不变。该夹具缺陷由新案例
+独立复现；不能据此宣称此前小 context 的全量超时已定位，也不能用局部 PASS 代替 full proof。
+
 ```bash
 PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -m unittest discover -s test_cases -t . -p 'test_*.py' -v
 ```
@@ -1472,3 +1478,11 @@ R2 新鲜准入、M=6、FIFO/APPLIED/COMPLETE、默认线上 worker 或 REQ7 整
 专用路径重放，不扩大普通计数合同。完整 worker records 目录还固定原始完整
 stat（含 ctime）；目录换出再换回，即使原 inode、文件及字节全部恢复也 HOLD。
 独立 direct 和实际 native 窗口流程覆盖该恢复式替换；不修改计数、期限或断言。
+
+手动单面板旧 C6 的 native 重放保留完整三面板来源摘要与资格集合；只有原
+MANIFEST 的 W1 决策和评估标签按原选定面板比较，未选面板必须精确为未评估，
+不能伪报无跳过。来源摘要漂移、遗漏、错面板、额外字段、布尔 K 或标签冲突均
+HOLD。独立 direct 覆盖三面板投影和拒绝预期；真实 worker/emitter→手动 Switch
+C6→新周期→原窗口重放验证 full 来源集合不被裁剪、原周期 published=1 而
+新周期 published=0、原件及状态不改写。此比较不创建收据、计数、准入或许可，
+不证明 M=6/真实发送/FIFO/COMPLETE、历史全量失败根因闭合或整个 REQ7 完成。

@@ -59,6 +59,61 @@ class ProdStageLFixture(unittest.TestCase):
 
 
 class ProdStageLConsumerDirectTests(ProdStageLFixture):
+    def test_original_manual_source_projection_preserves_full_digests_and_exact_panel_decisions(self):
+        from copy import deepcopy
+        from monitor import issue_tracker_stage_l_consumer as consumer
+        qualified = consumer.ProdStageLQualifiedSet(
+            b'[]', (), (
+                consumer.StageLQualifiedSkip('switch','leaf-a',
+                    record_id='switch:leaf-a:fan:PSU1/FAN1'),
+                consumer.StageLQualifiedSkip('eth_cabling','leaf-a',
+                    endpoints=('leaf-a','swp1','leaf-z','swp2')),
+            ), ('a'*64,), ('b'*64,), 'c'*64, 'd'*64, 'e'*64,
+            'f'*64, '1'*64, '2'*64, 'prod', 1, '2026-09-26T04:20:00Z')
+        source = {
+            'cycle_ids':['a'*64], 'completion_sha256':['b'*64],
+            'source_authority_sha256':'c'*64, 'observations_sha256':'d'*64,
+            'k_event_sha256':'e'*64, 'whitelist_sha256':'f'*64,
+            'project_key':'2'*64, 'scope':'prod', 'mode':'prod-runtime-protected-v1',
+            'k':1, 'recorded_at_utc':'2026-09-26T04:20:00Z',
+            'whitelist_skips':[{'source':'switch','matched_rule':'leaf-a',
+                'record_id':'switch:leaf-a:fan:PSU1/FAN1'}],
+            'selected_panel':'Switch Status', 'panel_evaluation':{
+                'Switch Status':{'state':'evaluated','whitelist_skips':'skips-present'},
+                'Eth Link Validation':{'state':'not-evaluated-in-this-manifest'},
+                'IB Link Validation':{'state':'not-evaluated-in-this-manifest'}},
+        }
+        validate = getattr(consumer, '_require_original_source_projection', None)
+        self.assertTrue(callable(validate), 'native replay needs exact manual projection validation')
+        self.assertIsNone(validate(source, qualified))
+        self.assertEqual(2, len(qualified.whitelist_skips), 'full native source must not be filtered')
+        eth_source = deepcopy(source)
+        eth_source.update(selected_panel='Eth Link Validation', whitelist_skips=[{
+            'source':'eth_cabling', 'matched_rule':'leaf-a',
+            'endpoints':['leaf-a','swp1','leaf-z','swp2']}], panel_evaluation={
+            'Switch Status':{'state':'not-evaluated-in-this-manifest'},
+            'Eth Link Validation':{'state':'evaluated','whitelist_skips':'skips-present'},
+            'IB Link Validation':{'state':'not-evaluated-in-this-manifest'}})
+        self.assertIsNone(validate(eth_source, qualified))
+        ib_source = deepcopy(source)
+        ib_source.update(selected_panel='IB Link Validation', whitelist_skips=[], panel_evaluation={
+            'Switch Status':{'state':'not-evaluated-in-this-manifest'},
+            'Eth Link Validation':{'state':'not-evaluated-in-this-manifest'},
+            'IB Link Validation':{'state':'evaluated','whitelist_skips':'no-skips'}})
+        self.assertIsNone(validate(ib_source, qualified))
+        bad = []
+        changed = deepcopy(source); changed['whitelist_skips']=[]; bad.append(changed)
+        changed = deepcopy(source); changed['selected_panel']='Foreign'; bad.append(changed)
+        changed = deepcopy(source); del changed['panel_evaluation']; bad.append(changed)
+        changed = deepcopy(source); changed['panel_evaluation']['Eth Link Validation']={'state':'evaluated','whitelist_skips':'no-skips'}; bad.append(changed)
+        changed = deepcopy(source); changed['source_authority_sha256']='0'*64; bad.append(changed)
+        changed = deepcopy(source); changed['extra_field']='invented'; bad.append(changed)
+        changed = deepcopy(source); changed['k']=True; bad.append(changed)
+        changed = deepcopy(source); changed['panel_evaluation']['Switch Status']['whitelist_skips']='no-skips'; bad.append(changed)
+        for index, changed in enumerate(bad):
+            with self.subTest(invalid=index), self.assertRaises(consumer.StageLConsumerHold):
+                validate(changed, qualified)
+
     def test_original_replay_rejects_record_directory_swap_back_even_with_all_original_files_restored(self):
         import shutil
         from monitor import issue_tracker_stage_l_consumer as consumer
