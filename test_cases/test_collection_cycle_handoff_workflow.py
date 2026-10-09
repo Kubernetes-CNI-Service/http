@@ -24,6 +24,7 @@ import tempfile
 import termios
 import time
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -469,6 +470,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import traceback
 
 root = Path(sys.argv[1]).resolve()
 scope = sys.argv[2]
@@ -524,6 +526,28 @@ if mode == "mixed_nonempty":
 (root / "fixture-control.json").write_text(
     json.dumps(control, sort_keys=True), encoding="utf-8",
 )
+if mode == "invalid_nvlink_binding":
+    # An independent malformed input, not a substituted worker decision.
+    del bindings["nvlink/prod"]["evidence"]
+slot_errors = []
+worker_globals = worker["run_collection_slots"].__globals__
+original_slot_wrapper = worker_globals["_collection_slot_wrapper"]
+
+def observed_slot_wrapper(slot, outcome, child, process_result, identity):
+    # Observe the exception while the production catch still owns it.  Never
+    # replace a decision, change a child stream, or turn a rejection into PASS.
+    if outcome == "worker_error":
+        kind, error, stack = sys.exc_info()
+        slot_errors.append({
+            "source_slot": slot,
+            "error_type": kind.__name__ if kind is not None else None,
+            "error": str(error) if error is not None else None,
+            "traceback": "".join(traceback.format_exception(kind, error, stack)),
+            "process_result": dict(process_result),
+        })
+    return original_slot_wrapper(slot, outcome, child, process_result, identity)
+
+worker_globals["_collection_slot_wrapper"] = observed_slot_wrapper
 try:
     if action in ("persisted", "sigkill"):
         coordinator = worker.get("run_collection_cycle_coordinator")
@@ -630,12 +654,14 @@ except Exception as exc:
         "returned": False,
         "error_type": type(exc).__name__,
         "error": str(exc),
+        "observed_slot_errors": slot_errors,
     }, sort_keys=True))
 else:
     print("__WORKFLOW_RESULT__" + json.dumps({
         "returned": True,
         "result": result,
         "persisted": persisted if action in ("persisted", "sigkill") else None,
+        "observed_slot_errors": slot_errors,
     }, ensure_ascii=False, sort_keys=True))
 '''
 
@@ -1120,32 +1146,100 @@ class CollectionCycleHandoffWorkflowTests(unittest.TestCase):
         self.assertIn(TASK_RESULT_PREFIX,
                       by_trace["nvlink/prod"]["observed_child"]["stdout"])
 
+    def test_worker_error_cause_evidence_survives_original_fixture_cleanup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.make_layout(directory)
+            completed, payload, traces = self.run_workflow(
+                root, "prod", "invalid_nvlink_binding", "nvlink/prod"
+            )
+        self.assertFalse(root.exists(), "retain the original private cleanup")
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["returned"], payload)
+        self.assertEqual(
+            ["accepted", "accepted", "worker_error"],
+            [item["outcome"] for item in payload["result"]["outcomes"]],
+            {"payload": payload, "traces": traces},
+        )
+        self.assertIsNone(payload["result"]["summary"])
+        self.assertIn("observed_slot_errors", payload)
+        self.assertEqual(1, len(payload["observed_slot_errors"]))
+        error = payload["observed_slot_errors"][0]
+        self.assertEqual("nvlink/prod", error["source_slot"])
+        self.assertEqual("ValueError", error["error_type"])
+        self.assertEqual("collection slot bindings are invalid", error["error"])
+        self.assertIn("run_collection_slots", error["traceback"])
+        self.assertIn("switch-collection-worker.py", error["traceback"])
+        self.assertEqual({"returncode": 1, "stdout": "", "stderr": ""},
+                         error["process_result"])
+
+    def test_timeout_workflow_failed_neighbor_assertion_keeps_all_slot_evidence(self):
+        # This literal returned payload only tests the assertion's failure
+        # message.  The real worker's rejection is separately exercised above.
+        stdout = TASK_RESULT_PREFIX + "independent-reported-result\n"
+        stderr = "independent-workflow-timeout-stderr\n"
+        timed_stderr = (stderr + "timeout after 10s").encode()
+        payload = {
+            "returned": True,
+            "observed_slot_errors": [{
+                "source_slot": "nvlink/prod", "error_type": "OSError",
+                "error": "independent-neighbor-cause", "traceback": "fixture-stack",
+                "process_result": {"returncode": 86, "stdout": "nv-raw-out",
+                                   "stderr": "nv-raw-err"},
+            }],
+            "result": {"summary": None, "outcomes": [
+                {"source_slot": "ethernet/prod", "outcome": "accepted"},
+                {"source_slot": "infiniband/prod", "outcome": "returncode_conflict",
+                 "evidence": {"returncode": 124,
+                              "stdout": {"sha256": hashlib.sha256(stdout.encode()).hexdigest()},
+                              "stderr": {"sha256": hashlib.sha256(timed_stderr).hexdigest(),
+                                         "size_bytes": len(timed_stderr)}}},
+                {"source_slot": "nvlink/prod", "outcome": "worker_error"},
+            ]},
+        }
+        traces = [{"source_slot": "infiniband/prod",
+                   "observed_child": {"stdout": stdout, "stderr": stderr}},
+                  {"source_slot": "nvlink/prod", "observed_child": {"phase": "full-started"}}]
+        completed = subprocess.CompletedProcess(["independent-fixture"], 0, "", "outer-raw-err")
+        with mock.patch.object(self, "run_workflow", return_value=(completed, payload, traces)), \
+                self.assertRaises(AssertionError) as rejected:
+            self.test_timeout_after_real_child_result_remains_nonqualifying_with_original_stream()
+        message = str(rejected.exception)
+        self.assertIn("'accepted' != 'worker_error'", message)
+        for original in ("worker_error", "nvlink/prod", "infiniband/prod", "ethernet/prod",
+                         "independent-neighbor-cause", "fixture-stack", "nv-raw-out",
+                         "nv-raw-err", "full-started", "outer-raw-err"):
+            with self.subTest(original=original):
+                self.assertIn(original, message)
+
     def test_timeout_after_real_child_result_remains_nonqualifying_with_original_stream(self):
         with tempfile.TemporaryDirectory() as directory:
             root = self.make_layout(directory)
             completed, payload, traces = self.run_workflow(
                 root, "prod", "timeout_after_result", "infiniband/prod"
             )
-        self.assertEqual(0, completed.returncode, completed.stderr)
-        self.assertTrue(payload["returned"], payload)
+        original_evidence = {"payload": payload, "traces": traces,
+                             "stdout": completed.stdout, "stderr": completed.stderr}
+        self.assertEqual(0, completed.returncode, original_evidence)
+        self.assertTrue(payload["returned"], original_evidence)
         by_slot = {item["source_slot"]: item
                    for item in payload["result"]["outcomes"]}
         outcome = by_slot["infiniband/prod"]
-        self.assertEqual("returncode_conflict", outcome["outcome"])
-        self.assertEqual(124, outcome["evidence"]["returncode"])
-        self.assertIsNone(payload["result"]["summary"])
+        self.assertEqual("returncode_conflict", outcome["outcome"], original_evidence)
+        self.assertEqual(124, outcome["evidence"]["returncode"], original_evidence)
+        self.assertIsNone(payload["result"]["summary"], original_evidence)
         by_trace = {item["source_slot"]: item for item in traces}
         child = by_trace["infiniband/prod"]["observed_child"]
-        self.assertIn(TASK_RESULT_PREFIX, child["stdout"])
+        self.assertIn(TASK_RESULT_PREFIX, child["stdout"], original_evidence)
         self.assertEqual(hashlib.sha256(child["stdout"].encode()).hexdigest(),
-                         outcome["evidence"]["stdout"]["sha256"])
-        self.assertIn("independent-workflow-timeout-stderr\n", child["stderr"])
+                         outcome["evidence"]["stdout"]["sha256"], original_evidence)
+        self.assertIn("independent-workflow-timeout-stderr\n", child["stderr"], original_evidence)
         expected_stderr = (child["stderr"] + "timeout after 10s").encode()
         self.assertEqual(hashlib.sha256(expected_stderr).hexdigest(),
-                         outcome["evidence"]["stderr"]["sha256"])
-        self.assertEqual(len(expected_stderr), outcome["evidence"]["stderr"]["size_bytes"])
-        self.assertEqual("accepted", by_slot["ethernet/prod"]["outcome"])
-        self.assertEqual("accepted", by_slot["nvlink/prod"]["outcome"])
+                         outcome["evidence"]["stderr"]["sha256"], original_evidence)
+        self.assertEqual(len(expected_stderr), outcome["evidence"]["stderr"]["size_bytes"],
+                         original_evidence)
+        self.assertEqual("accepted", by_slot["ethernet/prod"]["outcome"], original_evidence)
+        self.assertEqual("accepted", by_slot["nvlink/prod"]["outcome"], original_evidence)
 
     def test_plan_fd_tamper_and_forged_digest_cannot_qualify(self):
         for mode in ("plan_context_tamper", "plan_context_forged_digest"):

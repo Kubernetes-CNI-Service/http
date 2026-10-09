@@ -3461,3 +3461,28 @@ size 27781、SHA256 `7f86a72329dd08ae954c373c68dda126db598a9809c295d9030782c794d
 现场验证按 `REAL_ENVIRONMENT.md` 顶部 owner 确认的风险分级矩阵缩减：合并等价重复
 组合，暂缓本轮高成本物理断电，保留核心 Linux/root/恢复/安全状态与真实设备边界。
 缩减现场计划不缩减本地自动化或 full/check，也不新增任何现场 PASS 或部署授权。
+
+## 2026-10-10 Collector 邻接失败取证，原 full 仍未批准
+
+`b9748504e4ada33d2329ca277aca83f542a258cb`／tree
+`c5892b48611bb00e45d5fc7e3db974788c440898` 的 ordinary full 完整结果为
+5859 tests／7026.572 秒／1 FAIL／skipped5／exit1，源文件冻结一致，ledger 未变。
+原日志 `outputs/test-diagnostics/native-air-2ba0704-formal-full.log`：inode178645664，
+size858850，SHA256 `73605cf6602d0ab8b9ede9af9e1a5fe74a3d62bf6db5acad59db3e0b3b749b7a`，
+物理 END1；中途 stat 资格异常停止了该次读取，写者退出后重新核 held-FD 前后／命名身份及
+旧303748字节前缀 `f90c83463bad78e17e2ee449e2d3c3660c7a9bfc9afc8b11dcfec51fe90be6d0`。
+唯一失败在 timeout workflow 最后一条 NVLink accepted 断言，实际 `worker_error`；
+此前 IB timeout／marker／两流摘要和长度以及 ETH accepted 的原断言都已通过。
+不能将其归因于 IB 的超时注入前置，也不能从丢失的 NVLink 原异常编造确定根因。
+
+测试取证窄修先有独立 RED2 tests／10 FAIL，再有 GREEN3 tests 和完整 direct＋真实
+workflow 模块54 tests／283.280秒／exit0。malformed-binding 只控制真实 catch 的取证
+合同，不冒称它是旧 full 原因；观察装饰器读取当时 `sys.exc_info()`，仍执行原 wrapper，
+不使用全局 tracing、不改变返回、deadline、发现顺序、skip 或生产字段。原断言只加失败
+消息，独立负例继续拒绝。现有 manifest `collection_cycle_handoff` 的真实 worker／cron／
+emitter 和 direct/workflow 映射保留，无新生产脚本或忽略路径。
+
+单次原顺序168用例前缀诊断350.479秒／exit0，ledger 未变；仅说明该次未复现。
+它不是 full proof，不能据此批准新版本或关闭旧失败。完整因果诊断若被另行确认，也须
+与普通批准证明分开：不写批准 ledger、不自动放行。只有已修复原因或可复核的相关运行
+条件变化，才允许正式 full 重跑；所有原失败日志和断言保留。

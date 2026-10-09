@@ -1197,3 +1197,14 @@ dev/ino/mode/uid/gid 和文件 size/mtime/SHA 写入 WAL。冷恢复不能从当
 direct 与真实 LOAD→SETUP 指针发布后强杀→全新 LOAD 负例均保留原/替换文件、WAL、
 receipt、P manifest 和 mixed links，零恢复写、零服务启动。局部回归不等于正式 full/check；
 B 完整归档、实体 latest 全成员资格及 Linux/断电见证继续单独核验。
+
+### Collector 原异常取证（不改变接受合同）
+
+`test_collection_cycle_handoff_workflow` 的私有 bootstrap 在真实 worker 的
+`worker_error` catch 内，只读捕获原异常类型、消息、栈和原 `process_result`；随后仍调用
+原 wrapper，不替换决定或原流。诊断只属于测试，不进入生产包。原 timeout workflow
+保留全部断言及 10 秒 inner／30 秒 outer，失败消息带全部 slot、子进程 phase 和两流，
+不因原 TemporaryDirectory 清理而丢失原因。独立真实 malformed-binding 负例仍要求
+NVLink 拒绝、其余两个真实 collector 接受；独立消息控制仍要求邻接失败触发原断言。
+取证成功、限定前缀通过和局部模块通过均不说明历史 NVLink `worker_error` 根因已修复，
+不构成正式 full/check，也不授权因局部 PASS 盲重跑 full。
