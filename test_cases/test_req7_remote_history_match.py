@@ -465,6 +465,25 @@ class Req7RemoteHistoryNativeWorkflowTests(unittest.TestCase):
         self.assertEqual(setup.meta_plan.body, second[2])
 
 
+class Req7RemoteFixtureIsolationTests(unittest.TestCase):
+    def test_native_fixture_rebinds_current_registries_before_owner_issuance(self):
+        load_owner(); load_global()
+        old_enrollment = load_enrollment(); old_history = load_before()
+        current_owner = load_owner(); current_global = load_global()
+        self.assertIsNot(old_enrollment.ownership, current_owner)
+        self.assertIsNot(old_history.ownership, current_owner)
+        case = Req7OwnedHistoryMatchWorkflowTests()
+        try:
+            case.setUp()
+            import monitor
+            for name in ('issue_tracker_enrollment_journal', 'issue_tracker_history_preread_journal'):
+                with self.subTest(dependency=name):
+                    self.assertIs(getattr(monitor, name).ownership, current_owner)
+            self.assertIs(monitor.issue_tracker_history_preread_journal.global_journal, current_global)
+        finally:
+            case.doCleanups()
+
+
 class Req7OwnedHistoryMatchWorkflowTests(unittest.TestCase):
     @contextmanager
     def _default_recovery_store(self, project):
@@ -614,7 +633,13 @@ print('context-revoked')
 
     # Reuse owned native fixtures, not inherited test methods/discovery.
     from test_cases.test_req7_history_read_launcher import Req7HistoryReadLauncherWorkflowTests as _Fixture
-    setUp = _Fixture.setUp; certificates = _Fixture.certificates; server = _Fixture.server
+    certificates = _Fixture.certificates; server = _Fixture.server
+    def setUp(self):
+        self._Fixture.setUp(self)
+        # Earlier direct suites may reload the canonical owner and journal.
+        # Capture their current registries BEFORE any owner token is issued
+        # and before the remote matcher captures these dependency aliases.
+        load_enrollment(); load_before()
     owners = _Fixture.owners; intercept = _Fixture.intercept; child_fixture = _Fixture.child_fixture
 
     def read_owned(self, stack, writer, owner, binding, token, kind, value, *, raw_body=None, sheet=None, row=None):

@@ -1619,3 +1619,111 @@ C6→新周期→原窗口重放验证 full 来源集合不被裁剪、原周期
 保留 count=1、UNKNOWN 和 consumed CLAIM。已有 UNKNOWN 不得借首次入口
 绕过共享重试节奏；该入口不接收调用者 verifier 或 GO 标志，也不启用默认
 在线 worker，不证明隐藏 PROJECT 库存/G1、FIFO/APPLIED/COMPLETE。
+
+## REQ7 retained-original inventory — bounded main receiving
+
+`issue_tracker_retained_inventory.py` covers every current same-spreadsheet
+legacy namespace entry, holding its original directory/file descriptors, names,
+full stat/ctime and raw bytes before semantic replay and through recovery fsync
+and the consumer. Missing/partial/foreign or unsupported namespaces stay HOLD.
+The fixed legacy namespace represents one unit only. Unknown future or archive
+namespaces are not silently dropped or treated as empty/first use.
+
+The observation contains no send/NEW/APPLIED permit. Original enrollment and
+History initialization markers and raw digest links are checked using the
+already held originals, then actual enrollment nonce/id and History decoder,
+unit/capacity contracts are replayed against the original GLOBAL unit.
+Dispatch HEADER/CLAIM chains must bind that original unit, its actual held
+WIRE/ACTION full identities and original UNKNOWN-intent digests. A consumed
+UNKNOWN is not SENT, completion, FIFO release or retry/send authority.
+Business prefilter also binds the original GLOBAL/header/manifest/raw digests,
+all original operation IDs and both sent/NOOP coverage counts. It replays the
+existing bounded original envelope grammar, not the full cell/source classifier.
+It explicitly does not fabricate a remote identity observation from enrollment
+ids just to satisfy a typed semantic API; full business replay remains required.
+Other retained families are coverage witnesses requiring their specialized
+semantic validators. This is not whole multi-unit/project/C6/APPLIED inventory,
+global high-water/FIFO/G1/default worker closure.
+
+When a retained completion family is present, its file shape alone is not
+accepted: the existing remote-history reader replays the original start,
+header, identity, metadata, headers and History proof against the original
+GLOBAL unit. Enrollment and History originals are mandatory. Coherent foreign
+unit, empty-match, fabricated raw and APPLIED-label images remain intact HOLD.
+This replay is a historical COMPLETE observation only; it does not change the
+original UNKNOWN/count, create APPLIED, release FIFO or authorize a NEW unit.
+The actual owned local TLS completion workflow passes in the main 22-method
+direct/workflow module after the fixture rebinds enrollment and preread aliases
+before issuing owner tokens. Its first ERROR and bounded registry diagnosis are
+retained: enrollment's old owner registry rejected a newer issued token. The
+same assertions then pass; no permission or implementation validation is
+relaxed. This is not full proof or real Cloud/device acceptance.
+
+The completion-start cleanup also has an independent actual-FD RED: after a
+consumer closes the original reader FD and assigns its number to another
+dev/inode, the old unconditional finally-close destroyed that consumer FD.
+Cleanup now closes only the original dev/inode, including an original whose
+bytes or ctime changed. The two leaf tests retain the original HOLD and verify
+both foreign-FD survival and changed-original closure. They use actual shared
+owner/GLOBAL/start-reader scripts and native files, not sockets or a full
+completion proof. They do not prove same-inode open-description identity,
+portable FD ownership beyond this contract or global settlement. The original
+independently failed H witness passes against the integrated main guards in its
+own bounded native-file run; its initial ERROR remains retained. This closes
+that local cleanup defect, not whole H inventory/oracle or full acceptance.
+
+The original GLOBAL reader had the same unconditional-cleanup defect for both
+its WIRE FD and journal directory FD. Independent native-file tests reproduced
+two rejection-survival FAILs (one method with two subtests), while the changed
+original byte test still required the owned FD to close. Candidate cleanup now
+captures the original dev/inode immediately after acquisition and closes only
+that object. Both methods pass with the same assertions; files/count/UNKNOWN
+and original validation remain unchanged. The first setup-error log is retained
+separately: owner-only synthetic metadata was insufficient for the local
+directory validator, so the existing synthetic-root fixture is required. No
+root access or same-inode open-description guarantee is implied. The exact main
+22-method direct/workflow module passes; runner-related/full and onsite evidence
+remain required, and no approval hash is manually changed.
+
+Independent missing-API RED and four real corrupted-original REDs are retained.
+A diagnostic negative-test harness initially raised its own AssertionError
+inside a fail-closed context; that false-positive run is not rejection evidence.
+The negative body was corrected without changing any expected HOLD, followed by
+four actual rejection FAILs and implementation repair. Later independent REDs
+cover coherent foreign unit/nonce links, recycled file/directory FD numbers and
+four coherent foreign dispatch images. All old logs remain. Cleanup closes only
+an FD still naming the owned dev/inode, never a recycled number naming a foreign
+object; it does not claim portable same-inode open-file-description identity.
+Five coherent foreign business-preimage/coverage REDs are retained too; no such
+prefilter PASS is full business semantic, source, admission or APPLIED proof.
+
+The first dispatch fixture run produced five setup ERRORs because the old
+global root-redirection fixture also redirected local project ancestor opens.
+Using the existing owner-module-only scoped fixture keeps real local OS paths
+and identities intact, without changing assertions. The resulting four actual
+rejection FAILs are the dispatch RED; the setup-error log is not production RED.
+
+The manifest adds one script, one direct rule and one true multi-script workflow,
+retaining all existing mappings and suites. Tests were installed first on main:
+the independently bound initial RED retained two GLOBAL FD subtest failures,
+one completion-reader FD failure and the absent inventory API failure. Reviewed
+production and semantic manifest additions followed. Main direct/workflow PASS
+does not replace runner-related approval or frozen full/check under the existing
+failure and narrow validation-only rules. The partial diagnostic candidate was
+not a standalone production/full-proof tree.
+`TC-REAL-REQ7-RETAINED-INVENTORY-001` is NOT RUN; no onsite risk waiver is implied.
+
+The original upstream sequence (GLOBAL, remote History, retained inventory)
+initially ended with 11 ERROR entries in 196 methods. Bounded replay of the
+actual GLOBAL prefix and first failing owned remote workflow established the
+fixture cause: enrollment/preread retained an obsolete owner module registry,
+so the current issued owner token failed before the production flow began.
+An independent direct regression failed first (three registry assertions),
+then the owned fixture was changed to capture the current enrollment/preread
+registries before issuing any token. Production owner checks, all old behavior
+assertions and time budgets are unchanged. The same original three-module
+sequence, including the new regression, ends with 197 PASS in 471.715 seconds,
+exit 0, on HEAD 7335587 plus the exact reviewed receiving diff. Its complete
+append-only log preserves the old prefix and physical BEGIN/END identities.
+The failed 196-method log and both bounded RED logs remain diagnostic evidence;
+neither this local sequence nor single-case PASS is a current full proof.

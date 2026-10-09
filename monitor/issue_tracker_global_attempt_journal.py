@@ -451,7 +451,7 @@ def _hold_original_global_unit(token, binding):
     current qualification, APPLIED, FIFO, quota or a send capability. Absent or
     partial evidence is HOLD, never an empty inventory or a first-use permit.
     """
-    folder = None; held = []; failed = False
+    folder = None; folder_object = None; held = []; owned_objects = {}; failed = False
     try:
         owner = ownership._validated_owner(token, binding)
         parent = owner.directories[-1][0]
@@ -459,6 +459,7 @@ def _hold_original_global_unit(token, binding):
         started = owner.lock_name[:-5] + '.journal-started'
         parent_identity = journal._identity(os.fstat(parent))
         folder = local._directory(parent, name)
+        opened = os.fstat(folder); folder_object = (opened.st_dev, opened.st_ino)
         journal._named(parent, name, folder, directory=True)
         folder_identity = journal._identity(os.fstat(folder))
         names = frozenset(os.listdir(folder)); count = len(names) - 4
@@ -472,6 +473,7 @@ def _hold_original_global_unit(token, binding):
                   for entry in sorted(names))):
             fd = os.open(entry, local._flags(), dir_fd=directory)
             held.append((directory, entry, fd, None, None))
+            opened = os.fstat(fd); owned_objects[fd] = (opened.st_dev, opened.st_ino)
             info = local._check(fd, directory=False)
             journal._named(directory, entry, fd, directory=False)
             identity = journal._identity(info)
@@ -516,10 +518,20 @@ def _hold_original_global_unit(token, binding):
         failed = True
     finally:
         for _directory, _entry, fd, _identity, _raw in reversed(held):
-            try: os.close(fd)
+            try:
+                current = os.fstat(fd)
+                if (current.st_dev, current.st_ino) == owned_objects.get(fd):
+                    os.close(fd)
+                else:
+                    failed = True
             except OSError: failed = True
         if folder is not None:
-            try: os.close(folder)
+            try:
+                current = os.fstat(folder)
+                if (current.st_dev, current.st_ino) == folder_object:
+                    os.close(folder)
+                else:
+                    failed = True
             except OSError: failed = True
     if failed: raise GlobalAttemptHold()
 

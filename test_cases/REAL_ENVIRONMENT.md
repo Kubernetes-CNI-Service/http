@@ -2373,3 +2373,22 @@ generation/publish 及 UNKNOWN 下改 action/wire 均 HOLD，不计作 COMPLETE 
 - 历史周期原件边界补充：先实际记录首次 UNKNOWN，再产生真实新 collection completion；只回放原 admitted C6/native K 来源，不能重新编译原 WIRE 或生成新 C6。保留正常第二次重试、计数前输入身份丢失、计数后 C6/策略/W1 同字节替换、同步窗口内换回、INTENT/COUNT 中断及冷恢复的安全状态验证；计数后漂移须留下原计数与未配对 INTENT。记录两份原件 inode/stat/字节及物理日志顺序，不把仅本地 fixture 的 SIGKILL/恢复冒充真实断电。此补充没有省略现场场景或接受新剩余风险；现场、Cloud、设备与断电仍 NOT RUN，依本卡精确授权后再执行。
 - 原 worker records 目录换出再换回也须拒绝：完整原 stat/ctime 与 FD 持续核验，不能只凭最终 inode/字节恢复采用中途替换。保留普通 current-cycle 计数拒绝历史单元及 shared retry 正向的独立预期与完整日志。本地自动化不替代现场，未省略原场景或改变授权，状态仍 NOT RUN。
 - 共享原计数至固定发送边界补充：保留正常同字节第二次发送、原收据换出、issued ALL-business/History 过期、COUNT 配对前中断、配对后至 consume/pre-Popen/post-send/退出的原件漂移和冷恢复。记录真实原次数、两把锁、唯一子进程、原 WIRE digest、共享时间锚点及完整日志；拒绝不得回滚计数、UNKNOWN 或配额，不得以刷新读取期限通过。已有本地原生 TLS fixture 不代表 Cloud/设备/真实断电；没有省略原现场场景、接受新风险或扩大授权，现场仍 **NOT RUN / REAL_ENV REQUIRED**。
+
+## TC-REAL-REQ7-RETAINED-INVENTORY-001 — 原始 namespace 覆盖与读取证据持有
+
+- Case ID：`TC-REAL-REQ7-RETAINED-INVENTORY-001`；名称：共享 spreadsheet 的既有单元原始 inventory 读取；类型：transaction / integration / real-environment；对应 C-19；状态：**NOT RUN / REAL_ENV REQUIRED**。
+- 自动化：`test_cases/test_req7_retained_global_inventory.py` 的独立 shape/direct 和真实 enrollment → GLOBAL journal → History workflow。涉及原始 `issue_tracker_retained_inventory.py`、spreadsheet owner、global/attempt journal、local commit、enrollment、History preread 与 remote History match。
+- 适用平台：本地开发 fixture；现场 Linux 管理服务器 / AIR / 容器须另获精确授权。本卡不授权 root、设备、真实 Cloud、SSH、系统 cron、服务切换、发布或未知进程操作。
+- 风险与目标：拒绝遗漏或接管 same-spreadsheet 的未知/partial namespace；在解释和恢复屏障前持有每一原始文件与目录。固定 legacy namespace 目前只有一个单元；观察不证明多单元/project/C6/APPLIED 全集、global max、FIFO 释放、G1 或 NEW/发送权。
+- 前置条件：精确授权的独立现场副本、原始 root 0700 / private regular single-link 0600、共享 owner 锁和完整原始化记录；当前精确 HEAD/tree/dirty、Python/平台/依赖身份、命令与完整日志；清理范围提前限定为该副本和确证自有资源。缺一保持 HOLD。
+- 正常流程：在正常 count 0..6 原始单元中保留所有固定 family，逐项核 namespace、目录与文件 original FD / name / full stat / ctime / SHA；enrollment NONCES 和 History RAW 核原 HEADER/INITIALIZED 摘要，并重放实际 nonce/id、History decode/capacity 与原 GLOBAL 单元绑定。dispatch count 1..6 的 HEADER/CLAIM 链必须绑定实际持有 WIRE/ACTION 身份与原 UNKNOWN-intent；消费不证明 SENT、COMPLETE、FIFO 释放或新请求权限。其他 family 的 witness 不替代其专用语义校验。
+- 关键提交边界与中断：保留 unknown suffix、缺 STARTED、partial family、gap/extra entry、special file、同字节名字替换、原 inode 改写、目录位移；持有、语义解释、各 file/dir/parent fsync 与消费者边界注入代表性中断。失败只 HOLD，原文件和 UNKNOWN/count 原样保留，零新增请求、零许可，不修补、重编译、回退、删除、重置或释放 FIFO。
+- 冷恢复：独立冷进程重开同一原始 namespace，核原 count/WIRE/STARTED 和 enrollment/History 原件；缺失、被替换、失败后未提交状态不得变成 first-use、NEW 或发送证明。真实断电与恢复、设备及线上 worker 仍 NOT RUN，SIGKILL/正常重启/本地模拟不能冒充断电。
+- Business 必要链接：核原 GLOBAL/header/manifest/raw 摘要、全部 operation ID、sent 与 NOOP 覆盖计数和有界原 envelope；自洽 marker 不得绑定 foreign-unit/manifest、遗漏 NOOP 或改变 operation ID。此预滤不替代完整 cell/source 语义，不从 enrollment ids 虚构远端 identity 来取得 typed API 权限，完整 business 验收仍未完成。
+- COMPLETE 原件：存在 completion 时必须保留 enrollment、History 和原 completion-started/header/identity/metadata/headers/History 图像，调用现有原件读者重放固定读几何、nonce、fence 与全部 History 绑定；文件形状、自洽摘要、empty-match 或 APPLIED 标签不能代替语义证明。真实本地 owned TLS 正常流程在主树 22 方法 direct/workflow 模块中通过；保留初始旧 owner 注册表造成的夹具 ERROR 与加载顺序修正证据，不改写 UNKNOWN/count，不证明 APPLIED、FIFO 释放、NEW 或真实 Cloud/设备验收。
+- 证据：精确树、完整执行命令/退出码/物理日志顺序与 END，读取前后 stat/inode/已知旧前缀 SHA256，全原件 before/after 和屏障顺序；确证实际零 mutation/permit、已持有 FD 的清理以及异常后的安全状态。原日志和诊断失败保留。
+- 清理：仅关闭本次仍拥有的 FD 与已授权 fixture；若数字 FD 已被复用并命名其他 dev/inode，保持 HOLD 且不得误关外方 FD；不冒称同 inode 的 open-file-description 身份可移植证明。保留故障原件，不碰真实锁、历史 journal、预留、outbox、count 或未知进程。现场副本移除须独立精确授权，不因自动化 PASS 擅自清理。
+- completion-start 清理回归：原读者无条件 finally-close 的真实 FD 误关已由独立 H 见证和 root 两脚本叶测试复现；主树只关闭原 dev/inode，原字节/ctime 变化仍关闭自有对象，复用到其他对象的 FD 不误关。主树 22 方法模块和 H 原见证对集成后主树的独占 native 重跑通过；初始失败保留，主树关联/full 和现场仍须后续验证，不将局部结果标为现场通过，也不宣称同 inode 的 open-description 身份。
+- GLOBAL 清理回归：实际 GLOBAL 原件作用域中的 WIRE 与 journal-directory 数字 FD 复用均有独立初始 FAIL，修改后两方法 PASS；保留失败原件、原 UNKNOWN/count 与原校验，原 inode 字节变化后仍关闭自有 FD，外来 dev/inode 不误关。合成 root metadata 仅本地测试夹具，不是现场权限证明；主树实际 workflow/full/check 与现场仍 NOT RUN，局部通过不代替验收。
+- 验证范围：本次没有合并、省略或暂缓原现场场景，无新增剩余风险接受确认人。替代证据仅为独立测试与真实本地文件/fsync/多脚本流程；未验证范围为现场 root/Cloud、Linux/容器原件、真实断电、设备和线上完整恢复，均 NOT RUN。原现场授权、研发确认和普通发布门禁保持有效，候选及局部 PASS 不替代当前精确主树 full/check。
+- 原顺序联测夹具修复：GLOBAL → remote History → retained inventory 初次 196 方法产生 11 ERROR；实际原 GLOBAL 前置顺序与首个失败 workflow 有界复现确认 enrollment/preread 持有旧 owner 注册表，当前令牌在生产流程前被拒绝。新增独立注册表预期先 RED，再仅修正 owned fixture 的发行前依赖捕获；原行为断言和预算不变，原顺序含新回归 197 PASS / 471.715 秒 / exit 0。完整初败、诊断、RED/GREEN 和旧前缀身份保留；这是精确 dirty 主树局部证据，不是正式 full、现场通过或新风险豁免。

@@ -682,11 +682,12 @@ def _write_completion_start(parent,name,raw):
 @contextmanager
 def _hold_completion_start(owner_token,binding,unit,*,expected=None,expected_identity=None):
     from monitor import issue_tracker_local_commit as local, issue_tracker_attempt_journal as journal
-    fd=None
+    fd=None; owned_object=None
     try:
         owner,parent,name,_base=global_journal._inputs(owner_token,binding,unit)
         name=name[:-len('.journal')]+'.completion-started'
         fd=os.open(name,local._flags()|os.O_NONBLOCK,dir_fd=parent)
+        opened=os.fstat(fd); owned_object=(opened.st_dev,opened.st_ino)
         info=local._check(fd,directory=False); identity=journal._identity(info)
         if expected_identity is not None and identity!=expected_identity: raise RemoteHistoryHold()
         journal._named(parent,name,fd,directory=False)
@@ -706,7 +707,15 @@ def _hold_completion_start(owner_token,binding,unit,*,expected=None,expected_ide
         yield verify,list(identity)
         verify()
     finally:
-        if fd is not None: os.close(fd)
+        # Full stat/name/raw equality governs proof; cleanup owns the original
+        # object only. Byte/ctime drift does not transfer ownership, but a
+        # recycled integer naming a foreign dev/inode must not be closed.
+        # This does not claim portable same-inode open-description identity.
+        if fd is not None:
+            try: current=os.fstat(fd)
+            except OSError: current=None
+            if current is not None and (current.st_dev,current.st_ino)==owned_object:
+                os.close(fd)
 
 
 def record_owned_completion_evidence(writer_token,owner_token,binding,unit,*,
