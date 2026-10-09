@@ -22,6 +22,91 @@ RUN_ID = "20260926-0315-air-0123456789abcdef"
 
 
 class UfmCollectionPipelineTests(unittest.TestCase):
+    def directory_read_scope(self):
+        scope = getattr(PIPELINE, '_hold_reusable_directory_reads', None)
+        self.assertTrue(callable(scope), 'repeated checks need an actual held-FD scope')
+        return scope()
+
+    def test_repeated_directory_reads_open_each_original_ancestor_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve(); leaf = root / 'a' / 'b'
+            leaf.mkdir(parents=True)
+            real_open = os.open; opened = []
+            def opening(path, flags, *args, **kwargs):
+                descriptor = real_open(path, flags, *args, **kwargs)
+                if flags & os.O_DIRECTORY:
+                    opened.append(descriptor)
+                return descriptor
+            with mock.patch.object(PIPELINE.os, 'open', side_effect=opening):
+                with self.directory_read_scope():
+                    for _ in range(5):
+                        with PIPELINE._hold_real_dir_chain(leaf) as (fd, verify, identities):
+                            self.assertEqual(leaf.stat().st_ino, os.fstat(fd).st_ino)
+                            self.assertEqual(len(leaf.parts), len(identities))
+                            verify()
+                self.assertEqual(len(leaf.parts), len(opened))
+                for descriptor in opened:
+                    with self.assertRaises(OSError): os.fstat(descriptor)
+
+    def test_sibling_directory_reads_share_only_original_ancestors(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve(); first = root / 'a'; second = root / 'b'
+            first.mkdir(); second.mkdir()
+            real_open = os.open; opened = []
+            def opening(path, flags, *args, **kwargs):
+                descriptor = real_open(path, flags, *args, **kwargs)
+                if flags & os.O_DIRECTORY: opened.append(descriptor)
+                return descriptor
+            with mock.patch.object(PIPELINE.os, 'open', side_effect=opening):
+                with self.directory_read_scope():
+                    for leaf in (first, second, first, second):
+                        with PIPELINE._hold_real_dir_chain(leaf) as (fd, verify, _):
+                            self.assertEqual(leaf.stat().st_ino, os.fstat(fd).st_ino); verify()
+                self.assertEqual(len(root.parts) + 2, len(opened))
+
+    def test_reused_directory_scope_rejects_same_leaf_through_replaced_ancestor(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve(); parent = root / 'parent'; leaf = parent / 'leaf'
+            leaf.mkdir(parents=True); original = leaf.stat().st_ino
+            with self.assertRaises(PIPELINE.PipelineError):
+                with self.directory_read_scope():
+                    with PIPELINE._hold_real_dir_chain(leaf): pass
+                    moved = root / 'moved'; parent.rename(moved); parent.mkdir()
+                    (moved / 'leaf').rename(leaf)
+                    self.assertEqual(original, leaf.stat().st_ino)
+                    with PIPELINE._hold_real_dir_chain(leaf): pass
+
+    def test_reused_directory_scope_verifies_original_names_at_scope_exit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve(); leaf = root / 'leaf'; leaf.mkdir()
+            with self.assertRaises(PIPELINE.PipelineError):
+                with self.directory_read_scope():
+                    with PIPELINE._hold_real_dir_chain(leaf): pass
+                    leaf.rename(root / 'moved'); leaf.mkdir()
+
+    def test_reused_directory_scope_does_not_cache_file_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve(); archive = root / 'owned.tar.gz'
+            archive.write_bytes(b'independent original archive')
+            with self.directory_read_scope():
+                witness = PIPELINE._source_archive_witness(archive)
+                old_time = archive.stat().st_mtime_ns
+                archive.write_bytes(b'independent changed archive!')
+                os.utime(archive, ns=(old_time, old_time))
+                with self.assertRaises(PIPELINE.PipelineError):
+                    PIPELINE._require_source_archive_witness(archive, witness)
+
+    def test_reused_directory_scope_is_closed_after_failed_body(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve(); held = []
+            with self.assertRaisesRegex(RuntimeError, 'independent failure'):
+                with self.directory_read_scope():
+                    with PIPELINE._hold_real_dir_chain(root) as (fd, _, _): held.append(fd)
+                    raise RuntimeError('independent failure')
+            with self.assertRaises(OSError): os.fstat(held[0])
+            with self.directory_read_scope():
+                with PIPELINE._hold_real_dir_chain(root) as (fd, verify, _): verify()
+
     def test_archive_witness_rejects_real_ancestor_replace_with_same_leaf_inode(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()

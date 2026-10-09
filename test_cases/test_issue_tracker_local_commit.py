@@ -30,6 +30,61 @@ class LocalCommitTests(unittest.TestCase):
         self.publish.mkdir(mode=0o700)
         create_local_commit_store(self.project, self.publish)
 
+    def test_original_owner_directory_scope_opens_each_ancestor_once(self):
+        from tools import ufm_collection_pipeline as pipeline
+        with writer_owner(self.project, self.publish) as token:
+            owner = local_commit._owner(token)
+            real_open = os.open
+            opened = []
+            def opening(*args, **kwargs):
+                descriptor = real_open(*args, **kwargs)
+                opened.append(descriptor)
+                return descriptor
+            with mock.patch.object(local_commit.os, 'open', side_effect=opening):
+                with pipeline._hold_reusable_directory_reads():
+                    for _ in range(32):
+                        self.assertIs(owner, local_commit._owner(token))
+            self.assertEqual(len(self.project.parts), len(opened),
+                'the original ancestor FDs open once, without caching owner checks')
+
+    def test_original_owner_scope_rejects_same_project_under_rebound_parent(self):
+        from tools import ufm_collection_pipeline as pipeline
+        parent = self.project / 'original-parent'
+        parent.mkdir(mode=0o700)
+        project = parent / 'project'
+        project.mkdir(mode=0o700)
+        publication = project / 'publication'
+        publication.mkdir(mode=0o700)
+        create_local_commit_store(project, publication)
+        reached = []
+        with writer_owner(project, publication) as token:
+            original = project.stat().st_ino
+            with self.assertRaises(pipeline.PipelineError):
+                with pipeline._hold_reusable_directory_reads():
+                    local_commit._owner(token)
+                    moved = self.project / 'moved-parent'
+                    parent.rename(moved)
+                    parent.mkdir(mode=0o700)
+                    (moved / 'project').rename(project)
+                    self.assertEqual(original, project.stat().st_ino)
+                    with self.assertRaises(LocalCommitHold):
+                        local_commit._owner(token)
+                    reached.append(True)
+        self.assertEqual([True], reached)
+
+    def test_original_owner_scope_rechecks_lock_permissions(self):
+        from tools import ufm_collection_pipeline as pipeline
+        lock = self.project / '.tracker' / 'LOCK'
+        with writer_owner(self.project, self.publish) as token:
+            with pipeline._hold_reusable_directory_reads():
+                local_commit._owner(token)
+                lock.chmod(0o666)
+                try:
+                    with self.assertRaises(LocalCommitHold):
+                        local_commit._owner(token)
+                finally:
+                    lock.chmod(0o600)
+
     def test_immutable_record_uses_atomic_no_replace_rename_not_hardlink(self):
         with tempfile.TemporaryDirectory(prefix="tracker-rename-record-") as directory:
             parent = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)

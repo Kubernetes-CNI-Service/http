@@ -38,6 +38,27 @@ def _owned_fixture_children():
 
 
 class LocalCommitWorkflowTests(unittest.TestCase):
+    def test_original_directory_scope_preserves_actual_freeze_commit_and_cold_read(self):
+        from tools import ufm_collection_pipeline as pipeline
+        body, identity = freeze_qualified_manifest(
+            QUALIFIED, metadata=METADATA, expected_template_sha256="b" * 64)
+        expected_workbook = b"independent-held-directory-workbook\n"
+        with tempfile.TemporaryDirectory(prefix="tracker-held-directory-workflow-") as directory:
+            project = Path(directory).resolve(strict=True)
+            publish = project / "publication"
+            publish.mkdir(mode=0o700)
+            create_local_commit_store(project, publish)
+            with writer_owner(project, publish) as token:
+                with pipeline._hold_reusable_directory_reads():
+                    generation = begin_generation(token, body)
+                    record_intent(token, generation, expected_workbook)
+                    receipt = commit(token, generation)
+                    self.assertEqual(identity, receipt.manifest_id)
+                    self.assertEqual(expected_workbook,
+                        (publish / (generation.generation_id + '.bin')).read_bytes())
+            self.assertEqual("RECEIPT-PRESENT-NOT-ELIGIBILITY",
+                inspect_local_generation(project, publish, generation).status)
+
     def test_frozen_qualified_manifest_survives_local_commit_but_is_not_remote_proof(self):
         body, identity = freeze_qualified_manifest(
             QUALIFIED, metadata=METADATA, expected_template_sha256="b" * 64)

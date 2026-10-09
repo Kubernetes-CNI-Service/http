@@ -35,6 +35,25 @@ SCRIPTS = {
 
 
 class Req7TransportManifestCandidateTests(unittest.TestCase):
+    def test_original_retry_workflow_registers_live_owner_direct_and_real_commit_chain(self):
+        manifest = json.loads((ROOT / 'test_cases/script_test_manifest.json').read_text())
+        workflow = next(item for item in manifest['workflows']
+                        if item['id'] == 'req7_shared_retry_original_count_and_protected_c6')
+        self.assertTrue({'monitor/issue_tracker_local_commit.py', 'tools/ufm_collection_pipeline.py'}
+                        <= set(workflow['members']))
+        self.assertTrue({'test_cases.test_issue_tracker_local_commit',
+                         'test_cases.test_issue_tracker_local_commit_workflow'} <= set(workflow['tests']),
+                        'held original ancestor reuse must include actual owner and commit contracts')
+
+    def test_shared_retry_count_to_native_launch_registers_the_fixed_sender_and_supervisor(self):
+        manifest=json.loads((ROOT/'test_cases/script_test_manifest.json').read_text())
+        workflow=next(item for item in manifest['workflows']
+                      if item['id']=='req7_shared_retry_original_count_and_protected_c6')
+        self.assertTrue({'monitor/issue_tracker_mutation_launcher.py',
+                         'monitor/issue_tracker_attempt_supervision.py'} <= set(workflow['members']),
+                        'shared retry must map the actual fixed native launch, not only its count')
+        self.assertIn('test_cases.test_req7_mutation_launcher',workflow['tests'])
+
     def test_continuous_original_count_to_native_launch_registers_the_actual_cross_script_boundary(self):
         manifest = json.loads((ROOT/'test_cases/script_test_manifest.json').read_text())
         workflow = next(item for item in manifest['workflows']
@@ -163,6 +182,17 @@ class Req7TransportManifestCandidateTests(unittest.TestCase):
         self.assertIn('monitor/issue_tracker_online_whitelist_read.py', matching['members'])
         self.assertIn('monitor/issue_tracker_history_preread_journal.py', matching['members'])
         self.assertIn('monitor/issue_tracker_history_read_launcher.py', matching['members'])
+
+    def test_original_retry_workflow_binds_live_directory_and_provenance_readers(self):
+        manifest = json.loads((ROOT / 'test_cases/script_test_manifest.json').read_text())
+        workflow = next(item for item in manifest['workflows']
+                        if item['id'] == 'req7_shared_retry_original_count_and_protected_c6')
+        self.assertTrue({'tools/ufm_collection_pipeline.py', 'ztp/config/ib_topology_provenance.py'}
+                        <= set(workflow['members']))
+        self.assertTrue({'test_cases.test_ufm_collection_pipeline',
+                         'test_cases.test_ufm_collection_pipeline_workflow',
+                         'test_cases.test_req7_ib_provenance',
+                         'test_cases.test_req7_ib_provenance_workflow'} <= set(workflow['tests']))
 
     def test_durable_fixture_package_aliases_track_current_owner_and_journal_modules(self):
         import monitor

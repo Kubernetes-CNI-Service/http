@@ -39,6 +39,43 @@ def unit(**changes):
 
 
 class Req7GlobalAttemptJournalTests(unittest.TestCase):
+    def test_retry_guard_fixture_does_not_capture_mock_workbook_reader_in_cold_receipt_import(self):
+        program = '''import unittest
+from monitor import issue_tracker_local_workbook_commit as workbook
+original = workbook._latest_receipted_prod_xlsx
+from test_cases.test_req7_global_attempt_journal import Req7GlobalAttemptJournalTests
+case = Req7GlobalAttemptJournalTests('test_shared_retry_pins_worker_and_policy_inputs_before_any_facts_or_opportunity')
+result = unittest.TextTestRunner(verbosity=2).run(unittest.TestSuite((case,)))
+if not result.wasSuccessful(): raise AssertionError('the original guard assertion failed')
+from monitor import issue_tracker_receipt_snapshot as receipt
+if receipt._latest_receipted_prod_xlsx is not original:
+    raise AssertionError('guard fixture captured temporary mock as canonical receipt reader')
+'''
+        result = subprocess.run([sys.executable,'-B','-c',program],cwd=ROOT,
+            stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=15)
+        self.assertEqual(0,result.returncode,result.stdout+result.stderr)
+
+    def test_shared_retry_wire_refuses_first_or_exhausted_count_before_source_or_opportunity(self):
+        from monitor import issue_tracker_stage_l_consumer as consumer
+        from monitor import issue_tracker_admission as admission
+        holding = getattr(self.module, '_hold_shared_retry_owned_attempt_wire', None)
+        self.assertTrue(callable(holding), 'shared admitted retry must hold actual originals through fixed launch')
+        for count in (0, 6):
+            with self.subTest(count=count), Req7GlobalAttemptJournalWorkflowTests.counted_wire_owners(self,count=count) as (writer,owner,target):
+                original = {p.name:p.read_bytes() for p in self.store.iterdir()}
+                with mock.patch.object(consumer,'_hold_original_replay_inputs') as sources, \
+                        mock.patch.object(admission,'_hold_shared_retry_opportunity') as opportunity:
+                    with self.assertRaises(self.module.GlobalAttemptHold):
+                        with holding(owner,target,self.value,writer_token=writer,
+                                identity_response=None,history_response=None,business_reads=(),qualified_source=None,
+                                store=None,settings=None,whitelist_snapshot=None,expected_template_sha256='a'*64,
+                                http_root=self.root,whitelist_path=self.root/'not-used',headers_response=None,
+                                whitelist_response=None,metadata_response=None,boot_id='owned-boot',monotonic_ns=1):
+                            self.fail('fresh/exhausted unit yielded a retry wire')
+                    sources.assert_not_called(); opportunity.assert_not_called()
+                self.assertEqual(original,{p.name:p.read_bytes() for p in self.store.iterdir()})
+                self.assertEqual(count,self.module.inspect_global_unit(owner,target,self.value).attempt_count)
+
     def test_continuous_first_count_wire_scope_refuses_a_preexisting_unknown_attempt(self):
         self.assertTrue(hasattr(self.module,'_hold_continuous_owned_attempt_wire'),
             'fresh original C6 scopes must remain held through fixed launch; bare count is not this handoff')
@@ -222,6 +259,10 @@ class Req7GlobalAttemptJournalTests(unittest.TestCase):
         from monitor import issue_tracker_history_preread_journal as continuity
         from monitor import issue_tracker_remote_history_match as gates
         from monitor import issue_tracker_local_workbook_commit as workbooks
+        # The production receipt module captures this canonical function at
+        # import time. Load it before temporarily patching the workbook API;
+        # otherwise a later real workflow retains the fixture's mock forever.
+        from monitor import issue_tracker_receipt_snapshot as receipts
         gate = SimpleNamespace(identity=object())
         with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
             self.module.prepare_global_unit(token, binding(), self.value)
@@ -507,7 +548,7 @@ class Req7GlobalAttemptJournalWorkflowTests(unittest.TestCase):
     setUp = Req7GlobalAttemptJournalTests.setUp
 
     @contextmanager
-    def counted_wire_owners(self):
+    def counted_wire_owners(self,*,count=1):
         from test_cases.test_req7_history_read_launcher import Req7HistoryReadLauncherWorkflowTests as native
         self.root = self.root/'owned-claim-boundary'; self.root.mkdir()
         self.locks = self.root/'var/lib/http-ztp-container/issue-tracker'
@@ -515,7 +556,8 @@ class Req7GlobalAttemptJournalWorkflowTests(unittest.TestCase):
         with ExitStack() as stack:
             _local,_owner,writer,sheet_token,target,_credential,_config = native.owners(self,stack,target_id=TARGET)
             self.module.prepare_global_unit(sheet_token,target,self.value)
-            self.module.record_global_attempt_intent(sheet_token,target,self.value)
+            for _ in range(count):
+                self.module.record_global_attempt_intent(sheet_token,target,self.value)
             yield writer,sheet_token,target
 
     def test_wire_metadata_drift_holds_but_closes_its_original_owned_descriptor(self):

@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import sys
 from contextlib import contextmanager
 from typing import Mapping
 from xml.etree import ElementTree as ET
@@ -41,6 +42,19 @@ def _bound_parent(path: Path):
     directory_flag = getattr(os, "O_DIRECTORY", 0)
     if not nofollow or not directory_flag:
         raise ProvenanceError("IB provenance requires no-follow directory access")
+    # The native original-replay boundary may already hold these ancestors.
+    # Borrow only that actual live module scope, never a caller verifier or a
+    # cached digest. Standalone producers retain the original access contract.
+    pipeline = sys.modules.get('tools.ufm_collection_pipeline')
+    held = getattr(pipeline, '_HELD_DIRECTORY_READS', None)
+    if held is not None and held.get() is not None:
+        try:
+            with pipeline._hold_real_dir_chain(directory) as (parent_fd, verify, _):
+                yield parent_fd
+        except (OSError, ValueError) as exc:
+            if isinstance(exc, ProvenanceError): raise
+            raise ProvenanceError('original source ancestry cannot be verified') from exc
+        return
     try:
         before = directory.lstat()
         if not stat.S_ISDIR(before.st_mode):

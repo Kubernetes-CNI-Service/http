@@ -68,7 +68,9 @@ class IbCvtProvenanceWorkflowTests(unittest.TestCase):
 
     def test_real_converter_and_validator_bind_same_expected_topology(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            # Canonicalize only this fixture-owned macOS temporary root;
+            # producer/source authority paths are never normalized here.
+            root = Path(directory).resolve()
             p2p = root / "p2p.xlsx"
             workbook = xlsxwriter.Workbook(str(p2p))
             sheet = workbook.add_worksheet("CL links")
@@ -109,7 +111,10 @@ class IbCvtProvenanceWorkflowTests(unittest.TestCase):
                 check=False, env=env,
             )
             self.assertEqual(0, validation.returncode, validation.stderr)
-            record = read_report_provenance(report)
+            from tools import ufm_collection_pipeline as pipeline
+            with pipeline._hold_reusable_directory_reads():
+                record = read_report_provenance(report)
+                self.assertEqual(record, read_report_provenance(report))
             self.assertEqual(
                 hashlib.sha256(cvt.read_bytes()).hexdigest(),
                 record["expected_topology_sha256"],
@@ -117,8 +122,9 @@ class IbCvtProvenanceWorkflowTests(unittest.TestCase):
             old_time = cvt.stat().st_mtime_ns
             cvt.write_bytes(cvt.read_bytes() + b"changed")
             os.utime(cvt, ns=(old_time, old_time))
-            with self.assertRaises(ProvenanceError):
-                read_report_provenance(report)
+            with pipeline._hold_reusable_directory_reads():
+                with self.assertRaises(ProvenanceError):
+                    read_report_provenance(report)
             batch = subprocess.run(
                 [sys.executable, "-B", str(ANALYZER), str(root)],
                 cwd=root, text=True, stdout=subprocess.PIPE,

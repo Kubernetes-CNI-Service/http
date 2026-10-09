@@ -59,6 +59,135 @@ class ProdStageLFixture(unittest.TestCase):
 
 
 class ProdStageLConsumerDirectTests(ProdStageLFixture):
+    def test_fresh_switch_leg_reads_each_family_once_without_granting_authority(self):
+        from monitor import issue_tracker_stage_l_consumer as consumer
+        from monitor.issue_tracker_switch_runtime import ProdSwitchKWindow
+        observe = getattr(consumer, '_observe_prod_stage_l_switch_sources', None)
+        self.assertTrue(callable(observe), 'composition needs one fresh Switch-family leg, not a nested standalone inspection')
+        cycles = (mock.Mock(cycle_id='cycle-one', sequence=1),
+                  mock.Mock(cycle_id='cycle-two', sequence=2))
+        windows = tuple(ProdSwitchKWindow(slot, ('cycle-one', 'cycle-two'),
+            ('a'*64, 'b'*64), (), (), ('c'*64, 'd'*64), (),
+            'e'*64, 'f'*64, '0'*64)
+            for slot in ('ethernet/prod', 'nvlink/prod'))
+        args = dict(http_root=self.root, settings=self.settings,
+                    whitelist_snapshot=self.snapshot, whitelist_path=self.template)
+        with mock.patch.object(consumer, 'read_completed_cycle_evidence', return_value=cycles), \
+                mock.patch.object(consumer, 'read_prod_switch_k_window', side_effect=windows) as reads, \
+                mock.patch.object(consumer, '_latest_rows', return_value=((), ())) as rows:
+            result = observe(self.store, **args)
+        self.assertEqual(['ethernet/prod', 'nvlink/prod'],
+                         [call.kwargs['source_slot'] for call in reads.call_args_list])
+        self.assertEqual(2, rows.call_count)
+        self.assertEqual(('cycle-one', 'cycle-two'), result.cycle_ids)
+        self.assertFalse(result.qualified)
+        self.assertEqual('hold', result.state)
+        self.assertEqual((), tuple(self.publication.iterdir()))
+
+    def test_standalone_switch_inspection_still_rejects_changed_fresh_leg(self):
+        from dataclasses import replace
+        from monitor import issue_tracker_stage_l_consumer as consumer
+        observe = getattr(consumer, '_observe_prod_stage_l_switch_sources', None)
+        self.assertTrue(callable(observe), 'the standalone API must compare two independent fresh Switch legs')
+        original = consumer.ProdStageLSourceSnapshot(
+            ('cycle-one',), ('a'*64,), 'b'*64, 'c'*64, 'd'*64, ())
+        args = dict(http_root=self.root, settings=self.settings,
+                    whitelist_snapshot=self.snapshot, whitelist_path=self.template)
+        with mock.patch.object(consumer, '_observe_prod_stage_l_switch_sources',
+                               return_value=original) as reads:
+            self.assertEqual(original, consumer.inspect_prod_stage_l_sources(self.store, **args))
+        self.assertEqual(2, reads.call_count)
+        with mock.patch.object(consumer, '_observe_prod_stage_l_switch_sources',
+                side_effect=(original, replace(original, template_sha256='e'*64))) as changed:
+            with self.assertRaises(consumer.StageLConsumerHold):
+                consumer.inspect_prod_stage_l_sources(self.store, **args)
+        self.assertEqual(2, changed.call_count)
+        self.assertEqual((), tuple(self.publication.iterdir()))
+
+    def test_composed_observes_fresh_bound_legs_before_and_after_eth_without_recursive_rechecks(self):
+        from monitor import issue_tracker_stage_l_consumer as consumer
+        from monitor.issue_tracker_ib_runtime import IbKWindow, IbWhitelistedKWindow
+        from monitor.issue_tracker_switch_runtime import ProdEthActivityKWindow
+        switch = consumer.ProdStageLSourceSnapshot(
+            ('cycle-one', 'cycle-two'), ('a'*64, 'b'*64),
+            'c'*64, 'd'*64, 'e'*64, ())
+        ib = IbWhitelistedKWindow(IbKWindow(
+            'history_sufficient', '', 2, 2, switch.cycle_ids,
+            ('f'*64, '0'*64), '1'*64, (),
+            recorded_at_utc='2026-09-26T04:20:00Z'),
+            switch.template_sha256, switch.whitelist_sha256, (), ())
+        eth = ProdEthActivityKWindow(
+            switch.cycle_ids, switch.completion_sha256, ('2'*64, '3'*64),
+            (), (), switch.k_event_sha256, switch.whitelist_sha256,
+            switch.template_sha256)
+        cycles = (mock.Mock(cycle_id='cycle-one'), mock.Mock(cycle_id='cycle-two'))
+        args = dict(http_root=self.root, settings=self.settings,
+                    whitelist_snapshot=self.snapshot, whitelist_path=self.template)
+        observed_order = []
+        def observe(label, value):
+            def read(*_args, **_kwargs):
+                observed_order.append(label)
+                return value
+            return read
+        # Literal source values are independent of implementation. These seams
+        # isolate observation order only, not protected IB/report acceptance.
+        with mock.patch.object(consumer, 'read_completed_cycle_evidence', return_value=cycles), \
+                mock.patch.object(consumer, '_observe_prod_stage_l_switch_sources', side_effect=observe('switch', switch)) as switches, \
+                mock.patch.object(consumer, 'read_whitelisted_ib_k_window', side_effect=observe('ib', ib)) as ibs, \
+                mock.patch.object(consumer, 'read_prod_eth_activity_k_window', side_effect=observe('eth', eth)) as eths:
+            result = consumer.inspect_prod_stage_l_composed_sources(self.store, **args)
+        self.assertEqual(2, switches.call_count,
+                         'composed start/end each need one independently validated Switch leg')
+        self.assertEqual(2, ibs.call_count,
+                         'IB must be reopened on both sides of the actual ETH observation')
+        self.assertEqual(2, eths.call_count)
+        self.assertEqual(['switch', 'ib', 'eth', 'switch', 'ib', 'eth'], observed_order)
+        self.assertEqual(consumer.ProdStageLBoundSourceSnapshot(switch, ib), result.switch_ib_source)
+        self.assertFalse(result.qualified)
+        self.assertEqual('hold', result.state)
+        self.assertEqual((), tuple(self.publication.iterdir()))
+
+    def test_composed_post_domain_drift_remains_hold_and_standalone_bound_rechecks(self):
+        from dataclasses import replace
+        from monitor import issue_tracker_stage_l_consumer as consumer
+        from monitor.issue_tracker_ib_runtime import IbKWindow, IbWhitelistedKWindow
+        from monitor.issue_tracker_switch_runtime import ProdEthActivityKWindow
+        switch = consumer.ProdStageLSourceSnapshot(
+            ('cycle-one', 'cycle-two'), ('a'*64, 'b'*64),
+            'c'*64, 'd'*64, 'e'*64, ())
+        ib = IbWhitelistedKWindow(IbKWindow(
+            'history_sufficient', '', 2, 2, switch.cycle_ids,
+            ('f'*64, '0'*64), '1'*64, (),
+            recorded_at_utc='2026-09-26T04:20:00Z'),
+            switch.template_sha256, switch.whitelist_sha256, (), ())
+        eth = ProdEthActivityKWindow(switch.cycle_ids, switch.completion_sha256,
+            ('2'*64, '3'*64), (), (), switch.k_event_sha256,
+            switch.whitelist_sha256, switch.template_sha256)
+        cycles = (mock.Mock(cycle_id='cycle-one'), mock.Mock(cycle_id='cycle-two'))
+        args = dict(http_root=self.root, settings=self.settings,
+                    whitelist_snapshot=self.snapshot, whitelist_path=self.template)
+        for domain in ('switch', 'ib', 'eth'):
+            with self.subTest(domain=domain), \
+                    mock.patch.object(consumer, 'read_completed_cycle_evidence', return_value=cycles), \
+                    mock.patch.object(consumer, '_observe_prod_stage_l_switch_sources',
+                        side_effect=[switch, replace(switch, template_sha256='4'*64)]
+                        if domain == 'switch' else None, return_value=switch), \
+                    mock.patch.object(consumer, 'read_whitelisted_ib_k_window',
+                        side_effect=[ib, replace(ib, window=replace(ib.window, report_sha256s=('5'*64, '0'*64)))]
+                        if domain == 'ib' else None, return_value=ib), \
+                    mock.patch.object(consumer, 'read_prod_eth_activity_k_window',
+                        side_effect=[eth, replace(eth, template_sha256='6'*64)]
+                        if domain == 'eth' else None, return_value=eth):
+                with self.assertRaises(consumer.StageLConsumerHold):
+                    consumer.inspect_prod_stage_l_composed_sources(self.store, **args)
+        with mock.patch.object(consumer, '_observe_prod_stage_l_switch_sources', return_value=switch) as switches, \
+                mock.patch.object(consumer, 'read_whitelisted_ib_k_window', return_value=ib) as ibs:
+            result = consumer.inspect_prod_stage_l_bound_sources(self.store, **args)
+        self.assertEqual(2, switches.call_count, 'standalone bound API retains its own start/end checks')
+        self.assertEqual(2, ibs.call_count)
+        self.assertFalse(result.qualified)
+        self.assertEqual((), tuple(self.publication.iterdir()))
+
     def test_observed_projection_is_literal_hold_only_and_preserves_switch_rechecks(self):
         from dataclasses import replace
         from monitor import issue_tracker_stage_l_consumer as consumer

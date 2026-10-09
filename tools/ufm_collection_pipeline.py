@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager, ExitStack
+from contextvars import ContextVar
 import hashlib
 import json
 import os
@@ -158,6 +159,93 @@ def _fsync_directory(path: Path) -> None:
 
 
 _DIR_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+_HELD_DIRECTORY_READS = ContextVar('ufm_original_directory_reads', default=None)
+
+
+class _OriginalDirectoryReads:
+    """Bounded live directory FDs only, never cached bytes or qualification."""
+    def __init__(self):
+        self.entries = {}
+        self.chains = {}
+        self.closed = False
+
+    @staticmethod
+    def verify_entry(entry):
+        descriptor, original, parent_fd, name = entry
+        held = os.fstat(descriptor)
+        named = (os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+                 if parent_fd is not None else os.stat(name, follow_symlinks=False))
+        for current in (held, named):
+            if (not stat.S_ISDIR(current.st_mode)
+                    or (current.st_dev, current.st_ino) != original):
+                raise PipelineError('original directory name was rebound')
+
+    def chain(self, path):
+        if self.closed:
+            raise PipelineError('original directory scope is closed')
+        if path in self.chains:
+            result = self.chains[path]
+            result[1]()
+            return result
+        paths = [Path(path.anchor)]
+        for name in path.parts[1:]: paths.append(paths[-1] / name)
+        for index, item in enumerate(paths):
+            parent = paths[index - 1] if index else None
+            if item not in self.entries:
+                if len(self.entries) >= 256:
+                    raise PipelineError('original directory scope exceeds descriptor bound')
+                named = (os.stat(item.name, dir_fd=self.entries[parent][0], follow_symlinks=False)
+                         if parent is not None else os.stat(item, follow_symlinks=False))
+                if not stat.S_ISDIR(named.st_mode):
+                    raise PipelineError('directory ancestor is not a real directory')
+                descriptor = (os.open(item.name, _DIR_FLAGS, dir_fd=self.entries[parent][0])
+                              if parent is not None else os.open(item, _DIR_FLAGS))
+                original = (named.st_dev, named.st_ino)
+                self.entries[item] = (descriptor, original,
+                    self.entries[parent][0] if parent is not None else None,
+                    item.name if parent is not None else str(item))
+            self.verify_entry(self.entries[item])
+        # Reuse only the immutable traversal description of still-held FDs.
+        # Each lookup rechecks every actual named and held ancestor; neither
+        # an identity observation nor any file/qualification result is cached.
+        entries = tuple(self.entries[item] for item in paths)
+        def verify():
+            if self.closed: raise PipelineError('original directory scope is closed')
+            for entry in entries: self.verify_entry(entry)
+        result = self.entries[path][0], verify, tuple(entry[1] for entry in entries)
+        self.chains[path] = result
+        return result
+
+    def verify(self):
+        if self.closed: raise PipelineError('original directory scope is closed')
+        for entry in self.entries.values(): self.verify_entry(entry)
+
+    def close(self):
+        self.closed = True
+        for descriptor, _identity, _parent, _name in reversed(tuple(self.entries.values())):
+            os.close(descriptor)
+
+
+@contextmanager
+def _hold_reusable_directory_reads():
+    """Reuse only continuously held original ancestors during read-only replay.
+
+    Every borrowed chain is verified on entry and exit; all original names are
+    checked again before closing this scope. No file bytes, semantic results,
+    permissions to publish, deadlines, or external callbacks are cached.
+    """
+    if _HELD_DIRECTORY_READS.get() is not None:
+        raise PipelineError('nested original directory scopes are not supported')
+    held = _OriginalDirectoryReads()
+    key = _HELD_DIRECTORY_READS.set(held)
+    try:
+        yield
+        held.verify()
+    except OSError as exc:
+        raise PipelineError('original directory scope cannot be verified') from exc
+    finally:
+        _HELD_DIRECTORY_READS.reset(key)
+        held.close()
 
 
 @contextmanager
@@ -166,6 +254,15 @@ def _hold_real_dir_chain(path: Path):
     if (not isinstance(path, Path) or not path.is_absolute() or ".." in path.parts
             or not getattr(os, "O_NOFOLLOW", 0) or not getattr(os, "O_DIRECTORY", 0)):
         raise PipelineError("directory identity checks are unavailable or path is invalid")
+    active = _HELD_DIRECTORY_READS.get()
+    if active is not None:
+        try:
+            descriptor, verify, identities = active.chain(path)
+            yield descriptor, verify, identities
+            verify()
+        except OSError as exc:
+            raise PipelineError('directory ancestor identity cannot be verified') from exc
+        return
     descriptors: list[int] = []
     identities: list[tuple[int, int]] = []
     names = path.parts[1:]

@@ -1395,6 +1395,17 @@ History、W1/template/nonces，只在屏障内增加一个原次数。该接口�
 固定 launcher 整链、G1 隐藏配额、older-cycle R2、FIFO、COMPLETE 未由此闭合。
 真机卡 `TC-REAL-REQ7-SHARED-RETRY-ADMISSION-001` 为 NOT RUN，不是在线 GO。
 
+私有 `_hold_shared_retry_owned_attempt_wire` 现在把实际共享准入与原计数贯穿
+固定 mutation launcher：计数前持有 worker 周期／config／W1／audit／quota 原件；
+原 retry INTENT/COUNT 配对完成后持有其新完整原 namespace，不能把合法新增
+误判为普通只读 admission 漂移，也不能采用替换件。consume、pre-Popen、
+post-send 与退出范围保留实际 issued ALL-business/History 的原 30 秒期限，
+不延长或刷新权限。真实 C5/C6→只读→双 owner→两次同字节 TLS 请求场景，
+原收据同字节换出及读取过期均在第二次 Popen 前拒绝，保留 count=2、UNKNOWN、
+原 WIRE、配额和共享 retry 配对证据；对象不可重复消费。这仍是未安装的必要
+发送边界，不是 default online worker、hidden G1、COMPLETE/FIFO 或整体 REQ7
+闭合，也不将本地 TLS fixture 冒称真机验收或正式 full proof。
+
 `record_original_business_reserved_attempt_intent` 进一步在每次计数前后重开整个
 原始业务 journal（完整家族 manifest、全部发现／占用／精确行，含 NOOP），
 与原 enrollment、History 行预算、metadata 及适用 BOTH Cabling NV 一同核对。
@@ -1473,6 +1484,13 @@ events/outbox/current 的目录／文件 FD，复核完整 stat、身份及字�
 先持有原 FD 再首次读取名字，同字节文件或目录替换也 HOLD。私有只读视图只在
 native 三面板 C5 回放期间有效，返回前撤销，当前
 receipt 计数和共享链始终用完整真实 store，不把旧回执计入最新周期。
+当实际完整 worker 原件 scope 已持有时，这个私有窗口只做一次完整语义解析，
+并逐项对照真实当前链中由原 C6 定位的前缀。native 内部每次查读仍核完整当前
+链的原 FD、名字、stat/ctime、字节、owner 和 gate；不是仅核历史前缀或缓存 IB
+归档／资格结果。原完整 scope 不在时仍逐次原生解析，调用者不能提供视图、
+cutoff 或 verifier；native 调用退出后立即恢复完整当前链，再核 history/recovery。
+独立 workflow 要求每个实际旧 C6 私有窗口恰好一次语义解析，并保留新周期后
+第二次实际原 WIRE 请求、原读取期限以及所有漂移拒绝预期。
 返回仅为 intent，不创建 generation/RECEIPT、不计 retry、不发 mutation，不证明
 R2 新鲜准入、M=6、FIFO/APPLIED/COMPLETE、默认线上 worker 或 REQ7 整体完成。
 
@@ -1483,6 +1501,18 @@ R2 新鲜准入、M=6、FIFO/APPLIED/COMPLETE、默认线上 worker 或 REQ7 整
 必须在 COUNT 前拒绝并保留 UNKNOWN、计数及 orphan，不回滚或回填。
 历史 native 回放的完整输入／K 校验保留在同步回放的前后边界，内部每次 record
 访问仍核 ACTIVE owner、实际 collection gate 和原窗口边界。原件 FD 始终持有，
+ACTIVE owner 的项目祖先只在实际活跃原目录 scope 内借用持续持有的 FD，
+每次仍重核原祖先名字／身份、项目、publication、私有 tracker root 和 LOCK
+的权限与身份；借用 FD 独立关闭。不得缓存 owner 校验结果，也不放宽读取期限。
+独立 direct 覆盖重复访问、原父目录替换后保留同项目 inode 仍拒绝，以及 LOCK
+权限变更仍拒绝；真实 freeze→INTENT→commit→冷读取覆盖原发布字节与非 GO 状态。
+三域组成检查在 ETH 观察前后各重新读取一个真实 Switch/IB 分支，不再在每个
+分支内部递归执行另一套完整的双分支检查；独立 Switch/IB 检查入口仍重新读取
+两次。每个分支均重新验证原 worker、IB 报告、K/W1、owner 与 gate，资格判断
+仍保留完整开始／最终三域复核，不缓存来源或资格结果。独立 direct 固定实际
+观察顺序与各域漂移 HOLD；真实受保护 IB＋worker/emitter 三域 workflow 验证
+前后读取及 ETH 首次读取后 W1 变动拒绝。局部通过不替代原 native 重试、全量或
+REQ7 整体验收，原读取期限不变。
 同字节替换或换回由原 stat/ctime 校验拒绝；不放宽实际签发读取的原 30 秒期限。
 独立新周期后的原单元重试、计数后同字节 C6 替换、窗口内策略换回测试覆盖这些
 本地边界；仍不代表隐藏 PROJECT G1、真实发送上界、FIFO/COMPLETE、正式 full

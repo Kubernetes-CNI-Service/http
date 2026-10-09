@@ -61,6 +61,33 @@ def _write_cvt(path: Path) -> None:
 
 
 class UfmCollectionPipelineWorkflowTests(unittest.TestCase):
+    def test_real_analysis_receipt_replay_reuses_ancestors_but_not_report_bytes(self):
+        scope = getattr(PIPELINE, '_hold_reusable_directory_reads', None)
+        self.assertTrue(callable(scope), 'receipt replay requires actual held ancestor scope')
+        plan = COLLECTION.collection_plan('iblinkinfo', RUN_ID)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve(); vendor = root / 'iblinkinfo.txt'
+            vendor.write_text('Switch: 0x1 MF0;leaf01:MQM9700/U1:\n'
+                ' 10 1[  ] ==( 4X 200 Gbps Active / LinkUp )==> '
+                '20 1[  ] "server01 mlx5_0"\n', encoding='utf-8')
+            ufm = root / 'ufm-private'; ufm.mkdir()
+            archive = COLLECTION.publish_local_archive(plan, vendor, ufm)
+            cvt = root / 'cvt.xlsx'; _write_cvt(cvt)
+            project = root / 'project'; project.mkdir()
+            final = PIPELINE.run_local_iblinkinfo(plan, 'EXAMPLE-UFM01', archive, cvt, project)
+            report = final / f'iblinkinfo_{RUN_ID}-topology-validation.xlsx'
+            original_inode = report.stat().st_ino; original_time = report.stat().st_mtime_ns
+            with scope():
+                for _ in range(3):
+                    observed = PIPELINE.validated_receipts(project, 'air')
+                    self.assertEqual(1, len(observed))
+                    self.assertEqual(RUN_ID, observed[0]['run_id'])
+                with report.open('ab') as stream: stream.write(b'independent changed report')
+                os.utime(report, ns=(original_time, original_time))
+                self.assertEqual(original_inode, report.stat().st_ino)
+                self.assertEqual([], PIPELINE.validated_receipts(project, 'air'))
+            self.assertNotIn(RUN_ID, HTML.render_ufm_evidence_panel(project, 'air'))
+
     def test_actual_analysis_refuses_real_output_ancestor_replace_with_original_project_inode(self):
         plan = COLLECTION.collection_plan('iblinkinfo', RUN_ID)
         with tempfile.TemporaryDirectory() as directory:

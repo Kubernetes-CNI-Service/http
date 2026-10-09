@@ -91,6 +91,23 @@ def _open_absolute_directory(path):
     path = Path(path)
     if not path.is_absolute() or any(part in (".", "..") for part in path.parts):
         raise LocalCommitHold("local path is not canonical absolute")
+    # A native original replay may already hold every lexical ancestor.
+    # Borrow only that actual live scope; its entry/exit still checks original
+    # named/held identities. The caller receives a fresh owned FD and _owner
+    # continues checking project, publication, private root and LOCK on every
+    # call. No owner observation, bytes, permission or qualification is cached.
+    pipeline = sys.modules.get('tools.ufm_collection_pipeline')
+    held = getattr(pipeline, '_HELD_DIRECTORY_READS', None)
+    if held is not None and held.get() is not None:
+        duplicate = None
+        try:
+            with pipeline._hold_real_dir_chain(path) as (descriptor, _verify, _identities):
+                duplicate = os.dup(descriptor)
+            return duplicate
+        except (OSError, ValueError) as exc:
+            if duplicate is not None:
+                os.close(duplicate)
+            raise LocalCommitHold('original local directory identity changed') from exc
     fd = os.open("/", _flags(directory=True))
     try:
         for component in path.parts[1:]:

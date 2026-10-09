@@ -614,6 +614,31 @@ def record_shared_retry_continuous_owned_attempt_intent(
     never rolls back count, deletes an orphan or clears UNKNOWN. Hidden G1,
     fixed launcher/FIFO/COMPLETE still must dominate GO.
     """
+    with _hold_shared_retry_counted_sources(
+        token,binding,unit,writer_token=writer_token,identity_response=identity_response,
+        history_response=history_response,business_reads=business_reads,qualified_source=qualified_source,
+        store=store,settings=settings,whitelist_snapshot=whitelist_snapshot,
+        expected_template_sha256=expected_template_sha256,http_root=http_root,whitelist_path=whitelist_path,
+        headers_response=headers_response,whitelist_response=whitelist_response,metadata_response=metadata_response,
+        boot_id=boot_id,monotonic_ns=monotonic_ns,
+    ) as (result,_verify_sources):
+        return result
+
+
+@contextmanager
+def _hold_shared_retry_counted_sources(
+    token,binding,unit,*,writer_token,identity_response,history_response,business_reads,
+    qualified_source,store,settings,whitelist_snapshot,expected_template_sha256,
+    http_root,whitelist_path,headers_response,whitelist_response,metadata_response,
+    boot_id,monotonic_ns,
+):
+    """Original R2 opportunity/count owners, retained across optional fixed launch.
+
+    The legitimate paired COUNT changes the admission namespace. Pin its new
+    complete original prefix only AFTER the real opportunity closes; all
+    worker/config/W1/audit/quota owners remain held across that transition.
+    This grants neither GO nor completion and never accepts a caller verifier.
+    """
     from monitor.issue_tracker_admission import _hold_shared_retry_opportunity
     from monitor.issue_tracker_history_preread_journal import observe_owned_business_continuity
     from monitor.issue_tracker_remote_history_match import observe_owned_unit_read_gates
@@ -621,6 +646,8 @@ def record_shared_retry_continuous_owned_attempt_intent(
     from monitor.issue_tracker_stage_l_consumer import _hold_original_replay_inputs
     from monitor.issue_tracker_receipt_snapshot import _hold_history_originals
     from monitor.issue_tracker_send_unit import _read_original_generation_identity
+    from monitor.issue_tracker_cycle_source import _hold_completed_cycle_replay
+    from tools.ufm_collection_pipeline import _hold_reusable_directory_reads
     from pathlib import Path
     def facts():
         continuity=observe_owned_business_continuity(writer_token,token,binding,unit,
@@ -641,7 +668,9 @@ def record_shared_retry_continuous_owned_attempt_intent(
         return continuity,gates,originals
     failed=False
     try:
-        with _hold_original_replay_inputs(store,Path(store.project_identity),whitelist_path) as verify_inputs, \
+        with _hold_reusable_directory_reads(), \
+                _hold_original_replay_inputs(store,Path(store.project_identity),whitelist_path) as verify_inputs, \
+                _hold_completed_cycle_replay(store) as verify_cycles, \
                 _hold_receipted_audit_originals(writer_token,token,binding,unit) as verify_audits:
             before=inspect_global_unit(token,binding,unit)
             if not 1<=before.attempt_count<6: raise GlobalAttemptHold()
@@ -655,7 +684,7 @@ def record_shared_retry_continuous_owned_attempt_intent(
                     # Semantic admission replay must not adopt an orphan here.
                     with _hold_history_originals(writer_token) as verify_receipts:
                         def verify_originals():
-                            verify_inputs(); verify_receipts(); verify_audits(); verify_quota()
+                            verify_inputs(); verify_cycles(); verify_receipts(); verify_audits(); verify_quota()
                             if _read_original_generation_identity(original[2][0][0],writer_token) != original[2][0]:
                                 raise GlobalAttemptHold()
                         verify_originals()
@@ -663,12 +692,62 @@ def record_shared_retry_continuous_owned_attempt_intent(
                         # Post-count drift preserves UNKNOWN and an unpaired
                         # opportunity, never repairs or rolls back the counter.
                         verify_originals()
-                if (facts()!=original or result.attempt_count!=before.attempt_count+1
-                        or inspect_global_unit(token,binding,unit)!=result): raise GlobalAttemptHold()
-                verify_inputs()
+                with _hold_history_originals(writer_token) as verify_paired_receipts:
+                    def verify_originals():
+                        verify_inputs(); verify_cycles(); verify_paired_receipts(); verify_audits(); verify_quota()
+                    def verify_sources():
+                        verify_originals()
+                        if (facts()!=original or inspect_global_unit(token,binding,unit)!=result):
+                            raise GlobalAttemptHold()
+                        verify_originals()
+                    if result.attempt_count!=before.attempt_count+1: raise GlobalAttemptHold()
+                    verify_sources()
+                    yield result,verify_sources
+                    verify_originals()
     except Exception: failed=True
     if failed: raise GlobalAttemptHold()
-    return result
+
+
+@contextmanager
+def _hold_shared_retry_owned_attempt_wire(
+    token,binding,unit,*,writer_token,identity_response,history_response,business_reads,
+    qualified_source,store,settings,whitelist_snapshot,expected_template_sha256,
+    http_root,whitelist_path,headers_response,whitelist_response,metadata_response,
+    boot_id,monotonic_ns,
+):
+    """One original admitted identical R2 count through fixed launch, not GO.
+
+    Fresh ALL-business/History/W1 reads and held original C6 sources dominate
+    the shared cadence opportunity and one durable count. They remain current
+    at consume/pre-Popen/post-send/exit; UNKNOWN and every consumed count/claim
+    survive failure. First-count/exhausted units cannot enter this retry lane.
+    """
+    failed=False
+    try:
+        local._owner(writer_token)
+        if not 1<=inspect_global_unit(token,binding,unit).attempt_count<6: raise GlobalAttemptHold()
+        with _hold_shared_retry_counted_sources(
+            token,binding,unit,writer_token=writer_token,identity_response=identity_response,
+            history_response=history_response,business_reads=business_reads,qualified_source=qualified_source,
+            store=store,settings=settings,whitelist_snapshot=whitelist_snapshot,
+            expected_template_sha256=expected_template_sha256,http_root=http_root,whitelist_path=whitelist_path,
+            headers_response=headers_response,whitelist_response=whitelist_response,metadata_response=metadata_response,
+            boot_id=boot_id,monotonic_ns=monotonic_ns,
+        ) as (result,verify_sources):
+            with _hold_counted_original_wire(writer_token,token,binding,unit) as image:
+                if image.attempt_count!=result.attempt_count: raise GlobalAttemptHold()
+                with _WIRE_CLAIM_GUARD:
+                    issued=_LIVE_WIRE_CLAIMS.get(image)
+                    if issued is None: raise GlobalAttemptHold()
+                    verify_wire=issued[-2]
+                    def verify():
+                        verify_wire(); verify_sources(); verify_wire()
+                    _LIVE_WIRE_CLAIMS[image]=issued[:-2]+(verify,issued[-1])
+                verify_wire()
+                yield image
+                verify()
+    except Exception: failed=True
+    if failed: raise GlobalAttemptHold()
 
 
 def record_owned_receipted_attempt_intent(
@@ -728,6 +807,7 @@ def _hold_continuous_owned_attempt_wire(
     from monitor.issue_tracker_history_preread_journal import observe_owned_business_continuity
     from monitor.issue_tracker_remote_history_match import observe_owned_unit_read_gates
     from monitor.issue_tracker_cycle_source import _hold_completed_cycle_replay
+    from tools.ufm_collection_pipeline import _hold_reusable_directory_reads
     failed=False
     try:
         local._owner(writer_token)
@@ -749,7 +829,8 @@ def _hold_continuous_owned_attempt_wire(
                         headers_response=headers_response,whitelist_response=whitelist_response,metadata_response=metadata_response)!=gates):
                 raise GlobalAttemptHold()
             return continuity,gates,originals
-        with _hold_original_replay_inputs(store,Path(store.project_identity),whitelist_path) as verify_inputs, \
+        with _hold_reusable_directory_reads(), \
+                _hold_original_replay_inputs(store,Path(store.project_identity),whitelist_path) as verify_inputs, \
                 _hold_completed_cycle_replay(store) as verify_cycles, \
                 _hold_history_originals(writer_token) as verify_receipts, \
                 _hold_receipted_audit_originals(writer_token,token,binding,unit) as verify_audits:

@@ -390,15 +390,15 @@ def _latest_rows(
     return rows, identities
 
 
-def inspect_prod_stage_l_sources(
+def _observe_prod_stage_l_switch_sources(
     store, *, http_root: Path | str, settings: KChainState,
     whitelist_snapshot: WorkbookWhitelistSnapshot,
     whitelist_path: Path | str, writer_token=None,
 ) -> ProdStageLSourceSnapshot:
-    """Bind two real Switch families to the same completed prod K-window.
+    """Observe one fresh, HOLD-only leg for both real Switch families.
 
-    A complete ETH/NVL source is useful for diagnosing the missing IB role,
-    but never a substitute for that role or for a local issue transaction.
+    The enclosing inspector must reopen this leg after its other domains.
+    No file bytes or caller-supplied freshness witness are reused here.
     """
     try:
         root = Path(http_root).resolve(strict=True)
@@ -434,13 +434,7 @@ def inspect_prod_stage_l_sources(
                      for row in rows)
         if len(set(keys)) != len(keys):
             raise StageLConsumerHold("ETH and NVL Switch source keys collide")
-        again = tuple(read_prod_switch_k_window(
-            store, http_root=root, settings=settings,
-            whitelist_snapshot=whitelist_snapshot,
-            whitelist_path=whitelist_path, source_slot=slot,
-            writer_token=writer_token,
-        ) for slot in ("ethernet/prod", "nvlink/prod"))
-        if again != windows or read_completed_cycle_evidence(store) != cycles:
+        if read_completed_cycle_evidence(store) != cycles:
             raise StageLConsumerHold("prod Stage L source changed during read")
         return ProdStageLSourceSnapshot(
             cycle_ids=eth.cycle_ids,
@@ -457,6 +451,25 @@ def inspect_prod_stage_l_sources(
         if isinstance(exc, StageLConsumerHold):
             raise
         raise StageLConsumerHold("prod Stage L source evidence is unsafe") from exc
+
+
+def inspect_prod_stage_l_sources(
+    store, *, http_root: Path | str, settings: KChainState,
+    whitelist_snapshot: WorkbookWhitelistSnapshot,
+    whitelist_path: Path | str, writer_token=None,
+) -> ProdStageLSourceSnapshot:
+    """Compare two independently reopened Switch-family legs, still HOLD.
+
+    Standalone inspection retains its own start/end boundary. Composition
+    places these same fresh observations around the other real domains.
+    """
+    args = dict(http_root=http_root, settings=settings,
+                whitelist_snapshot=whitelist_snapshot,
+                whitelist_path=whitelist_path, writer_token=writer_token)
+    source = _observe_prod_stage_l_switch_sources(store, **args)
+    if _observe_prod_stage_l_switch_sources(store, **args) != source:
+        raise StageLConsumerHold("prod Stage L source changed during read")
+    return source
 
 
 def validate_prod_stage_l_sources(
@@ -480,19 +493,19 @@ def validate_prod_stage_l_sources(
     return actual
 
 
-def inspect_prod_stage_l_bound_sources(
+def _observe_prod_stage_l_bound_sources(
     store, *, http_root: Path | str, settings: KChainState,
     whitelist_snapshot: WorkbookWhitelistSnapshot,
     whitelist_path: Path | str, writer_token=None,
 ) -> ProdStageLBoundSourceSnapshot:
-    """Read protected IB K source with ETH/NVL Switch K and W1, not ETH Cabling.
+    """One fresh, HOLD-only Switch/IB leg, not a validated composite.
 
-    A patched report reader can exercise composition in tests, but this API
-    cannot promote such a witness or any other source into a qualified set.
+    The enclosing inspector must observe this leg again after its other
+    domains. No file, semantic result or caller witness is reused here.
     """
     try:
         root = Path(http_root).resolve(strict=True)
-        source = inspect_prod_stage_l_sources(
+        source = _observe_prod_stage_l_switch_sources(
             store, http_root=root, settings=settings,
             whitelist_snapshot=whitelist_snapshot, whitelist_path=whitelist_path,
             writer_token=writer_token,
@@ -532,18 +545,31 @@ def inspect_prod_stage_l_bound_sources(
                 or ib.whitelist_sha256 != source.whitelist_sha256
                 or ib.workbook_sha256 != source.template_sha256):
             raise StageLConsumerHold("IB and Switch completed K sources disagree")
-        if (read_ib() != ib
-                or validate_prod_stage_l_sources(
-                    source, store, http_root=root, settings=settings,
-                    whitelist_snapshot=whitelist_snapshot,
-                    whitelist_path=whitelist_path, writer_token=writer_token,
-                ) != source):
-            raise StageLConsumerHold("prod Switch/IB source changed during read")
         return ProdStageLBoundSourceSnapshot(source, ib)
     except (OSError, TypeError, AttributeError, RuntimeError, ValueError) as exc:
         if isinstance(exc, StageLConsumerHold):
             raise
         raise StageLConsumerHold("prod Switch/IB source evidence is unsafe") from exc
+
+
+def inspect_prod_stage_l_bound_sources(
+    store, *, http_root: Path | str, settings: KChainState,
+    whitelist_snapshot: WorkbookWhitelistSnapshot,
+    whitelist_path: Path | str, writer_token=None,
+) -> ProdStageLBoundSourceSnapshot:
+    """Reopen Switch/IB on both sides of a standalone binding inspection.
+
+    Composition instead places these same two fresh legs around ETH; calling
+    this complete two-leg inspector inside each leg recursively duplicates
+    the entire observation without adding a cross-domain boundary.
+    """
+    args = dict(http_root=http_root, settings=settings,
+                whitelist_snapshot=whitelist_snapshot,
+                whitelist_path=whitelist_path, writer_token=writer_token)
+    source = _observe_prod_stage_l_bound_sources(store, **args)
+    if _observe_prod_stage_l_bound_sources(store, **args) != source:
+        raise StageLConsumerHold("prod Switch/IB source changed during read")
+    return source
 
 
 def validate_prod_stage_l_bound_sources(
@@ -579,7 +605,7 @@ def inspect_prod_stage_l_composed_sources(
     try:
         root = Path(http_root).resolve(strict=True)
         cycles = read_completed_cycle_evidence(store)
-        switch_ib = inspect_prod_stage_l_bound_sources(
+        switch_ib = _observe_prod_stage_l_bound_sources(
             store, http_root=root, settings=settings,
             whitelist_snapshot=whitelist_snapshot,
             whitelist_path=whitelist_path, writer_token=writer_token,
@@ -601,7 +627,7 @@ def inspect_prod_stage_l_composed_sources(
                 or switch_ib.ib_source.window.cycle_ids != eth_link.cycle_ids
                 or read_completed_cycle_evidence(store) != cycles):
             raise StageLConsumerHold("three source domains disagree on K/W1")
-        if (inspect_prod_stage_l_bound_sources(
+        if (_observe_prod_stage_l_bound_sources(
                 store, http_root=root, settings=settings,
                 whitelist_snapshot=whitelist_snapshot,
                 whitelist_path=whitelist_path, writer_token=writer_token,
@@ -1265,7 +1291,32 @@ def replay_original_receipted_prod_source(
                 try:
                     input_guard()
                     original_guard()
-                    result = qualify_prod_stage_l(OriginalWindow(), **arguments)
+                    window = OriginalWindow()
+                    from monitor import issue_tracker_cycle_source as cycle_source
+                    held = cycle_source._HELD_CYCLE_REPLAY.get()
+                    window_key = None
+                    try:
+                        if held is not None and held[0] is store:
+                            # The cutoff comes only from the actual admitted C6.
+                            # Reuse only inside this synchronous private native
+                            # walk, backed by the complete current worker scope.
+                            def verify_window():
+                                guard()
+                                held[1]()
+                            verify_window()
+                            original_cycles = cycle_source._read_completed_cycle_evidence(window)
+                            verify_window()
+                            expected_cycles = tuple(c for c in cycles if c.sequence <= cutoff)
+                            if held[2] != cycles or original_cycles != expected_cycles:
+                                raise StageLConsumerHold('private original window differs from held worker chain')
+                            window_key = cycle_source._HELD_CYCLE_REPLAY.set(
+                                (window, verify_window, original_cycles))
+                        result = qualify_prod_stage_l(window, **arguments)
+                    finally:
+                        # Restore the full current chain before history/recovery
+                        # checks. No prefix escapes or survives this native call.
+                        if window_key is not None:
+                            cycle_source._HELD_CYCLE_REPLAY.reset(window_key)
                     _require_original_source_projection(source, result)
                     if (type(result) is not ProdStageLQualifiedSet or result.qualified is not True
                             or result.template_sha256 != template

@@ -282,9 +282,93 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             business_preread_probe=True,original_reserved_probe=True,receipted_intent_probe=True,
             owned_read_gates_probe=True,owned_continuity_probe=True,continuous_launch_probe='normal')
 
+    def test_shared_retry_held_originals_reach_one_identical_native_request(self):
+        from monitor import issue_tracker_global_attempt_journal as journal
+        self.assertTrue(hasattr(journal,'_hold_shared_retry_owned_attempt_wire'))
+        self._exercise_real_protected_three_panel_fixture(skip_history=False,observed_cabling_insert_probe=True,
+            business_preread_probe=True,original_reserved_probe=True,receipted_intent_probe=True,
+            owned_read_gates_probe=True,owned_continuity_probe=True,retry_launch_probe='normal')
+
+    def test_shared_retry_after_new_real_cycle_sends_only_the_original_unknown_wire(self):
+        from monitor import issue_tracker_global_attempt_journal as journal
+        self.assertTrue(hasattr(journal, '_hold_shared_retry_owned_attempt_wire'))
+        self._exercise_real_protected_three_panel_fixture(skip_history=False,observed_cabling_insert_probe=True,
+            business_preread_probe=True,original_reserved_probe=True,receipted_intent_probe=True,
+            owned_read_gates_probe=True,owned_continuity_probe=True,retry_launch_probe='old-cycle')
+
+    def test_old_receipted_private_window_replays_semantics_once_per_actual_qualification(self):
+        from monitor import issue_tracker_cycle_source as source
+        from monitor import issue_tracker_stage_l_consumer as consumer
+        actual_replay = consumer.replay_original_receipted_prod_source
+        actual_read = source._read_completed_cycle_evidence
+        reached = []
+        observed = []
+
+        def replay(*args, **kwargs):
+            windows = {}
+            def read(store):
+                if store is not self.store:
+                    item = windows.setdefault(id(store), [store, 0])
+                    item[1] += 1
+                return actual_read(store)
+            with mock.patch.object(source, '_read_completed_cycle_evidence', side_effect=read):
+                result = actual_replay(*args, **kwargs)
+            observed.append((len(windows), tuple(item[1] for item in windows.values())))
+            reached.append(result)
+            return result
+
+        try:
+            with mock.patch.object(consumer, 'replay_original_receipted_prod_source', side_effect=replay):
+                self._exercise_real_protected_three_panel_fixture(skip_history=False,observed_cabling_insert_probe=True,
+                    business_preread_probe=True,original_reserved_probe=True,receipted_intent_probe=True,
+                    owned_read_gates_probe=True,owned_continuity_probe=True,retry_launch_probe='old-cycle')
+        finally:
+            # Keep the independent assertion outside production's sanitized
+            # HOLD scopes; their exception cleanup must not mask its RED.
+            self.assertTrue(reached, 'the original admitted window must actually be requalified')
+            self.assertEqual([(1, (1,))] * len(observed), observed,
+                             'held original worker bytes need one semantic replay per private window')
+
+    def test_shared_retry_original_receipt_rebind_stops_before_second_native_launch(self):
+        from monitor import issue_tracker_global_attempt_journal as journal
+        self.assertTrue(hasattr(journal,'_hold_shared_retry_owned_attempt_wire'))
+        self._exercise_real_protected_three_panel_fixture(skip_history=False,observed_cabling_insert_probe=True,
+            business_preread_probe=True,original_reserved_probe=True,receipted_intent_probe=True,
+            owned_read_gates_probe=True,owned_continuity_probe=True,retry_launch_probe='receipt-rebind')
+
+    def test_shared_retry_original_read_expiry_stops_before_second_native_launch(self):
+        from monitor import issue_tracker_global_attempt_journal as journal
+        self.assertTrue(hasattr(journal,'_hold_shared_retry_owned_attempt_wire'))
+        self._exercise_real_protected_three_panel_fixture(skip_history=False,observed_cabling_insert_probe=True,
+            business_preread_probe=True,original_reserved_probe=True,receipted_intent_probe=True,
+            owned_read_gates_probe=True,owned_continuity_probe=True,retry_launch_probe='read-expiry')
+
     def test_native_qualification_bounds_recursive_source_replays_without_shortening_final_checks(self):
         self._exercise_real_protected_three_panel_fixture(skip_history=False,
             qualification_replay_probe='bounded')
+
+    def test_real_protected_three_domains_keep_start_end_reads_without_recursive_bound_walks(self):
+        self._exercise_real_protected_three_panel_fixture(skip_history=False,
+            qualification_replay_probe='composed-legs')
+
+    def test_real_composed_switch_families_keep_two_fresh_windows_per_domain_leg(self):
+        from monitor import issue_tracker_stage_l_consumer as consumer
+        self.assertTrue(callable(getattr(consumer, '_observe_prod_stage_l_switch_sources', None)),
+                        'actual composition must retain fresh source families without nested standalone walks')
+        self._exercise_real_protected_three_panel_fixture(skip_history=False,
+            qualification_replay_probe='switch-families')
+
+    def test_real_w1_drift_after_first_eth_observation_is_hold_at_composed_end(self):
+        self._exercise_real_protected_three_panel_fixture(skip_history=False,
+            qualification_replay_probe='composed-w1-drift')
+
+    def test_real_ethernet_archive_drift_after_eth_observation_is_hold(self):
+        self._exercise_real_protected_three_panel_fixture(skip_history=False,
+            qualification_replay_probe='composed-ethernet-archive-drift')
+
+    def test_real_nvlink_archive_drift_after_eth_observation_is_hold(self):
+        self._exercise_real_protected_three_panel_fixture(skip_history=False,
+            qualification_replay_probe='composed-nvlink-archive-drift')
 
     def test_native_qualification_still_rejects_whitelist_drift_at_final_projection_boundary(self):
         self._exercise_real_protected_three_panel_fixture(skip_history=False,
@@ -672,6 +756,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         receipt_admission_rebind_probe=False,quota_namespace_rebind_probe=False,quota_retry_identity_probe=False,
         before_cabling_fixture=None,
         continuous_launch_probe=None,
+        retry_launch_probe=None,
         qualification_replay_probe=None,
         complete_preview_source_race=False,
         complete_preview_cgi=False,
@@ -898,6 +983,89 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                 return
             if qualification_replay_probe is not None:
                 from monitor import issue_tracker_stage_l_consumer as consumer
+                if qualification_replay_probe in (
+                        'composed-ethernet-archive-drift',
+                        'composed-nvlink-archive-drift'):
+                    slot = ('ethernet/prod' if qualification_replay_probe ==
+                            'composed-ethernet-archive-drift' else 'nvlink/prod')
+                    path = artifacts[slot]['info']
+                    original_archive = path.read_bytes()
+                    actual_read = consumer.read_prod_eth_activity_k_window
+                    reached = []
+                    def drift_after_eth(*values, **keywords):
+                        result = actual_read(*values, **keywords)
+                        reached.append(True)
+                        if len(reached) == 1:
+                            path.write_bytes(original_archive + b'changed Switch archive after ETH')
+                        return result
+                    try:
+                        with mock.patch.object(consumer, 'read_prod_eth_activity_k_window',
+                                               side_effect=drift_after_eth):
+                            with self.assertRaises(consumer.StageLConsumerHold):
+                                consumer.inspect_prod_stage_l_composed_sources(self.store, **args)
+                        self.assertEqual([True], reached)
+                        self.assertEqual((), tuple(self.publication.glob('Issue_Tracker*')))
+                    finally:
+                        path.write_bytes(original_archive)
+                    return
+                if qualification_replay_probe == 'switch-families':
+                    actual_observe = consumer._observe_prod_stage_l_switch_sources
+                    actual_window = consumer.read_prod_switch_k_window
+                    legs = []
+                    def observe(*values, **keywords):
+                        with mock.patch.object(consumer, 'read_prod_switch_k_window',
+                                               wraps=actual_window) as windows:
+                            result = actual_observe(*values, **keywords)
+                        legs.append(tuple(call.kwargs['source_slot'] for call in windows.call_args_list))
+                        return result
+                    with mock.patch.object(consumer, '_observe_prod_stage_l_switch_sources', side_effect=observe):
+                        qualified = qualify_prod_stage_l(self.store, **args)
+                    self.assertEqual([('ethernet/prod', 'nvlink/prod')] * 4, legs,
+                                     'each actual composed start/end leg rereads both real Switch families once')
+                    self.assertTrue(qualified.qualified)
+                    self.assertEqual({'Switch Status', 'Eth Link Validation', 'IB Link Validation'},
+                                     {item.panel for item in qualified.candidates})
+                    self.assertEqual(4, len(qualified.candidates))
+                    self.assertEqual((), tuple(self.publication.glob('Issue_Tracker*')))
+                    return
+                if qualification_replay_probe == 'composed-w1-drift':
+                    actual_read = consumer.read_prod_eth_activity_k_window
+                    original_template = self.template.read_bytes()
+                    reached = []
+                    def drift_after_read(*values, **keywords):
+                        result = actual_read(*values, **keywords)
+                        reached.append(True)
+                        if len(reached) == 1:
+                            self.template.write_bytes(b'changed W1 after actual ETH observation')
+                        return result
+                    try:
+                        with mock.patch.object(consumer, 'read_prod_eth_activity_k_window',
+                                               side_effect=drift_after_read):
+                            with self.assertRaises(consumer.StageLConsumerHold):
+                                consumer.inspect_prod_stage_l_composed_sources(self.store, **args)
+                        self.assertEqual([True], reached)
+                        self.assertEqual((), tuple(self.publication.glob('Issue_Tracker*')))
+                    finally:
+                        self.template.write_bytes(original_template)
+                    return
+                if qualification_replay_probe == 'composed-legs':
+                    with mock.patch.object(consumer, 'read_whitelisted_ib_k_window',
+                            wraps=consumer.read_whitelisted_ib_k_window) as ib_reads, \
+                            mock.patch.object(consumer, '_observe_prod_stage_l_switch_sources',
+                            wraps=consumer._observe_prod_stage_l_switch_sources) as switch_reads, \
+                            mock.patch.object(consumer, 'inspect_prod_stage_l_composed_sources',
+                            wraps=consumer.inspect_prod_stage_l_composed_sources) as composed_reads:
+                        qualified = qualify_prod_stage_l(self.store, **args)
+                    self.assertEqual(2, composed_reads.call_count)
+                    self.assertEqual(4, ib_reads.call_count,
+                        'actual IB start/end for both native qualification walks, not nested duplicate legs')
+                    self.assertEqual(4, switch_reads.call_count)
+                    self.assertTrue(qualified.qualified)
+                    self.assertEqual({'Switch Status', 'Eth Link Validation', 'IB Link Validation'},
+                                     {item.panel for item in qualified.candidates})
+                    self.assertEqual(4, len(qualified.candidates))
+                    self.assertEqual((), tuple(self.publication.glob('Issue_Tracker*')))
+                    return
                 if qualification_replay_probe == 'whitelist-drift':
                     real_final = consumer.validate_prod_stage_l_source_projection
                     reached = []
@@ -2036,6 +2204,102 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                                             with self.assertRaises(global_journal.GlobalAttemptHold):
                                                 record_owned({**original_bundle,'business_reads':tuple(changed)})
                                             self.assertEqual(0,global_journal.inspect_global_unit(spreadsheet_token,binding,unit).attempt_count)
+                                    if retry_launch_probe is not None:
+                                        from types import SimpleNamespace
+                                        from monitor import issue_tracker_admission as admission
+                                        from monitor import issue_tracker_local_commit as local
+                                        from test_cases.test_req7_mutation_launcher import Req7MutationLauncherWorkflowTests, load as load_mutation
+                                        from tools.project_contract import MIN_CONTINUOUS_INTERVAL_MINUTES
+                                        import socket
+                                        native_mutation=Req7MutationLauncherWorkflowTests()
+                                        native_mutation.root=global_root; native_mutation.path=native_fixture.path
+                                        native_mutation.addCleanup=self.addCleanup
+                                        mutation=load_mutation(); original_wire=unit.wire_bytes; all_requests=[]; rejected=[]
+                                        response_bytes=b'HTTP/1.1 401 Denied\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}'
+                                        expected_requests = 2 if retry_launch_probe in ('normal', 'old-cycle') else 1
+                                        for count in (1,2):
+                                            bundle=fresh_bundle()
+                                            scope=global_journal._hold_continuous_owned_attempt_wire if count==1 else global_journal._hold_shared_retry_owned_attempt_wire
+                                            options=dict(qualified_source=qualified,store=self.store,writer_token=writer_token,
+                                                settings=args['settings'],whitelist_snapshot=self.snapshot,
+                                                expected_template_sha256=self.snapshot.workbook_sha256,http_root=self.root,
+                                                whitelist_path=self.template,**bundle)
+                                            with native_mutation.server(response_bytes,hostname='sheets.googleapis.com',
+                                                    destination='sheets.googleapis.com') as (requests,errors), ExitStack() as transport:
+                                                port=socket.getaddrinfo('sheets.googleapis.com',443)[0][4][1]
+                                                if count==2:
+                                                    prior=admission.read_shared_local_admission(writer_token,self.store,committed.prepared.xlsx_bytes)
+                                                    now=prior['monotonic_ns']+MIN_CONTINUOUS_INTERVAL_MINUTES*60*1_000_000_000
+                                                    options.update(boot_id=prior['boot_id'],monotonic_ns=now)
+                                                    # Fixture clock supplies the admitted interval; production
+                                                    # still derives and validates the original shared floor.
+                                                    transport.enter_context(mock.patch.object(admission,'time',SimpleNamespace(monotonic_ns=lambda:now)))
+                                                calls=[]; children=[]
+                                                def exercise():
+                                                    nonlocal calls,children
+                                                    with scope(spreadsheet_token,binding,unit,**options) as image:
+                                                        self.assertEqual(count,image.attempt_count)
+                                                        self.assertEqual(original_wire,os.pread(image.fd,len(original_wire)+1,0))
+                                                        calls,children=native_mutation.intercept(transport,local,owner_module,
+                                                            writer_token,spreadsheet_token,binding,image,port)
+                                                        if count==2 and retry_launch_probe=='receipt-rebind':
+                                                            path=generation_path/'RECEIPT'; raw=path.read_bytes(); inode=path.stat().st_ino
+                                                            path.rename(project/'owned-retry-prelaunch-receipt'); path.write_bytes(raw); path.chmod(0o600)
+                                                            self.assertNotEqual(inode,path.stat().st_ino)
+                                                        if count==2 and retry_launch_probe=='read-expiry':
+                                                            clock=fixed_reads._monotonic
+                                                            transport.enter_context(mock.patch.object(fixed_reads,'_monotonic',side_effect=lambda:clock()+31))
+                                                        if count==1 or retry_launch_probe in ('normal', 'old-cycle'):
+                                                            result=mutation._send_counted_original_once(writer_token,spreadsheet_token,binding,credential,unit,image)
+                                                            self.assertEqual((count,401,'UNKNOWN'),(result.attempt_count,result.status,result.outcome))
+                                                            self.assertTrue(result.termination_confirmed)
+                                                            self.assertEqual(1,len(calls)); self.assertEqual(1,len(children))
+                                                            with self.assertRaises(mutation.MutationLauncherHold):
+                                                                mutation._send_counted_original_once(writer_token,spreadsheet_token,binding,credential,unit,image)
+                                                            self.assertEqual(1,len(calls))
+                                                        else:
+                                                            with self.assertRaises(mutation.MutationLauncherHold):
+                                                                mutation._send_counted_original_once(writer_token,spreadsheet_token,binding,credential,unit,image)
+                                                            self.assertEqual([],calls); self.assertEqual([],children); rejected.append(True)
+                                                if count==1 or retry_launch_probe in ('normal', 'old-cycle'): exercise()
+                                                else:
+                                                    with self.assertRaises(global_journal.GlobalAttemptHold): exercise()
+                                                    self.assertEqual([True],rejected)
+                                            self.assertEqual([],errors)
+                                            self.assertEqual(1 if count==1 or retry_launch_probe in ('normal', 'old-cycle') else 0,len(requests))
+                                            if requests: self.assertEqual(original_wire,requests[0][2])
+                                            all_requests.extend(requests)
+                                            if count == 1 and retry_launch_probe == 'old-cycle':
+                                                from monitor.collection_ib_producer import produce_worker_ib_analysis
+                                                from tools.project_contract import build_collection_cycle_identity
+                                                from test_cases.test_collection_cycle_persistence import TOKEN_2
+                                                old_cycles = read_completed_cycle_evidence(self.store)
+                                                self.assertEqual(1, len(old_cycles))
+                                                identity_new = build_collection_cycle_identity(str(self.project), 'prod', 2, TOKEN_2)
+                                                ib_new = produce_worker_ib_analysis(identity_new, project_root=self.project,
+                                                    http_root=self.root,
+                                                    clock=lambda: dt.datetime(2026,9,26,4,31,tzinfo=dt.timezone.utc),
+                                                    runner=lambda _argv: self.fail('no external collection transport'))
+                                                latest, _ = self._cycle(activity=True, derivation=True, ib_analysis=ib_new,
+                                                    observed_peer='newer-not-original-peer', additional_eth_activity=True,
+                                                    fabric_templates={'ethernet/prod':'tan-leaf', 'nvlink/prod':'border-leaf'})
+                                                self.assertEqual(identity_new['cycle_id'], latest['cycle_id'])
+                                                self.assertNotEqual(qualified.cycle_ids[-1], latest['cycle_id'])
+                                                self.assertEqual(original_wire, unit.wire_bytes)
+                                                self.assertEqual(c6_original,{name:(generation_path/name).read_bytes() for name in c6_original})
+                                                self.assertEqual((1, 'UNKNOWN'),
+                                                    (global_journal.inspect_global_unit(spreadsheet_token,binding,unit).attempt_count,
+                                                     global_journal.inspect_global_unit(spreadsheet_token,binding,unit).outcome))
+                                        self.assertEqual(expected_requests,len(all_requests))
+                                        retained=global_journal.inspect_global_unit(spreadsheet_token,binding,unit)
+                                        self.assertEqual((2,'UNKNOWN'),(retained.attempt_count,retained.outcome))
+                                        self.assertEqual(c6_original,{name:(generation_path/name).read_bytes() for name in c6_original})
+                                        self.assertEqual(quota,quota_module.inspect_metadata_reservation(spreadsheet_token,binding,identity,unit))
+                                        state_path=state/(hashlib.sha256(binding.spreadsheet_id.encode('ascii')).hexdigest()+'.journal')
+                                        self.assertFalse((state_path/'ATTEMPT-3').exists())
+                                        shared=admission.read_shared_local_admission(writer_token,self.store,committed.prepared.xlsx_bytes)
+                                        self.assertEqual('retry',shared['lane'])
+                                        return
                                     if continuous_launch_probe is not None:
                                         from test_cases.test_req7_mutation_launcher import Req7MutationLauncherWorkflowTests, load as load_mutation
                                         from monitor import issue_tracker_local_commit as local
