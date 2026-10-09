@@ -1387,6 +1387,18 @@ UNKNOWN journal 位移后，同一单元不能回到零次；M=6 journal 位移�
 不证明完整历史 inventory、APPLIED/FIFO/high-water 最大值或 successor/NEW 准入；
 已有保守屏障不能当作 REQ7 整体完成。现场与断电/设备验收仍 NOT RUN。
 
+原件读取的 `inspect_original_global_unit` 不接收当前或缓存 unit：在解释前持续持有
+原 STARTED、ACTION、WIRE、HEADER、INITIALIZED、完整 ATTEMPT 前缀及原目录，
+从实际 ACTION/WIRE 恢复历史单元；旧 `inspect_global_unit` 也必须经同一持有作用域，
+再比较调用方 unit，不能绕过 STARTED 或接受解释期间的同字节换绑。原 FD／命名边／
+完整 stat／字节在解释、恢复 fsync 和消费者退出两侧重核，全部自有 FD 关闭后才公开
+返回。缺失、partial、缺链、FIFO 等特殊文件及漂移仅 HOLD，不补造、重编译或重置；
+真实 local intent→global intent→独立冷 owner/read 流程保留 UNKNOWN 与所有原像。
+该接口仅观察既有单一单元，不证明完整历史 inventory、successor、APPLIED/FIFO／
+高水位最大值、G1 或 NEW 资格，不能当作发送许可或 REQ7 完成。HISTORY 六屏障
+故障夹具仅将注入限定到实际 HISTORY 建立阶段，六个边界及原断言全部保留，
+新增 exact-boundary 断言；上游 GLOBAL 恢复屏障不能替代 HISTORY 故障证明。
+
 原持久 WIRE 的私有 `_hold_counted_original_wire` 交接在实际项目／spreadsheet
 双 owner 内，先同步原初始化证据，再写独立 NOREPLACE/fsync 的链式 CLAIM，
 然后才借出原只读 CLOEXEC FD。重复领取、冷进程复用、缺失旧 CLAIM 前缀和

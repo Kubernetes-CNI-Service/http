@@ -12,7 +12,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-if len(sys.argv) > 1 and sys.argv[1] in ('--owned-retry','--owned-wire-claim','--owned-start-hold'):
+if len(sys.argv) > 1 and sys.argv[1] in ('--owned-retry','--owned-wire-claim','--owned-start-hold','--owned-original-read'):
     sys.path.insert(0, sys.argv[3]); sys.path.insert(0, str(Path(sys.argv[3]) / 'tools'))
 import test_cases
 ROOT = Path(test_cases.__file__).resolve().parents[1]
@@ -36,6 +36,11 @@ def load():
 def unit(**changes):
     from monitor.issue_tracker_send_unit import freeze_send_unit
     args = inputs(); args.update(changes); return freeze_send_unit(**args)
+
+
+def original_read_files(root):
+    return {str(path.relative_to(root)): (path.stat().st_ino, path.read_bytes())
+            for path in root.rglob('*') if path.is_file()}
 
 
 class Req7GlobalAttemptJournalTests(unittest.TestCase):
@@ -709,6 +714,196 @@ if receipt._latest_receipted_prod_xlsx is not original:
                     self.assertEqual(injected[0],(retained.stat().st_ino,retained.read_bytes()))
 
 
+    def test_special_file_original_never_waits_for_a_pipe_writer_or_repairs_evidence(self):
+        code = '''import importlib.util,pathlib,sys
+sys.path.insert(0,sys.argv[3])
+from test_cases.test_req7_spreadsheet_owner import load as load_owner, fixture, binding
+spec=importlib.util.spec_from_file_location('monitor.issue_tracker_global_attempt_journal',sys.argv[2])
+subject=importlib.util.module_from_spec(spec); sys.modules[spec.name]=subject; spec.loader.exec_module(subject)
+owner=load_owner()
+with fixture(pathlib.Path(sys.argv[1])),owner.spreadsheet_owner(binding()) as token:
+ try: subject.inspect_original_global_unit(token,binding())
+ except subject.GlobalAttemptHold: print('HOLD ORIGINAL FIFO')
+ else: raise AssertionError('FIFO is not original regular-file evidence')
+'''
+        with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
+            self._prepare_original_read(token)
+        for path in (self._original_started, self.store / 'ACTION-PREIMAGE', self.store / 'WIRE',
+                     self.store / 'HEADER', self.store / 'INITIALIZED', self.store / 'ATTEMPT-1'):
+            with self.subTest(name=path.name):
+                preserved = self.root / ('preserved-fifo-' + path.name)
+                path.rename(preserved)
+                os.mkfifo(path, 0o600)
+                inode = path.stat().st_ino
+                before = original_read_files(self.root)
+                try:
+                    try:
+                        child = subprocess.run([sys.executable, '-B', '-c', code,
+                            str(self.root), str(SOURCE), str(ROOT)], stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=2)
+                    except subprocess.TimeoutExpired:
+                        self.fail('original reader blocked on FIFO without an owned pipe writer')
+                    self.assertEqual(0, child.returncode, child.stdout + child.stderr)
+                    self.assertEqual(b'HOLD ORIGINAL FIFO\n', child.stdout)
+                    self.assertEqual(inode, path.stat().st_ino)
+                    self.assertEqual(before, original_read_files(self.root))
+                finally:
+                    path.unlink()
+                    preserved.rename(path)
+
+    def _require_original_read_api(self):
+        self.assertTrue(callable(getattr(self.module, 'inspect_original_global_unit', None)),
+                        'cold history must come from held ACTION/WIRE, not a caller unit')
+        self.assertTrue(callable(getattr(self.module, '_hold_original_global_unit', None)))
+        self._original_started = self.store.with_name(self.store.stem + '.journal-started')
+
+    def _prepare_original_read(self, token, count=1):
+        Req7GlobalAttemptJournalTests._require_original_read_api(self)
+        self.module.prepare_global_unit(token, binding(), self.value)
+        for _ in range(count):
+            self.module.record_global_attempt_intent(token, binding(), self.value)
+
+    def test_original_read_restores_exact_action_wire_zero_unknown_and_exhausted_counts(self):
+        self._require_original_read_api()
+        from monitor import issue_tracker_send_unit as units
+        with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
+            self._prepare_original_read(token, count=0)
+            for count in range(7):
+                before = original_read_files(self.root)
+                with mock.patch.object(units, 'freeze_send_unit', side_effect=AssertionError('no current compilation')):
+                    original, seen = self.module.inspect_original_global_unit(token, binding())
+                self.assertEqual(self.value, original)
+                self.assertEqual((count, 'UNKNOWN' if count else 'UNATTEMPTED_OBSERVATION'),
+                                 (seen.attempt_count, seen.outcome))
+                self.assertFalse(hasattr(seen, 'permit'))
+                self.assertEqual(before, original_read_files(self.root))
+                if count < 6:
+                    self.module.record_global_attempt_intent(token, binding(), self.value)
+
+    def test_missing_journal_or_start_witness_is_hold_not_empty_inventory(self):
+        self._require_original_read_api()
+        with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
+            with self.assertRaises(self.module.GlobalAttemptHold):
+                self.module.inspect_original_global_unit(token, binding())
+            self._prepare_original_read(token)
+            for path in (self._original_started, self.store):
+                saved = path.with_name(path.name + '.preserved')
+                path.rename(saved)
+                try:
+                    before = original_read_files(self.root)
+                    with self.assertRaises(self.module.GlobalAttemptHold):
+                        self.module.inspect_original_global_unit(token, binding())
+                    self.assertEqual(before, original_read_files(self.root))
+                finally:
+                    saved.rename(path)
+
+    def test_bad_start_binding_or_gap_cannot_be_a_coherent_original(self):
+        self._require_original_read_api()
+        with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
+            self._prepare_original_read(token, count=2)
+            original = self._original_started.read_bytes()
+            for raw in (b'', b'partial', original.replace(self.value.unit_id.encode(), b'f' * 64)):
+                self._original_started.write_bytes(raw)
+                before = original_read_files(self.root)
+                with self.assertRaises(self.module.GlobalAttemptHold):
+                    self.module.inspect_original_global_unit(token, binding())
+                self.assertEqual(before, original_read_files(self.root))
+            self._original_started.write_bytes(original)
+            (self.store / 'ATTEMPT-1').rename(self.root / 'preserved-attempt-one')
+            with self.assertRaises(self.module.GlobalAttemptHold):
+                self.module.inspect_original_global_unit(token, binding())
+            self.assertFalse((self.store / 'ATTEMPT-1').exists())
+
+    def test_original_pins_precede_interpretation_and_reject_same_bytes_replacement(self):
+        self._require_original_read_api()
+        from monitor import issue_tracker_send_unit as units
+        with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
+            self._prepare_original_read(token)
+            reconstruct = units._original_unit
+            for path in (self._original_started, self.store / 'ACTION-PREIMAGE', self.store / 'WIRE',
+                         self.store / 'HEADER', self.store / 'INITIALIZED', self.store / 'ATTEMPT-1'):
+                with self.subTest(name=path.name):
+                    preserved = self.root / ('preserved-' + path.name)
+                    reached = []
+                    def replacing(action, wire):
+                        reached.append(True)
+                        path.rename(preserved)
+                        path.write_bytes(preserved.read_bytes())
+                        path.chmod(0o600)
+                        return reconstruct(action, wire)
+                    with mock.patch.object(units, '_original_unit', side_effect=replacing):
+                        with self.assertRaises(self.module.GlobalAttemptHold):
+                            self.module.inspect_original_global_unit(token, binding())
+                    self.assertEqual([True], reached)
+                    path.unlink()
+                    preserved.rename(path)
+
+    def test_held_original_scope_rechecks_namespace_and_count_after_consumer(self):
+        self._require_original_read_api()
+        with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
+            self._prepare_original_read(token)
+            before = original_read_files(self.root)
+            with self.assertRaises(self.module.GlobalAttemptHold):
+                with self.module._hold_original_global_unit(token, binding()) as (original, seen, verify):
+                    self.assertEqual((self.value, 1), (original, seen.attempt_count))
+                    verify()
+                    self.module.record_global_attempt_intent(token, binding(), self.value)
+            self.assertEqual(before['var/lib/http-ztp-container/issue-tracker/' + self.store.name + '/WIRE'],
+                             original_read_files(self.root)['var/lib/http-ztp-container/issue-tracker/' + self.store.name + '/WIRE'])
+            self.assertTrue((self.store / 'ATTEMPT-2').is_file())
+
+    def test_required_recovery_barriers_fail_without_mutation_or_adoption(self):
+        self._require_original_read_api()
+        with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
+            self._prepare_original_read(token)
+            original = original_read_files(self.root)
+            for path in (self._original_started, self.store / 'WIRE', self.store, self.locks):
+                with self.subTest(name=path.name):
+                    sync = os.fsync
+                    reached = []
+                    def failing(fd):
+                        if os.fstat(fd).st_ino == path.stat().st_ino:
+                            reached.append(True)
+                            raise OSError('owned recovery barrier failure')
+                        return sync(fd)
+                    with mock.patch('os.fsync', side_effect=failing):
+                        with self.assertRaises(self.module.GlobalAttemptHold):
+                            self.module.inspect_original_global_unit(token, binding())
+                    self.assertEqual([True], reached)
+                    self.assertEqual(original, original_read_files(self.root))
+
+    def test_existing_public_reader_cannot_bypass_missing_original_start(self):
+        self._require_original_read_api()
+        with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
+            self._prepare_original_read(token)
+            self._original_started.rename(self.root / 'preserved-original-start')
+            before = original_read_files(self.root)
+            with self.assertRaises(self.module.GlobalAttemptHold):
+                self.module.inspect_global_unit(token, binding(), self.value)
+            self.assertEqual(before, original_read_files(self.root))
+
+    def test_existing_public_reader_pins_originals_before_semantic_count_read(self):
+        self._require_original_read_api()
+        with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
+            self._prepare_original_read(token)
+            inspect = self.module._inspect; replaced = []
+            def after_count(*args):
+                result = inspect(*args)
+                if not replaced:
+                    replaced.append(True)
+                    path = self.store / 'ACTION-PREIMAGE'
+                    path.rename(self.root / 'preserved-original-action')
+                    path.write_bytes(self.value.action_preimage)
+                    path.chmod(0o600)
+                return result
+            with mock.patch.object(self.module, '_inspect', side_effect=after_count):
+                with self.assertRaises(self.module.GlobalAttemptHold):
+                    self.module.inspect_global_unit(token, binding(), self.value)
+            self.assertEqual([True], replaced)
+            self.assertEqual(self.value.action_preimage, (self.store / 'ACTION-PREIMAGE').read_bytes())
+            self.assertFalse((self.store / 'ATTEMPT-2').exists())
+
+
 class Req7GlobalAttemptJournalWorkflowTests(unittest.TestCase):
     setUp = Req7GlobalAttemptJournalTests.setUp
 
@@ -906,6 +1101,24 @@ class Req7GlobalAttemptJournalWorkflowTests(unittest.TestCase):
         self.assertTrue((project / '.tracker/remote-attempts' / self.value.unit_id / 'ATTEMPT-1').exists())
 
 
+    def test_cold_process_uses_retained_global_unit_to_reopen_actual_local_intent(self):
+        from monitor import issue_tracker_local_commit as local, issue_tracker_send_intent as intent
+        project = self.root / 'project'; project.mkdir(mode=0o700)
+        publication = project / 'publication'; publication.mkdir(mode=0o700)
+        local.create_local_commit_store(project, publication)
+        with local.writer_owner(project, publication) as writer:
+            intent.prepare_send_intent(writer, self.value)
+            intent.record_compiled_attempt_intent(writer, self.value)
+            with scoped_fixture(self.root, self.owner), self.owner.spreadsheet_owner(binding()) as token:
+                Req7GlobalAttemptJournalTests._prepare_original_read(self, token)
+        before = original_read_files(self.root)
+        child = subprocess.run([sys.executable, '-B', str(Path(__file__).resolve()), '--owned-original-read', str(self.root), str(ROOT)],
+                               stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
+        self.assertEqual(0, child.returncode, child.stdout + child.stderr)
+        self.assertEqual((self.value.unit_id + ' 1 1 UNKNOWN\n').encode(), child.stdout)
+        self.assertEqual(before, original_read_files(self.root))
+
+
 def cold_hold(root):
     from monitor import issue_tracker_local_commit as local
     from monitor import issue_tracker_send_intent as intent
@@ -925,7 +1138,20 @@ def cold_hold(root):
     return 0
 
 if __name__ == '__main__':
-    if len(sys.argv) > 1 and sys.argv[1] == '--owned-start-hold':
+    if len(sys.argv) > 1 and sys.argv[1] == '--owned-original-read':
+        from monitor import issue_tracker_local_commit as local, issue_tracker_send_intent as intent
+        from monitor import issue_tracker_send_unit as units
+        root = Path(sys.argv[2]).resolve()
+        owner = load_owner(); subject = load()
+        with local.writer_owner(root / 'project', root / 'project/publication') as writer:
+            with scoped_fixture(root, owner), owner.spreadsheet_owner(binding()) as token:
+                with mock.patch.object(units, 'freeze_send_unit', side_effect=AssertionError('cold recompile forbidden')):
+                    original, global_seen = subject.inspect_original_global_unit(token, binding())
+                    local_seen = intent.inspect_send_intent(writer, original)
+                    assert (global_seen.attempt_count, local_seen.attempt_count,
+                            global_seen.outcome, local_seen.outcome) == (1, 1, 'UNKNOWN', 'UNKNOWN')
+                    print(original.unit_id, global_seen.attempt_count, local_seen.attempt_count, global_seen.outcome)
+    elif len(sys.argv) > 1 and sys.argv[1] == '--owned-start-hold':
         raise SystemExit(cold_hold(Path(sys.argv[2]).resolve()))
     elif len(sys.argv) > 1 and sys.argv[1] == '--owned-wire-claim':
         from monitor import issue_tracker_local_commit as local

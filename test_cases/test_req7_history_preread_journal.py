@@ -147,11 +147,15 @@ class Req7HistoryPrereadJournalDirectTests(unittest.TestCase):
                     self.global_journal.prepare_global_unit(token, binding(), self.value)
                     calls = []
                     def failing(fd):
-                        calls.append(fd)
-                        if len(calls) == boundary: raise OSError('private synthetic barrier failure')
+                        # Target the six HISTORY image barriers, excluding
+                        # upstream retained GLOBAL recovery/read barriers.
+                        if store.exists():
+                            calls.append(fd)
+                            if len(calls) == boundary: raise OSError('private synthetic barrier failure')
                         real_fsync(fd)
                     with mock.patch('os.fsync', side_effect=failing), self.assertRaises(module.HistoryPrereadHold):
                         module.prepare_history_preread(token, binding(), self.value, self.plan, self.raw)
+                    self.assertEqual(boundary, len(calls))
                     self.assertTrue(store.is_dir()); self.assertFalse((store / 'INITIALIZED').exists())
                     with self.assertRaises(module.HistoryPrereadHold): module.inspect_history_preread(token, binding(), self.value)
                     with self.assertRaises(module.HistoryPrereadHold): module.prepare_history_preread(token, binding(), self.value, self.plan, self.raw)

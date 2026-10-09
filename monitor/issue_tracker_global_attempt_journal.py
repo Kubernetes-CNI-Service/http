@@ -432,7 +432,103 @@ def _observe(token, binding, unit, append):
 
 def inspect_global_unit(token, binding, unit):
     """Read-only global barrier/count observation; never COMPLETE or a permit."""
-    return _observe(token, binding, unit, False)
+    # Existing readers must not bypass the original history scope simply by
+    # supplying a coherent current/cached unit. This compares images only;
+    # original C6, freshness and all send gates remain separate obligations.
+    with _hold_original_global_unit(token, binding) as (original, seen, verify):
+        compiled._projection(unit)
+        if unit != original: raise GlobalAttemptHold()
+        verify()
+    return seen
+
+
+@contextmanager
+def _hold_original_global_unit(token, binding):
+    """Read the retained single-unit namespace without a caller's unit image.
+
+    Keep every original descriptor before interpreting ACTION/WIRE and through
+    the consumer. This does not certify a complete multi-unit inventory, C6,
+    current qualification, APPLIED, FIFO, quota or a send capability. Absent or
+    partial evidence is HOLD, never an empty inventory or a first-use permit.
+    """
+    folder = None; held = []; failed = False
+    try:
+        owner = ownership._validated_owner(token, binding)
+        parent = owner.directories[-1][0]
+        name = owner.lock_name[:-5] + '.journal'
+        started = owner.lock_name[:-5] + '.journal-started'
+        parent_identity = journal._identity(os.fstat(parent))
+        folder = local._directory(parent, name)
+        journal._named(parent, name, folder, directory=True)
+        folder_identity = journal._identity(os.fstat(folder))
+        names = frozenset(os.listdir(folder)); count = len(names) - 4
+        if (not 0 <= count <= 6 or names != {'ACTION-PREIMAGE', 'WIRE', 'HEADER', 'INITIALIZED',
+                *(f'ATTEMPT-{i}' for i in range(1, count + 1))}):
+            raise GlobalAttemptHold()
+        images = {}
+        for directory, entry, limit in (
+                (parent, started, 16384),
+                *((folder, entry, 1024 * 1024 if entry in ('ACTION-PREIMAGE', 'WIRE') else 16384)
+                  for entry in sorted(names))):
+            fd = os.open(entry, local._flags(), dir_fd=directory)
+            held.append((directory, entry, fd, None, None))
+            info = local._check(fd, directory=False)
+            journal._named(directory, entry, fd, directory=False)
+            identity = journal._identity(info)
+            raw = os.pread(fd, limit + 1, 0)
+            if (not raw or len(raw) != info.st_size or len(raw) > limit
+                    or journal._identity(os.fstat(fd)) != identity):
+                raise GlobalAttemptHold()
+            held[-1] = (directory, entry, fd, identity, raw)
+            images[entry] = raw
+        def verify():
+            if ownership._validated_owner(token, binding) is not owner:
+                raise GlobalAttemptHold()
+            journal._named(parent, name, folder, directory=True)
+            if (journal._identity(os.fstat(parent)) != parent_identity
+                    or journal._identity(os.fstat(folder)) != folder_identity
+                    or frozenset(os.listdir(folder)) != names):
+                raise GlobalAttemptHold()
+            for directory, entry, fd, identity, raw in held:
+                journal._named(directory, entry, fd, directory=False)
+                if (journal._identity(os.fstat(fd)) != identity
+                        or os.pread(fd, len(raw) + 1, 0) != raw):
+                    raise GlobalAttemptHold()
+        verify()
+        from monitor.issue_tracker_send_unit import _original_unit
+        unit = _original_unit(images['ACTION-PREIMAGE'], images['WIRE'])
+        verify()
+        _owner, _parent, _name, header = _inputs(token, binding, unit)
+        if (_owner is not owner or _parent != parent or _name != name
+                or images[started] != local._canonical({
+                    'schema_version': 1, 'state': 'GLOBAL-UNIT-STARTED', 'unit_id': unit.unit_id,
+                    'header_sha256': hashlib.sha256(local._canonical(header)).hexdigest()})
+                or _inspect(folder, unit, header)[0] != count):
+            raise GlobalAttemptHold()
+        for _directory, _entry, fd, _identity, _raw in held:
+            os.fsync(fd)
+        os.fsync(folder); os.fsync(parent); verify()
+        seen = GlobalIntentObservation(count, unit.wire_sha256, unit.action_digest,
+                                       'UNKNOWN' if count else 'UNATTEMPTED_OBSERVATION')
+        yield unit, seen, verify
+        verify()
+    except Exception:
+        failed = True
+    finally:
+        for _directory, _entry, fd, _identity, _raw in reversed(held):
+            try: os.close(fd)
+            except OSError: failed = True
+        if folder is not None:
+            try: os.close(folder)
+            except OSError: failed = True
+    if failed: raise GlobalAttemptHold()
+
+
+def inspect_original_global_unit(token, binding):
+    """Original historical bytes/count only; no reconstruction from a new cycle."""
+    with _hold_original_global_unit(token, binding) as (unit, seen, verify):
+        verify()
+    return unit, seen
 
 
 def record_global_attempt_intent(token, binding, unit):

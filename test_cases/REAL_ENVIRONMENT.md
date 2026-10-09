@@ -2121,6 +2121,8 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 ## TC-REAL-REQ7-GLOBAL-ATTEMPT-001 — 共享 UNKNOWN 屏障与全局意图计数
 
+- 原历史单元读取补充（**NOT RUN / REAL_ENV REQUIRED**）：在既有精确授权隔离副本中保留正常 count 0..6、UNKNOWN/M=6、缺 STARTED/journal、partial、缺链、同字节名字替换、原 inode 改写、目录位移、FIFO 等特殊文件、每个恢复 fsync 中断、消费者期间漂移及 local/global 原件独立冷恢复。解释前持有全部原件，持续重核原 FD/name/full stat/ctime/SHA；任何不确定均 HOLD，零新增请求，不修补、重编译、重置或删除原证据。保存精确 HEAD/tree/dirty、Python/平台/命令/退出码、完整物理顺序及 END、原字节和原件前后身份、实际零 mutation/permit 与确证自有 FD 清理。该观察仅针对既有单一单元，不授予 successor/NEW 或释放 UNKNOWN/FIFO/高水位/配额；现场清理仍只限精确授权副本，不碰真实锁、计数或未知进程。本地独立 RED、真实文件/fsync/冷进程与跨脚本流程仅为开发替代证据，不能冒充真实 root/Cloud、设备、断电或部署验收。本次没有合并、省略或暂缓原场景，没有新增剩余风险接受确认；现场、断电、设备及在线 worker 仍 NOT RUN，原现场授权、研发确认与生产发布门禁保持有效。
+
 - journal 首次初始化防重建补充（**NOT RUN / REAL_ENV REQUIRED**）：区别于 completion-started，固定 `.journal-started` 必须以 EXCL／NOFOLLOW／CLOEXEC 在首字节前建立；其 file／parent 两个屏障完成且原 FD／命名边／完整 stat 持续持有，才可创建 journal 目录。保留正常首用、zero/partial write、两个见证屏障中断、交接前名字丢失／同字节替换／同 inode 改写、原八个图像屏障、UNKNOWN/M=6 journal 位移及独立冷恢复案例；全部须保持 STOP、原 count/WIRE/UNKNOWN、零新增请求且不重建、补全、覆盖或删除原件。两屏障不替代原八个图像及两个 INITIALIZED 屏障，也不授予 successor/NEW 或释放 FIFO。保存 before/after stat/inode/SHA、实际屏障及命名边物理顺序、完整 END、原本地 C6/intent 与共享 journal 清单及冷进程退出码。清理仅限精确授权隔离副本与确证自有 fixture，保留故障原件并核回滚；不得清除真实 UNKNOWN 或重置计数。本地独立 RED、真实文件/flock/fsync 与跨脚本冷进程仅为替代开发证据，不能冒充真实 root/Cloud、断电或设备验收；没有合并、省略或暂缓原场景，无新增风险接受确认，现场、断电、部署恢复及在线 worker 未验证范围仍 NOT RUN，原现场授权、研发确认与发布门禁有效。
 
 - 启动见证首写边界（**NOT RUN / REAL_ENV REQUIRED**）：NOFOLLOW／CLOEXEC／EXCL 在首字节前建立固定 STOP 名；short write／首个 file fsync 故障须留下固定 partial 见证、无 proof 和原计数 UNKNOWN，不能以未 rename 的临时文件替代防重建边界。独立故障注入实际复现 RED 后保留原断言修正，本地 PASS 不是真实断电证明；原现场场景不缩减，残余风险和现场授权仍如上。
