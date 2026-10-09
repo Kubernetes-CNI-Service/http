@@ -7396,9 +7396,26 @@ print("actual-copied-validator-selected-B")
         self.assertTrue(foreign.is_file())
 
     def test_runtime_dhcp_source_rebound_during_held_read_holds(self):
+        self._assert_runtime_dhcp_source_rebound_during_held_read_holds()
+
+    def test_runtime_dhcp_source_rebound_from_explicit_alias_injects_and_holds(self):
+        self._assert_runtime_dhcp_source_rebound_during_held_read_holds(explicit_alias=True)
+
+    def _assert_runtime_dhcp_source_rebound_during_held_read_holds(self, *, explicit_alias=False):
         _generation, receipt = self._publish_a_with_managed_dhcp_receipt()
         record = LOAD._load_runtime_rollback_receipt(self.project, receipt)
         source = self.project / "99-output-dhcp/dhcp-release-manifest.json"
+        if explicit_alias:
+            alias = self.root / "fixture-project-alias"
+            alias.symlink_to(self.project.resolve(strict=True), target_is_directory=True)
+            source = alias / "99-output-dhcp/dhcp-release-manifest.json"
+            self.assertNotEqual(source, source.resolve(strict=True))
+        # The real reader uses the canonical project owner. Resolve only this
+        # trusted fixture target before the mutation, so filesystem aliases
+        # cannot silently prevent the original new-inode fault injection.
+        source = source.resolve(strict=True)
+        original = source.stat()
+        original_bytes = source.read_bytes()
         real_read = LOAD._read_rollback_regular
         injected = []
         def rebind(path, **kwargs):
@@ -7413,6 +7430,12 @@ print("actual-copied-validator-selected-B")
                 LOAD._verify_rollback_authorities(self.project, record)
         self.assertEqual([True], injected)
         self.assertTrue(source.with_name("operator-held-original").is_file())
+        held = source.with_name("operator-held-original")
+        self.assertEqual((original.st_dev, original.st_ino),
+                         (held.stat().st_dev, held.stat().st_ino))
+        self.assertNotEqual(original.st_ino, source.stat().st_ino)
+        self.assertEqual(original_bytes, held.read_bytes())
+        self.assertEqual(original_bytes, source.read_bytes())
 
     def test_runtime_dhcp_typed_receipt_rejects_boolean_identity_and_foreign_target(self):
         _generation, receipt = self._publish_a_with_managed_dhcp_receipt()
