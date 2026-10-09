@@ -26,6 +26,57 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class EthActivityCycleHandoffWorkflowTests(unittest.TestCase):
+    def _analyzer_trace_script(self, script):
+        """Capture per-fabric phases without rewriting the native context FD."""
+        for channel in ("stdout", "stderr"):
+            marker = (
+                f'(root / "fixture-child-{channel}.txt").write_text('
+                f'{channel}, encoding="utf-8")'
+            )
+            self.assertEqual(1, script.count(marker),
+                             "the original phase marker must be unique")
+            trace = (
+                '(root / f"fixture-child-{Path(arguments[0]).parent.parent.name}-'
+                f'{channel}.txt").write_text({channel}, encoding="utf-8")'
+            )
+            script = script.replace(marker, marker + "\n" + trace, 1)
+        return script
+
+    def test_analyzer_trace_adapter_preserves_original_seekable_context(self):
+        """Phase capture must not depend on or rebuild an obsolete pipe image."""
+        source = (
+            "import tempfile\n"
+            "with tempfile.TemporaryFile(mode=\"w+b\") as rewritten_context:\n"
+            "    rewritten_context.write(raw_context)\n"
+            "    rewritten_context.flush()\n"
+            "    rewritten_context.seek(0)\n"
+            "    os.dup2(rewritten_context.fileno(), descriptor)\n"
+            '(root / "fixture-child-stdout.txt").write_text(stdout, encoding="utf-8")\n'
+            '(root / "fixture-child-stderr.txt").write_text(stderr, encoding="utf-8")\n'
+        )
+        expected = (
+            "import tempfile\n"
+            "with tempfile.TemporaryFile(mode=\"w+b\") as rewritten_context:\n"
+            "    rewritten_context.write(raw_context)\n"
+            "    rewritten_context.flush()\n"
+            "    rewritten_context.seek(0)\n"
+            "    os.dup2(rewritten_context.fileno(), descriptor)\n"
+            '(root / "fixture-child-stdout.txt").write_text(stdout, encoding="utf-8")\n'
+            '(root / f"fixture-child-{Path(arguments[0]).parent.parent.name}-stdout.txt").write_text(stdout, encoding="utf-8")\n'
+            '(root / "fixture-child-stderr.txt").write_text(stderr, encoding="utf-8")\n'
+            '(root / f"fixture-child-{Path(arguments[0]).parent.parent.name}-stderr.txt").write_text(stderr, encoding="utf-8")\n'
+        )
+        self.assertTrue(hasattr(self, "_analyzer_trace_script"),
+                        "phase adapter must preserve the native context image")
+        actual = self._analyzer_trace_script(source)
+        self.assertEqual(expected, actual)
+        self.assertEqual(1, actual.count("import tempfile\n"))
+        marker = '(root / "fixture-child-stderr.txt").write_text(stderr, encoding="utf-8")'
+        for malformed in (source.replace(marker, "", 1), source + marker + "\n"):
+            with self.subTest(boundary="phase-trace-marker"):
+                with self.assertRaises(AssertionError):
+                    self._analyzer_trace_script(malformed)
+
     def test_real_analyzer_sidecar_is_bound_to_worker_completion(self):
         helper = handoff_workflow.CollectionCycleHandoffWorkflowTests(
             "test_managed_real_collectors_emit_run_bound_v2_evidence"
@@ -34,32 +85,7 @@ class EthActivityCycleHandoffWorkflowTests(unittest.TestCase):
             root = helper.make_layout(directory)
             boundary = root / "fixture-bin/bash"
             script = boundary.read_text(encoding="utf-8")
-            script = script.replace("import sys\n", "import sys\nimport tempfile\n", 1)
-            fifo = ("    read_fd, write_fd = os.pipe()\n"
-                    "    os.write(write_fd, raw_context)\n"
-                    "    os.close(write_fd)\n"
-                    "    os.dup2(read_fd, descriptor)\n"
-                    "    os.close(read_fd)\n")
-            self.assertIn(fifo, script)
-            script = script.replace(fifo, (
-                "    with tempfile.TemporaryFile() as held_context:\n"
-                "        held_context.write(raw_context)\n"
-                "        held_context.flush()\n"
-                "        held_context.seek(0)\n"
-                "        os.dup2(held_context.fileno(), descriptor)\n"
-            ))
-            marker = '(root / "fixture-child-stdout.txt").write_text(stdout, encoding="utf-8")'
-            self.assertIn(marker, script)
-            marker_err = '(root / "fixture-child-stderr.txt").write_text(stderr, encoding="utf-8")'
-            self.assertIn(marker_err, script)
-            script = script.replace(
-                marker_err,
-                marker_err + '\n(root / f"fixture-child-{Path(arguments[0]).parent.parent.name}-stderr.txt").write_text(stderr, encoding="utf-8")',
-            )
-            boundary.write_text(script.replace(
-                marker,
-                marker + '\n(root / f"fixture-child-{Path(arguments[0]).parent.parent.name}-stdout.txt").write_text(stdout, encoding="utf-8")',
-            ), encoding="utf-8")
+            boundary.write_text(self._analyzer_trace_script(script), encoding="utf-8")
             analyzer = root / "tools/lldp-analyze-tool"
             shutil.copy2(ROOT / "tools/lldp-analyze-tool/analyze_lldp.py",
                          analyzer / "analyze_lldp.py")

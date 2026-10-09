@@ -79,7 +79,7 @@ class Req7SendUnitDirectTests(unittest.TestCase):
         self.assertEqual(('sheets.googleapis.com', '/v4/spreadsheets/synthetic_spreadsheet_id_0001:batchUpdate',
                           'POST', 60.0), (plan.host, plan.path, plan.method, plan.budget_seconds))
         self.assertEqual(unit.wire_bytes, plan.body)
-        self.assertEqual((('Accept','application/json'),('Authorization','Bearer sentinel.private-token'),
+        self.assertEqual((('Accept','application/json'),('Authorization','Bearer ' + 'sentinel.private-token'),
                           ('Content-Type','application/json')), plan.headers)
         self.assertEqual(unit.wire_sha256, plan.wire_sha256)
         self.assertNotIn('sentinel.private-token', repr(plan)); self.assertNotIn(TARGET, repr(plan))

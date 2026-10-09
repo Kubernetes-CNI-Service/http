@@ -800,6 +800,41 @@ class DocumentationCatalogTests(unittest.TestCase):
                 else:
                     self.assertIn("候选", profile["outputs"])
 
+    def test_req7_fixed_launchers_and_audit_library_are_not_operator_clis(self):
+        updater = load_path("manual_req7_fixed_library_boundaries", USER_MANUAL_SCRIPT)
+        for name in ("history_read_launcher", "mutation_launcher",
+                     "settings_audit_allocation", "token_launcher"):
+            relative = f"monitor/issue_tracker_{name}.py"
+            with self.subTest(module=relative):
+                profile = updater.script_profile(ROOT, relative)
+                self.assertTrue(profile["direct"].startswith("否"))
+                for required in ("未安装", "未启用"):
+                    self.assertIn(required, profile["environment"])
+                self.assertIn("无独立 CLI", profile["parameters"])
+                self.assertIn("不授予", profile["success"])
+                self.assertNotIn(f"python3 -B {relative}", profile["syntax"])
+                self.assertNotIn(f"python3 -B {relative}", profile["example"])
+
+    def test_req7_generated_fixed_library_entries_retain_uninstalled_boundaries(self):
+        updater = load_path("manual_req7_fixed_library_render", USER_MANUAL_SCRIPT)
+        rendered = updater.render_manual(ROOT)
+        for name in ("history_read_launcher", "mutation_launcher",
+                     "settings_audit_allocation", "token_launcher"):
+            relative = f"monitor/issue_tracker_{name}.py"
+            with self.subTest(module=relative):
+                match = re.search(
+                    rf'<details[^>]*data-script-reference="{re.escape(relative)}"[^>]*>'
+                    r'(.*?)</details>', rendered, flags=re.DOTALL,
+                )
+                self.assertIsNotNone(match, relative)
+                body = html.unescape(" ".join(re.sub(r"<[^>]+>", " ", match.group(1)).split()))
+                for required in ("是否直接运行： 否", "未安装", "未启用",
+                                 "无独立 CLI", "不授予"):
+                    self.assertIn(required, body)
+                self.assertNotIn(f"python3 -B {relative} [options]", body)
+        self.assertEqual((ROOT / "user-manual.html").read_text(encoding="utf-8"),
+                         rendered, "generated manual must be current")
+
     def test_req7_sdk_dependency_profile_and_evidence_do_not_claim_sdk_or_image_execution(self):
         updater = load_path("manual_req7_sdk_dependencies", USER_MANUAL_SCRIPT)
         relative = "tools/req7_dependency_contract.py"

@@ -265,6 +265,7 @@ class Req7MetadataReservationDirectTests(unittest.TestCase):
         from monitor import issue_tracker_remote_history_match as gates
         from monitor import issue_tracker_local_workbook_commit as publications
         from monitor import issue_tracker_stage_l_consumer as consumer
+        from monitor import issue_tracker_cycle_source as cycles
         from monitor import issue_tracker_receipt_snapshot as receipts
         from monitor import issue_tracker_send_unit as units
         self.module=load()
@@ -278,6 +279,7 @@ class Req7MetadataReservationDirectTests(unittest.TestCase):
             original_facts=(original_receipt,'owned-qualified',
                             'owned-reservations','owned-business','owned-audits')
             store=SimpleNamespace(project_identity=self.root)
+            cycle_checks=[]
             original=self.global_journal._observe
             def replace_after_retry(*values,**options):
                 result=original(*values,**options)
@@ -287,6 +289,8 @@ class Req7MetadataReservationDirectTests(unittest.TestCase):
                 return result
             with mock.patch.object(consumer,'_hold_original_replay_inputs',
                         return_value=nullcontext(lambda:None)) as inputs_guard, \
+                    mock.patch.object(cycles,'_hold_completed_cycle_replay',
+                        return_value=nullcontext(lambda:cycle_checks.append('cycle'))) as cycles_guard, \
                     mock.patch.object(receipts,'_hold_history_originals',
                         return_value=nullcontext(lambda:None)) as receipts_guard, \
                     mock.patch.object(units,'_read_original_generation_identity',
@@ -307,6 +311,8 @@ class Req7MetadataReservationDirectTests(unittest.TestCase):
                     headers_response=None,whitelist_response=None,metadata_response=None,
                     boot_id='owned-boot',monotonic_ns=1)
             inputs_guard.assert_called_once_with(store,self.root,self.root/'not-used')
+            cycles_guard.assert_called_once_with(store)
+            self.assertEqual(['cycle','cycle'],cycle_checks)
             receipts_guard.assert_called_once_with(None)
             original_generation.assert_called_once_with('owned-generation',None)
             self.assertEqual([2],injected); self.assertNotEqual(inode,path.stat().st_ino)

@@ -111,6 +111,17 @@ fail closed，`--check --require-full`、`--list` 与 `--list-suites` 也不能�
 
 ## 新功能、流程和场景的补充规则
 
+REQ7 联测的夹具必须保留当前原生 context 的完整可 seek 字节，阶段 trace 只能追加见证，
+不能重建过期的 pipe 图像。quota/count 边界夹具显式持有并复核 cycle 原始来源，
+真实跨脚本 workflow 继续验证原始收据、计数和 UNKNOWN，不以夹具替代生产恢复能力。
+W-1 的跨库 mutation summary 按导入来源区分原生 `os.close` 与同名写入函数；
+namespace 重绑定、嵌套 import/global、属性写入和未知回调逃逸仍拒绝，不能按 basename
+豁免真实写者。私有 FD 生命周期、真实两脚本 replace、失败安全与冷读取有独立见证。
+合成 token/无效 PEM 的测试输入和预期字节不变，仅采用明确的合成构造；公开审计
+同时检查工作树及实际 Git index，不增加凭据例外。四个固定 launcher/audit 内部库在
+生成手册中仍为未安装、未启用、无独立 CLI、不授予执行权威。
+这些修复只闭合相应联测机制，不代表 REQ7、H 或同树正式 full 整体通过。
+
 `test_issue_tracker_credential_shape.py` 与 `test_issue_tracker_credential_fd.py`
 约束 REQ7 的固定私有输入：held-FD 单次有限读取、目录与文件身份前后复核、严格凭据形状及
 真实目标策略消费。root 元数据仅由私有临时夹具注入，不读取真实凭据，不证明原生 root/RO-bind

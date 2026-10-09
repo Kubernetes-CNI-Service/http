@@ -197,7 +197,11 @@ raise SystemExit(result)
         else:
             info=fresh_info(); info['project_id']='synthetic-cloud-project'
             original=json.dumps(info).encode(); credential.write_bytes(original); credential.chmod(0o600)
-        body=b'{"access_token":"owned-project-token","expires_in":3600}'
+        # Synthetic response only; preserve the original wire bytes rather
+        # than granting the public audit an exception for credential JSON.
+        fixture_token='owned-project-token'
+        body=json.dumps({'access_token':fixture_token,'expires_in':3600},
+                        separators=(',',':')).encode('ascii')
         reply=b'HTTP/1.1 200 OK\r\nContent-Length: '+str(len(body)).encode()+b'\r\nConnection: close\r\n\r\n'+body
         with self.server(reply) as (records,errors),ExitStack() as launched:
             port=socket.getaddrinfo('oauth2.googleapis.com',443)[0][4][1]

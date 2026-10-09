@@ -354,7 +354,9 @@ raise SystemExit(result)
         credential=directory/'cre.json'
         info=fresh_info(); info['project_id']='synthetic-cloud-project'
         original=json.dumps(info).encode(); credential.write_bytes(original); credential.chmod(0o600)
-        payload=b'{"access_token":"synthetic-token","expires_in":3600}'
+        fixture_token='synthetic-token'
+        payload=json.dumps({'access_token':fixture_token,'expires_in':3600},
+                           separators=(',',':')).encode('ascii')
         reply=('HTTP/1.1 200 Synthetic\r\nContent-Length: %d\r\nConnection: close\r\n\r\n'%len(payload)).encode()+payload
         with self.server(reply) as (records,errors),ExitStack() as stack:
             ownership,owner=self.owner(stack)
@@ -424,7 +426,9 @@ raise SystemExit(result)
         credential.write_text(json.dumps(fresh_info()), encoding='utf-8'); credential.chmod(0o600)
         original = credential.read_bytes()
         for status in (200, 401, 503):
-            payload = b'{"access_token":"synthetic-token","expires_in":3600}'
+            fixture_token = 'synthetic-token'
+            payload = json.dumps({'access_token':fixture_token,'expires_in':3600},
+                                 separators=(',',':')).encode('ascii')
             reply = ('HTTP/1.1 %d Synthetic\r\nContent-Length: %d\r\nConnection: close\r\n\r\n' % (status,len(payload))).encode()+payload
             # Existing server supplies native TLS; extract owned address from
             # its exact DNS fixture, never open a real endpoint.

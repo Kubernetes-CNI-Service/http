@@ -58,9 +58,13 @@ REQ7_CONTROLLED_TRANSPORT_LIBRARIES = frozenset({
     "monitor/issue_tracker_global_attempt_journal.py",
     "monitor/issue_tracker_enrollment_journal.py",
     "monitor/issue_tracker_history_preread_journal.py",
+    "monitor/issue_tracker_history_read_launcher.py",
+    "monitor/issue_tracker_mutation_launcher.py",
     "monitor/issue_tracker_remote_history_match.py",
     "monitor/issue_tracker_nv_reservation.py",
     "monitor/issue_tracker_metadata_reservation.py",
+    "monitor/issue_tracker_settings_audit_allocation.py",
+    "monitor/issue_tracker_token_launcher.py",
 })
 
 RUNTIME_PATTERNS = (

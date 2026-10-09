@@ -1068,10 +1068,17 @@ def governed_external_sink_calls(
     """Find imported/generic sink calls receiving a governed destination."""
     local_functions = production_functions(tree)
     import_bindings = {}
+    standard_bindings: dict[str, tuple[str, str | None]] = {}
     for node in getattr(tree, "body", ()):
         if isinstance(node, ast.ImportFrom):
             for alias in node.names:
                 import_bindings[alias.asname or alias.name] = alias.name
+                if node.module in {"os", "shutil"}:
+                    standard_bindings[alias.asname or alias.name] = (node.module, alias.name)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name in {"os", "shutil"}:
+                    standard_bindings[alias.asname or alias.name] = (alias.name, None)
     result = set()
     for function in local_functions.values():
         governed = set()
@@ -1135,6 +1142,80 @@ def governed_external_sink_calls(
                     any(authority in spelling for authority in GOVERNED_AUTHORITY_NAMES)
                     or names & governed
                 ):
+                    root_name = (
+                        call.func.id if isinstance(call.func, ast.Name)
+                        else call.func.value.id
+                        if isinstance(call.func, ast.Attribute)
+                        and isinstance(call.func.value, ast.Name) else None
+                    )
+                    if root_name in standard_bindings:
+                        # A repository function called `close` is not os.close.
+                        # Standard filesystem APIs are handled by direct sink
+                        # discovery, but only while their import stays bound.
+                        imports = []
+                        for node in ast.walk(tree):
+                            if isinstance(node, ast.Import):
+                                imports.extend((alias.name, None) for alias in node.names
+                                               if (alias.asname or alias.name.split(".")[0]) == root_name)
+                            elif isinstance(node, ast.ImportFrom):
+                                imports.extend((node.module, alias.name) for alias in node.names
+                                               if (alias.asname or alias.name) == root_name)
+                        escaped = False
+                        for node in ast.walk(tree):
+                            if isinstance(node, (ast.Attribute, ast.Subscript)) and isinstance(node.ctx, (ast.Store, ast.Del)):
+                                root = node.value
+                                while isinstance(root, (ast.Attribute, ast.Subscript)):
+                                    root = root.value
+                                escaped |= isinstance(root, ast.Name) and root.id == root_name
+                            if not (isinstance(node, ast.Call) and any(
+                                isinstance(argument, ast.Name) and argument.id == root_name
+                                for argument in (*node.args, *(item.value for item in node.keywords))
+                            )):
+                                continue
+                            # The actual read-side source checks flag existence.
+                            # Only unbound native builtin metadata reads may
+                            # inspect a namespace without receiving it as mutable
+                            # authority; unknown callbacks remain fail closed.
+                            builtin = node.func.id if isinstance(node.func, ast.Name) else None
+                            metadata_read = (standard_bindings[root_name][1] is None
+                                             and not node.keywords and len(node.args) in {2, 3}
+                                             and isinstance(node.args[0], ast.Name)
+                                             and node.args[0].id == root_name
+                                             and (builtin == "hasattr" and len(node.args) == 2
+                                                  or builtin == "getattr" and isinstance(node.args[1], ast.Constant)
+                                                  and type(node.args[1].value) is str
+                                                  and node.args[1].value.startswith("O_")))
+                            if metadata_read:
+                                metadata_read = not any(
+                                    isinstance(item, ast.Name) and item.id == builtin
+                                    and isinstance(item.ctx, (ast.Store, ast.Del))
+                                    or isinstance(item, ast.arg) and item.arg == builtin
+                                    or isinstance(item, (ast.Global, ast.Nonlocal)) and builtin in item.names
+                                    or isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                                    and item.name == builtin
+                                    or isinstance(item, (ast.Import, ast.ImportFrom)) and any(
+                                        (alias.asname or alias.name.split(".")[0]) == builtin for alias in item.names)
+                                    for item in ast.walk(tree)
+                                )
+                            escaped |= not metadata_read
+                        rebound = (imports != [standard_bindings[root_name]]
+                                   or escaped or root_name in _function_parameters(function) or any(
+                            isinstance(node, ast.Name) and node.id == root_name
+                            and isinstance(node.ctx, (ast.Store, ast.Del))
+                            or isinstance(node, ast.Attribute)
+                            and isinstance(node.value, ast.Name)
+                            and node.value.id == root_name
+                            and isinstance(node.ctx, (ast.Store, ast.Del))
+                            or isinstance(node, (ast.Global, ast.Nonlocal))
+                            and root_name in node.names
+                            for node in ast.walk(tree)
+                        ))
+                        if rebound:
+                            raise AssertionError(
+                                "WDISC_UNRESOLVED:rebound standard mutation namespace "
+                                f"{root_name}"
+                            )
+                        continue
                     result.add((function.name, callee))
     return result
 
@@ -4137,6 +4218,99 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
                 _assert_governed_writer_is_classified(
                     "src/new_writer.py", discovered, set(), {},
                 )
+
+    def test_imported_writer_summary_is_not_a_standard_api_basename(self) -> None:
+        summaries = {"close": (["destination"], {0})}
+        source = (
+            "import os\n"
+            "def main():\n"
+            "    authority_fd = os.open('01-global.yaml', os.O_RDONLY)\n"
+            "    os.close(authority_fd)\n"
+        )
+        self.assertEqual(set(), governed_external_sink_calls(ast.parse(source), summaries))
+        writer = (
+            "from repository_writer import close\n"
+            "def main():\n    close('01-global.yaml')\n"
+        )
+        self.assertEqual({("main", "close")},
+                         governed_external_sink_calls(ast.parse(writer), summaries))
+        rebound = source.replace("    os.close", "    os = runtime_writer\n    os.close")
+        with self.assertRaisesRegex(AssertionError, "WDISC_UNRESOLVED"):
+            governed_external_sink_calls(ast.parse(rebound), summaries)
+
+    def test_real_online_target_close_retains_fd_identity_not_writer_basename(self) -> None:
+        """The real read-side close cannot borrow a foreign mutator's role."""
+        source = (ROOT / "monitor/issue_tracker_online_target.py").read_text(encoding="utf-8")
+        summaries = {"close": (["destination"], {0})}
+        self.assertEqual(set(), governed_external_sink_calls(ast.parse(source), summaries))
+        writer_source = ("import os\ndef close(destination):\n"
+                         "    os.replace('stage', destination)\n")
+        caller_source = ("from mwq_private_close_writer import close\n"
+                         "def publish():\n    close('01-global.yaml')\n")
+        self.assertEqual({0}, generic_mutation_parameter_summaries(ast.parse(writer_source))["close"])
+        self.assertEqual({("publish", "close")},
+                         governed_external_sink_calls(ast.parse(caller_source), summaries))
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary).resolve()
+            target = directory / "01-global.yaml"
+            original, replacement = b"independent read-only global bytes\n", b"independent imported writer bytes\n"
+            target.write_bytes(original)
+            descriptor = os.open(target, os.O_RDONLY)
+            try:
+                self.assertEqual(original, os.read(descriptor, 4096))
+            finally:
+                os.close(descriptor)
+            with self.assertRaises(OSError):
+                os.fstat(descriptor)
+            self.assertEqual(original, target.read_bytes())
+            stage = directory / "stage"
+            stage.write_bytes(replacement)
+            helper = directory / "mwq_private_close_writer.py"
+            entry = directory / "entry.py"
+            helper.write_text(writer_source, encoding="utf-8")
+            entry.write_text(caller_source, encoding="utf-8")
+            spec = importlib.util.spec_from_file_location("mwq_private_close_writer", helper)
+            writer = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(writer)
+            original_replace = writer.os.replace
+
+            def private_replace(source_path, destination_path):
+                self.assertEqual("stage", source_path)
+                self.assertEqual("01-global.yaml", destination_path)
+                return original_replace(stage, target)
+
+            with mock.patch.dict(sys.modules, {"mwq_private_close_writer": writer}), \
+                    mock.patch.object(writer.os, "replace", side_effect=OSError("independent close writer fault")):
+                caller_spec = importlib.util.spec_from_file_location("mwq_private_close_entry", entry)
+                caller = importlib.util.module_from_spec(caller_spec)
+                caller_spec.loader.exec_module(caller)
+                with self.assertRaisesRegex(OSError, "independent close writer fault"):
+                    caller.publish()
+                self.assertEqual(original, target.read_bytes())
+                self.assertEqual(replacement, stage.read_bytes())
+            with mock.patch.object(writer.os, "replace", side_effect=private_replace):
+                caller.publish()
+            self.assertFalse(stage.exists())
+            cold_reader = load_module("mwq_close_cold_bytes", "tools/_package_common.py")
+            self.assertEqual(replacement, cold_reader._read_frozen_regular_bytes(target, "private close fixture"))
+
+        # Imported aliases retain native identity, but any all-tree import
+        # rebinding loses that identity rather than receiving a close exemption.
+        alias_source = ("from os import open as read_fd, close as release_fd\nimport os\n"
+                        "def inspect():\n    fd = read_fd('01-global.yaml', os.O_RDONLY)\n"
+                        "    release_fd(fd)\n")
+        self.assertEqual(set(), governed_external_sink_calls(ast.parse(alias_source), summaries))
+        for mutant, changed in enumerate((
+            source + "\ndef rebind_online_os():\n    global os\n    import runtime_writer as os\n",
+            source + "\ndef rebind_online_os():\n    global os\n    from runtime_writer import writer as os\n",
+            alias_source + "\ndef rebind_release_fd():\n    global release_fd\n"
+                           "    from runtime_writer import close as release_fd\n",
+            source + "\nos.__dict__['close'] = runtime_writer\n",
+            source + "\ndef unknown_close_namespace():\n    runtime_mutator(os)\n",
+        ), 1):
+            with self.subTest(boundary="close-source-identity", mutant=mutant), \
+                    self.assertRaisesRegex(AssertionError, "WDISC_UNRESOLVED"):
+                governed_external_sink_calls(ast.parse(changed), summaries)
 
     def test_governed_writers_are_derived_from_real_mutation_sinks(self) -> None:
         """W-1 walks from governed mutations, never from existing stop callers."""

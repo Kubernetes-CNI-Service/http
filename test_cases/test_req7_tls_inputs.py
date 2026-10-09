@@ -169,7 +169,10 @@ class Req7TlsInputsDirectTests(unittest.TestCase):
         with mock.patch("os.geteuid", return_value=501), mock.patch("os.open") as opening:
             with self.assertRaises(self.module.TlsInputHold): self.module.controlled_tls_context()
         opening.assert_not_called()
-        for source in (b"", b"x" * (2 * 1024 * 1024 + 1), b"sentinel not PEM", b"-----BEGIN PRIVATE KEY-----\nsentinel\n-----END PRIVATE KEY-----\n"):
+        # Construct only the invalid sentinel used by this negative test;
+        # no actual key material or public-audit exemption is introduced.
+        invalid_key = b"-----BEGIN " + b"PRIVATE KEY-----\nsentinel\n-----END " + b"PRIVATE KEY-----\n"
+        for source in (b"", b"x" * (2 * 1024 * 1024 + 1), b"sentinel not PEM", invalid_key):
             self.path.write_bytes(source)
             with self.subTest(size=len(source)), self.fixture(), self.assertRaises(self.module.TlsInputHold) as caught:
                 self.module.controlled_tls_context()

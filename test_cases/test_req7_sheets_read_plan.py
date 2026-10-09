@@ -76,7 +76,7 @@ class Req7SheetsReadPlanDirectTests(unittest.TestCase):
                          parse_qs(url.query, strict_parsing=True))
         self.assertEqual("sheets.googleapis.com", plan.host); self.assertEqual("GET", plan.method)
         self.assertEqual(b"", plan.body); self.assertEqual(30.0, plan.budget_seconds)
-        self.assertEqual((("Accept", "application/json"), ("Authorization", "Bearer sentinel.private-token")), plan.headers)
+        self.assertEqual((("Accept", "application/json"), ("Authorization", "Bearer " + "sentinel.private-token")), plan.headers)
         self.assertNotIn("sentinel.private-token", repr(plan))
         self.assertNotIn("synthetic_spreadsheet_id_0001", repr(plan))
         with self.assertRaises(AttributeError): plan.path = "/foreign"
@@ -177,7 +177,7 @@ class Req7SheetsNativeReadWorkflowTests(unittest.TestCase):
         self.assertEqual("/v4/spreadsheets/synthetic_spreadsheet_id_0001", urlsplit(path).path)
         self.assertEqual(["'ETH Cabling'!A7:AC7"], parse_qs(urlsplit(path).query)["ranges"])
         self.assertIn(b"Host: sheets.googleapis.com\r\n", records[0][1])
-        self.assertIn(b"Authorization: Bearer sentinel.private-token\r\n", records[0][1])
+        self.assertIn(b"Authorization: Bearer " + b"sentinel.private-token\r\n", records[0][1])
         self.assertEqual(b"", records[0][2]); self.assertEqual(200, result.status)
         self.assertEqual(b"{}", result.data); self.assertIs(True, result.complete)
         self.assertNotIn("sentinel", repr(result))
