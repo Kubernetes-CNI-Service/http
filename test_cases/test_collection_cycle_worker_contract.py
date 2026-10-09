@@ -324,6 +324,71 @@ class CollectionCycleWorkerContractTests(unittest.TestCase):
         self.assertEqual(1, terminate.call_count)
         self.assertIsNotNone(terminate.call_args.args[0].poll())
 
+    def test_timeout_preserves_flushed_child_streams_without_success_exit(self):
+        with mock.patch.object(
+            WORKER, "terminate_collector_process",
+            wraps=WORKER.terminate_collector_process,
+        ) as terminate:
+            result, cancelled = WORKER.run_interruptible(
+                [sys.executable, "-B", "-c",
+                 "import sys,time; print('independent-partial-stdout',flush=True); "
+                 "print('independent-partial-stderr',file=sys.stderr,flush=True); "
+                 "time.sleep(20)"], ROOT, 1,
+            )
+        self.assertFalse(cancelled)
+        self.assertEqual(124, result["returncode"])
+        self.assertEqual("independent-partial-stdout\n", result["stdout"])
+        self.assertIn("independent-partial-stderr\n", result["stderr"])
+        self.assertIn("timeout after 1s", result["stderr"])
+        self.assertFalse(WORKER._process_group_exists(terminate.call_args.args[0].pid))
+
+    def test_timeout_cleanup_failure_cannot_escape_through_early_return(self):
+        terminate_real = WORKER.terminate_collector_process
+        stopped = []
+
+        def report_failed_cleanup(process):
+            # Stop the real private child, but independently inject an
+            # unsuccessful cleanup report; never leave a process behind.
+            stopped.append(process)
+            self.assertTrue(terminate_real(process))
+            return False
+
+        try:
+            with mock.patch.object(WORKER, "terminate_collector_process",
+                                   side_effect=report_failed_cleanup):
+                with self.assertRaisesRegex(RuntimeError, "did not stop after escalation"):
+                    WORKER.run_interruptible(
+                        [sys.executable, "-B", "-c", "import time; time.sleep(20)"],
+                        ROOT, 1,
+                    )
+        finally:
+            for process in stopped:
+                terminate_real(process)
+        self.assertIsNone(WORKER._ACTIVE_COLLECTORS[WORKER.COLLECTION_LANE])
+        self.assertTrue(stopped)
+        self.assertTrue(all(process.poll() is not None for process in stopped))
+
+    def test_failed_cleanup_cannot_be_upgraded_by_later_cleanup_success(self):
+        for branch in ("cancel", "timeout", "normal"):
+            with self.subTest(branch=branch):
+                process = mock.Mock(pid=424242, returncode=0)
+                process.poll.return_value = 0 if branch == "normal" else None
+                cleanup_results = [False] if branch == "normal" else [False, True]
+                with mock.patch.object(WORKER.subprocess, "Popen", return_value=process), \
+                        mock.patch.object(WORKER, "_set_active_collector"), \
+                        mock.patch.object(WORKER, "_clear_active_collector") as clear, \
+                        mock.patch.object(WORKER, "_process_group_exists", return_value=True), \
+                        mock.patch.object(WORKER, "terminate_collector_process",
+                                          side_effect=cleanup_results) as terminate, \
+                        mock.patch.object(WORKER, "_shutdown_requested", return_value=False), \
+                        mock.patch.object(WORKER, "lane_cancelled",
+                                          return_value=branch == "cancel"), \
+                        mock.patch.object(WORKER.time, "monotonic", side_effect=(0, 2)):
+                    with self.assertRaisesRegex(RuntimeError, "did not stop after escalation"):
+                        WORKER.run_interruptible(["independent-private-child"], ROOT, 1)
+                self.assertEqual(len(cleanup_results), terminate.call_count)
+                clear.assert_called_once_with(process, WORKER.COLLECTION_LANE)
+
     def test_run_interruptible_reaps_remaining_group_after_leader_exits(self):
         process = mock.Mock()
         process.pid = 424242

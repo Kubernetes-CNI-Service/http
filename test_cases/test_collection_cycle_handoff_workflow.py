@@ -384,12 +384,18 @@ if mutate:
             return payload
         mutate_marker(zero_evidence)
 
+if mutate and mode == "timeout_after_result":
+    stderr += "independent-workflow-timeout-stderr\n"
 child_evidence.write_text(json.dumps({
     "source_slot": slot, "phase": "full-returned",
     "returncode": returncode, "stdout": stdout, "stderr": stderr,
 }, sort_keys=True), encoding="utf-8")
 sys.stdout.write(stdout)
 sys.stderr.write(stderr)
+if mutate and mode == "timeout_after_result":
+    sys.stdout.flush()
+    sys.stderr.flush()
+    __import__('time').sleep(20)
 raise SystemExit(returncode)
 '''
 
@@ -1113,6 +1119,33 @@ class CollectionCycleHandoffWorkflowTests(unittest.TestCase):
         )
         self.assertIn(TASK_RESULT_PREFIX,
                       by_trace["nvlink/prod"]["observed_child"]["stdout"])
+
+    def test_timeout_after_real_child_result_remains_nonqualifying_with_original_stream(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.make_layout(directory)
+            completed, payload, traces = self.run_workflow(
+                root, "prod", "timeout_after_result", "infiniband/prod"
+            )
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["returned"], payload)
+        by_slot = {item["source_slot"]: item
+                   for item in payload["result"]["outcomes"]}
+        outcome = by_slot["infiniband/prod"]
+        self.assertEqual("returncode_conflict", outcome["outcome"])
+        self.assertEqual(124, outcome["evidence"]["returncode"])
+        self.assertIsNone(payload["result"]["summary"])
+        by_trace = {item["source_slot"]: item for item in traces}
+        child = by_trace["infiniband/prod"]["observed_child"]
+        self.assertIn(TASK_RESULT_PREFIX, child["stdout"])
+        self.assertEqual(hashlib.sha256(child["stdout"].encode()).hexdigest(),
+                         outcome["evidence"]["stdout"]["sha256"])
+        self.assertIn("independent-workflow-timeout-stderr\n", child["stderr"])
+        expected_stderr = (child["stderr"] + "timeout after 10s").encode()
+        self.assertEqual(hashlib.sha256(expected_stderr).hexdigest(),
+                         outcome["evidence"]["stderr"]["sha256"])
+        self.assertEqual(len(expected_stderr), outcome["evidence"]["stderr"]["size_bytes"])
+        self.assertEqual("accepted", by_slot["ethernet/prod"]["outcome"])
+        self.assertEqual("accepted", by_slot["nvlink/prod"]["outcome"])
 
     def test_plan_fd_tamper_and_forged_digest_cannot_qualify(self):
         for mode in ("plan_context_tamper", "plan_context_forged_digest"):

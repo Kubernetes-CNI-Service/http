@@ -1500,20 +1500,19 @@ def run_interruptible(
             raise
         deadline = time.monotonic() + timeout
         cancelled = False
+        timed_out = False
         cleanup_succeeded = True
         try:
             while process.poll() is None:
                 if _shutdown_requested() or lane_cancelled(lane):
                     cancelled = True
-                    terminate_collector_process(process)
+                    cleanup_succeeded = terminate_collector_process(process)
                     break
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    terminate_collector_process(process)
-                    return {
-                        "returncode": 124, "stdout": "",
-                        "stderr": f"timeout after {timeout}s",
-                    }, False
+                    timed_out = True
+                    cleanup_succeeded = terminate_collector_process(process)
+                    break
                 # Preserve the 200 ms cancellation bound without imposing a
                 # full polling sleep on collectors that finish sooner.
                 try:
@@ -1525,7 +1524,9 @@ def run_interruptible(
             # a detached session from surviving an unexpected worker failure.
             try:
                 if _process_group_exists(process.pid):
-                    cleanup_succeeded = terminate_collector_process(process)
+                    cleanup_succeeded = (
+                        terminate_collector_process(process) and cleanup_succeeded
+                    )
             finally:
                 _clear_active_collector(process, lane)
         if not cleanup_succeeded:
@@ -1535,8 +1536,16 @@ def run_interruptible(
         process.wait()
         stdout_file.seek(0)
         stderr_file.seek(0)
-        return {"returncode": process.returncode,
-                "stdout": stdout_file.read(), "stderr": stderr_file.read()}, cancelled
+        stdout = stdout_file.read()
+        stderr = stderr_file.read()
+        if timed_out:
+            # Retain the actual child streams for diagnosis, but a partial
+            # success marker cannot turn an expired collector into success.
+            if stderr and not stderr.endswith("\n"):
+                stderr += "\n"
+            stderr += f"timeout after {timeout}s"
+        return {"returncode": 124 if timed_out else process.returncode,
+                "stdout": stdout, "stderr": stderr}, cancelled
 
 
 def _yaml_backup_scope(scope: str) -> str:
