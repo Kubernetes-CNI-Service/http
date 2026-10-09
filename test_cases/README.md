@@ -1399,6 +1399,14 @@ UNKNOWN journal 位移后，同一单元不能回到零次；M=6 journal 位移�
 故障夹具仅将注入限定到实际 HISTORY 建立阶段，六个边界及原断言全部保留，
 新增 exact-boundary 断言；上游 GLOBAL 恢复屏障不能替代 HISTORY 故障证明。
 
+settings-audit allocation 的屏障夹具也只选择本轮私有 allocation 图像的实际
+dev/inode：原 witness／pending、目录、HEADER、ASSIGNMENTS、INITIALIZED 及其
+恢复同步。八个故障注入点、marker 之前的原物理顺序和总计 13 个 allocation
+屏障预期不变；上游 GLOBAL 原件读取的恢复 fsync 必须照常执行，但不计入这些
+allocation 故障点。额外负例验证 GLOBAL 同步失败在 allocation witness 之前
+停止，原 GLOBAL／settings 图像不变、无 pending／marker、无修复或尝试计数。
+该修正是夹具隔离，不减少生产屏障，也不替代相关、完整 full 或现场证明。
+
 原持久 WIRE 的私有 `_hold_counted_original_wire` 交接在实际项目／spreadsheet
 双 owner 内，先同步原初始化证据，再写独立 NOREPLACE/fsync 的链式 CLAIM，
 然后才借出原只读 CLOEXEC FD。重复领取、冷进程复用、缺失旧 CLAIM 前缀和

@@ -34,6 +34,31 @@ def load():
     return module
 
 
+def allocation_image_barrier(case, fd):
+    """Fixture fault scope: original allocation images, not GLOBAL prereads.
+
+    All fsyncs still execute natively. Only the fault/count selector uses these
+    actual dev/inode pairs from this test's private namespace; a path, FD number
+    or filename alone never identifies a barrier. Pending witness images are
+    included because the first failed barrier must precede witness publication.
+    This helper supplies no production ownership or durability certificate.
+    """
+    info = os.fstat(fd)
+    tracker = case.project / '.tracker'
+    candidates = [tracker, tracker / 'SETTINGS-AUDIT-ALLOCATED']
+    candidates.extend(path for path in tracker.iterdir() if path.name.startswith('.pending-'))
+    if case.allocation.is_dir():
+        candidates.extend((case.allocation, *case.allocation.iterdir()))
+    for path in candidates:
+        try:
+            named = os.stat(path, follow_symlinks=False)
+        except FileNotFoundError:
+            continue
+        if (named.st_dev, named.st_ino) == (info.st_dev, info.st_ino):
+            return True
+    return False
+
+
 class Req7SettingsAuditAllocationTests(unittest.TestCase):
     def test_cleanup_requires_actual_complete_delivery_pair_before_any_move(self):
         with self.owners() as (writer,sheet):
@@ -456,14 +481,16 @@ class Req7SettingsAuditAllocationTests(unittest.TestCase):
                         case.global_journal.prepare_global_unit(sheet, binding(), value)
                         calls = []
                         def fsync(fd):
-                            calls.append(fd)
-                            if len(calls) == boundary: raise OSError('owned allocation barrier fault')
+                            if allocation_image_barrier(case, fd):
+                                calls.append(fd)
+                                if len(calls) == boundary: raise OSError('owned allocation barrier fault')
                             return native_fsync(fd)
                         with mock.patch.object(case.module.os, 'fsync', side_effect=fsync), self.assertRaises(case.module.SettingsAuditHold):
                             case.module.prepare_settings_audit_allocation(writer, sheet, binding(), value)
                         # Independent physical order: two witness barriers,
                         # then mkdir parent/folder, then both evidence files.
                         self.assertEqual(boundary >= 3, case.allocation.is_dir())
+                        self.assertEqual(boundary, len(calls))
                         self.assertFalse((case.allocation/'INITIALIZED').exists())
                         self.assertTrue((case.project/'.tracker/SETTINGS-AUDIT-ALLOCATED').exists()
                             or any(p.name.startswith('.pending-') for p in (case.project/'.tracker').iterdir()))
@@ -503,7 +530,8 @@ class Req7SettingsAuditAllocationTests(unittest.TestCase):
         with self.owners() as (writer, sheet):
             self.global_journal.prepare_global_unit(sheet, binding(), value)
             def fsync(fd):
-                observed.append(set(os.listdir(self.allocation)) if self.allocation.exists() else set())
+                if allocation_image_barrier(self, fd):
+                    observed.append(set(os.listdir(self.allocation)) if self.allocation.exists() else set())
                 return native_fsync(fd)
             with mock.patch.object(self.module.os, 'fsync', side_effect=fsync):
                 self.module.prepare_settings_audit_allocation(writer, sheet, binding(), value)
@@ -515,6 +543,31 @@ class Req7SettingsAuditAllocationTests(unittest.TestCase):
                 with self.assertRaises(self.module.SettingsAuditHold):
                     self.module.inspect_settings_audit_allocation(writer, sheet, binding(), value)
             self.assertEqual(before, self.image())
+
+    def test_global_original_sync_failure_stops_before_allocation_witness(self):
+        value = self.unit(); native_fsync = os.fsync; reached = []
+        with self.owners() as (writer, sheet):
+            self.global_journal.prepare_global_unit(sheet, binding(), value)
+            before = self.image()
+            global_parent = self.root / 'var/lib/http-ztp-container/issue-tracker'
+            original = {path: path.read_bytes() for path in global_parent.rglob('*') if path.is_file()}
+            objects = {(path.stat().st_dev, path.stat().st_ino)
+                       for path in global_parent.rglob('*')}
+            def fsync(fd):
+                info = os.fstat(fd)
+                if (info.st_dev, info.st_ino) in objects:
+                    self.assertFalse(allocation_image_barrier(self, fd))
+                    reached.append(True)
+                    raise OSError('owned original GLOBAL re-sync fault')
+                return native_fsync(fd)
+            with mock.patch.object(os, 'fsync', side_effect=fsync), self.assertRaises(self.module.SettingsAuditHold):
+                self.module.prepare_settings_audit_allocation(writer, sheet, binding(), value)
+            self.assertEqual([True], reached)
+            self.assertFalse(self.allocation.exists())
+            self.assertFalse((self.project / '.tracker/SETTINGS-AUDIT-ALLOCATED').exists())
+            self.assertFalse(any(path.name.startswith('.pending-') for path in (self.project / '.tracker').iterdir()))
+            self.assertEqual(before, self.image())
+            self.assertEqual(original, {path: path.read_bytes() for path in original})
 
     def test_missing_corrupt_or_linked_external_witness_never_authorizes_or_repairs(self):
         for fault in ('missing', 'corrupt', 'alias'):
