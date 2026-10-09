@@ -275,6 +275,35 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             business_preread_probe=True,original_reserved_probe=True,receipted_intent_probe=True,
             owned_read_gates_probe=True,owned_continuity_probe=True)
 
+    def test_actual_continuous_count_scope_reaches_one_fixed_native_original_request(self):
+        from monitor import issue_tracker_global_attempt_journal as journal
+        self.assertTrue(hasattr(journal,'_hold_continuous_owned_attempt_wire'))
+        self._exercise_real_protected_three_panel_fixture(skip_history=False,observed_cabling_insert_probe=True,
+            business_preread_probe=True,original_reserved_probe=True,receipted_intent_probe=True,
+            owned_read_gates_probe=True,owned_continuity_probe=True,continuous_launch_probe='normal')
+
+    def test_native_qualification_bounds_recursive_source_replays_without_shortening_final_checks(self):
+        self._exercise_real_protected_three_panel_fixture(skip_history=False,
+            qualification_replay_probe='bounded')
+
+    def test_native_qualification_still_rejects_whitelist_drift_at_final_projection_boundary(self):
+        self._exercise_real_protected_three_panel_fixture(skip_history=False,
+            qualification_replay_probe='whitelist-drift')
+
+    def test_original_receipt_rebind_after_continuous_count_stops_before_native_launch(self):
+        from monitor import issue_tracker_global_attempt_journal as journal
+        self.assertTrue(hasattr(journal,'_hold_continuous_owned_attempt_wire'))
+        self._exercise_real_protected_three_panel_fixture(skip_history=False,observed_cabling_insert_probe=True,
+            business_preread_probe=True,original_reserved_probe=True,receipted_intent_probe=True,
+            owned_read_gates_probe=True,owned_continuity_probe=True,continuous_launch_probe='receipt-rebind')
+
+    def test_issued_read_expiry_after_continuous_count_stops_before_native_launch(self):
+        from monitor import issue_tracker_global_attempt_journal as journal
+        self.assertTrue(hasattr(journal,'_hold_continuous_owned_attempt_wire'))
+        self._exercise_real_protected_three_panel_fixture(skip_history=False,observed_cabling_insert_probe=True,
+            business_preread_probe=True,original_reserved_probe=True,receipted_intent_probe=True,
+            owned_read_gates_probe=True,owned_continuity_probe=True,continuous_launch_probe='read-expiry')
+
     def test_actual_protected_sources_native_reads_and_c6_share_retry_admission_without_new_publication(self):
         self._exercise_real_protected_three_panel_fixture(skip_history=False,observed_cabling_insert_probe=True,
             business_preread_probe=True,original_reserved_probe=True,receipted_intent_probe=True,
@@ -642,6 +671,8 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         shared_retry_probe=False, allocation_original_identity_probe=False, allocation_retry_identity_probe=False,
         receipt_admission_rebind_probe=False,quota_namespace_rebind_probe=False,quota_retry_identity_probe=False,
         before_cabling_fixture=None,
+        continuous_launch_probe=None,
+        qualification_replay_probe=None,
         complete_preview_source_race=False,
         complete_preview_cgi=False,
     ):
@@ -864,6 +895,35 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                 self._verify_two_cycle_latest_local_commit(
                     project, args, (cycle["cycle_id"], second_cycle["cycle_id"]),
                 )
+                return
+            if qualification_replay_probe is not None:
+                from monitor import issue_tracker_stage_l_consumer as consumer
+                if qualification_replay_probe == 'whitelist-drift':
+                    real_final = consumer.validate_prod_stage_l_source_projection
+                    reached = []
+                    original_template = self.template.read_bytes()
+                    def drift(*values, **keywords):
+                        reached.append(True)
+                        self.template.write_bytes(b'changed W1 at final projection boundary')
+                        return real_final(*values, **keywords)
+                    try:
+                        with mock.patch.object(consumer,'validate_prod_stage_l_source_projection',side_effect=drift):
+                            with self.assertRaises(consumer.StageLConsumerHold):
+                                qualify_prod_stage_l(self.store,**args)
+                        self.assertEqual([True],reached)
+                    finally:
+                        self.template.write_bytes(original_template)
+                    return
+                self.assertEqual('bounded',qualification_replay_probe)
+                with mock.patch.object(consumer,'inspect_prod_stage_l_composed_sources',
+                                       wraps=consumer.inspect_prod_stage_l_composed_sources) as replay:
+                    qualified = qualify_prod_stage_l(self.store,**args)
+                self.assertEqual(2,replay.call_count,
+                    'one native qualification needs complete start/end source walks, not a third recursive walk')
+                self.assertTrue(qualified.qualified)
+                self.assertEqual({'Switch Status','Eth Link Validation','IB Link Validation'},
+                                 {item.panel for item in qualified.candidates})
+                self.assertEqual(4,len(qualified.candidates))
                 return
             qualified = qualify_prod_stage_l(self.store, **args)
             self.assertTrue(qualified.qualified)
@@ -1976,6 +2036,64 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                                             with self.assertRaises(global_journal.GlobalAttemptHold):
                                                 record_owned({**original_bundle,'business_reads':tuple(changed)})
                                             self.assertEqual(0,global_journal.inspect_global_unit(spreadsheet_token,binding,unit).attempt_count)
+                                    if continuous_launch_probe is not None:
+                                        from test_cases.test_req7_mutation_launcher import Req7MutationLauncherWorkflowTests, load as load_mutation
+                                        from monitor import issue_tracker_local_commit as local
+                                        native_mutation=Req7MutationLauncherWorkflowTests()
+                                        native_mutation.root=global_root; native_mutation.path=native_fixture.path
+                                        native_mutation.addCleanup=self.addCleanup
+                                        mutation=load_mutation(); rejected=[]; calls=[]; children=[]
+                                        import socket
+                                        bundle=fresh_bundle()
+                                        wire_response=b'HTTP/1.1 401 Denied\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}'
+                                        with native_mutation.server(wire_response,hostname='sheets.googleapis.com',
+                                                destination='sheets.googleapis.com') as (requests,errors), ExitStack() as transport:
+                                            port=socket.getaddrinfo('sheets.googleapis.com',443)[0][4][1]
+                                            def exercise():
+                                                with global_journal._hold_continuous_owned_attempt_wire(
+                                                        spreadsheet_token,binding,unit,qualified_source=qualified,store=self.store,
+                                                        writer_token=writer_token,settings=args['settings'],whitelist_snapshot=self.snapshot,
+                                                        expected_template_sha256=self.snapshot.workbook_sha256,http_root=self.root,
+                                                        whitelist_path=self.template,**bundle) as image:
+                                                    nonlocal calls,children
+                                                    self.assertEqual(1,image.attempt_count)
+                                                    calls,children=native_mutation.intercept(transport,local,owner_module,
+                                                        writer_token,spreadsheet_token,binding,image,port)
+                                                    if continuous_launch_probe=='receipt-rebind':
+                                                        original=generation_path/'RECEIPT'; raw=original.read_bytes(); inode=original.stat().st_ino
+                                                        original.rename(project/'owned-prelaunch-c6-receipt')
+                                                        original.write_bytes(raw); original.chmod(0o600)
+                                                        self.assertNotEqual(inode,original.stat().st_ino)
+                                                        self.assertEqual(raw,original.read_bytes())
+                                                    if continuous_launch_probe=='normal':
+                                                        result=mutation._send_counted_original_once(writer_token,spreadsheet_token,binding,credential,unit,image)
+                                                        self.assertEqual((1,401,'UNKNOWN'),(result.attempt_count,result.status,result.outcome))
+                                                        self.assertTrue(result.termination_confirmed)
+                                                        self.assertEqual(1,len(calls)); self.assertEqual(1,len(children))
+                                                    else:
+                                                        with ExitStack() as fault:
+                                                            if continuous_launch_probe=='read-expiry':
+                                                                original_clock=fixed_reads._monotonic
+                                                                transport.enter_context(mock.patch.object(fixed_reads,'_monotonic',
+                                                                    side_effect=lambda:original_clock()+31))
+                                                            with self.assertRaises(mutation.MutationLauncherHold) as caught:
+                                                                mutation._send_counted_original_once(writer_token,spreadsheet_token,binding,credential,unit,image)
+                                                            self.assertFalse(caught.exception.termination_confirmed)
+                                                            self.assertEqual([],calls); self.assertEqual([],children)
+                                                            rejected.append(True)
+                                            if continuous_launch_probe=='normal': exercise()
+                                            else:
+                                                with self.assertRaises(global_journal.GlobalAttemptHold): exercise()
+                                                self.assertEqual([True],rejected)
+                                            retained=global_journal.inspect_global_unit(spreadsheet_token,binding,unit)
+                                            self.assertEqual((1,'UNKNOWN'),(retained.attempt_count,retained.outcome))
+                                            self.assertEqual(c6_original,{name:(generation_path/name).read_bytes() for name in c6_original})
+                                            self.assertEqual(quota,quota_module.inspect_metadata_reservation(spreadsheet_token,binding,identity,unit))
+                                            self.assertFalse((state/(hashlib.sha256(binding.spreadsheet_id.encode('ascii')).hexdigest()+'.journal')/'ATTEMPT-2').exists())
+                                        self.assertEqual([],errors)
+                                        self.assertEqual(1 if continuous_launch_probe=='normal' else 0,len(requests))
+                                        if requests: self.assertEqual(unit.wire_bytes,requests[0][2])
+                                        return
                                     if shared_retry_probe:
                                         from types import SimpleNamespace
                                         from monitor import issue_tracker_admission as admission

@@ -7,6 +7,8 @@ settings, or send authority. Those remain separate fail-closed boundaries.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from contextlib import contextmanager
+from contextvars import ContextVar
 import hashlib
 import json
 import os
@@ -14,6 +16,8 @@ from pathlib import Path
 import stat
 
 from tools.project_contract import collection_cycle_source_slots
+
+_HELD_CYCLE_REPLAY = ContextVar('req7_held_cycle_replay', default=None)
 
 
 class CycleSourceHoldError(ValueError):
@@ -81,7 +85,7 @@ def _read_record(path):
     return document, hashlib.sha256(raw).hexdigest()
 
 
-def read_completed_cycle_evidence(store):
+def _read_completed_cycle_evidence(store):
     """Validate a held worker store's complete chain without modifying it.
 
     Every allocated sequence must have a start, launch, and terminal completion.
@@ -145,3 +149,101 @@ def read_completed_cycle_evidence(store):
         if isinstance(exc, CycleSourceHoldError):
             raise
         raise CycleSourceHoldError("collection cycle source evidence is not safe") from exc
+
+
+def read_completed_cycle_evidence(store):
+    """Replay normally, or verify every original input in an actual held scope."""
+    active = _HELD_CYCLE_REPLAY.get()
+    if active is not None and active[0] is store:
+        active[1]()
+        result = active[2]
+        active[1]()
+        return result
+    return _read_completed_cycle_evidence(store)
+
+
+@contextmanager
+def _hold_completed_cycle_replay(store):
+    """One semantic replay while ALL actual worker inputs remain original.
+
+    Every lookup still checks original parent/file FDs, complete record names,
+    exact stat (including ctime), bytes, actual store binding and held gate.
+    No caller witness/verifier, persistent cache, archive-read exemption or GO.
+    Other native source readers must still replay their own provenance.
+    """
+    fds=[]; parents=[]; files=[]; key=None; failed=False
+    def identity(info):
+        return (info.st_dev,info.st_ino,info.st_mode,info.st_uid,info.st_gid,
+                info.st_nlink,info.st_size,info.st_mtime_ns,info.st_ctime_ns)
+    def directory_identity(info):
+        return (info.st_dev,info.st_ino,info.st_mode,info.st_uid,info.st_gid)
+    def remember(fd):
+        fds.append((fd,os.fstat(fd).st_dev,os.fstat(fd).st_ino))
+        return fd
+    def open_parent(path):
+        if not path.is_absolute() or '..' in path.parts:
+            raise CycleSourceHoldError('cycle input parent is not absolute')
+        fd=remember(os.open('/',os.O_RDONLY|os.O_CLOEXEC|os.O_DIRECTORY|os.O_NOFOLLOW))
+        for part in path.parts[1:]:
+            child=remember(os.open(part,os.O_RDONLY|os.O_CLOEXEC|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=fd))
+            parents.append((fd,part,child,directory_identity(os.fstat(child))))
+            fd=child
+        return fd
+    def pin(parent,name):
+        fd=remember(os.open(name,os.O_RDONLY|os.O_CLOEXEC|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=parent))
+        info=os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1 or not 0<info.st_size<=16*1024*1024:
+            raise CycleSourceHoldError('cycle input is not bounded and original')
+        raw=os.pread(fd,info.st_size+1,0)
+        if len(raw)!=info.st_size: raise CycleSourceHoldError('cycle input changed during pin')
+        files.append((parent,name,fd,identity(info),raw))
+    def binding():
+        return tuple(getattr(store,name) for name in (
+            'root_status_dir','status_dir','records_dir','witness_path',
+            'project_identity','project_key','scope','source'))
+    try:
+        if _HELD_CYCLE_REPLAY.get() is not None:
+            raise CycleSourceHoldError('nested cycle reuse is not supported')
+        store._require_gate(); original_binding=binding()
+        gate=store.gate; lock_fd=gate._lock_fd; lock_identity=directory_identity(os.fstat(lock_fd))
+        records=Path(store.records_dir); witness=Path(store.witness_path)
+        record_fd=open_parent(records); record_identity=identity(os.fstat(record_fd))
+        names=frozenset(os.listdir(record_fd))
+        for name in sorted(names): pin(record_fd,name)
+        witness_parent=open_parent(witness.parent)
+        witness_missing=witness.name not in os.listdir(witness_parent)
+        if not witness_missing: pin(witness_parent,witness.name)
+        def verify():
+            store._require_gate()
+            if (binding()!=original_binding or store.gate is not gate or gate._lock_fd!=lock_fd
+                    or directory_identity(os.fstat(lock_fd))!=lock_identity):
+                raise CycleSourceHoldError('cycle store or gate binding changed')
+            for parent,name,fd,info in parents:
+                if (directory_identity(os.fstat(fd))!=info
+                        or directory_identity(os.stat(name,dir_fd=parent,follow_symlinks=False))!=info):
+                    raise CycleSourceHoldError('cycle input ancestor changed')
+            if identity(os.fstat(record_fd))!=record_identity or frozenset(os.listdir(record_fd))!=names:
+                raise CycleSourceHoldError('complete cycle record namespace changed')
+            if witness_missing and witness.name in os.listdir(witness_parent):
+                raise CycleSourceHoldError('cycle witness appeared during replay')
+            for parent,name,fd,info,raw in files:
+                if (identity(os.fstat(fd))!=info
+                        or identity(os.stat(name,dir_fd=parent,follow_symlinks=False))!=info
+                        or os.pread(fd,len(raw)+1,0)!=raw):
+                    raise CycleSourceHoldError('original cycle input changed')
+            store._require_gate()
+        verify(); result=_read_completed_cycle_evidence(store); verify()
+        key=_HELD_CYCLE_REPLAY.set((store,verify,result))
+        yield verify
+        verify()
+    except Exception:
+        failed=True
+    finally:
+        if key is not None: _HELD_CYCLE_REPLAY.reset(key)
+        for fd,device,inode in reversed(fds):
+            try:
+                info=os.fstat(fd)
+                if (info.st_dev,info.st_ino)==(device,inode): os.close(fd)
+                else: failed=True
+            except OSError: failed=True
+    if failed: raise CycleSourceHoldError('held cycle original replay is unsafe')

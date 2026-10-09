@@ -708,6 +708,87 @@ def record_owned_receipted_attempt_intent(
     return result
 
 
+@contextmanager
+def _hold_continuous_owned_attempt_wire(
+    token,binding,unit,*,writer_token,identity_response,history_response,business_reads,
+    qualified_source,store,settings,whitelist_snapshot,expected_template_sha256,
+    http_root,whitelist_path,headers_response,whitelist_response,metadata_response,
+):
+    """First original C6 count through fixed launch; necessary, NOT GO.
+
+    The original source/receipt/audit/quota descriptors and actual issued read
+    deadlines remain held through every live wire check, including pre-Popen.
+    No caller verifier/permission flag is accepted. Existing UNKNOWN requires
+    the separate shared retry cadence; this scope cannot bypass it. Neither
+    visible quota nor a consumed claim proves G1, FIFO or COMPLETE.
+    """
+    from pathlib import Path
+    from monitor.issue_tracker_stage_l_consumer import _hold_original_replay_inputs
+    from monitor.issue_tracker_receipt_snapshot import _hold_history_originals
+    from monitor.issue_tracker_history_preread_journal import observe_owned_business_continuity
+    from monitor.issue_tracker_remote_history_match import observe_owned_unit_read_gates
+    from monitor.issue_tracker_cycle_source import _hold_completed_cycle_replay
+    failed=False
+    try:
+        local._owner(writer_token)
+        if inspect_global_unit(token,binding,unit).attempt_count != 0: raise GlobalAttemptHold()
+        def facts():
+            continuity=observe_owned_business_continuity(writer_token,token,binding,unit,
+                identity_response=identity_response,history_response=history_response,business_reads=business_reads)
+            gates=observe_owned_unit_read_gates(writer_token,token,binding,unit,
+                whitelist_snapshot=whitelist_snapshot.whitelist,identity_response=identity_response,
+                headers_response=headers_response,whitelist_response=whitelist_response,metadata_response=metadata_response)
+            originals=_receipted_original_facts(token,binding,gates.identity,unit,
+                qualified_source=qualified_source,store=store,writer_token=writer_token,settings=settings,
+                whitelist_snapshot=whitelist_snapshot,expected_template_sha256=expected_template_sha256,
+                http_root=http_root,whitelist_path=whitelist_path)
+            if (observe_owned_business_continuity(writer_token,token,binding,unit,
+                    identity_response=identity_response,history_response=history_response,business_reads=business_reads)!=continuity
+                    or observe_owned_unit_read_gates(writer_token,token,binding,unit,
+                        whitelist_snapshot=whitelist_snapshot.whitelist,identity_response=identity_response,
+                        headers_response=headers_response,whitelist_response=whitelist_response,metadata_response=metadata_response)!=gates):
+                raise GlobalAttemptHold()
+            return continuity,gates,originals
+        with _hold_original_replay_inputs(store,Path(store.project_identity),whitelist_path) as verify_inputs, \
+                _hold_completed_cycle_replay(store) as verify_cycles, \
+                _hold_history_originals(writer_token) as verify_receipts, \
+                _hold_receipted_audit_originals(writer_token,token,binding,unit) as verify_audits:
+            original=facts()
+            with _hold_reserved_quota_originals(token,binding,original[1].identity,unit) as verify_quota:
+                def verify_originals():
+                    verify_inputs(); verify_cycles(); verify_receipts(); verify_audits(); verify_quota()
+                def verify_sources():
+                    verify_originals()
+                    if facts()!=original: raise GlobalAttemptHold()
+                    verify_originals()
+                # facts() has just replayed the actual native source and both
+                # issued-read gates. Count once under those original owners;
+                # nesting the separate count primitive would replay the same
+                # unchanged chain again and consume the original read budget.
+                verify_originals()
+                result=_observe(token,binding,unit,True)
+                if (result.attempt_count!=1 or
+                        inspect_global_unit(token,binding,unit)!=result): raise GlobalAttemptHold()
+                verify_sources()
+                with _hold_counted_original_wire(writer_token,token,binding,unit) as image:
+                    with _WIRE_CLAIM_GUARD:
+                        issued=_LIVE_WIRE_CLAIMS.get(image)
+                        if issued is None: raise GlobalAttemptHold()
+                        verify_wire=issued[-2]
+                        def verify():
+                            verify_wire(); verify_sources(); verify_wire()
+                        _LIVE_WIRE_CLAIMS[image]=issued[:-2]+(verify,issued[-1])
+                    # The post-count full replay above remains current only
+                    # while every original stays held. Actual consumption,
+                    # last pre-Popen, post-send and scope exit still replay
+                    # full sources and check issued deadlines independently.
+                    verify_wire(); verify_originals(); verify_wire()
+                    yield image
+                    verify()
+    except Exception: failed=True
+    if failed: raise GlobalAttemptHold()
+
+
 def record_continuous_owned_attempt_intent(
     token,binding,unit,*,writer_token,identity_response,history_response,business_reads,
     qualified_source,store,settings,whitelist_snapshot,expected_template_sha256,

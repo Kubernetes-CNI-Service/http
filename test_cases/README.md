@@ -1348,6 +1348,21 @@ FD 不关闭。真实冷进程、失败注入及原像逐字节不变覆盖实�
 隔离子进程只核 ACTION/WIRE 一致性，不导入父侧 YAML/workbook 编译依赖。
 这些仍是必要交接证据，不是新鲜准入、共享 cadence、隐藏 quota 或 M=6 发送证明。
 
+连续首次计数至固定启动的私有边界持续持有原 worker/config/W1、C6、审计和配额，
+签发读取期限在计数、实际消费、最终 pre-Popen、发送后和退出时仍按原规则核验。
+仅在实际 worker gate 与完整 records/witness 原 FD、名字、stat（含 ctime）和字节
+全部保持不变的作用域内复用一次周期语义解析；每次读取仍复核所有原件，退出即撤销。
+其余来源、归档与准入语义仍由原校验器执行，不接受调用者快照／verifier／GO 标志。
+资格判定对自己刚完成读取的 HOLD 来源使用内部候选投影，避免同一边界嵌套第三次
+完整来源读取；公开预览仍重读调用者来源，资格返回前仍完整重读三域来源、IB 与
+周期链。内部投影仅产生 HOLD 诊断值，不是缓存的来源证明或写入许可；Switch W1
+matched-rule 输入仍重开比较。独立 literal direct、首尾两次真实来源读取 workflow
+和末端 W1 漂移拒绝保留原期限，正常固定发送及收据／读取漂移负例仍须执行。
+首次计数执行一次原 `_observe`，前后完整来源核验不变；计数后的来源换 inode 或
+原读取过期必须零 child／请求并保留 count=1、UNKNOWN 和已消费 CLAIM。
+独立 direct 与真实 worker→C6→原读取→计数→固定 TLS child workflow 不代表整项
+REQ7、默认在线 worker、共享重试、隐藏配额、FIFO 或 COMPLETE 已完成。
+
 交接同时借出原 ACTION-PREIMAGE FD。`NativeOriginalSheetsMutationUnit` 对两个
 原只读、私有、单链接、受限 regular FD 各 pread 一次，检查前后精确身份，
 从原 ACTION/WIRE 恢复一致性投影，不重编译源文件、不重开路径；失败和元数据
@@ -1499,3 +1514,10 @@ C6→新周期→原窗口重放验证 full 来源集合不被裁剪、原周期
 并准确保留已确证的子进程终止结果，不创建第二次或修复原件。独立 direct 和
 真实原生 TLS/固定子进程 workflow 保留原 60 秒预算及 M=6 测试；这只是
 原件交接安全切片，不是完整准入、G1、FIFO/APPLIED/COMPLETE 或 REQ7 完成证明。
+
+首次连续原件计数的私有交接须把真实 worker/config/W1、C6 收据、审计和配额
+原 FD 持有到固定启动器的 pre-Popen、发送后和 context 退出；实际发行读取的
+原期限也在这些边界重核。计数后同字节收据替换或读取过期必须零子进程/请求，
+保留 count=1、UNKNOWN 和 consumed CLAIM。已有 UNKNOWN 不得借首次入口
+绕过共享重试节奏；该入口不接收调用者 verifier 或 GO 标志，也不启用默认
+在线 worker，不证明隐藏 PROJECT 库存/G1、FIFO/APPLIED/COMPLETE。

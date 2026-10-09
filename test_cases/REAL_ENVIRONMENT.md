@@ -2156,6 +2156,11 @@ pread，检查 mode/uid/nlink/大小和前后身份，原一致性不重编译�
 
 ## TC-REAL-REQ7-COUNTED-MUTATION-LAUNCHER-001 — 原次数固定子进程监督
 
+- 来源投影重放补充（**NOT RUN / REAL_ENV REQUIRED**）：资格判定内部仅复用自己刚读取的 HOLD 来源来构造候选，公开预览仍重读；返回前完整来源／IB／周期链检查及 Switch W1 matched-rule 重开保留，原读取期限不放宽。现场保留正常发送、末端 W1 漂移、同字节收据替换、原读取过期、代表性中断与冷恢复；未省略或合并任何原场景。替代证据仅为独立 literal direct 与实际多脚本 workflow，不证明真实 Cloud、设备或断电；原授权、证据、确认人、清理及剩余风险要求不变。
+
+- 连续首次计数至启动补充（**NOT RUN / REAL_ENV REQUIRED**）：保留 worker/config/W1、C6、审计、配额原件与实际发行读取的期限跨 durable count、pre-Popen、发送后和退出边界；计数后同字节 C6 收据换 inode、原读取过期须零 child/请求，保留原 count=1/UNKNOWN/consumed CLAIM，已有 UNKNOWN 不能绕过共享重试节奏。独立 direct 与 protected worker→C6→实际 native reads→count→固定 TLS child workflow 仅为本地替代证据；正常、关键提交、代表性中断、冷恢复和失败安全状态全部保留，无场景省略/合并，真实 Cloud/设备/断电仍未验证。保存精确树、原件 stat/SHA、真实请求计数、完整日志及退出码；原授权、必要研发确认、清理、残余风险和确认人要求不变，不构成 G1/发送许可。
+- 周期解析复用补充（**NOT RUN / REAL_ENV REQUIRED**）：仅实际 gate 持有且完整 worker records/witness 原件的目录、文件 FD、命名边、stat/ctime 与字节始终一致时复用一次语义解释；每次引用复核全部原件，作用域退出撤销，其他真实来源语义与读取期限不豁免。原件同字节换 inode、目录 ABA、见证原 inode 改写后恢复 mtime、缺失原件及 store/gate 改绑须 HOLD，不修补。全部既有正常、提交、中断、冷恢复与失败安全状态保留，无场景省略或合并；独立 direct 和实际多脚本流程仅为本地替代证据，不证明真实 Cloud、设备或断电。残余风险与精确授权、研发确认、原件证据、仅自有副本清理、确认人及发布门禁沿用本卡。
+
 - 每次语义重放两侧复核补充（**NOT RUN / REAL_ENV REQUIRED**）：在最后一次 pre-Popen 计数/CLAIM 重放返回边界，原 ATTEMPT 同 inode 写后恢复字节/mtime 仍须零 Popen、零 child、零请求，并保留原 UNKNOWN/count/consumed CLAIM；不得只在发送后的检查拒绝。保存复核前后原 FD/stat/ctime/字节摘要和实际请求计数。替代证据仅为独立 direct 与自有 loopback TLS/固定 child workflow；正常流程、关键提交、中断、冷恢复和失败安全状态全部保留，无省略或合并，真实 Cloud/设备/断电未验证，原授权、确认人要求、清理范围及残余风险不变。
 
 - 首次计数解释窗口补充（**NOT RUN / REAL_ENV REQUIRED**）：动作、WIRE、HEADER、INITIALIZED 和完整 ATTEMPT 前缀须在首次解释计数前固定原 FD/身份；在读取返回边界换 inode 或原 inode 写后恢复字节/mtime，均不得发行 live CLAIM 像、Popen 或请求，原计数及 UNKNOWN 保留。独立 direct 与真实固定 native workflow 是本地替代证据，不证明真实设备或断电；本卡正常/关键提交/代表性中断/冷恢复/失败安全状态全部保留，没有省略或合并，原授权、证据、清理、残余风险及确认要求不变。

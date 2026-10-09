@@ -1,6 +1,7 @@
 """REQ7 C23→C25 read-only handoff: real worker evidence, no operations."""
 
 import copy
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -25,11 +26,114 @@ def completed(store, token):
 
 
 class IssueTrackerCycleSourceTests(unittest.TestCase):
+    def test_scoped_cycle_verifier_checks_originals_without_replaying_semantics(self):
+        from monitor import issue_tracker_cycle_source as source
+        completed(self.store, TOKEN_1)
+        path = self.store.completion_path(1)
+        real = self.store._validate_completion_record
+        rejected = []
+        with mock.patch.object(self.store, '_validate_completion_record', wraps=real) as replay:
+            with self.assertRaises(CycleSourceHoldError):
+                with source._hold_completed_cycle_replay(self.store) as verify:
+                    self.assertTrue(callable(verify), 'held boundary must expose its actual original verifier')
+                    verify()
+                    self.assertEqual(1, replay.call_count)
+                    raw = path.read_bytes()
+                    path.rename(Path(self.directory.name) / 'owned-verifier-original')
+                    path.write_bytes(raw)
+                    with self.assertRaises(CycleSourceHoldError):
+                        verify()
+                    self.assertEqual(1, replay.call_count)
+                    rejected.append(True)
+        self.assertEqual([True], rejected, 'the actual verifier must be reached before rejection')
+
+    def test_scoped_cycle_replay_rejects_store_binding_changes(self):
+        from monitor import issue_tracker_cycle_source as source
+        completed(self.store, TOKEN_1)
+        rejected = []
+        with self.assertRaises(CycleSourceHoldError):
+            with source._hold_completed_cycle_replay(self.store):
+                self.store.project_key = 'foreign-project'
+                with self.assertRaises(CycleSourceHoldError):
+                    source.read_completed_cycle_evidence(self.store)
+                rejected.append(True)
+        self.assertEqual([True], rejected)
+
+    def test_scoped_cycle_replay_missing_original_is_a_typed_hold_without_repair(self):
+        from monitor import issue_tracker_cycle_source as source
+        completed(self.store,TOKEN_1); path=self.store.completion_path(1); rejected=[]
+        with self.assertRaises(CycleSourceHoldError):
+            with source._hold_completed_cycle_replay(self.store):
+                path.unlink()
+                with self.assertRaises(CycleSourceHoldError): source.read_completed_cycle_evidence(self.store)
+                rejected.append(True)
+        self.assertEqual([True],rejected)
+        self.assertFalse(path.exists(),'missing originals must never be reconstructed')
+
+    def test_scoped_cycle_replay_reuses_only_the_validated_held_original_chain(self):
+        from monitor import issue_tracker_cycle_source as source
+        self.assertTrue(hasattr(source, '_hold_completed_cycle_replay'))
+        start = completed(self.store, TOKEN_1)
+        real = self.store._validate_completion_record
+        with mock.patch.object(self.store, '_validate_completion_record', wraps=real) as replay:
+            with source._hold_completed_cycle_replay(self.store):
+                for _ in range(3):
+                    evidence = source.read_completed_cycle_evidence(self.store)
+                    self.assertEqual((start['cycle_id'], 1, 'prod'),
+                                     (evidence[0].cycle_id,evidence[0].sequence,evidence[0].scope))
+                self.assertEqual(1,replay.call_count,
+                                 'unchanged held originals need one semantic replay, not recursive reparsing')
+            self.assertEqual(start['cycle_id'],source.read_completed_cycle_evidence(self.store)[0].cycle_id)
+            self.assertEqual(2,replay.call_count,'scope exit must revoke all reuse')
+
+    def test_scoped_cycle_replay_refuses_same_byte_completion_rebinding(self):
+        from monitor import issue_tracker_cycle_source as source
+        self.assertTrue(hasattr(source, '_hold_completed_cycle_replay'))
+        completed(self.store,TOKEN_1); path=self.store.completion_path(1)
+        original=path.read_bytes(); inode=path.stat().st_ino; rejected=[]
+        with self.assertRaises(CycleSourceHoldError):
+            with source._hold_completed_cycle_replay(self.store):
+                path.rename(Path(self.directory.name)/'owned-original-completion')
+                path.write_bytes(original)
+                self.assertNotEqual(inode,path.stat().st_ino)
+                with self.assertRaises(CycleSourceHoldError): source.read_completed_cycle_evidence(self.store)
+                rejected.append(True)
+        self.assertEqual([True],rejected); self.assertEqual(original,path.read_bytes())
+
+    def test_scoped_cycle_replay_refuses_record_namespace_aba(self):
+        from monitor import issue_tracker_cycle_source as source
+        self.assertTrue(hasattr(source, '_hold_completed_cycle_replay'))
+        completed(self.store,TOKEN_1); path=self.store.completion_path(1)
+        original=path.read_bytes(); inode=path.stat().st_ino; rejected=[]
+        with self.assertRaises(CycleSourceHoldError):
+            with source._hold_completed_cycle_replay(self.store):
+                away=Path(self.directory.name)/'owned-record-aba'
+                path.rename(away); away.rename(path)
+                self.assertEqual(inode,path.stat().st_ino)
+                with self.assertRaises(CycleSourceHoldError): source.read_completed_cycle_evidence(self.store)
+                rejected.append(True)
+        self.assertEqual([True],rejected); self.assertEqual(original,path.read_bytes())
+
+    def test_scoped_cycle_replay_refuses_same_inode_witness_rewrite_with_restored_mtime(self):
+        from monitor import issue_tracker_cycle_source as source
+        self.assertTrue(hasattr(source, '_hold_completed_cycle_replay'))
+        completed(self.store,TOKEN_1); path=self.store.witness_path
+        original=path.read_bytes(); info=path.stat(); rejected=[]
+        with self.assertRaises(CycleSourceHoldError):
+            with source._hold_completed_cycle_replay(self.store):
+                path.write_bytes(b'x'*len(original)); path.write_bytes(original)
+                os.utime(path,ns=(info.st_atime_ns,info.st_mtime_ns))
+                self.assertEqual(info.st_ino,path.stat().st_ino)
+                self.assertEqual(info.st_mtime_ns,path.stat().st_mtime_ns)
+                with self.assertRaises(CycleSourceHoldError): source.read_completed_cycle_evidence(self.store)
+                rejected.append(True)
+        self.assertEqual([True],rejected); self.assertEqual(original,path.read_bytes())
+
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         gate = WORKER.CollectionGate(
-            PROJECT_IDENTITY, "prod", status_dir=Path(self.directory.name),
+            PROJECT_IDENTITY, "prod", status_dir=Path(self.directory.name).resolve(),
             enforce_cooldown=False, lane="collection",
         )
         self.gate = gate.__enter__()

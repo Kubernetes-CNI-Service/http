@@ -657,6 +657,30 @@ def project_prod_stage_l_source_candidates(
         whitelist_snapshot=whitelist_snapshot,
         whitelist_path=whitelist_path, writer_token=writer_token,
     )
+    return _project_observed_stage_l_source_candidates(
+        source, store, http_root=http_root, settings=settings,
+        whitelist_snapshot=whitelist_snapshot, whitelist_path=whitelist_path,
+        writer_token=writer_token,
+    )
+
+
+def _project_observed_stage_l_source_candidates(
+    source, store, *, http_root, settings, whitelist_snapshot,
+    whitelist_path, writer_token=None,
+):
+    """Project an observed HOLD snapshot, not provenance or qualification.
+
+    The public preview still reopens its caller's sources. Native qualification
+    instead uses its own just-observed snapshot and retains the full public
+    projection/source replay at its final boundary. This removes a redundant
+    recursive walk, without caching paths, accepting a caller witness as C5,
+    relaxing read freshness, or omitting the final IB and cycle-chain checks.
+    Switch matched-rule inputs below are still reopened and compared.
+    """
+    if (type(source) is not ProdStageLComposedSourceSnapshot
+            or source.qualified is not False or source.state != 'hold'
+            or source.reason != 'qualification_not_implemented'):
+        raise StageLConsumerHold('observed projection has no HOLD source snapshot')
     switch = source.switch_ib_source.switch_source
     ib = source.switch_ib_source.ib_source
     recorded_at_utc = ib.window.recorded_at_utc
@@ -839,7 +863,7 @@ def qualify_prod_stage_l(
             whitelist_snapshot=whitelist_snapshot,
             whitelist_path=whitelist_path, writer_token=writer_token,
         )
-        projection = project_prod_stage_l_source_candidates(
+        projection = _project_observed_stage_l_source_candidates(
             source, store, http_root=root, settings=settings,
             whitelist_snapshot=whitelist_snapshot,
             whitelist_path=whitelist_path, writer_token=writer_token,

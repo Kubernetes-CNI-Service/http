@@ -39,6 +39,25 @@ def unit(**changes):
 
 
 class Req7GlobalAttemptJournalTests(unittest.TestCase):
+    def test_continuous_first_count_wire_scope_refuses_a_preexisting_unknown_attempt(self):
+        self.assertTrue(hasattr(self.module,'_hold_continuous_owned_attempt_wire'),
+            'fresh original C6 scopes must remain held through fixed launch; bare count is not this handoff')
+        with Req7GlobalAttemptJournalWorkflowTests.counted_wire_owners(self) as (writer,owner,target):
+            saved={p.name:p.read_bytes() for p in self.store.iterdir()}; issued=[]
+            with self.assertRaises(self.module.GlobalAttemptHold):
+                with self.module._hold_continuous_owned_attempt_wire(owner,target,self.value,
+                    writer_token=writer,identity_response=None,history_response=None,business_reads=(),
+                    qualified_source=None,store=None,settings=None,whitelist_snapshot=None,
+                    expected_template_sha256='a'*64,http_root=self.root,whitelist_path=self.root/'not-used',
+                    headers_response=None,whitelist_response=None,metadata_response=None) as image:
+                    issued.append(image)
+            self.assertEqual([],issued)
+            self.assertEqual(saved,{p.name:p.read_bytes() for p in self.store.iterdir()})
+            seen=self.module.inspect_global_unit(owner,target,self.value)
+            self.assertEqual((1,'UNKNOWN'),(seen.attempt_count,seen.outcome))
+            self.assertFalse((self.store/'ATTEMPT-2').exists())
+            self.assertFalse((self.locks/(hashlib.sha256(TARGET.encode()).hexdigest()+'.dispatch')).exists())
+
     def test_live_count_verification_rechecks_originals_after_its_semantic_read(self):
         with Req7GlobalAttemptJournalWorkflowTests.counted_wire_owners(self) as (writer,owner,target):
             path=self.store/'ATTEMPT-1'; raw=path.read_bytes(); original=path.stat()

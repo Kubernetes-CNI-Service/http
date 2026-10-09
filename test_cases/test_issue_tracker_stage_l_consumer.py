@@ -59,6 +59,51 @@ class ProdStageLFixture(unittest.TestCase):
 
 
 class ProdStageLConsumerDirectTests(ProdStageLFixture):
+    def test_observed_projection_is_literal_hold_only_and_preserves_switch_rechecks(self):
+        from dataclasses import replace
+        from monitor import issue_tracker_stage_l_consumer as consumer
+        from monitor.issue_tracker_ib_runtime import IbKWindow, IbWhitelistedKWindow
+        from monitor.issue_tracker_switch_runtime import ProdEthActivityKWindow, ProdSwitchKWindow
+        project = getattr(consumer, '_project_observed_stage_l_source_candidates', None)
+        self.assertTrue(callable(project), 'qualification must project its already observed source without recursive requalification')
+        switch = consumer.ProdStageLSourceSnapshot(
+            ('cycle-one',), ('a'*64,), 'b'*64, 'c'*64, 'd'*64, ())
+        row = IbReportLink('Link Down', ('leaf01','1/1','server01','mlx5_0'),
+                           ('',''), 'Missing_Links', 2)
+        ib = IbWhitelistedKWindow(IbKWindow('history_sufficient','',1,1,
+            ('cycle-one',),('e'*64,),'f'*64,(row,),recorded_at_utc='2026-09-26T04:20:00Z'),
+            'd'*64,'c'*64,(row,),())
+        eth = ProdEthActivityKWindow(('cycle-one',),('a'*64,),('0'*64,),(),(),
+                                    'b'*64,'c'*64,'d'*64)
+        source = consumer.ProdStageLComposedSourceSnapshot(
+            consumer.ProdStageLBoundSourceSnapshot(switch,ib),eth,())
+        windows = [ProdSwitchKWindow(slot,('cycle-one',),('a'*64,),(),(),
+            ('1'*64,),(),'b'*64,'c'*64,'d'*64)
+            for slot in ('ethernet/prod','nvlink/prod')]
+        args = dict(http_root=self.root,settings=self.settings,
+                    whitelist_snapshot=self.snapshot,whitelist_path=self.template)
+        with mock.patch.object(consumer,'read_prod_switch_k_window',side_effect=windows) as reads:
+            result = project(source,self.store,**args)
+        self.assertEqual(2,reads.call_count)
+        self.assertFalse(result.qualified)
+        self.assertEqual('hold',result.state)
+        self.assertEqual('qualification_not_implemented',result.reason)
+        self.assertEqual(('cycle-one',),result.cycle_ids)
+        self.assertEqual((),result.whitelist_skips)
+        self.assertEqual(1,len(result.candidates))
+        literal = result.candidates[0]
+        self.assertEqual(('ib_cabling','leaf01','1/1','Link Down'),literal.activity_key)
+        self.assertEqual(('leaf01','1/1','server01','mlx5_0'),literal.expected_endpoints)
+        self.assertEqual(('','','',''),literal.actual_endpoints)
+        self.assertEqual('Missing_Links!2: leaf01:1/1 -> server01:mlx5_0',literal.evidence_description)
+        self.assertFalse(literal.qualified)
+        with self.assertRaises(consumer.StageLConsumerHold):
+            project(replace(source,qualified=True),self.store,**args)
+        with mock.patch.object(consumer,'read_prod_switch_k_window',
+                               return_value=replace(windows[0],template_sha256='2'*64)):
+            with self.assertRaises(consumer.StageLConsumerHold):
+                project(source,self.store,**args)
+
     def test_original_manual_source_projection_preserves_full_digests_and_exact_panel_decisions(self):
         from copy import deepcopy
         from monitor import issue_tracker_stage_l_consumer as consumer

@@ -35,6 +35,23 @@ SCRIPTS = {
 
 
 class Req7TransportManifestCandidateTests(unittest.TestCase):
+    def test_continuous_original_count_to_native_launch_registers_the_actual_cross_script_boundary(self):
+        manifest = json.loads((ROOT/'test_cases/script_test_manifest.json').read_text())
+        workflow = next(item for item in manifest['workflows']
+                        if item['id']=='req7_protected_original_receipt_business_count')
+        required = {'monitor/issue_tracker_global_attempt_journal.py',
+                    'monitor/issue_tracker_stage_l_consumer.py',
+                    'monitor/issue_tracker_receipt_snapshot.py',
+                    'monitor/issue_tracker_history_read_launcher.py',
+                    'monitor/issue_tracker_mutation_launcher.py',
+                    'monitor/issue_tracker_attempt_supervision.py',
+                    'monitor/issue_tracker_tls_inputs.py'}
+        self.assertTrue(required <= set(workflow['members']),
+                        'the protected C6/count boundary must include the real fixed mutation launcher')
+        self.assertTrue({'test_cases.test_issue_tracker_stage_l_consumer_workflow',
+                         'test_cases.test_req7_global_attempt_journal',
+                         'test_cases.test_req7_mutation_launcher'} <= set(workflow['tests']))
+
     def test_old_c6_retry_workflow_registers_actual_source_producers_and_original_unit_identity(self):
         manifest=json.loads((ROOT/'test_cases/script_test_manifest.json').read_text())
         workflow=next(item for item in manifest['workflows']
