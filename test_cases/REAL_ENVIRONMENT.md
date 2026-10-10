@@ -2424,6 +2424,8 @@ generation/publish 及 UNKNOWN 下改 action/wire 均 HOLD，不计作 COMPLETE 
 
 ## TC-REAL-REQ7-ORIGINAL-RECONCILIATION-001 — 已尝试原单元的固定读对账
 
+- 采集完成后独立 lane 边界补充（**NOT RUN / REAL_ENV REQUIRED**）：status 和本地发布仅在实际 completion 持久化后执行，各自普通异常不得跳过另一 lane 或把已完成采集重新标为失败；operator interrupt 仍传播，诊断不得输出秘密异常正文。保留正常 not-due、status OSError/ValueError、本地 ValueError、关键完成边界、代表性中断、冷恢复与失败安全状态。本地 independent direct 和真实 worker/gate/emitter/三 cron workflow 仅证明 dispatch 边界，不代替实际本地 C6、默认在线编排、设备/Cloud/断电或当前 full/check。无场景省略或合并，无新的风险接受确认人；原现场授权、研发确认与发布门禁不变。
+
 - 首次目标绑定补充：仅从实际项目 owner 下的原 config 与固定 root 枚举建立 locator，不接受 caller target/document/path；旧 inspect 必须仍持有非空原 binding。保留正常 root/RO-bind、禁用/空枚举、读间同字节 config 换 inode 和失败安全状态；本地 native owner/fixed-FD 仅为替代开发证据，现场仍 NOT RUN。无场景省略/合并、无新的风险接受确认人或现场权限，绑定本身不授予发送/NEW。
 
 - 状态：**NOT RUN / REAL_ENV REQUIRED**；对应 C-19/C-23/C-25。自动化为 `test_req7_online_reconciliation` 的独立 direct 与真实 C6/OAuth/本地加密 socket 四读 workflow；不代表现场或默认在线整链闭合。

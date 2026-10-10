@@ -2108,3 +2108,13 @@ inspect API still rejects missing/invalid previous bindings BEFORE any input;
 it never silently initializes or retargets one. Independent direct and real
 owner/config/fixed-enumeration workflows cover disabled policy, empty listing
 and same-byte config replacement. Root/RO-bind field provenance remains NOT RUN.
+
+The actual collection coordinator dispatches its existing status and local
+tracker lanes independently only after durable completion. An ordinary failure
+in either cannot skip the other or relabel collection success; diagnostics do
+not echo exception contents, and KeyboardInterrupt/SystemExit still propagate.
+Independent direct cases and real worker/gate/emitter plus three cron workflows
+observe original start/launch/completion bytes before both dispatches. This
+dispatch-edge proof is not actual online reconciliation, a new send permit,
+whole REQ7 closure, field verification or current full/check. Existing local
+business, admission and publication tests retain their original expectations.

@@ -206,6 +206,7 @@
       "id": "issue-tracker-local",
       "description": "REQ-7 本地 qualified-set 与不可变 manifest 的直接及双脚本流程合同",
       "tests": [
+        "test_cases.test_req7_completion_lane_dispatch",
         "test_cases.test_issue_tracker_qualification",
         "test_cases.test_issue_tracker_manifest",
         "test_cases.test_issue_tracker_manifest_workflow",
@@ -821,6 +822,15 @@
         "test_cases.test_monitor_authority_semantic_workflow",
         "test_cases.test_ztp_monitor_watch_resilience",
         "test_cases.test_ztp_monitor_watch_runtime_workflow"
+      ]
+    },
+    {
+      "id": "req7_completion_lane_dispatch",
+      "paths": [
+        "monitor/switch-collection-worker.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_completion_lane_dispatch"
       ]
     },
     {
@@ -2770,6 +2780,7 @@
         "tools/lldp-analyze-tool/analyze_lldp.py"
       ],
       "tests": [
+        "test_cases.test_req7_completion_lane_dispatch",
         "test_cases.test_collection_cycle_contract",
         "test_cases.test_collection_cycle_handoff_workflow",
         "test_cases.test_collection_cycle_persistence",

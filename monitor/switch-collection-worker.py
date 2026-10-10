@@ -934,6 +934,22 @@ def _publish_stage_l_status_after_completion(store) -> None:
     )
 
 
+def _publish_issue_tracker_lanes_after_completion(store) -> None:
+    """Keep independent tracker failures outside durable collection success.
+
+    Each existing lane gets its own ordinary-exception boundary. Operator
+    interrupts still propagate; diagnostics never include exception content.
+    """
+    for publish, diagnostic in (
+        (_publish_stage_l_status_after_completion, "Issue Tracker Stage L status unavailable"),
+        (_publish_stage_l_local_after_completion, "Issue Tracker Stage L local publication unavailable"),
+    ):
+        try:
+            publish(store)
+        except Exception:
+            print(diagnostic, file=sys.stderr)
+
+
 def _publish_stage_l_local_after_completion(store):
     """Admit at most one automatic local C6 after a protected prod cycle.
 
@@ -3211,13 +3227,7 @@ def run_collection_cycle_coordinator(
                     "collection cycle coordinator result is invalid"
                 ) from exc
             completion = store.publish_completion(start, run_result)
-            try:
-                _publish_stage_l_status_after_completion(store)
-                _publish_stage_l_local_after_completion(store)
-            except OSError:
-                # Status is non-authoritative. Its failure cannot relabel the
-                # already durable collection-cycle completion.
-                print("Issue Tracker Stage L status unavailable", file=sys.stderr)
+            _publish_issue_tracker_lanes_after_completion(store)
             return completion["run_result"]
         finally:
             _clear_active_collector(process, COLLECTION_LANE)
