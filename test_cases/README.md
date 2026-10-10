@@ -1278,6 +1278,14 @@ RESERVATION 的八个图像屏障完成后才能 INITIALIZED；冷进程及 UNKN
 字符池保留全部可见使用量，但其他 Cloud PROJECT 不可见，仍是
 VISIBLE_ONLY_UNPROVED，不是新鲜准入、COMPLETE、结算或发送许可；真机 NOT RUN。
 
+多单元 catalog 的 metadata 预留沿实际 global journal 的原单元命名空间
+`<spreadsheet>.unit-<unit-id>.metadata` 保存，不能在 catalog 旁创建旧的
+`<spreadsheet>.metadata` 共享槽。真实 catalog/global/enrollment/History/quota
+流程验证两个未尝试单元分别落盘与只读回放、后来单元部分图像不采用／回填、
+首个原配额计数后 UNKNOWN 继续阻断后来计数。旧无 catalog 流程仍使用原共享槽，
+现有断言及预算不变。这只修正原配额的单元归属；不证明跨单元容量汇总、隐藏
+PROJECT 库存、FIFO/NEW、COMPLETE 或发送许可；现场仍 NOT RUN。
+
 `test_cases.test_req7_history_preread_journal` 在实际 spreadsheet owner 与已初始化
 且计数为 0 的全局 action/wire journal 内保存原始全尾响应、容量与
 `history_last_row_before_send`。RAW/HEADER 的六个图像屏障后才能写 marker；

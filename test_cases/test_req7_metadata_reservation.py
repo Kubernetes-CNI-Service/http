@@ -643,6 +643,116 @@ class Req7MetadataReservationNativeWorkflowTests(unittest.TestCase):
         self.assertEqual(setup.meta_plan.body, record[2]); self.assertFalse(seen.inventory_complete)
 
 
+class Req7CatalogMetadataReservationTests(unittest.TestCase):
+    """Real catalog/global/enrollment/History/quota flow, no online permission."""
+    def original_case(self):
+        from test_cases.test_req7_unit_catalog import load as load_catalog
+        from test_cases.test_req7_send_unit import inputs, load as load_composer
+        case = Req7MetadataReservationDirectTests(); case.setUp()
+        self.addCleanup(case.doCleanups)
+        case.module = load(); catalog = load_catalog(reset_dependencies=False)
+        originals = []
+        for generation, publication in (('a', 'b'), ('e', 'f')):
+            args = inputs(1)
+            args.update(sheet_id=101, history_sheet_id=105, target_nonce='a' * 64,
+                        history_nonce='d' * 64, generation_id=generation * 64,
+                        publish_id=publication * 64)
+            originals.append(load_composer().freeze_send_unit(**args))
+        return case, catalog, tuple(originals)
+
+    def initialize_catalog(self, case, catalog, token, originals):
+        with mock.patch('secrets.token_hex', side_effect=['a' * 64, 'b' * 64, 'c' * 64, 'd' * 64]):
+            case.enrollment.prepare_enrollment_journal(token, binding(), case.identity)
+        for original in originals:
+            catalog.register_pending_unit(token, binding(), original)
+        for original in originals:
+            case.global_journal.prepare_global_unit(token, binding(), original)
+            case.before.prepare_history_preread(token, binding(), original, case.plan, response(case.empty))
+
+    def reservation(self, case, token, original):
+        try:
+            return case.module.prepare_metadata_reservation(token, binding(), case.identity,
+                original, case.meta_plan, case.raw), None
+        except case.module.MetadataReservationHold as error:
+            return None, type(error).__name__
+
+    def test_catalog_fence_uses_original_unit_namespace_not_legacy_shared_slot(self):
+        case, catalog, originals = self.original_case()
+        with fixture(case.root), case.owner.spreadsheet_owner(binding()) as token:
+            self.initialize_catalog(case, catalog, token, originals)
+            observed, error = self.reservation(case, token, originals[0])
+            self.assertIsNone(error, 'genuine pending unit quota must be retainable')
+            expected = case.state / (hashlib.sha256(TARGET.encode()).hexdigest() +
+                                     '.unit-' + originals[0].unit_id + '.metadata')
+            self.assertTrue(expected.is_dir(), 'catalog quota must follow its actual global unit')
+            self.assertFalse(case.store.exists(), 'no legacy slot beside a catalog')
+            self.assertEqual({'HEADER', 'INITIALIZED', 'METADATA-RAW', 'RESERVATION'},
+                             set(os.listdir(expected)))
+            self.assertEqual(originals[0].action_digest, observed.action_digest)
+            self.assertIs(False, observed.inventory_complete)
+
+    def test_two_original_pending_units_keep_distinct_quota_images_and_replay(self):
+        from test_cases.test_req7_global_attempt_journal import original_read_files
+        case, catalog, originals = self.original_case()
+        with fixture(case.root), case.owner.spreadsheet_owner(binding()) as token:
+            self.initialize_catalog(case, catalog, token, originals)
+            observations = [self.reservation(case, token, original) for original in originals]
+            self.assertEqual([None, None], [error for _row, error in observations],
+                             'one pending quota must not poison the later original unit')
+            before = original_read_files(case.root)
+            for original, (observed, _error) in zip(originals, observations):
+                self.assertEqual(observed, case.module.inspect_metadata_reservation(
+                    token, binding(), case.identity, original))
+                self.assertEqual(original.wire_sha256, observed.wire_sha256)
+                self.assertIs(False, observed.inventory_complete)
+                self.assertFalse(hasattr(observed, 'permit'))
+            self.assertEqual(before, original_read_files(case.root))
+            self.assertEqual((0, 0), tuple(row.attempt_count for _unit, row in
+                             case.global_journal.inspect_catalog_global_units(token, binding())))
+
+    def test_partial_later_unit_quota_is_not_adopted_or_backfilled(self):
+        from test_cases.test_req7_global_attempt_journal import original_read_files
+        case, catalog, originals = self.original_case()
+        with fixture(case.root), case.owner.spreadsheet_owner(binding()) as token:
+            self.initialize_catalog(case, catalog, token, originals)
+            observed, error = self.reservation(case, token, originals[0])
+            self.assertIsNone(error)
+            partial = case.state / (hashlib.sha256(TARGET.encode()).hexdigest() +
+                                    '.unit-' + originals[1].unit_id + '.metadata')
+            partial.mkdir(mode=0o700)
+            (partial / 'RESERVATION').write_bytes(b'original interrupted quota; must survive\n')
+            (partial / 'RESERVATION').chmod(0o600)
+            before = original_read_files(case.root)
+            result, error = self.reservation(case, token, originals[1])
+            self.assertIsNone(result); self.assertEqual('MetadataReservationHold', error)
+            self.assertEqual(before, original_read_files(case.root))
+            self.assertEqual(observed, case.module.inspect_metadata_reservation(
+                token, binding(), case.identity, originals[0]))
+            self.assertEqual({'RESERVATION'}, set(os.listdir(partial)))
+
+    def test_first_reserved_count_preserves_catalog_quota_and_unknown_blocks_later_count(self):
+        from test_cases.test_req7_global_attempt_journal import original_read_files
+        case, catalog, originals = self.original_case()
+        with fixture(case.root), case.owner.spreadsheet_owner(binding()) as token:
+            self.initialize_catalog(case, catalog, token, originals)
+            observations = [self.reservation(case, token, original) for original in originals]
+            self.assertEqual([None, None], [error for _row, error in observations])
+            quota_images = {name: image for name, image in original_read_files(case.root).items()
+                            if '.metadata/' in name}
+            counted = case.global_journal.record_reserved_attempt_intent(
+                token, binding(), case.identity, originals[0])
+            self.assertEqual((1, 'UNKNOWN'), (counted.attempt_count, counted.outcome))
+            with self.assertRaises(case.global_journal.GlobalAttemptHold):
+                case.global_journal.record_reserved_attempt_intent(
+                    token, binding(), case.identity, originals[1])
+            self.assertEqual((1, 0), tuple(row.attempt_count for _unit, row in
+                             case.global_journal.inspect_catalog_global_units(token, binding())))
+            self.assertEqual(quota_images, {name: image for name, image in
+                             original_read_files(case.root).items() if '.metadata/' in name})
+            self.assertEqual(observations[0][0], case.module.inspect_metadata_reservation(
+                token, binding(), case.identity, originals[0]))
+
+
 def _run_owned_count_child(command,count):
     """Keep the original command, 5s budget and error; retain native phases."""
     started=time.monotonic()

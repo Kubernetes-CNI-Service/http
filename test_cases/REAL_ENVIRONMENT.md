@@ -2344,6 +2344,8 @@ generation/publish 及 UNKNOWN 下改 action/wire 均 HOLD，不计作 COMPLETE 
 
 ## TC-REAL-REQ7-METADATA-RESERVATION-001 — 原 batch 的永久 fence 持久预算
 
+- catalog 原单元命名空间补充（**NOT RUN / REAL_ENV REQUIRED**）：保留两个原始 pending 单元各自 quota 落盘／只读回放、后来 quota 中断与首个计数后 UNKNOWN 安全状态；quota 必须跟随原 global journal 的 `.unit-<unit-id>.metadata`，不得创建旧共享槽污染 catalog、采用部分图像或重分配 fence。旧单元流程、八个屏障、冷恢复和原授权边界不变；本地真实多脚本文件流程不是跨单元完整容量／隐藏 PROJECT／真实 Cloud 或断电验收。不省略／合并原场景，证据、清理和残余风险沿用本卡。
+
 - 共享 retry 原配额补充（**NOT RUN / REAL_ENV REQUIRED**）：保留正常 retry 及持久次数增加后原配额 HEADER 同字节替换的场景；后置身份丢失须在配对 COUNT 前 HOLD，保留未配对 INTENT、已计 UNKNOWN、C6／业务／C25／outbox 原像，后续所有 lane 保持阻断，不补建或回滚。本地 direct 只隔离原 quota/count 边界，实际 C5/C6→原读取→共享事务 workflow 才见证跨脚本行为；均不证明断电、真实 Cloud、旧周期 R2 或发送准入。没有删减或合并既有场景，本卡原授权、证据、清理和未验证风险保持不变。
 
 - 原配额计数连续性补充（**NOT RUN / REAL_ENV REQUIRED**）：现场须保留正常计数、计数前原件缺失及持久计数后同字节替换目录／HEADER 的独立预期；后置替换必须 HOLD，并保留已计 UNKNOWN、原配额和替换前后证据，不回退或重建。本地 direct、六个冷进程及真实受保护 C5/C6 workflow 只验证自有隔离夹具中的原 FD 身份连续性，不冒充断电、真实设备、历史排他或完整 G1 库存验收。未省略或合并原场景；保留本卡原授权、证据及清理边界，未验证范围和残余风险仍为原卡所列。

@@ -59,7 +59,10 @@ def _inputs(token, binding, identity, unit):
             'identity_sha256': identity.source_sha256, 'sheet_ids': identity.sheet_ids,
             'history_source_sha256': history.source_sha256, 'history_first_row_index': history.first_row_index,
             'history_last_row_index': history.last_row_index, 'history_rows_reserved': history.rows_reserved}
-    return parent, owner.lock_name[:-5] + '.metadata', base, state, action['identity']['sheet'], fence
+    # Follow the actual global journal's original namespace. Catalog units
+    # each own a permanent fence image; the legacy shared slot must not be
+    # created beside a catalog and poison every subsequent original replay.
+    return parent, name[:-len('.journal')] + '.metadata', base, state, action['identity']['sheet'], fence
 
 
 def _observe(token, binding, identity, sheet, fence, plan, response):
