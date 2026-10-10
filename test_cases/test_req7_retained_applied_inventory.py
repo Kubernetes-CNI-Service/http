@@ -14,13 +14,25 @@ SOURCE = Path(__file__).resolve().parents[1] / 'monitor/issue_tracker_retained_i
 def load():
     remote_tests.load_owner(); remote_tests.load_global()
     remote_tests.load_enrollment(); remote_tests.load_before()
-    spec = importlib.util.spec_from_file_location('owned_retained_applied_inventory', SOURCE)
+    spec = importlib.util.spec_from_file_location('monitor.issue_tracker_retained_inventory', SOURCE)
     module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
+    import monitor
+    monitor.issue_tracker_retained_inventory = module
     return module
 
 
 class RetainedAppliedInventoryTests(unittest.TestCase):
+    def test_fixture_installs_current_inventory_alias_before_original_owner_issuance(self):
+        module = load()
+        from monitor import issue_tracker_retained_inventory as canonical
+        from monitor import issue_tracker_global_attempt_journal as journal
+        from monitor import issue_tracker_spreadsheet_owner as owner
+        self.assertIs(module, canonical,
+            'real counter and workflow oracle must not borrow distinct prior fixture registries')
+        self.assertIs(owner,module.ownership); self.assertIs(journal,module.global_journal)
+
     def test_settled_catalog_key_scope_rejects_unissued_writer_before_shared_reads(self):
         from unittest import mock
         module = remote_tests.load()
@@ -38,7 +50,10 @@ class RetainedAppliedInventoryTests(unittest.TestCase):
                     self.fail('caller label is not original settlement')
 
     def _catalog_completed_successor(self, *, applied, rebind_after_start=False,
-                                     native_nv=False, rebind_after_nv_start=False):
+                                     native_nv=False, rebind_after_nv_start=False,
+                                     successor_count=False, rebind_after_attempt=False,
+                                     lose_applied_before_count=False, another_pending=False,
+                                     rebind_attempt_image=False):
         """Real C6/catalog/count/COMPLETE originals, not a settlement label."""
         from unittest import mock
         from test_cases.test_req7_unit_catalog import load as load_catalog
@@ -205,6 +220,105 @@ class RetainedAppliedInventoryTests(unittest.TestCase):
                     self.assertEqual((first, second), tuple(unit for unit, _state in observed))
                     self.assertEqual(((1,'UNKNOWN'), (0,'UNATTEMPTED_OBSERVATION')),
                         tuple((state.attempt_count, state.outcome) for _unit, state in observed))
+                    if successor_count:
+                        from contextlib import contextmanager
+                        import json
+                        if another_pending:
+                            third_arguments = inputs()
+                            third_arguments['business'][0]['observed_values'] = {'L': {'stringValue':'down'}}
+                            third_arguments['audits'] = ({'event_id':'settings:003',
+                                'recorded_at_utc':'2026-10-08T11:00:00Z','details':'K=3'},)
+                            third_generation = local.begin_generation(writer,third_arguments['manifest'])
+                            local.record_intent(writer,third_generation,literal_xlsx(),kind='xlsx')
+                            third_receipt = local.commit(writer,third_generation)
+                            third_arguments.update(spreadsheet_id=bound.spreadsheet_id,
+                                generation_id=third_generation.generation_id,publish_id=third_receipt.published_sha256,
+                                sheet_id=101,history_sheet_id=105,target_nonce='a'*64,history_nonce='d'*64)
+                            third = catalog.composer.freeze_send_unit(**third_arguments)
+                            catalog.register_pending_c6_unit(writer,owner,bound,third)
+                            prepare(owner,bound,third)
+                            retained = original_read_files(case.root)
+                            for selected in (second,third):
+                                with self.assertRaises(globals_.GlobalAttemptHold):
+                                    globals_.record_global_attempt_intent(owner,bound,selected)
+                            self.assertEqual(retained,original_read_files(case.root),
+                                'neither a prior pending nor a nonfinal selected unit may be omitted')
+                            observations = globals_.inspect_catalog_global_units(owner,bound)
+                            self.assertEqual(((1,'UNKNOWN'),(0,'UNATTEMPTED_OBSERVATION'),(0,'UNATTEMPTED_OBSERVATION')),
+                                tuple((state.attempt_count,state.outcome) for _original,state in observations))
+                            return
+                        marker = local._owner(writer).project / '.tracker' / ('REMOTE-APPLIED-' + first.unit_id)
+                        original = marker.read_bytes(); inode = marker.stat().st_ino
+                        preserved = case.root / 'preserved-count-successor-original-applied'
+                        stem = globals_.ownership._validated_owner(owner, bound).lock_name[:-5]
+                        shared = case.root / 'var/lib/http-ztp-container/issue-tracker'
+                        attempt = shared / (stem + '.unit-' + second.unit_id + '.journal') / 'ATTEMPT-1'
+                        before_count = original_read_files(case.root); reached = []
+                        if lose_applied_before_count:
+                            marker.rename(preserved)
+                            with self.assertRaises(globals_.GlobalAttemptHold):
+                                globals_.record_global_attempt_intent(owner, bound, second)
+                            self.assertFalse(attempt.exists())
+                            self.assertEqual(inode, preserved.stat().st_ino)
+                        elif rebind_after_attempt or rebind_attempt_image:
+                            started = globals_._write_global_start
+                            original_attempt = []; saved_attempt = case.root / 'preserved-count-original-attempt'
+                            @contextmanager
+                            def attempt_then_rebind(*arguments, **keywords):
+                                with started(*arguments, **keywords) as verify:
+                                    if arguments[1] == 'ATTEMPT-1':
+                                        if rebind_attempt_image:
+                                            raw = attempt.read_bytes(); identity = attempt.stat().st_ino
+                                            attempt.rename(saved_attempt); attempt.write_bytes(raw); attempt.chmod(0o600)
+                                            original_attempt.append((identity,raw))
+                                            reached.append('actual-attempt-creator-original-replaced-before-consumer')
+                                        else:
+                                            marker.rename(preserved); marker.write_bytes(original); marker.chmod(0o600)
+                                            reached.append('actual-attempt-original-held-before-old-applied-rebind')
+                                    yield verify
+                                    verify()
+                            with mock.patch.object(globals_, '_write_global_start', side_effect=attempt_then_rebind):
+                                with self.assertRaises(globals_.GlobalAttemptHold):
+                                    globals_.record_global_attempt_intent(owner, bound, second)
+                            self.assertEqual(['actual-attempt-creator-original-replaced-before-consumer'
+                                if rebind_attempt_image else 'actual-attempt-original-held-before-old-applied-rebind'], reached)
+                            self.assertTrue(attempt.is_file()); self.assertFalse(attempt.with_name('ATTEMPT-2').exists())
+                            self.assertEqual((1,'UNKNOWN'),
+                                (json.loads(attempt.read_bytes())['attempt_count'],json.loads(attempt.read_bytes())['outcome']))
+                            if rebind_attempt_image:
+                                self.assertEqual(1,len(original_attempt))
+                                self.assertEqual(original_attempt[0][0],saved_attempt.stat().st_ino)
+                                self.assertNotEqual(saved_attempt.stat().st_ino,attempt.stat().st_ino)
+                                self.assertEqual(original_attempt[0][1],saved_attempt.read_bytes())
+                                self.assertEqual(original_attempt[0][1],attempt.read_bytes())
+                            else:
+                                self.assertEqual(inode, preserved.stat().st_ino)
+                                self.assertNotEqual(inode, marker.stat().st_ino)
+                                self.assertEqual(original, marker.read_bytes())
+                        else:
+                            prior_images = before_count
+                            for count in range(1,7):
+                                state = globals_.record_global_attempt_intent(owner, bound, second)
+                                self.assertEqual((count,'UNKNOWN'),(state.attempt_count,state.outcome))
+                                self.assertEqual(second.wire_sha256,state.wire_sha256)
+                                self.assertEqual(second.action_digest,state.action_digest)
+                                current_images = original_read_files(case.root)
+                                self.assertTrue(prior_images.items() <= current_images.items())
+                                prior_images = current_images
+                            retained = original_read_files(case.root)
+                            with self.assertRaises(globals_.GlobalAttemptHold):
+                                globals_.record_global_attempt_intent(owner, bound, second)
+                            self.assertEqual(retained,original_read_files(case.root))
+                            self.assertEqual((6,'UNKNOWN'),
+                                (globals_.inspect_global_unit(owner,bound,second).attempt_count,
+                                 globals_.inspect_global_unit(owner,bound,second).outcome))
+                        unchanged = {name:image for name,image in before_count.items()
+                            if not (rebind_after_attempt or lose_applied_before_count)
+                            or name != str(marker.relative_to(case.root))}
+                        self.assertTrue(unchanged.items() <= original_read_files(case.root).items())
+                        state = case.current_global_state(owner,bound,first)
+                        self.assertEqual((1,'UNKNOWN'),(state.attempt_count,state.outcome))
+                        return
                     with module._hold_all_project_fifo_frontier(owner, bound) as (frontier, verify):
                         self.assertEqual((first.unit_id,), frontier.applied)
                         self.assertEqual((second.unit_id,), frontier.frontier)
@@ -223,6 +337,21 @@ class RetainedAppliedInventoryTests(unittest.TestCase):
 
     def test_actual_catalog_complete_applied_keys_allow_same_key_successor_global_preparation(self):
         self._catalog_completed_successor(applied=True)
+
+    def test_settled_original_successor_counts_six_identical_unknowns_without_resetting_prior_count(self):
+        self._catalog_completed_successor(applied=True,successor_count=True)
+
+    def test_another_actual_pending_catalog_unit_is_never_omitted_by_successor_count(self):
+        self._catalog_completed_successor(applied=True,successor_count=True,another_pending=True)
+
+    def test_missing_actual_prior_applied_after_preparation_denies_successor_first_count(self):
+        self._catalog_completed_successor(applied=True,successor_count=True,lose_applied_before_count=True)
+
+    def test_actual_successor_attempt_write_then_prior_applied_rebind_retains_unknown_without_return(self):
+        self._catalog_completed_successor(applied=True,successor_count=True,rebind_after_attempt=True)
+
+    def test_actual_successor_attempt_creator_original_replacement_cannot_be_adopted(self):
+        self._catalog_completed_successor(applied=True,successor_count=True,rebind_attempt_image=True)
 
     def test_actual_catalog_complete_without_applied_keys_keeps_successor_unknown_barrier(self):
         self._catalog_completed_successor(applied=False)

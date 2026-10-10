@@ -44,6 +44,23 @@ def original_read_files(root):
 
 
 class Req7GlobalAttemptJournalTests(unittest.TestCase):
+    def test_settled_successor_counter_requires_real_owner_before_catalog_reads(self):
+        module = self.module
+        counter = getattr(module, '_record_settled_successor_attempt', None)
+        self.assertTrue(callable(counter), 'fixed counter must hold actual originals through its one append')
+        from monitor import issue_tracker_unit_catalog as catalog
+        with mock.patch.object(catalog, '_inspect') as read:
+            with self.assertRaises(module.GlobalAttemptHold):
+                counter(object(),object(),object())
+            read.assert_not_called()
+
+    def test_settled_successor_counter_accepts_no_caller_settlement_paths_or_override(self):
+        counter = getattr(self.module, '_record_settled_successor_attempt', None)
+        self.assertTrue(callable(counter), 'no caller verifier or settlement label is an original proof')
+        for extra in ({'applied':True},{'path':'foreign'},{'verify':lambda:None},{'attempt_count':1}):
+            with self.subTest(extra=tuple(extra)),self.assertRaises(TypeError):
+                counter(object(),object(),object(),**extra)
+
     def test_successor_preparation_rejects_unissued_owner_before_catalog_read(self):
         with mock.patch.object(self.module, '_catalog_present') as catalog:
             with self.assertRaises(self.module.GlobalAttemptHold):

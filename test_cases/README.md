@@ -2019,3 +2019,23 @@ held originals through each creator boundary, without broadening the public
 cold reader's namespace. An interrupted unindexed NV STARTED keeps that public
 reader HOLD while original count/inodes/bytes remain unchanged. Original key
 writer/readers and prior test methods retain their existing contracts.
+
+The settled-successor diagnostic counter continuously holds ALL original
+catalog/origin/C6/GLOBAL/History/nonces/COMPLETE/APPLIED/key evidence through
+one exclusive derived ATTEMPT-n, including the actual creator FD and captured
+reader original. Its bounded current scope requires the final catalog unit
+and genuine settlement of every OTHER counted unit; another pending or UNSENT
+unit stays HOLD, never omitted. First count checks the real shared FIFO before
+writing; identical subsequent counts retain selected UNKNOWN and the total
+six-count bound. Actual local sequence/key maxima are compared only within
+their original project. Every older count image/inode remains unchanged;
+missing prior APPLIED, a same-byte old APPLIED replacement after the actual
+count write, or replacement of that creator's ATTEMPT original refuses return
+without deleting, repairing, clearing UNKNOWN or issuing another opportunity.
+Independent direct and true C6/catalog/four-owned-read/settlement/count workflows
+cover these boundaries. The fixture installs its current canonical inventory
+before original owners are issued; a stale previous-test module is not proof.
+Public owner failures keep the original sanitized GlobalAttemptHold contract.
+CLAIM/launch, multiple pending/superseded frontier integration, current source,
+G1/shared cadence/default worker, current full/check and whole REQ7 remain OPEN.
+These diagnostic counts are not evidence of actual mutation wire sends.

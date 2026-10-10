@@ -982,7 +982,164 @@ def inspect_original_global_unit(token, binding):
 
 def record_global_attempt_intent(token, binding, unit):
     """Persist count BEFORE any eventual send, still not a transport capability."""
-    return _observe(token, binding, unit, True)
+    failed = False
+    try:
+        owner = ownership._validated_owner(token, binding)
+        successor = False
+        if _catalog_present(owner):
+            with _hold_catalog_attempts(token, binding) as (observations, verify):
+                successor = any(original != unit and state.attempt_count
+                                for original, state in observations)
+                verify()
+        result = (_record_settled_successor_attempt(token, binding, unit) if successor
+                  else _observe(token, binding, unit, True))
+    except Exception:
+        failed = True
+    if failed:
+        raise GlobalAttemptHold()
+    return result
+
+
+def _record_settled_successor_attempt(token, binding, unit):
+    """One immutable diagnostic count under continuously held real settlement.
+
+    This bounded join handles the final catalog unit only, with every OTHER
+    unit genuinely counted and APPLIED/key-settled. Other pending units and
+    UNSENT dispositions stay HOLD, not ignored inventory or a FIFO shortcut.
+    First count uses the actual all-project FIFO reader before the write;
+    identical retries retain selected UNKNOWN and compare actual prior keys
+    only within their original project. No claim/send/current-source/G1 or
+    shared-cadence capability is granted and no prior count is ever cleared.
+    Only this fixed function writes its derived ATTEMPT-n; there are no caller
+    paths, settlement labels, count overrides or verification callbacks.
+    """
+    failed = False; result = None
+    try:
+        owner = ownership._validated_owner(token, binding)
+        from monitor import issue_tracker_unit_catalog as catalog
+        from monitor import issue_tracker_retained_inventory as inventory
+        from monitor import issue_tracker_remote_history_match as remote
+        with ExitStack() as scope:
+            held = catalog._Originals(); scope.callback(held.close)
+            _catalog, units, _previous = catalog._inspect(token, binding, held)
+            if len(units) < 2 or units[-1] != unit:
+                raise GlobalAttemptHold()
+            parent = owner.directories[-1][0]; stem = owner.lock_name[:-5]
+            name = stem + '.unit-' + unit.unit_id + '.journal'
+            with _hold_catalog_attempts(token, binding) as (observations, verify_counts):
+                if (tuple(original for original, _state in observations) != units
+                        or any(not state.attempt_count for _original, state in observations[:-1])
+                        or observations[-1][1].outcome == 'PENDING_NO_JOURNAL'):
+                    raise GlobalAttemptHold()
+                count = observations[-1][1].attempt_count
+                if not 0 <= count < 6:
+                    raise GlobalAttemptHold()
+                # Pin ALL old shared images before settlement interpretation.
+                # The temporary count reader alone cannot dominate our append.
+                captured = {child for p, child, *_rest in held.files if p == parent}
+                captured.update(child for p, child, *_rest in held.directories if p == parent)
+                names = {child for child in os.listdir(parent) if child.startswith(stem + '.')}
+                allowed = {stem + '.lock', stem + '.enrollment', stem + '.units', stem + '.units-started',
+                    *(stem + '.units-position-%020d' % index for index in range(1, len(units) + 1))}
+                allowed.update(stem + '.unit-' + original.unit_id + '.' + family
+                    for original in units for family in inventory._CATALOG_FAMILIES if family != 'enrollment')
+                if names - allowed:
+                    raise GlobalAttemptHold()
+                for child in sorted(names - captured - {stem + '.lock'}):
+                    if child.endswith('-started'):
+                        held.file(parent, child, 16384)
+                    else:
+                        folder = held.directory(parent, child); family = child.rsplit('.', 1)[-1]
+                        entries = tuple(os.listdir(folder))
+                        if family == 'nv':
+                            from monitor import issue_tracker_nv_reservation as nv
+                            if frozenset(entries) != nv._CATALOG_NAMES:
+                                raise GlobalAttemptHold()
+                        else:
+                            inventory._family_entries(family, entries)
+                        for entry in sorted(entries):
+                            held.file(folder, entry, inventory._limit(family, entry))
+                verify_counts(); held.verify()
+            selected = [folder for p, child, folder, _stat, _names in held.directories
+                        if p == parent and child == name]
+            if len(selected) != 1:
+                raise GlobalAttemptHold()
+            folder = selected[0]
+            _current, _parent, actual_name, header = _inputs(token, binding, unit)
+            if _current is not owner or _parent != parent or actual_name != name:
+                raise GlobalAttemptHold()
+            actual_count, previous = _inspect(folder, unit, header)
+            if actual_count != count:
+                raise GlobalAttemptHold()
+            _require_no_completion(parent, name)
+            with catalog.hold_pending_project_origins(token, binding) as (origins, verify_origins):
+                if tuple(row.unit for row in origins) != units:
+                    raise GlobalAttemptHold()
+                rows, verify_c6 = scope.enter_context(catalog._hold_project_c6_from_origins(token, binding, origins))
+                verify_origins(); held.verify(); verify_c6()
+            validators = []; prior_keys = []
+            for row in rows:
+                matches = [(writer, local._owner(writer)) for writer, active in tuple(local._ACTIVE.items())
+                    if active.pid == os.getpid()
+                    and journal._identity(os.fstat(active.project_fd))[:2] == row.project_identity]
+                if len(matches) != 1:
+                    raise GlobalAttemptHold()
+                writer, project = matches[0]
+                if any(child.startswith('REMOTE-UNSENT-SUPERSESSION-') for child in os.listdir(project.root_fd)):
+                    raise GlobalAttemptHold()
+                if row.unit == unit:
+                    continue
+                facts = local._json(row.c6_facts)
+                generation = local.Generation(facts['generation_id'], facts['sequence'], facts['manifest_id'], writer)
+                actual, verify_inputs, body, keys = scope.enter_context(
+                    remote._hold_settled_catalog_key_watermarks(writer, token, binding, row.unit, generation))
+                if (actual is not project or tuple(body['project_identity']) != row.project_identity
+                        or body['binding']['unit_id'] != row.unit.unit_id):
+                    raise GlobalAttemptHold()
+                validators.append(verify_inputs); prior_keys.append((row.project_identity, keys))
+            if tuple(row.unit for row in rows) != units:
+                raise GlobalAttemptHold()
+            selected_row = rows[-1]; sequence = local._json(selected_row.c6_facts)['sequence']
+            keys = {tuple(item['activity_key']) for item in local._json(unit.action_preimage)['business']}
+            if any(project == selected_row.project_identity and key in keys and maximum >= sequence
+                    for project, watermarks in prior_keys for key, maximum in watermarks):
+                raise GlobalAttemptHold()
+            if not count:
+                with inventory._hold_all_project_fifo_frontier(token, binding) as (frontier, verify_fifo):
+                    if frontier.frontier != (unit.unit_id,) or frontier.blocked or frontier.superseded:
+                        raise GlobalAttemptHold()
+                    verify_fifo(); held.verify(); verify_c6()
+            appended = None
+            def verify():
+                if ownership._validated_owner(token, binding) is not owner:
+                    raise GlobalAttemptHold()
+                held.verify(appended_to=appended); verify_c6()
+                for validate in validators:
+                    validate()
+                held.verify(appended_to=appended); verify_c6()
+            verify(); held.sync(); _sync_initialization(parent, folder, header); verify()
+            entry = 'ATTEMPT-%d' % (count + 1)
+            raw = local._canonical({**header, 'attempt_count': count + 1,
+                                    'previous_sha256': previous, 'outcome': 'UNKNOWN'})
+            # Creator FD stays alive across reader capture and every consumer
+            # barrier. An interrupted exclusive image stays STOP, never fixed.
+            with _write_global_start(folder, entry, raw) as verify_written:
+                appended = (folder, {entry})
+                verify_written(); verify()
+                image, _identity = held.file(folder, entry, 16384)
+                if image != raw:
+                    raise GlobalAttemptHold()
+                verify_written(); verify()
+                if _inspect(folder, unit, header)[0] != count + 1:
+                    raise GlobalAttemptHold()
+                _require_no_completion(parent, name); verify_written(); verify()
+            verify()
+            result = GlobalIntentObservation(count + 1, unit.wire_sha256, unit.action_digest, 'UNKNOWN')
+    except Exception:
+        failed = True
+    if failed:
+        raise GlobalAttemptHold()
+    return result
 
 
 def _reserved_images(token, binding, identity, unit):
