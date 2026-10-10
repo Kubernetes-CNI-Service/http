@@ -646,11 +646,17 @@ class Req7MetadataReservationNativeWorkflowTests(unittest.TestCase):
 class Req7CatalogMetadataReservationTests(unittest.TestCase):
     """Real catalog/global/enrollment/History/quota flow, no online permission."""
     def original_case(self):
-        from test_cases.test_req7_unit_catalog import load as load_catalog
+        from test_cases.test_req7_unit_catalog import load as load_catalog, load_component
         from test_cases.test_req7_send_unit import inputs, load as load_composer
         case = Req7MetadataReservationDirectTests(); case.setUp()
         self.addCleanup(case.doCleanups)
         case.module = load(); catalog = load_catalog(reset_dependencies=False)
+        # Each owned fixture reloads its real owner/global modules. Reload the
+        # real inventory too: a prior case's cached token registry is not this
+        # case's owner. Never patch production token/class identity checks.
+        inventory = load_component('issue_tracker_retained_inventory')
+        self.assertIs(case.owner, inventory.ownership)
+        self.assertIs(case.global_journal, inventory.global_journal)
         originals = []
         for generation, publication in (('a', 'b'), ('e', 'f')):
             args = inputs(1)
@@ -751,6 +757,96 @@ class Req7CatalogMetadataReservationTests(unittest.TestCase):
                              original_read_files(case.root).items() if '.metadata/' in name})
             self.assertEqual(observations[0][0], case.module.inspect_metadata_reservation(
                 token, binding(), case.identity, originals[0]))
+
+    def metadata_catalog_api(self, case):
+        api = getattr(case.module, '_hold_catalog_metadata_capacity', None)
+        self.assertTrue(callable(api), 'G1 must hold and charge ALL original catalog quota images')
+        return api
+
+    def prepare_quotas(self, case, catalog, token, originals):
+        self.initialize_catalog(case, catalog, token, originals)
+        observations = [self.reservation(case, token, original) for original in originals]
+        self.assertEqual([None, None], [error for _row, error in observations])
+
+    def test_all_catalog_quota_images_charge_both_permanent_fences_not_only_selected_unit(self):
+        from test_cases.test_req7_global_attempt_journal import original_read_files
+        case, catalog, originals = self.original_case(); api = self.metadata_catalog_api(case)
+        with fixture(case.root), case.owner.spreadsheet_owner(binding()) as token:
+            self.prepare_quotas(case, catalog, token, originals)
+            before = original_read_files(case.root)
+            with api(token, binding(), case.identity, case.meta_plan, case.raw) as (budget, verify):
+                self.assertEqual('VISIBLE_ONLY_UNPROVED', budget.outcome)
+                self.assertEqual(2, budget.outstanding_reservations)
+                self.assertEqual((101, 86, 4, 29910), next(row for row in budget.pools if row[0] == 101))
+                self.assertEqual((None, 0, 0, 30000), budget.pools[0])
+                self.assertIs(False, budget.inventory_complete)
+                self.assertFalse(hasattr(budget, 'permit')); verify()
+            self.assertEqual(before, original_read_files(case.root))
+
+    def test_catalog_unknown_and_visible_matching_fence_never_release_original_quota(self):
+        from test_cases.test_req7_global_attempt_journal import original_read_files
+        case, catalog, originals = self.original_case(); api = self.metadata_catalog_api(case)
+        with fixture(case.root), case.owner.spreadsheet_owner(binding()) as token:
+            self.prepare_quotas(case, catalog, token, originals)
+            case.global_journal.record_reserved_attempt_intent(token, binding(), case.identity, originals[0])
+            payload = json.loads(case.raw.data)
+            payload['matchedDeveloperMetadata'].append({'developerMetadata': {
+                'metadataId': originals[0].fence_metadata_id, 'metadataKey': 'z', 'metadataValue': '1',
+                'visibility': 'DOCUMENT', 'location': {'locationType': 'SHEET', 'sheetId': 101}}})
+            before = original_read_files(case.root)
+            with api(token, binding(), case.identity, case.meta_plan, response(payload)) as (budget, verify):
+                self.assertEqual(2, budget.outstanding_reservations)
+                self.assertEqual((101, 88, 2, 29910), next(row for row in budget.pools if row[0] == 101))
+                self.assertIs(False, budget.inventory_complete); verify()
+            self.assertEqual(before, original_read_files(case.root))
+            self.assertEqual((1, 0), tuple(row.attempt_count for _unit, row in
+                             case.global_journal.inspect_catalog_global_units(token, binding())))
+
+    def test_missing_later_catalog_quota_holds_whole_budget_not_valid_prefix(self):
+        from test_cases.test_req7_global_attempt_journal import original_read_files
+        case, catalog, originals = self.original_case(); api = self.metadata_catalog_api(case)
+        with fixture(case.root), case.owner.spreadsheet_owner(binding()) as token:
+            self.initialize_catalog(case, catalog, token, originals)
+            observed, error = self.reservation(case, token, originals[0]); self.assertIsNone(error)
+            before = original_read_files(case.root); entered = []
+            with self.assertRaises(case.module.MetadataReservationHold):
+                with api(token, binding(), case.identity, case.meta_plan, case.raw) as value:
+                    entered.append(value)
+            self.assertEqual([], entered); self.assertEqual(before, original_read_files(case.root))
+            self.assertEqual(1, observed.outstanding_reservations)
+
+    def test_all_catalog_fences_make_near_limit_visible_pool_stop_without_reclaiming(self):
+        from test_cases.test_req7_global_attempt_journal import original_read_files
+        case, catalog, originals = self.original_case(); api = self.metadata_catalog_api(case)
+        with fixture(case.root), case.owner.spreadsheet_owner(binding()) as token:
+            self.prepare_quotas(case, catalog, token, originals)
+            payload = json.loads(case.raw.data)
+            payload['matchedDeveloperMetadata'].append({'developerMetadata': {
+                'metadataId': 2147483647, 'metadataKey': 'x', 'metadataValue': 'a' * 29911,
+                'visibility': 'DOCUMENT', 'location': {'locationType': 'SHEET', 'sheetId': 101}}})
+            before = original_read_files(case.root)
+            with api(token, binding(), case.identity, case.meta_plan, response(payload)) as (budget, verify):
+                self.assertEqual('STOP_CAPACITY', budget.outcome)
+                self.assertEqual((101, 29998, 4, -2), next(row for row in budget.pools if row[0] == 101))
+                self.assertEqual(2, budget.outstanding_reservations); verify()
+            self.assertEqual(before, original_read_files(case.root))
+
+    def test_later_catalog_quota_same_byte_rebind_revokes_whole_consumer(self):
+        case, catalog, originals = self.original_case(); api = self.metadata_catalog_api(case)
+        with fixture(case.root), case.owner.spreadsheet_owner(binding()) as token:
+            self.prepare_quotas(case, catalog, token, originals)
+            path = case.state / (hashlib.sha256(TARGET.encode()).hexdigest() +
+                                '.unit-' + originals[1].unit_id + '.metadata/RESERVATION')
+            raw = path.read_bytes(); original_inode = path.stat().st_ino; entered = []
+            with self.assertRaises(case.module.MetadataReservationHold):
+                with api(token, binding(), case.identity, case.meta_plan, case.raw) as (budget, _verify):
+                    entered.append(budget.outstanding_reservations)
+                    path.rename(case.root / 'preserved-original-quota')
+                    path.write_bytes(raw); path.chmod(0o600)
+            self.assertEqual([2], entered)
+            self.assertEqual(original_inode, (case.root / 'preserved-original-quota').stat().st_ino)
+            self.assertNotEqual(original_inode, path.stat().st_ino)
+            self.assertEqual(raw, path.read_bytes()); self.assertEqual(raw, (case.root / 'preserved-original-quota').read_bytes())
 
 
 def _run_owned_count_child(command,count):

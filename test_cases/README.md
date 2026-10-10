@@ -1286,6 +1286,15 @@ VISIBLE_ONLY_UNPROVED，不是新鲜准入、COMPLETE、结算或发送许可；
 现有断言及预算不变。这只修正原配额的单元归属；不证明跨单元容量汇总、隐藏
 PROJECT 库存、FIFO/NEW、COMPLETE 或发送许可；现场仍 NOT RUN。
 
+catalog 容量只读 handoff 还须持续持有 ALL 原 catalog/global/retained family 和
+各单元四份 metadata 原件，按全部永久 fence 汇总各自的可见字符池；不能接受 caller
+列表或只返回有效前缀。UNKNOWN 与已可见的同一 fence 仍算 outstanding，后者只避免
+重复字符收费，不释放原预留。后来 quota 缺失、部分图像或 consumer 期间同字节换 inode
+均使整体 HOLD，保留所有原像，不回填／收养／清理。新增真实多脚本 workflow 的固定
+预期同时覆盖双单元、UNKNOWN、容量溢出和消费后置替换；夹具每轮加载同一真实
+inventory 源码与当前 owner/global，生产身份检查不放宽。这只汇总本地原配额与所给
+固定可见响应，不能证明响应鲜度、隐藏 PROJECT 全集、历史排他或 NEW／发送许可。
+
 `test_cases.test_req7_history_preread_journal` 在实际 spreadsheet owner 与已初始化
 且计数为 0 的全局 action/wire journal 内保存原始全尾响应、容量与
 `history_last_row_before_send`。RAW/HEADER 的六个图像屏障后才能写 marker；

@@ -2344,6 +2344,8 @@ generation/publish 及 UNKNOWN 下改 action/wire 均 HOLD，不计作 COMPLETE 
 
 ## TC-REAL-REQ7-METADATA-RESERVATION-001 — 原 batch 的永久 fence 持久预算
 
+- ALL catalog 原配额汇总补充（**NOT RUN / REAL_ENV REQUIRED**）：保留正常双单元所有原 quota／family 持有、UNKNOWN 与已可见相同 fence 仍保留 outstanding、可见字符池加全部原预留溢出、后来 quota 缺失／部分图像及 consumer 后置同字节换 inode；任一缺失或漂移使整体 HOLD，不返回有效前缀、不回填／收养／释放原预留。证据须关联每份原 ACTION/WIRE、四份 quota 原件、ALL catalog/global/retained inventory 及前后 stat/inode/字节。固定可见响应的本地汇总不证明其现场鲜度、隐藏 PROJECT 全集、历史排他、真实 Cloud 或断电；未省略／合并原场景，残余风险、确认及精确授权／清理仍沿用本卡。
+
 - catalog 原单元命名空间补充（**NOT RUN / REAL_ENV REQUIRED**）：保留两个原始 pending 单元各自 quota 落盘／只读回放、后来 quota 中断与首个计数后 UNKNOWN 安全状态；quota 必须跟随原 global journal 的 `.unit-<unit-id>.metadata`，不得创建旧共享槽污染 catalog、采用部分图像或重分配 fence。旧单元流程、八个屏障、冷恢复和原授权边界不变；本地真实多脚本文件流程不是跨单元完整容量／隐藏 PROJECT／真实 Cloud 或断电验收。不省略／合并原场景，证据、清理和残余风险沿用本卡。
 
 - 共享 retry 原配额补充（**NOT RUN / REAL_ENV REQUIRED**）：保留正常 retry 及持久次数增加后原配额 HEADER 同字节替换的场景；后置身份丢失须在配对 COUNT 前 HOLD，保留未配对 INTENT、已计 UNKNOWN、C6／业务／C25／outbox 原像，后续所有 lane 保持阻断，不补建或回滚。本地 direct 只隔离原 quota/count 边界，实际 C5/C6→原读取→共享事务 workflow 才见证跨脚本行为；均不证明断电、真实 Cloud、旧周期 R2 或发送准入。没有删减或合并既有场景，本卡原授权、证据、清理和未验证风险保持不变。

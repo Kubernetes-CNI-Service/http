@@ -6,7 +6,7 @@ Hidden PROJECT metadata is still unproved: this is NOT admission, COMPLETE,
 reclamation or transport permission. No network, expiry, reset or cleanup.
 """
 from dataclasses import dataclass
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 import hashlib
 import json
 import os
@@ -245,3 +245,58 @@ def inspect_metadata_reservation(token, binding, identity, unit):
             except OSError: failed = True
     if failed: raise MetadataReservationHold()
     return result
+
+
+@contextmanager
+def _hold_catalog_metadata_capacity(token, binding, identity, plan, response):
+    """Charge ALL original permanent fences while their actual images stay held.
+
+    No caller reservation list or selected-unit prefix. UNKNOWN and matching
+    visible fences never release a reservation. The supplied fixed read is
+    only visible accounting, NOT original remote source/freshness, historical
+    Cloud exclusivity, complete inventory, NEW or a transport capability.
+    """
+    from monitor import issue_tracker_unit_catalog as catalog
+    from monitor import issue_tracker_retained_inventory as inventory
+    from monitor.issue_tracker_metadata_capacity import observe_metadata_capacity
+    held = catalog._Originals(); failed = False
+    try:
+        owner = ownership._validated_owner(token, binding)
+        parent = owner.directories[-1][0]; stem = owner.lock_name[:-5]
+        with ExitStack() as scope:
+            rows, verify_inventory = scope.enter_context(
+                inventory._hold_catalog_retained_inventory(token, binding))
+            held.namespace = (parent, stem + '.',
+                              {name for name in os.listdir(parent) if name.startswith(stem + '.')})
+            fences = []
+            for row in rows:
+                actual_parent, name, base, _state, sheet, fence = _inputs(token, binding, identity, row.unit)
+                if actual_parent != parent or name != stem + '.unit-' + row.unit.unit_id + '.metadata':
+                    raise MetadataReservationHold()
+                folder = held.directory(parent, name)
+                images = {}
+                for entry in sorted(_NAMES):
+                    images[entry], _original = held.file(folder, entry,
+                        2 * _LIMIT if entry == 'METADATA-RAW' else 16384)
+                _inspect(token, binding, identity, parent, name, folder, base, sheet, fence)
+                if images['RESERVATION'] != local._canonical(fence):
+                    raise MetadataReservationHold()
+                enrollment.observe_enrollment_pair(token, binding, identity, plan, response, sheet=sheet)
+                fences.append(fence)
+            result = observe_metadata_capacity(plan, response, identity, reservations=tuple(fences))
+            def verify():
+                if ownership._validated_owner(token, binding) is not owner:
+                    raise MetadataReservationHold()
+                verify_inventory(); held.verify(); verify_inventory()
+            verify(); held.sync(); verify()
+            yield result, verify
+            verify()
+    except Exception:
+        failed = True
+    finally:
+        try:
+            held.close()
+        except Exception:
+            failed = True
+    if failed:
+        raise MetadataReservationHold() from None
