@@ -639,7 +639,8 @@ class DhcpOptionalDirectTests(unittest.TestCase):
             ),
         )
         actions = []
-        with mock.patch.object(LOAD, "validate_dhcp_output_sources"), \
+        with tempfile.TemporaryDirectory() as project_directory, \
+                mock.patch.object(LOAD, "validate_dhcp_output_sources"), \
                 mock.patch.object(LOAD, "run") as run, \
                 mock.patch.object(LOAD, "ensure_ztp_url_network_ready") as ztp_gate, \
                 mock.patch.object(LOAD, "verify_http_publication") as publication, \
@@ -649,7 +650,8 @@ class DhcpOptionalDirectTests(unittest.TestCase):
                     actions.append((action, service)),
                 ):
             LOAD.preflight_services(
-                SimpleNamespace(settings=dhcp_only), {}, dry_run=True,
+                SimpleNamespace(settings=dhcp_only,
+                    global_file=Path(project_directory) / "01-global.yaml"), {}, dry_run=True,
                 dhcp_runtime_plan=relay,
                 runtime_backend=SimpleNamespace(name="supervisor"),
             )

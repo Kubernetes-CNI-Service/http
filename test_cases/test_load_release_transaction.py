@@ -122,11 +122,17 @@ def assert_private_dhcp_transaction_retention(
     api, root: Path, project: Path, outcome: str, *, reenter: bool = False,
     setup_guard=None, a_shapes=False, publication_candidates=None, a_metadata=False,
     require_staged_inventory=False, preserve_selected_a=False,
+    prepared_source=None,
 ) -> None:
     """Exercise real LOAD filesystem logic; never execute sudo, dhcpd or live writes."""
     root = root.resolve()
-    source_dir, live_dir = project / "independent-dhcp-B", root / "private-etc-dhcp"
-    source_dir.mkdir()
+    source_dir = prepared_source or project / "independent-dhcp-B"
+    live_dir = root / "private-etc-dhcp"
+    if prepared_source is None:
+        source_dir.mkdir()
+    else:
+        assert publication_candidates is not None
+        assert source_dir == publication_candidates[0].dhcp_source_dir
     live_dir.mkdir(exist_ok=preserve_selected_a)
     names = ("dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts", "dhcpd_nvl.hosts")
     expected_b = {name: f"independent-B:{name}\n".encode() for name in names}
@@ -139,7 +145,10 @@ def assert_private_dhcp_transaction_retention(
                          else f"independent-A:{name}\n".encode()) for name in names}
     mappings = {source_dir / name: live_dir / name for name in names}
     for source, destination in mappings.items():
-        source.write_bytes(expected_b[source.name])
+        if prepared_source is None:
+            source.write_bytes(expected_b[source.name])
+        else:
+            assert source.read_bytes() == expected_b[source.name], "sealed independent B bytes changed"
         if preserve_selected_a:
             assert destination.read_bytes() == expected_a[destination.name], "original selected A bytes were not installed"
         else:
@@ -1083,7 +1092,7 @@ def write_shared_artifact_receipt(
     return path
 
 
-def private_publication_candidates(api, project):
+def private_publication_candidates(api, project, *, dhcp_candidate=None):
     """Independent four-input schema-2 fixture; no service/runtime commands."""
     project = project.resolve()
     sources = {"global": "01-global.yaml", "devices": "02-devices_config.csv",
@@ -1109,12 +1118,19 @@ def private_publication_candidates(api, project):
                  dhcp_status="disabled", inputs=hashes,
                  input_sources={"p2p": {"path": sources["p2p"], "sha256": hashes["p2p"]}},
                  components={}, inventory=[])
+    if dhcp_candidate is not None:
+        child_path = dhcp_candidate / "dhcp-release-manifest.json"
+        child = json.loads(child_path.read_bytes())
+        basis["dhcp_status"] = "enabled"
+        basis["components"] = {"dhcp": {
+            "release_id": child["release_id"], "manifest_sha256": sha256(child_path),
+        }}
     release_id = hashlib.sha256(json.dumps(basis, sort_keys=True, ensure_ascii=False,
                                           separators=(",", ":")).encode()).hexdigest()[:20]
     parent = dict(basis, schema_version=2, release_id=release_id, validation="passed",
                   generated_at="2026-10-07T12:00:00+08:00", input_paths=sources)
-    parent_candidate = api.prepare_current_release(project, parent)
-    generation = api.stage_pinned_generation(project, parent_candidate.temporary, None)
+    parent_candidate = api.prepare_current_release(project, parent, dhcp_candidate_dir=dhcp_candidate)
+    generation = api.stage_pinned_generation(project, parent_candidate.temporary, dhcp_candidate)
     report = dict(schema_version=3, record_type="http-v3-public-key-generation-report",
                   project=project.name, release_id=release_id,
                   generated_at="2026-10-07T12:00:00+08:00", public_keys=[

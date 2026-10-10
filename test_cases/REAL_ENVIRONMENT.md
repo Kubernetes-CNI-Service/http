@@ -1,5 +1,29 @@
 # Real-environment acceptance cases
 
+## 待编号：LOAD 后固定运行别名不得进入部署包
+
+- 类型/范围：direct / 真实多脚本 workflow / Linux AIR；仅两个固定入口
+  `ztp/config/cumulus/latest_yaml` 和 `ztp/config/nvos/latest_yaml`。状态本地候选，
+  full/check 与新包 AIR NOT RUN；不授权绕过安装器或清除运行证据。
+- 原因/证据：完整 related `selected-service-related.log` inode183992068、710079 bytes、
+  SHA256 `6ed59099a2696aa8e4b759c70ceb77d2a63900f8f8e98f1c038260a14d95b3d5`，
+  4620 tests / 7 FAIL / 3 ERROR / skipped4 / actual1 / freezeTrue / END1，ledger 未改。
+  原真实 packager 已将 Cumulus 后建别名收入包，而排除 manifest 托管的运行输出目标；
+  installer 在 guard 前拒绝 missing target。隔离重现原包保留于诊断目录，包 SHA256
+  `7703468e5be21f14676c64626074fb63864509cbd7c6a873b7af8d4d85e13abd`。
+- 自动化：literal 两入口独立 direct 与原真实打包/中转/installer workflow，RED 原日志
+  保留。聚焦 GREEN `selected-service-package-latest-green.log` inode184319811、2828 bytes、
+  SHA256 `39a657be73ac795fec3e2deb3214e79ae882dfa00a57a5d5c7b6a6d7fb59e7f2`，
+  3 tests / actual0 / freezeTrue / END0，非 full proof 或 AIR PASS。
+- 前置/步骤：当前精确干净 ordinary full/check，管理机身份及 DocumentRoot 外 root-only
+  备份已核验；官方 package/sync 保留原 gate/锁，核传输包源码 SHA/canonical aliases。
+  macOS 普通 LOAD 后的两固定运行别名不进入包，普通源码与合法发布别名保留；用真实
+  安装器部署后再正常 LOAD，核 source manifest、parent/current、服务及设备请求。
+- 失败/清理：closure/owner/hash/输入漂移继续非零 HOLD，保留原包/日志/备份；不得手动
+  解包、摊平链接或删 receipt/WAL。只清理明确拥有的隔离包/项目，恢复须核备份及锁。
+- 风险分级：本卡无新增缩减/合并/豁免；本地替身不证明 Linux/root、设备取回、物理
+  断电或 DEV ACK，既有 R22/REQ23 未闭项保留，确认人仍待真实结果核验。
+
 ## 待编号：普通 LOAD 已提交 DHCP 代次到 Native/Supervisor 启动门禁
 
 - Case ID：待编号；类型：real-environment / integration；平台：Linux/root、AIR、Supervisor。

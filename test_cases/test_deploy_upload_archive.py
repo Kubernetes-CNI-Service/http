@@ -1552,6 +1552,8 @@ class RelayArchiveInstallerTests(unittest.TestCase):
             for setup_bridge in (
                 "infiniband/bringup/xdr-initial-setup/01-global.yaml",
                 "infiniband/bringup/xdr-initial-setup/publickey",
+                "ztp/config/cumulus/latest_yaml",
+                "ztp/config/nvos/latest_yaml",
             ):
                 with self.subTest(setup_bridge=setup_bridge):
                     self.assertNotIn(setup_bridge, names)

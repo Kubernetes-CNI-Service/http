@@ -273,6 +273,34 @@ class UploadPackageContractTests(unittest.TestCase):
                 arbitrary.linkname = "../../missing"
                 self.assertIs(arbitrary, selected(arbitrary))
 
+    def test_latest_yaml_runtime_links_are_filtered_without_manifest_registration(self):
+        """LOAD creates these later than SETUP; never ship their runtime aliases."""
+        for manifest_present in (False, True):
+            with self.subTest(manifest_present=manifest_present), tempfile.TemporaryDirectory() as temporary:
+                base = Path(temporary)
+                workspace, day0, project = self._minimal_package_workspace(base)
+                manifest = workspace / "ztp/.setup_manifest"
+                if manifest_present:
+                    manifest.write_text("infiniband/bringup/xdr-initial-setup/01-global.yaml\n")
+                with mock.patch.multiple(package, ROOT=workspace, DAY0=day0, MANIFEST=manifest):
+                    selected = package.PackageFilter(project, base / "upload.tar.gz",
+                        include_images=False, include_apps=False, include_firmware=False,
+                        max_file_size=50 * 1024 * 1024, day0_all=False, artifact_kind="upload")
+                    for name, target in (
+                        ("ztp/config/cumulus/latest_yaml", "template/99-output/latest"),
+                        ("ztp/config/nvos/latest_yaml", "template/99-output-ib_nvl/latest"),
+                    ):
+                        link = tarfile.TarInfo("./" + name)
+                        link.type, link.linkname = tarfile.SYMTYPE, target
+                        self.assertIsNone(selected(link))
+                        self.assertEqual(target, link.linkname)
+                    foreign = tarfile.TarInfo("./ztp/config/cumulus/foreign-link")
+                    foreign.type, foreign.linkname = tarfile.SYMTYPE, "template/foreign"
+                    self.assertIs(foreign, selected(foreign))
+                    source = tarfile.TarInfo("./tools/deploy-upload-archive.py")
+                    source.type = tarfile.REGTYPE
+                    self.assertIs(source, selected(source))
+
     @staticmethod
     def _minimal_package_workspace(base: Path) -> tuple[Path, Path, Path]:
         workspace = (base / "http").resolve()

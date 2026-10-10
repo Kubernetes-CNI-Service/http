@@ -63,6 +63,10 @@ STATIC_SETUP_MANAGED_LINKS = frozenset({
     "infiniband/bringup/xdr-initial-setup/ib.csv",
     "infiniband/bringup/xdr-initial-setup/01-global.yaml",
     "infiniband/bringup/xdr-initial-setup/publickey",
+    # LOAD creates these after SETUP wrote its manifest. Their targets are
+    # host-owned runtime output, not deployable archive source members.
+    "ztp/config/cumulus/latest_yaml",
+    "ztp/config/nvos/latest_yaml",
 })
 DEPLOYMENT_PREWRITE_GUARD = TOOLS_DIR / "deployment_prewrite_guard.py"
 DEPLOYMENT_SOURCE_MANIFEST_RELATIVE = PurePosixPath(

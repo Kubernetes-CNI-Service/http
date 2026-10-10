@@ -588,7 +588,8 @@ class DhcpOptionalWorkflowTests(unittest.TestCase):
                         mock.patch.object(LOAD, "verify_published_files"), \
                         mock.patch.object(LOAD, "verify_apache_publication_boundary"):
                     LOAD.preflight_services(
-                        SimpleNamespace(settings=settings_for("enabled")), {},
+                        SimpleNamespace(settings=settings_for("enabled"),
+                            global_file=project / "01-global.yaml"), {},
                         runtime_backend=SimpleNamespace(name="systemd"),
                     )
             self.assertEqual(3, len(checks))

@@ -5656,13 +5656,32 @@ try:
                                            _publish_manifest=True, **guard)
         if prefix_change:
             load.configure_ztp_prefix_publication(settings, setup_guard=guard)
-        candidates = private_publication_candidates(load, q)
+        dhcp_candidate = None
+        if b_typed and sys.argv[6] == 'dhcp':
+            import hashlib, json
+            dhcp_candidate = q / '99-output-dhcp/.load-dhcp-candidate-0123456789abcdef'
+            dhcp_candidate.mkdir(parents=True, mode=0o700)
+            names = ('dhcpd.conf', 'dhcpd_eth.hosts', 'dhcpd_ib.hosts', 'dhcpd_nvl.hosts')
+            expected_b = {n: f'independent-B:{n}\n'.encode() for n in names}
+            expected_b['dhcpd.conf'] = b'# independent-B configuration\n' + b''.join(
+                f'include "/etc/dhcp/{n}";\n'.encode() for n in names[1:])
+            for name, payload in expected_b.items():
+                (dhcp_candidate / name).write_bytes(payload)
+            child = dict(schema_version=1, release_id='independent-B-dhcp',
+                deployment_scope='all', switch_scope='all',
+                outputs={n: dict(sha256=hashlib.sha256(payload).hexdigest())
+                         for n, payload in expected_b.items()},
+                devices=[dict(hostname='leaf01', type='eth', interface='eth0',
+                    mac='02:00:00:00:00:01', identity_state='identified')])
+            (dhcp_candidate / 'dhcp-release-manifest.json').write_text(json.dumps(child))
+        candidates = private_publication_candidates(load, q, dhcp_candidate=dhcp_candidate)
         token = load.register_setup_switch_publication_bundle(*candidates, guard=guard,
             **(dict(images={}, upgrade_enabled=False) if b_typed else {}))
         if sys.argv[6] == 'dhcp':
             assert_private_dhcp_transaction_retention(load, root, q, 'bound-setup-before-write',
                 setup_guard=guard, publication_candidates=(*candidates, token), a_shapes=True,
-                a_metadata=len(sys.argv) > 11 and sys.argv[11] == 'a-metadata')
+                a_metadata=len(sys.argv) > 11 and sys.argv[11] == 'a-metadata',
+                prepared_source=dhcp_candidate)
             names = ('dhcpd.conf', 'dhcpd_eth.hosts', 'dhcpd_ib.hosts', 'dhcpd_nvl.hosts')
             load.dhcp_file_mappings = lambda *a: {q / 'independent-dhcp-B' / n: root / 'private-etc-dhcp' / n for n in names}
         else:
@@ -5678,7 +5697,13 @@ try:
     if sys.argv[6] == 'dhcp':
         names = ('dhcpd.conf', 'dhcpd_eth.hosts', 'dhcpd_ib.hosts', 'dhcpd_nvl.hosts')
         runtime = root / 'private-etc-dhcp'
-        load.dhcp_file_mappings = lambda *a: {q / 'independent-dhcp-B' / n: runtime / n for n in names}
+        original_mappings = load.dhcp_file_mappings
+        def private_mappings(source_directory=None):
+            if len(sys.argv) > 14 and sys.argv[14] == 'b-typed':
+                return {source: runtime / destination.name
+                        for source, destination in original_mappings(source_directory).items()}
+            return {q / 'independent-dhcp-B' / n: runtime / n for n in names}
+        load.dhcp_file_mappings = private_mappings
     if sys.argv[5] == 'kill-prefix-restore':
         import json
         body = json.loads((root / 'ztp/.setup-switch-journal.json').read_bytes())['body']
