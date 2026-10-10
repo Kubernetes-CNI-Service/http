@@ -90,6 +90,27 @@ def _marker(header):
 
 
 def _inspect(parent, name, folder, binding, base, keys, ids):
+    # Decode and finish every barrier while all five original named images
+    # remain pinned. Identical bytes at a replacement inode are not the
+    # reservation already being replayed. Reuse the original-object cleanup
+    # contract: never close a descriptor recycled onto a foreign object.
+    from monitor.issue_tracker_unit_catalog import _Originals
+    held = _Originals()
+    try:
+        original = held.directory(parent, name)
+        if journal._identity(os.fstat(original)) != journal._identity(os.fstat(folder)):
+            raise NvReservationHold()
+        for entry in sorted(_NAMES):
+            held.file(original, entry, 2 * _LIMIT if entry in ('ETH-RAW', 'IB-RAW') else _LIMIT)
+        held.verify()
+        result = _inspect_images(parent, name, original, binding, base, keys, ids)
+        held.verify()
+        return result
+    finally:
+        held.close()
+
+
+def _inspect_images(parent, name, folder, binding, base, keys, ids):
     if set(os.listdir(folder)) != _NAMES: raise NvReservationHold()
     header_raw = journal._read(folder, 'HEADER', _LIMIT)
     header = json.loads(header_raw.decode('utf-8'))
@@ -108,13 +129,16 @@ def _inspect(parent, name, folder, binding, base, keys, ids):
     expected = _header(base, plans[0], plans[1], observed, reservations)
     if header_raw != local._canonical(expected): raise NvReservationHold()
     fd = os.open('INITIALIZED', local._flags(), dir_fd=folder)
+    original_fd_identity = journal._identity(os.fstat(fd))
     try:
         info = local._check(fd, directory=False); journal._named(folder, 'INITIALIZED', fd, directory=False)
         raw = os.read(fd, 4097)
         if raw != _marker(expected) or len(raw) != info.st_size: raise NvReservationHold()
         os.fsync(fd); os.fsync(folder); os.fsync(parent)
         journal._named(folder, 'INITIALIZED', fd, directory=False)
-    finally: os.close(fd)
+    finally:
+        from monitor.issue_tracker_unit_catalog import _close_original
+        _close_original(fd, original_fd_identity)
     journal._named(parent, name, folder, directory=True)
     if set(os.listdir(folder)) != _NAMES: raise NvReservationHold()
     return NvReservationObservation(allocation.requested, base['unit_id'], hashlib.sha256(header_raw).hexdigest(),

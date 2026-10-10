@@ -1263,6 +1263,12 @@ literal encoder 校验；混合 update 不触碰既有 A。缺项、换号、别
 外来业务键或 nonce HOLD；global journal 存在后还须匹配原 action/wire，不能用相同
 编号重建不同 UNKNOWN 请求。三者同时匹配仍不是发送能力或 COMPLETE。
 
+NV 原像重读期间，目录及 ETH-RAW／IB-RAW／HEADER／RESERVATIONS／INITIALIZED
+全部持续持有并核对 named/stat/字节；同字节换 inode 仍须 HOLD，保留原像和替代物，
+不更新 UNKNOWN 次数或原 wire。借用 catalog 的原件持有与 conditional-owned close
+只约束原对象，不赋予跨单元分配、结算或发送能力；marker FD 被复用于外国对象时
+不得由本轮清理关闭。既有编号、十个图像屏障与冷恢复预期不变。
+
 原始 enrollment journal 的 sheet ID 必须保持 native int；即使 NONCES／HEADER／
 INITIALIZED 被一致重哈希，bool 或浮点数的 Python 相等别名仍 HOLD，不自动修复。
 `test_cases.test_req7_enrollment_journal` 保留原始数字 ID 合同及篡改证据。

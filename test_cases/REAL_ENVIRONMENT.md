@@ -2332,6 +2332,8 @@ ALL 审计行确定唯一 append 窗口（NOOP 无虚构行），精确耗尽可
 
 ## TC-REAL-REQ7-NV-RESERVATION-001 — 两张 Cabling 的共享持久编号
 
+- 原件持续持有补充（**NOT RUN / REAL_ENV REQUIRED**）：保留正常原编号重读、五份原像逐份在重读持久屏障处同字节换 inode、UNKNOWN 实际冻结单元校验拒绝与原 COUNT/WIRE 安全状态；本轮所有原目录／文件须持续持有，失败不回填、换号、删除原件或替代物，清理不得关闭已复用于外国对象的 FD。本地 direct 与真实 enrollment→NV→冻结 batch→GLOBAL UNKNOWN workflow 不代表断电、真实设备或跨单元完整分配。没有省略／合并原场景；现场前置、证据、清理、未验证风险与精确授权保持原卡要求。
+
 - Case ID：`TC-REAL-REQ7-NV-RESERVATION-001`；类型：real-environment / durable transaction；对应 C-17/C-19。状态：**NOT RUN / REAL_ENV REQUIRED**。`monitor/issue_tracker_nv_reservation.py` 未安装；本地 direct、真实私有 TLS 双读取和冷进程重读只验证保守 pending 单元预留，不是 COMPLETE、来源鉴别、新鲜准入或发送权限。
 - 前置条件、权限：另获 owner 精确 Stage O 隔离副本与预置私有 root state 授权；完整模板、原始 enrollment、固定读取器、真实 spreadsheet owner、受审 launcher 和跨单元结算须先闭合；当前不会创建真实目录、凭据或远端数据。两份响应必须绑定原始表 ID、同一 spreadsheet、完整容量及原始 A 列，含 Closed 和无关活动行。
 - 步骤与独立预期：保留两份完整原始响应和 immutable generation/publish/目标表/活动键；下一 NV 严格高于两表原始最大值，模板下一号为 NV30017；原有 ID 不改写。十个图像持久屏障全部完成后才能写 INITIALIZED；模拟每个屏障失败、UNKNOWN、冷启动、改变绑定、跨表重复、空种子与 NV99999 耗尽，分别要求 HOLD／保留原号，不回填、重分配或清除。既有 global journal（包括 unattempted/partial）保守阻止新预留；未实现的跨单元结算不冒称通过。

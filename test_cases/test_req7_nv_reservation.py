@@ -260,6 +260,65 @@ class Req7NvReservationDirectTests(unittest.TestCase):
                 self.module.require_unit_nv_reservation(token, binding(), self.identity, freeze_send_unit(**altered))
             self.assertEqual(before, {path.name: path.read_bytes() for path in self.store.iterdir()})
 
+    def test_each_identical_byte_replacement_during_replay_is_not_the_reserved_original(self):
+        self.module = load()
+        for name in ('ETH-RAW', 'IB-RAW', 'HEADER', 'RESERVATIONS', 'INITIALIZED'):
+            with self.subTest(image=name), tempfile.TemporaryDirectory(prefix='req7-nv-original-') as directory:
+                root = Path(directory).resolve()
+                state = root / 'var/lib/http-ztp-container/issue-tracker'
+                state.mkdir(parents=True, mode=0o700)
+                with fixture(root), self.owner.spreadsheet_owner(binding()) as token:
+                    self.initialize(token); self.reserve(token)
+                    store = state / self.store.name
+                    path = store / name; saved = state / ('preserved-' + name)
+                    raw = path.read_bytes(); inode = path.stat().st_ino
+                    marker_inode = (store / 'INITIALIZED').stat().st_ino
+                    real_sync = os.fsync; replaced = []
+                    def substitute(fd):
+                        if not replaced and os.fstat(fd).st_ino == marker_inode:
+                            path.rename(saved); path.write_bytes(raw); path.chmod(0o600)
+                            replaced.append(path.stat().st_ino)
+                        return real_sync(fd)
+                    with mock.patch('os.fsync', side_effect=substitute), self.assertRaises(self.module.NvReservationHold):
+                        self.inspect(token)
+                    self.assertEqual(1, len(replaced)); self.assertNotEqual(inode, replaced[0])
+                    self.assertEqual(inode, saved.stat().st_ino)
+                    self.assertEqual(raw, saved.read_bytes()); self.assertEqual(raw, path.read_bytes())
+                    self.assertEqual(set(('ETH-RAW', 'IB-RAW', 'HEADER', 'RESERVATIONS', 'INITIALIZED')),
+                                     {item.name for item in store.iterdir()})
+
+    def test_replay_cleanup_does_not_close_its_marker_fd_recycled_to_foreign_original(self):
+        self.module = load()
+        with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
+            self.initialize(token); expected = self.reserve(token)
+            self.assertEqual(expected, self.inspect(token))
+            marker_inode = (self.store / 'INITIALIZED').stat().st_ino
+            foreign = self.state / 'foreign-owned-test-file'; foreign.write_bytes(b'foreign test original')
+            foreign_inode = foreign.stat().st_ino
+            real_sync = os.fsync; replaced = []
+            def substitute(fd):
+                if not replaced and os.fstat(fd).st_ino == marker_inode:
+                    os.close(fd)
+                    opened = os.open(str(foreign), os.O_RDONLY)
+                    if opened != fd:
+                        os.dup2(opened, fd); os.close(opened)
+                    replaced.append(fd)
+                return real_sync(fd)
+            try:
+                with mock.patch('os.fsync', side_effect=substitute), self.assertRaises(self.module.NvReservationHold):
+                    self.inspect(token)
+                self.assertEqual(1, len(replaced))
+                try: seen = os.fstat(replaced[0])
+                except OSError: self.fail('NV replay cleanup closed the recycled foreign descriptor')
+                self.assertEqual(foreign_inode, seen.st_ino)
+                self.assertEqual(b'foreign test original', os.pread(replaced[0], 100, 0))
+                self.assertEqual(((KEYS[0], 'NV30102'), (KEYS[1], 'NV30103')), expected.reservations)
+            finally:
+                for fd in replaced:
+                    try:
+                        if os.fstat(fd).st_ino == foreign_inode: os.close(fd)
+                    except OSError: pass
+
     def test_coherent_compiler_cannot_attach_foreign_activity_key_to_reserved_literal_id(self):
         self.module = load()
         self.assertTrue(hasattr(self.module, 'require_unit_nv_reservation'), 'durable NV-to-actual-batch binding missing')
@@ -373,6 +432,36 @@ class Req7NvReservationWorkflowTests(unittest.TestCase):
         self.assertEqual(0, result.returncode, result.stderr); self.assertEqual(b'NV30102 NV30103\n', result.stdout)
         self.assertEqual(self.eth.data, (self.store / 'ETH-RAW').read_bytes())
         self.assertEqual(self.ib.data, (self.store / 'IB-RAW').read_bytes())
+
+    def test_unknown_actual_unit_binding_refuses_rebound_nv_original_without_count_or_payload_change(self):
+        from test_cases.test_req7_global_attempt_journal import load as global_load
+        from monitor.issue_tracker_send_unit import freeze_send_unit
+        global_journal = global_load(); self.module = load()
+        with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
+            original = self.initialize(token); expected = self.reserve(token)
+            value = freeze_send_unit(**cabling_inputs(original.nonces))
+            global_journal.prepare_global_unit(token, binding(), value)
+            global_journal.record_global_attempt_intent(token, binding(), value)
+            self.assertEqual(expected, self.module.require_unit_nv_reservation(token, binding(), self.identity, value))
+            path = self.store / 'ETH-RAW'; saved = self.state / 'preserved-original-eth'
+            raw = path.read_bytes(); inode = path.stat().st_ino
+            marker_inode = (self.store / 'INITIALIZED').stat().st_ino
+            real_sync = os.fsync; replaced = []
+            def substitute(fd):
+                if not replaced and os.fstat(fd).st_ino == marker_inode:
+                    path.rename(saved); path.write_bytes(raw); path.chmod(0o600)
+                    replaced.append(path.stat().st_ino)
+                return real_sync(fd)
+            with mock.patch('os.fsync', side_effect=substitute), self.assertRaises(self.module.NvReservationHold):
+                self.module.require_unit_nv_reservation(token, binding(), self.identity, value)
+            self.assertEqual(1, len(replaced)); self.assertNotEqual(inode, replaced[0])
+            self.assertEqual(inode, saved.stat().st_ino)
+            self.assertEqual(raw, saved.read_bytes()); self.assertEqual(raw, path.read_bytes())
+            seen = global_journal.inspect_global_unit(token, binding(), value)
+            self.assertEqual((1, 'UNKNOWN'), (seen.attempt_count, seen.outcome))
+            wire = self.state / (hashlib.sha256(TARGET.encode()).hexdigest() + '.journal') / 'WIRE'
+            self.assertEqual(value.wire_bytes, wire.read_bytes())
+            self.assertEqual(((KEYS[0], 'NV30102'), (KEYS[1], 'NV30103')), expected.reservations)
 
     def test_manifest_real_multi_script_workflow_primary_suite_and_not_run_card(self):
         manifest = json.loads((ROOT / 'test_cases/script_test_manifest.json').read_text())
