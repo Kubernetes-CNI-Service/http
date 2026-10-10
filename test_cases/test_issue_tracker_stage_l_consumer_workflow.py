@@ -29,6 +29,222 @@ from test_cases.test_issue_tracker_stage_l_consumer import ProdStageLFixture
 
 
 class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
+    def test_actual_default_worker_qualifies_before_lazy_oauth_and_retains_nine_original_images(self):
+        observed = []
+        self._exercise_real_protected_three_panel_fixture(skip_history=False,
+            observed_cabling_insert_probe=True, receipted_intent_probe=True,
+            native_catalog_probe=True, native_catalog_c6_origin_probe=True,
+            native_catalog_retained_probe=True,
+            native_catalog_launch_probe=('default-worker-original-images', observed))
+        self.assertEqual(['ETH Cabling:actual-default-worker:nine-original-images:hold',
+            'IB Cabling:actual-default-worker:nine-original-images:hold'], observed)
+
+    def _default_worker_original_images(self, *, native, whitelist_doc, private_context,
+            global_root, writer_token, spreadsheet_token, binding, unit, qualified,
+            settings, quota_raw, history_raw, reads, sheet, state, owner_module, global_journal):
+        """Actual worker composition; borrow already-held owners, never mint a permit.
+
+        The surrounding real C6 fixture owns both original locks. Borrow only
+        these tokens; this test does not prove first lock acquisition/revocation.
+        OAuth/read transport is the existing private native TLS fixture. Source,
+        reconciliation, image guards and every strict finalizer remain actual.
+        """
+        import errno
+        import importlib
+        import socket
+        import stat
+        from types import SimpleNamespace
+        from test_cases.test_req7_history_read_launcher import scoped_fixture
+        from test_cases.test_req7_sdk_authentication import fresh_info
+        from test_cases.test_req7_token_launcher import Req7FixedTokenLauncherWorkflowTests
+        from test_cases.test_req7_sheets_read_decode import header_response, identity_response, response
+        from test_cases.test_collection_cycle_persistence import WORKER as worker
+        from monitor import issue_tracker_token_launcher as tokens
+        from monitor import issue_tracker_history_read_launcher as fixed_reads
+        from monitor import issue_tracker_local_commit as local
+        from monitor import issue_tracker_remote_history_match as remote
+        from monitor import issue_tracker_stage_l_consumer as source
+        from monitor import issue_tracker_history_preread_journal as preread
+        from monitor import issue_tracker_mutation_launcher as mutation
+        from monitor import issue_tracker_cycle_source as cycles
+        sdk = importlib.import_module('monitor.issue_tracker_sdk_authentication')
+        private_context.enter_context(scoped_fixture(global_root, sdk))
+        credential = global_root/'var/lib/http-ztp-container/service-account/cre.json'
+        if not credential.exists():
+            info = fresh_info(); info['project_id'] = 'synthetic-cloud-project'
+            credential.write_bytes(json.dumps(info).encode()); credential.chmod(0o600)
+        credential_original = credential.read_bytes()
+        before = {str(path.relative_to(state)): (path.stat().st_ino, path.read_bytes())
+            for path in state.rglob('*') if path.is_file()}
+        cycle_before = {str(path): (path.stat().st_ino, path.read_bytes())
+            for path in self.store.status_dir.rglob('*') if path.is_file()}
+        writer_original = local._owner(writer_token)
+        owner_original = owner_module._validated_owner(spreadsheet_token, binding)
+        real_refresh = tokens.OwnedProjectTokenRefreshUnit.refresh_once
+        real_read = fixed_reads.OwnedProjectSheetsReadUnit.read_once
+        real_source = source.qualify_prod_stage_l
+        real_reconcile = remote._reconcile_pending_project_units_and_project_auth
+        real_consume = remote._consume_current_project_online_original_inputs
+        real_core = remote._hold_current_project_online_inputs
+        real_images = preread._OriginalBusinessReadGuard._hold_original_images
+        real_inputs = source._hold_original_replay_inputs
+        real_dup = os.dup
+        issued = []; oauth = []; projections = []; reconciled = []; consumed = []
+        graphs = []; packets = []; core_closed = []; after_strict = []; input_verified = []
+        documents = {'template_identity': identity_response(), 'template_headers': header_response(),
+            'whitelist': whitelist_doc, 'metadata': json.loads(quota_raw.data),
+            'history_tail': json.loads(history_raw.data),
+            'activity': json.loads(reads[0]['discovery_response'].data),
+            'insertion': json.loads(reads[0]['occupancy_response'].data),
+            'row': json.loads(next(item['row_response'].data for item in reads if item['row_response'] is not None))}
+        @contextmanager
+        def borrowed_writer(project, publication):
+            self.assertEqual((self.project, self.publication), (project, publication))
+            self.assertIs(writer_original, local._owner(writer_token))
+            yield writer_token
+            self.assertIs(writer_original, local._owner(writer_token))
+        @contextmanager
+        def borrowed_owner(actual_binding):
+            self.assertEqual(binding, actual_binding)
+            self.assertIs(owner_original, owner_module._validated_owner(spreadsheet_token, binding))
+            yield spreadsheet_token
+            self.assertIs(owner_original, owner_module._validated_owner(spreadsheet_token, binding))
+        def qualify(*args, **options):
+            value = real_source(*args, **options); projections.append(value); return value
+        def refresh(refresh_unit):
+            self.assertTrue(projections, 'genuine qualified source must precede the first OAuth child')
+            self.assertEqual([((), None, 0)], reconciled)
+            body = b'{"access_token":"owned-project-token","expires_in":3600}'
+            reply = b'HTTP/1.1 200 OK\r\nContent-Length: '+str(len(body)).encode()+b'\r\nConnection: close\r\n\r\n'+body
+            with native.server(reply) as (records, errors), ExitStack() as launched:
+                port = socket.getaddrinfo('oauth2.googleapis.com',443)[0][4][1]
+                program = Req7FixedTokenLauncherWorkflowTests.child_fixture(native,port,project_scope=True)
+                original_popen = subprocess.Popen; children = []
+                def launch(argv, **options):
+                    self.assertEqual([str(Path(sys.executable).resolve()),'-I','-B','-c'],argv[:4])
+                    self.assertEqual(tokens._PROJECT_CHILD_PROGRAM,argv[4])
+                    self.assertEqual(str(Path(__file__).resolve().parents[1]),argv[5])
+                    self.assertEqual(7,len(argv)); self.assertEqual({'LC_ALL':'C'},options['env'])
+                    self.assertIs(subprocess.DEVNULL,options['stdin'])
+                    self.assertEqual((owner_module.owner_lock_fd(spreadsheet_token,binding),),options['pass_fds'])
+                    changed = list(argv); changed[4] = program
+                    child = original_popen(changed,**options); children.append(child); return child
+                launched.enter_context(mock.patch.object(tokens,'subprocess',SimpleNamespace(
+                    Popen=launch,PIPE=subprocess.PIPE,DEVNULL=subprocess.DEVNULL)))
+                with self.assertWarnsRegex(FutureWarning,'Python version 3.9 past its end of life') if sys.version_info[:2]==(3,9) else ExitStack():
+                    actual = real_refresh(refresh_unit)
+                self.assertEqual(1,len(children)); self.assertEqual(0,children[0].returncode)
+                self.assertTrue(children[0].stdout.closed); self.assertTrue(children[0].stderr.closed)
+            self.assertEqual([],errors); self.assertEqual(1,len(records))
+            self.assertEqual(credential_original,credential.read_bytes())
+            oauth.append(actual)
+            native.certificates('sheets.googleapis.com')
+            return actual
+        def read(reader):
+            self.assertEqual(1,len(oauth)); self.assertTrue(projections)
+            body = response(documents[reader._kind]).data
+            reply = b'HTTP/1.1 200 OK\r\nContent-Length: '+str(len(body)).encode()+b'\r\nConnection: close\r\n\r\n'+body
+            with native.server(reply,hostname='sheets.googleapis.com',destination='sheets.googleapis.com') as (records,errors), ExitStack() as launched:
+                port = socket.getaddrinfo('sheets.googleapis.com',443)[0][4][1]
+                calls,children = native.intercept(launched,native.child_fixture(port),writer_token,spreadsheet_token,binding)
+                actual = real_read(reader)
+            issued.append((reader._kind,len(records),len(calls),tuple(errors),children[0].returncode))
+            return actual
+        def reconcile(*args, **options):
+            actual = real_reconcile(*args, **options)
+            reconciled.append((*actual,len(oauth))); return actual
+        def consume(*args, **options):
+            self.assertEqual((writer_token,spreadsheet_token,binding,None),args)
+            self.assertEqual({'_store':self.store,'http_root':self.root},options)
+            consumed.append('entered')
+            try: real_consume(*args, **options)
+            except remote.RemoteHistoryHold:
+                consumed.append('actual-typed-hold'); raise
+        @contextmanager
+        def held_inputs(*args, **options):
+            with real_inputs(*args, **options) as actual_verify:
+                def verify():
+                    actual_verify()
+                    input_verified.append((bool(core_closed),len(graphs)))
+                yield verify
+        @contextmanager
+        def core(*args, **options):
+            with real_core(*args, **options) as packet:
+                packets.append(packet); yield packet
+            core_closed.append(True)
+        @contextmanager
+        def images(guard):
+            duplicates = []
+            def duplicate(fd):
+                value = real_dup(fd); info = os.fstat(fd)
+                duplicates.append((value,info,None if stat.S_ISDIR(info.st_mode) else os.pread(fd,info.st_size+1,0)))
+                return value
+            with mock.patch.object(preread.os,'dup',side_effect=duplicate):
+                with real_images(guard) as packet:
+                    graphs.append((guard,duplicates,packet))
+                    def verify():
+                        packet[1]()
+                        if core_closed:
+                            with preread._BUSINESS_READ_GUARD_LOCK:
+                                phase = preread._BUSINESS_READ_GUARDS[guard][0]
+                            after_strict.append((phase,cycles._HELD_CYCLE_REPLAY.get()[0],
+                                tuple((os.fstat(fd),None if raw is None else os.pread(fd,len(raw)+1,0))
+                                    for fd,_info,raw in duplicates)))
+                    yield packet[0],verify
+        with ExitStack() as boundary:
+            boundary.enter_context(mock.patch.object(local,'try_writer_owner',side_effect=borrowed_writer))
+            boundary.enter_context(mock.patch.object(owner_module,'spreadsheet_owner',side_effect=borrowed_owner))
+            boundary.enter_context(mock.patch.object(source,'qualify_prod_stage_l',side_effect=qualify))
+            boundary.enter_context(mock.patch.object(tokens.OwnedProjectTokenRefreshUnit,'refresh_once',autospec=True,side_effect=refresh))
+            boundary.enter_context(mock.patch.object(fixed_reads.OwnedProjectSheetsReadUnit,'read_once',autospec=True,side_effect=read))
+            boundary.enter_context(mock.patch.object(remote,'_reconcile_pending_project_units_and_project_auth',side_effect=reconcile))
+            boundary.enter_context(mock.patch.object(remote,'_consume_current_project_online_original_inputs',side_effect=consume))
+            boundary.enter_context(mock.patch.object(remote,'_hold_current_project_online_inputs',side_effect=core))
+            boundary.enter_context(mock.patch.object(source,'_hold_original_replay_inputs',side_effect=held_inputs))
+            boundary.enter_context(mock.patch.object(preread._OriginalBusinessReadGuard,'_hold_original_images',images))
+            old_prepare = boundary.enter_context(mock.patch.object(remote,'_prepare_current_project_online_observation'))
+            no_first = boundary.enter_context(mock.patch.object(global_journal,'_hold_continuous_owned_attempt_wire'))
+            no_retry = boundary.enter_context(mock.patch.object(global_journal,'_hold_shared_retry_owned_attempt_wire'))
+            no_claim = boundary.enter_context(mock.patch.object(global_journal,'_hold_counted_original_wire'))
+            no_count = boundary.enter_context(mock.patch.object(global_journal,'record_global_attempt_intent',wraps=global_journal.record_global_attempt_intent))
+            no_send = boundary.enter_context(mock.patch.object(mutation,'_send_counted_original_once'))
+            boundary.enter_context(mock.patch.object(worker,'STATUS_DIR',self.root/'monitor/status'))
+            self.assertEqual((),worker._reconcile_issue_tracker_online_after_completion(self.store))
+        # Independent facts outside the worker/core exception sanitizers.
+        self.assertEqual(['entered','actual-typed-hold'],consumed)
+        self.assertEqual([((),None,0)],reconciled); self.assertEqual(1,len(oauth))
+        self.assertTrue(projections); self.assertTrue(all(value==qualified for value in projections))
+        self.assertEqual([(kind,1,1,(),0) for kind in ('template_identity','template_headers',
+            'whitelist','metadata','history_tail','activity','insertion','row')],issued)
+        self.assertEqual(1,len(packets)); self.assertEqual(1,len(graphs)); self.assertEqual([True],core_closed)
+        actual_settings,_whitelist,responses,prepared,authentication = packets[0]
+        self.assertEqual(settings,actual_settings); self.assertIs(oauth[0],authentication)
+        self.assertEqual(1,len(prepared)); row,actual_source,guard = prepared[0]
+        self.assertEqual(unit,row.unit); self.assertEqual(qualified,actual_source)
+        self.assertIs(guard,graphs[0][0]); self.assertIs(responses['template_identity'],graphs[0][2][0][0])
+        self.assertEqual(9,len(graphs[0][1]))
+        self.assertEqual(2,sum(stat.S_ISDIR(info.st_mode) for _,info,_ in graphs[0][1]))
+        self.assertIn((True,1),input_verified,'actual outer original-input verifier must succeed after strict closure')
+        self.assertTrue(after_strict,'genuine nine-FD graph must remain verifiable after strict closure')
+        for phase,store,originals in after_strict:
+            self.assertEqual('CLOSED',phase); self.assertIs(self.store,store)
+            self.assertEqual(tuple((info,raw) for _fd,info,raw in graphs[0][1]),originals)
+        for fd,_info,_raw in graphs[0][1]:
+            with self.assertRaises(OSError) as caught: os.fstat(fd)
+            self.assertEqual(errno.EBADF,caught.exception.errno)
+        for operation in (old_prepare,no_first,no_retry,no_claim,no_count,no_send): operation.assert_not_called()
+        self.assertEqual(0,global_journal.inspect_global_unit(spreadsheet_token,binding,unit).attempt_count)
+        self.assertFalse(list(state.rglob('ATTEMPT-*'))); self.assertFalse(list(state.rglob('CLAIM-*')))
+        self.assertEqual(before,{str(path.relative_to(state)):(path.stat().st_ino,path.read_bytes())
+            for path in state.rglob('*') if path.is_file()})
+        self.assertEqual(cycle_before,{str(path):(path.stat().st_ino,path.read_bytes())
+            for path in self.store.status_dir.rglob('*') if path.is_file()})
+        status = json.loads((self.root/'monitor/status/issue-tracker-online.status.json').read_bytes())
+        self.assertEqual((1,True,True,'no_counted_units'),
+            (status['schema_version'],status['read_only'],status['mutation_disabled'],status['state']))
+        observed_label = sheet+':actual-default-worker:nine-original-images:hold'
+        return observed_label
+
     def _fixed_default_original_inputs_probe(self, fault=None):
         from monitor import issue_tracker_remote_history_match as remote
         self.assertTrue(callable(getattr(remote, '_consume_current_project_online_original_inputs', None)),
@@ -818,6 +1034,13 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         def owned(kind, raw, **options):
             return native.read_owned(private_context, writer_token, spreadsheet_token,
                 binding, credential, kind, json.loads(raw), raw_body=raw, **options)
+        if mode == 'default-worker-original-images':
+            observed.append(self._default_worker_original_images(native=native,whitelist_doc=whitelist_doc,
+                private_context=private_context,global_root=global_root,writer_token=writer_token,
+                spreadsheet_token=spreadsheet_token,binding=binding,unit=unit,qualified=qualified,
+                settings=settings,quota_raw=quota_raw,history_raw=history_raw,reads=reads,sheet=sheet,
+                state=state,owner_module=owner_module,global_journal=global_journal))
+            return
         if mode in ('business-originals', 'business-originals-rebind', 'business-postclose', 'business-failed', 'business-live-inputs'):
             from test_cases.test_req7_history_read_launcher import Req7HistoryReadLauncherWorkflowTests
             from monitor import issue_tracker_history_preread_journal as preread
@@ -1929,7 +2152,8 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             self.template.write_bytes(fake_workbook(reserved_switch_rows=4))
             default_preparation = (native_catalog_launch_probe is not None
                 and native_catalog_launch_probe[0] in ('prepare','prepare-mixed-accounting','prepare-quota-rebind','prepare-finalizer-expiry',
-                    'prepare-business','prepare-business-finalizer-rebind','prepare-business-postclose-revoke'))
+                    'prepare-business','prepare-business-finalizer-rebind','prepare-business-postclose-revoke',
+                    'default-worker-original-images'))
             if manual_channel_bridge or complete_preview_probe or default_preparation:
                 root_template = self.root / "monitor/Issue_Tracker_Template_v1.xlsx"
                 root_template.parent.mkdir(parents=True, exist_ok=True)

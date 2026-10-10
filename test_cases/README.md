@@ -2488,10 +2488,20 @@ and cycle drift do not become success. Independent direct and actual OAuth /
 four-read default-worker workflows require one new-consumer call, zero legacy
 calls and no FIRST/R2/count/CLAIM/mutation; the original UNKNOWN/count/files and
 cycle identities remain unchanged. Their nonqualifying-cycle fixture does not
-prove entry into the nine-FD graph: a complete default-worker -> qualifying
-source -> original-image workflow is still required separately, not inferred
-from the protected ETH/IB leaf tests. Old preparation API and its standalone
-postclose issued-read contracts are unchanged.
+prove entry into the nine-FD graph. A separate actual default-worker workflow
+now builds the protected three-panel source and genuine ETH/IB C6 originals:
+real count-zero reconciliation returns ((), None) without OAuth, then the
+actual consumer qualifies before its first real token refresh, issues eight
+owned native TLS reads and overlaps two directory/seven file originals.
+External assertions require actual verification after strict reader closure,
+the original outer input verifier, final nine-FD EBADF, unchanged original
+cycle/catalog/WIRE/count and no FIRST/R2/CLAIM/send. It fails against the held
+exact pre-dispatch worker function and passes against the current function;
+only the old function is substituted in memory for RED, never main-tree bytes
+or genuine consumer/issuer implementations. This fixture borrows its already
+held actual project/spreadsheet owners, so it is not first lock acquisition or
+actual owner revocation evidence; the existing runtime workflows retain those
+contracts. No legacy preparation mode or expectation is removed.
 Historical PROJECT completeness remains unproved, so this private input edge
 refuses before FIRST/R2 COUNT/CLAIM/launcher and does not authorize sending.
 Whole REQ7, exact current full/check and all REAL_ENV remain open; no scenario
