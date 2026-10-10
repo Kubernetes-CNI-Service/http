@@ -2414,3 +2414,19 @@ with external successful revoke/restore facts, genuine copy refusal and failed
 consumer scope. This is still VISIBLE_ONLY_UNPROVED preparation: no FIRST/R2,
 hidden PROJECT completeness/G1, sending, whole REQ7 or current full/check.
 Existing tests and original 30-second limits remain; field validation NOT RUN.
+
+The genuine LIVE business-read guard can privately hand back its original
+issued identity/History responses and fresh copies of the fixed business-read
+dictionaries. It takes no caller selectors or callbacks; copies, fabricated,
+CLOSED and FAILED guards cannot supply inputs. Repeated handback preserves
+actual response object identity, update/insert order and insert row=None,
+without allowing caller dictionary edits to change the frozen packet. Actual
+original/read checks surround the handback, retaining the original deadlines.
+Normal close discards that packet; FAILED scopes revoke it permanently.
+This remains read-only: the helper pins the initial catalog/count/namespace,
+so it cannot surround a count or CLAIM append. A future FIRST/R2 consumer must
+use its protected append-aware original scope, not relax the read-only guard.
+Independent direct and actual protected ETH/IB OAuth/TLS workflow tests cover
+this boundary, copied/closed/failed holders and unchanged count/originals.
+This handback is not default FIRST/R2 wiring, G1 or sending authority; whole
+REQ7, current full/check and field/Cloud/device/power-loss validation remain open.

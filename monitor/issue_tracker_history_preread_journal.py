@@ -48,6 +48,28 @@ class _OriginalBusinessReadGuard:
     def _verify_issued_only(self):
         self._check(issued_only=True)
 
+    def _original_issued_inputs(self):
+        """LIVE actual read handback, not count/claim or a write-aware scope.
+
+        Preserve genuine response identities and original deadlines. Each
+        result has new business dictionaries; caller edits cannot mutate the
+        frozen helper packet. CLOSED/FAILED holders cannot hand back inputs.
+        The consumer still needs its own protected original write/count scope.
+        """
+        self()
+        with _BUSINESS_READ_GUARD_LOCK:
+            state = _BUSINESS_READ_GUARDS.get(self)
+            if (type(self) is not _OriginalBusinessReadGuard or state is None
+                    or state[0] != 'LIVE' or state[3] is None):
+                raise HistoryPrereadHold()
+            identity, history, business = state[3]
+            result = identity, history, tuple(dict(item) for item in business)
+        self()
+        with _BUSINESS_READ_GUARD_LOCK:
+            if _BUSINESS_READ_GUARDS.get(self) is not state or state[0] != 'LIVE':
+                raise HistoryPrereadHold()
+        return result
+
     def _check(self, *, issued_only):
         failed = False
         try:
@@ -61,7 +83,7 @@ class _OriginalBusinessReadGuard:
                 verify()
             except BaseException:
                 with _BUSINESS_READ_GUARD_LOCK:
-                    state[:] = ['FAILED', None, None]
+                    state[:] = ['FAILED', None, None, None]
                 raise
             with _BUSINESS_READ_GUARD_LOCK:
                 if _BUSINESS_READ_GUARDS.get(self) is not state or state[0] == 'FAILED':
@@ -303,7 +325,8 @@ def _hold_owned_original_business_history_reads(writer_token, owner_token, bindi
             acquisitions = tuple(acquisitions)
             guard = _OriginalBusinessReadGuard()
             with _BUSINESS_READ_GUARD_LOCK:
-                _BUSINESS_READ_GUARDS[guard] = ['LIVE', verify, current]
+                _BUSINESS_READ_GUARDS[guard] = ['LIVE', verify, current,
+                    (identity_response, history_response, tuple(tuple(item.items()) for item in fresh))]
             yield original, guard
             guard()
         # All finalizers have run; do not reuse a closed originals verifier.
@@ -311,7 +334,7 @@ def _hold_owned_original_business_history_reads(writer_token, owner_token, bindi
         with _BUSINESS_READ_GUARD_LOCK:
             state = _BUSINESS_READ_GUARDS[guard]
             if state[0] != 'LIVE': raise HistoryPrereadHold()
-            state[0] = 'CLOSED'; state[1] = None
+            state[0] = 'CLOSED'; state[1] = None; state[3] = None
         completed = True
     except Exception:
         failed = True
@@ -321,7 +344,7 @@ def _hold_owned_original_business_history_reads(writer_token, owner_token, bindi
         if guard is not None and not completed:
             with _BUSINESS_READ_GUARD_LOCK:
                 state = _BUSINESS_READ_GUARDS.get(guard)
-                if state is not None: state[:] = ['FAILED', None, None]
+                if state is not None: state[:] = ['FAILED', None, None, None]
     if failed:
         raise HistoryPrereadHold() from None
 

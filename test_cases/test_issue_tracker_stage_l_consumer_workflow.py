@@ -41,7 +41,8 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         suffix = {'business-originals': 'fresh-read-only',
                   'business-originals-rebind': 'original-rebind-hold',
                   'business-postclose': 'actual-issued-postclose-revocation-hold',
-                  'business-failed': 'actual-issued-failed-scope-hold'}[mode]
+                  'business-failed': 'actual-issued-failed-scope-hold',
+                  'business-live-inputs': 'actual-live-issued-inputs-only'}[mode]
         self.assertEqual(['ETH Cabling:' + suffix, 'IB Cabling:' + suffix], observed)
 
     def test_actual_protected_business_and_history_fixed_acquisition_preserves_original_count(self):
@@ -61,6 +62,12 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         self.assertTrue(callable(getattr(preread, '_OriginalBusinessReadGuard', None)),
                         'failed actual business scope must revoke its genuine issued guard')
         self._original_business_read_acquisition_probe('business-failed')
+
+    def test_actual_business_issued_inputs_keep_original_response_identity_and_refuse_after_close(self):
+        from monitor import issue_tracker_history_preread_journal as preread
+        self.assertTrue(callable(getattr(preread._OriginalBusinessReadGuard, '_original_issued_inputs', None)),
+                        'actual held business replies cannot be replaced by caller-created plans')
+        self._original_business_read_acquisition_probe('business-live-inputs')
 
     def test_default_preparation_acquires_all_actual_business_history_reads_without_count(self):
         self._default_source_read_preparation_probe('prepare-business')
@@ -407,7 +414,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         def owned(kind, raw, **options):
             return native.read_owned(private_context, writer_token, spreadsheet_token,
                 binding, credential, kind, json.loads(raw), raw_body=raw, **options)
-        if mode in ('business-originals', 'business-originals-rebind', 'business-postclose', 'business-failed'):
+        if mode in ('business-originals', 'business-originals-rebind', 'business-postclose', 'business-failed', 'business-live-inputs'):
             from test_cases.test_req7_history_read_launcher import Req7HistoryReadLauncherWorkflowTests
             from monitor import issue_tracker_history_preread_journal as preread
             from monitor import issue_tracker_mutation_launcher as mutation
@@ -420,7 +427,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                 'insertion': reads[0]['occupancy_response'].data,
                 'row': next(item['row_response'].data for item in reads if item['row_response'] is not None)}
             real_read = fixed_reads.OwnedProjectSheetsReadUnit.read_once
-            issued = []; substituted = []; entered = []; refused = []; actual_responses = {}; guards = []
+            issued = []; substituted = []; entered = []; refused = []; actual_responses = {}; guards = []; packets = []
             def read(reader):
                 body = documents[reader._kind]
                 reply = b'HTTP/1.1 200 OK\r\nContent-Length: ' + str(len(body)).encode() + b'\r\nConnection: close\r\n\r\n' + body
@@ -449,10 +456,20 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                         self.assertEqual((2, 0), (result.operations_retained, result.noop_operations))
                         verify()
                         guards.append(verify)
+                        if mode == 'business-live-inputs':
+                            import copy
+                            acquired_identity, acquired_history, acquired_business = verify._original_issued_inputs()
+                            acquired_business[0]['operation_id'] = 'caller-mutated-copy'
+                            again_identity, again_history, again_business = verify._original_issued_inputs()
+                            packets.append((acquired_identity, acquired_history, acquired_business,
+                                            again_identity, again_history, again_business))
+                            with self.assertRaises(preread.HistoryPrereadHold): copy.copy(verify)._original_issued_inputs()
                         if mode == 'business-failed':
                             raise RuntimeError('owned fixture interrupts the actual consumer scope')
-                if mode in ('business-originals', 'business-postclose'):
+                if mode in ('business-originals', 'business-postclose', 'business-live-inputs'):
                     observe()
+                    if mode == 'business-live-inputs':
+                        with self.assertRaises(preread.HistoryPrereadHold): guards[0]._original_issued_inputs()
                     if mode == 'business-postclose':
                         import copy
                         guard = guards[0]
@@ -478,11 +495,30 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                             binding,actual_responses['row'],actual,read_kind='row',sheet=sheet,row=3)
                         with self.assertRaises(preread.HistoryPrereadHold): guards[0]()
                         with self.assertRaises(preread.HistoryPrereadHold): guards[0]._verify_issued_only()
+                        with self.assertRaises(preread.HistoryPrereadHold): guards[0]._original_issued_inputs()
             # Facts outside every exception sanitizer; no synthetic read permit.
+            if mode == 'business-live-inputs':
+                self.assertEqual(1, len(packets))
+                acquired_identity, acquired_history, acquired_business, again_identity, again_history, again_business = packets[0]
+                self.assertIs(identity_raw, acquired_identity); self.assertIs(acquired_identity, again_identity)
+                self.assertIs(actual_responses['history_tail'], acquired_history); self.assertIs(acquired_history, again_history)
+                self.assertIs(type(acquired_business), tuple); self.assertEqual(2, len(acquired_business))
+                self.assertEqual([item['operation_id'] for item in reads], [item['operation_id'] for item in again_business])
+                self.assertIsNot(acquired_business[0], again_business[0])
+                self.assertEqual('caller-mutated-copy', acquired_business[0]['operation_id'])
+                for packet in (acquired_business, again_business):
+                    for fresh in packet:
+                        self.assertEqual({'operation_id', 'discovery_response', 'occupancy_response', 'row_response'}, set(fresh))
+                        self.assertIs(actual_responses['activity'], fresh['discovery_response'])
+                        self.assertIs(actual_responses['insertion'], fresh['occupancy_response'])
+                    # Original fixture contract is exactly one update followed
+                    # by one insert. An insert must retain row_response=None.
+                    self.assertIs(actual_responses['row'], packet[0]['row_response'])
+                    self.assertIsNone(packet[1]['row_response'])
             self.assertEqual([(kind, 1, 1, (), 0) for kind in
                 ('template_identity', 'history_tail', 'activity', 'insertion', 'row')], issued)
             self.assertEqual([] if mode == 'business-originals-rebind' else [True], entered)
-            self.assertEqual([] if mode == 'business-originals' else [True], refused)
+            self.assertEqual([] if mode in ('business-originals', 'business-live-inputs') else [True], refused)
             no_count.assert_not_called(); no_mutation.assert_not_called()
             self.assertEqual(0, global_journal.inspect_global_unit(spreadsheet_token, binding, unit).attempt_count)
             self.assertFalse(list(state.rglob('ATTEMPT-*'))); self.assertFalse(list(state.rglob('CLAIM-*')))
@@ -497,7 +533,8 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             observed.append(sheet + {'business-originals': ':fresh-read-only',
                 'business-originals-rebind': ':original-rebind-hold',
                 'business-postclose': ':actual-issued-postclose-revocation-hold',
-                'business-failed': ':actual-issued-failed-scope-hold'}[mode])
+                'business-failed': ':actual-issued-failed-scope-hold',
+                'business-live-inputs': ':actual-live-issued-inputs-only'}[mode])
             return
         if mode in ('prepare','prepare-mixed-accounting','prepare-quota-rebind','prepare-finalizer-expiry',
                     'prepare-business','prepare-business-finalizer-rebind','prepare-business-postclose-revoke'):

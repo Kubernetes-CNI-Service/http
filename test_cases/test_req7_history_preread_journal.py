@@ -764,6 +764,19 @@ class Req7HistoryPrereadNativeWorkflowTests(unittest.TestCase):
 
 
 class Req7OriginalBusinessReadAcquisitionDirectTests(unittest.TestCase):
+    def test_original_issued_inputs_are_owner_only_and_forged_guard_cannot_supply_them(self):
+        import copy
+        import inspect
+        module = load()
+        api = getattr(module._OriginalBusinessReadGuard, '_original_issued_inputs', None)
+        self.assertTrue(callable(api), 'fixed first/retry driver needs actual held issued inputs')
+        self.assertEqual(('self',), tuple(inspect.signature(api).parameters))
+        forged = module._OriginalBusinessReadGuard()
+        with mock.patch.object(module.ownership, '_validated_owner') as owner:
+            for value in (forged, copy.copy(forged)):
+                with self.assertRaises(module.HistoryPrereadHold): value._original_issued_inputs()
+            owner.assert_not_called()
+
     def test_caller_built_or_copied_postclose_guard_cannot_validate_issued_reads(self):
         import copy
         import inspect
