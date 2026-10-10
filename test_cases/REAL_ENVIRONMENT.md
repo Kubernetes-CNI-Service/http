@@ -2332,6 +2332,8 @@ ALL 审计行确定唯一 append 窗口（NOOP 无虚构行），精确耗尽可
 
 ## TC-REAL-REQ7-NV-RESERVATION-001 — 两张 Cabling 的共享持久编号
 
+- 外层原目录清理补充（**NOT RUN / REAL_ENV REQUIRED**）：保留 prepare／inspect／UNKNOWN 实际冻结单元校验的外层 FD 复用代表性中断，要求原 dev/inode 与 named 目录后置检查 HOLD，外国对象 FD 不被清理误关，原编号、图像、COUNT/WIRE 均保留。不以同 inode 证明同一 open-file-description，不将本地 FD 故障注入冒充断电或设备验收；未省略／合并既有场景，原前置、精确授权、证据、清理与残余风险有效。
+
 - 原件持续持有补充（**NOT RUN / REAL_ENV REQUIRED**）：保留正常原编号重读、五份原像逐份在重读持久屏障处同字节换 inode、UNKNOWN 实际冻结单元校验拒绝与原 COUNT/WIRE 安全状态；本轮所有原目录／文件须持续持有，失败不回填、换号、删除原件或替代物，清理不得关闭已复用于外国对象的 FD。本地 direct 与真实 enrollment→NV→冻结 batch→GLOBAL UNKNOWN workflow 不代表断电、真实设备或跨单元完整分配。没有省略／合并原场景；现场前置、证据、清理、未验证风险与精确授权保持原卡要求。
 
 - Case ID：`TC-REAL-REQ7-NV-RESERVATION-001`；类型：real-environment / durable transaction；对应 C-17/C-19。状态：**NOT RUN / REAL_ENV REQUIRED**。`monitor/issue_tracker_nv_reservation.py` 未安装；本地 direct、真实私有 TLS 双读取和冷进程重读只验证保守 pending 单元预留，不是 COMPLETE、来源鉴别、新鲜准入或发送权限。

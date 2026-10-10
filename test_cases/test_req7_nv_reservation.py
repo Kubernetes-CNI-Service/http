@@ -1,5 +1,6 @@
 """Independent C17 durable shared sequence, not an online mutation permit."""
 from dataclasses import replace
+from contextlib import contextmanager
 import hashlib
 import importlib.util
 import json
@@ -57,6 +58,36 @@ def cabling_inputs(nonces, *, identifiers=('NV30102', 'NV30103')):
         publish_id='d' * 64, sheet='ETH Cabling', sheet_id=102, history_sheet_id=105,
         target_nonce=original['ETH Cabling'][1], history_nonce=original['Update_History'][1], business=tuple(business))
     return args
+
+
+@contextmanager
+def recycled_outer_nv_directory(module, store, foreign):
+    """Recycle only this invocation's outer descriptor at its real replay barrier."""
+    foreign.write_bytes(b'foreign outer descriptor original')
+    foreign_identity = (foreign.stat().st_dev, foreign.stat().st_ino)
+    real_inspect = module._inspect; real_sync = os.fsync
+    folders = []; recycled = []
+    def inspect_original(*args):
+        folders.append(args[2])
+        return real_inspect(*args)
+    def sync_original(fd):
+        if folders and not recycled and os.fstat(fd).st_ino == (store / 'INITIALIZED').stat().st_ino:
+            original = folders[-1]
+            os.close(original)
+            opened = os.open(str(foreign), os.O_RDONLY)
+            if opened != original:
+                os.dup2(opened, original); os.close(opened)
+            recycled.append(original)
+        return real_sync(fd)
+    try:
+        with mock.patch.object(module, '_inspect', side_effect=inspect_original), mock.patch('os.fsync', side_effect=sync_original):
+            yield recycled, foreign_identity
+    finally:
+        for fd in recycled:
+            try:
+                current = os.fstat(fd)
+                if (current.st_dev, current.st_ino) == foreign_identity: os.close(fd)
+            except OSError: pass
 
 
 class Req7NvReservationDirectTests(unittest.TestCase):
@@ -319,6 +350,40 @@ class Req7NvReservationDirectTests(unittest.TestCase):
                         if os.fstat(fd).st_ino == foreign_inode: os.close(fd)
                     except OSError: pass
 
+    def test_prepare_outer_directory_recycling_holds_and_preserves_foreign_descriptor(self):
+        self.module = load()
+        with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
+            self.initialize(token)
+            with recycled_outer_nv_directory(self.module, self.store, self.state / 'foreign-prepare') as (recycled, foreign_identity):
+                held = False
+                try: self.reserve(token)
+                except self.module.NvReservationHold: held = True
+                self.assertEqual(1, len(recycled))
+                try: current = os.fstat(recycled[0])
+                except OSError: self.fail('prepare cleanup closed another original at its recycled outer fd')
+                self.assertEqual(foreign_identity, (current.st_dev, current.st_ino))
+                self.assertEqual(b'foreign outer descriptor original', os.pread(recycled[0], 100, 0))
+                self.assertTrue(held, 'prepare accepted a rebound outer directory descriptor')
+            self.assertEqual(((KEYS[0], 'NV30102'), (KEYS[1], 'NV30103')), self.inspect(token).reservations)
+
+    def test_inspect_outer_directory_recycling_holds_and_preserves_frozen_images(self):
+        self.module = load()
+        with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
+            self.initialize(token); expected = self.reserve(token)
+            before = {path.name: path.read_bytes() for path in self.store.iterdir()}
+            with recycled_outer_nv_directory(self.module, self.store, self.state / 'foreign-inspect') as (recycled, foreign_identity):
+                held = False
+                try: self.inspect(token)
+                except self.module.NvReservationHold: held = True
+                self.assertEqual(1, len(recycled))
+                try: current = os.fstat(recycled[0])
+                except OSError: self.fail('inspect cleanup closed another original at its recycled outer fd')
+                self.assertEqual(foreign_identity, (current.st_dev, current.st_ino))
+                self.assertEqual(b'foreign outer descriptor original', os.pread(recycled[0], 100, 0))
+                self.assertTrue(held, 'inspect accepted a rebound outer directory descriptor')
+            self.assertEqual(before, {path.name: path.read_bytes() for path in self.store.iterdir()})
+            self.assertEqual(expected, self.inspect(token))
+
     def test_coherent_compiler_cannot_attach_foreign_activity_key_to_reserved_literal_id(self):
         self.module = load()
         self.assertTrue(hasattr(self.module, 'require_unit_nv_reservation'), 'durable NV-to-actual-batch binding missing')
@@ -462,6 +527,33 @@ class Req7NvReservationWorkflowTests(unittest.TestCase):
             wire = self.state / (hashlib.sha256(TARGET.encode()).hexdigest() + '.journal') / 'WIRE'
             self.assertEqual(value.wire_bytes, wire.read_bytes())
             self.assertEqual(((KEYS[0], 'NV30102'), (KEYS[1], 'NV30103')), expected.reservations)
+
+    def test_unknown_binding_outer_directory_recycling_preserves_foreign_fd_wire_and_count(self):
+        from test_cases.test_req7_global_attempt_journal import load as global_load
+        from monitor.issue_tracker_send_unit import freeze_send_unit
+        global_journal = global_load(); self.module = load()
+        with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
+            original = self.initialize(token); expected = self.reserve(token)
+            value = freeze_send_unit(**cabling_inputs(original.nonces))
+            global_journal.prepare_global_unit(token, binding(), value)
+            global_journal.record_global_attempt_intent(token, binding(), value)
+            before = {path.name: path.read_bytes() for path in self.store.iterdir()}
+            with recycled_outer_nv_directory(self.module, self.store, self.state / 'foreign-unknown') as (recycled, foreign_identity):
+                held = False
+                try: self.module.require_unit_nv_reservation(token, binding(), self.identity, value)
+                except self.module.NvReservationHold: held = True
+                self.assertEqual(1, len(recycled))
+                try: current = os.fstat(recycled[0])
+                except OSError: self.fail('UNKNOWN binding cleanup closed the recycled foreign descriptor')
+                self.assertEqual(foreign_identity, (current.st_dev, current.st_ino))
+                self.assertEqual(b'foreign outer descriptor original', os.pread(recycled[0], 100, 0))
+                self.assertTrue(held, 'UNKNOWN binding accepted a rebound outer directory descriptor')
+            seen = global_journal.inspect_global_unit(token, binding(), value)
+            self.assertEqual((1, 'UNKNOWN'), (seen.attempt_count, seen.outcome))
+            self.assertEqual(before, {path.name: path.read_bytes() for path in self.store.iterdir()})
+            wire = self.state / (hashlib.sha256(TARGET.encode()).hexdigest() + '.journal') / 'WIRE'
+            self.assertEqual(value.wire_bytes, wire.read_bytes())
+            self.assertEqual(expected, self.module.require_unit_nv_reservation(token, binding(), self.identity, value))
 
     def test_manifest_real_multi_script_workflow_primary_suite_and_not_run_card(self):
         manifest = json.loads((ROOT / 'test_cases/script_test_manifest.json').read_text())

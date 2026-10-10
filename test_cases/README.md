@@ -1269,6 +1269,12 @@ NV 原像重读期间，目录及 ETH-RAW／IB-RAW／HEADER／RESERVATIONS／INI
 只约束原对象，不赋予跨单元分配、结算或发送能力；marker FD 被复用于外国对象时
 不得由本轮清理关闭。既有编号、十个图像屏障与冷恢复预期不变。
 
+prepare／inspect 的外层目录也须在取得 FD 后立即记录原对象身份，重读结束后再核对
+原 dev/inode 与 named 目录；若 FD 被复用于外国对象，返回 HOLD 且不得误关该 FD。
+新增 direct 和真实 enrollment→NV→冻结 batch→GLOBAL UNKNOWN→原编号校验 workflow
+同时要求原图像、原 wire 与 UNKNOWN 次数不变；不证明同 inode 的 open-file-description
+一致性，也不替代跨单元分配或正式 full。
+
 原始 enrollment journal 的 sheet ID 必须保持 native int；即使 NONCES／HEADER／
 INITIALIZED 被一致重哈希，bool 或浮点数的 Python 相等别名仍 HOLD，不自动修复。
 `test_cases.test_req7_enrollment_journal` 保留原始数字 ID 合同及篡改证据。

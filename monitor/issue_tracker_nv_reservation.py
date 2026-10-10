@@ -148,7 +148,7 @@ def _inspect_images(parent, name, folder, binding, base, keys, ids):
 def prepare_nv_reservation(token, binding, identity, eth_plan, eth_response, ib_plan, ib_response,
                            *, generation_id, publish_id, sheet, requested_keys):
     """New original unit only; no adoption or allocation after a global intent."""
-    folder = None; failed = False
+    folder = None; original_folder_identity = None; failed = False
     try:
         parent, name, base, keys, ids = _inputs(token, binding, identity, generation_id, publish_id, sheet, requested_keys)
         # Even an unattempted or partial global journal is a conservative
@@ -160,6 +160,7 @@ def prepare_nv_reservation(token, binding, identity, eth_plan, eth_response, ib_
         if len(reservations) > _LIMIT: raise NvReservationHold()
         header = _header(base, eth_plan, ib_plan, observed, reservations)
         folder = global_journal._create_folder(parent, name)
+        original_folder_identity = journal._identity(os.fstat(folder))
         journal._write_read_image(folder, 'ETH-RAW', eth_response.data)
         journal._write_read_image(folder, 'IB-RAW', ib_response.data)
         local._write_new(folder, 'HEADER', local._canonical(header))
@@ -169,29 +170,37 @@ def prepare_nv_reservation(token, binding, identity, eth_plan, eth_response, ib_
         # precede genuine initialization. Partial stores stay retained HOLD.
         local._write_new(folder, 'INITIALIZED', _marker(header))
         result = _inspect(parent, name, folder, binding, base, keys, ids)
+        if journal._identity(os.fstat(folder))[:2] != original_folder_identity[:2]:
+            raise NvReservationHold()
+        journal._named(parent, name, folder, directory=True)
         ownership._validated_owner(token, binding)
     except Exception: failed = True
     finally:
-        if folder is not None:
-            try: os.close(folder)
-            except OSError: failed = True
+        if original_folder_identity is not None:
+            from monitor.issue_tracker_unit_catalog import _close_original
+            _close_original(folder, original_folder_identity)
     if failed: raise NvReservationHold()
     return result
 
 
 def inspect_nv_reservation(token, binding, identity, *, generation_id, publish_id, sheet, requested_keys):
     """Existing pending IDs only; never allocate, reclaim or clear UNKNOWN."""
-    folder = None; failed = False
+    folder = None; original_folder_identity = None; failed = False
     try:
         parent, name, base, keys, ids = _inputs(token, binding, identity, generation_id, publish_id, sheet, requested_keys)
-        folder = local._directory(parent, name); journal._named(parent, name, folder, directory=True)
+        folder = local._directory(parent, name)
+        original_folder_identity = journal._identity(os.fstat(folder))
+        journal._named(parent, name, folder, directory=True)
         result = _inspect(parent, name, folder, binding, base, keys, ids)
+        if journal._identity(os.fstat(folder))[:2] != original_folder_identity[:2]:
+            raise NvReservationHold()
+        journal._named(parent, name, folder, directory=True)
         ownership._validated_owner(token, binding)
     except Exception: failed = True
     finally:
-        if folder is not None:
-            try: os.close(folder)
-            except OSError: failed = True
+        if original_folder_identity is not None:
+            from monitor.issue_tracker_unit_catalog import _close_original
+            _close_original(folder, original_folder_identity)
     if failed: raise NvReservationHold()
     return result
 
