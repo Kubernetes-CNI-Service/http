@@ -951,6 +951,35 @@ def _publish_issue_tracker_lanes_after_completion(store) -> None:
             print(diagnostic, file=sys.stderr)
 
 
+def _report_issue_tracker_online_read_only_result(result) -> None:
+    """Report unresolved read observations without granting send authority.
+
+    Validate the complete result before reporting. Diagnostics are fixed text:
+    evidence, target identities and authentication material are never echoed.
+    Historical APPLIED observations are deliberately not labelled online GO.
+    """
+    from monitor.issue_tracker_remote_history_match import (
+        AppliedEvidenceObservation, RemoteHistoryObservation,
+    )
+    if type(result) is not tuple:
+        raise CollectionCycleHoldError('online read result shape unavailable')
+    states = []
+    for observation in result:
+        if type(observation) is AppliedEvidenceObservation and observation.state == 'APPLIED':
+            continue
+        if (type(observation) is not RemoteHistoryObservation
+                or observation.state not in ('UNKNOWN', 'CONFLICT')):
+            raise CollectionCycleHoldError('online read result shape unavailable')
+        states.append(observation.state)
+    for state in states:
+        diagnostic = (
+            'Issue Tracker online stalled: UNKNOWN; read-only reconciliation; mutation disabled'
+            if state == 'UNKNOWN' else
+            'Issue Tracker online stopped: CONFLICT; read-only reconciliation; mutation disabled'
+        )
+        print(diagnostic, file=sys.stderr)
+
+
 def _reconcile_issue_tracker_online_after_completion(store):
     """Every terminal prod cycle can reconcile old UNKNOWN, never send NEW.
 
@@ -1004,6 +1033,7 @@ def _reconcile_issue_tracker_online_after_completion(store):
         failed = True
     if failed:
         raise CollectionCycleHoldError('online original reconciliation unavailable')
+    _report_issue_tracker_online_read_only_result(result)
     return result
 
 

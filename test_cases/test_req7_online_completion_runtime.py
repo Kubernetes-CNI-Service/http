@@ -107,6 +107,36 @@ class OnlineCompletionRuntimeDirectTests(unittest.TestCase):
                 self.assertNotIn('synthetic-private-detail', stderr.getvalue())
             self.assertEqual([store], calls)
 
+    def test_online_stall_diagnostic_is_fixed_and_cannot_echo_evidence_or_tokens(self):
+        worker = persistence.WORKER
+        report = getattr(worker, '_report_issue_tracker_online_read_only_result', None)
+        self.assertTrue(callable(report), 'unresolved reconciliation needs an explicit no-send diagnostic')
+        from monitor.issue_tracker_remote_history_match import RemoteHistoryObservation
+        for state, expected in (
+            ('UNKNOWN', 'Issue Tracker online stalled: UNKNOWN; read-only reconciliation; mutation disabled'),
+            ('CONFLICT', 'Issue Tracker online stopped: CONFLICT; read-only reconciliation; mutation disabled'),
+        ):
+            with self.subTest(state=state), mock.patch.object(worker.sys, 'stderr', io.StringIO()) as stream:
+                observation = RemoteHistoryObservation(state, 1, False, True, True, 1, 0, 3, 3,
+                    'PRIVATE ACTION', 'PRIVATE WIRE', 'PRIVATE METADATA', 'PRIVATE HISTORY')
+                report((observation,))
+                self.assertEqual(expected + '\n', stream.getvalue())
+
+    def test_read_only_report_rejects_caller_shapes_and_never_labels_applied_as_send_permission(self):
+        worker = persistence.WORKER
+        report = getattr(worker, '_report_issue_tracker_online_read_only_result', None)
+        self.assertTrue(callable(report), 'fixed reconciliation result reporter missing')
+        from monitor.issue_tracker_remote_history_match import AppliedEvidenceObservation
+        for forged in (({'state': 'UNKNOWN'},), ['UNKNOWN'], (object(),)):
+            with self.subTest(shape=type(forged).__name__), \
+                    mock.patch.object(worker.sys, 'stderr', io.StringIO()) as stream:
+                with self.assertRaises(worker.CollectionCycleHoldError): report(forged)
+                self.assertEqual('', stream.getvalue())
+        with mock.patch.object(worker.sys, 'stderr', io.StringIO()) as stream:
+            report(())
+            report((AppliedEvidenceObservation('APPLIED', 'original', 1, 'unit', ()),))
+            self.assertEqual('', stream.getvalue(), 'historical APPLIED is not current online GO')
+
 
 class OnlineCompletionRuntimeWorkflowTests(unittest.TestCase):
     _Fixture = native.OnlineReconciliationWorkflowTests._Fixture
@@ -141,7 +171,7 @@ class OnlineCompletionRuntimeWorkflowTests(unittest.TestCase):
         self.initial_writer = writer
         return local, ownership, writer, owner, binding, AuthenticatedToken('owned-private-token', time.time()+3600), config
 
-    def exercise(self, fault=None):
+    def exercise(self, fault=None, *, missing_fence=False):
         api = self.api()
         from monitor import issue_tracker_global_attempt_journal as globals_
         from monitor import issue_tracker_unit_catalog as catalog
@@ -194,7 +224,14 @@ class OnlineCompletionRuntimeWorkflowTests(unittest.TestCase):
             real_read = reads.OwnedProjectSheetsReadUnit.read_once
             def read_actual(reader):
                 writer, owner, binding = owned[-1]
-                doc = deepcopy(dict(docs.values())[reader._kind]); body = json.dumps(doc, separators=(',', ':')).encode()
+                doc = deepcopy(dict(docs.values())[reader._kind])
+                if missing_fence and reader._kind == 'metadata':
+                    entries = doc['matchedDeveloperMetadata']
+                    before_count = len(entries)
+                    doc['matchedDeveloperMetadata'] = [item for item in entries
+                        if item['developerMetadata']['metadataId'] != unit.fence_metadata_id]
+                    self.assertEqual(before_count - 1, len(doc['matchedDeveloperMetadata']))
+                body = json.dumps(doc, separators=(',', ':')).encode()
                 reply = b'HTTP/1.1 200 OK\r\nContent-Length: '+str(len(body)).encode()+b'\r\nConnection: close\r\n\r\n'+body
                 with self.server(reply, hostname='sheets.googleapis.com', destination='sheets.googleapis.com') as (records, errors), ExitStack() as launched:
                     port = socket.getaddrinfo('sheets.googleapis.com', 443)[0][4][1]
@@ -211,6 +248,14 @@ class OnlineCompletionRuntimeWorkflowTests(unittest.TestCase):
                     original = store.gate.project; store.gate.project = str(self.root/'foreign')
                     substituted.append((original, store.gate.project))
                 return value
+            if missing_fence:
+                # Prepare the owned OAuth fixture before measuring production
+                # side effects; the actual lazy refresh still performs TLS.
+                from test_req7_sdk_authentication import fresh_info
+                credential = self.root/'var/lib/http-ztp-container/service-account/cre.json'
+                self.assertFalse(credential.exists())
+                info = fresh_info(); info['project_id'] = 'synthetic-cloud-project'
+                credential.write_bytes(json.dumps(info).encode()); credential.chmod(0o600)
             before = {name: raw for name, raw in original_read_files(self.root).items()
                 if name.startswith(('project/', 'var/lib/http-ztp-container/'))}
             state = self.root/'var/lib/http-ztp-container/issue-tracker'
@@ -244,7 +289,10 @@ class OnlineCompletionRuntimeWorkflowTests(unittest.TestCase):
             if fault:
                 with self.assertRaises(persistence.WORKER.CollectionCycleHoldError) as caught: api(store)
                 self.assertIsNone(caught.exception.__context__)
-            else: result = api(store)
+            else:
+                with mock.patch.object(persistence.WORKER.sys, 'stderr', io.StringIO()) as online_stderr:
+                    result = api(store)
+                diagnostic = online_stderr.getvalue()
             self.assertEqual([(True, True)], oauth)
             self.assertEqual([] if fault in ('before-auth', 'allowlist-after-auth') else [(kind, 1, 1, (), 0) for kind in
                 ('template_identity', 'template_headers', 'metadata', 'history_tail')], facts)
@@ -273,6 +321,16 @@ class OnlineCompletionRuntimeWorkflowTests(unittest.TestCase):
                     self.assertEqual((self.root/'preserved-input').read_bytes(), changed_input[0].read_bytes())
                 elif fault != 'gate-last-read':
                     self.assertEqual((self.root/'preserved-cycle').read_bytes(), store.completion_path(1).read_bytes())
+            elif missing_fence:
+                self.assertEqual(('UNKNOWN',), tuple(item.state for item in result))
+                self.assertFalse(applied.exists())
+                self.assertFalse((state/(prefix+'.completion')).exists())
+                self.assertFalse((state/(prefix+'.dispatch')).exists())
+                self.assertEqual(before, {name: raw for name, raw in original_read_files(self.root).items()
+                    if name.startswith(('project/', 'var/lib/http-ztp-container/'))})
+                self.assertEqual(cycle_before, {path.name: (path.stat().st_ino, path.read_bytes())
+                    for path in store.records_dir.iterdir()})
+                self.assertEqual('Issue Tracker online stalled: UNKNOWN; read-only reconciliation; mutation disabled\n', diagnostic)
             else:
                 self.assertEqual(('APPLIED',), tuple(item.state for item in result)); self.assertTrue(applied.exists())
                 self.assertEqual(cycle_before, {path.name: (path.stat().st_ino, path.read_bytes()) for path in store.records_dir.iterdir()})
@@ -286,6 +344,8 @@ class OnlineCompletionRuntimeWorkflowTests(unittest.TestCase):
     def test_actual_creator_header_cycle_drift_refuses_complete_marker_not_only_applied(self): self.exercise('creator-header')
     def test_policy_original_outlives_actual_project_owner_revoke_close(self): self.exercise('config-owner-close')
     def test_allowlist_original_outlives_actual_project_owner_revoke_close(self): self.exercise('allowlist-owner-close')
+    def test_actual_missing_fence_four_reads_reports_stall_without_count_claim_or_mutation(self):
+        self.exercise(missing_fence=True)
 
 
 class OnlineCompletionCollectorDispatchWorkflowTests(unittest.TestCase):

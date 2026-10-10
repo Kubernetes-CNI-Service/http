@@ -2384,6 +2384,8 @@ generation/publish 及 UNKNOWN 下改 action/wire 均 HOLD，不计作 COMPLETE 
 - 证据：精确 HEAD/tree/dirty/diff/manifest/Python/平台、命令／退出码、前后 stat/inode/大小/SHA256、完整 END／物理顺序、固定 TLS 请求见证、原 RAW 摘要、原 action/wire／nonce、所有 fsync 屏障和冷进程 UNKNOWN；不输出 bearer 或业务正文。
 - 清理与风险：只恢复另获授权的隔离副本；保留 UNKNOWN 原像与预留／永久 fence，不删除未知 state、不向外部 PID 发信号、不安装／发布。真实断电、卷回滚、隐藏 PROJECT、在线并发修改仍 NOT RUN。
 
+- 默认只读停滞诊断补充（**NOT RUN / REAL_ENV REQUIRED**）：真实四读后缺少永久 fence 的 UNKNOWN、真实 CONFLICT 必须仅输出固定无秘密诊断；历史 APPLIED 不得显示当前 GO。保留实际完成读、原 owner/finalizer 复验、count/UNKNOWN 和全部原件不变、零新增 completion/dispatch CLAIM/请求及失败安全状态。现有正常、关键提交边界、代表性中断、冷恢复场景继续保留，省略/合并：无。替代证据仅为本地独立 direct 与真实 OAuth/四次 TLS 读；运行中日志可见性尚不代替持久状态、UI、T6 升级、重试调度或 NEW/R2/G1 权限。现场原前置授权、完整日志/stat/inode/命令与实际请求计数见证、仅自有 fixture 清理规则继续有效；真实 Cloud/设备/断电、现场日志链路和当前 full/check 未证明，残余风险未另行接受，无新增确认人。
+
 ## TC-REAL-REQ7-DURABLE-ATTEMPT-JOURNAL-001 — 意图先落盘与跨重启总计数
 
 - Case ID：`TC-REAL-REQ7-DURABLE-ATTEMPT-JOURNAL-001`；类型：real-environment / durable transaction；对应 C-6/C-14/C-19。状态：**NOT RUN / REAL_ENV REQUIRED**。`monitor/issue_tracker_attempt_journal.py` 是未安装的保守本地证据库；direct 与实际 C-6 owner → literal encoder → 意图 journal → 后续拒绝观察，以及真实私有子进程退出／重启 workflow，不证明实际断电或六次真实网络尝试上界。

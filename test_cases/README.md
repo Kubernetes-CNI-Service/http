@@ -2148,6 +2148,16 @@ not online proof. Existing raw UNKNOWN/count never reset. No business mutation,
 NEW/FIFO/G1 release, whole REQ7 or current full/check is established here.
 REAL_ENV remains NOT RUN; no existing automated or core field case is omitted.
 
+Unresolved default-lane observations now emit fixed UNKNOWN-stalled or
+CONFLICT-stopped diagnostics only after the original owners' final checks.
+The reporter validates the entire typed tuple before emitting anything and
+never echoes evidence, credentials or target details. Historical APPLIED is
+not labelled current online GO. An independently missing permanent fence in
+the actual OAuth/four-TLS-read workflow must preserve every original file and
+the initial UNKNOWN/count, with no completion, dispatch CLAIM or mutation.
+This is log visibility only, not durable operator status, retry scheduling,
+T6 escalation closure, default NEW/R2 permission or whole REQ7/full proof.
+
 Protected FIRST and original R2 may compose inside the terminal worker's
 identical actual held cycle store. Only the original live holder issues reuse;
 copied stores, caller callbacks/tuples, revoked holders and ContextVar changes
