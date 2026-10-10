@@ -39,7 +39,9 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             native_catalog_probe=True, native_catalog_c6_origin_probe=True,
             native_catalog_retained_probe=True, native_catalog_launch_probe=(mode, observed))
         suffix = {'business-originals': 'fresh-read-only',
-                  'business-originals-rebind': 'original-rebind-hold'}[mode]
+                  'business-originals-rebind': 'original-rebind-hold',
+                  'business-postclose': 'actual-issued-postclose-revocation-hold',
+                  'business-failed': 'actual-issued-failed-scope-hold'}[mode]
         self.assertEqual(['ETH Cabling:' + suffix, 'IB Cabling:' + suffix], observed)
 
     def test_actual_protected_business_and_history_fixed_acquisition_preserves_original_count(self):
@@ -47,6 +49,27 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
 
     def test_actual_business_original_rebound_during_last_native_read_refuses_without_count(self):
         self._original_business_read_acquisition_probe('business-originals-rebind')
+
+    def test_actual_business_postclose_guard_rejects_closed_fds_and_revoked_original_issued_read(self):
+        from monitor import issue_tracker_history_preread_journal as preread
+        self.assertTrue(callable(getattr(preread, '_OriginalBusinessReadGuard', None)),
+                        'actual issued reads need a postclose-only genuine guard')
+        self._original_business_read_acquisition_probe('business-postclose')
+
+    def test_actual_business_failed_scope_cannot_reuse_original_issued_guard(self):
+        from monitor import issue_tracker_history_preread_journal as preread
+        self.assertTrue(callable(getattr(preread, '_OriginalBusinessReadGuard', None)),
+                        'failed actual business scope must revoke its genuine issued guard')
+        self._original_business_read_acquisition_probe('business-failed')
+
+    def test_default_preparation_acquires_all_actual_business_history_reads_without_count(self):
+        self._default_source_read_preparation_probe('prepare-business')
+
+    def test_default_preparation_holds_business_original_through_last_actual_outer_finalizer(self):
+        self._default_source_read_preparation_probe('prepare-business-finalizer-rebind')
+
+    def test_default_preparation_rechecks_original_business_issued_read_after_all_holder_closures(self):
+        self._default_source_read_preparation_probe('prepare-business-postclose-revoke')
 
     def _default_source_read_preparation_probe(self, mode):
         from monitor import issue_tracker_remote_history_match as remote
@@ -60,7 +83,10 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         suffix={'prepare':'visible-only-no-count',
             'prepare-mixed-accounting':'mixed-original-visible-only-no-count',
             'prepare-quota-rebind':'original-rebind-hold-no-count',
-            'prepare-finalizer-expiry':'post-finalizer-expiry-hold-no-count'}[mode]
+            'prepare-finalizer-expiry':'post-finalizer-expiry-hold-no-count',
+            'prepare-business':'business-history-visible-only-no-count',
+            'prepare-business-finalizer-rebind':'business-finalizer-rebind-hold-no-count',
+            'prepare-business-postclose-revoke':'business-postclose-revoke-hold-no-count'}[mode]
         self.assertEqual(['ETH Cabling:'+suffix,'IB Cabling:'+suffix],observed)
 
     def test_default_preparation_replays_actual_source_then_fresh_project_gate_reads_without_count(self):
@@ -381,7 +407,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         def owned(kind, raw, **options):
             return native.read_owned(private_context, writer_token, spreadsheet_token,
                 binding, credential, kind, json.loads(raw), raw_body=raw, **options)
-        if mode in ('business-originals', 'business-originals-rebind'):
+        if mode in ('business-originals', 'business-originals-rebind', 'business-postclose', 'business-failed'):
             from test_cases.test_req7_history_read_launcher import Req7HistoryReadLauncherWorkflowTests
             from monitor import issue_tracker_history_preread_journal as preread
             from monitor import issue_tracker_mutation_launcher as mutation
@@ -394,7 +420,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                 'insertion': reads[0]['occupancy_response'].data,
                 'row': next(item['row_response'].data for item in reads if item['row_response'] is not None)}
             real_read = fixed_reads.OwnedProjectSheetsReadUnit.read_once
-            issued = []; substituted = []; entered = []; refused = []
+            issued = []; substituted = []; entered = []; refused = []; actual_responses = {}; guards = []
             def read(reader):
                 body = documents[reader._kind]
                 reply = b'HTTP/1.1 200 OK\r\nContent-Length: ' + str(len(body)).encode() + b'\r\nConnection: close\r\n\r\n' + body
@@ -403,6 +429,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                     calls, children = native.intercept(launched, native.child_fixture(port), writer_token, spreadsheet_token, binding)
                     value = real_read(reader)
                 issued.append((reader._kind, len(records), len(calls), tuple(errors), children[0].returncode))
+                actual_responses[reader._kind] = value
                 if mode == 'business-originals-rebind' and reader._kind == 'row':
                     path = next(path for path in state.rglob('BUSINESS-RAW'))
                     raw = path.read_bytes(); inode = path.stat().st_ino
@@ -421,30 +448,59 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                         entered.append(True)
                         self.assertEqual((2, 0), (result.operations_retained, result.noop_operations))
                         verify()
-                if mode == 'business-originals':
+                        guards.append(verify)
+                        if mode == 'business-failed':
+                            raise RuntimeError('owned fixture interrupts the actual consumer scope')
+                if mode in ('business-originals', 'business-postclose'):
                     observe()
+                    if mode == 'business-postclose':
+                        import copy
+                        guard = guards[0]
+                        copied = copy.copy(guard)
+                        with self.assertRaises(preread.HistoryPrereadHold): copied()
+                        with self.assertRaises(preread.HistoryPrereadHold): copied._verify_issued_only()
+                        with self.assertRaises(preread.HistoryPrereadHold): guard()
+                        guard._verify_issued_only()
+                        original = actual_responses['row']
+                        with fixed_reads._PROJECT_READ_GUARD:
+                            registered = fixed_reads._PROJECT_READS.pop(original)
+                        try:
+                            with self.assertRaises(preread.HistoryPrereadHold): guard._verify_issued_only()
+                            refused.append(True)
+                        finally:
+                            with fixed_reads._PROJECT_READ_GUARD:
+                                fixed_reads._PROJECT_READS[original] = registered
                 else:
                     with self.assertRaises(preread.HistoryPrereadHold): observe()
                     refused.append(True)
+                    if mode == 'business-failed':
+                        fixed_reads.require_current_owned_project_read(writer_token,spreadsheet_token,
+                            binding,actual_responses['row'],actual,read_kind='row',sheet=sheet,row=3)
+                        with self.assertRaises(preread.HistoryPrereadHold): guards[0]()
+                        with self.assertRaises(preread.HistoryPrereadHold): guards[0]._verify_issued_only()
             # Facts outside every exception sanitizer; no synthetic read permit.
             self.assertEqual([(kind, 1, 1, (), 0) for kind in
                 ('template_identity', 'history_tail', 'activity', 'insertion', 'row')], issued)
-            self.assertEqual([True] if mode == 'business-originals' else [], entered)
+            self.assertEqual([] if mode == 'business-originals-rebind' else [True], entered)
             self.assertEqual([] if mode == 'business-originals' else [True], refused)
             no_count.assert_not_called(); no_mutation.assert_not_called()
             self.assertEqual(0, global_journal.inspect_global_unit(spreadsheet_token, binding, unit).attempt_count)
             self.assertFalse(list(state.rglob('ATTEMPT-*'))); self.assertFalse(list(state.rglob('CLAIM-*')))
             after = {str(path.relative_to(state)): (path.stat().st_ino, path.read_bytes())
                 for path in state.rglob('*') if path.is_file()}
-            if mode == 'business-originals': self.assertEqual(before, after)
+            if mode != 'business-originals-rebind': self.assertEqual(before, after)
             else:
                 self.assertEqual(1, len(substituted)); name, old, new = substituted[0]
                 self.assertNotEqual(old, new); self.assertEqual(before[name][1], after[name][1])
                 self.assertEqual({k: v for k, v in before.items() if k != name},
                                  {k: v for k, v in after.items() if k != name})
-            observed.append(sheet + (':fresh-read-only' if mode == 'business-originals' else ':original-rebind-hold'))
+            observed.append(sheet + {'business-originals': ':fresh-read-only',
+                'business-originals-rebind': ':original-rebind-hold',
+                'business-postclose': ':actual-issued-postclose-revocation-hold',
+                'business-failed': ':actual-issued-failed-scope-hold'}[mode])
             return
-        if mode in ('prepare','prepare-mixed-accounting','prepare-quota-rebind','prepare-finalizer-expiry'):
+        if mode in ('prepare','prepare-mixed-accounting','prepare-quota-rebind','prepare-finalizer-expiry',
+                    'prepare-business','prepare-business-finalizer-rebind','prepare-business-postclose-revoke'):
             from test_cases.test_req7_history_read_launcher import Req7HistoryReadLauncherWorkflowTests
             from monitor import issue_tracker_token_launcher as tokens
             from monitor import issue_tracker_remote_history_match as remote
@@ -452,6 +508,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             from monitor import issue_tracker_mutation_launcher as mutation
             from monitor import issue_tracker_unit_catalog as catalog
             from monitor import issue_tracker_metadata_reservation as quota
+            from monitor import issue_tracker_history_preread_journal as preread
             before={str(path.relative_to(state)):(path.stat().st_ino,path.read_bytes())
                 for path in state.rglob('*') if path.is_file()}
             actual, _credential, _raw=Req7HistoryReadLauncherWorkflowTests.project_auth(
@@ -459,13 +516,44 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             native.certificates('sheets.googleapis.com')
             documents={'template_identity':identity_response(),'template_headers':header_response(),
                 'whitelist':whitelist_doc,'metadata':json.loads(quota_raw.data)}
+            documents.update(history_tail=json.loads(history_raw.data),
+                activity=json.loads(reads[0]['discovery_response'].data),
+                insertion=json.loads(reads[0]['occupancy_response'].data),
+                row=json.loads(next(item['row_response'].data for item in reads if item['row_response'] is not None)))
             real_read=fixed_reads.OwnedProjectSheetsReadUnit.read_once
             real_source=source.qualify_prod_stage_l
-            issued=[]; projections=[]; replaced=[]; refused=[]
+            issued=[]; projections=[]; replaced=[]; refused=[]; actual_responses={}; business_closed=[]
+            revoked=[]; restored=[]; issued_only_calls=[]; genuine_business_guards=[]
             closed=[]; first_holder=[]; mixed_observations=[]
             real_hold=catalog.hold_pending_project_c6_units
             real_mixed_quota=quota._hold_owned_project_mixed_metadata_capacity
             real_clock=fixed_reads._monotonic
+            real_business=preread._hold_owned_original_business_history_reads
+            real_issued_only=preread._OriginalBusinessReadGuard._verify_issued_only
+            def verify_issued_only(guard):
+                issued_only_calls.append((guard,len(business_closed),len(revoked)))
+                return real_issued_only(guard)
+            def replace_business_original():
+                path=next(path for path in state.rglob('BUSINESS-RAW'))
+                raw=path.read_bytes(); inode=path.stat().st_ino
+                path.rename(global_root/'preserved-preparation-business')
+                path.write_bytes(raw); path.chmod(0o600)
+                replaced.append((str(path.relative_to(state)),inode,path.stat().st_ino))
+            @contextmanager
+            def held_business(*args,**options):
+                with real_business(*args,**options) as original:
+                    actual_read=actual_responses['row']
+                    genuine_business_guards.append(original[1])
+                    yield original
+                business_closed.append(True)
+                with fixed_reads._PROJECT_READ_GUARD:
+                    registered=fixed_reads._PROJECT_READS.pop(actual_read)
+                revoked.append((actual_read,registered))
+                preparation_boundary.callback(restore_read,actual_read,registered)
+            def restore_read(actual_read,registered):
+                with fixed_reads._PROJECT_READ_GUARD:
+                    fixed_reads._PROJECT_READS[actual_read]=registered
+                restored.append((actual_read,registered))
             @contextmanager
             def held_catalog(*args,**options):
                 first = not first_holder
@@ -474,7 +562,9 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                     yield actual_rows
                 # First acquired holder is last released. Its actual verifier
                 # and cleanup run before the original read deadlines expire.
-                if first: closed.append(True)
+                if first:
+                    closed.append(True)
+                    if mode=='prepare-business-finalizer-rebind': replace_business_original()
             @contextmanager
             def mixed_quota(*args,**options):
                 with real_mixed_quota(*args,**options) as actual_budget:
@@ -495,6 +585,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                     calls,children=native.intercept(launched,native.child_fixture(port),writer_token,spreadsheet_token,binding)
                     value=real_read(reader)
                 issued.append((reader._kind,len(records),len(calls),tuple(errors),children[0].returncode))
+                actual_responses[reader._kind]=value
                 if mode=='prepare-quota-rebind' and reader._kind=='metadata':
                     path=next(path for path in state.rglob('RESERVATION') if path.parent.name.endswith('.metadata'))
                     raw=path.read_bytes(); inode=path.stat().st_ino
@@ -508,15 +599,21 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                     mock.patch.object(tokens,'OwnedProjectTokenRefreshUnit') as no_second_oauth, \
                     mock.patch.object(global_journal,'record_global_attempt_intent',wraps=global_journal.record_global_attempt_intent) as no_count, \
                     mock.patch.object(mutation,'_send_counted_original_once') as no_mutation:
-                if mode=='prepare-finalizer-expiry':
+                if mode in ('prepare-finalizer-expiry','prepare-business-finalizer-rebind'):
                     preparation_boundary.enter_context(mock.patch.object(catalog,
                         'hold_pending_project_c6_units',side_effect=held_catalog))
+                if mode=='prepare-finalizer-expiry':
                     preparation_boundary.enter_context(mock.patch.object(fixed_reads,
                         '_monotonic',side_effect=post_finalizer_clock))
                 if mode=='prepare-mixed-accounting':
                     preparation_boundary.enter_context(mock.patch.object(quota,
                         '_hold_owned_project_mixed_metadata_capacity',side_effect=mixed_quota))
-                if mode in ('prepare','prepare-mixed-accounting'):
+                if mode=='prepare-business-postclose-revoke':
+                    preparation_boundary.enter_context(mock.patch.object(preread,
+                        '_hold_owned_original_business_history_reads',side_effect=held_business))
+                    preparation_boundary.enter_context(mock.patch.object(preread._OriginalBusinessReadGuard,
+                        '_verify_issued_only',autospec=True,side_effect=verify_issued_only))
+                if mode in ('prepare','prepare-mixed-accounting','prepare-business'):
                     result=remote._prepare_current_project_online_observation(writer_token,spreadsheet_token,
                         binding,actual,_store=self.store,http_root=self.root)
                     self.assertEqual('VISIBLE_ONLY_UNPROVED',result)
@@ -527,19 +624,38 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                     refused.append(True)
                 no_second_oauth.assert_not_called(); no_count.assert_not_called(); no_mutation.assert_not_called()
             # Independent facts outside every implementation sanitizer.
-            self.assertEqual([(kind,1,1,(),0) for kind in
-                ('template_identity','template_headers','whitelist','metadata')],issued)
-            positive = mode in ('prepare','prepare-mixed-accounting')
+            expected_kinds=('template_identity','template_headers','whitelist','metadata')
+            if mode!='prepare-quota-rebind':
+                expected_kinds+=('history_tail','activity','insertion','row')
+            self.assertEqual([(kind,1,1,(),0) for kind in expected_kinds],issued)
+            positive = mode in ('prepare','prepare-mixed-accounting','prepare-business')
             self.assertGreaterEqual(len(projections),2 if positive else 1)
             self.assertEqual([] if positive else [True],refused)
             if mode=='prepare-mixed-accounting':
                 self.assertEqual([('VISIBLE_ONLY_UNPROVED',1)],mixed_observations)
             if mode=='prepare-finalizer-expiry': self.assertEqual([True],closed)
+            if mode=='prepare-business-finalizer-rebind': self.assertEqual([True],closed)
+            if mode=='prepare-business-postclose-revoke':
+                self.assertEqual([True],business_closed)
+                self.assertEqual(1,len(revoked)); self.assertEqual(1,len(restored))
+                self.assertIs(actual_responses['row'],revoked[0][0])
+                self.assertIs(actual,revoked[0][1]); self.assertIs(revoked[0][0],restored[0][0])
+                self.assertIs(revoked[0][1],restored[0][1])
+                self.assertEqual(1,len(issued_only_calls)); self.assertEqual(1,len(genuine_business_guards))
+                self.assertIs(genuine_business_guards[0],issued_only_calls[0][0])
+                self.assertEqual((1,1),issued_only_calls[0][1:])
+                with fixed_reads._PROJECT_READ_GUARD:
+                    self.assertIs(actual,fixed_reads._PROJECT_READS[actual_responses['row']])
+                    for kind in ('template_identity','template_headers','whitelist','metadata'):
+                        self.assertIs(actual,fixed_reads._PROJECT_READS[actual_responses[kind]])
+                for kind in ('template_identity','template_headers','whitelist','metadata'):
+                    fixed_reads.require_current_owned_project_read(writer_token,spreadsheet_token,
+                        binding,actual_responses[kind],actual,read_kind=kind)
             self.assertEqual(0,global_journal.inspect_global_unit(spreadsheet_token,binding,unit).attempt_count)
             self.assertFalse(list(state.rglob('ATTEMPT-*'))); self.assertFalse(list(state.rglob('CLAIM-*')))
             after={str(path.relative_to(state)):(path.stat().st_ino,path.read_bytes())
                 for path in state.rglob('*') if path.is_file()}
-            if mode!='prepare-quota-rebind': self.assertEqual(before,after)
+            if mode not in ('prepare-quota-rebind','prepare-business-finalizer-rebind'): self.assertEqual(before,after)
             else:
                 self.assertEqual(1,len(replaced)); name,old,new=replaced[0]
                 self.assertNotEqual(old,new); self.assertEqual(before[name][1],after[name][1])
@@ -547,7 +663,10 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             observed.append(sheet+{'prepare':':visible-only-no-count',
                 'prepare-mixed-accounting':':mixed-original-visible-only-no-count',
                 'prepare-quota-rebind':':original-rebind-hold-no-count',
-                'prepare-finalizer-expiry':':post-finalizer-expiry-hold-no-count'}[mode])
+                'prepare-finalizer-expiry':':post-finalizer-expiry-hold-no-count',
+                'prepare-business':':business-history-visible-only-no-count',
+                'prepare-business-finalizer-rebind':':business-finalizer-rebind-hold-no-count',
+                'prepare-business-postclose-revoke':':business-postclose-revoke-hold-no-count'}[mode])
             return
         bundle = {name:owned(kind, response(doc).data) for name,kind,doc in (
             ('identity_response','template_identity',identity_response()),
@@ -1368,7 +1487,8 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             self.template = self.publication / "local.xlsx"
             self.template.write_bytes(fake_workbook(reserved_switch_rows=4))
             default_preparation = (native_catalog_launch_probe is not None
-                and native_catalog_launch_probe[0] in ('prepare','prepare-mixed-accounting','prepare-quota-rebind','prepare-finalizer-expiry'))
+                and native_catalog_launch_probe[0] in ('prepare','prepare-mixed-accounting','prepare-quota-rebind','prepare-finalizer-expiry',
+                    'prepare-business','prepare-business-finalizer-rebind','prepare-business-postclose-revoke'))
             if manual_channel_bridge or complete_preview_probe or default_preparation:
                 root_template = self.root / "monitor/Issue_Tracker_Template_v1.xlsx"
                 root_template.parent.mkdir(parents=True, exist_ok=True)

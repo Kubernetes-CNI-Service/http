@@ -13,6 +13,8 @@ import json
 import os
 import base64
 import uuid
+import threading
+import weakref
 from types import SimpleNamespace
 from urllib.parse import urlsplit
 
@@ -26,6 +28,48 @@ from monitor.issue_tracker_sheets_read_plan import PreparedSheetsRead
 
 class HistoryPrereadHold(ValueError):
     def __init__(self): super().__init__('req7_history_preread_unproved')
+
+
+_BUSINESS_READ_GUARDS = weakref.WeakKeyDictionary()
+_BUSINESS_READ_GUARD_LOCK = threading.RLock()
+
+
+class _OriginalBusinessReadGuard:
+    """Actual helper identity only: LIVE originals or postclose issued reads.
+
+    Constructing/copying this private value gives no registry record. It never
+    grants admission or sending and accepts no replacement proof/callback.
+    """
+    __slots__ = ('__weakref__',)
+
+    def __call__(self):
+        self._check(issued_only=False)
+
+    def _verify_issued_only(self):
+        self._check(issued_only=True)
+
+    def _check(self, *, issued_only):
+        failed = False
+        try:
+            with _BUSINESS_READ_GUARD_LOCK:
+                state = _BUSINESS_READ_GUARDS.get(self)
+                if (type(self) is not _OriginalBusinessReadGuard or state is None
+                        or state[0] not in (('LIVE', 'CLOSED') if issued_only else ('LIVE',))):
+                    raise HistoryPrereadHold()
+                verify = state[2 if issued_only else 1]
+            try:
+                verify()
+            except BaseException:
+                with _BUSINESS_READ_GUARD_LOCK:
+                    state[:] = ['FAILED', None, None]
+                raise
+            with _BUSINESS_READ_GUARD_LOCK:
+                if _BUSINESS_READ_GUARDS.get(self) is not state or state[0] == 'FAILED':
+                    raise HistoryPrereadHold()
+        except Exception:
+            failed = True
+        if failed:
+            raise HistoryPrereadHold() from None
 
 
 @dataclass(frozen=True)
@@ -154,7 +198,7 @@ def _hold_owned_original_business_history_reads(writer_token, owner_token, bindi
     original business/History descriptors survive inventory finalizers too.
     This continuity observation does not authenticate the business source.
     """
-    failed = False
+    failed = False; guard = None; completed = False
     try:
         from monitor import issue_tracker_retained_inventory as inventory
         from monitor import issue_tracker_unit_catalog as catalog
@@ -254,12 +298,30 @@ def _hold_owned_original_business_history_reads(writer_token, owner_token, bindi
                     raise HistoryPrereadHold()
                 verify_inventory(); verify_originals()
             verify(); held.sync(); verify()
-            yield original, verify
-            verify()
+            # Freeze only this helper's actual issued acquisitions. A later
+            # unit/finalizer cannot refresh or substitute these original reads.
+            acquisitions = tuple(acquisitions)
+            guard = _OriginalBusinessReadGuard()
+            with _BUSINESS_READ_GUARD_LOCK:
+                _BUSINESS_READ_GUARDS[guard] = ['LIVE', verify, current]
+            yield original, guard
+            guard()
         # All finalizers have run; do not reuse a closed originals verifier.
         current()
+        with _BUSINESS_READ_GUARD_LOCK:
+            state = _BUSINESS_READ_GUARDS[guard]
+            if state[0] != 'LIVE': raise HistoryPrereadHold()
+            state[0] = 'CLOSED'; state[1] = None
+        completed = True
     except Exception:
         failed = True
+    finally:
+        # Consumer/finalizer interruption, including BaseException, can never
+        # become a successfully CLOSED holder or revive after registry repair.
+        if guard is not None and not completed:
+            with _BUSINESS_READ_GUARD_LOCK:
+                state = _BUSINESS_READ_GUARDS.get(guard)
+                if state is not None: state[:] = ['FAILED', None, None]
     if failed:
         raise HistoryPrereadHold() from None
 

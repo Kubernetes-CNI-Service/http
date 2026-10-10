@@ -2376,7 +2376,7 @@ the original C6 and retained inventory. Units, project identities and counts
 must agree before selecting only this project's genuinely unsettled units;
 historical settled units are not pending source or OAuth candidates. The
 actual mixed quota reader continues charging permanent fences. Protected
-ETH/IB source replay and four fresh project reads remain original-held, with
+ETH/IB source replay and four fresh project gates remain original-held, with
 read/auth/target checks after the last original finalizer. Independent direct
 and real native cross-project/protected-source workflows assert no count,
 CLAIM or mutation. This is read-only VISIBLE_ONLY_UNPROVED preparation, not
@@ -2395,6 +2395,22 @@ authentication, read issuances and original deadlines are checked throughout
 and after finalizers. Independent direct and actual protected ETH/IB native
 OAuth/TLS workflows require five issued reads (including supplied identity),
 unchanged originals/count and no CLAIM/mutation. Existing NOOP/cold recovery
-tests remain. This helper is a continuity observation, not source provenance,
-default worker integration, FIRST/R2, G1, a send permit or current full/check.
+tests remain. This helper alone is a continuity observation, not source
+provenance, FIRST/R2, G1, a send permit or current full/check.
 Field/Cloud/device/power-loss validation remains NOT RUN.
+
+Default read-only preparation now actually acquires the fixed business/History
+reads for each selected original unit after actual current source/C6 replay.
+Its business holders outlive the old source/catalog/C6 finalizers. Each genuine
+private guard checks originals only while LIVE; after all business holders
+close, issued-only checks use every helper's frozen actual read registry,
+original authentication/owners/target and unchanged original deadlines, never
+a closed FD/inventory verifier. Copies, fabricated guards, interrupted scopes
+and revoked actual reads HOLD. Failed scopes cannot become CLOSED or revive.
+Independent direct and protected ETH/IB OAuth/TLS workflows retain literal
+eight-read/no-count/no-CLAIM/no-mutation and unchanged-original expectations,
+last old finalizer same-byte inode replacement, actual postclose read revocation
+with external successful revoke/restore facts, genuine copy refusal and failed
+consumer scope. This is still VISIBLE_ONLY_UNPROVED preparation: no FIRST/R2,
+hidden PROJECT completeness/G1, sending, whole REQ7 or current full/check.
+Existing tests and original 30-second limits remain; field validation NOT RUN.

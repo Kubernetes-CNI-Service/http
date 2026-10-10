@@ -764,6 +764,20 @@ class Req7HistoryPrereadNativeWorkflowTests(unittest.TestCase):
 
 
 class Req7OriginalBusinessReadAcquisitionDirectTests(unittest.TestCase):
+    def test_caller_built_or_copied_postclose_guard_cannot_validate_issued_reads(self):
+        import copy
+        import inspect
+        module = load()
+        guard_type = getattr(module, '_OriginalBusinessReadGuard', None)
+        self.assertTrue(callable(guard_type), 'post-all-finalizer issued-read guard missing')
+        self.assertEqual(('self',), tuple(inspect.signature(guard_type._verify_issued_only).parameters))
+        forged = guard_type()
+        with mock.patch.object(module.ownership, '_validated_owner') as owner:
+            for candidate in (forged, copy.copy(forged)):
+                with self.assertRaises(module.HistoryPrereadHold): candidate()
+                with self.assertRaises(module.HistoryPrereadHold): candidate._verify_issued_only()
+            owner.assert_not_called()
+
     def test_private_acquisition_accepts_no_caller_plan_coordinate_factory_or_verifier(self):
         import inspect
         module = load()

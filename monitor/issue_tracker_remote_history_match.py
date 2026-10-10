@@ -758,6 +758,7 @@ def _prepare_current_project_online_observation(writer_token, owner_token, bindi
     from monitor.issue_tracker_token_launcher import (
         OwnedProjectTokenRefreshUnit, require_current_owned_project_token)
     from monitor.issue_tracker_metadata_reservation import _hold_owned_project_mixed_metadata_capacity
+    from monitor.issue_tracker_history_preread_journal import _hold_owned_original_business_history_reads
     from monitor.issue_tracker_online_target import inspect_project_online_target
 
     failed = False
@@ -769,7 +770,8 @@ def _prepare_current_project_online_observation(writer_token, owner_token, bindi
                 or Path(_store.project_identity) != project.project):
             raise RemoteHistoryHold()
         whitelist_path = root / 'monitor/Issue_Tracker_Template_v1.xlsx'
-        with ExitStack() as scope:
+        business_guards = []
+        with ExitStack() as business_scope, ExitStack() as scope:
             rows, verify_c6 = scope.enter_context(catalog.hold_pending_project_c6_units(owner_token, binding))
             retained, verify_inventory = scope.enter_context(
                 inventory._hold_catalog_retained_inventory(owner_token, binding))
@@ -844,6 +846,10 @@ def _prepare_current_project_online_observation(writer_token, owner_token, bindi
                         qualified_source=actual, store=_store, writer_token=writer_token, settings=settings,
                         whitelist_snapshot=whitelist, expected_template_sha256=whitelist.workbook_sha256,
                         http_root=root, whitelist_path=whitelist_path, _shared_retry=bool(observation.attempt_count))
+                    _business, verify_business = business_scope.enter_context(
+                        _hold_owned_original_business_history_reads(writer_token, owner_token, binding,
+                            row.unit, authentication, identity_response=responses['template_identity']))
+                    business_guards.append(verify_business)
                     originals(); verify_capacity()
                 if qualify() != (settings, whitelist, qualified):
                     raise RemoteHistoryHold()
@@ -854,6 +860,14 @@ def _prepare_current_project_online_observation(writer_token, owner_token, bindi
                 if budget.outcome != 'VISIBLE_ONLY_UNPROVED':
                     raise RemoteHistoryHold()
             originals()
+            # The separate business holders dominate even the LAST old source/
+            # C6/inventory finalizer. Their own originals remain live here.
+            scope.close()
+            for verify_business in business_guards: verify_business()
+            business_scope.close()
+        # No FD/inventory verifier is reused after closure. Check every actual
+        # unit's original issued reads after ALL business holders have exited.
+        for verify_business in business_guards: verify_business._verify_issued_only()
         for kind, response in responses.items():
             require_current_owned_project_read(writer_token, owner_token, binding, response,
                 authentication, read_kind=kind)
