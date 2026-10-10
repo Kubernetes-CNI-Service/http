@@ -2246,6 +2246,44 @@ def render_topology_tables(
     return "".join(blocks), sorted(statuses, key=str.casefold)
 
 
+_ISSUE_TRACKER_ONLINE_STATUS_SCRIPT = r'''
+function renderIssueTrackerOnlineStatus(payload) {
+  const label = document.getElementById('issue-tracker-online-state');
+  if (!label) return;
+  const messages = {
+    stalled: 'Issue Tracker 在线停滞（UNKNOWN）；请检查受保护证据并升级处理；自动发送禁用',
+    conflict: 'Issue Tracker 在线冲突（CONFLICT）；硬停止，请升级处理；自动发送禁用',
+    historical_applied: 'Issue Tracker 历史完成观察；不代表当前发送许可',
+    no_counted_units: 'Issue Tracker 最近对账未观察到已计数单元；不代表发送许可'
+  };
+  const unproved = 'Issue Tracker 在线状态未证明；自动发送禁用，请检查并升级处理';
+  if (!payload || Array.isArray(payload) || payload.schema_version !== 1
+      || Object.keys(payload).some(key => !['schema_version', 'state', 'updated_at',
+        'read_only', 'mutation_disabled', 'process_alive'].includes(key))
+      || payload.read_only !== true || payload.mutation_disabled !== true
+      || !Object.hasOwn(messages, payload.state)
+      || typeof payload.updated_at !== 'string'
+      || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$/.test(payload.updated_at)) {
+    label.textContent = unproved; return;
+  }
+  const observed = Date.parse(payload.updated_at);
+  if (!Number.isFinite(observed) || observed > Date.now()) {
+    label.textContent = unproved; return;
+  }
+  label.textContent = `${messages[payload.state]}；最后观察：${payload.updated_at}（非当前准入证明）`;
+}
+async function refreshIssueTrackerOnlineStatus() {
+  try {
+    const response = await fetch(`${SWITCH_COLLECTION_URL}?view=issue_tracker_online`, {
+      method: 'GET', credentials: 'same-origin', cache: 'no-store'
+    });
+    if (!response.ok) throw new Error('diagnostic unavailable');
+    renderIssueTrackerOnlineStatus(await response.json());
+  } catch (_error) { renderIssueTrackerOnlineStatus(null); }
+}
+'''
+
+
 def _issue_tracker_manual_controls(panel_id: str, panel: str) -> str:
     """Test-only local controls; the installed generator never enables them."""
     if (panel_id, panel) not in (
@@ -5695,6 +5733,7 @@ tr.grp-hidden {{ display: none; }}
         </span>
         <small class="monitor-control-help">单次执行；开始后不可中断</small>
         <span id="switch-collect-state" class="ztp-monitor-state" aria-live="polite">未知</span>
+        <span id="issue-tracker-online-state" class="ztp-monitor-state" aria-live="polite">Issue Tracker 在线状态未证明；自动发送禁用</span>
       </span>
       <span class="monitor-control-item">
         <span class="monitor-control-actions">
@@ -8199,6 +8238,8 @@ function initColumnResize() {{
 // ── 初始化 ────────────────────────────────────────────────────────────────────
 initAutoRefresh();
 setView(storageGet(SWITCH_VIEW_KEY) === 'list' ? 'list' : 'card', false);
+{_ISSUE_TRACKER_ONLINE_STATUS_SCRIPT}
+refreshIssueTrackerOnlineStatus();
 refreshZtpMonitorControl();
 refreshSwitchCollectionControl();
 refreshYamlBackupControl();

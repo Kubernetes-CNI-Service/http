@@ -183,6 +183,7 @@ class OnlineCompletionRuntimeWorkflowTests(unittest.TestCase):
         from monitor import issue_tracker_cycle_source as cycles
         with ExitStack() as stack, ExitStack() as initial:
             self.root = self.root.resolve()
+            stack.enter_context(mock.patch.object(persistence.WORKER, 'STATUS_DIR', self.root/'monitor/status'))
             store = cycle(stack, self.root); self.initial_owners = initial
             real_prepare = globals_.prepare_global_unit
             def prepare(owner, binding, unit):
@@ -331,6 +332,10 @@ class OnlineCompletionRuntimeWorkflowTests(unittest.TestCase):
                 self.assertEqual(cycle_before, {path.name: (path.stat().st_ino, path.read_bytes())
                     for path in store.records_dir.iterdir()})
                 self.assertEqual('Issue Tracker online stalled: UNKNOWN; read-only reconciliation; mutation disabled\n', diagnostic)
+                visible = json.loads((self.root/'monitor/status/issue-tracker-online.status.json').read_bytes())
+                self.assertEqual({'schema_version', 'state', 'updated_at', 'read_only', 'mutation_disabled'}, set(visible))
+                self.assertEqual('stalled', visible['state'])
+                self.assertIs(True, visible['read_only']); self.assertIs(True, visible['mutation_disabled'])
             else:
                 self.assertEqual(('APPLIED',), tuple(item.state for item in result)); self.assertTrue(applied.exists())
                 self.assertEqual(cycle_before, {path.name: (path.stat().st_ino, path.read_bytes()) for path in store.records_dir.iterdir()})

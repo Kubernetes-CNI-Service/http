@@ -13,6 +13,7 @@ import socket
 import stat
 import sys
 import time
+from datetime import datetime
 from urllib.parse import parse_qs
 
 
@@ -124,6 +125,77 @@ def collection_status():
         return status_with_remaining(value) if isinstance(value, dict) else {"state": "idle"}
     except (OSError, json.JSONDecodeError):
         return {"state": "idle"}
+
+
+def issue_tracker_online_status():
+    """Fixed bounded last-observation cache; no admission or journal reader."""
+    unproved = {'schema_version': 1, 'state': 'unproved', 'updated_at': None,
+        'read_only': True, 'mutation_disabled': True}
+    parent = descriptor = None
+    owned = {}
+    named_before_open = {}
+    name = 'issue-tracker-online.status.json'
+    keys = ('st_dev', 'st_ino', 'st_mode', 'st_uid', 'st_gid', 'st_nlink',
+            'st_size', 'st_mtime_ns', 'st_ctime_ns')
+    identity = lambda value: tuple(getattr(value, key) for key in keys)
+    def pairs(items):
+        value = {}
+        for key, item in items:
+            if key in value: raise ValueError('duplicate diagnostic field')
+            value[key] = item
+        return value
+    try:
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+        named_parent = STATUS_DIR.lstat()
+        parent = os.open(STATUS_DIR, flags | os.O_DIRECTORY)
+        named_before_open[parent] = (named_parent.st_dev, named_parent.st_ino)
+        directory = os.fstat(parent); owned[parent] = (directory.st_dev, directory.st_ino)
+        named_parent = STATUS_DIR.lstat()
+        if (not stat.S_ISDIR(named_parent.st_mode)
+                or (named_parent.st_dev, named_parent.st_ino) != owned[parent]
+                or directory.st_mode & 0o022 or directory.st_uid not in (0, os.geteuid())):
+            raise ValueError('untrusted diagnostic directory')
+        named_image = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        descriptor = os.open(name, flags, dir_fd=parent)
+        named_before_open[descriptor] = (named_image.st_dev, named_image.st_ino)
+        before = os.fstat(descriptor); owned[descriptor] = (before.st_dev, before.st_ino)
+        if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+                or before.st_mode & 0o022 or before.st_uid != directory.st_uid
+                or not 1 <= before.st_size <= 4096
+                or identity(before) != identity(os.stat(name, dir_fd=parent, follow_symlinks=False))):
+            raise ValueError('untrusted diagnostic image')
+        raw = os.pread(descriptor, 4097, 0)
+        if (len(raw) != before.st_size or identity(os.fstat(descriptor)) != identity(before)
+                or identity(os.stat(name, dir_fd=parent, follow_symlinks=False)) != identity(before)
+                or (STATUS_DIR.lstat().st_dev, STATUS_DIR.lstat().st_ino) != owned[parent]):
+            raise ValueError('diagnostic image changed')
+        value = json.loads(raw.decode('utf-8', 'strict'), object_pairs_hook=pairs)
+        if (type(value) is not dict or set(value) != set(unproved)
+                or type(value['schema_version']) is not int or value['schema_version'] != 1
+                or value['read_only'] is not True or value['mutation_disabled'] is not True
+                or type(value['state']) is not str or value['state'] not in (
+                    'stalled', 'conflict', 'historical_applied', 'no_counted_units')
+                or type(value['updated_at']) is not str
+                or re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}', value['updated_at']) is None):
+            raise ValueError('invalid diagnostic shape')
+        observed = datetime.fromisoformat(value['updated_at'])
+        if observed.tzinfo is None or observed.timestamp() > time.time():
+            raise ValueError('invalid observation time')
+        return value
+    except (OSError, ValueError, UnicodeError, OverflowError):
+        return unproved
+    finally:
+        for fd in (descriptor, parent):
+            if fd is not None:
+                try:
+                    current = os.fstat(fd)
+                    # A first fstat fault must not leak the unchanged named object.
+                    # A rebound numeric FD is not evidence of ownership: keep it
+                    # open unless the independently captured identity still matches.
+                    expected = owned.get(fd, named_before_open.get(fd))
+                    if expected == (current.st_dev, current.st_ino): os.close(fd)
+                except OSError:
+                    pass
 
 
 def yaml_backup_status():
@@ -316,8 +388,12 @@ def main():
         if len(view_values) != 1 or view_values[0] not in {
             "", "switch", "yaml_backup", "continuous",
             "continuous_collection", "continuous_backup",
+            "issue_tracker_online",
         }:
             respond({"error": "invalid status view"}, "400 Bad Request")
+            return
+        if view_values[0] == 'issue_tracker_online':
+            respond({**issue_tracker_online_status(), 'process_alive': alive})
             return
         selected = {
             "yaml_backup": backup_status,

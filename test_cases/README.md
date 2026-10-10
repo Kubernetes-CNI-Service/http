@@ -2187,6 +2187,26 @@ restoring the full parent; a copied private context cannot survive even while
 the original parent remains live. There is no caller callback registration API
 or exemption from the public reader's live-owner check.
 
+The default read-only reconciliation also publishes a separate best-effort
+`issue-tracker-online.status.json` observation cache only after all original
+finalizers succeed. Its five fixed fields contain no evidence, credentials,
+project identity or permission; `updated_at` means last observation, not current
+admission. The authenticated collection CGI's GET-only `issue_tracker_online`
+view and default HTML label display UNKNOWN/CONFLICT escalation, historical
+APPLIED, or the unscoped empty observation, always without send permission.
+Missing/untrusted/malformed/future input is unproved. The existing local status
+and disabled manual UI contracts remain unchanged. This cache is not a durable
+journal, T6 scheduler, G1 proof or power-loss recovery authority.
+
+Independent direct and actual worker→protected CGI→generated JavaScript tests
+cover fixed fields, secret rejection, real completion-path publication and
+unchanged originals/count/CLAIM. Real first-fstat fault tests require closing an
+unchanged owned parent/image and preserving a numeric FD rebound to a foreign
+inode. Named-before-open identity is cleanup-only fallback, never read authority;
+concurrent name drift plus failed first stat may leave cleanup unconfirmed and
+cannot prove an open-file-description. Original automated/field cases are not
+removed or weakened; whole REQ7, field verification and full/check remain open.
+
 The owned FIRST/R2 native fixture prepares its actual encrypted endpoint
 before issuing the original bounded reads. Nested read children use a separate
 owned TLS root, preserving the mutation CA's bytes/inode and outer DNS endpoint;

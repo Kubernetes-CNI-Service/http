@@ -980,6 +980,29 @@ def _report_issue_tracker_online_read_only_result(result) -> None:
         print(diagnostic, file=sys.stderr)
 
 
+def _publish_issue_tracker_online_observation_status(result) -> None:
+    """Best-effort diagnostic cache, never durable UNKNOWN or send authority."""
+    from monitor.issue_tracker_remote_history_match import (
+        AppliedEvidenceObservation, RemoteHistoryObservation,
+    )
+    if type(result) is not tuple:
+        raise CollectionCycleHoldError('online observation shape unavailable')
+    states = []
+    for observation in result:
+        if type(observation) is AppliedEvidenceObservation and observation.state == 'APPLIED':
+            states.append('APPLIED')
+        elif (type(observation) is RemoteHistoryObservation
+                and observation.state in ('UNKNOWN', 'CONFLICT')):
+            states.append(observation.state)
+        else:
+            raise CollectionCycleHoldError('online observation shape unavailable')
+    state = ('conflict' if 'CONFLICT' in states else 'stalled' if 'UNKNOWN' in states
+             else 'historical_applied' if states else 'no_counted_units')
+    _write_status_file(STATUS_DIR/'issue-tracker-online.status.json',
+        '.issue-tracker-online.', state, schema_version=1,
+        read_only=True, mutation_disabled=True)
+
+
 def _reconcile_issue_tracker_online_after_completion(store):
     """Every terminal prod cycle can reconcile old UNKNOWN, never send NEW.
 
@@ -1034,6 +1057,7 @@ def _reconcile_issue_tracker_online_after_completion(store):
     if failed:
         raise CollectionCycleHoldError('online original reconciliation unavailable')
     _report_issue_tracker_online_read_only_result(result)
+    _publish_issue_tracker_online_observation_status(result)
     return result
 
 
