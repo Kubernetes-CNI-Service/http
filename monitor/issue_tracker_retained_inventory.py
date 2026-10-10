@@ -582,6 +582,123 @@ def _record_catalog_unsent_dispositions(writer_token, token, binding):
     return result
 
 
+def _record_all_project_unsent_dispositions(token, binding):
+    """Append project-local UNSENT evidence with ALL catalog inputs held.
+
+    The shared original catalog selects every project; callers supply no root,
+    writer, maximum or settlement. Validate every project before the first
+    append. Later APPLIED witnesses never cross project identities. A stopped
+    append retains its witness/partial pair, never repairs or releases NEW.
+    """
+    failed = False
+    from monitor import issue_tracker_unit_catalog as catalog
+    from monitor import issue_tracker_remote_history_match as remote
+    intents = catalog._Originals()
+    try:
+        sheet_owner = ownership._validated_owner(token, binding)
+        with ExitStack() as scope:
+            rows, verify_inputs = scope.enter_context(_hold_all_project_applied_keys(token, binding))
+            owners = {}; plans = []; validators = []; results = []; namespaces = {}
+            prefixes = ('REMOTE-UNSENT-SUPERSESSION-STARTED-', 'REMOTE-UNSENT-SUPERSESSION-')
+            witness_prefix = 'REMOTE-UNSENT-SUPERSESSION-WITNESS-'
+            states = ('UNSENT-SUPERSESSION-STARTED', 'SUPERSEDED-NOT-SENT')
+            for project_identity in dict.fromkeys(row.project_identity for row in rows):
+                matches = [(writer, local._owner(writer)) for writer, active in tuple(local._ACTIVE.items())
+                    if active.pid == os.getpid()
+                    and journal._identity(os.fstat(active.project_fd))[:2] == project_identity]
+                if len(matches) != 1:
+                    raise RetainedInventoryHold()
+                writer, owner = matches[0]; owners[project_identity] = (writer, owner)
+                project_rows = tuple(row for row in rows if row.project_identity == project_identity)
+                pending = tuple(row for row in project_rows if row.attempt_count == 0)
+                present = set(os.listdir(owner.root_fd))
+                allowed = {prefix + row.unit.unit_id for prefix in (*prefixes, witness_prefix) for row in pending}
+                if (any(name.startswith('.pending-') for name in present)
+                        or any(name.startswith(prefixes) and name not in allowed for name in present)):
+                    raise RetainedInventoryHold()
+                namespaces[project_identity] = (owner,
+                    {name for name in present if name.startswith(prefixes)}, set())
+                for row in pending:
+                    names = tuple(prefix + row.unit.unit_id for prefix in prefixes)
+                    witness_name = witness_prefix + row.unit.unit_id
+                    exists = tuple(name in present for name in (*names, witness_name))
+                    if any(exists) and not all(exists):
+                        raise RetainedInventoryHold()
+                    recorded = None
+                    if all(exists):
+                        raw, _info = local._read(owner.root_fd, names[1], local._MAX_MANIFEST)
+                        recorded = local._json(raw)
+                    body, observed = _unsent_disposition_body(owner, binding, row, project_rows, recorded)
+                    if body is None:
+                        if any(exists):
+                            raise RetainedInventoryHold()
+                        continue
+                    intent_raw = local._canonical({'schema_version': 1, 'unit_id': row.unit.unit_id,
+                        'state': 'UNSENT-SUPERSESSION-WRITE-STARTED-NOT-AUTHORITY',
+                        'body_sha256': hashlib.sha256(local._canonical(body)).hexdigest()})
+                    if all(exists):
+                        raw, identity = intents.file(owner.root_fd, witness_name, 16384)
+                        if raw != intent_raw:
+                            raise RetainedInventoryHold()
+                        existing = {**body, 'write_witness': {'identity': list(identity),
+                            'sha256': hashlib.sha256(raw).hexdigest()}}
+                        validators.append(scope.enter_context(remote._hold_applied_records(
+                            owner.root_fd, names, existing, states=states)))
+                    plans.append((owner, names, witness_name, intent_raw, body, observed, all(exists)))
+            def verify(prior=None):
+                if ownership._validated_owner(token, binding) is not sheet_owner:
+                    raise RetainedInventoryHold()
+                verify_inputs(); intents.verify()
+                for project_identity, (writer, owner) in owners.items():
+                    if (local._owner(writer) is not owner
+                            or journal._identity(os.fstat(owner.project_fd))[:2] != project_identity):
+                        raise RetainedInventoryHold()
+                    _same_owner, original_names, created_names = namespaces[project_identity]
+                    present = set(os.listdir(owner.root_fd))
+                    relevant = {name for name in present if name.startswith(prefixes)}
+                    if (not original_names <= relevant
+                            or not relevant <= original_names | created_names
+                            or (prior is None and any(name.startswith('.pending-') for name in present))):
+                        raise RetainedInventoryHold()
+                for validate in validators if prior is None else prior:
+                    validate()
+                verify_inputs(); intents.verify()
+            verify()
+            for owner, names, witness_name, intent_raw, body, observed, exists in plans:
+                if not exists:
+                    verify()
+                    created = remote._write_completion_start(owner.root_fd, witness_name, intent_raw)
+                    raw, identity = intents.file(owner.root_fd, witness_name, 16384)
+                    if raw != intent_raw or identity != created:
+                        raise RetainedInventoryHold()
+                    intents.sync()
+                    project_identity = journal._identity(os.fstat(owner.project_fd))[:2]
+                    namespaces[project_identity][2].update((*names, witness_name))
+                    verify()
+                    body = {**body, 'write_witness': {'identity': list(identity),
+                        'sha256': hashlib.sha256(raw).hexdigest()}}
+                    # Only earlier held readers outlive this creator on LIFO
+                    # exit. Its own prepared originals are verified by the
+                    # creator; the later reader overlaps it but closes first.
+                    # Never capture the mutable list of later reader FDs.
+                    def verify_write(prior=tuple(validators)):
+                        verify(prior)
+                    scope.enter_context(remote._write_applied_pair(
+                        owner.root_fd, names, body, verify_write, states=states))
+                    validators.append(scope.enter_context(remote._hold_applied_records(
+                        owner.root_fd, names, body, states=states)))
+                results.append(observed)
+            verify()
+            result = tuple(results)
+        return result
+    except Exception:
+        failed = True
+    finally:
+        intents.close()
+    if failed:
+        raise RetainedInventoryHold() from None
+
+
 def _unique_names(names):
     if (type(names) is not tuple or len(names) > 256 or any(type(name) is not str for name in names)
             or len(set(names)) != len(names)):

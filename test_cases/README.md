@@ -2085,6 +2085,24 @@ replacement at the actual write boundary. This diagnostic count/claim join
 does not install default NEW/R2, create UNSENT records for a mixed-project
 catalog, qualify current source/freshness/G1, or prove whole REQ7/full/check.
 
+The mixed-project UNSENT writer derives every project and pending unit from
+the genuine shared original catalog, holding ALL C6/count/COMPLETE/APPLIED/key
+inputs before any append. Strictly later APPLIED sequences are compared only
+within the original project. Only the selected original unit's fixed
+WITNESS/STARTED/final names may be created; every project's disposition namespace
+is rechecked across write callbacks. A foreign new entry, changed original,
+partial pair or pending write refuses the whole result, retaining all evidence.
+Each creator callback captures only earlier retained readers that outlive it;
+its own prepared originals remain held and verified through the later reader
+handoff and final creator exit. It must not call a later reader after that
+reader has closed its FDs. Independent missing-API and namespace RED tests,
+actual encrypted C6/APPLIED workflows, a second-commit interruption and separate
+cold-process replay preserve old counts/wire/UNKNOWN and never repair partials.
+No caller project/root/maximum/settlement is accepted. This library append is
+not default worker NEW/R2 admission, freshness/G1, T6, whole REQ7 or current
+formal full/check. Existing tests and budgets remain unchanged; onsite device,
+Cloud and power-loss verification remain NOT RUN.
+
 The non-authoritative online observation display distinguishes UNKNOWN with
 an original durable total count of six as `retry_exhausted`: read-only
 reconciliation and escalation, with mutation still disabled. Counts one through

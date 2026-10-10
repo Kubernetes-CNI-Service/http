@@ -868,3 +868,188 @@ print('COLD_SETTLED_SUCCESSOR_CONSUMED_COUNT_HOLD_ORIGINAL_UNKNOWN')
                     self.assertEqual(before, original_read_files(case.root))
         finally:
             case.doCleanups()
+
+
+class AllProjectUnsentDispositionTests(unittest.TestCase):
+    """Actual project-local supersession in a shared mixed-project catalog."""
+
+    def api(self):
+        from monitor import issue_tracker_retained_inventory as inventory
+        api = getattr(inventory, '_record_all_project_unsent_dispositions', None)
+        self.assertTrue(callable(api), 'mixed catalog needs original-derived append, not caller project filtering')
+        return inventory, api
+
+    def test_unissued_shared_owner_is_refused_before_read_or_disposition_write(self):
+        from unittest import mock
+        inventory, api = self.api()
+        from monitor import issue_tracker_remote_history_match as remote
+        with mock.patch.object(inventory, '_hold_all_project_applied_keys') as read, \
+                mock.patch.object(remote, '_write_completion_start') as write:
+            with self.assertRaises(inventory.RetainedInventoryHold):
+                api(object(), object())
+        read.assert_not_called(); write.assert_not_called()
+
+    def test_caller_project_rows_maxima_or_settlement_are_not_accepted(self):
+        _inventory, api = self.api()
+        for claim in ({'writer': object()}, {'rows': ()}, {'project': 'foreign'},
+                      {'maxima': ()}, {'settled': True}, {'verify': lambda: None}):
+            with self.subTest(claim=tuple(claim)), self.assertRaises(TypeError):
+                api(object(), object(), **claim)
+
+    def exercise(self, fault=None, *, cold=False):
+        self.api()
+        from test_cases import test_req7_unit_catalog as fixtures
+        from test_cases.test_req7_send_unit import inputs
+        from test_cases.test_issue_tracker_whitelist_workbook import literal_xlsx
+        from unittest import mock
+        with fixtures.CatalogAppliedNativeWorkflowTests.completed_and_pending(
+                self, older_unsent=True, project_origins=True) as (
+                case, catalog, remote, inventory, _old, _writer, owner, bound, units), ExitStack() as scope:
+            from monitor import issue_tracker_global_attempt_journal as globals_
+            project = case.root/'other-project'; project.mkdir(mode=0o700)
+            publication = project/'publication'; publication.mkdir(mode=0o700)
+            catalog.local.create_local_commit_store(project, publication)
+            writer = scope.enter_context(catalog.local.writer_owner(project, publication))
+            arguments = inputs()
+            arguments.update(spreadsheet_id=bound.spreadsheet_id, sheet_id=101, history_sheet_id=105,
+                target_nonce='a'*64, history_nonce='d'*64)
+            arguments['audits'] = ({'event_id': 'other-settings:001',
+                'recorded_at_utc': '2026-10-11T10:00:00Z', 'details': 'K=3'},)
+            generation = catalog.local.begin_generation(writer, arguments['manifest'])
+            catalog.local.record_intent(writer, generation, literal_xlsx(), kind='xlsx')
+            receipt = catalog.local.commit(writer, generation)
+            arguments.update(generation_id=generation.generation_id, publish_id=receipt.published_sha256)
+            foreign = catalog.composer.freeze_send_unit(**arguments)
+            catalog.register_pending_c6_unit(writer, owner, bound, foreign)
+            globals_.prepare_global_unit(owner, bound, foreign)
+            expected = ((units[1].unit_id, 1, ((('switch', 'node0001', 'down', 'fabric'), 2),)),)
+            before = original_read_files(case.root)
+            marker = project/'.tracker/generations'/generation.generation_id/'RECEIPT'
+            preserved = case.root/'preserved-mixed-unsent-foreign-receipt'
+            foreign_marker = project/'.tracker/REMOTE-UNSENT-SUPERSESSION-FOREIGN'
+            image = marker.read_bytes(); original_ino = marker.stat().st_ino
+            reached = []; write = remote._write_completion_start
+            def append_then_rebind(*args, **kwargs):
+                actual = write(*args, **kwargs)
+                if args[1] == 'REMOTE-UNSENT-SUPERSESSION-WITNESS-'+units[1].unit_id:
+                    if fault == 'foreign-disposition':
+                        foreign_marker.write_bytes(b'{"foreign":true}\n'); foreign_marker.chmod(0o600)
+                    else:
+                        marker.rename(preserved); marker.write_bytes(image); marker.chmod(0o600)
+                    reached.append(args[1])
+                return actual
+            rename = catalog.local._rename_new
+            def stop_before_final(parent, pending, final):
+                if final == 'REMOTE-UNSENT-SUPERSESSION-'+units[1].unit_id:
+                    reached.append(final)
+                    raise OSError('owned diagnostic stop at second disposition commit')
+                return rename(parent, pending, final)
+            if fault == 'before-write':
+                marker.rename(preserved); marker.write_bytes(image); marker.chmod(0o600)
+            with mock.patch.object(remote, '_write_completion_start',
+                    side_effect=append_then_rebind if fault in ('after-witness', 'foreign-disposition') else write), \
+                    mock.patch.object(catalog.local, '_rename_new',
+                    side_effect=stop_before_final if fault == 'after-started' else rename):
+                if fault:
+                    with self.assertRaises(inventory.RetainedInventoryHold):
+                        inventory._record_all_project_unsent_dispositions(owner, bound)
+                else:
+                    observed = inventory._record_all_project_unsent_dispositions(owner, bound)
+            after = original_read_files(case.root)
+            if fault:
+                self.assertEqual(image, marker.read_bytes())
+                if fault in ('before-write', 'after-witness'):
+                    self.assertEqual(image, preserved.read_bytes())
+                    self.assertEqual(original_ino, preserved.stat().st_ino)
+                    self.assertNotEqual(original_ino, marker.stat().st_ino)
+                else:
+                    self.assertEqual(original_ino, marker.stat().st_ino)
+                expected_names = set()
+                if fault != 'before-write':
+                    expected_names.add('project/.tracker/REMOTE-UNSENT-SUPERSESSION-WITNESS-'+units[1].unit_id)
+                if fault == 'after-started':
+                    expected_names.add('project/.tracker/REMOTE-UNSENT-SUPERSESSION-STARTED-'+units[1].unit_id)
+                    self.assertEqual(1, len(tuple((case.root/'project/.tracker').glob('.pending-*'))))
+                if fault == 'foreign-disposition':
+                    expected_names.add('other-project/.tracker/REMOTE-UNSENT-SUPERSESSION-FOREIGN')
+                    self.assertEqual(b'{"foreign":true}\n', foreign_marker.read_bytes())
+                self.assertEqual(sorted(expected_names), sorted(name for name in set(after)-set(before)
+                    if 'REMOTE-UNSENT' in name))
+                self.assertEqual(0 if fault == 'before-write' else 1, len(reached))
+            else:
+                self.assertEqual(expected, observed)
+                self.assertEqual({'project/.tracker/'+prefix+units[1].unit_id for prefix in
+                    ('REMOTE-UNSENT-SUPERSESSION-WITNESS-', 'REMOTE-UNSENT-SUPERSESSION-STARTED-',
+                     'REMOTE-UNSENT-SUPERSESSION-')}, set(after)-set(before))
+                self.assertEqual(expected, inventory._record_all_project_unsent_dispositions(owner, bound))
+                with inventory._hold_all_project_fifo_frontier(owner, bound) as (frontier, verify):
+                    self.assertEqual((foreign.unit_id,), frontier.frontier)
+                    self.assertEqual((units[1].unit_id,), frontier.superseded)
+                    self.assertEqual((units[0].unit_id,), frontier.applied)
+                    self.assertEqual((), frontier.blocked); verify()
+                self.assertEqual(after, original_read_files(case.root))
+                self.assertEqual((1, 0, 0), tuple(state.attempt_count for _unit, state in
+                    globals_.inspect_catalog_global_units(owner, bound)))
+            if cold:
+                from dataclasses import asdict
+                import json, subprocess
+                scope.close(); case.catalog_release_owners()
+                cold_before = original_read_files(case.root)
+                program = '''import json,sys
+from pathlib import Path
+sys.path[:0]=[sys.argv[1],str(Path(sys.argv[1])/'tools')]
+from test_cases import test_req7_unit_catalog as tests
+catalog=tests.load(); inventory=tests.load_component('issue_tracker_retained_inventory')
+tests.load_component('issue_tracker_remote_history_match')
+from monitor.issue_tracker_online_target import OnlineTargetBinding
+from test_cases.test_req7_spreadsheet_owner import scoped_fixture
+root=Path(sys.argv[2]); bound=OnlineTargetBinding(**json.loads(sys.stdin.buffer.read()))
+assert catalog.local._ACTIVE=={}
+with scoped_fixture(root,catalog.ownership),catalog.ownership.spreadsheet_owner(bound) as owner:
+ if sys.argv[3]=='partial':
+  refused=False
+  try: inventory._record_all_project_unsent_dispositions(owner,bound)
+  except inventory.RetainedInventoryHold: refused=True
+  assert refused, 'cold partial disposition was repaired or accepted'
+  refused=False
+  try:
+   with inventory._hold_all_project_fifo_frontier(owner,bound): pass
+  except inventory.RetainedInventoryHold: refused=True
+  assert refused, 'cold partial disposition released FIFO'
+ else:
+  assert inventory._record_all_project_unsent_dispositions(owner,bound)==((sys.argv[4],1,((('switch','node0001','down','fabric'),2),)),)
+  with inventory._hold_all_project_fifo_frontier(owner,bound) as (seen,verify):
+   assert seen.frontier==(sys.argv[5],) and seen.superseded==(sys.argv[4],)
+   assert seen.applied==(sys.argv[6],) and seen.blocked==(); verify()
+assert catalog.local._ACTIVE=={}
+print('COLD_MIXED_UNSENT_ORIGINALS_NO_AUTHORITY')
+'''
+                child = subprocess.run([sys.executable, '-B', '-c', program, str(SOURCE.parents[1]),
+                    str(case.root), 'partial' if fault else 'normal', units[1].unit_id,
+                    foreign.unit_id, units[0].unit_id], input=json.dumps(asdict(bound)).encode(),
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
+                self.assertEqual(0, child.returncode, child.stdout+child.stderr)
+                self.assertEqual(b'COLD_MIXED_UNSENT_ORIGINALS_NO_AUTHORITY\n', child.stdout)
+                self.assertEqual(b'', child.stderr)
+                self.assertEqual(cold_before, original_read_files(case.root))
+            unchanged = {name: raw for name, raw in before.items()
+                if not fault or name != str(marker.relative_to(case.root))}
+            self.assertTrue(unchanged.items() <= after.items(), 'count/wire/APPLIED originals remain intact')
+
+    def test_actual_mixed_catalog_writes_only_local_strictly_later_applied_disposition(self):
+        self.exercise()
+
+    def test_other_project_receipt_rebind_refuses_before_any_disposition_prefix(self):
+        self.exercise('before-write')
+
+    def test_other_project_receipt_rebind_after_witness_retains_stop_without_final_pair(self):
+        self.exercise('after-witness')
+
+    def test_actual_mixed_disposition_cold_process_replays_without_parent_writer_handles(self):
+        self.exercise(cold=True)
+
+    def test_actual_second_commit_interruption_cold_process_preserves_partial_without_repair(self):
+        self.exercise('after-started', cold=True)
+
+    def test_new_foreign_disposition_after_witness_cannot_return_a_valid_prefix(self):
+        self.exercise('foreign-disposition')
