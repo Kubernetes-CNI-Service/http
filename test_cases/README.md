@@ -132,6 +132,14 @@ UNKNOWN、FIFO 或 NEW。counted WIRE 的所有来源原件穿过 CLAIM 消费�
 手册不声称 G1、qualified NEW、默认在线 worker、真机或正式 full/check 已闭合；对应
 REAL_ENV 补充仍为 NOT RUN，既有场景、权限与发布门禁不变。
 
+REQ7 的 `reconcile_pending_project_units` 从真实 ALL catalog/C6 原件选择当前项目的
+已计数单元，不接受 caller unit/generation/path。全部共享旧 family 在语义读取前持有；
+实际 COMPLETE 创建者与接收者重叠复核原 FD、字节和 full stat，仅放行该创建者的两个
+精确派生名。另一项目 pending C6 也持续持有但不选择，count zero 不触发读请求。
+独立 direct 与真实 C6/OAuth/四次加密 socket workflow 覆盖缺 fence、额外共享名、原
+ORIGIN/另一项目 RECEIPT/创建后 COMPLETE 同字节换 inode；原 count/UNKNOWN 不重置，
+失败不写 APPLIED/key。此片段不证明默认 worker 编排、NEW/G1/FIFO 或整体 full/check。
+
 `test_issue_tracker_credential_shape.py` 与 `test_issue_tracker_credential_fd.py`
 约束 REQ7 的固定私有输入：held-FD 单次有限读取、目录与文件身份前后复核、严格凭据形状及
 真实目标策略消费。root 元数据仅由私有临时夹具注入，不读取真实凭据，不证明原生 root/RO-bind

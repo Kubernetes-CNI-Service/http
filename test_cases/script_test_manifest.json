@@ -305,6 +305,7 @@
         "test_cases.test_req7_history_preread_journal",
         "test_cases.test_req7_remote_history_match",
         "test_cases.test_req7_online_reconciliation",
+        "test_cases.test_req7_catalog_reconciliation",
         "test_cases.test_req7_nv_reservation",
         "test_cases.test_req7_metadata_reservation",
         "test_cases.test_req7_retained_global_inventory",
@@ -1850,7 +1851,7 @@
     {
       "id": "req7_remote_history_match",
       "paths": ["monitor/issue_tracker_remote_history_match.py", "monitor/issue_tracker_history_preread_journal.py"],
-      "tests": ["test_cases.test_req7_remote_history_match", "test_cases.test_req7_online_reconciliation"]
+      "tests": ["test_cases.test_req7_remote_history_match", "test_cases.test_req7_online_reconciliation", "test_cases.test_req7_catalog_reconciliation"]
     },
     {
       "id": "req7_durable_nv_reservation",
@@ -3484,6 +3485,11 @@
       "id": "req7_original_project_authenticated_reconciliation",
       "members": ["monitor/issue_tracker_remote_history_match.py", "monitor/issue_tracker_history_read_launcher.py", "monitor/issue_tracker_token_launcher.py", "monitor/issue_tracker_sdk_authentication.py", "monitor/issue_tracker_online_target.py", "monitor/issue_tracker_credential_shape.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_history_preread_journal.py", "monitor/issue_tracker_enrollment_journal.py", "monitor/issue_tracker_sheets_read_decode.py", "monitor/issue_tracker_sheets_read_plan.py", "monitor/issue_tracker_tls_inputs.py", "monitor/issue_tracker_attempt_supervision.py"],
       "tests": ["test_cases.test_req7_online_reconciliation"]
+    },
+    {
+      "id": "req7_all_catalog_project_original_reconciliation",
+      "members": ["monitor/issue_tracker_remote_history_match.py", "monitor/issue_tracker_unit_catalog.py", "monitor/issue_tracker_retained_inventory.py", "monitor/issue_tracker_history_read_launcher.py", "monitor/issue_tracker_token_launcher.py", "monitor/issue_tracker_sdk_authentication.py", "monitor/issue_tracker_online_target.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_history_preread_journal.py", "monitor/issue_tracker_enrollment_journal.py"],
+      "tests": ["test_cases.test_req7_catalog_reconciliation"]
     },
     {
       "id": "req7_pending_catalog_shared_owner_native_originals",

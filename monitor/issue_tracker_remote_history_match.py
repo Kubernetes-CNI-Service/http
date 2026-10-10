@@ -470,6 +470,16 @@ def inspect_owned_applied_key_watermarks(writer_token,owner_token,binding,unit,*
 
 def reconcile_owned_project_unit(writer_token, owner_token, binding, unit,
                                  authentication, *, generation):
+    """Fixed four-read settlement; retained contexts finish before return."""
+    with _hold_reconciled_owned_project_unit(writer_token, owner_token, binding,
+            unit, authentication, generation=generation) as result:
+        pass
+    return result
+
+
+@contextmanager
+def _hold_reconciled_owned_project_unit(writer_token, owner_token, binding, unit,
+                                       authentication, *, generation, _catalog=None):
     """Fixed project-authenticated four-read reconciliation of ONE original.
 
     The online cycle consumer may call this for an already counted UNKNOWN,
@@ -507,6 +517,8 @@ def reconcile_owned_project_unit(writer_token, owner_token, binding, unit,
                 retained = ExitStack()
                 retained_checks = []
                 def verify_live():
+                    if _catalog is not None:
+                        _catalog.verify()
                     verify_c6(); verify_originals()
                     for check in retained_checks:
                         check()
@@ -548,6 +560,8 @@ def reconcile_owned_project_unit(writer_token, owner_token, binding, unit,
                                 _hold_created_completion_evidence(writer_token, owner_token,
                                     binding, unit, **responses))
                             retained_checks.append(verify_created)
+                            if _catalog is not None:
+                                _catalog.created(unit, verify_created)
                             verify_live()
                     if matched:
                         retained_checks.append(retained.enter_context(
@@ -571,11 +585,152 @@ def reconcile_owned_project_unit(writer_token, owner_token, binding, unit,
                                 'REMOTE-KEY-HIGH-WATER-'+unit.unit_id), key_body,
                             states=('KEY-HIGH-WATER-STARTED', 'KEY-HIGH-WATER'))))
                     verify_live()
+                    yield result
+                    verify_live()
     except Exception:
         failed = True
     if failed:
         raise RemoteHistoryHold()
-    return result
+
+
+class _CatalogReconciliationOriginals:
+    """Private actual-creator handoff, not caller namespace exemptions."""
+    def __init__(self, writer, token, binding, held, owner, project, rows, check_c6):
+        self.writer, self.token, self.binding = writer, token, binding
+        self.held, self.owner, self.project = held, owner, project
+        self.rows, self.check_c6 = rows, check_c6
+        self.additions = frozenset()
+
+    def verify(self):
+        from monitor import issue_tracker_local_commit as local
+        if (local._owner(self.writer) is not self.project
+                or ownership._validated_owner(self.token, self.binding) is not self.owner):
+            raise RemoteHistoryHold()
+        self.held.verify(parent_additions=self.additions)
+        self.check_c6()
+        self.held.verify(parent_additions=self.additions)
+
+    def created(self, unit, verify_created):
+        # Called only AFTER the fixed real creator yields its held originals,
+        # while its context remains live. Public entry points accept neither
+        # this object nor names, verifiers, additions or a completion label.
+        from monitor import issue_tracker_attempt_journal as journal
+        project_identity = journal._identity(os.fstat(self.project.project_fd))[:2]
+        if not any(row.unit == unit and row.project_identity == project_identity for row in self.rows):
+            raise RemoteHistoryHold()
+        owner, parent, name, _base = global_journal._inputs(self.token, self.binding, unit)
+        if owner is not self.owner or parent != self.held.namespace[0]:
+            raise RemoteHistoryHold()
+        prefix = name[:-len('.journal')]
+        additions = frozenset((prefix+'.completion-started', prefix+'.completion'))
+        if additions & (self.held.namespace[2] | self.additions):
+            raise RemoteHistoryHold()
+        verify_created()
+        # Overlap the actual creator with new retained FD/raw/full-stat
+        # originals BEFORE it may close. Recheck its saved identities AFTER
+        # capture so same-byte substitution cannot become the new original.
+        self.held.file(parent, prefix+'.completion-started', 16384)
+        folder = self.held.directory(parent, prefix+'.completion')
+        wanted = {'HEADER', 'COMPLETE', *(file for _key, _kind, file in _COMPLETION_READS)}
+        if set(os.listdir(folder)) != wanted:
+            raise RemoteHistoryHold()
+        for file in sorted(wanted):
+            self.held.file(folder, file, 65536 if file == 'HEADER' else
+                (16384 if file == 'COMPLETE' else 2*1024*1024))
+        verify_created()
+        self.additions |= additions
+        self.verify()
+
+
+def reconcile_pending_project_units(writer_token, owner_token, binding, authentication):
+    """Select this project's counted units from ALL actual catalog/C6 originals.
+
+    No caller unit, generation, plan, path or response is accepted. Shared
+    catalog/origins/families and ALL real project C6 stay pinned through the
+    fixed four-read driver and its exclusive completion creator. Existing
+    public readers remain strict. Count zero is not permission to authenticate,
+    create NEW or send. Original attempts and UNKNOWN are never reset.
+    """
+    from monitor import issue_tracker_unit_catalog as catalog
+    from monitor import issue_tracker_retained_inventory as inventory
+    from monitor import issue_tracker_local_commit as local
+    from monitor import issue_tracker_attempt_journal as journal
+    failed = False; inputs = ExitStack(); proofs = ExitStack(); held = None
+    try:
+        project = local._owner(writer_token)
+        owner = ownership._validated_owner(owner_token, binding)
+        held = catalog._originals(owner_token, binding)
+        _folder, units, _previous = catalog._inspect(owner_token, binding, held)
+        parent = owner.directories[-1][0]; stem = owner.lock_name[:-5]
+        names = {name for name in os.listdir(parent) if name.startswith(stem+'.')}
+        allowed = {stem+'.lock', stem+'.enrollment', stem+'.units', stem+'.units-started',
+            *(stem+'.units-position-%020d' % position for position in range(1, len(units)+1))}
+        allowed.update(stem+'.unit-'+unit.unit_id+'.'+family
+            for unit in units for family in inventory._CATALOG_FAMILIES if family != 'enrollment')
+        if names - allowed:
+            raise RemoteHistoryHold()
+        captured = {name for actual, name, *_rest in held.files if actual == parent}
+        captured.update(name for actual, name, *_rest in held.directories if actual == parent)
+        # Capture every original family BEFORE semantic readers or recovery
+        # barriers. Their temporary scopes never substitute these actual FDs.
+        for name in sorted(names-captured-{stem+'.lock'}):
+            if name.endswith('-started'):
+                held.file(parent, name, 16384)
+            else:
+                folder = held.directory(parent, name); family = name.rsplit('.', 1)[-1]
+                entries = tuple(os.listdir(folder))
+                if family == 'nv':
+                    from monitor import issue_tracker_nv_reservation as nv
+                    if frozenset(entries) != nv._CATALOG_NAMES:
+                        raise RemoteHistoryHold()
+                else:
+                    inventory._family_entries(family, entries)
+                for entry in sorted(entries):
+                    limit = max(inventory._limit(family, entry), nv._LIMIT) if family == 'nv' else inventory._limit(family, entry)
+                    held.file(folder, entry, limit)
+        held.verify()
+        with inventory._hold_catalog_retained_inventory(owner_token, binding) as (observations, verify_inventory):
+            if units != tuple(row.unit for row in observations):
+                raise RemoteHistoryHold()
+            verify_inventory(); held.verify()
+        with catalog.hold_pending_project_origins(owner_token, binding) as (origins, verify_origins):
+            if units != tuple(row.unit for row in origins):
+                raise RemoteHistoryHold()
+            rows, check_c6 = inputs.enter_context(catalog._hold_project_c6_from_origins(owner_token, binding, origins))
+            verify_origins(); held.verify(); check_c6()
+        replay = _CatalogReconciliationOriginals(writer_token, owner_token, binding,
+            held, owner, project, rows, check_c6)
+        replay.verify()
+        current_identity = journal._identity(os.fstat(project.project_fd))[:2]
+        results = []
+        for row, observation in zip(rows, observations):
+            if row.unit != observation.unit:
+                raise RemoteHistoryHold()
+            if row.project_identity != current_identity or not observation.attempt_count:
+                continue
+            facts = local._json(row.c6_facts)
+            generation = local.Generation(facts['generation_id'], facts['sequence'], facts['manifest_id'], writer_token)
+            results.append(proofs.enter_context(_hold_reconciled_owned_project_unit(
+                writer_token, owner_token, binding, row.unit, authentication,
+                generation=generation, _catalog=replay)))
+            replay.verify()
+        replay.verify()
+        # Creator finalizers run with ALL C6 live. The overlapping retained
+        # completion originals above then survive their close and ALL C6's
+        # finalizers; no closed verifier or freshly adopted image is used.
+        proofs.close(); replay.verify(); inputs.close()
+        held.verify(parent_additions=replay.additions)
+    except Exception:
+        failed = True
+    finally:
+        try: inputs.close()
+        except Exception: failed = True
+        try: proofs.close()
+        except Exception: failed = True
+        if held is not None: held.close()
+    if failed:
+        raise RemoteHistoryHold()
+    return tuple(results)
 
 
 def _fence(unit, identity, response):

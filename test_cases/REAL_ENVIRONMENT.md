@@ -2424,6 +2424,8 @@ generation/publish 及 UNKNOWN 下改 action/wire 均 HOLD，不计作 COMPLETE 
 
 ## TC-REAL-REQ7-ORIGINAL-RECONCILIATION-001 — 已尝试原单元的固定读对账
 
+- ALL catalog/C6 对账补充（**NOT RUN / REAL_ENV REQUIRED**）：保留当前项目已计数单元的四读正常流程、另一项目 count-zero pending 原件连续持有但不选择、缺 fence UNKNOWN、创建者后额外共享名、ORIGIN/另一项目 RECEIPT/接收捕获 COMPLETE 同字节换 inode，以及关键提交边界、代表性中断、冷恢复和失败后的原件/UNKNOWN/partial 安全状态。实际创建者和接收者须重叠复验 FD/raw/full stat，只有真实派生的两名可新增，不能采用替换原件或返回有效前缀。独立 direct 与真实 C6/OAuth/本地加密 socket 多脚本证据仅为开发替代，不证明默认 worker、NEW/G1/FIFO、设备/Cloud/断电或当前 full/check。原场景未省略、合并或弱化，无新增剩余风险接受人；原精确现场授权、清理权限、研发确认和发布门禁不变。
+
 - 采集完成后独立 lane 边界补充（**NOT RUN / REAL_ENV REQUIRED**）：status 和本地发布仅在实际 completion 持久化后执行，各自普通异常不得跳过另一 lane 或把已完成采集重新标为失败；operator interrupt 仍传播，诊断不得输出秘密异常正文。保留正常 not-due、status OSError/ValueError、本地 ValueError、关键完成边界、代表性中断、冷恢复与失败安全状态。本地 independent direct 和真实 worker/gate/emitter/三 cron workflow 仅证明 dispatch 边界，不代替实际本地 C6、默认在线编排、设备/Cloud/断电或当前 full/check。无场景省略或合并，无新的风险接受确认人；原现场授权、研发确认与发布门禁不变。
 
 - 首次目标绑定补充：仅从实际项目 owner 下的原 config 与固定 root 枚举建立 locator，不接受 caller target/document/path；旧 inspect 必须仍持有非空原 binding。保留正常 root/RO-bind、禁用/空枚举、读间同字节 config 换 inode 和失败安全状态；本地 native owner/fixed-FD 仅为替代开发证据，现场仍 NOT RUN。无场景省略/合并、无新的风险接受确认人或现场权限，绑定本身不授予发送/NEW。
