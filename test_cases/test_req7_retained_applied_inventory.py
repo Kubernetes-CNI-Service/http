@@ -24,6 +24,64 @@ def load():
 
 
 class RetainedAppliedInventoryTests(unittest.TestCase):
+    def _reserved_settled_successor(self, *, missing_applied=False):
+        import time
+        from test_cases import test_req7_unit_catalog as catalog_tests
+        fixture = catalog_tests.CatalogAppliedNativeWorkflowTests()
+        with fixture.completed_and_pending(project_origins=True) as (
+                case,catalog,_remote,_inventory,_old,writer,owner,bound,units):
+            from monitor import issue_tracker_global_attempt_journal as globals_
+            from monitor import issue_tracker_enrollment_journal as enrollment
+            from monitor import issue_tracker_history_preread_journal as preread
+            # New actual owners require their canonical reservation consumer,
+            # not the previous scenario's imported owner/global registries.
+            quota = catalog_tests.load_component('issue_tracker_metadata_reservation')
+            from monitor.issue_tracker_metadata_capacity import prepare_metadata_capacity_read
+            from monitor.issue_tracker_sheets_read_plan import prepare_template_identity_read, prepare_history_tail_read
+            from monitor.issue_tracker_sheets_read_decode import decode_template_identity
+            from monitor.issue_tracker_sdk_authentication import AuthenticatedToken
+            from test_cases.test_req7_sheets_read_decode import identity_response, response
+            auth = AuthenticatedToken('synthetic-reserved-successor',time.time()+3600)
+            document = identity_response(); document['spreadsheetId'] = bound.spreadsheet_id
+            identity = decode_template_identity(prepare_template_identity_read(bound,auth),response(document))
+            original = enrollment.inspect_enrollment_journal(owner,bound,identity)
+            history = {'spreadsheetId':bound.spreadsheet_id,'sheets':[{'properties':{
+                'sheetId':105,'title':'Update_History','sheetType':'GRID',
+                'gridProperties':{'rowCount':100,'columnCount':5}},
+                'data':[{'startRow':2,'startColumn':0}]}]}
+            preread.prepare_history_preread(owner,bound,units[-1],
+                prepare_history_tail_read(bound,auth),response(history))
+            metadata = {'matchedDeveloperMetadata':[{'developerMetadata':{
+                'metadataId':index+1,'metadataKey':'http-ztp-enrollment-v1',
+                'metadataValue':nonce,'visibility':'DOCUMENT',
+                'location':{'locationType':'SHEET','sheetId':sid}}}
+                for index,(_title,sid,nonce) in enumerate(original.nonces)]}
+            quota.prepare_metadata_reservation(owner,bound,identity,units[-1],
+                prepare_metadata_capacity_read(bound,auth),response(metadata))
+            before = original_read_files(case.root)
+            if missing_applied:
+                marker = case.root/'project/.tracker'/('REMOTE-APPLIED-'+units[0].unit_id)
+                marker.rename(case.root/'retained-prior-applied')
+                retained = original_read_files(case.root)
+                with self.assertRaises(globals_.GlobalAttemptHold):
+                    globals_.record_reserved_attempt_intent(owner,bound,identity,units[-1])
+                self.assertEqual(retained,original_read_files(case.root))
+                self.assertEqual(0,globals_.inspect_global_unit(owner,bound,units[-1]).attempt_count)
+            else:
+                for count in (1,2):
+                    observed = globals_.record_reserved_attempt_intent(owner,bound,identity,units[-1])
+                    self.assertEqual((count,'UNKNOWN'),(observed.attempt_count,observed.outcome))
+                    self.assertFalse(hasattr(observed,'permit'))
+                self.assertTrue(before.items() <= original_read_files(case.root).items())
+            self.assertEqual((1,'UNKNOWN'),(globals_.inspect_global_unit(owner,bound,units[0]).attempt_count,
+                globals_.inspect_global_unit(owner,bound,units[0]).outcome))
+
+    def test_actual_reserved_successor_joins_settled_catalog_and_retains_every_original(self):
+        self._reserved_settled_successor()
+
+    def test_actual_reserved_successor_missing_prior_applied_remains_uncounted_hold(self):
+        self._reserved_settled_successor(missing_applied=True)
+
     def test_fixture_installs_current_inventory_alias_before_original_owner_issuance(self):
         module = load()
         from monitor import issue_tracker_retained_inventory as canonical

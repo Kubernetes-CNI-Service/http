@@ -2060,3 +2060,26 @@ handoff is not current-source qualification, freshness/G1, shared cadence,
 multi-pending/superseded FIFO, default online worker, whole REQ7 or current
 formal full/check proof. No real device, Cloud or power-loss verification is
 claimed; existing automated cases and production release gates remain intact.
+
+Protected reserved, original-business, receipted, continuous and shared-retry
+count boundaries now call the same catalog-aware public counter. Their original
+quota, History, receipt, audit and current-source gates remain in place. Real
+settled-C6/APPLIED successor reservation cases retain old bytes/inodes; missing
+APPLIED refuses without count. Actual protected ETH/IB receipt and fixed TLS
+launch flows, and identical original-unit retry, independently assert exact
+count/outcome and shared-route identity outside sanitized production contexts.
+401 remains UNKNOWN, never COMPLETE or a reset opportunity.
+
+A bounded native launch diagnosis established an issued template-identity read
+expiring during final source replay, not a missing registry entry: its original
+30-second deadline had elapsed by 0.596632375s (fine timing reproduced 0.212110125s).
+The native qualification now projects its own just-observed protected IB/W1
+window instead of rereading that same intermediate window. Public IB readers,
+final independent IB/projection/full-cycle checks, producer timestamps and all
+original deadlines remain unchanged. Tests-first structural RED was retained;
+five actual normal/receipt-rebind/read-expiry checks passed, 303.205s, with exact
+source/test identity frozen. The structural test is supplemental, not a field
+provenance oracle. Existing drift/source-leg workflows remain required.
+This narrow correction and local PASS are not the diagnosis of the historical
+formal full's three other timing failures, current full/check, G1 proof, default
+online-worker integration or whole REQ7 closure. REAL_ENV remains NOT RUN.

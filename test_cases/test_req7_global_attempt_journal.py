@@ -44,6 +44,23 @@ def original_read_files(root):
 
 
 class Req7GlobalAttemptJournalTests(unittest.TestCase):
+    def test_all_protected_count_boundaries_join_the_shared_original_counter(self):
+        import ast, inspect, textwrap
+        # One semantic counter must inspect actual catalog settlement for all
+        # protected sources; bypassing it reinstates the old blanket HOLD.
+        names = ('record_reserved_attempt_intent',
+            'record_original_business_reserved_attempt_intent',
+            'record_receipted_original_attempt_intent',
+            '_hold_shared_retry_counted_sources', '_hold_continuous_owned_attempt_wire')
+        for name in names:
+            with self.subTest(boundary=name):
+                tree = ast.parse(textwrap.dedent(inspect.getsource(getattr(self.module,name))))
+                calls = [node.func.id for node in ast.walk(tree)
+                    if isinstance(node,ast.Call) and isinstance(node.func,ast.Name)]
+                self.assertEqual(1,calls.count('record_global_attempt_intent'),
+                    'protected boundary must retain its gates and join the canonical actual catalog counter')
+                self.assertEqual(0,calls.count('_observe'),'legacy local append bypasses actual OTHER settlement')
+
     def test_settled_claim_inputs_require_actual_writer_before_catalog_reads(self):
         holder = getattr(self.module, '_hold_settled_catalog_claim_inputs', None)
         self.assertTrue(callable(holder), 'fixed original settlement must dominate actual CLAIM consumers')

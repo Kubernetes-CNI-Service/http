@@ -1315,7 +1315,7 @@ def record_reserved_attempt_intent(token, binding, identity, unit):
             if before.attempt_count == 6: raise GlobalAttemptHold()
             images = _reserved_images(token, binding, identity, unit)
             verify_quota()
-            result = _observe(token, binding, unit, True)
+            result = record_global_attempt_intent(token, binding, unit)
             verify_quota()
             if (_reserved_images(token, binding, identity, unit) != images
                     or result.attempt_count != before.attempt_count + 1
@@ -1348,7 +1348,7 @@ def record_original_business_reserved_attempt_intent(token, binding, identity, u
             if before.attempt_count == 6: raise GlobalAttemptHold()
             images = originals()
             verify_quota()
-            result = _observe(token, binding, unit, True)
+            result = record_global_attempt_intent(token, binding, unit)
             verify_quota()
             if (originals() != images or result.attempt_count != before.attempt_count + 1
                     or inspect_global_unit(token, binding, unit) != result):
@@ -1455,7 +1455,7 @@ def record_receipted_original_attempt_intent(
             if before.attempt_count == 6: raise GlobalAttemptHold()
             images = originals()
             verify_audits(); verify_receipts(); verify_quota()
-            result = _observe(token, binding, unit, True)
+            result = record_global_attempt_intent(token, binding, unit)
             verify_audits(); verify_receipts(); verify_quota()
             if (originals() != images or result.attempt_count != before.attempt_count + 1
                     or inspect_global_unit(token, binding, unit) != result):
@@ -1553,7 +1553,7 @@ def _hold_shared_retry_counted_sources(
                             if _read_original_generation_identity(original[2][0][0],writer_token) != original[2][0]:
                                 raise GlobalAttemptHold()
                         verify_originals()
-                        result=_observe(token,binding,unit,True)
+                        result=record_global_attempt_intent(token,binding,unit)
                         # Post-count drift preserves UNKNOWN and an unpaired
                         # opportunity, never repairs or rolls back the counter.
                         verify_originals()
@@ -1712,7 +1712,7 @@ def _hold_continuous_owned_attempt_wire(
                 # nesting the separate count primitive would replay the same
                 # unchanged chain again and consume the original read budget.
                 verify_originals()
-                result=_observe(token,binding,unit,True)
+                result=record_global_attempt_intent(token,binding,unit)
                 if (result.attempt_count!=1 or
                         inspect_global_unit(token,binding,unit)!=result): raise GlobalAttemptHold()
                 verify_sources()

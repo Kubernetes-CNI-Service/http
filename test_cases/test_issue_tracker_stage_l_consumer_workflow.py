@@ -29,6 +29,51 @@ from test_cases.test_issue_tracker_stage_l_consumer import ProdStageLFixture
 
 
 class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
+    def _protected_shared_counter_route(self, *, launch=False, retry=False):
+        from test_cases import test_req7_global_attempt_journal as fixtures
+        actual_load = fixtures.load; routed = []; results = []
+        with ExitStack() as patches:
+            def load_and_observe():
+                module = actual_load(); counter = module.record_global_attempt_intent
+                def count(owner,bound,unit):
+                    routed.append(unit.unit_id)
+                    result = counter(owner,bound,unit)
+                    results.append((result.attempt_count,result.outcome))
+                    return result
+                patches.enter_context(mock.patch.object(module,'record_global_attempt_intent',side_effect=count))
+                return module
+            patches.enter_context(mock.patch.object(fixtures,'load',side_effect=load_and_observe))
+            if retry:
+                self._exercise_real_protected_three_panel_fixture(skip_history=False,
+                    observed_cabling_insert_probe=True,business_preread_probe=True,
+                    original_reserved_probe=True,receipted_intent_probe=True,
+                    owned_read_gates_probe=True,owned_continuity_probe=True,retry_launch_probe='normal')
+            else:
+                marks = []
+                options = dict(native_catalog_launch_probe=('normal',marks)) if launch else dict(
+                    native_catalog_receipted_count_probe=marks)
+                self._exercise_real_protected_three_panel_fixture(skip_history=False,
+                    observed_cabling_insert_probe=True,receipted_intent_probe=True,
+                    native_catalog_probe=True,native_catalog_c6_origin_probe=True,
+                    native_catalog_retained_probe=True,**options)
+                self.assertEqual(2,len(marks))
+        # Outside all sanitized production contexts: actual protected C5/C6,
+        # and where selected, fresh reads/CLAIM/TLS must reach this boundary.
+        self.assertEqual([(1,'UNKNOWN'),(2 if retry else 1,'UNKNOWN')],results,
+            'every actual protected count, including identical retry, must reach the shared counter exactly once')
+        self.assertEqual(2,len(routed))
+        self.assertEqual(retry,routed[0]==routed[1],
+            'retry binds one original unit; native ETH/IB source panels bind distinct units')
+
+    def test_actual_protected_native_receipted_count_joins_shared_catalog_counter(self):
+        self._protected_shared_counter_route()
+
+    def test_actual_protected_native_fixed_request_joins_shared_catalog_counter(self):
+        self._protected_shared_counter_route(launch=True)
+
+    def test_actual_original_shared_retry_joins_the_same_catalog_counter(self):
+        self._protected_shared_counter_route(retry=True)
+
     def test_original_unknown_unit_retries_after_a_new_real_cycle_without_recompile(self):
         self._exercise_original_unknown_retry()
 

@@ -19,7 +19,7 @@ import stat
 
 from monitor.issue_tracker_cycle_source import read_completed_cycle_evidence
 from monitor.issue_tracker_ib_runtime import (
-    IbWhitelistedKWindow, read_prod_ib_k_window,
+    IbWhitelistedKWindow, ProdIbKWindow, read_prod_ib_k_window,
     read_whitelisted_ib_k_window, validate_prod_ib_k_window,
 )
 from monitor.issue_tracker_k_chain import KChainState
@@ -902,14 +902,31 @@ def qualify_prod_stage_l(
                        or not skip.matched_rule
                        for skip in projection.whitelist_skips)):
             raise StageLConsumerHold("Fabric or W1 matched-rule provenance is incomplete")
-        ib = read_prod_ib_k_window(
-            store, http_root=root, settings=settings,
-            whitelist_snapshot=whitelist_snapshot,
-            whitelist_path=whitelist_path, writer_token=writer_token,
-        )
         bound_ib = source.switch_ib_source.ib_source
         switch = source.switch_ib_source.switch_source
         eth = source.eth_link_source
+        # The native composed inspector has just reopened protected IB/W1 on
+        # both sides of ETH. Project that actual observation here rather than
+        # recursively rereading the same intermediate window. This is not a
+        # caller witness or a cached qualification: the independent public
+        # IB validator, full projection replay and cycle checks below remain
+        # the last return boundary, including drift and original deadlines.
+        ib = ProdIbKWindow(
+            cycle_ids=bound_ib.window.cycle_ids,
+            completion_sha256=switch.completion_sha256,
+            report_sha256=bound_ib.window.report_sha256s,
+            expected_topology_sha256=bound_ib.window.expected_topology_sha256,
+            rows=bound_ib.kept_rows,
+            whitelist_skips=tuple((
+                ('ib_cabling', skip.row.expected_endpoints[0],
+                 skip.row.expected_endpoints[1], skip.row.issue_type),
+                skip.matched_rule,
+            ) for skip in bound_ib.skips),
+            k_event_sha256=switch.k_event_sha256,
+            whitelist_sha256=bound_ib.whitelist_sha256,
+            template_sha256=bound_ib.workbook_sha256,
+            recorded_at_utc=bound_ib.window.recorded_at_utc,
+        )
         if (ib.qualified is not False
                 or ib.cycle_ids != switch.cycle_ids
                 or ib.completion_sha256 != switch.completion_sha256

@@ -59,6 +59,20 @@ class ProdStageLFixture(unittest.TestCase):
 
 
 class ProdStageLConsumerDirectTests(ProdStageLFixture):
+    def test_native_qualification_projects_its_own_ib_observation_and_keeps_final_replay(self):
+        import ast, inspect, textwrap
+        from monitor import issue_tracker_stage_l_consumer as consumer
+        tree = ast.parse(textwrap.dedent(inspect.getsource(consumer.qualify_prod_stage_l)))
+        calls = [node.func.id for node in ast.walk(tree)
+            if isinstance(node,ast.Call) and isinstance(node.func,ast.Name)]
+        self.assertEqual(0,calls.count('read_prod_ib_k_window'),
+            'native qualification must not recursively reread the intermediate already-observed IB window')
+        self.assertEqual(1,calls.count('ProdIbKWindow'))
+        self.assertEqual(1,calls.count('inspect_prod_stage_l_composed_sources'))
+        self.assertEqual(1,calls.count('validate_prod_ib_k_window'),
+            'last independent protected IB/W1 replay must remain before qualification return')
+        self.assertEqual(1,calls.count('validate_prod_stage_l_source_projection'))
+
     def test_fresh_switch_leg_reads_each_family_once_without_granting_authority(self):
         from monitor import issue_tracker_stage_l_consumer as consumer
         from monitor.issue_tracker_switch_runtime import ProdSwitchKWindow
