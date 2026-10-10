@@ -177,7 +177,10 @@ class CatalogReconciliationWorkflowTests(unittest.TestCase):
                     mock.patch.object(module, '_hold_created_completion_evidence', side_effect=creator_then_fault):
                 if fault in ('third-name', 'origin-rebind', 'other-receipt-rebind', 'completion-capture-rebind'):
                     with self.assertRaises(module.RemoteHistoryHold) as caught:
-                        api(writer, owner, bound, auth)
+                        if lazy_auth:
+                            api(writer, owner, bound)
+                        else:
+                            api(writer, owner, bound, auth)
                     self.assertIsNone(caught.exception.__context__)
                 else:
                     result = api(writer, owner, bound) if lazy_auth else api(writer, owner, bound, auth)
@@ -251,3 +254,68 @@ class CatalogReconciliationWorkflowTests(unittest.TestCase):
 
     def test_selected_counted_catalog_default_performs_one_actual_oauth_and_four_reads(self):
         self.exercise(lazy_auth=True)
+
+
+class CatalogProjectAuthenticationHandoffDirectTests(unittest.TestCase):
+    def test_fixed_internal_handoff_accepts_no_caller_authentication_or_factory(self):
+        import inspect
+        module=importlib.import_module('monitor.issue_tracker_remote_history_match')
+        api=getattr(module,'_reconcile_pending_project_units_and_project_auth',None)
+        self.assertTrue(callable(api),'fixed reconciliation lacks actual internal OAuth lifecycle handoff')
+        self.assertEqual(('writer_token','owner_token','binding','_store'),tuple(inspect.signature(api).parameters))
+        from monitor import issue_tracker_unit_catalog as catalog
+        with mock.patch.object(catalog,'_inspect') as inventory:
+            with self.assertRaises(module.RemoteHistoryHold): api(object(),object(),object())
+            inventory.assert_not_called()
+
+
+class CatalogProjectAuthenticationHandoffWorkflowTests(unittest.TestCase):
+    _Base=CatalogReconciliationWorkflowTests
+    _Fixture=_Base._Fixture
+    setUp=_Base.setUp; server=_Base.server; owners=_Base.owners
+    intercept=_Base.intercept; child_fixture=_Base.child_fixture
+    certificates=_Base.certificates; read_owned=_Base.read_owned
+    prepare_owned=_Base.prepare_owned; project_auth=_Base.project_auth
+    exercise=_Base.exercise
+
+    def api(self):
+        module=importlib.import_module('monitor.issue_tracker_remote_history_match')
+        fixed=getattr(module,'_reconcile_pending_project_units_and_project_auth',None)
+        self.assertTrue(callable(fixed),'default next stage cannot use a closed read summary as OAuth')
+        def run(writer,owner,bound,authentication=None):
+            if authentication is not None:
+                # The reused fixture separately checks the unchanged legacy
+                # read-only API's settled replay. Never pass its caller auth
+                # to the new lazy-only handback or count it as a new handoff.
+                return module.reconcile_pending_project_units(writer,owner,bound,authentication)
+            result,actual=fixed(writer,owner,bound)
+            self.handoffs.append((result,actual))
+            if result:
+                from monitor.issue_tracker_token_launcher import require_current_owned_project_token
+                project,digest=require_current_owned_project_token(owner,bound,actual)
+                self.assertEqual('synthetic-cloud-project',project)
+                self.assertRegex(digest,r'^[0-9a-f]{64}$')
+                self.assertFalse(hasattr(actual,'permit'))
+            else:
+                self.assertIsNone(actual,'no counted unit must still mean no OAuth acquisition')
+            return result
+        return module,run
+
+    def test_actual_four_read_finalization_returns_original_live_auth_not_read_permission(self):
+        self.handoffs=[]; self.exercise(lazy_auth=True)
+        self.assertEqual(1,len(self.handoffs))
+        result,auth=self.handoffs[0]
+        self.assertEqual(('APPLIED',),tuple(row.state for row in result)); self.assertIsNotNone(auth)
+        # The helper owners have now closed. A handback is not a persisted or
+        # transferable token capability and cannot revive that acquisition.
+        from monitor import issue_tracker_token_launcher as tokens
+        with self.assertRaises(tokens.TokenLauncherHold):
+            tokens.require_current_owned_project_token(object(),object(),auth)
+
+    def test_no_counted_unit_returns_empty_result_without_authenticating(self):
+        self.handoffs=[]; self.exercise(lazy_auth=True,count_zero=True)
+        self.assertEqual([((),None)],self.handoffs)
+
+    def test_original_c6_failure_does_not_publish_authentication_handoff(self):
+        self.handoffs=[]; self.exercise('other-receipt-rebind',other_project=True,lazy_auth=True)
+        self.assertEqual([],self.handoffs)

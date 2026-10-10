@@ -2303,3 +2303,15 @@ wire/count/UNKNOWN/one-claim expectations. Original read, transport and startup
 deadlines and post-count expiry/rebinding negatives are unchanged. This fixes
 fixture preparation/isolation, not proof that earlier startup failures or the
 whole REQ7/full/check have been resolved; REAL_ENV remains NOT RUN.
+
+Fixed catalog reconciliation has an internal lazy-authentication handback for
+the next default stage. It returns only the actual issuer-bound project OAuth
+object after every ALL-catalog/C6/completion finalizer succeeds; the ordinary
+read-only API still returns its diagnostic tuple. No caller authentication or
+factory is accepted. No current counted unit still means no OAuth and an empty
+result. New direct and real OAuth/TLS/catalog/four-read workflows cover live
+handback, owner close revocation, count-zero, and foreign C6 original rebinding.
+This is neither a retained read snapshot nor G1/send permission: subsequent
+stages must acquire fresh source and actual reads under the original owners.
+No existing assertion or deadline is relaxed. Field verification is NOT RUN;
+default FIRST/R2, whole REQ7 and exact-tree full/check remain open.

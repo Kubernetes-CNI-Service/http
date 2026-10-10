@@ -700,6 +700,39 @@ def reconcile_pending_project_units(writer_token, owner_token, binding, authenti
 
 
 def _reconcile_pending_project_units(writer_token, owner_token, binding, authentication=None, *, _store=None):
+    # Keep the ordinary read-only result diagnostic-only.
+    result, _authentication = _reconcile_pending_project_units_with_authentication(
+        writer_token, owner_token, binding, authentication, _store=_store)
+    return result
+
+
+def _reconcile_pending_project_units_and_project_auth(writer_token, owner_token, binding, *, _store=None):
+    """Return actual lazy OAuth only after ALL reconciliation finalizers.
+
+    No caller credential/factory or old read verifier is accepted. The exact
+    process-local issued authentication remains bound to the original live
+    owners/current target. Later use requires ordinary issuer checks and NEW
+    actual reads; this is not a snapshot, G1 or send capability.
+    No current counted unit returns ((), None), without authenticating.
+    """
+    failed = False
+    try:
+        result, authentication = _reconcile_pending_project_units_with_authentication(
+            writer_token, owner_token, binding, _store=_store)
+        if authentication is not None:
+            from monitor.issue_tracker_token_launcher import require_current_owned_project_token
+            from monitor.issue_tracker_online_target import inspect_project_online_target
+            require_current_owned_project_token(owner_token, binding, authentication)
+            inspect_project_online_target(writer_token, binding)
+            require_current_owned_project_token(owner_token, binding, authentication)
+    except Exception:
+        failed = True
+    if failed:
+        raise RemoteHistoryHold() from None
+    return result, authentication
+
+
+def _reconcile_pending_project_units_with_authentication(writer_token, owner_token, binding, authentication=None, *, _store=None):
     """Private fixed worker composition, never a caller cycle/verifier permit."""
     from monitor import issue_tracker_unit_catalog as catalog
     from monitor import issue_tracker_retained_inventory as inventory
@@ -785,7 +818,7 @@ def _reconcile_pending_project_units(writer_token, owner_token, binding, authent
         if held is not None: held.close()
     if failed:
         raise RemoteHistoryHold()
-    return tuple(results)
+    return tuple(results), authentication
 
 
 def _fence(unit, identity, response):
