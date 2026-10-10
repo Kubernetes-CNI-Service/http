@@ -2422,6 +2422,14 @@ generation/publish 及 UNKNOWN 下改 action/wire 均 HOLD，不计作 COMPLETE 
 - 原顺序联测夹具修复：GLOBAL → remote History → retained inventory 初次 196 方法产生 11 ERROR；实际原 GLOBAL 前置顺序与首个失败 workflow 有界复现确认 enrollment/preread 持有旧 owner 注册表，当前令牌在生产流程前被拒绝。新增独立注册表预期先 RED，再仅修正 owned fixture 的发行前依赖捕获；原行为断言和预算不变，原顺序含新回归 197 PASS / 471.715 秒 / exit 0。完整初败、诊断、RED/GREEN 和旧前缀身份保留；这是精确 dirty 主树局部证据，不是正式 full、现场通过或新风险豁免。
 - APPLIED-key 原件接线：从原单元内部恢复历史 generation 身份并持有实际 C6 STATE/MANIFEST/INTENT/RECEIPT/XLSX、COMPLETE、APPLIED 和 key-watermark 两对原件；不接受 caller unit/generation/keys，不发行 mutation handle。主树初始缺 API 四方法 RED；新增读者与原 inventory 共 26 方法 PASS，最终五方法补实际持有期间同字节 key-marker/C6-receipt 替换拒绝。只返真正发送 key，NOOP 不标 APPLIED，原 count=1/UNKNOWN 不改；全局 max、FIFO、多单元冷恢复、G1、NEW/default worker 和当前正式 full/check 尚未闭合。现场保留正常原件恢复、关键提交中断/缺 pair、持有期替换及失败后安全状态；无新增省略、风险接受或现场授权，现场仍 NOT RUN。
 
+## TC-REAL-REQ7-ORIGINAL-RECONCILIATION-001 — 已尝试原单元的固定读对账
+
+- 状态：**NOT RUN / REAL_ENV REQUIRED**；对应 C-19/C-23/C-25。自动化为 `test_req7_online_reconciliation` 的独立 direct 与真实 C6/OAuth/本地加密 socket 四读 workflow；不代表现场或默认在线整链闭合。
+- 前置与权限：另获精确授权的隔离副本、真实私有原件与共享 owner、经批准目标和有效凭据/策略、当前精确树 full/check 及研发确认；本卡不授权真实 Cloud/SSH/设备/root/cron/生产发布。
+- 保留场景：正常四读、缺 fence 的 UNKNOWN、缺审计行的 CONFLICT、凭据原对象丢失、末次读后策略撤销；创建 COMPLETE 至新 reader 的交接、APPLIED/key 提交与最后认证复验边界的原件替换、代表性中断、冷恢复和失败后安全状态。创建者原身份必须保持至接收后且在 APPLIED 前复验，同字节换 inode 不能被重新认领。
+- 独立预期与证据：原 count/UNKNOWN、C6、不可变 WIRE/History/nonces 原样保留；只真正匹配的 sent key 贡献 APPLIED。零新增 mutation/count/NEW/G1 放行/outbox 清理，partial proof 不修补。保存完整命令、精确 HEAD/tree/dirty/diff、Python/依赖身份、退出码、物理 BEGIN/END、前后 stat/inode/SHA/旧前缀与原件 before/after；现场另核真实请求和 owner 锁。
+- 清理与风险：只关闭确证自有 fixture/child/FD，保留替换原件、partial 和 UNKNOWN，不碰未知 PID 或实际历史数据。保留/省略记录：原场景均保留，未省略或合并，无新的风险接受确认人；本地替代证据不覆盖现场 Linux/容器/Cloud、真实断电/设备或冷进程恢复，均 NOT RUN。SIGKILL/正常重启不得冒充断电；原现场授权、必要研发确认和普通发布门禁不变。
+
 ## TC-REAL-REQ7-PENDING-ORIGINAL-CATALOG-001 — 多个 pending 原件与冷恢复
 
 - Case ID：`TC-REAL-REQ7-PENDING-ORIGINAL-CATALOG-001`；名称：单个真实共享 spreadsheet owner 内不可变 pending 多单元目录；类型：transaction / integration / real-environment；对应 C-19；状态：**NOT RUN / REAL_ENV REQUIRED**。

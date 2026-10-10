@@ -468,6 +468,116 @@ def inspect_owned_applied_key_watermarks(writer_token,owner_token,binding,unit,*
     return _owned_applied_key_watermarks(writer_token,owner_token,binding,unit,generation,record=False)
 
 
+def reconcile_owned_project_unit(writer_token, owner_token, binding, unit,
+                                 authentication, *, generation):
+    """Fixed project-authenticated four-read reconciliation of ONE original.
+
+    The online cycle consumer may call this for an already counted UNKNOWN,
+    independently of a new local C6. The original committed generation,
+    count, immutable wire, History and nonces stay held across the reads and
+    COMPLETE/APPLIED/key handoff. No caller response, plan, URL or MATCHED
+    label is accepted. A visible fence alone never installs completion.
+
+    This never sends business mutations, increments/resets an attempt, creates
+    NEW, admits a retry, releases G1 reservations or cleans settings outboxes.
+    Globally complete metadata capacity is NOT needed to read historical
+    evidence and is NOT inferred from these four responses. Partial original
+    completion stores are refused, never adopted, repaired or overwritten.
+    """
+    from monitor import issue_tracker_local_commit as local
+    from monitor.issue_tracker_history_read_launcher import (
+        OwnedProjectSheetsReadUnit, require_current_owned_project_read,
+    )
+    from monitor.issue_tracker_token_launcher import require_current_owned_project_token
+    from monitor.issue_tracker_online_target import inspect_project_online_target
+
+    failed = False
+    try:
+        project = local._owner(writer_token)
+        with _hold_applied_generation(writer_token, generation, unit) as (actual, verify_c6, _facts, _sent):
+            if actual is not project:
+                raise RemoteHistoryHold()
+            with _hold_match_originals(owner_token, binding, unit) as (verify_originals, _images):
+                before_count = global_journal.inspect_global_unit(owner_token, binding, unit)
+                if not 1 <= before_count.attempt_count <= 6:
+                    raise RemoteHistoryHold()
+                require_current_owned_project_token(owner_token, binding, authentication)
+                inspect_project_online_target(writer_token, binding)
+                responses = {}
+                retained = ExitStack()
+                retained_checks = []
+                def verify_live():
+                    verify_c6(); verify_originals()
+                    for check in retained_checks:
+                        check()
+                    if local._owner(writer_token) is not project:
+                        raise RemoteHistoryHold()
+                    if global_journal.inspect_global_unit(owner_token, binding, unit) != before_count:
+                        raise RemoteHistoryHold()
+                    require_current_owned_project_token(owner_token, binding, authentication)
+                    inspect_project_online_target(writer_token, binding)
+                    for key, kind, _file in _COMPLETION_READS:
+                        if key in responses:
+                            require_current_owned_project_read(writer_token, owner_token, binding,
+                                responses[key], authentication, read_kind=kind)
+                    verify_c6(); verify_originals()
+                    for check in retained_checks:
+                        check()
+                verify_live()
+                _sheet, parent, name, _base = global_journal._inputs(owner_token, binding, unit)
+                prefix = name[:-len('.journal')]
+                with retained:
+                    if any(prefix + suffix in os.listdir(parent)
+                           for suffix in ('.completion', '.completion-started')):
+                        # Existing/partial stores go through the strict original
+                        # reader. Failure must never fall back to recreation.
+                        inspect_completion_evidence(owner_token, binding, unit)
+                        matched = True
+                    else:
+                        for key, kind, _file in _COMPLETION_READS:
+                            verify_live()
+                            responses[key] = OwnedProjectSheetsReadUnit(writer_token, owner_token,
+                                binding, authentication, read_kind=kind).read_once()
+                            verify_live()
+                        result = observe_owned_remote_history_unit(writer_token, owner_token,
+                            binding, unit, **responses)
+                        verify_live()
+                        matched = result.state == 'MATCHED_OBSERVATION'
+                        if matched:
+                            _completion, verify_created = retained.enter_context(
+                                _hold_created_completion_evidence(writer_token, owner_token,
+                                    binding, unit, **responses))
+                            retained_checks.append(verify_created)
+                            verify_live()
+                    if matched:
+                        retained_checks.append(retained.enter_context(
+                            _hold_completion_originals(owner_token, binding, unit)))
+                        # Recheck the creator's saved identities AFTER capture
+                        # and BEFORE APPLIED. Capture cannot adopt a replacement.
+                        verify_live()
+                        result = record_owned_applied_evidence(writer_token, owner_token,
+                            binding, unit, generation=generation)
+                        original_owner, verify_applied, key_body, _keys = retained.enter_context(
+                            _hold_original_applied_key_watermark_inputs(writer_token,
+                                owner_token, binding, unit, generation))
+                        if original_owner is not project:
+                            raise RemoteHistoryHold()
+                        retained_checks.append(verify_applied)
+                        verify_live()
+                        record_owned_applied_key_watermarks(writer_token, owner_token,
+                            binding, unit, generation=generation)
+                        retained_checks.append(retained.enter_context(_hold_applied_records(
+                            project.root_fd, ('REMOTE-KEY-HIGH-WATER-STARTED-'+unit.unit_id,
+                                'REMOTE-KEY-HIGH-WATER-'+unit.unit_id), key_body,
+                            states=('KEY-HIGH-WATER-STARTED', 'KEY-HIGH-WATER'))))
+                    verify_live()
+    except Exception:
+        failed = True
+    if failed:
+        raise RemoteHistoryHold()
+    return result
+
+
 def _fence(unit, identity, response):
     """Presence of the exact ID/image, not any z=1 or substituted fence ID."""
     doc = json.loads(response.data.decode('utf-8', 'strict'), object_pairs_hook=metadata._pairs,
@@ -804,6 +914,17 @@ def _hold_completion_start(owner_token,binding,unit,*,expected=None,expected_ide
 
 def record_owned_completion_evidence(writer_token,owner_token,binding,unit,*,
                                      identity_response,headers_response,metadata_response,history_response):
+    """Persist the original proof set; this API alone grants no settlement."""
+    with _hold_created_completion_evidence(writer_token,owner_token,binding,unit,
+            identity_response=identity_response,headers_response=headers_response,
+            metadata_response=metadata_response,history_response=history_response) as (result, verify):
+        verify()
+    return result
+
+
+@contextmanager
+def _hold_created_completion_evidence(writer_token,owner_token,binding,unit,*,
+                                     identity_response,headers_response,metadata_response,history_response):
     """Persist a complete matched proof set, NEVER clear UNKNOWN or resend.
 
     Only actual fixed-read objects under the current dual acquisitions may
@@ -891,6 +1012,18 @@ def record_owned_completion_evidence(writer_token,owner_token,binding,unit,*,
                     raise RemoteHistoryHold()
             live(); journal._named(parent,name,folder,directory=True)
             if journal._identity(os.fstat(folder))!=directory_identity: raise RemoteHistoryHold()
+            def verify_created():
+                live(); journal._named(parent,name,folder,directory=True)
+                if journal._identity(os.fstat(folder))!=directory_identity or set(os.listdir(folder))!=set(originals_saved):
+                    raise RemoteHistoryHold()
+                for file,saved in originals_saved.items():
+                    if (journal._read(folder,file,2*1024*1024),list(journal._identity(os.stat(file,dir_fd=folder,follow_symlinks=False))))!=saved:
+                        raise RemoteHistoryHold()
+                live(); journal._named(parent,name,folder,directory=True)
+                if journal._identity(os.fstat(folder))!=directory_identity: raise RemoteHistoryHold()
+            verify_created()
+            yield result,verify_created
+            verify_created()
     except Exception: failed=True
     finally:
         try: scope.close()
@@ -899,7 +1032,6 @@ def record_owned_completion_evidence(writer_token,owner_token,binding,unit,*,
             try: os.close(folder)
             except OSError: failed=True
     if failed: raise RemoteHistoryHold()
-    return result
 
 
 @contextmanager

@@ -2083,3 +2083,19 @@ provenance oracle. Existing drift/source-leg workflows remain required.
 This narrow correction and local PASS are not the diagnosis of the historical
 formal full's three other timing failures, current full/check, G1 proof, default
 online-worker integration or whole REQ7 closure. REAL_ENV remains NOT RUN.
+
+The fixed original-project reconciliation driver now obtains the four actual
+project-authenticated read results itself (template identity/headers, metadata,
+History), keeping original C6/count/wire/nonces/History and current auth/policy
+held. Missing fence remains UNKNOWN; missing audit remains CONFLICT. Only a
+complete match creates COMPLETE, APPLIED and the original sent-key watermarks;
+it never adds a wire/count, resets UNKNOWN, releases G1 or cleans an outbox.
+Created COMPLETE identities remain held by the creator through the next proof
+capture and are checked BEFORE APPLIED. A same-byte replacement at that handoff
+or at the final key/auth boundary refuses while preserving both originals and
+failure evidence. Existing/partial proof stores use strict readers, never a
+repair/recreate fallback. Direct refusal and real native C6/OAuth/owned TLS
+four-read workflows retain independent request/child/cleanup observations
+outside all exception normalization. Live original replay makes no new read;
+this is not a cold-process, default coordinator, whole REQ7 or current full/check
+proof. Existing automated cases and their original budgets remain required.
