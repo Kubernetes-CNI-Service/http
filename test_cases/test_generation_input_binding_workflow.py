@@ -6,7 +6,7 @@ from __future__ import annotations
 import base64
 import copy
 import csv
-from contextlib import contextmanager, redirect_stdout
+from contextlib import ExitStack, contextmanager, redirect_stdout
 import hashlib
 import io
 import json
@@ -9127,6 +9127,76 @@ with mock.patch.object(c2, "_require_csv_input_authority"), mock.patch.object(
                     hashlib.sha256(parent_path.read_bytes()).hexdigest(),
                     identity["parent_release_sha256"],
                 )
+
+    def test_real_private_generation_committed_dhcp_service_gate_preserves_empty_flat(self):
+        """Actual b/c1/c2/d -> parent/current -> both service gates, no flat copy."""
+        with tempfile.TemporaryDirectory(prefix="selected-dhcp-service-") as name:
+            private = Path(name).resolve()
+            project, ztp = _private_real_chain(private, "192.0.2.53", http_enabled=True)
+            flat = project / "99-output-dhcp"
+            flat.mkdir(mode=0o755)
+            for filename in DHCP_OUTPUTS:
+                (flat / filename).write_bytes(b"")
+                link = ztp / "config/isc-dhcp-server" / filename
+                if link.exists():
+                    link.unlink()
+                link.symlink_to(flat / filename)
+            before = {filename: ((flat / filename).stat().st_ino, b"") for filename in DHCP_OUTPUTS}
+            args = SimpleNamespace(switch_scope="eth", deployment_scope="prod", p2p_file=None,
+                                   no_upgrade=True, mini=None, ssh_dir=None, dry_run=True)
+            validated, _ = LOAD.validate_inputs(project, args, allow_management_key_generation=False,
+                                               host_role="workstation")
+            executed = []
+            original_subprocess = LOAD._run_subprocess
+            def child(command, **kwargs):
+                script = command[1] if len(command) > 1 else command[0]
+                child_dir = Path(kwargs["cwd"]).resolve(strict=True)
+                self.assertTrue(child_dir.is_relative_to(private))
+                self.assertIn(script, {Path(path).name for path in REAL_CHILD_SCRIPTS})
+                if not kwargs.get("capture_output"):
+                    kwargs.update(stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                result = original_subprocess(command, timeout=120, **kwargs)
+                executed.append(script)
+                self.assertEqual(0, result.returncode, result.stdout)
+                return result
+            with mock.patch.object(LOAD, "ZTP_DIR", ztp), redirect_stdout(io.StringIO()):
+                candidate = LOAD._create_dhcp_candidate_dir(project)
+                with mock.patch.object(LOAD, "_run_subprocess", side_effect=child):
+                    LOAD.generate_configs(validated.device_types, install_dhcp=False,
+                        dhcp_enabled=True, schema_version=validated.settings.schema_version,
+                        deployment_scope="prod", switch_scope="eth",
+                        source_identities=validated.source_identities, dhcp_candidate_dir=candidate)
+                self.assertEqual([Path(path).name for path in REAL_CHILD_SCRIPTS], executed)
+                self.assertGreater((candidate / "dhcpd.conf").stat().st_size, 0)
+                self.assertGreater((candidate / "dhcpd_eth.hosts").stat().st_size, 0)
+                for other in ("ib", "nvl"):
+                    self.assertEqual(0, (candidate / f"dhcpd_{other}.hosts").stat().st_size)
+                parent = LOAD.validate_and_publish_release(project, validated, publish=False,
+                                                          dhcp_candidate_dir=candidate)
+                prepared = LOAD.prepare_current_release(project, parent, dhcp_candidate_dir=candidate)
+                generation = LOAD.stage_pinned_generation(project, prepared.temporary, candidate)
+                installed = private / "etc/dhcp"
+                installed.mkdir(parents=True, mode=0o755)
+                paths = {}
+                for filename in DHCP_OUTPUTS[:-1]:
+                    paths[filename] = installed / filename
+                    shutil.copyfile(candidate / filename, paths[filename])
+                    paths[filename].chmod(0o644)
+                LOAD.commit_prepared_release(prepared)
+                LOAD.commit_pinned_generation(project, generation, expected_current=None)
+                for backend in ("systemd", "supervisor"):
+                    with ExitStack() as stack:
+                        stack.enter_context(mock.patch.object(LOAD, "_runtime_installed_dhcp_paths", return_value=paths))
+                        for external in ("verify_control_auth", "verify_published_files", "verify_apache_publication_boundary"):
+                            stack.enter_context(mock.patch.object(LOAD, external))
+                        stack.enter_context(mock.patch.object(LOAD, "validate_management_host", return_value=True))
+                        stack.enter_context(mock.patch.object(LOAD, "supervisor_service_availability", return_value=(True, True)))
+                        commands = stack.enter_context(mock.patch.object(LOAD, "run"))
+                        stack.enter_context(mock.patch.object(LOAD, "sudo_command", side_effect=lambda *argv: list(argv)))
+                        LOAD.preflight_services(validated, {}, runtime_backend=SimpleNamespace(name=backend),
+                                                dhcp_runtime_plan=mock.sentinel.plan, committed_dhcp_parent=parent)
+                        self.assertIn(mock.call(["dhcpd", "-t", "-cf", "/etc/dhcp/dhcpd.conf"], dry_run=False), commands.call_args_list)
+                self.assertEqual(before, {filename: ((flat / filename).stat().st_ino, (flat / filename).read_bytes()) for filename in DHCP_OUTPUTS})
 
     def test_scoped_empty_dhcp_hosts_accepted_by_load_remain_activatable(self):
         """A LOAD-accepted zero-host family cannot invalidate its parent."""

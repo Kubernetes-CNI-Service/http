@@ -1,5 +1,18 @@
 # Test Case 案例库
 
+普通 LOAD 的 DHCP 启动门禁须消费本轮已提交 parent/current 选中的不可变 DHCP 代次，
+不能误读 SETUP 留下的历史 flat 空占位。`test_load_release_transaction.py` 独立覆盖
+Native/Supervisor、错误 expected parent、损坏 selector 禁止 legacy 回退、安装四文件的
+安全所有者/普通文件/字节匹配及 syntax 前后漂移拒绝；普通 main 须传本轮 exact parent。
+`test_generation_input_binding_workflow.py` 实际执行 b/c1/c2/d 到私有 DHCP candidate、
+parent/current 提交及两种 service preflight，保留五个 flat 0-byte 文件的原 inode/字节。
+原 conf 必须非空、选中 family 不能为空、未选 family 只能按原 manifest 计数/hash 规则
+为空；真实 `dhcpd -t`、Apache/auth/发布边界均不跳过。自动化仅隔离文件与外部 OS
+边界，不替代 AIR 真实启动和交换机 provision，见 REAL_ENV 的待编号门禁卡片。
+本次仅修改已登记的 LOAD；现有 `day0_release_operations` direct 与
+`generation_input_binding_setup_load_c2` / `r22_scoped_dhcp_activation_workflow`
+均已选中上述完整模块，继续保留原 manifest 映射，不新增重复映射或豁免路径。
+
 `test_cases/` 是仓库唯一的测试案例目录。这里集中保存全部自动化回归、案例模板和必须在
 真实环境执行的验收案例；测试文件不得散落到其他源码目录，也不提供旧 `tests/` 别名，避免
 同一个案例被 discovery 重复加载。

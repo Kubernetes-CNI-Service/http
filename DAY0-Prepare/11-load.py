@@ -19241,19 +19241,91 @@ def _setup_switch_b_operator_selection(token):
     return inputs, {kind: Path(row["source"]["path"]) for kind, row in intent["files"].items()}
 
 
+def _selected_service_dhcp_guard(project: Path, expected_parent=None):
+    """Use committed DHCP authority, not SETUP's historical flat placeholders.
+
+    This read-only gate neither republishes flat output nor authorizes service
+    activation. Installed bytes must match the selected immutable generation;
+    a present but invalid selector can never fall back to legacy source paths.
+    """
+    from project_contract import open_selected_dhcp_release, recheck_selected_dhcp_release
+    try:
+        selected = open_selected_dhcp_release(project, expected_parent=expected_parent)
+    except (ValueError, OSError) as exc:
+        raise LoadError(f"selected DHCP service authority is invalid: {exc}") from exc
+    if selected.mode != "pinned":
+        raise LoadError("selected DHCP service gate requires an enabled pinned release")
+
+    def installed_snapshot():
+        paths = _runtime_installed_dhcp_paths()
+        directory = next(iter(paths.values())).parent
+        owner = _setup_switch_directory_identity(directory)
+        uid = directory.lstat().st_uid
+        leaves = {name: _setup_switch_dhcp_owned_leaf(path) for name, path in paths.items()}
+        if any(row is None or not stat.S_ISREG(row["identity"][2])
+               or row["identity"][3] != uid or row["identity"][2] & 0o022
+               or row["state"]["state"] != "file"
+               or row["state"]["sha256"] != selected.output_hashes[name]
+               for name, row in leaves.items()):
+            raise LoadError("installed DHCP owner/bytes differ from selected release; HOLD")
+        return owner, uid, leaves
+
+    try:
+        installed = installed_snapshot()
+        validate_dhcp_output_sources({selected.output_paths[name]: path
+                                      for name, path in _runtime_installed_dhcp_paths().items()})
+    except (ValueError, OSError) as exc:
+        raise LoadError(f"installed DHCP service authority unavailable; HOLD: {exc}") from exc
+
+    def guard():
+        try:
+            recheck_selected_dhcp_release(project, selected.binding)
+            if installed_snapshot() != installed:
+                raise LoadError("installed DHCP owner changed during service preflight; HOLD")
+        except (ValueError, OSError) as exc:
+            raise LoadError(f"selected DHCP service authority changed; HOLD: {exc}") from exc
+
+    guard()
+    return guard
+
+
 def preflight_services(
     inputs: ProjectInputs, images: dict[str, Path], dry_run: bool = False, *,
     dhcp_runtime_plan: DhcpRuntimePlan | None = None,
     runtime_backend: ServiceRuntimeBackend | None = None,
     require_authority=None,
+    committed_dhcp_parent=None,
 ) -> None:
+    dhcp_guard = None
+
     def checked(function, *args, **kwargs):
         if require_authority is not None:
             require_authority()
+        if dhcp_guard is not None:
+            dhcp_guard()
         result = function(*args, **kwargs)
+        if dhcp_guard is not None:
+            dhcp_guard()
         if require_authority is not None:
             require_authority()
         return result
+
+    def check_dhcp_sources():
+        nonlocal dhcp_guard
+        project = inputs.global_file.parent
+        selected_present = committed_dhcp_parent is not None
+        if not selected_present:
+            try:
+                (project / "99-output-ztp/current").lstat()
+                selected_present = True
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                raise LoadError(f"selected DHCP selector unavailable; HOLD: {exc}") from exc
+        if selected_present:
+            dhcp_guard = checked(_selected_service_dhcp_guard, project, committed_dhcp_parent)
+        else:
+            checked(validate_dhcp_output_sources, dhcp_file_mappings())
 
     if require_authority is not None:
         require_authority()
@@ -19272,7 +19344,7 @@ def preflight_services(
             checked(verify_apache_publication_boundary, dry_run=dry_run)
             checked(run, sudo_command("apache2ctl", "configtest"), dry_run=dry_run)
         if dhcp_required:
-            checked(validate_dhcp_output_sources, dhcp_file_mappings())
+            check_dhcp_sources()
             checked(run,
                 sudo_command("dhcpd", "-t", "-cf", "/etc/dhcp/dhcpd.conf"),
                 dry_run=dry_run,
@@ -19296,7 +19368,7 @@ def preflight_services(
     checked(verify_published_files, inputs, images, dry_run=dry_run)
     checked(verify_apache_publication_boundary, dry_run=dry_run)
     if inputs.settings.dhcp_enabled:
-        checked(validate_dhcp_output_sources, dhcp_file_mappings())
+        check_dhcp_sources()
         checked(run,
             sudo_command("dhcpd", "-t", "-cf", "/etc/dhcp/dhcpd.conf"),
             dry_run=dry_run,
@@ -20942,6 +21014,8 @@ def main(
                 inputs, images, args.dry_run,
                 dhcp_runtime_plan=dhcp_runtime_plan,
                 runtime_backend=runtime_backend_instance,
+                **({"committed_dhcp_parent": parent_release}
+                   if pinned_generation_candidate is not None and not args.dry_run else {}),
             )
             should_start = args.start_services or (
                 not args.dry_run and confirm_service_start()

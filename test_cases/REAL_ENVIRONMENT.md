@@ -1,5 +1,48 @@
 # Real-environment acceptance cases
 
+## 待编号：普通 LOAD 已提交 DHCP 代次到 Native/Supervisor 启动门禁
+
+- Case ID：待编号；类型：real-environment / integration；平台：Linux/root、AIR、Supervisor。
+- 对应阻塞：2644884 AIR 普通 LOAD 已生成并安装合法 DHCP、提交 parent/current 后，
+  preflight 仍读取 SETUP 的五个 flat 空占位并 exit1。该轮失败不改写为通过。
+- 风险/目标：避免把有效私有代次误报为空，也不得以任意候选、错误 current、安装漂移
+  或权限放宽取得启动许可。边界为 b/c1/c2/d→parent/current→安装文件→服务语法核验。
+- 前置：新精确干净版本 ordinary full/check；原 managed writers 静默、原部署锁有效；
+  指定 AIR ztp-server 有 root 权限、合法 ETH scoped 输入、本地地址已配置；服务原停止；
+  DocumentRoot 外的原身份/字节/权限及恢复备份已核验。不得删除 receipt/WAL 继续验证。
+- 步骤：正常官方 LOAD 生成 private candidate，核 parent/report/current/四安装文件及
+  实际部署源码；原五 flat 文件保持零字节时仍从 pinned 代次检查，再执行真正的
+  installed `dhcpd -t`、Apache configtest 与正常启动/健康检查。核 HTTP/租约/目标
+  oobofoob-leaf10 provision；只有成功后才按原授权执行 eth2→eth3 切换。
+- 预期：正常 LOAD 实际 exit0、服务和发布身份一致；选中 conf/ETH hosts 非空，IB/NVL
+  零声明可保持空。损坏 selector、错误 expected parent、安装内容/所有者漂移 fail closed，
+  不 fallback 到 flat、不手填占位、不手工绕过启动、不替换本轮版本中途修其它问题。
+- 原证据：TEST `outputs/test-diagnostics/air-priority-fresh-native-load-2644884-20261010.log`
+  inode183976702 / 80685 bytes / SHA256
+  `3b1570341ecd6b2473eeacf6dadbf69d46a78e05a277fecf617bf74b44717307`，actual1、
+  freezeTrue、物理 END1；release47e32d4e110facb9c0dd 已提交但服务未通过启动门禁。
+  原 root-private 备份和 complete actual LOAD 原日志保留；不是 healthy A 或 AIR PASS。
+- 本地独立 RED：clone `outputs/test-diagnostics/selected-service-real-workflow-red.log`
+  SHA256 `d9adce0ba5c21884934a58a1f178bf9748c9b6bc9dbf9a0a54aadb8f0d1a9a7e`，
+  3 tests / 6 failures / 1 error / actual1 / freezeTrue。真正四脚本流程同样因 flat conf 空失败。
+  首 GREEN 的 macOS /var 别名夹具失败原日志保留；只将测试输入规范为正式 LOAD 的
+  canonical 路径，不放宽生产 no-follow reader。最终 focused 7 tests actual0 / freezeTrue，
+  `selected-service-direct-workflow-green2.log` SHA256
+  `47b9e5bf1ab01a771db1dfd9610ec9ab5e5198a53afb2952292bfe804bc82aaf`，不作为 full proof。
+  再补无 explicit parent 的 selector PermissionError/EIO 独立 RED（4 failures），仅真实
+  FileNotFoundError 可视缺席；其它错误 HOLD。最后两份注入夹具遗漏 Python 3.9 Path
+  自有 accessor 的日志保留，补齐 fault 注入边界，不放宽拒绝断言。最终八项组合
+  `selected-service-final-focused-green3.log` inode183991143 / 6990 bytes / SHA256
+  `6fd0a9717e0da4c103398988f11d059ba07d2ad2a9794885ea18645bd596ed94`，
+  8 tests / 1.876s / actual0 / freezeTrue / END0，仍非正式 full。
+- 故障注入/清理：本机 isolated 文件覆盖 selector 与 installed 漂移，绝不连接设备；
+  AIR 危险故障保留 HOLD/停服和全部原日志，恢复须核原备份及官方操作条件，不以
+  清理未知 owner/WAL 或摊平链接恢复。完成健康 A 后再执行已授权 REQ23 真导入/取回。
+- 状态：本地窄修复候选，related/full/check 与新版本 AIR 仍待；Supervisor 实机未执行。
+- 场景范围：保留正常关键提交/安装/启动与失败安全状态；本卡片未缩减独立 direct、
+  真实 workflow 或 full。其它不阻塞问题仅登记延期，原 R22 四窗口、Linux/root、
+  C2、DEV ACK 与断电/REQ23 真设备证据要求不因本项修改；未新增风险接受或豁免。
+
 ## 2026-10-09 固定 AIR 轮次后的 TEST 候选补充（非正式 proof）
 
 - R22：新增 schema4 收据将 immutable selected DHCP 与历史 flat compatibility publication

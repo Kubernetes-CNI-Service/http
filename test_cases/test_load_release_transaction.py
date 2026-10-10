@@ -6177,6 +6177,8 @@ class ReleaseTransactionTests(unittest.TestCase):
             ))
             if failure_at == "preflight":
                 def fail_service_preflight(*_args, **_kwargs):
+                    if parent_schema_version == 2:
+                        self.assertEqual(fake_parent, _kwargs.get("committed_dhcp_parent"))
                     if lifecycle_events is not None:
                         lifecycle_events.append("service-preflight")
                     raise failure
@@ -6282,6 +6284,131 @@ class ReleaseTransactionTests(unittest.TestCase):
         device = {"hostname": "leaf01", "type": "eth", "mac_plain": "020000000001",
                   "identity_macs": {"eth0": "020000000001"}}
         return parent, generation, flat, before, device
+
+    def _service_selected_fixture(self):
+        parent, generation, flat, before, _ = self._selected_pinned_b_consumer_fixture()
+        # Formal LOAD supplies canonical inputs; /var is a macOS alias, not
+        # permission for the shared no-follow reader to relax its authority.
+        self.inputs = LOAD.replace(self.inputs, global_file=self.global_file.resolve(strict=True))
+        installed = self.root.resolve() / "etc/dhcp"
+        installed.mkdir(parents=True, mode=0o755)
+        paths = {}
+        for name in before:
+            (flat / name).write_bytes(b"")
+            if name != "dhcp-release-manifest.json":
+                paths[name] = installed / name
+                paths[name].write_bytes((generation / "dhcp" / name).read_bytes())
+                paths[name].chmod(0o644)
+        return parent, generation, flat, paths
+
+    def _service_gate(self, backend, paths, run_action=None, committed_parent=None):
+        with ExitStack() as stack:
+            stack.enter_context(mock.patch.object(LOAD, "ZTP_DIR", self.ztp))
+            stack.enter_context(mock.patch.object(LOAD, "_runtime_installed_dhcp_paths", return_value=paths))
+            for name in ("verify_control_auth", "verify_published_files", "verify_apache_publication_boundary"):
+                stack.enter_context(mock.patch.object(LOAD, name))
+            stack.enter_context(mock.patch.object(LOAD, "validate_management_host", return_value=True))
+            stack.enter_context(mock.patch.object(LOAD, "supervisor_service_availability", return_value=(True, True)))
+            stack.enter_context(mock.patch.object(LOAD, "sudo_command", side_effect=lambda *argv: list(argv)))
+            commands = stack.enter_context(mock.patch.object(LOAD, "run", side_effect=run_action))
+            LOAD.preflight_services(self.inputs, {}, runtime_backend=SimpleNamespace(name=backend),
+                                    dhcp_runtime_plan=mock.sentinel.plan,
+                                    **({"committed_dhcp_parent": committed_parent} if committed_parent is not None else {}))
+            return commands
+
+    def test_service_gate_reads_selected_dhcp_not_empty_setup_placeholders(self):
+        _, _, flat, paths = self._service_selected_fixture()
+        before = {path.name: (path.stat().st_ino, path.read_bytes()) for path in flat.iterdir() if path.is_file()}
+        for backend in ("systemd", "supervisor"):
+            with self.subTest(backend=backend):
+                commands = self._service_gate(backend, paths)
+                self.assertIn(mock.call(["dhcpd", "-t", "-cf", "/etc/dhcp/dhcpd.conf"], dry_run=False), commands.call_args_list)
+                self.assertIn(mock.call(["apache2ctl", "configtest"], dry_run=False), commands.call_args_list)
+        self.assertEqual(before, {path.name: (path.stat().st_ino, path.read_bytes()) for path in flat.iterdir() if path.is_file()})
+
+    def test_service_gate_selected_dhcp_rejects_installed_drift_and_unsafe_owner(self):
+        _, _, _, paths = self._service_selected_fixture()
+        conf = paths["dhcpd.conf"]
+        payload = conf.read_bytes()
+        for backend in ("systemd", "supervisor"):
+            for fault in ("bytes", "symlink", "permissions"):
+                with self.subTest(backend=backend, fault=fault):
+                    if fault == "bytes":
+                        conf.write_bytes(b"# wrong installed generation\n")
+                    elif fault == "symlink":
+                        conf.unlink()
+                        conf.symlink_to(paths["dhcpd_eth.hosts"])
+                    else:
+                        conf.chmod(0o666)
+                    with self.assertRaisesRegex(LOAD.LoadError, "installed DHCP|已安装 DHCP"):
+                        self._service_gate(backend, paths)
+                    if conf.is_symlink():
+                        conf.unlink()
+                    conf.write_bytes(payload)
+                    conf.chmod(0o644)
+
+    def test_service_gate_corrupt_selector_never_falls_back_to_legacy(self):
+        _, generation, flat, paths = self._service_selected_fixture()
+        for name in paths:
+            (flat / name).write_bytes((generation / "dhcp" / name).read_bytes())
+        selector = self.project / "99-output-ztp/current"
+        selector.unlink()
+        selector.symlink_to("generations/missing")
+        for backend in ("systemd", "supervisor"):
+            with self.subTest(backend=backend), self.assertRaisesRegex(LOAD.LoadError, "selected DHCP|已提交 DHCP"):
+                self._service_gate(backend, paths)
+
+    def test_service_gate_rejects_another_expected_committed_parent(self):
+        parent, _, _, paths = self._service_selected_fixture()
+        wrong_parent = dict(parent, release_id="another-committed-release")
+        for backend in ("systemd", "supervisor"):
+            with self.subTest(backend=backend), self.assertRaisesRegex(LOAD.LoadError, "selected DHCP"):
+                self._service_gate(backend, paths, committed_parent=wrong_parent)
+
+    def test_service_gate_selector_read_error_is_not_legacy_absence(self):
+        _, generation, flat, paths = self._service_selected_fixture()
+        for name in paths:
+            (flat / name).write_bytes((generation / "dhcp" / name).read_bytes())
+        selector = self.project / "99-output-ztp/current"
+        original = os.lstat
+        original_stat = os.stat
+        original_path_lstat = Path.lstat
+        for backend in ("systemd", "supervisor"):
+            for fault in (PermissionError("selector denied"), OSError(5, "selector I/O error")):
+                def lstat(path, *args, **kwargs):
+                    if isinstance(path, (str, os.PathLike)) and os.fspath(path) == str(selector):
+                        raise fault
+                    return original(path, *args, **kwargs)
+                def stat_call(path, *args, **kwargs):
+                    if isinstance(path, (str, os.PathLike)) and os.fspath(path) == str(selector):
+                        raise fault
+                    return original_stat(path, *args, **kwargs)
+                def path_lstat(path, *args, **kwargs):
+                    if path == selector:
+                        raise fault
+                    return original_path_lstat(path, *args, **kwargs)
+                with self.subTest(backend=backend, fault=type(fault).__name__), \
+                     mock.patch.object(LOAD.os, "lstat", side_effect=lstat), \
+                     mock.patch.object(LOAD.os, "stat", side_effect=stat_call), \
+                     mock.patch.object(LOAD.Path, "lstat", new=path_lstat), \
+                     self.assertRaisesRegex(LOAD.LoadError, "selected DHCP"):
+                    self._service_gate(backend, paths)
+
+    def test_service_gate_rechecks_selected_and_installed_after_syntax_check(self):
+        _, generation, _, paths = self._service_selected_fixture()
+        for backend in ("systemd", "supervisor"):
+            for target in (generation / "dhcp/dhcpd.conf", paths["dhcpd.conf"]):
+                with self.subTest(backend=backend, target=str(target)):
+                    payload = target.read_bytes()
+                    syntax_seen = []
+                    def changed(command, **kwargs):
+                        if command[0] == "dhcpd":
+                            syntax_seen.append(command)
+                            target.write_bytes(payload + b"# drift after syntax\n")
+                    with self.assertRaisesRegex(LOAD.LoadError, "DHCP"):
+                        self._service_gate(backend, paths, changed)
+                    self.assertEqual(1, len(syntax_seen))
+                    target.write_bytes(payload)
 
     def test_real_load_manual_selected_workflow_ignores_unrelated_exterior_sibling_creation(self):
         import project_contract as selected_authority
