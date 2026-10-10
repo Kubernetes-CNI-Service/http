@@ -290,24 +290,19 @@ def hold_pending_project_origins(token, binding):
 
 
 @contextmanager
-def hold_pending_project_c6_units(token, binding):
-    """Join ALL historical origin rows to original projects and real C6.
+def _hold_project_c6_from_origins(token, binding, origins):
+    """Internal join while the caller keeps the original origin images held.
 
-    Actual live writers may be borrowed but never reissued; closed writers
-    are acquired once, nonblocking, from held original locators. Named root,
-    tracker and publication must still be the original dev/ino. Every actual
-    C6 file/stat/byte image must exactly match its original registration.
-    A busy/missing/changed project holds the whole read before any prefix.
-    Local sequence numbers are never compared between distinct projects.
-    Acquired owner tokens and generation selectors never escape the context.
-    This is NOT APPLIED/FIFO-release/qualified NEW or online authority.
+    Separating project originals from catalog namespace checks lets the actual
+    native writer append its own exact names without reopening or dropping
+    old project locks/C6 files. Rows are locators, never acquisition or send
+    authority; every original owner and registered C6 image is replayed here.
     """
     failed = False
     try:
         sheet_owner = ownership._validated_owner(token, binding)
         from monitor import issue_tracker_remote_history_match as remote
         with ExitStack() as scope:
-            origins, verify_origins = scope.enter_context(hold_pending_project_origins(token, binding))
             acquired = {}; checks = []; observed = []
             for origin in origins:
                 key = (origin.project_path, origin.publication_path)
@@ -341,12 +336,39 @@ def hold_pending_project_c6_units(token, binding):
             def verify():
                 if ownership._validated_owner(token, binding) is not sheet_owner:
                     raise UnitCatalogHold()
-                verify_origins()
                 for check in checks:
                     check()
-                verify_origins()
             verify()
             yield tuple(observed), verify
+            verify()
+    except Exception:
+        failed = True
+    if failed:
+        raise UnitCatalogHold() from None
+
+
+@contextmanager
+def hold_pending_project_c6_units(token, binding):
+    """Join ALL historical origin rows to original projects and real C6.
+
+    Actual live writers may be borrowed but never reissued; closed writers
+    are acquired once, nonblocking, from held original locators. Named root,
+    tracker and publication must still be the original dev/ino. Every actual
+    C6 file/stat/byte image must exactly match its original registration.
+    A busy/missing/changed project holds the whole read before any prefix.
+    Local sequence numbers are never compared between distinct projects.
+    Acquired owner tokens and generation selectors never escape the context.
+    This is NOT APPLIED/FIFO-release/qualified NEW or online authority.
+    """
+    failed = False
+    try:
+        with ExitStack() as scope:
+            origins, verify_origins = scope.enter_context(hold_pending_project_origins(token, binding))
+            rows, verify_projects = scope.enter_context(_hold_project_c6_from_origins(token, binding, origins))
+            def verify():
+                verify_origins(); verify_projects(); verify_origins()
+            verify()
+            yield rows, verify
             verify()
     except Exception:
         failed = True

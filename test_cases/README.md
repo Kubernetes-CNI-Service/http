@@ -1330,6 +1330,17 @@ native NV 目录自身也接收 exclusive creator 的原身份与 FD，接收方
 独立 direct 的 owned/recycled 两类与 actual protected C5→C6→NV 工作流
 均在异常作用域外核真实注入及清理；不是断电、设备或发送许可证明。
 
+origin-backed native NV 后继准备从实际 catalog HEADER 原链选择全部旧 origin，
+并持有其真正项目 writer/LOCK、C6 四件和已发布 XLSX；这些原件贯穿 witness、
+全部 native 文件写入、compiler、origin 和唯一 append，不能只核共享 origin
+摘要或在写前检查一次。旧 receipt 原样换 inode 在写前要求零新 NV 写入，
+在实际 witness 后要求零下一 NV 文件写入，并保留失败原件、禁止冷采用。
+原 ALL-project C6 reader 仍核真正 origin，获取/原件校验逻辑不变；旧 namespace
+仍逐项精确校验，仅实际 native writer 自有的新名字和唯一 append 允许增长。
+独立失败用例、两代真实 C6→NV→origin→GLOBAL→ALL/FIFO 和实际 protected
+C5/C6 workflow 核原件、零 APPLIED 及重叠 pending 屏障；不释放 UNKNOWN、
+不授予 freshness、qualified NEW 或发送许可。REAL_ENV 仍 NOT RUN。
+
 old/current/indexed 以及 catalog 内部重读共用固定 16MiB 原始图像预算，按持续
 持有的 dev/inode 去重，并在实际 pread 前核单文件 size 与整组预算；同字节不同
 inode 分别计费，同一原件仍逐次真实读取并核 full-stat/named/bytes，不能缓存许可。

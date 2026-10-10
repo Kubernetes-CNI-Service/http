@@ -229,6 +229,14 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         self.assertEqual(['ETH Cabling:actual-first-stat-fault:owned-fd-closed',
                           'IB Cabling:actual-first-stat-fault:owned-fd-closed'], observed)
 
+    def test_actual_protected_native_nv_all_project_c6_fifo_keeps_originals_and_issues_no_send_permission(self):
+        observed = []
+        self._exercise_real_protected_three_panel_fixture(skip_history=False,
+            observed_cabling_insert_probe=True, native_catalog_probe=True, native_catalog_c6_origin_probe=True,
+            native_catalog_retained_probe=True, native_catalog_all_c6_fifo_probe=observed)
+        self.assertEqual(['ETH Cabling:actual-all-project-c6:no-applied', 'ETH Cabling:actual-fifo:read-only',
+                          'IB Cabling:actual-all-project-c6:no-applied', 'IB Cabling:actual-fifo:read-only'], observed)
+
     def test_native_compiler_holds_nv_original_drift_during_final_real_receipt_read(self):
         self._exercise_native_compiler_return_fault('same_byte_replace')
 
@@ -798,6 +806,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         native_catalog_c6_origin_probe=False,
         native_catalog_retained_probe=False,
         native_catalog_creator_first_stat_probe=None,
+        native_catalog_all_c6_fifo_probe=None,
         continuous_launch_probe=None,
         retry_launch_probe=None,
         qualification_replay_probe=None,
@@ -2137,6 +2146,20 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                                         self.assertTrue(any(name.endswith('.nv/PRIOR') for name, _stat, _sha in rows[0].originals))
                                         self.assertFalse(any(hasattr(rows[0], name) for name in ('permit', 'applied', 'fresh', 'new')))
                                         verify()
+                                    if native_catalog_all_c6_fifo_probe is not None:
+                                        with inventory._hold_all_project_applied_keys(spreadsheet_token, binding) as (rows, verify):
+                                            self.assertEqual((unit,), tuple(row.unit for row in rows))
+                                            self.assertEqual((0,), tuple(row.attempt_count for row in rows))
+                                            self.assertEqual(((),), tuple(row.key_watermarks for row in rows))
+                                            verify()
+                                            native_catalog_all_c6_fifo_probe.append(sheet + ':actual-all-project-c6:no-applied')
+                                        with inventory._hold_all_project_fifo_frontier(spreadsheet_token, binding) as (frontier, verify):
+                                            self.assertEqual((unit.unit_id,), frontier.frontier)
+                                            self.assertEqual((), frontier.blocked)
+                                            self.assertEqual((), frontier.applied); self.assertEqual((), frontier.superseded)
+                                            self.assertFalse(any(hasattr(frontier, name) for name in ('permit', 'fresh', 'new', 'writer_token')))
+                                            verify()
+                                            native_catalog_all_c6_fifo_probe.append(sheet + ':actual-fifo:read-only')
                                     self.assertEqual(original_files, {str(path.relative_to(state)): (path.stat().st_ino, path.read_bytes())
                                         for path in state.rglob('*') if path.is_file()})
                                 continue

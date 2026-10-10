@@ -7,7 +7,7 @@ COMPLETE or send permission. Authentic source/admission, row reservations,
 the audited launcher and authenticated settlement still require integration.
 """
 from dataclasses import dataclass, field
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 import hashlib
 import json
 import os
@@ -383,7 +383,7 @@ def _native_original(parent, name, binding, base, keys, ids, prior, held):
                                     observed[0].source_sha256, observed[1].source_sha256)
 
 
-def _pin_catalog_prefix(token, binding, identity, held, *, new_allocation):
+def _pin_catalog_prefix(token, binding, identity, held, *, new_allocation, _project_proofs=None):
     """ALL indexed original families before any NEW write, not absent-journal GO."""
     from monitor import issue_tracker_unit_catalog as catalog
     owner = ownership._validated_owner(token, binding); parent = owner.directories[-1][0]
@@ -443,6 +443,31 @@ def _pin_catalog_prefix(token, binding, identity, held, *, new_allocation):
         observations.append((unit, seen))
         prior.append({'unit_id': unit.unit_id, 'journal_sha256': seen.journal_sha256, 'reservations': seen.reservations})
     held.verify()
+    if new_allocation and units:
+        # Only actual catalog HEADER originals select origin-backed C6.
+        # Legacy uninstalled catalogs retain their old diagnostic contract;
+        # an origin-backed catalog cannot silently omit any older project.
+        unit_ids = {unit.unit_id for unit in units}
+        unit_folders = {folder for _parent, child, folder, _stat, _names in held.directories if child in unit_ids}
+        native_origins = any(local._json(raw).get('project_origin') is not None
+            for p, name, _fd, _identity, raw in held.files
+            if name == 'HEADER' and p in unit_folders)
+        if native_origins:
+            if _project_proofs is None:
+                raise NvReservationHold()
+            with catalog.hold_pending_project_origins(token, binding) as (origins, verify_origins):
+                if tuple(origin.unit for origin in origins) != units:
+                    raise NvReservationHold()
+                rows, verify_projects = _project_proofs['scope'].enter_context(
+                    catalog._hold_project_c6_from_origins(token, binding, origins))
+                if tuple(row.unit for row in rows) != units:
+                    raise NvReservationHold()
+                verify_origins(); held.verify(); verify_projects()
+                _project_proofs['verify'] = verify_projects
+            # The same actual origin files were already captured in held
+            # BEFORE this semantic read. They stay pinned while project C6
+            # and locks survive the entire native creator/compiler/append.
+            held.verify(); verify_projects()
     return owner, parent, stem, catalog_fd, units, prior, tuple(observations)
 
 
@@ -459,6 +484,7 @@ def hold_catalog_nv_preparation(token, binding, identity, eth_plan, eth_response
     budget = catalog._OriginalImageBudget()
     old = catalog._Originals(_image_budget=budget); current = catalog._Originals(_image_budget=budget)
     prepared = None; active_budget = None; failed = False
+    project_proofs = {'scope': ExitStack(), 'verify': lambda: None}
     try:
         parent, _legacy, base, keys, ids = _inputs(token, binding, identity, generation_id, publish_id, sheet, requested_keys)
         if token in catalog._IMAGE_BUDGETS:
@@ -466,7 +492,7 @@ def hold_catalog_nv_preparation(token, binding, identity, eth_plan, eth_response
         active_budget = (ownership._validated_owner(token, binding), binding, budget)
         catalog._IMAGE_BUDGETS[token] = active_budget
         owner, parent, stem, catalog_fd, units, prior, _observations = _pin_catalog_prefix(
-            token, binding, identity, old, new_allocation=True)
+            token, binding, identity, old, new_allocation=True, _project_proofs=project_proofs)
         if any(unit.unit_id == base['unit_id'] for unit in units):
             raise NvReservationHold()
         observed = _read_pair(binding, ids, eth_plan, eth_response, ib_plan, ib_response)
@@ -478,10 +504,10 @@ def hold_catalog_nv_preparation(token, binding, identity, eth_plan, eth_response
         name = stem + '.unit-' + base['unit_id'] + '.nv'; started = name + '-started'
         witness = local._canonical({**common, 'state': 'NV-PREPARATION-STARTED-NOT-AUTHORITY',
                                    'prior_sha256': hashlib.sha256(prior_raw).hexdigest()})
-        old.sync(); ownership._validated_owner(token, binding)
+        old.sync(); project_proofs['verify'](); ownership._validated_owner(token, binding)
         def verify_witness():
             if ownership._validated_owner(token, binding) is not owner: raise NvReservationHold()
-            old.verify(parent_additions={started}); current.verify()
+            old.verify(parent_additions={started}); current.verify(); project_proofs['verify']()
         raw, started_identity = _write_catalog_image(parent, started, witness, current, verify_witness)
         if raw != witness:
             raise NvReservationHold()
@@ -500,7 +526,7 @@ def hold_catalog_nv_preparation(token, binding, identity, eth_plan, eth_response
             def verify_new_folder(extra=frozenset()):
                 if ownership._validated_owner(token, binding) is not owner:
                     raise NvReservationHold()
-                old.verify(parent_additions={name, started}); current.verify()
+                old.verify(parent_additions={name, started}); current.verify(); project_proofs['verify']()
                 journal._named(parent, name, folder, directory=True)
                 if (journal._identity(os.fstat(folder))[:5] != folder_identity[:5]
                         or set(os.listdir(folder)) != completed | extra):
@@ -527,7 +553,7 @@ def hold_catalog_nv_preparation(token, binding, identity, eth_plan, eth_response
         record = {'owner': owner, 'token': token, 'binding': binding, 'identity': identity, 'old': old,
                   'current': current, 'catalog': catalog_fd, 'units': units, 'stem': stem, 'parent': parent,
                   'additions': {name, started}, 'appended': None, 'registered': False, 'unit': None, 'indexed': None,
-                  'budget': budget, 'origin': None, 'failed': False}
+                  'budget': budget, 'origin': None, 'failed': False, 'verify_prior_c6': project_proofs['verify']}
         prepared = _CatalogNvPreparation(seen); _ACTIVE_CATALOG_PREPARATIONS[prepared] = record
         _verify_catalog_preparation(prepared)
         yield prepared
@@ -548,6 +574,10 @@ def hold_catalog_nv_preparation(token, binding, identity, eth_plan, eth_response
                     catalog._close_original(origin['folder'], origin['identity'])
         if active_budget is not None and catalog._IMAGE_BUDGETS.get(token) is active_budget:
             catalog._IMAGE_BUDGETS.pop(token)
+        try:
+            project_proofs['scope'].close()
+        except Exception:
+            failed = True
         current.close(); old.close()
     if failed:
         raise NvReservationHold() from None
@@ -562,6 +592,7 @@ def _verify_catalog_preparation(prepared):
     if record['failed'] or record['budget'].failed or record['budget'].pending:
         raise NvReservationHold()
     record['old'].verify(parent_additions=record['additions'], appended_to=record['appended'])
+    record['verify_prior_c6']()
     record['current'].verify()
     if record['indexed'] is not None:
         record['indexed'].verify()

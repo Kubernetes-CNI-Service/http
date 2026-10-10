@@ -793,6 +793,105 @@ class Req7CatalogNvPreparationTests(unittest.TestCase):
                 self.assertEqual((first, second), tuple(row.unit for row in rows)); verify()
             self.assertEqual(old, {name: self.files()[name] for name in old})
 
+    @contextmanager
+    def _native_successor_with_old_c6(self):
+        with self.native_c6_origin_fixture() as (module, writer, token, first):
+            with self.preparation(token) as prepared:
+                self.catalog.register_pending_c6_unit(writer, token, binding(), first, _nv_preparation=prepared)
+            module.global_journal.prepare_global_unit(token, binding(), first)
+            first_action = json.loads(first.action_preimage)
+            owner = self.catalog.local._owner(writer)
+            receipt = owner.project / '.tracker/generations' / first_action['identity']['generation_id'] / 'RECEIPT'
+            enrolled = self.enrollment.inspect_enrollment_journal(token, binding(), self.identity)
+            args = cabling_inputs(enrolled.nonces, identifiers=('NV30104', 'NV30105'))
+            from test_cases.test_issue_tracker_whitelist_workbook import literal_xlsx
+            generation = self.catalog.local.begin_generation(writer, args['manifest'])
+            self.catalog.local.record_intent(writer, generation, literal_xlsx(), kind='xlsx')
+            published = self.catalog.local.commit(writer, generation)
+            yield module, writer, token, first, receipt, generation, published
+
+    def test_native_successor_refuses_old_real_c6_receipt_rebind_before_any_nv_write(self):
+        marks = []; error = None
+        with self._native_successor_with_old_c6() as (module, _writer, token, first, receipt, generation, published):
+            raw = receipt.read_bytes(); original = receipt.stat().st_ino
+            saved = self.root / 'preserved-old-native-receipt'; receipt.rename(saved)
+            receipt.write_bytes(raw); receipt.chmod(0o600)
+            before = self.files()
+            try:
+                with self.preparation(token, generation_id=generation.generation_id,
+                        publish_id=published.published_sha256):
+                    marks.append('unsafe-preparation-yield')
+            except Exception as exc: error = exc
+            self.assertIs(type(error), module.NvReservationHold)
+            self.assertEqual([], marks)
+            self.assertEqual(before, self.files(), 'invalid prior real C6 must stop before a new witness or NV directory')
+            self.assertEqual(original, saved.stat().st_ino)
+            self.assertNotEqual(original, receipt.stat().st_ino)
+            self.assertEqual(raw, receipt.read_bytes()); self.assertEqual(raw, saved.read_bytes())
+            self.assertEqual((0, 'UNATTEMPTED_OBSERVATION'),
+                (lambda state: (state.attempt_count, state.outcome))(
+                    module.global_journal.inspect_catalog_global_units(token, binding())[0][1]))
+
+    def test_native_successor_old_c6_rebind_after_actual_witness_stops_before_any_nv_image(self):
+        marks = []; writes = []; error = None
+        with self._native_successor_with_old_c6() as (module, _writer, token, first, receipt, generation, published):
+            raw = receipt.read_bytes(); original = receipt.stat().st_ino
+            saved = self.root / 'preserved-inflight-old-native-receipt'
+            write_original = module._write_catalog_image
+            def write_then_rebind(parent, name, *arguments, **keywords):
+                result = write_original(parent, name, *arguments, **keywords)
+                writes.append(name)
+                if name.endswith('.nv-started'):
+                    receipt.rename(saved); receipt.write_bytes(raw); receipt.chmod(0o600)
+                    marks.append('actual-witness-then-old-c6-rebound')
+                return result
+            try:
+                with mock.patch.object(module, '_write_catalog_image', side_effect=write_then_rebind):
+                    with self.preparation(token, generation_id=generation.generation_id,
+                            publish_id=published.published_sha256):
+                        marks.append('unsafe-preparation-yield')
+            except Exception as exc: error = exc
+            self.assertIs(type(error), module.NvReservationHold)
+            self.assertEqual(['actual-witness-then-old-c6-rebound'], marks)
+            self.assertEqual(1, len(writes)); self.assertTrue(writes[0].endswith('.nv-started'))
+            self.assertEqual(original, saved.stat().st_ino); self.assertNotEqual(original, receipt.stat().st_ino)
+            self.assertEqual(raw, receipt.read_bytes()); self.assertEqual(raw, saved.read_bytes())
+            with self.catalog.hold_pending_units(token, binding()) as (units, verify):
+                self.assertEqual((first,), units); verify()
+            before = self.files()
+            with self.assertRaises(module.NvReservationHold):
+                with self.preparation(token, generation_id=generation.generation_id,
+                        publish_id=published.published_sha256): self.fail('interrupted NV preparation was adopted')
+            self.assertEqual(before, self.files())
+
+    def test_real_two_native_c6_nv_origin_global_all_project_fifo_workflow_keeps_pending_barrier(self):
+        from test_cases.test_req7_retained_global_inventory import load as inventory_load
+        with self._native_successor_with_old_c6() as (module, writer, token, first, _receipt, generation, published):
+            enrolled = self.enrollment.inspect_enrollment_journal(token, binding(), self.identity)
+            args = cabling_inputs(enrolled.nonces, identifiers=('NV30104', 'NV30105'))
+            args.update(generation_id=generation.generation_id, publish_id=published.published_sha256)
+            second = self.catalog.composer.freeze_send_unit(**args)
+            with self.preparation(token, generation_id=generation.generation_id,
+                    publish_id=published.published_sha256) as prepared:
+                self.assertEqual(((KEYS[0], 'NV30104'), (KEYS[1], 'NV30105')), prepared.observation.reservations)
+                self.catalog.register_pending_c6_unit(writer, token, binding(), second, _nv_preparation=prepared)
+            module.global_journal.prepare_global_unit(token, binding(), second)
+            inventory = inventory_load(reset_support=False); before = self.files()
+            handles = dict(self.catalog.local._ACTIVE[writer].handles)
+            with inventory._hold_all_project_applied_keys(token, binding()) as (rows, verify):
+                self.assertEqual((first, second), tuple(row.unit for row in rows))
+                self.assertEqual((0, 0), tuple(row.attempt_count for row in rows))
+                self.assertEqual(((), ()), tuple(row.key_watermarks for row in rows))
+                self.assertEqual(rows[0].project_identity, rows[1].project_identity); verify()
+            with inventory._hold_all_project_fifo_frontier(token, binding()) as (frontier, verify):
+                self.assertEqual((first.unit_id,), frontier.frontier)
+                self.assertEqual(((second.unit_id, (first.unit_id,)),), frontier.blocked)
+                self.assertEqual((), frontier.applied); self.assertEqual((), frontier.superseded)
+                self.assertFalse(any(hasattr(frontier, name) for name in ('permit', 'fresh', 'new', 'writer_token')))
+                verify()
+            self.assertEqual(handles, self.catalog.local._ACTIVE[writer].handles)
+            self.assertEqual(before, self.files())
+
     def _exercise_native_c6_origin_first_stat_cleanup(self, recycle):
         marks = []; created = []; foreign_fd = None; error = None
         try:
