@@ -1038,6 +1038,200 @@ def _owned_metadata_child(mode,root):
         _cold_phase('fixture_cleanup_end')
 
 
+class Req7MixedOriginalQuotaTests(unittest.TestCase):
+    """Real C6/COMPLETE/APPLIED/KEY and fresh project TLS, no settlement flags."""
+    def api(self, module):
+        api = getattr(module, '_hold_owned_project_mixed_metadata_capacity', None)
+        self.assertTrue(callable(api), 'mixed originals must preserve ALL permanent quota fences')
+        return api
+
+    @__import__('contextlib').contextmanager
+    def originals(self, *, reserve_pending=True, visible_settled=True):
+        from contextlib import ExitStack
+        from test_cases.test_req7_unit_catalog import CatalogAppliedNativeWorkflowTests
+        with CatalogAppliedNativeWorkflowTests.completed_and_pending(self, project_origins=True) as (
+                case, catalog, remote, inventory, _old, writer, owner, bound, units), ExitStack() as stack:
+            # The native fixture deliberately reloads canonical owner/journal
+            # registries before issuance; borrow only its resulting modules.
+            from monitor import issue_tracker_history_read_launcher as reads
+            from monitor import issue_tracker_history_preread_journal as preread
+            from monitor import issue_tracker_sheets_read_decode as decode
+            module = load()
+            self.assertIs(module.ownership, inventory.ownership)
+            helper = Req7MetadataReservationProjectWorkflowTests
+            auth, credential, original = helper.project_auth(case, stack, module.ownership, owner, bound)
+            document = matching.identity_response(); document['spreadsheetId'] = bound.spreadsheet_id
+            identity_read = helper.read_project(case, stack, writer, owner, bound, auth, 'template_identity', document)
+            identity_plan, _project, _digest = reads.require_current_owned_project_read(
+                writer, owner, bound, identity_read, auth, read_kind='template_identity')
+            identity = decode.decode_template_identity(identity_plan, identity_read)
+            history = matching.tail_document(12); history['spreadsheetId'] = bound.spreadsheet_id
+            history['sheets'][0]['properties']['sheetId'] = 105
+            history['sheets'][0]['data'][0]['rowData'] = []
+            history_read = helper.read_project(case, stack, writer, owner, bound, auth, 'history_tail', history)
+            plan, _project, _digest = reads.require_current_owned_project_read(
+                writer, owner, bound, history_read, auth, read_kind='history_tail')
+            preread.prepare_history_preread(owner, bound, units[1], plan, history_read)
+            metadata = {'matchedDeveloperMetadata': [
+                {'developerMetadata': {'metadataId': 1, 'metadataKey': 'http-ztp-enrollment-v1',
+                    'metadataValue': 'a'*64, 'visibility': 'DOCUMENT',
+                    'location': {'locationType': 'SHEET', 'sheetId': 101}}},
+                {'developerMetadata': {'metadataId': 2, 'metadataKey': 'http-ztp-enrollment-v1',
+                    'metadataValue': 'd'*64, 'visibility': 'DOCUMENT',
+                    'location': {'locationType': 'SHEET', 'sheetId': 105}}}]}
+            if visible_settled:
+                # Independent literal permanent z=1 entry, not capacity output.
+                metadata['matchedDeveloperMetadata'].append({'developerMetadata': {
+                    'metadataId': units[0].fence_metadata_id, 'metadataKey': 'z', 'metadataValue': '1',
+                    'visibility': 'DOCUMENT', 'location': {'locationType': 'SHEET', 'sheetId': 101}}})
+            metadata_read = helper.read_project(case, stack, writer, owner, bound, auth, 'metadata', metadata)
+            if reserve_pending:
+                module.prepare_owned_project_metadata_reservation(writer, owner, bound, auth, units[1],
+                    identity_response=identity_read, metadata_response=metadata_read)
+            self.assertEqual(original, credential.read_bytes())
+            yield case, module, catalog, inventory, writer, owner, bound, auth, identity_read, metadata_read, units
+
+    def test_unissued_original_read_pair_refuses_before_any_inventory_access(self):
+        from monitor import issue_tracker_retained_inventory as inventory
+        module = load(); api = self.api(module)
+        with mock.patch.object(inventory, '_hold_all_project_mixed_settlements') as joined:
+            yielded = []
+            with self.assertRaises(module.MetadataReservationHold) as caught:
+                with api(object(), object(), binding(), object(), identity_response=object(), metadata_response=object()):
+                    yielded.append(True)
+            self.assertEqual([], yielded)
+            self.assertIsNone(caught.exception.__context__); joined.assert_not_called()
+
+    def test_actual_settled_historical_missing_quota_still_charged_and_visible_only_not_go(self):
+        from test_cases.test_req7_global_attempt_journal import original_read_files
+        self.api(load())
+        for visible in (True, False):
+            with self.subTest(visible=visible), self.originals(visible_settled=visible) as (
+                    case, module, _catalog, _inventory, writer, owner, bound, auth, identity, metadata, units):
+                before = original_read_files(case.root)
+                with self.api(module)(writer, owner, bound, auth,
+                        identity_response=identity, metadata_response=metadata) as (budget, verify):
+                    self.assertEqual('VISIBLE_ONLY_UNPROVED', budget.outcome)
+                    self.assertEqual(2, budget.outstanding_reservations)
+                    self.assertEqual((101, 88 if visible else 86, 2 if visible else 4, 29910),
+                                     next(row for row in budget.pools if row[0] == 101))
+                    self.assertIs(False, budget.inventory_complete)
+                    self.assertFalse(hasattr(budget, 'permit')); self.assertFalse(hasattr(budget, 'send_once'))
+                    verify()
+                self.assertEqual(before, original_read_files(case.root))
+                self.assertEqual((1, 0), tuple(module.global_journal.inspect_global_unit(owner, bound, u).attempt_count for u in units))
+
+    def test_actual_pending_missing_quota_refuses_without_creating_or_releasing_images(self):
+        from test_cases.test_req7_global_attempt_journal import original_read_files
+        self.api(load())
+        with self.originals(reserve_pending=False) as (
+                case, module, _catalog, _inventory, writer, owner, bound, auth, identity, metadata, units):
+            before = original_read_files(case.root); yielded = []
+            with self.assertRaises(module.MetadataReservationHold):
+                with self.api(module)(writer, owner, bound, auth, identity_response=identity, metadata_response=metadata):
+                    yielded.append(True)
+            self.assertEqual([], yielded)
+            self.assertEqual(before, original_read_files(case.root))
+            self.assertEqual((1, 0), tuple(module.global_journal.inspect_global_unit(owner, bound, u).attempt_count for u in units))
+
+    def test_actual_missing_settled_key_proof_refuses_whole_budget_without_prefix(self):
+        from test_cases.test_req7_global_attempt_journal import original_read_files
+        self.api(load())
+        with self.originals() as (case, module, _catalog, _inventory, writer, owner, bound, auth, identity, metadata, units):
+            marker = case.root/'project/.tracker'/('REMOTE-KEY-HIGH-WATER-'+units[0].unit_id)
+            marker.rename(case.root/'preserved-original-key')
+            before = original_read_files(case.root); yielded = []
+            with self.assertRaises(module.MetadataReservationHold):
+                with self.api(module)(writer, owner, bound, auth, identity_response=identity, metadata_response=metadata):
+                    yielded.append(True)
+            self.assertEqual([], yielded); self.assertEqual(before, original_read_files(case.root))
+
+    def test_actual_pending_quota_same_byte_rebind_during_consumer_refuses_entire_return(self):
+        self.api(load())
+        with self.originals() as (case, module, _catalog, _inventory, writer, owner, bound, auth, identity, metadata, units):
+            stem = hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()
+            target = case.root/'var/lib/http-ztp-container/issue-tracker'/(stem+'.unit-'+units[1].unit_id+'.metadata')/'RESERVATION'
+            raw = target.read_bytes(); inode = target.stat().st_ino; reached = []; refused = False
+            try:
+                with self.api(module)(writer, owner, bound, auth, identity_response=identity, metadata_response=metadata) as (budget, _verify):
+                    reached.append(budget.outstanding_reservations)
+                    target.rename(case.root/'preserved-quota-original')
+                    target.write_bytes(raw); target.chmod(0o600)
+            except module.MetadataReservationHold:
+                refused = True
+            self.assertEqual([2], reached); self.assertTrue(refused)
+            self.assertNotEqual(inode, target.stat().st_ino); self.assertEqual(raw, target.read_bytes())
+            self.assertEqual((1, 0), tuple(module.global_journal.inspect_global_unit(owner, bound, u).attempt_count for u in units))
+
+    def test_actual_project_read_expiry_after_last_mixed_holder_close_refuses_return(self):
+        from contextlib import contextmanager
+        from monitor import issue_tracker_history_read_launcher as reads
+        from test_cases.test_req7_global_attempt_journal import original_read_files
+        self.api(load())
+        with self.originals() as (case, module, _catalog, inventory, writer, owner, bound, auth, identity, metadata, units):
+            original = inventory._hold_all_project_mixed_settlements; closed = []; reached = []; refused = False
+            before = original_read_files(case.root)
+            @contextmanager
+            def close_then_expire(*args, **kwargs):
+                with original(*args, **kwargs) as result:
+                    yield result
+                closed.append(True)
+            with mock.patch.object(inventory, '_hold_all_project_mixed_settlements', side_effect=close_then_expire), \
+                    mock.patch.object(reads, '_monotonic', side_effect=lambda: time.monotonic()+(31 if closed else 0)):
+                try:
+                    with self.api(module)(writer, owner, bound, auth, identity_response=identity, metadata_response=metadata) as (budget, _verify):
+                        reached.append(budget.outstanding_reservations)
+                except module.MetadataReservationHold:
+                    refused = True
+            self.assertEqual([True], closed); self.assertEqual([2], reached); self.assertTrue(refused)
+            self.assertEqual(before, original_read_files(case.root))
+            self.assertEqual((1, 0), tuple(module.global_journal.inspect_global_unit(owner, bound, u).attempt_count for u in units))
+
+    def test_actual_quota_first_original_stat_failure_closes_fd_and_refuses_budget(self):
+        from test_cases.test_req7_global_attempt_journal import original_read_files
+        self.api(load())
+        with self.originals() as (case, module, catalog, _inventory, writer, owner, bound, auth, identity, metadata, units):
+            native_file = catalog._Originals.file; native_open = os.open; native_stat = os.fstat
+            acquiring = []; opened = []; fired = []; yielded = []; refused = False
+            def quota_file(holder, parent, name, limit):
+                selected = (name == 'RESERVATION' and len(holder.directories) == 1
+                            and holder.directories[0][1].endswith('.metadata'))
+                if selected: acquiring.append(True)
+                try: return native_file(holder, parent, name, limit)
+                finally:
+                    if selected: acquiring.pop()
+            def opening(name, *args, **kwargs):
+                fd = native_open(name, *args, **kwargs)
+                if acquiring and name == 'RESERVATION': opened.append(fd)
+                return fd
+            def stat(fd):
+                if opened and fd == opened[0] and not fired:
+                    fired.append(True); raise OSError('owned quota first original stat fault')
+                return native_stat(fd)
+            before = original_read_files(case.root)
+            try:
+                with mock.patch.object(catalog._Originals, 'file', new=quota_file), \
+                        mock.patch.object(catalog.os, 'open', side_effect=opening), \
+                        mock.patch.object(catalog.os, 'fstat', side_effect=stat):
+                    try:
+                        with self.api(module)(writer, owner, bound, auth, identity_response=identity, metadata_response=metadata):
+                            yielded.append(True)
+                    except module.MetadataReservationHold:
+                        refused = True
+                self.assertEqual([], yielded); self.assertTrue(refused)
+                self.assertEqual([True], fired); self.assertEqual(1, len(opened))
+                closed = False
+                try: native_stat(opened[0])
+                except OSError as exc: closed = exc.errno == 9
+                self.assertTrue(closed, 'actual quota first-stat fault leaked its owned original FD')
+                self.assertEqual(before, original_read_files(case.root))
+                self.assertEqual((1, 0), tuple(module.global_journal.inspect_global_unit(owner, bound, u).attempt_count for u in units))
+            finally:
+                for fd in opened:
+                    try: os.close(fd)
+                    except OSError: pass
+
+
 if __name__ == '__main__':
     if len(sys.argv) > 1 and sys.argv[1] in ('--owned-inspect', '--owned-count'):
         _owned_metadata_child(sys.argv[1],Path(sys.argv[2]))

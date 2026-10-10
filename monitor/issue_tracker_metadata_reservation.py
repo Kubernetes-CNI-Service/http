@@ -284,6 +284,103 @@ def _hold_owned_project_catalog_metadata_capacity(writer_token,owner_token,bindi
 
 
 @contextmanager
+def _hold_owned_project_mixed_metadata_capacity(writer_token, owner_token, binding, authentication, *,
+                                               identity_response, metadata_response):
+    """Charge ALL permanent fences from actual mixed settlement originals.
+
+    Only full held C6/COMPLETE/APPLIED/KEY originals permit a historical unit
+    without a quota family. Its immutable wire fence remains charged anyway.
+    Pending/UNKNOWN units require every original quota image. No caller rows,
+    settlement flag, fence, identity, plan or completeness claim is accepted;
+    no family is created, repaired, released or treated as G1/FIRST/R2 GO.
+    """
+    failed = False
+    try:
+        from monitor import issue_tracker_unit_catalog as catalog
+        from monitor import issue_tracker_retained_inventory as inventory
+        from monitor.issue_tracker_history_read_launcher import require_current_owned_project_read
+        from monitor.issue_tracker_sheets_read_decode import decode_template_identity
+        from monitor.issue_tracker_metadata_capacity import observe_metadata_capacity
+        def current():
+            identity_plan, project, digest = require_current_owned_project_read(
+                writer_token, owner_token, binding, identity_response, authentication, read_kind='template_identity')
+            metadata_plan, other_project, other_digest = require_current_owned_project_read(
+                writer_token, owner_token, binding, metadata_response, authentication, read_kind='metadata')
+            if (other_project, other_digest) != (project, digest):
+                raise MetadataReservationHold()
+            return identity_plan, metadata_plan
+        identity_plan, metadata_plan = current()
+        identity = decode_template_identity(identity_plan, identity_response)
+        owner = ownership._validated_owner(owner_token, binding)
+        parent = owner.directories[-1][0]; stem = owner.lock_name[:-5]
+        held = catalog._Originals()
+        def verify_quota():
+            current()
+            if ownership._validated_owner(owner_token, binding) is not owner:
+                raise MetadataReservationHold()
+            held.verify(); current()
+        def close_quota():
+            try:
+                verify_quota()
+            finally:
+                held.close()
+        with ExitStack() as scope:
+            # Quota originals survive BOTH inventory and mixed proof finalizers.
+            # The supplied actual project owner/auth remain live independently.
+            scope.callback(close_quota)
+            settlements, verify_settlements = scope.enter_context(
+                inventory._hold_all_project_mixed_settlements(owner_token, binding))
+            rows, verify_inventory = scope.enter_context(
+                inventory._hold_catalog_retained_inventory(owner_token, binding))
+            if tuple(row.unit for row in rows) != tuple(item.unit for item in settlements):
+                raise MetadataReservationHold()
+            held.namespace = (parent, stem + '.',
+                              {name for name in os.listdir(parent) if name.startswith(stem + '.')})
+            fences = []
+            for row, settlement in zip(rows, settlements):
+                if row.attempt_count != settlement.attempt_count:
+                    raise MetadataReservationHold()
+                if 'metadata' not in row.families:
+                    if not settlement.settled:
+                        raise MetadataReservationHold()
+                    _owner, actual_parent, _name, _base = global_journal._inputs(owner_token, binding, row.unit)
+                    enrollment.require_unit_enrollment(owner_token, binding, identity, row.unit)
+                    action = json.loads(row.unit.action_preimage)
+                    wire_fence = json.loads(row.unit.wire_bytes)['requests'][-1]['createDeveloperMetadata']['developerMetadata']
+                    fence = {**wire_fence, 'location': {'locationType': 'SHEET', **wire_fence['location']}}
+                    sheet = action['identity']['sheet']
+                    if actual_parent != parent:
+                        raise MetadataReservationHold()
+                else:
+                    actual_parent, name, base, _state, sheet, fence = _inputs(owner_token, binding, identity, row.unit)
+                    if actual_parent != parent or name != stem + '.unit-' + row.unit.unit_id + '.metadata':
+                        raise MetadataReservationHold()
+                    folder = held.directory(parent, name)
+                    images = {}
+                    for entry in sorted(_NAMES):
+                        images[entry], _original = held.file(folder, entry,
+                            2 * _LIMIT if entry == 'METADATA-RAW' else 16384)
+                    _inspect(owner_token, binding, identity, parent, name, folder, base, sheet, fence)
+                    if images['RESERVATION'] != local._canonical(fence):
+                        raise MetadataReservationHold()
+                enrollment.observe_enrollment_pair(owner_token, binding, identity, metadata_plan, metadata_response, sheet=sheet)
+                fences.append(fence)
+            budget = observe_metadata_capacity(metadata_plan, metadata_response, identity, reservations=tuple(fences))
+            def verify():
+                verify_quota(); verify_settlements(); verify_inventory(); verify_quota()
+            verify(); held.sync(); verify()
+            yield budget, verify
+            verify()
+        # A last proof/quota finalizer may revoke or expire the original read.
+        # Never re-open originals or use already-closed verifier callbacks.
+        current()
+    except Exception:
+        failed = True
+    if failed:
+        raise MetadataReservationHold() from None
+
+
+@contextmanager
 def _hold_catalog_metadata_capacity(token, binding, identity, plan, response):
     """Charge ALL original permanent fences while their actual images stay held.
 

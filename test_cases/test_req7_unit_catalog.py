@@ -58,6 +58,122 @@ def load_component(name):
     return module
 
 
+class CatalogOriginalFirstStatCleanupTests(unittest.TestCase):
+    def exercise(self, *, directory):
+        module = load(reset_dependencies=False)
+        with tempfile.TemporaryDirectory(prefix='req7-original-first-stat-') as temporary:
+            root = Path(temporary)
+            (root/'folder').mkdir(mode=0o700)
+            (root/'file').write_bytes(b'independent original image')
+            (root/'file').chmod(0o600)
+            parent = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            held = module._Originals(); opened = []; fired = []; native_stat = os.fstat
+            native_open = os.open; native_directory = module.local._directory
+            failure = OSError('owned original first stat fault')
+            def open_file(name, *args, **kwargs):
+                fd = native_open(name, *args, **kwargs)
+                if name == 'file': opened.append(fd)
+                return fd
+            def open_directory(*args, **kwargs):
+                fd = native_directory(*args, **kwargs); opened.append(fd); return fd
+            def first_stat(fd):
+                if opened and fd == opened[0] and not fired:
+                    fired.append(True); raise failure
+                return native_stat(fd)
+            try:
+                with mock.patch.object(module.os, 'open', side_effect=open_file), \
+                        mock.patch.object(module.local, '_directory', side_effect=open_directory), \
+                        mock.patch.object(module.os, 'fstat', side_effect=first_stat):
+                    with self.assertRaises(OSError) as caught:
+                        if directory: held.directory(parent, 'folder')
+                        else: held.file(parent, 'file', 64)
+                    self.assertIs(failure, caught.exception)
+                    held.close()
+                self.assertEqual([True], fired); self.assertEqual(1, len(opened))
+                closed = False
+                try: native_stat(opened[0])
+                except OSError as exc: closed = exc.errno == 9
+                self.assertTrue(closed, 'just-opened original FD leaked on its first fstat failure')
+                self.assertEqual(b'independent original image', (root/'file').read_bytes())
+            finally:
+                for fd in opened:
+                    try: os.close(fd)
+                    except OSError: pass
+                os.close(parent)
+
+    def test_real_file_open_first_stat_failure_closes_owned_fd(self):
+        self.exercise(directory=False)
+
+    def test_real_directory_open_first_stat_failure_closes_owned_fd(self):
+        self.exercise(directory=True)
+
+    def exercise_reused_fd(self, *, directory):
+        module = load(reset_dependencies=False)
+        with tempfile.TemporaryDirectory(prefix='req7-original-reused-fd-') as temporary:
+            root = Path(temporary)
+            for name in ('folder', 'foreign-folder'):
+                (root/name).mkdir(mode=0o700)
+            (root/'file').write_bytes(b'independent original image')
+            (root/'foreign-file').write_bytes(b'independent foreign image')
+            for name in ('file', 'foreign-file'): (root/name).chmod(0o600)
+            parent = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            foreign = os.open(root/('foreign-folder' if directory else 'foreign-file'),
+                              os.O_RDONLY | (os.O_DIRECTORY if directory else 0))
+            native_stat = os.fstat; native_open = os.open; native_list = os.listdir
+            native_directory = module.local._directory
+            expected = native_stat(foreign)
+            held = module._Originals(); opened = []; fired = []
+            failure = OSError('original acquisition slot replaced by foreign inode')
+            def open_file(name, *args, **kwargs):
+                fd = native_open(name, *args, **kwargs)
+                if name == 'file': opened.append(fd)
+                return fd
+            def open_directory(*args, **kwargs):
+                fd = native_directory(*args, **kwargs); opened.append(fd); return fd
+            def replace_slot(fd):
+                fired.append(True)
+                os.dup2(foreign, fd)
+                raise failure
+            def first_stat(fd):
+                if not directory and opened and fd == opened[0] and not fired:
+                    replace_slot(fd)
+                return native_stat(fd)
+            def first_list(fd):
+                if directory and opened and fd == opened[0] and not fired:
+                    replace_slot(fd)
+                return native_list(fd)
+            try:
+                with mock.patch.object(module.os, 'open', side_effect=open_file), \
+                        mock.patch.object(module.local, '_directory', side_effect=open_directory), \
+                        mock.patch.object(module.os, 'fstat', side_effect=first_stat), \
+                        mock.patch.object(module.os, 'listdir', side_effect=first_list):
+                    with self.assertRaises(OSError) as caught:
+                        if directory: held.directory(parent, 'folder')
+                        else: held.file(parent, 'file', 64)
+                    self.assertIs(failure, caught.exception)
+                    held.close()
+                self.assertEqual([True], fired); self.assertEqual(1, len(opened))
+                preserved = False
+                try:
+                    actual = native_stat(opened[0])
+                    preserved = (actual.st_dev, actual.st_ino) == (expected.st_dev, expected.st_ino)
+                except OSError: pass
+                self.assertTrue(preserved, 'cleanup closed a numeric FD reused for a foreign inode')
+                self.assertEqual(b'independent original image', (root/'file').read_bytes())
+                self.assertEqual(b'independent foreign image', (root/'foreign-file').read_bytes())
+            finally:
+                # Every descriptor here was opened/duplicated by this fixture.
+                for fd in opened + [foreign, parent]:
+                    try: os.close(fd)
+                    except OSError: pass
+
+    def test_real_file_first_stat_failure_preserves_reused_foreign_fd(self):
+        self.exercise_reused_fd(directory=False)
+
+    def test_real_directory_list_failure_preserves_reused_foreign_fd(self):
+        self.exercise_reused_fd(directory=True)
+
+
 class CatalogAppliedNativeWorkflowTests(unittest.TestCase):
     """Actual C6, owned TLS reads, COMPLETE/APPLIED/key pair and pending unit.
 

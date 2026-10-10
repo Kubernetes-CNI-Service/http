@@ -476,15 +476,30 @@ class _Originals:
         self.namespace = None
 
     def directory(self, parent, name):
+        # This named preimage is a cleanup candidate only, never admitted
+        # original authority. Successful acquisition still uses actual fstat.
+        identity = journal._identity(os.stat(name, dir_fd=parent, follow_symlinks=False))
         fd = local._directory(parent, name)
-        identity = journal._identity(os.fstat(fd))
-        self.directories.append((parent, name, fd, identity, tuple(sorted(os.listdir(fd)))))
+        try:
+            identity = journal._identity(os.fstat(fd))
+            names = tuple(sorted(os.listdir(fd)))
+        except BaseException:
+            # The graph cannot yet see this descriptor. Close only if the
+            # current slot still names the candidate/actual acquired inode.
+            _close_original(fd, identity)
+            raise
+        self.directories.append((parent, name, fd, identity, names))
         journal._named(parent, name, fd, directory=True)
         return fd
 
     def file(self, parent, name, limit):
+        identity = journal._identity(os.stat(name, dir_fd=parent, follow_symlinks=False))
         fd = os.open(name, local._flags(), dir_fd=parent)
-        identity = journal._identity(os.fstat(fd))
+        try:
+            identity = journal._identity(os.fstat(fd))
+        except BaseException:
+            _close_original(fd, identity)
+            raise
         self.files.append((parent, name, fd, identity, None))
         journal._named(parent, name, fd, directory=False)
         if not 1 <= identity[6] <= limit:

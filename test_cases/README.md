@@ -2350,3 +2350,23 @@ Independent direct and actual native/TLS multi-script tests cover original
 classification, count retention and inode/namespace faults. This prerequisite
 does not reclaim permanent quota fences, issue NEW/count/CLAIM, close REQ7, or
 replace exact-tree full/check. Field validation remains NOT RUN.
+
+REQ7 mixed original quota accounting keeps ALL permanent wire fences charged,
+including a historical full C6/COMPLETE/APPLIED/key settlement with no quota
+family. Pending or UNKNOWN units require the entire original quota family;
+present partial families, missing settlement proofs and same-byte original
+replacement refuse the whole budget. Matching visible fences avoid arithmetic
+double charging but never release the reservation. Actual project read/auth
+identity and the original fixed deadlines dominate consumer and all finalizers.
+The result remains VISIBLE_ONLY_UNPROVED, not hidden PROJECT completeness or
+G1/FIRST/R2/send authority. Independent direct and real OAuth/TLS+C6/proof/quota
+workflows retain the original counts/images on refusal; first-stat failures
+close newly acquired original file/directory descriptors only when cleanup can
+still prove the candidate inode. A reused numeric FD naming a foreign inode is
+preserved. Concurrent name drift or persistent cleanup-stat failure can leave
+cleanup unconfirmed, never grant authority or justify blindly closing a slot.
+The pre-open named identity is cleanup-only, not admitted original authority.
+Existing strict
+quota APIs and all pre-existing tests remain unchanged. This development slice
+does not close overall REQ7 or replace current exact-tree full/check; field
+verification is NOT RUN.
