@@ -9,6 +9,34 @@ CANDIDATE = Path(__file__).resolve().parents[1]
 
 
 class RetainedManualProfileTests(unittest.TestCase):
+    def test_original_cold_identity_is_checked_before_locking_any_replacement(self):
+        profile = self.load().script_profile(ROOT, 'monitor/issue_tracker_unit_catalog.py')
+        for word in ('flock 前', '原始身份', '不锁住替换件'):
+            self.assertIn(word, profile['outputs'])
+
+    def test_all_project_original_applied_join_stays_readonly_and_never_compares_local_sequences(self):
+        profile = self.load().script_profile(ROOT, 'monitor/issue_tracker_retained_inventory.py')
+        for word in ('跨项目原始 C6', '已计数', 'APPLIED', '不跨项目比较', '不释放 FIFO'):
+            self.assertIn(word, profile['outputs'])
+        for word in ('原始项目来源', '调用方路径'):
+            self.assertIn(word, profile['inputs'])
+        self.assertTrue(profile['direct'].startswith('否'))
+
+    def test_origin_locator_is_not_foreign_c6_permission_and_cold_owner_is_nonblocking(self):
+        profile = self.load().script_profile(ROOT, 'monitor/issue_tracker_unit_catalog.py')
+        self.assertIn('原始项目来源', profile['inputs'])
+        for word in ('历史 C6', '非阻塞', '不授予 NEW'):
+            self.assertIn(word, profile['outputs'])
+        for word in ('原件', '不修复', 'HOLD'):
+            self.assertIn(word, profile['recovery'])
+
+    def test_counted_wire_origin_originals_are_held_through_claim_not_a_send_permission(self):
+        profile = self.load().script_profile(ROOT, 'monitor/issue_tracker_global_attempt_journal.py')
+        self.assertIn('ORIGIN／WITNESS', profile['outputs'])
+        self.assertIn('CLAIM', profile['outputs'])
+        self.assertIn('没有', profile['outputs'])
+        self.assertTrue(profile['direct'].startswith('否'))
+
     def load(self):
         private = CANDIDATE / 'tools/update-user-manual.py'
         source = private if private.is_file() else ROOT / 'tools/update-user-manual.py'

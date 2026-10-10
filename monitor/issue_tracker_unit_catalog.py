@@ -6,9 +6,11 @@ release FIFO or grant NEW. Every indexed pending image remains immutable;
 missing, extra or interrupted images are HOLD, never adoption or repair.
 """
 from contextlib import contextmanager, ExitStack
+from dataclasses import dataclass, field
 import hashlib
 import os
 import re
+from pathlib import Path
 
 from monitor import issue_tracker_spreadsheet_owner as ownership
 from monitor import issue_tracker_local_commit as local
@@ -24,6 +26,258 @@ _FILES = frozenset(('HEADER', 'ACTION-PREIMAGE', 'WIRE', 'INITIALIZED'))
 class UnitCatalogHold(ValueError):
     def __init__(self):
         super().__init__('req7_pending_original_catalog_unproved')
+
+
+@dataclass(frozen=True)
+class CatalogProjectOrigin:
+    """Original locator only: no current source, foreign owner or send permit."""
+    unit: object = field(repr=False)
+    project_path: str
+    publication_path: str
+    project_identity: tuple
+    tracker_identity: tuple
+    publication_identity: tuple
+    lock_identity: tuple
+    c6_facts: bytes = field(repr=False)
+
+
+@dataclass(frozen=True)
+class CatalogProjectC6:
+    """Borrowed ALL-project C6 observation, no mutation handle or send permit."""
+    unit: object = field(repr=False)
+    project_identity: tuple
+    c6_facts: bytes = field(repr=False)
+
+
+def _project_origin_body(owner, binding, unit, facts):
+    return {'schema_version': 1, 'unit_id': unit.unit_id,
+        'spreadsheet_id': binding.spreadsheet_id, 'allowlist_sha256': binding.allowlist_sha256,
+        'policy_sha256': binding.policy_sha256, 'wire_sha256': unit.wire_sha256,
+        'action_digest': unit.action_digest, 'project_path': str(owner.project),
+        'publication_path': str(owner.publication),
+        'project_identity': list(journal._identity(os.fstat(owner.project_fd))[:2]),
+        'tracker_identity': list(journal._identity(os.fstat(owner.root_fd))[:2]),
+        'publication_identity': list(journal._identity(os.fstat(owner.publication_fd))[:2]),
+        'lock_identity': [owner.lock_dev, owner.lock_ino],
+        'c6_facts': facts}
+
+
+def register_pending_c6_unit(writer_token, token, binding, unit):
+    """Register actual C6 plus immutable original project locator, never repair.
+
+    Project/publication paths come only from the live opaque writer, not the
+    unit label or caller path vector. A interrupted catalog append or origin
+    write stays HOLD. Receipt-absent C6 creates neither catalog nor origin.
+    No GLOBAL attempt, APPLIED, cross-project high-water or NEW is issued.
+    """
+    held = _Originals(); failed = False; folder = None; folder_identity = None
+    try:
+        owner = local._owner(writer_token)
+        compiled._projection(unit)
+        action = local._json(unit.action_preimage)
+        match = local._GEN.fullmatch(action['identity']['generation_id'])
+        if match is None or int(match.group(1)) < 1:
+            raise UnitCatalogHold()
+        generation = local.Generation(match.group(0), int(match.group(1)), action['manifest_id'], writer_token)
+        from monitor import issue_tracker_remote_history_match as remote
+        with ExitStack() as scope:
+            original_owner, verify_c6, facts, _operations = scope.enter_context(remote._hold_applied_generation(writer_token, generation, unit))
+            if original_owner is not owner:
+                raise UnitCatalogHold()
+            verify_c6()
+            sheet_owner, parent, _name, _started, _base = _inputs(token, binding)
+            from monitor import issue_tracker_global_attempt_journal as globals_
+            name = sheet_owner.lock_name[:-5] + '.unit-' + unit.unit_id + '.project-origin'
+            if name in os.listdir(parent):
+                raise UnitCatalogHold()
+            if globals_._catalog_present(sheet_owner):
+                # Known older loss/partial origin must stop before appending
+                # a new position or witness; registration is not a repair.
+                with hold_pending_project_origins(token, binding) as (_older, verify_older):
+                    verify_older()
+            register_pending_unit(token, binding, unit)
+            # Establish our exact exclusive first-use name before freezing
+            # the catalog reader's namespace. Never refresh an old reader or
+            # adopt a pre-existing empty/partial origin directory.
+            folder = globals_._create_folder(parent, name)
+            folder_identity = journal._identity(os.fstat(folder))
+            units, verify_catalog = scope.enter_context(hold_pending_units(token, binding))
+            if not units or units[-1] != unit:
+                raise UnitCatalogHold()
+            if os.listdir(folder):
+                raise UnitCatalogHold()
+            body = _project_origin_body(owner, binding, unit, facts)
+            witness_raw = local._canonical({'schema_version': 1, 'unit_id': unit.unit_id,
+                'state': 'PROJECT-ORIGIN-WRITE-STARTED-NOT-AUTHORITY', 'body_sha256': _digest(local._canonical(body))})
+            written = remote._write_completion_start(folder, 'WITNESS', witness_raw)
+            raw, original = held.file(folder, 'WITNESS', 16384)
+            if raw != witness_raw or original != written:
+                raise UnitCatalogHold()
+            body = {**body, 'write_witness': {'identity': list(original), 'sha256': _digest(raw)}}
+            def verify():
+                if local._owner(writer_token) is not owner or ownership._validated_owner(token, binding) is not sheet_owner:
+                    raise UnitCatalogHold()
+                journal._named(parent, name, folder, directory=True)
+                verify_c6(); verify_catalog(); held.verify()
+            scope.enter_context(remote._write_applied_pair(folder, ('STARTED', 'ORIGIN'), body, verify,
+                states=('PROJECT-ORIGIN-STARTED', 'PROJECT-ORIGIN-NOT-AUTHORITY')))
+            verify()
+            # A complete all-unit reader must succeed before acknowledging
+            # this append. Missing older origins never yield a valid prefix.
+            with hold_pending_project_origins(token, binding) as (origins, verify_origins):
+                if origins[-1].unit != unit:
+                    raise UnitCatalogHold()
+                verify_origins()
+            verify()
+    except Exception:
+        failed = True
+    finally:
+        held.close()
+        if folder is not None and folder_identity is not None:
+            _close_original(folder, folder_identity)
+    if failed:
+        raise UnitCatalogHold() from None
+
+
+@contextmanager
+def hold_pending_project_origins(token, binding):
+    """ALL immutable origin images stay held, not genuine foreign C6 replay.
+
+    Stored paths are historical selectors, not trusted acquisition arguments
+    or permission to read a foreign project. The future cross-project C6 join
+    must acquire and verify each original project and publication identity;
+    this reader alone neither opens those paths nor compares local sequences.
+    """
+    held = _Originals(); failed = False
+    try:
+        from monitor import issue_tracker_remote_history_match as remote
+        with ExitStack() as scope:
+            units, verify_catalog = scope.enter_context(hold_pending_units(token, binding))
+            owner, parent, _name, _started, _base = _inputs(token, binding)
+            prefix = owner.lock_name[:-5] + '.unit-'
+            wanted = {prefix + unit.unit_id + '.project-origin' for unit in units}
+            if {name for name in os.listdir(parent) if name.startswith(prefix) and name.endswith('.project-origin')} != wanted:
+                raise UnitCatalogHold()
+            validators = []; results = []
+            for unit in units:
+                folder = held.directory(parent, prefix + unit.unit_id + '.project-origin')
+                if set(os.listdir(folder)) != {'STARTED', 'ORIGIN', 'WITNESS'}:
+                    raise UnitCatalogHold()
+                images = {name: held.file(folder, name, local._MAX_MANIFEST) for name in ('STARTED', 'ORIGIN', 'WITNESS')}
+                saved = local._json(images['ORIGIN'][0])
+                body = {key: value for key, value in saved.items() if key not in ('record_identities', 'state')}
+                if set(body) != {'schema_version', 'unit_id', 'spreadsheet_id', 'allowlist_sha256', 'policy_sha256',
+                    'wire_sha256', 'action_digest', 'project_path', 'publication_path', 'project_identity',
+                    'tracker_identity', 'publication_identity', 'lock_identity', 'c6_facts', 'write_witness'}:
+                    raise UnitCatalogHold()
+                action = local._json(unit.action_preimage); facts = body['c6_facts']
+                if (type(body['schema_version']) is not int or body['schema_version'] != 1
+                        or body['unit_id'] != unit.unit_id or body['spreadsheet_id'] != binding.spreadsheet_id
+                        or body['allowlist_sha256'] != binding.allowlist_sha256 or body['policy_sha256'] != binding.policy_sha256
+                        or body['wire_sha256'] != unit.wire_sha256 or body['action_digest'] != unit.action_digest
+                        or type(facts) is not dict or facts.get('generation_id') != action['identity']['generation_id']
+                        or facts.get('manifest_id') != action['manifest_id'] or facts.get('published_sha256') != action['identity']['publish_id']):
+                    raise UnitCatalogHold()
+                for key in ('project_path', 'publication_path'):
+                    value = body[key]
+                    if type(value) is not str or not Path(value).is_absolute() or str(Path(value)) != value or '..' in Path(value).parts:
+                        raise UnitCatalogHold()
+                if Path(body['publication_path']).parent != Path(body['project_path']):
+                    raise UnitCatalogHold()
+                for key in ('project_identity', 'tracker_identity', 'publication_identity', 'lock_identity'):
+                    if type(body[key]) is not list or len(body[key]) != 2 or any(type(value) is not int or value < 1 for value in body[key]):
+                        raise UnitCatalogHold()
+                pre_witness = {key: value for key, value in body.items() if key != 'write_witness'}
+                witness = local._canonical({'schema_version': 1, 'unit_id': unit.unit_id,
+                    'state': 'PROJECT-ORIGIN-WRITE-STARTED-NOT-AUTHORITY', 'body_sha256': _digest(local._canonical(pre_witness))})
+                if images['WITNESS'][0] != witness or body['write_witness'] != {'identity': list(images['WITNESS'][1]), 'sha256': _digest(witness)}:
+                    raise UnitCatalogHold()
+                validators.append(scope.enter_context(remote._hold_applied_records(folder, ('STARTED', 'ORIGIN'), body,
+                    states=('PROJECT-ORIGIN-STARTED', 'PROJECT-ORIGIN-NOT-AUTHORITY'))))
+                results.append(CatalogProjectOrigin(unit, body['project_path'], body['publication_path'],
+                    tuple(body['project_identity']), tuple(body['tracker_identity']), tuple(body['publication_identity']),
+                    tuple(body['lock_identity']), local._canonical(facts)))
+            def verify():
+                if ownership._validated_owner(token, binding) is not owner:
+                    raise UnitCatalogHold()
+                verify_catalog(); held.verify()
+                for validator in validators:
+                    validator()
+                verify_catalog(); held.verify()
+            verify(); held.sync()
+            yield tuple(results), verify
+            verify()
+    except Exception:
+        failed = True
+    finally:
+        held.close()
+    if failed:
+        raise UnitCatalogHold() from None
+
+
+@contextmanager
+def hold_pending_project_c6_units(token, binding):
+    """Join ALL historical origin rows to original projects and real C6.
+
+    Actual live writers may be borrowed but never reissued; closed writers
+    are acquired once, nonblocking, from held original locators. Named root,
+    tracker and publication must still be the original dev/ino. Every actual
+    C6 file/stat/byte image must exactly match its original registration.
+    A busy/missing/changed project holds the whole read before any prefix.
+    Local sequence numbers are never compared between distinct projects.
+    Acquired owner tokens and generation selectors never escape the context.
+    This is NOT APPLIED/FIFO-release/qualified NEW or online authority.
+    """
+    failed = False
+    try:
+        sheet_owner = ownership._validated_owner(token, binding)
+        from monitor import issue_tracker_remote_history_match as remote
+        with ExitStack() as scope:
+            origins, verify_origins = scope.enter_context(hold_pending_project_origins(token, binding))
+            acquired = {}; checks = []; observed = []
+            for origin in origins:
+                key = (origin.project_path, origin.publication_path)
+                if key not in acquired:
+                    matches = [writer for writer, owner in tuple(local._ACTIVE.items())
+                        if owner.pid == os.getpid() and str(owner.project) == key[0] and str(owner.publication) == key[1]]
+                    if len(matches) > 1:
+                        raise UnitCatalogHold()
+                    writer = matches[0] if matches else scope.enter_context(local._try_original_writer_owner(*key,
+                        (origin.project_identity, origin.tracker_identity, origin.publication_identity, origin.lock_identity)))
+                    acquired[key] = (writer, local._owner(writer))
+                writer, project_owner = acquired[key]
+                def verify_owner(origin=origin, writer=writer, project_owner=project_owner):
+                    if local._owner(writer) is not project_owner:
+                        raise UnitCatalogHold()
+                    if tuple(journal._identity(os.fstat(fd))[:2] for fd in
+                        (project_owner.project_fd, project_owner.root_fd, project_owner.publication_fd)) != (
+                            origin.project_identity, origin.tracker_identity, origin.publication_identity):
+                        raise UnitCatalogHold()
+                    if (project_owner.lock_dev, project_owner.lock_ino) != origin.lock_identity:
+                        raise UnitCatalogHold()
+                verify_owner()
+                facts = local._json(origin.c6_facts)
+                generation = local.Generation(facts['generation_id'], facts['sequence'], facts['manifest_id'], writer)
+                actual_owner, verify_c6, actual_facts, _operations = scope.enter_context(
+                    remote._hold_applied_generation(writer, generation, origin.unit))
+                if actual_owner is not project_owner or local._canonical(actual_facts) != origin.c6_facts:
+                    raise UnitCatalogHold()
+                checks.extend((verify_owner, verify_c6))
+                observed.append(CatalogProjectC6(origin.unit, origin.project_identity, origin.c6_facts))
+            def verify():
+                if ownership._validated_owner(token, binding) is not sheet_owner:
+                    raise UnitCatalogHold()
+                verify_origins()
+                for check in checks:
+                    check()
+                verify_origins()
+            verify()
+            yield tuple(observed), verify
+            verify()
+    except Exception:
+        failed = True
+    if failed:
+        raise UnitCatalogHold() from None
 
 
 def _inputs(token, binding):

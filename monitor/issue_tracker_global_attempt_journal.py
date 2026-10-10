@@ -264,26 +264,41 @@ def _catalog_present(owner):
 
 @contextmanager
 def _hold_catalog_originals(token, binding):
-    """Fixed native catalog only; no archive adoption or caller unit list."""
+    """Fixed native catalog only; ALL origin images or no prefix, never paths."""
     from monitor import issue_tracker_unit_catalog as catalog
-    owner = ownership._validated_owner(token, binding)
-    stem = owner.lock_name[:-5]; parent = owner.directories[-1][0]
-    with catalog.hold_pending_units(token, binding) as (units, verify):
-        allowed = {stem + '.lock', stem + '.enrollment', stem + '.units', stem + '.units-started',
-                   *(stem + '.units-position-%020d' % index for index in range(1, len(units) + 1))}
-        families = ('journal', 'journal-started', 'history', 'business', 'metadata', 'nv',
-                    'dispatch', 'completion', 'completion-started')
-        allowed.update(stem + '.unit-' + unit.unit_id + '.' + family
-                       for unit in units for family in families)
-        actual = {name for name in os.listdir(parent) if name.startswith(stem + '.')}
-        # Legacy/foreign/unknown families are never ignored just because a new
-        # catalog exists. This prototype refuses mixed legacy/archive stores;
-        # it does not migrate, rename, supersede or clear their UNKNOWN.
-        if actual - allowed:
-            raise GlobalAttemptHold()
-        verify()
-        yield units, verify
-        verify()
+    failed = False
+    try:
+        owner = ownership._validated_owner(token, binding)
+        stem = owner.lock_name[:-5]; parent = owner.directories[-1][0]
+        with ExitStack() as scope:
+            units, verify_catalog = scope.enter_context(catalog.hold_pending_units(token, binding))
+            allowed = {stem + '.lock', stem + '.enrollment', stem + '.units', stem + '.units-started',
+                       *(stem + '.units-position-%020d' % index for index in range(1, len(units) + 1))}
+            families = ('journal', 'journal-started', 'history', 'business', 'metadata', 'nv',
+                        'dispatch', 'completion', 'completion-started', 'project-origin')
+            allowed.update(stem + '.unit-' + unit.unit_id + '.' + family
+                           for unit in units for family in families)
+            actual = {name for name in os.listdir(parent) if name.startswith(stem + '.')}
+            # Legacy/foreign/unknown families are never silently ignored.
+            # Origin rows are ALL immutable locators, not C6 or settlement.
+            if actual - allowed:
+                raise GlobalAttemptHold()
+            verify_origins = lambda: None
+            if any(name.endswith('.project-origin') for name in actual):
+                origins, verify_origins = scope.enter_context(catalog.hold_pending_project_origins(token, binding))
+                if tuple(row.unit for row in origins) != units:
+                    raise GlobalAttemptHold()
+            def verify():
+                if ownership._validated_owner(token, binding) is not owner:
+                    raise GlobalAttemptHold()
+                verify_catalog(); verify_origins(); verify_catalog()
+            verify()
+            yield units, verify
+            verify()
+    except Exception:
+        failed = True
+    if failed:
+        raise GlobalAttemptHold() from None
 
 
 @contextmanager
@@ -305,6 +320,25 @@ def _hold_catalog_counted_originals(writer_token, token, binding, selected_unit)
         _catalog, units, _previous = catalog._inspect(token, binding, held)
         if selected_unit not in units:
             raise GlobalAttemptHold()
+        origin_prefix = stem + '.unit-'
+        if any(name.startswith(origin_prefix) and name.endswith('.project-origin')
+               for name in os.listdir(parent)):
+            # Pin ALL origin images before their semantic reader. Its temporary
+            # scope cannot dominate the later CLAIM/consumer by itself. These
+            # originals stay in this exact append-aware scope so only our one
+            # dispatch creation/claim is permitted; origin drift never is.
+            for unit in units:
+                origin = held.directory(parent, origin_prefix + unit.unit_id + '.project-origin')
+                if set(os.listdir(origin)) != {'STARTED', 'ORIGIN', 'WITNESS'}:
+                    raise GlobalAttemptHold()
+                for entry in ('STARTED', 'ORIGIN', 'WITNESS'):
+                    held.file(origin, entry, local._MAX_MANIFEST)
+            held.verify()
+            with catalog.hold_pending_project_origins(token, binding) as (origins, verify_origins):
+                if tuple(row.unit for row in origins) != units:
+                    raise GlobalAttemptHold()
+                verify_origins(); held.verify()
+            held.verify()
         observations = []
         for unit in units:
             _current, _parent, name, header = _inputs(token, binding, unit)

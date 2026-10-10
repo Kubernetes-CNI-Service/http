@@ -122,6 +122,16 @@ namespace 重绑定、嵌套 import/global、属性写入和未知回调逃逸�
 生成手册中仍为未安装、未启用、无独立 CLI、不授予执行权威。
 这些修复只闭合相应联测机制，不代表 REQ7、H 或同树正式 full 整体通过。
 
+REQ7 catalog 的项目来源 STARTED／ORIGIN／WITNESS 由真实 C6 writer 首写并绑定原始
+project／tracker／publication／LOCK；跨项目冷读取在 flock 前核原 dev/ino，一次性非阻塞
+取得原 owner，任一缺失、替换或锁忙都拒绝全部前缀。实际多脚本测试持续持有全部 C6 与
+已计数 COMPLETE／APPLIED／key 配对，不跨项目比较本地 sequence，也不由只读观察释放
+UNKNOWN、FIFO 或 NEW。counted WIRE 的所有来源原件穿过 CLAIM 消费与结束复验；缺失或
+替换不能被重新采用。锁竞争夹具的固定就绪期限、EOF/部分读取、消费异常和退出等待失败
+有独立预期，整个作用域只清理确证自有 session，原互斥和时间上界不放宽。这些测试与
+手册不声称 G1、qualified NEW、默认在线 worker、真机或正式 full/check 已闭合；对应
+REAL_ENV 补充仍为 NOT RUN，既有场景、权限与发布门禁不变。
+
 `test_issue_tracker_credential_shape.py` 与 `test_issue_tracker_credential_fd.py`
 约束 REQ7 的固定私有输入：held-FD 单次有限读取、目录与文件身份前后复核、严格凭据形状及
 真实目标策略消费。root 元数据仅由私有临时夹具注入，不读取真实凭据，不证明原生 root/RO-bind

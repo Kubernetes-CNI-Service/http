@@ -87,7 +87,7 @@ def _hold_applied_generation(writer_token,generation,unit):
     """
     from monitor import issue_tracker_local_commit as local, issue_tracker_attempt_journal as io
     from monitor.issue_tracker_send_unit import _read_original_generation_identity
-    generations=folder=None; held=[]
+    generations=folder=None; held=[]; owned_objects={}
     try:
         owner=local._owner(writer_token)
         if (type(generation) is not local.Generation or type(generation.sequence) is not int
@@ -98,7 +98,9 @@ def _hold_applied_generation(writer_token,generation,unit):
                 or action['identity']['generation_id']!=generation.generation_id
                 or generation.manifest_id!=action['manifest_id']): raise RemoteHistoryHold()
         generations=local._directory(owner.root_fd,'generations')
+        opened=os.fstat(generations); owned_objects[generations]=(opened.st_dev,opened.st_ino)
         folder=local._generation_fd(owner,generation)
+        opened=os.fstat(folder); owned_objects[folder]=(opened.st_dev,opened.st_ino)
         dir_identity=io._identity(os.fstat(folder))
         ancestors_identity=io._identity(os.fstat(generations))
         expected={'STATE','MANIFEST','INTENT','RECEIPT'}
@@ -109,6 +111,7 @@ def _hold_applied_generation(writer_token,generation,unit):
                 *((folder,name,1024*1024,True) for name in sorted(expected)),
                 (owner.publication_fd,receipt['published'],local._MAX_XLSX,False)):
             fd=os.open(name,local._flags()|os.O_NONBLOCK,dir_fd=parent)
+            opened=os.fstat(fd); owned_objects[fd]=(opened.st_dev,opened.st_ino)
             held.append((parent,name,fd,None,None))
             info=local._check(fd,directory=False,private=private)
             io._named(parent,name,fd,directory=False)
@@ -154,11 +157,17 @@ def _hold_applied_generation(writer_token,generation,unit):
     finally:
         failed=False
         for _parent,_name,fd,_identity,_raw in reversed(held):
-            try: os.close(fd)
+            try:
+                current=os.fstat(fd)
+                if (current.st_dev,current.st_ino)==owned_objects.get(fd): os.close(fd)
+                else: failed=True
             except OSError: failed=True
         for fd in (folder,generations):
             if fd is not None:
-                try: os.close(fd)
+                try:
+                    current=os.fstat(fd)
+                    if (current.st_dev,current.st_ino)==owned_objects.get(fd): os.close(fd)
+                    else: failed=True
                 except OSError: failed=True
         if failed: raise RemoteHistoryHold()
 
@@ -167,11 +176,12 @@ def _hold_applied_generation(writer_token,generation,unit):
 def _hold_applied_records(parent,names,body,*,states=('APPLIED-STARTED','APPLIED')):
     """Never adopt a substituted same-byte marker or partially written pair."""
     from monitor import issue_tracker_local_commit as local, issue_tracker_attempt_journal as io
-    held=[]
+    held=[]; owned_objects={}
     try:
         for name in names:
             fd=os.open(name,local._flags()|os.O_NONBLOCK,dir_fd=parent)
             held.append((name,fd,None,None))
+            opened=os.fstat(fd); owned_objects[fd]=(opened.st_dev,opened.st_ino)
             info=local._check(fd,directory=False)
             io._named(parent,name,fd,directory=False)
             identity=io._identity(info)
@@ -199,7 +209,12 @@ def _hold_applied_records(parent,names,body,*,states=('APPLIED-STARTED','APPLIED
     finally:
         failed=False
         for _name,fd,_identity,_raw in reversed(held):
-            try: os.close(fd)
+            try:
+                current=os.fstat(fd)
+                if (current.st_dev,current.st_ino)!=owned_objects.get(fd):
+                    failed=True
+                else:
+                    os.close(fd)
             except OSError: failed=True
         if failed: raise RemoteHistoryHold()
 
@@ -213,12 +228,13 @@ def _write_applied_pair(parent,names,body,verify_inputs,*,states=('APPLIED-START
     replacement adoption or completion of a partial pair is performed.
     """
     from monitor import issue_tracker_local_commit as local, issue_tracker_attempt_journal as io
-    held=[]
+    held=[]; owned_objects={}
     try:
         for name in names:
             temp='.pending-'+local.uuid.uuid4().hex
             fd=os.open(temp,os.O_RDWR|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW|os.O_CLOEXEC,0o600,dir_fd=parent)
             held.append([name,temp,fd,None,None])
+            opened=os.fstat(fd); owned_objects[fd]=(opened.st_dev,opened.st_ino)
             local._check(fd,directory=False)
             io._named(parent,temp,fd,directory=False)
         pair={name:list(io._identity(os.fstat(fd))[:2]) for name,_temp,fd,_id,_raw in held}
@@ -256,7 +272,12 @@ def _write_applied_pair(parent,names,body,verify_inputs,*,states=('APPLIED-START
     finally:
         failed=False
         for _name,_current,fd,_identity,_raw in reversed(held):
-            try: os.close(fd)
+            try:
+                current=os.fstat(fd)
+                if (current.st_dev,current.st_ino)!=owned_objects.get(fd):
+                    failed=True
+                else:
+                    os.close(fd)
             except OSError: failed=True
         if failed: raise RemoteHistoryHold()
 

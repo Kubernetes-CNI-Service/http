@@ -22,6 +22,7 @@ from monitor import issue_tracker_sheets_read_decode as decode
 
 _FAMILIES = frozenset(('business', 'completion', 'completion-started', 'dispatch', 'enrollment',
                        'history', 'journal', 'journal-started', 'metadata', 'nv'))
+_CATALOG_FAMILIES = _FAMILIES | {'project-origin'}
 _FIXED = {
     'enrollment': frozenset(('HEADER', 'INITIALIZED', 'NONCES')),
     'history': frozenset(('HEADER', 'HISTORY-RAW', 'INITIALIZED')),
@@ -29,6 +30,7 @@ _FIXED = {
     'metadata': frozenset(('HEADER', 'INITIALIZED', 'METADATA-RAW', 'RESERVATION')),
     'nv': frozenset(('ETH-RAW', 'HEADER', 'IB-RAW', 'INITIALIZED', 'RESERVATIONS')),
     'completion': frozenset(('COMPLETE', 'HEADER', 'HEADERS-RAW', 'HISTORY-RAW', 'IDENTITY-RAW', 'METADATA-RAW')),
+    'project-origin': frozenset(('STARTED', 'ORIGIN', 'WITNESS')),
 }
 _TOTAL_LIMIT = 48 * 1024 * 1024
 
@@ -59,6 +61,88 @@ class CatalogProjectKeyOrder:
     project_identity: tuple
     applied_maxima: tuple
     pending_keys: tuple
+
+
+@dataclass(frozen=True)
+class CatalogFifoFrontier:
+    """Borrowed original-derived read only, never fresh admission or a permit."""
+    project_identity: tuple
+    frontier: tuple
+    blocked: tuple
+    applied: tuple
+    superseded: tuple
+
+
+@contextmanager
+def _hold_catalog_fifo_frontier(writer_token, token, binding):
+    """Original one-project FIFO partition held through its actual consumer.
+
+    A counted row can leave the pending order only through its genuine
+    COMPLETE/APPLIED/key originals. UNSENT additionally requires the immutable
+    disposition pair and its write-ahead witness; a computed maximum is not
+    settlement. Any unresolved counted row holds the whole read. Pending units
+    blocked by earlier overlapping pending units stay in original catalog
+    order. A pending key at/below an original APPLIED high-water also stays
+    blocked: a partial supersession cannot permit reverse replay of that key.
+    No count/reset, mutation, cleanup, first-send or qualified NEW is issued.
+    Cross-project roots and sequences are deliberately not inferred here.
+    """
+    failed = False
+    try:
+        owner = local._owner(writer_token)
+        with ExitStack() as scope:
+            rows, verify_rows = scope.enter_context(_hold_catalog_applied_keys(writer_token, token, binding))
+            dispositions, verify_dispositions = scope.enter_context(_hold_catalog_unsent_dispositions(writer_token, token, binding))
+            project = journal._identity(os.fstat(owner.project_fd))[:2]
+            maxima = dict(_project_applied_maxima(rows, project))
+            superseded = tuple(unit_id for unit_id, _sequence, _keys in dispositions)
+            removed = set(superseded)
+            if len(removed) != len(superseded):
+                raise RetainedInventoryHold()
+            pending = []; applied = []
+            for row in rows:
+                if row.attempt_count:
+                    if row.unit.unit_id in removed:
+                        raise RetainedInventoryHold()
+                    applied.append(row.unit.unit_id)
+                elif row.unit.unit_id not in removed:
+                    action = local._json(row.unit.action_preimage)
+                    match = local._GEN.fullmatch(action['identity']['generation_id'])
+                    if match is None or int(match.group(1)) < 1:
+                        raise RetainedInventoryHold()
+                    keys = tuple(tuple(item['activity_key']) for item in action['business'])
+                    if not keys or len(set(keys)) != len(keys):
+                        raise RetainedInventoryHold()
+                    pending.append((row.unit.unit_id, int(match.group(1)), frozenset(keys)))
+            if not removed <= {row.unit.unit_id for row in rows if row.attempt_count == 0}:
+                raise RetainedInventoryHold()
+            frontier = []; blocked = []
+            for index, (unit_id, sequence, keys) in enumerate(pending):
+                barriers = [prior_id for prior_id, _prior_sequence, prior_keys in pending[:index] if keys & prior_keys]
+                for row in rows:
+                    if row.attempt_count and any(key in keys and maximum >= sequence
+                                                 for key, maximum in row.key_watermarks):
+                        barriers.append(row.unit.unit_id)
+                # Keep the actual blocking witness unit IDs, not caller
+                # flags or a detached arithmetic maximum standing as proof.
+                if any(maxima.get(key, 0) >= sequence for key in keys) and not barriers:
+                    raise RetainedInventoryHold()
+                if barriers:
+                    blocked.append((unit_id, tuple(dict.fromkeys(barriers))))
+                else:
+                    frontier.append(unit_id)
+            result = CatalogFifoFrontier(project, tuple(frontier), tuple(blocked), tuple(applied), superseded)
+            def verify():
+                if local._owner(writer_token) is not owner:
+                    raise RetainedInventoryHold()
+                verify_rows(); verify_dispositions(); verify_rows()
+            verify()
+            yield result, verify
+            verify()
+    except Exception:
+        failed = True
+    if failed:
+        raise RetainedInventoryHold() from None
 
 
 def _project_applied_maxima(rows, project_identity):
@@ -709,7 +793,7 @@ def _hold_catalog_retained_inventory(token, binding):
                 unit_names = {name for name, _family in entries}
                 if (not {prefix + '.journal', prefix + '.journal-started'} <= unit_names
                         or (prefix + '.completion' in unit_names) != (prefix + '.completion-started' in unit_names)
-                        or any(family not in _FAMILIES or family == 'enrollment' for _name, family in entries)):
+                        or any(family not in _CATALOG_FAMILIES or family == 'enrollment' for _name, family in entries)):
                     raise RetainedInventoryHold()
                 namespace.extend(entries)
                 per_unit.append((unit, state, prefix, tuple(sorted(entries + ([(shared, 'enrollment')] if shared in names else [])))))
@@ -779,6 +863,77 @@ def _hold_catalog_retained_inventory(token, binding):
             if not _close_if_original(fd, identity): failed = True
         for _name, folder, identity, _child_names in reversed(directories):
             if not _close_if_original(folder, identity): failed = True
+    if failed:
+        raise RetainedInventoryHold() from None
+
+
+@contextmanager
+def _hold_all_project_applied_keys(token, binding):
+    """Read all original project C6 and counted APPLIED pairs together.
+
+    Only the shared genuine owner selects the immutable catalog. Project
+    writers are internal, borrowed from the held original C6 acquisition;
+    callers cannot supply paths, writers, counts or settlement. A missing
+    counted proof holds the entire read. Local sequence numbers remain scoped
+    to their actual project, never a cross-project maximum or NEW permit.
+    """
+    failed = False
+    try:
+        sheet_owner = ownership._validated_owner(token, binding)
+        from monitor import issue_tracker_unit_catalog as catalog
+        from monitor import issue_tracker_remote_history_match as remote
+        with ExitStack() as scope:
+            projects, verify_c6 = scope.enter_context(catalog.hold_pending_project_c6_units(token, binding))
+            observations, verify_inventory = scope.enter_context(_hold_catalog_retained_inventory(token, binding))
+            if tuple(row.unit for row in projects) != tuple(row.unit for row in observations):
+                raise RetainedInventoryHold()
+            validators = []; owners = {}; result = []
+            for project, row in zip(projects, observations):
+                project_identity = project.project_identity
+                if project_identity not in owners:
+                    matches = []
+                    for writer, active in tuple(local._ACTIVE.items()):
+                        if (active.pid == os.getpid()
+                                and journal._identity(os.fstat(active.project_fd))[:2] == project_identity):
+                            matches.append((writer, local._owner(writer)))
+                    if len(matches) != 1:
+                        raise RetainedInventoryHold()
+                    owners[project_identity] = matches[0]
+                writer, owner = owners[project_identity]
+                keys = ()
+                if row.attempt_count:
+                    if 'completion' not in row.families:
+                        raise RetainedInventoryHold()
+                    facts = local._json(project.c6_facts)
+                    generation = local.Generation(facts['generation_id'], facts['sequence'], facts['manifest_id'], writer)
+                    held_owner, verify_inputs, body, keys = scope.enter_context(
+                        remote._hold_original_applied_key_watermark_inputs(writer, token, binding, row.unit, generation))
+                    if held_owner is not owner or tuple(body['project_identity']) != project_identity:
+                        raise RetainedInventoryHold()
+                    names = ('REMOTE-KEY-HIGH-WATER-STARTED-' + row.unit.unit_id,
+                             'REMOTE-KEY-HIGH-WATER-' + row.unit.unit_id)
+                    verify_keys = scope.enter_context(remote._hold_applied_records(owner.root_fd, names, body,
+                        states=('KEY-HIGH-WATER-STARTED', 'KEY-HIGH-WATER')))
+                    validators.extend((verify_inputs, verify_keys))
+                elif 'completion' in row.families:
+                    raise RetainedInventoryHold()
+                result.append(CatalogUnitAppliedKeys(row.unit, row.attempt_count, keys, project_identity))
+            def verify():
+                if ownership._validated_owner(token, binding) is not sheet_owner:
+                    raise RetainedInventoryHold()
+                verify_inventory(); verify_c6()
+                for project_identity, (writer, owner) in owners.items():
+                    if (local._owner(writer) is not owner
+                            or journal._identity(os.fstat(owner.project_fd))[:2] != project_identity):
+                        raise RetainedInventoryHold()
+                for validate in validators:
+                    validate()
+                verify_inventory(); verify_c6()
+            verify()
+            yield tuple(result), verify
+            verify()
+    except Exception:
+        failed = True
     if failed:
         raise RetainedInventoryHold() from None
 

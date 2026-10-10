@@ -29,6 +29,13 @@ def load(*, reset_dependencies=True):
         raise AssertionError('original multi-unit pending catalog is absent')
     if reset_dependencies:
         load_owner()
+    local_source = SOURCE.with_name('issue_tracker_local_commit.py')
+    if reset_dependencies and local_source.exists():
+        spec = importlib.util.spec_from_file_location('monitor.issue_tracker_local_commit', local_source)
+        local_module = importlib.util.module_from_spec(spec); sys.modules[spec.name] = local_module
+        spec.loader.exec_module(local_module)
+        import monitor
+        monitor.issue_tracker_local_commit = local_module
     global_source = SOURCE.with_name('issue_tracker_global_attempt_journal.py')
     if reset_dependencies and global_source.exists():
         spec = importlib.util.spec_from_file_location('monitor.issue_tracker_global_attempt_journal', global_source)
@@ -61,8 +68,87 @@ class CatalogAppliedNativeWorkflowTests(unittest.TestCase):
     Native heavy tests run in an exclusive local window; normal discovery
     includes the class, with every original native timing/behavior assertion.
     """
+    def all_project_applied_api(self):
+        inventory = load_component('issue_tracker_retained_inventory')
+        api = getattr(inventory, '_hold_all_project_applied_keys', None)
+        self.assertTrue(callable(api), 'ALL real project C6 origins and counted COMPLETE/APPLIED key pairs must stay held together')
+        return api
+
+    def test_actual_all_project_applied_keys_join_distinct_c6_roots_without_comparing_local_sequences(self):
+        self.all_project_applied_api()
+        with self.completed_and_pending(cross_project=True) as (case, catalog, _remote, inventory, _old_api,
+                writer, owner, bound, originals):
+            api = inventory._hold_all_project_applied_keys
+            before = original_read_files(case.root)
+            handles = {token: dict(active.handles) for token, active in catalog.local._ACTIVE.items()}
+            with api(owner, bound) as (observed, verify):
+                self.assertEqual(originals, tuple(row.unit for row in observed))
+                self.assertEqual((1, 0), tuple(row.attempt_count for row in observed))
+                self.assertNotEqual(observed[0].project_identity, observed[1].project_identity)
+                self.assertEqual(1, case.native_generation.sequence)
+                self.assertTrue(observed[0].key_watermarks)
+                self.assertEqual({1}, {sequence for _key, sequence in observed[0].key_watermarks})
+                self.assertEqual((), observed[1].key_watermarks)
+                self.assertFalse(any(hasattr(row, name) for row in observed for name in ('permit', 'settled', 'global_sequence')))
+                verify()
+            self.assertEqual(handles, {token: dict(active.handles) for token, active in catalog.local._ACTIVE.items()})
+            self.assertEqual(before, original_read_files(case.root))
+
+    def test_actual_all_project_applied_keys_foreign_pending_receipt_rebind_revokes_complete_handoff(self):
+        self.all_project_applied_api()
+        with self.completed_and_pending(cross_project=True) as (case, catalog, _remote, inventory, _old_api,
+                writer, owner, bound, originals):
+            action = json.loads(originals[1].action_preimage)
+            receipt = case.root / 'other-project/.tracker/generations' / action['identity']['generation_id'] / 'RECEIPT'
+            with self.assertRaises(inventory.RetainedInventoryHold):
+                with inventory._hold_all_project_applied_keys(owner, bound) as (observed, verify):
+                    self.assertEqual((1, 0), tuple(row.attempt_count for row in observed))
+                    raw = receipt.read_bytes(); old = receipt.stat().st_ino
+                    preserved = case.root / 'preserved-other-project-receipt'
+                    receipt.rename(preserved); receipt.write_bytes(raw); receipt.chmod(0o600)
+                    self.assertNotEqual(old, receipt.stat().st_ino)
+                    verify()
+            self.assertEqual(raw, receipt.read_bytes()); self.assertEqual(raw, preserved.read_bytes())
+
+    def test_actual_all_project_applied_keys_cold_independent_process_keeps_counts_and_uses_original_proofs(self):
+        self.all_project_applied_api()
+        with self.completed_and_pending(cross_project=True, cold_handoff=True) as (case, catalog, _remote,
+                _inventory, _old_api, _writer, _owner, bound, originals):
+            before = original_read_files(case.root)
+            program = '''import importlib.util,json,sys
+from pathlib import Path
+sys.path[:0]=[sys.argv[1],str(Path(sys.argv[1])/'tools')]
+spec=importlib.util.spec_from_file_location('cold_applied_projects_test_contract',sys.argv[3])
+tests=importlib.util.module_from_spec(spec);spec.loader.exec_module(tests)
+catalog=tests.load();inventory=tests.load_component('issue_tracker_retained_inventory')
+tests.load_component('issue_tracker_remote_history_match')
+from test_cases.test_req7_spreadsheet_owner import scoped_fixture
+from monitor.issue_tracker_online_target import OnlineTargetBinding
+bound=OnlineTargetBinding(**json.loads(sys.stdin.buffer.read()))
+assert catalog.local._ACTIVE=={}
+with scoped_fixture(Path(sys.argv[2]),catalog.ownership),catalog.ownership.spreadsheet_owner(bound) as owner:
+ with inventory._hold_all_project_applied_keys(owner,bound) as (observed,verify):
+  assert tuple(row.unit.unit_id for row in observed)==tuple(sys.argv[4:])
+  assert tuple(row.attempt_count for row in observed)==(1,0)
+  assert observed[0].project_identity!=observed[1].project_identity
+  assert observed[0].key_watermarks and observed[1].key_watermarks==()
+  assert all(sequence==1 for key,sequence in observed[0].key_watermarks)
+  assert len(catalog.local._ACTIVE)==2 and all(active.handles=={} for active in catalog.local._ACTIVE.values())
+  assert not any(hasattr(row,'permit') or hasattr(row,'settled') for row in observed)
+  verify()
+ assert catalog.local._ACTIVE=={}
+print('COLD_DISTINCT_PROJECT_APPLIED_ORIGINALS_UNKNOWN_COUNTS_UNCHANGED')
+'''
+            result = subprocess.run([sys.executable, '-B', '-c', program,
+                str(Path(__import__('test_cases').__file__).resolve().parents[1]), str(case.root), __file__,
+                originals[0].unit_id, originals[1].unit_id], input=json.dumps(asdict(bound)).encode(),
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15)
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertEqual(b'COLD_DISTINCT_PROJECT_APPLIED_ORIGINALS_UNKNOWN_COUNTS_UNCHANGED\n', result.stdout)
+            self.assertEqual(before, original_read_files(case.root))
+
     @contextmanager
-    def completed_and_pending(self, *, reverse_catalog=False, cold_handoff=False, older_unsent=False):
+    def completed_and_pending(self, *, reverse_catalog=False, cold_handoff=False, older_unsent=False, cross_project=False):
         from test_cases import test_req7_remote_history_match as native
         catalog = load()
         case = native.Req7OwnedHistoryMatchWorkflowTests()
@@ -111,14 +197,23 @@ class CatalogAppliedNativeWorkflowTests(unittest.TestCase):
                     self.assertEqual(1, len(earlier)); second = earlier[0]
                     self.assertEqual(2, case.native_generation.sequence)
                 else:
-                    generation = original_begin(writer, arguments['manifest'])
-                    catalog.local.record_intent(writer, generation, literal_xlsx(), kind='xlsx')
-                    receipt = catalog.local.commit(writer, generation)
+                    source = writer
+                    if cross_project:
+                        project = case.root / 'other-project'; project.mkdir(mode=0o700)
+                        publication = project / 'publication'; publication.mkdir(mode=0o700)
+                        catalog.local.create_local_commit_store(project, publication)
+                        source = scope.enter_context(catalog.local.writer_owner(project, publication))
+                    generation = original_begin(source, arguments['manifest'])
+                    catalog.local.record_intent(source, generation, literal_xlsx(), kind='xlsx')
+                    receipt = catalog.local.commit(source, generation)
                     arguments.update(generation_id=generation.generation_id, publish_id=receipt.published_sha256)
                     second = catalog.composer.freeze_send_unit(**arguments)
-                    self.assertEqual(2, generation.sequence)
+                    self.assertEqual(1 if cross_project else 2, generation.sequence)
                 for unit_ in ((second, first) if reverse_catalog else (first, second)):
-                    catalog.register_pending_unit(token, bound, unit_)
+                    if cross_project:
+                        catalog.register_pending_c6_unit(writer if unit_ == first else source, token, bound, unit_)
+                    else:
+                        catalog.register_pending_unit(token, bound, unit_)
                 for unit_ in (first, second):
                     original_prepare(token, bound, unit_)
                 originals.extend((first, second))
@@ -383,6 +478,61 @@ with catalog.local.writer_owner(root/'project',root/'project/publication') as wr
                     self.fail('loss of the entire recorded pair became first use')
             self.assertEqual(before, original_read_files(case.root))
 
+    def test_actual_fifo_frontier_discharge_requires_original_applied_and_keeps_raw_count(self):
+        inventory = load_component('issue_tracker_retained_inventory')
+        self.assertTrue(callable(getattr(inventory, '_hold_catalog_fifo_frontier', None)))
+        with self.completed_and_pending() as (case, catalog, _remote, inventory, _api, writer, owner, bound, originals):
+            before = original_read_files(case.root)
+            handles = dict(catalog.local._owner(writer).handles)
+            with inventory._hold_catalog_fifo_frontier(writer, owner, bound) as (observed, verify):
+                self.assertEqual((originals[0].unit_id,), observed.applied)
+                self.assertEqual((originals[1].unit_id,), observed.frontier)
+                self.assertEqual((), observed.superseded)
+                self.assertEqual((), observed.blocked)
+                self.assertFalse(hasattr(observed, 'permit') or hasattr(observed, 'settled'))
+                verify()
+            from monitor import issue_tracker_global_attempt_journal as globals_
+            # Original count remains UNKNOWN-form journal evidence. Only
+            # separately verified actual COMPLETE/APPLIED discharges FIFO.
+            self.assertEqual(((1, 'UNKNOWN'), (0, 'UNATTEMPTED_OBSERVATION')),
+                             tuple((row.attempt_count, row.outcome) for _unit, row in globals_.inspect_catalog_global_units(owner, bound)))
+            self.assertEqual(handles, catalog.local._owner(writer).handles)
+            self.assertEqual(before, original_read_files(case.root))
+
+    def test_actual_fifo_frontier_supersession_requires_complete_original_disposition_not_maximum_alone(self):
+        inventory = load_component('issue_tracker_retained_inventory')
+        self.assertTrue(callable(getattr(inventory, '_hold_catalog_fifo_frontier', None)))
+        with self.completed_and_pending(older_unsent=True) as (case, _catalog, _remote, inventory, _api, writer, owner, bound, originals):
+            before = original_read_files(case.root)
+            with self.assertRaises(inventory.RetainedInventoryHold):
+                with inventory._hold_catalog_fifo_frontier(writer, owner, bound):
+                    self.fail('computed later maximum silently settled UNSENT without its original record')
+            self.assertEqual(before, original_read_files(case.root))
+            inventory._record_catalog_unsent_dispositions(writer, owner, bound)
+            recorded = original_read_files(case.root)
+            with inventory._hold_catalog_fifo_frontier(writer, owner, bound) as (observed, verify):
+                self.assertEqual((originals[0].unit_id,), observed.applied)
+                self.assertEqual((originals[1].unit_id,), observed.superseded)
+                self.assertEqual((), observed.frontier)
+                self.assertEqual((), observed.blocked)
+                verify()
+            self.assertEqual(recorded, original_read_files(case.root))
+
+    def test_actual_fifo_frontier_rebound_applied_pair_revokes_all_consumers(self):
+        inventory = load_component('issue_tracker_retained_inventory')
+        self.assertTrue(callable(getattr(inventory, '_hold_catalog_fifo_frontier', None)))
+        with self.completed_and_pending() as (case, _catalog, _remote, inventory, _api, writer, owner, bound, originals):
+            path = case.root / 'project/.tracker' / ('REMOTE-KEY-HIGH-WATER-' + originals[0].unit_id)
+            image = path.read_bytes(); entered = []
+            with self.assertRaises(inventory.RetainedInventoryHold):
+                with inventory._hold_catalog_fifo_frontier(writer, owner, bound) as (observed, verify):
+                    entered.append(observed.frontier)
+                    path.rename(case.root / 'preserved-fifo-applied')
+                    path.write_bytes(image); path.chmod(0o600); verify()
+            self.assertEqual([(originals[1].unit_id,)], entered)
+            self.assertEqual(image, path.read_bytes())
+            self.assertEqual(image, (case.root / 'preserved-fifo-applied').read_bytes())
+
     def test_original_applied_key_and_pending_receipt_rebind_revoke_entire_held_catalog(self):
         for fault in ('applied-key', 'pending-receipt'):
             with self.subTest(fault=fault), self.completed_and_pending() as (case, catalog, _remote, inventory, api, writer, owner, bound, originals):
@@ -416,6 +566,768 @@ with catalog.local.writer_owner(root/'project',root/'project/publication') as wr
 
 
 class UnitCatalogTests(unittest.TestCase):
+    def fifo_api(self):
+        inventory, _reader = self.inventory_api()
+        api = getattr(inventory, '_hold_catalog_fifo_frontier', None)
+        self.assertTrue(callable(api), 'FIFO must derive its frontier from held original APPLIED and UNSENT records')
+        return inventory, api
+
+    def test_fifo_frontier_refuses_unissued_writer_and_caller_release_claims(self):
+        inventory, api = self.fifo_api()
+        with mock.patch.object(inventory, '_hold_catalog_applied_keys') as reading:
+            with self.assertRaises(inventory.RetainedInventoryHold):
+                with api(object(), object(), binding()):
+                    self.fail('unissued writer obtained a FIFO release view')
+            reading.assert_not_called()
+        for claim in ({'settled': ()}, {'units': ()}, {'maxima': ()}, {'superseded': ()}, {'permit': True}):
+            with self.subTest(claim=tuple(claim)), self.assertRaises(TypeError):
+                api(object(), object(), binding(), **claim)
+
+    def test_fifo_frontier_original_pending_same_key_preserves_order_and_does_not_count_or_issue(self):
+        inventory, api = self.fifo_api(); globals_ = self.globals_api()
+        with ExitStack() as scope:
+            writer, project, _publication = self.local_owner(scope)
+            token = self.owner(scope)
+            originals = tuple(self.c6_unit(writer)[0] for _ in range(3))
+            for original in originals:
+                self.module.register_pending_unit(token, binding(), original)
+                globals_.prepare_global_unit(token, binding(), original)
+            before = original_read_files(self.root)
+            handles = dict(self.module.local._owner(writer).handles)
+            with api(writer, token, binding()) as (observed, verify):
+                self.assertEqual((project.stat().st_dev, project.stat().st_ino), observed.project_identity)
+                self.assertEqual((originals[0].unit_id,), observed.frontier)
+                self.assertEqual(((originals[1].unit_id, (originals[0].unit_id,)),
+                                  (originals[2].unit_id, (originals[0].unit_id, originals[1].unit_id))), observed.blocked)
+                self.assertEqual((), observed.applied)
+                self.assertEqual((), observed.superseded)
+                self.assertFalse(hasattr(observed, 'permit') or hasattr(observed, 'settled'))
+                verify()
+            self.assertEqual(handles, self.module.local._owner(writer).handles)
+            self.assertEqual(before, original_read_files(self.root))
+            self.assertEqual((0, 0, 0), tuple(row.attempt_count for _unit, row in globals_.inspect_catalog_global_units(token, binding())))
+
+    def test_fifo_frontier_unknown_holds_entire_view_and_never_releases_valid_prefix(self):
+        inventory, api = self.fifo_api(); globals_ = self.globals_api()
+        with ExitStack() as scope:
+            writer, _project, _publication = self.local_owner(scope)
+            token = self.owner(scope)
+            originals = tuple(self.c6_unit(writer)[0] for _ in range(2))
+            for original in originals:
+                self.module.register_pending_unit(token, binding(), original)
+                globals_.prepare_global_unit(token, binding(), original)
+            globals_.record_global_attempt_intent(token, binding(), originals[0])
+            before = original_read_files(self.root); reached = []
+            with self.assertRaises(inventory.RetainedInventoryHold):
+                with api(writer, token, binding()) as result:
+                    reached.append(result)
+            self.assertEqual([], reached)
+            self.assertEqual(before, original_read_files(self.root))
+            self.assertEqual(((1, 'UNKNOWN'), (0, 'UNATTEMPTED_OBSERVATION')),
+                             tuple((row.attempt_count, row.outcome) for _unit, row in globals_.inspect_catalog_global_units(token, binding())))
+
+    def test_fifo_frontier_unrelated_keys_are_independent_but_overlapping_successor_waits(self):
+        inventory, api = self.fifo_api(); globals_ = self.globals_api()
+        with ExitStack() as scope:
+            writer, _project, _publication = self.local_owner(scope)
+            token = self.owner(scope)
+            originals = []
+            for node in ('node-A', 'node-B', 'node-A'):
+                args = send_inputs(1)
+                # Independently chosen fixture keys; not reverse-generated
+                # from the FIFO implementation or its reported frontier.
+                document = json.loads(args['manifest'])
+                document['operations'][0]['activity_key'] = ['switch', node, 'down', 'fabric']
+                args['manifest'] = (json.dumps(document, sort_keys=True, separators=(',', ':')) + '\n').encode()
+                args['manifest_id'] = hashlib.sha256(args['manifest']).hexdigest()
+                generation = self.module.local.begin_generation(writer, args['manifest'])
+                self.module.local.record_intent(writer, generation, literal_xlsx(), kind='xlsx')
+                receipt = self.module.local.commit(writer, generation)
+                args.update(generation_id=generation.generation_id, publish_id=receipt.published_sha256)
+                original = self.module.composer.freeze_send_unit(**args)
+                originals.append(original)
+                self.module.register_pending_unit(token, binding(), original)
+                globals_.prepare_global_unit(token, binding(), original)
+            before = original_read_files(self.root)
+            with api(writer, token, binding()) as (observed, verify):
+                self.assertEqual((originals[0].unit_id, originals[1].unit_id), observed.frontier)
+                self.assertEqual(((originals[2].unit_id, (originals[0].unit_id,)),), observed.blocked)
+                self.assertEqual((), observed.applied)
+                self.assertEqual((), observed.superseded)
+                verify()
+            self.assertEqual(before, original_read_files(self.root))
+
+    def test_fifo_frontier_cold_process_reopens_originals_without_parent_handles_or_detached_claim(self):
+        _inventory, api = self.fifo_api(); globals_ = self.globals_api()
+        with ExitStack() as scope:
+            writer, _project, _publication = self.local_owner(scope)
+            token = self.owner(scope)
+            originals = tuple(self.c6_unit(writer)[0] for _ in range(2))
+            for original in originals:
+                self.module.register_pending_unit(token, binding(), original)
+                globals_.prepare_global_unit(token, binding(), original)
+            with api(writer, token, binding()) as (observed, verify):
+                self.assertEqual((originals[0].unit_id,), observed.frontier)
+                verify()
+        before = original_read_files(self.root)
+        program = '''import importlib.util,json,sys
+from pathlib import Path
+sys.path[:0]=[sys.argv[1],str(Path(sys.argv[1])/'tools')]
+spec=importlib.util.spec_from_file_location('cold_fifo_test_contract',sys.argv[3])
+tests=importlib.util.module_from_spec(spec); spec.loader.exec_module(tests)
+catalog=tests.load(); inventory=tests.load_component('issue_tracker_retained_inventory')
+from monitor import issue_tracker_spreadsheet_owner as ownership
+from test_cases.test_req7_spreadsheet_owner import scoped_fixture,binding
+root=Path(sys.argv[2])
+with catalog.local.writer_owner(root/'project',root/'project/publication') as writer,scoped_fixture(root,ownership),ownership.spreadsheet_owner(binding()) as owner:
+ assert catalog.local._owner(writer).handles=={}
+ with inventory._hold_catalog_fifo_frontier(writer,owner,binding()) as (observed,verify):
+  assert observed.frontier==(sys.argv[4],)
+  assert observed.blocked==((sys.argv[5],(sys.argv[4],)),)
+  assert observed.applied==() and observed.superseded==()
+  assert not hasattr(observed,'permit') and not hasattr(observed,'settled')
+  verify()
+ assert catalog.local._owner(writer).handles=={}
+print('COLD_FIFO_ORIGINALS_ONLY_NO_AUTHORITY')
+'''
+        result = subprocess.run([sys.executable, '-B', '-c', program,
+            str(Path(__import__('test_cases').__file__).resolve().parents[1]), str(self.root), __file__,
+            originals[0].unit_id, originals[1].unit_id], stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=15)
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertEqual('COLD_FIFO_ORIGINALS_ONLY_NO_AUTHORITY\n', result.stdout)
+        self.assertEqual(before, original_read_files(self.root))
+
+    def test_fifo_frontier_receipt_rebind_revokes_consumer_without_repair(self):
+        inventory, api = self.fifo_api(); globals_ = self.globals_api()
+        with ExitStack() as scope:
+            writer, project, _publication = self.local_owner(scope)
+            token = self.owner(scope)
+            original, generation = self.c6_unit(writer)
+            self.module.register_pending_unit(token, binding(), original)
+            globals_.prepare_global_unit(token, binding(), original)
+            path = project / '.tracker/generations' / generation.generation_id / 'RECEIPT'
+            image = path.read_bytes(); entered = []
+            with self.assertRaises(inventory.RetainedInventoryHold):
+                with api(writer, token, binding()) as (observed, verify):
+                    entered.append(observed.frontier)
+                    path.rename(self.root / 'preserved-fifo-original')
+                    path.write_bytes(image); path.chmod(0o600); verify()
+            self.assertEqual([(original.unit_id,)], entered)
+            self.assertEqual(image, path.read_bytes())
+            self.assertEqual(image, (self.root / 'preserved-fifo-original').read_bytes())
+            self.assertNotEqual(path.stat().st_ino, (self.root / 'preserved-fifo-original').stat().st_ino)
+
+    def applied_pair_foreign_descriptor_case(self, *, writing, content_drift=False):
+        remote = load_component('issue_tracker_remote_history_match')
+        parent = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        self.addCleanup(os.close, parent)
+        names = ('OWNED-PAIR-STARTED', 'OWNED-PAIR')
+        body = {'schema_version': 1, 'unit_id': 'a' * 64, 'fixture': 'FD cleanup only, not C6 authority'}
+        if not writing:
+            with remote._write_applied_pair(parent, names, body, lambda: None) as verify:
+                verify()
+        foreign_path = self.root / 'foreign-owned-descriptor'
+        foreign_path.write_bytes(b'owned foreign FD must survive rejected proof consumer\n')
+        foreign_path.chmod(0o600)
+        foreign = os.open(foreign_path, os.O_RDONLY | os.O_NOFOLLOW)
+        self.addCleanup(os.close, foreign)
+        foreign_object = (os.fstat(foreign).st_dev, os.fstat(foreign).st_ino)
+        opened = []; reached = []; original_open = os.open
+        def capture(path, flags, *args, **kwargs):
+            fd = original_open(path, flags, *args, **kwargs)
+            if kwargs.get('dir_fd') == parent and type(path) is str and (
+                    path.startswith('.pending-') if writing else path in names):
+                opened.append(fd)
+            return fd
+        def close_owned_duplicate(fd):
+            try:
+                info = os.fstat(fd)
+            except OSError:
+                return
+            if (info.st_dev, info.st_ino) == foreign_object:
+                os.close(fd)
+        operation = (remote._write_applied_pair(parent, names, body, lambda: None)
+                     if writing else remote._hold_applied_records(parent, names, body))
+        from monitor.issue_tracker_attempt_journal import AttemptJournalHold
+        with mock.patch.object(remote.os, 'open', side_effect=capture), self.assertRaises((remote.RemoteHistoryHold, AttemptJournalHold)):
+            with operation as verify:
+                self.assertEqual(2, len(opened))
+                replaced = opened[0]
+                self.addCleanup(close_owned_duplicate, replaced)
+                if content_drift:
+                    # Changed bytes do not transfer FD ownership. The still
+                    # original descriptors must close after rejecting drift.
+                    (self.root / names[0]).write_bytes(b'owned original content drift; preserve evidence\n')
+                else:
+                    os.close(replaced); os.dup2(foreign, replaced)
+                reached.append(replaced)
+                verify()
+        self.assertEqual(1, len(reached))
+        if content_drift:
+            for fd in opened:
+                with self.assertRaises(OSError):
+                    os.fstat(fd)
+            self.assertEqual(b'owned original content drift; preserve evidence\n', (self.root / names[0]).read_bytes())
+            self.assertEqual(foreign_object, (os.fstat(foreign).st_dev, os.fstat(foreign).st_ino))
+            return
+        try:
+            info = os.fstat(reached[0])
+        except OSError:
+            self.fail('APPLIED pair cleanup closed a recycled FD now owned by another object')
+        self.assertEqual(foreign_object, (info.st_dev, info.st_ino))
+        self.assertEqual(b'owned foreign FD must survive rejected proof consumer\n', os.pread(reached[0], 128, 0))
+
+    def test_original_applied_pair_reader_rejects_recycled_fd_but_preserves_foreign_object(self):
+        self.applied_pair_foreign_descriptor_case(writing=False)
+
+    def test_original_applied_pair_writer_rejects_recycled_fd_but_preserves_foreign_object(self):
+        self.applied_pair_foreign_descriptor_case(writing=True)
+
+    def test_original_applied_pair_reader_closes_still_owned_descriptors_after_content_drift(self):
+        self.applied_pair_foreign_descriptor_case(writing=False, content_drift=True)
+
+    def test_original_applied_pair_writer_closes_still_owned_descriptors_after_content_drift(self):
+        self.applied_pair_foreign_descriptor_case(writing=True, content_drift=True)
+
+    def original_c6_foreign_descriptor_case(self, entry):
+        remote = load_component('issue_tracker_remote_history_match')
+        with ExitStack() as scope:
+            writer, project, _publication = self.local_owner(scope, 'c6-foreign-' + entry)
+            original, generation = self.c6_unit(writer)
+            token = self.owner(scope)
+            self.module.register_pending_unit(token, binding(), original)
+            original_path = project / '.tracker/generations' / generation.generation_id
+            if entry == 'RECEIPT':
+                original_path = original_path / entry
+            original_object = (original_path.stat().st_dev, original_path.stat().st_ino)
+            foreign_path = self.root / ('foreign-c6-' + entry)
+            foreign_path.write_bytes(b'owned foreign object must survive C6 rejection\n')
+            foreign = os.open(foreign_path, os.O_RDONLY)
+            scope.callback(os.close, foreign)
+            foreign_object = (os.fstat(foreign).st_dev, os.fstat(foreign).st_ino)
+            opening = remote.os.open; opened = []; borrowed = []
+            def capture(*args, **kwargs):
+                fd = opening(*args, **kwargs)
+                info = os.fstat(fd)
+                if (info.st_dev, info.st_ino) == original_object:
+                    opened.append(fd)
+                return fd
+            def close_borrowed_foreign():
+                if borrowed:
+                    try:
+                        info = os.fstat(borrowed[0])
+                        if (info.st_dev, info.st_ino) == foreign_object:
+                            os.close(borrowed[0])
+                    except OSError:
+                        pass
+            scope.callback(close_borrowed_foreign)
+            with mock.patch.object(remote.os, 'open', side_effect=capture):
+                with self.assertRaises(self.module.UnitCatalogHold):
+                    with self.module.hold_pending_c6_units(writer, token, binding()) as (observed, verify):
+                        self.assertEqual((original,), observed)
+                        live = []
+                        for fd in set(opened):
+                            try:
+                                info = os.fstat(fd)
+                                if (info.st_dev, info.st_ino) == original_object:
+                                    live.append(fd)
+                            except OSError:
+                                pass
+                        self.assertEqual(1, len(live))
+                        os.close(live[0]); os.dup2(foreign, live[0]); borrowed.append(live[0])
+                        verify()
+            try:
+                info = os.fstat(borrowed[0])
+            except OSError:
+                self.fail('C6 cleanup closed a rejected recycled FD belonging to another object')
+            self.assertEqual(foreign_object, (info.st_dev, info.st_ino))
+            self.assertEqual(b'owned foreign object must survive C6 rejection\n', os.pread(borrowed[0], 128, 0))
+
+    def test_original_c6_reader_rejects_recycled_receipt_fd_without_closing_foreign_object(self):
+        self.original_c6_foreign_descriptor_case('RECEIPT')
+
+    def test_original_c6_reader_rejects_recycled_directory_fd_without_closing_foreign_object(self):
+        self.original_c6_foreign_descriptor_case('generation-directory')
+
+    def project_origins_api(self):
+        registering = getattr(self.module, 'register_pending_c6_unit', None)
+        reading = getattr(self.module, 'hold_pending_project_origins', None)
+        self.assertTrue(callable(registering) and callable(reading),
+                        'cross-project replay needs original writer-issued project origins for EVERY catalog unit')
+        return registering, reading
+
+    def project_c6_api(self):
+        api = getattr(self.module, 'hold_pending_project_c6_units', None)
+        self.assertTrue(callable(api), 'ALL project origins must join genuine owned C6 originals, not stored locator claims')
+        return api
+
+    def all_project_applied_api(self):
+        inventory, _reading = self.inventory_api()
+        api = getattr(inventory, '_hold_all_project_applied_keys', None)
+        self.assertTrue(callable(api), 'ALL native project C6 and original APPLIED keys must join without caller writers or maxima')
+        return inventory, api
+
+    def test_all_project_applied_unissued_global_owner_and_caller_proof_claims_fail_before_read(self):
+        inventory, api = self.all_project_applied_api()
+        with mock.patch.object(self.module, 'hold_pending_project_c6_units') as reading:
+            with self.assertRaises(inventory.RetainedInventoryHold):
+                with api(object(), binding()):
+                    self.fail('unissued owner read historical APPLIED')
+            reading.assert_not_called()
+        for claims in ({'writers': ()}, {'projects': ()}, {'keys': ()}, {'complete': True}, {'maxima': {}}):
+            with self.subTest(claims=tuple(claims)), self.assertRaises(TypeError):
+                api(object(), binding(), **claims)
+
+    def test_all_project_applied_uncounted_real_c6_never_fabricates_keys_and_actual_unknown_holds_all(self):
+        inventory, api = self.all_project_applied_api(); registering, _reading = self.project_origins_api()
+        globals_ = self.globals_api()
+        with ExitStack() as scope:
+            writer, _project, _publication = self.local_owner(scope)
+            other, _other_project, _other_publication = self.local_owner(scope, 'other')
+            token = self.owner(scope)
+            originals = (self.c6_unit(writer)[0], self.c6_unit(other)[0])
+            for source, original in zip((writer, other), originals):
+                registering(source, token, binding(), original)
+                globals_.prepare_global_unit(token, binding(), original)
+            before = original_read_files(self.root)
+            with api(token, binding()) as (observed, verify):
+                self.assertEqual(originals, tuple(row.unit for row in observed))
+                self.assertEqual((0, 0), tuple(row.attempt_count for row in observed))
+                self.assertTrue(all(row.key_watermarks == () for row in observed))
+                self.assertNotEqual(observed[0].project_identity, observed[1].project_identity)
+                verify()
+            self.assertEqual(before, original_read_files(self.root))
+            globals_.record_global_attempt_intent(token, binding(), originals[0])
+            before = original_read_files(self.root); reached = []
+            with self.assertRaises(inventory.RetainedInventoryHold):
+                with api(token, binding()) as result:
+                    reached.append(result)
+            self.assertEqual([], reached); self.assertEqual(before, original_read_files(self.root))
+            self.assertEqual((1, 'UNKNOWN'), (globals_.inspect_global_unit(token, binding(), originals[0]).attempt_count,
+                                            globals_.inspect_global_unit(token, binding(), originals[0]).outcome))
+
+    def test_all_project_applied_pending_receipt_rebind_revokes_entire_consumer(self):
+        inventory, api = self.all_project_applied_api(); registering, _reading = self.project_origins_api()
+        globals_ = self.globals_api()
+        with ExitStack() as scope:
+            writer, _project, _publication = self.local_owner(scope)
+            other, other_project, _other_publication = self.local_owner(scope, 'other')
+            token = self.owner(scope)
+            first, _one = self.c6_unit(writer); second, _two = self.c6_unit(other)
+            for source, original in ((writer, first), (other, second)):
+                registering(source, token, binding(), original)
+                globals_.prepare_global_unit(token, binding(), original)
+            generation = json.loads(second.action_preimage)['identity']['generation_id']
+            receipt = other_project / '.tracker/generations' / generation / 'RECEIPT'
+            with self.assertRaises(inventory.RetainedInventoryHold):
+                with api(token, binding()) as (observed, verify):
+                    self.assertEqual((first, second), tuple(row.unit for row in observed))
+                    self.assertEqual((0, 0), tuple(row.attempt_count for row in observed))
+                    raw = receipt.read_bytes(); previous = receipt.stat().st_ino
+                    preserved = self.root / 'preserved-all-project-applied-receipt'
+                    receipt.rename(preserved); receipt.write_bytes(raw); receipt.chmod(0o600)
+                    self.assertNotEqual(previous, receipt.stat().st_ino)
+                    verify()
+            self.assertEqual(raw, preserved.read_bytes()); self.assertEqual(raw, receipt.read_bytes())
+            self.assertEqual((0, 0), tuple(globals_.inspect_global_unit(token, binding(), original).attempt_count
+                                          for original in (first, second)))
+
+    def test_all_project_applied_cold_uncounted_originals_do_not_reissue_handles_or_write(self):
+        _inventory, _api = self.all_project_applied_api(); registering, _reading = self.project_origins_api()
+        globals_ = self.globals_api()
+        with ExitStack() as scope:
+            writer, _project, _publication = self.local_owner(scope)
+            other, _other_project, _other_publication = self.local_owner(scope, 'other')
+            token = self.owner(scope)
+            first, _one = self.c6_unit(writer); second, _two = self.c6_unit(other)
+            for source, original in ((writer, first), (other, second)):
+                registering(source, token, binding(), original)
+                globals_.prepare_global_unit(token, binding(), original)
+        before = original_read_files(self.root)
+        program = '''import importlib.util,sys
+from pathlib import Path
+sys.path[:0]=[sys.argv[1],str(Path(sys.argv[1])/'tools')]
+spec=importlib.util.spec_from_file_location('cold_uncounted_applied_test_contract',sys.argv[3])
+tests=importlib.util.module_from_spec(spec);spec.loader.exec_module(tests)
+catalog=tests.load();inventory=tests.load_component('issue_tracker_retained_inventory')
+tests.load_component('issue_tracker_remote_history_match')
+from test_cases.test_req7_spreadsheet_owner import scoped_fixture,binding
+assert catalog.local._ACTIVE=={}
+with scoped_fixture(Path(sys.argv[2]),catalog.ownership),catalog.ownership.spreadsheet_owner(binding()) as owner:
+ with inventory._hold_all_project_applied_keys(owner,binding()) as (observed,verify):
+  assert tuple(row.unit.unit_id for row in observed)==tuple(sys.argv[4:])
+  assert tuple(row.attempt_count for row in observed)==(0,0)
+  assert observed[0].project_identity!=observed[1].project_identity
+  assert all(row.key_watermarks==() for row in observed)
+  assert len(catalog.local._ACTIVE)==2 and all(active.handles=={} for active in catalog.local._ACTIVE.values())
+  assert not any(hasattr(row,'permit') or hasattr(row,'settled') for row in observed)
+  verify()
+ assert catalog.local._ACTIVE=={}
+print('COLD_TWO_PROJECT_UNCOUNTED_ORIGINALS_NO_APPLIED_OR_HANDLES')
+'''
+        result = subprocess.run([sys.executable, '-B', '-c', program,
+            str(Path(__import__('test_cases').__file__).resolve().parents[1]), str(self.root), __file__,
+            first.unit_id, second.unit_id], stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=15)
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertEqual('COLD_TWO_PROJECT_UNCOUNTED_ORIGINALS_NO_APPLIED_OR_HANDLES\n', result.stdout)
+        self.assertEqual(before, original_read_files(self.root))
+
+    def test_all_project_c6_unissued_owner_and_path_claims_never_open_foreign_projects(self):
+        api = self.project_c6_api()
+        with mock.patch.object(self.module.local, '_open_absolute_directory') as opening:
+            with self.assertRaises(self.module.UnitCatalogHold):
+                with api(object(), binding()):
+                    self.fail('unissued spreadsheet owner read a project')
+            opening.assert_not_called()
+        for claim in ({'projects': ()}, {'writers': ()}, {'receipt': True}, {'settled': True}):
+            with self.subTest(claim=tuple(claim)), self.assertRaises(TypeError):
+                api(object(), binding(), **claim)
+
+    def test_all_project_c6_real_distinct_projects_with_equal_local_sequences_preserve_original_handles(self):
+        api = self.project_c6_api(); registering, _reading = self.project_origins_api()
+        with ExitStack() as scope:
+            writer, project, _publication = self.local_owner(scope)
+            other, other_project, _other_publication = self.local_owner(scope, 'other')
+            token = self.owner(scope)
+            first, one = self.c6_unit(writer); second, two = self.c6_unit(other)
+            registering(writer, token, binding(), first); registering(other, token, binding(), second)
+            before = original_read_files(self.root)
+            handles = (dict(self.module.local._owner(writer).handles), dict(self.module.local._owner(other).handles))
+            with api(token, binding()) as (observed, verify):
+                self.assertEqual((first, second), tuple(item.unit for item in observed))
+                self.assertEqual(((project.stat().st_dev, project.stat().st_ino),
+                    (other_project.stat().st_dev, other_project.stat().st_ino)), tuple(item.project_identity for item in observed))
+                self.assertEqual((1, 1), tuple(json.loads(item.c6_facts)['sequence'] for item in observed))
+                self.assertEqual((one.sequence, two.sequence), (1, 1))
+                self.assertFalse(any(hasattr(item, name) for item in observed for name in ('permit', 'settled', 'writer_token')))
+                verify()
+            self.assertEqual(before, original_read_files(self.root))
+            self.assertEqual(handles, (dict(self.module.local._owner(writer).handles), dict(self.module.local._owner(other).handles)))
+
+    def test_all_project_c6_missing_second_project_receipt_yields_no_valid_prefix_or_repair(self):
+        api = self.project_c6_api(); registering, _reading = self.project_origins_api()
+        with ExitStack() as scope:
+            writer, _project, _publication = self.local_owner(scope)
+            other, other_project, _other_publication = self.local_owner(scope, 'other')
+            token = self.owner(scope)
+            first, _one = self.c6_unit(writer); second, two = self.c6_unit(other)
+            registering(writer, token, binding(), first); registering(other, token, binding(), second)
+            receipt = other_project / '.tracker/generations' / two.generation_id / 'RECEIPT'
+            receipt.rename(self.root / 'preserved-second-receipt')
+            before = original_read_files(self.root); reached = []
+            with self.assertRaises(self.module.UnitCatalogHold):
+                with api(token, binding()) as result:
+                    reached.append(result)
+            self.assertEqual([], reached)
+            self.assertEqual(before, original_read_files(self.root))
+            self.assertFalse(receipt.exists())
+
+    def test_all_project_c6_second_receipt_same_byte_rebind_revokes_whole_consumer(self):
+        api = self.project_c6_api(); registering, _reading = self.project_origins_api()
+        with ExitStack() as scope:
+            writer, _project, _publication = self.local_owner(scope)
+            other, other_project, _other_publication = self.local_owner(scope, 'other')
+            token = self.owner(scope)
+            first, _one = self.c6_unit(writer); second, two = self.c6_unit(other)
+            registering(writer, token, binding(), first); registering(other, token, binding(), second)
+            receipt = other_project / '.tracker/generations' / two.generation_id / 'RECEIPT'
+            with self.assertRaises(self.module.UnitCatalogHold):
+                with api(token, binding()) as (observed, verify):
+                    self.assertEqual(2, len(observed))
+                    raw = receipt.read_bytes(); original_ino = receipt.stat().st_ino
+                    preserved = self.root / 'original-second-receipt'
+                    receipt.rename(preserved); receipt.write_bytes(raw); receipt.chmod(0o600)
+                    self.assertNotEqual(original_ino, receipt.stat().st_ino)
+                    verify()
+            self.assertEqual(raw, preserved.read_bytes())
+            self.assertEqual(raw, receipt.read_bytes())
+
+    def test_all_project_c6_cold_independent_process_reacquires_original_projects_without_handles(self):
+        api = self.project_c6_api(); registering, _reading = self.project_origins_api()
+        with ExitStack() as scope:
+            writer, _project, _publication = self.local_owner(scope)
+            other, _other_project, _other_publication = self.local_owner(scope, 'other')
+            token = self.owner(scope)
+            first, _one = self.c6_unit(writer); second, _two = self.c6_unit(other)
+            registering(writer, token, binding(), first); registering(other, token, binding(), second)
+        before = original_read_files(self.root)
+        program = '''import importlib.util,sys
+from pathlib import Path
+sys.path[:0]=[sys.argv[1],str(Path(sys.argv[1])/'tools')]
+spec=importlib.util.spec_from_file_location('cold_projects_test_contract',sys.argv[3])
+tests=importlib.util.module_from_spec(spec);spec.loader.exec_module(tests)
+catalog=tests.load();root=Path(sys.argv[2])
+from test_cases.test_req7_spreadsheet_owner import scoped_fixture,binding
+assert catalog.local._ACTIVE=={}
+with scoped_fixture(root,catalog.ownership),catalog.ownership.spreadsheet_owner(binding()) as owner:
+ with catalog.hold_pending_project_c6_units(owner,binding()) as (observed,verify):
+  assert tuple(item.unit.unit_id for item in observed)==tuple(sys.argv[4:])
+  assert len(catalog.local._ACTIVE)==2
+  assert all(active.handles=={} for active in catalog.local._ACTIVE.values())
+  assert not any(hasattr(item,'permit') or hasattr(item,'writer_token') for item in observed)
+  verify()
+ assert catalog.local._ACTIVE=={}
+print('COLD_TWO_REAL_PROJECT_C6_ORIGINALS_NO_HANDLES')
+'''
+        result = subprocess.run([sys.executable, '-B', '-c', program,
+            str(Path(__import__('test_cases').__file__).resolve().parents[1]), str(self.root), __file__,
+            first.unit_id, second.unit_id], stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=15)
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertEqual('COLD_TWO_REAL_PROJECT_C6_ORIGINALS_NO_HANDLES\n', result.stdout)
+        self.assertEqual(before, original_read_files(self.root))
+
+    def test_all_project_c6_busy_foreign_real_lock_holds_without_waiting_or_partial_prefix(self):
+        api = self.project_c6_api(); registering, _reading = self.project_origins_api()
+        import time
+        with ExitStack() as scope:
+            writer, _project, _publication = self.local_owner(scope)
+            other, other_project, _other_publication = self.local_owner(scope, 'other')
+            token = self.owner(scope)
+            first, _one = self.c6_unit(writer); second, _two = self.c6_unit(other)
+            registering(writer, token, binding(), first); registering(other, token, binding(), second)
+        before = original_read_files(self.root)
+        from test_cases.test_req7_native_supervised_workflow import owned_ready_lock_holder
+        with owned_ready_lock_holder(other_project / '.tracker/LOCK') as child:
+            with ExitStack() as scope:
+                token = self.owner(scope); reached = []; started = time.monotonic()
+                with self.assertRaises(self.module.UnitCatalogHold):
+                    with api(token, binding()) as result:
+                        reached.append(result)
+                self.assertLess(time.monotonic() - started, 2.0)
+                self.assertEqual([], reached)
+                self.assertEqual({}, self.module.local._ACTIVE)
+            self.assertEqual(before, original_read_files(self.root))
+        self.assertEqual(0, child.returncode)
+
+    def test_all_project_c6_cold_same_byte_writer_lock_replacement_is_not_original_exclusion(self):
+        api = self.project_c6_api(); registering, _reading = self.project_origins_api()
+        with ExitStack() as scope:
+            writer, project, _publication = self.local_owner(scope)
+            token = self.owner(scope)
+            original, _one = self.c6_unit(writer)
+            registering(writer, token, binding(), original)
+        lock = project / '.tracker/LOCK'; lock_object = (lock.stat().st_dev, lock.stat().st_ino)
+        preserved = self.root / 'preserved-original-writer-lock'
+        raw = lock.read_bytes(); lock.rename(preserved); lock.write_bytes(raw); lock.chmod(0o600)
+        self.assertNotEqual(lock_object, (lock.stat().st_dev, lock.stat().st_ino))
+        before = original_read_files(self.root); reached = []
+        with ExitStack() as scope:
+            token = self.owner(scope)
+            with self.assertRaises(self.module.UnitCatalogHold):
+                with api(token, binding()) as result:
+                    reached.append(result)
+            self.assertEqual([], reached)
+            self.assertEqual({}, self.module.local._ACTIVE)
+        self.assertEqual(before, original_read_files(self.root))
+        self.assertEqual(raw, preserved.read_bytes())
+
+    def cold_project_replacement_must_not_acquire_foreign_lock(self, replacement):
+        import shutil
+        api = self.project_c6_api(); registering, _reading = self.project_origins_api()
+        with ExitStack() as scope:
+            writer, project, _publication = self.local_owner(scope)
+            token = self.owner(scope)
+            original, _one = self.c6_unit(writer)
+            registering(writer, token, binding(), original)
+        if replacement == 'LOCK':
+            lock = project / '.tracker/LOCK'
+            raw = lock.read_bytes()
+            lock.rename(self.root / 'preserved-original-lock-before-acquire')
+            lock.write_bytes(raw); lock.chmod(0o600)
+        else:
+            preserved = self.root / 'preserved-original-project-before-acquire'
+            project.rename(preserved)
+            shutil.copytree(preserved, project)
+            lock = project / '.tracker/LOCK'
+        foreign = (lock.stat().st_dev, lock.stat().st_ino)
+        before = original_read_files(self.root); acquired = []; reached = []
+        flock = self.module.local.fcntl.flock
+        def observe_acquisition(fd, flags):
+            info = os.fstat(fd)
+            if (info.st_dev, info.st_ino) == foreign and flags & self.module.local.fcntl.LOCK_EX:
+                acquired.append(foreign)
+            return flock(fd, flags)
+        with ExitStack() as scope:
+            token = self.owner(scope)
+            with mock.patch.object(self.module.local.fcntl, 'flock', side_effect=observe_acquisition):
+                with self.assertRaises(self.module.UnitCatalogHold):
+                    with api(token, binding()) as result:
+                        reached.append(result)
+            self.assertEqual([], acquired, 'a rejected foreign replacement must never be locked as the original project')
+            self.assertEqual([], reached)
+            self.assertEqual({}, self.module.local._ACTIVE)
+        self.assertEqual(before, original_read_files(self.root))
+
+    def test_all_project_c6_cold_replaced_lock_is_refused_before_foreign_flock(self):
+        self.cold_project_replacement_must_not_acquire_foreign_lock('LOCK')
+
+    def test_all_project_c6_cold_replaced_project_is_refused_before_foreign_flock(self):
+        self.cold_project_replacement_must_not_acquire_foreign_lock('project')
+
+    def test_project_origin_unissued_writer_and_caller_path_or_receipt_overrides_never_read(self):
+        registering, reading = self.project_origins_api()
+        with mock.patch.object(self.module.local, '_open_absolute_directory') as opening:
+            with self.assertRaises(self.module.UnitCatalogHold):
+                registering(object(), object(), binding(), self.first)
+            opening.assert_not_called()
+        for claim in ({'project': self.root}, {'publication': self.root}, {'generation': object()}, {'receipt': True}):
+            with self.subTest(claim=tuple(claim)), self.assertRaises(TypeError):
+                registering(object(), object(), binding(), self.first, **claim)
+        for claim in ({'projects': ()}, {'units': ()}, {'paths': ()}, {'settled': True}):
+            with self.subTest(claim=tuple(claim)), self.assertRaises(TypeError):
+                reading(object(), binding(), **claim)
+
+    def test_project_origin_two_real_projects_bind_distinct_original_roots_without_global_sequence_comparison(self):
+        registering, reading = self.project_origins_api()
+        with ExitStack() as scope:
+            writer, project, publication = self.local_owner(scope)
+            other, other_project, other_publication = self.local_owner(scope, 'other')
+            token = self.owner(scope)
+            first, generation = self.c6_unit(writer)
+            second, other_generation = self.c6_unit(other)
+            registering(writer, token, binding(), first)
+            registering(other, token, binding(), second)
+            before = original_read_files(self.root)
+            handles = (dict(self.module.local._owner(writer).handles), dict(self.module.local._owner(other).handles))
+            with reading(token, binding()) as (origins, verify):
+                self.assertEqual((first, second), tuple(item.unit for item in origins))
+                self.assertEqual((str(project), str(other_project)), tuple(item.project_path for item in origins))
+                self.assertEqual((str(publication), str(other_publication)), tuple(item.publication_path for item in origins))
+                self.assertEqual(((project.stat().st_dev, project.stat().st_ino),
+                                  (other_project.stat().st_dev, other_project.stat().st_ino)), tuple(item.project_identity for item in origins))
+                # Both projects legitimately have local sequence 1. Never
+                # compare these numbers as a spreadsheet-wide high-water.
+                self.assertEqual((1, 1), (generation.sequence, other_generation.sequence))
+                self.assertFalse(any(hasattr(item, 'permit') or hasattr(item, 'settled') for item in origins))
+                verify()
+            self.assertEqual(handles, (dict(self.module.local._owner(writer).handles), dict(self.module.local._owner(other).handles)))
+            self.assertEqual(before, original_read_files(self.root))
+
+    def test_project_origin_unreceipted_c6_never_creates_catalog_or_origin_witness(self):
+        registering, _reading = self.project_origins_api()
+        with ExitStack() as scope:
+            writer, _project, _publication = self.local_owner(scope)
+            token = self.owner(scope)
+            original, _generation = self.c6_unit(writer, committed=False)
+            before = original_read_files(self.root)
+            with self.assertRaises(self.module.UnitCatalogHold):
+                registering(writer, token, binding(), original)
+            self.assertEqual(before, original_read_files(self.root))
+            self.assertFalse((self.parent / (STEM + '.units')).exists())
+
+    def test_project_origin_existing_empty_store_never_adopted_or_catalog_appended(self):
+        registering, _reading = self.project_origins_api()
+        with ExitStack() as scope:
+            writer, _project, _publication = self.local_owner(scope)
+            token = self.owner(scope)
+            self.module.register_pending_unit(token, binding(), self.first)
+            original, _generation = self.c6_unit(writer)
+            folder = self.parent / (STEM + '.unit-' + original.unit_id + '.project-origin')
+            folder.mkdir(mode=0o700)
+            before = original_read_files(self.root)
+            self.assertTrue((self.parent / (STEM + '.units')).exists())
+            folder_object = (folder.stat().st_dev, folder.stat().st_ino)
+            with self.assertRaises(self.module.UnitCatalogHold):
+                registering(writer, token, binding(), original)
+            self.assertEqual(before, original_read_files(self.root))
+            self.assertEqual(folder_object, (folder.stat().st_dev, folder.stat().st_ino))
+            self.assertEqual([], list(folder.iterdir()))
+            self.assertTrue((self.parent / (STEM + '.units')).exists())
+
+    def test_project_origin_missing_whole_store_remains_hold_without_repair_or_valid_prefix(self):
+        registering, reading = self.project_origins_api()
+        with ExitStack() as scope:
+            writer, _project, _publication = self.local_owner(scope)
+            token = self.owner(scope)
+            originals = tuple(self.c6_unit(writer)[0] for _ in range(2))
+            for original in originals:
+                registering(writer, token, binding(), original)
+            folder = self.parent / (STEM + '.unit-' + originals[1].unit_id + '.project-origin')
+            folder.rename(self.root / 'preserved-project-origin')
+            before = original_read_files(self.root); reached = []
+            with self.assertRaises(self.module.UnitCatalogHold):
+                with reading(token, binding()) as result:
+                    reached.append(result)
+            with self.assertRaises(self.module.UnitCatalogHold):
+                registering(writer, token, binding(), originals[1])
+            self.assertEqual([], reached)
+            self.assertEqual(before, original_read_files(self.root))
+            self.assertFalse(folder.exists())
+
+    def test_project_origins_are_covered_by_actual_global_counts_and_retained_inventory(self):
+        registering, _reading = self.project_origins_api()
+        globals_ = self.globals_api(); inventory, _unused = self.inventory_api()
+        with ExitStack() as scope:
+            writer, _project, _publication = self.local_owner(scope)
+            other, _other_project, _other_publication = self.local_owner(scope, 'other')
+            token = self.owner(scope)
+            originals = (self.c6_unit(writer)[0], self.c6_unit(other)[0])
+            for source, original in zip((writer, other), originals):
+                registering(source, token, binding(), original)
+                globals_.prepare_global_unit(token, binding(), original)
+            first_count = globals_.record_global_attempt_intent(token, binding(), originals[0])
+            self.assertEqual((1, 'UNKNOWN'), (first_count.attempt_count, first_count.outcome))
+            before = original_read_files(self.root)
+            counts = globals_.inspect_catalog_global_units(token, binding())
+            self.assertEqual((1, 0), tuple(state.attempt_count for _unit, state in counts))
+            with inventory._hold_catalog_retained_inventory(token, binding()) as (observed, verify):
+                self.assertEqual(originals, tuple(item.unit for item in observed))
+                self.assertEqual((1, 0), tuple(item.attempt_count for item in observed))
+                self.assertTrue(all('project-origin' in item.families for item in observed))
+                for item in observed:
+                    self.assertEqual({'STARTED', 'ORIGIN', 'WITNESS'},
+                        {relative.rsplit('/', 1)[1] for relative, _identity, _sha in item.originals
+                         if '.project-origin/' in relative})
+                verify()
+            self.assertEqual(before, original_read_files(self.root))
+            self.assertEqual((1, 'UNKNOWN'), (globals_.inspect_global_unit(token, binding(), originals[0]).attempt_count,
+                                            globals_.inspect_global_unit(token, binding(), originals[0]).outcome))
+
+    def test_missing_older_project_origin_blocks_new_registration_before_catalog_append(self):
+        registering, _reading = self.project_origins_api()
+        with ExitStack() as scope:
+            writer, _project, _publication = self.local_owner(scope)
+            token = self.owner(scope)
+            first, _one = self.c6_unit(writer)
+            registering(writer, token, binding(), first)
+            second, _two = self.c6_unit(writer)
+            old_origin = self.parent / (STEM + '.unit-' + first.unit_id + '.project-origin')
+            old_origin.rename(self.root / 'preserved-old-origin')
+            before = original_read_files(self.root)
+            with self.assertRaises(self.module.UnitCatalogHold):
+                registering(writer, token, binding(), second)
+            self.assertEqual(before, original_read_files(self.root))
+            with self.module.hold_pending_units(token, binding()) as (observed, verify):
+                self.assertEqual((first,), observed)
+                verify()
+            self.assertFalse((self.parent / (STEM + '.unit-' + second.unit_id + '.project-origin')).exists())
+
+    def test_project_origin_same_byte_rebind_revokes_actual_global_count_scope_without_repair(self):
+        registering, _reading = self.project_origins_api(); globals_ = self.globals_api()
+        with ExitStack() as scope:
+            writer, _project, _publication = self.local_owner(scope)
+            token = self.owner(scope)
+            original, _generation = self.c6_unit(writer)
+            registering(writer, token, binding(), original)
+            globals_.prepare_global_unit(token, binding(), original)
+            origin = self.parent / (STEM + '.unit-' + original.unit_id + '.project-origin/ORIGIN')
+            with self.assertRaises(globals_.GlobalAttemptHold):
+                with globals_._hold_catalog_attempts(token, binding()) as (observed, verify):
+                    self.assertEqual(((original, 0),), tuple((unit, state.attempt_count) for unit, state in observed))
+                    raw = origin.read_bytes(); original_ino = origin.stat().st_ino
+                    preserved = self.root / 'preserved-origin-pair'
+                    origin.rename(preserved); origin.write_bytes(raw); origin.chmod(0o600)
+                    self.assertNotEqual(original_ino, origin.stat().st_ino)
+                    verify()
+            self.assertEqual(raw, origin.read_bytes()); self.assertEqual(raw, preserved.read_bytes())
+            before = original_read_files(self.root)
+            with self.assertRaises(globals_.GlobalAttemptHold):
+                globals_.record_global_attempt_intent(token, binding(), original)
+            self.assertEqual(before, original_read_files(self.root))
+
     def setUp(self):
         self.module = load()
         self.temporary = tempfile.TemporaryDirectory(prefix='req7-unit-catalog-')
@@ -1382,6 +2294,42 @@ with catalog.local.writer_owner(root/'project',root/'project/publication') as wr
 
     def test_counted_wire_holds_other_original_unit_start_through_actual_consume_and_exit(self):
         self.counted_scope_other_original_fault(start=True)
+
+    def counted_scope_other_project_origin_fault(self, entry):
+        globals_ = self.globals_api(); registering, _reading = self.project_origins_api()
+        with ExitStack() as scope:
+            writer, _project, _publication = self.local_owner(scope)
+            token = self.owner(scope)
+            originals = []
+            for _index in range(2):
+                original, _generation = self.c6_unit(writer)
+                registering(writer, token, binding(), original)
+                globals_.prepare_global_unit(token, binding(), original)
+                originals.append(original)
+            globals_.record_global_attempt_intent(token, binding(), originals[0])
+            path = self.parent / (STEM + '.unit-' + originals[1].unit_id + '.project-origin') / entry
+            raw = path.read_bytes(); previous = path.stat().st_ino
+            reached = []; changed = []
+            with self.assertRaises(globals_.GlobalAttemptHold):
+                with globals_._hold_counted_original_wire(writer, token, binding(), originals[0]) as image:
+                    globals_._require_original_wire_launch(writer, token, binding(), originals[0], image, consume=True)
+                    reached.append(image.attempt_count)
+                    preserved = self.root / 'preserved-counted-other-project-origin'
+                    path.rename(preserved); path.write_bytes(raw); path.chmod(0o600)
+                    self.assertNotEqual(previous, path.stat().st_ino); changed.append(True)
+                    globals_._require_original_wire_launch(writer, token, binding(), originals[0], image, consume=False)
+            self.assertEqual([1], reached); self.assertEqual([True], changed)
+            self.assertEqual(raw, path.read_bytes()); self.assertEqual(raw, preserved.read_bytes())
+            first_journal = self.parent / (STEM + '.unit-' + originals[0].unit_id + '.journal')
+            second_journal = self.parent / (STEM + '.unit-' + originals[1].unit_id + '.journal')
+            self.assertEqual(['ATTEMPT-1'], sorted(name for name in os.listdir(first_journal) if name.startswith('ATTEMPT-')))
+            self.assertFalse(any(name.startswith('ATTEMPT-') for name in os.listdir(second_journal)))
+
+    def test_counted_wire_holds_other_original_project_origin_through_actual_consume_and_exit(self):
+        self.counted_scope_other_project_origin_fault('ORIGIN')
+
+    def test_counted_wire_holds_other_original_project_origin_witness_through_actual_consume_and_exit(self):
+        self.counted_scope_other_project_origin_fault('WITNESS')
 
     def test_last_wire_semantic_replay_cannot_replace_other_original_before_returning_consumed_image(self):
         globals_ = self.globals_api()

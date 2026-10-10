@@ -295,6 +295,46 @@ def create_local_commit_store(project, publication):
 @contextmanager
 def writer_owner(project, publication):
     """Issue an opaque single-use ACTIVE token for one flock ownership period."""
+    with _writer_owner(project, publication, nonblocking=False) as token:
+        yield token
+
+
+@contextmanager
+def try_writer_owner(project, publication):
+    """Acquire once without waiting; busy originals stay HOLD, never repair.
+
+    This uses the same private store, original lock and ACTIVE-token contract
+    as writer_owner. It creates no state and grants no online admission.
+    Historical multi-project consumers use it to avoid an inverted lock wait.
+    """
+    with _writer_owner(project, publication, nonblocking=True) as token:
+        yield token
+
+
+@contextmanager
+def _try_original_writer_owner(project, publication, original_identities):
+    """Private historical acquisition guard, not original-proof authority.
+
+    Only the ALL-project reader supplies its already-held original identities.
+    Check each named root and LOCK before flock, not after acquiring a foreign
+    replacement. The reader still owes actual C6 replay and continuous checks.
+    Public writer_owner/try_writer_owner and mutation hooks are unchanged.
+    """
+    if original_identities is None:
+        raise LocalCommitHold("historical acquisition requires original identities")
+    with _writer_owner(project, publication, nonblocking=True,
+                       original_identities=original_identities) as token:
+        yield token
+
+
+@contextmanager
+def _writer_owner(project, publication, *, nonblocking, original_identities=None):
+    if original_identities is not None and (
+            not nonblocking or type(original_identities) is not tuple or len(original_identities) != 4
+            or any(type(pair) is not tuple or len(pair) != 2
+                   or any(type(value) is not int or value < 1 for value in pair)
+                   for pair in original_identities)):
+        raise LocalCommitHold("invalid original project identities")
     project, publication = _validate_paths(project, publication)
     if any(active.pid == os.getpid() and active.project == project
            and active.publication == publication for active in _ACTIVE.values()):
@@ -307,13 +347,41 @@ def writer_owner(project, publication):
     held = False
     token = object()
     try:
-        _check(project_fd, directory=True, private=False)
+        project_info = _check(project_fd, directory=True, private=False)
+        if original_identities is not None and (project_info.st_dev, project_info.st_ino) != original_identities[0]:
+            raise LocalCommitHold("original project identity changed before acquisition")
         root_fd = _directory(project_fd, ".tracker")
+        root_info = os.fstat(root_fd)
+        if original_identities is not None and (root_info.st_dev, root_info.st_ino) != original_identities[1]:
+            raise LocalCommitHold("original private root identity changed before acquisition")
         publication_fd = _directory(project_fd, publication.name, private=False)
+        publication_info = os.fstat(publication_fd)
+        if original_identities is not None:
+            if (publication_info.st_dev, publication_info.st_ino) != original_identities[2]:
+                raise LocalCommitHold("original publication identity changed before acquisition")
+            named_lock = os.stat("LOCK", dir_fd=root_fd, follow_symlinks=False)
+            if (named_lock.st_dev, named_lock.st_ino) != original_identities[3]:
+                raise LocalCommitHold("original LOCK identity changed before acquisition")
         lock_fd = os.open("LOCK", os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC
                           | getattr(os, "O_NONBLOCK", 0), dir_fd=root_fd)
         info = _check(lock_fd, directory=False)
-        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        if original_identities is not None:
+            if (info.st_dev, info.st_ino) != original_identities[3]:
+                raise LocalCommitHold("original LOCK descriptor changed before acquisition")
+            named_project = _open_absolute_directory(project)
+            try:
+                current = os.fstat(named_project)
+                if (current.st_dev, current.st_ino) != original_identities[0]:
+                    raise LocalCommitHold("original project name changed before acquisition")
+            finally:
+                os.close(named_project)
+            for parent, name, expected in ((project_fd, ".tracker", original_identities[1]),
+                    (project_fd, publication.name, original_identities[2]),
+                    (root_fd, "LOCK", original_identities[3])):
+                current = os.stat(name, dir_fd=parent, follow_symlinks=False)
+                if (current.st_dev, current.st_ino) != expected:
+                    raise LocalCommitHold("original owner name changed before acquisition")
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | (fcntl.LOCK_NB if nonblocking else 0))
         held = True
         named = os.stat("LOCK", dir_fd=root_fd, follow_symlinks=False)
         if (named.st_dev, named.st_ino) != (info.st_dev, info.st_ino):

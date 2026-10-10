@@ -22,6 +22,97 @@ PREPARED = b"local-workbook-fixture\n"
 
 
 class LocalCommitTests(unittest.TestCase):
+    def original_try_api(self):
+        api = getattr(local_commit, '_try_original_writer_owner', None)
+        self.assertTrue(callable(api), 'historical acquisition must refuse non-original roots and LOCK before flock')
+        return api
+
+    def original_owner_identities(self):
+        return tuple((path.stat().st_dev, path.stat().st_ino) for path in
+                     (self.project, self.project / '.tracker', self.publish, self.project / '.tracker/LOCK'))
+
+    def test_original_try_writer_guard_preserves_real_owner_hooks_and_rejects_malformed_identity_before_open(self):
+        api = self.original_try_api(); identities = self.original_owner_identities()
+        with api(self.project, self.publish, identities) as token:
+            self.assertEqual({}, local_commit._owner(token).handles)
+            generation = begin_generation(token, MANIFEST)
+            record_intent(token, generation, PREPARED)
+            receipt = commit(token, generation)
+            self.assertEqual(hashlib.sha256(PREPARED).hexdigest(), receipt.published_sha256)
+        with self.assertRaises(LocalCommitHold):
+            local_commit._owner(token)
+        with mock.patch.object(local_commit, '_open_absolute_directory',
+                               side_effect=LocalCommitHold('malformed identity must not open a project')) as opening:
+            for malformed in (None, (), ((True, 1),) + identities[1:], list(identities)):
+                with self.subTest(malformed=malformed), self.assertRaises(LocalCommitHold):
+                    with api(self.project, self.publish, malformed):
+                        self.fail('malformed original identity opened a project')
+            opening.assert_not_called()
+
+    def test_original_try_writer_guard_refuses_replaced_lock_before_any_foreign_flock_or_write(self):
+        api = self.original_try_api(); identities = self.original_owner_identities()
+        lock = self.project / '.tracker/LOCK'; raw = lock.read_bytes()
+        lock.rename(self.project / '.tracker/preserved-original-LOCK')
+        lock.write_bytes(raw); lock.chmod(0o600)
+        before = {str(p.relative_to(self.project)): (p.stat().st_ino, p.read_bytes())
+                  for p in self.project.rglob('*') if p.is_file()}
+        with mock.patch.object(local_commit.fcntl, 'flock', wraps=local_commit.fcntl.flock) as locking:
+            with self.assertRaises(LocalCommitHold):
+                with api(self.project, self.publish, identities):
+                    self.fail('foreign LOCK acquired original owner')
+            locking.assert_not_called()
+        self.assertEqual(before, {str(p.relative_to(self.project)): (p.stat().st_ino, p.read_bytes())
+                                  for p in self.project.rglob('*') if p.is_file()})
+        self.assertEqual({}, local_commit._ACTIVE)
+
+    def try_owner_api(self):
+        api = getattr(local_commit, 'try_writer_owner', None)
+        self.assertTrue(callable(api), 'historical multi-project ownership must have explicit native nonblocking acquisition')
+        return api
+
+    def test_try_writer_owner_uses_real_nonblocking_lock_and_original_hook_and_revocation_contract(self):
+        api = self.try_owner_api()
+        with mock.patch.object(local_commit.fcntl, 'flock', wraps=local_commit.fcntl.flock) as locking:
+            with api(self.project, self.publish) as token:
+                owner = local_commit._owner(token)
+                self.assertEqual({}, owner.handles)
+                self.assertEqual(local_commit.fcntl.LOCK_EX | local_commit.fcntl.LOCK_NB, locking.call_args.args[1])
+                with self.assertRaises(LocalCommitHold):
+                    with api(self.project, self.publish):
+                        self.fail('same process reacquired a live writer')
+                generation = begin_generation(token, MANIFEST)
+                record_intent(token, generation, PREPARED)
+                receipt = commit(token, generation)
+                self.assertEqual(hashlib.sha256(PREPARED).hexdigest(), receipt.published_sha256)
+                self.assertEqual(PREPARED, (self.publish / (generation.generation_id + '.bin')).read_bytes())
+        with self.assertRaises(LocalCommitHold):
+            local_commit._owner(token)
+        with api(self.project, self.publish) as replacement:
+            self.assertIsNot(token, replacement)
+            self.assertEqual({}, local_commit._owner(replacement).handles)
+            with self.assertRaises(LocalCommitHold):
+                commit(replacement, generation)
+
+    def test_try_writer_owner_busy_real_foreign_lock_refuses_without_waiting_writing_or_token(self):
+        api = self.try_owner_api()
+        import subprocess, sys, time
+        before = {str(path.relative_to(self.project)): (path.stat().st_ino, path.read_bytes())
+                  for path in self.project.rglob('*') if path.is_file()}
+        active = dict(local_commit._ACTIVE)
+        from test_cases.test_req7_native_supervised_workflow import owned_ready_lock_holder
+        with owned_ready_lock_holder(self.project / '.tracker/LOCK') as child:
+            started = time.monotonic()
+            with self.assertRaises(LocalCommitHold):
+                with api(self.project, self.publish):
+                    self.fail('busy foreign lock issued a writer token')
+            self.assertLess(time.monotonic() - started, 2.0)
+            self.assertEqual(active, local_commit._ACTIVE)
+            self.assertEqual(before, {str(path.relative_to(self.project)): (path.stat().st_ino, path.read_bytes())
+                                     for path in self.project.rglob('*') if path.is_file()})
+        self.assertEqual(0, child.returncode)
+        with api(self.project, self.publish) as token:
+            self.assertEqual({}, local_commit._owner(token).handles)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="tracker-local-commit-")
         self.addCleanup(self.temp.cleanup)

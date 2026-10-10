@@ -621,20 +621,20 @@ def script_profile(root: Path, relative: str) -> dict[str, str]:
             elif relative == "monitor/issue_tracker_global_attempt_journal.py":
                 scenario = "在跨项目 spreadsheet owner 内持久绑定 action、wire 与原策略白名单，六次全局 UNKNOWN 意图跨冷启动计数；已有单元保守阻断所有新单元。"
                 inputs = "ACTIVE 全局 owner、typed 原绑定与完整冻结单元；结构一致不证明受保护作业来源、准入或真实发送许可。"
-                outputs = "不可变共享持久原像、链式意图计数或 HOLD；reserved 入口计数前后重核原 enrollment／History 行预算／永久 metadata quota，Cabling 新增还须绑定原 NV 预留；没有清理、重置、解除屏障、COMPLETE 或发送能力。"
+                outputs = "不可变共享持久原像、链式意图计数或 HOLD；reserved 入口计数前后重核原 enrollment／History 行预算／永久 metadata quota，Cabling 新增还须绑定原 NV 预留；catalog 已计数 WIRE 持续持有所有原始项目来源 ORIGIN／WITNESS 至 CLAIM 消费与交接结束，来源替换不被重新采用；没有清理、重置、解除屏障、COMPLETE 或发送能力。"
                 recovery = "部分 fsync、缺记录、链接／位移、原像漂移或六次耗尽均 HOLD；不补建／接管／回收，六次意图不是六次真实尝试。"
                 example = "python3 -B -m unittest -v test_cases.test_req7_global_attempt_journal  # 仅开发测试"
             elif relative == "monitor/issue_tracker_retained_inventory.py":
-                scenario = "持有单个 legacy unit 的全部原件、完整命名空间和原始文件身份；另有 catalog 诊断接口同时持有所有 unit 的原 count／family／共享 nonce 与本项目历史 C6 原件，消费者期间不重新采用新路径；未知未来或 archive 家族保持 HOLD。"
-                inputs = "实际共享 spreadsheet owner；APPLIED-key 观察另需实际 C6 writer owner 与原始 COMPLETE／APPLIED／key-high-water 配对；无 caller unit／generation／keys 覆盖。"
-                outputs = "原始 UNKNOWN 计数、历史 COMPLETE／APPLIED-key 必要只读观察；catalog 中未尝试 unit 不贡献 APPLIED keys，已计数 unit 必须具备真实 COMPLETE／APPLIED／key 配对；原件持续持有的单项目逐 key 最大值与 pending 顺序观察不跨项目比较序号；仅未尝试且更晚 APPLIED 覆盖全部实际候选 key 时可追加不可变 UNSENT disposition，不释放 FIFO，不证明多个 unit 的完整结算、global maximum、FIFO、G1 或 NEW 权限。"
+                scenario = "持有单个 legacy unit 的全部原件、完整命名空间和原始文件身份；另有 catalog 诊断接口同时持有所有 unit 的原 count／family／共享 nonce 与历史 C6 原件，跨项目观察另重核全部原始来源及真实项目锁，消费者期间不重新采用新路径；未知未来或 archive 家族保持 HOLD。"
+                inputs = "实际共享 spreadsheet owner；单项目 APPLIED-key 观察另需实际 C6 writer owner，跨项目只从 held 原始项目来源内部取得真实非阻塞 owner，并核原始 COMPLETE／APPLIED／key-high-water 配对；无调用方路径、caller unit／generation／keys 覆盖。"
+                outputs = "原始 UNKNOWN 计数、历史 COMPLETE／APPLIED-key 必要只读观察；跨项目原始 C6 与已计数原始 COMPLETE／APPLIED／key 配对整体持有，缺任一证明全部 HOLD；catalog 中未尝试 unit 不贡献 APPLIED keys，已计数 unit 必须具备真实 COMPLETE／APPLIED／key 配对；原件持续持有的单项目逐 key 最大值与 pending 顺序观察不跨项目比较序号；仅未尝试且更晚 APPLIED 覆盖全部实际候选 key 时可追加不可变 UNSENT disposition，不释放 FIFO，不证明多个 unit 的完整结算、global maximum、FIFO、G1 或 NEW 权限。"
                 recovery = "部分、外来原件、同字节替换、未识别家族或原 nonce／History／C6 配对不一致均 HOLD，不 yield 部分前缀；UNSENT 写前见证与双原 inode 配对持续保留，整对丢失仍 HOLD；不修复、不回填、不清除 UNKNOWN。"
                 example = "python3 -B -m unittest -v test_cases.test_req7_retained_global_inventory test_cases.test_req7_retained_applied_inventory test_cases.test_req7_unit_catalog  # 仅开发测试"
             elif relative == "monitor/issue_tracker_unit_catalog.py":
                 scenario = "在同一真实共享 owner 内追加多个 pending unit 原件及永久位置见证；不计数发送意图、不创建 CLAIM，不覆盖 legacy 原件。"
-                inputs = "真实 issued spreadsheet owner 与完整 coherent frozen action／wire；结构一致不是原始 C6、APPLIED、实际准入或发送证明。"
-                outputs = "按不可变索引恢复全部原件或 HOLD；不是完整结算库存，不授予 NEW、FIFO 释放或发送权限。"
-                recovery = "部分落盘、丢失尾目录／位置、额外项、同字节替换或重复 unit 均 HOLD；保留证据、不修复、不回收、不重新采用。"
+                inputs = "真实 issued spreadsheet owner 与完整 coherent frozen action／wire；原始项目来源登记另需真实 ACTIVE C6 writer，固定配对与首写见证只定位原项目，不接受调用方路径；结构一致不是原始 C6、APPLIED、实际准入或发送证明。"
+                outputs = "按不可变索引恢复全部原件或 HOLD；历史 C6 关联必须实际持有全部原始项目／tracker／publication／LOCK 与 generation 文件，冷 owner 在 flock 前逐项核原始身份，不锁住替换件，非阻塞取得且不补发历史 mutation handle；不是完整结算库存，不授予 NEW、FIFO 释放或发送权限。"
+                recovery = "部分落盘、丢失尾目录／位置、额外项、同字节替换或重复 unit 均 HOLD；原始项目／LOCK／C6 原件丢失、漂移或其他 owner 忙时全部 HOLD，不 yield 部分前缀；保留证据、不修复、不回收、不重新采用。"
                 example = "python3 -B -m unittest -v test_cases.test_req7_unit_catalog  # 仅开发测试"
             elif relative == "monitor/issue_tracker_spreadsheet_owner.py":
                 scenario = "同一 spreadsheet 的跨项目非阻塞 OS 锁；固定私有路径、持有祖先身份、无过期接管，父退出后继承 FD 继续互斥。"

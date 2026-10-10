@@ -5,11 +5,15 @@ production launcher, CA override, online credential or send permission ships.
 The test uses the actual 30-second total budget, not an increased socket timeout
 or a mocked monotonic clock. Full deployment/native DNS identity remains NOT RUN.
 """
+import ast
+from contextlib import contextmanager
 import fcntl
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
+import select
 import signal
 import socket
 import subprocess
@@ -17,6 +21,7 @@ import sys
 import threading
 import time
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 CANDIDATE = Path(__file__).resolve().parents[1]
@@ -47,6 +52,36 @@ def cleanup_owned_fixture_child(child):
     finally:
         for stream in (child.stdin, child.stdout, child.stderr):
             if stream is not None: stream.close()
+
+
+@contextmanager
+def owned_ready_lock_holder(lock_path):
+    """Finite readiness and release, with cleanup owning the entire scope."""
+    marker = b"OWNED_LOCK_READY\n"
+    program = "import fcntl,os,sys;fd=os.open(sys.argv[1],os.O_RDWR);fcntl.flock(fd,fcntl.LOCK_EX);print('OWNED_LOCK_READY',flush=True);sys.stdin.buffer.read(1);os.close(fd)"
+    child = subprocess.Popen([sys.executable, "-B", "-c", program, str(lock_path)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        start_new_session=True)
+    try:
+        deadline = time.monotonic() + 3.0
+        received = b""
+        while len(received) < len(marker):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not select.select([child.stdout], [], [], remaining)[0]:
+                raise AssertionError("owned lock fixture readiness deadline exceeded")
+            chunk = os.read(child.stdout.fileno(), len(marker) - len(received))
+            if not chunk:
+                raise AssertionError("owned lock fixture exited before readiness")
+            received += chunk
+        if received != marker:
+            raise AssertionError("owned lock fixture readiness differs")
+        yield child
+        child.stdin.close()
+        child.wait(timeout=3)
+        if child.returncode != 0:
+            raise AssertionError("owned lock fixture release failed")
+    finally:
+        cleanup_owned_fixture_child(child)
 
 
 def owned_fixture_child():
@@ -256,11 +291,12 @@ class Req7NativeSupervisedWorkflowTests(unittest.TestCase):
     def test_already_exited_fixture_cleanup_reaps_without_signalling_a_stale_group_id(self):
         child = subprocess.Popen([sys.executable, "-I", "-B", "-c", "pass"], stdin=subprocess.DEVNULL,
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
-        child.wait(timeout=3)
         try:
+            child.wait(timeout=3)
             with mock.patch("os.killpg", side_effect=AssertionError("exited fixture must not be signalled")):
                 cleanup_owned_fixture_child(child)
         finally:
+            cleanup_owned_fixture_child(child)
             for stream in (child.stdout, child.stderr): stream.close()
         self.assertIsNotNone(child.returncode)
         self.assertTrue(child.stdout.closed); self.assertTrue(child.stderr.closed)
@@ -364,6 +400,119 @@ class Req7NativeSupervisedWorkflowTests(unittest.TestCase):
         self.assertIsNotNone(child.poll())
         fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
         self.assertTrue(path.is_file())
+
+
+class ReadyLockHolderTests(unittest.TestCase):
+    """Synthetic private child failures cannot leave an unbounded lock holder."""
+
+    def lock_holder(self):
+        api = globals().get("owned_ready_lock_holder")
+        self.assertTrue(callable(api), "private lock readiness needs a finite owner-cleaned scope")
+        return api
+
+    def fixture(self, scope, *, ready, chunks, clocks, wait_error=None):
+        child = SimpleNamespace(stdin=io.BytesIO(), stdout=io.BytesIO(), stderr=io.BytesIO(),
+                                wait=mock.Mock(side_effect=wait_error), returncode=0)
+        child.stdout.fileno = mock.Mock(return_value=42)
+        def cleanup(original):
+            self.assertIs(child, original)
+            for stream in (original.stdin, original.stdout, original.stderr): stream.close()
+        module = sys.modules[__name__]
+        opening = scope.enter_context(mock.patch.object(subprocess, "Popen", return_value=child))
+        cleaning = scope.enter_context(mock.patch.object(module, "cleanup_owned_fixture_child", side_effect=cleanup))
+        scope.enter_context(mock.patch.object(time, "monotonic", side_effect=clocks))
+        selecting = mock.Mock(side_effect=ready)
+        scope.enter_context(mock.patch.object(module, "select", SimpleNamespace(select=selecting), create=True))
+        reading = scope.enter_context(mock.patch.object(os, "read", side_effect=chunks))
+        return child, opening, cleaning, selecting, reading
+
+    def test_missing_readiness_has_fixed_deadline_and_cleans_without_entering_consumer(self):
+        from contextlib import ExitStack
+        api = self.lock_holder()
+        with ExitStack() as scope:
+            child, opening, cleaning, selecting, reading = self.fixture(scope,
+                ready=[([], [], [])], chunks=[], clocks=[10.0, 10.0])
+            with self.assertRaises(AssertionError):
+                with api(Path("/owned-synthetic-lock")): self.fail("no ready child may be yielded")
+            self.assertTrue(opening.call_args.kwargs["start_new_session"])
+            self.assertEqual(3.0, selecting.call_args.args[3])
+            reading.assert_not_called(); child.wait.assert_not_called()
+            cleaning.assert_called_once_with(child)
+            self.assertTrue(all(stream.closed for stream in (child.stdin, child.stdout, child.stderr)))
+
+    def test_partial_readiness_does_not_restart_deadline_and_eof_cleans(self):
+        from contextlib import ExitStack
+        api = self.lock_holder()
+        with ExitStack() as scope:
+            child, _opening, cleaning, selecting, reading = self.fixture(scope,
+                ready=[([object()], [], []), ([object()], [], [])], chunks=[b"OWNED_", b""],
+                clocks=[10.0, 10.0, 10.5])
+            with self.assertRaises(AssertionError):
+                with api(Path("/owned-synthetic-lock")): self.fail("partial ready child may not be yielded")
+            self.assertEqual([3.0, 2.5], [call.args[3] for call in selecting.call_args_list])
+            self.assertEqual([(42, 17), (42, 11)], [call.args for call in reading.call_args_list])
+            child.wait.assert_not_called(); cleaning.assert_called_once_with(child)
+            self.assertTrue(all(stream.closed for stream in (child.stdin, child.stdout, child.stderr)))
+
+    def test_initial_release_wait_failure_preserves_error_and_cleans_child(self):
+        from contextlib import ExitStack
+        api = self.lock_holder(); error = subprocess.TimeoutExpired("owned synthetic child", 3)
+        with ExitStack() as scope:
+            child, _opening, cleaning, _selecting, _reading = self.fixture(scope,
+                ready=[([object()], [], [])], chunks=[b"OWNED_LOCK_READY\n"], clocks=[10.0, 10.0], wait_error=error)
+            with self.assertRaises(subprocess.TimeoutExpired) as caught:
+                with api(Path("/owned-synthetic-lock")) as actual: self.assertIs(child, actual)
+            self.assertIs(error, caught.exception)
+            child.wait.assert_called_once_with(timeout=3); cleaning.assert_called_once_with(child)
+            self.assertTrue(all(stream.closed for stream in (child.stdin, child.stdout, child.stderr)))
+
+    def test_consumer_failure_preserves_error_and_cleans_before_any_release_wait(self):
+        from contextlib import ExitStack
+        api = self.lock_holder(); error = RuntimeError("owned consumer failure")
+        with ExitStack() as scope:
+            child, _opening, cleaning, _selecting, _reading = self.fixture(scope,
+                ready=[([object()], [], [])], chunks=[b"OWNED_LOCK_READY\n"], clocks=[10.0, 10.0])
+            with self.assertRaises(RuntimeError) as caught:
+                with api(Path("/owned-synthetic-lock")) as actual:
+                    self.assertIs(child, actual); raise error
+            self.assertIs(error, caught.exception)
+            child.wait.assert_not_called(); cleaning.assert_called_once_with(child)
+            self.assertTrue(all(stream.closed for stream in (child.stdin, child.stdout, child.stderr)))
+
+
+class SupervisedCleanupFailureTests(unittest.TestCase):
+    """Initial wait failure must still clean this fixture's own child."""
+
+    def test_failed_initial_wait_cleans_owned_fixture_and_preserves_original_exception(self):
+        tree = ast.parse(Path(__file__).read_text())
+        owner = next(node for node in tree.body if isinstance(node, ast.ClassDef)
+                     and node.name == "Req7NativeSupervisedWorkflowTests")
+        method = next(node for node in owner.body if isinstance(node, ast.FunctionDef)
+                      and node.name == "test_already_exited_fixture_cleanup_reaps_without_signalling_a_stale_group_id")
+        for initial_error in (subprocess.TimeoutExpired("owned synthetic child", 3),
+                              OSError("owned wait injected failure")):
+            with self.subTest(error=type(initial_error).__name__):
+                child = SimpleNamespace(stdin=None, stdout=io.BytesIO(), stderr=io.BytesIO(),
+                                        returncode=None, wait=mock.Mock(side_effect=initial_error))
+
+                def cleanup(original):
+                    self.assertIs(child, original)
+                    original.stdout.close(); original.stderr.close()
+
+                final_cleanup = mock.Mock(side_effect=cleanup)
+                values = {"subprocess": SimpleNamespace(Popen=mock.Mock(return_value=child),
+                                                        DEVNULL=subprocess.DEVNULL,
+                                                        PIPE=subprocess.PIPE),
+                          "sys": sys, "mock": mock,
+                          "cleanup_owned_fixture_child": final_cleanup}
+                exec(compile(ast.Module(body=[method], type_ignores=[]), __file__, "exec"), values)
+                with self.assertRaises(type(initial_error)) as caught:
+                    values[method.name](self)
+                self.assertIs(initial_error, caught.exception, "cleanup cannot replace the wait failure")
+                child.wait.assert_called_once_with(timeout=3)
+                final_cleanup.assert_called_once_with(child)
+                self.assertTrue(child.stdout.closed)
+                self.assertTrue(child.stderr.closed)
 
 
 if __name__ == "__main__":
