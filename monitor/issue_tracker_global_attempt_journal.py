@@ -645,11 +645,150 @@ def _write_global_start(parent, name, raw):
         os.close(fd)
 
 
+@contextmanager
+def _hold_settled_successor_preparation(token, binding, unit):
+    """Original APPLIED/key evidence for ONE new diagnostic GLOBAL store.
+
+    No count is cleared and no send/FIFO/cadence/NEW capability is returned.
+    The fixed public creator alone consumes this private verifier. All prior
+    shared images, project C6, COMPLETE, APPLIED and key pairs survive the
+    actual write. Only its two derived exclusive names may extend the root;
+    no caller paths, settlement labels or refreshed prior originals are used.
+    Legacy/unattempted creation retains its existing conservative guard.
+    """
+    held = None; failed = False
+    try:
+        owner = ownership._validated_owner(token, binding)
+        if not _catalog_present(owner):
+            yield None
+            return
+        from monitor import issue_tracker_unit_catalog as catalog
+        from monitor import issue_tracker_retained_inventory as inventory
+        from monitor import issue_tracker_remote_history_match as remote
+        # The old unattempted branch must leave its read-only namespace scope
+        # before the creator appends its own names. No settlement scope is
+        # needed there, and keeping that reader open would reject our writes.
+        with _hold_catalog_attempts(token, binding) as (probe, verify_probe):
+            if unit not in tuple(original for original, _state in probe):
+                raise GlobalAttemptHold()
+            needs_settlement = any(state.attempt_count for _original, state in probe)
+            verify_probe()
+        if not needs_settlement:
+            yield None
+            return
+        with ExitStack() as scope:
+            held = catalog._Originals(); scope.callback(held.close)
+            _catalog, units, _previous = catalog._inspect(token, binding, held)
+            with _hold_catalog_attempts(token, binding) as (observations, verify_counts):
+                if tuple(original for original, _state in observations) != units or unit not in units:
+                    raise GlobalAttemptHold()
+                if not any(state.attempt_count for _original, state in observations):
+                    raise GlobalAttemptHold()
+                if (units[-1] != unit or observations[-1][1].attempt_count
+                        or observations[-1][1].outcome != 'PENDING_NO_JOURNAL'
+                        or any(state.outcome == 'PENDING_NO_JOURNAL' for _original,state in observations[:-1])):
+                    raise GlobalAttemptHold()
+                parent = owner.directories[-1][0]; stem = owner.lock_name[:-5]
+                captured = {name for p,name,*_rest in held.files if p == parent}
+                captured.update(name for p,name,*_rest in held.directories if p == parent)
+                names = {name for name in os.listdir(parent) if name.startswith(stem + '.')}
+                allowed = {stem + '.lock', stem + '.enrollment', stem + '.units', stem + '.units-started',
+                    *(stem + '.units-position-%020d' % index for index in range(1,len(units)+1))}
+                allowed.update(stem + '.unit-' + original.unit_id + '.' + family
+                    for original in units for family in inventory._CATALOG_FAMILIES if family != 'enrollment')
+                if names - allowed:
+                    raise GlobalAttemptHold()
+                # Capture BEFORE semantic settlement. Temporary readers cannot
+                # replace these originals after their scopes have returned.
+                for name in sorted(names - captured - {stem + '.lock'}):
+                    if name.endswith('-started'):
+                        held.file(parent,name,16384)
+                    else:
+                        folder = held.directory(parent,name)
+                        family = name.rsplit('.',1)[-1]
+                        entries = tuple(os.listdir(folder))
+                        if family == 'nv':
+                            from monitor import issue_tracker_nv_reservation as nv
+                            if frozenset(entries) != nv._CATALOG_NAMES:
+                                raise GlobalAttemptHold()
+                        else:
+                            inventory._family_entries(family,entries)
+                        for entry in sorted(entries):
+                            held.file(folder,entry,2*1024*1024 if entry.endswith('-RAW') else local._MAX_MANIFEST)
+                verify_counts(); held.verify()
+            with catalog.hold_pending_project_origins(token,binding) as (origins,verify_origins):
+                if tuple(row.unit for row in origins) != units:
+                    raise GlobalAttemptHold()
+                rows,verify_c6 = scope.enter_context(catalog._hold_project_c6_from_origins(token,binding,origins))
+                verify_origins(); held.verify(); verify_c6()
+            validators = []
+            for row, (original,state) in zip(rows,observations):
+                if row.unit != original:
+                    raise GlobalAttemptHold()
+                if not state.attempt_count:
+                    continue
+                matches = [(writer,local._owner(writer)) for writer,active in tuple(local._ACTIVE.items())
+                    if active.pid == os.getpid()
+                    and journal._identity(os.fstat(active.project_fd))[:2] == row.project_identity]
+                if len(matches) != 1:
+                    raise GlobalAttemptHold()
+                writer,project = matches[0]; facts = local._json(row.c6_facts)
+                generation = local.Generation(facts['generation_id'],facts['sequence'],facts['manifest_id'],writer)
+                actual,verify_inputs,body,_keys = scope.enter_context(
+                    remote._hold_original_applied_key_watermark_inputs(writer,token,binding,original,generation))
+                if (actual is not project or tuple(body['project_identity']) != row.project_identity
+                        or body['binding']['unit_id'] != original.unit_id):
+                    raise GlobalAttemptHold()
+                verify_keys = scope.enter_context(remote._hold_applied_records(project.root_fd,
+                    ('REMOTE-KEY-HIGH-WATER-STARTED-'+original.unit_id,'REMOTE-KEY-HIGH-WATER-'+original.unit_id),
+                    body,states=('KEY-HIGH-WATER-STARTED','KEY-HIGH-WATER')))
+                validators.extend((verify_inputs,verify_keys))
+            new_name = stem + '.unit-' + unit.unit_id + '.journal'
+            permitted = frozenset((new_name,new_name[:-len('.journal')]+'.journal-started'))
+            if names & permitted:
+                raise GlobalAttemptHold()
+            def verify():
+                if ownership._validated_owner(token,binding) is not owner:
+                    raise GlobalAttemptHold()
+                additions = permitted & set(os.listdir(parent))
+                held.verify(parent_additions=additions); verify_c6()
+                for validate in validators:
+                    validate()
+                held.verify(parent_additions=additions); verify_c6()
+            verify()
+            yield verify
+            verify()
+            if not permitted <= set(os.listdir(parent)):
+                raise GlobalAttemptHold()
+    except Exception:
+        failed = True
+    if failed:
+        raise GlobalAttemptHold() from None
+
+
 def prepare_global_unit(token, binding, unit):
+    """Fixed creator with continuously held original settlement when needed."""
+    failed = False
+    try:
+        with _hold_settled_successor_preparation(token,binding,unit) as verify:
+            _prepare_global_unit(token,binding,unit,_verify_settlement=verify)
+    except Exception:
+        failed = True
+    # A contextmanager can retain the injected internal exception even with
+    # ``from None``. Raise only outside that handling, preserving the original
+    # public no-context error contract and never exposing paths or raw images.
+    if failed:
+        raise GlobalAttemptHold()
+
+
+def _prepare_global_unit(token, binding, unit, *, _verify_settlement=None):
     """New coherent images only; never adopt a partial/existing global store."""
     folder = None; failed = False
     try:
-        _guard_catalog_transition(token, binding, unit, preparing=True)
+        if _verify_settlement is None:
+            _guard_catalog_transition(token, binding, unit, preparing=True)
+        else:
+            _verify_settlement()
         owner, parent, name, header = _inputs(token, binding, unit)
         _require_no_completion(parent,name)
         # A retained store is a conservative barrier even before ATTEMPT-1.
@@ -666,6 +805,7 @@ def prepare_global_unit(token, binding, unit):
             'header_sha256':hashlib.sha256(local._canonical(header)).hexdigest()})) as verify_start:
             ownership._validated_owner(token,binding)
             verify_start()
+            if _verify_settlement is not None: _verify_settlement()
             folder = _create_folder(parent, name)
             local._write_new(folder, 'ACTION-PREIMAGE', unit.action_preimage)
             local._write_new(folder, 'WIRE', unit.wire_bytes)
@@ -681,6 +821,7 @@ def prepare_global_unit(token, binding, unit):
             count, _previous = _inspect(folder, unit, header)
             if count: raise GlobalAttemptHold()
             verify_start()
+            if _verify_settlement is not None: _verify_settlement()
     except Exception: failed = True
     finally:
         if folder is not None:

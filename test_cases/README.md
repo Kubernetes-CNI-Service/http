@@ -1979,3 +1979,19 @@ tracebacks. After actual manual regeneration, the original documentation/
 upload sequence347 and clean-tree public packaging/capsule/S failure-chain14
 all passed (the latter1424.368s). These are cause-specific workflow evidence,
 not a current full success. REQ10C3 still execute and remain raw known FAIL.
+
+The settled-successor GLOBAL preparation slice joins actual catalog origins,
+all original project C6 images, counted GLOBAL/History/COMPLETE, and original
+APPLIED/key-high-water pairs before the fixed creator writes. All old shared
+images remain held through the new write-ahead witness and journal commit;
+only that creator's two exact derived names may extend the namespace. Missing
+APPLIED/key evidence or same-byte old-original replacement must HOLD. Count=1
+and UNKNOWN of the settled original remain unchanged. This permits diagnostic
+GLOBAL preparation only: successor counting, CLAIM, native NV allocation,
+G1/current qualification, default online worker and formal full/check remain
+separate obligations. The original positive workflow initially failed at the
+old permanent-count guard; the missing-APPLIED rejection already passed.
+The positive, rejection and actual-witness/old-APPLIED-inode drift workflows
+then passed against the corrected implementation. The extra direct cases
+reject unissued owner and any public caller settlement/verifier override.
+All earlier tests remain unchanged; no manual ledger or field waiver.

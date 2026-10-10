@@ -21,6 +21,108 @@ def load():
 
 
 class RetainedAppliedInventoryTests(unittest.TestCase):
+    def _catalog_completed_successor(self, *, applied, rebind_after_start=False):
+        """Real C6/catalog/count/COMPLETE originals, not a settlement label."""
+        from unittest import mock
+        from test_cases.test_req7_unit_catalog import load as load_catalog
+        from test_cases.test_req7_send_unit import inputs
+        from test_cases.test_issue_tracker_whitelist_workbook import literal_xlsx
+        module = load()
+        case = remote_tests.Req7OwnedHistoryMatchWorkflowTests(); case.setUp()
+        try:
+            match = remote_tests.load(); catalog = load_catalog(reset_dependencies=False)
+            from monitor import issue_tracker_global_attempt_journal as globals_
+            from monitor import issue_tracker_local_commit as local
+            prepare = globals_.prepare_global_unit
+            registered = []
+            def register_first(owner, bound, unit):
+                writers = tuple(local._ACTIVE)
+                self.assertEqual(1, len(writers))
+                catalog.register_pending_c6_unit(writers[0], owner, bound, unit)
+                registered.append(unit.unit_id)
+                return prepare(owner, bound, unit)
+            with ExitStack() as scope:
+                with mock.patch.object(globals_, 'prepare_global_unit', side_effect=register_first):
+                    writer, owner, bound, auth, _config, first, docs = case.prepare_owned(scope, native_generation=True)
+                self.assertEqual([first.unit_id], registered)
+                responses = {name:case.read_owned(scope, writer, owner, bound, auth, kind, value)
+                    for name, (kind, value) in docs.items()}
+                match.record_owned_completion_evidence(writer, owner, bound, first, **responses)
+                if applied:
+                    match.record_owned_applied_evidence(writer, owner, bound, first, generation=case.native_generation)
+                    match.record_owned_applied_key_watermarks(writer, owner, bound, first, generation=case.native_generation)
+                    with module._hold_all_project_fifo_frontier(owner, bound) as (frontier, verify):
+                        self.assertEqual((first.unit_id,), frontier.applied)
+                        self.assertEqual((), frontier.frontier); self.assertEqual((), frontier.blocked)
+                        verify()
+                # Independently authored same-key successor. Local sequence 2
+                # is real C6, never a caller maximum or APPLIED dataclass.
+                arguments = inputs()
+                arguments['business'][0]['observed_values'] = {'L': {'stringValue':'down'}}
+                arguments['audits'] = ({'event_id':'settings:002', 'recorded_at_utc':'2026-10-08T10:00:00Z', 'details':'K=3'},)
+                generation = local.begin_generation(writer, arguments['manifest'])
+                local.record_intent(writer, generation, literal_xlsx(), kind='xlsx')
+                receipt = local.commit(writer, generation)
+                arguments.update(spreadsheet_id=bound.spreadsheet_id, sheet_id=101, history_sheet_id=105,
+                    target_nonce='a'*64, history_nonce='d'*64, generation_id=generation.generation_id,
+                    publish_id=receipt.published_sha256)
+                second = catalog.composer.freeze_send_unit(**arguments)
+                catalog.register_pending_c6_unit(writer, owner, bound, second)
+                before = original_read_files(case.root)
+                if rebind_after_start:
+                    from contextlib import contextmanager
+                    started = globals_._write_global_start; reached = []
+                    marker = local._owner(writer).project / '.tracker' / ('REMOTE-APPLIED-' + first.unit_id)
+                    original = marker.read_bytes(); inode = marker.stat().st_ino
+                    preserved = case.root / 'preserved-successor-original-applied'
+                    @contextmanager
+                    def start_then_rebind(*arguments, **keywords):
+                        with started(*arguments, **keywords) as verify:
+                            marker.rename(preserved); marker.write_bytes(original); marker.chmod(0o600)
+                            reached.append('actual-new-global-start-then-prior-applied-rebound')
+                            yield verify
+                            verify()
+                    with mock.patch.object(globals_, '_write_global_start', side_effect=start_then_rebind):
+                        with self.assertRaises(globals_.GlobalAttemptHold): prepare(owner, bound, second)
+                    self.assertEqual(['actual-new-global-start-then-prior-applied-rebound'], reached)
+                    self.assertEqual(inode, preserved.stat().st_ino); self.assertNotEqual(inode, marker.stat().st_ino)
+                    self.assertEqual(original, marker.read_bytes()); self.assertEqual(original, preserved.read_bytes())
+                    stem = globals_.ownership._validated_owner(owner, bound).lock_name[:-5]
+                    shared = case.root / 'var/lib/http-ztp-container/issue-tracker'
+                    self.assertTrue((shared / (stem + '.unit-' + second.unit_id + '.journal-started')).is_file())
+                    self.assertFalse((shared / (stem + '.unit-' + second.unit_id + '.journal')).exists(),
+                        'prior original drift must stop before creating a new GLOBAL directory')
+                elif applied:
+                    prepare(owner, bound, second)
+                    observed = globals_.inspect_catalog_global_units(owner, bound)
+                    self.assertEqual((first, second), tuple(unit for unit, _state in observed))
+                    self.assertEqual(((1,'UNKNOWN'), (0,'UNATTEMPTED_OBSERVATION')),
+                        tuple((state.attempt_count, state.outcome) for _unit, state in observed))
+                    with module._hold_all_project_fifo_frontier(owner, bound) as (frontier, verify):
+                        self.assertEqual((first.unit_id,), frontier.applied)
+                        self.assertEqual((second.unit_id,), frontier.frontier)
+                        self.assertEqual((), frontier.blocked); verify()
+                else:
+                    with self.assertRaises(globals_.GlobalAttemptHold): prepare(owner, bound, second)
+                    self.assertEqual(before, original_read_files(case.root))
+                self.assertEqual((1,'UNKNOWN'), (case.current_global_state(owner,bound,first).attempt_count,
+                    case.current_global_state(owner,bound,first).outcome))
+                after = original_read_files(case.root)
+                unchanged = {name:image for name,image in before.items()
+                    if not rebind_after_start or name != str(marker.relative_to(case.root))}
+                self.assertTrue(unchanged.items() <= after.items(), 'old originals cannot be rewritten by successor preparation')
+        finally:
+            case.doCleanups()
+
+    def test_actual_catalog_complete_applied_keys_allow_same_key_successor_global_preparation(self):
+        self._catalog_completed_successor(applied=True)
+
+    def test_actual_catalog_complete_without_applied_keys_keeps_successor_unknown_barrier(self):
+        self._catalog_completed_successor(applied=False)
+
+    def test_prior_applied_original_rebind_after_new_start_stops_before_successor_global_directory(self):
+        self._catalog_completed_successor(applied=True, rebind_after_start=True)
+
     def api(self, module):
         api = getattr(module, '_hold_retained_applied_keys', None)
         self.assertTrue(callable(api), 'retained APPLIED keys must derive C6 from held originals, not caller generation/keys')

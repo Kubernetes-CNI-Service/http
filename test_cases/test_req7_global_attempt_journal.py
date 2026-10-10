@@ -44,6 +44,20 @@ def original_read_files(root):
 
 
 class Req7GlobalAttemptJournalTests(unittest.TestCase):
+    def test_successor_preparation_rejects_unissued_owner_before_catalog_read(self):
+        with mock.patch.object(self.module, '_catalog_present') as catalog:
+            with self.assertRaises(self.module.GlobalAttemptHold):
+                self.module.prepare_global_unit(object(), binding(), self.value)
+            catalog.assert_not_called()
+        self.assertFalse(self.store.exists())
+
+    def test_public_successor_preparation_accepts_no_settlement_override(self):
+        for override in ({'applied': True}, {'keys': ()}, {'verify': lambda: None},
+                         {'_verify_settlement': lambda: None}):
+            with self.subTest(override=tuple(override)), self.assertRaises(TypeError):
+                self.module.prepare_global_unit(object(), binding(), self.value, **override)
+        self.assertFalse(self.store.exists())
+
     def test_retry_guard_fixture_does_not_capture_mock_workbook_reader_in_cold_receipt_import(self):
         program = '''import unittest
 from monitor import issue_tracker_local_workbook_commit as workbook
