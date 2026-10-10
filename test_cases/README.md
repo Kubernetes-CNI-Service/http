@@ -2119,6 +2119,24 @@ manifest direct and real six-script workflow mappings cover this composition.
 These are local development results, not default worker dispatch, NEW/R2,
 freshness/G1/T6, whole REQ7, runner approval or current formal full/check.
 
+Every original terminal prod cycle's default read-only worker lane now calls
+the ALL-project UNSENT writer after original reconciliation, while the same
+sheet owner and current target/cycle scopes remain held. The append acquires
+and verifies its own ALL catalog/C6 scopes; no closed reconciliation verifier
+is reused. RetainedInventoryHold stops only disposition: it neither discards
+the original UNKNOWN/CONFLICT observations nor claims an append succeeded.
+Historical APPLIED with stopped disposition gets a fixed mutation-disabled
+notice, not GO; ordinary stalled diagnostics stay byte-identical. Cycle drift,
+config/allowlist/owner finalizers and BaseException still refuse successful
+return. The observation cache keeps its existing five non-authority fields.
+Five independently observed direct cases and two actual OAuth/four-read/C6
+workflows first failed before implementation, then passed unchanged after the
+16-line worker seam. The positive registers selected generation2 before old
+generation1 and proves only automatic historical UNSENT submission, not a
+final-unit count/CLAIM handoff. UNKNOWN/count/wire and cycle originals remain.
+This adds no NEW/R2 mutation, current-source qualification, freshness/G1/T6,
+whole REQ7, real device/Cloud/power-loss or current formal full/check claim.
+
 The non-authoritative online observation display distinguishes UNKNOWN with
 an original durable total count of six as `retry_exhausted`: read-only
 reconciliation and escalation, with mutation still disabled. Counts one through

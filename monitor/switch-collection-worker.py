@@ -1020,6 +1020,9 @@ def _reconcile_issue_tracker_online_after_completion(store):
     bound to its actual held gate and complete original archive is accepted.
     OAuth is lazy inside ALL catalog/C6; no current counted unit means no read.
     All cycle originals outlive the C6/creator/owner finalizers.
+    ALL-project UNSENT is a separate local evidence append, never a send lane.
+    Its typed HOLD retains the completed read-only observations; it cannot
+    suppress current-cycle/config/owner finalizers or operator interruption.
     """
     expected_fields = {'gate', 'source', 'scope', 'project_identity', 'project_key',
         'root_status_dir', 'status_dir', 'records_dir', 'witness_path'}
@@ -1044,8 +1047,12 @@ def _reconcile_issue_tracker_online_after_completion(store):
     from monitor.issue_tracker_online_target import _hold_current_project_online_target
     from monitor.issue_tracker_spreadsheet_owner import spreadsheet_owner
     from monitor.issue_tracker_remote_history_match import _reconcile_pending_project_units
+    from monitor.issue_tracker_retained_inventory import (
+        RetainedInventoryHold, _record_all_project_unsent_dispositions,
+    )
     from contextlib import ExitStack
     failed = False
+    disposition_stopped = False
     try:
         with _hold_completed_cycle_replay(store) as verify_cycles:
             if not read_completed_cycle_evidence(store):
@@ -1059,6 +1066,13 @@ def _reconcile_issue_tracker_online_after_completion(store):
                         verify_cycles()
                         result = _reconcile_pending_project_units(writer, owner, binding, _store=store)
                         verify_cycles()
+                        try:
+                            _record_all_project_unsent_dispositions(owner, binding)
+                        except RetainedInventoryHold:
+                            # Unsettled inventory or stopped/partial append is
+                            # not successful disposition, FIFO release or GO.
+                            disposition_stopped = True
+                        verify_cycles()
                     verify_cycles()
                 verify_cycles()
             verify_cycles()
@@ -1068,6 +1082,8 @@ def _reconcile_issue_tracker_online_after_completion(store):
         raise CollectionCycleHoldError('online original reconciliation unavailable')
     _report_issue_tracker_online_read_only_result(result)
     _publish_issue_tracker_online_observation_status(result)
+    if disposition_stopped and result and all(item.state == 'APPLIED' for item in result):
+        print('Issue Tracker UNSENT disposition unavailable; mutation disabled', file=sys.stderr)
     return result
 
 
