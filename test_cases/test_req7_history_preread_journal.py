@@ -764,6 +764,21 @@ class Req7HistoryPrereadNativeWorkflowTests(unittest.TestCase):
 
 
 class Req7OriginalBusinessReadAcquisitionDirectTests(unittest.TestCase):
+    def test_original_image_handoff_has_no_selector_and_rejects_unissued_guard(self):
+        import copy
+        import inspect
+        module = load()
+        api = getattr(module._OriginalBusinessReadGuard, '_hold_original_images', None)
+        self.assertTrue(callable(api), 'original images need continuous FD overlap, not path reacquisition')
+        self.assertEqual(('self',), tuple(inspect.signature(api).parameters))
+        original = module._OriginalBusinessReadGuard()
+        with mock.patch.object(module.os, 'dup') as duplicate:
+            for candidate in (original, copy.copy(original)):
+                with self.assertRaises(module.HistoryPrereadHold):
+                    with candidate._hold_original_images():
+                        self.fail('unissued guard entered original image handoff')
+            duplicate.assert_not_called()
+
     def test_original_issued_inputs_are_owner_only_and_forged_guard_cannot_supply_them(self):
         import copy
         import inspect

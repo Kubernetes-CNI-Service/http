@@ -8,6 +8,7 @@ admission/transport permission. The fixed launcher must still dominate sends.
 """
 from dataclasses import dataclass
 from contextlib import contextmanager, ExitStack
+import errno
 import hashlib
 import json
 import os
@@ -70,6 +71,87 @@ class _OriginalBusinessReadGuard:
                 raise HistoryPrereadHold()
         return result
 
+    @contextmanager
+    def _hold_original_images(self):
+        """Overlap the actual two directories/seven images, never reacquire.
+
+        The strict original reader must finish normally before a writer may
+        use this graph. Its issued response identities/deadlines remain checked;
+        only its global read-only namespace/count snapshot is not transferred.
+        This helper does not count, claim, send or prove G1 permission.
+        """
+        from monitor import issue_tracker_unit_catalog as catalog
+        images = catalog._Originals(); live = [True]; failed = False
+        try:
+            packet = self._original_issued_inputs()
+            with _BUSINESS_READ_GUARD_LOCK:
+                state = _BUSINESS_READ_GUARDS.get(self)
+                if state is None or state[0] != 'LIVE' or state[4] is None:
+                    raise HistoryPrereadHold()
+                original = state[4]
+            if (len(original.directories) != 2 or len(original.files) != 7
+                    or original.directories[1][1] != original.directories[0][1][:-9] + '.history'):
+                raise HistoryPrereadHold()
+            source_parents = tuple(item[2] for item in original.directories)
+            if ({name for parent, name, *_rest in original.files if parent == source_parents[0]}
+                    != {'MANIFEST','BUSINESS-RAW','HEADER','INITIALIZED'}
+                    or {name for parent, name, *_rest in original.files if parent == source_parents[1]}
+                    != {'HISTORY-RAW','HEADER','INITIALIZED'}):
+                raise HistoryPrereadHold()
+            parents = {}
+            for parent, name, fd, identity, names in original.directories:
+                duplicate = os.dup(fd)
+                images.directories.append((parent, name, duplicate, identity, names))
+                if journal._identity(os.fstat(duplicate)) != identity:
+                    raise HistoryPrereadHold()
+                parents[fd] = duplicate
+            for parent, name, fd, identity, raw in original.files:
+                duplicate = os.dup(fd)
+                images.files.append((parents[parent], name, duplicate, identity, raw))
+                if journal._identity(os.fstat(duplicate)) != identity:
+                    raise HistoryPrereadHold()
+            self(); images.verify(); self()
+            def verify():
+                if not live[0]: raise HistoryPrereadHold()
+                try:
+                    # LIVE still dominates its complete strict reader; CLOSED
+                    # checks only the same actual issued auth/read registry.
+                    with _BUSINESS_READ_GUARD_LOCK:
+                        state = _BUSINESS_READ_GUARDS.get(self)
+                        phase = None if state is None else state[0]
+                    if phase == 'LIVE': self()
+                    elif phase == 'CLOSED': self._verify_issued_only()
+                    else: raise HistoryPrereadHold()
+                    images.verify()
+                    self._verify_issued_only()
+                except BaseException as error:
+                    live[0] = False
+                    if isinstance(error, Exception):
+                        raise HistoryPrereadHold() from None
+                    raise
+            verify()
+            yield packet, verify
+            verify()
+        except Exception:
+            failed = True
+        finally:
+            live[0] = False
+            images.close()
+        if failed: raise HistoryPrereadHold() from None
+        # The generic graph closes only confirmed original inode slots. A
+        # foreign reuse or unconfirmed cleanup must not become success here;
+        # inspect without closing any still-live slot, even if it is foreign.
+        for record in (*images.files, *images.directories):
+            try:
+                os.fstat(record[2])
+            except OSError as error:
+                if error.errno != errno.EBADF: raise HistoryPrereadHold() from None
+            else:
+                raise HistoryPrereadHold()
+        # Cleanup can itself revoke the original issued authorization. Do not
+        # return success using the pre-cleanup check or reopen closed images.
+        self._verify_issued_only()
+
     def _check(self, *, issued_only):
         failed = False
         try:
@@ -83,7 +165,7 @@ class _OriginalBusinessReadGuard:
                 verify()
             except BaseException:
                 with _BUSINESS_READ_GUARD_LOCK:
-                    state[:] = ['FAILED', None, None, None]
+                    state[:] = ['FAILED', None, None, None, None]
                 raise
             with _BUSINESS_READ_GUARD_LOCK:
                 if _BUSINESS_READ_GUARDS.get(self) is not state or state[0] == 'FAILED':
@@ -326,7 +408,7 @@ def _hold_owned_original_business_history_reads(writer_token, owner_token, bindi
             guard = _OriginalBusinessReadGuard()
             with _BUSINESS_READ_GUARD_LOCK:
                 _BUSINESS_READ_GUARDS[guard] = ['LIVE', verify, current,
-                    (identity_response, history_response, tuple(tuple(item.items()) for item in fresh))]
+                    (identity_response, history_response, tuple(tuple(item.items()) for item in fresh)), held]
             yield original, guard
             guard()
         # All finalizers have run; do not reuse a closed originals verifier.
@@ -334,7 +416,7 @@ def _hold_owned_original_business_history_reads(writer_token, owner_token, bindi
         with _BUSINESS_READ_GUARD_LOCK:
             state = _BUSINESS_READ_GUARDS[guard]
             if state[0] != 'LIVE': raise HistoryPrereadHold()
-            state[0] = 'CLOSED'; state[1] = None; state[3] = None
+            state[0] = 'CLOSED'; state[1] = None; state[3] = None; state[4] = None
         completed = True
     except Exception:
         failed = True
@@ -344,7 +426,7 @@ def _hold_owned_original_business_history_reads(writer_token, owner_token, bindi
         if guard is not None and not completed:
             with _BUSINESS_READ_GUARD_LOCK:
                 state = _BUSINESS_READ_GUARDS.get(guard)
-                if state is not None: state[:] = ['FAILED', None, None, None]
+                if state is not None: state[:] = ['FAILED', None, None, None, None]
     if failed:
         raise HistoryPrereadHold() from None
 

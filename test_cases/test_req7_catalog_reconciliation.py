@@ -294,7 +294,23 @@ class CatalogProjectAuthenticationHandoffDirectTests(unittest.TestCase):
             and isinstance(node.iter,ast.Tuple))
         self.assertEqual(('template_identity','template_headers','whitelist','metadata'),
             tuple(ast.literal_eval(item) for item in read_loop.iter.elts))
-        final_read_loop=body[held_index+1]
+        # The actual original business readers outlive all old source/C6
+        # finalizers. Pin their normal close order, then independently check
+        # every issued business response before the four original gate reads.
+        self.assertEqual('scope.close()',ast.unparse(holder.body[-3]))
+        live_business_loop=holder.body[-2]
+        self.assertIsInstance(live_business_loop,ast.For)
+        self.assertEqual('business_guards',ast.unparse(live_business_loop.iter))
+        self.assertEqual(['verify_business()'],
+            [ast.unparse(node) for node in live_business_loop.body])
+        self.assertEqual('business_scope.close()',ast.unparse(holder.body[-1]))
+        final_business_loop=body[held_index+1]
+        self.assertIsInstance(final_business_loop,ast.For,
+            'actual issued business reads must be rechecked after their last finalizer')
+        self.assertEqual('business_guards',ast.unparse(final_business_loop.iter))
+        self.assertEqual(['verify_business._verify_issued_only()'],
+            [ast.unparse(node) for node in final_business_loop.body])
+        final_read_loop=body[held_index+2]
         self.assertIsInstance(final_read_loop,ast.For,
             'actual read deadlines must be rechecked after every original-holder finalizer')
         self.assertEqual('responses.items()',ast.unparse(final_read_loop.iter))
@@ -306,7 +322,7 @@ class CatalogProjectAuthenticationHandoffDirectTests(unittest.TestCase):
             tuple(arg.id for arg in call.args))
         self.assertEqual([('read_kind','kind')],[(arg.arg,arg.value.id) for arg in call.keywords])
         self.assertEqual(['require_current_owned_project_token','inspect_project_online_target'],
-            [node.value.func.id for node in body[held_index+2:]])
+            [node.value.func.id for node in body[held_index+3:]])
 
     def test_fixed_internal_handoff_accepts_no_caller_authentication_or_factory(self):
         import inspect

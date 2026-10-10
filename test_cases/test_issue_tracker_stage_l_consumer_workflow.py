@@ -29,6 +29,195 @@ from test_cases.test_issue_tracker_stage_l_consumer import ProdStageLFixture
 
 
 class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
+    def _original_business_image_handoff_probe(self, fault):
+        from monitor import issue_tracker_history_preread_journal as preread
+        from monitor import issue_tracker_history_read_launcher as reads
+        import stat
+        self.assertTrue(callable(getattr(preread._OriginalBusinessReadGuard, '_hold_original_images', None)),
+                        'actual business originals lack continuously overlapped image handoff')
+        original_scope = preread._hold_owned_original_business_history_reads
+        real_dup, real_fstat, real_open = os.dup, os.fstat, os.open
+        witnessed = []
+        @contextmanager
+        def bridge(*args, **kwargs):
+            duplicates = []; checked = []; revoked = []; substituted = []
+            with ExitStack() as images:
+                with original_scope(*args, **kwargs) as pair:
+                    if fault == 'first-stat-cleanup':
+                        import tempfile
+                        actual_fstat = preread.os.fstat
+                        for variant in ('owned', 'foreign'):
+                            acquired = []; interrupted = []
+                            with tempfile.TemporaryFile() as foreign:
+                                foreign.write(b'foreign descriptor remains caller-owned'); foreign.flush()
+                                foreign_identity = real_fstat(foreign.fileno())
+                                def early_duplicate(fd):
+                                    value = real_dup(fd); acquired.append(value); return value
+                                def first_stat(fd):
+                                    if fd in acquired and not interrupted:
+                                        interrupted.append(fd)
+                                        if variant == 'foreign': os.dup2(foreign.fileno(),fd)
+                                        raise KeyboardInterrupt('owned first duplicate stat interruption')
+                                    return actual_fstat(fd)
+                                with mock.patch.object(preread.os,'dup',side_effect=early_duplicate), \
+                                        mock.patch.object(preread.os,'fstat',side_effect=first_stat), \
+                                        self.assertRaises(KeyboardInterrupt):
+                                    with pair[1]._hold_original_images():
+                                        self.fail('interrupted first stat yielded original images')
+                                self.assertEqual(1,len(acquired)); self.assertEqual(acquired,interrupted)
+                                if variant == 'owned':
+                                    with self.assertRaises(OSError): real_fstat(acquired[0])
+                                else:
+                                    self.assertEqual(foreign_identity,real_fstat(acquired[0]))
+                                    self.assertEqual(b'foreign descriptor remains caller-owned',
+                                                     os.pread(acquired[0],64,0))
+                                    os.close(acquired[0])  # only the fixture's preserved foreign alias
+                            pair[1]()  # the old strict holder was never substituted/revoked
+                    def duplicate(fd):
+                        value = real_dup(fd)
+                        before = real_fstat(fd)
+                        duplicates.append((value, before, None if stat.S_ISDIR(before.st_mode)
+                                           else os.pread(fd, before.st_size+1, 0)))
+                        return value
+                    with mock.patch.object(preread.os, 'dup', side_effect=duplicate):
+                        packet, verify = images.enter_context(pair[1]._hold_original_images())
+                    self.assertEqual(9, len(duplicates))
+                    self.assertEqual(2, sum(stat.S_ISDIR(before.st_mode) for _, before, _ in duplicates))
+                    old_packet = pair[1]._original_issued_inputs()
+                    self.assertIs(old_packet[0], packet[0]); self.assertIs(old_packet[1], packet[1])
+                    self.assertEqual(old_packet[2], packet[2])
+                    self.assertIsNot(old_packet[2][0], packet[2][0])
+                    yield pair
+                # The strict read holder and its old originals have CLOSED.
+                # Independently prove the actual duplicate graph survived it.
+                for fd, before, raw in duplicates:
+                    self.assertEqual(before, real_fstat(fd))
+                    if raw is not None: self.assertEqual(raw, os.pread(fd, len(raw)+1, 0))
+                opened = []
+                def opening(name, flags, **options):
+                    opened.append(str(name)); return real_open(name, flags, **options)
+                verify()
+                if fault == 'rebind':
+                    folder = next(fd for fd, before, _raw in duplicates
+                                  if stat.S_ISDIR(before.st_mode) and 'BUSINESS-RAW' in os.listdir(fd))
+                    before = os.stat('BUSINESS-RAW', dir_fd=folder, follow_symlinks=False)
+                    fd = real_open('BUSINESS-RAW', os.O_RDONLY | os.O_NOFOLLOW, dir_fd=folder)
+                    try: raw = os.pread(fd, before.st_size+1, 0)
+                    finally: os.close(fd)
+                    os.rename('BUSINESS-RAW','preserved-owned-business-raw',src_dir_fd=folder,dst_dir_fd=folder)
+                    fd = real_open('BUSINESS-RAW',os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                                   dir_fd=folder,mode=0o600)
+                    try: self.assertEqual(len(raw),os.write(fd,raw))
+                    finally: os.close(fd)
+                    self.assertNotEqual(before.st_ino,os.stat('BUSINESS-RAW',dir_fd=folder).st_ino)
+                    substituted.append(folder)
+                elif fault == 'revoke':
+                    response = next(item['row_response'] for item in packet[2] if item['row_response'] is not None)
+                    with reads._PROJECT_READ_GUARD:
+                        saved = reads._PROJECT_READS.pop(response)
+                    revoked.append((response, saved))
+                try:
+                    with mock.patch.object(preread.os, 'open', side_effect=opening):
+                        if fault in ('rebind','revoke'):
+                            with self.assertRaises(preread.HistoryPrereadHold): verify()
+                            checked.append('HOLD')
+                        else:
+                            verify(); checked.append('LIVE')
+                finally:
+                    for response, saved in revoked:
+                        with reads._PROJECT_READ_GUARD: reads._PROJECT_READS[response] = saved
+                self.assertFalse(set(opened) & {'MANIFEST','BUSINESS-RAW','HISTORY-RAW','HEADER','INITIALIZED'},
+                                 'verification reopened original fixed images')
+                if fault in ('rebind','revoke'):
+                    with self.assertRaises(preread.HistoryPrereadHold): verify()
+                # Restore only this fixture's original name for the existing
+                # outer no-mutation assertions; the failed handoff stays failed.
+                for folder in substituted:
+                    os.unlink('BUSINESS-RAW',dir_fd=folder)
+                    os.rename('preserved-owned-business-raw','BUSINESS-RAW',src_dir_fd=folder,dst_dir_fd=folder)
+                if fault in ('close-revoke','close-foreign'):
+                    from monitor import issue_tracker_unit_catalog as catalog
+                    actual_close = catalog._close_original
+                    response = next(item['row_response'] for item in packet[2] if item['row_response'] is not None)
+                    cleanup_revocations = []; cleanup_rebindings = []
+                    def revoke_after_last_owned_close(fd, identity):
+                        if fault == 'close-foreign' and fd == duplicates[0][0]:
+                            import tempfile
+                            foreign = tempfile.TemporaryFile()
+                            foreign.write(b'foreign cleanup descriptor'); foreign.flush()
+                            os.dup2(foreign.fileno(),fd)
+                            cleanup_rebindings.append((fd,foreign,real_fstat(fd)))
+                        result = actual_close(fd, identity)
+                        if fault == 'close-revoke' and fd == duplicates[0][0]:
+                            with reads._PROJECT_READ_GUARD:
+                                cleanup_revocations.append((response,reads._PROJECT_READS.pop(response)))
+                        return result
+                    try:
+                        with mock.patch.object(catalog,'_close_original',side_effect=revoke_after_last_owned_close), \
+                                self.assertRaises(preread.HistoryPrereadHold):
+                            images.close()
+                    finally:
+                        for response, saved in cleanup_revocations:
+                            with reads._PROJECT_READ_GUARD: reads._PROJECT_READS[response] = saved
+                        for fd, foreign, identity in cleanup_rebindings:
+                            try:
+                                self.assertEqual(identity,real_fstat(fd))
+                                self.assertEqual(b'foreign cleanup descriptor',os.pread(fd,64,0))
+                            finally:
+                                os.close(fd); foreign.close()  # the fixture, never the image holder
+                    self.assertEqual(1,len(cleanup_revocations)+len(cleanup_rebindings))
+                    checked[0] = 'CLOSE-HOLD'
+                if fault == 'first-stat-cleanup': checked[0] = 'FIRST-STAT-HOLD'
+                witnessed.append(checked[0])
+                if fault in ('rebind','revoke'):
+                    with self.assertRaises(preread.HistoryPrereadHold): images.close()
+            with self.assertRaises(preread.HistoryPrereadHold): verify()
+            for fd, _before, _raw in duplicates:
+                with self.assertRaises(OSError): real_fstat(fd)
+        original_native = self._exercise_native_original_counted_launch
+        def scoped_native(**arguments):
+            from test_cases import test_req7_remote_history_match as gate_fixture
+            import importlib
+            actual_load = gate_fixture.load
+            with ExitStack() as boundary:
+                def after_actual_load(*args, **kwargs):
+                    nonlocal preread, reads, original_scope
+                    result = actual_load(*args, **kwargs)
+                    # The real native fixture deliberately reloads its modules.
+                    # Bind only the actual module it now consumes, not a stale
+                    # pre-fixture Python object with the same import name.
+                    preread = importlib.import_module('monitor.issue_tracker_history_preread_journal')
+                    reads = importlib.import_module('monitor.issue_tracker_history_read_launcher')
+                    original_scope = preread._hold_owned_original_business_history_reads
+                    boundary.enter_context(mock.patch.object(preread,
+                        '_hold_owned_original_business_history_reads',side_effect=bridge))
+                    return result
+                boundary.enter_context(mock.patch.object(gate_fixture,'load',side_effect=after_actual_load))
+                return original_native(**arguments)
+        with mock.patch.object(self,'_exercise_native_original_counted_launch',side_effect=scoped_native):
+            self._original_business_read_acquisition_probe('business-live-inputs')
+        expected = ('CLOSE-HOLD' if fault in ('close-revoke','close-foreign') else
+                    'FIRST-STAT-HOLD' if fault == 'first-stat-cleanup' else 'HOLD' if fault else 'LIVE')
+        self.assertEqual([expected]*2, witnessed)
+
+    def test_actual_business_original_images_overlap_strict_close_without_reopening_or_count(self):
+        self._original_business_image_handoff_probe(None)
+
+    def test_actual_business_image_handoff_same_bytes_rebind_retains_original_and_holds(self):
+        self._original_business_image_handoff_probe('rebind')
+
+    def test_actual_business_image_handoff_original_issued_revocation_is_irreversible_hold(self):
+        self._original_business_image_handoff_probe('revoke')
+
+    def test_actual_business_image_handoff_last_owned_cleanup_revocation_cannot_return_success(self):
+        self._original_business_image_handoff_probe('close-revoke')
+
+    def test_actual_business_image_handoff_first_stat_interrupt_closes_only_owned_duplicate(self):
+        self._original_business_image_handoff_probe('first-stat-cleanup')
+
+    def test_actual_business_image_handoff_foreign_cleanup_descriptor_is_retained_and_holds(self):
+        self._original_business_image_handoff_probe('close-foreign')
+
     def _original_business_read_acquisition_probe(self, mode):
         from monitor import issue_tracker_history_preread_journal as preread
         self.assertTrue(callable(getattr(preread, '_hold_owned_original_business_history_reads', None)),

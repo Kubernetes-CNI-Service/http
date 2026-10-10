@@ -2445,3 +2445,20 @@ images and malformed projections display unproved, never idle/GO. This does
 not enable the uninstalled manual/K relay, default FIRST/R2 or online sending;
 last observation is explicitly not current admission. Whole C25/REQ7,
 current full/check and all field validation remain open.
+
+The LIVE original-business guard now overlaps its actual two directories and
+seven fixed images into a private duplicate-FD graph before the strict
+read-only scope closes. No paths are reopened, no caller selector/verifier is
+accepted, and no initial namespace/count snapshot is transferred as append
+authority. Actual issued response identities, authentication and unchanged
+deadlines remain checked after strict closure. Same-byte replacement and
+issued-read revocation irreversibly refuse the graph. First-stat interruption
+cleans only still-owned duplicate inodes; foreign FD reuse is preserved.
+Successful cleanup must confirm all nine slots closed and recheck the actual
+issued reads after the last owned cleanup: skipped foreign cleanup or final
+revocation cannot return success. Independent direct and real protected ETH/IB
+OAuth/TLS workflows retain their literal no-count/no-CLAIM/no-mutation and
+unchanged-original expectations. This is a necessary original-image handoff,
+not installed default FIRST/R2, G1 or a send permit; whole REQ7, exact-tree
+full/check and field validation remain open. No existing tests or deadlines
+were removed, skipped or weakened.
