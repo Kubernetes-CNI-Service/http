@@ -2336,3 +2336,17 @@ after the actual last catalog holder has exited: all four real reads succeed
 first, but expired observations must HOLD without changing count/CLAIM/images.
 Removing the new final read checks makes both independent direct and native
 expectations fail. The fixed 30-second observation budget is unchanged.
+
+REQ7 mixed settlement is an original-held read, not admission: the private
+fixed-owner reader joins ALL actual project C6/catalog/family/count originals.
+Only a counted COMPLETE with the complete original APPLIED/key pair is settled;
+counted UNKNOWN and unattempted units remain pending without count mutation.
+Each project APPLIED/key namespace must exactly match the completed units,
+including both STARTED/final pairs. Bare, missing, partial or extra markers
+refuse the whole observation. Actual proof and C6 originals remain held through
+the consumer, and namespace checks run again after proof-reader finalizers while
+project owners are still held. Existing strict APPLIED readers are unchanged.
+Independent direct and actual native/TLS multi-script tests cover original
+classification, count retention and inode/namespace faults. This prerequisite
+does not reclaim permanent quota fences, issue NEW/count/CLAIM, close REQ7, or
+replace exact-tree full/check. Field validation remains NOT RUN.

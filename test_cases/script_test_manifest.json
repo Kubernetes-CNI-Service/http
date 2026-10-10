@@ -1908,6 +1908,11 @@
       "tests": ["test_cases.test_req7_retained_applied_inventory"]
     },
     {
+      "id": "req7_all_project_mixed_original_settlement",
+      "paths": ["monitor/issue_tracker_retained_inventory.py"],
+      "tests": ["test_cases.test_req7_retained_applied_inventory"]
+    },
+    {
       "id": "req7_retained_library_manual_profile",
       "paths": ["tools/update-user-manual.py"],
       "tests": ["test_cases.test_req7_retained_manual_profile"]
@@ -3522,6 +3527,11 @@
     },
     {
       "id": "req7_all_project_c6_applied_unsent_append_cold_recovery",
+      "members": ["monitor/issue_tracker_retained_inventory.py", "monitor/issue_tracker_unit_catalog.py", "monitor/issue_tracker_remote_history_match.py", "monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_spreadsheet_owner.py"],
+      "tests": ["test_cases.test_req7_retained_applied_inventory", "test_cases.test_req7_unit_catalog"]
+    },
+    {
+      "id": "req7_all_project_mixed_c6_complete_applied_key_originals",
       "members": ["monitor/issue_tracker_retained_inventory.py", "monitor/issue_tracker_unit_catalog.py", "monitor/issue_tracker_remote_history_match.py", "monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_spreadsheet_owner.py"],
       "tests": ["test_cases.test_req7_retained_applied_inventory", "test_cases.test_req7_unit_catalog"]
     },

@@ -1199,3 +1199,242 @@ print('COLD_MIXED_DISPOSITION_CONSUMED_COUNT_STAYS_UNKNOWN')
 
     def test_actual_mixed_disposition_consumed_claim_cold_process_cannot_reconsume(self):
         self.exercise(cold=True)
+
+
+class AllProjectMixedSettlementTests(unittest.TestCase):
+    def api(self, module=None):
+        module = module or load()
+        api = getattr(module, '_hold_all_project_mixed_settlements', None)
+        self.assertTrue(callable(api), 'mixed inventory needs an original-held settlement reader')
+        return module, api
+
+    def test_unissued_owner_refuses_before_actual_catalog_or_project_reads(self):
+        from unittest import mock
+        module, api = self.api()
+        from monitor import issue_tracker_unit_catalog as catalog
+        with mock.patch.object(catalog, 'hold_pending_project_c6_units') as reading:
+            with self.assertRaises(module.RetainedInventoryHold):
+                with api(object(), object()):
+                    self.fail('unissued owner read project originals')
+            reading.assert_not_called()
+
+    def test_no_caller_rows_settlement_paths_or_verifier_can_replace_originals(self):
+        _module, api = self.api()
+        import inspect
+        self.assertEqual(('token', 'binding'), tuple(inspect.signature(api).parameters))
+        for claims in ({'rows': ()}, {'settled': ()}, {'project': 'foreign'}, {'verify': lambda: None}):
+            with self.subTest(claim=tuple(claims)), self.assertRaises(TypeError):
+                with api(object(), object(), **claims):
+                    self.fail('caller settlement replaced originals')
+
+    def observe(self, counted):
+        self.api()
+        from test_cases import test_req7_unit_catalog as fixtures
+        with fixtures.CatalogAppliedNativeWorkflowTests.completed_and_pending(
+                self, project_origins=True) as (case, catalog, _remote, inventory, _old,
+                                               writer, owner, bound, units):
+            from monitor import issue_tracker_global_attempt_journal as journal
+            if counted:
+                state = journal.record_global_attempt_intent(owner, bound, units[1])
+                self.assertEqual((1, 'UNKNOWN'), (state.attempt_count, state.outcome))
+            before = original_read_files(case.root)
+            project = case.root / 'project'
+            identity = (project.stat().st_dev, project.stat().st_ino)
+            with inventory._hold_all_project_mixed_settlements(owner, bound) as (rows, verify):
+                self.assertEqual(((units[0], 1, True, ((('switch', 'node0001', 'down', 'fabric'), 1),), identity),
+                                  (units[1], int(counted), False, (), identity)),
+                    tuple((r.unit, r.attempt_count, r.settled, r.key_watermarks, r.project_identity) for r in rows))
+                self.assertTrue(all(not hasattr(r, 'permit') and not hasattr(r, 'go') for r in rows))
+                verify()
+            self.assertEqual(before, original_read_files(case.root))
+            self.assertEqual(((1, 'UNKNOWN'), (1, 'UNKNOWN') if counted else (0, 'UNATTEMPTED_OBSERVATION')),
+                tuple((s.attempt_count, s.outcome) for _u, s in journal.inspect_catalog_global_units(owner, bound)))
+
+    def test_actual_complete_applied_key_pair_and_unattempted_pending_are_both_held(self):
+        self.observe(False)
+
+    def test_actual_counted_unknown_remains_pending_without_clearing_original_count(self):
+        self.observe(True)
+
+    def test_partial_applied_or_key_settlement_never_downgrades_to_pending_or_repairs(self):
+        self.api()
+        from test_cases import test_req7_unit_catalog as fixtures
+        for prefix in ('REMOTE-APPLIED-', 'REMOTE-KEY-HIGH-WATER-STARTED-', 'REMOTE-KEY-HIGH-WATER-'):
+            with self.subTest(prefix=prefix), fixtures.CatalogAppliedNativeWorkflowTests.completed_and_pending(
+                    self, project_origins=True) as (case, _catalog, _remote, inventory, _old,
+                                                   _writer, owner, bound, units):
+                target = case.root / 'project/.tracker' / (prefix + units[0].unit_id)
+                target.rename(case.root / 'preserved-partial-settlement')
+                before = original_read_files(case.root)
+                entered = []
+                with self.assertRaises(inventory.RetainedInventoryHold):
+                    with inventory._hold_all_project_mixed_settlements(owner, bound):
+                        entered.append(True)
+                self.assertEqual([], entered)
+                self.assertEqual(before, original_read_files(case.root))
+
+    def test_original_key_or_c6_same_byte_replacement_revokes_the_entire_consumer(self):
+        self.api()
+        from test_cases import test_req7_unit_catalog as fixtures
+        import json
+        for kind in ('key', 'c6'):
+            with self.subTest(kind=kind), fixtures.CatalogAppliedNativeWorkflowTests.completed_and_pending(
+                    self, project_origins=True) as (case, _catalog, _remote, inventory, _old,
+                                                   _writer, owner, bound, units):
+                generation = json.loads(units[0].action_preimage)['identity']['generation_id']
+                target = (case.root / 'project/.tracker' / ('REMOTE-KEY-HIGH-WATER-' + units[0].unit_id)
+                    if kind == 'key' else case.root / 'project/.tracker/generations' / generation / 'RECEIPT')
+                original = target.read_bytes(); preserved = case.root / 'preserved-mixed-original'
+                reached = []
+                with self.assertRaises(inventory.RetainedInventoryHold):
+                    with inventory._hold_all_project_mixed_settlements(owner, bound) as (rows, verify):
+                        reached.append(tuple(r.settled for r in rows))
+                        target.rename(preserved); target.write_bytes(original); target.chmod(0o600)
+                        verify()
+                self.assertEqual([(True, False)], reached)
+                self.assertEqual(original, target.read_bytes()); self.assertEqual(original, preserved.read_bytes())
+                self.assertNotEqual(target.stat().st_ino, preserved.stat().st_ino)
+
+    def test_pending_bare_applied_and_new_marker_during_consumer_never_form_settlement(self):
+        self.api()
+        from test_cases import test_req7_unit_catalog as fixtures
+        for timing in ('before', 'during'):
+            with self.subTest(timing=timing), fixtures.CatalogAppliedNativeWorkflowTests.completed_and_pending(
+                    self, project_origins=True) as (case, _catalog, _remote, inventory, _old,
+                                                   _writer, owner, bound, units):
+                target = case.root / 'project/.tracker' / ('REMOTE-APPLIED-' + units[1].unit_id)
+                raw = b'INDEPENDENT BARE MARKER IS NOT COMPLETION\n'
+                reached = []
+                if timing == 'before':
+                    target.write_bytes(raw); target.chmod(0o600)
+                with self.assertRaises(inventory.RetainedInventoryHold):
+                    with inventory._hold_all_project_mixed_settlements(owner, bound) as (rows, verify):
+                        reached.append(tuple(r.settled for r in rows))
+                        target.write_bytes(raw); target.chmod(0o600)
+                        verify()
+                self.assertEqual([] if timing == 'before' else [(True, False)], reached)
+                self.assertEqual(raw, target.read_bytes())
+
+    def test_actual_last_key_proof_close_same_byte_rebind_refuses_outer_return(self):
+        self.api()
+        from contextlib import contextmanager
+        from unittest import mock
+        from test_cases import test_req7_unit_catalog as fixtures
+        with fixtures.CatalogAppliedNativeWorkflowTests.completed_and_pending(
+                self, project_origins=True) as (case, _catalog, remote, inventory, _old,
+                                               _writer, owner, bound, units):
+            from monitor import issue_tracker_global_attempt_journal as journal
+            target = case.root / 'project/.tracker' / ('REMOTE-KEY-HIGH-WATER-' + units[0].unit_id)
+            preserved = case.root / 'preserved-finalizer-key'; original = target.read_bytes()
+            real = remote._hold_applied_records; replacements = []; entered = []; refused = False
+            @contextmanager
+            def after_actual_close(*args, **kwargs):
+                with real(*args, **kwargs) as verify:
+                    yield verify
+                if kwargs.get('states') == ('KEY-HIGH-WATER-STARTED', 'KEY-HIGH-WATER'):
+                    old_inode = target.stat().st_ino
+                    target.rename(preserved); target.write_bytes(original); target.chmod(0o600)
+                    replacements.append((old_inode, target.stat().st_ino))
+            with mock.patch.object(remote, '_hold_applied_records', side_effect=after_actual_close):
+                try:
+                    with inventory._hold_all_project_mixed_settlements(owner, bound) as (rows, verify):
+                        entered.append(tuple(r.settled for r in rows)); verify()
+                except inventory.RetainedInventoryHold:
+                    refused = True
+            self.assertEqual([(True, False)], entered)
+            self.assertEqual(1, len(replacements))
+            self.assertNotEqual(*replacements[0])
+            self.assertEqual(original, preserved.read_bytes()); self.assertEqual(original, target.read_bytes())
+            self.assertEqual(((1, 'UNKNOWN'), (0, 'UNATTEMPTED_OBSERVATION')),
+                tuple((s.attempt_count, s.outcome) for _u, s in journal.inspect_catalog_global_units(owner, bound)))
+            self.assertTrue(refused, 'actual last proof close must not permit same-byte original substitution')
+
+    def test_actual_different_project_generation_one_is_pending_not_global_applied_maximum(self):
+        self.api()
+        from test_cases import test_req7_unit_catalog as fixtures
+        with fixtures.CatalogAppliedNativeWorkflowTests.completed_and_pending(
+                self, cross_project=True, project_origins=True) as (
+                case, _catalog, _remote, inventory, _old, _writer, owner, bound, units):
+            before = original_read_files(case.root)
+            first, other = case.root / 'project', case.root / 'other-project'
+            with inventory._hold_all_project_mixed_settlements(owner, bound) as (rows, verify):
+                self.assertEqual(((units[0], 1, True, ((('switch', 'node0001', 'down', 'fabric'), 1),),
+                                   (first.stat().st_dev, first.stat().st_ino)),
+                                  (units[1], 0, False, (), (other.stat().st_dev, other.stat().st_ino))),
+                    tuple((r.unit, r.attempt_count, r.settled, r.key_watermarks, r.project_identity) for r in rows))
+                self.assertNotEqual(rows[0].project_identity, rows[1].project_identity)
+                verify()
+            self.assertEqual(before, original_read_files(case.root))
+
+    def test_actual_cold_process_reacquires_originals_without_parent_settlement_or_handles(self):
+        self.api()
+        from dataclasses import asdict
+        import json
+        import subprocess
+        from test_cases import test_req7_unit_catalog as fixtures
+        with fixtures.CatalogAppliedNativeWorkflowTests.completed_and_pending(
+                self, cold_handoff=True, project_origins=True) as (
+                case, _catalog, _remote, _inventory, _old, _writer, _owner, bound, _units):
+            before = original_read_files(case.root)
+            program = '''import json,sys
+from pathlib import Path
+sys.path[:0]=[sys.argv[1],str(Path(sys.argv[1])/'tools')]
+from test_cases import test_req7_unit_catalog as fixtures
+catalog=fixtures.load(); inventory=fixtures.load_component('issue_tracker_retained_inventory')
+from monitor import issue_tracker_spreadsheet_owner as ownership,issue_tracker_global_attempt_journal as journal
+from monitor.issue_tracker_online_target import OnlineTargetBinding
+from test_cases.test_req7_spreadsheet_owner import scoped_fixture
+root=Path(sys.argv[2]); bound=OnlineTargetBinding(**json.loads(sys.stdin.buffer.read()))
+assert catalog.local._ACTIVE=={}
+with catalog.local.writer_owner(root/'project',root/'project/publication') as writer,scoped_fixture(root,ownership),ownership.spreadsheet_owner(bound) as owner:
+ assert catalog.local._owner(writer).handles=={}
+ with inventory._hold_all_project_mixed_settlements(owner,bound) as (rows,verify):
+  assert tuple((r.attempt_count,r.settled,r.key_watermarks) for r in rows)==((1,True,((('switch','node0001','down','fabric'),1),)),(0,False,()))
+  assert all(r.project_identity==(root.joinpath('project').stat().st_dev,root.joinpath('project').stat().st_ino) for r in rows)
+  assert all(not hasattr(r,'permit') and not hasattr(r,'go') for r in rows)
+  verify()
+ assert tuple((s.attempt_count,s.outcome) for _u,s in journal.inspect_catalog_global_units(owner,bound))==((1,'UNKNOWN'),(0,'UNATTEMPTED_OBSERVATION'))
+ assert catalog.local._owner(writer).handles=={}
+assert catalog.local._ACTIVE=={}
+print('COLD_MIXED_ORIGINALS_UNKNOWN_RETAINED')
+'''
+            child = subprocess.run([sys.executable, '-B', '-c', program, str(SOURCE.parents[1]), str(case.root)],
+                input=json.dumps(asdict(bound)).encode(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
+            self.assertEqual(0, child.returncode, child.stdout + child.stderr)
+            self.assertEqual(b'COLD_MIXED_ORIGINALS_UNKNOWN_RETAINED\n', child.stdout)
+            self.assertEqual(b'', child.stderr)
+            self.assertEqual(before, original_read_files(case.root))
+
+    def test_actual_retained_inventory_close_new_pending_marker_refuses_entire_return(self):
+        self.api()
+        from contextlib import contextmanager
+        from unittest import mock
+        from test_cases import test_req7_unit_catalog as fixtures
+        with fixtures.CatalogAppliedNativeWorkflowTests.completed_and_pending(
+                self, project_origins=True) as (case, _catalog, _remote, inventory, _old,
+                                               _writer, owner, bound, units):
+            from monitor import issue_tracker_global_attempt_journal as journal
+            target = case.root / 'project/.tracker' / ('REMOTE-APPLIED-' + units[1].unit_id)
+            raw = b'BARE PENDING MARKER AFTER ACTUAL INVENTORY CLOSE IS NOT SETTLEMENT\n'
+            real = inventory._hold_catalog_retained_inventory; acquired = []; created = []
+            entered = []; refused = False
+            @contextmanager
+            def after_actual_close(*args, **kwargs):
+                outer = not acquired; acquired.append(True)
+                with real(*args, **kwargs) as original:
+                    yield original
+                if outer:
+                    self.assertFalse(target.exists())
+                    target.write_bytes(raw); target.chmod(0o600); created.append(target.name)
+            with mock.patch.object(inventory, '_hold_catalog_retained_inventory', side_effect=after_actual_close):
+                try:
+                    with inventory._hold_all_project_mixed_settlements(owner, bound) as (rows, verify):
+                        entered.append(tuple(r.settled for r in rows)); verify()
+                except inventory.RetainedInventoryHold:
+                    refused = True
+            self.assertEqual([(True, False)], entered)
+            self.assertEqual([target.name], created)
+            self.assertEqual(raw, target.read_bytes())
+            self.assertEqual(((1, 'UNKNOWN'), (0, 'UNATTEMPTED_OBSERVATION')),
+                tuple((s.attempt_count, s.outcome) for _u, s in journal.inspect_catalog_global_units(owner, bound)))
+            self.assertTrue(refused, 'actual inventory close cannot append a marker outside the held exact namespace')

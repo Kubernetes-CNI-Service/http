@@ -57,6 +57,16 @@ class CatalogUnitAppliedKeys:
 
 
 @dataclass(frozen=True)
+class CatalogUnitSettlement:
+    """Borrowed classification, not a send permit or permanent-fence release."""
+    unit: object = field(repr=False)
+    attempt_count: int
+    settled: bool
+    key_watermarks: tuple
+    project_identity: tuple
+
+
+@dataclass(frozen=True)
 class CatalogProjectKeyOrder:
     project_identity: tuple
     applied_maxima: tuple
@@ -1191,6 +1201,111 @@ def _hold_catalog_retained_inventory(token, binding):
             if not _close_if_original(fd, identity): failed = True
         for _name, folder, identity, _child_names in reversed(directories):
             if not _close_if_original(folder, identity): failed = True
+    if failed:
+        raise RetainedInventoryHold() from None
+
+
+@contextmanager
+def _hold_all_project_mixed_settlements(token, binding):
+    """Classify ALL catalog originals without requiring UNKNOWN to be APPLIED.
+
+    Only full original COMPLETE/APPLIED/key pairs settle a counted unit. A
+    pending count remains UNKNOWN; bare, partial or foreign project markers
+    refuse the entire read. No caller rows, paths, settlement or verifier are
+    accepted, and no count, CLAIM, repair or quota-fence reclamation is done.
+    """
+    failed = False
+    try:
+        sheet_owner = ownership._validated_owner(token, binding)
+        from monitor import issue_tracker_unit_catalog as catalog
+        from monitor import issue_tracker_remote_history_match as remote
+        with ExitStack() as outer:
+            projects, verify_c6 = outer.enter_context(catalog.hold_pending_project_c6_units(token, binding))
+            markers = catalog._Originals()
+            owners = {}; namespaces = {}; validators = []; result = []
+            prefixes = ('REMOTE-APPLIED-', 'REMOTE-KEY-HIGH-WATER-')
+            def marker_names(owner):
+                return frozenset(n for n in os.listdir(owner.root_fd) if n.startswith(prefixes))
+            def verify_markers():
+                if ownership._validated_owner(token, binding) is not sheet_owner:
+                    raise RetainedInventoryHold()
+                markers.verify()
+                for identity, (writer, owner) in owners.items():
+                    if (local._owner(writer) is not owner
+                            or journal._identity(os.fstat(owner.project_fd))[:2] != identity
+                            or marker_names(owner) != frozenset(namespaces[identity])):
+                        raise RetainedInventoryHold()
+                markers.verify()
+            def close_markers():
+                try:
+                    verify_markers()
+                finally:
+                    markers.close()
+            # Keep project marker originals past every proof and retained
+            # inventory finalizer, but release before borrowed C6 owners close.
+            outer.callback(close_markers)
+            observations, verify_inventory = outer.enter_context(_hold_catalog_retained_inventory(token, binding))
+            if tuple(p.unit for p in projects) != tuple(r.unit for r in observations):
+                raise RetainedInventoryHold()
+            for project, row in zip(projects, observations):
+                identity = project.project_identity
+                if identity not in owners:
+                    matches = [(writer, local._owner(writer)) for writer, active in tuple(local._ACTIVE.items())
+                        if active.pid == os.getpid()
+                        and journal._identity(os.fstat(active.project_fd))[:2] == identity]
+                    if len(matches) != 1:
+                        raise RetainedInventoryHold()
+                    owners[identity] = matches[0]
+                    namespaces[identity] = set()
+                if 'completion' in row.families:
+                    if not row.attempt_count:
+                        raise RetainedInventoryHold()
+                    namespaces[identity].update(prefix + row.unit.unit_id for prefix in (
+                        'REMOTE-APPLIED-STARTED-', 'REMOTE-APPLIED-',
+                        'REMOTE-KEY-HIGH-WATER-STARTED-', 'REMOTE-KEY-HIGH-WATER-'))
+            for identity, (_writer, owner) in owners.items():
+                for name in sorted(namespaces[identity]):
+                    markers.file(owner.root_fd, name, local._MAX_MANIFEST)
+            def verify_outer():
+                if ownership._validated_owner(token, binding) is not sheet_owner:
+                    raise RetainedInventoryHold()
+                verify_inventory(); verify_c6()
+                verify_markers()
+                verify_inventory(); verify_c6()
+            verify_outer()
+            with ExitStack() as proofs:
+                for project, row in zip(projects, observations):
+                    identity = project.project_identity
+                    writer, owner = owners[identity]
+                    settled = 'completion' in row.families
+                    keys = ()
+                    if settled:
+                        facts = local._json(project.c6_facts)
+                        generation = local.Generation(facts['generation_id'], facts['sequence'], facts['manifest_id'], writer)
+                        held_owner, verify_inputs, body, keys = proofs.enter_context(
+                            remote._hold_original_applied_key_watermark_inputs(writer, token, binding, row.unit, generation))
+                        if held_owner is not owner or tuple(body['project_identity']) != identity:
+                            raise RetainedInventoryHold()
+                        names = ('REMOTE-KEY-HIGH-WATER-STARTED-' + row.unit.unit_id,
+                                 'REMOTE-KEY-HIGH-WATER-' + row.unit.unit_id)
+                        verify_keys = proofs.enter_context(remote._hold_applied_records(owner.root_fd, names, body,
+                            states=('KEY-HIGH-WATER-STARTED', 'KEY-HIGH-WATER')))
+                        validators.extend((verify_inputs, verify_keys))
+                    result.append(CatalogUnitSettlement(row.unit, row.attempt_count, settled, keys, identity))
+                def verify():
+                    verify_outer()
+                    for validate in validators:
+                        validate()
+                    verify_outer()
+                verify()
+                yield tuple(result), verify
+                verify()
+            # Proof readers have now verified and closed; project namespace
+            # originals and their genuine owners are still held. Do not call
+            # a closed proof verifier, or miss a marker added by a finalizer.
+            verify_outer()
+    except Exception:
+        failed = True
     if failed:
         raise RetainedInventoryHold() from None
 
