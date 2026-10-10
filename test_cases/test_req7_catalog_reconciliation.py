@@ -257,6 +257,25 @@ class CatalogReconciliationWorkflowTests(unittest.TestCase):
 
 
 class CatalogProjectAuthenticationHandoffDirectTests(unittest.TestCase):
+    def test_default_preparation_uses_actual_mixed_settlement_and_permanent_quota_readers(self):
+        import ast
+        import inspect
+        import textwrap
+        module = importlib.import_module('monitor.issue_tracker_remote_history_match')
+        tree = ast.parse(textwrap.dedent(inspect.getsource(module._prepare_current_project_online_observation)))
+        calls = [node.func for node in ast.walk(tree) if isinstance(node, ast.Call)]
+        self.assertIn('_hold_all_project_mixed_settlements',
+            [node.attr for node in calls if isinstance(node, ast.Attribute)])
+        self.assertIn('_hold_owned_project_mixed_metadata_capacity',
+            [node.id for node in calls if isinstance(node, ast.Name)])
+        self.assertNotIn('_hold_owned_project_catalog_metadata_capacity',
+            [node.id for node in calls if isinstance(node, ast.Name)])
+        selected = next(node.value for node in ast.walk(tree) if isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id == 'selected' for target in node.targets))
+        self.assertTrue(any(isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not)
+            and isinstance(node.operand, ast.Attribute) and node.operand.attr == 'settled'
+            for node in ast.walk(selected)), 'actual settled originals are not pending preparation candidates')
+
     def test_preparation_revalidates_each_actual_read_after_original_holders_close(self):
         import ast
         import inspect
@@ -314,6 +333,33 @@ class CatalogProjectAuthenticationHandoffDirectTests(unittest.TestCase):
             with self.assertRaises(module.RemoteHistoryHold):
                 api(object(),object(),object(),None,_store=object(),http_root=object())
             oauth.assert_not_called(); read.assert_not_called()
+
+
+class CatalogMixedPreparationOriginalWorkflowTests(unittest.TestCase):
+    def test_actual_settled_current_and_foreign_pending_refuse_before_source_auth_or_reads(self):
+        from types import SimpleNamespace
+        from test_cases.test_req7_unit_catalog import CatalogAppliedNativeWorkflowTests
+        with CatalogAppliedNativeWorkflowTests.completed_and_pending(self, cross_project=True) as (
+                case, catalog, remote, _inventory, _old, writer, owner, bound, units):
+            from monitor import issue_tracker_cycle_source as source
+            from monitor import issue_tracker_token_launcher as tokens
+            from monitor import issue_tracker_history_read_launcher as reads
+            before = original_read_files(case.root)
+            # Deliberately unsupported source store: no current pending unit
+            # must dereference it or acquire OAuth. It is NOT a qualified source.
+            store = SimpleNamespace(project_identity=str(catalog.local._owner(writer).project))
+            with mock.patch.object(source, '_hold_current_completed_cycle_replay',
+                    wraps=source._hold_current_completed_cycle_replay) as cycle, \
+                    mock.patch.object(tokens, 'OwnedProjectTokenRefreshUnit') as oauth, \
+                    mock.patch.object(reads, 'OwnedProjectSheetsReadUnit') as read:
+                with self.assertRaises(remote.RemoteHistoryHold):
+                    remote._prepare_current_project_online_observation(writer, owner, bound, None,
+                        _store=store, http_root=case.root)
+            cycle.assert_not_called(); oauth.assert_not_called(); read.assert_not_called()
+            self.assertEqual(before, original_read_files(case.root))
+            from monitor import issue_tracker_global_attempt_journal as globals_
+            self.assertEqual((1, 0), tuple(globals_.inspect_global_unit(owner, bound, unit).attempt_count
+                for unit in units))
 
 
 class CatalogProjectAuthenticationHandoffWorkflowTests(unittest.TestCase):

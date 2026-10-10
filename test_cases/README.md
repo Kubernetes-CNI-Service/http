@@ -2370,3 +2370,16 @@ Existing strict
 quota APIs and all pre-existing tests remain unchanged. This development slice
 does not close overall REQ7 or replace current exact-tree full/check; field
 verification is NOT RUN.
+
+Default REQ7 read preparation now holds actual ALL mixed settlements alongside
+the original C6 and retained inventory. Units, project identities and counts
+must agree before selecting only this project's genuinely unsettled units;
+historical settled units are not pending source or OAuth candidates. The
+actual mixed quota reader continues charging permanent fences. Protected
+ETH/IB source replay and four fresh project reads remain original-held, with
+read/auth/target checks after the last original finalizer. Independent direct
+and real native cross-project/protected-source workflows assert no count,
+CLAIM or mutation. This is read-only VISIBLE_ONLY_UNPROVED preparation, not
+FIRST/R2 admission, hidden PROJECT completeness, whole REQ7 or exact-tree
+full/check. Existing refusal expectations and original deadlines remain;
+field validation is NOT RUN.

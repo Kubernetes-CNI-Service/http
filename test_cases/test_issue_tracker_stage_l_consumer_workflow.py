@@ -39,12 +39,16 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             native_catalog_probe=True,native_catalog_c6_origin_probe=True,
             native_catalog_retained_probe=True,native_catalog_launch_probe=(mode,observed))
         suffix={'prepare':'visible-only-no-count',
+            'prepare-mixed-accounting':'mixed-original-visible-only-no-count',
             'prepare-quota-rebind':'original-rebind-hold-no-count',
             'prepare-finalizer-expiry':'post-finalizer-expiry-hold-no-count'}[mode]
         self.assertEqual(['ETH Cabling:'+suffix,'IB Cabling:'+suffix],observed)
 
     def test_default_preparation_replays_actual_source_then_fresh_project_gate_reads_without_count(self):
         self._default_source_read_preparation_probe('prepare')
+
+    def test_default_preparation_actual_protected_pending_uses_mixed_original_quota_without_count(self):
+        self._default_source_read_preparation_probe('prepare-mixed-accounting')
 
     def test_default_preparation_original_quota_rebind_during_actual_last_read_refuses_without_count(self):
         self._default_source_read_preparation_probe('prepare-quota-rebind')
@@ -358,13 +362,14 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         def owned(kind, raw, **options):
             return native.read_owned(private_context, writer_token, spreadsheet_token,
                 binding, credential, kind, json.loads(raw), raw_body=raw, **options)
-        if mode in ('prepare','prepare-quota-rebind','prepare-finalizer-expiry'):
+        if mode in ('prepare','prepare-mixed-accounting','prepare-quota-rebind','prepare-finalizer-expiry'):
             from test_cases.test_req7_history_read_launcher import Req7HistoryReadLauncherWorkflowTests
             from monitor import issue_tracker_token_launcher as tokens
             from monitor import issue_tracker_remote_history_match as remote
             from monitor import issue_tracker_stage_l_consumer as source
             from monitor import issue_tracker_mutation_launcher as mutation
             from monitor import issue_tracker_unit_catalog as catalog
+            from monitor import issue_tracker_metadata_reservation as quota
             before={str(path.relative_to(state)):(path.stat().st_ino,path.read_bytes())
                 for path in state.rglob('*') if path.is_file()}
             actual, _credential, _raw=Req7HistoryReadLauncherWorkflowTests.project_auth(
@@ -375,16 +380,25 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             real_read=fixed_reads.OwnedProjectSheetsReadUnit.read_once
             real_source=source.qualify_prod_stage_l
             issued=[]; projections=[]; replaced=[]; refused=[]
-            closed=[]
+            closed=[]; first_holder=[]; mixed_observations=[]
             real_hold=catalog.hold_pending_project_c6_units
+            real_mixed_quota=quota._hold_owned_project_mixed_metadata_capacity
             real_clock=fixed_reads._monotonic
             @contextmanager
             def held_catalog(*args,**options):
+                first = not first_holder
+                first_holder.append(True)
                 with real_hold(*args,**options) as actual_rows:
                     yield actual_rows
                 # First acquired holder is last released. Its actual verifier
                 # and cleanup run before the original read deadlines expire.
-                closed.append(True)
+                if first: closed.append(True)
+            @contextmanager
+            def mixed_quota(*args,**options):
+                with real_mixed_quota(*args,**options) as actual_budget:
+                    budget,_verify=actual_budget
+                    mixed_observations.append((budget.outcome,budget.outstanding_reservations))
+                    yield actual_budget
             def post_finalizer_clock():
                 return real_clock()+(31 if closed else 0)
             def qualify(*args,**options):
@@ -417,7 +431,10 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                         'hold_pending_project_c6_units',side_effect=held_catalog))
                     preparation_boundary.enter_context(mock.patch.object(fixed_reads,
                         '_monotonic',side_effect=post_finalizer_clock))
-                if mode=='prepare':
+                if mode=='prepare-mixed-accounting':
+                    preparation_boundary.enter_context(mock.patch.object(quota,
+                        '_hold_owned_project_mixed_metadata_capacity',side_effect=mixed_quota))
+                if mode in ('prepare','prepare-mixed-accounting'):
                     result=remote._prepare_current_project_online_observation(writer_token,spreadsheet_token,
                         binding,actual,_store=self.store,http_root=self.root)
                     self.assertEqual('VISIBLE_ONLY_UNPROVED',result)
@@ -430,8 +447,11 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             # Independent facts outside every implementation sanitizer.
             self.assertEqual([(kind,1,1,(),0) for kind in
                 ('template_identity','template_headers','whitelist','metadata')],issued)
-            self.assertGreaterEqual(len(projections),1 if mode!='prepare' else 2)
-            self.assertEqual([] if mode=='prepare' else [True],refused)
+            positive = mode in ('prepare','prepare-mixed-accounting')
+            self.assertGreaterEqual(len(projections),2 if positive else 1)
+            self.assertEqual([] if positive else [True],refused)
+            if mode=='prepare-mixed-accounting':
+                self.assertEqual([('VISIBLE_ONLY_UNPROVED',1)],mixed_observations)
             if mode=='prepare-finalizer-expiry': self.assertEqual([True],closed)
             self.assertEqual(0,global_journal.inspect_global_unit(spreadsheet_token,binding,unit).attempt_count)
             self.assertFalse(list(state.rglob('ATTEMPT-*'))); self.assertFalse(list(state.rglob('CLAIM-*')))
@@ -443,6 +463,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                 self.assertNotEqual(old,new); self.assertEqual(before[name][1],after[name][1])
                 self.assertEqual({k:v for k,v in before.items() if k!=name},{k:v for k,v in after.items() if k!=name})
             observed.append(sheet+{'prepare':':visible-only-no-count',
+                'prepare-mixed-accounting':':mixed-original-visible-only-no-count',
                 'prepare-quota-rebind':':original-rebind-hold-no-count',
                 'prepare-finalizer-expiry':':post-finalizer-expiry-hold-no-count'}[mode])
             return
@@ -1265,7 +1286,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             self.template = self.publication / "local.xlsx"
             self.template.write_bytes(fake_workbook(reserved_switch_rows=4))
             default_preparation = (native_catalog_launch_probe is not None
-                and native_catalog_launch_probe[0] in ('prepare','prepare-quota-rebind','prepare-finalizer-expiry'))
+                and native_catalog_launch_probe[0] in ('prepare','prepare-mixed-accounting','prepare-quota-rebind','prepare-finalizer-expiry'))
             if manual_channel_bridge or complete_preview_probe or default_preparation:
                 root_template = self.root / "monitor/Issue_Tracker_Template_v1.xlsx"
                 root_template.parent.mkdir(parents=True, exist_ok=True)

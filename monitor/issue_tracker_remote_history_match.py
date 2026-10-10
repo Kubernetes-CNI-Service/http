@@ -757,7 +757,7 @@ def _prepare_current_project_online_observation(writer_token, owner_token, bindi
         OwnedProjectSheetsReadUnit, require_current_owned_project_read)
     from monitor.issue_tracker_token_launcher import (
         OwnedProjectTokenRefreshUnit, require_current_owned_project_token)
-    from monitor.issue_tracker_metadata_reservation import _hold_owned_project_catalog_metadata_capacity
+    from monitor.issue_tracker_metadata_reservation import _hold_owned_project_mixed_metadata_capacity
     from monitor.issue_tracker_online_target import inspect_project_online_target
 
     failed = False
@@ -773,11 +773,18 @@ def _prepare_current_project_online_observation(writer_token, owner_token, bindi
             rows, verify_c6 = scope.enter_context(catalog.hold_pending_project_c6_units(owner_token, binding))
             retained, verify_inventory = scope.enter_context(
                 inventory._hold_catalog_retained_inventory(owner_token, binding))
-            if tuple(row.unit for row in rows) != tuple(row.unit for row in retained):
+            settlements, verify_settlements = scope.enter_context(
+                inventory._hold_all_project_mixed_settlements(owner_token, binding))
+            if (tuple(row.unit for row in rows) != tuple(row.unit for row in retained)
+                    or tuple(row.unit for row in rows) != tuple(row.unit for row in settlements)
+                    or any(row.project_identity != settlement.project_identity
+                        or observation.attempt_count != settlement.attempt_count
+                        for row, observation, settlement in zip(rows, retained, settlements))):
                 raise RemoteHistoryHold()
             current_identity = journal._identity(os.fstat(project.project_fd))[:2]
-            selected = tuple((row, observation) for row, observation in zip(rows, retained)
-                if row.project_identity == current_identity and observation.attempt_count < 6)
+            selected = tuple((row, observation) for row, observation, settlement in zip(rows, retained, settlements)
+                if row.project_identity == current_identity and observation.attempt_count < 6
+                and not settlement.settled)
             if not selected:
                 raise RemoteHistoryHold()
             verify_cycle = scope.enter_context(_hold_current_completed_cycle_replay(_store))
@@ -787,7 +794,8 @@ def _prepare_current_project_online_observation(writer_token, owner_token, bindi
 
             def originals():
                 local._owner(writer_token); ownership._validated_owner(owner_token, binding)
-                verify_c6(); verify_inventory(); verify_cycle(); verify_history(); verify_inputs()
+                verify_c6(); verify_inventory(); verify_settlements()
+                verify_cycle(); verify_history(); verify_inputs()
                 inspect_project_online_target(writer_token, binding)
 
             def qualify():
@@ -813,7 +821,7 @@ def _prepare_current_project_online_observation(writer_token, owner_token, bindi
                 writer_token, owner_token, binding, responses['template_identity'], authentication,
                 read_kind='template_identity')
             identity = decode.decode_template_identity(identity_plan, responses['template_identity'])
-            with _hold_owned_project_catalog_metadata_capacity(writer_token, owner_token, binding,
+            with _hold_owned_project_mixed_metadata_capacity(writer_token, owner_token, binding,
                     authentication, identity_response=responses['template_identity'],
                     metadata_response=responses['metadata']) as (budget, verify_capacity):
                 for row, observation in selected:
