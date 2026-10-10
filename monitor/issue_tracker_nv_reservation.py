@@ -523,7 +523,7 @@ def hold_catalog_nv_preparation(token, binding, identity, eth_plan, eth_response
         record = {'owner': owner, 'token': token, 'binding': binding, 'identity': identity, 'old': old,
                   'current': current, 'catalog': catalog_fd, 'units': units, 'stem': stem, 'parent': parent,
                   'additions': {name, started}, 'appended': None, 'registered': False, 'unit': None, 'indexed': None,
-                  'budget': budget}
+                  'budget': budget, 'origin': None, 'failed': False}
         prepared = _CatalogNvPreparation(seen); _ACTIVE_CATALOG_PREPARATIONS[prepared] = record
         _verify_catalog_preparation(prepared)
         yield prepared
@@ -537,6 +537,11 @@ def hold_catalog_nv_preparation(token, binding, identity, eth_plan, eth_response
             retained = _ACTIVE_CATALOG_PREPARATIONS.pop(prepared, None)
             if retained is not None and retained['indexed'] is not None:
                 retained['indexed'].close()
+            if retained is not None and retained['origin'] is not None:
+                origin = retained['origin']
+                origin['held'].close()
+                if origin['folder'] is not None:
+                    catalog._close_original(origin['folder'], origin['identity'])
         if active_budget is not None and catalog._IMAGE_BUDGETS.get(token) is active_budget:
             catalog._IMAGE_BUDGETS.pop(token)
         current.close(); old.close()
@@ -550,18 +555,32 @@ def _verify_catalog_preparation(prepared):
         raise NvReservationHold()
     if ownership._validated_owner(record['token'], record['binding']) is not record['owner']:
         raise NvReservationHold()
-    if record['budget'].failed or record['budget'].pending:
+    if record['failed'] or record['budget'].failed or record['budget'].pending:
         raise NvReservationHold()
     record['old'].verify(parent_additions=record['additions'], appended_to=record['appended'])
     record['current'].verify()
     if record['indexed'] is not None:
         record['indexed'].verify()
+    origin = record['origin']
+    if origin is not None:
+        if local._owner(origin['writer']) is not origin['owner']:
+            raise NvReservationHold()
+        if origin['folder'] is not None:
+            journal._named(record['parent'], origin['name'], origin['folder'], directory=True)
+            actual = journal._identity(os.fstat(origin['folder']))
+            if actual[:5] != origin['identity'][:5]: raise NvReservationHold()
+            if origin['sealed'] and (actual != origin['identity']
+                    or set(os.listdir(origin['folder'])) != {'WITNESS', 'STARTED', 'ORIGIN'}):
+                raise NvReservationHold()
+        origin['held'].verify()
     return record
 
 
 def _catalog_nv_append_guard(prepared, token, binding, unit):
     _catalog_nv_compiled_observation(prepared, token, binding, unit)
     record = _verify_catalog_preparation(prepared)
+    if record['indexed'] is not None or (record['origin'] is not None and not record['origin']['sealed']):
+        raise NvReservationHold()
     record['unit'] = unit
     return frozenset(record['additions'])
 
@@ -595,6 +614,84 @@ def _catalog_nv_compiled_observation(prepared, token, binding, unit):
     enrollment.require_unit_enrollment(token, binding, record['identity'], unit)
     _verify_catalog_preparation(prepared)
     return prepared.observation
+
+
+def _catalog_nv_c6_origin_begin(prepared, writer, token, binding, unit):
+    _catalog_nv_compiled_observation(prepared, token, binding, unit)
+    record = _verify_catalog_preparation(prepared)
+    if record['origin'] is not None or record['indexed'] is not None: raise NvReservationHold()
+    from monitor import issue_tracker_unit_catalog as catalog
+    name = record['stem'] + '.unit-' + unit.unit_id + '.project-origin'
+    if name in os.listdir(record['parent']): raise NvReservationHold()
+    record['unit'] = unit
+    record['origin'] = {'writer': writer, 'owner': local._owner(writer), 'name': name,
+        'folder': None, 'identity': None, 'held': catalog._Originals(_image_budget=record['budget']), 'sealed': False}
+
+
+def _catalog_nv_c6_origin_created(prepared, writer, token, binding, unit, folder):
+    # Only the actual exclusive creator for the one derived name is admitted.
+    # The old namespace is not refreshed and no caller name/list is accepted.
+    record = _ACTIVE_CATALOG_PREPARATIONS.get(prepared)
+    if record is None or record['failed']: raise NvReservationHold()
+    origin = record['origin']
+    if (origin is None or origin['writer'] is not writer or record['token'] is not token
+            or record['binding'] != binding or record['unit'] is not unit or origin['folder'] is not None):
+        raise NvReservationHold()
+    journal._named(record['parent'], origin['name'], folder, directory=True)
+    identity = journal._identity(os.fstat(folder))
+    if os.listdir(folder) or local._owner(writer) is not origin['owner']: raise NvReservationHold()
+    origin['folder'] = folder; origin['identity'] = identity
+    record['additions'].add(origin['name'])
+    _verify_catalog_preparation(prepared)
+    return origin['held']
+
+
+def _catalog_nv_c6_origin_seal(prepared, token, binding, unit):
+    record = _verify_catalog_preparation(prepared); origin = record['origin']
+    if (origin is None or origin['sealed'] or record['token'] is not token
+            or record['binding'] != binding or record['unit'] is not unit
+            or set(os.listdir(origin['folder'])) != {'WITNESS', 'STARTED', 'ORIGIN'}):
+        raise NvReservationHold()
+    images = origin['held'].files
+    if {name for parent, name, *_ in images if parent == origin['folder']} != {'WITNESS', 'STARTED', 'ORIGIN'}:
+        raise NvReservationHold()
+    origin['identity'] = journal._identity(os.fstat(origin['folder']))
+    origin['sealed'] = True
+    _verify_catalog_preparation(prepared)
+
+
+def _catalog_nv_c6_origin_anchor(prepared, token, binding, unit):
+    record = _verify_catalog_preparation(prepared); origin = record['origin']
+    if origin is None: return None
+    if (not origin['sealed'] or record['token'] is not token or record['binding'] != binding
+            or record['unit'] is not unit or record['registered']): raise NvReservationHold()
+    return {'directory_identity': list(origin['identity']), 'originals': {
+        name: {'identity': list(identity), 'sha256': hashlib.sha256(raw).hexdigest()}
+        for parent, name, _fd, identity, raw in origin['held'].files if parent == origin['folder']}}
+
+
+def _catalog_nv_c6_origin_registered(prepared, writer, token, binding, unit):
+    record = _verify_catalog_preparation(prepared); origin = record['origin']
+    if (origin is None or not origin['sealed'] or origin['writer'] is not writer
+            or record['token'] is not token or record['binding'] != binding
+            or record['unit'] is not unit or record['indexed'] is None or record['registered']):
+        raise NvReservationHold()
+    record['registered'] = True
+    _verify_catalog_preparation(prepared)
+
+
+def _catalog_nv_c6_origin_failed(prepared):
+    try: record = _ACTIVE_CATALOG_PREPARATIONS.get(prepared)
+    except TypeError: return
+    if record is not None: record['failed'] = True
+
+
+def _catalog_nv_c6_origin_owns_folder(prepared, folder):
+    # Cleanup ownership only, including an exception after actual transfer.
+    try: record = _ACTIVE_CATALOG_PREPARATIONS.get(prepared)
+    except TypeError: return False
+    return (record is not None and record['origin'] is not None
+            and record['origin']['folder'] is not None and record['origin']['folder'] == folder)
 
 
 def _catalog_nv_original_anchor(prepared, token, binding, unit):
@@ -642,7 +739,7 @@ def _catalog_nv_appended(prepared, catalog_fd, unit):
         indexed.close()
         raise
     record['indexed'] = indexed
-    record['registered'] = True
+    record['registered'] = record['origin'] is None
 
 
 def register_catalog_nv_unit(prepared, unit):

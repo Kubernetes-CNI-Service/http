@@ -2332,6 +2332,8 @@ ALL 审计行确定唯一 append 窗口（NOOP 无虚构行），精确耗尽可
 
 ## TC-REAL-REQ7-NV-RESERVATION-001 — 两张 Cabling 的共享持久编号
 
+- 原生 C6 origin-first 注册补充（**NOT RUN / REAL_ENV REQUIRED**）：保留真实来源/C6→opaque NV→实际 WITNESS/STARTED/ORIGIN 完成→唯一 catalog append→ALL 原项目 C6 的正常流程，先完成 pair finalizer、再 append、全部 C6/readers finalizer 成功才确认注册。关键提交边界覆盖 origin 完成但 append 失败、caller 捕获仍 sticky HOLD；冷恢复全部 origin 丢失、同字节换 inode 必须拒绝，无修复/采用。首次 stat 故障只清理实际 exclusive creator 原 FD，外来复用 FD 保留；保留原件 stat/inode/SHA、命中事件、真实 append 次数、完整日志/END 与失败安全状态。替代证据为独立 direct 和实际 protected 本地多脚本流程，不代表断电、真实设备、线上 freshness 或发布；未省略/合并现场场景，也未接受新增残余风险。现场原精确授权、前置与清理边界不变。
+
 - 真实来源/C6 编译交接补充（**NOT RUN / REAL_ENV REQUIRED**）：保留 actual C5→admitted C6 receipt→live opaque native preparation→混合 update/insert→单次 catalog append→ALL 真实 C6 原件读者的正常流程。最后真实 receipt 回读期间 NV RAW 同字节换 inode/同 inode 原样重写需使 compiler 本身返回前 HOLD，留存注入命中、无 catalog/origin 追加和原件不修复的证据，不以外层退出 HOLD 代替。核原 active ID 不写 A、完整 missing keys 和实际预留 ID、manifest 原操作顺序、receipt identity 与原 nonce；本地真实多脚本证据不是线上鲜度、断电或设备验收，project-origin writer/NEW 仍未闭合。未省略/合并既有场景或接受新剩余风险；原精确授权、前置、证据与清理边界不变。
 
 - 原生多单元准备补充（**NOT RUN / REAL_ENV REQUIRED**）：保留正常 ETH→IB→同 key 新 generation、高于两表 Closed/无关及全部旧预留、完整 PRIOR 原链冷重读、opaque owner 限定 append、scope 退出后新 catalog 原件替换拒绝。旧 journal UNKNOWN 或整个/部分丢失不得生成新 witness；default LOST 门禁不变。此本地原件诊断尚不证明真实 C5/C6 来源、FIFO、跨项目结算、freshness、NEW 或发送许可。

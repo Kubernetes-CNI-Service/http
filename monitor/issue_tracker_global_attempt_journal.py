@@ -541,7 +541,7 @@ def _require_no_completion(parent,journal_name,*,marker_only=False):
     finally: os.close(folder)
 
 
-def _create_folder(parent, name):
+def _create_folder(parent, name, *, _return_original=False):
     # Partial creation is retained HOLD, but no owned descriptor may leak when
     # a directory fsync or interruption happens before returning the handle.
     os.mkdir(name, 0o700, dir_fd=parent); os.fsync(parent)
@@ -563,7 +563,10 @@ def _create_folder(parent, name):
         except OSError:
             pass
         raise
-    return fd
+    # The exclusive creator already checked this actual named/opened original.
+    # Transfer its cleanup provenance with the FD, before a caller's first stat
+    # can fail. Default callers retain the existing descriptor-only contract.
+    return (fd, identity) if _return_original else fd
 
 
 def _inspect(folder, unit, header):

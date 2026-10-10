@@ -212,6 +212,10 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         self._exercise_real_protected_three_panel_fixture(skip_history=False,
             observed_cabling_insert_probe=True, native_catalog_probe=True)
 
+    def test_actual_protected_c6_native_nv_registers_unique_catalog_and_original_project_origin(self):
+        self._exercise_real_protected_three_panel_fixture(skip_history=False,
+            observed_cabling_insert_probe=True, native_catalog_probe=True, native_catalog_c6_origin_probe=True)
+
     def test_native_compiler_holds_nv_original_drift_during_final_real_receipt_read(self):
         self._exercise_native_compiler_return_fault('same_byte_replace')
 
@@ -778,6 +782,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         shared_retry_probe=False, allocation_original_identity_probe=False, allocation_retry_identity_probe=False,
         receipt_admission_rebind_probe=False,quota_namespace_rebind_probe=False,quota_retry_identity_probe=False,
         before_cabling_fixture=None, native_catalog_probe=False, native_catalog_return_fault=None,
+        native_catalog_c6_origin_probe=False,
         continuous_launch_probe=None,
         retry_launch_probe=None,
         qualification_replay_probe=None,
@@ -2055,15 +2060,31 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                                 for changes in ({'_nv_preparation': replace(prepared)}, {'reserved_ids': ('NV99999',)},
                                                 {'placements': ()}, {'target_nonce': 'c'*64}, {'business_reads': tuple(reads[:-1])}):
                                     with self.assertRaises(compiler.SendUnitHold): compile_cabling(**changes)
-                                nv_module.register_catalog_nv_unit(prepared, unit)
                                 from monitor import issue_tracker_unit_catalog as catalog
+                                if native_catalog_c6_origin_probe:
+                                    actual_append = catalog.register_pending_unit; appended = []
+                                    def append_once(*arguments, **keywords):
+                                        appended.append(arguments[2].unit_id)
+                                        return actual_append(*arguments, **keywords)
+                                    with mock.patch.object(catalog, 'register_pending_unit', side_effect=append_once):
+                                        catalog.register_pending_c6_unit(writer_token, spreadsheet_token, binding, unit,
+                                            _nv_preparation=prepared)
+                                    self.assertEqual([unit.unit_id], appended, 'one genuine C6 registration cannot double append')
+                                    with catalog.hold_pending_project_c6_units(spreadsheet_token, binding) as (rows, verify_projects):
+                                        self.assertEqual((unit,), tuple(row.unit for row in rows)); verify_projects()
+                                else:
+                                    nv_module.register_catalog_nv_unit(prepared, unit)
                                 with catalog.hold_pending_c6_units(writer_token, spreadsheet_token, binding) as (units, verify_c6):
                                     self.assertEqual((unit,), units); verify_c6()
                                 self.assertEqual(reservation, nv_module.require_unit_nv_reservation(spreadsheet_token, binding, identity, unit))
                                 self.assertEqual(before, {path.name: path.read_bytes() for path in
                                     (state/(hashlib.sha256(binding.spreadsheet_id.encode()).hexdigest()+nv_suffix)).iterdir()})
-                                self.assertFalse(any(path.name.endswith('.project-origin') for path in state.iterdir()),
-                                    'C6 original reader is not the separate project-origin writer')
+                                origins = tuple(path for path in state.iterdir() if path.name.endswith('.project-origin'))
+                                if native_catalog_c6_origin_probe:
+                                    self.assertEqual(1, len(origins))
+                                    self.assertEqual({'STARTED', 'ORIGIN', 'WITNESS'}, set(os.listdir(origins[0])))
+                                else:
+                                    self.assertFalse(origins, 'C6 original reader is not the separate project-origin writer')
                                 continue
                             self.assertEqual(reservation, nv_module.require_unit_nv_reservation(spreadsheet_token, binding, identity, unit))
                             for claims in ({'reserved_ids': ('NV99999',)}, {'placements': ()}, {'target_nonce': 'c'*64}, {'business_reads': tuple(reads[:-1])}, {'sheet': 'ETH&IB Switch'}):

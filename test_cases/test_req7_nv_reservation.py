@@ -620,6 +620,200 @@ class Req7CatalogNvPreparationTests(unittest.TestCase):
         return {str(path.relative_to(self.state)): (path.stat().st_ino, path.read_bytes())
                 for path in self.state.rglob('*') if path.is_file()}
 
+    @contextmanager
+    def native_c6_origin_fixture(self):
+        module = self.api()
+        from test_cases.test_issue_tracker_whitelist_workbook import literal_xlsx
+        project = self.root / 'native-c6-project'; project.mkdir(mode=0o700)
+        publication = project / 'publication'; publication.mkdir(mode=0o700)
+        local = self.catalog.local; local.create_local_commit_store(project, publication)
+        from test_cases.test_req7_spreadsheet_owner import scoped_fixture
+        with local.writer_owner(project, publication) as writer, scoped_fixture(self.root, self.owner), self.owner.spreadsheet_owner(binding()) as token:
+            enrolled = self.initialize(token)
+            args = cabling_inputs(enrolled.nonces)
+            generation = local.begin_generation(writer, args['manifest'])
+            local.record_intent(writer, generation, literal_xlsx(), kind='xlsx')
+            receipt = local.commit(writer, generation)
+            args.update(generation_id=generation.generation_id, publish_id=receipt.published_sha256)
+            unit = self.catalog.composer.freeze_send_unit(**args)
+            self.kw.update(generation_id=generation.generation_id, publish_id=receipt.published_sha256)
+            yield module, writer, token, unit
+
+    def test_native_c6_origin_registration_appends_once_and_cold_reads_exact_originals(self):
+        import inspect
+        self.api()
+        self.assertIn('_nv_preparation', inspect.signature(self.catalog.register_pending_c6_unit).parameters,
+            'unique real C6 registration must accept the same live preparation, not require a separate append')
+        marks = []; failure = None
+        try:
+            with self.native_c6_origin_fixture() as (module, writer, token, unit):
+                actual_append = self.catalog.register_pending_unit
+                def append_once(*args, **kwargs):
+                    marks.append(('append', args[2].unit_id))
+                    return actual_append(*args, **kwargs)
+                with self.preparation(token) as prepared, mock.patch.object(self.catalog, 'register_pending_unit', side_effect=append_once):
+                    self.catalog.register_pending_c6_unit(writer, token, binding(), unit, _nv_preparation=prepared)
+                    marks.append(('registered', unit.unit_id))
+                before = self.files()
+                with self.catalog.hold_pending_project_c6_units(token, binding()) as (rows, verify):
+                    self.assertEqual((unit,), tuple(row.unit for row in rows)); verify()
+                self.assertEqual(prepared.observation, module.inspect_catalog_nv_reservation(token, binding(), self.identity, unit))
+                self.assertEqual(before, self.files())
+                marks.append(('cold', unit.unit_id))
+        except Exception as exc: failure = exc
+        self.assertIsNone(failure, 'native genuine C6 origin must complete, not merely outer-scope HOLD')
+        self.assertEqual(['append', 'registered', 'cold'], [kind for kind, _unit in marks])
+
+    def test_native_c6_origin_lost_all_is_not_a_low_level_catalog_without_origin(self):
+        marks = []; failure = None
+        try:
+            with self.native_c6_origin_fixture() as (module, writer, token, unit):
+                with self.preparation(token) as prepared:
+                    self.catalog.register_pending_c6_unit(writer, token, binding(), unit, _nv_preparation=prepared)
+                origin = self.state / (hashlib.sha256(TARGET.encode()).hexdigest()+'.unit-'+unit.unit_id+'.project-origin')
+                origin.rename(self.root / 'preserved-original-native-c6-origin'); marks.append('lost-all')
+                before = self.files(); yielded = []
+                with self.assertRaises(self.catalog.UnitCatalogHold):
+                    with self.catalog.hold_pending_units(token, binding()) as values: yielded.append(values)
+                self.assertEqual([], yielded)
+                with self.assertRaises(module.NvReservationHold):
+                    module.inspect_catalog_nv_reservation(token, binding(), self.identity, unit)
+                self.assertEqual(before, self.files()); marks.append('cold-HOLD')
+        except Exception as exc: failure = exc
+        self.assertIsNone(failure)
+        self.assertEqual(['lost-all', 'cold-HOLD'], marks)
+
+    def test_native_c6_origin_complete_before_failed_append_stays_sticky_hold_when_caught(self):
+        marks = []; caught = None
+        with self.native_c6_origin_fixture() as (_module, writer, token, unit):
+            origin = self.state / (hashlib.sha256(TARGET.encode()).hexdigest()+'.unit-'+unit.unit_id+'.project-origin')
+            def failed_append(*args, **kwargs):
+                self.assertEqual(unit, args[2])
+                self.assertEqual({'WITNESS', 'STARTED', 'ORIGIN'}, set(os.listdir(origin)))
+                marks.append('original-origin-complete-before-append')
+                raise OSError('owned catalog append boundary interruption')
+            try:
+                with self.preparation(token) as prepared, mock.patch.object(self.catalog, 'register_pending_unit', side_effect=failed_append):
+                    with self.assertRaises(self.catalog.UnitCatalogHold):
+                        self.catalog.register_pending_c6_unit(writer, token, binding(), unit, _nv_preparation=prepared)
+                    marks.append('caller-caught-registration-HOLD')
+                    self.assertFalse(any(path.name.endswith('.units') for path in self.state.iterdir()))
+            except Exception as exc: caught = exc
+            self.assertIs(type(caught), self.module.NvReservationHold)
+            self.assertEqual(['original-origin-complete-before-append', 'caller-caught-registration-HOLD'], marks)
+            before = self.files()
+            with self.assertRaises(self.module.NvReservationHold):
+                with self.preparation(token): self.fail('partial/unindexed origin became NEW preparation')
+            self.assertEqual(before, self.files())
+
+    def test_native_c6_origin_same_bytes_replacement_after_registration_revokes_scope_and_cold_reader(self):
+        marks = []; caught = None
+        with self.native_c6_origin_fixture() as (module, writer, token, unit):
+            try:
+                with self.preparation(token) as prepared:
+                    self.catalog.register_pending_c6_unit(writer, token, binding(), unit, _nv_preparation=prepared)
+                    origin = self.state / (hashlib.sha256(TARGET.encode()).hexdigest()+'.unit-'+unit.unit_id+'.project-origin')
+                    path = origin / 'ORIGIN'; raw = path.read_bytes(); old = path.stat().st_ino
+                    preserved = self.root / 'preserved-real-origin-file'; path.rename(preserved)
+                    path.write_bytes(raw); path.chmod(0o600)
+                    self.assertNotEqual(old, path.stat().st_ino); marks.append('registered-origin-injected')
+            except Exception as exc: caught = exc
+            self.assertIs(type(caught), module.NvReservationHold)
+            self.assertEqual(['registered-origin-injected'], marks)
+            self.assertEqual(raw, path.read_bytes()); self.assertEqual(raw, preserved.read_bytes())
+            before = self.files(); yielded = []
+            with self.assertRaises(self.catalog.UnitCatalogHold):
+                with self.catalog.hold_pending_units(token, binding()) as values: yielded.append(values)
+            self.assertEqual([], yielded); self.assertEqual(before, self.files())
+
+    def test_two_native_c6_origins_keep_all_old_originals_and_allocate_new_generation_once(self):
+        with self.native_c6_origin_fixture() as (module, writer, token, first):
+            with self.preparation(token) as prepared:
+                self.catalog.register_pending_c6_unit(writer, token, binding(), first, _nv_preparation=prepared)
+            module.global_journal.prepare_global_unit(token, binding(), first)
+            old = self.files()
+            enrolled = self.enrollment.inspect_enrollment_journal(token, binding(), self.identity)
+            args = cabling_inputs(enrolled.nonces, identifiers=('NV30104', 'NV30105'))
+            local = self.catalog.local
+            from test_cases.test_issue_tracker_whitelist_workbook import literal_xlsx
+            generation = local.begin_generation(writer, args['manifest'])
+            local.record_intent(writer, generation, literal_xlsx(), kind='xlsx')
+            receipt = local.commit(writer, generation)
+            args.update(generation_id=generation.generation_id, publish_id=receipt.published_sha256)
+            second = self.catalog.composer.freeze_send_unit(**args)
+            appended = []; actual_append = self.catalog.register_pending_unit
+            def append_once(*arguments, **keywords):
+                appended.append(arguments[2].unit_id)
+                return actual_append(*arguments, **keywords)
+            with self.preparation(token, generation_id=generation.generation_id, publish_id=receipt.published_sha256) as prepared, \
+                    mock.patch.object(self.catalog, 'register_pending_unit', side_effect=append_once):
+                self.assertEqual(((KEYS[0], 'NV30104'), (KEYS[1], 'NV30105')), prepared.observation.reservations)
+                self.catalog.register_pending_c6_unit(writer, token, binding(), second, _nv_preparation=prepared)
+            self.assertEqual([second.unit_id], appended)
+            with self.catalog.hold_pending_project_c6_units(token, binding()) as (rows, verify):
+                self.assertEqual((first, second), tuple(row.unit for row in rows)); verify()
+            self.assertEqual(old, {name: self.files()[name] for name in old})
+
+    def _exercise_native_c6_origin_first_stat_cleanup(self, recycle):
+        marks = []; created = []; foreign_fd = None; error = None
+        try:
+            with self.native_c6_origin_fixture() as (module, writer, token, unit):
+                real_create = module.global_journal._create_folder; real_fstat = os.fstat
+                if recycle:
+                    foreign = self.root / 'foreign-c6-origin-cleanup'; foreign.write_bytes(b'foreign original must survive')
+                    foreign_fd = os.open(str(foreign), os.O_RDONLY)
+                def create_origin(*args, **kwargs):
+                    result = real_create(*args, **kwargs)
+                    if args[1].endswith('.project-origin'):
+                        fd = result[0] if isinstance(result, tuple) else result
+                        created.append((fd, real_fstat(fd)))
+                    return result
+                def first_stat(fd):
+                    if created and fd == created[0][0] and not marks:
+                        if recycle:
+                            os.close(fd); os.dup2(foreign_fd, fd)
+                        marks.append('first-stat-injected')
+                        raise OSError('owned first creator fstat fault')
+                    return real_fstat(fd)
+                try:
+                    with self.preparation(token) as prepared, \
+                            mock.patch.object(module.global_journal, '_create_folder', side_effect=create_origin), \
+                            mock.patch('os.fstat', side_effect=first_stat):
+                        with self.assertRaises(self.catalog.UnitCatalogHold):
+                            self.catalog.register_pending_c6_unit(writer, token, binding(), unit, _nv_preparation=prepared)
+                        marks.append('registration-HOLD')
+                except Exception as exc: error = exc
+                self.assertIs(type(error), module.NvReservationHold)
+                self.assertEqual(['first-stat-injected', 'registration-HOLD'], marks)
+                self.assertEqual(1, len(created))
+                fd, original = created[0]
+                if recycle:
+                    current = real_fstat(fd); external = real_fstat(foreign_fd)
+                    self.assertEqual((external.st_dev, external.st_ino), (current.st_dev, current.st_ino))
+                    self.assertEqual(b'foreign original must survive', os.pread(fd, 128, 0))
+                else:
+                    with self.assertRaises(OSError, msg='actual first-stat fault leaked owned original creator FD'):
+                        real_fstat(fd)
+                self.assertFalse(any(path.name.endswith('.units') for path in self.state.iterdir()))
+        finally:
+            # Clean only this fixture's exact leaked/recycled objects, even on
+            # initial RED. Do not turn cleanup into a production PASS claim.
+            for fd, original in created:
+                try:
+                    current = os.fstat(fd)
+                    owned = (original.st_dev, original.st_ino)
+                    if foreign_fd is not None:
+                        external = os.fstat(foreign_fd); owned = (external.st_dev, external.st_ino)
+                    if (current.st_dev, current.st_ino) == owned: os.close(fd)
+                except OSError: pass
+            if foreign_fd is not None: os.close(foreign_fd)
+
+    def test_native_c6_origin_first_stat_failure_closes_only_owned_creator(self):
+        self._exercise_native_c6_origin_first_stat_cleanup(False)
+
+    def test_native_c6_origin_first_stat_failure_preserves_recycled_foreign_creator(self):
+        self._exercise_native_c6_origin_first_stat_cleanup(True)
+
     def test_native_first_append_requires_live_owned_preparation_and_replays_after_scope(self):
         module = self.api()
         with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:

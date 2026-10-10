@@ -62,7 +62,7 @@ def _project_origin_body(owner, binding, unit, facts):
         'c6_facts': facts}
 
 
-def register_pending_c6_unit(writer_token, token, binding, unit):
+def register_pending_c6_unit(writer_token, token, binding, unit, *, _nv_preparation=None):
     """Register actual C6 plus immutable original project locator, never repair.
 
     Project/publication paths come only from the live opaque writer, not the
@@ -70,6 +70,8 @@ def register_pending_c6_unit(writer_token, token, binding, unit):
     write stays HOLD. Receipt-absent C6 creates neither catalog nor origin.
     No GLOBAL attempt, APPLIED, cross-project high-water or NEW is issued.
     """
+    if _nv_preparation is not None:
+        return _register_native_pending_c6_unit(writer_token, token, binding, unit, _nv_preparation)
     held = _originals(token, binding); failed = False; folder = None; folder_identity = None
     try:
         owner = local._owner(writer_token)
@@ -137,6 +139,78 @@ def register_pending_c6_unit(writer_token, token, binding, unit):
             _close_original(folder, folder_identity)
     if failed:
         raise UnitCatalogHold() from None
+
+
+def _register_native_pending_c6_unit(writer_token, token, binding, unit, prepared):
+    """Actual C6 origin first, then one append anchored to those originals.
+
+    The default/legacy writer above stays unchanged. A partial/unindexed origin
+    is retained HOLD, not a cold-reader exception, repair or send authority.
+    """
+    from monitor import issue_tracker_nv_reservation as nv
+    from monitor import issue_tracker_remote_history_match as remote
+    from monitor import issue_tracker_global_attempt_journal as globals_
+    failed = False; folder = None; identity = None
+    try:
+        owner = local._owner(writer_token); compiled._projection(unit)
+        action = local._json(unit.action_preimage)
+        match = local._GEN.fullmatch(action['identity']['generation_id'])
+        if match is None or int(match.group(1)) < 1: raise UnitCatalogHold()
+        generation = local.Generation(match.group(0), int(match.group(1)), action['manifest_id'], writer_token)
+        with ExitStack() as scope:
+            original_owner, verify_c6, facts, _operations = scope.enter_context(
+                remote._hold_applied_generation(writer_token, generation, unit))
+            if original_owner is not owner: raise UnitCatalogHold()
+            verify_c6()
+            sheet_owner, parent, _name, _started, _base = _inputs(token, binding)
+            name = sheet_owner.lock_name[:-5] + '.unit-' + unit.unit_id + '.project-origin'
+            if name in os.listdir(parent): raise UnitCatalogHold()
+            # This live preparation already pinned the genuine pre-append
+            # prefix. Its own new NV family is not an older catalog unit.
+            if nv._verify_catalog_preparation(prepared)['units']:
+                with hold_pending_project_origins(token, binding) as (_older, verify_older): verify_older()
+            nv._catalog_nv_c6_origin_begin(prepared, writer_token, token, binding, unit)
+            folder, identity = globals_._create_folder(parent, name, _return_original=True)
+            if journal._identity(os.fstat(folder)) != identity: raise UnitCatalogHold()
+            held = nv._catalog_nv_c6_origin_created(prepared, writer_token, token, binding, unit, folder)
+            def verify():
+                if local._owner(writer_token) is not owner or ownership._validated_owner(token, binding) is not sheet_owner:
+                    raise UnitCatalogHold()
+                verify_c6(); nv._verify_catalog_preparation(prepared)
+            verify()
+            body = _project_origin_body(owner, binding, unit, facts)
+            witness = local._canonical({'schema_version': 1, 'unit_id': unit.unit_id,
+                'state': 'PROJECT-ORIGIN-WRITE-STARTED-NOT-AUTHORITY', 'body_sha256': _digest(local._canonical(body))})
+            written = remote._write_completion_start(folder, 'WITNESS', witness)
+            raw, original = held.file(folder, 'WITNESS', 16384)
+            if raw != witness or original != written: raise UnitCatalogHold()
+            body = {**body, 'write_witness': {'identity': list(original), 'sha256': _digest(raw)}}
+            # Reader capture overlaps both real creator FDs; never adopt after
+            # the pair writer closes, and finalizers must succeed before append.
+            with remote._write_applied_pair(folder, ('STARTED', 'ORIGIN'), body, verify,
+                    states=('PROJECT-ORIGIN-STARTED', 'PROJECT-ORIGIN-NOT-AUTHORITY')) as verify_pair:
+                verify_pair()
+                for entry in ('STARTED', 'ORIGIN'): held.file(folder, entry, local._MAX_MANIFEST)
+                with remote._hold_applied_records(folder, ('STARTED', 'ORIGIN'), body,
+                        states=('PROJECT-ORIGIN-STARTED', 'PROJECT-ORIGIN-NOT-AUTHORITY')) as verify_records:
+                    verify_records(); verify_pair(); held.verify()
+                    nv._catalog_nv_c6_origin_seal(prepared, token, binding, unit)
+                    verify(); verify_pair(); verify_records()
+            verify()
+            register_pending_unit(token, binding, unit, _nv_preparation=prepared)
+            with hold_pending_project_c6_units(token, binding) as (rows, verify_projects):
+                if not rows or rows[-1].unit != unit: raise UnitCatalogHold()
+                verify_projects(); verify()
+            verify()
+        # Genuine C6 / writer / pair scope finalizers have all succeeded.
+        nv._catalog_nv_c6_origin_registered(prepared, writer_token, token, binding, unit)
+    except Exception:
+        failed = True
+        nv._catalog_nv_c6_origin_failed(prepared)
+    finally:
+        if (folder is not None and identity is not None
+                and not nv._catalog_nv_c6_origin_owns_folder(prepared, folder)): _close_original(folder, identity)
+    if failed: raise UnitCatalogHold() from None
 
 
 @contextmanager
@@ -450,9 +524,10 @@ class _Originals:
             _close_original(fd, identity)
 
 
-def _header(unit, *, nv_original=None):
+def _header(unit, *, nv_original=None, project_origin=None):
     result = {**compiled._projection(unit), 'state': 'PENDING_NOT_ATTEMPTED'}
     if nv_original is not None: result['nv_original'] = nv_original
+    if project_origin is not None: result['project_origin'] = project_origin
     return result
 
 
@@ -510,6 +585,18 @@ def _inspect(token, binding, held):
         unit = composer._original_unit(originals['ACTION-PREIMAGE'][0], originals['WIRE'][0])
         saved_header = local._json(originals['HEADER'][0])
         nv_original = saved_header.get('nv_original')
+        project_origin = saved_header.get('project_origin')
+        if project_origin is not None:
+            # Finished real writer identities, anchored by this unit's catalog
+            # INITIALIZED->ENTRY chain. Lost-all cannot fall back to a catalog
+            # that never required origins; raw/named/full-stat drift also stops.
+            origin = held.directory(parent, owner.lock_name[:-5] + '.unit-' + unit_id + '.project-origin')
+            if set(os.listdir(origin)) != {'WITNESS', 'STARTED', 'ORIGIN'}: raise UnitCatalogHold()
+            images = {item: held.file(origin, item, local._MAX_MANIFEST) for item in ('WITNESS', 'STARTED', 'ORIGIN')}
+            expected_origin = {'directory_identity': list(journal._identity(os.fstat(origin))), 'originals': {
+                item: {'identity': list(image[1]), 'sha256': _digest(image[0])} for item, image in images.items()}}
+            if local._canonical(project_origin) != local._canonical(expected_origin): raise UnitCatalogHold()
+            project_origin = expected_origin
         nv_name = owner.lock_name[:-5] + '.unit-' + unit_id + '.nv'
         if nv_original is None and {nv_name, nv_name + '-started'} & root_names:
             raise UnitCatalogHold()
@@ -523,7 +610,7 @@ def _inspect(token, binding, held):
             if local._canonical(nv_original) != local._canonical(expected_nv):
                 raise UnitCatalogHold()
             nv_original = expected_nv
-        if (unit.unit_id != unit_id or originals['HEADER'][0] != local._canonical(_header(unit, nv_original=nv_original))
+        if (unit.unit_id != unit_id or originals['HEADER'][0] != local._canonical(_header(unit, nv_original=nv_original, project_origin=project_origin))
                 or local._json(unit.action_preimage)['identity']['spreadsheet_id'] != binding.spreadsheet_id):
             raise UnitCatalogHold()
         marker_raw, marker_identity = originals['INITIALIZED']
@@ -635,11 +722,13 @@ def register_pending_unit(token, binding, unit, *, _nv_preparation=None):
         owner, parent, name, started, base = _inputs(token, binding)
         nv_additions = frozenset()
         nv_original = None
+        project_origin = None
         if _nv_preparation is not None:
             from monitor import issue_tracker_nv_reservation as nv
             nv_additions = nv._catalog_nv_append_guard(_nv_preparation, token, binding, unit)
             nv_original = nv._catalog_nv_original_anchor(_nv_preparation, token, binding, unit)
-        header_raw = local._canonical(_header(unit, nv_original=nv_original))
+            project_origin = nv._catalog_nv_c6_origin_anchor(_nv_preparation, token, binding, unit)
+        header_raw = local._canonical(_header(unit, nv_original=nv_original, project_origin=project_origin))
         if local._json(unit.action_preimage)['identity']['spreadsheet_id'] != binding.spreadsheet_id:
             raise UnitCatalogHold()
         names = set(os.listdir(parent))

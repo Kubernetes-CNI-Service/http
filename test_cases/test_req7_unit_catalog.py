@@ -29,13 +29,10 @@ def load(*, reset_dependencies=True):
         raise AssertionError('original multi-unit pending catalog is absent')
     if reset_dependencies:
         load_owner()
-    local_source = SOURCE.with_name('issue_tracker_local_commit.py')
-    if reset_dependencies and local_source.exists():
-        spec = importlib.util.spec_from_file_location('monitor.issue_tracker_local_commit', local_source)
-        local_module = importlib.util.module_from_spec(spec); sys.modules[spec.name] = local_module
-        spec.loader.exec_module(local_module)
-        import monitor
-        monitor.issue_tracker_local_commit = local_module
+    # Keep the actual canonical local registry shared by preimported C6/K/
+    # send-intent consumers. Reloading it splits ordinary full-discovery
+    # function imports from new opaque owners, rather than isolating a test.
+    # Each test still creates its own project, original owners and cleanup.
     global_source = SOURCE.with_name('issue_tracker_global_attempt_journal.py')
     if reset_dependencies and global_source.exists():
         spec = importlib.util.spec_from_file_location('monitor.issue_tracker_global_attempt_journal', global_source)
@@ -789,6 +786,21 @@ print('COLD_SHARED_FIFO_ORIGINALS_NO_HANDLES_OR_AUTHORITY')
 
 
 class UnitCatalogTests(unittest.TestCase):
+    def test_catalog_fixture_reload_preserves_preimported_real_local_owner_registry(self):
+        # Ordinary full discovery imports consumers before catalog tests run.
+        # A fixture must not replace their production owner registry behind
+        # their already imported functions; a new opaque token then cannot
+        # be interpreted by the canonical old consumer.
+        from monitor import issue_tracker_local_commit as original
+        from monitor import issue_tracker_send_intent as intent
+        from monitor import issue_tracker_state_owner as states
+        before = original._ACTIVE
+        catalog = load()
+        self.assertIs(original, catalog.local)
+        self.assertIs(original, sys.modules['monitor.issue_tracker_local_commit'])
+        self.assertIs(original, intent.local)
+        self.assertIs(before, states._owner.__globals__['_ACTIVE'])
+
     def fifo_api(self):
         inventory, _reader = self.inventory_api()
         api = getattr(inventory, '_hold_catalog_fifo_frontier', None)

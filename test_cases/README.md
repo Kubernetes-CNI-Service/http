@@ -1301,6 +1301,18 @@ workflow 编译后单次 catalog append，再由既有 ALL C6 reader 核原 ACTI
 generation 四件和已发布 XLSX。这不是 project-origin writer，也不授予 freshness、FIFO、
 APPLIED、NEW 或发送许可；唯一 C6 registration 的 origin 交接仍需后续整体接线。
 
+原生 C6 registration 的显式 `_nv_preparation` 分支现先完成实际
+project-origin WITNESS/STARTED/ORIGIN，再唯一 append，不在已注册后补写 origin。
+真实 writer/C6、NV 与全部旧 catalog 原件贯穿其间；pair finalizer 先于 append，
+全部实际 C6/ALL-project reader 的 finalizer 成功后才确认本次注册完成。
+完成的 origin 三份文件 full-stat/SHA 与目录原身份沿 catalog HEADER→marker→ENTRY
+绑定；冷读全部 origin 名字丢失或原样换 inode 仍 HOLD，不降级成不要求 origin 的
+旧 catalog。部分 origin、失败 append 即使被调用方捕获，准备作用域仍保持 HOLD，
+不修复或自动采用。exclusive creator 同时交接实际原身份与 FD，首次 stat 失败只
+关闭自有原对象，外来复用 FD 不关闭；默认旧 creator 返回合同不变。
+独立 direct 与实际 protected C5→admitted C6→native NV→origin→单次 append→ALL C6
+workflow 覆盖本地交接；不是 FIFO 释放、freshness、NEW/send 或整个 REQ7 证明。
+
 old/current/indexed 以及 catalog 内部重读共用固定 16MiB 原始图像预算，按持续
 持有的 dev/inode 去重，并在实际 pread 前核单文件 size 与整组预算；同字节不同
 inode 分别计费，同一原件仍逐次真实读取并核 full-stat/named/bytes，不能缓存许可。
