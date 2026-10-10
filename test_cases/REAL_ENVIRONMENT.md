@@ -2332,6 +2332,8 @@ ALL 审计行确定唯一 append 窗口（NOOP 无虚构行），精确耗尽可
 
 ## TC-REAL-REQ7-NV-RESERVATION-001 — 两张 Cabling 的共享持久编号
 
+- native 原始计数链补充（**NOT RUN / REAL_ENV REQUIRED**）：正常 protected C5/C6→native NV→唯一 project-origin/catalog→GLOBAL→History/business preread→永久 quota→原 C6 计数须保留原编号、原 wire、原计数 UNKNOWN 与原文件；计数期间 NV RAW 原件脱离名字后恢复，必须拒绝返回可用计数结果，不回滚已写 UNKNOWN。保留前置实际 source/receipt、私有目标/白名单根在整个消费期有效；NV preparation 完结不得提前关闭这些根。留存阶段、原 stat/inode/SHA、完整日志 END 和原计数。本地 direct/真实跨脚本流程不等于现场发送、freshness/G1、冷恢复采用或断电证明；无现场范围省略、合并或新增剩余风险接受，原精确授权、前置、清理及发布门禁保持有效。
+
 - NV 目录首次接收补充（**NOT RUN / REAL_ENV REQUIRED**）：保留真实 source/C6→exclusive native NV creator 的正常交接，以及创建器返回后接收方首次 stat 失败、原 FD 被外来对象复用两类安全边界。失败必须无 preparation yield/编译/catalog/origin/尝试，只关当前原 dev/inode、不关外来 FD，保留 `nv-started` 与空/部分目录，冷恢复仍 HOLD、不采用或修复。记录命中阶段、原件/替代物 stat/inode、FD 结果、完整日志/END。替代证据为独立 direct 和本地真实 protected 跨脚本 workflow；不冒称断电、真实设备或在线许可。无现场场景省略/合并或新增风险接受，原精确授权、前置与清理边界不变。
 
 - native retained 读取补充（**NOT RUN / REAL_ENV REQUIRED**）：保留 actual source/C6→native NV→origin-first catalog→GLOBAL→只读 inventory 正常流程，完整六文件及 `nv-started`、共享 enrollment/原 nonce、跨 unit PRIOR 与预留链均按真实原件核验；持有中 PRIOR 原样换 inode、冷恢复丢失/部分 NV 原件必须 HOLD，无重新采用、修复或生成新发送许可。留存实际 stat/inode/SHA、consumer 命中及退出结果、计数/原 wire 不变和完整日志 END。替代证据为独立 direct 与本地真实跨脚本流程，不冒充断电、设备、在线 freshness 或容量/NEW 许可；未省略/合并现场场景、未新增风险接受，原授权及清理前置不变。

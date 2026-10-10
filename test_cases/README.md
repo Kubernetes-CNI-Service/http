@@ -1330,6 +1330,16 @@ native NV 目录自身也接收 exclusive creator 的原身份与 FD，接收方
 独立 direct 的 owned/recycled 两类与 actual protected C5→C6→NV 工作流
 均在异常作用域外核真实注入及清理；不是断电、设备或发送许可证明。
 
+native 原始计数链新增实际 protected C5/C6→NV→唯一 origin/catalog→GLOBAL→
+History/business preread→永久 quota→原 C6 第一次计数流程，ETH/IB 两类均核原
+编号、原 wire、原文件不变与 count=1/UNKNOWN。NV RAW 在真实计数期间脱离名字
+再恢复的独立反例在原实现上已经拒绝，因此不宣称实现 RED 或新增持有修复；
+已写计数不可回滚。新增流程夹具只在 preparation 完结时关闭该 scope，目标/
+白名单隔离根仍持有至 source replay/计数退出，旧用例预期不变。映射独立 RED
+补登真实 History/quota/target 模块和相关测试。这是实际原件计数边界证据，
+不产生 freshness、G1、FIFO release、发送许可、COMPLETE 或整项 REQ7 证明；
+REAL_ENV 仍 NOT RUN，当前精确树 related/full/check 仍须如实验证。
+
 origin-backed native NV 后继准备从实际 catalog HEADER 原链选择全部旧 origin，
 并持有其真正项目 writer/LOCK、C6 四件和已发布 XLSX；这些原件贯穿 witness、
 全部 native 文件写入、compiler、origin 和唯一 append，不能只核共享 origin

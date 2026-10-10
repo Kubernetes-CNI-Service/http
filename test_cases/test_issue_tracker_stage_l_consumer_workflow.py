@@ -229,6 +229,15 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         self.assertEqual(['ETH Cabling:actual-first-stat-fault:owned-fd-closed',
                           'IB Cabling:actual-first-stat-fault:owned-fd-closed'], observed)
 
+    def test_actual_protected_native_nv_origin_history_quota_and_receipted_first_count_preserve_unknown(self):
+        observed = []
+        self._exercise_real_protected_three_panel_fixture(skip_history=False,
+            observed_cabling_insert_probe=True, receipted_intent_probe=True,
+            native_catalog_probe=True, native_catalog_c6_origin_probe=True,
+            native_catalog_retained_probe=True, native_catalog_receipted_count_probe=observed)
+        self.assertEqual(['ETH Cabling:actual-receipted-count:unknown',
+            'IB Cabling:actual-receipted-count:unknown'], observed)
+
     def test_actual_protected_native_nv_all_project_c6_fifo_keeps_originals_and_issues_no_send_permission(self):
         observed = []
         self._exercise_real_protected_three_panel_fixture(skip_history=False,
@@ -807,6 +816,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         native_catalog_retained_probe=False,
         native_catalog_creator_first_stat_probe=None,
         native_catalog_all_c6_fifo_probe=None,
+        native_catalog_receipted_count_probe=None,
         continuous_launch_probe=None,
         retry_launch_probe=None,
         qualification_replay_probe=None,
@@ -1973,7 +1983,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                         global_root = Path(directory).resolve(); state = global_root/'var/lib/http-ztp-container/issue-tracker'
                         state.mkdir(parents=True, mode=0o700); owner_module = load_owner(); enrollment_module = load_enrollment(); nv_module = load_nv()
                         from contextlib import ExitStack
-                        with tracker_writer(project, self.publication) as writer_token, scoped_fixture(global_root, owner_module), owner_module.spreadsheet_owner(binding) as spreadsheet_token, ExitStack() as private_context:
+                        with tracker_writer(project, self.publication) as writer_token, scoped_fixture(global_root, owner_module), owner_module.spreadsheet_owner(binding) as spreadsheet_token, ExitStack() as private_context, ExitStack() as native_count_context:
                             if receipted_intent_probe:
                                 private_directory = global_root/'var/lib/http-ztp-container/service-account'
                                 private_directory.mkdir(mode=0o700)
@@ -2007,7 +2017,8 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                                         self.assertEqual(1, len(tuple(state.glob('*.nv-started'))))
                                         native_catalog_creator_first_stat_probe.append(sheet + ':actual-first-stat-fault:owned-fd-closed')
                                     continue
-                                prepared = private_context.enter_context(nv_module.hold_catalog_nv_preparation(
+                                preparation_context = (native_count_context if native_catalog_receipted_count_probe is not None else private_context)
+                                prepared = preparation_context.enter_context(nv_module.hold_catalog_nv_preparation(
                                     spreadsheet_token, binding, identity, *pair, **nv_args))
                                 reservation = prepared.observation
                             else:
@@ -2128,7 +2139,13 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                                     # Close the actual preparation before the genuine GLOBAL
                                     # writer adds its fixed journal; old namespace proof is
                                     # not silently refreshed to permit a foreign append.
-                                    private_context.close()
+                                    if native_catalog_receipted_count_probe is not None:
+                                        # Close only the completed native preparation. The
+                                        # actual fixed credential/allowlist roots must stay
+                                        # bound through protected source replay and count.
+                                        native_count_context.close()
+                                    else:
+                                        private_context.close()
                                     from monitor import issue_tracker_global_attempt_journal as global_journal
                                     # This fixture creates canonical owner registries per
                                     # scenario. Bind the real consumer after that setup,
@@ -2162,6 +2179,38 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                                             native_catalog_all_c6_fifo_probe.append(sheet + ':actual-fifo:read-only')
                                     self.assertEqual(original_files, {str(path.relative_to(state)): (path.stat().st_ino, path.read_bytes())
                                         for path in state.rglob('*') if path.is_file()})
+                                if native_catalog_receipted_count_probe is not None:
+                                    from test_cases.test_req7_history_preread_journal import load as load_preread
+                                    from test_cases.test_req7_metadata_reservation import load as load_quota
+                                    from monitor.issue_tracker_metadata_capacity import prepare_metadata_capacity_read
+                                    preread = load_preread(); quota_module = load_quota()
+                                    preread.prepare_history_preread(spreadsheet_token, binding, unit, history_plan, history_raw)
+                                    preread.prepare_business_preread(spreadsheet_token, binding, identity, unit,
+                                        manifest=body, business_reads=tuple(reads))
+                                    quota_raw = response({'matchedDeveloperMetadata': [
+                                        {'developerMetadata': {'metadataId': index+1, 'metadataKey': 'http-ztp-enrollment-v1',
+                                            'metadataValue': nonce, 'visibility': 'DOCUMENT',
+                                            'location': {'locationType': 'SHEET', 'sheetId': sheet_id}}}
+                                        for index, (_title, sheet_id, nonce) in enumerate(original.nonces)]})
+                                    quota_module.prepare_metadata_reservation(spreadsheet_token, binding, identity, unit,
+                                        prepare_metadata_capacity_read(binding, credential), quota_raw)
+                                    frozen_images = {str(path.relative_to(state)): (path.stat().st_ino, path.read_bytes())
+                                        for path in state.rglob('*') if path.is_file()}
+                                    counted = global_journal.record_receipted_original_attempt_intent(
+                                        spreadsheet_token, binding, identity, unit, qualified_source=qualified,
+                                        store=self.store, writer_token=writer_token, settings=args['settings'],
+                                        whitelist_snapshot=self.snapshot, expected_template_sha256=self.snapshot.workbook_sha256,
+                                        http_root=self.root, whitelist_path=self.template)
+                                    self.assertEqual((1, 'UNKNOWN'), (counted.attempt_count, counted.outcome))
+                                    self.assertFalse(any(hasattr(counted, name) for name in ('permit', 'send_once', 'complete', 'applied')))
+                                    self.assertEqual(expected, nv_module.require_unit_nv_reservation(
+                                        spreadsheet_token, binding, identity, unit).reservations)
+                                    after = {str(path.relative_to(state)): (path.stat().st_ino, path.read_bytes())
+                                        for path in state.rglob('*') if path.is_file()}
+                                    for name, image in frozen_images.items():
+                                        if '.journal/' not in name:
+                                            self.assertEqual(image, after[name], name)
+                                    native_catalog_receipted_count_probe.append(sheet + ':actual-receipted-count:unknown')
                                 continue
                             self.assertEqual(reservation, nv_module.require_unit_nv_reservation(spreadsheet_token, binding, identity, unit))
                             for claims in ({'reserved_ids': ('NV99999',)}, {'placements': ()}, {'target_nonce': 'c'*64}, {'business_reads': tuple(reads[:-1])}, {'sheet': 'ETH&IB Switch'}):

@@ -35,6 +35,19 @@ SCRIPTS = {
 
 
 class Req7TransportManifestCandidateTests(unittest.TestCase):
+    def test_native_c6_to_original_count_workflow_registers_actual_history_quota_and_target_bindings(self):
+        manifest = json.loads((ROOT / 'test_cases/script_test_manifest.json').read_text())
+        workflow = next(item for item in manifest['workflows']
+            if item['id'] == 'req7_protected_source_native_nv_catalog_c6_originals')
+        self.assertTrue({'monitor/issue_tracker_history_preread_journal.py',
+            'monitor/issue_tracker_metadata_reservation.py', 'monitor/issue_tracker_metadata_capacity.py',
+            'monitor/issue_tracker_online_target.py', 'monitor/issue_tracker_credential_shape.py'}
+            <= set(workflow['members']), 'actual native C6 counted chain must not omit its History/quota/target roots')
+        self.assertTrue({'test_cases.test_req7_nv_reservation',
+            'test_cases.test_issue_tracker_stage_l_consumer_workflow',
+            'test_cases.test_req7_history_preread_journal', 'test_cases.test_req7_metadata_reservation'}
+            <= set(workflow['tests']))
+
     def test_original_retry_workflow_registers_live_owner_direct_and_real_commit_chain(self):
         manifest = json.loads((ROOT / 'test_cases/script_test_manifest.json').read_text())
         workflow = next(item for item in manifest['workflows']

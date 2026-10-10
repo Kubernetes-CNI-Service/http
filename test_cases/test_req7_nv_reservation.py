@@ -703,6 +703,74 @@ class Req7CatalogNvPreparationTests(unittest.TestCase):
         self.assertIsNone(failure, 'native genuine C6 origin must complete, not merely outer-scope HOLD')
         self.assertEqual(['append', 'registered', 'cold'], [kind for kind, _unit in marks])
 
+    @contextmanager
+    def native_reserved_count_fixture(self):
+        from test_cases.test_req7_history_preread_journal import load as history_load
+        from test_cases.test_req7_metadata_reservation import load as quota_load
+        from test_cases.test_req7_metadata_capacity import entry, reply
+        with self.native_c6_origin_fixture() as (module, writer, token, unit):
+            with self.preparation(token) as prepared:
+                self.catalog.register_pending_c6_unit(writer, token, binding(), unit, _nv_preparation=prepared)
+            global_journal = module.global_journal
+            global_journal.prepare_global_unit(token, binding(), unit)
+            read_binding = replace(self.binding, spreadsheet_id=TARGET)
+            history_plan = self.planner.prepare_history_tail_read(read_binding, self.token)
+            history_raw = grids.response({'spreadsheetId': TARGET, 'sheets': [{'properties': {
+                'sheetId': 105, 'title': 'Update_History', 'sheetType': 'GRID',
+                'gridProperties': {'rowCount': 100, 'columnCount': 5}},
+                'data': [{'startRow': 2, 'startColumn': 0}]}]})
+            history_load().prepare_history_preread(token, binding(), unit, history_plan, history_raw)
+            nonces = {title: nonce for title, _sid, nonce in
+                self.enrollment.inspect_enrollment_journal(token, binding(), self.identity).nonces}
+            metadata_plan = self.capacity.prepare_metadata_capacity_read(read_binding, self.token)
+            metadata_raw = reply((entry(201, 'http-ztp-enrollment-v1', nonces['ETH Cabling'], sheet=102),
+                entry(202, 'http-ztp-enrollment-v1', nonces['Update_History'], sheet=105)))
+            quota_load().prepare_metadata_reservation(token, binding(), self.identity, unit, metadata_plan, metadata_raw)
+            yield module, token, unit
+
+    def test_actual_native_nv_origin_history_quota_count_keeps_original_ids_and_unknown(self):
+        with self.native_reserved_count_fixture() as (module, token, unit):
+            before = self.files()
+            counted = module.global_journal.record_reserved_attempt_intent(token, binding(), self.identity, unit)
+            self.assertEqual((1, 'UNKNOWN'), (counted.attempt_count, counted.outcome))
+            self.assertEqual(((KEYS[0], 'NV30102'), (KEYS[1], 'NV30103')),
+                module.require_unit_nv_reservation(token, binding(), self.identity, unit).reservations)
+            after = self.files()
+            for path, image in before.items():
+                if '.journal/' not in path:
+                    self.assertEqual(image, after[path], path)
+            self.assertFalse(any(hasattr(counted, name) for name in ('permit', 'applied', 'complete', 'send_once')))
+
+    def test_native_nv_original_detach_restore_during_actual_count_retains_unknown_but_refuses_result(self):
+        with self.native_reserved_count_fixture() as (module, token, unit):
+            raw = self.state / (hashlib.sha256(TARGET.encode()).hexdigest() + '.unit-' + unit.unit_id + '.nv') / 'ETH-RAW'
+            before = self.files(); saved = self.root / 'owned-count-detached-nv-original'
+            actual_observe = module.global_journal._observe; marks = []; result = None; failure = None
+            def count_while_original_name_is_absent(*args, **kwargs):
+                raw.rename(saved); marks.append('original-detached')
+                try:
+                    counted = actual_observe(*args, **kwargs)
+                    self.assertEqual(1, counted.attempt_count)
+                    marks.append('actual-count-one')
+                    return counted
+                finally:
+                    saved.rename(raw); marks.append('original-restored')
+            with mock.patch.object(module.global_journal, '_observe', side_effect=count_while_original_name_is_absent):
+                try:
+                    result = module.global_journal.record_reserved_attempt_intent(token, binding(), self.identity, unit)
+                except module.global_journal.GlobalAttemptHold as error:
+                    failure = error
+            self.assertEqual(['original-detached', 'actual-count-one', 'original-restored'], marks)
+            self.assertIsNone(result, 'two cold reads must not accept loss of an original during the actual count')
+            self.assertIsInstance(failure, module.global_journal.GlobalAttemptHold)
+            observed = module.global_journal.inspect_global_unit(token, binding(), unit)
+            self.assertEqual((1, 'UNKNOWN'), (observed.attempt_count, observed.outcome))
+            after = self.files()
+            for path, image in before.items():
+                if '.journal/' not in path:
+                    self.assertEqual(image, after[path], path)
+            self.assertFalse(saved.exists())
+
     def test_native_c6_origin_lost_all_is_not_a_low_level_catalog_without_origin(self):
         marks = []; failure = None
         try:
