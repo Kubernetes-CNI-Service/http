@@ -534,7 +534,8 @@ def freeze_observed_receipted_cabling_unit(qualified, store, *, http_root, setti
                                          expected_template_sha256, local_generation_id, sheet,
                                          business_reads, history_plan, history_response,
                                          spreadsheet_token, binding, identity, audits=(),
-                                         occupied_metadata_ids=(), writer_token=None, **claims):
+                                         occupied_metadata_ids=(), writer_token=None,
+                                         _nv_preparation=None, **claims):
     """NEW Cabling unit from original C5/C6, both owners and retained C17 IDs.
 
     All family operations share one complete original key/occupancy image.
@@ -553,7 +554,8 @@ def freeze_observed_receipted_cabling_unit(qualified, store, *, http_root, setti
         from monitor.issue_tracker_online_cells import source_tool_values
         from monitor.issue_tracker_spreadsheet_owner import _validated_owner
         from monitor.issue_tracker_enrollment_journal import inspect_enrollment_journal
-        from monitor.issue_tracker_nv_reservation import inspect_nv_reservation, require_unit_nv_reservation
+        from monitor.issue_tracker_nv_reservation import (inspect_nv_reservation, require_unit_nv_reservation,
+            _catalog_nv_source_observation, _catalog_nv_compiled_observation)
         from monitor.issue_tracker_sheets_read_decode import (
             _activity_sheet_image, _insertion_sheet_image, observe_active_row,
             observe_insertion_position, decode_history_tail)
@@ -577,6 +579,11 @@ def freeze_observed_receipted_cabling_unit(qualified, store, *, http_root, setti
 
         def original_state(keys=None):
             owner = _validated_owner(spreadsheet_token, binding)
+            if _nv_preparation is not None:
+                reserved = _catalog_nv_source_observation(_nv_preparation, spreadsheet_token, binding, identity,
+                    generation_id=receipt[0], publish_id=receipt[1], sheet=sheet, requested_keys=keys)
+                enrolled = inspect_enrollment_journal(spreadsheet_token, binding, identity)
+                return enrolled, None if keys is None else reserved
             stem = owner.lock_name[:-5]
             names = {name for name in os.listdir(owner.directories[-1][0]) if name.startswith(stem + '.')}
             expected = {stem+'.lock', stem+'.enrollment'}
@@ -659,13 +666,22 @@ def freeze_observed_receipted_cabling_unit(qualified, store, *, http_root, setti
             placements=placements, preread_sha256=digest, spreadsheet_id=binding.spreadsheet_id, sheet=sheet,
             sheet_id=sid, history_sheet_id=history_sid, target_nonce=target_nonce, history_nonce=history_nonce,
             audits=audits, occupied_metadata_ids=occupied_metadata_ids, **context)
-        if keys and require_unit_nv_reservation(spreadsheet_token, binding, identity, result) != original[1]: raise SendUnitHold()
+        if keys:
+            reservation = (_catalog_nv_compiled_observation(_nv_preparation, spreadsheet_token, binding, result)
+                if _nv_preparation is not None else require_unit_nv_reservation(spreadsheet_token, binding, identity, result))
+            if reservation != original[1]: raise SendUnitHold()
         if (read_images() != (placements, digest, history, original, keys)
                 or freeze_prod_stage_l_manifest(qualified, store, **context) != (manifest, manifest_id)
                 or _original_receipt_identity(qualified, store, local_generation_id, writer_token,
                     settings, whitelist_snapshot, expected_template_sha256) != receipt
                 or history.last_data_row_index + result.history_rows_expected >= history.row_count): raise SendUnitHold()
         _owner(writer_token); _validated_owner(spreadsheet_token, binding)
+        if _nv_preparation is not None:
+            # Final real source/receipt reads above may themselves overlap a
+            # change to retained NV originals. Outer-scope HOLD is too late
+            # to substitute for the compiler's own pre-return observation.
+            if _catalog_nv_compiled_observation(_nv_preparation, spreadsheet_token, binding, result) != original[1]:
+                raise SendUnitHold()
     except Exception: failed = True
     if failed: raise SendUnitHold()
     return result

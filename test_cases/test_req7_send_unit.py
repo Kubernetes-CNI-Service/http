@@ -118,6 +118,19 @@ class Req7SendUnitDirectTests(unittest.TestCase):
                     history_plan=object(), history_response=object(), spreadsheet_token=object(), binding=object(), identity=object(), **claim)
             self.assertIsNone(caught.exception.__context__)
 
+    def test_native_preparation_is_not_a_protected_c5_or_c6_source_substitute(self):
+        # A private parameter does not turn a caller label into either owner,
+        # current source qualification or an original admitted C6 receipt.
+        with mock.patch('socket.socket') as networking, \
+             mock.patch.object(self.module, 'freeze_receipted_prod_source_unit') as receipt_compiler:
+            with self.assertRaises(self.module.SendUnitHold):
+                self.module.freeze_observed_receipted_cabling_unit(object(), object(), http_root='/', settings=object(),
+                    whitelist_snapshot=object(), whitelist_path='/', metadata={}, expected_template_sha256='a'*64,
+                    local_generation_id='gen-00000000000000000001-'+'1'*32, sheet='ETH Cabling', business_reads=({},),
+                    history_plan=object(), history_response=object(), spreadsheet_token=object(), binding=object(),
+                    identity=object(), _nv_preparation=object())
+            networking.assert_not_called(); receipt_compiler.assert_not_called()
+
     def test_observed_switch_compiler_cannot_accept_caller_nonce_coordinate_or_business_claims(self):
         self.assertTrue(hasattr(self.module,'freeze_observed_receipted_switch_unit'),'original lock/enrollment Switch insert compiler missing')
         for claim in ({}, {'target_nonce':'c'*64}, {'placements':()}, {'sheet_id':101}, {'preread_sha256':'e'*64}):

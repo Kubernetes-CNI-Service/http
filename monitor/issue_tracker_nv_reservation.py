@@ -560,13 +560,41 @@ def _verify_catalog_preparation(prepared):
 
 
 def _catalog_nv_append_guard(prepared, token, binding, unit):
+    _catalog_nv_compiled_observation(prepared, token, binding, unit)
     record = _verify_catalog_preparation(prepared)
-    if (record['token'] is not token or record['binding'] != binding or record['registered']
-            or prepared.observation.unit_id != unit.unit_id or _unit_insertions(unit) != prepared.observation.reservations):
-        raise NvReservationHold()
-    enrollment.require_unit_enrollment(token, binding, record['identity'], unit)
     record['unit'] = unit
     return frozenset(record['additions'])
+
+
+def _catalog_nv_source_observation(prepared, token, binding, identity, *,
+                                   generation_id, publish_id, sheet, requested_keys=None):
+    # Receipt labels here come from the genuine compiler's original C6 read.
+    # This necessary comparison is not itself C5/C6, freshness or NEW proof.
+    record = _verify_catalog_preparation(prepared)
+    if (record['token'] is not token or record['binding'] != binding
+            or record['identity'] != identity or record['registered']):
+        raise NvReservationHold()
+    keys = tuple(key for key, _identifier in prepared.observation.reservations)
+    actual = keys if requested_keys is None else requested_keys
+    _parent, _name, base, checked, _ids = _inputs(token, binding, identity,
+        generation_id, publish_id, sheet, actual)
+    if checked != keys or base['unit_id'] != prepared.observation.unit_id:
+        raise NvReservationHold()
+    _verify_catalog_preparation(prepared)
+    return prepared.observation
+
+
+def _catalog_nv_compiled_observation(prepared, token, binding, unit):
+    # Preserve actual ACTION/WIRE and all insertion key/ID pairs. No append,
+    # namespace mutation or compiler authority is issued by this observation.
+    record = _verify_catalog_preparation(prepared)
+    if (record['token'] is not token or record['binding'] != binding or record['registered']
+            or prepared.observation.unit_id != unit.unit_id
+            or _unit_insertions(unit) != prepared.observation.reservations):
+        raise NvReservationHold()
+    enrollment.require_unit_enrollment(token, binding, record['identity'], unit)
+    _verify_catalog_preparation(prepared)
+    return prepared.observation
 
 
 def _catalog_nv_original_anchor(prepared, token, binding, unit):

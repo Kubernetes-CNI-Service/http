@@ -639,6 +639,35 @@ class Req7CatalogNvPreparationTests(unittest.TestCase):
             with self.catalog.hold_pending_units(token, binding()) as (units, verify):
                 self.assertEqual((value,), units); verify()
 
+    def test_native_source_observation_and_compiled_handoff_bind_live_owner_and_exact_identity(self):
+        module = self.api()
+        for name in ('_catalog_nv_source_observation', '_catalog_nv_compiled_observation'):
+            self.assertTrue(callable(getattr(module, name, None)), 'actual compiler needs ' + name)
+        with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
+            enrolled = self.initialize(token); unit = self.compiled(enrolled.nonces)
+            with self.preparation(token) as prepared:
+                args = dict(self.kw)
+                before = self.files()
+                self.assertEqual(prepared.observation, module._catalog_nv_source_observation(
+                    prepared, token, binding(), self.identity, **args))
+                for changes in ({'generation_id': 'e'*64}, {'publish_id': 'e'*64},
+                                {'sheet': 'IB Cabling'}, {'requested_keys': KEYS[:1]}):
+                    with self.subTest(changes=changes):
+                        with self.assertRaises(module.NvReservationHold):
+                            module._catalog_nv_source_observation(prepared, token, binding(), self.identity,
+                                **{**args, **changes})
+                with self.assertRaises(module.NvReservationHold):
+                    module._catalog_nv_source_observation(replace(prepared), token, binding(), self.identity, **args)
+                self.assertEqual(prepared.observation, module._catalog_nv_compiled_observation(prepared, token, binding(), unit))
+                for bad in (self.compiled(enrolled.nonces, generation='e'*64),
+                            self.compiled(enrolled.nonces, identifiers=('NV99998', 'NV99999'))):
+                    with self.assertRaises(module.NvReservationHold):
+                        module._catalog_nv_compiled_observation(prepared, token, binding(), bad)
+                self.assertEqual(before, self.files(), 'compiler observation never appends or issues authority')
+                module.register_catalog_nv_unit(prepared, unit)
+            with self.assertRaises(module.NvReservationHold):
+                module._catalog_nv_compiled_observation(prepared, token, binding(), unit)
+
     def test_native_cross_family_and_same_key_new_generation_allocate_above_all_old_originals(self):
         module = self.api()
         from test_cases.test_req7_global_attempt_journal import load as global_load

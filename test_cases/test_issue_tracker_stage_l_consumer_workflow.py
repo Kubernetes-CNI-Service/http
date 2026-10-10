@@ -208,6 +208,29 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
     def test_actual_source_receipt_and_original_two_sheet_nv_derive_mixed_cabling_units(self):
         self._exercise_real_protected_three_panel_fixture(skip_history=False, observed_cabling_insert_probe=True)
 
+    def test_actual_protected_c6_source_compiles_native_nv_and_reads_same_original_catalog_unit(self):
+        self._exercise_real_protected_three_panel_fixture(skip_history=False,
+            observed_cabling_insert_probe=True, native_catalog_probe=True)
+
+    def test_native_compiler_holds_nv_original_drift_during_final_real_receipt_read(self):
+        self._exercise_native_compiler_return_fault('same_byte_replace')
+
+    def test_native_compiler_holds_nv_same_inode_rewrite_during_final_real_receipt_read(self):
+        self._exercise_native_compiler_return_fault('same_inode_rewrite')
+
+    def _exercise_native_compiler_return_fault(self, mode):
+        marks = []; error = None
+        try:
+            self._exercise_real_protected_three_panel_fixture(skip_history=False,
+                observed_cabling_insert_probe=True, native_catalog_probe=True,
+                native_catalog_return_fault=(mode, marks))
+        except Exception as exc:
+            error = exc
+        # Each method gets a fresh actual project/cycle fixture. Outer scope
+        # HOLD must not mask a compiler that already returned a frozen unit.
+        self.assertEqual([('injected', mode), ('compiler', 'HOLD'), ('catalog_written', False)], marks)
+        self.assertIs(type(error), sys.modules['monitor.issue_tracker_nv_reservation'].NvReservationHold)
+
     def test_actual_receipted_cabling_unit_retains_original_business_images_across_unknown(self):
         self._exercise_real_protected_three_panel_fixture(skip_history=False, observed_cabling_insert_probe=True, business_preread_probe=True)
 
@@ -754,7 +777,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         settings_audit_probe=False, owned_read_gates_probe=False, owned_continuity_probe=False, complete_preview_probe=False,
         shared_retry_probe=False, allocation_original_identity_probe=False, allocation_retry_identity_probe=False,
         receipt_admission_rebind_probe=False,quota_namespace_rebind_probe=False,quota_retry_identity_probe=False,
-        before_cabling_fixture=None,
+        before_cabling_fixture=None, native_catalog_probe=False, native_catalog_return_fault=None,
         continuous_launch_probe=None,
         retry_launch_probe=None,
         qualification_replay_probe=None,
@@ -1933,11 +1956,23 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                             nv_args = dict(generation_id=committed.receipt.generation_id, publish_id=committed.receipt.published_sha256,
                                 sheet=sheet, requested_keys=requested)
                             pair = (discovery_plan, original_read, other_plan, other_read) if sheet == 'ETH Cabling' else (other_plan, other_read, discovery_plan, original_read)
-                            reservation = nv_module.prepare_nv_reservation(spreadsheet_token, binding, identity, *pair, **nv_args)
+                            prepared = None
+                            if native_catalog_probe:
+                                from test_cases.test_req7_global_attempt_journal import load as load_global
+                                load_global(); nv_module = load_nv()
+                                from test_cases.test_req7_unit_catalog import load as load_catalog
+                                catalog = load_catalog(reset_dependencies=False)
+                                self.assertIs(catalog.ownership, owner_module, 'native catalog must use this actual fixture owner registry')
+                                prepared = private_context.enter_context(nv_module.hold_catalog_nv_preparation(
+                                    spreadsheet_token, binding, identity, *pair, **nv_args))
+                                reservation = prepared.observation
+                            else:
+                                reservation = nv_module.prepare_nv_reservation(spreadsheet_token, binding, identity, *pair, **nv_args)
                             self.assertEqual(expected, reservation.reservations)
                             def compile_cabling(**changes):
                                 options = dict(local_generation_id=committed.receipt.generation_id, sheet=sheet, business_reads=tuple(reads),
                                     history_plan=history_plan, history_response=history_raw, spreadsheet_token=spreadsheet_token, binding=binding, identity=identity)
+                                if prepared is not None: options['_nv_preparation'] = prepared
                                 if settings_audit_probe and sheet == 'ETH Cabling':
                                     from monitor.issue_tracker_settings_audit_allocation import pending_settings_audits
                                     options['audits'] = pending_settings_audits(writer_token)
@@ -1945,8 +1980,48 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                                 options.update(changes)
                                 return compiler.freeze_observed_receipted_cabling_unit(qualified, self.store, metadata=metadata,
                                     expected_template_sha256=self.snapshot.workbook_sha256, writer_token=writer_token, **args, **options)
-                            before = {path.name: path.read_bytes() for path in (state/(hashlib.sha256(binding.spreadsheet_id.encode()).hexdigest()+'.nv')).iterdir()}
-                            unit = compile_cabling(); action = json.loads(unit.action_preimage)
+                            nv_suffix = '.nv' if prepared is None else '.unit-' + reservation.unit_id + '.nv'
+                            before = {path.name: path.read_bytes() for path in (state/(hashlib.sha256(binding.spreadsheet_id.encode()).hexdigest()+nv_suffix)).iterdir()}
+                            if native_catalog_return_fault is not None:
+                                mode, marks = native_catalog_return_fault
+                                original_freeze = compiler.freeze_receipted_prod_source_unit
+                                original_receipt = compiler._original_receipt_identity
+                                compiled_stage = []
+                                raw_path = state/(hashlib.sha256(binding.spreadsheet_id.encode()).hexdigest()+nv_suffix)/'ETH-RAW'
+                                def retain_real_frozen_unit(*arguments, **keywords):
+                                    result = original_freeze(*arguments, **keywords)
+                                    compiled_stage.append(True)
+                                    return result
+                                def drift_after_real_final_receipt(*arguments, **keywords):
+                                    result = original_receipt(*arguments, **keywords)
+                                    if compiled_stage and not marks:
+                                        raw, old_stat = raw_path.read_bytes(), raw_path.stat()
+                                        if mode == 'same_byte_replace':
+                                            replacement = raw_path.with_name('owned-fault-replacement')
+                                            replacement.write_bytes(raw); replacement.chmod(0o600)
+                                            os.replace(replacement, raw_path)
+                                            self.assertNotEqual(old_stat.st_ino, raw_path.stat().st_ino)
+                                        else:
+                                            raw_path.write_bytes(raw)
+                                            os.utime(raw_path, ns=(old_stat.st_atime_ns, old_stat.st_mtime_ns+1000000))
+                                            self.assertEqual(old_stat.st_ino, raw_path.stat().st_ino)
+                                        marks.append(('injected', mode))
+                                    return result
+                                with mock.patch.object(compiler, 'freeze_receipted_prod_source_unit', side_effect=retain_real_frozen_unit), \
+                                     mock.patch.object(compiler, '_original_receipt_identity', side_effect=drift_after_real_final_receipt):
+                                    try: compile_cabling()
+                                    except compiler.SendUnitHold: marks.append(('compiler', 'HOLD'))
+                                    else: marks.append(('compiler', 'RETURNED'))
+                                marks.append(('catalog_written', any(path.name.endswith('.units') for path in state.iterdir())))
+                                raise RuntimeError('owned native compiler fault fixture complete; preserve original HOLD')
+                            if native_catalog_probe:
+                                try: unit = compile_cabling()
+                                except compiler.SendUnitHold:
+                                    print('NATIVE_C6_COMPILE_REJECTED_BEFORE_HANDOFF', sheet, flush=True)
+                                    raise
+                            else:
+                                unit = compile_cabling()
+                            action = json.loads(unit.action_preimage)
                             self.assertEqual(['update']+['insert']*(len(candidates)-1), [item['action'] for item in action['business']])
                             self.assertEqual(committed.receipt.generation_id, action['identity']['generation_id'])
                             self.assertEqual(committed.receipt.published_sha256, action['identity']['publish_id'])
@@ -1975,6 +2050,21 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                             for item in requests:
                                 if 'updateCells' in item:
                                     self.assertEqual(2, item['updateCells']['start']['rowIndex']); self.assertNotEqual(0, item['updateCells']['start']['columnIndex'])
+                            if prepared is not None:
+                                self.assertEqual(reservation, nv_module._catalog_nv_compiled_observation(prepared, spreadsheet_token, binding, unit))
+                                for changes in ({'_nv_preparation': replace(prepared)}, {'reserved_ids': ('NV99999',)},
+                                                {'placements': ()}, {'target_nonce': 'c'*64}, {'business_reads': tuple(reads[:-1])}):
+                                    with self.assertRaises(compiler.SendUnitHold): compile_cabling(**changes)
+                                nv_module.register_catalog_nv_unit(prepared, unit)
+                                from monitor import issue_tracker_unit_catalog as catalog
+                                with catalog.hold_pending_c6_units(writer_token, spreadsheet_token, binding) as (units, verify_c6):
+                                    self.assertEqual((unit,), units); verify_c6()
+                                self.assertEqual(reservation, nv_module.require_unit_nv_reservation(spreadsheet_token, binding, identity, unit))
+                                self.assertEqual(before, {path.name: path.read_bytes() for path in
+                                    (state/(hashlib.sha256(binding.spreadsheet_id.encode()).hexdigest()+nv_suffix)).iterdir()})
+                                self.assertFalse(any(path.name.endswith('.project-origin') for path in state.iterdir()),
+                                    'C6 original reader is not the separate project-origin writer')
+                                continue
                             self.assertEqual(reservation, nv_module.require_unit_nv_reservation(spreadsheet_token, binding, identity, unit))
                             for claims in ({'reserved_ids': ('NV99999',)}, {'placements': ()}, {'target_nonce': 'c'*64}, {'business_reads': tuple(reads[:-1])}, {'sheet': 'ETH&IB Switch'}):
                                 with self.assertRaises(compiler.SendUnitHold): compile_cabling(**claims)

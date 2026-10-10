@@ -1291,6 +1291,16 @@ catalog header 合同不变；已有 native NV 但缺外锚不得按 legacy 路�
 这是未安装的原件准备、append 和冷重读，不证明真实 C5/C6 来源准入、FIFO 释放、
 跨项目结算、当前 freshness、NEW 或发送许可；这些整体接线仍未完成。
 
+真实 Cabling compiler 的私有 native preparation 分支另须保持实际 C5 来源与
+current admitted C6 receipt 的前后复核，不用 reservation 替代来源。完整 missing-key
+集合、receipt-derived generation/publish、原 nonce 和真实 literal key/ID 逐项相同；
+仅 key 分配集合排序，ACTION 保留 manifest 原操作顺序，active update 不写 A。
+最后真实 receipt 回读后、compiler 返回前再核一次原件；同字节换 inode 或同 inode
+原样重写均要求 compiler 本身 HOLD，不以外层 scope 退出 HOLD 冒充。真实 protected
+workflow 编译后单次 catalog append，再由既有 ALL C6 reader 核原 ACTION/WIRE、真实
+generation 四件和已发布 XLSX。这不是 project-origin writer，也不授予 freshness、FIFO、
+APPLIED、NEW 或发送许可；唯一 C6 registration 的 origin 交接仍需后续整体接线。
+
 old/current/indexed 以及 catalog 内部重读共用固定 16MiB 原始图像预算，按持续
 持有的 dev/inode 去重，并在实际 pread 前核单文件 size 与整组预算；同字节不同
 inode 分别计费，同一原件仍逐次真实读取并核 full-stat/named/bytes，不能缓存许可。

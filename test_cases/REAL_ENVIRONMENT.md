@@ -2332,6 +2332,8 @@ ALL 审计行确定唯一 append 窗口（NOOP 无虚构行），精确耗尽可
 
 ## TC-REAL-REQ7-NV-RESERVATION-001 — 两张 Cabling 的共享持久编号
 
+- 真实来源/C6 编译交接补充（**NOT RUN / REAL_ENV REQUIRED**）：保留 actual C5→admitted C6 receipt→live opaque native preparation→混合 update/insert→单次 catalog append→ALL 真实 C6 原件读者的正常流程。最后真实 receipt 回读期间 NV RAW 同字节换 inode/同 inode 原样重写需使 compiler 本身返回前 HOLD，留存注入命中、无 catalog/origin 追加和原件不修复的证据，不以外层退出 HOLD 代替。核原 active ID 不写 A、完整 missing keys 和实际预留 ID、manifest 原操作顺序、receipt identity 与原 nonce；本地真实多脚本证据不是线上鲜度、断电或设备验收，project-origin writer/NEW 仍未闭合。未省略/合并既有场景或接受新剩余风险；原精确授权、前置、证据与清理边界不变。
+
 - 原生多单元准备补充（**NOT RUN / REAL_ENV REQUIRED**）：保留正常 ETH→IB→同 key 新 generation、高于两表 Closed/无关及全部旧预留、完整 PRIOR 原链冷重读、opaque owner 限定 append、scope 退出后新 catalog 原件替换拒绝。旧 journal UNKNOWN 或整个/部分丢失不得生成新 witness；default LOST 门禁不变。此本地原件诊断尚不证明真实 C5/C6 来源、FIFO、跨项目结算、freshness、NEW 或发送许可。
 - 固定整组预算与写入补充（**NOT RUN / REAL_ENV REQUIRED**）：保留 old/current/indexed 与内部 catalog 原件共享固定 16MiB 的边界、相同原件真实重读、相同字节不同 inode 分别计费、整组超限未 yield/ack，以及目录 fsync／ETH 写入后 foreign FD 复用拒绝与零后续 sibling 写入。清理只关原 dev/inode；现场须见证原件、统计、字节、注入事件和安全状态，不把字节去重当许可缓存或进程峰值保证。
 - 首次 writer 原件补充（**NOT RUN / REAL_ENV REQUIRED**）：保持七个固定名 exclusive creator 的真实原 FD，前五份 file full-stat/hash 与 INITIALIZED 自身预开 dev/inode 联合绑定；ETH 写入后换同字节 inode 必须在下一 sibling 前 HOLD，完整注册后六份各自同字节换 inode 的冷重读必须拒绝。不以事后 reopen 认领原件；异常只 conditional-close 本次原对象，保留外来 FD、旧图像及替代物。
