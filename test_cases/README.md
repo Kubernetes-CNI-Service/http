@@ -2103,6 +2103,22 @@ not default worker NEW/R2 admission, freshness/G1, T6, whole REQ7 or current
 formal full/check. Existing tests and budgets remain unchanged; onsite device,
 Cloud and power-loss verification remain NOT RUN.
 
+The mixed-project disposition-to-count/CLAIM composition now uses a genuine
+second project's original C6 and selected wire, never a caller foreign writer.
+The older first-project count=0 disposition releases only the original-derived
+FIFO classification; local sequence=1 in another project does not inherit that
+project's sequence=2 watermark. The actual ATTEMPT append and final CLAIM
+consumer retain all three disposition originals. Same-byte/new-inode witness
+or selected C6 replacement refuses return and retains UNKNOWN/consumed state.
+A separate cold process observes original counts (1,0,1) and cannot reconsume
+the used claim. Initial composition errors were fixture registry import-order
+errors, not implementation RED; only the new fixture's canonical import timing
+was corrected, with old test definitions unchanged. The fixed four scenarios
+passed, followed by all 109 retained-applied/GLOBAL module tests. Existing
+manifest direct and real six-script workflow mappings cover this composition.
+These are local development results, not default worker dispatch, NEW/R2,
+freshness/G1/T6, whole REQ7, runner approval or current formal full/check.
+
 The non-authoritative online observation display distinguishes UNKNOWN with
 an original durable total count of six as `retry_exhausted`: read-only
 reconciliation and escalation, with mutation still disabled. Counts one through

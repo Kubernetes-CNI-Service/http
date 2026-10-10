@@ -1053,3 +1053,149 @@ print('COLD_MIXED_UNSENT_ORIGINALS_NO_AUTHORITY')
 
     def test_new_foreign_disposition_after_witness_cannot_return_a_valid_prefix(self):
         self.exercise('foreign-disposition')
+
+
+class MixedProjectDispositionClaimWorkflowTests(unittest.TestCase):
+    """Join actual mixed dispositions to the existing count/CLAIM contract.
+
+    No new API/permit is invented to make RED: these existing interfaces must
+    compose with all original files held. This is not qualified NEW admission.
+    """
+
+    def exercise(self, *, fault=None, cold=False):
+        from test_cases import test_req7_unit_catalog as fixtures
+        from test_cases.test_req7_send_unit import inputs
+        from test_cases.test_issue_tracker_whitelist_workbook import literal_xlsx
+        from contextlib import contextmanager
+        from unittest import mock
+        import json, os, subprocess
+        with fixtures.CatalogAppliedNativeWorkflowTests.completed_and_pending(
+                self, older_unsent=True, project_origins=True) as (
+                case, catalog, _remote, inventory, _old, _writer, owner, bound, units), ExitStack() as scope:
+            # The native fixture loads the canonical owner/journal registry.
+            # Bind after that handoff, never keep a pre-fixture registry alias.
+            from monitor import issue_tracker_global_attempt_journal as globals_
+            # The foreign project is genuinely sequence=1, after an APPLIED
+            # sequence=2 and an unattempted sequence=1 in the first project.
+            project = case.root/'mixed-claim-project'; project.mkdir(mode=0o700)
+            publication = project/'publication'; publication.mkdir(mode=0o700)
+            catalog.local.create_local_commit_store(project, publication)
+            writer = scope.enter_context(catalog.local.writer_owner(project, publication))
+            arguments = inputs()
+            arguments.update(spreadsheet_id=bound.spreadsheet_id, sheet_id=101, history_sheet_id=105,
+                target_nonce='a'*64, history_nonce='d'*64)
+            arguments['audits'] = ({'event_id': 'mixed-claim-settings:001',
+                'recorded_at_utc': '2026-10-11T10:00:00Z', 'details': 'K=3'},)
+            generation = catalog.local.begin_generation(writer, arguments['manifest'])
+            self.assertEqual(1, generation.sequence)
+            catalog.local.record_intent(writer, generation, literal_xlsx(), kind='xlsx')
+            receipt = catalog.local.commit(writer, generation)
+            arguments.update(generation_id=generation.generation_id, publish_id=receipt.published_sha256)
+            selected = catalog.composer.freeze_send_unit(**arguments)
+            catalog.register_pending_c6_unit(writer, owner, bound, selected)
+            globals_.prepare_global_unit(owner, bound, selected)
+            self.assertEqual(((units[1].unit_id, 1, ((('switch', 'node0001', 'down', 'fabric'), 2),)),),
+                inventory._record_all_project_unsent_dispositions(owner, bound))
+            before = original_read_files(case.root)
+            witness = case.root/'project/.tracker'/('REMOTE-UNSENT-SUPERSESSION-WITNESS-'+units[1].unit_id)
+            c6 = project/'.tracker/generations'/generation.generation_id/'RECEIPT'
+            target = c6 if fault == 'consumer-c6' else witness
+            preserved = case.root/'preserved-mixed-claim-original'
+            def rebind():
+                raw = target.read_bytes(); identity = target.stat().st_ino
+                target.rename(preserved); target.write_bytes(raw); target.chmod(0o600)
+                self.assertEqual(raw, target.read_bytes()); self.assertEqual(raw, preserved.read_bytes())
+                self.assertEqual(identity, preserved.stat().st_ino)
+                self.assertNotEqual(identity, target.stat().st_ino)
+            reached = []; original = globals_._write_global_start
+            @contextmanager
+            def counted_then_rebind(folder, name, raw):
+                with original(folder, name, raw) as verify:
+                    if name == 'ATTEMPT-1':
+                        reached.append(name); rebind()
+                    yield verify
+            if fault == 'after-count-witness':
+                with mock.patch.object(globals_, '_write_global_start', side_effect=counted_then_rebind):
+                    with self.assertRaises(globals_.GlobalAttemptHold):
+                        globals_.record_global_attempt_intent(owner, bound, selected)
+                self.assertEqual(['ATTEMPT-1'], reached)
+                self.assertEqual(1, globals_.inspect_global_unit(owner, bound, selected).attempt_count)
+                self.assertFalse(any(name.endswith('/CLAIM-1') for name in original_read_files(case.root)))
+            else:
+                observed = globals_.record_global_attempt_intent(owner, bound, selected)
+                self.assertEqual((1, 'UNKNOWN', selected.wire_sha256),
+                    (observed.attempt_count, observed.outcome, observed.wire_sha256))
+                if fault:
+                    refused = []; consumed = []
+                    with self.assertRaises(globals_.GlobalAttemptHold):
+                        with globals_._hold_counted_original_wire(writer, owner, bound, selected) as image:
+                            globals_._require_original_wire_launch(writer, owner, bound, selected, image, consume=True)
+                            rebind()
+                            try:
+                                globals_._require_original_wire_launch(writer, owner, bound, selected, image, consume=False)
+                            except globals_.GlobalAttemptHold: refused.append(True)
+                            else: refused.append(False)
+                            consumed.append(globals_._LIVE_WIRE_CLAIMS[image][-1])
+                    self.assertEqual([True], refused, 'last consumer must reject before scope exit')
+                    self.assertEqual([True], consumed, 'rejection must not restore consumed count')
+                else:
+                    with globals_._hold_counted_original_wire(writer, owner, bound, selected) as image:
+                        self.assertEqual(selected.wire_bytes, os.pread(image.fd, 1024*1024+1, 0))
+                        self.assertEqual(selected.action_preimage, os.pread(image.action_fd, 1024*1024+1, 0))
+                        globals_._require_original_wire_launch(writer, owner, bound, selected, image, consume=True)
+                        globals_._require_original_wire_launch(writer, owner, bound, selected, image, consume=False)
+                    claimed = original_read_files(case.root)
+                    with self.assertRaises(globals_.GlobalAttemptHold):
+                        with globals_._hold_counted_original_wire(writer, owner, bound, selected):
+                            self.fail('the same original count was consumed twice')
+                    self.assertEqual(claimed, original_read_files(case.root))
+                    if cold:
+                        from dataclasses import asdict
+                        scope.close(); case.catalog_release_owners()
+                        program = '''import sys,json
+from pathlib import Path
+sys.path[:0]=[sys.argv[1],str(Path(sys.argv[1])/'tools')]
+from test_cases import test_req7_unit_catalog as tests
+catalog=tests.load(); tests.load_component('issue_tracker_remote_history_match')
+from monitor import issue_tracker_global_attempt_journal as journal
+from monitor.issue_tracker_online_target import OnlineTargetBinding
+from test_cases.test_req7_spreadsheet_owner import scoped_fixture
+root=Path(sys.argv[2]); bound=OnlineTargetBinding(**json.loads(sys.stdin.buffer.read()))
+assert catalog.local._ACTIVE=={}
+with catalog.local.writer_owner(root/'mixed-claim-project',root/'mixed-claim-project/publication') as writer:
+ with scoped_fixture(root,catalog.ownership),catalog.ownership.spreadsheet_owner(bound) as owner:
+  observed=journal.inspect_catalog_global_units(owner,bound)
+  assert tuple((s.attempt_count,s.outcome) for _,s in observed)==((1,'UNKNOWN'),(0,'UNATTEMPTED_OBSERVATION'),(1,'UNKNOWN'))
+  selected=observed[-1][0]; yielded=[]; refused=False
+  try:
+   with journal._hold_counted_original_wire(writer,owner,bound,selected): yielded.append(True)
+  except journal.GlobalAttemptHold: refused=True
+  assert refused and not yielded
+assert catalog.local._ACTIVE=={}
+print('COLD_MIXED_DISPOSITION_CONSUMED_COUNT_STAYS_UNKNOWN')
+'''
+                        child = subprocess.run([sys.executable, '-B', '-c', program, str(SOURCE.parents[1]),
+                            str(case.root)], input=json.dumps(asdict(bound)).encode(),
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
+                        self.assertEqual(0, child.returncode, child.stdout+child.stderr)
+                        self.assertEqual(b'COLD_MIXED_DISPOSITION_CONSUMED_COUNT_STAYS_UNKNOWN\n', child.stdout)
+                        self.assertEqual(b'', child.stderr)
+                        self.assertEqual(claimed, original_read_files(case.root))
+            unchanged = {name: value for name, value in before.items()
+                if not fault or name != str(target.relative_to(case.root))}
+            self.assertTrue(unchanged.items() <= original_read_files(case.root).items())
+            if not cold:
+                self.assertEqual((1, 0, 1), tuple(state.attempt_count for _unit, state in
+                    globals_.inspect_catalog_global_units(owner, bound)))
+
+    def test_actual_mixed_disposition_original_count_and_one_use_claim_compose(self):
+        self.exercise()
+
+    def test_actual_prior_project_witness_rebind_after_count_retains_unknown_before_claim(self):
+        self.exercise(fault='after-count-witness')
+
+    def test_actual_selected_foreign_c6_rebind_refuses_last_consumer_without_restoring_claim(self):
+        self.exercise(fault='consumer-c6')
+
+    def test_actual_mixed_disposition_consumed_claim_cold_process_cannot_reconsume(self):
+        self.exercise(cold=True)
