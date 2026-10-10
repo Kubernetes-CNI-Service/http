@@ -2390,6 +2390,8 @@ generation/publish 及 UNKNOWN 下改 action/wire 均 HOLD，不计作 COMPLETE 
 
 ## TC-REAL-REQ7-DURABLE-ATTEMPT-JOURNAL-001 — 意图先落盘与跨重启总计数
 
+- UNSENT 后继计数/CLAIM 接线补充（**NOT RUN / REAL_ENV REQUIRED**）：保留真实旧 count=0、同项目每个 key 严格更晚 APPLIED/key 与固定 WITNESS/STARTED/final 三原件，以及真实最终后继 C6、六次原 wire 意图计数、原始 CLAIM 单次消费。必须见证原件连续持有跨首次 FIFO→ATTEMPT、CLAIM/末次 consumer，旧 count/wire 不变，UNKNOWN、未覆盖 pending、缺失/部分三原件、写边界原 inode 替换均 HOLD 并保留失败安全状态。保留正常、关键提交边界、代表性中断与冷恢复；省略/合并：无；替代证据仅本地独立 direct 与真实 C6/OAuth/四读/APPLIED/UNSENT/GLOBAL 脚本流程，不代替设备、Cloud、断电或当前 full/check。默认 NEW/R2、混项目 disposition writer、当前 source/freshness/G1 和整体闭合未证明；残余风险未新增接受，原现场授权、研发确认、证据/清理和生产门禁有效，无新增确认人。
+
 - Case ID：`TC-REAL-REQ7-DURABLE-ATTEMPT-JOURNAL-001`；类型：real-environment / durable transaction；对应 C-6/C-14/C-19。状态：**NOT RUN / REAL_ENV REQUIRED**。`monitor/issue_tracker_attempt_journal.py` 是未安装的保守本地证据库；direct 与实际 C-6 owner → literal encoder → 意图 journal → 后续拒绝观察，以及真实私有子进程退出／重启 workflow，不证明实际断电或六次真实网络尝试上界。
 - 前置条件、权限：另获 owner 精确 Stage O 隔离副本授权；固定 root worker、跨项目同 spreadsheet 的唯一 OS 锁、继承锁的固定 launcher、每次新鲜准入、不可变完整 batch、双 enrollment 与 COMPLETE 对账闭合后才可接入。当前 API 只使用现有项目 C-6 owner，保守阻止所有新单元；不接受它作为完整 spreadsheet-wide ownership 或发送能力。
 - 步骤与独立预期：WIRE、HEADER 与每次 ATTEMPT 必须以 single-link 0600、目录 0700、no-follow held FD、atomic NOREPLACE 和文件／目录 fsync 保存；返回前后重核 ACTIVE token 和命名目录身份。第七次记录、wire 改变、部分／陌生记录、gap、链接及 barrier 失败必须 HOLD 且保留原像；意图落盘后进程死亡不能重置计数／UNKNOWN。必须独立证明固定发送器一次且仅一次消费每份新意图；六次记录本身不等于六次真实尝试。

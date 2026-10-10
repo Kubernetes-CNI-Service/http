@@ -472,6 +472,125 @@ def _hold_catalog_counted_originals(writer_token, token, binding, selected_unit)
 
 
 @contextmanager
+def _hold_catalog_other_settlements(token, binding, unit):
+    """Original OTHER APPLIED/key or committed count-zero UNSENT through IO.
+
+    Only the fixed final catalog unit is selected. This private join runs
+    underneath the count/CLAIM writer's append-aware ALL shared-image holder;
+    it never exempts the read-only inventory verifier from namespace changes.
+    Every OTHER zero-count unit needs its original immutable disposition and
+    same-project strictly later APPLIED/key witnesses. Counted UNKNOWN cannot
+    be relabelled UNSENT. Selected UNKNOWN is not interpreted as settlement.
+    No caller rows, classification, paths, maxima or callbacks are accepted.
+    """
+    failed = False
+    try:
+        owner = ownership._validated_owner(token, binding)
+        from monitor import issue_tracker_unit_catalog as catalog
+        from monitor import issue_tracker_retained_inventory as inventory
+        from monitor import issue_tracker_remote_history_match as remote
+        with ExitStack() as scope:
+            originals = catalog._Originals(); scope.callback(originals.close)
+            with _hold_catalog_attempts(token, binding) as (observed, verify_counts):
+                units = tuple(original for original, _state in observed)
+                if (len(units) < 2 or units[-1] != unit
+                        or any(state.outcome == 'PENDING_NO_JOURNAL' for _original, state in observed)):
+                    raise GlobalAttemptHold()
+                verify_counts()
+            with catalog.hold_pending_project_origins(token, binding) as (origins, verify_origins):
+                if tuple(row.unit for row in origins) != units:
+                    raise GlobalAttemptHold()
+                rows, verify_c6 = scope.enter_context(catalog._hold_project_c6_from_origins(token, binding, origins))
+                verify_origins(); verify_c6()
+            if tuple(row.unit for row in rows) != units:
+                raise GlobalAttemptHold()
+            projects = {}; applied_rows = []; validators = []; prior_keys = []
+            for row, (original, state) in zip(rows, observed):
+                if original != row.unit:
+                    raise GlobalAttemptHold()
+                if row.project_identity not in projects:
+                    matches = [(writer, local._owner(writer)) for writer, active in tuple(local._ACTIVE.items())
+                        if active.pid == os.getpid()
+                        and journal._identity(os.fstat(active.project_fd))[:2] == row.project_identity]
+                    if len(matches) != 1:
+                        raise GlobalAttemptHold()
+                    projects[row.project_identity] = matches[0]
+                writer, project = projects[row.project_identity]
+                keys = ()
+                if original != unit and state.attempt_count:
+                    facts = local._json(row.c6_facts)
+                    generation = local.Generation(facts['generation_id'], facts['sequence'], facts['manifest_id'], writer)
+                    actual, verify_inputs, body, keys = scope.enter_context(
+                        remote._hold_settled_catalog_key_watermarks(writer, token, binding, original, generation))
+                    if (actual is not project or tuple(body['project_identity']) != row.project_identity
+                            or body['binding']['unit_id'] != original.unit_id):
+                        raise GlobalAttemptHold()
+                    validators.append(verify_inputs); prior_keys.append((row.project_identity, keys))
+                # The selected UNKNOWN must not supply a false later witness.
+                applied_rows.append(inventory.CatalogUnitAppliedKeys(original,
+                    state.attempt_count if original != unit else 0, keys, row.project_identity))
+            prefixes = ('REMOTE-UNSENT-SUPERSESSION-STARTED-', 'REMOTE-UNSENT-SUPERSESSION-',
+                        'REMOTE-UNSENT-SUPERSESSION-WITNESS-')
+            namespaces = {}; superseded = []
+            def disposition_names(project):
+                return frozenset(name for name in os.listdir(project.root_fd)
+                    if name.startswith('REMOTE-UNSENT-SUPERSESSION-') or name.startswith('.pending-'))
+            for identity, (_writer, project) in projects.items():
+                project_rows = tuple(row for row in applied_rows if row.project_identity == identity)
+                old_rows = tuple(row for row in project_rows if row.unit != unit and row.attempt_count == 0)
+                names = disposition_names(project); namespaces[identity] = names
+                expected = frozenset(prefix + row.unit.unit_id for prefix in prefixes for row in old_rows)
+                if names != expected:
+                    raise GlobalAttemptHold()
+                for row in old_rows:
+                    pair = tuple(prefix + row.unit.unit_id for prefix in prefixes[:2])
+                    witness = prefixes[2] + row.unit.unit_id
+                    # Capture all three fixed originals BEFORE interpreting any
+                    # body. Pair semantic replay overlaps these same held bytes.
+                    captured = {name: originals.file(project.root_fd, name, local._MAX_MANIFEST)
+                                for name in (*pair, witness)}
+                    body, _observation = inventory._unsent_disposition_body(project, binding, row,
+                        project_rows, local._json(captured[pair[1]][0]))
+                    if body is None:
+                        raise GlobalAttemptHold()
+                    expected_witness = local._canonical({'schema_version': 1, 'unit_id': row.unit.unit_id,
+                        'state': 'UNSENT-SUPERSESSION-WRITE-STARTED-NOT-AUTHORITY',
+                        'body_sha256': hashlib.sha256(local._canonical(body)).hexdigest()})
+                    raw, image = captured[witness]
+                    if raw != expected_witness:
+                        raise GlobalAttemptHold()
+                    body = {**body, 'write_witness': {'identity': list(image),
+                        'sha256': hashlib.sha256(raw).hexdigest()}}
+                    validators.append(scope.enter_context(remote._hold_applied_records(project.root_fd,
+                        pair, body, states=('UNSENT-SUPERSESSION-STARTED', 'SUPERSEDED-NOT-SENT'))))
+                    superseded.append(row.unit.unit_id)
+            selected = rows[-1]; sequence = local._json(selected.c6_facts)['sequence']
+            keys = {tuple(item['activity_key']) for item in local._json(unit.action_preimage)['business']}
+            if any(identity == selected.project_identity and key in keys and maximum >= sequence
+                    for identity, watermarks in prior_keys for key, maximum in watermarks):
+                raise GlobalAttemptHold()
+            def verify():
+                if ownership._validated_owner(token, binding) is not owner:
+                    raise GlobalAttemptHold()
+                verify_c6(); originals.verify()
+                for identity, (writer, project) in projects.items():
+                    if (local._owner(writer) is not project
+                            or journal._identity(os.fstat(project.project_fd))[:2] != identity
+                            or disposition_names(project) != namespaces[identity]):
+                        raise GlobalAttemptHold()
+                for validate in validators:
+                    validate()
+                verify_c6(); originals.verify()
+            verify(); originals.sync()
+            yield tuple(superseded), verify
+            verify()
+    except Exception:
+        failed = True
+    if failed:
+        raise GlobalAttemptHold()
+
+
+@contextmanager
 def _hold_settled_catalog_claim_inputs(writer_token,token,binding,unit):
     """Actual OTHER settlement/C6 originals through CLAIM consumers and exit.
 
@@ -492,7 +611,7 @@ def _hold_settled_catalog_claim_inputs(writer_token,token,binding,unit):
                 units = tuple(original for original,_state in observed)
                 if (len(units) < 2 or units[-1] != unit
                         or not 1 <= observed[-1][1].attempt_count <= 6
-                        or any(not state.attempt_count for _original,state in observed[:-1])):
+                        or any(state.outcome == 'PENDING_NO_JOURNAL' for _original,state in observed[:-1])):
                     raise GlobalAttemptHold()
                 verify_counts()
             with catalog.hold_pending_project_origins(token,binding) as (origins,verify_origins):
@@ -502,37 +621,14 @@ def _hold_settled_catalog_claim_inputs(writer_token,token,binding,unit):
             if (tuple(row.unit for row in rows) != units
                     or rows[-1].project_identity != journal._identity(os.fstat(project.project_fd))[:2]):
                 raise GlobalAttemptHold()
-            validators = []; prior_keys = []
-            for row in rows:
-                matches = [(writer,local._owner(writer)) for writer,active in tuple(local._ACTIVE.items())
-                    if active.pid == os.getpid()
-                    and journal._identity(os.fstat(active.project_fd))[:2] == row.project_identity]
-                if len(matches) != 1: raise GlobalAttemptHold()
-                writer,actual_project = matches[0]
-                if any(name.startswith('REMOTE-UNSENT-SUPERSESSION-') for name in os.listdir(actual_project.root_fd)):
-                    raise GlobalAttemptHold()
-                if row.unit == unit:
-                    if writer is not writer_token or actual_project is not project: raise GlobalAttemptHold()
-                    continue
-                facts = local._json(row.c6_facts)
-                generation = local.Generation(facts['generation_id'],facts['sequence'],facts['manifest_id'],writer)
-                actual,verify_inputs,body,keys = scope.enter_context(
-                    remote._hold_settled_catalog_key_watermarks(writer,token,binding,row.unit,generation))
-                if (actual is not actual_project or tuple(body['project_identity']) != row.project_identity
-                        or body['binding']['unit_id'] != row.unit.unit_id): raise GlobalAttemptHold()
-                validators.append(verify_inputs); prior_keys.append((row.project_identity,keys))
-            sequence = local._json(rows[-1].c6_facts)['sequence']
-            keys = {tuple(item['activity_key']) for item in local._json(unit.action_preimage)['business']}
-            if any(original_project == rows[-1].project_identity and key in keys and maximum >= sequence
-                for original_project,watermarks in prior_keys for key,maximum in watermarks):
-                raise GlobalAttemptHold()
+            _superseded, verify_other = scope.enter_context(_hold_catalog_other_settlements(token, binding, unit))
             parent = owner.directories[-1][0]
             name = owner.lock_name[:-5]+'.unit-'+unit.unit_id+'.journal'
             def verify():
                 if local._owner(writer_token) is not project or ownership._validated_owner(token,binding) is not owner:
                     raise GlobalAttemptHold()
                 _require_no_completion(parent,name); verify_c6()
-                for validate in validators: validate()
+                verify_other()
                 verify_c6(); _require_no_completion(parent,name)
             verify()
             yield verify
@@ -1121,8 +1217,8 @@ def _record_settled_successor_attempt(token, binding, unit):
     """One immutable diagnostic count under continuously held real settlement.
 
     This bounded join handles the final catalog unit only, with every OTHER
-    unit genuinely counted and APPLIED/key-settled. Other pending units and
-    UNSENT dispositions stay HOLD, not ignored inventory or a FIFO shortcut.
+    unit genuinely counted and APPLIED/key-settled or count-zero with its
+    original committed UNSENT disposition. Uncovered pending units stay HOLD.
     First count uses the actual all-project FIFO reader before the write;
     identical retries retain selected UNKNOWN and compare actual prior keys
     only within their original project. No claim/send/current-source/G1 or
@@ -1145,7 +1241,7 @@ def _record_settled_successor_attempt(token, binding, unit):
             name = stem + '.unit-' + unit.unit_id + '.journal'
             with _hold_catalog_attempts(token, binding) as (observations, verify_counts):
                 if (tuple(original for original, _state in observations) != units
-                        or any(not state.attempt_count for _original, state in observations[:-1])
+                        or any(state.outcome == 'PENDING_NO_JOURNAL' for _original, state in observations[:-1])
                         or observations[-1][1].outcome == 'PENDING_NO_JOURNAL'):
                     raise GlobalAttemptHold()
                 count = observations[-1][1].attempt_count
@@ -1194,45 +1290,24 @@ def _record_settled_successor_attempt(token, binding, unit):
                     raise GlobalAttemptHold()
                 rows, verify_c6 = scope.enter_context(catalog._hold_project_c6_from_origins(token, binding, origins))
                 verify_origins(); held.verify(); verify_c6()
-            validators = []; prior_keys = []
-            for row in rows:
-                matches = [(writer, local._owner(writer)) for writer, active in tuple(local._ACTIVE.items())
-                    if active.pid == os.getpid()
-                    and journal._identity(os.fstat(active.project_fd))[:2] == row.project_identity]
-                if len(matches) != 1:
-                    raise GlobalAttemptHold()
-                writer, project = matches[0]
-                if any(child.startswith('REMOTE-UNSENT-SUPERSESSION-') for child in os.listdir(project.root_fd)):
-                    raise GlobalAttemptHold()
-                if row.unit == unit:
-                    continue
-                facts = local._json(row.c6_facts)
-                generation = local.Generation(facts['generation_id'], facts['sequence'], facts['manifest_id'], writer)
-                actual, verify_inputs, body, keys = scope.enter_context(
-                    remote._hold_settled_catalog_key_watermarks(writer, token, binding, row.unit, generation))
-                if (actual is not project or tuple(body['project_identity']) != row.project_identity
-                        or body['binding']['unit_id'] != row.unit.unit_id):
-                    raise GlobalAttemptHold()
-                validators.append(verify_inputs); prior_keys.append((row.project_identity, keys))
             if tuple(row.unit for row in rows) != units:
                 raise GlobalAttemptHold()
-            selected_row = rows[-1]; sequence = local._json(selected_row.c6_facts)['sequence']
-            keys = {tuple(item['activity_key']) for item in local._json(unit.action_preimage)['business']}
-            if any(project == selected_row.project_identity and key in keys and maximum >= sequence
-                    for project, watermarks in prior_keys for key, maximum in watermarks):
-                raise GlobalAttemptHold()
+            superseded, verify_other = scope.enter_context(_hold_catalog_other_settlements(token, binding, unit))
             if not count:
                 with inventory._hold_all_project_fifo_frontier(token, binding) as (frontier, verify_fifo):
-                    if frontier.frontier != (unit.unit_id,) or frontier.blocked or frontier.superseded:
+                    if (frontier.frontier != (unit.unit_id,) or frontier.blocked
+                            or set(frontier.superseded) != set(superseded)):
                         raise GlobalAttemptHold()
-                    verify_fifo(); held.verify(); verify_c6()
+                    # Transfer while both scopes overlap: the fixed disposition
+                    # FDs and every shared image already stay held in our own
+                    # append-aware scopes. Do not extend read-only FIFO across IO.
+                    verify_fifo(); verify_other(); held.verify(); verify_c6()
             appended = None
             def verify():
                 if ownership._validated_owner(token, binding) is not owner:
                     raise GlobalAttemptHold()
                 held.verify(appended_to=appended); verify_c6()
-                for validate in validators:
-                    validate()
+                verify_other()
                 held.verify(appended_to=appended); verify_c6()
             verify(); held.sync(); _sync_initialization(parent, folder, header); verify()
             entry = 'ATTEMPT-%d' % (count + 1)

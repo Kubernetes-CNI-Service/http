@@ -1887,6 +1887,11 @@
       "tests": ["test_cases.test_req7_retained_global_inventory", "test_cases.test_req7_retained_applied_inventory", "test_cases.test_req7_nv_reservation"]
     },
     {
+      "id": "req7_original_unsent_successor_count_claim",
+      "paths": ["monitor/issue_tracker_global_attempt_journal.py"],
+      "tests": ["test_cases.test_req7_retained_applied_inventory"]
+    },
+    {
       "id": "req7_retained_library_manual_profile",
       "paths": ["tools/update-user-manual.py"],
       "tests": ["test_cases.test_req7_retained_manual_profile"]
@@ -3493,6 +3498,11 @@
       "id": "req7_retained_enrollment_global_history_originals",
       "members": ["monitor/issue_tracker_retained_inventory.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_attempt_journal.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_enrollment_journal.py", "monitor/issue_tracker_history_preread_journal.py", "monitor/issue_tracker_manifest.py", "monitor/issue_tracker_sheets_read_decode.py", "monitor/issue_tracker_sheets_read_plan.py", "monitor/issue_tracker_remote_history_match.py", "monitor/issue_tracker_unit_catalog.py", "monitor/issue_tracker_send_unit.py", "monitor/issue_tracker_nv_reservation.py", "monitor/issue_tracker_history_read_launcher.py"],
       "tests": ["test_cases.test_req7_retained_global_inventory", "test_cases.test_req7_retained_applied_inventory"]
+    },
+    {
+      "id": "req7_actual_c6_applied_unsent_originals_to_successor_count_claim",
+      "members": ["monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_unit_catalog.py", "monitor/issue_tracker_retained_inventory.py", "monitor/issue_tracker_remote_history_match.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_spreadsheet_owner.py"],
+      "tests": ["test_cases.test_req7_retained_applied_inventory", "test_cases.test_req7_unit_catalog"]
     },
     {
       "id": "req7_protected_shared_counter_native_receipt_retry",

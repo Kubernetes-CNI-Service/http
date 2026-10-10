@@ -2069,6 +2069,22 @@ multi-pending/superseded FIFO, default online worker, whole REQ7 or current
 formal full/check proof. No real device, Cloud or power-loss verification is
 claimed; existing automated cases and production release gates remain intact.
 
+The final-successor join additionally accepts an OTHER unit only when its
+original count is zero and its immutable UNSENT WITNESS/STARTED/final originals
+bind every key to a strictly later genuine same-project APPLIED/key witness.
+This is original-derived classification, not a caller label or computed maximum.
+Every old shared image is held before semantic replay; the three disposition
+FDs overlap the real FIFO reader before its read-only scope ends and remain
+held through the writer's exact ATTEMPT append, CLAIM/consumer and finalizers.
+Selected UNKNOWN contributes no APPLIED witness. Missing/partial/foreign names,
+uncovered pending or counted UNKNOWN still HOLD; local sequences never compare
+between projects. The final catalog unit and six identical-count limit remain
+unchanged. Direct closed-owner tests and real C6/four-read/APPLIED/UNSENT/count/
+CLAIM workflows preserve older counts, wire and disposition images, including
+replacement at the actual write boundary. This diagnostic count/claim join
+does not install default NEW/R2, create UNSENT records for a mixed-project
+catalog, qualify current source/freshness/G1, or prove whole REQ7/full/check.
+
 Protected reserved, original-business, receipted, continuous and shared-retry
 count boundaries now call the same catalog-aware public counter. Their original
 quota, History, receipt, audit and current-source gates remain in place. Real

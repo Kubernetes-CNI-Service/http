@@ -24,6 +24,138 @@ def load():
 
 
 class RetainedAppliedInventoryTests(unittest.TestCase):
+    def test_other_settlement_scope_rejects_unissued_owner_before_catalog_reads(self):
+        from unittest import mock
+        remote_tests.load_global()
+        from monitor import issue_tracker_global_attempt_journal as globals_
+        scope = getattr(globals_, '_hold_catalog_other_settlements', None)
+        self.assertTrue(callable(scope), 'count/CLAIM need one original OTHER settlement scope')
+        with mock.patch.object(globals_, '_hold_catalog_attempts') as reading:
+            with self.assertRaises(globals_.GlobalAttemptHold):
+                with scope(object(), object(), object()):
+                    self.fail('unissued owner yielded OTHER settlement')
+            reading.assert_not_called()
+
+    def test_other_settlement_scope_has_no_caller_labels_paths_or_verification(self):
+        remote_tests.load_global()
+        from monitor import issue_tracker_global_attempt_journal as globals_
+        scope = getattr(globals_, '_hold_catalog_other_settlements', None)
+        self.assertTrue(callable(scope), 'original OTHER classification cannot come from the caller')
+        for claim in ({'superseded': ()}, {'keys': ()}, {'path': 'foreign'}, {'verify': lambda: None}):
+            with self.subTest(claim=tuple(claim)), self.assertRaises(TypeError):
+                with scope(object(), object(), object(), **claim):
+                    self.fail('caller classification reached original readers')
+
+    def _actual_unsent_successor(self, *, claim=False, missing_disposition=False, rebound=False, claim_rebound=False):
+        from unittest import mock
+        from contextlib import contextmanager
+        from test_cases import test_req7_unit_catalog as fixtures
+        with fixtures.CatalogAppliedNativeWorkflowTests.completed_and_pending(
+                self, older_unsent=True, project_origins=True) as (
+                case, catalog, _remote, inventory, _old, writer, owner, bound, units):
+            from monitor import issue_tracker_global_attempt_journal as globals_
+            from test_cases.test_req7_send_unit import inputs
+            from test_cases.test_issue_tracker_whitelist_workbook import literal_xlsx
+            local = catalog.local
+            expected = ((units[1].unit_id, 1, ((('switch', 'node0001', 'down', 'fabric'), 2),)),)
+            if not missing_disposition:
+                self.assertEqual(expected, inventory._record_catalog_unsent_dispositions(writer, owner, bound))
+            arguments = inputs()
+            arguments['business'][0]['observed_values'] = {'L': {'stringValue': 'down'}}
+            arguments['audits'] = ({'event_id': 'settings:003',
+                'recorded_at_utc': '2026-10-10T10:00:00Z', 'details': 'K=3'},)
+            generation = local.begin_generation(writer, arguments['manifest'])
+            self.assertEqual(3, generation.sequence)
+            local.record_intent(writer, generation, literal_xlsx(), kind='xlsx')
+            receipt = local.commit(writer, generation)
+            arguments.update(spreadsheet_id=bound.spreadsheet_id, sheet_id=101, history_sheet_id=105,
+                target_nonce='a'*64, history_nonce='d'*64, generation_id=generation.generation_id,
+                publish_id=receipt.published_sha256)
+            selected = catalog.composer.freeze_send_unit(**arguments)
+            catalog.register_pending_c6_unit(writer, owner, bound, selected)
+            globals_.prepare_global_unit(owner, bound, selected)
+            before = original_read_files(case.root)
+            target = case.root/'project/.tracker'/('REMOTE-UNSENT-SUPERSESSION-WITNESS-'+units[1].unit_id)
+            reached = []; original_write = globals_._write_global_start
+            @contextmanager
+            def write_then_rebind(folder, name, raw):
+                with original_write(folder, name, raw) as verify:
+                    if name == ('CLAIM-1' if claim_rebound else 'ATTEMPT-1'):
+                        image = target.read_bytes(); target.rename(case.root/'preserved-unsent-witness')
+                        target.write_bytes(image); target.chmod(0o600); reached.append(name)
+                    yield verify
+            if missing_disposition or rebound:
+                with mock.patch.object(globals_, '_write_global_start',
+                        side_effect=write_then_rebind if rebound else original_write):
+                    with self.assertRaises(globals_.GlobalAttemptHold):
+                        globals_.record_global_attempt_intent(owner, bound, selected)
+                if rebound:
+                    self.assertEqual(['ATTEMPT-1'], reached)
+                    self.assertEqual(target.read_bytes(), (case.root/'preserved-unsent-witness').read_bytes())
+                    self.assertNotEqual(target.stat().st_ino, (case.root/'preserved-unsent-witness').stat().st_ino)
+                    self.assertEqual(1, globals_.inspect_global_unit(owner, bound, selected).attempt_count)
+                else:
+                    self.assertEqual(before, original_read_files(case.root))
+                    self.assertEqual(0, globals_.inspect_global_unit(owner, bound, selected).attempt_count)
+            else:
+                for count in range(1, 2 if claim_rebound else 7):
+                    state = globals_.record_global_attempt_intent(owner, bound, selected)
+                    self.assertEqual((count, 'UNKNOWN', selected.wire_sha256),
+                        (state.attempt_count, state.outcome, state.wire_sha256))
+                    if claim_rebound:
+                        yielded = []
+                        with mock.patch.object(globals_, '_write_global_start', side_effect=write_then_rebind):
+                            with self.assertRaises(globals_.GlobalAttemptHold):
+                                with globals_._hold_counted_original_wire(writer, owner, bound, selected):
+                                    yielded.append(True)
+                        self.assertEqual([], yielded); self.assertEqual(['CLAIM-1'], reached)
+                        self.assertEqual(target.read_bytes(), (case.root/'preserved-unsent-witness').read_bytes())
+                        self.assertNotEqual(target.stat().st_ino, (case.root/'preserved-unsent-witness').stat().st_ino)
+                        self.assertEqual(1, globals_.inspect_global_unit(owner, bound, selected).attempt_count)
+                        claims = [path for path in original_read_files(case.root) if str(path).endswith('/CLAIM-1')]
+                        self.assertEqual(1, len(claims), 'interrupted original CLAIM must be retained, not repaired')
+                        self.assertEqual((1, 0), tuple(globals_.inspect_global_unit(owner, bound, old).attempt_count for old in units))
+                        return
+                    if claim:
+                        counted = original_read_files(case.root)
+                        with globals_._hold_counted_original_wire(writer, owner, bound, selected) as image:
+                            globals_._require_original_wire_launch(writer, owner, bound, selected, image, consume=True)
+                            globals_._require_original_wire_launch(writer, owner, bound, selected, image, consume=False)
+                        claimed = original_read_files(case.root)
+                        self.assertTrue(counted.items() <= claimed.items())
+                        with self.assertRaises(globals_.GlobalAttemptHold):
+                            with globals_._hold_counted_original_wire(writer, owner, bound, selected):
+                                self.fail('the same original count was claimed twice')
+                        self.assertEqual(claimed, original_read_files(case.root))
+                counted = original_read_files(case.root)
+                self.assertTrue(before.items() <= counted.items())
+                added = [str(path).rsplit('/', 1)[-1] for path in set(counted)-set(before)]
+                self.assertEqual({'ATTEMPT-'+str(i) for i in range(1, 7)},
+                    {name for name in added if name.startswith('ATTEMPT-')})
+                self.assertEqual(14 if claim else 6, len(added))
+                if claim:
+                    self.assertEqual({'CLAIM-'+str(i) for i in range(1, 7)} | {'HEADER', 'INITIALIZED'},
+                        {name for name in added if not name.startswith('ATTEMPT-')})
+                with self.assertRaises(globals_.GlobalAttemptHold):
+                    globals_.record_global_attempt_intent(owner, bound, selected)
+                self.assertEqual(counted, original_read_files(case.root))
+            self.assertEqual((1, 0), tuple(globals_.inspect_global_unit(owner, bound, old).attempt_count for old in units))
+
+    def test_actual_committed_unsent_allows_only_selected_six_identical_counts(self):
+        self._actual_unsent_successor()
+
+    def test_actual_committed_unsent_count_can_claim_original_wire_once(self):
+        self._actual_unsent_successor(claim=True)
+
+    def test_actual_computed_supersession_without_disposition_remains_uncounted_hold(self):
+        self._actual_unsent_successor(missing_disposition=True)
+
+    def test_actual_unsent_original_rebind_at_attempt_write_retains_unknown_without_return(self):
+        self._actual_unsent_successor(rebound=True)
+
+    def test_actual_unsent_original_rebind_at_claim_write_retains_consumed_claim_without_yield(self):
+        self._actual_unsent_successor(claim_rebound=True)
+
     def _reserved_settled_successor(self, *, missing_applied=False):
         import time
         from test_cases import test_req7_unit_catalog as catalog_tests
