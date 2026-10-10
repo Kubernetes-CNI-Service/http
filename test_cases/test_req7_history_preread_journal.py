@@ -763,6 +763,29 @@ class Req7HistoryPrereadNativeWorkflowTests(unittest.TestCase):
             self.assertEqual(payload, (self.store / 'HISTORY-RAW').read_bytes())
 
 
+class Req7OriginalBusinessReadAcquisitionDirectTests(unittest.TestCase):
+    def test_private_acquisition_accepts_no_caller_plan_coordinate_factory_or_verifier(self):
+        import inspect
+        module = load()
+        api = getattr(module, '_hold_owned_original_business_history_reads', None)
+        self.assertTrue(callable(api), 'original business/History lacks fixed fresh-read acquisition')
+        self.assertEqual(('writer_token', 'owner_token', 'binding', 'unit', 'authentication',
+                          'identity_response'), tuple(inspect.signature(api).parameters))
+
+    def test_fabricated_owner_or_unit_refuses_before_any_actual_reader(self):
+        module = load()
+        api = getattr(module, '_hold_owned_original_business_history_reads', None)
+        self.assertTrue(callable(api), 'original business/History lacks fixed fresh-read acquisition')
+        from monitor import issue_tracker_history_read_launcher as launcher
+        entered = []
+        with mock.patch.object(launcher, 'OwnedProjectSheetsReadUnit') as reader:
+            with self.assertRaises(module.HistoryPrereadHold):
+                with api(object(), object(), object(), object(), object(), identity_response=object()):
+                    entered.append(True)
+            reader.assert_not_called()
+        self.assertEqual([], entered, 'fabricated originals cannot enter the acquisition scope')
+
+
 if __name__ == '__main__':
     if len(sys.argv) > 1 and sys.argv[1] == '--owned-inspect':
         owner = load_owner(); module = load()

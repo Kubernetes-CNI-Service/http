@@ -2383,3 +2383,18 @@ CLAIM or mutation. This is read-only VISIBLE_ONLY_UNPROVED preparation, not
 FIRST/R2 admission, hidden PROJECT completeness, whole REQ7 or exact-tree
 full/check. Existing refusal expectations and original deadlines remain;
 field validation is NOT RUN.
+
+Private `_hold_owned_original_business_history_reads` acquires fresh fixed
+History/activity/insertion/row reads from the actual retained catalog unit's
+immutable business originals. Every original operation, including NOOP and
+operator cells, is compared without recompiling action/wire or changing count.
+Shared fixed read shapes may be deduplicated, never operation identities.
+Original business/History descriptors remain held through inventory finalizers;
+same-byte inode replacement refuses before yielding. The actual project
+authentication, read issuances and original deadlines are checked throughout
+and after finalizers. Independent direct and actual protected ETH/IB native
+OAuth/TLS workflows require five issued reads (including supplied identity),
+unchanged originals/count and no CLAIM/mutation. Existing NOOP/cold recovery
+tests remain. This helper is a continuity observation, not source provenance,
+default worker integration, FIRST/R2, G1, a send permit or current full/check.
+Field/Cloud/device/power-loss validation remains NOT RUN.

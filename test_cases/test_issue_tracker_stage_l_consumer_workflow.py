@@ -29,6 +29,25 @@ from test_cases.test_issue_tracker_stage_l_consumer import ProdStageLFixture
 
 
 class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
+    def _original_business_read_acquisition_probe(self, mode):
+        from monitor import issue_tracker_history_preread_journal as preread
+        self.assertTrue(callable(getattr(preread, '_hold_owned_original_business_history_reads', None)),
+            'actual protected source needs fixed original business/History fresh reads')
+        observed = []
+        self._exercise_real_protected_three_panel_fixture(skip_history=False,
+            observed_cabling_insert_probe=True, receipted_intent_probe=True,
+            native_catalog_probe=True, native_catalog_c6_origin_probe=True,
+            native_catalog_retained_probe=True, native_catalog_launch_probe=(mode, observed))
+        suffix = {'business-originals': 'fresh-read-only',
+                  'business-originals-rebind': 'original-rebind-hold'}[mode]
+        self.assertEqual(['ETH Cabling:' + suffix, 'IB Cabling:' + suffix], observed)
+
+    def test_actual_protected_business_and_history_fixed_acquisition_preserves_original_count(self):
+        self._original_business_read_acquisition_probe('business-originals')
+
+    def test_actual_business_original_rebound_during_last_native_read_refuses_without_count(self):
+        self._original_business_read_acquisition_probe('business-originals-rebind')
+
     def _default_source_read_preparation_probe(self, mode):
         from monitor import issue_tracker_remote_history_match as remote
         self.assertTrue(callable(getattr(remote,'_prepare_current_project_online_observation',None)),
@@ -362,6 +381,69 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         def owned(kind, raw, **options):
             return native.read_owned(private_context, writer_token, spreadsheet_token,
                 binding, credential, kind, json.loads(raw), raw_body=raw, **options)
+        if mode in ('business-originals', 'business-originals-rebind'):
+            from test_cases.test_req7_history_read_launcher import Req7HistoryReadLauncherWorkflowTests
+            from monitor import issue_tracker_history_preread_journal as preread
+            from monitor import issue_tracker_mutation_launcher as mutation
+            before = {str(path.relative_to(state)): (path.stat().st_ino, path.read_bytes())
+                for path in state.rglob('*') if path.is_file()}
+            actual, _credential, _raw = Req7HistoryReadLauncherWorkflowTests.project_auth(
+                native, private_context, owner_module, spreadsheet_token, binding)
+            documents = {'template_identity': response(identity_response()).data,
+                'history_tail': history_raw.data, 'activity': reads[0]['discovery_response'].data,
+                'insertion': reads[0]['occupancy_response'].data,
+                'row': next(item['row_response'].data for item in reads if item['row_response'] is not None)}
+            real_read = fixed_reads.OwnedProjectSheetsReadUnit.read_once
+            issued = []; substituted = []; entered = []; refused = []
+            def read(reader):
+                body = documents[reader._kind]
+                reply = b'HTTP/1.1 200 OK\r\nContent-Length: ' + str(len(body)).encode() + b'\r\nConnection: close\r\n\r\n' + body
+                with native.server(reply, hostname='sheets.googleapis.com', destination='sheets.googleapis.com') as (records, errors), ExitStack() as launched:
+                    port = socket.getaddrinfo('sheets.googleapis.com', 443)[0][4][1]
+                    calls, children = native.intercept(launched, native.child_fixture(port), writer_token, spreadsheet_token, binding)
+                    value = real_read(reader)
+                issued.append((reader._kind, len(records), len(calls), tuple(errors), children[0].returncode))
+                if mode == 'business-originals-rebind' and reader._kind == 'row':
+                    path = next(path for path in state.rglob('BUSINESS-RAW'))
+                    raw = path.read_bytes(); inode = path.stat().st_ino
+                    path.rename(global_root / 'preserved-business-read-original')
+                    path.write_bytes(raw); path.chmod(0o600)
+                    substituted.append((str(path.relative_to(state)), inode, path.stat().st_ino))
+                return value
+            with mock.patch.object(fixed_reads.OwnedProjectSheetsReadUnit, 'read_once', autospec=True, side_effect=read), \
+                    mock.patch.object(global_journal, 'record_global_attempt_intent', wraps=global_journal.record_global_attempt_intent) as no_count, \
+                    mock.patch.object(mutation, '_send_counted_original_once') as no_mutation:
+                identity_raw = fixed_reads.OwnedProjectSheetsReadUnit(writer_token, spreadsheet_token,
+                    binding, actual, read_kind='template_identity').read_once()
+                def observe():
+                    with preread._hold_owned_original_business_history_reads(writer_token,
+                            spreadsheet_token, binding, unit, actual, identity_response=identity_raw) as (result, verify):
+                        entered.append(True)
+                        self.assertEqual((2, 0), (result.operations_retained, result.noop_operations))
+                        verify()
+                if mode == 'business-originals':
+                    observe()
+                else:
+                    with self.assertRaises(preread.HistoryPrereadHold): observe()
+                    refused.append(True)
+            # Facts outside every exception sanitizer; no synthetic read permit.
+            self.assertEqual([(kind, 1, 1, (), 0) for kind in
+                ('template_identity', 'history_tail', 'activity', 'insertion', 'row')], issued)
+            self.assertEqual([True] if mode == 'business-originals' else [], entered)
+            self.assertEqual([] if mode == 'business-originals' else [True], refused)
+            no_count.assert_not_called(); no_mutation.assert_not_called()
+            self.assertEqual(0, global_journal.inspect_global_unit(spreadsheet_token, binding, unit).attempt_count)
+            self.assertFalse(list(state.rglob('ATTEMPT-*'))); self.assertFalse(list(state.rglob('CLAIM-*')))
+            after = {str(path.relative_to(state)): (path.stat().st_ino, path.read_bytes())
+                for path in state.rglob('*') if path.is_file()}
+            if mode == 'business-originals': self.assertEqual(before, after)
+            else:
+                self.assertEqual(1, len(substituted)); name, old, new = substituted[0]
+                self.assertNotEqual(old, new); self.assertEqual(before[name][1], after[name][1])
+                self.assertEqual({k: v for k, v in before.items() if k != name},
+                                 {k: v for k, v in after.items() if k != name})
+            observed.append(sheet + (':fresh-read-only' if mode == 'business-originals' else ':original-rebind-hold'))
+            return
         if mode in ('prepare','prepare-mixed-accounting','prepare-quota-rebind','prepare-finalizer-expiry'):
             from test_cases.test_req7_history_read_launcher import Req7HistoryReadLauncherWorkflowTests
             from monitor import issue_tracker_token_launcher as tokens
