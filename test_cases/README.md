@@ -1275,6 +1275,37 @@ prepare／inspect 的外层目录也须在取得 FD 后立即记录原对象身�
 同时要求原图像、原 wire 与 UNKNOWN 次数不变；不证明同 inode 的 open-file-description
 一致性，也不替代跨单元分配或正式 full。
 
+原生 catalog NV 诊断入口用真实 spreadsheet owner 派生 `.unit-<unit-id>.nv`，
+固定保存两份 RAW、HEADER、RESERVATIONS、INITIALIZED 和完整原 PRIOR 链，
+目录前写不可变 `nv-started`。固定原件读者重放全部旧单元，下一编号同时高于
+两表所有原 ID 与全部旧预留；同 key 的不同 generation 不复用旧编号。
+旧 GLOBAL 任一 UNKNOWN、部分或整个 journal 丢失，均在新 witness 写入前 HOLD。
+default catalog 的 LOST 门禁不变；只有当前真实 owner 的未过期 opaque preparation
+可以交接自己的精确新增名字和实际 FrozenUnit literal key/ID。
+creator 原目录 FD 从创建至冷读交接和 append 始终持有；完成六份文件后封存其最终
+目录身份与名字，不依赖关闭后再次打开恰好复用同一整数。INITIALIZED 完成后的
+真实 full stat/SHA 经 opaque preparation 写入实际 catalog HEADER，沿既有
+catalog marker→ENTRY 原身份链外锚；冷读同 inode 原样改写 marker 或原位重编码
+其他文件的新身份仍 HOLD，不能从当前 marker 重新认领首写身份。默认无 NV 的
+catalog header 合同不变；已有 native NV 但缺外锚不得按 legacy 路径采用。
+这是未安装的原件准备、append 和冷重读，不证明真实 C5/C6 来源准入、FIFO 释放、
+跨项目结算、当前 freshness、NEW 或发送许可；这些整体接线仍未完成。
+
+old/current/indexed 以及 catalog 内部重读共用固定 16MiB 原始图像预算，按持续
+持有的 dev/inode 去重，并在实际 pread 前核单文件 size 与整组预算；同字节不同
+inode 分别计费，同一原件仍逐次真实读取并核 full-stat/named/bytes，不能缓存许可。
+这是 retained originals 的容量约束，不宣称 Python 解码/临时数据的进程峰值上限。
+新目录每次真实 RAW/后续 sibling 写入前后核原 FD/name 和精确已写名字；目录
+fsync 期间或 ETH 写入后 FD 外来复用均 HOLD，零下一 sibling 写入且不误关外来 FD。
+七个已提交文件边界覆盖 witness、两份 RAW 和四份其余图像；负例在异常 context
+外核注入命中、无 yield/ack，避免 assertion 被转换成 HOLD 造成假绿。
+原生固定名 creator 保持 exclusive O_RDWR 的首次文件 FD，不在写完后重新打开
+名字来认领原件。INITIALIZED 核前五份实际 writer FD 的完整身份/摘要与自身预开
+FD 的 dev/inode，冷读取同字节换 inode 仍 HOLD。witness 自 exclusive open 成功
+即为可见 STOP 名字，零字节/partial/file-fsync/parent-fsync 失败也不能 fresh-first-use。
+旧 legacy pending/rename 阶段不冒称为这条原生 direct-create 路径；全部残片保留，
+不采用/删除/宣称恢复。未做现场缩减、豁免或断电验收，REAL_ENV 仍 NOT RUN。
+
 原始 enrollment journal 的 sheet ID 必须保持 native int；即使 NONCES／HEADER／
 INITIALIZED 被一致重哈希，bool 或浮点数的 Python 相等别名仍 HOLD，不自动修复。
 `test_cases.test_req7_enrollment_journal` 保留原始数字 ID 合同及篡改证据。

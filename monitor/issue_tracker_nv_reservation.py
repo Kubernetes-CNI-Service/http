@@ -7,6 +7,7 @@ COMPLETE or send permission. Authentic source/admission, row reservations,
 the audited launcher and authenticated settlement still require integration.
 """
 from dataclasses import dataclass, field
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -26,6 +27,8 @@ from monitor.issue_tracker_sheets_read_plan import PreparedSheetsRead
 _NAMES = {'ETH-RAW', 'IB-RAW', 'HEADER', 'RESERVATIONS', 'INITIALIZED'}
 _FAMILIES = {'ETH Cabling': 'eth_cabling', 'IB Cabling': 'ib_cabling'}
 _LIMIT = 1024 * 1024
+_CATALOG_NAMES = _NAMES | {'PRIOR'}
+_ACTIVE_CATALOG_PREPARATIONS = {}
 
 
 class NvReservationHold(ValueError):
@@ -153,7 +156,10 @@ def prepare_nv_reservation(token, binding, identity, eth_plan, eth_response, ib_
         parent, name, base, keys, ids = _inputs(token, binding, identity, generation_id, publish_id, sheet, requested_keys)
         # Even an unattempted or partial global journal is a conservative
         # barrier. UNKNOWN cannot be bypassed by switching project or family.
-        if name in os.listdir(parent) or name[:-3] + '.journal' in os.listdir(parent): raise NvReservationHold()
+        owner = ownership._validated_owner(token, binding)
+        if (name in os.listdir(parent) or name[:-3] + '.journal' in os.listdir(parent)
+                or global_journal._catalog_present(owner)):
+            raise NvReservationHold()
         observed = _read_pair(binding, ids, eth_plan, eth_response, ib_plan, ib_response)
         allocation = allocator.plan_nv_reservations(observed[0].nv_ids, observed[1].nv_ids, (), keys)
         reservations = local._canonical(allocation.requested)
@@ -247,6 +253,404 @@ def _literal_image(item, target):
     return values
 
 
+@dataclass(frozen=True, eq=False)
+class _CatalogNvPreparation:
+    """Live original preparation only, never source admission or send authority."""
+    observation: NvReservationObservation
+
+
+def _unit_insertions(unit):
+    from monitor.issue_tracker_send_intent import _projection
+    _projection(unit)
+    action = local._json(unit.action_preimage); target = action['identity']
+    pairs = []
+    for item in action['business']:
+        if target['sheet'] not in _FAMILIES:
+            return ()
+        values = _literal_image(item, target)
+        if item['action'] == 'insert':
+            key = allocator._key(tuple(item['activity_key']))
+            if key[0] != _FAMILIES[target['sheet']] or (values['K'], values['L'], values['F']) != key[1:]:
+                raise NvReservationHold()
+            allocator._id(values['A']); pairs.append((key, values['A']))
+    if len({key for key, _value in pairs}) != len(pairs):
+        raise NvReservationHold()
+    return tuple(sorted(pairs))
+
+
+def _catalog_allocation(observed, prior, keys):
+    # Prior keys are unit-scoped. A NEW generation with the same activity key
+    # must not obtain the previous unit's ID from the pure helper's key reuse.
+    # ALL prior IDs remain an immutable high-water input, including Closed rows.
+    old = tuple(identifier for row in prior for _key, identifier in row['reservations'])
+    if len(old) != len(set(old)):
+        raise NvReservationHold()
+    for identifier in old:
+        allocator._id(identifier)
+    # First classify both originals independently (including duplicate IDs).
+    allocator.plan_nv_reservations(observed[0].nv_ids, observed[1].nv_ids, (), ())
+    seen = set(observed[0].nv_ids + observed[1].nv_ids)
+    extra = tuple(identifier for identifier in old if identifier not in seen)
+    return allocator.plan_nv_reservations(observed[0].nv_ids + extra, observed[1].nv_ids, (), keys)
+
+
+def _catalog_marker(header, originals, identity):
+    return local._canonical({'schema_version': 1, 'state': 'NATIVE-NV-ORIGINALS-NOT-AUTHORITY',
+        'header_sha256': hashlib.sha256(local._canonical(header)).hexdigest(),
+        'directory_identity': header['directory_identity'], 'initialized_identity': list(identity[:2]),
+        'originals': {entry: {'identity': list(originals[entry][1]),
+            'sha256': hashlib.sha256(originals[entry][0]).hexdigest()}
+            for entry in sorted(_CATALOG_NAMES - {'INITIALIZED'})}})
+
+
+def _write_catalog_image(parent, name, raw, held, verify, *, initialization=None):
+    """Own the fixed-name creator FD through the full native handoff.
+
+    Direct exclusive names retain even partial STOP evidence. No post-write
+    reopen can become the first identity of this file. Legacy writers unchanged.
+    """
+    from monitor import issue_tracker_unit_catalog as catalog
+    if name not in _CATALOG_NAMES and re.fullmatch(r'[0-9a-f]{64}\.unit-[0-9a-f]{64}\.nv-started', name) is None:
+        raise NvReservationHold()
+    fd = None; opened = None; retained = False
+    budget = held._image_budget
+    try:
+        fd = os.open(name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=parent)
+        # Capture actual creator provenance immediately. An initial failure is
+        # recovered only from this exclusive name if the FD still matches it.
+        opened = journal._identity(os.stat(name, dir_fd=parent, follow_symlinks=False))
+        actual = journal._identity(os.fstat(fd))
+        if actual != opened: raise NvReservationHold()
+        if initialization is not None:
+            if name != 'INITIALIZED' or raw is not None: raise NvReservationHold()
+            raw = _catalog_marker(initialization[0], initialization[1], opened)
+        limit = 2 * _LIMIT if name in ('ETH-RAW', 'IB-RAW') else (16384 if name.endswith('.nv-started') else _LIMIT)
+        if type(raw) is not bytes or not 1 <= len(raw) <= limit: raise NvReservationHold()
+        budget.begin_written(opened, len(raw))
+        def check_created():
+            verify(); journal._named(parent, name, fd, directory=False)
+            if journal._identity(os.fstat(fd))[:5] != opened[:5]: raise NvReservationHold()
+        view = memoryview(raw)
+        while view:
+            check_created(); count = os.write(fd, view)
+            if count <= 0: raise NvReservationHold()
+            view = view[count:]; check_created()
+        written = journal._identity(os.fstat(fd))
+        check_created(); os.fsync(fd); check_created(); os.fsync(parent); check_created()
+        if journal._identity(os.fstat(fd)) != written or os.pread(fd, limit + 1, 0) != raw:
+            raise NvReservationHold()
+        budget.seal_written(written, raw)
+        held.files.append((parent, name, fd, written, raw)); retained = True
+        return raw, written
+    except BaseException:
+        budget.failed = True
+        raise
+    finally:
+        if fd is not None and not retained:
+            if opened is None:
+                try: opened = journal._identity(os.stat(name, dir_fd=parent, follow_symlinks=False))
+                except OSError: pass
+            if opened is not None: catalog._close_original(fd, opened)
+
+
+def _native_original(parent, name, binding, base, keys, ids, prior, held):
+    folder = held.directory(parent, name)
+    if set(os.listdir(folder)) != _CATALOG_NAMES:
+        raise NvReservationHold()
+    images = {entry: held.file(folder, entry, 2 * _LIMIT if entry in ('ETH-RAW', 'IB-RAW') else _LIMIT)
+              for entry in sorted(_CATALOG_NAMES)}
+    started, started_identity = held.file(parent, name + '-started', 16384)
+    held.verify()
+    header = local._json(images['HEADER'][0])
+    plans = tuple(PreparedSheetsRead('sheets.googleapis.com', header[key], 'GET', (), b'')
+                  for key in ('eth_read_path', 'ib_read_path'))
+    raws = tuple(SimpleNamespace(status=200, complete=True, data=images[key][0]) for key in ('ETH-RAW', 'IB-RAW'))
+    observed = _read_pair(binding, ids, plans[0], raws[0], plans[1], raws[1])
+    allocation = _catalog_allocation(observed, prior, keys)
+    reservations = local._canonical(allocation.requested); prior_raw = local._canonical(prior)
+    common = _header(base, plans[0], plans[1], observed, reservations)
+    witness = local._canonical({**common, 'state': 'NV-PREPARATION-STARTED-NOT-AUTHORITY',
+                               'prior_sha256': hashlib.sha256(prior_raw).hexdigest()})
+    expected = {**common, 'prior_sha256': hashlib.sha256(prior_raw).hexdigest(),
+                'started_identity': list(started_identity), 'started_sha256': hashlib.sha256(witness).hexdigest(),
+                'directory_identity': list(journal._identity(os.fstat(folder))[:2])}
+    if (started != witness or images['PRIOR'][0] != prior_raw or images['RESERVATIONS'][0] != reservations
+            or images['HEADER'][0] != local._canonical(expected)
+            or images['INITIALIZED'][0] != _catalog_marker(expected, images, images['INITIALIZED'][1])):
+        raise NvReservationHold()
+    held.verify()
+    return NvReservationObservation(allocation.requested, base['unit_id'], hashlib.sha256(images['HEADER'][0]).hexdigest(),
+                                    observed[0].source_sha256, observed[1].source_sha256)
+
+
+def _pin_catalog_prefix(token, binding, identity, held, *, new_allocation):
+    """ALL indexed original families before any NEW write, not absent-journal GO."""
+    from monitor import issue_tracker_unit_catalog as catalog
+    owner = ownership._validated_owner(token, binding); parent = owner.directories[-1][0]
+    stem = owner.lock_name[:-5]; names = {name for name in os.listdir(parent) if name.startswith(stem + '.')}
+    catalog_fd = None; units = ()
+    if names - {stem + '.lock', stem + '.enrollment'}:
+        catalog_fd, units, _previous = catalog._inspect(token, binding, held)
+        allowed = {stem + '.lock', stem + '.enrollment', stem + '.units', stem + '.units-started',
+                   *(stem + '.units-position-%020d' % index for index in range(1, len(units) + 1))}
+        families = ('journal', 'journal-started', 'history', 'business', 'metadata', 'nv', 'nv-started',
+                    'dispatch', 'completion', 'completion-started', 'project-origin')
+        allowed.update(stem + '.unit-' + unit.unit_id + '.' + family for unit in units for family in families)
+        if names - allowed:
+            raise NvReservationHold()
+    else:
+        held.namespace = (parent, stem + '.', names)
+    # Capture all retained auxiliary images BEFORE semantic count/lineage reads.
+    # Catalog position/start originals were already captured by its own reader.
+    captured = {name for p, name, *_rest in held.files if p == parent}
+    captured.update(name for p, name, *_rest in held.directories if p == parent)
+    for name in sorted(names - captured - {stem + '.lock'}):
+        if name.endswith('-started'):
+            held.file(parent, name, 16384)
+        else:
+            folder = held.directory(parent, name)
+            for entry in sorted(os.listdir(folder)):
+                held.file(folder, entry, 2 * _LIMIT if entry in ('ETH-RAW', 'IB-RAW') else _LIMIT)
+    held.verify()
+    if new_allocation and units:
+        for unit in units:
+            prefix = stem + '.unit-' + unit.unit_id
+            # Both absent is diagnostic only: lost whole journals cannot be
+            # reinterpreted as permission to allocate a fresh generation.
+            if not {prefix + '.journal', prefix + '.journal-started'} <= names:
+                raise NvReservationHold()
+        with global_journal._hold_catalog_attempts(token, binding) as (counts, verify):
+            if any(state.attempt_count or state.outcome == 'PENDING_NO_JOURNAL' for _unit, state in counts):
+                raise NvReservationHold()
+            verify(); held.verify()
+    prior = []; observations = []
+    for unit in units:
+        target = local._json(unit.action_preimage)['identity']; insertions = _unit_insertions(unit)
+        name = stem + '.unit-' + unit.unit_id + '.nv'
+        present = {name, name + '-started'} & names
+        if not insertions:
+            if present:
+                raise NvReservationHold()
+            continue
+        if present != {name, name + '-started'}:
+            raise NvReservationHold()
+        _parent, _legacy, base, keys, ids = _inputs(token, binding, identity, target['generation_id'],
+            target['publish_id'], target['sheet'], tuple(key for key, _value in insertions))
+        seen = _native_original(parent, name, binding, base, keys, ids, prior, held)
+        enrollment.require_unit_enrollment(token, binding, identity, unit)
+        if seen.unit_id != unit.unit_id or seen.reservations != insertions:
+            raise NvReservationHold()
+        observations.append((unit, seen))
+        prior.append({'unit_id': unit.unit_id, 'journal_sha256': seen.journal_sha256, 'reservations': seen.reservations})
+    held.verify()
+    return owner, parent, stem, catalog_fd, units, prior, tuple(observations)
+
+
+@contextmanager
+def hold_catalog_nv_preparation(token, binding, identity, eth_plan, eth_response, ib_plan, ib_response,
+                                *, generation_id, publish_id, sheet, requested_keys):
+    """Native reservation->compiler->catalog handoff under one actual owner.
+
+    No caller high-water/path/list or recovery adoption. ALL previous originals
+    stay held through the exact append. Interrupted preparation is retained HOLD.
+    This uninstalled component is NOT qualified source/C6/NEW or send authority.
+    """
+    from monitor import issue_tracker_unit_catalog as catalog
+    budget = catalog._OriginalImageBudget()
+    old = catalog._Originals(_image_budget=budget); current = catalog._Originals(_image_budget=budget)
+    prepared = None; active_budget = None; failed = False
+    try:
+        parent, _legacy, base, keys, ids = _inputs(token, binding, identity, generation_id, publish_id, sheet, requested_keys)
+        if token in catalog._IMAGE_BUDGETS:
+            raise NvReservationHold()
+        active_budget = (ownership._validated_owner(token, binding), binding, budget)
+        catalog._IMAGE_BUDGETS[token] = active_budget
+        owner, parent, stem, catalog_fd, units, prior, _observations = _pin_catalog_prefix(
+            token, binding, identity, old, new_allocation=True)
+        if any(unit.unit_id == base['unit_id'] for unit in units):
+            raise NvReservationHold()
+        observed = _read_pair(binding, ids, eth_plan, eth_response, ib_plan, ib_response)
+        allocation = _catalog_allocation(observed, prior, keys)
+        reservations = local._canonical(allocation.requested); prior_raw = local._canonical(prior)
+        if len(reservations) > _LIMIT or len(prior_raw) > _LIMIT:
+            raise NvReservationHold()
+        common = _header(base, eth_plan, ib_plan, observed, reservations)
+        name = stem + '.unit-' + base['unit_id'] + '.nv'; started = name + '-started'
+        witness = local._canonical({**common, 'state': 'NV-PREPARATION-STARTED-NOT-AUTHORITY',
+                                   'prior_sha256': hashlib.sha256(prior_raw).hexdigest()})
+        old.sync(); ownership._validated_owner(token, binding)
+        def verify_witness():
+            if ownership._validated_owner(token, binding) is not owner: raise NvReservationHold()
+            old.verify(parent_additions={started}); current.verify()
+        raw, started_identity = _write_catalog_image(parent, started, witness, current, verify_witness)
+        if raw != witness:
+            raise NvReservationHold()
+        folder = global_journal._create_folder(parent, name)
+        folder_identity = journal._identity(os.fstat(folder))
+        folder_retained = False
+        try:
+            header = {**common, 'prior_sha256': hashlib.sha256(prior_raw).hexdigest(),
+                      'started_identity': list(started_identity), 'started_sha256': hashlib.sha256(witness).hexdigest(),
+                      'directory_identity': list(folder_identity[:2])}
+            completed = set()
+            def verify_new_folder(extra=frozenset()):
+                if ownership._validated_owner(token, binding) is not owner:
+                    raise NvReservationHold()
+                old.verify(parent_additions={name, started}); current.verify()
+                journal._named(parent, name, folder, directory=True)
+                if (journal._identity(os.fstat(folder))[:5] != folder_identity[:5]
+                        or set(os.listdir(folder)) != completed | extra):
+                    raise NvReservationHold()
+            originals = {}
+            for entry, raw in (('ETH-RAW', eth_response.data), ('IB-RAW', ib_response.data),
+                    ('PRIOR', prior_raw), ('HEADER', local._canonical(header)), ('RESERVATIONS', reservations)):
+                verify_new_folder()
+                originals[entry] = _write_catalog_image(folder, entry, raw, current,
+                    lambda entry=entry: verify_new_folder({entry}))
+                completed.add(entry); verify_new_folder()
+            _write_catalog_image(folder, 'INITIALIZED', None, current, lambda: verify_new_folder({'INITIALIZED'}),
+                                 initialization=(header, originals))
+            completed.add('INITIALIZED'); verify_new_folder()
+            # Every creator file stores this actual parent FD. Keep it alive
+            # through replay/append; never rely on a cold open reusing its int.
+            final_folder_identity = journal._identity(os.fstat(folder))
+            current.directories.append((parent, name, folder, final_folder_identity, tuple(sorted(completed))))
+            folder_retained = True
+        finally:
+            if not folder_retained: catalog._close_original(folder, folder_identity)
+        seen = _native_original(parent, name, binding, base, keys, ids, prior, current)
+        current.sync()
+        record = {'owner': owner, 'token': token, 'binding': binding, 'identity': identity, 'old': old,
+                  'current': current, 'catalog': catalog_fd, 'units': units, 'stem': stem, 'parent': parent,
+                  'additions': {name, started}, 'appended': None, 'registered': False, 'unit': None, 'indexed': None,
+                  'budget': budget}
+        prepared = _CatalogNvPreparation(seen); _ACTIVE_CATALOG_PREPARATIONS[prepared] = record
+        _verify_catalog_preparation(prepared)
+        yield prepared
+        _verify_catalog_preparation(prepared)
+        if not record['registered']:
+            raise NvReservationHold()
+    except Exception:
+        failed = True
+    finally:
+        if prepared is not None:
+            retained = _ACTIVE_CATALOG_PREPARATIONS.pop(prepared, None)
+            if retained is not None and retained['indexed'] is not None:
+                retained['indexed'].close()
+        if active_budget is not None and catalog._IMAGE_BUDGETS.get(token) is active_budget:
+            catalog._IMAGE_BUDGETS.pop(token)
+        current.close(); old.close()
+    if failed:
+        raise NvReservationHold() from None
+
+
+def _verify_catalog_preparation(prepared):
+    record = _ACTIVE_CATALOG_PREPARATIONS.get(prepared)
+    if type(prepared) is not _CatalogNvPreparation or record is None:
+        raise NvReservationHold()
+    if ownership._validated_owner(record['token'], record['binding']) is not record['owner']:
+        raise NvReservationHold()
+    if record['budget'].failed or record['budget'].pending:
+        raise NvReservationHold()
+    record['old'].verify(parent_additions=record['additions'], appended_to=record['appended'])
+    record['current'].verify()
+    if record['indexed'] is not None:
+        record['indexed'].verify()
+    return record
+
+
+def _catalog_nv_append_guard(prepared, token, binding, unit):
+    record = _verify_catalog_preparation(prepared)
+    if (record['token'] is not token or record['binding'] != binding or record['registered']
+            or prepared.observation.unit_id != unit.unit_id or _unit_insertions(unit) != prepared.observation.reservations):
+        raise NvReservationHold()
+    enrollment.require_unit_enrollment(token, binding, record['identity'], unit)
+    record['unit'] = unit
+    return frozenset(record['additions'])
+
+
+def _catalog_nv_original_anchor(prepared, token, binding, unit):
+    # Called only by the genuine append after its opaque scope/unit guard.
+    # Anchor the finished marker in the actual catalog's existing identity
+    # chain; no self-stat cycle, caller-provided record or cold re-baselining.
+    record = _verify_catalog_preparation(prepared)
+    if (record['token'] is not token or record['binding'] != binding
+            or record['unit'] is not unit or record['registered']):
+        raise NvReservationHold()
+    name = record['stem'] + '.unit-' + unit.unit_id + '.nv'
+    folders = {fd for parent, entry, fd, _identity, _names in record['current'].directories
+               if parent == record['parent'] and entry == name}
+    images = [(identity, raw) for parent, entry, _fd, identity, raw in record['current'].files
+              if parent in folders and entry == 'INITIALIZED']
+    if not images or any(image != images[0] for image in images):
+        raise NvReservationHold()
+    identity, raw = images[0]
+    return {'identity': list(identity), 'sha256': hashlib.sha256(raw).hexdigest()}
+
+
+def _catalog_nv_appended(prepared, catalog_fd, unit):
+    record = _ACTIVE_CATALOG_PREPARATIONS.get(prepared)
+    if record is None or record['registered'] or record['unit'] is not unit:
+        raise NvReservationHold()
+    from monitor import issue_tracker_unit_catalog as catalog
+    index = len(record['units']) + 1
+    record['additions'].add(record['stem'] + '.units-position-%020d' % index)
+    if record['catalog'] is None:
+        record['additions'].update((record['stem'] + '.units', record['stem'] + '.units-started'))
+    else:
+        journal._named(record['parent'], record['stem'] + '.units', catalog_fd, directory=True)
+        if journal._identity(os.fstat(catalog_fd))[:2] != journal._identity(os.fstat(record['catalog']))[:2]:
+            raise NvReservationHold()
+        record['appended'] = (record['catalog'], {unit.unit_id, 'ENTRY-%020d' % index})
+    _verify_catalog_preparation(prepared)
+    # Hold our exact new catalog originals before acknowledging the handoff.
+    indexed = catalog._Originals(_image_budget=record['budget'])
+    try:
+        _folder, units, _previous = catalog._inspect(record['token'], record['binding'], indexed)
+        if units != record['units'] + (unit,):
+            raise NvReservationHold()
+        indexed.sync(); _verify_catalog_preparation(prepared)
+    except Exception:
+        indexed.close()
+        raise
+    record['indexed'] = indexed
+    record['registered'] = True
+
+
+def register_catalog_nv_unit(prepared, unit):
+    """Consume only this live preparation for its exact frozen unit, never GO."""
+    failed = False
+    try:
+        record = _verify_catalog_preparation(prepared)
+        from monitor import issue_tracker_unit_catalog as catalog
+        catalog.register_pending_unit(record['token'], record['binding'], unit, _nv_preparation=prepared)
+        _verify_catalog_preparation(prepared)
+    except Exception:
+        failed = True
+    if failed:
+        raise NvReservationHold() from None
+
+
+def inspect_catalog_nv_reservation(token, binding, identity, unit):
+    """Cold replay of ALL original lineage; UNKNOWN IDs retained, never NEW."""
+    from monitor import issue_tracker_unit_catalog as catalog
+    held = catalog._originals(token, binding); failed = False
+    try:
+        _owner, _parent, _stem, _folder, _units, _prior, observations = _pin_catalog_prefix(
+            token, binding, identity, held, new_allocation=False)
+        matches = [seen for original, seen in observations if original == unit]
+        if len(matches) != 1:
+            raise NvReservationHold()
+        held.sync(); result = matches[0]
+    except Exception:
+        failed = True
+    finally:
+        held.close()
+    if failed:
+        raise NvReservationHold() from None
+    return result
+
+
 def require_unit_nv_reservation(token, binding, identity, unit):
     """Bind all actual Cabling inserts to original IDs; no send capability.
 
@@ -272,8 +676,12 @@ Units with no inserts have no allocation to validate here and remain HOLD.
                     raise NvReservationHold()
                 inserted.append((key, values['A']))
         keys = tuple(key for key, _identifier in inserted)
-        result = inspect_nv_reservation(token, binding, identity, generation_id=target['generation_id'],
-            publish_id=target['publish_id'], sheet=target['sheet'], requested_keys=keys)
+        owner = ownership._validated_owner(token, binding)
+        if global_journal._catalog_present(owner):
+            result = inspect_catalog_nv_reservation(token, binding, identity, unit)
+        else:
+            result = inspect_nv_reservation(token, binding, identity, generation_id=target['generation_id'],
+                publish_id=target['publish_id'], sheet=target['sheet'], requested_keys=keys)
         if result.unit_id != unit.unit_id or tuple(sorted(inserted)) != result.reservations: raise NvReservationHold()
         owner = ownership._validated_owner(token, binding)
         if owner.lock_name[:-5] + '.journal' in os.listdir(owner.directories[-1][0]):

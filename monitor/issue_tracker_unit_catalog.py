@@ -70,7 +70,7 @@ def register_pending_c6_unit(writer_token, token, binding, unit):
     write stays HOLD. Receipt-absent C6 creates neither catalog nor origin.
     No GLOBAL attempt, APPLIED, cross-project high-water or NEW is issued.
     """
-    held = _Originals(); failed = False; folder = None; folder_identity = None
+    held = _originals(token, binding); failed = False; folder = None; folder_identity = None
     try:
         owner = local._owner(writer_token)
         compiled._projection(unit)
@@ -148,7 +148,7 @@ def hold_pending_project_origins(token, binding):
     must acquire and verify each original project and publication identity;
     this reader alone neither opens those paths nor compares local sequences.
     """
-    held = _Originals(); failed = False
+    held = _originals(token, binding); failed = False
     try:
         from monitor import issue_tracker_remote_history_match as remote
         with ExitStack() as scope:
@@ -303,8 +303,77 @@ def _close_original(fd, identity):
         pass
 
 
-class _Originals:
+class _OriginalImageBudget:
+    """Fixed unique live-image capacity, never cached original authority."""
     def __init__(self):
+        self.bytes = 0
+        self.images = {}
+        self.pending = {}
+        self.failed = False
+
+    def reserve(self, identity):
+        key = identity[:2]
+        if self.failed:
+            raise UnitCatalogHold()
+        old = self.images.get(key)
+        if old is not None:
+            if old[0] != identity or old[1] is None:
+                self.failed = True
+                raise UnitCatalogHold()
+        elif self.bytes + identity[6] > 16 * 1024 * 1024:
+            self.failed = True
+            raise UnitCatalogHold()
+        else:
+            self.bytes += identity[6]
+            self.images[key] = (identity, None)
+
+    def seal(self, identity, raw):
+        saved = self.images[identity[:2]]
+        if saved[0] != identity or (saved[1] is not None and saved[1] != raw):
+            self.failed = True
+            raise UnitCatalogHold()
+        self.images[identity[:2]] = (identity, raw)
+
+    def begin_written(self, identity, size):
+        # Charge the actual newly opened inode and determined raw length,
+        # never synthesize a future stat or admit its unfinished bytes.
+        key = identity[:2]
+        if (self.failed or key in self.images or type(size) is not int or size < 1
+                or self.bytes + size > 16 * 1024 * 1024):
+            self.failed = True
+            raise UnitCatalogHold()
+        self.bytes += size
+        self.images[key] = (None, None); self.pending[key] = size
+
+    def seal_written(self, identity, raw):
+        key = identity[:2]
+        if (self.failed or self.images.get(key) != (None, None)
+                or self.pending.get(key) != len(raw) or identity[6] != len(raw)):
+            self.failed = True
+            raise UnitCatalogHold()
+        self.images[key] = (identity, raw); self.pending.pop(key)
+
+
+# Only a live native preparation installs its actual owner-bound budget.
+# Callers cannot provide a limit, budget or original inventory to public APIs.
+_IMAGE_BUDGETS = {}
+
+
+def _originals(token, binding):
+    active = _IMAGE_BUDGETS.get(token)
+    if active is None:
+        return _Originals()
+    owner, expected, budget = active
+    if expected != binding or ownership._validated_owner(token, binding) is not owner:
+        raise UnitCatalogHold()
+    return _Originals(_image_budget=budget)
+
+
+class _Originals:
+    def __init__(self, *, _image_budget=None):
+        if _image_budget is not None and type(_image_budget) is not _OriginalImageBudget:
+            raise UnitCatalogHold()
+        self._image_budget = _image_budget
         self.files = []
         self.directories = []
         self.bytes = 0
@@ -322,15 +391,26 @@ class _Originals:
         identity = journal._identity(os.fstat(fd))
         self.files.append((parent, name, fd, identity, None))
         journal._named(parent, name, fd, directory=False)
+        if not 1 <= identity[6] <= limit:
+            raise UnitCatalogHold()
+        if self._image_budget is not None:
+            self._image_budget.reserve(identity)
+        elif self.bytes + identity[6] > _MAX_IMAGES:
+            raise UnitCatalogHold()
         raw = os.pread(fd, limit + 1, 0)
         self.bytes += len(raw)
         if (not 1 <= len(raw) <= limit or len(raw) != identity[6]
-                or self.bytes > _MAX_IMAGES):
+                or journal._identity(os.fstat(fd)) != identity):
             raise UnitCatalogHold()
+        journal._named(parent, name, fd, directory=False)
+        if self._image_budget is not None:
+            self._image_budget.seal(identity, raw)
         self.files[-1] = (parent, name, fd, identity, raw)
         return raw, identity
 
     def verify(self, *, appended_to=None, parent_additions=frozenset()):
+        if self._image_budget is not None and self._image_budget.failed:
+            raise UnitCatalogHold()
         if self.namespace is not None:
             parent, prefix, before = self.namespace
             actual = {item for item in os.listdir(parent) if item.startswith(prefix)}
@@ -370,8 +450,10 @@ class _Originals:
             _close_original(fd, identity)
 
 
-def _header(unit):
-    return {**compiled._projection(unit), 'state': 'PENDING_NOT_ATTEMPTED'}
+def _header(unit, *, nv_original=None):
+    result = {**compiled._projection(unit), 'state': 'PENDING_NOT_ATTEMPTED'}
+    if nv_original is not None: result['nv_original'] = nv_original
+    return result
 
 
 def _inspect(token, binding, held):
@@ -426,7 +508,22 @@ def _inspect(token, binding, held):
             raise UnitCatalogHold()
         originals = {item: held.file(folder, item, 1024 * 1024) for item in sorted(_FILES)}
         unit = composer._original_unit(originals['ACTION-PREIMAGE'][0], originals['WIRE'][0])
-        if (unit.unit_id != unit_id or originals['HEADER'][0] != local._canonical(_header(unit))
+        saved_header = local._json(originals['HEADER'][0])
+        nv_original = saved_header.get('nv_original')
+        nv_name = owner.lock_name[:-5] + '.unit-' + unit_id + '.nv'
+        if nv_original is None and {nv_name, nv_name + '-started'} & root_names:
+            raise UnitCatalogHold()
+        if nv_original is not None:
+            # The genuine writer captured this finished marker's full stat
+            # and bytes before append. Cold reads compare actual originals;
+            # they cannot regenerate the first identity from a changed marker.
+            nv_folder = held.directory(parent, nv_name)
+            nv_raw, nv_identity = held.file(nv_folder, 'INITIALIZED', 1024 * 1024)
+            expected_nv = {'identity': list(nv_identity), 'sha256': _digest(nv_raw)}
+            if local._canonical(nv_original) != local._canonical(expected_nv):
+                raise UnitCatalogHold()
+            nv_original = expected_nv
+        if (unit.unit_id != unit_id or originals['HEADER'][0] != local._canonical(_header(unit, nv_original=nv_original))
                 or local._json(unit.action_preimage)['identity']['spreadsheet_id'] != binding.spreadsheet_id):
             raise UnitCatalogHold()
         marker_raw, marker_identity = originals['INITIALIZED']
@@ -459,7 +556,7 @@ def _inspect(token, binding, held):
 @contextmanager
 def hold_pending_units(token, binding):
     """All pending originals remain pinned through consumer and context exit."""
-    held = _Originals()
+    held = _originals(token, binding)
     failed = False
     try:
         owner = _inputs(token, binding)[0]
@@ -528,15 +625,21 @@ def hold_pending_c6_units(writer_token, token, binding):
         raise UnitCatalogHold() from None
 
 
-def register_pending_unit(token, binding, unit):
+def register_pending_unit(token, binding, unit, *, _nv_preparation=None):
     """Append one coherent pending image; never repair or issue a capability."""
-    held = _Originals()
+    held = _originals(token, binding)
     catalog = folder = None
     catalog_identity = folder_identity = None
     failed = False
     try:
         owner, parent, name, started, base = _inputs(token, binding)
-        header_raw = local._canonical(_header(unit))
+        nv_additions = frozenset()
+        nv_original = None
+        if _nv_preparation is not None:
+            from monitor import issue_tracker_nv_reservation as nv
+            nv_additions = nv._catalog_nv_append_guard(_nv_preparation, token, binding, unit)
+            nv_original = nv._catalog_nv_original_anchor(_nv_preparation, token, binding, unit)
+        header_raw = local._canonical(_header(unit, nv_original=nv_original))
         if local._json(unit.action_preimage)['identity']['spreadsheet_id'] != binding.spreadsheet_id:
             raise UnitCatalogHold()
         names = set(os.listdir(parent))
@@ -552,7 +655,7 @@ def register_pending_unit(token, binding, unit):
             # by creating a new catalog after all catalog witnesses disappear.
             # Legacy pending witnesses still remain untouched by this purely
             # diagnostic catalog; GLOBAL refuses any mixed legacy inventory.
-            if any(item.startswith(owner.lock_name[:-5] + '.unit-') for item in names):
+            if {item for item in names if item.startswith(owner.lock_name[:-5] + '.unit-')} - nv_additions:
                 raise UnitCatalogHold()
             local._write_new(parent, started, local._canonical(base))
             catalog = local._mkdir(parent, name)
@@ -607,6 +710,8 @@ def register_pending_unit(token, binding, unit):
         held.verify(appended_to=additions, parent_additions={position_name})
         if ownership._validated_owner(token, binding) is not owner:
             raise UnitCatalogHold()
+        if _nv_preparation is not None:
+            nv._catalog_nv_appended(_nv_preparation, catalog, unit)
     except Exception:
         failed = True
     finally:

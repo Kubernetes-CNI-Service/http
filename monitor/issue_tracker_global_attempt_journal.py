@@ -274,7 +274,7 @@ def _hold_catalog_originals(token, binding):
             units, verify_catalog = scope.enter_context(catalog.hold_pending_units(token, binding))
             allowed = {stem + '.lock', stem + '.enrollment', stem + '.units', stem + '.units-started',
                        *(stem + '.units-position-%020d' % index for index in range(1, len(units) + 1))}
-            families = ('journal', 'journal-started', 'history', 'business', 'metadata', 'nv',
+            families = ('journal', 'journal-started', 'history', 'business', 'metadata', 'nv', 'nv-started',
                         'dispatch', 'completion', 'completion-started', 'project-origin')
             allowed.update(stem + '.unit-' + unit.unit_id + '.' + family
                            for unit in units for family in families)
@@ -545,10 +545,24 @@ def _create_folder(parent, name):
     # Partial creation is retained HOLD, but no owned descriptor may leak when
     # a directory fsync or interruption happens before returning the handle.
     os.mkdir(name, 0o700, dir_fd=parent); os.fsync(parent)
+    original = journal._identity(os.stat(name, dir_fd=parent, follow_symlinks=False))
     fd = local._directory(parent, name)
-    try: os.fsync(fd)
+    try:
+        identity = journal._identity(os.fstat(fd))
+        if identity != original:
+            raise GlobalAttemptHold()
+        journal._named(parent, name, fd, directory=True)
+        os.fsync(fd)
+        journal._named(parent, name, fd, directory=True)
+        if journal._identity(os.fstat(fd)) != identity:
+            raise GlobalAttemptHold()
     except BaseException:
-        os.close(fd); raise
+        try:
+            if journal._identity(os.fstat(fd))[:2] == original[:2]:
+                os.close(fd)
+        except OSError:
+            pass
+        raise
     return fd
 
 

@@ -2332,6 +2332,13 @@ ALL 审计行确定唯一 append 窗口（NOOP 无虚构行），精确耗尽可
 
 ## TC-REAL-REQ7-NV-RESERVATION-001 — 两张 Cabling 的共享持久编号
 
+- 原生多单元准备补充（**NOT RUN / REAL_ENV REQUIRED**）：保留正常 ETH→IB→同 key 新 generation、高于两表 Closed/无关及全部旧预留、完整 PRIOR 原链冷重读、opaque owner 限定 append、scope 退出后新 catalog 原件替换拒绝。旧 journal UNKNOWN 或整个/部分丢失不得生成新 witness；default LOST 门禁不变。此本地原件诊断尚不证明真实 C5/C6 来源、FIFO、跨项目结算、freshness、NEW 或发送许可。
+- 固定整组预算与写入补充（**NOT RUN / REAL_ENV REQUIRED**）：保留 old/current/indexed 与内部 catalog 原件共享固定 16MiB 的边界、相同原件真实重读、相同字节不同 inode 分别计费、整组超限未 yield/ack，以及目录 fsync／ETH 写入后 foreign FD 复用拒绝与零后续 sibling 写入。清理只关原 dev/inode；现场须见证原件、统计、字节、注入事件和安全状态，不把字节去重当许可缓存或进程峰值保证。
+- 首次 writer 原件补充（**NOT RUN / REAL_ENV REQUIRED**）：保持七个固定名 exclusive creator 的真实原 FD，前五份 file full-stat/hash 与 INITIALIZED 自身预开 dev/inode 联合绑定；ETH 写入后换同字节 inode 必须在下一 sibling 前 HOLD，完整注册后六份各自同字节换 inode 的冷重读必须拒绝。不以事后 reopen 认领原件；异常只 conditional-close 本次原对象，保留外来 FD、旧图像及替代物。
+- 目录交接与 marker 外锚补充（**NOT RUN / REAL_ENV REQUIRED**）：保留 creator 原目录 FD 至作用域退出，正常读者取得 FD 前占用其他本轮 FD 不得造成原件误 HOLD。完成 INITIALIZED 的实际 full stat/SHA 由真实 opaque append 写入 catalog HEADER 并经 marker/ENTRY 原链绑定；冷同 inode 原样重写 marker 和替换 sibling 后原位重编码 marker 均拒绝，失败原件、替代物与原编号保留。仅本地独立 RED 与真实多脚本文件流程作为替代证据，不证明断电、现场或同 inode 的 open-file-description；原现场范围无省略/合并，风险和精确授权不变。
+- 中断阶段补充：七个已提交文件边界覆盖 nv-started、ETH-RAW、IB-RAW、PRIOR、HEADER、RESERVATIONS、INITIALIZED。原生 direct exclusive-create 的 witness 从 open 成功即为可见 STOP，零字节/partial/file-fsync/parent-fsync 失败均保留并冷 HOLD；旧 legacy pending/rename 阶段另列，不能冒称原生路径或恢复成功。实际 open/write/file-fsync/目录屏障、冷恢复和断电仍需精确现场授权及证据，不能以本地 post-write 注入冒充全部物理边界。
+- 验证范围记录：本次没有省略、合并或暂缓既有现场场景，无新增残余风险接受或确认人；替代证据仅为独立 direct 和真实本地多脚本文件流程。实际现场 root、设备、Cloud、卷/断电和版本整体恢复未验证，全部 NOT RUN；原授权、研发确认、普通发布门禁及完整当前树 full/check 要求不变。
+
 - 外层原目录清理补充（**NOT RUN / REAL_ENV REQUIRED**）：保留 prepare／inspect／UNKNOWN 实际冻结单元校验的外层 FD 复用代表性中断，要求原 dev/inode 与 named 目录后置检查 HOLD，外国对象 FD 不被清理误关，原编号、图像、COUNT/WIRE 均保留。不以同 inode 证明同一 open-file-description，不将本地 FD 故障注入冒充断电或设备验收；未省略／合并既有场景，原前置、精确授权、证据、清理与残余风险有效。
 
 - 原件持续持有补充（**NOT RUN / REAL_ENV REQUIRED**）：保留正常原编号重读、五份原像逐份在重读持久屏障处同字节换 inode、UNKNOWN 实际冻结单元校验拒绝与原 COUNT/WIRE 安全状态；本轮所有原目录／文件须持续持有，失败不回填、换号、删除原件或替代物，清理不得关闭已复用于外国对象的 FD。本地 direct 与真实 enrollment→NV→冻结 batch→GLOBAL UNKNOWN workflow 不代表断电、真实设备或跨单元完整分配。没有省略／合并原场景；现场前置、证据、清理、未验证风险与精确授权保持原卡要求。
