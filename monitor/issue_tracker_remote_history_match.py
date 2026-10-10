@@ -732,6 +732,132 @@ def _reconcile_pending_project_units_and_project_auth(writer_token, owner_token,
     return result, authentication
 
 
+def _prepare_current_project_online_observation(writer_token, owner_token, binding, authentication, *,
+                                                _store, http_root):
+    """Reacquire actual source and fresh project reads, never a send permit.
+
+    The previous reconciliation's authentication may be reused only while its
+    actual owners remain live. ALL catalog/C6/family originals are acquired
+    anew before observing the current source or issuing reads. No caller unit,
+    qualified set, read plan, quota list or historical completeness is adopted.
+    Visible accounting remains VISIBLE_ONLY_UNPROVED: no count/CLAIM/NEW is
+    performed, and the diagnostic result escapes only after all finalizers.
+    """
+    from pathlib import Path
+    from monitor import issue_tracker_local_commit as local
+    from monitor import issue_tracker_attempt_journal as journal
+    from monitor import issue_tracker_unit_catalog as catalog
+    from monitor import issue_tracker_retained_inventory as inventory
+    from monitor import issue_tracker_stage_l_consumer as source
+    from monitor import issue_tracker_receipt_snapshot as receipts
+    from monitor.issue_tracker_cycle_source import _hold_current_completed_cycle_replay
+    from monitor.issue_tracker_state_owner import current_k
+    from monitor.issue_tracker_whitelist_workbook import read_whitelist_workbook
+    from monitor.issue_tracker_history_read_launcher import (
+        OwnedProjectSheetsReadUnit, require_current_owned_project_read)
+    from monitor.issue_tracker_token_launcher import (
+        OwnedProjectTokenRefreshUnit, require_current_owned_project_token)
+    from monitor.issue_tracker_metadata_reservation import _hold_owned_project_catalog_metadata_capacity
+    from monitor.issue_tracker_online_target import inspect_project_online_target
+
+    failed = False
+    try:
+        project = local._owner(writer_token)
+        ownership._validated_owner(owner_token, binding)
+        root = Path(http_root)
+        if (not root.is_absolute() or root.resolve(strict=True) != root
+                or Path(_store.project_identity) != project.project):
+            raise RemoteHistoryHold()
+        whitelist_path = root / 'monitor/Issue_Tracker_Template_v1.xlsx'
+        with ExitStack() as scope:
+            rows, verify_c6 = scope.enter_context(catalog.hold_pending_project_c6_units(owner_token, binding))
+            retained, verify_inventory = scope.enter_context(
+                inventory._hold_catalog_retained_inventory(owner_token, binding))
+            if tuple(row.unit for row in rows) != tuple(row.unit for row in retained):
+                raise RemoteHistoryHold()
+            current_identity = journal._identity(os.fstat(project.project_fd))[:2]
+            selected = tuple((row, observation) for row, observation in zip(rows, retained)
+                if row.project_identity == current_identity and observation.attempt_count < 6)
+            if not selected:
+                raise RemoteHistoryHold()
+            verify_cycle = scope.enter_context(_hold_current_completed_cycle_replay(_store))
+            verify_history = scope.enter_context(receipts._hold_history_originals(writer_token))
+            verify_inputs = scope.enter_context(source._hold_original_replay_inputs(
+                _store, project.project, whitelist_path))
+
+            def originals():
+                local._owner(writer_token); ownership._validated_owner(owner_token, binding)
+                verify_c6(); verify_inventory(); verify_cycle(); verify_history(); verify_inputs()
+                inspect_project_online_target(writer_token, binding)
+
+            def qualify():
+                originals()
+                settings = current_k(writer_token)
+                whitelist = read_whitelist_workbook(whitelist_path)
+                qualified = source.qualify_prod_stage_l(_store, http_root=root, settings=settings,
+                    whitelist_snapshot=whitelist, whitelist_path=whitelist_path, writer_token=writer_token)
+                originals()
+                return settings, whitelist, qualified
+
+            settings, whitelist, qualified = qualify()
+            if authentication is None:
+                authentication = OwnedProjectTokenRefreshUnit(owner_token, binding).refresh_once()
+            originals(); require_current_owned_project_token(owner_token, binding, authentication)
+            responses = {}
+            for kind in ('template_identity', 'template_headers', 'whitelist', 'metadata'):
+                originals()
+                responses[kind] = OwnedProjectSheetsReadUnit(writer_token, owner_token, binding,
+                    authentication, read_kind=kind).read_once()
+                originals()
+            identity_plan, _project, _digest = require_current_owned_project_read(
+                writer_token, owner_token, binding, responses['template_identity'], authentication,
+                read_kind='template_identity')
+            identity = decode.decode_template_identity(identity_plan, responses['template_identity'])
+            with _hold_owned_project_catalog_metadata_capacity(writer_token, owner_token, binding,
+                    authentication, identity_response=responses['template_identity'],
+                    metadata_response=responses['metadata']) as (budget, verify_capacity):
+                for row, observation in selected:
+                    observe_owned_unit_read_gates(writer_token, owner_token, binding, row.unit,
+                        whitelist_snapshot=whitelist.whitelist, identity_response=responses['template_identity'],
+                        headers_response=responses['template_headers'], whitelist_response=responses['whitelist'],
+                        metadata_response=responses['metadata'])
+                    action = local._json(row.unit.action_preimage)
+                    generation_id = action['identity']['generation_id']
+                    _template, original_source = receipts._manifest_source(project, generation_id)
+                    actual = qualified
+                    if tuple(original_source['cycle_ids']) != qualified.cycle_ids:
+                        if not observation.attempt_count:
+                            raise RemoteHistoryHold()
+                        actual = source.replay_original_receipted_prod_source(_store, http_root=root,
+                            settings=settings, whitelist_snapshot=whitelist, whitelist_path=whitelist_path,
+                            expected_template_sha256=whitelist.workbook_sha256,
+                            local_generation_id=generation_id, writer_token=writer_token)
+                    global_journal._receipted_original_facts(owner_token, binding, identity, row.unit,
+                        qualified_source=actual, store=_store, writer_token=writer_token, settings=settings,
+                        whitelist_snapshot=whitelist, expected_template_sha256=whitelist.workbook_sha256,
+                        http_root=root, whitelist_path=whitelist_path, _shared_retry=bool(observation.attempt_count))
+                    originals(); verify_capacity()
+                if qualify() != (settings, whitelist, qualified):
+                    raise RemoteHistoryHold()
+                for kind, response in responses.items():
+                    require_current_owned_project_read(writer_token, owner_token, binding, response,
+                        authentication, read_kind=kind)
+                originals(); verify_capacity()
+                if budget.outcome != 'VISIBLE_ONLY_UNPROVED':
+                    raise RemoteHistoryHold()
+            originals()
+        for kind, response in responses.items():
+            require_current_owned_project_read(writer_token, owner_token, binding, response,
+                authentication, read_kind=kind)
+        require_current_owned_project_token(owner_token, binding, authentication)
+        inspect_project_online_target(writer_token, binding)
+    except Exception:
+        failed = True
+    if failed:
+        raise RemoteHistoryHold() from None
+    return 'VISIBLE_ONLY_UNPROVED'
+
+
 def _reconcile_pending_project_units_with_authentication(writer_token, owner_token, binding, authentication=None, *, _store=None):
     """Private fixed worker composition, never a caller cycle/verifier permit."""
     from monitor import issue_tracker_unit_catalog as catalog

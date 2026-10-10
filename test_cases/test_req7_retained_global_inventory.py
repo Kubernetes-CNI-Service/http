@@ -28,10 +28,23 @@ def load(*, reset_support=True):
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
+    import monitor
+    monitor.issue_tracker_retained_inventory = module
     return module
 
 
 class RetainedInventoryShapeTests(unittest.TestCase):
+    def test_fixture_reload_keeps_normal_import_and_package_alias_on_actual_registry(self):
+        import importlib
+        import monitor
+        name='monitor.issue_tracker_retained_inventory'
+        importlib.import_module(name)
+        actual=load(reset_support=False)
+        self.assertIs(actual,sys.modules[name])
+        self.assertIs(actual,importlib.import_module(name))
+        self.assertIs(actual,monitor.issue_tracker_retained_inventory,
+            'native fixture reload must preserve normal package import identity')
+
     def test_all_fixed_namespace_families_are_explicit_not_discarded(self):
         module = load()
         suffixes = ('business', 'completion', 'completion-started', 'dispatch', 'enrollment',

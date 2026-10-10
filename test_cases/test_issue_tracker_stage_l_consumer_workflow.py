@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, replace
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 import datetime as dt
 import hashlib
 import json
@@ -29,6 +29,29 @@ from test_cases.test_issue_tracker_stage_l_consumer import ProdStageLFixture
 
 
 class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
+    def _default_source_read_preparation_probe(self, mode):
+        from monitor import issue_tracker_remote_history_match as remote
+        self.assertTrue(callable(getattr(remote,'_prepare_current_project_online_observation',None)),
+            'default coordinator must prepare actual current source and fresh project reads')
+        observed=[]
+        self._exercise_real_protected_three_panel_fixture(skip_history=False,
+            observed_cabling_insert_probe=True,receipted_intent_probe=True,
+            native_catalog_probe=True,native_catalog_c6_origin_probe=True,
+            native_catalog_retained_probe=True,native_catalog_launch_probe=(mode,observed))
+        suffix={'prepare':'visible-only-no-count',
+            'prepare-quota-rebind':'original-rebind-hold-no-count',
+            'prepare-finalizer-expiry':'post-finalizer-expiry-hold-no-count'}[mode]
+        self.assertEqual(['ETH Cabling:'+suffix,'IB Cabling:'+suffix],observed)
+
+    def test_default_preparation_replays_actual_source_then_fresh_project_gate_reads_without_count(self):
+        self._default_source_read_preparation_probe('prepare')
+
+    def test_default_preparation_original_quota_rebind_during_actual_last_read_refuses_without_count(self):
+        self._default_source_read_preparation_probe('prepare-quota-rebind')
+
+    def test_default_preparation_actual_read_expiry_after_last_original_finalizer_refuses_without_count(self):
+        self._default_source_read_preparation_probe('prepare-finalizer-expiry')
+
     def _protected_shared_counter_route(self, *, launch=False, retry=False):
         from test_cases import test_req7_global_attempt_journal as fixtures
         actual_load = fixtures.load; routed = []; results = []
@@ -335,6 +358,94 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         def owned(kind, raw, **options):
             return native.read_owned(private_context, writer_token, spreadsheet_token,
                 binding, credential, kind, json.loads(raw), raw_body=raw, **options)
+        if mode in ('prepare','prepare-quota-rebind','prepare-finalizer-expiry'):
+            from test_cases.test_req7_history_read_launcher import Req7HistoryReadLauncherWorkflowTests
+            from monitor import issue_tracker_token_launcher as tokens
+            from monitor import issue_tracker_remote_history_match as remote
+            from monitor import issue_tracker_stage_l_consumer as source
+            from monitor import issue_tracker_mutation_launcher as mutation
+            from monitor import issue_tracker_unit_catalog as catalog
+            before={str(path.relative_to(state)):(path.stat().st_ino,path.read_bytes())
+                for path in state.rglob('*') if path.is_file()}
+            actual, _credential, _raw=Req7HistoryReadLauncherWorkflowTests.project_auth(
+                native,private_context,owner_module,spreadsheet_token,binding)
+            native.certificates('sheets.googleapis.com')
+            documents={'template_identity':identity_response(),'template_headers':header_response(),
+                'whitelist':whitelist_doc,'metadata':json.loads(quota_raw.data)}
+            real_read=fixed_reads.OwnedProjectSheetsReadUnit.read_once
+            real_source=source.qualify_prod_stage_l
+            issued=[]; projections=[]; replaced=[]; refused=[]
+            closed=[]
+            real_hold=catalog.hold_pending_project_c6_units
+            real_clock=fixed_reads._monotonic
+            @contextmanager
+            def held_catalog(*args,**options):
+                with real_hold(*args,**options) as actual_rows:
+                    yield actual_rows
+                # First acquired holder is last released. Its actual verifier
+                # and cleanup run before the original read deadlines expire.
+                closed.append(True)
+            def post_finalizer_clock():
+                return real_clock()+(31 if closed else 0)
+            def qualify(*args,**options):
+                value=real_source(*args,**options)
+                projections.append(value); return value
+            def read(reader):
+                self.assertTrue(projections,'actual source must precede actual project reads')
+                body=response(documents[reader._kind]).data
+                reply=b'HTTP/1.1 200 OK\r\nContent-Length: '+str(len(body)).encode()+b'\r\nConnection: close\r\n\r\n'+body
+                with native.server(reply,hostname='sheets.googleapis.com',destination='sheets.googleapis.com') as (records,errors), ExitStack() as launched:
+                    port=socket.getaddrinfo('sheets.googleapis.com',443)[0][4][1]
+                    calls,children=native.intercept(launched,native.child_fixture(port),writer_token,spreadsheet_token,binding)
+                    value=real_read(reader)
+                issued.append((reader._kind,len(records),len(calls),tuple(errors),children[0].returncode))
+                if mode=='prepare-quota-rebind' and reader._kind=='metadata':
+                    path=next(path for path in state.rglob('RESERVATION') if path.parent.name.endswith('.metadata'))
+                    raw=path.read_bytes(); inode=path.stat().st_ino
+                    path.rename(global_root/'preserved-preparation-quota')
+                    path.write_bytes(raw); path.chmod(0o600)
+                    replaced.append((str(path.relative_to(state)),inode,path.stat().st_ino))
+                return value
+            with ExitStack() as preparation_boundary, \
+                    mock.patch.object(source,'qualify_prod_stage_l',side_effect=qualify), \
+                    mock.patch.object(fixed_reads.OwnedProjectSheetsReadUnit,'read_once',autospec=True,side_effect=read), \
+                    mock.patch.object(tokens,'OwnedProjectTokenRefreshUnit') as no_second_oauth, \
+                    mock.patch.object(global_journal,'record_global_attempt_intent',wraps=global_journal.record_global_attempt_intent) as no_count, \
+                    mock.patch.object(mutation,'_send_counted_original_once') as no_mutation:
+                if mode=='prepare-finalizer-expiry':
+                    preparation_boundary.enter_context(mock.patch.object(catalog,
+                        'hold_pending_project_c6_units',side_effect=held_catalog))
+                    preparation_boundary.enter_context(mock.patch.object(fixed_reads,
+                        '_monotonic',side_effect=post_finalizer_clock))
+                if mode=='prepare':
+                    result=remote._prepare_current_project_online_observation(writer_token,spreadsheet_token,
+                        binding,actual,_store=self.store,http_root=self.root)
+                    self.assertEqual('VISIBLE_ONLY_UNPROVED',result)
+                else:
+                    with self.assertRaises(remote.RemoteHistoryHold):
+                        remote._prepare_current_project_online_observation(writer_token,spreadsheet_token,
+                            binding,actual,_store=self.store,http_root=self.root)
+                    refused.append(True)
+                no_second_oauth.assert_not_called(); no_count.assert_not_called(); no_mutation.assert_not_called()
+            # Independent facts outside every implementation sanitizer.
+            self.assertEqual([(kind,1,1,(),0) for kind in
+                ('template_identity','template_headers','whitelist','metadata')],issued)
+            self.assertGreaterEqual(len(projections),1 if mode!='prepare' else 2)
+            self.assertEqual([] if mode=='prepare' else [True],refused)
+            if mode=='prepare-finalizer-expiry': self.assertEqual([True],closed)
+            self.assertEqual(0,global_journal.inspect_global_unit(spreadsheet_token,binding,unit).attempt_count)
+            self.assertFalse(list(state.rglob('ATTEMPT-*'))); self.assertFalse(list(state.rglob('CLAIM-*')))
+            after={str(path.relative_to(state)):(path.stat().st_ino,path.read_bytes())
+                for path in state.rglob('*') if path.is_file()}
+            if mode!='prepare-quota-rebind': self.assertEqual(before,after)
+            else:
+                self.assertEqual(1,len(replaced)); name,old,new=replaced[0]
+                self.assertNotEqual(old,new); self.assertEqual(before[name][1],after[name][1])
+                self.assertEqual({k:v for k,v in before.items() if k!=name},{k:v for k,v in after.items() if k!=name})
+            observed.append(sheet+{'prepare':':visible-only-no-count',
+                'prepare-quota-rebind':':original-rebind-hold-no-count',
+                'prepare-finalizer-expiry':':post-finalizer-expiry-hold-no-count'}[mode])
+            return
         bundle = {name:owned(kind, response(doc).data) for name,kind,doc in (
             ('identity_response','template_identity',identity_response()),
             ('headers_response','template_headers',header_response()),
@@ -1153,7 +1264,9 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             )
             self.template = self.publication / "local.xlsx"
             self.template.write_bytes(fake_workbook(reserved_switch_rows=4))
-            if manual_channel_bridge or complete_preview_probe:
+            default_preparation = (native_catalog_launch_probe is not None
+                and native_catalog_launch_probe[0] in ('prepare','prepare-quota-rebind','prepare-finalizer-expiry'))
+            if manual_channel_bridge or complete_preview_probe or default_preparation:
                 root_template = self.root / "monitor/Issue_Tracker_Template_v1.xlsx"
                 root_template.parent.mkdir(parents=True, exist_ok=True)
                 root_template.write_bytes(self.template.read_bytes())

@@ -849,6 +849,11 @@
       "tests": ["test_cases.test_req7_terminal_unsent_dispatch"]
     },
     {
+      "id": "req7_default_actual_source_and_project_read_preparation",
+      "paths": ["monitor/switch-collection-worker.py", "monitor/issue_tracker_remote_history_match.py"],
+      "tests": ["test_cases.test_req7_catalog_reconciliation", "test_cases.test_req7_terminal_unsent_dispatch", "test_cases.test_issue_tracker_stage_l_consumer_workflow"]
+    },
+    {
       "id": "req7_online_actual_cycle_scope_composition",
       "paths": ["monitor/issue_tracker_cycle_source.py", "monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_stage_l_consumer.py"],
       "tests": ["test_cases.test_req7_online_cycle_scope"]
@@ -3524,6 +3529,11 @@
       "id": "req7_protected_shared_counter_native_receipt_retry",
       "members": ["monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_stage_l_consumer.py", "monitor/issue_tracker_unit_catalog.py", "monitor/issue_tracker_retained_inventory.py", "monitor/issue_tracker_remote_history_match.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_metadata_reservation.py", "monitor/issue_tracker_history_preread_journal.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_local_workbook_commit.py", "monitor/issue_tracker_manifest.py", "monitor/issue_tracker_send_unit.py", "monitor/issue_tracker_history_read_launcher.py", "monitor/issue_tracker_mutation_launcher.py", "monitor/issue_tracker_ib_runtime.py", "monitor/issue_tracker_switch_runtime.py"],
       "tests": ["test_cases.test_req7_global_attempt_journal", "test_cases.test_req7_retained_applied_inventory", "test_cases.test_issue_tracker_stage_l_consumer_workflow"]
+    },
+    {
+      "id": "req7_default_owner_auth_current_source_and_fresh_project_reads",
+      "members": ["monitor/switch-collection-worker.py", "monitor/issue_tracker_remote_history_match.py", "monitor/issue_tracker_stage_l_consumer.py", "monitor/issue_tracker_cycle_source.py", "monitor/issue_tracker_state_owner.py", "monitor/issue_tracker_whitelist_workbook.py", "monitor/issue_tracker_metadata_reservation.py", "monitor/issue_tracker_history_read_launcher.py", "monitor/issue_tracker_token_launcher.py", "monitor/issue_tracker_unit_catalog.py", "monitor/issue_tracker_retained_inventory.py", "monitor/issue_tracker_receipt_snapshot.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_online_target.py"],
+      "tests": ["test_cases.test_req7_catalog_reconciliation", "test_cases.test_req7_terminal_unsent_dispatch", "test_cases.test_req7_online_completion_runtime", "test_cases.test_issue_tracker_stage_l_consumer_workflow"]
     },
     {
       "id": "req7_original_project_authenticated_reconciliation",

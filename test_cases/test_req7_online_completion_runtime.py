@@ -194,7 +194,7 @@ class OnlineCompletionRuntimeWorkflowTests(unittest.TestCase):
             initial.close()
             self.assertFalse(cycles.read_completed_cycle_evidence(store)[0].qualifying)
             cycle_before = {path.name: (path.stat().st_ino, path.read_bytes()) for path in store.records_dir.iterdir()}
-            real_reconcile = match._reconcile_pending_project_units if hasattr(match, '_reconcile_pending_project_units') else None
+            real_reconcile = match._reconcile_pending_project_units_and_project_auth
             owned = []; oauth = []; facts = []; substituted = []; closing_owners = []
             changed_input = []
             def replace_original(path):
@@ -206,7 +206,7 @@ class OnlineCompletionRuntimeWorkflowTests(unittest.TestCase):
                 owned.append((writer, owner, binding))
                 closing_owners.append((writer, local._owner(writer).project_fd))
                 return real_reconcile(writer, owner, binding, *args, **kwargs)
-            stack.enter_context(mock.patch.object(match, '_reconcile_pending_project_units', create=True, side_effect=reconcile))
+            stack.enter_context(mock.patch.object(match, '_reconcile_pending_project_units_and_project_auth', side_effect=reconcile))
             real_refresh = tokens.OwnedProjectTokenRefreshUnit.refresh_once
             def refresh_actual(refresh_unit):
                 writer, owner, binding = owned[-1]

@@ -1046,7 +1046,10 @@ def _reconcile_issue_tracker_online_after_completion(store):
     from monitor.issue_tracker_local_commit import try_writer_owner
     from monitor.issue_tracker_online_target import _hold_current_project_online_target
     from monitor.issue_tracker_spreadsheet_owner import spreadsheet_owner
-    from monitor.issue_tracker_remote_history_match import _reconcile_pending_project_units
+    from monitor.issue_tracker_remote_history_match import (
+        RemoteHistoryHold, _reconcile_pending_project_units_and_project_auth,
+        _prepare_current_project_online_observation,
+    )
     from monitor.issue_tracker_retained_inventory import (
         RetainedInventoryHold, _record_all_project_unsent_dispositions,
     )
@@ -1064,7 +1067,8 @@ def _reconcile_issue_tracker_online_after_completion(store):
                     verify_cycles()
                     with spreadsheet_owner(binding) as owner:
                         verify_cycles()
-                        result = _reconcile_pending_project_units(writer, owner, binding, _store=store)
+                        result, authentication = _reconcile_pending_project_units_and_project_auth(
+                            writer, owner, binding, _store=store)
                         verify_cycles()
                         try:
                             _record_all_project_unsent_dispositions(owner, binding)
@@ -1072,6 +1076,15 @@ def _reconcile_issue_tracker_online_after_completion(store):
                             # Unsettled inventory or stopped/partial append is
                             # not successful disposition, FIFO release or GO.
                             disposition_stopped = True
+                        verify_cycles()
+                        try:
+                            _prepare_current_project_online_observation(writer, owner, binding,
+                                authentication, _store=store, http_root=root.parent.parent)
+                        except RemoteHistoryHold:
+                            # This separately reacquired preparation is still
+                            # non-authoritative. HOLD preserves reconciliation,
+                            # never masks owner/cycle finalizers or interruption.
+                            pass
                         verify_cycles()
                     verify_cycles()
                 verify_cycles()

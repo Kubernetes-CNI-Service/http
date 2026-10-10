@@ -257,6 +257,38 @@ class CatalogReconciliationWorkflowTests(unittest.TestCase):
 
 
 class CatalogProjectAuthenticationHandoffDirectTests(unittest.TestCase):
+    def test_preparation_revalidates_each_actual_read_after_original_holders_close(self):
+        import ast
+        import inspect
+        import textwrap
+        module=importlib.import_module('monitor.issue_tracker_remote_history_match')
+        api=getattr(module,'_prepare_current_project_online_observation',None)
+        self.assertTrue(callable(api))
+        function=ast.parse(textwrap.dedent(inspect.getsource(api))).body[0]
+        body=next(node.body for node in function.body if isinstance(node,ast.Try))
+        held_index=next(i for i,node in enumerate(body) if isinstance(node,ast.With)
+            and any(isinstance(item.context_expr,ast.Call)
+                and isinstance(item.context_expr.func,ast.Name)
+                and item.context_expr.func.id=='ExitStack' for item in node.items))
+        holder=body[held_index]
+        read_loop=next(node for node in holder.body if isinstance(node,ast.For)
+            and isinstance(node.iter,ast.Tuple))
+        self.assertEqual(('template_identity','template_headers','whitelist','metadata'),
+            tuple(ast.literal_eval(item) for item in read_loop.iter.elts))
+        final_read_loop=body[held_index+1]
+        self.assertIsInstance(final_read_loop,ast.For,
+            'actual read deadlines must be rechecked after every original-holder finalizer')
+        self.assertEqual('responses.items()',ast.unparse(final_read_loop.iter))
+        self.assertEqual(['require_current_owned_project_read'],
+            [node.func.id for node in ast.walk(final_read_loop) if isinstance(node,ast.Call)
+                and isinstance(node.func,ast.Name)])
+        call=final_read_loop.body[0].value
+        self.assertEqual(('writer_token','owner_token','binding','response','authentication'),
+            tuple(arg.id for arg in call.args))
+        self.assertEqual([('read_kind','kind')],[(arg.arg,arg.value.id) for arg in call.keywords])
+        self.assertEqual(['require_current_owned_project_token','inspect_project_online_target'],
+            [node.value.func.id for node in body[held_index+2:]])
+
     def test_fixed_internal_handoff_accepts_no_caller_authentication_or_factory(self):
         import inspect
         module=importlib.import_module('monitor.issue_tracker_remote_history_match')
@@ -267,6 +299,21 @@ class CatalogProjectAuthenticationHandoffDirectTests(unittest.TestCase):
         with mock.patch.object(catalog,'_inspect') as inventory:
             with self.assertRaises(module.RemoteHistoryHold): api(object(),object(),object())
             inventory.assert_not_called()
+
+    def test_fixed_next_stage_acquires_source_and_reads_instead_of_accepting_plans(self):
+        import inspect
+        module=importlib.import_module('monitor.issue_tracker_remote_history_match')
+        api=getattr(module,'_prepare_current_project_online_observation',None)
+        self.assertTrue(callable(api),'default next stage lacks actual source/read preparation')
+        self.assertEqual(('writer_token','owner_token','binding','authentication','_store','http_root'),
+            tuple(inspect.signature(api).parameters))
+        from monitor import issue_tracker_token_launcher as tokens
+        from monitor import issue_tracker_history_read_launcher as reads
+        with mock.patch.object(tokens,'OwnedProjectTokenRefreshUnit') as oauth, \
+                mock.patch.object(reads,'OwnedProjectSheetsReadUnit') as read:
+            with self.assertRaises(module.RemoteHistoryHold):
+                api(object(),object(),object(),None,_store=object(),http_root=object())
+            oauth.assert_not_called(); read.assert_not_called()
 
 
 class CatalogProjectAuthenticationHandoffWorkflowTests(unittest.TestCase):

@@ -11,7 +11,8 @@ from test_cases import test_req7_online_completion_runtime as runtime_tests
 
 
 class TerminalUnsentDispatchDirectTests(unittest.TestCase):
-    def exercise(self, *, held_stop=False, drift=False, interrupt=False, applied=False):
+    def exercise(self, *, held_stop=False, drift=False, interrupt=False, applied=False,
+                 preparation_probe=None, preparation_interrupt=False):
         from monitor import issue_tracker_local_commit as local
         from monitor import issue_tracker_online_target as target
         from monitor import issue_tracker_spreadsheet_owner as ownership
@@ -22,6 +23,7 @@ class TerminalUnsentDispatchDirectTests(unittest.TestCase):
             root = Path(directory).resolve()
             store = runtime_tests.cycle(stack, root)
             writer, owner, binding = object(), object(), object()
+            authentication = object()
             calls = []; closed = []; reached = []; substituted = []
             result = (remote.RemoteHistoryObservation('UNKNOWN', 1, False, True, True,
                 1, 0, 3, 3, 'PRIVATE ACTION', 'PRIVATE WIRE', 'PRIVATE METADATA', 'PRIVATE HISTORY'),)
@@ -57,6 +59,16 @@ class TerminalUnsentDispatchDirectTests(unittest.TestCase):
                     raise inventory.RetainedInventoryHold()
                 return ()
 
+            def prepare(actual_writer, actual_owner, actual_binding, actual_authentication, *, _store, http_root):
+                self.assertIs(writer,actual_writer); self.assertIs(owner,actual_owner)
+                self.assertIs(binding,actual_binding); self.assertIs(authentication,actual_authentication)
+                self.assertIs(store,_store); self.assertEqual(root,http_root)
+                self.assertEqual(['reconcile','disposition'],calls)
+                self.assertEqual([],closed); self.assertIsNotNone(store.gate._lock_fd)
+                if preparation_probe is not None: preparation_probe.append('live-after-unsent')
+                if preparation_interrupt: raise KeyboardInterrupt('PRIVATE PREPARATION INTERRUPT')
+                raise remote.RemoteHistoryHold()
+
             stack.enter_context(mock.patch.object(worker, 'STATUS_DIR', root/'monitor/status'))
             stack.enter_context(mock.patch.object(local, 'try_writer_owner',
                 side_effect=lambda *args: held('writer', writer)))
@@ -65,9 +77,12 @@ class TerminalUnsentDispatchDirectTests(unittest.TestCase):
             stack.enter_context(mock.patch.object(ownership, 'spreadsheet_owner',
                 side_effect=lambda *args: held('sheet', owner)))
             stack.enter_context(mock.patch.object(remote, '_reconcile_pending_project_units', side_effect=reconcile))
+            stack.enter_context(mock.patch.object(remote, '_reconcile_pending_project_units_and_project_auth',
+                side_effect=lambda *args,**options:(reconcile(*args,**options),authentication)))
+            stack.enter_context(mock.patch.object(remote, '_prepare_current_project_online_observation', side_effect=prepare))
             stack.enter_context(mock.patch.object(inventory, '_record_all_project_unsent_dispositions', side_effect=append))
             with mock.patch.object(worker.sys, 'stderr', io.StringIO()) as stream:
-                if interrupt:
+                if interrupt or preparation_interrupt:
                     with self.assertRaises(KeyboardInterrupt):
                         worker._reconcile_issue_tracker_online_after_completion(store)
                 elif drift:
@@ -83,7 +98,7 @@ class TerminalUnsentDispatchDirectTests(unittest.TestCase):
             else:
                 self.assertEqual([], substituted)
             status = root/'monitor/status/issue-tracker-online.status.json'
-            if drift or interrupt:
+            if drift or interrupt or preparation_interrupt:
                 self.assertFalse(status.exists())
             else:
                 self.assertEqual(['sheet', 'writer', 'target'], closed)
@@ -96,6 +111,16 @@ class TerminalUnsentDispatchDirectTests(unittest.TestCase):
                 if held_stop and applied:
                     self.assertIn('Issue Tracker UNSENT disposition unavailable; mutation disabled', stream.getvalue())
             self.assertNotIn('PRIVATE', stream.getvalue())
+
+    def test_fixed_preparation_follows_unsent_with_identical_live_owner_and_actual_auth_handoff(self):
+        observed=[]
+        self.exercise(preparation_probe=observed,held_stop=True)
+        self.assertEqual(['live-after-unsent'],observed)
+
+    def test_preparation_operator_interrupt_is_not_swallowed_or_published(self):
+        observed=[]
+        self.exercise(preparation_probe=observed,preparation_interrupt=True)
+        self.assertEqual(['live-after-unsent'],observed)
 
     def test_reconciliation_then_local_disposition_use_identical_live_owner_and_binding(self):
         self.exercise()
@@ -127,6 +152,27 @@ class TerminalUnsentNativeWorkflowTests(unittest.TestCase):
     intercept = runtime_tests.OnlineCompletionRuntimeWorkflowTests.intercept
     api = runtime_tests.OnlineCompletionRuntimeWorkflowTests.api
     exercise = runtime_tests.OnlineCompletionRuntimeWorkflowTests.exercise
+
+    def test_default_worker_hands_actual_issued_project_auth_to_preparation_inside_real_owners(self):
+        observed=[]; worker_api=self.api()
+        def invoke(store):
+            # The native fixture loads a new actual matcher before invoking
+            # the worker. Observe that current module, not a stale prefixture.
+            from monitor import issue_tracker_remote_history_match as remote
+            from monitor.issue_tracker_token_launcher import require_current_owned_project_token
+            actual=remote._prepare_current_project_online_observation
+            def prepare(writer,owner,binding,authentication,*,_store,http_root):
+                project,digest=require_current_owned_project_token(owner,binding,authentication)
+                self.assertTrue(project); self.assertEqual(64,len(digest))
+                self.assertIsNotNone(_store.gate._lock_fd)
+                self.assertEqual(self.root,http_root)
+                observed.append('actual-auth-live')
+                return actual(writer,owner,binding,authentication,_store=_store,http_root=http_root)
+            with mock.patch.object(remote,'_prepare_current_project_online_observation',side_effect=prepare):
+                return worker_api(store)
+        with mock.patch.object(self,'api',return_value=invoke):
+            self.exercise(missing_fence=True)
+        self.assertEqual(['actual-auth-live'],observed)
 
     def test_actual_missing_fence_keeps_unknown_and_status_after_unsent_hold(self):
         from monitor import issue_tracker_retained_inventory as inventory

@@ -2315,3 +2315,24 @@ This is neither a retained read snapshot nor G1/send permission: subsequent
 stages must acquire fresh source and actual reads under the original owners.
 No existing assertion or deadline is relaxed. Field verification is NOT RUN;
 default FIRST/R2, whole REQ7 and exact-tree full/check remain open.
+
+The next default worker stage reuses only actual issued project authentication,
+after reconciliation and local ALL-UNSENT finalizers. It reacquires ALL actual
+catalog/C6/family originals, current K, fixed workbook W1 and protected native
+source before four new issued project gate reads. Fresh gates and ALL visible
+quota originals surround actual receipted-source/business/reservation replay
+and another current source qualification. Original read deadlines are checked
+again after holder cleanup. Ordinary preparation HOLD preserves the old
+diagnostic tuple; cycle/owner finalizers and operator interruption still apply.
+It never counts, claims, mutates, invents NEW, or excludes a unit merely because
+an APPLIED filename exists. Visible accounting is VISIBLE_ONLY_UNPROVED, not
+historical hidden-PROJECT completeness. Settled-unit exclusion, fresh History
+and per-operation business continuity, shared opportunity/default FIRST/R2,
+whole REQ7 and exact-tree full/check remain open. Existing automated tests and
+deadlines are not weakened; the new direct and actual native/TLS workflows are
+registered in the manifest. Field verification remains NOT RUN.
+The post-finalizer native negative advances only the original issuer's clock
+after the actual last catalog holder has exited: all four real reads succeed
+first, but expired observations must HOLD without changing count/CLAIM/images.
+Removing the new final read checks makes both independent direct and native
+expectations fail. The fixed 30-second observation budget is unchanged.
