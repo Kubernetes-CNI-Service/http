@@ -229,6 +229,7 @@
         "test_cases.test_issue_tracker_whitelist_workflow",
         "test_cases.test_issue_tracker_online_target",
         "test_cases.test_issue_tracker_online_target_workflow",
+        "test_cases.test_req7_initial_target_binding",
         "test_cases.test_issue_tracker_credential_shape",
         "test_cases.test_issue_tracker_credential_fd",
         "test_cases.test_issue_tracker_online_cells",
@@ -1497,7 +1498,8 @@
         "monitor/issue_tracker_online_target.py"
       ],
       "tests": [
-        "test_cases.test_issue_tracker_online_target"
+        "test_cases.test_issue_tracker_online_target",
+        "test_cases.test_req7_initial_target_binding"
       ]
     },
     {
@@ -1984,7 +1986,8 @@
         "tools/project_contract.py"
       ],
       "tests": [
-        "test_cases.test_issue_tracker_online_target_workflow"
+        "test_cases.test_issue_tracker_online_target_workflow",
+        "test_cases.test_req7_initial_target_binding"
       ]
     },
     {

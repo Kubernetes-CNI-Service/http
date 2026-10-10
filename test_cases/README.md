@@ -2099,3 +2099,12 @@ four-read workflows retain independent request/child/cleanup observations
 outside all exception normalization. Live original replay makes no new read;
 this is not a cold-process, default coordinator, whole REQ7 or current full/check
 proof. Existing automated cases and their original budgets remain required.
+
+Initial target binding is a separate fixed-input API under the actual live
+project owner. It reuses the same no-follow, bounded current config and root-only
+enumeration reader, including named/held stat checks after both reads. It takes
+no caller target/document/path, and a typed binding is never a permit. The old
+inspect API still rejects missing/invalid previous bindings BEFORE any input;
+it never silently initializes or retargets one. Independent direct and real
+owner/config/fixed-enumeration workflows cover disabled policy, empty listing
+and same-byte config replacement. Root/RO-bind field provenance remains NOT RUN.

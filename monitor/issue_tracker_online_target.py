@@ -108,7 +108,24 @@ def bind_online_target(global_document, allowlist, *, expected=None):
     return current
 
 
+def bind_current_project_online_target(writer_token):
+    """Initial binding from the actual project owner and fixed root inputs.
+
+    No caller document, path, target or previous binding enters this API.
+    This supplies a typed locator only, never admission or send permission.
+    Every downstream use still owes current exact-binding revalidation.
+    """
+    return _inspect_project_online_target(writer_token, None)
+
+
 def inspect_project_online_target(writer_token, expected):
+    """Revalidate an exact previous binding; never silently initialize it."""
+    if type(expected) is not OnlineTargetBinding:
+        raise OnlineTargetHold('current_target_binding_unproved')
+    return _inspect_project_online_target(writer_token, expected)
+
+
+def _inspect_project_online_target(writer_token, expected):
     """Reopen current project policy and the fixed root-only enumeration.
 
     The actual ACTIVE project owner supplies the held project FD, never a
@@ -127,7 +144,7 @@ def inspect_project_online_target(writer_token, expected):
         return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid,
                 info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
     try:
-        if (type(expected) is not OnlineTargetBinding or os.geteuid() != 0
+        if ((expected is not None and type(expected) is not OnlineTargetBinding) or os.geteuid() != 0
                 or any(not hasattr(os, flag) for flag in ('O_NOFOLLOW', 'O_CLOEXEC', 'O_NONBLOCK'))):
             raise OnlineTargetHold('current_target_binding_unproved')
         owner = _owner(writer_token)

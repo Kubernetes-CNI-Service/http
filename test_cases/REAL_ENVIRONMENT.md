@@ -2424,6 +2424,8 @@ generation/publish 及 UNKNOWN 下改 action/wire 均 HOLD，不计作 COMPLETE 
 
 ## TC-REAL-REQ7-ORIGINAL-RECONCILIATION-001 — 已尝试原单元的固定读对账
 
+- 首次目标绑定补充：仅从实际项目 owner 下的原 config 与固定 root 枚举建立 locator，不接受 caller target/document/path；旧 inspect 必须仍持有非空原 binding。保留正常 root/RO-bind、禁用/空枚举、读间同字节 config 换 inode 和失败安全状态；本地 native owner/fixed-FD 仅为替代开发证据，现场仍 NOT RUN。无场景省略/合并、无新的风险接受确认人或现场权限，绑定本身不授予发送/NEW。
+
 - 状态：**NOT RUN / REAL_ENV REQUIRED**；对应 C-19/C-23/C-25。自动化为 `test_req7_online_reconciliation` 的独立 direct 与真实 C6/OAuth/本地加密 socket 四读 workflow；不代表现场或默认在线整链闭合。
 - 前置与权限：另获精确授权的隔离副本、真实私有原件与共享 owner、经批准目标和有效凭据/策略、当前精确树 full/check 及研发确认；本卡不授权真实 Cloud/SSH/设备/root/cron/生产发布。
 - 保留场景：正常四读、缺 fence 的 UNKNOWN、缺审计行的 CONFLICT、凭据原对象丢失、末次读后策略撤销；创建 COMPLETE 至新 reader 的交接、APPLIED/key 提交与最后认证复验边界的原件替换、代表性中断、冷恢复和失败后安全状态。创建者原身份必须保持至接收后且在 APPLIED 前复验，同字节换 inode 不能被重新认领。
