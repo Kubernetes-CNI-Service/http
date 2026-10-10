@@ -2430,3 +2430,18 @@ Independent direct and actual protected ETH/IB OAuth/TLS workflow tests cover
 this boundary, copied/closed/failed holders and unchanged count/originals.
 This handback is not default FIRST/R2 wiring, G1 or sending authority; whole
 REQ7, current full/check and field/Cloud/device/power-loss validation remain open.
+
+REQ7 C25 default Stage-L last-observation display uses the existing worker's
+fixed private cache, an authenticated GET-only public projection, and three
+read-only default publication-area labels. Independent literal direct tests
+and actual worker/emitter/C6 -> persisted file -> CGI -> generated JavaScript
+workflows retain pending progress, archive-gap unknown counts and local C6
+completion without online permission. K, revision (including initial zero),
+N and counts cross the browser boundary as exact decimal strings, never JS
+floating-point numbers; missing facts remain unknown. Only fixed display
+fields cross the boundary: no device/project/evidence identity, raw ACTION,
+wire, credential, source path or arbitrary exception text. Unsafe/replaced
+images and malformed projections display unproved, never idle/GO. This does
+not enable the uninstalled manual/K relay, default FIRST/R2 or online sending;
+last observation is explicitly not current admission. Whole C25/REQ7,
+current full/check and all field validation remain open.

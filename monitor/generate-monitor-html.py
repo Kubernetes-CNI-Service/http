@@ -2285,6 +2285,79 @@ async function refreshIssueTrackerOnlineStatus() {
 '''
 
 
+_ISSUE_TRACKER_STAGE_L_STATUS_SCRIPT = r'''
+function renderIssueTrackerStageLStatus(payload) {
+  const panels = {'eth':'Switch Status', 'etop':'Eth Link Validation', 'itop':'IB Link Validation'};
+  const states = {pending:'等待源窗口', hold:'HOLD', qualified:'源合格（非发送许可）',
+    local_applied:'本地完成（非远端提交证明）', local_no_change:'本地无变化', local_no_candidates:'本地无候选'};
+  const object = value => value && typeof value === 'object' && !Array.isArray(value);
+  const exact = (value, keys) => object(value) && Object.keys(value).length === keys.length
+    && keys.every(key => Object.hasOwn(value, key));
+  const decimal = (value, positive=false) => value === null || (typeof value === 'string'
+    && (positive ? /^[1-9][0-9]*$/ : /^(0|[1-9][0-9]*)$/).test(value));
+  const progress = (value, k) => {
+    if (value === null) return true;
+    if (typeof value !== 'string') return false;
+    if (value === 'unknown — source authority changed; confirm input change') return true;
+    const gap = /^pending \?\/([1-9][0-9]*) — archive sequence gap$/.exec(value);
+    if (gap) return gap[1] === k;
+    const match = /^(pending|qualified|qualified subset; pending) (0|[1-9][0-9]*)\/([1-9][0-9]*)$/.exec(value);
+    return !!match && match[3] === k && BigInt(match[2]) <= BigInt(match[3])
+      && (match[1] !== 'qualified' || match[2] === match[3]);
+  };
+  let valid = exact(payload, ['schema_version','state','updated_at','k','k_revision',
+      'publish_every_cycles','panels','cycle_summary','online','read_only','mutation_disabled'])
+    && payload.schema_version === 1 && Object.hasOwn(states, payload.state)
+    && payload.read_only === true && payload.mutation_disabled === true
+    && payload.online === 'disabled_no_send_authority'
+    && typeof payload.updated_at === 'string'
+    && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$/.test(payload.updated_at)
+    && Number.isFinite(Date.parse(payload.updated_at)) && Date.parse(payload.updated_at) <= Date.now()
+    && decimal(payload.k, true) && decimal(payload.k_revision)
+    && ((payload.k === null) === (payload.k_revision === null))
+    && (payload.k !== null || payload.state === 'hold')
+    && decimal(payload.publish_every_cycles, true)
+    && exact(payload.panels, Object.values(panels))
+    && exact(payload.cycle_summary, ['published','skipped','pending','pending_count_complete']);
+  if (valid) {
+    const summary = payload.cycle_summary;
+    valid = typeof summary.pending_count_complete === 'boolean'
+      && ['published','skipped','pending'].every(key => decimal(summary[key]))
+      && Object.values(panels).every(name => exact(payload.panels[name], ['state','progress_text'])
+        && ['pending','hold','qualified'].includes(payload.panels[name].state)
+        && progress(payload.panels[name].progress_text, payload.k));
+  }
+  for (const [id, name] of Object.entries(panels)) {
+    const label = document.getElementById(`issue-tracker-${id}-stage-l-state`);
+    if (!label) continue;
+    if (!valid) { label.textContent = 'Issue Tracker 本地状态未证明；只读，自动发送禁用'; continue; }
+    const summary = payload.cycle_summary, panel = payload.panels[name];
+    const show = value => value === null ? '未知' : value;
+    label.textContent = `Issue Tracker ${states[payload.state]}；${panel.state === 'hold' ? 'HOLD；' : ''}`
+      + `${panel.progress_text === null ? '进度未知' : panel.progress_text}；K ${show(payload.k)}；N ${show(payload.publish_every_cycles)}；`
+      + `本地 published ${show(summary.published)} / skipped ${show(summary.skipped)} / pending ${show(summary.pending)}`
+      + `${summary.pending_count_complete ? '' : '（计数未完整证明）'}；最后观察：${payload.updated_at}（非当前准入证明）；自动发送禁用`;
+  }
+}
+async function refreshIssueTrackerStageLStatus() {
+  try {
+    const response = await fetch(`${SWITCH_COLLECTION_URL}?view=issue_tracker_stage_l`, {
+      method:'GET', credentials:'same-origin', cache:'no-store'
+    });
+    if (!response.ok) throw new Error('observation unavailable');
+    renderIssueTrackerStageLStatus(await response.json());
+  } catch (_error) { renderIssueTrackerStageLStatus(null); }
+}
+'''
+
+
+def _issue_tracker_stage_l_label(panel_id: str) -> str:
+    if panel_id not in ('eth', 'etop', 'itop'):
+        raise ValueError('unsupported Stage L display panel')
+    return (f'<span id="issue-tracker-{panel_id}-stage-l-state" role="status">'
+            'Issue Tracker 本地状态未证明；只读，自动发送禁用</span>')
+
+
 def _issue_tracker_manual_controls(panel_id: str, panel: str) -> str:
     """Test-only local controls; the installed generator never enables them."""
     if (panel_id, panel) not in (
@@ -4766,7 +4839,7 @@ def build_html(
                          if issue_tracker_local_ui else "")
     issue_tracker_script = (_ISSUE_TRACKER_MANUAL_SCRIPT
                             if issue_tracker_local_ui else "")
-    issue_tracker_eth_controls = (
+    issue_tracker_eth_controls = _issue_tracker_stage_l_label('eth') + '\n    ' + (
         manual_controls["Switch Status"] + "\n    "
         if issue_tracker_local_ui else ""
     )
@@ -4782,11 +4855,11 @@ def build_html(
         "etop",
         "Ethernet",
         hidden_headers=("B Oper", "B Remote Host", "B Remote Port"),
-        manual_controls=manual_controls.get("Eth Link Validation", ""),
+        manual_controls=_issue_tracker_stage_l_label('etop') + manual_controls.get("Eth Link Validation", ""),
     )
     infiniband_topology_panel = render_topology_panel(
         infiniband_topology, "itop", "InfiniBand",
-        manual_controls=manual_controls.get("IB Link Validation", ""),
+        manual_controls=_issue_tracker_stage_l_label('itop') + manual_controls.get("IB Link Validation", ""),
     )
     ethernet_diagram_panel = render_diagram_panel(
         ethernet_diagram, "p2p", "最新 Ethernet 拓扑图", "*-lldpq.html"
@@ -8241,6 +8314,8 @@ initAutoRefresh();
 setView(storageGet(SWITCH_VIEW_KEY) === 'list' ? 'list' : 'card', false);
 {_ISSUE_TRACKER_ONLINE_STATUS_SCRIPT}
 refreshIssueTrackerOnlineStatus();
+{_ISSUE_TRACKER_STAGE_L_STATUS_SCRIPT}
+refreshIssueTrackerStageLStatus();
 refreshZtpMonitorControl();
 refreshSwitchCollectionControl();
 refreshYamlBackupControl();

@@ -210,6 +210,7 @@
         "test_cases.test_req7_online_completion_runtime",
         "test_cases.test_req7_terminal_unsent_dispatch",
         "test_cases.test_req7_online_observation_status",
+        "test_cases.test_req7_stage_l_readonly_display",
         "test_cases.test_req7_online_cycle_scope",
         "test_cases.test_issue_tracker_qualification",
         "test_cases.test_issue_tracker_manifest",
@@ -862,6 +863,11 @@
       "id": "req7_online_non_authority_observation_status",
       "paths": ["monitor/switch-collection-worker.py", "monitor/switch-collection-control.cgi", "monitor/generate-monitor-html.py"],
       "tests": ["test_cases.test_req7_online_observation_status"]
+    },
+    {
+      "id": "req7_stage_l_fixed_readonly_display",
+      "paths": ["monitor/switch-collection-control.cgi", "monitor/generate-monitor-html.py"],
+      "tests": ["test_cases.test_req7_stage_l_readonly_display"]
     },
     {
       "id": "finished_project_lifecycle",
@@ -3589,6 +3595,11 @@
       "id": "req7_actual_observation_writer_protected_get_default_display",
       "members": ["monitor/switch-collection-worker.py", "monitor/switch-collection-control.cgi", "monitor/generate-monitor-html.py", "monitor/issue_tracker_remote_history_match.py", "monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_spreadsheet_owner.py"],
       "tests": ["test_cases.test_req7_online_observation_status", "test_cases.test_req7_online_completion_runtime"]
+    },
+    {
+      "id": "req7_actual_stage_l_worker_fixed_cache_authenticated_get_and_default_js",
+      "members": ["monitor/switch-collection-worker.py", "monitor/collection_v2_emitter.py", "monitor/issue_tracker_publish_runtime.py", "monitor/issue_tracker_local_workbook_commit.py", "monitor/switch-collection-control.cgi", "monitor/generate-monitor-html.py"],
+      "tests": ["test_cases.test_req7_stage_l_readonly_display", "test_cases.test_issue_tracker_stage_l_status_per_key_contract_workflow"]
     },
     {
       "id": "req7_terminal_scope_actual_first_and_original_retry",
