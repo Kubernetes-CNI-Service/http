@@ -849,6 +849,155 @@ class Req7CatalogMetadataReservationTests(unittest.TestCase):
             self.assertEqual(raw, path.read_bytes()); self.assertEqual(raw, (case.root / 'preserved-original-quota').read_bytes())
 
 
+class Req7OwnedCatalogMetadataDirectTests(unittest.TestCase):
+    def test_unissued_reads_refuse_before_catalog_inventory_or_quota_access(self):
+        module=load()
+        api=getattr(module,'_hold_owned_project_catalog_metadata_capacity',None)
+        self.assertTrue(callable(api),'ALL quota accounting lacks original project-read handoff')
+        with mock.patch.object(module,'_hold_catalog_metadata_capacity') as inventory:
+            for raw in (object(),response({'matchedDeveloperMetadata':[]})):
+                with self.subTest(kind=type(raw).__name__),self.assertRaises(module.MetadataReservationHold) as caught:
+                    with api(object(),object(),binding(),object(),
+                             identity_response=raw,metadata_response=raw):
+                        self.fail('unissued read must not yield a budget')
+                self.assertIsNone(caught.exception.__context__)
+            inventory.assert_not_called()
+
+
+class Req7OwnedCatalogMetadataWorkflowTests(unittest.TestCase):
+    """Actual OAuth/TLS reads -> ALL immutable quota images, never G1 GO.
+
+    Synthetic frozen units exercise accounting, not qualified current C6 or
+    FIRST/R2. Only the existing local fixture redirects native TLS to loopback.
+    """
+    _Fixture=Req7MetadataReservationProjectWorkflowTests
+    setUp=_Fixture.setUp; certificates=_Fixture.certificates; server=_Fixture.server
+    owners=_Fixture.owners; intercept=_Fixture.intercept; child_fixture=_Fixture.child_fixture
+    project_auth=_Fixture.project_auth; read_project=_Fixture.read_project
+    prepare_original=_Fixture.prepare_original
+
+    def originals(self,stack,module):
+        from test_cases.test_req7_unit_catalog import load as load_catalog, load_component
+        from monitor import issue_tracker_global_attempt_journal as journal
+        from monitor import issue_tracker_history_preread_journal as preread
+        from monitor import issue_tracker_history_read_launcher as reads
+        from monitor.issue_tracker_send_unit import freeze_send_unit
+        from test_cases.test_req7_send_unit import inputs
+        catalog=load_catalog(reset_dependencies=False)
+        inventory=load_component('issue_tracker_retained_inventory')
+        self.assertIs(module.ownership,inventory.ownership)
+        native=journal.prepare_global_unit
+        def register_then_prepare(owner,bound,unit):
+            catalog.register_pending_unit(owner,bound,unit)
+            return native(owner,bound,unit)
+        # Register before first global creation: no legacy shared slot beside
+        # the actual catalog. Do not mock any production provenance decision.
+        with mock.patch.object(journal,'prepare_global_unit',side_effect=register_then_prepare):
+            values=self.prepare_original(stack)
+        writer,owner,bound,auth,identity_read,identity,first,metadata,credential,credential_raw=values
+        args=inputs(); args.update(spreadsheet_id=bound.spreadsheet_id,sheet_id=101,history_sheet_id=105,
+            target_nonce='a'*64,history_nonce='d'*64,generation_id='e'*64,publish_id='f'*64)
+        second=freeze_send_unit(**args)
+        catalog.register_pending_unit(owner,bound,second); native(owner,bound,second)
+        history=matching.tail_document(12); history['spreadsheetId']=bound.spreadsheet_id
+        history['sheets'][0]['properties']['sheetId']=105; history['sheets'][0]['data'][0]['rowData']=[]
+        history_read=self.read_project(stack,writer,owner,bound,auth,'history_tail',history)
+        plan,_project,_digest=reads.require_current_owned_project_read(
+            writer,owner,bound,history_read,auth,read_kind='history_tail')
+        preread.prepare_history_preread(owner,bound,second,plan,history_read)
+        metadata_read=self.read_project(stack,writer,owner,bound,auth,'metadata',metadata)
+        for unit in (first,second):
+            module.prepare_owned_project_metadata_reservation(writer,owner,bound,auth,unit,
+                identity_response=identity_read,metadata_response=metadata_read)
+        return values,metadata_read,(first,second)
+
+    def api(self,module):
+        api=getattr(module,'_hold_owned_project_catalog_metadata_capacity',None)
+        self.assertTrue(callable(api),'actual project reads must dominate ALL catalog quota consumption')
+        return api
+
+    def test_actual_read_pair_charges_all_fences_and_copied_objects_never_enter_inventory(self):
+        from contextlib import ExitStack
+        from test_cases.test_req7_global_attempt_journal import original_read_files
+        module=load(); api=self.api(module)
+        with ExitStack() as stack:
+            values,metadata_read,units=self.originals(stack,module)
+            writer,owner,bound,auth,identity_read,_identity,_first,_metadata,credential,raw=values
+            before=original_read_files(self.root)
+            native=module._hold_catalog_metadata_capacity
+            with mock.patch.object(module,'_hold_catalog_metadata_capacity',wraps=native) as inventory:
+                for identity_image,metadata_image,authentication in (
+                        (replace(identity_read),metadata_read,auth),
+                        (identity_read,replace(metadata_read),auth),
+                        (identity_read,metadata_read,replace(auth))):
+                    with self.assertRaises(module.MetadataReservationHold):
+                        with api(writer,owner,bound,authentication,
+                                 identity_response=identity_image,metadata_response=metadata_image):
+                            self.fail('copied acquisition must not yield')
+                inventory.assert_not_called()
+            with api(writer,owner,bound,auth,identity_response=identity_read,
+                     metadata_response=metadata_read) as (budget,verify):
+                self.assertEqual('VISIBLE_ONLY_UNPROVED',budget.outcome)
+                self.assertEqual(2,budget.outstanding_reservations)
+                self.assertEqual((101,86,4,29910),next(row for row in budget.pools if row[0]==101))
+                self.assertIs(False,budget.inventory_complete)
+                self.assertFalse(hasattr(budget,'permit')); verify()
+            self.assertEqual(before,original_read_files(self.root)); self.assertEqual(raw,credential.read_bytes())
+            self.assertEqual([0,0],[module.global_journal.inspect_global_unit(owner,bound,unit).attempt_count for unit in units])
+
+    def test_original_read_deadline_remains_live_through_consumer_and_finalization(self):
+        from contextlib import ExitStack
+        from monitor import issue_tracker_history_read_launcher as reads
+        from test_cases.test_req7_global_attempt_journal import original_read_files
+        module=load(); api=self.api(module)
+        with ExitStack() as stack:
+            values,metadata_read,_units=self.originals(stack,module)
+            writer,owner,bound,auth,identity_read,*_rest=values
+            before=original_read_files(self.root); entered=[]
+            with self.assertRaises(module.MetadataReservationHold):
+                with api(writer,owner,bound,auth,identity_response=identity_read,
+                         metadata_response=metadata_read) as (budget,verify):
+                    entered.append(budget.outstanding_reservations)
+                    with mock.patch.object(reads,'_monotonic',side_effect=lambda:time.monotonic()+31):
+                        verify()
+            self.assertEqual([2],entered); self.assertEqual(before,original_read_files(self.root))
+
+    def test_consumer_cannot_adopt_same_bytes_later_quota_after_yield(self):
+        from contextlib import ExitStack
+        module=load(); api=self.api(module)
+        with ExitStack() as stack:
+            values,metadata_read,units=self.originals(stack,module)
+            writer,owner,bound,auth,identity_read,*_rest=values
+            stem=hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()
+            path=self.root/'var/lib/http-ztp-container/issue-tracker'/(stem+'.unit-'+units[1].unit_id+'.metadata/RESERVATION')
+            raw=path.read_bytes(); inode=path.stat().st_ino; saved=self.root/'retained-original-quota'; entered=[]
+            with self.assertRaises(module.MetadataReservationHold):
+                with api(writer,owner,bound,auth,identity_response=identity_read,
+                         metadata_response=metadata_read) as (budget,_verify):
+                    entered.append(budget.outstanding_reservations)
+                    path.rename(saved); path.write_bytes(raw); path.chmod(0o600)
+            self.assertEqual([2],entered); self.assertEqual(inode,saved.stat().st_ino)
+            self.assertNotEqual(inode,path.stat().st_ino)
+            self.assertEqual(raw,saved.read_bytes()); self.assertEqual(raw,path.read_bytes())
+
+    def test_expiry_at_implicit_final_check_cannot_return_a_successful_consumption(self):
+        from contextlib import ExitStack
+        from monitor import issue_tracker_history_read_launcher as reads
+        from test_cases.test_req7_global_attempt_journal import original_read_files
+        module=load(); api=self.api(module)
+        with ExitStack() as stack:
+            values,metadata_read,_units=self.originals(stack,module)
+            writer,owner,bound,auth,identity_read,*_rest=values
+            before=original_read_files(self.root); consumed=[]
+            with mock.patch.object(reads,'_monotonic',side_effect=lambda:time.monotonic()+(31 if consumed else 0)):
+                with self.assertRaises(module.MetadataReservationHold) as caught:
+                    with api(writer,owner,bound,auth,identity_response=identity_read,
+                             metadata_response=metadata_read) as (budget,_verify):
+                        consumed.append(budget.outstanding_reservations)
+                self.assertIsNone(caught.exception.__context__)
+            self.assertEqual([2],consumed); self.assertEqual(before,original_read_files(self.root))
+
+
 def _run_owned_count_child(command,count):
     """Keep the original command, 5s budget and error; retain native phases."""
     started=time.monotonic()

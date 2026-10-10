@@ -2383,6 +2383,7 @@ generation/publish 及 UNKNOWN 下改 action/wire 均 HOLD，不计作 COMPLETE 
 - 步骤与独立预期：实际 immutable batch 的 fence ID/key/value/目标表确定唯一预留；两份 nonce 可见预算各为 86，z=1 为 2，sheet 与 spreadsheet 各自 30000 池。容量溢出、已存在同 ID（包括相同图像）、部分响应、原 nonce 错误、foreign target 必须在创建 state 前 HOLD；八个图像屏障全部完成后才写 INITIALIZED。部分屏障不采用，冷进程及 UNKNOWN 不换 fence、不回填／清理／释放配额。链接、marker 缺失、重哈希替换 reservation HOLD。
 - 证据：精确 HEAD/tree/dirty/diff/manifest/Python/平台、命令／退出码、前后 stat/inode/大小/SHA256、完整 END／物理顺序、固定 TLS 请求见证、原 RAW 摘要、原 action/wire／nonce、所有 fsync 屏障和冷进程 UNKNOWN；不输出 bearer 或业务正文。
 - 清理与风险：只恢复另获授权的隔离副本；保留 UNKNOWN 原像与预留／永久 fence，不删除未知 state、不向外部 PID 发信号、不安装／发布。真实断电、卷回滚、隐藏 PROJECT、在线并发修改仍 NOT RUN。
+- 原项目双读→ALL quota 消费补充（**NOT RUN / REAL_ENV REQUIRED**）：保留正常真实读取及全部永久 fence 计量、复制认证／读取在库存访问前拒绝、消费期及隐式 finalizer 的原截止期过期、后继 quota 同字节换 inode、晚失败后原 quota/count 不变。替代证据为本地真实 OAuth／TLS／catalog/global/enrollment/History/quota 多脚本流程；fixture frozen unit 不是已准入 C6，不能冒充 FIRST/R2/G1 完整性。省略/合并：无；理由：不缩减原合同。隐藏其他 PROJECT 使用量、Cloud 并发、断电与当前 full/check 仍未验证，未新增剩余风险接受人；原授权、必要研发确认、证据／清理和生产发布门禁仍有效。
 
 - 默认只读停滞诊断补充（**NOT RUN / REAL_ENV REQUIRED**）：真实四读后缺少永久 fence 的 UNKNOWN、真实 CONFLICT 必须仅输出固定无秘密诊断；历史 APPLIED 不得显示当前 GO。保留实际完成读、原 owner/finalizer 复验、count/UNKNOWN 和全部原件不变、零新增 completion/dispatch CLAIM/请求及失败安全状态。现有正常、关键提交边界、代表性中断、冷恢复场景继续保留，省略/合并：无。替代证据仅为本地独立 direct 与真实 OAuth/四次 TLS 读；运行中日志可见性尚不代替持久状态、UI、T6 升级、重试调度或 NEW/R2/G1 权限。现场原前置授权、完整日志/stat/inode/命令与实际请求计数见证、仅自有 fixture 清理规则继续有效；真实 Cloud/设备/断电、现场日志链路和当前 full/check 未证明，残余风险未另行接受，无新增确认人。
 

@@ -248,6 +248,42 @@ def inspect_metadata_reservation(token, binding, identity, unit):
 
 
 @contextmanager
+def _hold_owned_project_catalog_metadata_capacity(writer_token,owner_token,binding,authentication,*,
+                                                 identity_response,metadata_response):
+    """Original live project reads -> ALL retained fences, still NOT G1 GO.
+
+    No caller plan, identity, reservation list or completeness declaration.
+    Both issued reads and their actual auth acquisition remain current across
+    the consumer and final held-image check. Hidden PROJECT metadata remains
+    unproved; this never grants FIRST/R2, increments count or releases quota.
+    """
+    failed=False
+    try:
+        from monitor.issue_tracker_history_read_launcher import require_current_owned_project_read
+        from monitor.issue_tracker_sheets_read_decode import decode_template_identity
+        def current():
+            identity_plan,project,digest=require_current_owned_project_read(
+                writer_token,owner_token,binding,identity_response,authentication,read_kind='template_identity')
+            metadata_plan,metadata_project,metadata_digest=require_current_owned_project_read(
+                writer_token,owner_token,binding,metadata_response,authentication,read_kind='metadata')
+            if (metadata_project,metadata_digest)!=(project,digest): raise MetadataReservationHold()
+            return identity_plan,metadata_plan
+        identity_plan,metadata_plan=current()
+        identity=decode_template_identity(identity_plan,identity_response)
+        with _hold_catalog_metadata_capacity(owner_token,binding,identity,metadata_plan,
+                                            metadata_response) as (budget,verify_inventory):
+            def verify():
+                current(); verify_inventory(); current()
+            verify()
+            yield budget,verify
+            verify()
+    except Exception:
+        failed=True
+    if failed:
+        raise MetadataReservationHold() from None
+
+
+@contextmanager
 def _hold_catalog_metadata_capacity(token, binding, identity, plan, response):
     """Charge ALL original permanent fences while their actual images stay held.
 

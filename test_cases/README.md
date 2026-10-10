@@ -941,6 +941,14 @@ reservation 列表。复制、过期及来源不一致在落盘前 HOLD；落盘
 quota 原目录及四个原文件 FD 保持到最终校验／内部来源复核结束；同字节目录或
 HEADER／RESERVATION／METADATA-RAW／INITIALIZED 替换不能通过重新读取而被采用。
 晚失败不删除原始或替换后的证据，也不增加发送次数。
+`_hold_owned_project_catalog_metadata_capacity` 把实际原项目认证及该次 template／metadata
+双读取接入 ALL catalog quota 消费；复制对象在库存访问前拒绝，消费与最终校验中
+仍复核原读取截止期、双 owner、固定凭据／目标及全部原 quota FD。计量来自全部
+永久 fence，不接受 caller reservations；两个原单元的 86 可见字节与 4 预留字节
+独立见证剩余 29910。原读取过期或后继 quota 同字节换 inode 都 HOLD，不改原
+count／UNKNOWN、不释放预留。这里仍为 `VISIBLE_ONLY_UNPROVED`，不是隐藏 PROJECT
+完整性、真实 C6/FIRST/R2 或默认在线发送；本地 workflow 使用真实 OAuth／TLS
+读取及原 catalog/global/enrollment/History/quota，测试 frozen unit 本身不冒充 C6。
 `test_req7_settings_audit_allocation` 从持有实际项目 ACTIVE 锁的 C25 原始事件链、
 最高 current、INITIALIZED 和逐事件 outbox 投影导出审计行；调用方不能伪造队列、
 revision、时间或内容。双 owner 下把真实非空单元的原始审计固定到项目
