@@ -2480,7 +2480,19 @@ post-finalizer verifier has rejected and both originals were witnessed;
 the replacement is retained separately. This isolates the next real IB
 scenario without refreshing its original device/inode-bound snapshot or
 altering any production recovery path.
+The default worker now calls this fixed consumer exactly once after ALL UNSENT
+disposition, instead of the old preparation wrapper. Its original owner/auth
+handoff, cycle checks and every outer finalizer remain; typed HOLD preserves
+the prior read-only reconciliation result/status, whereas operator interruption
+and cycle drift do not become success. Independent direct and actual OAuth /
+four-read default-worker workflows require one new-consumer call, zero legacy
+calls and no FIRST/R2/count/CLAIM/mutation; the original UNKNOWN/count/files and
+cycle identities remain unchanged. Their nonqualifying-cycle fixture does not
+prove entry into the nine-FD graph: a complete default-worker -> qualifying
+source -> original-image workflow is still required separately, not inferred
+from the protected ETH/IB leaf tests. Old preparation API and its standalone
+postclose issued-read contracts are unchanged.
 Historical PROJECT completeness remains unproved, so this private input edge
-refuses before FIRST/R2 COUNT/CLAIM/launcher; it is not installed in the worker
-and does not authorize sending. Whole REQ7, exact current full/check and all
-REAL_ENV remain open; no scenario was omitted or merged.
+refuses before FIRST/R2 COUNT/CLAIM/launcher and does not authorize sending.
+Whole REQ7, exact current full/check and all REAL_ENV remain open; no scenario
+was omitted or merged.

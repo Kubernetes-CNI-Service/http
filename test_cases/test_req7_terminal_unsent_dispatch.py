@@ -12,7 +12,8 @@ from test_cases import test_req7_online_completion_runtime as runtime_tests
 
 class TerminalUnsentDispatchDirectTests(unittest.TestCase):
     def exercise(self, *, held_stop=False, drift=False, interrupt=False, applied=False,
-                 preparation_probe=None, preparation_interrupt=False):
+                 preparation_probe=None, preparation_interrupt=False,
+                 preparation_endpoint='_consume_current_project_online_original_inputs'):
         from monitor import issue_tracker_local_commit as local
         from monitor import issue_tracker_online_target as target
         from monitor import issue_tracker_spreadsheet_owner as ownership
@@ -79,7 +80,7 @@ class TerminalUnsentDispatchDirectTests(unittest.TestCase):
             stack.enter_context(mock.patch.object(remote, '_reconcile_pending_project_units', side_effect=reconcile))
             stack.enter_context(mock.patch.object(remote, '_reconcile_pending_project_units_and_project_auth',
                 side_effect=lambda *args,**options:(reconcile(*args,**options),authentication)))
-            stack.enter_context(mock.patch.object(remote, '_prepare_current_project_online_observation', side_effect=prepare))
+            stack.enter_context(mock.patch.object(remote, preparation_endpoint, side_effect=prepare))
             stack.enter_context(mock.patch.object(inventory, '_record_all_project_unsent_dispositions', side_effect=append))
             with mock.patch.object(worker.sys, 'stderr', io.StringIO()) as stream:
                 if interrupt or preparation_interrupt:
@@ -117,6 +118,16 @@ class TerminalUnsentDispatchDirectTests(unittest.TestCase):
         self.exercise(preparation_probe=observed,held_stop=True)
         self.assertEqual(['live-after-unsent'],observed)
 
+    def test_default_worker_enters_fixed_original_consumer_once_not_legacy_preparation(self):
+        from monitor import issue_tracker_remote_history_match as remote
+        observed=[]
+        with mock.patch.object(remote, '_prepare_current_project_online_observation') as legacy:
+            self.exercise(preparation_probe=observed, held_stop=True,
+                preparation_endpoint='_consume_current_project_online_original_inputs')
+        self.assertEqual(['live-after-unsent'], observed,
+            'actual default worker must enter the fixed original consumer after ALL UNSENT')
+        legacy.assert_not_called()
+
     def test_preparation_operator_interrupt_is_not_swallowed_or_published(self):
         observed=[]
         self.exercise(preparation_probe=observed,preparation_interrupt=True)
@@ -153,6 +164,40 @@ class TerminalUnsentNativeWorkflowTests(unittest.TestCase):
     api = runtime_tests.OnlineCompletionRuntimeWorkflowTests.api
     exercise = runtime_tests.OnlineCompletionRuntimeWorkflowTests.exercise
 
+    def test_actual_default_worker_calls_new_consumer_with_original_auth_and_keeps_unknown(self):
+        observed=[]; worker_api=self.api()
+        def invoke(store):
+            from monitor import issue_tracker_remote_history_match as remote
+            from monitor.issue_tracker_token_launcher import require_current_owned_project_token
+            from monitor import issue_tracker_global_attempt_journal as attempts
+            from monitor import issue_tracker_mutation_launcher as mutation
+            actual=remote._consume_current_project_online_original_inputs
+            def consume(writer,owner,binding,authentication,*,_store,http_root):
+                project,digest=require_current_owned_project_token(owner,binding,authentication)
+                self.assertTrue(project); self.assertEqual(64,len(digest))
+                self.assertIs(store,_store); self.assertIsNotNone(_store.gate._lock_fd)
+                self.assertEqual(self.root,http_root)
+                try:
+                    actual(writer,owner,binding,authentication,_store=_store,http_root=http_root)
+                except remote.RemoteHistoryHold:
+                    observed.append('original-auth-live-actual-hold')
+                    raise
+                self.fail('unproved G1 must not return an admission result')
+            with mock.patch.object(remote,'_consume_current_project_online_original_inputs',side_effect=consume) as consumer, \
+                    mock.patch.object(remote,'_prepare_current_project_online_observation') as legacy, \
+                    mock.patch.object(attempts,'_hold_continuous_owned_attempt_wire') as first, \
+                    mock.patch.object(attempts,'_hold_shared_retry_owned_attempt_wire') as retry, \
+                    mock.patch.object(attempts,'_hold_counted_original_wire') as claim, \
+                    mock.patch.object(mutation,'_send_counted_original_once') as send:
+                result=worker_api(store)
+                self.assertEqual(1,consumer.call_count)
+                legacy.assert_not_called(); first.assert_not_called(); retry.assert_not_called()
+                claim.assert_not_called(); send.assert_not_called()
+                return result
+        with mock.patch.object(self,'api',return_value=invoke):
+            self.exercise(missing_fence=True)
+        self.assertEqual(['original-auth-live-actual-hold'],observed)
+
     def test_default_worker_hands_actual_issued_project_auth_to_preparation_inside_real_owners(self):
         observed=[]; worker_api=self.api()
         def invoke(store):
@@ -160,7 +205,7 @@ class TerminalUnsentNativeWorkflowTests(unittest.TestCase):
             # the worker. Observe that current module, not a stale prefixture.
             from monitor import issue_tracker_remote_history_match as remote
             from monitor.issue_tracker_token_launcher import require_current_owned_project_token
-            actual=remote._prepare_current_project_online_observation
+            actual=remote._consume_current_project_online_original_inputs
             def prepare(writer,owner,binding,authentication,*,_store,http_root):
                 project,digest=require_current_owned_project_token(owner,binding,authentication)
                 self.assertTrue(project); self.assertEqual(64,len(digest))
@@ -168,7 +213,7 @@ class TerminalUnsentNativeWorkflowTests(unittest.TestCase):
                 self.assertEqual(self.root,http_root)
                 observed.append('actual-auth-live')
                 return actual(writer,owner,binding,authentication,_store=_store,http_root=http_root)
-            with mock.patch.object(remote,'_prepare_current_project_online_observation',side_effect=prepare):
+            with mock.patch.object(remote,'_consume_current_project_online_original_inputs',side_effect=prepare):
                 return worker_api(store)
         with mock.patch.object(self,'api',return_value=invoke):
             self.exercise(missing_fence=True)

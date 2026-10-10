@@ -1048,7 +1048,7 @@ def _reconcile_issue_tracker_online_after_completion(store):
     from monitor.issue_tracker_spreadsheet_owner import spreadsheet_owner
     from monitor.issue_tracker_remote_history_match import (
         RemoteHistoryHold, _reconcile_pending_project_units_and_project_auth,
-        _prepare_current_project_online_observation,
+        _consume_current_project_online_original_inputs,
     )
     from monitor.issue_tracker_retained_inventory import (
         RetainedInventoryHold, _record_all_project_unsent_dispositions,
@@ -1078,10 +1078,10 @@ def _reconcile_issue_tracker_online_after_completion(store):
                             disposition_stopped = True
                         verify_cycles()
                         try:
-                            _prepare_current_project_online_observation(writer, owner, binding,
+                            _consume_current_project_online_original_inputs(writer, owner, binding,
                                 authentication, _store=store, http_root=root.parent.parent)
                         except RemoteHistoryHold:
-                            # This separately reacquired preparation is still
+                            # The fixed original-image consumer is still
                             # non-authoritative. HOLD preserves reconciliation,
                             # never masks owner/cycle finalizers or interruption.
                             pass
