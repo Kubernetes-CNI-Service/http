@@ -2446,6 +2446,18 @@ not enable the uninstalled manual/K relay, default FIRST/R2 or online sending;
 last observation is explicitly not current admission. Whole C25/REQ7,
 current full/check and all field validation remain open.
 
+The manual listener workflow additionally carries authenticated CGI settings
+intents through the actual listener, durable queue, broker and LK-P K event /
+current / outbox chain. Independent literal expectations require K3/revision0,
+one K7/revision1 operator:nvis event, exact replay without rewritten settings
+originals, and wrong UID or GID rejection before enqueue with queue/settings
+inodes and bytes unchanged. No C6 publish, count, CLAIM or online permission
+is issued. This evidence-only extension passed on its first run; no production
+implementation changed and no artificial initial RED is claimed. Only kernel
+peer credentials/transport are simulated on macOS; fixture 1201/1202 are not
+approved deployment identities. The exclusive non-login CGI identity, actual
+Apache/root relay installation and corresponding REAL_ENV remain unverified.
+
 The LIVE original-business guard now overlaps its actual two directories and
 seven fixed images into a private duplicate-FD graph before the strict
 read-only scope closes. No paths are reopened, no caller selector/verifier is

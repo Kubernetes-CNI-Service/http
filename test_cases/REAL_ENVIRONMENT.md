@@ -2046,6 +2046,8 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - K 设置通道补充（真实环境仍 **NOT RUN**）：`settings` 仅查询受保护最高 revision；`set_k` 只接受 panel、正整数 new_k、expected_revision 和 32 位十六进制 request_id，主体与事件时间由可信 CGI/worker 提供，浏览器不能传 actor、principal、时间、路径或来源。独立 root worker 必须在同一 LK-P 下使用已初始化的 settings/event/outbox/current 链，核验精确重复请求只返回原事件且不重写，不同 payload/主体复用 ID 或陈旧 revision 拒绝，K 超过现有周期仍显示 pending。K 设置尝试撤销旧预览；事件提交后 pointer/barrier 故障必须保留 `unknown_after_claim` 和尾部证据，不回显成功、不自动重试、不回退旧 K。记录原始请求、可信主体、事件/current/outbox 摘要、锁排他与故障阶段；不向线上发送审计，也不安装或启用本机 root/Apache 服务。
 - 证据、清理与风险：保存脱敏请求/响应、精确命令/退出码、所有 root/Apache 身份与权限、queue 记录/receipt 与工作簿前后 SHA、故障注入点、同 UID 写者静默及快照恢复核验；仅清理获准 VM 隔离产物并确认原状态。若 CGI 路由/worker/C5-C6 未接、任一真实权限或恢复证据缺失，此卡保持 BLOCKED/NOT RUN；本卡不授权生产发布或 Stage O。
 
+前一手动 CGI 队列卡的本地补充：实际 CGI→listener→queue/broker→LK-P settings/events/current/outbox 联测保留初始 K3/revision0、一次 operator:nvis 的 K7/revision1、精确重放保持原 inode/字节，以及错误 UID/GID 在 enqueue 前拒绝且原队列／设置不变。只模拟内核 peer/传输，不安装服务，不将 fixture 1201/1202 当部署身份；零 C6 发布／COUNT／CLAIM／发送。新增证据首次运行通过，无实现修复或伪造 RED；原权限、代表性中断、冷恢复和失败安全场景不删减／合并，真实独占非登录 CGI 身份、Apache/root 安装与本卡现场仍 NOT RUN，无新增剩余风险接受确认人。
+
 ## TC-REAL-REQ7-PER-KEY-STATUS-001 — 逐键连续性与本周期本地回执状态
 
 - Case ID：`TC-REAL-REQ7-PER-KEY-STATUS-001`；类型：real-environment / protected-cycle / status / local-only；对应 REQ7 O-4、C-25；状态：**NOT RUN / REAL_ENV REQUIRED**。本地自动化覆盖 `test_issue_tracker_per_key_status_contract`、`test_issue_tracker_per_key_source`、`test_issue_tracker_switch_per_key_source`、`test_issue_tracker_ib_per_key_source`、`test_issue_tracker_receipt_snapshot`、`test_issue_tracker_stage_l_status_per_key_contract` 及其各自 workflow，和 `test_issue_tracker_publish_runtime` direct/workflow；本地结果不代表现场根保护、真实来源、生产 UI、Stage O 或整个 REQ7 已验收。

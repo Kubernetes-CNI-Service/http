@@ -1978,7 +1978,9 @@
         "monitor/issue-tracker-control.cgi",
         "monitor/issue_tracker_manual_channel.py",
         "monitor/issue_tracker_manual_listener.py",
-        "monitor/issue_tracker_manual_preview.py"
+        "monitor/issue_tracker_manual_preview.py",
+        "monitor/issue_tracker_state_owner.py",
+        "monitor/issue_tracker_k_store.py"
       ],
       "tests": [
         "test_cases.test_issue_tracker_manual_listener_workflow"
