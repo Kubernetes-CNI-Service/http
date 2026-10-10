@@ -148,7 +148,7 @@ print('COLD_DISTINCT_PROJECT_APPLIED_ORIGINALS_UNKNOWN_COUNTS_UNCHANGED')
             self.assertEqual(before, original_read_files(case.root))
 
     @contextmanager
-    def completed_and_pending(self, *, reverse_catalog=False, cold_handoff=False, older_unsent=False, cross_project=False):
+    def completed_and_pending(self, *, reverse_catalog=False, cold_handoff=False, older_unsent=False, cross_project=False, project_origins=False):
         from test_cases import test_req7_remote_history_match as native
         catalog = load()
         case = native.Req7OwnedHistoryMatchWorkflowTests()
@@ -210,8 +210,9 @@ print('COLD_DISTINCT_PROJECT_APPLIED_ORIGINALS_UNKNOWN_COUNTS_UNCHANGED')
                     second = catalog.composer.freeze_send_unit(**arguments)
                     self.assertEqual(1 if cross_project else 2, generation.sequence)
                 for unit_ in ((second, first) if reverse_catalog else (first, second)):
-                    if cross_project:
-                        catalog.register_pending_c6_unit(writer if unit_ == first else source, token, bound, unit_)
+                    if cross_project or project_origins:
+                        origin_writer = writer if not cross_project or unit_ == first else source
+                        catalog.register_pending_c6_unit(origin_writer, token, bound, unit_)
                     else:
                         catalog.register_pending_unit(token, bound, unit_)
                 for unit_ in (first, second):
@@ -563,6 +564,228 @@ with catalog.local.writer_owner(root/'project',root/'project/publication') as wr
                 self.assertEqual([], reached); self.assertEqual(before, original_read_files(case.root))
                 self.assertFalse(path.exists())
                 self.assertEqual(image, (case.root / 'preserved-missing-pair-original').read_bytes())
+
+
+class SharedCatalogFifoTests(unittest.TestCase):
+    """Spreadsheet-wide key order, with project-local APPLIED sequences."""
+
+    def api(self):
+        inventory = load_component('issue_tracker_retained_inventory')
+        api = getattr(inventory, '_hold_all_project_fifo_frontier', None)
+        self.assertTrue(callable(api), 'shared FIFO needs ALL held project C6/APPLIED and original UNSENT records')
+        return inventory, api
+
+    @contextmanager
+    def pending(self, keys=('node-A', 'node-A', 'node-B')):
+        case = UnitCatalogTests()
+        case.setUp()
+        try:
+            inventory, api = self.api()
+            with ExitStack() as scope:
+                first, first_project, _publication = case.local_owner(scope)
+                second, second_project, _other = case.local_owner(scope, 'other')
+                token = case.owner(scope)
+                # The first original has sequence 4; the second project starts
+                # at 1. Neither number is a spreadsheet-global high-water.
+                for _unused in range(3):
+                    case.c6_unit(first)
+                originals = []
+                for writer, node in zip((first, second, second), keys):
+                    args = send_inputs(1)
+                    document = json.loads(args['manifest'])
+                    document['operations'][0]['activity_key'] = ['switch', node, 'down', 'fabric']
+                    args['manifest'] = (json.dumps(document, sort_keys=True, separators=(',', ':')) + '\n').encode()
+                    args['manifest_id'] = hashlib.sha256(args['manifest']).hexdigest()
+                    generation = case.module.local.begin_generation(writer, args['manifest'])
+                    case.module.local.record_intent(writer, generation, literal_xlsx(), kind='xlsx')
+                    receipt = case.module.local.commit(writer, generation)
+                    args.update(generation_id=generation.generation_id, publish_id=receipt.published_sha256)
+                    original = case.module.composer.freeze_send_unit(**args)
+                    case.module.register_pending_c6_unit(writer, token, binding(), original)
+                    case.globals_api().prepare_global_unit(token, binding(), original)
+                    originals.append(original)
+                yield case, inventory, api, scope, token, tuple(originals), (first_project, second_project)
+        finally:
+            case.doCleanups()
+
+    def test_shared_fifo_refuses_unissued_owner_and_detached_release_claims_before_read(self):
+        inventory, api = self.api()
+        with mock.patch.object(inventory, '_hold_all_project_applied_keys') as reading:
+            with self.assertRaises(inventory.RetainedInventoryHold):
+                with api(object(), binding()):
+                    self.fail('unissued owner received shared FIFO')
+            reading.assert_not_called()
+        for claim in ({'writers': ()}, {'rows': ()}, {'maxima': ()}, {'settled': True}, {'permit': True}):
+            with self.subTest(claim=tuple(claim)), self.assertRaises(TypeError):
+                api(object(), binding(), **claim)
+
+    def test_shared_fifo_orders_overlapping_keys_across_original_projects_without_global_sequences(self):
+        self.api()
+        with self.pending() as (case, _inventory, api, _scope, token, originals, projects):
+            before = original_read_files(case.root)
+            handles = {writer: dict(active.handles) for writer, active in case.module.local._ACTIVE.items()}
+            with api(token, binding()) as (observed, verify):
+                self.assertEqual((originals[0].unit_id, originals[2].unit_id), observed.frontier)
+                self.assertEqual(((originals[1].unit_id, (originals[0].unit_id,)),), observed.blocked)
+                self.assertEqual((), observed.applied)
+                self.assertEqual((), observed.superseded)
+                identities = tuple((path.stat().st_dev, path.stat().st_ino) for path in projects)
+                self.assertEqual(((originals[0].unit_id, identities[0]),
+                                  (originals[1].unit_id, identities[1]),
+                                  (originals[2].unit_id, identities[1])), observed.projects)
+                self.assertFalse(any(hasattr(observed, key) for key in ('permit', 'settled', 'writer_token', 'global_sequence')))
+                verify()
+            self.assertEqual(before, original_read_files(case.root))
+            self.assertEqual(handles, {writer: dict(active.handles) for writer, active in case.module.local._ACTIVE.items()})
+            self.assertEqual((0, 0, 0), tuple(state.attempt_count for _unit, state in case.globals_api().inspect_catalog_global_units(token, binding())))
+
+    def test_shared_fifo_actual_unknown_refuses_entire_view_without_prefix_or_count_reset(self):
+        self.api()
+        with self.pending() as (case, inventory, api, _scope, token, originals, _projects):
+            case.globals_api().record_global_attempt_intent(token, binding(), originals[0])
+            before = original_read_files(case.root); entered = []
+            with self.assertRaises(inventory.RetainedInventoryHold):
+                with api(token, binding()) as result:
+                    entered.append(result)
+            self.assertEqual([], entered)
+            self.assertEqual(before, original_read_files(case.root))
+            self.assertEqual((1, 0, 0), tuple(state.attempt_count for _unit, state in case.globals_api().inspect_catalog_global_units(token, binding())))
+
+    def test_shared_fifo_missing_foreign_receipt_never_returns_local_prefix_or_repairs(self):
+        self.api()
+        with self.pending() as (case, inventory, api, _scope, token, originals, projects):
+            generation = json.loads(originals[1].action_preimage)['identity']['generation_id']
+            receipt = projects[1] / '.tracker/generations' / generation / 'RECEIPT'
+            receipt.rename(case.root / 'preserved-foreign-fifo-receipt')
+            before = original_read_files(case.root); entered = []
+            with self.assertRaises(inventory.RetainedInventoryHold):
+                with api(token, binding()) as result:
+                    entered.append(result)
+            self.assertEqual([], entered)
+            self.assertEqual(before, original_read_files(case.root))
+            self.assertFalse(receipt.exists())
+
+    def test_shared_fifo_partial_original_unsent_witness_refuses_without_adoption(self):
+        self.api()
+        with self.pending() as (case, inventory, api, _scope, token, originals, projects):
+            path = projects[1] / '.tracker' / ('REMOTE-UNSENT-SUPERSESSION-WITNESS-' + originals[1].unit_id)
+            path.write_bytes(b'partial-original-do-not-repair\n'); path.chmod(0o600)
+            before = original_read_files(case.root); entered = []
+            with self.assertRaises(inventory.RetainedInventoryHold):
+                with api(token, binding()) as result:
+                    entered.append(result)
+            self.assertEqual([], entered)
+            self.assertEqual(before, original_read_files(case.root))
+
+    def test_shared_fifo_foreign_project_new_disposition_namespace_revokes_consumer_at_exit(self):
+        self.api()
+        with self.pending() as (case, inventory, api, _scope, token, originals, projects):
+            entered = []
+            path = projects[1] / '.tracker' / ('REMOTE-UNSENT-SUPERSESSION-WITNESS-' + originals[1].unit_id)
+            with self.assertRaises(inventory.RetainedInventoryHold):
+                with api(token, binding()) as (observed, _verify):
+                    entered.append(observed.frontier)
+                    path.write_bytes(b'foreign-interrupted-disposition\n'); path.chmod(0o600)
+            self.assertEqual([(originals[0].unit_id, originals[2].unit_id)], entered)
+            self.assertEqual(b'foreign-interrupted-disposition\n', path.read_bytes())
+
+    def test_shared_fifo_foreign_receipt_same_bytes_rebind_revokes_consumer_and_preserves_objects(self):
+        self.api()
+        with self.pending() as (case, inventory, api, _scope, token, originals, projects):
+            generation = json.loads(originals[1].action_preimage)['identity']['generation_id']
+            path = projects[1] / '.tracker/generations' / generation / 'RECEIPT'
+            raw = path.read_bytes(); saved = case.root / 'original-foreign-fifo-receipt'
+            with self.assertRaises(inventory.RetainedInventoryHold):
+                with api(token, binding()) as (observed, verify):
+                    self.assertEqual((originals[0].unit_id, originals[2].unit_id), observed.frontier)
+                    path.rename(saved); path.write_bytes(raw); path.chmod(0o600)
+                    verify()
+            self.assertEqual(raw, saved.read_bytes()); self.assertEqual(raw, path.read_bytes())
+            self.assertNotEqual(saved.stat().st_ino, path.stat().st_ino)
+
+    def test_shared_fifo_cold_process_reopens_all_origins_without_reissuing_handles_or_writes(self):
+        self.api()
+        with self.pending() as (case, _inventory, _api, scope, _token, originals, _projects):
+            scope.close()
+            before = original_read_files(case.root)
+            program = '''import importlib.util,sys
+from pathlib import Path
+sys.path[:0]=[sys.argv[1],str(Path(sys.argv[1])/'tools')]
+spec=importlib.util.spec_from_file_location('shared_fifo_cold_contract',sys.argv[3])
+tests=importlib.util.module_from_spec(spec);spec.loader.exec_module(tests)
+catalog=tests.load();inventory=tests.load_component('issue_tracker_retained_inventory')
+tests.load_component('issue_tracker_remote_history_match')
+from test_cases.test_req7_spreadsheet_owner import scoped_fixture,binding
+assert catalog.local._ACTIVE=={}
+with scoped_fixture(Path(sys.argv[2]),catalog.ownership),catalog.ownership.spreadsheet_owner(binding()) as owner:
+ with inventory._hold_all_project_fifo_frontier(owner,binding()) as (observed,verify):
+  assert observed.frontier==(sys.argv[4],sys.argv[6])
+  assert observed.blocked==((sys.argv[5],(sys.argv[4],)),)
+  assert observed.applied==() and observed.superseded==()
+  assert len(catalog.local._ACTIVE)==2 and all(active.handles=={} for active in catalog.local._ACTIVE.values())
+  assert not hasattr(observed,'permit') and not hasattr(observed,'writer_token')
+  verify()
+ assert catalog.local._ACTIVE=={}
+print('COLD_SHARED_FIFO_ORIGINALS_NO_HANDLES_OR_AUTHORITY')
+'''
+            result = subprocess.run([sys.executable, '-B', '-c', program,
+                str(SOURCE.parents[1]), str(case.root), __file__, *(unit.unit_id for unit in originals)],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=15)
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertEqual('COLD_SHARED_FIFO_ORIGINALS_NO_HANDLES_OR_AUTHORITY\n', result.stdout)
+            self.assertEqual(before, original_read_files(case.root))
+
+    def test_shared_fifo_actual_foreign_applied_same_sequence_is_not_local_supersession(self):
+        self.api()
+        with CatalogAppliedNativeWorkflowTests.completed_and_pending(self, cross_project=True) as (
+                case, _catalog, _remote, inventory, _old, _writer, owner, bound, originals):
+            before = original_read_files(case.root)
+            with inventory._hold_all_project_fifo_frontier(owner, bound) as (observed, verify):
+                self.assertEqual((originals[1].unit_id,), observed.frontier)
+                self.assertEqual((), observed.blocked)
+                self.assertEqual((originals[0].unit_id,), observed.applied)
+                self.assertEqual((), observed.superseded)
+                self.assertNotEqual(observed.projects[0][1], observed.projects[1][1])
+                verify()
+            self.assertEqual(before, original_read_files(case.root))
+
+    def test_shared_fifo_actual_original_unsent_pair_removes_only_its_local_unit_without_writes(self):
+        self.api()
+        with CatalogAppliedNativeWorkflowTests.completed_and_pending(self, older_unsent=True, project_origins=True) as (
+                case, catalog, _remote, inventory, _old, writer, owner, bound, originals):
+            expected = ((originals[1].unit_id, 1, ((('switch', 'node0001', 'down', 'fabric'), 2),)),)
+            before_record = original_read_files(case.root)
+            with self.assertRaises(inventory.RetainedInventoryHold):
+                with inventory._hold_all_project_fifo_frontier(owner, bound):
+                    self.fail('computed supersession without original disposition released a unit')
+            self.assertEqual(before_record, original_read_files(case.root))
+            self.assertEqual(expected, inventory._record_catalog_unsent_dispositions(writer, owner, bound))
+            before = original_read_files(case.root)
+            with inventory._hold_all_project_fifo_frontier(owner, bound) as (observed, verify):
+                self.assertEqual((), observed.frontier)
+                self.assertEqual((), observed.blocked)
+                self.assertEqual((originals[0].unit_id,), observed.applied)
+                self.assertEqual((originals[1].unit_id,), observed.superseded)
+                self.assertEqual(observed.projects[0][1], observed.projects[1][1])
+                verify()
+            self.assertEqual(before, original_read_files(case.root))
+            from monitor import issue_tracker_global_attempt_journal as globals_
+            self.assertEqual((1, 0), tuple(state.attempt_count for _unit, state in globals_.inspect_catalog_global_units(owner, bound)))
+
+    def test_shared_fifo_actual_unsent_witness_same_bytes_rebind_revokes_all_and_preserves_foreign(self):
+        self.api()
+        with CatalogAppliedNativeWorkflowTests.completed_and_pending(self, older_unsent=True, project_origins=True) as (
+                case, _catalog, _remote, inventory, _old, writer, owner, bound, originals):
+            inventory._record_catalog_unsent_dispositions(writer, owner, bound)
+            path = case.root / 'project/.tracker' / ('REMOTE-UNSENT-SUPERSESSION-WITNESS-' + originals[1].unit_id)
+            raw = path.read_bytes(); preserved = case.root / 'preserved-shared-fifo-witness'
+            with self.assertRaises(inventory.RetainedInventoryHold):
+                with inventory._hold_all_project_fifo_frontier(owner, bound) as (observed, verify):
+                    self.assertEqual((originals[1].unit_id,), observed.superseded)
+                    path.rename(preserved); path.write_bytes(raw); path.chmod(0o600)
+                    verify()
+            self.assertEqual(raw, path.read_bytes()); self.assertEqual(raw, preserved.read_bytes())
+            self.assertNotEqual(path.stat().st_ino, preserved.stat().st_ino)
 
 
 class UnitCatalogTests(unittest.TestCase):

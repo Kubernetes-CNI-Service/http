@@ -9,6 +9,14 @@ CANDIDATE = Path(__file__).resolve().parents[1]
 
 
 class RetainedManualProfileTests(unittest.TestCase):
+    def test_shared_fifo_catalog_order_and_project_scoped_sequences_are_not_new_authority(self):
+        profile = self.load().script_profile(ROOT, 'monitor/issue_tracker_retained_inventory.py')
+        for word in ('跨项目 per-key FIFO', 'catalog 顺序', '序号只按原项目', '不释放 FIFO'):
+            self.assertIn(word, profile['outputs'])
+        for word in ('原件', 'UNKNOWN', '不修复', 'HOLD'):
+            self.assertIn(word, profile['recovery'])
+        self.assertTrue(profile['direct'].startswith('否'))
+
     def test_original_cold_identity_is_checked_before_locking_any_replacement(self):
         profile = self.load().script_profile(ROOT, 'monitor/issue_tracker_unit_catalog.py')
         for word in ('flock 前', '原始身份', '不锁住替换件'):

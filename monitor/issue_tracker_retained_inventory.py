@@ -74,6 +74,137 @@ class CatalogFifoFrontier:
 
 
 @contextmanager
+def _hold_all_project_fifo_frontier(token, binding):
+    """Shared key order from ALL continuously held original project evidence.
+
+    Catalog order governs overlapping pending keys across projects. Local
+    generation sequences and UNSENT witnesses are compared only within the
+    exact original project. Every counted unit needs genuine APPLIED inputs;
+    any UNKNOWN or interrupted disposition refuses the entire observation.
+    This reader does not append dispositions, release NEW, count or send.
+    """
+    failed = False
+    from monitor import issue_tracker_unit_catalog as catalog
+    from monitor import issue_tracker_remote_history_match as remote
+    intents = catalog._Originals()
+    try:
+        sheet_owner = ownership._validated_owner(token, binding)
+        with ExitStack() as scope:
+            rows, verify_inputs = scope.enter_context(_hold_all_project_applied_keys(token, binding))
+            owners = {}; namespaces = {}; validators = []; removed = []
+            prefixes = ('REMOTE-UNSENT-SUPERSESSION-STARTED-', 'REMOTE-UNSENT-SUPERSESSION-')
+            witness_prefix = 'REMOTE-UNSENT-SUPERSESSION-WITNESS-'
+            states = ('UNSENT-SUPERSESSION-STARTED', 'SUPERSEDED-NOT-SENT')
+            def disposition_names(owner):
+                return frozenset(name for name in os.listdir(owner.root_fd)
+                                 if name.startswith(prefixes) or name.startswith('.pending-'))
+            for project_identity in dict.fromkeys(row.project_identity for row in rows):
+                matches = []
+                for writer, active in tuple(local._ACTIVE.items()):
+                    if (active.pid == os.getpid()
+                            and journal._identity(os.fstat(active.project_fd))[:2] == project_identity):
+                        matches.append((writer, local._owner(writer)))
+                if len(matches) != 1:
+                    raise RetainedInventoryHold()
+                writer, owner = matches[0]
+                owners[project_identity] = (writer, owner)
+                project_rows = tuple(row for row in rows if row.project_identity == project_identity)
+                pending_rows = tuple(row for row in project_rows if row.attempt_count == 0)
+                present = disposition_names(owner); namespaces[project_identity] = present
+                allowed = {prefix + row.unit.unit_id for prefix in (*prefixes, witness_prefix) for row in pending_rows}
+                if not present <= allowed:
+                    raise RetainedInventoryHold()
+                for row in pending_rows:
+                    names = tuple(prefix + row.unit.unit_id for prefix in prefixes)
+                    witness_name = witness_prefix + row.unit.unit_id
+                    exists = tuple(name in present for name in (*names, witness_name))
+                    if any(exists) and not all(exists):
+                        raise RetainedInventoryHold()
+                    recorded = None
+                    if all(exists):
+                        raw, _info = local._read(owner.root_fd, names[1], local._MAX_MANIFEST)
+                        recorded = local._json(raw)
+                    body, _observed = _unsent_disposition_body(owner, binding, row, project_rows, recorded)
+                    if body is None:
+                        if any(exists):
+                            raise RetainedInventoryHold()
+                        continue
+                    # A computed later maximum is not a committed disposition.
+                    # Missing originals stay HOLD: no adoption or auto-write.
+                    if not all(exists):
+                        raise RetainedInventoryHold()
+                    witness_raw = local._canonical({'schema_version': 1, 'unit_id': row.unit.unit_id,
+                        'state': 'UNSENT-SUPERSESSION-WRITE-STARTED-NOT-AUTHORITY',
+                        'body_sha256': hashlib.sha256(local._canonical(body)).hexdigest()})
+                    raw, identity = intents.file(owner.root_fd, witness_name, 16384)
+                    if raw != witness_raw:
+                        raise RetainedInventoryHold()
+                    body = {**body, 'write_witness': {'identity': list(identity),
+                            'sha256': hashlib.sha256(raw).hexdigest()}}
+                    validators.append(scope.enter_context(remote._hold_applied_records(owner.root_fd,
+                        names, body, states=states)))
+                    removed.append(row.unit.unit_id)
+            if len(set(removed)) != len(removed):
+                raise RetainedInventoryHold()
+            removed_ids = set(removed); pending = []; applied = []
+            for row in rows:
+                if row.attempt_count:
+                    applied.append(row.unit.unit_id)
+                elif row.unit.unit_id not in removed_ids:
+                    action = local._json(row.unit.action_preimage)
+                    match = local._GEN.fullmatch(action['identity']['generation_id'])
+                    keys = tuple(tuple(item['activity_key']) for item in action['business'])
+                    if match is None or int(match.group(1)) < 1 or not keys or len(set(keys)) != len(keys):
+                        raise RetainedInventoryHold()
+                    pending.append((row.unit.unit_id, row.project_identity, int(match.group(1)), frozenset(keys)))
+            frontier = []; blocked = []
+            for index, (unit_id, project_identity, sequence, keys) in enumerate(pending):
+                barriers = [prior_id for prior_id, _project, _sequence, prior_keys in pending[:index] if keys & prior_keys]
+                for row in rows:
+                    if (row.attempt_count and row.project_identity == project_identity
+                            and any(key in keys and maximum >= sequence for key, maximum in row.key_watermarks)):
+                        barriers.append(row.unit.unit_id)
+                if barriers:
+                    blocked.append((unit_id, tuple(dict.fromkeys(barriers))))
+                else:
+                    frontier.append(unit_id)
+            result = CatalogSharedFifoFrontier(tuple(frontier), tuple(blocked), tuple(applied), tuple(removed),
+                tuple((row.unit.unit_id, row.project_identity) for row in rows))
+            def verify():
+                if ownership._validated_owner(token, binding) is not sheet_owner:
+                    raise RetainedInventoryHold()
+                verify_inputs(); intents.verify()
+                for project_identity, (writer, owner) in owners.items():
+                    if (local._owner(writer) is not owner
+                            or journal._identity(os.fstat(owner.project_fd))[:2] != project_identity
+                            or disposition_names(owner) != namespaces[project_identity]):
+                        raise RetainedInventoryHold()
+                for validate in validators:
+                    validate()
+                verify_inputs(); intents.verify()
+            verify()
+            intents.sync()
+            yield result, verify
+            verify()
+    except Exception:
+        failed = True
+    finally:
+        intents.close()
+    if failed:
+        raise RetainedInventoryHold() from None
+
+
+@dataclass(frozen=True)
+class CatalogSharedFifoFrontier:
+    """ALL borrowed original observations, never a generation or send permit."""
+    frontier: tuple
+    blocked: tuple
+    applied: tuple
+    superseded: tuple
+    projects: tuple
+
+
+@contextmanager
 def _hold_catalog_fifo_frontier(writer_token, token, binding):
     """Original one-project FIFO partition held through its actual consumer.
 

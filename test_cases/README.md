@@ -1757,6 +1757,20 @@ integrated transitions and current exact-tree full/check remain open.
 
 ### Multiple pending originals and original counted-wire/APPLIED reading
 
+The shared FIFO reader joins ALL original project C6/APPLIED inputs and each
+project's immutable UNSENT records in one held scope. Overlapping pending keys
+follow catalog order across projects; generation numbers and later APPLIED
+witnesses are compared only within the original project. A genuine foreign
+project's APPLIED sequence 1 cannot supersede local sequence 1. Computed
+supersession without its original write-ahead witness and paired records stays
+HOLD; any UNKNOWN, missing receipt, changed original or interrupted/new
+disposition namespace refuses the whole view through consumer exit. The reader
+does not record dispositions, reset attempts, clear UNKNOWN, issue NEW or bypass
+the original GLOBAL guard. Independent missing-API RED, direct file/cold-process
+and actual local TLS COMPLETE/APPLIED workflows remain distinct from runner
+approval, exact-tree full/check, G1/default-worker and whole REQ7 completion.
+Existing single-project readers, all assertions and time budgets remain.
+
 `test_req7_unit_catalog.py` covers the immutable append-only pending catalog
 under the genuine spreadsheet owner, per-unit GLOBAL/History/dispatch original
 names and the one shared enrollment nonce. All old original rules remain.
