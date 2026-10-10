@@ -371,6 +371,65 @@ def _hold_original_applied_key_watermark_inputs(writer_token,owner_token,binding
         verify()
 
 
+@contextmanager
+def _hold_settled_catalog_key_watermarks(writer_token,owner_token,binding,unit,generation):
+    failed=False
+    try:
+        with _hold_settled_catalog_key_watermark_originals(writer_token,owner_token,binding,unit,generation) as values:
+            yield values
+    except Exception:
+        failed=True
+    if failed:
+        raise RemoteHistoryHold()
+
+
+@contextmanager
+def _hold_settled_catalog_key_watermark_originals(writer_token,owner_token,binding,unit,generation):
+    """Fixed original settlement while a catalog creator appends its own names.
+
+    Fully replay actual COMPLETE before any write, with all C6/matched inputs/
+    COMPLETE/APPLIED/key originals already held. Subsequent checks use those
+    same bytes/inodes, not a cold inventory reader that mistakes the creator's
+    unindexed NV witness for a foreign unit. The caller separately pins ALL
+    catalog originals and its exact append. No path/flag/verifier override,
+    count clearing, freshness or send authority is accepted or returned.
+    The old key writer's semantic replay contract is unchanged.
+    """
+    from monitor import issue_tracker_local_commit as local, issue_tracker_attempt_journal as io
+    with ExitStack() as scope:
+        owner,verify_local,facts,sent=scope.enter_context(_hold_applied_generation(writer_token,generation,unit))
+        verify_matched,_originals=scope.enter_context(_hold_match_originals(owner_token,binding,unit))
+        verify_complete=scope.enter_context(_hold_completion_originals(owner_token,binding,unit))
+        completion=inspect_completion_evidence(owner_token,binding,unit)
+        _sheet_owner,_parent,_name,base=global_journal._inputs(owner_token,binding,unit)
+        if not sent or completion.state!='COMPLETE-PRESENT-NOT-APPLIED': raise RemoteHistoryHold()
+        applied_body={'schema_version':1,'unit_id':unit.unit_id,'binding':base,'local_generation':facts,
+            'completion_header_sha256':completion.header_sha256,'attempt_count':completion.attempt_count,
+            'wire_sha256':unit.wire_sha256,'action_digest':unit.action_digest,
+            'outcome_mapping_sha256':unit.outcome_mapping_sha256,'applied_operation_ids':list(sent)}
+        names=('REMOTE-APPLIED-STARTED-'+unit.unit_id,'REMOTE-APPLIED-'+unit.unit_id)
+        verify_applied=scope.enter_context(_hold_applied_records(owner.root_fd,names,applied_body))
+        references={}
+        for name in names:
+            raw,info=local._read(owner.root_fd,name,local._MAX_MANIFEST)
+            references[name]={'identity':list(io._identity(info)),'sha256':hashlib.sha256(raw).hexdigest()}
+        action=local._json(unit.action_preimage)
+        keys=tuple((tuple(row['activity_key']),generation.sequence) for row in action['business'])
+        if not keys or len({key for key,_sequence in keys})!=len(keys): raise RemoteHistoryHold()
+        body={'schema_version':1,'unit_id':unit.unit_id,'binding':base,'local_generation':facts,
+            'project_identity':list(io._identity(os.fstat(owner.project_fd))[:2]),
+            'applied_originals':references,'key_watermarks':[[list(key),sequence] for key,sequence in keys]}
+        verify_keys=scope.enter_context(_hold_applied_records(owner.root_fd,
+            ('REMOTE-KEY-HIGH-WATER-STARTED-'+unit.unit_id,'REMOTE-KEY-HIGH-WATER-'+unit.unit_id),
+            body,states=('KEY-HIGH-WATER-STARTED','KEY-HIGH-WATER')))
+        def verify():
+            verify_local(); verify_matched(); verify_complete(); verify_applied(); verify_keys()
+            verify_local(); verify_matched(); verify_complete()
+        verify()
+        yield owner,verify,body,keys
+        verify()
+
+
 def _owned_applied_key_watermarks(writer_token,owner_token,binding,unit,generation,*,record):
     """Immutable per-original-unit evidence; never a spreadsheet admission permit."""
     failed=False

@@ -412,6 +412,7 @@ def _pin_catalog_prefix(token, binding, identity, held, *, new_allocation, _proj
             for entry in sorted(os.listdir(folder)):
                 held.file(folder, entry, 2 * _LIMIT if entry in ('ETH-RAW', 'IB-RAW') else _LIMIT)
     held.verify()
+    counts = ()
     if new_allocation and units:
         for unit in units:
             prefix = stem + '.unit-' + unit.unit_id
@@ -420,7 +421,7 @@ def _pin_catalog_prefix(token, binding, identity, held, *, new_allocation, _proj
             if not {prefix + '.journal', prefix + '.journal-started'} <= names:
                 raise NvReservationHold()
         with global_journal._hold_catalog_attempts(token, binding) as (counts, verify):
-            if any(state.attempt_count or state.outcome == 'PENDING_NO_JOURNAL' for _unit, state in counts):
+            if any(state.outcome == 'PENDING_NO_JOURNAL' for _unit, state in counts):
                 raise NvReservationHold()
             verify(); held.verify()
     prior = []; observations = []
@@ -449,9 +450,18 @@ def _pin_catalog_prefix(token, binding, identity, held, *, new_allocation, _proj
         # an origin-backed catalog cannot silently omit any older project.
         unit_ids = {unit.unit_id for unit in units}
         unit_folders = {folder for _parent, child, folder, _stat, _names in held.directories if child in unit_ids}
-        native_origins = any(local._json(raw).get('project_origin') is not None
+        # Both real registration paths exist: the native NV handoff anchors
+        # its origin in HEADER; the earlier C6 registrar commits a separate
+        # original project-origin pair. Names only select the mandatory proof
+        # reader below; neither their presence nor a HEADER label is evidence.
+        native_origins = any(name.endswith('.project-origin') for name in names) or any(local._json(raw).get('project_origin') is not None
             for p, name, _fd, _identity, raw in held.files
             if name == 'HEADER' and p in unit_folders)
+        counted = tuple(unit for unit, state in counts if state.attempt_count)
+        if counted and not native_origins:
+            # A legacy count or a settlement dataclass cannot release the
+            # original UNKNOWN barrier. Only actual installed C6 origins do.
+            raise NvReservationHold()
         if native_origins:
             if _project_proofs is None:
                 raise NvReservationHold()
@@ -463,11 +473,39 @@ def _pin_catalog_prefix(token, binding, identity, held, *, new_allocation, _proj
                 if tuple(row.unit for row in rows) != units:
                     raise NvReservationHold()
                 verify_origins(); held.verify(); verify_projects()
-                _project_proofs['verify'] = verify_projects
+                if tuple(unit for unit, _state in counts) != units:
+                    raise NvReservationHold()
+                from monitor import issue_tracker_remote_history_match as remote
+                validators = []
+                for row in rows:
+                    if row.unit not in counted:
+                        continue
+                    matches = [(writer, local._owner(writer)) for writer, active in tuple(local._ACTIVE.items())
+                        if active.pid == os.getpid()
+                        and journal._identity(os.fstat(active.project_fd))[:2] == row.project_identity]
+                    if len(matches) != 1:
+                        raise NvReservationHold()
+                    writer, project = matches[0]; facts = local._json(row.c6_facts)
+                    generation = local.Generation(facts['generation_id'], facts['sequence'], facts['manifest_id'], writer)
+                    actual, verify_inputs, body, _keys = _project_proofs['scope'].enter_context(
+                        remote._hold_settled_catalog_key_watermarks(writer, token, binding, row.unit, generation))
+                    if (actual is not project or tuple(body['project_identity']) != row.project_identity
+                            or body['binding']['unit_id'] != row.unit.unit_id):
+                        raise NvReservationHold()
+                    validators.append(verify_inputs)
+                def verify_settlement():
+                    if ownership._validated_owner(token, binding) is not owner:
+                        raise NvReservationHold()
+                    verify_projects()
+                    for validate in validators:
+                        validate()
+                    verify_projects()
+                verify_settlement()
+                _project_proofs['verify'] = verify_settlement
             # The same actual origin files were already captured in held
             # BEFORE this semantic read. They stay pinned while project C6
             # and locks survive the entire native creator/compiler/append.
-            held.verify(); verify_projects()
+            held.verify(); _project_proofs['verify']()
     return owner, parent, stem, catalog_fd, units, prior, tuple(observations)
 
 
@@ -511,6 +549,10 @@ def hold_catalog_nv_preparation(token, binding, identity, eth_plan, eth_response
         raw, started_identity = _write_catalog_image(parent, started, witness, current, verify_witness)
         if raw != witness:
             raise NvReservationHold()
+        # The creator's return is itself a boundary. A prior APPLIED/key/C6
+        # rebind immediately after STARTED must stop before the new directory,
+        # not merely before its first image. Never refresh the held original.
+        verify_witness()
         folder, folder_identity = global_journal._create_folder(parent, name, _return_original=True)
         folder_retained = False
         try:

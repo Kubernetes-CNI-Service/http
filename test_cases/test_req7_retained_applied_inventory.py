@@ -21,16 +21,35 @@ def load():
 
 
 class RetainedAppliedInventoryTests(unittest.TestCase):
-    def _catalog_completed_successor(self, *, applied, rebind_after_start=False):
+    def test_settled_catalog_key_scope_rejects_unissued_writer_before_shared_reads(self):
+        from unittest import mock
+        module = remote_tests.load()
+        with mock.patch.object(module, '_hold_match_originals') as shared:
+            with self.assertRaises(module.RemoteHistoryHold):
+                with module._hold_settled_catalog_key_watermarks(object(), object(), object(), object(), object()):
+                    self.fail('unissued writer cannot inspect catalog settlement')
+            shared.assert_not_called()
+
+    def test_settled_catalog_key_scope_has_no_caller_paths_settlement_or_verifier(self):
+        module = remote_tests.load()
+        for claims in ({'applied':True}, {'keys':()}, {'path':'foreign'}, {'verify':lambda:None}):
+            with self.subTest(claims=tuple(claims)), self.assertRaises(TypeError):
+                with module._hold_settled_catalog_key_watermarks(object(), object(), object(), object(), object(), **claims):
+                    self.fail('caller label is not original settlement')
+
+    def _catalog_completed_successor(self, *, applied, rebind_after_start=False,
+                                     native_nv=False, rebind_after_nv_start=False):
         """Real C6/catalog/count/COMPLETE originals, not a settlement label."""
         from unittest import mock
         from test_cases.test_req7_unit_catalog import load as load_catalog
         from test_cases.test_req7_send_unit import inputs
         from test_cases.test_issue_tracker_whitelist_workbook import literal_xlsx
+        from test_cases import test_req7_nv_reservation as nv_tests
         module = load()
         case = remote_tests.Req7OwnedHistoryMatchWorkflowTests(); case.setUp()
         try:
             match = remote_tests.load(); catalog = load_catalog(reset_dependencies=False)
+            nv = nv_tests.load() if native_nv else None
             from monitor import issue_tracker_global_attempt_journal as globals_
             from monitor import issue_tracker_local_commit as local
             prepare = globals_.prepare_global_unit
@@ -57,16 +76,104 @@ class RetainedAppliedInventoryTests(unittest.TestCase):
                         verify()
                 # Independently authored same-key successor. Local sequence 2
                 # is real C6, never a caller maximum or APPLIED dataclass.
-                arguments = inputs()
-                arguments['business'][0]['observed_values'] = {'L': {'stringValue':'down'}}
+                if native_nv:
+                    from monitor import issue_tracker_history_read_launcher as reads
+                    from monitor import issue_tracker_sheets_read_decode as decode
+                    from monitor import issue_tracker_enrollment_journal as enrollment
+                    import json
+                    identity_plan = reads.require_current_owned_read(writer, owner, bound,
+                        responses['identity_response'], read_kind='template_identity')
+                    identity = decode.decode_template_identity(identity_plan, responses['identity_response'])
+                    enrolled = enrollment.inspect_enrollment_journal(owner, bound, identity)
+                    arguments = nv_tests.cabling_inputs(enrolled.nonces)
+                    sources = []
+                    for title, identifiers in (('ETH Cabling', ('NV30016',)), ('IB Cabling', ('NV30101',))):
+                        document = json.loads(nv_tests.source(title, identifiers).data)
+                        document['spreadsheetId'] = bound.spreadsheet_id
+                        response = case.read_owned(scope, writer, owner, bound, auth, 'activity', document, sheet=title)
+                        plan = reads.require_current_owned_read(writer, owner, bound, response,
+                            read_kind='activity', sheet=title)
+                        sources.extend((plan, response))
+                else:
+                    arguments = inputs()
+                    arguments['business'][0]['observed_values'] = {'L': {'stringValue':'down'}}
                 arguments['audits'] = ({'event_id':'settings:002', 'recorded_at_utc':'2026-10-08T10:00:00Z', 'details':'K=3'},)
                 generation = local.begin_generation(writer, arguments['manifest'])
                 local.record_intent(writer, generation, literal_xlsx(), kind='xlsx')
                 receipt = local.commit(writer, generation)
-                arguments.update(spreadsheet_id=bound.spreadsheet_id, sheet_id=101, history_sheet_id=105,
-                    target_nonce='a'*64, history_nonce='d'*64, generation_id=generation.generation_id,
+                arguments.update(spreadsheet_id=bound.spreadsheet_id, generation_id=generation.generation_id,
                     publish_id=receipt.published_sha256)
+                if not native_nv:
+                    arguments.update(sheet_id=101, history_sheet_id=105, target_nonce='a'*64, history_nonce='d'*64)
                 second = catalog.composer.freeze_send_unit(**arguments)
+                if native_nv:
+                    from contextlib import contextmanager
+                    before = original_read_files(case.root)
+                    stem = globals_.ownership._validated_owner(owner, bound).lock_name[:-5]
+                    shared = case.root / 'var/lib/http-ztp-container/issue-tracker'
+                    reached = []
+                    marker = local._owner(writer).project / '.tracker' / ('REMOTE-APPLIED-' + first.unit_id)
+                    preserved = case.root / 'preserved-nv-successor-original-applied'
+                    original = marker.read_bytes() if applied else None
+                    inode = marker.stat().st_ino if applied else None
+                    write = nv._write_catalog_image
+                    def write_then_rebind(*args, **keywords):
+                        result = write(*args, **keywords)
+                        if args[1].endswith('.nv-started'):
+                            marker.rename(preserved); marker.write_bytes(original); marker.chmod(0o600)
+                            reached.append('actual-new-nv-start-then-prior-applied-rebound')
+                        return result
+                    @contextmanager
+                    def preparation():
+                        with nv.hold_catalog_nv_preparation(owner, bound, identity, *sources,
+                                generation_id=generation.generation_id, publish_id=receipt.published_sha256,
+                                sheet='ETH Cabling', requested_keys=nv_tests.KEYS) as prepared:
+                            self.assertEqual(tuple(zip(nv_tests.KEYS, ('NV30102','NV30103'))), prepared.observation.reservations)
+                            catalog.register_pending_c6_unit(writer, owner, bound, second, _nv_preparation=prepared)
+                            yield
+                    if rebind_after_nv_start:
+                        with mock.patch.object(nv, '_write_catalog_image', side_effect=write_then_rebind):
+                            with self.assertRaises(nv.NvReservationHold):
+                                with preparation(): self.fail('prior rebound APPLIED cannot authorize successor NV')
+                        self.assertEqual(['actual-new-nv-start-then-prior-applied-rebound'], reached)
+                        self.assertEqual(inode, preserved.stat().st_ino); self.assertNotEqual(inode, marker.stat().st_ino)
+                        self.assertEqual(original, marker.read_bytes()); self.assertEqual(original, preserved.read_bytes())
+                        self.assertEqual(1, len(tuple(shared.glob(stem + '.unit-*.nv-started'))))
+                        self.assertEqual((), tuple(shared.glob(stem + '.unit-*.nv')),
+                            'old original drift must stop before any successor NV directory')
+                    elif not applied:
+                        with self.assertRaises(nv.NvReservationHold):
+                            with preparation(): self.fail('COMPLETE alone is not APPLIED/key settlement')
+                        self.assertEqual(before, original_read_files(case.root))
+                    else:
+                        with preparation(): pass
+                        prepare(owner, bound, second)
+                        observed = globals_.inspect_catalog_global_units(owner, bound)
+                        self.assertEqual((first, second), tuple(unit for unit, _state in observed))
+                        self.assertEqual(((1,'UNKNOWN'), (0,'UNATTEMPTED_OBSERVATION')),
+                            tuple((state.attempt_count, state.outcome) for _unit, state in observed))
+                        with module._hold_all_project_fifo_frontier(owner, bound) as (frontier, verify):
+                            self.assertEqual((first.unit_id,), frontier.applied)
+                            self.assertEqual((second.unit_id,), frontier.frontier)
+                            self.assertEqual((), frontier.blocked); verify()
+                    after = original_read_files(case.root)
+                    unchanged = {name:image for name,image in before.items()
+                        if not rebind_after_nv_start or name != str(marker.relative_to(case.root))}
+                    self.assertTrue(unchanged.items() <= after.items())
+                    if rebind_after_nv_start:
+                        # The genuine unindexed STOP must keep the public
+                        # cold catalog reader HOLD. Old count bytes are part
+                        # of the unchanged originals assertion above; do not
+                        # bypass that reader to pretend this partial tree GO.
+                        with self.assertRaises(globals_.GlobalAttemptHold):
+                            case.current_global_state(owner, bound, first)
+                        attempt = shared / (stem + '.unit-' + first.unit_id + '.journal') / 'ATTEMPT-1'
+                        self.assertEqual((1,'UNKNOWN'),
+                            (json.loads(attempt.read_bytes())['attempt_count'], json.loads(attempt.read_bytes())['outcome']))
+                    else:
+                        state = case.current_global_state(owner, bound, first)
+                        self.assertEqual((1,'UNKNOWN'), (state.attempt_count, state.outcome))
+                    return
                 catalog.register_pending_c6_unit(writer, owner, bound, second)
                 before = original_read_files(case.root)
                 if rebind_after_start:
@@ -122,6 +229,15 @@ class RetainedAppliedInventoryTests(unittest.TestCase):
 
     def test_prior_applied_original_rebind_after_new_start_stops_before_successor_global_directory(self):
         self._catalog_completed_successor(applied=True, rebind_after_start=True)
+
+    def test_actual_native_columns_after_complete_applied_keys_allow_successor_nv_without_resetting_count(self):
+        self._catalog_completed_successor(applied=True, native_nv=True)
+
+    def test_actual_native_columns_complete_without_applied_keys_refuse_successor_nv(self):
+        self._catalog_completed_successor(applied=False, native_nv=True)
+
+    def test_prior_applied_rebind_after_actual_nv_started_stops_before_successor_nv_directory(self):
+        self._catalog_completed_successor(applied=True, native_nv=True, rebind_after_nv_start=True)
 
     def api(self, module):
         api = getattr(module, '_hold_retained_applied_keys', None)

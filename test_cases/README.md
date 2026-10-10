@@ -1995,3 +1995,27 @@ The positive, rejection and actual-witness/old-APPLIED-inode drift workflows
 then passed against the corrected implementation. The extra direct cases
 reject unissued owner and any public caller settlement/verifier override.
 All earlier tests remain unchanged; no manual ledger or field waiver.
+
+The native NV settled-successor slice uses two actual owned Cabling reads and
+all previous catalog/C6/GLOBAL/COMPLETE/APPLIED/key originals. Counted units
+without these original pairs remain a barrier; a legacy count cannot use a
+caller settlement label. The project scopes remain held through NV STARTED,
+each image, compiler/catalog append and exit. Rebinding old APPLIED immediately
+after the actual STARTED return must stop before creating the successor NV
+directory, retaining STARTED and the original count/UNKNOWN. Source Closed and
+unrelated A-column identifiers still determine the next literal reserved IDs;
+no history reset, expiry, reclamation or ID reuse is introduced. Direct cases
+reject unissued owners and caller settlement/verifier overrides, and real
+multi-script workflows retain the positive, missing-pair and commit-boundary
+negative expectations. This is necessary diagnostic allocation, not current
+source/freshness/G1, successor counting/CLAIM, default worker or whole REQ7
+closure. Formal current-tree full/check and REAL_ENV remain separate.
+Both actual C6 registration paths are verified: an original independent origin
+pair and a native NV HEADER anchor must reach the same genuine all-origin/C6
+reader. A name or label never substitutes for that proof. The new fixed private
+settlement scope holds matched GLOBAL/History/nonces, COMPLETE, C6, APPLIED and
+key pairs before its one full entry replay; subsequent checks verify the same
+held originals through each creator boundary, without broadening the public
+cold reader's namespace. An interrupted unindexed NV STARTED keeps that public
+reader HOLD while original count/inodes/bytes remain unchanged. Original key
+writer/readers and prior test methods retain their existing contracts.

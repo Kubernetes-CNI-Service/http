@@ -133,6 +133,24 @@ def recycled_outer_nv_directory(module, store, foreign):
 
 
 class Req7NvReservationDirectTests(unittest.TestCase):
+    def test_native_creator_does_not_accept_caller_settlement_or_verifier_overrides(self):
+        module = load()
+        for overrides in ({'applied': True}, {'keys': KEYS}, {'verify': lambda: None}, {'_project_proofs': {}}):
+            with self.subTest(overrides=tuple(overrides)), self.assertRaises(TypeError):
+                with module.hold_catalog_nv_preparation(object(), binding(), self.identity,
+                        self.eth_plan, self.eth, self.ib_plan, self.ib, **self.kw, **overrides):
+                    self.fail('caller claims cannot release a counted UNKNOWN')
+
+    def test_native_unissued_owner_stops_before_shared_prefix_or_source_decode(self):
+        module = load()
+        with mock.patch.object(module, '_pin_catalog_prefix') as prefix, \
+                mock.patch.object(module, '_read_pair') as decode:
+            with self.assertRaises(module.NvReservationHold):
+                with module.hold_catalog_nv_preparation(object(), binding(), self.identity,
+                        self.eth_plan, self.eth, self.ib_plan, self.ib, **self.kw):
+                    self.fail('unissued owner cannot reach native allocation')
+            prefix.assert_not_called(); decode.assert_not_called()
+
     def setUp(self):
         enrollment_tests.Req7EnrollmentJournalDirectTests.setUp(self)
         self.enrollment = self.module; self.module = None
