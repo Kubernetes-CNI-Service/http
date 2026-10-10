@@ -1312,26 +1312,45 @@ def replay_original_receipted_prod_source(
                     from monitor import issue_tracker_cycle_source as cycle_source
                     held = cycle_source._HELD_CYCLE_REPLAY.get()
                     window_key = None
+                    window_active = None
                     try:
                         if held is not None and held[0] is store:
+                            cycle_source._require_live_cycle_replay(held)
                             # The cutoff comes only from the actual admitted C6.
                             # Reuse only inside this synchronous private native
                             # walk, backed by the complete current worker scope.
+                            def require_window_owner():
+                                current = held if window_active is None else window_active
+                                if (cycle_source._LIVE_CYCLE_REPLAYS.get(id(held)) is not held
+                                        or cycle_source._HELD_CYCLE_REPLAY.get() is not current
+                                        or (window_active is not None and
+                                            cycle_source._LIVE_CYCLE_REPLAYS.get(id(window_active))
+                                            is not window_active)):
+                                    raise StageLConsumerHold('private original window owner has expired')
                             def verify_window():
+                                require_window_owner()
                                 guard()
                                 held[1]()
+                                guard()
+                                require_window_owner()
                             verify_window()
                             original_cycles = cycle_source._read_completed_cycle_evidence(window)
                             verify_window()
                             expected_cycles = tuple(c for c in cycles if c.sequence <= cutoff)
                             if held[2] != cycles or original_cycles != expected_cycles:
                                 raise StageLConsumerHold('private original window differs from held worker chain')
-                            window_key = cycle_source._HELD_CYCLE_REPLAY.set(
-                                (window, verify_window, original_cycles))
+                            window_active = (window, verify_window, original_cycles)
+                            cycle_source._LIVE_CYCLE_REPLAYS[id(window_active)] = window_active
+                            window_key = cycle_source._HELD_CYCLE_REPLAY.set(window_active)
                         result = qualify_prod_stage_l(window, **arguments)
+                        if window_active is not None:
+                            verify_window()
                     finally:
                         # Restore the full current chain before history/recovery
                         # checks. No prefix escapes or survives this native call.
+                        if (window_active is not None and
+                                cycle_source._LIVE_CYCLE_REPLAYS.get(id(window_active)) is window_active):
+                            del cycle_source._LIVE_CYCLE_REPLAYS[id(window_active)]
                         if window_key is not None:
                             cycle_source._HELD_CYCLE_REPLAY.reset(window_key)
                     _require_original_source_projection(source, result)

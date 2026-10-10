@@ -2147,3 +2147,42 @@ cron dispatch workflows are separate evidence; dispatch observers alone are
 not online proof. Existing raw UNKNOWN/count never reset. No business mutation,
 NEW/FIFO/G1 release, whole REQ7 or current full/check is established here.
 REAL_ENV remains NOT RUN; no existing automated or core field case is omitted.
+
+Protected FIRST and original R2 may compose inside the terminal worker's
+identical actual held cycle store. Only the original live holder issues reuse;
+copied stores, caller callbacks/tuples, revoked holders and ContextVar changes
+are refused. The borrower checks original FD/name/full-stat/gate bindings at
+entry and exit without resetting or closing its owner; the standalone holder
+still rejects nesting. Independent negative facts are asserted outside sanitized
+HOLD scopes and locate borrower rejection before the outer finalizer. Existing
+real source/compiler/C6/CLAIM/encrypted-request workflows exercise both entries
+under that outer scope. This necessary composition does not prove default NEW,
+G1, FIFO release, overall REQ7, field verification or current full/check. No
+original behavioral expectation or field case is removed or weakened.
+
+The public cycle reader uses the same live-owner registry before consulting a
+held result and after each original verification. Caller tuples/malformed scopes
+and an actual copied context retained after owner exit are typed HOLD, before
+any caller callback or stale result is used. A live scope for another actual
+store still performs the original fresh replay. Independent direct negatives
+and real worker publication of a second cycle prove revocation without repair;
+this is not persisted cache authority or online send permission.
+
+An older admitted C6's private native window is issued only by the real
+receipted-source replay after the original cutoff, complete parent chain and
+expected prefix have been verified. Its live registry entry lasts only for
+that synchronous native qualification and checks the original parent's live
+identity before and after verification. The private window is revoked before
+restoring the full parent; a copied private context cannot survive even while
+the original parent remains live. There is no caller callback registration API
+or exemption from the public reader's live-owner check.
+
+The owned FIRST/R2 native fixture prepares its actual encrypted endpoint
+before issuing the original bounded reads. Nested read children use a separate
+owned TLS root, preserving the mutation CA's bytes/inode and outer DNS endpoint;
+both children still run the fixed production CA reader and verified TLS. The
+independent readiness test and actual old-cycle retry workflow retain exact
+wire/count/UNKNOWN/one-claim expectations. Original read, transport and startup
+deadlines and post-count expiry/rebinding negatives are unchanged. This fixes
+fixture preparation/isolation, not proof that earlier startup failures or the
+whole REQ7/full/check have been resolved; REAL_ENV remains NOT RUN.

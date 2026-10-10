@@ -208,6 +208,7 @@
       "tests": [
         "test_cases.test_req7_completion_lane_dispatch",
         "test_cases.test_req7_online_completion_runtime",
+        "test_cases.test_req7_online_cycle_scope",
         "test_cases.test_issue_tracker_qualification",
         "test_cases.test_issue_tracker_manifest",
         "test_cases.test_issue_tracker_manifest_workflow",
@@ -839,6 +840,11 @@
       "id": "req7_online_completion_originals",
       "paths": ["monitor/switch-collection-worker.py", "monitor/issue_tracker_cycle_source.py", "monitor/issue_tracker_online_target.py", "monitor/issue_tracker_credential_shape.py", "monitor/issue_tracker_remote_history_match.py"],
       "tests": ["test_cases.test_req7_online_completion_runtime"]
+    },
+    {
+      "id": "req7_online_actual_cycle_scope_composition",
+      "paths": ["monitor/issue_tracker_cycle_source.py", "monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_stage_l_consumer.py"],
+      "tests": ["test_cases.test_req7_online_cycle_scope"]
     },
     {
       "id": "finished_project_lifecycle",
@@ -3501,6 +3507,11 @@
       "id": "req7_default_terminal_cycle_original_reconciliation",
       "members": ["monitor/switch-collection-worker.py", "monitor/switch_collection_gate.py", "monitor/collection_v2_emitter.py", "ethernet/monitor/cron.sh", "infiniband/monitor/cron.sh", "nvlink/monitor/cron.sh", "monitor/issue_tracker_cycle_source.py", "monitor/issue_tracker_online_target.py", "monitor/issue_tracker_credential_shape.py", "monitor/issue_tracker_remote_history_match.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_unit_catalog.py", "monitor/issue_tracker_retained_inventory.py", "monitor/issue_tracker_history_read_launcher.py", "monitor/issue_tracker_token_launcher.py", "monitor/issue_tracker_sdk_authentication.py", "monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_history_preread_journal.py", "monitor/issue_tracker_enrollment_journal.py", "monitor/issue_tracker_tls_inputs.py", "tools/project_contract.py"],
       "tests": ["test_cases.test_req7_online_completion_runtime"]
+    },
+    {
+      "id": "req7_terminal_scope_actual_first_and_original_retry",
+      "members": ["monitor/issue_tracker_cycle_source.py", "monitor/switch-collection-worker.py", "monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_stage_l_consumer.py", "monitor/issue_tracker_mutation_launcher.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_admission.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_local_workbook_commit.py", "monitor/issue_tracker_nv_reservation.py", "monitor/issue_tracker_remote_history_match.py", "monitor/issue_tracker_history_read_launcher.py", "monitor/issue_tracker_send_unit.py", "monitor/issue_tracker_ib_runtime.py", "monitor/issue_tracker_switch_runtime.py"],
+      "tests": ["test_cases.test_req7_online_cycle_scope"]
     },
     {
       "id": "req7_pending_catalog_shared_owner_native_originals",

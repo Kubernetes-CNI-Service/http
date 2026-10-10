@@ -1511,7 +1511,7 @@ def _hold_shared_retry_counted_sources(
     from monitor.issue_tracker_stage_l_consumer import _hold_original_replay_inputs
     from monitor.issue_tracker_receipt_snapshot import _hold_history_originals
     from monitor.issue_tracker_send_unit import _read_original_generation_identity
-    from monitor.issue_tracker_cycle_source import _hold_completed_cycle_replay
+    from monitor.issue_tracker_cycle_source import _hold_current_completed_cycle_replay
     from tools.ufm_collection_pipeline import _hold_reusable_directory_reads
     from pathlib import Path
     def facts():
@@ -1535,7 +1535,7 @@ def _hold_shared_retry_counted_sources(
     try:
         with _hold_reusable_directory_reads(), \
                 _hold_original_replay_inputs(store,Path(store.project_identity),whitelist_path) as verify_inputs, \
-                _hold_completed_cycle_replay(store) as verify_cycles, \
+                _hold_current_completed_cycle_replay(store) as verify_cycles, \
                 _hold_receipted_audit_originals(writer_token,token,binding,unit) as verify_audits:
             before=inspect_global_unit(token,binding,unit)
             if not 1<=before.attempt_count<6: raise GlobalAttemptHold()
@@ -1671,7 +1671,7 @@ def _hold_continuous_owned_attempt_wire(
     from monitor.issue_tracker_receipt_snapshot import _hold_history_originals
     from monitor.issue_tracker_history_preread_journal import observe_owned_business_continuity
     from monitor.issue_tracker_remote_history_match import observe_owned_unit_read_gates
-    from monitor.issue_tracker_cycle_source import _hold_completed_cycle_replay
+    from monitor.issue_tracker_cycle_source import _hold_current_completed_cycle_replay
     from tools.ufm_collection_pipeline import _hold_reusable_directory_reads
     failed=False
     try:
@@ -1696,7 +1696,7 @@ def _hold_continuous_owned_attempt_wire(
             return continuity,gates,originals
         with _hold_reusable_directory_reads(), \
                 _hold_original_replay_inputs(store,Path(store.project_identity),whitelist_path) as verify_inputs, \
-                _hold_completed_cycle_replay(store) as verify_cycles, \
+                _hold_current_completed_cycle_replay(store) as verify_cycles, \
                 _hold_history_originals(writer_token) as verify_receipts, \
                 _hold_receipted_audit_originals(writer_token,token,binding,unit) as verify_audits:
             original=facts()

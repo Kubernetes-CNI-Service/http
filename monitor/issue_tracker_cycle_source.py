@@ -18,6 +18,7 @@ import stat
 from tools.project_contract import collection_cycle_source_slots
 
 _HELD_CYCLE_REPLAY = ContextVar('req7_held_cycle_replay', default=None)
+_LIVE_CYCLE_REPLAYS = {}
 
 
 class CycleSourceHoldError(ValueError):
@@ -151,15 +152,64 @@ def _read_completed_cycle_evidence(store):
         raise CycleSourceHoldError("collection cycle source evidence is not safe") from exc
 
 
+def _require_live_cycle_replay(active):
+    if (type(active) is not tuple or len(active) != 3
+            or _HELD_CYCLE_REPLAY.get() is not active
+            or _LIVE_CYCLE_REPLAYS.get(id(active)) is not active):
+        raise CycleSourceHoldError('cycle replay requires its live original owner')
+
+
 def read_completed_cycle_evidence(store):
     """Replay normally, or verify every original input in an actual held scope."""
     active = _HELD_CYCLE_REPLAY.get()
-    if active is not None and active[0] is store:
-        active[1]()
-        result = active[2]
-        active[1]()
-        return result
+    if active is not None:
+        _require_live_cycle_replay(active)
+        if active[0] is store:
+            try:
+                active[1]()
+                _require_live_cycle_replay(active)
+                result = active[2]
+                active[1]()
+                _require_live_cycle_replay(active)
+            except Exception as exc:
+                raise CycleSourceHoldError('held cycle originals are unsafe') from exc
+            return result
     return _read_completed_cycle_evidence(store)
+
+
+@contextmanager
+def _hold_current_completed_cycle_replay(store):
+    """Compose protected FIRST/R2 inside the identical actual original scope.
+
+    Only an original live holder may issue reuse. Borrowing neither installs
+    a ContextVar nor closes/revokes its owner, and checks originals at both
+    boundaries. No caller callback, copied store, persisted cache or GO.
+    The independently acquiring holder below remains strictly non-nestable.
+    """
+    active = _HELD_CYCLE_REPLAY.get()
+    if active is None:
+        with _hold_completed_cycle_replay(store) as verify:
+            yield verify
+        return
+
+    def require_original_scope():
+        _require_live_cycle_replay(active)
+        if active[0] is not store:
+            raise CycleSourceHoldError('cycle composition requires its live original owner')
+
+    def verify_original_scope():
+        require_original_scope()
+        try:
+            active[1]()
+        except Exception as exc:
+            raise CycleSourceHoldError('borrowed cycle originals are unsafe') from exc
+        require_original_scope()
+
+    verify_original_scope()
+    try:
+        yield active[1]
+    finally:
+        verify_original_scope()
 
 
 @contextmanager
@@ -171,7 +221,7 @@ def _hold_completed_cycle_replay(store):
     No caller witness/verifier, persistent cache, archive-read exemption or GO.
     Other native source readers must still replay their own provenance.
     """
-    fds=[]; parents=[]; files=[]; key=None; failed=False
+    fds=[]; parents=[]; files=[]; key=None; active=None; failed=False
     def identity(info):
         return (info.st_dev,info.st_ino,info.st_mode,info.st_uid,info.st_gid,
                 info.st_nlink,info.st_size,info.st_mtime_ns,info.st_ctime_ns)
@@ -235,12 +285,16 @@ def _hold_completed_cycle_replay(store):
                     raise CycleSourceHoldError('original cycle input changed')
             store._require_gate()
         verify(); result=_read_completed_cycle_evidence(store); verify()
-        key=_HELD_CYCLE_REPLAY.set((store,verify,result))
+        active=(store,verify,result)
+        _LIVE_CYCLE_REPLAYS[id(active)]=active
+        key=_HELD_CYCLE_REPLAY.set(active)
         yield verify
         verify()
     except Exception:
         failed=True
     finally:
+        if active is not None and _LIVE_CYCLE_REPLAYS.get(id(active)) is active:
+            del _LIVE_CYCLE_REPLAYS[id(active)]
         if key is not None: _HELD_CYCLE_REPLAY.reset(key)
         for fd,device,inode in reversed(fds):
             try:

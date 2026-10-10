@@ -2549,8 +2549,11 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                                         self.assertIs(read_gates.ownership, owner_module)
                                         import xml.etree.ElementTree as ET
                                         native_fixture = Req7OwnedHistoryMatchWorkflowTests()
-                                        native_fixture.root = global_root
-                                        native_fixture.path = global_root/'etc/ssl/certs/ca-certificates.crt'
+                                        # The read child still uses the real fixed CA reader.
+                                        # Its owned TLS root must not replace the CA/leaf
+                                        # of an already prepared mutation endpoint.
+                                        native_fixture.root = global_root/'owned-read-tls-root'
+                                        native_fixture.path = native_fixture.root/'etc/ssl/certs/ca-certificates.crt'
                                         native_fixture.path.parent.mkdir(parents=True)
                                         native_fixture.addCleanup = self.addCleanup
                                         # Read actual fixture cells, not a whitelist generated
@@ -2624,21 +2627,25 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                                         from tools.project_contract import MIN_CONTINUOUS_INTERVAL_MINUTES
                                         import socket
                                         native_mutation=Req7MutationLauncherWorkflowTests()
-                                        native_mutation.root=global_root; native_mutation.path=native_fixture.path
+                                        native_mutation.root=global_root
+                                        native_mutation.path=global_root/'etc/ssl/certs/ca-certificates.crt'
+                                        native_mutation.path.parent.mkdir(parents=True,exist_ok=True)
                                         native_mutation.addCleanup=self.addCleanup
                                         mutation=load_mutation(); original_wire=unit.wire_bytes; all_requests=[]; rejected=[]
                                         response_bytes=b'HTTP/1.1 401 Denied\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}'
                                         expected_requests = 2 if retry_launch_probe in ('normal', 'old-cycle') else 1
                                         for count in (1,2):
-                                            bundle=fresh_bundle()
                                             scope=global_journal._hold_continuous_owned_attempt_wire if count==1 else global_journal._hold_shared_retry_owned_attempt_wire
-                                            options=dict(qualified_source=qualified,store=self.store,writer_token=writer_token,
-                                                settings=args['settings'],whitelist_snapshot=self.snapshot,
-                                                expected_template_sha256=self.snapshot.workbook_sha256,http_root=self.root,
-                                                whitelist_path=self.template,**bundle)
                                             with native_mutation.server(response_bytes,hostname='sheets.googleapis.com',
                                                     destination='sheets.googleapis.com') as (requests,errors), ExitStack() as transport:
                                                 port=socket.getaddrinfo('sheets.googleapis.com',443)[0][4][1]
+                                                # Prepare the endpoint before issuing real
+                                                # bounded reads; keep their original deadline.
+                                                bundle=fresh_bundle()
+                                                options=dict(qualified_source=qualified,store=self.store,writer_token=writer_token,
+                                                    settings=args['settings'],whitelist_snapshot=self.snapshot,
+                                                    expected_template_sha256=self.snapshot.workbook_sha256,http_root=self.root,
+                                                    whitelist_path=self.template,**bundle)
                                                 if count==2:
                                                     prior=admission.read_shared_local_admission(writer_token,self.store,committed.prepared.xlsx_bytes)
                                                     now=prior['monotonic_ns']+MIN_CONTINUOUS_INTERVAL_MINUTES*60*1_000_000_000
@@ -2716,15 +2723,17 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                                         from test_cases.test_req7_mutation_launcher import Req7MutationLauncherWorkflowTests, load as load_mutation
                                         from monitor import issue_tracker_local_commit as local
                                         native_mutation=Req7MutationLauncherWorkflowTests()
-                                        native_mutation.root=global_root; native_mutation.path=native_fixture.path
+                                        native_mutation.root=global_root
+                                        native_mutation.path=global_root/'etc/ssl/certs/ca-certificates.crt'
+                                        native_mutation.path.parent.mkdir(parents=True,exist_ok=True)
                                         native_mutation.addCleanup=self.addCleanup
                                         mutation=load_mutation(); rejected=[]; calls=[]; children=[]
                                         import socket
-                                        bundle=fresh_bundle()
                                         wire_response=b'HTTP/1.1 401 Denied\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}'
                                         with native_mutation.server(wire_response,hostname='sheets.googleapis.com',
                                                 destination='sheets.googleapis.com') as (requests,errors), ExitStack() as transport:
                                             port=socket.getaddrinfo('sheets.googleapis.com',443)[0][4][1]
+                                            bundle=fresh_bundle()
                                             def exercise():
                                                 with global_journal._hold_continuous_owned_attempt_wire(
                                                         spreadsheet_token,binding,unit,qualified_source=qualified,store=self.store,
