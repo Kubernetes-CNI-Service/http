@@ -1,31 +1,4 @@
 {
-  "full_suite_attestation": {
-    "environment": {
-      "container_toplevel_lock_sha256": "3532f5208b462243bab779b01eb4deb21638ac05a9390c17ac997ba8d7f24998",
-      "container_toplevel_versions": [
-        "Jinja2==3.1.6",
-        "openpyxl==3.1.5",
-        "pandas==2.3.3",
-        "PyYAML==6.0.3",
-        "XlsxWriter==3.2.9"
-      ],
-      "machine": "arm64",
-      "platform": "darwin",
-      "python_cache_tag": "cpython-39",
-      "python_executable": "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/bin/python3.9",
-      "python_implementation": "CPython",
-      "python_version": [
-        3,
-        9,
-        6
-      ]
-    },
-    "scenario_coverage": {
-      "root-entrypoint-workflow": "NOT COVERED (requires Linux EUID 0 private namespace)"
-    },
-    "schema_version": 1,
-    "snapshot_sha256": "7eeeb57293383abcef17df788f9ebc0d9cd0f3388d3335262738c28c414f66c7"
-  },
   "impact_manifest_sha256": "dcfd40e6ae985901e483eb770877aa719cd239f17270a15ff4f7a13e47fef7a6",
   "schema_version": 1,
   "scripts": {
@@ -39,7 +12,7 @@
     },
     "DAY0-Prepare/11-load.py": {
       "canonical": "DAY0-Prepare/11-load.py",
-      "sha256": "6a04dcd9f928e75d3b9324c14ec33605247fa75c1192e8dd7e759f7a3c0bbe56"
+      "sha256": "9d7afd5a9f602feb7ec91c9d13484cf7763214db5002109b424e9eb37960e57f"
     },
     "DAY0-Prepare/12-ztp-monitor.py": {
       "canonical": "DAY0-Prepare/12-ztp-monitor.py",
@@ -279,7 +252,7 @@
     },
     "tools/_package_common.py": {
       "canonical": "tools/_package_common.py",
-      "sha256": "3d8e84377f2bbdcd2d866882d138ef5af39ecedde7ff1ba548b68b828a42b03f"
+      "sha256": "8591d407c0702bba3c6d1accf7ad8cd05ee63997ca8aa01f8494364c2a36afef"
     },
     "tools/collect-ztp-diagnostics.py": {
       "canonical": "tools/collect-ztp-diagnostics.py",
@@ -730,7 +703,7 @@
     "infra/infra-neutral.conf": "238bec3c9be34fc5a7bf097e36012133da4a30b90cabdf17d758796ecdab24f8",
     "requirements-container-top-level.lock": "3532f5208b462243bab779b01eb4deb21638ac05a9390c17ac997ba8d7f24998",
     "requirements-dev.txt": "2047cfeb6e7d7c3b02380624cd212528fb8416cf3e76dd924d2e2cba8567a50a",
-    "test_cases/REAL_ENVIRONMENT.md": "06db44bc9be22608411be8cef6fb90949874e768723fbe0830975725bda6e60d",
+    "test_cases/REAL_ENVIRONMENT.md": "fb322e63ddb71ed4f804ffcbd57ac4f6bf5cc67997e59e3104cf6033652b5c1c",
     "test_cases/audit_public_tree.py": "82a0c8dbb507f8ee21b1781eba4f4d4e158142a3c7d3c70da8c1cd2e1daae433",
     "test_cases/module_loader.py": "4b96ad4b8b6d7b894081683b277b7383cb4d2ac4895167210eaa16f04921f150",
     "test_cases/monitor_authority_root_warden.py": "f4ac61acc04af33168aa01ba295a74fe036202b9179ad65f10e9db87375a2c4c",
@@ -807,11 +780,11 @@
     "test_cases.test_continuous_interval_handoff_workflow": "bbeeba908269873df3c6ecae9fd8860cf1acca7c6dd45787d24be52109613c4d",
     "test_cases.test_control_auth": "da27975ed095e2c7e88d32f4fd1cf0352a050541a6750b3548b3e5dffa6f092c",
     "test_cases.test_cumulus_snippet_rendering": "a9dc63b808ad3dce40f8ec831bc2ab1b50b5cfdec095280ea1511ec99b1f225c",
-    "test_cases.test_deploy_upload_archive": "69eda9a6e4213cb4d40406f790bbbd97e420f9f1701ea6888347f703d34030ef",
+    "test_cases.test_deploy_upload_archive": "6476b73ca84a5b7c9ed6e0fdba532b85fce523beb8322a3ee885a88bac0d5028",
     "test_cases.test_deployment_writer_lock": "45ce565e89721abe70d3e265cd4f1dffe6463111d24ce7005b36dd4065c75308",
     "test_cases.test_dhcp_deferred_candidate_contract": "aeb007744e1b295f8d7bae0ce24167b14730dec72a4ceaa438b27d1339649851",
-    "test_cases.test_dhcp_optional_contract": "1147b78797efc2ed991e24bf41ec1be7ba218427d48c590a37813088fac90ea8",
-    "test_cases.test_dhcp_optional_workflow": "8b222fc92d4db1e149aa127cff093074b8308e09fbbcfaaee423d5467e31c11c",
+    "test_cases.test_dhcp_optional_contract": "ad3bf662f403a6ed1d8f18fdfe499b3bee9bc982cccc19b18e067224b86626dd",
+    "test_cases.test_dhcp_optional_workflow": "e2fd29eab6c78ba968d762fab7b2dd2eb1bad9678b7d79d654715f7dcc34be64",
     "test_cases.test_dhcp_runtime_reassignment": "7ed63b5140210a46570d522cc115dcafe0daaabcfa758df47cf86002246c0bcf",
     "test_cases.test_dhcp_switch_scope_preservation": "47287c05918c9ac83f69fd6bfe22c7a24f0efa5b08ed2a48f519aced3744da70",
     "test_cases.test_dhcp_switch_scope_preservation_workflow": "2f63cf66935a9ad9569839556234e62142ff54d6039f1e8d8d42e3fed7cbf4c8",
@@ -843,7 +816,7 @@
     "test_cases.test_full_flow_integration": "b36d9d5912e8458dcb99a92bf060e346717d0ff950c67086c47b6246a4e3fbbf",
     "test_cases.test_generation_input_binding_activation_contract": "75f6fb0ddc2bebf26560172316ac5a4f2bb0cb860d4a54ccfbc25080f9516760",
     "test_cases.test_generation_input_binding_contract": "0efdb5fe23c5c46b60747681105b3996e8049032b89702aac3003f3ab711eb67",
-    "test_cases.test_generation_input_binding_workflow": "5e315b69cab248fff1466874b39ab155d009bb581706c7cca5eafa233209da10",
+    "test_cases.test_generation_input_binding_workflow": "8db88e595835397c64de9ee11985569c45b3e58928175af2ba1ae31f8f899f4e",
     "test_cases.test_generation_report_contract": "387309da522defa8f6c0eb5fa94487ef006d7acbd7190c63cf521f7dd0897ed4",
     "test_cases.test_generation_report_workflow": "a1670c349de81317a0cfdbc8ec871c0681614cd774a3738a663bb32e5bbb785c",
     "test_cases.test_http_port_contract": "9ea7d6ed55a9564c05d6dbab1fad7cfbb82b46b90279f01b5ced7f66469c6839",
@@ -893,7 +866,7 @@
     "test_cases.test_issue_tracker_whitelist_workbook": "6c4fd8bceec23e1fbfa1b9d8ecad78853058ee7f3ef93bd90b5f7906923c6eac",
     "test_cases.test_issue_tracker_whitelist_workbook_workflow": "2cc91998f5ee6c704f7b17b95bcc404dbfde4737092430a306485e5a39ace919",
     "test_cases.test_issue_tracker_whitelist_workflow": "b22e238ef2e8eedf29977486a6c170c7cf9158a126d7797d145109acf726c353",
-    "test_cases.test_load_release_transaction": "eeb5d5149331d16bce16d3598243ff927e2032708e46b06f54acb27e7cab8259",
+    "test_cases.test_load_release_transaction": "402a05a26fede68b93f44aceef0691ea18922fd712e8d411526af85871ac780f",
     "test_cases.test_manual_applied_config": "c9dfc264bcc07e6a7b957ec14053761280bf9072834e49e51bc4c714cb5f8f02",
     "test_cases.test_mlag_evpn_generation": "7eb9edb511bc66c616b214903fbeef5c77df112c27990750fd6fb006a507cd7a",
     "test_cases.test_module_loader_contract": "70f5910689d83a83367c6618aad27c8ec94884b175e1188e4f34eea7dccbbcc0",
@@ -972,7 +945,7 @@
     "test_cases.test_ufm_local_archive_workflow": "c43cfa2ae5988c50b2d3519cdb20c534cc13c5b0228ab7b2ed5b7b90334587c9",
     "test_cases.test_ufm_remote_producer": "38363c09546951664c58c3a8ea13666a7681f7d620daff2b47384fa372e09ad6",
     "test_cases.test_ufm_remote_producer_workflow": "0af8e841718064e149d2d8b1c49b85800c3644b17b3f5b3284809ef196a994c1",
-    "test_cases.test_upload_package_contract": "ede02f2a28b4941088a888cce7e4663856db3d3a4a73a99cf83256aeabef48a9",
+    "test_cases.test_upload_package_contract": "9249133c89d54a158a17568ce66852dc28e0a433ca590715331c525773ce135f",
     "test_cases.test_v2_generation_flow": "7731dc3a8257720de0324de3cc1a3cdc8806670b459dd74b92240b0c91e87608",
     "test_cases.test_v2_project_schema": "e905680d7ca87d9c7d0f0df6b1570cd656f518b90e03bb8cd860962de1490167",
     "test_cases.test_vm_validation_runner": "239548073ee1092d2411589ba4ac55a4b3b1e42707837105ed419bef35d2a938",
