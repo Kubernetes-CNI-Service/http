@@ -1313,6 +1313,17 @@ project-origin WITNESS/STARTED/ORIGIN，再唯一 append，不在已注册后补
 独立 direct 与实际 protected C5→admitted C6→native NV→origin→单次 append→ALL C6
 workflow 覆盖本地交接；不是 FIFO 释放、freshness、NEW/send 或整个 REQ7 证明。
 
+catalog-retained inventory 的 native NV 分支只从持续持有的真实 catalog
+HEADER 原链识别，不接受 caller boolean/name-list 或合成 TemplateIdentity。
+共享 enrollment/原 ACTION nonce 逐项核验后，从已持有的实际 FD 重放两份 RAW、
+PRIOR、预留及完整 INITIALIZED/started 原件语义；跨 unit 的预留链顺序不重置。
+native 六文件与 `nv-started` 全部覆盖，只有该分支的 HEADER/PRIOR/marker 使用
+原 native 1MiB 边界；legacy 五文件形状和原界限不变。原件 named/full-stat/bytes、
+catalog/count 与精确 parent namespace 持续贯穿 consumer 和退出，原样换 inode
+仍 HOLD。独立 direct、旧 retained 回归和真实 protected C5→C6→NV→origin→
+catalog→GLOBAL→retained workflow 是只读原件接线证据，不是容量释放、APPLIED、
+freshness、NEW/send 或整个 REQ7/full 证明。
+
 old/current/indexed 以及 catalog 内部重读共用固定 16MiB 原始图像预算，按持续
 持有的 dev/inode 去重，并在实际 pread 前核单文件 size 与整组预算；同字节不同
 inode 分别计费，同一原件仍逐次真实读取并核 full-stat/named/bytes，不能缓存许可。

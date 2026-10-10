@@ -814,6 +814,52 @@ class Req7CatalogNvPreparationTests(unittest.TestCase):
     def test_native_c6_origin_first_stat_failure_preserves_recycled_foreign_creator(self):
         self._exercise_native_c6_origin_first_stat_cleanup(True)
 
+    def test_native_catalog_retained_inventory_reads_all_six_nv_originals_and_witness_without_authority(self):
+        from test_cases.test_req7_retained_global_inventory import load as inventory_load
+        with self.native_c6_origin_fixture() as (module, writer, token, unit):
+            with self.preparation(token) as prepared:
+                self.catalog.register_pending_c6_unit(writer, token, binding(), unit, _nv_preparation=prepared)
+            module.global_journal.prepare_global_unit(token, binding(), unit)
+            inventory = inventory_load(reset_support=False); before = self.files()
+            with inventory._hold_catalog_retained_inventory(token, binding()) as (rows, verify):
+                self.assertEqual((unit,), tuple(row.unit for row in rows))
+                self.assertEqual((0,), tuple(row.attempt_count for row in rows))
+                self.assertEqual({'enrollment', 'journal', 'journal-started', 'nv', 'nv-started', 'project-origin'},
+                    set(rows[0].families))
+                prefix = hashlib.sha256(TARGET.encode()).hexdigest() + '.unit-' + unit.unit_id
+                original_names = {name for name, _stat, _sha in rows[0].originals}
+                self.assertEqual({'ETH-RAW', 'IB-RAW', 'PRIOR', 'HEADER', 'RESERVATIONS', 'INITIALIZED'},
+                    {name.split('/')[-1] for name in original_names if name.startswith(prefix + '.nv/')})
+                self.assertIn(prefix + '.nv-started', original_names)
+                self.assertFalse(any(hasattr(rows[0], name) for name in ('permit', 'applied', 'fresh', 'new')))
+                verify()
+            self.assertEqual(before, self.files())
+
+    def test_native_catalog_retained_inventory_prior_same_bytes_rebind_revokes_actual_consumer(self):
+        from test_cases.test_req7_retained_global_inventory import load as inventory_load
+        marks = []; error = None
+        with self.native_c6_origin_fixture() as (module, writer, token, unit):
+            with self.preparation(token) as prepared:
+                self.catalog.register_pending_c6_unit(writer, token, binding(), unit, _nv_preparation=prepared)
+            module.global_journal.prepare_global_unit(token, binding(), unit)
+            inventory = inventory_load(reset_support=False)
+            prefix = hashlib.sha256(TARGET.encode()).hexdigest() + '.unit-' + unit.unit_id
+            path = self.state / (prefix + '.nv') / 'PRIOR'; saved = self.root / 'retained-prior-original'
+            raw = path.read_bytes(); inode = path.stat().st_ino
+            try:
+                with inventory._hold_catalog_retained_inventory(token, binding()) as (rows, verify):
+                    marks.append('actual-inventory-yield')
+                    path.rename(saved); path.write_bytes(raw); path.chmod(0o600)
+                    marks.append('same-bytes-rebound'); verify(); marks.append('unsafe-verification')
+            except Exception as exc: error = exc
+            self.assertEqual(['actual-inventory-yield', 'same-bytes-rebound'], marks)
+            self.assertIs(type(error), inventory.RetainedInventoryHold)
+            self.assertNotEqual(inode, path.stat().st_ino)
+            self.assertEqual(inode, saved.stat().st_ino); self.assertEqual(raw, path.read_bytes())
+            self.assertEqual((0, 'UNATTEMPTED_OBSERVATION'),
+                (lambda row: (row.attempt_count, row.outcome))(
+                    module.global_journal.inspect_catalog_global_units(token, binding())[0][1]))
+
     def test_native_first_append_requires_live_owned_preparation_and_replays_after_scope(self):
         module = self.api()
         with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:

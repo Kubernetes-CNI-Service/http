@@ -216,6 +216,11 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         self._exercise_real_protected_three_panel_fixture(skip_history=False,
             observed_cabling_insert_probe=True, native_catalog_probe=True, native_catalog_c6_origin_probe=True)
 
+    def test_actual_protected_c6_native_nv_origin_global_and_retained_originals_stay_read_only(self):
+        self._exercise_real_protected_three_panel_fixture(skip_history=False,
+            observed_cabling_insert_probe=True, native_catalog_probe=True, native_catalog_c6_origin_probe=True,
+            native_catalog_retained_probe=True)
+
     def test_native_compiler_holds_nv_original_drift_during_final_real_receipt_read(self):
         self._exercise_native_compiler_return_fault('same_byte_replace')
 
@@ -783,6 +788,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         receipt_admission_rebind_probe=False,quota_namespace_rebind_probe=False,quota_retry_identity_probe=False,
         before_cabling_fixture=None, native_catalog_probe=False, native_catalog_return_fault=None,
         native_catalog_c6_origin_probe=False,
+        native_catalog_retained_probe=False,
         continuous_launch_probe=None,
         retry_launch_probe=None,
         qualification_replay_probe=None,
@@ -2085,6 +2091,30 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                                     self.assertEqual({'STARTED', 'ORIGIN', 'WITNESS'}, set(os.listdir(origins[0])))
                                 else:
                                     self.assertFalse(origins, 'C6 original reader is not the separate project-origin writer')
+                                if native_catalog_retained_probe:
+                                    # Close the actual preparation before the genuine GLOBAL
+                                    # writer adds its fixed journal; old namespace proof is
+                                    # not silently refreshed to permit a foreign append.
+                                    private_context.close()
+                                    from monitor import issue_tracker_global_attempt_journal as global_journal
+                                    # This fixture creates canonical owner registries per
+                                    # scenario. Bind the real consumer after that setup,
+                                    # as the existing native inventory fixtures do; a
+                                    # preimported prior scenario cannot own this token.
+                                    from test_cases.test_req7_retained_global_inventory import load as inventory_load
+                                    inventory = inventory_load(reset_support=False)
+                                    global_journal.prepare_global_unit(spreadsheet_token, binding, unit)
+                                    original_files = {str(path.relative_to(state)): (path.stat().st_ino, path.read_bytes())
+                                        for path in state.rglob('*') if path.is_file()}
+                                    with inventory._hold_catalog_retained_inventory(spreadsheet_token, binding) as (rows, verify):
+                                        self.assertEqual((unit,), tuple(row.unit for row in rows))
+                                        self.assertEqual((0,), tuple(row.attempt_count for row in rows))
+                                        self.assertIn('nv-started', rows[0].families)
+                                        self.assertTrue(any(name.endswith('.nv/PRIOR') for name, _stat, _sha in rows[0].originals))
+                                        self.assertFalse(any(hasattr(rows[0], name) for name in ('permit', 'applied', 'fresh', 'new')))
+                                        verify()
+                                    self.assertEqual(original_files, {str(path.relative_to(state)): (path.stat().st_ino, path.read_bytes())
+                                        for path in state.rglob('*') if path.is_file()})
                                 continue
                             self.assertEqual(reservation, nv_module.require_unit_nv_reservation(spreadsheet_token, binding, identity, unit))
                             for claims in ({'reserved_ids': ('NV99999',)}, {'placements': ()}, {'target_nonce': 'c'*64}, {'business_reads': tuple(reads[:-1])}, {'sheet': 'ETH&IB Switch'}):

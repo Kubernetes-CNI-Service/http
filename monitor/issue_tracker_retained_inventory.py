@@ -22,7 +22,7 @@ from monitor import issue_tracker_sheets_read_decode as decode
 
 _FAMILIES = frozenset(('business', 'completion', 'completion-started', 'dispatch', 'enrollment',
                        'history', 'journal', 'journal-started', 'metadata', 'nv'))
-_CATALOG_FAMILIES = _FAMILIES | {'project-origin'}
+_CATALOG_FAMILIES = _FAMILIES | {'project-origin', 'nv-started'}
 _FIXED = {
     'enrollment': frozenset(('HEADER', 'INITIALIZED', 'NONCES')),
     'history': frozenset(('HEADER', 'HISTORY-RAW', 'INITIALIZED')),
@@ -893,6 +893,64 @@ def _hold_retained_inventory(token, binding):
         raise RetainedInventoryHold()
 
 
+def _verify_catalog_native_nv_originals(binding, observations, native_ids, parent, shared, files, directories, verify):
+    """Replay C17 from borrowed actual inventory FDs, never a typed admission.
+
+    Native identities came from the continuously held catalog HEADER chain.
+    Enrollment was already replayed against each actual ACTION nonce. No
+    synthetic TemplateIdentity, mutable caller inventory or new permit exists.
+    """
+    if not native_ids: return
+    from monitor import issue_tracker_nv_reservation as nv
+    images = {(directory, name): (raw, identity)
+        for directory, name, _relative, _fd, identity, raw in files}
+    folders = {name: folder for name, folder, _identity, _names in directories}
+    enrollment_folder = folders[shared]
+    enrollment_raw = images[(enrollment_folder, 'HEADER')][0]
+    enrollment_header = local._json(enrollment_raw)
+    ids = dict(enrollment_header['sheet_ids'])
+
+    class BorrowedOriginals:
+        def directory(self, actual_parent, name):
+            if actual_parent != parent: raise RetainedInventoryHold()
+            return folders[name]
+
+        def file(self, directory, name, limit):
+            raw, identity = images[(directory, name)]
+            if not 1 <= len(raw) <= limit: raise RetainedInventoryHold()
+            return raw, identity
+
+        def verify(self):
+            verify()
+
+    borrowed = BorrowedOriginals(); prior = []
+    for unit, _state in observations:
+        insertions = nv._unit_insertions(unit)
+        if not insertions:
+            if unit.unit_id in native_ids: raise RetainedInventoryHold()
+            continue
+        # A later native reservation requires every older reservation's actual
+        # original lineage. Never reinterpret an unproved older insertion as 0.
+        if unit.unit_id not in native_ids: raise RetainedInventoryHold()
+        target = local._json(unit.action_preimage)['identity']
+        keys = tuple(key for key, _identifier in insertions)
+        base = {'schema_version': 1, 'identity': target, 'unit_id': unit.unit_id,
+            'requested_keys': keys, 'sheet_ids': enrollment_header['sheet_ids'],
+            'enrollment_sha256': hashlib.sha256(enrollment_raw).hexdigest(),
+            'allowlist_sha256': binding.allowlist_sha256, 'policy_sha256': binding.policy_sha256}
+        # Native NV has the fixed per-sheet identity, not History/operation
+        # fields from the full ACTION envelope.
+        base['identity'] = {key: target[key] for key in
+            ('schema_version', 'generation_id', 'publish_id', 'spreadsheet_id', 'sheet', 'sheet_id')}
+        name = shared[:-len('.enrollment')] + '.unit-' + unit.unit_id + '.nv'
+        seen = nv._native_original(parent, name, binding, base, keys, ids, prior, borrowed)
+        if seen.unit_id != unit.unit_id or seen.reservations != insertions:
+            raise RetainedInventoryHold()
+        prior.append({'unit_id': unit.unit_id, 'journal_sha256': seen.journal_sha256,
+                      'reservations': seen.reservations})
+    verify()
+
+
 @contextmanager
 def _hold_catalog_retained_inventory(token, binding):
     """Pin EVERY original catalog unit/family plus shared enrollment.
@@ -908,6 +966,15 @@ def _hold_catalog_retained_inventory(token, binding):
     try:
         with ExitStack() as scope:
             observations, verify_counts = scope.enter_context(global_journal._hold_catalog_attempts(token, binding))
+            from monitor import issue_tracker_unit_catalog as catalog
+            anchored = catalog._Originals(); scope.callback(anchored.close)
+            catalog_fd, original_units, _previous = catalog._inspect(token, binding, anchored)
+            if original_units != tuple(unit for unit, _state in observations): raise RetainedInventoryHold()
+            unit_folders = {name: fd for directory, name, fd, _identity, _entries in anchored.directories
+                            if directory == catalog_fd}
+            headers = {(directory, name): raw for directory, name, _fd, _identity, raw in anchored.files}
+            native_ids = frozenset(unit.unit_id for unit in original_units
+                if local._json(headers[(unit_folders[unit.unit_id], 'HEADER')]).get('nv_original') is not None)
             owner = ownership._validated_owner(token, binding)
             parent = owner.directories[-1][0]; stem = owner.lock_name[:-5]
             parent_identity = journal._identity(os.fstat(parent))
@@ -924,11 +991,14 @@ def _hold_catalog_retained_inventory(token, binding):
                 unit_names = {name for name, _family in entries}
                 if (not {prefix + '.journal', prefix + '.journal-started'} <= unit_names
                         or (prefix + '.completion' in unit_names) != (prefix + '.completion-started' in unit_names)
-                        or any(family not in _CATALOG_FAMILIES or family == 'enrollment' for _name, family in entries)):
+                        or any(family not in _CATALOG_FAMILIES or family == 'enrollment' for _name, family in entries)
+                        or (prefix + '.nv-started' in unit_names and unit.unit_id not in native_ids)
+                        or (unit.unit_id in native_ids and not {prefix + '.nv', prefix + '.nv-started'} <= unit_names)):
                     raise RetainedInventoryHold()
                 namespace.extend(entries)
                 per_unit.append((unit, state, prefix, tuple(sorted(entries + ([(shared, 'enrollment')] if shared in names else [])))))
             namespace = tuple(sorted(namespace)); total = 0
+            native_names = {stem + '.unit-' + unit_id + '.nv' for unit_id in native_ids}
             for name, family in namespace:
                 if family.endswith('-started'):
                     entries = ((parent, name, name, 16384),)
@@ -937,9 +1007,17 @@ def _hold_catalog_retained_inventory(token, binding):
                     directories.append((name, folder, journal._identity(os.fstat(folder)), None))
                     journal._named(parent, name, folder, directory=True)
                     identity = journal._identity(os.fstat(folder))
-                    child_names = _family_entries(family, tuple(os.listdir(folder)))
+                    if name in native_names:
+                        from monitor import issue_tracker_nv_reservation as nv
+                        actual_names = _unique_names(tuple(os.listdir(folder)))
+                        if actual_names != nv._CATALOG_NAMES: raise RetainedInventoryHold()
+                        child_names = tuple(sorted(actual_names))
+                    else:
+                        child_names = _family_entries(family, tuple(os.listdir(folder)))
                     directories[-1] = (name, folder, identity, child_names)
-                    entries = tuple((folder, child, name + '/' + child, _limit(family, child)) for child in child_names)
+                    entries = tuple((folder, child, name + '/' + child,
+                        max(_limit(family, child), nv._LIMIT) if name in native_names else _limit(family, child))
+                        for child in child_names)
                 for directory, entry, relative, limit in entries:
                     fd = os.open(entry, local._flags(), dir_fd=directory)
                     files.append((directory, entry, relative, fd, journal._identity(os.fstat(fd)), None))
@@ -952,7 +1030,7 @@ def _hold_catalog_retained_inventory(token, binding):
                     files[-1] = (directory, entry, relative, fd, identity, raw)
 
             def verify():
-                verify_counts()
+                verify_counts(); anchored.verify()
                 if (ownership._validated_owner(token, binding) is not owner
                         or journal._identity(os.fstat(parent)) != parent_identity or set(os.listdir(parent)) != names):
                     raise RetainedInventoryHold()
@@ -964,7 +1042,7 @@ def _hold_catalog_retained_inventory(token, binding):
                     journal._named(directory, entry, fd, directory=False)
                     if journal._identity(os.fstat(fd)) != identity or os.pread(fd, len(raw) + 1, 0) != raw:
                         raise RetainedInventoryHold()
-                verify_counts()
+                anchored.verify(); verify_counts()
 
             verify(); _verify_retained_read_links(namespace, files)
             results = []
@@ -979,6 +1057,8 @@ def _hold_catalog_retained_inventory(token, binding):
                     tuple((relative, identity, hashlib.sha256(raw).hexdigest())
                           for _directory, _entry, relative, _fd, identity, raw in files
                           if relative.split('/')[0] in selected)))
+            _verify_catalog_native_nv_originals(binding, observations, native_ids, parent, shared,
+                                               files, directories, verify)
             verify()
             for _directory, _entry, _relative, fd, _identity, _raw in files:
                 os.fsync(fd)
