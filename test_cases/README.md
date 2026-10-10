@@ -1330,6 +1330,17 @@ native NV 目录自身也接收 exclusive creator 的原身份与 FD，接收方
 独立 direct 的 owned/recycled 两类与 actual protected C5→C6→NV 工作流
 均在异常作用域外核真实注入及清理；不是断电、设备或发送许可证明。
 
+native 原件固定发送边界增加实际 protected ETH/IB C5/C6→native NV/catalog→
+History/business/quota 原件→逐次签发的真实隔离 TLS 读取→原计数→原 CLAIM→
+固定隔离 child 单次请求流程；原 wire 请求收到 401 后仍 UNKNOWN，同一 CLAIM
+再次消费必须在 child 前拒绝。计数后原 RECEIPT 原字节换 inode、已签发读过期
+均须无 child/无请求并保留原 count/UNKNOWN。使用原 30 秒读取与 60 秒 mutation
+合同，不改时间阈值；只替换私有测试根/CA/DNS边界，实际 child 解析、FD与 TLS
+发送不替换。正常路径先在现实现上通过，不宣称实现 RED/修复。新增映射测试
+先 RED 再登记真实 fixed read/sender/supervisor/TLS/rejection 模块。此流程仍不
+建立 G1/隐藏 PROJECT 容量、共享准入/FIFO release 或生产发送许可；相关回归、
+当前精确树 full/check 和 REAL_ENV NOT RUN 如实分别记录。
+
 native 原始计数链新增实际 protected C5/C6→NV→唯一 origin/catalog→GLOBAL→
 History/business preread→永久 quota→原 C6 第一次计数流程，ETH/IB 两类均核原
 编号、原 wire、原文件不变与 count=1/UNKNOWN。NV RAW 在真实计数期间脱离名字

@@ -238,6 +238,125 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         self.assertEqual(['ETH Cabling:actual-receipted-count:unknown',
             'IB Cabling:actual-receipted-count:unknown'], observed)
 
+    def _native_original_launch_probe(self, mode):
+        observed = []
+        self._exercise_real_protected_three_panel_fixture(skip_history=False,
+            observed_cabling_insert_probe=True, receipted_intent_probe=True,
+            native_catalog_probe=True, native_catalog_c6_origin_probe=True,
+            native_catalog_retained_probe=True, native_catalog_launch_probe=(mode, observed))
+        self.assertEqual(['ETH Cabling:native-launch:' + mode,
+            'IB Cabling:native-launch:' + mode], observed)
+
+    def test_native_original_fresh_reads_count_claim_and_one_fixed_local_request(self):
+        self._native_original_launch_probe('normal')
+
+    def test_native_original_receipt_rebind_after_count_refuses_fixed_local_request(self):
+        self._native_original_launch_probe('receipt-rebind')
+
+    def test_native_original_issued_read_expiry_after_count_refuses_fixed_local_request(self):
+        self._native_original_launch_probe('read-expiry')
+
+    def _exercise_native_original_counted_launch(self, *, mode, observed, global_root, private_context,
+            writer_token, spreadsheet_token, binding, credential, unit, identity, quota_raw, history_raw,
+            reads, sheet, qualified, settings, committed, state, owner_module, global_journal):
+        from test_cases.test_req7_remote_history_match import Req7OwnedHistoryMatchWorkflowTests, load as load_read_gates
+        from test_cases.test_req7_mutation_launcher import Req7MutationLauncherWorkflowTests, load as load_mutation
+        from test_cases.test_req7_sheets_read_decode import header_response, identity_response, response
+        from test_cases.test_req7_online_whitelist_read import document as whitelist_document
+        from monitor import issue_tracker_history_read_launcher as fixed_reads, issue_tracker_local_commit as local
+        from contextlib import ExitStack
+        import xml.etree.ElementTree as ET
+        import socket
+        load_read_gates()
+        native = Req7OwnedHistoryMatchWorkflowTests()
+        native.root = global_root; native.path = global_root/'etc/ssl/certs/ca-certificates.crt'
+        native.path.parent.mkdir(parents=True); native.addCleanup = self.addCleanup
+        namespace = '{http://schemas.openxmlformats.org/spreadsheetml/2006/main}'
+        with zipfile.ZipFile(self.template) as archive:
+            original_sheet = ET.fromstring(archive.read('xl/worksheets/sheet13.xml'))
+        rows = []
+        for original_row in original_sheet.find(namespace+'sheetData'):
+            cells = [None]*6
+            for cell in original_row:
+                self.assertEqual('inlineStr', cell.get('t')); self.assertIsNone(cell.find(namespace+'f'))
+                column = ord(cell.get('r')[0])-ord('A'); self.assertTrue(0 <= column < 6)
+                cells[column] = ''.join(cell.itertext())
+            rows.append(tuple(cells))
+        whitelist_doc = whitelist_document(())
+        whitelist_doc['sheets'][0]['properties']['sheetId'] = dict(identity.sheet_ids)['Whitelist']
+        whitelist_doc['sheets'][0]['data'][0]['rowData'] = [
+            {'values': [{} if value is None else {'userEnteredValue': {'stringValue': value}}
+                for value in row]} for row in rows]
+        def owned(kind, raw, **options):
+            return native.read_owned(private_context, writer_token, spreadsheet_token,
+                binding, credential, kind, json.loads(raw), raw_body=raw, **options)
+        bundle = {name:owned(kind, response(doc).data) for name,kind,doc in (
+            ('identity_response','template_identity',identity_response()),
+            ('headers_response','template_headers',header_response()),
+            ('whitelist_response','whitelist',whitelist_doc),
+            ('metadata_response','metadata',json.loads(quota_raw.data)))}
+        bundle['history_response'] = owned('history_tail', history_raw.data)
+        current = {role+'_response':owned(kind, reads[0][role+'_response'].data, sheet=sheet)
+            for role,kind in (('discovery','activity'),('occupancy','insertion'))}
+        bundle['business_reads'] = tuple({'operation_id':reading['operation_id'], **current,
+            'row_response':None if reading['row_response'] is None else owned('row',
+                reading['row_response'].data, sheet=sheet, row=3)} for reading in reads)
+        mutation_fixture = Req7MutationLauncherWorkflowTests()
+        mutation_fixture.root = global_root; mutation_fixture.path = native.path
+        mutation_fixture.addCleanup = self.addCleanup; mutation = load_mutation()
+        before = {str(path.relative_to(state)):(path.stat().st_ino,path.read_bytes())
+            for path in state.rglob('*') if path.is_file()}
+        wire_response = b'HTTP/1.1 401 Denied\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}'
+        calls = []; children = []; reached = []; rejected = []
+        with mutation_fixture.server(wire_response, hostname='sheets.googleapis.com',
+                destination='sheets.googleapis.com') as (requests, errors), ExitStack() as transport:
+            port = socket.getaddrinfo('sheets.googleapis.com',443)[0][4][1]
+            def exercise():
+                nonlocal calls, children
+                with global_journal._hold_continuous_owned_attempt_wire(spreadsheet_token,binding,unit,
+                        writer_token=writer_token,qualified_source=qualified,store=self.store,
+                        settings=settings,whitelist_snapshot=self.snapshot,
+                        expected_template_sha256=self.snapshot.workbook_sha256,http_root=self.root,
+                        whitelist_path=self.template,**bundle) as image:
+                    reached.append('original-count-and-claim'); self.assertEqual(1,image.attempt_count)
+                    calls,children = mutation_fixture.intercept(transport,local,owner_module,
+                        writer_token,spreadsheet_token,binding,image,port)
+                    if mode == 'receipt-rebind':
+                        path = Path(self.store.project_identity)/'.tracker/generations'/committed.receipt.generation_id/'RECEIPT'
+                        raw = path.read_bytes(); inode = path.stat().st_ino
+                        path.rename(global_root/'owned-prelaunch-original-receipt')
+                        path.write_bytes(raw); path.chmod(0o600)
+                        self.assertNotEqual(inode,path.stat().st_ino); self.assertEqual(raw,path.read_bytes())
+                    if mode == 'normal':
+                        result = mutation._send_counted_original_once(writer_token,spreadsheet_token,binding,credential,unit,image)
+                        self.assertEqual((1,401,'UNKNOWN'),(result.attempt_count,result.status,result.outcome))
+                        self.assertTrue(result.termination_confirmed)
+                        with self.assertRaises(mutation.MutationLauncherHold):
+                            mutation._send_counted_original_once(writer_token,spreadsheet_token,binding,credential,unit,image)
+                    else:
+                        if mode == 'read-expiry':
+                            clock = fixed_reads._monotonic
+                            transport.enter_context(mock.patch.object(fixed_reads,'_monotonic',side_effect=lambda:clock()+31))
+                        with self.assertRaises(mutation.MutationLauncherHold) as caught:
+                            mutation._send_counted_original_once(writer_token,spreadsheet_token,binding,credential,unit,image)
+                        self.assertFalse(caught.exception.termination_confirmed); rejected.append('before-child')
+            if mode == 'normal': exercise()
+            else:
+                with self.assertRaises(global_journal.GlobalAttemptHold): exercise()
+            self.assertEqual(['original-count-and-claim'],reached)
+            self.assertEqual([] if mode == 'normal' else ['before-child'],rejected)
+            self.assertEqual(1 if mode == 'normal' else 0,len(calls))
+            self.assertEqual(1 if mode == 'normal' else 0,len(children))
+            self.assertEqual(1 if mode == 'normal' else 0,len(requests)); self.assertEqual([],errors)
+            if requests: self.assertEqual(unit.wire_bytes,requests[0][2])
+        retained = global_journal.inspect_global_unit(spreadsheet_token,binding,unit)
+        self.assertEqual((1,'UNKNOWN'),(retained.attempt_count,retained.outcome))
+        after = {str(path.relative_to(state)):(path.stat().st_ino,path.read_bytes())
+            for path in state.rglob('*') if path.is_file()}
+        for name,image in before.items():
+            if '.journal/' not in name: self.assertEqual(image,after[name],name)
+        observed.append(sheet + ':native-launch:' + mode)
+
     def test_actual_protected_native_nv_all_project_c6_fifo_keeps_originals_and_issues_no_send_permission(self):
         observed = []
         self._exercise_real_protected_three_panel_fixture(skip_history=False,
@@ -817,6 +936,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         native_catalog_creator_first_stat_probe=None,
         native_catalog_all_c6_fifo_probe=None,
         native_catalog_receipted_count_probe=None,
+        native_catalog_launch_probe=None,
         continuous_launch_probe=None,
         retry_launch_probe=None,
         qualification_replay_probe=None,
@@ -2017,7 +2137,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                                         self.assertEqual(1, len(tuple(state.glob('*.nv-started'))))
                                         native_catalog_creator_first_stat_probe.append(sheet + ':actual-first-stat-fault:owned-fd-closed')
                                     continue
-                                preparation_context = (native_count_context if native_catalog_receipted_count_probe is not None else private_context)
+                                preparation_context = (native_count_context if native_catalog_receipted_count_probe is not None or native_catalog_launch_probe is not None else private_context)
                                 prepared = preparation_context.enter_context(nv_module.hold_catalog_nv_preparation(
                                     spreadsheet_token, binding, identity, *pair, **nv_args))
                                 reservation = prepared.observation
@@ -2139,7 +2259,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                                     # Close the actual preparation before the genuine GLOBAL
                                     # writer adds its fixed journal; old namespace proof is
                                     # not silently refreshed to permit a foreign append.
-                                    if native_catalog_receipted_count_probe is not None:
+                                    if native_catalog_receipted_count_probe is not None or native_catalog_launch_probe is not None:
                                         # Close only the completed native preparation. The
                                         # actual fixed credential/allowlist roots must stay
                                         # bound through protected source replay and count.
@@ -2179,7 +2299,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                                             native_catalog_all_c6_fifo_probe.append(sheet + ':actual-fifo:read-only')
                                     self.assertEqual(original_files, {str(path.relative_to(state)): (path.stat().st_ino, path.read_bytes())
                                         for path in state.rglob('*') if path.is_file()})
-                                if native_catalog_receipted_count_probe is not None:
+                                if native_catalog_receipted_count_probe is not None or native_catalog_launch_probe is not None:
                                     from test_cases.test_req7_history_preread_journal import load as load_preread
                                     from test_cases.test_req7_metadata_reservation import load as load_quota
                                     from monitor.issue_tracker_metadata_capacity import prepare_metadata_capacity_read
@@ -2196,6 +2316,16 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                                         prepare_metadata_capacity_read(binding, credential), quota_raw)
                                     frozen_images = {str(path.relative_to(state)): (path.stat().st_ino, path.read_bytes())
                                         for path in state.rglob('*') if path.is_file()}
+                                    if native_catalog_launch_probe is not None:
+                                        mode,observed = native_catalog_launch_probe
+                                        self._exercise_native_original_counted_launch(mode=mode,observed=observed,
+                                            global_root=global_root,private_context=private_context,
+                                            writer_token=writer_token,spreadsheet_token=spreadsheet_token,
+                                            binding=binding,credential=credential,unit=unit,identity=identity,
+                                            quota_raw=quota_raw,history_raw=history_raw,reads=reads,sheet=sheet,
+                                            qualified=qualified,settings=args['settings'],committed=committed,
+                                            state=state,owner_module=owner_module,global_journal=global_journal)
+                                        continue
                                     counted = global_journal.record_receipted_original_attempt_intent(
                                         spreadsheet_token, binding, identity, unit, qualified_source=qualified,
                                         store=self.store, writer_token=writer_token, settings=args['settings'],

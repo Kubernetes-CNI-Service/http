@@ -35,6 +35,17 @@ SCRIPTS = {
 
 
 class Req7TransportManifestCandidateTests(unittest.TestCase):
+    def test_native_original_claim_workflow_registers_issued_read_fixed_sender_and_supervisor(self):
+        manifest = json.loads((ROOT / 'test_cases/script_test_manifest.json').read_text())
+        workflow = next(item for item in manifest['workflows']
+            if item['id'] == 'req7_protected_source_native_nv_catalog_c6_originals')
+        self.assertTrue({'monitor/issue_tracker_history_read_launcher.py',
+            'monitor/issue_tracker_mutation_launcher.py', 'monitor/issue_tracker_attempt_supervision.py',
+            'monitor/issue_tracker_tls_inputs.py', 'monitor/issue_tracker_mutation_rejection.py'}
+            <= set(workflow['members']), 'native original CLAIM flow must register its actual fixed local transport')
+        self.assertTrue({'test_cases.test_req7_history_read_launcher',
+            'test_cases.test_req7_mutation_launcher'} <= set(workflow['tests']))
+
     def test_native_c6_to_original_count_workflow_registers_actual_history_quota_and_target_bindings(self):
         manifest = json.loads((ROOT / 'test_cases/script_test_manifest.json').read_text())
         workflow = next(item for item in manifest['workflows']
