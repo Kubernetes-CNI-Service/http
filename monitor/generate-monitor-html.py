@@ -2252,6 +2252,7 @@ function renderIssueTrackerOnlineStatus(payload) {
   if (!label) return;
   const messages = {
     stalled: 'Issue Tracker 在线停滞（UNKNOWN）；请检查受保护证据并升级处理；自动发送禁用',
+    retry_exhausted: 'Issue Tracker 在线停滞（UNKNOWN），持久计数 6 次已耗尽；只读对账并升级处理；自动发送禁用',
     conflict: 'Issue Tracker 在线冲突（CONFLICT）；硬停止，请升级处理；自动发送禁用',
     historical_applied: 'Issue Tracker 历史完成观察；不代表当前发送许可',
     no_counted_units: 'Issue Tracker 最近对账未观察到已计数单元；不代表发送许可'

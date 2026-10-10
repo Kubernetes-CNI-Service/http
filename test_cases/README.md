@@ -2085,6 +2085,17 @@ replacement at the actual write boundary. This diagnostic count/claim join
 does not install default NEW/R2, create UNSENT records for a mixed-project
 catalog, qualify current source/freshness/G1, or prove whole REQ7/full/check.
 
+The non-authoritative online observation display distinguishes UNKNOWN with
+an original durable total count of six as `retry_exhausted`: read-only
+reconciliation and escalation, with mutation still disabled. Counts one through
+five remain stalled, and CONFLICT takes precedence. Invalid typed counts are
+rejected before any diagnostic prefix or snapshot is emitted. The fixed five
+cache fields do not carry identities, credentials or send authority. Independent
+direct tests and an actual six-intent GLOBAL journal → worker cache → authenticated
+CGI GET → generated JavaScript workflow retain all original count evidence and
+reject a seventh intent. Durable intent count is not proof of six physical wire
+attempts, T6 cadence, current-source freshness, G1 or whole REQ7/full/check.
+
 Protected reserved, original-business, receipted, continuous and shared-retry
 count boundaries now call the same catalog-aware public counter. Their original
 quota, History, receipt, audit and current-source gates remain in place. Real

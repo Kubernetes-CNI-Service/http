@@ -3526,7 +3526,7 @@
     },
     {
       "id": "req7_actual_observation_writer_protected_get_default_display",
-      "members": ["monitor/switch-collection-worker.py", "monitor/switch-collection-control.cgi", "monitor/generate-monitor-html.py", "monitor/issue_tracker_remote_history_match.py"],
+      "members": ["monitor/switch-collection-worker.py", "monitor/switch-collection-control.cgi", "monitor/generate-monitor-html.py", "monitor/issue_tracker_remote_history_match.py", "monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_spreadsheet_owner.py"],
       "tests": ["test_cases.test_req7_online_observation_status", "test_cases.test_req7_online_completion_runtime"]
     },
     {

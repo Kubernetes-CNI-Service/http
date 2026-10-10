@@ -174,7 +174,7 @@ def issue_tracker_online_status():
                 or type(value['schema_version']) is not int or value['schema_version'] != 1
                 or value['read_only'] is not True or value['mutation_disabled'] is not True
                 or type(value['state']) is not str or value['state'] not in (
-                    'stalled', 'conflict', 'historical_applied', 'no_counted_units')
+                    'stalled', 'retry_exhausted', 'conflict', 'historical_applied', 'no_counted_units')
                 or type(value['updated_at']) is not str
                 or re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}', value['updated_at']) is None):
             raise ValueError('invalid diagnostic shape')

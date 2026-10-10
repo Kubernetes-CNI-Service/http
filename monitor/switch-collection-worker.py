@@ -968,11 +968,16 @@ def _report_issue_tracker_online_read_only_result(result) -> None:
         if type(observation) is AppliedEvidenceObservation and observation.state == 'APPLIED':
             continue
         if (type(observation) is not RemoteHistoryObservation
-                or observation.state not in ('UNKNOWN', 'CONFLICT')):
+                or observation.state not in ('UNKNOWN', 'CONFLICT')
+                or type(observation.attempt_count) is not int
+                or not 1 <= observation.attempt_count <= 6):
             raise CollectionCycleHoldError('online read result shape unavailable')
-        states.append(observation.state)
-    for state in states:
+        states.append((observation.state, observation.attempt_count))
+    for state, count in states:
         diagnostic = (
+            'Issue Tracker online stalled: UNKNOWN; retry-exhausted; durable total count=6; '
+            'read-only reconciliation and escalation; mutation disabled'
+            if state == 'UNKNOWN' and count == 6 else
             'Issue Tracker online stalled: UNKNOWN; read-only reconciliation; mutation disabled'
             if state == 'UNKNOWN' else
             'Issue Tracker online stopped: CONFLICT; read-only reconciliation; mutation disabled'
@@ -992,11 +997,16 @@ def _publish_issue_tracker_online_observation_status(result) -> None:
         if type(observation) is AppliedEvidenceObservation and observation.state == 'APPLIED':
             states.append('APPLIED')
         elif (type(observation) is RemoteHistoryObservation
-                and observation.state in ('UNKNOWN', 'CONFLICT')):
-            states.append(observation.state)
+                and observation.state in ('UNKNOWN', 'CONFLICT')
+                and type(observation.attempt_count) is int
+                and 1 <= observation.attempt_count <= 6):
+            states.append('retry_exhausted' if observation.state == 'UNKNOWN'
+                          and observation.attempt_count == 6 else observation.state)
         else:
             raise CollectionCycleHoldError('online observation shape unavailable')
-    state = ('conflict' if 'CONFLICT' in states else 'stalled' if 'UNKNOWN' in states
+    state = ('conflict' if 'CONFLICT' in states
+             else 'retry_exhausted' if 'retry_exhausted' in states
+             else 'stalled' if 'UNKNOWN' in states
              else 'historical_applied' if states else 'no_counted_units')
     _write_status_file(STATUS_DIR/'issue-tracker-online.status.json',
         '.issue-tracker-online.', state, schema_version=1,

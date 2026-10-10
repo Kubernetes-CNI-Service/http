@@ -253,3 +253,124 @@ class OnlineObservationStatusWorkflowTests(unittest.TestCase):
                 result = browser(value)
                 self.assertIn('未证明', result['text']); self.assertNotIn('PRIVATE', result['text'])
                 self.assertNotIn('GO', result['text'])
+
+
+class OnlineExhaustionDirectTests(unittest.TestCase):
+    def test_sixth_unknown_count_is_explicit_exhaustion_without_new_permission(self):
+        from dataclasses import replace
+        report = WORKER._report_issue_tracker_online_read_only_result
+        publish = WORKER._publish_issue_tracker_online_observation_status
+        for count in range(1, 7):
+            value = replace(observed('UNKNOWN'), attempt_count=count)
+            expected = 'retry_exhausted' if count == 6 else 'stalled'
+            with self.subTest(count=count), mock.patch.object(WORKER, '_write_status_file') as write, \
+                    mock.patch.object(WORKER.sys, 'stderr', io.StringIO()) as stream:
+                report((value,)); publish((value,))
+                write.assert_called_once_with(WORKER.STATUS_DIR/'issue-tracker-online.status.json',
+                    '.issue-tracker-online.', expected, schema_version=1,
+                    read_only=True, mutation_disabled=True)
+                diagnostic = stream.getvalue()
+                self.assertIn('UNKNOWN', diagnostic); self.assertIn('mutation disabled', diagnostic)
+                self.assertNotIn('PRIVATE', diagnostic)
+                if count == 6:
+                    self.assertEqual('Issue Tracker online stalled: UNKNOWN; retry-exhausted; '
+                        'durable total count=6; read-only reconciliation and escalation; '
+                        'mutation disabled\n', diagnostic)
+                else:
+                    self.assertNotIn('retry-exhausted', diagnostic)
+        with mock.patch.object(WORKER, '_write_status_file') as write:
+            publish((replace(observed('UNKNOWN'), attempt_count=6), observed('CONFLICT')))
+            self.assertEqual('conflict', write.call_args.args[2], 'exhaustion never hides CONFLICT')
+
+    def test_unproved_count_cannot_report_or_write_even_after_valid_prefix(self):
+        from dataclasses import replace
+        for count in (0, 7, True, '6', None):
+            values = (observed('UNKNOWN'), replace(observed('UNKNOWN'), attempt_count=count))
+            with self.subTest(count=count), mock.patch.object(WORKER, '_write_status_file') as write, \
+                    mock.patch.object(WORKER.sys, 'stderr', io.StringIO()) as stream:
+                with self.assertRaises(WORKER.CollectionCycleHoldError):
+                    WORKER._report_issue_tracker_online_read_only_result(values)
+                self.assertEqual('', stream.getvalue(), 'no partial count classification')
+                with self.assertRaises(WORKER.CollectionCycleHoldError):
+                    WORKER._publish_issue_tracker_online_observation_status(values)
+                write.assert_not_called()
+
+
+class OnlineExhaustionWorkflowTests(unittest.TestCase):
+    def test_exhaustion_workflow_preserves_existing_canonical_owner_and_counter_registries(self):
+        import sys
+        from monitor import issue_tracker_spreadsheet_owner as owner
+        from monitor import issue_tracker_global_attempt_journal as counter
+        from monitor import issue_tracker_unit_catalog as catalog
+        self.assertIs(catalog.ownership, owner)
+        probe = OnlineExhaustionWorkflowTests(
+            'test_actual_six_durable_intents_survive_read_only_worker_cgi_browser_diagnostic')
+        try:
+            probe.test_actual_six_durable_intents_survive_read_only_worker_cgi_browser_diagnostic()
+        finally:
+            probe.doCleanups()
+        self.assertIs(owner, sys.modules['monitor.issue_tracker_spreadsheet_owner'],
+            'workflow fixture must not revoke later real scripts by replacing their owner registry')
+        self.assertIs(counter, sys.modules['monitor.issue_tracker_global_attempt_journal'])
+        self.assertIs(catalog.ownership, owner)
+
+    def test_actual_six_durable_intents_survive_read_only_worker_cgi_browser_diagnostic(self):
+        from dataclasses import replace
+        from types import SimpleNamespace
+        from test_cases import test_req7_global_attempt_journal as originals
+        from monitor import issue_tracker_global_attempt_journal as counter
+        from monitor import issue_tracker_spreadsheet_owner as owner
+        import hashlib
+        # Borrow current real registries; another fixture's setUp reloads the
+        # canonical modules and would strand already imported real readers.
+        temporary = tempfile.TemporaryDirectory(prefix='req7-six-intent-display-')
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name).resolve()
+        locks = root/'var/lib/http-ztp-container/issue-tracker'
+        locks.mkdir(parents=True, mode=0o700)
+        case = SimpleNamespace(root=root, owner=owner, module=counter,
+            value=originals.unit(), store=locks/(hashlib.sha256(originals.TARGET.encode()).hexdigest()+'.journal'))
+        states = []; seventh_refused = False
+        with originals.fixture(case.root), case.owner.spreadsheet_owner(originals.binding()) as token:
+            case.module.prepare_global_unit(token, originals.binding(), case.value)
+            for _ in range(6):
+                states.append(case.module.record_global_attempt_intent(token, originals.binding(), case.value))
+            before = originals.original_read_files(case.root)
+            try:
+                case.module.record_global_attempt_intent(token, originals.binding(), case.value)
+            except case.module.GlobalAttemptHold:
+                seventh_refused = True
+            after = originals.original_read_files(case.root)
+            actual = case.module.inspect_global_unit(token, originals.binding(), case.value)
+        # Independent assertions stay outside production owner finalizers.
+        self.assertEqual([(i, 'UNKNOWN') for i in range(1, 7)],
+            [(item.attempt_count, item.outcome) for item in states])
+        self.assertTrue(seventh_refused); self.assertEqual(before, after)
+        self.assertEqual((6, 'UNKNOWN'), (actual.attempt_count, actual.outcome))
+        self.assertEqual({'ATTEMPT-'+str(i) for i in range(1, 7)},
+            {path.name for path in case.store.glob('ATTEMPT-*')})
+        self.assertFalse(any(path.name.startswith('CLAIM-') for path in case.root.rglob('*')),
+            'durable intent count is not proof of any physical wire attempt')
+        with ExitStack() as stack:
+            status = case.root/'status'; status.mkdir(mode=0o700)
+            stack.enter_context(mock.patch.object(WORKER, 'STATUS_DIR', status))
+            stack.enter_context(mock.patch.object(WORKER, 'timestamp', return_value=STAMP))
+            stack.enter_context(mock.patch.object(CGI, 'STATUS_DIR', status))
+            stream = stack.enter_context(mock.patch.object(WORKER.sys, 'stderr', io.StringIO()))
+            value = replace(observed('UNKNOWN'), attempt_count=actual.attempt_count)
+            WORKER._report_issue_tracker_online_read_only_result((value,))
+            WORKER._publish_issue_tracker_online_observation_status((value,))
+            stack.enter_context(mock.patch.dict(os.environ, AUTH, clear=True))
+            stack.enter_context(mock.patch.object(CGI, 'process_state', return_value=(False, None)))
+            respond = stack.enter_context(mock.patch.object(CGI, 'respond'))
+            write = stack.enter_context(mock.patch.object(CGI, 'write_request'))
+            CGI.main(); respond.assert_called_once(); write.assert_not_called()
+            payload = respond.call_args.args[0]
+            self.assertEqual({**snapshot('retry_exhausted'), 'process_alive': False}, payload)
+            visible = browser(payload)
+            for text in ('UNKNOWN', '6', '耗尽', '升级', '发送禁用'):
+                self.assertIn(text, visible['text'])
+            self.assertNotIn('PRIVATE', visible['text']); self.assertNotIn('GO', visible['text'])
+            self.assertIn('retry-exhausted', stream.getvalue())
+        self.assertTrue(before.items() <= originals.original_read_files(case.root).items(),
+            'observation must not remove/reset/repair immutable original count evidence')
