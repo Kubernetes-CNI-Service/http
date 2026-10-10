@@ -65,12 +65,13 @@ class CatalogReconciliationWorkflowTests(unittest.TestCase):
     project_auth = fixture.OnlineReconciliationWorkflowTests.project_auth
     api = CatalogReconciliationDirectTests.api
 
-    def exercise(self, fault=None, *, other_project=False):
+    def exercise(self, fault=None, *, other_project=False, lazy_auth=False, count_zero=False):
         module, api = self.api()
         from monitor import issue_tracker_unit_catalog as catalog
         from monitor import issue_tracker_history_read_launcher as reads
         from monitor import issue_tracker_spreadsheet_owner as ownership
         from monitor import issue_tracker_global_attempt_journal as globals_
+        from monitor import issue_tracker_token_launcher as tokens
         real_owners = self.owners; captured = []; other_receipts = []
         def capture_owners(stack):
             actual = real_owners(stack); captured.append(actual[2]); return actual
@@ -97,16 +98,43 @@ class CatalogReconciliationWorkflowTests(unittest.TestCase):
                 other_receipts.append(project/'.tracker/generations'/generation.generation_id/'RECEIPT')
             return real_prepare(owner, binding, unit)
         with ExitStack() as stack:
+            if count_zero:
+                # Setup a genuine initialized GLOBAL/History but no attempt.
+                # The production reconciliation is never patched or given a
+                # caller count; it must inspect that original count-zero state.
+                stack.enter_context(mock.patch.object(globals_, 'record_global_attempt_intent'))
             with mock.patch.object(self, 'owners', side_effect=capture_owners), \
                     mock.patch.object(globals_, 'prepare_global_unit', side_effect=register_then_prepare):
                 writer, owner, bound, _old_auth, _config, unit, docs = self.prepare_owned(stack, native_generation=True)
-            auth, _credential, _raw = self.project_auth(stack, ownership, owner, bound)
-            self.certificates('sheets.googleapis.com')
+            refreshes = []; authentications = []
+            if not lazy_auth:
+                auth, _credential, _raw = self.project_auth(stack, ownership, owner, bound)
+                self.certificates('sheets.googleapis.com')
+            else:
+                real_refresh = tokens.OwnedProjectTokenRefreshUnit.refresh_once
+                def refresh_actual(refresh_unit):
+                    refreshes.append((refresh_unit._owner_token is owner, refresh_unit._binding == bound))
+                    # The fixture owns only TLS/credentials/DNS/child mapping;
+                    # call the same genuine fixed OAuth implementation, not an
+                    # issued-object substitute or a caller authentication plan.
+                    with mock.patch.object(tokens.OwnedProjectTokenRefreshUnit, 'refresh_once', real_refresh):
+                        value, _credential, _raw = self.project_auth(stack, ownership, owner, bound)
+                    self.certificates('sheets.googleapis.com')
+                    authentications.append(value)
+                    return value
+                stack.enter_context(mock.patch.object(tokens.OwnedProjectTokenRefreshUnit, 'refresh_once',
+                    autospec=True, side_effect=refresh_actual))
             state = self.root/'var/lib/http-ztp-container/issue-tracker'
             stem = hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()
             prefix = stem+'.unit-'+unit.unit_id
             origin = state/(prefix+'.project-origin')/'ORIGIN'
             before = original_read_files(self.root); reads_seen = []; replaced = []
+            if lazy_auth:
+                # Synthetic TLS certificates are regenerated when the owned
+                # destination changes. Keep every business/origin/state image,
+                # policy and fixed enumeration; certificates are not journals.
+                before = {name: raw for name, raw in before.items()
+                    if name.startswith(('project/', 'other-project/', 'var/lib/http-ztp-container/'))}
             documents = {kind: deepcopy(doc) for kind, doc in docs.values()}
             if fault == 'missing-fence': documents['metadata']['matchedDeveloperMetadata'].pop()
             actual_read = reads.OwnedProjectSheetsReadUnit.read_once
@@ -152,16 +180,23 @@ class CatalogReconciliationWorkflowTests(unittest.TestCase):
                         api(writer, owner, bound, auth)
                     self.assertIsNone(caught.exception.__context__)
                 else:
-                    result = api(writer, owner, bound, auth)
+                    result = api(writer, owner, bound) if lazy_auth else api(writer, owner, bound, auth)
             # Outside every production normalization scope: actual four owned
             # TLS requests, cleanup, original count and persisted safety facts.
-            self.assertEqual([(kind, 1, 1, (), 0) for kind in
+            self.assertEqual([] if count_zero else [(kind, 1, 1, (), 0) for kind in
                 ('template_identity', 'template_headers', 'metadata', 'history_tail')], reads_seen)
+            self.assertEqual([] if not lazy_auth or count_zero else [(True, True)], refreshes)
             # A deliberately invalid shared namespace/origin must itself make
             # high-level inventory inspection HOLD. Inspect the retained raw
             # attempt instead, not a permission from that invalid inventory.
             attempts = sorted((state/(prefix+'.journal')).glob('ATTEMPT-*'))
-            self.assertEqual(['ATTEMPT-1'], [path.name for path in attempts])
+            self.assertEqual([] if count_zero else ['ATTEMPT-1'], [path.name for path in attempts])
+            if count_zero:
+                self.assertEqual((), result)
+                self.assertTrue(before.items() <= original_read_files(self.root).items())
+                self.assertFalse((state/(prefix+'.completion')).exists())
+                self.assertFalse((self.root/'project/.tracker'/('REMOTE-APPLIED-'+unit.unit_id)).exists())
+                return
             self.assertEqual('UNKNOWN', json.loads(attempts[0].read_bytes())['outcome'])
             old_attempts = {name: raw for name, raw in before.items() if '/ATTEMPT-' in name}
             self.assertTrue(old_attempts)
@@ -179,7 +214,8 @@ class CatalogReconciliationWorkflowTests(unittest.TestCase):
                 self.assertTrue((state/(prefix+'.completion')/'COMPLETE').is_file())
                 self.assertTrue(before.items() <= original_read_files(self.root).items())
                 with mock.patch.object(reads, 'OwnedProjectSheetsReadUnit') as no_new:
-                    self.assertEqual(result, api(writer, owner, bound, auth))
+                    self.assertEqual(result, api(writer, owner, bound,
+                        authentications[0] if lazy_auth else auth))
                 no_new.assert_not_called()
             else:
                 self.assertFalse(key.exists()); self.assertFalse(applied.exists())
@@ -209,3 +245,9 @@ class CatalogReconciliationWorkflowTests(unittest.TestCase):
         self.exercise('other-receipt-rebind', other_project=True)
     def test_created_complete_rebound_during_all_receiver_capture_cannot_be_adopted(self):
         self.exercise('completion-capture-rebind')
+
+    def test_actual_catalog_count_zero_default_does_not_authenticate_or_read(self):
+        self.exercise(lazy_auth=True, count_zero=True)
+
+    def test_selected_counted_catalog_default_performs_one_actual_oauth_and_four_reads(self):
+        self.exercise(lazy_auth=True)

@@ -9,6 +9,7 @@ native/container identity and authentication remain separate proof obligations.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 import json
 import os
@@ -101,6 +102,18 @@ def _read_private_file(basename):
     no recovery, ownership/mode repair, second read or path reopen is allowed.
     CGI must not call this function. It is not a network/send entrypoint.
     """
+    with _hold_private_file(basename) as (source, verify):
+        verify()
+    return source
+
+
+@contextmanager
+def _hold_private_file(basename):
+    """Private continuous original scope; the same fixed names and one read.
+
+    No replacement name is adopted during this scope. Rechecks use the held
+    file/ancestor metadata, including file ctime, not a new read or reopen.
+    """
     if (type(basename) is not str
             or basename not in ("cre.json", "issue-tracker-spreadsheet-whitelist.json")
             or os.geteuid() != 0):
@@ -135,20 +148,26 @@ def _read_private_file(basename):
                 or not 1 <= file_meta.st_size <= _MAX_BYTES):
             raise CredentialFileHold()
         source = os.read(file_fd, _MAX_BYTES + 1)
-        if (len(source) != file_meta.st_size
-                or _file_identity(os.fstat(file_fd)) != _file_identity(file_meta)
-                or _file_identity(os.stat(basename, dir_fd=parent, follow_symlinks=False))
-                != _file_identity(file_meta)):
+        if len(source) != file_meta.st_size:
             raise CredentialFileHold()
-        for fd, before, private in directories:
-            after = os.fstat(fd)
-            _root_directory(after, private=private)
-            if _directory_identity(after) != _directory_identity(before):
+        def verify():
+            if (os.geteuid() != 0
+                    or _file_identity(os.fstat(file_fd)) != _file_identity(file_meta)
+                    or _file_identity(os.stat(basename, dir_fd=parent, follow_symlinks=False))
+                    != _file_identity(file_meta)):
                 raise CredentialFileHold()
-        for ancestor, name, child, before in edges:
-            if (_directory_identity(os.stat(name, dir_fd=ancestor, follow_symlinks=False))
-                    != _directory_identity(before)):
-                raise CredentialFileHold()
+            for fd, before, private in directories:
+                after = os.fstat(fd)
+                _root_directory(after, private=private)
+                if _directory_identity(after) != _directory_identity(before):
+                    raise CredentialFileHold()
+            for ancestor, name, child, before in edges:
+                if (_directory_identity(os.stat(name, dir_fd=ancestor, follow_symlinks=False))
+                        != _directory_identity(before)):
+                    raise CredentialFileHold()
+        verify()
+        yield source, verify
+        verify()
     except (OSError, ValueError, TypeError, OverflowError):
         raise CredentialFileHold() from None
     finally:
@@ -159,7 +178,6 @@ def _read_private_file(basename):
                 close_failed = True
     if close_failed:
         raise CredentialFileHold()
-    return source
 
 
 def read_service_account_info():

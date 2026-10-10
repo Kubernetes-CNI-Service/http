@@ -198,9 +198,11 @@ def _hold_completed_cycle_replay(store):
         if len(raw)!=info.st_size: raise CycleSourceHoldError('cycle input changed during pin')
         files.append((parent,name,fd,identity(info),raw))
     def binding():
-        return tuple(getattr(store,name) for name in (
+        return (tuple(getattr(store,name) for name in (
             'root_status_dir','status_dir','records_dir','witness_path',
-            'project_identity','project_key','scope','source'))
+            'project_identity','project_key','scope','source')),
+            tuple(getattr(store.gate,name) for name in (
+                'project','scope','status_dir','lane','collection_keys','state_name','lock_name')))
     try:
         if _HELD_CYCLE_REPLAY.get() is not None:
             raise CycleSourceHoldError('nested cycle reuse is not supported')

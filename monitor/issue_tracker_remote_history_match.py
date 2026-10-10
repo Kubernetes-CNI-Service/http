@@ -558,7 +558,7 @@ def _hold_reconciled_owned_project_unit(writer_token, owner_token, binding, unit
                         if matched:
                             _completion, verify_created = retained.enter_context(
                                 _hold_created_completion_evidence(writer_token, owner_token,
-                                    binding, unit, **responses))
+                                    binding, unit, _reconciliation=_catalog, **responses))
                             retained_checks.append(verify_created)
                             if _catalog is not None:
                                 _catalog.created(unit, verify_created)
@@ -595,20 +595,62 @@ def _hold_reconciled_owned_project_unit(writer_token, owner_token, binding, unit
 
 class _CatalogReconciliationOriginals:
     """Private actual-creator handoff, not caller namespace exemptions."""
-    def __init__(self, writer, token, binding, held, owner, project, rows, check_c6):
+    def __init__(self, writer, token, binding, held, owner, project, rows, check_c6, store=None):
         self.writer, self.token, self.binding = writer, token, binding
         self.held, self.owner, self.project = held, owner, project
         self.rows, self.check_c6 = rows, check_c6
         self.additions = frozenset()
+        self.store = store
+
+    def verify_cycles(self):
+        if self.store is not None:
+            from monitor import issue_tracker_cycle_source as cycles
+            from monitor.issue_tracker_online_target import _require_held_current_project_online_target
+            _require_held_current_project_online_target(self.writer, self.binding)
+            active = cycles._HELD_CYCLE_REPLAY.get()
+            if active is None or active[0] is not self.store:
+                raise RemoteHistoryHold()
+            if not cycles.read_completed_cycle_evidence(self.store):
+                raise RemoteHistoryHold()
+            _require_held_current_project_online_target(self.writer, self.binding)
+
+    def verify_sources_during_creation(self, unit):
+        """Actual creator's two exclusive names; all old originals stay held.
+
+        Names derive from an actual current-project C6 row and fixed journal
+        inputs, never a caller namespace allowance. The creator owns/checks its
+        new partial files until overlapping capture in created().
+        """
+        from monitor import issue_tracker_local_commit as local
+        from monitor import issue_tracker_attempt_journal as journal
+        self.verify_cycles()
+        if (local._owner(self.writer) is not self.project
+                or ownership._validated_owner(self.token, self.binding) is not self.owner):
+            raise RemoteHistoryHold()
+        actual_identity = journal._identity(os.fstat(self.project.project_fd))[:2]
+        if not any(row.unit == unit and row.project_identity == actual_identity for row in self.rows):
+            raise RemoteHistoryHold()
+        owner, parent, name, _base = global_journal._inputs(self.token, self.binding, unit)
+        if owner is not self.owner or parent != self.held.namespace[0]:
+            raise RemoteHistoryHold()
+        prefix = name[:-len('.journal')]
+        future = frozenset((prefix+'.completion-started', prefix+'.completion'))
+        present = future & frozenset(os.listdir(parent))
+        self.check_c6()
+        self.held.verify(parent_additions=self.additions | present)
+        self.check_c6()
+        self.verify_cycles()
 
     def verify(self):
         from monitor import issue_tracker_local_commit as local
+        self.verify_cycles()
         if (local._owner(self.writer) is not self.project
                 or ownership._validated_owner(self.token, self.binding) is not self.owner):
             raise RemoteHistoryHold()
         self.held.verify(parent_additions=self.additions)
         self.check_c6()
         self.held.verify(parent_additions=self.additions)
+        self.verify_cycles()
 
     def created(self, unit, verify_created):
         # Called only AFTER the fixed real creator yields its held originals,
@@ -642,15 +684,23 @@ class _CatalogReconciliationOriginals:
         self.verify()
 
 
-def reconcile_pending_project_units(writer_token, owner_token, binding, authentication):
+def reconcile_pending_project_units(writer_token, owner_token, binding, authentication=None):
     """Select this project's counted units from ALL actual catalog/C6 originals.
 
     No caller unit, generation, plan, path or response is accepted. Shared
     catalog/origins/families and ALL real project C6 stay pinned through the
     fixed four-read driver and its exclusive completion creator. Existing
     public readers remain strict. Count zero is not permission to authenticate,
-    create NEW or send. Original attempts and UNKNOWN are never reset.
+    create NEW or send. Without an explicit original authentication, the fixed
+    owned OAuth unit runs once, only after selecting a counted current-project
+    row with ALL originals held. No caller factory or auth result is adopted.
+    Original attempts and UNKNOWN are never reset.
     """
+    return _reconcile_pending_project_units(writer_token, owner_token, binding, authentication)
+
+
+def _reconcile_pending_project_units(writer_token, owner_token, binding, authentication=None, *, _store=None):
+    """Private fixed worker composition, never a caller cycle/verifier permit."""
     from monitor import issue_tracker_unit_catalog as catalog
     from monitor import issue_tracker_retained_inventory as inventory
     from monitor import issue_tracker_local_commit as local
@@ -699,7 +749,7 @@ def reconcile_pending_project_units(writer_token, owner_token, binding, authenti
             rows, check_c6 = inputs.enter_context(catalog._hold_project_c6_from_origins(owner_token, binding, origins))
             verify_origins(); held.verify(); check_c6()
         replay = _CatalogReconciliationOriginals(writer_token, owner_token, binding,
-            held, owner, project, rows, check_c6)
+            held, owner, project, rows, check_c6, _store)
         replay.verify()
         current_identity = journal._identity(os.fstat(project.project_fd))[:2]
         results = []
@@ -708,6 +758,11 @@ def reconcile_pending_project_units(writer_token, owner_token, binding, authenti
                 raise RemoteHistoryHold()
             if row.project_identity != current_identity or not observation.attempt_count:
                 continue
+            if authentication is None:
+                from monitor.issue_tracker_token_launcher import OwnedProjectTokenRefreshUnit
+                replay.verify()
+                authentication = OwnedProjectTokenRefreshUnit(owner_token, binding).refresh_once()
+                replay.verify()
             facts = local._json(row.c6_facts)
             generation = local.Generation(facts['generation_id'], facts['sequence'], facts['manifest_id'], writer_token)
             results.append(proofs.enter_context(_hold_reconciled_owned_project_unit(
@@ -1079,7 +1134,8 @@ def record_owned_completion_evidence(writer_token,owner_token,binding,unit,*,
 
 @contextmanager
 def _hold_created_completion_evidence(writer_token,owner_token,binding,unit,*,
-                                     identity_response,headers_response,metadata_response,history_response):
+                                     identity_response,headers_response,metadata_response,history_response,
+                                     _reconciliation=None):
     """Persist a complete matched proof set, NEVER clear UNKNOWN or resend.
 
     Only actual fixed-read objects under the current dual acquisitions may
@@ -1102,12 +1158,18 @@ def _hold_created_completion_evidence(writer_token,owner_token,binding,unit,*,
             owner,parent,name,base=global_journal._inputs(owner_token,binding,unit)
             key=name[:-len('.journal')]; name=key+'.completion'; start_name=key+'.completion-started'
             def live():
+                if _reconciliation is not None:
+                    if type(_reconciliation) is not _CatalogReconciliationOriginals:
+                        raise RemoteHistoryHold()
+                    _reconciliation.verify_sources_during_creation(unit)
                 if local._owner(writer_token) is not project: raise RemoteHistoryHold()
                 if ownership._validated_owner(owner_token,binding) is not owner: raise RemoteHistoryHold()
                 for key,kind,_file in _COMPLETION_READS:
                     require_current_owned_read(writer_token,owner_token,binding,responses[key],read_kind=kind)
                 verify()
                 if start_verify is not None: start_verify()
+                if _reconciliation is not None:
+                    _reconciliation.verify_sources_during_creation(unit)
             live()
             if name in os.listdir(parent) or start_name in os.listdir(parent): raise RemoteHistoryHold()
             start_raw=_completion_start_raw(unit,base,originals)
@@ -1120,6 +1182,7 @@ def _hold_created_completion_evidence(writer_token,owner_token,binding,unit,*,
             folder=global_journal._create_folder(parent,name)
             files={}
             for key,kind,file in _COMPLETION_READS:
+                live()
                 raw=responses[key].data
                 if file in ('METADATA-RAW','HISTORY-RAW'): journal._write_read_image(folder,file,raw)
                 else: local._write_new(folder,file,raw)
@@ -1131,6 +1194,7 @@ def _hold_created_completion_evidence(writer_token,owner_token,binding,unit,*,
                     'folder_identity':list(journal._identity(os.fstat(folder))[:2]),
                     'matched':asdict(observed),'responses':files}
             header_raw=local._canonical(header)
+            live()
             local._write_new(folder,'HEADER',header_raw)
             header_identity=list(journal._identity(os.stat('HEADER',dir_fd=folder,follow_symlinks=False)))
             # Recheck all files, original journal count/images and issued-read

@@ -943,11 +943,68 @@ def _publish_issue_tracker_lanes_after_completion(store) -> None:
     for publish, diagnostic in (
         (_publish_stage_l_status_after_completion, "Issue Tracker Stage L status unavailable"),
         (_publish_stage_l_local_after_completion, "Issue Tracker Stage L local publication unavailable"),
+        (_reconcile_issue_tracker_online_after_completion, "Issue Tracker online reconciliation unavailable"),
     ):
         try:
             publish(store)
         except Exception:
             print(diagnostic, file=sys.stderr)
+
+
+def _reconcile_issue_tracker_online_after_completion(store):
+    """Every terminal prod cycle can reconcile old UNKNOWN, never send NEW.
+
+    Independent of local due/result or cycle qualification. Only a real store
+    bound to its actual held gate and complete original archive is accepted.
+    OAuth is lazy inside ALL catalog/C6; no current counted unit means no read.
+    All cycle originals outlive the C6/creator/owner finalizers.
+    """
+    expected_fields = {'gate', 'source', 'scope', 'project_identity', 'project_key',
+        'root_status_dir', 'status_dir', 'records_dir', 'witness_path'}
+    if type(store) is not CollectionCycleStore or set(vars(store)) != expected_fields:
+        raise CollectionCycleHoldError('online reconciliation requires original cycle store')
+    gate = store.gate
+    if type(gate) is not CollectionGate:
+        raise CollectionCycleHoldError('online reconciliation requires original collection gate')
+    CollectionCycleStore._require_gate(store)
+    key = collection_cycle_project_key(gate.project)
+    root = Path(gate.status_dir)
+    status = root/'collection-cycles'/key/gate.scope/'switch_collection'
+    if (store.source != 'switch_collection' or store.scope != gate.scope
+            or store.project_identity != gate.project or store.project_key != key
+            or store.root_status_dir != root or store.status_dir != status
+            or store.records_dir != status/'records' or store.witness_path != status/'high-water.json'):
+        raise CollectionCycleHoldError('online cycle binding changed')
+    if store.scope != 'prod':
+        return None
+    from monitor.issue_tracker_cycle_source import _hold_completed_cycle_replay, read_completed_cycle_evidence
+    from monitor.issue_tracker_local_commit import try_writer_owner
+    from monitor.issue_tracker_online_target import _hold_current_project_online_target
+    from monitor.issue_tracker_spreadsheet_owner import spreadsheet_owner
+    from monitor.issue_tracker_remote_history_match import _reconcile_pending_project_units
+    from contextlib import ExitStack
+    failed = False
+    try:
+        with _hold_completed_cycle_replay(store) as verify_cycles:
+            if not read_completed_cycle_evidence(store):
+                raise CollectionCycleHoldError('online cycle chain is empty')
+            project = Path(store.project_identity)
+            with ExitStack() as target_originals:
+                with try_writer_owner(project, project/'99-output-monitor') as writer:
+                    binding = target_originals.enter_context(_hold_current_project_online_target(writer))
+                    verify_cycles()
+                    with spreadsheet_owner(binding) as owner:
+                        verify_cycles()
+                        result = _reconcile_pending_project_units(writer, owner, binding, _store=store)
+                        verify_cycles()
+                    verify_cycles()
+                verify_cycles()
+            verify_cycles()
+    except Exception:
+        failed = True
+    if failed:
+        raise CollectionCycleHoldError('online original reconciliation unavailable')
+    return result
 
 
 def _publish_stage_l_local_after_completion(store):

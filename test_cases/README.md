@@ -2126,3 +2126,24 @@ observe original start/launch/completion bytes before both dispatches. This
 dispatch-edge proof is not actual online reconciliation, a new send permit,
 whole REQ7 closure, field verification or current full/check. Existing local
 business, admission and publication tests retain their original expectations.
+
+The default terminal prod-cycle entry now independently reconciles old counted
+UNKNOWN units, even when the actual terminal cycle is nonqualifying or local
+publication is not due. AIR never enters this online lane. Its actual gate and
+store binding and ALL lifecycle originals stay held; initial config/allowlist
+originals are continuously FD/name/full-stat checked through actual OAuth,
+four reads, creator, APPLIED/key and both shared/project-owner finalizers.
+Read-only original checks after project-token revocation never extend ACTIVE
+authority. OAuth is lazy: count zero makes neither token nor Sheets request.
+Only this project's actual catalog/C6 counted rows are selected, but all other
+originals remain held. The actual exclusive creator checks cycle/target/old
+catalog/C6 sources before COMPLETE; its only two derived new names do not
+authorize a third name or adoption of replacement images. Late finalizer drift
+returns HOLD while preserving already genuine COMPLETE/APPLIED, not rollback.
+Independent initial RED cases cover same-byte cycle/config/allowlist replacement,
+gate drift, HEADER-to-COMPLETE and actual project-owner revoke/close boundaries.
+Actual owned OAuth/TLS four-read workflows and real worker/gate/emitter/three
+cron dispatch workflows are separate evidence; dispatch observers alone are
+not online proof. Existing raw UNKNOWN/count never reset. No business mutation,
+NEW/FIFO/G1 release, whole REQ7 or current full/check is established here.
+REAL_ENV remains NOT RUN; no existing automated or core field case is omitted.

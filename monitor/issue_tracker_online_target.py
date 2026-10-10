@@ -10,6 +10,8 @@ never establish provenance or authorize a wire attempt.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 import hashlib
 import json
@@ -20,6 +22,7 @@ import stat
 
 _ID = re.compile(r"[A-Za-z0-9_-]{20,}\Z")
 _MAX_ALLOWLIST_BYTES = 65536
+_HELD_CURRENT_TARGET = ContextVar('req7_held_current_target', default=None)
 
 
 class OnlineTargetHold(ValueError):
@@ -139,6 +142,16 @@ def _inspect_project_online_target(writer_token, expected):
     from monitor.issue_tracker_credential_shape import read_target_allowlist
     from tools.project_contract import safe_load_global_yaml
 
+    active = _HELD_CURRENT_TARGET.get()
+    if active is not None:
+        if active[0] is not writer_token or _owner(writer_token) is not active[3]:
+            raise OnlineTargetHold('current_target_binding_unproved')
+        active[2]()
+        if expected is not None and active[1] != expected:
+            raise OnlineTargetHold('stale_target_binding')
+        active[2]()
+        return active[1]
+
     fd = None; failed = False
     def identity(info):
         return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid,
@@ -169,3 +182,92 @@ def _inspect_project_online_target(writer_token, expected):
             except OSError: failed = True
     if failed: raise OnlineTargetHold('current_target_binding_unproved')
     return result
+
+
+def _require_held_current_project_online_target(writer_token, binding):
+    """Only the native scope supplies its actual writer/binding/originals."""
+    from monitor.issue_tracker_local_commit import _owner
+    active = _HELD_CURRENT_TARGET.get()
+    if (active is None or active[0] is not writer_token or active[1] is not binding
+            or _owner(writer_token) is not active[3]):
+        raise OnlineTargetHold('current_target_binding_unproved')
+    active[2]()
+
+
+@contextmanager
+def _hold_current_project_online_target(writer_token):
+    """Pin actual fixed config and allowlist until sensitive finalizers finish.
+
+    No caller config/path/binding/checker. Public revalidation inside this scope
+    checks these originals instead of accepting a same-byte replacement inode.
+    """
+    from monitor import issue_tracker_local_commit as local
+    from monitor.issue_tracker_credential_shape import _hold_private_file
+    from tools.project_contract import safe_load_global_yaml
+
+    def identity(info):
+        return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid,
+                info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    fd = None; key = None; failed = False; project_fds = []; project_edges = []
+    try:
+        if (_HELD_CURRENT_TARGET.get() is not None or os.geteuid() != 0
+                or any(not hasattr(os, flag) for flag in ('O_NOFOLLOW', 'O_CLOEXEC', 'O_NONBLOCK'))):
+            raise OnlineTargetHold('current_target_binding_unproved')
+        owner = local._owner(writer_token)
+        # Independently owned no-follow ancestor FDs overlap the actual owner
+        # BEFORE its revoke/close. These are read-only originals, not an ACTIVE
+        # token extension; every public/driver use still validates that token.
+        parent = local.os.open('/', local._flags(directory=True)); project_fds.append(parent)
+        root_identity = identity(os.fstat(parent))[:5]
+        for name in owner.project.parts[1:]:
+            child = local.os.open(name, local._flags(directory=True), dir_fd=parent)
+            project_fds.append(child)
+            project_edges.append((parent, name, child, identity(os.fstat(child))[:5]))
+            parent = child
+        project_fd = parent
+        if identity(os.fstat(project_fd))[:2] != identity(os.fstat(owner.project_fd))[:2]:
+            raise OnlineTargetHold('current_target_binding_unproved')
+        fd = os.open('01-global.yaml', os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK,
+            dir_fd=project_fd)
+        before = os.fstat(fd)
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != 0 or before.st_mode & 0o022
+                or before.st_nlink != 1 or not 1 <= before.st_size <= 1024*1024):
+            raise OnlineTargetHold('current_target_binding_unproved')
+        raw = os.read(fd, 1024*1024+1)
+        if len(raw) != before.st_size:
+            raise OnlineTargetHold('current_target_binding_unproved')
+        document = safe_load_global_yaml(raw.decode('utf-8', 'strict'))
+        with _hold_private_file('issue-tracker-spreadsheet-whitelist.json') as (allowlist, check_allowlist):
+            binding = bind_online_target(document, freeze_target_allowlist(allowlist))
+            def verify():
+                if (os.geteuid() != 0
+                        or identity(os.fstat(project_fds[0]))[:5] != root_identity
+                        or identity(os.fstat(fd)) != identity(before)
+                        or identity(os.stat('01-global.yaml', dir_fd=project_fd,
+                            follow_symlinks=False)) != identity(before)):
+                    raise OnlineTargetHold('current_target_binding_unproved')
+                for ancestor, name, child, original in project_edges:
+                    if (identity(os.fstat(child))[:5] != original
+                            or identity(os.stat(name, dir_fd=ancestor, follow_symlinks=False))[:5] != original):
+                        raise OnlineTargetHold('current_target_binding_unproved')
+                check_allowlist()
+            verify()
+            if local._owner(writer_token) is not owner:
+                raise OnlineTargetHold('current_target_binding_unproved')
+            key = _HELD_CURRENT_TARGET.set((writer_token, binding, verify, owner))
+            try:
+                yield binding
+                verify()
+            finally:
+                _HELD_CURRENT_TARGET.reset(key); key = None
+    except Exception:
+        failed = True
+    finally:
+        if fd is not None:
+            try: os.close(fd)
+            except OSError: failed = True
+        for descriptor in reversed(project_fds):
+            try: local.os.close(descriptor)
+            except OSError: failed = True
+    if failed:
+        raise OnlineTargetHold('current_target_binding_unproved')

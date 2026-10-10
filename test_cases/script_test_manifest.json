@@ -207,6 +207,7 @@
       "description": "REQ-7 本地 qualified-set 与不可变 manifest 的直接及双脚本流程合同",
       "tests": [
         "test_cases.test_req7_completion_lane_dispatch",
+        "test_cases.test_req7_online_completion_runtime",
         "test_cases.test_issue_tracker_qualification",
         "test_cases.test_issue_tracker_manifest",
         "test_cases.test_issue_tracker_manifest_workflow",
@@ -833,6 +834,11 @@
       "tests": [
         "test_cases.test_req7_completion_lane_dispatch"
       ]
+    },
+    {
+      "id": "req7_online_completion_originals",
+      "paths": ["monitor/switch-collection-worker.py", "monitor/issue_tracker_cycle_source.py", "monitor/issue_tracker_online_target.py", "monitor/issue_tracker_credential_shape.py", "monitor/issue_tracker_remote_history_match.py"],
+      "tests": ["test_cases.test_req7_online_completion_runtime"]
     },
     {
       "id": "finished_project_lifecycle",
@@ -3490,6 +3496,11 @@
       "id": "req7_all_catalog_project_original_reconciliation",
       "members": ["monitor/issue_tracker_remote_history_match.py", "monitor/issue_tracker_unit_catalog.py", "monitor/issue_tracker_retained_inventory.py", "monitor/issue_tracker_history_read_launcher.py", "monitor/issue_tracker_token_launcher.py", "monitor/issue_tracker_sdk_authentication.py", "monitor/issue_tracker_online_target.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_history_preread_journal.py", "monitor/issue_tracker_enrollment_journal.py"],
       "tests": ["test_cases.test_req7_catalog_reconciliation"]
+    },
+    {
+      "id": "req7_default_terminal_cycle_original_reconciliation",
+      "members": ["monitor/switch-collection-worker.py", "monitor/switch_collection_gate.py", "monitor/collection_v2_emitter.py", "ethernet/monitor/cron.sh", "infiniband/monitor/cron.sh", "nvlink/monitor/cron.sh", "monitor/issue_tracker_cycle_source.py", "monitor/issue_tracker_online_target.py", "monitor/issue_tracker_credential_shape.py", "monitor/issue_tracker_remote_history_match.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_unit_catalog.py", "monitor/issue_tracker_retained_inventory.py", "monitor/issue_tracker_history_read_launcher.py", "monitor/issue_tracker_token_launcher.py", "monitor/issue_tracker_sdk_authentication.py", "monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_history_preread_journal.py", "monitor/issue_tracker_enrollment_journal.py", "monitor/issue_tracker_tls_inputs.py", "tools/project_contract.py"],
+      "tests": ["test_cases.test_req7_online_completion_runtime"]
     },
     {
       "id": "req7_pending_catalog_shared_owner_native_originals",
