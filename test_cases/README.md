@@ -1324,6 +1324,12 @@ catalog/count 与精确 parent namespace 持续贯穿 consumer 和退出，原�
 catalog→GLOBAL→retained workflow 是只读原件接线证据，不是容量释放、APPLIED、
 freshness、NEW/send 或整个 REQ7/full 证明。
 
+native NV 目录自身也接收 exclusive creator 的原身份与 FD，接收方首次
+`fstat` 在 conditional-close 范围内；失败只关本次原 dev/inode，外来复用
+对象保持打开。失败保留 `nv-started` 与空/部分目录，冷重试不得采用或修复。
+独立 direct 的 owned/recycled 两类与 actual protected C5→C6→NV 工作流
+均在异常作用域外核真实注入及清理；不是断电、设备或发送许可证明。
+
 old/current/indexed 以及 catalog 内部重读共用固定 16MiB 原始图像预算，按持续
 持有的 dev/inode 去重，并在实际 pread 前核单文件 size 与整组预算；同字节不同
 inode 分别计费，同一原件仍逐次真实读取并核 full-stat/named/bytes，不能缓存许可。

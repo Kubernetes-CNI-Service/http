@@ -35,6 +35,45 @@ def load():
     return module
 
 
+@contextmanager
+def native_creator_first_stat_fault(module, root, *, recycle=False):
+    """Fault only our actual exclusive NV return, retaining exact cleanup IDs."""
+    real_create = module.global_journal._create_folder; real_fstat = os.fstat
+    created = []; marks = []; foreign_fd = None
+    if recycle:
+        foreign = root / 'owned-native-creator-foreign'; foreign.write_bytes(b'foreign original must survive')
+        foreign_fd = os.open(str(foreign), os.O_RDONLY)
+    def creating(*args, **kwargs):
+        result = real_create(*args, **kwargs)
+        if '.unit-' in args[1] and args[1].endswith('.nv'):
+            fd = result[0] if isinstance(result, tuple) else result
+            created.append((fd, real_fstat(fd)))
+        return result
+    def first_stat(fd):
+        if created and fd == created[0][0] and not marks:
+            if recycle:
+                os.close(fd); os.dup2(foreign_fd, fd)
+            marks.append('actual-first-stat-fault')
+            raise OSError('native receiving stat failed')
+        return real_fstat(fd)
+    try:
+        with mock.patch.object(module.global_journal, '_create_folder', side_effect=creating), \
+                mock.patch('os.fstat', side_effect=first_stat):
+            yield created, marks, foreign_fd, real_fstat
+    finally:
+        # Exact fixture-owned cleanup after RED as well as GREEN. Never scan
+        # system descriptors or close an unrelated recycled object.
+        for fd, original in created:
+            try:
+                current = real_fstat(fd)
+                expected = (original.st_dev, original.st_ino)
+                if foreign_fd is not None:
+                    external = real_fstat(foreign_fd); expected = (external.st_dev, external.st_ino)
+                if (current.st_dev, current.st_ino) == expected: os.close(fd)
+            except OSError: pass
+        if foreign_fd is not None: os.close(foreign_fd)
+
+
 def source(sheet, identifiers):
     rows = []
     for index, identifier in enumerate(identifiers):
@@ -814,6 +853,36 @@ class Req7CatalogNvPreparationTests(unittest.TestCase):
     def test_native_c6_origin_first_stat_failure_preserves_recycled_foreign_creator(self):
         self._exercise_native_c6_origin_first_stat_cleanup(True)
 
+    def _exercise_native_nv_first_stat_cleanup(self, recycle):
+        module = self.api()
+        with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
+            self.initialize(token)
+            with native_creator_first_stat_fault(module, self.root, recycle=recycle) as (created, marks, foreign_fd, real_fstat):
+                with self.assertRaises(module.NvReservationHold):
+                    with self.preparation(token): self.fail('faulted creator yielded preparation')
+                self.assertEqual(['actual-first-stat-fault'], marks)
+                self.assertEqual(1, len(created)); fd, original = created[0]
+                if recycle:
+                    current = real_fstat(fd); external = real_fstat(foreign_fd)
+                    self.assertEqual((external.st_dev, external.st_ino), (current.st_dev, current.st_ino))
+                    self.assertEqual(b'foreign original must survive', os.pread(fd, 128, 0))
+                else:
+                    with self.assertRaises(OSError, msg='native first receive leaked exclusive original FD'): real_fstat(fd)
+                self.assertEqual(1, len(tuple(self.state.glob('*.nv-started'))))
+                folders = tuple(self.state.glob('*.nv')); self.assertEqual(1, len(folders))
+                self.assertEqual([], os.listdir(folders[0]))
+                self.assertFalse(any(path.name.endswith('.units') or '.journal' in path.name for path in self.state.iterdir()))
+                before = self.files()
+                with self.assertRaises(module.NvReservationHold):
+                    with self.preparation(token): self.fail('interrupted creator was adopted')
+                self.assertEqual(before, self.files())
+
+    def test_native_nv_first_stat_failure_closes_only_owned_creator_before_handoff(self):
+        self._exercise_native_nv_first_stat_cleanup(False)
+
+    def test_native_nv_first_stat_failure_preserves_foreign_recycled_descriptor(self):
+        self._exercise_native_nv_first_stat_cleanup(True)
+
     def test_native_catalog_retained_inventory_reads_all_six_nv_originals_and_witness_without_authority(self):
         from test_cases.test_req7_retained_global_inventory import load as inventory_load
         with self.native_c6_origin_fixture() as (module, writer, token, unit):
@@ -1168,8 +1237,10 @@ class Req7CatalogNvPreparationTests(unittest.TestCase):
         module = self.api(); create = module.global_journal._create_folder; read = module._native_original
         created = []; blockers = []; alive = []; reached = []; acknowledged = []
         blocker = self.root / 'unrelated-owned-fd'; blocker.write_bytes(b'unrelated')
-        def creating(parent, name):
-            fd = create(parent, name); created.append(fd); return fd
+        def creating(parent, name, **keywords):
+            result = create(parent, name, **keywords)
+            fd = result[0] if isinstance(result, tuple) else result
+            created.append(fd); return result
         def inspecting(*args, **kwargs):
             try: alive.append(os.fstat(created[-1]).st_ino == (self.state / args[1]).stat().st_ino)
             except OSError: alive.append(False)

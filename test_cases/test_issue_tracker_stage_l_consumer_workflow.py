@@ -221,6 +221,14 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             observed_cabling_insert_probe=True, native_catalog_probe=True, native_catalog_c6_origin_probe=True,
             native_catalog_retained_probe=True)
 
+    def test_actual_protected_c6_native_nv_creator_receive_fault_holds_before_compile_and_closes_owned_fd(self):
+        observed = []
+        self._exercise_real_protected_three_panel_fixture(skip_history=False,
+            observed_cabling_insert_probe=True, native_catalog_probe=True,
+            native_catalog_creator_first_stat_probe=observed)
+        self.assertEqual(['ETH Cabling:actual-first-stat-fault:owned-fd-closed',
+                          'IB Cabling:actual-first-stat-fault:owned-fd-closed'], observed)
+
     def test_native_compiler_holds_nv_original_drift_during_final_real_receipt_read(self):
         self._exercise_native_compiler_return_fault('same_byte_replace')
 
@@ -789,6 +797,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         before_cabling_fixture=None, native_catalog_probe=False, native_catalog_return_fault=None,
         native_catalog_c6_origin_probe=False,
         native_catalog_retained_probe=False,
+        native_catalog_creator_first_stat_probe=None,
         continuous_launch_probe=None,
         retry_launch_probe=None,
         qualification_replay_probe=None,
@@ -1974,6 +1983,21 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                                 from test_cases.test_req7_unit_catalog import load as load_catalog
                                 catalog = load_catalog(reset_dependencies=False)
                                 self.assertIs(catalog.ownership, owner_module, 'native catalog must use this actual fixture owner registry')
+                                if native_catalog_creator_first_stat_probe is not None:
+                                    from test_cases.test_req7_nv_reservation import native_creator_first_stat_fault
+                                    with native_creator_first_stat_fault(nv_module, global_root) as (created, marks, _foreign, real_fstat):
+                                        with self.assertRaises(nv_module.NvReservationHold):
+                                            with nv_module.hold_catalog_nv_preparation(spreadsheet_token, binding, identity, *pair, **nv_args):
+                                                self.fail('actual protected C6 fault reached compiler handoff')
+                                        self.assertEqual(['actual-first-stat-fault'], marks)
+                                        self.assertEqual(1, len(created))
+                                        with self.assertRaises(OSError, msg='actual protected C6 NV creator leaked owned FD'):
+                                            real_fstat(created[0][0])
+                                        self.assertFalse(any(path.name.endswith('.units') or path.name.endswith('.project-origin')
+                                            or '.journal' in path.name for path in state.iterdir()))
+                                        self.assertEqual(1, len(tuple(state.glob('*.nv-started'))))
+                                        native_catalog_creator_first_stat_probe.append(sheet + ':actual-first-stat-fault:owned-fd-closed')
+                                    continue
                                 prepared = private_context.enter_context(nv_module.hold_catalog_nv_preparation(
                                     spreadsheet_token, binding, identity, *pair, **nv_args))
                                 reservation = prepared.observation

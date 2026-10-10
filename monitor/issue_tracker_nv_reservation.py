@@ -485,10 +485,14 @@ def hold_catalog_nv_preparation(token, binding, identity, eth_plan, eth_response
         raw, started_identity = _write_catalog_image(parent, started, witness, current, verify_witness)
         if raw != witness:
             raise NvReservationHold()
-        folder = global_journal._create_folder(parent, name)
-        folder_identity = journal._identity(os.fstat(folder))
+        folder, folder_identity = global_journal._create_folder(parent, name, _return_original=True)
         folder_retained = False
         try:
+            # Receive the creator's actual cleanup provenance before the
+            # first consumer stat can fail. A recycled foreign FD is HOLD,
+            # never ours to close; partial NV and its witness stay retained.
+            if journal._identity(os.fstat(folder)) != folder_identity:
+                raise NvReservationHold()
             header = {**common, 'prior_sha256': hashlib.sha256(prior_raw).hexdigest(),
                       'started_identity': list(started_identity), 'started_sha256': hashlib.sha256(witness).hexdigest(),
                       'directory_identity': list(folder_identity[:2])}
