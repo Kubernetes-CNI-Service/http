@@ -2039,3 +2039,24 @@ Public owner failures keep the original sanitized GlobalAttemptHold contract.
 CLAIM/launch, multiple pending/superseded frontier integration, current source,
 G1/shared cadence/default worker, current full/check and whole REQ7 remain OPEN.
 These diagnostic counts are not evidence of actual mutation wire sends.
+
+Settled-final-successor counted-wire handoff now holds every original catalog,
+origin, C6 and shared family before interpretation, plus genuine OTHER
+COMPLETE/APPLIED/key pairs through exclusive dispatch HEADER/INITIALIZED and
+one derived CLAIM creator, consume, final semantic checks and exit. The actual
+selected writer/project must match; only the final unit with all OTHER units
+genuinely settled is accepted. Missing APPLIED, an unrelated writer or another
+pending/UNSENT unit remains HOLD. Legacy and unresolved UNKNOWN contracts are
+unchanged. Old count/CLAIM images remain original, each count is consumed once,
+copied images and cold-process reuse are rejected, and the six-count limit is
+not reset. Selected C6 or old APPLIED same-byte/new-inode replacement at entry
+or last consumer refuses return while keeping partial/UNKNOWN evidence.
+Independent direct tests and the actual C6/catalog/four-read/APPLIED/successor
+workflow include a fixed isolated child making one owned loopback TLS request
+with the original wire. It receives 401/UNKNOWN, not COMPLETE, and is reaped.
+Negative consumer/cold assertions are checked outside production exception
+normalization; a swallowed assertion is not refusal evidence. This bounded
+handoff is not current-source qualification, freshness/G1, shared cadence,
+multi-pending/superseded FIFO, default online worker, whole REQ7 or current
+formal full/check proof. No real device, Cloud or power-loss verification is
+claimed; existing automated cases and production release gates remain intact.

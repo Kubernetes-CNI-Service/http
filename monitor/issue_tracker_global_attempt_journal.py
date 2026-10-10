@@ -102,12 +102,12 @@ def _hold_counted_original_wire(writer_token,token,binding,unit):
     original = claims = wire = action = image = None; wire_identity = action_identity = None; failed = False
     prefix_originals = []; catalog_scope = ExitStack(); verify_catalog = lambda: None
     catalog_created = catalog_claimed = None; catalog_dispatch_present = None
+    catalog_settled = False; new_images = []
     try:
         project = local._owner(writer_token)
-        _guard_catalog_transition(token, binding, unit, preparing=False)
         sheet_owner = ownership._validated_owner(token, binding)
         if _catalog_present(sheet_owner):
-            verify_catalog, catalog_dispatch_present, catalog_created, catalog_claimed = catalog_scope.enter_context(
+            verify_catalog, catalog_dispatch_present, catalog_created, catalog_claimed, catalog_settled = catalog_scope.enter_context(
                 _hold_catalog_counted_originals(writer_token, token, binding, unit))
         owner,parent,name,base = _inputs(token,binding,unit)
         _require_no_completion(parent,name)
@@ -157,9 +157,15 @@ def _hold_counted_original_wire(writer_token,token,binding,unit):
         if claim_name not in os.listdir(parent):
             if count != 1: raise GlobalAttemptHold()
             claims = _create_folder(parent,claim_name)
-            local._write_new(claims,'HEADER',local._canonical(header))
-            # Never mark initialized before every prior image barrier succeeds.
-            local._write_new(claims,'INITIALIZED',_initialization(header))
+            if catalog_settled:
+                new_images.append(catalog_scope.enter_context(_write_global_start(claims,'HEADER',local._canonical(header))))
+                new_images[-1]()
+                new_images.append(catalog_scope.enter_context(_write_global_start(claims,'INITIALIZED',_initialization(header))))
+                for verify_new in new_images: verify_new()
+            else:
+                local._write_new(claims,'HEADER',local._canonical(header))
+                # Never mark initialized before every prior image barrier succeeds.
+                local._write_new(claims,'INITIALIZED',_initialization(header))
             if catalog_created is not None:
                 catalog_created(claims)
         else: claims = local._directory(parent,claim_name)
@@ -174,10 +180,15 @@ def _hold_counted_original_wire(writer_token,token,binding,unit):
         if (journal._identity(os.fstat(wire)) != wire_identity
                 or journal._identity(os.fstat(action)) != action_identity): raise GlobalAttemptHold()
         verify_catalog()
-        local._write_new(claims,f'CLAIM-{count}',local._canonical({'schema_version':1,
+        claim_raw = local._canonical({'schema_version':1,
             'unit_id':unit.unit_id,'wire_sha256':unit.wire_sha256,'attempt_count':count,
             'original_intent_sha256':hashlib.sha256(journal._read(original,f'ATTEMPT-{count}',16384)).hexdigest(),
-            'previous_sha256':previous,'outcome':'CONSUMED_UNKNOWN_NOT_SEND_PROOF'}))
+            'previous_sha256':previous,'outcome':'CONSUMED_UNKNOWN_NOT_SEND_PROOF'})
+        if catalog_settled:
+            new_images.append(catalog_scope.enter_context(_write_global_start(claims,f'CLAIM-{count}',claim_raw)))
+            for verify_new in new_images: verify_new()
+        else:
+            local._write_new(claims,f'CLAIM-{count}',claim_raw)
         if catalog_claimed is not None:
             catalog_claimed(claims, count)
         if _inspect_wire_claims(claims,original,unit,header)[0] != count: raise GlobalAttemptHold()
@@ -191,6 +202,7 @@ def _hold_counted_original_wire(writer_token,token,binding,unit):
                 or journal._identity(os.fstat(wire)) != wire_identity
                 or journal._identity(os.fstat(action)) != action_identity): raise GlobalAttemptHold()
         def verify():
+            for verify_new in new_images: verify_new()
             verify_catalog()
             _require_no_completion(parent,name)
             if (journal._identity(os.fstat(original)) != original_identity
@@ -223,6 +235,7 @@ def _hold_counted_original_wire(writer_token,token,binding,unit):
             # ALL catalog/count originals must still be held AFTER the last
             # semantic replay, not merely at entry or eventual scope exit.
             verify_catalog()
+            for verify_new in new_images: verify_new()
         verify()
         image = CountedOriginalWireObservation(count,unit.wire_sha256,wire,action)
         with _WIRE_CLAIM_GUARD:
@@ -312,7 +325,7 @@ def _hold_catalog_counted_originals(writer_token, token, binding, selected_unit)
     necessary original evidence, not fresh admission or a launch permit.
     """
     from monitor import issue_tracker_unit_catalog as catalog
-    held = catalog._Originals(); failed = False
+    held = catalog._Originals(); failed = False; settlement_scope = ExitStack()
     try:
         project = local._owner(writer_token)
         owner = ownership._validated_owner(token, binding)
@@ -363,16 +376,46 @@ def _hold_catalog_counted_originals(writer_token, token, binding, selected_unit)
             held.verify(); observations.append((unit, count))
         position = units.index(selected_unit)
         selected_count = observations[position][1]
-        if not 1 <= selected_count <= 6 or any(count and unit != selected_unit for unit, count in observations):
+        if not 1 <= selected_count <= 6:
             raise GlobalAttemptHold()
-        keys = {tuple(row['activity_key']) for row in local._json(selected_unit.action_preimage)['business']}
-        if any(keys & {tuple(row['activity_key']) for row in local._json(unit.action_preimage)['business']}
-               for unit in units[:position]):
-            raise GlobalAttemptHold()
+        successor = any(count and unit != selected_unit for unit, count in observations)
+        verify_settlement = lambda: None
+        if successor:
+            # Every existing family is pinned before actual settlement replay.
+            # This scope's later allowance remains only the selected dispatch
+            # initialization and ONE derived CLAIM; nothing else may change.
+            from monitor import issue_tracker_retained_inventory as inventory
+            captured = {name for p,name,*_rest in held.files if p == parent}
+            captured.update(name for p,name,*_rest in held.directories if p == parent)
+            actual = {name for name in os.listdir(parent) if name.startswith(stem + '.')}
+            allowed = {stem+'.lock',stem+'.enrollment',stem+'.units',stem+'.units-started',
+                *(stem+'.units-position-%020d' % index for index in range(1,len(units)+1))}
+            allowed.update(stem+'.unit-'+unit.unit_id+'.'+family
+                for unit in units for family in inventory._CATALOG_FAMILIES if family != 'enrollment')
+            if actual - allowed: raise GlobalAttemptHold()
+            for name in sorted(actual - captured - {stem+'.lock'}):
+                if name.endswith('-started'): held.file(parent,name,16384)
+                else:
+                    folder = held.directory(parent,name); family = name.rsplit('.',1)[-1]
+                    entries = tuple(os.listdir(folder))
+                    if family == 'nv':
+                        from monitor import issue_tracker_nv_reservation as nv
+                        if frozenset(entries) != nv._CATALOG_NAMES: raise GlobalAttemptHold()
+                    else: inventory._family_entries(family,entries)
+                    for entry in sorted(entries): held.file(folder,entry,inventory._limit(family,entry))
+            held.verify()
+            verify_settlement = settlement_scope.enter_context(
+                _hold_settled_catalog_claim_inputs(writer_token,token,binding,selected_unit))
+            verify_settlement(); held.verify()
+        else:
+            _guard_catalog_transition(token,binding,selected_unit,preparing=False)
         dispatch = stem + '.unit-' + selected_unit.unit_id + '.dispatch'
         present = dispatch in os.listdir(parent); retained_dispatch = None
         if present:
-            retained_dispatch = held.directory(parent, dispatch)
+            captured_dispatch = [folder for p,name,folder,_identity,_names in held.directories
+                if p == parent and name == dispatch]
+            if len(captured_dispatch) > 1: raise GlobalAttemptHold()
+            retained_dispatch = captured_dispatch[0] if captured_dispatch else held.directory(parent,dispatch)
             names = set(os.listdir(retained_dispatch)); used = len(names) - 2
             if not 0 <= used <= 6 or names != {'HEADER', 'INITIALIZED',
                     *(f'CLAIM-{index}' for index in range(1, used + 1))}:
@@ -383,6 +426,8 @@ def _hold_catalog_counted_originals(writer_token, token, binding, selected_unit)
         def verify():
             if local._owner(writer_token) is not project or ownership._validated_owner(token, binding) is not owner:
                 raise GlobalAttemptHold()
+            held.verify(parent_additions=additions, appended_to=appended)
+            verify_settlement()
             held.verify(parent_additions=additions, appended_to=appended)
         def created_dispatch(folder):
             nonlocal created, retained_dispatch
@@ -412,16 +457,88 @@ def _hold_catalog_counted_originals(writer_token, token, binding, selected_unit)
             held.file(retained_dispatch, entry, 16384)
             claimed = True; verify()
         verify()
-        yield verify, present, created_dispatch, claimed_dispatch
+        yield verify, present, created_dispatch, claimed_dispatch, successor
         verify()
         if not claimed:
             raise GlobalAttemptHold()
     except Exception:
         failed = True
     finally:
+        try: settlement_scope.close()
+        except Exception: failed = True
         held.close()
     if failed:
         raise GlobalAttemptHold() from None
+
+
+@contextmanager
+def _hold_settled_catalog_claim_inputs(writer_token,token,binding,unit):
+    """Actual OTHER settlement/C6 originals through CLAIM consumers and exit.
+
+    Fixed last-unit join, not a count writer, FIFO bypass or fresh admission.
+    The outer append-aware holder pins ALL shared originals before entry;
+    these project/COMPLETE/APPLIED/key scopes never reopen or adopt replacements.
+    Selected count/UNKNOWN is retained, and its actual C6 project must belong
+    to this exact original writer. No caller path/mode/label/verifier is used.
+    """
+    failed = False
+    try:
+        project = local._owner(writer_token)
+        owner = ownership._validated_owner(token,binding)
+        from monitor import issue_tracker_unit_catalog as catalog
+        from monitor import issue_tracker_remote_history_match as remote
+        with ExitStack() as scope:
+            with _hold_catalog_attempts(token,binding) as (observed,verify_counts):
+                units = tuple(original for original,_state in observed)
+                if (len(units) < 2 or units[-1] != unit
+                        or not 1 <= observed[-1][1].attempt_count <= 6
+                        or any(not state.attempt_count for _original,state in observed[:-1])):
+                    raise GlobalAttemptHold()
+                verify_counts()
+            with catalog.hold_pending_project_origins(token,binding) as (origins,verify_origins):
+                if tuple(row.unit for row in origins) != units: raise GlobalAttemptHold()
+                rows,verify_c6 = scope.enter_context(catalog._hold_project_c6_from_origins(token,binding,origins))
+                verify_origins(); verify_c6()
+            if (tuple(row.unit for row in rows) != units
+                    or rows[-1].project_identity != journal._identity(os.fstat(project.project_fd))[:2]):
+                raise GlobalAttemptHold()
+            validators = []; prior_keys = []
+            for row in rows:
+                matches = [(writer,local._owner(writer)) for writer,active in tuple(local._ACTIVE.items())
+                    if active.pid == os.getpid()
+                    and journal._identity(os.fstat(active.project_fd))[:2] == row.project_identity]
+                if len(matches) != 1: raise GlobalAttemptHold()
+                writer,actual_project = matches[0]
+                if any(name.startswith('REMOTE-UNSENT-SUPERSESSION-') for name in os.listdir(actual_project.root_fd)):
+                    raise GlobalAttemptHold()
+                if row.unit == unit:
+                    if writer is not writer_token or actual_project is not project: raise GlobalAttemptHold()
+                    continue
+                facts = local._json(row.c6_facts)
+                generation = local.Generation(facts['generation_id'],facts['sequence'],facts['manifest_id'],writer)
+                actual,verify_inputs,body,keys = scope.enter_context(
+                    remote._hold_settled_catalog_key_watermarks(writer,token,binding,row.unit,generation))
+                if (actual is not actual_project or tuple(body['project_identity']) != row.project_identity
+                        or body['binding']['unit_id'] != row.unit.unit_id): raise GlobalAttemptHold()
+                validators.append(verify_inputs); prior_keys.append((row.project_identity,keys))
+            sequence = local._json(rows[-1].c6_facts)['sequence']
+            keys = {tuple(item['activity_key']) for item in local._json(unit.action_preimage)['business']}
+            if any(original_project == rows[-1].project_identity and key in keys and maximum >= sequence
+                for original_project,watermarks in prior_keys for key,maximum in watermarks):
+                raise GlobalAttemptHold()
+            parent = owner.directories[-1][0]
+            name = owner.lock_name[:-5]+'.unit-'+unit.unit_id+'.journal'
+            def verify():
+                if local._owner(writer_token) is not project or ownership._validated_owner(token,binding) is not owner:
+                    raise GlobalAttemptHold()
+                _require_no_completion(parent,name); verify_c6()
+                for validate in validators: validate()
+                verify_c6(); _require_no_completion(parent,name)
+            verify()
+            yield verify
+            verify()
+    except Exception: failed = True
+    if failed: raise GlobalAttemptHold()
 
 
 def _inputs(token, binding, unit):

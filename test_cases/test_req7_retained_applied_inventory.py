@@ -53,7 +53,8 @@ class RetainedAppliedInventoryTests(unittest.TestCase):
                                      native_nv=False, rebind_after_nv_start=False,
                                      successor_count=False, rebind_after_attempt=False,
                                      lose_applied_before_count=False, another_pending=False,
-                                     rebind_attempt_image=False):
+                                     rebind_attempt_image=False, successor_claim=False,
+                                     claim_fault=None):
         """Real C6/catalog/count/COMPLETE originals, not a settlement label."""
         from unittest import mock
         from test_cases.test_req7_unit_catalog import load as load_catalog
@@ -220,6 +221,9 @@ class RetainedAppliedInventoryTests(unittest.TestCase):
                     self.assertEqual((first, second), tuple(unit for unit, _state in observed))
                     self.assertEqual(((1,'UNKNOWN'), (0,'UNATTEMPTED_OBSERVATION')),
                         tuple((state.attempt_count, state.outcome) for _unit, state in observed))
+                    if successor_claim:
+                        self._settled_successor_claims(case,globals_,writer,owner,bound,first,second,claim_fault)
+                        return
                     if successor_count:
                         from contextlib import contextmanager
                         import json
@@ -334,6 +338,222 @@ class RetainedAppliedInventoryTests(unittest.TestCase):
                 self.assertTrue(unchanged.items() <= after.items(), 'old originals cannot be rewritten by successor preparation')
         finally:
             case.doCleanups()
+
+    def _settled_successor_claims(self,case,globals_,writer,owner,bound,first,second,fault):
+        from contextlib import contextmanager
+        from dataclasses import replace
+        from unittest import mock
+        import json,os
+        local = globals_.local
+        stem = globals_.ownership._validated_owner(owner,bound).lock_name[:-5]
+        shared = case.root / 'var/lib/http-ztp-container/issue-tracker'
+        dispatch = shared / (stem + '.unit-' + second.unit_id + '.dispatch')
+        marker = local._owner(writer).project / '.tracker' / ('REMOTE-APPLIED-' + first.unit_id)
+        receipt = (local._owner(writer).project / '.tracker/generations' /
+            local._json(second.action_preimage)['identity']['generation_id'] / 'RECEIPT')
+        globals_.record_global_attempt_intent(owner,bound,second)
+        before = original_read_files(case.root); reached = []; changed = []
+        preserved = case.root / 'preserved-successor-claim-original'
+        def denied_without_yield(actual_writer):
+            yielded = []
+            with self.assertRaises(globals_.GlobalAttemptHold):
+                with globals_._hold_counted_original_wire(actual_writer,owner,bound,second):
+                    yielded.append(True)
+            self.assertEqual([],yielded,'refusal must occur before counted wire handoff')
+        def rebound(path):
+            raw = path.read_bytes(); inode = path.stat().st_ino
+            path.rename(preserved); path.write_bytes(raw); path.chmod(0o600)
+            self.assertEqual(inode,preserved.stat().st_ino); self.assertNotEqual(inode,path.stat().st_ino)
+            self.assertEqual(raw,path.read_bytes()); self.assertEqual(raw,preserved.read_bytes())
+            changed.append(str(path.relative_to(case.root)))
+        if fault == 'missing-applied':
+            inode = marker.stat().st_ino; marker.rename(preserved)
+            denied_without_yield(writer)
+            self.assertEqual(inode,preserved.stat().st_ino); changed.append(str(marker.relative_to(case.root)))
+            self.assertFalse(dispatch.exists())
+        elif fault == 'before-claim-c6':
+            rebound(receipt)
+            denied_without_yield(writer)
+            self.assertFalse(dispatch.exists())
+        elif fault == 'foreign-writer':
+            project = case.root / 'foreign-claim-project'; publication = project / 'publication'
+            project.mkdir(mode=0o700); publication.mkdir(mode=0o700)
+            local.create_local_commit_store(project,publication)
+            with local.writer_owner(project,publication) as foreign:
+                denied_without_yield(foreign)
+            self.assertFalse(dispatch.exists())
+        elif fault in ('after-claim-applied','claim-image','dispatch-header'):
+            creator = globals_._write_global_start
+            @contextmanager
+            def create_then_rebind(folder,name,raw):
+                with creator(folder,name,raw) as verify:
+                    if name == ('HEADER' if fault == 'dispatch-header' else 'CLAIM-1'):
+                        reached.append('actual-exclusive-' + name)
+                        rebound(marker if fault == 'after-claim-applied' else dispatch / name)
+                    yield verify
+                    verify()
+            with mock.patch.object(globals_,'_write_global_start',side_effect=create_then_rebind):
+                denied_without_yield(writer)
+            self.assertEqual(['actual-exclusive-' + ('HEADER' if fault == 'dispatch-header' else 'CLAIM-1')],reached)
+            self.assertEqual(fault != 'dispatch-header',(dispatch / 'CLAIM-1').exists())
+            self.assertFalse((dispatch / 'CLAIM-2').exists())
+        elif fault in ('consumer-applied','consumer-c6'):
+            refused = []; consumed = []
+            with self.assertRaises(globals_.GlobalAttemptHold):
+                with globals_._hold_counted_original_wire(writer,owner,bound,second) as image:
+                    globals_._require_original_wire_launch(writer,owner,bound,second,image,consume=True)
+                    reached.append('actual-consumed-claim')
+                    rebound(receipt if fault == 'consumer-c6' else marker)
+                    try:
+                        globals_._require_original_wire_launch(writer,owner,bound,second,image,consume=False)
+                    except globals_.GlobalAttemptHold: refused.append(True)
+                    else: refused.append(False)
+                    consumed.append(globals_._LIVE_WIRE_CLAIMS[image][-1])
+            self.assertEqual(['actual-consumed-claim'],reached)
+            self.assertEqual([True],refused,'exit rejection cannot replace the actual last consumer rejection')
+            self.assertEqual([True],consumed,'failed consumer verification cannot restore once-consumed state')
+            self.assertTrue((dispatch / 'CLAIM-1').is_file()); self.assertFalse((dispatch / 'CLAIM-2').exists())
+        else:
+            prior = before
+            for count in range(1,7):
+                if count > 1:
+                    observed = globals_.record_global_attempt_intent(owner,bound,second)
+                    self.assertEqual(count,observed.attempt_count)
+                with globals_._hold_counted_original_wire(writer,owner,bound,second) as image:
+                    self.assertEqual((count,second.wire_sha256),(image.attempt_count,image.wire_sha256))
+                    self.assertEqual(second.wire_bytes,os.pread(image.fd,1024*1024+1,0))
+                    self.assertEqual(second.action_preimage,os.pread(image.action_fd,1024*1024+1,0))
+                    self.assertFalse(os.get_inheritable(image.fd)); self.assertFalse(hasattr(image,'permit'))
+                    with self.assertRaises(globals_.GlobalAttemptHold):
+                        globals_._require_original_wire_launch(writer,owner,bound,second,replace(image),consume=True)
+                    globals_._require_original_wire_launch(writer,owner,bound,second,image,consume=True)
+                    globals_._require_original_wire_launch(writer,owner,bound,second,image,consume=False)
+                    with self.assertRaises(globals_.GlobalAttemptHold):
+                        globals_._require_original_wire_launch(writer,owner,bound,second,image,consume=True)
+                    self.assertEqual({'HEADER','INITIALIZED',*(f'CLAIM-{i}' for i in range(1,count+1))},
+                        {path.name for path in dispatch.iterdir()})
+                    if count == 1:
+                        self._native_successor_claim_child(case,globals_,writer,owner,bound,second,image)
+                current = original_read_files(case.root)
+                self.assertTrue(prior.items() <= current.items()); prior = current
+                denied_without_yield(writer)
+            retained = original_read_files(case.root)
+            with self.assertRaises(globals_.GlobalAttemptHold): globals_.record_global_attempt_intent(owner,bound,second)
+            self.assertEqual(retained,original_read_files(case.root))
+        if fault in ('after-claim-applied','claim-image','dispatch-header','consumer-applied','before-claim-c6','consumer-c6'):
+            target = (dispatch / ('HEADER' if fault == 'dispatch-header' else 'CLAIM-1')
+                if fault in ('claim-image','dispatch-header') else receipt
+                if fault in ('before-claim-c6','consumer-c6') else marker)
+            self.assertEqual([str(target.relative_to(case.root))],changed,
+                'actual same-byte new-inode fault must be witnessed outside production exception normalization')
+        unchanged = {name:value for name,value in before.items() if name not in changed}
+        self.assertTrue(unchanged.items() <= original_read_files(case.root).items())
+        self.assertEqual((1,'UNKNOWN'),(case.current_global_state(owner,bound,first).attempt_count,
+            case.current_global_state(owner,bound,first).outcome))
+        self.assertEqual((6 if not fault else 1,'UNKNOWN'),
+            (case.current_global_state(owner,bound,second).attempt_count,case.current_global_state(owner,bound,second).outcome))
+
+    def _native_successor_claim_child(self,case,globals_,writer,owner,bound,unit,image):
+        from test_cases import test_req7_native_supervised_workflow as native_tests
+        import hashlib,json,socket,time
+        native = native_tests.Req7NativeSupervisedWorkflowTests()
+        native.root = case.root / 'owned-successor-mutation-tls'
+        native.root.mkdir(mode=0o700)
+        native.path = native.root / 'etc/ssl/certs/ca-certificates.crt'
+        native.path.parent.mkdir(parents=True); native.path.write_bytes(b'owned fixture pending CA'); native.path.chmod(0o644)
+        reply = b'HTTP/1.1 401 Denied\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}'
+        try:
+            with native.server(reply,hostname='sheets.googleapis.com',destination='sheets.googleapis.com') as (records,errors):
+                port = socket.getaddrinfo('sheets.googleapis.com',443)[0][4][1]
+                locks = (globals_.local._owner(writer).lock_fd,globals_.ownership.owner_lock_fd(owner,bound))
+                raw = json.dumps({'binding':vars(bound),'token':'owned-local-fixture-token',
+                    'expires_at':time.time()+3600},sort_keys=True,separators=(',',':')).encode()
+                globals_._require_original_wire_launch(writer,owner,bound,unit,image,consume=False)
+                child,started = native.launch_original_fixture(port,image,locks)
+                result = native_tests.supervision_fixtures.load().supervise_owned_attempt(
+                    child,started_monotonic=started,kind='mutation',request_bytes=raw)
+                self.assertTrue(result.termination_confirmed); self.assertEqual(0,child.returncode)
+                self.assertEqual({'status':401,'wire_sha256':unit.wire_sha256,
+                    'response_sha256':hashlib.sha256(b'{}').hexdigest(),'outcome':'UNKNOWN'},json.loads(result.data))
+                globals_._require_original_wire_launch(writer,owner,bound,unit,image,consume=False)
+            self.assertEqual([],errors); self.assertEqual(1,len(records)); self.assertEqual(unit.wire_bytes,records[0][2])
+        finally:
+            native.doCleanups()
+
+    def test_actual_settled_successor_six_counts_claim_once_and_fixed_local_child_keep_unknown(self):
+        self._catalog_completed_successor(applied=True,successor_claim=True)
+
+    def test_actual_missing_prior_applied_after_count_refuses_successor_dispatch(self):
+        self._catalog_completed_successor(applied=True,successor_claim=True,claim_fault='missing-applied')
+
+    def test_actual_foreign_live_writer_cannot_claim_successor_c6(self):
+        self._catalog_completed_successor(applied=True,successor_claim=True,claim_fault='foreign-writer')
+
+    def test_actual_claim_write_prior_applied_rebind_holds_and_retains_claim(self):
+        self._catalog_completed_successor(applied=True,successor_claim=True,claim_fault='after-claim-applied')
+
+    def test_actual_claim_creator_original_replacement_is_not_adopted(self):
+        self._catalog_completed_successor(applied=True,successor_claim=True,claim_fault='claim-image')
+
+    def test_actual_dispatch_header_creator_original_replacement_stops_before_claim(self):
+        self._catalog_completed_successor(applied=True,successor_claim=True,claim_fault='dispatch-header')
+
+    def test_actual_consumed_successor_claim_prior_applied_rebind_cannot_restore_consumption(self):
+        self._catalog_completed_successor(applied=True,successor_claim=True,claim_fault='consumer-applied')
+
+    def test_actual_selected_c6_rebind_after_count_refuses_claim_before_dispatch(self):
+        self._catalog_completed_successor(applied=True,successor_claim=True,claim_fault='before-claim-c6')
+
+    def test_actual_consumed_successor_claim_selected_c6_rebind_refuses_last_consumer(self):
+        self._catalog_completed_successor(applied=True,successor_claim=True,claim_fault='consumer-c6')
+
+    def test_actual_settled_successor_claim_cold_process_cannot_reuse_consumed_count(self):
+        from dataclasses import asdict
+        import json,subprocess
+        from test_cases import test_req7_unit_catalog as catalog_tests
+        fixture = catalog_tests.CatalogAppliedNativeWorkflowTests()
+        with fixture.completed_and_pending(project_origins=True) as (
+                case,catalog,_remote,_inventory,_old_api,writer,owner,bound,units):
+            from monitor import issue_tracker_global_attempt_journal as globals_
+            globals_.record_global_attempt_intent(owner,bound,units[-1])
+            with globals_._hold_counted_original_wire(writer,owner,bound,units[-1]) as image:
+                globals_._require_original_wire_launch(writer,owner,bound,units[-1],image,consume=True)
+                globals_._require_original_wire_launch(writer,owner,bound,units[-1],image,consume=False)
+            before = original_read_files(case.root)
+            case.catalog_release_owners()
+            program = '''import sys,json
+from pathlib import Path
+sys.path[:0]=[sys.argv[1],str(Path(sys.argv[1])/'tools')]
+from test_cases import test_req7_unit_catalog as tests
+catalog=tests.load()
+tests.load_component('issue_tracker_remote_history_match')
+from monitor import issue_tracker_global_attempt_journal as journal
+from monitor.issue_tracker_online_target import OnlineTargetBinding
+from test_cases.test_req7_spreadsheet_owner import scoped_fixture
+root=Path(sys.argv[2]); bound=OnlineTargetBinding(**json.loads(sys.stdin.buffer.read()))
+assert catalog.local._ACTIVE=={}
+with catalog.local.writer_owner(root/'project',root/'project/publication') as writer:
+ with scoped_fixture(root,catalog.ownership),catalog.ownership.spreadsheet_owner(bound) as owner:
+  with catalog.hold_pending_units(owner,bound) as (units,verify):
+   assert len(units)==2; selected=units[-1]; verify()
+  observed=journal.inspect_catalog_global_units(owner,bound)
+  assert tuple((state.attempt_count,state.outcome) for unit,state in observed)==((1,'UNKNOWN'),(1,'UNKNOWN'))
+  yielded=[]; refused=False
+  try:
+   with journal._hold_counted_original_wire(writer,owner,bound,selected):
+    yielded.append(True)
+  except journal.GlobalAttemptHold: refused=True
+  assert refused and not yielded, 'cold consumed count was accepted or yielded'
+  assert journal.inspect_global_unit(owner,bound,selected).attempt_count==1
+  assert len(journal._LIVE_WIRE_CLAIMS)==0
+assert catalog.local._ACTIVE=={}
+print('COLD_SETTLED_SUCCESSOR_CONSUMED_COUNT_HOLD_ORIGINAL_UNKNOWN')
+'''
+            result = subprocess.run([sys.executable,'-B','-c',program,str(SOURCE.parents[1]),str(case.root)],
+                input=json.dumps(asdict(bound)).encode(),stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=15)
+            self.assertEqual(0,result.returncode,result.stdout+result.stderr)
+            self.assertEqual(b'COLD_SETTLED_SUCCESSOR_CONSUMED_COUNT_HOLD_ORIGINAL_UNKNOWN\n',result.stdout)
+            self.assertEqual(before,original_read_files(case.root))
 
     def test_actual_catalog_complete_applied_keys_allow_same_key_successor_global_preparation(self):
         self._catalog_completed_successor(applied=True)

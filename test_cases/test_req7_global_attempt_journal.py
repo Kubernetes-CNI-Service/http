@@ -44,6 +44,26 @@ def original_read_files(root):
 
 
 class Req7GlobalAttemptJournalTests(unittest.TestCase):
+    def test_settled_claim_inputs_require_actual_writer_before_catalog_reads(self):
+        holder = getattr(self.module, '_hold_settled_catalog_claim_inputs', None)
+        self.assertTrue(callable(holder), 'fixed original settlement must dominate actual CLAIM consumers')
+        from monitor import issue_tracker_unit_catalog as catalog
+        with mock.patch.object(catalog, '_inspect') as read:
+            yielded = []
+            with self.assertRaises(self.module.GlobalAttemptHold):
+                with holder(object(),object(),object(),object()):
+                    yielded.append(True)
+            self.assertEqual([],yielded,'unissued writer reached shared evidence')
+            read.assert_not_called()
+
+    def test_settled_claim_inputs_have_no_caller_settlement_mode_paths_or_callbacks(self):
+        holder = getattr(self.module, '_hold_settled_catalog_claim_inputs', None)
+        self.assertTrue(callable(holder), 'caller settlement labels cannot release UNKNOWN')
+        for extra in ({'applied':True},{'path':'foreign'},{'verify':lambda:None},{'units':()},{'mode':'settled'}):
+            with self.subTest(extra=tuple(extra)),self.assertRaises(TypeError):
+                with holder(object(),object(),object(),object(),**extra):
+                    self.fail('caller override reached claim inputs')
+
     def test_settled_successor_counter_requires_real_owner_before_catalog_reads(self):
         module = self.module
         counter = getattr(module, '_record_settled_successor_attempt', None)
