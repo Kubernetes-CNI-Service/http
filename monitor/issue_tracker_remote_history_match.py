@@ -732,16 +732,18 @@ def _reconcile_pending_project_units_and_project_auth(writer_token, owner_token,
     return result, authentication
 
 
-def _prepare_current_project_online_observation(writer_token, owner_token, binding, authentication, *,
-                                                _store, http_root):
-    """Reacquire actual source and fresh project reads, never a send permit.
+@contextmanager
+def _hold_current_project_online_inputs(writer_token, owner_token, binding, authentication, *,
+                                        _store, http_root):
+    """Acquire fixed current source and actual reads while strict scopes LIVE.
 
     The previous reconciliation's authentication may be reused only while its
     actual owners remain live. ALL catalog/C6/family originals are acquired
     anew before observing the current source or issuing reads. No caller unit,
     qualified set, read plan, quota list or historical completeness is adopted.
-    Visible accounting remains VISIBLE_ONLY_UNPROVED: no count/CLAIM/NEW is
-    performed, and the diagnostic result escapes only after all finalizers.
+    The fixed internal consumer may overlap genuine business images before
+    these strict scopes close. No selected unit, callback, factory or permission
+    is supplied by the caller. This scope does not count, claim or send.
     """
     from pathlib import Path
     from monitor import issue_tracker_local_commit as local
@@ -770,7 +772,7 @@ def _prepare_current_project_online_observation(writer_token, owner_token, bindi
                 or Path(_store.project_identity) != project.project):
             raise RemoteHistoryHold()
         whitelist_path = root / 'monitor/Issue_Tracker_Template_v1.xlsx'
-        business_guards = []
+        business_guards = []; prepared = []
         with ExitStack() as business_scope, ExitStack() as scope:
             rows, verify_c6 = scope.enter_context(catalog.hold_pending_project_c6_units(owner_token, binding))
             retained, verify_inventory = scope.enter_context(
@@ -850,6 +852,7 @@ def _prepare_current_project_online_observation(writer_token, owner_token, bindi
                         _hold_owned_original_business_history_reads(writer_token, owner_token, binding,
                             row.unit, authentication, identity_response=responses['template_identity']))
                     business_guards.append(verify_business)
+                    prepared.append((row, actual, verify_business))
                     originals(); verify_capacity()
                 if qualify() != (settings, whitelist, qualified):
                     raise RemoteHistoryHold()
@@ -860,6 +863,7 @@ def _prepare_current_project_online_observation(writer_token, owner_token, bindi
                 if budget.outcome != 'VISIBLE_ONLY_UNPROVED':
                     raise RemoteHistoryHold()
             originals()
+            yield settings, whitelist, responses, tuple(prepared), authentication
             # The separate business holders dominate even the LAST old source/
             # C6/inventory finalizer. Their own originals remain live here.
             scope.close()
@@ -877,7 +881,83 @@ def _prepare_current_project_online_observation(writer_token, owner_token, bindi
         failed = True
     if failed:
         raise RemoteHistoryHold() from None
+
+
+def _prepare_current_project_online_observation(writer_token, owner_token, binding, authentication, *,
+                                                _store, http_root):
+    """Unchanged read-only diagnostic after ALL original finalizers.
+
+    Never acquire the new image graph here or turn visible accounting into
+    admission. The fixed acquisition scope preserves the original close order
+    and actual issued business/read/authentication checks exactly.
+    """
+    with _hold_current_project_online_inputs(writer_token, owner_token, binding, authentication,
+            _store=_store, http_root=http_root):
+        pass
     return 'VISIBLE_ONLY_UNPROVED'
+
+
+def _consume_current_project_online_original_inputs(writer_token, owner_token, binding, authentication, *,
+                                                     _store, http_root):
+    """Fixed continuous input edge, still HOLD before FIRST/R2 COUNT.
+
+    Original cycle/config/W1 and actual issued images outlive strict ALL
+    catalog/count/quota readers. No closed verifier or path reacquisition is
+    used for business images. Historical PROJECT metadata completeness is
+    unproved: this input edge cannot count, claim, launch or report GO.
+    """
+    from pathlib import Path
+    from monitor import issue_tracker_local_commit as local
+    from monitor import issue_tracker_stage_l_consumer as source
+    from monitor.issue_tracker_cycle_source import _hold_current_completed_cycle_replay
+    from monitor.issue_tracker_history_read_launcher import require_current_owned_project_read
+    from monitor.issue_tracker_token_launcher import require_current_owned_project_token
+    from monitor.issue_tracker_online_target import inspect_project_online_target
+    try:
+        project = local._owner(writer_token)
+        ownership._validated_owner(owner_token, binding)
+        root = Path(http_root)
+        if (not root.is_absolute() or root.resolve(strict=True) != root
+                or Path(_store.project_identity) != project.project):
+            raise RemoteHistoryHold()
+        with _hold_current_completed_cycle_replay(_store) as verify_cycle, \
+                source._hold_original_replay_inputs(_store, project.project,
+                    root/'monitor/Issue_Tracker_Template_v1.xlsx') as verify_inputs, ExitStack() as images:
+            with _hold_current_project_online_inputs(writer_token, owner_token, binding, authentication,
+                    _store=_store, http_root=root) as prepared:
+                _settings, _whitelist, responses, originals, authentication = prepared
+                graphs = []
+                for row, actual_source, guard in originals:
+                    packet, verify = images.enter_context(guard._hold_original_images())
+                    if packet[0] is not responses['template_identity']:
+                        raise RemoteHistoryHold()
+                    graphs.append((row, actual_source, guard, packet, verify))
+                verify_cycle(); verify_inputs()
+            # ALL strict count/catalog/quota/business scopes have completed.
+            # Only genuinely overlapped images and actual issued reads survive.
+            verify_cycle(); verify_inputs()
+            for _row, _actual_source, _guard, _packet, verify in graphs:
+                verify()
+            for kind, response in responses.items():
+                require_current_owned_project_read(writer_token, owner_token, binding, response,
+                    authentication, read_kind=kind)
+            require_current_owned_project_token(owner_token, binding, authentication)
+            inspect_project_online_target(writer_token, binding)
+            # G1 remains unproved; finish normal image cleanup before refusing.
+            # No FIRST/R2 primitive is entered, even for visible free capacity.
+            images.close()
+            for kind, response in responses.items():
+                require_current_owned_project_read(writer_token, owner_token, binding, response,
+                    authentication, read_kind=kind)
+            verify_cycle(); verify_inputs()
+        for kind, response in responses.items():
+            require_current_owned_project_read(writer_token, owner_token, binding, response,
+                authentication, read_kind=kind)
+        require_current_owned_project_token(owner_token, binding, authentication)
+        inspect_project_online_target(writer_token, binding)
+    except Exception:
+        pass
+    raise RemoteHistoryHold() from None
 
 
 def _reconcile_pending_project_units_with_authentication(writer_token, owner_token, binding, authentication=None, *, _store=None):

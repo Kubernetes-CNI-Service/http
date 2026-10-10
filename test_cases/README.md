@@ -2462,3 +2462,25 @@ unchanged-original expectations. This is a necessary original-image handoff,
 not installed default FIRST/R2, G1 or a send permit; whole REQ7, exact-tree
 full/check and field validation remain open. No existing tests or deadlines
 were removed, skipped or weakened.
+
+The fixed private `_consume_current_project_online_original_inputs` now uses
+the same actual acquisition core as the unchanged read-only preparation API.
+It takes no caller-selected unit, source, guard, permission or callback. Each
+genuine original unit keeps its own qualified source and business guard; its
+image graph is acquired while strict readers are live. Current cycle and
+fixed policy/W1 originals dominate strict closure, graph verification and
+cleanup. Independent real ETH/IB workflows require the actual outer original
+verifier's refusal after last-finalizer same-byte policy/W1 replacement, not
+merely the final generic HOLD (the normal G1-unproved path also holds).
+Preservation is witnessed before each owned temporary fixture is cleaned;
+fault variants use distinct complete source trees. Old mixed settlement,
+quota, close order, postclose issued-read and deadline expectations remain.
+The W1 fault fixture restores its original inode only after the actual
+post-finalizer verifier has rejected and both originals were witnessed;
+the replacement is retained separately. This isolates the next real IB
+scenario without refreshing its original device/inode-bound snapshot or
+altering any production recovery path.
+Historical PROJECT completeness remains unproved, so this private input edge
+refuses before FIRST/R2 COUNT/CLAIM/launcher; it is not installed in the worker
+and does not authorize sending. Whole REQ7, exact current full/check and all
+REAL_ENV remain open; no scenario was omitted or merged.

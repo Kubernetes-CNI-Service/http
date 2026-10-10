@@ -257,12 +257,51 @@ class CatalogReconciliationWorkflowTests(unittest.TestCase):
 
 
 class CatalogProjectAuthenticationHandoffDirectTests(unittest.TestCase):
+    def _actual_fixed_acquisition_contract(self, module):
+        import ast
+        import inspect
+        import textwrap
+        # The old API remains a read-only wrapper. Pin its real single-core
+        # delegation independently before inspecting that core's old contract.
+        wrapper = ast.parse(textwrap.dedent(inspect.getsource(
+            module._prepare_current_project_online_observation))).body[0]
+        statements = wrapper.body[1:]
+        self.assertEqual(2, len(statements))
+        self.assertIsInstance(statements[0], ast.With)
+        self.assertEqual(1, len(statements[0].items))
+        call = statements[0].items[0].context_expr
+        self.assertEqual('_hold_current_project_online_inputs', call.func.id)
+        self.assertEqual(('writer_token','owner_token','binding','authentication'),
+            tuple(arg.id for arg in call.args))
+        self.assertEqual([('_store','_store'),('http_root','http_root')],
+            [(item.arg,item.value.id) for item in call.keywords])
+        self.assertEqual(['pass'], [ast.unparse(item) for item in statements[0].body])
+        self.assertEqual("return 'VISIBLE_ONLY_UNPROVED'", ast.unparse(statements[1]))
+        return ast.parse(textwrap.dedent(inspect.getsource(
+            module._hold_current_project_online_inputs)))
+
+    def test_fixed_default_consumer_accepts_no_selected_unit_guard_or_permission(self):
+        import inspect
+        module = importlib.import_module('monitor.issue_tracker_remote_history_match')
+        api = getattr(module, '_consume_current_project_online_original_inputs', None)
+        self.assertTrue(callable(api), 'default input consumer lacks actual continuous original-image handoff')
+        self.assertEqual(('writer_token','owner_token','binding','authentication','_store','http_root'),
+            tuple(inspect.signature(api).parameters))
+        from monitor import issue_tracker_global_attempt_journal as attempts
+        from monitor import issue_tracker_mutation_launcher as mutation
+        with mock.patch.object(attempts, '_hold_continuous_owned_attempt_wire') as first, \
+                mock.patch.object(attempts, '_hold_shared_retry_owned_attempt_wire') as retry, \
+                mock.patch.object(mutation, '_send_counted_original_once') as send:
+            with self.assertRaises(module.RemoteHistoryHold):
+                api(object(),object(),object(),None,_store=object(),http_root=object())
+            first.assert_not_called(); retry.assert_not_called(); send.assert_not_called()
+
     def test_default_preparation_uses_actual_mixed_settlement_and_permanent_quota_readers(self):
         import ast
         import inspect
         import textwrap
         module = importlib.import_module('monitor.issue_tracker_remote_history_match')
-        tree = ast.parse(textwrap.dedent(inspect.getsource(module._prepare_current_project_online_observation)))
+        tree = self._actual_fixed_acquisition_contract(module)
         calls = [node.func for node in ast.walk(tree) if isinstance(node, ast.Call)]
         self.assertIn('_hold_all_project_mixed_settlements',
             [node.attr for node in calls if isinstance(node, ast.Attribute)])
@@ -281,9 +320,9 @@ class CatalogProjectAuthenticationHandoffDirectTests(unittest.TestCase):
         import inspect
         import textwrap
         module=importlib.import_module('monitor.issue_tracker_remote_history_match')
-        api=getattr(module,'_prepare_current_project_online_observation',None)
+        api=getattr(module,'_hold_current_project_online_inputs',None)
         self.assertTrue(callable(api))
-        function=ast.parse(textwrap.dedent(inspect.getsource(api))).body[0]
+        function=self._actual_fixed_acquisition_contract(module).body[0]
         body=next(node.body for node in function.body if isinstance(node,ast.Try))
         held_index=next(i for i,node in enumerate(body) if isinstance(node,ast.With)
             and any(isinstance(item.context_expr,ast.Call)

@@ -29,6 +29,221 @@ from test_cases.test_issue_tracker_stage_l_consumer import ProdStageLFixture
 
 
 class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
+    def _fixed_default_original_inputs_probe(self, fault=None):
+        from monitor import issue_tracker_remote_history_match as remote
+        self.assertTrue(callable(getattr(remote, '_consume_current_project_online_original_inputs', None)),
+            'default consumer must overlap genuine originals before closing strict read scopes')
+        from test_cases import test_req7_remote_history_match as fixture
+        import errno
+        import importlib
+        import stat
+        actual_load = fixture.load; actual_native = self._exercise_native_original_counted_launch
+        witnesses = []
+        def native_probe(**arguments):
+            with ExitStack() as boundary:
+                def after_load(*args, **options):
+                    result = actual_load(*args, **options)
+                    remote = importlib.import_module('monitor.issue_tracker_remote_history_match')
+                    preread = importlib.import_module('monitor.issue_tracker_history_preread_journal')
+                    catalog = importlib.import_module('monitor.issue_tracker_unit_catalog')
+                    cycles = importlib.import_module('monitor.issue_tracker_cycle_source')
+                    source_module = importlib.import_module('monitor.issue_tracker_stage_l_consumer')
+                    attempts = importlib.import_module('monitor.issue_tracker_global_attempt_journal')
+                    real_core = remote._hold_current_project_online_inputs
+                    real_images = preread._OriginalBusinessReadGuard._hold_original_images
+                    real_catalog = catalog.hold_pending_project_c6_units
+                    real_inputs = source_module._hold_original_replay_inputs
+                    real_dup = os.dup
+                    graphs = []; selected = []; core_closed = []; rebound = []; stopped = []; holder_calls = []
+                    preserved_after_refusal = []
+                    fixture_restorations = []
+                    after_strict = []
+                    input_holders = []; input_verifications = []; input_refusals = []
+                    @contextmanager
+                    def held_inputs(*args, **options):
+                        number = len(input_holders); input_holders.append((args,options))
+                        with real_inputs(*args, **options) as actual_verify:
+                            def verify():
+                                # Record the real original verifier's outcome
+                                # before production sanitizes it to generic HOLD.
+                                stage = (number,bool(core_closed),len(rebound))
+                                try:
+                                    actual_verify()
+                                except Exception as error:
+                                    input_refusals.append((stage,error))
+                                    raise
+                                else:
+                                    input_verifications.append(stage)
+                            yield verify
+                    @contextmanager
+                    def core(*args, **options):
+                        with real_core(*args, **options) as packet:
+                            selected.append(packet)
+                            yield packet
+                        core_closed.append(True)
+                    @contextmanager
+                    def images(guard):
+                        duplicates = []
+                        def duplicate(fd):
+                            duplicate = real_dup(fd)
+                            info = os.fstat(fd)
+                            duplicates.append((duplicate,info,None if stat.S_ISDIR(info.st_mode)
+                                else os.pread(fd,info.st_size+1,0)))
+                            return duplicate
+                        with mock.patch.object(preread.os,'dup',side_effect=duplicate):
+                            with real_images(guard) as packet:
+                                graphs.append((guard,duplicates,packet))
+                                def verify():
+                                    packet[1]()
+                                    if core_closed:
+                                        with preread._BUSINESS_READ_GUARD_LOCK:
+                                            phase = preread._BUSINESS_READ_GUARDS[guard][0]
+                                        after_strict.append((phase,cycles._HELD_CYCLE_REPLAY.get()[0],
+                                            tuple((os.fstat(fd),None if raw is None else os.pread(fd,len(raw)+1,0))
+                                                for fd,_info,raw in duplicates)))
+                                yield packet[0],verify
+                    @contextmanager
+                    def held_catalog(*args, **options):
+                        first = not holder_calls; holder_calls.append(True)
+                        with real_catalog(*args, **options) as packet:
+                            yield packet
+                        if first and fault:
+                            path = (self.project/'01-global.yaml' if fault=='policy' else self.template)
+                            info = path.stat(); raw = path.read_bytes()
+                            retained = arguments['global_root']/('preserved-default-'+fault)
+                            path.rename(retained); path.write_bytes(raw); path.chmod(info.st_mode & 0o777)
+                            rebound.append((path,retained,info,raw,path.stat()))
+                    def consume(*args, **options):
+                        try:
+                            remote._consume_current_project_online_original_inputs(*args, **options)
+                        except remote.RemoteHistoryHold:
+                            stopped.append(True)
+                        else:
+                            stopped.append(False)
+                        # The native fixture legitimately removes its own
+                        # temporary root on return. Capture preservation while
+                        # it still exists, after actual production refusal.
+                        for path,retained,_info,_raw,_replacement in rebound:
+                            preserved_after_refusal.append((path.stat(),path.read_bytes(),
+                                retained.stat(),retained.read_bytes()))
+                            if fault == 'w1':
+                                # The original two-sheet fixture independently
+                                # binds W1's device/inode, not just its bytes.
+                                # Only AFTER the actual consumer has refused
+                                # and preservation is witnessed, restore this
+                                # fixture's original inode for the next sheet.
+                                # Keep the replacement too; never refresh the
+                                # old snapshot or alter production cleanup.
+                                self.assertEqual([True],stopped)
+                                self.assertTrue(input_refusals)
+                                self.assertEqual((0,True,1),input_refusals[0][0])
+                                self.assertIsInstance(input_refusals[0][1],source_module.StageLConsumerHold)
+                                replacement_path = arguments['global_root']/'preserved-default-w1-replacement'
+                                self.assertFalse(replacement_path.exists())
+                                path.rename(replacement_path)
+                                retained.rename(path)
+                                fixture_restorations.append((path.stat(),path.read_bytes(),
+                                    replacement_path.stat(),replacement_path.read_bytes()))
+                        witnesses.append((arguments,graphs,selected,core_closed,rebound,stopped,
+                            after_strict,no_first,no_retry,no_claim,input_holders,
+                            input_verifications,input_refusals,source_module.StageLConsumerHold,
+                            preserved_after_refusal,fixture_restorations))
+                        # This adapter exists only inside the original read-only
+                        # fixture. Independent checks below require actual HOLD,
+                        # not this fixture's diagnostic return or a send permit.
+                        return 'VISIBLE_ONLY_UNPROVED'
+                    boundary.enter_context(mock.patch.object(remote,'_hold_current_project_online_inputs',side_effect=core))
+                    boundary.enter_context(mock.patch.object(remote,'_prepare_current_project_online_observation',side_effect=consume))
+                    boundary.enter_context(mock.patch.object(preread._OriginalBusinessReadGuard,'_hold_original_images',images))
+                    boundary.enter_context(mock.patch.object(catalog,'hold_pending_project_c6_units',side_effect=held_catalog))
+                    boundary.enter_context(mock.patch.object(source_module,'_hold_original_replay_inputs',side_effect=held_inputs))
+                    no_first = boundary.enter_context(mock.patch.object(attempts,'_hold_continuous_owned_attempt_wire'))
+                    no_retry = boundary.enter_context(mock.patch.object(attempts,'_hold_shared_retry_owned_attempt_wire'))
+                    no_claim = boundary.enter_context(mock.patch.object(attempts,'_hold_counted_original_wire'))
+                    return result
+                boundary.enter_context(mock.patch.object(fixture,'load',side_effect=after_load))
+                return actual_native(**arguments)
+        with mock.patch.object(self,'_exercise_native_original_counted_launch',side_effect=native_probe):
+            self._default_source_read_preparation_probe('prepare-business')
+        self.assertEqual(2,len(witnesses))
+        for (arguments,graphs,selected,core_closed,rebound,stopped,after_strict,
+                no_first,no_retry,no_claim,input_holders,input_verifications,
+                input_refusals,actual_hold_type,preserved_after_refusal,fixture_restorations) in witnesses:
+            self.assertEqual([True],stopped)
+            self.assertEqual(1,len(selected)); self.assertEqual(1,len(graphs))
+            settings,whitelist,responses,prepared,authentication = selected[0]
+            self.assertEqual(arguments['settings'],settings)
+            self.assertEqual(('template_identity','template_headers','whitelist','metadata'),tuple(responses))
+            self.assertEqual(1,len(prepared))
+            row,source,guard = prepared[0]
+            self.assertEqual(arguments['unit'].unit_id,row.unit.unit_id)
+            self.assertEqual(arguments['unit'].action_preimage,row.unit.action_preimage)
+            self.assertEqual(arguments['unit'].wire_bytes,row.unit.wire_bytes)
+            self.assertEqual(arguments['qualified'],source)
+            self.assertIs(guard,graphs[0][0]); self.assertIs(responses['template_identity'],graphs[0][2][0][0])
+            self.assertEqual(9,len(graphs[0][1]))
+            self.assertEqual(2,sum(stat.S_ISDIR(info.st_mode) for _,info,_ in graphs[0][1]))
+            self.assertEqual([True],core_closed)
+            no_first.assert_not_called(); no_retry.assert_not_called(); no_claim.assert_not_called()
+            for fd,_info,_raw in graphs[0][1]:
+                with self.assertRaises(OSError) as caught: os.fstat(fd)
+                self.assertEqual(errno.EBADF,caught.exception.errno)
+            if fault:
+                self.assertIs(self.store,input_holders[0][0][0])
+                self.assertEqual(self.project,input_holders[0][0][1])
+                self.assertEqual(self.template,input_holders[0][0][2])
+                self.assertTrue(input_refusals,
+                    'generic G1 HOLD cannot substitute for actual original-input drift refusal')
+                self.assertEqual((0,True,1),input_refusals[0][0],
+                    'the original outer verifier must reject after the last strict finalizer')
+                self.assertIsInstance(input_refusals[0][1],actual_hold_type)
+                self.assertNotIn((0,True,1),input_verifications)
+                self.assertEqual(1,len(rebound))
+                path,retained,original,raw,replacement = rebound[0]
+                self.assertEqual(1,len(preserved_after_refusal))
+                current,current_bytes,preserved,preserved_bytes = preserved_after_refusal[0]
+                self.assertNotEqual(original.st_ino,replacement.st_ino)
+                self.assertEqual(replacement,current)
+                self.assertEqual(original.st_ino,preserved.st_ino)
+                self.assertEqual(raw,current_bytes); self.assertEqual(raw,preserved_bytes)
+                if fault == 'w1':
+                    self.assertEqual(1,len(fixture_restorations))
+                    restored,restored_bytes,kept,kept_bytes = fixture_restorations[0]
+                    self.assertEqual((original.st_dev,original.st_ino),
+                        (restored.st_dev,restored.st_ino))
+                    self.assertEqual((replacement.st_dev,replacement.st_ino),
+                        (kept.st_dev,kept.st_ino))
+                    self.assertEqual(raw,restored_bytes); self.assertEqual(raw,kept_bytes)
+                else:
+                    self.assertEqual([],fixture_restorations)
+                self.assertFalse(arguments['global_root'].exists(),
+                    'native fixture must finish its own temporary cleanup')
+            else:
+                self.assertEqual([],preserved_after_refusal)
+                self.assertEqual([],fixture_restorations)
+                self.assertEqual([],input_refusals)
+                self.assertIn((0,True,0),input_verifications)
+                self.assertEqual([],rebound)
+                self.assertTrue(after_strict,'actual graph must be verified after all strict readers close')
+                for phase,store,images in after_strict:
+                    self.assertEqual('CLOSED',phase); self.assertIs(self.store,store)
+                    self.assertEqual(tuple((info,raw) for _fd,info,raw in graphs[0][1]),images)
+
+    def test_fixed_default_consumer_overlaps_actual_images_but_unproved_g1_never_counts_or_sends(self):
+        self._fixed_default_original_inputs_probe()
+
+    def test_fixed_default_consumer_last_strict_finalizer_rebinds_policy_or_w1_and_holds(self):
+        for fault in ('policy','w1'):
+            with self.subTest(fault=fault):
+                # Each real three-panel workflow builds a complete private
+                # source tree once; a second variant must not reuse that tree.
+                case = type(self)('runTest')
+                try:
+                    case.setUp()
+                    case._fixed_default_original_inputs_probe(fault)
+                finally:
+                    case.doCleanups()
+
     def _original_business_image_handoff_probe(self, fault):
         from monitor import issue_tracker_history_preread_journal as preread
         from monitor import issue_tracker_history_read_launcher as reads
