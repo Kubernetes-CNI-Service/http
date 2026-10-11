@@ -3106,3 +3106,20 @@ use. Independent direct and actual writer/spreadsheet/enrollment/catalog
 workflows cover this zero-write observation. Default NEW compilation and
 registration, first-use remote provisioning, whole REQ7 and current formal
 full/check remain open; no existing assertion or approval is removed.
+
+Native preparation can now borrow only its own original, already-closed ALL
+delivery handoff for a read-only K scope. The actual project writer and held
+spreadsheet owner, unique retained prior-delivery raw graph, current settings
+FDs, preparation and opaque issuer must remain identical at every read. No
+caller event list, cached K or reentrant sheet lock is accepted. Foreign writers,
+unissued/revoked/copied contexts and revocation during actual chain validation
+fail before a K result returns; map deletion cannot fall back or permit set-K
+or completed-pair mutation/cleanup. Revocation precedes settings finalizers,
+and the preparation/raw graph is checked again after those original FDs close.
+An actual finalizer's unissued delivery tail refuses scope return and preserves
+the original interruption and faulted files. First use without an old delivery
+keeps the ordinary strict K contract. Independent direct and genuine archived
+delivery/C6/NV/catalog workflows cover this leaf handoff, not the still-open
+qualified-source/current-cycle receipt/compiler/default NEW integration or
+whole REQ7/full/check. No automation or field case is removed or weakened;
+REAL_ENV remains NOT RUN and the approval ledger remains runner-only.

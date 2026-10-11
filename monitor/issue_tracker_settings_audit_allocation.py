@@ -36,6 +36,13 @@ _LOCAL_C6_CONTEXT = ContextVar('req7_completed_local_c6_originals', default=None
 _LIVE_LOCAL_C6_CONTEXTS = {}
 _DELIVERY_CREATOR_CONTEXT = ContextVar('req7_native_delivery_creator_originals',default=None)
 _LIVE_DELIVERY_CREATORS = {}
+_NATIVE_CATALOG_K_CONTEXT = ContextVar('req7_native_catalog_original_k', default=None)
+_LIVE_NATIVE_CATALOG_K_CONTEXTS = {}
+
+
+class _NativeCatalogKContext:
+    """Read-only K identity inside one genuine ACTIVE native preparation."""
+    __slots__ = ()
 
 
 class _CompletedLocalC6Context:
@@ -1914,6 +1921,82 @@ def _native_allocation_prior_events(prepared,writer,sheet,bound):
     return actual['events']
 
 
+def _native_catalog_k_read_active(writer):
+    from monitor import issue_tracker_state_owner as state
+    return (writer in state._NATIVE_CATALOG_K_READ_CONTEXT or any(
+        packet['token'] is writer for packet in _LIVE_NATIVE_CATALOG_K_CONTEXTS.values()))
+
+
+@contextmanager
+def _hold_native_catalog_k_read(prepared,writer,sheet,bound):
+    """Borrow the actual preparation's closed ALL handoff for original K only.
+
+    No caller event IDs, snapshot, callback or reentrant sheet acquisition.
+    The old semantic issuer stays revoked. This identity cannot authorize a
+    settings mutation, projection archive, COUNT, registration or sending.
+    """
+    from monitor import issue_tracker_nv_reservation as nv, issue_tracker_state_owner as state
+    record=nv._verify_catalog_preparation(prepared)
+    owner=local._owner(writer); sheet_owner=ownership._validated_owner(sheet,bound)
+    if (record['token'] is not sheet or record['binding']!=bound
+            or _native_catalog_k_read_active(writer) or _NATIVE_CATALOG_K_CONTEXT.get() is not None
+            or writer in state._COMPLETED_READ_CONTEXT or writer in state._COMPLETED_ORIGINAL_GUARDS
+            or writer in state._LOCAL_C6_READ_CONTEXT):raise SettingsAuditHold()
+    if (type(prepared) is nv._CatalogNonallocatingPreparation
+            and record['nonallocating_writer'] is not writer):raise SettingsAuditHold()
+    actual_prior=[row for row in record['prior_delivery_events']
+                 if row['writer'] is writer and row['owner'] is owner and row['raw'] is not None]
+    # Only this real closed-ALL raw handoff needs an archive allowance. First
+    # use with no old delivery remains the ordinary strict K reader instead.
+    if len(actual_prior)!=1:raise SettingsAuditHold()
+    events=_native_allocation_prior_events(prepared,writer,sheet,bound)
+    def preparation_verify():
+        if (nv._verify_catalog_preparation(prepared) is not record
+                or local._owner(writer) is not owner
+                or ownership._validated_owner(sheet,bound) is not sheet_owner
+                or _native_allocation_prior_events(prepared,writer,sheet,bound)!=events):
+            raise SettingsAuditHold()
+        nv._verify_catalog_preparation(prepared)
+    with state._settings_original_scope() as scope:
+        # This actual preparation/raw check runs AFTER all settings FD cleanup.
+        scope.callback(preparation_verify)
+        images,settings_verify=scope.enter_context(_hold_settings_originals(writer,delivered_event_ids=events))
+        _settings(writer,delivered_event_ids=events)
+        def verify():
+            preparation_verify(); settings_verify(); preparation_verify()
+        verify()
+        issued=_NativeCatalogKContext()
+        packet={'token':writer,'owner':owner,'pid':os.getpid(),'thread':threading.get_ident(),
+                'images':images,'verify':verify}
+        reset=_NATIVE_CATALOG_K_CONTEXT.set(issued)
+        _LIVE_NATIVE_CATALOG_K_CONTEXTS[issued]=packet
+        state._NATIVE_CATALOG_K_READ_CONTEXT[writer]=issued
+        try:
+            yield
+            _read_native_catalog_k(writer,issued)
+        finally:
+            # Revoke BEFORE any original finalizer; no stale/copied issuer.
+            state._NATIVE_CATALOG_K_READ_CONTEXT.pop(writer,None)
+            _LIVE_NATIVE_CATALOG_K_CONTEXTS.pop(issued,None)
+            _NATIVE_CATALOG_K_CONTEXT.reset(reset)
+
+
+def _read_native_catalog_k(writer,context):
+    from monitor import issue_tracker_state_owner as state
+    packet=_LIVE_NATIVE_CATALOG_K_CONTEXTS.get(context) if type(context) is _NativeCatalogKContext else None
+    def admitted():
+        if packet is None or local._owner(writer) is not packet['owner']:raise SettingsAuditHold()
+        if (_LIVE_NATIVE_CATALOG_K_CONTEXTS.get(context) is not packet
+                or _NATIVE_CATALOG_K_CONTEXT.get() is not context or packet['token'] is not writer
+                or packet['pid']!=os.getpid() or packet['thread']!=threading.get_ident()
+                or state._NATIVE_CATALOG_K_READ_CONTEXT.get(writer) is not context):raise SettingsAuditHold()
+    admitted(); packet['verify'](); admitted()
+    events,current,initialized,_outbox=packet['images']
+    result=chain.validate_k_chain_snapshot(events,current,initialized)
+    admitted(); packet['verify'](); admitted()
+    return result
+
+
 def _close_delivery_scope(scope,kind,primary,tb):
     """Close all owned children without replacing an incoming interruption."""
     try:scope.__exit__(kind,primary,tb)
@@ -2558,6 +2641,7 @@ class _CompletedSettingsTransition:
         self.added.append((parent,name,fd,journal._identity(os.fstat(fd)),raw))
 
 def _apply_completed_k_change(token,sheet,bound,unit,*,new_k,actor,recorded_at,request_id,expected_revision,_native_context=None):
+    if _native_catalog_k_read_active(token):raise SettingsAuditHold()
     chain._positive_int(new_k); chain._actor(actor); chain._time(recorded_at)
     chain._request_id(request_id); chain._revision(expected_revision)
     if actor=='system:default': raise SettingsAuditHold()
@@ -2675,6 +2759,7 @@ def cleanup_completed_settings_outbox(token,sheet,bound,unit):
     existing directories; it cannot manufacture missing evidence or projections.
     """
     try:
+        if _native_catalog_k_read_active(token):raise SettingsAuditHold()
         from monitor import issue_tracker_state_owner as state
         context=state._COMPLETED_READ_CONTEXT.get(token)
         native=type(context) is _NativeCompletedSettingsContext

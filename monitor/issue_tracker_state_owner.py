@@ -20,6 +20,7 @@ from monitor.issue_tracker_local_commit import (
 _COMPLETED_READ_CONTEXT = {}
 _COMPLETED_ORIGINAL_GUARDS = {}
 _LOCAL_C6_READ_CONTEXT = {}
+_NATIVE_CATALOG_K_READ_CONTEXT = {}
 
 
 class TrackerStateHold(ValueError):
@@ -183,6 +184,11 @@ def current_k(token, *, spreadsheet_token=None, binding=None, completed_unit=Non
     """
     try:
         from monitor import issue_tracker_settings_audit_allocation as allocation
+        native_catalog=_NATIVE_CATALOG_K_READ_CONTEXT.get(token)
+        if allocation._native_catalog_k_read_active(token):
+            if any(item is not None for item in (spreadsheet_token,binding,completed_unit)):
+                raise TrackerStateHold('native catalog K cannot borrow another delivery context')
+            return allocation._read_native_catalog_k(token,native_catalog)
         local_c6=_LOCAL_C6_READ_CONTEXT.get(token)
         if local_c6 is not None:
             if any(item is not None for item in (spreadsheet_token,binding,completed_unit)):
@@ -233,6 +239,8 @@ def set_k(token, *, new_k, actor, recorded_at, request_id, expected_revision):
     """Commit a K event under the same LK-P token; actor trust is external."""
     try:
         from monitor import issue_tracker_settings_audit_allocation as allocation
+        if allocation._native_catalog_k_read_active(token):
+            raise TrackerStateHold('native catalog K enrollment is read-only')
         if token in _LOCAL_C6_READ_CONTEXT or any(
                 packet['token'] is token for packet in allocation._LIVE_LOCAL_C6_CONTEXTS.values()):
             raise TrackerStateHold('fixed local C6 enrollment is read-only')

@@ -994,6 +994,17 @@ with local.writer_owner(project, project/"99-output-monitor") as writer, scoped_
 
 
 class Req7NativeDeliveryCreatorOriginalsTests(unittest.TestCase):
+    def test_native_catalog_k_read_refuses_unissued_preparation_before_settings_or_sheet_acquisition(self):
+        allocation=load();entry=getattr(allocation,'_hold_native_catalog_k_read',None)
+        self.assertTrue(callable(entry),'native preparation needs original read-only K reception')
+        from monitor import issue_tracker_nv_reservation as nv
+        with mock.patch.object(allocation,'_hold_settings_originals') as settings_images, \
+                mock.patch.object(allocation.ownership,'spreadsheet_owner') as sheet:
+            with self.assertRaises((allocation.SettingsAuditHold,nv.NvReservationHold,local.LocalCommitHold)):
+                with entry(object(),object(),object(),binding()):
+                    self.fail('unissued preparation reached K read enrollment')
+        settings_images.assert_not_called();sheet.assert_not_called()
+
     def test_native_allocation_prior_events_rejects_unissued_preparation_before_settings(self):
         allocation=load();entry=getattr(allocation,'_native_allocation_prior_events',None)
         self.assertTrue(callable(entry),'native allocation needs fixed actual preparation provenance')

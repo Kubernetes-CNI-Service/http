@@ -1659,7 +1659,8 @@ with scoped_fixture(root,sheet),state.tracker_settings_writer(project,project/'p
         self.assertFalse((tracker/'settings/events/1.json').exists())
         self.assertFalse((tracker/'settings/outbox/0.json').exists())
 
-    def native_second_audit_completed(self, stack, *, fixture_facts=None, archive_before_new=False,late_fault=None):
+    def native_second_audit_completed(self, stack, *, fixture_facts=None, archive_before_new=False,late_fault=None,
+                                     preparation_k_probe=None):
         """Two real same-project native C6 units; first genuinely APPLIED/key.
 
         Retain outbox0 while constructing the second. This does not pretend
@@ -1739,12 +1740,19 @@ with scoped_fixture(root,sheet),state.tracker_settings_writer(project,project/'p
         self.assertNotEqual(first.unit_id,second.unit_id)
         eth_plan=reads._prepare(bound,facts['auth'],'activity','ETH Cabling',None)
         ib_plan=reads._prepare(bound,facts['auth'],'activity','IB Cabling',None)
+        preparation_probe_assertion=None
         with nv.hold_catalog_nv_preparation(owner,bound,facts['identity'],
                 eth_plan,source('ETH Cabling',('NV30016',)),ib_plan,source('IB Cabling',('NV30101',)),
                 generation_id=generation.generation_id,publish_id=receipt.published_sha256,
                 sheet='ETH Cabling',requested_keys=KEYS) as prepared:
             self.assertEqual(((KEYS[0],'NV30104'),(KEYS[1],'NV30105')),prepared.observation.reservations)
+            if preparation_k_probe is not None:
+                # Keep the independent assertion outside production's typed
+                # refusal sanitizer; all real registration/finalizers still run.
+                try: preparation_k_probe(allocation,writer,owner,bound,prepared,tracker)
+                except AssertionError as exc: preparation_probe_assertion=exc
             catalog.register_pending_c6_unit(writer,owner,bound,second,_nv_preparation=prepared)
+        if preparation_probe_assertion is not None:raise preparation_probe_assertion
         journal.prepare_global_unit(owner,bound,second)
         original=self.read_owned(stack,writer,owner,bound,facts['auth'],'history_tail',facts['post'])
         plan=reads.require_current_owned_read(writer,owner,bound,original,read_kind='history_tail')
@@ -1780,6 +1788,151 @@ with scoped_fixture(root,sheet),state.tracker_settings_writer(project,project/'p
             fixture_facts.update(facts)
             fixture_facts.update(generation=generation,post=post,metadata=metadata)
         return allocation,writer,owner,bound,first,second,first_projection,first_delivery
+
+    def test_actual_archived_delivery_native_preparation_reads_original_k_without_reacquiring_sheet(self):
+        from monitor import issue_tracker_state_owner as state
+        reached=[]
+        def probe(allocation,writer,sheet,bound,prepared,tracker):
+            self.assertFalse((tracker/'settings/outbox/0.json').exists())
+            self.assertEqual({},state._COMPLETED_READ_CONTEXT)
+            before={str(path.relative_to(tracker)):(path.stat().st_ino,path.read_bytes())
+                for path in tracker.rglob('*') if path.is_file()}
+            entry=getattr(allocation,'_hold_native_catalog_k_read',None)
+            self.assertTrue(callable(entry),'actual old delivery must support K inside native preparation')
+            with mock.patch.object(allocation.ownership,'spreadsheet_owner') as reacquire:
+                with entry(prepared,writer,sheet,bound):
+                    actual=state.current_k(writer)
+                    self.assertEqual((1,7),(actual.revision,actual.k))
+                    issued=state._NATIVE_CATALOG_K_READ_CONTEXT[writer]
+                    # The real archived delivery grants only a read. Even a
+                    # removed/rebound public map must not fall back or mutate.
+                    with mock.patch.object(allocation,'_hold_completed_k_pair') as mutation_pair:
+                        for altered in (None,allocation._NativeCatalogKContext()):
+                            if altered is None:state._NATIVE_CATALOG_K_READ_CONTEXT.pop(writer)
+                            else:state._NATIVE_CATALOG_K_READ_CONTEXT[writer]=altered
+                            try:
+                                with self.assertRaises(state.TrackerStateHold):state.current_k(writer)
+                                with self.assertRaises(state.TrackerStateHold):
+                                    state.set_k(writer,new_k=9,actor='operator:fixture',recorded_at='2026-10-08T10:02:00Z',
+                                                request_id='read-only-must-not-write',expected_revision=1)
+                                with self.assertRaises(allocation.SettingsAuditHold):
+                                    allocation.cleanup_completed_settings_outbox(writer,sheet,bound,object())
+                                with self.assertRaises(allocation.SettingsAuditHold):
+                                    allocation.apply_completed_k_change(writer,sheet,bound,object(),new_k=9,
+                                        actor='operator:fixture',recorded_at='2026-10-08T10:02:00Z',
+                                        request_id='read-only-must-not-write',expected_revision=1)
+                            finally:state._NATIVE_CATALOG_K_READ_CONTEXT[writer]=issued
+                        mutation_pair.assert_not_called()
+                    reset=allocation._NATIVE_CATALOG_K_CONTEXT.set(None)
+                    try:
+                        with self.assertRaises(state.TrackerStateHold):state.current_k(writer)
+                    finally:allocation._NATIVE_CATALOG_K_CONTEXT.reset(reset)
+                    self.assertEqual((1,7),(state.current_k(writer).revision,state.current_k(writer).k))
+                    reached.append('actual-preparation-original-k')
+                reacquire.assert_not_called()
+            self.assertNotIn(issued,allocation._LIVE_NATIVE_CATALOG_K_CONTEXTS)
+            self.assertIsNone(allocation._NATIVE_CATALOG_K_CONTEXT.get())
+            state._NATIVE_CATALOG_K_READ_CONTEXT[writer]=issued
+            try:
+                with self.assertRaises(state.TrackerStateHold):state.current_k(writer)
+            finally:state._NATIVE_CATALOG_K_READ_CONTEXT.pop(writer)
+            self.assertEqual({},state._COMPLETED_READ_CONTEXT)
+            with self.assertRaises(state.TrackerStateHold):state.current_k(writer)
+            self.assertEqual(before,{str(path.relative_to(tracker)):(path.stat().st_ino,path.read_bytes())
+                for path in tracker.rglob('*') if path.is_file()})
+        with ExitStack() as stack:
+            self.native_second_audit_completed(stack,archive_before_new=True,preparation_k_probe=probe)
+        self.assertEqual(['actual-preparation-original-k'],reached)
+
+    def test_native_preparation_k_read_rechecks_issuer_after_actual_chain_validation(self):
+        from monitor import issue_tracker_state_owner as state
+        reached=[]
+        def probe(allocation,writer,sheet,bound,prepared,tracker):
+            refused=False
+            with allocation._hold_native_catalog_k_read(prepared,writer,sheet,bound):
+                issued=state._NATIVE_CATALOG_K_READ_CONTEXT[writer]
+                actual_validate=allocation.chain.validate_k_chain_snapshot
+                def validate_then_revoke(*args,**kwargs):
+                    result=actual_validate(*args,**kwargs)
+                    reached.append('actual-chain-validated-before-revocation')
+                    state._NATIVE_CATALOG_K_READ_CONTEXT.pop(writer)
+                    return result
+                try:
+                    with mock.patch.object(allocation.chain,'validate_k_chain_snapshot',validate_then_revoke):
+                        try:state.current_k(writer)
+                        except state.TrackerStateHold:refused=True
+                finally:state._NATIVE_CATALOG_K_READ_CONTEXT[writer]=issued
+            self.assertTrue(refused,'this original K read must HOLD before returning after issuer revocation')
+        with ExitStack() as stack:
+            self.native_second_audit_completed(stack,archive_before_new=True,preparation_k_probe=probe)
+        self.assertEqual(['actual-chain-validated-before-revocation'],reached)
+
+    def test_native_preparation_k_read_rejects_foreign_actual_writer_before_settings_acquisition(self):
+        reached=[]
+        def probe(allocation,writer,sheet,bound,prepared,tracker):
+            project=self.root/'foreign-k-project';publication=project/'publication'
+            project.mkdir(mode=0o700);publication.mkdir(mode=0o700)
+            allocation.local.create_local_commit_store(project,publication)
+            with allocation.local.writer_owner(project,publication) as foreign:
+                allocation.settings.initialize_local_k_store(project/'.tracker',initialized_at='2026-10-08T10:00:00Z',
+                    acquisition_id='foreign-k-initialization',token=foreign)
+                original={str(path.relative_to(project)):(path.stat().st_ino,path.read_bytes())
+                    for path in project.rglob('*') if path.is_file()}
+                refused=False
+                with mock.patch.object(allocation,'_hold_settings_originals',wraps=allocation._hold_settings_originals) as images:
+                    try:
+                        with allocation._hold_native_catalog_k_read(prepared,foreign,sheet,bound):pass
+                    except allocation.SettingsAuditHold:refused=True
+                reached.append((refused,images.call_count))
+                self.assertEqual(original,{str(path.relative_to(project)):(path.stat().st_ino,path.read_bytes())
+                    for path in project.rglob('*') if path.is_file()})
+            self.assertEqual([(True,0)],reached,'foreign strict K cannot acquire this preparation read identity')
+        with ExitStack() as stack:
+            self.native_second_audit_completed(stack,archive_before_new=True,preparation_k_probe=probe)
+        self.assertEqual([(True,0)],reached)
+
+    def test_native_preparation_k_read_checks_old_raw_after_actual_settings_finalizer_and_revocation(self):
+        from monitor import issue_tracker_state_owner as state
+        class ProbeFinished(BaseException):pass
+        primary=ProbeFinished('actual tail probe finished')
+        facts=[];returned=[];retained=[]
+        def probe(allocation,writer,sheet,bound,prepared,tracker):
+            actual_holder=allocation._hold_settings_originals
+            marker=tracker/'settings-audit-delivery/UNISSUED-K-TAIL'
+            @contextmanager
+            def after_actual_close(*args,**kwargs):
+                with actual_holder(*args,**kwargs) as original:
+                    yield original
+                # Inner semantic validation closes before issuance; select
+                # only the outer actual FD holder after the read identity was
+                # issued and then genuinely revoked, not a fake verifier.
+                if not returned or facts:return
+                facts.append((not state._NATIVE_CATALOG_K_READ_CONTEXT,
+                    not allocation._LIVE_NATIVE_CATALOG_K_CONTEXTS,
+                    allocation._NATIVE_CATALOG_K_CONTEXT.get() is None))
+                marker.write_bytes(b'literal unissued old-delivery tail\n');marker.chmod(0o600)
+                retained.append(marker)
+            refused=False
+            with mock.patch.object(allocation,'_hold_settings_originals',after_actual_close):
+                try:
+                    with allocation._hold_native_catalog_k_read(prepared,writer,sheet,bound):
+                        actual=state.current_k(writer)
+                        self.assertEqual((1,7),(actual.revision,actual.k))
+                        returned.append('actual-original-read')
+                except state.TrackerStateHold:refused=True
+            facts.append(('factory-return-refused',refused))
+            # Preserve the exact operator interruption through the real outer
+            # preparation and owners; never register/repair a faulted graph.
+            raise primary
+        with self.assertRaises(ProbeFinished) as caught:
+            with ExitStack() as stack:
+                self.native_second_audit_completed(stack,archive_before_new=True,preparation_k_probe=probe)
+        self.assertIs(primary,caught.exception)
+        self.assertEqual(['actual-original-read'],returned)
+        self.assertEqual([(True,True,True),('factory-return-refused',True)],facts)
+        self.assertEqual(1,len(retained))
+        self.assertEqual(b'literal unissued old-delivery tail\n',retained[0].read_bytes())
+        self.assertEqual({},state._NATIVE_CATALOG_K_READ_CONTEXT)
 
     def test_native_second_allocation_created_after_actual_first_archive_assigns_only_literal_new_event(self):
         from monitor import issue_tracker_mutation_launcher as mutation
