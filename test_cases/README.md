@@ -976,6 +976,16 @@ COMPLETE/DELIVERED、outbox 消费、发送或在线 worker 激活。
 这不是清理或重试许可。独立 direct 覆盖八类原件及计数前后两种状态，真实
 Stage-L/C5/C6 workflow 覆盖普通计数和共享重试后的同字节替换，保留原字节故障测试。
 此身份快照仅绑定本次观察／计数窗口，不是跨冷进程的永久 inode 登记或现场证明。
+首次 allocation 写者另将四个真实 creator FD 与写者最终完整 stat 交接给读者，
+持续持有到读者 finalizer 结束；不能在写者返回后重新登记改过的 stat。
+首写后、reader 捕获前同字节换 inode 或同 inode 原样重写均 HOLD，marker 前
+故障不能提交 INITIALIZED；marker 后故障保留 evidence，不确认成功或计数。
+FD 槽复用为 foreign inode 时只拒绝、不误关；creator 清理中断仍收尾目录。
+首次 pathname stat 失败而身份未建立时，不重新采纳 FD 槽身份、不盲关未知 FD；
+保留原失败／中断对象，并将清理未确认作为明确 cause，保留失败证据。
+原两次文件/父目录屏障、八次 pre-marker 与十三次总屏障合同保持不变，默认
+`_write_new` 调用仍保留原行为；私有 `(FD, fullstat)` 只供本地原件交接，
+不是 cold 首用、多单元 catalog 外锚、COMPLETE、DELIVERED 或发送许可。
 实际 COMPLETE→C25 桥另在双 owner 下持有原分配、settings、全局 journal、
 enrollment、History preread 与全部完成 proof 原件，重放完整语义并完成屏障后，
 先独占写目录外 `.tracker/SETTINGS-AUDIT-DELIVERY-STARTED` 固定见证，

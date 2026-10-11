@@ -22,6 +22,107 @@ PREPARED = b"local-workbook-fixture\n"
 
 
 class LocalCommitTests(unittest.TestCase):
+    def test_first_name_stat_failure_never_closes_a_foreign_reused_slot(self):
+        native_open=os.open; native_stat=os.stat; owned=[]; foreign=[]
+        primary=OSError('first pending pathname identity unavailable')
+        target=self.project/'independent-foreign'; target.write_bytes(b'foreign remains owned by test\n')
+        with writer_owner(self.project,self.publish) as token:
+            parent=local_commit._owner(token).root_fd
+            def opening(name,*args,**kwargs):
+                descriptor=native_open(name,*args,**kwargs)
+                if isinstance(name,str) and name.startswith('.pending-'): owned.append(descriptor)
+                return descriptor
+            def inspecting(name,*args,**kwargs):
+                if isinstance(name,str) and name.startswith('.pending-'):
+                    os.close(owned[0])
+                    descriptor=native_open(target,os.O_RDONLY)
+                    if descriptor!=owned[0]:
+                        os.dup2(descriptor,owned[0]); os.close(descriptor)
+                    foreign.append(owned[0])
+                    raise primary
+                return native_stat(name,*args,**kwargs)
+            try:
+                with mock.patch.object(os,'open',side_effect=opening),mock.patch.object(os,'stat',side_effect=inspecting):
+                    with self.assertRaises(OSError) as caught:
+                        local_commit._write_new(parent,'never-installed',b'new record\n',_return_original=True)
+                self.assertIs(primary,caught.exception)
+                self.assertEqual(b'foreign remains owned by test\n',os.pread(foreign[0],100,0))
+                self.assertEqual(target.stat().st_ino,os.fstat(foreign[0]).st_ino)
+                self.assertIsInstance(caught.exception.__cause__,LocalCommitHold)
+                self.assertFalse((self.project/'.tracker/never-installed').exists())
+            finally:
+                for descriptor in foreign:
+                    try: os.close(descriptor)
+                    except OSError: pass
+
+    def test_first_write_cleanup_refusal_preserves_the_original_interrupt(self):
+        native_open=os.open; native_write=os.write; owned=[]; foreign=[]
+        primary=KeyboardInterrupt('original first-write interruption')
+        target=self.project/'independent-interrupt-foreign'; target.write_bytes(b'foreign interrupt evidence\n')
+        with writer_owner(self.project,self.publish) as token:
+            parent=local_commit._owner(token).root_fd
+            def opening(name,*args,**kwargs):
+                descriptor=native_open(name,*args,**kwargs)
+                if isinstance(name,str) and name.startswith('.pending-'): owned.append(descriptor)
+                return descriptor
+            def writing(descriptor,raw):
+                if owned and descriptor==owned[0]:
+                    os.close(descriptor)
+                    replacement=native_open(target,os.O_RDONLY)
+                    if replacement!=descriptor:
+                        os.dup2(replacement,descriptor); os.close(replacement)
+                    foreign.append(descriptor)
+                    raise primary
+                return native_write(descriptor,raw)
+            try:
+                with mock.patch.object(os,'open',side_effect=opening),mock.patch.object(os,'write',side_effect=writing):
+                    with self.assertRaises(KeyboardInterrupt) as caught:
+                        local_commit._write_new(parent,'interrupted-record',b'original intended record\n',_return_original=True)
+                self.assertIs(primary,caught.exception)
+                self.assertIsInstance(caught.exception.__cause__,LocalCommitHold)
+                self.assertEqual(b'foreign interrupt evidence\n',os.pread(foreign[0],100,0))
+                self.assertFalse((self.project/'.tracker/interrupted-record').exists())
+            finally:
+                for descriptor in foreign:
+                    try: os.close(descriptor)
+                    except OSError: pass
+
+    def test_first_write_can_hand_off_the_actual_original_descriptor_until_reader_closes(self):
+        with writer_owner(self.project,self.publish) as token:
+            parent=local_commit._owner(token).root_fd
+            raw=b'independent first-written immutable image\n'
+            descriptor,identity=local_commit._write_new(parent,'owned-first-image',raw,_return_original=True)
+            try:
+                actual=os.fstat(descriptor); named=os.stat('owned-first-image',dir_fd=parent,follow_symlinks=False)
+                self.assertEqual((actual.st_dev,actual.st_ino),(named.st_dev,named.st_ino))
+                self.assertEqual((actual.st_dev,actual.st_ino,actual.st_mode,actual.st_uid,actual.st_gid,
+                    actual.st_nlink,actual.st_size,actual.st_mtime_ns,actual.st_ctime_ns),identity)
+                self.assertEqual(raw,os.pread(descriptor,len(raw)+1,0))
+                with self.assertRaises(FileExistsError):
+                    local_commit._write_new(parent,'owned-first-image',b'never overwrite',_return_original=True)
+                self.assertEqual(raw,os.pread(descriptor,len(raw)+1,0))
+                self.assertEqual(raw,(self.project/'.tracker/owned-first-image').read_bytes())
+            finally: local_commit._close_written_original(descriptor,identity)
+            with self.assertRaises(OSError): os.fstat(descriptor)
+
+    def test_first_write_retained_descriptor_is_closed_when_parent_barrier_refuses(self):
+        native_open=os.open; native_fsync=os.fsync; opened=[]
+        with writer_owner(self.project,self.publish) as token:
+            parent=local_commit._owner(token).root_fd
+            def opening(name,*args,**kwargs):
+                result=native_open(name,*args,**kwargs)
+                if isinstance(name,str) and name.startswith('.pending-'): opened.append(result)
+                return result
+            def barrier(fd):
+                if fd==parent: raise OSError('owned first-written parent barrier failed')
+                return native_fsync(fd)
+            with mock.patch.object(os,'open',side_effect=opening),mock.patch.object(os,'fsync',side_effect=barrier):
+                with self.assertRaises(OSError):
+                    local_commit._write_new(parent,'owned-failed-image',b'preserve failed evidence\n',_return_original=True)
+            self.assertEqual(1,len(opened))
+            with self.assertRaises(OSError): os.fstat(opened[0])
+            self.assertEqual(b'preserve failed evidence\n',(self.project/'.tracker/owned-failed-image').read_bytes())
+
     def original_try_api(self):
         api = getattr(local_commit, '_try_original_writer_owner', None)
         self.assertTrue(callable(api), 'historical acquisition must refuse non-original roots and LOCK before flock')

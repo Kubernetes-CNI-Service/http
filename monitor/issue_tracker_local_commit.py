@@ -223,13 +223,46 @@ def _rename_new(parent, source, destination, *, destination_parent=None):
         raise OSError(error, os.strerror(error), destination)
 
 
-def _write_new(parent, name, raw):
-    if not isinstance(raw, bytes) or len(raw) > _MAX_MANIFEST:
+def _written_file_identity(info):
+    return (info.st_dev,info.st_ino,info.st_mode,info.st_uid,info.st_gid,
+            info.st_nlink,info.st_size,info.st_mtime_ns,info.st_ctime_ns)
+
+
+def _close_written_original(fd, identity):
+    """Never close a foreign inode merely reusing this writer's FD number."""
+    current=os.fstat(fd)
+    if (current.st_dev,current.st_ino)!=identity[:2]:
+        raise LocalCommitHold('first-written descriptor no longer original')
+    os.close(fd)
+
+
+def _write_new(parent, name, raw, *, _return_original=False):
+    """Install no-replace evidence; optionally hand off its still-open writer.
+
+    Private creator/reader overlap only, not a commit or recovery capability.
+    Default callers retain their original close-before-rename behavior. The
+    explicit handoff retains the actual first inode through both barriers and
+    validates its named post-image before transferring (FD, actual final full
+    identity) and conditional cleanup to the caller. The recipient revalidates
+    this identity; it never recaptures a changed inode's first-written stat.
+    """
+    if (not isinstance(raw, bytes) or len(raw) > _MAX_MANIFEST
+            or type(_return_original) is not bool):
         raise LocalCommitHold("invalid local evidence write")
     temp = ".pending-" + uuid.uuid4().hex
-    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+    fd = os.open(temp, (os.O_RDWR if _return_original else os.O_WRONLY) | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
                  | os.O_CLOEXEC, 0o600, dir_fd=parent)
+    transferred = False; close_identity=None; primary=None
     try:
+        if _return_original:
+            # Cleanup candidate only, not write authority; successful issuance
+            # below must match the actual first fstat, not adopt this pathname.
+            close_identity=_written_file_identity(os.stat(temp,dir_fd=parent,follow_symlinks=False))
+        original = _check(fd,directory=False) if _return_original else None
+        if original is not None:
+            if (original.st_dev,original.st_ino)!=close_identity[:2]:
+                raise LocalCommitHold('first-written descriptor replaced before acquisition')
+            close_identity=_written_file_identity(original)
         view = memoryview(raw)
         while view:
             count = os.write(fd, view)
@@ -237,8 +270,44 @@ def _write_new(parent, name, raw):
                 raise LocalCommitHold("short local evidence write")
             view = view[count:]
         os.fsync(fd)
+        if _return_original:
+            _check(fd,directory=False)
+            named=os.stat(temp,dir_fd=parent,follow_symlinks=False)
+            if ((named.st_dev,named.st_ino)!=(original.st_dev,original.st_ino)
+                    or os.pread(fd,len(raw)+1,0)!=raw):
+                raise LocalCommitHold('first-written pending evidence replaced')
+            _rename_new(parent,temp,name)
+            os.fsync(parent)
+            named=os.stat(name,dir_fd=parent,follow_symlinks=False)
+            actual=_check(fd,directory=False)
+            if ((named.st_dev,named.st_ino)!=(original.st_dev,original.st_ino)
+                    or (actual.st_dev,actual.st_ino)!=(original.st_dev,original.st_ino)
+                    or os.pread(fd,len(raw)+1,0)!=raw):
+                raise LocalCommitHold('first-written evidence handoff replaced')
+            identity=_written_file_identity(actual)
+            if (_written_file_identity(named)!=identity
+                    or _written_file_identity(os.fstat(fd))!=identity):
+                raise LocalCommitHold('first-written full identity changed before handoff')
+            transferred=True
+            return fd,identity
+    except BaseException as exc:
+        primary=exc
+        raise
     finally:
-        os.close(fd)
+        if not transferred:
+            try:
+                if _return_original:
+                    if close_identity is None:
+                        # Acquisition never established our original inode.
+                        # A fresh fstat may now describe a foreign reused slot;
+                        # neither adopt it nor blindly close that FD number.
+                        raise LocalCommitHold('first-written cleanup identity unavailable; evidence retained')
+                    _close_written_original(fd,close_identity)
+                else: os.close(fd)
+            except BaseException as cleanup:
+                if primary is not None:
+                    raise primary from cleanup
+                raise
     try:
         _rename_new(parent, temp, name)
     except FileExistsError:

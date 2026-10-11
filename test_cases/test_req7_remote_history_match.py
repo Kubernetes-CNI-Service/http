@@ -1221,6 +1221,35 @@ with local.writer_owner(root/'project',root/'project/publication') as writer,sco
         return {'event_id':'settings:0:'+hashlib.sha256(event).hexdigest(),
             'recorded_at_utc':'2026-10-08T10:00:00Z','details':event.decode().rstrip('\n')}
 
+    def test_actual_tls_c6_allocation_first_writer_replacement_refuses_before_count(self):
+        from test_cases.test_req7_settings_audit_allocation import load as load_allocation
+        allocation=load_allocation()
+        from monitor import issue_tracker_global_attempt_journal as globals_
+        native_write=allocation.local._write_new; native_prepare=globals_.prepare_global_unit
+        reached=[]; captured=[]; target=self.root/'project/.tracker/settings-audit-allocation/ASSIGNMENTS'
+        preserved=self.root/'preserved-real-first-allocation-original'
+        def capture(sheet,bound,unit):
+            result=native_prepare(sheet,bound,unit); captured.append((sheet,bound,unit)); return result
+        def replace_after_writer(parent,name,raw,**options):
+            result=native_write(parent,name,raw,**options)
+            if name=='ASSIGNMENTS' and not reached:
+                original=target.stat(); target.rename(preserved)
+                target.write_bytes(raw); target.chmod(0o600)
+                reached.append((original.st_ino,target.stat().st_ino))
+            return result
+        with ExitStack() as scope:
+            with mock.patch.object(globals_,'prepare_global_unit',side_effect=capture), \
+                    mock.patch.object(allocation.local,'_write_new',side_effect=replace_after_writer):
+                with self.assertRaises(allocation.SettingsAuditHold):
+                    self.prepare_owned(scope,settings_audits=(self.settings_audit_oracle(),),native_generation=True)
+            self.assertEqual(1,len(reached)); self.assertNotEqual(*reached[0]); self.assertEqual(1,len(captured))
+            self.assertEqual(preserved.read_bytes(),target.read_bytes())
+            self.assertFalse((target.parent/'INITIALIZED').exists())
+            sheet,bound,unit=captured[0]; state=globals_.inspect_global_unit(sheet,bound,unit)
+            self.assertEqual((0,'UNATTEMPTED_OBSERVATION'),(state.attempt_count,state.outcome))
+            self.assertEqual(['0.json'],sorted(p.name for p in (target.parent.parent/'settings/outbox').iterdir()))
+            self.assertFalse(any(p.name.endswith('.completion') for p in (self.root/'var/lib/http-ztp-container/issue-tracker').iterdir()))
+
     def catalog_settings_completed_and_pending(self, *, mirror_foreign_allocation=False):
         """Actual two-C6 catalog, native TLS COMPLETE and original C25 delivery.
 

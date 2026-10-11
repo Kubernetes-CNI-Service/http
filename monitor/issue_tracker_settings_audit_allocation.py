@@ -297,7 +297,21 @@ def _hold_counted_audit_originals(writer_token, spreadsheet_token, binding, unit
 
 
 def _observe_held(writer_token, spreadsheet_token, binding, unit, *, create, verify_settings):
-    folder = None; failed = False
+    folder = None; failed = False; creators=ExitStack(); written=[]
+    def verify_written():
+        for parent,name,fd,identity,raw in written:
+            local._check(fd,directory=False); journal._named(parent,name,fd,directory=False)
+            if journal._identity(os.fstat(fd))!=identity or os.pread(fd,len(raw)+1,0)!=raw:
+                raise SettingsAuditHold()
+            journal._named(parent,name,fd,directory=False)
+            if journal._identity(os.fstat(fd))!=identity: raise SettingsAuditHold()
+    def write(parent,name,raw):
+        fd,identity=local._write_new(parent,name,raw,_return_original=True)
+        # Register cleanup BEFORE the first stat/read can fail. Keep the actual
+        # creator FD until the completed reader and all finalizers have closed;
+        # a same-byte replacement between writer return and capture is not ours.
+        creators.callback(local._close_written_original,fd,identity)
+        written.append((parent,name,fd,identity,raw)); verify_written()
     try:
         owner, header, assignments = _originals(writer_token, spreadsheet_token, binding, unit)
         verify_settings()
@@ -317,24 +331,27 @@ def _observe_held(writer_token, spreadsheet_token, binding, unit, *, create, ver
                 raise SettingsAuditHold()
             # Witness file+parent barriers BEFORE directory creation; a crash
             # leaves the witness or unexplained pending file, never adoption.
-            local._write_new(owner.root_fd, _WITNESS, _witness(header, assignments))
+            write(owner.root_fd, _WITNESS, _witness(header, assignments))
             folder = global_journal._create_folder(owner.root_fd, _FOLDER)
-            local._write_new(folder, 'HEADER', header)
-            local._write_new(folder, 'ASSIGNMENTS', assignments)
+            write(folder, 'HEADER', header)
+            write(folder, 'ASSIGNMENTS', assignments)
             if _originals(writer_token, spreadsheet_token, binding, unit)[1:] != (header, assignments):
                 raise SettingsAuditHold()
             if global_journal.inspect_global_unit(spreadsheet_token, binding, unit).attempt_count != 0:
                 raise SettingsAuditHold()
             journal._named(owner.root_fd, _FOLDER, folder, directory=True)
             verify_settings()
+            verify_written()
             # ALL eight witness+image barriers precede the unit marker.
-            local._write_new(folder, 'INITIALIZED', _marker(header, assignments))
+            write(folder, 'INITIALIZED', _marker(header, assignments))
         else:
             folder = local._directory(owner.root_fd, _FOLDER)
         with _hold_allocation_originals(owner.root_fd,folder,header,assignments) as verify_allocation:
+            verify_written()
             _inspect(owner.root_fd, folder, header, assignments)
             _sync_marker(owner.root_fd, folder, header, assignments)
             verify_allocation()
+            verify_written()
             if _originals(writer_token, spreadsheet_token, binding, unit)[1:] != (header, assignments):
                 raise SettingsAuditHold()
             ownership._validated_owner(spreadsheet_token, binding)
@@ -344,11 +361,18 @@ def _observe_held(writer_token, spreadsheet_token, binding, unit, *, create, ver
                 raise SettingsAuditHold()
             verify_settings()
             verify_allocation()
+            verify_written()
+        verify_written()
     except Exception: failed = True
     finally:
-        if folder is not None:
-            try: os.close(folder)
-            except OSError: failed = True
+        try:
+            try: creators.close()
+            except Exception: failed=True
+        finally:
+            # A creator finalizer interruption cannot bypass the folder close.
+            if folder is not None:
+                try: os.close(folder)
+                except OSError: failed = True
     if failed: raise SettingsAuditHold()
     return assignments
 

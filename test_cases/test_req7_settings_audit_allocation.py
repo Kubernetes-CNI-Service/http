@@ -60,6 +60,113 @@ def allocation_image_barrier(case, fd):
 
 
 class Req7SettingsAuditAllocationTests(unittest.TestCase):
+    def test_creator_finalizer_interrupt_still_closes_the_actual_allocation_folder(self):
+        native_folder=self.global_journal._create_folder
+        native_cleanup=local._close_written_original
+        folders=[]; reached=[]; primary=KeyboardInterrupt('creator finalizer interrupted')
+        def folder(parent,name):
+            descriptor=native_folder(parent,name)
+            if name=='settings-audit-allocation': folders.append(descriptor)
+            return descriptor
+        def cleanup(descriptor,identity):
+            native_cleanup(descriptor,identity)
+            if not reached:
+                reached.append(identity)
+                raise primary
+        with self.owners() as (writer,sheet):
+            value=self.unit(); self.global_journal.prepare_global_unit(sheet,binding(),value)
+            with mock.patch.object(self.global_journal,'_create_folder',side_effect=folder),mock.patch.object(local,'_close_written_original',side_effect=cleanup):
+                with self.assertRaises(KeyboardInterrupt) as caught:
+                    self.module.prepare_settings_audit_allocation(writer,sheet,binding(),value)
+            self.assertIs(primary,caught.exception)
+            self.assertEqual(1,len(reached)); self.assertEqual(1,len(folders))
+            with self.assertRaises(OSError): os.fstat(folders[0])
+            self.assertEqual(0,self.global_journal.inspect_global_unit(sheet,binding(),value).attempt_count)
+            self.assertTrue((self.allocation/'INITIALIZED').is_file())
+            self.assertEqual(canonical({'schema_version':1,'revision':0,
+                'event_sha256':hashlib.sha256(self.event0).hexdigest()}),
+                (self.project/'.tracker/settings/outbox/0.json').read_bytes())
+
+    def test_first_creator_stat_cannot_be_recaptured_after_same_inode_rewrite(self):
+        native=local._write_new; reached=[]
+        with self.owners() as (writer,sheet):
+            value=self.unit(); self.global_journal.prepare_global_unit(sheet,binding(),value)
+            target=self.allocation/'ASSIGNMENTS'
+            def rewritten(parent,name,raw,**options):
+                result=native(parent,name,raw,**options)
+                if name=='ASSIGNMENTS' and not reached:
+                    before=target.stat(); target.write_bytes(raw)
+                    os.utime(target,ns=(before.st_atime_ns,before.st_mtime_ns+1000000000))
+                    after=target.stat(); reached.append((before,after))
+                return result
+            with mock.patch.object(local,'_write_new',side_effect=rewritten):
+                with self.assertRaises(self.module.SettingsAuditHold):
+                    self.module.prepare_settings_audit_allocation(writer,sheet,binding(),value)
+            self.assertEqual(1,len(reached)); before,after=reached[0]
+            self.assertEqual(before.st_ino,after.st_ino); self.assertNotEqual(before.st_mtime_ns,after.st_mtime_ns)
+            self.assertFalse((self.allocation/'INITIALIZED').exists())
+            state=self.global_journal.inspect_global_unit(sheet,binding(),value)
+            self.assertEqual((0,'UNATTEMPTED_OBSERVATION'),(state.attempt_count,state.outcome))
+
+    def test_first_writer_cleanup_never_closes_a_foreign_reused_descriptor(self):
+        native=local._write_new; retained=[]; replacement=[]
+        foreign=self.root/'owned-foreign-fd'; foreign.write_bytes(b'foreign original preserved\n'); foreign.chmod(0o600)
+        try:
+            with self.owners() as (writer,sheet):
+                value=self.unit(); self.global_journal.prepare_global_unit(sheet,binding(),value)
+                def reused(parent,name,raw,**options):
+                    result=native(parent,name,raw,**options)
+                    if name=='ASSIGNMENTS' and not replacement:
+                        fd=result[0] if isinstance(result,tuple) else result
+                        os.close(fd)
+                        other=os.open(foreign,os.O_RDONLY)
+                        if other!=fd: os.dup2(other,fd); os.close(other)
+                        replacement.append(fd); retained.append(os.fstat(fd))
+                    return result
+                with mock.patch.object(local,'_write_new',side_effect=reused):
+                    with self.assertRaises(self.module.SettingsAuditHold):
+                        self.module.prepare_settings_audit_allocation(writer,sheet,binding(),value)
+                self.assertEqual(1,len(replacement))
+                actual=os.fstat(replacement[0])
+                self.assertEqual((retained[0].st_dev,retained[0].st_ino),(actual.st_dev,actual.st_ino))
+                self.assertEqual(b'foreign original preserved\n',os.pread(replacement[0],128,0))
+        finally:
+            for fd in replacement:
+                try: os.close(fd)
+                except OSError: pass
+
+    def test_first_allocation_cannot_adopt_same_byte_replacement_before_reader_capture(self):
+        for name in ('SETTINGS-AUDIT-ALLOCATED','HEADER','ASSIGNMENTS','INITIALIZED'):
+            with self.subTest(first_written=name):
+                case=type(self)('test_pending_projection_comes_from_exact_actual_event_and_retains_outbox'); case.setUp()
+                try:
+                    native=local._write_new; reached=[]; closed=[]
+                    with case.owners() as (writer,sheet):
+                        value=case.unit(); case.global_journal.prepare_global_unit(sheet,binding(),value)
+                        target=(case.project/'.tracker'/name if name=='SETTINGS-AUDIT-ALLOCATED' else case.allocation/name)
+                        preserved=case.root/'preserved-first-allocation-original'
+                        def replace_after_writer(parent,actual,raw,**options):
+                            result=native(parent,actual,raw,**options)
+                            if actual==name and not reached:
+                                original=target.stat(); target.rename(preserved)
+                                target.write_bytes(raw); target.chmod(0o600)
+                                reached.append((original.st_ino,target.stat().st_ino))
+                                if options.get('_return_original'): closed.append(result[0])
+                            return result
+                        with mock.patch.object(local,'_write_new',side_effect=replace_after_writer):
+                            with self.assertRaises(case.module.SettingsAuditHold):
+                                case.module.prepare_settings_audit_allocation(writer,sheet,binding(),value)
+                        self.assertEqual(1,len(reached),'must reach original first writer return before reader capture')
+                        self.assertNotEqual(*reached[0]); self.assertEqual(preserved.read_bytes(),target.read_bytes())
+                        state=case.global_journal.inspect_global_unit(sheet,binding(),value)
+                        self.assertEqual((0,'UNATTEMPTED_OBSERVATION'),(state.attempt_count,state.outcome))
+                        self.assertEqual((case.audit0,),case.module.pending_settings_audits(writer))
+                        self.assertEqual(['0.json'],sorted(p.name for p in (case.project/'.tracker/settings/outbox').iterdir()))
+                        if name!='INITIALIZED': self.assertFalse((case.allocation/'INITIALIZED').exists())
+                        for descriptor in closed:
+                            with self.assertRaises(OSError): os.fstat(descriptor)
+                finally: case.doCleanups()
+
     def test_pending_reader_requires_actual_active_owner_and_preserves_ordinary_contract(self):
         from monitor import issue_tracker_state_owner as state
         before=self.image()
@@ -285,8 +392,8 @@ class Req7SettingsAuditAllocationTests(unittest.TestCase):
             self.global_journal.prepare_global_unit(sheet,binding(),value)
             path=self.project/'.tracker/settings/events/0.json'; preserved=self.root/'preserved-allocation-event'
             changed=[]
-            def write_then_replace(parent,name,raw):
-                result=native_write(parent,name,raw)
+            def write_then_replace(parent,name,raw,**options):
+                result=native_write(parent,name,raw,**options)
                 if name=='ASSIGNMENTS' and not changed:
                     image=path.read_bytes(); path.rename(preserved); path.write_bytes(image); path.chmod(0o600)
                     changed.append(True)
@@ -526,9 +633,10 @@ class Req7SettingsAuditAllocationTests(unittest.TestCase):
         value = self.unit(); native_write = local._write_new
         with self.owners() as (writer, sheet):
             self.global_journal.prepare_global_unit(sheet, binding(), value)
-            def write(parent, name, raw):
-                native_write(parent, name, raw)
+            def write(parent, name, raw, **options):
+                result=native_write(parent, name, raw, **options)
                 if name == 'ASSIGNMENTS': self.global_journal.record_global_attempt_intent(sheet, binding(), value)
+                return result
             with mock.patch.object(local, '_write_new', side_effect=write), self.assertRaises(self.module.SettingsAuditHold):
                 self.module.prepare_settings_audit_allocation(writer, sheet, binding(), value)
             self.assertFalse((self.allocation/'INITIALIZED').exists())
