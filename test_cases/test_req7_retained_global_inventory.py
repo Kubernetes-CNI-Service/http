@@ -34,6 +34,21 @@ def load(*, reset_support=True):
 
 
 class RetainedInventoryShapeTests(unittest.TestCase):
+    def test_native_settings_family_has_exact_shape_and_bounded_assignment_limit(self):
+        module=load()
+        names=('ASSIGNMENTS','HEADER','INITIALIZED')
+        self.assertEqual(names,module._family_entries('settings-audit',names))
+        for changed in (names[:-1],names+('foreign',),names+(names[0],)):
+            with self.subTest(names=changed),self.assertRaises(module.RetainedInventoryHold):
+                module._family_entries('settings-audit',changed)
+        self.assertEqual(1024*1024,module._limit('settings-audit','ASSIGNMENTS'))
+        self.assertEqual(16384,module._limit('settings-audit','HEADER'))
+        self.assertEqual(16384,module._limit('settings-audit','INITIALIZED'))
+        self.assertEqual(16384,module._limit('journal','ASSIGNMENTS'))
+        self.assertNotIn('settings-audit',module._FAMILIES)
+        with self.assertRaises(module.RetainedInventoryHold):
+            module._namespace_entries(STEM,(STEM+'.journal',STEM+'.journal-started',STEM+'.settings-audit'))
+
     def test_fixture_reload_keeps_normal_import_and_package_alias_on_actual_registry(self):
         import importlib
         import monitor

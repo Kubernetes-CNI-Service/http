@@ -22,7 +22,7 @@ from monitor import issue_tracker_sheets_read_decode as decode
 
 _FAMILIES = frozenset(('business', 'completion', 'completion-started', 'dispatch', 'enrollment',
                        'history', 'journal', 'journal-started', 'metadata', 'nv'))
-_CATALOG_FAMILIES = _FAMILIES | {'project-origin', 'nv-started'}
+_CATALOG_FAMILIES = _FAMILIES | {'project-origin', 'nv-started', 'settings-audit', 'settings-audit-started'}
 _FIXED = {
     'enrollment': frozenset(('HEADER', 'INITIALIZED', 'NONCES')),
     'history': frozenset(('HEADER', 'HISTORY-RAW', 'INITIALIZED')),
@@ -31,6 +31,7 @@ _FIXED = {
     'nv': frozenset(('ETH-RAW', 'HEADER', 'IB-RAW', 'INITIALIZED', 'RESERVATIONS')),
     'completion': frozenset(('COMPLETE', 'HEADER', 'HEADERS-RAW', 'HISTORY-RAW', 'IDENTITY-RAW', 'METADATA-RAW')),
     'project-origin': frozenset(('STARTED', 'ORIGIN', 'WITNESS')),
+    'settings-audit': frozenset(('HEADER', 'ASSIGNMENTS', 'INITIALIZED')),
 }
 _TOTAL_LIMIT = 48 * 1024 * 1024
 
@@ -755,6 +756,8 @@ def _family_entries(family, names):
 
 
 def _limit(family, name):
+    if family == 'settings-audit' and name == 'ASSIGNMENTS':
+        return 1024 * 1024
     if name == 'BUSINESS-RAW':
         return 16 * 1024 * 1024
     if name.endswith('-RAW'):

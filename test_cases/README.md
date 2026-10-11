@@ -1001,6 +1001,16 @@ FD 槽复用为 foreign inode 时只拒绝、不误关；creator 清理中断仍
 本地 direct 与真实 C6→NV→allocation→catalog→冷读覆盖这些边界；这是创建/发现接线，
 不是 GLOBAL/count/retained 接收、第二单元 DELIVERED、
 投影归档、默认 worker hook 或 REQ7 整体/full/check 证明，这些仍须分别实证闭合。
+native catalog 的 GLOBAL/retained 原图接收另只允许两个精确派生 family：
+`settings-audit` 的固定 HEADER/ASSIGNMENTS/INITIALIZED 和单文件
+`settings-audit-started`。实际 ALL catalog 外锚仍必须验证全部原件，不能按后缀
+前缀放宽未知名字、接受未锚定目录或丢弃不认识的项目。仅 ASSIGNMENTS 的读取限额
+为 1 MiB，其他小文件 16 KiB、总量 48 MiB 以及 legacy namespace 合同不变。
+真实 C6→native allocation→catalog→GLOBAL count-zero→retained 消费者保持原 NV
+六文件与全部 allocation 原件；实际 holder 内同字节新 inode 拒绝整个读取，保留
+旧 journal/count/WIRE，无修复或有效前缀。未知审计 suffix 在消费者前拒绝。
+这是原图覆盖，不是 protected COUNT/CLAIM 原 allocation 接收、DELIVERED、发送
+许可、默认 hook 或当前精确树正式 full/check 证明。
 实际 COMPLETE→C25 桥另在双 owner 下持有原分配、settings、全局 journal、
 enrollment、History preread 与全部完成 proof 原件，重放完整语义并完成屏障后，
 先独占写目录外 `.tracker/SETTINGS-AUDIT-DELIVERY-STARTED` 固定见证，

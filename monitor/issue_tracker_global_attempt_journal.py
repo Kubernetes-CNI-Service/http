@@ -288,7 +288,8 @@ def _hold_catalog_originals(token, binding):
             allowed = {stem + '.lock', stem + '.enrollment', stem + '.units', stem + '.units-started',
                        *(stem + '.units-position-%020d' % index for index in range(1, len(units) + 1))}
             families = ('journal', 'journal-started', 'history', 'business', 'metadata', 'nv', 'nv-started',
-                        'dispatch', 'completion', 'completion-started', 'project-origin')
+                        'dispatch', 'completion', 'completion-started', 'project-origin',
+                        'settings-audit', 'settings-audit-started')
             allowed.update(stem + '.unit-' + unit.unit_id + '.' + family
                            for unit in units for family in families)
             actual = {name for name in os.listdir(parent) if name.startswith(stem + '.')}

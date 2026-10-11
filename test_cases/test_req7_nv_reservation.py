@@ -1266,6 +1266,77 @@ class Req7CatalogNvPreparationTests(unittest.TestCase):
                 verify()
             self.assertEqual(before, self.files())
 
+    def test_native_audit_catalog_global_and_retained_inventory_hold_all_originals_without_authority(self):
+        from test_cases.test_req7_retained_global_inventory import load as inventory_load
+        audit=self.native_settings_oracle()
+        with self.native_c6_origin_fixture(settings_audit=audit) as (module,writer,token,unit):
+            with self.preparation(token) as prepared:
+                self.catalog.register_pending_c6_unit(writer,token,binding(),unit,_nv_preparation=prepared)
+            original=self.files()
+            module.global_journal.prepare_global_unit(token,binding(),unit)
+            inventory=inventory_load(reset_support=False);before=self.files()
+            with inventory._hold_catalog_retained_inventory(token,binding()) as (rows,verify):
+                self.assertEqual((unit,),tuple(row.unit for row in rows))
+                self.assertEqual((0,),tuple(row.attempt_count for row in rows))
+                self.assertEqual({'enrollment','journal','journal-started','nv','nv-started','project-origin',
+                                  'settings-audit','settings-audit-started'},set(rows[0].families))
+                prefix=hashlib.sha256(TARGET.encode()).hexdigest()+'.unit-'+unit.unit_id
+                names={name for name,_stat,_sha in rows[0].originals}
+                self.assertEqual({'HEADER','ASSIGNMENTS','INITIALIZED'},
+                    {name.split('/')[-1] for name in names if name.startswith(prefix+'.settings-audit/')})
+                self.assertIn(prefix+'.settings-audit-started',names)
+                self.assertEqual({'ETH-RAW','IB-RAW','PRIOR','HEADER','RESERVATIONS','INITIALIZED'},
+                    {name.split('/')[-1] for name in names if name.startswith(prefix+'.nv/')})
+                self.assertFalse(any(hasattr(rows[0],name) for name in ('permit','applied','fresh','new')))
+                verify()
+            self.assertEqual(before,self.files())
+            for name,image in original.items():self.assertEqual(image,self.files()[name],name)
+            self.assertEqual((0,'UNATTEMPTED_OBSERVATION'),
+                (lambda row:(row.attempt_count,row.outcome))(
+                    module.global_journal.inspect_catalog_global_units(token,binding())[0][1]))
+
+    def test_native_retained_assignment_same_bytes_rebind_refuses_after_actual_yield(self):
+        from test_cases.test_req7_retained_global_inventory import load as inventory_load
+        with self.native_c6_origin_fixture(settings_audit=self.native_settings_oracle()) as (module,writer,token,unit):
+            with self.preparation(token) as prepared:
+                self.catalog.register_pending_c6_unit(writer,token,binding(),unit,_nv_preparation=prepared)
+            module.global_journal.prepare_global_unit(token,binding(),unit)
+            inventory=inventory_load(reset_support=False)
+            prefix=hashlib.sha256(TARGET.encode()).hexdigest()+'.unit-'+unit.unit_id
+            path=self.state/(prefix+'.settings-audit')/'ASSIGNMENTS'
+            saved=self.root/'original-retained-native-assignment';raw=path.read_bytes();inode=path.stat().st_ino
+            journal_before={name:image for name,image in self.files().items() if name.startswith(prefix+'.journal/')}
+            marks=[];failure=None
+            try:
+                with inventory._hold_catalog_retained_inventory(token,binding()) as (_rows,verify):
+                    marks.append('actual-inventory-yield')
+                    path.rename(saved);path.write_bytes(raw);path.chmod(0o600)
+                    marks.append('same-byte-rebind');verify();marks.append('unsafe-return')
+            except Exception as exc:failure=exc
+            self.assertEqual(['actual-inventory-yield','same-byte-rebind'],marks)
+            self.assertIs(type(failure),inventory.RetainedInventoryHold)
+            self.assertNotEqual(inode,path.stat().st_ino);self.assertEqual(inode,saved.stat().st_ino)
+            self.assertEqual(raw,path.read_bytes());self.assertEqual(raw,saved.read_bytes())
+            self.assertEqual(journal_before,
+                {name:image for name,image in self.files().items() if name.startswith(prefix+'.journal/')})
+            self.assertFalse(any(name.startswith('ATTEMPT-') for name in os.listdir(self.state/(prefix+'.journal'))))
+            with self.assertRaises(module.global_journal.GlobalAttemptHold):
+                module.global_journal.inspect_catalog_global_units(token,binding())
+
+    def test_native_audit_unknown_family_suffix_refuses_before_any_retained_consumer(self):
+        from test_cases.test_req7_retained_global_inventory import load as inventory_load
+        with self.native_c6_origin_fixture(settings_audit=self.native_settings_oracle()) as (module,writer,token,unit):
+            with self.preparation(token) as prepared:
+                self.catalog.register_pending_c6_unit(writer,token,binding(),unit,_nv_preparation=prepared)
+            suffix=hashlib.sha256(TARGET.encode()).hexdigest()+'.unit-'+unit.unit_id+'.settings-audit-foreign'
+            (self.state/suffix).mkdir(mode=0o700);before=self.files()
+            with self.assertRaises(module.global_journal.GlobalAttemptHold):
+                module.global_journal.inspect_catalog_global_units(token,binding())
+            inventory=inventory_load(reset_support=False);marks=[]
+            with self.assertRaises(inventory.RetainedInventoryHold):
+                with inventory._hold_catalog_retained_inventory(token,binding()):marks.append('unsafe-yield')
+            self.assertEqual([],marks);self.assertEqual(before,self.files());self.assertTrue((self.state/suffix).is_dir())
+
     def test_native_catalog_retained_inventory_prior_same_bytes_rebind_revokes_actual_consumer(self):
         from test_cases.test_req7_retained_global_inventory import load as inventory_load
         marks = []; error = None
