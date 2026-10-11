@@ -29,6 +29,21 @@ from test_cases.test_issue_tracker_stage_l_consumer import ProdStageLFixture
 
 
 class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
+    @contextmanager
+    def _assertion_preserving_preparation(self, preparation):
+        # A production HOLD deliberately hides consumer exception text. Keep
+        # an independent expectation visible only after real scope cleanup.
+        primary = None
+        try:
+            with preparation as borrowed:
+                try: yield borrowed
+                except BaseException as exc:
+                    primary = exc
+                    raise
+        except BaseException:
+            if primary is not None: raise primary
+            raise
+
     def _fixture_certificate_supplier(self, builder):
         # One scenario's server material only, never a cached read/result,
         # deadline, client connection or production authorization. Rebuild if
@@ -1385,8 +1400,36 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
     def test_actual_source_receipt_global_owner_and_original_enrollment_derive_switch_inserts(self):
         self._exercise_real_protected_three_panel_fixture(skip_history=False, observed_switch_insert_probe=True)
 
+    def test_actual_c6_switch_nonallocating_scope_registers_catalog_without_any_nv_family(self):
+        self._exercise_real_protected_three_panel_fixture(skip_history=False,
+            observed_switch_insert_probe=True, nonallocating_switch_catalog_probe=True)
+
+    def test_actual_nonallocating_switch_refuses_legacy_nv_registrar_before_any_catalog_write(self):
+        self._exercise_real_protected_three_panel_fixture(skip_history=False,
+            observed_switch_insert_probe=True, nonallocating_switch_catalog_probe=True,
+            nonallocating_switch_alias_probe='old-nv-registry')
+
+    def test_actual_nonallocating_switch_refuses_legacy_c6_nv_parameter_before_any_origin_write(self):
+        self._exercise_real_protected_three_panel_fixture(skip_history=False,
+            observed_switch_insert_probe=True, nonallocating_switch_catalog_probe=True,
+            nonallocating_switch_alias_probe='old-c6-parameter')
+
+    def test_actual_nonallocating_switch_c6_keeps_real_settings_audit_anchor_without_nv(self):
+        self._exercise_real_protected_three_panel_fixture(skip_history=False,
+            observed_switch_insert_probe=True, nonallocating_switch_catalog_probe=True,
+            nonallocating_switch_audit_probe=True)
+
+    def test_actual_nonallocating_switch_refuses_another_live_project_writer_before_source_or_c6(self):
+        self._exercise_real_protected_three_panel_fixture(skip_history=False,
+            observed_switch_insert_probe=True, nonallocating_switch_catalog_probe=True,
+            nonallocating_switch_alias_probe='other-live-writer')
+
     def test_actual_source_receipt_and_original_two_sheet_nv_derive_mixed_cabling_units(self):
         self._exercise_real_protected_three_panel_fixture(skip_history=False, observed_cabling_insert_probe=True)
+
+    def test_actual_c6_all_update_eth_ib_catalog_units_keep_original_ids_without_nv_allocation(self):
+        self._exercise_real_protected_three_panel_fixture(skip_history=False,
+            observed_cabling_insert_probe=True, nonallocating_cabling_catalog_probe=True)
 
     def test_actual_protected_c6_source_compiles_native_nv_and_reads_same_original_catalog_unit(self):
         self._exercise_real_protected_three_panel_fixture(skip_history=False,
@@ -2782,7 +2825,9 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         shared_retry_probe=False, allocation_original_identity_probe=False, allocation_retry_identity_probe=False,
         receipt_admission_rebind_probe=False,quota_namespace_rebind_probe=False,quota_retry_identity_probe=False,
         before_cabling_fixture=None, native_catalog_probe=False, native_catalog_return_fault=None,
-        native_catalog_c6_origin_probe=False,
+        native_catalog_c6_origin_probe=False, nonallocating_switch_catalog_probe=False,
+        nonallocating_switch_alias_probe=None, nonallocating_switch_audit_probe=False,
+        nonallocating_cabling_catalog_probe=False,
         native_catalog_retained_probe=False,
         native_catalog_creator_first_stat_probe=None,
         native_catalog_all_c6_fifo_probe=None,
@@ -3931,6 +3976,12 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                     closed = cabling_row('NV30017', 'Closed'); key = candidates[-1].activity_key
                     closed.update({column: literal(value) for column, value in zip(('K', 'L', 'F'), key[1:])})
                     rows = [row, closed, {'V': {'boolValue': False}}]
+                    if nonallocating_cabling_catalog_probe:
+                        rows = []
+                        for index, candidate in enumerate(candidates):
+                            active = cabling_row('NV%05d' % (30016 + index))
+                            active.update({column: literal(value) for column, value in zip(('K', 'L', 'F'), candidate.activity_key[1:])})
+                            rows.append(active)
                     discovery = sheet_document(sheet, rows, 100); discovery['sheets'][0]['properties']['sheetId'] = sid
                     occupancy = insertion_document(sheet, rows, 100); occupancy['sheets'][0]['properties']['sheetId'] = sid
                     other = cabling_row('NV39999', 'Closed'); other['K'] = literal('unrelated-original-seed')
@@ -3949,11 +4000,13 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                     original_read = response(discovery); other_read = response(other_raw)
                     reads = []
                     for offset, candidate in enumerate(candidates):
-                        exact = exact_row_document(sheet, rows[0], 2); exact['sheets'][0]['properties']['sheetId'] = sid
+                        row_index = offset + 2 if nonallocating_cabling_catalog_probe else 2
+                        exact = exact_row_document(sheet, rows[offset] if nonallocating_cabling_catalog_probe else rows[0], row_index)
+                        exact['sheets'][0]['properties']['sheetId'] = sid
                         reads.append({'operation_id': candidate.operation_id, 'discovery_plan': discovery_plan,
                             'discovery_response': original_read, 'occupancy_plan': occupancy_plan, 'occupancy_response': response(occupancy),
-                            'row_plan': prepare_sheets_read(binding, credential, mode='row_rectangle', sheet=sheet, first_row=3) if offset == 0 else None,
-                            'row_response': response(exact) if offset == 0 else None})
+                            'row_plan': prepare_sheets_read(binding, credential, mode='row_rectangle', sheet=sheet, first_row=row_index+1) if offset == 0 or nonallocating_cabling_catalog_probe else None,
+                            'row_response': response(exact) if offset == 0 or nonallocating_cabling_catalog_probe else None})
                     requested = tuple(item.activity_key for item in candidates[1:])
                     expected = tuple((key, 'NV%05d' % (40000+index)) for index, key in enumerate(sorted(requested)))
                     with tempfile.TemporaryDirectory(prefix='req7-real-cabling-unit-') as directory:
@@ -3972,6 +4025,62 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                                 private_context.enter_context(scoped_fixture(global_root, private_inputs))
                                 private_context.enter_context(scoped_fixture(global_root, current_target))
                             original = enrollment_module.prepare_enrollment_journal(spreadsheet_token, binding, identity)
+                            if nonallocating_cabling_catalog_probe:
+                                from test_cases.test_req7_global_attempt_journal import load as load_global
+                                from test_cases.test_req7_unit_catalog import load as load_catalog
+                                load_global(); nv_module = load_nv(); catalog = load_catalog(reset_dependencies=False)
+                                self.assertIs(nv_module.ownership, owner_module)
+                                self.assertIs(catalog.ownership, owner_module)
+                                stem = hashlib.sha256(binding.spreadsheet_id.encode()).hexdigest()
+                                baseline = {path.name for path in state.iterdir()}
+                                with self._assertion_preserving_preparation(nv_module.hold_catalog_nonallocating_preparation(
+                                        writer_token, spreadsheet_token, binding, identity,
+                                        generation_id=committed.receipt.generation_id,
+                                        publish_id=committed.receipt.published_sha256, sheet=sheet)) as prepared:
+                                    def compile_updates(**changes):
+                                        options = dict(local_generation_id=committed.receipt.generation_id, sheet=sheet,
+                                            business_reads=tuple(reads), history_plan=history_plan, history_response=history_raw,
+                                            spreadsheet_token=spreadsheet_token, binding=binding, identity=identity,
+                                            _unit_preparation=prepared)
+                                        options.update(changes)
+                                        return compiler.freeze_observed_receipted_cabling_unit(qualified, self.store,
+                                            metadata=metadata, expected_template_sha256=self.snapshot.workbook_sha256,
+                                            writer_token=writer_token, **args, **options)
+                                    unit = compile_updates(); body = json.loads(unit.action_preimage)
+                                    self.assertEqual(['update'] * len(candidates), [item['action'] for item in body['business']])
+                                    self.assertEqual(committed.receipt.generation_id, body['identity']['generation_id'])
+                                    self.assertEqual(committed.receipt.published_sha256, body['identity']['publish_id'])
+                                    self.assertEqual(len(candidates), unit.history_rows_expected)
+                                    requests = json.loads(unit.wire_bytes)['requests']
+                                    self.assertFalse(any('appendCells' in item and item['appendCells']['sheetId'] == sid for item in requests))
+                                    updates = [item['updateCells'] for item in requests if 'updateCells' in item]
+                                    self.assertEqual(set(range(2, 2 + len(candidates))), {item['start']['rowIndex'] for item in updates})
+                                    self.assertTrue(all(item['start']['sheetId'] == sid and item['start']['columnIndex'] != 0 for item in updates))
+                                    independent = {'schema_version': 1, 'spreadsheet_id': binding.spreadsheet_id, 'sheet': sheet,
+                                        'sheet_id': sid, 'history_sheet_id': 105, 'history_path': history_plan.path,
+                                        'history_sha256': hashlib.sha256(history_raw.data).hexdigest(), 'nv_journal_sha256': None,
+                                        'business': [{'operation_id': candidate.operation_id, 'discovery_path': discovery_plan.path,
+                                            'discovery_sha256': hashlib.sha256(original_read.data).hexdigest(), 'occupancy_path': occupancy_plan.path,
+                                            'occupancy_sha256': hashlib.sha256(reads[index]['occupancy_response'].data).hexdigest(),
+                                            'row_path': reads[index]['row_plan'].path,
+                                            'row_sha256': hashlib.sha256(reads[index]['row_response'].data).hexdigest(), 'append_start_row_index': None}
+                                            for index, candidate in enumerate(candidates)]}
+                                    self.assertEqual(hashlib.sha256((json.dumps(independent, ensure_ascii=False, sort_keys=True,
+                                        separators=(',', ':')) + '\n').encode()).hexdigest(), body['preread_sha256'])
+                                    self.assertEqual(baseline, {path.name for path in state.iterdir()})
+                                    with self.assertRaises(compiler.SendUnitHold): compile_updates(_nv_preparation=prepared)
+                                    catalog.register_pending_c6_unit(writer_token, spreadsheet_token, binding, unit, _unit_preparation=prepared)
+                                    with catalog.hold_pending_project_c6_units(spreadsheet_token, binding) as (units, verify):
+                                        self.assertEqual((unit,), tuple(item.unit for item in units)); verify()
+                                    with self.assertRaises(compiler.SendUnitHold): compile_updates()
+                                self.assertFalse(nv_module._ACTIVE_CATALOG_PREPARATIONS)
+                                self.assertFalse(catalog._IMAGE_BUDGETS)
+                                names = {path.name for path in state.iterdir()}
+                                self.assertFalse(any(name.endswith('.nv') or name.endswith('.nv-started') or '.journal' in name for name in names))
+                                folder = state / (stem + '.units') / unit.unit_id
+                                self.assertNotIn('nv_original', json.loads((folder / 'HEADER').read_bytes()))
+                                self.assertEqual(unit.wire_bytes, (folder / 'WIRE').read_bytes())
+                                continue
                             nv_args = dict(generation_id=committed.receipt.generation_id, publish_id=committed.receipt.published_sha256,
                                 sheet=sheet, requested_keys=requested)
                             pair = (discovery_plan, original_read, other_plan, other_read) if sheet == 'ETH Cabling' else (other_plan, other_read, discovery_plan, original_read)
@@ -4855,9 +4964,90 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                         def compile_switch(**changes):
                             options = dict(local_generation_id=committed.receipt.generation_id,business_reads=tuple(reads),history_plan=history_plan,
                                 history_response=history_response,spreadsheet_token=spreadsheet_token,binding=binding,identity=identity,audits=(),occupied_metadata_ids=())
+                            if nonallocating_switch_audit_probe:
+                                from monitor.issue_tracker_settings_audit_allocation import pending_settings_audits
+                                options['audits'] = pending_settings_audits(writer_token)
+                                self.assertTrue(options['audits'])
                             options.update(changes)
                             return compiler.freeze_observed_receipted_switch_unit(qualified,self.store,metadata=metadata,
                                 expected_template_sha256=self.snapshot.workbook_sha256,writer_token=writer_token,**args,**options)
+                        if nonallocating_switch_catalog_probe:
+                            from test_cases.test_req7_global_attempt_journal import load as load_global
+                            from test_cases.test_req7_nv_reservation import load as load_native
+                            from test_cases.test_req7_unit_catalog import load as load_catalog
+                            load_global(); native = load_native(); catalog = load_catalog(reset_dependencies=False)
+                            self.assertIs(native.ownership, owner_module)
+                            self.assertIs(catalog.ownership, owner_module)
+                            stem = hashlib.sha256(binding.spreadsheet_id.encode()).hexdigest()
+                            baseline = {path.name for path in state.iterdir()}
+                            with self._assertion_preserving_preparation(native.hold_catalog_nonallocating_preparation(writer_token, spreadsheet_token, binding, identity,
+                                    generation_id=committed.receipt.generation_id,
+                                    publish_id=committed.receipt.published_sha256, sheet='ETH&IB Switch')) as prepared:
+                                self.assertEqual(baseline, {path.name for path in state.iterdir()})
+                                self.assertFalse(hasattr(prepared, 'observation'))
+                                with self.assertRaises(native.NvReservationHold):
+                                    native._catalog_nonallocating_source_observation(prepared, spreadsheet_token, binding, identity,
+                                        writer_token=writer_token, generation_id=committed.receipt.generation_id,
+                                        publish_id='0' * 64, sheet='ETH&IB Switch')
+                                if nonallocating_switch_alias_probe == 'other-live-writer':
+                                    foreign_project = global_root / 'another-project'
+                                    foreign_project.mkdir(mode=0o700)
+                                    foreign_publication = foreign_project / 'publication'
+                                    foreign_publication.mkdir(mode=0o700)
+                                    initialize_tracker_state(foreign_project, foreign_publication,
+                                        initialized_at='2026-09-25T00:00:00Z',
+                                        acquisition_id='req7-nonallocating-other-live-writer')
+                                    with tracker_writer(foreign_project, foreign_publication) as foreign_writer:
+                                        self.assertIsNot(writer_token, foreign_writer)
+                                        with self.assertRaises(native.NvReservationHold):
+                                            native._catalog_nonallocating_source_observation(prepared, spreadsheet_token, binding, identity,
+                                                writer_token=foreign_writer, generation_id=committed.receipt.generation_id,
+                                                publish_id=committed.receipt.published_sha256, sheet='ETH&IB Switch')
+                                        with mock.patch.object(catalog, '_register_native_pending_c6_unit') as register:
+                                            with self.assertRaises(catalog.UnitCatalogHold):
+                                                catalog.register_pending_c6_unit(foreign_writer, spreadsheet_token, binding,
+                                                    compile_switch(_unit_preparation=prepared), _unit_preparation=prepared)
+                                            register.assert_not_called()
+                                    self.assertEqual(baseline, {path.name for path in state.iterdir()})
+                                unit = compile_switch(_unit_preparation=prepared)
+                                body = json.loads(unit.action_preimage)
+                                self.assertEqual(['update'] + ['insert'] * (len(candidates) - 1),
+                                    [item['action'] for item in body['business']])
+                                self.assertEqual(baseline, {path.name for path in state.iterdir()})
+                                if nonallocating_switch_alias_probe == 'old-nv-registry':
+                                    with self.assertRaises(native.NvReservationHold):
+                                        native.register_catalog_nv_unit(prepared, unit)
+                                    self.assertEqual(baseline, {path.name for path in state.iterdir()})
+                                elif nonallocating_switch_alias_probe == 'old-c6-parameter':
+                                    with self.assertRaises(catalog.UnitCatalogHold):
+                                        catalog.register_pending_c6_unit(writer_token, spreadsheet_token, binding, unit,
+                                            _nv_preparation=prepared)
+                                    self.assertEqual(baseline, {path.name for path in state.iterdir()})
+                                catalog.register_pending_c6_unit(writer_token, spreadsheet_token, binding, unit,
+                                    _unit_preparation=prepared)
+                                with catalog.hold_pending_units(spreadsheet_token, binding) as (units, verify):
+                                    self.assertEqual((unit,), units); verify()
+                                with self.assertRaises(compiler.SendUnitHold): compile_switch(_unit_preparation=prepared)
+                            self.assertFalse(native._ACTIVE_CATALOG_PREPARATIONS)
+                            self.assertFalse(catalog._IMAGE_BUDGETS)
+                            names = {path.name for path in state.iterdir()}
+                            self.assertFalse(any(name.endswith('.nv') or name.endswith('.nv-started') for name in names))
+                            self.assertFalse(any('.journal' in name or '.GLOBAL' in name for name in names))
+                            folder = state / (stem + '.units') / unit.unit_id
+                            header = json.loads((folder / 'HEADER').read_bytes())
+                            self.assertNotIn('nv_original', header)
+                            self.assertIn('project_origin', header)
+                            if nonallocating_switch_audit_probe:
+                                self.assertTrue(body['audits'])
+                                self.assertIn('settings_allocation', header)
+                                self.assertEqual(len(candidates) + len(body['audits']), unit.history_rows_expected)
+                                audit_directory = state / (stem + '.unit-' + unit.unit_id + '.settings-audit')
+                                self.assertTrue((audit_directory / 'INITIALIZED').is_file())
+                            self.assertEqual(unit.wire_bytes, (folder / 'WIRE').read_bytes())
+                            with self.assertRaises(compiler.SendUnitHold): compile_switch()
+                            self.assertEqual(names, {path.name for path in state.iterdir()})
+                            self.assertEqual(original_template, self.template.read_bytes())
+                            return
                         unit = compile_switch(); action = json.loads(unit.action_preimage)
                         self.assertEqual(committed.receipt.generation_id,action['identity']['generation_id'])
                         self.assertEqual(committed.receipt.published_sha256,action['identity']['publish_id'])

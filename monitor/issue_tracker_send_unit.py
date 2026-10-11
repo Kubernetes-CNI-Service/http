@@ -423,7 +423,7 @@ def freeze_observed_receipted_switch_unit(qualified, store, *, http_root, settin
                                         expected_template_sha256, local_generation_id,
                                         business_reads, history_plan, history_response,
                                         spreadsheet_token, binding, identity, audits=(),
-                                        occupied_metadata_ids=(), writer_token=None, **claims):
+                                        occupied_metadata_ids=(), writer_token=None, _unit_preparation=None, **claims):
     """New Switch-only source unit under BOTH real owners and original nonces.
 
     Derive update vs insert from complete original key images, never caller
@@ -453,6 +453,13 @@ def freeze_observed_receipted_switch_unit(qualified, store, *, http_root, settin
         if str(local_owner.project) != str(store.project_identity): raise SendUnitHold()
 
         def original_nonce_state():
+            if _unit_preparation is not None:
+                from monitor import issue_tracker_nv_reservation as native
+                receipt = _original_receipt_identity(qualified, store, local_generation_id, writer_token,
+                    settings, whitelist_snapshot, expected_template_sha256)
+                return native._catalog_nonallocating_source_observation(_unit_preparation,
+                    spreadsheet_token, binding, identity, writer_token=writer_token, generation_id=receipt[0],
+                    publish_id=receipt[1], sheet='ETH&IB Switch')
             owner = _validated_owner(spreadsheet_token, binding)
             stem = owner.lock_name[:-5]
             names = {name for name in os.listdir(owner.directories[-1][0]) if name.startswith(stem + '.')}
@@ -535,7 +542,7 @@ def freeze_observed_receipted_cabling_unit(qualified, store, *, http_root, setti
                                          business_reads, history_plan, history_response,
                                          spreadsheet_token, binding, identity, audits=(),
                                          occupied_metadata_ids=(), writer_token=None,
-                                         _nv_preparation=None, **claims):
+                                         _nv_preparation=None, _unit_preparation=None, **claims):
     """NEW Cabling unit from original C5/C6, both owners and retained C17 IDs.
 
     All family operations share one complete original key/occupancy image.
@@ -555,12 +562,14 @@ def freeze_observed_receipted_cabling_unit(qualified, store, *, http_root, setti
         from monitor.issue_tracker_spreadsheet_owner import _validated_owner
         from monitor.issue_tracker_enrollment_journal import inspect_enrollment_journal
         from monitor.issue_tracker_nv_reservation import (inspect_nv_reservation, require_unit_nv_reservation,
-            _catalog_nv_source_observation, _catalog_nv_compiled_observation)
+            _catalog_nv_source_observation, _catalog_nv_compiled_observation,
+            _catalog_nonallocating_source_observation)
         from monitor.issue_tracker_sheets_read_decode import (
             _activity_sheet_image, _insertion_sheet_image, observe_active_row,
             observe_insertion_position, decode_history_tail)
 
-        if (claims or type(sheet) is not str or sheet not in ('ETH Cabling', 'IB Cabling')
+        if (claims or (_nv_preparation is not None and _unit_preparation is not None)
+                or type(sheet) is not str or sheet not in ('ETH Cabling', 'IB Cabling')
                 or type(business_reads) is not tuple or not 1 <= len(business_reads) <= 1000): raise SendUnitHold()
         local_owner = _owner(writer_token)
         if str(local_owner.project) != str(store.project_identity): raise SendUnitHold()
@@ -579,6 +588,12 @@ def freeze_observed_receipted_cabling_unit(qualified, store, *, http_root, setti
 
         def original_state(keys=None):
             owner = _validated_owner(spreadsheet_token, binding)
+            if _unit_preparation is not None:
+                if keys: raise SendUnitHold()
+                enrolled = _catalog_nonallocating_source_observation(_unit_preparation,
+                    spreadsheet_token, binding, identity, writer_token=writer_token,
+                    generation_id=receipt[0], publish_id=receipt[1], sheet=sheet)
+                return enrolled, None
             if _nv_preparation is not None:
                 reserved = _catalog_nv_source_observation(_nv_preparation, spreadsheet_token, binding, identity,
                     generation_id=receipt[0], publish_id=receipt[1], sheet=sheet, requested_keys=keys)
@@ -681,6 +696,9 @@ def freeze_observed_receipted_cabling_unit(qualified, store, *, http_root, setti
             # change to retained NV originals. Outer-scope HOLD is too late
             # to substitute for the compiler's own pre-return observation.
             if _catalog_nv_compiled_observation(_nv_preparation, spreadsheet_token, binding, result) != original[1]:
+                raise SendUnitHold()
+        if _unit_preparation is not None:
+            if _catalog_nv_compiled_observation(_unit_preparation, spreadsheet_token, binding, result) is not None:
                 raise SendUnitHold()
     except Exception: failed = True
     if failed: raise SendUnitHold()

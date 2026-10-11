@@ -3039,3 +3039,25 @@ source drift, read-expiry and receipt-rebind expectations remain unchanged.
 This driver is still uninstalled: default NEW/G1/FIFO, whole REQ7 and current
 full/check remain open. The old read-only worker tests retain their original
 expectations, relocated into a shared fixture with retry mode disabled.
+
+The nonallocating catalog preparation now retains ALL earlier catalog/C6/
+settlement originals under the actual project and spreadsheet owners without
+creating an NV family or inventing insertion keys. The original source
+compiler binds that live preparation to the same writer, receipted generation,
+publication and sheet. Switch and all-update ETH/IB Cabling register exactly
+once through actual C6; Cabling missing keys must still use the original NV
+allocator, never this scope. Both legacy NV registration entrances reject the
+new preparation, and its append requires the actual sealed C6 origin.
+Settings audits without NV still require their actual allocation originals and
+outside anchor; absent or replaced allocation cannot become a legacy unit.
+Independent tests first refused unsupported compilation/legacy entrances and
+audit readback. Genuine protected three-panel workflows check exact update
+coordinates and preread digest, preserved IDs/WIRE, no NV/count namespace,
+another real live writer refusal, unique C6 registration and a fresh strict
+reader's same-process original readback (not an independent cold-process
+restart). Existing mixed-insert and allocation-corruption tests remain intact.
+The production paths already have direct rules and the multi-script
+`req7_protected_source_native_nv_catalog_c6_originals` workflow mapping; no
+ignored inventory or approval exception is added. This is a preparation seam,
+not installed default NEW/G1/FIFO, overall REQ7, a current full/check proof or
+permission for real Cloud/SSH/device operations. REAL_ENV remains NOT RUN.

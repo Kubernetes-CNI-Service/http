@@ -62,7 +62,7 @@ def _project_origin_body(owner, binding, unit, facts):
         'c6_facts': facts}
 
 
-def register_pending_c6_unit(writer_token, token, binding, unit, *, _nv_preparation=None):
+def register_pending_c6_unit(writer_token, token, binding, unit, *, _nv_preparation=None, _unit_preparation=None):
     """Register actual C6 plus immutable original project locator, never repair.
 
     Project/publication paths come only from the live opaque writer, not the
@@ -70,7 +70,16 @@ def register_pending_c6_unit(writer_token, token, binding, unit, *, _nv_preparat
     write stays HOLD. Receipt-absent C6 creates neither catalog nor origin.
     No GLOBAL attempt, APPLIED, cross-project high-water or NEW is issued.
     """
+    if _unit_preparation is not None:
+        from monitor import issue_tracker_nv_reservation as native
+        if _nv_preparation is not None or type(_unit_preparation) is not native._CatalogNonallocatingPreparation:
+            raise UnitCatalogHold()
+        record = native._verify_catalog_preparation(_unit_preparation)
+        if record['nonallocating_writer'] is not writer_token: raise UnitCatalogHold()
+        return _register_native_pending_c6_unit(writer_token, token, binding, unit, _unit_preparation)
     if _nv_preparation is not None:
+        from monitor import issue_tracker_nv_reservation as native
+        if type(_nv_preparation) is not native._CatalogNvPreparation: raise UnitCatalogHold()
         return _register_native_pending_c6_unit(writer_token, token, binding, unit, _nv_preparation)
     held = _originals(token, binding); failed = False; folder = None; folder_identity = None
     try:
@@ -733,11 +742,14 @@ def _inspect(token, binding, held):
         audits=local._json(unit.action_preimage)['audits']
         allocation_name=owner.lock_name[:-5]+'.unit-'+unit_id+'.settings-audit'
         if settings_allocation is not None:
-            if not audits or origin_body is None or nv_original is None: raise UnitCatalogHold()
+            if not audits or origin_body is None: raise UnitCatalogHold()
+            if nv_original is None:
+                from monitor import issue_tracker_nv_reservation as native
+                if native._unit_insertions(unit): raise UnitCatalogHold()
             from monitor import issue_tracker_settings_audit_allocation as allocation
             settings_allocation=allocation._inspect_native_catalog_allocation(parent,allocation_name,unit,binding,
                 origin_body,settings_allocation,held)
-        elif ((audits and project_origin is not None and nv_original is not None)
+        elif ((audits and project_origin is not None)
                 or {allocation_name,allocation_name+'-started'}&root_names): raise UnitCatalogHold()
         if (unit.unit_id != unit_id or originals['HEADER'][0] != local._canonical(_header(unit, nv_original=nv_original, project_origin=project_origin,settings_allocation=settings_allocation))
                 or local._json(unit.action_preimage)['identity']['spreadsheet_id'] != binding.spreadsheet_id):

@@ -259,6 +259,116 @@ class _CatalogNvPreparation:
     observation: NvReservationObservation
 
 
+@dataclass(frozen=True, eq=False)
+class _CatalogNonallocatingPreparation:
+    """Live catalog originals; no NV reservation, admission or send permit."""
+    unit_id: str
+
+
+def _nonallocating_identity(token, binding, identity, generation_id, publish_id, sheet):
+    from monitor.issue_tracker_send_unit import _generation_identity
+    _generation_identity(generation_id)
+    enrollment._inputs(token, binding, identity)
+    enrolled = enrollment.inspect_enrollment_journal(token, binding, identity)
+    if (type(sheet) is not str or sheet not in {'ETH&IB Switch', *_FAMILIES}
+            or type(publish_id) is not str or re.fullmatch(r'[0-9a-f]{64}', publish_id) is None):
+        raise NvReservationHold()
+    body = {'schema_version': 1, 'generation_id': generation_id, 'publish_id': publish_id,
+            'spreadsheet_id': binding.spreadsheet_id, 'sheet': sheet, 'sheet_id': dict(identity.sheet_ids)[sheet]}
+    return hashlib.sha256(local._canonical(body)).hexdigest(), enrolled
+
+
+@contextmanager
+def hold_catalog_nonallocating_preparation(writer_token, token, binding, identity, *,
+                                           generation_id, publish_id, sheet):
+    """Retain ALL prior catalog/C6/settlement originals without allocating IDs.
+
+    Switch and all-update Cabling still need the genuine source compiler and
+    unique C6 registration. No invented insertion keys or caller settlement,
+    verifier, namespace allowance or path vector are accepted. An interruption
+    retains any created original and revokes this live handoff before cleanup.
+    """
+    from monitor import issue_tracker_unit_catalog as catalog
+    budget = catalog._OriginalImageBudget()
+    old = catalog._Originals(_image_budget=budget); current = catalog._Originals(_image_budget=budget)
+    prepared = None; active_budget = None; failed = False; primary = None; cleanup_problem = None
+    proofs = {'scope': ExitStack(), 'verify': lambda: None, 'delivery_scope': ExitStack(),
+              'delivery_events': [], 'owner_tail': ExitStack()}
+    try:
+        project_owner = local._owner(writer_token)
+        unit_id, _enrolled = _nonallocating_identity(token, binding, identity, generation_id, publish_id, sheet)
+        if token in catalog._IMAGE_BUDGETS: raise NvReservationHold()
+        active_budget = (ownership._validated_owner(token, binding), binding, budget)
+        catalog._IMAGE_BUDGETS[token] = active_budget
+        owner, parent, stem, catalog_fd, units, _prior, _observations = _pin_catalog_prefix(
+            token, binding, identity, old, new_allocation=True, _project_proofs=proofs)
+        if any(unit.unit_id == unit_id for unit in units): raise NvReservationHold()
+        old.sync(); proofs['verify']()
+        if local._owner(writer_token) is not project_owner: raise NvReservationHold()
+        record = {'owner': owner, 'token': token, 'binding': binding, 'identity': identity, 'old': old,
+                  'current': current, 'catalog': catalog_fd, 'units': units, 'stem': stem, 'parent': parent,
+                  'additions': set(), 'appended': None, 'registered': False, 'unit': None, 'indexed': None,
+                  'budget': budget, 'origin': None, 'settings': None, 'settings_scope': ExitStack(),
+                  'failed': False, 'verify_prior_c6': proofs['verify'],
+                  'prior_delivery_events': proofs['delivery_events'],
+                  'nonallocating_writer': writer_token, 'nonallocating_owner': project_owner}
+        prepared = _CatalogNonallocatingPreparation(unit_id); _ACTIVE_CATALOG_PREPARATIONS[prepared] = record
+        for delivery in record['prior_delivery_events']:
+            if delivery['raw'] is not None: delivery['raw'].bind(record)
+        _verify_catalog_preparation(prepared)
+        yield prepared
+        _verify_catalog_preparation(prepared)
+        if not record['registered']: raise NvReservationHold()
+    except BaseException as exc:
+        if isinstance(exc, Exception): failed = True
+        else: primary = exc
+    finally:
+        closes = []
+        if prepared is not None:
+            retained = _ACTIVE_CATALOG_PREPARATIONS.pop(prepared, None)
+            if retained is not None:
+                for delivery in retained['prior_delivery_events']:
+                    if delivery['raw'] is not None:
+                        try: delivery['raw'].freeze(retained)
+                        except BaseException as exc:
+                            failed = True
+                            if cleanup_problem is None: cleanup_problem = exc
+                            if not isinstance(exc, Exception) and primary is None: primary = exc
+                closes.append(retained['settings_scope'].close)
+                if retained['indexed'] is not None: closes.append(retained['indexed'].close)
+                if retained['origin'] is not None:
+                    origin = retained['origin']; closes.append(origin['held'].close)
+                    if origin['folder'] is not None:
+                        closes.append(lambda: catalog._close_original(origin['folder'], origin['identity']))
+        if active_budget is not None and catalog._IMAGE_BUDGETS.get(token) is active_budget:
+            catalog._IMAGE_BUDGETS.pop(token)
+        closes.extend((proofs['scope'].close, current.close, old.close,
+                       proofs['delivery_scope'].close, proofs['owner_tail'].close))
+        for close in closes:
+            try: close()
+            except BaseException as exc:
+                failed = True
+                if cleanup_problem is None: cleanup_problem = exc
+                if not isinstance(exc, Exception) and primary is None: primary = exc
+    if primary is not None:
+        if cleanup_problem is not None and cleanup_problem is not primary: raise primary from cleanup_problem
+        raise primary
+    if failed: raise NvReservationHold() from None
+
+
+def _catalog_nonallocating_source_observation(prepared, token, binding, identity, *,
+                                             writer_token, generation_id, publish_id, sheet):
+    record = _verify_catalog_preparation(prepared)
+    if (type(prepared) is not _CatalogNonallocatingPreparation or record['token'] is not token
+            or record['binding'] != binding or record['identity'] != identity or record['registered']
+            or record['nonallocating_writer'] is not writer_token):
+        raise NvReservationHold()
+    unit_id, original = _nonallocating_identity(token, binding, identity, generation_id, publish_id, sheet)
+    if prepared.unit_id != unit_id: raise NvReservationHold()
+    _verify_catalog_preparation(prepared)
+    return original
+
+
 def _unit_insertions(unit):
     from monitor.issue_tracker_send_intent import _projection
     _projection(unit)
@@ -664,7 +774,10 @@ def hold_catalog_nv_preparation(token, binding, identity, eth_plan, eth_response
 
 def _verify_catalog_preparation(prepared):
     record = _ACTIVE_CATALOG_PREPARATIONS.get(prepared)
-    if type(prepared) is not _CatalogNvPreparation or record is None:
+    if type(prepared) not in (_CatalogNvPreparation, _CatalogNonallocatingPreparation) or record is None:
+        raise NvReservationHold()
+    if (type(prepared) is _CatalogNonallocatingPreparation
+            and local._owner(record['nonallocating_writer']) is not record['nonallocating_owner']):
         raise NvReservationHold()
     if ownership._validated_owner(record['token'], record['binding']) is not record['owner']:
         raise NvReservationHold()
@@ -700,6 +813,8 @@ def _catalog_nv_append_guard(prepared, token, binding, unit):
     record = _verify_catalog_preparation(prepared)
     if record['indexed'] is not None or (record['origin'] is not None and not record['origin']['sealed']):
         raise NvReservationHold()
+    if type(prepared) is _CatalogNonallocatingPreparation and record['origin'] is None:
+        raise NvReservationHold()
     record['unit'] = unit
     return frozenset(record['additions'])
 
@@ -726,18 +841,22 @@ def _catalog_nv_compiled_observation(prepared, token, binding, unit):
     # Preserve actual ACTION/WIRE and all insertion key/ID pairs. No append,
     # namespace mutation or compiler authority is issued by this observation.
     record = _verify_catalog_preparation(prepared)
+    nonallocating = type(prepared) is _CatalogNonallocatingPreparation
+    unit_id = prepared.unit_id if nonallocating else prepared.observation.unit_id
+    reservations = () if nonallocating else prepared.observation.reservations
     if (record['token'] is not token or record['binding'] != binding or record['registered']
-            or prepared.observation.unit_id != unit.unit_id
-            or _unit_insertions(unit) != prepared.observation.reservations):
+            or unit_id != unit.unit_id or _unit_insertions(unit) != reservations):
         raise NvReservationHold()
     enrollment.require_unit_enrollment(token, binding, record['identity'], unit)
     _verify_catalog_preparation(prepared)
-    return prepared.observation
+    return None if nonallocating else prepared.observation
 
 
 def _catalog_nv_c6_origin_begin(prepared, writer, token, binding, unit):
     _catalog_nv_compiled_observation(prepared, token, binding, unit)
     record = _verify_catalog_preparation(prepared)
+    if type(prepared) is _CatalogNonallocatingPreparation and record['nonallocating_writer'] is not writer:
+        raise NvReservationHold()
     if record['origin'] is not None or record['indexed'] is not None: raise NvReservationHold()
     from monitor import issue_tracker_unit_catalog as catalog
     name = record['stem'] + '.unit-' + unit.unit_id + '.project-origin'
@@ -821,6 +940,9 @@ def _catalog_nv_original_anchor(prepared, token, binding, unit):
     if (record['token'] is not token or record['binding'] != binding
             or record['unit'] is not unit or record['registered']):
         raise NvReservationHold()
+    if type(prepared) is _CatalogNonallocatingPreparation:
+        if _unit_insertions(unit): raise NvReservationHold()
+        return None
     name = record['stem'] + '.unit-' + unit.unit_id + '.nv'
     folders = {fd for parent, entry, fd, _identity, _names in record['current'].directories
                if parent == record['parent'] and entry == name}
@@ -865,6 +987,7 @@ def register_catalog_nv_unit(prepared, unit):
     """Consume only this live preparation for its exact frozen unit, never GO."""
     failed = False
     try:
+        if type(prepared) is not _CatalogNvPreparation: raise NvReservationHold()
         record = _verify_catalog_preparation(prepared)
         from monitor import issue_tracker_unit_catalog as catalog
         catalog.register_pending_unit(record['token'], record['binding'], unit, _nv_preparation=prepared)

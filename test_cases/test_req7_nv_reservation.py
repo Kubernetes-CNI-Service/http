@@ -133,6 +133,24 @@ def recycled_outer_nv_directory(module, store, foreign):
 
 
 class Req7NvReservationDirectTests(unittest.TestCase):
+    def test_nonallocating_catalog_preparation_requires_real_project_writer_before_prefix(self):
+        module = load()
+        with mock.patch.object(module, '_pin_catalog_prefix') as prefix:
+            with self.assertRaises(module.NvReservationHold):
+                with module.hold_catalog_nonallocating_preparation(object(), self.token, binding(), self.identity,
+                        generation_id='c' * 64, publish_id='d' * 64, sheet='ETH&IB Switch'):
+                    self.fail('an invented writer cannot retain a NEW catalog scope')
+            prefix.assert_not_called()
+
+    def test_nonallocating_catalog_preparation_has_no_caller_keys_or_settlement_override(self):
+        module = load()
+        for override in ({'requested_keys': ()}, {'applied': True}, {'verify': lambda: None},
+                         {'_project_proofs': {}}, {'allow_namespace': ()}):
+            with self.subTest(override=tuple(override)), self.assertRaises(TypeError):
+                with module.hold_catalog_nonallocating_preparation(object(), self.token, binding(), self.identity,
+                        generation_id='c' * 64, publish_id='d' * 64, sheet='ETH&IB Switch', **override):
+                    self.fail('no fabricated allocation or prior-settlement claims')
+
     def test_native_creator_does_not_accept_caller_settlement_or_verifier_overrides(self):
         module = load()
         for overrides in ({'applied': True}, {'keys': KEYS}, {'verify': lambda: None}, {'_project_proofs': {}}):
