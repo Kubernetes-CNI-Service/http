@@ -775,6 +775,18 @@ class Req7HistoryPrereadNativeWorkflowTests(unittest.TestCase):
 
 
 class Req7OriginalBusinessReadAcquisitionDirectTests(unittest.TestCase):
+    def test_owned_business_creation_has_no_caller_manifest_plan_or_verifier(self):
+        import inspect
+        module=load(); api=getattr(module,'prepare_owned_project_business_preread',None)
+        self.assertTrue(callable(api),'NEW needs actual C6 and issued ALL business originals')
+        self.assertEqual(('writer_token','owner_token','binding','authentication','generation','unit',
+            'identity_response','business_reads'),tuple(inspect.signature(api).parameters))
+        with mock.patch.object(module.global_journal,'_create_folder') as create:
+            with self.assertRaises(module.HistoryPrereadHold) as caught:
+                api(object(),object(),object(),object(),object(),object(),
+                    identity_response=object(),business_reads=())
+            create.assert_not_called(); self.assertIsNone(caught.exception.__context__)
+
     def test_original_image_handoff_has_no_selector_and_rejects_unissued_guard(self):
         import copy
         import inspect
@@ -946,6 +958,178 @@ class Req7OwnedHistoryPrereadCreationWorkflowTests(unittest.TestCase):
                 self.assertTrue((path.parent/'INITIALIZED').is_file())
                 self.assertEqual(0,module.global_journal.inspect_global_unit(owner,bound,actual_unit).attempt_count)
                 self.assertFalse(list(self.root.rglob('CLAIM-*')))
+
+
+class Req7OwnedBusinessPrereadCreationWorkflowTests(unittest.TestCase):
+    _Fixture=Req7OwnedHistoryPrereadCreationWorkflowTests
+    setUp=_Fixture.setUp; certificates=_Fixture.certificates; server=_Fixture.server
+    owners=_Fixture.owners; intercept=_Fixture.intercept; child_fixture=_Fixture.child_fixture
+    project_auth=_Fixture.project_auth; read_project=_Fixture.read_project
+
+    def business_api(self):
+        module=load(); api=getattr(module,'prepare_owned_project_business_preread',None)
+        self.assertTrue(callable(api),'actual NEW business creation must retain ALL operations including NOOP')
+        return module,api
+
+    def read_business_project(self,stack,writer,owner,bound,auth,kind,value,*,sheet=None,row=None):
+        from contextlib import ExitStack
+        import socket
+        from monitor import issue_tracker_history_read_launcher as reads
+        body=json.dumps(value,separators=(',',':')).encode()
+        reply=b'HTTP/1.1 200 OK\r\nContent-Length: '+str(len(body)).encode()+b'\r\nConnection: close\r\n\r\n'+body
+        with self.server(reply,hostname='sheets.googleapis.com',destination='sheets.googleapis.com') as (records,errors),ExitStack() as launched:
+            port=socket.getaddrinfo('sheets.googleapis.com',443)[0][4][1]
+            calls,children=self.intercept(launched,self.child_fixture(port),writer,owner,bound)
+            result=reads.OwnedProjectSheetsReadUnit(writer,owner,bound,auth,
+                read_kind=kind,sheet=sheet,row=row).read_once()
+            self.assertEqual(1,len(calls)); self.assertEqual(0,children[0].returncode)
+        self.assertEqual([],errors); self.assertEqual(1,len(records)); self.assertEqual(body,result.data)
+        return result
+
+    @__import__('contextlib').contextmanager
+    def business_originals(self):
+        from contextlib import ExitStack
+        from test_cases.test_issue_tracker_whitelist_workbook import literal_xlsx
+        from test_cases.test_req7_sheets_read_decode import identity_response
+        from monitor.issue_tracker_send_unit import freeze_send_unit
+        prototype=Req7BusinessPrereadJournalDirectTests(); prototype.setUp()
+        self.addCleanup(prototype.doCleanups)
+        with ExitStack() as scope:
+            original_root,original_path=self.root,self.path
+            candidate=scope.enter_context(tempfile.TemporaryDirectory(dir=str(original_root),prefix='owned-business-'))
+            self.root=Path(candidate).resolve(); self.path=self.root/'etc/ssl/certs/ca-certificates.crt'
+            self.path.parent.mkdir(parents=True,mode=0o755)
+            scope.callback(setattr,self,'root',original_root); scope.callback(setattr,self,'path',original_path)
+            local,ownership,writer,owner,bound,_credential,_config=self.owners(scope,target_id=TARGET)
+            module,api=self.business_api()
+            auth,_path,_original=self.project_auth(scope,ownership,owner,bound)
+            identity_read=self.read_project(scope,writer,owner,bound,auth,'template_identity',identity_response())
+            from monitor import issue_tracker_history_read_launcher as reads, issue_tracker_sheets_read_decode as decoder
+            plan,_,_=reads.require_current_owned_project_read(writer,owner,bound,identity_read,auth,read_kind='template_identity')
+            identity=decoder.decode_template_identity(plan,identity_read)
+            from monitor import issue_tracker_enrollment_journal as enrollment
+            image=enrollment.prepare_enrollment_journal(owner,bound,identity)
+            nonces={title:nonce for title,_sid,nonce in image.nonces}
+            history=self.read_project(scope,writer,owner,bound,auth,'history_tail',json.loads(prototype.raw.data))
+            actual=[]; common={}
+            for role,kind in (('discovery','activity'),('occupancy','insertion')):
+                common[role+'_response']=self.read_business_project(scope,writer,owner,bound,auth,kind,
+                    json.loads(prototype.reads[0][role+'_response'].data),sheet='ETH&IB Switch')
+            for index,reading in enumerate(prototype.reads):
+                actual.append({'operation_id':reading['operation_id'],**common,
+                    'row_response':self.read_business_project(scope,writer,owner,bound,auth,'row',
+                        json.loads(reading['row_response'].data),sheet='ETH&IB Switch',row=index+3)})
+            # Independent documented digest: fixed read paths and actual raw
+            # hashes, never values/decisions generated by the behavior under test.
+            history_plan,_,_=reads.require_current_owned_project_read(writer,owner,bound,history,auth,read_kind='history_tail')
+            digest_image={'schema_version':1,'spreadsheet_id':TARGET,'sheet':'ETH&IB Switch','sheet_id':101,
+                'history_sheet_id':105,'history_path':history_plan.path,'history_sha256':hashlib.sha256(history.data).hexdigest(),
+                'business':[{'operation_id':item['operation_id'],
+                    'discovery_path':prototype.reads[0]['discovery_plan'].path,
+                    'discovery_sha256':hashlib.sha256(item['discovery_response'].data).hexdigest(),
+                    'occupancy_path':prototype.reads[0]['occupancy_plan'].path,
+                    'occupancy_sha256':hashlib.sha256(item['occupancy_response'].data).hexdigest(),
+                    'row_path':prototype.reads[index]['row_plan'].path,
+                    'row_sha256':hashlib.sha256(item['row_response'].data).hexdigest()}
+                    for index,item in enumerate(actual)]}
+            digest=hashlib.sha256((json.dumps(digest_image,ensure_ascii=False,sort_keys=True,separators=(',',':'))+'\n').encode()).hexdigest()
+            generation=local.begin_generation(writer,prototype.manifest)
+            local.record_intent(writer,generation,literal_xlsx(),kind='xlsx'); receipt=local.commit(writer,generation)
+            business=[dict(item) for item in prototype.args['business']]
+            for index,item in enumerate(business):
+                item['values']={'L':'[MONITOR][down][fabric] '+('old' if index==0 else 'new')}
+                item['observed_values']={'L':{'stringValue':'[MONITOR][down][fabric] old'}}
+            unit=freeze_send_unit(**{**prototype.args,'business':tuple(business),
+                'generation_id':generation.generation_id,'publish_id':receipt.published_sha256,
+                'sheet_id':101,'history_sheet_id':105,'target_nonce':nonces['ETH&IB Switch'],
+                'history_nonce':nonces['Update_History'],'preread_sha256':digest})
+            module.global_journal.prepare_global_unit(owner,bound,unit)
+            module.prepare_owned_project_history_preread(writer,owner,bound,auth,unit,
+                identity_response=identity_read,history_response=history)
+            yield module,api,writer,owner,bound,auth,generation,unit,identity,identity_read,tuple(actual),prototype.manifest,digest
+
+    def test_actual_c6_and_project_reads_create_all_noop_originals_and_never_rebuild_unknown(self):
+        from test_cases.test_req7_global_attempt_journal import original_read_files
+        self.business_api()
+        with self.business_originals() as (module,api,writer,owner,bound,auth,generation,unit,identity,identity_read,actual,manifest,digest):
+            before=original_read_files(self.root)
+            copied=tuple({**item,'row_response':replace(item['row_response'])} for item in actual)
+            for proposed,original_identity in ((copied,identity_read),(actual,replace(identity_read))):
+                with self.assertRaises(module.HistoryPrereadHold):
+                    api(writer,owner,bound,auth,generation,unit,identity_response=original_identity,business_reads=proposed)
+                self.assertEqual(before,original_read_files(self.root))
+            self.assertIsNone(api(writer,owner,bound,auth,generation,unit,
+                identity_response=identity_read,business_reads=actual))
+            seen=module.inspect_business_preread(owner,bound,identity,unit)
+            self.assertEqual((2,1,digest),(seen.operations_retained,seen.noop_operations,seen.preread_sha256))
+            stored=next(self.root.rglob('BUSINESS-RAW')).parent
+            self.assertEqual({'MANIFEST','BUSINESS-RAW','HEADER','INITIALIZED'},set(os.listdir(stored)))
+            self.assertEqual(manifest,(stored/'MANIFEST').read_bytes())
+            originals=original_read_files(self.root)
+            module.global_journal.record_global_attempt_intent(owner,bound,unit)
+            with self.assertRaises(module.HistoryPrereadHold):
+                api(writer,owner,bound,auth,generation,unit,identity_response=identity_read,business_reads=actual)
+            self.assertTrue(originals.items()<=original_read_files(self.root).items())
+            self.assertEqual((1,'UNKNOWN'),tuple(getattr(module.global_journal.inspect_global_unit(
+                owner,bound,unit),name) for name in ('attempt_count','outcome')))
+
+    def test_final_inspection_business_c6_replacement_or_actual_read_revocation_retains_hold(self):
+        from monitor import issue_tracker_history_read_launcher as reads
+        self.business_api()
+        for fault in ('business-same-bytes','c6-same-bytes','issued-revocation'):
+            with self.subTest(fault=fault),self.business_originals() as (
+                    module,api,writer,owner,bound,auth,generation,unit,identity,identity_read,actual,manifest,digest):
+                original=module._inspect_business; reached=[]; restore=[]
+                def inspect(*args,**options):
+                    result=original(*args,**options)
+                    if not reached:
+                        if fault=='issued-revocation':
+                            with reads._PROJECT_READ_GUARD: restore.append(reads._PROJECT_READS.pop(actual[-1]['row_response']))
+                        else:
+                            path=(next(self.root.rglob('BUSINESS-RAW')) if fault=='business-same-bytes' else
+                                self.root/'project/.tracker/generations'/generation.generation_id/'MANIFEST')
+                            raw=path.read_bytes(); old=path.stat().st_ino
+                            path.rename(self.root/'preserved-original'); path.write_bytes(raw); path.chmod(0o600)
+                            self.assertNotEqual(old,path.stat().st_ino)
+                        reached.append(True)
+                    return result
+                try:
+                    with mock.patch.object(module,'_inspect_business',side_effect=inspect):
+                        with self.assertRaises(module.HistoryPrereadHold):
+                            api(writer,owner,bound,auth,generation,unit,identity_response=identity_read,business_reads=actual)
+                finally:
+                    if restore:
+                        with reads._PROJECT_READ_GUARD: reads._PROJECT_READS[actual[-1]['row_response']]=restore[0]
+                self.assertEqual([True],reached)
+                stored=next(self.root.rglob('BUSINESS-RAW')).parent
+                self.assertTrue((stored/'INITIALIZED').is_file())
+                self.assertEqual(manifest,(stored/'MANIFEST').read_bytes())
+                self.assertEqual(0,module.global_journal.inspect_global_unit(owner,bound,unit).attempt_count)
+                self.assertFalse(list(self.root.rglob('CLAIM-*')))
+
+    def test_business_originals_stay_live_through_actual_c6_scope_finalizer(self):
+        from contextlib import contextmanager
+        from monitor import issue_tracker_remote_history_match as remote
+        self.business_api()
+        with self.business_originals() as (
+                module,api,writer,owner,bound,auth,generation,unit,identity,identity_read,actual,manifest,digest):
+            original=remote._hold_applied_generation; reached=[]
+            @contextmanager
+            def finalizer(*args,**options):
+                with original(*args,**options) as held:
+                    yield held
+                path=next(self.root.rglob('BUSINESS-RAW')); raw=path.read_bytes(); old=path.stat().st_ino
+                path.rename(self.root/'preserved-before-c6-cleanup'); path.write_bytes(raw); path.chmod(0o600)
+                self.assertNotEqual(old,path.stat().st_ino); reached.append(True)
+            with mock.patch.object(remote,'_hold_applied_generation',side_effect=finalizer):
+                with self.assertRaises(module.HistoryPrereadHold):
+                    api(writer,owner,bound,auth,generation,unit,identity_response=identity_read,business_reads=actual)
+            self.assertEqual([True],reached)
+            stored=next(self.root.rglob('BUSINESS-RAW')).parent
+            self.assertTrue((stored/'INITIALIZED').is_file())
+            self.assertEqual(manifest,(stored/'MANIFEST').read_bytes())
+            self.assertEqual(0,module.global_journal.inspect_global_unit(owner,bound,unit).attempt_count)
+            self.assertFalse(list(self.root.rglob('CLAIM-*')))
 
 
 if __name__ == '__main__':

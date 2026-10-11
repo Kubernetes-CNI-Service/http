@@ -767,6 +767,99 @@ def prepare_business_preread(token, binding, identity, unit, *, manifest, busine
     enrollment/NV and exact frozen action/wire. No regeneration after UNKNOWN,
     arbitrary coordinate/credential storage, row settlement or COMPLETE.
     """
+    return _prepare_business_preread(token,binding,identity,unit,
+        manifest=manifest,business_reads=business_reads,claims=claims)
+
+
+def prepare_owned_project_business_preread(writer_token,owner_token,binding,authentication,generation,unit,*,
+                                          identity_response,business_reads):
+    """NEW original C6 manifest plus actual same-project ALL business reads.
+
+    Plans/coordinates derive from issued responses and immutable operations;
+    no caller manifest, verifier or freshness/admission claim is accepted. C6
+    original FD overlap remains live through creator and C6-scope cleanup.
+    This stores observations, never COUNT, CLAIM, COMPLETE or send authority.
+    """
+    failed=False; originals=None
+    try:
+        from monitor import issue_tracker_remote_history_match as remote, issue_tracker_unit_catalog as catalog
+        from monitor.issue_tracker_history_read_launcher import require_current_owned_project_read
+        action=local._json(unit.action_preimage); sheet=action['identity']['sheet']
+        def issued(response,kind,*,sheet=None,row=None):
+            return require_current_owned_project_read(writer_token,owner_token,binding,response,
+                authentication,read_kind=kind,sheet=sheet,row=row)
+        def current_reads():
+            identity_plan,project,digest=issued(identity_response,'template_identity')
+            if type(business_reads) is not tuple or not 1<=len(business_reads)<=1000:
+                raise HistoryPrereadHold()
+            result=[]
+            for reading in business_reads:
+                if (type(reading) is not dict or set(reading)!=
+                        {'operation_id','discovery_response','occupancy_response','row_response'}):
+                    raise HistoryPrereadHold()
+                converted={'operation_id':reading['operation_id']}
+                for role,kind in (('discovery','activity'),('occupancy','insertion'),('row','row')):
+                    response=reading[role+'_response']; row=None
+                    if response is None:
+                        if role!='row' or sheet=='ETH&IB Switch': raise HistoryPrereadHold()
+                        plan=None
+                    else:
+                        if role=='row':
+                            # Actual response coordinate, not a caller plan.
+                            # Issuer and full business decoder both validate it.
+                            document=json.loads(response.data.decode('utf-8','strict'),
+                                object_pairs_hook=decode._pairs,parse_constant=decode._nonfinite)
+                            first=document['sheets'][0]['data'][0]['startRow']
+                            if type(first) is not int or first<2: raise HistoryPrereadHold()
+                            row=first+1
+                        plan,other_project,other_digest=issued(response,kind,sheet=sheet,row=row)
+                        if (other_project,other_digest)!=(project,digest): raise HistoryPrereadHold()
+                    converted[role+'_plan']=plan; converted[role+'_response']=response
+                result.append(converted)
+            return decode.decode_template_identity(identity_plan,identity_response),tuple(result)
+        identity,actual=current_reads()
+        originals=catalog._Originals()
+        with remote._hold_applied_generation(writer_token,generation,unit) as (owner,verify_c6,facts,_operations):
+            verify_c6()
+            ancestors=originals.directory(owner.root_fd,'generations')
+            folder=originals.directory(ancestors,generation.generation_id)
+            if list(journal._identity(os.fstat(folder)))!=facts['generation_directory_identity']:
+                raise HistoryPrereadHold()
+            manifest=None; receipt=None
+            for entry in ('STATE','MANIFEST','INTENT','RECEIPT'):
+                raw,image_identity=originals.file(folder,entry,1024*1024)
+                if (list(image_identity)!=facts['files'][entry]['identity'] or
+                        hashlib.sha256(raw).hexdigest()!=facts['files'][entry]['sha256']): raise HistoryPrereadHold()
+                if entry=='MANIFEST': manifest=raw
+                elif entry=='RECEIPT': receipt=local._json(raw)
+            published=receipt['published']
+            raw,image_identity=originals.file(owner.publication_fd,published,local._MAX_XLSX)
+            if (list(image_identity)!=facts['files'][published]['identity'] or
+                    hashlib.sha256(raw).hexdigest()!=facts['files'][published]['sha256']): raise HistoryPrereadHold()
+            def current():
+                if local._owner(writer_token) is not owner: raise HistoryPrereadHold()
+                current_reads(); originals.verify(); verify_c6(); originals.verify()
+            current()
+            _prepare_business_preread(owner_token,binding,identity,unit,
+                manifest=manifest,business_reads=actual,claims={},revalidate=current,created_originals=originals)
+            current()
+        # The overlap graph was acquired while the old C6 FDs were still live;
+        # it detects substitution during their finalizers without reopening.
+        originals.verify(); current_reads(); originals.verify()
+    except Exception: failed=True
+    finally:
+        if originals is not None:
+            try: originals.close()
+            except Exception: failed=True
+    if not failed:
+        try: current_reads()
+        except Exception: failed=True
+    if failed: raise HistoryPrereadHold() from None
+
+
+def _prepare_business_preread(token,binding,identity,unit,*,manifest,business_reads,claims,
+                             revalidate=None,created_originals=None):
+    """Legacy contract plus internal actual-source final-boundary checking."""
     folder = None; failed = False
     try:
         parent, name, base, state = _business_inputs(token, binding, unit)
@@ -781,7 +874,25 @@ def prepare_business_preread(token, binding, identity, unit, *, manifest, busine
                 or global_journal.inspect_global_unit(token, binding, unit) != state): raise HistoryPrereadHold()
         journal._named(parent, name, folder, directory=True); ownership._validated_owner(token, binding)
         local._write_new(folder, 'INITIALIZED', _marker(header))
-        _inspect_business(token, binding, identity, unit, parent, name, folder, base)
+        if revalidate is None:
+            _inspect_business(token,binding,identity,unit,parent,name,folder,base)
+        else:
+            from monitor import issue_tracker_unit_catalog as catalog
+            originals=created_originals if created_originals is not None else catalog._Originals()
+            try:
+                captured=originals.directory(parent,name)
+                if journal._identity(os.fstat(captured))!=journal._identity(os.fstat(folder)):
+                    raise HistoryPrereadHold()
+                for entry,expected,limit in (('MANIFEST',manifest,1024*1024),('BUSINESS-RAW',raw,_BUSINESS_LIMIT),
+                        ('HEADER',local._canonical(header),16384),('INITIALIZED',_marker(header),16384)):
+                    actual,_identity=originals.file(captured,entry,limit)
+                    if actual!=expected: raise HistoryPrereadHold()
+                originals.verify(); revalidate()
+                _inspect_business(token,binding,identity,unit,parent,name,folder,base)
+                originals.verify(); revalidate(); originals.verify()
+            finally:
+                if created_originals is None: originals.close()
+            revalidate()
     except Exception: failed = True
     finally:
         if folder is not None:

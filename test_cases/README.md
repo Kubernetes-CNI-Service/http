@@ -2832,3 +2832,14 @@ COUNT or CLAIM. The legacy plan-based offline preparation is unchanged.
 Independent direct and actual local OAuth/TLS/global-journal workflows were
 initially RED; these prerequisites do not themselves wire default NEW/R2,
 prove G1 send admission, complete REQ7, or replace current full/check.
+
+Owned NEW business preparation takes an actual C6 generation and issued
+same-project template/activity/insertion/row responses, not a supplied manifest
+or read plan. ALL original operations including NOOP are re-decoded; the C6
+manifest/publication and newly created four business images overlap their
+original FD scopes through C6 finalizers. Independent expectations first RED
+include substitution after the last inspection and after C6 cleanup; late
+failure retains initialized HOLD with zero COUNT/CLAIM, never adoption or
+rollback. Counted UNKNOWN cannot recreate these images. The legacy offline
+creator retains its existing behavior; default NEW/FIRST/R2 integration and
+current formal full/check are still separate, uncompleted requirements.
