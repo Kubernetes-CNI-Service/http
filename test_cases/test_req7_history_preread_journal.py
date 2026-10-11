@@ -32,6 +32,17 @@ def load():
 
 
 class Req7HistoryPrereadJournalDirectTests(unittest.TestCase):
+    def test_owned_creation_accepts_only_actual_project_sources_before_any_durable_write(self):
+        import inspect
+        module=load(); api=getattr(module,'prepare_owned_project_history_preread',None)
+        self.assertTrue(callable(api),'default NEW requires actual issued History creation, not a caller read plan')
+        self.assertEqual(('writer_token','owner_token','binding','authentication','unit',
+            'identity_response','history_response'),tuple(inspect.signature(api).parameters))
+        with mock.patch.object(module.global_journal,'_create_folder') as create:
+            with self.assertRaises(module.HistoryPrereadHold) as caught:
+                api(object(),object(),object(),object(),object(),identity_response=object(),history_response=object())
+            create.assert_not_called(); self.assertIsNone(caught.exception.__context__)
+
     def setUp(self):
         self.owner = load_owner(); self.global_journal = load_global()
         self.planner = load_read('issue_tracker_sheets_read_plan'); load_read('issue_tracker_sheets_read_decode')
@@ -826,6 +837,115 @@ class Req7OriginalBusinessReadAcquisitionDirectTests(unittest.TestCase):
                     entered.append(True)
             reader.assert_not_called()
         self.assertEqual([], entered, 'fabricated originals cannot enter the acquisition scope')
+
+
+class Req7OwnedHistoryPrereadCreationWorkflowTests(unittest.TestCase):
+    from test_cases.test_req7_history_read_launcher import Req7HistoryReadLauncherWorkflowTests as _Fixture
+    setUp=_Fixture.setUp; certificates=_Fixture.certificates; server=_Fixture.server
+    owners=_Fixture.owners; intercept=_Fixture.intercept; child_fixture=_Fixture.child_fixture
+    project_auth=_Fixture.project_auth
+
+    def read_project(self,*args,**options):
+        # Runtime-only reuse: class-definition import of the metadata fixture
+        # recurses into this module when the old cold inspector is __main__.
+        from test_cases.test_req7_metadata_reservation import Req7MetadataReservationProjectWorkflowTests
+        return Req7MetadataReservationProjectWorkflowTests.read_project(self,*args,**options)
+
+    def api(self):
+        module=load(); api=getattr(module,'prepare_owned_project_history_preread',None)
+        self.assertTrue(callable(api),'real authentication/identity/History pair must create one retained original')
+        return module,api
+
+    @__import__('contextlib').contextmanager
+    def originals(self):
+        from contextlib import ExitStack
+        from test_cases.test_req7_send_unit import inputs as send_inputs
+        from test_cases.test_req7_sheets_read_decode import identity_response
+        from monitor.issue_tracker_send_unit import freeze_send_unit
+        with ExitStack() as scope:
+            original_root,original_path=self.root,self.path
+            candidate=scope.enter_context(tempfile.TemporaryDirectory(dir=str(original_root),prefix='owned-history-'))
+            self.root=Path(candidate).resolve(); self.path=self.root/'etc/ssl/certs/ca-certificates.crt'
+            self.path.parent.mkdir(parents=True,mode=0o755)
+            scope.callback(setattr,self,'root',original_root); scope.callback(setattr,self,'path',original_path)
+            _local,ownership,writer,owner,bound,_credential,_config=self.owners(scope)
+            module,api=self.api()
+            auth,_path,_original=self.project_auth(scope,ownership,owner,bound)
+            document=identity_response(); document['spreadsheetId']=bound.spreadsheet_id
+            identity_read=self.read_project(scope,writer,owner,bound,auth,'template_identity',document)
+            arguments=send_inputs(); arguments.update(spreadsheet_id=bound.spreadsheet_id,
+                sheet_id=101,history_sheet_id=105,target_nonce='a'*64,history_nonce='d'*64)
+            actual_unit=freeze_send_unit(**arguments)
+            module.global_journal.prepare_global_unit(owner,bound,actual_unit)
+            history=tail_document(); history['spreadsheetId']=bound.spreadsheet_id
+            history['sheets'][0]['properties']['sheetId']=105
+            history_read=self.read_project(scope,writer,owner,bound,auth,'history_tail',history)
+            yield module,api,writer,owner,bound,auth,actual_unit,identity_read,history_read
+
+    def test_actual_read_creation_rejects_copies_then_preserves_boundary_through_unknown(self):
+        from test_cases.test_req7_global_attempt_journal import original_read_files
+        self.api()
+        with self.originals() as (module,api,writer,owner,bound,auth,actual_unit,identity,history):
+            before=original_read_files(self.root)
+            for first,second in ((replace(identity),history),(identity,replace(history))):
+                with self.assertRaises(module.HistoryPrereadHold):
+                    api(writer,owner,bound,auth,actual_unit,identity_response=first,history_response=second)
+                self.assertEqual(before,original_read_files(self.root))
+            self.assertIsNone(api(writer,owner,bound,auth,actual_unit,
+                identity_response=identity,history_response=history))
+            seen=module.inspect_history_preread(owner,bound,actual_unit)
+            self.assertEqual((3,7,105),(seen.history_last_row_before_send,seen.row_count,seen.history_sheet_id))
+            originals=original_read_files(self.root)
+            module.global_journal.record_global_attempt_intent(owner,bound,actual_unit)
+            with self.assertRaises(module.HistoryPrereadHold):
+                api(writer,owner,bound,auth,actual_unit,identity_response=identity,history_response=history)
+            self.assertEqual(seen,module.inspect_history_preread(owner,bound,actual_unit))
+            self.assertTrue(originals.items()<=original_read_files(self.root).items())
+            self.assertEqual((1,'UNKNOWN'),tuple(getattr(module.global_journal.inspect_global_unit(
+                owner,bound,actual_unit),name) for name in ('attempt_count','outcome')))
+
+    def test_last_original_inspection_replacement_or_issued_revocation_retains_history_and_holds(self):
+        from monitor import issue_tracker_history_read_launcher as reads
+        self.api()
+        for fault in ('same-bytes','issued-revocation'):
+            with self.subTest(fault=fault),self.originals() as (
+                    module,api,writer,owner,bound,auth,actual_unit,identity,history):
+                real_inspect=module._inspect; changed=[]; restore=[]
+                def inspect(*args,**options):
+                    result=real_inspect(*args,**options)
+                    if not changed:
+                        folder=args[2]
+                        if fault=='same-bytes':
+                            old=os.stat('HISTORY-RAW',dir_fd=folder).st_ino
+                            destination=os.open(self.root,os.O_RDONLY)
+                            try:
+                                os.rename('HISTORY-RAW','preserved-history',src_dir_fd=folder,dst_dir_fd=destination)
+                            finally: os.close(destination)
+                            raw=history.data
+                            fd=os.open('HISTORY-RAW',os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600,dir_fd=folder)
+                            try: os.write(fd,raw)
+                            finally: os.close(fd)
+                            changed.append((old,os.stat('HISTORY-RAW',dir_fd=folder).st_ino))
+                        else:
+                            with reads._PROJECT_READ_GUARD:
+                                restore.append(reads._PROJECT_READS.pop(history))
+                            changed.append(True)
+                    return result
+                try:
+                    with mock.patch.object(module,'_inspect',side_effect=inspect):
+                        with self.assertRaises(module.HistoryPrereadHold):
+                            api(writer,owner,bound,auth,actual_unit,
+                                identity_response=identity,history_response=history)
+                finally:
+                    if restore:
+                        with reads._PROJECT_READ_GUARD: reads._PROJECT_READS[history]=restore[0]
+                self.assertEqual(1,len(changed),'fault must hit the original creation final boundary')
+                if fault=='same-bytes': self.assertNotEqual(*changed[0])
+                path=next(p for p in self.root.rglob('HISTORY-RAW'))
+                self.assertEqual(history.data,path.read_bytes())
+                self.assertTrue((path.parent/'INITIALIZED').is_file())
+                self.assertEqual(0,module.global_journal.inspect_global_unit(owner,bound,actual_unit).attempt_count)
+                self.assertFalse(list(self.root.rglob('CLAIM-*')))
 
 
 if __name__ == '__main__':

@@ -2397,6 +2397,8 @@ generation/publish 及 UNKNOWN 下改 action/wire 均 HOLD，不计作 COMPLETE 
 
 - 默认只读停滞诊断补充（**NOT RUN / REAL_ENV REQUIRED**）：真实四读后缺少永久 fence 的 UNKNOWN、真实 CONFLICT 必须仅输出固定无秘密诊断；历史 APPLIED 不得显示当前 GO。保留实际完成读、原 owner/finalizer 复验、count/UNKNOWN 和全部原件不变、零新增 completion/dispatch CLAIM/请求及失败安全状态。现有正常、关键提交边界、代表性中断、冷恢复场景继续保留，省略/合并：无。替代证据仅为本地独立 direct 与真实 OAuth/四次 TLS 读；运行中日志可见性尚不代替持久状态、UI、T6 升级、重试调度或 NEW/R2/G1 权限。现场原前置授权、完整日志/stat/inode/命令与实际请求计数见证、仅自有 fixture 清理规则继续有效；真实 Cloud/设备/断电、现场日志链路和当前 full/check 未证明，残余风险未另行接受，无新增确认人。
 
+- 本次认证来源创建 History 原件补充（**NOT RUN / REAL_ENV REQUIRED**）：在原现场精确授权、真实当前目标与同一认证、完整模板身份和全尾读取成立时，保留零次尝试的首次创建、实际业务 sheet/Update_History ID 对齐、原件 INITIALIZED 提交边界、中断后的保留 HOLD、冷恢复、同字节换件及读取授权撤销后的失败安全状态，禁止补写采用、回退 COUNT/UNKNOWN 或生成 CLAIM。替代证据为独立 direct 和本地真实 OAuth/TLS→GLOBAL→三文件原件固定/复验流程，不代替真实 Cloud/设备/断电或默认 NEW/R2 的端到端验收。保留原核心场景，省略/合并：无；原因：该原件创建为默认 NEW 必需前置，不缩减既有合同。残余风险未新增接受，确认人仅沿用 owner 的历史部署事实确认，不包含现场操作许可；必要研发确认、原清理和正式 full/check 发布门禁有效。
+
 - 默认最后观察展示补充（**NOT RUN / REAL_ENV REQUIRED**）：保留真实完成读与全部原件/finalizer 成功后发布、UNKNOWN/CONFLICT 升级、历史 APPLIED 非当前许可、无项目绑定的空观察、缺失/危险文件/秘密字段/未来时间显示未证明、关键提交中断与失败后原 count/UNKNOWN/CLAIM 不变。固定缓存仅 best-effort，`updated_at` 是最后观察时间；不承诺断电持久性、当前项目空库存、T6 调度、G1 或发送许可。保留 parent/image 首次 stat 失败及本轮 numeric FD 被 foreign inode 重用的代表性清理见证；名字漂移且首次 stat 失败时清理可能不能确认，不能采用晚采样或冒称同一 open-file-description。替代证据为独立 direct、真实 worker/OAuth/四次 TLS 读→固定文件→authenticated GET→生成 JavaScript；不代替设备、Cloud、断电、现场 UI 链路或当前 full/check。保留场景如上及原卡全部核心场景；省略/合并：无；理由：不缩减原合同；残余风险与现场前置、精确授权、仅本轮自有 fixture 清理、研发确认和生产门禁有效，无新增风险接受确认人。
 
 ## TC-REAL-REQ7-DURABLE-ATTEMPT-JOURNAL-001 — 意图先落盘与跨重启总计数

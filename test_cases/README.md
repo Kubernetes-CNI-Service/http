@@ -2820,3 +2820,15 @@ unissued-source rejection were first RED; real local OAuth/TLS and immutable
 C6/settlement/quota sources are used rather than mocked capacity results.
 This necessary mixed-accounting edge is not default FIRST/R2/FIFO send wiring,
 whole REQ7 completion, field validation or current full/check approval.
+
+Owned NEW History preparation accepts only the actual project authentication,
+issued template identity and issued full History read, without a caller plan,
+coordinate, freshness flag or verifier. The immutable unit's two sheet IDs
+must match the actual fourteen-sheet identity (including Update_History).
+Creation remains count-zero/new-only, pins all three retained images through
+final inspection, and rechecks issued sources through cleanup. Same-byte
+replacement or source revocation leaves retained HOLD without repair, rollback,
+COUNT or CLAIM. The legacy plan-based offline preparation is unchanged.
+Independent direct and actual local OAuth/TLS/global-journal workflows were
+initially RED; these prerequisites do not themselves wire default NEW/R2,
+prove G1 send admission, complete REQ7, or replace current full/check.

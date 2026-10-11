@@ -246,6 +246,43 @@ def _inspect(parent, name, folder, base, sheet_id):
 
 def prepare_history_preread(token, binding, unit, plan, response):
     """New image before ATTEMPT-1 only; never overwrite/adopt/backfill a store."""
+    return _prepare_history_preread(token,binding,unit,plan,response)
+
+
+def prepare_owned_project_history_preread(writer_token,owner_token,binding,authentication,unit,*,
+                                         identity_response,history_response):
+    """Actual issued project reads create a NEW original, never send authority.
+
+    No caller plan, project ID, coordinates, freshness flag or verifier is
+    accepted. Both responses must belong to the same actual authentication
+    and remain current inside the final original-image inspection and after
+    cleanup. Partial/late-failed images stay retained HOLD, never backfilled.
+    """
+    failed=False
+    try:
+        from monitor.issue_tracker_history_read_launcher import require_current_owned_project_read
+        def current():
+            identity_plan,project,digest=require_current_owned_project_read(writer_token,owner_token,
+                binding,identity_response,authentication,read_kind='template_identity')
+            history_plan,other_project,other_digest=require_current_owned_project_read(writer_token,owner_token,
+                binding,history_response,authentication,read_kind='history_tail')
+            if (project,digest)!=(other_project,other_digest): raise HistoryPrereadHold()
+            return identity_plan,history_plan
+        identity_plan,history_plan=current()
+        identity=decode.decode_template_identity(identity_plan,identity_response)
+        action=local._json(unit.action_preimage)
+        if (dict(identity.sheet_ids).get('Update_History')!=action['history_sheet_id'] or
+                dict(identity.sheet_ids).get(action['identity']['sheet'])!=action['identity']['sheet_id']):
+            raise HistoryPrereadHold()
+        current()
+        _prepare_history_preread(owner_token,binding,unit,history_plan,history_response,revalidate=current)
+        current()
+    except Exception: failed=True
+    if failed: raise HistoryPrereadHold() from None
+
+
+def _prepare_history_preread(token,binding,unit,plan,response,*,revalidate=None):
+    """Legacy creation unchanged; owned creation also pins its final originals."""
     folder = None; failed = False
     try:
         parent, name, base, sheet_id, state = _inputs(token, binding, unit)
@@ -263,7 +300,26 @@ def prepare_history_preread(token, binding, unit, plan, response):
         # Folder+parent and RAW/HEADER file+folder: six image barriers must
         # precede this marker. Failure retains the image as unadoptable HOLD.
         local._write_new(folder, 'INITIALIZED', _marker(header))
-        _inspect(parent, name, folder, base, sheet_id)
+        if revalidate is None:
+            _inspect(parent, name, folder, base, sheet_id)
+        else:
+            from monitor import issue_tracker_unit_catalog as catalog
+            originals=catalog._Originals()
+            try:
+                journal._named(parent,name,folder,directory=True)
+                captured=originals.directory(parent,name)
+                if journal._identity(os.fstat(captured))!=journal._identity(os.fstat(folder)):
+                    raise HistoryPrereadHold()
+                expected={'HISTORY-RAW':response.data,'HEADER':local._canonical(header),'INITIALIZED':_marker(header)}
+                for entry,raw in expected.items():
+                    actual,_identity=originals.file(captured,entry,
+                        2*1024*1024 if entry=='HISTORY-RAW' else 16384)
+                    if actual!=raw: raise HistoryPrereadHold()
+                originals.verify(); revalidate()
+                _inspect(parent,name,folder,base,sheet_id)
+                originals.verify(); revalidate(); originals.verify()
+            finally: originals.close()
+            revalidate()
         ownership._validated_owner(token, binding)
     except Exception: failed = True
     finally:
