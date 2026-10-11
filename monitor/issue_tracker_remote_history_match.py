@@ -1072,12 +1072,74 @@ def _consume_current_project_online_original_inputs(writer_token, owner_token, b
     raise RemoteHistoryHold() from None
 
 
+def _observe_original_first_catalog_absence(writer_token, owner_token, binding):
+    """Strict original enrollment plus no catalog is a read-only observation.
+
+    It is not enrollment provisioning, remote nonce proof, a NEW permit or
+    permission to replace missing catalog/journal evidence. Existing families
+    still go through the unchanged complete original reconciliation reader.
+    """
+    from monitor import issue_tracker_unit_catalog as catalog
+    from monitor import issue_tracker_enrollment_journal as enrollment
+    from monitor import issue_tracker_local_commit as local
+    from monitor.issue_tracker_sheets_read_decode import _TEMPLATE_SHEETS
+    held = None; failed = False; absent = False
+    try:
+        project = local._owner(writer_token)
+        owner = ownership._validated_owner(owner_token, binding)
+        parent = owner.directories[-1][0]; stem = owner.lock_name[:-5]
+        names = {name for name in os.listdir(parent) if name.startswith(stem+'.')}
+        if not names - {stem+'.lock', stem+'.enrollment'}:
+            if names != {stem+'.lock', stem+'.enrollment'}:
+                raise RemoteHistoryHold()
+            held = catalog._originals(owner_token, binding)
+            held.namespace = (parent, stem+'.', names)
+            folder = held.directory(parent, stem+'.enrollment')
+            if set(os.listdir(folder)) != {'HEADER', 'NONCES', 'INITIALIZED'}:
+                raise RemoteHistoryHold()
+            originals = {name: held.file(folder, name, 16384)[0]
+                for name in ('HEADER', 'NONCES', 'INITIALIZED')}
+            header = local._json(originals['HEADER'],
+                {'schema_version', 'spreadsheet_id', 'sheet_ids', 'nonces_sha256'})
+            rows = header['sheet_ids']
+            if (type(header['schema_version']) is not int or header['schema_version'] != 1
+                    or header['spreadsheet_id'] != binding.spreadsheet_id or type(rows) is not list
+                    or len(rows) != len(_TEMPLATE_SHEETS)
+                    or any(type(row) is not list or len(row) != 2
+                        or row[0] != title or type(row[1]) is not int or not 0 <= row[1] <= 2147483647
+                        for title, row in zip(_TEMPLATE_SHEETS, rows))
+                    or len({row[1] for row in rows}) != len(rows)):
+                raise RemoteHistoryHold()
+            base = {key: header[key] for key in ('schema_version', 'spreadsheet_id', 'sheet_ids')}
+            # The semantic reader uses the same actual pinned directory; no
+            # typed remote identity is fabricated from this local header.
+            held.verify()
+            enrollment._inspect(parent, folder, stem+'.enrollment', base)
+            held.verify()
+            absent = True
+        if (local._owner(writer_token) is not project
+                or ownership._validated_owner(owner_token, binding) is not owner):
+            raise RemoteHistoryHold()
+        if held is not None:
+            held.verify()
+    except Exception:
+        failed = True
+    finally:
+        if held is not None:
+            try: held.close()
+            except Exception: failed = True
+    if failed: raise RemoteHistoryHold() from None
+    return absent
+
+
 def _reconcile_pending_project_units_with_authentication(writer_token, owner_token, binding, authentication=None, *, _store=None):
     """Private fixed worker composition, never a caller cycle/verifier permit."""
     from monitor import issue_tracker_unit_catalog as catalog
     from monitor import issue_tracker_retained_inventory as inventory
     from monitor import issue_tracker_local_commit as local
     from monitor import issue_tracker_attempt_journal as journal
+    if _observe_original_first_catalog_absence(writer_token, owner_token, binding):
+        return (), authentication
     failed = False; inputs = ExitStack(); proofs = ExitStack(); held = None
     try:
         project = local._owner(writer_token)

@@ -3092,3 +3092,17 @@ milestones, not this new terminal seam. Default NEW bootstrap/allocator,
 whole REQ7, current formal full/check, Cloud/device/power-loss and REAL_ENV
 remain open. Historical dedicated-table/same-Cloud-project confirmation is a
 deployment premise, not runtime or full proof. Approval ledger is runner-only.
+
+The first-catalog reconciliation seam now observes absence only beside the
+actual existing enrollment originals. All three images are pinned before its
+semantic inspector, and the same owner, exact namespace, bytes and full stats
+must survive that reader and the final actual owner checks. Missing/partial/malformed
+enrollment, an interrupted catalog witness, same-byte replacement or a late
+witness (including at the final sheet-owner return boundary) fail closed. It never
+creates enrollment, catalog, NV, COUNT or CLAIM, performs OAuth, proves remote
+nonce mirroring, or returns a NEW permit. Existing catalog families still use
+the complete original reconciliation path; no typed HOLD is swallowed as first
+use. Independent direct and actual writer/spreadsheet/enrollment/catalog
+workflows cover this zero-write observation. Default NEW compilation and
+registration, first-use remote provisioning, whole REQ7 and current formal
+full/check remain open; no existing assertion or approval is removed.

@@ -32,6 +32,16 @@ def cycle(stack, root, *, scope='prod', terminal=True):
 
 
 class OnlineCompletionRuntimeDirectTests(unittest.TestCase):
+    def test_first_catalog_observation_refuses_unheld_owners_before_io_or_authentication(self):
+        from monitor import issue_tracker_remote_history_match as remote
+        from monitor import issue_tracker_token_launcher as tokens
+        from monitor import issue_tracker_unit_catalog as catalog
+        with mock.patch.object(catalog, '_originals') as images, \
+                mock.patch.object(tokens, 'OwnedProjectTokenRefreshUnit') as authentication:
+            with self.assertRaises(remote.RemoteHistoryHold):
+                remote._reconcile_pending_project_units_and_project_auth(object(), object(), object())
+        images.assert_not_called(); authentication.assert_not_called()
+
     def test_default_terminal_lane_uses_fixed_dispatch_not_closed_read_only_consumer(self):
         worker = persistence.WORKER; calls = []; store = object()
         with mock.patch.object(worker, '_publish_stage_l_status_after_completion', side_effect=lambda value: calls.append(('status', value))), \
@@ -227,6 +237,123 @@ class OnlineCompletionRuntimeWorkflowTests(unittest.TestCase):
     project_auth = native.OnlineReconciliationWorkflowTests.project_auth
     intercept = native.OnlineReconciliationWorkflowTests.intercept
     api = OnlineCompletionRuntimeDirectTests.api
+
+    def _exercise_first_catalog_observation(self, fault=None):
+        from monitor import issue_tracker_remote_history_match as remote
+        from monitor import issue_tracker_enrollment_journal as enrollment
+        from monitor import issue_tracker_unit_catalog as catalog
+        from monitor import issue_tracker_token_launcher as tokens
+        from monitor import issue_tracker_history_read_launcher as reads
+        from monitor import issue_tracker_global_attempt_journal as journal
+        from monitor import issue_tracker_mutation_launcher as mutation
+        from monitor import issue_tracker_sheets_read_plan as plans
+        from monitor import issue_tracker_sheets_read_decode as decode
+        from test_cases.test_req7_sheets_read_decode import identity_response
+        from test_cases.test_req7_history_read import response
+        from monitor.issue_tracker_sdk_authentication import AuthenticatedToken
+        import time
+        with tempfile.TemporaryDirectory(prefix='req7-first-catalog-original-') as directory, ExitStack() as stack:
+            self.root = Path(directory).resolve(); self.initial_owners = stack
+            (self.root/'project').mkdir()
+            _local, _ownership, writer, owner, bound, _unused, _config = self.owners(stack)
+            identity_document = identity_response(); identity_document['spreadsheetId'] = bound.spreadsheet_id
+            original_identity = decode.decode_template_identity(
+                plans.prepare_template_identity_read(bound, AuthenticatedToken('owned-format-token', time.time()+3600)),
+                response(identity_document))
+            state = self.root/'var/lib/http-ztp-container/issue-tracker'
+            stem = hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()
+            if fault != 'missing-enrollment':
+                with mock.patch('secrets.token_hex', side_effect=['a'*64, 'b'*64, 'c'*64, 'd'*64]):
+                    enrollment.prepare_enrollment_journal(owner, bound, original_identity)
+            folder = state/(stem+'.enrollment'); injected = []; captured = []
+            if fault == 'partial-enrollment': (folder/'INITIALIZED').rename(self.root/'preserved-enrollment-marker')
+            if fault == 'malformed-enrollment': (folder/'NONCES').write_bytes(b'[]\n')
+            if fault == 'lost-catalog-witness':
+                (state/(stem+'.units-started')).write_bytes(b'original interrupted catalog witness\n')
+                (state/(stem+'.units-started')).chmod(0o600)
+            before = {str(path.relative_to(state)): (path.stat().st_ino, path.read_bytes())
+                for path in state.rglob('*') if path.is_file()}
+            actual_inspect = enrollment._inspect; actual_file = catalog._Originals.file
+            from monitor import issue_tracker_spreadsheet_owner as ownership
+            actual_owner = ownership._validated_owner; semantic_finished = []
+            def pin(graph, *args):
+                value = actual_file(graph, *args)
+                captured.append(graph.files[-1][2]); return value
+            def inspect(*args):
+                self.assertEqual(3, len(captured), 'pin all three original images before the semantic reader')
+                value = actual_inspect(*args)
+                if fault == 'same-byte-rebind':
+                    path = folder/'NONCES'; raw = path.read_bytes(); original = path.stat().st_ino
+                    path.rename(self.root/'preserved-first-nonces'); path.write_bytes(raw); path.chmod(0o600)
+                    injected.append((original, path.stat().st_ino))
+                if fault == 'late-catalog-witness':
+                    path = state/(stem+'.units-started')
+                    path.write_bytes(b'late foreign witness\n'); path.chmod(0o600); injected.append(path.name)
+                semantic_finished.append(True)
+                return value
+            def final_owner(*args):
+                value = actual_owner(*args)
+                if fault == 'final-owner-catalog-witness' and semantic_finished and not injected:
+                    path = state/(stem+'.units-started')
+                    path.write_bytes(b'final owner boundary witness\n'); path.chmod(0o600)
+                    injected.append(path.name)
+                return value
+            stack.enter_context(mock.patch.object(catalog._Originals, 'file', pin))
+            stack.enter_context(mock.patch.object(enrollment, '_inspect', side_effect=inspect))
+            stack.enter_context(mock.patch.object(ownership, '_validated_owner', side_effect=final_owner))
+            authentication = stack.enter_context(mock.patch.object(tokens, 'OwnedProjectTokenRefreshUnit'))
+            read = stack.enter_context(mock.patch.object(reads, 'OwnedProjectSheetsReadUnit'))
+            count = stack.enter_context(mock.patch.object(journal, 'record_global_attempt_intent'))
+            send = stack.enter_context(mock.patch.object(mutation, '_send_counted_original_once'))
+            if fault is None:
+                self.assertEqual(((), None), remote._reconcile_pending_project_units_and_project_auth(writer, owner, bound))
+                self.assertEqual(3, len(captured))
+            else:
+                if fault == 'final-owner-catalog-witness':
+                    rejected = False
+                    try: remote._reconcile_pending_project_units_and_project_auth(writer, owner, bound)
+                    except remote.RemoteHistoryHold: rejected = True
+                else:
+                    with self.assertRaises(remote.RemoteHistoryHold):
+                        remote._reconcile_pending_project_units_and_project_auth(writer, owner, bound)
+            for operation in (authentication, read, count, send): operation.assert_not_called()
+            for descriptor in captured:
+                with self.assertRaises(OSError) as caught: os.fstat(descriptor)
+                self.assertEqual(9, caught.exception.errno)
+            after = {str(path.relative_to(state)): (path.stat().st_ino, path.read_bytes())
+                for path in state.rglob('*') if path.is_file()}
+            if fault in ('same-byte-rebind', 'late-catalog-witness', 'final-owner-catalog-witness'):
+                self.assertEqual(1, len(injected), 'fault must occur after actual original capture')
+                if fault == 'same-byte-rebind': self.assertNotEqual(*injected[0])
+                if fault == 'final-owner-catalog-witness':
+                    self.assertTrue(semantic_finished, 'actual semantic reader must finish before injection')
+                    witness = stem+'.units-started'
+                    self.assertEqual(b'final owner boundary witness\n', after[witness][1])
+                    self.assertEqual(before, {name: image for name, image in after.items() if name != witness})
+            else: self.assertEqual(before, after)
+            self.assertFalse(list(state.rglob('ATTEMPT-*'))); self.assertFalse(list(state.rglob('CLAIM-*')))
+            self.assertFalse(list(state.glob('*.units'))); self.assertFalse(list(state.glob('*.nv')))
+            if fault == 'final-owner-catalog-witness':
+                self.assertTrue(rejected, 'final owner boundary witness must cause typed HOLD')
+
+    def test_first_catalog_original_enrollment_is_read_only_without_auth_or_new_unit(self):
+        self._exercise_first_catalog_observation()
+
+    def test_first_catalog_missing_partial_or_malformed_enrollment_never_recreated(self):
+        for fault in ('missing-enrollment', 'partial-enrollment', 'malformed-enrollment'):
+            with self.subTest(fault=fault): self._exercise_first_catalog_observation(fault)
+
+    def test_first_catalog_original_started_witness_is_loss_not_empty(self):
+        self._exercise_first_catalog_observation('lost-catalog-witness')
+
+    def test_first_catalog_same_byte_enrollment_replacement_after_capture_is_hold(self):
+        self._exercise_first_catalog_observation('same-byte-rebind')
+
+    def test_first_catalog_late_witness_after_original_capture_is_hold(self):
+        self._exercise_first_catalog_observation('late-catalog-witness')
+
+    def test_first_catalog_witness_at_final_original_owner_check_is_hold(self):
+        self._exercise_first_catalog_observation('final-owner-catalog-witness')
 
     def owners(self, stack, *, target_id=None):
         from test_cases.test_req7_history_read_launcher import document, TARGET, scoped_fixture
