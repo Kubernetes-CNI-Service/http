@@ -333,7 +333,15 @@ class CatalogProjectAuthenticationHandoffDirectTests(unittest.TestCase):
         import inspect
         import textwrap
         module=importlib.import_module('monitor.issue_tracker_remote_history_match')
-        tree=ast.parse(textwrap.dedent(inspect.getsource(module._consume_current_project_online_original_inputs)))
+        # Extraction must keep the old quota acquisition and all its strict
+        # overlap assertions, not move acquisition after closed readers.
+        wrapper=ast.parse(textwrap.dedent(inspect.getsource(module._consume_current_project_online_original_inputs)))
+        delegations=[node for node in ast.walk(wrapper) if isinstance(node,ast.Call)
+            and isinstance(node.func,ast.Name) and node.func.id=='_hold_current_project_online_original_inputs']
+        self.assertEqual(1,len(delegations),'read-only consumer must use the same fixed live context once')
+        api=getattr(module,'_hold_current_project_online_original_inputs',None)
+        self.assertTrue(callable(api),'default FIRST/R2 needs a live original context, not a returned closed tuple')
+        tree=ast.parse(textwrap.dedent(inspect.getsource(api)))
         calls=[node for node in ast.walk(tree) if isinstance(node,ast.Call)
             and isinstance(node.func,ast.Name) and node.func.id=='_hold_owned_project_dedicated_quota_images']
         self.assertEqual(1,len(calls),'G1 quota originals must overlap the still-live strict acquisition')
@@ -346,6 +354,25 @@ class CatalogProjectAuthenticationHandoffDirectTests(unittest.TestCase):
                 and item.context_expr.func.id=='_hold_current_project_online_inputs' for item in node.items)
             and calls[0] in tuple(ast.walk(node)) for node in ast.walk(tree)),
             'closed strict readers cannot be the first acquisition of quota originals')
+
+    def test_continuous_default_input_context_rejects_unissued_and_caller_permissions(self):
+        import inspect
+        from monitor import issue_tracker_unit_catalog as catalog
+        from monitor import issue_tracker_history_read_launcher as reads
+        module=importlib.import_module('monitor.issue_tracker_remote_history_match')
+        api=getattr(module,'_hold_current_project_online_original_inputs',None)
+        self.assertTrue(callable(api),'fixed live context must not return original images after cleanup')
+        self.assertEqual(('writer_token','owner_token','binding','authentication','_store','http_root'),
+            tuple(inspect.signature(api).parameters))
+        with mock.patch.object(catalog,'hold_pending_project_origins') as origins, \
+                mock.patch.object(reads,'OwnedProjectSheetsReadUnit') as read:
+            with self.assertRaises(module.RemoteHistoryHold):
+                with api(object(),object(),object(),None,_store=object(),http_root=object()):
+                    self.fail('unissued default context yielded')
+            origins.assert_not_called();read.assert_not_called()
+        for claims in ({'unit':object()},{'verify':lambda:None},{'capacity_complete':True},{'allow_send':True}):
+            with self.subTest(claim=tuple(claims)),self.assertRaises(TypeError):
+                api(object(),object(),object(),None,_store=object(),http_root=object(),**claims)
 
     def _actual_fixed_acquisition_contract(self, module):
         import ast

@@ -292,6 +292,57 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         for (_sheet,unit),packet in zip(received,packets):
             self.assertIs(unit,packet[3][-1][0].unit,'borrow actual prepared last unit, never a reconstructed locator object')
 
+    def test_actual_default_live_input_context_holds_selected_images_and_dedicated_quota(self):
+        from monitor import issue_tracker_remote_history_match as remote
+        api=getattr(remote,'_hold_current_project_online_original_inputs',None)
+        self.assertTrue(callable(api),'default dispatch cannot adopt images returned after original cleanup')
+        entered=[];completed=[];originals=[]
+        @contextmanager
+        def held(writer,owner,bound,authentication,**options):
+            from monitor import issue_tracker_cycle_source as current_cycles
+            from monitor import issue_tracker_history_read_launcher as current_reads
+            from monitor import issue_tracker_token_launcher as current_tokens
+            from monitor import issue_tracker_history_preread_journal as current_preread
+            with actual_api(writer,owner,bound,authentication,**options) as packet:
+                self.assertEqual(6,len(packet))
+                settings,whitelist,responses,graph,actual_auth,budget=packet
+                row,actual_source,guard,image,verify=graph
+                self.assertEqual('DEDICATED_PROJECT_CAPACITY',budget.outcome)
+                self.assertTrue(budget.inventory_complete)
+                self.assertIs(image[0],responses['template_identity'])
+                self.assertIs(self.store,current_cycles._HELD_CYCLE_REPLAY.get()[0])
+                current_cycles._require_live_cycle_replay(current_cycles._HELD_CYCLE_REPLAY.get())
+                with current_preread._BUSINESS_READ_GUARD_LOCK:
+                    self.assertEqual('CLOSED',current_preread._BUSINESS_READ_GUARDS[guard][0])
+                with self.assertRaises(current_preread.HistoryPrereadHold):guard()
+                verify()
+                for kind,response in responses.items():
+                    current_reads.require_current_owned_project_read(writer,owner,bound,response,actual_auth,read_kind=kind)
+                current_tokens.require_current_owned_project_token(owner,bound,actual_auth)
+                self.assertTrue(actual_source.cycle_ids);self.assertEqual(settings.k,actual_source.k)
+                entered.append(row.unit.unit_id);originals.append((guard,image,verify,current_preread.HistoryPrereadHold))
+                yield packet
+            completed.append(row.unit.unit_id)
+        # The entire unchanged native dedicated-quota workflow still proves
+        # actual C6/OAuth/TLS/8 reads, no COUNT/CLAIM/send, immutable originals
+        # and all owned image descriptors closed after both panels finish.
+        actual_worker=self._default_worker_original_images;actual_api=None
+        def worker(**arguments):
+            nonlocal actual_api
+            from monitor import issue_tracker_remote_history_match as current_remote
+            # The genuine fixture intentionally reloads canonical components.
+            # Bind this observation only at the actual worker's live boundary,
+            # not to a stale pre-fixture module object.
+            actual_api=current_remote._hold_current_project_online_original_inputs
+            with mock.patch.object(current_remote,'_hold_current_project_online_original_inputs',side_effect=held):
+                return actual_worker(**arguments)
+        with mock.patch.object(self,'_default_worker_original_images',side_effect=worker):
+            self.test_actual_default_worker_dedicated_quota_originals_outlive_strict_input_finalizers()
+        self.assertEqual(2,len(entered));self.assertEqual(entered,completed)
+        self.assertEqual(2,len(set(entered)))
+        for guard,_image,verify,typed_hold in originals:
+            with self.assertRaises(typed_hold):verify()
+
     def _default_worker_original_images(self, *, native, whitelist_doc, private_context,
             global_root, writer_token, spreadsheet_token, binding, unit, qualified,
             settings, quota_raw, history_raw, reads, sheet, state, owner_module, global_journal):

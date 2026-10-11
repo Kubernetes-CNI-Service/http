@@ -943,16 +943,19 @@ def _prepare_current_project_online_observation(writer_token, owner_token, bindi
     return 'VISIBLE_ONLY_UNPROVED'
 
 
-def _consume_current_project_online_original_inputs(writer_token, owner_token, binding, authentication, *,
-                                                     _store, http_root):
-    """Fixed continuous input edge, still HOLD before FIRST/R2 COUNT.
+@contextmanager
+def _hold_current_project_online_original_inputs(writer_token, owner_token, binding, authentication, *,
+                                                 _store, http_root):
+    """Fixed live input graph, never a returned closed permit or GO.
 
     Original cycle/config/W1 and actual issued images outlive strict ALL
     catalog/count/quota readers. No closed verifier or path reacquisition is
     used for business images. Dedicated-from-creation / one historical Cloud
     project is a confirmed deployment precondition, not API evidence. Retain
     actual same-project quota images separately; this input edge still cannot
-    count, claim, launch or report GO.
+    count, claim, launch or report GO. Only the actual selected row and held
+    original images are yielded; a future fixed driver must independently
+    enforce G1/FIFO and actual FIRST/R2 admission inside this scope.
     """
     from pathlib import Path
     from monitor import issue_tracker_local_commit as local
@@ -976,7 +979,7 @@ def _consume_current_project_online_original_inputs(writer_token, owner_token, b
                     root/'monitor/Issue_Tracker_Template_v1.xlsx') as verify_inputs, \
                 ExitStack() as all_images, \
                 ExitStack() as quota_images, ExitStack() as images:
-            verify_quota = None
+            verify_quota = None; budget = None
             with _hold_current_project_online_inputs(writer_token, owner_token, binding, authentication,
                     _store=_store, http_root=root) as prepared:
                 _settings, _whitelist, responses, originals, authentication = prepared
@@ -1025,8 +1028,25 @@ def _consume_current_project_online_original_inputs(writer_token, owner_token, b
                     authentication, read_kind=kind)
             require_current_owned_project_token(owner_token, binding, authentication)
             inspect_project_online_target(writer_token, binding)
-            # Quota continuity is necessary, not ALL/C6/FIFO/FIRST/R2 GO.
-            # Finish actual image cleanup before the unchanged typed refusal.
+            selected_graph=tuple(graph for graph in graphs if graph[0] is selected[0])
+            if len(selected_graph)!=1:
+                raise RemoteHistoryHold()
+            # Actual original owners/images dominate the entire consumer,
+            # including its last cleanup. Do not return a closed guard as
+            # evidence, adopt a caller selector or infer GO from visible quota.
+            yield _settings,_whitelist,responses,selected_graph[0],authentication,budget
+            verify_cycle(); verify_inputs(); verify_all()
+            if verify_quota is not None:
+                verify_quota()
+            for _row,_actual_source,_guard,_packet,verify in graphs:
+                verify()
+            for kind,response in responses.items():
+                require_current_owned_project_read(writer_token,owner_token,binding,response,
+                    authentication,read_kind=kind)
+            require_current_owned_project_token(owner_token,binding,authentication)
+            inspect_project_online_target(writer_token,binding)
+            # Finish actual image cleanup before the unchanged input-only
+            # wrapper's typed refusal, or before the fixed driver's return.
             images.close()
             for kind, response in responses.items():
                 require_current_owned_project_read(writer_token, owner_token, binding, response,
@@ -1040,6 +1060,14 @@ def _consume_current_project_online_original_inputs(writer_token, owner_token, b
         require_current_owned_project_token(owner_token, binding, authentication)
         inspect_project_online_target(writer_token, binding)
     except Exception:
+        raise RemoteHistoryHold() from None
+
+
+def _consume_current_project_online_original_inputs(writer_token, owner_token, binding, authentication, *,
+                                                     _store, http_root):
+    """Unchanged input-only entry: actual live graph, then HOLD without COUNT."""
+    with _hold_current_project_online_original_inputs(writer_token,owner_token,binding,authentication,
+            _store=_store,http_root=http_root):
         pass
     raise RemoteHistoryHold() from None
 

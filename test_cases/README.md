@@ -2981,3 +2981,18 @@ quota orchestration test keeps all interruption/read-revocation assertions;
 its synthetic selection prerequisites are not native-owner proof. This input
 edge still refuses before COUNT/CLAIM/send. G1/NEW/FIFO admission, complete
 REQ7 integration, current full/check and REAL_ENV remain unproved.
+
+The same fixed receiver is also a private live context for the remaining
+default dispatch composition. It yields only the actual selected row, source,
+settings/W1, issued responses/authentication, dedicated quota observation and
+genuinely overlapping business images, after the old strict readers complete.
+The old business guard remains CLOSED and cannot be revived; only the new
+original image verifier works until its own exit, then rejects with its typed
+HOLD. The old input-only wrapper delegates exactly once and still never counts,
+claims or sends. Direct expectations retain the original quota-before-strict-
+close contract and reject caller unit/verifier/permission labels. A genuine
+two-panel dedicated-quota/C6/OAuth/TLS workflow observes live issued reads and
+images, both complete context exits, and typed post-exit revocation outside
+production sanitizers. None/STOP quota is not admission, and a yielded packet
+must never be retained as authority for a later launch. Default G1/FIFO/FIRST/
+R2 execution and whole REQ7/full/check/REAL_ENV remain separate open duties.
