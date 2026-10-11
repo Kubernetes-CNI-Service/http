@@ -1654,27 +1654,42 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
     def test_native_original_settings_audit_count_claim_and_one_fixed_local_request_without_legacy_shadow(self):
         self._native_original_launch_probe('normal',settings_audit=True)
 
-    def _native_completed_archive_preview_probe(self, *, receipt_rebind=False, local_c6=False, settings_finalizer=False):
+    def _native_completed_archive_preview_probe(self, *, receipt_rebind=False, local_c6=False, settings_finalizer=False,
+                                              native_current_compiler=False, current_receipt_tail=False):
         observed = []
         mode = 'complete-after-archive-receipt-rebind' if receipt_rebind else 'complete-after-archive'
         if settings_finalizer:
             mode += '-settings-finalizer'
         if local_c6:
             mode += '-local-c6'
+        if native_current_compiler:
+            mode += '-native-current-compiler'
+        if current_receipt_tail:
+            mode += '-receipt-tail'
         from test_cases.test_req7_remote_history_match import Req7OwnedHistoryMatchWorkflowTests
         from test_cases.test_req7_mutation_launcher import Req7MutationLauncherWorkflowTests
         supplied=self._fixture_certificate_supplier(Req7OwnedHistoryMatchWorkflowTests.certificates)
         with mock.patch.object(Req7OwnedHistoryMatchWorkflowTests,'certificates',supplied), \
                 mock.patch.object(Req7MutationLauncherWorkflowTests,'certificates',supplied):
-            self._exercise_real_protected_three_panel_fixture(skip_history=False,
-                observed_cabling_insert_probe=True, receipted_intent_probe=True,
-                native_catalog_probe=True, native_catalog_c6_origin_probe=True,
-                native_catalog_retained_probe=True, settings_audit_probe=True,
-                native_catalog_launch_probe=(mode, observed, self._native_original_settings_audit_oracle()))
+            def exercise():
+                self._exercise_real_protected_three_panel_fixture(skip_history=False,
+                    observed_cabling_insert_probe=True, receipted_intent_probe=True,
+                    native_catalog_probe=True, native_catalog_c6_origin_probe=True,
+                    native_catalog_retained_probe=True, settings_audit_probe=True,
+                    native_catalog_launch_probe=(mode, observed, self._native_original_settings_audit_oracle()))
+            if current_receipt_tail:
+                class CurrentReceiptTailFinished(BaseException):pass
+                self.current_receipt_tail_primary=CurrentReceiptTailFinished('actual current receipt tail finished')
+                with self.assertRaises(CurrentReceiptTailFinished) as caught:exercise()
+                self.assertIs(self.current_receipt_tail_primary,caught.exception)
+                self.assertEqual((True,True,True),self.current_receipt_tail_facts)
+            else:exercise()
         self.assertEqual(['ETH Cabling:native-launch:normal',
             'ETH Cabling:archived:fresh-preview:' + ('HOLD' if receipt_rebind else 'read-only')]
             + (['ETH Cabling:archived:next-local-c6:' + ('HOLD' if receipt_rebind or settings_finalizer else 'committed')]
-               if local_c6 else []), observed)
+               if local_c6 else [])
+            + (['ETH&IB Switch:archived:current-cycle-compiler:'+
+                ('tail-refused' if current_receipt_tail else 'registered')] if native_current_compiler else []), observed)
 
     def test_real_complete_archive_then_fresh_owner_manual_preview_preserves_all_originals(self):
         self._native_completed_archive_preview_probe()
@@ -1684,6 +1699,15 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
 
     def test_real_complete_archive_then_new_eligible_cycle_commits_default_local_c6(self):
         self._native_completed_archive_preview_probe(local_c6=True)
+
+    def test_real_archived_delivery_next_cycle_receipt_replays_c5_and_registers_observed_switch_unit(self):
+        from monitor import issue_tracker_remote_history_match as remote
+        self.assertTrue(callable(getattr(remote,'_hold_native_current_cycle_compiler_inputs',None)),
+            'fixed native source/receipt reception must feed the actual observed compiler')
+        self._native_completed_archive_preview_probe(local_c6=True,native_current_compiler=True)
+
+    def test_real_current_receipt_replaced_after_actual_k_settings_finalizer_refuses_compiler_receiver_return(self):
+        self._native_completed_archive_preview_probe(local_c6=True,native_current_compiler=True,current_receipt_tail=True)
 
     def test_real_complete_archive_old_receipt_rebind_refuses_next_default_local_c6(self):
         self._native_completed_archive_preview_probe(receipt_rebind=True, local_c6=True)
@@ -1755,6 +1779,9 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             binding,credential,kind,value) for name,(kind,value) in documents.items()}
         remote=load_remote();allocation=load_allocation()
         remote.record_owned_completion_evidence(writer_token,spreadsheet_token,binding,unit,**responses)
+        if '-native-current-compiler' in mode:
+            remote.record_owned_applied_evidence(writer_token,spreadsheet_token,binding,unit,generation=committed.generation)
+            remote.record_owned_applied_key_watermarks(writer_token,spreadsheet_token,binding,unit,generation=committed.generation)
         tracker=Path(self.store.project_identity)/'.tracker'
         projections={str(revision)+'.json':(tracker/'settings/outbox'/(str(revision)+'.json')).read_bytes()
             for revision in (0,1)}
@@ -1802,7 +1829,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             for root in (Path(self.store.project_identity),state) for p in root.rglob('*') if p.is_file()}
         self.assertEqual(before,after)
         observed.append('ETH Cabling:archived:fresh-preview:'+('HOLD' if receipt_rebind else 'read-only'))
-        if mode.endswith('-local-c6'):
+        if '-local-c6' in mode:
             from monitor.collection_ib_producer import produce_worker_ib_analysis
             from monitor.issue_tracker_publish_runtime import commit_qualified_prod_local
             from monitor.issue_tracker_local_workbook_commit import CommittedProdWorkbook
@@ -1898,6 +1925,109 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                 self.assertEqual([True],closed)
                 self.assertEqual(2,len(list((tracker/'generations').iterdir())))
             observed.append('ETH Cabling:archived:next-local-c6:'+('HOLD' if receipt_rebind or closed else 'committed'))
+            if '-native-current-compiler' in mode:
+                self._compile_current_switch_after_actual_archive(global_root=global_root,owner_module=owner_module,
+                    binding=binding,credential=credential,committed=result,cycle_id=cycle['cycle_id'],observed=observed,
+                    receipt_tail='-receipt-tail' in mode)
+
+    def _compile_current_switch_after_actual_archive(self, *, global_root,owner_module,binding,credential,
+                                                    committed,cycle_id,observed,receipt_tail=False):
+        from monitor import issue_tracker_local_commit as local,issue_tracker_nv_reservation as native
+        from monitor import issue_tracker_remote_history_match as remote,issue_tracker_unit_catalog as catalog
+        from monitor import issue_tracker_send_unit as compiler
+        from monitor.issue_tracker_sheets_read_plan import (
+            prepare_activity_sheet_read,prepare_insertion_sheet_read,prepare_sheets_read,
+            prepare_history_tail_read,prepare_template_identity_read)
+        from monitor.issue_tracker_sheets_read_decode import decode_template_identity
+        from test_cases.test_req7_sheets_read_decode import identity_response,response
+        from test_cases.test_req7_activity_discovery import (
+            reserved_switch_row,sheet_document,insertion_document,exact_row_document)
+        from test_cases.test_req7_history_read_launcher import scoped_fixture
+        project=Path(self.store.project_identity);tracker=project/'.tracker'
+        identity=decode_template_identity(prepare_template_identity_read(binding,credential),response(identity_response()))
+        rows=[reserved_switch_row(index) for index in range(2,6)]
+        discovery=sheet_document('ETH&IB Switch',rows,100)
+        occupancy=insertion_document('ETH&IB Switch',rows,100)
+        for document in (discovery,occupancy):document['sheets'][0]['properties']['sheetId']=101
+        history=response({'spreadsheetId':binding.spreadsheet_id,'sheets':[{'properties':{
+            'sheetId':105,'title':'Update_History','sheetType':'GRID',
+            'gridProperties':{'rowCount':100,'columnCount':5}},'data':[{'startRow':2,'startColumn':0}]}]})
+        discovery_plan=prepare_activity_sheet_read(binding,credential,sheet='ETH&IB Switch')
+        occupancy_plan=prepare_insertion_sheet_read(binding,credential,sheet='ETH&IB Switch')
+        metadata={'project_id':str(project),'schema_version':1,'producer_version':'stage-l-runtime-v1',
+            'template_contract_version':'local-xlsx-v1','template_sha256':self.snapshot.workbook_sha256}
+        from monitor import issue_tracker_settings_audit_allocation as allocation,issue_tracker_state_owner as state_owner
+        compiled=[];switched=[];original_settings=allocation._hold_settings_originals
+        current_receipt=tracker/'generations'/committed.receipt.generation_id/'RECEIPT'
+        @contextmanager
+        def after_actual_settings_close(*args,**kwargs):
+            with original_settings(*args,**kwargs) as actual:yield actual
+            if not compiled or switched:return
+            raw=current_receipt.read_bytes();before=current_receipt.stat().st_ino
+            original=global_root/'owned-current-c6-original-receipt'
+            current_receipt.rename(original);current_receipt.write_bytes(raw);current_receipt.chmod(0o600)
+            self.current_receipt_tail_facts=(
+                not state_owner._NATIVE_CATALOG_K_READ_CONTEXT and not allocation._LIVE_NATIVE_CATALOG_K_CONTEXTS,
+                before!=current_receipt.stat().st_ino,original.read_bytes()==current_receipt.read_bytes())
+            switched.append(True)
+        with local.writer_owner(project,self.publication) as writer,scoped_fixture(global_root,owner_module), \
+                owner_module.spreadsheet_owner(binding) as sheet,ExitStack() as patches:
+            if receipt_tail:patches.enter_context(mock.patch.object(allocation,'_hold_settings_originals',after_actual_settings_close))
+            with self._assertion_preserving_preparation(native.hold_catalog_nonallocating_preparation(
+                    writer,sheet,binding,identity,generation_id=committed.receipt.generation_id,
+                    publish_id=committed.receipt.published_sha256,sheet='ETH&IB Switch')) as prepared:
+                receiver_refused=False
+                try:
+                    with self._assertion_preserving_preparation(remote._hold_native_current_cycle_compiler_inputs(prepared,writer,sheet,binding,
+                        _store=self.store,http_root=self.root)) as packet:
+                        settings,whitelist,qualified,receipts=packet
+                        self.assertEqual((1,1),(settings.revision,settings.k))
+                        self.assertEqual((cycle_id,),qualified.cycle_ids)
+                        self.assertEqual((cycle_id,1,(committed.receipt.generation_id,)),
+                            (receipts.cycle_id,receipts.published,receipts.generation_ids))
+                        candidates=tuple(item for item in qualified.candidates if item.activity_key[0]=='switch')
+                        self.assertEqual(2,len(candidates));reads=[]
+                        for offset,candidate in enumerate(candidates):
+                            exact=exact_row_document('ETH&IB Switch',rows[offset],offset+2)
+                            exact['sheets'][0]['properties']['sheetId']=101
+                            reads.append({'operation_id':candidate.operation_id,'discovery_plan':discovery_plan,
+                                'discovery_response':response(discovery),'occupancy_plan':occupancy_plan,
+                                'occupancy_response':response(occupancy),'row_plan':prepare_sheets_read(binding,credential,
+                                    mode='row_rectangle',sheet='ETH&IB Switch',first_row=offset+3),'row_response':response(exact)})
+                        unit=compiler.freeze_observed_receipted_switch_unit(qualified,self.store,http_root=self.root,
+                            settings=settings,whitelist_snapshot=whitelist,whitelist_path=self.template,metadata=metadata,
+                            expected_template_sha256=whitelist.workbook_sha256,
+                            local_generation_id=committed.receipt.generation_id,business_reads=tuple(reads),
+                            history_plan=prepare_history_tail_read(binding,credential),history_response=history,
+                            spreadsheet_token=sheet,binding=binding,identity=identity,writer_token=writer,
+                            _unit_preparation=prepared)
+                        action=json.loads(unit.action_preimage)
+                        self.assertEqual(committed.receipt.generation_id,action['identity']['generation_id'])
+                        self.assertEqual(committed.receipt.published_sha256,action['identity']['publish_id'])
+                        self.assertEqual(committed.receipt.manifest_id,action['manifest_id'],
+                            'local default C6 and online compiler must freeze the same changeset')
+                        self.assertEqual(['insert','insert'],[item['action'] for item in action['business']])
+                        self.assertEqual([[(101,row,column) for column in (1,5,9,13)] for row in (2,3)],
+                            [[(request['updateCells']['start']['sheetId'],
+                               request['updateCells']['start']['rowIndex'],
+                               request['updateCells']['start']['columnIndex'])
+                              for request in item['requests']] for item in action['business']])
+                        self.assertEqual([],action['audits'])
+                        compiled.append(True)
+                        if not receipt_tail:catalog.register_pending_c6_unit(writer,sheet,binding,unit,_unit_preparation=prepared)
+                except remote.RemoteHistoryHold:
+                    if not receipt_tail:raise
+                    receiver_refused=True
+                if receipt_tail:
+                    observed.append('ETH&IB Switch:archived:current-cycle-compiler:'+('tail-refused' if receiver_refused else 'tail-escaped'))
+                    # Exact operator interruption exits the unregistered real
+                    # native scope, retaining the fault; its own unregistered
+                    # HOLD cannot substitute for receiver refusal above.
+                    raise self.current_receipt_tail_primary
+            with catalog.hold_pending_project_c6_units(sheet,binding) as (units,verify):
+                self.assertEqual(2,len(units));self.assertEqual(unit.unit_id,units[-1].unit.unit_id);verify()
+        self.assertEqual([],list((tracker/'settings/outbox').iterdir()))
+        observed.append('ETH&IB Switch:archived:current-cycle-compiler:registered')
 
     def test_native_original_settings_audit_receipt_rebind_after_count_refuses_fixed_local_request(self):
         self._native_original_launch_probe('receipt-rebind',settings_audit=True)
@@ -3165,7 +3295,9 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                     'prepare-business','prepare-business-finalizer-rebind','prepare-business-postclose-revoke',
                     'default-worker-original-images','complete-after-archive','complete-after-archive-receipt-rebind',
                     'complete-after-archive-local-c6','complete-after-archive-receipt-rebind-local-c6',
-                    'complete-after-archive-settings-finalizer-local-c6'))
+                    'complete-after-archive-settings-finalizer-local-c6',
+                    'complete-after-archive-local-c6-native-current-compiler',
+                    'complete-after-archive-local-c6-native-current-compiler-receipt-tail'))
             if manual_channel_bridge or complete_preview_probe or default_preparation:
                 root_template = self.root / "monitor/Issue_Tracker_Template_v1.xlsx"
                 root_template.parent.mkdir(parents=True, exist_ok=True)

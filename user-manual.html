@@ -456,7 +456,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
         <p>本目录由 <code>tools/update-user-manual.py</code> 从 Git tracked 与非忽略文件生成；每个受维护文件必须有独立说明。大量项目数据、镜像、缓存与运行输出按路径模式说明，不把二进制内容嵌入网页。</p>
         <!-- BEGIN GENERATED USER MANUAL FILE CATALOG -->
         <div class="catalog-summary">
-          <span><strong>612</strong> 个受维护文件</span>
+          <span><strong>621</strong> 个受维护文件</span>
           <span><strong>24</strong> 个根级分组</span>
           <span>清单范围：Git tracked + untracked/nonignored</span>
         </div>
@@ -722,7 +722,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           </tbody></table></div>
         </details>
         <details id="v2-file-group-test-cases" data-nav-title="test_cases/ 文件" class="catalog-group">
-          <summary><code>test_cases/</code> — 282 个文件</summary>
+          <summary><code>test_cases/</code> — 291 个文件</summary>
           <div><table class="file-catalog"><thead><tr><th>文件</th><th>说明</th></tr></thead><tbody>
             <tr data-file-path="test_cases/CASE_TEMPLATE.md"><td><code>test_cases/CASE_TEMPLATE.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>新增真机/破坏性验证案例时必须填写的证据模板。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/CHANGE_AWARE_TESTING.md"><td><code>test_cases/CHANGE_AWARE_TESTING.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>文档：脚本变更影响测试。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
@@ -925,6 +925,8 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <tr data-file-path="test_cases/test_req7_attempt_journal.py"><td><code>test_cases/test_req7_attempt_journal.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Independent immutable attempt-count contract, using owned local state only。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_req7_attempt_supervision.py"><td><code>test_cases/test_req7_attempt_supervision.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Owned real child processes; no sockets, real locks, credentials or online activation。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_req7_auth_documentation_candidate.py"><td><code>test_cases/test_req7_auth_documentation_candidate.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Independent auth-library documentation expectations; no runtime/CLI permission。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_req7_catalog_reconciliation.py"><td><code>test_cases/test_req7_catalog_reconciliation.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>ALL catalog originals survive fixed four-read reconciliation and append。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_req7_completion_lane_dispatch.py"><td><code>test_cases/test_req7_completion_lane_dispatch.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Durable collection cannot be relabelled by independent tracker lanes。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_req7_dependency_contract.py"><td><code>test_cases/test_req7_dependency_contract.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Independent REQ7 C-14 dependency policy, artifacts and fail-closed reads。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_req7_dependency_workflow.py"><td><code>test_cases/test_req7_dependency_workflow.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Actual activation/runner consumers of REQ7 policy; no Docker or SDK import。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_req7_enrollment_journal.py"><td><code>test_cases/test_req7_enrollment_journal.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Durable original nonces plus actual metadata reads, never online permission。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
@@ -934,6 +936,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <tr data-file-path="test_cases/test_req7_history_read_launcher.py"><td><code>test_cases/test_req7_history_read_launcher.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Fixed read-only entry with actual locks and owned loopback TLS, no online use。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_req7_ib_provenance.py"><td><code>test_cases/test_req7_ib_provenance.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>REQ7 IB expected-topology identity is the CVT bytes, not a release ID。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_req7_ib_provenance_workflow.py"><td><code>test_cases/test_req7_ib_provenance_workflow.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Real CVT producer must carry byte-bound IB topology provenance。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_req7_initial_target_binding.py"><td><code>test_cases/test_req7_initial_target_binding.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Independent initial-binding cases under actual owner and fixed root reads。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_req7_metadata_capacity.py"><td><code>test_cases/test_req7_metadata_capacity.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Independent G1 visible budget accounting; no online enrollment/permission。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_req7_metadata_reservation.py"><td><code>test_cases/test_req7_metadata_reservation.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Actual original nonces/global unit plus durable G1 budget, not admission。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_req7_mutation_launcher.py"><td><code>test_cases/test_req7_mutation_launcher.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Fixed uninstalled original-count launcher, owned native TLS only; not GO。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
@@ -941,6 +944,10 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <tr data-file-path="test_cases/test_req7_native_supervised_workflow.py"><td><code>test_cases/test_req7_native_supervised_workflow.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Native HTTPS in a test-owned child, with a real inherited temporary lock。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_req7_native_tls_wire.py"><td><code>test_cases/test_req7_native_tls_wire.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Actual stdlib TLS/HTTP to an owned loopback fake server, never online OAuth。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_req7_nv_reservation.py"><td><code>test_cases/test_req7_nv_reservation.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Independent C17 durable shared sequence, not an online mutation permit。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_req7_online_completion_runtime.py"><td><code>test_cases/test_req7_online_completion_runtime.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Actual terminal cycle -&gt; original C6/catalog -&gt; fixed OAuth/four reads。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_req7_online_cycle_scope.py"><td><code>test_cases/test_req7_online_cycle_scope.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Actual FIRST/R2 composition under the terminal worker&#x27;s original cycle scope。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_req7_online_observation_status.py"><td><code>test_cases/test_req7_online_observation_status.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Non-authoritative last-observation display: never a send admission。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_req7_online_reconciliation.py"><td><code>test_cases/test_req7_online_reconciliation.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Fixed project-authenticated reads reconcile originals, never retry or NEW。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_req7_online_whitelist_read.py"><td><code>test_cases/test_req7_online_whitelist_read.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Independent C-24 read-only online Whitelist, never refiltering or admission。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_req7_remote_history_match.py"><td><code>test_cases/test_req7_remote_history_match.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Independent all-business/all-audit reconciliation and original APPLIED evidence。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_req7_retained_applied_inventory.py"><td><code>test_cases/test_req7_retained_applied_inventory.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Original retained unit -&gt; native C6/APPLIED/key evidence; no NEW authority。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
@@ -954,6 +961,8 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <tr data-file-path="test_cases/test_req7_sheets_read_decode.py"><td><code>test_cases/test_req7_sheets_read_decode.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Independent exact-grid response checks; a read image grants no write permit。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_req7_sheets_read_plan.py"><td><code>test_cases/test_req7_sheets_read_plan.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Independent bounded-read shapes; no online service or send authority。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_req7_spreadsheet_owner.py"><td><code>test_cases/test_req7_spreadsheet_owner.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Actual local flock/fd workflows with synthetic root metadata, no root writes。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_req7_stage_l_readonly_display.py"><td><code>test_cases/test_req7_stage_l_readonly_display.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>C25 fixed last-observation projection, not qualification or send authority。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_req7_terminal_unsent_dispatch.py"><td><code>test_cases/test_req7_terminal_unsent_dispatch.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Terminal original reconciliation -&gt; local ALL UNSENT disposition; no NEW。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_req7_tls_inputs.py"><td><code>test_cases/test_req7_tls_inputs.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Real owned CA-file/SSL contexts, synthetic ownership; no network or real CA changes。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_req7_token_launcher.py"><td><code>test_cases/test_req7_token_launcher.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Fixed auth-only entry, real owned children/flock and loopback TLS; no activation。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_req7_transport_manifest.py"><td><code>test_cases/test_req7_transport_manifest.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Independent promotion graph checks; no partial-tree approval or full proof。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
@@ -1244,7 +1253,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
         <p>以下参考覆盖当前工作树中的每个 Python、Shell 与 CGI 文件，包括操作入口、内部库、worker、设备端脚本和开发测试。先看“是否直接运行”，再复制示例；内部组件不得脱离所属事务单独执行。</p>
         <!-- BEGIN GENERATED USER MANUAL SCRIPT REFERENCE -->
         <div class="catalog-summary">
-          <span><strong>473</strong> 个脚本型文件</span>
+          <span><strong>482</strong> 个脚本型文件</span>
           <span><strong>9</strong> 个功能分组</span>
           <span>每项均含运行、输入输出、示例与恢复合同</span>
         </div>
@@ -3037,7 +3046,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           <p><strong>示例：</strong></p>
           <pre><code>readlink nvlink/monitor/sw-link.sh  # 预期解析到 ../../ethernet/monitor/sw-link.sh</code></pre></div>
         </details>
-        <h4 id="v2-script-group-test-cases" data-nav-title="test_cases/ 脚本">test_cases/ — 275 个脚本</h4>
+        <h4 id="v2-script-group-test-cases" data-nav-title="test_cases/ 脚本">test_cases/ — 284 个脚本</h4>
         <details data-script-reference="test_cases/__init__.py" class="script-reference">
           <summary><code>test_cases/__init__.py</code> — Canonical executable regression and integration test case package。</summary>
           <div class="script-body"><dl>
@@ -6548,6 +6557,42 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           <p><strong>示例：</strong></p>
           <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_req7_auth_documentation_candidate</code></pre></div>
         </details>
+        <details data-script-reference="test_cases/test_req7_catalog_reconciliation.py" class="script-reference">
+          <summary><code>test_cases/test_req7_catalog_reconciliation.py</code> — ALL catalog originals survive fixed four-read reconciliation and append。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>ALL catalog originals survive fixed four-read reconciliation and append。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_req7_catalog_reconciliation</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_req7_catalog_reconciliation</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/test_req7_completion_lane_dispatch.py" class="script-reference">
+          <summary><code>test_cases/test_req7_completion_lane_dispatch.py</code> — Durable collection cannot be relabelled by independent tracker lanes。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>Durable collection cannot be relabelled by independent tracker lanes。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_req7_completion_lane_dispatch</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_req7_completion_lane_dispatch</code></pre></div>
+        </details>
         <details data-script-reference="test_cases/test_req7_dependency_contract.py" class="script-reference">
           <summary><code>test_cases/test_req7_dependency_contract.py</code> — Independent REQ7 C-14 dependency policy, artifacts and fail-closed reads。</summary>
           <div class="script-body"><dl>
@@ -6710,6 +6755,24 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           <p><strong>示例：</strong></p>
           <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_req7_ib_provenance_workflow</code></pre></div>
         </details>
+        <details data-script-reference="test_cases/test_req7_initial_target_binding.py" class="script-reference">
+          <summary><code>test_cases/test_req7_initial_target_binding.py</code> — Independent initial-binding cases under actual owner and fixed root reads。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>Independent initial-binding cases under actual owner and fixed root reads。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_req7_initial_target_binding</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_req7_initial_target_binding</code></pre></div>
+        </details>
         <details data-script-reference="test_cases/test_req7_metadata_capacity.py" class="script-reference">
           <summary><code>test_cases/test_req7_metadata_capacity.py</code> — Independent G1 visible budget accounting; no online enrollment/permission。</summary>
           <div class="script-body"><dl>
@@ -6835,6 +6898,78 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           </dl>
           <p><strong>示例：</strong></p>
           <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_req7_nv_reservation</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/test_req7_online_completion_runtime.py" class="script-reference">
+          <summary><code>test_cases/test_req7_online_completion_runtime.py</code> — Actual terminal cycle -&gt; original C6/catalog -&gt; fixed OAuth/four reads。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>Actual terminal cycle -&gt; original C6/catalog -&gt; fixed OAuth/four reads。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_req7_online_completion_runtime</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_req7_online_completion_runtime</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/test_req7_online_cycle_scope.py" class="script-reference">
+          <summary><code>test_cases/test_req7_online_cycle_scope.py</code> — Actual FIRST/R2 composition under the terminal worker&#x27;s original cycle scope。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>Actual FIRST/R2 composition under the terminal worker&#x27;s original cycle scope。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_req7_online_cycle_scope</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_req7_online_cycle_scope</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/test_req7_online_observation_status.py" class="script-reference">
+          <summary><code>test_cases/test_req7_online_observation_status.py</code> — Non-authoritative last-observation display: never a send admission。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>Non-authoritative last-observation display: never a send admission。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_req7_online_observation_status</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_req7_online_observation_status</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/test_req7_online_reconciliation.py" class="script-reference">
+          <summary><code>test_cases/test_req7_online_reconciliation.py</code> — Fixed project-authenticated reads reconcile originals, never retry or NEW。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>Fixed project-authenticated reads reconcile originals, never retry or NEW。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_req7_online_reconciliation</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_req7_online_reconciliation</code></pre></div>
         </details>
         <details data-script-reference="test_cases/test_req7_online_whitelist_read.py" class="script-reference">
           <summary><code>test_cases/test_req7_online_whitelist_read.py</code> — Independent C-24 read-only online Whitelist, never refiltering or admission。</summary>
@@ -7069,6 +7204,42 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           </dl>
           <p><strong>示例：</strong></p>
           <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_req7_spreadsheet_owner</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/test_req7_stage_l_readonly_display.py" class="script-reference">
+          <summary><code>test_cases/test_req7_stage_l_readonly_display.py</code> — C25 fixed last-observation projection, not qualification or send authority。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>C25 fixed last-observation projection, not qualification or send authority。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_req7_stage_l_readonly_display</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_req7_stage_l_readonly_display</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/test_req7_terminal_unsent_dispatch.py" class="script-reference">
+          <summary><code>test_cases/test_req7_terminal_unsent_dispatch.py</code> — Terminal original reconciliation -&gt; local ALL UNSENT disposition; no NEW。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>Terminal original reconciliation -&gt; local ALL UNSENT disposition; no NEW。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_req7_terminal_unsent_dispatch</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_req7_terminal_unsent_dispatch</code></pre></div>
         </details>
         <details data-script-reference="test_cases/test_req7_tls_inputs.py" class="script-reference">
           <summary><code>test_cases/test_req7_tls_inputs.py</code> — Real owned CA-file/SSL contexts, synthetic ownership; no network or real CA changes。</summary>

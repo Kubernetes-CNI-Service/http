@@ -1131,6 +1131,17 @@ owner 不变。独立 direct 与真实 producer/worker/C6/native COUNT/固定本
 预览只读全部原件，不补 outbox、生成代次、再次 COUNT/CLAIM 或发送；同字节新 inode
 RECEIPT 必须拒绝且不修复。本地 TLS/进程及证书夹具不是真实设备或 Cloud 验收。
 
+旧原 COMPLETE/APPLIED/key/DELIVERED 与投影归档后，固定的 native 当前编译输入
+接收器只在实际 writer/spreadsheet owner 与 ACTIVE preparation 内重放当前周期、
+原 K/W1、C5 资格及 admitted C6 receipt，不采用 caller 快照、旧周期来源或返回许可。
+实际 observed Switch compiler 的 manifest 须与默认本地 C6 的 manifest 严格相等，
+真实注册仍由 catalog 独立执行。当前 cycle/C6/source 原件持有者先进入、K 最后进入，
+使 K 撤权和最后 settings FD 清理先完成，再由仍 LIVE 的 raw 原件收尾验证；不能
+在撤 K 后重新 qualify 或调用关闭的 verifier。真实多脚本正例须完成单次注册，
+负例须独立证明接收器本身拒绝清理后的 receipt 同字节新 inode，而非用未注册
+preparation 的外层 HOLD 冒充。此接线不新增 COUNT/CLAIM/send，不证明默认 NEW
+整体闭合、当前 full/check 或真实 Cloud/设备/断电；现场卡仍 NOT RUN。
+
 `test_req7_sheets_read_plan` / `test_req7_sheets_read_decode` 与
 `test_req7_online_whitelist_read` 固定精确列／坐标、十四表身份、四张 row-2 多行字面表头
 和完整有限 Whitelist；非原子 GET 不构成 enrollment、发送许可或完整格式快照。

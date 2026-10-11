@@ -40,6 +40,17 @@ def load():
 
 
 class Req7RemoteHistoryMatchDirectTests(unittest.TestCase):
+    def test_native_current_cycle_compiler_inputs_refuse_unissued_preparation_before_acquisition(self):
+        module=load();entry=getattr(module,'_hold_native_current_cycle_compiler_inputs',None)
+        self.assertTrue(callable(entry),'fixed native source/receipt reception is missing')
+        from monitor import issue_tracker_nv_reservation as native
+        from monitor import issue_tracker_stage_l_consumer as source
+        with mock.patch.object(source,'_hold_original_replay_inputs') as acquire:
+            with self.assertRaises((module.RemoteHistoryHold,native.NvReservationHold)):
+                with entry(object(),object(),object(),binding(),_store=object(),http_root=self.root):
+                    self.fail('unissued preparation reached source/receipt reception')
+        acquire.assert_not_called()
+
     def setUp(self):
         self.owner = load_owner(); self.global_journal = load_global()
         self.planner = load_read('issue_tracker_sheets_read_plan'); self.decoder = load_read('issue_tracker_sheets_read_decode')

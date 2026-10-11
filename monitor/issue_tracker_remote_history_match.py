@@ -779,6 +779,76 @@ def _hold_current_project_last_original_owners(writer_token, owner_token, bindin
 
 
 @contextmanager
+def _hold_native_current_cycle_compiler_inputs(prepared,writer_token,owner_token,binding,*,
+                                             _store,http_root):
+    """Fixed current C5/C6 originals for one genuine native compiler scope.
+
+    Derive K, W1, qualification and latest-cycle receipts from actual held
+    inputs, not caller snapshots or an old generation. No acquisition of a
+    second sheet owner, network read, catalog append, COUNT or send authority.
+    The observed compiler and actual native registration remain separate.
+    """
+    from pathlib import Path
+    from monitor import issue_tracker_local_commit as local,issue_tracker_nv_reservation as native
+    from monitor import issue_tracker_settings_audit_allocation as allocation
+    from monitor import issue_tracker_stage_l_consumer as source,issue_tracker_receipt_snapshot as receipts
+    from monitor.issue_tracker_cycle_source import _hold_current_completed_cycle_replay
+    from monitor.issue_tracker_state_owner import current_k,_settings_original_scope
+    from monitor.issue_tracker_whitelist_workbook import read_whitelist_workbook
+    try:
+        record=native._verify_catalog_preparation(prepared)
+        project=local._owner(writer_token);owner=ownership._validated_owner(owner_token,binding)
+        root=Path(http_root)
+        if (record['token'] is not owner_token or record['binding']!=binding
+                or root.resolve(strict=True)!=root or not root.is_absolute()
+                or Path(_store.project_identity)!=project.project or _store.scope!='prod'
+                or type(prepared) is native._CatalogNonallocatingPreparation
+                   and record['nonallocating_writer'] is not writer_token):raise RemoteHistoryHold()
+        whitelist_path=root/'monitor/Issue_Tracker_Template_v1.xlsx'
+        def preparation_tail():
+            if (native._verify_catalog_preparation(prepared) is not record
+                    or local._owner(writer_token) is not project
+                    or ownership._validated_owner(owner_token,binding) is not owner):raise RemoteHistoryHold()
+        with _settings_original_scope() as scope:
+            scope.callback(preparation_tail)
+            prior=tuple(row for row in record['prior_delivery_events']
+                if row['writer'] is writer_token and row['owner'] is project and row['raw'] is not None)
+            verify_cycle=scope.enter_context(_hold_current_completed_cycle_replay(_store))
+            verify_history=scope.enter_context(receipts._hold_history_originals(writer_token))
+            verify_inputs=scope.enter_context(source._hold_original_replay_inputs(_store,project.project,whitelist_path))
+            # LIFO: revoke/finish actual K settings first, while every current
+            # cycle/C6/source raw verifier is still live. Their real finalizers
+            # must reject a receipt rebound during the last settings close;
+            # no qualification or K capability is reused after K revocation.
+            if prior:
+                scope.enter_context(allocation._hold_native_catalog_k_read(prepared,writer_token,owner_token,binding))
+            def originals():
+                preparation_tail();verify_cycle();verify_history();verify_inputs();preparation_tail()
+            originals()
+            settings=current_k(writer_token);whitelist=read_whitelist_workbook(whitelist_path)
+            qualified=source.qualify_prod_stage_l(_store,http_root=root,settings=settings,
+                whitelist_snapshot=whitelist,whitelist_path=whitelist_path,writer_token=writer_token)
+            observed=receipts.read_current_cycle_local_receipts(writer_token,_store,
+                expected_template_sha256=whitelist.workbook_sha256,settings=settings,
+                whitelist_sha256=whitelist.whitelist.sha256,qualified_source=qualified)
+            if (not observed.generation_ids or observed.published!=len(observed.generation_ids)
+                    or qualified.cycle_ids[-1]!=observed.cycle_id):raise RemoteHistoryHold()
+            originals()
+            yield settings,whitelist,qualified,observed
+            originals()
+            if (current_k(writer_token)!=settings or read_whitelist_workbook(whitelist_path)!=whitelist
+                    or source.qualify_prod_stage_l(_store,http_root=root,settings=settings,
+                        whitelist_snapshot=whitelist,whitelist_path=whitelist_path,writer_token=writer_token)!=qualified
+                    or receipts.read_current_cycle_local_receipts(writer_token,_store,
+                        expected_template_sha256=whitelist.workbook_sha256,settings=settings,
+                        whitelist_sha256=whitelist.whitelist.sha256,qualified_source=qualified)!=observed):
+                raise RemoteHistoryHold()
+            originals()
+    except Exception:
+        raise RemoteHistoryHold() from None
+
+
+@contextmanager
 def _hold_current_project_online_inputs(writer_token, owner_token, binding, authentication, *,
                                         _store, http_root):
     """Acquire fixed current source and actual reads while strict scopes LIVE.
