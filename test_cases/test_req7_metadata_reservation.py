@@ -50,6 +50,20 @@ class Req7MetadataReservationDirectTests(unittest.TestCase):
         self.store = self.state / (hashlib.sha256(TARGET.encode()).hexdigest() + '.metadata')
         self.raw = response({'matchedDeveloperMetadata': self.metadata['matchedDeveloperMetadata'][:2]})
 
+    def test_project_origin_decoder_rejects_forged_shape_without_upgrading_legacy(self):
+        module=load(); decode=getattr(module,'_project_origin',None)
+        self.assertTrue(callable(decode),'immutable quota header needs a strict non-secret project-origin shape')
+        self.assertIsNone(decode({}))
+        self.assertEqual({'schema_version':1,'cloud_project_id':'synthetic-cloud-project'},
+            decode({'project_origin':{'schema_version':1,'cloud_project_id':'synthetic-cloud-project'}}))
+        for value in (None,True,'synthetic-cloud-project',{},
+                {'schema_version':True,'cloud_project_id':'synthetic-cloud-project'},
+                {'schema_version':2,'cloud_project_id':'synthetic-cloud-project'},
+                {'schema_version':1,'cloud_project_id':'Foreign Project'},
+                {'schema_version':1,'cloud_project_id':'synthetic-cloud-project','dedicated':True}):
+            with self.subTest(value=value),self.assertRaises(module.MetadataReservationHold):
+                decode({'project_origin':value})
+
     def initialize(self, token): matching.Req7RemoteHistoryMatchDirectTests.prepare(self, token, attempt=False)
     def reserve(self, token, *, plan=None, raw=None, unit=None):
         return self.module.prepare_metadata_reservation(token, binding(), self.identity, unit or self.unit,
@@ -479,6 +493,66 @@ class Req7MetadataReservationProjectWorkflowTests(unittest.TestCase):
     owners=_Fixture.owners; intercept=_Fixture.intercept; child_fixture=_Fixture.child_fixture
     project_auth=_Fixture.project_auth
 
+    def test_original_project_binding_survives_unknown_and_same_project_credential_rotation(self):
+        from contextlib import ExitStack
+        from monitor import issue_tracker_history_read_launcher as reads
+        module=load()
+        api=getattr(module,'_hold_owned_project_metadata_reservation',None)
+        self.assertTrue(callable(api),'owned quota consumption must bind the original authenticated Cloud project')
+        with ExitStack() as stack:
+            writer,owner,bound,auth,identity_read,identity,unit,metadata,credential,original=self.prepare_original(stack)
+            metadata_read=self.read_project(stack,writer,owner,bound,auth,'metadata',metadata)
+            module.prepare_owned_project_metadata_reservation(writer,owner,bound,auth,unit,
+                identity_response=identity_read,metadata_response=metadata_read)
+            store=self.root/'var/lib/http-ztp-container/issue-tracker'/(hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()+'.metadata')
+            header=json.loads((store/'HEADER').read_bytes())
+            self.assertEqual({'schema_version':1,'cloud_project_id':'synthetic-cloud-project'},header['project_origin'])
+            retained={path.name:path.read_bytes() for path in store.iterdir()}
+            module.global_journal.record_reserved_attempt_intent(owner,bound,identity,unit)
+            self.assertEqual((1,'UNKNOWN'),(module.global_journal.inspect_global_unit(owner,bound,unit).attempt_count,
+                module.global_journal.inspect_global_unit(owner,bound,unit).outcome))
+            native=module._inspect
+            with mock.patch.object(module,'_inspect',wraps=native) as inspect:
+                for authentication,image in ((replace(auth),identity_read),(auth,replace(identity_read))):
+                    with self.assertRaises(module.MetadataReservationHold):
+                        with api(writer,owner,bound,authentication,unit,identity_response=image):
+                            self.fail('copied authentication/read cannot consume original quota')
+                inspect.assert_not_called()
+            # Rotate an actual fixed credential image, not a caller project or
+            # token flag. Same Cloud project stays valid; old issued auth does not.
+            rotated=json.loads(original); rotated['client_x509_cert_url']='https://example.invalid/rotated-certificate'
+            credential.write_bytes(json.dumps(rotated).encode())
+            new_auth,_credential,new_raw=self.project_auth(stack,module.ownership,owner,bound)
+            self.assertNotEqual(original,new_raw)
+            document=matching.identity_response(); document['spreadsheetId']=bound.spreadsheet_id
+            new_identity=self.read_project(stack,writer,owner,bound,new_auth,'template_identity',document)
+            with api(writer,owner,bound,new_auth,unit,identity_response=new_identity) as (budget,verify):
+                self.assertEqual('VISIBLE_ONLY_UNPROVED',budget.outcome)
+                self.assertIs(False,budget.inventory_complete); verify()
+                self.assertEqual(budget,module.inspect_metadata_reservation(owner,bound,identity,unit))
+            self.assertEqual(retained,{path.name:path.read_bytes() for path in store.iterdir()})
+            self.assertEqual(1,module.global_journal.inspect_global_unit(owner,bound,unit).attempt_count)
+
+    def test_legacy_visible_quota_is_not_upgraded_to_an_authenticated_project_original(self):
+        from contextlib import ExitStack
+        from monitor import issue_tracker_history_read_launcher as reads
+        module=load(); api=getattr(module,'_hold_owned_project_metadata_reservation',None)
+        self.assertTrue(callable(api),'legacy visible observations cannot acquire project provenance by replay')
+        with ExitStack() as stack:
+            writer,owner,bound,auth,identity_read,identity,unit,metadata,_credential,_original=self.prepare_original(stack)
+            metadata_read=self.read_project(stack,writer,owner,bound,auth,'metadata',metadata)
+            plan,_project,_digest=reads.require_current_owned_project_read(writer,owner,bound,metadata_read,auth,read_kind='metadata')
+            module.prepare_metadata_reservation(owner,bound,identity,unit,plan,metadata_read)
+            store=self.root/'var/lib/http-ztp-container/issue-tracker'/(hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()+'.metadata')
+            retained={path.name:path.read_bytes() for path in store.iterdir()}
+            self.assertNotIn('project_origin',json.loads(retained['HEADER']))
+            with self.assertRaises(module.MetadataReservationHold):
+                with api(writer,owner,bound,auth,unit,identity_response=identity_read):
+                    self.fail('legacy quota must not gain authenticated historical identity')
+            self.assertIs(False,module.inspect_metadata_reservation(owner,bound,identity,unit).inventory_complete)
+            self.assertEqual(retained,{path.name:path.read_bytes() for path in store.iterdir()})
+            self.assertEqual(0,module.global_journal.inspect_global_unit(owner,bound,unit).attempt_count)
+
     def read_project(self,stack,writer,owner,bound,authentication,kind,value):
         from contextlib import ExitStack
         import socket
@@ -875,6 +949,37 @@ class Req7OwnedCatalogMetadataWorkflowTests(unittest.TestCase):
     owners=_Fixture.owners; intercept=_Fixture.intercept; child_fixture=_Fixture.child_fixture
     project_auth=_Fixture.project_auth; read_project=_Fixture.read_project
     prepare_original=_Fixture.prepare_original
+
+    def test_actual_foreign_project_cannot_consume_bound_unit_or_all_catalog_quota(self):
+        from contextlib import ExitStack
+        from test_cases.test_req7_global_attempt_journal import original_read_files
+        module=load(); single=getattr(module,'_hold_owned_project_metadata_reservation',None)
+        self.assertTrue(callable(single),'actual Cloud project changes must reject immutable quota originals')
+        with ExitStack() as stack:
+            values,_old_metadata,units=self.originals(stack,module)
+            writer,owner,bound,_old_auth,_old_identity,_identity,_first,metadata,credential,raw=values
+            # The actual OAuth/TLS fixture intentionally renews its synthetic
+            # certificate/key files. Compare ALL durable tracker originals,
+            # not those unrelated owned fixture files or the changed credential.
+            state_root=self.root/'var/lib/http-ztp-container/issue-tracker'
+            before=original_read_files(state_root)
+            changed=json.loads(raw); changed['project_id']='foreign-cloud-project'
+            credential.write_bytes(json.dumps(changed).encode())
+            foreign_auth,_credential,_raw=self.project_auth(stack,module.ownership,owner,bound)
+            document=matching.identity_response(); document['spreadsheetId']=bound.spreadsheet_id
+            foreign_identity=self.read_project(stack,writer,owner,bound,foreign_auth,'template_identity',document)
+            foreign_metadata=self.read_project(stack,writer,owner,bound,foreign_auth,'metadata',metadata)
+            for unit in units:
+                with self.assertRaises(module.MetadataReservationHold):
+                    with single(writer,owner,bound,foreign_auth,unit,identity_response=foreign_identity):
+                        self.fail('a newly authenticated foreign project cannot adopt old quota')
+            with self.assertRaises(module.MetadataReservationHold):
+                with self.api(module)(writer,owner,bound,foreign_auth,
+                        identity_response=foreign_identity,metadata_response=foreign_metadata):
+                    self.fail('ALL accounting must not silently mix authenticated Cloud projects')
+            self.assertEqual(before,original_read_files(state_root))
+            for unit in units:
+                self.assertEqual(0,module.global_journal.inspect_global_unit(owner,bound,unit).attempt_count)
 
     def originals(self,stack,module):
         from test_cases.test_req7_unit_catalog import load as load_catalog, load_component

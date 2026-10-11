@@ -10,6 +10,7 @@ from contextlib import ExitStack, contextmanager
 import hashlib
 import json
 import os
+import re
 from types import SimpleNamespace
 
 from monitor import issue_tracker_local_commit as local
@@ -79,9 +80,29 @@ def _observe(token, binding, identity, sheet, fence, plan, response):
     return budget
 
 
-def _header(base, plan, budget, reservation):
-    return {**base, 'read_path': plan.path, 'source_sha256': budget.source_sha256,
-            'reservation_sha256': hashlib.sha256(reservation).hexdigest()}
+def _project_origin(header):
+    """Decode retained provenance, never a completeness/permission claim.
+
+    Absence is the legacy visible-only format. Do not infer or repair it from
+    today's credential: that would invent the historical Cloud project.
+    """
+    if 'project_origin' not in header: return None
+    origin = header['project_origin']
+    if (type(origin) is not dict or set(origin) != {'schema_version', 'cloud_project_id'} or
+            type(origin['schema_version']) is not int or origin['schema_version'] != 1 or
+            type(origin['cloud_project_id']) is not str or
+            re.fullmatch(r'[a-z][a-z0-9-]{4,28}[a-z0-9]', origin['cloud_project_id']) is None):
+        raise MetadataReservationHold()
+    return origin
+
+
+def _header(base, plan, budget, reservation, *, project_origin=None):
+    header = {**base, 'read_path': plan.path, 'source_sha256': budget.source_sha256,
+              'reservation_sha256': hashlib.sha256(reservation).hexdigest()}
+    if project_origin is not None:
+        header['project_origin'] = project_origin
+        _project_origin(header)
+    return header
 
 
 def _marker(header):
@@ -127,12 +148,18 @@ def _hold_quota_originals(parent,name,folder):
         if failed: raise MetadataReservationHold()
 
 
-def _inspect(token, binding, identity, parent, name, folder, base, sheet, fence):
+def _inspect(token, binding, identity, parent, name, folder, base, sheet, fence, *,
+             cloud_project_id=None, require_project_origin=False):
     from monitor.issue_tracker_metadata_capacity import PreparedMetadataRead, _BODY
     if set(os.listdir(folder)) != _NAMES: raise MetadataReservationHold()
     header_raw = journal._read(folder, 'HEADER', 16384)
     header = json.loads(header_raw.decode('utf-8', 'strict'))
     if type(header) is not dict or type(header.get('read_path')) is not str: raise MetadataReservationHold()
+    origin = _project_origin(header)
+    if ((require_project_origin and origin is None) or
+            (cloud_project_id is not None and origin is not None and
+             origin['cloud_project_id'] != cloud_project_id)):
+        raise MetadataReservationHold()
     # Fixed non-secret syntax token for offline decoder validation ONLY.
     # No original bearer is stored and this plan is never sent to a transport.
     plan = PreparedMetadataRead('sheets.googleapis.com', header['read_path'], 'POST',
@@ -143,7 +170,7 @@ def _inspect(token, binding, identity, parent, name, folder, base, sheet, fence)
                       SimpleNamespace(status=200, complete=True, data=raw))
     reservation = local._canonical(fence)
     if journal._read(folder, 'RESERVATION', 16384) != reservation: raise MetadataReservationHold()
-    expected = _header(base, plan, budget, reservation)
+    expected = _header(base, plan, budget, reservation, project_origin=origin)
     if header_raw != local._canonical(expected): raise MetadataReservationHold()
     fd = os.open('INITIALIZED', local._flags(), dir_fd=folder)
     try:
@@ -164,14 +191,15 @@ def prepare_metadata_reservation(token, binding, identity, unit, plan, response)
     return _prepare_metadata_reservation(token,binding,identity,unit,plan,response)
 
 
-def _prepare_metadata_reservation(token,binding,identity,unit,plan,response,*,revalidate=None):
+def _prepare_metadata_reservation(token,binding,identity,unit,plan,response,*,revalidate=None,project_origin=None):
     """Keep original quota FDs through internal final source revalidation."""
     folder = None; failed = False
     try:
         parent, name, base, state, sheet, fence = _inputs(token, binding, identity, unit)
         if state.attempt_count != 0 or name in os.listdir(parent): raise MetadataReservationHold()
         budget = _observe(token, binding, identity, sheet, fence, plan, response)
-        reservation = local._canonical(fence); header = _header(base, plan, budget, reservation)
+        reservation = local._canonical(fence)
+        header = _header(base, plan, budget, reservation, project_origin=project_origin)
         if len(local._canonical(header)) > 16384: raise MetadataReservationHold()
         folder = global_journal._create_folder(parent, name)
         journal._write_read_image(folder, 'METADATA-RAW', response.data)
@@ -216,17 +244,55 @@ def prepare_owned_project_metadata_reservation(writer_token,owner_token,binding,
             metadata_plan,metadata_project,metadata_digest=require_current_owned_project_read(
                 writer_token,owner_token,binding,metadata_response,authentication,read_kind='metadata')
             if (metadata_project,metadata_digest)!=(project,digest): raise MetadataReservationHold()
-            return identity_plan,metadata_plan
-        identity_plan,metadata_plan=current()
+            return identity_plan,metadata_plan,project
+        identity_plan,metadata_plan,project=current()
         identity=decode_template_identity(identity_plan,identity_response)
         current()
         # Revalidate inside the primitive's held-original scope, not after it
         # has closed and a same-byte quota replacement could be freshly read.
         result=_prepare_metadata_reservation(owner_token,binding,identity,unit,metadata_plan,
-                                             metadata_response,revalidate=current)
+            metadata_response,revalidate=current,
+            project_origin={'schema_version':1,'cloud_project_id':project})
     except Exception: failed=True
     if failed: raise MetadataReservationHold()
     return result
+
+
+@contextmanager
+def _hold_owned_project_metadata_reservation(writer_token,owner_token,binding,authentication,unit,*,
+                                              identity_response):
+    """Actual current project -> same immutable quota original, NOT G1 GO.
+
+    Credential rotation within the same Cloud project is allowed only after
+    a new real authentication/read acquisition. Missing legacy provenance or
+    a different actual project is HOLD, not an automatic upgrade/adoption.
+    Original quota FDs and actual source validity survive the consumer.
+    """
+    folder=None; failed=False
+    try:
+        from monitor.issue_tracker_history_read_launcher import require_current_owned_project_read
+        from monitor.issue_tracker_sheets_read_decode import decode_template_identity
+        def current():
+            return require_current_owned_project_read(writer_token,owner_token,binding,
+                identity_response,authentication,read_kind='template_identity')
+        plan,project,_digest=current()
+        identity=decode_template_identity(plan,identity_response)
+        parent,name,base,_state,sheet,fence=_inputs(owner_token,binding,identity,unit)
+        folder=local._directory(parent,name)
+        with _hold_quota_originals(parent,name,folder) as verify_originals:
+            result=_inspect(owner_token,binding,identity,parent,name,folder,base,sheet,fence,
+                cloud_project_id=project,require_project_origin=True)
+            def verify():
+                _plan,actual_project,_digest=current()
+                if actual_project!=project: raise MetadataReservationHold()
+                verify_originals(); ownership._validated_owner(owner_token,binding); current()
+            verify(); yield result,verify; verify()
+    except Exception: failed=True
+    finally:
+        if folder is not None:
+            try: os.close(folder)
+            except OSError: failed=True
+    if failed: raise MetadataReservationHold() from None
 
 
 def inspect_metadata_reservation(token, binding, identity, unit):
@@ -267,11 +333,11 @@ def _hold_owned_project_catalog_metadata_capacity(writer_token,owner_token,bindi
             metadata_plan,metadata_project,metadata_digest=require_current_owned_project_read(
                 writer_token,owner_token,binding,metadata_response,authentication,read_kind='metadata')
             if (metadata_project,metadata_digest)!=(project,digest): raise MetadataReservationHold()
-            return identity_plan,metadata_plan
-        identity_plan,metadata_plan=current()
+            return identity_plan,metadata_plan,project
+        identity_plan,metadata_plan,project=current()
         identity=decode_template_identity(identity_plan,identity_response)
         with _hold_catalog_metadata_capacity(owner_token,binding,identity,metadata_plan,
-                                            metadata_response) as (budget,verify_inventory):
+                                            metadata_response,cloud_project_id=project) as (budget,verify_inventory):
             def verify():
                 current(); verify_inventory(); current()
             verify()
@@ -308,8 +374,8 @@ def _hold_owned_project_mixed_metadata_capacity(writer_token, owner_token, bindi
                 writer_token, owner_token, binding, metadata_response, authentication, read_kind='metadata')
             if (other_project, other_digest) != (project, digest):
                 raise MetadataReservationHold()
-            return identity_plan, metadata_plan
-        identity_plan, metadata_plan = current()
+            return identity_plan, metadata_plan, project
+        identity_plan, metadata_plan, project = current()
         identity = decode_template_identity(identity_plan, identity_response)
         owner = ownership._validated_owner(owner_token, binding)
         parent = owner.directories[-1][0]; stem = owner.lock_name[:-5]
@@ -360,7 +426,8 @@ def _hold_owned_project_mixed_metadata_capacity(writer_token, owner_token, bindi
                     for entry in sorted(_NAMES):
                         images[entry], _original = held.file(folder, entry,
                             2 * _LIMIT if entry == 'METADATA-RAW' else 16384)
-                    _inspect(owner_token, binding, identity, parent, name, folder, base, sheet, fence)
+                    _inspect(owner_token, binding, identity, parent, name, folder, base, sheet, fence,
+                             cloud_project_id=project)
                     if images['RESERVATION'] != local._canonical(fence):
                         raise MetadataReservationHold()
                 enrollment.observe_enrollment_pair(owner_token, binding, identity, metadata_plan, metadata_response, sheet=sheet)
@@ -381,7 +448,7 @@ def _hold_owned_project_mixed_metadata_capacity(writer_token, owner_token, bindi
 
 
 @contextmanager
-def _hold_catalog_metadata_capacity(token, binding, identity, plan, response):
+def _hold_catalog_metadata_capacity(token, binding, identity, plan, response, *, cloud_project_id=None):
     """Charge ALL original permanent fences while their actual images stay held.
 
     No caller reservation list or selected-unit prefix. UNKNOWN and matching
@@ -411,7 +478,8 @@ def _hold_catalog_metadata_capacity(token, binding, identity, plan, response):
                 for entry in sorted(_NAMES):
                     images[entry], _original = held.file(folder, entry,
                         2 * _LIMIT if entry == 'METADATA-RAW' else 16384)
-                _inspect(token, binding, identity, parent, name, folder, base, sheet, fence)
+                _inspect(token, binding, identity, parent, name, folder, base, sheet, fence,
+                         cloud_project_id=cloud_project_id)
                 if images['RESERVATION'] != local._canonical(fence):
                     raise MetadataReservationHold()
                 enrollment.observe_enrollment_pair(token, binding, identity, plan, response, sheet=sheet)

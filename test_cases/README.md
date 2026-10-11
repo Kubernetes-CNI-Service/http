@@ -2760,3 +2760,34 @@ exact dirty candidate; these runs do not approve the ledger or constitute a
 clean-tree formal full. The earlier three non-REQ10C full timing causes remain
 UNKNOWN; isolated or ordered local PASS is not their root-cause closure and
 does not justify a blind full rerun. Ordinary release gates remain closed.
+
+### G1 authenticated Cloud-project origin (2026-10-11 receiving slice)
+
+The owner confirmed that the target spreadsheet has been dedicated to this
+tool since creation and developerMetadata has never been written by any other
+Cloud project. This is a deployment precondition, not an API observation or
+field/full proof. New `prepare_owned_project_metadata_reservation` originals
+persist the non-secret project id obtained from the actual fixed OAuth/read
+acquisition in their canonical HEADER, covered by INITIALIZED. No token,
+credential bytes, caller completeness/dedicated flag or permission is stored.
+The new held owned reader requires matching actual current authentication and
+template-read provenance throughout consumption. Same-project credential
+rotation requires a new actual acquisition; a different project is refused,
+also when consuming ALL catalog or mixed quota originals. Legacy images remain
+readable as visible-only observations but cannot acquire authenticated origin
+by replay, repair or today's credential. All fences, quota bytes and UNKNOWN
+counts remain unchanged; this slice still returns VISIBLE_ONLY_UNPROVED,
+never inventory_complete, FIRST/R2 or a send permit.
+
+`test_cases.test_req7_metadata_reservation` retains its existing direct and
+real OAuth/TLS→enrollment/global/History/catalog/quota workflows and adds
+independent strict origin-shape, same-project rotation, copied acquisition,
+legacy-no-upgrade and foreign-project refusal expectations. Four initial RED
+methods are retained. The first implementation run's single new fixture
+failure compared deliberately renewed TLS certificates with tracker state;
+the fixture now compares ALL durable tracker originals by inode and bytes.
+The whole module passed 49 tests without deleting, skipping, relaxing or
+changing any existing test. Manifest mapping remains the existing primary
+issue-tracker-local direct rule and native durable-quota multi-script workflow;
+no production path or canonical target was added. REAL_ENV, full/check, G1
+complete inventory/default send integration and whole REQ7 remain separate.
