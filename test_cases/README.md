@@ -2807,3 +2807,16 @@ refuse without repair, count change or reservation reclamation. The earlier
 pure/legacy/owned visible-only APIs and their independent expectations remain
 unchanged. Default-worker NEW/R2/FIFO integration and current full/check are
 still separate obligations; this helper alone cannot enable sending.
+
+The dedicated mixed counterpart requires ALL original C6/COMPLETE/APPLIED/key
+settlement proofs for historical units without a quota family, and matching
+saved Cloud-project provenance for every existing pending quota. Both permanent
+wire fences remain charged, whether already visible remotely or still reserved;
+overflow remains STOP_CAPACITY. It does not accept a caller settlement or
+completeness flag, create missing originals, adopt a legacy quota, release a
+reservation or change COUNT/UNKNOWN. The old mixed API remains visible-only.
+Independent literal normal/overflow/missing-original workflows and a direct
+unissued-source rejection were first RED; real local OAuth/TLS and immutable
+C6/settlement/quota sources are used rather than mocked capacity results.
+This necessary mixed-accounting edge is not default FIRST/R2/FIFO send wiring,
+whole REQ7 completion, field validation or current full/check approval.

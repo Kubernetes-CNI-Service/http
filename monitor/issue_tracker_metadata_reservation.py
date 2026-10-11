@@ -393,6 +393,41 @@ def _hold_owned_project_dedicated_catalog_metadata_capacity(writer_token,owner_t
 @contextmanager
 def _hold_owned_project_mixed_metadata_capacity(writer_token, owner_token, binding, authentication, *,
                                                identity_response, metadata_response):
+    """Legacy visible-only mixed accounting; no historical completeness."""
+    with _hold_owned_project_mixed_metadata_capacity_inputs(writer_token,owner_token,binding,authentication,
+            identity_response=identity_response,metadata_response=metadata_response,
+            require_project_origin=False) as result:
+        yield result
+
+
+@contextmanager
+def _hold_owned_project_dedicated_mixed_metadata_capacity(writer_token,owner_token,binding,authentication,*,
+                                                         identity_response,metadata_response):
+    """Conditional G1 accounting for ALL mixed originals, never send permission.
+
+    The dedicated-from-creation / one historical Cloud project deployment
+    precondition is the same as the dedicated catalog path. Settled historical
+    units require their entire original C6/COMPLETE/APPLIED/KEY proof even when
+    they have no quota family; their wire's permanent fence remains charged.
+    Every existing pending quota must carry matching original project binding.
+    No caller settlement/completeness flag, missing-image repair or reclamation.
+    """
+    failed=False
+    try:
+        with _hold_owned_project_mixed_metadata_capacity_inputs(writer_token,owner_token,binding,authentication,
+                identity_response=identity_response,metadata_response=metadata_response,
+                require_project_origin=True) as (visible,verify):
+            if visible.outcome not in ('VISIBLE_ONLY_UNPROVED','STOP_CAPACITY'): raise MetadataReservationHold()
+            budget=replace(visible,inventory_complete=True,
+                outcome='STOP_CAPACITY' if visible.outcome=='STOP_CAPACITY' else 'DEDICATED_PROJECT_CAPACITY')
+            verify(); yield budget,verify; verify()
+    except Exception: failed=True
+    if failed: raise MetadataReservationHold() from None
+
+
+@contextmanager
+def _hold_owned_project_mixed_metadata_capacity_inputs(writer_token,owner_token,binding,authentication,*,
+                                                       identity_response,metadata_response,require_project_origin):
     """Charge ALL permanent fences from actual mixed settlement originals.
 
     Only full held C6/COMPLETE/APPLIED/KEY originals permit a historical unit
@@ -468,7 +503,7 @@ def _hold_owned_project_mixed_metadata_capacity(writer_token, owner_token, bindi
                         images[entry], _original = held.file(folder, entry,
                             2 * _LIMIT if entry == 'METADATA-RAW' else 16384)
                     _inspect(owner_token, binding, identity, parent, name, folder, base, sheet, fence,
-                             cloud_project_id=project)
+                             cloud_project_id=project,require_project_origin=require_project_origin)
                     if images['RESERVATION'] != local._canonical(fence):
                         raise MetadataReservationHold()
                 enrollment.observe_enrollment_pair(owner_token, binding, identity, metadata_plan, metadata_response, sheet=sheet)

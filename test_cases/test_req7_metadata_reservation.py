@@ -115,6 +115,17 @@ class Req7MetadataReservationDirectTests(unittest.TestCase):
             self.assertIsNone(caught.exception.__context__); writing.assert_not_called()
         self.assertFalse(self.store.exists())
 
+    def test_dedicated_mixed_unissued_sources_refuse_before_inventory_or_durable_access(self):
+        from monitor import issue_tracker_retained_inventory as inventory
+        module=load(); api=getattr(module,'_hold_owned_project_dedicated_mixed_metadata_capacity',None)
+        self.assertTrue(callable(api),'dedicated mixed accounting must authenticate original reads before inventory')
+        with mock.patch.object(inventory,'_hold_all_project_mixed_settlements') as joined:
+            with self.assertRaises(module.MetadataReservationHold) as caught:
+                with api(object(),object(),binding(),object(),identity_response=object(),metadata_response=object()):
+                    self.fail('unissued images cannot establish complete mixed capacity')
+            self.assertIsNone(caught.exception.__context__); joined.assert_not_called()
+        self.assertFalse(self.store.exists())
+
     def test_fixture_canonical_metadata_alias_and_original_owner_dependencies_match_current_imports(self):
         import monitor
         module = load()
@@ -1230,6 +1241,65 @@ class Req7MixedOriginalQuotaTests(unittest.TestCase):
         api = getattr(module, '_hold_owned_project_mixed_metadata_capacity', None)
         self.assertTrue(callable(api), 'mixed originals must preserve ALL permanent quota fences')
         return api
+
+    def dedicated_api(self,module):
+        api=getattr(module,'_hold_owned_project_dedicated_mixed_metadata_capacity',None)
+        self.assertTrue(callable(api),'G1 needs ALL original mixed settlements and project-bound pending quotas')
+        return api
+
+    def test_dedicated_mixed_settled_without_quota_and_pending_charge_both_permanent_fences(self):
+        from test_cases.test_req7_global_attempt_journal import original_read_files
+        self.dedicated_api(load())
+        for visible in (True,False):
+            with self.subTest(visible=visible),self.originals(visible_settled=visible) as (
+                    case,module,_catalog,_inventory,writer,owner,bound,auth,identity,metadata,units):
+                before=original_read_files(case.root)
+                with self.dedicated_api(module)(writer,owner,bound,auth,
+                        identity_response=identity,metadata_response=metadata) as (budget,verify):
+                    self.assertEqual('DEDICATED_PROJECT_CAPACITY',budget.outcome)
+                    self.assertIs(True,budget.inventory_complete)
+                    self.assertEqual((101,88 if visible else 86,2 if visible else 4,29910),
+                        next(row for row in budget.pools if row[0]==101))
+                    self.assertEqual(2,budget.outstanding_reservations)
+                    self.assertFalse(hasattr(budget,'permit')); self.assertFalse(hasattr(budget,'send_once')); verify()
+                self.assertEqual(before,original_read_files(case.root))
+                self.assertEqual((1,0),tuple(module.global_journal.inspect_global_unit(owner,bound,u).attempt_count for u in units))
+
+    def test_dedicated_mixed_overflow_preserves_stop_and_all_original_count_evidence(self):
+        from contextlib import ExitStack
+        from test_cases.test_req7_global_attempt_journal import original_read_files
+        self.dedicated_api(load())
+        with self.originals() as (case,module,_catalog,_inventory,writer,owner,bound,auth,identity,metadata,units),ExitStack() as scope:
+            payload=json.loads(metadata.data)
+            payload['matchedDeveloperMetadata'].append({'developerMetadata':{
+                'metadataId':3,'metadataKey':'p','metadataValue':'x'*29910,'visibility':'PROJECT',
+                'location':{'locationType':'SHEET','sheetId':101}}})
+            actual=Req7MetadataReservationProjectWorkflowTests.read_project(
+                case,scope,writer,owner,bound,auth,'metadata',payload)
+            state=case.root/'var/lib/http-ztp-container/issue-tracker'; before=original_read_files(state)
+            with self.dedicated_api(module)(writer,owner,bound,auth,
+                    identity_response=identity,metadata_response=actual) as (budget,verify):
+                self.assertEqual('STOP_CAPACITY',budget.outcome); self.assertIs(True,budget.inventory_complete)
+                self.assertEqual((101,29999,2,-1),next(row for row in budget.pools if row[0]==101)); verify()
+            self.assertEqual(before,original_read_files(state))
+            self.assertEqual((1,0),tuple(module.global_journal.inspect_global_unit(owner,bound,u).attempt_count for u in units))
+
+    def test_dedicated_mixed_missing_pending_quota_or_settled_key_proof_holds_entire_budget(self):
+        from test_cases.test_req7_global_attempt_journal import original_read_files
+        self.dedicated_api(load())
+        for fault in ('pending-quota','settled-key'):
+            with self.subTest(fault=fault),self.originals(reserve_pending=fault!='pending-quota') as (
+                    case,module,_catalog,_inventory,writer,owner,bound,auth,identity,metadata,units):
+                if fault=='settled-key':
+                    marker=case.root/'project/.tracker'/('REMOTE-KEY-HIGH-WATER-'+units[0].unit_id)
+                    marker.rename(case.root/'preserved-original-key')
+                before=original_read_files(case.root)
+                with self.assertRaises(module.MetadataReservationHold):
+                    with self.dedicated_api(module)(writer,owner,bound,auth,
+                            identity_response=identity,metadata_response=metadata):
+                        self.fail('no prefix, backfill, repair or release after a missing original')
+                self.assertEqual(before,original_read_files(case.root))
+                self.assertEqual((1,0),tuple(module.global_journal.inspect_global_unit(owner,bound,u).attempt_count for u in units))
 
     @__import__('contextlib').contextmanager
     def originals(self, *, reserve_pending=True, visible_settled=True):
