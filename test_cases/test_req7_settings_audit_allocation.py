@@ -7,6 +7,7 @@ from importlib import metadata as distribution_metadata
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 import subprocess
 import sys
 import tempfile
@@ -57,6 +58,38 @@ def allocation_image_barrier(case, fd):
         if (named.st_dev, named.st_ino) == (info.st_dev, info.st_ino):
             return True
     return False
+
+
+class Req7NativeProjectAuditAssignmentTests(unittest.TestCase):
+    def record(self):
+        first=SimpleNamespace(unit_id='a'*64,action_preimage=canonical({'audits':[{'event_id':'literal-event-0'}]}))
+        second=SimpleNamespace(unit_id='b'*64,action_preimage=canonical({'audits':[{'event_id':'literal-event-0'}]}))
+        held=SimpleNamespace(directories=[(11,'stem.unit-'+first.unit_id+'.project-origin',21,(),()),
+                                         (11,'stem.unit-'+second.unit_id+'.project-origin',22,(),())],
+            files=[(21,'ORIGIN',31,(),canonical({'unit_id':first.unit_id,'project_identity':[7,101]})),
+                   (22,'ORIGIN',32,(),canonical({'unit_id':second.unit_id,'project_identity':[7,102]}))])
+        return {'old':held,'units':(first,second),'parent':11,'stem':'stem'}
+
+    def test_literal_event_assignment_is_scoped_by_original_project_not_global_id(self):
+        module=load();record=self.record()
+        self.assertEqual({'literal-event-0'},module._native_assigned_event_ids(record,(7,101)))
+        self.assertEqual({'literal-event-0'},module._native_assigned_event_ids(record,(7,102)))
+        self.assertEqual(set(),module._native_assigned_event_ids(record,(7,103)))
+
+    def test_missing_ambiguous_unread_or_wrong_unit_original_never_becomes_unassigned(self):
+        module=load()
+        for defect in ('missing-folder','duplicate-folder','missing-image','duplicate-image','unread','wrong-unit','bool-identity'):
+            with self.subTest(defect=defect):
+                record=self.record();held=record['old']
+                if defect=='missing-folder': held.directories.pop()
+                elif defect=='duplicate-folder': held.directories.append(held.directories[-1])
+                elif defect=='missing-image': held.files.pop()
+                elif defect=='duplicate-image': held.files.append(held.files[-1])
+                else:
+                    raw=None if defect=='unread' else canonical({'unit_id':'c'*64 if defect=='wrong-unit' else 'b'*64,
+                        'project_identity':[True,102] if defect=='bool-identity' else [7,102]})
+                    held.files[-1]=(22,'ORIGIN',32,(),raw)
+                with self.assertRaises(module.SettingsAuditHold): module._native_assigned_event_ids(record,(7,101))
 
 
 class Req7SettingsAuditAllocationTests(unittest.TestCase):

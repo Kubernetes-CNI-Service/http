@@ -435,6 +435,33 @@ def _native_header(unit,binding,project_identity,tracker_identity):
         'tracker_identity':list(tracker_identity),'state':'NATIVE_SETTINGS_ALLOCATION'})
 
 
+def _native_assigned_event_ids(record,project_identity):
+    """Group prior audits by already-held original project, never event alone.
+
+    The preparation has verified these original images and ALL actual C6
+    projects. Do not reopen a path or use a current writer/ACTIVE selector to
+    reconstruct the older unit's owner. Missing or ambiguous originals stop.
+    """
+    assigned=set();held=record['old']
+    for older in record['units']:
+        audits=local._json(older.action_preimage)['audits']
+        if not audits: continue
+        name=record['stem']+'.unit-'+older.unit_id+'.project-origin'
+        folders=[fd for parent,child,fd,_identity,_names in held.directories
+                 if parent==record['parent'] and child==name]
+        if len(folders)!=1: raise SettingsAuditHold()
+        images=[raw for parent,child,_fd,_identity,raw in held.files
+                if parent==folders[0] and child=='ORIGIN']
+        if len(images)!=1 or images[0] is None: raise SettingsAuditHold()
+        origin=local._json(images[0]);identity=origin.get('project_identity')
+        if (origin.get('unit_id')!=older.unit_id or type(identity) is not list
+                or len(identity)!=2 or any(type(value) is not int or value<1 for value in identity)):
+            raise SettingsAuditHold()
+        if tuple(identity)==project_identity:
+            assigned.update(row['event_id'] for row in audits)
+    return assigned
+
+
 def _prepare_native_catalog_allocation(prepared,writer,token,binding,unit):
     """One genuine live C6 creator, BEFORE its catalog append; never cold NEW.
 
@@ -454,13 +481,14 @@ def _prepare_native_catalog_allocation(prepared,writer,token,binding,unit):
     owner=local._owner(writer)
     if owner is not origin['owner']: raise SettingsAuditHold()
     _images,verify=record['settings_scope'].enter_context(_hold_settings_originals(writer))
-    events=_settings(writer); assigned=set()
-    for older in record['units']:
-        assigned.update(row['event_id'] for row in local._json(older.action_preimage)['audits'])
+    events=_settings(writer)
+    project_identity=journal._identity(os.fstat(owner.project_fd))[:2]
+    assigned=_native_assigned_event_ids(record,project_identity)
+    nv._verify_catalog_preparation(prepared)
     wanted=tuple(row[2] for row in events if row[2]['event_id'] not in assigned)
     if local._canonical(audits)!=local._canonical(wanted): raise SettingsAuditHold()
     assignments=_native_assignments(unit)
-    header=_native_header(unit,binding,journal._identity(os.fstat(owner.project_fd))[:2],
+    header=_native_header(unit,binding,project_identity,
                           journal._identity(os.fstat(owner.root_fd))[:2])
     parent=record['parent']; name=record['stem']+'.unit-'+unit.unit_id+'.settings-audit'
     started=name+'-started'

@@ -1011,6 +1011,14 @@ native catalog 的 GLOBAL/retained 原图接收另只允许两个精确派生 fa
 旧 journal/count/WIRE，无修复或有效前缀。未知审计 suffix 在消费者前拒绝。
 这是原图覆盖，不是 protected COUNT/CLAIM 原 allocation 接收、DELIVERED、发送
 许可、默认 hook 或当前精确树正式 full/check 证明。
+native 事件分配按已持有、外锚与 ALL C6 核验的原 ORIGIN 项目 dev/inode 分组，
+不是全表 event_id 集合；不同项目同一个 literal settings 事件可分别分配。
+缺失、多份、未读原 ORIGIN 或 unit/project 身份不符均 HOLD，不通过重新开路径、
+当前 ACTIVE 或调用方项目标签补算。冷 ALL catalog 在原 allocation/ORIGIN/ENTRY
+全部核验后拒绝同一项目同一事件出现在两个单元，不返回有效前缀。
+独立 direct 与真实两项目 C6/NV/allocation/catalog 正向流程，以及仅在真实 creator
+分类边界注入一个重复事件的冷读反向流程覆盖此合同；旧原件、count/WIRE 保留，
+无 ATTEMPT/CLAIM/修复。这不关闭 DELIVERED/归档/default hook 或正式 full/check。
 实际 COMPLETE→C25 桥另在双 owner 下持有原分配、settings、全局 journal、
 enrollment、History preread 与全部完成 proof 原件，重放完整语义并完成屏障后，
 先独占写目录外 `.tracker/SETTINGS-AUDIT-DELIVERY-STARTED` 固定见证，

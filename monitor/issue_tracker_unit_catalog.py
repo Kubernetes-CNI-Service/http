@@ -594,6 +594,23 @@ def _header(unit, *, nv_original=None, project_origin=None, settings_allocation=
     return result
 
 
+def _check_native_audit_assignments(seen,unit,origin):
+    """ALL-catalog uniqueness uses anchored original project plus event ID.
+
+    This consistency check grants no sending or recovery authority. It runs
+    only after the unit's actual allocation/ORIGIN/ENTRY originals validate.
+    Different projects may contain the same literal settings event.
+    """
+    identity=origin.get('project_identity')
+    if (origin.get('unit_id')!=unit.unit_id or type(identity) is not list
+            or len(identity)!=2 or any(type(value) is not int or value<1 for value in identity)):
+        raise UnitCatalogHold()
+    audits=local._json(unit.action_preimage)['audits']
+    keys={(identity[0],identity[1],row['event_id']) for row in audits}
+    if len(keys)!=len(audits) or keys&seen: raise UnitCatalogHold()
+    seen.update(keys)
+
+
 def _inspect(token, binding, held):
     owner, parent, name, started, base = _inputs(token, binding)
     prefix = owner.lock_name[:-5] + '.'
@@ -623,6 +640,7 @@ def _inspect(token, binding, held):
     units = []
     previous = _digest(header_raw)
     unit_ids = set()
+    audit_assignments = set()
     for index, position in enumerate(positions, 1):
         raw, _identity = held.file(catalog, position, 16384)
         entry = local._json(raw, {'schema_version', 'index', 'unit_id',
@@ -705,6 +723,8 @@ def _inspect(token, binding, held):
                 'previous_sha256': previous, 'position_sha256': _digest(position_raw),
                 'position_identity': list(position_identity)}):
             raise UnitCatalogHold()
+        if settings_allocation is not None:
+            _check_native_audit_assignments(audit_assignments,unit,origin_body)
         units.append(unit)
         previous = _digest(raw)
     if names != {'HEADER', 'INITIALIZED', *positions, *unit_ids}:

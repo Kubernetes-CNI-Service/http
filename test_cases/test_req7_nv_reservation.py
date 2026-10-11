@@ -1056,6 +1056,108 @@ class Req7CatalogNvPreparationTests(unittest.TestCase):
                 self.assertEqual((first, second), tuple(row.unit for row in rows)); verify()
             self.assertEqual(old, {name: self.files()[name] for name in old})
 
+    def test_two_native_projects_can_allocate_identical_literal_settings_events_independently(self):
+        audit=self.native_settings_oracle()
+        from test_cases.test_issue_tracker_whitelist_workbook import literal_xlsx
+        from monitor import issue_tracker_k_store as settings
+        with self.native_c6_origin_fixture(settings_audit=audit) as (module,writer,token,first):
+            with self.preparation(token) as prepared:
+                self.catalog.register_pending_c6_unit(writer,token,binding(),first,_nv_preparation=prepared)
+            module.global_journal.prepare_global_unit(token,binding(),first);old=self.files()
+            local=self.catalog.local
+            original_project=local._owner(writer).project_fd
+            first_identity=(os.fstat(original_project).st_dev,os.fstat(original_project).st_ino)
+            project=self.root/'other-native-audit-project';project.mkdir(mode=0o700)
+            publication=project/'publication';publication.mkdir(mode=0o700)
+            local.create_local_commit_store(project,publication)
+            with local.writer_owner(project,publication) as other:
+                settings.initialize_local_k_store(project/'.tracker',token=other,
+                    initialized_at='2026-10-08T10:00:00Z',acquisition_id='first-use')
+                other_project=local._owner(other).project_fd
+                other_identity=(os.fstat(other_project).st_dev,os.fstat(other_project).st_ino)
+                self.assertNotEqual(first_identity,other_identity)
+                enrolled=self.enrollment.inspect_enrollment_journal(token,binding(),self.identity)
+                args=cabling_inputs(enrolled.nonces,identifiers=('NV30104','NV30105'));args['audits']=(audit,)
+                generation=local.begin_generation(other,args['manifest'])
+                local.record_intent(other,generation,literal_xlsx(),kind='xlsx');receipt=local.commit(other,generation)
+                args.update(generation_id=generation.generation_id,publish_id=receipt.published_sha256)
+                second=self.catalog.composer.freeze_send_unit(**args)
+                with self.preparation(token,generation_id=generation.generation_id,publish_id=receipt.published_sha256) as prepared:
+                    self.catalog.register_pending_c6_unit(other,token,binding(),second,_nv_preparation=prepared)
+                with self.catalog.hold_pending_project_c6_units(token,binding()) as (rows,verify):
+                    self.assertEqual((first,second),tuple(row.unit for row in rows))
+                    self.assertEqual((first_identity,other_identity),tuple(row.project_identity for row in rows));verify()
+                stem=hashlib.sha256(TARGET.encode()).hexdigest()
+                for unit,identity in ((first,first_identity),(second,other_identity)):
+                    folder=self.state/(stem+'.unit-'+unit.unit_id+'.settings-audit')
+                    self.assertEqual([{'revision':0,'event_sha256':audit['event_id'].split(':')[2],'audit':audit}],
+                        json.loads((folder/'ASSIGNMENTS').read_bytes()))
+                    self.assertEqual(list(identity),json.loads((folder/'HEADER').read_bytes())['project_identity'])
+                self.assertEqual(old,{name:self.files()[name] for name in old})
+                self.assertFalse(any(path.name.startswith('ATTEMPT-') for path in self.state.rglob('*')))
+
+    def test_cold_all_catalog_refuses_same_project_event_in_two_actual_native_allocations(self):
+        audit=self.native_settings_oracle()
+        from test_cases.test_issue_tracker_whitelist_workbook import literal_xlsx
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        with self.native_c6_origin_fixture(settings_audit=audit) as (module,writer,token,first):
+            with self.preparation(token) as prepared:
+                self.catalog.register_pending_c6_unit(writer,token,binding(),first,_nv_preparation=prepared)
+            module.global_journal.prepare_global_unit(token,binding(),first);old=self.files()
+            local=self.catalog.local;owner=local._owner(writer)
+            project_identity=(os.fstat(owner.project_fd).st_dev,os.fstat(owner.project_fd).st_ino)
+            enrolled=self.enrollment.inspect_enrollment_journal(token,binding(),self.identity)
+            args=cabling_inputs(enrolled.nonces,identifiers=('NV30104','NV30105'));args['audits']=(audit,)
+            generation=local.begin_generation(writer,args['manifest'])
+            local.record_intent(writer,generation,literal_xlsx(),kind='xlsx');receipt=local.commit(writer,generation)
+            args.update(generation_id=generation.generation_id,publish_id=receipt.published_sha256)
+            second=self.catalog.composer.freeze_send_unit(**args);self.assertNotEqual(first.unit_id,second.unit_id)
+            actual_assigned=allocation._native_assigned_event_ids;injections=[]
+            def omit_only_this_original_event(record,identity):
+                # Preserve the genuine original lookup/ALL C6 proof. Only a
+                # creator-side classification fault injects the one duplicate;
+                # no ENTRY, marker, external anchor or cold reader is forged.
+                assigned=actual_assigned(record,identity)
+                self.assertEqual(project_identity,identity)
+                self.assertEqual({audit['event_id']},assigned)
+                reduced=assigned-{audit['event_id']}
+                injections.append((identity,frozenset(assigned),frozenset(reduced)))
+                return reduced
+            creation_error=None
+            try:
+                with mock.patch.object(allocation,'_native_assigned_event_ids',side_effect=omit_only_this_original_event):
+                    with self.preparation(token,generation_id=generation.generation_id,publish_id=receipt.published_sha256) as prepared:
+                        self.catalog.register_pending_c6_unit(writer,token,binding(),second,_nv_preparation=prepared)
+            except Exception as exc: creation_error=exc
+            self.assertEqual([(project_identity,frozenset({audit['event_id']}),frozenset())],injections)
+            if creation_error is not None:
+                self.assertIn(type(creation_error),(module.NvReservationHold,self.catalog.UnitCatalogHold))
+            stem=hashlib.sha256(TARGET.encode()).hexdigest()
+            catalog=self.state/(stem+'.units')
+            second_entry=json.loads((catalog/('ENTRY-%020d'%2)).read_bytes())
+            self.assertEqual(second.unit_id,second_entry['unit_id'])
+            for unit in (first,second):
+                folder=self.state/(stem+'.unit-'+unit.unit_id+'.settings-audit')
+                self.assertEqual({'HEADER','ASSIGNMENTS','INITIALIZED'},set(os.listdir(folder)))
+                self.assertEqual([{'revision':0,'event_sha256':audit['event_id'].split(':')[2],'audit':audit}],
+                    json.loads((folder/'ASSIGNMENTS').read_bytes()))
+                self.assertEqual(list(project_identity),json.loads((folder/'HEADER').read_bytes())['project_identity'])
+            self.assertEqual(old,{name:self.files()[name] for name in old})
+            before=self.files();yielded=[];collisions=[]
+            actual_check=self.catalog._check_native_audit_assignments
+            def observe_actual_duplicate_check(seen,unit,origin):
+                try: return actual_check(seen,unit,origin)
+                except self.catalog.UnitCatalogHold:
+                    collisions.append((unit.unit_id,tuple(origin['project_identity']),frozenset(seen)))
+                    raise
+            with mock.patch.object(self.catalog,'_check_native_audit_assignments',side_effect=observe_actual_duplicate_check):
+                with self.assertRaises(self.catalog.UnitCatalogHold):
+                    with self.catalog.hold_pending_units(token,binding()) as values: yielded.append(values)
+            self.assertEqual([(second.unit_id,project_identity,
+                frozenset({(*project_identity,audit['event_id'])}))],collisions)
+            self.assertEqual([],yielded);self.assertEqual(before,self.files())
+            self.assertFalse(any(path.name.startswith(('ATTEMPT-','CLAIM-')) for path in self.state.rglob('*')))
+
     @contextmanager
     def _native_successor_with_old_c6(self):
         with self.native_c6_origin_fixture() as (module, writer, token, first):

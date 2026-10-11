@@ -9,6 +9,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 import subprocess
 import sys
 import tempfile
@@ -56,6 +57,24 @@ def load_component(name):
     import monitor
     setattr(monitor, name, module)
     return module
+
+
+class CatalogNativeAuditAssignmentTests(unittest.TestCase):
+    def test_same_literal_event_in_two_original_projects_is_not_a_duplicate(self):
+        module=load(reset_dependencies=False);seen=set()
+        unit=SimpleNamespace(unit_id='a'*64,action_preimage=module.local._canonical({'audits':[{'event_id':'literal-event-0'}]}))
+        module._check_native_audit_assignments(seen,unit,{'unit_id':unit.unit_id,'project_identity':[7,101]})
+        module._check_native_audit_assignments(seen,unit,{'unit_id':unit.unit_id,'project_identity':[7,102]})
+        self.assertEqual({(7,101,'literal-event-0'),(7,102,'literal-event-0')},seen)
+
+    def test_same_original_project_event_in_second_unit_refuses_without_mutating_seen(self):
+        module=load(reset_dependencies=False);seen=set()
+        first=SimpleNamespace(unit_id='a'*64,action_preimage=module.local._canonical({'audits':[{'event_id':'literal-event-0'}]}))
+        second=SimpleNamespace(unit_id='b'*64,action_preimage=module.local._canonical({'audits':[{'event_id':'literal-event-0'}]}))
+        module._check_native_audit_assignments(seen,first,{'unit_id':first.unit_id,'project_identity':[7,101]})
+        with self.assertRaises(module.UnitCatalogHold):
+            module._check_native_audit_assignments(seen,second,{'unit_id':second.unit_id,'project_identity':[7,101]})
+        self.assertEqual({(7,101,'literal-event-0')},seen)
 
 
 class CatalogOriginalFirstStatCleanupTests(unittest.TestCase):
