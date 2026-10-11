@@ -693,6 +693,70 @@ class Req7MetadataReservationProjectWorkflowTests(unittest.TestCase):
             self.assertEqual(0,module.global_journal.inspect_global_unit(owner,bound,unit).attempt_count)
 
 
+    def test_owned_quota_originals_survive_creator_folder_cleanup(self):
+        from contextlib import ExitStack
+        module=load()
+        with ExitStack() as stack:
+            writer,owner,bound,auth,identity_read,identity,unit,metadata,_credential,_original=self.prepare_original(stack)
+            metadata_read=self.read_project(stack,writer,owner,bound,auth,'metadata',metadata)
+            store=self.root/'var/lib/http-ztp-container/issue-tracker'/(hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()+'.metadata')
+            close=module.os.close; changed=[]; preserved=self.root/'preserved-cleanup-original'
+            def cleanup(fd):
+                target=False
+                if (store/'INITIALIZED').is_file() and not changed:
+                    target=os.fstat(fd).st_ino==store.stat().st_ino
+                result=close(fd)
+                if target:
+                    path=store/'RESERVATION'; raw=path.read_bytes(); original_inode=path.stat().st_ino
+                    path.rename(preserved); path.write_bytes(raw); path.chmod(0o600)
+                    self.assertNotEqual(original_inode,path.stat().st_ino); changed.append(True)
+                return result
+            with mock.patch.object(module.os,'close',side_effect=cleanup),self.assertRaises(module.MetadataReservationHold):
+                module.prepare_owned_project_metadata_reservation(writer,owner,bound,auth,unit,
+                    identity_response=identity_read,metadata_response=metadata_read)
+            self.assertEqual([True],changed)
+            self.assertEqual(preserved.read_bytes(),(store/'RESERVATION').read_bytes())
+            self.assertTrue((store/'INITIALIZED').is_file())
+            self.assertEqual(0,module.global_journal.inspect_global_unit(owner,bound,unit).attempt_count)
+            self.assertFalse(list(self.root.rglob('CLAIM-*')))
+            retained={path.name:(path.stat().st_ino,path.read_bytes()) for path in store.iterdir()}
+            with self.assertRaises(module.MetadataReservationHold):
+                module.prepare_owned_project_metadata_reservation(writer,owner,bound,auth,unit,
+                    identity_response=identity_read,metadata_response=metadata_read)
+            self.assertEqual(retained,{path.name:(path.stat().st_ino,path.read_bytes()) for path in store.iterdir()})
+
+    def test_owned_quota_rechecks_actual_read_after_last_creator_cleanup(self):
+        from contextlib import ExitStack
+        from monitor import issue_tracker_history_read_launcher as reads
+        module=load()
+        with ExitStack() as stack:
+            writer,owner,bound,auth,identity_read,_identity,unit,metadata,_credential,_original=self.prepare_original(stack)
+            metadata_read=self.read_project(stack,writer,owner,bound,auth,'metadata',metadata)
+            store=self.root/'var/lib/http-ztp-container/issue-tracker'/(hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()+'.metadata')
+            close=module.os.close; revoked=[]
+            def cleanup(fd):
+                target=False
+                if (store/'INITIALIZED').is_file() and not revoked:
+                    target=os.fstat(fd).st_ino==store.stat().st_ino
+                result=close(fd)
+                if target:
+                    with reads._PROJECT_READ_GUARD: revoked.append(reads._PROJECT_READS.pop(metadata_read))
+                return result
+            try:
+                with mock.patch.object(module.os,'close',side_effect=cleanup),self.assertRaises(module.MetadataReservationHold):
+                    module.prepare_owned_project_metadata_reservation(writer,owner,bound,auth,unit,
+                        identity_response=identity_read,metadata_response=metadata_read)
+            finally:
+                if revoked:
+                    with reads._PROJECT_READ_GUARD: reads._PROJECT_READS[metadata_read]=revoked[0]
+            self.assertEqual(1,len(revoked))
+            self.assertEqual({'METADATA-RAW','HEADER','RESERVATION','INITIALIZED'},set(os.listdir(store)))
+            self.assertEqual({'schema_version':1,'cloud_project_id':'synthetic-cloud-project'},
+                json.loads((store/'HEADER').read_bytes())['project_origin'])
+            self.assertEqual(0,module.global_journal.inspect_global_unit(owner,bound,unit).attempt_count)
+            self.assertFalse(list(self.root.rglob('CLAIM-*')))
+
+
 class Req7MetadataReservationNativeWorkflowTests(unittest.TestCase):
     _Fixture = matching.Req7RemoteHistoryNativeWorkflowTests
     fixture = _Fixture.fixture; certificates = _Fixture.certificates; server = _Fixture.server

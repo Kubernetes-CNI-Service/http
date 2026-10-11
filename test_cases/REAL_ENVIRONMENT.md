@@ -2401,6 +2401,8 @@ generation/publish 及 UNKNOWN 下改 action/wire 均 HOLD，不计作 COMPLETE 
 
 - 本次认证来源创建业务原件补充（**NOT RUN / REAL_ENV REQUIRED**）：保留真实 C6 manifest/发布原件与同一认证的实际模板、activity/insertion/row 读取→ALL 操作含 NOOP→四业务原件首次提交、代表性提交中断/冷恢复、末检和 C6 清理后的同字节换件、读取授权撤销及 UNKNOWN 后拒绝重建。失败保留初始化图且 count/CLAIM 不增加，不采用替代 manifest/读计划或弱化原清理合同。替代证据是独立 direct 与本地真实 OAuth/TLS、C6、enrollment、GLOBAL 和原 FD 重叠流程，仅为默认 NEW 的必要前置，不替代真实 Cloud/设备/断电、发送或 full/check。省略/合并：无；未新增风险接受或现场授权；确认人仅沿用 owner 已确认的历史部署事实，必要研发确认与原发布门禁保持有效。
 
+- 认证来源 quota 创建者清理边界补充（**NOT RUN / REAL_ENV REQUIRED**）：正常首次创建须持续持有四原始 quota 文件直到 creator folder 清理完成，并在最后原件图关闭后复核真实 issued identity/metadata 来源。保留清理时 RESERVATION 同字节换 inode、实际读身份撤销、关键 INITIALIZED 提交中断、冷恢复和失败安全状态；拒绝后原文件及替换物保留，COUNT/CLAIM 为零，既存 family 不重建、不修复。替代证据为独立 direct 及真实本地 OAuth/TLS→enrollment/GLOBAL/History/quota workflow，不证明真实 Cloud/设备/断电、完整 NEW/FIRST/R2/FIFO 或当前 full/check。场景省略/合并：无，原因是默认 NEW 必要边界，不缩减原合同；无新增风险接受人，owner 仅确认历史部署事实。现场原精确授权、必要研发确认、仅自有夹具清理和发布门禁继续有效。
+
 - 默认最后观察展示补充（**NOT RUN / REAL_ENV REQUIRED**）：保留真实完成读与全部原件/finalizer 成功后发布、UNKNOWN/CONFLICT 升级、历史 APPLIED 非当前许可、无项目绑定的空观察、缺失/危险文件/秘密字段/未来时间显示未证明、关键提交中断与失败后原 count/UNKNOWN/CLAIM 不变。固定缓存仅 best-effort，`updated_at` 是最后观察时间；不承诺断电持久性、当前项目空库存、T6 调度、G1 或发送许可。保留 parent/image 首次 stat 失败及本轮 numeric FD 被 foreign inode 重用的代表性清理见证；名字漂移且首次 stat 失败时清理可能不能确认，不能采用晚采样或冒称同一 open-file-description。替代证据为独立 direct、真实 worker/OAuth/四次 TLS 读→固定文件→authenticated GET→生成 JavaScript；不代替设备、Cloud、断电、现场 UI 链路或当前 full/check。保留场景如上及原卡全部核心场景；省略/合并：无；理由：不缩减原合同；残余风险与现场前置、精确授权、仅本轮自有 fixture 清理、研发确认和生产门禁有效，无新增风险接受确认人。
 
 ## TC-REAL-REQ7-DURABLE-ATTEMPT-JOURNAL-001 — 意图先落盘与跨重启总计数

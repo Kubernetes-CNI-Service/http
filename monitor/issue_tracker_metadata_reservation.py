@@ -196,7 +196,7 @@ def prepare_metadata_reservation(token, binding, identity, unit, plan, response)
 
 def _prepare_metadata_reservation(token,binding,identity,unit,plan,response,*,revalidate=None,project_origin=None):
     """Keep original quota FDs through internal final source revalidation."""
-    folder = None; failed = False
+    folder = None; originals = None; failed = False
     try:
         parent, name, base, state, sheet, fence = _inputs(token, binding, identity, unit)
         if state.attempt_count != 0 or name in os.listdir(parent): raise MetadataReservationHold()
@@ -213,14 +213,39 @@ def _prepare_metadata_reservation(token,binding,identity,unit,plan,response,*,re
         # must precede INITIALIZED. Interrupted stores remain retained HOLD.
         local._write_new(folder, 'INITIALIZED', _marker(header))
         with _hold_quota_originals(parent,name,folder):
+            if revalidate is not None:
+                from monitor import issue_tracker_unit_catalog as catalog
+                originals=catalog._Originals()
+                captured=originals.directory(parent,name)
+                if journal._identity(os.fstat(captured))!=journal._identity(os.fstat(folder)):
+                    raise MetadataReservationHold()
+                for entry,expected,limit in (('METADATA-RAW',response.data,2*_LIMIT),
+                        ('HEADER',local._canonical(header),16384),('RESERVATION',reservation,16384),
+                        ('INITIALIZED',_marker(header),16384)):
+                    actual,_identity=originals.file(captured,entry,limit)
+                    if actual!=expected: raise MetadataReservationHold()
+                originals.verify(); revalidate(); originals.verify()
             result = _inspect(token, binding, identity, parent, name, folder, base, sheet, fence)
-            if revalidate is not None: revalidate()
+            if revalidate is not None:
+                originals.verify(); revalidate(); originals.verify()
             ownership._validated_owner(token, binding)
+        if originals is not None:
+            originals.verify(); revalidate(); originals.verify()
     except Exception: failed = True
     finally:
         if folder is not None:
             try: os.close(folder)
             except OSError: failed = True
+        if originals is not None:
+            try:
+                # This overlapping original graph outlives both the quota
+                # holder and creator folder finalizers; never reopen paths.
+                originals.verify(); revalidate(); originals.verify()
+            except Exception: failed = True
+            finally: originals.close()
+    if not failed and revalidate is not None:
+        try: revalidate()
+        except Exception: failed = True
     if failed: raise MetadataReservationHold()
     return result
 

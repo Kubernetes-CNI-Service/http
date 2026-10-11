@@ -2843,3 +2843,12 @@ failure retains initialized HOLD with zero COUNT/CLAIM, never adoption or
 rollback. Counted UNKNOWN cannot recreate these images. The legacy offline
 creator retains its existing behavior; default NEW/FIRST/R2 integration and
 current formal full/check are still separate, uncompleted requirements.
+
+Owned quota creation now overlaps all four quota originals through its actual
+creator folder cleanup and rechecks the issued identity/metadata sources after
+the final original graph closes. Independent real OAuth/TLS workflow failures
+first reproduce identical-byte RESERVATION replacement and actual issued-read
+revocation at cleanup; both must retain INITIALIZED with zero COUNT/CLAIM and
+cannot repair or recreate the existing family. Legacy offline behavior is
+unchanged. This necessary default NEW boundary does not itself enable sending,
+close FIRST/R2/FIFO, approve current full/check or validate a real Cloud target.
