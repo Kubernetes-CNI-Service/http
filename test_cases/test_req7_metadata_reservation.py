@@ -725,6 +725,66 @@ class Req7MetadataReservationProjectWorkflowTests(unittest.TestCase):
                     identity_response=identity_read,metadata_response=metadata_read)
             self.assertEqual(retained,{path.name:(path.stat().st_ino,path.read_bytes()) for path in store.iterdir()})
 
+    def test_first_quota_writer_cannot_handoff_same_bytes_from_a_replaced_inode(self):
+        from contextlib import ExitStack
+        module=load()
+        with ExitStack() as stack:
+            writer,owner,bound,auth,identity_read,_identity,unit,metadata,_credential,_original=self.prepare_original(stack)
+            metadata_read=self.read_project(stack,writer,owner,bound,auth,'metadata',metadata)
+            store=self.root/'var/lib/http-ztp-container/issue-tracker'/(hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()+'.metadata')
+            write=module.journal._write_read_image; changed=[]; preserved=self.root/'first-quota-original'
+            def replace_after_write(folder,name,raw,**options):
+                result=write(folder,name,raw,**options)
+                if name=='METADATA-RAW' and not changed:
+                    path=store/name; original=path.stat().st_ino
+                    path.rename(preserved); path.write_bytes(raw); path.chmod(0o600)
+                    changed.append((original,path.stat().st_ino))
+                return result
+            with mock.patch.object(module.journal,'_write_read_image',side_effect=replace_after_write),self.assertRaises(module.MetadataReservationHold):
+                module.prepare_owned_project_metadata_reservation(writer,owner,bound,auth,unit,
+                    identity_response=identity_read,metadata_response=metadata_read)
+            self.assertEqual(1,len(changed)); self.assertNotEqual(*changed[0])
+            self.assertEqual(metadata_read.data,preserved.read_bytes())
+            self.assertEqual(metadata_read.data,(store/'METADATA-RAW').read_bytes())
+            self.assertEqual(0,module.global_journal.inspect_global_unit(owner,bound,unit).attempt_count)
+            self.assertFalse(list(self.root.rglob('CLAIM-*')))
+
+    def test_creator_directory_interrupt_preserves_primary_and_closes_all_quota_originals(self):
+        from contextlib import ExitStack
+        from monitor import issue_tracker_unit_catalog as catalog
+        module=load()
+        with ExitStack() as stack:
+            writer,owner,bound,auth,identity_read,_identity,unit,metadata,_credential,_original=self.prepare_original(stack)
+            metadata_read=self.read_project(stack,writer,owner,bound,auth,'metadata',metadata)
+            close=module.local._close_written_original; primary=KeyboardInterrupt('owned quota creator exit')
+            captured=[]; reached=[]; write=catalog._Originals._written_file; directory=catalog._Originals.directory
+            def retain(graph,parent,name,written,raw,limit):
+                captured.append(written); return write(graph,parent,name,written,raw,limit)
+            def acquire(graph,parent,name):
+                result=directory(graph,parent,name)
+                captured.append((result,module.journal._identity(os.fstat(result)))); return result
+            def interrupt(fd,original):
+                result=close(fd,original)
+                if not reached: reached.append(fd); raise primary
+                return result
+            try:
+                with mock.patch.object(catalog._Originals,'_written_file',retain),mock.patch.object(catalog._Originals,'directory',acquire), \
+                        mock.patch.object(module.local,'_close_written_original',side_effect=interrupt):
+                    with self.assertRaises(KeyboardInterrupt) as caught:
+                        module.prepare_owned_project_metadata_reservation(writer,owner,bound,auth,unit,
+                            identity_response=identity_read,metadata_response=metadata_read)
+                self.assertIs(primary,caught.exception); self.assertEqual(1,len(reached)); self.assertEqual(5,len(captured))
+                for fd,_original in captured:
+                    with self.assertRaises(OSError) as closed: os.fstat(fd)
+                    self.assertEqual(9,closed.exception.errno,'every first-writer/overlap FD must close despite interrupt')
+                self.assertEqual(0,module.global_journal.inspect_global_unit(owner,bound,unit).attempt_count)
+                self.assertFalse(list(self.root.rglob('CLAIM-*')))
+            finally:
+                for fd,original in captured:
+                    try:
+                        if module.journal._identity(os.fstat(fd))[:2]==original[:2]: os.close(fd)
+                    except OSError: pass
+
     def test_owned_quota_rechecks_actual_read_after_last_creator_cleanup(self):
         from contextlib import ExitStack
         from monitor import issue_tracker_history_read_launcher as reads

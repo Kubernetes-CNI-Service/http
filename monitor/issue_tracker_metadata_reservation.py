@@ -13,6 +13,7 @@ from contextlib import ExitStack, contextmanager
 import hashlib
 import json
 import os
+import sys
 import re
 from types import SimpleNamespace
 
@@ -196,7 +197,7 @@ def prepare_metadata_reservation(token, binding, identity, unit, plan, response)
 
 def _prepare_metadata_reservation(token,binding,identity,unit,plan,response,*,revalidate=None,project_origin=None):
     """Keep original quota FDs through internal final source revalidation."""
-    folder = None; originals = None; failed = False
+    folder = None; first_directory = None; originals = None; failed = False
     try:
         parent, name, base, state, sheet, fence = _inputs(token, binding, identity, unit)
         if state.attempt_count != 0 or name in os.listdir(parent): raise MetadataReservationHold()
@@ -204,26 +205,30 @@ def _prepare_metadata_reservation(token,binding,identity,unit,plan,response,*,re
         reservation = local._canonical(fence)
         header = _header(base, plan, budget, reservation, project_origin=project_origin)
         if len(local._canonical(header)) > 16384: raise MetadataReservationHold()
-        folder = global_journal._create_folder(parent, name)
-        journal._write_read_image(folder, 'METADATA-RAW', response.data)
-        local._write_new(folder, 'HEADER', local._canonical(header))
-        local._write_new(folder, 'RESERVATION', reservation)
+        if revalidate is None:
+            folder = global_journal._create_folder(parent, name)
+            journal._write_read_image(folder, 'METADATA-RAW', response.data)
+            local._write_new(folder, 'HEADER', local._canonical(header))
+            local._write_new(folder, 'RESERVATION', reservation)
+        else:
+            from monitor import issue_tracker_unit_catalog as catalog
+            originals=catalog._Originals()
+            folder,first_directory=global_journal._create_folder(parent,name,_return_original=True)
+            originals._written_file(folder,'METADATA-RAW',
+                journal._write_read_image(folder,'METADATA-RAW',response.data,_return_original=True),response.data,2*_LIMIT)
+            for entry,raw in (('HEADER',local._canonical(header)),('RESERVATION',reservation)):
+                originals._written_file(folder,entry,local._write_new(folder,entry,raw,_return_original=True),raw,16384)
         journal._named(parent, name, folder, directory=True); ownership._validated_owner(token, binding)
         # Folder+parent and three file+folder pairs: all eight image barriers
         # must precede INITIALIZED. Interrupted stores remain retained HOLD.
-        local._write_new(folder, 'INITIALIZED', _marker(header))
+        if revalidate is None:
+            local._write_new(folder, 'INITIALIZED', _marker(header))
+        else:
+            raw=_marker(header)
+            originals._written_file(folder,'INITIALIZED',local._write_new(folder,'INITIALIZED',raw,_return_original=True),raw,16384)
+            originals._written_directory(parent,name,folder,first_directory)
         with _hold_quota_originals(parent,name,folder):
             if revalidate is not None:
-                from monitor import issue_tracker_unit_catalog as catalog
-                originals=catalog._Originals()
-                captured=originals.directory(parent,name)
-                if journal._identity(os.fstat(captured))!=journal._identity(os.fstat(folder)):
-                    raise MetadataReservationHold()
-                for entry,expected,limit in (('METADATA-RAW',response.data,2*_LIMIT),
-                        ('HEADER',local._canonical(header),16384),('RESERVATION',reservation,16384),
-                        ('INITIALIZED',_marker(header),16384)):
-                    actual,_identity=originals.file(captured,entry,limit)
-                    if actual!=expected: raise MetadataReservationHold()
                 originals.verify(); revalidate(); originals.verify()
             result = _inspect(token, binding, identity, parent, name, folder, base, sheet, fence)
             if revalidate is not None:
@@ -233,16 +238,24 @@ def _prepare_metadata_reservation(token,binding,identity,unit,plan,response,*,re
             originals.verify(); revalidate(); originals.verify()
     except Exception: failed = True
     finally:
+        primary=sys.exc_info()[1]; cleanup=None; finishers=[]
         if folder is not None:
-            try: os.close(folder)
-            except OSError: failed = True
+            finishers.append(lambda: os.close(folder) if first_directory is None
+                else local._close_written_original(folder,first_directory))
         if originals is not None:
-            try:
-                # This overlapping original graph outlives both the quota
-                # holder and creator folder finalizers; never reopen paths.
-                originals.verify(); revalidate(); originals.verify()
-            except Exception: failed = True
-            finally: originals.close()
+            # This overlapping original graph outlives both the quota holder
+            # and creator folder finalizers, including actual close interrupts.
+            finishers.extend((lambda: (originals.verify(),revalidate(),originals.verify()),originals.close))
+        for finish in finishers:
+            try: finish()
+            except BaseException as error:
+                failed=True
+                if not isinstance(error,Exception) and (primary is None or isinstance(primary,Exception)):
+                    primary=error
+                elif cleanup is None: cleanup=error
+        if primary is not None and not isinstance(primary,Exception):
+            if cleanup is not None: raise primary from cleanup
+            raise primary
     if not failed and revalidate is not None:
         try: revalidate()
         except Exception: failed = True

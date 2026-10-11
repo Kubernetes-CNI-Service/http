@@ -2852,3 +2852,26 @@ revocation at cleanup; both must retain INITIALIZED with zero COUNT/CLAIM and
 cannot repair or recreate the existing family. Legacy offline behavior is
 unchanged. This necessary default NEW boundary does not itself enable sending,
 close FIRST/R2/FIFO, approve current full/check or validate a real Cloud target.
+
+Owned History, BUSINESS and quota creation now transfer the actual first
+O_EXCL writer FD and its checked final full identity directly into the held
+original graph. They do not reopen same-byte replacements as new originals.
+The first creator directory stays live through a checked overlapping directory
+capture; actual file identities/bytes and complete names freeze before creator
+cleanup. History/quota graphs outlive that cleanup; BUSINESS shares the real
+C6 graph and outlives its finalizer. Fixed RAW bounds remain 2 MiB and BUSINESS
+16 MiB, while wire/manifest remain 1 MiB; no caller-selected limit or verifier
+is added. Three independent real OAuth/TLS workflows first reproduce the
+write-to-reader replacement failures, plus independent direct first-FD/bound
+and no-reopen checks. Interrupted images remain retained HOLD, count0 and zero
+CLAIM, never repaired/adopted. This closes only this necessary creation seam,
+not default NEW/FIRST/R2/FIFO, current full/check or real Cloud acceptance.
+
+Actual creator-directory close interruption is also covered by independent
+owned History and quota workflows. Both first reproduced leaked original FDs;
+cleanup now attempts every remaining owned graph even when the creator close
+raises a BaseException, and rethrows the same primary interrupt rather than
+masking it with a later verification or cleanup error. Borrowed BUSINESS/C6
+graphs remain owned by their outer finalizer. Existing count, CLAIM, immutable
+bytes, RAW bounds and legacy offline expectations remain unchanged. This is
+local cleanup evidence, not power-loss, real-device or current full proof.

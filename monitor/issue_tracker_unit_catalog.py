@@ -527,6 +527,36 @@ class _Originals:
         self.files[-1] = (parent, name, fd, identity, raw)
         return raw, identity
 
+    def _written_file(self,parent,name,written,raw,limit):
+        # Private creator overlap, never reopen a pathname to adopt its inode.
+        # Register the real writer immediately, before any receiving stat fails.
+        fd,identity=written
+        self.files.append((parent,name,fd,identity,raw))
+        if (type(raw) is not bytes or not 1<=len(raw)<=limit or identity[6]!=len(raw)
+                or journal._identity(os.fstat(fd))!=identity): raise UnitCatalogHold()
+        journal._named(parent,name,fd,directory=False)
+        if os.pread(fd,len(raw)+1,0)!=raw or journal._identity(os.fstat(fd))!=identity:
+            raise UnitCatalogHold()
+        if self._image_budget is not None:
+            self._image_budget.reserve(identity); self._image_budget.seal(identity,raw)
+        elif self.bytes+len(raw)>_MAX_IMAGES: raise UnitCatalogHold()
+        self.bytes+=len(raw)
+
+    def _written_directory(self,parent,name,folder,first_identity):
+        # Own writes legitimately change size/timestamps, not inode/type/owner.
+        # The first creator FD remains live while a checked overlapping reader
+        # takes its exact completed directory image and all first writer FDs.
+        journal._named(parent,name,folder,directory=True)
+        current=journal._identity(os.fstat(folder))
+        if current[:5]!=first_identity[:5]: raise UnitCatalogHold()
+        self.verify()
+        captured=self.directory(parent,name)
+        if journal._identity(os.fstat(captured))!=current: raise UnitCatalogHold()
+        self.files=[(captured if source==folder else source,entry,fd,identity,raw)
+            for source,entry,fd,identity,raw in self.files]
+        self.verify()
+        return captured
+
     def verify(self, *, appended_to=None, parent_additions=frozenset()):
         if self._image_budget is not None and self._image_budget.failed:
             raise UnitCatalogHold()

@@ -78,6 +78,26 @@ class CatalogNativeAuditAssignmentTests(unittest.TestCase):
 
 
 class CatalogOriginalFirstStatCleanupTests(unittest.TestCase):
+    def test_written_image_handoff_uses_first_identity_without_reopening_or_adopting(self):
+        module=load(reset_dependencies=False)
+        self.assertTrue(callable(getattr(module._Originals,'_written_file',None)),
+            'first writer identity must be handed to the original graph')
+        with tempfile.TemporaryDirectory(prefix='req7-first-written-graph-') as temporary:
+            root=Path(temporary); parent=os.open(root,os.O_RDONLY|os.O_DIRECTORY)
+            held=module._Originals(); raw=b'independent first-written bytes\n'
+            try:
+                written=module.local._write_new(parent,'HEADER',raw,_return_original=True)
+                (root/'HEADER').rename(root/'preserved'); (root/'HEADER').write_bytes(raw); (root/'HEADER').chmod(0o600)
+                with mock.patch.object(module.os,'open',side_effect=AssertionError('must not reopen replacement')):
+                    with self.assertRaises((module.UnitCatalogHold,module.journal.AttemptJournalHold)):
+                        held._written_file(parent,'HEADER',written,raw,16384)
+                self.assertEqual(written[0],held.files[0][2])
+                self.assertEqual(written[1],held.files[0][3])
+                self.assertEqual(raw,(root/'preserved').read_bytes())
+                self.assertNotEqual((root/'HEADER').stat().st_ino,written[1][1])
+            finally:
+                held.close(); os.close(parent)
+
     def test_graph_finalizer_interrupt_closes_all_other_owned_originals(self):
         module=load(reset_dependencies=False)
         with tempfile.TemporaryDirectory(prefix='req7-original-graph-interrupt-') as temporary:

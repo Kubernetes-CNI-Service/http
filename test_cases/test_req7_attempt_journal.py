@@ -84,6 +84,28 @@ class Req7AttemptJournalDirectTests(unittest.TestCase):
             with self.assertRaises(module.AttemptJournalHold): module.prepare_unit(token, UNIT, b'x' * (1024 * 1024 + 1))
             self.assertFalse((self.project / '.tracker/remote-attempts').exists())
 
+    def test_read_image_handoff_retains_actual_first_fd_and_fixed_two_mib_bound(self):
+        import inspect
+        module=self.module()
+        self.assertIn('_return_original',inspect.signature(module._write_read_image).parameters,
+            'owned readers must receive the actual first writer, not reopen the name')
+        parent=os.open(self.project,os.O_RDONLY|os.O_DIRECTORY); handed=None
+        raw=b'independent full read'+b' '*(2*1024*1024-len(b'independent full read'))
+        try:
+            for name,body,option in (('WIRE',b'x',True),('HISTORY-RAW',raw+b'x',True),
+                    ('HISTORY-RAW',b'x',1)):
+                with self.assertRaises(module.AttemptJournalHold):
+                    module._write_read_image(parent,name,body,_return_original=option)
+            handed=module._write_read_image(parent,'HISTORY-RAW',raw,_return_original=True)
+            self.assertEqual(2,len(handed)); descriptor,identity=handed
+            self.assertEqual(raw,os.pread(descriptor,len(raw)+1,0))
+            self.assertEqual((self.project/'HISTORY-RAW').stat().st_ino,identity[1])
+            self.assertEqual(identity,module._identity(os.fstat(descriptor)))
+            self.assertFalse(any(name.startswith('.pending-') for name in os.listdir(parent)))
+        finally:
+            if handed is not None: os.close(handed[0])
+            os.close(parent)
+
     def test_read_image_short_writes_noreplace_and_failed_progress_keep_original_evidence(self):
         module = self.module(); raw = b'original typed read bytes\n' * 1000
         fd = os.open(self.project, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)

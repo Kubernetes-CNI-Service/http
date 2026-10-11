@@ -916,6 +916,61 @@ class Req7OwnedHistoryPrereadCreationWorkflowTests(unittest.TestCase):
             self.assertEqual((1,'UNKNOWN'),tuple(getattr(module.global_journal.inspect_global_unit(
                 owner,bound,actual_unit),name) for name in ('attempt_count','outcome')))
 
+    def test_first_history_writer_cannot_handoff_same_bytes_from_a_replaced_inode(self):
+        with self.originals() as (module,api,writer,owner,bound,auth,actual_unit,identity,history):
+            write=module.journal._write_read_image; changed=[]; preserved=self.root/'first-history-original'
+            def replace_after_write(folder,name,raw,**options):
+                result=write(folder,name,raw,**options)
+                if name=='HISTORY-RAW' and not changed:
+                    destination=os.open(self.root,os.O_RDONLY)
+                    try:
+                        original=os.stat(name,dir_fd=folder).st_ino
+                        os.rename(name,preserved.name,src_dir_fd=folder,dst_dir_fd=destination)
+                        fd=os.open(name,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600,dir_fd=folder)
+                        try: os.write(fd,raw)
+                        finally: os.close(fd)
+                        changed.append((original,os.stat(name,dir_fd=folder).st_ino))
+                    finally: os.close(destination)
+                return result
+            with mock.patch.object(module.journal,'_write_read_image',side_effect=replace_after_write),self.assertRaises(module.HistoryPrereadHold):
+                api(writer,owner,bound,auth,actual_unit,identity_response=identity,history_response=history)
+            self.assertEqual(1,len(changed)); self.assertNotEqual(*changed[0])
+            self.assertEqual(history.data,preserved.read_bytes())
+            self.assertEqual(history.data,next(self.root.rglob('HISTORY-RAW')).read_bytes())
+            self.assertEqual(0,module.global_journal.inspect_global_unit(owner,bound,actual_unit).attempt_count)
+            self.assertFalse(list(self.root.rglob('CLAIM-*')))
+
+    def test_creator_directory_interrupt_preserves_primary_and_closes_all_history_originals(self):
+        from monitor import issue_tracker_unit_catalog as catalog
+        with self.originals() as (module,api,writer,owner,bound,auth,actual_unit,identity,history):
+            close=module.local._close_written_original; primary=KeyboardInterrupt('owned history creator exit')
+            captured=[]; reached=[]; write=catalog._Originals._written_file; directory=catalog._Originals.directory
+            def retain(graph,parent,name,written,raw,limit):
+                captured.append(written); return write(graph,parent,name,written,raw,limit)
+            def acquire(graph,parent,name):
+                result=directory(graph,parent,name)
+                captured.append((result,module.journal._identity(os.fstat(result)))); return result
+            def interrupt(fd,original):
+                result=close(fd,original)
+                if not reached: reached.append(fd); raise primary
+                return result
+            try:
+                with mock.patch.object(catalog._Originals,'_written_file',retain),mock.patch.object(catalog._Originals,'directory',acquire), \
+                        mock.patch.object(module.local,'_close_written_original',side_effect=interrupt):
+                    with self.assertRaises(KeyboardInterrupt) as caught:
+                        api(writer,owner,bound,auth,actual_unit,identity_response=identity,history_response=history)
+                self.assertIs(primary,caught.exception); self.assertEqual(1,len(reached)); self.assertEqual(4,len(captured))
+                for fd,_original in captured:
+                    with self.assertRaises(OSError) as closed: os.fstat(fd)
+                    self.assertEqual(9,closed.exception.errno,'every first-writer/overlap FD must close despite interrupt')
+                self.assertEqual(0,module.global_journal.inspect_global_unit(owner,bound,actual_unit).attempt_count)
+                self.assertFalse(list(self.root.rglob('CLAIM-*')))
+            finally:
+                for fd,original in captured:
+                    try:
+                        if module.journal._identity(os.fstat(fd))[:2]==original[:2]: os.close(fd)
+                    except OSError: pass
+
     def test_last_original_inspection_replacement_or_issued_revocation_retains_history_and_holds(self):
         from monitor import issue_tracker_history_read_launcher as reads
         self.api()
@@ -1072,6 +1127,29 @@ class Req7OwnedBusinessPrereadCreationWorkflowTests(unittest.TestCase):
             self.assertTrue(originals.items()<=original_read_files(self.root).items())
             self.assertEqual((1,'UNKNOWN'),tuple(getattr(module.global_journal.inspect_global_unit(
                 owner,bound,unit),name) for name in ('attempt_count','outcome')))
+
+    def test_first_business_writer_cannot_handoff_same_bytes_from_a_replaced_inode(self):
+        with self.business_originals() as (module,api,writer,owner,bound,auth,generation,unit,
+                _identity,identity_read,actual,_manifest,_digest):
+            write=module._write_business_image; changed=[]; preserved=self.root/'first-business-original'
+            def replace_after_write(folder,raw,**options):
+                result=write(folder,raw,**options)
+                destination=os.open(self.root,os.O_RDONLY)
+                try:
+                    original=os.stat('BUSINESS-RAW',dir_fd=folder).st_ino
+                    os.rename('BUSINESS-RAW',preserved.name,src_dir_fd=folder,dst_dir_fd=destination)
+                    fd=os.open('BUSINESS-RAW',os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600,dir_fd=folder)
+                    try: os.write(fd,raw)
+                    finally: os.close(fd)
+                    changed.append((original,os.stat('BUSINESS-RAW',dir_fd=folder).st_ino))
+                finally: os.close(destination)
+                return result
+            with mock.patch.object(module,'_write_business_image',side_effect=replace_after_write),self.assertRaises(module.HistoryPrereadHold):
+                api(writer,owner,bound,auth,generation,unit,identity_response=identity_read,business_reads=actual)
+            self.assertEqual(1,len(changed)); self.assertNotEqual(*changed[0])
+            self.assertEqual(preserved.read_bytes(),next(self.root.rglob('BUSINESS-RAW')).read_bytes())
+            self.assertEqual(0,module.global_journal.inspect_global_unit(owner,bound,unit).attempt_count)
+            self.assertFalse(list(self.root.rglob('CLAIM-*')))
 
     def test_final_inspection_business_c6_replacement_or_actual_read_revocation_retains_hold(self):
         from monitor import issue_tracker_history_read_launcher as reads

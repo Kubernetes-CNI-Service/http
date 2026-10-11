@@ -12,6 +12,7 @@ import errno
 import hashlib
 import json
 import os
+import sys
 import base64
 import uuid
 import threading
@@ -283,7 +284,7 @@ def prepare_owned_project_history_preread(writer_token,owner_token,binding,authe
 
 def _prepare_history_preread(token,binding,unit,plan,response,*,revalidate=None):
     """Legacy creation unchanged; owned creation also pins its final originals."""
-    folder = None; failed = False
+    folder = None; first_directory = None; originals = None; failed = False
     try:
         parent, name, base, sheet_id, state = _inputs(token, binding, unit)
         if state.attempt_count != 0 or name in os.listdir(parent): raise HistoryPrereadHold()
@@ -292,40 +293,58 @@ def _prepare_history_preread(token,binding,unit,plan,response,*,revalidate=None)
         # genuine global journal too, not just to a caller's coherent plan.
         if urlsplit(plan.path).path != '/v4/spreadsheets/' + binding.spreadsheet_id: raise HistoryPrereadHold()
         header = _header(base, plan, observed)
-        folder = global_journal._create_folder(parent, name)
-        journal._write_read_image(folder, 'HISTORY-RAW', response.data)
-        local._write_new(folder, 'HEADER', local._canonical(header))
+        if revalidate is None:
+            folder = global_journal._create_folder(parent, name)
+            journal._write_read_image(folder, 'HISTORY-RAW', response.data)
+            local._write_new(folder, 'HEADER', local._canonical(header))
+        else:
+            from monitor import issue_tracker_unit_catalog as catalog
+            originals=catalog._Originals()
+            folder,first_directory=global_journal._create_folder(parent,name,_return_original=True)
+            originals._written_file(folder,'HISTORY-RAW',
+                journal._write_read_image(folder,'HISTORY-RAW',response.data,_return_original=True),response.data,2*1024*1024)
+            raw=local._canonical(header)
+            originals._written_file(folder,'HEADER',local._write_new(folder,'HEADER',raw,_return_original=True),raw,16384)
         journal._named(parent, name, folder, directory=True)
         ownership._validated_owner(token, binding)
         # Folder+parent and RAW/HEADER file+folder: six image barriers must
         # precede this marker. Failure retains the image as unadoptable HOLD.
-        local._write_new(folder, 'INITIALIZED', _marker(header))
+        if revalidate is None:
+            local._write_new(folder, 'INITIALIZED', _marker(header))
+        else:
+            raw=_marker(header)
+            originals._written_file(folder,'INITIALIZED',local._write_new(folder,'INITIALIZED',raw,_return_original=True),raw,16384)
+            originals._written_directory(parent,name,folder,first_directory)
         if revalidate is None:
             _inspect(parent, name, folder, base, sheet_id)
         else:
-            from monitor import issue_tracker_unit_catalog as catalog
-            originals=catalog._Originals()
-            try:
-                journal._named(parent,name,folder,directory=True)
-                captured=originals.directory(parent,name)
-                if journal._identity(os.fstat(captured))!=journal._identity(os.fstat(folder)):
-                    raise HistoryPrereadHold()
-                expected={'HISTORY-RAW':response.data,'HEADER':local._canonical(header),'INITIALIZED':_marker(header)}
-                for entry,raw in expected.items():
-                    actual,_identity=originals.file(captured,entry,
-                        2*1024*1024 if entry=='HISTORY-RAW' else 16384)
-                    if actual!=raw: raise HistoryPrereadHold()
-                originals.verify(); revalidate()
-                _inspect(parent,name,folder,base,sheet_id)
-                originals.verify(); revalidate(); originals.verify()
-            finally: originals.close()
-            revalidate()
+            originals.verify(); revalidate()
+            _inspect(parent,name,folder,base,sheet_id)
+            originals.verify(); revalidate(); originals.verify()
         ownership._validated_owner(token, binding)
     except Exception: failed = True
     finally:
+        primary=sys.exc_info()[1]; cleanup=None; finishers=[]
         if folder is not None:
-            try: os.close(folder)
-            except OSError: failed = True
+            finishers.append(lambda: os.close(folder) if first_directory is None
+                else local._close_written_original(folder,first_directory))
+        if originals is not None:
+            finishers.extend((lambda: (originals.verify(),revalidate(),originals.verify()),originals.close))
+        # Every owned cleanup is attempted even if the actual creator close
+        # interrupts. Never replace an incoming interrupt with a later error.
+        for finish in finishers:
+            try: finish()
+            except BaseException as error:
+                failed=True
+                if not isinstance(error,Exception) and (primary is None or isinstance(primary,Exception)):
+                    primary=error
+                elif cleanup is None: cleanup=error
+        if primary is not None and not isinstance(primary,Exception):
+            if cleanup is not None: raise primary from cleanup
+            raise primary
+    if not failed and revalidate is not None:
+        try: revalidate()
+        except Exception: failed = True
     if failed: raise HistoryPrereadHold()
 
 
@@ -712,10 +731,12 @@ def _business_image(token, binding, identity, unit, manifest, reads, *, source_r
     return len(operations), noops, digest
 
 
-def _write_business_image(folder, raw):
+def _write_business_image(folder, raw, *, _return_original=False):
     # Narrow fixed filename/bound; never broaden the original 1 MiB wire or
     # four-name 2 MiB raw-image writer. Partial files remain fail-closed.
-    if type(raw) is not bytes or not 1 <= len(raw) <= _BUSINESS_LIMIT: raise HistoryPrereadHold()
+    if type(raw) is not bytes or not 1 <= len(raw) <= _BUSINESS_LIMIT or type(_return_original) is not bool: raise HistoryPrereadHold()
+    if _return_original:
+        return journal._write_first_read_image(folder,'BUSINESS-RAW',raw)
     pending = '.pending-'+uuid.uuid4().hex
     fd = os.open(pending, os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW|os.O_CLOEXEC, 0o600, dir_fd=folder)
     try:
@@ -860,44 +881,63 @@ def prepare_owned_project_business_preread(writer_token,owner_token,binding,auth
 def _prepare_business_preread(token,binding,identity,unit,*,manifest,business_reads,claims,
                              revalidate=None,created_originals=None):
     """Legacy contract plus internal actual-source final-boundary checking."""
-    folder = None; failed = False
+    folder = None; first_directory = None; originals = None; failed = False
     try:
         parent, name, base, state = _business_inputs(token, binding, unit)
         if claims or state.attempt_count or name in os.listdir(parent): raise HistoryPrereadHold()
         raw = _pack_business(business_reads); reads = _unpack_business(raw)
         count, noops, digest = _business_image(token, binding, identity, unit, manifest, reads)
         header = {**base, 'preread_sha256': digest, 'source_sha256': hashlib.sha256(raw).hexdigest(), 'operations_retained': count, 'noop_operations': noops}
-        folder = global_journal._create_folder(parent, name)
-        local._write_new(folder, 'MANIFEST', manifest); _write_business_image(folder, raw)
-        local._write_new(folder, 'HEADER', local._canonical(header))
-        if (_pack_business(business_reads) != raw or _business_image(token, binding, identity, unit, manifest, reads) != (count, noops, digest)
-                or global_journal.inspect_global_unit(token, binding, unit) != state): raise HistoryPrereadHold()
-        journal._named(parent, name, folder, directory=True); ownership._validated_owner(token, binding)
-        local._write_new(folder, 'INITIALIZED', _marker(header))
         if revalidate is None:
-            _inspect_business(token,binding,identity,unit,parent,name,folder,base)
+            folder = global_journal._create_folder(parent, name)
+            local._write_new(folder, 'MANIFEST', manifest); _write_business_image(folder, raw)
+            local._write_new(folder, 'HEADER', local._canonical(header))
         else:
             from monitor import issue_tracker_unit_catalog as catalog
             originals=created_originals if created_originals is not None else catalog._Originals()
-            try:
-                captured=originals.directory(parent,name)
-                if journal._identity(os.fstat(captured))!=journal._identity(os.fstat(folder)):
-                    raise HistoryPrereadHold()
-                for entry,expected,limit in (('MANIFEST',manifest,1024*1024),('BUSINESS-RAW',raw,_BUSINESS_LIMIT),
-                        ('HEADER',local._canonical(header),16384),('INITIALIZED',_marker(header),16384)):
-                    actual,_identity=originals.file(captured,entry,limit)
-                    if actual!=expected: raise HistoryPrereadHold()
-                originals.verify(); revalidate()
-                _inspect_business(token,binding,identity,unit,parent,name,folder,base)
-                originals.verify(); revalidate(); originals.verify()
-            finally:
-                if created_originals is None: originals.close()
-            revalidate()
+            folder,first_directory=global_journal._create_folder(parent,name,_return_original=True)
+            originals._written_file(folder,'MANIFEST',local._write_new(folder,'MANIFEST',manifest,_return_original=True),manifest,1024*1024)
+            originals._written_file(folder,'BUSINESS-RAW',_write_business_image(folder,raw,_return_original=True),raw,_BUSINESS_LIMIT)
+            header_raw=local._canonical(header)
+            originals._written_file(folder,'HEADER',local._write_new(folder,'HEADER',header_raw,_return_original=True),header_raw,16384)
+        if (_pack_business(business_reads) != raw or _business_image(token, binding, identity, unit, manifest, reads) != (count, noops, digest)
+                or global_journal.inspect_global_unit(token, binding, unit) != state): raise HistoryPrereadHold()
+        journal._named(parent, name, folder, directory=True); ownership._validated_owner(token, binding)
+        if revalidate is None:
+            local._write_new(folder, 'INITIALIZED', _marker(header))
+        else:
+            marker=_marker(header)
+            originals._written_file(folder,'INITIALIZED',local._write_new(folder,'INITIALIZED',marker,_return_original=True),marker,16384)
+            originals._written_directory(parent,name,folder,first_directory)
+        if revalidate is None:
+            _inspect_business(token,binding,identity,unit,parent,name,folder,base)
+        else:
+            originals.verify(); revalidate()
+            _inspect_business(token,binding,identity,unit,parent,name,folder,base)
+            originals.verify(); revalidate(); originals.verify()
     except Exception: failed = True
     finally:
+        primary=sys.exc_info()[1]; cleanup=None; finishers=[]
         if folder is not None:
-            try: os.close(folder)
-            except OSError: failed = True
+            finishers.append(lambda: os.close(folder) if first_directory is None
+                else local._close_written_original(folder,first_directory))
+        if originals is not None and created_originals is None:
+            finishers.extend((lambda: (originals.verify(),revalidate(),originals.verify()),originals.close))
+        # Borrowed C6 originals remain owned by the outer creator; do not
+        # close them here or skip its finalizer when the folder interrupts.
+        for finish in finishers:
+            try: finish()
+            except BaseException as error:
+                failed=True
+                if not isinstance(error,Exception) and (primary is None or isinstance(primary,Exception)):
+                    primary=error
+                elif cleanup is None: cleanup=error
+        if primary is not None and not isinstance(primary,Exception):
+            if cleanup is not None: raise primary from cleanup
+            raise primary
+    if not failed and revalidate is not None:
+        try: revalidate()
+        except Exception: failed = True
     if failed: raise HistoryPrereadHold()
 
 

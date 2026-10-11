@@ -61,7 +61,7 @@ def _read(parent,name,limit):
     return raw
 
 
-def _write_read_image(parent, name, raw):
+def _write_read_image(parent, name, raw, *, _return_original=False):
     """Fixed private original read-image names, distinct from 1 MiB wire.
 
     Retain the whole bounded 2 MiB read response through no-follow exclusive
@@ -70,8 +70,11 @@ def _write_read_image(parent, name, raw):
     store. Callers hold and validate their own private owner/directory FDs.
     """
     if (type(name) is not str or name not in ('HISTORY-RAW', 'ETH-RAW', 'IB-RAW', 'METADATA-RAW')
-            or type(raw) is not bytes or not 1 <= len(raw) <= 2 * 1024 * 1024):
+            or type(raw) is not bytes or not 1 <= len(raw) <= 2 * 1024 * 1024
+            or type(_return_original) is not bool):
         raise AttemptJournalHold()
+    if _return_original:
+        return _write_first_read_image(parent,name,raw)
     pending = '.pending-' + uuid.uuid4().hex
     fd = os.open(pending, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=parent)
     try:
@@ -84,6 +87,49 @@ def _write_read_image(parent, name, raw):
     finally: os.close(fd)
     local._rename_new(parent, pending, name)
     os.fsync(parent)
+
+
+def _write_first_read_image(parent,name,raw):
+    """Fixed read-image first FD handoff, never a caller-selected wire limit."""
+    limits={'HISTORY-RAW':2*1024*1024,'ETH-RAW':2*1024*1024,
+        'IB-RAW':2*1024*1024,'METADATA-RAW':2*1024*1024,'BUSINESS-RAW':16*1024*1024}
+    if type(name) is not str or name not in limits or type(raw) is not bytes or not 1<=len(raw)<=limits[name]:
+        raise AttemptJournalHold()
+    pending='.pending-'+uuid.uuid4().hex
+    fd=os.open(pending,os.O_RDWR|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW|os.O_CLOEXEC,0o600,dir_fd=parent)
+    transferred=False; cleanup_identity=None; primary=None
+    try:
+        cleanup_identity=_identity(os.stat(pending,dir_fd=parent,follow_symlinks=False))
+        original=_identity(local._check(fd,directory=False))
+        if original[:2]!=cleanup_identity[:2]: raise AttemptJournalHold()
+        cleanup_identity=original
+        view=memoryview(raw)
+        while view:
+            count=os.write(fd,view)
+            if count<=0: raise AttemptJournalHold()
+            view=view[count:]
+        os.fsync(fd)
+        _named(parent,pending,fd,directory=False)
+        if _identity(os.fstat(fd))[:2]!=original[:2] or os.pread(fd,len(raw)+1,0)!=raw:
+            raise AttemptJournalHold()
+        local._rename_new(parent,pending,name); os.fsync(parent)
+        _named(parent,name,fd,directory=False)
+        final=_identity(os.fstat(fd))
+        if final[:2]!=original[:2] or os.pread(fd,len(raw)+1,0)!=raw or _identity(os.fstat(fd))!=final:
+            raise AttemptJournalHold()
+        transferred=True
+        return fd,final
+    except BaseException as exc:
+        primary=exc
+        raise
+    finally:
+        if not transferred:
+            try:
+                if cleanup_identity is None: raise AttemptJournalHold()
+                local._close_written_original(fd,cleanup_identity)
+            except BaseException as cleanup:
+                if primary is not None: raise primary from cleanup
+                raise
 
 
 def _open(token,unit_id):
