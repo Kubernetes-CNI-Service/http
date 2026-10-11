@@ -2996,3 +2996,28 @@ images, both complete context exits, and typed post-exit revocation outside
 production sanitizers. None/STOP quota is not admission, and a yielded packet
 must never be retained as authority for a later launch. Default G1/FIFO/FIRST/
 R2 execution and whole REQ7/full/check/REAL_ENV remain separate open duties.
+
+The uninstalled fixed default dispatch driver now composes that actual live
+receiver with original FIRST or shared R2 and the existing counted mutation
+launcher. Only the selected row's original unit and complete dedicated quota
+observation may reach COUNT; STOP/visible-only/incomplete quota and exhausted
+counts still refuse. Response/authentication identities, original deadlines,
+all semantic/image finalizers and primary operator interruption remain intact.
+Independent direct tests cover selection/refusal/finalizers; the genuine ETH
+and IB C6/OAuth/eight-read/TLS401 workflow verifies one COUNT/CLAIM, retained
+UNKNOWN, actual child termination and all original business/quota FD closures.
+The durable dispatch namespace remains exactly HEADER/INITIALIZED/CLAIM-n,
+not an invented dispatch-started marker. The old zero-count worker workflows
+remain unchanged; this private driver is not installed as default sending.
+
+Original business-image acquisition performs a complete LIVE check before and
+after capturing the actual nine descriptors, retaining all later explicit and
+exit checks. FIRST/R2 source replay additionally has a bounded private scope
+for continuously held original regular-file FDs: every use verifies the actual
+name/inode and rereads all current bytes; no digest, qualified result, deadline
+or permission is cached. The ordinary directory-only reader still opens its
+leaves normally. Independent direct and real converter/analyzer/receipt tests
+cover in-read drift, same-byte new inode, first-stat failure, recycled foreign
+slots, interruption and descriptor overflow, with conditional owned cleanup.
+These are local receiving/composition evidence, not complete REQ7, default
+NEW/G1/FIFO, R2 acceptance, current full/check, Cloud or power-loss proof.

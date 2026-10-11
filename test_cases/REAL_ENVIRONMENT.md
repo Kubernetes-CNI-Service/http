@@ -2499,6 +2499,14 @@ generation/publish 及 UNKNOWN 下改 action/wire 均 HOLD，不计作 COMPLETE 
 
 ## TC-REAL-REQ7-PENDING-ORIGINAL-CATALOG-001 — 多个 pending 原件与冷恢复
 
+固定默认 FIRST/R2 原件组合与读取优化补充（**NOT RUN / REAL_ENV REQUIRED**）：
+
+- 前置：沿用本卡原精确现场授权、实际项目/spreadsheet owner、ALL catalog/C6、完整 dedicated quota、真实 issued reads 和原始读取期限。私有 driver 的本地证据不是默认在线发送授权；历史专用表/同 Cloud 项目确认仅为部署前提。
+- 保留场景：正常 ETH/IB FIRST 与同一原单元 R2，COUNT/CLAIM/固定启动及全部 finalizer 关键边界，原九 FD 交接、来源读取期间变化、同字节新 inode、first-stat 失败、数字 FD foreign 复用、读取到期、有限 FD 溢出、代表性中断、独立冷恢复及失败后的安全状态。不得缓存摘要/来源资格或延长原期限；STOP/不完整库存不得 COUNT，401 保留 UNKNOWN，不释放 FIFO、不补写或重发。
+- 替代证据：独立 direct，以及真实本地 C6/OAuth/八读/TLS401/COUNT/CLAIM/原件关闭流程；另有真实 P2P converter→analyzer→receipt 反例。每次来源摘要仍读取全部字节，scope 只复用实际持续持有的原文件/目录，foreign 槽不误关。既有 directory-only 与零 COUNT worker 测试合同保持不变。
+- 证据与清理：精确 HEAD/tree/dirty/manifest/Python/平台、命令、退出码、完整物理 BEGIN/END、读前后 stat/inode/SHA、实际请求与计数、所有自有 FD/子进程收尾；仅清理获准自有隔离副本，不处理系统 PID/真实凭据/Cloud/设备。
+- 验证范围：没有省略或合并原核心现场/自动化场景，没有新的剩余风险接受确认人。现场 Cloud/设备、真实断电、默认 NEW/G1/FIFO、实际 R2 完整验收和当前 full/check 仍未验证；本卡现场为 NOT RUN，SIGKILL/重启不冒称断电，原现场授权、研发确认与普通发布门禁不变。
+
 - C25 归档后默认本地 C6 交接补充（**NOT RUN / REAL_ENV REQUIRED**）：原真实 COMPLETE／DELIVERED 投影归档和旧 owner 关闭后，新的合格受保护周期须可正常提交本地 C6；不能因已合法缺失旧 outbox 阻断，也不能据缺失推导交付成功。固定入口须先完成 ALL catalog／COUNT／C6／原交付语义并撤销旧 issuer，再在真实项目／spreadsheet 锁与重复原 FD 连续持有下发行仅只读 K 的新 opaque context；不得授予 set-K、COUNT、清理或在线发送。保留正常安全0755发布目录、同0755新 inode 替换及0777拒绝、原 RECEIPT 同字节新 inode、最后 settings／sheet finalizer 后漂移、首次 generation recipient stat 中断和 foreign FD 复用的关键边界；失败不 ACK，保留新 partial／旧原件／UNKNOWN，条件清理只关确证自有 inode。正常、关键提交、代表性中断、冷恢复和失败安全状态均保留；省略／合并：无；理由：未缩减合同；替代证据为独立 direct 与真实受保护三面板／C6／native NV／catalog／四次加密读取／交付／归档／下一周期流程，不冒充 Cloud、设备、断电或 current full/check。残余风险为上述现场范围、默认新单元交付及在线 G1 尚未验证；无新增风险接受确认人。记录精确树／命令／Python／依赖、故障真正到达阶段、完整日志物理顺序与 END、前后 stat／inode／SHA及自有清理见证；原精确现场授权、研发确认和生产发布门禁不变。
 
 - C25 默认 ALL 设置接收补充（**NOT RUN / REAL_ENV REQUIRED**，2026-10-11）：沿用本卡原精确授权，正常流程保留两个实际 native C6/COMPLETE/DELIVERED 的完整发现、选定单元投影归档、完整 K 链读取、新 K/event/outbox 配对和独立冷进程在两项旧投影均已归档后读取。必须持续持有实际项目/spreadsheet owner、ALL catalog/count/C6 和全部 immutable 原件，内嵌 locator 不能自行授予许可；私有 missing-projection union 不得扩展公共 observation 或实体 selected-only 归档集合。关键边界保留 ALL C6 holder 最后 finalizer 后同字节换 inode、opaque context 伪造/复制/替换/撤销、跨线程/Context 与拒绝后不得普通回退；原件和 COUNT/UNKNOWN 保留，无修复或重新发送。正常、关键提交、代表性中断、冷恢复及失败安全状态均保留；省略/合并：无；替代证据为本地独立 direct 与真实双 C6/TLS/交付/归档/冷解释器流程；残余风险为实际 Linux/AIR/容器、Cloud/设备、断电、默认在线 worker/G1 及当前 full/check 尚未证明；无新增风险接受确认人。记录精确树/命令/执行身份、实际注入到达阶段、完整日志/退出码及前后原件 stat/inode/SHA，清理仅本轮自有资源。未到达故障的夹具失败不得冒称实现 RED 或通过；SIGKILL/正常重启不得冒充断电。原现场授权、研发确认和发布门禁不变。

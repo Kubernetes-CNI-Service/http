@@ -24,6 +24,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 from typing import Callable, NamedTuple
 import zipfile
 
@@ -160,6 +161,116 @@ def _fsync_directory(path: Path) -> None:
 
 _DIR_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
 _HELD_DIRECTORY_READS = ContextVar('ufm_original_directory_reads', default=None)
+_HELD_SOURCE_READS = ContextVar('ufm_original_source_reads', default=None)
+
+
+def _source_inode(info):
+    return info.st_dev, info.st_ino
+
+
+class _OriginalSourceReads:
+    """Original regular FDs only; every digest still reads every current byte."""
+    def __init__(self, directories):
+        self.directories=directories;self.files={};self.closed=False
+        self.owner=(os.getpid(),threading.get_ident())
+
+    def require_live(self):
+        if (self.closed or _HELD_SOURCE_READS.get() is not self
+                or _HELD_DIRECTORY_READS.get() is not self.directories
+                or self.directories.closed
+                or self.owner!=(os.getpid(),threading.get_ident())):
+            raise PipelineError('original source scope is not its live owner')
+
+    @staticmethod
+    def verify_file(record):
+        fd,original,parent,name=record
+        held=os.fstat(fd);named=os.stat(name,dir_fd=parent,follow_symlinks=False)
+        if any(not stat.S_ISREG(info.st_mode) or _source_inode(info)!=original
+               for info in (held,named)):
+            raise PipelineError('original source file was replaced')
+
+    def file(self,path,parent):
+        self.require_live()
+        actual,verify,_=self.directories.chain(path.parent)
+        verify()
+        if _source_inode(os.fstat(parent))!=_source_inode(os.fstat(actual)):
+            raise PipelineError('source parent is not the actual held original')
+        if path not in self.files:
+            if len(self.files)>=256:
+                raise PipelineError('original source scope exceeds descriptor bound')
+            named=os.stat(path.name,dir_fd=actual,follow_symlinks=False)
+            if not stat.S_ISREG(named.st_mode):
+                raise PipelineError('source is not an original regular file')
+            fd=os.open(path.name,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC|os.O_NONBLOCK,dir_fd=actual)
+            try:
+                opened=os.fstat(fd)
+            except BaseException:
+                # A failed first stat is not ownership of an arbitrary reused
+                # numeric slot. Close only a independently matching original.
+                try:
+                    if _source_inode(os.fstat(fd))==_source_inode(named):os.close(fd)
+                except OSError:pass
+                raise
+            record=(fd,_source_inode(opened),actual,path.name)
+            self.files[path]=record
+            if _source_inode(opened)!=_source_inode(named):
+                raise PipelineError('source changed before original capture')
+        record=self.files[path];self.verify_file(record);self.require_live()
+        return record
+
+    def verify(self):
+        self.require_live();self.directories.verify()
+        for record in self.files.values():self.verify_file(record)
+
+    def close(self):
+        self.closed=True;failed=False
+        for fd,original,_parent,_name in reversed(tuple(self.files.values())):
+            try:
+                if _source_inode(os.fstat(fd))!=original:
+                    failed=True;continue
+                os.close(fd)
+            except OSError:failed=True
+        if failed:raise PipelineError('original source cleanup could not be confirmed')
+
+
+@contextmanager
+def _hold_reusable_source_reads():
+    """Explicit FIRST/R2 read-only optimization, never a publication permit.
+
+    The ordinary directory-only scope keeps opening leaves as before. Here
+    actual original leaves remain held too, while each use rechecks named/held
+    identity and rereads bytes. No digest, source qualification or deadline is
+    cached. Revoke before conditional owned-FD cleanup; retain an interruption.
+    """
+    directories=_HELD_DIRECTORY_READS.get()
+    if (type(directories) is not _OriginalDirectoryReads or directories.closed
+            or _HELD_SOURCE_READS.get() is not None):
+        raise PipelineError('source reads require one actual original directory owner')
+    directories.verify()
+    held=_OriginalSourceReads(directories);key=_HELD_SOURCE_READS.set(held)
+    primary=None;cleanup=None
+    try:
+        yield
+        held.verify()
+    except BaseException as error:primary=error
+    finally:
+        _HELD_SOURCE_READS.reset(key)
+        try:held.close()
+        except BaseException as error:cleanup=error
+    if primary is not None:
+        if cleanup is not None:raise primary from cleanup
+        raise primary
+    if cleanup is not None:raise cleanup
+
+
+@contextmanager
+def _borrow_current_source_file(path,parent):
+    held=_HELD_SOURCE_READS.get()
+    if type(held) is not _OriginalSourceReads:
+        raise PipelineError('original source scope is unavailable')
+    record=held.file(path,parent)
+    yield record[0]
+    held.require_live();held.verify_file(record)
 
 
 class _OriginalDirectoryReads:

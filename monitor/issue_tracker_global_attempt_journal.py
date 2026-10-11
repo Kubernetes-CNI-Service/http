@@ -2030,7 +2030,9 @@ def _hold_shared_retry_counted_sources(
     from monitor.issue_tracker_receipt_snapshot import _hold_history_originals
     from monitor.issue_tracker_send_unit import _read_original_generation_identity
     from monitor.issue_tracker_cycle_source import _hold_current_completed_cycle_replay
-    from tools.ufm_collection_pipeline import _hold_reusable_directory_reads
+    from tools.ufm_collection_pipeline import (
+        _hold_reusable_directory_reads, _hold_reusable_source_reads,
+    )
     from pathlib import Path
     def facts():
         continuity=observe_owned_business_continuity(writer_token,token,binding,unit,
@@ -2051,7 +2053,7 @@ def _hold_shared_retry_counted_sources(
         return continuity,gates,originals
     failed=False
     try:
-        with _hold_reusable_directory_reads(), \
+        with _hold_reusable_directory_reads(), _hold_reusable_source_reads(), \
                 _hold_original_replay_inputs(store,Path(store.project_identity),whitelist_path) as verify_inputs, \
                 _hold_current_completed_cycle_replay(store) as verify_cycles, \
                 _hold_receipted_audit_originals(writer_token,token,binding,unit) as verify_audits:
@@ -2191,7 +2193,9 @@ def _hold_continuous_owned_attempt_wire(
     from monitor.issue_tracker_history_preread_journal import observe_owned_business_continuity
     from monitor.issue_tracker_remote_history_match import observe_owned_unit_read_gates
     from monitor.issue_tracker_cycle_source import _hold_current_completed_cycle_replay
-    from tools.ufm_collection_pipeline import _hold_reusable_directory_reads
+    from tools.ufm_collection_pipeline import (
+        _hold_reusable_directory_reads, _hold_reusable_source_reads,
+    )
     failed=False
     try:
         local._owner(writer_token)
@@ -2213,7 +2217,7 @@ def _hold_continuous_owned_attempt_wire(
                         headers_response=headers_response,whitelist_response=whitelist_response,metadata_response=metadata_response)!=gates):
                 raise GlobalAttemptHold()
             return continuity,gates,originals
-        with _hold_reusable_directory_reads(), \
+        with _hold_reusable_directory_reads(), _hold_reusable_source_reads(), \
                 _hold_original_replay_inputs(store,Path(store.project_identity),whitelist_path) as verify_inputs, \
                 _hold_current_completed_cycle_replay(store) as verify_cycles, \
                 _hold_history_originals(writer_token) as verify_receipts, \

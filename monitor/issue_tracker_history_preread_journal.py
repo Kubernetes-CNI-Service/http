@@ -84,11 +84,17 @@ class _OriginalBusinessReadGuard:
         from monitor import issue_tracker_unit_catalog as catalog
         images = catalog._Originals(); live = [True]; failed = False
         try:
-            packet = self._original_issued_inputs()
+            # One complete LIVE check before capture, and verify() below after
+            # ALL nine duplications. Do not recursively hand back through the
+            # public helper and replay the same strict reader five times inside
+            # one acquisition. The public helper's contract is unchanged.
+            self()
             with _BUSINESS_READ_GUARD_LOCK:
                 state = _BUSINESS_READ_GUARDS.get(self)
-                if state is None or state[0] != 'LIVE' or state[4] is None:
+                if state is None or state[0] != 'LIVE' or state[3] is None or state[4] is None:
                     raise HistoryPrereadHold()
+                identity, history, business = state[3]
+                packet = identity, history, tuple(dict(item) for item in business)
                 original = state[4]
             if (len(original.directories) != 2 or len(original.files) != 7
                     or original.directories[1][1] != original.directories[0][1][:-9] + '.history'):
@@ -111,15 +117,15 @@ class _OriginalBusinessReadGuard:
                 images.files.append((parents[parent], name, duplicate, identity, raw))
                 if journal._identity(os.fstat(duplicate)) != identity:
                     raise HistoryPrereadHold()
-            self(); images.verify(); self()
             def verify():
                 if not live[0]: raise HistoryPrereadHold()
                 try:
                     # LIVE still dominates its complete strict reader; CLOSED
                     # checks only the same actual issued auth/read registry.
                     with _BUSINESS_READ_GUARD_LOCK:
-                        state = _BUSINESS_READ_GUARDS.get(self)
-                        phase = None if state is None else state[0]
+                        current = _BUSINESS_READ_GUARDS.get(self)
+                        if current is not state: raise HistoryPrereadHold()
+                        phase = current[0]
                     if phase == 'LIVE': self()
                     elif phase == 'CLOSED': self._verify_issued_only()
                     else: raise HistoryPrereadHold()

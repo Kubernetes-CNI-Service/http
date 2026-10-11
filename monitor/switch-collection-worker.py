@@ -1013,6 +1013,58 @@ def _publish_issue_tracker_online_observation_status(result) -> None:
         read_only=True, mutation_disabled=True)
 
 
+def _dispatch_current_project_online_originals(writer_token,owner_token,binding,authentication,*,
+                                               _store,http_root):
+    """Private fixed original FIRST/R2 composition, not the installed NEW lane.
+
+    Actual dedicated quota and selected C6/source/issued images stay held through
+    the existing original count, one-use CLAIM and fixed native launcher. The
+    original FIRST/R2 primitives retain FIFO, UNKNOWN, identical-wire and shared
+    retry cadence checks; there is no caller selector/permission/clock/verifier.
+    No result escapes before every original finalizer succeeds, and neither a
+    HTTP response nor this transport result is COMPLETE or FIFO release.
+    """
+    from monitor import issue_tracker_remote_history_match as remote
+    from monitor import issue_tracker_global_attempt_journal as journal
+    from monitor import issue_tracker_mutation_launcher as mutation
+    try:
+        with remote._hold_current_project_online_original_inputs(writer_token,owner_token,binding,
+                authentication,_store=_store,http_root=http_root) as packet:
+            settings,whitelist,responses,graph,actual_auth,budget=packet
+            if (budget is None or budget.inventory_complete is not True
+                    or budget.outcome!='DEDICATED_PROJECT_CAPACITY'):
+                raise remote.RemoteHistoryHold()
+            row,qualified,_closed_guard,original_images,verify_images=graph
+            identity,history,business=original_images
+            if identity is not responses['template_identity']:
+                raise remote.RemoteHistoryHold()
+            unit=row.unit
+            count=journal.inspect_global_unit(owner_token,binding,unit).attempt_count
+            if type(count) is not int or not 0<=count<6:
+                raise remote.RemoteHistoryHold()
+            options=dict(writer_token=writer_token,identity_response=identity,history_response=history,
+                business_reads=business,qualified_source=qualified,store=_store,settings=settings,
+                whitelist_snapshot=whitelist,expected_template_sha256=whitelist.workbook_sha256,
+                http_root=http_root,whitelist_path=Path(http_root)/'monitor/Issue_Tracker_Template_v1.xlsx',
+                headers_response=responses['template_headers'],whitelist_response=responses['whitelist'],
+                metadata_response=responses['metadata'])
+            if count:
+                lane=journal._hold_shared_retry_owned_attempt_wire
+                options.update(boot_id=_current_boot_identity(),monotonic_ns=time.monotonic_ns())
+            else:
+                lane=journal._hold_continuous_owned_attempt_wire
+            verify_images()
+            with lane(owner_token,binding,unit,**options) as image:
+                verify_images()
+                result=mutation._send_counted_original_once(writer_token,owner_token,binding,
+                    actual_auth.token,unit,image)
+                verify_images()
+            verify_images()
+    except Exception:
+        raise remote.RemoteHistoryHold() from None
+    return result
+
+
 def _reconcile_issue_tracker_online_after_completion(store):
     """Every terminal prod cycle can reconcile old UNKNOWN, never send NEW.
 

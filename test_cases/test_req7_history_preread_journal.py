@@ -775,6 +775,89 @@ class Req7HistoryPrereadNativeWorkflowTests(unittest.TestCase):
 
 
 class Req7OriginalBusinessReadAcquisitionDirectTests(unittest.TestCase):
+    @__import__('contextlib').contextmanager
+    def _literal_nine_originals(self, *, fault=None):
+        # A direct mechanism fixture, NOT issued auth or a send permit. Both
+        # directories and all seven files are genuine held descriptors; the
+        # literal packet and safety expectations are independent of the guard.
+        from types import SimpleNamespace
+        from monitor import issue_tracker_unit_catalog as catalog
+        module=load(); guard=module._OriginalBusinessReadGuard()
+        checks=[]; duplicates=[]; identity=object(); history=object()
+        business={'literal':'unchanged'}
+        with tempfile.TemporaryDirectory(prefix='req7-nine-originals-') as name:
+            root=Path(name).resolve()
+            names={'literal.business':('MANIFEST','BUSINESS-RAW','HEADER','INITIALIZED'),
+                   'literal.history':('HISTORY-RAW','HEADER','INITIALIZED')}
+            for directory,files in names.items():
+                (root/directory).mkdir(mode=0o700)
+                for file in files:
+                    path=root/directory/file;path.write_bytes((directory+'/'+file).encode());path.chmod(0o600)
+            parent=os.open(root,module.local._flags(directory=True)); originals=catalog._Originals()
+            try:
+                for directory,files in names.items():
+                    folder=originals.directory(parent,directory)
+                    for file in files:originals.file(folder,file,1024)
+                def full():
+                    checks.append('LIVE');originals.verify()
+                def issued():checks.append('ISSUED')
+                state=['LIVE',full,issued,(identity,history,(business,)),originals]
+                with module._BUSINESS_READ_GUARD_LOCK:module._BUSINESS_READ_GUARDS[guard]=state
+                real_dup=os.dup
+                def duplicate(fd):
+                    result=real_dup(fd);duplicates.append(result)
+                    if fault is not None:fault(module,state,root,len(duplicates))
+                    return result
+                facade=SimpleNamespace(**{key:getattr(module.os,key) for key in dir(module.os)})
+                facade.dup=duplicate
+                with mock.patch.object(module,'os',facade):
+                    yield module,guard,state,checks,duplicates,(identity,history,business)
+            finally:
+                with module._BUSINESS_READ_GUARD_LOCK:module._BUSINESS_READ_GUARDS.pop(guard,None)
+                originals.close();os.close(parent)
+            for fd in duplicates:
+                with self.assertRaises(OSError):os.fstat(fd)
+
+    def test_nine_image_acquisition_has_one_complete_check_on_each_side_of_duplication(self):
+        # Initial LIVE and the final full LIVE+all-nine-image+issued check
+        # dominate one atomic acquisition. Repeated whole-reader replay in
+        # between consumes the actual read deadline without adding a boundary.
+        with self._literal_nine_originals() as (module,guard,state,checks,duplicates,expected):
+            with guard._hold_original_images() as (packet,verify):
+                initial=checks.count('LIVE');size=len(duplicates)
+                identities=(expected[0] is packet[0],expected[1] is packet[1])
+                handback=tuple(dict(item) for item in packet[2])
+                packet[2][0]['literal']='caller edit'
+                original=dict(expected[2]);verify();verified=checks.count('LIVE')
+            # Assert after normal exit: the production context intentionally
+            # sanitizes ordinary consumer exceptions, including AssertionError.
+            self.assertEqual(2,initial);self.assertEqual(3,verified)
+            self.assertEqual(9,size);self.assertEqual((True,True),identities)
+            self.assertEqual(({'literal':'unchanged'},),handback)
+            self.assertEqual({'literal':'unchanged'},original)
+            self.assertEqual(4,checks.count('LIVE'))
+            self.assertGreaterEqual(checks.count('ISSUED'),3)
+
+    def test_nine_image_acquisition_catches_drift_and_revocation_during_first_or_last_duplication(self):
+        for index in (1,9):
+            for kind in ('same-bytes-new-inode','bytes','revocation'):
+                with self.subTest(index=index,kind=kind):
+                    def fault(module,state,root,count):
+                        if count!=index:return
+                        path=root/'literal.business/BUSINESS-RAW'
+                        if kind=='revocation':state[:]=['FAILED',None,None,None,None]
+                        elif kind=='bytes':path.write_bytes(b'foreign')
+                        else:
+                            raw=path.read_bytes();path.rename(root/'retained-original')
+                            path.write_bytes(raw);path.chmod(0o600)
+                    entered=[]
+                    with self._literal_nine_originals(fault=fault) as (module,guard,state,checks,duplicates,_expected):
+                        with self.assertRaises(module.HistoryPrereadHold):
+                            with guard._hold_original_images():entered.append(True)
+                        self.assertEqual([],entered)
+                        self.assertGreaterEqual(len(duplicates),index)
+                        self.assertLessEqual(len(duplicates),9)
+
     def test_owned_business_creation_has_no_caller_manifest_plan_or_verifier(self):
         import inspect
         module=load(); api=getattr(module,'prepare_owned_project_business_preread',None)

@@ -78,6 +78,23 @@ def _bound_parent(path: Path):
         os.close(parent_fd)
 
 
+@contextmanager
+def _bound_source_file(path, parent_fd):
+    pipeline=sys.modules.get('tools.ufm_collection_pipeline')
+    scope=getattr(pipeline,'_HELD_SOURCE_READS',None)
+    if scope is not None and scope.get() is not None:
+        try:
+            with pipeline._borrow_current_source_file(path,parent_fd) as fd:
+                yield fd,True
+        except (OSError,ValueError) as exc:
+            if isinstance(exc,ProvenanceError):raise
+            raise ProvenanceError('original source file cannot be verified') from exc
+        return
+    fd=os.open(path.name,os.O_RDONLY|os.O_NOFOLLOW,dir_fd=parent_fd)
+    try:yield fd,False
+    finally:os.close(fd)
+
+
 def _regular_digest(path: Path) -> str:
     try:
         with _bound_parent(path) as parent_fd:
@@ -85,19 +102,23 @@ def _regular_digest(path: Path) -> str:
             before_name = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
             if not stat.S_ISREG(before_name.st_mode):
                 raise ProvenanceError(f"source is not a regular file: {path}")
-            source_fd = os.open(path.name, os.O_RDONLY | nofollow, dir_fd=parent_fd)
-            try:
+            with _bound_source_file(path,parent_fd) as (source_fd,borrowed):
                 before_fd = os.fstat(source_fd)
                 if (before_name.st_dev, before_name.st_ino) != (
                     before_fd.st_dev, before_fd.st_ino
                 ):
                     raise ProvenanceError(f"source changed before read: {path}")
                 digest = hashlib.sha256()
+                offset=0
                 while True:
-                    chunk = os.read(source_fd, 1024 * 1024)
+                    # pread does not share/rewind the held original's offset.
+                    # Every invocation still hashes the actual current bytes.
+                    chunk = (os.pread(source_fd,1024*1024,offset) if borrowed
+                             else os.read(source_fd,1024*1024))
                     if not chunk:
                         break
                     digest.update(chunk)
+                    offset+=len(chunk)
                 after_fd = os.fstat(source_fd)
                 after_name = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
                 for after in (after_fd, after_name):
@@ -108,8 +129,6 @@ def _regular_digest(path: Path) -> str:
                     ):
                         raise ProvenanceError(f"source changed during read: {path}")
                 return digest.hexdigest()
-            finally:
-                os.close(source_fd)
     except OSError as exc:
         raise ProvenanceError(f"source cannot be read: {path}: {exc}") from exc
 

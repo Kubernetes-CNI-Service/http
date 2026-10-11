@@ -343,9 +343,24 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         for guard,_image,verify,typed_hold in originals:
             with self.assertRaises(typed_hold):verify()
 
+    def test_actual_fixed_default_first_dispatch_retains_original_context_through_native_claim(self):
+        from test_cases.test_collection_cycle_persistence import WORKER
+        self.assertTrue(callable(getattr(WORKER,'_dispatch_current_project_online_originals',None)),
+            'fixed driver must compose actual default images and existing original FIRST/CLAIM')
+        actual_worker=self._default_worker_original_images;completed=[]
+        def worker(**arguments):
+            result=actual_worker(**arguments,dispatch_probe=True)
+            completed.append(arguments['sheet']);return result
+        # Genuine dedicated quota construction and both original C6 panels;
+        # all prior zero-count tests keep their original default fixture lane.
+        with mock.patch.object(self,'_default_worker_original_images',side_effect=worker):
+            self.test_actual_default_worker_dedicated_quota_originals_outlive_strict_input_finalizers()
+        self.assertEqual(['ETH Cabling','IB Cabling'],completed)
+
     def _default_worker_original_images(self, *, native, whitelist_doc, private_context,
             global_root, writer_token, spreadsheet_token, binding, unit, qualified,
-            settings, quota_raw, history_raw, reads, sheet, state, owner_module, global_journal):
+            settings, quota_raw, history_raw, reads, sheet, state, owner_module, global_journal,
+            dispatch_probe=False):
         """Actual worker composition; borrow already-held owners, never mint a permit.
 
         The surrounding real C6 fixture owns both original locks. Borrow only
@@ -392,6 +407,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         real_core = remote._hold_current_project_online_inputs
         real_images = preread._OriginalBusinessReadGuard._hold_original_images
         real_inputs = source._hold_original_replay_inputs
+        real_send=mutation._send_counted_original_once
         real_dup = os.dup
         issued = []; oauth = []; projections = []; reconciled = []; consumed = []
         graphs = []; packets = []; core_closed = []; after_strict = []; input_verified = []
@@ -464,6 +480,35 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             try: real_consume(*args, **options)
             except remote.RemoteHistoryHold:
                 consumed.append('actual-typed-hold'); raise
+        mutation_facts=[]
+        def native_send(writer,owner,bound,token,actual_unit,image):
+            from test_cases.test_req7_mutation_launcher import Req7MutationLauncherWorkflowTests
+            self.assertEqual((writer_token,spreadsheet_token,binding),(writer,owner,bound))
+            self.assertEqual(unit,actual_unit)
+            self.assertIs(packets[0][3][0][0].unit,actual_unit)
+            reply=b'HTTP/1.1 401 Denied\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}'
+            with native.server(reply,hostname='sheets.googleapis.com',destination='sheets.googleapis.com') as (records,errors),ExitStack() as launched:
+                port=socket.getaddrinfo('sheets.googleapis.com',443)[0][4][1]
+                native_popen=subprocess.Popen;children=[];calls=[]
+                def launch(argv,**options):
+                    self.assertEqual([str(Path(sys.executable).resolve()),'-I','-B','-c',mutation._CHILD_PROGRAM,
+                        str(Path(__file__).resolve().parents[1])],argv[:6])
+                    self.assertEqual([str(image.action_fd),str(image.fd)],argv[7:])
+                    self.assertEqual((writer_original.lock_fd,owner_module.owner_lock_fd(owner,bound),
+                        image.action_fd,image.fd),options['pass_fds'])
+                    self.assertEqual({'LC_ALL':'C'},options['env']);self.assertNotIn(token.value,repr(argv))
+                    self.assertTrue(options['close_fds']);self.assertTrue(options['start_new_session'])
+                    changed=list(argv);changed[4]=Req7MutationLauncherWorkflowTests.child_fixture(native,port)
+                    child=native_popen(changed,**options);children.append(child);calls.append(argv)
+                    from test_cases.test_req7_native_supervised_workflow import cleanup_owned_fixture_child
+                    self.addCleanup(cleanup_owned_fixture_child,child);return child
+                launched.enter_context(mock.patch.object(mutation,'subprocess',SimpleNamespace(Popen=launch,PIPE=subprocess.PIPE)))
+                result=real_send(writer,owner,bound,token,actual_unit,image)
+            self.assertEqual([],errors);self.assertEqual(1,len(records));self.assertEqual(unit.wire_bytes,records[0][2])
+            self.assertEqual(1,len(calls));self.assertEqual(0,children[0].returncode)
+            self.assertTrue(all(stream.closed for stream in (children[0].stdin,children[0].stdout,children[0].stderr)))
+            mutation_facts.append((result.attempt_count,result.status,result.outcome,result.termination_confirmed))
+            return result
         @contextmanager
         def held_inputs(*args, **options):
             with real_inputs(*args, **options) as actual_verify:
@@ -483,8 +528,15 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                 value = real_dup(fd); info = os.fstat(fd)
                 duplicates.append((value,info,None if stat.S_ISDIR(info.st_mode) else os.pread(fd,info.st_size+1,0)))
                 return value
-            with mock.patch.object(preread.os,'dup',side_effect=duplicate):
+            # Patch this module's OS facade, not the shared os.dup function.
+            # FIRST/CLAIM also duplicates temporary original descriptors in
+            # other real modules; those are not this nine-image graph and may
+            # legitimately close before the next image verification.
+            image_os=SimpleNamespace(**{name:getattr(preread.os,name) for name in dir(preread.os)})
+            image_os.dup=duplicate
+            with mock.patch.object(preread,'os',image_os):
                 with real_images(guard) as packet:
+                    self.assertIs(real_dup,os.dup)
                     graphs.append((guard,duplicates,packet))
                     def verify():
                         packet[1]()
@@ -507,15 +559,33 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             boundary.enter_context(mock.patch.object(source,'_hold_original_replay_inputs',side_effect=held_inputs))
             boundary.enter_context(mock.patch.object(preread._OriginalBusinessReadGuard,'_hold_original_images',images))
             old_prepare = boundary.enter_context(mock.patch.object(remote,'_prepare_current_project_online_observation'))
-            no_first = boundary.enter_context(mock.patch.object(global_journal,'_hold_continuous_owned_attempt_wire'))
-            no_retry = boundary.enter_context(mock.patch.object(global_journal,'_hold_shared_retry_owned_attempt_wire'))
-            no_claim = boundary.enter_context(mock.patch.object(global_journal,'_hold_counted_original_wire'))
+            no_first = boundary.enter_context(mock.patch.object(global_journal,'_hold_continuous_owned_attempt_wire',
+                side_effect=global_journal._hold_continuous_owned_attempt_wire if dispatch_probe else None))
+            no_retry = boundary.enter_context(mock.patch.object(global_journal,'_hold_shared_retry_owned_attempt_wire',
+                side_effect=global_journal._hold_shared_retry_owned_attempt_wire if dispatch_probe else None))
+            no_claim = boundary.enter_context(mock.patch.object(global_journal,'_hold_counted_original_wire',
+                side_effect=global_journal._hold_counted_original_wire if dispatch_probe else None))
             no_count = boundary.enter_context(mock.patch.object(global_journal,'record_global_attempt_intent',wraps=global_journal.record_global_attempt_intent))
-            no_send = boundary.enter_context(mock.patch.object(mutation,'_send_counted_original_once'))
+            no_send = boundary.enter_context(mock.patch.object(mutation,'_send_counted_original_once',
+                side_effect=native_send if dispatch_probe else None))
             boundary.enter_context(mock.patch.object(worker,'STATUS_DIR',self.root/'monitor/status'))
-            self.assertEqual((),worker._reconcile_issue_tracker_online_after_completion(self.store))
+            if dispatch_probe:
+                from monitor.issue_tracker_online_target import _hold_current_project_online_target
+                # Restore the real outer prerequisites of the default worker,
+                # not a fabricated target/cycle callback or a caller GO.
+                with cycles._hold_current_completed_cycle_replay(self.store) as verify_cycles, \
+                        _hold_current_project_online_target(writer_token) as actual_binding:
+                    self.assertEqual(binding,actual_binding);verify_cycles()
+                    self.assertEqual(((),None),remote._reconcile_pending_project_units_and_project_auth(
+                        writer_token,spreadsheet_token,actual_binding,_store=self.store))
+                    dispatched=worker._dispatch_current_project_online_originals(writer_token,spreadsheet_token,actual_binding,None,
+                        _store=self.store,http_root=self.root)
+                    verify_cycles()
+                self.assertEqual((1,401,'UNKNOWN',True),(dispatched.attempt_count,dispatched.status,
+                    dispatched.outcome,dispatched.termination_confirmed))
+            else:self.assertEqual((),worker._reconcile_issue_tracker_online_after_completion(self.store))
         # Independent facts outside the worker/core exception sanitizers.
-        self.assertEqual(['entered','actual-typed-hold'],consumed)
+        self.assertEqual([] if dispatch_probe else ['entered','actual-typed-hold'],consumed)
         self.assertEqual([((),None,0)],reconciled); self.assertEqual(1,len(oauth))
         self.assertTrue(projections); self.assertTrue(all(value==qualified for value in projections))
         self.assertEqual([(kind,1,1,(),0) for kind in ('template_identity','template_headers',
@@ -536,16 +606,43 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         for fd,_info,_raw in graphs[0][1]:
             with self.assertRaises(OSError) as caught: os.fstat(fd)
             self.assertEqual(errno.EBADF,caught.exception.errno)
-        for operation in (old_prepare,no_first,no_retry,no_claim,no_count,no_send): operation.assert_not_called()
-        self.assertEqual(0,global_journal.inspect_global_unit(spreadsheet_token,binding,unit).attempt_count)
-        self.assertFalse(list(state.rglob('ATTEMPT-*'))); self.assertFalse(list(state.rglob('CLAIM-*')))
-        self.assertEqual(before,{str(path.relative_to(state)):(path.stat().st_ino,path.read_bytes())
-            for path in state.rglob('*') if path.is_file()})
+        if dispatch_probe:
+            old_prepare.assert_not_called();no_retry.assert_not_called()
+            for operation in (no_first,no_claim,no_count,no_send):operation.assert_called_once()
+            self.assertEqual([(1,401,'UNKNOWN',True)],mutation_facts)
+            self.assertEqual(1,global_journal.inspect_global_unit(spreadsheet_token,binding,unit).attempt_count)
+            self.assertEqual(['ATTEMPT-1'],[path.name for path in state.rglob('ATTEMPT-*')])
+            self.assertEqual(['CLAIM-1'],[path.name for path in state.rglob('CLAIM-*')])
+            after={str(path.relative_to(state)):(path.stat().st_ino,path.read_bytes())
+                for path in state.rglob('*') if path.is_file()}
+            self.assertEqual(before,{name:after[name] for name in before})
+            stem=hashlib.sha256(binding.spreadsheet_id.encode()).hexdigest()+'.unit-'+unit.unit_id
+            # Existing durable CLAIM schema has no dispatch-started family.
+            # The independent original-claim tests require exactly HEADER,
+            # INITIALIZED and CLAIM-1; do not invent a fifth persistence file.
+            self.assertEqual({stem+'.journal/ATTEMPT-1',
+                stem+'.dispatch/HEADER',stem+'.dispatch/INITIALIZED',stem+'.dispatch/CLAIM-1'},
+                set(after)-set(before))
+            self.assertFalse((state/(stem+'.dispatch-started')).exists())
+            claim=json.loads(after[stem+'.dispatch/CLAIM-1'][1])
+            self.assertEqual((1,unit.unit_id,unit.wire_sha256,1,'CONSUMED_UNKNOWN_NOT_SEND_PROOF'),
+                (claim['schema_version'],claim['unit_id'],claim['wire_sha256'],
+                 claim['attempt_count'],claim['outcome']))
+            self.assertEqual(hashlib.sha256(after[stem+'.journal/ATTEMPT-1'][1]).hexdigest(),
+                claim['original_intent_sha256'])
+            self.assertFalse(list(state.rglob('COMPLETE')))
+        else:
+            for operation in (old_prepare,no_first,no_retry,no_claim,no_count,no_send): operation.assert_not_called()
+            self.assertEqual(0,global_journal.inspect_global_unit(spreadsheet_token,binding,unit).attempt_count)
+            self.assertFalse(list(state.rglob('ATTEMPT-*'))); self.assertFalse(list(state.rglob('CLAIM-*')))
+            self.assertEqual(before,{str(path.relative_to(state)):(path.stat().st_ino,path.read_bytes())
+                for path in state.rglob('*') if path.is_file()})
         self.assertEqual(cycle_before,{str(path):(path.stat().st_ino,path.read_bytes())
             for path in self.store.status_dir.rglob('*') if path.is_file()})
-        status = json.loads((self.root/'monitor/status/issue-tracker-online.status.json').read_bytes())
-        self.assertEqual((1,True,True,'no_counted_units'),
-            (status['schema_version'],status['read_only'],status['mutation_disabled'],status['state']))
+        if not dispatch_probe:
+            status = json.loads((self.root/'monitor/status/issue-tracker-online.status.json').read_bytes())
+            self.assertEqual((1,True,True,'no_counted_units'),
+                (status['schema_version'],status['read_only'],status['mutation_disabled'],status['state']))
         observed_label = sheet+':actual-default-worker:nine-original-images:hold'
         return observed_label
 

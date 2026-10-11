@@ -61,6 +61,39 @@ def _write_cvt(path: Path) -> None:
 
 
 class UfmCollectionPipelineWorkflowTests(unittest.TestCase):
+    def test_actual_receipt_replay_with_original_file_scope_refuses_same_bytes_new_report(self):
+        from tools import ufm_collection_pipeline as pipeline
+        plan = COLLECTION.collection_plan('iblinkinfo', RUN_ID)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve(); vendor = root / 'iblinkinfo.txt'
+            vendor.write_text('Switch: 0x1 MF0;leaf01:MQM9700/U1:\n'
+                ' 10 1[  ] ==( 4X 200 Gbps Active / LinkUp )==> '
+                '20 1[  ] "server01 mlx5_0"\n', encoding='utf-8')
+            ufm = root / 'ufm-private'; ufm.mkdir()
+            archive = COLLECTION.publish_local_archive(plan, vendor, ufm)
+            cvt = root / 'cvt.xlsx'; _write_cvt(cvt)
+            project = root / 'project'; project.mkdir()
+            final = pipeline.run_local_iblinkinfo(plan, 'EXAMPLE-UFM01', archive, cvt, project)
+            report = final / f'iblinkinfo_{RUN_ID}-topology-validation.xlsx'
+            original_bytes = report.read_bytes(); original_inode = report.stat().st_ino
+            observed = []; reached = []
+            with self.assertRaises(pipeline.PipelineError):
+                with pipeline._hold_reusable_directory_reads(), pipeline._hold_reusable_source_reads():
+                    for _ in range(3):
+                        receipts = pipeline.validated_receipts(project, 'air')
+                        self.assertEqual(1, len(receipts))
+                        self.assertEqual(RUN_ID, receipts[0]['run_id'])
+                        observed.append(receipts)
+                    retained = report.with_name('retained-original-report')
+                    report.rename(retained); report.write_bytes(original_bytes)
+                    self.assertNotEqual(original_inode, report.stat().st_ino)
+                    self.assertEqual([], pipeline.validated_receipts(project, 'air'))
+                    reached.append(True)
+            self.assertEqual(3, len(observed)); self.assertEqual([True], reached)
+            self.assertEqual(original_bytes, report.read_bytes())
+            self.assertEqual(original_inode, retained.stat().st_ino)
+            self.assertIsNone(pipeline._HELD_SOURCE_READS.get())
+
     def test_real_analysis_receipt_replay_reuses_ancestors_but_not_report_bytes(self):
         scope = getattr(PIPELINE, '_hold_reusable_directory_reads', None)
         self.assertTrue(callable(scope), 'receipt replay requires actual held ancestor scope')

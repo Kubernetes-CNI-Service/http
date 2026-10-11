@@ -21,6 +21,174 @@ HTML = load_script("ufm_candidate_panel_direct", ROOT / "monitor/generate-monito
 RUN_ID = "20260926-0315-air-0123456789abcdef"
 
 
+class OriginalSourceReadReuseTests(unittest.TestCase):
+    """Explicit native scope keeps originals, never content or digest results."""
+    def setUp(self):
+        from tools import ufm_collection_pipeline as pipeline
+        from ztp.config import ib_topology_provenance as provenance
+        self.pipeline=pipeline;self.provenance=provenance
+        self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
+        self.root=Path(self.temp.name).resolve();self.source=self.root/'literal-source'
+        self.source.write_bytes(b'independent original source')
+
+    def source_scope(self):
+        api=getattr(self.pipeline,'_hold_reusable_source_reads',None)
+        self.assertTrue(callable(api),'native replay needs bounded original file FDs, not digest caching')
+        return api()
+
+    def test_explicit_scope_opens_one_original_but_rereads_all_actual_bytes(self):
+        real_open=os.open;opened=[];real_pread=os.pread;reads=[]
+        original=self.source.stat().st_ino
+        def opening(*args,**kwargs):
+            fd=real_open(*args,**kwargs)
+            if os.fstat(fd).st_ino==original:opened.append(fd)
+            return fd
+        def reading(fd,size,offset):
+            value=real_pread(fd,size,offset)
+            if os.fstat(fd).st_ino==original:reads.append((offset,value))
+            return value
+        with mock.patch.object(os,'open',side_effect=opening),mock.patch.object(os,'pread',side_effect=reading):
+            with self.pipeline._hold_reusable_directory_reads(),self.source_scope():
+                for _ in range(3):
+                    self.assertEqual(hashlib.sha256(b'independent original source').hexdigest(),
+                        self.provenance._regular_digest(self.source))
+                self.source.write_bytes(b'independent changed source!')
+                self.assertEqual(hashlib.sha256(b'independent changed source!').hexdigest(),
+                    self.provenance._regular_digest(self.source))
+        self.assertEqual(1,len(opened));self.assertEqual(4,sum(offset==0 for offset,_ in reads))
+        self.assertEqual(3,sum(raw==b'independent original source' for _,raw in reads))
+        self.assertEqual(1,sum(raw==b'independent changed source!' for _,raw in reads))
+        with self.assertRaises(OSError):os.fstat(opened[0])
+
+    def test_same_bytes_new_inode_cannot_be_adopted_by_repeated_digest(self):
+        before=self.source.stat().st_ino;reached=[]
+        with self.assertRaises(self.pipeline.PipelineError):
+            with self.pipeline._hold_reusable_directory_reads(),self.source_scope():
+                self.provenance._regular_digest(self.source)
+                self.source.rename(self.root/'retained-original')
+                self.source.write_bytes(b'independent original source')
+                self.assertNotEqual(before,self.source.stat().st_ino)
+                with self.assertRaises(self.provenance.ProvenanceError):
+                    self.provenance._regular_digest(self.source)
+                reached.append(True)
+        self.assertEqual([True],reached)
+        self.assertEqual(b'independent original source',self.source.read_bytes())
+        self.assertEqual(before,(self.root/'retained-original').stat().st_ino)
+
+    def test_scope_requires_original_directory_owner_and_rejects_nesting(self):
+        with self.assertRaises(self.pipeline.PipelineError):
+            with self.source_scope():pass
+        with self.pipeline._hold_reusable_directory_reads(),self.source_scope():
+            with self.assertRaises(self.pipeline.PipelineError):
+                with self.source_scope():pass
+            self.assertEqual(hashlib.sha256(b'independent original source').hexdigest(),
+                self.provenance._regular_digest(self.source))
+
+    def test_recycled_original_slot_is_not_closed_as_if_still_owned(self):
+        real_open=os.open;owned=[];foreign=None
+        other=self.root/'foreign';other.write_bytes(b'independent foreign descriptor')
+        original=self.source.stat().st_ino
+        def opening(*args,**kwargs):
+            fd=real_open(*args,**kwargs)
+            if os.fstat(fd).st_ino==original:owned.append(fd)
+            return fd
+        try:
+            with mock.patch.object(os,'open',side_effect=opening):
+                with self.assertRaises(self.pipeline.PipelineError):
+                    with self.pipeline._hold_reusable_directory_reads(),self.source_scope():
+                        self.provenance._regular_digest(self.source)
+                        self.assertEqual(1,len(owned))
+                        foreign=real_open(other,os.O_RDONLY)
+                        os.dup2(foreign,owned[0])
+                        with self.assertRaises(self.provenance.ProvenanceError):
+                            self.provenance._regular_digest(self.source)
+            self.assertEqual(other.stat().st_ino,os.fstat(owned[0]).st_ino)
+            self.assertEqual(b'independent foreign descriptor',os.pread(owned[0],100,0))
+        finally:
+            for fd in set((*owned,*(() if foreign is None else (foreign,)))):
+                try:os.close(fd)
+                except OSError:pass
+
+    def test_read_drift_is_rejected_and_original_interruption_closes_owned_files(self):
+        real_open=os.open;real_pread=os.pread;owned=[];fault=[]
+        original=self.source.stat().st_ino
+        def opening(*args,**kwargs):
+            fd=real_open(*args,**kwargs)
+            if os.fstat(fd).st_ino==original:owned.append(fd)
+            return fd
+        def reading(fd,size,offset):
+            raw=real_pread(fd,size,offset)
+            if raw and os.fstat(fd).st_ino==original and not fault:
+                self.source.write_bytes(b'independent in-read mutation');fault.append(True)
+            return raw
+        interrupt=KeyboardInterrupt('original source consumer interrupted')
+        with mock.patch.object(os,'open',side_effect=opening):
+            with self.assertRaises(KeyboardInterrupt) as caught:
+                with self.pipeline._hold_reusable_directory_reads(),self.source_scope():
+                    with mock.patch.object(os,'pread',side_effect=reading):
+                        with self.assertRaises(self.provenance.ProvenanceError):
+                            self.provenance._regular_digest(self.source)
+                    raise interrupt
+        self.assertIs(interrupt,caught.exception);self.assertEqual([True],fault)
+        self.assertEqual(1,len(owned))
+        with self.assertRaises(OSError):os.fstat(owned[0])
+
+    def test_first_file_stat_failure_closes_only_confirmed_original_not_recycled_slot(self):
+        real_open=os.open;real_stat=os.fstat;original=self.source.stat().st_ino
+        other=self.root/'foreign-first-stat';other.write_bytes(b'foreign first-stat original')
+        for recycle in (False,True):
+            with self.subTest(recycle=recycle):
+                owned=[];hit=[];foreign=real_open(other,os.O_RDONLY)
+                def opening(*args,**kwargs):
+                    fd=real_open(*args,**kwargs)
+                    if real_stat(fd).st_ino==original:owned.append(fd)
+                    return fd
+                def first_stat(fd):
+                    if owned and fd==owned[0] and not hit:
+                        hit.append(True)
+                        if recycle:os.dup2(foreign,fd)
+                        raise OSError('independent first source stat failure')
+                    return real_stat(fd)
+                try:
+                    with mock.patch.object(os,'open',side_effect=opening),mock.patch.object(os,'fstat',side_effect=first_stat):
+                        with self.pipeline._hold_reusable_directory_reads(),self.source_scope():
+                            with self.assertRaises(self.provenance.ProvenanceError):
+                                self.provenance._regular_digest(self.source)
+                    self.assertEqual([True],hit);self.assertEqual(1,len(owned))
+                    if recycle:
+                        self.assertEqual(other.stat().st_ino,real_stat(owned[0]).st_ino)
+                        self.assertEqual(b'foreign first-stat original',os.pread(owned[0],100,0))
+                    else:
+                        with self.assertRaises(OSError):real_stat(owned[0])
+                finally:
+                    for fd in set((*owned,foreign)):
+                        try:os.close(fd)
+                        except OSError:pass
+
+    def test_source_scope_is_bounded_and_closes_all_captured_original_files_on_overflow(self):
+        owned=[];attempted=[];real_open=os.open
+        paths=[]
+        for index in range(257):
+            path=self.root/f'literal-bound-source-{index}'
+            path.write_bytes(b'independent bounded source');paths.append(path)
+        def opening(path,*args,**kwargs):
+            fd=real_open(path,*args,**kwargs)
+            if str(path).startswith('literal-bound-source-'):
+                attempted.append(str(path));owned.append(fd)
+            return fd
+        with mock.patch.object(os,'open',side_effect=opening):
+            with self.pipeline._hold_reusable_directory_reads(),self.source_scope():
+                for path in paths[:256]:
+                    self.assertEqual(hashlib.sha256(b'independent bounded source').hexdigest(),
+                        self.provenance._regular_digest(path))
+                with self.assertRaises(self.provenance.ProvenanceError):
+                    self.provenance._regular_digest(paths[256])
+        self.assertEqual(256,len(owned));self.assertNotIn(paths[256].name,attempted)
+        self.assertEqual(b'independent bounded source',paths[256].read_bytes())
+        for fd in owned:
+            with self.assertRaises(OSError):os.fstat(fd)
+
+
 class UfmCollectionPipelineTests(unittest.TestCase):
     def directory_read_scope(self):
         scope = getattr(PIPELINE, '_hold_reusable_directory_reads', None)

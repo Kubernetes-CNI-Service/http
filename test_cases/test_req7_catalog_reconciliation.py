@@ -52,6 +52,106 @@ class CatalogReconciliationDirectTests(unittest.TestCase):
             self.assertEqual(('token', 'binding'), tuple(inspect.signature(api).parameters))
 
 
+class DefaultOriginalDispatchDirectTests(unittest.TestCase):
+    def api(self):
+        from test_cases.test_collection_cycle_persistence import WORKER
+        api=getattr(WORKER,'_dispatch_current_project_online_originals',None)
+        self.assertTrue(callable(api),'fixed dispatch must remain inside the original live input context')
+        return WORKER,api
+
+    def test_fixed_driver_rejects_unissued_and_caller_admission_inputs(self):
+        import inspect
+        worker,api=self.api()
+        from monitor import issue_tracker_remote_history_match as remote
+        self.assertEqual(('writer_token','owner_token','binding','authentication','_store','http_root'),
+            tuple(inspect.signature(api).parameters))
+        with self.assertRaises(remote.RemoteHistoryHold):
+            api(object(),object(),object(),None,_store=object(),http_root=object())
+        for claims in ({'unit':object()},{'boot_id':'caller-boot'},{'monotonic_ns':1},
+                {'allow_send':True},{'verify':lambda:None}):
+            with self.subTest(claim=tuple(claims)),self.assertRaises(TypeError):
+                api(object(),object(),object(),None,_store=object(),http_root=object(),**claims)
+
+    def exercise(self,*,count=0,budget_kind='DEDICATED_PROJECT_CAPACITY',complete=True,exit_error=None):
+        # These synthetic packets prove orchestration only. The separate native
+        # workflow must exercise actual C6/issued reads/COUNT/CLAIM/TLS originals.
+        from pathlib import Path
+        from types import SimpleNamespace as N
+        worker,api=self.api()
+        from monitor import issue_tracker_remote_history_match as remote
+        from monitor import issue_tracker_global_attempt_journal as journal
+        from monitor import issue_tracker_mutation_launcher as mutation
+        events=[];writer=object();owner=object();binding=object();store=object();unit=object()
+        settings=object();source=object();whitelist=N(workbook_sha256='a'*64)
+        auth=N(token=object());identity=object();history=object();business=({},)
+        responses={kind:object() for kind in ('template_headers','whitelist','metadata')}
+        responses['template_identity']=identity
+        budget=None if budget_kind is None else N(outcome=budget_kind,inventory_complete=complete)
+        def verify():events.append('image-verify')
+        def old_guard():self.fail('closed strict business guard must not be revived')
+        @contextmanager
+        def inputs(*arguments,**options):
+            self.assertEqual((writer,owner,binding,None),arguments)
+            self.assertEqual({'_store':store,'http_root':Path('/fixed-http')},options)
+            events.append('input-enter')
+            yield settings,whitelist,responses,(N(unit=unit),source,old_guard,(identity,history,business),verify),auth,budget
+            events.append('input-exit')
+            if exit_error is not None:raise exit_error
+        image=object();completion=object();seen=[]
+        @contextmanager
+        def lane(*arguments,**options):
+            self.assertEqual((owner,binding,unit),arguments);seen.append(options)
+            self.assertIs(writer,options['writer_token']);self.assertIs(source,options['qualified_source'])
+            self.assertIs(store,options['store']);self.assertIs(settings,options['settings'])
+            self.assertIs(whitelist,options['whitelist_snapshot']);self.assertIs(business,options['business_reads'])
+            self.assertIs(identity,options['identity_response']);self.assertIs(history,options['history_response'])
+            self.assertEqual('a'*64,options['expected_template_sha256'])
+            self.assertEqual(Path('/fixed-http/monitor/Issue_Tracker_Template_v1.xlsx'),options['whitelist_path'])
+            for kind in ('template_headers','whitelist','metadata'):
+                key={'template_headers':'headers_response','whitelist':'whitelist_response','metadata':'metadata_response'}[kind]
+                self.assertIs(responses[kind],options[key])
+            events.append('lane-enter');yield image;events.append('lane-exit')
+        def send(*arguments):
+            self.assertEqual((writer,owner,binding,auth.token,unit,image),arguments)
+            events.append('send');return completion
+        with mock.patch.object(remote,'_hold_current_project_online_original_inputs',side_effect=inputs), \
+                mock.patch.object(journal,'inspect_global_unit',return_value=N(attempt_count=count)) as inspected, \
+                mock.patch.object(journal,'_hold_continuous_owned_attempt_wire',side_effect=lane) as first, \
+                mock.patch.object(journal,'_hold_shared_retry_owned_attempt_wire',side_effect=lane) as retry, \
+                mock.patch.object(mutation,'_send_counted_original_once',side_effect=send) as sender, \
+                mock.patch.object(worker,'_current_boot_identity',return_value='actual-boot') as boot, \
+                mock.patch.object(worker.time,'monotonic_ns',return_value=123456789) as clock:
+            refused=budget is None or not complete or budget_kind!='DEDICATED_PROJECT_CAPACITY' or type(count) is not int or not 0<=count<6
+            if refused or exit_error is not None:
+                with self.assertRaises(type(exit_error) if isinstance(exit_error,(KeyboardInterrupt,SystemExit)) else remote.RemoteHistoryHold):
+                    api(writer,owner,binding,None,_store=store,http_root=Path('/fixed-http'))
+            else:self.assertIs(completion,api(writer,owner,binding,None,_store=store,http_root=Path('/fixed-http')))
+            if refused:
+                first.assert_not_called();retry.assert_not_called();sender.assert_not_called()
+                boot.assert_not_called();clock.assert_not_called()
+                if budget is None or not complete or budget_kind!='DEDICATED_PROJECT_CAPACITY':inspected.assert_not_called()
+            else:
+                sender.assert_called_once()
+                self.assertEqual(['input-enter','image-verify','lane-enter','image-verify','send',
+                    'image-verify','lane-exit','image-verify','input-exit'],events)
+                if count==0:first.assert_called_once();retry.assert_not_called();boot.assert_not_called();clock.assert_not_called()
+                else:
+                    retry.assert_called_once();first.assert_not_called();boot.assert_called_once();clock.assert_called_once()
+                    self.assertEqual(('actual-boot',123456789),(seen[0]['boot_id'],seen[0]['monotonic_ns']))
+
+    def test_fixed_driver_never_counts_on_missing_stop_or_incomplete_quota(self):
+        for kind,complete in ((None,True),('STOP_CAPACITY',True),('VISIBLE_ONLY_UNPROVED',True),('DEDICATED_PROJECT_CAPACITY',False)):
+            with self.subTest(kind=kind,complete=complete):self.exercise(budget_kind=kind,complete=complete)
+
+    def test_fixed_driver_uses_actual_first_or_shared_retry_once_and_refuses_exhaustion(self):
+        for count in (0,1,5,6,-1,True,'1'):
+            with self.subTest(count=count):self.exercise(count=count)
+
+    def test_fixed_driver_waits_for_all_finalizers_and_preserves_operator_interrupt(self):
+        for error in (ValueError('owned original cleanup fault'),KeyboardInterrupt(),SystemExit()):
+            with self.subTest(error=type(error).__name__):self.exercise(exit_error=error)
+
+
 class CatalogReconciliationWorkflowTests(unittest.TestCase):
     _Fixture = fixture.OnlineReconciliationWorkflowTests._Fixture
     setUp = fixture.OnlineReconciliationWorkflowTests.setUp
