@@ -950,6 +950,83 @@ class Req7OwnedCatalogMetadataWorkflowTests(unittest.TestCase):
     project_auth=_Fixture.project_auth; read_project=_Fixture.read_project
     prepare_original=_Fixture.prepare_original
 
+    def test_dedicated_history_contract_counts_document_project_and_all_permanent_fences(self):
+        from contextlib import ExitStack
+        from test_cases.test_req7_global_attempt_journal import original_read_files
+        module=load(); api=getattr(module,'_hold_owned_project_dedicated_catalog_metadata_capacity',None)
+        self.assertTrue(callable(api),'G1 needs actual ALL quota accounting under the confirmed historical dedicated-table contract')
+        with ExitStack() as stack:
+            values,_old_read,units=self.originals(stack,module)
+            writer,owner,bound,auth,identity_read,_identity,_first,metadata,_credential,_raw=values
+            # Actual fixed unfiltered read contains this project's PROJECT
+            # metadata as well as DOCUMENT nonces; no caller completeness flag.
+            metadata['matchedDeveloperMetadata'].append({'developerMetadata':{
+                'metadataId':3,'metadataKey':'other','metadataValue':'abc','visibility':'PROJECT',
+                'location':{'locationType':'SHEET','sheetId':101}}})
+            actual=self.read_project(stack,writer,owner,bound,auth,'metadata',metadata)
+            state=self.root/'var/lib/http-ztp-container/issue-tracker'; before=original_read_files(state)
+            native=module._hold_catalog_metadata_capacity
+            with mock.patch.object(module,'_hold_catalog_metadata_capacity',wraps=native) as inventory:
+                for authentication,image in ((replace(auth),actual),(auth,replace(actual))):
+                    with self.assertRaises(module.MetadataReservationHold):
+                        with api(writer,owner,bound,authentication,identity_response=identity_read,metadata_response=image):
+                            self.fail('copied acquisition cannot establish dedicated complete inventory')
+                inventory.assert_not_called()
+            with api(writer,owner,bound,auth,identity_response=identity_read,metadata_response=actual) as (budget,verify):
+                self.assertEqual('DEDICATED_PROJECT_CAPACITY',budget.outcome)
+                self.assertIs(True,budget.inventory_complete)
+                self.assertEqual((101,94,4,29902),next(row for row in budget.pools if row[0]==101))
+                self.assertEqual(2,budget.outstanding_reservations)
+                self.assertFalse(hasattr(budget,'permit')); self.assertFalse(hasattr(budget,'send_once')); verify()
+            self.assertEqual(before,original_read_files(state))
+            for unit in units:self.assertEqual(0,module.global_journal.inspect_global_unit(owner,bound,unit).attempt_count)
+
+    def test_dedicated_inventory_overflow_remains_stop_with_all_originals_and_unknown_kept(self):
+        from contextlib import ExitStack
+        from test_cases.test_req7_global_attempt_journal import original_read_files
+        module=load(); api=getattr(module,'_hold_owned_project_dedicated_catalog_metadata_capacity',None)
+        self.assertTrue(callable(api),'complete dedicated inventory must still STOP before overflow')
+        with ExitStack() as stack:
+            values,_old_read,units=self.originals(stack,module)
+            writer,owner,bound,auth,identity_read,identity,_first,metadata,_credential,_raw=values
+            module.global_journal.record_reserved_attempt_intent(owner,bound,identity,units[0])
+            metadata['matchedDeveloperMetadata'].append({'developerMetadata':{
+                'metadataId':3,'metadataKey':'p','metadataValue':'x'*29910,'visibility':'PROJECT',
+                'location':{'locationType':'SHEET','sheetId':101}}})
+            actual=self.read_project(stack,writer,owner,bound,auth,'metadata',metadata)
+            state=self.root/'var/lib/http-ztp-container/issue-tracker'; before=original_read_files(state)
+            with api(writer,owner,bound,auth,identity_response=identity_read,metadata_response=actual) as (budget,verify):
+                self.assertEqual('STOP_CAPACITY',budget.outcome); self.assertIs(True,budget.inventory_complete)
+                self.assertEqual((101,29997,4,-1),next(row for row in budget.pools if row[0]==101)); verify()
+            self.assertEqual(before,original_read_files(state))
+            seen=module.global_journal.inspect_global_unit(owner,bound,units[0])
+            self.assertEqual((1,'UNKNOWN'),(seen.attempt_count,seen.outcome))
+
+    def test_dedicated_complete_inventory_rejects_missing_original_project_binding_without_repair(self):
+        from contextlib import ExitStack
+        from monitor import issue_tracker_history_read_launcher as reads
+        from test_cases.test_req7_unit_catalog import load as load_catalog
+        from test_cases.test_req7_global_attempt_journal import original_read_files
+        module=load(); api=getattr(module,'_hold_owned_project_dedicated_catalog_metadata_capacity',None)
+        self.assertTrue(callable(api),'historical contract cannot manufacture provenance for a legacy quota image')
+        with ExitStack() as stack:
+            catalog=load_catalog(reset_dependencies=False); native=module.global_journal.prepare_global_unit
+            def register_then_prepare(owner,bound,unit):
+                catalog.register_pending_unit(owner,bound,unit); return native(owner,bound,unit)
+            with mock.patch.object(module.global_journal,'prepare_global_unit',side_effect=register_then_prepare):
+                values=self.prepare_original(stack)
+            writer,owner,bound,auth,identity_read,identity,unit,metadata,_credential,_raw=values
+            actual=self.read_project(stack,writer,owner,bound,auth,'metadata',metadata)
+            plan,_project,_digest=reads.require_current_owned_project_read(writer,owner,bound,actual,auth,read_kind='metadata')
+            module.prepare_metadata_reservation(owner,bound,identity,unit,plan,actual)
+            state=self.root/'var/lib/http-ztp-container/issue-tracker'; before=original_read_files(state)
+            with self.assertRaises(module.MetadataReservationHold):
+                with api(writer,owner,bound,auth,identity_response=identity_read,metadata_response=actual):
+                    self.fail('unbound legacy quota must not become complete inventory')
+            self.assertEqual(before,original_read_files(state))
+            with self.api(module)(writer,owner,bound,auth,identity_response=identity_read,metadata_response=actual) as (visible,verify):
+                self.assertEqual('VISIBLE_ONLY_UNPROVED',visible.outcome); self.assertIs(False,visible.inventory_complete); verify()
+
     def test_actual_foreign_project_cannot_consume_bound_unit_or_all_catalog_quota(self):
         from contextlib import ExitStack
         from test_cases.test_req7_global_attempt_journal import original_read_files
@@ -977,6 +1054,10 @@ class Req7OwnedCatalogMetadataWorkflowTests(unittest.TestCase):
                 with self.api(module)(writer,owner,bound,foreign_auth,
                         identity_response=foreign_identity,metadata_response=foreign_metadata):
                     self.fail('ALL accounting must not silently mix authenticated Cloud projects')
+            with self.assertRaises(module.MetadataReservationHold):
+                with module._hold_owned_project_dedicated_catalog_metadata_capacity(writer,owner,bound,foreign_auth,
+                        identity_response=foreign_identity,metadata_response=foreign_metadata):
+                    self.fail('the historical contract cannot override an actual foreign Cloud project')
             self.assertEqual(before,original_read_files(state_root))
             for unit in units:
                 self.assertEqual(0,module.global_journal.inspect_global_unit(owner,bound,unit).attempt_count)

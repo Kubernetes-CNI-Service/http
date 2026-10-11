@@ -2,10 +2,13 @@
 
 Original nonces, global wire/action and fixed metadata response are mandatory.
 The permanent fence is derived from that wire, never caller-supplied quota.
-Hidden PROJECT metadata is still unproved: this is NOT admission, COMPLETE,
-reclamation or transport permission. No network, expiry, reset or cleanup.
+Raw searches cannot prove hidden PROJECT history. Dedicated-project accounting
+requires the confirmed exclusive-from-creation deployment contract plus actual
+read/auth and ALL retained project bindings. Legacy observations remain unproved;
+neither path is admission, COMPLETE settlement, reclamation or transport permission.
+No network, expiry, reset or cleanup.
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from contextlib import ExitStack, contextmanager
 import hashlib
 import json
@@ -350,6 +353,44 @@ def _hold_owned_project_catalog_metadata_capacity(writer_token,owner_token,bindi
 
 
 @contextmanager
+def _hold_owned_project_dedicated_catalog_metadata_capacity(writer_token,owner_token,binding,authentication,*,
+                                                           identity_response,metadata_response):
+    """G1 accounting under the confirmed dedicated-from-creation contract.
+
+    Supported deployment precondition: this tool's dedicated spreadsheet has
+    never had a developerMetadata writer from another Cloud project. An API
+    search cannot independently prove that historical fact. Actual unfiltered
+    issued reads, current authentication and EVERY immutable quota's saved
+    project must match; no caller dedicated/completeness flag is accepted.
+    Missing legacy provenance stays HOLD, never inferred/backfilled. This is
+    capacity accounting only, not COMPLETE settlement or a transport permit.
+    """
+    failed=False
+    try:
+        from monitor.issue_tracker_history_read_launcher import require_current_owned_project_read
+        from monitor.issue_tracker_sheets_read_decode import decode_template_identity
+        def current():
+            identity_plan,project,digest=require_current_owned_project_read(
+                writer_token,owner_token,binding,identity_response,authentication,read_kind='template_identity')
+            metadata_plan,other_project,other_digest=require_current_owned_project_read(
+                writer_token,owner_token,binding,metadata_response,authentication,read_kind='metadata')
+            if (other_project,other_digest)!=(project,digest): raise MetadataReservationHold()
+            return identity_plan,metadata_plan,project
+        identity_plan,metadata_plan,project=current()
+        identity=decode_template_identity(identity_plan,identity_response)
+        with _hold_catalog_metadata_capacity(owner_token,binding,identity,metadata_plan,metadata_response,
+                cloud_project_id=project,require_project_origin=True) as (visible,verify_inventory):
+            if visible.outcome not in ('VISIBLE_ONLY_UNPROVED','STOP_CAPACITY'): raise MetadataReservationHold()
+            budget=replace(visible,inventory_complete=True,
+                outcome='STOP_CAPACITY' if visible.outcome=='STOP_CAPACITY' else 'DEDICATED_PROJECT_CAPACITY')
+            def verify():
+                current(); verify_inventory(); current()
+            verify(); yield budget,verify; verify()
+    except Exception: failed=True
+    if failed: raise MetadataReservationHold() from None
+
+
+@contextmanager
 def _hold_owned_project_mixed_metadata_capacity(writer_token, owner_token, binding, authentication, *,
                                                identity_response, metadata_response):
     """Charge ALL permanent fences from actual mixed settlement originals.
@@ -448,7 +489,8 @@ def _hold_owned_project_mixed_metadata_capacity(writer_token, owner_token, bindi
 
 
 @contextmanager
-def _hold_catalog_metadata_capacity(token, binding, identity, plan, response, *, cloud_project_id=None):
+def _hold_catalog_metadata_capacity(token, binding, identity, plan, response, *, cloud_project_id=None,
+                                    require_project_origin=False):
     """Charge ALL original permanent fences while their actual images stay held.
 
     No caller reservation list or selected-unit prefix. UNKNOWN and matching
@@ -479,7 +521,7 @@ def _hold_catalog_metadata_capacity(token, binding, identity, plan, response, *,
                     images[entry], _original = held.file(folder, entry,
                         2 * _LIMIT if entry == 'METADATA-RAW' else 16384)
                 _inspect(token, binding, identity, parent, name, folder, base, sheet, fence,
-                         cloud_project_id=cloud_project_id)
+                         cloud_project_id=cloud_project_id,require_project_origin=require_project_origin)
                 if images['RESERVATION'] != local._canonical(fence):
                     raise MetadataReservationHold()
                 enrollment.observe_enrollment_pair(token, binding, identity, plan, response, sheet=sheet)

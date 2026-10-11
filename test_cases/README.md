@@ -2791,3 +2791,19 @@ changing any existing test. Manifest mapping remains the existing primary
 issue-tracker-local direct rule and native durable-quota multi-script workflow;
 no production path or canonical target was added. REAL_ENV, full/check, G1
 complete inventory/default send integration and whole REQ7 remain separate.
+
+The following necessary G1 accounting edge is separately tested first:
+`_hold_owned_project_dedicated_catalog_metadata_capacity` relies on the owner's
+dedicated-from-creation / no historical foreign metadata writer deployment
+contract. It requires actual issued unfiltered metadata/template reads, current
+fixed authentication and matching saved project provenance for EVERY retained
+quota. Under that supported precondition it accounts for DOCUMENT and the
+same Cloud project's PROJECT entries plus ALL permanent fence reservations;
+normal outcome is DEDICATED_PROJECT_CAPACITY / inventory_complete, overflow
+remains STOP_CAPACITY. This is conditional accounting, not an API proof of
+hidden-project history, a COMPLETE settlement or a live transport capability.
+Copied acquisitions, a foreign actual project or any legacy missing provenance
+refuse without repair, count change or reservation reclamation. The earlier
+pure/legacy/owned visible-only APIs and their independent expectations remain
+unchanged. Default-worker NEW/R2/FIFO integration and current full/check are
+still separate obligations; this helper alone cannot enable sending.
