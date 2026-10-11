@@ -2111,7 +2111,13 @@ def _hold_shared_retry_owned_attempt_wire(
     try:
         local._owner(writer_token)
         if not 1<=inspect_global_unit(token,binding,unit).attempt_count<6: raise GlobalAttemptHold()
-        with _hold_selected_last_catalog_write_originals(writer_token,token,binding,unit) as verify_all, \
+        # As in FIRST, retain the actual immutable catalog/origin graph across
+        # the entire R2 transition. Borrowers still reread its held stat/bytes;
+        # COUNT/CLAIM, source qualification and read deadlines stay independent.
+        # Reopening and reparsing this same graph at every nested boundary can
+        # otherwise consume the original read budget before native dispatch.
+        with _hold_native_catalog_write_replay(token,binding,unit) as verify_catalog, \
+                _hold_selected_last_catalog_write_originals(writer_token,token,binding,unit) as verify_all, \
                 _hold_shared_retry_counted_sources(
             token,binding,unit,writer_token=writer_token,identity_response=identity_response,
             history_response=history_response,business_reads=business_reads,qualified_source=qualified_source,
@@ -2127,9 +2133,9 @@ def _hold_shared_retry_owned_attempt_wire(
                     if issued is None: raise GlobalAttemptHold()
                     verify_wire=issued[-2]
                     def verify():
-                        verify_all(); verify_wire(); verify_sources(); verify_wire(); verify_all()
+                        verify_catalog(); verify_all(); verify_wire(); verify_sources(); verify_wire(); verify_all(); verify_catalog()
                     _LIVE_WIRE_CLAIMS[image]=issued[:-2]+(verify,issued[-1])
-                verify_all(); verify_wire()
+                verify_catalog(); verify_all(); verify_wire()
                 yield image
                 verify()
     except Exception: failed=True

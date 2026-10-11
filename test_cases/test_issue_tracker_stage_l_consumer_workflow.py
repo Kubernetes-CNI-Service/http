@@ -117,6 +117,9 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             'IB Cabling:actual-default-worker:nine-original-images:hold'], observed)
 
     def test_actual_default_worker_dedicated_quota_originals_outlive_strict_input_finalizers(self):
+        self._exercise_default_dedicated_quota_originals()
+
+    def _exercise_default_dedicated_quota_originals(self, *, retry_probe=False):
         from test_cases import test_req7_spreadsheet_owner as owner_fixture
         from test_cases import test_req7_metadata_reservation as quota_fixture
         from test_cases.test_req7_sheets_read_decode import identity_response
@@ -224,9 +227,11 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         # two real C6 panels, five quota FDs each still live after strict close,
         # then all owned duplicates closed. The old fixture asserts no COUNT,
         # CLAIM/send, unchanged durable originals/cycles and read-only status.
-        self.assertEqual(2,len(created));self.assertEqual([('DEDICATED_PROJECT_CAPACITY',True)]*2,received)
-        self.assertEqual(['ETH Cabling','IB Cabling'],closed);self.assertTrue(post_strict)
-        self.assertEqual([5,5],[len(items) for items in graphs])
+        self.assertEqual(2,len(created))
+        self.assertEqual([('DEDICATED_PROJECT_CAPACITY',True)]*(4 if retry_probe else 2),received)
+        self.assertEqual(['ETH Cabling','ETH Cabling','IB Cabling','IB Cabling'] if retry_probe else
+            ['ETH Cabling','IB Cabling'],closed);self.assertTrue(post_strict)
+        self.assertEqual([5,5,5,5] if retry_probe else [5,5],[len(items) for items in graphs])
         for originals in post_strict:self.assertTrue(all(preserved for _info,preserved in originals))
         for originals in graphs:
             for fd,_info,_raw in originals:
@@ -357,10 +362,20 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             self.test_actual_default_worker_dedicated_quota_originals_outlive_strict_input_finalizers()
         self.assertEqual(['ETH Cabling','IB Cabling'],completed)
 
+    def test_actual_fixed_default_retry_reopens_owned_reads_and_keeps_identical_unknown_wire(self):
+        actual_worker=self._default_worker_original_images;completed=[]
+        def worker(**arguments):
+            actual_worker(**arguments,dispatch_probe=True)
+            result=actual_worker(**arguments,dispatch_probe=True,retry_probe=True)
+            completed.append(arguments['sheet']);return result
+        with mock.patch.object(self,'_default_worker_original_images',side_effect=worker):
+            self._exercise_default_dedicated_quota_originals(retry_probe=True)
+        self.assertEqual(['ETH Cabling','IB Cabling'],completed)
+
     def _default_worker_original_images(self, *, native, whitelist_doc, private_context,
             global_root, writer_token, spreadsheet_token, binding, unit, qualified,
             settings, quota_raw, history_raw, reads, sheet, state, owner_module, global_journal,
-            dispatch_probe=False):
+            dispatch_probe=False,retry_probe=False):
         """Actual worker composition; borrow already-held owners, never mint a permit.
 
         The surrounding real C6 fixture owns both original locks. Borrow only
@@ -433,7 +448,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             value = real_source(*args, **options); projections.append(value); return value
         def refresh(refresh_unit):
             self.assertTrue(projections, 'genuine qualified source must precede the first OAuth child')
-            self.assertEqual([((), None, 0)], reconciled)
+            self.assertEqual([] if retry_probe else [((), None, 0)], reconciled)
             body = b'{"access_token":"owned-project-token","expires_in":3600}'
             reply = b'HTTP/1.1 200 OK\r\nContent-Length: '+str(len(body)).encode()+b'\r\nConnection: close\r\n\r\n'+body
             with native.server(reply) as (records, errors), ExitStack() as launched:
@@ -571,22 +586,37 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             boundary.enter_context(mock.patch.object(worker,'STATUS_DIR',self.root/'monitor/status'))
             if dispatch_probe:
                 from monitor.issue_tracker_online_target import _hold_current_project_online_target
+                if retry_probe:
+                    from monitor import issue_tracker_admission as admission
+                    from monitor.issue_tracker_local_workbook_commit import _latest_receipted_prod_xlsx
+                    from tools.project_contract import MIN_CONTINUOUS_INTERVAL_MINUTES
+                    prior=admission.read_shared_local_admission(writer_token,self.store,
+                        _latest_receipted_prod_xlsx(writer_token,self.snapshot.workbook_sha256))
+                    self.assertEqual(1,global_journal.inspect_global_unit(spreadsheet_token,binding,unit).attempt_count)
+                    # Only the fixture's elapsed shared interval is supplied.
+                    # The production driver obtains its own boot/time; the
+                    # real opportunity still validates/persists the prior floor.
+                    now=prior['monotonic_ns']+MIN_CONTINUOUS_INTERVAL_MINUTES*60*1_000_000_000
+                    boundary.enter_context(mock.patch.object(worker,'_current_boot_identity',return_value=prior['boot_id']))
+                    boundary.enter_context(mock.patch.object(worker,'time',SimpleNamespace(monotonic_ns=lambda:now)))
+                    boundary.enter_context(mock.patch.object(admission,'time',SimpleNamespace(monotonic_ns=lambda:now)))
                 # Restore the real outer prerequisites of the default worker,
                 # not a fabricated target/cycle callback or a caller GO.
                 with cycles._hold_current_completed_cycle_replay(self.store) as verify_cycles, \
                         _hold_current_project_online_target(writer_token) as actual_binding:
                     self.assertEqual(binding,actual_binding);verify_cycles()
-                    self.assertEqual(((),None),remote._reconcile_pending_project_units_and_project_auth(
-                        writer_token,spreadsheet_token,actual_binding,_store=self.store))
+                    if not retry_probe:
+                        self.assertEqual(((),None),remote._reconcile_pending_project_units_and_project_auth(
+                            writer_token,spreadsheet_token,actual_binding,_store=self.store))
                     dispatched=worker._dispatch_current_project_online_originals(writer_token,spreadsheet_token,actual_binding,None,
                         _store=self.store,http_root=self.root)
                     verify_cycles()
-                self.assertEqual((1,401,'UNKNOWN',True),(dispatched.attempt_count,dispatched.status,
+                self.assertEqual((2 if retry_probe else 1,401,'UNKNOWN',True),(dispatched.attempt_count,dispatched.status,
                     dispatched.outcome,dispatched.termination_confirmed))
             else:self.assertEqual((),worker._reconcile_issue_tracker_online_after_completion(self.store))
         # Independent facts outside the worker/core exception sanitizers.
         self.assertEqual([] if dispatch_probe else ['entered','actual-typed-hold'],consumed)
-        self.assertEqual([((),None,0)],reconciled); self.assertEqual(1,len(oauth))
+        self.assertEqual([] if retry_probe else [((),None,0)],reconciled); self.assertEqual(1,len(oauth))
         self.assertTrue(projections); self.assertTrue(all(value==qualified for value in projections))
         self.assertEqual([(kind,1,1,(),0) for kind in ('template_identity','template_headers',
             'whitelist','metadata','history_tail','activity','insertion','row')],issued)
@@ -607,12 +637,17 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             with self.assertRaises(OSError) as caught: os.fstat(fd)
             self.assertEqual(errno.EBADF,caught.exception.errno)
         if dispatch_probe:
-            old_prepare.assert_not_called();no_retry.assert_not_called()
-            for operation in (no_first,no_claim,no_count,no_send):operation.assert_called_once()
-            self.assertEqual([(1,401,'UNKNOWN',True)],mutation_facts)
-            self.assertEqual(1,global_journal.inspect_global_unit(spreadsheet_token,binding,unit).attempt_count)
-            self.assertEqual(['ATTEMPT-1'],[path.name for path in state.rglob('ATTEMPT-*')])
-            self.assertEqual(['CLAIM-1'],[path.name for path in state.rglob('CLAIM-*')])
+            old_prepare.assert_not_called()
+            if retry_probe:no_first.assert_not_called();no_retry.assert_called_once()
+            else:no_retry.assert_not_called();no_first.assert_called_once()
+            for operation in (no_claim,no_count,no_send):operation.assert_called_once()
+            expected_count=2 if retry_probe else 1
+            self.assertEqual([(expected_count,401,'UNKNOWN',True)],mutation_facts)
+            self.assertEqual(expected_count,global_journal.inspect_global_unit(spreadsheet_token,binding,unit).attempt_count)
+            self.assertEqual(['ATTEMPT-1','ATTEMPT-2'] if retry_probe else ['ATTEMPT-1'],
+                sorted(path.name for path in state.rglob('ATTEMPT-*')))
+            self.assertEqual(['CLAIM-1','CLAIM-2'] if retry_probe else ['CLAIM-1'],
+                sorted(path.name for path in state.rglob('CLAIM-*')))
             after={str(path.relative_to(state)):(path.stat().st_ino,path.read_bytes())
                 for path in state.rglob('*') if path.is_file()}
             self.assertEqual(before,{name:after[name] for name in before})
@@ -620,15 +655,15 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             # Existing durable CLAIM schema has no dispatch-started family.
             # The independent original-claim tests require exactly HEADER,
             # INITIALIZED and CLAIM-1; do not invent a fifth persistence file.
-            self.assertEqual({stem+'.journal/ATTEMPT-1',
-                stem+'.dispatch/HEADER',stem+'.dispatch/INITIALIZED',stem+'.dispatch/CLAIM-1'},
+            self.assertEqual({stem+'.journal/ATTEMPT-2',stem+'.dispatch/CLAIM-2'} if retry_probe else
+                {stem+'.journal/ATTEMPT-1',stem+'.dispatch/HEADER',stem+'.dispatch/INITIALIZED',stem+'.dispatch/CLAIM-1'},
                 set(after)-set(before))
             self.assertFalse((state/(stem+'.dispatch-started')).exists())
-            claim=json.loads(after[stem+'.dispatch/CLAIM-1'][1])
-            self.assertEqual((1,unit.unit_id,unit.wire_sha256,1,'CONSUMED_UNKNOWN_NOT_SEND_PROOF'),
+            claim=json.loads(after[stem+'.dispatch/CLAIM-'+str(expected_count)][1])
+            self.assertEqual((1,unit.unit_id,unit.wire_sha256,expected_count,'CONSUMED_UNKNOWN_NOT_SEND_PROOF'),
                 (claim['schema_version'],claim['unit_id'],claim['wire_sha256'],
                  claim['attempt_count'],claim['outcome']))
-            self.assertEqual(hashlib.sha256(after[stem+'.journal/ATTEMPT-1'][1]).hexdigest(),
+            self.assertEqual(hashlib.sha256(after[stem+'.journal/ATTEMPT-'+str(expected_count)][1]).hexdigest(),
                 claim['original_intent_sha256'])
             self.assertFalse(list(state.rglob('COMPLETE')))
         else:

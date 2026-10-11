@@ -3020,4 +3020,22 @@ leaves normally. Independent direct and real converter/analyzer/receipt tests
 cover in-read drift, same-byte new inode, first-stat failure, recycled foreign
 slots, interruption and descriptor overflow, with conditional owned cleanup.
 These are local receiving/composition evidence, not complete REQ7, default
-NEW/G1/FIFO, R2 acceptance, current full/check, Cloud or power-loss proof.
+NEW/G1/FIFO, current full/check, Cloud or power-loss proof.
+
+The private R2 driver now retains the same immutable catalog/origin graph as
+FIRST, using the existing fixed-selection write borrower when an actual outer
+issuer already holds it. Every borrowed use still checks all held stat/bytes,
+owner, registry and namespace; mutable COUNT/CLAIM, source qualification and
+actual issued deadlines are independently reread, never cached or extended.
+The initial native FIRST-to-R2 test refused after the real read deadline;
+failure-only diagnostics identified expiry, rather than assuming load from an
+isolated PASS. An independent direct test was initially RED for the missing
+retained scope. The genuine ETH/IB workflow now obtains a new OAuth/eight-read
+set for R2, retains the original WIRE, records COUNT/CLAIM 1 then 2, and keeps
+both HTTP401 responses UNKNOWN with confirmed child/FD cleanup. Its interval
+fixture supplies only elapsed boot/monotonic time; the actual shared admission
+opportunity still validates and pairs the count. Original first/exhausted,
+source drift, read-expiry and receipt-rebind expectations remain unchanged.
+This driver is still uninstalled: default NEW/G1/FIFO, whole REQ7 and current
+full/check remain open. The old read-only worker tests retain their original
+expectations, relocated into a shared fixture with retry mode disabled.

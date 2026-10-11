@@ -226,6 +226,33 @@ if receipt._latest_receipted_prod_xlsx is not original:
             self.assertFalse((self.store/'ATTEMPT-2').exists())
             self.assertFalse((self.locks/(hashlib.sha256(TARGET.encode()).hexdigest()+'.dispatch')).exists())
 
+    def test_shared_retry_holds_real_catalog_replay_before_invalid_source_without_new_count(self):
+        # Same actual owner and existing UNKNOWN, not a caller-built cache or
+        # permission. A bad source must unwind the retained catalog scope and
+        # leave all original durable bytes/counts unchanged.
+        replay=self.module._hold_native_catalog_replay;events=[]
+        @contextmanager
+        def retained(*args):
+            with replay(*args) as verify:
+                verify();events.append('entered')
+                try:yield verify
+                finally:verify();events.append('closed')
+        with Req7GlobalAttemptJournalWorkflowTests.counted_wire_owners(self) as (writer,owner,target):
+            original=original_read_files(self.root)
+            with mock.patch.object(self.module,'_hold_native_catalog_replay',new=retained):
+                with self.assertRaises(self.module.GlobalAttemptHold):
+                    with self.module._hold_shared_retry_owned_attempt_wire(owner,target,self.value,
+                            writer_token=writer,identity_response=None,history_response=None,business_reads=(),
+                            qualified_source=None,store=None,settings=None,whitelist_snapshot=None,
+                            expected_template_sha256='a'*64,http_root=self.root,whitelist_path=self.root/'absent',
+                            headers_response=None,whitelist_response=None,metadata_response=None,
+                            boot_id='owned-boot',monotonic_ns=1):
+                        self.fail('invalid source received an owned retry wire')
+            self.assertEqual(['entered','closed'],events)
+            self.assertEqual(original,original_read_files(self.root))
+            self.assertEqual((1,'UNKNOWN'),(self.module.inspect_global_unit(owner,target,self.value).attempt_count,
+                self.module.inspect_global_unit(owner,target,self.value).outcome))
+
     def test_live_count_verification_rechecks_originals_after_its_semantic_read(self):
         with Req7GlobalAttemptJournalWorkflowTests.counted_wire_owners(self) as (writer,owner,target):
             path=self.store/'ATTEMPT-1'; raw=path.read_bytes(); original=path.stat()
