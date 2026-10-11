@@ -1200,6 +1200,90 @@ print('COLD_MIXED_DISPOSITION_CONSUMED_COUNT_STAYS_UNKNOWN')
     def test_actual_mixed_disposition_consumed_claim_cold_process_cannot_reconsume(self):
         self.exercise(cold=True)
 
+    def _exercise_count_claim_original_overlap(self, *, rebind=False, finalizer_rebind=False):
+        import os
+        from contextlib import contextmanager
+        from unittest import mock
+        from test_cases import test_req7_unit_catalog as fixtures
+        fixture=fixtures.CatalogAppliedNativeWorkflowTests.completed_and_pending
+        entered=[];counts=[];claims=[];faults=[];failures=[];hold_types=[]
+        @contextmanager
+        def with_original_overlap(*args,**options):
+            with fixture(*args,**options) as packet,ExitStack() as retained:
+                case,catalog,_remote,_inventory,_old,_writer,owner,bound,units=packet
+                from monitor import issue_tracker_global_attempt_journal as globals_
+                hold_types.append(globals_.GlobalAttemptHold)
+                count=globals_.record_global_attempt_intent;claim=globals_._hold_counted_original_wire
+                holder=getattr(globals_,'_hold_selected_last_catalog_write_originals',None)
+                self.assertTrue(callable(holder),'actual COUNT return must not close ALL original family FDs')
+                selected=[];project_scopes=[];capturing=[]
+                original_c6=catalog._hold_project_c6_from_origins
+                def swap_other_wire():
+                    folders=tuple(case.root.rglob('*.unit-'+units[0].unit_id+'.journal'))
+                    self.assertEqual(1,len(folders))
+                    path=folders[0]/'WIRE';raw=path.read_bytes();old=path.stat().st_ino
+                    preserved=case.root/'preserved-count-to-claim-other-wire'
+                    path.rename(preserved);path.write_bytes(raw);path.chmod(0o600)
+                    faults.append((old,path.stat().st_ino,raw==preserved.read_bytes()==path.read_bytes()))
+                @contextmanager
+                def original_c6_finalizers(*args,**kwargs):
+                    tag=object()
+                    if capturing and not project_scopes:project_scopes.append(tag)
+                    with original_c6(*args,**kwargs) as observation:yield observation
+                    if finalizer_rebind and project_scopes==[tag] and not faults:swap_other_wire()
+                def held_count(token,target,unit):
+                    project=(case.root/'mixed-claim-project').stat()
+                    writers=[writer for writer in catalog.local._ACTIVE
+                        if (os.fstat(catalog.local._owner(writer).project_fd).st_dev,
+                            os.fstat(catalog.local._owner(writer).project_fd).st_ino)==(project.st_dev,project.st_ino)]
+                    self.assertEqual(1,len(writers))
+                    capturing.append(True)
+                    try:verify=retained.enter_context(holder(writers[0],token,target,unit))
+                    finally:capturing.clear()
+                    entered.append(unit.unit_id);selected.append(unit)
+                    result=count(token,target,unit);verify();counts.append(result.attempt_count)
+                    return result
+                @contextmanager
+                def held_claim(writer,token,target,unit):
+                    if rebind and not faults:
+                        swap_other_wire()
+                    try:
+                        with claim(writer,token,target,unit) as image:
+                            claims.append(image.attempt_count);yield image
+                    finally:
+                        # Original COUNT/CLAIM graph exits before this actual
+                        # project's writer owner, after all inner finalizers.
+                        retained.close()
+                with mock.patch.object(globals_,'record_global_attempt_intent',side_effect=held_count), \
+                        mock.patch.object(globals_,'_hold_counted_original_wire',side_effect=held_claim), \
+                        mock.patch.object(catalog,'_hold_project_c6_from_origins',side_effect=original_c6_finalizers):
+                    try:yield packet
+                    finally:
+                        if selected:
+                            observed=globals_.inspect_global_unit(owner,bound,selected[-1])
+                            counts.append(observed.attempt_count)
+        try:
+            with mock.patch.object(fixtures.CatalogAppliedNativeWorkflowTests,'completed_and_pending',
+                    side_effect=with_original_overlap):
+                self.exercise()
+        except Exception as error:failures.append(type(error))
+        # Outside every production sanitizer and original fixture cleanup.
+        self.assertEqual(1,len(entered));self.assertEqual([1,1],counts)
+        if rebind or finalizer_rebind:
+            self.assertEqual(hold_types,failures);self.assertEqual([1] if finalizer_rebind else [],claims)
+            self.assertEqual(1,len(faults));self.assertNotEqual(faults[0][0],faults[0][1]);self.assertTrue(faults[0][2])
+        else:
+            self.assertEqual([],failures);self.assertEqual([1],claims);self.assertEqual([],faults)
+
+    def test_actual_mixed_count_claim_keep_all_original_families_without_reopening(self):
+        self._exercise_count_claim_original_overlap()
+
+    def test_actual_other_wire_rebind_after_count_return_refuses_before_claim(self):
+        self._exercise_count_claim_original_overlap(rebind=True)
+
+    def test_actual_other_wire_rebind_after_project_finalizers_refuses_outer_exit(self):
+        self._exercise_count_claim_original_overlap(finalizer_rebind=True)
+
 
 class AllProjectMixedSettlementTests(unittest.TestCase):
     def api(self, module=None):

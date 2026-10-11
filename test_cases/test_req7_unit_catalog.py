@@ -970,6 +970,65 @@ print('COLD_SHARED_FIFO_ORIGINALS_NO_HANDLES_OR_AUTHORITY')
 
 
 class UnitCatalogTests(unittest.TestCase):
+    @contextmanager
+    def _simple_count_claim_originals(self):
+        globals_=self.globals_api()
+        with ExitStack() as scope:
+            token=self.owner(scope);bound=binding()
+            project=self.root/'count-claim-project';project.mkdir(mode=0o700)
+            publication=project/'publication';publication.mkdir(mode=0o700)
+            self.module.local.create_local_commit_store(project,publication)
+            writer=scope.enter_context(self.module.local.writer_owner(project,publication))
+            self.module.register_pending_unit(token,bound,self.first)
+            globals_.prepare_global_unit(token,bound,self.first)
+            yield globals_,writer,token,bound
+
+    def test_count_claim_original_verifier_rejects_missing_live_context_and_thread(self):
+        from contextvars import Context
+        import threading
+        with self._simple_count_claim_originals() as (globals_,writer,token,bound):
+            answers=[]
+            with globals_._hold_selected_last_catalog_write_originals(writer,token,bound,self.first) as verify:
+                verify()
+                try:Context().run(verify)
+                except Exception as error:answers.append(type(error))
+                else:answers.append(None)
+                def other_thread():
+                    try:verify()
+                    except Exception as error:answers.append(type(error))
+                    else:answers.append(None)
+                thread=threading.Thread(target=other_thread);thread.start();thread.join(2)
+            self.assertFalse(thread.is_alive());self.assertEqual([globals_.GlobalAttemptHold]*2,answers)
+            with self.assertRaises(globals_.GlobalAttemptHold):verify()
+
+    def test_count_claim_original_context_reset_failure_still_closes_all_actual_graphs(self):
+        from contextvars import copy_context
+        with self._simple_count_claim_originals() as (globals_,writer,token,bound):
+            init=self.module._Originals.__init__;close=self.module._Originals.close
+            graphs=[];closed=[]
+            def capturing(graph,*args,**options):
+                init(graph,*args,**options);graphs.append(graph)
+            def closing(graph):
+                closed.append(graph);return close(graph)
+            manager=globals_._hold_selected_last_catalog_write_originals(writer,token,bound,self.first)
+            context=copy_context()
+            try:
+                with mock.patch.object(self.module._Originals,'__init__',capturing), \
+                        mock.patch.object(self.module._Originals,'close',closing):
+                    verify=context.run(manager.__enter__);context.run(verify)
+                    # Real Token.reset rejects use in another Context. It must
+                    # revoke issuance but cannot bypass owned graph cleanup.
+                    with self.assertRaises(globals_.GlobalAttemptHold):manager.__exit__(None,None,None)
+                originals=[graph for graph in graphs if graph._image_budget is not None]
+                self.assertEqual(3,len(originals));self.assertTrue(all(graph in closed for graph in originals))
+                self.assertEqual(1,len({id(graph._image_budget) for graph in originals}))
+                for graph in originals:
+                    for _parent,_name,fd,*_rest in (*graph.files,*graph.directories):
+                        with self.assertRaises(OSError):os.fstat(fd)
+            finally:
+                # Baseline RED must not leave even the faulted test's owned FDs.
+                for graph in graphs:close(graph)
+
     def test_native_count_catalog_borrow_uses_same_selection_without_second_issuer(self):
         globals_,issuer=self.catalog_replay_api()
         borrow=getattr(globals_,'_hold_native_catalog_write_replay',None)

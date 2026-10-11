@@ -2903,3 +2903,22 @@ COUNT, CLAIM and the fixed local encrypted request. This immutable catalog
 overlap does not by itself retain every mutable OTHER family continuously
 between COUNT and CLAIM, close FIFO/default NEW/FIRST/R2, or establish current
 full/check or real Cloud acceptance.
+
+The private last-catalog-unit COUNT/CLAIM holder now pins ALL shared old
+families before count interpretation, including OTHER mutable journals and
+the selected original dispatch prefix. Three raw graphs share one fixed
+16 MiB unique-image budget; only the actual creator may append one derived
+ATTEMPT and one CLAIM, plus first dispatch HEADER/INITIALIZED when absent.
+New readers capture exact identities/bytes while exclusive writer FDs remain
+live. Original project/C6 and OTHER APPLIED/key or committed UNSENT checks
+remain separate necessary gates, not supplied settlement flags. Actual FIRST
+and R2 wire holders retain this graph through consumption, child checks and
+exit, without changing count, UNKNOWN, wire, cadence or FIFO expectations.
+Issuance requires the same live ContextVar/registry/process/thread and owners;
+reset failure revokes issuance without bypassing cleanup. Semantic finalizers
+finish before the raw graph's last check and newly acquired owners close last.
+Independent direct and real mixed-project workflows first RED cover normal
+handoff, identical-byte OTHER rebind after COUNT and after project finalizers,
+first creator fstat refusal, foreign FD reuse and opaque-context revocation.
+These are local necessary handoff/cleanup proofs, not full REQ7, default
+NEW/FIRST/R2 integration, current full/check, real Cloud or power-loss proof.

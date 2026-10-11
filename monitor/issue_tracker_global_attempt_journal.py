@@ -25,6 +25,8 @@ _LIVE_WIRE_CLAIMS = weakref.WeakKeyDictionary()
 _WIRE_CLAIM_GUARD = threading.Lock()
 _HELD_CATALOG_REPLAY = ContextVar('req7_original_catalog_replay', default=None)
 _LIVE_CATALOG_REPLAYS = {}
+_HELD_COUNT_CLAIM_ORIGINALS = ContextVar('req7_count_claim_originals', default=None)
+_LIVE_COUNT_CLAIM_ORIGINALS = {}
 
 
 class GlobalAttemptHold(ValueError):
@@ -91,6 +93,238 @@ def _inspect_wire_claims(claims, original, unit, header):
     return count,previous
 
 
+def _count_claim_original_packet():
+    key = _HELD_COUNT_CLAIM_ORIGINALS.get()
+    if key is None:
+        return None
+    packet = _LIVE_COUNT_CLAIM_ORIGINALS.get(key)
+    if (packet is None or packet['context'] != (os.getpid(), threading.get_ident())
+            or local._owner(packet['writer']) is not packet['project']
+            or ownership._validated_owner(packet['token'], packet['binding']) is not packet['owner']):
+        raise GlobalAttemptHold()
+    return packet
+
+
+@contextmanager
+def _hold_selected_last_catalog_write_originals(writer_token, token, binding, unit):
+    """Original ALL families before COUNT through CLAIM/consumer/last exit.
+
+    Private fixed last-unit join, not admission, settlement or a send permit.
+    Three append-aware graphs share ONE fixed unique-image budget. Only the
+    actual exclusive creators may introduce the derived next ATTEMPT/CLAIM;
+    their readers overlap the live writer FD, never adopt a closed writer's
+    pathname. Every OTHER family and every old selected image stays immutable.
+    """
+    from monitor import issue_tracker_unit_catalog as catalog
+    from monitor import issue_tracker_retained_inventory as inventory
+    graphs = []; scope = ExitStack(); owner_tail = ExitStack()
+    key = reset = None; problem = None; verify_raw = None
+    try:
+        project = local._owner(writer_token)
+        owner = ownership._validated_owner(token, binding)
+        if _HELD_COUNT_CLAIM_ORIGINALS.get() is not None:
+            raise GlobalAttemptHold()
+        if not _catalog_present(owner):
+            def legacy_verify():
+                if (local._owner(writer_token) is not project
+                        or ownership._validated_owner(token, binding) is not owner):
+                    raise GlobalAttemptHold()
+            legacy_verify(); yield legacy_verify; legacy_verify()
+            return
+        budget = catalog._OriginalImageBudget()
+        immutable, counted, dispatched = graphs = [catalog._Originals(_image_budget=budget) for _ in range(3)]
+        _catalog, units, _previous = catalog._inspect(token, binding, immutable)
+        if not units or units[-1] != unit:
+            raise GlobalAttemptHold()
+        parent = owner.directories[-1][0]; stem = owner.lock_name[:-5]
+        name = stem + '.unit-' + unit.unit_id + '.journal'
+        dispatch_name = stem + '.unit-' + unit.unit_id + '.dispatch'
+        actual = {child for child in os.listdir(parent) if child.startswith(stem + '.')}
+        allowed = {stem+'.lock', stem+'.enrollment', stem+'.units', stem+'.units-started',
+            *(stem+'.units-position-%020d' % index for index in range(1, len(units)+1))}
+        allowed.update(stem+'.unit-'+original.unit_id+'.'+family
+            for original in units for family in inventory._CATALOG_FAMILIES if family != 'enrollment')
+        if actual - allowed or name not in actual:
+            raise GlobalAttemptHold()
+        captured = {child for p, child, *_rest in immutable.files if p == parent}
+        for child in sorted(actual - captured - {stem+'.lock', stem+'.units'}):
+            if child.endswith('-started') or child.startswith(stem+'.units-position-'):
+                immutable.file(parent, child, 16384)
+                continue
+            graph = counted if child == name else dispatched if child == dispatch_name else immutable
+            old = [folder for p, entry, folder, _identity, _names in graph.directories
+                if p == parent and entry == child]
+            if len(old) > 1:
+                raise GlobalAttemptHold()
+            folder = old[0] if old else graph.directory(parent, child)
+            family = child.rsplit('.', 1)[-1]; entries = tuple(os.listdir(folder))
+            if family == 'nv':
+                from monitor import issue_tracker_nv_reservation as nv
+                if frozenset(entries) != nv._CATALOG_NAMES:
+                    raise GlobalAttemptHold()
+            else:
+                inventory._family_entries(family, entries)
+            held_names = {entry for p, entry, *_rest in graph.files if p == folder}
+            for entry in sorted(set(entries) - held_names):
+                graph.file(folder, entry, inventory._limit(family, entry))
+        selected = [folder for p, child, folder, _identity, _names in counted.directories
+            if p == parent and child == name]
+        if len(selected) != 1:
+            raise GlobalAttemptHold()
+        folder = selected[0]
+        _current, _parent, _name, header = _inputs(token, binding, unit)
+        if _current is not owner or _parent != parent or _name != name:
+            raise GlobalAttemptHold()
+        for graph in graphs:
+            graph.verify()
+        count, previous = _inspect(folder, unit, header)
+        if not 0 <= count < 6:
+            raise GlobalAttemptHold()
+        _require_no_completion(parent, name)
+        wire_identity = next(image for p, entry, _fd, image, _raw in counted.files
+            if p == folder and entry == 'WIRE')
+        action_identity = next(image for p, entry, _fd, image, _raw in counted.files
+            if p == folder and entry == 'ACTION-PREIMAGE')
+        claim_header = {'schema_version':1, 'unit_id':unit.unit_id, 'wire_sha256':unit.wire_sha256,
+            'action_digest':unit.action_digest, 'journal_header_sha256':hashlib.sha256(local._canonical(header)).hexdigest(),
+            'wire_identity':wire_identity, 'action_identity':action_identity}
+        dispatch_folders = [child for p, entry, child, _identity, _names in dispatched.directories
+            if p == parent and entry == dispatch_name]
+        if len(dispatch_folders) > 1 or bool(dispatch_folders) != bool(count):
+            raise GlobalAttemptHold()
+        dispatch_folder = dispatch_folders[0] if dispatch_folders else None
+        claim_previous = hashlib.sha256(local._canonical(claim_header)).hexdigest()
+        if dispatch_folder is not None:
+            used, claim_previous = _inspect_wire_claims(dispatch_folder, folder, unit, claim_header)
+            if used != count:
+                raise GlobalAttemptHold()
+        project_verifiers = []
+        if any(child.endswith('.project-origin') for child in actual):
+            with catalog.hold_pending_project_origins(token, binding) as (origins, verify_origins):
+                if (tuple(row.unit for row in origins) != units
+                        or origins[-1].project_identity != journal._identity(os.fstat(project.project_fd))[:2]):
+                    raise GlobalAttemptHold()
+                _rows, verify_c6 = scope.enter_context(catalog._hold_project_c6_from_origins(
+                    token, binding, origins, _owner_tail=owner_tail))
+                project_verifiers.append(verify_c6)
+                verify_origins()
+            if len(units) > 1:
+                _superseded, verify_other = scope.enter_context(_hold_catalog_other_settlements(token, binding, unit))
+                project_verifiers.append(verify_other)
+        additions = set(); count_additions = set(); claim_additions = set(); completed = set()
+        attempt_name = 'ATTEMPT-%d' % (count+1); claim_name = 'CLAIM-%d' % (count+1)
+        attempt_raw = local._canonical({**header, 'attempt_count':count+1,
+            'previous_sha256':previous, 'outcome':'UNKNOWN'})
+        claim_raw = local._canonical({'schema_version':1, 'unit_id':unit.unit_id,
+            'wire_sha256':unit.wire_sha256, 'attempt_count':count+1,
+            'original_intent_sha256':hashlib.sha256(attempt_raw).hexdigest(),
+            'previous_sha256':claim_previous, 'outcome':'CONSUMED_UNKNOWN_NOT_SEND_PROOF'})
+        def verify_raw():
+            if (local._owner(writer_token) is not project
+                    or ownership._validated_owner(token, binding) is not owner):
+                raise GlobalAttemptHold()
+            immutable.verify(parent_additions=additions)
+            counted.verify(appended_to=(folder, count_additions) if count_additions else None)
+            dispatched.verify(appended_to=(dispatch_folder, claim_additions) if claim_additions else None)
+        def verify():
+            verify_raw()
+            for check in project_verifiers:
+                check()
+            immutable.verify(parent_additions=additions)
+            counted.verify(appended_to=(folder, count_additions) if count_additions else None)
+            dispatched.verify(appended_to=(dispatch_folder, claim_additions) if claim_additions else None)
+        def created_directory(actual_parent, entry, creator, first_identity):
+            nonlocal dispatch_folder
+            if (actual_parent != parent or entry != dispatch_name or dispatch_folder is not None
+                    or completed != {attempt_name}):
+                raise GlobalAttemptHold()
+            journal._named(parent, entry, creator, directory=True)
+            if journal._identity(os.fstat(creator)) != first_identity or os.listdir(creator):
+                raise GlobalAttemptHold()
+            dispatch_folder = dispatched.directory(parent, entry)
+            if journal._identity(os.fstat(dispatch_folder)) != first_identity:
+                raise GlobalAttemptHold()
+            additions.add(entry); verify()
+        def created_file(actual_parent, entry, creator, identity, raw):
+            if (journal._identity(os.fstat(actual_parent))[:2] == journal._identity(os.fstat(folder))[:2]
+                    and entry == attempt_name and not completed):
+                graph, destination, expected, allowance = counted, folder, attempt_raw, count_additions
+            elif (dispatch_folder is not None
+                    and journal._identity(os.fstat(actual_parent))[:2] == journal._identity(os.fstat(dispatch_folder))[:2]):
+                required = {attempt_name} if dispatch_folders else {attempt_name, 'HEADER', 'INITIALIZED'}
+                if entry == 'HEADER' and not dispatch_folders and completed == {attempt_name}:
+                    expected = local._canonical(claim_header)
+                elif entry == 'INITIALIZED' and not dispatch_folders and completed == {attempt_name, 'HEADER'}:
+                    expected = _initialization(claim_header)
+                elif entry == claim_name and completed == required:
+                    expected = claim_raw
+                else:
+                    raise GlobalAttemptHold()
+                graph, destination, allowance = dispatched, dispatch_folder, claim_additions
+            else:
+                raise GlobalAttemptHold()
+            if raw != expected or entry in completed:
+                raise GlobalAttemptHold()
+            journal._named(actual_parent, entry, creator, directory=False)
+            if journal._identity(os.fstat(creator)) != identity:
+                raise GlobalAttemptHold()
+            image, captured_identity = graph.file(destination, entry, 16384)
+            if image != expected or captured_identity != identity or journal._identity(os.fstat(creator)) != identity:
+                raise GlobalAttemptHold()
+            journal._named(actual_parent, entry, creator, directory=False)
+            allowance.add(entry); completed.add(entry); verify()
+        verify()
+        key = object()
+        packet = {'writer':writer_token, 'project':project, 'token':token,
+            'binding':binding, 'owner':owner, 'unit':unit, 'context':(os.getpid(),threading.get_ident()),
+            'created_file':created_file, 'created_directory':created_directory}
+        def issued_verify():
+            failed = False
+            try:
+                if (_HELD_COUNT_CLAIM_ORIGINALS.get() is not key
+                        or _count_claim_original_packet() is not packet):
+                    raise GlobalAttemptHold()
+                verify()
+                if (_HELD_COUNT_CLAIM_ORIGINALS.get() is not key
+                        or _count_claim_original_packet() is not packet):
+                    raise GlobalAttemptHold()
+            except Exception:
+                failed = True
+            if failed:
+                raise GlobalAttemptHold() from None
+        packet['verify'] = issued_verify
+        _LIVE_COUNT_CLAIM_ORIGINALS[key] = packet
+        reset = _HELD_COUNT_CLAIM_ORIGINALS.set(key)
+        issued_verify()
+        yield issued_verify
+        issued_verify()
+    except BaseException as error:
+        problem = error
+    finally:
+        if key is not None:
+            _LIVE_COUNT_CLAIM_ORIGINALS.pop(key, None)
+        if reset is not None:
+            try:
+                _HELD_COUNT_CLAIM_ORIGINALS.reset(reset)
+            except BaseException as error:
+                if problem is None or (isinstance(problem, Exception) and not isinstance(error, Exception)):
+                    problem = error
+        # Revoke first. All semantic C6/OTHER finalizers finish while the
+        # independently acquired actual owners still remain held. Then check
+        # our raw shared graphs once more; never call a closed semantic scope.
+        for close in (scope.close, *((verify_raw,) if verify_raw is not None else ()),
+                *(graph.close for graph in reversed(graphs)), owner_tail.close):
+            try:
+                close()
+            except BaseException as error:
+                if problem is None or (isinstance(problem, Exception) and not isinstance(error, Exception)):
+                    problem = error
+    if problem is not None:
+        if not isinstance(problem, Exception):
+            raise problem
+        raise GlobalAttemptHold() from None
+
+
 @contextmanager
 def _hold_counted_original_wire(writer_token,token,binding,unit):
     """Consume this original count once BEFORE eventual child launch.
@@ -109,6 +343,12 @@ def _hold_counted_original_wire(writer_token,token,binding,unit):
     try:
         project = local._owner(writer_token)
         sheet_owner = ownership._validated_owner(token, binding)
+        overlap = _count_claim_original_packet()
+        if overlap is not None:
+            if (overlap['writer'] is not writer_token or overlap['token'] is not token
+                    or overlap['binding'] != binding or overlap['unit'] != unit):
+                raise GlobalAttemptHold()
+            overlap['verify']()
         if _catalog_present(sheet_owner):
             verify_catalog, catalog_dispatch_present, catalog_created, catalog_claimed, catalog_settled = catalog_scope.enter_context(
                 _hold_catalog_counted_originals(writer_token, token, binding, unit))
@@ -160,7 +400,7 @@ def _hold_counted_original_wire(writer_token,token,binding,unit):
         if claim_name not in os.listdir(parent):
             if count != 1: raise GlobalAttemptHold()
             claims = _create_folder(parent,claim_name)
-            if catalog_settled:
+            if catalog_settled or overlap is not None:
                 new_images.append(catalog_scope.enter_context(_write_global_start(claims,'HEADER',local._canonical(header))))
                 new_images[-1]()
                 new_images.append(catalog_scope.enter_context(_write_global_start(claims,'INITIALIZED',_initialization(header))))
@@ -187,7 +427,7 @@ def _hold_counted_original_wire(writer_token,token,binding,unit):
             'unit_id':unit.unit_id,'wire_sha256':unit.wire_sha256,'attempt_count':count,
             'original_intent_sha256':hashlib.sha256(journal._read(original,f'ATTEMPT-{count}',16384)).hexdigest(),
             'previous_sha256':previous,'outcome':'CONSUMED_UNKNOWN_NOT_SEND_PROOF'})
-        if catalog_settled:
+        if catalog_settled or overlap is not None:
             new_images.append(catalog_scope.enter_context(_write_global_start(claims,f'CLAIM-{count}',claim_raw)))
             for verify_new in new_images: verify_new()
         else:
@@ -205,6 +445,8 @@ def _hold_counted_original_wire(writer_token,token,binding,unit):
                 or journal._identity(os.fstat(wire)) != wire_identity
                 or journal._identity(os.fstat(action)) != action_identity): raise GlobalAttemptHold()
         def verify():
+            if overlap is not None:
+                overlap['verify']()
             for verify_new in new_images: verify_new()
             verify_catalog()
             _require_no_completion(parent,name)
@@ -239,6 +481,8 @@ def _hold_counted_original_wire(writer_token,token,binding,unit):
             # semantic replay, not merely at entry or eventual scope exit.
             verify_catalog()
             for verify_new in new_images: verify_new()
+            if overlap is not None:
+                overlap['verify']()
         verify()
         image = CountedOriginalWireObservation(count,unit.wire_sha256,wire,action)
         with _WIRE_CLAIM_GUARD:
@@ -906,6 +1150,9 @@ def _create_folder(parent, name, *, _return_original=False):
         journal._named(parent, name, fd, directory=True)
         if journal._identity(os.fstat(fd)) != identity:
             raise GlobalAttemptHold()
+        overlap = _count_claim_original_packet()
+        if overlap is not None:
+            overlap['created_directory'](parent, name, fd, identity)
     except BaseException:
         try:
             if journal._identity(os.fstat(fd))[:2] == original[:2]:
@@ -973,8 +1220,14 @@ def _write_global_start(parent, name, raw):
     local._flags()
     fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
                  os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=parent)
+    initial = cleanup_identity = None; problem = None
     try:
-        local._check(fd, directory=False)
+        # Named preimage is ONLY a cleanup candidate if the first real fstat
+        # refuses. It is never admitted evidence or a replacement FD license.
+        cleanup_identity = journal._identity(os.stat(name,dir_fd=parent,follow_symlinks=False))
+        initial = journal._identity(os.fstat(fd))
+        if (initial != cleanup_identity or journal._identity(local._check(fd, directory=False)) != initial):
+            raise GlobalAttemptHold()
         journal._named(parent, name, fd, directory=False)
         remaining = memoryview(raw)
         while remaining:
@@ -982,6 +1235,8 @@ def _write_global_start(parent, name, raw):
             if not 0 < written <= len(remaining): raise GlobalAttemptHold()
             remaining = remaining[written:]
         identity = journal._identity(os.fstat(fd))
+        if identity[:5] != initial[:5]:
+            raise GlobalAttemptHold()
         def verify():
             journal._named(parent, name, fd, directory=False)
             if journal._identity(os.fstat(fd)) != identity: raise GlobalAttemptHold()
@@ -989,10 +1244,27 @@ def _write_global_start(parent, name, raw):
         verify()
         os.fsync(parent)
         verify()
+        overlap = _count_claim_original_packet()
+        if overlap is not None:
+            overlap['created_file'](parent, name, fd, identity, raw)
+            verify()
         yield verify
         verify()
+    except BaseException as error:
+        problem = error
     finally:
-        os.close(fd)
+        candidate = initial if initial is not None else cleanup_identity
+        if candidate is not None:
+            try:
+                if journal._identity(os.fstat(fd))[:2] == candidate[:2]:
+                    os.close(fd)
+            except OSError:
+                pass
+            except BaseException as error:
+                if problem is None:
+                    problem = error
+    if problem is not None:
+        raise problem
 
 
 @contextmanager
@@ -1196,8 +1468,13 @@ def _observe(token, binding, unit, append):
             ownership._validated_owner(token, binding)
             journal._named(parent, name, folder, directory=True)
             count += 1
-            local._write_new(folder, f'ATTEMPT-{count}', local._canonical(
-                {**header, 'attempt_count': count, 'previous_sha256': previous, 'outcome': 'UNKNOWN'}))
+            raw = local._canonical({**header, 'attempt_count': count,
+                'previous_sha256': previous, 'outcome': 'UNKNOWN'})
+            if _count_claim_original_packet() is not None:
+                with _write_global_start(folder, f'ATTEMPT-{count}', raw) as verify_written:
+                    verify_written()
+            else:
+                local._write_new(folder, f'ATTEMPT-{count}', raw)
             _require_no_completion(parent,name,marker_only=True)
         journal._named(parent, name, folder, directory=True)
         ownership._validated_owner(token, binding)
@@ -1803,7 +2080,8 @@ def _hold_shared_retry_owned_attempt_wire(
     try:
         local._owner(writer_token)
         if not 1<=inspect_global_unit(token,binding,unit).attempt_count<6: raise GlobalAttemptHold()
-        with _hold_shared_retry_counted_sources(
+        with _hold_selected_last_catalog_write_originals(writer_token,token,binding,unit) as verify_all, \
+                _hold_shared_retry_counted_sources(
             token,binding,unit,writer_token=writer_token,identity_response=identity_response,
             history_response=history_response,business_reads=business_reads,qualified_source=qualified_source,
             store=store,settings=settings,whitelist_snapshot=whitelist_snapshot,
@@ -1818,9 +2096,9 @@ def _hold_shared_retry_owned_attempt_wire(
                     if issued is None: raise GlobalAttemptHold()
                     verify_wire=issued[-2]
                     def verify():
-                        verify_wire(); verify_sources(); verify_wire()
+                        verify_all(); verify_wire(); verify_sources(); verify_wire(); verify_all()
                     _LIVE_WIRE_CLAIMS[image]=issued[:-2]+(verify,issued[-1])
-                verify_wire()
+                verify_all(); verify_wire()
                 yield image
                 verify()
     except Exception: failed=True
@@ -1911,11 +2189,13 @@ def _hold_continuous_owned_attempt_wire(
                 _hold_current_completed_cycle_replay(store) as verify_cycles, \
                 _hold_history_originals(writer_token) as verify_receipts, \
                 _hold_receipted_audit_originals(writer_token,token,binding,unit) as verify_audits, \
-                _hold_native_catalog_write_replay(token,binding,unit) as verify_catalog:
+                _hold_native_catalog_write_replay(token,binding,unit) as verify_catalog, \
+                _hold_selected_last_catalog_write_originals(writer_token,token,binding,unit) as verify_all:
             original=facts()
             with _hold_reserved_quota_originals(token,binding,original[1].identity,unit) as verify_quota:
                 def verify_originals():
                     verify_inputs(); verify_cycles(); verify_receipts(); verify_audits(); verify_quota(); verify_catalog()
+                    verify_all()
                 def verify_sources():
                     verify_originals()
                     if facts()!=original: raise GlobalAttemptHold()

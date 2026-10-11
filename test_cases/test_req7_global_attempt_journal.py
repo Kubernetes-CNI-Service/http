@@ -44,6 +44,64 @@ def original_read_files(root):
 
 
 class Req7GlobalAttemptJournalTests(unittest.TestCase):
+    def _exercise_global_creator_first_stat(self, *, recycle=False):
+        original_open=os.open;original_stat=os.fstat;opened=[];hit=[]
+        error=OSError('injected first creator fstat')
+        folder=original_open(self.root,self.module.local._flags(directory=True))
+        foreign_path=self.root/'foreign-creator-slot';foreign_path.write_bytes(b'foreign-original')
+        foreign=original_open(foreign_path,self.module.local._flags())
+        def open_file(name,*args,**options):
+            fd=original_open(name,*args,**options)
+            if name=='STOP':opened.append(fd)
+            return fd
+        def first_stat(fd):
+            if opened and fd==opened[0] and not hit:
+                hit.append(True)
+                if recycle:os.dup2(foreign,fd)
+                raise error
+            return original_stat(fd)
+        caught=[]
+        try:
+            with mock.patch.object(os,'open',side_effect=open_file),mock.patch.object(os,'fstat',side_effect=first_stat):
+                try:
+                    with self.module._write_global_start(folder,'STOP',b'partial-stop'):pass
+                except OSError as failure:caught.append(failure)
+            self.assertEqual([error],caught);self.assertEqual([True],hit);self.assertEqual(1,len(opened))
+            self.assertEqual(b'',(self.root/'STOP').read_bytes())
+            if recycle:
+                self.assertEqual((original_stat(foreign).st_dev,original_stat(foreign).st_ino),
+                    (original_stat(opened[0]).st_dev,original_stat(opened[0]).st_ino))
+                self.assertEqual(b'foreign-original',os.pread(opened[0],100,0))
+            else:
+                with self.assertRaises(OSError):original_stat(opened[0])
+        finally:
+            for fd in (*opened,foreign,folder):
+                try:os.close(fd)
+                except OSError:pass
+
+    def test_actual_global_creator_first_fstat_failure_closes_only_owned_original(self):
+        self._exercise_global_creator_first_stat()
+
+    def test_actual_global_creator_first_fstat_recycled_slot_keeps_foreign_original(self):
+        self._exercise_global_creator_first_stat(recycle=True)
+
+    def test_native_count_claim_overlap_requires_actual_both_owners_before_catalog(self):
+        holder=getattr(self.module,'_hold_selected_last_catalog_write_originals',None)
+        self.assertTrue(callable(holder),'COUNT and CLAIM must share original ALL family FDs')
+        from monitor import issue_tracker_unit_catalog as catalog
+        with mock.patch.object(catalog,'_inspect') as read:
+            entered=[]
+            with self.assertRaises(self.module.GlobalAttemptHold):
+                with holder(object(),object(),binding(),self.value):entered.append(True)
+            self.assertEqual([],entered);read.assert_not_called()
+
+    def test_native_count_claim_overlap_accepts_no_caller_graph_or_allowance(self):
+        holder=getattr(self.module,'_hold_selected_last_catalog_write_originals',None)
+        self.assertTrue(callable(holder),'original graph cannot be supplied by the caller')
+        for extra in ({'verify':lambda:None},{'paths':()},{'count':0},{'allowance':True},{'budget':object()}):
+            with self.subTest(extra=tuple(extra)),self.assertRaises(TypeError):
+                with holder(object(),object(),binding(),self.value,**extra):pass
+
     def test_all_protected_count_boundaries_join_the_shared_original_counter(self):
         import ast, inspect, textwrap
         # One semantic counter must inspect actual catalog settlement for all

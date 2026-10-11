@@ -2327,6 +2327,16 @@ ALL 审计行确定唯一 append 窗口（NOOP 无虚构行），精确耗尽可
 - 证据与清理：精确 HEAD/tree/dirty/manifest/Python/平台/命令、完整日志/退出码/物理 BEGIN/END、读取前后 stat/inode/旧前缀 SHA、真实故障阶段及固定请求计数；仅清理本轮确证自有 fixture/FD/child，不管理未知进程或真实环境。独立初始 RED/direct 与真实本地多脚本/加密 socket 是开发替代证据，不是 Cloud/设备/断电或正式 full。
 - 验证范围：保留上述核心场景，省略/合并：无；真实现场全部 NOT RUN，无新增剩余风险接受确认人。原现场授权、必要研发确认和普通发布门禁不变。
 
+## TC-REAL-REQ7-ALL-COUNT-CLAIM-ORIGINALS-001 — ALL 原件贯穿 COUNT/CLAIM 和最后收尾
+
+- Case ID：`TC-REAL-REQ7-ALL-COUNT-CLAIM-ORIGINALS-001`；类型：transaction / workflow / recovery；对应 C-14/C-19。状态：**NOT RUN / REAL_ENV REQUIRED**。
+- 风险与目标：COUNT 返回后重新采用 OTHER 原件、最后项目 finalizer 后换件、first stat 异常泄漏原 FD、复用 FD 被误关，以及 opaque holder 跨 Context/thread 或撤权后可用。覆盖 shared ALL catalog/origin/NV/audit/journal/history/business/metadata/completion、原项目 C6/COMPLETE/APPLIED/key 与 committed UNSENT、selected COUNT/dispatch/CLAIM 和真实固定 FIRST/R2 consumer。
+- 前置与权限：另获精确 Stage O 副本/平台授权，先闭合当前树依赖/TLS/launcher/总预算/原锁/当前来源/issued reads/G1/FIFO/每次准入。历史专用表/同 Cloud 项目确认仅是前提，不是现场证明或 API 写权限。测试库仍未授权真实 Cloud/SSH/设备、root/未知 PID/cron 或发布。
+- 保留场景与独立预期：正常 selected last-unit 一次 ATTEMPT 与一次 CLAIM；实际完整旧 dispatch prefix 的相同原 wire R2；OTHER 同字节新 inode 分别在 COUNT 返回后与项目 finalizer 后换入，必须在 CLAIM/child 或整体返回前 HOLD；原件/实际 creator FD 首 stat 拒绝、foreign slot 复用、Context reset 失败和代表性中断必须只清理本轮确证自有原件、保留 foreign FD，撤权不可恢复。新 ATTEMPT/HEADER/INITIALIZED/CLAIM 原件须在 exclusive writer 尚活时取得，禁止写者已关后首次采用名字。
+- 提交边界、恢复与安全状态：保留初始化前后、durable COUNT 后 CLAIM 前、CLAIM 后消费/子进程前后和全部 finalizer 尾部；失败保留 UNKNOWN、原 wire、原 COUNT/CLAIM 和空/部分 STOP，不回填/修补/回滚/重发。独立冷恢复核相同原件、完整前缀与已消费 count 不可再次发送；SIGKILL/正常重启/模拟取回不是断电或设备验收。
+- 证据与清理：精确 HEAD/tree/dirty/manifest/Python/平台/依赖/命令、完整日志/退出码、前后 stat/inode/旧前缀 SHA 和物理完整 END；原 FD/名字/完整身份/原始字节、固定唯一 16MiB 容量、实际阶段/COUNT/CLAIM/request 数、原 deadline、失败安全状态、仅本轮自有 FD/child 的完整回收见证。清理不管理其他方树、真实设备或未知进程。
+- 替代证据与范围：独立初始 RED/direct、实际 C6/COMPLETE/APPLIED/key/UNSENT 多项目流程与本地真实 TLS FIRST/R2 是开发替代证据，不是 current full/check 或真实环境通过。保留上述全部核心场景，省略/等价合并：无；残余现场验证全部 NOT RUN，无新增风险接受或确认人。既有现场授权、研发确认及发布门禁保持有效。
+
 ## TC-REAL-REQ7-NATIVE-READ-WHITELIST-001 — 精确字面列与每单元同规则读核
 
 - Case ID：`TC-REAL-REQ7-NATIVE-READ-WHITELIST-001`；类型：real-environment / read-only API / whitelist；对应 C-7/C-8/C-24。状态：**NOT RUN / REAL_ENV REQUIRED**。本地先决为 `test_req7_sheets_read_plan`、`test_req7_sheets_read_decode`、`test_req7_online_whitelist_read` direct 和真实 TLS/read-plan/grid-decoder/本地 held-workbook workflow 全绿。对应 `monitor/issue_tracker_sheets_read_plan.py`、`monitor/issue_tracker_sheets_read_decode.py`、`monitor/issue_tracker_online_whitelist_read.py` 均为未安装库，不是在线发送入口、APPLIED 回执或新鲜准入许可。
