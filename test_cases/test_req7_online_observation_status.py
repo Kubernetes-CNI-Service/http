@@ -1,5 +1,5 @@
 """Non-authoritative last-observation display: never a send admission."""
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 import errno
 import io
 import json
@@ -67,6 +67,16 @@ refreshIssueTrackerOnlineStatus().then(() => {
 
 
 class OnlineObservationStatusDirectTests(unittest.TestCase):
+    def test_fixed_transport_observations_are_read_only_never_remote_complete(self):
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(CGI, 'STATUS_DIR', Path(directory)):
+            path = Path(directory)/'issue-tracker-online.status.json'
+            for state in ('attempted_unknown', 'attempted_definite_rejection', 'attempt_unproved'):
+                value = snapshot(state); path.write_text(json.dumps(value)); path.chmod(0o644)
+                self.assertEqual(value, self.reader()())
+                for field in ('read_only', 'mutation_disabled'):
+                    path.write_text(json.dumps({**value, field: False}))
+                    self.assertEqual(unproved(), self.reader()())
+
     def publisher(self):
         publish = getattr(WORKER, '_publish_issue_tracker_online_observation_status', None)
         self.assertTrue(callable(publish), 'fixed non-authoritative observation publisher missing')
@@ -209,6 +219,73 @@ class OnlineObservationStatusDirectTests(unittest.TestCase):
 
 
 class OnlineObservationStatusWorkflowTests(unittest.TestCase):
+    def test_fixed_transport_browser_labels_cannot_claim_complete_or_permission(self):
+        for state, text in (('attempted_unknown', 'UNKNOWN'),
+                ('attempted_definite_rejection', '明确拒绝'), ('attempt_unproved', '未证明')):
+            with self.subTest(state=state):
+                rendered=browser(snapshot(state))
+                self.assertIn(text, rendered['text'])
+                self.assertIn('不代表', rendered['text']); self.assertIn('发送许可', rendered['text'])
+                self.assertNotIn('已完成', rendered['text'])
+
+    def test_terminal_transport_observation_actual_cache_cgi_and_browser_without_permission(self):
+        from monitor.issue_tracker_mutation_launcher import CountedMutationCompletion
+        from monitor.issue_tracker_remote_history_match import RemoteHistoryHold
+        for outcome, count, state, text in (
+                ('UNKNOWN', 1, 'attempted_unknown', 'UNKNOWN'),
+                ('DEFINITE_REJECTION', 1, 'attempted_definite_rejection', '明确拒绝'),
+                ('HOLD', None, 'attempt_unproved', '未证明'),
+                ('UNKNOWN', 6, 'retry_exhausted', '6 次已耗尽'),
+                ('DEFINITE_REJECTION', 6, 'retry_exhausted', '6 次已耗尽')):
+            with self.subTest(outcome=outcome), tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
+                root=Path(directory); closed=[]; store=object()
+                observations=dict(result=(), writer=object(), owner=object(), binding=object(),
+                    authentication=object(), http_root=root, disposition_stopped=False, delivery_stopped=False)
+                @contextmanager
+                def owners(actual):
+                    self.assertIs(store, actual)
+                    yield observations
+                    closed.append('all-original-finalizers')
+                actual_write=WORKER._write_status_file
+                def write(*args, **kwargs):
+                    self.assertEqual(['all-original-finalizers'], closed)
+                    return actual_write(*args, **kwargs)
+                stack.enter_context(mock.patch.object(WORKER, '_hold_terminal_current_project_online_originals', owners))
+                dispatch_options = ({'side_effect':RemoteHistoryHold()} if outcome == 'HOLD'
+                    else {'return_value':CountedMutationCompletion(count, 401, 'a'*64, None, outcome)})
+                stack.enter_context(mock.patch.object(WORKER, '_dispatch_current_project_online_originals',
+                    **dispatch_options))
+                stack.enter_context(mock.patch.object(WORKER, '_write_status_file', side_effect=write))
+                stack.enter_context(mock.patch.object(WORKER, 'STATUS_DIR', root))
+                stack.enter_context(mock.patch.object(WORKER, 'timestamp', return_value=STAMP))
+                stack.enter_context(mock.patch.object(CGI, 'STATUS_DIR', root))
+                diagnostic = stack.enter_context(mock.patch.object(WORKER.sys, 'stderr', io.StringIO()))
+                self.assertEqual((), WORKER._dispatch_issue_tracker_online_after_completion(store))
+                self.assertEqual('Issue Tracker online attempt unproved; original count/UNKNOWN retained; mutation disabled\n'
+                    if outcome == 'HOLD' else '', diagnostic.getvalue())
+                original=(root/'issue-tracker-online.status.json').read_bytes()
+                stack.enter_context(mock.patch.dict(os.environ, AUTH, clear=True))
+                stack.enter_context(mock.patch.object(CGI, 'process_state', return_value=(False, None)))
+                for name in ('collection_status', 'yaml_backup_status', 'continuous_collection_status', 'continuous_backup_status'):
+                    stack.enter_context(mock.patch.object(CGI, name, return_value={'state':'idle'}))
+                stack.enter_context(mock.patch.object(CGI, 'request_action', return_value=None))
+                respond=stack.enter_context(mock.patch.object(CGI, 'respond'))
+                request=stack.enter_context(mock.patch.object(CGI, 'write_request'))
+                CGI.main(); respond.assert_called_once(); request.assert_not_called()
+                value=respond.call_args.args[0]
+                self.assertEqual({**snapshot(state), 'process_alive':False}, value)
+                rendered=browser(value)
+                self.assertIn(text, rendered['text'])
+                if count == 6:
+                    self.assertIn('自动发送禁用', rendered['text']); self.assertIn('升级', rendered['text'])
+                else:
+                    self.assertIn('不代表', rendered['text']); self.assertIn('发送许可', rendered['text'])
+                self.assertNotIn('已完成', rendered['text'])
+                self.assertNotIn('PRIVATE', rendered['text'])
+                self.assertEqual('GET', rendered['calls'][0]['options']['method'])
+                self.assertEqual('no-store', rendered['calls'][0]['options']['cache'])
+                self.assertEqual(original, (root/'issue-tracker-online.status.json').read_bytes())
+
     def test_unscoped_empty_observation_does_not_claim_the_page_project_is_empty(self):
         result = browser(snapshot('no_counted_units'))
         self.assertIn('最近对账未观察到已计数单元', result['text'])

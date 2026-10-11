@@ -1312,8 +1312,16 @@ def _match_original_decoded_images(token,binding,unit,identity,pair,metadata_res
         still = tuple(cell for cell in post.cells if cell[0] <= old_tail)
         actual = _rows(post.cells, old_tail + 1, post.last_data_row_index)
         matched = sum(1 for first, second in zip(expected, actual) if first == second)
+        # No fence and the exact original tail is still an unresolved attempt,
+        # not proof of a conflicting partial application or of no transport.
+        # This narrow observation does not clear COUNT/UNKNOWN or grant R2;
+        # the governed retry independently requires all original continuity.
+        unchanged_without_fence = (not fence_present and not foreign_fence
+            and post.row_count == original.row_count
+            and post.last_data_row_index == old_tail and post.cells == original.cells)
         conflict = (foreign_fence or post.row_count < original.row_count or old != still
-                    or actual != expected or post.last_data_row_index != old_tail + len(expected))
+                    or not unchanged_without_fence and
+                    (actual != expected or post.last_data_row_index != old_tail + len(expected)))
         outcome = 'CONFLICT' if conflict else ('MATCHED_OBSERVATION' if fence_present else 'UNKNOWN')
         ownership._validated_owner(token, binding)
         result = RemoteHistoryObservation(outcome, state.attempt_count, fence_present,

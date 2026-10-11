@@ -13,12 +13,14 @@ from test_cases import test_req7_online_completion_runtime as runtime_tests
 class TerminalUnsentDispatchDirectTests(unittest.TestCase):
     def exercise(self, *, held_stop=False, drift=False, interrupt=False, applied=False,
                  preparation_probe=None, preparation_interrupt=False,
-                 preparation_endpoint='_consume_current_project_online_original_inputs'):
+                 preparation_endpoint='_consume_current_project_online_original_inputs',
+                 terminal_dispatch=False, delivery_failure=False, attempt_unproved=False):
         from monitor import issue_tracker_local_commit as local
         from monitor import issue_tracker_online_target as target
         from monitor import issue_tracker_spreadsheet_owner as ownership
         from monitor import issue_tracker_remote_history_match as remote
         from monitor import issue_tracker_retained_inventory as inventory
+        from monitor import issue_tracker_settings_audit_allocation as delivery
         worker = runtime_tests.persistence.WORKER
         with tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
             root = Path(directory).resolve()
@@ -70,6 +72,16 @@ class TerminalUnsentDispatchDirectTests(unittest.TestCase):
                 if preparation_interrupt: raise KeyboardInterrupt('PRIVATE PREPARATION INTERRUPT')
                 raise remote.RemoteHistoryHold()
 
+            def finalize(actual_writer, actual_binding):
+                # This direct fixture substitutes owner objects, not native C25
+                # authority. Its C25 boundary must likewise be explicit, after
+                # sheet exit and before the writer/target originals close.
+                self.assertIs(writer, actual_writer); self.assertIs(binding, actual_binding)
+                self.assertEqual(['sheet'], closed)
+                self.assertIsNotNone(store.gate._lock_fd)
+                if delivery_failure: raise ValueError('PRIVATE FINALIZER DETAIL')
+                return ()
+
             stack.enter_context(mock.patch.object(worker, 'STATUS_DIR', root/'monitor/status'))
             stack.enter_context(mock.patch.object(local, 'try_writer_owner',
                 side_effect=lambda *args: held('writer', writer)))
@@ -80,17 +92,22 @@ class TerminalUnsentDispatchDirectTests(unittest.TestCase):
             stack.enter_context(mock.patch.object(remote, '_reconcile_pending_project_units', side_effect=reconcile))
             stack.enter_context(mock.patch.object(remote, '_reconcile_pending_project_units_and_project_auth',
                 side_effect=lambda *args,**options:(reconcile(*args,**options),authentication)))
-            stack.enter_context(mock.patch.object(remote, preparation_endpoint, side_effect=prepare))
+            stack.enter_context(mock.patch.object(worker if terminal_dispatch else remote,
+                '_dispatch_current_project_online_originals' if terminal_dispatch else preparation_endpoint,
+                side_effect=prepare))
             stack.enter_context(mock.patch.object(inventory, '_record_all_project_unsent_dispositions', side_effect=append))
+            stack.enter_context(mock.patch.object(delivery, '_finalize_native_completed_settings_delivery', side_effect=finalize))
+            api = (worker._dispatch_issue_tracker_online_after_completion if terminal_dispatch
+                   else worker._reconcile_issue_tracker_online_after_completion)
             with mock.patch.object(worker.sys, 'stderr', io.StringIO()) as stream:
                 if interrupt or preparation_interrupt:
                     with self.assertRaises(KeyboardInterrupt):
-                        worker._reconcile_issue_tracker_online_after_completion(store)
-                elif drift:
+                        api(store)
+                elif drift or delivery_failure:
                     with self.assertRaises(worker.CollectionCycleHoldError):
-                        worker._reconcile_issue_tracker_online_after_completion(store)
+                        api(store)
                 else:
-                    self.assertIs(result, worker._reconcile_issue_tracker_online_after_completion(store))
+                    self.assertIs(result, api(store))
             self.assertEqual([True], reached)
             self.assertEqual(['reconcile', 'disposition'], calls)
             if drift:
@@ -99,12 +116,13 @@ class TerminalUnsentDispatchDirectTests(unittest.TestCase):
             else:
                 self.assertEqual([], substituted)
             status = root/'monitor/status/issue-tracker-online.status.json'
-            if drift or interrupt or preparation_interrupt:
+            if drift or interrupt or preparation_interrupt or delivery_failure:
                 self.assertFalse(status.exists())
             else:
                 self.assertEqual(['sheet', 'writer', 'target'], closed)
                 view = json.loads(status.read_bytes())
-                self.assertEqual('historical_applied' if applied else 'stalled', view['state'])
+                self.assertEqual('attempt_unproved' if attempt_unproved else
+                    'historical_applied' if applied else 'stalled', view['state'])
                 self.assertIs(True, view['read_only']); self.assertIs(True, view['mutation_disabled'])
                 if not applied:
                     self.assertEqual('Issue Tracker online stalled: UNKNOWN; read-only reconciliation; mutation disabled\n',
@@ -147,6 +165,47 @@ class TerminalUnsentDispatchDirectTests(unittest.TestCase):
 
     def test_operator_interrupt_is_not_normalized_into_successful_reconciliation(self):
         self.exercise(interrupt=True)
+
+    def test_terminal_dispatch_hold_preserves_actual_unknown_and_all_finalizer_order(self):
+        reached=[]
+        self.exercise(terminal_dispatch=True,held_stop=True,preparation_probe=reached)
+        self.assertEqual(['live-after-unsent'], reached)
+
+    def test_terminal_dispatch_cannot_mask_original_cycle_rebind(self):
+        self.exercise(terminal_dispatch=True,held_stop=True,drift=True)
+
+    def test_terminal_dispatch_interrupt_does_not_publish_or_normalize_success(self):
+        self.exercise(terminal_dispatch=True,preparation_interrupt=True)
+
+    def test_terminal_dispatch_failed_c25_finalizer_never_publishes_status(self):
+        self.exercise(terminal_dispatch=True,delivery_failure=True)
+
+    def test_terminal_original_conflict_or_exhaustion_stops_before_dispatch(self):
+        from monitor import issue_tracker_remote_history_match as remote
+        worker = runtime_tests.persistence.WORKER
+        for state, count, expected in (('CONFLICT', 1, 'conflict'), ('UNKNOWN', 6, 'retry_exhausted')):
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
+                observation = remote.RemoteHistoryObservation(state, count, False, True, True,
+                    2, 0, 3, 3, 'PRIVATE ACTION', 'PRIVATE WIRE', 'PRIVATE META', 'PRIVATE HISTORY')
+                result = (observation,)
+                @contextmanager
+                def originals(store):
+                    yield dict(result=result, writer=object(), owner=object(), binding=object(),
+                        authentication=object(), http_root=Path(directory),
+                        disposition_stopped=False, delivery_stopped=False)
+                stack.enter_context(mock.patch.object(worker, '_hold_terminal_current_project_online_originals', originals))
+                stack.enter_context(mock.patch.object(worker, 'STATUS_DIR', Path(directory)))
+                dispatch = stack.enter_context(mock.patch.object(worker, '_dispatch_current_project_online_originals', return_value=None))
+                stream = stack.enter_context(mock.patch.object(worker.sys, 'stderr', io.StringIO()))
+                self.assertIs(result, worker._dispatch_issue_tracker_online_after_completion(object()))
+                dispatch.assert_not_called()
+                self.assertEqual(expected, json.loads((Path(directory)/'issue-tracker-online.status.json').read_bytes())['state'])
+                self.assertNotIn('PRIVATE', stream.getvalue())
+
+    def test_terminal_applied_prefix_cannot_hide_new_attempt_hold(self):
+        # Historical APPLIED is not a statement about the selected new unit.
+        # The old read-only entry keeps its historical display independently.
+        self.exercise(terminal_dispatch=True, applied=True, attempt_unproved=True)
 
 
 class TerminalUnsentNativeWorkflowTests(unittest.TestCase):

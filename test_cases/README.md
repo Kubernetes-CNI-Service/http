@@ -3061,3 +3061,34 @@ The production paths already have direct rules and the multi-script
 ignored inventory or approval exception is added. This is a preparation seam,
 not installed default NEW/G1/FIFO, overall REQ7, a current full/check proof or
 permission for real Cloud/SSH/device operations. REAL_ENV remains NOT RUN.
+
+The terminal prod-cycle lane now installs the fixed original FIRST/R2 driver,
+not the compatibility read-only consumer. It accepts only the actual cycle
+store and retains the original target, writer, spreadsheet and cycle owners
+through reconciliation, independent UNSENT disposition, dispatch and C25
+finalizers. CONFLICT and count-six UNKNOWN stop before dispatch. No caller
+unit, clock, callback or send flag is introduced. The compatibility entry and
+its existing zero-COUNT workflows remain read-only.
+
+Independent RED/direct and genuine protected ETH/IB C6/OAuth/TLS workflows
+cover FIRST and historical-four-read-to-identical-R2, as well as historical
+CONFLICT stopping before another COUNT/current eight reads and actual
+COUNT-then-read-expiry retaining UNKNOWN without CLAIM/send. The latter keeps
+the original successful quota/cycle finalizer checks and nine-FD cleanup;
+it does not infer success from a mocked completion. No fence with the exact
+unchanged original History is narrowly UNKNOWN, never COMPLETE or permission;
+partial append, missing audit, present fence with missing rows, foreign fence
+and original drift retain the existing CONFLICT/refusal expectations.
+
+Terminal transport observations are published only after all outer finalizers
+succeed. UNKNOWN/rejection and unproved HOLD have fixed read-only states in
+the authenticated CGI and generated browser. An old APPLIED prefix cannot
+mask a new attempt's HOLD, and a durable sixth attempt displays exhaustion
+without claiming remote COMPLETE. The cache never becomes another send permit.
+The native fixture borrows already-held actual owners; it does not prove
+independent first acquisition or cold-process restart. Earlier paragraphs
+describing an uninstalled private FIRST/R2 driver describe their historical
+milestones, not this new terminal seam. Default NEW bootstrap/allocator,
+whole REQ7, current formal full/check, Cloud/device/power-loss and REAL_ENV
+remain open. Historical dedicated-table/same-Cloud-project confirmation is a
+deployment premise, not runtime or full proof. Approval ledger is runner-only.

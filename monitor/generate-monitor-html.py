@@ -2255,7 +2255,10 @@ function renderIssueTrackerOnlineStatus(payload) {
     retry_exhausted: 'Issue Tracker 在线停滞（UNKNOWN），持久计数 6 次已耗尽；只读对账并升级处理；自动发送禁用',
     conflict: 'Issue Tracker 在线冲突（CONFLICT）；硬停止，请升级处理；自动发送禁用',
     historical_applied: 'Issue Tracker 历史完成观察；不代表当前发送许可',
-    no_counted_units: 'Issue Tracker 最近对账未观察到已计数单元；不代表发送许可'
+    no_counted_units: 'Issue Tracker 最近对账未观察到已计数单元；不代表发送许可',
+    attempted_unknown: 'Issue Tracker 最近发送尝试结果为 UNKNOWN；不代表远端完成或当前发送许可，请检查受保护证据',
+    attempted_definite_rejection: 'Issue Tracker 最近发送尝试被明确拒绝；不代表远端完成或当前发送许可，请检查受保护证据',
+    attempt_unproved: 'Issue Tracker 在线准入或尝试未证明；不代表未发送、远端完成或当前发送许可，请检查受保护证据'
   };
   const unproved = 'Issue Tracker 在线状态未证明；自动发送禁用，请检查并升级处理';
   if (!payload || Array.isArray(payload) || payload.schema_version !== 1

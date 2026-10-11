@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import csv
 import ctypes
 from datetime import datetime
@@ -943,7 +944,7 @@ def _publish_issue_tracker_lanes_after_completion(store) -> None:
     for publish, diagnostic in (
         (_publish_stage_l_status_after_completion, "Issue Tracker Stage L status unavailable"),
         (_publish_stage_l_local_after_completion, "Issue Tracker Stage L local publication unavailable"),
-        (_reconcile_issue_tracker_online_after_completion, "Issue Tracker online reconciliation unavailable"),
+        (_dispatch_issue_tracker_online_after_completion, "Issue Tracker online reconciliation unavailable"),
     ):
         try:
             publish(store)
@@ -1065,8 +1066,9 @@ def _dispatch_current_project_online_originals(writer_token,owner_token,binding,
     return result
 
 
-def _reconcile_issue_tracker_online_after_completion(store):
-    """Every terminal prod cycle can reconcile old UNKNOWN, never send NEW.
+@contextmanager
+def _hold_terminal_current_project_online_originals(store):
+    """Hold actual terminal originals through every independent lane finalizer.
 
     Independent of local due/result or cycle qualification. Only a real store
     bound to its actual held gate and complete original archive is accepted.
@@ -1093,14 +1095,14 @@ def _reconcile_issue_tracker_online_after_completion(store):
             or store.records_dir != status/'records' or store.witness_path != status/'high-water.json'):
         raise CollectionCycleHoldError('online cycle binding changed')
     if store.scope != 'prod':
-        return None
+        yield None
+        return
     from monitor.issue_tracker_cycle_source import _hold_completed_cycle_replay, read_completed_cycle_evidence
     from monitor.issue_tracker_local_commit import try_writer_owner
     from monitor.issue_tracker_online_target import _hold_current_project_online_target
     from monitor.issue_tracker_spreadsheet_owner import spreadsheet_owner
     from monitor.issue_tracker_remote_history_match import (
-        RemoteHistoryHold, _reconcile_pending_project_units_and_project_auth,
-        _consume_current_project_online_original_inputs,
+        _reconcile_pending_project_units_and_project_auth,
     )
     from monitor.issue_tracker_retained_inventory import (
         RetainedInventoryHold, _record_all_project_unsent_dispositions,
@@ -1110,8 +1112,7 @@ def _reconcile_issue_tracker_online_after_completion(store):
     )
     from contextlib import ExitStack
     failed = False
-    disposition_stopped = False
-    delivery_stopped = False
+    observations = {'disposition_stopped': False, 'delivery_stopped': False}
     try:
         with _hold_completed_cycle_replay(store) as verify_cycles:
             if not read_completed_cycle_evidence(store):
@@ -1131,16 +1132,12 @@ def _reconcile_issue_tracker_online_after_completion(store):
                         except RetainedInventoryHold:
                             # Unsettled inventory or stopped/partial append is
                             # not successful disposition, FIFO release or GO.
-                            disposition_stopped = True
+                            observations['disposition_stopped'] = True
                         verify_cycles()
-                        try:
-                            _consume_current_project_online_original_inputs(writer, owner, binding,
-                                authentication, _store=store, http_root=root.parent.parent)
-                        except RemoteHistoryHold:
-                            # The fixed original-image consumer is still
-                            # non-authoritative. HOLD preserves reconciliation,
-                            # never masks owner/cycle finalizers or interruption.
-                            pass
+                        observations.update(result=result, writer=writer, owner=owner,
+                            binding=binding, authentication=authentication,
+                            http_root=root.parent.parent)
+                        yield observations
                         verify_cycles()
                     verify_cycles()
                     # The OAuth/read owner has fully exited. Fresh actual
@@ -1149,7 +1146,7 @@ def _reconcile_issue_tracker_online_after_completion(store):
                     try:
                         _finalize_native_completed_settings_delivery(writer,binding)
                     except SettingsAuditHold:
-                        delivery_stopped = True
+                        observations['delivery_stopped'] = True
                     verify_cycles()
                 verify_cycles()
             verify_cycles()
@@ -1157,12 +1154,86 @@ def _reconcile_issue_tracker_online_after_completion(store):
         failed = True
     if failed:
         raise CollectionCycleHoldError('online original reconciliation unavailable')
+
+
+def _report_terminal_online_dispositions(observations):
+    result = observations['result']
+    if observations['disposition_stopped'] and result and all(item.state == 'APPLIED' for item in result):
+        print('Issue Tracker UNSENT disposition unavailable; mutation disabled', file=sys.stderr)
+    if observations['delivery_stopped'] and result and all(item.state == 'APPLIED' for item in result):
+        print('Issue Tracker C25 delivery disposition unavailable; mutation disabled', file=sys.stderr)
+
+
+def _reconcile_issue_tracker_online_after_completion(store):
+    """Compatibility read-only entry: consume actual originals, never COUNT."""
+    from monitor.issue_tracker_remote_history_match import (
+        RemoteHistoryHold, _consume_current_project_online_original_inputs,
+    )
+    with _hold_terminal_current_project_online_originals(store) as observations:
+        if observations is None:
+            return None
+        try:
+            _consume_current_project_online_original_inputs(observations['writer'],
+                observations['owner'], observations['binding'], observations['authentication'],
+                _store=store, http_root=observations['http_root'])
+        except RemoteHistoryHold:
+            pass
+    result = observations['result']
     _report_issue_tracker_online_read_only_result(result)
     _publish_issue_tracker_online_observation_status(result)
-    if disposition_stopped and result and all(item.state == 'APPLIED' for item in result):
-        print('Issue Tracker UNSENT disposition unavailable; mutation disabled', file=sys.stderr)
-    if delivery_stopped and result and all(item.state == 'APPLIED' for item in result):
-        print('Issue Tracker C25 delivery disposition unavailable; mutation disabled', file=sys.stderr)
+    _report_terminal_online_dispositions(observations)
+    return result
+
+
+def _dispatch_issue_tracker_online_after_completion(store):
+    """Fixed terminal FIRST/R2, with live originals and no caller send selector.
+
+    A transport completion is not remote COMPLETE or FIFO release. The status
+    published after all owners exit describes an observation only; it cannot
+    be consumed as permission for another attempt. Typed HOLD keeps the actual
+    reconciliation result, while interruptions and failed finalizers propagate.
+    """
+    from monitor.issue_tracker_remote_history_match import RemoteHistoryHold, RemoteHistoryObservation
+    from monitor.issue_tracker_mutation_launcher import CountedMutationCompletion
+    completion = None
+    with _hold_terminal_current_project_online_originals(store) as observations:
+        if observations is None:
+            return None
+        blocked = any(type(item) is RemoteHistoryObservation
+            and (item.state == 'CONFLICT' or item.state == 'UNKNOWN' and item.attempt_count == 6)
+            for item in observations['result'])
+        if not blocked:
+            try:
+                completion = _dispatch_current_project_online_originals(observations['writer'],
+                    observations['owner'], observations['binding'], observations['authentication'],
+                    _store=store, http_root=observations['http_root'])
+            except RemoteHistoryHold:
+                pass
+        if completion is not None and (type(completion) is not CountedMutationCompletion
+                or type(completion.attempt_count) is not int or not 1 <= completion.attempt_count <= 6
+                or completion.outcome not in ('UNKNOWN', 'DEFINITE_REJECTION')
+                or completion.termination_confirmed is not True):
+            raise CollectionCycleHoldError('online transport observation unavailable')
+    result = observations['result']
+    if completion is None:
+        _report_issue_tracker_online_read_only_result(result)
+        if any(type(item) is RemoteHistoryObservation for item in result):
+            _publish_issue_tracker_online_observation_status(result)
+        else:
+            # HOLD may occur AFTER durable COUNT/CLAIM. An empty observation
+            # from before this attempt cannot claim the current count is zero.
+            _write_status_file(STATUS_DIR/'issue-tracker-online.status.json',
+                '.issue-tracker-online.', 'attempt_unproved', schema_version=1,
+                read_only=True, mutation_disabled=True)
+            print('Issue Tracker online attempt unproved; original count/UNKNOWN retained; mutation disabled',
+                file=sys.stderr)
+    else:
+        _write_status_file(STATUS_DIR/'issue-tracker-online.status.json',
+            '.issue-tracker-online.', 'retry_exhausted' if completion.attempt_count == 6
+            else 'attempted_unknown' if completion.outcome == 'UNKNOWN'
+            else 'attempted_definite_rejection', schema_version=1,
+            read_only=True, mutation_disabled=True)
+    _report_terminal_online_dispositions(observations)
     return result
 
 

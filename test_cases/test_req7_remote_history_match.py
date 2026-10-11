@@ -134,6 +134,25 @@ class Req7RemoteHistoryMatchDirectTests(unittest.TestCase):
             for item in cases: self.assertEqual('CONFLICT', self.observe(module, token, post=item).state)
             self.assertEqual(1, self.global_journal.inspect_global_unit(token, binding(), self.unit).attempt_count)
 
+    def test_absent_fence_and_exact_unchanged_history_remain_unresolved_not_complete_or_conflict(self):
+        module = load()
+        absent = deepcopy(self.metadata); absent['matchedDeveloperMetadata'].pop()
+        with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:
+            self.prepare(token)
+            seen = self.observe(module, token, post=deepcopy(self.empty), metadata=absent)
+            self.assertEqual(('UNKNOWN', 1, False, 2, 0),
+                (seen.state, seen.attempt_count, seen.fence_present,
+                 seen.history_rows_expected, seen.history_rows_matched))
+            self.assertEqual((1, 'UNKNOWN'),
+                (self.global_journal.inspect_global_unit(token, binding(), self.unit).attempt_count,
+                 self.global_journal.inspect_global_unit(token, binding(), self.unit).outcome))
+            self.assertFalse(hasattr(seen, 'permit'))
+            # A partial append is not the unchanged pre-send state, and even
+            # an empty tail conflicts when the actual fence is present.
+            partial = deepcopy(self.post); partial['sheets'][0]['data'][0]['rowData'].pop()
+            self.assertEqual('CONFLICT', self.observe(module, token, post=partial, metadata=absent).state)
+            self.assertEqual('CONFLICT', self.observe(module, token, post=deepcopy(self.empty)).state)
+
     def test_absent_fence_is_unknown_foreign_fence_or_bad_nonce_cannot_match(self):
         module = load()
         with fixture(self.root), self.owner.spreadsheet_owner(binding()) as token:

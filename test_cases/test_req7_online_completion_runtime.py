@@ -32,6 +32,42 @@ def cycle(stack, root, *, scope='prod', terminal=True):
 
 
 class OnlineCompletionRuntimeDirectTests(unittest.TestCase):
+    def test_default_terminal_lane_uses_fixed_dispatch_not_closed_read_only_consumer(self):
+        worker = persistence.WORKER; calls = []; store = object()
+        with mock.patch.object(worker, '_publish_stage_l_status_after_completion', side_effect=lambda value: calls.append(('status', value))), \
+                mock.patch.object(worker, '_publish_stage_l_local_after_completion', side_effect=lambda value: calls.append(('local', value))), \
+                mock.patch.object(worker, '_reconcile_issue_tracker_online_after_completion') as legacy, \
+                mock.patch.object(worker, '_dispatch_issue_tracker_online_after_completion', create=True,
+                    side_effect=lambda value: calls.append(('online', value))), \
+                mock.patch.object(worker.sys, 'stderr', io.StringIO()):
+            worker._publish_issue_tracker_lanes_after_completion(store)
+        self.assertEqual([('status', store), ('local', store), ('online', store)], calls)
+        legacy.assert_not_called()
+
+    def test_fixed_terminal_dispatch_has_only_store_and_refuses_before_owners(self):
+        import inspect
+        api = getattr(persistence.WORKER, '_dispatch_issue_tracker_online_after_completion', None)
+        self.assertTrue(callable(api), 'default terminal dispatch must hold the original owners itself')
+        self.assertEqual(('store',), tuple(inspect.signature(api).parameters))
+        from monitor import issue_tracker_local_commit as local, issue_tracker_token_launcher as tokens
+        with mock.patch.object(local, 'try_writer_owner') as writer, \
+                mock.patch.object(tokens, 'OwnedProjectTokenRefreshUnit') as authentication:
+            with self.assertRaises(persistence.WORKER.CollectionCycleHoldError): api(object())
+        writer.assert_not_called(); authentication.assert_not_called()
+
+    def test_fixed_terminal_dispatch_air_and_unfinished_cycle_do_not_enter_writer(self):
+        api = getattr(persistence.WORKER, '_dispatch_issue_tracker_online_after_completion', None)
+        self.assertTrue(callable(api), 'AIR or incomplete cycles cannot mint a default send opportunity')
+        from monitor import issue_tracker_local_commit as local
+        for scope, terminal in (('air', True), ('prod', False)):
+            with self.subTest(scope=scope), tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
+                store = cycle(stack, Path(directory).resolve(), scope=scope, terminal=terminal)
+                with mock.patch.object(local, 'try_writer_owner') as writer:
+                    if scope == 'air': self.assertIsNone(api(store))
+                    else:
+                        with self.assertRaises(persistence.WORKER.CollectionCycleHoldError): api(store)
+                writer.assert_not_called()
+
     def test_manifest_maps_default_online_original_lane_and_real_collector_flow(self):
         registry = json.loads((Path(__file__).resolve().parent/'script_test_manifest.json').read_text())
         module = 'test_cases.test_req7_online_completion_runtime'
@@ -100,7 +136,7 @@ class OnlineCompletionRuntimeDirectTests(unittest.TestCase):
             calls.clear()
             with mock.patch.object(worker, '_publish_stage_l_status_after_completion'), \
                     mock.patch.object(worker, '_publish_stage_l_local_after_completion', side_effect=fault), \
-                    mock.patch.object(worker, '_reconcile_issue_tracker_online_after_completion',
+                    mock.patch.object(worker, '_dispatch_issue_tracker_online_after_completion',
                         create=True, side_effect=lambda actual: calls.append(actual)), \
                     mock.patch.object(worker.sys, 'stderr', io.StringIO()) as stderr:
                 store = object(); worker._publish_issue_tracker_lanes_after_completion(store)
@@ -516,7 +552,7 @@ def observe_completion_lane(phase):
     return observe
 for phase, name in (("status", "_publish_stage_l_status_after_completion"),
     ("local", "_publish_stage_l_local_after_completion"),
-    ("online", "_reconcile_issue_tracker_online_after_completion")):
+    ("online", "_dispatch_issue_tracker_online_after_completion")):
     worker["run_collection_cycle_coordinator"].__globals__[name] = observe_completion_lane(phase)
 '''.replace('FAULT_LITERAL', repr(fault))
         field = '"persisted": persisted if action in ("persisted", "sigkill") else None,'

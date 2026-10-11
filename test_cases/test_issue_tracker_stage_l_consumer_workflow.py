@@ -140,7 +140,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         from test_cases.test_req7_sheets_read_decode import identity_response
         from monitor import issue_tracker_local_commit as local
         real_fixture=owner_fixture.scoped_fixture;real_load=quota_fixture.load
-        roots={};created=[];received=[];post_strict=[];closed=[];graphs=[]
+        roots={};created=[];received=[];post_strict=[];closed=[];graphs=[];exited=[]
         with ExitStack() as patches:
             @contextmanager
             def actual_fixture(root,module):
@@ -226,7 +226,9 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                 original_core=remote._hold_current_project_online_inputs
                 @contextmanager
                 def core(*args,**options):
-                    with original_core(*args,**options) as packet:yield packet
+                    try:
+                        with original_core(*args,**options) as packet:yield packet
+                    finally: exited.append(arguments['sheet'])
                     closed.append(arguments['sheet'])
                 with mock.patch.object(remote,'_hold_current_project_online_inputs',side_effect=core):
                     return actual_worker(**arguments)
@@ -244,8 +246,9 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         # CLAIM/send, unchanged durable originals/cycles and read-only status.
         self.assertEqual(2,len(created))
         self.assertEqual([('DEDICATED_PROJECT_CAPACITY',True)]*(4 if retry_probe else 2),received)
-        self.assertEqual(['ETH Cabling','ETH Cabling','IB Cabling','IB Cabling'] if retry_probe else
-            ['ETH Cabling','IB Cabling'],closed);self.assertTrue(post_strict)
+        expected_panels = ['ETH Cabling','ETH Cabling','IB Cabling','IB Cabling'] if retry_probe else ['ETH Cabling','IB Cabling']
+        self.assertEqual(expected_panels, exited)
+        self.assertEqual(expected_panels, closed); self.assertTrue(post_strict)
         self.assertEqual([5,5,5,5] if retry_probe else [5,5],[len(items) for items in graphs])
         for originals in post_strict:self.assertTrue(all(preserved for _info,preserved in originals))
         for originals in graphs:
@@ -377,6 +380,18 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             self.test_actual_default_worker_dedicated_quota_originals_outlive_strict_input_finalizers()
         self.assertEqual(['ETH Cabling','IB Cabling'],completed)
 
+    def test_actual_terminal_default_first_hook_keeps_native_c6_quota_claim_and_unknown_wire(self):
+        from test_cases.test_collection_cycle_persistence import WORKER
+        self.assertTrue(callable(getattr(WORKER, '_dispatch_issue_tracker_online_after_completion', None)),
+            'the terminal owner scope must run fixed FIRST without a closed observation permit')
+        actual_worker = self._default_worker_original_images; completed = []
+        def worker(**arguments):
+            result = actual_worker(**arguments, dispatch_probe=True, terminal_dispatch_probe=True)
+            completed.append(arguments['sheet']); return result
+        with mock.patch.object(self, '_default_worker_original_images', side_effect=worker):
+            self._exercise_default_dedicated_quota_originals()
+        self.assertEqual(['ETH Cabling', 'IB Cabling'], completed)
+
     def test_actual_fixed_default_retry_reopens_owned_reads_and_keeps_identical_unknown_wire(self):
         actual_worker=self._default_worker_original_images;completed=[]
         def worker(**arguments):
@@ -387,10 +402,46 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             self._exercise_default_dedicated_quota_originals(retry_probe=True)
         self.assertEqual(['ETH Cabling','IB Cabling'],completed)
 
+    def test_actual_terminal_default_retry_reconciles_original_unknown_before_identical_second_wire(self):
+        actual_worker = self._default_worker_original_images; completed = []
+        def worker(**arguments):
+            actual_worker(**arguments, dispatch_probe=True, terminal_dispatch_probe=True)
+            result = actual_worker(**arguments, dispatch_probe=True, retry_probe=True,
+                terminal_dispatch_probe=True)
+            completed.append(arguments['sheet']); return result
+        with mock.patch.object(self, '_default_worker_original_images', side_effect=worker):
+            self._exercise_default_dedicated_quota_originals(retry_probe=True)
+        self.assertEqual(['ETH Cabling', 'IB Cabling'], completed)
+
+    def test_actual_terminal_conflicting_history_stops_before_second_count_or_current_reads(self):
+        actual_worker = self._default_worker_original_images; completed = []
+        def worker(**arguments):
+            actual_worker(**arguments, dispatch_probe=True, terminal_dispatch_probe=True)
+            result = actual_worker(**arguments, dispatch_probe=True, retry_probe=True,
+                terminal_dispatch_probe=True, original_conflict_probe=True)
+            completed.append(arguments['sheet']); return result
+        # Only FIRST reaches the current source/quota graph. The conflict is
+        # decoded from a real subsequent historical TLS read, not a supplied
+        # observation or a patched reconciliation result.
+        with mock.patch.object(self, '_default_worker_original_images', side_effect=worker):
+            self._exercise_default_dedicated_quota_originals()
+        self.assertEqual(['ETH Cabling', 'IB Cabling'], completed)
+
+    def test_actual_terminal_post_count_read_expiry_keeps_unknown_without_claim_send_or_empty_status(self):
+        actual_worker = self._default_worker_original_images; completed = []
+        def worker(**arguments):
+            result = actual_worker(**arguments, dispatch_probe=True, terminal_dispatch_probe=True,
+                post_count_expiry_probe=True)
+            completed.append(arguments['sheet']); return result
+        with mock.patch.object(self, '_default_worker_original_images', side_effect=worker):
+            self._exercise_default_dedicated_quota_originals()
+        self.assertEqual(['ETH Cabling', 'IB Cabling'], completed)
+
     def _default_worker_original_images(self, *, native, whitelist_doc, private_context,
             global_root, writer_token, spreadsheet_token, binding, unit, qualified,
             settings, quota_raw, history_raw, reads, sheet, state, owner_module, global_journal,
-            dispatch_probe=False,retry_probe=False):
+            dispatch_probe=False,retry_probe=False,terminal_dispatch_probe=False,
+            original_conflict_probe=False,post_count_expiry_probe=False):
         """Actual worker composition; borrow already-held owners, never mint a permit.
 
         The surrounding real C6 fixture owns both original locks. Borrow only
@@ -447,6 +498,10 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             'activity': json.loads(reads[0]['discovery_response'].data),
             'insertion': json.loads(reads[0]['occupancy_response'].data),
             'row': json.loads(next(item['row_response'].data for item in reads if item['row_response'] is not None))}
+        if original_conflict_probe:
+            self.assertTrue(dispatch_probe and retry_probe and terminal_dispatch_probe)
+            documents['history_tail']['sheets'][0]['data'][0].setdefault('rowData', []).append(
+                {'values': [{'userEnteredValue': {'stringValue': 'foreign append'}}]})
         @contextmanager
         def borrowed_writer(project, publication):
             self.assertEqual((self.project, self.publication), (project, publication))
@@ -462,8 +517,13 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         def qualify(*args, **options):
             value = real_source(*args, **options); projections.append(value); return value
         def refresh(refresh_unit):
-            self.assertTrue(projections, 'genuine qualified source must precede the first OAuth child')
-            self.assertEqual([] if retry_probe else [((), None, 0)], reconciled)
+            if terminal_dispatch_probe and retry_probe:
+                # The terminal entry authenticates the existing counted unit
+                # before qualifying the current cycle for a new opportunity.
+                self.assertEqual([], projections); self.assertEqual([], reconciled)
+            else:
+                self.assertTrue(projections, 'genuine qualified source must precede the first OAuth child')
+                self.assertEqual([] if retry_probe else [((), None, 0)], reconciled)
             body = b'{"access_token":"owned-project-token","expires_in":3600}'
             reply = b'HTTP/1.1 200 OK\r\nContent-Length: '+str(len(body)).encode()+b'\r\nConnection: close\r\n\r\n'+body
             with native.server(reply) as (records, errors), ExitStack() as launched:
@@ -491,7 +551,12 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             native.certificates('sheets.googleapis.com')
             return actual
         def read(reader):
-            self.assertEqual(1,len(oauth)); self.assertTrue(projections)
+            self.assertEqual(1,len(oauth))
+            if terminal_dispatch_probe and retry_probe and not projections:
+                self.assertEqual([], reconciled)
+                self.assertIn(reader._kind, ('template_identity', 'template_headers', 'metadata', 'history_tail'))
+            else:
+                self.assertTrue(projections)
             body = response(documents[reader._kind]).data
             reply = b'HTTP/1.1 200 OK\r\nContent-Length: '+str(len(body)).encode()+b'\r\nConnection: close\r\n\r\n'+body
             with native.server(reply,hostname='sheets.googleapis.com',destination='sheets.googleapis.com') as (records,errors), ExitStack() as launched:
@@ -578,6 +643,21 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                                     for fd,_info,raw in duplicates)))
                     yield packet[0],verify
         with ExitStack() as boundary:
+            if post_count_expiry_probe:
+                self.assertTrue(dispatch_probe and terminal_dispatch_probe and not retry_probe)
+                # The continuously held FIRST lane performs its own original
+                # checks around this primitive; it does not call the separate
+                # record_receipted_original_attempt_intent helper.
+                actual_counter = global_journal.record_global_attempt_intent
+                actual_clock = fixed_reads._monotonic; expired = []
+                def expire_after_original_count(*args, **options):
+                    counted = actual_counter(*args, **options)
+                    expired.append(counted.attempt_count)
+                    return counted
+                boundary.enter_context(mock.patch.object(fixed_reads, '_monotonic',
+                    side_effect=lambda: actual_clock()+(31 if expired else 0)))
+                import io
+                diagnostic = boundary.enter_context(mock.patch.object(worker.sys, 'stderr', io.StringIO()))
             boundary.enter_context(mock.patch.object(local,'try_writer_owner',side_effect=borrowed_writer))
             boundary.enter_context(mock.patch.object(owner_module,'spreadsheet_owner',side_effect=borrowed_owner))
             boundary.enter_context(mock.patch.object(source,'qualify_prod_stage_l',side_effect=qualify))
@@ -595,7 +675,9 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                 side_effect=global_journal._hold_shared_retry_owned_attempt_wire if dispatch_probe else None))
             no_claim = boundary.enter_context(mock.patch.object(global_journal,'_hold_counted_original_wire',
                 side_effect=global_journal._hold_counted_original_wire if dispatch_probe else None))
-            no_count = boundary.enter_context(mock.patch.object(global_journal,'record_global_attempt_intent',wraps=global_journal.record_global_attempt_intent))
+            no_count = boundary.enter_context(mock.patch.object(global_journal,'record_global_attempt_intent',
+                **({'side_effect': expire_after_original_count} if post_count_expiry_probe
+                   else {'wraps': global_journal.record_global_attempt_intent})))
             no_send = boundary.enter_context(mock.patch.object(mutation,'_send_counted_original_once',
                 side_effect=native_send if dispatch_probe else None))
             boundary.enter_context(mock.patch.object(worker,'STATUS_DIR',self.root/'monitor/status'))
@@ -617,23 +699,97 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                     boundary.enter_context(mock.patch.object(admission,'time',SimpleNamespace(monotonic_ns=lambda:now)))
                 # Restore the real outer prerequisites of the default worker,
                 # not a fabricated target/cycle callback or a caller GO.
-                with cycles._hold_current_completed_cycle_replay(self.store) as verify_cycles, \
+                if terminal_dispatch_probe:
+                    observations = worker._dispatch_issue_tracker_online_after_completion(self.store)
+                    if retry_probe:
+                        self.assertEqual(1, len(observations))
+                        self.assertEqual(('CONFLICT' if original_conflict_probe else 'UNKNOWN', 1),
+                            (observations[0].state, observations[0].attempt_count))
+                    else:
+                        self.assertEqual((), observations)
+                    status = json.loads((self.root/'monitor/status/issue-tracker-online.status.json').read_bytes())
+                    expected_status = ('conflict' if original_conflict_probe else
+                        'attempt_unproved' if post_count_expiry_probe else 'attempted_unknown')
+                    self.assertEqual((1, expected_status, True, True),
+                        (status['schema_version'], status['state'], status['read_only'], status['mutation_disabled']))
+                else:
+                    with cycles._hold_current_completed_cycle_replay(self.store) as verify_cycles, \
                         _hold_current_project_online_target(writer_token) as actual_binding:
-                    self.assertEqual(binding,actual_binding);verify_cycles()
-                    if not retry_probe:
-                        self.assertEqual(((),None),remote._reconcile_pending_project_units_and_project_auth(
-                            writer_token,spreadsheet_token,actual_binding,_store=self.store))
-                    dispatched=worker._dispatch_current_project_online_originals(writer_token,spreadsheet_token,actual_binding,None,
-                        _store=self.store,http_root=self.root)
-                    verify_cycles()
-                self.assertEqual((2 if retry_probe else 1,401,'UNKNOWN',True),(dispatched.attempt_count,dispatched.status,
-                    dispatched.outcome,dispatched.termination_confirmed))
+                        self.assertEqual(binding,actual_binding);verify_cycles()
+                        if not retry_probe:
+                            self.assertEqual(((),None),remote._reconcile_pending_project_units_and_project_auth(
+                                writer_token,spreadsheet_token,actual_binding,_store=self.store))
+                        dispatched=worker._dispatch_current_project_online_originals(writer_token,spreadsheet_token,actual_binding,None,
+                            _store=self.store,http_root=self.root)
+                        verify_cycles()
+                    self.assertEqual((2 if retry_probe else 1,401,'UNKNOWN',True),(dispatched.attempt_count,dispatched.status,
+                        dispatched.outcome,dispatched.termination_confirmed))
             else:self.assertEqual((),worker._reconcile_issue_tracker_online_after_completion(self.store))
         # Independent facts outside the worker/core exception sanitizers.
         self.assertEqual([] if dispatch_probe else ['entered','actual-typed-hold'],consumed)
-        self.assertEqual([] if retry_probe else [((),None,0)],reconciled); self.assertEqual(1,len(oauth))
+        if post_count_expiry_probe:
+            self.assertEqual([1], expired)
+            self.assertEqual('Issue Tracker online attempt unproved; original count/UNKNOWN retained; mutation disabled\n',
+                diagnostic.getvalue())
+            self.assertEqual([((), None, 0)], reconciled); self.assertEqual(1, len(oauth))
+            self.assertTrue(projections); self.assertTrue(all(value == qualified for value in projections))
+            self.assertEqual([(kind, 1, 1, (), 0) for kind in ('template_identity', 'template_headers',
+                'whitelist', 'metadata', 'history_tail', 'activity', 'insertion', 'row')], issued)
+            self.assertEqual(1, len(packets)); self.assertEqual(1, len(graphs))
+            self.assertEqual(9, len(graphs[0][1])); self.assertEqual([], mutation_facts)
+            for fd, _info, _raw in graphs[0][1]:
+                with self.assertRaises(OSError) as caught: os.fstat(fd)
+                self.assertEqual(errno.EBADF, caught.exception.errno)
+            old_prepare.assert_not_called(); no_first.assert_called_once(); no_retry.assert_not_called()
+            no_count.assert_called_once(); no_claim.assert_not_called(); no_send.assert_not_called()
+            original_intent = global_journal.inspect_global_unit(spreadsheet_token, binding, unit)
+            self.assertEqual((1, 'UNKNOWN'), (original_intent.attempt_count, original_intent.outcome))
+            self.assertEqual(['ATTEMPT-1'], sorted(path.name for path in state.rglob('ATTEMPT-*')))
+            self.assertFalse(list(state.rglob('CLAIM-*'))); self.assertFalse(list(state.rglob('COMPLETE')))
+            after = {str(path.relative_to(state)): (path.stat().st_ino, path.read_bytes())
+                for path in state.rglob('*') if path.is_file()}
+            self.assertEqual(before, {name: after[name] for name in before})
+            stem = hashlib.sha256(binding.spreadsheet_id.encode()).hexdigest()+'.unit-'+unit.unit_id
+            self.assertEqual({stem+'.journal/ATTEMPT-1'}, set(after)-set(before))
+            self.assertEqual(cycle_before, {str(path): (path.stat().st_ino, path.read_bytes())
+                for path in self.store.status_dir.rglob('*') if path.is_file()})
+            return sheet+':actual-default-worker:post-count-expiry:unknown-no-claim-send'
+        if original_conflict_probe:
+            self.assertEqual(1, len(reconciled))
+            original_observations, auth, refresh_count = reconciled[0]
+            self.assertEqual([('CONFLICT', 1)],
+                [(item.state, item.attempt_count) for item in original_observations])
+            self.assertIs(oauth[0], auth); self.assertEqual(1, refresh_count)
+            self.assertEqual(1, len(oauth))
+            self.assertEqual([(kind, 1, 1, (), 0) for kind in
+                ('template_identity', 'template_headers', 'metadata', 'history_tail')], issued)
+            for values in (projections, packets, graphs, core_closed, mutation_facts):
+                self.assertEqual([], values)
+            for operation in (old_prepare, no_first, no_retry, no_claim, no_count, no_send):
+                operation.assert_not_called()
+            original_intent = global_journal.inspect_global_unit(spreadsheet_token, binding, unit)
+            self.assertEqual((1, 'UNKNOWN'), (original_intent.attempt_count, original_intent.outcome))
+            self.assertEqual(['ATTEMPT-1'], sorted(path.name for path in state.rglob('ATTEMPT-*')))
+            self.assertEqual(['CLAIM-1'], sorted(path.name for path in state.rglob('CLAIM-*')))
+            self.assertEqual(before, {str(path.relative_to(state)): (path.stat().st_ino, path.read_bytes())
+                for path in state.rglob('*') if path.is_file()})
+            self.assertEqual(cycle_before, {str(path): (path.stat().st_ino, path.read_bytes())
+                for path in self.store.status_dir.rglob('*') if path.is_file()})
+            self.assertFalse(list(state.rglob('COMPLETE')))
+            return sheet+':actual-default-worker:original-conflict:no-second-attempt'
+        if terminal_dispatch_probe and retry_probe:
+            self.assertEqual(1, len(reconciled))
+            observations, auth, refresh_count = reconciled[0]
+            self.assertEqual(1, len(observations))
+            self.assertEqual(('UNKNOWN', 1), (observations[0].state, observations[0].attempt_count))
+            self.assertIs(oauth[0], auth); self.assertEqual(1, refresh_count)
+        else:
+            self.assertEqual([] if retry_probe else [((),None,0)],reconciled)
+        self.assertEqual(1,len(oauth))
         self.assertTrue(projections); self.assertTrue(all(value==qualified for value in projections))
-        self.assertEqual([(kind,1,1,(),0) for kind in ('template_identity','template_headers',
+        historical_kinds = ('template_identity', 'template_headers', 'metadata', 'history_tail') \
+            if terminal_dispatch_probe and retry_probe else ()
+        self.assertEqual([(kind,1,1,(),0) for kind in historical_kinds + ('template_identity','template_headers',
             'whitelist','metadata','history_tail','activity','insertion','row')],issued)
         self.assertEqual(1,len(packets)); self.assertEqual(1,len(graphs)); self.assertEqual([True],core_closed)
         actual_settings,_whitelist,responses,prepared,authentication = packets[0]
