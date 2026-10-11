@@ -26,6 +26,206 @@ PREPARED = b"scratch-workbook-projection\n"
 
 
 class TrackerStateOwnerTests(unittest.TestCase):
+    def _assert_local_c6_publication_original(self, mutation=None):
+        from contextlib import ExitStack
+        from monitor import issue_tracker_local_commit as local, issue_tracker_settings_audit_allocation as allocation
+        from monitor import issue_tracker_unit_catalog as catalog, issue_tracker_attempt_journal as journal
+        self.initialize()
+        self.assertEqual(0o755,self.publication.stat().st_mode & 0o777)
+        with tracker_writer(self.project,self.publication) as token, ExitStack() as scope:
+            owner=local._owner(token)
+            sources=(owner.project_fd,owner.root_fd,owner.publication_fd,owner.lock_fd)
+            identities=tuple(journal._identity(os.fstat(fd)) for fd in sources)
+            held=catalog._Originals();raw=allocation._LocalC6Originals(token,scope)
+            scope.callback(raw.close)
+            raw.retain(held,projects=((self.project,self.publication.name,sources,identities),))
+            raw.verify()
+            if mutation is not None:
+                original=self.publication.stat().st_ino
+                if mutation=='replace':
+                    self.publication.rename(self.project/'owned-original-publication')
+                    self.publication.mkdir(mode=0o755);self.publication.chmod(0o755)
+                    self.assertNotEqual(original,self.publication.stat().st_ino)
+                elif mutation=='unsafe-mode':
+                    self.publication.chmod(0o777)
+                else:self.fail('unknown independent publication fault')
+                with self.assertRaises((LocalCommitHold,allocation.SettingsAuditHold)):raw.verify()
+                with self.assertRaises((LocalCommitHold,allocation.SettingsAuditHold)):scope.close()
+            else:
+                scope.close()
+                self.assertEqual(identities[2][:5],journal._identity(self.publication.stat())[:5])
+            self.assertEqual([],raw.slots)
+
+    def test_local_c6_raw_handoff_accepts_original_publication_0755(self):
+        self._assert_local_c6_publication_original()
+
+    def test_local_c6_raw_handoff_rejects_replaced_publication_0755(self):
+        self._assert_local_c6_publication_original('replace')
+
+    def test_local_c6_raw_handoff_rejects_world_writable_publication(self):
+        self._assert_local_c6_publication_original('unsafe-mode')
+
+    def test_local_c6_raw_sheet_tail_retains_lock_after_revoke_and_checks_old_receipt(self):
+        from contextlib import ExitStack
+        from monitor import issue_tracker_local_commit as local, issue_tracker_settings_audit_allocation as allocation
+        from monitor import issue_tracker_unit_catalog as catalog, issue_tracker_spreadsheet_owner as ownership
+        from test_cases.test_req7_spreadsheet_owner import scoped_fixture, binding
+        # Earlier real native fixtures reload canonical owner registries.
+        # Refresh references BEFORE issuance; production checks stay strict.
+        from test_cases.test_req7_settings_audit_allocation import load as load_allocation
+        allocation=load_allocation()
+        self.assertIs(allocation.ownership,ownership)
+        self.initialize()
+        global_root=self.project.parent/'local-sheet-originals'; global_root.mkdir(mode=0o700)
+        (global_root/'var/lib/http-ztp-container/issue-tracker').mkdir(parents=True,mode=0o700)
+        bound=binding();native_sheet=ownership.spreadsheet_owner
+        with tracker_writer(self.project,self.publication) as token,scoped_fixture(global_root,ownership):
+            generation=begin_generation(token,MANIFEST);record_intent(token,generation,PREPARED);commit(token,generation)
+            receipt=self.project/'.tracker/generations'/generation.generation_id/'RECEIPT'
+            old=(receipt.stat().st_ino,receipt.read_bytes());observed=[]
+            @contextmanager
+            def actual_sheet_last_finalizer():
+                with native_sheet(bound) as sheet:
+                    yield sheet
+                self.assertEqual({},ownership._ACTIVE)
+                with self.assertRaises(ownership.SpreadsheetOwnerHold):
+                    with native_sheet(bound):self.fail('overlapped original LOCK lost exclusion')
+                receipt.rename(self.project.parent/'retained-sheet-tail-receipt')
+                receipt.write_bytes(old[1]);receipt.chmod(0o600);observed.append(True)
+            with self.assertRaises(allocation.SettingsAuditHold):
+                with ExitStack() as scope:
+                    raw=allocation._LocalC6Originals(token,scope);scope.callback(raw.close)
+                    sheet=scope.enter_context(actual_sheet_last_finalizer())
+                    raw.sheet,raw.bound=sheet,bound
+                    raw.retain_sheet_originals(ownership._validated_owner(sheet,bound))
+                    held=catalog._Originals();parent=held.directory(local._owner(token).root_fd,'generations')
+                    folder=held.directory(parent,generation.generation_id);held.file(folder,'RECEIPT',16384)
+                    try:raw.retain(held)
+                    finally:held.close()
+                    raw.verify()
+            self.assertEqual([True],observed);self.assertEqual([],raw.slots)
+            self.assertEqual(old[1],receipt.read_bytes());self.assertNotEqual(old[0],receipt.stat().st_ino)
+            with native_sheet(bound) as new_sheet:ownership._validated_owner(new_sheet,bound)
+
+    def test_local_c6_raw_last_finalizer_rejects_same_bytes_receipt_replacement(self):
+        from contextlib import ExitStack
+        from monitor import issue_tracker_local_commit as local, issue_tracker_settings_audit_allocation as allocation
+        from monitor import issue_tracker_unit_catalog as catalog
+        self.initialize(); replaced=[]
+        with tracker_writer(self.project,self.publication) as token:
+            generation=begin_generation(token,MANIFEST);record_intent(token,generation,PREPARED);commit(token,generation)
+            receipt=self.project/'.tracker/generations'/generation.generation_id/'RECEIPT'
+            original=(receipt.stat().st_ino,receipt.read_bytes())
+            def finalizer():
+                receipt.rename(self.root/'retained-receipt-original')
+                receipt.write_bytes(original[1]);receipt.chmod(0o600);replaced.append(True)
+            with self.assertRaises(allocation.SettingsAuditHold):
+                with ExitStack() as scope:
+                    held=catalog._Originals();parent=held.directory(local._owner(token).root_fd,'generations')
+                    folder=held.directory(parent,generation.generation_id);held.file(folder,'RECEIPT',16384)
+                    raw=allocation._LocalC6Originals(token,scope);scope.callback(raw.close)
+                    try:raw.retain(held)
+                    finally:held.close()
+                    scope.callback(finalizer)
+                    raw.verify()
+            self.assertEqual([True],replaced);self.assertEqual(original[1],receipt.read_bytes())
+            self.assertNotEqual(original[0],receipt.stat().st_ino)
+            self.assertEqual([],raw.slots)
+
+    def test_local_c6_generation_first_recipient_stat_failure_closes_its_original_fd(self):
+        from contextlib import ExitStack
+        from monitor import issue_tracker_local_commit as local, issue_tracker_settings_audit_allocation as allocation
+        from monitor import issue_tracker_unit_catalog as catalog
+        self.initialize(); opened=[]; native=local._generation_fd; native_stat=os.fstat
+        primary=OSError('independent recipient first stat refusal')
+        with tracker_writer(self.project,self.publication) as token, ExitStack() as scope:
+            held=catalog._Originals(); held.directory(local._owner(token).root_fd,'generations')
+            raw=allocation._LocalC6Originals(token,scope); scope.callback(raw.close)
+            try:raw.retain(held)
+            finally:held.close()
+            generation=begin_generation(token,MANIFEST)
+            def acquire(*args,**kwargs):
+                result=native(*args,**kwargs)
+                opened.append(result[0] if isinstance(result,tuple) else result)
+                return result
+            refused=[]
+            def inspecting(fd):
+                if opened and fd==opened[-1] and not refused:
+                    refused.append(fd); raise primary
+                return native_stat(fd)
+            try:
+                with mock.patch.object(local,'_generation_fd',side_effect=acquire),mock.patch.object(os,'fstat',side_effect=inspecting):
+                    with self.assertRaises(OSError) as caught:raw.verify()
+                self.assertIs(primary,caught.exception);self.assertEqual(1,len(opened))
+                with self.assertRaises(OSError):native_stat(opened[0])
+            finally:
+                # Reap only a leaked original after assertions, to isolate RED.
+                for fd in opened:
+                    try:os.close(fd)
+                    except OSError:pass
+
+    def test_fixed_local_c6_owner_without_delivery_cannot_excuse_a_missing_projection(self):
+        from monitor import issue_tracker_state_owner as state
+        self.initialize()
+        projection=self.project/'.tracker/settings/outbox/0.json'
+        projection.rename(self.root/'owned-undelivered-projection')
+        before={str(p):(p.stat().st_ino,p.read_bytes()) for p in self.project.rglob('*') if p.is_file()}
+        with self.assertRaises(TrackerStateHold):
+            with state.tracker_local_c6_writer(self.project,self.publication):
+                self.fail('absent undelivered projection yielded local C6')
+        self.assertEqual(before,{str(p):(p.stat().st_ino,p.read_bytes()) for p in self.project.rglob('*') if p.is_file()})
+        self.assertEqual({},state._LOCAL_C6_READ_CONTEXT)
+
+    def test_local_c6_read_refuses_an_unissued_context(self):
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        self.initialize()
+        with tracker_writer(self.project,self.publication) as token:
+            with self.assertRaises(allocation.SettingsAuditHold):
+                allocation._read_completed_local_c6_k(token,object())
+            self.assertEqual((0,3),(current_k(token).revision,current_k(token).k))
+
+    def test_local_c6_raw_handoff_keeps_old_images_and_accepts_only_real_writer_generation(self):
+        from contextlib import ExitStack
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        from monitor import issue_tracker_unit_catalog as catalog
+        self.initialize()
+        with tracker_writer(self.project,self.publication) as token, ExitStack() as scope:
+            first=begin_generation(token,MANIFEST)
+            record_intent(token,first,PREPARED)
+            commit(token,first)
+            from monitor.issue_tracker_local_commit import _owner
+            held=catalog._Originals()
+            generations=held.directory(_owner(token).root_fd,'generations')
+            old=held.directory(generations,first.generation_id)
+            for name in ('STATE','MANIFEST','INTENT','RECEIPT'):
+                held.file(old,name,16384)
+            raw=allocation._LocalC6Originals(token,scope);scope.callback(raw.close)
+            try:raw.retain(held)
+            finally:held.close()
+            second=begin_generation(token,MANIFEST)
+            record_intent(token,second,PREPARED+b'changed\n')
+            commit(token,second)
+            raw.verify()
+            # An unissued directory is never a writer-produced addition.
+            extra=self.project/'.tracker/generations'/('gen-00000000000000000003-'+'a'*32)
+            extra.mkdir(mode=0o700)
+            with self.assertRaises(allocation.SettingsAuditHold):raw.verify()
+            # The stronger last raw check must also refuse the unexplained
+            # directory, while still conditionally closing every owned slot.
+            with self.assertRaises(allocation.SettingsAuditHold):scope.close()
+            self.assertEqual([],raw.slots)
+
+    def test_native_settings_context_unregistered_object_never_grants_missing_projections(self):
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        self.initialize()
+        with tracker_writer(self.project,self.publication) as token:
+            before={str(path.relative_to(self.project)):path.read_bytes()
+                for path in self.project.rglob('*') if path.is_file()}
+            with self.assertRaises(allocation.SettingsAuditHold):
+                allocation._read_native_completed_k(token,object())
+            self.assertEqual(before,{str(path.relative_to(self.project)):path.read_bytes()
+                for path in self.project.rglob('*') if path.is_file()})
+
     def _assert_settings_first_read_failure_revokes(self, primary):
         from monitor import issue_tracker_state_owner as state
         self.initialize(); native=state.current_k; tokens=[]

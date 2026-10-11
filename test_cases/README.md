@@ -1121,8 +1121,15 @@ COMPLETE/DELIVERED 对，只剔除该原单元明确交付的事件。后续未�
 独立 direct 验证缺失 tracker 不初始化、错误 scope 不读来源；实际多脚本流程验证正常
 暖／冷读取、后续 pending 与原 WIRE 保持、缺失交付证明 HOLD，以及真实 per-key 来源
 读取后同字节替换分配 HEADER 时不能返回成功。真实 worker 写出的只是状态文件；
-AIR、完整手动 preview 与 C6 提交仍使用原 owner，不借此放宽来源、发布或发送准入。
+AIR 与 C6 提交仍使用原 owner，不借此放宽来源、发布或发送准入。
 这组本地自动化不覆盖旧周期 R2、APPLIED／FIFO／高水位或默认在线发送闭环。
+
+完整手动 preview 的再次资格核对使用同一原件发现设置 owner，解决真实完成、
+DELIVERED 及两个审计投影归档后普通 writer 无法读取最高 K 的边界；C6 确认写入
+owner 不变。独立 direct 与真实 producer/worker/C6/native COUNT/固定本地 TLS 请求/
+四个完成读取/交付归档/fresh owner broker 流程保留原审计预期、K/W1 和逐源摘要。
+预览只读全部原件，不补 outbox、生成代次、再次 COUNT/CLAIM 或发送；同字节新 inode
+RECEIPT 必须拒绝且不修复。本地 TLS/进程及证书夹具不是真实设备或 Cloud 验收。
 
 `test_req7_sheets_read_plan` / `test_req7_sheets_read_decode` 与
 `test_req7_online_whitelist_read` 固定精确列／坐标、十四表身份、四张 row-2 多行字面表头
@@ -1967,6 +1974,24 @@ integrated transitions and current exact-tree full/check remain open.
 
 ### Multiple pending originals and original counted-wire/APPLIED reading
 
+2026-10-11 bounded C25 receiving: the default local settings factory now joins
+the complete claimed native delivery set under actual project/spreadsheet,
+ALL catalog/count/C6 and immutable COMPLETE/DELIVERED originals. A private
+live opaque context permits only those proved missing projections while
+reading the full K chain; it cannot be forged, copied, rebound, revoked or
+used across threads/contexts to obtain a fallback. The public delivery
+observation and physical archive still select exactly one original unit,
+not the private union. A new K event remains independently paired with its
+new outbox. Raw original holders survive ALL semantic finalizers and refuse
+same-byte C6 replacement at the final exit boundary. The new direct and
+actual two-unit TLS/C6/delivery/archive/cold-process workflows passed together
+(21 tests, 166.200s); this is diagnostic evidence, not runner approval or full.
+The old cold selected-unit expectation remains unchanged; only its interim
+default-ALL refusal is replaced by the independently specified C25 read.
+No existing timeout, negative proof boundary, skip or ledger is relaxed.
+Default online sending/G1, whole REQ7 closure and current exact-tree
+full/check remain open; the corresponding onsite scenarios remain NOT RUN.
+
 The shared FIFO reader joins ALL original project C6/APPLIED inputs and each
 project's immutable UNSENT records in one held scope. Overlapping pending keys
 follow catalog order across projects; generation numbers and later APPLIED
@@ -2581,3 +2606,157 @@ Historical PROJECT completeness remains unproved, so this private input edge
 refuses before FIRST/R2 COUNT/CLAIM/launcher and does not authorize sending.
 Whole REQ7, exact current full/check and all REAL_ENV remain open; no scenario
 was omitted or merged.
+
+Native C25 audit COUNT/CLAIM original reception: the public allocation reader
+and counted holder interpret the actual catalog-anchored allocation and ALL
+project origins, retaining their own immutable descriptors across subordinate
+reader finalizers. The final original-image check precedes descriptor closure;
+ordinary refusal exposes only typed HOLD, while operator interruption survives.
+FIRST may reuse one actual interpretation of the immutable catalog only inside
+its live issuer/context/process/thread-bound scope. Every borrower still checks
+the actual owner, ALL named/held full stat and bytes, exact namespace and every
+native or explicit legacy C6 bridge origin. No caller cache, callback, unit list,
+qualification result, count/claim authority or refreshed deadline is accepted.
+Mutable journals, COUNT/CLAIM, C6/source qualification and issued reads keep
+their original independent checks; the sole exact dispatch-name allowance is
+not a launch permit. Closed/copied/rebound context, foreign thread, original
+replacement and cross-context exit revoke the scope and clean owned originals.
+Independent direct expectations cover the issuer and finalizer boundaries;
+actual protected ETH/IB workflows cover native audit COUNT=1 UNKNOWN, CLAIM=1,
+one fixed local request, receipt replacement and original issued-read expiry.
+The ETH branch carries both independently authored original K events; the IB
+branch retains the original unaudited contract, not a second audit claim.
+The original 30-second contract and all earlier workflows remain unchanged.
+These local cases do not prove default worker G1, second-unit DELIVERED/archive,
+whole REQ7 or exact full/check; all corresponding REAL_ENV cases remain NOT RUN.
+
+Native C25 COMPLETE/DELIVERED receiving retains the catalog-anchored original
+HEADER/ASSIGNMENTS rather than reconstructing the one-unit legacy allocation.
+The real C6/NV/catalog/GLOBAL and four independent child/TLS completion reads
+must precede DELIVERED; broken native anchors never fall back to legacy images.
+COUNT/CLAIM retains the strict mutable settings graph. Completed-pair K changes
+and recoverable outbox archival instead retain immutable catalog/C6/EVENT
+originals while their existing transaction holders validate mutable current,
+outbox and appended events. The immutable leaf alone grants no authority.
+Independent literal-event direct and real multi-script workflows cover native
+delivery hashes, same-byte allocation replacement, owned directory acquisition
+and cleanup refusal, operator-interruption identity, open-time ancestor rebind,
+foreign FD reuse, normal archival and paired K append/replay. Existing legacy
+archive and K-transition expectations remain unchanged. The directory's private
+original handoff captures its checked identity inside acquisition, before any
+recipient stat, so cleanup never adopts a foreign reused slot. This development
+slice is not native second-unit delivery, default G1/NEW/send, whole REQ7,
+current formal full/check or REAL_ENV approval; no case was omitted or merged.
+
+Native C25 default local settings discovery now obtains its binding/unit locator
+from the original local DELIVERED HEADER's exact embedded native allocation
+image, not a nonexistent legacy folder or caller coordinates. The embedded
+image's canonical SHA and actual project/tracker identity are checked before
+ALL original catalog/COUNT/C6 and the actual COMPLETE/DELIVERED pair are joined.
+Locators never authorize missing projections or K changes on their own; the
+actual shared native allocation must still match. Legacy delivery bytes remain
+unchanged. Locator/journal originals outlive subordinate pair/C6 finalizers and
+are verified before the real sheet parent closes, with conditional original-FD
+cleanup. Independent direct expectations and true fresh-process workflows
+cover default discovery/archival/replay with empty parent context, tampered unit,
+recomputed foreign-project locator, native anchor loss/legacy shadow, removed
+native locator, same-byte original replacements and last-pair-finalizer drift.
+The explicit-unit and default cold tests retain their original 10-second bound.
+This closes only the first native unit's local default settings entry, not
+second-unit delivery, ALL historical delivered events, online worker/G1/NEW,
+whole REQ7 or current formal full/check. Field cases remain NOT RUN.
+
+Local C6 after native historical delivery now uses a separate fixed original
+handoff: strict ALL catalog/COUNT/C6/delivery semantics finish and their opaque
+issuer is revoked before generation creation. Actual project/sheet locks and
+checked duplicate original file, directory, ancestor and namespace FDs overlap
+that transition; no closed semantic verifier or reopened replacement becomes
+authority. Only real generation handles issued by this same live writer admit
+exact additions under its original generations directory. All old receipts,
+events, settings, COUNT/UNKNOWN, foreign project originals and delivery pairs
+stay fixed. The new opaque read-only K context rejects forged/unregistered
+copies and set-K, and revokes before all cleanup. Raw sheet graph/LOCK OFD
+outlives sheet-token revocation for a final original check; conditional cleanup
+retains foreign reused FD slots. Publication keeps its established safe 0755
+owner contract, not the private journal's 0700 contract, while named/held
+identity, unsafe modes and directory replacement remain checked.
+
+Independent directs cover new generation handoff, first recipient stat failure,
+last raw/sheet finalizer receipt replacement, actual lock exclusion, normal0755,
+same0755 replacement and0777 refusal. The actual protected multi-script normal
+COMPLETE/DELIVERED/archive → fresh preview → new eligible cycle → default local
+C6 workflow passed after the original publication-policy defect was explained
+and fixed. The real receipt-rebind and last-settings-finalizer workflow checks
+also passed, with former native and C6 issuers revoked before the late fault.
+No local pass closes hidden G1, whole REQ7 or current exact-tree full/check.
+REAL_ENV remains NOT RUN.
+
+New native delivery after an older event's original archive uses its own fixed
+raw ALL handoff, not the local C6 grant. Old native semantic issuers revoke
+before exclusive new STARTED/HEADER/DELIVERED writes; actual project/sheet
+locks, original files, namespace and ancestor FDs overlap that boundary. The
+selected new audit must still have its exact projection. Only names derived
+from its actual native allocation and COMPLETE enter the raw graph; the real
+writer FD overlaps read acquisition. Original writer and folder source cleanup
+uses acquisition-time identity, refuses recycled foreign FD slots and preserves
+the actual incoming operator interruption. Source folder close is inside the
+existing tail stack, before the final retained graph check. Real workflows
+cover normal selected-only archival, old HEADER replacement after STARTED,
+missing new projection before creation, foreign writer/folder slots, operator
+interruption and same-byte old HEADER replacement after actual last folder
+close. Partial/new evidence remains retained HOLD, not acknowledgement.
+
+The default worker now enters fixed C25 disposition only after its OAuth/read
+sheet owner closes, while the actual project writer, current target and cycle
+originals remain held. Fresh ALL C6/catalog/native audit/C19 originals select
+completed current-project units, never APPLIED labels or caller IDs. A new
+pair is created only when both exact derived names are absent; a partial pair
+is refused, never repaired. After this sheet scope finishes, fresh ALL native
+discovery issues a private temporary union and archives only selected original
+events; it revokes before finalizers. Typed C25 HOLD preserves the historical
+read-only reconciliation observation, with a fixed failure diagnostic, not a
+C25 success claim or sending authority. First-unit actual worker disposition,
+old-archive/new-unit selected-only disposition, partial-pair refusal and late
+cycle-original drift refusal passed their actual workflows. The original later
+unit disposition fixture creates that unit BEFORE the older archive; a separate
+default-worker workflow now creates its actual new C6/NV/catalog AFTER the old
+archive and delivers only the new event. That workflow and the unchanged
+partial-pair/late-cycle refusals passed together, without increasing their
+existing bounds. A separate allocation workflow also constructs
+the second C6/NV/catalog only AFTER the first original projection is archived.
+Its literal revision1 assignment excludes the old delivered event; old pair,
+COUNT1/UNKNOWN and raw evidence stay original. A fixed private allocation
+handoff acquires ALL genuine prior delivery evidence before the first NV
+STARTED write, then revokes semantic issuers. Actual preparation-owned additions
+are frozen before old/current FD cleanup, never inferred from directory names.
+Original shared and catalog namespaces stay checked through the last raw tail,
+under the existing actual catalog image budget. Real late-old-close delivery
+HEADER rebind, shared extra and catalog extra cases refuse at the NV boundary.
+
+The separate counted-foreign workflow completes, applies and archives a first
+project through actual native C6/NV and four TLS reads, closes ALL its owners,
+then creates a second real project. A newly acquired original foreign owner
+retains its genuine lock through the raw tail; C6/settlement semantics and NV
+preparation authority still revoke first. Existing caller tokens remain borrowed,
+not reissued or closed. The raw tail observes that foreign owner live with all
+semantic registries revoked, then final owner cleanup removes it. Identical
+literal event0 inputs in the two projects remain separately assigned; old
+inode/bytes and COUNT1/UNKNOWN stay unchanged, with no protected mutation.
+The three whole modules plus five real after-archive/cross-project workflows
+passed 274 tests; this is local development evidence only. Both independent
+cold-process orders also passed: the original pre-archive creation and the new
+AFTER-archive creation retain literal K7/revision1, no pending audit and two
+COUNT1/UNKNOWN units, with all original inode/bytes unchanged. The new fixture
+explicitly retains legacy one-unit refusal before using a fresh real default
+writer's ALL native discovery to archive the second event. It does not widen
+the legacy pair's exception to other missing projections. G1/NEW, whole REQ7, current
+exact-tree full/check and all field cases remain OPEN.
+
+The receiving slice's adjacent regression also passed 169 tests across the
+whole local commit, publication, state-owner and global-attempt modules plus
+default-worker direct/isolation, real three-script collector dispatch and
+remote-history direct/isolation/manifest contracts. Complete logs bind the
+exact dirty candidate; these runs do not approve the ledger or constitute a
+clean-tree formal full. The earlier three non-REQ10C full timing causes remain
+UNKNOWN; isolated or ordered local PASS is not their root-cause closure and
+does not justify a blind full rerun. Ordinary release gates remain closed.

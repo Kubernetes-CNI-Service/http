@@ -19,6 +19,7 @@ from monitor.issue_tracker_local_commit import (
 
 _COMPLETED_READ_CONTEXT = {}
 _COMPLETED_ORIGINAL_GUARDS = {}
+_LOCAL_C6_READ_CONTEXT = {}
 
 
 class TrackerStateHold(ValueError):
@@ -81,6 +82,14 @@ def tracker_writer(project, publication, *, completed_binding=None, completed_un
 
 def _verify_settings_originals(token):
     try:
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        context=_COMPLETED_READ_CONTEXT.get(token)
+        if type(context) is allocation._NativeCompletedSettingsContext:
+            allocation._native_settings_packet(token,context)
+        elif any(packet['token'] is token for packet in allocation._LIVE_NATIVE_SETTINGS_CONTEXTS.values()):
+            # Revoked/rebound public enrollment must not fall back to ordinary
+            # K merely because its projection currently happens to be present.
+            raise TrackerStateHold('native settings enrollment changed')
         verify = _COMPLETED_ORIGINAL_GUARDS.get(token)
         if verify is not None:
             verify()
@@ -146,6 +155,26 @@ def tracker_settings_writer(project, publication):
             _COMPLETED_READ_CONTEXT.pop(token, None)
 
 
+@contextmanager
+def tracker_local_c6_writer(project, publication):
+    """Fixed local C6 continuation after legitimate original audit archive."""
+    with _settings_original_scope() as scope:
+        token=None
+        try:
+            try:
+                token=scope.enter_context(writer_owner(project,publication))
+                from monitor.issue_tracker_settings_audit_allocation import _hold_completed_local_c6
+                context,verify=scope.enter_context(_hold_completed_local_c6(token))
+                if context is not None:_LOCAL_C6_READ_CONTEXT[token]=context
+                current_k(token); verify()
+            except (LocalCommitHold,KChainHoldError,OSError,TypeError,ValueError,KeyError) as exc:
+                raise TrackerStateHold('local C6 original handoff refused') from exc
+            yield token
+            current_k(token); verify()
+        finally:
+            _LOCAL_C6_READ_CONTEXT.pop(token,None)
+
+
 def current_k(token, *, spreadsheet_token=None, binding=None, completed_unit=None):
     """Read highest K; missing delivered projections require the actual paired owners.
 
@@ -153,11 +182,24 @@ def current_k(token, *, spreadsheet_token=None, binding=None, completed_unit=Non
     cannot authorize missing projections. This is not an online send permission.
     """
     try:
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        local_c6=_LOCAL_C6_READ_CONTEXT.get(token)
+        if local_c6 is not None:
+            if any(item is not None for item in (spreadsheet_token,binding,completed_unit)):
+                raise TrackerStateHold('local C6 cannot borrow another delivery context')
+            return allocation._read_completed_local_c6_k(token,local_c6)
+        if any(packet['token'] is token for packet in allocation._LIVE_LOCAL_C6_CONTEXTS.values()):
+            raise TrackerStateHold('local C6 enrollment changed')
         _verify_settings_originals(token)
         owner = _owner(token)
         context=(spreadsheet_token,binding,completed_unit)
         if all(item is None for item in context):
             context=_COMPLETED_READ_CONTEXT.get(token,context)
+            from monitor import issue_tracker_settings_audit_allocation as allocation
+            if type(context) is allocation._NativeCompletedSettingsContext:
+                result=allocation._read_native_completed_k(token,context)
+                _verify_settings_originals(token)
+                return result
             spreadsheet_token,binding,completed_unit=context
         if any(item is not None for item in context):
             if any(item is None for item in context):
@@ -190,10 +232,18 @@ def require_current_k(token, project, publication, expected):
 def set_k(token, *, new_k, actor, recorded_at, request_id, expected_revision):
     """Commit a K event under the same LK-P token; actor trust is external."""
     try:
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        if token in _LOCAL_C6_READ_CONTEXT or any(
+                packet['token'] is token for packet in allocation._LIVE_LOCAL_C6_CONTEXTS.values()):
+            raise TrackerStateHold('fixed local C6 enrollment is read-only')
         _verify_settings_originals(token)
         owner = _owner(token)
         context = _COMPLETED_READ_CONTEXT.get(token)
-        if context is not None:
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        if type(context) is allocation._NativeCompletedSettingsContext:
+            result=allocation._apply_native_completed_k_change(token,context,new_k=new_k,actor=actor,
+                recorded_at=recorded_at,request_id=request_id,expected_revision=expected_revision)
+        elif context is not None:
             from monitor.issue_tracker_settings_audit_allocation import apply_completed_k_change
             result = apply_completed_k_change(token,*context,new_k=new_k,actor=actor,
                 recorded_at=recorded_at,request_id=request_id,expected_revision=expected_revision)

@@ -21,7 +21,7 @@ from monitor.issue_tracker_manifest import (
     _runtime_skip, selected_panel_decision_sha256,
 )
 from monitor.issue_tracker_state_owner import (
-    TrackerStateHold, current_k, tracker_writer, tracker_settings_writer,
+    TrackerStateHold, current_k, tracker_writer, tracker_settings_writer, tracker_local_c6_writer,
 )
 from monitor.issue_tracker_switch_runtime import (
     SwitchRuntimeHoldError, read_switch_runtime_window,
@@ -401,7 +401,7 @@ def inspect_manual_stage_l_preview(store, *, panel, http_root, project, publicat
     status = inspect_stage_l(store, http_root=root, project=project,
                              publication=publication, template_path=template)
     prior = _bound_status(status, panel)
-    with tracker_writer(project, publication) as token:
+    with tracker_settings_writer(project, publication) as token:
         settings = current_k(token)
         snapshot = read_whitelist_workbook(template)
         qualified = qualify_prod_stage_l(store, http_root=root, settings=settings,
@@ -669,7 +669,7 @@ def commit_qualified_prod_local(
         if selected_panel is not None and (
                 type(selected_panel) is not str or selected_panel not in _PANELS):
             raise StageLHold("manual selected panel is invalid")
-        with tracker_writer(project, publication) as token:
+        with tracker_local_c6_writer(project, publication) as token:
             settings = current_k(token)
             snapshot = read_whitelist_workbook(template)
             if auto_admission is None and manual_admission is None:

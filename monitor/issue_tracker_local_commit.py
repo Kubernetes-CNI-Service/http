@@ -130,14 +130,17 @@ def _check(fd, *, directory, private=True):
     return info
 
 
-def _directory(parent, name, *, private=True):
+def _directory(parent, name, *, private=True, _return_original=False):
     fd = os.open(name, _flags(directory=True), dir_fd=parent)
     try:
-        _check(fd, directory=True, private=private)
+        info = _check(fd, directory=True, private=private)
     except BaseException:
         os.close(fd)
         raise
-    return fd
+    # Private original-FD handoff captures the identity inside acquisition,
+    # before its recipient can observe a refused stat or a reused slot. This
+    # is cleanup identity, not publication/mutation permission.
+    return (fd, _written_file_identity(info)) if _return_original else fd
 
 
 def _mkdir(parent, name):
@@ -509,7 +512,7 @@ def _owner(token):
     return owner
 
 
-def _generation_fd(owner, generation, *, token=None):
+def _generation_fd(owner, generation, *, token=None, _return_original=False):
     if not isinstance(generation, Generation) or _GEN.fullmatch(generation.generation_id) is None:
         raise LocalCommitHold("invalid generation handle")
     if token is not None and (generation.owner_token is not token
@@ -517,7 +520,9 @@ def _generation_fd(owner, generation, *, token=None):
         raise LocalCommitHold("generation handle was not issued to this writer acquisition")
     generations = _directory(owner.root_fd, "generations")
     try:
-        current = _directory(generations, generation.generation_id)
+        acquired = _directory(generations, generation.generation_id,
+            _return_original=_return_original)
+        current = acquired[0] if _return_original else acquired
         try:
             state = _json(_read(current, "STATE")[0],
                           {"schema_version", "generation_id", "sequence", "manifest_id"})
@@ -533,7 +538,7 @@ def _generation_fd(owner, generation, *, token=None):
         except BaseException:
             os.close(current)
             raise
-        return current
+        return acquired
     finally:
         os.close(generations)
 

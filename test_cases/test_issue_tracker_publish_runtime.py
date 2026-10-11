@@ -13,6 +13,86 @@ from test_cases.test_issue_tracker_switch_runtime import RuntimeWorkerFixture
 
 
 class StageLRuntimeDirectTests(RuntimeWorkerFixture, unittest.TestCase):
+    def test_complete_manual_preview_preserves_original_stage_l_hold_before_read_owner(self):
+        from monitor import issue_tracker_publish_runtime as runtime
+        store = SimpleNamespace(scope='prod', project_identity=self.project)
+        template = self.root/'monitor/Issue_Tracker_Template_v1.xlsx'
+        original = runtime.StageLHold('original source authority is unproved')
+        with mock.patch.object(runtime, '_paths',
+                return_value=(self.root, self.project, self.publication, template)), \
+                mock.patch.object(runtime, 'inspect_stage_l', side_effect=original), \
+                mock.patch.object(runtime, 'tracker_settings_writer') as owner:
+            with self.assertRaises(runtime.StageLHold) as refused:
+                runtime.inspect_manual_stage_l_preview(store, panel='Switch Status',
+                    http_root=self.root, project=self.project,
+                    publication=self.publication, template_path=template)
+        self.assertIs(original, refused.exception)
+        owner.assert_not_called()
+
+    def test_complete_manual_preview_requalifies_with_settings_read_owner(self):
+        from contextlib import contextmanager
+        from monitor import issue_tracker_publish_runtime as runtime
+        from monitor import issue_tracker_stage_l_consumer as consumer
+        # This is a separate prod contract, not a mutation of the AIR fixture.
+        store = SimpleNamespace(scope='prod', project_identity=self.project)
+        token, snapshot = object(), object()
+        status = {
+            'state': 'qualified', 'online': 'disabled_no_send_authority',
+            'project_key': 'independent-preview-project', 'scope': 'prod',
+            'k': 2, 'k_revision': 1, 'latest_cycle_id': 'cycle-2',
+            'window_cycle_ids': ['cycle-1', 'cycle-2'],
+            'whitelist_sha256': 'a'*64, 'template_sha256': 'b'*64,
+            'source_authority_sha256': 'c'*64, 'observations_sha256': 'd'*64,
+            'qualified_operation_count': 0, 'whitelist_skip_count': 0,
+            'panels': {'Switch Status': {'state': 'qualified'}},
+            'selected_decision_sha256': {'Switch Status': 'e'*64},
+        }
+        qualified = SimpleNamespace(
+            project_key='independent-preview-project', scope='prod', k=2,
+            cycle_ids=('cycle-1', 'cycle-2'), whitelist_sha256='a'*64,
+            template_sha256='b'*64, source_authority_sha256='c'*64,
+            observations_sha256='d'*64)
+        settings = SimpleNamespace(revision=1)
+        entered = []
+        @contextmanager
+        def selected(project, publication):
+            self.assertEqual((self.project, self.publication), (project, publication))
+            entered.append('settings-read-enter')
+            try:
+                yield token
+            finally:
+                entered.append('settings-read-exit')
+        def qualify(*arguments, **options):
+            self.assertEqual(['settings-read-enter'], entered)
+            self.assertIs(store, arguments[0])
+            self.assertIs(token, options['writer_token'])
+            self.assertIs(settings, options['settings'])
+            self.assertIs(snapshot, options['whitelist_snapshot'])
+            return qualified
+        def prepare(actual_token, actual_qualified, *arguments):
+            self.assertEqual(['settings-read-enter'], entered)
+            self.assertIs(token, actual_token)
+            self.assertIs(qualified, actual_qualified)
+            return {'independent-public-detail': True}, 'f'*64
+        template = self.root/'monitor/Issue_Tracker_Template_v1.xlsx'
+        with mock.patch.object(runtime, '_paths', return_value=(self.root, self.project, self.publication, template)), \
+             mock.patch.object(runtime, 'inspect_stage_l', return_value=status), \
+             mock.patch.object(runtime, 'tracker_writer',
+                side_effect=AssertionError('ordinary owner used for settings read')), \
+             mock.patch.object(runtime, 'tracker_settings_writer', side_effect=selected) as factory, \
+             mock.patch.object(runtime, 'current_k', return_value=settings), \
+             mock.patch.object(runtime, 'read_whitelist_workbook', return_value=snapshot), \
+             mock.patch.object(consumer, 'qualify_prod_stage_l', side_effect=qualify), \
+             mock.patch.object(runtime, 'selected_panel_decision_sha256', return_value='e'*64), \
+             mock.patch.object(runtime, '_prepare_manual_snapshot', side_effect=prepare):
+            result = runtime.inspect_manual_stage_l_preview(store, panel='Switch Status',
+                http_root=self.root, project=self.project, publication=self.publication,
+                template_path=template)
+        factory.assert_called_once_with(self.project, self.publication)
+        self.assertEqual(['settings-read-enter', 'settings-read-exit'], entered)
+        self.assertEqual({**status, 'manual_preview': {'independent-public-detail': True},
+                          'manual_snapshot_sha256': 'f'*64}, result)
+
     def test_default_prod_status_never_initializes_absent_tracker(self):
         import os
         from pathlib import Path

@@ -950,6 +950,187 @@ print('COLD_SHARED_FIFO_ORIGINALS_NO_HANDLES_OR_AUTHORITY')
 
 
 class UnitCatalogTests(unittest.TestCase):
+    def catalog_replay_api(self):
+        globals_=self.globals_api()
+        api=getattr(globals_,'_hold_native_catalog_replay',None)
+        self.assertTrue(callable(api),'actual immutable catalog must remain original through repeated reads')
+        return globals_,api
+
+    def test_catalog_replay_reuses_only_original_semantics_and_preserves_actual_count(self):
+        globals_,api=self.catalog_replay_api()
+        with ExitStack() as scope:
+            token=self.owner(scope);bound=binding()
+            self.module.register_pending_unit(token,bound,self.first)
+            globals_.prepare_global_unit(token,bound,self.first)
+            before=original_read_files(self.root)
+            actual=self.module._inspect
+            with api(token,bound,self.first) as verify:
+                with mock.patch.object(self.module,'_inspect',wraps=actual) as replay:
+                    for _ in range(3):
+                        with globals_._hold_catalog_originals(token,bound) as (units,check):
+                            self.assertEqual((self.first,),units);check()
+                        self.assertEqual(0,globals_.inspect_global_unit(token,bound,self.first).attempt_count)
+                    self.assertEqual(0,replay.call_count,'continuously held originals must not be reopened and reparsed')
+                verify()
+                result=globals_.record_global_attempt_intent(token,bound,self.first)
+                self.assertEqual((1,'UNKNOWN'),(result.attempt_count,result.outcome))
+                verify()
+            after=original_read_files(self.root)
+            added=set(after)-set(before)
+            self.assertEqual({STEM+'.unit-'+self.first.unit_id+'.journal/ATTEMPT-1'},
+                {name.rsplit('issue-tracker/',1)[-1] for name in added})
+            self.assertEqual(before,{name:value for name,value in after.items() if name in before})
+
+    def test_catalog_replay_original_rebind_refuses_before_count_and_retains_count_after(self):
+        globals_,api=self.catalog_replay_api()
+        for counted in (False,True):
+            with self.subTest(counted=counted),ExitStack() as scope:
+                # Each scenario owns an independent original namespace.
+                if counted:
+                    other=self.root/'other';other.mkdir()
+                    self.parent=other/'var/lib/http-ztp-container/issue-tracker'
+                    self.parent.mkdir(parents=True,mode=0o700)
+                    scope.enter_context(scoped_fixture(other,self.module.ownership))
+                    token=scope.enter_context(self.module.ownership.spreadsheet_owner(binding()))
+                else:token=self.owner(scope)
+                bound=binding();self.module.register_pending_unit(token,bound,self.first)
+                globals_.prepare_global_unit(token,bound,self.first)
+                original=self.parent/(STEM+'.units')/self.first.unit_id/'WIRE'
+                journal_dir=self.parent/(STEM+'.unit-'+self.first.unit_id+'.journal')
+                before=original_read_files(self.root);fault=[]
+                with self.assertRaises(globals_.GlobalAttemptHold):
+                    with api(token,bound,self.first):
+                        if counted:globals_.record_global_attempt_intent(token,bound,self.first)
+                        raw=original.read_bytes();old=original.stat().st_ino
+                        original.rename(self.root/('preserved-wire-'+str(counted)))
+                        original.write_bytes(raw);original.chmod(0o600)
+                        fault.append((old,original.stat().st_ino,raw,original.read_bytes()))
+                        globals_.inspect_global_unit(token,bound,self.first)
+                self.assertEqual(1,len(fault));self.assertNotEqual(fault[0][0],fault[0][1])
+                self.assertEqual(fault[0][2],fault[0][3])
+                self.assertEqual({'HEADER','INITIALIZED','ACTION-PREIMAGE','WIRE'}|
+                    ({'ATTEMPT-1'} if counted else set()),set(os.listdir(journal_dir)))
+                if counted:self.assertEqual('UNKNOWN',json.loads((journal_dir/'ATTEMPT-1').read_bytes())['outcome'])
+                self.assertFalse((self.parent/(STEM+'.unit-'+self.first.unit_id+'.dispatch')).exists())
+
+    def test_catalog_replay_copied_context_revokes_and_caller_overrides_are_not_accepted(self):
+        from contextvars import copy_context
+        globals_,api=self.catalog_replay_api()
+        for extra in ({'verify':lambda:None},{'units':(self.first,)},{'allow_additions':set()},{'qualified':True}):
+            with self.subTest(extra=tuple(extra)),self.assertRaises(TypeError):
+                with api(object(),object(),object(),**extra):self.fail('caller supplied original authority')
+        with ExitStack() as scope:
+            token=self.owner(scope);bound=binding()
+            self.module.register_pending_unit(token,bound,self.first)
+            globals_.prepare_global_unit(token,bound,self.first)
+            before=original_read_files(self.root)
+            with api(token,bound,self.first) as verify:
+                copied=copy_context()
+                with self.assertRaises(globals_.GlobalAttemptHold):
+                    with api(token,bound,self.first):self.fail('nested issuer adopted held result')
+                with self.assertRaises(globals_.GlobalAttemptHold):
+                    with globals_._hold_catalog_originals(object(),bound):self.fail('foreign owner borrowed graph')
+                verify()
+            def borrow():
+                with globals_._hold_catalog_originals(token,bound):self.fail('closed original scope survived context copy')
+            with self.assertRaises(globals_.GlobalAttemptHold):copied.run(borrow)
+            with self.assertRaises(globals_.GlobalAttemptHold):verify()
+            self.assertEqual(before,original_read_files(self.root))
+
+    def test_catalog_replay_retains_explicit_legacy_c6_bridge_originals(self):
+        globals_,api=self.catalog_replay_api()
+        with ExitStack() as scope:
+            writer,_project,_publication=self.local_owner(scope)
+            token=self.owner(scope);bound=binding()
+            original,_generation=self.c6_unit(writer)
+            self.module.register_pending_c6_unit(writer,token,bound,original)
+            globals_.prepare_global_unit(token,bound,original)
+            header=self.parent/(STEM+'.units')/original.unit_id/'HEADER'
+            self.assertIsNone(json.loads(header.read_bytes()).get('project_origin'))
+            origin=self.parent/(STEM+'.unit-'+original.unit_id+'.project-origin/ORIGIN')
+            journal_dir=self.parent/(STEM+'.unit-'+original.unit_id+'.journal');fault=[]
+            with self.assertRaises(globals_.GlobalAttemptHold):
+                with api(token,bound,original):
+                    raw=origin.read_bytes();old=origin.stat().st_ino
+                    origin.rename(self.root/'preserved-legacy-origin')
+                    origin.write_bytes(raw);origin.chmod(0o600)
+                    fault.append((old,origin.stat().st_ino,raw,origin.read_bytes()))
+                    with globals_._hold_catalog_originals(token,bound) as (_units,check):check()
+            self.assertEqual(1,len(fault));self.assertNotEqual(fault[0][0],fault[0][1])
+            self.assertEqual(fault[0][2],fault[0][3])
+            self.assertEqual({'HEADER','INITIALIZED','ACTION-PREIMAGE','WIRE'},set(os.listdir(journal_dir)))
+
+    def test_catalog_replay_live_context_rebind_and_cross_thread_verifier_refuse(self):
+        from contextvars import copy_context
+        import threading
+        globals_,api=self.catalog_replay_api()
+        with ExitStack() as scope:
+            token=self.owner(scope);bound=binding()
+            self.module.register_pending_unit(token,bound,self.first)
+            globals_.prepare_global_unit(token,bound,self.first)
+            before=original_read_files(self.root);cross_thread=[]
+            with api(token,bound,self.first) as verify:
+                borrowed=globals_._hold_catalog_originals(token,bound)
+                borrowed.__enter__()
+                swapped=globals_._HELD_CATALOG_REPLAY.set(object())
+                try:
+                    with self.assertRaises(globals_.GlobalAttemptHold):borrowed.__exit__(None,None,None)
+                finally:globals_._HELD_CATALOG_REPLAY.reset(swapped)
+                context=copy_context()
+                def worker():
+                    try:context.run(verify)
+                    except BaseException as error:cross_thread.append(type(error))
+                    else:cross_thread.append('accepted-foreign-thread')
+                thread=threading.Thread(target=worker);thread.start();thread.join(2)
+                self.assertFalse(thread.is_alive(),'owned verifier diagnostic did not finish')
+                self.assertEqual([globals_.GlobalAttemptHold],cross_thread)
+                verify()
+            self.assertEqual(before,original_read_files(self.root))
+
+    def test_catalog_replay_cross_context_exit_revokes_registry_and_closes_original_fds(self):
+        from contextvars import copy_context
+        globals_,api=self.catalog_replay_api()
+        with ExitStack() as scope:
+            token=self.owner(scope);bound=binding()
+            self.module.register_pending_unit(token,bound,self.first)
+            globals_.prepare_global_unit(token,bound,self.first)
+            before=original_read_files(self.root);fds=[];closed=[]
+            actual_close=self.module._Originals.close
+            def close(held):
+                fds.extend(entry[2] for entry in held.files)
+                fds.extend(entry[2] for entry in held.directories)
+                closed.append(True);return actual_close(held)
+            previous=globals_._HELD_CATALOG_REPLAY.get()
+            holder=api(token,bound,self.first);holder.__enter__();context=copy_context()
+            try:
+                with mock.patch.object(self.module._Originals,'close',close):
+                    with self.assertRaises(globals_.GlobalAttemptHold):context.run(holder.__exit__,None,None,None)
+                self.assertEqual({},globals_._LIVE_CATALOG_REPLAYS)
+                self.assertEqual([True],closed);self.assertTrue(fds)
+                for descriptor in fds:
+                    with self.assertRaises(OSError):os.fstat(descriptor)
+            finally:globals_._HELD_CATALOG_REPLAY.set(previous)
+            self.assertEqual(before,original_read_files(self.root))
+
+    def test_catalog_replay_actual_verifier_rejects_copied_live_scope_on_other_thread(self):
+        from contextvars import copy_context
+        import threading
+        globals_,api=self.catalog_replay_api()
+        with ExitStack() as scope:
+            token=self.owner(scope);bound=binding()
+            self.module.register_pending_unit(token,bound,self.first)
+            globals_.prepare_global_unit(token,bound,self.first)
+            with api(token,bound,self.first) as verify:
+                context=copy_context();seen=[]
+                def worker():
+                    try:context.run(verify)
+                    except BaseException as error:seen.append(type(error))
+                    else:seen.append('accepted-foreign-thread')
+                thread=threading.Thread(target=worker);thread.start();thread.join(2)
+                self.assertFalse(thread.is_alive(),'actual verifier thread did not finish')
+                self.assertEqual([globals_.GlobalAttemptHold],seen)
+                verify()
+
     def test_catalog_fixture_reload_preserves_preimported_real_local_owner_registry(self):
         # Ordinary full discovery imports consumers before catalog tests run.
         # A fixture must not replace their production owner registry behind
@@ -1404,6 +1585,58 @@ print('COLD_TWO_PROJECT_UNCOUNTED_ORIGINALS_NO_APPLIED_OR_HANDLES')
                 verify()
             self.assertEqual(before, original_read_files(self.root))
             self.assertEqual(handles, (dict(self.module.local._owner(writer).handles), dict(self.module.local._owner(other).handles)))
+
+    def test_foreign_project_owner_tail_outlives_c6_readers_without_reissuing_handles(self):
+        registering, reading = self.project_origins_api()
+        with ExitStack() as creation:
+            writer, project, _publication = self.local_owner(creation)
+            token = self.owner(creation)
+            first, _generation = self.c6_unit(writer)
+            registering(writer, token, binding(), first)
+        self.assertEqual({}, self.module.local._ACTIVE)
+        before = original_read_files(self.root)
+        with ExitStack() as scope:
+            token = self.owner(scope)
+            with reading(token, binding()) as (origins, verify_origins):
+                with ExitStack() as owner_tail:
+                    with self.module._hold_project_c6_from_origins(
+                            token, binding(), origins, _owner_tail=owner_tail) as (rows, verify):
+                        self.assertEqual((first,), tuple(row.unit for row in rows))
+                        self.assertEqual(1, len(self.module.local._ACTIVE))
+                        foreign = next(iter(self.module.local._ACTIVE))
+                        actual_owner = self.module.local._owner(foreign)
+                        self.assertEqual(str(project), str(actual_owner.project))
+                        self.assertEqual({}, actual_owner.handles)
+                        verify_origins(); verify()
+                    # Semantic C6 readers have exited, but the genuine owner
+                    # and its original exclusion must survive raw tail checks.
+                    self.assertIs(actual_owner, self.module.local._owner(foreign))
+                    self.assertEqual({}, actual_owner.handles)
+                    import fcntl
+                    fd = os.open(project / '.tracker/LOCK', os.O_RDWR)
+                    try:
+                        with self.assertRaises(BlockingIOError):
+                            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    finally:
+                        os.close(fd)
+                    verify_origins()
+                self.assertEqual({}, self.module.local._ACTIVE)
+                with self.assertRaises(self.module.local.LocalCommitHold):
+                    self.module.local._owner(foreign)
+        self.assertEqual(before, original_read_files(self.root))
+
+    def test_foreign_project_owner_tail_rejects_non_stack_before_acquisition(self):
+        with ExitStack() as scope:
+            token = self.owner(scope)
+            with mock.patch.object(self.module.local, '_try_original_writer_owner') as acquiring:
+                for tail in (object(), {'scope': ExitStack()}, True):
+                    reached = []
+                    with self.subTest(tail=type(tail).__name__), self.assertRaises(self.module.UnitCatalogHold):
+                        with self.module._hold_project_c6_from_origins(
+                                token, binding(), (), _owner_tail=tail):
+                            reached.append(True)
+                    self.assertEqual([], reached, 'caller-shaped owner tail yielded a proof')
+                acquiring.assert_not_called()
 
     def test_all_project_c6_missing_second_project_receipt_yields_no_valid_prefix_or_repair(self):
         api = self.project_c6_api(); registering, _reading = self.project_origins_api()

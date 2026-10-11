@@ -469,23 +469,24 @@ def _pin_catalog_prefix(token, binding, identity, held, *, new_allocation, _proj
                 if tuple(origin.unit for origin in origins) != units:
                     raise NvReservationHold()
                 rows, verify_projects = _project_proofs['scope'].enter_context(
-                    catalog._hold_project_c6_from_origins(token, binding, origins))
+                    catalog._hold_project_c6_from_origins(token, binding, origins,
+                        _owner_tail=_project_proofs['owner_tail']))
                 if tuple(row.unit for row in rows) != units:
                     raise NvReservationHold()
                 verify_origins(); held.verify(); verify_projects()
                 if tuple(unit for unit, _state in counts) != units:
                     raise NvReservationHold()
                 from monitor import issue_tracker_remote_history_match as remote
-                validators = []
+                validators = [];actual_writers={}
                 for row in rows:
                     if row.unit not in counted:
                         continue
                     matches = [(writer, local._owner(writer)) for writer, active in tuple(local._ACTIVE.items())
                         if active.pid == os.getpid()
                         and journal._identity(os.fstat(active.project_fd))[:2] == row.project_identity]
-                    if len(matches) != 1:
-                        raise NvReservationHold()
-                    writer, project = matches[0]; facts = local._json(row.c6_facts)
+                    if len(matches) != 1:raise NvReservationHold()
+                    writer,project=matches[0];actual_writers[writer]=project
+                    facts = local._json(row.c6_facts)
                     generation = local.Generation(facts['generation_id'], facts['sequence'], facts['manifest_id'], writer)
                     actual, verify_inputs, body, _keys = _project_proofs['scope'].enter_context(
                         remote._hold_settled_catalog_key_watermarks(writer, token, binding, row.unit, generation))
@@ -502,6 +503,14 @@ def _pin_catalog_prefix(token, binding, identity, held, *, new_allocation, _proj
                     verify_projects()
                 verify_settlement()
                 _project_proofs['verify'] = verify_settlement
+                from monitor import issue_tracker_settings_audit_allocation as allocation
+                for writer,project in actual_writers.items():
+                    events,check,raw=_project_proofs['scope'].enter_context(
+                        allocation._hold_native_allocation_prior_deliveries(writer,token,binding,held,
+                            _project_proofs['delivery_scope']))
+                    _project_proofs['delivery_events'].append(
+                        {'writer':writer,'owner':project,'events':events,'verify':check,'raw':raw})
+                verify_settlement();held.verify()
             # The same actual origin files were already captured in held
             # BEFORE this semantic read. They stay pinned while project C6
             # and locks survive the entire native creator/compiler/append.
@@ -522,7 +531,8 @@ def hold_catalog_nv_preparation(token, binding, identity, eth_plan, eth_response
     budget = catalog._OriginalImageBudget()
     old = catalog._Originals(_image_budget=budget); current = catalog._Originals(_image_budget=budget)
     prepared = None; active_budget = None; failed = False; primary=None; cleanup_problem=None
-    project_proofs = {'scope': ExitStack(), 'verify': lambda: None}
+    project_proofs = {'scope': ExitStack(), 'verify': lambda: None,
+                      'delivery_scope':ExitStack(),'delivery_events':[], 'owner_tail':ExitStack()}
     try:
         parent, _legacy, base, keys, ids = _inputs(token, binding, identity, generation_id, publish_id, sheet, requested_keys)
         if token in catalog._IMAGE_BUDGETS:
@@ -596,8 +606,11 @@ def hold_catalog_nv_preparation(token, binding, identity, eth_plan, eth_response
                   'current': current, 'catalog': catalog_fd, 'units': units, 'stem': stem, 'parent': parent,
                   'additions': {name, started}, 'appended': None, 'registered': False, 'unit': None, 'indexed': None,
                   'budget': budget, 'origin': None, 'settings':None,'settings_scope':ExitStack(),
-                  'failed': False, 'verify_prior_c6': project_proofs['verify']}
+                  'failed': False, 'verify_prior_c6': project_proofs['verify'],
+                  'prior_delivery_events':project_proofs['delivery_events']}
         prepared = _CatalogNvPreparation(seen); _ACTIVE_CATALOG_PREPARATIONS[prepared] = record
+        for prior_delivery in record['prior_delivery_events']:
+            if prior_delivery['raw'] is not None:prior_delivery['raw'].bind(record)
         _verify_catalog_preparation(prepared)
         yield prepared
         _verify_catalog_preparation(prepared)
@@ -611,6 +624,14 @@ def hold_catalog_nv_preparation(token, binding, identity, eth_plan, eth_response
         if prepared is not None:
             retained = _ACTIVE_CATALOG_PREPARATIONS.pop(prepared, None)
             if retained is not None:
+                for prior_delivery in retained['prior_delivery_events']:
+                    if prior_delivery['raw'] is not None:
+                        try:prior_delivery['raw'].freeze(retained)
+                        except BaseException as exc:
+                            failed=True
+                            if cleanup_problem is None:cleanup_problem=exc
+                            if not isinstance(exc,Exception) and primary is None:primary=exc
+            if retained is not None:
                 closes.append(retained['settings_scope'].close)
             if retained is not None and retained['indexed'] is not None:
                 closes.append(retained['indexed'].close)
@@ -621,7 +642,10 @@ def hold_catalog_nv_preparation(token, binding, identity, eth_plan, eth_response
                     closes.append(lambda:catalog._close_original(origin['folder'],origin['identity']))
         if active_budget is not None and catalog._IMAGE_BUDGETS.get(token) is active_budget:
             catalog._IMAGE_BUDGETS.pop(token)
-        closes.extend((project_proofs['scope'].close,current.close,old.close))
+        # Revoke semantic/preparation authority first. A genuine foreign owner
+        # alone retains original exclusion through the raw graph's final check.
+        closes.extend((project_proofs['scope'].close,current.close,old.close,
+                       project_proofs['delivery_scope'].close,project_proofs['owner_tail'].close))
         # Every owned graph is finalized even when settings' exit verification
         # refuses or interrupts. Revoke registries first; never leak a live
         # preparation/budget because the first finalizer raised.
@@ -648,6 +672,7 @@ def _verify_catalog_preparation(prepared):
         raise NvReservationHold()
     record['old'].verify(parent_additions=record['additions'], appended_to=record['appended'])
     record['verify_prior_c6']()
+    for prior_delivery in record['prior_delivery_events']:prior_delivery['verify']()
     record['current'].verify()
     if record['indexed'] is not None:
         record['indexed'].verify()

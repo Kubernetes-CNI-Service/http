@@ -9,6 +9,7 @@ fresh checks, reservations, FIFO and COMPLETE still need integration.
 """
 from contextlib import contextmanager, ExitStack
 from dataclasses import dataclass, field
+from contextvars import ContextVar
 import hashlib
 import json
 import os
@@ -22,6 +23,8 @@ from monitor import issue_tracker_send_intent as compiled
 
 _LIVE_WIRE_CLAIMS = weakref.WeakKeyDictionary()
 _WIRE_CLAIM_GUARD = threading.Lock()
+_HELD_CATALOG_REPLAY = ContextVar('req7_original_catalog_replay', default=None)
+_LIVE_CATALOG_REPLAYS = {}
 
 
 class GlobalAttemptHold(ValueError):
@@ -276,12 +279,113 @@ def _catalog_present(owner):
 
 
 @contextmanager
+def _hold_native_catalog_replay(token, binding, selected_unit):
+    """Interpret ONE catalog while its ALL immutable originals stay held.
+
+    This only avoids reopening/reparsing identical catalog locators. Every
+    borrowed read still checks the actual owner, all named/held full stat and
+    bytes, complete catalog/origin/NV/audit graph and exact namespace. C6,
+    current source qualification, mutable counts/claims and issued deadlines
+    remain independent actual observations. No caller cache/verifier or GO.
+    """
+    from monitor import issue_tracker_unit_catalog as catalog
+    held=catalog._Originals();key=None;issued=None;packet=None
+    alive=False;failed=False;primary=None
+    try:
+        if _HELD_CATALOG_REPLAY.get() is not None:raise GlobalAttemptHold()
+        owner=ownership._validated_owner(token,binding)
+        if not _catalog_present(owner):
+            def verify_legacy():
+                if ownership._validated_owner(token,binding) is not owner or _catalog_present(owner):
+                    raise GlobalAttemptHold()
+            yield verify_legacy
+            verify_legacy()
+        else:
+            _folder,units,_previous=catalog._inspect(token,binding,held)
+            if selected_unit not in units:raise GlobalAttemptHold()
+            # Independently validate all origin records while retaining our
+            # own ALL graph, including the explicit older C6 bridge whose
+            # HEADER never contained a native project_origin anchor.
+            with _hold_catalog_originals(token,binding) as (observed,check):
+                if observed!=units:raise GlobalAttemptHold()
+                parent=owner.directories[-1][0];stem=owner.lock_name[:-5]
+                if any(name.endswith('.project-origin') for name in held.namespace[2]):
+                    with catalog.hold_pending_project_origins(token,binding) as (origins,check_origins):
+                        if tuple(row.unit for row in origins)!=units:raise GlobalAttemptHold()
+                        captured={name for p,name,*_rest in held.directories if p==parent}
+                        for unit in units:
+                            name=stem+'.unit-'+unit.unit_id+'.project-origin'
+                            if name not in captured:
+                                folder=held.directory(parent,name)
+                                for entry in ('WITNESS','STARTED','ORIGIN'):
+                                    held.file(folder,entry,local._MAX_MANIFEST)
+                        check_origins();check();held.verify()
+                check();held.verify()
+            before=held.namespace[2]
+            dispatch=stem+'.unit-'+selected_unit.unit_id+'.dispatch'
+            alive=True
+            def verify_graph():
+                if (not alive or ownership._validated_owner(token,binding) is not owner):
+                    raise GlobalAttemptHold()
+                # This exact name allowance grants no count/claim. Mutable
+                # originals remain independently checked by their real holders.
+                additions={dispatch} if dispatch not in before and dispatch in os.listdir(parent) else set()
+                held.verify(parent_additions=additions)
+            def require_issuer():
+                if (not alive or issued is None or packet is None
+                        or _HELD_CATALOG_REPLAY.get() is not issued
+                        or _LIVE_CATALOG_REPLAYS.get(issued) is not packet
+                        or packet[5:]!=(os.getpid(),threading.get_ident())):
+                    raise GlobalAttemptHold()
+            def verify():
+                require_issuer();verify_graph();require_issuer()
+            held.sync();verify_graph()
+            issued=object()
+            packet=(token,binding,owner,units,verify,os.getpid(),threading.get_ident())
+            _LIVE_CATALOG_REPLAYS[issued]=packet
+            key=_HELD_CATALOG_REPLAY.set(issued)
+            verify()
+            yield verify
+            verify()
+    except Exception:failed=True
+    except BaseException as exc:primary=exc
+    finally:
+        alive=False
+        # Revoke first. A Token from another Context cannot be reset there,
+        # but that refusal must never skip owned original descriptor cleanup.
+        if issued is not None:_LIVE_CATALOG_REPLAYS.pop(issued,None)
+        try:
+            if key is not None:_HELD_CATALOG_REPLAY.reset(key)
+        except Exception:failed=True
+        except BaseException as exc:
+            if primary is None:primary=exc
+        try:held.close()
+        except Exception:failed=True
+        except BaseException as exc:
+            if primary is None:primary=exc
+    if primary is not None:raise primary
+    if failed:raise GlobalAttemptHold() from None
+
+
+@contextmanager
 def _hold_catalog_originals(token, binding):
     """Fixed native catalog only; ALL origin images or no prefix, never paths."""
     from monitor import issue_tracker_unit_catalog as catalog
     failed = False
     try:
         owner = ownership._validated_owner(token, binding)
+        active=_HELD_CATALOG_REPLAY.get()
+        if active is not None:
+            original=_LIVE_CATALOG_REPLAYS.get(active)
+            if (original is None or original[0] is not token or original[1]!=binding
+                    or original[2] is not owner
+                    or original[5:]!=(os.getpid(),threading.get_ident())):
+                raise GlobalAttemptHold()
+            verify=original[4]
+            verify()
+            yield original[3],verify
+            verify()
+            return
         stem = owner.lock_name[:-5]; parent = owner.directories[-1][0]
         with ExitStack() as scope:
             units, verify_catalog = scope.enter_context(catalog.hold_pending_units(token, binding))
@@ -1774,11 +1878,12 @@ def _hold_continuous_owned_attempt_wire(
                 _hold_original_replay_inputs(store,Path(store.project_identity),whitelist_path) as verify_inputs, \
                 _hold_current_completed_cycle_replay(store) as verify_cycles, \
                 _hold_history_originals(writer_token) as verify_receipts, \
-                _hold_receipted_audit_originals(writer_token,token,binding,unit) as verify_audits:
+                _hold_receipted_audit_originals(writer_token,token,binding,unit) as verify_audits, \
+                _hold_native_catalog_replay(token,binding,unit) as verify_catalog:
             original=facts()
             with _hold_reserved_quota_originals(token,binding,original[1].identity,unit) as verify_quota:
                 def verify_originals():
-                    verify_inputs(); verify_cycles(); verify_receipts(); verify_audits(); verify_quota()
+                    verify_inputs(); verify_cycles(); verify_receipts(); verify_audits(); verify_quota(); verify_catalog()
                 def verify_sources():
                     verify_originals()
                     if facts()!=original: raise GlobalAttemptHold()

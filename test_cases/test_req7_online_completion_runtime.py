@@ -138,9 +138,51 @@ class OnlineCompletionRuntimeDirectTests(unittest.TestCase):
             self.assertEqual('', stream.getvalue(), 'historical APPLIED is not current online GO')
 
 
+class OnlineCompletionFixtureIsolationTests(unittest.TestCase):
+    def test_prior_catalog_then_owner_reload_is_refreshed_before_completion_owners(self):
+        from test_cases.test_req7_unit_catalog import load as load_catalog
+        from test_cases.test_req7_spreadsheet_owner import load as load_owner
+        previous = load_catalog(reset_dependencies=False)
+        for name in ('issue_tracker_global_attempt_journal',
+                     'issue_tracker_remote_history_match',
+                     'issue_tracker_retained_inventory'):
+            importlib.import_module('monitor.'+name)
+        expected = load_owner()
+        self.assertIsNot(previous.ownership, expected)
+        case = OnlineCompletionRuntimeWorkflowTests()
+        try:
+            case.setUp()
+            from monitor import issue_tracker_unit_catalog as actual
+            self.assertIsNot(previous, actual)
+            self.assertIs(expected, actual.ownership,
+                'catalog must capture the actual registry before completion token issuance')
+            for name in ('issue_tracker_global_attempt_journal',
+                         'issue_tracker_enrollment_journal',
+                         'issue_tracker_history_preread_journal',
+                         'issue_tracker_remote_history_match',
+                         'issue_tracker_retained_inventory'):
+                with self.subTest(consumer=name):
+                    module = importlib.import_module('monitor.'+name)
+                    self.assertIs(expected, module.ownership,
+                        'all actual completion consumers must capture the same preowner registry')
+            self.assertEqual({}, expected._ACTIVE)
+        finally:
+            case.doCleanups()
+
+
 class OnlineCompletionRuntimeWorkflowTests(unittest.TestCase):
     _Fixture = native.OnlineReconciliationWorkflowTests._Fixture
-    setUp = native.OnlineReconciliationWorkflowTests.setUp
+    def setUp(self):
+        from test_cases.test_req7_global_attempt_journal import load as load_global
+        load_global()
+        native.OnlineReconciliationWorkflowTests.setUp(self)
+        from test_cases.test_req7_unit_catalog import load as load_catalog
+        from test_cases.test_req7_retained_global_inventory import load as load_inventory
+        # Bind to the current owner registry before issuing any completion
+        # token. Full-suite consumers can outlive a prior fixture reload.
+        load_catalog(reset_dependencies=False)
+        native.native.load()
+        load_inventory(reset_support=False)
     server = native.OnlineReconciliationWorkflowTests.server
     certificates = native.OnlineReconciliationWorkflowTests.certificates
     child_fixture = native.OnlineReconciliationWorkflowTests.child_fixture
@@ -150,7 +192,7 @@ class OnlineCompletionRuntimeWorkflowTests(unittest.TestCase):
     intercept = native.OnlineReconciliationWorkflowTests.intercept
     api = OnlineCompletionRuntimeDirectTests.api
 
-    def owners(self, stack):
+    def owners(self, stack, *, target_id=None):
         from test_cases.test_req7_history_read_launcher import document, TARGET, scoped_fixture
         from monitor import issue_tracker_local_commit as local
         from monitor import issue_tracker_spreadsheet_owner as ownership
@@ -158,18 +200,117 @@ class OnlineCompletionRuntimeWorkflowTests(unittest.TestCase):
         from monitor import issue_tracker_credential_shape as private
         from monitor.issue_tracker_sdk_authentication import AuthenticatedToken
         import time
+        target_id=TARGET if target_id is None else target_id
         project = self.root/'project'; publication = project/'99-output-monitor'
         publication.mkdir(mode=0o700); local.create_local_commit_store(project, publication)
-        config = project/'01-global.yaml'; config.write_text(json.dumps(document(target=TARGET, cycles=3))); config.chmod(0o644)
+        config = project/'01-global.yaml'; config.write_text(json.dumps(document(target=target_id, cycles=3))); config.chmod(0o644)
         credentials = self.root/'var/lib/http-ztp-container/service-account'; credentials.mkdir(parents=True, mode=0o700)
-        listing = credentials/'issue-tracker-spreadsheet-whitelist.json'; listing.write_text(json.dumps([TARGET])); listing.chmod(0o600)
+        listing = credentials/'issue-tracker-spreadsheet-whitelist.json'; listing.write_text(json.dumps([target_id])); listing.chmod(0o600)
         (self.root/'var/lib/http-ztp-container/issue-tracker').mkdir(mode=0o700)
-        binding = target.bind_online_target(document(target=TARGET, cycles=3), target.freeze_target_allowlist(listing.read_bytes()))
+        binding = target.bind_online_target(document(target=target_id, cycles=3), target.freeze_target_allowlist(listing.read_bytes()))
         for module in (ownership, target, private): stack.enter_context(scoped_fixture(self.root, module))
         writer = self.initial_owners.enter_context(local.writer_owner(project, publication))
         owner = self.initial_owners.enter_context(ownership.spreadsheet_owner(binding))
         self.initial_writer = writer
         return local, ownership, writer, owner, binding, AuthenticatedToken('owned-private-token', time.time()+3600), config
+
+    def _exercise_default_native_delivery(self, *, later=False,partial=False,late_cycle=False,archive_before_new=False):
+        from test_cases.test_req7_remote_history_match import Req7OwnedHistoryMatchWorkflowTests as actual
+        from monitor import issue_tracker_mutation_launcher as mutation
+        from monitor import issue_tracker_token_launcher as tokens
+        from monitor import issue_tracker_history_read_launcher as reads
+        from monitor import issue_tracker_remote_history_match as match
+        with ExitStack() as stack,ExitStack() as initial:
+            self.root=self.root.resolve();self.initial_owners=initial
+            stack.enter_context(mock.patch.object(persistence.WORKER,'STATUS_DIR',self.root/'monitor/status'))
+            store=cycle(stack,self.root);facts={}
+            self.settings_audit_oracle=lambda:actual.settings_audit_oracle(self)
+            self.catalog_later_settings_audit_oracle=lambda:actual.catalog_later_settings_audit_oracle(self)
+            self.native_audit_completed=lambda held,**options:actual.native_audit_completed(self,held,**options)
+            if later:
+                allocation,writer,owner,bound,first,unit,_projection,_pair=actual.native_second_audit_completed(
+                    self,stack,fixture_facts=facts,archive_before_new=archive_before_new)
+                if not archive_before_new:
+                    allocation.cleanup_completed_settings_outbox(writer,owner,bound,first)
+                self.assertFalse((self.root/'project/.tracker/settings/outbox/0.json').exists())
+            else:
+                allocation,writer,owner,bound,unit,_allocated,_images=actual.native_audit_completed(self,stack,fixture_facts=facts)
+            from monitor import issue_tracker_remote_history_match as completion
+            completion.record_owned_applied_evidence(writer,owner,bound,unit,generation=facts['generation'])
+            completion.record_owned_applied_key_watermarks(writer,owner,bound,unit,generation=facts['generation'])
+            tracker=self.root/'project/.tracker';projection=tracker/('settings/outbox/1.json' if later else 'settings/outbox/0.json')
+            original_projection=projection.stat().st_ino,projection.read_bytes()
+            delivered=tracker/('settings-audit-delivery-'+unit.unit_id if later else 'settings-audit-delivery')
+            if partial:
+                allocation.record_completed_settings_delivery(writer,owner,bound,unit)
+                (delivered/'DELIVERED').rename(self.root/'retained-partial-delivery-marker')
+            originals={str(path.relative_to(self.root)):(path.stat().st_ino,path.read_bytes())
+                for path in self.root.rglob('*') if path.is_file() and path!=projection
+                and str(path.relative_to(self.root)).startswith(('project/','var/lib/http-ztp-container/'))}
+            if not partial:self.assertFalse(delivered.exists())
+            initial.close();owned=[];refresh=tokens.OwnedProjectTokenRefreshUnit.refresh_once
+            real_reconcile=completion._reconcile_pending_project_units_and_project_auth
+            def reconcile(actual_writer,actual_owner,binding,**options):
+                owned.append((actual_writer,actual_owner,binding))
+                return real_reconcile(actual_writer,actual_owner,binding,**options)
+            def actual_authentication(refresh_unit):
+                actual_writer,actual_owner,binding=owned[-1]
+                self.assertIs(actual_owner,refresh_unit._owner_token);self.assertEqual(bound,binding)
+                with mock.patch.object(tokens.OwnedProjectTokenRefreshUnit,'refresh_once',refresh):
+                    auth,_credential,_raw=self.project_auth(stack,allocation.ownership,actual_owner,binding)
+                return auth
+            finalize=allocation._finalize_native_completed_settings_delivery;rebound=[]
+            def final_disposition(actual_writer,binding):
+                result=finalize(actual_writer,binding)
+                if late_cycle:
+                    path=store.completion_path(1);raw=path.read_bytes();inode=path.stat().st_ino
+                    path.rename(self.root/'retained-old-worker-cycle');path.write_bytes(raw);path.chmod(0o600)
+                    rebound.append((inode,path.stat().st_ino))
+                return result
+            with mock.patch.object(completion,'_reconcile_pending_project_units_and_project_auth',side_effect=reconcile), \
+                    mock.patch.object(tokens.OwnedProjectTokenRefreshUnit,'refresh_once',autospec=True,side_effect=actual_authentication), \
+                    mock.patch.object(reads.OwnedProjectSheetsReadUnit,'read_once') as no_new_read, \
+                    mock.patch.object(mutation,'_send_counted_original_once') as no_send, \
+                    mock.patch.object(allocation,'_finalize_native_completed_settings_delivery',side_effect=final_disposition), \
+                    mock.patch.object(persistence.WORKER.sys,'stderr',io.StringIO()) as diagnostic:
+                if late_cycle:
+                    with self.assertRaises(persistence.WORKER.CollectionCycleHoldError):self.api()(store)
+                else:
+                    result=self.api()(store)
+                    self.assertEqual(('APPLIED',)*(2 if later else 1),tuple(item.state for item in result))
+            no_new_read.assert_not_called();no_send.assert_not_called()
+            archived=[path for path in (tracker/'quarantine').iterdir()
+                if path.is_file() and (path.stat().st_ino,path.read_bytes())==original_projection]
+            if partial:
+                self.assertFalse((delivered/'DELIVERED').exists());self.assertEqual([],archived)
+                self.assertEqual(original_projection,(projection.stat().st_ino,projection.read_bytes()))
+                self.assertIn('Issue Tracker C25 delivery disposition unavailable; mutation disabled',diagnostic.getvalue())
+            else:
+                self.assertTrue((delivered/'DELIVERED').is_file(),
+                    'actual COMPLETE must reach the fixed default worker delivery entry')
+                self.assertFalse(projection.exists(),'default worker must archive only the proven original event')
+                self.assertEqual(1,len(archived))
+            if late_cycle:self.assertEqual(1,len(rebound));self.assertNotEqual(*rebound[0])
+            for name,image in originals.items():
+                path=self.root/name;self.assertEqual(image,(path.stat().st_ino,path.read_bytes()))
+            self.assertEqual({},allocation._LIVE_NATIVE_SETTINGS_CONTEXTS)
+            from monitor import issue_tracker_state_owner as state
+            self.assertEqual({},state._COMPLETED_READ_CONTEXT);self.assertEqual({},state._COMPLETED_ORIGINAL_GUARDS)
+
+    def test_default_worker_delivers_and_archives_actual_native_complete_without_sending(self):
+        self._exercise_default_native_delivery()
+
+    def test_default_worker_old_archive_then_new_complete_archives_only_new_original(self):
+        self._exercise_default_native_delivery(later=True)
+
+    def test_default_worker_creates_new_native_allocation_after_old_archive_then_delivers_only_new_event(self):
+        self._exercise_default_native_delivery(later=True,archive_before_new=True)
+
+    def test_default_worker_partial_pair_never_repairs_or_archives_new_projection(self):
+        self._exercise_default_native_delivery(later=True,partial=True)
+
+    def test_default_worker_late_cycle_drift_refuses_ack_and_retains_moved_original(self):
+        self._exercise_default_native_delivery(late_cycle=True)
 
     def exercise(self, fault=None, *, missing_fence=False):
         api = self.api()

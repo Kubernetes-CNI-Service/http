@@ -29,6 +29,83 @@ from test_cases.test_issue_tracker_stage_l_consumer import ProdStageLFixture
 
 
 class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
+    def _fixture_certificate_supplier(self, builder):
+        # One scenario's server material only, never a cached read/result,
+        # deadline, client connection or production authorization. Rebuild if
+        # host/root changes or any original certificate/key file drifts.
+        last=None
+        def originals(fixture):
+            paths=(fixture.path,fixture.root/'owned-server.pem',fixture.root/'owned-server-key.pem')
+            fields=('st_dev','st_ino','st_mode','st_uid','st_gid','st_nlink',
+                    'st_size','st_mtime_ns','st_ctime_ns')
+            result=[]
+            for path in paths:
+                before=tuple(getattr(path.stat(),name) for name in fields)
+                raw=path.read_bytes()
+                after=tuple(getattr(path.stat(),name) for name in fields)
+                self.assertEqual(before,after,'owned certificate changed during fixture read')
+                result.append((str(path),before,raw))
+            return tuple(result)
+        def supply(fixture,hostname='oauth2.googleapis.com'):
+            nonlocal last
+            key=(str(fixture.root),str(fixture.path),hostname)
+            if last is not None and last[0]==key and originals(fixture)==last[1]:
+                return last[2]
+            context=builder(fixture,hostname)
+            last=(key,originals(fixture),context)
+            return context
+        return supply
+
+    def test_fixture_certificate_reuses_only_exact_current_same_host_originals(self):
+        from types import SimpleNamespace
+        import tempfile
+        with tempfile.TemporaryDirectory(prefix='req7-certificate-isolation-') as directory:
+            root=Path(directory);fixture=SimpleNamespace(root=root,path=root/'ca.pem')
+            files=(fixture.path,root/'owned-server.pem',root/'owned-server-key.pem')
+            built=[]
+            def builder(actual,host):
+                self.assertIs(fixture,actual)
+                context=object();built.append((host,context))
+                for index,path in enumerate(files):path.write_bytes(('literal-%d-%s-%d'%(index,host,len(built))).encode())
+                return context
+            supplied=self._fixture_certificate_supplier(builder)
+            first=supplied(fixture,'sheets.googleapis.com')
+            self.assertIs(first,supplied(fixture,'sheets.googleapis.com'))
+            self.assertEqual(1,len(built))
+            for path in files:
+                raw=path.read_bytes();old=path.stat().st_ino
+                path.rename(root/'owned-prior-certificate');path.write_bytes(raw)
+                self.assertNotEqual(old,path.stat().st_ino)
+                prior=built[-1][1];current=supplied(fixture,'sheets.googleapis.com')
+                self.assertIsNot(prior,current)
+                self.assertIs(current,supplied(fixture,'sheets.googleapis.com'))
+            prior=built[-1][1]
+            self.assertIsNot(prior,supplied(fixture,'oauth2.googleapis.com'))
+            self.assertEqual(['sheets.googleapis.com']*4+['oauth2.googleapis.com'],[host for host,_ in built])
+
+    def _assert_original_stat_preserved(self, before, after):
+        # Reads may update atime. Preserve every persistent identity/permission/
+        # content-size/change field instead, including sub-second timestamps.
+        fields = ('st_dev', 'st_ino', 'st_mode', 'st_uid', 'st_gid', 'st_nlink',
+                  'st_size', 'st_mtime_ns', 'st_ctime_ns')
+        self.assertEqual(tuple(getattr(before, name) for name in fields),
+                         tuple(getattr(after, name) for name in fields))
+
+    def test_preservation_oracle_allows_read_atime_but_refuses_all_persistent_stat_drift(self):
+        from types import SimpleNamespace
+        values = dict(st_dev=11, st_ino=23, st_mode=0o100600, st_uid=501,
+            st_gid=20, st_nlink=1, st_size=41, st_mtime_ns=100000003,
+            st_ctime_ns=200000005, st_atime_ns=300000007)
+        original = SimpleNamespace(**values)
+        read_only = SimpleNamespace(**{**values, 'st_atime_ns': 400000009})
+        self._assert_original_stat_preserved(original, read_only)
+        for field in tuple(values):
+            if field == 'st_atime_ns':
+                continue
+            with self.subTest(field=field), self.assertRaises(AssertionError):
+                self._assert_original_stat_preserved(original,
+                    SimpleNamespace(**{**values, field: values[field]+1}))
+
     def test_actual_default_worker_qualifies_before_lazy_oauth_and_retains_nine_original_images(self):
         observed = []
         self._exercise_real_protected_three_panel_fixture(skip_history=False,
@@ -419,7 +496,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                 self.assertEqual(1,len(preserved_after_refusal))
                 current,current_bytes,preserved,preserved_bytes = preserved_after_refusal[0]
                 self.assertNotEqual(original.st_ino,replacement.st_ino)
-                self.assertEqual(replacement,current)
+                self._assert_original_stat_preserved(replacement,current)
                 self.assertEqual(original.st_ino,preserved.st_ino)
                 self.assertEqual(raw,current_bytes); self.assertEqual(raw,preserved_bytes)
                 if fault == 'w1':
@@ -982,17 +1059,293 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         self.assertEqual(['ETH Cabling:actual-receipted-count:unknown',
             'IB Cabling:actual-receipted-count:unknown'], observed)
 
-    def _native_original_launch_probe(self, mode):
+    def _native_original_settings_audit_oracle(self):
+        # Literal fixture contract, constructed before any settings/source
+        # implementation runs; never decode an EVENT or pending-reader result.
+        def canonical(value):
+            return (json.dumps(value,sort_keys=True,separators=(',',':'),ensure_ascii=False)+'\n').encode()
+        events=[];previous=None
+        for revision,kind,old,new,actor,when,request in (
+                (0,'init',None,3,'system:default','2026-09-25T00:00:00Z','req7-three-panel-protected-fixture'),
+                (1,'set_k',3,1,'operator:fixture','2026-09-25T00:01:00Z','req7-three-panel-k1')):
+            payload={'new_k':new,'actor':actor,'expected_revision':None if revision==0 else 0,
+                     'request_id':request}
+            event=canonical({'schema_version':1,'revision':revision,'type':kind,'old_k':old,'new_k':new,
+                'actor':actor,'recorded_at':when,'request_id':request,
+                'payload_sha256':hashlib.sha256(canonical(payload)).hexdigest(),'predecessor_sha256':previous})
+            digest=hashlib.sha256(event).hexdigest()
+            events.append({'event_id':'settings:%d:%s'%(revision,digest),
+                'recorded_at_utc':when,'details':event.decode().rstrip('\n')})
+            previous=digest
+        return tuple(events)
+
+    def _native_original_launch_probe(self, mode, *, settings_audit=False):
         observed = []
+        expected_audits=self._native_original_settings_audit_oracle() if settings_audit else ()
         self._exercise_real_protected_three_panel_fixture(skip_history=False,
             observed_cabling_insert_probe=True, receipted_intent_probe=True,
             native_catalog_probe=True, native_catalog_c6_origin_probe=True,
-            native_catalog_retained_probe=True, native_catalog_launch_probe=(mode, observed))
+            native_catalog_retained_probe=True, native_catalog_launch_probe=(mode, observed,expected_audits),
+            settings_audit_probe=settings_audit)
         self.assertEqual(['ETH Cabling:native-launch:' + mode,
             'IB Cabling:native-launch:' + mode], observed)
 
     def test_native_original_fresh_reads_count_claim_and_one_fixed_local_request(self):
         self._native_original_launch_probe('normal')
+
+    def test_native_original_settings_audit_count_claim_and_one_fixed_local_request_without_legacy_shadow(self):
+        self._native_original_launch_probe('normal',settings_audit=True)
+
+    def _native_completed_archive_preview_probe(self, *, receipt_rebind=False, local_c6=False, settings_finalizer=False):
+        observed = []
+        mode = 'complete-after-archive-receipt-rebind' if receipt_rebind else 'complete-after-archive'
+        if settings_finalizer:
+            mode += '-settings-finalizer'
+        if local_c6:
+            mode += '-local-c6'
+        from test_cases.test_req7_remote_history_match import Req7OwnedHistoryMatchWorkflowTests
+        from test_cases.test_req7_mutation_launcher import Req7MutationLauncherWorkflowTests
+        supplied=self._fixture_certificate_supplier(Req7OwnedHistoryMatchWorkflowTests.certificates)
+        with mock.patch.object(Req7OwnedHistoryMatchWorkflowTests,'certificates',supplied), \
+                mock.patch.object(Req7MutationLauncherWorkflowTests,'certificates',supplied):
+            self._exercise_real_protected_three_panel_fixture(skip_history=False,
+                observed_cabling_insert_probe=True, receipted_intent_probe=True,
+                native_catalog_probe=True, native_catalog_c6_origin_probe=True,
+                native_catalog_retained_probe=True, settings_audit_probe=True,
+                native_catalog_launch_probe=(mode, observed, self._native_original_settings_audit_oracle()))
+        self.assertEqual(['ETH Cabling:native-launch:normal',
+            'ETH Cabling:archived:fresh-preview:' + ('HOLD' if receipt_rebind else 'read-only')]
+            + (['ETH Cabling:archived:next-local-c6:' + ('HOLD' if receipt_rebind or settings_finalizer else 'committed')]
+               if local_c6 else []), observed)
+
+    def test_real_complete_archive_then_fresh_owner_manual_preview_preserves_all_originals(self):
+        self._native_completed_archive_preview_probe()
+
+    def test_real_complete_archive_receipt_rebind_refuses_fresh_manual_preview_without_repair(self):
+        self._native_completed_archive_preview_probe(receipt_rebind=True)
+
+    def test_real_complete_archive_then_new_eligible_cycle_commits_default_local_c6(self):
+        self._native_completed_archive_preview_probe(local_c6=True)
+
+    def test_real_complete_archive_old_receipt_rebind_refuses_next_default_local_c6(self):
+        self._native_completed_archive_preview_probe(receipt_rebind=True, local_c6=True)
+
+    def test_real_complete_archive_settings_last_finalizer_receipt_rebind_never_acks_next_local_c6(self):
+        self._native_completed_archive_preview_probe(local_c6=True,settings_finalizer=True)
+
+    def _complete_original_audits_then_preview(self, *, mode, observed, global_root,
+            private_context, native_count_context, fixture_owners, writer_token,
+            spreadsheet_token, binding, credential, unit, state, owner_module,
+            global_journal, committed, expected_audits, quota_raw, history_raw):
+        # Business expectations are literal source-fixture inputs, not WIRE,
+        # matcher output, catalog business rows or an implementation helper.
+        from copy import deepcopy
+        from test_cases.test_req7_remote_history_match import Req7OwnedHistoryMatchWorkflowTests, load as load_remote
+        from test_cases.test_req7_sheets_read_decode import header_response, identity_response
+        from test_cases.test_req7_history_read_launcher import scoped_fixture
+        from test_cases.test_req7_settings_audit_allocation import load as load_allocation
+        from monitor import issue_tracker_manual_preview as manual
+        from monitor.issue_tracker_publish_runtime import StageLHold
+        def canonical(value):
+            return (json.dumps(value,ensure_ascii=False,sort_keys=True,separators=(',',':'))+'\n').encode()
+        # The authored discovery fixture puts the first operation-id-sorted
+        # edge (leaf-b, 2b71...) in row 3; leaf-a is the absent/new edge.
+        business = (
+            ('2b71fef8673bdb94157801218f88b6d9f4fe20af2f6f2a9985c60f78f76af7ab',
+             'update', 2, {'G':'[MONITOR][eth_cabling][2b71fef8673bdb94] WRONG_PEER: Miswired_Links: leaf-b:swp3 -> leaf-c:swp4',
+              'M':'foreign-c','N':'swp10','S':'leaf-b','T':'swp3'}),
+            ('633644dc08963f192f3fef7a1fd9ba7133a275c9879d62c02c09928765a072bc',
+             'insert', None, {'A':'NV40000','B':'ZTP Monitor','C':'ZTP Monitor','D':'2026-09-26',
+              'E':'ETH','F':'Mis-wiring','G':'[MONITOR][eth_cabling][633644dc08963f19] WRONG_PEER: Miswired_Links: leaf-a:swp1 -> leaf-z:swp2',
+              'K':'leaf-a','L':'swp1','M':'foreign-z','N':'swp9','Q':'leaf-z','R':'swp2',
+              'S':'leaf-a','T':'swp1','U':'New'}))
+        action = json.loads(unit.action_preimage)
+        rows=[]
+        common={'schema_version':1,'unit_id':unit.unit_id,'manifest_id':action['manifest_id'],
+            'generation_id':committed.receipt.generation_id,'publish_id':committed.receipt.published_sha256,
+            'action_digest':unit.action_digest,'outcome_mapping_sha256':unit.outcome_mapping_sha256,
+            'target_nonce':action['target_nonce'],'history_nonce':action['history_nonce'],
+            'preread_sha256':action['preread_sha256']}
+        self.assertEqual(2,len(action['business']))
+        for actual,(key,kind,row_index,values) in zip(action['business'],business):
+            operation='stl-'+key
+            intended=hashlib.sha256(canonical({'sheet':'ETH Cabling','sheet_id':102,
+                'action':kind,'row_index':row_index,
+                'values':{column:{'stringValue':value} for column,value in values.items()}})).hexdigest()
+            self.assertEqual((operation,key,kind,'2026-09-26T04:20:00Z',intended),
+                (actual['operation_id'],hashlib.sha256(json.dumps(actual['activity_key'],separators=(',',':')).encode()).hexdigest(),actual['action'],
+                 actual['recorded_at_utc'],actual['intended_sha256']))
+            rows.append(('2026-09-26T04:20:00Z','ETH Cabling',kind,operation,
+                canonical({**common,'operation_id':operation,'intended_sha256':intended}).decode().rstrip('\n')))
+        self.assertEqual(list(expected_audits),action['audits'])
+        for audit in expected_audits:
+            rows.append((audit['recorded_at_utc'],'ETH Cabling','settings-audit',audit['event_id'],
+                canonical({**common,'event_id':audit['event_id'],'event_details':audit['details']}).decode().rstrip('\n')))
+        post=deepcopy(json.loads(history_raw.data))
+        post['sheets'][0]['data'][0]['rowData']=[{'values':[
+            {'userEnteredValue':{'stringValue':value}} for value in row]} for row in rows]
+        metadata=deepcopy(json.loads(quota_raw.data))
+        metadata['matchedDeveloperMetadata'].append({'developerMetadata':{
+            'metadataId':unit.fence_metadata_id,'metadataKey':'z','metadataValue':'1',
+            'visibility':'DOCUMENT','location':{'locationType':'SHEET','sheetId':102}}})
+        native=Req7OwnedHistoryMatchWorkflowTests();native.root=global_root
+        native.path=global_root/'etc/ssl/certs/ca-certificates.crt';native.addCleanup=self.addCleanup
+        documents={'identity_response':('template_identity',identity_response()),
+            'headers_response':('template_headers',header_response()),
+            'metadata_response':('metadata',metadata),'history_response':('history_tail',post)}
+        responses={name:native.read_owned(private_context,writer_token,spreadsheet_token,
+            binding,credential,kind,value) for name,(kind,value) in documents.items()}
+        remote=load_remote();allocation=load_allocation()
+        remote.record_owned_completion_evidence(writer_token,spreadsheet_token,binding,unit,**responses)
+        tracker=Path(self.store.project_identity)/'.tracker'
+        projections={str(revision)+'.json':(tracker/'settings/outbox'/(str(revision)+'.json')).read_bytes()
+            for revision in (0,1)}
+        allocation.record_completed_settings_delivery(writer_token,spreadsheet_token,binding,unit)
+        prior={p.name for p in (tracker/'quarantine').iterdir()}
+        result=allocation.cleanup_completed_settings_outbox(writer_token,spreadsheet_token,binding,unit)
+        self.assertEqual(('DELIVERED-PRESENT-OUTBOX-ABSENT-VALID',tuple(a['event_id'] for a in expected_audits)),
+            (result.state,result.event_ids))
+        archived=[p for p in (tracker/'quarantine').iterdir() if p.name not in prior]
+        self.assertEqual(2,len(archived));self.assertEqual(sorted(projections.values()),sorted(p.read_bytes() for p in archived))
+        self.assertTrue(all(p.stat().st_mode & 0o777 == 0o600 for p in archived))
+        self.assertEqual([],list((tracker/'settings/outbox').iterdir()))
+        retained=global_journal.inspect_global_unit(spreadsheet_token,binding,unit)
+        self.assertEqual((1,'UNKNOWN'),(retained.attempt_count,retained.outcome))
+        # Leave every old read/preparation and both old owner locks before
+        # asking the real broker to acquire its own default read owner.
+        native_count_context.close();private_context.close();fixture_owners.close()
+        receipt_rebind = 'receipt-rebind' in mode
+        if receipt_rebind:
+            receipt=tracker/'generations'/committed.receipt.generation_id/'RECEIPT'
+            old=(receipt.stat().st_ino,receipt.read_bytes())
+            receipt.rename(global_root/'owned-original-receipt');receipt.write_bytes(old[1]);receipt.chmod(0o600)
+            self.assertEqual(old[1],receipt.read_bytes());self.assertNotEqual(old[0],receipt.stat().st_ino)
+        before={str(p):(p.stat().st_ino,p.read_bytes())
+            for root in (Path(self.store.project_identity),state) for p in root.rglob('*') if p.is_file()}
+        broker=manual.make_complete_protected_stage_l_broker(self.store,http_root=self.root,
+            project=Path(self.store.project_identity),publication=self.publication,template_path=self.template,
+            boot_id='completed-archive-read-only',clock=lambda:1000.,monotonic_ns=time.monotonic_ns)
+        with scoped_fixture(global_root,owner_module):
+            if receipt_rebind:
+                # Original source-authority failure belongs to the Stage L
+                # reader contract, not the browser-request validation contract.
+                with self.assertRaises(StageLHold):broker.preview('nvis','Switch Status')
+                self.assertEqual(0,broker.pending_count)
+            else:
+                preview=broker.preview('nvis','Switch Status')
+                self.assertEqual(('Switch Status','ETH&IB Switch','disabled_no_send_authority'),
+                    (preview['panel'],preview['target_sheet'],preview['online']))
+                self.assertEqual((2,0,0,0,2),tuple(preview[name] for name in (
+                    'qualified_operation_count','whitelist_skip_count','new_count','update_count','skip_count')))
+                self.assertEqual(2,len(preview['row_digests']));self.assertEqual(2,len(preview['source_files']))
+                for source in preview['source_files']:
+                    self.assertEqual(source['sha256'],hashlib.sha256((self.root/source['path']).read_bytes()).hexdigest())
+        after={str(p):(p.stat().st_ino,p.read_bytes())
+            for root in (Path(self.store.project_identity),state) for p in root.rglob('*') if p.is_file()}
+        self.assertEqual(before,after)
+        observed.append('ETH Cabling:archived:fresh-preview:'+('HOLD' if receipt_rebind else 'read-only'))
+        if mode.endswith('-local-c6'):
+            from monitor.collection_ib_producer import produce_worker_ib_analysis
+            from monitor.issue_tracker_publish_runtime import commit_qualified_prod_local
+            from monitor.issue_tracker_local_workbook_commit import CommittedProdWorkbook
+            from test_cases.test_collection_cycle_persistence import TOKEN_2
+            from tools.project_contract import build_collection_cycle_identity, MIN_CONTINUOUS_INTERVAL_MINUTES
+            project = Path(self.store.project_identity)
+            identity = build_collection_cycle_identity(str(project), 'prod', 2, TOKEN_2)
+            ib = produce_worker_ib_analysis(identity, project_root=project, http_root=self.root,
+                clock=lambda: dt.datetime(2026, 9, 26, 4, 31, tzinfo=dt.timezone.utc),
+                runner=lambda _argv: self.fail('transport is supplied by fixture'))
+            cycle, _ = self._cycle(activity=True, derivation=True, observed_peer='changed-peer',
+                ib_analysis=ib, fabric_templates={'ethernet/prod':'tan-leaf','nvlink/prod':'border-leaf'})
+            self.assertEqual(identity['cycle_id'], cycle['cycle_id'])
+            admissions = sorted((tracker/'admissions').iterdir())
+            self.assertEqual(1, len(admissions))
+            prior = json.loads(admissions[0].read_bytes())
+            later = prior['monotonic_ns'] + MIN_CONTINUOUS_INTERVAL_MINUTES * 60 * 1_000_000_000 + 1
+            witness = (prior['policy_sha256'], prior['publish_every_cycles'], prior['boot_id'], later)
+            originals = {str(p):(p.stat().st_ino,p.read_bytes())
+                for root in (tracker, state) for p in root.rglob('*') if p.is_file()}
+            from monitor import issue_tracker_settings_audit_allocation as allocation
+            native_settings=allocation._hold_settings_originals;closed=[];selected_finalizer=[]
+            receipt=tracker/'generations'/committed.receipt.generation_id/'RECEIPT'
+            @contextmanager
+            def finalizer_drift(*args,**kwargs):
+                from monitor import issue_tracker_state_owner as actual_state
+                native_context=actual_state._COMPLETED_READ_CONTEXT.get(args[0])
+                # Fault only the outer handoff's retained settings holder,
+                # not nested actual settings inspections before C6 writes.
+                selected=(not selected_finalizer
+                    and native_context in allocation._LIVE_NATIVE_SETTINGS_CONTEXTS)
+                if selected:selected_finalizer.append(True)
+                with native_settings(*args,**kwargs) as original:
+                    yield original
+                if not selected:return
+                # Real settings finalization has finished, not a fake guard.
+                self.assertEqual(1,len(owner_module._ACTIVE))
+                self.assertEqual({},allocation._LIVE_NATIVE_SETTINGS_CONTEXTS)
+                self.assertEqual({},allocation._LIVE_LOCAL_C6_CONTEXTS)
+                raw=receipt.read_bytes();receipt.rename(global_root/'owned-last-finalizer-receipt')
+                receipt.write_bytes(raw);receipt.chmod(0o600);closed.append(True)
+            with scoped_fixture(global_root,owner_module), ExitStack() as patches:
+                patches.enter_context(mock.patch('monitor.issue_tracker_admission.time.monotonic_ns',return_value=later))
+                # Bounded diagnostics retain the FIRST unsanitized original
+                # fault, without replacing any actual holder/check or oracle.
+                from monitor import issue_tracker_unit_catalog as actual_catalog
+                diagnostics=[]
+                def diagnosed(function):
+                    def actual(*args,**kwargs):
+                        try:return function(*args,**kwargs)
+                        except BaseException as exc:
+                            if len(diagnostics)<8:
+                                import traceback
+                                diagnostics.append((function.__qualname__,type(exc).__name__))
+                                print('OWNED_LOCAL_C6_ORIGINAL_FAILURE',diagnostics[-1],flush=True)
+                                traceback.print_exc(file=sys.stdout)
+                            raise
+                    return actual
+                for actual_type,name in ((allocation._LocalC6Originals,'retain'),
+                        (allocation._LocalC6Originals,'verify'),
+                        (actual_catalog._Originals,'directory'),(actual_catalog._Originals,'file'),
+                        (actual_catalog._Originals,'verify')):
+                    patches.enter_context(mock.patch.object(actual_type,name,
+                        new=diagnosed(getattr(actual_type,name))))
+                if '-settings-finalizer-' in mode:
+                    patches.enter_context(mock.patch.object(allocation,'_hold_settings_originals',side_effect=finalizer_drift))
+                if receipt_rebind or '-settings-finalizer-' in mode:
+                    with self.assertRaises(StageLHold):
+                        commit_qualified_prod_local(self.store,http_root=self.root,project=project,
+                            publication=self.publication,template_path=self.template,manual_admission=witness)
+                else:
+                    result = commit_qualified_prod_local(self.store,http_root=self.root,project=project,
+                        publication=self.publication,template_path=self.template,manual_admission=witness)
+                    self.assertIsInstance(result, CommittedProdWorkbook)
+                    self.assertNotEqual(committed.receipt.generation_id,result.receipt.generation_id)
+                    self.assertEqual(2,len(list((tracker/'generations').iterdir())))
+                    records = sorted((tracker/'admissions').iterdir())
+                    self.assertEqual(2,len(records))
+                    admitted = json.loads(records[-1].read_bytes())
+                    self.assertEqual(('manual',cycle['cycle_id'],result.receipt.generation_id),
+                        (admitted['lane'],admitted['cycle_id'],admitted['generation_id']))
+            for name,image in originals.items():
+                path = Path(name)
+                if '-settings-finalizer-' in mode and path==receipt:
+                    self.assertEqual(image[1],path.read_bytes());self.assertNotEqual(image[0],path.stat().st_ino)
+                    continue
+                self.assertEqual(image,(path.stat().st_ino,path.read_bytes()),name)
+            self.assertEqual([],list((tracker/'settings/outbox').iterdir()))
+            if receipt_rebind:
+                self.assertEqual(1,len(list((tracker/'generations').iterdir())))
+                self.assertEqual(1,len(list((tracker/'admissions').iterdir())))
+            if '-settings-finalizer-' in mode:
+                self.assertEqual([True],closed)
+                self.assertEqual(2,len(list((tracker/'generations').iterdir())))
+            observed.append('ETH Cabling:archived:next-local-c6:'+('HOLD' if receipt_rebind or closed else 'committed'))
+
+    def test_native_original_settings_audit_receipt_rebind_after_count_refuses_fixed_local_request(self):
+        self._native_original_launch_probe('receipt-rebind',settings_audit=True)
+
+    def test_native_original_settings_audit_issued_read_expiry_after_count_refuses_fixed_local_request(self):
+        self._native_original_launch_probe('read-expiry',settings_audit=True)
 
     def test_native_original_receipt_rebind_after_count_refuses_fixed_local_request(self):
         self._native_original_launch_probe('receipt-rebind')
@@ -1002,7 +1355,8 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
 
     def _exercise_native_original_counted_launch(self, *, mode, observed, global_root, private_context,
             writer_token, spreadsheet_token, binding, credential, unit, identity, quota_raw, history_raw,
-            reads, sheet, qualified, settings, committed, state, owner_module, global_journal):
+            reads, sheet, qualified, settings, committed, state, owner_module, global_journal,
+            expected_audits=None):
         from test_cases.test_req7_remote_history_match import Req7OwnedHistoryMatchWorkflowTests, load as load_read_gates
         from test_cases.test_req7_mutation_launcher import Req7MutationLauncherWorkflowTests, load as load_mutation
         from test_cases.test_req7_sheets_read_decode import header_response, identity_response, response
@@ -1011,6 +1365,11 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         from contextlib import ExitStack
         import xml.etree.ElementTree as ET
         import socket
+        if expected_audits is not None:
+            # Outside all counted/launcher exception sanitizers. A compiler
+            # that silently drops either audit must fail before this flow,
+            # not turn the native-audit case into an unaudited success.
+            self.assertEqual(list(expected_audits),json.loads(unit.action_preimage)['audits'])
         load_read_gates()
         native = Req7OwnedHistoryMatchWorkflowTests()
         native.root = global_root; native.path = global_root/'etc/ssl/certs/ca-certificates.crt'
@@ -1346,10 +1705,29 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         mutation_fixture = Req7MutationLauncherWorkflowTests()
         mutation_fixture.root = global_root; mutation_fixture.path = native.path
         mutation_fixture.addCleanup = self.addCleanup; mutation = load_mutation()
+        audit_action=json.loads(unit.action_preimage)['audits']
+        if audit_action:
+            # The native creator, not this consumer fixture, wrote this graph.
+            # Absence of both legacy names must NOT become missing allocation.
+            project=Path(self.store.project_identity)
+            self.assertFalse((project/'.tracker/settings-audit-allocation').exists())
+            self.assertFalse((project/'.tracker/SETTINGS-AUDIT-ALLOCATED').exists())
+            audit_folder=state/(hashlib.sha256(binding.spreadsheet_id.encode()).hexdigest()+'.unit-'+unit.unit_id+'.settings-audit')
+            self.assertEqual({'HEADER','ASSIGNMENTS','INITIALIZED'},set(os.listdir(audit_folder)))
+            self.assertEqual(list(expected_audits) if expected_audits is not None else audit_action,
+                [row['audit'] for row in json.loads((audit_folder/'ASSIGNMENTS').read_bytes())])
         before = {str(path.relative_to(state)):(path.stat().st_ino,path.read_bytes())
             for path in state.rglob('*') if path.is_file()}
         wire_response = b'HTTP/1.1 401 Denied\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}'
         calls = []; children = []; reached = []; rejected = []
+        if audit_action:
+            # Like the catalog/retained fixtures above, attach this real
+            # consumer to the actual registry issued for this sheet, not a
+            # prior scenario's imported registry. No owner validation is mocked.
+            from test_cases.test_req7_settings_audit_allocation import load as load_allocation
+            allocation = load_allocation()
+            self.assertIs(allocation.ownership, owner_module)
+            self.assertIs(allocation.global_journal, global_journal)
         with mutation_fixture.server(wire_response, hostname='sheets.googleapis.com',
                 destination='sheets.googleapis.com') as (requests, errors), ExitStack() as transport:
             port = socket.getaddrinfo('sheets.googleapis.com',443)[0][4][1]
@@ -1393,6 +1771,10 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             if requests: self.assertEqual(unit.wire_bytes,requests[0][2])
         retained = global_journal.inspect_global_unit(spreadsheet_token,binding,unit)
         self.assertEqual((1,'UNKNOWN'),(retained.attempt_count,retained.outcome))
+        if audit_action:
+            dispatch=state/(hashlib.sha256(binding.spreadsheet_id.encode()).hexdigest()+'.unit-'+unit.unit_id+'.dispatch')
+            self.assertEqual({'HEADER','INITIALIZED','CLAIM-1'},set(os.listdir(dispatch)))
+            self.assertFalse((Path(self.store.project_identity)/'.tracker/settings-audit-allocation').exists())
         after = {str(path.relative_to(state)):(path.stat().st_ino,path.read_bytes())
             for path in state.rglob('*') if path.is_file()}
         for name,image in before.items():
@@ -2153,7 +2535,9 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             default_preparation = (native_catalog_launch_probe is not None
                 and native_catalog_launch_probe[0] in ('prepare','prepare-mixed-accounting','prepare-quota-rebind','prepare-finalizer-expiry',
                     'prepare-business','prepare-business-finalizer-rebind','prepare-business-postclose-revoke',
-                    'default-worker-original-images'))
+                    'default-worker-original-images','complete-after-archive','complete-after-archive-receipt-rebind',
+                    'complete-after-archive-local-c6','complete-after-archive-receipt-rebind-local-c6',
+                    'complete-after-archive-settings-finalizer-local-c6'))
             if manual_channel_bridge or complete_preview_probe or default_preparation:
                 root_template = self.root / "monitor/Issue_Tracker_Template_v1.xlsx"
                 root_template.parent.mkdir(parents=True, exist_ok=True)
@@ -3149,7 +3533,10 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                         global_root = Path(directory).resolve(); state = global_root/'var/lib/http-ztp-container/issue-tracker'
                         state.mkdir(parents=True, mode=0o700); owner_module = load_owner(); enrollment_module = load_enrollment(); nv_module = load_nv()
                         from contextlib import ExitStack
-                        with tracker_writer(project, self.publication) as writer_token, scoped_fixture(global_root, owner_module), owner_module.spreadsheet_owner(binding) as spreadsheet_token, ExitStack() as private_context, ExitStack() as native_count_context:
+                        with ExitStack() as fixture_owners, ExitStack() as private_context, ExitStack() as native_count_context:
+                            writer_token=fixture_owners.enter_context(tracker_writer(project,self.publication))
+                            fixture_owners.enter_context(scoped_fixture(global_root,owner_module))
+                            spreadsheet_token=fixture_owners.enter_context(owner_module.spreadsheet_owner(binding))
                             if receipted_intent_probe:
                                 private_directory = global_root/'var/lib/http-ztp-container/service-account'
                                 private_directory.mkdir(mode=0o700)
@@ -3363,14 +3750,25 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                                     frozen_images = {str(path.relative_to(state)): (path.stat().st_ino, path.read_bytes())
                                         for path in state.rglob('*') if path.is_file()}
                                     if native_catalog_launch_probe is not None:
-                                        mode,observed = native_catalog_launch_probe
-                                        self._exercise_native_original_counted_launch(mode=mode,observed=observed,
+                                        mode,observed = native_catalog_launch_probe[:2]
+                                        self._exercise_native_original_counted_launch(mode='normal' if mode.startswith('complete-after-archive') else mode,observed=observed,
                                             global_root=global_root,private_context=private_context,
                                             writer_token=writer_token,spreadsheet_token=spreadsheet_token,
                                             binding=binding,credential=credential,unit=unit,identity=identity,
                                             quota_raw=quota_raw,history_raw=history_raw,reads=reads,sheet=sheet,
                                             qualified=qualified,settings=args['settings'],committed=committed,
-                                            state=state,owner_module=owner_module,global_journal=global_journal)
+                                            state=state,owner_module=owner_module,global_journal=global_journal,
+                                            expected_audits=(native_catalog_launch_probe[2] if sheet=='ETH Cabling' else ())
+                                                if len(native_catalog_launch_probe)==3 else None)
+                                        if mode.startswith('complete-after-archive'):
+                                            self._complete_original_audits_then_preview(mode=mode,observed=observed,
+                                                global_root=global_root,private_context=private_context,
+                                                native_count_context=native_count_context,fixture_owners=fixture_owners,
+                                                writer_token=writer_token,spreadsheet_token=spreadsheet_token,
+                                                binding=binding,credential=credential,unit=unit,state=state,
+                                                owner_module=owner_module,global_journal=global_journal,committed=committed,
+                                                expected_audits=native_catalog_launch_probe[2],quota_raw=quota_raw,history_raw=history_raw)
+                                            return
                                         continue
                                     counted = global_journal.record_receipted_original_attempt_intent(
                                         spreadsheet_token, binding, identity, unit, qualified_source=qualified,

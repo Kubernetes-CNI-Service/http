@@ -61,6 +61,138 @@ def allocation_image_barrier(case, fd):
 
 
 class Req7NativeProjectAuditAssignmentTests(unittest.TestCase):
+    def test_native_completed_delivery_original_holder_is_separate_from_mutable_projection_reader(self):
+        module=load()
+        self.assertTrue(callable(getattr(module,'_hold_native_completed_delivery_originals',None)),
+            'ALL discovery must prove actual immutable pairs before any missing-projection allowance')
+
+    def native_delivery_locator_literal(self, **changes):
+        header={'state':'NATIVE_SETTINGS_ALLOCATION','unit_id':'a'*64,
+            'spreadsheet_id':'literal-approved-sheet','allowlist_sha256':'b'*64,'policy_sha256':'c'*64,
+            'project_identity':[7,11],'tracker_identity':[7,12]}
+        body={'schema_version':1,'unit_id':'a'*64,'native_allocation_header':header,
+            'allocation_header_sha256':hashlib.sha256(canonical(header)).hexdigest()}
+        body.update(changes)
+        return canonical({'schema_version':1,'complete_allocation':body,
+            'delivery_start_identity':[7,13,33152,501,1,0,123,1,1]})
+
+    def test_native_delivery_locator_decodes_exact_embedded_original_not_reconstructed_header(self):
+        module=load();raw=self.native_delivery_locator_literal()
+        header=module._native_delivery_locator(raw)
+        self.assertEqual({'state':'NATIVE_SETTINGS_ALLOCATION','unit_id':'a'*64,
+            'spreadsheet_id':'literal-approved-sheet','allowlist_sha256':'b'*64,'policy_sha256':'c'*64,
+            'project_identity':[7,11],'tracker_identity':[7,12]},header)
+
+    def test_native_delivery_locator_refuses_hash_unit_type_and_canonical_mismatch(self):
+        module=load()
+        images=[self.native_delivery_locator_literal(allocation_header_sha256='d'*64),
+            self.native_delivery_locator_literal(unit_id='d'*64),
+            self.native_delivery_locator_literal(native_allocation_header=None),
+            b' '+self.native_delivery_locator_literal()]
+        for raw in images:
+            with self.subTest(raw=raw),self.assertRaises(module.SettingsAuditHold):
+                module._native_delivery_locator(raw)
+
+    def test_legacy_delivery_locator_does_not_invent_native_coordinate_or_change_raw(self):
+        module=load();raw=canonical({'schema_version':1,'complete_allocation':{'schema_version':1,
+            'unit_id':'a'*64,'allocation_header_sha256':'b'*64},'delivery_start_identity':[7,13]})
+        self.assertIsNone(module._native_delivery_locator(raw))
+
+    def test_native_later_delivery_names_bind_exact_original_unit_not_caller_path(self):
+        module=load();body=json.loads(self.native_delivery_locator_literal())['complete_allocation']
+        body['native_delivery_unit_id']='a'*64
+        expected=('settings-audit-delivery-'+'a'*64,'SETTINGS-AUDIT-DELIVERY-STARTED-'+'a'*64)
+        self.assertEqual(expected,module._delivery_names(canonical(body)))
+        self.assertEqual(expected,module._delivery_names(canonical({'schema_version':1,
+            'complete_allocation':body,'delivery_start_identity':[7,13]})))
+
+    def test_native_later_delivery_names_refuse_wrong_unit_path_injection_and_legacy_claim(self):
+        module=load();body=json.loads(self.native_delivery_locator_literal())['complete_allocation']
+        for claim in ('d'*64,'../foreign',None,True):
+            value={**body,'native_delivery_unit_id':claim}
+            with self.subTest(claim=claim),self.assertRaises(module.SettingsAuditHold):
+                module._delivery_names(canonical(value))
+        body.pop('native_allocation_header');body['native_delivery_unit_id']='a'*64
+        with self.assertRaises(module.SettingsAuditHold):module._delivery_names(canonical(body))
+
+    def test_initial_native_and_legacy_delivery_names_keep_original_fixed_pair(self):
+        module=load();native=json.loads(self.native_delivery_locator_literal())['complete_allocation']
+        expected=('settings-audit-delivery','SETTINGS-AUDIT-DELIVERY-STARTED')
+        self.assertEqual(expected,module._delivery_names(canonical(native)))
+        self.assertEqual(expected,module._delivery_names(canonical({'schema_version':1,'unit_id':'a'*64})))
+
+    def test_delivery_names_refuse_unbound_embedded_header_and_unsupported_wrapper(self):
+        module=load();body=json.loads(self.native_delivery_locator_literal())['complete_allocation']
+        body['native_delivery_unit_id']='a'*64
+        wrapper={'schema_version':1,'complete_allocation':body,'delivery_start_identity':[7,13]}
+        images=[{**body,'allocation_header_sha256':'d'*64},
+            {**body,'schema_version':True},{**body,'caller_path':'foreign'},
+            {**wrapper,'schema_version':2},{**wrapper,'schema_version':True},
+            {**wrapper,'extra_wrapper':body},
+            {'schema_version':1,'complete_allocation':wrapper,'delivery_start_identity':[7,13]}]
+        initial={**body};initial.pop('native_delivery_unit_id')
+        images.append({**initial,'allocation_header_sha256':'d'*64})
+        for value in images:
+            with self.subTest(value=value),self.assertRaises(module.SettingsAuditHold):
+                module._delivery_names(canonical(value))
+
+    def test_delivery_catalog_replay_issues_one_actual_scope_and_revalidates_live_originals(self):
+        from contextlib import contextmanager
+        allocation=load();calls=[];writer=object();bound=object();unit=object()
+        @contextmanager
+        def issue(*args):
+            self.assertEqual((writer,bound,unit),args);calls.append('issue')
+            yield lambda:calls.append('verify')
+            calls.append('close')
+        with mock.patch.object(allocation.global_journal,'_HELD_CATALOG_REPLAY',mock.Mock(get=mock.Mock(return_value=None))), \
+                mock.patch.object(allocation.global_journal,'_hold_native_catalog_replay',side_effect=issue):
+            with allocation._hold_delivery_catalog_replay(writer,bound,unit) as verify:
+                self.assertEqual(['issue','verify'],calls);verify()
+            self.assertEqual(['issue','verify','verify','verify','close'],calls)
+
+    def test_delivery_catalog_replay_borrows_existing_exact_scope_never_issues_nested_cache(self):
+        from contextlib import contextmanager
+        allocation=load();calls=[];writer=object();bound=object();unit=object()
+        @contextmanager
+        def borrow(*args):
+            self.assertEqual((writer,bound),args);calls.append('borrow')
+            yield (unit,),lambda:calls.append('verify')
+        with mock.patch.object(allocation.global_journal,'_HELD_CATALOG_REPLAY',mock.Mock(get=mock.Mock(return_value=object()))), \
+                mock.patch.object(allocation.global_journal,'_hold_catalog_originals',side_effect=borrow), \
+                mock.patch.object(allocation.global_journal,'_hold_native_catalog_replay') as issue:
+            with allocation._hold_delivery_catalog_replay(writer,bound,unit) as verify:verify()
+            issue.assert_not_called();self.assertEqual(['borrow','verify','verify','verify'],calls)
+
+    def test_delivery_allocation_selector_uses_held_native_bytes_and_live_guard(self):
+        module=load()
+        self.assertTrue(callable(getattr(module,'_hold_delivery_allocation_originals',None)),
+            'delivery needs the retained native allocation, not a legacy reconstruction')
+        selected=object(); header=b'literal-native-header\n'; assignments=b'literal-native-assignment\n'
+        checks=[]
+        @contextmanager
+        def native(*args,**options):
+            yield selected,header,assignments,lambda:checks.append('held-original')
+        with mock.patch.object(module,'_hold_native_catalog_audit_originals',side_effect=native), \
+                mock.patch.object(module,'_originals') as legacy:
+            with module._hold_delivery_allocation_originals(object(),object(),object(),object()) as held:
+                self.assertEqual((selected,header,assignments),held[:3]); held[3]()
+            self.assertTrue(checks); legacy.assert_not_called()
+
+    def test_delivery_broken_native_anchor_never_falls_back_to_legacy_images(self):
+        module=load()
+        self.assertTrue(callable(getattr(module,'_hold_delivery_allocation_originals',None)),
+            'native delivery failures must remain fail closed')
+        @contextmanager
+        def broken(*args,**options):
+            raise module.SettingsAuditHold()
+            yield
+        with mock.patch.object(module,'_hold_native_catalog_audit_originals',side_effect=broken), \
+                mock.patch.object(module,'_originals') as legacy:
+            with self.assertRaises(module.SettingsAuditHold):
+                with module._hold_delivery_allocation_originals(object(),object(),object(),object()):
+                    self.fail('broken native anchor cannot grant delivery authority')
+            legacy.assert_not_called()
+
     def record(self):
         first=SimpleNamespace(unit_id='a'*64,action_preimage=canonical({'audits':[{'event_id':'literal-event-0'}]}))
         second=SimpleNamespace(unit_id='b'*64,action_preimage=canonical({'audits':[{'event_id':'literal-event-0'}]}))
@@ -859,6 +991,131 @@ with local.writer_owner(project, project/"99-output-monitor") as writer, scoped_
             cwd=ROOT, timeout=10, env={'LC_ALL': 'C', 'PYTHONPYCACHEPREFIX': '/tmp/http-test-pyc'})
         self.assertEqual(0, result.returncode, result.stderr.decode('utf-8', 'replace'))
         self.assertEqual((expected+'\n').encode(), result.stdout); self.assertEqual(before, self.image())
+
+
+class Req7NativeDeliveryCreatorOriginalsTests(unittest.TestCase):
+    def test_native_allocation_prior_events_rejects_unissued_preparation_before_settings(self):
+        allocation=load();entry=getattr(allocation,'_native_allocation_prior_events',None)
+        self.assertTrue(callable(entry),'native allocation needs fixed actual preparation provenance')
+        from monitor import issue_tracker_nv_reservation as nv
+        with mock.patch.object(allocation,'_hold_settings_originals') as settings:
+            with self.assertRaises((allocation.SettingsAuditHold,nv.NvReservationHold,local.LocalCommitHold)):
+                entry(object(),object(),object(),binding())
+        settings.assert_not_called()
+
+    def test_default_delivery_disposition_rejects_unissued_writer_before_sheet_or_creation(self):
+        allocation=load();entry=getattr(allocation,'_finalize_native_completed_settings_delivery',None)
+        self.assertTrue(callable(entry),'default worker needs fixed original-only C25 disposition')
+        with mock.patch.object(allocation.ownership,'spreadsheet_owner') as sheet, \
+                mock.patch.object(allocation,'record_completed_settings_delivery') as create:
+            with self.assertRaises((allocation.SettingsAuditHold,local.LocalCommitHold)):
+                entry(object(),binding())
+        sheet.assert_not_called();create.assert_not_called()
+
+    def _writer_source_cleanup(self, interrupt=False):
+        allocation=load();primary=KeyboardInterrupt('literal first writer interrupted')
+        with tempfile.TemporaryDirectory(prefix='req7-delivery-writer-cleanup-') as temporary:
+            root=Path(temporary).resolve();root.chmod(0o700)
+            foreign=root/'literal-foreign';foreign.write_bytes(b'foreign original preserved\n');foreign.chmod(0o600)
+            parent=os.open(root,local._flags(directory=True));replaced=[]
+            expected=foreign.stat().st_dev,foreign.stat().st_ino
+            class CaptureFault:
+                def capture_written(_self,actual_parent,name,fd,identity,raw):
+                    self.assertEqual(parent,actual_parent);self.assertEqual('STARTED',name)
+                    self.assertEqual(b'literal new delivery\n',raw)
+                    self.assertEqual((root/name).stat().st_ino,os.fstat(fd).st_ino)
+                    os.close(fd);other=os.open(foreign,os.O_RDONLY)
+                    if other!=fd:os.dup2(other,fd);os.close(other)
+                    os.lseek(fd,3,os.SEEK_SET);replaced.append(fd)
+                    if interrupt:raise primary
+            try:
+                if interrupt:
+                    with self.assertRaises(KeyboardInterrupt) as caught:
+                        allocation._write_delivery_file(parent,'STARTED',b'literal new delivery\n',_creator=CaptureFault())
+                    self.assertIs(primary,caught.exception)
+                    self.assertIsNotNone(caught.exception.__cause__)
+                else:
+                    with self.assertRaises((allocation.SettingsAuditHold,local.LocalCommitHold)):
+                        allocation._write_delivery_file(parent,'STARTED',b'literal new delivery\n',_creator=CaptureFault())
+                self.assertEqual(1,len(replaced));actual=os.fstat(replaced[0])
+                self.assertEqual(expected,(actual.st_dev,actual.st_ino))
+                self.assertEqual(3,os.lseek(replaced[0],0,os.SEEK_CUR))
+                self.assertEqual(b'foreign original preserved\n',os.pread(replaced[0],100,0))
+                self.assertEqual(b'literal new delivery\n',(root/'STARTED').read_bytes())
+            finally:
+                for fd in replaced:
+                    try:
+                        actual=os.fstat(fd)
+                        if (actual.st_dev,actual.st_ino)==expected:os.close(fd)
+                    except OSError:pass
+                os.close(parent)
+
+    def test_actual_writer_source_cleanup_refuses_foreign_slot_without_closing_it(self):
+        self._writer_source_cleanup()
+
+    def test_actual_writer_source_cleanup_preserves_primary_interrupt_and_foreign_slot(self):
+        self._writer_source_cleanup(interrupt=True)
+
+    def _actual_original_graph(self, fault=None):
+        from contextlib import ExitStack
+        from monitor import issue_tracker_spreadsheet_owner as ownership, issue_tracker_unit_catalog as catalog
+        allocation=load()
+        self.assertTrue(hasattr(allocation,'_DeliveryCreatorOriginals'),
+            'new delivery requires its own immutable raw handoff, not LocalC6 permission')
+        with tempfile.TemporaryDirectory(prefix='req7-delivery-raw-') as temporary, ExitStack() as scope:
+            root=Path(temporary).resolve();project=root/'project';project.mkdir(mode=0o700)
+            publication=project/'publication';publication.mkdir(mode=0o755)
+            (root/'var/lib/http-ztp-container/issue-tracker').mkdir(parents=True,mode=0o700)
+            scope.enter_context(scoped_fixture(root,ownership))
+            local.create_local_commit_store(project,publication)
+            token=scope.enter_context(local.try_writer_owner(project,publication))
+            sheet=scope.enter_context(ownership.spreadsheet_owner(binding()))
+            owner=local._owner(token);original=project/'.tracker/literal-original'
+            original.write_bytes(b'literal-delivery-original\n');original.chmod(0o600)
+            before=original.stat().st_ino,original.read_bytes()
+            held=catalog._Originals();scope.callback(held.close)
+            held.file(owner.root_fd,'literal-original',16384)
+            raw=allocation._DeliveryCreatorOriginals(token,sheet,binding())
+            raw.retain(held);held.close();raw.verify()
+            if fault in ('rebind','interrupt'):
+                original.rename(original.with_name('displaced-original'))
+                original.write_bytes(before[1]);original.chmod(0o600)
+                self.assertNotEqual(before[0],original.stat().st_ino)
+                with self.assertRaises(allocation.SettingsAuditHold):raw.verify()
+                if fault=='interrupt':
+                    self.assertTrue(hasattr(raw,'finish'),'raw finalization must receive the original interruption')
+                    primary=KeyboardInterrupt('literal raw original interruption')
+                    self.assertFalse(raw.finish(type(primary),primary,None))
+                    self.assertIsInstance(primary.__cause__,allocation.SettingsAuditHold)
+                else:
+                    with self.assertRaises(allocation.SettingsAuditHold):raw.close()
+            elif fault=='unissued-write':
+                descriptor=os.open('literal-unissued',os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600,dir_fd=owner.root_fd)
+                try:
+                    os.write(descriptor,b'literal\n')
+                    with self.assertRaises(allocation.SettingsAuditHold):
+                        raw.capture_written(owner.root_fd,'literal-unissued',descriptor,
+                            allocation.journal._identity(os.fstat(descriptor)),b'literal\n')
+                    self.assertEqual([],raw.created_files)
+                    self.assertEqual(before,(original.stat().st_ino,original.read_bytes()))
+                finally:os.close(descriptor)
+                raw.close()
+            else:
+                raw.verify();raw.close()
+                self.assertEqual(before,(original.stat().st_ino,original.read_bytes()))
+            self.assertEqual([],raw.slots)
+
+    def test_delivery_raw_handoff_preserves_actual_original_after_leaf_close(self):
+        self._actual_original_graph()
+
+    def test_delivery_raw_handoff_refuses_same_bytes_new_original_inode(self):
+        self._actual_original_graph('rebind')
+
+    def test_unissued_delivery_raw_graph_cannot_adopt_a_created_pair(self):
+        self._actual_original_graph('unissued-write')
+
+    def test_delivery_raw_tail_preserves_incoming_interrupt_and_closes_every_original(self):
+        self._actual_original_graph('interrupt')
 
 
 if __name__ == '__main__': unittest.main()

@@ -22,6 +22,28 @@ PREPARED = b"local-workbook-fixture\n"
 
 
 class LocalCommitTests(unittest.TestCase):
+    def test_generation_original_handoff_captures_identity_inside_real_acquisition(self):
+        with writer_owner(self.project,self.publish) as token:
+            generation=begin_generation(token,MANIFEST)
+            fd,identity=local_commit._generation_fd(local_commit._owner(token),generation,
+                token=token,_return_original=True)
+            try:
+                named=self.project/'.tracker/generations'/generation.generation_id
+                self.assertEqual((named.stat().st_dev,named.stat().st_ino),identity[:2])
+                self.assertEqual(local_commit._written_file_identity(os.fstat(fd)),identity)
+            finally:local_commit._close_written_original(fd,identity)
+
+    def test_directory_original_handoff_binds_actual_checked_descriptor_identity(self):
+        with writer_owner(self.project,self.publish) as token:
+            parent=local_commit._owner(token).root_fd
+            os.mkdir('handoff-original',0o700,dir_fd=parent)
+            expected=os.stat('handoff-original',dir_fd=parent,follow_symlinks=False)
+            descriptor,identity=local_commit._directory(parent,'handoff-original',_return_original=True)
+            try:
+                self.assertEqual((expected.st_dev,expected.st_ino),identity[:2])
+                self.assertEqual(local_commit._written_file_identity(os.fstat(descriptor)),identity)
+            finally:local_commit._close_written_original(descriptor,identity)
+
     def test_first_name_stat_failure_never_closes_a_foreign_reused_slot(self):
         native_open=os.open; native_stat=os.stat; owned=[]; foreign=[]
         primary=OSError('first pending pathname identity unavailable')

@@ -466,6 +466,34 @@ class Req7RemoteHistoryNativeWorkflowTests(unittest.TestCase):
 
 
 class Req7RemoteFixtureIsolationTests(unittest.TestCase):
+    def test_native_fixture_refreshes_retained_consumer_before_first_owner(self):
+        from test_cases.test_req7_retained_global_inventory import load as load_inventory
+        previous = load_inventory(reset_support=False)
+        load_owner()
+        case = Req7OwnedHistoryMatchWorkflowTests()
+        class StopBeforeOwners(BaseException):
+            pass
+        original = StopBeforeOwners()
+        reached = []
+        def stop(*arguments, **options):
+            reached.append(True)
+            raise original
+        with ExitStack() as stack, mock.patch.object(case, 'owners', side_effect=stop):
+            with self.assertRaises(StopBeforeOwners) as caught:
+                case.native_audit_completed(stack)
+        self.assertIs(original, caught.exception)
+        self.assertEqual([True], reached)
+        from monitor import issue_tracker_retained_inventory as actual
+        for alias, name in (
+                ('ownership', 'monitor.issue_tracker_spreadsheet_owner'),
+                ('global_journal', 'monitor.issue_tracker_global_attempt_journal'),
+                ('enrollment', 'monitor.issue_tracker_enrollment_journal'),
+                ('history', 'monitor.issue_tracker_history_preread_journal')):
+            with self.subTest(alias=alias):
+                self.assertIs(getattr(actual, alias), sys.modules[name],
+                    'capture current registries before issuing any native owner token')
+        self.assertIsNot(previous, actual)
+
     def test_native_fixture_rebinds_current_registries_before_owner_issuance(self):
         load_owner(); load_global()
         old_enrollment = load_enrollment(); old_history = load_before()
@@ -1220,6 +1248,1405 @@ with local.writer_owner(root/'project',root/'project/publication') as writer,sco
             'payload_sha256':hashlib.sha256(canonical(payload)).hexdigest(),'predecessor_sha256':None})
         return {'event_id':'settings:0:'+hashlib.sha256(event).hexdigest(),
             'recorded_at_utc':'2026-10-08T10:00:00Z','details':event.decode().rstrip('\n')}
+
+    def native_audit_completed(self, stack, *, fixture_facts=None):
+        """Actual native C6/NV originals and four child/TLS completion reads.
+
+        Expectations originate in literal cabling/business/event inputs, not
+        the matcher, catalog WIRE or a fabricated COMPLETE observation.
+        """
+        from test_cases.test_req7_unit_catalog import load as load_catalog
+        from test_cases.test_req7_nv_reservation import load as load_nv, cabling_inputs, source, KEYS
+        from test_cases.test_req7_settings_audit_allocation import load as load_allocation
+        from test_cases.test_req7_retained_global_inventory import load as load_inventory
+        from test_cases.test_issue_tracker_whitelist_workbook import literal_xlsx
+        from test_cases.test_req7_sheets_read_decode import header_response
+        load_global(); load_enrollment(); load_before()
+        nv=load_nv(); catalog=load_catalog(reset_dependencies=False)
+        allocation=load_allocation(); completion=load()
+        # Earlier suites may have captured an obsolete owner/GLOBAL registry.
+        # Refresh the actual consumer before issuance, never adopt a token or
+        # replace a registry after any original owner has been acquired.
+        load_inventory(reset_support=False)
+        from monitor import issue_tracker_history_read_launcher as reads
+        from monitor import issue_tracker_sheets_read_decode as decode, issue_tracker_k_store as settings
+        from monitor import issue_tracker_enrollment_journal as enrollment, issue_tracker_global_attempt_journal as journal
+        from monitor import issue_tracker_history_preread_journal as preread
+        local,_ownership,writer,owner,bound,auth,_config=self.owners(stack,target_id=TARGET)
+        audit=self.settings_audit_oracle()
+        settings.initialize_local_k_store(self.root/'project/.tracker',token=writer,
+            initialized_at='2026-10-08T10:00:00Z',acquisition_id='first-use')
+        identity_doc=identity_response(); identity_doc['spreadsheetId']=bound.spreadsheet_id
+        identity=decode.decode_template_identity(reads._prepare(bound,auth,'template_identity',None,None),response(identity_doc))
+        with mock.patch('secrets.token_hex',side_effect=['a'*64,'b'*64,'c'*64,'d'*64]):
+            enrolled=enrollment.prepare_enrollment_journal(owner,bound,identity)
+        arguments=cabling_inputs(enrolled.nonces); arguments['audits']=(audit,)
+        generation=local.begin_generation(writer,arguments['manifest'])
+        local.record_intent(writer,generation,literal_xlsx(),kind='xlsx')
+        receipt=local.commit(writer,generation)
+        arguments.update(generation_id=generation.generation_id,publish_id=receipt.published_sha256)
+        unit=catalog.composer.freeze_send_unit(**arguments)
+        eth_plan=reads._prepare(bound,auth,'activity','ETH Cabling',None)
+        ib_plan=reads._prepare(bound,auth,'activity','IB Cabling',None)
+        with nv.hold_catalog_nv_preparation(owner,bound,identity,
+                eth_plan,source('ETH Cabling',('NV30016',)),ib_plan,source('IB Cabling',('NV30101',)),
+                generation_id=generation.generation_id,publish_id=receipt.published_sha256,
+                sheet='ETH Cabling',requested_keys=KEYS) as prepared:
+            catalog.register_pending_c6_unit(writer,owner,bound,unit,_nv_preparation=prepared)
+        journal.prepare_global_unit(owner,bound,unit)
+        stem=hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()
+        allocated=self.root/'var/lib/http-ztp-container/issue-tracker'/(stem+'.unit-'+unit.unit_id+'.settings-audit')
+        self.assertEqual({'HEADER','ASSIGNMENTS','INITIALIZED'},{p.name for p in allocated.iterdir()})
+        self.assertFalse((self.root/'project/.tracker/settings-audit-allocation').exists())
+        self.assertFalse((self.root/'project/.tracker/SETTINGS-AUDIT-ALLOCATED').exists())
+        native_images={name:(allocated/name).read_bytes() for name in ('HEADER','ASSIGNMENTS')}
+        empty=tail_document(12); empty['spreadsheetId']=bound.spreadsheet_id
+        empty['sheets'][0]['properties']['sheetId']=105; empty['sheets'][0]['data'][0]['rowData']=[]
+        original=self.read_owned(stack,writer,owner,bound,auth,'history_tail',empty)
+        plan=reads.require_current_owned_read(writer,owner,bound,original,read_kind='history_tail')
+        preread.prepare_history_preread(owner,bound,unit,plan,original)
+        journal.record_global_attempt_intent(owner,bound,unit)
+        common={'schema_version':1,'unit_id':unit.unit_id,'manifest_id':arguments['manifest_id'],
+            'generation_id':arguments['generation_id'],'publish_id':arguments['publish_id'],
+            'action_digest':unit.action_digest,'outcome_mapping_sha256':unit.outcome_mapping_sha256,
+            'target_nonce':'b'*64,'history_nonce':'d'*64,'preread_sha256':'e'*64}
+        rows=[]
+        for item in arguments['business']:
+            intended=hashlib.sha256(canonical({'sheet':'ETH Cabling','sheet_id':102,'action':'insert',
+                'row_index':None,'values':{column:{'stringValue':value}
+                    for column,value in item['values'].items()}})).hexdigest()
+            rows.append((item['recorded_at_utc'],'ETH Cabling','insert',item['operation_id'],
+                canonical({**common,'operation_id':item['operation_id'],'intended_sha256':intended}).decode().rstrip('\n')))
+        rows.append((audit['recorded_at_utc'],'ETH Cabling','settings-audit',audit['event_id'],
+            canonical({**common,'event_id':audit['event_id'],'event_details':audit['details']}).decode().rstrip('\n')))
+        post=deepcopy(empty)
+        post['sheets'][0]['data'][0]['rowData']=[{'values':[{'userEnteredValue':{'stringValue':text}} for text in row]} for row in rows]
+        metadata={'matchedDeveloperMetadata':[
+            {'developerMetadata':{'metadataId':1,'metadataKey':'http-ztp-enrollment-v1','metadataValue':'b'*64,
+                'visibility':'DOCUMENT','location':{'locationType':'SHEET','sheetId':102}}},
+            {'developerMetadata':{'metadataId':2,'metadataKey':'http-ztp-enrollment-v1','metadataValue':'d'*64,
+                'visibility':'DOCUMENT','location':{'locationType':'SHEET','sheetId':105}}},
+            {'developerMetadata':{'metadataId':unit.fence_metadata_id,'metadataKey':'z','metadataValue':'1',
+                'visibility':'DOCUMENT','location':{'locationType':'SHEET','sheetId':102}}}]}
+        headers=header_response(); headers['spreadsheetId']=bound.spreadsheet_id
+        documents={'identity_response':('template_identity',identity_doc),'headers_response':('template_headers',headers),
+            'metadata_response':('metadata',metadata),'history_response':('history_tail',post)}
+        responses={name:self.read_owned(stack,writer,owner,bound,auth,kind,value)
+            for name,(kind,value) in documents.items()}
+        completion.record_owned_completion_evidence(writer,owner,bound,unit,**responses)
+        self.assertEqual('COMPLETE-PRESENT-NOT-APPLIED',completion.inspect_completion_evidence(owner,bound,unit).state)
+        if fixture_facts is not None:
+            # Fixture orchestration only: genuine returned generation/auth and
+            # independently authored source/History documents, never a permit.
+            fixture_facts.update(generation=generation,auth=auth,identity=identity,nonces=enrolled.nonces,
+                identity_doc=identity_doc,post=post,metadata=metadata,headers=headers)
+        return allocation,writer,owner,bound,unit,allocated,native_images
+
+    def test_native_complete_delivery_header_binds_actual_catalog_audit_originals(self):
+        with ExitStack() as stack:
+            allocation,writer,owner,bound,unit,allocated,images=self.native_audit_completed(stack)
+            immutable={str(p.relative_to(self.root)):(p.stat().st_ino,p.read_bytes())
+                for p in self.root.rglob('*') if p.is_file()}
+            from monitor import issue_tracker_mutation_launcher as mutation
+            with mock.patch.object(mutation,'_send_counted_original_once') as send:
+                result=allocation.record_completed_settings_delivery(writer,owner,bound,unit)
+                header=json.loads((self.root/'project/.tracker/settings-audit-delivery/HEADER').read_bytes())['complete_allocation']
+                self.assertEqual(hashlib.sha256(images['HEADER']).hexdigest(),header['allocation_header_sha256'])
+                self.assertEqual(hashlib.sha256(images['ASSIGNMENTS']).hexdigest(),header['assignments_sha256'])
+                self.assertEqual((self.settings_audit_oracle()['event_id'],),result.event_ids)
+                self.assertEqual((),allocation.pending_settings_audits_after_completed_unit(writer,owner,bound,unit))
+                send.assert_not_called()
+            for name,(inode,raw) in immutable.items():
+                path=self.root/name; self.assertEqual((inode,raw),(path.stat().st_ino,path.read_bytes()))
+            seen=self.current_global_state(owner,bound,unit)
+            self.assertEqual((1,'UNKNOWN'),(seen.attempt_count,seen.outcome))
+            self.assertTrue((self.root/'project/.tracker/settings/outbox/0.json').exists())
+
+    def test_native_delivery_same_bytes_allocation_rebind_refuses_before_marker(self):
+        with ExitStack() as stack:
+            allocation,writer,owner,bound,unit,allocated,images=self.native_audit_completed(stack)
+            original=allocation._hold_native_catalog_audit_originals; reached=[]
+            path=allocated/'ASSIGNMENTS'; saved=self.root/'preserved-native-delivery-assignment'
+            journal_path=allocated.parent/(allocated.name[:-len('.settings-audit')]+'.journal')
+            retained={name:((journal_path/name).stat().st_ino,(journal_path/name).read_bytes())
+                for name in ('ATTEMPT-1','WIRE','ACTION-PREIMAGE','HEADER','INITIALIZED')}
+            @contextmanager
+            def rebind(*args,**options):
+                with original(*args,**options) as held:
+                    if held is not None and not reached:
+                        before=path.stat().st_ino; path.rename(saved)
+                        path.write_bytes(images['ASSIGNMENTS']); path.chmod(0o600)
+                        reached.append((before,path.stat().st_ino))
+                    yield held
+            with mock.patch.object(allocation,'_hold_native_catalog_audit_originals',side_effect=rebind):
+                with self.assertRaises(allocation.SettingsAuditHold):
+                    allocation.record_completed_settings_delivery(writer,owner,bound,unit)
+            self.assertEqual(1,len(reached)); self.assertNotEqual(*reached[0])
+            self.assertEqual(images['ASSIGNMENTS'],saved.read_bytes()); self.assertEqual(saved.read_bytes(),path.read_bytes())
+            self.assertFalse((self.root/'project/.tracker/settings-audit-delivery/DELIVERED').exists())
+            self.assertTrue((self.root/'project/.tracker/settings/outbox/0.json').exists())
+            self.assertEqual(set(retained),{p.name for p in journal_path.iterdir()})
+            self.assertEqual(retained,{name:((journal_path/name).stat().st_ino,(journal_path/name).read_bytes())
+                for name in retained})
+            from monitor import issue_tracker_global_attempt_journal as journal
+            with self.assertRaises(journal.GlobalAttemptHold):
+                self.current_global_state(owner,bound,unit)
+
+    def test_native_complete_delivery_archives_only_original_outbox_projection(self):
+        with ExitStack() as stack:
+            allocation,writer,owner,bound,unit,allocated,images=self.native_audit_completed(stack)
+            allocation.record_completed_settings_delivery(writer,owner,bound,unit)
+            tracker=self.root/'project/.tracker'; projection=(tracker/'settings/outbox/0.json').read_bytes()
+            originals={str(p.relative_to(self.root)):(p.stat().st_ino,p.read_bytes())
+                for p in self.root.rglob('*') if p.is_file() and p!=tracker/'settings/outbox/0.json'}
+            before={p.name for p in (tracker/'quarantine').iterdir()}
+            from monitor import issue_tracker_mutation_launcher as mutation
+            with mock.patch.object(mutation,'_send_counted_original_once') as send:
+                result=allocation.cleanup_completed_settings_outbox(writer,owner,bound,unit)
+                self.assertEqual(('DELIVERED-PRESENT-OUTBOX-ABSENT-VALID',(self.settings_audit_oracle()['event_id'],)),
+                    (result.state,result.event_ids))
+                self.assertEqual((),allocation.pending_settings_audits_after_completed_unit(writer,owner,bound,unit))
+                send.assert_not_called()
+            archived=[p for p in (tracker/'quarantine').iterdir() if p.name not in before]
+            self.assertEqual(1,len(archived)); self.assertEqual(projection,archived[0].read_bytes())
+            self.assertEqual(0o600,archived[0].stat().st_mode & 0o777)
+            self.assertFalse((tracker/'settings/outbox/0.json').exists())
+            for name,(inode,raw) in originals.items():
+                path=self.root/name; self.assertEqual((inode,raw),(path.stat().st_ino,path.read_bytes()))
+            seen=self.current_global_state(owner,bound,unit)
+            self.assertEqual((1,'UNKNOWN'),(seen.attempt_count,seen.outcome))
+
+    def test_native_delivery_paired_k_append_and_archive_preserve_original_count_and_events(self):
+        with ExitStack() as stack:
+            allocation,writer,owner,bound,unit,allocated,images=self.native_audit_completed(stack)
+            allocation.record_completed_settings_delivery(writer,owner,bound,unit)
+            tracker=self.root/'project/.tracker';old=(tracker/'settings/events/0.json').read_bytes()
+            payload={'new_k':6,'actor':'operator:fixture','expected_revision':0,'request_id':'native-after-delivery'}
+            expected=canonical({'schema_version':1,'revision':1,'type':'set_k','old_k':3,'new_k':6,
+                'actor':'operator:fixture','recorded_at':'2026-10-08T10:01:00Z','request_id':'native-after-delivery',
+                'payload_sha256':hashlib.sha256(canonical(payload)).hexdigest(),
+                'predecessor_sha256':hashlib.sha256(old).hexdigest()})
+            options=dict(new_k=6,actor='operator:fixture',recorded_at='2026-10-08T10:01:00Z',
+                request_id='native-after-delivery',expected_revision=0)
+            receipt=allocation.apply_completed_k_change(writer,owner,bound,unit,**options)
+            digest=hashlib.sha256(expected).hexdigest()
+            self.assertEqual((1,6,digest,False),(receipt.revision,receipt.k,receipt.event_sha256,receipt.replay))
+            self.assertEqual(expected,(tracker/'settings/events/1.json').read_bytes())
+            pending=(tracker/'settings/outbox/1.json').read_bytes()
+            allocation.cleanup_completed_settings_outbox(writer,owner,bound,unit)
+            self.assertEqual(pending,(tracker/'settings/outbox/1.json').read_bytes())
+            self.assertEqual(('settings:1:'+digest,),tuple(row['event_id'] for row in
+                allocation.pending_settings_audits_after_completed_unit(writer,owner,bound,unit)))
+            replay=allocation.apply_completed_k_change(writer,owner,bound,unit,**options)
+            self.assertTrue(replay.replay)
+            current=allocation.read_current_k_after_completed_unit(writer,owner,bound,unit)
+            self.assertEqual((1,6),(current.revision,current.k))
+            self.assertEqual(old,(tracker/'settings/events/0.json').read_bytes())
+            for name,raw in images.items():self.assertEqual(raw,(allocated/name).read_bytes())
+            seen=self.current_global_state(owner,bound,unit)
+            self.assertEqual((1,'UNKNOWN'),(seen.attempt_count,seen.outcome))
+
+    def native_delivery_cold_replay(self, *, discovered=False):
+        from dataclasses import asdict
+        import subprocess
+        with ExitStack() as stack:
+            allocation,writer,owner,bound,unit,allocated,images=self.native_audit_completed(stack)
+            allocation.record_completed_settings_delivery(writer,owner,bound,unit)
+            tracker=self.root/'project/.tracker';original=(tracker/'settings/events/0.json').read_bytes()
+            projection=(tracker/'settings/outbox/0.json').read_bytes()
+        before={p.name for p in (tracker/'quarantine').iterdir()}
+        program='''import sys,json,hashlib
+from pathlib import Path
+sys.path[:0]=[sys.argv[1],sys.argv[1]+"/tools"]
+from monitor import issue_tracker_state_owner as state,issue_tracker_spreadsheet_owner as sheet
+from monitor import issue_tracker_settings_audit_allocation as allocation
+from test_cases.test_req7_spreadsheet_owner import scoped_fixture
+from monitor.issue_tracker_online_target import OnlineTargetBinding
+from monitor.issue_tracker_send_unit import _original_unit
+root=Path(sys.argv[2]);project=root/'project';tracker=project/'.tracker'
+bound=OnlineTargetBinding(**json.loads(sys.stdin.buffer.read()))
+folder=root/'var/lib/http-ztp-container/issue-tracker'/(hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()+'.units')/sys.argv[3]
+unit=_original_unit((folder/'ACTION-PREIMAGE').read_bytes(),(folder/'WIRE').read_bytes())
+with scoped_fixture(root,sheet),state.tracker_writer(project,project/'publication',completed_binding=bound,completed_unit=unit) as token:
+ owner=state._COMPLETED_READ_CONTEXT[token][0]
+ result=allocation.cleanup_completed_settings_outbox(token,owner,bound,unit)
+ current=state.current_k(token);pending=allocation.pending_settings_audits_after_completed_unit(token,owner,bound,unit)
+ print(result.state,current.revision,current.k,len(pending))
+ before={str(p.relative_to(tracker)):p.read_bytes() for p in tracker.rglob('*') if p.is_file()}
+ again=allocation.cleanup_completed_settings_outbox(token,owner,bound,unit)
+ print(result==again,before=={str(p.relative_to(tracker)):p.read_bytes() for p in tracker.rglob('*') if p.is_file()})
+'''
+        if discovered:
+            # The fresh process is given only project coordinates, not a
+            # binding/unit, parent token registry or reconstructed authority.
+            start=program.index('bound=OnlineTargetBinding(')
+            end=program.index(' result=allocation.cleanup_completed_settings_outbox')
+            program=program[:start]+'''assert state._COMPLETED_READ_CONTEXT=={} and state._COMPLETED_ORIGINAL_GUARDS=={}
+with scoped_fixture(root,sheet),state.tracker_settings_writer(project,project/'publication') as token:
+ owner,bound,unit=state._COMPLETED_READ_CONTEXT[token]
+'''+program[end:]
+            arguments=[sys.executable,'-B','-c',program,str(ROOT),str(self.root)]
+            payload=b''
+        else:
+            arguments=[sys.executable,'-B','-c',program,str(ROOT),str(self.root),unit.unit_id]
+            payload=json.dumps(asdict(bound)).encode()
+        program+='assert state._COMPLETED_READ_CONTEXT=={} and state._COMPLETED_ORIGINAL_GUARDS=={}\n'
+        arguments[3]=program
+        cold=subprocess.run(arguments,input=payload,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=10)
+        self.assertEqual(0,cold.returncode,cold.stderr)
+        self.assertEqual(b'DELIVERED-PRESENT-OUTBOX-ABSENT-VALID 0 3 0\nTrue True\n',cold.stdout)
+        self.assertEqual(original,(tracker/'settings/events/0.json').read_bytes())
+        self.assertFalse((tracker/'settings/outbox/0.json').exists())
+        archives=[p for p in (tracker/'quarantine').iterdir() if p.name not in before]
+        self.assertEqual(1,len(archives));self.assertEqual(projection,archives[0].read_bytes())
+        for name,raw in images.items():self.assertEqual(raw,(allocated/name).read_bytes())
+
+    def test_native_catalog_audit_delivery_cold_process_archives_and_replays_original_pair(self):
+        self.native_delivery_cold_replay()
+
+    def test_native_default_cold_settings_entry_discovers_actual_delivery_without_parent_coordinates(self):
+        self.native_delivery_cold_replay(discovered=True)
+
+    def native_default_delivered_fixture(self):
+        with ExitStack() as stack:
+            allocation,writer,owner,bound,unit,allocated,images=self.native_audit_completed(stack)
+            allocation.record_completed_settings_delivery(writer,owner,bound,unit)
+            allocation.cleanup_completed_settings_outbox(writer,owner,bound,unit)
+        return self.root/'project',allocated
+
+    def native_default_refused_without_repair(self, project):
+        from monitor import issue_tracker_state_owner as state,issue_tracker_spreadsheet_owner as sheet
+        before=self._default_recovery_images(project);yielded=[]
+        with scoped_fixture(self.root,sheet),self.assertRaises(state.TrackerStateHold):
+            with state.tracker_settings_writer(project,project/'publication'):
+                yielded.append(True)
+        self.assertEqual([],yielded)
+        self.assertEqual(before,self._default_recovery_images(project))
+        self.assertEqual({},state._COMPLETED_READ_CONTEXT)
+        self.assertEqual({},state._COMPLETED_ORIGINAL_GUARDS)
+
+    def test_native_default_locator_tampered_unit_never_releases_missing_projection(self):
+        project,_allocated=self.native_default_delivered_fixture()
+        path=project/'.tracker/settings-audit-delivery/HEADER';body=json.loads(path.read_bytes())
+        body['complete_allocation']['native_allocation_header']['unit_id']='f'*64
+        path.write_bytes(canonical(body));path.chmod(0o600)
+        self.native_default_refused_without_repair(project)
+
+    def test_native_default_locator_recomputed_hash_foreign_project_still_refuses(self):
+        project,_allocated=self.native_default_delivered_fixture()
+        path=project/'.tracker/settings-audit-delivery/HEADER';body=json.loads(path.read_bytes())
+        image=body['complete_allocation']['native_allocation_header']
+        image['project_identity'][1]+=1
+        body['complete_allocation']['allocation_header_sha256']=hashlib.sha256(canonical(image)).hexdigest()
+        path.write_bytes(canonical(body));path.chmod(0o600)
+        self.native_default_refused_without_repair(project)
+
+    def test_native_default_missing_native_anchor_never_uses_valid_shadow_legacy_allocation(self):
+        project,allocated=self.native_default_delivered_fixture()
+        tracker=project/'.tracker';shadow=tracker/'settings-audit-allocation';shadow.mkdir(mode=0o700)
+        # Even byte-identical local shadows do not replace the actual shared
+        # catalog anchor or its original project/C6 provenance.
+        for path in allocated.iterdir():
+            target=shadow/path.name;target.write_bytes(path.read_bytes());target.chmod(0o600)
+        allocated.rename(self.root/'preserved-native-default-allocation')
+        self.native_default_refused_without_repair(project)
+
+    def test_native_default_removed_native_locator_never_adopts_legacy_shadow(self):
+        project,allocated=self.native_default_delivered_fixture()
+        tracker=project/'.tracker';shadow=tracker/'settings-audit-allocation';shadow.mkdir(mode=0o700)
+        for path in allocated.iterdir():
+            target=shadow/path.name;target.write_bytes(path.read_bytes());target.chmod(0o600)
+        path=tracker/'settings-audit-delivery/HEADER';body=json.loads(path.read_bytes())
+        body['complete_allocation'].pop('native_allocation_header')
+        path.write_bytes(canonical(body));path.chmod(0o600)
+        self.native_default_refused_without_repair(project)
+
+    def native_default_original_replacement_refuses(self, *, allocation_header):
+        from monitor import issue_tracker_state_owner as state,issue_tracker_spreadsheet_owner as sheet
+        project,allocated=self.native_default_delivered_fixture();tracker=project/'.tracker'
+        header=allocated/'HEADER' if allocation_header else tracker/'settings-audit-delivery/HEADER'
+        reached=[];reads=[]
+        with scoped_fixture(self.root,sheet),self.assertRaises(state.TrackerStateHold):
+            with state.tracker_settings_writer(project,project/'publication') as token:
+                self.assertEqual((0,3),(state.current_k(token).revision,state.current_k(token).k))
+                original=(header.stat().st_ino,header.read_bytes())
+                header.rename(self.root/'preserved-native-default-header')
+                header.write_bytes(original[1]);header.chmod(0o600)
+                reached.append((original[0],header.stat().st_ino))
+                with self.assertRaises(state.TrackerStateHold):
+                    reads.append(state.current_k(token))
+                with self.assertRaises(state.TrackerStateHold):
+                    state.set_k(token,new_k=6,actor='operator:fixture',recorded_at='2026-10-09T00:00:00Z',
+                        request_id='native-discovery-rebind',expected_revision=0)
+        self.assertEqual(1,len(reached));self.assertNotEqual(*reached[0]);self.assertEqual([],reads)
+        self.assertFalse((tracker/'settings/events/1.json').exists())
+        self.assertFalse((tracker/'settings/outbox/0.json').exists())
+        self.assertEqual({},state._COMPLETED_READ_CONTEXT)
+        self.assertEqual({},state._COMPLETED_ORIGINAL_GUARDS)
+
+    def test_native_default_held_delivery_header_same_bytes_rebind_stops_read_and_k_commit(self):
+        self.native_default_original_replacement_refuses(allocation_header=False)
+
+    def test_native_default_held_allocation_header_same_bytes_rebind_stops_read_and_k_commit(self):
+        self.native_default_original_replacement_refuses(allocation_header=True)
+
+    def test_native_default_locator_revalidates_after_actual_pair_last_finalizer(self):
+        project,_allocated=self.native_default_delivered_fixture()
+        from monitor import issue_tracker_state_owner as state,issue_tracker_spreadsheet_owner as sheet
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        header=project/'.tracker/settings-audit-delivery/HEADER'
+        actual=allocation._hold_completed_k_pair;armed=[];reached=[]
+        @contextmanager
+        def after_actual_pair(*args,**options):
+            with actual(*args,**options) as original:
+                yield original
+            if armed and not reached:
+                prior=(header.stat().st_ino,header.read_bytes())
+                header.rename(self.root/'preserved-last-native-locator')
+                header.write_bytes(prior[1]);header.chmod(0o600)
+                reached.append((prior[0],header.stat().st_ino))
+        with scoped_fixture(self.root,sheet),mock.patch.object(allocation,'_hold_completed_k_pair',side_effect=after_actual_pair), \
+                self.assertRaises(state.TrackerStateHold):
+            with state.tracker_settings_writer(project,project/'publication') as token:
+                self.assertEqual((0,3),(state.current_k(token).revision,state.current_k(token).k))
+                armed.append(True)
+        self.assertEqual(1,len(reached));self.assertNotEqual(*reached[0])
+        self.assertEqual({},state._COMPLETED_READ_CONTEXT)
+        self.assertEqual({},state._COMPLETED_ORIGINAL_GUARDS)
+        self.assertFalse((project/'.tracker/settings/events/1.json').exists())
+        self.assertFalse((project/'.tracker/settings/outbox/0.json').exists())
+
+    def test_native_default_unknown_partial_claim_after_actual_pair_finalizer_refuses(self):
+        project,_allocated=self.native_default_delivered_fixture()
+        from monitor import issue_tracker_state_owner as state,issue_tracker_spreadsheet_owner as sheet
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        tracker=project/'.tracker';actual=allocation._hold_completed_k_pair;armed=[];reached=[]
+        partial=tracker/('SETTINGS-AUDIT-DELIVERY-STARTED-'+'f'*64)
+        @contextmanager
+        def after_actual_pair(*args,**options):
+            with actual(*args,**options) as original:
+                yield original
+            if armed and not reached:
+                partial.write_bytes(b'literal-incomplete-delivery-claim\n');partial.chmod(0o600)
+                reached.append(partial.stat().st_ino)
+        with scoped_fixture(self.root,sheet),mock.patch.object(allocation,'_hold_completed_k_pair',side_effect=after_actual_pair), \
+                self.assertRaises(state.TrackerStateHold):
+            with state.tracker_settings_writer(project,project/'publication') as token:
+                self.assertEqual((0,3),(state.current_k(token).revision,state.current_k(token).k))
+                armed.append(True)
+        self.assertEqual(1,len(reached));self.assertEqual(b'literal-incomplete-delivery-claim\n',partial.read_bytes())
+        self.assertEqual({},state._COMPLETED_READ_CONTEXT)
+        self.assertEqual({},state._COMPLETED_ORIGINAL_GUARDS)
+        self.assertFalse((tracker/'settings/events/1.json').exists())
+        self.assertFalse((tracker/'settings/outbox/0.json').exists())
+
+    def native_second_audit_completed(self, stack, *, fixture_facts=None, archive_before_new=False,late_fault=None):
+        """Two real same-project native C6 units; first genuinely APPLIED/key.
+
+        Retain outbox0 while constructing the second. This does not pretend
+        that ALL historical DELIVERED interpretation is already integrated.
+        """
+        facts={}
+        allocation,writer,owner,bound,first,allocated,images=self.native_audit_completed(stack,fixture_facts=facts)
+        from monitor import issue_tracker_unit_catalog as catalog,issue_tracker_nv_reservation as nv
+        from monitor import issue_tracker_remote_history_match as completion,issue_tracker_global_attempt_journal as journal
+        from monitor import issue_tracker_history_read_launcher as reads,issue_tracker_history_preread_journal as preread
+        from test_cases.test_req7_nv_reservation import cabling_inputs,source,KEYS
+        from test_cases.test_issue_tracker_whitelist_workbook import literal_xlsx
+        completion.record_owned_applied_evidence(writer,owner,bound,first,generation=facts['generation'])
+        completion.record_owned_applied_key_watermarks(writer,owner,bound,first,generation=facts['generation'])
+        allocation.record_completed_settings_delivery(writer,owner,bound,first)
+        if archive_before_new:
+            # Independent physical-order boundary: no second C6/NV/catalog
+            # exists when this actual first event is retired. Existing callers
+            # retain their original pre-archive second-unit fixture contract.
+            tracker=self.root/'project/.tracker'
+            original=(tracker/'settings/outbox/0.json').stat().st_ino,(tracker/'settings/outbox/0.json').read_bytes()
+            allocation.cleanup_completed_settings_outbox(writer,owner,bound,first)
+            self.assertFalse((tracker/'settings/outbox/0.json').exists())
+            self.assertEqual(1,sum((p.stat().st_ino,p.read_bytes())==original
+                for p in (tracker/'quarantine').iterdir() if p.is_file()))
+            actual_prepare=allocation._prepare_native_catalog_allocation
+            def diagnose_native_creation(*args,**kwargs):
+                if late_fault is not None:
+                    original_preparation=nv._verify_catalog_preparation(args[0])
+                    fixture_facts['old']=original_preparation['old']
+                    fixture_facts['first_journal']=self.root/'var/lib/http-ztp-container/issue-tracker'/(
+                        original_preparation['stem']+'.unit-'+first.unit_id+'.journal')
+                    fixture_facts['old_count_images']={p.name:(p.stat().st_ino,p.read_bytes())
+                        for p in fixture_facts['first_journal'].iterdir() if p.is_file()}
+                try:return actual_prepare(*args,**kwargs)
+                except BaseException:
+                    import traceback
+                    traceback.print_exc()
+                    raise
+            stack.enter_context(mock.patch.object(allocation,'_prepare_native_catalog_allocation',
+                side_effect=diagnose_native_creation))
+            if late_fault is not None:
+                actual_close=catalog._Originals.close
+                def last_nv_old_close(original):
+                    result=actual_close(original)
+                    if original is fixture_facts.get('old') and not fixture_facts.get('reached'):
+                        fixture_facts['reached']=True
+                        shared=self.root/'var/lib/http-ztp-container/issue-tracker'
+                        stem=hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()
+                        if late_fault=='delivery-header':
+                            path=tracker/'settings-audit-delivery/HEADER';raw=path.read_bytes()
+                            fixture_facts['before_inode']=path.stat().st_ino
+                            path.rename(self.root/'retained-old-allocation-delivery-header')
+                            path.write_bytes(raw);path.chmod(0o600)
+                            fixture_facts['path']=path
+                        else:
+                            path=shared/(stem+'.unissued-tail') if late_fault=='shared-extra' else shared/(stem+'.units/UNISSUED-TAIL')
+                            path.write_bytes(b'literal foreign tail preserved\n');path.chmod(0o600)
+                            fixture_facts['path']=path
+                    return result
+                stack.enter_context(mock.patch.object(catalog._Originals,'close',last_nv_old_close))
+        allocation.apply_completed_k_change(writer,owner,bound,first,new_k=7,actor='operator:fixture',
+            recorded_at='2026-10-08T10:01:00Z',request_id='catalog-later-k',expected_revision=0)
+        tracker=self.root/'project/.tracker'
+        first_projection=None if archive_before_new else (
+            (tracker/'settings/outbox/0.json').stat().st_ino,(tracker/'settings/outbox/0.json').read_bytes())
+        first_delivery={p.name:(p.stat().st_ino,p.read_bytes()) for p in (tracker/'settings-audit-delivery').iterdir()}
+        audit=self.catalog_later_settings_audit_oracle()
+        arguments=cabling_inputs(facts['nonces'],identifiers=('NV30104','NV30105'));arguments['audits']=(audit,)
+        arguments['occupied_metadata_ids']=(first.fence_metadata_id,)
+        generation=catalog.local.begin_generation(writer,arguments['manifest'])
+        catalog.local.record_intent(writer,generation,literal_xlsx(),kind='xlsx')
+        receipt=catalog.local.commit(writer,generation)
+        self.assertEqual(2,generation.sequence)
+        arguments.update(generation_id=generation.generation_id,publish_id=receipt.published_sha256)
+        second=catalog.composer.freeze_send_unit(**arguments)
+        self.assertNotEqual(first.unit_id,second.unit_id)
+        eth_plan=reads._prepare(bound,facts['auth'],'activity','ETH Cabling',None)
+        ib_plan=reads._prepare(bound,facts['auth'],'activity','IB Cabling',None)
+        with nv.hold_catalog_nv_preparation(owner,bound,facts['identity'],
+                eth_plan,source('ETH Cabling',('NV30016',)),ib_plan,source('IB Cabling',('NV30101',)),
+                generation_id=generation.generation_id,publish_id=receipt.published_sha256,
+                sheet='ETH Cabling',requested_keys=KEYS) as prepared:
+            self.assertEqual(((KEYS[0],'NV30104'),(KEYS[1],'NV30105')),prepared.observation.reservations)
+            catalog.register_pending_c6_unit(writer,owner,bound,second,_nv_preparation=prepared)
+        journal.prepare_global_unit(owner,bound,second)
+        original=self.read_owned(stack,writer,owner,bound,facts['auth'],'history_tail',facts['post'])
+        plan=reads.require_current_owned_read(writer,owner,bound,original,read_kind='history_tail')
+        preread.prepare_history_preread(owner,bound,second,plan,original)
+        journal.record_global_attempt_intent(owner,bound,second)
+        common={'schema_version':1,'unit_id':second.unit_id,'manifest_id':arguments['manifest_id'],
+            'generation_id':arguments['generation_id'],'publish_id':arguments['publish_id'],
+            'action_digest':second.action_digest,'outcome_mapping_sha256':second.outcome_mapping_sha256,
+            'target_nonce':'b'*64,'history_nonce':'d'*64,'preread_sha256':'e'*64}
+        rows=[]
+        for item in arguments['business']:
+            intended=hashlib.sha256(canonical({'sheet':'ETH Cabling','sheet_id':102,'action':'insert',
+                'row_index':None,'values':{column:{'stringValue':value}
+                    for column,value in item['values'].items()}})).hexdigest()
+            rows.append((item['recorded_at_utc'],'ETH Cabling','insert',item['operation_id'],
+                canonical({**common,'operation_id':item['operation_id'],'intended_sha256':intended}).decode().rstrip('\n')))
+        rows.append((audit['recorded_at_utc'],'ETH Cabling','settings-audit',audit['event_id'],
+            canonical({**common,'event_id':audit['event_id'],'event_details':audit['details']}).decode().rstrip('\n')))
+        post=deepcopy(facts['post'])
+        post['sheets'][0]['data'][0]['rowData'].extend(
+            {'values':[{'userEnteredValue':{'stringValue':text}} for text in row]} for row in rows)
+        metadata=deepcopy(facts['metadata'])
+        metadata['matchedDeveloperMetadata'].append({'developerMetadata':{'metadataId':second.fence_metadata_id,
+            'metadataKey':'z','metadataValue':'1','visibility':'DOCUMENT','location':{'locationType':'SHEET','sheetId':102}}})
+        documents={'identity_response':('template_identity',facts['identity_doc']),
+            'headers_response':('template_headers',facts['headers']),
+            'metadata_response':('metadata',metadata),'history_response':('history_tail',post)}
+        responses={name:self.read_owned(stack,writer,owner,bound,facts['auth'],kind,value)
+            for name,(kind,value) in documents.items()}
+        completion.record_owned_completion_evidence(writer,owner,bound,second,**responses)
+        self.assertEqual('COMPLETE-PRESENT-NOT-APPLIED',completion.inspect_completion_evidence(owner,bound,second).state)
+        if fixture_facts is not None:
+            fixture_facts.update(facts)
+            fixture_facts.update(generation=generation,post=post,metadata=metadata)
+        return allocation,writer,owner,bound,first,second,first_projection,first_delivery
+
+    def test_native_second_allocation_created_after_actual_first_archive_assigns_only_literal_new_event(self):
+        from monitor import issue_tracker_mutation_launcher as mutation
+        with ExitStack() as stack,mock.patch.object(mutation,'_send_counted_original_once') as no_send:
+            allocation,writer,owner,bound,first,second,_projection,old_pair=self.native_second_audit_completed(
+                stack,archive_before_new=True)
+            tracker=self.root/'project/.tracker'
+            from monitor import issue_tracker_global_attempt_journal as journal
+            old=journal.inspect_global_unit(owner,bound,first)
+            new=journal.inspect_global_unit(owner,bound,second)
+            self.assertEqual((1,'UNKNOWN'),(old.attempt_count,old.outcome))
+            self.assertEqual((1,'UNKNOWN'),(new.attempt_count,new.outcome))
+            # The helper records one diagnostic count for the four real TLS
+            # completion reads; it never launches a protected mutation.
+            stem=hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()
+            allocated=self.root/'var/lib/http-ztp-container/issue-tracker'/(stem+'.unit-'+second.unit_id+'.settings-audit')
+            expected=self.catalog_later_settings_audit_oracle()
+            assignments=json.loads((allocated/'ASSIGNMENTS').read_bytes())
+            self.assertEqual([{'revision':1,'event_sha256':hashlib.sha256((expected['details']+'\n').encode()).hexdigest(),
+                'audit':expected}],assignments)
+            self.assertFalse((tracker/'settings/outbox/0.json').exists())
+            self.assertEqual((expected['details']+'\n').encode(),(tracker/'settings/events/1.json').read_bytes())
+            self.assertEqual(old_pair,{p.name:(p.stat().st_ino,p.read_bytes())
+                for p in (tracker/'settings-audit-delivery').iterdir()})
+            self.assertFalse((tracker/('settings-audit-delivery-'+second.unit_id)).exists())
+            no_send.assert_not_called()
+
+    def test_native_counted_foreign_archived_project_retains_real_owner_through_new_allocation_raw_tail(self):
+        from test_cases.test_req7_nv_reservation import cabling_inputs, source, KEYS
+        from test_cases.test_issue_tracker_whitelist_workbook import literal_xlsx
+        facts = {}
+        with ExitStack() as initial:
+            allocation, writer, sheet, bound, first, _allocated, _images = self.native_audit_completed(
+                initial, fixture_facts=facts)
+            from monitor import issue_tracker_remote_history_match as completion
+            completion.record_owned_applied_evidence(writer, sheet, bound, first, generation=facts['generation'])
+            completion.record_owned_applied_key_watermarks(writer, sheet, bound, first, generation=facts['generation'])
+            allocation.record_completed_settings_delivery(writer, sheet, bound, first)
+            allocation.cleanup_completed_settings_outbox(writer, sheet, bound, first)
+        from monitor import issue_tracker_unit_catalog as catalog, issue_tracker_nv_reservation as nv
+        from monitor import issue_tracker_k_store as settings, issue_tracker_state_owner as state
+        from monitor import issue_tracker_global_attempt_journal as journal
+        from monitor import issue_tracker_history_read_launcher as reads, issue_tracker_mutation_launcher as mutation
+        local = catalog.local; ownership = catalog.ownership
+        self.assertEqual({}, local._ACTIVE)
+        old_project = self.root / 'project'
+        original = self._default_recovery_images(old_project)
+        shared = self.root / 'var/lib/http-ztp-container/issue-tracker'
+        shared_original = {str(p.relative_to(shared)):(p.stat().st_ino,p.read_bytes())
+            for p in shared.rglob('*') if p.is_file()}
+        project = self.root / 'next-real-project'; project.mkdir(mode=0o700)
+        publication = project / 'publication'; publication.mkdir(mode=0o700)
+        local.create_local_commit_store(project, publication)
+        tail_facts = []; actual_finish = allocation._NativeAllocationPriorOriginals.finish
+        def observe_real_raw_tail(raw, *args):
+            # Observe only genuine newly acquired foreign owner and revoked
+            # semantic registries. Assertions remain outside sanitizers.
+            actual_owner = local._ACTIVE.get(raw.writer)
+            tail_facts.append((raw.writer, actual_owner,
+                None if actual_owner is None else str(actual_owner.project),
+                bool(nv._ACTIVE_CATALOG_PREPARATIONS), bool(state._COMPLETED_READ_CONTEXT),
+                bool(state._COMPLETED_ORIGINAL_GUARDS), bool(allocation._LIVE_NATIVE_SETTINGS_CONTEXTS)))
+            try:
+                return actual_finish(raw, *args)
+            except BaseException:
+                import traceback
+                print('ACTUAL_FOREIGN_RAW_TAIL_OWNER_PRESENT', actual_owner is not None)
+                traceback.print_exc()
+                raise
+        with scoped_fixture(self.root, ownership), ownership.spreadsheet_owner(bound) as sheet, \
+                local.writer_owner(project, publication) as current, \
+                mock.patch.object(mutation, '_send_counted_original_once') as no_send, \
+                mock.patch.object(allocation._NativeAllocationPriorOriginals, 'finish', observe_real_raw_tail):
+            settings.initialize_local_k_store(project / '.tracker', token=current,
+                initialized_at='2026-10-08T10:00:00Z', acquisition_id='first-use')
+            audit = self.settings_audit_oracle()
+            args = cabling_inputs(facts['nonces'], identifiers=('NV30104','NV30105')); args['audits']=(audit,)
+            args['occupied_metadata_ids']=(first.fence_metadata_id,)
+            generation = local.begin_generation(current, args['manifest'])
+            local.record_intent(current, generation, literal_xlsx(), kind='xlsx')
+            receipt = local.commit(current, generation)
+            args.update(generation_id=generation.generation_id, publish_id=receipt.published_sha256)
+            second = catalog.composer.freeze_send_unit(**args)
+            eth_plan = reads._prepare(bound, facts['auth'], 'activity', 'ETH Cabling', None)
+            ib_plan = reads._prepare(bound, facts['auth'], 'activity', 'IB Cabling', None)
+            with nv.hold_catalog_nv_preparation(sheet, bound, facts['identity'],
+                    eth_plan, source('ETH Cabling', ('NV30016',)),
+                    ib_plan, source('IB Cabling', ('NV30101',)),
+                    generation_id=generation.generation_id, publish_id=receipt.published_sha256,
+                    sheet='ETH Cabling', requested_keys=KEYS) as prepared:
+                self.assertEqual(((KEYS[0],'NV30104'),(KEYS[1],'NV30105')), prepared.observation.reservations)
+                catalog.register_pending_c6_unit(current, sheet, bound, second, _nv_preparation=prepared)
+            self.assertEqual(1, len(tail_facts))
+            foreign, actual_owner, path, *registries = tail_facts[0]
+            self.assertIsNotNone(actual_owner); self.assertEqual(str(old_project), path)
+            self.assertEqual([False]*4, registries)
+            self.assertNotIn(foreign, local._ACTIVE)
+            self.assertEqual({current}, set(local._ACTIVE))
+            count = journal.inspect_global_unit(sheet, bound, first)
+            self.assertEqual((1,'UNKNOWN'), (count.attempt_count,count.outcome))
+            folder = shared / (hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()+
+                '.unit-'+second.unit_id+'.settings-audit')
+            self.assertEqual([{'revision':0,'event_sha256':audit['event_id'].split(':')[2],'audit':audit}],
+                json.loads((folder/'ASSIGNMENTS').read_bytes()))
+            self.assertTrue((project/'.tracker/settings/outbox/0.json').is_file())
+            self.assertFalse((project/'.tracker/settings-audit-delivery').exists())
+            no_send.assert_not_called()
+        self.assertEqual({},local._ACTIVE); self.assertEqual({},nv._ACTIVE_CATALOG_PREPARATIONS)
+        self.assertEqual(original,self._default_recovery_images(old_project))
+        self.assertEqual(shared_original,{name:((shared/name).stat().st_ino,(shared/name).read_bytes())
+            for name in shared_original})
+
+    def test_native_after_archive_allocation_last_old_close_delivery_rebind_is_hold(self):
+        self._native_after_archive_last_close_fault('delivery-header')
+
+    def test_native_after_archive_allocation_last_old_close_shared_extra_is_hold(self):
+        self._native_after_archive_last_close_fault('shared-extra')
+
+    def test_native_after_archive_allocation_last_old_close_catalog_extra_is_hold(self):
+        self._native_after_archive_last_close_fault('catalog-extra')
+
+    def _native_after_archive_last_close_fault(self,fault):
+        from monitor import issue_tracker_nv_reservation as nv,issue_tracker_state_owner as state
+        from monitor import issue_tracker_mutation_launcher as mutation
+        facts={}
+        with ExitStack() as stack,mock.patch.object(mutation,'_send_counted_original_once') as no_send:
+            # The genuine fixture reloads NV before issuing originals. Pin
+            # the literal typed-HOLD contract, not a stale imported class.
+            with self.assertRaisesRegex(ValueError,'^req7_nv_reservation_unproved$') as caught:
+                self.native_second_audit_completed(stack,fixture_facts=facts,archive_before_new=True,late_fault=fault)
+            self.assertEqual('NvReservationHold',type(caught.exception).__name__)
+            self.assertTrue(facts.get('reached'),'fault must follow actual NV old original cleanup')
+            path=facts['path'];self.assertTrue(path.is_file())
+            if fault=='delivery-header':
+                self.assertNotEqual(facts['before_inode'],path.stat().st_ino)
+                self.assertEqual((self.root/'retained-old-allocation-delivery-header').read_bytes(),path.read_bytes())
+            else:self.assertEqual(b'literal foreign tail preserved\n',path.read_bytes())
+            self.assertEqual(facts['old_count_images'],{p.name:(p.stat().st_ino,p.read_bytes())
+                for p in facts['first_journal'].iterdir() if p.is_file()})
+            self.assertEqual({},nv._ACTIVE_CATALOG_PREPARATIONS)
+            self.assertEqual({},state._COMPLETED_READ_CONTEXT);self.assertEqual({},state._COMPLETED_ORIGINAL_GUARDS)
+            no_send.assert_not_called()
+
+    def test_native_new_delivery_after_first_archive_keeps_originals_and_archives_only_new_event(self):
+        from monitor import issue_tracker_state_owner as state,issue_tracker_spreadsheet_owner as sheet
+        from monitor import issue_tracker_remote_history_match as completion
+        tracker=self.root/'project/.tracker'
+        with ExitStack() as stack:
+            allocation,writer,owner,bound,first,second,projection,first_delivery=self.native_second_audit_completed(stack)
+            # Both genuine native COMPLETEs already exist. Retire event0 by
+            # its actual old pair before first creation of the new pair.
+            old=allocation.cleanup_completed_settings_outbox(writer,owner,bound,first)
+            self.assertEqual(('DELIVERED-PRESENT-OUTBOX-ABSENT-VALID',
+                (self.settings_audit_oracle()['event_id'],)),(old.state,old.event_ids))
+            self.assertFalse((tracker/'settings/outbox/0.json').exists())
+            self.assertTrue((tracker/'settings/outbox/1.json').is_file())
+            self.assertEqual('COMPLETE-PRESENT-NOT-APPLIED',completion.inspect_completion_evidence(owner,bound,second).state)
+            before={str(path):(path.stat().st_ino,path.read_bytes()) for path in self.root.rglob('*') if path.is_file()}
+            print('OWNED_NEW_DELIVERY_AFTER_OLD_ARCHIVE',True,flush=True)
+            original_settings=allocation._hold_settings_originals
+            @contextmanager
+            def settings_diagnosis(*args,**kwargs):
+                try:
+                    with original_settings(*args,**kwargs) as actual:yield actual
+                except Exception:
+                    import traceback
+                    print('OWNED_NEW_DELIVERY_SETTINGS_FAILURE',flush=True)
+                    traceback.print_exc()
+                    raise
+            with mock.patch.object(allocation,'_hold_settings_originals',side_effect=settings_diagnosis):
+                result=allocation.record_completed_settings_delivery(writer,owner,bound,second)
+            self.assertEqual((self.catalog_later_settings_audit_oracle()['event_id'],),result.event_ids)
+            folder=tracker/('settings-audit-delivery-'+second.unit_id)
+            self.assertEqual({'HEADER','DELIVERED'},{path.name for path in folder.iterdir()})
+            self.assertTrue((tracker/('SETTINGS-AUDIT-DELIVERY-STARTED-'+second.unit_id)).is_file())
+            for name,image in before.items():
+                path=Path(name);self.assertEqual(image,(path.stat().st_ino,path.read_bytes()),name)
+        event=(self.catalog_later_settings_audit_oracle()['details']+'\n').encode()
+        expected=canonical({'schema_version':1,'revision':1,'event_sha256':hashlib.sha256(event).hexdigest()})
+        projection=(tracker/'settings/outbox/1.json').stat().st_ino,(tracker/'settings/outbox/1.json').read_bytes()
+        self.assertEqual(expected,projection[1]);archives={path.name for path in (tracker/'quarantine').iterdir()}
+        with scoped_fixture(self.root,sheet),state.tracker_settings_writer(self.root/'project',self.root/'project/publication') as token:
+            actual=[key for key,value in sheet._ACTIVE.items() if value.pid==os.getpid()]
+            self.assertEqual(1,len(actual))
+            result=allocation.cleanup_completed_settings_outbox(token,actual[0],bound,second)
+            self.assertEqual(('DELIVERED-PRESENT-OUTBOX-ABSENT-VALID',
+                (self.catalog_later_settings_audit_oracle()['event_id'],)),(result.state,result.event_ids))
+            self.assertEqual((1,7),(state.current_k(token).revision,state.current_k(token).k))
+            self.assertEqual((),allocation.pending_settings_audits(token))
+            self.assertEqual([(1,'UNKNOWN'),(1,'UNKNOWN')],
+                [(self.current_global_state(actual[0],bound,unit).attempt_count,
+                  self.current_global_state(actual[0],bound,unit).outcome) for unit in (first,second)])
+        self.assertEqual([],list((tracker/'settings/outbox').iterdir()))
+        added=[path for path in (tracker/'quarantine').iterdir() if path.name not in archives]
+        self.assertEqual(1,len(added));self.assertEqual(projection,(added[0].stat().st_ino,added[0].read_bytes()))
+        for name,(inode,raw) in first_delivery.items():
+            path=tracker/'settings-audit-delivery'/name
+            self.assertEqual((inode,raw),(path.stat().st_ino,path.read_bytes()))
+        self.assertEqual({},state._COMPLETED_READ_CONTEXT);self.assertEqual({},state._COMPLETED_ORIGINAL_GUARDS)
+
+    def _assert_new_native_delivery_after_archive_hold(self, fault):
+        from monitor import issue_tracker_state_owner as state
+        tracker=self.root/'project/.tracker'
+        with ExitStack() as stack:
+            allocation,writer,owner,bound,first,second,_projection,first_delivery=self.native_second_audit_completed(stack)
+            allocation.cleanup_completed_settings_outbox(writer,owner,bound,first)
+            projection=tracker/'settings/outbox/1.json'
+            before=projection.stat().st_ino,projection.read_bytes()
+            reached=[];creator_calls=[];write=allocation._write_delivery_file;foreign=[]
+            primary=KeyboardInterrupt('literal native delivery operator interruption')
+            foreign_path=tracker/'literal-foreign-cleanup-evidence'
+            foreign_path.write_bytes(b'literal foreign slot remains owned\n');foreign_path.chmod(0o600)
+            actual_capture=allocation._DeliveryCreatorOriginals.capture_written
+            actual_folder=allocation._DeliveryCreatorOriginals.capture_folder
+            actual_close=allocation.local._close_written_original;folder_sources=[]
+            def replace_owned_slot(descriptor):
+                os.close(descriptor)
+                replacement=os.open(foreign_path,os.O_RDONLY)
+                if replacement!=descriptor:os.dup2(replacement,descriptor);os.close(replacement)
+                os.lseek(descriptor,3,os.SEEK_SET);foreign.append(descriptor);reached.append(True)
+            def capture_written(holder,parent,name,descriptor,identity,raw):
+                actual_capture(holder,parent,name,descriptor,identity,raw)
+                if fault=='writer-foreign' and name=='SETTINGS-AUDIT-DELIVERY-STARTED-'+second.unit_id:
+                    replace_owned_slot(descriptor)
+            def capture_folder(holder,descriptor):
+                actual_folder(holder,descriptor)
+                folder_sources.append((descriptor,os.fstat(descriptor).st_dev,os.fstat(descriptor).st_ino))
+                if fault=='folder-foreign':replace_owned_slot(descriptor)
+            def close_source(descriptor,identity):
+                result=actual_close(descriptor,identity)
+                if (fault=='folder-last-close' and folder_sources
+                        and (descriptor,*identity[:2])==folder_sources[0] and not reached):
+                    old=tracker/'settings-audit-delivery/HEADER';image=old.read_bytes()
+                    inode=old.stat().st_ino;old.rename(old.with_name('displaced-original-HEADER'))
+                    old.write_bytes(image);old.chmod(0o600)
+                    self.assertNotEqual(inode,old.stat().st_ino);reached.append(True)
+                return result
+            def actual_write(parent,name,raw,**kwargs):
+                creator_calls.append(name)
+                result=write(parent,name,raw,**kwargs)
+                if (name=='SETTINGS-AUDIT-DELIVERY-STARTED-'+second.unit_id
+                        and fault in ('old-header-rebind','old-header-interrupt')):
+                    self.assertEqual({},allocation._LIVE_NATIVE_SETTINGS_CONTEXTS)
+                    self.assertEqual({},state._COMPLETED_READ_CONTEXT)
+                    self.assertEqual({},state._LOCAL_C6_READ_CONTEXT)
+                    old=tracker/'settings-audit-delivery/HEADER'
+                    image=old.read_bytes();identity=old.stat().st_ino
+                    old.rename(old.with_name('displaced-original-HEADER'))
+                    old.write_bytes(image);old.chmod(0o600)
+                    self.assertNotEqual(identity,old.stat().st_ino)
+                    reached.append(True)
+                    if fault=='old-header-interrupt':raise primary
+                return result
+            if fault=='selected-outbox-missing':
+                projection.rename(tracker/'quarantine/fixture-retained-new-projection')
+            try:
+                with mock.patch.object(allocation,'_write_delivery_file',side_effect=actual_write), \
+                        mock.patch.object(allocation._DeliveryCreatorOriginals,'capture_written',capture_written), \
+                        mock.patch.object(allocation._DeliveryCreatorOriginals,'capture_folder',capture_folder), \
+                        mock.patch.object(allocation.local,'_close_written_original',side_effect=close_source):
+                    if fault=='old-header-interrupt':
+                        with self.assertRaises(KeyboardInterrupt) as caught:
+                            allocation.record_completed_settings_delivery(writer,owner,bound,second)
+                        self.assertIs(primary,caught.exception)
+                        self.assertIsInstance(caught.exception.__cause__,allocation.SettingsAuditHold)
+                    else:
+                        with self.assertRaises(allocation.SettingsAuditHold):
+                            allocation.record_completed_settings_delivery(writer,owner,bound,second)
+                if fault in ('writer-foreign','folder-foreign'):
+                    self.assertEqual(1,len(foreign));self.assertEqual([True],reached)
+                    self.assertEqual(foreign_path.stat().st_ino,os.fstat(foreign[0]).st_ino)
+                    self.assertEqual(3,os.lseek(foreign[0],0,os.SEEK_CUR))
+                    self.assertEqual(b'literal foreign slot remains owned\n',os.pread(foreign[0],100,0))
+            finally:
+                for descriptor in foreign:
+                    try:
+                        current=os.fstat(descriptor);expected=foreign_path.stat()
+                        if (current.st_dev,current.st_ino)==(expected.st_dev,expected.st_ino):os.close(descriptor)
+                    except OSError:pass
+            if fault=='selected-outbox-missing':
+                self.assertEqual([],creator_calls)
+                retained=tracker/'quarantine/fixture-retained-new-projection'
+                self.assertEqual(before,(retained.stat().st_ino,retained.read_bytes()))
+                self.assertEqual([],reached)
+            else:
+                self.assertEqual([True],reached)
+                self.assertEqual(before,(projection.stat().st_ino,projection.read_bytes()))
+                marker=tracker/('settings-audit-delivery-'+second.unit_id)/'DELIVERED'
+                if fault=='folder-last-close':
+                    self.assertTrue(marker.is_file(),'late refusal retains the actually written marker, never ACKs')
+                else:self.assertFalse(marker.exists())
+            self.assertFalse((tracker/'settings/outbox/0.json').exists())
+            self.assertEqual({},state._COMPLETED_READ_CONTEXT)
+            self.assertEqual({},state._COMPLETED_ORIGINAL_GUARDS)
+
+    def test_native_new_delivery_after_archive_refuses_old_header_rebind_after_real_started(self):
+        self._assert_new_native_delivery_after_archive_hold('old-header-rebind')
+
+    def test_native_new_delivery_after_archive_missing_selected_outbox_never_enters_creator(self):
+        self._assert_new_native_delivery_after_archive_hold('selected-outbox-missing')
+
+    def test_native_new_delivery_original_tail_refusal_preserves_real_operator_interrupt(self):
+        self._assert_new_native_delivery_after_archive_hold('old-header-interrupt')
+
+    def test_native_new_delivery_writer_cleanup_never_closes_a_recycled_foreign_source_slot(self):
+        self._assert_new_native_delivery_after_archive_hold('writer-foreign')
+
+    def test_native_new_delivery_folder_cleanup_never_closes_a_recycled_foreign_source_slot(self):
+        self._assert_new_native_delivery_after_archive_hold('folder-foreign')
+
+    def test_native_new_delivery_last_actual_folder_close_still_checks_old_originals(self):
+        self._assert_new_native_delivery_after_archive_hold('folder-last-close')
+
+    def test_same_project_second_native_audit_complete_delivers_without_overwriting_first_pair(self):
+        with ExitStack() as stack:
+            allocation,writer,owner,bound,first,second,projection,first_delivery=self.native_second_audit_completed(stack)
+            tracker=self.root/'project/.tracker'
+            actual=allocation._hold_delivery_authority;entered=[]
+            @contextmanager
+            def actual_authority(*args,**options):
+                with actual(*args,**options) as original:
+                    entered.append((args[-1].unit_id,(tracker/'settings-audit-delivery').is_dir(),
+                        (tracker/'SETTINGS-AUDIT-DELIVERY-STARTED').is_file()))
+                    yield original
+            error=None
+            try:
+                with mock.patch.object(allocation,'_hold_delivery_authority',side_effect=actual_authority):
+                    delivered=allocation.record_completed_settings_delivery(writer,owner,bound,second)
+            except Exception as exc:error=exc
+            # Outside sanitizers: prove the actual second COMPLETE/allocation
+            # authority was reached before the fixed-name refusal.
+            self.assertEqual([(second.unit_id,True,True)],entered)
+            if error is not None:raise error
+            self.assertEqual((self.catalog_later_settings_audit_oracle()['event_id'],),delivered.event_ids)
+            folder=tracker/('settings-audit-delivery-'+second.unit_id)
+            started=tracker/('SETTINGS-AUDIT-DELIVERY-STARTED-'+second.unit_id)
+            self.assertEqual({'HEADER','DELIVERED'},{path.name for path in folder.iterdir()})
+            self.assertTrue(started.is_file())
+            saved=json.loads((folder/'HEADER').read_bytes())
+            self.assertEqual(second.unit_id,saved['complete_allocation']['native_delivery_unit_id'])
+            self.assertEqual(second.unit_id,saved['complete_allocation']['native_allocation_header']['unit_id'])
+            for name,(inode,raw) in first_delivery.items():
+                path=tracker/'settings-audit-delivery'/name
+                self.assertEqual((inode,raw),(path.stat().st_ino,path.read_bytes()))
+            allocation.cleanup_completed_settings_outbox(writer,owner,bound,second)
+            path=tracker/'settings/outbox/0.json'
+            self.assertEqual(projection,(path.stat().st_ino,path.read_bytes()))
+            self.assertFalse((tracker/'settings/outbox/1.json').exists())
+            self.assertEqual((self.settings_audit_oracle()['details']+'\n').encode(),(tracker/'settings/events/0.json').read_bytes())
+            self.assertEqual((self.catalog_later_settings_audit_oracle()['details']+'\n').encode(),(tracker/'settings/events/1.json').read_bytes())
+            for unit in (first,second):
+                seen=self.current_global_state(owner,bound,unit)
+                self.assertEqual((1,'UNKNOWN'),(seen.attempt_count,seen.outcome))
+
+    def test_second_native_delivery_header_same_bytes_rebind_refuses_cleanup_without_consuming_any_event(self):
+        from monitor import issue_tracker_state_owner as state
+        with ExitStack() as stack:
+            allocation,writer,owner,bound,first,second,projection,first_delivery=self.native_second_audit_completed(stack)
+            allocation.record_completed_settings_delivery(writer,owner,bound,second)
+            tracker=self.root/'project/.tracker';header=tracker/('settings-audit-delivery-'+second.unit_id)/'HEADER'
+            actual=allocation._hold_delivery_files;reached=[]
+            before=self._default_recovery_images(self.root/'project')
+            @contextmanager
+            def replace_after_hold(*args,**options):
+                with actual(*args,**options) as verify:
+                    old=(header.stat().st_ino,header.read_bytes())
+                    header.rename(self.root/'preserved-second-native-delivery-header')
+                    header.write_bytes(old[1]);header.chmod(0o600)
+                    reached.append((old[0],header.stat().st_ino))
+                    yield verify
+            with mock.patch.object(allocation,'_hold_delivery_files',side_effect=replace_after_hold), \
+                    self.assertRaises(allocation.SettingsAuditHold):
+                allocation.cleanup_completed_settings_outbox(writer,owner,bound,second)
+            self.assertEqual(1,len(reached));self.assertNotEqual(*reached[0])
+            # The owned fault intentionally replaced exactly this inode. All
+            # other original images and the replacement's old SHA must remain.
+            key=str(header.relative_to(self.root/'project'))
+            before[key]=(reached[0][1],before[key][1])
+            self.assertEqual(before,self._default_recovery_images(self.root/'project'))
+            for name,(inode,raw) in first_delivery.items():
+                path=tracker/'settings-audit-delivery'/name
+                self.assertEqual((inode,raw),(path.stat().st_ino,path.read_bytes()))
+            path=tracker/'settings/outbox/0.json';self.assertEqual(projection,(path.stat().st_ino,path.read_bytes()))
+            self.assertTrue((tracker/'settings/outbox/1.json').is_file())
+            self.assertEqual({},state._COMPLETED_READ_CONTEXT)
+            self.assertEqual({},state._COMPLETED_ORIGINAL_GUARDS)
+
+    def test_second_native_delivery_independent_cold_reader_archives_only_original_selected_projection(self):
+        from dataclasses import asdict
+        import subprocess
+        with ExitStack() as stack:
+            allocation,writer,owner,bound,first,second,projection,first_delivery=self.native_second_audit_completed(stack)
+            allocation.record_completed_settings_delivery(writer,owner,bound,second)
+            tracker=self.root/'project/.tracker';second_projection=(tracker/'settings/outbox/1.json').read_bytes()
+        before={path.name for path in (tracker/'quarantine').iterdir()}
+        program='''import sys,json,hashlib
+from pathlib import Path
+sys.path[:0]=[sys.argv[1],sys.argv[1]+"/tools"]
+from monitor import issue_tracker_state_owner as state,issue_tracker_spreadsheet_owner as sheet
+from monitor import issue_tracker_settings_audit_allocation as allocation
+from test_cases.test_req7_spreadsheet_owner import scoped_fixture
+from monitor.issue_tracker_online_target import OnlineTargetBinding
+from monitor.issue_tracker_send_unit import _original_unit
+root=Path(sys.argv[2]);project=root/'project';tracker=project/'.tracker'
+bound=OnlineTargetBinding(**json.loads(sys.stdin.buffer.read()))
+folder=root/'var/lib/http-ztp-container/issue-tracker'/(hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()+'.units')/sys.argv[3]
+unit=_original_unit((folder/'ACTION-PREIMAGE').read_bytes(),(folder/'WIRE').read_bytes())
+assert state._COMPLETED_READ_CONTEXT=={} and state._COMPLETED_ORIGINAL_GUARDS=={}
+with scoped_fixture(root,sheet),state.tracker_writer(project,project/'publication',completed_binding=bound,completed_unit=unit) as token:
+ owner=state._COMPLETED_READ_CONTEXT[token][0]
+ result=allocation.cleanup_completed_settings_outbox(token,owner,bound,unit)
+ current=state.current_k(token)
+ pending=allocation.pending_settings_audits_after_completed_unit(token,owner,bound,unit)
+ print(result.state,current.revision,current.k,len(pending))
+assert state._COMPLETED_READ_CONTEXT=={} and state._COMPLETED_ORIGINAL_GUARDS=={}
+'''
+        # New two-unit scenario's bounded process budget; no prior deadline or
+        # automatic assertion is changed. Independent parent holds no owners.
+        cold=subprocess.run([sys.executable,'-B','-c',program,str(ROOT),str(self.root),second.unit_id],
+            input=json.dumps(asdict(bound)).encode(),stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=30)
+        self.assertEqual(0,cold.returncode,cold.stderr)
+        self.assertEqual(b'DELIVERED-PRESENT-OUTBOX-ABSENT-VALID 1 7 1\n',cold.stdout)
+        path=tracker/'settings/outbox/0.json';self.assertEqual(projection,(path.stat().st_ino,path.read_bytes()))
+        self.assertFalse((tracker/'settings/outbox/1.json').exists())
+        archives=[path for path in (tracker/'quarantine').iterdir() if path.name not in before]
+        self.assertEqual(1,len(archives));self.assertEqual(second_projection,archives[0].read_bytes())
+        for name,(inode,raw) in first_delivery.items():
+            path=tracker/'settings-audit-delivery'/name
+            self.assertEqual((inode,raw),(path.stat().st_ino,path.read_bytes()))
+        # C25 ALL default discovery now proves both historical deliveries.
+        # The explicit single-unit reader above still reports event0 pending;
+        # its result is not silently widened to a public union observation.
+        from monitor import issue_tracker_state_owner as state,issue_tracker_spreadsheet_owner as sheet
+        before_default=self._default_recovery_images(self.root/'project')
+        with scoped_fixture(self.root,sheet),state.tracker_settings_writer(self.root/'project',self.root/'project/publication') as token:
+            self.assertEqual((1,7),(state.current_k(token).revision,state.current_k(token).k))
+            self.assertEqual((),allocation.pending_settings_audits(token))
+        self.assertEqual(before_default,self._default_recovery_images(self.root/'project'))
+        self.assertEqual({},state._COMPLETED_READ_CONTEXT);self.assertEqual({},state._COMPLETED_ORIGINAL_GUARDS)
+
+    def test_native_all_default_archives_second_only_while_both_projections_present(self):
+        from test_cases.test_req7_global_attempt_journal import original_read_files
+        from monitor import issue_tracker_state_owner as state,issue_tracker_spreadsheet_owner as sheet
+        with ExitStack() as stack:
+            allocation,writer,owner,bound,first,second,projection,first_delivery=self.native_second_audit_completed(stack)
+            allocation.record_completed_settings_delivery(writer,owner,bound,second)
+        from monitor import issue_tracker_global_attempt_journal as journal
+        project=self.root/'project';tracker=project/'.tracker'
+        event=(self.catalog_later_settings_audit_oracle()['details']+'\n').encode()
+        expected_second=canonical({'schema_version':1,'revision':1,
+            'event_sha256':hashlib.sha256(event).hexdigest()})
+        self.assertEqual(expected_second,(tracker/'settings/outbox/1.json').read_bytes())
+        self.assertTrue((tracker/'settings/outbox/0.json').is_file())
+        before=original_read_files(self.root);archives={path.name for path in (tracker/'quarantine').iterdir()}
+        with scoped_fixture(self.root,sheet),state.tracker_settings_writer(project,project/'publication') as token:
+            actual=[key for key,value in sheet._ACTIVE.items() if value.pid==os.getpid()]
+            self.assertEqual(1,len(actual))
+            result=allocation.cleanup_completed_settings_outbox(token,actual[0],bound,second)
+            self.assertEqual(('DELIVERED-PRESENT-OUTBOX-ABSENT-VALID',second.unit_id,
+                (self.catalog_later_settings_audit_oracle()['event_id'],)),(result.state,result.unit_id,result.event_ids))
+            self.assertEqual((1,7),(state.current_k(token).revision,state.current_k(token).k))
+            self.assertEqual((),allocation.pending_settings_audits(token))
+            self.assertEqual([(1,'UNKNOWN'),(1,'UNKNOWN')],
+                [(row.attempt_count,row.outcome) for _unit,row in journal.inspect_catalog_global_units(actual[0],bound)])
+        path=tracker/'settings/outbox/0.json'
+        self.assertEqual(projection,(path.stat().st_ino,path.read_bytes()))
+        self.assertFalse((tracker/'settings/outbox/1.json').exists())
+        added=[path for path in (tracker/'quarantine').iterdir() if path.name not in archives]
+        self.assertEqual(1,len(added));self.assertEqual(expected_second,added[0].read_bytes())
+        self.assertEqual(0o600,added[0].stat().st_mode & 0o777)
+        removed=str((tracker/'settings/outbox/1.json').relative_to(self.root))
+        after=original_read_files(self.root)
+        self.assertEqual({name:row for name,row in before.items() if name!=removed},
+            {name:row for name,row in after.items() if name!=str(added[0].relative_to(self.root))})
+        self.assertEqual({},state._COMPLETED_READ_CONTEXT);self.assertEqual({},state._COMPLETED_ORIGINAL_GUARDS)
+        self.assertEqual({},allocation._LIVE_NATIVE_SETTINGS_CONTEXTS)
+
+    def test_native_all_default_incomplete_or_foreign_second_claim_never_grants_union(self):
+        from test_cases.test_req7_global_attempt_journal import original_read_files
+        from monitor import issue_tracker_state_owner as state,issue_tracker_spreadsheet_owner as sheet
+        for fault in ('unknown-start','second-delivered-absent','foreign-second-project'):
+            with self.subTest(fault=fault):
+                case=type(self)('test_native_all_default_settings_reads_whole_delivery_set_and_commits_only_new_event')
+                case.setUp()
+                try:
+                    with ExitStack() as stack:
+                        allocation,writer,owner,bound,first,second,projection,first_delivery=case.native_second_audit_completed(stack)
+                        allocation.record_completed_settings_delivery(writer,owner,bound,second)
+                    tracker=case.root/'project/.tracker';folder=tracker/('settings-audit-delivery-'+second.unit_id)
+                    reached=[]
+                    if fault=='unknown-start':
+                        path=tracker/('SETTINGS-AUDIT-DELIVERY-STARTED-'+'f'*64)
+                        path.write_bytes(b'literal-unknown-incomplete-claim\n');path.chmod(0o600)
+                        reached.append(path.is_file())
+                    elif fault=='second-delivered-absent':
+                        (folder/'DELIVERED').rename(case.root/'preserved-second-delivered')
+                        reached.append(not (folder/'DELIVERED').exists())
+                    else:
+                        path=folder/'HEADER';body=json.loads(path.read_bytes())
+                        locator=body['complete_allocation']['native_allocation_header']
+                        locator['project_identity'][1]+=1
+                        body['complete_allocation']['allocation_header_sha256']=hashlib.sha256(canonical(locator)).hexdigest()
+                        path.write_bytes(canonical(body));path.chmod(0o600)
+                        reached.append(json.loads(path.read_bytes())['complete_allocation']['native_allocation_header']['project_identity']!=
+                            [os.stat(tracker.parent).st_dev,os.stat(tracker.parent).st_ino])
+                    before=original_read_files(case.root);yielded=[]
+                    with scoped_fixture(case.root,sheet),case.assertRaises(state.TrackerStateHold):
+                        with state.tracker_settings_writer(tracker.parent,tracker.parent/'publication'):
+                            yielded.append(True)
+                    case.assertEqual([True],reached);case.assertEqual([],yielded)
+                    case.assertEqual(before,original_read_files(case.root))
+                    case.assertEqual({},state._COMPLETED_READ_CONTEXT);case.assertEqual({},state._COMPLETED_ORIGINAL_GUARDS)
+                    case.assertEqual({},allocation._LIVE_NATIVE_SETTINGS_CONTEXTS)
+                    case.assertIsNone(allocation._NATIVE_SETTINGS_CONTEXT.get())
+                finally:case.doCleanups()
+
+    def test_native_all_default_revokes_before_first_semantic_finalizer_with_owners_still_held(self):
+        from contextvars import copy_context
+        from monitor import issue_tracker_state_owner as state,issue_tracker_spreadsheet_owner as sheet
+        with ExitStack() as stack:
+            allocation,writer,owner,bound,first,second,projection,first_delivery=self.native_second_audit_completed(stack)
+            allocation.record_completed_settings_delivery(writer,owner,bound,second)
+        project=self.root/'project';before=self._default_recovery_images(project)
+        actual=allocation._hold_native_completed_delivery_originals
+        saved={};observed=[]
+        @contextmanager
+        def first_semantic_exit(*args,**options):
+            with actual(*args,**options) as originals:
+                try:
+                    yield originals
+                finally:
+                    if saved and not observed:
+                        token=saved['token'];context=saved['context']
+                        facts=[token not in state._COMPLETED_READ_CONTEXT,
+                            token not in state._COMPLETED_ORIGINAL_GUARDS,
+                            context not in allocation._LIVE_NATIVE_SETTINGS_CONTEXTS,
+                            allocation._NATIVE_SETTINGS_CONTEXT.get() is None,
+                            allocation.local._owner(token) is saved['owner'],
+                            sheet._validated_owner(saved['sheet'],bound) is saved['sheet_owner']]
+                        try:saved['copied'].run(allocation._read_native_completed_k,token,context)
+                        except allocation.SettingsAuditHold:facts.append(True)
+                        else:facts.append(False)
+                        observed.append(tuple(facts))
+        with scoped_fixture(self.root,sheet), \
+                mock.patch.object(allocation,'_hold_native_completed_delivery_originals',side_effect=first_semantic_exit):
+            with state.tracker_settings_writer(project,project/'publication') as token:
+                context=state._COMPLETED_READ_CONTEXT[token]
+                packet=allocation._LIVE_NATIVE_SETTINGS_CONTEXTS[context]
+                self.assertEqual((1,7),(state.current_k(token).revision,state.current_k(token).k))
+                saved.update(token=token,context=context,owner=allocation.local._owner(token),
+                    sheet=packet['sheet'],sheet_owner=packet['sheet_owner'],copied=copy_context())
+        # Assert outside all sanitizers: the first actual original holder's
+        # finalizer has not run yet, and both original owners remain live.
+        self.assertEqual([(True,True,True,True,True,True,True)],observed)
+        self.assertEqual(before,self._default_recovery_images(project))
+        self.assertEqual({},state._COMPLETED_READ_CONTEXT);self.assertEqual({},state._COMPLETED_ORIGINAL_GUARDS)
+        self.assertEqual({},allocation._LIVE_NATIVE_SETTINGS_CONTEXTS)
+        self.assertIsNone(allocation._NATIVE_SETTINGS_CONTEXT.get())
+
+    def test_native_all_default_settings_reads_whole_delivery_set_and_commits_only_new_event(self):
+        from monitor import issue_tracker_state_owner as state,issue_tracker_spreadsheet_owner as sheet
+        with ExitStack() as stack:
+            allocation,writer,owner,bound,first,second,projection,first_delivery=self.native_second_audit_completed(stack)
+            allocation.record_completed_settings_delivery(writer,owner,bound,second)
+            allocation.cleanup_completed_settings_outbox(writer,owner,bound,second)
+        from monitor import issue_tracker_global_attempt_journal as journal
+        project=self.root/'project';tracker=project/'.tracker'
+        immutable={str(path.relative_to(tracker)):(path.stat().st_ino,path.read_bytes())
+            for folder in ('settings-audit-delivery','settings-audit-delivery-'+second.unit_id)
+            for path in (tracker/folder).iterdir()}
+        old_events={path.name:(path.stat().st_ino,path.read_bytes()) for path in (tracker/'settings/events').iterdir()}
+        archives={path.name for path in (tracker/'quarantine').iterdir()}
+        saved_context=None
+        with scoped_fixture(self.root,sheet),state.tracker_settings_writer(project,project/'publication') as token:
+            saved_context=state._COMPLETED_READ_CONTEXT[token]
+            self.assertEqual((1,7),(state.current_k(token).revision,state.current_k(token).k))
+            self.assertEqual((),allocation.pending_settings_audits(token))
+            actual_sheets=[key for key,value in sheet._ACTIVE.items() if value.pid==os.getpid()]
+            self.assertEqual(1,len(actual_sheets));actual_sheet=actual_sheets[0]
+            result=allocation.cleanup_completed_settings_outbox(token,actual_sheet,bound,first)
+            self.assertEqual((first.unit_id,), (result.unit_id,))
+            self.assertEqual(('settings:0:'+hashlib.sha256(old_events['0.json'][1]).hexdigest(),),result.event_ids)
+            self.assertFalse((tracker/'settings/outbox/0.json').exists())
+            self.assertFalse((tracker/'settings/outbox/1.json').exists())
+            self.assertEqual([(1,'UNKNOWN'),(1,'UNKNOWN')],
+                [(row.attempt_count,row.outcome) for _unit,row in journal.inspect_catalog_global_units(actual_sheet,bound)])
+            accepted=state.set_k(token,new_k=11,actor='operator:fixture',recorded_at='2026-10-11T00:00:00Z',
+                request_id='native-all-next-k',expected_revision=1)
+            self.assertEqual((2,11,False),(accepted.revision,accepted.k,accepted.replay))
+            self.assertEqual((2,11),(state.current_k(token).revision,state.current_k(token).k))
+        expected_payload=canonical({'new_k':11,'actor':'operator:fixture','expected_revision':1,'request_id':'native-all-next-k'})
+        expected=canonical({'schema_version':1,'revision':2,'type':'set_k','old_k':7,'new_k':11,
+            'actor':'operator:fixture','recorded_at':'2026-10-11T00:00:00Z','request_id':'native-all-next-k',
+            'payload_sha256':hashlib.sha256(expected_payload).hexdigest(),
+            'predecessor_sha256':hashlib.sha256(old_events['1.json'][1]).hexdigest()})
+        self.assertEqual(expected,(tracker/'settings/events/2.json').read_bytes())
+        with scoped_fixture(self.root,sheet),state.tracker_settings_writer(project,project/'publication') as token:
+            self.assertIsNot(saved_context,state._COMPLETED_READ_CONTEXT[token])
+            self.assertEqual((2,11),(state.current_k(token).revision,state.current_k(token).k))
+            self.assertEqual(({'event_id':'settings:2:'+hashlib.sha256(expected).hexdigest(),
+                'recorded_at_utc':'2026-10-11T00:00:00Z','details':expected.decode().rstrip('\n')},),
+                allocation.pending_settings_audits(token))
+        for name,(inode,raw) in old_events.items():
+            path=tracker/'settings/events'/name;self.assertEqual((inode,raw),(path.stat().st_ino,path.read_bytes()))
+        for name,(inode,raw) in immutable.items():
+            path=tracker/name;self.assertEqual((inode,raw),(path.stat().st_ino,path.read_bytes()))
+        additions=[path for path in (tracker/'quarantine').iterdir() if path.name not in archives]
+        self.assertEqual(1,len([path for path in additions if path.read_bytes()==projection[1]]))
+        self.assertEqual({},state._COMPLETED_READ_CONTEXT);self.assertEqual({},state._COMPLETED_ORIGINAL_GUARDS)
+
+    def test_native_all_default_originals_c6_rebind_after_all_holder_finalizer_refuses(self):
+        from monitor import issue_tracker_state_owner as state,issue_tracker_spreadsheet_owner as sheet
+        with ExitStack() as stack:
+            allocation,writer,owner,bound,first,second,projection,first_delivery=self.native_second_audit_completed(stack)
+            allocation.record_completed_settings_delivery(writer,owner,bound,second)
+            allocation.cleanup_completed_settings_outbox(writer,owner,bound,second)
+        # This genuine fixture reloads the catalog. Inject into the actual
+        # canonical module only AFTER fixture construction, not a stale alias.
+        from monitor import issue_tracker_unit_catalog as catalog
+        self.assertIs(catalog,sys.modules['monitor.issue_tracker_unit_catalog'])
+        project=self.root/'project';tracker=project/'.tracker'
+        action=json.loads(second.action_preimage)
+        path=tracker/'generations'/action['identity']['generation_id']/'RECEIPT'
+        original=(path.stat().st_ino,path.read_bytes());reached=[]
+        native=catalog.hold_pending_project_c6_units
+        @contextmanager
+        def after_actual_all(*args,**kwargs):
+            with native(*args,**kwargs) as result:yield result
+            reached.append('after-all-c6-finalizer')
+            path.rename(self.root/'preserved-all-c6-receipt')
+            path.write_bytes(original[1]);path.chmod(0o600)
+        entered=[]
+        refusal=None
+        with scoped_fixture(self.root,sheet),mock.patch.object(catalog,'hold_pending_project_c6_units',side_effect=after_actual_all):
+            try:
+                with state.tracker_settings_writer(project,project/'publication') as token:
+                    entered.append(token);self.assertEqual((1,7),(state.current_k(token).revision,state.current_k(token).k))
+            except state.TrackerStateHold as exc:refusal=exc
+        self.assertEqual(1,len(entered));self.assertEqual(['after-all-c6-finalizer'],reached)
+        self.assertIsNotNone(refusal,'actual ALL last-finalizer rebind was acknowledged')
+        self.assertEqual(original[1],path.read_bytes());self.assertNotEqual(original[0],path.stat().st_ino)
+        self.assertEqual(projection,((tracker/'settings/outbox/0.json').stat().st_ino,(tracker/'settings/outbox/0.json').read_bytes()))
+        self.assertFalse((tracker/'settings/outbox/1.json').exists())
+        self.assertEqual({},state._COMPLETED_READ_CONTEXT);self.assertEqual({},state._COMPLETED_ORIGINAL_GUARDS)
+
+    def test_native_all_default_live_context_rebinding_and_revocation_never_grant_or_fallback(self):
+        import copy
+        import threading
+        from contextvars import copy_context
+        from monitor import issue_tracker_state_owner as state,issue_tracker_spreadsheet_owner as sheet
+        with ExitStack() as stack:
+            allocation,writer,owner,bound,first,second,projection,first_delivery=self.native_second_audit_completed(stack)
+            allocation.record_completed_settings_delivery(writer,owner,bound,second)
+        project=self.root/'project';before=self._default_recovery_images(project)
+        with scoped_fixture(self.root,sheet),state.tracker_settings_writer(project,project/'publication') as token:
+            context=state._COMPLETED_READ_CONTEXT[token];captured=copy_context()
+            self.assertNotIsInstance(context,(tuple,allocation.SettingsDeliveryObservation))
+            self.assertFalse(hasattr(context,'event_ids'))
+            for forged in (object(),allocation._NativeCompletedSettingsContext(),copy.copy(context)):
+                with self.subTest(forged_type=type(forged).__name__):
+                    with self.assertRaises(allocation.SettingsAuditHold):allocation._read_native_completed_k(token,forged)
+            guard=state._COMPLETED_ORIGINAL_GUARDS[token]
+            caller=mock.Mock(side_effect=AssertionError('caller guard must not be invoked'))
+            try:
+                for replacement in (None,caller):
+                    state._COMPLETED_ORIGINAL_GUARDS[token]=replacement
+                    with self.assertRaises(state.TrackerStateHold):state.current_k(token)
+                    with self.assertRaises(allocation.SettingsAuditHold):allocation.pending_settings_audits(token)
+                caller.assert_not_called()
+            finally:state._COMPLETED_ORIGINAL_GUARDS[token]=guard
+            try:
+                state._COMPLETED_READ_CONTEXT.pop(token)
+                with self.assertRaises(state.TrackerStateHold):state.current_k(token)
+                with self.assertRaises(allocation.SettingsAuditHold):allocation.pending_settings_audits(token)
+                with self.assertRaises(state.TrackerStateHold):
+                    state.set_k(token,new_k=11,actor='operator:fixture',recorded_at='2026-10-11T00:00:00Z',
+                        request_id='rebound-context-must-not-commit',expected_revision=1)
+            finally:state._COMPLETED_READ_CONTEXT[token]=context
+            reset=allocation._NATIVE_SETTINGS_CONTEXT.set(None)
+            try:
+                with self.assertRaises(state.TrackerStateHold):state.current_k(token)
+            finally:allocation._NATIVE_SETTINGS_CONTEXT.reset(reset)
+            errors=[]
+            def foreign_thread():
+                try:state.current_k(token)
+                except Exception as exc:errors.append(type(exc))
+            thread=threading.Thread(target=foreign_thread);thread.start();thread.join(timeout=5)
+            self.assertFalse(thread.is_alive());self.assertEqual([state.TrackerStateHold],errors)
+            self.assertEqual((1,7),(state.current_k(token).revision,state.current_k(token).k))
+            self.assertEqual((),allocation.pending_settings_audits(token))
+        with self.assertRaises(allocation.SettingsAuditHold):
+            captured.run(allocation._read_native_completed_k,token,context)
+        self.assertEqual({},allocation._LIVE_NATIVE_SETTINGS_CONTEXTS)
+        self.assertEqual({},state._COMPLETED_READ_CONTEXT);self.assertEqual({},state._COMPLETED_ORIGINAL_GUARDS)
+        self.assertEqual(before,self._default_recovery_images(project))
+
+    def test_native_all_default_independent_cold_process_reads_both_absent_projections_without_parent_coordinates(self):
+        self._exercise_native_all_default_cold_process_reads_both_absent_projections()
+
+    def test_native_all_default_independent_cold_process_recovers_after_archive_before_new_allocation(self):
+        self._exercise_native_all_default_cold_process_reads_both_absent_projections(archive_before_new=True)
+
+    def _exercise_native_all_default_cold_process_reads_both_absent_projections(self, *, archive_before_new=False):
+        import subprocess
+        from monitor import issue_tracker_state_owner as state,issue_tracker_spreadsheet_owner as sheet
+        with ExitStack() as stack:
+            allocation,writer,owner,bound,first,second,projection,first_delivery=self.native_second_audit_completed(
+                stack,archive_before_new=archive_before_new)
+            allocation.record_completed_settings_delivery(writer,owner,bound,second)
+            if archive_before_new:
+                # The one-unit legacy pair must NOT excuse the other missing
+                # projection. This is not the fixed ALL native factory used
+                # by the default writer/worker. Keep its refusal and every
+                # original unchanged, then leave ALL initial owners below.
+                before_legacy=self._default_recovery_images(self.root/'project')
+                with self.assertRaises(allocation.SettingsAuditHold):
+                    allocation.cleanup_completed_settings_outbox(writer,owner,bound,second)
+                self.assertEqual(before_legacy,self._default_recovery_images(self.root/'project'))
+            else:
+                allocation.cleanup_completed_settings_outbox(writer,owner,bound,second)
+        project=self.root/'project'
+        with scoped_fixture(self.root,sheet),state.tracker_settings_writer(project,project/'publication') as token:
+            actual_sheets=[key for key,value in sheet._ACTIVE.items() if value.pid==os.getpid()]
+            self.assertEqual(1,len(actual_sheets))
+            allocation.cleanup_completed_settings_outbox(token,actual_sheets[0],bound,first)
+            if archive_before_new:
+                # Fresh actual default writer discovery owns the union. No
+                # caller event list or parent permission crosses the process.
+                allocation.cleanup_completed_settings_outbox(token,actual_sheets[0],bound,second)
+        before=self._default_recovery_images(project)
+        program='''import sys
+from pathlib import Path
+sys.path[:0]=[sys.argv[1],sys.argv[1]+"/tools"]
+from monitor import issue_tracker_state_owner as state,issue_tracker_spreadsheet_owner as sheet
+from monitor import issue_tracker_settings_audit_allocation as allocation,issue_tracker_global_attempt_journal as journal
+from test_cases.test_req7_spreadsheet_owner import scoped_fixture
+root=Path(sys.argv[2]);project=root/'project'
+assert state._COMPLETED_READ_CONTEXT=={} and state._COMPLETED_ORIGINAL_GUARDS=={}
+assert allocation._LIVE_NATIVE_SETTINGS_CONTEXTS=={} and allocation._NATIVE_SETTINGS_CONTEXT.get() is None
+with scoped_fixture(root,sheet),state.tracker_settings_writer(project,project/'publication') as token:
+ current=state.current_k(token);pending=allocation.pending_settings_audits(token)
+ actual=list(sheet._ACTIVE.items());assert len(actual)==1
+ counts=journal.inspect_catalog_global_units(actual[0][0],actual[0][1].binding)
+ print(current.revision,current.k,len(pending),','.join(str(row.attempt_count)+':'+row.outcome for unit,row in counts))
+assert state._COMPLETED_READ_CONTEXT=={} and state._COMPLETED_ORIGINAL_GUARDS=={}
+assert allocation._LIVE_NATIVE_SETTINGS_CONTEXTS=={} and allocation._NATIVE_SETTINGS_CONTEXT.get() is None
+'''
+        cold=subprocess.run([sys.executable,'-B','-c',program,str(ROOT),str(self.root)],
+            stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=30)
+        self.assertEqual(0,cold.returncode,cold.stderr)
+        self.assertEqual(b'1 7 0 1:UNKNOWN,1:UNKNOWN\n',cold.stdout)
+        self.assertEqual(before,self._default_recovery_images(project))
+
+    def test_native_complete_pair_originals_do_not_read_or_grant_other_missing_projection(self):
+        with ExitStack() as stack:
+            allocation,writer,owner,bound,first,second,projection,first_delivery=self.native_second_audit_completed(stack)
+            allocation.record_completed_settings_delivery(writer,owner,bound,second)
+            allocation.cleanup_completed_settings_outbox(writer,owner,bound,second)
+            before=self._default_recovery_images(self.root/'project')
+            with allocation._hold_native_completed_delivery_originals(writer,owner,bound,first) as (actual,events,verify):
+                self.assertIs(allocation.local._owner(writer),actual)
+                self.assertEqual((self.settings_audit_oracle()['event_id'],),events)
+                verify()
+                # A held immutable pair is NOT permission for the ordinary
+                # reader or a single-unit reader to ignore another event.
+                with self.assertRaises(allocation.SettingsAuditHold):
+                    allocation.read_current_k_after_completed_unit(writer,owner,bound,first)
+            self.assertEqual(before,self._default_recovery_images(self.root/'project'))
+
+    def test_native_complete_pair_originals_same_bytes_delivered_rebind_refuses_last_close(self):
+        with ExitStack() as stack:
+            allocation,writer,owner,bound,first,second,projection,first_delivery=self.native_second_audit_completed(stack)
+            tracker=self.root/'project/.tracker';marker=tracker/'settings-audit-delivery/DELIVERED';reached=[]
+            with self.assertRaises(allocation.SettingsAuditHold):
+                with allocation._hold_native_completed_delivery_originals(writer,owner,bound,first) as (actual,events,verify):
+                    self.assertEqual((self.settings_audit_oracle()['event_id'],),events)
+                    prior=(marker.stat().st_ino,marker.read_bytes())
+                    marker.rename(self.root/'preserved-immutable-first-delivered')
+                    marker.write_bytes(prior[1]);marker.chmod(0o600)
+                    reached.append((prior[0],marker.stat().st_ino))
+            self.assertEqual(1,len(reached));self.assertNotEqual(*reached[0])
+            path=tracker/'settings/outbox/0.json';self.assertEqual(projection,(path.stat().st_ino,path.read_bytes()))
+            self.assertTrue((tracker/'settings/outbox/1.json').is_file())
+
+    def test_native_complete_pair_originals_history_rebind_after_actual_replay_finalizer_refuses(self):
+        with ExitStack() as stack:
+            allocation,writer,owner,bound,first,second,projection,first_delivery=self.native_second_audit_completed(stack)
+            _owner,parent,name,_body=allocation.global_journal._inputs(owner,bound,first)
+            history_name=name[:-len('.journal')]+'.history'
+            actual=allocation._hold_delivery_catalog_replay;armed=[];reached=[]
+            @contextmanager
+            def after_actual_replay(*args,**options):
+                with actual(*args,**options) as original:
+                    yield original
+                if armed and not reached:
+                    folder=allocation.local._directory(parent,history_name)
+                    try:
+                        prior=os.stat('HISTORY-RAW',dir_fd=folder,follow_symlinks=False)
+                        source=os.open('HISTORY-RAW',os.O_RDONLY,dir_fd=folder)
+                        try:raw=os.pread(source,prior.st_size,0)
+                        finally:os.close(source)
+                        os.rename('HISTORY-RAW','PRESERVED-HISTORY-RAW',src_dir_fd=folder,dst_dir_fd=folder)
+                        fd=os.open('HISTORY-RAW',os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600,dir_fd=folder)
+                        try:os.write(fd,raw)
+                        finally:os.close(fd)
+                        reached.append((prior.st_ino,os.stat('HISTORY-RAW',dir_fd=folder,follow_symlinks=False).st_ino))
+                        # Restore the exact name set; preserve the old original
+                        # outside its fixed family without deleting evidence.
+                        os.rename('PRESERVED-HISTORY-RAW',str(self.root/'preserved-last-immutable-history'),
+                            src_dir_fd=folder)
+                    finally:os.close(folder)
+            with mock.patch.object(allocation,'_hold_delivery_catalog_replay',side_effect=after_actual_replay), \
+                    self.assertRaises(allocation.SettingsAuditHold):
+                with allocation._hold_native_completed_delivery_originals(writer,owner,bound,first) as (actual_owner,events,verify):
+                    self.assertEqual((self.settings_audit_oracle()['event_id'],),events)
+                    armed.append(True)
+            self.assertEqual(1,len(reached));self.assertNotEqual(*reached[0])
+            tracker=self.root/'project/.tracker';path=tracker/'settings/outbox/0.json'
+            self.assertEqual(projection,(path.stat().st_ino,path.read_bytes()))
+            self.assertTrue((tracker/'settings/outbox/1.json').is_file())
+
+    def test_native_complete_pair_originals_c6_rebind_after_actual_replay_finalizer_refuses(self):
+        with ExitStack() as stack:
+            allocation,writer,owner,bound,first,second,projection,first_delivery=self.native_second_audit_completed(stack)
+            action=allocation.local._json(first.action_preimage)
+            marker=self.root/'project/.tracker/generations'/action['identity']['generation_id']/'RECEIPT'
+            actual=allocation._hold_delivery_catalog_replay;armed=[];reached=[]
+            @contextmanager
+            def after_actual_replay(*args,**options):
+                with actual(*args,**options) as original:
+                    yield original
+                if armed and not reached:
+                    prior=(marker.stat().st_ino,marker.read_bytes())
+                    marker.rename(self.root/'preserved-last-immutable-c6-receipt')
+                    marker.write_bytes(prior[1]);marker.chmod(0o600)
+                    reached.append((prior[0],marker.stat().st_ino))
+            with mock.patch.object(allocation,'_hold_delivery_catalog_replay',side_effect=after_actual_replay), \
+                    self.assertRaises(allocation.SettingsAuditHold):
+                with allocation._hold_native_completed_delivery_originals(writer,owner,bound,first) as (actual_owner,events,verify):
+                    self.assertEqual((self.settings_audit_oracle()['event_id'],),events)
+                    armed.append(True)
+            self.assertEqual(1,len(reached));self.assertNotEqual(*reached[0])
+            tracker=self.root/'project/.tracker';path=tracker/'settings/outbox/0.json'
+            self.assertEqual(projection,(path.stat().st_ino,path.read_bytes()))
+            self.assertTrue((tracker/'settings/outbox/1.json').is_file())
+
+    def test_native_complete_pair_originals_temporary_path_fd_reuse_preserves_interrupt_and_foreign_fd(self):
+        with ExitStack() as stack:
+            allocation,writer,owner,bound,first,second,projection,first_delivery=self.native_second_audit_completed(stack)
+            foreign=self.root/'owned-foreign-path-fd';foreign.write_bytes(b'foreign must survive\n');foreign.chmod(0o600)
+            source=os.open(foreign,os.O_RDONLY);duplicate=[];armed=[];reached=[]
+            actual_open=allocation.local._open_absolute_directory;actual_stat=os.fstat
+            primary=KeyboardInterrupt('original temporary path acquisition interruption')
+            def capture(path):
+                fd=actual_open(path)
+                caller=sys._getframe(1)
+                while caller is not None and caller.f_code.co_filename.endswith('/unittest/mock.py'):
+                    caller=caller.f_back
+                if armed and caller is not None and caller.f_code.co_name=='verify_raw' and not duplicate:
+                    duplicate.append(fd)
+                return fd
+            def displace(fd):
+                if duplicate and fd==duplicate[0] and not reached:
+                    reached.append(actual_stat(fd).st_ino)
+                    os.close(fd);os.dup2(source,fd)
+                    raise primary
+                return actual_stat(fd)
+            try:
+                with mock.patch.object(allocation.local,'_open_absolute_directory',side_effect=capture), \
+                        mock.patch.object(os,'fstat',side_effect=displace):
+                    with self.assertRaises(KeyboardInterrupt) as raised:
+                        with allocation._hold_native_completed_delivery_originals(writer,owner,bound,first) as (_actual,events,verify):
+                            armed.append(True);verify()
+                self.assertIs(primary,raised.exception)
+                self.assertEqual(1,len(reached))
+                self.assertEqual(actual_stat(source).st_ino,actual_stat(duplicate[0]).st_ino)
+                self.assertEqual(b'foreign must survive\n',os.pread(duplicate[0],64,0))
+            finally:
+                if duplicate:
+                    try:
+                        if actual_stat(duplicate[0]).st_ino==actual_stat(source).st_ino:os.close(duplicate[0])
+                    except OSError:pass
+                os.close(source)
+            tracker=self.root/'project/.tracker';path=tracker/'settings/outbox/0.json'
+            self.assertEqual(projection,(path.stat().st_ino,path.read_bytes()))
+            self.assertTrue((tracker/'settings/outbox/1.json').is_file())
 
     def test_actual_tls_c6_allocation_first_writer_replacement_refuses_before_count(self):
         from test_cases.test_req7_settings_audit_allocation import load as load_allocation

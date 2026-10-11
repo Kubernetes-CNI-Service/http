@@ -292,7 +292,7 @@ def hold_pending_project_origins(token, binding):
 
 
 @contextmanager
-def _hold_project_c6_from_origins(token, binding, origins):
+def _hold_project_c6_from_origins(token, binding, origins, *, _owner_tail=None):
     """Internal join while the caller keeps the original origin images held.
 
     Separating project originals from catalog namespace checks lets the actual
@@ -302,6 +302,8 @@ def _hold_project_c6_from_origins(token, binding, origins):
     """
     failed = False
     try:
+        if _owner_tail is not None and type(_owner_tail) is not ExitStack:
+            raise UnitCatalogHold()
         sheet_owner = ownership._validated_owner(token, binding)
         from monitor import issue_tracker_remote_history_match as remote
         with ExitStack() as scope:
@@ -313,7 +315,11 @@ def _hold_project_c6_from_origins(token, binding, origins):
                         if owner.pid == os.getpid() and str(owner.project) == key[0] and str(owner.publication) == key[1]]
                     if len(matches) > 1:
                         raise UnitCatalogHold()
-                    writer = matches[0] if matches else scope.enter_context(local._try_original_writer_owner(*key,
+                    # Only newly acquired original owners may outlive semantic
+                    # C6 readers. NV's raw finalizer needs their real exclusion
+                    # until its last check; no token or generation is reissued.
+                    owner_scope = scope if _owner_tail is None else _owner_tail
+                    writer = matches[0] if matches else owner_scope.enter_context(local._try_original_writer_owner(*key,
                         (origin.project_identity, origin.tracker_identity, origin.publication_identity, origin.lock_identity)))
                     acquired[key] = (writer, local._owner(writer))
                 writer, project_owner = acquired[key]

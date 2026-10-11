@@ -1053,9 +1053,13 @@ def _reconcile_issue_tracker_online_after_completion(store):
     from monitor.issue_tracker_retained_inventory import (
         RetainedInventoryHold, _record_all_project_unsent_dispositions,
     )
+    from monitor.issue_tracker_settings_audit_allocation import (
+        SettingsAuditHold, _finalize_native_completed_settings_delivery,
+    )
     from contextlib import ExitStack
     failed = False
     disposition_stopped = False
+    delivery_stopped = False
     try:
         with _hold_completed_cycle_replay(store) as verify_cycles:
             if not read_completed_cycle_evidence(store):
@@ -1087,6 +1091,14 @@ def _reconcile_issue_tracker_online_after_completion(store):
                             pass
                         verify_cycles()
                     verify_cycles()
+                    # The OAuth/read owner has fully exited. Fresh actual
+                    # sheet originals, never historical APPLIED labels, drive
+                    # COMPLETE/DELIVERED and selected-only local archival.
+                    try:
+                        _finalize_native_completed_settings_delivery(writer,binding)
+                    except SettingsAuditHold:
+                        delivery_stopped = True
+                    verify_cycles()
                 verify_cycles()
             verify_cycles()
     except Exception:
@@ -1097,6 +1109,8 @@ def _reconcile_issue_tracker_online_after_completion(store):
     _publish_issue_tracker_online_observation_status(result)
     if disposition_stopped and result and all(item.state == 'APPLIED' for item in result):
         print('Issue Tracker UNSENT disposition unavailable; mutation disabled', file=sys.stderr)
+    if delivery_stopped and result and all(item.state == 'APPLIED' for item in result):
+        print('Issue Tracker C25 delivery disposition unavailable; mutation disabled', file=sys.stderr)
     return result
 
 

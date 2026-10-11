@@ -711,6 +711,135 @@ class Req7CatalogNvPreparationTests(unittest.TestCase):
         return {'event_id':'settings:0:'+hashlib.sha256(event).hexdigest(),
             'recorded_at_utc':'2026-10-08T10:00:00Z','details':event.decode().rstrip('\n')}
 
+    def native_delivery_leaf_stat_fault(self, name):
+        with self.native_c6_origin_fixture(settings_audit=self.native_settings_oracle()) as (module,writer,token,unit):
+            with self.preparation(token) as prepared:
+                self.catalog.register_pending_c6_unit(writer,token,binding(),unit,_nv_preparation=prepared)
+            module.global_journal.prepare_global_unit(token,binding(),unit)
+            from test_cases.test_req7_settings_audit_allocation import load as load_allocation
+            allocation=load_allocation()
+            directory=allocation.local._directory; stat=os.fstat; owned=[]; failed=[];yielded=[]
+            def acquiring(parent,entry,**options):
+                result=directory(parent,entry,**options)
+                descriptor=result[0] if isinstance(result,tuple) else result
+                if entry==name and not owned:owned.append((descriptor,stat(descriptor)))
+                return result
+            def refuse_after_return(descriptor):
+                if owned and descriptor==owned[0][0] and not failed:
+                    failed.append(descriptor);raise OSError('owned post-return stat refusal')
+                return stat(descriptor)
+            try:
+                with mock.patch.object(allocation.local,'_directory',side_effect=acquiring), \
+                        mock.patch.object(allocation.os,'fstat',side_effect=refuse_after_return):
+                    with self.assertRaises(Exception):
+                        with allocation._hold_native_catalog_allocation_images(writer,token,binding(),unit):
+                            yielded.append(True)
+                self.assertEqual([],yielded,'post-return acquisition refusal cannot yield originals')
+                self.assertTrue(owned,'actual requested directory must be acquired')
+                self.assertEqual([owned[0][0]],failed)
+                with self.assertRaises(OSError) as caught:stat(owned[0][0])
+                self.assertEqual(9,caught.exception.errno,'post-return stat refusal must not leak the acquired directory')
+            finally:
+                for descriptor,original in owned:
+                    try:current=stat(descriptor)
+                    except OSError:continue
+                    if (current.st_dev,current.st_ino)==(original.st_dev,original.st_ino):os.close(descriptor)
+
+    def test_native_delivery_settings_directory_after_return_stat_refusal_closes_owned_fd(self):
+        self.native_delivery_leaf_stat_fault('settings')
+
+    def test_native_delivery_events_directory_after_return_stat_refusal_closes_owned_fd(self):
+        self.native_delivery_leaf_stat_fault('events')
+
+    def test_native_delivery_open_time_ancestor_rebind_closes_acquired_not_previous_inode(self):
+        with self.native_c6_origin_fixture(settings_audit=self.native_settings_oracle()) as (module,writer,token,unit):
+            with self.preparation(token) as prepared:
+                self.catalog.register_pending_c6_unit(writer,token,binding(),unit,_nv_preparation=prepared)
+            module.global_journal.prepare_global_unit(token,binding(),unit)
+            from test_cases.test_req7_settings_audit_allocation import load as load_allocation
+            allocation=load_allocation();directory=allocation.local._directory;owned=[];reached=[];yielded=[]
+            path=self.root/'native-c6-project/.tracker/settings';saved=self.root/'original-settings-directory'
+            original=path.stat()
+            def rebind_before_open(parent,entry,**options):
+                if entry=='settings' and not reached:
+                    path.rename(saved);path.mkdir(mode=0o700);reached.append(True)
+                result=directory(parent,entry,**options)
+                descriptor=result[0] if isinstance(result,tuple) else result
+                if entry=='settings' and not owned:owned.append((descriptor,os.fstat(descriptor)))
+                return result
+            try:
+                with mock.patch.object(allocation.local,'_directory',side_effect=rebind_before_open):
+                    with self.assertRaises(Exception):
+                        with allocation._hold_native_catalog_allocation_images(writer,token,binding(),unit):
+                            yielded.append(True)
+                self.assertEqual([],yielded,'changed named ancestor cannot yield originals')
+                self.assertEqual([True],reached);self.assertTrue(owned)
+                self.assertEqual(original.st_ino,saved.stat().st_ino)
+                self.assertEqual([],list(path.iterdir()))
+                self.assertTrue((saved/'events/0.json').is_file())
+                with self.assertRaises(OSError) as caught:os.fstat(owned[0][0])
+                self.assertEqual(9,caught.exception.errno)
+            finally:
+                for descriptor,identity in owned:
+                    try:current=os.fstat(descriptor)
+                    except OSError:continue
+                    if (current.st_dev,current.st_ino)==(identity.st_dev,identity.st_ino):os.close(descriptor)
+
+    def test_native_delivery_consumer_interrupt_survives_graph_cleanup_refusal(self):
+        with self.native_c6_origin_fixture(settings_audit=self.native_settings_oracle()) as (module,writer,token,unit):
+            with self.preparation(token) as prepared:
+                self.catalog.register_pending_c6_unit(writer,token,binding(),unit,_nv_preparation=prepared)
+            module.global_journal.prepare_global_unit(token,binding(),unit)
+            from test_cases.test_req7_settings_audit_allocation import load as load_allocation
+            allocation=load_allocation()
+            close=self.catalog._close_original; primary=KeyboardInterrupt('owned consumer interrupted')
+            refused=[]; closed=[]; armed=[]
+            def close_then_refuse(descriptor,identity):
+                close(descriptor,identity)
+                if armed:
+                    closed.append(descriptor)
+                    if not refused:refused.append(descriptor);raise OSError('owned cleanup refused after original close')
+            with mock.patch.object(self.catalog,'_close_original',side_effect=close_then_refuse):
+                with self.assertRaises(KeyboardInterrupt) as caught:
+                    with allocation._hold_native_catalog_allocation_images(writer,token,binding(),unit):
+                        armed.append(True)
+                        raise primary
+            self.assertIs(primary,caught.exception)
+            self.assertIsNotNone(caught.exception.__cause__)
+            self.assertGreater(len(closed),1)
+            for descriptor in closed:
+                with self.assertRaises(OSError):os.fstat(descriptor)
+
+    def test_native_delivery_ancestor_return_foreign_slot_is_not_closed(self):
+        with self.native_c6_origin_fixture(settings_audit=self.native_settings_oracle()) as (module,writer,token,unit):
+            with self.preparation(token) as prepared:
+                self.catalog.register_pending_c6_unit(writer,token,binding(),unit,_nv_preparation=prepared)
+            module.global_journal.prepare_global_unit(token,binding(),unit)
+            from test_cases.test_req7_settings_audit_allocation import load as load_allocation
+            allocation=load_allocation();directory=allocation.local._directory;reused=[];yielded=[]
+            foreign=self.root/'foreign-directory';foreign.mkdir(mode=0o700);identity=foreign.stat()
+            def replace_returned_slot(parent,entry,**options):
+                result=directory(parent,entry,**options)
+                if entry=='settings' and not reused:
+                    descriptor=result[0] if isinstance(result,tuple) else result
+                    os.close(descriptor);other=os.open(foreign,os.O_RDONLY|os.O_DIRECTORY)
+                    if other!=descriptor:os.dup2(other,descriptor);os.close(other)
+                    reused.append(descriptor)
+                return result
+            try:
+                with mock.patch.object(allocation.local,'_directory',side_effect=replace_returned_slot):
+                    with self.assertRaises(Exception):
+                        with allocation._hold_native_catalog_allocation_images(writer,token,binding(),unit):
+                            yielded.append(True)
+                self.assertEqual([],yielded,'foreign ancestor slot cannot yield originals')
+                self.assertEqual(1,len(reused));current=os.fstat(reused[0])
+                self.assertEqual((identity.st_dev,identity.st_ino),(current.st_dev,current.st_ino))
+            finally:
+                for descriptor in reused:
+                    try:current=os.fstat(descriptor)
+                    except OSError:continue
+                    if (current.st_dev,current.st_ino)==(identity.st_dev,identity.st_ino):os.close(descriptor)
+
     def test_native_settings_scope_refusal_never_bypasses_existing_preparation_cleanup(self):
         failure=None;descriptors=[]
         with self.native_c6_origin_fixture(settings_audit=self.native_settings_oracle()) as (module,writer,token,unit):
@@ -1157,6 +1286,74 @@ class Req7CatalogNvPreparationTests(unittest.TestCase):
                 frozenset({(*project_identity,audit['event_id'])}))],collisions)
             self.assertEqual([],yielded);self.assertEqual(before,self.files())
             self.assertFalse(any(path.name.startswith(('ATTEMPT-','CLAIM-')) for path in self.state.rglob('*')))
+
+    def test_native_audit_snapshot_and_actual_count_holder_do_not_require_legacy_shadow(self):
+        audit=self.native_settings_oracle()
+        from test_cases.test_req7_settings_audit_allocation import load as load_allocation
+        with self.native_c6_origin_fixture(settings_audit=audit) as (module,writer,token,unit):
+            allocation=load_allocation()
+            with self.preparation(token) as prepared:
+                self.catalog.register_pending_c6_unit(writer,token,binding(),unit,_nv_preparation=prepared)
+            module.global_journal.prepare_global_unit(token,binding(),unit)
+            before=self.files();actual=allocation.inspect_settings_audit_allocation(writer,token,binding(),unit)
+            self.assertEqual([{'revision':0,'event_sha256':audit['event_id'].split(':')[2],'audit':audit}],json.loads(actual))
+            with module.global_journal._hold_receipted_audit_originals(writer,token,binding(),unit) as verify:
+                verify();counted=module.global_journal.record_global_attempt_intent(token,binding(),unit);verify()
+                self.assertEqual((1,'UNKNOWN'),(counted.attempt_count,counted.outcome))
+            after=self.files()
+            for name,image in before.items(): self.assertEqual(image,after[name],name)
+            project=self.catalog.local._owner(writer).project
+            self.assertFalse((project/'.tracker/settings-audit-allocation').exists())
+            self.assertFalse((project/'.tracker/SETTINGS-AUDIT-ALLOCATED').exists())
+
+    def _native_audit_last_c6_exit_rebind(self, *, counted):
+        from test_cases.test_req7_settings_audit_allocation import load as load_allocation
+        with self.native_c6_origin_fixture(settings_audit=self.native_settings_oracle()) as (module,writer,token,unit):
+            allocation=load_allocation()
+            with self.preparation(token) as prepared:
+                self.catalog.register_pending_c6_unit(writer,token,binding(),unit,_nv_preparation=prepared)
+            module.global_journal.prepare_global_unit(token,binding(),unit)
+            stem=hashlib.sha256(TARGET.encode()).hexdigest()
+            path=self.state/(stem+'.unit-'+unit.unit_id+'.settings-audit')/'ASSIGNMENTS'
+            raw=path.read_bytes();before=self.files();faults=[];armed=[False]
+            actual=self.catalog._hold_project_c6_from_origins
+            @contextmanager
+            def last_exit(*args,**kwargs):
+                with actual(*args,**kwargs) as result:yield result
+                if armed[0]:
+                    old=path.stat().st_ino
+                    path.rename(self.root/'preserved-native-audit-original')
+                    path.write_bytes(raw);path.chmod(0o600)
+                    faults.append((old,path.stat().st_ino,path.read_bytes()))
+            with mock.patch.object(self.catalog,'_hold_project_c6_from_origins',last_exit):
+                with self.assertRaises(allocation.SettingsAuditHold):
+                    with allocation._hold_counted_audit_originals(writer,token,binding(),unit) as verify:
+                        verify()
+                        if counted:module.global_journal.record_global_attempt_intent(token,binding(),unit)
+                        armed[0]=True
+            # Outside every sanitizer: prove the actual finalizer fault and
+            # original bytes, not an unrelated HOLD or rollback after COUNT.
+            self.assertEqual(1,len(faults));self.assertNotEqual(faults[0][0],faults[0][1])
+            self.assertEqual(raw,faults[0][2]);self.assertEqual(raw,path.read_bytes())
+            # The corrupted immutable graph must also close the public GLOBAL
+            # reader. Raw retained intent is failure evidence, not authority.
+            with self.assertRaises(module.global_journal.GlobalAttemptHold):
+                module.global_journal.inspect_global_unit(token,binding(),unit)
+            attempts=list(self.state.rglob('ATTEMPT-*'))
+            self.assertEqual(int(counted),len(attempts))
+            if counted:
+                self.assertEqual('ATTEMPT-1',attempts[0].name)
+                self.assertEqual((1,'UNKNOWN'),tuple(json.loads(attempts[0].read_bytes())[key]
+                    for key in ('attempt_count','outcome')))
+            self.assertFalse(list(self.state.rglob('CLAIM-*')))
+            for name,image in before.items():
+                if name!=str(path.relative_to(self.state)):self.assertEqual(image,self.files()[name],name)
+
+    def test_native_audit_last_c6_exit_rebind_holds_before_count(self):
+        self._native_audit_last_c6_exit_rebind(counted=False)
+
+    def test_native_audit_last_c6_exit_rebind_holds_after_count_without_rollback(self):
+        self._native_audit_last_c6_exit_rebind(counted=True)
 
     @contextmanager
     def _native_successor_with_old_c6(self):
