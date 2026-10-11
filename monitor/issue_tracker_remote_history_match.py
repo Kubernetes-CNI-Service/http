@@ -733,6 +733,52 @@ def _reconcile_pending_project_units_and_project_auth(writer_token, owner_token,
 
 
 @contextmanager
+def _hold_current_project_last_original_owners(writer_token, owner_token, binding):
+    """Keep newly acquired original foreign owners past strict C6 readers.
+
+    ALL original origins locate the last unit, never the last current-project
+    subset. No old verifier escapes, and the returned row is only a locator.
+    Existing live owners are borrowed, not transferred to this cleanup scope.
+    The fixed consumer independently overlaps fresh actual write-aware images
+    while its strict core is live; this scope grants no COUNT or send authority.
+    """
+    from monitor import issue_tracker_local_commit as local
+    from monitor import issue_tracker_attempt_journal as journal
+    from monitor import issue_tracker_unit_catalog as catalog
+    owner_tail=ExitStack();primary=cleanup_problem=None
+    try:
+        project=local._owner(writer_token)
+        owner=ownership._validated_owner(owner_token,binding)
+        def current():
+            if (local._owner(writer_token) is not project
+                    or ownership._validated_owner(owner_token,binding) is not owner):
+                raise RemoteHistoryHold()
+        with catalog.hold_pending_project_origins(owner_token,binding) as (origins,verify_origins):
+            with catalog._hold_project_c6_from_origins(owner_token,binding,origins,
+                    _owner_tail=owner_tail) as (rows,verify_c6):
+                if (not rows or tuple(row.unit for row in rows)!=tuple(origin.unit for origin in origins)
+                        or rows[-1].project_identity!=journal._identity(os.fstat(project.project_fd))[:2]):
+                    raise RemoteHistoryHold()
+                last=rows[-1]
+                current();verify_origins();verify_c6()
+        # Both semantic scopes have completed. Never invoke their verifiers
+        # here or return them as evidence of the next input/count scope.
+        current();yield last;current()
+    except BaseException as error:
+        primary=error
+    finally:
+        try:owner_tail.close()
+        except BaseException as error:
+            cleanup_problem=error
+            if primary is None or (isinstance(primary,Exception) and not isinstance(error,Exception)):
+                primary=error
+    if primary is not None:
+        if isinstance(primary,Exception):raise RemoteHistoryHold() from None
+        if cleanup_problem is not None and cleanup_problem is not primary:raise primary from cleanup_problem
+        raise primary
+
+
+@contextmanager
 def _hold_current_project_online_inputs(writer_token, owner_token, binding, authentication, *,
                                         _store, http_root):
     """Acquire fixed current source and actual reads while strict scopes LIVE.
@@ -924,14 +970,28 @@ def _consume_current_project_online_original_inputs(writer_token, owner_token, b
         if (not root.is_absolute() or root.resolve(strict=True) != root
                 or Path(_store.project_identity) != project.project):
             raise RemoteHistoryHold()
-        with _hold_current_completed_cycle_replay(_store) as verify_cycle, \
+        with _hold_current_project_last_original_owners(writer_token,owner_token,binding) as last, \
+                _hold_current_completed_cycle_replay(_store) as verify_cycle, \
                 source._hold_original_replay_inputs(_store, project.project,
                     root/'monitor/Issue_Tracker_Template_v1.xlsx') as verify_inputs, \
+                ExitStack() as all_images, \
                 ExitStack() as quota_images, ExitStack() as images:
             verify_quota = None
             with _hold_current_project_online_inputs(writer_token, owner_token, binding, authentication,
                     _store=_store, http_root=root) as prepared:
                 _settings, _whitelist, responses, originals, authentication = prepared
+                selected=tuple(row for row,_actual_source,_guard in originals
+                    if row.unit==last.unit and row.project_identity==last.project_identity
+                    and row.c6_facts==last.c6_facts)
+                if len(selected)!=1:
+                    raise RemoteHistoryHold()
+                # Use the actual prepared unit object, not the independently
+                # parsed primer locator or a reconstructed FrozenUnit. Only
+                # the genuine ALL-last graph can protect the following tail.
+                verify_all=all_images.enter_context(
+                    global_journal._hold_selected_last_catalog_write_originals(
+                        writer_token,owner_token,binding,selected[0].unit))
+                verify_all()
                 try:
                     budget, verify_quota = quota_images.enter_context(
                         _hold_owned_project_dedicated_quota_images(writer_token, owner_token, binding, authentication,
@@ -952,10 +1012,10 @@ def _consume_current_project_online_original_inputs(writer_token, owner_token, b
                     if packet[0] is not responses['template_identity']:
                         raise RemoteHistoryHold()
                     graphs.append((row, actual_source, guard, packet, verify))
-                verify_cycle(); verify_inputs()
+                verify_cycle(); verify_inputs(); verify_all()
             # ALL strict count/catalog/quota/business scopes have completed.
             # Only genuinely overlapped images and actual issued reads survive.
-            verify_cycle(); verify_inputs()
+            verify_cycle(); verify_inputs(); verify_all()
             if verify_quota is not None:
                 verify_quota()
             for _row, _actual_source, _guard, _packet, verify in graphs:
@@ -971,7 +1031,7 @@ def _consume_current_project_online_original_inputs(writer_token, owner_token, b
             for kind, response in responses.items():
                 require_current_owned_project_read(writer_token, owner_token, binding, response,
                     authentication, read_kind=kind)
-            verify_cycle(); verify_inputs()
+            verify_cycle(); verify_inputs(); verify_all()
             if verify_quota is not None:
                 verify_quota()
         for kind, response in responses.items():

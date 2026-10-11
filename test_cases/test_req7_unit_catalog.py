@@ -970,6 +970,91 @@ print('COLD_SHARED_FIFO_ORIGINALS_NO_HANDLES_OR_AUTHORITY')
 
 
 class UnitCatalogTests(unittest.TestCase):
+    def last_original_owner_api(self):
+        remote=load_component('issue_tracker_remote_history_match')
+        api=getattr(remote,'_hold_current_project_last_original_owners',None)
+        self.assertTrue(callable(api),'default tail needs genuine ALL-located foreign owners before strict core acquisition')
+        return remote,api
+
+    @contextmanager
+    def two_original_owner_projects(self, *, current_last=True):
+        registering,_reading=self.project_origins_api()
+        with ExitStack() as creation:
+            first,first_project,first_publication=self.local_owner(creation,'foreign-first')
+            last,last_project,last_publication=self.local_owner(creation,'current-last')
+            token=self.owner(creation)
+            originals=(self.c6_unit(first)[0],self.c6_unit(last)[0])
+            for writer,original in zip((first,last),originals):registering(writer,token,binding(),original)
+        self.assertEqual({},self.module.local._ACTIVE)
+        current=(last_project,last_publication) if current_last else (first_project,first_publication)
+        with ExitStack() as scope:
+            writer=scope.enter_context(self.module.local.writer_owner(*current));token=self.owner(scope)
+            yield writer,token,originals,(first_project,last_project)
+
+    def test_default_last_original_owner_tail_keeps_foreign_lock_after_semantic_readers_close(self):
+        _remote,api=self.last_original_owner_api()
+        with self.two_original_owner_projects() as (writer,token,originals,projects):
+            before=original_read_files(self.root);current=self.module.local._owner(writer)
+            actual_join=self.module._hold_project_c6_from_origins;closed=[]
+            @contextmanager
+            def joined(*args,**options):
+                with actual_join(*args,**options) as packet:yield packet
+                closed.append(True)
+            with mock.patch.object(self.module,'_hold_project_c6_from_origins',side_effect=joined):
+                with api(writer,token,binding()) as locator:
+                    self.assertEqual([True],closed,'strict semantic reader must already be closed')
+                    self.assertEqual(originals[-1],locator.unit)
+                    self.assertEqual((projects[-1].stat().st_dev,projects[-1].stat().st_ino),locator.project_identity)
+                    foreign=[key for key in self.module.local._ACTIVE if key is not writer]
+                    self.assertEqual(1,len(foreign));foreign=foreign[0]
+                    actual=self.module.local._owner(foreign)
+                    self.assertEqual(projects[0],actual.project);self.assertEqual({},actual.handles)
+                    import fcntl
+                    fd=os.open(projects[0]/'.tracker/LOCK',os.O_RDWR)
+                    try:
+                        with self.assertRaises(BlockingIOError):fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+                    finally:os.close(fd)
+                    self.assertIs(current,self.module.local._owner(writer))
+            self.assertEqual([writer],list(self.module.local._ACTIVE))
+            with self.assertRaises(self.module.local.LocalCommitHold):self.module.local._owner(foreign)
+            self.assertIs(current,self.module.local._owner(writer));self.assertEqual(before,original_read_files(self.root))
+
+    def test_default_last_original_owner_tail_rejects_unissued_and_caller_selection_before_read(self):
+        remote,api=self.last_original_owner_api()
+        with mock.patch.object(self.module,'hold_pending_project_origins') as reading:
+            with self.assertRaises(remote.RemoteHistoryHold):
+                with api(object(),object(),binding()):self.fail('unissued owner yielded a locator')
+            reading.assert_not_called()
+        for claims in ({'unit':self.first},{'projects':()},{'owner_tail':ExitStack()},{'complete':True}):
+            with self.subTest(claim=tuple(claims)),self.assertRaises(TypeError):api(object(),object(),binding(),**claims)
+
+    def test_default_last_original_owner_tail_refuses_last_other_project_without_mutation(self):
+        remote,api=self.last_original_owner_api()
+        with self.two_original_owner_projects(current_last=False) as (writer,token,_originals,_projects):
+            before=original_read_files(self.root);current=self.module.local._owner(writer);entered=[]
+            with self.assertRaises(remote.RemoteHistoryHold):
+                with api(writer,token,binding()) as locator:entered.append(locator)
+            self.assertEqual([],entered);self.assertEqual([writer],list(self.module.local._ACTIVE))
+            self.assertIs(current,self.module.local._owner(writer));self.assertEqual(before,original_read_files(self.root))
+
+    def test_default_last_original_owner_tail_preserves_interrupt_and_releases_only_new_owners(self):
+        _remote,api=self.last_original_owner_api()
+        with self.two_original_owner_projects() as (writer,token,_originals,projects):
+            before=original_read_files(self.root);current=self.module.local._owner(writer)
+            primary=KeyboardInterrupt('owned default foreign-lock tail interruption');entered=[]
+            with self.assertRaises(KeyboardInterrupt) as caught:
+                with api(writer,token,binding()):
+                    entered.append(True);foreign=next(key for key in self.module.local._ACTIVE if key is not writer)
+                    self.module.local._owner(foreign);raise primary
+            self.assertIs(primary,caught.exception);self.assertEqual([True],entered)
+            self.assertEqual([writer],list(self.module.local._ACTIVE));self.assertIs(current,self.module.local._owner(writer))
+            with self.assertRaises(self.module.local.LocalCommitHold):self.module.local._owner(foreign)
+            import fcntl
+            fd=os.open(projects[0]/'.tracker/LOCK',os.O_RDWR)
+            try:fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB);fcntl.flock(fd,fcntl.LOCK_UN)
+            finally:os.close(fd)
+            self.assertEqual(before,original_read_files(self.root))
+
     def test_count_claim_nested_holder_borrows_same_live_originals_without_reacquiring_catalog(self):
         with self._simple_count_claim_originals() as (globals_,writer,token,bound):
             before=original_read_files(self.root)

@@ -2963,3 +2963,21 @@ originals across COUNT, CLAIM, the fixed request and cleanup. This does not solv
 default selection, foreign-owner lifetime, G1 admission, NEW or the current
 full/check gate; the old R2 cadence, deadlines and immutable-wire tests remain
 necessary and unchanged.
+
+The fixed default input receiver now locates the genuine ALL-last unit from
+original project origins/C6 while retaining newly acquired foreign project
+owners beyond both semantic primer finalizers. Existing ACTIVE owners remain
+borrowed. A locator is not evidence or permission: the strict current input
+scope independently joins one actual prepared row and passes that exact unit
+object to the write-aware ALL holder. Business/quota cleanup and ALL semantic
+and raw finalizers run while original cycle/policy/W1 holders remain live;
+foreign-owner cleanup runs last. No closed primer/core verifier is reused.
+Independent direct RED covers original foreign lock continuity, caller
+selection/unissued refusal, non-current ALL-last refusal and exact primary
+interruption. A genuine ETH/IB protected-worker/C6/OAuth/TLS workflow observes
+the actual graph after strict closure and checks live original cycle/source
+guards outside production HOLD sanitizers at the final ALL boundary. The old
+quota orchestration test keeps all interruption/read-revocation assertions;
+its synthetic selection prerequisites are not native-owner proof. This input
+edge still refuses before COUNT/CLAIM/send. G1/NEW/FIFO admission, complete
+REQ7 integration, current full/check and REAL_ENV remain unproved.

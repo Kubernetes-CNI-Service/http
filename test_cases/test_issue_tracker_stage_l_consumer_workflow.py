@@ -232,6 +232,66 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             for fd,_info,_raw in originals:
                 with self.assertRaises(OSError):os.fstat(fd)
 
+    def test_actual_default_worker_all_write_originals_outlive_strict_input_finalizers(self):
+        actual_worker=self._default_worker_original_images;received=[];post_strict=[];completed=[];packets=[]
+        tail_inputs=[];tail_errors=[]
+        def worker(**arguments):
+            from monitor import issue_tracker_remote_history_match as remote
+            from monitor import issue_tracker_global_attempt_journal as globals_
+            from monitor import issue_tracker_stage_l_consumer as source
+            from monitor import issue_tracker_cycle_source as cycles
+            original_core=remote._hold_current_project_online_inputs
+            original_all=globals_._hold_selected_last_catalog_write_originals
+            original_inputs=source._hold_original_replay_inputs
+            closed=[];active_inputs={};input_sequence=[]
+            @contextmanager
+            def inputs(*args,**options):
+                key=len(input_sequence);input_sequence.append(key)
+                try:
+                    with original_inputs(*args,**options) as original:
+                        active_inputs[key]=original;yield original
+                finally:active_inputs.pop(key,None)
+            @contextmanager
+            def core(*args,**options):
+                with original_core(*args,**options) as packet:packets.append(packet);yield packet
+                closed.append(True)
+            @contextmanager
+            def all_originals(writer,token,bound,unit):
+                with original_all(writer,token,bound,unit) as original:
+                    received.append((arguments['sheet'],unit));original()
+                    def verify():
+                        original()
+                        if closed:post_strict.append(arguments['sheet'])
+                    yield verify
+                completed.append(arguments['sheet'])
+                active=cycles._HELD_CYCLE_REPLAY.get()
+                tail_inputs.append((arguments['sheet'],active is not None and active[0] is self.store,bool(active_inputs)))
+                try:
+                    cycles._require_live_cycle_replay(active);active[1]()
+                    for original in active_inputs.values():original()
+                except Exception as error:tail_errors.append(type(error).__name__)
+            with mock.patch.object(remote,'_hold_current_project_online_inputs',side_effect=core), \
+                    mock.patch.object(globals_,'_hold_selected_last_catalog_write_originals',side_effect=all_originals), \
+                    mock.patch.object(source,'_hold_original_replay_inputs',side_effect=inputs):
+                return actual_worker(**arguments)
+        with mock.patch.object(self,'_default_worker_original_images',side_effect=worker):
+            observed=[]
+            self._exercise_real_protected_three_panel_fixture(skip_history=False,
+                observed_cabling_insert_probe=True,receipted_intent_probe=True,native_catalog_probe=True,
+                native_catalog_c6_origin_probe=True,native_catalog_retained_probe=True,
+                native_catalog_launch_probe=('default-worker-original-images',observed))
+        # These independent observations are outside production HOLD sanitizers.
+        # The unchanged actual fixture proves 8 fresh reads, zero COUNT/CLAIM/
+        # request, original durable files/cycles and business-FD cleanup.
+        self.assertEqual(['ETH Cabling','IB Cabling'],[sheet for sheet,_unit in received])
+        self.assertEqual(['ETH Cabling','IB Cabling'],completed)
+        self.assertEqual({'ETH Cabling','IB Cabling'},set(post_strict));self.assertEqual(2,len(packets))
+        self.assertEqual([('ETH Cabling',True,True),('IB Cabling',True,True)],tail_inputs,
+            'actual cycle/policy/W1 originals must remain live through the LAST ALL finalizer')
+        self.assertEqual([],tail_errors)
+        for (_sheet,unit),packet in zip(received,packets):
+            self.assertIs(unit,packet[3][-1][0].unit,'borrow actual prepared last unit, never a reconstructed locator object')
+
     def _default_worker_original_images(self, *, native, whitelist_doc, private_context,
             global_root, writer_token, spreadsheet_token, binding, unit, qualified,
             settings, quota_raw, history_raw, reads, sheet, state, owner_module, global_journal):

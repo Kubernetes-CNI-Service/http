@@ -277,13 +277,21 @@ class CatalogProjectAuthenticationHandoffDirectTests(unittest.TestCase):
                 root=Path(directory).resolve();events=[];strict_live=[False];revoked=[False]
                 writer=object();owner=object();binding=object();auth=object();identity=object();metadata=object()
                 stop=KeyboardInterrupt('owned quota finalizer interruption')
+                row=SimpleNamespace(unit=object(),project_identity=object(),c6_facts=object())
                 @contextmanager
                 def held(*args,**options):
                     yield lambda:None
                 @contextmanager
+                def last_owner(*args,**options):
+                    yield row
+                @contextmanager
+                def business_images():
+                    yield (identity,None,None),lambda:None
+                guard=SimpleNamespace(_hold_original_images=business_images)
+                @contextmanager
                 def core(*args,**options):
                     strict_live[0]=True
-                    try:yield (None,None,{'template_identity':identity,'metadata':metadata},(),auth)
+                    try:yield (None,None,{'template_identity':identity,'metadata':metadata},((row,None,guard),),auth)
                     finally:strict_live[0]=False;events.append('strict-closed')
                 @contextmanager
                 def quota_images(*args,**options):
@@ -301,6 +309,10 @@ class CatalogProjectAuthenticationHandoffDirectTests(unittest.TestCase):
                 patches.enter_context(mock.patch.object(module.ownership,'_validated_owner'))
                 patches.enter_context(mock.patch.object(cycles,'_hold_current_completed_cycle_replay',held))
                 patches.enter_context(mock.patch.object(source,'_hold_original_replay_inputs',held))
+                # Synthetic orchestration prerequisites only; genuine ALL-last
+                # selection, owners and raw tails remain real workflow duties.
+                patches.enter_context(mock.patch.object(module,'_hold_current_project_last_original_owners',last_owner))
+                patches.enter_context(mock.patch.object(module.global_journal,'_hold_selected_last_catalog_write_originals',held))
                 patches.enter_context(mock.patch.object(module,'_hold_current_project_online_inputs',core))
                 patches.enter_context(mock.patch.object(quota,'_hold_owned_project_dedicated_quota_images',quota_images))
                 patches.enter_context(mock.patch.object(reads,'require_current_owned_project_read',side_effect=issued))
