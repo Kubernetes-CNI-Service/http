@@ -60,6 +60,15 @@ def allocation_image_barrier(case, fd):
 
 
 class Req7SettingsAuditAllocationTests(unittest.TestCase):
+    def test_completed_discovery_refuses_unissued_writer_before_acquiring_sheet(self):
+        before=self.image()
+        with mock.patch.object(self.module.ownership,'spreadsheet_owner') as acquire:
+            with self.assertRaises(local.LocalCommitHold):
+                with self.module._hold_discovered_completed_settings(object()):
+                    self.fail('unissued writer yielded a delivery context')
+            acquire.assert_not_called()
+        self.assertEqual(before,self.image())
+
     def test_cleanup_requires_actual_complete_delivery_pair_before_any_move(self):
         with self.owners() as (writer,sheet):
             value=self.unit(); self.prepare(writer,sheet,value); before=self.image()

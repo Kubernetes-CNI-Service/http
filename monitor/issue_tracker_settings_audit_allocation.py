@@ -711,13 +711,38 @@ def _hold_discovered_completed_settings(writer):
         sheet=scope.enter_context(ownership.spreadsheet_owner(bound))
         sheet_owner=ownership._validated_owner(sheet,bound)
         parent=sheet_owner.directories[-1][0]
-        unit_folder=directory(parent,sheet_owner.lock_name[:-5]+'.journal')
+        catalog_checks=[]
+        unit_name=sheet_owner.lock_name[:-5]+'.journal'
+        selected=None
+        if global_journal._catalog_present(sheet_owner):
+            from monitor import issue_tracker_unit_catalog as catalog
+            # HEADER is a locator, never authority. Hold ALL original units,
+            # attempts and genuine project C6 before selecting the one whose
+            # original COMPLETE/DELIVERED pair excuses missing projections.
+            states,counts_verify=scope.enter_context(global_journal._hold_catalog_attempts(sheet,bound))
+            rows,c6_verify=scope.enter_context(catalog.hold_pending_project_c6_units(sheet,bound))
+            if tuple(row.unit for row in rows)!=tuple(unit for unit,_state in states):
+                raise SettingsAuditHold()
+            matches=[row for row in rows if row.unit.unit_id==header['unit_id']]
+            if len(matches)!=1: raise SettingsAuditHold()
+            if matches[0].project_identity!=(project.st_dev,project.st_ino):
+                raise SettingsAuditHold()
+            selected=matches[0].unit
+            unit_name=sheet_owner.lock_name[:-5]+'.unit-'+selected.unit_id+'.journal'
+            catalog_checks.extend((counts_verify,c6_verify))
+            for check in catalog_checks: check()
+        unit_folder=directory(parent,unit_name)
         unit=_original_unit(file(unit_folder,'ACTION-PREIMAGE',_LIMIT),
                             file(unit_folder,'WIRE',_LIMIT))
+        if selected is not None and unit!=selected: raise SettingsAuditHold()
         _owner,_delivered,pair_verify=scope.enter_context(_hold_completed_k_pair(writer,sheet,bound,unit))
         if _owner is not owner: raise SettingsAuditHold()
         def original_verify():
-            verify(); pair_verify(); verify()
+            verify()
+            for check in catalog_checks: check()
+            pair_verify()
+            for check in catalog_checks: check()
+            verify()
         original_verify()
         yield (sheet,bound,unit),original_verify
         original_verify()

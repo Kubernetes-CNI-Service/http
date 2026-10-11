@@ -1053,6 +1053,19 @@ K 提交边界前后重新验证该原件作用域；写入中丢失原件须保
 状态。此接入不替换发布／来源 owner、不安装在线服务、不释放 UNKNOWN 或授权发送；
 全量证明及真实设备／Cloud／断电验收仍未完成，不以本地 PASS 标为通过。
 
+已完成单元的设置原件冷发现也支持真实 `.unit-<id>.journal` catalog：分配 HEADER
+中的 unit_id 仅作定位，先保持全部原 catalog/count 及真实项目 C6，再唯一选中并核
+选中 C6 的 project dev/inode、原 ACTION/WIRE 和完整 COMPLETE/DELIVERED 对；
+同表另一项目的真实 C6 不授权当前项目，即使旧接口留存相符分配/交付；有 catalog
+不回退旧 `.journal`。其他 pending 单元的同字节换 inode 在 ALL-C6 holder
+已钉住原件后及最后 K 读取时均整体 HOLD，
+不能只证明已交付单元便忽略它。真实双 C6／TLS 完成／DELIVERED／同设备归档后，
+独立冷进程读取最高 revision=1、K=7，原 count/WIRE、后续 outbox 和全部上下文撤权
+不变。首次 K 读取的中断/退出/未列异常也先撤销两份 registry 再关闭所有原件；
+调用者原异常保留，收尾拒绝单独发生时为 typed HOLD，无 ACK。
+这里仍仅支持原第一分配的交付恢复；不是多单元事件分配、默认 delivery hook、
+FIRST/R2 发送或 REQ7 整体完成，不能替代当前 full/check 或现场验收。
+
 默认 prod `inspect_stage_l` 与真实 worker 状态入口在合法交付投影归档后读取最高 K，
 仍保持 pending／来源资格／本地 receipt 的原合同和 `disabled_no_send_authority`。
 独立 direct 验证缺失 tracker 不初始化、错误 scope 不读来源；实际多脚本流程验证正常

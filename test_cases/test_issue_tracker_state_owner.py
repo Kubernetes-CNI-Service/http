@@ -5,6 +5,7 @@ eligibility or send to any Issue Tracker service.
 """
 
 import os
+from contextlib import contextmanager
 from pathlib import Path
 import tempfile
 import unittest
@@ -25,6 +26,76 @@ PREPARED = b"scratch-workbook-projection\n"
 
 
 class TrackerStateOwnerTests(unittest.TestCase):
+    def _assert_settings_first_read_failure_revokes(self, primary):
+        from monitor import issue_tracker_state_owner as state
+        self.initialize(); native=state.current_k; tokens=[]
+        before={str(p.relative_to(self.root)):p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
+        def interrupt_first_read(token, **kwargs):
+            self.assertIn(token,state._COMPLETED_ORIGINAL_GUARDS)
+            self.assertEqual((0,3),(native(token,**kwargs).revision,native(token,**kwargs).k))
+            tokens.append(token)
+            raise primary
+        try:
+            with mock.patch.object(state,'current_k',side_effect=interrupt_first_read):
+                with self.assertRaises(type(primary)) as caught:
+                    with state.tracker_settings_writer(self.project,self.publication):
+                        self.fail('initial read failure yielded a settings writer')
+            self.assertIs(primary,caught.exception)
+            self.assertEqual(1,len(tokens))
+            with self.assertRaises(TrackerStateHold): native(tokens[0])
+            self.assertEqual(before,{str(p.relative_to(self.root)):p.read_bytes() for p in self.root.rglob('*') if p.is_file()})
+            self.assertEqual({},state._COMPLETED_READ_CONTEXT)
+            self.assertEqual({},state._COMPLETED_ORIGINAL_GUARDS)
+        finally:
+            # Isolate a failing RED from subsequent cases, after the original
+            # contract assertions; this does not perform production cleanup.
+            for token in tokens:
+                state._COMPLETED_READ_CONTEXT.pop(token,None)
+                state._COMPLETED_ORIGINAL_GUARDS.pop(token,None)
+
+    def test_settings_first_read_keyboard_interrupt_revokes_context(self):
+        self._assert_settings_first_read_failure_revokes(KeyboardInterrupt('first read interruption'))
+
+    def test_settings_first_read_system_exit_revokes_context(self):
+        self._assert_settings_first_read_failure_revokes(SystemExit('first read exit'))
+
+    def test_settings_first_read_runtime_error_revokes_context(self):
+        self._assert_settings_first_read_failure_revokes(RuntimeError('first read caller fault'))
+
+    def test_settings_original_finalizer_failure_is_typed_hold_after_revocation(self):
+        from monitor import issue_tracker_state_owner as state,issue_tracker_settings_audit_allocation as allocation
+        self.initialize(); native=allocation._hold_discovered_completed_settings; tokens=[]
+        @contextmanager
+        def failure_after_real_scope(token):
+            with native(token) as original:
+                yield original
+            raise ValueError('private original finalizer fault')
+        with mock.patch.object(allocation,'_hold_discovered_completed_settings',side_effect=failure_after_real_scope):
+            with self.assertRaises(TrackerStateHold):
+                with state.tracker_settings_writer(self.project,self.publication) as token:
+                    tokens.append(token); self.assertEqual(3,state.current_k(token).k)
+        self.assertEqual(1,len(tokens))
+        self.assertEqual({},state._COMPLETED_READ_CONTEXT)
+        self.assertEqual({},state._COMPLETED_ORIGINAL_GUARDS)
+        with self.assertRaises(TrackerStateHold): state.current_k(tokens[0])
+
+    def test_settings_caller_exception_survives_original_finalizer_failure(self):
+        from monitor import issue_tracker_state_owner as state,issue_tracker_settings_audit_allocation as allocation
+        self.initialize(); native=allocation._hold_discovered_completed_settings
+        primary=RuntimeError('independent caller interruption')
+        @contextmanager
+        def failure_after_real_scope(token):
+            try:
+                with native(token) as original: yield original
+            finally:
+                raise ValueError('private original finalizer fault')
+        with mock.patch.object(allocation,'_hold_discovered_completed_settings',side_effect=failure_after_real_scope):
+            with self.assertRaises(RuntimeError) as caught:
+                with state.tracker_settings_writer(self.project,self.publication): raise primary
+        self.assertIs(primary,caught.exception)
+        self.assertEqual({},state._COMPLETED_READ_CONTEXT)
+        self.assertEqual({},state._COMPLETED_ORIGINAL_GUARDS)
+
     def test_settings_discovery_never_bootstraps_absent_state(self):
         from monitor import issue_tracker_state_owner as state
         before={str(p.relative_to(self.project)):p.read_bytes() for p in self.project.rglob('*') if p.is_file()}

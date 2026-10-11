@@ -89,6 +89,32 @@ def _verify_settings_originals(token):
 
 
 @contextmanager
+def _settings_original_scope():
+    """Always finish ALL holders; no ACK after teardown or hidden body failure.
+
+    Revocation is performed by the settings factory before this stack closes.
+    A caller's original interruption survives a simultaneous original-finalizer
+    failure (which remains its explicit cause). Internal refusal alone is a
+    typed state HOLD, not a raw error accidentally escaping the factory.
+    """
+    stack=ExitStack(); primary=None
+    try:
+        yield stack
+    except BaseException as exc:
+        primary=exc
+        raise
+    finally:
+        try:
+            stack.close()
+        except BaseException as exc:
+            if primary is not None:
+                raise primary from exc
+            if isinstance(exc,(LocalCommitHold,KChainHoldError,OSError,TypeError,ValueError,KeyError)):
+                raise TrackerStateHold('settings original finalization refused') from exc
+            raise
+
+
+@contextmanager
 def tracker_settings_writer(project, publication):
     """Reopen local settings through actual originals, never caller delivery flags.
 
@@ -97,26 +123,25 @@ def tracker_settings_writer(project, publication):
     No claim preserves the ordinary strict K contract. This does not initialize
     missing state, grant online authority or replace publication/source owners.
     """
-    with ExitStack() as stack:
+    with _settings_original_scope() as stack:
         token = None
         try:
-            token = stack.enter_context(writer_owner(project, publication))
-            from monitor.issue_tracker_settings_audit_allocation import _hold_discovered_completed_settings
-            context, verify = stack.enter_context(_hold_discovered_completed_settings(token))
-            _COMPLETED_ORIGINAL_GUARDS[token] = verify
-            if context is not None:
-                _COMPLETED_READ_CONTEXT[token] = context
-            current_k(token)
-        except (LocalCommitHold, KChainHoldError, OSError, TypeError, ValueError, KeyError) as exc:
-            _COMPLETED_ORIGINAL_GUARDS.pop(token, None)
-            _COMPLETED_READ_CONTEXT.pop(token, None)
-            raise TrackerStateHold("settings original discovery refused") from exc
-        try:
+            try:
+                token = stack.enter_context(writer_owner(project, publication))
+                from monitor.issue_tracker_settings_audit_allocation import _hold_discovered_completed_settings
+                context, verify = stack.enter_context(_hold_discovered_completed_settings(token))
+                _COMPLETED_ORIGINAL_GUARDS[token] = verify
+                if context is not None:
+                    _COMPLETED_READ_CONTEXT[token] = context
+                current_k(token)
+            except (LocalCommitHold, KChainHoldError, OSError, TypeError, ValueError, KeyError) as exc:
+                raise TrackerStateHold("settings original discovery refused") from exc
             yield token
             current_k(token)
         finally:
             # Revoke before the original pair and project owner close, on every
-            # exit. Caller exceptions are not relabeled as ownership failures.
+            # exit, including interruption during the FIRST K read. Caller
+            # exceptions are not relabeled as ownership failures.
             _COMPLETED_ORIGINAL_GUARDS.pop(token, None)
             _COMPLETED_READ_CONTEXT.pop(token, None)
 

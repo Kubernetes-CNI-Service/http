@@ -1221,6 +1221,208 @@ with local.writer_owner(root/'project',root/'project/publication') as writer,sco
         return {'event_id':'settings:0:'+hashlib.sha256(event).hexdigest(),
             'recorded_at_utc':'2026-10-08T10:00:00Z','details':event.decode().rstrip('\n')}
 
+    def catalog_settings_completed_and_pending(self, *, mirror_foreign_allocation=False):
+        """Actual two-C6 catalog, native TLS COMPLETE and original C25 delivery.
+
+        Adapt orchestration only: no substituted owner, C6, journal, read or
+        completion observation. The second immutable unit has no audit and
+        remains unattempted; it must not be silently ignored by cold discovery.
+        """
+        from test_cases.test_req7_unit_catalog import load as load_catalog
+        from test_cases.test_issue_tracker_whitelist_workbook import literal_xlsx
+        from monitor import issue_tracker_k_store as settings
+        from test_cases.test_req7_settings_audit_allocation import load as load_allocation
+        catalog=load_catalog(reset_dependencies=False); remote=load()
+        from monitor import issue_tracker_global_attempt_journal as globals_
+        allocation=load_allocation()
+        original_prepare=globals_.prepare_global_unit
+        original_owners=self.owners; writers=[]; units=[]; generations=[]; mirror=[]
+        original_allocate=allocation.prepare_settings_audit_allocation
+        def capture(scope,**kwargs):
+            result=original_owners(scope,**kwargs); writers.append(result[2])
+            if mirror_foreign_allocation:
+                project=self.root/'other-project'; project.mkdir(mode=0o700)
+                publication=project/'publication'; publication.mkdir(mode=0o700)
+                catalog.local.create_local_commit_store(project,publication)
+                other=scope.enter_context(catalog.local.writer_owner(project,publication))
+                settings.initialize_local_k_store(project/'.tracker',token=other,
+                    initialized_at='2026-10-08T10:00:00Z',acquisition_id='first-use')
+                mirror.append(other)
+            return result
+        def allocate_both(writer,sheet,bound,unit):
+            result=original_allocate(writer,sheet,bound,unit)
+            if mirror:
+                # Construct retained adversarial local evidence with the real
+                # old one-unit API, not fake owners/C6/COMPLETE observations.
+                original_allocate(mirror[0],sheet,bound,unit)
+            return result
+        def prepare_both(sheet,bound,first):
+            self.assertEqual([],units)
+            writer=writers[0]; arguments=send_inputs()
+            arguments.update(spreadsheet_id=bound.spreadsheet_id,sheet_id=101,history_sheet_id=105,
+                target_nonce='a'*64,history_nonce='d'*64,audits=())
+            arguments['business'][0]['observed_values']={'L':{'stringValue':'down'}}
+            generation=catalog.local.begin_generation(writer,arguments['manifest'])
+            catalog.local.record_intent(writer,generation,literal_xlsx(),kind='xlsx')
+            receipt=catalog.local.commit(writer,generation)
+            arguments.update(generation_id=generation.generation_id,publish_id=receipt.published_sha256)
+            second=catalog.composer.freeze_send_unit(**arguments)
+            self.assertEqual(2,generation.sequence); generations.append(generation)
+            for unit in (first,second):
+                catalog.register_pending_c6_unit(writer,sheet,bound,unit)
+                original_prepare(sheet,bound,unit)
+            units.extend((first,second))
+        with ExitStack() as scope:
+            with mock.patch.object(self,'owners',side_effect=capture), \
+                    mock.patch.object(globals_,'prepare_global_unit',side_effect=prepare_both), \
+                    mock.patch.object(allocation,'prepare_settings_audit_allocation',side_effect=allocate_both):
+                writer,sheet,bound,auth,_config,first,docs=self.prepare_owned(
+                    scope,settings_audits=(self.settings_audit_oracle(),),native_generation=True)
+            responses={name:self.read_owned(scope,writer,sheet,bound,auth,kind,value)
+                       for name,(kind,value) in docs.items()}
+            remote.record_owned_completion_evidence(writer,sheet,bound,first,**responses)
+            # A later independently committed K event is pending, not delivered
+            # by the first unit. Its projection and current pointer stay intact.
+            settings.apply_local_k_change(self.root/'project/.tracker',token=writer,new_k=7,
+                actor='operator:fixture',recorded_at='2026-10-08T10:01:00Z',
+                request_id='catalog-later-k',expected_revision=0)
+            allocation.record_completed_settings_delivery(writer,sheet,bound,first)
+            delivery=allocation.cleanup_completed_settings_outbox(writer,sheet,bound,first)
+            if mirror:
+                allocation.record_completed_settings_delivery(mirror[0],sheet,bound,first)
+                allocation.cleanup_completed_settings_outbox(mirror[0],sheet,bound,first)
+            self.assertEqual(('DELIVERED-PRESENT-OUTBOX-ABSENT-VALID',
+                (self.settings_audit_oracle()['event_id'],)),(delivery.state,delivery.event_ids))
+            before=globals_.inspect_catalog_global_units(sheet,bound)
+            self.assertEqual(((1,'UNKNOWN'),(0,'UNATTEMPTED_OBSERVATION')),
+                tuple((value.attempt_count,value.outcome) for _unit,value in before))
+            self.assertEqual(tuple(units),tuple(unit for unit,_value in before))
+        return bound,tuple(units),tuple(generations)
+
+    def test_catalog_settings_discovery_rejects_actual_c6_from_a_different_project(self):
+        from monitor import issue_tracker_state_owner as state,issue_tracker_spreadsheet_owner as sheet
+        self.catalog_settings_completed_and_pending(mirror_foreign_allocation=True)
+        project=self.root/'other-project'; before=self._default_recovery_images(project)
+        self.assertFalse((project/'.tracker/settings/outbox/0.json').exists())
+        with scoped_fixture(self.root,sheet),self.assertRaises(state.TrackerStateHold):
+            with state.tracker_settings_writer(project,project/'publication'):
+                self.fail('foreign original C6 cannot authorize this project settings')
+        self.assertEqual(before,self._default_recovery_images(project))
+        self.assertEqual({},state._COMPLETED_READ_CONTEXT)
+        self.assertEqual({},state._COMPLETED_ORIGINAL_GUARDS)
+
+    def test_cold_settings_discovery_uses_actual_catalog_journal_and_preserves_pending_unit(self):
+        import subprocess
+        bound,units,_generations=self.catalog_settings_completed_and_pending()
+        project=self.root/'project'; before=self._default_recovery_images(project)
+        program='''from pathlib import Path
+import sys
+from monitor import issue_tracker_state_owner as state,issue_tracker_spreadsheet_owner as sheet
+from test_cases.test_req7_spreadsheet_owner import scoped_fixture
+root=Path(sys.argv[1]); project=root/'project'
+assert state._COMPLETED_READ_CONTEXT=={} and state._COMPLETED_ORIGINAL_GUARDS=={}
+with scoped_fixture(root,sheet),state.tracker_settings_writer(project,project/'publication') as token:
+ value=state.current_k(token); print(value.revision,value.k)
+assert state._COMPLETED_READ_CONTEXT=={} and state._COMPLETED_ORIGINAL_GUARDS=={}
+print('original catalog context revoked')
+'''
+        child=subprocess.run([sys.executable,'-B','-c',program,str(self.root)],cwd=ROOT,
+            stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=20)
+        self.assertEqual(0,child.returncode,child.stderr)
+        self.assertEqual(b'1 7\noriginal catalog context revoked\n',child.stdout)
+        self.assertEqual(before,self._default_recovery_images(project))
+        self.assertFalse((project/'.tracker/settings/outbox/0.json').exists())
+        self.assertTrue((project/'.tracker/settings/outbox/1.json').is_file())
+        parent=self.root/'var/lib/http-ztp-container/issue-tracker'
+        stem=hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()
+        self.assertFalse((parent/(stem+'.journal')).exists(),'never manufacture a legacy shadow journal')
+        self.assertTrue((parent/(stem+'.unit-'+units[1].unit_id+'.journal')).is_dir())
+
+    def test_catalog_settings_discovery_pins_pending_c6_before_returning_completed_k(self):
+        from monitor import issue_tracker_state_owner as state,issue_tracker_spreadsheet_owner as sheet
+        _bound,_units,generations=self.catalog_settings_completed_and_pending()
+        # The fixture reloads the actual canonical catalog before issuing its
+        # owners. Observe that current module, never a stale pre-fixture alias.
+        from monitor import issue_tracker_unit_catalog as catalog
+        project=self.root/'project'
+        # Keep the first COMPLETE/DELIVERED pair untouched. Replace an original
+        # second-unit C6 image with identical bytes, outside any test sanitizer.
+        generation=generations[0]
+        candidates=[p for p in (project/'.tracker').rglob('*')
+                    if p.is_file() and generation.generation_id in str(p)]
+        self.assertTrue(candidates,'actual pending generation originals must exist')
+        path=next(p for p in candidates if p.name=='MANIFEST')
+        image=path.read_bytes()
+        native=catalog.hold_pending_project_c6_units; reached=[]; changed=[]
+        @contextmanager
+        def actual_c6(*args,**kwargs):
+            reached.append(True)
+            with native(*args,**kwargs) as actual:
+                # C6 facts persist the actual generation/content; this holder
+                # pins its FD/stat image for the current observation. Inject
+                # AFTER that pin, before discovery may return a K context.
+                path.rename(self.root/'preserved-catalog-pending-manifest')
+                path.write_bytes(image); path.chmod(0o600)
+                changed.append(self._default_recovery_images(project))
+                yield actual
+        with scoped_fixture(self.root,sheet),mock.patch.object(catalog,'hold_pending_project_c6_units',side_effect=actual_c6):
+            with self.assertRaises(state.TrackerStateHold):
+                with state.tracker_settings_writer(project,project/'publication') as token:
+                    state.current_k(token)
+        self.assertEqual([True],reached,'rejection must reach actual ALL-C6 validation, not a missing legacy path')
+        self.assertEqual(1,len(changed))
+        self.assertEqual(changed[0],self._default_recovery_images(project))
+        self.assertEqual(image,(self.root/'preserved-catalog-pending-manifest').read_bytes())
+        self.assertFalse((project/'.tracker/settings/outbox/0.json').exists())
+        self.assertTrue((project/'.tracker/settings/outbox/1.json').is_file())
+
+    def test_catalog_settings_first_k_interruption_revokes_both_original_registries(self):
+        from monitor import issue_tracker_state_owner as state,issue_tracker_spreadsheet_owner as sheet
+        self.catalog_settings_completed_and_pending()
+        project=self.root/'project'; before=self._default_recovery_images(project)
+        native=state.current_k; tokens=[]; primary=RuntimeError('catalog initial K interruption')
+        def interrupted(token,**kwargs):
+            self.assertIn(token,state._COMPLETED_READ_CONTEXT)
+            self.assertIn(token,state._COMPLETED_ORIGINAL_GUARDS)
+            value=native(token,**kwargs); self.assertEqual((1,7),(value.revision,value.k))
+            tokens.append(token)
+            raise primary
+        try:
+            with scoped_fixture(self.root,sheet),mock.patch.object(state,'current_k',side_effect=interrupted):
+                with self.assertRaises(RuntimeError) as caught:
+                    with state.tracker_settings_writer(project,project/'publication'):
+                        self.fail('interrupted first K must not yield a writer')
+            self.assertIs(primary,caught.exception)
+            self.assertEqual(1,len(tokens))
+            self.assertEqual(before,self._default_recovery_images(project))
+            with self.assertRaises(state.TrackerStateHold): native(tokens[0])
+            self.assertEqual({},state._COMPLETED_READ_CONTEXT)
+            self.assertEqual({},state._COMPLETED_ORIGINAL_GUARDS)
+        finally:
+            for token in tokens:
+                state._COMPLETED_READ_CONTEXT.pop(token,None)
+                state._COMPLETED_ORIGINAL_GUARDS.pop(token,None)
+
+    def test_catalog_settings_scope_keeps_pending_c6_original_through_last_k_read(self):
+        from monitor import issue_tracker_state_owner as state,issue_tracker_spreadsheet_owner as sheet
+        _bound,_units,generations=self.catalog_settings_completed_and_pending()
+        project=self.root/'project'; generation=generations[0]; reached=[]; changed=[]
+        path=next(p for p in (project/'.tracker').rglob('MANIFEST')
+                  if generation.generation_id in str(p))
+        image=path.read_bytes()
+        with scoped_fixture(self.root,sheet),self.assertRaises(state.TrackerStateHold):
+            with state.tracker_settings_writer(project,project/'publication') as token:
+                value=state.current_k(token)
+                self.assertEqual((1,7),(value.revision,value.k))
+                path.rename(self.root/'preserved-catalog-last-manifest')
+                path.write_bytes(image); path.chmod(0o600); reached.append(True)
+                changed.append(self._default_recovery_images(project))
+        self.assertEqual([True],reached,'scope must first qualify the real catalog before late substitution')
+        self.assertEqual(changed[0],self._default_recovery_images(project))
+        self.assertEqual(image,(self.root/'preserved-catalog-last-manifest').read_bytes())
+        self.assertFalse((project/'.tracker/settings/outbox/0.json').exists())
+        self.assertTrue((project/'.tracker/settings/outbox/1.json').is_file())
+
     def test_actual_complete_then_delivered_binds_original_audits_and_preserves_outbox_unknown(self):
         from contextlib import ExitStack
         from monitor import issue_tracker_settings_audit_allocation as allocation
