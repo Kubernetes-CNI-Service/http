@@ -15,6 +15,7 @@ import json
 import os
 import sys
 import re
+import errno
 from types import SimpleNamespace
 
 from monitor import issue_tracker_local_commit as local
@@ -466,6 +467,97 @@ def _hold_owned_project_dedicated_mixed_metadata_capacity(writer_token,owner_tok
 @contextmanager
 def _hold_owned_project_mixed_metadata_capacity_inputs(writer_token,owner_token,binding,authentication,*,
                                                        identity_response,metadata_response,require_project_origin):
+    # Legacy readers still own their original strict count/namespace lifetime.
+    # The private image-input scope exposes originals only to the fixed native
+    # overlap below; no public caller inventory, FD or verifier is accepted.
+    with _hold_owned_project_mixed_metadata_capacity_image_inputs(
+            writer_token,owner_token,binding,authentication,identity_response=identity_response,
+            metadata_response=metadata_response,require_project_origin=require_project_origin) as (budget,verify,_held,_current):
+        yield budget,verify
+
+
+@contextmanager
+def _hold_owned_project_dedicated_quota_images(writer_token,owner_token,binding,authentication,*,
+                                              identity_response,metadata_response):
+    """Native quota-only overlap after ALL strict mixed readers have finished.
+
+    The confirmed historical dedicated-table contract and actual issued reads
+    dominate ALL fence accounting. Copy only genuine held quota descriptors,
+    never reopen paths after the original reader closes. A later native writer
+    must separately retain ALL catalog/C6/settlement/count/FIFO originals and
+    authorize its exact append. This graph checks immutable quota continuity,
+    NOT those other originals, capacity reclamation or permission to send.
+    No caller unit, budget, FD, completeness flag or verifier is accepted.
+    """
+    from monitor import issue_tracker_unit_catalog as catalog
+    images=catalog._Originals(_image_budget=catalog._OriginalImageBudget())
+    live=False; failed=False; primary=None; cleanup_problem=None
+    try:
+        with _hold_owned_project_mixed_metadata_capacity_image_inputs(
+                writer_token,owner_token,binding,authentication,identity_response=identity_response,
+                metadata_response=metadata_response,require_project_origin=True) as (visible,strict,original,current):
+            if visible.outcome not in ('VISIBLE_ONLY_UNPROVED','STOP_CAPACITY'):
+                raise MetadataReservationHold()
+            budget=replace(visible,inventory_complete=True,
+                outcome='STOP_CAPACITY' if visible.outcome=='STOP_CAPACITY' else 'DEDICATED_PROJECT_CAPACITY')
+            strict(); parents={}
+            for parent,name,fd,identity,names in original.directories:
+                if not name.endswith('.metadata') or set(names)!=_NAMES:
+                    raise MetadataReservationHold()
+                duplicate=os.dup(fd)
+                images.directories.append((parent,name,duplicate,identity,names))
+                if journal._identity(os.fstat(duplicate))!=identity:raise MetadataReservationHold()
+                parents[fd]=duplicate
+            for parent,name,fd,identity,raw in original.files:
+                if parent not in parents or name not in _NAMES:raise MetadataReservationHold()
+                duplicate=os.dup(fd)
+                images.files.append((parents[parent],name,duplicate,identity,raw))
+                if journal._identity(os.fstat(duplicate))!=identity:raise MetadataReservationHold()
+                images._image_budget.reserve(identity); images._image_budget.seal(identity,raw)
+            if len(images.files)!=4*len(images.directories):raise MetadataReservationHold()
+            strict(); images.verify(); strict()
+        # All old strict finalizers and actual old quota FD closes are done.
+        # Do not revive their callbacks or transfer their count snapshot.
+        live=True
+        def verify():
+            nonlocal live
+            if not live:raise MetadataReservationHold()
+            try:
+                current(); images.verify(); current()
+            except BaseException as error:
+                live=False
+                if isinstance(error,Exception):raise MetadataReservationHold() from None
+                raise
+        verify()
+        yield budget,verify
+        verify()
+    except BaseException as error:
+        if isinstance(error,Exception):failed=True
+        else:primary=error
+    finally:
+        live=False
+        try:images.close()
+        except BaseException as error:
+            failed=True; cleanup_problem=error
+            if not isinstance(error,Exception) and primary is None:primary=error
+    if primary is not None:
+        if cleanup_problem is not None and cleanup_problem is not primary:raise primary from cleanup_problem
+        raise primary
+    if failed:raise MetadataReservationHold() from None
+    for record in (*images.files,*images.directories):
+        try:os.fstat(record[2])
+        except OSError as error:
+            if error.errno!=errno.EBADF:raise MetadataReservationHold() from None
+        else:raise MetadataReservationHold()
+    # Closing an original can revoke actual issued reads; never accept a
+    # pre-close read check as a successful final handoff or cached authority.
+    try:current()
+    except Exception:raise MetadataReservationHold() from None
+
+
+@contextmanager
+def _hold_owned_project_mixed_metadata_capacity_image_inputs(writer_token,owner_token,binding,authentication,*,
+                                                             identity_response,metadata_response,require_project_origin):
     """Charge ALL permanent fences from actual mixed settlement originals.
 
     Only full held C6/COMPLETE/APPLIED/KEY originals permit a historical unit
@@ -550,7 +642,7 @@ def _hold_owned_project_mixed_metadata_capacity_inputs(writer_token,owner_token,
             def verify():
                 verify_quota(); verify_settlements(); verify_inventory(); verify_quota()
             verify(); held.sync(); verify()
-            yield budget, verify
+            yield budget, verify, held, current
             verify()
         # A last proof/quota finalizer may revoke or expire the original read.
         # Never re-open originals or use already-closed verifier callbacks.

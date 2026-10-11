@@ -2875,3 +2875,18 @@ masking it with a later verification or cleanup error. Borrowed BUSINESS/C6
 graphs remain owned by their outer finalizer. Existing count, CLAIM, immutable
 bytes, RAW bounds and legacy offline expectations remain unchanged. This is
 local cleanup evidence, not power-loss, real-device or current full proof.
+
+The fixed dedicated-quota overlap now duplicates the actual ALL pending quota
+directory/image FDs before strict mixed accounting exits. Its first yield is
+after every old strict finalizer and quota close; it checks original issued
+identity/metadata provenance and immutable quota bytes throughout real native
+count changes, without reviving the closed count/namespace snapshot. Legacy
+visible-only and strict readers retain their existing contracts. No caller
+unit, completeness flag, inventory, FD, budget or verifier is accepted; the
+overlap retains the fixed 16 MiB unique-image bound. Independent direct refusal
+and real C6/COMPLETE/APPLIED/key + OAuth/TLS workflows cover actual reserved
+count with originals still live, identical-byte rebind at the last strict
+finalizer and issued-read revocation at overlap cleanup. This quota-only graph
+does not itself retain ALL other catalog/C6/FIFO originals or grant G1 send
+permission. The native writer must separately supply those real protected
+boundaries; default NEW/FIRST/R2 integration and current full/check remain open.

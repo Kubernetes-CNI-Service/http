@@ -126,6 +126,19 @@ class Req7MetadataReservationDirectTests(unittest.TestCase):
             self.assertIsNone(caught.exception.__context__); joined.assert_not_called()
         self.assertFalse(self.store.exists())
 
+    def test_dedicated_quota_handoff_refuses_unissued_reads_before_inventory(self):
+        from monitor import issue_tracker_retained_inventory as inventory
+        module=load(); api=getattr(module,'_hold_owned_project_dedicated_quota_images',None)
+        self.assertTrue(callable(api),'native G1 handoff needs actual issued reads before ALL original acquisition')
+        entered=[]
+        with mock.patch.object(inventory,'_hold_all_project_mixed_settlements') as joined:
+            with self.assertRaises(module.MetadataReservationHold):
+                with api(object(),object(),binding(),object(),identity_response=object(),metadata_response=object()):
+                    entered.append(True)
+            joined.assert_not_called()
+        self.assertEqual([],entered,'fabricated images must not yield an original graph')
+        self.assertFalse(self.store.exists())
+
     def test_fixture_canonical_metadata_alias_and_original_owner_dependencies_match_current_imports(self):
         import monitor
         module = load()
@@ -1370,6 +1383,114 @@ class Req7MixedOriginalQuotaTests(unittest.TestCase):
         api=getattr(module,'_hold_owned_project_dedicated_mixed_metadata_capacity',None)
         self.assertTrue(callable(api),'G1 needs ALL original mixed settlements and project-bound pending quotas')
         return api
+
+    def test_actual_dedicated_quota_handoff_outlives_strict_readers_and_real_count(self):
+        from contextlib import ExitStack,contextmanager
+        from monitor import issue_tracker_unit_catalog as graph_module
+        from monitor import issue_tracker_sheets_read_decode as decode
+        from monitor.issue_tracker_history_read_launcher import require_current_owned_project_read
+        api=getattr(load(),'_hold_owned_project_dedicated_quota_images',None)
+        self.assertTrue(callable(api),'strict G1 reader must hand off held original quota images before closing')
+        with self.originals() as (case,module,_catalog,_inventory,writer,owner,bound,auth,identity,metadata,units),ExitStack() as scope:
+            api=module._hold_owned_project_dedicated_quota_images
+            native=module._hold_owned_project_mixed_metadata_capacity_image_inputs
+            closed=[]; duplicates=[]; real_dup=os.dup
+            @contextmanager
+            def original_scope(*args,**options):
+                with native(*args,**options) as value: yield value
+                closed.append('all-strict-finalizers-completed')
+            def duplicate(fd):
+                result=real_dup(fd); info=os.fstat(fd)
+                duplicates.append((result,info,None if __import__('stat').S_ISDIR(info.st_mode)
+                    else os.pread(fd,info.st_size+1,0)))
+                return result
+            scope.enter_context(mock.patch.object(module,'_hold_owned_project_mixed_metadata_capacity_image_inputs',side_effect=original_scope))
+            scope.enter_context(mock.patch.object(graph_module.os,'dup',side_effect=duplicate))
+            state=case.root/'var/lib/http-ztp-container/issue-tracker'
+            before={str(path.relative_to(state)):(path.stat().st_ino,path.read_bytes())
+                for path in state.rglob('*') if path.is_file() and '.metadata/' in str(path)}
+            plan,_project,_digest=require_current_owned_project_read(writer,owner,bound,identity,auth,read_kind='template_identity')
+            decoded=decode.decode_template_identity(plan,identity)
+            with api(writer,owner,bound,auth,identity_response=identity,metadata_response=metadata) as (budget,verify):
+                self.assertEqual(['all-strict-finalizers-completed'],closed)
+                self.assertEqual('DEDICATED_PROJECT_CAPACITY',budget.outcome); self.assertIs(True,budget.inventory_complete)
+                self.assertEqual((101,88,2,29910),next(row for row in budget.pools if row[0]==101))
+                self.assertEqual(2,budget.outstanding_reservations)
+                self.assertEqual(5,len(duplicates),'one pending quota directory and four actual images, not path reopens')
+                verify()
+                actual=module.global_journal.record_reserved_attempt_intent(owner,bound,decoded,units[1])
+                self.assertEqual((1,'UNKNOWN'),(actual.attempt_count,actual.outcome))
+                verify()
+                for fd,info,raw in duplicates:
+                    current=os.fstat(fd)
+                    fields=('st_dev','st_ino','st_mode','st_uid','st_gid','st_nlink',
+                        'st_size','st_mtime_ns','st_ctime_ns')
+                    self.assertEqual(tuple(getattr(info,name) for name in fields),
+                        tuple(getattr(current,name) for name in fields))
+                    if raw is not None:self.assertEqual(raw,os.pread(fd,len(raw)+1,0))
+            for fd,_info,_raw in duplicates:
+                with self.assertRaises(OSError):os.fstat(fd)
+            with self.assertRaises(module.MetadataReservationHold):verify()
+            self.assertEqual(before,{str(path.relative_to(state)):(path.stat().st_ino,path.read_bytes())
+                for path in state.rglob('*') if path.is_file() and '.metadata/' in str(path)})
+            self.assertFalse(list(state.rglob('CLAIM-*')))
+
+    def test_actual_dedicated_quota_handoff_refuses_last_strict_finalizer_rebind(self):
+        from contextlib import ExitStack,contextmanager
+        self.assertTrue(callable(getattr(load(),'_hold_owned_project_dedicated_quota_images',None)),
+            'actual quota originals must remain pinned through the last strict finalizer')
+        with self.originals() as (case,module,_catalog,_inventory,writer,owner,bound,auth,identity,metadata,units),ExitStack() as scope:
+            native=module._hold_owned_project_mixed_metadata_capacity_image_inputs
+            path=case.root/'var/lib/http-ztp-container/issue-tracker'/(
+                hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()+'.unit-'+units[1].unit_id+'.metadata/RESERVATION')
+            original=path.stat(); raw=path.read_bytes(); retained=case.root/'quota-handoff-original'
+            closed=[]; entered=[]
+            @contextmanager
+            def original_scope(*args,**options):
+                with native(*args,**options) as value:yield value
+                path.rename(retained); path.write_bytes(raw); path.chmod(0o600)
+                closed.append('same-bytes-new-inode-after-last-strict-finalizer')
+            scope.enter_context(mock.patch.object(module,'_hold_owned_project_mixed_metadata_capacity_image_inputs',side_effect=original_scope))
+            with self.assertRaises(module.MetadataReservationHold):
+                with module._hold_owned_project_dedicated_quota_images(writer,owner,bound,auth,
+                        identity_response=identity,metadata_response=metadata):entered.append(True)
+            self.assertEqual([],entered); self.assertEqual(['same-bytes-new-inode-after-last-strict-finalizer'],closed)
+            self.assertEqual(original.st_ino,retained.stat().st_ino); self.assertNotEqual(original.st_ino,path.stat().st_ino)
+            self.assertEqual(raw,path.read_bytes()); self.assertEqual(raw,retained.read_bytes())
+            self.assertEqual(0,module.global_journal.inspect_global_unit(owner,bound,units[1]).attempt_count)
+            self.assertFalse(list(case.root.rglob('CLAIM-*')))
+
+    def test_actual_dedicated_quota_handoff_rechecks_read_after_overlap_cleanup(self):
+        from contextlib import ExitStack
+        self.assertTrue(callable(getattr(load(),'_hold_owned_project_dedicated_quota_images',None)),
+            'cleanup must not turn revoked actual reads into successful quota handoff')
+        with self.originals() as (case,module,catalog,_inventory,writer,owner,bound,auth,identity,metadata,units),ExitStack() as scope:
+            from monitor import issue_tracker_history_read_launcher as reads
+            original_close=catalog._Originals.close; revoked=[]; guards=[]
+            def close(graph):
+                overlap=(graph.namespace is None and graph._image_budget is not None
+                    and len(graph.files)==4 and len(graph.directories)==1
+                    and graph.directories[0][1].endswith('.metadata'))
+                original_close(graph)
+                if overlap:
+                    with reads._PROJECT_READ_GUARD:
+                        self.assertIs(auth,reads._PROJECT_READS[metadata])
+                        revoked.append(reads._PROJECT_READS.pop(metadata))
+            scope.enter_context(mock.patch.object(catalog._Originals,'close',close))
+            try:
+                with self.assertRaises(module.MetadataReservationHold):
+                    with module._hold_owned_project_dedicated_quota_images(writer,owner,bound,auth,
+                            identity_response=identity,metadata_response=metadata) as (_budget,verify):
+                        verify(); guards.append(verify)
+                self.assertEqual([auth],revoked); self.assertEqual(1,len(guards))
+                with self.assertRaises(module.MetadataReservationHold):guards[0]()
+                self.assertEqual(0,module.global_journal.inspect_global_unit(owner,bound,units[1]).attempt_count)
+                self.assertFalse(list(case.root.rglob('CLAIM-*')))
+            finally:
+                # Restore only this fixture's actual registry after the real
+                # refusal, never extend a deadline or revive the closed graph.
+                if revoked:
+                    with reads._PROJECT_READ_GUARD:reads._PROJECT_READS[metadata]=auth
 
     def test_dedicated_mixed_settled_without_quota_and_pending_charge_both_permanent_fences(self):
         from test_cases.test_req7_global_attempt_journal import original_read_files
