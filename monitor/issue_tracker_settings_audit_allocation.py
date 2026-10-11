@@ -44,20 +44,27 @@ def _hold_settings_originals(writer_token,*,delivered_event_ids=()):
     ordinary readers, allocation and mutation-count paths stay strict.
     """
     owner = local._owner(writer_token)
-    held = []
+    held = []; primary=None
     try:
         def directory(parent,name):
-            descriptor=local._directory(parent,name)
-            held.append((parent,name,descriptor,True,None,None))
+            candidate=journal._identity(os.stat(name,dir_fd=parent,follow_symlinks=False))
+            descriptor=os.open(name,local._flags(directory=True),dir_fd=parent)
+            # The named preimage is only a conditional cleanup candidate.
+            # Admission still requires this actual FD's first checked stat.
+            held.append((parent,name,descriptor,True,candidate,None))
+            info=local._check(descriptor,directory=True)
+            if (info.st_dev,info.st_ino)!=candidate[:2]: raise SettingsAuditHold()
             journal._named(parent,name,descriptor,directory=True)
-            identity=journal._identity(os.fstat(descriptor)); names=set(os.listdir(descriptor))
+            identity=journal._identity(info); names=set(os.listdir(descriptor))
             if journal._identity(os.fstat(descriptor))!=identity: raise SettingsAuditHold()
             held[-1]=(parent,name,descriptor,True,identity,names)
             return descriptor,names
         def file(parent,name):
+            candidate=journal._identity(os.stat(name,dir_fd=parent,follow_symlinks=False))
             descriptor=os.open(name,local._flags(),dir_fd=parent)
-            held.append((parent,name,descriptor,False,None,None))
+            held.append((parent,name,descriptor,False,candidate,None))
             info=local._check(descriptor,directory=False)
+            if (info.st_dev,info.st_ino)!=candidate[:2]: raise SettingsAuditHold()
             journal._named(parent,name,descriptor,directory=False)
             identity=journal._identity(info)
             raw=os.pread(descriptor,16385,0)
@@ -92,12 +99,20 @@ def _hold_settings_originals(writer_token,*,delivered_event_ids=()):
         verify()
         yield (raw_events,current,initialized,raw_outbox),verify
         verify()
+    except BaseException as exc:
+        primary=exc
+        raise
     finally:
-        close_failed=False
-        for _parent,_name,descriptor,_directory,_identity,_image in reversed(held):
-            try: os.close(descriptor)
-            except OSError: close_failed=True
-        if close_failed: raise SettingsAuditHold()
+        close_problem=None
+        for _parent,_name,descriptor,_directory,identity,_image in reversed(held):
+            try: local._close_written_original(descriptor,identity)
+            except BaseException as exc:
+                if close_problem is None: close_problem=exc
+                if primary is None and not isinstance(exc,Exception): primary=exc
+        if close_problem is not None:
+            refusal=SettingsAuditHold()
+            if primary is not None: raise primary from refusal
+            raise refusal from close_problem
 
 
 def _settings(writer_token,*,delivered_event_ids=()):
@@ -396,6 +411,109 @@ def prepare_settings_audit_allocation(writer_token, spreadsheet_token, binding, 
 def inspect_settings_audit_allocation(writer_token, spreadsheet_token, binding, unit):
     """Read only retained original assignments, including across UNKNOWN retries."""
     return _observe(writer_token, spreadsheet_token, binding, unit, create=False)
+
+
+def _native_assignments(unit):
+    """Exact frozen audit images, not caller-supplied event selectors."""
+    rows=[]
+    for audit in local._json(unit.action_preimage)['audits']:
+        raw=(audit['details']+'\n').encode('utf-8'); event=local._json(raw)
+        revision=event['revision']; digest=hashlib.sha256(raw).hexdigest()
+        if (type(revision) is not int or revision<0
+                or audit['event_id']!='settings:%d:%s'%(revision,digest)
+                or audit['recorded_at_utc']!=event['recorded_at']): raise SettingsAuditHold()
+        rows.append({'revision':revision,'event_sha256':digest,'audit':audit})
+    if [row['revision'] for row in rows]!=sorted({row['revision'] for row in rows}): raise SettingsAuditHold()
+    return local._canonical(rows)
+
+
+def _native_header(unit,binding,project_identity,tracker_identity):
+    from monitor import issue_tracker_send_intent as compiled
+    return local._canonical({**compiled._projection(unit),
+        'spreadsheet_id':binding.spreadsheet_id,'allowlist_sha256':binding.allowlist_sha256,
+        'policy_sha256':binding.policy_sha256,'project_identity':list(project_identity),
+        'tracker_identity':list(tracker_identity),'state':'NATIVE_SETTINGS_ALLOCATION'})
+
+
+def _prepare_native_catalog_allocation(prepared,writer,token,binding,unit):
+    """One genuine live C6 creator, BEFORE its catalog append; never cold NEW.
+
+    No GLOBAL/count0 inference, caller paths or capability flags. The opaque
+    preparation owns all original FDs through ENTRY/readback/final verification.
+    Prior allocations retain their events, including UNKNOWN. This is not the
+    native COMPLETE/DELIVERED bridge or an installed sending authority.
+    """
+    from monitor import issue_tracker_nv_reservation as nv
+    record=nv._verify_catalog_preparation(prepared); origin=record['origin']
+    if (origin is None or not origin['sealed'] or origin['writer'] is not writer
+            or record['token'] is not token or record['binding']!=binding
+            or record['unit'] is not unit or record['registered'] or record['indexed'] is not None
+            or record['settings'] is not None): raise SettingsAuditHold()
+    audits=local._json(unit.action_preimage)['audits']
+    if not audits: return
+    owner=local._owner(writer)
+    if owner is not origin['owner']: raise SettingsAuditHold()
+    _images,verify=record['settings_scope'].enter_context(_hold_settings_originals(writer))
+    events=_settings(writer); assigned=set()
+    for older in record['units']:
+        assigned.update(row['event_id'] for row in local._json(older.action_preimage)['audits'])
+    wanted=tuple(row[2] for row in events if row[2]['event_id'] not in assigned)
+    if local._canonical(audits)!=local._canonical(wanted): raise SettingsAuditHold()
+    assignments=_native_assignments(unit)
+    header=_native_header(unit,binding,journal._identity(os.fstat(owner.project_fd))[:2],
+                          journal._identity(os.fstat(owner.root_fd))[:2])
+    parent=record['parent']; name=record['stem']+'.unit-'+unit.unit_id+'.settings-audit'
+    started=name+'-started'
+    if {name,started}&set(os.listdir(parent)): raise SettingsAuditHold()
+    record['settings']={'writer':writer,'owner':owner,'verify':verify,'anchor':None}
+    record['additions'].update((name,started))
+    held=record['current']
+    def write(directory,entry,raw):
+        descriptor,identity=local._write_new(directory,entry,raw,_return_original=True)
+        # Own the ACTUAL creator before any subsequent stat can fail.
+        held.files.append((directory,entry,descriptor,identity,raw))
+        held._image_budget.reserve(identity);held._image_budget.seal(identity,raw)
+        held.verify();verify()
+        return identity
+    witness=_witness(header,assignments)
+    witness_identity=write(parent,started,witness)
+    folder,created=global_journal._create_folder(parent,name,_return_original=True)
+    retained=False
+    try:
+        if journal._identity(os.fstat(folder))!=created or os.listdir(folder): raise SettingsAuditHold()
+        for entry,raw in (('HEADER',header),('ASSIGNMENTS',assignments),('INITIALIZED',_marker(header,assignments))):
+            write(folder,entry,raw)
+        final=journal._identity(os.fstat(folder))
+        held.directories.append((parent,name,folder,final,('ASSIGNMENTS','HEADER','INITIALIZED')));retained=True
+        held.verify();verify();held.sync();nv._verify_catalog_preparation(prepared)
+        originals={entry:{'identity':list(identity),'sha256':hashlib.sha256(raw).hexdigest()}
+            for directory,entry,_fd,identity,raw in held.files if directory==folder}
+        record['settings']['anchor']={'directory_identity':list(final),
+            'witness':{'identity':list(witness_identity),'sha256':hashlib.sha256(witness).hexdigest()},
+            'originals':originals}
+        nv._verify_catalog_preparation(prepared)
+    finally:
+        if not retained: local._close_written_original(folder,created)
+
+
+def _inspect_native_catalog_allocation(parent,name,unit,binding,origin,anchor,held):
+    """Cold read of the catalog's external original anchor, never repair."""
+    folder=held.directory(parent,name)
+    if set(os.listdir(folder))!={'HEADER','ASSIGNMENTS','INITIALIZED'}: raise SettingsAuditHold()
+    images={entry:held.file(folder,entry,_LIMIT) for entry in ('HEADER','ASSIGNMENTS','INITIALIZED')}
+    witness,witness_identity=held.file(parent,name+'-started',_LIMIT)
+    header=_native_header(unit,binding,origin['project_identity'],origin['tracker_identity'])
+    assignments=_native_assignments(unit)
+    expected={'directory_identity':list(journal._identity(os.fstat(folder))),
+        'witness':{'identity':list(witness_identity),'sha256':hashlib.sha256(witness).hexdigest()},
+        'originals':{entry:{'identity':list(info),'sha256':hashlib.sha256(raw).hexdigest()}
+            for entry,(raw,info) in images.items()}}
+    if (local._canonical(anchor)!=local._canonical(expected)
+            or images['HEADER'][0]!=header or images['ASSIGNMENTS'][0]!=assignments
+            or images['INITIALIZED'][0]!=_marker(header,assignments)
+            or witness!=_witness(header,assignments)): raise SettingsAuditHold()
+    held.verify()
+    return expected
 
 
 @dataclass(frozen=True)

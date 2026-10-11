@@ -197,6 +197,8 @@ def _register_native_pending_c6_unit(writer_token, token, binding, unit, prepare
                     nv._catalog_nv_c6_origin_seal(prepared, token, binding, unit)
                     verify(); verify_pair(); verify_records()
             verify()
+            from monitor import issue_tracker_settings_audit_allocation as settings_allocation
+            settings_allocation._prepare_native_catalog_allocation(prepared,writer_token,token,binding,unit)
             register_pending_unit(token, binding, unit, _nv_preparation=prepared)
             with hold_pending_project_c6_units(token, binding) as (rows, verify_projects):
                 if not rows or rows[-1].unit != unit: raise UnitCatalogHold()
@@ -555,16 +557,40 @@ class _Originals:
         self.verify()
 
     def close(self):
+        problem = None
+        primary = None
         for _parent, _name, fd, identity, _raw in reversed(self.files):
-            _close_original(fd, identity)
+            try:
+                _close_original(fd, identity)
+            except BaseException as exc:
+                if problem is None:
+                    problem = exc
+                if not isinstance(exc, Exception) and primary is None:
+                    primary = exc
         for _parent, _name, fd, identity, _names in reversed(self.directories):
-            _close_original(fd, identity)
+            try:
+                _close_original(fd, identity)
+            except BaseException as exc:
+                if problem is None:
+                    problem = exc
+                if not isinstance(exc, Exception) and primary is None:
+                    primary = exc
+        # Each slot still closes only its captured original inode. An interrupt
+        # in one slot must not bypass the remaining owned originals, nor be
+        # replaced by an ordinary cleanup error discovered later.
+        if primary is not None:
+            if problem is not primary:
+                raise primary from problem
+            raise primary
+        if problem is not None:
+            raise problem
 
 
-def _header(unit, *, nv_original=None, project_origin=None):
+def _header(unit, *, nv_original=None, project_origin=None, settings_allocation=None):
     result = {**compiled._projection(unit), 'state': 'PENDING_NOT_ATTEMPTED'}
     if nv_original is not None: result['nv_original'] = nv_original
     if project_origin is not None: result['project_origin'] = project_origin
+    if settings_allocation is not None: result['settings_allocation']=settings_allocation
     return result
 
 
@@ -623,6 +649,8 @@ def _inspect(token, binding, held):
         saved_header = local._json(originals['HEADER'][0])
         nv_original = saved_header.get('nv_original')
         project_origin = saved_header.get('project_origin')
+        settings_allocation=saved_header.get('settings_allocation')
+        origin_body=None
         if project_origin is not None:
             # Finished real writer identities, anchored by this unit's catalog
             # INITIALIZED->ENTRY chain. Lost-all cannot fall back to a catalog
@@ -634,6 +662,7 @@ def _inspect(token, binding, held):
                 item: {'identity': list(image[1]), 'sha256': _digest(image[0])} for item, image in images.items()}}
             if local._canonical(project_origin) != local._canonical(expected_origin): raise UnitCatalogHold()
             project_origin = expected_origin
+            origin_body=local._json(images['ORIGIN'][0])
         nv_name = owner.lock_name[:-5] + '.unit-' + unit_id + '.nv'
         if nv_original is None and {nv_name, nv_name + '-started'} & root_names:
             raise UnitCatalogHold()
@@ -647,7 +676,16 @@ def _inspect(token, binding, held):
             if local._canonical(nv_original) != local._canonical(expected_nv):
                 raise UnitCatalogHold()
             nv_original = expected_nv
-        if (unit.unit_id != unit_id or originals['HEADER'][0] != local._canonical(_header(unit, nv_original=nv_original, project_origin=project_origin))
+        audits=local._json(unit.action_preimage)['audits']
+        allocation_name=owner.lock_name[:-5]+'.unit-'+unit_id+'.settings-audit'
+        if settings_allocation is not None:
+            if not audits or origin_body is None or nv_original is None: raise UnitCatalogHold()
+            from monitor import issue_tracker_settings_audit_allocation as allocation
+            settings_allocation=allocation._inspect_native_catalog_allocation(parent,allocation_name,unit,binding,
+                origin_body,settings_allocation,held)
+        elif ((audits and project_origin is not None and nv_original is not None)
+                or {allocation_name,allocation_name+'-started'}&root_names): raise UnitCatalogHold()
+        if (unit.unit_id != unit_id or originals['HEADER'][0] != local._canonical(_header(unit, nv_original=nv_original, project_origin=project_origin,settings_allocation=settings_allocation))
                 or local._json(unit.action_preimage)['identity']['spreadsheet_id'] != binding.spreadsheet_id):
             raise UnitCatalogHold()
         marker_raw, marker_identity = originals['INITIALIZED']
@@ -760,12 +798,17 @@ def register_pending_unit(token, binding, unit, *, _nv_preparation=None):
         nv_additions = frozenset()
         nv_original = None
         project_origin = None
+        settings_allocation=None
         if _nv_preparation is not None:
             from monitor import issue_tracker_nv_reservation as nv
             nv_additions = nv._catalog_nv_append_guard(_nv_preparation, token, binding, unit)
             nv_original = nv._catalog_nv_original_anchor(_nv_preparation, token, binding, unit)
             project_origin = nv._catalog_nv_c6_origin_anchor(_nv_preparation, token, binding, unit)
-        header_raw = local._canonical(_header(unit, nv_original=nv_original, project_origin=project_origin))
+            record=nv._verify_catalog_preparation(_nv_preparation)
+            if record['settings'] is not None: settings_allocation=record['settings']['anchor']
+            if project_origin is not None and local._json(unit.action_preimage)['audits'] and settings_allocation is None:
+                raise UnitCatalogHold()
+        header_raw = local._canonical(_header(unit, nv_original=nv_original, project_origin=project_origin,settings_allocation=settings_allocation))
         if local._json(unit.action_preimage)['identity']['spreadsheet_id'] != binding.spreadsheet_id:
             raise UnitCatalogHold()
         names = set(os.listdir(parent))

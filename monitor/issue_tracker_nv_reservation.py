@@ -394,7 +394,7 @@ def _pin_catalog_prefix(token, binding, identity, held, *, new_allocation, _proj
         allowed = {stem + '.lock', stem + '.enrollment', stem + '.units', stem + '.units-started',
                    *(stem + '.units-position-%020d' % index for index in range(1, len(units) + 1))}
         families = ('journal', 'journal-started', 'history', 'business', 'metadata', 'nv', 'nv-started',
-                    'dispatch', 'completion', 'completion-started', 'project-origin')
+                    'dispatch', 'completion', 'completion-started', 'project-origin', 'settings-audit', 'settings-audit-started')
         allowed.update(stem + '.unit-' + unit.unit_id + '.' + family for unit in units for family in families)
         if names - allowed:
             raise NvReservationHold()
@@ -521,7 +521,7 @@ def hold_catalog_nv_preparation(token, binding, identity, eth_plan, eth_response
     from monitor import issue_tracker_unit_catalog as catalog
     budget = catalog._OriginalImageBudget()
     old = catalog._Originals(_image_budget=budget); current = catalog._Originals(_image_budget=budget)
-    prepared = None; active_budget = None; failed = False
+    prepared = None; active_budget = None; failed = False; primary=None; cleanup_problem=None
     project_proofs = {'scope': ExitStack(), 'verify': lambda: None}
     try:
         parent, _legacy, base, keys, ids = _inputs(token, binding, identity, generation_id, publish_id, sheet, requested_keys)
@@ -595,32 +595,45 @@ def hold_catalog_nv_preparation(token, binding, identity, eth_plan, eth_response
         record = {'owner': owner, 'token': token, 'binding': binding, 'identity': identity, 'old': old,
                   'current': current, 'catalog': catalog_fd, 'units': units, 'stem': stem, 'parent': parent,
                   'additions': {name, started}, 'appended': None, 'registered': False, 'unit': None, 'indexed': None,
-                  'budget': budget, 'origin': None, 'failed': False, 'verify_prior_c6': project_proofs['verify']}
+                  'budget': budget, 'origin': None, 'settings':None,'settings_scope':ExitStack(),
+                  'failed': False, 'verify_prior_c6': project_proofs['verify']}
         prepared = _CatalogNvPreparation(seen); _ACTIVE_CATALOG_PREPARATIONS[prepared] = record
         _verify_catalog_preparation(prepared)
         yield prepared
         _verify_catalog_preparation(prepared)
         if not record['registered']:
             raise NvReservationHold()
-    except Exception:
-        failed = True
+    except BaseException as exc:
+        if isinstance(exc,Exception): failed = True
+        else: primary=exc
     finally:
+        closes=[]
         if prepared is not None:
             retained = _ACTIVE_CATALOG_PREPARATIONS.pop(prepared, None)
+            if retained is not None:
+                closes.append(retained['settings_scope'].close)
             if retained is not None and retained['indexed'] is not None:
-                retained['indexed'].close()
+                closes.append(retained['indexed'].close)
             if retained is not None and retained['origin'] is not None:
                 origin = retained['origin']
-                origin['held'].close()
+                closes.append(origin['held'].close)
                 if origin['folder'] is not None:
-                    catalog._close_original(origin['folder'], origin['identity'])
+                    closes.append(lambda:catalog._close_original(origin['folder'],origin['identity']))
         if active_budget is not None and catalog._IMAGE_BUDGETS.get(token) is active_budget:
             catalog._IMAGE_BUDGETS.pop(token)
-        try:
-            project_proofs['scope'].close()
-        except Exception:
-            failed = True
-        current.close(); old.close()
+        closes.extend((project_proofs['scope'].close,current.close,old.close))
+        # Every owned graph is finalized even when settings' exit verification
+        # refuses or interrupts. Revoke registries first; never leak a live
+        # preparation/budget because the first finalizer raised.
+        for close in closes:
+            try:close()
+            except BaseException as exc:
+                failed=True
+                if cleanup_problem is None:cleanup_problem=exc
+                if not isinstance(exc,Exception) and primary is None:primary=exc
+    if primary is not None:
+        if cleanup_problem is not None and cleanup_problem is not primary:raise primary from cleanup_problem
+        raise primary
     if failed:
         raise NvReservationHold() from None
 
@@ -639,6 +652,10 @@ def _verify_catalog_preparation(prepared):
     if record['indexed'] is not None:
         record['indexed'].verify()
     origin = record['origin']
+    settings=record['settings']
+    if settings is not None:
+        if local._owner(settings['writer']) is not settings['owner']: raise NvReservationHold()
+        settings['verify']()
     if origin is not None:
         if local._owner(origin['writer']) is not origin['owner']:
             raise NvReservationHold()

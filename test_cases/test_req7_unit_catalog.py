@@ -59,6 +59,35 @@ def load_component(name):
 
 
 class CatalogOriginalFirstStatCleanupTests(unittest.TestCase):
+    def test_graph_finalizer_interrupt_closes_all_other_owned_originals(self):
+        module=load(reset_dependencies=False)
+        with tempfile.TemporaryDirectory(prefix='req7-original-graph-interrupt-') as temporary:
+            root=Path(temporary);(root/'folder').mkdir(mode=0o700)
+            for name in ('first','second'):
+                (root/name).write_bytes((name+' original\n').encode());(root/name).chmod(0o600)
+            parent=os.open(root,os.O_RDONLY|os.O_DIRECTORY);held=module._Originals();owned=[]
+            native_close=module._close_original;primary=KeyboardInterrupt('actual original graph finalizer')
+            reached=[]
+            def close(descriptor,identity):
+                native_close(descriptor,identity)
+                if not reached:reached.append(descriptor);raise primary
+            try:
+                owned.append(held.directory(parent,'folder'))
+                for name in ('first','second'):
+                    held.file(parent,name,64);owned.append(held.files[-1][2])
+                with mock.patch.object(module,'_close_original',side_effect=close):
+                    with self.assertRaises(KeyboardInterrupt) as caught:held.close()
+                self.assertIs(primary,caught.exception);self.assertEqual(1,len(reached))
+                for descriptor in owned:
+                    closed=False
+                    try:os.fstat(descriptor)
+                    except OSError as exc:closed=exc.errno==9
+                    self.assertTrue(closed,'one interrupt bypassed another owned graph original')
+            finally:
+                for descriptor in owned+[parent]:
+                    try:os.close(descriptor)
+                    except OSError:pass
+
     def exercise(self, *, directory):
         module = load(reset_dependencies=False)
         with tempfile.TemporaryDirectory(prefix='req7-original-first-stat-') as temporary:

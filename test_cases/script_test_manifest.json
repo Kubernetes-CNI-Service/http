@@ -3509,6 +3509,11 @@
       "tests": ["test_cases.test_req7_send_unit", "test_cases.test_req7_nv_reservation", "test_cases.test_issue_tracker_stage_l_consumer_workflow", "test_cases.test_req7_history_preread_journal", "test_cases.test_req7_metadata_reservation", "test_cases.test_req7_history_read_launcher", "test_cases.test_req7_mutation_launcher"]
     },
     {
+      "id": "req7_native_c25_creator_catalog_outside_anchor",
+      "members": ["monitor/issue_tracker_settings_audit_allocation.py", "monitor/issue_tracker_nv_reservation.py", "monitor/issue_tracker_unit_catalog.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_k_store.py", "monitor/issue_tracker_k_chain.py", "monitor/issue_tracker_send_unit.py", "monitor/issue_tracker_send_intent.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_remote_history_match.py"],
+      "tests": ["test_cases.test_req7_nv_reservation", "test_cases.test_req7_settings_audit_allocation"]
+    },
+    {
       "id": "req7_native_both_cabling_durable_nv_cold_process",
       "members": ["monitor/issue_tracker_nv_reservation.py", "monitor/issue_tracker_unit_catalog.py", "monitor/issue_tracker_online_nv_ids.py", "monitor/issue_tracker_enrollment_journal.py", "monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_attempt_journal.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_sheets_read_decode.py", "monitor/issue_tracker_sheets_read_plan.py", "monitor/issue_tracker_tls_inputs.py", "monitor/issue_tracker_send_unit.py", "monitor/issue_tracker_send_intent.py", "monitor/issue_tracker_online_cells.py"],
       "tests": ["test_cases.test_req7_nv_reservation"]

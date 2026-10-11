@@ -60,22 +60,99 @@ def allocation_image_barrier(case, fd):
 
 
 class Req7SettingsAuditAllocationTests(unittest.TestCase):
+    def test_settings_scope_cleanup_preserves_foreign_reused_fd_and_other_originals_close(self):
+        native_open=os.open; originals=[]; reused=[]
+        foreign=self.root/'held-settings-foreign'; foreign.write_bytes(b'foreign still open\n')
+        foreign.chmod(0o600)
+        def capture(name,*args,**options):
+            descriptor=native_open(name,*args,**options)
+            if name=='0.json': originals.append(descriptor)
+            return descriptor
+        try:
+            with self.owners() as (writer,_sheet):
+                with mock.patch.object(self.module.os,'open',side_effect=capture):
+                    with self.assertRaises((self.module.SettingsAuditHold,local.LocalCommitHold,
+                                            self.module.journal.AttemptJournalHold)):
+                        with self.module._hold_settings_originals(writer) as (_images,verify):
+                            verify(); self.assertEqual(2,len(originals))
+                            descriptor=originals[0]; os.close(descriptor)
+                            other=native_open(foreign,os.O_RDONLY)
+                            if other!=descriptor: os.dup2(other,descriptor); os.close(other)
+                            reused.append(descriptor)
+                self.assertEqual(b'foreign still open\n',os.pread(reused[0],128,0))
+                self.assertEqual(foreign.stat().st_ino,os.fstat(reused[0]).st_ino)
+                with self.assertRaises(OSError): os.fstat(originals[1])
+        finally:
+            for descriptor in reused:
+                try: os.close(descriptor)
+                except OSError: pass
+
+    def test_settings_scope_cleanup_preserves_primary_interrupt_and_foreign_fd(self):
+        native_open=os.open; originals=[]; reused=[]
+        foreign=self.root/'held-settings-interrupt-foreign'; foreign.write_bytes(b'foreign on interrupt\n')
+        foreign.chmod(0o600); primary=KeyboardInterrupt('original settings interruption')
+        def capture(name,*args,**options):
+            descriptor=native_open(name,*args,**options)
+            if name=='0.json': originals.append(descriptor)
+            return descriptor
+        try:
+            with self.owners() as (writer,_sheet):
+                with mock.patch.object(self.module.os,'open',side_effect=capture):
+                    with self.assertRaises(KeyboardInterrupt) as caught:
+                        with self.module._hold_settings_originals(writer):
+                            self.assertEqual(2,len(originals))
+                            descriptor=originals[0]; os.close(descriptor)
+                            other=native_open(foreign,os.O_RDONLY)
+                            if other!=descriptor: os.dup2(other,descriptor); os.close(other)
+                            reused.append(descriptor)
+                            raise primary
+                self.assertIs(primary,caught.exception)
+                self.assertEqual(b'foreign on interrupt\n',os.pread(reused[0],128,0))
+                self.assertIsInstance(caught.exception.__cause__,self.module.SettingsAuditHold)
+                with self.assertRaises(OSError): os.fstat(originals[1])
+        finally:
+            for descriptor in reused:
+                try: os.close(descriptor)
+                except OSError: pass
+
+    def test_settings_scope_first_file_check_failure_closes_its_owned_fd(self):
+        native_open=os.open; native_check=local._check; originals=[]
+        def capture(name,*args,**options):
+            descriptor=native_open(name,*args,**options)
+            if name=='0.json': originals.append(descriptor)
+            return descriptor
+        def check(descriptor,**options):
+            if descriptor in originals: raise OSError('fixture first file check refused')
+            return native_check(descriptor,**options)
+        with self.owners() as (writer,_sheet):
+            with mock.patch.object(self.module.os,'open',side_effect=capture),mock.patch.object(local,'_check',side_effect=check):
+                with self.assertRaises(OSError):
+                    with self.module._hold_settings_originals(writer): self.fail('unproved scope yielded')
+            self.assertEqual(1,len(originals))
+            with self.assertRaises(OSError): os.fstat(originals[0])
+
     def test_creator_finalizer_interrupt_still_closes_the_actual_allocation_folder(self):
         native_folder=self.global_journal._create_folder
         native_cleanup=local._close_written_original
-        folders=[]; reached=[]; primary=KeyboardInterrupt('creator finalizer interrupted')
+        native_write=local._write_new
+        folders=[]; reached=[]; creators=[]; primary=KeyboardInterrupt('creator finalizer interrupted')
         def folder(parent,name):
             descriptor=native_folder(parent,name)
             if name=='settings-audit-allocation': folders.append(descriptor)
             return descriptor
         def cleanup(descriptor,identity):
             native_cleanup(descriptor,identity)
-            if not reached:
+            if identity[:2] in creators and not reached:
                 reached.append(identity)
                 raise primary
+        def writing(parent,name,raw,**options):
+            result=native_write(parent,name,raw,**options)
+            if name in ('SETTINGS-AUDIT-ALLOCATED','HEADER','ASSIGNMENTS','INITIALIZED') and options.get('_return_original'):
+                creators.append(result[1][:2])
+            return result
         with self.owners() as (writer,sheet):
             value=self.unit(); self.global_journal.prepare_global_unit(sheet,binding(),value)
-            with mock.patch.object(self.global_journal,'_create_folder',side_effect=folder),mock.patch.object(local,'_close_written_original',side_effect=cleanup):
+            with mock.patch.object(self.global_journal,'_create_folder',side_effect=folder),mock.patch.object(local,'_close_written_original',side_effect=cleanup),mock.patch.object(local,'_write_new',side_effect=writing):
                 with self.assertRaises(KeyboardInterrupt) as caught:
                     self.module.prepare_settings_audit_allocation(writer,sheet,binding(),value)
             self.assertIs(primary,caught.exception)

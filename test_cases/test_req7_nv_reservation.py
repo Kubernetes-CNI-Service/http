@@ -678,7 +678,7 @@ class Req7CatalogNvPreparationTests(unittest.TestCase):
                 for path in self.state.rglob('*') if path.is_file()}
 
     @contextmanager
-    def native_c6_origin_fixture(self):
+    def native_c6_origin_fixture(self, *, settings_audit=None):
         module = self.api()
         from test_cases.test_issue_tracker_whitelist_workbook import literal_xlsx
         project = self.root / 'native-c6-project'; project.mkdir(mode=0o700)
@@ -688,6 +688,11 @@ class Req7CatalogNvPreparationTests(unittest.TestCase):
         with local.writer_owner(project, publication) as writer, scoped_fixture(self.root, self.owner), self.owner.spreadsheet_owner(binding()) as token:
             enrolled = self.initialize(token)
             args = cabling_inputs(enrolled.nonces)
+            if settings_audit is not None:
+                from monitor import issue_tracker_k_store as settings
+                settings.initialize_local_k_store(project/'.tracker',token=writer,
+                    initialized_at='2026-10-08T10:00:00Z',acquisition_id='first-use')
+                args['audits']=(settings_audit,)
             generation = local.begin_generation(writer, args['manifest'])
             local.record_intent(writer, generation, literal_xlsx(), kind='xlsx')
             receipt = local.commit(writer, generation)
@@ -695,6 +700,178 @@ class Req7CatalogNvPreparationTests(unittest.TestCase):
             unit = self.catalog.composer.freeze_send_unit(**args)
             self.kw.update(generation_id=generation.generation_id, publish_id=receipt.published_sha256)
             yield module, writer, token, unit
+
+    def native_settings_oracle(self):
+        canonical=lambda value:(json.dumps(value,sort_keys=True,separators=(',',':'))+'\n').encode()
+        payload={'new_k':3,'actor':'system:default','expected_revision':None,'request_id':'first-use'}
+        event=canonical({'schema_version':1,'revision':0,'type':'init','old_k':None,
+            'new_k':3,'actor':'system:default','recorded_at':'2026-10-08T10:00:00Z',
+            'request_id':'first-use','payload_sha256':hashlib.sha256(canonical(payload)).hexdigest(),
+            'predecessor_sha256':None})
+        return {'event_id':'settings:0:'+hashlib.sha256(event).hexdigest(),
+            'recorded_at_utc':'2026-10-08T10:00:00Z','details':event.decode().rstrip('\n')}
+
+    def test_native_settings_scope_refusal_never_bypasses_existing_preparation_cleanup(self):
+        failure=None;descriptors=[]
+        with self.native_c6_origin_fixture(settings_audit=self.native_settings_oracle()) as (module,writer,token,unit):
+            try:
+                with self.preparation(token) as prepared:
+                    self.catalog.register_pending_c6_unit(writer,token,binding(),unit,_nv_preparation=prepared)
+                    record=module._ACTIVE_CATALOG_PREPARATIONS[prepared]
+                    descriptors=[row[2] for row in record['current'].files]
+                    event=module.local._owner(writer).project/'.tracker/settings/events/0.json'
+                    raw=event.read_bytes();event.rename(event.parent/'preserved-original-event')
+                    event.write_bytes(raw);event.chmod(0o600)
+            except Exception as exc:failure=exc
+            self.assertNotIn(token,self.catalog._IMAGE_BUDGETS)
+            self.assertEqual({},module._ACTIVE_CATALOG_PREPARATIONS)
+            self.assertTrue(descriptors)
+            for descriptor in descriptors:
+                with self.assertRaises(OSError):os.fstat(descriptor)
+            self.assertIsInstance(failure,module.NvReservationHold)
+
+    def test_native_creator_graph_interrupt_still_closes_all_owned_images(self):
+        primary=KeyboardInterrupt('actual native creator graph interrupted');reached=[];created=[];target=[]
+        native_close=None
+        def close(descriptor,identity):
+            native_close(descriptor,identity)
+            if target and descriptor==target[0] and not reached:reached.append(descriptor);raise primary
+        with self.native_c6_origin_fixture(settings_audit=self.native_settings_oracle()) as (module,writer,token,unit):
+            native_close=self.catalog._close_original
+            with mock.patch.object(self.catalog,'_close_original',side_effect=close):
+                with self.assertRaises(KeyboardInterrupt) as caught:
+                    with self.preparation(token) as prepared:
+                        self.catalog.register_pending_c6_unit(writer,token,binding(),unit,_nv_preparation=prepared)
+                        record=module._ACTIVE_CATALOG_PREPARATIONS[prepared]
+                        created=[row[2] for row in record['current'].files]
+                        target[:]=[record['current'].files[-1][2]]
+            self.assertIs(primary,caught.exception);self.assertEqual(target,reached)
+            self.assertNotIn(token,self.catalog._IMAGE_BUDGETS)
+            self.assertEqual({},module._ACTIVE_CATALOG_PREPARATIONS)
+            self.assertTrue(created)
+            for descriptor in created:
+                closed=False
+                try:os.fstat(descriptor)
+                except OSError as exc:closed=exc.errno==9
+                self.assertTrue(closed,'native graph interrupt leaked another original creator')
+            self.assertFalse(any(path.name.endswith('.journal') for path in self.state.iterdir()))
+
+    def test_native_settings_scope_foreign_fd_refusal_revokes_all_preparation_authority(self):
+        native_open=os.open; settings_descriptors=[]; recycled=[]; failure=None; created=[]
+        foreign=self.root/'native-settings-foreign';foreign.write_bytes(b'foreign not closed by preparation\n')
+        foreign.chmod(0o600)
+        def capture(name,*args,**options):
+            descriptor=native_open(name,*args,**options)
+            if name=='0.json':settings_descriptors.append(descriptor)
+            return descriptor
+        try:
+            with self.native_c6_origin_fixture(settings_audit=self.native_settings_oracle()) as (module,writer,token,unit):
+                try:
+                    with self.preparation(token) as prepared,mock.patch.object(module.os,'open',side_effect=capture):
+                        self.catalog.register_pending_c6_unit(writer,token,binding(),unit,_nv_preparation=prepared)
+                        record=module._ACTIVE_CATALOG_PREPARATIONS[prepared]
+                        created=[row[2] for row in record['current'].files]
+                        self.assertGreaterEqual(len(settings_descriptors),2)
+                        descriptor=settings_descriptors[0]
+                        self.assertEqual((self.native_settings_oracle()['details']+'\n').encode(),os.pread(descriptor,16384,0))
+                        os.close(descriptor);other=native_open(foreign,os.O_RDONLY)
+                        if other!=descriptor:os.dup2(other,descriptor);os.close(other)
+                        recycled.append(descriptor)
+                except Exception as exc:failure=exc
+                self.assertIsInstance(failure,module.NvReservationHold)
+                self.assertNotIn(token,self.catalog._IMAGE_BUDGETS)
+                self.assertEqual({},module._ACTIVE_CATALOG_PREPARATIONS)
+                self.assertEqual(b'foreign not closed by preparation\n',os.pread(recycled[0],128,0))
+                self.assertEqual(foreign.stat().st_ino,os.fstat(recycled[0]).st_ino)
+                self.assertTrue(created)
+                for descriptor in created:
+                    with self.assertRaises(OSError):os.fstat(descriptor)
+                self.assertFalse(any(path.name.endswith('.journal') for path in self.state.iterdir()))
+        finally:
+            for descriptor in recycled:
+                try:os.close(descriptor)
+                except OSError:pass
+
+    def test_native_allocation_creator_handoff_replacement_refuses_before_catalog_entry(self):
+        reached=[];failure=None
+        with self.native_c6_origin_fixture(settings_audit=self.native_settings_oracle()) as (module,writer,token,unit):
+            native=module.local._write_new
+            def writing(parent,name,raw,**options):
+                result=native(parent,name,raw,**options)
+                if name=='ASSIGNMENTS' and not reached:
+                    original=os.stat(name,dir_fd=parent,follow_symlinks=False)
+                    os.rename(name,'preserved-original-assignment',src_dir_fd=parent,dst_dir_fd=parent)
+                    replacement=os.open(name,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600,dir_fd=parent)
+                    try:os.write(replacement,raw)
+                    finally:os.close(replacement)
+                    reached.append((original.st_ino,os.stat(name,dir_fd=parent).st_ino))
+                return result
+            try:
+                with self.preparation(token) as prepared,mock.patch.object(module.local,'_write_new',side_effect=writing):
+                    self.catalog.register_pending_c6_unit(writer,token,binding(),unit,_nv_preparation=prepared)
+            except Exception as exc:failure=exc
+            self.assertEqual(1,len(reached));self.assertNotEqual(*reached[0])
+            self.assertIsInstance(failure,module.NvReservationHold)
+            stem=hashlib.sha256(TARGET.encode()).hexdigest()
+            self.assertFalse((self.state/(stem+'.units')).exists())
+            self.assertFalse(any(path.name.endswith('.journal') for path in self.state.iterdir()))
+            self.assertNotIn(token,self.catalog._IMAGE_BUDGETS)
+
+    def test_native_actual_c6_audit_allocation_precedes_unique_catalog_entry_and_cold_reads(self):
+        audit=self.native_settings_oracle(); marks=[]
+        with self.native_c6_origin_fixture(settings_audit=audit) as (module,writer,token,unit):
+            parent=module.ownership._validated_owner(token,binding()).directories[-1][0]
+            stem=hashlib.sha256(TARGET.encode()).hexdigest()+'.unit-'+unit.unit_id+'.settings-audit'
+            native_append=self.catalog.register_pending_unit
+            def append(*args,**kwargs):
+                if stem in os.listdir(parent):
+                    descriptor=os.open(stem,os.O_RDONLY|os.O_DIRECTORY,dir_fd=parent)
+                    try: present=set(os.listdir(descriptor))
+                    finally: os.close(descriptor)
+                    marks.append(('allocation-before-entry',present))
+                else: marks.append(('allocation-missing-before-entry',set()))
+                return native_append(*args,**kwargs)
+            with self.preparation(token) as prepared,mock.patch.object(self.catalog,'register_pending_unit',side_effect=append):
+                self.catalog.register_pending_c6_unit(writer,token,binding(),unit,_nv_preparation=prepared)
+            self.assertEqual([('allocation-before-entry',{'HEADER','ASSIGNMENTS','INITIALIZED'})],marks)
+            marks[:]=['allocation-before-entry'];marks.append('registered')
+            folder=self.state/stem
+            assignments=json.loads((folder/'ASSIGNMENTS').read_bytes())
+            self.assertEqual([{'revision':0,'event_sha256':audit['event_id'].split(':')[2],'audit':audit}],assignments)
+            before=self.files()
+            with self.catalog.hold_pending_project_c6_units(token,binding()) as (rows,verify):
+                self.assertEqual((unit,),tuple(row.unit for row in rows));verify()
+            self.assertEqual(before,self.files());marks.append('cold-originals')
+            names=os.listdir(parent)
+            self.assertFalse(any(name.endswith('.journal') or name.endswith('.journal-started') for name in names))
+        self.assertEqual(['allocation-before-entry','registered','cold-originals'],marks)
+
+    def test_native_catalog_audit_outside_anchor_refuses_lost_all_and_same_byte_replacement(self):
+        for fault in ('lost-all','same-byte-assignments'):
+            with self.subTest(fault=fault):
+                # Each case gets a complete independent real C6/project/owner.
+                with tempfile.TemporaryDirectory(prefix='req7-native-audit-anchor-') as directory:
+                    old_root=self.root;old_state=self.state
+                    self.root=Path(directory).resolve();self.state=self.root/'var/lib/http-ztp-container/issue-tracker'
+                    self.state.mkdir(parents=True,mode=0o700)
+                    try:
+                        with self.native_c6_origin_fixture(settings_audit=self.native_settings_oracle()) as (module,writer,token,unit):
+                            with self.preparation(token) as prepared:
+                                self.catalog.register_pending_c6_unit(writer,token,binding(),unit,_nv_preparation=prepared)
+                            stem=hashlib.sha256(TARGET.encode()).hexdigest()+'.unit-'+unit.unit_id+'.settings-audit'
+                            folder=self.state/stem;self.assertTrue(folder.is_dir())
+                            if fault=='lost-all':
+                                # Only test-owned temp objects; retain moved originals.
+                                folder.rename(self.root/'preserved-allocation')
+                                (self.state/(stem+'-started')).rename(self.root/'preserved-allocation-started')
+                            else:
+                                target=folder/'ASSIGNMENTS';raw=target.read_bytes()
+                                target.rename(self.root/'preserved-assignment');target.write_bytes(raw);target.chmod(0o600)
+                            before=self.files()
+                            with self.assertRaises(self.catalog.UnitCatalogHold):
+                                with self.catalog.hold_pending_units(token,binding()):pass
+                            self.assertEqual(before,self.files())
+                    finally:self.root=old_root;self.state=old_state
 
     def test_native_c6_origin_registration_appends_once_and_cold_reads_exact_originals(self):
         import inspect

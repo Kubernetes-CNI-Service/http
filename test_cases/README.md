@@ -986,6 +986,21 @@ FD 槽复用为 foreign inode 时只拒绝、不误关；creator 清理中断仍
 原两次文件/父目录屏障、八次 pre-marker 与十三次总屏障合同保持不变，默认
 `_write_new` 调用仍保留原行为；私有 `(FD, fullstat)` 只供本地原件交接，
 不是 cold 首用、多单元 catalog 外锚、COMPLETE、DELIVERED 或发送许可。
+真实 native C6 创建链另在原 origin seal 后、唯一 catalog ENTRY 前，从实际 LIVE
+项目 settings 原件分配本次 ALL 尚未分配的审计；目的地由实际 spreadsheet owner
+与 unit 派生，不接受调用方路径、队列或 newness 声明。四个实际 creator FD/fullstat
+连续进入同一 preparation 原图与共享 image budget；catalog HEADER→INITIALIZED→ENTRY
+绑定外部 allocation 目录、启动见证和三个原文件的完整身份/SHA。冷读必须核实际
+全部原件与冻结 revision/event/hash/时间/内容，lost-all 或同字节新 inode 不回退首用。
+无 audits 的旧 native 分支不创建 settings 文件或 scope。settings scope 收尾只关闭
+仍属原 dev/inode 的 FD，foreign 槽保留并拒绝成功；首文件检查失败关闭已确证自有
+槽，原操作者中断保留同一异常对象。一个 finalizer 拒绝不能跳过 preparation/budget
+撤销及其他自有图像清理。
+同一原件图内任一关闭抛出中断时，仍逐槽尝试其余原文件与目录的条件关闭，
+随后原样抛出中断；foreign 槽不误关，普通清理错误不能覆盖操作者中断。
+本地 direct 与真实 C6→NV→allocation→catalog→冷读覆盖这些边界；这是创建/发现接线，
+不是 GLOBAL/count/retained 接收、第二单元 DELIVERED、
+投影归档、默认 worker hook 或 REQ7 整体/full/check 证明，这些仍须分别实证闭合。
 实际 COMPLETE→C25 桥另在双 owner 下持有原分配、settings、全局 journal、
 enrollment、History preread 与全部完成 proof 原件，重放完整语义并完成屏障后，
 先独占写目录外 `.tracker/SETTINGS-AUDIT-DELIVERY-STARTED` 固定见证，
