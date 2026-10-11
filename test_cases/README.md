@@ -2602,10 +2602,35 @@ or genuine consumer/issuer implementations. This fixture borrows its already
 held actual project/spreadsheet owners, so it is not first lock acquisition or
 actual owner revocation evidence; the existing runtime workflows retain those
 contracts. No legacy preparation mode or expectation is removed.
-Historical PROJECT completeness remains unproved, so this private input edge
-refuses before FIRST/R2 COUNT/CLAIM/launcher and does not authorize sending.
+At this earlier business-image-only stage, PROJECT completeness was unproved;
+the private input edge refused before FIRST/R2 COUNT/CLAIM/launcher and did
+not authorize sending.
 Whole REQ7, exact current full/check and all REAL_ENV remain open; no scenario
 was omitted or merged.
+
+Default G1 quota-original reception now also uses the confirmed dedicated-from-
+creation / one historical Cloud project deployment precondition. That owner
+confirmation is not API evidence, runtime provenance or new Cloud authority.
+The actual fixed consumer enters the genuine dedicated quota holder while its
+strict current source/read scopes are live, before business image overlap.
+Five original quota descriptors per real ETH/IB C6 fixture (one directory and
+four files) remain unchanged across every strict input finalizer and business
+image cleanup. The quota-only verifier is never a closed-reader callback;
+actual issued reads are rechecked after its own finalizer. Legacy quotas with
+no saved project origin retain read-only HOLD; no HEADER is backfilled from
+today's credential. A direct boundary test separately requires final-close
+read revocation to HOLD and preserves the exact operator interruption.
+The native workflow creates new genuine project-bound quota originals through
+actual fixed OAuth/native TLS, not by editing an old HEADER. Its independent
+post-sanitizer assertions require both original five-FD graphs, post-strict
+fullstat/byte continuity, final EBADF and every old nine-business-FD, eight-read,
+unchanged-cycle/catalog and zero COUNT/CLAIM/send expectation. Initial RED
+reached this missing-overlap assertion after fixture-only CA/JSON wire fixes;
+those earlier fixture failures are not claimed as requirement RED. Dedicated
+capacity and STOP_CAPACITY remain accounting observations, never permission
+to send. Default NEW/FIRST/R2, ALL/FIFO/cadence, current full/check, REAL_ENV and
+whole REQ7 closure remain separate and unproved. No existing automation was
+removed, skipped, weakened or given a longer deadline.
 
 Native C25 audit COUNT/CLAIM original reception: the public allocation reader
 and counted holder interpret the actual catalog-anchored allocation and ALL

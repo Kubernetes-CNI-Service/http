@@ -116,6 +116,122 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         self.assertEqual(['ETH Cabling:actual-default-worker:nine-original-images:hold',
             'IB Cabling:actual-default-worker:nine-original-images:hold'], observed)
 
+    def test_actual_default_worker_dedicated_quota_originals_outlive_strict_input_finalizers(self):
+        from test_cases import test_req7_spreadsheet_owner as owner_fixture
+        from test_cases import test_req7_metadata_reservation as quota_fixture
+        from test_cases.test_req7_sheets_read_decode import identity_response
+        from monitor import issue_tracker_local_commit as local
+        real_fixture=owner_fixture.scoped_fixture;real_load=quota_fixture.load
+        roots={};created=[];received=[];post_strict=[];closed=[];graphs=[]
+        with ExitStack() as patches:
+            @contextmanager
+            def actual_fixture(root,module):
+                if module.__name__=='monitor.issue_tracker_spreadsheet_owner':roots[id(module)]=root
+                with real_fixture(root,module):yield
+            def loaded_quota():
+                module=real_load();actual_overlap=module._hold_owned_project_dedicated_quota_images
+                # This NEW fixture creates genuine authenticated quota originals
+                # from fresh native OAuth/TLS reads. Never edit a legacy HEADER,
+                # derive expectations from it or patch a production predicate.
+                def prepare(owner,bound,_identity,unit,_plan,raw):
+                    ownership=module.ownership;root=roots[id(ownership)]
+                    writers=[writer for writer in local._ACTIVE if local._owner(writer).project==self.project]
+                    self.assertEqual(1,len(writers));writer=writers[0]
+                    native=quota_fixture.Req7MetadataReservationProjectWorkflowTests()
+                    native.root=root;native.path=root/'etc/ssl/certs/ca-certificates.crt'
+                    native.path.parent.mkdir(parents=True,exist_ok=True);native.addCleanup=self.addCleanup
+                    with ExitStack() as scope:
+                        auth,_credential,_bytes=native.project_auth(scope,ownership,owner,bound)
+                        native.certificates('sheets.googleapis.com')
+                        def original_read(kind,document):
+                            import socket
+                            from monitor.issue_tracker_history_read_launcher import OwnedProjectSheetsReadUnit
+                            # Match the unchanged enrollment/default-worker
+                            # wire image exactly. Equivalent JSON with different
+                            # spacing has a different immutable identity hash.
+                            body=json.dumps(document,allow_nan=False).encode()
+                            reply=b'HTTP/1.1 200 OK\r\nContent-Length: '+str(len(body)).encode()+b'\r\nConnection: close\r\n\r\n'+body
+                            with native.server(reply,hostname='sheets.googleapis.com',destination='sheets.googleapis.com') as (records,errors),ExitStack() as launched:
+                                port=socket.getaddrinfo('sheets.googleapis.com',443)[0][4][1]
+                                calls,children=native.intercept(launched,native.child_fixture(port),writer,owner,bound)
+                                result=OwnedProjectSheetsReadUnit(writer,owner,bound,auth,read_kind=kind).read_once()
+                            self.assertEqual([],errors);self.assertEqual(1,len(records));self.assertEqual(1,len(calls))
+                            self.assertEqual(0,children[0].returncode);self.assertEqual(body,result.data)
+                            return result
+                        identity_doc=identity_response();identity_doc['spreadsheetId']=bound.spreadsheet_id
+                        identity_read=original_read('template_identity',identity_doc)
+                        metadata_read=original_read('metadata',json.loads(raw.data))
+                        result=module.prepare_owned_project_metadata_reservation(writer,owner,bound,auth,unit,
+                            identity_response=identity_read,metadata_response=metadata_read)
+                    # The unchanged consumer fixture creates its own CA root
+                    # with mkdir(exist_ok=False). Retain our entirely owned
+                    # constructor CA elsewhere after all constructor children
+                    # have been reaped; do not delete or reuse it as evidence.
+                    native.path.parent.rename(root/'constructor-ca-preserved')
+                    created.append(unit.unit_id)
+                    return result
+                @contextmanager
+                def overlap(*args,**options):
+                    from monitor import issue_tracker_unit_catalog as catalog
+                    # Track only the actual overlap's dup calls, not other
+                    # graphs or unrelated child descriptor inheritance.
+                    duplicates=[];original_dup=os.dup;strict_exits=len(closed)
+                    def duplicate(fd):
+                        result=original_dup(fd);info=os.fstat(fd)
+                        import stat
+                        raw=None if stat.S_ISDIR(info.st_mode) else os.pread(fd,info.st_size+1,0)
+                        duplicates.append((result,info,raw));return result
+                    with mock.patch.object(catalog.os,'dup',side_effect=duplicate):
+                        manager=actual_overlap(*args,**options)
+                        budget,verify=manager.__enter__()
+                    graphs.append(duplicates);received.append((budget.outcome,budget.inventory_complete))
+                    # Acquisition is already under the genuine core; its
+                    # actual finalizer event is recorded by the wrapper below.
+                    def checked():
+                        verify()
+                        if len(closed)>strict_exits:
+                            fields=('st_dev','st_ino','st_mode','st_uid','st_gid','st_nlink',
+                                'st_size','st_mtime_ns','st_ctime_ns')
+                            post_strict.append(tuple((os.fstat(fd),
+                                tuple(getattr(os.fstat(fd),name) for name in fields)==tuple(getattr(info,name) for name in fields)
+                                and (raw is None or os.pread(fd,len(raw)+1,0)==raw))
+                                for fd,info,raw in duplicates))
+                    try:
+                        yield budget,checked
+                    finally:manager.__exit__(*sys.exc_info())
+                patches.enter_context(mock.patch.object(module,'prepare_metadata_reservation',side_effect=prepare))
+                patches.enter_context(mock.patch.object(module,'_hold_owned_project_dedicated_quota_images',side_effect=overlap))
+                return module
+            actual_worker=self._default_worker_original_images
+            def worker(**arguments):
+                from monitor import issue_tracker_remote_history_match as remote
+                original_core=remote._hold_current_project_online_inputs
+                @contextmanager
+                def core(*args,**options):
+                    with original_core(*args,**options) as packet:yield packet
+                    closed.append(arguments['sheet'])
+                with mock.patch.object(remote,'_hold_current_project_online_inputs',side_effect=core):
+                    return actual_worker(**arguments)
+            patches.enter_context(mock.patch.object(owner_fixture,'scoped_fixture',side_effect=actual_fixture))
+            patches.enter_context(mock.patch.object(quota_fixture,'load',side_effect=loaded_quota))
+            patches.enter_context(mock.patch.object(self,'_default_worker_original_images',side_effect=worker))
+            observed=[]
+            self._exercise_real_protected_three_panel_fixture(skip_history=False,
+                observed_cabling_insert_probe=True,receipted_intent_probe=True,native_catalog_probe=True,
+                native_catalog_c6_origin_probe=True,native_catalog_retained_probe=True,
+                native_catalog_launch_probe=('default-worker-original-images',observed))
+        # Independent expectations after actual worker and every sanitizer:
+        # two real C6 panels, five quota FDs each still live after strict close,
+        # then all owned duplicates closed. The old fixture asserts no COUNT,
+        # CLAIM/send, unchanged durable originals/cycles and read-only status.
+        self.assertEqual(2,len(created));self.assertEqual([('DEDICATED_PROJECT_CAPACITY',True)]*2,received)
+        self.assertEqual(['ETH Cabling','IB Cabling'],closed);self.assertTrue(post_strict)
+        self.assertEqual([5,5],[len(items) for items in graphs])
+        for originals in post_strict:self.assertTrue(all(preserved for _info,preserved in originals))
+        for originals in graphs:
+            for fd,_info,_raw in originals:
+                with self.assertRaises(OSError):os.fstat(fd)
+
     def _default_worker_original_images(self, *, native, whitelist_doc, private_context,
             global_root, writer_token, spreadsheet_token, binding, unit, qualified,
             settings, quota_raw, history_raw, reads, sheet, state, owner_module, global_journal):

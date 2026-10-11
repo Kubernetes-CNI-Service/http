@@ -903,8 +903,10 @@ def _consume_current_project_online_original_inputs(writer_token, owner_token, b
 
     Original cycle/config/W1 and actual issued images outlive strict ALL
     catalog/count/quota readers. No closed verifier or path reacquisition is
-    used for business images. Historical PROJECT metadata completeness is
-    unproved: this input edge cannot count, claim, launch or report GO.
+    used for business images. Dedicated-from-creation / one historical Cloud
+    project is a confirmed deployment precondition, not API evidence. Retain
+    actual same-project quota images separately; this input edge still cannot
+    count, claim, launch or report GO.
     """
     from pathlib import Path
     from monitor import issue_tracker_local_commit as local
@@ -913,6 +915,8 @@ def _consume_current_project_online_original_inputs(writer_token, owner_token, b
     from monitor.issue_tracker_history_read_launcher import require_current_owned_project_read
     from monitor.issue_tracker_token_launcher import require_current_owned_project_token
     from monitor.issue_tracker_online_target import inspect_project_online_target
+    from monitor.issue_tracker_metadata_reservation import (
+        MetadataReservationHold, _hold_owned_project_dedicated_quota_images)
     try:
         project = local._owner(writer_token)
         ownership._validated_owner(owner_token, binding)
@@ -922,10 +926,26 @@ def _consume_current_project_online_original_inputs(writer_token, owner_token, b
             raise RemoteHistoryHold()
         with _hold_current_completed_cycle_replay(_store) as verify_cycle, \
                 source._hold_original_replay_inputs(_store, project.project,
-                    root/'monitor/Issue_Tracker_Template_v1.xlsx') as verify_inputs, ExitStack() as images:
+                    root/'monitor/Issue_Tracker_Template_v1.xlsx') as verify_inputs, \
+                ExitStack() as quota_images, ExitStack() as images:
+            verify_quota = None
             with _hold_current_project_online_inputs(writer_token, owner_token, binding, authentication,
                     _store=_store, http_root=root) as prepared:
                 _settings, _whitelist, responses, originals, authentication = prepared
+                try:
+                    budget, verify_quota = quota_images.enter_context(
+                        _hold_owned_project_dedicated_quota_images(writer_token, owner_token, binding, authentication,
+                            identity_response=responses['template_identity'], metadata_response=responses['metadata']))
+                except MetadataReservationHold:
+                    # Legacy quotas have no historical project origin. Retain
+                    # their existing read-only observation, never infer/repair
+                    # provenance or grant permission from today's credentials.
+                    verify_quota = None
+                else:
+                    if not budget.inventory_complete or budget.outcome not in (
+                            'DEDICATED_PROJECT_CAPACITY', 'STOP_CAPACITY'):
+                        raise RemoteHistoryHold()
+                    verify_quota()
                 graphs = []
                 for row, actual_source, guard in originals:
                     packet, verify = images.enter_context(guard._hold_original_images())
@@ -936,6 +956,8 @@ def _consume_current_project_online_original_inputs(writer_token, owner_token, b
             # ALL strict count/catalog/quota/business scopes have completed.
             # Only genuinely overlapped images and actual issued reads survive.
             verify_cycle(); verify_inputs()
+            if verify_quota is not None:
+                verify_quota()
             for _row, _actual_source, _guard, _packet, verify in graphs:
                 verify()
             for kind, response in responses.items():
@@ -943,13 +965,15 @@ def _consume_current_project_online_original_inputs(writer_token, owner_token, b
                     authentication, read_kind=kind)
             require_current_owned_project_token(owner_token, binding, authentication)
             inspect_project_online_target(writer_token, binding)
-            # G1 remains unproved; finish normal image cleanup before refusing.
-            # No FIRST/R2 primitive is entered, even for visible free capacity.
+            # Quota continuity is necessary, not ALL/C6/FIFO/FIRST/R2 GO.
+            # Finish actual image cleanup before the unchanged typed refusal.
             images.close()
             for kind, response in responses.items():
                 require_current_owned_project_read(writer_token, owner_token, binding, response,
                     authentication, read_kind=kind)
             verify_cycle(); verify_inputs()
+            if verify_quota is not None:
+                verify_quota()
         for kind, response in responses.items():
             require_current_owned_project_read(writer_token, owner_token, binding, response,
                 authentication, read_kind=kind)

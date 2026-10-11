@@ -257,6 +257,84 @@ class CatalogReconciliationWorkflowTests(unittest.TestCase):
 
 
 class CatalogProjectAuthenticationHandoffDirectTests(unittest.TestCase):
+    def test_default_quota_finalizer_rechecks_issued_reads_and_preserves_interruptions(self):
+        from contextlib import ExitStack, contextmanager
+        from pathlib import Path
+        import tempfile
+        from types import SimpleNamespace
+        from monitor import issue_tracker_local_commit as local
+        from monitor import issue_tracker_stage_l_consumer as source
+        from monitor import issue_tracker_cycle_source as cycles
+        from monitor import issue_tracker_metadata_reservation as quota
+        from monitor import issue_tracker_history_read_launcher as reads
+        from monitor import issue_tracker_token_launcher as tokens
+        from monitor import issue_tracker_online_target as target
+        module=importlib.import_module('monitor.issue_tracker_remote_history_match')
+        # Direct orchestration boundary only. Real owners/issued reads/native
+        # quota FDs are separately required by the genuine C6/TLS workflow.
+        for interrupted in (False,True):
+            with self.subTest(interrupted=interrupted),tempfile.TemporaryDirectory() as directory,ExitStack() as patches:
+                root=Path(directory).resolve();events=[];strict_live=[False];revoked=[False]
+                writer=object();owner=object();binding=object();auth=object();identity=object();metadata=object()
+                stop=KeyboardInterrupt('owned quota finalizer interruption')
+                @contextmanager
+                def held(*args,**options):
+                    yield lambda:None
+                @contextmanager
+                def core(*args,**options):
+                    strict_live[0]=True
+                    try:yield (None,None,{'template_identity':identity,'metadata':metadata},(),auth)
+                    finally:strict_live[0]=False;events.append('strict-closed')
+                @contextmanager
+                def quota_images(*args,**options):
+                    self.assertTrue(strict_live[0]);self.assertEqual((writer,owner,binding,auth),args)
+                    self.assertEqual({'identity_response':identity,'metadata_response':metadata},options)
+                    events.append('quota-enter')
+                    try:yield SimpleNamespace(inventory_complete=True,outcome='DEDICATED_PROJECT_CAPACITY'),lambda:events.append('quota-verify')
+                    finally:
+                        events.append('quota-closed');revoked[0]=True
+                        if interrupted:raise stop
+                def issued(*args,**options):
+                    events.append('read-after-quota-close' if revoked[0] else 'live-read')
+                    if revoked[0]:raise module.RemoteHistoryHold()
+                patches.enter_context(mock.patch.object(local,'_owner',return_value=SimpleNamespace(project=root)))
+                patches.enter_context(mock.patch.object(module.ownership,'_validated_owner'))
+                patches.enter_context(mock.patch.object(cycles,'_hold_current_completed_cycle_replay',held))
+                patches.enter_context(mock.patch.object(source,'_hold_original_replay_inputs',held))
+                patches.enter_context(mock.patch.object(module,'_hold_current_project_online_inputs',core))
+                patches.enter_context(mock.patch.object(quota,'_hold_owned_project_dedicated_quota_images',quota_images))
+                patches.enter_context(mock.patch.object(reads,'require_current_owned_project_read',side_effect=issued))
+                patches.enter_context(mock.patch.object(tokens,'require_current_owned_project_token'))
+                patches.enter_context(mock.patch.object(target,'inspect_project_online_target'))
+                no_count=patches.enter_context(mock.patch.object(module.global_journal,'record_global_attempt_intent'))
+                with self.assertRaises(KeyboardInterrupt if interrupted else module.RemoteHistoryHold) as caught:
+                    module._consume_current_project_online_original_inputs(writer,owner,binding,None,
+                        _store=SimpleNamespace(project_identity=root),http_root=root)
+                self.assertLess(events.index('quota-enter'),events.index('strict-closed'))
+                self.assertLess(events.index('strict-closed'),events.index('quota-closed'))
+                self.assertGreaterEqual(events.count('quota-verify'),3);no_count.assert_not_called()
+                if interrupted:self.assertIs(stop,caught.exception);self.assertNotIn('read-after-quota-close',events)
+                else:self.assertEqual('read-after-quota-close',events[-1])
+
+    def test_default_consumer_retains_actual_dedicated_quota_before_strict_inputs_close(self):
+        import ast
+        import inspect
+        import textwrap
+        module=importlib.import_module('monitor.issue_tracker_remote_history_match')
+        tree=ast.parse(textwrap.dedent(inspect.getsource(module._consume_current_project_online_original_inputs)))
+        calls=[node for node in ast.walk(tree) if isinstance(node,ast.Call)
+            and isinstance(node.func,ast.Name) and node.func.id=='_hold_owned_project_dedicated_quota_images']
+        self.assertEqual(1,len(calls),'G1 quota originals must overlap the still-live strict acquisition')
+        self.assertEqual(('writer_token','owner_token','binding','authentication'),
+            tuple(arg.id for arg in calls[0].args))
+        self.assertEqual({'identity_response','metadata_response'},set(item.arg for item in calls[0].keywords))
+        self.assertTrue(any(isinstance(node,ast.With)
+            and any(isinstance(item.context_expr,ast.Call)
+                and isinstance(item.context_expr.func,ast.Name)
+                and item.context_expr.func.id=='_hold_current_project_online_inputs' for item in node.items)
+            and calls[0] in tuple(ast.walk(node)) for node in ast.walk(tree)),
+            'closed strict readers cannot be the first acquisition of quota originals')
+
     def _actual_fixed_acquisition_contract(self, module):
         import ast
         import inspect
