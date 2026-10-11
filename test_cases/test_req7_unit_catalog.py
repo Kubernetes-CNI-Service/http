@@ -970,6 +970,62 @@ print('COLD_SHARED_FIFO_ORIGINALS_NO_HANDLES_OR_AUTHORITY')
 
 
 class UnitCatalogTests(unittest.TestCase):
+    def test_count_claim_nested_holder_borrows_same_live_originals_without_reacquiring_catalog(self):
+        with self._simple_count_claim_originals() as (globals_,writer,token,bound):
+            before=original_read_files(self.root)
+            with globals_._hold_selected_last_catalog_write_originals(writer,token,bound,self.first) as outer:
+                with mock.patch.object(globals_,'_catalog_present',side_effect=AssertionError('nested holder must not reacquire the catalog')):
+                    with globals_._hold_selected_last_catalog_write_originals(writer,token,bound,self.first) as borrowed:
+                        self.assertIs(outer,borrowed);borrowed();outer()
+                outer()
+            self.assertEqual(before,original_read_files(self.root))
+            with self.assertRaises(globals_.GlobalAttemptHold):borrowed()
+
+    def test_count_claim_nested_holder_rejects_different_originals_and_exited_context(self):
+        from contextvars import copy_context
+        from dataclasses import replace
+        with self._simple_count_claim_originals() as (globals_,writer,token,bound):
+            before=original_read_files(self.root)
+            with globals_._hold_selected_last_catalog_write_originals(writer,token,bound,self.first) as outer:
+                stale=copy_context()
+                for args in ((object(),token,bound,self.first),(writer,object(),bound,self.first),
+                        (writer,token,replace(bound,spreadsheet_id='other-target'),self.first),
+                        (writer,token,bound,replace(self.first))):
+                    with self.subTest(field=next(i for i,(old,new) in enumerate(zip((writer,token,bound,self.first),args)) if old is not new)):
+                        entered=[]
+                        with self.assertRaises(globals_.GlobalAttemptHold):
+                            with globals_._hold_selected_last_catalog_write_originals(*args):entered.append(True)
+                        self.assertEqual([],entered);outer()
+            manager=globals_._hold_selected_last_catalog_write_originals(writer,token,bound,self.first)
+            with mock.patch.object(globals_,'_catalog_present',side_effect=AssertionError('exited context must not issue a fresh original graph')):
+                with self.assertRaises(globals_.GlobalAttemptHold):stale.run(manager.__enter__)
+            self.assertEqual(before,original_read_files(self.root))
+
+    def test_count_claim_nested_interruption_preserves_primary_and_checks_originals_on_exit(self):
+        import errno
+        with self._simple_count_claim_originals() as (globals_,writer,token,bound):
+            primary=KeyboardInterrupt('owned nested count/claim interruption')
+            init=self.module._Originals.__init__;graphs=[];seen=[]
+            def capture(graph,*args,**options):
+                init(graph,*args,**options);graphs.append(graph)
+            with mock.patch.object(self.module._Originals,'__init__',capture):
+                with self.assertRaises(KeyboardInterrupt) as caught:
+                    with globals_._hold_selected_last_catalog_write_originals(writer,token,bound,self.first) as outer:
+                        with globals_._hold_selected_last_catalog_write_originals(writer,token,bound,self.first) as borrowed:
+                            self.assertIs(outer,borrowed);borrowed();seen.append('entered-original-borrow')
+                            path=next(self.root.rglob('WIRE'));raw=path.read_bytes()
+                            preserved=self.root/'preserved-interrupted-original-wire'
+                            path.rename(preserved);path.write_bytes(raw);path.chmod(0o600)
+                            self.assertNotEqual(path.stat().st_ino,preserved.stat().st_ino)
+                            raise primary
+            self.assertIs(primary,caught.exception);self.assertEqual(['entered-original-borrow'],seen)
+            for graph in graphs:
+                for _parent,_name,fd,*_rest in (*graph.files,*graph.directories):
+                    with self.assertRaises(OSError) as closed:os.fstat(fd)
+                    self.assertEqual(errno.EBADF,closed.exception.errno)
+            self.assertFalse(tuple(self.root.rglob('ATTEMPT-*')))
+            self.assertFalse(tuple(self.root.rglob('CLAIM-*')))
+
     @contextmanager
     def _simple_count_claim_originals(self):
         globals_=self.globals_api()

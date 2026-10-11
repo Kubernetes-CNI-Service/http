@@ -2033,6 +2033,39 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         self.assertEqual(['ETH Cabling:native-launch:normal',
             'IB Cabling:native-launch:normal'],marks)
 
+    def test_actual_first_count_and_wire_receive_already_held_all_write_aware_originals(self):
+        from test_cases import test_req7_global_attempt_journal as fixtures
+        actual_load=fixtures.load;reached=[];completed=[];failures=[]
+        with ExitStack() as patches:
+            def loaded():
+                module=actual_load();first=module._hold_continuous_owned_attempt_wire
+                @contextmanager
+                def overlap(owner,bound,unit,**options):
+                    with module._hold_selected_last_catalog_write_originals(options['writer_token'],owner,bound,unit) as original:
+                        reached.append(unit.unit_id);original()
+                        with first(owner,bound,unit,**options) as image:
+                            original();yield image;original()
+                        original()
+                    completed.append(unit.unit_id)
+                patches.enter_context(mock.patch.object(module,'_hold_continuous_owned_attempt_wire',side_effect=overlap))
+                return module
+            patches.enter_context(mock.patch.object(fixtures,'load',side_effect=loaded))
+            marks=[]
+            try:
+                self._exercise_real_protected_three_panel_fixture(skip_history=False,
+                    observed_cabling_insert_probe=True,receipted_intent_probe=True,
+                    native_catalog_probe=True,native_catalog_c6_origin_probe=True,
+                    native_catalog_retained_probe=True,native_catalog_launch_probe=('normal',marks))
+            except Exception:
+                import traceback
+                failures.append(traceback.format_exc())
+        # Outside production sanitizers: genuine complete ALL originals must
+        # survive original C6/read/FIRST/COUNT/CLAIM/native request and cleanup.
+        # No supplied graph, permission flag or alternative issuer is accepted.
+        self.assertEqual([],failures)
+        self.assertEqual(2,len(reached));self.assertEqual(reached,completed)
+        self.assertEqual(['ETH Cabling:native-launch:normal','IB Cabling:native-launch:normal'],marks)
+
     def test_shared_retry_held_originals_reach_one_identical_native_request(self):
         from monitor import issue_tracker_global_attempt_journal as journal
         self.assertTrue(hasattr(journal,'_hold_shared_retry_owned_attempt_wire'))

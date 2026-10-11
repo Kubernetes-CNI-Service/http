@@ -2947,3 +2947,19 @@ handoff, identical-byte OTHER rebind after COUNT and after project finalizers,
 first creator fstat refusal, foreign FD reuse and opaque-context revocation.
 These are local necessary handoff/cleanup proofs, not full REQ7, default
 NEW/FIRST/R2 integration, current full/check, real Cloud or power-loss proof.
+
+The same private COUNT/CLAIM holder also receives an already issued live ALL
+write-aware graph. A nested receiver must use the identical writer, spreadsheet
+owner and unit plus the same binding; it borrows the original verifier without
+reopening paths, issuing another graph or deriving another next-count allowance.
+Entry and exit recheck the receiver identity and original graph. The original
+issuer keeps its key, budget and cleanup responsibility; an exited/copied
+context, changed arguments or raw original rebind cannot become fresh issuance.
+Operator interruption stays the primary exception while exit validation and
+owned descriptor cleanup still run. Independent initial RED and direct tests
+cover no reacquisition, foreign arguments, revoked contexts and interruption;
+the actual protected ETH/IB C6/OAuth/TLS FIRST workflow retains outer ALL
+originals across COUNT, CLAIM, the fixed request and cleanup. This does not solve
+default selection, foreign-owner lifetime, G1 admission, NEW or the current
+full/check gate; the old R2 cadence, deadlines and immutable-wire tests remain
+necessary and unchanged.

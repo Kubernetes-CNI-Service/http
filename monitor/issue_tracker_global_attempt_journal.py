@@ -122,8 +122,37 @@ def _hold_selected_last_catalog_write_originals(writer_token, token, binding, un
     try:
         project = local._owner(writer_token)
         owner = ownership._validated_owner(token, binding)
-        if _HELD_COUNT_CLAIM_ORIGINALS.get() is not None:
-            raise GlobalAttemptHold()
+        overlap = _count_claim_original_packet()
+        if overlap is not None:
+            # Receive only the already issued original graph. Never put its
+            # key/reset in this borrower's cleanup slots, reacquire paths or
+            # derive a second ATTEMPT/CLAIM allowance from the changed count.
+            borrowed_verify = overlap['verify']
+            def current_borrow():
+                if (_count_claim_original_packet() is not overlap
+                        or overlap['writer'] is not writer_token or overlap['token'] is not token
+                        or overlap['binding'] != binding or overlap['unit'] is not unit
+                        or overlap['verify'] is not borrowed_verify):
+                    raise GlobalAttemptHold()
+            def verify_borrow():
+                current_borrow(); borrowed_verify(); current_borrow()
+            primary = cleanup_problem = None
+            try:
+                verify_borrow()
+                yield borrowed_verify
+            except BaseException as error:
+                primary = error
+            finally:
+                try: verify_borrow()
+                except BaseException as error:
+                    cleanup_problem = error
+                    if primary is None or (isinstance(primary, Exception) and not isinstance(error, Exception)):
+                        primary = error
+            if primary is not None:
+                if cleanup_problem is not None and cleanup_problem is not primary:
+                    raise primary from cleanup_problem
+                raise primary
+            return
         if not _catalog_present(owner):
             def legacy_verify():
                 if (local._owner(writer_token) is not project
