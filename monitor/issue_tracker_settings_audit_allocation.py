@@ -118,9 +118,35 @@ def _settings(writer_token,*,delivered_event_ids=()):
 
 
 def pending_settings_audits(writer_token):
-    """ALL committed events remain pending; allocation is NOT consumption."""
+    """Read committed pending audits under the actual LIVE settings factory.
+
+    A matching held original COMPLETE/DELIVERED context excludes only its
+    exact events. Ordinary writers retain the strict projection contract;
+    allocation, caller IDs or a context without its original guard cannot
+    consume an event. No cleanup, new allocation or sending is performed.
+    """
     failed = False
-    try: result = tuple(dict(row[2]) for row in _settings(writer_token))
+    try:
+        from monitor import issue_tracker_state_owner as state
+        owner=local._owner(writer_token)
+        context=state._COMPLETED_READ_CONTEXT.get(writer_token)
+        guard=state._COMPLETED_ORIGINAL_GUARDS.get(writer_token)
+        def verify():
+            if (local._owner(writer_token) is not owner
+                    or state._COMPLETED_READ_CONTEXT.get(writer_token) is not context
+                    or state._COMPLETED_ORIGINAL_GUARDS.get(writer_token) is not guard):
+                raise SettingsAuditHold()
+            if guard is not None: guard()
+            if (local._owner(writer_token) is not owner
+                    or state._COMPLETED_READ_CONTEXT.get(writer_token) is not context
+                    or state._COMPLETED_ORIGINAL_GUARDS.get(writer_token) is not guard):
+                raise SettingsAuditHold()
+        verify()
+        if context is not None and guard is not None:
+            result=pending_settings_audits_after_completed_unit(writer_token,*context)
+        else:
+            result=tuple(dict(row[2]) for row in _settings(writer_token))
+        verify()
     except Exception: failed = True
     if failed: raise SettingsAuditHold()
     return result

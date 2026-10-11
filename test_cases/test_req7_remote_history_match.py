@@ -1299,6 +1299,81 @@ with local.writer_owner(root/'project',root/'project/publication') as writer,sco
             self.assertEqual(tuple(units),tuple(unit for unit,_value in before))
         return bound,tuple(units),tuple(generations)
 
+    def catalog_later_settings_audit_oracle(self):
+        # Independent literal event contract, never decode the production
+        # event/outbox or ask the pending reader to construct its expectation.
+        canonical=lambda value: (json.dumps(value,sort_keys=True,separators=(',',':'),ensure_ascii=False)+'\n').encode()
+        prior=(self.settings_audit_oracle()['details']+'\n').encode()
+        payload={'new_k':7,'actor':'operator:fixture','expected_revision':0,'request_id':'catalog-later-k'}
+        event=canonical({'schema_version':1,'revision':1,'type':'set_k','old_k':3,'new_k':7,
+            'actor':'operator:fixture','recorded_at':'2026-10-08T10:01:00Z','request_id':'catalog-later-k',
+            'payload_sha256':hashlib.sha256(canonical(payload)).hexdigest(),
+            'predecessor_sha256':hashlib.sha256(prior).hexdigest()})
+        return {'event_id':'settings:1:'+hashlib.sha256(event).hexdigest(),
+            'recorded_at_utc':'2026-10-08T10:01:00Z','details':event.decode().rstrip('\n')}
+
+    def test_catalog_scoped_pending_reader_returns_only_original_later_event_after_delivery(self):
+        from monitor import issue_tracker_state_owner as state,issue_tracker_spreadsheet_owner as sheet
+        self.catalog_settings_completed_and_pending()
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        project=self.root/'project'; before=self._default_recovery_images(project)
+        expected=self.catalog_later_settings_audit_oracle(); seen=[]
+        with scoped_fixture(self.root,sheet),state.tracker_settings_writer(project,project/'publication') as token:
+            seen.append(allocation.pending_settings_audits(token))
+            self.assertEqual((expected,),seen[0])
+            seen[0][0]['details']='caller-local mutation, never frozen evidence'
+            self.assertEqual((expected,),allocation.pending_settings_audits(token))
+            self.assertEqual((1,7),(state.current_k(token).revision,state.current_k(token).k))
+        self.assertEqual(before,self._default_recovery_images(project))
+        self.assertEqual({},state._COMPLETED_READ_CONTEXT)
+        self.assertEqual({},state._COMPLETED_ORIGINAL_GUARDS)
+        with self.assertRaises(allocation.SettingsAuditHold): allocation.pending_settings_audits(token)
+
+    def test_catalog_cold_pending_reader_uses_actual_scoped_pair_without_parent_context(self):
+        import subprocess
+        self.catalog_settings_completed_and_pending()
+        project=self.root/'project'; before=self._default_recovery_images(project)
+        program='''from pathlib import Path
+import sys,json
+from monitor import issue_tracker_state_owner as state,issue_tracker_spreadsheet_owner as sheet
+from monitor import issue_tracker_settings_audit_allocation as allocation
+from test_cases.test_req7_spreadsheet_owner import scoped_fixture
+root=Path(sys.argv[1]); project=root/'project'
+assert state._COMPLETED_READ_CONTEXT=={} and state._COMPLETED_ORIGINAL_GUARDS=={}
+with scoped_fixture(root,sheet),state.tracker_settings_writer(project,project/'publication') as token:
+ print(json.dumps(allocation.pending_settings_audits(token),sort_keys=True,separators=(',',':')))
+assert state._COMPLETED_READ_CONTEXT=={} and state._COMPLETED_ORIGINAL_GUARDS=={}
+'''
+        child=subprocess.run([sys.executable,'-B','-c',program,str(self.root)],cwd=ROOT,
+            stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=20)
+        self.assertEqual(0,child.returncode,child.stderr)
+        self.assertEqual([self.catalog_later_settings_audit_oracle()],json.loads(child.stdout))
+        self.assertEqual(before,self._default_recovery_images(project))
+
+    def test_catalog_pending_reader_refuses_context_replacement_after_real_pair_read(self):
+        from monitor import issue_tracker_state_owner as state,issue_tracker_spreadsheet_owner as sheet
+        self.catalog_settings_completed_and_pending()
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        project=self.root/'project'; before=self._default_recovery_images(project); reached=[]
+        native=allocation.pending_settings_audits_after_completed_unit
+        with scoped_fixture(self.root,sheet),state.tracker_settings_writer(project,project/'publication') as token:
+            context=state._COMPLETED_READ_CONTEXT[token]
+            def replaced(*args,**kwargs):
+                result=native(*args,**kwargs)
+                state._COMPLETED_READ_CONTEXT[token]=tuple(list(context)); reached.append(True)
+                return result
+            try:
+                with mock.patch.object(allocation,'pending_settings_audits_after_completed_unit',side_effect=replaced):
+                    with self.assertRaises(allocation.SettingsAuditHold): allocation.pending_settings_audits(token)
+                self.assertEqual([True],reached,'must refuse after the real paired read, not before reaching it')
+            finally:
+                # Restore only this test-owned registry after the fault result
+                # assertions so the outer original factory can close normally.
+                state._COMPLETED_READ_CONTEXT[token]=context
+        self.assertEqual(before,self._default_recovery_images(project))
+        self.assertEqual({},state._COMPLETED_READ_CONTEXT)
+        self.assertEqual({},state._COMPLETED_ORIGINAL_GUARDS)
+
     def test_catalog_settings_discovery_rejects_actual_c6_from_a_different_project(self):
         from monitor import issue_tracker_state_owner as state,issue_tracker_spreadsheet_owner as sheet
         self.catalog_settings_completed_and_pending(mirror_foreign_allocation=True)

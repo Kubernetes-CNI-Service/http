@@ -1066,6 +1066,13 @@ K 提交边界前后重新验证该原件作用域；写入中丢失原件须保
 这里仍仅支持原第一分配的交付恢复；不是多单元事件分配、默认 delivery hook、
 FIRST/R2 发送或 REQ7 整体完成，不能替代当前 full/check 或现场验收。
 
+`pending_settings_audits` 在同一 LIVE 设置工厂作用域内复用其实际原
+COMPLETE/DELIVERED 对，只剔除该原单元明确交付的事件。后续未交付事件仍须有
+原 outbox 并保持 pending；无 matching held guard 的普通 writer 保留旧严格合同。
+委托读取前后核同一 ACTIVE owner 与同一 registry 对象，撤销／替换后不能返回缓存
+结果或降级采用旧投影。独立 literal 后续事件、真实双 C6／TLS／交付／归档及冷进程
+覆盖这条只读接线；不产生多单元分配、清理、COUNT／CLAIM 或发送权限。
+
 默认 prod `inspect_stage_l` 与真实 worker 状态入口在合法交付投影归档后读取最高 K，
 仍保持 pending／来源资格／本地 receipt 的原合同和 `disabled_no_send_authority`。
 独立 direct 验证缺失 tracker 不初始化、错误 scope 不读来源；实际多脚本流程验证正常

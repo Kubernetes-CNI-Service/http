@@ -60,6 +60,18 @@ def allocation_image_barrier(case, fd):
 
 
 class Req7SettingsAuditAllocationTests(unittest.TestCase):
+    def test_pending_reader_requires_actual_active_owner_and_preserves_ordinary_contract(self):
+        from monitor import issue_tracker_state_owner as state
+        before=self.image()
+        with state.tracker_settings_writer(self.project,self.publication) as writer:
+            self.assertNotIn(writer,state._COMPLETED_READ_CONTEXT)
+            self.assertEqual((self.audit0,),self.module.pending_settings_audits(writer))
+        for token in (writer,object()):
+            with self.subTest(expired=token is writer),self.assertRaises(self.module.SettingsAuditHold):
+                self.module.pending_settings_audits(token)
+        self.assertEqual({},state._COMPLETED_ORIGINAL_GUARDS)
+        self.assertEqual(before,self.image())
+
     def test_completed_discovery_refuses_unissued_writer_before_acquiring_sheet(self):
         before=self.image()
         with mock.patch.object(self.module.ownership,'spreadsheet_owner') as acquire:
