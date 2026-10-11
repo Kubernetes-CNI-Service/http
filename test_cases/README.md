@@ -2890,3 +2890,16 @@ finalizer and issued-read revocation at overlap cleanup. This quota-only graph
 does not itself retain ALL other catalog/C6/FIFO originals or grant G1 send
 permission. The native writer must separately supply those real protected
 boundaries; default NEW/FIRST/R2 integration and current full/check remain open.
+
+The fixed native count path can borrow its already-live original catalog
+selection instead of issuing a second catalog graph. The public issuer remains
+non-nestable. Borrowing requires the actual registry/token/owner, binding,
+selected unit, process and thread, with the original graph checked on entry,
+inside and exit; another member alone cannot change the selected writer.
+Independent direct expectations first RED cover no second issuance, different
+selection/owner refusal before count, and closed/copied context refusal. A real
+C5/C6 ETH/IB workflow holds the outer catalog across fresh original reads,
+COUNT, CLAIM and the fixed local encrypted request. This immutable catalog
+overlap does not by itself retain every mutable OTHER family continuously
+between COUNT and CLAIM, close FIFO/default NEW/FIRST/R2, or establish current
+full/check or real Cloud acceptance.

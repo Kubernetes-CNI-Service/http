@@ -335,13 +335,13 @@ def _hold_native_catalog_replay(token, binding, selected_unit):
                 if (not alive or issued is None or packet is None
                         or _HELD_CATALOG_REPLAY.get() is not issued
                         or _LIVE_CATALOG_REPLAYS.get(issued) is not packet
-                        or packet[5:]!=(os.getpid(),threading.get_ident())):
+                        or packet[6:]!=(os.getpid(),threading.get_ident())):
                     raise GlobalAttemptHold()
             def verify():
                 require_issuer();verify_graph();require_issuer()
             held.sync();verify_graph()
             issued=object()
-            packet=(token,binding,owner,units,verify,os.getpid(),threading.get_ident())
+            packet=(token,binding,owner,units,verify,selected_unit,os.getpid(),threading.get_ident())
             _LIVE_CATALOG_REPLAYS[issued]=packet
             key=_HELD_CATALOG_REPLAY.set(issued)
             verify()
@@ -368,6 +368,38 @@ def _hold_native_catalog_replay(token, binding, selected_unit):
 
 
 @contextmanager
+def _hold_native_catalog_write_replay(token,binding,selected_unit):
+    """Fixed count path borrows its SAME issued original catalog selection.
+
+    Public issuance remains non-nestable. An outer native writer may already
+    hold ALL immutable catalog/origin/NV/audit originals before strict input
+    readers close. Count must not reopen or issue a second graph at that edge.
+    Borrow only the actual registry/owner/thread/context and selected unit;
+    membership alone cannot switch the writer or its fixed dispatch allowance.
+    Mutable count/CLAIM, C6, FIFO, quota, sources and freshness remain the
+    original independent checks. No caller callback, image or flag is used.
+    """
+    failed=False
+    try:
+        active=_HELD_CATALOG_REPLAY.get()
+        if active is None:
+            with _hold_native_catalog_replay(token,binding,selected_unit) as verify:
+                yield verify
+            return
+        owner=ownership._validated_owner(token,binding)
+        original=_LIVE_CATALOG_REPLAYS.get(active)
+        if (original is None or original[0] is not token or original[1]!=binding
+                or original[2] is not owner or original[5]!=selected_unit
+                or original[6:]!=(os.getpid(),threading.get_ident())):
+            raise GlobalAttemptHold()
+        with _hold_catalog_originals(token,binding) as (units,verify):
+            if selected_unit not in units:raise GlobalAttemptHold()
+            verify(); yield verify; verify()
+    except Exception:failed=True
+    if failed:raise GlobalAttemptHold() from None
+
+
+@contextmanager
 def _hold_catalog_originals(token, binding):
     """Fixed native catalog only; ALL origin images or no prefix, never paths."""
     from monitor import issue_tracker_unit_catalog as catalog
@@ -379,7 +411,7 @@ def _hold_catalog_originals(token, binding):
             original=_LIVE_CATALOG_REPLAYS.get(active)
             if (original is None or original[0] is not token or original[1]!=binding
                     or original[2] is not owner
-                    or original[5:]!=(os.getpid(),threading.get_ident())):
+                    or original[6:]!=(os.getpid(),threading.get_ident())):
                 raise GlobalAttemptHold()
             verify=original[4]
             verify()
@@ -1879,7 +1911,7 @@ def _hold_continuous_owned_attempt_wire(
                 _hold_current_completed_cycle_replay(store) as verify_cycles, \
                 _hold_history_originals(writer_token) as verify_receipts, \
                 _hold_receipted_audit_originals(writer_token,token,binding,unit) as verify_audits, \
-                _hold_native_catalog_replay(token,binding,unit) as verify_catalog:
+                _hold_native_catalog_write_replay(token,binding,unit) as verify_catalog:
             original=facts()
             with _hold_reserved_quota_originals(token,binding,original[1].identity,unit) as verify_quota:
                 def verify_originals():

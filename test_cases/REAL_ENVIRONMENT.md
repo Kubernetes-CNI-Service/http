@@ -2318,6 +2318,15 @@ ALL 审计行确定唯一 append 窗口（NOOP 无虚构行），精确耗尽可
 - 证据与风险：记录精确 HEAD/tree/manifest/Python/平台、完整有界 read 与旧前缀、前后 stat/inode/大小/SHA、物理顺序和 END、逐池 usage/reservation/remaining、不可见 PROJECT 风险及库存完整性证明缺口；无秘密正文、nonce 或 token。不可见使用量、外部编辑与读写间竞态不由本地观察闭合。
 - 故障注入与清理：在精确授权副本测试 enrollment/他方 metadata/未知预留、Unicode、各池临界与超限、部分响应/redirect/non200，不触碰真实业务数据。只清理本卡创建的私有 fixture；不删除未知永久栅、真实 journal 或预留，不以重试/改目标/释放 owner 消除不确定性。无法安全执行仍 NOT RUN。
 
+## TC-REAL-REQ7-CATALOG-COUNT-BORROW-001 — 同一原生 catalog 的固定计数借用
+
+- 类型：real-environment / transaction / workflow；对应 REQ7 原件连续性、FIRST/COUNT/CLAIM。状态：**NOT RUN / REAL_ENV REQUIRED**。自动化为 `test_req7_unit_catalog.UnitCatalogTests` 两项独立 direct 和 `test_issue_tracker_stage_l_consumer_workflow.ProdStageLConsumerWorkflowTests.test_actual_first_count_and_wire_borrow_already_held_native_catalog_originals`。
+- 前置与权限：另获精确现场授权的隔离项目/表、实际双 owner、ALL catalog/C6/原 issued reads 与现行准入前置；本卡不授权真实 Cloud/SSH/设备/root/cron 或生产发布。正式验证仍绑定当前精确树 full/check，开发局部通过不能替代。
+- 步骤及独立预期：正常 ETH/IB 原 C5/C6→新鲜读取→COUNT→CLAIM→固定原请求，外层 immutable catalog holder 全程保留；固定内部 count 借用不得二次发行/重开原图。公开重复 issuer 继续 HOLD；foreign owner、不同 selected unit（即使属于同一 catalog）、已关闭/copied context 均拒绝，不增加 COUNT/CLAIM/child。逐段核原 registry/owner/binding/PID/thread 和原图，退出不能撤销外层 holder。
+- 故障、恢复及安全状态：保留正常流程、借用进入/退出和 owner 收尾的关键边界、原件同字节新 inode、代表性中断、独立冷恢复和失败后原 COUNT/UNKNOWN/WIRE/替代物保留；不修补、回填、采用新原件或重发。ALL mutable OTHER family 的 COUNT→CLAIM 连续原件、FIFO、default NEW/FIRST/R2 仍须分别证明，不以本图代替。
+- 证据与清理：精确 HEAD/tree/dirty/manifest/Python/平台/命令、完整日志/退出码/物理 BEGIN/END、读取前后 stat/inode/旧前缀 SHA、真实故障阶段及固定请求计数；仅清理本轮确证自有 fixture/FD/child，不管理未知进程或真实环境。独立初始 RED/direct 与真实本地多脚本/加密 socket 是开发替代证据，不是 Cloud/设备/断电或正式 full。
+- 验证范围：保留上述核心场景，省略/合并：无；真实现场全部 NOT RUN，无新增剩余风险接受确认人。原现场授权、必要研发确认和普通发布门禁不变。
+
 ## TC-REAL-REQ7-NATIVE-READ-WHITELIST-001 — 精确字面列与每单元同规则读核
 
 - Case ID：`TC-REAL-REQ7-NATIVE-READ-WHITELIST-001`；类型：real-environment / read-only API / whitelist；对应 C-7/C-8/C-24。状态：**NOT RUN / REAL_ENV REQUIRED**。本地先决为 `test_req7_sheets_read_plan`、`test_req7_sheets_read_decode`、`test_req7_online_whitelist_read` direct 和真实 TLS/read-plan/grid-decoder/本地 held-workbook workflow 全绿。对应 `monitor/issue_tracker_sheets_read_plan.py`、`monitor/issue_tracker_sheets_read_decode.py`、`monitor/issue_tracker_online_whitelist_read.py` 均为未安装库，不是在线发送入口、APPLIED 回执或新鲜准入许可。

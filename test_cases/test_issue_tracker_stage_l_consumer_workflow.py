@@ -1882,6 +1882,41 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             business_preread_probe=True,original_reserved_probe=True,receipted_intent_probe=True,
             owned_read_gates_probe=True,owned_continuity_probe=True,continuous_launch_probe='normal')
 
+    def test_actual_first_count_and_wire_borrow_already_held_native_catalog_originals(self):
+        from contextlib import contextmanager
+        from test_cases import test_req7_global_attempt_journal as fixtures
+        actual_load=fixtures.load; reached=[]; completed=[]; failures=[]
+        with ExitStack() as patches:
+            def load_with_original_catalog_overlap():
+                module=actual_load(); first=module._hold_continuous_owned_attempt_wire
+                @contextmanager
+                def overlapping(owner,bound,unit,**options):
+                    with module._hold_native_catalog_replay(owner,bound,unit) as outer:
+                        reached.append(unit.unit_id)
+                        outer()
+                        with first(owner,bound,unit,**options) as image:
+                            outer(); yield image; outer()
+                        outer()
+                    completed.append(unit.unit_id)
+                patches.enter_context(mock.patch.object(module,'_hold_continuous_owned_attempt_wire',side_effect=overlapping))
+                return module
+            patches.enter_context(mock.patch.object(fixtures,'load',side_effect=load_with_original_catalog_overlap))
+            marks=[]
+            try:
+                self._exercise_real_protected_three_panel_fixture(skip_history=False,
+                    observed_cabling_insert_probe=True,receipted_intent_probe=True,
+                    native_catalog_probe=True,native_catalog_c6_origin_probe=True,
+                    native_catalog_retained_probe=True,native_catalog_launch_probe=('normal',marks))
+            except Exception:
+                import traceback
+                failures.append(traceback.format_exc())
+        # Outside production sanitizers: actual protected C5/C6, ALL native
+        # catalog, fresh owned reads, count/CLAIM and original encrypted request.
+        self.assertEqual([],failures)
+        self.assertEqual(2,len(reached));self.assertEqual(reached,completed)
+        self.assertEqual(['ETH Cabling:native-launch:normal',
+            'IB Cabling:native-launch:normal'],marks)
+
     def test_shared_retry_held_originals_reach_one_identical_native_request(self):
         from monitor import issue_tracker_global_attempt_journal as journal
         self.assertTrue(hasattr(journal,'_hold_shared_retry_owned_attempt_wire'))

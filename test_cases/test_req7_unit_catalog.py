@@ -970,6 +970,49 @@ print('COLD_SHARED_FIFO_ORIGINALS_NO_HANDLES_OR_AUTHORITY')
 
 
 class UnitCatalogTests(unittest.TestCase):
+    def test_native_count_catalog_borrow_uses_same_selection_without_second_issuer(self):
+        globals_,issuer=self.catalog_replay_api()
+        borrow=getattr(globals_,'_hold_native_catalog_write_replay',None)
+        self.assertTrue(callable(borrow),'fixed count path must borrow its already held original catalog')
+        from contextvars import copy_context
+        with ExitStack() as scope:
+            token=self.owner(scope);bound=binding()
+            self.module.register_pending_unit(token,bound,self.first)
+            globals_.prepare_global_unit(token,bound,self.first)
+            before=original_read_files(self.root); entered=[]
+            with issuer(token,bound,self.first) as outer:
+                with mock.patch.object(globals_,'_hold_native_catalog_replay',wraps=issuer) as issuing:
+                    with borrow(token,bound,self.first) as verify:
+                        entered.append('same-original-selected'); verify(); outer()
+                        stale_context=copy_context()
+                    self.assertEqual(0,issuing.call_count,'borrow must not reissue or recapture ALL originals')
+                outer()
+            self.assertEqual(['same-original-selected'],entered)
+            with self.assertRaises(globals_.GlobalAttemptHold):verify()
+            with self.assertRaises(globals_.GlobalAttemptHold):stale_context.run(verify)
+            self.assertEqual(before,original_read_files(self.root))
+
+    def test_native_count_catalog_borrow_rejects_different_selected_unit_before_count(self):
+        globals_,issuer=self.catalog_replay_api()
+        borrow=getattr(globals_,'_hold_native_catalog_write_replay',None)
+        self.assertTrue(callable(borrow),'held catalog membership alone cannot change the selected writer')
+        with ExitStack() as scope:
+            token=self.owner(scope);bound=binding()
+            self.module.register_pending_unit(token,bound,self.first)
+            self.module.register_pending_unit(token,bound,self.second)
+            for unit in (self.first,self.second):globals_.prepare_global_unit(token,bound,unit)
+            before=original_read_files(self.root);entered=[]
+            with issuer(token,bound,self.first) as outer:
+                with self.assertRaises(globals_.GlobalAttemptHold):
+                    with borrow(token,bound,self.second):entered.append(True)
+                with self.assertRaises(globals_.GlobalAttemptHold):
+                    with borrow(object(),bound,self.first):entered.append(True)
+                outer()
+            self.assertEqual([],entered)
+            self.assertEqual((0,0),tuple(globals_.inspect_global_unit(token,bound,unit).attempt_count
+                for unit in (self.first,self.second)))
+            self.assertEqual(before,original_read_files(self.root));self.assertFalse(list(self.root.rglob('CLAIM-*')))
+
     def catalog_replay_api(self):
         globals_=self.globals_api()
         api=getattr(globals_,'_hold_native_catalog_replay',None)
