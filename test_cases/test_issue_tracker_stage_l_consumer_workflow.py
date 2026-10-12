@@ -2460,6 +2460,183 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         self.assertEqual([],list((project/'.tracker/settings/outbox').iterdir()))
         observed.append('ETH&IB Switch:archived:current-cycle-compiler:registered')
 
+    def test_real_fresh_c6_all_switch_noops_close_without_catalog_or_audit_consumption(self):
+        self.native_no_send_expectation_failure=None
+        try:self._exercise_real_protected_three_panel_fixture(skip_history=False,native_current_no_send_probe=True)
+        except BaseException:
+            if self.native_no_send_expectation_failure is not None:raise self.native_no_send_expectation_failure
+            raise
+
+    def test_real_fresh_no_send_original_read_revocation_after_preparation_cleanup_refuses_return(self):
+        self.native_no_send_expectation_failure=None
+        try:self._exercise_real_protected_three_panel_fixture(skip_history=False,native_current_no_send_probe='tail-revoke')
+        except BaseException:
+            if self.native_no_send_expectation_failure is not None:raise self.native_no_send_expectation_failure
+            raise
+
+    def _verify_fresh_native_switch_no_send(self,committed,qualified,*,tail_revoke=False):
+        import tempfile
+        import socket
+        from test_cases.test_req7_spreadsheet_owner import load as load_owner,scoped_fixture
+        from test_cases.test_req7_enrollment_journal import load as load_enrollment
+        from test_cases.test_req7_global_attempt_journal import load as load_global
+        from test_cases.test_req7_nv_reservation import load as load_native
+        from test_cases.test_req7_unit_catalog import load as load_catalog
+        from test_cases.test_req7_remote_history_match import Req7OwnedHistoryMatchWorkflowTests,load as load_remote
+        from test_cases.test_req7_history_read_launcher import Req7HistoryReadLauncherWorkflowTests
+        from test_cases.test_req7_sdk_authentication import fresh_info
+        from test_cases.test_req7_sheets_read_decode import identity_response,response
+        from test_cases.test_req7_activity_discovery import reserved_switch_row,literal,sheet_document,insertion_document,exact_row_document
+        from monitor import issue_tracker_online_target as target
+        from monitor.issue_tracker_online_target import bind_online_target,freeze_target_allowlist
+        from monitor.issue_tracker_sdk_authentication import AuthenticatedToken
+        from monitor.issue_tracker_sheets_read_plan import prepare_template_identity_read
+        from monitor.issue_tracker_sheets_read_decode import decode_template_identity
+        from tools.project_contract import safe_load_global_yaml
+        project=Path(self.store.project_identity)
+        binding=bind_online_target(safe_load_global_yaml((project/'01-global.yaml').read_text(encoding='utf-8')),
+            freeze_target_allowlist(b'["synthetic_spreadsheet_id_0001"]\n'))
+        expected_keys=(('switch','leaf-a','fan','PSU1/FAN1'),('switch','nvsw01','asic_temp','ASIC1'))
+        self.assertEqual(tuple(sorted(expected_keys)),tuple(sorted(item.activity_key for item in qualified.candidates
+            if item.activity_key[0]=='switch')))
+        descriptions=(
+            '[MONITOR][fan][PSU1/FAN1] [fabric_source=template] PSU1/FAN1: state=fail',
+            # NVL device type is authoritative; the Ethernet template rule
+            # must not be projected onto this independent NVLink row.
+            '[MONITOR][asic_temp][ASIC1] [fabric_source=type] ASIC1: state=ok; current=75 C; max=70 C; critical=80 C')
+        rows=[reserved_switch_row(index) for index in range(2,4)]
+        for row,key,description in zip(rows,expected_keys,descriptions):
+            row.update({'F':literal(key[1]),'L':literal(description),'N':literal('New')})
+        discovery=sheet_document('ETH&IB Switch',rows,100)
+        occupancy=insertion_document('ETH&IB Switch',rows,100)
+        for document in (discovery,occupancy):document['sheets'][0]['properties']['sheetId']=101
+        documents={'template_identity':identity_response(),'metadata':{'matchedDeveloperMetadata':[]},
+            'activity':discovery,'insertion':occupancy,'history_tail':{'spreadsheetId':binding.spreadsheet_id,
+                'sheets':[{'properties':{'sheetId':105,'title':'Update_History','sheetType':'GRID',
+                    'gridProperties':{'rowCount':100,'columnCount':5}},'data':[{'startRow':2,'startColumn':0}]}]}}
+        with tempfile.TemporaryDirectory(prefix='req7-fresh-native-no-send-') as directory:
+            global_root=Path(directory).resolve()
+            state=global_root/'var/lib/http-ztp-container/issue-tracker';state.mkdir(parents=True,mode=0o700)
+            private_dir=global_root/'var/lib/http-ztp-container/service-account';private_dir.mkdir(mode=0o700)
+            private_dir.joinpath('issue-tracker-spreadsheet-whitelist.json').write_bytes(b'["synthetic_spreadsheet_id_0001"]\n')
+            private_dir.joinpath('issue-tracker-spreadsheet-whitelist.json').chmod(0o600)
+            credential_info=fresh_info();credential_info['project_id']='synthetic-cloud-project'
+            credential_path=private_dir/'cre.json';credential_path.write_bytes(json.dumps(credential_info).encode())
+            credential_path.chmod(0o600)
+            owner_module=load_owner();enrollment=load_enrollment();load_global()
+            native_module=load_native();load_catalog(reset_dependencies=False);load_remote()
+            from monitor import issue_tracker_local_commit as local,issue_tracker_remote_history_match as remote
+            from monitor import issue_tracker_history_read_launcher as launcher,issue_tracker_send_unit as compiler
+            from monitor import issue_tracker_credential_shape as credentials
+            native=Req7OwnedHistoryMatchWorkflowTests();native.root=global_root
+            native.path=global_root/'etc/ssl/certs/ca-certificates.crt';native.path.parent.mkdir(parents=True)
+            native.addCleanup=self.addCleanup
+            certificates=self._fixture_certificate_supplier(type(native).certificates)
+            native.certificates=lambda hostname='oauth2.googleapis.com':certificates(native,hostname)
+            issued=[];compiled=[];units=[]
+            real_read=launcher.OwnedProjectSheetsReadUnit.read_once
+            actual_compiler=compiler.freeze_observed_receipted_switch_unit
+            def compile_actual(*args,**kwargs):
+                unit=actual_compiler(*args,**kwargs)
+                try:
+                    self.assertEqual('NO_SEND',unit.outcome)
+                    self.assertEqual(7,len(issued),'target RED must follow seven genuine issued reads')
+                    self.assertEqual(('OBSERVED-SATISFIED-AT-READ',)*2,tuple(outcome for _key,outcome in unit.outcomes))
+                    self.assertEqual(committed.receipt.manifest_id,json.loads(unit.action_preimage)['manifest_id'])
+                    self.assertEqual((b'',None,0),(unit.wire_bytes,unit.fence_metadata_id,unit.history_rows_expected))
+                except AssertionError as exc:
+                    self.native_no_send_expectation_failure=exc
+                    print('NO_SEND_FIXTURE_COMPILER_RETURN',unit.outcome,json.loads(unit.action_preimage)['business'],flush=True)
+                    raise
+                compiled.append(unit)
+                print('NO_SEND_PHASE actual-C5/C6 compiler, seven original issued reads, all-NOOP, empty wire, no fence/History',flush=True)
+                return unit
+            def read(reader):
+                if reader._kind=='row':
+                    self.assertIn(reader._row,(3,4))
+                    document=exact_row_document('ETH&IB Switch',rows[reader._row-3],reader._row-1)
+                    document['sheets'][0]['properties']['sheetId']=101
+                else:document=documents[reader._kind]
+                body=response(document).data
+                reply=b'HTTP/1.1 200 OK\r\nContent-Length: '+str(len(body)).encode()+b'\r\nConnection: close\r\n\r\n'+body
+                with native.server(reply,hostname='sheets.googleapis.com',destination='sheets.googleapis.com') as (records,errors),ExitStack() as launched:
+                    port=socket.getaddrinfo('sheets.googleapis.com',443)[0][4][1]
+                    calls,children=native.intercept(launched,native.child_fixture(port),writer,sheet,binding)
+                    actual=real_read(reader)
+                self.assertEqual((1,1,(),0),(len(records),len(calls),tuple(errors),children[0].returncode))
+                issued.append((reader._kind,reader._row));return actual
+            locator=AuthenticatedToken('synthetic.private-locator',time.time()+3600)
+            identity=decode_template_identity(prepare_template_identity_read(binding,locator),response(identity_response()))
+            with local.writer_owner(project,self.publication) as writer,scoped_fixture(global_root,owner_module), \
+                    owner_module.spreadsheet_owner(binding) as sheet,ExitStack() as private:
+                private.enter_context(scoped_fixture(global_root,credentials))
+                private.enter_context(scoped_fixture(global_root,target))
+                auth,_path,_raw=Req7HistoryReadLauncherWorkflowTests.project_auth(native,private,owner_module,sheet,binding)
+                enrollment.prepare_enrollment_journal(sheet,binding,identity)
+                roots=(project/'.tracker',state)
+                def originals():return {str(path):(path.stat().st_ino,path.read_bytes())
+                    for root in roots for path in root.rglob('*') if path.is_file()}
+                before=originals();outbox=project/'.tracker/settings/outbox'
+                audits_before={path.name:(path.stat().st_ino,path.read_bytes()) for path in outbox.iterdir()}
+                self.assertTrue(audits_before,'the real K change remains pending, not an empty fixture')
+                original_pin=native_module._pin_catalog_prefix
+                original_tail=native_module._verify_nonallocating_project_read_tail
+                retained=[];revoked=[];fault_facts=[];target_holds=[];refused=False
+                def revoke_after_all_closes():
+                    record,fds=retained[0]
+                    self.assertFalse(native_module._ACTIVE_CATALOG_PREPARATIONS)
+                    for fd in fds:
+                        with self.assertRaises(OSError):os.fstat(fd)
+                    packet=record['project_read_tail'].packet
+                    self.assertIs(units[0],packet[-1]);self.assertIs(auth,packet[5])
+                    original_response=packet[6][0][3]
+                    with launcher._PROJECT_READ_GUARD:saved=launcher._PROJECT_READS.pop(original_response)
+                    revoked.append((original_response,saved))
+                    self.assertIs(auth,saved)
+                    fault_facts.append((not record['registered'],not native_module._ACTIVE_CATALOG_PREPARATIONS,
+                        original_response not in launcher._PROJECT_READS,len(fds)>0))
+                def pin(*args,**kwargs):
+                    if tail_revoke:kwargs['_project_proofs']['owner_tail'].callback(revoke_after_all_closes)
+                    return original_pin(*args,**kwargs)
+                def tail(record,state):
+                    try:return original_tail(record,state)
+                    except native_module.NvReservationHold:
+                        if revoked and retained and record is retained[0][0]:target_holds.append(True)
+                        raise
+                try:
+                    with mock.patch.object(native_module,'_pin_catalog_prefix',side_effect=pin), \
+                            mock.patch.object(native_module,'_verify_nonallocating_project_read_tail',side_effect=tail):
+                        with self._assertion_preserving_preparation(native_module.hold_catalog_nonallocating_preparation(
+                                writer,sheet,binding,identity,generation_id=committed.receipt.generation_id,
+                                publish_id=committed.receipt.published_sha256,sheet='ETH&IB Switch')) as prepared, \
+                                mock.patch.object(launcher.OwnedProjectSheetsReadUnit,'read_once',autospec=True,side_effect=read), \
+                                mock.patch.object(compiler,'freeze_observed_receipted_switch_unit',side_effect=compile_actual):
+                            with self._assertion_preserving_preparation(remote._hold_native_current_cycle_observed_switch_unit(
+                                    prepared,writer,sheet,binding,auth,_store=self.store,http_root=self.root)) as unit:
+                                self.assertIs(compiled[0],unit);units.append(unit)
+                                record=native_module._verify_catalog_preparation(prepared)
+                                self.assertFalse(record['registered']);self.assertIsNone(record['unit'])
+                                self.assertIsNone(record['origin']);self.assertIsNone(record['indexed'])
+                                self.assertEqual(set(),record['additions']);self.assertIsNone(record['appended'])
+                                retained.append((record,tuple(item[2] for held in (record['old'],record['current'])
+                                    for item in held.files)))
+                except native_module.NvReservationHold:
+                    if not tail_revoke:raise
+                    refused=True
+                finally:
+                    for original_response,saved in revoked:
+                        with launcher._PROJECT_READ_GUARD:launcher._PROJECT_READS[original_response]=saved
+                self.assertEqual(tail_revoke,refused)
+                if tail_revoke:
+                    self.assertEqual([(True,True,True,True)],fault_facts)
+                    self.assertEqual([True],target_holds,'unrelated cleanup HOLD is not target revocation proof')
+                self.assertEqual(before,originals(),'NO_SEND cannot create catalog/NV/INTENT/GLOBAL/COUNT/CLAIM')
+                self.assertEqual(audits_before,{path.name:(path.stat().st_ino,path.read_bytes()) for path in outbox.iterdir()})
+                self.assertFalse(native_module._ACTIVE_CATALOG_PREPARATIONS)
+            self.assertEqual(1,len(units));self.assertIs(compiled[0],units[0])
+            self.assertEqual([('template_identity',None),('metadata',None),('activity',None),('insertion',None),
+                ('row',4),('row',3),('history_tail',None)],issued)
+
     def test_native_original_settings_audit_receipt_rebind_after_count_refuses_fixed_local_request(self):
         self._native_original_launch_probe('receipt-rebind',settings_audit=True)
 
@@ -3554,7 +3731,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         retry_launch_probe=None,
         qualification_replay_probe=None,
         complete_preview_source_race=False,
-        complete_preview_cgi=False,
+        complete_preview_cgi=False, native_current_no_send_probe=False,
     ):
         from monitor.collection_ib_producer import (
             IbProducerAuthoritySnapshot, parse_ib_producer_authority,
@@ -3731,7 +3908,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                     'complete-after-archive-local-c6-native-current-compiler-issued-reads',
                     'complete-after-archive-local-c6-native-current-compiler-issued-reads-issued-tail',
                     'complete-after-archive-local-c6-native-current-compiler-receipt-tail'))
-            if manual_channel_bridge or complete_preview_probe or default_preparation:
+            if manual_channel_bridge or complete_preview_probe or default_preparation or native_current_no_send_probe:
                 root_template = self.root / "monitor/Issue_Tracker_Template_v1.xlsx"
                 root_template.parent.mkdir(parents=True, exist_ok=True)
                 root_template.write_bytes(self.template.read_bytes())
@@ -4131,6 +4308,8 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                 "template_contract_version": "v1",
                 "template_sha256": self.snapshot.workbook_sha256,
             }
+            if native_current_no_send_probe:
+                metadata.update(producer_version='stage-l-runtime-v1',template_contract_version='local-xlsx-v1')
             before_publication = tuple(sorted(self.publication.iterdir()))
             body, digest = freeze_prod_stage_l_manifest(
                 qualified, self.store, metadata=metadata,
@@ -4592,7 +4771,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             (project / "01-global.yaml").write_text(
                 "schema_version: 2\ncommon:\n  mgmt:\n"
                 "    issue-tracker:\n" + ("      status: enabled\n      spreadsheet_id: synthetic_spreadsheet_id_0001\n"
-                    if receipted_intent_probe else "      status: disabled\n")
+                    if receipted_intent_probe or native_current_no_send_probe else "      status: disabled\n")
                 + ("      publish_every_cycles: 3\n"
                    if manual_after_manual else ""),
                 encoding="utf-8",
@@ -4658,6 +4837,10 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             self.assertEqual(digest, committed.receipt.manifest_id)
             self.assertEqual(hashlib.sha256(committed.prepared.xlsx_bytes).hexdigest(),
                              committed.receipt.published_sha256)
+            if native_current_no_send_probe:
+                self._verify_fresh_native_switch_no_send(committed,qualified,
+                    tail_revoke=native_current_no_send_probe=='tail-revoke')
+                return
             if observed_cabling_insert_probe:
                 import tempfile
                 import monitor.issue_tracker_send_unit as compiler

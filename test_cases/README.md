@@ -3189,3 +3189,29 @@ RED. These tests do not close the final outer-owner boundary, bootstrap,
 three-sheet/default NEW/NO_SEND driver, whole REQ7 or current full/check.
 No existing automatic or field scenario is removed, skipped or weakened;
 REAL_ENV remains NOT RUN and approval remains runner-only.
+
+The fixed current-cycle Switch receiver also supports an actual all-NOOP
+NO_SEND result through that same nonallocating preparation. A separate byte
+coherence check is necessary only, not source/registration/send authority;
+send-intent remains WIRE-only. Only the context's original bound receiver
+packet can take the normal unregistered exit. A separate one-time issuance
+anchor retains the actual packet/unit identity between verifier calls and is
+checked again after delegated guards; an equal packet/unit or same-unit-id
+NO_SEND substitute is not a new issuance. Both strong references are revoked
+only after final cleanup verification. Its state must remain exactly
+zero-write before and after delegated original issuer/authentication guards
+and after all preparation cleanup: no registered=True fiction, catalog,
+origin/indexed unit, additions, append, NV, intent, COUNT or CLAIM. All original
+source/C6/K/compiler checks and unchanged read deadlines remain in force.
+Settings audits stay pending; there is no audit-only request or empty fence.
+
+Independent direct tests reject incoherent empty-wire/audit/zero-write state.
+The real fresh three-panel C5/C6 + OAuth + seven owned TLS-read workflow
+covers both normal all-NOOP exit with original files/outbox unchanged and
+actual original-read revocation after the preparation registry and FDs close.
+The negative records the target verifier's own HOLD, not an unrelated cleanup
+failure. Fixture setup/order/canonical-module errors are preserved separately
+from the phase-proven pre-fix RED. This does not close bootstrap, Cabling or
+the default three-sheet NEW driver/final outer-owner boundary, G1, whole REQ7
+or current full/check. REAL_ENV remains NOT RUN; no scenario is removed,
+skipped or weakened and the runner alone may update approval.

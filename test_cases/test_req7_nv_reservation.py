@@ -133,13 +133,108 @@ def recycled_outer_nv_directory(module, store, foreign):
 
 
 class Req7NvReservationDirectTests(unittest.TestCase):
+    def test_native_bound_packet_or_actual_unit_replacement_before_cleanup_is_rejected(self):
+        from test_cases.test_req7_send_unit import load as load_composer,inputs
+        from monitor import issue_tracker_history_read_launcher as reads,issue_tracker_token_launcher as tokens
+        module=load();args=inputs();composer=load_composer();wire=composer.freeze_send_unit(**args)
+        noop=composer.freeze_send_unit(**{**args,'business':tuple(
+            {**item,'observed_values':{'L':{'stringValue':'down'}}} for item in args['business'])})
+        self.assertEqual(wire.unit_id,noop.unit_id,'the actual source identity alone cannot distinguish NO_SEND')
+        for fault in ('equal-packet','equal-unit','no-send-substitution'):
+            with self.subTest(fault=fault):
+                writer=object();token=object();project=object();owner=object();auth=object();target=binding()
+                tail=module._NonallocatingProjectReadTail();prepared=module._CatalogNonallocatingPreparation(wire.unit_id)
+                shapes=(('template_identity',None,None),('metadata',None,None),
+                    ('activity','ETH&IB Switch',None),('insertion','ETH&IB Switch',None),
+                    ('row','ETH&IB Switch',3),('row','ETH&IB Switch',4),('history_tail',None,None))
+                images=tuple((*shape,object()) for shape in shapes)
+                record={'project_read_tail':tail,'nonallocating_writer':writer,'token':token,'binding':target,
+                    'nonallocating_owner':project,'owner':owner,'registered':False,'failed':False,
+                    'budget':SimpleNamespace(failed=False,pending=False),'unit':None,'origin':None,
+                    'indexed':None,'settings':None,'additions':set(),'appended':None}
+                with mock.patch.dict(module._ACTIVE_CATALOG_PREPARATIONS,{prepared:record}), \
+                        mock.patch.object(module.local,'_owner',return_value=project), \
+                        mock.patch.object(module.ownership,'_validated_owner',return_value=owner), \
+                        mock.patch.object(tokens,'require_current_owned_project_token'), \
+                        mock.patch.object(reads,'require_current_owned_project_read'):
+                    module._bind_nonallocating_project_read_tail(prepared,writer,token,target,auth,images,wire)
+                    original=tail.packet;self.assertIs(wire,original[-1])
+                    self.assertIsNone(module._verify_nonallocating_project_read_tail(record,tail))
+                    changed=(wire if fault=='equal-packet' else replace(wire) if fault=='equal-unit' else noop)
+                    tail.packet=(*original[:-1],changed)
+                    self.assertIsNot(original,tail.packet)
+                    if fault!='no-send-substitution':self.assertEqual(original,tail.packet)
+                    with self.assertRaises(module.NvReservationHold):
+                        module._verify_nonallocating_project_read_tail(record,tail)
+
+    def test_native_no_send_coherence_is_separate_from_wire_or_send_authority(self):
+        module=load();verify=getattr(module,'_verify_nonallocating_no_send_image',None)
+        self.assertTrue(callable(verify),'actual all-NOOP preparation needs a separate NO_SEND coherence check')
+        from test_cases.test_req7_send_unit import load as load_composer, inputs
+        args=inputs()
+        args['business']=tuple({**item,'observed_values':{'L':{'stringValue':'down'}}}
+            for item in args['business'])
+        unit=load_composer().freeze_send_unit(**args)
+        self.assertEqual('NO_SEND',unit.outcome)
+        self.assertEqual(('OBSERVED-SATISFIED-AT-READ',)*2,tuple(value for _key,value in unit.outcomes))
+        self.assertEqual(b'',unit.wire_bytes);self.assertEqual(0,unit.history_rows_expected)
+        self.assertIsNone(unit.fence_metadata_id)
+        audited=load_composer().freeze_send_unit(**{**args,'audits':(
+            {'event_id':'settings:pending-no-send','recorded_at_utc':'2026-10-08T10:00:00Z','details':'K=3'},)})
+        self.assertEqual(('settings:pending-no-send',),audited.pending_audit_ids)
+        self.assertEqual((b'',0),(audited.wire_bytes,audited.history_rows_expected))
+        with mock.patch('socket.socket') as network:
+            self.assertIsNone(verify(unit))
+            self.assertIsNone(verify(audited))
+            for candidate in (replace(unit,wire_bytes=b'{}'),replace(unit,fence_metadata_id=1),
+                              replace(unit,outcome='WIRE-CANDIDATE'),replace(unit,history_rows_expected=True),
+                              replace(audited,pending_audit_ids=())):
+                with self.subTest(candidate=candidate.outcome),self.assertRaises(module.NvReservationHold):
+                    verify(candidate)
+        network.assert_not_called()
+        from monitor.issue_tracker_send_intent import _projection,SendIntentHold
+        with self.assertRaises(SendIntentHold):_projection(unit)
+        with self.assertRaises(module.NvReservationHold):
+            module._verify_nonallocating_no_send_preparation({'registered':True},object())
+
+    def test_native_no_send_zero_write_state_is_rechecked_after_original_read_guards(self):
+        from test_cases.test_req7_send_unit import load as load_composer,inputs
+        from monitor import issue_tracker_history_read_launcher as reads,issue_tracker_token_launcher as tokens
+        module=load();args=inputs()
+        args['business']=tuple({**item,'observed_values':{'L':{'stringValue':'down'}}} for item in args['business'])
+        unit=load_composer().freeze_send_unit(**args)
+        for field,value in (('registered',True),('additions',{'foreign'}),('origin',object())):
+            with self.subTest(field=field):
+                writer=object();token=object();project=object();owner=object();auth=object();target=binding()
+                tail=module._NonallocatingProjectReadTail();tail.bound=True
+                shapes=(('template_identity',None,None),('metadata',None,None),
+                    ('activity','ETH&IB Switch',None),('insertion','ETH&IB Switch',None),
+                    ('row','ETH&IB Switch',3),('row','ETH&IB Switch',4),('history_tail',None,None))
+                tail.packet=(writer,token,target,project,owner,auth,tuple((*shape,object()) for shape in shapes),unit)
+                tail._issued_packet=tail.packet
+                record={'project_read_tail':tail,'nonallocating_writer':writer,'token':token,'binding':target,
+                    'nonallocating_owner':project,'owner':owner,'registered':False,'failed':False,
+                    'budget':SimpleNamespace(failed=False,pending=False),'unit':None,'origin':None,
+                    'indexed':None,'settings':None,'additions':set(),'appended':None}
+                checked=[]
+                def guard(*args):
+                    checked.append(True)
+                    if len(checked)==2:record[field]=value
+                with mock.patch.object(module.local,'_owner',return_value=project), \
+                        mock.patch.object(module.ownership,'_validated_owner',return_value=owner), \
+                        mock.patch.object(tokens,'require_current_owned_project_token',side_effect=guard), \
+                        mock.patch.object(reads,'require_current_owned_project_read') as read_guard:
+                    with self.assertRaises(module.NvReservationHold):
+                        module._verify_nonallocating_no_send_preparation(record,tail)
+                self.assertEqual([True,True],checked);self.assertEqual(7,read_guard.call_count)
+
     def test_native_project_read_tail_rechecks_original_state_after_delegated_guards(self):
         # Isolate only IO guards here; the real issuer/cleanup workflow is separate.
         from test_cases.test_req7_send_unit import load as load_composer, inputs
         from monitor import issue_tracker_history_read_launcher as reads
         from monitor import issue_tracker_token_launcher as tokens
         module=load();unit=load_composer().freeze_send_unit(**inputs())
-        for fault in ('lost-slot','bound-revoked','equal-valued-new-packet'):
+        for fault in ('lost-slot','bound-revoked','equal-valued-new-packet','issued-anchor-revoked'):
             with self.subTest(fault=fault):
                 writer=object();token=object();project=object();owner=object();auth=object()
                 target=binding();tail=module._NonallocatingProjectReadTail()
@@ -149,7 +244,7 @@ class Req7NvReservationDirectTests(unittest.TestCase):
                     ('history_tail',None,None))
                 images=tuple((*shape,object()) for shape in shapes)
                 packet=(writer,token,target,project,owner,auth,images,unit)
-                tail.packet=packet;tail.bound=True
+                tail.packet=packet;tail._issued_packet=packet;tail.bound=True
                 record={'project_read_tail':tail,'nonallocating_writer':writer,'token':token,
                     'binding':target,'nonallocating_owner':project,'owner':owner}
                 checked=[]
@@ -158,6 +253,7 @@ class Req7NvReservationDirectTests(unittest.TestCase):
                     if len(checked)==2:
                         if fault=='lost-slot':record.pop('project_read_tail')
                         elif fault=='bound-revoked':tail.bound=False
+                        elif fault=='issued-anchor-revoked':tail._issued_packet=None
                         else:
                             replacement=tuple(list(packet))
                             self.assertEqual(packet,replacement)

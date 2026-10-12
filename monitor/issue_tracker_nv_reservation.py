@@ -270,6 +270,81 @@ class _NonallocatingProjectReadTail:
     """Context-owned original observations, never a caller callback/permit."""
     packet: object = field(default=None, repr=False)
     bound: bool = False
+    _issued_packet: object = field(default=None, init=False, repr=False)
+
+
+def _verify_nonallocating_no_send_image(unit):
+    """Necessary NO_SEND byte coherence only, never source/send authority."""
+    from monitor import issue_tracker_send_unit as compiler
+    try:
+        if (type(unit) is not compiler.FrozenSendUnit or unit.outcome!='NO_SEND'
+                or type(unit.wire_bytes) is not bytes or unit.wire_bytes!=b''
+                or unit.wire_sha256!=hashlib.sha256(b'').hexdigest()
+                or unit.fence_metadata_id is not None
+                or type(unit.history_rows_expected) is not int or unit.history_rows_expected!=0
+                or type(unit.action_preimage) is not bytes
+                or not 1<=len(unit.action_preimage)<=compiler._MAX_BODY
+                or hashlib.sha256(unit.action_preimage).hexdigest()!=unit.action_digest):raise NvReservationHold()
+        for digest in (unit.unit_id,unit.wire_sha256,unit.action_digest,unit.outcome_mapping_sha256):
+            compiler._digest(digest)
+        action=local._json(unit.action_preimage,{'identity','manifest_id','history_sheet_id',
+            'target_nonce','history_nonce','preread_sha256','business','audits','outcomes','decisions'})
+        identity=action['identity']
+        if (type(identity) is not dict or set(identity)!={'schema_version','generation_id','publish_id',
+                'spreadsheet_id','sheet','sheet_id'} or type(identity['schema_version']) is not int
+                or identity['schema_version']!=1 or identity['sheet'] not in compiler._FAMILY
+                or type(identity['spreadsheet_id']) is not str
+                or re.fullmatch(r'[A-Za-z0-9_-]{20,4096}',identity['spreadsheet_id']) is None
+                or hashlib.sha256(local._canonical(identity)).hexdigest()!=unit.unit_id):raise NvReservationHold()
+        compiler._generation_identity(identity['generation_id'])
+        if compiler._identifier(identity['sheet_id'])==compiler._identifier(action['history_sheet_id']):
+            raise NvReservationHold()
+        for digest in (identity['publish_id'],action['manifest_id'],action['target_nonce'],
+                action['history_nonce'],action['preread_sha256']):compiler._digest(digest)
+        outcomes=action['outcomes'];decisions=action['decisions'];audits=action['audits']
+        if (type(action['business']) is not list or action['business']
+                or any(type(items) is not list or len(items)>1000 for items in (outcomes,decisions,audits))
+                or not outcomes or len(decisions)!=len(outcomes) or type(unit.outcomes) is not tuple
+                or tuple(tuple(pair) for pair in outcomes)!=unit.outcomes
+                or any(type(pair) is not tuple for pair in unit.outcomes)
+                or hashlib.sha256(local._canonical(outcomes)).hexdigest()!=unit.outcome_mapping_sha256
+                or type(unit.pending_audit_ids) is not tuple):raise NvReservationHold()
+        seen=set()
+        for pair,decision in zip(outcomes,decisions):
+            if (type(pair) is not list or len(pair)!=2 or type(pair[0]) is not str or not pair[0]
+                    or pair[0] in seen or pair[1]!='OBSERVED-SATISFIED-AT-READ'
+                    or type(decision) is not dict or set(decision)!={'operation_id','outcome','intended_sha256'}
+                    or (decision['operation_id'],decision['outcome'])!=tuple(pair)):raise NvReservationHold()
+            compiler._digest(decision['intended_sha256']);seen.add(pair[0])
+        for item in audits:
+            if (type(item) is not dict or set(item)!={'event_id','recorded_at_utc','details'}
+                    or item['event_id'] in seen):raise NvReservationHold()
+            compiler._text(item['event_id']);compiler._text(item['details'])
+            compiler._timestamp(item['recorded_at_utc']);seen.add(item['event_id'])
+        if tuple(item['event_id'] for item in audits)!=unit.pending_audit_ids:raise NvReservationHold()
+    except Exception:raise NvReservationHold() from None
+
+
+def _verify_nonallocating_no_send_state(record,tail,packet):
+    # Recheck before AND after delegated original-read guards. No mutable
+    # cancel flag or registered=True fiction substitutes for zero writes.
+    if (record.get('project_read_tail') is not tail or tail.bound is not True or tail.packet is not packet
+            or record['registered'] is not False or record['failed'] is not False
+            or record['budget'].failed or record['budget'].pending
+            or record['unit'] is not None or record['origin'] is not None or record['indexed'] is not None
+            or record['settings'] is not None or type(record['additions']) is not set or record['additions']
+            or record['appended'] is not None):raise NvReservationHold()
+
+
+def _verify_nonallocating_no_send_preparation(record,tail):
+    # Called only by the actual preparation's normal unregistered exit. Its
+    # original context state must already bind the fixed receiver's result.
+    try:
+        if (type(tail) is not _NonallocatingProjectReadTail or tail.bound is not True
+                or type(tail.packet) is not tuple or len(tail.packet)!=8
+                or tail.packet[-1].outcome!='NO_SEND'):raise NvReservationHold()
+        _verify_nonallocating_project_read_tail(record,tail)
+    except Exception:raise NvReservationHold() from None
 
 
 def _verify_nonallocating_project_read_tail(record, tail):
@@ -278,10 +353,11 @@ def _verify_nonallocating_project_read_tail(record, tail):
     try:
         if (type(tail) is not _NonallocatingProjectReadTail
                 or record.get('project_read_tail') is not tail): raise NvReservationHold()
-        if tail.bound is False and tail.packet is None:return
+        if tail.bound is False and tail.packet is None and tail._issued_packet is None:return
         if tail.bound is not True or type(tail.packet) is not tuple or len(tail.packet)!=8:
             raise NvReservationHold()
         original_packet=tail.packet
+        if original_packet is not tail._issued_packet:raise NvReservationHold()
         writer,token,binding,project,owner,authentication,images,unit=original_packet
         if (writer is not record['nonallocating_writer'] or token is not record['token']
                 or binding!=record['binding'] or project is not record['nonallocating_owner']
@@ -290,7 +366,11 @@ def _verify_nonallocating_project_read_tail(record, tail):
         from monitor.issue_tracker_send_intent import _projection
         from monitor.issue_tracker_history_read_launcher import require_current_owned_project_read
         from monitor.issue_tracker_token_launcher import require_current_owned_project_token
-        _projection(unit)
+        no_send=unit.outcome=='NO_SEND'
+        if no_send:
+            _verify_nonallocating_no_send_image(unit)
+            _verify_nonallocating_no_send_state(record,tail,original_packet)
+        else:_projection(unit)
         action=local._json(unit.action_preimage)
         if action['identity']['sheet']!='ETH&IB Switch':raise NvReservationHold()
         # One original row read per actual manifest outcome, including NOOP;
@@ -315,7 +395,8 @@ def _verify_nonallocating_project_read_tail(record, tail):
         if (local._owner(writer) is not project
                 or ownership._validated_owner(token,binding) is not owner):raise NvReservationHold()
         if (record.get('project_read_tail') is not tail or tail.bound is not True
-                or tail.packet is not original_packet):raise NvReservationHold()
+                or tail.packet is not original_packet or tail._issued_packet is not original_packet):raise NvReservationHold()
+        if no_send:_verify_nonallocating_no_send_state(record,tail,original_packet)
     except Exception:raise NvReservationHold() from None
 
 
@@ -328,9 +409,13 @@ def _bind_nonallocating_project_read_tail(prepared,writer,token,binding,authenti
                 or record['nonallocating_writer'] is not writer or record['token'] is not token
                 or record['binding']!=binding or prepared.unit_id!=unit.unit_id):raise NvReservationHold()
         tail=record['project_read_tail']
-        if type(tail) is not _NonallocatingProjectReadTail or tail.bound is not False or tail.packet is not None:
+        if (type(tail) is not _NonallocatingProjectReadTail or tail.bound is not False
+                or tail.packet is not None or tail._issued_packet is not None):
             raise NvReservationHold()
         tail.packet=(writer,token,binding,record['nonallocating_owner'],record['owner'],authentication,images,unit)
+        # Keep the original binding separately from the live record slot:
+        # replacement BETWEEN verifier calls is not a new original issuance.
+        tail._issued_packet=tail.packet
         tail.bound=True
         _verify_nonallocating_project_read_tail(record,tail)
     except Exception:raise NvReservationHold() from None
@@ -391,7 +476,7 @@ def hold_catalog_nonallocating_preparation(writer_token, token, binding, identit
         _verify_catalog_preparation(prepared)
         yield prepared
         _verify_catalog_preparation(prepared)
-        if not record['registered']: raise NvReservationHold()
+        if not record['registered']:_verify_nonallocating_no_send_preparation(record,read_tail)
     except BaseException as exc:
         if isinstance(exc, Exception): failed = True
         else: primary = exc
@@ -434,6 +519,7 @@ def hold_catalog_nonallocating_preparation(writer_token, token, binding, identit
             # slot from silently downgrading a bound tail to legacy. Revoke all
             # strong references only AFTER that final check, even on failure.
             read_tail.packet=None
+            read_tail._issued_packet=None
     if primary is not None:
         if cleanup_problem is not None and cleanup_problem is not primary: raise primary from cleanup_problem
         raise primary
