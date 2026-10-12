@@ -40,6 +40,43 @@ def load():
 
 
 class Req7RemoteHistoryMatchDirectTests(unittest.TestCase):
+    def test_native_nv_issued_columns_match_both_retained_originals_without_new_read_or_capacity_authority(self):
+        module=load();verify=getattr(module,'_verify_native_issued_nv_columns',None)
+        self.assertTrue(callable(verify),'both original issued columns need a fixed precompiler check')
+        from monitor import issue_tracker_nv_reservation as native,issue_tracker_history_read_launcher as reads,issue_tracker_token_launcher as tokens
+        eth=SimpleNamespace(data=b'original ETH column image');ib=SimpleNamespace(data=b'original IB column image')
+        observation=SimpleNamespace(eth_source_sha256=hashlib.sha256(eth.data).hexdigest(),
+            ib_source_sha256=hashlib.sha256(ib.data).hexdigest())
+        prepared=native._CatalogNvPreparation(observation);writer=object();token=object();auth=object();target=binding()
+        record={'token':token,'binding':target}
+        with mock.patch.object(native,'_verify_catalog_preparation',return_value=record), \
+                mock.patch.object(reads,'require_current_owned_project_read') as guard, \
+                mock.patch.object(tokens,'require_current_owned_project_token') as authenticate, \
+                mock.patch.object(reads.OwnedProjectSheetsReadUnit,'read_once') as acquire:
+            self.assertIsNone(verify(prepared,writer,token,target,auth,eth,ib))
+            self.assertEqual([mock.call(writer,token,target,eth,auth,read_kind='activity',sheet='ETH Cabling'),
+                mock.call(writer,token,target,ib,auth,read_kind='activity',sheet='IB Cabling')],guard.call_args_list)
+            self.assertEqual(2,authenticate.call_count);acquire.assert_not_called()
+            for first,second in ((SimpleNamespace(data=b'changed ETH column image'),ib),
+                                 (eth,SimpleNamespace(data=b'changed IB column image')),(ib,eth)):
+                with self.subTest(pair=(first.data,second.data)),self.assertRaises(module.RemoteHistoryHold):
+                    verify(prepared,writer,token,target,auth,first,second)
+
+    def test_native_nv_cabling_issued_compiler_refuses_unissued_preparation_without_caller_source_plans(self):
+        import inspect
+        module=load();entry=getattr(module,'_hold_native_current_cycle_observed_nv_cabling_unit',None)
+        self.assertTrue(callable(entry),'actual two-original-column NV compiler receiver is missing')
+        self.assertFalse({'sheet','keys','rows','plans','qualified','unit','compiler','eth_plan','ib_plan'}
+            & set(inspect.signature(entry).parameters))
+        from monitor import issue_tracker_history_read_launcher as reads,issue_tracker_token_launcher as tokens
+        entered=[]
+        with mock.patch.object(reads.OwnedProjectSheetsReadUnit,'read_once') as acquire, \
+                mock.patch.object(tokens,'require_current_owned_project_token') as auth:
+            with self.assertRaises(module.RemoteHistoryHold):
+                with entry(object(),object(),object(),binding(),object(),_store=object(),http_root=self.root):
+                    entered.append(True)
+        self.assertEqual([],entered);acquire.assert_not_called();auth.assert_not_called()
+
     def test_native_cabling_issued_compiler_derives_family_and_refuses_unissued_preparation_before_reads(self):
         import inspect
         module=load();entry=getattr(module,'_hold_native_current_cycle_observed_cabling_unit',None)

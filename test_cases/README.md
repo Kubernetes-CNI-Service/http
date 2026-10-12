@@ -3249,6 +3249,37 @@ factory integration, bootstrap, the default three-sheet NEW driver, the
 final outer-owner boundary, G1, whole REQ7 or current full/check proof.
 REAL_ENV remains NOT RUN and approval remains runner-only.
 
+The fixed Cabling NV receiver takes only a genuine live NV preparation
+and derives its unique target from actual current C6. Both ETH/IB activity
+images are acquired through actual project issuers and compared separately
+with the complete retained original columns. No caller keys/plans or new
+reservation are accepted. Only this NV branch may append missing/Closed
+keys with their original reserved IDs; the nonallocating branch still
+refuses them. Direct and fresh C5/C6/OAuth/TLS workflows cover both families,
+literal NV40000 insertion above an independently authored NV39999 seed,
+and actual other-column drift to NV49999. Target-stage refusal is proved
+while both issuers/authentication remain valid, before insertion/History/
+compiler/registration, with original reserved IDs and NV bytes unchanged.
+
+The receiver binds its actual WIRE unit, both column issuers, remaining
+read roles, authentication, reservation observation and outer owners once
+to the preparation's original context-local packet. Semantic preparation
+authority is revoked and every original cleanup is attempted before the
+final read/authentication tail, with unchanged original deadlines. Packet,
+observation and column coherence are checked before and after delegated
+guards. Actual post-cleanup other-column issuer revocation refuses without
+undoing completed registration or changing original IDs. Independent RED
+also caught a final authentication-return column mutation missed by an
+entry-only body check. NV remains WIRE-only and cannot cancel as NO_SEND.
+Unbound standalone preparations keep their existing contract. An original
+once-issued context marker survives clearing the packet and record slots,
+so a previously bound receiver cannot be downgraded into legacy; the marker
+is not cancellation, a new issuer or send authority. Source/
+fixture errors, target RED and complete GREEN remain distinct evidence.
+These are necessary local receiving/cleanup slices, not bootstrap, default
+three-sheet NEW, final outer-owner cleanup, G1, whole REQ7 or current
+full/check. Existing assertions, deadlines and field scenarios remain.
+
 Independent direct tests reject incoherent empty-wire/audit/zero-write state.
 The real fresh three-panel C5/C6 + OAuth + seven owned TLS-read workflow
 covers both normal all-NOOP exit with original files/outbox unchanged and

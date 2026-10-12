@@ -903,10 +903,47 @@ def _hold_native_current_cycle_observed_cabling_unit(prepared,writer_token,owner
         yield unit
 
 
+def _verify_native_issued_nv_columns(prepared,writer_token,owner_token,binding,authentication,eth_response,ib_response):
+    """Necessary retained-column equality; no allocation/read/NEW authority."""
+    from monitor import issue_tracker_nv_reservation as native
+    from monitor.issue_tracker_history_read_launcher import require_current_owned_project_read
+    from monitor.issue_tracker_token_launcher import require_current_owned_project_token
+    try:
+        record=native._verify_catalog_preparation(prepared)
+        if (type(prepared) is not native._CatalogNvPreparation or record['token'] is not owner_token
+                or record['binding']!=binding):raise RemoteHistoryHold()
+        original=prepared.observation
+        require_current_owned_project_token(owner_token,binding,authentication)
+        for sheet,completion in (('ETH Cabling',eth_response),('IB Cabling',ib_response)):
+            require_current_owned_project_read(writer_token,owner_token,binding,completion,authentication,
+                read_kind='activity',sheet=sheet)
+        if tuple(hashlib.sha256(item.data).hexdigest() for item in (eth_response,ib_response))!=(
+                original.eth_source_sha256,original.ib_source_sha256):raise RemoteHistoryHold()
+        if (native._verify_catalog_preparation(prepared) is not record or prepared.observation is not original
+                or record['token'] is not owner_token or record['binding']!=binding):raise RemoteHistoryHold()
+        require_current_owned_project_token(owner_token,binding,authentication)
+    except Exception:raise RemoteHistoryHold() from None
+
+
+@contextmanager
+def _hold_native_current_cycle_observed_nv_cabling_unit(prepared,writer_token,owner_token,binding,authentication,*,
+                                                        _store,http_root):
+    """Fixed current Cabling insertion receiver under genuine retained NV IDs.
+
+    The other original Cabling column is issued and checked too. No caller
+    family, key, plan, reservation or fallback from nonallocating reception.
+    This compiler edge is not G1, COUNT, send or preparation-tail completion.
+    """
+    with _hold_native_current_cycle_observed_nonallocating_unit(prepared,writer_token,owner_token,binding,
+            authentication,_store=_store,http_root=http_root,_sheets=('ETH Cabling','IB Cabling'),
+            _native_nv=True) as unit:
+        yield unit
+
+
 @contextmanager
 def _hold_native_current_cycle_observed_nonallocating_unit(prepared,writer_token,owner_token,binding,authentication,*,
-                                                           _store,http_root,_sheets):
-    """Acquire fixed issued nonallocating images under current C5/C6 originals.
+                                                           _store,http_root,_sheets,_native_nv=False):
+    """Acquire fixed issued images under current C5/C6 and preparation originals.
 
     No caller plans, rows, generation, qualified source, metadata inventory or
     compiler callback. This constructs a candidate, never COUNT/send or G1 GO;
@@ -923,9 +960,11 @@ def _hold_native_current_cycle_observed_nonallocating_unit(prepared,writer_token
     try:
         record=native._verify_catalog_preparation(prepared)
         if (_sheets not in (('ETH&IB Switch',),('ETH Cabling','IB Cabling'))
-                or type(prepared) is not native._CatalogNonallocatingPreparation
+                or type(_native_nv) is not bool or _native_nv and _sheets!=('ETH Cabling','IB Cabling')
+                or type(prepared) is not (native._CatalogNvPreparation if _native_nv else native._CatalogNonallocatingPreparation)
                 or record['token'] is not owner_token or record['binding']!=binding
-                or record['nonallocating_writer'] is not writer_token):raise RemoteHistoryHold()
+                or not _native_nv and record['nonallocating_writer'] is not writer_token):raise RemoteHistoryHold()
+        prepared_unit_id=prepared.observation.unit_id if _native_nv else prepared.unit_id
         acquired=[]
         def verify_reads():
             require_current_owned_project_token(owner_token,binding,authentication)
@@ -966,7 +1005,7 @@ def _hold_native_current_cycle_observed_nonallocating_unit(prepared,writer_token
                     settings,whitelist,whitelist.workbook_sha256) for generation in receipts.generation_ids)
                 selected=tuple((original,sheet) for original in originals for sheet in _sheets
                     if native._nonallocating_identity(owner_token,binding,record['identity'],
-                        original[0],original[1],sheet)[0]==prepared.unit_id)
+                        original[0],original[1],sheet)[0]==prepared_unit_id)
                 if len(selected)!=1 or selected[0][0][2]!=manifest_id:raise RemoteHistoryHold()
                 original,sheet=selected[0]
                 family=compiler._FAMILY[sheet]
@@ -984,6 +1023,11 @@ def _hold_native_current_cycle_observed_nonallocating_unit(prepared,writer_token
                     for item in document.get('matchedDeveloperMetadata',[]))
                 sid=dict(identity.sheet_ids)[sheet]
                 discovery_plan,discovery_response=read('activity',sheet=sheet)
+                if _native_nv:
+                    other_sheet='IB Cabling' if sheet=='ETH Cabling' else 'ETH Cabling'
+                    _other_plan,other_response=read('activity',sheet=other_sheet)
+                    columns=(discovery_response,other_response) if sheet=='ETH Cabling' else (other_response,discovery_response)
+                    _verify_native_issued_nv_columns(prepared,writer_token,owner_token,binding,authentication,*columns)
                 occupancy_plan,occupancy_response=read('insertion',sheet=sheet)
                 occupancy,row_count,_digest=decode._insertion_sheet_image(occupancy_plan,occupancy_response,
                     sheet_id=sid,title=sheet,target=binding.spreadsheet_id)
@@ -998,16 +1042,18 @@ def _hold_native_current_cycle_observed_nonallocating_unit(prepared,writer_token
                     else:
                         # A genuine nonallocating Cabling scope cannot invent
                         # missing IDs or reinterpret Closed as a free row.
-                        if sheet!='ETH&IB Switch':raise RemoteHistoryHold()
-                        index=next((index for index in range(2,row_count) if index not in reserved
-                            and all(cells[(index,column)]==() for column in columns)),None)
-                        if index is None:raise RemoteHistoryHold()
-                    if index in reserved:raise RemoteHistoryHold()
-                    row_plan,row_response=read('row',sheet=sheet,row=index+1)
+                        if sheet!='ETH&IB Switch' and not _native_nv:raise RemoteHistoryHold()
+                        if _native_nv:index=None
+                        else:
+                            index=next((index for index in range(2,row_count) if index not in reserved
+                                and all(cells[(index,column)]==() for column in columns)),None)
+                            if index is None:raise RemoteHistoryHold()
+                    if index is not None and index in reserved:raise RemoteHistoryHold()
+                    row_plan,row_response=(read('row',sheet=sheet,row=index+1) if index is not None else (None,None))
                     business.append({'operation_id':operation['operation_id'],'discovery_plan':discovery_plan,
                         'discovery_response':discovery_response,'occupancy_plan':occupancy_plan,
                         'occupancy_response':occupancy_response,'row_plan':row_plan,'row_response':row_response})
-                    reserved.append(index)
+                    if index is not None:reserved.append(index)
                 history_plan,history_response=read('history_tail')
                 freeze=(compiler.freeze_observed_receipted_switch_unit if sheet=='ETH&IB Switch'
                     else compiler.freeze_observed_receipted_cabling_unit)
@@ -1015,8 +1061,15 @@ def _hold_native_current_cycle_observed_nonallocating_unit(prepared,writer_token
                 unit=freeze(qualified,_store,**context,**family_options,
                     local_generation_id=original[0],business_reads=tuple(business),history_plan=history_plan,
                     history_response=history_response,spreadsheet_token=owner_token,binding=binding,identity=identity,
-                    occupied_metadata_ids=occupied,_unit_preparation=prepared)
-                native._bind_nonallocating_project_read_tail(prepared,writer_token,owner_token,binding,
+                    occupied_metadata_ids=occupied,**({'_nv_preparation':prepared} if _native_nv else {'_unit_preparation':prepared}))
+                if _native_nv:
+                    # Existing actual reservation comparison remains WIRE-only;
+                    # an NV preparation never gains NO_SEND cancellation.
+                    if native._catalog_nv_compiled_observation(prepared,owner_token,binding,unit)!=prepared.observation:
+                        raise RemoteHistoryHold()
+                    native._bind_nv_project_read_tail(prepared,writer_token,owner_token,binding,
+                        authentication,tuple(acquired),unit)
+                else:native._bind_nonallocating_project_read_tail(prepared,writer_token,owner_token,binding,
                     authentication,tuple(acquired),unit)
                 verify_reads();yield unit;verify_reads()
     except Exception:

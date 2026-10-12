@@ -273,6 +273,93 @@ class _NonallocatingProjectReadTail:
     _issued_packet: object = field(default=None, init=False, repr=False)
 
 
+@dataclass(eq=False)
+class _NvProjectReadTail(_NonallocatingProjectReadTail):
+    """Actual NV receiver packet only; never cancellation or a send permit."""
+    _ever_bound: bool = field(default=False, init=False, repr=False)
+
+
+def _verify_nv_project_read_tail(record,tail):
+    # No closed NV/K/catalog descriptor is borrowed here. Only the original
+    # outer owners and actual auth/read issuers survive all preparation closes.
+    try:
+        if type(tail) is not _NvProjectReadTail or record.get('nv_project_read_tail') is not tail:
+            raise NvReservationHold()
+        if tail.bound is False and tail.packet is None and tail._issued_packet is None:
+            if (tail._ever_bound is False and record['nv_read_writer'] is None
+                    and record['nv_read_owner'] is None and record['nv_read_observation'] is None):return
+            raise NvReservationHold()
+        packet=tail.packet
+        if (tail._ever_bound is not True or tail.bound is not True or type(packet) is not tuple
+                or len(packet)!=9 or packet is not tail._issued_packet):
+            raise NvReservationHold()
+        writer,token,binding,project,owner,authentication,images,unit,observation=packet
+        def verify_packet():
+            if (record.get('nv_project_read_tail') is not tail or tail._ever_bound is not True or tail.bound is not True
+                    or tail.packet is not packet or tail._issued_packet is not packet
+                    or writer is not record['nv_read_writer'] or project is not record['nv_read_owner']
+                    or token is not record['token'] or binding!=record['binding'] or owner is not record['owner']
+                    or observation is not record['nv_read_observation']
+                    or local._owner(writer) is not project
+                    or ownership._validated_owner(token,binding) is not owner):raise NvReservationHold()
+        verify_packet()
+        # WIRE-only and the exact reserved IDs remain necessary even after
+        # semantic preparation authority has been revoked. Never turn a
+        # retained reservation into NO_SEND or a fresh allocation.
+        if unit.unit_id!=observation.unit_id or _unit_insertions(unit)!=observation.reservations:
+            raise NvReservationHold()
+        action=local._json(unit.action_preimage);sheet=action['identity']['sheet']
+        if sheet not in _FAMILIES:raise NvReservationHold()
+        other='IB Cabling' if sheet=='ETH Cabling' else 'ETH Cabling'
+        rows=len(unit.outcomes)-len(observation.reservations)
+        if (type(images) is not tuple or rows<0 or len(images)!=6+rows
+                or any(type(item) is not tuple or len(item)!=4 for item in images)):
+            raise NvReservationHold()
+        shape=tuple(item[:3] for item in images)
+        if (shape[:5]!=(('template_identity',None,None),('metadata',None,None),
+                ('activity',sheet,None),('activity',other,None),('insertion',sheet,None))
+                or shape[-1]!=('history_tail',None,None)
+                or any(kind!='row' or target!=sheet or type(row) is not int or row<3
+                    for kind,target,row in shape[5:-1])
+                or len({row for _kind,_sheet,row in shape[5:-1]})!=rows
+                or len({id(item[3]) for item in images})!=len(images)):raise NvReservationHold()
+        columns={item[1]:item[3] for item in images[2:4]}
+        def verify_columns():
+            if tuple(hashlib.sha256(columns[family].data).hexdigest() for family in _FAMILIES)!=(
+                    observation.eth_source_sha256,observation.ib_source_sha256):raise NvReservationHold()
+        verify_columns()
+        from monitor.issue_tracker_history_read_launcher import require_current_owned_project_read
+        from monitor.issue_tracker_token_launcher import require_current_owned_project_token
+        require_current_owned_project_token(token,binding,authentication)
+        for kind,sheet,row,response in images:
+            require_current_owned_project_read(writer,token,binding,response,authentication,
+                read_kind=kind,sheet=sheet,row=row)
+        require_current_owned_project_token(token,binding,authentication)
+        verify_columns()
+        if unit.unit_id!=observation.unit_id or _unit_insertions(unit)!=observation.reservations:
+            raise NvReservationHold()
+        verify_packet()
+    except Exception:raise NvReservationHold() from None
+
+
+def _bind_nv_project_read_tail(prepared,writer,token,binding,authentication,images,unit):
+    try:
+        record=_verify_catalog_preparation(prepared)
+        if (type(prepared) is not _CatalogNvPreparation or record['token'] is not token
+                or record['binding']!=binding or record['registered']):raise NvReservationHold()
+        tail=record['nv_project_read_tail']
+        if (type(tail) is not _NvProjectReadTail or tail._ever_bound is not False or tail.bound is not False
+                or tail.packet is not None or tail._issued_packet is not None):raise NvReservationHold()
+        if _catalog_nv_compiled_observation(prepared,token,binding,unit) is not prepared.observation:
+            raise NvReservationHold()
+        record['nv_read_writer']=writer;record['nv_read_owner']=local._owner(writer)
+        record['nv_read_observation']=prepared.observation
+        tail.packet=(writer,token,binding,record['nv_read_owner'],record['owner'],authentication,images,unit,prepared.observation)
+        tail._issued_packet=tail.packet;tail.bound=True;tail._ever_bound=True
+        _verify_nv_project_read_tail(record,tail)
+    except Exception:raise NvReservationHold() from None
+
+
 def _verify_nonallocating_no_send_image(unit):
     """Necessary NO_SEND byte coherence only, never source/send authority."""
     from monitor import issue_tracker_send_unit as compiler
@@ -812,6 +899,7 @@ def hold_catalog_nv_preparation(token, binding, identity, eth_plan, eth_response
     budget = catalog._OriginalImageBudget()
     old = catalog._Originals(_image_budget=budget); current = catalog._Originals(_image_budget=budget)
     prepared = None; active_budget = None; failed = False; primary=None; cleanup_problem=None
+    record=None;read_tail=_NvProjectReadTail()
     project_proofs = {'scope': ExitStack(), 'verify': lambda: None,
                       'delivery_scope':ExitStack(),'delivery_events':[], 'owner_tail':ExitStack()}
     try:
@@ -888,7 +976,9 @@ def hold_catalog_nv_preparation(token, binding, identity, eth_plan, eth_response
                   'additions': {name, started}, 'appended': None, 'registered': False, 'unit': None, 'indexed': None,
                   'budget': budget, 'origin': None, 'settings':None,'settings_scope':ExitStack(),
                   'failed': False, 'verify_prior_c6': project_proofs['verify'],
-                  'prior_delivery_events':project_proofs['delivery_events']}
+                  'prior_delivery_events':project_proofs['delivery_events'],
+                  'nv_project_read_tail':read_tail,'nv_read_writer':None,'nv_read_owner':None,
+                  'nv_read_observation':None}
         prepared = _CatalogNvPreparation(seen); _ACTIVE_CATALOG_PREPARATIONS[prepared] = record
         for prior_delivery in record['prior_delivery_events']:
             if prior_delivery['raw'] is not None:prior_delivery['raw'].bind(record)
@@ -936,6 +1026,14 @@ def hold_catalog_nv_preparation(token, binding, identity, eth_plan, eth_response
                 failed=True
                 if cleanup_problem is None:cleanup_problem=exc
                 if not isinstance(exc,Exception) and primary is None:primary=exc
+        try:
+            if record is not None:_verify_nv_project_read_tail(record,read_tail)
+        except BaseException as exc:
+            failed=True
+            if cleanup_problem is None:cleanup_problem=exc
+            if not isinstance(exc,Exception) and primary is None:primary=exc
+        finally:
+            read_tail.packet=None;read_tail._issued_packet=None
     if primary is not None:
         if cleanup_problem is not None and cleanup_problem is not primary:raise primary from cleanup_problem
         raise primary

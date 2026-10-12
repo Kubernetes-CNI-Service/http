@@ -133,6 +133,87 @@ def recycled_outer_nv_directory(module, store, foreign):
 
 
 class Req7NvReservationDirectTests(unittest.TestCase):
+    def test_native_nv_final_issued_read_tail_requires_original_preparation_and_no_caller_verifier(self):
+        import inspect
+        module=load();bind=getattr(module,'_bind_nv_project_read_tail',None)
+        self.assertTrue(callable(bind),'genuine NV receiving must retain its original read packet through final cleanup')
+        self.assertFalse({'verifier','callback','deadline','sheet','keys','plan'} & set(inspect.signature(bind).parameters))
+        with self.assertRaises(module.NvReservationHold):
+            bind(object(),object(),object(),binding(),object(),(),object())
+
+    def test_native_nv_read_tail_last_auth_return_cannot_replace_original_packet_or_columns(self):
+        from test_cases.test_req7_send_unit import load as load_composer
+        from monitor import issue_tracker_history_read_launcher as reads,issue_tracker_token_launcher as tokens
+        module=load()
+        nonces=(('ETH&IB Switch',101,'a'*64),('ETH Cabling',102,'b'*64),
+            ('IB Cabling',103,'c'*64),('Update_History',105,'d'*64))
+        unit=load_composer().freeze_send_unit(**cabling_inputs(nonces))
+        eth=b'independent retained ETH';ib=b'independent retained IB'
+        observation=module.NvReservationObservation(tuple(zip(KEYS,('NV30102','NV30103'))),unit.unit_id,
+            'e'*64,hashlib.sha256(eth).hexdigest(),hashlib.sha256(ib).hexdigest())
+        for fault in (None,'lost-slot','new-packet','new-observation','last-column-drift'):
+            with self.subTest(fault=fault):
+                writer=object();token=object();project=object();owner=object();auth=object();target=binding()
+                tail=module._NvProjectReadTail()
+                shape=(('template_identity',None,None),('metadata',None,None),('activity','ETH Cabling',None),
+                    ('activity','IB Cabling',None),('insertion','ETH Cabling',None),('history_tail',None,None))
+                images=tuple((*item,SimpleNamespace(data=eth if index==2 else ib if index==3 else b'other'))
+                    for index,item in enumerate(shape))
+                packet=(writer,token,target,project,owner,auth,images,unit,observation)
+                tail.packet=packet;tail._issued_packet=packet;tail.bound=True;tail._ever_bound=True
+                record={'nv_project_read_tail':tail,'nv_read_writer':writer,'nv_read_owner':project,
+                    'nv_read_observation':observation,'token':token,'binding':target,'owner':owner}
+                checked=[]
+                def last(*args):
+                    checked.append(True)
+                    if len(checked)==2:
+                        if fault=='lost-slot':record.pop('nv_project_read_tail')
+                        elif fault=='new-packet':tail.packet=tuple(list(packet))
+                        elif fault=='new-observation':record['nv_read_observation']=replace(observation)
+                        elif fault=='last-column-drift':images[3][3].data=b'foreign final original'
+                with mock.patch.object(module.local,'_owner',return_value=project), \
+                        mock.patch.object(module.ownership,'_validated_owner',return_value=owner), \
+                        mock.patch.object(tokens,'require_current_owned_project_token',side_effect=last), \
+                        mock.patch.object(reads,'require_current_owned_project_read') as guards:
+                    if fault is None:self.assertIsNone(module._verify_nv_project_read_tail(record,tail))
+                    else:
+                        with self.assertRaises(module.NvReservationHold):module._verify_nv_project_read_tail(record,tail)
+                self.assertEqual([True,True],checked);self.assertEqual(6,guards.call_count)
+
+    def test_native_nv_once_bound_tail_cannot_be_cleared_into_legacy_even_with_record_slots_cleared(self):
+        from test_cases.test_req7_send_unit import load as load_composer
+        from monitor import issue_tracker_history_read_launcher as reads,issue_tracker_token_launcher as tokens
+        module=load()
+        nonces=(('ETH&IB Switch',101,'a'*64),('ETH Cabling',102,'b'*64),
+            ('IB Cabling',103,'c'*64),('Update_History',105,'d'*64))
+        unit=load_composer().freeze_send_unit(**cabling_inputs(nonces))
+        eth=b'independent ETH original';ib=b'independent IB original'
+        observation=module.NvReservationObservation(tuple(zip(KEYS,('NV30102','NV30103'))),unit.unit_id,
+            'e'*64,hashlib.sha256(eth).hexdigest(),hashlib.sha256(ib).hexdigest())
+        for clear_record in (False,True):
+            with self.subTest(clear_record=clear_record):
+                writer=object();token=object();project=object();owner=object();auth=object();target=binding()
+                prepared=module._CatalogNvPreparation(observation);tail=module._NvProjectReadTail()
+                record={'nv_project_read_tail':tail,'nv_read_writer':None,'nv_read_owner':None,
+                    'nv_read_observation':None,'token':token,'binding':target,'owner':owner,'registered':False}
+                shape=(('template_identity',None,None),('metadata',None,None),('activity','ETH Cabling',None),
+                    ('activity','IB Cabling',None),('insertion','ETH Cabling',None),('history_tail',None,None))
+                images=tuple((*item,SimpleNamespace(data=eth if index==2 else ib if index==3 else b'other'))
+                    for index,item in enumerate(shape))
+                with mock.patch.object(module,'_verify_catalog_preparation',return_value=record), \
+                        mock.patch.object(module,'_catalog_nv_compiled_observation',return_value=observation), \
+                        mock.patch.object(module.local,'_owner',return_value=project), \
+                        mock.patch.object(module.ownership,'_validated_owner',return_value=owner), \
+                        mock.patch.object(tokens,'require_current_owned_project_token'), \
+                        mock.patch.object(reads,'require_current_owned_project_read'):
+                    self.assertIsNone(module._verify_nv_project_read_tail(record,tail),'genuine never-bound legacy stays unchanged')
+                    module._bind_nv_project_read_tail(prepared,writer,token,target,auth,images,unit)
+                    self.assertIsNone(module._verify_nv_project_read_tail(record,tail))
+                    tail.bound=False;tail.packet=None;tail._issued_packet=None
+                    if clear_record:
+                        for name in ('nv_read_writer','nv_read_owner','nv_read_observation'):record[name]=None
+                    with self.assertRaises(module.NvReservationHold):module._verify_nv_project_read_tail(record,tail)
+
     def test_nonallocating_cabling_no_send_observation_cannot_open_nv_or_registration_paths(self):
         module=load()
         from test_cases.test_req7_send_unit import load as load_composer

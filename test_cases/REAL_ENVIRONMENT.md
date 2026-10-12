@@ -1,5 +1,15 @@
 # Real-environment acceptance cases
 
+## TC-REAL-REQ7-FIXED-NV-ISSUER-TAIL-001 — 固定 Cabling NV 原列与最终收尾
+
+- 类型：real-environment / native integration；对应 REQ7 C6/C17/C19/C25；状态：**NOT RUN / REAL_ENV REQUIRED**。
+- 模块：`monitor/issue_tracker_remote_history_match.py`、`monitor/issue_tracker_nv_reservation.py`、实际 source/C6、认证/读取 issuer、catalog 与双 owner。自动化：`test_req7_remote_history_match`、`test_req7_nv_reservation` 与 `test_issue_tracker_stage_l_consumer_workflow`；本地 synthetic OAuth/TLS 不是实际 Cloud/设备验收。
+- 前置条件：另行精确授权的项目/专用表、实际当前 C5/C6 和真实双 owner、原登记 nonce、原 ETH/IB NV 两列、原保留 ID 与完整源/目录原件；owner 历史事实确认不是当前 G1、实际 inventory/配额或操作许可。
+- 正常步骤：从真实 preparation/gen/pub 唯一推导 ETH 或 IB 目标；实际发行两张原 activity 列并逐一核 retained SHA；只在 genuine NV 分支用原预留 ID 插入 missing/Closed 键；实际原 C6 唯一登记。preparation 撤权及 settings/catalog/source/delivery/owner-tail 全部清理后，原认证/双列及其他读角色仍须保持原期限与实际 outer owners；最终尾核不得重读、续期、重开 K/raw 或重分配。
+- 关键边界：保留其他列有效但不同的原 ID、最后真实 auth 返回后的原列变化、packet/observation/record slot 删除或同值换件、全部 preparation 原 FD 关闭后其他原列 issuer 撤销/过期、清理拒绝与操作者中断。拒绝在目标阶段证明，不以无关 cleanup HOLD 代替；未登记失败保留 NV 原件/原 ID，已登记尾核失败保留唯一 catalog/origin 和原 WIRE，零 COUNT/CLAIM/额外请求、不修补/回滚。NV 不取消为 NO_SEND；nonallocating 缺/Closed 仍 HOLD。
+- 证据：精确 HEAD/tree/dirty/diff/manifest、Python/平台/命令、原件前后 stat/inode/fullstat/字节/SHA、原读取 issuer/期限与实际拒绝/清理顺序、唯一登记/原 ID/WIRE/COUNT、安全状态、完整物理 BEGIN/END 和退出码。保留正常、关键提交边界、代表性中断、独立冷恢复与失败安全状态；SIGKILL/重启/模拟恢复不冒充断电。
+- 清理与风险：只清理另行确证自有现场资源；失败原件及替换物保留，不能为后续验证重建或采用。当前本地 RED/direct/真实多脚本是替代开发证据，不证明 bootstrap/default NEW、最终 outer-owner 收尾、G1、整体 REQ7/full/check 或现场/断电。省略/合并：无；理由为核心证据/恢复边界；无新增剩余风险接受确认人。原现场授权、必要研发确认和普通发布门禁保持有效。
+
 ## TC-REAL-F02-LOCAL-GENERATION-001 — 本地配置代次的持久化与部分回放拒绝
 
 - 方法 V2 后端补充（NOT RUN）：在另行授权的隔离存储中验证 ZTP/initial-setup 的
