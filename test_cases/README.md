@@ -3398,5 +3398,16 @@ C5/C6 locator; same-call successful NO_SEND alone advances, generation/publish
 and family drift refuses before reads/writes, and first WIRE stops. Creation
 HOLD never falls through to dispatch after a partial prefix. FIRST/R2 still
 reacquires and validates its own original graph; selector results are not GO.
-Full NEW-to-FIRST/cold-bootstrap/archive composition, current full/check and
+Whole terminal NEW-to-FIRST/cold-bootstrap/archive composition, current full/check and
 REAL_ENV remain unclosed; no existing test is removed or weakened.
+
+The actual new Switch and ETH NV-insert originals now also feed the independent
+fixed FIRST driver in local multi-script workflows: one original COUNT, one
+CLAIM and one bounded TLS request with exact WIRE, returning UNKNOWN without
+manufacturing COMPLETE/APPLIED. NV None-row BUSINESS mapping stays unchanged.
+The fixture refreshes retained inventory before issuing owners, just like its
+existing preread/quota refresh; unissued or earlier registry objects never
+become accepted production tokens. Actual current fourteen-sheet identity
+requires Whitelist 112 (Dashboard 104); decoder equality and original tests
+are not relaxed. This local composition is not complete terminal/bootstrap/
+archive proof, nor current formal full/check or REAL_ENV acceptance.

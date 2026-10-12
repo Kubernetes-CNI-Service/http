@@ -43,13 +43,26 @@ def _load_current_native_creator_fixture_modules():
     from test_cases.test_req7_nv_reservation import load as load_native
     from test_cases.test_req7_unit_catalog import load as load_catalog
     from test_cases.test_req7_remote_history_match import load as load_remote
+    from test_cases.test_req7_retained_global_inventory import load as load_inventory
     owner=load_owner();enrolled=load_enrollment();global_api=load_global()
     load_preread();load_quota()
-    native=load_native();catalog=load_catalog(reset_dependencies=False);remote=load_remote()
+    native=load_native();catalog=load_catalog(reset_dependencies=False)
+    load_inventory(reset_support=False);remote=load_remote()
     return owner,enrolled,global_api,native,catalog,remote
 
 
 class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
+    def test_current_creator_fixture_refreshes_retained_inventory_before_first_consumer_tokens(self):
+        from monitor import issue_tracker_retained_inventory as old_inventory
+        from test_cases.test_req7_spreadsheet_owner import load as load_owner
+        expected=load_owner()
+        self.assertIsNot(expected,old_inventory.ownership,'reproduce a preimported earlier opaque registry')
+        owner,_enrolled,global_api,_native,_catalog,_remote=_load_current_native_creator_fixture_modules()
+        from monitor import issue_tracker_retained_inventory as current
+        self.assertIs(owner,current.ownership,'FIRST inventory must capture the same pre-token canonical owner')
+        self.assertIs(global_api,current.global_journal)
+        self.assertFalse(owner._ACTIVE)
+
     def test_current_creator_fixture_refreshes_preread_and_quota_owner_registries_before_tokens(self):
         from test_cases.test_req7_spreadsheet_owner import load as load_owner
         from monitor import issue_tracker_history_preread_journal as old_preread
@@ -2689,6 +2702,18 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         finally:
             if self.native_no_send_expectation_failure is not None:raise self.native_no_send_expectation_failure
 
+    def test_real_next_current_native_new_then_independent_first_counts_claims_and_sends_exact_original_wire(self):
+        self.native_no_send_expectation_failure=None
+        try:self._exercise_real_protected_three_panel_fixture(skip_history=False,native_current_no_send_probe='next-native-new-first')
+        finally:
+            if self.native_no_send_expectation_failure is not None:raise self.native_no_send_expectation_failure
+
+    def test_real_next_native_eth_nv_new_then_first_preserves_none_row_insert_and_exact_wire(self):
+        self.native_no_send_expectation_failure=None
+        try:self._exercise_real_protected_three_panel_fixture(skip_history=False,native_current_no_send_probe='next-native-eth-nv-first')
+        finally:
+            if self.native_no_send_expectation_failure is not None:raise self.native_no_send_expectation_failure
+
     def test_real_fixed_eth_ib_new_originals_preserve_actual_active_row_prereads(self):
         self.native_no_send_expectation_failure=None
         try:self._exercise_real_protected_three_panel_fixture(skip_history=False,native_current_no_send_probe='fixed-cabling-new-originals')
@@ -2749,7 +2774,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         finally:
             if self.native_no_send_expectation_failure is not None:raise self.native_no_send_expectation_failure
 
-    def _verify_fresh_native_switch_no_send(self,committed,qualified,*,tail_revoke=False,_sheet='ETH&IB Switch',_inactive=None,_wire=False,_nv=False,_other_drift=False,_tail_clear=False,_fixed_creation=False,_initial_revoke=False,_selection_revoke=False,_new_originals=False,_auto=False):
+    def _verify_fresh_native_switch_no_send(self,committed,qualified,*,tail_revoke=False,_sheet='ETH&IB Switch',_inactive=None,_wire=False,_nv=False,_other_drift=False,_tail_clear=False,_fixed_creation=False,_initial_revoke=False,_selection_revoke=False,_new_originals=False,_auto=False,_dispatch_new=False):
         import tempfile
         import socket
         from test_cases.test_req7_spreadsheet_owner import load as load_owner,scoped_fixture
@@ -2823,11 +2848,34 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             'activity':discovery,'insertion':occupancy,'history_tail':{'spreadsheetId':binding.spreadsheet_id,
                 'sheets':[{'properties':{'sheetId':105,'title':'Update_History','sheetType':'GRID',
                 'gridProperties':{'rowCount':100,'columnCount':5}},'data':[{'startRow':2,'startColumn':0}]}]}}
+        if _dispatch_new:
+            import xml.etree.ElementTree as ET
+            from test_cases.test_req7_sheets_read_decode import header_response
+            from test_cases.test_req7_online_whitelist_read import document as whitelist_document
+            namespace='{http://schemas.openxmlformats.org/spreadsheetml/2006/main}'
+            with zipfile.ZipFile(self.template) as workbook:
+                original=ET.fromstring(workbook.read('xl/worksheets/sheet13.xml'))
+            whitelist_rows=[]
+            for original_row in original.find(namespace+'sheetData'):
+                cells=[None]*6
+                for cell in original_row:
+                    self.assertEqual('inlineStr',cell.get('t'));self.assertIsNone(cell.find(namespace+'f'))
+                    column=ord(cell.get('r')[0])-ord('A');self.assertTrue(0<=column<6)
+                    cells[column]=''.join(cell.itertext())
+                whitelist_rows.append(tuple(cells))
+            whitelist_doc=whitelist_document(())
+            # Independent fixed fourteen-sheet fixture identity: 104 belongs
+            # to Dashboard; Whitelist is 112. Do not loosen read-gate equality.
+            whitelist_doc['sheets'][0]['properties']['sheetId']=112
+            whitelist_doc['sheets'][0]['data'][0]['rowData']=[{'values':[
+                {} if value is None else {'userEnteredValue':{'stringValue':value}} for value in row]}
+                for row in whitelist_rows]
+            documents.update(template_headers=header_response(),whitelist=whitelist_doc)
         prior_no_send=[];switch_rows=[]
         if _auto and _sheet!='ETH&IB Switch':
-            for index,key,description in zip(range(2,4),switch_keys,switch_descriptions):
+            for index,switch_key,switch_description in zip(range(2,4),switch_keys,switch_descriptions):
                 actual_row=reserved_switch_row(index)
-                actual_row.update({'F':literal(key[1]),'L':literal(description),'N':literal('New')})
+                actual_row.update({'F':literal(switch_key[1]),'L':literal(switch_description),'N':literal('New')})
                 switch_rows.append(actual_row)
             switch_documents={'activity':sheet_document('ETH&IB Switch',switch_rows,100),
                 'insertion':insertion_document('ETH&IB Switch',switch_rows,100)}
@@ -3083,6 +3131,66 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                         +([('activity',None)] if _nv else [])+[('insertion',None)]
                         +([] if _nv else [('row',4),('row',3)] if _sheet=='ETH&IB Switch' else [('row',3)])
                         +[('history_tail',None)],issued)
+                    if _dispatch_new:
+                        from test_cases.test_collection_cycle_persistence import WORKER
+                        from test_cases.test_req7_mutation_launcher import Req7MutationLauncherWorkflowTests
+                        from monitor import issue_tracker_mutation_launcher as mutation
+                        from types import SimpleNamespace
+                        real_send=mutation._send_counted_original_once;sent=[]
+                        from monitor import issue_tracker_retained_inventory as inventory
+                        original_inventory=inventory._hold_catalog_retained_inventory
+                        @contextmanager
+                        def observed_inventory(*args,**options):
+                            try:
+                                with original_inventory(*args,**options) as actual:yield actual
+                            except inventory.RetainedInventoryHold:
+                                print('NEW_FIRST_ACTUAL_INVENTORY_REJECT',
+                                    'same_owner_registry',inventory.ownership is owner_module,
+                                    'same_global_registry',inventory.global_journal is global_module,
+                                    'issued_reads',len(issued),flush=True)
+                                raise
+                        def send(writer_actual,owner_actual,bound,token,unit,image):
+                            self.assertEqual((writer,sheet,binding),(writer_actual,owner_actual,bound))
+                            self.assertEqual(compiled[0],unit)
+                            reply=b'HTTP/1.1 401 Denied\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}'
+                            with native.server(reply,hostname='sheets.googleapis.com',destination='sheets.googleapis.com') as (records,errors),ExitStack() as launched:
+                                port=socket.getaddrinfo('sheets.googleapis.com',443)[0][4][1]
+                                native_popen=subprocess.Popen;children=[];calls=[]
+                                def launch(argv,**options):
+                                    self.assertEqual([str(Path(sys.executable).resolve()),'-I','-B','-c',mutation._CHILD_PROGRAM,
+                                        str(Path(__file__).resolve().parents[1])],argv[:6])
+                                    self.assertEqual([str(image.action_fd),str(image.fd)],argv[7:])
+                                    self.assertEqual((local._owner(writer).lock_fd,owner_module.owner_lock_fd(sheet,binding),
+                                        image.action_fd,image.fd),options['pass_fds'])
+                                    self.assertEqual({'LC_ALL':'C'},options['env']);self.assertNotIn(token.value,repr(argv))
+                                    self.assertTrue(options['close_fds']);self.assertTrue(options['start_new_session'])
+                                    changed=list(argv);changed[4]=Req7MutationLauncherWorkflowTests.child_fixture(native,port)
+                                    child=native_popen(changed,**options);children.append(child);calls.append(argv)
+                                    from test_cases.test_req7_native_supervised_workflow import cleanup_owned_fixture_child
+                                    self.addCleanup(cleanup_owned_fixture_child,child);return child
+                                launched.enter_context(mock.patch.object(mutation,'subprocess',SimpleNamespace(Popen=launch,PIPE=subprocess.PIPE)))
+                                actual=real_send(writer_actual,owner_actual,bound,token,unit,image)
+                            self.assertEqual((1,1,(),0),(len(records),len(calls),tuple(errors),children[0].returncode))
+                            self.assertEqual(unit.wire_bytes,records[0][2])
+                            self.assertTrue(all(stream.closed for stream in (children[0].stdin,children[0].stdout,children[0].stderr)))
+                            sent.append(actual);return actual
+                        with mock.patch.object(launcher.OwnedProjectSheetsReadUnit,'read_once',autospec=True,side_effect=read), \
+                                mock.patch.object(mutation,'_send_counted_original_once',side_effect=send), \
+                                mock.patch.object(inventory,'_hold_catalog_retained_inventory',side_effect=observed_inventory):
+                            try:completion=WORKER._dispatch_current_project_online_originals(
+                                writer,sheet,binding,auth,_store=self.store,http_root=self.root)
+                            except remote.RemoteHistoryHold as error:
+                                import traceback
+                                cause=error.__context__;seen=set()
+                                while cause is not None and id(cause) not in seen:
+                                    seen.add(id(cause));traceback.print_exception(type(cause),cause,cause.__traceback__)
+                                    cause=cause.__context__
+                                raise
+                        self.assertEqual([completion],sent)
+                        self.assertEqual((1,401,'UNKNOWN',True),(completion.attempt_count,completion.status,completion.outcome,completion.termination_confirmed))
+                        self.assertEqual(1,global_module.inspect_global_unit(sheet,binding,compiled[0]).attempt_count)
+                        self.assertEqual(1,len(list(state.rglob('ATTEMPT-1'))));self.assertEqual(1,len(list(state.rglob('CLAIM-1'))))
+                        self.assertFalse(list(state.rglob('COMPLETE')));self.assertFalse(list((project/'.tracker').glob('REMOTE-APPLIED-*')))
                     return
                 original_pin=native_module._pin_catalog_prefix
                 tail_name='_verify_nv_project_read_tail' if _nv else '_verify_nonallocating_project_read_tail'
@@ -5499,28 +5607,30 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                         for path in (project/'.tracker').rglob('*') if path.is_file()}
                     self.assertEqual(before,after,'locator discovery cannot create native NV/catalog/count or change C6/K')
                     return
-                if native_current_no_send_probe in ('cabling','cabling-tail-revoke','cabling-inactive','cabling-wire','cabling-nv','cabling-nv-other-drift','cabling-nv-tail-revoke','cabling-nv-tail-clear','fixed-cabling-creator','fixed-cabling-creator-wire','fixed-cabling-creator-initial-revoke','fixed-cabling-creator-nv','fixed-cabling-creator-nv-initial-revoke','fixed-cabling-creator-nv-missing','fixed-cabling-creator-nv-selection-revoke','fixed-cabling-new-originals','fixed-cabling-new-originals-nv','next-native-eth-originals'):
-                    for target_sheet in (('ETH Cabling',) if native_current_no_send_probe=='next-native-eth-originals' else ('ETH Cabling','IB Cabling')):
+                if native_current_no_send_probe in ('cabling','cabling-tail-revoke','cabling-inactive','cabling-wire','cabling-nv','cabling-nv-other-drift','cabling-nv-tail-revoke','cabling-nv-tail-clear','fixed-cabling-creator','fixed-cabling-creator-wire','fixed-cabling-creator-initial-revoke','fixed-cabling-creator-nv','fixed-cabling-creator-nv-initial-revoke','fixed-cabling-creator-nv-missing','fixed-cabling-creator-nv-selection-revoke','fixed-cabling-new-originals','fixed-cabling-new-originals-nv','next-native-eth-originals','next-native-eth-nv-first'):
+                    for target_sheet in (('ETH Cabling',) if native_current_no_send_probe in ('next-native-eth-originals','next-native-eth-nv-first') else ('ETH Cabling','IB Cabling')):
                         self._verify_fresh_native_switch_no_send(committed,qualified,_sheet=target_sheet,
                             tail_revoke=native_current_no_send_probe in ('cabling-tail-revoke','cabling-nv-tail-revoke','cabling-nv-tail-clear'),
                             _inactive=('closed' if target_sheet=='ETH Cabling' else 'missing')
                                 if native_current_no_send_probe=='cabling-inactive' else 'missing'
                                 if native_current_no_send_probe=='fixed-cabling-creator-nv-missing' else None,
                             _wire=native_current_no_send_probe in ('cabling-wire','fixed-cabling-creator-wire','fixed-cabling-new-originals','next-native-eth-originals'),
-                            _nv=native_current_no_send_probe in ('cabling-nv','cabling-nv-other-drift','cabling-nv-tail-revoke','cabling-nv-tail-clear','fixed-cabling-creator-nv','fixed-cabling-creator-nv-initial-revoke','fixed-cabling-creator-nv-missing','fixed-cabling-creator-nv-selection-revoke','fixed-cabling-new-originals-nv'),
+                            _nv=native_current_no_send_probe in ('cabling-nv','cabling-nv-other-drift','cabling-nv-tail-revoke','cabling-nv-tail-clear','fixed-cabling-creator-nv','fixed-cabling-creator-nv-initial-revoke','fixed-cabling-creator-nv-missing','fixed-cabling-creator-nv-selection-revoke','fixed-cabling-new-originals-nv','next-native-eth-nv-first'),
                             _other_drift=native_current_no_send_probe=='cabling-nv-other-drift',
                             _tail_clear=native_current_no_send_probe=='cabling-nv-tail-clear',
-                            _fixed_creation=native_current_no_send_probe in ('fixed-cabling-creator','fixed-cabling-creator-wire','fixed-cabling-creator-initial-revoke','fixed-cabling-creator-nv','fixed-cabling-creator-nv-initial-revoke','fixed-cabling-creator-nv-missing','fixed-cabling-creator-nv-selection-revoke','fixed-cabling-new-originals','fixed-cabling-new-originals-nv','next-native-eth-originals'),
-                            _new_originals=native_current_no_send_probe in ('fixed-cabling-new-originals','fixed-cabling-new-originals-nv','next-native-eth-originals'),
-                            _auto=native_current_no_send_probe=='next-native-eth-originals',
+                            _fixed_creation=native_current_no_send_probe in ('fixed-cabling-creator','fixed-cabling-creator-wire','fixed-cabling-creator-initial-revoke','fixed-cabling-creator-nv','fixed-cabling-creator-nv-initial-revoke','fixed-cabling-creator-nv-missing','fixed-cabling-creator-nv-selection-revoke','fixed-cabling-new-originals','fixed-cabling-new-originals-nv','next-native-eth-originals','next-native-eth-nv-first'),
+                            _new_originals=native_current_no_send_probe in ('fixed-cabling-new-originals','fixed-cabling-new-originals-nv','next-native-eth-originals','next-native-eth-nv-first'),
+                            _auto=native_current_no_send_probe in ('next-native-eth-originals','next-native-eth-nv-first'),
+                            _dispatch_new=native_current_no_send_probe=='next-native-eth-nv-first',
                             _initial_revoke=native_current_no_send_probe in ('fixed-cabling-creator-initial-revoke','fixed-cabling-creator-nv-initial-revoke'),
                             _selection_revoke=native_current_no_send_probe=='fixed-cabling-creator-nv-selection-revoke')
                 else:self._verify_fresh_native_switch_no_send(committed,qualified,
                     tail_revoke=native_current_no_send_probe=='tail-revoke',
-                    _wire=native_current_no_send_probe in ('fixed-switch-creator-wire','fixed-switch-new-originals','next-native-new-originals'),
-                    _fixed_creation=native_current_no_send_probe in ('fixed-switch-creator','fixed-switch-creator-wire','fixed-switch-creator-initial-revoke','fixed-switch-new-originals','next-native-new-originals'),
-                    _new_originals=native_current_no_send_probe in ('fixed-switch-new-originals','next-native-new-originals'),
-                    _auto=native_current_no_send_probe=='next-native-new-originals',
+                    _wire=native_current_no_send_probe in ('fixed-switch-creator-wire','fixed-switch-new-originals','next-native-new-originals','next-native-new-first'),
+                    _fixed_creation=native_current_no_send_probe in ('fixed-switch-creator','fixed-switch-creator-wire','fixed-switch-creator-initial-revoke','fixed-switch-new-originals','next-native-new-originals','next-native-new-first'),
+                    _new_originals=native_current_no_send_probe in ('fixed-switch-new-originals','next-native-new-originals','next-native-new-first'),
+                    _auto=native_current_no_send_probe in ('next-native-new-originals','next-native-new-first'),
+                    _dispatch_new=native_current_no_send_probe=='next-native-new-first',
                     _initial_revoke=native_current_no_send_probe=='fixed-switch-creator-initial-revoke')
                 return
             if observed_cabling_insert_probe:
