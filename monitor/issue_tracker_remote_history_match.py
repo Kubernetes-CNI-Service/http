@@ -942,25 +942,25 @@ def _read_current_cycle_native_receipt_locators(writer_token,*,_store,http_root)
 
 def _prepare_current_cycle_native_switch_unit(writer_token,owner_token,binding,authentication,*,_store,http_root):
     """Fixed current Switch preparation; no caller source or send permission."""
-    return _prepare_current_cycle_native_nonallocating_unit(writer_token,owner_token,binding,authentication,
+    return _prepare_current_cycle_native_unit(writer_token,owner_token,binding,authentication,
         _store=_store,http_root=http_root,_sheet='ETH&IB Switch')
 
 
 def _prepare_current_cycle_native_eth_cabling_unit(writer_token,owner_token,binding,authentication,*,_store,http_root):
-    """Fixed ETH active-row preparation. Missing/Closed still require NV."""
-    return _prepare_current_cycle_native_nonallocating_unit(writer_token,owner_token,binding,authentication,
+    """Fixed ETH preparation; original columns select genuine NV when needed."""
+    return _prepare_current_cycle_native_unit(writer_token,owner_token,binding,authentication,
         _store=_store,http_root=http_root,_sheet='ETH Cabling')
 
 
 def _prepare_current_cycle_native_ib_cabling_unit(writer_token,owner_token,binding,authentication,*,_store,http_root):
-    """Fixed IB active-row preparation. Missing/Closed still require NV."""
-    return _prepare_current_cycle_native_nonallocating_unit(writer_token,owner_token,binding,authentication,
+    """Fixed IB preparation; original columns select genuine NV when needed."""
+    return _prepare_current_cycle_native_unit(writer_token,owner_token,binding,authentication,
         _store=_store,http_root=http_root,_sheet='IB Cabling')
 
 
-def _prepare_current_cycle_native_nonallocating_unit(writer_token,owner_token,binding,authentication,*,
-                                                     _store,http_root,_sheet):
-    """Fixed native nonallocating preparation and local pending registration.
+def _prepare_current_cycle_native_unit(writer_token,owner_token,binding,authentication,*,
+                                      _store,http_root,_sheet):
+    """Fixed native preparation and local pending registration, never a send.
 
     Derive latest current C6 inside live source holders, not caller generation
     or unit. Existing local enrollment is mandatory, never bootstrap/adoption.
@@ -979,12 +979,28 @@ def _prepare_current_cycle_native_nonallocating_unit(writer_token,owner_token,bi
         from monitor.issue_tracker_history_read_launcher import OwnedProjectSheetsReadUnit,require_current_owned_project_read
         from monitor.issue_tracker_token_launcher import require_current_owned_project_token
         with _hold_current_cycle_native_receipt_locators(writer_token,_store=_store,http_root=root) as labels:
+            # Derive necessary Cabling keys from current protected C5 before
+            # issuing bounded reads. The held locator context and fixed
+            # compiler independently revalidate this source; no caller keys.
+            keys=()
+            if _sheet!='ETH&IB Switch':
+                from monitor import issue_tracker_stage_l_consumer as source
+                from monitor.issue_tracker_state_owner import current_k
+                from monitor.issue_tracker_whitelist_workbook import read_whitelist_workbook
+                whitelist_path=root/'monitor/Issue_Tracker_Template_v1.xlsx'
+                qualified=source.qualify_prod_stage_l(_store,http_root=root,settings=current_k(writer_token),
+                    whitelist_snapshot=read_whitelist_workbook(whitelist_path),whitelist_path=whitelist_path,
+                    writer_token=writer_token)
+                family={'ETH Cabling':'eth_cabling','IB Cabling':'ib_cabling'}[_sheet]
+                keys=tuple(item.activity_key for item in qualified.candidates if item.activity_key[0]==family)
+                if not keys or len(set(keys))!=len(keys):raise RemoteHistoryHold()
             require_current_owned_project_token(owner_token,binding,authentication)
             observed=OwnedProjectSheetsReadUnit(writer_token,owner_token,binding,authentication,
                 read_kind='template_identity').read_once()
             plan,_project,_digest=require_current_owned_project_read(writer_token,owner_token,binding,observed,
                 authentication,read_kind='template_identity')
             identity=decode.decode_template_identity(plan,observed)
+            selection_reads=[]
             def verify_initial_identity():
                 require_current_owned_project_token(owner_token,binding,authentication)
                 current=require_current_owned_project_read(writer_token,owner_token,binding,observed,
@@ -994,16 +1010,48 @@ def _prepare_current_cycle_native_nonallocating_unit(writer_token,owner_token,bi
                 require_current_owned_project_token(owner_token,binding,authentication)
                 if require_current_owned_project_read(writer_token,owner_token,binding,observed,
                         authentication,read_kind='template_identity')!=current:raise RemoteHistoryHold()
+                for title,response,original in selection_reads:
+                    if require_current_owned_project_read(writer_token,owner_token,binding,response,
+                            authentication,read_kind='activity',sheet=title)!=original:raise RemoteHistoryHold()
+                require_current_owned_project_token(owner_token,binding,authentication)
+                for title,response,original in selection_reads:
+                    if require_current_owned_project_read(writer_token,owner_token,binding,response,
+                            authentication,read_kind='activity',sheet=title)!=original:raise RemoteHistoryHold()
             verify_initial_identity()
             generation,publish=labels[-1]
-            with native.hold_catalog_nonallocating_preparation(writer_token,owner_token,binding,identity,
-                    generation_id=generation,publish_id=publish,sheet=_sheet) as prepared:
+            missing=()
+            def read_activity(title):
+                verify_initial_identity()
+                response=OwnedProjectSheetsReadUnit(writer_token,owner_token,binding,authentication,
+                    read_kind='activity',sheet=title).read_once()
+                original=require_current_owned_project_read(writer_token,owner_token,binding,response,
+                    authentication,read_kind='activity',sheet=title)
+                selection_reads.append((title,response,original));verify_initial_identity()
+                return original[0],response
+            if keys:
+                target_plan,target_response=read_activity(_sheet)
+                sid=dict(identity.sheet_ids)[_sheet]
+                missing=tuple(key for key in keys if not decode.discover_activity_sheet(target_plan,target_response,
+                    sheet_id=sid,activity_key=key).active_rows)
+            if missing:
+                other='IB Cabling' if _sheet=='ETH Cabling' else 'ETH Cabling'
+                other_plan,other_response=read_activity(other)
+                eth,ib=((target_plan,target_response),(other_plan,other_response)) if _sheet=='ETH Cabling' else (
+                    (other_plan,other_response),(target_plan,target_response))
+                preparation=native.hold_catalog_nv_preparation(owner_token,binding,identity,*eth,*ib,
+                    generation_id=generation,publish_id=publish,sheet=_sheet,requested_keys=missing)
+            else:preparation=native.hold_catalog_nonallocating_preparation(writer_token,owner_token,binding,identity,
+                generation_id=generation,publish_id=publish,sheet=_sheet)
+            verify_initial_identity()
+            with preparation as prepared:
                 receiver=(_hold_native_current_cycle_observed_switch_unit if _sheet=='ETH&IB Switch'
+                    else _hold_native_current_cycle_observed_nv_cabling_unit if missing
                     else _hold_native_current_cycle_observed_cabling_unit)
                 with receiver(prepared,writer_token,owner_token,binding,
                         authentication,_store=_store,http_root=root) as unit:
                     if unit.outcome=='WIRE-CANDIDATE':
-                        catalog.register_pending_c6_unit(writer_token,owner_token,binding,unit,_unit_preparation=prepared)
+                        catalog.register_pending_c6_unit(writer_token,owner_token,binding,unit,
+                            **({'_nv_preparation':prepared} if missing else {'_unit_preparation':prepared}))
                         result=('WIRE_REGISTERED',unit.unit_id)
                     elif unit.outcome=='NO_SEND':result=('NO_SEND',unit.unit_id)
                     else:raise RemoteHistoryHold()

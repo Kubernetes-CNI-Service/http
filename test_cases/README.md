@@ -3330,6 +3330,21 @@ receiver, never silently substitute a row or an ID. Runtime selection of the
 genuine NV allocator, bootstrap/default NEW, final outer-owner/G1 and full/check
 remain OPEN, not discharged by these local creator reports.
 
+The Cabling creators now derive their necessary keys from actual protected C5
+before bounded reads, classify the owned target activity image and, only for
+missing/Closed keys, acquire the other owned Cabling column and enter genuine
+NV preparation. No caller keys, ID/high-water, row or allocator fallback is
+accepted. Both original full A-column bodies (including Closed/unrelated IDs)
+feed the existing durable allocator; the fixed receiver independently compares
+its actual two columns to the retained originals and registers the same C6.
+The initial identity and selection-column issuers are checked after all
+preparation/source cleanup without fresh reads or deadline renewal. Active-row
+creation adds its necessary target-classification read but never creates NV;
+the old standalone receiver expectations are unchanged. Current Closed factory
+refusal is retained as initial RED; missing-key and selection-issuer negatives
+are additional independent regressions, not invented REDs. Bootstrap/default
+NEW, final external-owner/G1 and current full/check still remain OPEN.
+
 Independent direct tests reject incoherent empty-wire/audit/zero-write state.
 The real fresh three-panel C5/C6 + OAuth + seven owned TLS-read workflow
 covers both normal all-NOOP exit with original files/outbox unchanged and
