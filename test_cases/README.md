@@ -3318,6 +3318,18 @@ two-row L-only WIRE/History expectations are unchanged. These direct and real
 protected C5/C6/OAuth/TLS flows do not close bootstrap, the three-family default
 NEW dispatcher, final external-owner cleanup, G1 or current full/check.
 
+Fixed ETH and IB creators now use the same unchanged current-source/initial-read
+tail with their own constant family entrance; callers provide no family,
+generation, keys, plans or compiler. Actual active-row receivers independently
+resolve the genuine prepared unit against current C6 and keep the original NV
+IDs. All-NOOP closes zero-write; all-update WIRE registers its unique original
+unit with literal G/M/N/S/T runs and no NV allocation or attempt. Both actual
+families retain the post-source-cleanup initial-issuer revocation test. These
+are nonallocating creators only: missing/Closed Cabling still HOLD at the
+receiver, never silently substitute a row or an ID. Runtime selection of the
+genuine NV allocator, bootstrap/default NEW, final outer-owner/G1 and full/check
+remain OPEN, not discharged by these local creator reports.
+
 Independent direct tests reject incoherent empty-wire/audit/zero-write state.
 The real fresh three-panel C5/C6 + OAuth + seven owned TLS-read workflow
 covers both normal all-NOOP exit with original files/outbox unchanged and

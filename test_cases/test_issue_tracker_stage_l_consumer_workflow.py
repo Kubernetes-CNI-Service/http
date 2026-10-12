@@ -2543,6 +2543,24 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         finally:
             if self.native_no_send_expectation_failure is not None:raise self.native_no_send_expectation_failure
 
+    def test_real_fixed_current_eth_ib_cabling_creators_keep_no_send_zero_write(self):
+        self.native_no_send_expectation_failure=None
+        try:self._exercise_real_protected_three_panel_fixture(skip_history=False,native_current_no_send_probe='fixed-cabling-creator')
+        finally:
+            if self.native_no_send_expectation_failure is not None:raise self.native_no_send_expectation_failure
+
+    def test_real_fixed_current_eth_ib_cabling_creators_register_original_active_row_wire(self):
+        self.native_no_send_expectation_failure=None
+        try:self._exercise_real_protected_three_panel_fixture(skip_history=False,native_current_no_send_probe='fixed-cabling-creator-wire')
+        finally:
+            if self.native_no_send_expectation_failure is not None:raise self.native_no_send_expectation_failure
+
+    def test_real_fixed_current_cabling_creator_initial_identity_issuer_revoked_after_source_cleanup_cannot_return(self):
+        self.native_no_send_expectation_failure=None
+        try:self._exercise_real_protected_three_panel_fixture(skip_history=False,native_current_no_send_probe='fixed-cabling-creator-initial-revoke')
+        finally:
+            if self.native_no_send_expectation_failure is not None:raise self.native_no_send_expectation_failure
+
     def _verify_fresh_native_switch_no_send(self,committed,qualified,*,tail_revoke=False,_sheet='ETH&IB Switch',_inactive=None,_wire=False,_nv=False,_other_drift=False,_tail_clear=False,_fixed_creation=False,_initial_revoke=False):
         import tempfile
         import socket
@@ -2728,6 +2746,9 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                 self.assertTrue(audits_before,'the real K change remains pending, not an empty fixture')
                 if _fixed_creation:
                     actual_context=remote._hold_current_cycle_native_receipt_locators;revoked=[];returned=[]
+                    create_name={'ETH&IB Switch':'_prepare_current_cycle_native_switch_unit',
+                        'ETH Cabling':'_prepare_current_cycle_native_eth_cabling_unit',
+                        'IB Cabling':'_prepare_current_cycle_native_ib_cabling_unit'}[_sheet]
                     @contextmanager
                     def context(*args,**kwargs):
                         with actual_context(*args,**kwargs) as labels:yield labels
@@ -2743,9 +2764,9 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                         try:
                             if _initial_revoke:
                                 with self.assertRaises(remote.RemoteHistoryHold):
-                                    returned.append(remote._prepare_current_cycle_native_switch_unit(
+                                    returned.append(getattr(remote,create_name)(
                                         writer,sheet,binding,auth,_store=self.store,http_root=self.root))
-                            else:returned.append(remote._prepare_current_cycle_native_switch_unit(
+                            else:returned.append(getattr(remote,create_name)(
                                 writer,sheet,binding,auth,_store=self.store,http_root=self.root))
                         finally:
                             for first,saved in revoked:
@@ -2762,7 +2783,9 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                     self.assertEqual(audits_before,{path.name:(path.stat().st_ino,path.read_bytes()) for path in outbox.iterdir()})
                     self.assertEqual(1,len(compiled));self.assertFalse(native_module._ACTIVE_CATALOG_PREPARATIONS)
                     self.assertEqual([('template_identity',None),('template_identity',None),('metadata',None),
-                        ('activity',None),('insertion',None),('row',4),('row',3),('history_tail',None)],issued)
+                        ('activity',None),('insertion',None)]
+                        +([('row',4),('row',3)] if _sheet=='ETH&IB Switch' else [('row',3)])
+                        +[('history_tail',None)],issued)
                     return
                 original_pin=native_module._pin_catalog_prefix
                 tail_name='_verify_nv_project_read_tail' if _nv else '_verify_nonallocating_project_read_tail'
@@ -5179,16 +5202,18 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                         for path in (project/'.tracker').rglob('*') if path.is_file()}
                     self.assertEqual(before,after,'locator discovery cannot create native NV/catalog/count or change C6/K')
                     return
-                if native_current_no_send_probe in ('cabling','cabling-tail-revoke','cabling-inactive','cabling-wire','cabling-nv','cabling-nv-other-drift','cabling-nv-tail-revoke','cabling-nv-tail-clear'):
+                if native_current_no_send_probe in ('cabling','cabling-tail-revoke','cabling-inactive','cabling-wire','cabling-nv','cabling-nv-other-drift','cabling-nv-tail-revoke','cabling-nv-tail-clear','fixed-cabling-creator','fixed-cabling-creator-wire','fixed-cabling-creator-initial-revoke'):
                     for target_sheet in ('ETH Cabling','IB Cabling'):
                         self._verify_fresh_native_switch_no_send(committed,qualified,_sheet=target_sheet,
                             tail_revoke=native_current_no_send_probe in ('cabling-tail-revoke','cabling-nv-tail-revoke','cabling-nv-tail-clear'),
                             _inactive=('closed' if target_sheet=='ETH Cabling' else 'missing')
                                 if native_current_no_send_probe=='cabling-inactive' else None,
-                            _wire=native_current_no_send_probe=='cabling-wire',
+                            _wire=native_current_no_send_probe in ('cabling-wire','fixed-cabling-creator-wire'),
                             _nv=native_current_no_send_probe in ('cabling-nv','cabling-nv-other-drift','cabling-nv-tail-revoke','cabling-nv-tail-clear'),
                             _other_drift=native_current_no_send_probe=='cabling-nv-other-drift',
-                            _tail_clear=native_current_no_send_probe=='cabling-nv-tail-clear')
+                            _tail_clear=native_current_no_send_probe=='cabling-nv-tail-clear',
+                            _fixed_creation=native_current_no_send_probe in ('fixed-cabling-creator','fixed-cabling-creator-wire','fixed-cabling-creator-initial-revoke'),
+                            _initial_revoke=native_current_no_send_probe=='fixed-cabling-creator-initial-revoke')
                 else:self._verify_fresh_native_switch_no_send(committed,qualified,
                     tail_revoke=native_current_no_send_probe=='tail-revoke',
                     _wire=native_current_no_send_probe=='fixed-switch-creator-wire',

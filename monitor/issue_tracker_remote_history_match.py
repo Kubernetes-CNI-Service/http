@@ -941,7 +941,26 @@ def _read_current_cycle_native_receipt_locators(writer_token,*,_store,http_root)
 
 
 def _prepare_current_cycle_native_switch_unit(writer_token,owner_token,binding,authentication,*,_store,http_root):
-    """Fixed current Switch preparation and local pending registration only.
+    """Fixed current Switch preparation; no caller source or send permission."""
+    return _prepare_current_cycle_native_nonallocating_unit(writer_token,owner_token,binding,authentication,
+        _store=_store,http_root=http_root,_sheet='ETH&IB Switch')
+
+
+def _prepare_current_cycle_native_eth_cabling_unit(writer_token,owner_token,binding,authentication,*,_store,http_root):
+    """Fixed ETH active-row preparation. Missing/Closed still require NV."""
+    return _prepare_current_cycle_native_nonallocating_unit(writer_token,owner_token,binding,authentication,
+        _store=_store,http_root=http_root,_sheet='ETH Cabling')
+
+
+def _prepare_current_cycle_native_ib_cabling_unit(writer_token,owner_token,binding,authentication,*,_store,http_root):
+    """Fixed IB active-row preparation. Missing/Closed still require NV."""
+    return _prepare_current_cycle_native_nonallocating_unit(writer_token,owner_token,binding,authentication,
+        _store=_store,http_root=http_root,_sheet='IB Cabling')
+
+
+def _prepare_current_cycle_native_nonallocating_unit(writer_token,owner_token,binding,authentication,*,
+                                                     _store,http_root,_sheet):
+    """Fixed native nonallocating preparation and local pending registration.
 
     Derive latest current C6 inside live source holders, not caller generation
     or unit. Existing local enrollment is mandatory, never bootstrap/adoption.
@@ -953,7 +972,8 @@ def _prepare_current_cycle_native_switch_unit(writer_token,owner_token,binding,a
     try:
         project=local._owner(writer_token);ownership._validated_owner(owner_token,binding)
         root=Path(http_root)
-        if (not root.is_absolute() or root.resolve(strict=True)!=root
+        if (_sheet not in ('ETH&IB Switch','ETH Cabling','IB Cabling')
+                or not root.is_absolute() or root.resolve(strict=True)!=root
                 or Path(_store.project_identity)!=project.project or _store.scope!='prod'):raise RemoteHistoryHold()
         from monitor import issue_tracker_nv_reservation as native,issue_tracker_unit_catalog as catalog
         from monitor.issue_tracker_history_read_launcher import OwnedProjectSheetsReadUnit,require_current_owned_project_read
@@ -977,8 +997,10 @@ def _prepare_current_cycle_native_switch_unit(writer_token,owner_token,binding,a
             verify_initial_identity()
             generation,publish=labels[-1]
             with native.hold_catalog_nonallocating_preparation(writer_token,owner_token,binding,identity,
-                    generation_id=generation,publish_id=publish,sheet='ETH&IB Switch') as prepared:
-                with _hold_native_current_cycle_observed_switch_unit(prepared,writer_token,owner_token,binding,
+                    generation_id=generation,publish_id=publish,sheet=_sheet) as prepared:
+                receiver=(_hold_native_current_cycle_observed_switch_unit if _sheet=='ETH&IB Switch'
+                    else _hold_native_current_cycle_observed_cabling_unit)
+                with receiver(prepared,writer_token,owner_token,binding,
                         authentication,_store=_store,http_root=root) as unit:
                     if unit.outcome=='WIRE-CANDIDATE':
                         catalog.register_pending_c6_unit(writer_token,owner_token,binding,unit,_unit_preparation=prepared)

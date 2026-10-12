@@ -40,6 +40,18 @@ def load():
 
 
 class Req7RemoteHistoryMatchDirectTests(unittest.TestCase):
+    def test_fixed_current_cabling_creators_accept_no_caller_family_generation_or_unit(self):
+        import inspect
+        module=load()
+        for name in ('_prepare_current_cycle_native_eth_cabling_unit','_prepare_current_cycle_native_ib_cabling_unit'):
+            with self.subTest(name=name):
+                create=getattr(module,name,None)
+                self.assertTrue(callable(create),'both fixed Cabling creators must derive current C6 themselves')
+                self.assertEqual(('writer_token','owner_token','binding','authentication','_store','http_root'),
+                    tuple(inspect.signature(create).parameters))
+                with self.assertRaises(module.RemoteHistoryHold):
+                    create(object(),object(),binding(),object(),_store=object(),http_root=ROOT)
+
     def test_fixed_current_native_switch_preparation_creator_accepts_no_caller_generation_or_unit(self):
         import inspect
         module=load();create=getattr(module,'_prepare_current_cycle_native_switch_unit',None)
