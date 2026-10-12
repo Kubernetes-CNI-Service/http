@@ -40,6 +40,45 @@ def load():
 
 
 class Req7RemoteHistoryMatchDirectTests(unittest.TestCase):
+    def test_next_current_native_new_has_no_caller_family_or_pending_backfill(self):
+        import inspect
+        module=load();api=getattr(module,'_prepare_next_current_cycle_native_originals',None)
+        self.assertTrue(callable(api),'default NEW must choose its own current family after original settlement')
+        self.assertEqual(('writer_token','owner_token','binding','authentication','_store','http_root'),
+            tuple(inspect.signature(api).parameters))
+        with mock.patch.object(module.global_journal,'prepare_global_unit') as writes:
+            with self.assertRaises(module.RemoteHistoryHold):
+                api(object(),object(),binding(),None,_store=object(),http_root=ROOT)
+        writes.assert_not_called()
+
+    def test_next_current_native_pending_stops_before_source_or_oauth_and_no_send_stops_at_first_wire(self):
+        module=load();api=getattr(module,'_prepare_next_current_cycle_native_originals',None)
+        self.assertTrue(callable(api),'fixed internal family loop missing')
+        from monitor import issue_tracker_local_commit as local
+        from monitor.issue_tracker_token_launcher import OwnedProjectTokenRefreshUnit
+        writer=object();owner=object();bound=binding();auth=object();store=object()
+        families=('ETH&IB Switch','ETH Cabling','IB Cabling');stamp=(('GEN00000000000000000001','a'*64),)
+        # Control-only fixture: actual settlement/C5/C6/issued-response proof
+        # is independently exercised by real workflow. No fake permit escapes.
+        with mock.patch.object(local,'_owner'),mock.patch.object(module.ownership,'_validated_owner'), \
+                mock.patch.object(module,'_current_cycle_native_new_pending',return_value=True), \
+                mock.patch.object(module,'_prepare_current_cycle_native_unit') as create, \
+                mock.patch.object(OwnedProjectTokenRefreshUnit,'refresh_once') as oauth:
+            self.assertEqual(('EXISTING_PENDING',None,None),api(writer,owner,bound,None,_store=store,http_root=ROOT))
+        create.assert_not_called();oauth.assert_not_called()
+        steps=[]
+        def create_actual(*args,**kwargs):
+            self.assertEqual('AUTO',kwargs['_sheet']);self.assertIs(True,kwargs['_new_originals'])
+            skipped=kwargs['_skipped_sheets'];steps.append(skipped)
+            self.assertEqual((),skipped) if len(steps)==1 else self.assertEqual(('ETH&IB Switch',),skipped)
+            return ('NO_SEND' if len(steps)==1 else 'WIRE_REGISTERED','selected-'+str(len(steps)),
+                families[len(steps)-1],families,auth,stamp)
+        with mock.patch.object(local,'_owner'),mock.patch.object(module.ownership,'_validated_owner'), \
+                mock.patch.object(module,'_current_cycle_native_new_pending',return_value=False), \
+                mock.patch.object(module,'_prepare_current_cycle_native_unit',side_effect=create_actual):
+            self.assertEqual(('WIRE_REGISTERED','selected-2',auth),api(writer,owner,bound,None,_store=store,http_root=ROOT))
+        self.assertEqual([(),('ETH&IB Switch',)],steps,'do not create third family after first WIRE')
+
     def test_fixed_cabling_new_originals_have_no_caller_family_unit_or_backfill(self):
         import inspect
         module=load()

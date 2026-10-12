@@ -251,6 +251,11 @@ class OnlineObservationStatusWorkflowTests(unittest.TestCase):
                     self.assertEqual(['all-original-finalizers'], closed)
                     return actual_write(*args, **kwargs)
                 stack.enter_context(mock.patch.object(WORKER, '_hold_terminal_current_project_online_originals', owners))
+                # The status-only fixture supplies fake owners and transport
+                # observations, not source/NEW authority. Preserve every
+                # original cache/CGI/browser assertion at that boundary.
+                stack.enter_context(mock.patch('monitor.issue_tracker_remote_history_match._prepare_next_current_cycle_native_originals',
+                    return_value=('EXISTING_PENDING',None,observations['authentication'])))
                 dispatch_options = ({'side_effect':RemoteHistoryHold()} if outcome == 'HOLD'
                     else {'return_value':CountedMutationCompletion(count, 401, 'a'*64, None, outcome)})
                 stack.enter_context(mock.patch.object(WORKER, '_dispatch_current_project_online_originals',

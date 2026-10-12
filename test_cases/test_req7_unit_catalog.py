@@ -953,6 +953,37 @@ print('COLD_SHARED_FIFO_ORIGINALS_NO_HANDLES_OR_AUTHORITY')
             from monitor import issue_tracker_global_attempt_journal as globals_
             self.assertEqual((1, 0), tuple(state.attempt_count for _unit, state in globals_.inspect_catalog_global_units(owner, bound)))
 
+    def test_next_native_new_actual_counted_unknown_stops_before_fifo_source_or_oauth(self):
+        with CatalogAppliedNativeWorkflowTests.completed_and_pending(self,project_origins=True) as (
+                case,_catalog,remote,inventory,_old,writer,owner,bound,originals):
+            from monitor import issue_tracker_global_attempt_journal as globals_
+            from monitor.issue_tracker_token_launcher import OwnedProjectTokenRefreshUnit
+            before=original_read_files(case.root)
+            self.assertIs(True,remote._current_cycle_native_new_pending(writer,owner,bound))
+            self.assertEqual(before,original_read_files(case.root))
+            self.assertEqual(1,globals_.record_global_attempt_intent(owner,bound,originals[1]).attempt_count)
+            counted=original_read_files(case.root)
+            with mock.patch.object(inventory,'_hold_all_project_fifo_frontier') as fifo, \
+                    mock.patch.object(remote,'_prepare_current_cycle_native_unit') as creator, \
+                    mock.patch.object(OwnedProjectTokenRefreshUnit,'refresh_once') as oauth:
+                self.assertEqual(('EXISTING_PENDING',None,None),remote._prepare_next_current_cycle_native_originals(
+                    writer,owner,bound,None,_store=object(),http_root=case.root))
+            fifo.assert_not_called();creator.assert_not_called();oauth.assert_not_called()
+            self.assertEqual(counted,original_read_files(case.root))
+
+    def test_next_native_new_actual_unsent_missing_originals_hold_and_original_pair_settles_without_writes(self):
+        with CatalogAppliedNativeWorkflowTests.completed_and_pending(self,older_unsent=True,project_origins=True) as (
+                case,_catalog,remote,inventory,_old,writer,owner,bound,originals):
+            before=original_read_files(case.root)
+            with self.assertRaises(remote.RemoteHistoryHold):
+                remote._current_cycle_native_new_pending(writer,owner,bound)
+            self.assertEqual(before,original_read_files(case.root),'computed later maximum is not UNSENT settlement')
+            expected=((originals[1].unit_id,1,((('switch','node0001','down','fabric'),2),)),)
+            self.assertEqual(expected,inventory._record_catalog_unsent_dispositions(writer,owner,bound))
+            settled=original_read_files(case.root)
+            self.assertIs(False,remote._current_cycle_native_new_pending(writer,owner,bound))
+            self.assertEqual(settled,original_read_files(case.root))
+
     def test_shared_fifo_actual_unsent_witness_same_bytes_rebind_revokes_all_and_preserves_foreign(self):
         self.api()
         with CatalogAppliedNativeWorkflowTests.completed_and_pending(self, older_unsent=True, project_origins=True) as (
@@ -970,6 +1001,20 @@ print('COLD_SHARED_FIFO_ORIGINALS_NO_HANDLES_OR_AUTHORITY')
 
 
 class UnitCatalogTests(unittest.TestCase):
+    def test_next_native_new_first_absence_requires_original_enrollment_before_source_or_oauth(self):
+        remote=load_component('issue_tracker_remote_history_match')
+        from monitor.issue_tracker_token_launcher import OwnedProjectTokenRefreshUnit
+        with ExitStack() as scope:
+            writer,_project,_publication=self.local_owner(scope);owner=self.owner(scope)
+            before=original_read_files(self.root)
+            with mock.patch.object(remote,'_prepare_current_cycle_native_unit') as creator, \
+                    mock.patch.object(OwnedProjectTokenRefreshUnit,'refresh_once') as oauth:
+                with self.assertRaises(remote.RemoteHistoryHold):
+                    remote._prepare_next_current_cycle_native_originals(writer,owner,binding(),None,
+                        _store=object(),http_root=self.root)
+            creator.assert_not_called();oauth.assert_not_called()
+            self.assertEqual(before,original_read_files(self.root))
+
     def last_original_owner_api(self):
         remote=load_component('issue_tracker_remote_history_match')
         api=getattr(remote,'_hold_current_project_last_original_owners',None)

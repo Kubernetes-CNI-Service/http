@@ -32,6 +32,37 @@ def cycle(stack, root, *, scope='prod', terminal=True):
 
 
 class OnlineCompletionRuntimeDirectTests(unittest.TestCase):
+    def test_terminal_dispatch_runs_next_new_inside_actual_owner_scope_before_first_or_retry(self):
+        from contextlib import contextmanager
+        from monitor import issue_tracker_remote_history_match as remote
+        worker=persistence.WORKER;store=object();writer=object();owner=object();bound=object()
+        old_auth=object();issued_auth=object()
+        for state in ('EXISTING_PENDING','WIRE_REGISTERED','NO_SEND','HOLD'):
+            with self.subTest(state=state),tempfile.TemporaryDirectory() as directory,ExitStack() as scope:
+                steps=[];closed=[]
+                observation=dict(result=(),writer=writer,owner=owner,binding=bound,authentication=old_auth,
+                    http_root=Path(directory),disposition_stopped=False,delivery_stopped=False)
+                @contextmanager
+                def held(actual):
+                    self.assertIs(store,actual);yield observation;closed.append('all')
+                def create(*args,**kwargs):
+                    self.assertEqual([],closed);self.assertEqual((writer,owner,bound,old_auth),args)
+                    self.assertIs(store,kwargs['_store']);steps.append('NEW')
+                    if state=='HOLD':raise remote.RemoteHistoryHold()
+                    return state,'actual-local-unit' if state=='WIRE_REGISTERED' else None,issued_auth
+                def dispatch(*args,**kwargs):
+                    self.assertEqual([],closed);self.assertEqual(['NEW'],steps)
+                    self.assertEqual((writer,owner,bound,issued_auth),args);steps.append('FIRST/R2')
+                    raise remote.RemoteHistoryHold()
+                scope.enter_context(mock.patch.object(worker,'_hold_terminal_current_project_online_originals',held))
+                scope.enter_context(mock.patch.object(remote,'_prepare_next_current_cycle_native_originals',side_effect=create))
+                scope.enter_context(mock.patch.object(worker,'_dispatch_current_project_online_originals',side_effect=dispatch))
+                scope.enter_context(mock.patch.object(worker,'STATUS_DIR',Path(directory)))
+                scope.enter_context(mock.patch.object(worker.sys,'stderr',io.StringIO()))
+                self.assertEqual((),worker._dispatch_issue_tracker_online_after_completion(store))
+                self.assertEqual(['NEW','FIRST/R2'] if state in ('EXISTING_PENDING','WIRE_REGISTERED') else ['NEW'],steps)
+                self.assertEqual(['all'],closed)
+
     def test_first_catalog_observation_refuses_unheld_owners_before_io_or_authentication(self):
         from monitor import issue_tracker_remote_history_match as remote
         from monitor import issue_tracker_token_launcher as tokens

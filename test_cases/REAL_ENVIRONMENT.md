@@ -2,6 +2,7 @@
 
 ## TC-REAL-REQ7-FIXED-SWITCH-NEW-ORIGINALS-001 — 同次真实创建到零计数原像
 
+- 默认选择器/终结 worker 补充（**NOT RUN / REAL_ENV REQUIRED**）：实际 ALL mixed+FIFO 原件须同 scope 关联完整有序 projects、counted/APPLIED 与无重叠、无遗漏分区；counted UNKNOWN 阻止 NEW，零计数 UNSENT 必须有原 witness/双记录，不能依文件名或 later maximum 补 settlement。首次 catalog 缺失沿用原 enrollment 三原件检查，缺损在源/OAuth 前 HOLD。保留真实 Switch→ETH→IB 顺序、同次 NO_SEND 才继续、首个 WIRE 停止、同 C6 generation/publish/family 漂移在读写前拒绝，以及缺族/空来源、安全中断、关键登记边界、冷恢复与失败后 partial 原件/COUNT/UNKNOWN 保留。默认 worker NEW HOLD 不回退 FIRST；成功选择后 FIRST/R2 仍独立取得原件，观察值不授予许可。真实 NEW→FIRST、归档与 bootstrap 整体组合和当前 full/check 仍未证明；本地独立 RED/direct、实际 Switch 创建与原 ALL settlement、原 terminal FIRST 多脚本仅为开发证据。现场精确授权、研发确认与普通发布门禁不变；无省略/合并/新剩余风险接受确认人，仅清理本轮确证自有资源，全部现场 NOT RUN。
 - ETH/IB Cabling 扩展：同样状态 **NOT RUN**，保留真实 active 行更新与真实缺失/Closed 键 NV 插入两种必要机制；NV 原双列、原 ID reservation 和 `row_response=None` 原样贯穿实际 BUSINESS 创建，不能按响应列表切片重算配对。只读候选不是 NEW 证明；same-call packet 删除/替换/复制、原 issuer 撤销和原期限检查保持 fail closed，原旧 eight/nine-field read-tail、namespace、K 和 NV 收尾合同不放宽。未新增现场授权或接受风险确认人。
 - 类型：integration / real-environment；REQ7 C5/C6/C19/C25。状态 **NOT RUN / REAL_ENV REQUIRED**；自动化：`test_req7_remote_history_match` direct 与 `test_issue_tracker_stage_l_consumer_workflow` 实际多脚本 normal workflow。
 - 前置：另行精确现场授权、当前精确树与运行身份、专用表/同 Cloud 项目历史前提、真实当前 C5/C6、实际双 owner、合法本地登记及真实 target/History nonce 对。该卡不扩大真实 SSH、设备、Cloud 或生产写入授权。

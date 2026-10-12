@@ -3385,3 +3385,18 @@ in a same-call, once-bound private data packet. NV's other-column read and
 None-row insert stay distinct; the original NV/nonallocating read-tail shapes,
 source/column checks and cleanup deadlines remain unchanged. Closed native
 verifiers never become permission for the independent preread stage.
+
+The fixed terminal worker now invokes the next current native NEW selector
+before independent FIRST/R2. ALL counted UNKNOWN blocks NEW without OAuth or
+current-source reads; zero-count historical settlement needs the actual FIFO
+reader's full UNSENT witness/pair, joined to mixed settlements inside live
+scopes with a complete non-overlapping ALL partition. Exact first catalog
+absence reuses the three-original local enrollment check, not a lock/name
+subset. All readers close before creation and no closed verifier is adopted.
+AUTO derives actual family presence in Switch/ETH/IB order inside the current
+C5/C6 locator; same-call successful NO_SEND alone advances, generation/publish
+and family drift refuses before reads/writes, and first WIRE stops. Creation
+HOLD never falls through to dispatch after a partial prefix. FIRST/R2 still
+reacquires and validates its own original graph; selector results are not GO.
+Full NEW-to-FIRST/cold-bootstrap/archive composition, current full/check and
+REAL_ENV remain unclosed; no existing test is removed or weakened.

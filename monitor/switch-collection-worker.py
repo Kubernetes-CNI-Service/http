@@ -1186,14 +1186,15 @@ def _reconcile_issue_tracker_online_after_completion(store):
 
 
 def _dispatch_issue_tracker_online_after_completion(store):
-    """Fixed terminal FIRST/R2, with live originals and no caller send selector.
+    """Fixed terminal NEW then FIRST/R2, with live originals and no selector.
 
     A transport completion is not remote COMPLETE or FIFO release. The status
     published after all owners exit describes an observation only; it cannot
     be consumed as permission for another attempt. Typed HOLD keeps the actual
     reconciliation result, while interruptions and failed finalizers propagate.
     """
-    from monitor.issue_tracker_remote_history_match import RemoteHistoryHold, RemoteHistoryObservation
+    from monitor.issue_tracker_remote_history_match import (
+        RemoteHistoryHold, RemoteHistoryObservation, _prepare_next_current_cycle_native_originals)
     from monitor.issue_tracker_mutation_launcher import CountedMutationCompletion
     completion = None
     with _hold_terminal_current_project_online_originals(store) as observations:
@@ -1204,9 +1205,19 @@ def _dispatch_issue_tracker_online_after_completion(store):
             for item in observations['result'])
         if not blocked:
             try:
-                completion = _dispatch_current_project_online_originals(observations['writer'],
-                    observations['owner'], observations['binding'], observations['authentication'],
-                    _store=store, http_root=observations['http_root'])
+                next_state, _unit_id, authentication = _prepare_next_current_cycle_native_originals(
+                    observations['writer'], observations['owner'], observations['binding'],
+                    observations['authentication'], _store=store, http_root=observations['http_root'])
+                if next_state not in ('EXISTING_PENDING', 'WIRE_REGISTERED', 'NO_SEND'):
+                    raise RemoteHistoryHold()
+                if next_state != 'NO_SEND':
+                    # NEW observations never authorize an attempt: the fixed
+                    # FIRST/R2 driver reacquires its own actual ALL originals.
+                    # Typed creation HOLD does not fall back after a partial
+                    # prefix; count/UNKNOWN and all originals remain retained.
+                    completion = _dispatch_current_project_online_originals(observations['writer'],
+                        observations['owner'], observations['binding'], authentication,
+                        _store=store, http_root=observations['http_root'])
             except RemoteHistoryHold:
                 pass
         if completion is not None and (type(completion) is not CountedMutationCompletion

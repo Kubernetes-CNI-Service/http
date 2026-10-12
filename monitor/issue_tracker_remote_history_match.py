@@ -1038,8 +1038,80 @@ def _prepare_current_cycle_native_ib_cabling_originals(writer_token,owner_token,
         _store=_store,http_root=http_root,_sheet='IB Cabling',_new_originals=True)
 
 
+def _current_cycle_native_new_pending(writer_token,owner_token,binding):
+    """Necessary ALL-original settlement observation, never NEW/send authority.
+
+    Counted UNKNOWN stays pending. Zero-count historical units leave pending
+    only through the actual FIFO reader's three original UNSENT records.
+    All semantic readers finish before any creator runs; no closed verifier
+    is handed off and fresh native preparation still independently qualifies.
+    """
+    from monitor import issue_tracker_local_commit as local
+    from monitor import issue_tracker_retained_inventory as inventory
+    try:
+        project=local._owner(writer_token);owner=ownership._validated_owner(owner_token,binding)
+        # Reuse the original reconciliation's exact first-use contract: all
+        # three local enrollment originals, not a lock/name subset. Missing
+        # enrollment refuses before current source selection or lazy OAuth.
+        if _observe_original_first_catalog_absence(writer_token,owner_token,binding):return False
+        with inventory._hold_all_project_mixed_settlements(owner_token,binding) as (rows,verify_mixed):
+            verify_mixed()
+            if any(row.attempt_count and not row.settled for row in rows):pending=True
+            else:
+                with inventory._hold_all_project_fifo_frontier(owner_token,binding) as (fifo,verify_fifo):
+                    verify_mixed();verify_fifo();verify_mixed()
+                    ids=tuple(row.unit.unit_id for row in rows)
+                    counted=tuple(row.unit.unit_id for row in rows if row.attempt_count and row.settled)
+                    zero={row.unit.unit_id for row in rows if row.attempt_count==0}
+                    parts=(fifo.applied,fifo.superseded,fifo.frontier,tuple(item[0] for item in fifo.blocked))
+                    flattened=tuple(item for part in parts for item in part)
+                    if (fifo.projects!=tuple((row.unit.unit_id,row.project_identity) for row in rows)
+                            or fifo.applied!=counted or not set(fifo.superseded)<=zero
+                            or len(ids)!=len(set(ids)) or len(flattened)!=len(set(flattened))
+                            or set(flattened)!=set(ids)):raise RemoteHistoryHold()
+                    pending=bool(fifo.frontier or fifo.blocked)
+                    verify_fifo();verify_mixed();verify_fifo()
+            verify_mixed()
+        if local._owner(writer_token) is not project or ownership._validated_owner(owner_token,binding) is not owner:
+            raise RemoteHistoryHold()
+        return pending
+    except Exception:raise RemoteHistoryHold() from None
+
+
+def _prepare_next_current_cycle_native_originals(writer_token,owner_token,binding,authentication,*,_store,http_root):
+    """Fixed current Switch/ETH/IB loop; first WIRE stops, actual NO_SEND advances.
+
+    Pending ALL originals only block NEW; they do not grant FIRST/R2 selection.
+    Skipped families are actual same-call NO_SEND, never supplied/cold labels.
+    The returned authentication is still independently validated by every
+    consumer, not GO. No COUNT, CLAIM, mutation or bootstrap occurs here.
+    """
+    from monitor import issue_tracker_local_commit as local
+    try:
+        project=local._owner(writer_token);owner=ownership._validated_owner(owner_token,binding)
+        if _current_cycle_native_new_pending(writer_token,owner_token,binding):
+            return ('EXISTING_PENDING',None,authentication)
+        skipped=();original_stamp=None;original_families=None
+        for _index in range(3):
+            state,unit_id,selected,families,authentication,stamp=_prepare_current_cycle_native_unit(
+                writer_token,owner_token,binding,authentication,_store=_store,http_root=http_root,
+                _sheet='AUTO',_new_originals=True,_skipped_sheets=skipped,
+                _same_cycle=None if original_stamp is None else (original_stamp,original_families))
+            if (local._owner(writer_token) is not project
+                    or ownership._validated_owner(owner_token,binding) is not owner
+                    or selected in skipped or selected not in families
+                    or original_stamp is not None and (stamp!=original_stamp or families!=original_families)):
+                raise RemoteHistoryHold()
+            if state=='WIRE_REGISTERED':return (state,unit_id,authentication)
+            if state!='NO_SEND':raise RemoteHistoryHold()
+            original_stamp=stamp;original_families=families;skipped=(*skipped,selected)
+            if set(skipped)==set(families):return ('NO_SEND',None,authentication)
+        raise RemoteHistoryHold()
+    except Exception:raise RemoteHistoryHold() from None
+
+
 def _prepare_current_cycle_native_unit(writer_token,owner_token,binding,authentication,*,
-                                      _store,http_root,_sheet,_new_originals=False):
+                                      _store,http_root,_sheet,_new_originals=False,_skipped_sheets=(),_same_cycle=None):
     """Fixed native preparation and local pending registration, never a send.
 
     Derive latest current C6 inside live source holders, not caller generation
@@ -1052,7 +1124,12 @@ def _prepare_current_cycle_native_unit(writer_token,owner_token,binding,authenti
     try:
         project=local._owner(writer_token);sheet_owner=ownership._validated_owner(owner_token,binding)
         root=Path(http_root)
-        if (_sheet not in ('ETH&IB Switch','ETH Cabling','IB Cabling')
+        automatic=_sheet=='AUTO'
+        fixed=('ETH&IB Switch','ETH Cabling','IB Cabling')
+        if (_sheet not in (*fixed,'AUTO') or automatic and not _new_originals
+                or type(_skipped_sheets) is not tuple or len(set(_skipped_sheets))!=len(_skipped_sheets)
+                or any(title not in fixed for title in _skipped_sheets)
+                or not automatic and (_skipped_sheets or _same_cycle is not None)
                 or type(_new_originals) is not bool
                 or not root.is_absolute() or root.resolve(strict=True)!=root
                 or Path(_store.project_identity)!=project.project or _store.scope!='prod'):raise RemoteHistoryHold()
@@ -1066,6 +1143,21 @@ def _prepare_current_cycle_native_unit(writer_token,owner_token,binding,authenti
             # issuing bounded reads. The held locator context and fixed
             # compiler independently revalidate this source; no caller keys.
             keys=()
+            if automatic:
+                from monitor import issue_tracker_stage_l_consumer as source
+                from monitor.issue_tracker_state_owner import current_k
+                from monitor.issue_tracker_whitelist_workbook import read_whitelist_workbook
+                whitelist_path=root/'monitor/Issue_Tracker_Template_v1.xlsx'
+                qualified=source.qualify_prod_stage_l(_store,http_root=root,settings=current_k(writer_token),
+                    whitelist_snapshot=read_whitelist_workbook(whitelist_path),whitelist_path=whitelist_path,
+                    writer_token=writer_token)
+                family_by_sheet={'ETH&IB Switch':'switch','ETH Cabling':'eth_cabling','IB Cabling':'ib_cabling'}
+                present={item.activity_key[0] for item in qualified.candidates}
+                families=tuple(title for title in fixed if family_by_sheet[title] in present)
+                remaining=tuple(title for title in families if title not in _skipped_sheets)
+                if (not remaining or not set(_skipped_sheets)<=set(families)
+                        or _same_cycle is not None and (labels,families)!=_same_cycle):raise RemoteHistoryHold()
+                _sheet=remaining[0]
             if _sheet!='ETH&IB Switch':
                 from monitor import issue_tracker_stage_l_consumer as source
                 from monitor.issue_tracker_state_owner import current_k
@@ -1077,6 +1169,9 @@ def _prepare_current_cycle_native_unit(writer_token,owner_token,binding,authenti
                 family={'ETH Cabling':'eth_cabling','IB Cabling':'ib_cabling'}[_sheet]
                 keys=tuple(item.activity_key for item in qualified.candidates if item.activity_key[0]==family)
                 if not keys or len(set(keys))!=len(keys):raise RemoteHistoryHold()
+            if automatic and authentication is None:
+                from monitor.issue_tracker_token_launcher import OwnedProjectTokenRefreshUnit
+                authentication=OwnedProjectTokenRefreshUnit(owner_token,binding).refresh_once()
             require_current_owned_project_token(owner_token,binding,authentication)
             observed=OwnedProjectSheetsReadUnit(writer_token,owner_token,binding,authentication,
                 read_kind='template_identity').read_once()
@@ -1199,7 +1294,7 @@ def _prepare_current_cycle_native_unit(writer_token,owner_token,binding,authenti
                 reservation.prepare_owned_project_metadata_reservation(writer_token,owner_token,binding,authentication,
                     new_unit,identity_response=new_images[0][3],metadata_response=new_images[1][3]);current()
             original_reads()
-        return result
+        return (*result,_sheet,families,authentication,labels) if automatic else result
     except Exception:raise RemoteHistoryHold() from None
 
 

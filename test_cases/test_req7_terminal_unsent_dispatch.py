@@ -92,6 +92,12 @@ class TerminalUnsentDispatchDirectTests(unittest.TestCase):
             stack.enter_context(mock.patch.object(remote, '_reconcile_pending_project_units', side_effect=reconcile))
             stack.enter_context(mock.patch.object(remote, '_reconcile_pending_project_units_and_project_auth',
                 side_effect=lambda *args,**options:(reconcile(*args,**options),authentication)))
+            if terminal_dispatch:
+                # This original lifecycle-only fixture substitutes unissued
+                # owners; its new classification boundary must be explicit
+                # too. Real ALL settlement and creators run in workflow tests.
+                stack.enter_context(mock.patch.object(remote,'_prepare_next_current_cycle_native_originals',
+                    return_value=('EXISTING_PENDING',None,authentication)))
             stack.enter_context(mock.patch.object(worker if terminal_dispatch else remote,
                 '_dispatch_current_project_online_originals' if terminal_dispatch else preparation_endpoint,
                 side_effect=prepare))
