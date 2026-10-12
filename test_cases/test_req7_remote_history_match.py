@@ -40,6 +40,21 @@ def load():
 
 
 class Req7RemoteHistoryMatchDirectTests(unittest.TestCase):
+    def test_native_cabling_issued_compiler_derives_family_and_refuses_unissued_preparation_before_reads(self):
+        import inspect
+        module=load();entry=getattr(module,'_hold_native_current_cycle_observed_cabling_unit',None)
+        self.assertTrue(callable(entry),'Cabling needs a fixed actual issuer factory, not caller row/read plans')
+        self.assertFalse({'sheet','keys','rows','plans','qualified','unit','compiler'} & set(inspect.signature(entry).parameters))
+        from monitor import issue_tracker_history_read_launcher as reads,issue_tracker_token_launcher as tokens
+        entered=[]
+        with mock.patch.object(reads.OwnedProjectSheetsReadUnit,'read_once') as acquire, \
+                mock.patch.object(tokens,'require_current_owned_project_token') as auth:
+            with self.assertRaises(module.RemoteHistoryHold):
+                with entry(object(),object(),object(),binding(),object(),_store=object(),http_root=self.root):
+                    entered.append(True)
+        self.assertEqual([],entered,'sanitized caller assertion is not rejection before entry')
+        acquire.assert_not_called();auth.assert_not_called()
+
     def test_native_switch_issued_compiler_refuses_unissued_preparation_before_auth_or_reads(self):
         module=load();entry=getattr(module,'_hold_native_current_cycle_observed_switch_unit',None)
         self.assertTrue(callable(entry),'fixed actual issued-read Switch compiler is missing')

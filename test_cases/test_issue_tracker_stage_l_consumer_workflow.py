@@ -2474,7 +2474,22 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             if self.native_no_send_expectation_failure is not None:raise self.native_no_send_expectation_failure
             raise
 
-    def _verify_fresh_native_switch_no_send(self,committed,qualified,*,tail_revoke=False):
+    def test_real_fresh_c6_all_cabling_noops_use_original_issued_rows_without_nv_or_catalog(self):
+        self.native_no_send_expectation_failure=None
+        try:self._exercise_real_protected_three_panel_fixture(skip_history=False,native_current_no_send_probe='cabling')
+        finally:
+            if self.native_no_send_expectation_failure is not None:raise self.native_no_send_expectation_failure
+
+    def test_real_fresh_cabling_original_row_revocation_after_cleanup_refuses_zero_write_return(self):
+        self.native_no_send_expectation_failure=None
+        try:self._exercise_real_protected_three_panel_fixture(skip_history=False,native_current_no_send_probe='cabling-tail-revoke')
+        finally:
+            if self.native_no_send_expectation_failure is not None:raise self.native_no_send_expectation_failure
+
+    def test_real_fresh_nonallocating_cabling_closed_or_missing_key_refuses_before_history_or_nv(self):
+        self._exercise_real_protected_three_panel_fixture(skip_history=False,native_current_no_send_probe='cabling-inactive')
+
+    def _verify_fresh_native_switch_no_send(self,committed,qualified,*,tail_revoke=False,_sheet='ETH&IB Switch',_inactive=None):
         import tempfile
         import socket
         from test_cases.test_req7_spreadsheet_owner import load as load_owner,scoped_fixture
@@ -2486,7 +2501,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         from test_cases.test_req7_history_read_launcher import Req7HistoryReadLauncherWorkflowTests
         from test_cases.test_req7_sdk_authentication import fresh_info
         from test_cases.test_req7_sheets_read_decode import identity_response,response
-        from test_cases.test_req7_activity_discovery import reserved_switch_row,literal,sheet_document,insertion_document,exact_row_document
+        from test_cases.test_req7_activity_discovery import reserved_switch_row,cabling_row,literal,sheet_document,insertion_document,exact_row_document
         from monitor import issue_tracker_online_target as target
         from monitor.issue_tracker_online_target import bind_online_target,freeze_target_allowlist
         from monitor.issue_tracker_sdk_authentication import AuthenticatedToken
@@ -2504,12 +2519,37 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             # NVL device type is authoritative; the Ethernet template rule
             # must not be projected onto this independent NVLink row.
             '[MONITOR][asic_temp][ASIC1] [fabric_source=type] ASIC1: state=ok; current=75 C; max=70 C; critical=80 C')
+        if _sheet!='ETH&IB Switch':
+            expected_keys=((('eth_cabling','leaf-a','swp1','Mis-wiring'),) if _sheet=='ETH Cabling'
+                else (('ib_cabling','leaf01','sw1p1','Mis-wiring'),))
+        family={'ETH&IB Switch':'switch','ETH Cabling':'eth_cabling','IB Cabling':'ib_cabling'}[_sheet]
+        sid={'ETH&IB Switch':101,'ETH Cabling':102,'IB Cabling':103}[_sheet]
+        self.assertEqual(tuple(sorted(expected_keys)),tuple(sorted(item.activity_key for item in qualified.candidates
+            if item.activity_key[0]==family)))
         rows=[reserved_switch_row(index) for index in range(2,4)]
         for row,key,description in zip(rows,expected_keys,descriptions):
             row.update({'F':literal(key[1]),'L':literal(description),'N':literal('New')})
-        discovery=sheet_document('ETH&IB Switch',rows,100)
-        occupancy=insertion_document('ETH&IB Switch',rows,100)
-        for document in (discovery,occupancy):document['sheets'][0]['properties']['sheetId']=101
+        if _sheet!='ETH&IB Switch':
+            key=expected_keys[0]
+            # Literal source fixtures and independent key hash, never values
+            # copied from the compiler, ACTION, WIRE or source_tool_values.
+            # Existing source key-digest contract hashes compact JSON itself,
+            # not the newline-terminated journal image format.
+            digest=hashlib.sha256(json.dumps(key,ensure_ascii=False,sort_keys=True,separators=(',',':')).encode()).hexdigest()[:16]
+            if _sheet=='ETH Cabling':
+                values={'G':f'[MONITOR][eth_cabling][{digest}] WRONG_PEER: Miswired_Links: leaf-a:swp1 -> leaf-z:swp2',
+                    'M':'foreign-z','N':'swp9','S':'leaf-a','T':'swp1'}
+            else:
+                values={'G':f'[MONITOR][ib_cabling][{digest}] Mis-wiring: Miswired_Links!2: leaf01:sw1p1 -> server01:mlx5_0',
+                    'M':'leaf01','N':'sw1p1','S':'server02','T':'mlx5_1'}
+            active=cabling_row('NV30016')
+            active.update({column:literal(value) for column,value in {**values,'K':key[1],'L':key[2],'F':key[3]}.items()})
+            rows=[active]
+            if _inactive=='closed':active['U']=literal('Closed')
+            elif _inactive=='missing':rows=[]
+        discovery=sheet_document(_sheet,rows,100)
+        occupancy=insertion_document(_sheet,rows,100)
+        for document in (discovery,occupancy):document['sheets'][0]['properties']['sheetId']=sid
         documents={'template_identity':identity_response(),'metadata':{'matchedDeveloperMetadata':[]},
             'activity':discovery,'insertion':occupancy,'history_tail':{'spreadsheetId':binding.spreadsheet_id,
                 'sheets':[{'properties':{'sheetId':105,'title':'Update_History','sheetType':'GRID',
@@ -2535,13 +2575,15 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             native.certificates=lambda hostname='oauth2.googleapis.com':certificates(native,hostname)
             issued=[];compiled=[];units=[]
             real_read=launcher.OwnedProjectSheetsReadUnit.read_once
-            actual_compiler=compiler.freeze_observed_receipted_switch_unit
+            compiler_name=('freeze_observed_receipted_switch_unit' if _sheet=='ETH&IB Switch'
+                else 'freeze_observed_receipted_cabling_unit')
+            actual_compiler=getattr(compiler,compiler_name)
             def compile_actual(*args,**kwargs):
                 unit=actual_compiler(*args,**kwargs)
                 try:
                     self.assertEqual('NO_SEND',unit.outcome)
-                    self.assertEqual(7,len(issued),'target RED must follow seven genuine issued reads')
-                    self.assertEqual(('OBSERVED-SATISFIED-AT-READ',)*2,tuple(outcome for _key,outcome in unit.outcomes))
+                    self.assertEqual(5+len(expected_keys),len(issued),'target RED must follow every genuine issued read')
+                    self.assertEqual(('OBSERVED-SATISFIED-AT-READ',)*len(expected_keys),tuple(outcome for _key,outcome in unit.outcomes))
                     self.assertEqual(committed.receipt.manifest_id,json.loads(unit.action_preimage)['manifest_id'])
                     self.assertEqual((b'',None,0),(unit.wire_bytes,unit.fence_metadata_id,unit.history_rows_expected))
                 except AssertionError as exc:
@@ -2549,13 +2591,14 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                     print('NO_SEND_FIXTURE_COMPILER_RETURN',unit.outcome,json.loads(unit.action_preimage)['business'],flush=True)
                     raise
                 compiled.append(unit)
-                print('NO_SEND_PHASE actual-C5/C6 compiler, seven original issued reads, all-NOOP, empty wire, no fence/History',flush=True)
+                print('NO_SEND_PHASE',_sheet,'actual-C5/C6 compiler,',len(issued),
+                    'original issued reads, all-NOOP, empty wire, no fence/History',flush=True)
                 return unit
             def read(reader):
                 if reader._kind=='row':
-                    self.assertIn(reader._row,(3,4))
-                    document=exact_row_document('ETH&IB Switch',rows[reader._row-3],reader._row-1)
-                    document['sheets'][0]['properties']['sheetId']=101
+                    self.assertIn(reader._row,tuple(range(3,3+len(rows))))
+                    document=exact_row_document(_sheet,rows[reader._row-3],reader._row-1)
+                    document['sheets'][0]['properties']['sheetId']=sid
                 else:document=documents[reader._kind]
                 body=response(document).data
                 reply=b'HTTP/1.1 200 OK\r\nContent-Length: '+str(len(body)).encode()+b'\r\nConnection: close\r\n\r\n'+body
@@ -2589,7 +2632,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                         with self.assertRaises(OSError):os.fstat(fd)
                     packet=record['project_read_tail'].packet
                     self.assertIs(units[0],packet[-1]);self.assertIs(auth,packet[5])
-                    original_response=packet[6][0][3]
+                    original_response=packet[6][0 if _sheet=='ETH&IB Switch' else 4][3]
                     with launcher._PROJECT_READ_GUARD:saved=launcher._PROJECT_READS.pop(original_response)
                     revoked.append((original_response,saved))
                     self.assertIs(auth,saved)
@@ -2608,34 +2651,52 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                             mock.patch.object(native_module,'_verify_nonallocating_project_read_tail',side_effect=tail):
                         with self._assertion_preserving_preparation(native_module.hold_catalog_nonallocating_preparation(
                                 writer,sheet,binding,identity,generation_id=committed.receipt.generation_id,
-                                publish_id=committed.receipt.published_sha256,sheet='ETH&IB Switch')) as prepared, \
+                                publish_id=committed.receipt.published_sha256,sheet=_sheet)) as prepared, \
                                 mock.patch.object(launcher.OwnedProjectSheetsReadUnit,'read_once',autospec=True,side_effect=read), \
-                                mock.patch.object(compiler,'freeze_observed_receipted_switch_unit',side_effect=compile_actual):
-                            with self._assertion_preserving_preparation(remote._hold_native_current_cycle_observed_switch_unit(
-                                    prepared,writer,sheet,binding,auth,_store=self.store,http_root=self.root)) as unit:
-                                self.assertIs(compiled[0],unit);units.append(unit)
+                                mock.patch.object(compiler,compiler_name,side_effect=compile_actual):
+                            receiver=(remote._hold_native_current_cycle_observed_switch_unit if _sheet=='ETH&IB Switch'
+                                else remote._hold_native_current_cycle_observed_cabling_unit)
+                            try:
+                                with self._assertion_preserving_preparation(receiver(
+                                        prepared,writer,sheet,binding,auth,_store=self.store,http_root=self.root)) as unit:
+                                    self.assertIs(compiled[0],unit);units.append(unit)
+                                    record=native_module._verify_catalog_preparation(prepared)
+                                    self.assertFalse(record['registered']);self.assertIsNone(record['unit'])
+                                    self.assertIsNone(record['origin']);self.assertIsNone(record['indexed'])
+                                    self.assertEqual(set(),record['additions']);self.assertIsNone(record['appended'])
+                                    retained.append((record,tuple(item[2] for held in (record['old'],record['current'])
+                                        for item in held.files)))
+                            except remote.RemoteHistoryHold:
+                                if _inactive is None:raise
                                 record=native_module._verify_catalog_preparation(prepared)
-                                self.assertFalse(record['registered']);self.assertIsNone(record['unit'])
-                                self.assertIsNone(record['origin']);self.assertIsNone(record['indexed'])
-                                self.assertEqual(set(),record['additions']);self.assertIsNone(record['appended'])
-                                retained.append((record,tuple(item[2] for held in (record['old'],record['current'])
-                                    for item in held.files)))
+                                fault_facts.append((len(issued)==4,not compiled,not units,
+                                    not record['registered'] and record['origin'] is None and not record['additions']))
+                                target_holds.append(True)
+                                # Keep the receiver's actual refusal fact
+                                # outside sanitized contexts. Let the real
+                                # unregistered preparation then close/HOLD;
+                                # its HOLD alone cannot satisfy this test.
                 except native_module.NvReservationHold:
-                    if not tail_revoke:raise
+                    if not tail_revoke and _inactive is None:raise
                     refused=True
                 finally:
                     for original_response,saved in revoked:
                         with launcher._PROJECT_READ_GUARD:launcher._PROJECT_READS[original_response]=saved
-                self.assertEqual(tail_revoke,refused)
-                if tail_revoke:
+                self.assertEqual(tail_revoke or _inactive is not None,refused)
+                if tail_revoke or _inactive is not None:
                     self.assertEqual([(True,True,True,True)],fault_facts)
                     self.assertEqual([True],target_holds,'unrelated cleanup HOLD is not target revocation proof')
                 self.assertEqual(before,originals(),'NO_SEND cannot create catalog/NV/INTENT/GLOBAL/COUNT/CLAIM')
                 self.assertEqual(audits_before,{path.name:(path.stat().st_ino,path.read_bytes()) for path in outbox.iterdir()})
                 self.assertFalse(native_module._ACTIVE_CATALOG_PREPARATIONS)
+            if _inactive is not None:
+                self.assertEqual([],units);self.assertEqual([],compiled)
+                self.assertEqual([('template_identity',None),('metadata',None),('activity',None),('insertion',None)],issued)
+                return
             self.assertEqual(1,len(units));self.assertIs(compiled[0],units[0])
+            expected_rows=[('row',4),('row',3)] if _sheet=='ETH&IB Switch' else [('row',3)]
             self.assertEqual([('template_identity',None),('metadata',None),('activity',None),('insertion',None),
-                ('row',4),('row',3),('history_tail',None)],issued)
+                *expected_rows,('history_tail',None)],issued)
 
     def test_native_original_settings_audit_receipt_rebind_after_count_refuses_fixed_local_request(self):
         self._native_original_launch_probe('receipt-rebind',settings_audit=True)
@@ -4838,7 +4899,13 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             self.assertEqual(hashlib.sha256(committed.prepared.xlsx_bytes).hexdigest(),
                              committed.receipt.published_sha256)
             if native_current_no_send_probe:
-                self._verify_fresh_native_switch_no_send(committed,qualified,
+                if native_current_no_send_probe in ('cabling','cabling-tail-revoke','cabling-inactive'):
+                    for target_sheet in ('ETH Cabling','IB Cabling'):
+                        self._verify_fresh_native_switch_no_send(committed,qualified,_sheet=target_sheet,
+                            tail_revoke=native_current_no_send_probe=='cabling-tail-revoke',
+                            _inactive=('closed' if target_sheet=='ETH Cabling' else 'missing')
+                                if native_current_no_send_probe=='cabling-inactive' else None)
+                else:self._verify_fresh_native_switch_no_send(committed,qualified,
                     tail_revoke=native_current_no_send_probe=='tail-revoke')
                 return
             if observed_cabling_insert_probe:

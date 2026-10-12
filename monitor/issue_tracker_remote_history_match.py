@@ -884,7 +884,29 @@ def _hold_native_current_cycle_compiler_inputs(prepared,writer_token,owner_token
 @contextmanager
 def _hold_native_current_cycle_observed_switch_unit(prepared,writer_token,owner_token,binding,authentication,*,
                                                     _store,http_root):
-    """Acquire the fixed issued NEW Switch images under current C5/C6 originals.
+    """Fixed Switch-only reception; no caller source, plan or row coordinates."""
+    with _hold_native_current_cycle_observed_nonallocating_unit(prepared,writer_token,owner_token,binding,
+            authentication,_store=_store,http_root=http_root,_sheets=('ETH&IB Switch',)) as unit:
+        yield unit
+
+
+@contextmanager
+def _hold_native_current_cycle_observed_cabling_unit(prepared,writer_token,owner_token,binding,authentication,*,
+                                                     _store,http_root):
+    """Derive the unique current ETH/IB target; missing/Closed keys stay HOLD.
+
+    No caller family or allocator fallback. This read-only nonallocating
+    receiver handles existing active rows only, never creates an NV store.
+    """
+    with _hold_native_current_cycle_observed_nonallocating_unit(prepared,writer_token,owner_token,binding,
+            authentication,_store=_store,http_root=http_root,_sheets=('ETH Cabling','IB Cabling')) as unit:
+        yield unit
+
+
+@contextmanager
+def _hold_native_current_cycle_observed_nonallocating_unit(prepared,writer_token,owner_token,binding,authentication,*,
+                                                           _store,http_root,_sheets):
+    """Acquire fixed issued nonallocating images under current C5/C6 originals.
 
     No caller plans, rows, generation, qualified source, metadata inventory or
     compiler callback. This constructs a candidate, never COUNT/send or G1 GO;
@@ -900,7 +922,8 @@ def _hold_native_current_cycle_observed_switch_unit(prepared,writer_token,owner_
     from tools.ufm_collection_pipeline import _hold_reusable_directory_reads,_hold_reusable_source_reads
     try:
         record=native._verify_catalog_preparation(prepared)
-        if (type(prepared) is not native._CatalogNonallocatingPreparation
+        if (_sheets not in (('ETH&IB Switch',),('ETH Cabling','IB Cabling'))
+                or type(prepared) is not native._CatalogNonallocatingPreparation
                 or record['token'] is not owner_token or record['binding']!=binding
                 or record['nonallocating_writer'] is not writer_token):raise RemoteHistoryHold()
         acquired=[]
@@ -941,10 +964,13 @@ def _hold_native_current_cycle_observed_switch_unit(prepared,writer_token,owner_
                 manifest,manifest_id=freeze_prod_stage_l_manifest(qualified,_store,**context)
                 originals=tuple(compiler._original_receipt_identity(qualified,_store,generation,writer_token,
                     settings,whitelist,whitelist.workbook_sha256) for generation in receipts.generation_ids)
-                selected=tuple(original for original in originals if native._nonallocating_identity(owner_token,
-                    binding,record['identity'],original[0],original[1],'ETH&IB Switch')[0]==prepared.unit_id)
-                if len(selected)!=1 or selected[0][2]!=manifest_id:raise RemoteHistoryHold()
-                operations=tuple(item for item in json.loads(manifest)['operations'] if item['activity_key'][0]=='switch')
+                selected=tuple((original,sheet) for original in originals for sheet in _sheets
+                    if native._nonallocating_identity(owner_token,binding,record['identity'],
+                        original[0],original[1],sheet)[0]==prepared.unit_id)
+                if len(selected)!=1 or selected[0][0][2]!=manifest_id:raise RemoteHistoryHold()
+                original,sheet=selected[0]
+                family=compiler._FAMILY[sheet]
+                operations=tuple(item for item in json.loads(manifest)['operations'] if item['activity_key'][0]==family)
                 if not operations:raise RemoteHistoryHold()
                 identity_plan,identity_response=read('template_identity')
                 identity=decode.decode_template_identity(identity_plan,identity_response)
@@ -956,7 +982,7 @@ def _hold_native_current_cycle_observed_switch_unit(prepared,writer_token,owner_
                     parse_constant=capacity._nonfinite)
                 occupied=tuple(item['developerMetadata']['metadataId']
                     for item in document.get('matchedDeveloperMetadata',[]))
-                sid=dict(identity.sheet_ids)['ETH&IB Switch'];sheet='ETH&IB Switch'
+                sid=dict(identity.sheet_ids)[sheet]
                 discovery_plan,discovery_response=read('activity',sheet=sheet)
                 occupancy_plan,occupancy_response=read('insertion',sheet=sheet)
                 occupancy,row_count,_digest=decode._insertion_sheet_image(occupancy_plan,occupancy_response,
@@ -970,6 +996,9 @@ def _hold_native_current_cycle_observed_switch_unit(prepared,writer_token,owner_
                         if len(discovery.active_rows)!=1:raise RemoteHistoryHold()
                         index=discovery.active_rows[0][0]
                     else:
+                        # A genuine nonallocating Cabling scope cannot invent
+                        # missing IDs or reinterpret Closed as a free row.
+                        if sheet!='ETH&IB Switch':raise RemoteHistoryHold()
                         index=next((index for index in range(2,row_count) if index not in reserved
                             and all(cells[(index,column)]==() for column in columns)),None)
                         if index is None:raise RemoteHistoryHold()
@@ -980,8 +1009,11 @@ def _hold_native_current_cycle_observed_switch_unit(prepared,writer_token,owner_
                         'occupancy_response':occupancy_response,'row_plan':row_plan,'row_response':row_response})
                     reserved.append(index)
                 history_plan,history_response=read('history_tail')
-                unit=compiler.freeze_observed_receipted_switch_unit(qualified,_store,**context,
-                    local_generation_id=selected[0][0],business_reads=tuple(business),history_plan=history_plan,
+                freeze=(compiler.freeze_observed_receipted_switch_unit if sheet=='ETH&IB Switch'
+                    else compiler.freeze_observed_receipted_cabling_unit)
+                family_options={} if sheet=='ETH&IB Switch' else {'sheet':sheet}
+                unit=freeze(qualified,_store,**context,**family_options,
+                    local_generation_id=original[0],business_reads=tuple(business),history_plan=history_plan,
                     history_response=history_response,spreadsheet_token=owner_token,binding=binding,identity=identity,
                     occupied_metadata_ids=occupied,_unit_preparation=prepared)
                 native._bind_nonallocating_project_read_tail(prepared,writer_token,owner_token,binding,

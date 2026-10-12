@@ -3205,6 +3205,39 @@ origin/indexed unit, additions, append, NV, intent, COUNT or CLAIM. All original
 source/C6/K/compiler checks and unchanged read deadlines remain in force.
 Settings audits stay pending; there is no audit-only request or empty fence.
 
+The fixed nonallocating Cabling receiver now derives one ETH/IB target from
+the genuine preparation identity and the actual current C6 generation and
+publication originals. It accepts no caller family, qualified source, row,
+plan or compiler callback. Shared source/K/receipt and issued-read scopes
+remain the same as the Switch receiver. Every manifest key must have exactly
+one original active row; missing/Closed or row reuse refuses before History,
+compilation or NV allocation. Original A IDs are observed, never rewritten.
+All-update WIRE registration remains a separate live operation.
+
+An all-NOOP Cabling compiler may make a necessary read-only NO_SEND
+observation only in the genuine nonallocating preparation. Empty-wire
+coherence, exact original enrollment nonces and source identity, unchanged
+preparation issuer and full zero-write state are checked before and after
+the final delegated graph guard. Independent RED showed that the graph
+guard alone could accept a late registered/origin/additions change; that is
+not successful NO_SEND. NV preparations cannot cancel, and append/origin
+entry points remain WIRE-only before modifying any record or namespace.
+The original issued packet/anchor tail verifies the actual derived sheet's
+fixed read roles after every preparation cleanup, without renewed deadlines.
+
+Independent direct and real fresh C5/C6 + OAuth/TLS workflows cover both
+Cabling families, original row revocation after cleanup, and inactive-key
+refusal with target-stage facts kept outside sanitized exceptions. Literal
+business expectations come from authored source fixtures and the existing
+compact-JSON key digest contract, not the compiler's ACTION/WIRE output.
+The earlier fixture mistakenly hashed a newline-terminated journal image;
+its failed logs are retained separately from the missing-factory and
+WIRE-only-observation RED. No test/assertion/timeout or field scenario was
+removed or weakened. These are local receiving slices, not insertion/NV
+factory integration, bootstrap, the default three-sheet NEW driver, the
+final outer-owner boundary, G1, whole REQ7 or current full/check proof.
+REAL_ENV remains NOT RUN and approval remains runner-only.
+
 Independent direct tests reject incoherent empty-wire/audit/zero-write state.
 The real fresh three-panel C5/C6 + OAuth + seven owned TLS-read workflow
 covers both normal all-NOOP exit with original files/outbox unchanged and

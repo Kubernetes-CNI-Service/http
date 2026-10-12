@@ -372,7 +372,8 @@ def _verify_nonallocating_project_read_tail(record, tail):
             _verify_nonallocating_no_send_state(record,tail,original_packet)
         else:_projection(unit)
         action=local._json(unit.action_preimage)
-        if action['identity']['sheet']!='ETH&IB Switch':raise NvReservationHold()
+        sheet=action['identity']['sheet']
+        if sheet not in {'ETH&IB Switch',*_FAMILIES}:raise NvReservationHold()
         # One original row read per actual manifest outcome, including NOOP;
         # never hard-code a fixture's seven reads or adopt caller row plans.
         count=len(unit.outcomes)
@@ -381,10 +382,10 @@ def _verify_nonallocating_project_read_tail(record, tail):
             raise NvReservationHold()
         shape=tuple(item[:3] for item in images)
         if (shape[:4]!=(('template_identity',None,None),('metadata',None,None),
-                ('activity','ETH&IB Switch',None),('insertion','ETH&IB Switch',None))
+                ('activity',sheet,None),('insertion',sheet,None))
                 or shape[-1]!=('history_tail',None,None)
-                or any(kind!='row' or sheet!='ETH&IB Switch' or type(row) is not int or row<3
-                    for kind,sheet,row in shape[4:-1])
+                or any(kind!='row' or target!=sheet or type(row) is not int or row<3
+                    for kind,target,row in shape[4:-1])
                 or len({row for _kind,_sheet,row in shape[4:-1]})!=count
                 or len({id(item[3]) for item in images})!=len(images)):raise NvReservationHold()
         require_current_owned_project_token(token,binding,authentication)
@@ -979,6 +980,9 @@ def _verify_catalog_preparation(prepared):
 
 
 def _catalog_nv_append_guard(prepared, token, binding, unit):
+    # Compiled NO_SEND observation is read-only. Keep every mutating caller
+    # WIRE-only before it can set a unit, origin, namespace or append slot.
+    _unit_insertions(unit)
     _catalog_nv_compiled_observation(prepared, token, binding, unit)
     record = _verify_catalog_preparation(prepared)
     if record['indexed'] is not None or (record['origin'] is not None and not record['origin']['sealed']):
@@ -1015,14 +1019,41 @@ def _catalog_nv_compiled_observation(prepared, token, binding, unit):
     unit_id = prepared.unit_id if nonallocating else prepared.observation.unit_id
     reservations = () if nonallocating else prepared.observation.reservations
     if (record['token'] is not token or record['binding'] != binding or record['registered']
-            or unit_id != unit.unit_id or _unit_insertions(unit) != reservations):
+            or unit_id != unit.unit_id):
         raise NvReservationHold()
+    if unit.outcome=='NO_SEND':
+        def verify_zero_write_observation():
+            if (not nonallocating or _ACTIVE_CATALOG_PREPARATIONS.get(prepared) is not record
+                    or record['token'] is not token or record['binding']!=binding
+                    or prepared.unit_id!=unit.unit_id or record['registered'] is not False
+                    or record['failed'] is not False or record['budget'].failed or record['budget'].pending
+                    or record['unit'] is not None or record['origin'] is not None
+                    or record['indexed'] is not None or record['settings'] is not None
+                    or type(record['additions']) is not set or record['additions']
+                    or record['appended'] is not None):raise NvReservationHold()
+        verify_zero_write_observation()
+        _verify_nonallocating_no_send_image(unit)
+        action=local._json(unit.action_preimage);target=action['identity']
+        original=_catalog_nonallocating_source_observation(prepared,token,binding,record['identity'],
+            writer_token=record['nonallocating_writer'],generation_id=target['generation_id'],
+            publish_id=target['publish_id'],sheet=target['sheet'])
+        nonces={title:(sid,nonce) for title,sid,nonce in original.nonces}
+        if (nonces[target['sheet']]!=(target['sheet_id'],action['target_nonce'])
+                or nonces['Update_History']!=(action['history_sheet_id'],action['history_nonce'])):
+            raise NvReservationHold()
+        if _verify_catalog_preparation(prepared) is not record:raise NvReservationHold()
+        # The final delegated graph can legally admit registered WIRE state;
+        # it cannot replace this NO_SEND branch's own final zero-write check.
+        verify_zero_write_observation()
+        return None
+    if _unit_insertions(unit)!=reservations:raise NvReservationHold()
     enrollment.require_unit_enrollment(token, binding, record['identity'], unit)
     _verify_catalog_preparation(prepared)
     return None if nonallocating else prepared.observation
 
 
 def _catalog_nv_c6_origin_begin(prepared, writer, token, binding, unit):
+    _unit_insertions(unit)
     _catalog_nv_compiled_observation(prepared, token, binding, unit)
     record = _verify_catalog_preparation(prepared)
     if type(prepared) is _CatalogNonallocatingPreparation and record['nonallocating_writer'] is not writer:

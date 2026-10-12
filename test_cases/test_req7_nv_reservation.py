@@ -133,6 +133,68 @@ def recycled_outer_nv_directory(module, store, foreign):
 
 
 class Req7NvReservationDirectTests(unittest.TestCase):
+    def test_nonallocating_cabling_no_send_observation_cannot_open_nv_or_registration_paths(self):
+        module=load()
+        from test_cases.test_req7_send_unit import load as load_composer
+        nonces=(('ETH&IB Switch',101,'a'*64),('ETH Cabling',102,'b'*64),
+            ('IB Cabling',103,'c'*64),('Update_History',105,'d'*64))
+        args=cabling_inputs(nonces)
+        args['business']=tuple({**item,'action':'update','row_index':index+2,
+            'values':{'G':'literal evidence','M':'peer-a','N':'p1','S':'peer-b','T':'p2'},
+            'observed_values':{key:{'stringValue':value} for key,value in
+                {'G':'literal evidence','M':'peer-a','N':'p1','S':'peer-b','T':'p2'}.items()}}
+            for index,item in enumerate(args['business']))
+        unit=load_composer().freeze_send_unit(**args);self.assertEqual('NO_SEND',unit.outcome)
+        prepared=module._CatalogNonallocatingPreparation(unit.unit_id)
+        writer=object();token=object();target=binding();identity=object()
+        record={'token':token,'binding':target,'identity':identity,'registered':False,
+            'nonallocating_writer':writer,'unit':None,'origin':None,'indexed':None,
+            'settings':None,'additions':set(),'appended':None,'failed':False,
+            'budget':SimpleNamespace(failed=False,pending=False)}
+        with mock.patch.dict(module._ACTIVE_CATALOG_PREPARATIONS,{prepared:record}), \
+                mock.patch.object(module,'_verify_catalog_preparation',return_value=record), \
+                mock.patch.object(module,'_catalog_nonallocating_source_observation',
+                    return_value=SimpleNamespace(nonces=nonces)) as original, \
+                mock.patch.object(module.enrollment,'require_unit_enrollment',
+                    side_effect=AssertionError('WIRE enrollment cannot confer NO_SEND permission')):
+            self.assertIsNone(module._catalog_nv_compiled_observation(prepared,token,target,unit))
+            original.assert_called_once_with(prepared,token,target,identity,writer_token=writer,
+                generation_id='c'*64,publish_id='d'*64,sheet='ETH Cabling')
+            for entry,parameters in ((module._catalog_nv_append_guard,(prepared,token,target,unit)),
+                    (module._catalog_nv_c6_origin_begin,(prepared,writer,token,target,unit))):
+                with self.subTest(entry=entry.__name__),self.assertRaises(ValueError):entry(*parameters)
+            self.assertIsNone(record['unit']);self.assertIsNone(record['origin'])
+            self.assertEqual(set(),record['additions']);self.assertIsNone(record['appended'])
+            foreign=module._CatalogNvPreparation(SimpleNamespace(unit_id=unit.unit_id,reservations=()))
+            with self.assertRaises(module.NvReservationHold):
+                module._catalog_nv_compiled_observation(foreign,token,target,unit)
+            with mock.patch.object(module,'_catalog_nonallocating_source_observation',
+                    return_value=SimpleNamespace(nonces=tuple((title,sid,'e'*64) for title,sid,_nonce in nonces))):
+                with self.assertRaises(module.NvReservationHold):
+                    module._catalog_nv_compiled_observation(prepared,token,target,unit)
+            for field,value in (('registered',True),('origin',object()),('additions',{'foreign-write'})):
+                saved=record[field]
+                def drift(*args,**kwargs):
+                    record[field]=value
+                    return SimpleNamespace(nonces=nonces)
+                try:
+                    with self.subTest(field=field), \
+                            mock.patch.object(module,'_catalog_nonallocating_source_observation',side_effect=drift), \
+                            self.assertRaises(module.NvReservationHold):
+                        module._catalog_nv_compiled_observation(prepared,token,target,unit)
+                finally:record[field]=saved
+            calls=[]
+            def late_graph(*args):
+                calls.append(True)
+                if len(calls)==2:record['registered']=True
+                return record
+            try:
+                with mock.patch.object(module,'_verify_catalog_preparation',side_effect=late_graph), \
+                        self.assertRaises(module.NvReservationHold):
+                    module._catalog_nv_compiled_observation(prepared,token,target,unit)
+                self.assertEqual([True,True],calls,'refusal must follow the actual final graph return')
+            finally:record['registered']=False
+
     def test_native_bound_packet_or_actual_unit_replacement_before_cleanup_is_rejected(self):
         from test_cases.test_req7_send_unit import load as load_composer,inputs
         from monitor import issue_tracker_history_read_launcher as reads,issue_tracker_token_launcher as tokens
