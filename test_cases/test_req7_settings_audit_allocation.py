@@ -994,6 +994,37 @@ with local.writer_owner(project, project/"99-output-monitor") as writer, scoped_
 
 
 class Req7NativeDeliveryCreatorOriginalsTests(unittest.TestCase):
+    def test_native_catalog_k_prior_identity_is_only_an_exact_relation_not_an_issuer(self):
+        allocation=load();check=getattr(allocation,'_require_native_catalog_k_prior_identity',None)
+        self.assertTrue(callable(check),'K replay needs exact original prior identity at each semantic boundary')
+        writer,owner,sheet=object(),object(),object();bound=binding()
+        events=('settings:0:literal-original','settings:1:literal-original')
+        raw=SimpleNamespace(events=events)
+        prior={'writer':writer,'owner':owner,'raw':raw,'events':events}
+        record={'token':sheet,'binding':bound,'prior_delivery_events':[prior]}
+        with mock.patch.object(allocation,'_hold_settings_originals') as acquire:
+            self.assertIsNone(check(record,writer,owner,sheet,bound,prior=prior,raw=raw,events=events))
+        acquire.assert_not_called()  # This relation alone never issues a K context.
+
+    def test_native_catalog_k_prior_identity_refuses_equal_replacement_and_ambiguous_originals(self):
+        allocation=load();check=getattr(allocation,'_require_native_catalog_k_prior_identity',None)
+        self.assertTrue(callable(check),'equal copied rows/raw/events cannot replace a prior original')
+        writer,owner,sheet=object(),object(),object();bound=binding()
+        events=('settings:0:literal-original','settings:1:literal-original')
+        raw=SimpleNamespace(events=events)
+        prior={'writer':writer,'owner':owner,'raw':raw,'events':events}
+        def record(rows):return {'token':sheet,'binding':bound,'prior_delivery_events':rows}
+        replacements=[record([dict(prior)]),record([prior,dict(prior)]),record([]),
+            {**record([prior]),'token':object()},
+            record([{**prior,'raw':SimpleNamespace(events=events)}]),
+            record([{**prior,'events':tuple(list(events))}])]
+        for replaced in replacements:
+            with self.subTest(replaced=replaced),self.assertRaises(allocation.SettingsAuditHold):
+                check(replaced,writer,owner,sheet,bound,prior=prior,raw=raw,events=events)
+        raw.events=tuple(list(events))
+        with self.assertRaises(allocation.SettingsAuditHold):
+            check(record([prior]),writer,owner,sheet,bound,prior=prior,raw=raw,events=events)
+
     def test_native_catalog_k_read_refuses_unissued_preparation_before_settings_or_sheet_acquisition(self):
         allocation=load();entry=getattr(allocation,'_hold_native_catalog_k_read',None)
         self.assertTrue(callable(entry),'native preparation needs original read-only K reception')

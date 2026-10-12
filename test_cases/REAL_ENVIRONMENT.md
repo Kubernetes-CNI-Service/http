@@ -2274,6 +2274,8 @@ ALL 审计行确定唯一 append 窗口（NOOP 无虚构行），精确耗尽可
 
 ## TC-REAL-REQ7-IMMUTABLE-SEND-UNIT-001 — 单表不可变 batch / History / 永久 fence
 
+- NEW native Switch 纯派生边界补充（**NOT RUN / REAL_ENV REQUIRED**）：保留正常原 COMPLETE/archive→当前 C6→实际 nonallocating preparation→同 changeset 组批，以及纯派生后原模板变化、原 receipt／nonce／owner／读像失效、issued-read 到期或撤权和收尾失败后的零注册／零新发送安全状态。单次调用内纯派生由前后两次完整原 manifest 重放包围，四次原 C6 观察及双 owner、真实原行／History 容量和最终尾核仍必需；standalone／legacy／Cabling 原重放边界不变，不缓存资格、不接受 caller manifest 或 skip、纯结果不构成权限。证据保留精确树／Python／平台、命令和退出码、完整 END／物理顺序、原件前后 stat/inode/SHA 和实际注册／计数／WIRE／UNKNOWN 不变；清理仅限确证自有夹具。上述场景全部保留，无缩减、合并或低概率豁免，登记依据为 owner 验证指令；替代证据为独立 RED/direct 与真实 native 多脚本正反例，不代表实际 Cloud、设备、断电或在线默认 worker。未验证范围和残余风险仍如实 NOT RUN，原现场授权、必要研发确认和发布门禁不变。
+
 - K current 无覆盖提交补充（**NOT RUN / REAL_ENV REQUIRED**）：保留全部原八个 event/outbox/current 屏障场景，另加旧指针移动后的源目录与 quarantine 屏障（合计十个安装屏障）、移动前原名被替换、移动后陌生 current 插入，以及暖／冷拒绝收养 partial 场景。正常提交将持有的原指针 NOREPLACE 归档，逐字节保留且两目录同步，再 NOREPLACE 安装新 current；不得覆盖陌生对象、回滚事件、补建交付投影或 ACK 失败。证据含各原件与归档 before/after stat/inode/SHA、完整屏障物理顺序和新进程 HOLD，清理只限确证自有夹具。未省略或合并原场景；确认人为本轮 owner 指令，替代证据为独立 direct 与真实成对 native/TLS/cold workflow。真实断电、设备／卷持久性及在线 worker 仍未验证，不标通过，不扩大既有现场授权、研发确认或发布范围。
 
 - K guard 收尾补充（**NOT RUN / REAL_ENV REQUIRED**）：保留原 guard 替换件、既有归档目的名碰撞、原子 NOREPLACE 移动后 settings／quarantine 两个目录屏障失败、最终证明丢失和冷恢复场景。成功后仅归档原 guard，不删除名称替换件；任一异常不 ACK，保留 partial／归档与持久 STOP，原事件、已冻结单元及 UNKNOWN 不回滚或释放。前后 stat/inode/SHA、屏障物理顺序和新进程证据沿用本卡要求。没有删减或合并原场景；确认人为本轮 owner 指令，替代证据为本地独立预期和 native 双 owner／TLS／冷进程故障流程；真实断电、实际卷持久性及线上 worker 仍未验证，不标通过，不扩展原现场授权、研发确认或发布范围。

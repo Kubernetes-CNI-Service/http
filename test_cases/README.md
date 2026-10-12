@@ -3134,3 +3134,33 @@ delivery/C6/NV/catalog workflows cover this leaf handoff, not the still-open
 qualified-source/current-cycle receipt/compiler/default NEW integration or
 whole REQ7/full/check. No automation or field case is removed or weakened;
 REAL_ENV remains NOT RUN and the approval ledger remains runner-only.
+
+The NEW native Switch compiler now derives immutable business values once
+inside its own two complete original manifest replays. The pure builder does
+not acquire sources, accept a caller manifest through a public compiler, cache
+qualification across calls, or confer ownership/send authority. Both manifest
+boundaries, four original C6 observations, actual nonallocating preparation,
+both owners, original business/History images and final capacity checks remain
+required. Standalone source, legacy Switch and Cabling compilers keep their
+existing replay boundaries. Independent RED/direct and genuine archived
+delivery/current C6/native preparation workflows cover the literal boundaries
+and original-template drift after pure derivation: compiler refusal precedes
+registration, and an unregistered preparation's cleanup HOLD cannot substitute
+for that refusal. Actual project authentication, seven issued reads, their
+unchanged deadlines and receiver/finalizer tails are separate verification
+obligations; this optimization's local related PASS is not their proof or a
+current full/check. No automatic or field scenario is removed or weakened;
+REAL_ENV and whole REQ7 remain open, with runner-only approval.
+
+The current native Switch receiver obtains actual project authentication and
+seven fixed issued reads before same-changeset compilation. Its unchanged
+issued-read/authentication tail runs after the actual K/settings, raw-source
+and retained-directory finalizers. Local normal and post-K/settings issued-read
+revocation workflows check actual successful compilation, all seven native
+reads and zero registration/count/CLAIM/WIRE change on refusal. An initial
+negative failed before this boundary because its literal mode lacked the
+fixture's root-template preparation; independent RED/direct caught that
+prerequisite, and only the mode registration was corrected. That early ERROR
+is not the expected refusal. These local receiver results do not close the
+outer preparation/owner finalizers, default NEW driver, G1, whole REQ7 or
+current full/check, and REAL_ENV remains NOT RUN.

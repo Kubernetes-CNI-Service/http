@@ -106,7 +106,10 @@ def _hold_applied_generation(writer_token,generation,unit):
         expected={'STATE','MANIFEST','INTENT','RECEIPT'}
         if set(os.listdir(folder))!=expected: raise RemoteHistoryHold()
         snapshots={}
-        receipt=local._json(local._read(folder,'RECEIPT')[0])
+        receipt_raw=local._read(folder,'RECEIPT')[0]
+        receipt=local._json(receipt_raw)
+        if receipt.get('published')!=local._published_name(generation.generation_id,'xlsx'):
+            raise RemoteHistoryHold()
         for parent,name,limit,private in (
                 *((folder,name,1024*1024,True) for name in sorted(expected)),
                 (owner.publication_fd,receipt['published'],local._MAX_XLSX,False)):
@@ -120,7 +123,29 @@ def _hold_applied_generation(writer_token,generation,unit):
             if not raw or len(raw)!=info.st_size or len(raw)>limit: raise RemoteHistoryHold()
             held[-1]=(parent,name,fd,identity,raw)
             snapshots[name]={'identity':list(identity),'sha256':hashlib.sha256(raw).hexdigest()}
-        def verify():
+        # Reuse the cold reader's semantic facts only for these exact originals.
+        # Its identity uses dev/ino/SIZE, not io._identity's dev/ino/MODE prefix.
+        # Neither a same-byte file nor a substituted ancestor can be adopted in
+        # the cold-read -> held-capture gap. No qualification is cached here.
+        originals={name:(identity,raw) for parent,name,_fd,identity,raw in held if parent==folder}
+        ordered=('STATE','RECEIPT','MANIFEST','INTENT')
+        if (tuple(identity[:2] for identity in (ancestors_identity,dir_identity))!=original[3]
+                or tuple((originals[name][0][0],originals[name][0][1],originals[name][0][6])
+                         for name in ordered)!=original[4:8]
+                or tuple(hashlib.sha256(originals[name][1]).hexdigest() for name in ordered)!=original[8:12]
+                or originals['RECEIPT'][1]!=receipt_raw):
+            raise RemoteHistoryHold()
+        intent=local._json(originals['INTENT'][1])['prepared']
+        published_identity,published_raw=next((identity,raw) for parent,_name,_fd,identity,raw in held
+                                             if parent==owner.publication_fd)
+        published_witness=(published_identity[0],published_identity[1],published_identity[6],
+                           hashlib.sha256(published_raw).hexdigest())
+        if (published_witness!=(receipt['published_dev'],receipt['published_ino'],
+                                receipt['published_size'],receipt['published_sha256'])
+                or published_witness!=(intent['dev'],intent['ino'],intent['size'],intent['sha256'])
+                or published_witness[3]!=original[1]):
+            raise RemoteHistoryHold()
+        def verify_originals():
             if local._owner(writer_token) is not owner: raise RemoteHistoryHold()
             io._named(owner.root_fd,'generations',generations,directory=True)
             io._named(generations,generation.generation_id,folder,directory=True)
@@ -131,9 +156,17 @@ def _hold_applied_generation(writer_token,generation,unit):
                 io._named(parent,name,fd,directory=False)
                 if io._identity(os.fstat(fd))!=identity or os.pread(fd,len(raw)+1,0)!=raw:
                     raise RemoteHistoryHold()
-            if _read_original_generation_identity(generation.generation_id,writer_token)!=original:
-                raise RemoteHistoryHold()
-            io._named(generations,generation.generation_id,folder,directory=True)
+        def verify():
+            verify_originals()
+            # The cold recovery reader performed these actual directory
+            # barriers on every replay. Keep both and recheck the entire held
+            # graph afterwards, including replacements during either fsync.
+            try:
+                os.fsync(owner.publication_fd)
+                os.fsync(folder)
+            except OSError as exc:
+                raise RemoteHistoryHold() from exc
+            verify_originals()
         verify()
         state=local._json(next(raw for _parent,name,_fd,_id,raw in held if name=='STATE'))
         manifest=local._json(next(raw for _parent,name,_fd,_id,raw in held if name=='MANIFEST'))
@@ -844,6 +877,114 @@ def _hold_native_current_cycle_compiler_inputs(prepared,writer_token,owner_token
                         whitelist_sha256=whitelist.whitelist.sha256,qualified_source=qualified)!=observed):
                 raise RemoteHistoryHold()
             originals()
+    except Exception:
+        raise RemoteHistoryHold() from None
+
+
+@contextmanager
+def _hold_native_current_cycle_observed_switch_unit(prepared,writer_token,owner_token,binding,authentication,*,
+                                                    _store,http_root):
+    """Acquire the fixed issued NEW Switch images under current C5/C6 originals.
+
+    No caller plans, rows, generation, qualified source, metadata inventory or
+    compiler callback. This constructs a candidate, never COUNT/send or G1 GO;
+    registration remains an independent operation inside this live scope.
+    """
+    from pathlib import Path
+    from monitor import issue_tracker_nv_reservation as native,issue_tracker_send_unit as compiler
+    from monitor import issue_tracker_metadata_capacity as capacity
+    from monitor.issue_tracker_manifest import freeze_prod_stage_l_manifest
+    from monitor.issue_tracker_history_read_launcher import OwnedProjectSheetsReadUnit,require_current_owned_project_read
+    from monitor.issue_tracker_token_launcher import require_current_owned_project_token
+    from monitor.issue_tracker_state_owner import _settings_original_scope
+    from tools.ufm_collection_pipeline import _hold_reusable_directory_reads,_hold_reusable_source_reads
+    try:
+        record=native._verify_catalog_preparation(prepared)
+        if (type(prepared) is not native._CatalogNonallocatingPreparation
+                or record['token'] is not owner_token or record['binding']!=binding
+                or record['nonallocating_writer'] is not writer_token):raise RemoteHistoryHold()
+        acquired=[]
+        def verify_reads():
+            require_current_owned_project_token(owner_token,binding,authentication)
+            for kind,sheet,row,response in acquired:
+                require_current_owned_project_read(writer_token,owner_token,binding,response,authentication,
+                    read_kind=kind,sheet=sheet,row=row)
+        def read(kind,*,sheet=None,row=None):
+            verify_reads()
+            response=OwnedProjectSheetsReadUnit(writer_token,owner_token,binding,authentication,
+                read_kind=kind,sheet=sheet,row=row).read_once()
+            acquired.append((kind,sheet,row,response));verify_reads()
+            plan,_project,_digest=require_current_owned_project_read(writer_token,owner_token,binding,
+                response,authentication,read_kind=kind,sheet=sheet,row=row)
+            return plan,response
+        # The issued-read/authentication tail outlives the actual K and raw
+        # source finalizers. It does not reuse K or requalify closed inputs.
+        with _settings_original_scope() as read_scope:
+            read_scope.callback(verify_reads)
+            # Retain only actual directory/file descriptors, not digests or
+            # qualification results. Every compiler boundary still replays
+            # its original checks and hashes current bytes. Their revoke and
+            # conditional cleanup finish BEFORE the unchanged issued-read tail.
+            read_scope.enter_context(_hold_reusable_directory_reads())
+            read_scope.enter_context(_hold_reusable_source_reads())
+            with _hold_native_current_cycle_compiler_inputs(prepared,writer_token,owner_token,binding,
+                    _store=_store,http_root=http_root) as (settings,whitelist,qualified,receipts):
+                # Finish response-independent local derivation BEFORE issuing
+                # the bounded reads. Their original deadline includes launch
+                # time and is never refreshed to pay for local source replay.
+                metadata={'project_id':str(_store.project_identity),'schema_version':1,
+                    'producer_version':'stage-l-runtime-v1','template_contract_version':'local-xlsx-v1',
+                    'template_sha256':whitelist.workbook_sha256}
+                context=dict(http_root=Path(http_root),settings=settings,whitelist_snapshot=whitelist,
+                    whitelist_path=Path(http_root)/'monitor/Issue_Tracker_Template_v1.xlsx',metadata=metadata,
+                    expected_template_sha256=whitelist.workbook_sha256,writer_token=writer_token)
+                manifest,manifest_id=freeze_prod_stage_l_manifest(qualified,_store,**context)
+                originals=tuple(compiler._original_receipt_identity(qualified,_store,generation,writer_token,
+                    settings,whitelist,whitelist.workbook_sha256) for generation in receipts.generation_ids)
+                selected=tuple(original for original in originals if native._nonallocating_identity(owner_token,
+                    binding,record['identity'],original[0],original[1],'ETH&IB Switch')[0]==prepared.unit_id)
+                if len(selected)!=1 or selected[0][2]!=manifest_id:raise RemoteHistoryHold()
+                operations=tuple(item for item in json.loads(manifest)['operations'] if item['activity_key'][0]=='switch')
+                if not operations:raise RemoteHistoryHold()
+                identity_plan,identity_response=read('template_identity')
+                identity=decode.decode_template_identity(identity_plan,identity_response)
+                if identity!=record['identity']:raise RemoteHistoryHold()
+                metadata_plan,metadata_response=read('metadata')
+                budget=capacity.observe_metadata_capacity(metadata_plan,metadata_response,identity,reservations=())
+                if budget.outcome!='VISIBLE_ONLY_UNPROVED':raise RemoteHistoryHold()
+                document=json.loads(metadata_response.data.decode('utf8'),object_pairs_hook=capacity._pairs,
+                    parse_constant=capacity._nonfinite)
+                occupied=tuple(item['developerMetadata']['metadataId']
+                    for item in document.get('matchedDeveloperMetadata',[]))
+                sid=dict(identity.sheet_ids)['ETH&IB Switch'];sheet='ETH&IB Switch'
+                discovery_plan,discovery_response=read('activity',sheet=sheet)
+                occupancy_plan,occupancy_response=read('insertion',sheet=sheet)
+                occupancy,row_count,_digest=decode._insertion_sheet_image(occupancy_plan,occupancy_response,
+                    sheet_id=sid,title=sheet,target=binding.spreadsheet_id)
+                cells={(index,column):value for index,column,value in occupancy};reserved=[];business=[]
+                columns=('B','C','F','J','K','L','M','N','O','P','Q','R','S','T','U')
+                for operation in operations:
+                    key=tuple(operation['activity_key'])
+                    discovery=decode.discover_activity_sheet(discovery_plan,discovery_response,sheet_id=sid,activity_key=key)
+                    if discovery.active_rows:
+                        if len(discovery.active_rows)!=1:raise RemoteHistoryHold()
+                        index=discovery.active_rows[0][0]
+                    else:
+                        index=next((index for index in range(2,row_count) if index not in reserved
+                            and all(cells[(index,column)]==() for column in columns)),None)
+                        if index is None:raise RemoteHistoryHold()
+                    if index in reserved:raise RemoteHistoryHold()
+                    row_plan,row_response=read('row',sheet=sheet,row=index+1)
+                    business.append({'operation_id':operation['operation_id'],'discovery_plan':discovery_plan,
+                        'discovery_response':discovery_response,'occupancy_plan':occupancy_plan,
+                        'occupancy_response':occupancy_response,'row_plan':row_plan,'row_response':row_response})
+                    reserved.append(index)
+                history_plan,history_response=read('history_tail')
+                unit=compiler.freeze_observed_receipted_switch_unit(qualified,_store,**context,
+                    local_generation_id=selected[0][0],business_reads=tuple(business),history_plan=history_plan,
+                    history_response=history_response,spreadsheet_token=owner_token,binding=binding,identity=identity,
+                    occupied_metadata_ids=occupied,_unit_preparation=prepared)
+                verify_reads();yield unit;verify_reads()
     except Exception:
         raise RemoteHistoryHold() from None
 

@@ -189,6 +189,165 @@ class OriginalSourceReadReuseTests(unittest.TestCase):
             with self.assertRaises(OSError):os.fstat(fd)
 
 
+class OriginalReadCleanupContractTests(unittest.TestCase):
+    """Real retained originals, including failure during their last cleanup."""
+    def setUp(self):
+        from tools import ufm_collection_pipeline as pipeline
+        from ztp.config import ib_topology_provenance as provenance
+        self.pipeline=pipeline;self.provenance=provenance
+        self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
+        self.root=Path(self.temp.name).resolve()
+
+    @staticmethod
+    def originals(records):
+        return [(row[0],(os.fstat(row[0]).st_dev,os.fstat(row[0]).st_ino)) for row in records]
+
+    @staticmethod
+    def reclaim(rows):
+        # Fixture cleanup only: never claim this as production close evidence.
+        for fd,identity in rows:
+            try:
+                actual=os.fstat(fd)
+                if (actual.st_dev,actual.st_ino)==identity:os.close(fd)
+            except OSError:pass
+
+    def assert_closed(self,rows):
+        for fd,_identity in rows:
+            with self.assertRaises(OSError):os.fstat(fd)
+
+    def test_directory_cleanup_does_not_close_recycled_foreign_slot(self):
+        foreign=self.root/'foreign';foreign.write_bytes(b'independent foreign offset and bytes')
+        other=os.open(foreign,os.O_RDONLY);os.lseek(other,3,os.SEEK_SET)
+        rows=[];recycled=None
+        try:
+            with self.assertRaises(self.pipeline.PipelineError):
+                with self.pipeline._hold_reusable_directory_reads():
+                    with self.pipeline._hold_real_dir_chain(self.root):pass
+                    held=self.pipeline._HELD_DIRECTORY_READS.get()
+                    rows=self.originals(held.entries.values());recycled=held.entries[self.root][0]
+                    os.dup2(other,recycled)
+            self.assertIsNone(self.pipeline._HELD_DIRECTORY_READS.get())
+            self.assertEqual(foreign.stat().st_ino,os.fstat(recycled).st_ino)
+            self.assertEqual(3,os.lseek(recycled,0,os.SEEK_CUR))
+            self.assertEqual(b'independent foreign offset and bytes',os.pread(recycled,100,0))
+            self.assert_closed([row for row in rows if row[0]!=recycled])
+        finally:
+            self.reclaim(rows)
+            if recycled is not None:
+                try:
+                    if os.fstat(recycled).st_ino==foreign.stat().st_ino:os.close(recycled)
+                except OSError:pass
+            os.close(other)
+
+    def test_directory_cleanup_keeps_primary_and_attempts_remaining_originals(self):
+        class WorkInterrupted(BaseException):pass
+        class CloseInterrupted(BaseException):pass
+        primary=WorkInterrupted();secondary=CloseInterrupted();rows=[];attempted=[];target=None
+        original_close=os.close
+        def closing(fd):
+            attempted.append(fd)
+            if fd==target:raise secondary
+            return original_close(fd)
+        try:
+            with self.assertRaises(WorkInterrupted) as caught:
+                with mock.patch.object(self.pipeline.os,'close',side_effect=closing):
+                    with self.pipeline._hold_reusable_directory_reads():
+                        with self.pipeline._hold_real_dir_chain(self.root):pass
+                        held=self.pipeline._HELD_DIRECTORY_READS.get()
+                        rows=self.originals(held.entries.values());target=rows[-1][0]
+                        raise primary
+            self.assertIs(primary,caught.exception);self.assertIs(secondary,caught.exception.__cause__)
+            self.assertIsNone(self.pipeline._HELD_DIRECTORY_READS.get())
+            self.assertEqual(list(reversed([row[0] for row in rows])),attempted)
+            self.assert_closed([row for row in rows if row[0]!=target])
+            self.assertEqual(rows[-1][1],(os.fstat(target).st_dev,os.fstat(target).st_ino))
+        finally:self.reclaim(rows)
+
+    def test_directory_open_time_replacement_is_rejected_but_acquired_fd_is_closed(self):
+        leaf=self.root/'leaf';leaf.mkdir();original_identity=(leaf.stat().st_dev,leaf.stat().st_ino)
+        parent_identity=(self.root.stat().st_dev,self.root.stat().st_ino)
+        original_open=os.open;rows=[];replaced=[]
+        def opening(path,flags,*args,**kwargs):
+            parent=kwargs.get('dir_fd')
+            if path=='leaf' and parent is not None:
+                actual=os.fstat(parent)
+                if (actual.st_dev,actual.st_ino)==parent_identity:
+                    os.rename('leaf','retained',src_dir_fd=parent,dst_dir_fd=parent)
+                    os.mkdir('leaf',dir_fd=parent)
+                    replaced.append(True)
+            fd=original_open(path,flags,*args,**kwargs)
+            if flags & os.O_DIRECTORY:
+                actual=os.fstat(fd);rows.append((fd,(actual.st_dev,actual.st_ino)))
+            return fd
+        try:
+            with self.assertRaises(self.pipeline.PipelineError):
+                with mock.patch.object(self.pipeline.os,'open',side_effect=opening):
+                    with self.pipeline._hold_reusable_directory_reads():
+                        with self.pipeline._hold_real_dir_chain(leaf):
+                            self.fail('open-time replacement must never be adopted')
+            self.assertEqual([True],replaced)
+            self.assertEqual(original_identity,((self.root/'retained').stat().st_dev,
+                                               (self.root/'retained').stat().st_ino))
+            self.assertNotEqual(original_identity,(leaf.stat().st_dev,leaf.stat().st_ino))
+            self.assertIsNone(self.pipeline._HELD_DIRECTORY_READS.get())
+            self.assert_closed(rows)
+        finally:self.reclaim(rows)
+
+    def test_source_cleanup_keeps_primary_and_attempts_remaining_originals(self):
+        class WorkInterrupted(BaseException):pass
+        class CloseInterrupted(BaseException):pass
+        primary=WorkInterrupted();secondary=CloseInterrupted();rows=[];attempted=[];target=None
+        original_close=os.close
+        def closing(fd):
+            if fd in [row[0] for row in rows]:attempted.append(fd)
+            if fd==target:raise secondary
+            return original_close(fd)
+        try:
+            with self.assertRaises(WorkInterrupted) as caught:
+                with self.pipeline._hold_reusable_directory_reads():
+                    with mock.patch.object(self.pipeline.os,'close',side_effect=closing):
+                        with self.pipeline._hold_reusable_source_reads():
+                            for name in ('first','second'):
+                                path=self.root/name;path.write_bytes(b'independent source bytes')
+                                self.provenance._regular_digest(path)
+                            held=self.pipeline._HELD_SOURCE_READS.get()
+                            rows=self.originals(held.files.values());target=rows[-1][0]
+                            raise primary
+            self.assertIs(primary,caught.exception);self.assertIs(secondary,caught.exception.__cause__)
+            self.assertIsNone(self.pipeline._HELD_SOURCE_READS.get())
+            self.assertEqual(list(reversed([row[0] for row in rows])),attempted)
+            self.assert_closed([row for row in rows if row[0]!=target])
+            self.assertEqual(rows[-1][1],(os.fstat(target).st_dev,os.fstat(target).st_ino))
+        finally:self.reclaim(rows)
+
+    def cross_context_close(self,*,source):
+        from contextvars import copy_context
+        variable=self.pipeline._HELD_SOURCE_READS if source else self.pipeline._HELD_DIRECTORY_READS
+        restore=variable.set(None);rows=[]
+        scope=(self.pipeline._hold_reusable_source_reads if source
+               else self.pipeline._hold_reusable_directory_reads)()
+        try:
+            scope.__enter__()
+            if source:
+                path=self.root/'source';path.write_bytes(b'independent cross-context source')
+                self.provenance._regular_digest(path)
+                held=variable.get();rows=self.originals(held.files.values())
+            else:
+                with self.pipeline._hold_real_dir_chain(self.root):pass
+                held=variable.get();rows=self.originals(held.entries.values())
+            with self.assertRaises(ValueError):copy_context().run(scope.__exit__,None,None,None)
+            self.assertTrue(held.closed,'failed original ContextVar reset must not skip owned cleanup')
+            self.assert_closed(rows)
+        finally:
+            self.reclaim(rows);variable.reset(restore)
+
+    def test_directory_cross_context_reset_failure_still_closes_own_originals(self):
+        self.cross_context_close(source=False)
+
+    def test_source_cross_context_reset_failure_still_closes_own_originals(self):
+        with self.pipeline._hold_reusable_directory_reads():self.cross_context_close(source=True)
+
+
 class UfmCollectionPipelineTests(unittest.TestCase):
     def directory_read_scope(self):
         scope = getattr(PIPELINE, '_hold_reusable_directory_reads', None)

@@ -223,13 +223,16 @@ class _OriginalSourceReads:
         for record in self.files.values():self.verify_file(record)
 
     def close(self):
-        self.closed=True;failed=False
+        self.closed=True;failed=False;interrupted=None
         for fd,original,_parent,_name in reversed(tuple(self.files.values())):
             try:
                 if _source_inode(os.fstat(fd))!=original:
                     failed=True;continue
                 os.close(fd)
             except OSError:failed=True
+            except BaseException as error:
+                if interrupted is None:interrupted=error
+        if interrupted is not None:raise interrupted
         if failed:raise PipelineError('original source cleanup could not be confirmed')
 
 
@@ -254,9 +257,11 @@ def _hold_reusable_source_reads():
         held.verify()
     except BaseException as error:primary=error
     finally:
-        _HELD_SOURCE_READS.reset(key)
-        try:held.close()
+        try:_HELD_SOURCE_READS.reset(key)
         except BaseException as error:cleanup=error
+        try:held.close()
+        except BaseException as error:
+            if cleanup is None:cleanup=error
     if primary is not None:
         if cleanup is not None:raise primary from cleanup
         raise primary
@@ -277,6 +282,7 @@ class _OriginalDirectoryReads:
     """Bounded live directory FDs only, never cached bytes or qualification."""
     def __init__(self):
         self.entries = {}
+        self.cleanup_identities = {}
         self.chains = {}
         self.closed = False
 
@@ -315,6 +321,14 @@ class _OriginalDirectoryReads:
                 self.entries[item] = (descriptor, original,
                     self.entries[parent][0] if parent is not None else None,
                     item.name if parent is not None else str(item))
+                # Keep the named identity as the validation expectation. An
+                # open-time replacement must still be refused, but its actual
+                # acquired FD is ours to clean up, not a recycled foreign slot.
+                # If the first fstat fails, only an independently matching
+                # named original can be conditionally closed.
+                self.cleanup_identities[descriptor] = original
+                opened = os.fstat(descriptor)
+                self.cleanup_identities[descriptor] = _source_inode(opened)
             self.verify_entry(self.entries[item])
         # Reuse only the immutable traversal description of still-held FDs.
         # Each lookup rechecks every actual named and held ancestor; neither
@@ -332,9 +346,19 @@ class _OriginalDirectoryReads:
         for entry in self.entries.values(): self.verify_entry(entry)
 
     def close(self):
-        self.closed = True
-        for descriptor, _identity, _parent, _name in reversed(tuple(self.entries.values())):
-            os.close(descriptor)
+        self.closed = True;failed=False;interrupted=None
+        for descriptor, identity, _parent, _name in reversed(tuple(self.entries.values())):
+            try:
+                actual=os.fstat(descriptor)
+                cleanup_identity=self.cleanup_identities.get(descriptor,identity)
+                if not stat.S_ISDIR(actual.st_mode) or _source_inode(actual)!=cleanup_identity:
+                    failed=True;continue
+                os.close(descriptor)
+            except OSError:failed=True
+            except BaseException as error:
+                if interrupted is None:interrupted=error
+        if interrupted is not None:raise interrupted
+        if failed:raise PipelineError('original directory cleanup could not be confirmed')
 
 
 @contextmanager
@@ -355,8 +379,15 @@ def _hold_reusable_directory_reads():
     except OSError as exc:
         raise PipelineError('original directory scope cannot be verified') from exc
     finally:
-        _HELD_DIRECTORY_READS.reset(key)
-        held.close()
+        primary=sys.exc_info()[1];cleanup=None
+        try:_HELD_DIRECTORY_READS.reset(key)
+        except BaseException as error:cleanup=error
+        try:held.close()
+        except BaseException as error:
+            if cleanup is None:cleanup=error
+        if cleanup is not None:
+            if primary is not None:raise primary from cleanup
+            raise cleanup
 
 
 @contextmanager

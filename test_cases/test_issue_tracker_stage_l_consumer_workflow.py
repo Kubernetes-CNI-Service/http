@@ -1655,7 +1655,8 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         self._native_original_launch_probe('normal',settings_audit=True)
 
     def _native_completed_archive_preview_probe(self, *, receipt_rebind=False, local_c6=False, settings_finalizer=False,
-                                              native_current_compiler=False, current_receipt_tail=False):
+                                              native_current_compiler=False, current_receipt_tail=False,issued_current_compiler=False,
+                                              issued_read_tail=False):
         observed = []
         mode = 'complete-after-archive-receipt-rebind' if receipt_rebind else 'complete-after-archive'
         if settings_finalizer:
@@ -1666,6 +1667,10 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             mode += '-native-current-compiler'
         if current_receipt_tail:
             mode += '-receipt-tail'
+        if issued_current_compiler:
+            mode += '-issued-reads'
+        if issued_read_tail:
+            mode += '-issued-tail'
         from test_cases.test_req7_remote_history_match import Req7OwnedHistoryMatchWorkflowTests
         from test_cases.test_req7_mutation_launcher import Req7MutationLauncherWorkflowTests
         supplied=self._fixture_certificate_supplier(Req7OwnedHistoryMatchWorkflowTests.certificates)
@@ -1683,13 +1688,19 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                 with self.assertRaises(CurrentReceiptTailFinished) as caught:exercise()
                 self.assertIs(self.current_receipt_tail_primary,caught.exception)
                 self.assertEqual((True,True,True),self.current_receipt_tail_facts)
+            elif issued_read_tail:
+                class IssuedReadTailFinished(BaseException):pass
+                self.issued_read_tail_primary=IssuedReadTailFinished('actual issued read tail finished')
+                with self.assertRaises(IssuedReadTailFinished) as caught:exercise()
+                self.assertIs(self.issued_read_tail_primary,caught.exception)
+                self.assertEqual((True,True,True),self.issued_read_tail_facts)
             else:exercise()
         self.assertEqual(['ETH Cabling:native-launch:normal',
             'ETH Cabling:archived:fresh-preview:' + ('HOLD' if receipt_rebind else 'read-only')]
             + (['ETH Cabling:archived:next-local-c6:' + ('HOLD' if receipt_rebind or settings_finalizer else 'committed')]
                if local_c6 else [])
             + (['ETH&IB Switch:archived:current-cycle-compiler:'+
-                ('tail-refused' if current_receipt_tail else 'registered')] if native_current_compiler else []), observed)
+                ('tail-refused' if current_receipt_tail or issued_read_tail else 'registered')] if native_current_compiler else []), observed)
 
     def test_real_complete_archive_then_fresh_owner_manual_preview_preserves_all_originals(self):
         self._native_completed_archive_preview_probe()
@@ -1705,6 +1716,207 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         self.assertTrue(callable(getattr(remote,'_hold_native_current_cycle_compiler_inputs',None)),
             'fixed native source/receipt reception must feed the actual observed compiler')
         self._native_completed_archive_preview_probe(local_c6=True,native_current_compiler=True)
+
+    def test_real_current_cycle_switch_compiler_acquires_original_project_auth_and_fixed_issued_reads(self):
+        from monitor import issue_tracker_remote_history_match as remote
+        self.assertTrue(callable(getattr(remote,'_hold_native_current_cycle_observed_switch_unit',None)),
+            'native current-cycle compiler must acquire its actual authenticated business images')
+        self._native_completed_archive_preview_probe(local_c6=True,native_current_compiler=True,issued_current_compiler=True)
+
+    def test_real_native_switch_compiler_brackets_pure_derivation_with_two_manifests_and_four_original_receipts(self):
+        from monitor import issue_tracker_send_unit as compiler,issue_tracker_manifest as manifest
+        original = compiler.freeze_observed_receipted_switch_unit
+        real_manifest = manifest.freeze_prod_stage_l_manifest
+        real_receipt = compiler._original_receipt_identity
+        facts=[]
+        def observe(*args,**kwargs):
+            self.assertIsNotNone(kwargs.get('_unit_preparation'))
+            calls=[];receipts=[]
+            def replay(*values,**options):
+                result=real_manifest(*values,**options);calls.append(result);return result
+            def receipt(*values,**options):
+                result=real_receipt(*values,**options);receipts.append(result);return result
+            with mock.patch.object(manifest,'freeze_prod_stage_l_manifest',side_effect=replay), \
+                    mock.patch.object(compiler,'_original_receipt_identity',side_effect=receipt):
+                unit=original(*args,**kwargs)
+            facts.append((len(calls),len(receipts)))
+            self.assertEqual(2,len(calls),'outer complete replay must bracket single-invocation pure derivation')
+            self.assertEqual(4,len(receipts),'C6 before/after and both nonce observations must remain real')
+            self.assertTrue(all(value==calls[0] for value in calls))
+            self.assertTrue(all(value==receipts[0] for value in receipts))
+            self.assertFalse(hasattr(unit,'send_once'));self.assertFalse(hasattr(unit,'permit'))
+            return unit
+        with mock.patch.object(compiler,'freeze_observed_receipted_switch_unit',side_effect=observe):
+            self._native_completed_archive_preview_probe(local_c6=True,native_current_compiler=True)
+        self.assertEqual([(2,4)],facts)
+
+    def test_real_native_switch_last_manifest_rejects_original_template_drift_after_pure_builder(self):
+        from monitor import issue_tracker_send_unit as compiler,issue_tracker_manifest as manifest
+        build=getattr(compiler,'_freeze_prod_source_business',None)
+        self.assertTrue(callable(build),'negative must reach actual pure derivation before source-tail fault')
+        class FaultFinished(BaseException):pass
+        primary=FaultFinished();facts=[]
+        original=compiler.freeze_observed_receipted_switch_unit
+        real_manifest=manifest.freeze_prod_stage_l_manifest
+        def fault(*args,**kwargs):
+            from monitor import issue_tracker_nv_reservation as native
+            record=native._verify_catalog_preparation(kwargs['_unit_preparation'])
+            built=[];attempts=[];drift=[]
+            def derive(*values,**options):
+                result=build(*values,**options);built.append(True);return result
+            def replay(*values,**options):
+                attempts.append(bool(built))
+                if built and not drift:
+                    raw=self.template.read_bytes()
+                    self.template.write_bytes(b'not-an-xlsx-original')
+                    drift.append(raw!=self.template.read_bytes())
+                return real_manifest(*values,**options)
+            refused=False
+            with mock.patch.object(compiler,'_freeze_prod_source_business',side_effect=derive), \
+                    mock.patch.object(manifest,'freeze_prod_stage_l_manifest',side_effect=replay):
+                try:original(*args,**kwargs)
+                except compiler.SendUnitHold:refused=True
+            facts.append((tuple(built),tuple(attempts),tuple(drift),refused,record['registered'],record['unit']))
+            # Consumer primary survives actual unregistered preparation cleanup;
+            # that cleanup's HOLD cannot masquerade as the compiler-tail refusal.
+            raise primary
+        with mock.patch.object(compiler,'freeze_observed_receipted_switch_unit',side_effect=fault):
+            with self.assertRaises(FaultFinished) as caught:
+                self._native_completed_archive_preview_probe(local_c6=True,native_current_compiler=True)
+        self.assertIs(primary,caught.exception)
+        self.assertEqual([((True,),(False,True),(True,),True,False,None)],facts)
+
+    def test_real_issued_read_revoked_after_actual_k_settings_close_refuses_compiler_receiver_return(self):
+        self._native_completed_archive_preview_probe(local_c6=True,native_current_compiler=True,
+            issued_current_compiler=True,issued_read_tail=True)
+
+    def test_issued_read_tail_fixture_prepares_the_original_root_template_before_preview(self):
+        # The literal scenario must enter the same template preparation as its
+        # positive control, before any production preview/receiver is invoked.
+        import ast
+        import inspect
+        import textwrap
+        source=ast.parse(textwrap.dedent(inspect.getsource(
+            self._exercise_real_protected_three_panel_fixture)))
+        assignments=[node for node in ast.walk(source) if isinstance(node,ast.Assign)
+            and any(isinstance(target,ast.Name) and target.id=='default_preparation'
+                    for target in node.targets)]
+        self.assertEqual(1,len(assignments))
+        modes=[ast.literal_eval(node) for node in ast.walk(assignments[0].value)
+            if isinstance(node,ast.Tuple)]
+        self.assertEqual(1,len(modes))
+        self.assertIn('complete-after-archive-local-c6-native-current-compiler-issued-reads-issued-tail',
+                      modes[0])
+
+    def test_real_native_k_has_one_full_graph_per_boundary_and_rejects_post_settings_original_rebind(self):
+        # Actual old COMPLETE/archive -> current C6 -> genuine preparation/K.
+        # Four semantic boundaries: before/after settings on both sides of the
+        # real K chain. Every observed graph check delegates to production;
+        # no qualification, owner, raw holder or successful verifier is faked.
+        from monitor import issue_tracker_remote_history_match as remote
+        from test_cases.test_req7_remote_history_match import Req7OwnedHistoryMatchWorkflowTests
+        from test_cases.test_req7_mutation_launcher import Req7MutationLauncherWorkflowTests
+        class ProbeFinished(BaseException):pass
+        primary=ProbeFinished();facts=[];observed=[]
+        supplied=self._fixture_certificate_supplier(Req7OwnedHistoryMatchWorkflowTests.certificates)
+        original_inputs=None
+        original_switch=self._compile_current_switch_after_actual_archive
+        @contextmanager
+        def inspect_original_boundaries(prepared,writer,sheet,bound,**kwargs):
+            from monitor import issue_tracker_nv_reservation as nv,issue_tracker_state_owner as state
+            from monitor import issue_tracker_settings_audit_allocation as allocation
+            original_settings=allocation._hold_settings_originals;armed=[];drift=[]
+            record=nv._verify_catalog_preparation(prepared)
+            original_graph=nv._verify_catalog_preparation;calls=[]
+            def observe_graph(actual):
+                result=original_graph(actual)
+                if actual is prepared:calls.append(True)
+                return result
+            @contextmanager
+            def observed_settings(*args,**kw):
+                with original_settings(*args,**kw) as (images,verify):
+                    def after_original_settings():
+                        verify()
+                        if not armed or drift:return
+                        # The actual old delivery graph supplies its retained
+                        # DELIVERED original. Rebind only after real settings
+                        # verification has returned, with exactly the old bytes.
+                        prior=next(row for row in record['prior_delivery_events'] if row['writer'] is writer)
+                        parent,name,fd,identity,raw=next(row for row in prior['raw'].raw.files if row[1]=='DELIVERED')
+                        os.rename(name,'owned-displaced-delivered',src_dir_fd=parent,dst_dir_fd=parent)
+                        replacement=os.open(name,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,dir_fd=parent)
+                        try:
+                            self.assertEqual(len(raw),os.write(replacement,raw));os.fsync(replacement)
+                            current=os.fstat(replacement)
+                            drift.append((identity[:2]!=(current.st_dev,current.st_ino),
+                                os.pread(fd,len(raw)+1,0)==raw))
+                        finally:os.close(replacement)
+                    yield images,after_original_settings
+            with mock.patch.object(allocation,'_hold_settings_originals',observed_settings):
+                with self._assertion_preserving_preparation(
+                        original_inputs(prepared,writer,sheet,bound,**kwargs)) as packet:
+                    with mock.patch.object(nv,'_verify_catalog_preparation',side_effect=observe_graph):
+                        actual=state.current_k(writer)
+                    count=len(calls)
+                    print('NATIVE_K_ACTUAL_GRAPH_COUNT '+str(count),flush=True)
+                    self.assertEqual(4,count,'one complete original graph at each K semantic boundary')
+                    armed.append(True);refused=False
+                    try:state.current_k(writer)
+                    except ValueError:refused=True
+                    facts.append((actual.revision,actual.k,count,refused,tuple(drift),
+                        not record['registered'],not record['additions'],record['appended'] is None,
+                        not list((Path(self.store.project_identity)/'.tracker/settings/outbox').iterdir())))
+                    print('NATIVE_K_ACTUAL_BOUNDARY_OBSERVATION '+json.dumps(facts),flush=True)
+                    # Finish the genuine unregistered preparation through its
+                    # original primary path, not a forged registration flag.
+                    raise primary
+                    yield packet
+        def after_actual_archive(**kwargs):
+            nonlocal original_inputs
+            # Old native fixtures reload canonical registries. Attach the
+            # delegating observer only at the actual new-owner boundary.
+            from monitor import issue_tracker_remote_history_match as current
+            original_inputs=current._hold_native_current_cycle_compiler_inputs
+            with mock.patch.object(current,'_hold_native_current_cycle_compiler_inputs',inspect_original_boundaries):
+                return original_switch(**kwargs)
+        with mock.patch.object(Req7OwnedHistoryMatchWorkflowTests,'certificates',supplied), \
+                mock.patch.object(Req7MutationLauncherWorkflowTests,'certificates',supplied), \
+                mock.patch.object(self,'_compile_current_switch_after_actual_archive',after_actual_archive):
+            with self.assertRaises(ProbeFinished) as caught:
+                self._exercise_real_protected_three_panel_fixture(skip_history=False,
+                    observed_cabling_insert_probe=True,receipted_intent_probe=True,native_catalog_probe=True,
+                    native_catalog_c6_origin_probe=True,native_catalog_retained_probe=True,settings_audit_probe=True,
+                    native_catalog_launch_probe=('complete-after-archive-local-c6-native-current-compiler',
+                        observed,self._native_original_settings_audit_oracle()))
+        self.assertIs(primary,caught.exception)
+        print('NATIVE_K_ACTUAL_BOUNDARIES '+json.dumps(facts),flush=True)
+        self.assertEqual([(1,1,4,True,((True,True),),True,True,True,True)],facts)
+
+    def test_actual_project_auth_requires_current_credential_and_target_root_fixture_after_old_scope_close(self):
+        from test_cases.test_req7_history_read_launcher import Req7HistoryReadLauncherWorkflowTests
+        from monitor import issue_tracker_credential_shape as credentials,issue_tracker_online_target as target
+        from monitor import issue_tracker_token_launcher as tokens
+        class MissingRootBoundary:
+            # Deterministic absence of the fixture boundary on any host. Never
+            # allow a root test runner to fall through to real private paths.
+            def geteuid(self):return 501
+            def open(self,*args,**kwargs):raise AssertionError('private path reached past nonroot guard')
+            def __getattr__(self,name):return getattr(os,name)
+        native=Req7HistoryReadLauncherWorkflowTests();native.setUp();self.addCleanup(native.doCleanups)
+        with ExitStack() as current:
+            _local,ownership,writer,sheet,binding,_token,_config=native.owners(current)
+            auth,_path,_raw=native.project_auth(current,ownership,sheet,binding)
+            original=tokens.require_current_owned_project_token(sheet,binding,auth)
+            # Drop ONLY the root metadata/path transport boundary, not issuer,
+            # decoder, credential bytes, token, owners or production checks.
+            with mock.patch.object(credentials,'os',MissingRootBoundary()):
+                with self.assertRaises(tokens.TokenLauncherHold):
+                    tokens.require_current_owned_project_token(sheet,binding,auth)
+            self.assertEqual(original,tokens.require_current_owned_project_token(sheet,binding,auth))
+            with mock.patch.object(target,'os',MissingRootBoundary()):
+                with self.assertRaises(target.OnlineTargetHold):
+                    target.inspect_project_online_target(writer,binding)
+            self.assertEqual(binding,target.inspect_project_online_target(writer,binding))
 
     def test_real_current_receipt_replaced_after_actual_k_settings_finalizer_refuses_compiler_receiver_return(self):
         self._native_completed_archive_preview_probe(local_c6=True,native_current_compiler=True,current_receipt_tail=True)
@@ -1928,10 +2140,17 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             if '-native-current-compiler' in mode:
                 self._compile_current_switch_after_actual_archive(global_root=global_root,owner_module=owner_module,
                     binding=binding,credential=credential,committed=result,cycle_id=cycle['cycle_id'],observed=observed,
-                    receipt_tail='-receipt-tail' in mode)
+                    receipt_tail='-receipt-tail' in mode,native=native,issued_reads='-issued-reads' in mode,
+                    issued_read_tail='-issued-tail' in mode)
 
     def _compile_current_switch_after_actual_archive(self, *, global_root,owner_module,binding,credential,
-                                                    committed,cycle_id,observed,receipt_tail=False):
+                                                    committed,cycle_id,observed,receipt_tail=False,native=None,issued_reads=False,
+                                                    issued_read_tail=False):
+        if issued_reads:
+            self._compile_current_issued_switch_after_actual_archive(global_root=global_root,owner_module=owner_module,
+                binding=binding,credential=credential,committed=committed,observed=observed,native=native,
+                issued_read_tail=issued_read_tail)
+            return
         from monitor import issue_tracker_local_commit as local,issue_tracker_nv_reservation as native
         from monitor import issue_tracker_remote_history_match as remote,issue_tracker_unit_catalog as catalog
         from monitor import issue_tracker_send_unit as compiler
@@ -2027,6 +2246,122 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             with catalog.hold_pending_project_c6_units(sheet,binding) as (units,verify):
                 self.assertEqual(2,len(units));self.assertEqual(unit.unit_id,units[-1].unit.unit_id);verify()
         self.assertEqual([],list((tracker/'settings/outbox').iterdir()))
+        observed.append('ETH&IB Switch:archived:current-cycle-compiler:registered')
+
+    def _compile_current_issued_switch_after_actual_archive(self, *, global_root,owner_module,binding,
+                                                           credential,committed,observed,native,issued_read_tail=False):
+        import socket
+        from monitor import issue_tracker_local_commit as local,issue_tracker_nv_reservation as preparation
+        from monitor import issue_tracker_remote_history_match as remote,issue_tracker_unit_catalog as catalog
+        from monitor import issue_tracker_history_read_launcher as launcher
+        from monitor import issue_tracker_credential_shape as credentials,issue_tracker_online_target as target
+        from monitor import issue_tracker_settings_audit_allocation as allocation,issue_tracker_state_owner as state_owner
+        from test_cases.test_req7_history_read_launcher import Req7HistoryReadLauncherWorkflowTests,scoped_fixture
+        from test_cases.test_req7_sheets_read_decode import identity_response,response
+        from test_cases.test_req7_activity_discovery import reserved_switch_row,sheet_document,insertion_document,exact_row_document
+        from monitor.issue_tracker_sheets_read_plan import prepare_template_identity_read
+        from monitor.issue_tracker_sheets_read_decode import decode_template_identity
+        rows=[reserved_switch_row(index) for index in range(2,6)]
+        discovery=sheet_document('ETH&IB Switch',rows,100);occupancy=insertion_document('ETH&IB Switch',rows,100)
+        for document in (discovery,occupancy):document['sheets'][0]['properties']['sheetId']=101
+        history={'spreadsheetId':binding.spreadsheet_id,'sheets':[{'properties':{
+            'sheetId':105,'title':'Update_History','sheetType':'GRID','gridProperties':{'rowCount':100,'columnCount':5}},
+            'data':[{'startRow':2,'startColumn':0}]}]}
+        documents={'template_identity':identity_response(),'metadata':{'matchedDeveloperMetadata':[]},
+            'activity':discovery,'insertion':occupancy,'history_tail':history}
+        issued=[];actual_reads=[];compiled=[];revoked=[]
+        real_read=launcher.OwnedProjectSheetsReadUnit.read_once
+        original_settings=allocation._hold_settings_originals
+        def read(reader):
+            if reader._kind=='row':
+                self.assertIn(reader._row,(3,4))
+                document=exact_row_document('ETH&IB Switch',rows[reader._row-3],reader._row-1)
+                document['sheets'][0]['properties']['sheetId']=101
+            else:document=documents[reader._kind]
+            body=response(document).data
+            reply=b'HTTP/1.1 200 OK\r\nContent-Length: '+str(len(body)).encode()+b'\r\nConnection: close\r\n\r\n'+body
+            with native.server(reply,hostname='sheets.googleapis.com',destination='sheets.googleapis.com') as (records,errors),ExitStack() as launched:
+                port=socket.getaddrinfo('sheets.googleapis.com',443)[0][4][1]
+                calls,children=native.intercept(launched,native.child_fixture(port),writer,sheet,binding)
+                actual=real_read(reader)
+            self.assertEqual((1,1,(),0),(len(records),len(calls),tuple(errors),children[0].returncode))
+            issued.append((reader._kind,reader._row));actual_reads.append(actual);return actual
+        @contextmanager
+        def revoke_after_actual_settings_close(*args,**kwargs):
+            with original_settings(*args,**kwargs) as actual:yield actual
+            if not compiled or revoked:return
+            self.assertEqual(7,len(actual_reads),'fault must follow successful actual compilation and all issued reads')
+            response=actual_reads[0]
+            with launcher._PROJECT_READ_GUARD:saved=launcher._PROJECT_READS.pop(response)
+            revoked.append((response,saved))
+            self.issued_read_tail_facts=(
+                not state_owner._NATIVE_CATALOG_K_READ_CONTEXT and not allocation._LIVE_NATIVE_CATALOG_K_CONTEXTS,
+                saved is auth,response not in launcher._PROJECT_READS)
+        project=Path(self.store.project_identity)
+        with local.writer_owner(project,self.publication) as writer,scoped_fixture(global_root,owner_module), \
+                owner_module.spreadsheet_owner(binding) as sheet,ExitStack() as private:
+            # The old cycle's credential/target fixtures are already closed.
+            # A new actual project-auth flow needs its own path/root transport
+            # boundaries; the production source and owner checks stay intact.
+            private.enter_context(scoped_fixture(global_root,credentials))
+            private.enter_context(scoped_fixture(global_root,target))
+            auth,_path,_raw=Req7HistoryReadLauncherWorkflowTests.project_auth(native,private,owner_module,sheet,binding)
+            if issued_read_tail:
+                private.enter_context(mock.patch.object(allocation,'_hold_settings_originals',revoke_after_actual_settings_close))
+                before_files={str(path):(path.stat().st_ino,path.read_bytes())
+                    for root in (project/'.tracker',global_root/'var/lib/http-ztp-container/issue-tracker')
+                    for path in root.rglob('*') if path.is_file()}
+            identity=decode_template_identity(prepare_template_identity_read(binding,credential),response(identity_response()))
+            with self._assertion_preserving_preparation(preparation.hold_catalog_nonallocating_preparation(
+                    writer,sheet,binding,identity,generation_id=committed.receipt.generation_id,
+                    publish_id=committed.receipt.published_sha256,sheet='ETH&IB Switch')) as prepared, \
+                    mock.patch.object(launcher.OwnedProjectSheetsReadUnit,'read_once',autospec=True,side_effect=read):
+                receiver_refused=False
+                try:
+                    with self._assertion_preserving_preparation(remote._hold_native_current_cycle_observed_switch_unit(
+                        prepared,writer,sheet,binding,auth,_store=self.store,http_root=self.root)) as unit:
+                        action=json.loads(unit.action_preimage)
+                        self.assertEqual(committed.receipt.manifest_id,action['manifest_id'])
+                        self.assertEqual((committed.receipt.generation_id,committed.receipt.published_sha256),
+                            (action['identity']['generation_id'],action['identity']['publish_id']))
+                        self.assertEqual(['insert','insert'],[item['action'] for item in action['business']])
+                        self.assertEqual([[(101,row,column) for column in (1,5,9,13)] for row in (2,3)],
+                            [[(r['updateCells']['start']['sheetId'],r['updateCells']['start']['rowIndex'],
+                                r['updateCells']['start']['columnIndex']) for r in item['requests']] for item in action['business']])
+                        compiled.append(True)
+                        if not issued_read_tail:catalog.register_pending_c6_unit(writer,sheet,binding,unit,_unit_preparation=prepared)
+                except remote.RemoteHistoryHold:
+                    if not issued_read_tail:raise
+                    receiver_refused=True
+                finally:
+                    # Restore only this fixture's exact original registry entry
+                    # AFTER the receiver tail has actually refused it.
+                    for response,saved in revoked:
+                        with launcher._PROJECT_READ_GUARD:launcher._PROJECT_READS[response]=saved
+                if issued_read_tail:
+                    self.assertEqual([True],compiled)
+                    self.assertTrue(receiver_refused)
+                    self.assertEqual(1,len(revoked))
+                    self.assertEqual([('template_identity',None),('metadata',None),('activity',None),('insertion',None),
+                        ('row',3),('row',4),('history_tail',None)],issued)
+                    record=preparation._verify_catalog_preparation(prepared)
+                    self.assertFalse(record['registered']);self.assertIsNone(record['origin'])
+                    self.assertIsNone(record['unit']);self.assertEqual(set(),record['additions'])
+                    self.assertIsNone(record['appended'])
+                    self.assertEqual([],list((project/'.tracker/settings/outbox').iterdir()))
+                    self.assertEqual(before_files,{str(path):(path.stat().st_ino,path.read_bytes())
+                        for root in (project/'.tracker',global_root/'var/lib/http-ztp-container/issue-tracker')
+                        for path in root.rglob('*') if path.is_file()},
+                        'issued-tail refusal must not change original catalog/count/CLAIM/WIRE or allocate files')
+                    observed.append('ETH&IB Switch:archived:current-cycle-compiler:tail-refused')
+                    # The original interruption exits the unregistered native
+                    # preparation; its own HOLD cannot fake receiver refusal.
+                    raise self.issued_read_tail_primary
+            with catalog.hold_pending_project_c6_units(sheet,binding) as (units,verify):
+                self.assertEqual(2,len(units));self.assertEqual(unit.unit_id,units[-1].unit.unit_id);verify()
+        self.assertEqual([('template_identity',None),('metadata',None),('activity',None),('insertion',None),
+            ('row',3),('row',4),('history_tail',None)],issued)
+        self.assertEqual([],list((project/'.tracker/settings/outbox').iterdir()))
         observed.append('ETH&IB Switch:archived:current-cycle-compiler:registered')
 
     def test_native_original_settings_audit_receipt_rebind_after_count_refuses_fixed_local_request(self):
@@ -3297,6 +3632,8 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                     'complete-after-archive-local-c6','complete-after-archive-receipt-rebind-local-c6',
                     'complete-after-archive-settings-finalizer-local-c6',
                     'complete-after-archive-local-c6-native-current-compiler',
+                    'complete-after-archive-local-c6-native-current-compiler-issued-reads',
+                    'complete-after-archive-local-c6-native-current-compiler-issued-reads-issued-tail',
                     'complete-after-archive-local-c6-native-current-compiler-receipt-tail'))
             if manual_channel_bridge or complete_preview_probe or default_preparation:
                 root_template = self.root / "monitor/Issue_Tracker_Template_v1.xlsx"

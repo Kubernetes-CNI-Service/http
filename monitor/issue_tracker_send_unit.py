@@ -177,6 +177,45 @@ Returned byte strings cannot track later mutation of supplied dictionaries.
     return result
 
 
+def _freeze_prod_source_business(qualified, manifest, manifest_id, placements, **unit_binding):
+    """Pure derivation inside an already-bracketed compiler invocation.
+
+    No source acquisition, replay exemption, ownership or send authority is
+    established here. Public source compilers must independently revalidate
+    their complete originals before AND after this immutable-value operation.
+    """
+    from monitor.issue_tracker_local_workbook_commit import _source_rows
+    from monitor.issue_tracker_online_cells import source_tool_values
+
+    names = {'generation_id', 'publish_id', 'spreadsheet_id', 'sheet', 'sheet_id',
+             'history_sheet_id', 'target_nonce', 'history_nonce', 'preread_sha256',
+             'audits', 'occupied_metadata_ids'}
+    if (set(unit_binding) != names or type(unit_binding['sheet']) is not str
+            or unit_binding['sheet'] not in _FAMILY or type(placements) is not tuple
+            or len(placements) > 1000): raise SendUnitHold()
+    family = _FAMILY[unit_binding['sheet']]
+    operations = [item for item in json.loads(manifest)['operations'] if item['activity_key'][0] == family]
+    cabling, switch = _source_rows(qualified)
+    by_key = {row.activity_key: row for row in (*cabling, *switch)}
+    if len(by_key) != len(cabling) + len(switch) or len(operations) != len(placements): raise SendUnitHold()
+    placement_image = _canonical(placements)
+    business = []
+    for operation, placement in zip(operations, placements):
+        if (type(placement) is not dict or set(placement) != {
+                'operation_id', 'action', 'row_index', 'observed_values', 'reserved_id'}
+                or placement['operation_id'] != operation['operation_id']
+                or type(placement['action']) is not str or placement['action'] not in ('insert', 'update')):
+            raise SendUnitHold()
+        row = by_key[tuple(operation['activity_key'])]
+        values = source_tool_values(row, placement['action'], reserved_id=placement['reserved_id'])
+        business.append({'operation_id': operation['operation_id'], 'action': placement['action'],
+            'row_index': placement['row_index'], 'observed_values': placement['observed_values'],
+            'values': values, 'recorded_at_utc': row.recorded_at_utc})
+    result = freeze_send_unit(manifest=manifest, manifest_id=manifest_id, business=tuple(business), **unit_binding)
+    if _canonical(placements) != placement_image: raise SendUnitHold()
+    return result
+
+
 def freeze_prod_source_unit(qualified, store, *, http_root, settings,
                            whitelist_snapshot, whitelist_path, metadata,
                            expected_template_sha256, placements, writer_token=None,
@@ -192,9 +231,7 @@ def freeze_prod_source_unit(qualified, store, *, http_root, settings,
     failed = False
     try:
         from monitor.issue_tracker_local_commit import _owner
-        from monitor.issue_tracker_local_workbook_commit import _source_rows
         from monitor.issue_tracker_manifest import freeze_prod_stage_l_manifest
-        from monitor.issue_tracker_online_cells import source_tool_values
 
         names = {'generation_id', 'publish_id', 'spreadsheet_id', 'sheet', 'sheet_id',
                  'history_sheet_id', 'target_nonce', 'history_nonce', 'preread_sha256',
@@ -208,25 +245,8 @@ def freeze_prod_source_unit(qualified, store, *, http_root, settings,
                        whitelist_path=whitelist_path, metadata=metadata,
                        expected_template_sha256=expected_template_sha256, writer_token=writer_token)
         manifest, manifest_id = freeze_prod_stage_l_manifest(qualified, store, **context)
-        family = _FAMILY[unit_binding['sheet']]
-        operations = [item for item in json.loads(manifest)['operations'] if item['activity_key'][0] == family]
-        cabling, switch = _source_rows(qualified)
-        by_key = {row.activity_key: row for row in (*cabling, *switch)}
-        if len(by_key) != len(cabling) + len(switch) or len(operations) != len(placements): raise SendUnitHold()
         placement_image = _canonical(placements)
-        business = []
-        for operation, placement in zip(operations, placements):
-            if (type(placement) is not dict or set(placement) != {
-                    'operation_id', 'action', 'row_index', 'observed_values', 'reserved_id'}
-                    or placement['operation_id'] != operation['operation_id']
-                    or type(placement['action']) is not str or placement['action'] not in ('insert', 'update')):
-                raise SendUnitHold()
-            row = by_key[tuple(operation['activity_key'])]
-            values = source_tool_values(row, placement['action'], reserved_id=placement['reserved_id'])
-            business.append({'operation_id': operation['operation_id'], 'action': placement['action'],
-                'row_index': placement['row_index'], 'observed_values': placement['observed_values'],
-                'values': values, 'recorded_at_utc': row.recorded_at_utc})
-        result = freeze_send_unit(manifest=manifest, manifest_id=manifest_id, business=tuple(business), **unit_binding)
+        result = _freeze_prod_source_business(qualified, manifest, manifest_id, placements, **unit_binding)
         if (freeze_prod_stage_l_manifest(qualified, store, **context) != (manifest, manifest_id)
                 or _canonical(placements) != placement_image): raise SendUnitHold()
         _owner(writer_token)
@@ -523,10 +543,26 @@ def freeze_observed_receipted_switch_unit(qualified, store, *, http_root, settin
             return tuple(placements), hashlib.sha256(image).hexdigest(), history
 
         placements, digest, history = read_images()
-        result = freeze_receipted_prod_source_unit(qualified, store, local_generation_id=local_generation_id,
-            placements=placements, preread_sha256=digest, spreadsheet_id=binding.spreadsheet_id, sheet='ETH&IB Switch',
+        unit_binding = dict(preread_sha256=digest, spreadsheet_id=binding.spreadsheet_id, sheet='ETH&IB Switch',
             sheet_id=sid, history_sheet_id=history_sid, target_nonce=target_nonce, history_nonce=history_nonce,
-            audits=audits, occupied_metadata_ids=occupied_metadata_ids, **context)
+            audits=audits, occupied_metadata_ids=occupied_metadata_ids)
+        if _unit_preparation is not None:
+            # original_nonce_state already verified this actual nonallocating
+            # registry, both owners, current generation/publication and NEW
+            # state. This single invocation's full outer manifest replays
+            # bracket the entire pure construction; do not cache qualification
+            # or accept a caller manifest/skip flag. Keep BOTH intervening C6
+            # observations, in addition to the nonce observations on each side.
+            before = _original_receipt_identity(qualified, store, local_generation_id, writer_token,
+                settings, whitelist_snapshot, expected_template_sha256)
+            result = _freeze_prod_source_business(qualified, manifest, manifest_id, placements,
+                generation_id=before[0], publish_id=before[1], **unit_binding)
+            if json.loads(result.action_preimage)['manifest_id'] != before[2]: raise SendUnitHold()
+            if _original_receipt_identity(qualified, store, local_generation_id, writer_token,
+                    settings, whitelist_snapshot, expected_template_sha256) != before: raise SendUnitHold()
+        else:
+            result = freeze_receipted_prod_source_unit(qualified, store, local_generation_id=local_generation_id,
+                placements=placements, **unit_binding, **context)
         if (read_images() != (placements, digest, history) or original_nonce_state() != original
                 or freeze_prod_stage_l_manifest(qualified, store, **context) != (manifest, manifest_id)
                 or history.last_data_row_index + result.history_rows_expected >= history.row_count): raise SendUnitHold()

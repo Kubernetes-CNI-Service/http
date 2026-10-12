@@ -49,6 +49,46 @@ def inputs(count=2):
 class Req7SendUnitDirectTests(unittest.TestCase):
     def setUp(self): self.module = load()
 
+    def test_single_manifest_business_derivation_is_pure_and_keeps_literal_source_values(self):
+        from types import SimpleNamespace
+        build = getattr(self.module, '_freeze_prod_source_business', None)
+        self.assertTrue(callable(build), 'one invocation needs a pure builder, not a caller replay override')
+        candidate = SimpleNamespace(panel='Switch Status', activity_key=('switch','node0000','down','fabric'),
+            evidence_description='literal original source', fabric='Compute', fabric_source='template',
+            recorded_at_utc='2026-10-08T10:00:00Z')
+        qualified = SimpleNamespace(candidates=(candidate,))  # Pure values, NOT production qualification.
+        args = inputs(1); manifest = args.pop('manifest'); manifest_id = args.pop('manifest_id')
+        args.pop('business')
+        placements = ({'operation_id':'switch:0000','action':'update','row_index':2,
+            'observed_values':{'L':{'stringValue':'old'}},'reserved_id':None},)
+        original = deepcopy(placements)
+        with mock.patch('socket.socket') as network, \
+                mock.patch('monitor.issue_tracker_manifest.freeze_prod_stage_l_manifest',
+                           side_effect=AssertionError('pure derivation must not read source files')) as replay:
+            unit = build(qualified, manifest, manifest_id, placements, **args)
+        network.assert_not_called(); replay.assert_not_called(); self.assertEqual(original, placements)
+        action = json.loads(unit.action_preimage)
+        self.assertEqual(manifest_id, action['manifest_id'])
+        self.assertEqual(('WIRE-CANDIDATE',), tuple(value for _key,value in unit.outcomes))
+        self.assertEqual({'updateCells':{'start':{'sheetId':17,'rowIndex':2,'columnIndex':11},
+            'rows':[{'values':[{'userEnteredValue':{'stringValue':
+                '[MONITOR][down][fabric] [fabric_source=template] literal original source'}}]}],
+            'fields':'userEnteredValue'}}, json.loads(unit.wire_bytes)['requests'][0])
+        self.assertFalse(hasattr(unit,'permit')); self.assertFalse(hasattr(unit,'send_once'))
+        for changes in ({'manifest':b'caller override'}, {'recorded_at_utc':'caller time'},
+                        {'business':()}, {'sheet':'foreign'}):
+            with self.subTest(changes=changes), self.assertRaises((TypeError,self.module.SendUnitHold)):
+                build(qualified, manifest, manifest_id, placements, **{**args,**changes})
+
+    def test_public_source_compiler_keeps_both_independent_manifest_boundaries(self):
+        import ast, inspect, textwrap
+        tree = ast.parse(textwrap.dedent(inspect.getsource(self.module.freeze_prod_source_unit)))
+        calls = [node.func.id for node in ast.walk(tree)
+                 if isinstance(node,ast.Call) and isinstance(node.func,ast.Name)]
+        self.assertEqual(2,calls.count('freeze_prod_stage_l_manifest'))
+        self.assertEqual(1,calls.count('_freeze_prod_source_business'))
+        self.assertEqual(2,calls.count('_owner'))
+
     def test_original_action_wire_rehydration_checks_coherence_without_recompiling_sources(self):
         self.assertTrue(hasattr(self.module,'_original_unit'),'original images must not recompile current sources')
         original = self.module.freeze_send_unit(**inputs())

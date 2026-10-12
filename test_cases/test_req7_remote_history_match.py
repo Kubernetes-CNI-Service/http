@@ -40,6 +40,18 @@ def load():
 
 
 class Req7RemoteHistoryMatchDirectTests(unittest.TestCase):
+    def test_native_switch_issued_compiler_refuses_unissued_preparation_before_auth_or_reads(self):
+        module=load();entry=getattr(module,'_hold_native_current_cycle_observed_switch_unit',None)
+        self.assertTrue(callable(entry),'fixed actual issued-read Switch compiler is missing')
+        from monitor import issue_tracker_history_read_launcher as reads
+        from monitor import issue_tracker_token_launcher as tokens
+        with mock.patch.object(reads.OwnedProjectSheetsReadUnit,'read_once') as acquire, \
+                mock.patch.object(tokens,'require_current_owned_project_token') as auth:
+            with self.assertRaises(module.RemoteHistoryHold):
+                with entry(object(),object(),object(),binding(),object(),_store=object(),http_root=self.root):
+                    self.fail('unissued native preparation reached an authenticated read')
+        acquire.assert_not_called();auth.assert_not_called()
+
     def test_native_current_cycle_compiler_inputs_refuse_unissued_preparation_before_acquisition(self):
         module=load();entry=getattr(module,'_hold_native_current_cycle_compiler_inputs',None)
         self.assertTrue(callable(entry),'fixed native source/receipt reception is missing')
@@ -540,6 +552,124 @@ class Req7RemoteFixtureIsolationTests(unittest.TestCase):
             self.assertIs(monitor.issue_tracker_history_preread_journal.global_journal, current_global)
         finally:
             case.doCleanups()
+
+
+class Req7AppliedC6OriginalDirectTests(unittest.TestCase):
+    """Actual committed C6 originals, not source qualification or sending."""
+    def setUp(self):
+        self.temp=tempfile.TemporaryDirectory(prefix='req7-c6-held-replay-')
+        self.addCleanup(self.temp.cleanup);self.root=Path(self.temp.name).resolve()
+
+    @contextmanager
+    def actual_c6(self):
+        from monitor import issue_tracker_local_commit as local
+        from monitor import issue_tracker_send_unit as composer
+        from test_cases.test_issue_tracker_whitelist_workbook import literal_xlsx
+        project=self.root/'project';publication=project/'publication'
+        project.mkdir(mode=0o700);publication.mkdir(mode=0o700)
+        local.create_local_commit_store(project,publication)
+        with local.writer_owner(project,publication) as writer:
+            args=send_inputs();generation=local.begin_generation(writer,args['manifest'])
+            local.record_intent(writer,generation,literal_xlsx(),kind='xlsx')
+            receipt=local.commit(writer,generation)
+            args.update(generation_id=generation.generation_id,publish_id=receipt.published_sha256)
+            unit=composer.freeze_send_unit(**args)
+            yield local,composer,writer,generation,unit,publication
+
+    def test_held_c6_replays_original_bytes_and_recovery_barriers_without_recursive_cold_parse(self):
+        module=load()
+        with self.actual_c6() as (local,composer,writer,generation,unit,publication):
+            folder=publication.parent/'.tracker/generations'/generation.generation_id
+            expected=[(publication.stat().st_dev,publication.stat().st_ino),
+                      (folder.stat().st_dev,folder.stat().st_ino)]
+            actual_sync=os.fsync;barriers=[]
+            def sync(fd):
+                info=os.fstat(fd);actual_sync(fd)
+                barriers.append((info.st_dev,info.st_ino))
+            with mock.patch.object(composer,'_read_original_generation_identity',
+                    wraps=composer._read_original_generation_identity) as cold:
+                with module._hold_applied_generation(writer,generation,unit) as (_owner,verify,facts,sent):
+                    with mock.patch.object(os,'fsync',side_effect=sync):
+                        verify();verify()
+                    self.assertEqual(('switch:0000','switch:0001'),sent)
+                    self.assertEqual(generation.generation_id,facts['generation_id'])
+                calls=cold.call_count
+            self.assertEqual(expected*2,barriers,'both actual recovery barriers remain on every live replay')
+            self.assertEqual(1,calls,'one cold semantic admission; all later checks use the same held originals')
+
+    def test_held_c6_refuses_each_actual_recovery_barrier_failure_without_mutating_originals(self):
+        module=load()
+        for boundary in (1,2):
+            with self.subTest(boundary=boundary),self.actual_c6() as (
+                    local,_composer,writer,generation,unit,publication):
+                paths=[p for p in publication.parent.rglob('*') if p.is_file()]
+                before={p:(p.stat().st_ino,p.read_bytes()) for p in paths};reached=[];native=os.fsync
+                with module._hold_applied_generation(writer,generation,unit) as (_owner,verify,_facts,_sent):
+                    def fault(fd):
+                        reached.append(fd)
+                        if len(reached)==boundary:raise OSError('owned C6 recovery barrier fault')
+                        native(fd)
+                    with mock.patch.object(os,'fsync',side_effect=fault):
+                        with self.assertRaises(ValueError):verify()
+                self.assertEqual(boundary,len(reached))
+                self.assertEqual(before,{p:(p.stat().st_ino,p.read_bytes()) for p in paths})
+            self.temp.cleanup();self.setUp()
+
+    def test_held_c6_refuses_same_bytes_rebound_after_recovery_barrier_before_return(self):
+        module=load()
+        for selected in ('RECEIPT','XLSX'):
+            with self.subTest(selected=selected),self.actual_c6() as (
+                    local,_composer,writer,generation,unit,publication):
+                folder=publication.parent/'.tracker/generations'/generation.generation_id
+                path=(folder/'RECEIPT' if selected=='RECEIPT' else
+                      next(p for p in publication.iterdir() if p.suffix=='.xlsx'))
+                image=path.read_bytes();inode=path.stat().st_ino;reached=[];native=os.fsync
+                with self.assertRaises(ValueError):
+                    with module._hold_applied_generation(writer,generation,unit) as (_owner,verify,_facts,_sent):
+                        def replace_after_sync(fd):
+                            native(fd)
+                            if not reached:
+                                path.rename(self.root/'owned-displaced-c6-original')
+                                path.write_bytes(image);path.chmod(0o600);reached.append(True)
+                        with mock.patch.object(os,'fsync',side_effect=replace_after_sync):verify()
+                self.assertEqual([True],reached)
+                self.assertNotEqual(inode,path.stat().st_ino)
+                self.assertEqual(image,path.read_bytes())
+                self.assertEqual(inode,(self.root/'owned-displaced-c6-original').stat().st_ino)
+            self.temp.cleanup();self.setUp()
+
+    def test_held_c6_cannot_adopt_same_bytes_replacement_between_cold_read_and_capture(self):
+        module=load()
+        for selected in ('STATE','RECEIPT','MANIFEST','INTENT','XLSX','DIRECTORY'):
+            with self.subTest(selected=selected),self.actual_c6() as (
+                    local,composer,writer,generation,unit,publication):
+                folder=publication.parent/'.tracker/generations'/generation.generation_id
+                path=(folder if selected=='DIRECTORY' else
+                      next(p for p in publication.iterdir() if p.suffix=='.xlsx')
+                      if selected=='XLSX' else folder/selected)
+                original=path.stat().st_ino;reached=[];cold=composer._read_original_generation_identity
+                def replace_after_cold(*args,**kwargs):
+                    result=cold(*args,**kwargs)
+                    if not reached:
+                        saved=self.root/'owned-displaced-capture-original'
+                        path.rename(saved)
+                        if selected=='DIRECTORY':
+                            path.mkdir(mode=0o700)
+                            for old in saved.iterdir():
+                                # Preserve child objects; replace only the ancestor.
+                                old.rename(path/old.name)
+                        else:
+                            path.write_bytes(saved.read_bytes());path.chmod(0o600)
+                        reached.append(True)
+                    return result
+                with mock.patch.object(composer,'_read_original_generation_identity',side_effect=replace_after_cold):
+                    with self.assertRaises(ValueError):
+                        with module._hold_applied_generation(writer,generation,unit):
+                            self.fail('substituted C6 must never reach the handoff')
+                self.assertEqual([True],reached)
+                self.assertNotEqual(original,path.stat().st_ino)
+                self.assertEqual(original,(self.root/'owned-displaced-capture-original').stat().st_ino)
+            self.temp.cleanup();self.setUp()
 
 
 class Req7OwnedHistoryMatchWorkflowTests(unittest.TestCase):
@@ -1854,6 +1984,42 @@ with scoped_fixture(root,sheet),state.tracker_settings_writer(project,project/'p
         with ExitStack() as stack:
             self.native_second_audit_completed(stack,archive_before_new=True,preparation_k_probe=probe)
         self.assertEqual(['actual-preparation-original-k'],reached)
+
+    def test_native_preparation_k_read_refuses_equal_prior_replacement_and_graph_tail_budget_failure(self):
+        from monitor import issue_tracker_state_owner as state
+        reached=[]
+        def probe(allocation,writer,sheet,bound,prepared,tracker):
+            # The actual fixture reloads NV before issuance. Capture the
+            # current registry here, never an earlier module's empty registry.
+            from monitor import issue_tracker_nv_reservation as nv
+            record=nv._verify_catalog_preparation(prepared)
+            prior=next(row for row in record['prior_delivery_events'] if row['writer'] is writer)
+            rows=record['prior_delivery_events'];index=rows.index(prior)
+            before={str(path.relative_to(tracker)):(path.stat().st_ino,path.read_bytes())
+                for path in tracker.rglob('*') if path.is_file()}
+            with allocation._hold_native_catalog_k_read(prepared,writer,sheet,bound):
+                self.assertEqual((1,7),(state.current_k(writer).revision,state.current_k(writer).k))
+                rows[index]=dict(prior)  # Equal contents are not the issued original row.
+                try:
+                    with self.assertRaises(state.TrackerStateHold):state.current_k(writer)
+                    reached.append('equal-prior-refused')
+                finally:rows[index]=prior
+                budget=record['budget'];original_graph=nv._verify_catalog_preparation
+                def graph_then_fail_budget(actual):
+                    result=original_graph(actual)
+                    if actual is prepared:budget.failed=True
+                    return result
+                try:
+                    with mock.patch.object(nv,'_verify_catalog_preparation',graph_then_fail_budget):
+                        with self.assertRaises(state.TrackerStateHold):state.current_k(writer)
+                    reached.append('actual-graph-tail-budget-refused')
+                finally:budget.failed=False  # Restore only this test's injected flag.
+                self.assertEqual((1,7),(state.current_k(writer).revision,state.current_k(writer).k))
+            self.assertEqual(before,{str(path.relative_to(tracker)):(path.stat().st_ino,path.read_bytes())
+                for path in tracker.rglob('*') if path.is_file()})
+        with ExitStack() as stack:
+            self.native_second_audit_completed(stack,archive_before_new=True,preparation_k_probe=probe)
+        self.assertEqual(['equal-prior-refused','actual-graph-tail-budget-refused'],reached)
 
     def test_native_preparation_k_read_rechecks_issuer_after_actual_chain_validation(self):
         from monitor import issue_tracker_state_owner as state
@@ -3569,6 +3735,24 @@ with scoped_fixture(root,owner),owner.spreadsheet_owner(bound) as token:
                                                                          generation=self.native_generation))
             self.assertEqual(saved,{p:(p.stat().st_ino,p.read_bytes())
                                    for p in tracker.rglob('*') if p.is_file()})
+
+    def test_actual_completed_to_applied_handoff_uses_one_cold_c6_admission_and_original_replays(self):
+        from monitor import issue_tracker_send_unit as composer
+        module=load()
+        with ExitStack() as stack:
+            writer,owner,bound,unit=self.prepare_native_completed(stack,module)
+            tracker=self.root/'project/.tracker'
+            retained={p:(p.stat().st_ino,p.read_bytes()) for p in tracker.rglob('*') if p.is_file()}
+            with mock.patch.object(composer,'_read_original_generation_identity',
+                    wraps=composer._read_original_generation_identity) as cold:
+                applied=module.record_owned_applied_evidence(writer,owner,bound,unit,
+                                                            generation=self.native_generation)
+            self.assertEqual(('APPLIED',1,('switch:0001',)),
+                             (applied.state,applied.sequence,applied.applied_operation_ids))
+            self.assertEqual(1,cold.call_count,'one original C6 admission across actual durable APPLIED handoff')
+            self.assertEqual(retained,{p:(p.stat().st_ino,p.read_bytes()) for p in retained})
+            self.assertEqual((1,'UNKNOWN'),(self.current_global_state(owner,bound,unit).attempt_count,
+                                          self.current_global_state(owner,bound,unit).outcome))
 
     def test_native_complete_without_applied_pair_cannot_write_key_watermark(self):
         module=load()

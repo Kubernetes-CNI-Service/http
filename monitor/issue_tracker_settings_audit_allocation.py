@@ -1927,6 +1927,24 @@ def _native_catalog_k_read_active(writer):
         packet['token'] is writer for packet in _LIVE_NATIVE_CATALOG_K_CONTEXTS.values()))
 
 
+def _require_native_catalog_k_prior_identity(record,writer,owner,sheet,bound,*,prior,raw,events):
+    """Require the same retained relation; this never issues a read allowance.
+
+    Equality of copied rows or event tuples is not original provenance. The
+    caller still needs the genuine ACTIVE preparation and its full graph
+    verification at every semantic boundary.
+    """
+    try:
+        matches=[row for row in record['prior_delivery_events']
+                 if row['writer'] is writer and row['owner'] is owner]
+        if (record['token'] is not sheet or record['binding']!=bound
+                or len(matches)!=1 or matches[0] is not prior or raw is None
+                or prior['raw'] is not raw or prior['events'] is not events
+                or raw.events is not events):raise SettingsAuditHold()
+    except (KeyError,TypeError,AttributeError) as exc:
+        raise SettingsAuditHold() from exc
+
+
 @contextmanager
 def _hold_native_catalog_k_read(prepared,writer,sheet,bound):
     """Borrow the actual preparation's closed ALL handoff for original K only.
@@ -1949,14 +1967,35 @@ def _hold_native_catalog_k_read(prepared,writer,sheet,bound):
     # Only this real closed-ALL raw handoff needs an archive allowance. First
     # use with no old delivery remains the ordinary strict K reader instead.
     if len(actual_prior)!=1:raise SettingsAuditHold()
-    events=_native_allocation_prior_events(prepared,writer,sheet,bound)
+    prior=actual_prior[0];raw=prior['raw'];events=prior['events']
+    prior_verify=prior['verify'];old=record['old'];budget=record['budget']
+    pid=os.getpid();thread=threading.get_ident()
+    def original_admission():
+        # Pure registry/object checks bracket ONE complete original graph.
+        # They do not cache an owner/path check or authorize any operation.
+        # In particular, the last callback runs after K issuer revocation.
+        with ownership._GUARD:active_sheet=ownership._ACTIVE.get(sheet)
+        if (type(prepared) not in (nv._CatalogNvPreparation,nv._CatalogNonallocatingPreparation)
+                or nv._ACTIVE_CATALOG_PREPARATIONS.get(prepared) is not record
+                or local._ACTIVE.get(writer) is not owner or active_sheet is not sheet_owner
+                or os.getpid()!=pid or threading.get_ident()!=thread
+                or owner.pid!=pid or sheet_owner.pid!=pid or sheet_owner.binding!=bound
+                or record['owner'] is not sheet_owner or record['old'] is not old
+                or record['budget'] is not budget or record['failed'] or budget.failed or budget.pending
+                or type(raw) is not _NativeAllocationPriorOriginals
+                or raw.writer is not writer or raw.owner is not owner
+                or raw.sheet is not sheet or raw.bound!=bound or raw.old is not old
+                or raw.record is not record or raw.frozen is not None
+                or prior['verify'] is not prior_verify):raise SettingsAuditHold()
+        if (type(prepared) is nv._CatalogNonallocatingPreparation
+                and (record['nonallocating_writer'] is not writer
+                     or record['nonallocating_owner'] is not owner)):raise SettingsAuditHold()
+        _require_native_catalog_k_prior_identity(record,writer,owner,sheet,bound,
+            prior=prior,raw=raw,events=events)
     def preparation_verify():
-        if (nv._verify_catalog_preparation(prepared) is not record
-                or local._owner(writer) is not owner
-                or ownership._validated_owner(sheet,bound) is not sheet_owner
-                or _native_allocation_prior_events(prepared,writer,sheet,bound)!=events):
-            raise SettingsAuditHold()
-        nv._verify_catalog_preparation(prepared)
+        original_admission()
+        if nv._verify_catalog_preparation(prepared) is not record:raise SettingsAuditHold()
+        original_admission()
     with state._settings_original_scope() as scope:
         # This actual preparation/raw check runs AFTER all settings FD cleanup.
         scope.callback(preparation_verify)
