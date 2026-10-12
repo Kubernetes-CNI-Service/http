@@ -40,6 +40,17 @@ def load():
 
 
 class Req7RemoteHistoryMatchDirectTests(unittest.TestCase):
+    def test_fixed_switch_new_originals_has_no_caller_unit_or_backfill_entrance(self):
+        import inspect
+        module=load();api=getattr(module,'_prepare_current_cycle_native_switch_originals',None)
+        self.assertTrue(callable(api),'fixed NEW must join its own genuine creation, not adopt a pending unit')
+        self.assertEqual(('writer_token','owner_token','binding','authentication','_store','http_root'),
+            tuple(inspect.signature(api).parameters))
+        with mock.patch.object(module.global_journal,'prepare_global_unit') as writes:
+            with self.assertRaises(module.RemoteHistoryHold):
+                api(object(),object(),binding(),object(),_store=object(),http_root=ROOT)
+        writes.assert_not_called()
+
     def test_owned_archived_creator_locator_refuses_foreign_owners_before_k_or_source_read(self):
         import inspect
         module=load();hold=getattr(module,'_hold_current_cycle_native_creation_locators',None)

@@ -2633,6 +2633,12 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         finally:
             if self.native_no_send_expectation_failure is not None:raise self.native_no_send_expectation_failure
 
+    def test_real_fixed_switch_new_originals_creates_zero_count_history_business_quota_after_creator_cleanup(self):
+        self.native_no_send_expectation_failure=None
+        try:self._exercise_real_protected_three_panel_fixture(skip_history=False,native_current_no_send_probe='fixed-switch-new-originals')
+        finally:
+            if self.native_no_send_expectation_failure is not None:raise self.native_no_send_expectation_failure
+
     def test_real_fixed_switch_creator_initial_identity_issuer_revoked_after_source_cleanup_cannot_return(self):
         self.native_no_send_expectation_failure=None
         try:self._exercise_real_protected_three_panel_fixture(skip_history=False,native_current_no_send_probe='fixed-switch-creator-initial-revoke')
@@ -2681,7 +2687,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         finally:
             if self.native_no_send_expectation_failure is not None:raise self.native_no_send_expectation_failure
 
-    def _verify_fresh_native_switch_no_send(self,committed,qualified,*,tail_revoke=False,_sheet='ETH&IB Switch',_inactive=None,_wire=False,_nv=False,_other_drift=False,_tail_clear=False,_fixed_creation=False,_initial_revoke=False,_selection_revoke=False):
+    def _verify_fresh_native_switch_no_send(self,committed,qualified,*,tail_revoke=False,_sheet='ETH&IB Switch',_inactive=None,_wire=False,_nv=False,_other_drift=False,_tail_clear=False,_fixed_creation=False,_initial_revoke=False,_selection_revoke=False,_new_originals=False):
         import tempfile
         import socket
         from test_cases.test_req7_spreadsheet_owner import load as load_owner,scoped_fixture
@@ -2767,7 +2773,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             credential_info=fresh_info();credential_info['project_id']='synthetic-cloud-project'
             credential_path=private_dir/'cre.json';credential_path.write_bytes(json.dumps(credential_info).encode())
             credential_path.chmod(0o600)
-            owner_module=load_owner();enrollment=load_enrollment();load_global()
+            owner_module=load_owner();enrollment=load_enrollment();global_module=load_global()
             native_module=load_native();catalog_module=load_catalog(reset_dependencies=False);load_remote()
             from monitor import issue_tracker_local_commit as local,issue_tracker_remote_history_match as remote
             from monitor import issue_tracker_history_read_launcher as launcher,issue_tracker_send_unit as compiler
@@ -2859,7 +2865,23 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                 private.enter_context(scoped_fixture(global_root,credentials))
                 private.enter_context(scoped_fixture(global_root,target))
                 auth,_path,_raw=Req7HistoryReadLauncherWorkflowTests.project_auth(native,private,owner_module,sheet,binding)
-                enrollment.prepare_enrollment_journal(sheet,binding,identity)
+                if _new_originals:
+                    # Only this NEW scenario supplies the actual remote
+                    # enrollment pair. Older candidate-only empty metadata
+                    # fixtures and their expectations stay unchanged.
+                    with mock.patch('secrets.token_hex',side_effect=[value*64 for value in 'abcd']):
+                        enrolled=enrollment.prepare_enrollment_journal(sheet,binding,identity)
+                    self.assertEqual((('ETH&IB Switch',101,'a'*64),('ETH Cabling',102,'b'*64),
+                        ('IB Cabling',103,'c'*64),('Update_History',105,'d'*64)),enrolled.nonces)
+                    with self.assertRaises(enrollment.EnrollmentHold):
+                        enrollment._observe_enrollment_image(sheet,binding,identity,
+                            b'{"matchedDeveloperMetadata":[]}',sheet='ETH&IB Switch')
+                    documents['metadata']={'matchedDeveloperMetadata':[
+                        {'developerMetadata':{'metadataId':mid,'metadataKey':'http-ztp-enrollment-v1',
+                            'metadataValue':value*64,'visibility':'DOCUMENT',
+                            'location':{'locationType':'SHEET','sheetId':sid}}}
+                        for mid,value,sid in ((1,'a',101),(2,'d',105))]}
+                else:enrollment.prepare_enrollment_journal(sheet,binding,identity)
                 roots=(project/'.tracker',state)
                 def originals():return {str(path):(path.stat().st_ino,path.read_bytes())
                     for root in roots for path in root.rglob('*') if path.is_file()}
@@ -2868,9 +2890,18 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                 self.assertTrue(audits_before,'the real K change remains pending, not an empty fixture')
                 if _fixed_creation:
                     actual_context=remote._hold_current_cycle_native_receipt_locators;revoked=[];returned=[]
+                    original_global_creator=global_module.prepare_global_unit;new_writes=[]
+                    def new_global_creator(*args,**kwargs):
+                        if _new_originals:
+                            from monitor import issue_tracker_settings_audit_allocation as allocation
+                            self.assertFalse(native_module._ACTIVE_CATALOG_PREPARATIONS)
+                            self.assertFalse(allocation._LIVE_OWNED_PRIOR_SOURCE_READS)
+                            new_writes.append(True)
+                        return original_global_creator(*args,**kwargs)
                     create_name={'ETH&IB Switch':'_prepare_current_cycle_native_switch_unit',
                         'ETH Cabling':'_prepare_current_cycle_native_eth_cabling_unit',
                         'IB Cabling':'_prepare_current_cycle_native_ib_cabling_unit'}[_sheet]
+                    if _new_originals:create_name='_prepare_current_cycle_native_switch_originals'
                     @contextmanager
                     def context(*args,**kwargs):
                         with actual_context(*args,**kwargs) as labels:yield labels
@@ -2884,7 +2915,8 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                             self.assertIs(auth,saved);revoked.append((first,saved))
                     with mock.patch.object(launcher.OwnedProjectSheetsReadUnit,'read_once',autospec=True,side_effect=read), \
                             mock.patch.object(compiler,compiler_name,side_effect=compile_actual), \
-                            mock.patch.object(remote,'_hold_current_cycle_native_receipt_locators',side_effect=context):
+                            mock.patch.object(remote,'_hold_current_cycle_native_receipt_locators',side_effect=context), \
+                            mock.patch.object(global_module,'prepare_global_unit',side_effect=new_global_creator):
                         try:
                             if _initial_revoke or _selection_revoke:
                                 with self.assertRaises(remote.RemoteHistoryHold):
@@ -2892,6 +2924,17 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                                         writer,sheet,binding,auth,_store=self.store,http_root=self.root))
                             else:returned.append(getattr(remote,create_name)(
                                 writer,sheet,binding,auth,_store=self.store,http_root=self.root))
+                        except remote.RemoteHistoryHold as error:
+                            if _new_originals:
+                                # Synthetic fixture only; preserve the actual
+                                # hidden cause without changing any result.
+                                import traceback
+                                cause=error.__context__;seen=set()
+                                while cause is not None and id(cause) not in seen:
+                                    seen.add(id(cause))
+                                    traceback.print_exception(type(cause),cause,cause.__traceback__)
+                                    cause=cause.__context__
+                            raise
                         finally:
                             for first,saved in revoked:
                                 with launcher._PROJECT_READ_GUARD:launcher._PROJECT_READS[first]=saved
@@ -2902,7 +2945,18 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                         self.assertTrue(after.keys()-before.keys())
                         with catalog_module.hold_pending_project_c6_units(sheet,binding) as (pending,verify):
                             self.assertEqual((compiled[0],),tuple(item.unit for item in pending));verify()
-                        self.assertFalse(any('.journal' in path.name for path in state.iterdir()))
+                        if _new_originals:
+                            self.assertFalse(native_module._ACTIVE_CATALOG_PREPARATIONS)
+                            self.assertEqual([True],new_writes)
+                            stem=hashlib.sha256(binding.spreadsheet_id.encode()).hexdigest()+'.unit-'+compiled[0].unit_id
+                            self.assertTrue((state/(stem+'.journal')/'INITIALIZED').is_file())
+                            for family,entry in (('history','HISTORY-RAW'),('business','BUSINESS-RAW'),('metadata','METADATA-RAW')):
+                                self.assertTrue((state/(stem+'.'+family)/entry).is_file(),family)
+                                self.assertTrue((state/(stem+'.'+family)/'INITIALIZED').is_file(),family)
+                            self.assertEqual(0,global_module.inspect_global_unit(sheet,binding,compiled[0]).attempt_count)
+                            self.assertFalse(list(state.rglob('ATTEMPT-*')))
+                            self.assertFalse(list(state.rglob('CLAIM-*')))
+                        else:self.assertFalse(any('.journal' in path.name for path in state.iterdir()))
                         if _nv:
                             stem=hashlib.sha256(binding.spreadsheet_id.encode()).hexdigest()
                             folder=state/(stem+'.unit-'+compiled[0].unit_id+'.nv')
@@ -5354,8 +5408,9 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                             _selection_revoke=native_current_no_send_probe=='fixed-cabling-creator-nv-selection-revoke')
                 else:self._verify_fresh_native_switch_no_send(committed,qualified,
                     tail_revoke=native_current_no_send_probe=='tail-revoke',
-                    _wire=native_current_no_send_probe=='fixed-switch-creator-wire',
-                    _fixed_creation=native_current_no_send_probe in ('fixed-switch-creator','fixed-switch-creator-wire','fixed-switch-creator-initial-revoke'),
+                    _wire=native_current_no_send_probe in ('fixed-switch-creator-wire','fixed-switch-new-originals'),
+                    _fixed_creation=native_current_no_send_probe in ('fixed-switch-creator','fixed-switch-creator-wire','fixed-switch-creator-initial-revoke','fixed-switch-new-originals'),
+                    _new_originals=native_current_no_send_probe=='fixed-switch-new-originals',
                     _initial_revoke=native_current_no_send_probe=='fixed-switch-creator-initial-revoke')
                 return
             if observed_cabling_insert_probe:

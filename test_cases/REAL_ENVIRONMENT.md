@@ -1,5 +1,14 @@
 # Real-environment acceptance cases
 
+## TC-REAL-REQ7-FIXED-SWITCH-NEW-ORIGINALS-001 — 同次真实创建到零计数原像
+
+- 类型：integration / real-environment；REQ7 C5/C6/C19/C25。状态 **NOT RUN / REAL_ENV REQUIRED**；自动化：`test_req7_remote_history_match` direct 与 `test_issue_tracker_stage_l_consumer_workflow` 实际多脚本 normal workflow。
+- 前置：另行精确现场授权、当前精确树与运行身份、专用表/同 Cloud 项目历史前提、真实当前 C5/C6、实际双 owner、合法本地登记及真实 target/History nonce 对。该卡不扩大真实 SSH、设备、Cloud 或生产写入授权。
+- 步骤/预期：固定 Switch creator 内真实编译、唯一登记；全部 native locator/bridge/preparation 原收尾成功后，独立 live C6 scope创建 GLOBAL→History→BUSINESS→quota；每阶段及收尾仍核同一实际 issuer/认证/原期限。保留正常流程、关键提交边界、代表性中断、冷恢复与失败安全状态；NO_SEND 零创建，零 COUNT/CLAIM/发送，不以旧 catalog/裸 unit_id/原件缺失启动补建。
+- 故障与清理：部分写入、原件同字节换 inode、issuer 撤销/过期或收尾失败均 HOLD，保留已写 prefix/原件及 UNKNOWN，不续期、回填、自动重发或清除证据；仅清理本轮确证自有 fixture/子进程/FD。
+- 证据：精确 HEAD/tree/dirty/diff/manifest、Python/平台/依赖来源，命令及退出码，完整日志的前后 stat/inode、旧前缀与完整 SHA、物理 BEGIN/END，以及创建/撤权/收尾次序。局部本地自动化不替代默认三表 NEW、FIRST/G1、正式 full/check、真实设备或断电验收。
+- 范围缩减：无现有场景删除/跳过/弱化；无本卡新增风险接受确认人。残余风险为以上尚未运行现场及未闭整体范围，均不得记 PASS；原现场授权、研发确认和普通发布门禁仍有效。
+
 ## TC-REAL-REQ7-CURRENT-C6-NATIVE-LOCATORS-001 — 默认 preparation 的当前原 C6 定位
 
 - 类型：native / integration / read-only；对应 REQ7 C5/C6/C23/C25；状态：**NOT RUN / REAL_ENV REQUIRED**。模块：`monitor/issue_tracker_remote_history_match.py`、实际 writer/cycle/source/K/W1/receipt；自动化为 `test_req7_remote_history_match` direct 和 `test_issue_tracker_stage_l_consumer_workflow` 实际 protected 多脚本正反例。

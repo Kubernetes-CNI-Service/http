@@ -1002,6 +1002,18 @@ def _prepare_current_cycle_native_switch_unit(writer_token,owner_token,binding,a
         _store=_store,http_root=http_root,_sheet='ETH&IB Switch')
 
 
+def _prepare_current_cycle_native_switch_originals(writer_token,owner_token,binding,authentication,*,_store,http_root):
+    """Same-call genuine NEW Switch creation plus original zero-count prereads.
+
+    No existing unit, locator, callback, old verifier or repair selector enters.
+    Native creator/locator finalizers finish before the independent NEW writes;
+    original issued responses keep their existing deadlines throughout.
+    This creates local originals only, never COUNT, CLAIM or a network write.
+    """
+    return _prepare_current_cycle_native_unit(writer_token,owner_token,binding,authentication,
+        _store=_store,http_root=http_root,_sheet='ETH&IB Switch',_new_originals=True)
+
+
 def _prepare_current_cycle_native_eth_cabling_unit(writer_token,owner_token,binding,authentication,*,_store,http_root):
     """Fixed ETH preparation; original columns select genuine NV when needed."""
     return _prepare_current_cycle_native_unit(writer_token,owner_token,binding,authentication,
@@ -1015,7 +1027,7 @@ def _prepare_current_cycle_native_ib_cabling_unit(writer_token,owner_token,bindi
 
 
 def _prepare_current_cycle_native_unit(writer_token,owner_token,binding,authentication,*,
-                                      _store,http_root,_sheet):
+                                      _store,http_root,_sheet,_new_originals=False):
     """Fixed native preparation and local pending registration, never a send.
 
     Derive latest current C6 inside live source holders, not caller generation
@@ -1026,14 +1038,16 @@ def _prepare_current_cycle_native_unit(writer_token,owner_token,binding,authenti
     from pathlib import Path
     from monitor import issue_tracker_local_commit as local
     try:
-        project=local._owner(writer_token);ownership._validated_owner(owner_token,binding)
+        project=local._owner(writer_token);sheet_owner=ownership._validated_owner(owner_token,binding)
         root=Path(http_root)
         if (_sheet not in ('ETH&IB Switch','ETH Cabling','IB Cabling')
+                or type(_new_originals) is not bool or _new_originals and _sheet!='ETH&IB Switch'
                 or not root.is_absolute() or root.resolve(strict=True)!=root
                 or Path(_store.project_identity)!=project.project or _store.scope!='prod'):raise RemoteHistoryHold()
         from monitor import issue_tracker_nv_reservation as native,issue_tracker_unit_catalog as catalog
         from monitor.issue_tracker_history_read_launcher import OwnedProjectSheetsReadUnit,require_current_owned_project_read
         from monitor.issue_tracker_token_launcher import require_current_owned_project_token
+        new_images=None;new_unit=None
         with _hold_current_cycle_native_creation_locators(writer_token,owner_token,binding,
                 _store=_store,http_root=root) as (labels,prior_bridge):
             # Derive necessary Cabling keys from current protected C5 before
@@ -1110,6 +1124,13 @@ def _prepare_current_cycle_native_unit(writer_token,owner_token,binding,authenti
                     if unit.outcome=='WIRE-CANDIDATE':
                         catalog.register_pending_c6_unit(writer_token,owner_token,binding,unit,
                             **({'_nv_preparation':prepared} if missing else {'_unit_preparation':prepared}))
+                        if _new_originals:
+                            record=native._verify_catalog_preparation(prepared)
+                            tail=record['project_read_tail'];packet=tail.packet
+                            if (packet is not tail._issued_packet or packet[:3]!=(writer_token,owner_token,binding)
+                                    or packet[3] is not project or packet[4] is not sheet_owner
+                                    or packet[5] is not authentication or packet[7] is not unit):raise RemoteHistoryHold()
+                            new_images=packet[6];new_unit=unit
                         result=('WIRE_REGISTERED',unit.unit_id)
                     elif unit.outcome=='NO_SEND':result=('NO_SEND',unit.unit_id)
                     else:raise RemoteHistoryHold()
@@ -1118,6 +1139,42 @@ def _prepare_current_cycle_native_unit(writer_token,owner_token,binding,authenti
         # These external owners are still live; no closed source/K verifier is
         # revived and no fresh read or deadline can replace the original.
         verify_initial_identity()
+        if new_unit is not None:
+            # The entire native locator/bridge has closed successfully. Its
+            # strict namespace allowances are unchanged: these NEW families
+            # are never written inside a closed/revived preparation scope.
+            from monitor import issue_tracker_history_preread_journal as preread
+            from monitor import issue_tracker_metadata_reservation as reservation
+            def original_reads():
+                if (local._owner(writer_token) is not project
+                        or ownership._validated_owner(owner_token,binding) is not sheet_owner):raise RemoteHistoryHold()
+                verify_initial_identity()
+                for kind,title,row,response in new_images:
+                    require_current_owned_project_read(writer_token,owner_token,binding,response,
+                        authentication,read_kind=kind,sheet=title,row=row)
+                require_current_owned_project_token(owner_token,binding,authentication)
+            original_reads()
+            if (tuple(item[:3] for item in new_images[:4])!=(('template_identity',None,None),
+                    ('metadata',None,None),('activity',_sheet,None),('insertion',_sheet,None))
+                    or new_images[-1][:3]!=('history_tail',None,None)
+                    or len(new_images[4:-1])!=len(new_unit.outcomes)):raise RemoteHistoryHold()
+            body=local._json(new_unit.action_preimage);generation_id=body['identity']['generation_id']
+            generation=local.Generation(generation_id,int(local._GEN.fullmatch(generation_id).group(1)),
+                body['manifest_id'],writer_token)
+            business=tuple({'operation_id':outcome[0],'discovery_response':new_images[2][3],
+                'occupancy_response':new_images[3][3],'row_response':image[3]}
+                for outcome,image in zip(new_unit.outcomes,new_images[4:-1]))
+            with _hold_applied_generation(writer_token,generation,new_unit) as (actual,verify_c6,_facts,_operations):
+                if actual is not project:raise RemoteHistoryHold()
+                def current():original_reads();verify_c6();original_reads()
+                current();global_journal.prepare_global_unit(owner_token,binding,new_unit);current()
+                preread.prepare_owned_project_history_preread(writer_token,owner_token,binding,authentication,new_unit,
+                    identity_response=new_images[0][3],history_response=new_images[-1][3]);current()
+                preread.prepare_owned_project_business_preread(writer_token,owner_token,binding,authentication,
+                    generation,new_unit,identity_response=new_images[0][3],business_reads=business);current()
+                reservation.prepare_owned_project_metadata_reservation(writer_token,owner_token,binding,authentication,
+                    new_unit,identity_response=new_images[0][3],metadata_response=new_images[1][3]);current()
+            original_reads()
         return result
     except Exception:raise RemoteHistoryHold() from None
 
