@@ -3190,6 +3190,17 @@ three-sheet/default NEW/NO_SEND driver, whole REQ7 or current full/check.
 No existing automatic or field scenario is removed, skipped or weakened;
 REAL_ENV remains NOT RUN and approval remains runner-only.
 
+The same fixed Cabling receiver's WIRE branch is also exercised with actual
+current C5/C6, OAuth and all six issued reads for each one-row ETH/IB fixture.
+Only the original G/M/N/S/T update runs and their History/fence are compiled;
+the existing A IDs and operator cells are not written. Independent live C6
+registration then creates the unique catalog/project origin and reads it back
+under the real owners. All prior original files and pending settings outbox
+remain unchanged, with no NV reservation, attempt journal, COUNT or send.
+This additional positive regression needed no further production change and
+is not represented as a new failing reproduction. It closes this receiving
+edge only, not insertion allocation, bootstrap, default NEW, G1 or full/check.
+
 The fixed current-cycle Switch receiver also supports an actual all-NOOP
 NO_SEND result through that same nonallocating preparation. A separate byte
 coherence check is necessary only, not source/registration/send authority;

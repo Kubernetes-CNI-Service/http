@@ -2489,7 +2489,13 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
     def test_real_fresh_nonallocating_cabling_closed_or_missing_key_refuses_before_history_or_nv(self):
         self._exercise_real_protected_three_panel_fixture(skip_history=False,native_current_no_send_probe='cabling-inactive')
 
-    def _verify_fresh_native_switch_no_send(self,committed,qualified,*,tail_revoke=False,_sheet='ETH&IB Switch',_inactive=None):
+    def test_real_fresh_fixed_cabling_issued_compiler_registers_all_update_wire_without_allocating_ids(self):
+        self.native_no_send_expectation_failure=None
+        try:self._exercise_real_protected_three_panel_fixture(skip_history=False,native_current_no_send_probe='cabling-wire')
+        finally:
+            if self.native_no_send_expectation_failure is not None:raise self.native_no_send_expectation_failure
+
+    def _verify_fresh_native_switch_no_send(self,committed,qualified,*,tail_revoke=False,_sheet='ETH&IB Switch',_inactive=None,_wire=False):
         import tempfile
         import socket
         from test_cases.test_req7_spreadsheet_owner import load as load_owner,scoped_fixture
@@ -2544,6 +2550,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                     'M':'leaf01','N':'sw1p1','S':'server02','T':'mlx5_1'}
             active=cabling_row('NV30016')
             active.update({column:literal(value) for column,value in {**values,'K':key[1],'L':key[2],'F':key[3]}.items()})
+            if _wire:active['G']=literal('older original business evidence')
             rows=[active]
             if _inactive=='closed':active['U']=literal('Closed')
             elif _inactive=='missing':rows=[]
@@ -2564,7 +2571,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             credential_path=private_dir/'cre.json';credential_path.write_bytes(json.dumps(credential_info).encode())
             credential_path.chmod(0o600)
             owner_module=load_owner();enrollment=load_enrollment();load_global()
-            native_module=load_native();load_catalog(reset_dependencies=False);load_remote()
+            native_module=load_native();catalog_module=load_catalog(reset_dependencies=False);load_remote()
             from monitor import issue_tracker_local_commit as local,issue_tracker_remote_history_match as remote
             from monitor import issue_tracker_history_read_launcher as launcher,issue_tracker_send_unit as compiler
             from monitor import issue_tracker_credential_shape as credentials
@@ -2581,18 +2588,30 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             def compile_actual(*args,**kwargs):
                 unit=actual_compiler(*args,**kwargs)
                 try:
-                    self.assertEqual('NO_SEND',unit.outcome)
+                    self.assertEqual('WIRE-CANDIDATE' if _wire else 'NO_SEND',unit.outcome)
                     self.assertEqual(5+len(expected_keys),len(issued),'target RED must follow every genuine issued read')
-                    self.assertEqual(('OBSERVED-SATISFIED-AT-READ',)*len(expected_keys),tuple(outcome for _key,outcome in unit.outcomes))
+                    self.assertEqual(('WIRE-CANDIDATE' if _wire else 'OBSERVED-SATISFIED-AT-READ',)*len(expected_keys),
+                        tuple(outcome for _key,outcome in unit.outcomes))
                     self.assertEqual(committed.receipt.manifest_id,json.loads(unit.action_preimage)['manifest_id'])
-                    self.assertEqual((b'',None,0),(unit.wire_bytes,unit.fence_metadata_id,unit.history_rows_expected))
+                    if _wire:
+                        self.assertTrue(unit.wire_bytes);self.assertIs(type(unit.fence_metadata_id),int)
+                        self.assertEqual(1,unit.history_rows_expected)
+                        requests=json.loads(unit.wire_bytes)['requests']
+                        updates=[request['updateCells'] for request in requests if 'updateCells' in request]
+                        self.assertEqual([(sid,2,6),(sid,2,12),(sid,2,18)],
+                            [(item['start']['sheetId'],item['start']['rowIndex'],item['start']['columnIndex']) for item in updates])
+                        self.assertEqual([[{'stringValue':values[column]} for column in run]
+                            for run in (('G',),('M','N'),('S','T'))],
+                            [[cell['userEnteredValue'] for cell in item['rows'][0]['values']] for item in updates])
+                        self.assertFalse(any('appendCells' in request and request['appendCells']['sheetId']==sid for request in requests))
+                    else:self.assertEqual((b'',None,0),(unit.wire_bytes,unit.fence_metadata_id,unit.history_rows_expected))
                 except AssertionError as exc:
                     self.native_no_send_expectation_failure=exc
                     print('NO_SEND_FIXTURE_COMPILER_RETURN',unit.outcome,json.loads(unit.action_preimage)['business'],flush=True)
                     raise
                 compiled.append(unit)
-                print('NO_SEND_PHASE',_sheet,'actual-C5/C6 compiler,',len(issued),
-                    'original issued reads, all-NOOP, empty wire, no fence/History',flush=True)
+                print('FIXED_COMPILER_PHASE',_sheet,unit.outcome,'actual-C5/C6 compiler,',len(issued),
+                    'original issued reads,',unit.history_rows_expected,'History rows',flush=True)
                 return unit
             def read(reader):
                 if reader._kind=='row':
@@ -2666,6 +2685,11 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                                     self.assertEqual(set(),record['additions']);self.assertIsNone(record['appended'])
                                     retained.append((record,tuple(item[2] for held in (record['old'],record['current'])
                                         for item in held.files)))
+                                    if _wire:
+                                        catalog_module.register_pending_c6_unit(writer,sheet,binding,unit,_unit_preparation=prepared)
+                                        with catalog_module.hold_pending_project_c6_units(sheet,binding) as (pending,verify):
+                                            self.assertEqual((unit,),tuple(item.unit for item in pending));verify()
+                                        self.assertTrue(record['registered']);self.assertIs(record['unit'],unit)
                             except remote.RemoteHistoryHold:
                                 if _inactive is None:raise
                                 record=native_module._verify_catalog_preparation(prepared)
@@ -2686,7 +2710,13 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                 if tail_revoke or _inactive is not None:
                     self.assertEqual([(True,True,True,True)],fault_facts)
                     self.assertEqual([True],target_holds,'unrelated cleanup HOLD is not target revocation proof')
-                self.assertEqual(before,originals(),'NO_SEND cannot create catalog/NV/INTENT/GLOBAL/COUNT/CLAIM')
+                after=originals()
+                if _wire:
+                    self.assertEqual(before,{path:after[path] for path in before},'registration cannot rewrite any prior original')
+                    self.assertTrue(after.keys()-before.keys(),'WIRE needs actual unique catalog/origin originals')
+                    self.assertFalse(any('.nv' in path.name or '.journal' in path.name
+                        for path in state.iterdir()),'all-update registration cannot allocate NV or count an attempt')
+                else:self.assertEqual(before,after,'NO_SEND cannot create catalog/NV/INTENT/GLOBAL/COUNT/CLAIM')
                 self.assertEqual(audits_before,{path.name:(path.stat().st_ino,path.read_bytes()) for path in outbox.iterdir()})
                 self.assertFalse(native_module._ACTIVE_CATALOG_PREPARATIONS)
             if _inactive is not None:
@@ -4899,12 +4929,13 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             self.assertEqual(hashlib.sha256(committed.prepared.xlsx_bytes).hexdigest(),
                              committed.receipt.published_sha256)
             if native_current_no_send_probe:
-                if native_current_no_send_probe in ('cabling','cabling-tail-revoke','cabling-inactive'):
+                if native_current_no_send_probe in ('cabling','cabling-tail-revoke','cabling-inactive','cabling-wire'):
                     for target_sheet in ('ETH Cabling','IB Cabling'):
                         self._verify_fresh_native_switch_no_send(committed,qualified,_sheet=target_sheet,
                             tail_revoke=native_current_no_send_probe=='cabling-tail-revoke',
                             _inactive=('closed' if target_sheet=='ETH Cabling' else 'missing')
-                                if native_current_no_send_probe=='cabling-inactive' else None)
+                                if native_current_no_send_probe=='cabling-inactive' else None,
+                            _wire=native_current_no_send_probe=='cabling-wire')
                 else:self._verify_fresh_native_switch_no_send(committed,qualified,
                     tail_revoke=native_current_no_send_probe=='tail-revoke')
                 return
