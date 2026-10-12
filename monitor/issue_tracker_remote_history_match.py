@@ -882,6 +882,65 @@ def _hold_native_current_cycle_compiler_inputs(prepared,writer_token,owner_token
 
 
 @contextmanager
+def _hold_current_cycle_native_receipt_locators(writer_token,*,_store,http_root):
+    """Retain current C5/C6/K originals across native preparation discovery.
+
+    Plain generation/publish locators are NOT retained eligibility or a closed
+    verifier. A future preparation must independently replay current C5/C6/K
+    and every original source while live; these labels cannot create or adopt
+    an enrollment, reservation, compiled unit, COUNT or send permission.
+    """
+    from pathlib import Path
+    from monitor import issue_tracker_local_commit as local
+    try:
+        project=local._owner(writer_token);root=Path(http_root)
+        if (not root.is_absolute() or root.resolve(strict=True)!=root
+                or Path(_store.project_identity)!=project.project or _store.scope!='prod'):raise RemoteHistoryHold()
+        # Reject foreign/unissued writers before importing source readers.
+        # No partially imported source/K provider escapes a refused entry.
+        from monitor import issue_tracker_stage_l_consumer as source
+        from monitor import issue_tracker_receipt_snapshot as receipts,issue_tracker_send_unit as compiler
+        from monitor.issue_tracker_cycle_source import _hold_current_completed_cycle_replay
+        from monitor.issue_tracker_state_owner import current_k,_settings_original_scope
+        from monitor.issue_tracker_whitelist_workbook import read_whitelist_workbook
+        whitelist_path=root/'monitor/Issue_Tracker_Template_v1.xlsx'
+        def owner_tail():
+            if local._owner(writer_token) is not project:raise RemoteHistoryHold()
+        with _settings_original_scope() as scope:
+            scope.callback(owner_tail)
+            cycle=scope.enter_context(_hold_current_completed_cycle_replay(_store))
+            history=scope.enter_context(receipts._hold_history_originals(writer_token))
+            inputs=scope.enter_context(source._hold_original_replay_inputs(_store,project.project,whitelist_path))
+            def originals():owner_tail();cycle();history();inputs();owner_tail()
+            def snapshot():
+                originals();settings=current_k(writer_token);whitelist=read_whitelist_workbook(whitelist_path)
+                qualified=source.qualify_prod_stage_l(_store,http_root=root,settings=settings,
+                    whitelist_snapshot=whitelist,whitelist_path=whitelist_path,writer_token=writer_token)
+                observed=receipts.read_current_cycle_local_receipts(writer_token,_store,
+                    expected_template_sha256=whitelist.workbook_sha256,settings=settings,
+                    whitelist_sha256=whitelist.whitelist.sha256,qualified_source=qualified)
+                if (not observed.generation_ids or observed.published!=len(observed.generation_ids)
+                        or qualified.cycle_ids[-1]!=observed.cycle_id):raise RemoteHistoryHold()
+                actual=tuple(compiler._original_receipt_identity(qualified,_store,generation,writer_token,
+                    settings,whitelist,whitelist.workbook_sha256) for generation in observed.generation_ids)
+                if len({item[0] for item in actual})!=len(actual):raise RemoteHistoryHold()
+                originals();return settings,whitelist,qualified,observed,actual
+            first=snapshot()
+            originals();yield tuple(item[:2] for item in first[-1]);originals()
+            if snapshot()!=first:raise RemoteHistoryHold()
+            originals()
+        owner_tail()
+    except Exception:raise RemoteHistoryHold() from None
+
+
+def _read_current_cycle_native_receipt_locators(writer_token,*,_store,http_root):
+    """Plain labels only, after full closure; never a retained permission."""
+    with _hold_current_cycle_native_receipt_locators(writer_token,_store=_store,http_root=http_root) as labels:
+        result=labels
+    return result
+
+
+@contextmanager
 def _hold_native_current_cycle_observed_switch_unit(prepared,writer_token,owner_token,binding,authentication,*,
                                                     _store,http_root):
     """Fixed Switch-only reception; no caller source, plan or row coordinates."""

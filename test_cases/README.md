@@ -3280,6 +3280,27 @@ These are necessary local receiving/cleanup slices, not bootstrap, default
 three-sheet NEW, final outer-owner cleanup, G1, whole REQ7 or current
 full/check. Existing assertions, deadlines and field scenarios remain.
 
+Default native preparation also has a fixed current C6 locator discovery
+entry under the real project writer, before acquiring the outer sheet owner.
+It replays actual current C5/K/W1 and protected C6 twice while original
+cycle/history/source holders remain live, then completes every finalizer.
+The underlying live context also keeps those actual holders across its
+consumer body and repeats the complete snapshot after the body. A real
+RECEIPT rebound after yield must refuse before successful context completion;
+the simple closed reader is only a wrapper which returns labels after that
+context has fully closed. Neither API yields a verifier or source permit.
+Only plain generation/publish labels leave this scope: not qualified-source
+objects, closed verifiers, enrollment/NEW eligibility or send authority.
+Each later preparation/compiler must independently revalidate its genuine
+current originals. Missing-factory direct/fresh-workflow RED is retained;
+the initial combined run also exposed source readers importing a temporary
+K spy before rejecting an unissued writer. Entry now rejects that writer
+before source-provider imports. Actual same-byte RECEIPT replacement after
+its genuine identity read refuses at the held history guard and preserves
+both original and replacement, without returning a locator prefix. This
+negative was initially PASS with the retained holder contract, not invented
+RED. The helper is not yet the installed default NEW driver or bootstrap.
+
 Independent direct tests reject incoherent empty-wire/audit/zero-write state.
 The real fresh three-panel C5/C6 + OAuth + seven owned TLS-read workflow
 covers both normal all-NOOP exit with original files/outbox unchanged and

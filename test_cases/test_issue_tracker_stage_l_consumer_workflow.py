@@ -2516,6 +2516,15 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         finally:
             if self.native_no_send_expectation_failure is not None:raise self.native_no_send_expectation_failure
 
+    def test_real_fresh_fixed_current_native_receipt_locator_discovery_reads_actual_c5_c6_without_online_owners(self):
+        self._exercise_real_protected_three_panel_fixture(skip_history=False,native_current_no_send_probe='native-receipt-locators')
+
+    def test_real_fresh_current_native_locator_original_receipt_rebind_refuses_at_held_history_guard(self):
+        self._exercise_real_protected_three_panel_fixture(skip_history=False,native_current_no_send_probe='native-receipt-locators-rebind')
+
+    def test_real_current_native_locator_context_receipt_rebind_after_yield_refuses_before_context_completion(self):
+        self._exercise_real_protected_three_panel_fixture(skip_history=False,native_current_no_send_probe='native-receipt-locators-late-rebind')
+
     def _verify_fresh_native_switch_no_send(self,committed,qualified,*,tail_revoke=False,_sheet='ETH&IB Switch',_inactive=None,_wire=False,_nv=False,_other_drift=False,_tail_clear=False):
         import tempfile
         import socket
@@ -5041,6 +5050,67 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             self.assertEqual(hashlib.sha256(committed.prepared.xlsx_bytes).hexdigest(),
                              committed.receipt.published_sha256)
             if native_current_no_send_probe:
+                if native_current_no_send_probe in ('native-receipt-locators','native-receipt-locators-rebind','native-receipt-locators-late-rebind'):
+                    from test_cases.test_req7_remote_history_match import load as load_remote
+                    remote=load_remote()
+                    from monitor import issue_tracker_local_commit as local,issue_tracker_receipt_snapshot as receipts
+                    from monitor import issue_tracker_send_unit as compiler
+                    project=Path(self.store.project_identity)
+                    before={str(path):(path.stat().st_ino,path.read_bytes())
+                        for path in (project/'.tracker').rglob('*') if path.is_file()}
+                    receipt=project/'.tracker/generations'/committed.receipt.generation_id/'RECEIPT'
+                    preserved=self.root/'owned-locator-original-receipt'
+                    original=(receipt.stat().st_ino,receipt.read_bytes())
+                    real_identity=compiler._original_receipt_identity;real_history=receipts._hold_history_originals
+                    faults=[];target_holds=[];returned=[];yielded=[]
+                    def rebind():
+                        receipt.rename(preserved);receipt.write_bytes(original[1]);receipt.chmod(0o600)
+                        faults.append((preserved.stat().st_ino==original[0],receipt.stat().st_ino!=original[0]))
+                    def identity(*args,**kwargs):
+                        actual=real_identity(*args,**kwargs)
+                        if native_current_no_send_probe=='native-receipt-locators-rebind' and not faults:
+                            rebind()
+                        return actual
+                    @contextmanager
+                    def history(*args,**kwargs):
+                        with real_history(*args,**kwargs) as verify:
+                            def actual():
+                                try:verify()
+                                except Exception:
+                                    if faults:target_holds.append((preserved.stat().st_ino==original[0],
+                                        receipt.read_bytes()==original[1],receipt.stat().st_ino!=original[0]))
+                                    raise
+                            yield actual
+                    with local.writer_owner(project,self.publication) as writer:
+                        with mock.patch.object(compiler,'_original_receipt_identity',side_effect=identity), \
+                                mock.patch.object(receipts,'_hold_history_originals',side_effect=history):
+                            if native_current_no_send_probe=='native-receipt-locators-late-rebind':
+                                with self.assertRaises(remote.RemoteHistoryHold):
+                                    with remote._hold_current_cycle_native_receipt_locators(
+                                            writer,_store=self.store,http_root=self.root) as locators:
+                                        yielded.append(locators);rebind()
+                                    returned.append(locators)
+                            elif native_current_no_send_probe=='native-receipt-locators-rebind':
+                                with self.assertRaises(remote.RemoteHistoryHold):
+                                    returned.append(remote._read_current_cycle_native_receipt_locators(
+                                        writer,_store=self.store,http_root=self.root))
+                            else:returned.append(remote._read_current_cycle_native_receipt_locators(
+                                writer,_store=self.store,http_root=self.root))
+                    if native_current_no_send_probe!='native-receipt-locators':
+                        if native_current_no_send_probe=='native-receipt-locators-late-rebind':
+                            self.assertEqual([((committed.receipt.generation_id,committed.receipt.published_sha256),)],yielded)
+                        self.assertEqual([(True,True)],faults)
+                        self.assertTrue(target_holds,'the real held history guard must reject, not an unrelated outer cleanup')
+                        self.assertTrue(all(item==(True,True,True) for item in target_holds))
+                        self.assertEqual([],returned)
+                        self.assertEqual(original,(preserved.stat().st_ino,preserved.read_bytes()))
+                        self.assertEqual(original[1],receipt.read_bytes())
+                        return
+                    self.assertEqual([((committed.receipt.generation_id,committed.receipt.published_sha256),)],returned)
+                    after={str(path):(path.stat().st_ino,path.read_bytes())
+                        for path in (project/'.tracker').rglob('*') if path.is_file()}
+                    self.assertEqual(before,after,'locator discovery cannot create native NV/catalog/count or change C6/K')
+                    return
                 if native_current_no_send_probe in ('cabling','cabling-tail-revoke','cabling-inactive','cabling-wire','cabling-nv','cabling-nv-other-drift','cabling-nv-tail-revoke','cabling-nv-tail-clear'):
                     for target_sheet in ('ETH Cabling','IB Cabling'):
                         self._verify_fresh_native_switch_no_send(committed,qualified,_sheet=target_sheet,

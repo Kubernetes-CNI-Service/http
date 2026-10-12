@@ -1,5 +1,13 @@
 # Real-environment acceptance cases
 
+## TC-REAL-REQ7-CURRENT-C6-NATIVE-LOCATORS-001 — 默认 preparation 的当前原 C6 定位
+
+- 类型：native / integration / read-only；对应 REQ7 C5/C6/C23/C25；状态：**NOT RUN / REAL_ENV REQUIRED**。模块：`monitor/issue_tracker_remote_history_match.py`、实际 writer/cycle/source/K/W1/receipt；自动化为 `test_req7_remote_history_match` direct 和 `test_issue_tracker_stage_l_consumer_workflow` 实际 protected 多脚本正反例。
+- live context 补充：保留正常 consumer 内准备、yield 后原 RECEIPT 同字节换 inode及最后 source/K/history holder 收尾；原真实 C5/C6/K holders 持续跨过 consumer，结束后完整快照须再次相等。闭合 reader 只返回定位字串，live context 也不输出资格/guard/发送许可；source holder 缺失的 direct/实际初始 RED 与已有 held history 拒绝的初始 PASS 分开记录。
+- 前置与步骤：沿用原现场精确项目/owner/源码与必要研发确认，不授予 Cloud/设备操作。真实完整当前周期已有合法 C6/admission，实际项目 writer 持续拥有；outer sheet owner 获取前只读取当前 generation/publish 定位值，完整重放 C5/K/W1/C6 与实际原 cycle/history/source holders，并先完成全部清理。定位值不能代替后续 genuine preparation 重新验证的原始证据，不能创建/采用 nonce、NV/catalog、COUNT 或发送。
+- 保留场景：正常当前原收据、原历史与最新周期区分、实际 RECEIPT 读取后同字节换 inode、关键提交与最后原 holder 收尾、代表性中断、冷恢复与失败安全状态。拒绝不得返回有效前缀，不能采用替换件；原 K/C6/COUNT/UNKNOWN 和故障原件保留。证据记录目标真实 history guard 到达/拒绝、原及替换 dev/inode/fullstat/字节/SHA、精确树/dirty/manifest/Python/平台/命令、完整物理日志和退出码。
+- 清理/风险：只清理本轮确证自有现场资源；本地 fake/protected 源与实际原件 workflow 不证明默认三表 NEW 接线、bootstrap、G1、最终 outer-owner 或 full/check，不冒充 Cloud/设备/断电。上述和原核心场景全部保留，无省略/合并，无新增剩余风险接受确认人；原授权、研发确认和普通发布门禁不变。
+
 ## TC-REAL-REQ7-FIXED-NV-ISSUER-TAIL-001 — 固定 Cabling NV 原列与最终收尾
 
 - 类型：real-environment / native integration；对应 REQ7 C6/C17/C19/C25；状态：**NOT RUN / REAL_ENV REQUIRED**。

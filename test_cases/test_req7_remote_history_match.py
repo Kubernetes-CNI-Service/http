@@ -40,6 +40,25 @@ def load():
 
 
 class Req7RemoteHistoryMatchDirectTests(unittest.TestCase):
+    def test_current_native_receipt_locator_context_keeps_originals_live_without_caller_guards(self):
+        import inspect
+        module=load();hold=getattr(module,'_hold_current_cycle_native_receipt_locators',None)
+        self.assertTrue(callable(hold),'NEW preparation requires original C5/C6/K holders live beyond locator discovery')
+        self.assertEqual(('writer_token','_store','http_root'),tuple(inspect.signature(hold).parameters))
+        entered=[]
+        with self.assertRaises(module.RemoteHistoryHold):
+            with hold(object(),_store=object(),http_root=ROOT):entered.append(True)
+        self.assertEqual([],entered)
+
+    def test_current_native_receipt_locator_discovery_has_no_caller_source_or_admission_callback(self):
+        import inspect
+        module=load();discover=getattr(module,'_read_current_cycle_native_receipt_locators',None)
+        self.assertTrue(callable(discover),'default native preparation needs fixed actual current C6 discovery')
+        self.assertEqual(('writer_token','_store','http_root'),tuple(inspect.signature(discover).parameters))
+        with mock.patch('monitor.issue_tracker_state_owner.current_k') as settings:
+            with self.assertRaises(module.RemoteHistoryHold):discover(object(),_store=object(),http_root=ROOT)
+        settings.assert_not_called()
+
     def test_native_nv_issued_columns_match_both_retained_originals_without_new_read_or_capacity_authority(self):
         module=load();verify=getattr(module,'_verify_native_issued_nv_columns',None)
         self.assertTrue(callable(verify),'both original issued columns need a fixed precompiler check')
