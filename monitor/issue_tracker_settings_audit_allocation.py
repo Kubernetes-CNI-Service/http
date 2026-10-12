@@ -38,6 +38,23 @@ _DELIVERY_CREATOR_CONTEXT = ContextVar('req7_native_delivery_creator_originals',
 _LIVE_DELIVERY_CREATORS = {}
 _NATIVE_CATALOG_K_CONTEXT = ContextVar('req7_native_catalog_original_k', default=None)
 _LIVE_NATIVE_CATALOG_K_CONTEXTS = {}
+_LIVE_OWNED_PRIOR_SOURCE_READS = {}
+
+
+class _OwnedPriorSourceRead:
+    """One actual dual-owner discovery; not a preparation or write permit."""
+    __slots__ = ()
+
+
+class _OwnedPriorSourceOriginals:
+    """Read-only ALL duplicates; never enrolled as a delivery creator."""
+    def __init__(self,writer,sheet,bound):
+        self.writer,self.sheet,self.bound=writer,sheet,bound
+        self.raw=_DeliveryCreatorOriginals(writer,sheet,bound)
+
+    def retain(self,held,ancestors=(),projects=()):self.raw.retain(held,ancestors,projects)
+    def verify(self):self.raw.verify()
+    def finish(self,kind,primary,tb):return self.raw.finish(kind,primary,tb)
 
 
 class _NativeCatalogKContext:
@@ -1232,7 +1249,7 @@ def _native_delivery_locator(raw):
 
 @contextmanager
 def _hold_native_completed_delivery_originals(writer,sheet,bound,unit,*,_tail_scope=None,
-        _c6_handoff=None,_delivery_handoff=None,_allocation_handoff=None):
+        _c6_handoff=None,_delivery_handoff=None,_allocation_handoff=None,_source_handoff=None):
     """Prove one native immutable pair WITHOUT reading mutable projections.
 
     This is an internal original join, not a consumed-ID grant, observation,
@@ -1243,11 +1260,12 @@ def _hold_native_completed_delivery_originals(writer,sheet,bound,unit,*,_tail_sc
     from monitor import issue_tracker_remote_history_match as completion
     from monitor import issue_tracker_unit_catalog as catalog
     if _tail_scope is not None and type(_tail_scope) is not ExitStack:raise SettingsAuditHold()
-    if sum(item is not None for item in (_c6_handoff,_delivery_handoff,_allocation_handoff))>1:raise SettingsAuditHold()
+    if sum(item is not None for item in (_c6_handoff,_delivery_handoff,_allocation_handoff,_source_handoff))>1:raise SettingsAuditHold()
     handoff=_c6_handoff if _delivery_handoff is None else _delivery_handoff
     if _allocation_handoff is not None:handoff=_allocation_handoff
+    if _source_handoff is not None:handoff=_source_handoff
     if handoff is not None:
-        expected=_NativeAllocationPriorOriginals if _allocation_handoff is not None else (
+        expected=_OwnedPriorSourceOriginals if _source_handoff is not None else _NativeAllocationPriorOriginals if _allocation_handoff is not None else (
             _LocalC6Originals if _delivery_handoff is None else _DeliveryCreatorOriginals)
         if type(handoff) is not expected or handoff.writer is not writer:raise SettingsAuditHold()
     owner=local._owner(writer);sheet_owner=ownership._validated_owner(sheet,bound)
@@ -1477,7 +1495,8 @@ def _hold_native_settings_transition_pair(token,context):
 
 
 @contextmanager
-def _hold_discovered_native_completed_settings(writer,*,_c6_handoff=None,_delivery_handoff=None,_allocation_handoff=None):
+def _hold_discovered_native_completed_settings(writer,*,_c6_handoff=None,_delivery_handoff=None,_allocation_handoff=None,
+                                              _source_handoff=None):
     """ALL claims joined to original native units before any mutable exemption.
 
     Locators supply coordinates only. Every claimed pair, ALL catalog/counts
@@ -1487,7 +1506,7 @@ def _hold_discovered_native_completed_settings(writer,*,_c6_handoff=None,_delive
     from monitor.issue_tracker_online_target import OnlineTargetBinding
     from monitor import issue_tracker_unit_catalog as catalog
     owner=local._owner(writer);held=catalog._Originals();issued=None;reset=None
-    if sum(item is not None for item in (_c6_handoff,_delivery_handoff,_allocation_handoff))>1:raise SettingsAuditHold()
+    if sum(item is not None for item in (_c6_handoff,_delivery_handoff,_allocation_handoff,_source_handoff))>1:raise SettingsAuditHold()
     handoff=_c6_handoff if _delivery_handoff is None else _delivery_handoff
     if _allocation_handoff is not None:
         if type(_allocation_handoff) is not _NativeAllocationPriorOriginals or _allocation_handoff.writer is not writer:
@@ -1497,6 +1516,10 @@ def _hold_discovered_native_completed_settings(writer,*,_c6_handoff=None,_delive
     if _delivery_handoff is not None:
         if type(_delivery_handoff) is not _DeliveryCreatorOriginals or _delivery_handoff.writer is not writer:
             raise SettingsAuditHold()
+    if _source_handoff is not None:
+        if type(_source_handoff) is not _OwnedPriorSourceOriginals or _source_handoff.writer is not writer:
+            raise SettingsAuditHold()
+        handoff=_source_handoff
     markers={_DELIVERY_FOLDER,_DELIVERY_STARTED}
     def claimed_names():
         return {name for name in os.listdir(owner.root_fd) if name in markers
@@ -1528,8 +1551,8 @@ def _hold_discovered_native_completed_settings(writer,*,_c6_handoff=None,_delive
             if type(_c6_handoff) is not _LocalC6Originals or _c6_handoff.writer is not writer:
                 raise SettingsAuditHold()
             sheet_scope=_c6_handoff.scope
-        if _delivery_handoff is not None or _allocation_handoff is not None:
-            borrower=_delivery_handoff if _allocation_handoff is None else _allocation_handoff
+        if _delivery_handoff is not None or _allocation_handoff is not None or _source_handoff is not None:
+            borrower=handoff
             if borrower.bound!=bound:raise SettingsAuditHold()
             sheet=borrower.sheet
         else:sheet=sheet_scope.enter_context(ownership.spreadsheet_owner(bound))
@@ -1583,7 +1606,7 @@ def _hold_discovered_native_completed_settings(writer,*,_c6_handoff=None,_delive
             actual,events,check=scope.enter_context(
                 _hold_native_completed_delivery_originals(writer,sheet,bound,unit,_tail_scope=tail,
                     _c6_handoff=_c6_handoff,_delivery_handoff=_delivery_handoff,
-                    _allocation_handoff=_allocation_handoff))
+                    _allocation_handoff=_allocation_handoff,_source_handoff=_source_handoff))
             if actual is not owner:raise SettingsAuditHold()
             if any(set(events)&set(previous) for _old,previous in entries):raise SettingsAuditHold()
             entries.append((unit,events));checks.append(check);expected_claims.update(pair_names)
@@ -1633,6 +1656,134 @@ def _hold_discovered_native_completed_settings(writer,*,_c6_handoff=None,_delive
             # original graph finalizers, including an interrupted initial read.
             _LIVE_NATIVE_SETTINGS_CONTEXTS.pop(issued,None)
             _NATIVE_SETTINGS_CONTEXT.reset(reset)
+
+
+def _owned_prior_source_packet(bridge,sheet,bound):
+    packet=_LIVE_OWNED_PRIOR_SOURCE_READS.get(bridge) if type(bridge) is _OwnedPriorSourceRead else None
+    if (packet is None or packet['sheet'] is not sheet or packet['bound']!=bound
+            or packet['owner'] is not local._owner(packet['writer'])
+            or packet['sheet_owner'] is not ownership._validated_owner(sheet,bound)
+            or packet['pid']!=os.getpid() or packet['thread']!=threading.get_ident()):raise SettingsAuditHold()
+    return packet
+
+
+@contextmanager
+def _hold_owned_native_prior_source_read(writer,sheet,bound):
+    """Actual prior ALL proof -> read-only K -> overlapping native raw tail.
+
+    Only the fixed creator uses this scope. No caller event list, mutable
+    allowance or fabricated preparation; ordinary K remains strict outside.
+    Settings originals and the received actual preparation delivery raw tail
+    remain live through the outer source holders' last finalizers.
+    """
+    from monitor import issue_tracker_state_owner as state
+    try:
+        owner=local._owner(writer);sheet_owner=ownership._validated_owner(sheet,bound)
+        if (_native_catalog_k_read_active(writer) or _NATIVE_CATALOG_K_CONTEXT.get() is not None
+                or writer in state._COMPLETED_READ_CONTEXT or writer in state._COMPLETED_ORIGINAL_GUARDS
+                or writer in state._LOCAL_C6_READ_CONTEXT
+                or any(p['writer'] is writer for p in _LIVE_OWNED_PRIOR_SOURCE_READS.values())):raise SettingsAuditHold()
+    except (OSError,ValueError,TypeError,KeyError) as exc:raise SettingsAuditHold() from exc
+    bridge=_OwnedPriorSourceRead();raw=_OwnedPriorSourceOriginals(writer,sheet,bound)
+    semantic=ExitStack();raw_scope=ExitStack();settings_scope=ExitStack();tail=ExitStack()
+    packet={'writer':writer,'owner':owner,'sheet':sheet,'sheet_owner':sheet_owner,'bound':bound,
+        'pid':os.getpid(),'thread':threading.get_ident(),'raw':raw,'semantic':semantic,'raw_scope':raw_scope,
+        'settings_scope':settings_scope,'tail':tail,'retired':False,'received':False,'attached':False}
+    _LIVE_OWNED_PRIOR_SOURCE_READS[bridge]=packet
+    try:
+        with state._settings_original_scope() as cleanup:
+            # LIFO: semantic issuer closes first, then settings, initial raw,
+            # and finally the transferred ACTUAL preparation raw originals.
+            cleanup.callback(tail.close);cleanup.callback(raw_scope.close)
+            cleanup.callback(settings_scope.close);cleanup.callback(semantic.close)
+            raw_scope.push(raw.finish)
+            native,guard=semantic.enter_context(_hold_discovered_native_completed_settings(writer,_source_handoff=raw))
+            if writer in state._COMPLETED_READ_CONTEXT or writer in state._COMPLETED_ORIGINAL_GUARDS:
+                raise SettingsAuditHold()
+            def revoke_completed():
+                refused=False
+                for registry,original in ((state._COMPLETED_READ_CONTEXT,native),
+                                          (state._COMPLETED_ORIGINAL_GUARDS,guard)):
+                    value=registry.get(writer)
+                    if value is original:registry.pop(writer,None)
+                    elif value is not None:refused=True
+                if refused:raise SettingsAuditHold()
+            # The actual ALL factory requires these exact identities before
+            # its first packet/guard. Register cleanup before either insertion,
+            # and revoke before ALL's original semantic finalizers.
+            semantic.callback(revoke_completed)
+            state._COMPLETED_READ_CONTEXT[writer]=native
+            state._COMPLETED_ORIGINAL_GUARDS[writer]=guard
+            actual=_native_settings_packet(writer,native);guard()
+            images,settings_verify=settings_scope.enter_context(
+                _hold_settings_originals(writer,delivered_event_ids=actual['events']))
+            _settings(writer,delivered_event_ids=actual['events'])
+            packet['settings_verify']=settings_verify
+            def verify():
+                _owned_prior_source_packet(bridge,sheet,bound);guard();raw.verify();settings_verify();guard()
+            verify();issued=_NativeCatalogKContext()
+            reset=_NATIVE_CATALOG_K_CONTEXT.set(issued)
+            def revoke():
+                state._NATIVE_CATALOG_K_READ_CONTEXT.pop(writer,None)
+                _LIVE_NATIVE_CATALOG_K_CONTEXTS.pop(issued,None);_NATIVE_CATALOG_K_CONTEXT.reset(reset)
+            semantic.callback(revoke)
+            _LIVE_NATIVE_CATALOG_K_CONTEXTS[issued]={'token':writer,'owner':owner,'pid':os.getpid(),
+                'thread':threading.get_ident(),'images':images,'verify':verify}
+            state._NATIVE_CATALOG_K_READ_CONTEXT[writer]=issued
+            yield bridge
+            # This is raw/settings closure only. No closed K/ALL verifier is
+            # called or revived after retirement or preparation revocation.
+            _owned_prior_source_packet(bridge,sheet,bound)
+            if not packet['received'] or not packet['attached']:raise SettingsAuditHold()
+    finally:
+        _LIVE_OWNED_PRIOR_SOURCE_READS.pop(bridge,None)
+
+
+def _retire_owned_native_prior_source_k(bridge,sheet,bound):
+    packet=_owned_prior_source_packet(bridge,sheet,bound)
+    if packet['retired'] or packet['received']:raise SettingsAuditHold()
+    packet['raw'].verify();packet['settings_verify']()
+    packet['semantic'].close()  # Permanent K and ALL issuer revocation.
+    packet['retired']=True
+    packet['raw'].verify();packet['settings_verify']()
+
+
+def _receive_owned_native_prior_source_graph(bridge,sheet,bound,old):
+    """Fixed preparer's original ALL graph overlaps the initial raw reader."""
+    from monitor import issue_tracker_unit_catalog as catalog
+    packet=_owned_prior_source_packet(bridge,sheet,bound)
+    budget=catalog._IMAGE_BUDGETS.get(sheet)
+    if (not packet['retired'] or packet['received'] or type(old) is not catalog._Originals
+            or budget is None or budget[0] is not packet['sheet_owner'] or budget[1]!=bound
+            or old._image_budget is not budget[2] or old.namespace is None):raise SettingsAuditHold()
+    raw=packet['raw'].raw
+    packet['settings_verify']();raw.verify();old.verify()
+    # Actual graph names, parent inode, and ALL namespace must still agree.
+    # The fixed _pin_catalog_prefix has completed all C6/count/raw captures;
+    # an independently allocated lookalike budget cannot receive this graph.
+    parent,prefix,names=old.namespace
+    matches=[row for row in raw.namespaces if row[1:]==(prefix,frozenset(names))
+        and journal._identity(os.fstat(row[0]))[:2]==journal._identity(os.fstat(parent))[:2]]
+    if not matches:raise SettingsAuditHold()
+    raw.verify();old.verify();packet['raw_scope'].close();old.verify();packet['settings_verify']()
+    packet['received']=True;packet['receiving_old']=old
+
+
+def _retain_owned_native_prior_source_tail(bridge,sheet,bound,prepared,record,delivery_scope,*,owner_tail):
+    from monitor import issue_tracker_nv_reservation as nv
+    packet=_owned_prior_source_packet(bridge,sheet,bound)
+    if (type(delivery_scope) is not ExitStack or type(owner_tail) is not ExitStack
+            or not packet['received'] or packet['attached'] or record['old'] is not packet['receiving_old']
+            or nv._ACTIVE_CATALOG_PREPARATIONS.get(prepared) is not record
+            or record['token'] is not sheet or record['binding']!=bound):raise SettingsAuditHold()
+    if (type(prepared) is nv._CatalogNonallocatingPreparation
+            and (record['nonallocating_writer'] is not packet['writer']
+                 or record['nonallocating_owner'] is not packet['owner'])):raise SettingsAuditHold()
+    # Move the actual owned stack, not verifiers or copied event lists.
+    # LIFO raw closes first while any genuinely acquired foreign project
+    # owners are still ACTIVE. Borrowed external tokens are not moved.
+    packet['tail'].enter_context(owner_tail.pop_all())
+    packet['tail'].enter_context(delivery_scope.pop_all());packet['attached']=True
 
 
 class _DeliveryCreatorOriginals:

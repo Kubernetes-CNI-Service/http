@@ -3346,6 +3346,20 @@ are additional independent regressions, not invented REDs. Bootstrap/default
 NEW, final external-owner/G1 and current full/check still remain OPEN.
 
 Independent direct tests reject incoherent empty-wire/audit/zero-write state.
+The archived fixed-creator continuation has a separate dual-owner locator;
+the original strict locator and ordinary K reader are unchanged. Actual ALL
+COMPLETE/DELIVERED originals issue initial read-only K, with exact completed
+context/guard enrollment. Both K and completed identities revoke before the
+new preparer's ALL pin. The initial raw graph overlaps that actual pin; only
+then may native preparation proceed. The actual preparation's delivery raw
+stack moves to the outer source scope and its original freeze still runs
+before preparation revocation, so raw delivery checks follow source/settings
+cleanup. No closed K/ALL/preparation verifier, caller events or copied budget
+becomes a permit. Independent missing-entry RED and the exact registration
+defect RED are preserved separately from complete actual workflow evidence.
+This continuation remains under local verification; its report is not send,
+G1, final external-owner, bootstrap/default NEW or current full/check proof.
+
 The real fresh three-panel C5/C6 + OAuth + seven owned TLS-read workflow
 covers both normal all-NOOP exit with original files/outbox unchanged and
 actual original-read revocation after the preparation registry and FDs close.

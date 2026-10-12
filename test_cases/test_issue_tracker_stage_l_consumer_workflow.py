@@ -1723,6 +1723,12 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             'native current-cycle compiler must acquire its actual authenticated business images')
         self._native_completed_archive_preview_probe(local_c6=True,native_current_compiler=True,issued_current_compiler=True)
 
+    def test_real_fixed_current_switch_creator_after_completed_audit_archive_derives_current_c6_without_caller_locator(self):
+        original=self._compile_current_issued_switch_after_actual_archive
+        def fixed_creator(**kwargs):return original(**kwargs,_fixed_creator=True)
+        with mock.patch.object(self,'_compile_current_issued_switch_after_actual_archive',side_effect=fixed_creator):
+            self._native_completed_archive_preview_probe(local_c6=True,native_current_compiler=True,issued_current_compiler=True)
+
     def test_real_native_switch_compiler_brackets_pure_derivation_with_two_manifests_and_four_original_receipts(self):
         from monitor import issue_tracker_send_unit as compiler,issue_tracker_manifest as manifest
         original = compiler.freeze_observed_receipted_switch_unit
@@ -2345,7 +2351,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         observed.append('ETH&IB Switch:archived:current-cycle-compiler:registered')
 
     def _compile_current_issued_switch_after_actual_archive(self, *, global_root,owner_module,binding,
-                                                           credential,committed,observed,native,issued_read_tail=False):
+                                                           credential,committed,observed,native,issued_read_tail=False,_fixed_creator=False):
         import socket
         from monitor import issue_tracker_local_commit as local,issue_tracker_nv_reservation as preparation
         from monitor import issue_tracker_remote_history_match as remote,issue_tracker_unit_catalog as catalog
@@ -2402,6 +2408,96 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             private.enter_context(scoped_fixture(global_root,credentials))
             private.enter_context(scoped_fixture(global_root,target))
             auth,_path,_raw=Req7HistoryReadLauncherWorkflowTests.project_auth(native,private,owner_module,sheet,binding)
+            if _fixed_creator:
+                self.assertFalse(preparation._ACTIVE_CATALOG_PREPARATIONS)
+                self.assertEqual([],list((project/'.tracker/settings/outbox').iterdir()))
+                # Legitimate COMPLETE/DELIVERED archival does not authorize
+                # the ordinary K reader. The creator must discover and hold
+                # actual prior delivery originals, never restore projections.
+                from monitor.issue_tracker_k_chain import KChainHoldError
+                self.assertNotIn(writer,state_owner._COMPLETED_READ_CONTEXT)
+                self.assertNotIn(writer,state_owner._LOCAL_C6_READ_CONTEXT)
+                self.assertNotIn(writer,state_owner._NATIVE_CATALOG_K_READ_CONTEXT)
+                with self.assertRaises(state_owner.TrackerStateHold) as strict:
+                    state_owner.current_k(writer)
+                self.assertIsInstance(strict.exception.__cause__,KChainHoldError)
+                self.assertEqual('settings outbox projection missing or unexplained',str(strict.exception.__cause__))
+                actual_k=state_owner.current_k;faults=[]
+                actual_read_guard=launcher.require_current_owned_project_read
+                def diagnosed_read_guard(*args,**kwargs):
+                    try:return actual_read_guard(*args,**kwargs)
+                    except BaseException:
+                        completion=args[3]
+                        with launcher._READ_GUARD:packet=launcher._READS.get(completion)
+                        with launcher._PROJECT_READ_GUARD:issued_auth=launcher._PROJECT_READS.get(completion)
+                        now=launcher._monotonic()
+                        facts={'read_kind':kwargs.get('read_kind'),'original_packet_present':packet is not None,
+                            'exact_original_authentication':issued_auth is args[4]}
+                        if packet is not None:
+                            import hashlib
+                            facts.update(deadline=packet[-1],observed_monotonic=now,
+                                deadline_exceeded=now>=packet[-1],remaining_seconds=packet[-1]-now,
+                                exact_writer=args[0] is packet[0],exact_sheet_owner=args[1] is packet[1],
+                                exact_binding=args[2]==packet[2],exact_read_kind=kwargs.get('read_kind')==packet[5],
+                                exact_data=completion.data==packet[9],status=completion.status,
+                                complete=completion.complete,termination_confirmed=completion.termination_confirmed,
+                                exact_path_digest=completion.request_path_sha256==hashlib.sha256(packet[8].path.encode('ascii')).hexdigest())
+                        print('FIXED_CREATOR_ARCHIVED_ACTUAL_READ_GUARD_FACTS',json.dumps(facts,sort_keys=True),flush=True)
+                        raise
+                actual_creation_context=remote._hold_current_cycle_native_creation_locators
+                @contextmanager
+                def diagnosed_creation_context(*args,**kwargs):
+                    try:
+                        with actual_creation_context(*args,**kwargs) as actual:yield actual
+                    except BaseException as exc:
+                        # Strictly delegate the real scope. Preserve original
+                        # suppressed causes for this synthetic-only diagnostic,
+                        # never substitute a provider, permission or result.
+                        import traceback
+                        current=exc;seen=set()
+                        while current is not None and id(current) not in seen:
+                            seen.add(id(current))
+                            print('FIXED_CREATOR_ARCHIVED_ORIGINAL_CONTEXT_FAILURE',type(current).__name__,flush=True)
+                            traceback.print_exception(type(current),current,current.__traceback__,chain=False,file=sys.stdout)
+                            current=current.__cause__ or current.__context__
+                        raise
+                def diagnosed_k(*args,**kwargs):
+                    try:return actual_k(*args,**kwargs)
+                    except BaseException as exc:
+                        if not faults:
+                            import traceback
+                            faults.append(type(exc).__name__)
+                            print('FIXED_CREATOR_ARCHIVED_K_ORIGINAL_FAILURE',faults[0],flush=True)
+                            traceback.print_exc(file=sys.stdout)
+                        raise
+                with mock.patch.object(state_owner,'current_k',side_effect=diagnosed_k), \
+                        mock.patch.object(launcher,'require_current_owned_project_read',side_effect=diagnosed_read_guard), \
+                        mock.patch.object(remote,'_hold_current_cycle_native_creation_locators',side_effect=diagnosed_creation_context), \
+                        mock.patch.object(launcher.OwnedProjectSheetsReadUnit,'read_once',autospec=True,side_effect=read):
+                    report=remote._prepare_current_cycle_native_switch_unit(writer,sheet,binding,auth,
+                        _store=self.store,http_root=self.root)
+                with catalog.hold_pending_project_c6_units(sheet,binding) as (pending,verify):
+                    self.assertEqual(2,len(pending));verify()
+                    action=json.loads(pending[-1].unit.action_preimage)
+                    self.assertEqual(('WIRE_REGISTERED',pending[-1].unit.unit_id),report)
+                    self.assertEqual(committed.receipt.manifest_id,action['manifest_id'])
+                    self.assertEqual((committed.receipt.generation_id,committed.receipt.published_sha256,'ETH&IB Switch'),
+                        tuple(action['identity'][key] for key in ('generation_id','publish_id','sheet')))
+                    self.assertEqual(['insert','insert'],[item['action'] for item in action['business']])
+                    self.assertEqual([[(101,row,column) for column in (1,5,9,13)] for row in (2,3)],
+                        [[(r['updateCells']['start']['sheetId'],r['updateCells']['start']['rowIndex'],
+                            r['updateCells']['start']['columnIndex']) for r in item['requests']] for item in action['business']])
+                self.assertEqual([('template_identity',None),('template_identity',None),('metadata',None),
+                    ('activity',None),('insertion',None),('row',3),('row',4),('history_tail',None)],issued)
+                self.assertFalse(preparation._ACTIVE_CATALOG_PREPARATIONS)
+                self.assertFalse(allocation._LIVE_OWNED_PRIOR_SOURCE_READS)
+                self.assertNotIn(writer,state_owner._COMPLETED_READ_CONTEXT)
+                self.assertNotIn(writer,state_owner._COMPLETED_ORIGINAL_GUARDS)
+                self.assertNotIn(writer,state_owner._NATIVE_CATALOG_K_READ_CONTEXT)
+                self.assertEqual([],list((project/'.tracker/settings/outbox').iterdir()))
+                with self.assertRaises(state_owner.TrackerStateHold):state_owner.current_k(writer)
+                observed.append('ETH&IB Switch:archived:current-cycle-compiler:registered')
+                return
             if issued_read_tail:
                 private.enter_context(mock.patch.object(allocation,'_hold_settings_originals',revoke_after_actual_settings_close))
                 before_files={str(path):(path.stat().st_ino,path.read_bytes())

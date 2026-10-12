@@ -1000,6 +1000,25 @@ class Req7CatalogNvPreparationTests(unittest.TestCase):
     setUp = Req7NvReservationDirectTests.setUp
     initialize = Req7NvReservationDirectTests.initialize
 
+    def test_native_nv_source_bridge_cleanup_uses_original_module_after_literal_allocation(self):
+        """Actual NV/C6 files; mocked bridge callbacks test only module/stack dispatch."""
+        with self.native_c6_origin_fixture() as (module,writer,token,unit):
+            from monitor import issue_tracker_settings_audit_allocation as settings_allocation
+            steps=[];refused=[]
+            with mock.patch.object(settings_allocation,'_retire_owned_native_prior_source_k',
+                    side_effect=lambda *a:steps.append('retire')), \
+                    mock.patch.object(settings_allocation,'_receive_owned_native_prior_source_graph',
+                    side_effect=lambda *a:steps.append('receive')), \
+                    mock.patch.object(settings_allocation,'_retain_owned_native_prior_source_tail',
+                    side_effect=lambda *a,**k:steps.append('actual-tail-module')):
+                try:
+                    with self.preparation(token,_source_prior_bridge=object()) as prepared:
+                        self.catalog.register_pending_c6_unit(writer,token,binding(),unit,_nv_preparation=prepared)
+                except module.NvReservationHold as exc:refused.append(exc)
+            self.assertEqual(['retire','receive','actual-tail-module'],steps,
+                'the NV allocation result cannot replace the actual settings module in finally')
+            self.assertEqual([],refused)
+
     def api(self):
         # The fixture reloads the real owner registry per test. Reload the
         # canonical GLOBAL module BEFORE NV captures its owner dependency;

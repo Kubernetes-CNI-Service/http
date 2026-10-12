@@ -524,7 +524,7 @@ def _nonallocating_identity(token, binding, identity, generation_id, publish_id,
 
 @contextmanager
 def hold_catalog_nonallocating_preparation(writer_token, token, binding, identity, *,
-                                           generation_id, publish_id, sheet):
+                                           generation_id, publish_id, sheet,_source_prior_bridge=None):
     """Retain ALL prior catalog/C6/settlement originals without allocating IDs.
 
     Switch and all-update Cabling still need the genuine source compiler and
@@ -545,8 +545,16 @@ def hold_catalog_nonallocating_preparation(writer_token, token, binding, identit
         if token in catalog._IMAGE_BUDGETS: raise NvReservationHold()
         active_budget = (ownership._validated_owner(token, binding), binding, budget)
         catalog._IMAGE_BUDGETS[token] = active_budget
+        if _source_prior_bridge is not None:
+            from monitor import issue_tracker_settings_audit_allocation as allocation
+            original=allocation._owned_prior_source_packet(_source_prior_bridge,token,binding)
+            if original['writer'] is not writer_token or original['owner'] is not project_owner:
+                raise NvReservationHold()
+            allocation._retire_owned_native_prior_source_k(_source_prior_bridge,token,binding)
         owner, parent, stem, catalog_fd, units, _prior, _observations = _pin_catalog_prefix(
             token, binding, identity, old, new_allocation=True, _project_proofs=proofs)
+        if _source_prior_bridge is not None:
+            allocation._receive_owned_native_prior_source_graph(_source_prior_bridge,token,binding,old)
         if any(unit.unit_id == unit_id for unit in units): raise NvReservationHold()
         old.sync(); proofs['verify']()
         if local._owner(writer_token) is not project_owner: raise NvReservationHold()
@@ -571,6 +579,13 @@ def hold_catalog_nonallocating_preparation(writer_token, token, binding, identit
     finally:
         closes = []
         if prepared is not None:
+            if _source_prior_bridge is not None:
+                try:allocation._retain_owned_native_prior_source_tail(_source_prior_bridge,token,binding,
+                    prepared,record,proofs['delivery_scope'],owner_tail=proofs['owner_tail'])
+                except BaseException as exc:
+                    failed=True
+                    if cleanup_problem is None:cleanup_problem=exc
+                    if not isinstance(exc,Exception) and primary is None:primary=exc
             retained = _ACTIVE_CATALOG_PREPARATIONS.pop(prepared, None)
             if retained is not None:
                 for delivery in retained['prior_delivery_events']:
@@ -888,7 +903,7 @@ def _pin_catalog_prefix(token, binding, identity, held, *, new_allocation, _proj
 
 @contextmanager
 def hold_catalog_nv_preparation(token, binding, identity, eth_plan, eth_response, ib_plan, ib_response,
-                                *, generation_id, publish_id, sheet, requested_keys):
+                                *, generation_id, publish_id, sheet, requested_keys,_source_prior_bridge=None):
     """Native reservation->compiler->catalog handoff under one actual owner.
 
     No caller high-water/path/list or recovery adoption. ALL previous originals
@@ -908,8 +923,13 @@ def hold_catalog_nv_preparation(token, binding, identity, eth_plan, eth_response
             raise NvReservationHold()
         active_budget = (ownership._validated_owner(token, binding), binding, budget)
         catalog._IMAGE_BUDGETS[token] = active_budget
+        if _source_prior_bridge is not None:
+            from monitor import issue_tracker_settings_audit_allocation as settings_allocation
+            settings_allocation._retire_owned_native_prior_source_k(_source_prior_bridge,token,binding)
         owner, parent, stem, catalog_fd, units, prior, _observations = _pin_catalog_prefix(
             token, binding, identity, old, new_allocation=True, _project_proofs=project_proofs)
+        if _source_prior_bridge is not None:
+            settings_allocation._receive_owned_native_prior_source_graph(_source_prior_bridge,token,binding,old)
         if any(unit.unit_id == base['unit_id'] for unit in units):
             raise NvReservationHold()
         observed = _read_pair(binding, ids, eth_plan, eth_response, ib_plan, ib_response)
@@ -993,6 +1013,13 @@ def hold_catalog_nv_preparation(token, binding, identity, eth_plan, eth_response
     finally:
         closes=[]
         if prepared is not None:
+            if _source_prior_bridge is not None:
+                try:settings_allocation._retain_owned_native_prior_source_tail(_source_prior_bridge,token,binding,
+                    prepared,record,project_proofs['delivery_scope'],owner_tail=project_proofs['owner_tail'])
+                except BaseException as exc:
+                    failed=True
+                    if cleanup_problem is None:cleanup_problem=exc
+                    if not isinstance(exc,Exception) and primary is None:primary=exc
             retained = _ACTIVE_CATALOG_PREPARATIONS.pop(prepared, None)
             if retained is not None:
                 for prior_delivery in retained['prior_delivery_events']:

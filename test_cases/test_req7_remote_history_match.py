@@ -40,6 +40,131 @@ def load():
 
 
 class Req7RemoteHistoryMatchDirectTests(unittest.TestCase):
+    def test_owned_archived_creator_locator_refuses_foreign_owners_before_k_or_source_read(self):
+        import inspect
+        module=load();hold=getattr(module,'_hold_current_cycle_native_creation_locators',None)
+        self.assertTrue(callable(hold),'archived creator requires its own fixed dual-owner source entrance')
+        self.assertEqual(('writer_token','owner_token','binding','_store','http_root'),
+            tuple(inspect.signature(hold).parameters))
+        with mock.patch('monitor.issue_tracker_state_owner.current_k') as read:
+            with self.assertRaises(module.RemoteHistoryHold):
+                with hold(object(),object(),binding(),_store=object(),http_root=ROOT):self.fail('foreign owners entered')
+        read.assert_not_called()
+
+    def test_owned_prior_source_k_bridge_has_no_caller_events_or_mutation_allowance(self):
+        import inspect
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        hold=getattr(allocation,'_hold_owned_native_prior_source_read',None)
+        self.assertTrue(callable(hold),'initial archived K needs genuine prior completed originals')
+        self.assertEqual(('writer','sheet','bound'),tuple(inspect.signature(hold).parameters))
+        with self.assertRaises(allocation.SettingsAuditHold):
+            with hold(object(),object(),binding()):self.fail('unissued bridge entered')
+        for name in ('_retire_owned_native_prior_source_k','_receive_owned_native_prior_source_graph'):
+            function=getattr(allocation,name,None)
+            self.assertTrue(callable(function))
+            with self.assertRaises(allocation.SettingsAuditHold):
+                if name.endswith('_k'):function(object(),object(),binding())
+                else:function(object(),object(),binding(),object())
+
+    def test_owned_prior_source_bridge_enrolls_the_actual_completed_identity_before_packet_and_revokes_it_first(self):
+        """Lifecycle-only direct fixture; genuine archived graph is covered by workflow."""
+        import threading
+        from monitor import issue_tracker_settings_audit_allocation as allocation,issue_tracker_state_owner as state
+        writer=object();sheet=object();bound=binding();owner=object();sheet_owner=object()
+        native=allocation._NativeCompletedSettingsContext();steps=[]
+        def guard():
+            actual=allocation._native_settings_packet(writer,native)
+            self.assertIs(actual['guard'],guard);steps.append('actual-packet')
+        @contextmanager
+        def actual_factory(actual_writer,**kwargs):
+            self.assertIs(actual_writer,writer)
+            reset=allocation._NATIVE_SETTINGS_CONTEXT.set(native)
+            allocation._LIVE_NATIVE_SETTINGS_CONTEXTS[native]={'token':writer,'owner':owner,'sheet':sheet,
+                'sheet_owner':sheet_owner,'bound':bound,'events':(), 'guard':guard,
+                'pid':os.getpid(),'thread':threading.get_ident()}
+            try:
+                yield native,guard
+                self.assertNotIn(writer,state._COMPLETED_READ_CONTEXT)
+                self.assertNotIn(writer,state._COMPLETED_ORIGINAL_GUARDS)
+                steps.append('semantic-finalizer-after-revocation')
+            finally:
+                allocation._LIVE_NATIVE_SETTINGS_CONTEXTS.pop(native,None)
+                allocation._NATIVE_SETTINGS_CONTEXT.reset(reset)
+        @contextmanager
+        def settings(*args,**kwargs):
+            yield ((),None,None,()),lambda:steps.append('settings-original')
+            steps.append('settings-close')
+        with mock.patch.object(allocation.local,'_owner',return_value=owner), \
+                mock.patch.object(allocation.ownership,'_validated_owner',return_value=sheet_owner), \
+                mock.patch.object(allocation,'_OwnedPriorSourceOriginals'), \
+                mock.patch.object(allocation,'_hold_discovered_native_completed_settings',side_effect=actual_factory), \
+                mock.patch.object(allocation,'_hold_settings_originals',side_effect=settings), \
+                mock.patch.object(allocation,'_settings',return_value=()):
+            with allocation._hold_owned_native_prior_source_read(writer,sheet,bound) as bridge:
+                self.assertIs(state._COMPLETED_READ_CONTEXT[writer],native)
+                self.assertIs(state._COMPLETED_ORIGINAL_GUARDS[writer],guard)
+                with self.assertRaises(state.TrackerStateHold):
+                    state.set_k(writer,new_k=7,actor='fixture',recorded_at='invalid-not-reached',
+                        request_id='invalid-not-reached',expected_revision=0)
+                allocation._retire_owned_native_prior_source_k(bridge,sheet,bound)
+                self.assertNotIn(writer,state._COMPLETED_READ_CONTEXT)
+                self.assertNotIn(writer,state._NATIVE_CATALOG_K_READ_CONTEXT)
+                # This direct fixture does not create a prep, receive a graph
+                # or transfer a raw tail: bypass only its final diagnostic
+                # completeness requirement, never the enrollment/guard above.
+                packet=allocation._owned_prior_source_packet(bridge,sheet,bound)
+                packet['received']=packet['attached']=True
+            self.assertFalse(allocation._LIVE_OWNED_PRIOR_SOURCE_READS)
+        self.assertIn('actual-packet',steps)
+        self.assertLess(steps.index('semantic-finalizer-after-revocation'),steps.index('settings-close'))
+        self.assertNotIn(writer,state._COMPLETED_READ_CONTEXT)
+        self.assertNotIn(writer,state._COMPLETED_ORIGINAL_GUARDS)
+        self.assertFalse(allocation._LIVE_NATIVE_CATALOG_K_CONTEXTS)
+
+    def test_owned_prior_source_tail_keeps_actual_acquired_owners_until_raw_close(self):
+        """Pure stack-ownership oracle, not a fake archived source proof."""
+        import threading
+        from monitor import issue_tracker_settings_audit_allocation as allocation,issue_tracker_nv_reservation as nv
+        bridge=allocation._OwnedPriorSourceRead();writer=object();sheet=object();target=binding()
+        owner=object();sheet_owner=object();old=object();order=[]
+        prepared=nv._CatalogNonallocatingPreparation('a'*64)
+        record={'old':old,'token':sheet,'binding':target,'nonallocating_writer':writer,'nonallocating_owner':owner}
+        with ExitStack() as tail,ExitStack() as acquired,ExitStack() as delivery:
+            acquired.callback(lambda:order.append('actual-acquired-owners-closed'))
+            delivery.callback(lambda:order.append('actual-delivery-raw-closed'))
+            packet={'writer':writer,'owner':owner,'sheet':sheet,'sheet_owner':sheet_owner,'bound':target,
+                'pid':os.getpid(),'thread':threading.get_ident(),'received':True,'attached':False,
+                'receiving_old':old,'tail':tail}
+            with mock.patch.dict(allocation._LIVE_OWNED_PRIOR_SOURCE_READS,{bridge:packet}), \
+                    mock.patch.dict(nv._ACTIVE_CATALOG_PREPARATIONS,{prepared:record}), \
+                    mock.patch.object(allocation.local,'_owner',return_value=owner), \
+                    mock.patch.object(allocation.ownership,'_validated_owner',return_value=sheet_owner):
+                allocation._retain_owned_native_prior_source_tail(bridge,sheet,target,prepared,record,delivery,
+                    owner_tail=acquired)
+                delivery.close();acquired.close();self.assertEqual([],order)
+                tail.close()
+                self.assertEqual(['actual-delivery-raw-closed','actual-acquired-owners-closed'],order)
+
+    def test_owned_prior_source_tail_refuses_nonallocating_other_actual_writer(self):
+        import threading
+        from monitor import issue_tracker_settings_audit_allocation as allocation,issue_tracker_nv_reservation as nv
+        bridge=allocation._OwnedPriorSourceRead();writer=object();sheet=object();target=binding()
+        owner=object();sheet_owner=object();old=object();prepared=nv._CatalogNonallocatingPreparation('a'*64)
+        record={'old':old,'token':sheet,'binding':target,
+            'nonallocating_writer':object(),'nonallocating_owner':object()}
+        with ExitStack() as tail,ExitStack() as delivery,ExitStack() as acquired:
+            packet={'writer':writer,'owner':owner,'sheet':sheet,'sheet_owner':sheet_owner,'bound':target,
+                'pid':os.getpid(),'thread':threading.get_ident(),'received':True,'attached':False,
+                'receiving_old':old,'tail':tail}
+            with mock.patch.dict(allocation._LIVE_OWNED_PRIOR_SOURCE_READS,{bridge:packet}), \
+                    mock.patch.dict(nv._ACTIVE_CATALOG_PREPARATIONS,{prepared:record}), \
+                    mock.patch.object(allocation.local,'_owner',return_value=owner), \
+                    mock.patch.object(allocation.ownership,'_validated_owner',return_value=sheet_owner):
+                with self.assertRaises(allocation.SettingsAuditHold):
+                    allocation._retain_owned_native_prior_source_tail(bridge,sheet,target,prepared,record,delivery,
+                        owner_tail=acquired)
+                self.assertFalse(packet['attached'])
+
     def test_fixed_current_cabling_creators_accept_no_caller_family_generation_or_unit(self):
         import inspect
         module=load()

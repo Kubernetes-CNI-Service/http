@@ -940,6 +940,62 @@ def _read_current_cycle_native_receipt_locators(writer_token,*,_store,http_root)
     return result
 
 
+@contextmanager
+def _hold_current_cycle_native_creation_locators(writer_token,owner_token,binding,*,_store,http_root):
+    """Current creator discovery after genuine audit archival, never adoption.
+
+    Ordinary/no-delivery discovery retains the existing strict locator. Old
+    delivery claims require actual dual-owner ALL proof and immutable K/C5/C6
+    source holders. The initial read issuer is retired before new native
+    writes; only plain labels and its genuine original handoff reach prep.
+    """
+    from pathlib import Path
+    from monitor import issue_tracker_local_commit as local,issue_tracker_settings_audit_allocation as allocation
+    try:
+        project=local._owner(writer_token);ownership._validated_owner(owner_token,binding);root=Path(http_root)
+        if (not root.is_absolute() or root.resolve(strict=True)!=root
+                or Path(_store.project_identity)!=project.project or _store.scope!='prod'):raise RemoteHistoryHold()
+        claims={name for name in os.listdir(project.root_fd)
+            if name in (allocation._DELIVERY_FOLDER,allocation._DELIVERY_STARTED)
+            or name.startswith(allocation._DELIVERY_FOLDER+'-') or name.startswith(allocation._DELIVERY_STARTED+'-')}
+        if not claims:
+            with _hold_current_cycle_native_receipt_locators(writer_token,_store=_store,http_root=root) as labels:
+                yield labels,None
+            return
+        from monitor import issue_tracker_stage_l_consumer as source,issue_tracker_receipt_snapshot as receipts
+        from monitor import issue_tracker_send_unit as compiler
+        from monitor.issue_tracker_cycle_source import _hold_current_completed_cycle_replay
+        from monitor.issue_tracker_state_owner import current_k,_settings_original_scope
+        from monitor.issue_tracker_whitelist_workbook import read_whitelist_workbook
+        path=root/'monitor/Issue_Tracker_Template_v1.xlsx'
+        # Outer prior scope's actual raw tail finishes AFTER source/settings
+        # cleanup. Initial ALL semantics never span the native append.
+        with allocation._hold_owned_native_prior_source_read(writer_token,owner_token,binding) as bridge:
+            with _settings_original_scope() as scope:
+                cycle=scope.enter_context(_hold_current_completed_cycle_replay(_store))
+                history=scope.enter_context(receipts._hold_history_originals(writer_token))
+                inputs=scope.enter_context(source._hold_original_replay_inputs(_store,project.project,path))
+                def originals():
+                    if local._owner(writer_token) is not project:raise RemoteHistoryHold()
+                    cycle();history();inputs();ownership._validated_owner(owner_token,binding)
+                originals();settings=current_k(writer_token);whitelist=read_whitelist_workbook(path)
+                qualified=source.qualify_prod_stage_l(_store,http_root=root,settings=settings,
+                    whitelist_snapshot=whitelist,whitelist_path=path,writer_token=writer_token)
+                observed=receipts.read_current_cycle_local_receipts(writer_token,_store,
+                    expected_template_sha256=whitelist.workbook_sha256,settings=settings,
+                    whitelist_sha256=whitelist.whitelist.sha256,qualified_source=qualified)
+                if (not observed.generation_ids or observed.published!=len(observed.generation_ids)
+                        or qualified.cycle_ids[-1]!=observed.cycle_id):raise RemoteHistoryHold()
+                actual=tuple(compiler._original_receipt_identity(qualified,_store,g,writer_token,
+                    settings,whitelist,whitelist.workbook_sha256) for g in observed.generation_ids)
+                if len({row[0] for row in actual})!=len(actual):raise RemoteHistoryHold()
+                originals();yield tuple(row[:2] for row in actual),bridge;originals()
+                # Raw source holders finalize normally here. The actual prep
+                # independently replayed C5/C6/K while LIVE; no stale K scope
+                # or closed semantic verifier is invoked at this boundary.
+    except Exception:raise RemoteHistoryHold() from None
+
+
 def _prepare_current_cycle_native_switch_unit(writer_token,owner_token,binding,authentication,*,_store,http_root):
     """Fixed current Switch preparation; no caller source or send permission."""
     return _prepare_current_cycle_native_unit(writer_token,owner_token,binding,authentication,
@@ -978,7 +1034,8 @@ def _prepare_current_cycle_native_unit(writer_token,owner_token,binding,authenti
         from monitor import issue_tracker_nv_reservation as native,issue_tracker_unit_catalog as catalog
         from monitor.issue_tracker_history_read_launcher import OwnedProjectSheetsReadUnit,require_current_owned_project_read
         from monitor.issue_tracker_token_launcher import require_current_owned_project_token
-        with _hold_current_cycle_native_receipt_locators(writer_token,_store=_store,http_root=root) as labels:
+        with _hold_current_cycle_native_creation_locators(writer_token,owner_token,binding,
+                _store=_store,http_root=root) as (labels,prior_bridge):
             # Derive necessary Cabling keys from current protected C5 before
             # issuing bounded reads. The held locator context and fixed
             # compiler independently revalidate this source; no caller keys.
@@ -1039,9 +1096,10 @@ def _prepare_current_cycle_native_unit(writer_token,owner_token,binding,authenti
                 eth,ib=((target_plan,target_response),(other_plan,other_response)) if _sheet=='ETH Cabling' else (
                     (other_plan,other_response),(target_plan,target_response))
                 preparation=native.hold_catalog_nv_preparation(owner_token,binding,identity,*eth,*ib,
-                    generation_id=generation,publish_id=publish,sheet=_sheet,requested_keys=missing)
+                    generation_id=generation,publish_id=publish,sheet=_sheet,requested_keys=missing,
+                    _source_prior_bridge=prior_bridge)
             else:preparation=native.hold_catalog_nonallocating_preparation(writer_token,owner_token,binding,identity,
-                generation_id=generation,publish_id=publish,sheet=_sheet)
+                generation_id=generation,publish_id=publish,sheet=_sheet,_source_prior_bridge=prior_bridge)
             verify_initial_identity()
             with preparation as prepared:
                 receiver=(_hold_native_current_cycle_observed_switch_unit if _sheet=='ETH&IB Switch'
