@@ -984,6 +984,8 @@ def _hold_native_current_cycle_observed_switch_unit(prepared,writer_token,owner_
                     local_generation_id=selected[0][0],business_reads=tuple(business),history_plan=history_plan,
                     history_response=history_response,spreadsheet_token=owner_token,binding=binding,identity=identity,
                     occupied_metadata_ids=occupied,_unit_preparation=prepared)
+                native._bind_nonallocating_project_read_tail(prepared,writer_token,owner_token,binding,
+                    authentication,tuple(acquired),unit)
                 verify_reads();yield unit;verify_reads()
     except Exception:
         raise RemoteHistoryHold() from None

@@ -1790,6 +1790,102 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         self._native_completed_archive_preview_probe(local_c6=True,native_current_compiler=True,
             issued_current_compiler=True,issued_read_tail=True)
 
+    def test_real_registered_switch_original_read_revoked_after_native_preparation_cleanup_refuses_return(self):
+        from monitor import issue_tracker_nv_reservation as native
+        from monitor import issue_tracker_remote_history_match as remote
+        from monitor import issue_tracker_history_read_launcher as reads
+        from monitor import issue_tracker_token_launcher as tokens
+        original_pin=native._pin_catalog_prefix
+        original_receiver=remote._hold_native_current_cycle_observed_switch_unit
+        original_require=reads.require_current_owned_project_read
+        original_compile=self._compile_current_issued_switch_after_actual_archive
+        captured=[];returned=[];facts=[];revoked=[];images=[];late_tail_refusals=[]
+        @contextmanager
+        def after_all_preparation_originals_close():
+            yield
+            if not returned:return
+            prepared,record,writer,owner,binding,auth,response=captured[0]
+            all_closed=True
+            for descriptor in images:
+                try:os.fstat(descriptor)
+                except OSError as exc:all_closed=all_closed and exc.errno==9
+                else:all_closed=False
+            tokens.require_current_owned_project_token(owner,binding,auth)
+            original_require(writer,owner,binding,response,auth,read_kind='template_identity')
+            with reads._PROJECT_READ_GUARD:saved=reads._PROJECT_READS.pop(response)
+            revoked.append((response,saved))
+            facts.append((prepared not in native._ACTIVE_CATALOG_PREPARATIONS,
+                all_closed,record['registered'],saved is auth,response not in reads._PROJECT_READS))
+        def pin(*args,**kwargs):
+            # Enter first: LIFO closes every actual ALL/C6/delivery owner tail
+            # before this fault; no finalizer or successful verifier is faked.
+            proofs=kwargs.get('_project_proofs')
+            if proofs is not None:
+                proofs['owner_tail'].enter_context(after_all_preparation_originals_close())
+            return original_pin(*args,**kwargs)
+        @contextmanager
+        def receive(prepared,writer,owner,binding,auth,**kwargs):
+            record=native._verify_catalog_preparation(prepared)
+            def observe(*values,**options):
+                result=original_require(*values,**options)
+                if options['read_kind']=='template_identity' and not captured:
+                    captured.append((prepared,record,writer,owner,binding,auth,values[3]))
+                return result
+            with mock.patch.object(reads,'require_current_owned_project_read',side_effect=observe):
+                with original_receiver(prepared,writer,owner,binding,auth,**kwargs) as unit:yield unit
+            images.extend({item[2] for holder in (record['old'],record['current']) for item in holder.files})
+            returned.append(unit.unit_id)
+        def compile_current(**kwargs):
+            # Real old-cycle setup reloads the canonical modules. Bind only
+            # at the actual new-cycle compiler entrance, not to a stale module
+            # facade/registry or an exception class from before those reloads.
+            nonlocal native,remote,reads,tokens,original_pin,original_receiver,original_require
+            native=sys.modules['monitor.issue_tracker_nv_reservation']
+            remote=sys.modules['monitor.issue_tracker_remote_history_match']
+            reads=sys.modules['monitor.issue_tracker_history_read_launcher']
+            tokens=sys.modules['monitor.issue_tracker_token_launcher']
+            original_pin=native._pin_catalog_prefix
+            original_receiver=remote._hold_native_current_cycle_observed_switch_unit
+            original_require=reads.require_current_owned_project_read
+            original_tail=getattr(native,'_verify_nonallocating_project_read_tail',None)
+            def tail(record,state):
+                try:return original_tail(record,state)
+                except native.NvReservationHold:
+                    if captured and record is captured[0][1] and revoked:
+                        late_tail_refusals.append(True)
+                    raise
+            with ExitStack() as patches:
+                patches.enter_context(mock.patch.object(native,'_pin_catalog_prefix',side_effect=pin))
+                patches.enter_context(mock.patch.object(remote,'_hold_native_current_cycle_observed_switch_unit',side_effect=receive))
+                if callable(original_tail):
+                    patches.enter_context(mock.patch.object(native,'_verify_nonallocating_project_read_tail',side_effect=tail))
+                return original_compile(**kwargs)
+        try:
+            failure=None
+            with mock.patch.object(self,'_compile_current_issued_switch_after_actual_archive',side_effect=compile_current):
+                try:
+                    self._native_completed_archive_preview_probe(local_c6=True,native_current_compiler=True,
+                        issued_current_compiler=True)
+                except ValueError as exc:failure=exc
+            self.assertIsNotNone(failure,
+                'native preparation escaped late original-read revocation: returned=%r original-tail-facts=%r revoked=%d' %
+                (returned,facts,len(revoked)))
+            self.assertIs(type(failure),native.NvReservationHold,
+                'the actual new-cycle native preparation, not another HOLD or stale exception class, must refuse return')
+            self.assertEqual(1,len(returned),'actual compilation and registration must precede the late fault')
+            self.assertTrue(images,'original catalog file descriptors must actually be closed')
+            self.assertEqual([(True,True,True,True,True)],facts,
+                'the last native preparation tail must reject the revoked original read with both real owners still live')
+            self.assertEqual(1,len(revoked))
+            self.assertEqual([True],late_tail_refusals,
+                'the actual final issued-read helper must reject this original packet; another cleanup HOLD is insufficient')
+        finally:
+            # Restore only the exact fixture issuer entry after native tail
+            # completion. Neither an earlier cleanup HOLD nor this restoration
+            # may stand in for the required preparation-return refusal.
+            for response,saved in revoked:
+                with reads._PROJECT_READ_GUARD:reads._PROJECT_READS[response]=saved
+
     def test_issued_read_tail_fixture_prepares_the_original_root_template_before_preview(self):
         # The literal scenario must enter the same template preparation as its
         # positive control, before any production preview/receiver is invoked.

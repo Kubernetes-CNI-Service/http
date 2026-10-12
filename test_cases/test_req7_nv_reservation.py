@@ -133,6 +133,111 @@ def recycled_outer_nv_directory(module, store, foreign):
 
 
 class Req7NvReservationDirectTests(unittest.TestCase):
+    def test_native_project_read_tail_rechecks_original_state_after_delegated_guards(self):
+        # Isolate only IO guards here; the real issuer/cleanup workflow is separate.
+        from test_cases.test_req7_send_unit import load as load_composer, inputs
+        from monitor import issue_tracker_history_read_launcher as reads
+        from monitor import issue_tracker_token_launcher as tokens
+        module=load();unit=load_composer().freeze_send_unit(**inputs())
+        for fault in ('lost-slot','bound-revoked','equal-valued-new-packet'):
+            with self.subTest(fault=fault):
+                writer=object();token=object();project=object();owner=object();auth=object()
+                target=binding();tail=module._NonallocatingProjectReadTail()
+                shapes=(('template_identity',None,None),('metadata',None,None),
+                    ('activity','ETH&IB Switch',None),('insertion','ETH&IB Switch',None),
+                    ('row','ETH&IB Switch',3),('row','ETH&IB Switch',4),
+                    ('history_tail',None,None))
+                images=tuple((*shape,object()) for shape in shapes)
+                packet=(writer,token,target,project,owner,auth,images,unit)
+                tail.packet=packet;tail.bound=True
+                record={'project_read_tail':tail,'nonallocating_writer':writer,'token':token,
+                    'binding':target,'nonallocating_owner':project,'owner':owner}
+                checked=[]
+                def token_guard(*args):
+                    checked.append('token')
+                    if len(checked)==2:
+                        if fault=='lost-slot':record.pop('project_read_tail')
+                        elif fault=='bound-revoked':tail.bound=False
+                        else:
+                            replacement=tuple(list(packet))
+                            self.assertEqual(packet,replacement)
+                            self.assertIsNot(packet,replacement)
+                            tail.packet=replacement
+                with mock.patch.object(module.local,'_owner',return_value=project), \
+                        mock.patch.object(module.ownership,'_validated_owner',return_value=owner), \
+                        mock.patch.object(tokens,'require_current_owned_project_token',side_effect=token_guard), \
+                        mock.patch.object(reads,'require_current_owned_project_read') as read_guard:
+                    with self.assertRaises(module.NvReservationHold):
+                        module._verify_nonallocating_project_read_tail(record,tail)
+                self.assertEqual(['token','token'],checked)
+                self.assertEqual(7,read_guard.call_count)
+
+    def test_native_project_read_tail_slot_loss_or_replacement_cannot_downgrade_to_legacy(self):
+        module=load();kind=getattr(module,'_NonallocatingProjectReadTail',None)
+        self.assertTrue(callable(kind),'preparation must own its original tail state')
+        tail=kind()
+        for record in ({},{'project_read_tail':kind()}):
+            with self.subTest(record=tuple(record)),self.assertRaises(module.NvReservationHold):
+                module._verify_nonallocating_project_read_tail(record,tail)
+        record={'project_read_tail':tail}
+        self.assertIsNone(module._verify_nonallocating_project_read_tail(record,tail),
+            'the actual never-bound standalone scope keeps its existing contract')
+        tail.bound=True
+        with self.assertRaises(module.NvReservationHold):
+            module._verify_nonallocating_project_read_tail(record,tail)
+
+    def test_native_preparation_tail_runs_after_every_cleanup_and_preserves_primary_interrupt(self):
+        module=load();tail=getattr(module,'_verify_nonallocating_project_read_tail',None)
+        self.assertTrue(callable(tail),'last fixed tail cannot be skipped by an earlier cleanup failure')
+        from monitor import issue_tracker_unit_catalog as catalog
+        primary=KeyboardInterrupt('independent consumer interruption')
+        cleanup=OSError('independent actual scope close failure');order=[]
+        writer=object();token=object();owner=object();project=object();target=binding();holders=[]
+        def originals(**kwargs):
+            label='old' if not holders else 'current'
+            def close():order.append(label)
+            value=SimpleNamespace(sync=lambda:None,close=close);holders.append(value);return value
+        def pin(*args,**kwargs):
+            def close_proof():order.append('proof');raise cleanup
+            kwargs['_project_proofs']['scope'].callback(close_proof)
+            kwargs['_project_proofs']['delivery_scope'].callback(lambda:order.append('delivery'))
+            kwargs['_project_proofs']['owner_tail'].callback(lambda:order.append('owner-tail'))
+            return owner,object(),'independent-stem',None,(),None,()
+        def verify(prepared):return module._ACTIVE_CATALOG_PREPARATIONS[prepared]
+        def last(record,state):
+            order.append(('issued-tail',tuple(order),record['project_read_tail'] is state,
+                not module._ACTIVE_CATALOG_PREPARATIONS,token not in catalog._IMAGE_BUDGETS))
+            raise module.NvReservationHold()
+        with mock.patch.object(module.local,'_owner',return_value=project), \
+                mock.patch.object(module.ownership,'_validated_owner',return_value=owner), \
+                mock.patch.object(module,'_nonallocating_identity',return_value=('a'*64,object())), \
+                mock.patch.object(catalog,'_Originals',side_effect=originals), \
+                mock.patch.object(module,'_pin_catalog_prefix',side_effect=pin), \
+                mock.patch.object(module,'_verify_catalog_preparation',side_effect=verify), \
+                mock.patch.object(module,'_verify_nonallocating_project_read_tail',side_effect=last):
+            with self.assertRaises(KeyboardInterrupt) as caught:
+                with module.hold_catalog_nonallocating_preparation(writer,token,target,self.identity,
+                        generation_id='c'*64,publish_id='d'*64,sheet='ETH&IB Switch') as prepared:
+                    record=verify(prepared)
+                    record['settings_scope'].callback(lambda:order.append('settings'))
+                    raise primary
+        self.assertIs(primary,caught.exception)
+        self.assertIs(cleanup,caught.exception.__cause__)
+        expected=('settings','proof','current','old','delivery','owner-tail')
+        self.assertEqual([*expected,('issued-tail',expected,True,True,True)],order)
+
+    def test_native_project_read_tail_rejects_unissued_images_without_acquisition_or_refresh(self):
+        module=load();verify=getattr(module,'_verify_nonallocating_project_read_tail',None)
+        self.assertTrue(callable(verify),'native preparation must retain the original issued-read tail')
+        from monitor import issue_tracker_history_read_launcher as reads
+        from monitor import issue_tracker_token_launcher as tokens
+        record={'token':object(),'binding':binding(),'nonallocating_writer':object()}
+        tail=(object(),(('template_identity',None,None,object()),))
+        with mock.patch.object(reads.OwnedProjectSheetsReadUnit,'read_once') as acquire, \
+                mock.patch.object(tokens.OwnedProjectTokenRefreshUnit,'refresh_once') as refresh:
+            with self.assertRaises(module.NvReservationHold):verify(record,tail)
+        acquire.assert_not_called();refresh.assert_not_called()
+
     def test_nonallocating_catalog_preparation_requires_real_project_writer_before_prefix(self):
         module = load()
         with mock.patch.object(module, '_pin_catalog_prefix') as prefix:

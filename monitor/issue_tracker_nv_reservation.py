@@ -265,6 +265,77 @@ class _CatalogNonallocatingPreparation:
     unit_id: str
 
 
+@dataclass(eq=False)
+class _NonallocatingProjectReadTail:
+    """Context-owned original observations, never a caller callback/permit."""
+    packet: object = field(default=None, repr=False)
+    bound: bool = False
+
+
+def _verify_nonallocating_project_read_tail(record, tail):
+    # Runs after preparation revocation and every original cleanup. Only the
+    # outer writer/sheet owners remain live; do not borrow closed K/raw scopes.
+    try:
+        if (type(tail) is not _NonallocatingProjectReadTail
+                or record.get('project_read_tail') is not tail): raise NvReservationHold()
+        if tail.bound is False and tail.packet is None:return
+        if tail.bound is not True or type(tail.packet) is not tuple or len(tail.packet)!=8:
+            raise NvReservationHold()
+        original_packet=tail.packet
+        writer,token,binding,project,owner,authentication,images,unit=original_packet
+        if (writer is not record['nonallocating_writer'] or token is not record['token']
+                or binding!=record['binding'] or project is not record['nonallocating_owner']
+                or owner is not record['owner'] or local._owner(writer) is not project
+                or ownership._validated_owner(token,binding) is not owner): raise NvReservationHold()
+        from monitor.issue_tracker_send_intent import _projection
+        from monitor.issue_tracker_history_read_launcher import require_current_owned_project_read
+        from monitor.issue_tracker_token_launcher import require_current_owned_project_token
+        _projection(unit)
+        action=local._json(unit.action_preimage)
+        if action['identity']['sheet']!='ETH&IB Switch':raise NvReservationHold()
+        # One original row read per actual manifest outcome, including NOOP;
+        # never hard-code a fixture's seven reads or adopt caller row plans.
+        count=len(unit.outcomes)
+        if (type(images) is not tuple or not count or len(images)!=5+count
+                or any(type(item) is not tuple or len(item)!=4 for item in images)):
+            raise NvReservationHold()
+        shape=tuple(item[:3] for item in images)
+        if (shape[:4]!=(('template_identity',None,None),('metadata',None,None),
+                ('activity','ETH&IB Switch',None),('insertion','ETH&IB Switch',None))
+                or shape[-1]!=('history_tail',None,None)
+                or any(kind!='row' or sheet!='ETH&IB Switch' or type(row) is not int or row<3
+                    for kind,sheet,row in shape[4:-1])
+                or len({row for _kind,_sheet,row in shape[4:-1]})!=count
+                or len({id(item[3]) for item in images})!=len(images)):raise NvReservationHold()
+        require_current_owned_project_token(token,binding,authentication)
+        for kind,sheet,row,response in images:
+            require_current_owned_project_read(writer,token,binding,response,authentication,
+                read_kind=kind,sheet=sheet,row=row)
+        require_current_owned_project_token(token,binding,authentication)
+        if (local._owner(writer) is not project
+                or ownership._validated_owner(token,binding) is not owner):raise NvReservationHold()
+        if (record.get('project_read_tail') is not tail or tail.bound is not True
+                or tail.packet is not original_packet):raise NvReservationHold()
+    except Exception:raise NvReservationHold() from None
+
+
+def _bind_nonallocating_project_read_tail(prepared,writer,token,binding,authentication,images,unit):
+    # Only the fixed receiver calls this after actual compilation. Every image
+    # must still have its original issuer/shape/deadline and project auth.
+    try:
+        record=_ACTIVE_CATALOG_PREPARATIONS.get(prepared)
+        if (type(prepared) is not _CatalogNonallocatingPreparation or record is None
+                or record['nonallocating_writer'] is not writer or record['token'] is not token
+                or record['binding']!=binding or prepared.unit_id!=unit.unit_id):raise NvReservationHold()
+        tail=record['project_read_tail']
+        if type(tail) is not _NonallocatingProjectReadTail or tail.bound is not False or tail.packet is not None:
+            raise NvReservationHold()
+        tail.packet=(writer,token,binding,record['nonallocating_owner'],record['owner'],authentication,images,unit)
+        tail.bound=True
+        _verify_nonallocating_project_read_tail(record,tail)
+    except Exception:raise NvReservationHold() from None
+
+
 def _nonallocating_identity(token, binding, identity, generation_id, publish_id, sheet):
     from monitor.issue_tracker_send_unit import _generation_identity
     _generation_identity(generation_id)
@@ -292,6 +363,7 @@ def hold_catalog_nonallocating_preparation(writer_token, token, binding, identit
     budget = catalog._OriginalImageBudget()
     old = catalog._Originals(_image_budget=budget); current = catalog._Originals(_image_budget=budget)
     prepared = None; active_budget = None; failed = False; primary = None; cleanup_problem = None
+    record=None; read_tail=_NonallocatingProjectReadTail()
     proofs = {'scope': ExitStack(), 'verify': lambda: None, 'delivery_scope': ExitStack(),
               'delivery_events': [], 'owner_tail': ExitStack()}
     try:
@@ -311,6 +383,7 @@ def hold_catalog_nonallocating_preparation(writer_token, token, binding, identit
                   'budget': budget, 'origin': None, 'settings': None, 'settings_scope': ExitStack(),
                   'failed': False, 'verify_prior_c6': proofs['verify'],
                   'prior_delivery_events': proofs['delivery_events'],
+                  'project_read_tail': read_tail,
                   'nonallocating_writer': writer_token, 'nonallocating_owner': project_owner}
         prepared = _CatalogNonallocatingPreparation(unit_id); _ACTIVE_CATALOG_PREPARATIONS[prepared] = record
         for delivery in record['prior_delivery_events']:
@@ -350,6 +423,17 @@ def hold_catalog_nonallocating_preparation(writer_token, token, binding, identit
                 failed = True
                 if cleanup_problem is None: cleanup_problem = exc
                 if not isinstance(exc, Exception) and primary is None: primary = exc
+        try:
+            if record is not None:_verify_nonallocating_project_read_tail(record,read_tail)
+        except BaseException as exc:
+            failed=True
+            if cleanup_problem is None:cleanup_problem=exc
+            if not isinstance(exc,Exception) and primary is None:primary=exc
+        finally:
+            # Context-local original state prevents a deleted/replaced record
+            # slot from silently downgrading a bound tail to legacy. Revoke all
+            # strong references only AFTER that final check, even on failure.
+            read_tail.packet=None
     if primary is not None:
         if cleanup_problem is not None and cleanup_problem is not primary: raise primary from cleanup_problem
         raise primary

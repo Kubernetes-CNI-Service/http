@@ -3164,3 +3164,28 @@ prerequisite, and only the mode registration was corrected. That early ERROR
 is not the expected refusal. These local receiver results do not close the
 outer preparation/owner finalizers, default NEW driver, G1, whole REQ7 or
 current full/check, and REAL_ENV remains NOT RUN.
+
+The native nonallocating preparation now keeps the receiver's original issued
+read/authentication packet in a context-owned, one-time bound tail. After its
+ACTIVE preparation registry entry is revoked (not its durable catalog entry)
+and all settings/catalog/source/delivery finalizers have been attempted, a
+fixed verifier checks the original issuer, unchanged
+deadlines, actual manifest outcome row count and both still-live outer owners.
+The tail also checks the same state slot, bound state and packet object after
+all delegated guards return; equal-valued replacement is not continuity. A
+missing/replaced slot cannot downgrade a bound invocation to never-bound
+standalone compatibility. Strong references are cleared only after that tail,
+including failures; an original interruption remains primary and all other
+owned cleanup slots are still attempted. No acquisition, refresh, caller
+callback, row plan, permission or reopened K/raw scope is added.
+
+Independent RED/direct tests cover the original state and cleanup contract.
+The genuine current-cycle Switch workflow covers normal registration and
+revocation of the actual original read only after registration, preparation
+revocation and original FD cleanup; it records the target verifier's own HOLD
+so an unrelated cleanup failure cannot produce a false positive. The initial
+stale-module fixture failure is preserved separately from the phase-proven
+RED. These tests do not close the final outer-owner boundary, bootstrap,
+three-sheet/default NEW/NO_SEND driver, whole REQ7 or current full/check.
+No existing automatic or field scenario is removed, skipped or weakened;
+REAL_ENV remains NOT RUN and approval remains runner-only.
