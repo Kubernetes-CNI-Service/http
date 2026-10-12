@@ -940,6 +940,60 @@ def _read_current_cycle_native_receipt_locators(writer_token,*,_store,http_root)
     return result
 
 
+def _prepare_current_cycle_native_switch_unit(writer_token,owner_token,binding,authentication,*,_store,http_root):
+    """Fixed current Switch preparation and local pending registration only.
+
+    Derive latest current C6 inside live source holders, not caller generation
+    or unit. Existing local enrollment is mandatory, never bootstrap/adoption.
+    A local pending entry or NO_SEND observation is not G1, COUNT, send or a
+    proof about final outer-owner cleanup. No compiler object escapes closure.
+    """
+    from pathlib import Path
+    from monitor import issue_tracker_local_commit as local
+    try:
+        project=local._owner(writer_token);ownership._validated_owner(owner_token,binding)
+        root=Path(http_root)
+        if (not root.is_absolute() or root.resolve(strict=True)!=root
+                or Path(_store.project_identity)!=project.project or _store.scope!='prod'):raise RemoteHistoryHold()
+        from monitor import issue_tracker_nv_reservation as native,issue_tracker_unit_catalog as catalog
+        from monitor.issue_tracker_history_read_launcher import OwnedProjectSheetsReadUnit,require_current_owned_project_read
+        from monitor.issue_tracker_token_launcher import require_current_owned_project_token
+        with _hold_current_cycle_native_receipt_locators(writer_token,_store=_store,http_root=root) as labels:
+            require_current_owned_project_token(owner_token,binding,authentication)
+            observed=OwnedProjectSheetsReadUnit(writer_token,owner_token,binding,authentication,
+                read_kind='template_identity').read_once()
+            plan,_project,_digest=require_current_owned_project_read(writer_token,owner_token,binding,observed,
+                authentication,read_kind='template_identity')
+            identity=decode.decode_template_identity(plan,observed)
+            def verify_initial_identity():
+                require_current_owned_project_token(owner_token,binding,authentication)
+                current=require_current_owned_project_read(writer_token,owner_token,binding,observed,
+                    authentication,read_kind='template_identity')
+                if current!=(plan,_project,_digest) or decode.decode_template_identity(current[0],observed)!=identity:
+                    raise RemoteHistoryHold()
+                require_current_owned_project_token(owner_token,binding,authentication)
+                if require_current_owned_project_read(writer_token,owner_token,binding,observed,
+                        authentication,read_kind='template_identity')!=current:raise RemoteHistoryHold()
+            verify_initial_identity()
+            generation,publish=labels[-1]
+            with native.hold_catalog_nonallocating_preparation(writer_token,owner_token,binding,identity,
+                    generation_id=generation,publish_id=publish,sheet='ETH&IB Switch') as prepared:
+                with _hold_native_current_cycle_observed_switch_unit(prepared,writer_token,owner_token,binding,
+                        authentication,_store=_store,http_root=root) as unit:
+                    if unit.outcome=='WIRE-CANDIDATE':
+                        catalog.register_pending_c6_unit(writer_token,owner_token,binding,unit,_unit_preparation=prepared)
+                        result=('WIRE_REGISTERED',unit.unit_id)
+                    elif unit.outcome=='NO_SEND':result=('NO_SEND',unit.unit_id)
+                    else:raise RemoteHistoryHold()
+            verify_initial_identity()
+        # Check the original initial read after every source-holder finalizer.
+        # These external owners are still live; no closed source/K verifier is
+        # revived and no fresh read or deadline can replace the original.
+        verify_initial_identity()
+        return result
+    except Exception:raise RemoteHistoryHold() from None
+
+
 @contextmanager
 def _hold_native_current_cycle_observed_switch_unit(prepared,writer_token,owner_token,binding,authentication,*,
                                                     _store,http_root):

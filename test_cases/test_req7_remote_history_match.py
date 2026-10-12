@@ -40,6 +40,15 @@ def load():
 
 
 class Req7RemoteHistoryMatchDirectTests(unittest.TestCase):
+    def test_fixed_current_native_switch_preparation_creator_accepts_no_caller_generation_or_unit(self):
+        import inspect
+        module=load();create=getattr(module,'_prepare_current_cycle_native_switch_unit',None)
+        self.assertTrue(callable(create),'runtime must derive the actual current C6 before native preparation creation')
+        self.assertFalse({'generation_id','publish_id','unit','keys','qualified','compiler','callback','plan'}
+            & set(inspect.signature(create).parameters))
+        with self.assertRaises(module.RemoteHistoryHold):
+            create(object(),object(),binding(),object(),_store=object(),http_root=ROOT)
+
     def test_current_native_receipt_locator_context_keeps_originals_live_without_caller_guards(self):
         import inspect
         module=load();hold=getattr(module,'_hold_current_cycle_native_receipt_locators',None)

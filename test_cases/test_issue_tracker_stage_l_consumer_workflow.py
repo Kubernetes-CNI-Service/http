@@ -2525,7 +2525,25 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
     def test_real_current_native_locator_context_receipt_rebind_after_yield_refuses_before_context_completion(self):
         self._exercise_real_protected_three_panel_fixture(skip_history=False,native_current_no_send_probe='native-receipt-locators-late-rebind')
 
-    def _verify_fresh_native_switch_no_send(self,committed,qualified,*,tail_revoke=False,_sheet='ETH&IB Switch',_inactive=None,_wire=False,_nv=False,_other_drift=False,_tail_clear=False):
+    def test_real_fixed_current_native_switch_creator_discovers_c6_and_keeps_no_send_zero_write(self):
+        self.native_no_send_expectation_failure=None
+        try:self._exercise_real_protected_three_panel_fixture(skip_history=False,native_current_no_send_probe='fixed-switch-creator')
+        finally:
+            if self.native_no_send_expectation_failure is not None:raise self.native_no_send_expectation_failure
+
+    def test_real_fixed_current_native_switch_creator_registers_only_original_current_c6_wire(self):
+        self.native_no_send_expectation_failure=None
+        try:self._exercise_real_protected_three_panel_fixture(skip_history=False,native_current_no_send_probe='fixed-switch-creator-wire')
+        finally:
+            if self.native_no_send_expectation_failure is not None:raise self.native_no_send_expectation_failure
+
+    def test_real_fixed_switch_creator_initial_identity_issuer_revoked_after_source_cleanup_cannot_return(self):
+        self.native_no_send_expectation_failure=None
+        try:self._exercise_real_protected_three_panel_fixture(skip_history=False,native_current_no_send_probe='fixed-switch-creator-initial-revoke')
+        finally:
+            if self.native_no_send_expectation_failure is not None:raise self.native_no_send_expectation_failure
+
+    def _verify_fresh_native_switch_no_send(self,committed,qualified,*,tail_revoke=False,_sheet='ETH&IB Switch',_inactive=None,_wire=False,_nv=False,_other_drift=False,_tail_clear=False,_fixed_creation=False,_initial_revoke=False):
         import tempfile
         import socket
         from test_cases.test_req7_spreadsheet_owner import load as load_owner,scoped_fixture
@@ -2565,6 +2583,11 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         rows=[reserved_switch_row(index) for index in range(2,4)]
         for row,key,description in zip(rows,expected_keys,descriptions):
             row.update({'F':literal(key[1]),'L':literal(description),'N':literal('New')})
+        if _wire and _sheet=='ETH&IB Switch':
+            old_descriptions=(
+                '[MONITOR][fan][PSU1/FAN1] [fabric_source=template] PSU1/FAN1: state=ok',
+                '[MONITOR][asic_temp][ASIC1] [fabric_source=type] ASIC1: state=ok; current=70 C; max=70 C; critical=80 C')
+            for row,description in zip(rows,old_descriptions):row['L']=literal(description)
         if _sheet!='ETH&IB Switch':
             key=expected_keys[0]
             # Literal source fixtures and independent key hash, never values
@@ -2616,7 +2639,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             native.addCleanup=self.addCleanup
             certificates=self._fixture_certificate_supplier(type(native).certificates)
             native.certificates=lambda hostname='oauth2.googleapis.com':certificates(native,hostname)
-            issued=[];compiled=[];units=[]
+            issued=[];compiled=[];units=[];issued_objects=[]
             real_read=launcher.OwnedProjectSheetsReadUnit.read_once
             compiler_name=('freeze_observed_receipted_switch_unit' if _sheet=='ETH&IB Switch'
                 else 'freeze_observed_receipted_cabling_unit')
@@ -2625,7 +2648,8 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                 unit=actual_compiler(*args,**kwargs)
                 try:
                     self.assertEqual('WIRE-CANDIDATE' if _wire or _nv else 'NO_SEND',unit.outcome)
-                    self.assertEqual(6 if _nv else 5+len(expected_keys),len(issued),'target RED must follow every genuine issued read')
+                    self.assertEqual((6 if _nv else 5+len(expected_keys))+int(_fixed_creation),len(issued),
+                        'target RED must follow every genuine issued read, including the fixed creator identity read')
                     self.assertEqual(('WIRE-CANDIDATE' if _wire or _nv else 'OBSERVED-SATISFIED-AT-READ',)*len(expected_keys),
                         tuple(outcome for _key,outcome in unit.outcomes))
                     self.assertEqual(committed.receipt.manifest_id,json.loads(unit.action_preimage)['manifest_id'])
@@ -2644,14 +2668,20 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                         self.assertFalse(any('updateCells' in request for request in requests))
                     elif _wire:
                         self.assertTrue(unit.wire_bytes);self.assertIs(type(unit.fence_metadata_id),int)
-                        self.assertEqual(1,unit.history_rows_expected)
+                        self.assertEqual(2 if _sheet=='ETH&IB Switch' else 1,unit.history_rows_expected)
                         requests=json.loads(unit.wire_bytes)['requests']
                         updates=[request['updateCells'] for request in requests if 'updateCells' in request]
-                        self.assertEqual([(sid,2,6),(sid,2,12),(sid,2,18)],
-                            [(item['start']['sheetId'],item['start']['rowIndex'],item['start']['columnIndex']) for item in updates])
-                        self.assertEqual([[{'stringValue':values[column]} for column in run]
-                            for run in (('G',),('M','N'),('S','T'))],
-                            [[cell['userEnteredValue'] for cell in item['rows'][0]['values']] for item in updates])
+                        if _sheet=='ETH&IB Switch':
+                            self.assertEqual([(101,3,11),(101,2,11)],
+                                [(item['start']['sheetId'],item['start']['rowIndex'],item['start']['columnIndex']) for item in updates])
+                            self.assertEqual([[{'stringValue':description}] for description in reversed(descriptions)],
+                                [[cell['userEnteredValue'] for cell in item['rows'][0]['values']] for item in updates])
+                        else:
+                            self.assertEqual([(sid,2,6),(sid,2,12),(sid,2,18)],
+                                [(item['start']['sheetId'],item['start']['rowIndex'],item['start']['columnIndex']) for item in updates])
+                            self.assertEqual([[{'stringValue':values[column]} for column in run]
+                                for run in (('G',),('M','N'),('S','T'))],
+                                [[cell['userEnteredValue'] for cell in item['rows'][0]['values']] for item in updates])
                         self.assertFalse(any('appendCells' in request and request['appendCells']['sheetId']==sid for request in requests))
                     else:self.assertEqual((b'',None,0),(unit.wire_bytes,unit.fence_metadata_id,unit.history_rows_expected))
                 except AssertionError as exc:
@@ -2681,7 +2711,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                     calls,children=native.intercept(launched,native.child_fixture(port),writer,sheet,binding)
                     actual=real_read(reader)
                 self.assertEqual((1,1,(),0),(len(records),len(calls),tuple(errors),children[0].returncode))
-                issued.append((reader._kind,reader._row));return actual
+                issued.append((reader._kind,reader._row));issued_objects.append(actual);return actual
             locator=AuthenticatedToken('synthetic.private-locator',time.time()+3600)
             identity=decode_template_identity(prepare_template_identity_read(binding,locator),response(identity_response()))
             with local.writer_owner(project,self.publication) as writer,scoped_fixture(global_root,owner_module), \
@@ -2696,6 +2726,44 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                 before=originals();outbox=project/'.tracker/settings/outbox'
                 audits_before={path.name:(path.stat().st_ino,path.read_bytes()) for path in outbox.iterdir()}
                 self.assertTrue(audits_before,'the real K change remains pending, not an empty fixture')
+                if _fixed_creation:
+                    actual_context=remote._hold_current_cycle_native_receipt_locators;revoked=[];returned=[]
+                    @contextmanager
+                    def context(*args,**kwargs):
+                        with actual_context(*args,**kwargs) as labels:yield labels
+                        if _initial_revoke:
+                            self.assertFalse(native_module._ACTIVE_CATALOG_PREPARATIONS)
+                            first=issued_objects[0]
+                            launcher.require_current_owned_project_read(writer,sheet,binding,first,auth,read_kind='template_identity')
+                            with launcher._PROJECT_READ_GUARD:saved=launcher._PROJECT_READS.pop(first)
+                            self.assertIs(auth,saved);revoked.append((first,saved))
+                    with mock.patch.object(launcher.OwnedProjectSheetsReadUnit,'read_once',autospec=True,side_effect=read), \
+                            mock.patch.object(compiler,compiler_name,side_effect=compile_actual), \
+                            mock.patch.object(remote,'_hold_current_cycle_native_receipt_locators',side_effect=context):
+                        try:
+                            if _initial_revoke:
+                                with self.assertRaises(remote.RemoteHistoryHold):
+                                    returned.append(remote._prepare_current_cycle_native_switch_unit(
+                                        writer,sheet,binding,auth,_store=self.store,http_root=self.root))
+                            else:returned.append(remote._prepare_current_cycle_native_switch_unit(
+                                writer,sheet,binding,auth,_store=self.store,http_root=self.root))
+                        finally:
+                            for first,saved in revoked:
+                                with launcher._PROJECT_READ_GUARD:launcher._PROJECT_READS[first]=saved
+                    if _initial_revoke:self.assertEqual(1,len(revoked));self.assertEqual([],returned)
+                    else:self.assertEqual([('WIRE_REGISTERED' if _wire else 'NO_SEND',compiled[0].unit_id)],returned)
+                    if _wire:
+                        after=originals();self.assertEqual(before,{path:after[path] for path in before})
+                        self.assertTrue(after.keys()-before.keys())
+                        with catalog_module.hold_pending_project_c6_units(sheet,binding) as (pending,verify):
+                            self.assertEqual((compiled[0],),tuple(item.unit for item in pending));verify()
+                        self.assertFalse(any('.nv' in path.name or '.journal' in path.name for path in state.iterdir()))
+                    else:self.assertEqual(before,originals(),'fixed NO_SEND creation must not write catalog/NV/count/origin')
+                    self.assertEqual(audits_before,{path.name:(path.stat().st_ino,path.read_bytes()) for path in outbox.iterdir()})
+                    self.assertEqual(1,len(compiled));self.assertFalse(native_module._ACTIVE_CATALOG_PREPARATIONS)
+                    self.assertEqual([('template_identity',None),('template_identity',None),('metadata',None),
+                        ('activity',None),('insertion',None),('row',4),('row',3),('history_tail',None)],issued)
+                    return
                 original_pin=native_module._pin_catalog_prefix
                 tail_name='_verify_nv_project_read_tail' if _nv else '_verify_nonallocating_project_read_tail'
                 original_tail=getattr(native_module,tail_name,None)
@@ -5122,7 +5190,10 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                             _other_drift=native_current_no_send_probe=='cabling-nv-other-drift',
                             _tail_clear=native_current_no_send_probe=='cabling-nv-tail-clear')
                 else:self._verify_fresh_native_switch_no_send(committed,qualified,
-                    tail_revoke=native_current_no_send_probe=='tail-revoke')
+                    tail_revoke=native_current_no_send_probe=='tail-revoke',
+                    _wire=native_current_no_send_probe=='fixed-switch-creator-wire',
+                    _fixed_creation=native_current_no_send_probe in ('fixed-switch-creator','fixed-switch-creator-wire','fixed-switch-creator-initial-revoke'),
+                    _initial_revoke=native_current_no_send_probe=='fixed-switch-creator-initial-revoke')
                 return
             if observed_cabling_insert_probe:
                 import tempfile

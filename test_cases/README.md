@@ -3301,6 +3301,23 @@ both original and replacement, without returning a locator prefix. This
 negative was initially PASS with the retained holder contract, not invented
 RED. The helper is not yet the installed default NEW driver or bootstrap.
 
+The fixed current Switch creator now derives its generation/publish from that
+live context, issues its own initial template-identity read, creates a genuine
+nonallocating preparation and invokes the fixed receiver/compiler. WIRE is
+registered against the original current C6; NO_SEND closes with zero new
+catalog/NV/origin/attempt/COUNT and unchanged pending K outbox. Only a report
+tuple leaves this entry, never a compiler, guard or send permission. The
+original initial read/authentication is rechecked after preparation cleanup
+and after all source-holder finalizers while the external owners remain live;
+it is not replaced by a fresh read, reopened K or renewed deadline. Independent
+missing-entry RED and actual post-source-cleanup issuer-revocation RED are
+retained. The WIRE fixture error is separately diagnosed: changing evidence
+must preserve its stable MONITOR business-key prefix, otherwise it tests
+missing-key insertion instead of the intended active-row update. Literal
+two-row L-only WIRE/History expectations are unchanged. These direct and real
+protected C5/C6/OAuth/TLS flows do not close bootstrap, the three-family default
+NEW dispatcher, final external-owner cleanup, G1 or current full/check.
+
 Independent direct tests reject incoherent empty-wire/audit/zero-write state.
 The real fresh three-panel C5/C6 + OAuth + seven owned TLS-read workflow
 covers both normal all-NOOP exit with original files/outbox unchanged and
