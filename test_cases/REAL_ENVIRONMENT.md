@@ -2,6 +2,7 @@
 
 ## TC-REAL-REQ7-FIXED-SWITCH-NEW-ORIGINALS-001 — 同次真实创建到零计数原像
 
+- ETH/IB Cabling 扩展：同样状态 **NOT RUN**，保留真实 active 行更新与真实缺失/Closed 键 NV 插入两种必要机制；NV 原双列、原 ID reservation 和 `row_response=None` 原样贯穿实际 BUSINESS 创建，不能按响应列表切片重算配对。只读候选不是 NEW 证明；same-call packet 删除/替换/复制、原 issuer 撤销和原期限检查保持 fail closed，原旧 eight/nine-field read-tail、namespace、K 和 NV 收尾合同不放宽。未新增现场授权或接受风险确认人。
 - 类型：integration / real-environment；REQ7 C5/C6/C19/C25。状态 **NOT RUN / REAL_ENV REQUIRED**；自动化：`test_req7_remote_history_match` direct 与 `test_issue_tracker_stage_l_consumer_workflow` 实际多脚本 normal workflow。
 - 前置：另行精确现场授权、当前精确树与运行身份、专用表/同 Cloud 项目历史前提、真实当前 C5/C6、实际双 owner、合法本地登记及真实 target/History nonce 对。该卡不扩大真实 SSH、设备、Cloud 或生产写入授权。
 - 步骤/预期：固定 Switch creator 内真实编译、唯一登记；全部 native locator/bridge/preparation 原收尾成功后，独立 live C6 scope创建 GLOBAL→History→BUSINESS→quota；每阶段及收尾仍核同一实际 issuer/认证/原期限。保留正常流程、关键提交边界、代表性中断、冷恢复与失败安全状态；NO_SEND 零创建，零 COUNT/CLAIM/发送，不以旧 catalog/裸 unit_id/原件缺失启动补建。

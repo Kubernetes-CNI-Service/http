@@ -1020,10 +1020,22 @@ def _prepare_current_cycle_native_eth_cabling_unit(writer_token,owner_token,bind
         _store=_store,http_root=http_root,_sheet='ETH Cabling')
 
 
+def _prepare_current_cycle_native_eth_cabling_originals(writer_token,owner_token,binding,authentication,*,_store,http_root):
+    """Fixed same-call ETH NEW originals, including genuine NV inserts."""
+    return _prepare_current_cycle_native_unit(writer_token,owner_token,binding,authentication,
+        _store=_store,http_root=http_root,_sheet='ETH Cabling',_new_originals=True)
+
+
 def _prepare_current_cycle_native_ib_cabling_unit(writer_token,owner_token,binding,authentication,*,_store,http_root):
     """Fixed IB preparation; original columns select genuine NV when needed."""
     return _prepare_current_cycle_native_unit(writer_token,owner_token,binding,authentication,
         _store=_store,http_root=http_root,_sheet='IB Cabling')
+
+
+def _prepare_current_cycle_native_ib_cabling_originals(writer_token,owner_token,binding,authentication,*,_store,http_root):
+    """Fixed same-call IB NEW originals, including genuine NV inserts."""
+    return _prepare_current_cycle_native_unit(writer_token,owner_token,binding,authentication,
+        _store=_store,http_root=http_root,_sheet='IB Cabling',_new_originals=True)
 
 
 def _prepare_current_cycle_native_unit(writer_token,owner_token,binding,authentication,*,
@@ -1041,13 +1053,13 @@ def _prepare_current_cycle_native_unit(writer_token,owner_token,binding,authenti
         project=local._owner(writer_token);sheet_owner=ownership._validated_owner(owner_token,binding)
         root=Path(http_root)
         if (_sheet not in ('ETH&IB Switch','ETH Cabling','IB Cabling')
-                or type(_new_originals) is not bool or _new_originals and _sheet!='ETH&IB Switch'
+                or type(_new_originals) is not bool
                 or not root.is_absolute() or root.resolve(strict=True)!=root
                 or Path(_store.project_identity)!=project.project or _store.scope!='prod'):raise RemoteHistoryHold()
         from monitor import issue_tracker_nv_reservation as native,issue_tracker_unit_catalog as catalog
         from monitor.issue_tracker_history_read_launcher import OwnedProjectSheetsReadUnit,require_current_owned_project_read
         from monitor.issue_tracker_token_launcher import require_current_owned_project_token
-        new_images=None;new_unit=None
+        new_images=None;new_unit=None;new_packet=None
         with _hold_current_cycle_native_creation_locators(writer_token,owner_token,binding,
                 _store=_store,http_root=root) as (labels,prior_bridge):
             # Derive necessary Cabling keys from current protected C5 before
@@ -1126,10 +1138,15 @@ def _prepare_current_cycle_native_unit(writer_token,owner_token,binding,authenti
                             **({'_nv_preparation':prepared} if missing else {'_unit_preparation':prepared}))
                         if _new_originals:
                             record=native._verify_catalog_preparation(prepared)
-                            tail=record['project_read_tail'];packet=tail.packet
+                            tail=record['nv_project_read_tail' if missing else 'project_read_tail'];packet=tail.packet
                             if (packet is not tail._issued_packet or packet[:3]!=(writer_token,owner_token,binding)
                                     or packet[3] is not project or packet[4] is not sheet_owner
                                     or packet[5] is not authentication or packet[7] is not unit):raise RemoteHistoryHold()
+                            new_packet=record['native_current_original_prereads']
+                            if (new_packet is not record['native_current_original_prereads_issued']
+                                    or type(new_packet) is not tuple or len(new_packet)!=4
+                                    or new_packet[0] is not unit or new_packet[1] is not authentication
+                                    or new_packet[2] is not packet[6]):raise RemoteHistoryHold()
                             new_images=packet[6];new_unit=unit
                         result=('WIRE_REGISTERED',unit.unit_id)
                     elif unit.outcome=='NO_SEND':result=('NO_SEND',unit.unit_id)
@@ -1147,23 +1164,30 @@ def _prepare_current_cycle_native_unit(writer_token,owner_token,binding,authenti
             from monitor import issue_tracker_metadata_reservation as reservation
             def original_reads():
                 if (local._owner(writer_token) is not project
-                        or ownership._validated_owner(owner_token,binding) is not sheet_owner):raise RemoteHistoryHold()
+                        or ownership._validated_owner(owner_token,binding) is not sheet_owner
+                        or record.get('native_current_original_prereads') is not new_packet
+                        or record.get('native_current_original_prereads_issued') is not new_packet
+                        or new_packet[0] is not new_unit or new_packet[1] is not authentication
+                        or new_packet[2] is not new_images):raise RemoteHistoryHold()
                 verify_initial_identity()
                 for kind,title,row,response in new_images:
                     require_current_owned_project_read(writer_token,owner_token,binding,response,
                         authentication,read_kind=kind,sheet=title,row=row)
                 require_current_owned_project_token(owner_token,binding,authentication)
             original_reads()
-            if (tuple(item[:3] for item in new_images[:4])!=(('template_identity',None,None),
-                    ('metadata',None,None),('activity',_sheet,None),('insertion',_sheet,None))
-                    or new_images[-1][:3]!=('history_tail',None,None)
-                    or len(new_images[4:-1])!=len(new_unit.outcomes)):raise RemoteHistoryHold()
+            business=new_packet[3]
+            if (type(business) is not tuple or len(business)!=len(new_unit.outcomes)
+                    or tuple(reading['operation_id'] for reading in business)!=tuple(item[0] for item in new_unit.outcomes)
+                    or any(type(reading) is not dict or set(reading)!=
+                        {'operation_id','discovery_response','occupancy_response','row_response'} for reading in business)
+                    or any(response is not None and not any(response is image[3] for image in new_images)
+                        for reading in business for name,response in reading.items() if name.endswith('_response'))
+                    or new_images[0][:3]!=('template_identity',None,None)
+                    or new_images[1][:3]!=('metadata',None,None)
+                    or new_images[-1][:3]!=('history_tail',None,None)):raise RemoteHistoryHold()
             body=local._json(new_unit.action_preimage);generation_id=body['identity']['generation_id']
             generation=local.Generation(generation_id,int(local._GEN.fullmatch(generation_id).group(1)),
                 body['manifest_id'],writer_token)
-            business=tuple({'operation_id':outcome[0],'discovery_response':new_images[2][3],
-                'occupancy_response':new_images[3][3],'row_response':image[3]}
-                for outcome,image in zip(new_unit.outcomes,new_images[4:-1]))
             with _hold_applied_generation(writer_token,generation,new_unit) as (actual,verify_c6,_facts,_operations):
                 if actual is not project:raise RemoteHistoryHold()
                 def current():original_reads();verify_c6();original_reads()
@@ -1360,15 +1384,26 @@ def _hold_native_current_cycle_observed_nonallocating_unit(prepared,writer_token
                     local_generation_id=original[0],business_reads=tuple(business),history_plan=history_plan,
                     history_response=history_response,spreadsheet_token=owner_token,binding=binding,identity=identity,
                     occupied_metadata_ids=occupied,**({'_nv_preparation':prepared} if _native_nv else {'_unit_preparation':prepared}))
+                original_images=tuple(acquired)
                 if _native_nv:
                     # Existing actual reservation comparison remains WIRE-only;
                     # an NV preparation never gains NO_SEND cancellation.
                     if native._catalog_nv_compiled_observation(prepared,owner_token,binding,unit)!=prepared.observation:
                         raise RemoteHistoryHold()
                     native._bind_nv_project_read_tail(prepared,writer_token,owner_token,binding,
-                        authentication,tuple(acquired),unit)
+                        authentication,original_images,unit)
                 else:native._bind_nonallocating_project_read_tail(prepared,writer_token,owner_token,binding,
-                    authentication,tuple(acquired),unit)
+                    authentication,original_images,unit)
+                # Same lexical producer, not a supplied locator/plan/guard.
+                # Preserve each actual operation's raw response references,
+                # including None-row NV inserts and the separate other column.
+                if any(name in record for name in ('native_current_original_prereads',
+                        'native_current_original_prereads_issued')):raise RemoteHistoryHold()
+                creation=(unit,authentication,original_images,
+                    tuple({name:reading[name] for name in ('operation_id','discovery_response',
+                        'occupancy_response','row_response')} for reading in business))
+                record['native_current_original_prereads']=creation
+                record['native_current_original_prereads_issued']=creation
                 verify_reads();yield unit;verify_reads()
     except Exception:
         raise RemoteHistoryHold() from None

@@ -3370,12 +3370,18 @@ the default three-sheet NEW driver/final outer-owner boundary, G1, whole REQ7
 or current full/check. REAL_ENV remains NOT RUN; no scenario is removed,
 skipped or weakened and the runner alone may update approval.
 
-REQ7 fixed Switch NEW-originals bridge keeps creation and preread stages in
+REQ7 fixed Switch/ETH/IB NEW-originals bridges keep creation and preread stages in
 one fixed call. It retains the actual compiler's issued images, finishes the
 entire native locator/preparation cleanup, then creates GLOBAL, History,
 BUSINESS and quota under independent live C6 originals. It never refreshes
-reads, adopts an existing pending unit, loosens namespace guards, COUNTs or
+reads, adopt an existing pending unit, loosen namespace guards, COUNT or
 sends. The new actual workflow supplies a real journal-bound remote nonce
 pair; older empty-metadata candidate fixtures remain unchanged. Direct tests
-and the actual workflow are required; default NEW, Cabling, final full/check
+and actual active-row/NV-insert workflows are required; default NEW, final full/check
 and REAL_ENV remain separate unclosed work.
+
+The actual compiler retains its original four-field BUSINESS response mapping
+in a same-call, once-bound private data packet. NV's other-column read and
+None-row insert stay distinct; the original NV/nonallocating read-tail shapes,
+source/column checks and cleanup deadlines remain unchanged. Closed native
+verifiers never become permission for the independent preread stage.
