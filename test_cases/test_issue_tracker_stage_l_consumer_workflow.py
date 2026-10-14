@@ -52,6 +52,191 @@ def _load_current_native_creator_fixture_modules():
 
 
 class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
+    def test_postclose_business_fault_wraps_actual_pre_read_input_scope(self):
+        """Fixture routing control; real revoke/cleanup is a separate workflow."""
+        import ast,inspect,textwrap
+        tree=ast.parse(textwrap.dedent(inspect.getsource(self._exercise_native_original_counted_launch)))
+        holders=[node for node in ast.walk(tree) if isinstance(node,ast.FunctionDef)
+            and node.name=='held_business_inputs']
+        self.assertEqual(1,len(holders),'postclose fault must wrap the actual core input scope')
+        patches=[node for node in ast.walk(tree) if isinstance(node,ast.Call)
+            and isinstance(node.func,ast.Attribute) and node.func.attr=='object'
+            and len(node.args)>1 and isinstance(node.args[1],ast.Constant)
+            and node.args[1].value=='_hold_owned_original_business_history_inputs'
+            and any(k.arg=='side_effect' and isinstance(k.value,ast.Name)
+                and k.value.id=='held_business_inputs' for k in node.keywords)]
+        self.assertEqual(1,len(patches),'old public read wrapper is not this core source holder')
+        holder=holders[0]
+        closes=[node for node in holder.body if isinstance(node,ast.With)
+            and any(isinstance(item.context_expr,ast.Call)
+                and isinstance(item.context_expr.func,ast.Name)
+                and item.context_expr.func.id=='real_business_inputs' for item in node.items)]
+        self.assertEqual(1,len(closes))
+        revoke=[node for node in ast.walk(holder) if isinstance(node,ast.Call)
+            and isinstance(node.func,ast.Attribute) and node.func.attr=='pop']
+        self.assertEqual(1,len(revoke));self.assertGreater(revoke[0].lineno,closes[0].end_lineno,
+            'actual raw graph must finish before revoking its original issued read')
+
+    def _actual_fixed_template_transport(self,native,reader,documents,writer,owner,binding,real_read):
+        """Test transport only: four actual HTTP requests, one owned child.
+
+        Logical response records never copy this single physical Popen fact.
+        All original parser/supervisor/issuer code still executes once.
+        """
+        import socket
+        from test_cases.test_req7_sheets_read_decode import response
+        kinds=('template_identity','template_headers','whitelist','metadata')
+        bodies=tuple(response(documents[kind]).data for kind in kinds)
+        replies=tuple(b'HTTP/1.1 200 OK\r\nContent-Length: '+str(len(body)).encode()+
+            b'\r\nConnection: close\r\n\r\n'+body for body in bodies)
+        with native.server(replies,hostname='sheets.googleapis.com',destination='sheets.googleapis.com') as (records,errors),ExitStack() as launched:
+            port=socket.getaddrinfo('sheets.googleapis.com',443)[0][4][1]
+            old=native.child_fixture(port);needle='result=launcher._history_child(sys.argv[2])'
+            self.assertEqual(1,old.count(needle))
+            program=old.replace(needle,'result=launcher._history_template_cohort_child(sys.argv[2])')
+            calls,children=native.intercept(launched,program,writer,owner,binding,template_cohort=True)
+            values=real_read(reader)
+            self.assertEqual(bodies,tuple(value.data for value in values))
+            self.assertEqual((1,1),(len(calls),len(children)))
+            self.assertEqual(0,children[0].returncode)
+            self.assertTrue(all(getattr(children[0],name).closed for name in ('stdin','stdout','stderr')))
+        self.assertEqual((4,[]),(len(records),errors))
+        self.assertEqual(('GET','GET','GET','POST'),tuple(record[0].split(b' ',1)[0].decode() for record in records))
+        self.assertTrue(all(b'Host: sheets.googleapis.com\r\n' in record[1] for record in records))
+        self.assertEqual((b'',b'',b'',b'{"dataFilters":[{"developerMetadataLookup":{}}]}'),tuple(record[2] for record in records))
+        return values,(len(records),len(calls),len(children),tuple(errors),children[0].returncode)
+
+    def test_received_evaluation_observer_survives_input_close_at_actual_count_wire_scope(self):
+        import ast,inspect,textwrap
+        tree=ast.parse(textwrap.dedent(inspect.getsource(self._actual_received_fixed_source_evaluation_probe)))
+        patches=[node for node in ast.walk(tree) if isinstance(node,ast.Call)
+            and isinstance(node.func,ast.Attribute) and node.func.attr=='object']
+        attributes=[node.args[1].value for node in patches if len(node.args)>1
+            and isinstance(node.args[1],ast.Constant)]
+        self.assertIn('_hold_first_diagnostic_trace',attributes,
+            'actual input observer closes before Count facts; evaluate observer must dominate Count-wire scope')
+        self.assertNotIn('_first_source_core_receiver',attributes)
+
+    def test_received_sync_observer_matches_actual_count_identity_and_independent_unit_value(self):
+        # Static observer contract only; real native/Count reception remains
+        # separately exercised. A redecoded expected unit is not the issuer.
+        import ast,inspect,textwrap
+        tree=ast.parse(textwrap.dedent(inspect.getsource(
+            self._compile_current_issued_switch_after_actual_archive)))
+        observer=next(node for node in ast.walk(tree) if isinstance(node,ast.FunctionDef)
+            and node.name=='observe_received_sync')
+        assertions=[(node.func.attr,tuple(ast.unparse(argument) for argument in node.args))
+            for node in ast.walk(observer) if isinstance(node,ast.Call)
+            and isinstance(node.func,ast.Attribute) and node.func.attr in ('assertIs','assertEqual')]
+        self.assertIn(('assertIs',('original.receiver.unit',"count_packet['unit']")),assertions)
+        self.assertIn(('assertEqual',('current_unit','original.receiver.unit')),assertions)
+
+    def _first_source_sync_has_issued_k(self,writer,owner,state,allocation):
+        # Source raw ownership precedes K issuance and outlives K revocation.
+        # Only an actually registered, identical live K counts as read-phase
+        # evidence; construction/finalization cannot satisfy that requirement.
+        context=state._NATIVE_CATALOG_K_READ_CONTEXT.get(writer)
+        if context is None:
+            self.assertIsNone(allocation._NATIVE_CATALOG_K_CONTEXT.get())
+            self.assertFalse(any(packet['token'] is writer
+                for packet in allocation._LIVE_NATIVE_CATALOG_K_CONTEXTS.values()))
+            return False
+        self.assertIs(context,allocation._NATIVE_CATALOG_K_CONTEXT.get())
+        packet=allocation._LIVE_NATIVE_CATALOG_K_CONTEXTS.get(context)
+        self.assertIsNotNone(packet)
+        self.assertIs(writer,packet['token']);self.assertIs(owner,packet['owner'])
+        return True
+
+    def test_first_source_sync_observer_separates_acquisition_from_issued_k(self):
+        # Observer ordering control only, not a fabricated source/K proof.
+        from types import SimpleNamespace
+        observe=getattr(self,'_first_source_sync_has_issued_k',None)
+        self.assertTrue(callable(observe),'source construction must not require an already-issued K reader')
+        writer,owner,context=object(),object(),object()
+        current=[None]
+        state=SimpleNamespace(_NATIVE_CATALOG_K_READ_CONTEXT={})
+        allocation=SimpleNamespace(_NATIVE_CATALOG_K_CONTEXT=SimpleNamespace(get=lambda:current[0]),
+            _LIVE_NATIVE_CATALOG_K_CONTEXTS={})
+        self.assertIs(False,observe(writer,owner,state,allocation))
+        current[0]=context;state._NATIVE_CATALOG_K_READ_CONTEXT[writer]=context
+        packet={'token':writer,'owner':owner}
+        allocation._LIVE_NATIVE_CATALOG_K_CONTEXTS[context]=packet
+        self.assertIs(True,observe(writer,owner,state,allocation))
+        for field in ('token','owner'):
+            original=packet[field];packet[field]=object()
+            with self.assertRaises(AssertionError):observe(writer,owner,state,allocation)
+            packet[field]=original
+        current[0]=None
+        with self.assertRaises(AssertionError):observe(writer,owner,state,allocation)
+        state._NATIVE_CATALOG_K_READ_CONTEXT.clear();allocation._LIVE_NATIVE_CATALOG_K_CONTEXTS.clear()
+        self.assertIs(False,observe(writer,owner,state,allocation))
+
+    @contextmanager
+    def _hold_first_diagnostic_trace(self, observer):
+        # Exception tracing is a test-only observer, never a production permit.
+        # Ordinary behavior workflows must exercise the unchanged deadlines
+        # without a global Python-call callback installed by this fixture.
+        previous = sys.gettrace()
+        installed = getattr(self, '_first_diagnostic_trace', False) is True and previous is None
+        try:
+            if installed:sys.settrace(observer)
+            yield installed
+        finally:
+            if installed:sys.settrace(previous)
+
+    def test_first_diagnostic_trace_is_opt_in_and_restores_original_observer(self):
+        holder = getattr(self, '_hold_first_diagnostic_trace', None)
+        self.assertTrue(callable(holder), 'normal FIRST must not install an exception observer by default')
+        def observer(frame, event, argument):return None
+        def previous(frame, event, argument):return None
+        original = sys.gettrace()
+        try:
+            sys.settrace(None)
+            with mock.patch.object(sys,'settrace',wraps=sys.settrace) as changes:
+                with holder(observer) as installed:
+                    self.assertIs(installed,False)
+                    self.assertIsNone(sys.gettrace())
+                self.assertEqual(0,changes.call_count)
+            for requested, prior in ((False,None),(True,None),(True,previous)):
+                with self.subTest(requested=requested, prior=prior is not None):
+                    self._first_diagnostic_trace = requested
+                    sys.settrace(prior)
+                    failure = RuntimeError('original body refusal is not an observer result')
+                    with mock.patch.object(sys,'settrace',wraps=sys.settrace) as changes:
+                        with self.assertRaises(RuntimeError) as caught:
+                            with holder(observer) as installed:
+                                self.assertIs(installed,requested and prior is None)
+                                self.assertIs(sys.gettrace(),observer if installed else prior)
+                                raise failure
+                        self.assertIs(failure,caught.exception)
+                        self.assertIs(sys.gettrace(),prior)
+                        self.assertEqual(2 if requested and prior is None else 0,changes.call_count)
+        finally:
+            sys.settrace(original)
+            self.__dict__.pop('_first_diagnostic_trace',None)
+
+    def test_first_core_fixture_observer_binds_the_current_postreload_factory(self):
+        # Composition control only: not actual FIRST acceptance. The selected
+        # callable must be supplied at dispatch, after canonical reloads.
+        selector = getattr(self, '_hold_actual_first_fixture_inputs', None)
+        self.assertTrue(callable(selector), 'FIRST observer needs a post-reload dispatch boundary')
+        events = []; packet = object()
+        @contextmanager
+        def current(*args, **kwargs):
+            events.append(('current', args, kwargs)); yield packet
+            events.append('current closed')
+        @contextmanager
+        def observer(original, *args, **kwargs):
+            self.assertIs(current, original)
+            events.append('observer entered')
+            with original(*args, **kwargs) as actual: yield actual
+            events.append('observer closed')
+        with mock.patch.object(self, '_first_source_core_receiver', observer, create=True):
+            with selector(current, 'literal', key='literal') as actual:
+                self.assertIs(packet, actual)
+        self.assertEqual(['observer entered', ('current', ('literal',), {'key':'literal'}),
+            'current closed', 'observer closed'], events)
+
     def test_current_creator_fixture_refreshes_retained_inventory_before_first_consumer_tokens(self):
         from monitor import issue_tracker_retained_inventory as old_inventory
         from test_cases.test_req7_spreadsheet_owner import load as load_owner
@@ -184,6 +369,43 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
 
     def test_actual_default_worker_dedicated_quota_originals_outlive_strict_input_finalizers(self):
         self._exercise_default_dedicated_quota_originals()
+
+    def _create_authenticated_quota_original(self, module, root, writer, owner, bound, unit, raw):
+        """Create provenance once from actual reads; never upgrade a legacy HEADER."""
+        from test_cases import test_req7_metadata_reservation as quota_fixture
+        from test_cases.test_req7_sheets_read_decode import identity_response
+        native=quota_fixture.Req7MetadataReservationProjectWorkflowTests()
+        native.root=root; native.path=root/'etc/ssl/certs/ca-certificates.crt'
+        native.path.parent.mkdir(parents=True,exist_ok=True); native.addCleanup=self.addCleanup
+        with ExitStack() as scope:
+            auth,_credential,_bytes=native.project_auth(scope,module.ownership,owner,bound)
+            native.certificates('sheets.googleapis.com')
+            def original_read(kind,document):
+                import socket
+                from monitor.issue_tracker_history_read_launcher import OwnedProjectSheetsReadUnit
+                # Exact unchanged enrollment wire spacing is part of identity.
+                body=json.dumps(document,allow_nan=False).encode()
+                reply=b'HTTP/1.1 200 OK\r\nContent-Length: '+str(len(body)).encode()+b'\r\nConnection: close\r\n\r\n'+body
+                with native.server(reply,hostname='sheets.googleapis.com',destination='sheets.googleapis.com') as (records,errors),ExitStack() as launched:
+                    port=socket.getaddrinfo('sheets.googleapis.com',443)[0][4][1]
+                    calls,children=native.intercept(launched,native.child_fixture(port),writer,owner,bound)
+                    result=OwnedProjectSheetsReadUnit(writer,owner,bound,auth,read_kind=kind).read_once()
+                self.assertEqual([],errors); self.assertEqual(1,len(records)); self.assertEqual(1,len(calls))
+                self.assertEqual(0,children[0].returncode); self.assertEqual(body,result.data)
+                return result
+            identity_doc=identity_response(); identity_doc['spreadsheetId']=bound.spreadsheet_id
+            identity_read=original_read('template_identity',identity_doc)
+            metadata_read=original_read('metadata',json.loads(raw.data))
+            result=module.prepare_owned_project_metadata_reservation(writer,owner,bound,auth,unit,
+                identity_response=identity_read,metadata_response=metadata_read)
+        # Preserve our CA after constructor children finish. The unchanged
+        # consumer later creates its separate CA directory with exist_ok=False.
+        native.path.parent.rename(root/'constructor-ca-preserved')
+        state=root/'var/lib/http-ztp-container/issue-tracker'
+        quota=state/(hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()+'.unit-'+unit.unit_id+'.metadata')
+        self.assertEqual({'schema_version':1,'cloud_project_id':'synthetic-cloud-project'},
+            json.loads((quota/'HEADER').read_bytes())['project_origin'])
+        return result
 
     def _exercise_default_dedicated_quota_originals(self, *, retry_probe=False):
         from test_cases import test_req7_spreadsheet_owner as owner_fixture
@@ -533,6 +755,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         owner_original = owner_module._validated_owner(spreadsheet_token, binding)
         real_refresh = tokens.OwnedProjectTokenRefreshUnit.refresh_once
         real_read = fixed_reads.OwnedProjectSheetsReadUnit.read_once
+        real_cohort = fixed_reads.OwnedProjectTemplateReadCohort.read_once
         real_source = source.qualify_prod_stage_l
         real_reconcile = remote._reconcile_pending_project_units_and_project_auth
         real_consume = remote._consume_current_project_online_original_inputs
@@ -541,7 +764,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         real_inputs = source._hold_original_replay_inputs
         real_send=mutation._send_counted_original_once
         real_dup = os.dup
-        issued = []; oauth = []; projections = []; reconciled = []; consumed = []
+        issued = []; cohort_physical = []; oauth = []; projections = []; reconciled = []; consumed = []
         graphs = []; packets = []; core_closed = []; after_strict = []; input_verified = []
         documents = {'template_identity': identity_response(), 'template_headers': header_response(),
             'whitelist': whitelist_doc, 'metadata': json.loads(quota_raw.data),
@@ -619,6 +842,15 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         def reconcile(*args, **options):
             actual = real_reconcile(*args, **options)
             reconciled.append((*actual,len(oauth))); return actual
+        def read_cohort(reader):
+            self.assertEqual(1,len(oauth));self.assertTrue(projections)
+            values,physical=self._actual_fixed_template_transport(native,reader,documents,
+                writer_token,spreadsheet_token,binding,real_cohort)
+            cohort_physical.append(physical)
+            for kind in ('template_identity','template_headers','whitelist','metadata'):
+                # Zero per-kind Popen entries; the one actual child is above.
+                issued.append((kind,1,0,(),0))
+            return values
         def consume(*args, **options):
             self.assertEqual((writer_token,spreadsheet_token,binding,None),args)
             self.assertEqual({'_store':self.store,'http_root':self.root},options)
@@ -714,6 +946,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             boundary.enter_context(mock.patch.object(source,'qualify_prod_stage_l',side_effect=qualify))
             boundary.enter_context(mock.patch.object(tokens.OwnedProjectTokenRefreshUnit,'refresh_once',autospec=True,side_effect=refresh))
             boundary.enter_context(mock.patch.object(fixed_reads.OwnedProjectSheetsReadUnit,'read_once',autospec=True,side_effect=read))
+            boundary.enter_context(mock.patch.object(fixed_reads.OwnedProjectTemplateReadCohort,'read_once',autospec=True,side_effect=read_cohort))
             boundary.enter_context(mock.patch.object(remote,'_reconcile_pending_project_units_and_project_auth',side_effect=reconcile))
             boundary.enter_context(mock.patch.object(remote,'_consume_current_project_online_original_inputs',side_effect=consume))
             boundary.enter_context(mock.patch.object(remote,'_hold_current_project_online_inputs',side_effect=core))
@@ -784,8 +1017,9 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                 diagnostic.getvalue())
             self.assertEqual([((), None, 0)], reconciled); self.assertEqual(1, len(oauth))
             self.assertTrue(projections); self.assertTrue(all(value == qualified for value in projections))
-            self.assertEqual([(kind, 1, 1, (), 0) for kind in ('template_identity', 'template_headers',
-                'whitelist', 'metadata', 'history_tail', 'activity', 'insertion', 'row')], issued)
+            self.assertEqual([(kind,1,0,(),0) for kind in ('template_identity','template_headers','whitelist','metadata')]+
+                [(kind,1,1,(),0) for kind in ('history_tail','activity','insertion','row')],issued)
+            self.assertEqual([(4,1,1,(),0)],cohort_physical)
             self.assertEqual(1, len(packets)); self.assertEqual(1, len(graphs))
             self.assertEqual(9, len(graphs[0][1])); self.assertEqual([], mutation_facts)
             for fd, _info, _raw in graphs[0][1]:
@@ -806,6 +1040,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                 for path in self.store.status_dir.rglob('*') if path.is_file()})
             return sheet+':actual-default-worker:post-count-expiry:unknown-no-claim-send'
         if original_conflict_probe:
+            self.assertEqual([],cohort_physical,'conflict must not enter the online cohort')
             self.assertEqual(1, len(reconciled))
             original_observations, auth, refresh_count = reconciled[0]
             self.assertEqual([('CONFLICT', 1)],
@@ -840,8 +1075,10 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         self.assertTrue(projections); self.assertTrue(all(value==qualified for value in projections))
         historical_kinds = ('template_identity', 'template_headers', 'metadata', 'history_tail') \
             if terminal_dispatch_probe and retry_probe else ()
-        self.assertEqual([(kind,1,1,(),0) for kind in historical_kinds + ('template_identity','template_headers',
-            'whitelist','metadata','history_tail','activity','insertion','row')],issued)
+        self.assertEqual([(kind,1,1,(),0) for kind in historical_kinds]+
+            [(kind,1,0,(),0) for kind in ('template_identity','template_headers','whitelist','metadata')]+
+            [(kind,1,1,(),0) for kind in ('history_tail','activity','insertion','row')],issued)
+        self.assertEqual([(4,1,1,(),0)],cohort_physical)
         self.assertEqual(1,len(packets)); self.assertEqual(1,len(graphs)); self.assertEqual([True],core_closed)
         actual_settings,_whitelist,responses,prepared,authentication = packets[0]
         self.assertEqual(settings,actual_settings); self.assertIs(oauth[0],authentication)
@@ -1595,6 +1832,14 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
     def test_real_nine_role_ib_and_eth_fourth_role_qualify_and_c5_reject_drift(self):
         self._exercise_real_protected_three_panel_fixture(skip_history=False)
 
+    def test_real_native_projection_uses_actual_switch_pair_and_keeps_independent_final_pair(self):
+        self._exercise_real_protected_three_panel_fixture(skip_history=False,
+            qualification_replay_probe='projection-switch-pair')
+
+    def test_real_native_projection_switch_pair_cannot_hide_archive_drift_before_final_replay(self):
+        self._exercise_real_protected_three_panel_fixture(skip_history=False,
+            qualification_replay_probe='projection-switch-pair-drift')
+
     def test_real_protected_three_panel_sources_compile_literal_units_and_refuse_invented_values(self):
         self._exercise_real_protected_three_panel_fixture(skip_history=False, source_unit_probe=True)
 
@@ -1779,6 +2024,585 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         def fixed_creator(**kwargs):return original(**kwargs,_fixed_creator=True)
         with mock.patch.object(self,'_compile_current_issued_switch_after_actual_archive',side_effect=fixed_creator):
             self._native_completed_archive_preview_probe(local_c6=True,native_current_compiler=True,issued_current_compiler=True)
+
+    def test_real_archived_delivery_new_originals_then_independent_first_sends_only_current_wire(self):
+        original=self._compile_current_issued_switch_after_actual_archive
+        def fixed_first(**kwargs):return original(**kwargs,_fixed_creator=True,_first_after_archive=True)
+        with mock.patch.object(self,'_compile_current_issued_switch_after_actual_archive',side_effect=fixed_first), \
+                mock.patch.object(self,'_archived_first_authenticated_quota_from_creation',True,create=True):
+            self._native_completed_archive_preview_probe(local_c6=True,native_current_compiler=True,issued_current_compiler=True)
+
+    def test_fixed_c19_observer_matches_exact_code_actual_parameter_and_original_identity(self):
+        from types import SimpleNamespace
+        entry=getattr(type(self),'_fixed_c19_frame_is_original',None)
+        self.assertTrue(callable(entry),'fixed C19 observer parameter matcher missing')
+        metadata=object()
+        def wrapped(original):pass
+        def direct(self):pass
+        for function,parameter in ((wrapped,'original'),(direct,'self')):
+            code=function.__code__
+            self.assertTrue(entry(SimpleNamespace(f_code=code,f_locals={parameter:metadata}),code,metadata))
+            self.assertFalse(entry(SimpleNamespace(f_code=code,f_locals={parameter:object()}),code,metadata))
+            self.assertFalse(entry(SimpleNamespace(f_code=code,f_locals={'wrong':metadata}),code,metadata))
+        self.assertFalse(entry(SimpleNamespace(f_code=direct.__code__,f_locals={'original':metadata}),
+                               wrapped.__code__,metadata))
+
+    @staticmethod
+    def _fixed_c19_frame_is_original(frame,code,metadata):
+        # The exact installed fixture wrapper has an `original` parameter;
+        # the unwrapped method has `self`. Neither name is an issuance proof.
+        return frame.f_code is code and frame.f_locals.get(code.co_varnames[0]) is metadata
+
+    @staticmethod
+    def _fixed_c6_checkpoint_code(packet):
+        # Observer identity only: the real packet retains this original
+        # closure even when fixture imports replace a same-named module.
+        import inspect
+        from types import FunctionType
+        original=inspect.getclosurevars(packet['verify']).nonlocals['c6_verify']
+        if type(original) is not FunctionType:raise AssertionError('original C6 closure missing')
+        return original.__code__
+
+    def test_fixed_c6_observer_uses_current_closure_not_pre_fixture_code(self):
+        namespace={}
+        exec('def delegate():\n    return 1\n',namespace)
+        before=namespace['delegate'].__code__
+        exec('def delegate():\n    return 1\n',namespace)
+        actual=namespace['delegate']
+        def packet_for(c6_verify):
+            def verify():return c6_verify()
+            return {'verify':verify}
+        self.assertIsNot(before,actual.__code__)
+        self.assertIs(actual.__code__,self._fixed_c6_checkpoint_code(packet_for(actual)))
+
+    def _actual_received_fixed_source_evaluation_probe(self, fault=None, *, receipt_mode=False,c6_postreturn=False):
+        """Actual complete qualifier under Count originals; no send/full proof.
+
+        Stop only after the fixed evaluator's own return/refusal boundary.
+        Observations supply no source result, native issuer or clock value.
+        """
+        class EvaluationObserved(BaseException):pass
+        primary=EvaluationObserved();facts=[];receivers=[];count_boundaries=[];c6_returns=[];unpoisoned_at_result=[]
+        actual_trace_scope=self._hold_first_diagnostic_trace
+        @contextmanager
+        def observe_count_wire(observer):
+            with actual_trace_scope(observer) as installed:
+                if not observer.__qualname__.endswith('diagnosed_count_wire.<locals>.trace'):
+                    yield installed;return
+                self.assertIs(installed,False)
+                with observe_fixed_evaluator():yield installed
+        @contextmanager
+        def observe_fixed_evaluator():
+            from monitor import issue_tracker_settings_audit_allocation as allocation
+            from monitor import issue_tracker_global_attempt_journal as journal
+            from monitor import issue_tracker_stage_l_consumer as source
+            from monitor import issue_tracker_send_unit as send_unit
+            from monitor import issue_tracker_receipt_snapshot as receipts
+            from monitor import issue_tracker_state_owner as state
+            entry_name='_evaluate_received_count_receipt' if receipt_mode else '_evaluate_received_count_source'
+            entry=getattr(allocation,entry_name,None)
+            legacy_receipt=receipt_mode and entry is None
+            if legacy_receipt:entry=send_unit._original_receipt_identity
+            self.assertTrue(callable(entry),'fixed evaluator missing; structural RED, not native behavioral proof')
+            def observe_evaluation(writer,sheet,bound,unit,*arguments,**options):
+                def invoke_original():
+                    if legacy_receipt:
+                        return entry(options['qualified_source'],arguments[0],options['generation_id'],writer,
+                            options['settings'],options['whitelist_snapshot'],options['expected_template_sha256'])
+                    return entry(writer,sheet,bound,unit,*arguments,**options)
+                if (receipt_mode or c6_postreturn) and fault=='delivered':
+                    # The new fixed factory also runs in the genuine prefix
+                    # before COUNT. Let that original computation finish;
+                    # this failure contract targets persisted Count=1 only.
+                    # The C6 checkpoint control must likewise not intercept
+                    # the original pre-Count source prefix (which has no K).
+                    image=journal.inspect_global_unit(sheet,bound,unit)
+                    if image.attempt_count==0:return invoke_original()
+                    self.assertEqual((1,'UNKNOWN'),(image.attempt_count,image.outcome))
+                    count_boundaries.append((image.attempt_count,image.outcome))
+                relation=allocation._LIVE_COUNT_RECEIVED_SOURCES[journal._HELD_COUNT_CLAIM_ORIGINALS.get()]
+                received,metadata=relation[1:];receivers.append(received)
+                full_code=type(metadata)._verify_receiver_raw.__code__
+                c6_code=k_verify_code=None
+                if c6_postreturn:
+                    issued=allocation._NATIVE_CATALOG_K_CONTEXT.get()
+                    packet=allocation._LIVE_NATIVE_CATALOG_K_CONTEXTS[issued]
+                    k_verify_code=packet['verify'].__code__
+                    c6_code=self._fixed_c6_checkpoint_code(packet)
+                qualifier_code=((entry.__code__ if legacy_receipt else send_unit._original_receipt_identity.__code__) if receipt_mode
+                    else source.qualify_prod_stage_l.__code__)
+                k_code=receipts.current_k.__code__;k_returns=[]
+                raw_calls=[];completed=[];changed=[];refused=[]
+                barrier_code=type(metadata)._sync_barriers.__code__
+                barrier_calls=[];barriers_at_result=[];in_barrier=[False]
+                import threading
+                barrier_thread=threading.get_ident()
+                barrier_fds=frozenset(fd for groups in metadata.original_barriers for group in groups for fd in group)
+                original_fsync=os.fsync
+                def synchronize_original(fd):
+                    boundary=1 if fault=='sync-entry' else 2 if fault=='sync-exit' else None
+                    if (threading.get_ident()==barrier_thread and fd in barrier_fds
+                            and in_barrier[0] and boundary==len(barrier_calls) and not changed):
+                        changed.append(True)
+                        raise OSError('owned original C19 boundary fixture')
+                    return original_fsync(fd)
+                previous=sys.getprofile();self.assertIsNone(previous)
+                def observe(frame,event,_argument):
+                    if (c6_postreturn and event=='return' and frame.f_code is c6_code
+                            and frame.f_back is not None and frame.f_back.f_code is k_verify_code
+                            and frame.f_back.f_locals.get('evaluating') is True):
+                        c6_returns.append(True)
+                    if event=='return' and frame.f_code is k_code and _argument is not None:
+                        k_returns.append(True)
+                    if event=='call' and frame.f_code is full_code and frame.f_locals.get('self') is metadata:
+                        raw_calls.append(True)
+                    if self._fixed_c19_frame_is_original(frame,barrier_code,metadata):
+                        if event=='call':barrier_calls.append(True);in_barrier[0]=True
+                        elif event=='return':in_barrier[0]=False
+                    if event=='return' and frame.f_code is qualifier_code and _argument is not None:
+                        completed.append(True)
+                        barriers_at_result.append(len(barrier_calls))
+                        if c6_postreturn:
+                            self.assertTrue(c6_returns,'replacement follows a genuine internal C6 delegate return')
+                            unpoisoned_at_result.append(received.source_failed is False)
+                        if fault=='delivered' and not changed:
+                            rows=[row for row in received.raw.files if row[1]=='DELIVERED']
+                            self.assertTrue(rows,'genuine prior DELIVERED original must exist')
+                            parent,name,fd,identity,raw=rows[0]
+                            os.rename(name,'DELIVERED-original-evaluation',src_dir_fd=parent,dst_dir_fd=parent)
+                            replacement=os.open(name,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,dir_fd=parent)
+                            try:
+                                self.assertEqual(len(raw),os.write(replacement,raw));os.fsync(replacement)
+                                self.assertNotEqual(identity[:2],(os.fstat(replacement).st_dev,os.fstat(replacement).st_ino))
+                            finally:os.close(replacement)
+                            self.assertEqual(raw,os.pread(fd,len(raw),0));changed.append(True)
+                        elif fault=='caught-metadata' and not changed:
+                            old=metadata.original.actual['events'];changed.append(True)
+                            metadata.original.actual['events']=tuple(list(old))
+                            try:
+                                with self.assertRaises(state.TrackerStateHold):state.current_k(writer)
+                            finally:metadata.original.actual['events']=old
+                            self.assertTrue(received.source_failed)
+                            with self.assertRaises(state.TrackerStateHold):state.current_k(writer)
+                try:
+                    sys.setprofile(observe)
+                    with mock.patch.object(os,'fsync',new=synchronize_original):
+                        try:
+                            invoke_original()
+                        except BaseException as error:
+                            if (isinstance(error,allocation.SettingsAuditHold)
+                                    or (fault in ('sync-entry','sync-exit') and isinstance(error,OSError))):
+                                refused.append(True)
+                            else:raise
+                finally:sys.setprofile(previous)
+                if (receipt_mode or c6_postreturn) and fault=='delivered':
+                    image=journal.inspect_global_unit(sheet,bound,unit)
+                    count_boundaries.append((image.attempt_count,image.outcome))
+                    self.assertEqual((1,'UNKNOWN'),(image.attempt_count,image.outcome))
+                    print('ACTUAL_RECEIPT_DRIFT_COUNT_BOUNDARIES',json.dumps(count_boundaries),flush=True)
+                facts.append((len(raw_calls),completed,changed,refused,received.source_failed,
+                              len(barrier_calls),barriers_at_result,k_returns))
+                raise primary
+            if legacy_receipt:
+                def observe_legacy_receipt(qualified,store,generation,writer,settings,snapshot,sha):
+                    relation=allocation._LIVE_COUNT_RECEIVED_SOURCES.get(journal._HELD_COUNT_CLAIM_ORIGINALS.get())
+                    if relation is None or relation[2]._short_k_original is None:
+                        return entry(qualified,store,generation,writer,settings,snapshot,sha)
+                    received=relation[1]
+                    return observe_evaluation(writer,received.sheet,received.bound,received.unit,store,
+                        qualified_source=qualified,generation_id=generation,settings=settings,
+                        whitelist_snapshot=snapshot,expected_template_sha256=sha)
+                with mock.patch.object(send_unit,'_original_receipt_identity',new=observe_legacy_receipt):yield
+            else:
+                with mock.patch.object(allocation,entry_name,new=observe_evaluation):yield
+        with mock.patch.object(self,'_hold_first_diagnostic_trace',new=observe_count_wire):
+            with self.assertRaises(EvaluationObserved) as caught:
+                self.test_real_archived_delivery_new_originals_then_independent_first_sends_only_current_wire()
+        self.assertIs(primary,caught.exception)
+        self.assertEqual(1,len(facts));count,completed,changed,refused,poisoned,barriers,barriers_at_result,k_returns=facts[0]
+        if receipt_mode:self.assertEqual([True,True],k_returns,'actual receipt must retain both original current K reads')
+        if (receipt_mode or c6_postreturn) and fault=='delivered':
+            self.assertEqual([(1,'UNKNOWN'),(1,'UNKNOWN')],count_boundaries,
+                'last-receipt drift must preserve actual persisted Count=1 UNKNOWN, not stop at prefix Count=0')
+        if fault=='sync-entry':
+            self.assertEqual([],completed,'failed original ENTRY barrier must not enter qualification')
+        else:
+            self.assertEqual([True],completed,'real complete original qualifier must reach its last return')
+        if fault:
+            self.assertEqual([True],changed);self.assertEqual([True],refused);self.assertTrue(poisoned)
+            if c6_postreturn:
+                self.assertEqual([True],unpoisoned_at_result,
+                    'no controlled primary or poisoned scope may manufacture the target refusal')
+                self.assertGreaterEqual(count,3,
+                    'two genuine ENTRY raw sweeps must be followed by the actual full EXIT raw delegate')
+        else:
+            self.assertEqual((4,[],[],False),(count,changed,refused,poisoned),
+                'whole source ENTRY/EXIT each keep both full raw checks; internal K is not a full ALL rescan')
+            self.assertEqual((2,[1]),(barriers,barriers_at_result),
+                'fixed source ENTRY/complete EXIT each sync all original C19 groups; internal K issues no permission')
+        self.assertTrue(receivers[0].closed);self.assertEqual([],receivers[0].raw.slots)
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        self.assertEqual({},allocation._LIVE_RECEIVED_COUNT_K_ORIGINALS)
+        self.assertEqual({},allocation._LIVE_NATIVE_CATALOG_K_CONTEXTS)
+
+    def test_real_received_fixed_source_evaluation_checks_whole_all_at_both_return_boundaries(self):
+        self._actual_received_fixed_source_evaluation_probe()
+
+    def test_real_received_fixed_source_evaluation_refuses_same_bytes_delivered_replacement_at_last_source_return(self):
+        self._actual_received_fixed_source_evaluation_probe('delivered')
+
+    def test_real_received_fixed_source_evaluation_caught_restored_metadata_drift_stays_poisoned(self):
+        self._actual_received_fixed_source_evaluation_probe('caught-metadata')
+
+    def test_real_received_fixed_source_evaluation_entry_barrier_failure_refuses_before_qualification(self):
+        self._actual_received_fixed_source_evaluation_probe('sync-entry')
+
+    def test_real_received_fixed_source_evaluation_exit_barrier_failure_refuses_before_result_return(self):
+        self._actual_received_fixed_source_evaluation_probe('sync-exit')
+
+    def test_real_received_fixed_receipt_evaluation_keeps_both_k_and_complete_return_boundaries(self):
+        self._actual_received_fixed_source_evaluation_probe(receipt_mode=True)
+
+    def test_real_received_fixed_receipt_evaluation_refuses_delivered_replacement_at_last_receipt_return(self):
+        self._actual_received_fixed_source_evaluation_probe('delivered',receipt_mode=True)
+
+    def _hold_actual_first_fixture_inputs(self, actual_first_inputs, *args, **kwargs):
+        """Select the test observer only at actual post-reload FIRST dispatch."""
+        observer = getattr(self, '_first_source_core_receiver', None)
+        return (actual_first_inputs(*args, **kwargs) if observer is None
+            else observer(actual_first_inputs, *args, **kwargs))
+
+    @contextmanager
+    def _observe_actual_first_source_core(self, actual_first_inputs, *arguments, **keywords):
+        """Observe genuine current modules and native read fixture after reload."""
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        from monitor import issue_tracker_state_owner as state
+        from monitor import issue_tracker_global_attempt_journal as journal
+        from monitor import issue_tracker_history_preread_journal as preread, issue_tracker_unit_catalog as catalog
+        from monitor import issue_tracker_stage_l_consumer as source
+        primary = self._first_core_primary; facts = self._first_core_facts
+        self._first_core_entries.append('post-reload actual FIRST')
+        prefix_events = []; in_first = [False]
+        captured_images = []; capture_before_read = []; source_timings = []; fresh_reads = []
+        fault_mode = getattr(self, '_first_core_final_source_fault', False); faulted = []
+        original = actual_first_inputs
+        original_prefix = journal._hold_receipted_original_source_inputs
+        original_business_prefix = preread._hold_owned_original_business_history_inputs
+        original_file = catalog._Originals.file
+        original_qualify = source.qualify_prod_stage_l
+        def timed_qualify(*args, **options):
+            started = time.monotonic()
+            if fault_mode and len(fresh_reads) == 9 and not faulted:
+                # All actual fresh business/continuity and last capacity IO
+                # precede this genuine final source qualifier. Keep K/W1
+                # unchanged; mutate ONLY the known original Switch archive.
+                path = self._first_core_current_archive
+                self.assertEqual(options['settings'], state.current_k(options['writer_token']))
+                from monitor.issue_tracker_whitelist_workbook import read_whitelist_workbook
+                self.assertEqual(options['whitelist_snapshot'], read_whitelist_workbook(options['whitelist_path']))
+                raw = path.read_bytes(); changed = raw + b'changed at final actual source boundary'
+                path.write_bytes(changed)
+                self.assertEqual(changed, path.read_bytes())
+                faulted.append(path)
+                facts.append('actual final archive changed; original K and W1 unchanged')
+                print('ARCHIVED_FIRST_FINAL_SOURCE_FAULT', json.dumps({
+                    'original_sha256':hashlib.sha256(raw).hexdigest(),
+                    'changed_sha256':hashlib.sha256(changed).hexdigest(),
+                    'fresh_actual_reads':len(fresh_reads)},sort_keys=True),flush=True)
+            try: return original_qualify(*args, **options)
+            except source.StageLConsumerHold:
+                if faulted: facts.append('actual source qualifier refused changed archive')
+                raise
+            finally: source_timings.append(time.monotonic() - started)
+        @contextmanager
+        def phase_evidence():
+            try: yield
+            finally:
+                if faulted:
+                    writer, sheet, bound, current_unit = self._first_core_current_unit
+                    self.assertEqual(0, journal.inspect_global_unit(sheet, bound, current_unit).attempt_count)
+                    self.assertTrue(faulted[0].read_bytes().endswith(b'changed at final actual source boundary'))
+                    facts.append('count zero; changed original not repaired')
+                print('ARCHIVED_FIRST_LOCAL_PHASE_FACTS',json.dumps({
+                    'actual_local_capture_count':len(captured_images),
+                    'capture_preceded_identity':capture_before_read == [True],
+                    'actual_qualification_seconds':source_timings,
+                    'source_and_read_budgets_unchanged':True},sort_keys=True),flush=True)
+        @contextmanager
+        def observe_business_prefix(*args, **options):
+            touched = []
+            capture_code = original_business_prefix.__wrapped__.__code__
+            def observe_file(images, *arguments, **keywords):
+                result = original_file(images, *arguments, **keywords)
+                if sys._getframe(1).f_code is capture_code and images not in touched:
+                    touched.append(images)
+                return result
+            with ExitStack() as capture_scope:
+                # Delegate the original acquisition once. No factory, graph,
+                # returned-success value or FD identity is supplied to it.
+                with mock.patch.object(catalog._Originals, 'file', new=observe_file):
+                    bind = capture_scope.enter_context(original_business_prefix(*args, **options))
+                self.assertEqual(1, len(touched)); images = touched[0]
+                self.assertEqual((2, 7), (len(images.directories), len(images.files)))
+                self.assertEqual(['MANIFEST','BUSINESS-RAW','HEADER','INITIALIZED',
+                    'HISTORY-RAW','HEADER','INITIALIZED'], [item[1] for item in images.files])
+                images.verify()
+                captured_images.append(images); capture_before_read.append(True)
+                yield bind
+            # The genuine context has closed all original images and the
+            # corresponding guard, not a separately reopened substitute.
+            for _parent, _name, fd, identity, _data in (*images.files, *images.directories):
+                try: remaining = preread.journal._identity(os.fstat(fd))
+                except OSError as error:
+                    import errno
+                    if error.errno != errno.EBADF: raise
+                    continue
+                self.assertNotEqual(identity[:2], remaining[:2], 'original inode still held in descriptor slot after source close')
+        from monitor import issue_tracker_history_read_launcher as launcher
+        original_read = launcher.OwnedProjectSheetsReadUnit.read_once
+        original_cohort = launcher.OwnedProjectTemplateReadCohort.read_once
+        @contextmanager
+        def observe_prefix(*args, **options):
+            with original_prefix(*args, **options) as actual:
+                prefix_events.append('actual local prefix entered')
+                yield actual
+            prefix_events.append('actual local suffix complete')
+        def observe_read(reader):
+            if in_first[0] and reader._kind == 'template_identity':
+                self.assertEqual([True], capture_before_read,
+                    'genuine nine local originals must be held before FIRST identity issuance')
+                self.assertEqual(['actual local prefix entered'], prefix_events,
+                    'the genuine source/receipt prefix must complete before FIRST identity issuance')
+                prefix_events.append('actual FIRST identity read')
+            result = original_read(reader)
+            if in_first[0]: fresh_reads.append(reader._kind)
+            return result
+        def observe_cohort(reader):
+            if in_first[0]:
+                self.assertEqual([True],capture_before_read,
+                    'the same genuine nine local originals precede cohort issuance')
+                self.assertEqual(['actual local prefix entered'],prefix_events)
+                prefix_events.append('actual FIRST identity read')
+            result=original_cohort(reader)
+            if in_first[0]:fresh_reads.extend(('template_identity','template_headers','whitelist','metadata'))
+            return result
+        @contextmanager
+        def receive(*args, **options):
+            writer, sheet, bound, authentication = args
+            in_first[0] = True
+            with mock.patch.object(source, 'qualify_prod_stage_l', new=timed_qualify), \
+                    original(*args, **options) as packet:
+                settings, whitelist, responses, rows, actual_auth = packet
+                # Independent fixture input is set_k(new_k=1,
+                # expected_revision=0) in the three-panel setup. This actual
+                # archived FIRST path does not request two_cycle_changed_latest
+                # or another settings change; do not infer K from the packet.
+                self.assertEqual((1, 1), (settings.k, settings.revision))
+                self.assertEqual({'template_identity', 'template_headers', 'whitelist', 'metadata'}, set(responses))
+                self.assertIs(authentication, actual_auth)
+                self.assertEqual(1, len(rows))
+                row = rows[0][0]
+                self.assertEqual('ETH&IB Switch', json.loads(row.unit.action_preimage)['identity']['sheet'])
+                self.assertEqual(0, journal.inspect_global_unit(sheet, bound, row.unit).attempt_count)
+                self.assertEqual(['actual local prefix entered', 'actual FIRST identity read',
+                    'actual local suffix complete'], prefix_events)
+                self.assertTrue(allocation._native_catalog_k_read_active(writer))
+                live_images = [state for state in preread._BUSINESS_READ_GUARDS.values()
+                    if state[0] == 'LIVE' and state[4] is captured_images[0]]
+                self.assertEqual(1, len(live_images), 'binding must use the same pre-read original graph')
+                yield packet
+            # All actual source/settings/semantic/raw finalizers have run.
+            # No old read identity or settings snapshot can become COUNT K.
+            self.assertFalse(allocation._native_catalog_k_read_active(writer))
+            self.assertNotIn(writer, state._NATIVE_CATALOG_K_READ_CONTEXT)
+            self.assertEqual(0, journal.inspect_global_unit(sheet, bound, row.unit).attempt_count)
+            with self.assertRaises(state.TrackerStateHold): state.current_k(writer)
+            facts.append('actual input core complete; count zero; ordinary K strict')
+            raise primary
+        with phase_evidence(), \
+                mock.patch.object(journal, '_hold_receipted_original_source_inputs', side_effect=observe_prefix), \
+                mock.patch.object(launcher.OwnedProjectSheetsReadUnit, 'read_once', new=observe_read), \
+                mock.patch.object(launcher.OwnedProjectTemplateReadCohort,'read_once',new=observe_cohort), \
+                mock.patch.object(preread, '_hold_owned_original_business_history_inputs', new=observe_business_prefix):
+            with receive(*arguments, **keywords) as actual: yield actual
+
+    def test_real_archived_first_source_core_closes_readonly_k_before_count_or_send(self):
+        """Actual input-core reception only; not whole FIRST/COUNT acceptance."""
+        class InputCoreFinished(BaseException): pass
+        primary = InputCoreFinished(); facts = []; entries = []
+        with mock.patch.object(self, '_first_core_primary', primary, create=True), \
+                mock.patch.object(self, '_first_core_facts', facts, create=True), \
+                mock.patch.object(self, '_first_core_entries', entries, create=True), \
+                mock.patch.object(self, '_first_source_core_receiver',
+                    self._observe_actual_first_source_core, create=True):
+            with self.assertRaises(InputCoreFinished) as caught:
+                self.test_real_archived_delivery_new_originals_then_independent_first_sends_only_current_wire()
+        self.assertIs(primary, caught.exception)
+        self.assertEqual(['post-reload actual FIRST'], entries)
+        self.assertEqual(['actual input core complete; count zero; ordinary K strict'], facts)
+
+    def test_real_archived_first_final_source_rejects_original_switch_archive_drift_with_k_w1_unchanged(self):
+        """Actual late source refusal, not an expired-read/cleanup-only HOLD."""
+        class UnexpectedCoreFinished(BaseException): pass
+        facts = []; entries = []
+        with mock.patch.object(self, '_first_core_primary', UnexpectedCoreFinished(), create=True), \
+                mock.patch.object(self, '_first_core_facts', facts, create=True), \
+                mock.patch.object(self, '_first_core_entries', entries, create=True), \
+                mock.patch.object(self, '_first_core_final_source_fault', True, create=True), \
+                mock.patch.object(self, '_first_source_core_receiver',
+                    self._observe_actual_first_source_core, create=True):
+            with self.assertRaises(ValueError):
+                self.test_real_archived_delivery_new_originals_then_independent_first_sends_only_current_wire()
+        self.assertEqual(['post-reload actual FIRST'], entries)
+        self.assertEqual(['actual final archive changed; original K and W1 unchanged',
+            'actual source qualifier refused changed archive',
+            'count zero; changed original not repaired'], facts)
+
+    def test_real_archived_new_lost_both_received_intent_slots_stops_before_compiler_reads_or_writes(self):
+        """Actual bridge/preparation, not a fake registry or caller intent."""
+        original = self._compile_current_issued_switch_after_actual_archive
+        facts = []
+        def fixed(**kwargs):
+            from monitor import issue_tracker_settings_audit_allocation as allocation
+            from monitor import issue_tracker_nv_reservation as native
+            entry = allocation._native_received_prior_source_manifest
+            def lose_both(prepared, writer, sheet, bound):
+                intent = entry(prepared, writer, sheet, bound)
+                if facts: return intent
+                self.assertIs(type(intent), tuple)
+                record = native._verify_catalog_preparation(prepared)
+                self.assertFalse(record['registered']); self.assertIsNone(record['unit'])
+                # This exact genuine input boundary precedes receiver-issued
+                # reads, the fixed compiler and new origin/catalog/GLOBAL.
+                self.assertIs(intent, record['native_pre_read_manifest'])
+                self.assertIs(intent, record['native_pre_read_manifest_issued'])
+                record.pop('native_pre_read_manifest'); record.pop('native_pre_read_manifest_issued')
+                try: entry(prepared, writer, sheet, bound)
+                except allocation.SettingsAuditHold:
+                    self.assertFalse(record['registered']); self.assertIsNone(record['origin'])
+                    self.assertIsNone(record['appended']); self.assertIsNone(record['unit'])
+                    facts.append('actual graph receipt refused whole intent loss before compiler')
+                    raise
+                self.fail('actual received graph silently fell back to standalone')
+            with mock.patch.object(allocation, '_native_received_prior_source_manifest', side_effect=lose_both):
+                return original(**kwargs, _fixed_creator=True, _first_after_archive=True)
+        with mock.patch.object(self, '_compile_current_issued_switch_after_actual_archive', side_effect=fixed):
+            with self.assertRaises(ValueError) as rejected:
+                self._native_completed_archive_preview_probe(local_c6=True, native_current_compiler=True,
+                    issued_current_compiler=True)
+        self.assertEqual('RemoteHistoryHold', type(rejected.exception).__name__)
+        self.assertEqual('req7_remote_history_unproved', str(rejected.exception))
+        self.assertEqual(['actual graph receipt refused whole intent loss before compiler'], facts)
+
+    def test_real_archived_new_checks_received_intent_after_actual_source_borrower_exit(self):
+        original = self._compile_current_issued_switch_after_actual_archive
+        facts = []
+        def fixed(**kwargs):
+            from monitor import issue_tracker_remote_history_match as remote
+            from monitor import issue_tracker_settings_audit_allocation as allocation
+            from monitor import issue_tracker_nv_reservation as native
+            source = remote._hold_native_preparation_source_reads
+            @contextmanager
+            def lose_after_exit(*args, **options):
+                actual = [prepared for prepared, record in native._ACTIVE_CATALOG_PREPARATIONS.items()
+                    if 'native_pre_read_manifest' in record]
+                with source(*args, **options) as result: yield result
+                if not actual or facts: return
+                self.assertEqual(1, len(actual))
+                prepared = actual[0]; record = native._verify_catalog_preparation(prepared)
+                intent = allocation._native_received_prior_source_manifest(prepared,
+                    record['nonallocating_writer'], record['token'], record['binding'])
+                self.assertIs(type(intent), tuple)
+                # The original source borrower already completed its real
+                # last verification; mutation is after it, before intent tail.
+                record.pop('native_pre_read_manifest'); record.pop('native_pre_read_manifest_issued')
+                facts.append('real source borrower exited while actual prep/bridge remained live')
+            with mock.patch.object(remote, '_hold_native_preparation_source_reads', side_effect=lose_after_exit):
+                return original(**kwargs, _fixed_creator=True)
+        with mock.patch.object(self, '_compile_current_issued_switch_after_actual_archive', side_effect=fixed):
+            with self.assertRaises(ValueError) as rejected:
+                self._native_completed_archive_preview_probe(local_c6=True, native_current_compiler=True,
+                    issued_current_compiler=True)
+        self.assertEqual('RemoteHistoryHold', type(rejected.exception).__name__)
+        self.assertEqual('req7_remote_history_unproved', str(rejected.exception))
+        self.assertEqual(['real source borrower exited while actual prep/bridge remained live'], facts)
+
+    def test_real_archived_new_enters_locator_with_live_original_source_owner_and_closes_it(self):
+        class Captured(BaseException):pass
+        stopped=Captured();facts={};original=self._compile_current_issued_switch_after_actual_archive
+        @contextmanager
+        def observe_locator(*args,**kwargs):
+            from tools import ufm_collection_pipeline as pipeline
+            source=pipeline._HELD_SOURCE_READS.get();directories=pipeline._HELD_DIRECTORY_READS.get()
+            facts['present']=source is not None and directories is not None
+            if facts['present']:
+                source.require_live();facts.update(source=source,directories=directories)
+                # Borrow a real current template original, not permission or
+                # source results. An interrupted NEW must close this owned FD.
+                with pipeline._hold_real_dir_chain(self.template.parent) as (parent,_verify,_identities):
+                    with pipeline._borrow_current_source_file(self.template,parent) as fd:
+                        facts['fd']=fd;facts['inode']=os.fstat(fd).st_ino
+            raise stopped
+            yield
+        def fixed(**kwargs):
+            # The actual preceding archive workflow reloads owned modules.
+            # Observe the exact module selected at this current NEW boundary,
+            # not the obsolete object imported before that workflow ran.
+            from monitor import issue_tracker_remote_history_match as remote
+            with mock.patch.object(remote,'_hold_current_cycle_native_creation_locators',observe_locator):
+                return original(**kwargs,_fixed_creator=True,_first_after_archive=True)
+        with mock.patch.object(self,'_compile_current_issued_switch_after_actual_archive',side_effect=fixed):
+            with self.assertRaises(Captured) as caught:
+                self._native_completed_archive_preview_probe(local_c6=True,native_current_compiler=True,issued_current_compiler=True)
+        self.assertIs(stopped,caught.exception)
+        self.assertTrue(facts.get('present'),'actual NEW locator began without its original source/ancestor owner')
+        self.assertTrue(facts['source'].closed);self.assertTrue(facts['directories'].closed)
+        with self.assertRaises(OSError):os.fstat(facts['fd'])
+        from tools import ufm_collection_pipeline as pipeline
+        self.assertIsNone(pipeline._HELD_SOURCE_READS.get());self.assertIsNone(pipeline._HELD_DIRECTORY_READS.get())
+
+    def test_real_archived_native_creator_keeps_unique_live_delivery_semantic_capture_edges(self):
+        # Actual archived old COMPLETE/DELIVERED -> new cycle C6 -> real
+        # creator discovery. Storage uniqueness is not a qualification cache:
+        # every observed verify still delegates to the original implementation.
+        class CaptureFinished(BaseException):pass
+        primary=CaptureFinished('actual native delivery capture observed')
+        facts={};original_compile=self._compile_current_switch_after_actual_archive
+        def current_creator(**kwargs):
+            from monitor import issue_tracker_settings_audit_allocation as allocation
+            from monitor import issue_tracker_unit_catalog as catalog
+            actual_factory=allocation._hold_discovered_native_completed_settings
+            original_verify=catalog._Originals.verify
+            def inspect(held,*args,**options):
+                result=original_verify(held,*args,**options)
+                if any(name==allocation._DELIVERY_FOLDER or name.startswith(allocation._DELIVERY_FOLDER+'-')
+                        for _parent,name,*_rest in held.directories):
+                    def edge(parent,name):
+                        info=os.fstat(parent);return (info.st_dev,info.st_ino,name)
+                    directories=[edge(parent,name) for parent,name,*_rest in held.directories]
+                    files=[edge(parent,name) for parent,name,*_rest in held.files]
+                    facts[held]=(len(directories),len(set(directories)),len(files),len(set(files)))
+                return result
+            @contextmanager
+            def factory(*args,**options):
+                with mock.patch.object(catalog._Originals,'verify',inspect):
+                    with actual_factory(*args,**options):
+                        # End only after the real factory has proved ALL and
+                        # issued its original context. BaseException preserves
+                        # every original cleanup; no consumer permission escapes.
+                        raise primary
+                        yield
+            with mock.patch.object(allocation,'_hold_discovered_native_completed_settings',factory):
+                return original_compile(**kwargs)
+        with mock.patch.object(self,'_compile_current_switch_after_actual_archive',side_effect=current_creator):
+            with self.assertRaises(CaptureFinished) as caught:
+                self._native_completed_archive_preview_probe(local_c6=True,native_current_compiler=True)
+        self.assertIs(primary,caught.exception)
+        self.assertTrue(facts,'actual native discovery must inspect its live delivery graph')
+        print('NATIVE_DELIVERY_ACTUAL_CAPTURE_COUNTS '+json.dumps(list(facts.values())),flush=True)
+        for directories,unique_directories,files,unique_files in facts.values():
+            self.assertEqual(directories,unique_directories,'same LIVE directory edge stored more than once')
+            self.assertEqual(files,unique_files,'same LIVE file edge stored more than once')
 
     def test_real_native_switch_compiler_brackets_pure_derivation_with_two_manifests_and_four_original_receipts(self):
         from monitor import issue_tracker_send_unit as compiler,issue_tracker_manifest as manifest
@@ -2071,6 +2895,37 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                     target.inspect_project_online_target(writer,binding)
             self.assertEqual(binding,target.inspect_project_online_target(writer,binding))
 
+    def test_prepared_remote_sheets_material_precedes_two_original_project_read_issuances(self):
+        from test_cases.test_req7_history_read_launcher import Req7HistoryReadLauncherWorkflowTests
+        from test_cases.test_req7_remote_history_match import Req7OwnedHistoryMatchWorkflowTests
+        from monitor import issue_tracker_history_read_launcher as launcher
+        import socket
+        native=Req7OwnedHistoryMatchWorkflowTests();native.setUp();self.addCleanup(native.doCleanups)
+        body=b'{"matchedDeveloperMetadata":[]}'
+        reply=b'HTTP/1.1 200 OK\r\nContent-Length: '+str(len(body)).encode()+b'\r\nConnection: close\r\n\r\n'+body
+        with ExitStack() as current:
+            _local,ownership,writer,sheet,binding,_token,_config=native.owners(current)
+            auth,_path,_raw=Req7HistoryReadLauncherWorkflowTests.project_auth(native,current,ownership,sheet,binding)
+            original=native.certificates
+            with mock.patch.object(native,'certificates',wraps=original) as building:
+                with native.prepared_server_certificate('sheets.googleapis.com'):
+                    ca_bytes=native.path.read_bytes()
+                    self.assertEqual(1,building.call_count,'remote setup precedes any current client issuance')
+                    reads=[]
+                    for _ in range(2):
+                        with native.server(reply,hostname='sheets.googleapis.com',destination='sheets.googleapis.com') as (records,errors),ExitStack() as launched:
+                            port=socket.getaddrinfo('sheets.googleapis.com',443)[0][4][1]
+                            calls,children=native.intercept(launched,native.child_fixture(port),writer,sheet,binding)
+                            actual=launcher.OwnedProjectSheetsReadUnit(writer,sheet,binding,auth,read_kind='metadata').read_once()
+                            _plan,project,_digest=launcher.require_current_owned_project_read(writer,sheet,binding,actual,auth,read_kind='metadata')
+                            self.assertEqual('synthetic-cloud-project',project)
+                            self.assertEqual(body,actual.data);reads.append(actual)
+                        self.assertEqual((1,1,(),0),(len(records),len(calls),tuple(errors),children[0].returncode))
+                        self.assertEqual(b'{"dataFilters":[{"developerMetadataLookup":{}}]}',records[0][2])
+                        self.assertEqual(ca_bytes,native.path.read_bytes())
+                    self.assertIsNot(reads[0],reads[1],'each response must be freshly issued, never reused')
+                    self.assertEqual(1,building.call_count)
+
     def test_real_current_receipt_replaced_after_actual_k_settings_finalizer_refuses_compiler_receiver_return(self):
         self._native_completed_archive_preview_probe(local_c6=True,native_current_compiler=True,current_receipt_tail=True)
 
@@ -2205,8 +3060,10 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             ib = produce_worker_ib_analysis(identity, project_root=project, http_root=self.root,
                 clock=lambda: dt.datetime(2026, 9, 26, 4, 31, tzinfo=dt.timezone.utc),
                 runner=lambda _argv: self.fail('transport is supplied by fixture'))
-            cycle, _ = self._cycle(activity=True, derivation=True, observed_peer='changed-peer',
+            cycle, current_artifacts = self._cycle(activity=True, derivation=True, observed_peer='changed-peer',
                 ib_analysis=ib, fabric_templates={'ethernet/prod':'tan-leaf','nvlink/prod':'border-leaf'})
+            if getattr(self, '_first_core_final_source_fault', False):
+                self._first_core_current_archive = current_artifacts['ethernet/prod']['info']
             self.assertEqual(identity['cycle_id'], cycle['cycle_id'])
             admissions = sorted((tracker/'admissions').iterdir())
             self.assertEqual(1, len(admissions))
@@ -2402,7 +3259,8 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         observed.append('ETH&IB Switch:archived:current-cycle-compiler:registered')
 
     def _compile_current_issued_switch_after_actual_archive(self, *, global_root,owner_module,binding,
-                                                           credential,committed,observed,native,issued_read_tail=False,_fixed_creator=False):
+                                                           credential,committed,observed,native,issued_read_tail=False,_fixed_creator=False,
+                                                           _first_after_archive=False):
         import socket
         from monitor import issue_tracker_local_commit as local,issue_tracker_nv_reservation as preparation
         from monitor import issue_tracker_remote_history_match as remote,issue_tracker_unit_catalog as catalog
@@ -2422,10 +3280,53 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             'data':[{'startRow':2,'startColumn':0}]}]}
         documents={'template_identity':identity_response(),'metadata':{'matchedDeveloperMetadata':[]},
             'activity':discovery,'insertion':occupancy,'history_tail':history}
-        issued=[];actual_reads=[];compiled=[];revoked=[]
+        if _first_after_archive:
+            # Refresh the canonical inventory BEFORE issuing this scenario's
+            # new owners; never exchange a live token or reconstruct evidence.
+            from test_cases.test_req7_retained_global_inventory import load as load_inventory
+            load_inventory(reset_support=False)
+            from test_cases.test_req7_sheets_read_decode import header_response
+            from test_cases.test_req7_online_whitelist_read import document as whitelist_document
+            import xml.etree.ElementTree as ET
+            namespace='{http://schemas.openxmlformats.org/spreadsheetml/2006/main}'
+            with zipfile.ZipFile(self.template) as workbook:
+                original=ET.fromstring(workbook.read('xl/worksheets/sheet13.xml'))
+            whitelist_rows=[]
+            for original_row in original.find(namespace+'sheetData'):
+                cells=[None]*6
+                for cell in original_row:
+                    self.assertEqual('inlineStr',cell.get('t'));self.assertIsNone(cell.find(namespace+'f'))
+                    column=ord(cell.get('r')[0])-ord('A');self.assertTrue(0<=column<6)
+                    cells[column]=''.join(cell.itertext())
+                whitelist_rows.append(tuple(cells))
+            whitelist_doc=whitelist_document(())
+            whitelist_doc['sheets'][0]['properties']['sheetId']=112
+            whitelist_doc['sheets'][0]['data'][0]['rowData']=[{'values':[
+                {} if value is None else {'userEnteredValue':{'stringValue':value}} for value in row]}
+                for row in whitelist_rows]
+            documents.update(template_headers=header_response(),whitelist=whitelist_doc)
+        issued=[];cohort_physical=[];actual_reads=[];compiled=[];revoked=[]
         real_read=launcher.OwnedProjectSheetsReadUnit.read_once
+        real_cohort=launcher.OwnedProjectTemplateReadCohort.read_once
         original_settings=allocation._hold_settings_originals
         def read(reader):
+            if _fixed_creator and not issued:
+                # The actual archived creator must move its pure local freeze
+                # BEFORE issuing this first identity read. This literal-source
+                # comparison does not supply the receiver's qualification.
+                packets=[packet for packet in allocation._LIVE_OWNED_PRIOR_SOURCE_READS.values()
+                    if packet['writer'] is writer and packet['sheet'] is sheet and packet['bound']==binding]
+                self.assertEqual(1,len(packets))
+                packet=packets[0];intent=packet.get('native_pre_read_manifest')
+                self.assertIs(intent,packet.get('native_pre_read_manifest_issued'))
+                self.assertIs(type(intent),tuple);self.assertEqual(3,len(intent))
+                self.assertIs(type(intent[0]),bytes)
+                self.assertEqual(hashlib.sha256(intent[0]).hexdigest(),intent[1])
+                self.assertIn((committed.receipt.generation_id,committed.receipt.published_sha256,
+                    committed.receipt.manifest_id),intent[2])
+                self.assertEqual(committed.receipt.manifest_id,intent[1])
+                self.assertFalse(packet['retired']);self.assertFalse(packet['received'])
+                self.assertFalse(any(type(value).__name__=='ProdStageLQualifiedSet' for value in intent))
             if reader._kind=='row':
                 self.assertIn(reader._row,(3,4))
                 document=exact_row_document('ETH&IB Switch',rows[reader._row-3],reader._row-1)
@@ -2436,9 +3337,62 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             with native.server(reply,hostname='sheets.googleapis.com',destination='sheets.googleapis.com') as (records,errors),ExitStack() as launched:
                 port=socket.getaddrinfo('sheets.googleapis.com',443)[0][4][1]
                 calls,children=native.intercept(launched,native.child_fixture(port),writer,sheet,binding)
-                actual=real_read(reader)
+                if not _first_after_archive:
+                    actual=real_read(reader)
+                else:
+                    # Bounded acquisition diagnosis only. The original read
+                    # and supervisor still execute once with their unchanged
+                    # budget, response and cleanup. Observe exceptions before
+                    # their intentional secret-free public sanitization; never
+                    # retain messages, locals, traceback objects or child bytes.
+                    original_supervise=launcher.supervise_owned_attempt
+                    codes={launcher.OwnedSheetsReadUnit._read_once.__code__:'read_once',
+                        original_supervise.__code__:'supervisor'}
+                    positions=[];supervision=[False,False]
+                    def exception_position(frame,event,arg):
+                        role=codes.get(frame.f_code)
+                        if role is None:return None
+                        frame.f_trace_lines=False;frame.f_trace_opcodes=False
+                        if event=='exception' and len(positions)<8:
+                            positions.append((role,frame.f_lineno,arg[0].__name__))
+                        return exception_position
+                    def supervise(*args,**options):
+                        supervision[0]=True
+                        value=original_supervise(*args,**options)
+                        supervision[1]=True
+                        return value
+                    started=time.monotonic();observer_installed=False
+                    try:
+                        with mock.patch.object(launcher,'supervise_owned_attempt',side_effect=supervise), \
+                                self._hold_first_diagnostic_trace(exception_position) as observer_installed:
+                            actual=real_read(reader)
+                    except BaseException:
+                        facts={'read_kind':reader._kind,'exceptions':positions,
+                            'exception_observer_installed':observer_installed,
+                            'elapsed_seconds':time.monotonic()-started,
+                            'unchanged_total_budget_seconds':30,
+                            'launch_calls':len(calls),'supervisor_entered':supervision[0],
+                            'supervisor_returned':supervision[1],
+                            'original_tls_readiness_fds':getattr(native,'_last_owned_tls_ready_fds',None),
+                            'owned_child_returncodes':[child.returncode for child in children],
+                            'tls_requests':len(records),'tls_error_types':[type(error).__name__ for error in errors]}
+                        print('ARCHIVED_FIRST_ACTUAL_ACQUISITION_STAGE_FACTS',json.dumps(facts,sort_keys=True),flush=True)
+                        raise
+                    if len(issued)>=8:
+                        print('ARCHIVED_FIRST_ACTUAL_READ_RETURNED',json.dumps({
+                            'read_kind':reader._kind,'original_tls_readiness_fds':
+                                getattr(native,'_last_owned_tls_ready_fds',None),
+                            'owned_child_returncodes':[child.returncode for child in children]},sort_keys=True),flush=True)
             self.assertEqual((1,1,(),0),(len(records),len(calls),tuple(errors),children[0].returncode))
             issued.append((reader._kind,reader._row));actual_reads.append(actual);return actual
+        def read_cohort(reader):
+            self.assertTrue(_first_after_archive,'creator/legacy scalar path must not acquire a cohort')
+            values,physical=self._actual_fixed_template_transport(native,reader,documents,
+                writer,sheet,binding,real_cohort)
+            cohort_physical.append(physical)
+            issued.extend((kind,None) for kind in ('template_identity','template_headers','whitelist','metadata'))
+            actual_reads.extend(values)
+            return values
         @contextmanager
         def revoke_after_actual_settings_close(*args,**kwargs):
             with original_settings(*args,**kwargs) as actual:yield actual
@@ -2459,6 +3413,24 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             private.enter_context(scoped_fixture(global_root,credentials))
             private.enter_context(scoped_fixture(global_root,target))
             auth,_path,_raw=Req7HistoryReadLauncherWorkflowTests.project_auth(native,private,owner_module,sheet,binding)
+            if _first_after_archive:
+                # This is the remote fake server's setup, not a refresh of any
+                # issued client read. Prepare before the first Sheets read;
+                # every request still uses original TLS/HTTP/child checks.
+                private.enter_context(native.prepared_server_certificate('sheets.googleapis.com'))
+                from monitor import issue_tracker_enrollment_journal as enrollment
+                from monitor.issue_tracker_sdk_authentication import AuthenticatedToken
+                locator=AuthenticatedToken('synthetic.archive-fixture-locator',time.time()+3600)
+                identity=decode_template_identity(prepare_template_identity_read(binding,locator),response(identity_response()))
+                enrolled=enrollment.inspect_enrollment_journal(sheet,binding,identity)
+                # The synthetic remote retains the ACTUAL old enrollment
+                # nonces. This is reply construction, not expected WIRE values
+                # derived from the implementation or a new enrollment issuer.
+                documents['metadata']={'matchedDeveloperMetadata':[
+                    {'developerMetadata':{'metadataId':index,'metadataKey':'http-ztp-enrollment-v1',
+                        'metadataValue':nonce,'visibility':'DOCUMENT',
+                        'location':{'locationType':'SHEET','sheetId':sid}}}
+                    for index,(_title,sid,nonce) in enumerate(enrolled.nonces,1)]}
             if _fixed_creator:
                 self.assertFalse(preparation._ACTIVE_CATALOG_PREPARATIONS)
                 self.assertEqual([],list((project/'.tracker/settings/outbox').iterdir()))
@@ -2525,8 +3497,23 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                         mock.patch.object(launcher,'require_current_owned_project_read',side_effect=diagnosed_read_guard), \
                         mock.patch.object(remote,'_hold_current_cycle_native_creation_locators',side_effect=diagnosed_creation_context), \
                         mock.patch.object(launcher.OwnedProjectSheetsReadUnit,'read_once',autospec=True,side_effect=read):
-                    report=remote._prepare_current_cycle_native_switch_unit(writer,sheet,binding,auth,
-                        _store=self.store,http_root=self.root)
+                    creator=(remote._prepare_current_cycle_native_switch_originals if _first_after_archive
+                        else remote._prepare_current_cycle_native_switch_unit)
+                    try:
+                        report=creator(writer,sheet,binding,auth,
+                            _store=self.store,http_root=self.root)
+                    except BaseException as exc:
+                        # The locator may already have closed before a late
+                        # original-read check fails. Expose the untouched
+                        # suppressed chain, without extending its lifetime.
+                        import traceback
+                        current=exc;seen=set()
+                        while current is not None and id(current) not in seen:
+                            seen.add(id(current))
+                            print('FIXED_CREATOR_ARCHIVED_ORIGINAL_CREATOR_FAILURE',type(current).__name__,flush=True)
+                            traceback.print_exception(type(current),current,current.__traceback__,chain=False,file=sys.stdout)
+                            current=current.__cause__ or current.__context__
+                        raise
                 with catalog.hold_pending_project_c6_units(sheet,binding) as (pending,verify):
                     self.assertEqual(2,len(pending));verify()
                     action=json.loads(pending[-1].unit.action_preimage)
@@ -2538,6 +3525,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                     self.assertEqual([[(101,row,column) for column in (1,5,9,13)] for row in (2,3)],
                         [[(r['updateCells']['start']['sheetId'],r['updateCells']['start']['rowIndex'],
                             r['updateCells']['start']['columnIndex']) for r in item['requests']] for item in action['business']])
+                    current_unit=pending[-1].unit
                 self.assertEqual([('template_identity',None),('template_identity',None),('metadata',None),
                     ('activity',None),('insertion',None),('row',3),('row',4),('history_tail',None)],issued)
                 self.assertFalse(preparation._ACTIVE_CATALOG_PREPARATIONS)
@@ -2547,6 +3535,421 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                 self.assertNotIn(writer,state_owner._NATIVE_CATALOG_K_READ_CONTEXT)
                 self.assertEqual([],list((project/'.tracker/settings/outbox').iterdir()))
                 with self.assertRaises(state_owner.TrackerStateHold):state_owner.current_k(writer)
+                if _first_after_archive:
+                    from test_cases.test_collection_cycle_persistence import WORKER
+                    from test_cases.test_req7_mutation_launcher import Req7MutationLauncherWorkflowTests
+                    from monitor import issue_tracker_mutation_launcher as mutation,issue_tracker_global_attempt_journal as global_api
+                    from types import SimpleNamespace
+                    original_send=mutation._send_counted_original_once;sent=[]
+                    self.assertEqual(0,global_api.inspect_global_unit(sheet,binding,current_unit).attempt_count)
+                    def send(actual_writer,actual_sheet,actual_binding,token,unit,image):
+                        self.assertEqual((writer,sheet,binding),(actual_writer,actual_sheet,actual_binding))
+                        self.assertEqual(current_unit,unit,'only current NEW unit may be counted and sent')
+                        reply=b'HTTP/1.1 401 Denied\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}'
+                        with native.server(reply,hostname='sheets.googleapis.com',destination='sheets.googleapis.com') as (records,errors),ExitStack() as launched:
+                            port=socket.getaddrinfo('sheets.googleapis.com',443)[0][4][1]
+                            original_popen=subprocess.Popen;children=[];calls=[]
+                            def launch(argv,**options):
+                                self.assertEqual([str(Path(sys.executable).resolve()),'-I','-B','-c',mutation._CHILD_PROGRAM,
+                                    str(Path(__file__).resolve().parents[1])],argv[:6])
+                                self.assertEqual([str(image.action_fd),str(image.fd)],argv[7:])
+                                self.assertEqual((local._owner(writer).lock_fd,owner_module.owner_lock_fd(sheet,binding),
+                                    image.action_fd,image.fd),options['pass_fds'])
+                                self.assertEqual({'LC_ALL':'C'},options['env']);self.assertNotIn(token.value,repr(argv))
+                                self.assertTrue(options['close_fds']);self.assertTrue(options['start_new_session'])
+                                actual=list(argv);actual[4]=Req7MutationLauncherWorkflowTests.child_fixture(native,port)
+                                child=original_popen(actual,**options);children.append(child);calls.append(argv)
+                                from test_cases.test_req7_native_supervised_workflow import cleanup_owned_fixture_child
+                                self.addCleanup(cleanup_owned_fixture_child,child);return child
+                            launched.enter_context(mock.patch.object(mutation,'subprocess',SimpleNamespace(Popen=launch,PIPE=subprocess.PIPE)))
+                            completion=original_send(actual_writer,actual_sheet,actual_binding,token,unit,image)
+                        self.assertEqual((1,1,(),0),(len(records),len(calls),tuple(errors),children[0].returncode))
+                        self.assertEqual(unit.wire_bytes,records[0][2])
+                        self.assertTrue(all(stream.closed for stream in (children[0].stdin,children[0].stdout,children[0].stderr)))
+                        sent.append(completion);return completion
+                    actual_first_inputs=remote._hold_current_project_online_inputs
+                    actual_worker_inputs=remote._hold_current_project_online_original_inputs
+                    actual_receipted_facts=global_api._receipted_original_facts
+                    actual_first_prefix=global_api._prepare_first_original_source_prefix
+                    actual_first_consume=global_api._consume_first_original_source_prefix
+                    actual_first_prefetch=global_api._prefetch_first_original_count_graph
+                    first_prefix_order=[]
+                    first_prefetch_order=[]
+                    def observe_first_prefix(*args,**kwargs):
+                        result=actual_first_prefix(*args,**kwargs)
+                        prefix=global_api._first_original_source_prefix_packet()
+                        if prefix is not None and prefix['row'] is args[0]:
+                            self.assertIsNotNone(prefix['body'])
+                            self.assertIsNone(prefix['count'])
+                            self.assertFalse(prefix['used'])
+                            self.assertTrue(allocation._native_catalog_k_read_active(writer))
+                            first_prefix_order.append('actual independent local prefix before issuance')
+                        return result
+                    def observe_first_prefetch():
+                        self.assertEqual(['actual independent local prefix before issuance'],first_prefix_order)
+                        self.assertEqual([],first_prefetch_order)
+                        prefix=global_api._first_original_source_prefix_packet()
+                        anchor=global_api._FIRST_ORIGINAL_SOURCE_PREFIX.get()
+                        row=prefix['row'];unit=row.unit
+                        self.assertIsNone(global_api._count_claim_original_packet())
+                        self.assertTrue(allocation._native_catalog_k_read_active(writer))
+                        result=actual_first_prefetch()
+                        self.assertIs(prefix,global_api._first_original_source_prefix_packet())
+                        self.assertIs(row,prefix['row']);self.assertIs(unit,row.unit)
+                        self.assertTrue(allocation._native_catalog_k_read_active(writer))
+                        count=global_api._count_claim_original_packet()
+                        key=global_api._HELD_COUNT_CLAIM_ORIGINALS.get()
+                        record=global_api._LIVE_COUNT_SOURCE_GRAPHS[key]
+                        self.assertIs(count,record[0]);self.assertIs(record,count['_source_graphs'])
+                        self.assertEqual(3,len(record[1]))
+                        self.assertIs(row,anchor.prefetched[0]);self.assertIs(unit,anchor.prefetched[1])
+                        self.assertIs(key,anchor.prefetched[2]);self.assertIs(count,anchor.prefetched[3])
+                        self.assertIs(record,anchor.prefetched[4]);self.assertIs(count['verify'],anchor.prefetched[5])
+                        self.assertIsNone(prefix['count']);self.assertFalse(prefix['used'])
+                        self.assertEqual(0,global_api.inspect_global_unit(sheet,binding,unit).attempt_count)
+                        first_prefetch_order.append('actual Count originals held before read issuance without intent')
+                        return result
+                    def observe_first_consume(*args,**kwargs):
+                        self.assertEqual(['actual independent local prefix before issuance'],first_prefix_order)
+                        self.assertEqual(['actual Count originals held before read issuance without intent'],first_prefetch_order)
+                        prefix=global_api._first_original_source_prefix_packet()
+                        self.assertIs(prefix['count'],global_api._count_claim_original_packet())
+                        self.assertIs(prefix['row'].unit,args[3])
+                        result=actual_first_consume(*args,**kwargs)
+                        self.assertTrue(prefix['used']);self.assertIsNone(prefix['body'])
+                        self.assertFalse(allocation._native_catalog_k_read_active(writer))
+                        first_prefix_order.append('actual full suffix and new short K closed before COUNT')
+                        return result
+                    first_prefetch_reads=[]
+                    def read_first_with_prefetch(reader):
+                        self.assertEqual(['actual Count originals held before read issuance without intent'],first_prefetch_order)
+                        if not first_prefetch_reads:
+                            prefix=global_api._first_original_source_prefix_packet()
+                            self.assertIsNone(prefix['count']);self.assertFalse(prefix['used'])
+                            self.assertTrue(allocation._native_catalog_k_read_active(writer))
+                        first_prefetch_reads.append(reader._kind)
+                        return read(reader)
+                    def read_first_cohort_with_prefetch(reader):
+                        self.assertEqual(['actual Count originals held before read issuance without intent'],first_prefetch_order)
+                        self.assertEqual([],first_prefetch_reads)
+                        prefix=global_api._first_original_source_prefix_packet()
+                        self.assertIsNone(prefix['count']);self.assertFalse(prefix['used'])
+                        self.assertTrue(allocation._native_catalog_k_read_active(writer))
+                        result=read_cohort(reader)
+                        first_prefetch_reads.extend(('template_identity','template_headers','whitelist','metadata'))
+                        return result
+                    actual_count_wire=global_api._hold_continuous_owned_attempt_wire
+                    actual_count=global_api.record_global_attempt_intent
+                    actual_c6_borrow=global_api._hold_count_claim_project_c6
+                    actual_c6_cold=catalog.hold_pending_project_c6_units
+                    actual_c6_origin_cold=catalog._hold_project_c6_from_origins
+                    actual_c19_sync=allocation._sync_completed_source_leaf_originals
+                    actual_completion_inspect=remote.inspect_completion_evidence
+                    from types import CodeType
+                    c19_verify_code=next(value for value in
+                        allocation._hold_native_completed_delivery_originals.__wrapped__.__code__.co_consts
+                        if isinstance(value,CodeType) and value.co_name=='verify')
+                    c19_syncs=[];c19_strict_source_syncs=[]
+                    actual_received_sync=allocation._ReceivedCountSourceSettings._sync_barriers
+                    def observe_received_sync(original):
+                        count_packet=global_api._count_claim_original_packet()
+                        self.assertIsNotNone(count_packet)
+                        self.assertIs(original.receiver.packet,count_packet)
+                        self.assertIs(original.receiver.unit,count_packet['unit'])
+                        self.assertEqual(current_unit,original.receiver.unit)
+                        self.assertIs(original.barriers,original.original_barriers)
+                        self.assertTrue(original.barriers)
+                        result=actual_received_sync(original)
+                        c19_syncs.append(True)
+                        return result
+                    def observe_c19_sync(*args,**kwargs):
+                        count_packet=global_api._count_claim_original_packet()
+                        if count_packet is None:
+                            # Same genuine source domain before COUNT; not an
+                            # ordinary archive/NEW reader or caller-built DTO.
+                            sources=[packet for packet in allocation._LIVE_OWNED_PRIOR_SOURCE_READS.values()
+                                if packet['writer'] is writer]
+                            self.assertEqual(1,len(sources))
+                            source=sources[0]
+                            self.assertIs(source['owner'],local._owner(writer))
+                            self.assertIs(source['sheet'],sheet)
+                            self.assertEqual(binding,source['bound'])
+                            self.assertEqual((False,False,False),
+                                tuple(source[name] for name in ('retired','received','attached')))
+                            if self._first_source_sync_has_issued_k(
+                                    writer,source['owner'],state_owner,allocation):
+                                c19_strict_source_syncs.append(True)
+                        else:
+                            self.assertIs(count_packet['writer'],writer)
+                            self.assertIs(count_packet['token'],sheet)
+                            self.assertEqual(binding,count_packet['binding'])
+                        result=actual_c19_sync(*args,**kwargs)
+                        if count_packet is not None:c19_syncs.append(True)
+                        return result
+                    def reject_recursive_source_c19(*args,**kwargs):
+                        frame=sys._getframe(1)
+                        while frame is not None and frame.f_code.co_filename==__import__('unittest.mock').mock.__file__:
+                            frame=frame.f_back
+                        if (frame is not None and frame.f_code is c19_verify_code
+                                and frame.f_locals.get('completion_loan_ready') is True
+                                and frame.f_locals.get('final') is not True):
+                            self.fail('read-only source K recursively decoded C19 instead of checking its held originals/barriers')
+                        del frame
+                        return actual_completion_inspect(*args,**kwargs)
+                    c6_borrows=[]
+                    @contextmanager
+                    def observe_c6_borrow(*args,**kwargs):
+                        with actual_c6_borrow(*args,**kwargs) as original:
+                            if global_api._count_claim_original_packet() is not None:
+                                self.assertIsNotNone(original,'actual source COUNT keeps its original ALL C6 live')
+                                c6_borrows.append(len(original[0]))
+                            yield original
+                    @contextmanager
+                    def reject_duplicate_source_c6(*args,**kwargs):
+                        import inspect
+                        frame=inspect.currentframe().f_back
+                        # contextlib.__enter__ delegates to this generator;
+                        # its immediate caller is the actual source factory.
+                        while frame is not None and frame.f_code.co_filename==__import__('contextlib').__file__:
+                            frame=frame.f_back
+                        if (frame is not None
+                                and frame.f_code is allocation._hold_discovered_native_completed_settings.__wrapped__.__code__
+                                and frame.f_locals.get('_source_handoff') is not None
+                                and global_api._count_claim_original_packet() is not None):
+                            self.fail('source K reconstructed ALL C6 instead of borrowing the still-live original graph')
+                        del frame
+                        with actual_c6_cold(*args,**kwargs) as original:yield original
+                    @contextmanager
+                    def reject_duplicate_source_leaf_c6(*args,**kwargs):
+                        import inspect
+                        frame=inspect.currentframe().f_back
+                        while frame is not None and frame.f_code.co_filename==__import__('contextlib').__file__:
+                            frame=frame.f_back
+                        leaf_codes=(allocation._hold_native_completed_delivery_originals.__wrapped__.__code__,
+                                    allocation._hold_native_catalog_allocation_images.__wrapped__.__code__)
+                        if (frame is not None and any(frame.f_code is code for code in leaf_codes)
+                                and frame.f_locals.get('_source_handoff') is not None
+                                and global_api._count_claim_original_packet() is not None):
+                            self.fail('source leaf reconstructed ALL C6 instead of borrowing live original C6')
+                        del frame
+                        with actual_c6_origin_cold(*args,**kwargs) as original:yield original
+                    def print_original_chain(label,exc):
+                        import traceback
+                        current=exc;seen=set()
+                        while current is not None and id(current) not in seen:
+                            seen.add(id(current))
+                            print(label,type(current).__name__,flush=True)
+                            traceback.print_exception(type(current),current,current.__traceback__,chain=False,file=sys.stdout)
+                            current=current.__cause__ or current.__context__
+                    @contextmanager
+                    def diagnosed_worker_inputs(*args,**kwargs):
+                        try:
+                            with actual_worker_inputs(*args,**kwargs) as packet:
+                                budget=packet[-1]
+                                print('ARCHIVED_FIRST_ACTUAL_WORKER_PACKET',json.dumps({
+                                    'actual_quota_present':budget is not None,
+                                    'quota_outcome':None if budget is None else budget.outcome,
+                                    'inventory_complete':None if budget is None else budget.inventory_complete,
+                                    'original_count':global_api.inspect_global_unit(sheet,binding,current_unit).attempt_count},
+                                    sort_keys=True),flush=True)
+                                yield packet
+                        except BaseException as exc:
+                            print_original_chain('ARCHIVED_FIRST_ORIGINAL_WORKER_INPUT_FAILURE',exc)
+                            raise
+                    def diagnosed_receipted_facts(*args,**kwargs):
+                        profiler=None
+                        if getattr(self,'_first_receipted_profile',False) is True:
+                            import cProfile
+                            if sys.getprofile() is not None:
+                                raise RuntimeError('explicit facts profile requires an unobserved entry')
+                            profiler=cProfile.Profile()
+                        started=time.monotonic()
+                        try:
+                            if profiler is not None:profiler.enable()
+                            return actual_receipted_facts(*args,**kwargs)
+                        except BaseException as exc:
+                            # Observe before the count lane's boolean refusal
+                            # can discard this source/receipt cause entirely.
+                            print_original_chain('ARCHIVED_FIRST_ORIGINAL_COUNT_SOURCE_FAILURE',exc)
+                            raise
+                        finally:
+                            if profiler is not None:
+                                profiler.disable()
+                                entries=profiler.getstats()
+                                def rows(key,limit):
+                                    return [
+                                        {'code':str(item.code) if type(item.code) is str else
+                                            f'{item.code.co_filename}:{item.code.co_firstlineno}:{item.code.co_name}',
+                                         'calls':item.callcount,'recursive_calls':item.reccallcount,
+                                         'total_seconds':item.totaltime,'self_seconds':item.inlinetime}
+                                        for item in sorted(entries,key=key,reverse=True)[:limit]]
+                                print('ARCHIVED_FIRST_EXPLICIT_FACTS_PROFILE',json.dumps({
+                                    'cumulative':rows(lambda item:item.totaltime,24),
+                                    'self':rows(lambda item:item.inlinetime,16)},sort_keys=True),flush=True)
+                            print('ARCHIVED_FIRST_ACTUAL_RECEIPTED_FACTS_DURATION',json.dumps({
+                                'elapsed_seconds':time.monotonic()-started},sort_keys=True),flush=True)
+                    def diagnosed_count(*args,**kwargs):
+                        self.assertEqual(['actual independent local prefix before issuance',
+                            'actual full suffix and new short K closed before COUNT'],first_prefix_order)
+                        self.assertEqual(['actual Count originals held before read issuance without intent'],first_prefetch_order)
+                        result=actual_count(*args,**kwargs)
+                        print('ARCHIVED_FIRST_ACTUAL_COUNT_RETURNED',json.dumps({
+                            'attempt_count':result.attempt_count,'outcome':result.outcome,
+                            'monotonic':time.monotonic()},sort_keys=True),flush=True)
+                        return result
+                    @contextmanager
+                    def diagnosed_count_wire(*args,**kwargs):
+                        # Observe only exception events in exact original code
+                        # objects, before the lane's boolean HOLD hides them.
+                        # No line/opcode tracing, replaced results, input clock
+                        # changes or source predicate exemptions. Read-guard
+                        # diagnostics expose only existing predicate booleans,
+                        # never token/response contents or mutable authority.
+                        import importlib
+                        from types import CodeType
+                        continuity_module=importlib.import_module('monitor.issue_tracker_history_preread_journal')
+                        code=actual_count_wire.__wrapped__.__code__
+                        watched={code:'FIRST lane',actual_count.__code__:'actual COUNT',
+                            global_api._record_settled_successor_attempt.__code__:'settled COUNT',
+                            global_api._hold_counted_original_wire.__wrapped__.__code__:'actual CLAIM',
+                            global_api._hold_settled_catalog_claim_inputs.__wrapped__.__code__:'settled CLAIM',
+                            continuity_module.observe_owned_business_continuity.__code__:'actual continuity',
+                            continuity_module._inspect_business.__code__:'continuity business originals',
+                            continuity_module._read_preread.__code__:'continuity history originals',
+                            launcher.require_current_owned_read.__code__:'actual issued read'}
+                        watched.update((value,'FIRST facts') for value in code.co_consts
+                            if isinstance(value,CodeType) and value.co_name=='facts')
+                        previous=sys.gettrace();seen=set();events=[];continuity_calls=0;observation_installed=False
+                        def trace(frame,event,argument):
+                            nonlocal continuity_calls
+                            role=watched.get(frame.f_code)
+                            if role is None:return None
+                            frame.f_trace_lines=False;frame.f_trace_opcodes=False
+                            if event=='call' and role=='actual continuity':
+                                continuity_calls+=1
+                                print('ARCHIVED_FIRST_ACTUAL_CONTINUITY_CALL',json.dumps({
+                                    'ordinal':continuity_calls,'monotonic':time.monotonic()},sort_keys=True),flush=True)
+                            if event=='exception' and len(events)<16:
+                                kind,error,_tb=argument;key=(role,frame.f_lineno,kind.__name__)
+                                if key not in seen:
+                                    seen.add(key);events.append(key)
+                                    print('ARCHIVED_FIRST_ACTUAL_COUNT_LANE_EXCEPTION',json.dumps({
+                                        'role':role,'line':frame.f_lineno,'type':kind.__name__,
+                                        'continuity_call':continuity_calls,
+                                        'monotonic':time.monotonic()},sort_keys=True),flush=True)
+                                    if role=='actual issued read':
+                                        values=frame.f_locals
+                                        issued=values.get('issued')
+                                        predicates={'original_registry_present':issued is not None}
+                                        if type(issued) is tuple and len(issued)==11:
+                                            response=values.get('completion')
+                                            predicates.update({
+                                                'writer_same':values.get('writer_token') is issued[0],
+                                                'owner_same':values.get('owner_token') is issued[1],
+                                                'binding_same':values.get('binding')==issued[2],
+                                                'shape_same':(values.get('read_kind'),values.get('sheet'),values.get('row'))==issued[5:8],
+                                                'shape_types_same':(type(values.get('read_kind')) is str
+                                                    and type(values.get('sheet')) is type(issued[6])
+                                                    and type(values.get('row')) is type(issued[7])),
+                                                'response_data_same':getattr(response,'data',None)==issued[9],
+                                                'response_data_bytes':type(getattr(response,'data',None)) is bytes,
+                                                'status_exact_200':type(getattr(response,'status',None)) is int
+                                                    and response.status==200,
+                                                'complete_true':getattr(response,'complete',None) is True,
+                                                'termination_confirmed_true':getattr(response,'termination_confirmed',None) is True,
+                                                'path_digest_same':getattr(response,'request_path_sha256',None)
+                                                    ==hashlib.sha256(issued[8].path.encode('ascii')).hexdigest(),
+                                                'deadline_expired_at_observation':launcher._monotonic()>=issued[10]})
+                                        print('ARCHIVED_FIRST_ACTUAL_ISSUED_READ_FAILURE_PREDICATES',
+                                            json.dumps(predicates,sort_keys=True),flush=True)
+                                    print_original_chain('ARCHIVED_FIRST_ORIGINAL_COUNT_LANE_FAILURE',error)
+                            return trace
+                        try:
+                            with self._hold_first_diagnostic_trace(trace) as observation_installed, \
+                                    actual_count_wire(*args,**kwargs) as image:yield image
+                        except BaseException:
+                            try:
+                                count=global_api.inspect_global_unit(sheet,binding,current_unit).attempt_count
+                                print('ARCHIVED_FIRST_COUNT_LANE_FAILURE_ORIGINAL_COUNT',count,flush=True)
+                            except BaseException as error:
+                                print('ARCHIVED_FIRST_COUNT_LANE_FAILURE_COUNT_UNKNOWN',type(error).__name__,flush=True)
+                            raise
+                        finally:
+                            print('ARCHIVED_FIRST_COUNT_TRACE_RESTORED',json.dumps({
+                                'original_trace_restored':sys.gettrace() is previous,
+                                'exception_events':events,'continuity_calls':continuity_calls,
+                                'observation_installed':observation_installed},sort_keys=True),flush=True)
+                    if getattr(self, '_first_core_final_source_fault', False):
+                        self._first_core_current_unit = (writer,sheet,binding,current_unit)
+                    @contextmanager
+                    def diagnosed_first_inputs(*args,**kwargs):
+                        try:
+                            with self._hold_actual_first_fixture_inputs(actual_first_inputs,*args,**kwargs) as actual:yield actual
+                        except BaseException as exc:
+                            # Preserve the underlying stage before the fixed
+                            # worker's ordinary typed refusal. Diagnostic only:
+                            # no source/result/guard/clock replacement.
+                            import traceback
+                            current=exc;seen=set()
+                            while current is not None and id(current) not in seen:
+                                seen.add(id(current))
+                                print('ARCHIVED_FIRST_ORIGINAL_INPUT_FAILURE',type(current).__name__,flush=True)
+                                traceback.print_exception(type(current),current,current.__traceback__,chain=False,file=sys.stdout)
+                                current=current.__cause__ or current.__context__
+                            raise
+                    private.enter_context(mock.patch.object(global_api,
+                        '_prepare_first_original_source_prefix',side_effect=observe_first_prefix))
+                    private.enter_context(mock.patch.object(global_api,
+                        '_consume_first_original_source_prefix',side_effect=observe_first_consume))
+                    private.enter_context(mock.patch.object(global_api,
+                        '_prefetch_first_original_count_graph',side_effect=observe_first_prefetch))
+                    private.enter_context(mock.patch.object(allocation._ReceivedCountSourceSettings,
+                        '_sync_barriers',observe_received_sync))
+                    with mock.patch.object(state_owner,'current_k',side_effect=diagnosed_k), \
+                            mock.patch.object(remote,'_hold_current_project_online_inputs',side_effect=diagnosed_first_inputs), \
+                            mock.patch.object(remote,'_hold_current_project_online_original_inputs',side_effect=diagnosed_worker_inputs), \
+                            mock.patch.object(global_api,'_receipted_original_facts',side_effect=diagnosed_receipted_facts), \
+                            mock.patch.object(global_api,'record_global_attempt_intent',side_effect=diagnosed_count), \
+                            mock.patch.object(global_api,'_hold_count_claim_project_c6',side_effect=observe_c6_borrow), \
+                            mock.patch.object(allocation,'_sync_completed_source_leaf_originals',side_effect=observe_c19_sync), \
+                            mock.patch.object(remote,'inspect_completion_evidence',side_effect=reject_recursive_source_c19), \
+                            mock.patch.object(catalog,'hold_pending_project_c6_units',side_effect=reject_duplicate_source_c6), \
+                            mock.patch.object(catalog,'_hold_project_c6_from_origins',side_effect=reject_duplicate_source_leaf_c6), \
+                            mock.patch.object(global_api,'_hold_continuous_owned_attempt_wire',side_effect=diagnosed_count_wire), \
+                            mock.patch.object(launcher,'require_current_owned_project_read',side_effect=diagnosed_read_guard), \
+                            mock.patch.object(launcher.OwnedProjectSheetsReadUnit,'read_once',autospec=True,side_effect=read_first_with_prefetch), \
+                            mock.patch.object(launcher.OwnedProjectTemplateReadCohort,'read_once',autospec=True,side_effect=read_first_cohort_with_prefetch), \
+                            mock.patch.object(mutation,'_send_counted_original_once',side_effect=send):
+                        try:
+                            completion=WORKER._dispatch_current_project_online_originals(writer,sheet,binding,auth,
+                                _store=self.store,http_root=self.root)
+                        except BaseException as exc:
+                            # Observe the untouched fixed worker/count/source
+                            # chain, including contexts suppressed for public
+                            # callers. No assertion, result, budget, registry or
+                            # original verifier is replaced by this diagnostic.
+                            print_original_chain('ARCHIVED_FIRST_ORIGINAL_WORKER_FAILURE',exc)
+                            raise
+                    self.assertEqual([completion],sent)
+                    self.assertEqual([(4,1,1,(),0)],cohort_physical)
+                    self.assertEqual(('template_identity','template_headers','whitelist','metadata'),tuple(first_prefetch_reads[:4]))
+                    self.assertEqual(9,len(first_prefetch_reads),'all original FIRST logical reads remain')
+                    self.assertEqual(['actual independent local prefix before issuance',
+                        'actual full suffix and new short K closed before COUNT'],first_prefix_order)
+                    self.assertIsNone(global_api._FIRST_ORIGINAL_SOURCE_PREFIX.get())
+                    self.assertEqual({},global_api._LIVE_FIRST_ORIGINAL_SOURCE_PREFIXES)
+                    self.assertEqual({},global_api._LIVE_COUNT_SOURCE_GRAPHS)
+                    self.assertEqual(['actual Count originals held before read issuance without intent'],first_prefetch_order)
+                    self.assertTrue(first_prefetch_reads)
+                    self.assertTrue(c6_borrows,'real archived FIRST must borrow the actual COUNT-held ALL C6')
+                    self.assertTrue(c19_syncs,'actual FIRST retains real C19 recovery barriers inside its read-only source loan')
+                    self.assertTrue(c19_strict_source_syncs,'pre-COUNT source keeps real C19 barriers under its genuine strict original holder')
+                    self.assertEqual((1,401,'UNKNOWN',True),(completion.attempt_count,completion.status,
+                        completion.outcome,completion.termination_confirmed))
+                    self.assertEqual(1,global_api.inspect_global_unit(sheet,binding,current_unit).attempt_count)
+                    self.assertEqual([],list((project/'.tracker/settings/outbox').iterdir()),'never restore archived projections')
+                    self.assertNotIn(writer,state_owner._NATIVE_CATALOG_K_READ_CONTEXT)
+                    with self.assertRaises(state_owner.TrackerStateHold):state_owner.current_k(writer)
                 observed.append('ETH&IB Switch:archived:current-cycle-compiler:registered')
                 return
             if issued_read_tail:
@@ -3548,15 +4951,30 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                 insertion=json.loads(reads[0]['occupancy_response'].data),
                 row=json.loads(next(item['row_response'].data for item in reads if item['row_response'] is not None)))
             real_read=fixed_reads.OwnedProjectSheetsReadUnit.read_once
+            real_cohort=fixed_reads.OwnedProjectTemplateReadCohort.read_once
             real_source=source.qualify_prod_stage_l
-            issued=[]; projections=[]; replaced=[]; refused=[]; actual_responses={}; business_closed=[]
+            issued=[]; cohort_physical=[]; projections=[]; replaced=[]; refused=[]; actual_responses={}; business_closed=[]
             revoked=[]; restored=[]; issued_only_calls=[]; genuine_business_guards=[]
             closed=[]; first_holder=[]; mixed_observations=[]
             real_hold=catalog.hold_pending_project_c6_units
             real_mixed_quota=quota._hold_owned_project_mixed_metadata_capacity
             real_clock=fixed_reads._monotonic
             real_business=preread._hold_owned_original_business_history_reads
+            real_business_inputs=preread._hold_owned_original_business_history_inputs
             real_issued_only=preread._OriginalBusinessReadGuard._verify_issued_only
+            real_project_group=fixed_reads._require_current_owned_project_read_group
+            business_groups=[]
+            def observe_business_group(writer,owner,bound,authentication,group):
+                result=real_project_group(writer,owner,bound,authentication,group)
+                if len(group)>1 and group[1][0]=='history_tail':
+                    self.assertIs(writer_token,writer);self.assertIs(spreadsheet_token,owner)
+                    self.assertEqual(binding,bound);self.assertIs(actual,authentication)
+                    kinds=tuple(item[0] for item in group)
+                    self.assertEqual(('template_identity','history_tail','activity','insertion','row')[:len(group)],kinds)
+                    for kind,_sheet,_row,value in group:
+                        self.assertIs(actual_responses[kind],value)
+                    business_groups.append(tuple(group))
+                return result
             def verify_issued_only(guard):
                 issued_only_calls.append((guard,len(business_closed),len(revoked)))
                 return real_issued_only(guard)
@@ -3567,12 +4985,21 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                 path.write_bytes(raw); path.chmod(0o600)
                 replaced.append((str(path.relative_to(state)),inode,path.stat().st_ino))
             @contextmanager
-            def held_business(*args,**options):
-                with real_business(*args,**options) as original:
-                    actual_read=actual_responses['row']
-                    genuine_business_guards.append(original[1])
-                    yield original
+            def held_business_inputs(*args,**options):
+                # The core pre-acquires this actual raw graph, then binds its
+                # real fresh reads. The public convenience wrapper is not on
+                # this route and cannot inject a genuine postclose fault.
+                with real_business_inputs(*args,**options) as actual_bind:
+                    @contextmanager
+                    def bind(*arguments,**keywords):
+                        with actual_bind(*arguments,**keywords) as original:
+                            genuine_business_guards.append(original[1])
+                            yield original
+                    yield bind
                 business_closed.append(True)
+                actual_read=actual_responses['row']
+                with preread._BUSINESS_READ_GUARD_LOCK:
+                    self.assertEqual('CLOSED',preread._BUSINESS_READ_GUARDS[genuine_business_guards[-1]][0])
                 with fixed_reads._PROJECT_READ_GUARD:
                     registered=fixed_reads._PROJECT_READS.pop(actual_read)
                 revoked.append((actual_read,registered))
@@ -3600,6 +5027,23 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                     yield actual_budget
             def post_finalizer_clock():
                 return real_clock()+(31 if closed else 0)
+            def fault_metadata():
+                if mode=='prepare-quota-rebind':
+                    self.assertIn('metadata',actual_responses)
+                    path=next(path for path in state.rglob('RESERVATION') if path.parent.name.endswith('.metadata'))
+                    raw=path.read_bytes();inode=path.stat().st_ino
+                    path.rename(global_root/'preserved-preparation-quota')
+                    path.write_bytes(raw);path.chmod(0o600)
+                    replaced.append((str(path.relative_to(state)),inode,path.stat().st_ino))
+            def read_cohort(reader):
+                self.assertTrue(projections,'actual source must precede actual project reads')
+                values,physical=self._actual_fixed_template_transport(native,reader,documents,
+                    writer_token,spreadsheet_token,binding,real_cohort)
+                cohort_physical.append(physical)
+                for kind,value in zip(('template_identity','template_headers','whitelist','metadata'),values):
+                    issued.append((kind,1,0,(),0));actual_responses[kind]=value
+                fault_metadata()
+                return values
             def qualify(*args,**options):
                 value=real_source(*args,**options)
                 projections.append(value); return value
@@ -3614,15 +5058,12 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                 issued.append((reader._kind,len(records),len(calls),tuple(errors),children[0].returncode))
                 actual_responses[reader._kind]=value
                 if mode=='prepare-quota-rebind' and reader._kind=='metadata':
-                    path=next(path for path in state.rglob('RESERVATION') if path.parent.name.endswith('.metadata'))
-                    raw=path.read_bytes(); inode=path.stat().st_ino
-                    path.rename(global_root/'preserved-preparation-quota')
-                    path.write_bytes(raw); path.chmod(0o600)
-                    replaced.append((str(path.relative_to(state)),inode,path.stat().st_ino))
+                    fault_metadata()
                 return value
             with ExitStack() as preparation_boundary, \
                     mock.patch.object(source,'qualify_prod_stage_l',side_effect=qualify), \
                     mock.patch.object(fixed_reads.OwnedProjectSheetsReadUnit,'read_once',autospec=True,side_effect=read), \
+                    mock.patch.object(fixed_reads.OwnedProjectTemplateReadCohort,'read_once',autospec=True,side_effect=read_cohort), \
                     mock.patch.object(tokens,'OwnedProjectTokenRefreshUnit') as no_second_oauth, \
                     mock.patch.object(global_journal,'record_global_attempt_intent',wraps=global_journal.record_global_attempt_intent) as no_count, \
                     mock.patch.object(mutation,'_send_counted_original_once') as no_mutation:
@@ -3637,9 +5078,12 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                         '_hold_owned_project_mixed_metadata_capacity',side_effect=mixed_quota))
                 if mode=='prepare-business-postclose-revoke':
                     preparation_boundary.enter_context(mock.patch.object(preread,
-                        '_hold_owned_original_business_history_reads',side_effect=held_business))
+                        '_hold_owned_original_business_history_inputs',side_effect=held_business_inputs))
                     preparation_boundary.enter_context(mock.patch.object(preread._OriginalBusinessReadGuard,
                         '_verify_issued_only',autospec=True,side_effect=verify_issued_only))
+                if mode=='prepare-business':
+                    preparation_boundary.enter_context(mock.patch.object(fixed_reads,
+                        '_require_current_owned_project_read_group',side_effect=observe_business_group))
                 if mode in ('prepare','prepare-mixed-accounting','prepare-business'):
                     result=remote._prepare_current_project_online_observation(writer_token,spreadsheet_token,
                         binding,actual,_store=self.store,http_root=self.root)
@@ -3654,7 +5098,11 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             expected_kinds=('template_identity','template_headers','whitelist','metadata')
             if mode!='prepare-quota-rebind':
                 expected_kinds+=('history_tail','activity','insertion','row')
-            self.assertEqual([(kind,1,1,(),0) for kind in expected_kinds],issued)
+            self.assertEqual([(kind,1,0 if index<4 else 1,(),0) for index,kind in enumerate(expected_kinds)],issued)
+            self.assertEqual([(4,1,1,(),0)],cohort_physical)
+            if mode=='prepare-business':
+                self.assertTrue(business_groups,'actual binder must use fresh groups, not repeated scalar source opens')
+                self.assertTrue(any(len(group)==5 for group in business_groups))
             positive = mode in ('prepare','prepare-mixed-accounting','prepare-business')
             self.assertGreaterEqual(len(projections),2 if positive else 1)
             self.assertEqual([] if positive else [True],refused)
@@ -4673,6 +6121,60 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                 return
             if qualification_replay_probe is not None:
                 from monitor import issue_tracker_stage_l_consumer as consumer
+                if qualification_replay_probe == 'projection-switch-pair-drift':
+                    core = getattr(consumer, '_project_observed_stage_l_source_candidates_with_windows', None)
+                    self.assertTrue(callable(core))
+                    path = artifacts['ethernet/prod']['info']
+                    original_archive = path.read_bytes(); reached = []
+                    def drift_after_actual_pair(*values, **keywords):
+                        result = core(*values, **keywords)
+                        reached.append(tuple(window.source_slot for window in result[1]))
+                        if len(reached) == 1:
+                            # The genuine role/completion hashes stay original.
+                            # A candidate-only object comparison cannot detect
+                            # this changed archive; the actual final reader must.
+                            path.write_bytes(original_archive + b'changed after original projection pair')
+                        return result
+                    try:
+                        with mock.patch.object(consumer, '_project_observed_stage_l_source_candidates_with_windows',
+                                               side_effect=drift_after_actual_pair):
+                            with self.assertRaises(consumer.StageLConsumerHold):
+                                qualify_prod_stage_l(self.store, **args)
+                        self.assertEqual([('ethernet/prod', 'nvlink/prod')], reached)
+                        self.assertEqual((), tuple(self.publication.glob('Issue_Tracker*')))
+                    finally:
+                        path.write_bytes(original_archive)
+                    return
+                if qualification_replay_probe == 'projection-switch-pair':
+                    core = getattr(consumer, '_project_observed_stage_l_source_candidates_with_windows', None)
+                    self.assertTrue(callable(core), 'actual native qualifier needs its just-observed Switch pair')
+                    actual_window = consumer.read_prod_switch_k_window
+                    pairs = []; windows = []
+                    def read_window(*values, **keywords):
+                        result = actual_window(*values, **keywords)
+                        windows.append((keywords['source_slot'], result))
+                        return result
+                    def project(*values, **keywords):
+                        before = len(windows)
+                        result = core(*values, **keywords)
+                        pair = tuple(item[1] for item in windows[before:])
+                        pairs.append((result, pair))
+                        return result
+                    with mock.patch.object(consumer, 'read_prod_switch_k_window', side_effect=read_window), \
+                            mock.patch.object(consumer, '_project_observed_stage_l_source_candidates_with_windows', side_effect=project):
+                        qualified = qualify_prod_stage_l(self.store, **args)
+                    self.assertEqual(2, len(pairs), 'native projection and final public projection each read independently')
+                    for (_projection, original_pair), observed_pair in pairs:
+                        self.assertEqual(2, len(original_pair)); self.assertEqual(2, len(observed_pair))
+                        for actual, observed in zip(original_pair, observed_pair): self.assertIs(actual, observed)
+                    self.assertEqual(['ethernet/prod', 'nvlink/prod'] * 6, [slot for slot, _ in windows],
+                        'four real composed legs plus native/final projection pairs; no third pure-derivation query')
+                    self.assertTrue(qualified.qualified)
+                    self.assertEqual(4, len(qualified.candidates))
+                    self.assertEqual({'Switch Status', 'Eth Link Validation', 'IB Link Validation'},
+                        {item.panel for item in qualified.candidates})
+                    self.assertEqual((), tuple(self.publication.glob('Issue_Tracker*')))
+                    return
                 if qualification_replay_probe in (
                         'composed-ethernet-archive-drift',
                         'composed-nvlink-archive-drift'):
@@ -5977,8 +7479,15 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                                             'metadataValue': nonce, 'visibility': 'DOCUMENT',
                                             'location': {'locationType': 'SHEET', 'sheetId': sheet_id}}}
                                         for index, (_title, sheet_id, nonce) in enumerate(original.nonces)]})
-                                    quota_module.prepare_metadata_reservation(spreadsheet_token, binding, identity, unit,
-                                        prepare_metadata_capacity_read(binding, credential), quota_raw)
+                                    if getattr(self,'_archived_first_authenticated_quota_from_creation',False):
+                                        # Positive whole FIRST needs historical quotas created
+                                        # by this same project's actual OAuth/TLS source from
+                                        # inception. Legacy refusal tests remain unchanged.
+                                        self._create_authenticated_quota_original(quota_module,global_root,
+                                            writer_token,spreadsheet_token,binding,unit,quota_raw)
+                                    else:
+                                        quota_module.prepare_metadata_reservation(spreadsheet_token, binding, identity, unit,
+                                            prepare_metadata_capacity_read(binding, credential), quota_raw)
                                     frozen_images = {str(path.relative_to(state)): (path.stat().st_ino, path.read_bytes())
                                         for path in state.rglob('*') if path.is_file()}
                                     if native_catalog_launch_probe is not None:

@@ -27,10 +27,121 @@ _HELD_CATALOG_REPLAY = ContextVar('req7_original_catalog_replay', default=None)
 _LIVE_CATALOG_REPLAYS = {}
 _HELD_COUNT_CLAIM_ORIGINALS = ContextVar('req7_count_claim_originals', default=None)
 _LIVE_COUNT_CLAIM_ORIGINALS = {}
+_LIVE_COUNT_PROJECT_C6 = {}
+_LIVE_COUNT_SOURCE_GRAPHS = {}
+_LIVE_COUNT_SOURCE_RAW_TAILS = {}
+_COUNT_SOURCE_RAW_TAIL_CONTEXT = ContextVar('req7_count_source_raw_tail',default=None)
+_FIRST_ORIGINAL_SOURCE_PREFIX = ContextVar('req7_first_original_source_prefix', default=None)
+_LIVE_FIRST_ORIGINAL_SOURCE_PREFIXES = {}
+
+
+class _FirstOriginalSourcePrefixAnchor:
+    """Lexical issuer's independent identity/lifecycle anchor, not a permit."""
+    def __init__(self,packet):
+        self.packet=packet
+        self.fields=frozenset(packet)
+        self.originals=tuple(packet[name] for name in
+            ('writer','project','token','owner','binding','last','context','_count_scope'))
+        self.prepared=None;self.count=None;self.count_fields=None
+        self.used=self.succeeded=self.failed=self.exit_attempted=False
+        self.prefetch_scope=packet['_count_scope'];self.prefetched=None
+        self.prefetch_attempted=self.prefetch_failed=False
 
 
 class GlobalAttemptHold(ValueError):
     def __init__(self): super().__init__('req7_global_attempt_unproved')
+
+
+class _CountSourceRawTail:
+    """Original Count issuer owns cleanup, never a source/K/send grant."""
+    def __init__(self,key,packet,record,verify_raw):
+        self.key,self.packet,self.record=key,packet,record
+        self.verify_raw=verify_raw;self.receiver=None;self.finish_receiver=None;self.closing=False
+        self._raw_binding=(verify_raw,getattr(verify_raw,'__code__',None))
+        self._binding=None
+        self._received_source=None
+        self.originals=tuple(packet[name] for name in
+            ('writer','token','binding','unit','project','owner','context','verify'))
+
+    def attach(self,receiver):
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        if (self._binding is not None or self.receiver is not None or self.closing
+                or type(receiver) is not allocation._CountSourceRawOriginals
+                or _LIVE_COUNT_SOURCE_RAW_TAILS.get(self.key) is not self
+                or _HELD_COUNT_CLAIM_ORIGINALS.get() is not self.key
+                or _count_claim_original_packet() is not self.packet
+                or _LIVE_COUNT_SOURCE_GRAPHS.get(self.key) is not self.record
+                or receiver.key is not self.key or receiver.packet is not self.packet
+                or receiver.record is not self.record or receiver._count_tail_owner is not None):
+            raise GlobalAttemptHold()
+        _same_first_count_original_fields(self.packet,self.originals)
+        receiver.verify()
+        self.receiver=receiver;self.finish_receiver=receiver._finish_from_count_tail
+        # Create the recipient before any source scope is moved. This strong
+        # original slot cannot be replaced by an exposed receiver attribute.
+        self._binding=(receiver,self.finish_receiver,receiver.raw,tuple(receiver.owned_slots),ExitStack())
+        receiver._count_tail_owner=self
+
+    def check_tail(self,receiver):
+        if (not self.closing or _COUNT_SOURCE_RAW_TAIL_CONTEXT.get() is not self
+                or _LIVE_COUNT_SOURCE_RAW_TAILS.get(self.key) is not self
+                or self._binding is None or self._binding[0] is not receiver
+                or (len(self._binding)==6 and self._received_source is not self._binding[5])
+                or self.receiver is not receiver or self.finish_receiver is not self._binding[1]
+                or receiver._count_tail_owner is not self or receiver.closed
+                or self.verify_raw is not self._raw_binding[0]
+                or getattr(self.verify_raw,'__code__',None) is not self._raw_binding[1]
+                or self.key in _LIVE_COUNT_CLAIM_ORIGINALS
+                or self.key in _LIVE_COUNT_SOURCE_GRAPHS
+                or self.packet['context']!=(os.getpid(),threading.get_ident())):raise GlobalAttemptHold()
+        _same_first_count_original_fields(self.packet,self.originals)
+
+    def finish(self):
+        # Once-bound original identity cannot be downgraded by deleting its
+        # exposed receiver slot. Call the independently captured original.
+        if self._binding is None:return
+        if (self.closing or self.key in _LIVE_COUNT_CLAIM_ORIGINALS
+                or self.key in _LIVE_COUNT_SOURCE_GRAPHS):raise GlobalAttemptHold()
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        original_binding=self._binding
+        original_close=allocation._CountSourceRawOriginals._close_owned
+        reset=None;entered=False;problem=None
+        try:
+            self.closing=True
+            reset=_COUNT_SOURCE_RAW_TAIL_CONTEXT.set(self)
+            entered=True
+            original_binding[1](self)
+        except BaseException as error:problem=error
+        finally:
+            if not entered:
+                # Phase acquisition failed after ownership had transferred.
+                # Clean only the independently captured originals; no forged
+                # phase, closed Count/C6 verifier, K or source permission.
+                allocation._LIVE_COUNT_RECEIVED_SOURCES.pop(self.key,None)
+                original_binding[0].source_failed=True
+                try:original_binding[4].close()
+                except BaseException as error:
+                    if problem is None or (isinstance(problem,Exception) and not isinstance(error,Exception)):
+                        problem=error
+                try:original_close(original_binding[0],problem,originals=original_binding[2:4])
+                except BaseException as error:
+                    if problem is None or (isinstance(problem,Exception) and not isinstance(error,Exception)):
+                        problem=error
+            self.closing=False
+            if reset is not None:
+                try:_COUNT_SOURCE_RAW_TAIL_CONTEXT.reset(reset)
+                except BaseException as error:
+                    if problem is None or (isinstance(problem,Exception) and not isinstance(error,Exception)):
+                        problem=error
+        if problem is not None:raise problem
+
+
+def _register_count_source_raw_receiver(receiver):
+    """Enroll only typed original raw cleanup; not a callable permission."""
+    key=_HELD_COUNT_CLAIM_ORIGINALS.get()
+    anchor=_LIVE_COUNT_SOURCE_RAW_TAILS.get(key)
+    if type(anchor) is not _CountSourceRawTail:raise GlobalAttemptHold()
+    anchor.attach(receiver)
 
 
 @dataclass(frozen=True)
@@ -48,6 +159,30 @@ class CountedOriginalWireObservation:
     wire_sha256: str
     fd: int = field(repr=False)
     action_fd: int = field(repr=False)
+
+
+def _consume_original_wire_launch_attempt(writer_token,token,binding,unit,image):
+    """Spend the original once, returning no fresh admission or send grant.
+
+    Only issuance DATA is checked here. The complete original verifier must
+    still run at the actual launch fence, after read-only private preparation.
+    Startup or final validation failure never rolls this consumption back.
+    """
+    failed = False
+    try:
+        if type(image) is not CountedOriginalWireObservation: raise GlobalAttemptHold()
+        with _WIRE_CLAIM_GUARD:
+            issued = _LIVE_WIRE_CLAIMS.get(image)
+            if issued is None: raise GlobalAttemptHold()
+            writer,owner,target,original,wire,action,count,_verify,used = issued
+            if (writer is not writer_token or owner is not token or target != binding or original is not unit
+                    or type(image.fd) is not int or image.fd != wire
+                    or type(image.action_fd) is not int or image.action_fd != action
+                    or type(image.attempt_count) is not int or image.attempt_count != count
+                    or image.wire_sha256 != unit.wire_sha256 or used): raise GlobalAttemptHold()
+            _LIVE_WIRE_CLAIMS[image] = issued[:-1]+(True,)
+    except Exception: failed = True
+    if failed: raise GlobalAttemptHold()
 
 
 def _require_original_wire_launch(writer_token,token,binding,unit,image,*,consume):
@@ -105,6 +240,187 @@ def _count_claim_original_packet():
     return packet
 
 
+def _verify_count_source_original_overlap(source, graphs, *, _namespace_originals=()):
+    """Necessary raw overlap, NOT a K/COUNT loan or semantic retirement.
+
+    All three receiving graphs and the old source must still be LIVE and
+    strictly unchanged. Prove every actual shared named edge against original
+    FD/fullstat/bytes/names, not a locator, equal-content substitute or selected
+    subset. Unshared project/settings/C19 originals remain in the source and
+    are independently verified before and after. This check never edits a
+    graph, relaxes its namespace, returns authority or survives COUNT/CLAIM.
+    The fixed coordinator must separately bind the genuine issued COUNT graph
+    and retain each semantic/owner tail before any eventual transfer.
+    """
+    from monitor import issue_tracker_unit_catalog as catalog
+    try:
+        if (type(source) is not catalog._Originals or type(graphs) is not tuple
+                or len(graphs)!=3 or len({id(graph) for graph in graphs})!=3
+                or any(type(graph) is not catalog._Originals for graph in graphs)
+                or source in graphs or source.namespace is None
+                or graphs[0].namespace is None or type(_namespace_originals) is not tuple):raise GlobalAttemptHold()
+        source.verify()
+        for graph in graphs:graph.verify()
+        def identity(fd):return journal._identity(os.fstat(fd))
+        source_parent,prefix,names=source.namespace
+        receiver_parent,receiver_prefix,receiver_names=graphs[0].namespace
+        if (identity(source_parent)[:2]!=identity(receiver_parent)[:2]
+                or prefix!=receiver_prefix or set(names)!=set(receiver_names)):
+            raise GlobalAttemptHold()
+        # The issuer's actual lock is separately held by the OS owner, never
+        # silently ignored by suffix. Every other namespace member needs a
+        # root edge in BOTH graphs. Missing shared parent records cannot turn
+        # their still-open children into an alleged unshared project graph.
+        anchors={}
+        for name,fd in _namespace_originals:
+            if name in anchors or name not in names:raise GlobalAttemptHold()
+            journal._named(source_parent,name,fd,directory=False)
+            anchors[name]=(fd,identity(fd))
+        root_identity=identity(source_parent)[:2]
+        def root_names(originals):
+            return {row[1] for graph in originals for row in (*graph.directories,*graph.files)
+                if identity(row[0])[:2]==root_identity}
+        if (root_names((source,))|set(anchors)!=set(names)
+                or root_names(graphs)|set(anchors)!=set(names)):raise GlobalAttemptHold()
+        # Classify by actual directory lineage, not suffix/family allowlists.
+        # The shared root is the held original namespace parent. Every source
+        # child beneath it needs full coverage; other raw graphs remain strict.
+        shared={identity(source_parent)[:2]}
+        remaining=list(source.directories)
+        shared_directories=[]
+        while remaining:
+            added=[]
+            for row in remaining:
+                if identity(row[0])[:2] in shared:
+                    shared_directories.append(row);shared.add(identity(row[2])[:2]);added.append(row)
+            if not added:break
+            remaining=[row for row in remaining if row not in added]
+        receiver_directories={}
+        receiver_files={}
+        for graph in graphs:
+            for row in graph.directories:
+                receiver_directories.setdefault((identity(row[0])[:2],row[1]),[]).append(row)
+            for row in graph.files:
+                receiver_files.setdefault((identity(row[0])[:2],row[1]),[]).append(row)
+        for parent,name,fd,original,entries in shared_directories:
+            matches=receiver_directories.get((identity(parent)[:2],name),())
+            if (len(matches)!=1 or matches[0][3]!=original
+                    or identity(matches[0][2])!=identity(fd)
+                    or matches[0][4]!=entries):raise GlobalAttemptHold()
+        for parent,name,fd,original,raw in source.files:
+            if identity(parent)[:2] not in shared:continue
+            matches=receiver_files.get((identity(parent)[:2],name),())
+            if (len(matches)!=1 or matches[0][3]!=original
+                    or identity(matches[0][2])!=identity(fd)
+                    or matches[0][4]!=raw):raise GlobalAttemptHold()
+        for graph in graphs:graph.verify()
+        source.verify()
+        for name,(fd,original) in anchors.items():
+            journal._named(source_parent,name,fd,directory=False)
+            if identity(fd)!=original:raise GlobalAttemptHold()
+    except Exception as error:
+        raise GlobalAttemptHold() from error
+
+
+def _verify_issued_count_source_original_overlap(writer,token,binding,unit,source):
+    """Fixed live COUNT issuer plus necessary original shared-edge overlap.
+
+    This is NOT the continuous K handoff. In particular it cannot replace a
+    strict old source snapshot after the legitimate creator has appended.
+    The actual issuer's independent closure owns the registry record and its
+    three graph objects; a supplied equal-content tuple cannot register them.
+    """
+    packet=_count_claim_original_packet()
+    if (packet is None or packet['writer'] is not writer or packet['token'] is not token
+            or packet['binding']!=binding or packet['unit'] is not unit):raise GlobalAttemptHold()
+    key=_HELD_COUNT_CLAIM_ORIGINALS.get()
+    record=_LIVE_COUNT_SOURCE_GRAPHS.get(key)
+    if (type(record) is not tuple or len(record)!=2 or record[0] is not packet
+            or packet.get('_source_graphs') is not record):raise GlobalAttemptHold()
+    original_verify=packet['verify']
+    def current():
+        if (_HELD_COUNT_CLAIM_ORIGINALS.get() is not key
+                or _count_claim_original_packet() is not packet
+                or _LIVE_COUNT_SOURCE_GRAPHS.get(key) is not record
+                or packet.get('_source_graphs') is not record
+                or packet['verify'] is not original_verify or packet['unit'] is not unit
+                or packet['writer'] is not writer or packet['token'] is not token
+                or packet['binding']!=binding):raise GlobalAttemptHold()
+    current();original_verify();current()
+    owner=packet['owner']
+    _verify_count_source_original_overlap(source,record[1],
+        _namespace_originals=((owner.lock_name,owner.lock_fd),))
+    current();original_verify();current()
+
+
+@contextmanager
+def _hold_count_claim_project_c6(writer, token, binding, units):
+    """Borrow the issuer's still-held ALL C6, never cold rows as authority.
+
+    Only the short completed-source reader uses this internal join. No live
+    COUNT issuer leaves the ordinary cold path unchanged. Every borrow checks
+    the actual owners, raw graph and original C6 verifier before and after;
+    it cannot outlive this domain or the actual issuer's first revocation.
+    """
+    packet = _count_claim_original_packet()
+    if packet is None:
+        yield None
+        return
+    key = _HELD_COUNT_CLAIM_ORIGINALS.get()
+    record = _LIVE_COUNT_PROJECT_C6.get(key)
+    if record is None or record[0] is not packet:
+        raise GlobalAttemptHold()
+    if (packet['writer'] is not writer or packet['token'] is not token
+            or packet['binding'] != binding):
+        raise GlobalAttemptHold()
+    if record[2] is None:  # Original legacy COUNT graph has no project C6.
+        yield None
+        return
+    from monitor import issue_tracker_unit_catalog as catalog
+    original_units, rows, verify_c6 = record[1:]
+    selected = packet['unit']; verify_count = packet['verify']; live = True
+    if (type(rows) is not tuple or original_units != tuple(units)
+            or any(type(row) is not catalog.CatalogProjectC6 for row in rows)
+            or tuple(row.unit for row in rows) != original_units):
+        raise GlobalAttemptHold()
+    def same_join():
+        if (not live or _HELD_COUNT_CLAIM_ORIGINALS.get() is not key
+                or _LIVE_COUNT_PROJECT_C6.get(key) is not record
+                or _count_claim_original_packet() is not packet
+                or packet['writer'] is not writer or packet['token'] is not token
+                or packet['binding'] != binding or packet['unit'] is not selected
+                or packet['verify'] is not verify_count):
+            raise GlobalAttemptHold()
+    def verify():
+        # A C6 recheck is not an unrelated ALL COUNT graph reconstruction.
+        # The original COUNT verifier still dominates both loan boundaries;
+        # every intermediate call checks the real live join and original C6.
+        same_join(); verify_c6(); same_join()
+    def count_boundary():
+        same_join(); verify_count(); same_join()
+    primary = None
+    try:
+        count_boundary()
+        verify()
+        yield rows, verify
+        verify()
+    except BaseException as error:
+        primary = error
+        raise
+    finally:
+        try:
+            count_boundary()
+            verify()
+        except BaseException as error:
+            if primary is not None and error is not primary:
+                if isinstance(primary, Exception) and not isinstance(error, Exception):
+                    raise error from primary
+                raise primary from error
+            raise
+        finally:
+            live = False
+
+
 @contextmanager
 def _hold_selected_last_catalog_write_originals(writer_token, token, binding, unit):
     """Original ALL families before COUNT through CLAIM/consumer/last exit.
@@ -118,7 +434,7 @@ def _hold_selected_last_catalog_write_originals(writer_token, token, binding, un
     from monitor import issue_tracker_unit_catalog as catalog
     from monitor import issue_tracker_retained_inventory as inventory
     graphs = []; scope = ExitStack(); owner_tail = ExitStack()
-    key = reset = None; problem = None; verify_raw = None
+    key = reset = None; problem = None; verify_raw = None; source_tail=None
     try:
         project = local._owner(writer_token)
         owner = ownership._validated_owner(token, binding)
@@ -227,7 +543,7 @@ def _hold_selected_last_catalog_write_originals(writer_token, token, binding, un
             used, claim_previous = _inspect_wire_claims(dispatch_folder, folder, unit, claim_header)
             if used != count:
                 raise GlobalAttemptHold()
-        project_verifiers = []
+        project_verifiers = []; c6_rows = c6_original_verify = None
         if any(child.endswith('.project-origin') for child in actual):
             with catalog.hold_pending_project_origins(token, binding) as (origins, verify_origins):
                 if (tuple(row.unit for row in origins) != units
@@ -235,6 +551,7 @@ def _hold_selected_last_catalog_write_originals(writer_token, token, binding, un
                     raise GlobalAttemptHold()
                 _rows, verify_c6 = scope.enter_context(catalog._hold_project_c6_from_origins(
                     token, binding, origins, _owner_tail=owner_tail))
+                c6_rows, c6_original_verify = _rows, verify_c6
                 project_verifiers.append(verify_c6)
                 verify_origins()
             if len(units) > 1:
@@ -307,22 +624,37 @@ def _hold_selected_last_catalog_write_originals(writer_token, token, binding, un
         packet = {'writer':writer_token, 'project':project, 'token':token,
             'binding':binding, 'owner':owner, 'unit':unit, 'context':(os.getpid(),threading.get_ident()),
             'created_file':created_file, 'created_directory':created_directory}
+        source_graphs=tuple(graphs)
+        source_graph_record=(packet,source_graphs)
+        packet['_source_graphs']=source_graph_record
         def issued_verify():
             failed = False
             try:
                 if (_HELD_COUNT_CLAIM_ORIGINALS.get() is not key
-                        or _count_claim_original_packet() is not packet):
+                        or _count_claim_original_packet() is not packet
+                        or _LIVE_COUNT_SOURCE_GRAPHS.get(key) is not source_graph_record
+                        or packet.get('_source_graphs') is not source_graph_record
+                        or len(graphs)!=3
+                        or any(actual is not original for actual,original in zip(graphs,source_graphs))):
                     raise GlobalAttemptHold()
                 verify()
                 if (_HELD_COUNT_CLAIM_ORIGINALS.get() is not key
-                        or _count_claim_original_packet() is not packet):
+                        or _count_claim_original_packet() is not packet
+                        or _LIVE_COUNT_SOURCE_GRAPHS.get(key) is not source_graph_record
+                        or packet.get('_source_graphs') is not source_graph_record
+                        or len(graphs)!=3
+                        or any(actual is not original for actual,original in zip(graphs,source_graphs))):
                     raise GlobalAttemptHold()
             except Exception:
                 failed = True
             if failed:
                 raise GlobalAttemptHold() from None
         packet['verify'] = issued_verify
+        source_tail=_CountSourceRawTail(key,packet,source_graph_record,verify_raw)
         _LIVE_COUNT_CLAIM_ORIGINALS[key] = packet
+        _LIVE_COUNT_SOURCE_GRAPHS[key] = source_graph_record
+        _LIVE_COUNT_SOURCE_RAW_TAILS[key] = source_tail
+        _LIVE_COUNT_PROJECT_C6[key] = (packet, units, c6_rows, c6_original_verify)
         reset = _HELD_COUNT_CLAIM_ORIGINALS.set(key)
         issued_verify()
         yield issued_verify
@@ -331,6 +663,8 @@ def _hold_selected_last_catalog_write_originals(writer_token, token, binding, un
         problem = error
     finally:
         if key is not None:
+            _LIVE_COUNT_SOURCE_GRAPHS.pop(key, None)
+            _LIVE_COUNT_PROJECT_C6.pop(key, None)
             _LIVE_COUNT_CLAIM_ORIGINALS.pop(key, None)
         if reset is not None:
             try:
@@ -342,12 +676,14 @@ def _hold_selected_last_catalog_write_originals(writer_token, token, binding, un
         # independently acquired actual owners still remain held. Then check
         # our raw shared graphs once more; never call a closed semantic scope.
         for close in (scope.close, *((verify_raw,) if verify_raw is not None else ()),
+                *((source_tail.finish,) if source_tail is not None else ()),
                 *(graph.close for graph in reversed(graphs)), owner_tail.close):
             try:
                 close()
             except BaseException as error:
                 if problem is None or (isinstance(problem, Exception) and not isinstance(error, Exception)):
                     problem = error
+        if key is not None:_LIVE_COUNT_SOURCE_RAW_TAILS.pop(key,None)
     if problem is not None:
         if not isinstance(problem, Exception):
             raise problem
@@ -667,7 +1003,11 @@ def _hold_native_catalog_write_replay(token,binding,selected_unit):
             raise GlobalAttemptHold()
         with _hold_catalog_originals(token,binding) as (units,verify):
             if selected_unit not in units:raise GlobalAttemptHold()
-            verify(); yield verify; verify()
+            # Membership can invoke equality; keep this last original check
+            # before handing the borrower its body. The enclosing context
+            # already checks the original again at body exit, without an
+            # intervening call or I/O that needs a second adjacent replay.
+            verify(); yield verify
     except Exception:failed=True
     if failed:raise GlobalAttemptHold() from None
 
@@ -1059,7 +1399,8 @@ def _inputs(token, binding, unit):
         with _hold_catalog_originals(token, binding) as (units, verify):
             if unit not in units:
                 raise GlobalAttemptHold()
-            verify()
+            # Its real ENTER/EXIT bracket the membership comparison. Return
+            # only after EXIT; no third adjacent original replay is needed.
         name = owner.lock_name[:-5] + '.unit-' + unit.unit_id + '.journal'
     return owner, owner.directories[-1][0], name, header
 
@@ -1876,12 +2217,354 @@ def record_original_business_reserved_attempt_intent(token, binding, identity, u
     return result
 
 
+def _same_first_count_original_fields(count,originals):
+    names=('writer','token','binding','unit','project','owner','context','verify')
+    if type(count) is not dict or any(name not in count for name in names):raise GlobalAttemptHold()
+    if any(count[name]!=original if name in ('binding','context') else count[name] is not original
+            for name,original in zip(names,originals)):raise GlobalAttemptHold()
+
+
+def _first_original_source_prefix_packet():
+    key=_FIRST_ORIGINAL_SOURCE_PREFIX.get()
+    if key is None:return None
+    packet=_LIVE_FIRST_ORIGINAL_SOURCE_PREFIXES.get(key)
+    if (type(key) is not _FirstOriginalSourcePrefixAnchor or packet is not key.packet
+            or type(packet) is not dict or frozenset(packet)!=key.fields
+            or packet['context']!=(os.getpid(),threading.get_ident())
+            or local._owner(packet['writer']) is not packet['project']
+            or ownership._validated_owner(packet['token'],packet['binding']) is not packet['owner']):
+        raise GlobalAttemptHold()
+    if key.prefetch_failed:raise GlobalAttemptHold()
+    for name,original in zip(('writer','project','token','owner','binding','last','context','_count_scope'),key.originals):
+        if (packet[name]!=original if name in ('binding','context') else packet[name] is not original):
+            raise GlobalAttemptHold()
+    if key.prefetch_scope is not packet['_count_scope']:raise GlobalAttemptHold()
+    if packet['used'] is not key.used or packet['count'] is not key.count:raise GlobalAttemptHold()
+    if key.prepared is None:
+        if any(packet[name] is not None for name in ('row','arguments','body','observe')):raise GlobalAttemptHold()
+    else:
+        row,unit,body,observe,arguments,snapshot=key.prepared
+        if (packet['row'] is not row or row.unit is not unit or packet['arguments'] is not arguments
+                or tuple(arguments)!=tuple(name for name,_value in snapshot)
+                or any(arguments[name] is not value for name,value in snapshot)):
+            raise GlobalAttemptHold()
+        expected_body=None if key.exit_attempted else body
+        expected_observe=None if key.exit_attempted else observe
+        if packet['body'] is not expected_body or packet['observe'] is not expected_observe:raise GlobalAttemptHold()
+    if key.count is not None:
+        if key.count_fields is None:raise GlobalAttemptHold()
+        _same_first_count_original_fields(key.count,key.count_fields)
+        if _count_claim_original_packet() is not key.count:raise GlobalAttemptHold()
+    if key.prefetched is not None:
+        row,unit,count_key,count,record,verify,originals=key.prefetched
+        if (key.prepared is None or key.prepared[0] is not row or row.unit is not unit
+                or _HELD_COUNT_CLAIM_ORIGINALS.get() is not count_key
+                or _count_claim_original_packet() is not count
+                or _LIVE_COUNT_SOURCE_GRAPHS.get(count_key) is not record
+                or record[0] is not count or count.get('_source_graphs') is not record
+                or count['verify'] is not verify):raise GlobalAttemptHold()
+        _same_first_count_original_fields(count,originals)
+    return packet
+
+
+@contextmanager
+def _hold_first_original_source_prefix(writer,token,binding,last):
+    """Fixed receiver-owned lexical prefix, not a returned observation/permit.
+
+    The independent original body starts while core C6/source/K are live. The
+    selected COUNT graph overlaps those originals before core closure. Only
+    that same live graph can receive the one-use body; its full suffix runs in
+    a NEW short source K and finishes before COUNT. No old K escapes the core.
+    """
+    if _FIRST_ORIGINAL_SOURCE_PREFIX.get() is not None:raise GlobalAttemptHold()
+    count_scope=ExitStack()
+    packet={'writer':writer,'token':token,'binding':binding,'last':last,
+        'project':local._owner(writer),'owner':ownership._validated_owner(token,binding),
+        'context':(os.getpid(),threading.get_ident()),'row':None,'arguments':None,
+        'body':None,'observe':None,'count':None,'used':False,'_count_scope':count_scope}
+    key=_FirstOriginalSourcePrefixAnchor(packet)
+    _LIVE_FIRST_ORIGINAL_SOURCE_PREFIXES[key]=packet
+    reset=_FIRST_ORIGINAL_SOURCE_PREFIX.set(key)
+    primary=cleanup_problem=None
+    try:
+        _first_original_source_prefix_packet()
+        yield
+        _first_original_source_prefix_packet()
+    except BaseException as error:
+        primary=error
+    finally:
+        # Revoke first; an unconsumed body is interrupted, not completed or
+        # replayed after COUNT. Outer original owners/graphs still dominate.
+        _LIVE_FIRST_ORIGINAL_SOURCE_PREFIXES.pop(key,None)
+        body=(key.prepared[2] if key.prepared is not None and not key.exit_attempted else None)
+        key.exit_attempted=True;packet['body']=packet['observe']=None
+        for close in (lambda:_FIRST_ORIGINAL_SOURCE_PREFIX.reset(reset),
+                *((lambda:body.__exit__(GeneratorExit,GeneratorExit(),None),) if body is not None else ()),
+                count_scope.close):
+            try:close()
+            except BaseException as error:
+                cleanup_problem=error
+                if primary is None or (isinstance(primary,Exception) and not isinstance(error,Exception)):
+                    primary=error
+    if primary is not None:
+        if cleanup_problem is not None and cleanup_problem is not primary:raise primary from cleanup_problem
+        raise primary
+
+
+def _prepare_first_original_source_prefix(row,observation,**arguments):
+    packet=_first_original_source_prefix_packet()
+    if packet is None:return
+    last=packet['last']
+    if (row.unit!=last.unit or row.project_identity!=last.project_identity
+            or row.c6_facts!=last.c6_facts or observation.attempt_count!=0):return
+    if (packet['row'] is not None or packet['used'] or arguments['writer_token'] is not packet['writer']
+            or arguments.get('_shared_retry') is not False):raise GlobalAttemptHold()
+    # No K wrapper here: the actual input core owns its strict original K.
+    body=_hold_receipted_original_source_inputs_body(packet['token'],packet['binding'],row.unit,**arguments)
+    packet['observe']=body.__enter__()
+    packet['body']=body;packet['row']=row;packet['arguments']=dict(arguments)
+    key=_FIRST_ORIGINAL_SOURCE_PREFIX.get()
+    key.prepared=(row,row.unit,body,packet['observe'],packet['arguments'],tuple(arguments.items()))
+    _first_original_source_prefix_packet()
+
+
+def _prefetch_first_original_count_graph():
+    """Cold read-only graph entry before IO, never early COUNT/K/CLAIM.
+
+    Core source/business scopes have already entered with no COUNT join and
+    keep their original strict K and close order. Only the fixed FIRST receiver
+    owns this longer graph scope. R2 and input-only diagnostic paths are not
+    silently converted. Failed acquisition never retries or adopts a later
+    graph; actual selected row/unit/key/packet/three graphs are anchored once.
+    """
+    packet=_first_original_source_prefix_packet()
+    if packet is None:return
+    key=_FIRST_ORIGINAL_SOURCE_PREFIX.get()
+    if key.prepared is None:return
+    if key.prefetch_attempted:raise GlobalAttemptHold()
+    key.prefetch_attempted=True
+    row,unit=key.prepared[:2]
+    try:
+        if _HELD_COUNT_CLAIM_ORIGINALS.get() is not None:raise GlobalAttemptHold()
+        verify=key.prefetch_scope.enter_context(_hold_selected_last_catalog_write_originals(
+            packet['writer'],packet['token'],packet['binding'],unit))
+        count=_count_claim_original_packet();count_key=_HELD_COUNT_CLAIM_ORIGINALS.get()
+        record=_LIVE_COUNT_SOURCE_GRAPHS.get(count_key)
+        if (count is None or count_key is None or type(record) is not tuple or len(record)!=2
+                or record[0] is not count or count.get('_source_graphs') is not record
+                or type(record[1]) is not tuple or len(record[1])!=3
+                or count['writer'] is not packet['writer'] or count['token'] is not packet['token']
+                or count['binding']!=packet['binding'] or count['unit'] is not unit
+                or count['project'] is not packet['project'] or count['owner'] is not packet['owner']
+                or count['verify'] is not verify):raise GlobalAttemptHold()
+        originals=tuple(count[name] for name in ('writer','token','binding','unit','project','owner','context','verify'))
+        verify();_same_first_count_original_fields(count,originals)
+        key.prefetched=(row,unit,count_key,count,record,verify,originals)
+        if _first_original_source_prefix_packet() is not packet:raise GlobalAttemptHold()
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        # An actual still-LIVE source factory selects this overlap, never a
+        # caller event list or existence of a folder as permission. Ordinary
+        # first use without archived deliveries has no source to transfer.
+        if any(source.packet['writer'] is packet['writer']
+                for source in allocation._LIVE_SOURCE_K_SETTINGS.values()):
+            allocation._receive_first_original_count_source(packet['writer'],packet['token'],packet['binding'],unit)
+        if _first_original_source_prefix_packet() is not packet:raise GlobalAttemptHold()
+    except BaseException:
+        key.prefetch_failed=True
+        raise
+
+
+def _bind_first_original_source_prefix(row):
+    packet=_first_original_source_prefix_packet()
+    if packet is None:raise GlobalAttemptHold()
+    count=_count_claim_original_packet()
+    if (count is None or count['writer'] is not packet['writer'] or count['token'] is not packet['token']
+            or count['binding']!=packet['binding'] or count['unit'] is not row.unit
+            or count['project'] is not packet['project'] or count['owner'] is not packet['owner']
+            or packet['count'] is not None):raise GlobalAttemptHold()
+    if packet['row'] is None:
+        if inspect_global_unit(packet['token'],packet['binding'],row.unit).attempt_count==0:
+            raise GlobalAttemptHold()
+        return
+    if packet['row'] is not row or packet['used'] or packet['body'] is None:raise GlobalAttemptHold()
+    originals=tuple(count[name] for name in ('writer','token','binding','unit','project','owner','context','verify'))
+    originals[-1]()
+    _same_first_count_original_fields(count,originals)
+    if _first_original_source_prefix_packet() is not packet:raise GlobalAttemptHold()
+    key=_FIRST_ORIGINAL_SOURCE_PREFIX.get();key.count=count;key.count_fields=originals
+    packet['count']=count
+    _first_original_source_prefix_packet()
+
+
+def _consume_first_original_source_prefix(writer,token,binding,unit,identity,**arguments):
+    packet=_first_original_source_prefix_packet()
+    key=_FIRST_ORIGINAL_SOURCE_PREFIX.get()
+    count=_count_claim_original_packet()
+    if (packet is None or packet['used'] or packet['body'] is None or packet['count'] is not count
+            or count is None or packet['writer'] is not writer or packet['token'] is not token
+            or packet['binding']!=binding or packet['row'].unit is not unit
+            or count['unit'] is not unit):raise GlobalAttemptHold()
+    # Consume BEFORE observation, including argument drift and suffix failure.
+    key.used=True;packet['used']=True
+    expected=packet['arguments']
+    pending=key.prepared[2]
+    try:
+        if (set(arguments)!=set(expected) or any(arguments[name] is not expected[name]
+                for name in ('qualified_source','store','writer_token','settings','whitelist_snapshot'))
+                or any(arguments[name]!=expected[name] for name in
+                    ('expected_template_sha256','http_root','whitelist_path','_shared_retry'))):raise GlobalAttemptHold()
+        with _hold_receipted_count_source_k(writer,token,binding,unit):
+            count['verify']()
+            if _first_original_source_prefix_packet() is not packet:raise GlobalAttemptHold()
+            observe=key.prepared[3];body=pending
+            result=observe(identity)
+            if _first_original_source_prefix_packet() is not packet:raise GlobalAttemptHold()
+            # Remove cleanup slot before executing the real full suffix. A
+            # failed suffix cannot replay the observer or turn into cold PASS.
+            key.exit_attempted=True;packet['body']=packet['observe']=None;pending=None
+            body.__exit__(None,None,None)
+            count['verify']()
+            if _first_original_source_prefix_packet() is not packet:raise GlobalAttemptHold()
+        # Only a successful COMPLETE suffix, COUNT tail and short-K exit allow
+        # subsequent independent full facts. Used/failed alone never do.
+        if _first_original_source_prefix_packet() is not packet:raise GlobalAttemptHold()
+        key.succeeded=True
+    except BaseException as primary:
+        key.failed=True;key.exit_attempted=True;packet['body']=packet['observe']=None
+        if pending is not None:
+            try:pending.__exit__(GeneratorExit,GeneratorExit(),None)
+            except BaseException as cleanup:
+                if isinstance(primary,Exception) and not isinstance(cleanup,Exception):raise
+                raise primary from cleanup
+        raise
+    return result
+
+
 def _receipted_original_facts(
     token, binding, identity, unit, *, qualified_source, store, writer_token,
     settings, whitelist_snapshot, expected_template_sha256, http_root, whitelist_path,
     _shared_retry=False,
 ):
     """Read-only actual original C5/C6 facts, never admission or recompilation."""
+    arguments=dict(qualified_source=qualified_source,store=store,writer_token=writer_token,
+        settings=settings,whitelist_snapshot=whitelist_snapshot,
+        expected_template_sha256=expected_template_sha256,http_root=http_root,
+        whitelist_path=whitelist_path,_shared_retry=_shared_retry)
+    prefix=_first_original_source_prefix_packet()
+    if prefix is not None:
+        key=_FIRST_ORIGINAL_SOURCE_PREFIX.get()
+        if key.prepared is not None:
+            if key.failed or (key.used and not key.succeeded):raise GlobalAttemptHold()
+            if not key.used:
+                return _consume_first_original_source_prefix(writer_token,token,binding,unit,identity,**arguments)
+    with _hold_receipted_original_source_inputs(token,binding,unit,
+            qualified_source=qualified_source,store=store,writer_token=writer_token,
+            settings=settings,whitelist_snapshot=whitelist_snapshot,
+            expected_template_sha256=expected_template_sha256,http_root=http_root,
+            whitelist_path=whitelist_path,_shared_retry=_shared_retry) as observe:
+        result=observe(identity)
+    if prefix is not None and _first_original_source_prefix_packet() is not prefix:raise GlobalAttemptHold()
+    return result
+
+
+@contextmanager
+def _hold_receipted_count_source_k(writer,token,binding,unit):
+    """Short source-read domain under the actual COUNT/CLAIM original join.
+
+    No join keeps ordinary strict K. This never carries a strict count snapshot
+    across an ATTEMPT/CLAIM write or issues any write/send permission: the fixed
+    native ALL completed-settings reader owns only this lexical facts replay.
+    """
+    packet=_count_claim_original_packet()
+    if packet is None:
+        yield
+        return
+    def same_join():
+        if (_count_claim_original_packet() is not packet or packet['writer'] is not writer
+                or packet['token'] is not token or packet['binding']!=binding
+                or packet['unit'] is not unit):raise GlobalAttemptHold()
+    def current():
+        same_join()
+        packet['verify']()
+        same_join()
+    current()
+    from monitor import issue_tracker_settings_audit_allocation as allocation
+    claims=tuple(name for name in os.listdir(packet['project'].root_fd)
+        if name in (allocation._DELIVERY_FOLDER,allocation._DELIVERY_STARTED)
+        or name.startswith(allocation._DELIVERY_FOLDER+'-')
+        or name.startswith(allocation._DELIVERY_STARTED+'-'))
+    # The actual ALL factory proves complete paired claims. Their names alone
+    # neither supply event IDs nor authorize an archived projection exception.
+    primary=None
+    try:
+        with ExitStack() as scope:
+            try:
+                if claims:
+                    key=_HELD_COUNT_CLAIM_ORIGINALS.get()
+                    if key in allocation._LIVE_COUNT_RECEIVED_SOURCES:
+                        scope.enter_context(allocation._hold_received_count_source_k(writer,token,binding,unit))
+                    else:
+                        prefix=_first_original_source_prefix_packet()
+                        first=_FIRST_ORIGINAL_SOURCE_PREFIX.get()
+                        if prefix is not None and first.prefetched is not None:raise GlobalAttemptHold()
+                        scope.enter_context(allocation._hold_owned_native_completed_source_k(writer,token,binding))
+                current()
+                yield
+                current()
+            except BaseException as error:
+                # Capture the body interruption before any reader finalizer
+                # can replace it with a secondary ordinary HOLD.
+                primary=error
+                raise
+    except BaseException as error:
+        if primary is None:primary=error
+        elif error is not primary:
+            if isinstance(primary,Exception) and not isinstance(error,Exception):
+                # A real reader-finalizer interruption dominates an ordinary
+                # body refusal, and must also survive the final original check.
+                primary=error
+            else:raise primary from error
+        raise
+    finally:
+        # Last original check follows the native K issuer's actual revocation
+        # and ALL/settings/raw finalizers, including an incoming interruption.
+        try:current()
+        except BaseException as error:
+            if primary is not None:
+                if isinstance(primary,Exception) and not isinstance(error,Exception):
+                    raise error from primary
+                raise primary from error
+            raise
+
+
+@contextmanager
+def _hold_receipted_original_source_inputs(
+    token,binding,unit,*,qualified_source,store,writer_token,settings,
+    whitelist_snapshot,expected_template_sha256,http_root,whitelist_path,
+    _shared_retry=False,
+):
+    with _hold_receipted_count_source_k(writer_token,token,binding,unit), \
+            _hold_receipted_original_source_inputs_body(token,binding,unit,
+                qualified_source=qualified_source,store=store,writer_token=writer_token,settings=settings,
+                whitelist_snapshot=whitelist_snapshot,expected_template_sha256=expected_template_sha256,
+                http_root=http_root,whitelist_path=whitelist_path,_shared_retry=_shared_retry) as observe:
+        yield observe
+
+
+@contextmanager
+def _hold_receipted_original_source_inputs_body(
+    token,binding,unit,*,qualified_source,store,writer_token,settings,
+    whitelist_snapshot,expected_template_sha256,http_root,whitelist_path,
+    _shared_retry=False,
+):
+    """Same-call local prefix before reads; no qualification/send handoff.
+
+    Only the first actual local source/receipt observations move. A genuine
+    fresh source and receipt are still replayed after the identity-dependent
+    business/reservation IO. Both original source calls and all four K graphs
+    remain. The fixed one-use observer cannot be used after this lexical scope
+    or from another process/thread; no caller verifier/graph/cache is accepted.
+    """
     from monitor.issue_tracker_send_unit import _original_receipt_identity, _read_original_generation_identity
     from monitor.issue_tracker_history_preread_journal import inspect_business_preread, inspect_business_source_projection
     from monitor.issue_tracker_stage_l_consumer import qualify_prod_stage_l, replay_original_receipted_prod_source
@@ -1904,6 +2587,16 @@ def _receipted_original_facts(
         whitelist_snapshot=whitelist_snapshot, whitelist_path=whitelist_path,
         writer_token=writer_token)
     def source():
+        from monitor.issue_tracker_settings_audit_allocation import (
+            _LIVE_COUNT_RECEIVED_SOURCES,_evaluate_received_count_source,_NATIVE_CATALOG_K_CONTEXT)
+        relation=_LIVE_COUNT_RECEIVED_SOURCES.get(_HELD_COUNT_CLAIM_ORIGINALS.get())
+        if relation is not None and (relation[2]._short_k_original is not None
+                or _NATIVE_CATALOG_K_CONTEXT.get() is not relation[2].original.issued):
+            return _evaluate_received_count_source(writer_token,token,binding,unit,store,
+                http_root=http_root,settings=settings,whitelist_snapshot=whitelist_snapshot,
+                whitelist_path=whitelist_path,
+                local_generation_id=target['generation_id'] if older else None,
+                expected_template_sha256=expected_template_sha256 if older else None)
         if older:
             return replay_original_receipted_prod_source(store, **arguments,
                 expected_template_sha256=expected_template_sha256,
@@ -1912,6 +2605,14 @@ def _receipted_original_facts(
     def receipt_identity():
         if older:
             return _read_original_generation_identity(target['generation_id'], writer_token)
+        from monitor.issue_tracker_settings_audit_allocation import (
+            _LIVE_COUNT_RECEIVED_SOURCES,_evaluate_received_count_receipt,_NATIVE_CATALOG_K_CONTEXT)
+        relation=_LIVE_COUNT_RECEIVED_SOURCES.get(_HELD_COUNT_CLAIM_ORIGINALS.get())
+        if relation is not None and (relation[2]._short_k_original is not None
+                or _NATIVE_CATALOG_K_CONTEXT.get() is not relation[2].original.issued):
+            return _evaluate_received_count_receipt(writer_token,token,binding,unit,store,
+                qualified_source=qualified_source,generation_id=target['generation_id'],settings=settings,
+                whitelist_snapshot=whitelist_snapshot,expected_template_sha256=expected_template_sha256)
         return _original_receipt_identity(qualified_source, store, target['generation_id'],
             writer_token, settings, whitelist_snapshot, expected_template_sha256)
     # A caller's old qualified object does not establish provenance. Replay
@@ -1921,18 +2622,32 @@ def _receipted_original_facts(
     receipt = receipt_identity()
     if receipt[:3] != (target['generation_id'], target['publish_id'], action['manifest_id']):
         raise GlobalAttemptHold()
-    reservations = _reserved_images(token, binding, identity, unit)
-    business = inspect_business_preread(token, binding, identity, unit)
-    cabling_rows, switch_rows = _source_rows(actual_source)
-    if inspect_business_source_projection(token, binding, identity, unit, (*cabling_rows, *switch_rows)) != business:
-        raise GlobalAttemptHold()
-    if source() != actual_source or read_completed_cycle_evidence(store) != cycles:
-        raise GlobalAttemptHold()
-    if receipt_identity() != receipt:
-        raise GlobalAttemptHold()
-    inspect_project_online_target(writer_token, binding)
-    ownership._validated_owner(token, binding)
-    return receipt, actual_source, reservations, business, audits
+    live=True;used=False;completed=False
+    origin=(os.getpid(),threading.get_ident())
+    def observe(identity):
+        nonlocal used,completed
+        if not live or used or origin!=(os.getpid(),threading.get_ident()):raise GlobalAttemptHold()
+        used=True
+        _inputs(token,binding,unit)
+        inspect_project_online_target(writer_token,binding)
+        reservations = _reserved_images(token, binding, identity, unit)
+        business = inspect_business_preread(token, binding, identity, unit)
+        cabling_rows, switch_rows = _source_rows(actual_source)
+        if inspect_business_source_projection(token, binding, identity, unit, (*cabling_rows, *switch_rows)) != business:
+            raise GlobalAttemptHold()
+        completed=True
+        return receipt, actual_source, reservations, business, audits
+    try:
+        yield observe
+        if (not completed or origin!=(os.getpid(),threading.get_ident())
+                or source() != actual_source or read_completed_cycle_evidence(store) != cycles):
+            raise GlobalAttemptHold()
+        if receipt_identity() != receipt:
+            raise GlobalAttemptHold()
+        inspect_project_online_target(writer_token, binding)
+        ownership._validated_owner(token, binding)
+    finally:
+        live=False
 
 
 @contextmanager

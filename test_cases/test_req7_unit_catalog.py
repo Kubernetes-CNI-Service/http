@@ -1111,6 +1111,486 @@ class UnitCatalogTests(unittest.TestCase):
             self.assertEqual(before,original_read_files(self.root))
             with self.assertRaises(globals_.GlobalAttemptHold):borrowed()
 
+    @contextmanager
+    def _count_source_overlap_originals(self):
+        with self._simple_count_claim_originals() as (globals_,writer,token,bound):
+            with globals_._hold_selected_last_catalog_write_originals(writer,token,bound,self.first) as verify:
+                key=globals_._HELD_COUNT_CLAIM_ORIGINALS.get()
+                record=globals_._LIVE_COUNT_SOURCE_GRAPHS[key]
+                packet,graphs=record
+                source=self.module._Originals()
+                try:
+                    # Genuine independently opened original edges while the
+                    # actual catalog/Count issuer still holds all three graphs.
+                    source.namespace=graphs[0].namespace
+                    for graph in graphs:
+                        for parent,name,_fd,_identity,_entries in graph.directories:
+                            source.directory(parent,name)
+                        for parent,name,_fd,_identity,raw in graph.files:
+                            source.file(parent,name,len(raw))
+                    yield globals_,writer,token,bound,key,record,source,verify
+                finally:source.close()
+
+    def test_actual_count_source_overlap_requires_registered_three_graphs_and_same_unit(self):
+        from contextvars import copy_context
+        from dataclasses import replace
+        globals_=self.globals_api()
+        entry=getattr(globals_,'_verify_issued_count_source_original_overlap',None)
+        self.assertTrue(callable(entry),'actual Count graph receiver is missing')
+        with self._count_source_overlap_originals() as (globals_,writer,token,bound,key,record,source,verify):
+            entry=globals_._verify_issued_count_source_original_overlap
+            self.assertIsNone(entry(writer,token,bound,self.first,source))
+            with self.assertRaises(globals_.GlobalAttemptHold):entry(writer,token,bound,replace(self.first),source)
+            stale=copy_context()
+            globals_._LIVE_COUNT_SOURCE_GRAPHS[key]=tuple(list(record))
+            try:
+                with self.assertRaises(globals_.GlobalAttemptHold):entry(writer,token,bound,self.first,source)
+            finally:globals_._LIVE_COUNT_SOURCE_GRAPHS[key]=record
+            verify()
+        self.assertEqual({},globals_._LIVE_COUNT_SOURCE_GRAPHS)
+        with self.assertRaises(globals_.GlobalAttemptHold):
+            stale.run(entry,writer,token,bound,self.first,source)
+
+    def test_actual_count_source_overlap_cannot_refresh_old_strict_source_after_creator_append(self):
+        globals_=self.globals_api()
+        entry=getattr(globals_,'_verify_issued_count_source_original_overlap',None)
+        self.assertTrue(callable(entry))
+        with self._count_source_overlap_originals() as (globals_,writer,token,bound,_key,_record,source,verify):
+            self.assertIsNone(globals_._verify_issued_count_source_original_overlap(writer,token,bound,self.first,source))
+            result=globals_.record_global_attempt_intent(token,bound,self.first)
+            self.assertEqual((1,'UNKNOWN'),(result.attempt_count,result.outcome))
+            verify() # genuine exclusive creator append is in Count's own graph
+            with self.assertRaises(globals_.GlobalAttemptHold):
+                globals_._verify_issued_count_source_original_overlap(writer,token,bound,self.first,source)
+            self.assertEqual(1,globals_.inspect_global_unit(token,bound,self.first).attempt_count)
+        self.assertFalse(tuple(self.root.rglob('CLAIM-*')))
+
+    @contextmanager
+    def _count_source_raw_receiver_control(self):
+        # Genuine original Count creator and raw FD mechanics only: this does
+        # not issue native K, authenticate source events or prove FIRST wire.
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        allocation.global_journal=self.globals_api()
+        entry=getattr(allocation,'_CountSourceRawOriginals',None)
+        self.assertTrue(callable(entry),'continuous Count-backed raw receiver is missing')
+        with self._count_source_overlap_originals() as (globals_,writer,token,bound,key,record,source,verify):
+            allocation.global_journal=globals_
+            # Catalog controls reload the canonical sheet-owner module between
+            # cases. Match that real registry, never substitute an owner guard.
+            allocation.ownership=globals_.ownership
+            raw=allocation._DeliveryCreatorOriginals(writer,token,bound)
+            received=None
+            try:
+                raw.retain(source)
+                received=entry(writer,token,bound,self.first,raw)
+                yield allocation,globals_,writer,token,bound,key,record,source,raw,received,verify
+            finally:
+                has_tail=(received is not None and (getattr(received,'_count_tail_owner',None) is not None
+                    or any(getattr(anchor,'receiver',None) is received
+                        or getattr(getattr(anchor,'finish_receiver',None),'__self__',None) is received
+                        for anchor in globals_._LIVE_COUNT_SOURCE_RAW_TAILS.values())))
+                if received is not None and not received.closed and not has_tail:received.close()
+                # Strict original-source cleanup still releases all owned FDs
+                # after the Count creator has legitimately changed names.
+                if raw.slots:
+                    try:raw.close()
+                    except allocation.SettingsAuditHold:pass
+
+    def test_count_raw_receiver_keeps_own_duplicates_across_original_count_append(self):
+        with self._count_source_raw_receiver_control() as (
+                allocation,globals_,writer,token,bound,_key,_record,source,raw,received,verify):
+            received.verify()
+            self.assertTrue(received.raw.slots)
+            self.assertFalse({fd for fd,_identity in raw.slots}&
+                             {fd for fd,_identity in received.raw.slots})
+            result=globals_.record_global_attempt_intent(token,bound,self.first)
+            self.assertEqual((1,'UNKNOWN'),(result.attempt_count,result.outcome))
+            verify();received.verify()
+            with self.assertRaises(self.module.UnitCatalogHold):source.verify()
+            with self.assertRaises(allocation.SettingsAuditHold):raw.verify()
+            self.assertFalse(tuple(self.root.rglob('CLAIM-*')))
+
+    def test_count_raw_receiver_refuses_equal_registry_record_and_original_file_drift(self):
+        with self._count_source_raw_receiver_control() as (
+                allocation,_globals,_writer,_token,_bound,key,record,_source,_raw,received,_verify):
+            _globals._LIVE_COUNT_SOURCE_GRAPHS[key]=tuple(list(record))
+            try:
+                with self.assertRaises(allocation.SettingsAuditHold):received.verify()
+            finally:_globals._LIVE_COUNT_SOURCE_GRAPHS[key]=record
+            received.verify()
+            parent,name,fd,identity,raw=received.raw.files[0]
+            # Same-byte foreign inode cannot replace the retained actual FD.
+            foreign=self.root/'receiver-foreign';foreign.write_bytes(raw);foreign.chmod(0o600)
+            substituted=os.open(foreign,os.O_RDONLY)
+            original=received.raw.files[0]
+            received.raw.files[0]=(parent,name,substituted,identity,raw)
+            try:
+                with self.assertRaises(allocation.SettingsAuditHold):received.verify()
+            finally:
+                received.raw.files[0]=original;os.close(substituted)
+            received.verify()
+
+    def test_count_raw_receiver_requires_same_original_unit_and_live_count_issuer(self):
+        from contextvars import copy_context
+        from dataclasses import replace
+        with self._count_source_raw_receiver_control() as (
+                allocation,globals_,writer,token,bound,key,record,_source,raw,received,_verify):
+            with self.assertRaises(allocation.SettingsAuditHold):
+                allocation._CountSourceRawOriginals(writer,token,bound,replace(self.first),raw)
+            stale=copy_context()
+            globals_._LIVE_COUNT_SOURCE_GRAPHS.pop(key)
+            try:
+                with self.assertRaises(allocation.SettingsAuditHold):stale.run(received.verify)
+            finally:globals_._LIVE_COUNT_SOURCE_GRAPHS[key]=record
+            received.verify()
+
+    def test_count_raw_receiver_cleanup_does_not_adopt_substituted_foreign_slot(self):
+        import errno
+        with self._count_source_raw_receiver_control() as (
+                allocation,_globals,_writer,_token,_bound,_key,_record,_source,_raw,received,_verify):
+            original_fd,original_identity=received.raw.slots[0]
+            foreign=self.root/'foreign-cleanup-slot';foreign.write_bytes(b'foreign must remain open\n')
+            fd=os.open(foreign,os.O_RDONLY)
+            try:
+                received.raw.slots[0]=(fd,allocation.journal._identity(os.fstat(fd)))
+                with self.assertRaises(allocation.SettingsAuditHold):received.close()
+                self.assertEqual(b'foreign must remain open\n',os.pread(fd,128,0))
+                with self.assertRaises(OSError) as closed:os.fstat(original_fd)
+                self.assertEqual(errno.EBADF,closed.exception.errno)
+            finally:
+                try:os.close(fd)
+                except OSError:pass
+
+    def test_count_raw_receiver_refuses_unanchored_unshared_parent(self):
+        with self._count_source_raw_receiver_control() as (
+                allocation,_globals,writer,token,bound,_key,_record,_source,raw,_received,_verify):
+            unknown=self.root/'unanchored-project';unknown.mkdir(mode=0o700)
+            (unknown/'EVENT').write_bytes(b'literal unknown root event\n');(unknown/'EVENT').chmod(0o600)
+            parent=os.open(unknown,os.O_RDONLY|os.O_DIRECTORY);held=self.module._Originals()
+            try:
+                held.file(parent,'EVENT',1024);raw.retain(held)
+                adopted=None
+                try:
+                    with self.assertRaises(allocation.SettingsAuditHold):
+                        adopted=allocation._CountSourceRawOriginals(writer,token,bound,self.first,raw)
+                finally:
+                    if adopted is not None:adopted.close()
+            finally:held.close();os.close(parent)
+
+    def test_count_raw_receiver_failed_capture_cleanup_attempts_all_slots_before_interrupt(self):
+        import errno
+        with self._count_source_raw_receiver_control() as (
+                allocation,_globals,writer,token,bound,_key,_record,_source,raw,_received,_verify):
+            native_dup=allocation._DeliveryCreatorOriginals._dup
+            native_close=allocation.local._close_written_original
+            acquired=[];seen=[];secondary=KeyboardInterrupt('literal capture cleanup interrupt')
+            def acquire(holder,*args,**kwargs):
+                result=native_dup(holder,*args,**kwargs)
+                if holder is not raw:
+                    acquired[:]=list(holder.slots)
+                    if len(acquired)>=3:raise RuntimeError('literal partial receiver capture failure')
+                return result
+            def close(fd,identity):
+                result=native_close(fd,identity)
+                if fd in {owned for owned,_image in acquired}:
+                    seen.append(fd)
+                    if len(seen)==1:raise secondary
+                return result
+            try:
+                with mock.patch.object(allocation._DeliveryCreatorOriginals,'_dup',acquire), \
+                        mock.patch.object(allocation.local,'_close_written_original',close):
+                    with self.assertRaises(KeyboardInterrupt) as caught:
+                        allocation._CountSourceRawOriginals(writer,token,bound,self.first,raw)
+                self.assertIs(secondary,caught.exception)
+                self.assertEqual(list(reversed([fd for fd,_identity in acquired])),seen)
+                for fd,_identity in acquired:
+                    with self.assertRaises(OSError) as closed:os.fstat(fd)
+                    self.assertEqual(errno.EBADF,closed.exception.errno)
+            finally:
+                for fd,identity in reversed(acquired):
+                    try:native_close(fd,identity)
+                    except (OSError,ValueError):pass
+
+    def test_count_issuer_owns_raw_receiver_tail_after_revocation_before_graph_close(self):
+        from monitor import issue_tracker_global_attempt_journal as globals_
+        entry=getattr(globals_,'_register_count_source_raw_receiver',None)
+        self.assertTrue(callable(entry),'original Count issuer raw tail enrollment missing')
+        observed=[];captured=[]
+        with self._count_source_raw_receiver_control() as (
+                allocation,globals_,_writer,_token,_bound,key,record,_source,_raw,received,_verify):
+            captured.append(received)
+            actual_finish=received._finish_from_count_tail
+            def finish(anchor):
+                self.assertNotIn(key,globals_._LIVE_COUNT_SOURCE_GRAPHS)
+                self.assertNotIn(key,globals_._LIVE_COUNT_CLAIM_ORIGINALS)
+                for graph in record[1]:graph.verify()
+                observed.append('revoked Count; all original graphs still live')
+                return actual_finish(anchor)
+            received._finish_from_count_tail=finish
+            globals_._register_count_source_raw_receiver(received)
+            self.assertFalse(received.closed);received.verify()
+            with self.assertRaises(globals_.GlobalAttemptHold):globals_._register_count_source_raw_receiver(received)
+        self.assertEqual(['revoked Count; all original graphs still live'],observed)
+        self.assertTrue(captured[0].closed)
+        self.assertEqual([],captured[0].raw.slots)
+
+    def test_count_raw_tail_cannot_be_closed_by_unissued_callback_or_copied_record(self):
+        from monitor import issue_tracker_global_attempt_journal as globals_
+        self.assertTrue(callable(getattr(globals_,'_register_count_source_raw_receiver',None)))
+        with self._count_source_raw_receiver_control() as (
+                allocation,globals_,_writer,_token,_bound,key,record,_source,_raw,received,_verify):
+            with self.assertRaises(allocation.SettingsAuditHold):received._finish_from_count_tail(lambda:True)
+            self.assertFalse(received.closed)
+            globals_._LIVE_COUNT_SOURCE_GRAPHS[key]=tuple(list(record))
+            try:
+                with self.assertRaises(globals_.GlobalAttemptHold):globals_._register_count_source_raw_receiver(received)
+            finally:globals_._LIVE_COUNT_SOURCE_GRAPHS[key]=record
+            globals_._register_count_source_raw_receiver(received)
+            received.verify()
+
+    def test_original_count_tail_closes_received_raw_after_genuine_count_without_reviving_registry(self):
+        captured=[]
+        with self._count_source_raw_receiver_control() as (
+                _allocation,globals_,_writer,token,bound,_key,_record,_source,_raw,received,_verify):
+            captured.append(received)
+            globals_._register_count_source_raw_receiver(received)
+            result=globals_.record_global_attempt_intent(token,bound,self.first)
+            self.assertEqual((1,'UNKNOWN'),(result.attempt_count,result.outcome))
+            received.verify()
+        self.assertTrue(captured[0].closed)
+        self.assertEqual([],captured[0].raw.slots)
+        self.assertEqual({},globals_._LIVE_COUNT_SOURCE_RAW_TAILS)
+        self.assertEqual({},globals_._LIVE_COUNT_SOURCE_GRAPHS)
+        self.assertIsNone(globals_._COUNT_SOURCE_RAW_TAIL_CONTEXT.get())
+        self.assertFalse(tuple(self.root.rglob('CLAIM-*')))
+
+    def test_erased_count_tail_registry_cannot_skip_issuer_owned_original_cleanup(self):
+        import errno
+        from monitor import issue_tracker_global_attempt_journal as globals_
+        captured=[];slots=[]
+        with self.assertRaises(globals_.GlobalAttemptHold):
+            with self._count_source_raw_receiver_control() as (
+                    _allocation,globals_,_writer,_token,_bound,key,_record,_source,_raw,received,_verify):
+                globals_._register_count_source_raw_receiver(received)
+                captured.append(received);slots.extend(received.owned_slots)
+                globals_._LIVE_COUNT_SOURCE_RAW_TAILS.pop(key)
+        self.assertTrue(captured[0].closed)
+        for fd,_identity in slots:
+            with self.assertRaises(OSError) as closed:os.fstat(fd)
+            self.assertEqual(errno.EBADF,closed.exception.errno)
+        self.assertIsNone(globals_._COUNT_SOURCE_RAW_TAIL_CONTEXT.get())
+
+    def _count_bound_raw_tail_drift(self,which):
+        from monitor import issue_tracker_global_attempt_journal as globals_
+        captured=[];slots=[]
+        try:
+            with self.assertRaises(globals_.GlobalAttemptHold):
+                with self._count_source_raw_receiver_control() as (
+                        _allocation,globals_,_writer,_token,_bound,_key,_record,_source,_raw,received,_verify):
+                    globals_._register_count_source_raw_receiver(received)
+                    captured.append(received);slots.extend(received.owned_slots)
+                    if which=='owner':received._count_tail_owner=None
+                    else:received._count_tail_owner.receiver=None
+            for fd,_identity in slots:
+                with self.assertRaises(OSError):os.fstat(fd)
+            self.assertTrue(captured[0].closed)
+        finally:
+            for fd,identity in reversed(slots):
+                try:self.module.local._close_written_original(fd,identity)
+                except (OSError,ValueError):pass
+
+    def test_bound_count_raw_owner_drift_refuses_but_cleans_original_slots(self):
+        self._count_bound_raw_tail_drift('owner')
+
+    def test_bound_count_receiver_slot_cannot_downgrade_to_unbound_and_skip_cleanup(self):
+        self._count_bound_raw_tail_drift('receiver')
+
+    def test_count_raw_tail_reset_error_cannot_replace_original_cleanup_interrupt(self):
+        from monitor import issue_tracker_global_attempt_journal as globals_
+        primary=KeyboardInterrupt('literal original Count raw tail interruption')
+        actual_context=globals_._COUNT_SOURCE_RAW_TAIL_CONTEXT
+        def reset(value):
+            actual_context.reset(value)
+            raise OSError('literal tail context reset secondary error')
+        observed=SimpleNamespace(get=actual_context.get,set=actual_context.set,reset=reset)
+        with self.assertRaises(KeyboardInterrupt) as caught, \
+                mock.patch.object(globals_,'_COUNT_SOURCE_RAW_TAIL_CONTEXT',observed):
+            with self._count_source_raw_receiver_control() as (
+                    _allocation,globals_,_writer,_token,_bound,_key,_record,_source,_raw,received,_verify):
+                actual_finish=received._finish_from_count_tail
+                def finish(anchor):actual_finish(anchor);raise primary
+                received._finish_from_count_tail=finish
+                globals_._register_count_source_raw_receiver(received)
+        self.assertIs(primary,caught.exception)
+        self.assertIsNone(actual_context.get())
+
+    def _actual_count_tail_phase_entry_failure(self,primary):
+        # Actual Count three graphs -> independent raw receiver -> issuer tail.
+        # No source qualification, K or native send is fabricated here.
+        import errno
+        from monitor import issue_tracker_global_attempt_journal as globals_
+        slots=[];settings=[];closed_settings=[];captured=[];callback_errors=[]
+        try:
+            with ExitStack() as patches:
+                expected=type(primary) if not isinstance(primary,Exception) else globals_.GlobalAttemptHold
+                with self.assertRaises(expected) as caught:
+                    with self._count_source_raw_receiver_control() as (
+                            allocation,globals_,_writer,token,bound,key,record,_source,_raw,received,_verify):
+                        globals_._register_count_source_raw_receiver(received)
+                        anchor=received._count_tail_owner;captured.append((received,anchor,key,globals_))
+                        slots.extend(received.owned_slots)
+                        self.assertEqual(3,len(record[1]))
+                        count_folders=[row[2] for row in record[1][1].directories
+                            if row[1].endswith('.unit-'+self.first.unit_id+'.journal')]
+                        self.assertEqual(1,len(count_folders))
+                        path=self.root/'literal-phase-settings-original'
+                        path.write_bytes(b'literal owned settings tail\n');path.chmod(0o600)
+                        fd=os.open(path,os.O_RDONLY)
+                        settings.append((fd,allocation.journal._identity(os.fstat(fd))))
+                        def finish_settings():
+                            try:
+                                self.assertNotIn(key,globals_._LIVE_COUNT_CLAIM_ORIGINALS)
+                                self.assertNotIn(key,globals_._LIVE_COUNT_SOURCE_GRAPHS)
+                                for original,_identity in slots:os.fstat(original)
+                                for index,graph in enumerate(record[1]):
+                                    if index==1:
+                                        # Independent exact Count=1 contract:
+                                        # only ATTEMPT-1 was appended, no CLAIM.
+                                        graph.verify(appended_to=(count_folders[0],{'ATTEMPT-1'}))
+                                    else:graph.verify()
+                                allocation.local._close_written_original(*settings[0]);closed_settings.append(True)
+                            except BaseException as error:
+                                callback_errors.append(type(error).__name__);raise
+                        anchor._binding[4].callback(finish_settings)
+                        image=globals_.record_global_attempt_intent(token,bound,self.first)
+                        self.assertEqual((1,'UNKNOWN'),(image.attempt_count,image.outcome))
+                        context=globals_._COUNT_SOURCE_RAW_TAIL_CONTEXT
+                        def fail_phase(value):raise primary
+                        patches.enter_context(mock.patch.object(globals_,'_COUNT_SOURCE_RAW_TAIL_CONTEXT',
+                            SimpleNamespace(get=context.get,set=fail_phase,reset=context.reset)))
+                if not isinstance(primary,Exception):self.assertIs(primary,caught.exception)
+            received,anchor,key,globals_=captured[0]
+            self.assertEqual([True],closed_settings,
+                (callback_errors,received.closed,len(received.raw.slots),anchor.closing))
+            self.assertEqual([],callback_errors)
+            self.assertTrue(received.closed);self.assertFalse(anchor.closing)
+            self.assertEqual([],received.raw.slots)
+            for fd,_identity in (*slots,*settings):
+                with self.assertRaises(OSError) as closed:os.fstat(fd)
+                self.assertEqual(errno.EBADF,closed.exception.errno)
+            self.assertIsNone(context.get())
+            for registry in (globals_._LIVE_COUNT_CLAIM_ORIGINALS,globals_._LIVE_COUNT_SOURCE_GRAPHS,
+                    globals_._LIVE_COUNT_PROJECT_C6,globals_._LIVE_COUNT_SOURCE_RAW_TAILS):
+                self.assertNotIn(key,registry)
+            self.assertFalse(tuple(self.root.rglob('CLAIM-*')))
+        finally:
+            for fd,identity in (*slots,*settings):
+                try:self.module.local._close_written_original(fd,identity)
+                except (OSError,ValueError):pass
+
+    def test_actual_count_tail_phase_entry_interrupt_keeps_unknown_and_closes_originals(self):
+        self._actual_count_tail_phase_entry_failure(KeyboardInterrupt('literal actual Count tail phase interrupt'))
+
+    def test_actual_count_tail_phase_entry_memory_error_holds_and_closes_originals(self):
+        self._actual_count_tail_phase_entry_failure(MemoryError('literal actual Count tail phase allocation failure'))
+
+    def test_count_owns_fixed_settings_tail_before_raw_final_closure(self):
+        # Real Count/FD ownership order, not a native source/K allowance.
+        observed=[];captured=[]
+        with self._count_source_raw_receiver_control() as (
+                _allocation,globals_,_writer,_token,_bound,key,record,_source,_raw,received,_verify):
+            globals_._register_count_source_raw_receiver(received)
+            anchor=received._count_tail_owner
+            self.assertEqual(5,len(anchor._binding),'Count must independently own a fixed settings tail')
+            settings_tail=anchor._binding[4]
+            self.assertIsInstance(settings_tail,ExitStack)
+            def settings_closed():
+                self.assertNotIn(key,globals_._LIVE_COUNT_CLAIM_ORIGINALS)
+                self.assertNotIn(key,globals_._LIVE_COUNT_SOURCE_GRAPHS)
+                self.assertFalse(received.closed)
+                for fd,_identity in received.owned_slots:os.fstat(fd)
+                for graph in record[1]:graph.verify()
+                observed.append('settings closed before original raw and Count graphs')
+            settings_tail.callback(settings_closed);captured.append(received)
+        self.assertEqual(['settings closed before original raw and Count graphs'],observed)
+        self.assertTrue(captured[0].closed)
+        self.assertEqual([],captured[0].raw.slots)
+
+    def test_settings_tail_interrupt_still_closes_all_original_raw_slots(self):
+        from monitor import issue_tracker_global_attempt_journal as globals_
+        primary=KeyboardInterrupt('literal original settings tail interrupt')
+        slots=[];captured=[]
+        with self.assertRaises(KeyboardInterrupt) as caught:
+            with self._count_source_raw_receiver_control() as (
+                    _allocation,globals_,_writer,_token,_bound,_key,_record,_source,_raw,received,_verify):
+                globals_._register_count_source_raw_receiver(received)
+                anchor=received._count_tail_owner
+                self.assertEqual(5,len(anchor._binding),'fixed settings tail missing')
+                def interrupt():raise primary
+                anchor._binding[4].callback(interrupt)
+                slots.extend(received.owned_slots);captured.append(received)
+        self.assertIs(primary,caught.exception)
+        self.assertTrue(captured[0].closed)
+        for fd,_identity in slots:
+            with self.assertRaises(OSError):os.fstat(fd)
+        self.assertIsNone(globals_._COUNT_SOURCE_RAW_TAIL_CONTEXT.get())
+
+    def test_actual_first_prefetch_holds_original_count_graph_before_io_without_early_intent(self):
+        # Actual catalog/OS owners/Count graphs, but the source body is a
+        # lifecycle-only stand-in. This is NOT whole FIRST, G1 or native K.
+        from types import SimpleNamespace
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        with self._simple_count_claim_originals() as (globals_,writer,token,bound):
+            actual=globals_.local._owner(writer)
+            row=SimpleNamespace(unit=self.first,project_identity=(os.fstat(actual.project_fd).st_dev,
+                os.fstat(actual.project_fd).st_ino),c6_facts=b'explicit lifecycle-only C6 stand-in')
+            observed=SimpleNamespace(attempt_count=0);events=[]
+            options=dict(qualified_source=object(),store=object(),writer_token=writer,settings=object(),
+                whitelist_snapshot=object(),expected_template_sha256='a'*64,http_root=self.root,
+                whitelist_path=self.root/'literal-W1',_shared_retry=False)
+            @contextmanager
+            def source_body(*args,**kwargs):
+                self.assertEqual((token,bound,self.first),args);self.assertEqual(options,kwargs)
+                events.append('source entered before Count')
+                try:yield lambda _identity:('lifecycle-only source result',)
+                finally:events.append('source body closed')
+            with mock.patch.object(globals_,'_hold_receipted_original_source_inputs_body',new=source_body), \
+                    mock.patch.object(allocation,'_hold_owned_native_completed_source_k',
+                        side_effect=AssertionError('already-entered no-Count source scope nested K')):
+                with globals_._hold_first_original_source_prefix(writer,token,bound,row), ExitStack() as borrowers:
+                    # This is the genuine no-Count lexical path, entered before
+                    # actual Count registration and retained through core exit.
+                    with globals_._hold_receipted_count_source_k(writer,token,bound,self.first):
+                        globals_._prepare_first_original_source_prefix(row,observed,**options)
+                        globals_._prefetch_first_original_count_graph()
+                        count=globals_._count_claim_original_packet();key=globals_._HELD_COUNT_CLAIM_ORIGINALS.get()
+                        self.assertIs(self.first,count['unit'])
+                        record=globals_._LIVE_COUNT_SOURCE_GRAPHS[key]
+                        self.assertEqual(3,len(record[1]));count['verify']()
+                        self.assertFalse(tuple(self.root.rglob('ATTEMPT-*')))
+                        self.assertFalse(tuple(self.root.rglob('CLAIM-*')))
+                        events.append('original IO boundary completed')
+                        # Real existing borrower retains SAME verifier/graphs,
+                        # never re-enters the cold catalog constructor.
+                        with mock.patch.object(globals_,'_catalog_present',
+                                side_effect=AssertionError('second Count issuer')):
+                            verify=borrowers.enter_context(globals_._hold_selected_last_catalog_write_originals(
+                                writer,token,bound,self.first))
+                        self.assertIs(count['verify'],verify)
+                        self.assertIs(record,globals_._LIVE_COUNT_SOURCE_GRAPHS[key])
+                        globals_._bind_first_original_source_prefix(row)
+                    self.assertEqual(('lifecycle-only source result',),
+                        globals_._consume_first_original_source_prefix(writer,token,bound,self.first,object(),**options))
+                    counted=globals_.record_global_attempt_intent(token,bound,self.first)
+                    self.assertEqual((1,'UNKNOWN'),(counted.attempt_count,counted.outcome));verify()
+                    borrowers.callback(lambda:events.append('borrower closed while Count live')
+                        if globals_._count_claim_original_packet() is count else self.fail('Count issuer closed first'))
+            self.assertEqual(['source entered before Count','original IO boundary completed',
+                'source body closed','borrower closed while Count live'],events)
+            self.assertEqual({},globals_._LIVE_COUNT_SOURCE_GRAPHS)
+            self.assertIsNone(globals_._HELD_COUNT_CLAIM_ORIGINALS.get())
+            self.assertFalse(tuple(self.root.rglob('CLAIM-*')))
+
     def test_count_claim_nested_holder_rejects_different_originals_and_exited_context(self):
         from contextvars import copy_context
         from dataclasses import replace

@@ -1,5 +1,5 @@
 """Fixed read-only entry with actual locks and owned loopback TLS, no online use."""
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 import fcntl
 import hashlib
 import importlib
@@ -31,6 +31,140 @@ def load():
 
 
 class Req7HistoryReadLauncherDirectTests(unittest.TestCase):
+    @contextmanager
+    def issuance_fixture(self, *, project_auth=False, close_fault=None, final_fault=None, terminated=True):
+        """Direct lifecycle seam only; no genuine child or authentication claim."""
+        module=load()
+        from monitor import issue_tracker_local_commit as local, issue_tracker_spreadsheet_owner as ownership
+        from monitor import issue_tracker_online_target as target, issue_tracker_token_launcher as auth
+        from monitor.issue_tracker_sdk_authentication import AuthenticatedToken
+        from monitor.issue_tracker_online_target import OnlineTargetBinding
+        writer=object(); owner=object(); project=SimpleNamespace(lock_fd=21)
+        binding=OnlineTargetBinding(TARGET,'a'*64,'b'*64)
+        token=AuthenticatedToken('literal-direct-token',time.time()+3600)
+        authentication=auth.ProjectTokenRefreshCompletion(token,'literal-cloud-project','d'*64,())
+        authentication_packet=(os.getpid(),owner,binding,project,token,
+            (token.value,token.expires_at),'literal-cloud-project','d'*64,())
+        clock=[1000.0]; issued=[]; closes=[]; launches=[]; supervision=[]
+        class Stream:
+            closed=False
+            def __init__(self,name): self.name=name
+            def close(self):
+                response=issued[0] if issued else None
+                closes.append((self.name,response in module._READS,response in module._PROJECT_READS))
+                self.closed=True;clock[0]+=1.0
+                if self.name=='stdin' and close_fault is not None: raise close_fault
+        process=SimpleNamespace(stdin=Stream('stdin'),stdout=Stream('stdout'),stderr=Stream('stderr'))
+        original_decode=module._decode_completion
+        def decode(*args):
+            result=original_decode(*args);issued.append(result);return result
+        def launch(*args,**kwargs): launches.append((args,kwargs));return process
+        def supervise(child,**kwargs):
+            self.assertIs(process,child);supervision.append(kwargs)
+            request=json.loads(kwargs['request_bytes']);body=b'{"independent":"read"}'
+            path=module._prepare(binding,token,'metadata',None,None).path
+            header={'schema_version':1,'nonce':request['nonce'],
+                'request_path_sha256':hashlib.sha256(path.encode('ascii')).hexdigest(),
+                'status':200,'body_sha256':hashlib.sha256(body).hexdigest(),'body_bytes':len(body)}
+            clock[0]=1008.0
+            return SimpleNamespace(data=module._canonical(header)+body,termination_confirmed=terminated)
+        def inspect(*args):
+            if all(getattr(process,name).closed for name in ('stdin','stdout','stderr')):
+                if final_fault=='target':raise module.HistoryReadLauncherHold()
+                if final_fault=='acquisition_deadline':clock[0]=1030.0
+            return binding
+        def authenticate(*args):
+            if final_fault=='token' and all(getattr(process,n).closed for n in ('stdin','stdout','stderr')):
+                raise module.HistoryReadLauncherHold()
+            return project,'d'*64
+        with ExitStack() as stack:
+            if project_auth:
+                with auth._PROJECT_GUARD:auth._PROJECT_TOKENS[authentication]=authentication_packet
+                stack.callback(auth._PROJECT_TOKENS.pop,authentication,None)
+            stack.enter_context(mock.patch.object(local,'_owner',return_value=project))
+            stack.enter_context(mock.patch.object(ownership,'owner_lock_fd',return_value=32))
+            stack.enter_context(mock.patch.object(target,'inspect_project_online_target',side_effect=inspect))
+            stack.enter_context(mock.patch.object(auth,'require_current_owned_project_token',side_effect=authenticate))
+            stack.enter_context(mock.patch.object(module,'subprocess',SimpleNamespace(Popen=launch,PIPE=subprocess.PIPE)))
+            stack.enter_context(mock.patch.object(module,'supervise_owned_attempt',side_effect=supervise))
+            stack.enter_context(mock.patch.object(module,'_decode_completion',side_effect=decode))
+            stack.enter_context(mock.patch.object(module,'time',SimpleNamespace(monotonic=lambda:1000.0)))
+            stack.enter_context(mock.patch.object(module,'_monotonic',side_effect=lambda:clock[0]))
+            unit=(module.OwnedProjectSheetsReadUnit(writer,owner,binding,authentication,read_kind='metadata')
+                  if project_auth else module.OwnedSheetsReadUnit(writer,owner,binding,token,read_kind='metadata'))
+            yield SimpleNamespace(module=module,unit=unit,writer=writer,owner=owner,binding=binding,
+                authentication=authentication,clock=clock,issued=issued,closes=closes,
+                launches=launches,supervision=supervision,process=process)
+
+    def test_observation_has_fixed_thirty_seconds_after_successful_cleanup_without_renewal(self):
+        with self.issuance_fixture() as f:
+            actual=f.unit.read_once()
+            self.assertEqual([('stdin',False,False),('stdout',False,False),('stderr',False,False)],f.closes)
+            self.assertEqual(1041.0,f.module._READS[actual][-1],
+                '8 seconds reading + 3 cleanup seconds, then exactly 30 observation seconds')
+            self.assertEqual((1000.0,'read'),(f.supervision[0]['started_monotonic'],f.supervision[0]['kind']))
+            self.assertEqual(30.0,f.module._BUDGETS['read']);self.assertEqual(60.0,f.module._BUDGETS['mutation'])
+            f.clock[0]=1031.0
+            f.module.require_current_owned_read(f.writer,f.owner,f.binding,actual,read_kind='metadata')
+            self.assertEqual(1041.0,f.module._READS[actual][-1])
+            f.clock[0]=1041.0
+            with self.assertRaises(f.module.HistoryReadLauncherHold):
+                f.module.require_current_owned_read(f.writer,f.owner,f.binding,actual,read_kind='metadata')
+            with self.assertRaises(f.module.HistoryReadLauncherHold):f.unit.read_once()
+            self.assertEqual(1,len(f.launches));self.assertEqual(1,len(f.supervision))
+
+    def test_cleanup_refusal_or_interrupt_never_registers_a_read_observation(self):
+        for project_auth in (False,True):
+            for fault in (OSError('literal close failure'),KeyboardInterrupt('literal close interrupt')):
+                with self.subTest(project=project_auth,fault=type(fault).__name__), \
+                        self.issuance_fixture(project_auth=project_auth,close_fault=fault) as f:
+                    with self.assertRaises(type(fault) if not isinstance(fault,Exception)
+                                           else f.module.HistoryReadLauncherHold) as caught:
+                        f.unit.read_once()
+                    if not isinstance(fault,Exception):self.assertIs(fault,caught.exception)
+                    self.assertEqual(1,len(f.issued));response=f.issued[0]
+                    self.assertNotIn(response,f.module._READS);self.assertNotIn(response,f.module._PROJECT_READS)
+                    self.assertTrue(all(getattr(f.process,n).closed for n in ('stdin','stdout','stderr')))
+
+    def test_final_original_target_or_acquisition_deadline_refusal_never_issues_after_cleanup(self):
+        for fault in ('target','token','acquisition_deadline'):
+            with self.subTest(fault=fault),self.issuance_fixture(project_auth=True,final_fault=fault) as f:
+                with self.assertRaises(f.module.HistoryReadLauncherHold):f.unit.read_once()
+                self.assertTrue(all(getattr(f.process,n).closed for n in ('stdin','stdout','stderr')))
+                response=f.issued[0]
+                self.assertNotIn(response,f.module._READS);self.assertNotIn(response,f.module._PROJECT_READS)
+
+    def test_partial_project_registry_interrupt_retracts_both_observation_entries(self):
+        import weakref
+        incoming=KeyboardInterrupt('literal registry interruption')
+        original=weakref.WeakKeyDictionary.__setitem__
+        with self.issuance_fixture(project_auth=True) as f:
+            def put(registry,key,value):
+                original(registry,key,value)
+                if registry is f.module._PROJECT_READS:raise incoming
+            with mock.patch.object(weakref.WeakKeyDictionary,'__setitem__',new=put), \
+                    self.assertRaises(KeyboardInterrupt) as caught:f.unit.read_once()
+            self.assertIs(incoming,caught.exception);response=f.issued[0]
+            self.assertNotIn(response,f.module._READS);self.assertNotIn(response,f.module._PROJECT_READS)
+            self.assertTrue(all(getattr(f.process,n).closed for n in ('stdin','stdout','stderr')))
+
+    def test_unconfirmed_termination_cannot_issue_complete_read_evidence(self):
+        with self.issuance_fixture(terminated=False) as f:
+            before=(tuple(f.module._READS),tuple(f.module._PROJECT_READS))
+            with self.assertRaises(f.module.HistoryReadLauncherHold):f.unit.read_once()
+            self.assertEqual(before,(tuple(f.module._READS),tuple(f.module._PROJECT_READS)))
+            self.assertTrue(all(getattr(f.process,n).closed for n in ('stdin','stdout','stderr')))
+
+    def test_read_group_unissued_or_malformed_data_never_opens_sources(self):
+        module=load()
+        self.assertTrue(hasattr(module,'_require_current_owned_read_group'))
+        from monitor import issue_tracker_online_target as target
+        with mock.patch.object(target,'inspect_project_online_target') as opening:
+            for wrong in ((),[],(('metadata',None,None,object()),),((False,None,None,object()),)):
+                with self.subTest(kind=type(wrong).__name__),self.assertRaises(module.HistoryReadLauncherHold):
+                    module._require_current_owned_read_group(object(),object(),object(),wrong)
+            opening.assert_not_called()
+
     def test_g1_project_read_requires_original_issued_auth_not_decoded_or_caller_project(self):
         module=load()
         self.assertTrue(hasattr(module,'OwnedProjectSheetsReadUnit'),
@@ -112,7 +246,215 @@ class Req7HistoryReadLauncherDirectTests(unittest.TestCase):
 class Req7HistoryReadLauncherWorkflowTests(unittest.TestCase):
     setUp = native_fixture.Req7NativeTlsWireTests.setUp
     certificates = native_fixture.Req7NativeTlsWireTests.certificates
+    prepared_server_certificate = native_fixture.Req7NativeTlsWireTests.prepared_server_certificate
+    _server_material_originals = native_fixture.Req7NativeTlsWireTests._server_material_originals
     server = native_fixture.Req7NativeTlsWireTests.server
+
+    def test_original_auth_revocation_at_final_target_return_never_issues_a_project_read(self):
+        module=load()
+        from monitor import issue_tracker_token_launcher as auth, issue_tracker_online_target as target
+        body=b'{"matchedDeveloperMetadata":[]}'
+        reply=b'HTTP/1.1 200 OK\r\nContent-Length: '+str(len(body)).encode()+b'\r\nConnection: close\r\n\r\n'+body
+        for fault in ('token_expiry','auth_registry_revocation'):
+            with self.subTest(fault=fault),ExitStack() as stack:
+                if fault=='auth_registry_revocation':self.setUp();stack.callback(self.doCleanups)
+                _local,ownership,writer,owner,binding,_token,_config=self.owners(stack)
+                authentication,_credential,_original=self.project_auth(stack,ownership,owner,binding)
+                with auth._PROJECT_GUARD:packet=auth._PROJECT_TOKENS[authentication]
+                expiry=authentication.token.expires_at;decoded=[];mutated=[];target_visits=[]
+                original_decode=module._decode_completion;original_target=target.inspect_project_online_target
+                def decode(*args):
+                    result=original_decode(*args);decoded.append(result);return result
+                try:
+                    with self.server(reply,hostname='sheets.googleapis.com',destination='sheets.googleapis.com') as (records,errors),ExitStack() as launched:
+                        port=socket.getaddrinfo('sheets.googleapis.com',443)[0][4][1]
+                        calls,children=self.intercept(launched,self.child_fixture(port),writer,owner,binding)
+                        def inspect(*args):
+                            result=original_target(*args)
+                            target_visits.append(True)
+                            # The real supervisor already closes its streams.
+                            # Parent-finalizer RETURN is the fourth target
+                            # check: PRE, supervised POST, project POST, final.
+                            if len(target_visits)==4:
+                                self.assertTrue(all(getattr(children[0],n).closed for n in ('stdin','stdout','stderr')))
+                                self.assertEqual([],mutated);mutated.append(True)
+                                if fault=='token_expiry':object.__setattr__(authentication.token,'expires_at',0)
+                                else:
+                                    with auth._PROJECT_GUARD:auth._PROJECT_TOKENS.pop(authentication)
+                            return result
+                        unit=module.OwnedProjectSheetsReadUnit(writer,owner,binding,authentication,read_kind='metadata')
+                        with mock.patch.object(target,'inspect_project_online_target',side_effect=inspect), \
+                                mock.patch.object(module,'_decode_completion',side_effect=decode), \
+                                self.assertRaises(module.HistoryReadLauncherHold):unit.read_once()
+                        self.assertEqual(4,len(target_visits));self.assertEqual([True],mutated);self.assertEqual(1,len(decoded))
+                        self.assertNotIn(decoded[0],module._READS);self.assertNotIn(decoded[0],module._PROJECT_READS)
+                        self.assertEqual((1,0),(len(calls),children[0].returncode))
+                        self.assertTrue(all(getattr(children[0],n).closed for n in ('stdin','stdout','stderr')))
+                    self.assertEqual((1,[]),(len(records),errors))
+                finally:
+                    object.__setattr__(authentication.token,'expires_at',expiry)
+                    with auth._PROJECT_GUARD:auth._PROJECT_TOKENS[authentication]=packet
+
+    def test_real_original_project_and_legacy_reads_keep_fixed_post_completion_observation_window(self):
+        module=load();body=b'{"matchedDeveloperMetadata":[]}'
+        reply=b'HTTP/1.1 200 OK\r\nContent-Length: '+str(len(body)).encode()+b'\r\nConnection: close\r\n\r\n'+body
+        for project_auth in (False,True):
+            # Separate actual owners/registries, TLS and supervised child each
+            # time. Controlled clock only; native supervisor keeps real time.
+            with self.subTest(project=project_auth),ExitStack() as stack:
+                if project_auth:
+                    # Each subcase needs an independent actual project fixture.
+                    self.setUp();stack.callback(self.doCleanups)
+                _local,ownership,writer,owner,binding,token,_config=self.owners(stack)
+                authentication=None
+                if project_auth:authentication,_credential,_original=self.project_auth(stack,ownership,owner,binding)
+                with self.server(reply,hostname='sheets.googleapis.com',destination='sheets.googleapis.com') as (records,errors),ExitStack() as launched:
+                    port=socket.getaddrinfo('sheets.googleapis.com',443)[0][4][1]
+                    calls,children=self.intercept(launched,self.child_fixture(port),writer,owner,binding)
+                    started=time.monotonic();clock=[started+8.0]
+                    unit=(module.OwnedProjectSheetsReadUnit(writer,owner,binding,authentication,read_kind='metadata')
+                          if project_auth else module.OwnedSheetsReadUnit(writer,owner,binding,token,read_kind='metadata'))
+                    with mock.patch.object(module,'time',SimpleNamespace(monotonic=lambda:started)), \
+                            mock.patch.object(module,'_monotonic',side_effect=lambda:clock[0]):
+                        actual=unit.read_once()
+                        self.assertEqual(started+38.0,module._READS[actual][-1],
+                            'observation is a fixed30s from successful completion, not initial read start')
+                        self.assertEqual((body,1,0),(actual.data,len(calls),children[0].returncode))
+                        self.assertTrue(all(getattr(children[0],n).closed for n in ('stdin','stdout','stderr')))
+                        clock[0]=started+31.0
+                        module.require_current_owned_read(writer,owner,binding,actual,read_kind='metadata')
+                        if project_auth:
+                            module.require_current_owned_project_read(writer,owner,binding,actual,authentication,read_kind='metadata')
+                        self.assertEqual(started+38.0,module._READS[actual][-1])
+                        clock[0]=started+38.0
+                        with self.assertRaises(module.HistoryReadLauncherHold):
+                            module.require_current_owned_read(writer,owner,binding,actual,read_kind='metadata')
+                        with self.assertRaises(module.HistoryReadLauncherHold):unit.read_once()
+                        self.assertEqual(1,len(calls))
+                self.assertEqual((1,[]),(len(records),errors))
+
+    def test_original_read_group_has_one_fresh_auth_target_pair_at_each_boundary(self):
+        module=load()
+        self.assertTrue(hasattr(module,'_require_current_owned_project_read_group'),
+                        'fixed non-yield group must check genuine originals, not cache individual PASS')
+        from monitor import issue_tracker_token_launcher as auth, issue_tracker_online_target as target
+        with ExitStack() as stack:
+            _local,ownership,writer,owner,binding,_token,_config=self.owners(stack)
+            value,credential,original=self.project_auth(stack,ownership,owner,binding)
+            responses=[]
+            for kind,body in (('template_identity',b'{"independent":"identity"}'),
+                              ('metadata',b'{"matchedDeveloperMetadata":[]}')):
+                reply=b'HTTP/1.1 200 OK\r\nContent-Length: '+str(len(body)).encode()+b'\r\nConnection: close\r\n\r\n'+body
+                with self.server(reply,hostname='sheets.googleapis.com',destination='sheets.googleapis.com') as (records,errors),ExitStack() as launched:
+                    port=socket.getaddrinfo('sheets.googleapis.com',443)[0][4][1]
+                    calls,children=self.intercept(launched,self.child_fixture(port),writer,owner,binding)
+                    actual=module.OwnedProjectSheetsReadUnit(writer,owner,binding,value,read_kind=kind).read_once()
+                    self.assertEqual((body,1,0),(actual.data,len(calls),children[0].returncode))
+                self.assertEqual((1,[]),(len(records),errors))
+                responses.append((kind,None,None,actual))
+            expected=tuple(module.require_current_owned_project_read(writer,owner,binding,item[3],value,read_kind=item[0])
+                           for item in responses)
+            original_token=auth.require_current_owned_project_token
+            original_target=target.inspect_project_online_target
+            visits=[]
+            def token(*args):
+                visits.append('auth');return original_token(*args)
+            def policy(*args):
+                visits.append('target');return original_target(*args)
+            with mock.patch.object(auth,'require_current_owned_project_token',side_effect=token), \
+                    mock.patch.object(target,'inspect_project_online_target',side_effect=policy):
+                actual=module._require_current_owned_project_read_group(writer,owner,binding,value,tuple(responses))
+            self.assertEqual(expected,actual)
+            self.assertTrue(all(a[0] is b[0] for a,b in zip(expected,actual)))
+            self.assertEqual(['auth','target','auth','target'],visits)
+            self.assertEqual(original,credential.read_bytes())
+            # No reusable aggregate observation, callback, or extra read/send.
+            self.assertIs(type(actual),tuple)
+            self.assertTrue(hasattr(module,'_require_current_owned_read_group'))
+            visits.clear()
+            with mock.patch.object(target,'inspect_project_online_target',side_effect=policy):
+                plans=module._require_current_owned_read_group(writer,owner,binding,tuple(responses))
+            self.assertTrue(all(a[0] is b for a,b in zip(expected,plans)))
+            self.assertEqual(['target','target'],visits)
+            with module._READ_GUARD:first_deadline=module._READS[responses[0][3]][-1]
+            with mock.patch.object(module,'_monotonic',side_effect=[first_deadline-1]*6+[first_deadline]), \
+                    self.assertRaises(module.HistoryReadLauncherHold):
+                module._require_current_owned_read_group(writer,owner,binding,tuple(responses))
+
+    def test_original_read_group_refuses_equal_copy_revocation_and_expiry_at_return(self):
+        module=load()
+        self.assertTrue(hasattr(module,'_require_current_owned_project_read_group'))
+        from dataclasses import replace
+        from monitor import issue_tracker_online_target as target
+        with ExitStack() as stack:
+            _local,ownership,writer,owner,binding,_token,_config=self.owners(stack)
+            value,_credential,_original=self.project_auth(stack,ownership,owner,binding)
+            body=b'{"matchedDeveloperMetadata":[]}'
+            reply=b'HTTP/1.1 200 OK\r\nContent-Length: '+str(len(body)).encode()+b'\r\nConnection: close\r\n\r\n'+body
+            with self.server(reply,hostname='sheets.googleapis.com',destination='sheets.googleapis.com') as (records,errors),ExitStack() as launched:
+                port=socket.getaddrinfo('sheets.googleapis.com',443)[0][4][1]
+                calls,children=self.intercept(launched,self.child_fixture(port),writer,owner,binding)
+                actual=module.OwnedProjectSheetsReadUnit(writer,owner,binding,value,read_kind='metadata').read_once()
+                self.assertEqual((body,1,0),(actual.data,len(calls),children[0].returncode))
+            self.assertEqual((1,[]),(len(records),errors))
+            group=(('metadata',None,None,actual),)
+            for wrong in ((('metadata',None,None,replace(actual)),),
+                          (('metadata',None,True,actual),),(),list(group)):
+                with self.subTest(wrong=type(wrong).__name__),self.assertRaises(module.HistoryReadLauncherHold):
+                    module._require_current_owned_project_read_group(writer,owner,binding,value,wrong)
+            with module._READ_GUARD:packet=module._READS[actual]
+            with module._PROJECT_READ_GUARD:project_auth=module._PROJECT_READS[actual]
+            original_target=target.inspect_project_online_target
+            for fault in ('equal_registry_copy','auth_revoked','read_expired'):
+                visits=[]
+                def policy(*args):
+                    result=original_target(*args);visits.append(True)
+                    if len(visits)==2:
+                        if fault=='equal_registry_copy':
+                            with module._READ_GUARD:module._READS[actual]=tuple(list(packet))
+                        elif fault=='auth_revoked':
+                            with module._PROJECT_READ_GUARD:module._PROJECT_READS.pop(actual)
+                        else:
+                            # Fault is a deterministic deadline crossing, not
+                            # a replacement read or a longer production limit.
+                            module._monotonic=lambda:packet[-1]
+                    return result
+                try:
+                    with mock.patch.object(module,'_monotonic',wraps=module._monotonic), \
+                            mock.patch.object(target,'inspect_project_online_target',side_effect=policy), \
+                            self.assertRaises(module.HistoryReadLauncherHold):
+                        module._require_current_owned_project_read_group(writer,owner,binding,value,group)
+                    self.assertEqual(2,len(visits))
+                finally:
+                    with module._READ_GUARD:module._READS[actual]=packet
+                    with module._PROJECT_READ_GUARD:module._PROJECT_READS[actual]=project_auth
+            module._require_current_owned_project_read_group(writer,owner,binding,value,group)
+            from monitor import issue_tracker_token_launcher as auth
+            original_token=auth.require_current_owned_project_token
+            original_token_object=value.token
+            original_expiry=value.token.expires_at
+            original_config=_config.read_bytes()
+            for fault in ('target_after_last_auth','equal_token_object','token_expiry_after_last_auth'):
+                visits=[]
+                def token(*args):
+                    result=original_token(*args);visits.append(True)
+                    if len(visits)==2:
+                        if fault=='target_after_last_auth':
+                            _config.write_text(json.dumps(document(status='disabled')))
+                        elif fault=='equal_token_object':
+                            object.__setattr__(value,'token',replace(original_token_object))
+                        else:
+                            object.__setattr__(original_token_object,'expires_at',0)
+                    return result
+                try:
+                    with mock.patch.object(auth,'require_current_owned_project_token',side_effect=token), \
+                            self.subTest(return_fault=fault),self.assertRaises(module.HistoryReadLauncherHold):
+                        module._require_current_owned_project_read_group(writer,owner,binding,value,group)
+                    self.assertEqual(2,len(visits))
+                finally:
+                    object.__setattr__(value,'token',original_token_object)
+                    object.__setattr__(original_token_object,'expires_at',original_expiry)
+                    _config.write_bytes(original_config)
 
     def owners(self,stack,*,target_id=TARGET):
         from monitor import issue_tracker_spreadsheet_owner as ownership, issue_tracker_online_target as target
@@ -131,12 +473,13 @@ class Req7HistoryReadLauncherWorkflowTests(unittest.TestCase):
         from monitor.issue_tracker_sdk_authentication import AuthenticatedToken
         return local,ownership,writer,owner,binding,AuthenticatedToken('owned-private-token',time.time()+3600),config
 
-    def intercept(self,stack,program,writer,owner,binding):
+    def intercept(self,stack,program,writer,owner,binding,*,template_cohort=False):
         module=load(); native=subprocess.Popen; calls=[]; children=[]
         from monitor import issue_tracker_local_commit as local, issue_tracker_spreadsheet_owner as ownership
         def launch(argv,**kwargs):
             self.assertEqual([str(Path(sys.executable).resolve()),'-I','-B','-c'],argv[:4])
-            self.assertEqual(module._CHILD_PROGRAM,argv[4]); self.assertEqual(str(ROOT),argv[5]); self.assertEqual(7,len(argv))
+            expected_program=module._TEMPLATE_COHORT_CHILD_PROGRAM if template_cohort else module._CHILD_PROGRAM
+            self.assertEqual(expected_program,argv[4]); self.assertEqual(str(ROOT),argv[5]); self.assertEqual(7,len(argv))
             self.assertRegex(argv[6],r'^[0-9a-f]{64}$'); self.assertNotIn('owned-private-token',repr(argv))
             self.assertEqual({'LC_ALL':'C'},kwargs['env']); self.assertIsNone(kwargs.get('shell'))
             self.assertIs(kwargs['stdin'],subprocess.PIPE); self.assertIs(kwargs['stdout'],subprocess.PIPE)
@@ -181,6 +524,97 @@ with ExitStack() as stack:
  result=launcher._history_child(sys.argv[2])
 raise SystemExit(result)
 ''' % (str(self.root),port)
+
+    def test_fixed_template_group_boundary_rechecks_last_actual_auth_source_and_retains_no_permit(self):
+        self._template_cohort_actual_tls_workflow(consumer=True,group_boundary=True)
+
+    def _template_cohort_actual_tls_workflow(self,*,partial=False,consumer=False,group_boundary=False):
+        # Four real native requests inside one actual original supervised
+        # child. The only test substitutions remain owned root/CA and DNS.
+        module=load();kinds=('template_identity','template_headers','whitelist','metadata')
+        bodies=(b'{"literal":"identity"}',b'{"literal":"headers"}',
+                b'{"literal":"whitelist"}',b'{"matchedDeveloperMetadata":[]}')
+        replies=tuple(b'HTTP/1.1 200 OK\r\nContent-Length: '+
+            str(len(body)+(1 if partial and index==3 else 0)).encode()+
+            b'\r\nConnection: close\r\n\r\n'+body for index,body in enumerate(bodies))
+        with ExitStack() as stack:
+            _local,ownership,writer,owner,binding,_token,_config=self.owners(stack)
+            authentication,credential,original=self.project_auth(stack,ownership,owner,binding)
+            before=set(module._READS);before_auth=set(module._PROJECT_READS)
+            with self.server(replies,hostname='sheets.googleapis.com',destination='sheets.googleapis.com') as (records,errors),ExitStack() as launched:
+                port=socket.getaddrinfo('sheets.googleapis.com',443)[0][4][1]
+                old=self.child_fixture(port)
+                needle='result=launcher._history_child(sys.argv[2])'
+                self.assertEqual(1,old.count(needle))
+                program=old.replace(needle,'result=launcher._history_template_cohort_child(sys.argv[2])')
+                calls,children=self.intercept(launched,program,writer,owner,binding,template_cohort=True)
+                unit=None if consumer else module.OwnedProjectTemplateReadCohort(writer,owner,binding,authentication)
+                if consumer:
+                    from monitor import issue_tracker_remote_history_match as remote
+                    acquire=getattr(remote,'_acquire_current_project_template_reads',None)
+                    self.assertTrue(callable(acquire),'actual fixed consumer boundary is missing')
+                def read():
+                    if consumer:
+                        result=acquire(writer,owner,binding,authentication)
+                        self.assertEqual(kinds,tuple(result))
+                        return tuple(result.values())
+                    return unit.read_once()
+                if partial:
+                    with self.assertRaises(module.HistoryReadLauncherHold) as caught:read()
+                    self.assertTrue(caught.exception.termination_confirmed)
+                    self.assertEqual(before,set(module._READS));self.assertEqual(before_auth,set(module._PROJECT_READS))
+                    self.assertNotEqual(0,children[0].returncode)
+                else:
+                    results=read()
+                    if group_boundary:
+                        from monitor import issue_tracker_remote_history_match as remote
+                        from monitor import issue_tracker_online_target as target
+                        verify=getattr(remote,'_verify_current_project_template_reads',None)
+                        self.assertTrue(callable(verify),'fixed template original group boundary is absent')
+                        responses=dict(zip(kinds,results));visits=[]
+                        original_target=target.inspect_project_online_target
+                        def policy(*args):
+                            value=original_target(*args);visits.append(True)
+                            if len(visits)==2:
+                                with module._PROJECT_READ_GUARD:module._PROJECT_READS.pop(results[-1])
+                            return value
+                        self.assertIsNone(verify(writer,owner,binding,authentication,responses))
+                        with mock.patch.object(target,'inspect_project_online_target',side_effect=policy), \
+                                self.assertRaises(module.HistoryReadLauncherHold):
+                            verify(writer,owner,binding,authentication,responses)
+                        self.assertEqual(2,len(visits))
+                        with module._PROJECT_READ_GUARD:module._PROJECT_READS[results[-1]]=authentication
+                    self.assertEqual(bodies,tuple(result.data for result in results))
+                    deadlines=tuple(module._READS[result][-1] for result in results)
+                    self.assertEqual((deadlines[0],)*4,deadlines)
+                    for kind,result in zip(kinds,results):
+                        module.require_current_owned_project_read(writer,owner,binding,result,authentication,read_kind=kind)
+                        self.assertFalse(hasattr(result,'permit'))
+                    self.assertEqual(0,children[0].returncode)
+                self.assertEqual((1,1),(len(calls),len(children)))
+                self.assertTrue(all(getattr(children[0],name).closed for name in ('stdin','stdout','stderr')))
+                if not consumer:
+                    with self.assertRaises(module.HistoryReadLauncherHold):unit.read_once()
+                self.assertEqual(1,len(calls))
+            self.assertEqual((4,[]),(len(records),errors))
+            self.assertEqual(('GET','GET','GET','POST'),tuple(row[0].split(b' ',1)[0].decode() for row in records))
+            self.assertTrue(all(b'Host: sheets.googleapis.com\r\n' in row[1] for row in records))
+            self.assertTrue(all(b'Authorization: Bearer owned-project-token\r\n' in row[1] for row in records))
+            self.assertEqual((b'',b'',b'',b'{"dataFilters":[{"developerMetadataLookup":{}}]}'),tuple(row[2] for row in records))
+            self.assertEqual(original,credential.read_bytes())
+            ownership.owner_lock_fd(owner,binding)
+
+    def test_fixed_template_cohort_one_actual_child_four_tls_requests_complete_before_issue(self):
+        self._template_cohort_actual_tls_workflow()
+
+    def test_fixed_template_cohort_partial_fourth_tls_response_never_issues_or_retries(self):
+        self._template_cohort_actual_tls_workflow(partial=True)
+
+    def test_fixed_consumer_boundary_uses_actual_one_child_and_four_tls_completions(self):
+        self._template_cohort_actual_tls_workflow(consumer=True)
+
+    def test_fixed_consumer_boundary_partial_fourth_tls_never_returns_observations(self):
+        self._template_cohort_actual_tls_workflow(partial=True,consumer=True)
 
     def project_auth(self,stack,ownership,owner,binding):
         """Real fixed FD -> public SDK -> native OAuth TLS -> owned child."""
@@ -628,6 +1062,128 @@ os.write(1,header+body)
                     self.assertTrue(records[0][0].startswith(b'GET /v4/spreadsheets/'+TARGET.encode()+b'?'))
                     self.assertEqual(b'',records[0][2])
             self.assertEqual(['whitelist','template_identity','template_headers','metadata'],seen_kinds)
+
+
+class Req7TemplateCohortDirectTests(unittest.TestCase):
+    """Fixed cohort codec/lifecycle only; mocked transport is NOT native proof."""
+    issuance_fixture = Req7HistoryReadLauncherDirectTests.issuance_fixture
+    kinds = ('template_identity', 'template_headers', 'whitelist', 'metadata')
+
+    def required(self, name):
+        actual = getattr(load(), name, None)
+        self.assertTrue(callable(actual), 'fixed template cohort ' + name + ' missing')
+        return actual
+
+    @staticmethod
+    def frame(nonce, paths, bodies, *, kinds=None):
+        kinds = kinds or Req7TemplateCohortDirectTests.kinds
+        # Independent literal protocol, never generated by the tested codec.
+        parts = [dict(read_kind=kind, request_path_sha256=hashlib.sha256(path.encode('ascii')).hexdigest(),
+                      status=200, body_sha256=hashlib.sha256(body).hexdigest(), body_bytes=len(body))
+                 for kind, path, body in zip(kinds, paths, bodies)]
+        header = dict(schema_version=3, nonce=nonce, parts=parts)
+        return (json.dumps(header, sort_keys=True, separators=(',', ':'), ensure_ascii=True)+'\n').encode('ascii') + b''.join(bodies)
+
+    def test_fixed_four_frame_whole_bytes_order_and_paths_not_permission(self):
+        decode = self.required('_decode_template_cohort_completion')
+        nonce = '1'*64
+        paths = ('/literal/identity', '/literal/headers', '/literal/whitelist', '/literal/metadata')
+        bodies = (b'identity-literal', b'headers\x00literal', b'whitelist\r\nliteral', b'metadata-literal')
+        plans = tuple(SimpleNamespace(path=path) for path in paths)
+        results = decode(self.frame(nonce, paths, bodies), nonce, plans)
+        self.assertIs(type(results), tuple)
+        self.assertEqual(4, len(results))
+        self.assertEqual(bodies, tuple(result.data for result in results))
+        self.assertEqual(tuple(hashlib.sha256(path.encode('ascii')).hexdigest() for path in paths),
+                         tuple(result.request_path_sha256 for result in results))
+        for result in results:
+            self.assertNotIn(result, load()._READS)
+            self.assertNotIn(result, load()._PROJECT_READS)
+
+    def test_wrong_role_order_nonce_digest_partial_or_trailing_data_refuses(self):
+        decode = self.required('_decode_template_cohort_completion')
+        nonce='2'*64; paths=('/literal/id','/literal/headers','/literal/wl','/literal/meta')
+        plans=tuple(SimpleNamespace(path=path) for path in paths); bodies=(b'id',b'headers',b'wl',b'meta')
+        raw=self.frame(nonce,paths,bodies)
+        for changed in (raw[:-1], raw+b'x', self.frame('3'*64,paths,bodies),
+                        self.frame(nonce,paths,bodies,kinds=tuple(reversed(self.kinds))),
+                        self.frame(nonce,paths[:-1]+('/foreign',),bodies),
+                        self.frame(nonce,paths,(b'id',b'headers',b'wl',b'Meta'))[:-1]+b'X'):
+            with self.subTest(change=hashlib.sha256(changed).hexdigest()), self.assertRaises(load().HistoryReadLauncherHold):
+                decode(changed,nonce,plans)
+        with self.assertRaises(load().HistoryReadLauncherHold):
+            decode(b'x'*(2*1024*1024+1),nonce,plans)
+
+    def reply(self, f, *, partial=False):
+        bodies=(b'identity-original',b'headers-original',b'whitelist-original',b'metadata-original')
+        def supervise(child, **kwargs):
+            self.assertIs(child,f.process); f.supervision.append(kwargs)
+            request=json.loads(kwargs['request_bytes'])
+            self.assertEqual(3,request['schema_version'])
+            self.assertNotIn('read_kind',request)
+            self.assertNotIn('plans',request)
+            paths=tuple(f.module._prepare(f.binding,f.authentication.token,kind,None,None).path for kind in self.kinds)
+            raw=self.frame(request['nonce'],paths,bodies)
+            f.clock[0]=1008.0
+            return SimpleNamespace(data=raw[:-1] if partial else raw, termination_confirmed=True)
+        return bodies,supervise
+
+    def test_one_owned_acquisition_cleanup_then_four_once_issued_observations(self):
+        cohort=self.required('OwnedProjectTemplateReadCohort')
+        with self.issuance_fixture(project_auth=True) as f:
+            bodies,supervise=self.reply(f)
+            with mock.patch.object(f.module,'supervise_owned_attempt',side_effect=supervise):
+                unit=cohort(f.writer,f.owner,f.binding,f.authentication)
+                results=unit.read_once()
+            self.assertEqual(bodies,tuple(result.data for result in results))
+            self.assertEqual(1,len(f.launches));self.assertEqual(1,len(f.supervision))
+            self.assertEqual((1000.0,'read'),(f.supervision[0]['started_monotonic'],f.supervision[0]['kind']))
+            self.assertEqual([('stdin',False,False),('stdout',False,False),('stderr',False,False)],f.closes)
+            for kind,result in zip(self.kinds,results):
+                self.assertEqual(1041.0,f.module._READS[result][-1])
+                self.assertIs(f.authentication,f.module._PROJECT_READS[result])
+                f.module.require_current_owned_project_read(f.writer,f.owner,f.binding,result,f.authentication,read_kind=kind)
+                self.assertEqual(1041.0,f.module._READS[result][-1])
+            with self.assertRaises(f.module.HistoryReadLauncherHold):unit.read_once()
+            self.assertEqual(1,len(f.launches))
+            f.clock[0]=1041.0
+            for kind,result in zip(self.kinds,results):
+                with self.assertRaises(f.module.HistoryReadLauncherHold):
+                    f.module.require_current_owned_read(f.writer,f.owner,f.binding,result,read_kind=kind)
+            self.assertEqual((30.0,60.0),(f.module._BUDGETS['read'],f.module._BUDGETS['mutation']))
+
+    def test_partial_final_response_or_final_owner_fault_issues_nothing(self):
+        cohort=self.required('OwnedProjectTemplateReadCohort')
+        for fault in ('partial','target','token','acquisition_deadline'):
+            with self.subTest(fault=fault),self.issuance_fixture(project_auth=True,
+                    final_fault=None if fault=='partial' else fault) as f:
+                before=set(f.module._READS);before_auth=set(f.module._PROJECT_READS)
+                _bodies,supervise=self.reply(f,partial=fault=='partial')
+                with mock.patch.object(f.module,'supervise_owned_attempt',side_effect=supervise):
+                    unit=cohort(f.writer,f.owner,f.binding,f.authentication)
+                    with self.assertRaises(f.module.HistoryReadLauncherHold):unit.read_once()
+                    with self.assertRaises(f.module.HistoryReadLauncherHold):unit.read_once()
+                self.assertEqual(before,set(f.module._READS));self.assertEqual(before_auth,set(f.module._PROJECT_READS))
+                self.assertEqual(1,len(f.launches))
+                self.assertTrue(all(getattr(f.process,name).closed for name in ('stdin','stdout','stderr')))
+
+    def test_interrupted_second_registration_retracts_the_entire_cohort(self):
+        cohort=self.required('OwnedProjectTemplateReadCohort')
+        primary=KeyboardInterrupt('literal direct control')
+        with self.issuance_fixture(project_auth=True) as f:
+            _bodies,supervise=self.reply(f)
+            class Registry(dict):
+                def __setitem__(self,key,value):
+                    if len(self)==1:raise primary
+                    return super().__setitem__(key,value)
+            registry=Registry();auth_registry={}
+            with mock.patch.object(f.module,'supervise_owned_attempt',side_effect=supervise), \
+                    mock.patch.object(f.module,'_READS',registry),mock.patch.object(f.module,'_PROJECT_READS',auth_registry):
+                unit=cohort(f.writer,f.owner,f.binding,f.authentication)
+                with self.assertRaises(KeyboardInterrupt) as caught:unit.read_once()
+                self.assertIs(primary,caught.exception)
+                self.assertEqual({},registry);self.assertEqual({},auth_registry)
+                with self.assertRaises(f.module.HistoryReadLauncherHold):unit.read_once()
 
 
 if __name__=='__main__': unittest.main()

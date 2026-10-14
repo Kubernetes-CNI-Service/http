@@ -536,7 +536,7 @@ def hold_catalog_nonallocating_preparation(writer_token, token, binding, identit
     budget = catalog._OriginalImageBudget()
     old = catalog._Originals(_image_budget=budget); current = catalog._Originals(_image_budget=budget)
     prepared = None; active_budget = None; failed = False; primary = None; cleanup_problem = None
-    record=None; read_tail=_NonallocatingProjectReadTail()
+    record=None; read_tail=_NonallocatingProjectReadTail();pre_read_manifest=None
     proofs = {'scope': ExitStack(), 'verify': lambda: None, 'delivery_scope': ExitStack(),
               'delivery_events': [], 'owner_tail': ExitStack()}
     try:
@@ -554,7 +554,7 @@ def hold_catalog_nonallocating_preparation(writer_token, token, binding, identit
         owner, parent, stem, catalog_fd, units, _prior, _observations = _pin_catalog_prefix(
             token, binding, identity, old, new_allocation=True, _project_proofs=proofs)
         if _source_prior_bridge is not None:
-            allocation._receive_owned_native_prior_source_graph(_source_prior_bridge,token,binding,old)
+            pre_read_manifest=allocation._receive_owned_native_prior_source_graph(_source_prior_bridge,token,binding,old)
         if any(unit.unit_id == unit_id for unit in units): raise NvReservationHold()
         old.sync(); proofs['verify']()
         if local._owner(writer_token) is not project_owner: raise NvReservationHold()
@@ -566,6 +566,9 @@ def hold_catalog_nonallocating_preparation(writer_token, token, binding, identit
                   'prior_delivery_events': proofs['delivery_events'],
                   'project_read_tail': read_tail,
                   'nonallocating_writer': writer_token, 'nonallocating_owner': project_owner}
+        if pre_read_manifest is not None:
+            record['native_pre_read_manifest']=pre_read_manifest
+            record['native_pre_read_manifest_issued']=pre_read_manifest
         prepared = _CatalogNonallocatingPreparation(unit_id); _ACTIVE_CATALOG_PREPARATIONS[prepared] = record
         for delivery in record['prior_delivery_events']:
             if delivery['raw'] is not None: delivery['raw'].bind(record)
@@ -737,12 +740,41 @@ def _write_catalog_image(parent, name, raw, held, verify, *, initialization=None
 
 
 def _native_original(parent, name, binding, base, keys, ids, prior, held):
-    folder = held.directory(parent, name)
+    # _pin_catalog_prefix has already retained every prior family before
+    # semantic replay. Reuse only its own exact LIVE capture, not a path
+    # reopened after close, another graph, cached decode or updated preimage.
+    from monitor import issue_tracker_unit_catalog as catalog
+    # The retained-inventory reader has its own fixed BorrowedOriginals
+    # adapter. Preserve that original verified reader unchanged; only the
+    # genuine catalog graph owns the storage records optimized here.
+    captured=([row for row in held.directories if row[:2]==(parent,name)]
+        if type(held) is catalog._Originals else [])
+    if len(captured)>1:raise NvReservationHold()
+    folder=captured[0][2] if captured else held.directory(parent,name)
+    if captured:
+        journal._named(parent,name,folder,directory=True)
+        if journal._identity(os.fstat(folder))!=captured[0][3]:raise NvReservationHold()
+    def original_file(directory,entry,limit):
+        if not captured:return held.file(directory,entry,limit)
+        originals=[row for row in held.files if row[:2]==(directory,entry)]
+        # Catalog anchor inspection can pin only INITIALIZED first. Acquire
+        # other on-disk members normally inside the same still-held directory;
+        # this neither writes missing files nor replaces an existing preimage.
+        if not originals:return held.file(directory,entry,limit)
+        if len(originals)!=1:raise NvReservationHold()
+        _p,_name,fd,identity,expected=originals[0]
+        journal._named(directory,entry,fd,directory=False)
+        if expected is None or journal._identity(os.fstat(fd))!=identity:raise NvReservationHold()
+        raw=os.pread(fd,limit+1,0)
+        if (not 1<=len(raw)<=limit or raw!=expected
+                or journal._identity(os.fstat(fd))!=identity):raise NvReservationHold()
+        journal._named(directory,entry,fd,directory=False)
+        return raw,identity
     if set(os.listdir(folder)) != _CATALOG_NAMES:
         raise NvReservationHold()
-    images = {entry: held.file(folder, entry, 2 * _LIMIT if entry in ('ETH-RAW', 'IB-RAW') else _LIMIT)
+    images = {entry: original_file(folder, entry, 2 * _LIMIT if entry in ('ETH-RAW', 'IB-RAW') else _LIMIT)
               for entry in sorted(_CATALOG_NAMES)}
-    started, started_identity = held.file(parent, name + '-started', 16384)
+    started, started_identity = original_file(parent, name + '-started', 16384)
     held.verify()
     header = local._json(images['HEADER'][0])
     plans = tuple(PreparedSheetsRead('sheets.googleapis.com', header[key], 'GET', (), b'')
@@ -914,7 +946,7 @@ def hold_catalog_nv_preparation(token, binding, identity, eth_plan, eth_response
     budget = catalog._OriginalImageBudget()
     old = catalog._Originals(_image_budget=budget); current = catalog._Originals(_image_budget=budget)
     prepared = None; active_budget = None; failed = False; primary=None; cleanup_problem=None
-    record=None;read_tail=_NvProjectReadTail()
+    record=None;read_tail=_NvProjectReadTail();pre_read_manifest=None
     project_proofs = {'scope': ExitStack(), 'verify': lambda: None,
                       'delivery_scope':ExitStack(),'delivery_events':[], 'owner_tail':ExitStack()}
     try:
@@ -929,7 +961,7 @@ def hold_catalog_nv_preparation(token, binding, identity, eth_plan, eth_response
         owner, parent, stem, catalog_fd, units, prior, _observations = _pin_catalog_prefix(
             token, binding, identity, old, new_allocation=True, _project_proofs=project_proofs)
         if _source_prior_bridge is not None:
-            settings_allocation._receive_owned_native_prior_source_graph(_source_prior_bridge,token,binding,old)
+            pre_read_manifest=settings_allocation._receive_owned_native_prior_source_graph(_source_prior_bridge,token,binding,old)
         if any(unit.unit_id == base['unit_id'] for unit in units):
             raise NvReservationHold()
         observed = _read_pair(binding, ids, eth_plan, eth_response, ib_plan, ib_response)
@@ -999,6 +1031,9 @@ def hold_catalog_nv_preparation(token, binding, identity, eth_plan, eth_response
                   'prior_delivery_events':project_proofs['delivery_events'],
                   'nv_project_read_tail':read_tail,'nv_read_writer':None,'nv_read_owner':None,
                   'nv_read_observation':None}
+        if pre_read_manifest is not None:
+            record['native_pre_read_manifest']=pre_read_manifest
+            record['native_pre_read_manifest_issued']=pre_read_manifest
         prepared = _CatalogNvPreparation(seen); _ACTIVE_CATALOG_PREPARATIONS[prepared] = record
         for prior_delivery in record['prior_delivery_events']:
             if prior_delivery['raw'] is not None:prior_delivery['raw'].bind(record)

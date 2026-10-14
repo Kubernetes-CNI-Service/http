@@ -27,6 +27,10 @@ from monitor.issue_tracker_attempt_supervision import supervise_owned_attempt, A
 _SOURCE_ROOT = Path(__file__).resolve().parents[1]
 _NONCE = re.compile(r'[0-9a-f]{64}\Z')
 _LIMIT = 2*1024*1024
+# The read attempt keeps its original total30s acquisition budget. Only after
+# successful cleanup and final original checks is a fixed30s observation issued;
+# no getter, group check, finalizer or subsequent read renews this deadline.
+_READ_OBSERVATION_SECONDS = 30.0
 _READS = weakref.WeakKeyDictionary()
 _READ_GUARD = threading.Lock()
 _PROJECT_READS = weakref.WeakKeyDictionary()
@@ -35,6 +39,12 @@ _CHILD_PROGRAM = '''import sys
 sys.path[:0]=[sys.argv[1],sys.argv[1]+"/tools"]
 from monitor.issue_tracker_history_read_launcher import _history_child
 raise SystemExit(_history_child(sys.argv[2]))
+'''
+_TEMPLATE_READ_KINDS = ('template_identity','template_headers','whitelist','metadata')
+_TEMPLATE_COHORT_CHILD_PROGRAM = '''import sys
+sys.path[:0]=[sys.argv[1],sys.argv[1]+"/tools"]
+from monitor.issue_tracker_history_read_launcher import _history_template_cohort_child
+raise SystemExit(_history_template_cohort_child(sys.argv[2]))
 '''
 
 
@@ -121,6 +131,97 @@ def require_current_owned_project_read(writer_token,owner_token,binding,completi
     return result
 
 
+def _require_current_owned_read_group(writer_token,owner_token,binding,reads,*,_authentication=None):
+    """One non-yield check of genuine read originals; never reusable authority.
+
+    Shared target bytes (and project credentials when requested) are freshly
+    read at BOTH boundaries. Every
+    individual original registry, shape, body and deadline is checked again
+    after the last source read. Nothing is cached across calls or filesystem
+    work, and no input tuple can issue a read or extend its original deadline.
+    """
+    from monitor import issue_tracker_token_launcher as auth
+    from monitor.issue_tracker_local_commit import _owner
+    from monitor.issue_tracker_spreadsheet_owner import owner_lock_fd
+    from monitor.issue_tracker_online_target import inspect_project_online_target
+    failed=False
+    try:
+        if type(reads) is not tuple or not reads:raise HistoryReadLauncherHold()
+        authentication=_authentication
+        auth_packet=None
+        if authentication is not None:
+            with auth._PROJECT_GUARD:auth_packet=auth._PROJECT_TOKENS.get(authentication)
+            if auth_packet is None:raise HistoryReadLauncherHold()
+        captured=[]
+        for reading in reads:
+            if type(reading) is not tuple or len(reading)!=4:raise HistoryReadLauncherHold()
+            kind,sheet,row,response=reading
+            if type(response) is not SupervisedSheetsReadCompletion:raise HistoryReadLauncherHold()
+            with _READ_GUARD:packet=_READS.get(response)
+            with _PROJECT_READ_GUARD:original_auth=_PROJECT_READS.get(response)
+            if packet is None or (authentication is not None and original_auth is not authentication):
+                raise HistoryReadLauncherHold()
+            captured.append((reading,packet))
+        project=_owner(writer_token);sheet_fd=owner_lock_fd(owner_token,binding)
+        def current():
+            if authentication is not None:
+                with auth._PROJECT_GUARD:current_auth=auth._PROJECT_TOKENS.get(authentication)
+                if current_auth is not auth_packet:raise HistoryReadLauncherHold()
+                pid,original_owner,target,_sheet_owner,token,token_image,cloud_project,digest,warnings_image=auth_packet
+                if (pid!=os.getpid() or owner_token is not original_owner or binding!=target
+                        or authentication.token is not token
+                        or (token.value,token.expires_at)!=token_image
+                        or authentication.cloud_project_id!=cloud_project
+                        or authentication.credential_sha256!=digest
+                        or authentication.runtime_warnings!=warnings_image
+                        or authentication.termination_confirmed is not True
+                        or auth.time.time()>=token_image[1]):raise HistoryReadLauncherHold()
+            for (kind,sheet,row,response),packet in captured:
+                with _READ_GUARD:current_packet=_READS.get(response)
+                with _PROJECT_READ_GUARD:current_auth=_PROJECT_READS.get(response)
+                writer,owner,target,original_project,original_fd,original_kind,original_sheet,original_row,plan,data,deadline=packet
+                if (current_packet is not packet or (authentication is not None and current_auth is not authentication)
+                        or writer_token is not writer or owner_token is not owner or binding!=target
+                        or project is not original_project or sheet_fd!=original_fd
+                        or type(kind) is not str or kind!=original_kind
+                        or type(sheet) is not type(original_sheet) or sheet!=original_sheet
+                        or type(row) is not type(original_row) or row!=original_row
+                        or type(response.data) is not bytes or response.data!=data
+                        or type(response.status) is not int or response.status!=200
+                        or response.complete is not True or response.termination_confirmed is not True
+                        or response.request_path_sha256!=hashlib.sha256(plan.path.encode('ascii')).hexdigest()
+                        or (authentication is not None and plan.headers[1]!=('Authorization','Bearer '+authentication.token.value))
+                        or _monotonic()>=deadline):raise HistoryReadLauncherHold()
+        current()
+        provenance=None
+        if authentication is not None:
+            provenance=auth.require_current_owned_project_token(owner_token,binding,authentication)
+        inspect_project_online_target(writer_token,binding)
+        current()
+        if authentication is not None:
+            if auth.require_current_owned_project_token(owner_token,binding,authentication)!=provenance:
+                raise HistoryReadLauncherHold()
+        if _owner(writer_token) is not project or owner_lock_fd(owner_token,binding)!=sheet_fd:
+            raise HistoryReadLauncherHold()
+        inspect_project_online_target(writer_token,binding)
+        current()
+        # Check the FIRST deadline at the end of the ENTIRE group too, not
+        # merely before processing a slower final item.
+        now=_monotonic()
+        if any(now>=packet[-1] for _reading,packet in captured):raise HistoryReadLauncherHold()
+        result=tuple(packet[8] if provenance is None else (packet[8],*provenance)
+                     for _reading,packet in captured)
+    except Exception:failed=True
+    if failed:raise HistoryReadLauncherHold()
+    return result
+
+
+def _require_current_owned_project_read_group(writer_token,owner_token,binding,authentication,reads):
+    if authentication is None:raise HistoryReadLauncherHold()
+    return _require_current_owned_read_group(writer_token,owner_token,binding,reads,
+                                             _authentication=authentication)
+
+
 def _canonical(value):
     return (json.dumps(value,sort_keys=True,separators=(',',':'),ensure_ascii=True,allow_nan=False)+'\n').encode('ascii')
 
@@ -168,6 +269,49 @@ def _prepare(binding,token,kind,sheet,row):
         from monitor.issue_tracker_metadata_capacity import prepare_metadata_capacity_read
         return prepare_metadata_capacity_read(binding,token)
     raise HistoryReadLauncherHold()
+
+
+def _decode_template_cohort_completion(raw, nonce, plans):
+    """Four fixed, correlated sequential observations; no registration/permit."""
+    try:
+        if (type(raw) is not bytes or not 1<=len(raw)<=_LIMIT
+                or type(nonce) is not str or _NONCE.fullmatch(nonce) is None
+                or type(plans) is not tuple or len(plans)!=4):raise HistoryReadLauncherHold(True)
+        boundary=raw.find(b'\n',0,4096)
+        if boundary<0:raise HistoryReadLauncherHold(True)
+        header=raw[:boundary+1];value=json.loads(header.decode('ascii'))
+        if (type(value) is not dict or set(value)!={'schema_version','nonce','parts'}
+                or _canonical(value)!=header or type(value['schema_version']) is not int
+                or value['schema_version']!=3 or value['nonce']!=nonce
+                or type(value['parts']) is not list or len(value['parts'])!=4):raise HistoryReadLauncherHold(True)
+        results=[];offset=boundary+1
+        for kind,plan,part in zip(_TEMPLATE_READ_KINDS,plans,value['parts']):
+            if (type(part) is not dict or set(part)!={'read_kind','request_path_sha256','status','body_sha256','body_bytes'}
+                    or part['read_kind']!=kind or type(part['body_bytes']) is not int
+                    or not 1<=part['body_bytes']<=_LIMIT):raise HistoryReadLauncherHold(True)
+            path_digest=hashlib.sha256(plan.path.encode('ascii')).hexdigest()
+            body=raw[offset:offset+part['body_bytes']];offset+=part['body_bytes']
+            single=dict(schema_version=1,nonce=nonce,request_path_sha256=part['request_path_sha256'],
+                status=part['status'],body_sha256=part['body_sha256'],body_bytes=part['body_bytes'])
+            results.append(_decode_completion(_canonical(single)+body,nonce,path_digest))
+        if offset!=len(raw):raise HistoryReadLauncherHold(True)
+        return tuple(results)
+    except Exception:
+        raise HistoryReadLauncherHold(True) from None
+
+
+def _parse_template_cohort_request(raw, nonce):
+    if (type(raw) is not bytes or not 1<=len(raw)<=32768
+            or type(nonce) is not str or _NONCE.fullmatch(nonce) is None):raise HistoryReadLauncherHold()
+    value=json.loads(raw.decode('ascii'))
+    if (type(value) is not dict or set(value)!={'schema_version','nonce','spreadsheet_id','policy_sha256',
+            'allowlist_sha256','token','expires_at'} or _canonical(value)!=raw
+            or type(value['schema_version']) is not int or value['schema_version']!=3
+            or value['nonce']!=nonce):raise HistoryReadLauncherHold()
+    # Reuse the unchanged single-read token/target discipline; no supplied plans.
+    single=dict(value,schema_version=2,read_kind='metadata',sheet=None,row=None)
+    binding,token,_plan=_parse_request(_canonical(single),nonce)
+    return binding,token,tuple(_prepare(binding,token,kind,None,None) for kind in _TEMPLATE_READ_KINDS)
 
 
 def _parse_request(raw,nonce):
@@ -233,6 +377,40 @@ def _history_child(nonce):
     return 1 if failed else 0
 
 
+def _history_template_cohort_child(nonce):
+    """Fixed four native shapes once each; never a Google atomic snapshot."""
+    try:
+        if type(nonce) is not str or _NONCE.fullmatch(nonce) is None or os.geteuid()!=0:
+            raise HistoryReadLauncherHold()
+        raw=bytearray()
+        while True:
+            chunk=os.read(0,min(4096,32769-len(raw)))
+            if not chunk:break
+            raw.extend(chunk)
+            if len(raw)>32768:raise HistoryReadLauncherHold()
+        binding,token,plans=_parse_template_cohort_request(bytes(raw),nonce)
+        parts=[];bodies=[];total=0
+        for kind,plan in zip(_TEMPLATE_READ_KINDS,plans):
+            response=_native_read(binding,token,kind,None,None)
+            if (type(response.status) is not int or response.status!=200 or response.complete is not True
+                    or type(response.data) is not bytes or not response.data):raise HistoryReadLauncherHold()
+            total+=len(response.data)
+            if total>_LIMIT:raise HistoryReadLauncherHold()
+            bodies.append(response.data)
+            parts.append(dict(read_kind=kind,request_path_sha256=hashlib.sha256(plan.path.encode('ascii')).hexdigest(),
+                status=200,body_sha256=hashlib.sha256(response.data).hexdigest(),body_bytes=len(response.data)))
+        output=_canonical(dict(schema_version=3,nonce=nonce,parts=parts))+b''.join(bodies)
+        _decode_template_cohort_completion(output,nonce,plans)
+        offset=0
+        while offset<len(output):
+            written=os.write(1,output[offset:offset+65536])
+            if written<=0:raise HistoryReadLauncherHold()
+            offset+=written
+        return 0
+    except Exception:
+        return 1
+
+
 class OwnedSheetsReadUnit:
     """One observed response under actual dual owners; no COMPLETE authority."""
     def __init__(self,writer_token,owner_token,binding,token,*,read_kind,sheet=None,row=None):
@@ -250,16 +428,21 @@ class OwnedSheetsReadUnit:
     def read_once(self):
         return self._read_once()
 
-    def _read_once(self,*,project_auth=None):
+    def _read_once(self,*,project_auth=None,_template_cohort=False):
         with self._guard:
             used=self._used; self._used=True
         if used: raise HistoryReadLauncherHold()
         started=time.monotonic(); failed=False; confirmed=False; process=None
         try:
+            if type(_template_cohort) is not bool or (_template_cohort and project_auth is None):
+                raise HistoryReadLauncherHold()
             if project_auth is not None:
+                from monitor import issue_tracker_token_launcher as auth
                 from monitor.issue_tracker_token_launcher import require_current_owned_project_token
                 require_current_owned_project_token(self._owner,self._binding,project_auth)
                 if self._token is not project_auth.token: raise HistoryReadLauncherHold()
+                with auth._PROJECT_GUARD:auth_packet=auth._PROJECT_TOKENS.get(project_auth)
+                if auth_packet is None:raise HistoryReadLauncherHold()
             from monitor.issue_tracker_local_commit import _owner
             from monitor.issue_tracker_spreadsheet_owner import owner_lock_fd
             from monitor.issue_tracker_online_target import inspect_project_online_target
@@ -270,47 +453,99 @@ class OwnedSheetsReadUnit:
                             'policy_sha256':self._binding.policy_sha256,'allowlist_sha256':self._binding.allowlist_sha256,
                             'token':self._token.value,'expires_at':self._token.expires_at,
                             'read_kind':self._kind,'sheet':self._sheet,'row':self._row})
-            _binding,_token,prepared=_parse_request(raw,nonce)
-            path_digest=hashlib.sha256(prepared.path.encode('ascii')).hexdigest()
+            if _template_cohort:
+                raw=_canonical({'schema_version':3,'nonce':nonce,'spreadsheet_id':self._binding.spreadsheet_id,
+                    'policy_sha256':self._binding.policy_sha256,'allowlist_sha256':self._binding.allowlist_sha256,
+                    'token':self._token.value,'expires_at':self._token.expires_at})
+                _binding,_token,prepared=_parse_template_cohort_request(raw,nonce)
+                path_digest=None
+            else:
+                _binding,_token,prepared=_parse_request(raw,nonce)
+                path_digest=hashlib.sha256(prepared.path.encode('ascii')).hexdigest()
             executable=str(Path(sys.executable).resolve(strict=True))
             if _monotonic() >= started+_BUDGETS['read']: raise HistoryReadLauncherHold()
             # Final actual owner observations precede this one child launch.
             if _owner(self._writer) is not project or owner_lock_fd(self._owner,self._binding) != sheet_fd:
                 raise HistoryReadLauncherHold()
-            process=subprocess.Popen([executable,'-I','-B','-c',_CHILD_PROGRAM,str(_SOURCE_ROOT),nonce],
+            program=_TEMPLATE_COHORT_CHILD_PROGRAM if _template_cohort else _CHILD_PROGRAM
+            process=subprocess.Popen([executable,'-I','-B','-c',program,str(_SOURCE_ROOT),nonce],
                 stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,
                 start_new_session=True,close_fds=True,pass_fds=(project.lock_fd,sheet_fd),
                 cwd=str(_SOURCE_ROOT),env={'LC_ALL':'C'})
             completion=supervise_owned_attempt(process,started_monotonic=started,kind='read',request_bytes=raw)
             confirmed=completion.termination_confirmed
+            if confirmed is not True: raise HistoryReadLauncherHold()
             inspect_project_online_target(self._writer,self._binding)
             if _owner(self._writer) is not project or owner_lock_fd(self._owner,self._binding) != sheet_fd:
                 raise HistoryReadLauncherHold(True)
-            result=_decode_completion(completion.data,nonce,path_digest)
+            result=(_decode_template_cohort_completion(completion.data,nonce,prepared) if _template_cohort
+                    else _decode_completion(completion.data,nonce,path_digest))
             if project_auth is not None:
                 require_current_owned_project_token(self._owner,self._binding,project_auth)
                 inspect_project_online_target(self._writer,self._binding)
                 if _owner(self._writer) is not project or owner_lock_fd(self._owner,self._binding)!=sheet_fd:
                     raise HistoryReadLauncherHold(True)
             if _monotonic() >= started+_BUDGETS['read']: raise HistoryReadLauncherHold(True)
-            # Private identity registry, not dataclass equality or caller hashes.
-            # Only this actual successful supervised/fresh-owner launch issues
-            # a bounded process-local read observation. Decoding alone does not.
-            with _READ_GUARD:
-                _READS[result]=(self._writer,self._owner,self._binding,project,sheet_fd,
-                    self._kind,self._sheet,self._row,prepared,result.data,started+_BUDGETS['read'])
-            if project_auth is not None:
-                with _PROJECT_READ_GUARD: _PROJECT_READS[result]=project_auth
         except Exception as error:
             failed=True
             if isinstance(error,AttemptHold): confirmed=error.termination_confirmed
         finally:
+            primary=sys.exc_info()[1]; interrupted=None
             if process is not None:
                 for stream in (process.stdin,process.stdout,process.stderr):
                     if stream is not None:
                         try: stream.close()
-                        except OSError: failed=True
+                        except BaseException as error:
+                            failed=True
+                            if not isinstance(error,Exception) and interrupted is None:interrupted=error
+            if interrupted is not None:
+                if primary is not None and not isinstance(primary,Exception):raise primary from interrupted
+                raise interrupted
         if failed: raise HistoryReadLauncherHold(confirmed)
+        # Successful transport alone is insufficient. Cleanup and final real
+        # owner/target/token checks still belong to the original acquisition
+        # deadline; only their successful completion starts observation time.
+        try:
+            if project_auth is not None:
+                require_current_owned_project_token(self._owner,self._binding,project_auth)
+                if self._token is not project_auth.token:raise HistoryReadLauncherHold(True)
+            inspect_project_online_target(self._writer,self._binding)
+            if _owner(self._writer) is not project or owner_lock_fd(self._owner,self._binding)!=sheet_fd:
+                raise HistoryReadLauncherHold(True)
+            if project_auth is not None:
+                # Pure original identity check AFTER the last real source IO,
+                # matching the group RETURN contract; no cached validation.
+                with auth._PROJECT_GUARD:current_auth=auth._PROJECT_TOKENS.get(project_auth)
+                pid,original_owner,target,_sheet_owner,token,token_image,cloud_project,digest,warnings=auth_packet
+                if (current_auth is not auth_packet or pid!=os.getpid()
+                        or self._owner is not original_owner or self._binding!=target
+                        or project_auth.token is not token or self._token is not token
+                        or (token.value,token.expires_at)!=token_image
+                        or project_auth.cloud_project_id!=cloud_project
+                        or project_auth.credential_sha256!=digest
+                        or project_auth.runtime_warnings!=warnings
+                        or project_auth.termination_confirmed is not True
+                        or auth.time.time()>=token_image[1]):raise HistoryReadLauncherHold(True)
+            observed=_monotonic()
+            if observed >= started+_BUDGETS['read']:raise HistoryReadLauncherHold(True)
+        except Exception:
+            raise HistoryReadLauncherHold(confirmed) from None
+        # Private one-use original identity, not decoded/caller-built evidence.
+        # Commit both registries together; a partial registration interruption
+        # cannot leave a legacy or project observation behind.
+        with _READ_GUARD,_PROJECT_READ_GUARD:
+            entries=(tuple(zip(_TEMPLATE_READ_KINDS,prepared,result)) if _template_cohort
+                     else ((self._kind,prepared,result),))
+            try:
+                for kind,plan,response in entries:
+                    _READS[response]=(self._writer,self._owner,self._binding,project,sheet_fd,
+                        kind,None if _template_cohort else self._sheet,None if _template_cohort else self._row,
+                        plan,response.data,observed+_READ_OBSERVATION_SECONDS)
+                    if project_auth is not None:_PROJECT_READS[response]=project_auth
+            except BaseException:
+                for _kind,_plan,response in entries:
+                    _READS.pop(response,None);_PROJECT_READS.pop(response,None)
+                raise
         return result
 
 
@@ -329,6 +564,16 @@ class OwnedProjectSheetsReadUnit(OwnedSheetsReadUnit):
 
     def read_once(self):
         return self._read_once(project_auth=self._authentication)
+
+
+class OwnedProjectTemplateReadCohort(OwnedProjectSheetsReadUnit):
+    """Fixed four-read acquisition only; no per-caller shape or clock selection."""
+    def __init__(self,writer_token,owner_token,binding,authentication):
+        super().__init__(writer_token,owner_token,binding,authentication,read_kind='metadata')
+        for kind in _TEMPLATE_READ_KINDS:_prepare(binding,authentication.token,kind,None,None)
+
+    def read_once(self):
+        return self._read_once(project_auth=self._authentication,_template_cohort=True)
 
 
 class OwnedHistoryTailReadUnit(OwnedSheetsReadUnit):

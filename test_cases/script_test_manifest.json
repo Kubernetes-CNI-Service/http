@@ -1157,7 +1157,8 @@
         "ztp/config/ib_topology_provenance.py"
       ],
       "tests": [
-        "test_cases.test_req7_ib_provenance"
+        "test_cases.test_req7_ib_provenance",
+        "test_cases.test_ufm_collection_pipeline"
       ]
     },
     {
@@ -3164,6 +3165,7 @@
       "id": "ufm_collection_pipeline_analyzer_receipt",
       "members": [
         "tools/ufm_collection_pipeline.py",
+        "ztp/config/ib_topology_provenance.py",
         "tools/ufm_collection_contract.py",
         "tools/ufm_collection_agent.py",
         "tools/ibdiagnet-analyze-tool/scripts/validate_ib_topology.py"
@@ -3353,6 +3355,11 @@
       "id": "req7_fixed_owned_history_read_launcher",
       "members": ["monitor/issue_tracker_history_read_launcher.py", "monitor/issue_tracker_token_launcher.py", "monitor/issue_tracker_online_target.py", "monitor/issue_tracker_credential_shape.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_attempt_supervision.py", "monitor/issue_tracker_sheets_read_plan.py", "monitor/issue_tracker_sheets_read_decode.py", "monitor/issue_tracker_online_whitelist_read.py", "monitor/issue_tracker_metadata_capacity.py", "monitor/issue_tracker_sdk_authentication.py", "monitor/issue_tracker_tls_inputs.py", "tools/project_contract.py"],
       "tests": ["test_cases.test_req7_history_read_launcher", "test_cases.test_req7_token_launcher", "test_cases.test_req7_sdk_authentication", "test_cases.test_issue_tracker_online_target_workflow", "test_cases.test_req7_attempt_supervision"]
+    },
+    {
+      "id": "req7_fixed_template_cohort_consumer_boundary",
+      "members": ["monitor/issue_tracker_remote_history_match.py", "monitor/issue_tracker_history_read_launcher.py", "monitor/issue_tracker_token_launcher.py", "monitor/issue_tracker_attempt_supervision.py", "monitor/issue_tracker_tls_inputs.py", "monitor/issue_tracker_online_target.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_stage_l_consumer.py", "monitor/issue_tracker_global_attempt_journal.py", "tools/ufm_collection_pipeline.py"],
+      "tests": ["test_cases.test_req7_remote_history_match", "test_cases.test_req7_history_read_launcher", "test_cases.test_issue_tracker_stage_l_consumer_workflow"]
     },
     {
       "id": "req7_exact_native_business_read",

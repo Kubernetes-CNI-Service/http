@@ -61,6 +61,76 @@ def _write_cvt(path: Path) -> None:
 
 
 class UfmCollectionPipelineWorkflowTests(unittest.TestCase):
+    def test_actual_receipt_replay_warm_digests_have_two_complete_fresh_walks(self):
+        from tools import ufm_collection_pipeline as pipeline
+        from ztp.config import ib_topology_provenance as provenance
+        plan = COLLECTION.collection_plan('iblinkinfo', RUN_ID)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve(); vendor = root / 'iblinkinfo.txt'
+            vendor.write_text('Switch: 0x1 MF0;leaf01:MQM9700/U1:\n'
+                ' 10 1[  ] ==( 4X 200 Gbps Active / LinkUp )==> '
+                '20 1[  ] "server01 mlx5_0"\n', encoding='utf-8')
+            ufm = root / 'ufm-private'; ufm.mkdir()
+            archive = COLLECTION.publish_local_archive(plan, vendor, ufm)
+            cvt = root / 'cvt.xlsx'; _write_cvt(cvt)
+            project = root / 'project'; project.mkdir()
+            pipeline.run_local_iblinkinfo(plan, 'EXAMPLE-UFM01', archive, cvt, project)
+            actual_digest = provenance._regular_digest; walks = []
+            def observed_digest(path):
+                holder = pipeline._HELD_DIRECTORY_READS.get()
+                self.assertIn(path.parent, holder.entries)
+                original_verify = holder.verify_entry; calls = []
+                def verify(entry):
+                    calls.append(entry[0]); return original_verify(entry)
+                with mock.patch.object(holder, 'verify_entry', side_effect=verify):
+                    result = actual_digest(path)
+                walks.append((len(path.parent.parts), tuple(calls)))
+                return result
+            with pipeline._hold_reusable_directory_reads(), pipeline._hold_reusable_source_reads():
+                pipeline.validated_receipts(project, 'air')  # acquire actual originals, not a result cache
+                with mock.patch.object(provenance, '_regular_digest', side_effect=observed_digest):
+                    receipts = pipeline.validated_receipts(project, 'air')
+                self.assertEqual(1, len(receipts)); self.assertEqual(RUN_ID, receipts[0]['run_id'])
+            self.assertTrue(walks, 'real analysis receipts must replay their original sources')
+            for depth, calls in walks:
+                self.assertEqual(depth * 2, len(calls),
+                    'one full fresh ancestry walk before bytes and one after; no duplicate entry walk')
+                self.assertEqual(calls[:depth], calls[depth:])
+
+    def test_actual_analysis_receipt_source_borrows_each_use_make_one_fresh_ancestor_walk(self):
+        from tools import ufm_collection_pipeline as pipeline
+        plan = COLLECTION.collection_plan('iblinkinfo', RUN_ID)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve(); vendor = root / 'iblinkinfo.txt'
+            vendor.write_text('Switch: 0x1 MF0;leaf01:MQM9700/U1:\n'
+                ' 10 1[  ] ==( 4X 200 Gbps Active / LinkUp )==> '
+                '20 1[  ] "server01 mlx5_0"\n', encoding='utf-8')
+            ufm = root / 'ufm-private'; ufm.mkdir()
+            archive = COLLECTION.publish_local_archive(plan, vendor, ufm)
+            cvt = root / 'cvt.xlsx'; _write_cvt(cvt)
+            project = root / 'project'; project.mkdir()
+            pipeline.run_local_iblinkinfo(plan, 'EXAMPLE-UFM01', archive, cvt, project)
+            actual_file = pipeline._OriginalSourceReads.file
+            walks = []
+            def observed_file(holder, path, parent):
+                actual_verify = holder.directories.verify_entry
+                calls = []
+                def verify(entry):
+                    calls.append(entry[0]); return actual_verify(entry)
+                with mock.patch.object(holder.directories, 'verify_entry', side_effect=verify):
+                    result = actual_file(holder, path, parent)
+                walks.append((len(path.parent.parts), tuple(calls)))
+                return result
+            with pipeline._hold_reusable_directory_reads(), pipeline._hold_reusable_source_reads():
+                with mock.patch.object(pipeline._OriginalSourceReads, 'file', observed_file):
+                    receipts = pipeline.validated_receipts(project, 'air')
+                self.assertEqual(1, len(receipts)); self.assertEqual(RUN_ID, receipts[0]['run_id'])
+            self.assertTrue(walks, 'real receipt replay must borrow its original source files')
+            for expected_depth, calls in walks:
+                self.assertEqual(expected_depth, len(calls))
+                self.assertEqual(len(calls), len(set(calls)))
+            self.assertIsNone(pipeline._HELD_SOURCE_READS.get())
+
     def test_actual_receipt_replay_with_original_file_scope_refuses_same_bytes_new_report(self):
         from tools import ufm_collection_pipeline as pipeline
         plan = COLLECTION.collection_plan('iblinkinfo', RUN_ID)

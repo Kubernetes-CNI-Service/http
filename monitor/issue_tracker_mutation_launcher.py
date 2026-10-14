@@ -145,7 +145,7 @@ def _send_counted_original_once(writer_token,owner_token,binding,token,unit,imag
         from monitor.issue_tracker_send_unit import prepare_mutation_request
         project = _owner(writer_token); sheet_fd = owner_lock_fd(owner_token,binding)
         inspect_project_online_target(writer_token,binding); prepare_mutation_request(binding,token,unit)
-        global_journal._require_original_wire_launch(writer_token,owner_token,binding,unit,image,consume=True)
+        global_journal._consume_original_wire_launch_attempt(writer_token,owner_token,binding,unit,image)
         nonce = secrets.token_hex(32)
         raw = _canonical({'schema_version':1,'nonce':nonce,'spreadsheet_id':binding.spreadsheet_id,
             'policy_sha256':binding.policy_sha256,'allowlist_sha256':binding.allowlist_sha256,

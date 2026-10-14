@@ -36,6 +36,115 @@ class OriginalSourceReadReuseTests(unittest.TestCase):
         self.assertTrue(callable(api),'native replay needs bounded original file FDs, not digest caching')
         return api()
 
+    def test_source_acquisition_walks_every_original_ancestor_once_per_call(self):
+        # chain() itself establishes the fresh complete entry walk. The
+        # immediately following pure unpack must not repeat that same walk;
+        # subsequent calls, actual leaf identity and exit checks remain fresh.
+        with self.pipeline._hold_reusable_directory_reads(), self.source_scope():
+            directories = self.pipeline._HELD_DIRECTORY_READS.get()
+            source = self.pipeline._HELD_SOURCE_READS.get()
+            parent, _, _ = directories.chain(self.root)
+            actual_verify = directories.verify_entry
+            for _ in range(2):
+                calls = []
+                def verify(entry):
+                    calls.append(entry[0])
+                    return actual_verify(entry)
+                with mock.patch.object(directories, 'verify_entry', side_effect=verify):
+                    record = source.file(self.source, parent)
+                self.assertEqual(len(self.root.parts), len(calls),
+                    'one acquisition must make one complete fresh ancestor walk')
+                self.assertEqual(len(calls), len(set(calls)))
+                self.assertEqual(b'independent original source', os.pread(record[0], 100, 0))
+                source.verify_file(record)
+
+    def test_archive_and_directory_dup_have_one_complete_exit_after_actual_io(self):
+        # Observe original checks and real I/O, not an injected PASS callback.
+        for role in ('archive', 'directory-dup'):
+            with self.subTest(role=role), self.pipeline._hold_reusable_directory_reads():
+                directories = self.pipeline._HELD_DIRECTORY_READS.get()
+                directories.chain(self.root)  # Warm traversal data only.
+                original_verify = directories.verify_entry
+                original_io = os.read if role == 'archive' else os.dup
+                before = []; after = []; io_calls = []
+                def verify(entry):
+                    (after if io_calls else before).append(entry[0])
+                    return original_verify(entry)
+                def actual_io(*arguments):
+                    result = original_io(*arguments)
+                    io_calls.append(result)
+                    return result
+                with mock.patch.object(directories, 'verify_entry', side_effect=verify), \
+                        mock.patch.object(os, 'read' if role == 'archive' else 'dup', side_effect=actual_io):
+                    if role == 'archive':
+                        result = self.pipeline._source_archive_witness(self.source)
+                        self.assertEqual(hashlib.sha256(b'independent original source').hexdigest(), result.sha256)
+                        self.assertEqual([b'independent original source', b''], io_calls)
+                    else:
+                        descriptor = self.pipeline._open_real_dir(self.root)
+                        try:
+                            self.assertEqual(self.root.stat().st_ino, os.fstat(descriptor).st_ino)
+                        finally: os.close(descriptor)
+                        self.assertEqual(1, len(io_calls))
+                self.assertEqual(len(self.root.parts), len(before))
+                self.assertEqual(len(self.root.parts), len(after),
+                    'the original context exit, not two consecutive identical walks, encloses I/O')
+                self.assertEqual(before, after)
+
+    def test_directory_dup_exit_refuses_real_ancestor_rebind_and_closes_duplicate(self):
+        parent = self.root / 'parent'; parent.mkdir(); leaf = parent / 'leaf'; leaf.mkdir()
+        original_dup = os.dup; acquired = []
+        def duplicate(fd):
+            result = original_dup(fd); acquired.append(result)
+            moved = self.root / 'moved'; parent.rename(moved)
+            parent.symlink_to(moved, target_is_directory=True)
+            return result
+        with mock.patch.object(os, 'dup', side_effect=duplicate):
+            with self.assertRaises(self.pipeline.PipelineError):
+                self.pipeline._open_real_dir(leaf)
+        self.assertEqual(1, len(acquired))
+        with self.assertRaises(OSError): os.fstat(acquired[0])
+
+    def test_original_digest_encloses_each_warm_read_in_two_fresh_ancestor_walks(self):
+        expected = hashlib.sha256(b'independent original source').hexdigest()
+        with self.pipeline._hold_reusable_directory_reads(), self.source_scope():
+            self.assertEqual(expected, self.provenance._regular_digest(self.source))
+            directories = self.pipeline._HELD_DIRECTORY_READS.get()
+            original_verify = directories.verify_entry
+            original_read = os.pread
+            for _ in range(2):
+                before = []; after = []; actual_reads = []
+                def verify(entry):
+                    (after if actual_reads else before).append(entry[0])
+                    return original_verify(entry)
+                def read(fd, size, offset):
+                    raw = original_read(fd, size, offset)
+                    actual_reads.append((offset, raw))
+                    return raw
+                with mock.patch.object(directories, 'verify_entry', side_effect=verify), \
+                        mock.patch.object(os, 'pread', side_effect=read):
+                    actual = self.provenance._regular_digest(self.source)
+                self.assertEqual(expected, actual)
+                self.assertEqual([(0, b'independent original source'), (27, b'')], actual_reads)
+                self.assertEqual(len(self.root.parts), len(before))
+                self.assertEqual(len(self.root.parts), len(after))
+                self.assertEqual(len(before), len(set(before)))
+                self.assertEqual(before, after,
+                    'the same complete original ancestry must enclose the real byte read')
+
+    def test_fused_original_digest_refuses_dotdot_parent_before_any_bytes(self):
+        nested = self.root / 'child'; nested.mkdir()
+        aliased = nested / '..' / self.source.name
+        original_read = os.pread; reads = []
+        def read(fd, size, offset):
+            reads.append(fd); return original_read(fd, size, offset)
+        with self.pipeline._hold_reusable_directory_reads(), self.source_scope():
+            with mock.patch.object(os, 'pread', side_effect=read):
+                with self.assertRaises(self.provenance.ProvenanceError):
+                    self.provenance._regular_digest(aliased)
+            self.assertEqual([], reads,
+                'the original canonical-parent gate precedes any source-byte read')
+
     def test_explicit_scope_opens_one_original_but_rereads_all_actual_bytes(self):
         real_open=os.open;opened=[];real_pread=os.pread;reads=[]
         original=self.source.stat().st_ino

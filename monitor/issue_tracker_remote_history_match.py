@@ -153,8 +153,14 @@ def _hold_applied_generation(writer_token,generation,unit):
                     or io._identity(os.fstat(folder))!=dir_identity
                     or set(os.listdir(folder))!=expected): raise RemoteHistoryHold()
             for parent,name,fd,identity,raw in held:
-                io._named(parent,name,fd,directory=False)
-                if io._identity(os.fstat(fd))!=identity or os.pread(fd,len(raw)+1,0)!=raw:
+                # Same complete original check, without three pre-read fstats
+                # of one held file. Two FRESH samples enclose its actual read;
+                # neither phase nor the original recovery barriers is omitted.
+                before=local._check(fd,directory=False)
+                named=os.stat(name,dir_fd=parent,follow_symlinks=False)
+                if (before.st_mode & 0o777!=0o600 or io._identity(before)!=identity
+                        or io._identity(named)!=identity or os.pread(fd,len(raw)+1,0)!=raw
+                        or io._identity(os.fstat(fd))!=identity):
                     raise RemoteHistoryHold()
         def verify():
             verify_originals()
@@ -989,7 +995,27 @@ def _hold_current_cycle_native_creation_locators(writer_token,owner_token,bindin
                 actual=tuple(compiler._original_receipt_identity(qualified,_store,g,writer_token,
                     settings,whitelist,whitelist.workbook_sha256) for g in observed.generation_ids)
                 if len({row[0] for row in actual})!=len(actual):raise RemoteHistoryHold()
+                # Move this same-call response-independent freeze before the
+                # FIRST bounded identity read. Only plain intent bytes and
+                # receipt relations cross the existing genuine raw handoff;
+                # no qualified set, K/nonce issuer or skip permission does.
+                from monitor.issue_tracker_manifest import freeze_prod_stage_l_manifest
+                metadata={'project_id':str(_store.project_identity),'schema_version':1,
+                    'producer_version':'stage-l-runtime-v1','template_contract_version':'local-xlsx-v1',
+                    'template_sha256':whitelist.workbook_sha256}
+                manifest,manifest_id=freeze_prod_stage_l_manifest(qualified,_store,http_root=root,
+                    settings=settings,whitelist_snapshot=whitelist,whitelist_path=path,metadata=metadata,
+                    expected_template_sha256=whitelist.workbook_sha256,writer_token=writer_token)
+                packet=allocation._owned_prior_source_packet(bridge,owner_token,binding)
+                if (packet['retired'] or packet['received'] or 'native_pre_read_manifest' in packet
+                        or 'native_pre_read_manifest_issued' in packet):raise RemoteHistoryHold()
+                intent=(manifest,manifest_id,tuple(row[:3] for row in actual))
+                packet['native_pre_read_manifest']=intent
+                packet['native_pre_read_manifest_issued']=intent
                 originals();yield tuple(row[:2] for row in actual),bridge;originals()
+                packet=allocation._owned_prior_source_packet(bridge,owner_token,binding)
+                if (packet.get('native_pre_read_manifest') is not intent
+                        or packet.get('native_pre_read_manifest_issued') is not intent):raise RemoteHistoryHold()
                 # Raw source holders finalize normally here. The actual prep
                 # independently replayed C5/C6/K while LIVE; no stale K scope
                 # or closed semantic verifier is invoked at this boundary.
@@ -1110,8 +1136,67 @@ def _prepare_next_current_cycle_native_originals(writer_token,owner_token,bindin
     except Exception:raise RemoteHistoryHold() from None
 
 
+@contextmanager
+def _hold_native_preparation_source_reads():
+    """Borrow actual original FDs only, not K/source/READ observations."""
+    from tools import ufm_collection_pipeline as pipeline
+    try:
+        source=pipeline._HELD_SOURCE_READS.get()
+        directories=pipeline._HELD_DIRECTORY_READS.get()
+        with ExitStack() as scope:
+            if source is None and directories is None:
+                scope.enter_context(pipeline._hold_reusable_directory_reads())
+                scope.enter_context(pipeline._hold_reusable_source_reads())
+                source=pipeline._HELD_SOURCE_READS.get()
+                directories=pipeline._HELD_DIRECTORY_READS.get()
+            if (type(source) is not pipeline._OriginalSourceReads
+                    or type(directories) is not pipeline._OriginalDirectoryReads
+                    or source.directories is not directories):raise RemoteHistoryHold()
+            def current():
+                if (pipeline._HELD_SOURCE_READS.get() is not source
+                        or pipeline._HELD_DIRECTORY_READS.get() is not directories):raise RemoteHistoryHold()
+                source.require_live();source.verify();source.require_live()
+            current();yield;current()
+        # Only this scope's original issuers close here. Borrowed holders
+        # remain with the actual enclosing NEW owner, never reset/reissued.
+    except Exception:raise RemoteHistoryHold() from None
+
+
 def _prepare_current_cycle_native_unit(writer_token,owner_token,binding,authentication,*,
                                       _store,http_root,_sheet,_new_originals=False,_skipped_sheets=(),_same_cycle=None):
+    """Fixed NEW source-FD owner; original read tail follows all FD cleanup."""
+    options=dict(_store=_store,http_root=http_root,_sheet=_sheet,
+        _new_originals=_new_originals,_skipped_sheets=_skipped_sheets,_same_cycle=_same_cycle)
+    if _new_originals is not True:
+        return _prepare_current_cycle_native_unit_unscoped(writer_token,owner_token,binding,authentication,
+            **options,_source_tail=None)
+    from monitor.issue_tracker_history_read_launcher import require_current_owned_project_read
+    from monitor.issue_tracker_token_launcher import require_current_owned_project_token
+    from tools import ufm_collection_pipeline as pipeline
+    try:
+        original_tail=[]
+        # NEW owns the actual issuers. A pre-existing pair is not borrowed:
+        # nested issuance still refuses, rather than returning before its
+        # caller's eventual source/directory cleanup.
+        with ExitStack() as original_scope:
+            original_scope.enter_context(pipeline._hold_reusable_directory_reads())
+            original_scope.enter_context(pipeline._hold_reusable_source_reads())
+            result=_prepare_current_cycle_native_unit_unscoped(writer_token,owner_token,binding,authentication,
+                **options,_source_tail=original_tail)
+        if len(original_tail)!=1:raise RemoteHistoryHold()
+        actual_authentication,actual_images=original_tail[0]
+        require_current_owned_project_token(owner_token,binding,actual_authentication)
+        for kind,title,row,response in actual_images:
+            require_current_owned_project_read(writer_token,owner_token,binding,response,actual_authentication,
+                read_kind=kind,sheet=title,row=row)
+        require_current_owned_project_token(owner_token,binding,actual_authentication)
+        return result
+    except Exception:raise RemoteHistoryHold() from None
+
+
+def _prepare_current_cycle_native_unit_unscoped(writer_token,owner_token,binding,authentication,*,
+                                      _store,http_root,_sheet,_new_originals=False,_skipped_sheets=(),_same_cycle=None,
+                                      _source_tail=None):
     """Fixed native preparation and local pending registration, never a send.
 
     Derive latest current C6 inside live source holders, not caller generation
@@ -1246,6 +1331,20 @@ def _prepare_current_cycle_native_unit(writer_token,owner_token,binding,authenti
                         result=('WIRE_REGISTERED',unit.unit_id)
                     elif unit.outcome=='NO_SEND':result=('NO_SEND',unit.unit_id)
                     else:raise RemoteHistoryHold()
+                    if _source_tail is not None:
+                        # The actual receiver is still LIVE. Preserve only
+                        # its once-issued response references, never a closed
+                        # preparation/K verifier or caller-supplied tail.
+                        original_record=(record if unit.outcome=='WIRE-CANDIDATE'
+                            else native._verify_catalog_preparation(prepared))
+                        original_packet=original_record['native_current_original_prereads']
+                        if (original_packet is not original_record['native_current_original_prereads_issued']
+                                or type(original_packet) is not tuple or len(original_packet)!=4
+                                or original_packet[0] is not unit or original_packet[1] is not authentication
+                                or type(original_packet[2]) is not tuple or not original_packet[2]):raise RemoteHistoryHold()
+                        initial=(('template_identity',None,None,observed),)
+                        selections=tuple(('activity',title,None,response) for title,response,_plan in selection_reads)
+                        _source_tail.append((authentication,(*initial,*selections,*original_packet[2])))
             verify_initial_identity()
         # Check the original initial read after every source-holder finalizer.
         # These external owners are still live; no closed source/K verifier is
@@ -1357,6 +1456,39 @@ def _hold_native_current_cycle_observed_nv_cabling_unit(prepared,writer_token,ow
         yield unit
 
 
+def _native_pre_read_manifest_intent(record,original,qualified,metadata):
+    """Pure exact intent comparison, NOT current source or owner authority.
+
+    The fixed receiver has independently acquired its actual preparation and
+    requalified source. These bytes only select reads; original compiler start
+    and end fresh freezes remain mandatory before any WIRE registration.
+    """
+    from monitor.issue_tracker_manifest import _runtime_recorded_at,_runtime_skip,_canonical_array
+    from monitor import issue_tracker_local_commit as local
+    try:
+        packet=record['native_pre_read_manifest']
+        if (packet is not record['native_pre_read_manifest_issued'] or type(packet) is not tuple
+                or len(packet)!=3 or type(packet[0]) is not bytes or not 1<=len(packet[0])<=1024*1024
+                or type(packet[1]) is not str or hashlib.sha256(packet[0]).hexdigest()!=packet[1]
+                or type(packet[2]) is not tuple or type(original) is not tuple or len(original)!=3
+                or sum(row==original for row in packet[2])!=1 or original[2]!=packet[1]):
+            raise RemoteHistoryHold()
+        source={'cycle_ids':list(qualified.cycle_ids),'k':qualified.k,'mode':qualified.mode,
+            'scope':qualified.scope,'project_key':qualified.project_key,
+            'source_authority_sha256':qualified.source_authority_sha256,
+            'observations_sha256':qualified.observations_sha256,
+            'whitelist_sha256':qualified.whitelist_sha256,'k_event_sha256':qualified.k_event_sha256,
+            'completion_sha256':list(qualified.completion_sha256),
+            'recorded_at_utc':_runtime_recorded_at(qualified.recorded_at_utc),
+            'whitelist_skips':[_runtime_skip(item) for item in qualified.whitelist_skips]}
+        operations=_canonical_array(qualified.operations_json,'runtime operations')
+        if (metadata['template_sha256']!=qualified.template_sha256
+                or packet[0]!=local._canonical({**metadata,'operations':operations,'qualified_source':source})):
+            raise RemoteHistoryHold()
+        return packet[:2]
+    except Exception:raise RemoteHistoryHold() from None
+
+
 @contextmanager
 def _hold_native_current_cycle_observed_nonallocating_unit(prepared,writer_token,owner_token,binding,authentication,*,
                                                            _store,http_root,_sheets,_native_nv=False):
@@ -1373,7 +1505,6 @@ def _hold_native_current_cycle_observed_nonallocating_unit(prepared,writer_token
     from monitor.issue_tracker_history_read_launcher import OwnedProjectSheetsReadUnit,require_current_owned_project_read
     from monitor.issue_tracker_token_launcher import require_current_owned_project_token
     from monitor.issue_tracker_state_owner import _settings_original_scope
-    from tools.ufm_collection_pipeline import _hold_reusable_directory_reads,_hold_reusable_source_reads
     try:
         record=native._verify_catalog_preparation(prepared)
         if (_sheets not in (('ETH&IB Switch',),('ETH Cabling','IB Cabling'))
@@ -1400,12 +1531,20 @@ def _hold_native_current_cycle_observed_nonallocating_unit(prepared,writer_token
         # source finalizers. It does not reuse K or requalify closed inputs.
         with _settings_original_scope() as read_scope:
             read_scope.callback(verify_reads)
+            from monitor import issue_tracker_settings_audit_allocation as allocation
+            migrated=allocation._native_received_prior_source_manifest(prepared,writer_token,owner_token,binding)
+            def intent_tail():
+                if allocation._native_received_prior_source_manifest(
+                        prepared,writer_token,owner_token,binding) is not migrated:raise RemoteHistoryHold()
+            # LIFO: compiler K/C6/source, then source borrower close, then
+            # pure intent reception, then the unchanged original read tail.
+            # This data does not replace the upcoming fresh qualification.
+            read_scope.callback(intent_tail)
             # Retain only actual directory/file descriptors, not digests or
             # qualification results. Every compiler boundary still replays
             # its original checks and hashes current bytes. Their revoke and
             # conditional cleanup finish BEFORE the unchanged issued-read tail.
-            read_scope.enter_context(_hold_reusable_directory_reads())
-            read_scope.enter_context(_hold_reusable_source_reads())
+            read_scope.enter_context(_hold_native_preparation_source_reads())
             with _hold_native_current_cycle_compiler_inputs(prepared,writer_token,owner_token,binding,
                     _store=_store,http_root=http_root) as (settings,whitelist,qualified,receipts):
                 # Finish response-independent local derivation BEFORE issuing
@@ -1417,14 +1556,19 @@ def _hold_native_current_cycle_observed_nonallocating_unit(prepared,writer_token
                 context=dict(http_root=Path(http_root),settings=settings,whitelist_snapshot=whitelist,
                     whitelist_path=Path(http_root)/'monitor/Issue_Tracker_Template_v1.xlsx',metadata=metadata,
                     expected_template_sha256=whitelist.workbook_sha256,writer_token=writer_token)
-                manifest,manifest_id=freeze_prod_stage_l_manifest(qualified,_store,**context)
+                if migrated is None:
+                    # Standalone/no-bridge keeps its original freeze order.
+                    manifest,manifest_id=freeze_prod_stage_l_manifest(qualified,_store,**context)
                 originals=tuple(compiler._original_receipt_identity(qualified,_store,generation,writer_token,
                     settings,whitelist,whitelist.workbook_sha256) for generation in receipts.generation_ids)
                 selected=tuple((original,sheet) for original in originals for sheet in _sheets
                     if native._nonallocating_identity(owner_token,binding,record['identity'],
                         original[0],original[1],sheet)[0]==prepared_unit_id)
-                if len(selected)!=1 or selected[0][0][2]!=manifest_id:raise RemoteHistoryHold()
+                if len(selected)!=1:raise RemoteHistoryHold()
                 original,sheet=selected[0]
+                if migrated is not None:
+                    manifest,manifest_id=_native_pre_read_manifest_intent(record,original[:3],qualified,metadata)
+                if original[2]!=manifest_id:raise RemoteHistoryHold()
                 family=compiler._FAMILY[sheet]
                 operations=tuple(item for item in json.loads(manifest)['operations'] if item['activity_key'][0]==family)
                 if not operations:raise RemoteHistoryHold()
@@ -1504,6 +1648,44 @@ def _hold_native_current_cycle_observed_nonallocating_unit(prepared,writer_token
         raise RemoteHistoryHold() from None
 
 
+def _acquire_current_project_template_reads(writer_token, owner_token, binding, authentication):
+    """One fixed acquisition; four original observations, never a snapshot grant.
+
+    The launcher owns the unchanged acquisition deadline, complete cleanup and
+    final original checks. Keep each consumer read gate after issuance. This
+    boundary accepts no read shape, provider, qualification or cached result.
+    """
+    from monitor.issue_tracker_history_read_launcher import (
+        OwnedProjectTemplateReadCohort, require_current_owned_project_read)
+    kinds=('template_identity','template_headers','whitelist','metadata')
+    observed=OwnedProjectTemplateReadCohort(writer_token,owner_token,binding,authentication).read_once()
+    if type(observed) is not tuple or len(observed)!=4:
+        raise RemoteHistoryHold()
+    responses=dict(zip(kinds,observed))
+    for kind,response in responses.items():
+        require_current_owned_project_read(writer_token,owner_token,binding,response,
+            authentication,read_kind=kind)
+    return responses
+
+
+def _verify_current_project_template_reads(writer_token,owner_token,binding,authentication,responses):
+    """Fresh fixed originals at one boundary; no retained aggregate authority.
+
+    Share only the existing group's source reads within this non-yield check.
+    Every original response, registration and deadline is checked on entry and
+    after the final auth/target read. Separate graph IO/cleanup boundaries must
+    call again; this neither caches a PASS nor renews an observation.
+    """
+    from monitor.issue_tracker_history_read_launcher import _require_current_owned_project_read_group
+    kinds=('template_identity','template_headers','whitelist','metadata')
+    if type(responses) is not dict or set(responses)!=set(kinds):raise RemoteHistoryHold()
+    captured=tuple(responses[kind] for kind in kinds)
+    _require_current_owned_project_read_group(writer_token,owner_token,binding,authentication,
+        tuple((kind,None,None,response) for kind,response in zip(kinds,captured)))
+    if set(responses)!=set(kinds) or any(responses[kind] is not response
+            for kind,response in zip(kinds,captured)):raise RemoteHistoryHold()
+
+
 @contextmanager
 def _hold_current_project_online_inputs(writer_token, owner_token, binding, authentication, *,
                                         _store, http_root):
@@ -1527,15 +1709,14 @@ def _hold_current_project_online_inputs(writer_token, owner_token, binding, auth
     from monitor.issue_tracker_cycle_source import _hold_current_completed_cycle_replay
     from monitor.issue_tracker_state_owner import current_k
     from monitor.issue_tracker_whitelist_workbook import read_whitelist_workbook
-    from monitor.issue_tracker_history_read_launcher import (
-        OwnedProjectSheetsReadUnit, require_current_owned_project_read)
+    from monitor.issue_tracker_history_read_launcher import require_current_owned_project_read
     from monitor.issue_tracker_token_launcher import (
         OwnedProjectTokenRefreshUnit, require_current_owned_project_token)
     from monitor.issue_tracker_metadata_reservation import _hold_owned_project_mixed_metadata_capacity
-    from monitor.issue_tracker_history_preread_journal import _hold_owned_original_business_history_reads
+    from monitor.issue_tracker_history_preread_journal import _hold_owned_original_business_history_inputs
     from monitor.issue_tracker_online_target import inspect_project_online_target
 
-    failed = False
+    failed = False; interruption = [None]
     try:
         project = local._owner(writer_token)
         ownership._validated_owner(owner_token, binding)
@@ -1545,7 +1726,28 @@ def _hold_current_project_online_inputs(writer_token, owner_token, binding, auth
             raise RemoteHistoryHold()
         whitelist_path = root / 'monitor/Issue_Tracker_Template_v1.xlsx'
         business_guards = []; prepared = []
-        with ExitStack() as business_scope, ExitStack() as scope:
+        @contextmanager
+        def remember_interruption():
+            try: yield
+            except BaseException as error:
+                interruption[0] = error
+                raise
+        with ExitStack() as business_tail_scope, ExitStack() as native_k_scope, \
+                ExitStack() as business_scope, ExitStack() as scope, remember_interruption():
+            from monitor import issue_tracker_settings_audit_allocation as allocation
+            claims={name for name in os.listdir(project.root_fd)
+                if name in (allocation._DELIVERY_FOLDER,allocation._DELIVERY_STARTED)
+                or name.startswith(allocation._DELIVERY_FOLDER+'-')
+                or name.startswith(allocation._DELIVERY_STARTED+'-')}
+            if claims:
+                # The exact actual owners already dominate this input reader.
+                # Prove ALL completed delivery originals before reading K;
+                # do not reacquire a sheet lock, create a preparation or use a
+                # closed creator bridge. Its actual catalog loan must remain
+                # LIVE until every business semantic borrower has closed;
+                # overlapping original business raw tails outlive this issuer.
+                native_k_scope.enter_context(allocation._hold_owned_native_completed_source_k(
+                    writer_token,owner_token,binding))
             rows, verify_c6 = scope.enter_context(catalog.hold_pending_project_c6_units(owner_token, binding))
             retained, verify_inventory = scope.enter_context(
                 inventory._hold_catalog_retained_inventory(owner_token, binding))
@@ -1584,14 +1786,53 @@ def _hold_current_project_online_inputs(writer_token, owner_token, binding, auth
                 return settings, whitelist, qualified
 
             settings, whitelist, qualified = qualify()
+            source_inputs = []; current_source_scopes = []
+            for row, observation in selected:
+                action = local._json(row.unit.action_preimage)
+                generation_id = action['identity']['generation_id']
+                _template, original_source = receipts._manifest_source(project, generation_id)
+                actual = qualified
+                if tuple(original_source['cycle_ids']) != qualified.cycle_ids:
+                    if not observation.attempt_count:
+                        raise RemoteHistoryHold()
+                    actual = source.replay_original_receipted_prod_source(_store, http_root=root,
+                        settings=settings, whitelist_snapshot=whitelist, whitelist_path=whitelist_path,
+                        expected_template_sha256=whitelist.workbook_sha256,
+                        local_generation_id=generation_id, writer_token=writer_token)
+                # Only the identity-independent FIRST local prefix precedes
+                # actual online reads. Identity/receipt gates precede business
+                # binding; the full current-source suffix follows ALL fresh IO.
+                global_journal._prepare_first_original_source_prefix(row,observation,
+                    qualified_source=actual,store=_store,writer_token=writer_token,settings=settings,
+                    whitelist_snapshot=whitelist,expected_template_sha256=whitelist.workbook_sha256,
+                    http_root=root,whitelist_path=whitelist_path,_shared_retry=bool(observation.attempt_count))
+                unit_scope = scope.enter_context(ExitStack())
+                observe_source = unit_scope.enter_context(
+                    global_journal._hold_receipted_original_source_inputs(owner_token, binding, row.unit,
+                        qualified_source=actual, store=_store, writer_token=writer_token, settings=settings,
+                        whitelist_snapshot=whitelist, expected_template_sha256=whitelist.workbook_sha256,
+                        http_root=root, whitelist_path=whitelist_path, _shared_retry=bool(observation.attempt_count)))
+                bind_business = business_scope.enter_context(
+                    _hold_owned_original_business_history_inputs(writer_token, owner_token, binding, row.unit))
+                source_inputs.append((row, actual, unit_scope, observe_source, bind_business))
+            # These original source/business scopes captured no COUNT join at
+            # entry. Pre-acquire only the exact FIRST row's read-only Count
+            # graph now; old strict K/ALL borrowers close in their same order,
+            # and no ATTEMPT or CLAIM is created before all genuine fresh IO.
+            global_journal._prefetch_first_original_count_graph()
             if authentication is None:
                 authentication = OwnedProjectTokenRefreshUnit(owner_token, binding).refresh_once()
             originals(); require_current_owned_project_token(owner_token, binding, authentication)
-            responses = {}
+            originals()
+            responses = _acquire_current_project_template_reads(writer_token,owner_token,binding,authentication)
             for kind in ('template_identity', 'template_headers', 'whitelist', 'metadata'):
                 originals()
-                responses[kind] = OwnedProjectSheetsReadUnit(writer_token, owner_token, binding,
-                    authentication, read_kind=kind).read_once()
+                # Each use still checks the complete original source graph
+                # around its actual once-issued observation. Cohort acquisition
+                # itself publishes nothing until all four requests and final
+                # original auth/target/owner/cleanup checks have completed.
+                require_current_owned_project_read(writer_token,owner_token,binding,responses[kind],
+                    authentication,read_kind=kind)
                 originals()
             identity_plan, _project, _digest = require_current_owned_project_read(
                 writer_token, owner_token, binding, responses['template_identity'], authentication,
@@ -1600,37 +1841,47 @@ def _hold_current_project_online_inputs(writer_token, owner_token, binding, auth
             with _hold_owned_project_mixed_metadata_capacity(writer_token, owner_token, binding,
                     authentication, identity_response=responses['template_identity'],
                     metadata_response=responses['metadata']) as (budget, verify_capacity):
-                for row, observation in selected:
+                for row, actual, unit_scope, observe_source, bind_business in source_inputs:
                     observe_owned_unit_read_gates(writer_token, owner_token, binding, row.unit,
                         whitelist_snapshot=whitelist.whitelist, identity_response=responses['template_identity'],
                         headers_response=responses['template_headers'], whitelist_response=responses['whitelist'],
                         metadata_response=responses['metadata'])
-                    action = local._json(row.unit.action_preimage)
-                    generation_id = action['identity']['generation_id']
-                    _template, original_source = receipts._manifest_source(project, generation_id)
-                    actual = qualified
-                    if tuple(original_source['cycle_ids']) != qualified.cycle_ids:
-                        if not observation.attempt_count:
-                            raise RemoteHistoryHold()
-                        actual = source.replay_original_receipted_prod_source(_store, http_root=root,
-                            settings=settings, whitelist_snapshot=whitelist, whitelist_path=whitelist_path,
-                            expected_template_sha256=whitelist.workbook_sha256,
-                            local_generation_id=generation_id, writer_token=writer_token)
-                    global_journal._receipted_original_facts(owner_token, binding, identity, row.unit,
-                        qualified_source=actual, store=_store, writer_token=writer_token, settings=settings,
-                        whitelist_snapshot=whitelist, expected_template_sha256=whitelist.workbook_sha256,
-                        http_root=root, whitelist_path=whitelist_path, _shared_retry=bool(observation.attempt_count))
+                    observe_source(identity)
                     _business, verify_business = business_scope.enter_context(
-                        _hold_owned_original_business_history_reads(writer_token, owner_token, binding,
-                            row.unit, authentication, identity_response=responses['template_identity']))
+                        bind_business(authentication, identity_response=responses['template_identity']))
                     business_guards.append(verify_business)
                     prepared.append((row, actual, verify_business))
+                    if claims:
+                        # Capture genuine LIVE original FDs before yield or
+                        # ANY finalizer, including exceptional exit. After the
+                        # strict business reader closes this real overlap uses
+                        # only original issued reads and its own held raw graph,
+                        # never a stale catalog verifier or a K/count grant.
+                        business_tail_scope.enter_context(verify_business._hold_original_images())
                     originals(); verify_capacity()
-                if qualify() != (settings, whitelist, qualified):
+                    if actual is qualified:
+                        # Retain EVERY actual current-source scope until ALL
+                        # fresh business/continuity/capacity IO is complete.
+                        # Its original second qualification then occupies the
+                        # last source-replay boundary, not an early snapshot.
+                        current_source_scopes.append(unit_scope)
+                    else:
+                        unit_scope.close()
+                if current_source_scopes:
+                    originals()
+                    if (current_k(writer_token), read_whitelist_workbook(whitelist_path)) != (settings, whitelist):
+                        raise RemoteHistoryHold()
+                    for unit_scope in current_source_scopes:
+                        # This executes the REAL original source() again,
+                        # including all four K graphs and full receipt/cycle/
+                        # target/owner tails. No closed verifier, cached
+                        # qualification result or caller provider is adopted.
+                        unit_scope.close()
+                    originals()
+                elif qualify() != (settings, whitelist, qualified):
+                    # An older source cannot stand in for the current source.
                     raise RemoteHistoryHold()
-                for kind, response in responses.items():
-                    require_current_owned_project_read(writer_token, owner_token, binding, response,
-                        authentication, read_kind=kind)
+                _verify_current_project_template_reads(writer_token,owner_token,binding,authentication,responses)
                 originals(); verify_capacity()
                 if budget.outcome != 'VISIBLE_ONLY_UNPROVED':
                     raise RemoteHistoryHold()
@@ -1641,17 +1892,22 @@ def _hold_current_project_online_inputs(writer_token, owner_token, binding, auth
             scope.close()
             for verify_business in business_guards: verify_business()
             business_scope.close()
+            native_k_scope.close()
+            business_tail_scope.close()
         # No FD/inventory verifier is reused after closure. Check every actual
         # unit's original issued reads after ALL business holders have exited.
         for verify_business in business_guards: verify_business._verify_issued_only()
-        for kind, response in responses.items():
-            require_current_owned_project_read(writer_token, owner_token, binding, response,
-                authentication, read_kind=kind)
+        _verify_current_project_template_reads(writer_token,owner_token,binding,authentication,responses)
         require_current_owned_project_token(owner_token, binding, authentication)
         inspect_project_online_target(writer_token, binding)
-    except Exception:
-        failed = True
-    if failed:
+    except BaseException as error:
+        primary = interruption[0]
+        if primary is not None and not isinstance(primary, Exception):
+            if error is not primary: raise primary from error
+            raise
+        if not isinstance(error, Exception): raise
+        # Public traceback/message stay typed and suppress original context;
+        # retain the actual fault internally for bounded evidence diagnosis.
         raise RemoteHistoryHold() from None
 
 
@@ -1703,6 +1959,7 @@ def _hold_current_project_online_original_inputs(writer_token, owner_token, bind
                 _hold_current_completed_cycle_replay(_store) as verify_cycle, \
                 source._hold_original_replay_inputs(_store, project.project,
                     root/'monitor/Issue_Tracker_Template_v1.xlsx') as verify_inputs, \
+                global_journal._hold_first_original_source_prefix(writer_token,owner_token,binding,last), \
                 ExitStack() as all_images, \
                 ExitStack() as quota_images, ExitStack() as images:
             verify_quota = None; budget = None
@@ -1721,6 +1978,7 @@ def _hold_current_project_online_original_inputs(writer_token, owner_token, bind
                     global_journal._hold_selected_last_catalog_write_originals(
                         writer_token,owner_token,binding,selected[0].unit))
                 verify_all()
+                global_journal._bind_first_original_source_prefix(selected[0])
                 try:
                     budget, verify_quota = quota_images.enter_context(
                         _hold_owned_project_dedicated_quota_images(writer_token, owner_token, binding, authentication,
@@ -1749,9 +2007,7 @@ def _hold_current_project_online_original_inputs(writer_token, owner_token, bind
                 verify_quota()
             for _row, _actual_source, _guard, _packet, verify in graphs:
                 verify()
-            for kind, response in responses.items():
-                require_current_owned_project_read(writer_token, owner_token, binding, response,
-                    authentication, read_kind=kind)
+            _verify_current_project_template_reads(writer_token,owner_token,binding,authentication,responses)
             require_current_owned_project_token(owner_token, binding, authentication)
             inspect_project_online_target(writer_token, binding)
             selected_graph=tuple(graph for graph in graphs if graph[0] is selected[0])
@@ -1766,23 +2022,17 @@ def _hold_current_project_online_original_inputs(writer_token, owner_token, bind
                 verify_quota()
             for _row,_actual_source,_guard,_packet,verify in graphs:
                 verify()
-            for kind,response in responses.items():
-                require_current_owned_project_read(writer_token,owner_token,binding,response,
-                    authentication,read_kind=kind)
+            _verify_current_project_template_reads(writer_token,owner_token,binding,authentication,responses)
             require_current_owned_project_token(owner_token,binding,authentication)
             inspect_project_online_target(writer_token,binding)
             # Finish actual image cleanup before the unchanged input-only
             # wrapper's typed refusal, or before the fixed driver's return.
             images.close()
-            for kind, response in responses.items():
-                require_current_owned_project_read(writer_token, owner_token, binding, response,
-                    authentication, read_kind=kind)
+            _verify_current_project_template_reads(writer_token,owner_token,binding,authentication,responses)
             verify_cycle(); verify_inputs(); verify_all()
             if verify_quota is not None:
                 verify_quota()
-        for kind, response in responses.items():
-            require_current_owned_project_read(writer_token, owner_token, binding, response,
-                authentication, read_kind=kind)
+        _verify_current_project_template_reads(writer_token,owner_token,binding,authentication,responses)
         require_current_owned_project_token(owner_token, binding, authentication)
         inspect_project_online_target(writer_token, binding)
     except Exception:
@@ -2608,12 +2858,12 @@ def observe_owned_unit_read_gates(writer_token, owner_token, binding, unit, *,
     """
     failed=False
     try:
-        from monitor.issue_tracker_history_read_launcher import require_current_owned_read
+        from monitor.issue_tracker_history_read_launcher import _require_current_owned_read_group
         from monitor.issue_tracker_online_whitelist_read import compare_online_whitelist_read
         responses=(('template_identity',identity_response),('template_headers',headers_response),
                    ('whitelist',whitelist_response),('metadata',metadata_response))
-        plans=tuple(require_current_owned_read(writer_token,owner_token,binding,response,read_kind=kind)
-                    for kind,response in responses)
+        read_group=tuple((kind,None,None,response) for kind,response in responses)
+        plans=_require_current_owned_read_group(writer_token,owner_token,binding,read_group)
         identity=decode.decode_template_identity(plans[0],identity_response)
         decode.decode_template_headers(plans[1],headers_response,identity)
         whitelist=compare_online_whitelist_read(plans[2],whitelist_response,whitelist_snapshot)
@@ -2625,8 +2875,7 @@ def observe_owned_unit_read_gates(writer_token, owner_token, binding, unit, *,
                                                 sheet=action['identity']['sheet'])
         capacity=metadata.observe_metadata_capacity(plans[3],metadata_response,identity,reservations=())
         if capacity.outcome=='STOP_CAPACITY' or _fence(unit,identity,metadata_response)[0]: raise RemoteHistoryHold()
-        for kind,response in responses:
-            require_current_owned_read(writer_token,owner_token,binding,response,read_kind=kind)
+        _require_current_owned_read_group(writer_token,owner_token,binding,read_group)
         result=OwnedUnitReadGateObservation(identity,whitelist.rules_sha256,pair.journal_sha256,capacity.outcome)
     except Exception: failed=True
     if failed: raise RemoteHistoryHold()

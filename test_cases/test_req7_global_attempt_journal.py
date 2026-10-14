@@ -44,6 +44,833 @@ def original_read_files(root):
 
 
 class Req7GlobalAttemptJournalTests(unittest.TestCase):
+    def _literal_count_tail_phase_entry_failure(self,primary):
+        # Synthetic private lifecycle control only, not Count/source admission.
+        # Its two actual local FDs and cleanup expectations are independent.
+        import errno
+        from types import SimpleNamespace
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        packet={name:object() for name in
+            ('writer','token','binding','unit','project','owner','context','verify')}
+        calls=[];slots=[];settings=[]
+        for name,target in (('literal-raw',slots),('literal-settings',settings)):
+            path=self.root/name;path.write_bytes(b'literal owned cleanup file\n');path.chmod(0o600)
+            fd=os.open(path,os.O_RDONLY)
+            target.append((fd,self.module.journal._identity(os.fstat(fd))))
+        raw=SimpleNamespace(slots=list(slots))
+        receiver=allocation._CountSourceRawOriginals.__new__(allocation._CountSourceRawOriginals)
+        receiver.raw=raw;receiver.owned_slots=tuple(slots);receiver.closed=False;receiver.source_failed=False
+        stack=ExitStack()
+        def settings_close():
+            calls.append('settings')
+            self.module.local._close_written_original(*settings[0])
+        stack.callback(settings_close)
+        def forbidden(*args):calls.append('semantic');raise AssertionError('phase failure cannot use revoked verifier')
+        anchor=self.module._CountSourceRawTail(object(),packet,object(),forbidden)
+        anchor._binding=(receiver,forbidden,raw,tuple(slots),stack)
+        context=self.module._COUNT_SOURCE_RAW_TAIL_CONTEXT
+        def fail_phase(value):raise primary
+        observed=SimpleNamespace(get=context.get,set=fail_phase,reset=lambda value:calls.append('reset'))
+        def closed(fd):
+            try:os.fstat(fd);return False
+            except OSError as error:
+                self.assertEqual(errno.EBADF,error.errno);return True
+        try:
+            with mock.patch.object(self.module,'_COUNT_SOURCE_RAW_TAIL_CONTEXT',observed):
+                with self.assertRaises(type(primary)) as caught:anchor.finish()
+            self.assertIs(primary,caught.exception)
+            self.assertEqual({'closed':True,'raw':True,'settings':True,'closing':False,'calls':['settings']},
+                {'closed':receiver.closed,'raw':closed(slots[0][0]),'settings':closed(settings[0][0]),
+                 'closing':anchor.closing,'calls':calls})
+            self.assertEqual([],raw.slots);self.assertIsNone(context.get())
+        finally:
+            for fd,identity in (*slots,*settings):
+                try:self.module.local._close_written_original(fd,identity)
+                except (OSError,ValueError):pass
+
+    def test_count_tail_phase_entry_interrupt_cleans_owned_slots_without_semantic_grant(self):
+        self._literal_count_tail_phase_entry_failure(KeyboardInterrupt('literal phase entry interruption'))
+
+    def test_count_tail_phase_entry_memory_error_keeps_private_primary_and_cleans_slots(self):
+        self._literal_count_tail_phase_entry_failure(MemoryError('literal phase entry allocation failure'))
+
+    @contextmanager
+    def _actual_catalog_replay_control(self):
+        # Real local catalog bytes and actual sheet owner only. This does not
+        # issue project C6, K, a counted wire, or a native send permission.
+        from test_cases.test_req7_unit_catalog import load as load_catalog
+        catalog=load_catalog(reset_dependencies=False)
+        with fixture(self.root),self.owner.spreadsheet_owner(binding()) as token:
+            catalog.register_pending_unit(token,binding(),self.value)
+            with self.module._hold_native_catalog_replay(token,binding(),self.value):
+                yield catalog,token
+
+    def test_catalog_input_membership_retains_only_the_enclosing_original_entry_and_exit(self):
+        with self._actual_catalog_replay_control() as (catalog,token):
+            checks=[];original=catalog._Originals.verify
+            def inspect(held,*args,**kwargs):
+                result=original(held,*args,**kwargs);checks.append(held);return result
+            with mock.patch.object(catalog._Originals,'verify',new=inspect):
+                owner,parent,name,header=self.module._inputs(token,binding(),self.value)
+        # Assert outside the actual issuer: its intentional sanitized HOLD
+        # must not turn an independent expected-call-count FAIL into ERROR.
+        self.assertEqual(2,len(checks),'pure membership needs original ENTER/EXIT, not a third adjacent replay')
+        self.assertIs(checks[0],checks[1])
+        self.assertEqual(owner.directories[-1][0],parent)
+        self.assertEqual(owner.lock_name[:-5]+'.unit-'+self.value.unit_id+'.journal',name)
+        self.assertEqual(TARGET,header['spreadsheet_id'])
+
+    def test_catalog_writer_borrow_keeps_post_membership_entry_but_no_adjacent_exit_replay(self):
+        with self._actual_catalog_replay_control() as (catalog,token):
+            checks=[];original=catalog._Originals.verify;inside=[]
+            def inspect(held,*args,**kwargs):
+                result=original(held,*args,**kwargs);checks.append(held);return result
+            with mock.patch.object(catalog._Originals,'verify',new=inspect):
+                with self.module._hold_native_catalog_write_replay(token,binding(),self.value) as verify:
+                    self.assertTrue(callable(verify))
+                    inside.append(len(checks))
+        self.assertEqual([2],inside,'membership must be checked before borrower body starts')
+        self.assertEqual(3,len(checks),'body exit is enclosed by the original context EXIT once')
+        self.assertTrue(all(held is checks[0] for held in checks))
+
+    def test_data_only_launch_consumption_spends_original_without_semantic_read_or_grant(self):
+        entry = getattr(self.module, '_consume_original_wire_launch_attempt', None)
+        self.assertTrue(callable(entry), 'one-use DATA consumption must be separate from fresh launch validation')
+        with Req7GlobalAttemptJournalWorkflowTests.counted_wire_owners(self) as (writer, owner, target):
+            with self.module._hold_counted_original_wire(writer, owner, target, self.value) as image:
+                actual_inspect = self.module._inspect
+                with mock.patch.object(self.module, '_inspect', wraps=actual_inspect) as inspected:
+                    self.assertIsNone(entry(writer, owner, target, self.value, image))
+                    self.assertEqual(0, inspected.call_count, 'spending an image is DATA, not a fresh semantic PASS')
+                    self.assertIs(True, self.module._LIVE_WIRE_CLAIMS[image][-1])
+                    for candidate in (image, replace(image)):
+                        with self.assertRaises(self.module.GlobalAttemptHold):
+                            entry(writer, owner, target, self.value, candidate)
+                    self.assertEqual(0, inspected.call_count)
+                    # The unchanged original prelaunch API, not consumption,
+                    # must still perform the complete real verifier.
+                    self.module._require_original_wire_launch(writer, owner, target, self.value, image, consume=False)
+                    self.assertGreater(inspected.call_count, 0)
+            current = self.module.inspect_global_unit(owner, target, self.value)
+            self.assertEqual((1, 'UNKNOWN'), (current.attempt_count, current.outcome))
+
+    def test_first_prefetch_transfers_live_source_after_original_count_graph_is_anchored(self):
+        import ast,inspect,textwrap
+        tree=ast.parse(textwrap.dedent(inspect.getsource(self.module._prefetch_first_original_count_graph)))
+        calls=[node for node in ast.walk(tree) if isinstance(node,ast.Call)
+            and isinstance(node.func,ast.Attribute) and node.func.attr=='_receive_first_original_count_source']
+        self.assertEqual(1,len(calls),'FIRST pre-IO receiver must overlap the actual source with Count')
+        self.assertEqual(["packet['writer']","packet['token']","packet['binding']",'unit'],
+            [ast.unparse(argument) for argument in calls[0].args])
+        assigned=[node for node in ast.walk(tree) if isinstance(node,ast.Assign)
+            and any(isinstance(target,ast.Attribute) and target.attr=='prefetched' for target in node.targets)]
+        self.assertLess(assigned[0].lineno,calls[0].lineno)
+
+    @contextmanager
+    def _count_source_edge_control(self):
+        # Actual original FD/bytes overlap only. This does NOT issue a COUNT,
+        # native K identity, semantic retirement or online execution permit.
+        from monitor import issue_tracker_unit_catalog as catalog
+        parent_path=Path(tempfile.mkdtemp(prefix='edge-overlap-',dir=self.root))
+        (parent_path/'native.units').mkdir(mode=0o700)
+        (parent_path/'native.unit-one.journal').mkdir(mode=0o700)
+        (parent_path/'native.units'/'HEADER').write_bytes(b'literal catalog original\n')
+        (parent_path/'native.unit-one.journal'/'WIRE').write_bytes(b'literal immutable wire\n')
+        (parent_path/'native.units'/'HEADER').chmod(0o600)
+        (parent_path/'native.unit-one.journal'/'WIRE').chmod(0o600)
+        parent=os.open(parent_path,os.O_RDONLY|os.O_DIRECTORY)
+        source=catalog._Originals()
+        graphs=tuple(catalog._Originals() for _ in range(3))
+        try:
+            names={'native.units','native.unit-one.journal'}
+            source.namespace=(parent,'native.',set(names))
+            graphs[0].namespace=(parent,'native.',set(names))
+            for name,leaf,index in (('native.units','HEADER',0),('native.unit-one.journal','WIRE',1)):
+                received=graphs[index].directory(parent,name)
+                graphs[index].file(received,leaf,1024)
+                original=source.directory(parent,name)
+                source.file(original,leaf,1024)
+            yield source,graphs,parent_path
+        finally:
+            source.close()
+            for graph in reversed(graphs):graph.close()
+            os.close(parent)
+
+    def test_count_source_overlap_requires_every_real_shared_edge_not_equal_content(self):
+        entry=getattr(self.module,'_verify_count_source_original_overlap',None)
+        self.assertTrue(callable(entry),'actual three-graph shared original overlap is missing')
+        with self._count_source_edge_control() as (source,graphs,parent):
+            self.assertIsNone(entry(source,graphs))
+            original=graphs[1].files[0]
+            graphs[1].files=[]
+            try:
+                with self.assertRaises(self.module.GlobalAttemptHold):entry(source,graphs)
+            finally:graphs[1].files=[original]
+            foreign=parent/'foreign-wire';foreign.write_bytes(b'literal immutable wire\n')
+            fd=os.open(foreign,os.O_RDONLY)
+            try:
+                # A same-byte replacement FD is not the acquired named edge.
+                graphs[1].files[0]=(*original[:2],fd,*original[3:])
+                with self.assertRaises(self.module.GlobalAttemptHold):entry(source,graphs)
+            finally:
+                graphs[1].files[0]=original;os.close(fd)
+
+    def test_count_source_overlap_checks_directory_and_namespace_coverage_before_transition(self):
+        entry=getattr(self.module,'_verify_count_source_original_overlap',None)
+        self.assertTrue(callable(entry))
+        with self._count_source_edge_control() as (source,graphs,_parent):
+            original=graphs[1].directories[0]
+            graphs[1].directories=[]
+            try:
+                with self.assertRaises(self.module.GlobalAttemptHold):entry(source,graphs)
+            finally:graphs[1].directories=[original]
+            before=graphs[0].namespace
+            graphs[0].namespace=(*before[:2],{'native.units'})
+            try:
+                with self.assertRaises(self.module.GlobalAttemptHold):entry(source,graphs)
+            finally:graphs[0].namespace=before
+            with self.assertRaises(self.module.GlobalAttemptHold):entry(source,(graphs[0],)*3)
+
+    def test_count_source_overlap_does_not_discard_unshared_project_originals(self):
+        entry=getattr(self.module,'_verify_count_source_original_overlap',None)
+        self.assertTrue(callable(entry))
+        with self._count_source_edge_control() as (source,graphs,parent):
+            unrelated=parent/'project-originals';unrelated.mkdir(mode=0o700)
+            original_file=unrelated/'EVENT';original_file.write_bytes(b'literal retained event\n')
+            original_file.chmod(0o600)
+            fd=os.open(unrelated,os.O_RDONLY|os.O_DIRECTORY)
+            try:
+                source.file(fd,'EVENT',1024)
+                retained=tuple(source.files)
+                self.assertIsNone(entry(source,graphs))
+                self.assertEqual(retained,tuple(source.files))
+                original_file.write_bytes(b'foreign event\n')
+                with self.assertRaises(self.module.GlobalAttemptHold):entry(source,graphs)
+            finally:os.close(fd)
+
+    def test_count_source_overlap_cannot_hide_shared_children_by_deleting_parent_records(self):
+        entry=getattr(self.module,'_verify_count_source_original_overlap',None)
+        self.assertTrue(callable(entry))
+        for which in ('source','both'):
+            with self.subTest(which=which), self._count_source_edge_control() as (source,graphs,_parent):
+                original=source.directories[1];received=graphs[1].directories[0]
+                source.directories.remove(original)
+                if which=='both':graphs[1].directories.remove(received)
+                try:
+                    with self.assertRaises(self.module.GlobalAttemptHold):entry(source,graphs)
+                finally:
+                    source.directories.append(original)
+                    if which=='both':graphs[1].directories.append(received)
+
+    @contextmanager
+    def _first_prefix_control(self, *, suffix_drift=False, cleanup_failure=False, exit_calls=None):
+        # Lifecycle/order control only. Inert owners and a body stand-in do
+        # not issue native source, COUNT, read or send permission.
+        from types import SimpleNamespace
+        names=('_hold_first_original_source_prefix','_prepare_first_original_source_prefix',
+            '_bind_first_original_source_prefix','_consume_first_original_source_prefix')
+        for name in names:self.assertTrue(callable(getattr(self.module,name,None)),name)
+        writer,sheet,project,owner=object(),object(),object(),object()
+        bound=binding();row=SimpleNamespace(unit=self.value,project_identity=(11,22),c6_facts=b'literal C6')
+        observation=SimpleNamespace(attempt_count=0)
+        events=[];result=('literal receipt','literal source','literal reservations','literal business','literal audits')
+        arguments=dict(qualified_source=object(),store=object(),writer_token=writer,settings=object(),
+            whitelist_snapshot=object(),expected_template_sha256='a'*64,http_root=self.root,
+            whitelist_path=self.root/'literal-W1',_shared_retry=False)
+        packet={'writer':writer,'project':project,'token':sheet,'owner':owner,'binding':bound,
+            'unit':row.unit,'context':(os.getpid(),__import__('threading').get_ident()),
+            'verify':lambda:events.append('COUNT originals')}
+        @contextmanager
+        def body_inner(*args,**kwargs):
+            self.assertEqual((sheet,bound,row.unit),args);self.assertEqual(arguments,kwargs)
+            events.extend(('source prefix','receipt prefix'))
+            def observe(identity):events.append('identity-dependent facts');return result
+            try:
+                yield observe
+                events.extend(('source suffix','receipt suffix'))
+                if suffix_drift:raise self.module.GlobalAttemptHold()
+            finally:
+                events.append('body closed')
+                if cleanup_failure:raise OSError('literal secondary prefix cleanup failure')
+        class BodyExitObserver:
+            def __init__(self,inner):self.inner=inner
+            def __enter__(self):return self.inner.__enter__()
+            def __exit__(self,kind,value,traceback):
+                if exit_calls is not None:exit_calls.append('normal' if kind is None else 'interrupted')
+                return self.inner.__exit__(kind,value,traceback)
+        def body(*args,**kwargs):return BodyExitObserver(body_inner(*args,**kwargs))
+        @contextmanager
+        def short_k(*args):
+            self.assertEqual((writer,sheet,bound,row.unit),args)
+            events.append('new short K entered')
+            try:yield
+            finally:events.append('new short K closed')
+        with mock.patch.object(self.module.local,'_owner',return_value=project), \
+                mock.patch.object(self.module.ownership,'_validated_owner',return_value=owner), \
+                mock.patch.object(self.module,'_hold_receipted_original_source_inputs_body',new=body), \
+                mock.patch.object(self.module,'_hold_receipted_count_source_k',new=short_k), \
+                mock.patch.object(self.module,'_count_claim_original_packet',return_value=packet), \
+                mock.patch.object(self.module,'inspect_global_unit',return_value=observation):
+            with self.module._hold_first_original_source_prefix(writer,sheet,bound,row):
+                yield writer,sheet,bound,row,observation,arguments,packet,events,result
+
+    def test_first_prefix_precedes_reads_and_full_suffix_finishes_before_count(self):
+        with self._first_prefix_control() as (writer,sheet,bound,row,observed,args,packet,events,result):
+            self.module._prepare_first_original_source_prefix(row,observed,**args)
+            self.assertEqual(['source prefix','receipt prefix'],events)
+            events.append('nine actual read boundary')
+            self.module._bind_first_original_source_prefix(row)
+            value=self.module._consume_first_original_source_prefix(writer,sheet,bound,row.unit,object(),**args)
+            self.assertEqual(result,value)
+            relevant=[e for e in events if e!='COUNT originals']
+            self.assertEqual(['source prefix','receipt prefix','nine actual read boundary',
+                'new short K entered','identity-dependent facts','source suffix','receipt suffix',
+                'body closed','new short K closed'],relevant)
+            with self.assertRaises(self.module.GlobalAttemptHold):
+                self.module._consume_first_original_source_prefix(writer,sheet,bound,row.unit,object(),**args)
+        self.assertIsNone(self.module._FIRST_ORIGINAL_SOURCE_PREFIX.get())
+        self.assertEqual({},self.module._LIVE_FIRST_ORIGINAL_SOURCE_PREFIXES)
+
+    @contextmanager
+    def _prefetched_first_control(self, *, acquisition_failure=False):
+        # Registry/order controls only; no native source/COUNT permission.
+        from monitor import issue_tracker_unit_catalog as catalog
+        with self._first_prefix_control() as actual:
+            writer,sheet,bound,row,_observed,_args,packet,events,_result=actual
+            live=[None];count_key=object();graphs=tuple(catalog._Originals() for _ in range(3))
+            record=(packet,graphs);packet['_source_graphs']=record
+            @contextmanager
+            def issuer(*args):
+                self.assertEqual((writer,sheet,bound,row.unit),args)
+                events.append('actual cold graph entry')
+                if acquisition_failure:raise self.module.GlobalAttemptHold()
+                reset=self.module._HELD_COUNT_CLAIM_ORIGINALS.set(count_key)
+                self.module._LIVE_COUNT_SOURCE_GRAPHS[count_key]=record;live[0]=packet
+                try:yield packet['verify']
+                finally:
+                    live[0]=None;self.module._LIVE_COUNT_SOURCE_GRAPHS.pop(count_key,None)
+                    self.module._HELD_COUNT_CLAIM_ORIGINALS.reset(reset)
+                    events.append('original Count issuer closed')
+            with mock.patch.object(self.module,'_count_claim_original_packet',side_effect=lambda:live[0]), \
+                    mock.patch.object(self.module,'_hold_selected_last_catalog_write_originals',new=issuer):
+                yield actual,live,count_key,record
+
+    def test_first_count_graph_prefetch_precedes_reads_without_count_and_closes_after_body(self):
+        entry=getattr(self.module,'_prefetch_first_original_count_graph',None)
+        self.assertTrue(callable(entry),'first original Count graph must be acquired before online IO')
+        with self._prefetched_first_control() as (actual,live,_key,_record):
+            writer,sheet,bound,row,observed,args,packet,events,result=actual
+            self.module._prepare_first_original_source_prefix(row,observed,**args)
+            entry()
+            self.assertEqual(['source prefix','receipt prefix','actual cold graph entry'],
+                [event for event in events if event!='COUNT originals'])
+            self.assertIs(packet,live[0]);events.append('nine original IO completed')
+            self.module._bind_first_original_source_prefix(row)
+            self.assertEqual(result,self.module._consume_first_original_source_prefix(
+                writer,sheet,bound,row.unit,object(),**args))
+            self.assertNotIn('original Count issuer closed',events)
+        self.assertLess(events.index('nine original IO completed'),events.index('new short K entered'))
+        self.assertLess(events.index('body closed'),events.index('original Count issuer closed'))
+        self.assertEqual(1,events.count('actual cold graph entry'))
+
+    def test_first_prefetch_cannot_adopt_later_equal_packet_record_or_row(self):
+        entry=getattr(self.module,'_prefetch_first_original_count_graph',None)
+        self.assertTrue(callable(entry))
+        for which in ('packet','record','row'):
+            with self.subTest(which=which),self._prefetched_first_control() as (actual,live,key,record):
+                writer,sheet,bound,row,observed,args,packet,events,_result=actual
+                self.module._prepare_first_original_source_prefix(row,observed,**args);entry()
+                try:
+                    if which=='packet':live[0]=dict(packet)
+                    elif which=='record':self.module._LIVE_COUNT_SOURCE_GRAPHS[key]=tuple(list(record))
+                    else:packet['unit']=unit()
+                    with self.assertRaises(self.module.GlobalAttemptHold):
+                        self.module._bind_first_original_source_prefix(row)
+                finally:
+                    live[0]=packet;packet['unit']=row.unit
+                    self.module._LIVE_COUNT_SOURCE_GRAPHS[key]=record
+                self.assertEqual(1,events.count('actual cold graph entry'))
+
+    def test_failed_first_count_prefetch_is_poisoned_and_cannot_reacquire_cold_graph(self):
+        entry=getattr(self.module,'_prefetch_first_original_count_graph',None)
+        self.assertTrue(callable(entry))
+        with self.assertRaises(self.module.GlobalAttemptHold):
+            with self._prefetched_first_control(acquisition_failure=True) as (actual,_live,_key,_record):
+                writer,sheet,bound,row,observed,args,_packet,events,_result=actual
+                self.module._prepare_first_original_source_prefix(row,observed,**args)
+                with self.assertRaises(self.module.GlobalAttemptHold):entry()
+                with self.assertRaises(self.module.GlobalAttemptHold):entry()
+                self.assertEqual(1,events.count('actual cold graph entry'))
+                with mock.patch.object(self.module,'_hold_receipted_original_source_inputs',
+                        side_effect=AssertionError('failed prefetch cold fallback')):
+                    with self.assertRaises(self.module.GlobalAttemptHold):
+                        self.module._receipted_original_facts(sheet,bound,object(),row.unit,**args)
+
+    def test_prefetched_first_count_tail_preserves_operator_interrupt_and_releases_registry(self):
+        entry=getattr(self.module,'_prefetch_first_original_count_graph',None)
+        self.assertTrue(callable(entry));primary=KeyboardInterrupt('literal prefetched Count interruption')
+        with self.assertRaises(KeyboardInterrupt) as caught:
+            with self._prefetched_first_control() as (actual,_live,_key,_record):
+                _writer,_sheet,_bound,row,observed,args,_packet,events,_result=actual
+                self.module._prepare_first_original_source_prefix(row,observed,**args);entry()
+                raise primary
+        self.assertIs(primary,caught.exception)
+        self.assertEqual(1,events.count('original Count issuer closed'))
+        self.assertEqual({},self.module._LIVE_COUNT_SOURCE_GRAPHS)
+        self.assertIsNone(self.module._HELD_COUNT_CLAIM_ORIGINALS.get())
+
+    def test_first_prefetch_cannot_use_substituted_cleanup_scope(self):
+        entry=getattr(self.module,'_prefetch_first_original_count_graph',None)
+        self.assertTrue(callable(entry))
+        with self._prefetched_first_control() as (actual,_live,_key,_record):
+            _writer,_sheet,_bound,row,observed,args,_packet,events,_result=actual
+            self.module._prepare_first_original_source_prefix(row,observed,**args)
+            anchor=self.module._FIRST_ORIGINAL_SOURCE_PREFIX.get()
+            original=anchor.prefetch_scope
+            with ExitStack() as foreign:
+                anchor.prefetch_scope=foreign
+                try:
+                    with self.assertRaises(self.module.GlobalAttemptHold):entry()
+                finally:anchor.prefetch_scope=original
+            self.assertNotIn('actual cold graph entry',events)
+
+    def test_first_prefix_same_value_row_or_unit_and_revoked_context_cannot_bind(self):
+        from types import SimpleNamespace
+        with self._first_prefix_control() as (writer,sheet,bound,row,observed,args,packet,events,result):
+            self.module._prepare_first_original_source_prefix(row,observed,**args)
+            copied_row=SimpleNamespace(**vars(row))
+            with self.assertRaises(self.module.GlobalAttemptHold):
+                self.module._bind_first_original_source_prefix(copied_row)
+            original=packet['unit'];packet['unit']=unit()
+            self.assertEqual(original,packet['unit']);self.assertIsNot(original,packet['unit'])
+            with self.assertRaises(self.module.GlobalAttemptHold):self.module._bind_first_original_source_prefix(row)
+            packet['unit']=original
+            key=self.module._FIRST_ORIGINAL_SOURCE_PREFIX.get()
+            saved=self.module._LIVE_FIRST_ORIGINAL_SOURCE_PREFIXES.pop(key)
+            try:
+                with self.assertRaises(self.module.GlobalAttemptHold):self.module._bind_first_original_source_prefix(row)
+            finally:self.module._LIVE_FIRST_ORIGINAL_SOURCE_PREFIXES[key]=saved
+        self.assertEqual(['source prefix','receipt prefix','body closed'],events)
+
+    def test_first_prefix_suffix_drift_is_not_cached_success_and_is_permanently_consumed(self):
+        with self._first_prefix_control(suffix_drift=True) as (writer,sheet,bound,row,observed,args,packet,events,result):
+            self.module._prepare_first_original_source_prefix(row,observed,**args)
+            self.module._bind_first_original_source_prefix(row)
+            with self.assertRaises(self.module.GlobalAttemptHold):
+                self.module._consume_first_original_source_prefix(writer,sheet,bound,row.unit,object(),**args)
+            with self.assertRaises(self.module.GlobalAttemptHold):
+                self.module._consume_first_original_source_prefix(writer,sheet,bound,row.unit,object(),**args)
+            self.assertEqual(1,events.count('source prefix'))
+            self.assertEqual(1,events.count('source suffix'))
+            self.assertEqual(1,events.count('body closed'))
+            self.assertEqual(1,events.count('new short K closed'))
+
+    def test_first_prefix_interruption_survives_cleanup_failure_and_revoke_happens_first(self):
+        primary=KeyboardInterrupt('literal operator interruption')
+        with self.assertRaises(KeyboardInterrupt) as caught:
+            with self._first_prefix_control(cleanup_failure=True) as (writer,sheet,bound,row,observed,args,packet,events,result):
+                self.module._prepare_first_original_source_prefix(row,observed,**args)
+                raise primary
+        self.assertIs(primary,caught.exception)
+        self.assertIsNone(self.module._FIRST_ORIGINAL_SOURCE_PREFIX.get())
+        self.assertEqual({},self.module._LIVE_FIRST_ORIGINAL_SOURCE_PREFIXES)
+        self.assertEqual(['source prefix','receipt prefix','body closed'],events)
+
+    def test_failed_first_prefix_cannot_fall_back_to_cold_facts(self):
+        with self._first_prefix_control(suffix_drift=True) as (writer,sheet,bound,row,observed,args,packet,events,result):
+            self.module._prepare_first_original_source_prefix(row,observed,**args)
+            self.module._bind_first_original_source_prefix(row)
+            with self.assertRaises(self.module.GlobalAttemptHold):
+                self.module._consume_first_original_source_prefix(writer,sheet,bound,row.unit,object(),**args)
+            with mock.patch.object(self.module,'_hold_receipted_original_source_inputs',
+                    side_effect=AssertionError('failed declared FIRST fell back to cold source')):
+                with self.assertRaises(self.module.GlobalAttemptHold):
+                    self.module._receipted_original_facts(sheet,bound,object(),row.unit,**args)
+
+    def test_bound_first_prefix_rejects_same_value_registry_or_row_replacement(self):
+        from types import SimpleNamespace
+        for which in ('row','registry'):
+            with self.subTest(which=which), self._first_prefix_control() as (writer,sheet,bound,row,observed,args,count,events,result):
+                self.module._prepare_first_original_source_prefix(row,observed,**args)
+                self.module._bind_first_original_source_prefix(row)
+                key=self.module._FIRST_ORIGINAL_SOURCE_PREFIX.get()
+                original=self.module._LIVE_FIRST_ORIGINAL_SOURCE_PREFIXES[key]
+                try:
+                    if which=='row':original['row']=SimpleNamespace(**vars(row))
+                    else:self.module._LIVE_FIRST_ORIGINAL_SOURCE_PREFIXES[key]=dict(original)
+                    with self.assertRaises(self.module.GlobalAttemptHold):
+                        self.module._consume_first_original_source_prefix(writer,sheet,bound,row.unit,object(),**args)
+                finally:
+                    original['row']=row
+                    self.module._LIVE_FIRST_ORIGINAL_SOURCE_PREFIXES[key]=original
+
+    def test_failed_original_body_normal_exit_is_attempted_only_once(self):
+        exits=[]
+        with self._first_prefix_control(suffix_drift=True,exit_calls=exits) as (writer,sheet,bound,row,observed,args,packet,events,result):
+            self.module._prepare_first_original_source_prefix(row,observed,**args)
+            self.module._bind_first_original_source_prefix(row)
+            with self.assertRaises(self.module.GlobalAttemptHold):
+                self.module._consume_first_original_source_prefix(writer,sheet,bound,row.unit,object(),**args)
+            self.assertEqual(['normal'],exits,'a failed original suffix is not a second cleanup domain')
+        self.assertEqual(['normal'],exits)
+
+    def test_deleted_bound_first_row_cannot_fall_back_to_cold_facts(self):
+        with self._first_prefix_control() as (writer,sheet,bound,row,observed,args,count,events,result):
+            self.module._prepare_first_original_source_prefix(row,observed,**args)
+            self.module._bind_first_original_source_prefix(row)
+            packet=self.module._first_original_source_prefix_packet()
+            del packet['row']
+            try:
+                with mock.patch.object(self.module,'_hold_receipted_original_source_inputs',
+                        side_effect=AssertionError('deleted declared FIRST fell back to cold source')):
+                    with self.assertRaises(self.module.GlobalAttemptHold):
+                        self.module._receipted_original_facts(sheet,bound,object(),row.unit,**args)
+            finally:packet['row']=row
+
+    def test_successful_first_prefix_does_not_replace_later_full_facts(self):
+        with self._first_prefix_control() as (writer,sheet,bound,row,observed,args,count,events,result):
+            self.module._prepare_first_original_source_prefix(row,observed,**args)
+            self.module._bind_first_original_source_prefix(row)
+            self.assertEqual(result,self.module._receipted_original_facts(sheet,bound,object(),row.unit,**args))
+            later=('independent later source',);reads=[]
+            @contextmanager
+            def fresh(*a,**kw):
+                reads.append('fresh full prefix')
+                yield lambda identity:later
+                reads.append('fresh full suffix')
+            with mock.patch.object(self.module,'_hold_receipted_original_source_inputs',new=fresh):
+                self.assertEqual(later,self.module._receipted_original_facts(sheet,bound,object(),row.unit,**args))
+            self.assertEqual(['fresh full prefix','fresh full suffix'],reads)
+
+    def test_first_count_original_join_fields_are_rechecked_after_real_delegate(self):
+        for which in ('unit','verify','context'):
+            with self.subTest(which=which), self._first_prefix_control() as (writer,sheet,bound,row,observed,args,count,events,result):
+                self.module._prepare_first_original_source_prefix(row,observed,**args)
+                original_unit=count['unit'];original_verify=count['verify'];original_context=count['context']
+                def changed_delegate():
+                    original_verify()
+                    count[which]=(unit() if which=='unit' else
+                        ((0,0) if which=='context' else lambda:events.append('foreign callback')))
+                count['verify']=changed_delegate
+                try:
+                    with self.assertRaises(self.module.GlobalAttemptHold):
+                        self.module._bind_first_original_source_prefix(row)
+                    self.assertNotIn('identity-dependent facts',events)
+                    self.assertNotIn('foreign callback',events)
+                finally:
+                    count['unit']=original_unit;count['verify']=original_verify;count['context']=original_context
+
+    def test_count_project_c6_without_live_join_keeps_cold_path(self):
+        entry = getattr(self.module, '_hold_count_claim_project_c6', None)
+        self.assertTrue(callable(entry), 'source K needs an original-only C6 borrow, not a row cache')
+        with entry(object(), object(), binding(), (self.value,)) as borrowed:
+            self.assertIsNone(borrowed)
+
+    def _count_c6_control(self):
+        # Registry/lifetime control only; this does not issue actual C6 proof.
+        from monitor import issue_tracker_unit_catalog as catalog
+        writer, sheet, key = object(), object(), object()
+        bound = binding(); events = []
+        packet = {'writer': writer, 'token': sheet, 'binding': bound,
+                  'unit': self.value, 'verify': lambda: events.append('COUNT originals')}
+        rows = (catalog.CatalogProjectC6(self.value, (101, 202), b'control-only'),)
+        record = (packet, (self.value,), rows, lambda: events.append('C6 originals'))
+        return writer, sheet, key, bound, events, packet, rows, record
+
+    def test_count_project_c6_borrows_exact_registered_originals_and_revokes_escaped_verifier(self):
+        entry = getattr(self.module, '_hold_count_claim_project_c6', None)
+        self.assertTrue(callable(entry), 'only an actual live COUNT issuer may lend its C6 graph')
+        writer, sheet, key, bound, events, packet, rows, record = self._count_c6_control()
+        with mock.patch.object(self.module, '_count_claim_original_packet', return_value=packet), \
+                mock.patch.dict(self.module._LIVE_COUNT_PROJECT_C6, {key: record}):
+            reset = self.module._HELD_COUNT_CLAIM_ORIGINALS.set(key)
+            try:
+                with entry(writer, sheet, bound, (self.value,)) as borrowed:
+                    actual_rows, verify = borrowed
+                    self.assertIs(rows, actual_rows)
+                    verify()
+                    self.assertGreaterEqual(events.count('COUNT originals'), 1,
+                                            'the genuine COUNT entry boundary already ran')
+                    self.assertGreaterEqual(events.count('C6 originals'), 2)
+                # Check both lexical COUNT boundaries after the scope exits;
+                # its final boundary has not run inside the with-body.
+                self.assertGreaterEqual(events.count('COUNT originals'), 2)
+                with self.assertRaises(self.module.GlobalAttemptHold):
+                    verify()
+            finally:
+                self.module._HELD_COUNT_CLAIM_ORIGINALS.reset(reset)
+
+    def test_count_project_c6_same_value_record_replacement_is_not_an_original_loan(self):
+        entry = getattr(self.module, '_hold_count_claim_project_c6', None)
+        self.assertTrue(callable(entry))
+        writer, sheet, key, bound, _events, packet, _rows, record = self._count_c6_control()
+        with mock.patch.object(self.module, '_count_claim_original_packet', return_value=packet), \
+                mock.patch.dict(self.module._LIVE_COUNT_PROJECT_C6, {key: record}):
+            reset = self.module._HELD_COUNT_CLAIM_ORIGINALS.set(key)
+            try:
+                with self.assertRaises(self.module.GlobalAttemptHold):
+                    with entry(writer, sheet, bound, (self.value,)) as (_rows, verify):
+                        self.module._LIVE_COUNT_PROJECT_C6[key] = tuple(list(record))
+                        verify()
+            finally:
+                self.module._HELD_COUNT_CLAIM_ORIGINALS.reset(reset)
+
+    def test_count_project_c6_revoked_join_preserves_body_interruption(self):
+        entry = getattr(self.module, '_hold_count_claim_project_c6', None)
+        self.assertTrue(callable(entry))
+        class Interrupted(BaseException): pass
+        primary = Interrupted()
+        writer, sheet, key, bound, _events, packet, _rows, record = self._count_c6_control()
+        current = [packet]
+        with mock.patch.object(self.module, '_count_claim_original_packet', side_effect=lambda: current[0]), \
+                mock.patch.dict(self.module._LIVE_COUNT_PROJECT_C6, {key: record}):
+            reset = self.module._HELD_COUNT_CLAIM_ORIGINALS.set(key)
+            try:
+                with self.assertRaises(Interrupted) as caught:
+                    with entry(writer, sheet, bound, (self.value,)):
+                        current[0] = None
+                        raise primary
+                self.assertIs(primary, caught.exception)
+                self.assertIsInstance(primary.__cause__, self.module.GlobalAttemptHold)
+            finally:
+                self.module._HELD_COUNT_CLAIM_ORIGINALS.reset(reset)
+
+    def test_count_project_c6_tail_operator_interruption_dominates_ordinary_body_error(self):
+        writer, sheet, key, bound, _events, packet, _rows, record = self._count_c6_control()
+        ordinary = ValueError('independent original body failure')
+        interrupted = KeyboardInterrupt(); body_finished = []
+        def verify_c6():
+            if body_finished: raise interrupted
+        record = (*record[:3], verify_c6)
+        with mock.patch.object(self.module, '_count_claim_original_packet', return_value=packet), \
+                mock.patch.dict(self.module._LIVE_COUNT_PROJECT_C6, {key: record}):
+            reset = self.module._HELD_COUNT_CLAIM_ORIGINALS.set(key)
+            try:
+                with self.assertRaises(KeyboardInterrupt) as caught:
+                    with self.module._hold_count_claim_project_c6(writer, sheet, bound, (self.value,)):
+                        body_finished.append(True)
+                        raise ordinary
+                self.assertIs(interrupted, caught.exception)
+                self.assertIs(ordinary, interrupted.__cause__)
+            finally:
+                self.module._HELD_COUNT_CLAIM_ORIGINALS.reset(reset)
+
+    def test_count_project_c6_fresh_rechecks_do_not_rebuild_unrelated_count_graph_checks(self):
+        # C6-only rechecks retain original C6 checks each time. The independent
+        # COUNT graph is already held and checked at the lexical boundaries.
+        writer, sheet, key, bound, events, packet, _rows, record = self._count_c6_control()
+        with mock.patch.object(self.module, '_count_claim_original_packet', return_value=packet), \
+                mock.patch.dict(self.module._LIVE_COUNT_PROJECT_C6, {key: record}):
+            reset = self.module._HELD_COUNT_CLAIM_ORIGINALS.set(key)
+            try:
+                with self.module._hold_count_claim_project_c6(writer, sheet, bound, (self.value,)) as (_rows, verify):
+                    for _ in range(8): verify()
+                self.assertEqual(2, events.count('COUNT originals'))
+                self.assertGreaterEqual(events.count('C6 originals'), 10)
+            finally:
+                self.module._HELD_COUNT_CLAIM_ORIGINALS.reset(reset)
+
+    def test_count_source_k_without_original_join_keeps_ordinary_reader(self):
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        entry=getattr(self.module,'_hold_receipted_count_source_k',None)
+        self.assertTrue(callable(entry),'COUNT source reads need a fixed original-only K read domain')
+        with mock.patch.object(self.module,'_count_claim_original_packet',return_value=None), \
+                mock.patch.object(allocation,'_hold_owned_native_completed_source_k') as issued:
+            with entry(object(),object(),binding(),self.value):pass
+        issued.assert_not_called()
+
+    def test_count_source_k_mismatched_original_join_refuses_before_issuer(self):
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        entry=getattr(self.module,'_hold_receipted_count_source_k',None)
+        self.assertTrue(callable(entry),'foreign COUNT graph cannot issue archived-settings K')
+        writer=object();sheet=object();bound=binding()
+        original={'writer':writer,'token':sheet,'binding':bound,'unit':self.value,'verify':mock.Mock()}
+        for field in ('writer','token','binding','unit'):
+            changed={**original,field:object()}
+            with self.subTest(field=field), \
+                    mock.patch.object(self.module,'_count_claim_original_packet',return_value=changed), \
+                    mock.patch.object(allocation,'_hold_owned_native_completed_source_k') as issued:
+                with self.assertRaises(self.module.GlobalAttemptHold):
+                    with entry(writer,sheet,bound,self.value):self.fail('foreign original joined')
+                issued.assert_not_called()
+
+    def test_count_source_k_original_join_dominates_read_scope_and_checks_after_revoke(self):
+        # Ordering/identity control only. Actual archived FIRST is the real
+        # ALL/COUNT/source workflow; this fake issuer grants no production proof.
+        from types import SimpleNamespace
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        entry=getattr(self.module,'_hold_receipted_count_source_k',None)
+        self.assertTrue(callable(entry),'original COUNT/source graph must dominate K read cleanup')
+        writer=object();sheet=object();bound=binding();events=[]
+        fd=os.open(self.root,os.O_RDONLY|os.O_DIRECTORY)
+        (self.root/allocation._DELIVERY_STARTED).write_bytes(b'control-only')
+        packet={'writer':writer,'token':sheet,'binding':bound,'unit':self.value,
+                'project':SimpleNamespace(root_fd=fd),'verify':lambda:events.append('original verify')}
+        @contextmanager
+        def read_k(*args):
+            self.assertEqual((writer,sheet,bound),args)
+            events.append('original K enter')
+            try:yield
+            finally:events.append('original K revoked')
+        try:
+            with mock.patch.object(self.module,'_count_claim_original_packet',return_value=packet), \
+                    mock.patch.object(allocation,'_hold_owned_native_completed_source_k',side_effect=read_k):
+                with entry(writer,sheet,bound,self.value):events.append('source and receipt domain')
+            self.assertLess(events.index('original verify'),events.index('original K enter'))
+            self.assertLess(events.index('original K enter'),events.index('source and receipt domain'))
+            self.assertLess(events.index('source and receipt domain'),events.index('original K revoked'))
+            self.assertEqual('original verify',events[-1])
+        finally:os.close(fd)
+
+    def test_count_source_k_preserves_original_interruption_when_tail_join_is_revoked(self):
+        from types import SimpleNamespace
+        entry=getattr(self.module,'_hold_receipted_count_source_k',None)
+        self.assertTrue(callable(entry))
+        class OriginalInterruption(BaseException):pass
+        primary=OriginalInterruption();writer=object();sheet=object();bound=binding()
+        fd=os.open(self.root,os.O_RDONLY|os.O_DIRECTORY)
+        packet={'writer':writer,'token':sheet,'binding':bound,'unit':self.value,
+                'project':SimpleNamespace(root_fd=fd),'verify':lambda:None}
+        current=[packet]
+        try:
+            with mock.patch.object(self.module,'_count_claim_original_packet',side_effect=lambda:current[0]):
+                with self.assertRaises(OriginalInterruption) as caught:
+                    with entry(writer,sheet,bound,self.value):
+                        current[0]=None
+                        raise primary
+            self.assertIs(primary,caught.exception)
+            self.assertIsInstance(primary.__cause__,self.module.GlobalAttemptHold)
+        finally:os.close(fd)
+
+    def test_count_source_k_preserves_body_interruption_before_actual_reader_cleanup(self):
+        from types import SimpleNamespace
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        class OriginalInterruption(BaseException):pass
+        primary=OriginalInterruption();cleanup=allocation.SettingsAuditHold()
+        writer=object();sheet=object();bound=binding();fd=os.open(self.root,os.O_RDONLY|os.O_DIRECTORY)
+        (self.root/allocation._DELIVERY_STARTED).write_bytes(b'control-only')
+        packet={'writer':writer,'token':sheet,'binding':bound,'unit':self.value,
+                'project':SimpleNamespace(root_fd=fd),'verify':lambda:None}
+        @contextmanager
+        def failing_reader(*args):
+            try:yield
+            finally:raise cleanup
+        try:
+            with mock.patch.object(self.module,'_count_claim_original_packet',return_value=packet), \
+                    mock.patch.object(allocation,'_hold_owned_native_completed_source_k',side_effect=failing_reader):
+                with self.assertRaises(OriginalInterruption) as caught:
+                    with self.module._hold_receipted_count_source_k(writer,sheet,bound,self.value):raise primary
+            self.assertIs(primary,caught.exception);self.assertIs(cleanup,primary.__cause__)
+        finally:os.close(fd)
+
+    def test_count_source_k_cleanup_interrupt_dominates_ordinary_body_and_final_hold(self):
+        # Exception ordering only; this control never issues native K or GO.
+        from types import SimpleNamespace
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        body=ValueError('literal ordinary source body')
+        interrupted=KeyboardInterrupt('literal original reader cleanup')
+        last=self.module.GlobalAttemptHold()
+        revoked=[];final_checks=[]
+        writer=object();sheet=object();bound=binding()
+        fd=os.open(self.root,os.O_RDONLY|os.O_DIRECTORY)
+        (self.root/allocation._DELIVERY_STARTED).write_bytes(b'control-only')
+        def verify():
+            if revoked:
+                final_checks.append(True)
+                raise last
+        packet={'writer':writer,'token':sheet,'binding':bound,'unit':self.value,
+                'project':SimpleNamespace(root_fd=fd),'verify':verify}
+        @contextmanager
+        def reader(*args):
+            try:yield
+            finally:
+                revoked.append(True)
+                raise interrupted
+        try:
+            with mock.patch.object(self.module,'_count_claim_original_packet',return_value=packet), \
+                    mock.patch.object(allocation,'_hold_owned_native_completed_source_k',side_effect=reader):
+                with self.assertRaises(KeyboardInterrupt) as caught:
+                    with self.module._hold_receipted_count_source_k(writer,sheet,bound,self.value):
+                        raise body
+            self.assertIs(interrupted,caught.exception)
+            self.assertIs(last,interrupted.__cause__)
+            self.assertEqual([True],revoked);self.assertEqual([True],final_checks)
+        finally:os.close(fd)
+
+    def test_count_source_k_last_verifier_cannot_replace_same_value_unit_after_reader_cleanup(self):
+        from types import SimpleNamespace
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        writer=object();sheet=object();bound=binding();fd=os.open(self.root,os.O_RDONLY|os.O_DIRECTORY)
+        (self.root/allocation._DELIVERY_STARTED).write_bytes(b'control-only')
+        revoked=[]
+        packet={'writer':writer,'token':sheet,'binding':bound,'unit':self.value,
+                'project':SimpleNamespace(root_fd=fd)}
+        def verify():
+            if revoked:packet['unit']=replace(self.value)
+        packet['verify']=verify
+        @contextmanager
+        def reader(*args):
+            try:yield
+            finally:revoked.append(True)
+        try:
+            with mock.patch.object(self.module,'_count_claim_original_packet',return_value=packet), \
+                    mock.patch.object(allocation,'_hold_owned_native_completed_source_k',side_effect=reader):
+                with self.assertRaises(self.module.GlobalAttemptHold):
+                    with self.module._hold_receipted_count_source_k(writer,sheet,bound,self.value):pass
+            self.assertEqual(self.value,packet['unit']);self.assertIsNot(self.value,packet['unit'])
+        finally:os.close(fd)
+
+    def _receipted_local_prefix_probe(self, *, source_drift=False):
+        # Fixed-order/lifetime oracle only, not an actual qualification issuer.
+        from types import SimpleNamespace
+        from monitor import issue_tracker_stage_l_consumer as source
+        from monitor import issue_tracker_cycle_source as cycles
+        from monitor import issue_tracker_send_unit as send
+        from monitor import issue_tracker_history_preread_journal as preread
+        from monitor import issue_tracker_local_workbook_commit as workbook
+        from monitor import issue_tracker_online_target as target
+        entry=getattr(self.module,'_hold_receipted_original_source_inputs',None)
+        self.assertTrue(callable(entry),'actual local source prefix must precede FIRST reads in one bounded scope')
+        qualified=SimpleNamespace(cycle_ids=('original-cycle',));events=[]
+        receipt=('a'*64,'b'*64,hashlib.sha256(inputs()['manifest']).hexdigest())
+        business=object();reserved=('literal-reservation',);identity=object()
+        def replay(*args,**options):
+            events.append('source')
+            return object() if source_drift and events.count('source')==2 else qualified
+        def original_receipt(*args,**options):events.append('receipt');return receipt
+        def reservations(*args):events.append('reservations');return reserved
+        def original_business(*args):events.append('business');return business
+        arguments=dict(qualified_source=qualified,store=object(),writer_token=object(),settings=object(),
+            whitelist_snapshot=object(),expected_template_sha256='f'*64,http_root=self.root,whitelist_path=self.root/'W1')
+        with ExitStack() as patches:
+            patches.enter_context(mock.patch.object(self.module,'_inputs'))
+            patches.enter_context(mock.patch.object(target,'inspect_project_online_target'))
+            patches.enter_context(mock.patch.object(cycles,'read_completed_cycle_evidence',
+                return_value=(SimpleNamespace(cycle_id='original-cycle'),)))
+            patches.enter_context(mock.patch.object(source,'qualify_prod_stage_l',side_effect=replay))
+            patches.enter_context(mock.patch.object(send,'_original_receipt_identity',side_effect=original_receipt))
+            patches.enter_context(mock.patch.object(self.module,'_reserved_images',side_effect=reservations))
+            patches.enter_context(mock.patch.object(preread,'inspect_business_preread',side_effect=original_business))
+            patches.enter_context(mock.patch.object(workbook,'_source_rows',return_value=(('literal-cabling',),('literal-switch',))))
+            patches.enter_context(mock.patch.object(preread,'inspect_business_source_projection',return_value=business))
+            patches.enter_context(mock.patch.object(self.module.ownership,'_validated_owner'))
+            with entry(object(),binding(),self.value,**arguments) as observe:
+                self.assertEqual(['source','receipt'],events)
+                events.append('actual-online-read-boundary')
+                result=observe(identity)
+                self.assertEqual((receipt,qualified,reserved,business,b''),result)
+                self.assertEqual(['source','receipt','actual-online-read-boundary','reservations','business'],events)
+                with self.assertRaises(self.module.GlobalAttemptHold):observe(identity)
+            self.assertEqual(['source','receipt','actual-online-read-boundary','reservations','business','source','receipt'],events)
+            with self.assertRaises(self.module.GlobalAttemptHold):observe(identity)
+
+    def test_receipted_source_prefix_precedes_reads_and_keeps_both_original_checks(self):
+        self._receipted_local_prefix_probe()
+
+    def test_receipted_source_prefix_never_accepts_postread_source_drift(self):
+        with self.assertRaises(self.module.GlobalAttemptHold):
+            self._receipted_local_prefix_probe(source_drift=True)
+
     def _exercise_global_creator_first_stat(self, *, recycle=False):
         original_open=os.open;original_stat=os.fstat;opened=[];hit=[]
         error=OSError('injected first creator fstat')
@@ -840,22 +1667,45 @@ if receipt._latest_receipted_prod_xlsx is not original:
                 started=locks/(prefix+".journal-started"); store=locks/(prefix+".journal")
                 real_validate=self.owner._validated_owner; injected=[]
                 def after_validation(*args):
-                    owner=real_validate(*args)
-                    if started.exists() and not store.exists() and not injected:
-                        raw=started.read_bytes(); original=started.stat()
-                        if fault in ("lost-name","same-byte-replacement"):
-                            started.rename(root/"preserved-start-original")
-                            if fault=="same-byte-replacement":
-                                started.write_bytes(raw); started.chmod(0o600)
-                                self.assertNotEqual(original.st_ino,started.stat().st_ino)
-                        else:
-                            started.write_bytes(b"x"*len(raw)); started.write_bytes(raw)
-                            os.utime(started,ns=(original.st_atime_ns,original.st_mtime_ns))
-                            self.assertEqual(original.st_ino,started.stat().st_ino)
-                            self.assertEqual(original.st_mtime_ns,started.stat().st_mtime_ns)
-                            self.assertNotEqual(original.st_ctime_ns,started.stat().st_ctime_ns)
-                        injected.append((original.st_ino,raw))
-                    return owner
+                    phase='actual-owner';original=None
+                    try:
+                        owner=real_validate(*args);phase='select-fault'
+                        if started.exists() and not store.exists() and not injected:
+                            phase='read-original'
+                            raw=started.read_bytes(); original=started.stat()
+                            if fault in ("lost-name","same-byte-replacement"):
+                                phase='rename-original';started.rename(root/"preserved-start-original")
+                                if fault=="same-byte-replacement":
+                                    phase='write-replacement';started.write_bytes(raw); started.chmod(0o600)
+                                    phase='replacement-inode-assertion'
+                                    self.assertNotEqual(original.st_ino,started.stat().st_ino)
+                            else:
+                                phase='rewrite-original'
+                                started.write_bytes(b"x"*len(raw)); started.write_bytes(raw)
+                                phase='restore-original-mtime'
+                                os.utime(started,ns=(original.st_atime_ns,original.st_mtime_ns))
+                                phase='same-original-inode-assertion'
+                                self.assertEqual(original.st_ino,started.stat().st_ino)
+                                phase='restored-original-mtime-assertion'
+                                self.assertEqual(original.st_mtime_ns,started.stat().st_mtime_ns)
+                                phase='changed-original-ctime-assertion'
+                                self.assertNotEqual(original.st_ctime_ns,started.stat().st_ctime_ns)
+                            injected.append((original.st_ino,raw))
+                        return owner
+                    except BaseException as primary:
+                        # Failure-only facts before production sanitizes the
+                        # fixture exception. Never change the original fault,
+                        # assertions, timestamp restoration, or primary object.
+                        try:
+                            record={'fault':fault,'phase':phase,'type':type(primary).__name__}
+                            if original is not None:
+                                record['original_stat']=[original.st_ino,original.st_mtime_ns,original.st_ctime_ns]
+                                if started.exists():
+                                    current=started.stat()
+                                    record['current_stat']=[current.st_ino,current.st_mtime_ns,current.st_ctime_ns]
+                            print('GLOBAL_START_FAULT_CALLBACK_FAILURE '+json.dumps(record,sort_keys=True),flush=True)
+                        except BaseException:pass
+                        raise
                 with fixture(root),self.owner.spreadsheet_owner(binding()) as token:
                     with mock.patch.object(self.owner,"_validated_owner",side_effect=after_validation), \
                             mock.patch.object(self.module,"_create_folder",wraps=self.module._create_folder) as creating:
@@ -1058,6 +1908,37 @@ with fixture(pathlib.Path(sys.argv[1])),owner.spreadsheet_owner(binding()) as to
 
 
 class Req7GlobalAttemptJournalWorkflowTests(unittest.TestCase):
+    def test_actual_catalog_membership_rebind_is_rejected_before_borrower_body(self):
+        from test_cases.test_req7_unit_catalog import load as load_catalog
+        owner_module=load_owner();module=load();catalog=load_catalog(reset_dependencies=False)
+        with tempfile.TemporaryDirectory(prefix='req7-catalog-membership-rebind-') as temporary:
+            root=Path(temporary).resolve();selected=unit();injected=[];entered=[]
+            (root/'var/lib/http-ztp-container/issue-tracker').mkdir(parents=True,mode=0o700)
+            with fixture(root),owner_module.spreadsheet_owner(binding()) as token:
+                with self.assertRaises(module.GlobalAttemptHold):
+                    catalog.register_pending_unit(token,binding(),selected)
+                    with module._hold_native_catalog_replay(token,binding(),selected):
+                        issued=module._LIVE_CATALOG_REPLAYS[module._HELD_CATALOG_REPLAY.get()]
+                        original_unit=issued[3][0]
+                        original_equal=type(selected).__eq__
+                        path=root/'var/lib/http-ztp-container/issue-tracker'/(
+                            hashlib.sha256(TARGET.encode()).hexdigest()+'.units')/'HEADER'
+                        original_bytes=path.read_bytes();original_inode=path.stat().st_ino
+                        def equal(left,right):
+                            result=original_equal(left,right)
+                            if left is original_unit and right is selected and not injected:
+                                path.rename(path.with_name('HEADER-preserved-original'))
+                                path.write_bytes(original_bytes);path.chmod(0o600)
+                                injected.append(path.stat().st_ino)
+                            return result
+                        with mock.patch.object(type(selected),'__eq__',new=equal):
+                            with module._hold_native_catalog_write_replay(token,binding(),selected):
+                                entered.append(True)
+                self.assertEqual([],entered,'EXIT refusal cannot replace refusal before borrower body')
+                self.assertEqual(1,len(injected));self.assertNotEqual(original_inode,injected[0])
+                self.assertEqual(original_bytes,path.read_bytes())
+                self.assertEqual(original_bytes,path.with_name('HEADER-preserved-original').read_bytes())
+
     setUp = Req7GlobalAttemptJournalTests.setUp
 
     def test_actual_local_intent_and_cold_owner_never_recreate_lost_unknown(self):

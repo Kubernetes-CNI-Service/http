@@ -116,7 +116,8 @@ def _source_archive_witness(path: Path) -> _ArchiveSourceWitness:
                     raise PipelineError("source archive changed during read")
             finally:
                 os.close(source_fd)
-            verify_parent()
+            # The context's complete exit walk follows this pure construction.
+            # No I/O intervenes, so retain that exit rather than repeat it here.
             return _ArchiveSourceWitness(parent_identity, identity(opened),
                                          digest.hexdigest(), ancestors)
     except OSError as exc:
@@ -191,8 +192,11 @@ class _OriginalSourceReads:
 
     def file(self,path,parent):
         self.require_live()
-        actual,verify,_=self.directories.chain(path.parent)
-        verify()
+        # chain() just walked every original named/held ancestor, including
+        # on reuse. No I/O or callback intervenes before this pure unpack;
+        # do not repeat that identical entry walk. Parent/leaf checks below,
+        # actual byte reads and all borrow/scope exit checks stay independent.
+        actual,_verified_chain,_=self.directories.chain(path.parent)
         if _source_inode(os.fstat(parent))!=_source_inode(os.fstat(actual)):
             raise PipelineError('source parent is not the actual held original')
         if path not in self.files:
@@ -276,6 +280,36 @@ def _borrow_current_source_file(path,parent):
     record=held.file(path,parent)
     yield record[0]
     held.require_live();held.verify_file(record)
+
+
+@contextmanager
+def _borrow_current_source_originals(path):
+    """One fresh parent/leaf entry and complete ancestry exit for a digest.
+
+    A remembered parent FD is only a lookup input to the original file()
+    acquisition. Its fresh full chain runs BEFORE any digest-body stat/read;
+    no previous verification, bytes or qualification are reused.
+    """
+    directory = path.parent
+    if (not isinstance(directory, Path) or not directory.is_absolute()
+            or ".." in directory.parts or not getattr(os, "O_NOFOLLOW", 0)
+            or not getattr(os, "O_DIRECTORY", 0)):
+        raise PipelineError('directory identity checks are unavailable or path is invalid')
+    held = _HELD_SOURCE_READS.get()
+    if type(held) is not _OriginalSourceReads:
+        raise PipelineError('original source scope is unavailable')
+    held.require_live()
+    entry = held.directories.entries.get(path.parent)
+    if entry is None:
+        parent, _verify, _identities = held.directories.chain(path.parent)
+    else:
+        parent = entry[0]
+    record = held.file(path, parent)
+    yield parent, record[0]
+    held.require_live(); held.verify_file(record)
+    # A fresh complete exit, not the previously returned chain callback.
+    held.directories.chain(path.parent)
+    held.require_live()
 
 
 class _OriginalDirectoryReads:
@@ -451,7 +485,7 @@ def _open_real_dir(path: Path) -> int:
     try:
         with _hold_real_dir_chain(path) as (descriptor, verify, _identities):
             duplicate = os.dup(descriptor)
-            verify()
+            # The original context exit verifies the full ancestry after dup.
         return duplicate
     except BaseException:
         if duplicate is not None:

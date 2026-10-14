@@ -7,6 +7,7 @@ projections; it never sends, deletes originals, repairs a partial journal,
 authorizes a source or releases UNKNOWN/FIFO/admission barriers.
 """
 import hashlib
+import fcntl
 import json
 import os
 import stat
@@ -39,6 +40,9 @@ _LIVE_DELIVERY_CREATORS = {}
 _NATIVE_CATALOG_K_CONTEXT = ContextVar('req7_native_catalog_original_k', default=None)
 _LIVE_NATIVE_CATALOG_K_CONTEXTS = {}
 _LIVE_OWNED_PRIOR_SOURCE_READS = {}
+_LIVE_SOURCE_K_SETTINGS = {}
+_LIVE_COUNT_RECEIVED_SOURCES = {}
+_LIVE_RECEIVED_COUNT_K_ORIGINALS = {}
 
 
 class _OwnedPriorSourceRead:
@@ -51,8 +55,26 @@ class _OwnedPriorSourceOriginals:
     def __init__(self,writer,sheet,bound):
         self.writer,self.sheet,self.bound=writer,sheet,bound
         self.raw=_DeliveryCreatorOriginals(writer,sheet,bound)
+        self.completed_barriers=[]
 
     def retain(self,held,ancestors=(),projects=()):self.raw.retain(held,ancestors,projects)
+
+    def retain_completed_leaf(self,held,ancestors,projects,unit,parent,completed,witness):
+        # This fixed cold leaf has proved actual COMPLETE/DELIVERED and still
+        # holds every original. The metadata is FD data, never event admission.
+        matches=[(bridge,packet) for bridge,packet in _LIVE_OWNED_PRIOR_SOURCE_READS.items()
+            if packet['writer'] is self.writer and packet['raw'] is self]
+        if len(matches)!=1:raise SettingsAuditHold()
+        bridge,packet=matches[0]
+        if (_owned_prior_source_packet(bridge,self.sheet,self.bound) is not packet
+                or any(packet[name] is not False for name in ('retired','received','attached'))):
+            raise SettingsAuditHold()
+        groups=_completed_source_leaf_original_barriers(held,parent,
+            completion_folder=completed,match_folders=witness)
+        self.retain(held,ancestors,projects)
+        retained=tuple(tuple(self.raw._dup(fd) for fd in group) for group in groups)
+        self.completed_barriers.append((unit,self.raw._dup(parent),self.raw._dup(completed),witness,retained))
+        held.verify();self.raw.verify()
     def verify(self):self.raw.verify()
     def finish(self,kind,primary,tb):return self.raw.finish(kind,primary,tb)
 
@@ -60,6 +82,550 @@ class _OwnedPriorSourceOriginals:
 class _NativeCatalogKContext:
     """Read-only K identity inside one genuine ACTIVE native preparation."""
     __slots__ = ()
+
+
+class _SourceKSettingsOriginals:
+    """Actual factory refs to still-LIVE settings, never a caller K grant."""
+    def __init__(self,bridge,packet,native,actual,issued,k_packet,images,scope,settings_verify,verify):
+        self.bridge,self.packet=bridge,packet
+        self.native,self.actual,self.issued,self.k_packet=native,actual,issued,k_packet
+        self.images,self.scope,self.settings_verify,self.verify=images,scope,settings_verify,verify
+        self.events=actual['events']
+        self.originals=tuple(packet[name] for name in ('writer','owner','sheet','sheet_owner','bound','raw','pid','thread'))
+        self.image_originals=(images[0],tuple(images[0].items()),images[1],images[2],
+            images[3],tuple(images[3].items()))
+        self.capture_attempted=False;self.capture_failed=False
+        self.count_receiver=None
+
+    def current(self):
+        from monitor import issue_tracker_state_owner as state
+        writer,owner,sheet,sheet_owner,bound,raw,pid,thread=self.originals
+        packet=_owned_prior_source_packet(self.bridge,sheet,bound)
+        if (packet is not self.packet or _LIVE_SOURCE_K_SETTINGS.get(self.bridge) is not self
+                or packet.get('_count_source_settings') is not self
+                or any(packet[name] is not False for name in ('retired','received','attached'))
+                or any(packet[name]!=original if name in ('bound','pid','thread') else packet[name] is not original
+                    for name,original in zip(('writer','owner','sheet','sheet_owner','bound','raw','pid','thread'),self.originals))
+                or packet['settings_scope'] is not self.scope or packet['settings_verify'] is not self.settings_verify
+                or _native_settings_packet(writer,self.native) is not self.actual
+                or self.actual['events'] is not self.events
+                or _NATIVE_CATALOG_K_CONTEXT.get() is not self.issued
+                or _LIVE_NATIVE_CATALOG_K_CONTEXTS.get(self.issued) is not self.k_packet
+                or state._NATIVE_CATALOG_K_READ_CONTEXT.get(writer) is not self.issued
+                or self.k_packet['images'] is not self.images or self.k_packet['verify'] is not self.verify):
+            raise SettingsAuditHold()
+        events,event_rows,current,initialized,outbox,outbox_rows=self.image_originals
+        if (self.images[0] is not events or self.images[1] is not current
+                or self.images[2] is not initialized or self.images[3] is not outbox
+                or set(events)!={key for key,_value in event_rows}
+                or set(outbox)!={key for key,_value in outbox_rows}
+                or any(events[key] is not value for key,value in event_rows)
+                or any(outbox[key] is not value for key,value in outbox_rows)):raise SettingsAuditHold()
+
+
+def _publish_owned_source_k_settings(bridge,packet,native,actual,issued,k_packet,images,settings_scope,settings_verify,verify):
+    if bridge in _LIVE_SOURCE_K_SETTINGS or '_count_source_settings' in packet:raise SettingsAuditHold()
+    original=_SourceKSettingsOriginals(bridge,packet,native,actual,issued,k_packet,images,
+        settings_scope,settings_verify,verify)
+    _LIVE_SOURCE_K_SETTINGS[bridge]=original;packet['_count_source_settings']=original
+    try:original.current()
+    except BaseException:
+        _LIVE_SOURCE_K_SETTINGS.pop(bridge,None);packet.pop('_count_source_settings',None)
+        raise
+
+
+def _owned_source_k_settings_originals(writer,sheet,bound):
+    """Fixed source factory relation only; no supplied images/verifier/mode."""
+    matches=[(bridge,packet) for bridge,packet in _LIVE_OWNED_PRIOR_SOURCE_READS.items()
+        if packet['writer'] is writer and packet['sheet'] is sheet and packet['bound']==bound]
+    if len(matches)!=1:raise SettingsAuditHold()
+    bridge,packet=matches[0];original=_LIVE_SOURCE_K_SETTINGS.get(bridge)
+    if type(original) is not _SourceKSettingsOriginals or original.packet is not packet:raise SettingsAuditHold()
+    original.current();original.verify();original.current()
+    return original
+
+
+def _receive_first_original_count_source(writer,sheet,bound,unit):
+    """Move the same still-LIVE settings scope; no K or sending grant.
+
+    Only the fixed source factory and original Count creator can participate.
+    The original source semantic issuer closes normally, never transfers its
+    allowance. Count already strongly owns the recipient before pop_all.
+    """
+    original=_owned_source_k_settings_originals(writer,sheet,bound)
+    if original.capture_attempted:
+        original.capture_failed=True
+        if original.count_receiver is not None:original.count_receiver.source_failed=True
+        raise SettingsAuditHold()
+    original.capture_attempted=True
+    source=original.originals[5]
+    received=None
+    attached=False
+    try:
+        if type(source) is not _OwnedPriorSourceOriginals:raise SettingsAuditHold()
+        received=_CountSourceRawOriginals(writer,sheet,bound,unit,source.raw)
+        original.count_receiver=received
+        metadata=_ReceivedCountSourceSettings(received,original)
+        original.current();original.verify();received.verify()
+        global_journal._register_count_source_raw_receiver(received);attached=True
+        anchor=received._count_tail_owner
+        if (type(anchor) is not global_journal._CountSourceRawTail
+                or anchor._binding is None or anchor._binding[0] is not received
+                or type(anchor._binding[4]) is not ExitStack):raise SettingsAuditHold()
+        if anchor._received_source is not None or received.key in _LIVE_COUNT_RECEIVED_SOURCES:
+            raise SettingsAuditHold()
+        relation=(anchor,received,metadata)
+        # The exposed relation slot is a checked mirror, never an option to
+        # downgrade this already-received issuer to the legacy raw-only path.
+        anchor._binding=(*anchor._binding,relation)
+        anchor._received_source=relation
+        _LIVE_COUNT_RECEIVED_SOURCES[received.key]=relation
+        original.current();original.settings_verify();received.verify()
+        # No reopening, closure introspection, copied settings or caller
+        # supplied scope. Both stacks have been registered before this move.
+        anchor._binding[4].enter_context(original.scope.pop_all())
+        original.current();original.settings_verify();received.verify()
+        metadata.moved=True;metadata.verify()
+        return received
+    except BaseException as primary:
+        original.capture_failed=True
+        if received is not None:received.source_failed=True
+        if received is not None and not attached:
+            try:received.close()
+            except BaseException as cleanup:
+                if isinstance(primary,Exception) and not isinstance(cleanup,Exception):raise cleanup from primary
+                raise primary from cleanup
+        raise
+
+
+class _ReceivedCountSourceSettings:
+    """Same original source refs, anchored before old semantic revocation.
+
+    Completed entries and recovery FD groups come from actual cold leaves,
+    not filenames/current event IDs as permission. Only the original settings
+    holder is moved; the old native/ALL/K issuer is never called or reissued.
+    """
+    def __init__(self,receiver,original):
+        original.current();receiver.verify()
+        self.receiver,self.original=receiver,original
+        self.images,self.settings_verify=original.images,original.settings_verify
+        self.settings_scope=original.scope
+        self.image_rows=original.image_originals
+        self.source_fields=original.originals
+        self.events,self.entries=original.events,original.actual['entries']
+        self.entry_rows=tuple((unit,events) for unit,events in self.entries)
+        self.source=original.originals[5];self.barrier_list=self.source.completed_barriers
+        self.barrier_rows=tuple(self.barrier_list);self.moved=False
+        c6=global_journal._LIVE_COUNT_PROJECT_C6.get(receiver.key)
+        if c6 is None or c6[0] is not receiver.packet or c6[2] is None:raise SettingsAuditHold()
+        self.c6_record=c6;self.c6_units=c6[1]
+        tail=global_journal._LIVE_COUNT_SOURCE_RAW_TAILS.get(receiver.key)
+        if (type(tail) is not global_journal._CountSourceRawTail
+                or tail.key is not receiver.key or tail.packet is not receiver.packet
+                or tail.record is not receiver.record or tail.closing
+                or tail.verify_raw is not tail._raw_binding[0]
+                or getattr(tail.verify_raw,'__code__',None) is not tail._raw_binding[1]):
+            raise SettingsAuditHold()
+        # Constructor-held original closure, not a later exposed callback.
+        self.count_raw_original=(tail,tail._raw_binding)
+        body=type(self)._verify_original_c6_body
+        self._body_binding=(body,body.__code__)
+        self._short_k_original=None
+        expected={row.project_identity for row in c6[2]}
+        actual={identities[0][:2] for _path,_published,_fds,identities in self.source.raw.projects}
+        if actual!=expected or len(self.barrier_rows)!=len(self.entry_rows):raise SettingsAuditHold()
+        retained=[]
+        for (unit,_parent,_completed,_witness,groups),(entry,_events) in zip(self.barrier_rows,self.entry_rows):
+            if unit is not entry or type(groups) is not tuple or len(groups)!=5:raise SettingsAuditHold()
+            copied=[]
+            for group in groups:
+                members=[]
+                for fd in group:
+                    key=(journal._identity(os.fstat(fd)),fcntl.fcntl(fd,fcntl.F_GETFL))
+                    if key not in receiver.raw.duplicates:raise SettingsAuditHold()
+                    # Validation of a genuine existing duplicate only; never
+                    # add a naked FD not represented by the retained graph.
+                    members.append(receiver.raw._dup(fd))
+                copied.append(tuple(members))
+            retained.append(tuple(copied))
+        self.barriers=tuple(retained)
+        self.original_barriers=self.barriers
+        # The original receiver slot/edge expectations remain unchanged.
+        original.current();original.settings_verify();receiver.verify()
+
+    def _same_source_refs(self):
+        received=self.receiver;original=self.original
+        tail,raw_binding=self.count_raw_original
+        if (not self.moved or received.source_failed or original.capture_failed
+                or type(self)._verify_original_c6_body is not self._body_binding[0]
+                or type(self)._verify_original_c6_body.__code__ is not self._body_binding[1]
+                or tail._raw_binding is not raw_binding or tail.verify_raw is not raw_binding[0]
+                or getattr(tail.verify_raw,'__code__',None) is not raw_binding[1]
+                or original.count_receiver is not received or original.capture_attempted is not True
+                or self.barriers is not self.original_barriers
+                or original.scope is not self.settings_scope
+                or original.packet['settings_scope'] is not self.settings_scope
+                or original.packet['settings_verify'] is not self.settings_verify
+                or original.images is not self.images or original.settings_verify is not self.settings_verify
+                or original.events is not self.events or original.actual['events'] is not self.events
+                or original.actual['entries'] is not self.entries
+                or original.originals is not self.source_fields
+                or self.source.completed_barriers is not self.barrier_list
+                or len(self.barrier_list)!=len(self.barrier_rows)
+                or any(row is not held for row,held in zip(self.barrier_list,self.barrier_rows))):
+            raise SettingsAuditHold()
+        events,event_rows,current,initialized,outbox,outbox_rows=self.image_rows
+        if (self.images[0] is not events or self.images[1] is not current or self.images[2] is not initialized
+                or self.images[3] is not outbox or set(events)!={key for key,_raw in event_rows}
+                or set(outbox)!={key for key,_raw in outbox_rows}
+                or any(events[key] is not value for key,value in event_rows)
+                or any(outbox[key] is not value for key,value in outbox_rows)
+                or len(self.entries)!=len(self.entry_rows)
+                or any(unit is not held_unit or values is not held_values
+                    for (unit,values),(held_unit,held_values) in zip(self.entries,self.entry_rows))):
+            raise SettingsAuditHold()
+        for name,held in zip(('writer','owner','sheet','sheet_owner','bound','raw','pid','thread'),self.source_fields):
+            actual=original.packet[name]
+            if (actual!=held if name in ('bound','pid','thread') else actual is not held):raise SettingsAuditHold()
+
+    def _same_live_originals(self):
+        self._same_source_refs()
+        received=self.receiver;anchor=received._count_tail_owner
+        relation=_LIVE_COUNT_RECEIVED_SOURCES.get(received.key)
+        if (type(anchor) is not global_journal._CountSourceRawTail or anchor.closing
+                or anchor is not self.count_raw_original[0]
+                or global_journal._LIVE_COUNT_SOURCE_RAW_TAILS.get(received.key) is not anchor
+                or relation is None or relation[0] is not anchor or relation[1] is not received
+                or relation[2] is not self or anchor._received_source is not relation
+                or anchor._binding is None or anchor._binding[0] is not received
+                or len(anchor._binding)!=6 or anchor._binding[5] is not relation
+                or global_journal._LIVE_COUNT_PROJECT_C6.get(received.key) is not self.c6_record):
+            raise SettingsAuditHold()
+
+    def verify(self):
+        received=self.receiver
+        try:
+            self._same_live_originals()
+            with global_journal._hold_count_claim_project_c6(received.writer,received.sheet,
+                    received.bound,self.c6_units) as actual:
+                # The original loan checks FULL Count/OTHER at entry and
+                # after the entire body, including every independent APPLIED,
+                # key-watermark and UNSENT original/namespace. These checks
+                # cannot be replaced by our narrower retained source graph.
+                self._verify_original_c6_body(actual)
+            # Final real delegate must not silently replace metadata with an
+            # equal object, including the loan's COMPLETE original finalizer.
+            self._same_live_originals()
+            # Count/OTHER does not own this project's DELIVERED source graph.
+            # Check those SAME originals after the actual last loan delegate,
+            # before a K result can return; final Count tail is not a substitute.
+            received._current();received._verify_records();received._current()
+            self._same_live_originals()
+        except BaseException:
+            received.source_failed=True
+            raise
+
+    def _verify_original_c6_body(self,actual):
+        """Fresh data/C6 checks INSIDE the genuine live loan, not authority.
+
+        Standalone verification owns its original loan. The fixed short K
+        reader instead retains that SAME loan throughout all read-only calls;
+        full Count/OTHER still dominates entry and complete exit. Nothing is
+        cached or promoted to COUNT/CLAIM/write/send permission.
+        """
+        self._same_live_originals()
+        if actual is None or actual[0] is not self.c6_record[2]:raise SettingsAuditHold()
+        self._verify_receiver_raw();self.settings_verify()
+        actual[1]();self._sync_barriers();actual[1]()
+        self.settings_verify();self._verify_receiver_raw()
+        self._same_live_originals()
+
+    def _verify_receiver_raw(self):
+        """Data checks inside the original full-Count loan, never a permit.
+
+        No successful check is cached. Every call rechecks all retained raw
+        originals and the creator's three exact mutable Count graphs; complete
+        C6/OTHER semantics dominate the enclosing loan's two boundaries.
+        """
+        self._same_live_originals()
+        received=self.receiver
+        received._current();received._verify_record_bindings_flags()
+        # Two FRESH complete source sweeps enclose this entire fixed data
+        # delegate. The middle record checks do not yield, authorize or return
+        # a result; nesting their standalone sweeps duplicated the same graph.
+        received.raw.verify();received._verify_mutable_namespace_edges()
+        self.count_raw_original[1][0]()
+        received._current();received._verify_record_bindings_flags()
+        received._verify_mutable_namespace_edges();received.raw.verify()
+        # An original raw delegate cannot silently swap a same-valued record
+        # collection before the caller gets its data result.
+        received._verify_record_bindings_flags();received._current()
+        self._same_live_originals()
+
+    def _sync_barriers(self):
+        # Same exact C19 barriers as the original reader, without recursive
+        # semantic decoding, refreshed namespace images or old issuer calls.
+        for groups in self.barriers:
+            for group in groups:
+                for fd in group:os.fsync(fd)
+
+
+@contextmanager
+def _hold_received_count_source_k(writer,sheet,bound,unit):
+    """Short read-only K under the original Count/source/FD relation."""
+    from monitor import issue_tracker_state_owner as state
+    key=global_journal._HELD_COUNT_CLAIM_ORIGINALS.get()
+    relation=_LIVE_COUNT_RECEIVED_SOURCES.get(key)
+    if relation is None or len(relation)!=3:raise SettingsAuditHold()
+    anchor,received,metadata=relation
+    if (type(metadata) is not _ReceivedCountSourceSettings or metadata.receiver is not received
+            or received.writer is not writer or received.sheet is not sheet or received.bound!=bound
+            or received.unit is not unit or anchor._received_source is not relation
+            or _native_catalog_k_read_active(writer) or _NATIVE_CATALOG_K_CONTEXT.get() is not None
+            or writer in state._COMPLETED_READ_CONTEXT or writer in state._COMPLETED_ORIGINAL_GUARDS
+            or writer in state._LOCAL_C6_READ_CONTEXT):raise SettingsAuditHold()
+    original=metadata.original
+    if (original.bridge in _LIVE_SOURCE_K_SETTINGS or original.bridge in _LIVE_OWNED_PRIOR_SOURCE_READS
+            or original.native in _LIVE_NATIVE_SETTINGS_CONTEXTS
+            or original.issued in _LIVE_NATIVE_CATALOG_K_CONTEXTS):raise SettingsAuditHold()
+    try:
+        metadata._same_live_originals()
+        with global_journal._hold_count_claim_project_c6(writer,sheet,bound,metadata.c6_units) as actual:
+            # Acquire one ORIGINAL C6 loan for this fixed lexical read domain,
+            # not a new full Count loan at every nested native K getter.
+            if actual is None or actual[0] is not metadata.c6_record[2]:raise SettingsAuditHold()
+            body=metadata._verify_original_c6_body
+            body_function=body.__func__;body_code=body_function.__code__
+            c6_verify=actual[1];c6_code=c6_verify.__code__
+            def check_body():
+                current_body=metadata._verify_original_c6_body
+                if (current_body.__self__ is not metadata or current_body.__func__ is not body_function
+                        or body_function.__code__ is not body_code or body.__self__ is not metadata
+                        or actual[1] is not c6_verify or c6_verify.__code__ is not c6_code):
+                    raise SettingsAuditHold()
+                metadata._same_live_originals()
+            check_body();body(actual);check_body()
+            issued=_NativeCatalogKContext()
+            evaluating=False
+            def check_binding():
+                try:
+                    if (packet['verify'] is not verify or verify.__code__ is not verify_code
+                            or packet['images'] is not original_images
+                            or metadata._short_k_original is not short_original):
+                        raise SettingsAuditHold()
+                    metadata._same_live_originals()
+                except BaseException:
+                    received.source_failed=True
+                    raise
+            def check_scope():
+                try:
+                    if (_LIVE_RECEIVED_COUNT_K_ORIGINALS.get(issued) is not k_original
+                            or check_binding.__code__ is not binding_code
+                            or k_original[4] is not evaluate_source
+                            or evaluate_source.__code__ is not k_original[5]
+                            or k_original[6] is not evaluate_receipt
+                            or evaluate_receipt.__code__ is not k_original[7]):raise SettingsAuditHold()
+                    check_binding();check_body()
+                except BaseException:
+                    received.source_failed=True
+                    raise
+            def verify():
+                try:
+                    check_scope()
+                    if evaluating:
+                        # Only the fixed, non-yielding source/receipt evaluators
+                        # can enter this interval. Full retained ALL/Count raw
+                        # checks enclose its entire computation. Every K still
+                        # checks fresh settings, original FD/flags/edges and
+                        # one complete original C6 replay per checkpoint;
+                        # the K getter still owns independent PRE/POST checks.
+                        # No PASS cache. Complete C19
+                        # syncs stay at this non-yielding evaluator's ENTRY
+                        # and EXIT; no result/permission escapes between them.
+                        received._current();received._verify_record_bindings_flags()
+                        received._verify_mutable_namespace_edges();metadata.settings_verify()
+                        c6_verify()
+                        metadata.settings_verify();received._verify_record_bindings_flags()
+                        received._verify_mutable_namespace_edges();received._current()
+                    else:body(actual)
+                    check_scope()
+                except BaseException:
+                    # Catching the public K refusal inside the read body must
+                    # not allow restored/equal metadata to revive this domain.
+                    received.source_failed=True
+                    raise
+            def evaluate_source(store,*,http_root,settings,whitelist_snapshot,whitelist_path,
+                                local_generation_id=None,expected_template_sha256=None):
+                nonlocal evaluating
+                from monitor import issue_tracker_stage_l_consumer as stage_l
+                if evaluating:raise SettingsAuditHold()
+                check_scope();body(actual);check_scope()
+                primary=None
+                try:
+                    evaluating=True
+                    arguments=dict(http_root=http_root,settings=settings,whitelist_snapshot=whitelist_snapshot,
+                        whitelist_path=whitelist_path,writer_token=writer)
+                    if local_generation_id is None:
+                        if expected_template_sha256 is not None:raise SettingsAuditHold()
+                        result=stage_l.qualify_prod_stage_l(store,**arguments)
+                    else:
+                        result=stage_l.replay_original_receipted_prod_source(store,**arguments,
+                            local_generation_id=local_generation_id,expected_template_sha256=expected_template_sha256)
+                except BaseException as error:
+                    primary=error;received.source_failed=True
+                    raise
+                finally:
+                    # No source/qualification result escapes before BOTH
+                    # complete original graph checks and original tail succeed.
+                    evaluating=False
+                    try:check_scope();body(actual);check_scope()
+                    except BaseException as cleanup:
+                        received.source_failed=True
+                        if primary is not None:
+                            if isinstance(primary,Exception) and not isinstance(cleanup,Exception):raise cleanup from primary
+                            raise primary from cleanup
+                        raise
+                return result
+            def evaluate_receipt(store,*,qualified_source,generation_id,settings,
+                                 whitelist_snapshot,expected_template_sha256):
+                # This fixed entire receipt computation has no yield, caller
+                # callback or intermediate permission. Both genuine K reads,
+                # admissions/XLSX recovery and the original generation reader
+                # remain inside the same complete original ENTRY/EXIT checks.
+                nonlocal evaluating
+                from monitor import issue_tracker_send_unit as send_unit
+                if evaluating:raise SettingsAuditHold()
+                if json.loads(unit.action_preimage)['identity']['generation_id']!=generation_id:
+                    raise SettingsAuditHold()
+                check_scope();body(actual);check_scope()
+                primary=None
+                try:
+                    evaluating=True
+                    result=send_unit._original_receipt_identity(qualified_source,store,generation_id,
+                        writer,settings,whitelist_snapshot,expected_template_sha256)
+                except BaseException as error:
+                    primary=error;received.source_failed=True
+                    raise
+                finally:
+                    evaluating=False
+                    try:check_scope();body(actual);check_scope()
+                    except BaseException as cleanup:
+                        received.source_failed=True
+                        if primary is not None:
+                            if isinstance(primary,Exception) and not isinstance(cleanup,Exception):raise cleanup from primary
+                            raise primary from cleanup
+                        raise
+                return result
+            packet={'token':writer,'owner':local._owner(writer),'pid':os.getpid(),
+                'thread':threading.get_ident(),'images':metadata.images,'verify':verify}
+            verify_code=verify.__code__;original_images=metadata.images
+            binding_code=check_binding.__code__
+            k_original=(packet,check_scope,check_scope.__code__,received,evaluate_source,evaluate_source.__code__,
+                        evaluate_receipt,evaluate_receipt.__code__)
+            short_original=(issued,k_original)
+            if metadata._short_k_original is not None:raise SettingsAuditHold()
+            primary=None;reset=None
+            try:
+                # Protect the FIRST publication as well as partial issuance.
+                # No failed setter/registration may leave a short-K identity.
+                metadata._short_k_original=short_original
+                _LIVE_RECEIVED_COUNT_K_ORIGINALS[issued]=k_original
+                reset=_NATIVE_CATALOG_K_CONTEXT.set(issued)
+                _LIVE_NATIVE_CATALOG_K_CONTEXTS[issued]=packet
+                state._NATIVE_CATALOG_K_READ_CONTEXT[writer]=issued
+                check_scope()
+                yield
+                check_scope();_read_native_catalog_k(writer,issued);check_scope()
+            except BaseException as error:
+                primary=error
+                raise
+            finally:
+                # Revoke FIRST, before the loan's original full Count/OTHER
+                # finalizer. Its C6 verifier is never called after that exit.
+                cleanup=None
+                try:check_scope()
+                except BaseException as error:cleanup=error
+                _LIVE_RECEIVED_COUNT_K_ORIGINALS.pop(issued,None)
+                state._NATIVE_CATALOG_K_READ_CONTEXT.pop(writer,None)
+                _LIVE_NATIVE_CATALOG_K_CONTEXTS.pop(issued,None)
+                try:
+                    if reset is not None:_NATIVE_CATALOG_K_CONTEXT.reset(reset)
+                except BaseException as error:
+                    if cleanup is None or (isinstance(cleanup,Exception) and not isinstance(error,Exception)):
+                        cleanup=error
+                if cleanup is not None:
+                    if primary is not None and not (isinstance(primary,Exception) and not isinstance(cleanup,Exception)):
+                        raise primary from cleanup
+                    raise cleanup
+        check_binding();metadata.settings_verify()
+        metadata._verify_receiver_raw();check_binding()
+    except BaseException:
+        received.source_failed=True
+        raise
+    finally:
+        metadata._short_k_original=None
+
+
+def _received_count_k_original(writer,sheet,bound,unit):
+    """Independent original factory admission, never a mutable-registry vote."""
+    from monitor import issue_tracker_state_owner as state
+    relation=_LIVE_COUNT_RECEIVED_SOURCES.get(global_journal._HELD_COUNT_CLAIM_ORIGINALS.get())
+    if type(relation) is not tuple or len(relation)!=3:raise SettingsAuditHold()
+    anchor,received,metadata=relation
+    if type(received) is not _CountSourceRawOriginals:raise SettingsAuditHold()
+    issued=_NATIVE_CATALOG_K_CONTEXT.get()
+    try:
+        # The mutable K registry cannot attest its own callbacks. Select the
+        # independent original tuple from the genuine Count/source relation
+        # FIRST, including the exact opaque short-K identity and native packet.
+        if (type(metadata) is not _ReceivedCountSourceSettings or metadata.receiver is not received
+                or anchor is not received._count_tail_owner):raise SettingsAuditHold()
+        metadata._same_live_originals();received._current()
+        short=metadata._short_k_original
+        if (type(issued) is not _NativeCatalogKContext or type(short) is not tuple or len(short)!=2
+                or short[0] is not issued or state._NATIVE_CATALOG_K_READ_CONTEXT.get(writer) is not issued):
+            raise SettingsAuditHold()
+        original=short[1]
+        if (type(original) is not tuple or len(original)!=8
+                or _LIVE_RECEIVED_COUNT_K_ORIGINALS.get(issued) is not original
+                or _LIVE_NATIVE_CATALOG_K_CONTEXTS.get(issued) is not original[0]
+                or original[3] is not received
+                or received.writer is not writer or received.sheet is not sheet or received.bound!=bound
+                or received.unit is not unit or original[1].__code__ is not original[2]
+                or original[4].__code__ is not original[5]
+                or original[6].__code__ is not original[7]):raise SettingsAuditHold()
+        original[1]()
+        return original
+    except BaseException:
+        received.source_failed=True
+        raise
+
+
+def _evaluate_received_count_source(writer,sheet,bound,unit,store,*,http_root,settings,
+                                    whitelist_snapshot,whitelist_path,local_generation_id=None,
+                                    expected_template_sha256=None):
+    """Fixed entire source evaluation, not a caller-selected scope or verifier."""
+    original=_received_count_k_original(writer,sheet,bound,unit)
+    try:
+        return original[4](store,http_root=http_root,settings=settings,
+            whitelist_snapshot=whitelist_snapshot,whitelist_path=whitelist_path,
+            local_generation_id=local_generation_id,expected_template_sha256=expected_template_sha256)
+    except BaseException:
+        original[3].source_failed=True
+        raise
+
+
+def _evaluate_received_count_receipt(writer,sheet,bound,unit,store,*,qualified_source,generation_id,
+                                     settings,whitelist_snapshot,expected_template_sha256):
+    """Fixed entire current receipt read, not qualification or a send grant."""
+    original=_received_count_k_original(writer,sheet,bound,unit)
+    try:
+        return original[6](store,qualified_source=qualified_source,generation_id=generation_id,
+            settings=settings,whitelist_snapshot=whitelist_snapshot,
+            expected_template_sha256=expected_template_sha256)
+    except BaseException:
+        original[3].source_failed=True
+        raise
 
 
 class _CompletedLocalC6Context:
@@ -74,6 +640,184 @@ class _NativeCompletedSettingsContext:
 
 class SettingsAuditHold(ValueError):
     def __init__(self): super().__init__('req7_settings_audit_unproved')
+
+
+def _sync_completed_source_leaf_originals(held,parent,*,completion_folder=None,match_folders=()):
+    """Original durability barriers only; no completion result or allowance.
+
+    The fixed leaf already retains all C19 proof and GLOBAL/history/enrollment
+    witness files/directories. The selected fixed leaf uses the exact cold
+    recovery barriers from those retained FDs; the unspecialized call retains
+    the full graph sync. Both paths preserve original shared-parent barriers.
+    No pathname reopening or refreshed raw/stat image replaces those originals.
+    """
+    from monitor import issue_tracker_unit_catalog as catalog
+    if (type(held) is not catalog._Originals or type(parent) is not int
+            or held.namespace is None or held.namespace[0]!=parent):
+        raise SettingsAuditHold()
+    if completion_folder is None:
+        if match_folders:raise SettingsAuditHold()
+        held.sync();os.fsync(parent);held.verify()
+        return
+    groups=_completed_source_leaf_original_barriers(held,parent,
+        completion_folder=completion_folder,match_folders=match_folders)
+    held.verify()
+    for group in groups:
+        for fd in group:os.fsync(fd)
+    held.verify()
+
+
+def _completed_source_leaf_original_barriers(held,parent,*,completion_folder,match_folders):
+    """Fixed original C19 recovery groups as data, never a completion grant.
+
+    Capture only while the actual strict graph remains LIVE. A future receiver
+    retains these same FD groups by overlap rather than reconstructing names
+    after the old semantic issuer has closed. Existing sync order is unchanged.
+    """
+    from monitor import issue_tracker_unit_catalog as catalog
+    if (type(held) is not catalog._Originals or type(parent) is not int
+            or held.namespace is None or held.namespace[0]!=parent):raise SettingsAuditHold()
+    # Match the cold C19 reader's recovery barriers, not every unrelated C6/
+    # catalog image also retained by this larger graph. ALL original bytes,
+    # names, flags and full stats still dominate the whole operation.
+    if (type(completion_folder) is not int or type(match_folders) is not tuple
+            or len(match_folders)!=3 or len(set(match_folders))!=3
+            or any(type(name) is not str for name in match_folders)):
+        raise SettingsAuditHold()
+    def folder(name):
+        matches=[row for row in held.directories if row[0]==parent and row[1]==name]
+        if len(matches)!=1:raise SettingsAuditHold()
+        return matches[0]
+    def file_fd(directory,name):
+        matches=[row for row in held.files if row[0]==directory and row[1]==name]
+        if len(matches)!=1:raise SettingsAuditHold()
+        return matches[0][2]
+    journals=[name for name in match_folders if name.endswith('.journal')]
+    histories=[name for name in match_folders if name.endswith('.history')]
+    enrollments=[name for name in match_folders if name.endswith('.enrollment')]
+    if not all(len(names)==1 for names in (journals,histories,enrollments)):
+        raise SettingsAuditHold()
+    prefix=journals[0][:-len('.journal')]
+    if histories[0]!=prefix+'.history':raise SettingsAuditHold()
+    proof=folder(prefix+'.completion')
+    if proof[2]!=completion_folder:raise SettingsAuditHold()
+    proof_names={'HEADER','COMPLETE','IDENTITY-RAW','HEADERS-RAW','METADATA-RAW','HISTORY-RAW'}
+    if set(proof[4])!=proof_names:raise SettingsAuditHold()
+    journal_row=folder(journals[0]);journal_names=set(journal_row[4]);count=len(journal_names)-4
+    if (not 1<=count<=6 or journal_names!={'ACTION-PREIMAGE','WIRE','HEADER','INITIALIZED',
+            *(f'ATTEMPT-{index}' for index in range(1,count+1))}):raise SettingsAuditHold()
+    history_row=folder(histories[0]);enrollment_row=folder(enrollments[0])
+    if (set(history_row[4])!={'HEADER','INITIALIZED','HISTORY-RAW'}
+            or set(enrollment_row[4])!={'HEADER','INITIALIZED','NONCES'}):raise SettingsAuditHold()
+    groups=(
+        (file_fd(parent,prefix+'.completion-started'),parent),
+        (file_fd(parent,prefix+'.journal-started'),
+         *(file_fd(journal_row[2],name) for name in sorted(journal_names)),journal_row[2],parent),
+        (file_fd(history_row[2],'INITIALIZED'),history_row[2],parent),
+        (file_fd(enrollment_row[2],'INITIALIZED'),enrollment_row[2],parent),
+        (*(file_fd(completion_folder,name) for name in sorted(proof_names)),completion_folder,parent),
+    )
+    held.verify()
+    return groups
+
+
+@contextmanager
+def _hold_source_original_verifier(writer,sheet,bound,raw,original):
+    """Same genuine read-only source relation around its actual cold C6.
+
+    This does not register authority or accept a caller provider at an external
+    boundary. The fixed leaf alone delegates its existing cold original check;
+    issuer identity, owners, roles and uniqueness are checked on every call.
+    """
+    def relation():
+        if (type(raw) is not _OwnedPriorSourceOriginals or raw.writer is not writer
+                or raw.sheet is not sheet or raw.bound!=bound):raise SettingsAuditHold()
+        matches=[(bridge,packet) for bridge,packet in _LIVE_OWNED_PRIOR_SOURCE_READS.items()
+            if packet['writer'] is writer and packet['raw'] is raw]
+        if len(matches)!=1:raise SettingsAuditHold()
+        bridge,packet=matches[0]
+        if (_owned_prior_source_packet(bridge,sheet,bound) is not packet
+                or any(packet[name] is not False for name in ('retired','received','attached'))):
+            raise SettingsAuditHold()
+        return bridge,packet
+    bridge,packet=relation();live=True;primary=None
+    def current():
+        if not live:raise SettingsAuditHold()
+        actual_bridge,actual_packet=relation()
+        if actual_bridge is not bridge or actual_packet is not packet:raise SettingsAuditHold()
+    def verify():
+        current();result=original();current();return result
+    try:
+        current();yield verify;current()
+    except BaseException as error:
+        primary=error
+        raise
+    finally:
+        try:current()
+        except BaseException as error:
+            if primary is not None and error is not primary:
+                if isinstance(primary,Exception) and not isinstance(error,Exception):raise error from primary
+                raise primary from error
+            raise
+        finally:live=False
+
+
+@contextmanager
+def _hold_source_count_c6(writer,sheet,bound,units,*,_source_handoff):
+    """Internal loan only inside the actual registered prior-source issuer.
+
+    A typed raw holder, callback or origin tuple alone cannot receive this
+    loan. Ordinary consumers keep their cold C6 constructor. The actual
+    source packet and COUNT-held C6 both dominate the entire lexical loan.
+    """
+    if _source_handoff is None:
+        yield None
+        return
+    if (type(_source_handoff) is not _OwnedPriorSourceOriginals
+            or _source_handoff.writer is not writer
+            or _source_handoff.sheet is not sheet or _source_handoff.bound!=bound):
+        raise SettingsAuditHold()
+    matches=[(bridge,packet) for bridge,packet in _LIVE_OWNED_PRIOR_SOURCE_READS.items()
+        if packet['writer'] is writer and packet['raw'] is _source_handoff]
+    if len(matches)!=1:raise SettingsAuditHold()
+    bridge,packet=matches[0];live=True
+    def current():
+        matches=[(actual,record) for actual,record in _LIVE_OWNED_PRIOR_SOURCE_READS.items()
+            if record['writer'] is writer and record['raw'] is _source_handoff]
+        if (len(matches)!=1 or matches[0][0] is not bridge or matches[0][1] is not packet):
+            raise SettingsAuditHold()
+        if (not live or _LIVE_OWNED_PRIOR_SOURCE_READS.get(bridge) is not packet
+                or _owned_prior_source_packet(bridge,sheet,bound) is not packet
+                or packet['writer'] is not writer or packet['raw'] is not _source_handoff
+                or _source_handoff.writer is not writer
+                or _source_handoff.sheet is not sheet or _source_handoff.bound!=bound
+                or any(packet[name] is not False for name in ('retired','received','attached'))):
+            raise SettingsAuditHold()
+    primary=None
+    try:
+        current()
+        with global_journal._hold_count_claim_project_c6(writer,sheet,bound,units) as original:
+            current()
+            if original is None:
+                yield None
+            else:
+                rows,check=original
+                def verify():
+                    current();check();current()
+                yield rows,verify
+            current()
+    except BaseException as error:
+        primary=error
+        raise
+    finally:
+        try:current()
+        except BaseException as error:
+            if primary is not None and error is not primary:
+                if isinstance(primary,Exception) and not isinstance(error,Exception):
+                    raise error from primary
+                raise primary from error
+            raise
+        finally:live=False
 
 
 @contextmanager
@@ -509,7 +1253,7 @@ def _hold_anchored_native_audit_originals(writer,token,binding,unit,*,delivered_
 
 
 @contextmanager
-def _hold_native_catalog_allocation_images(writer,token,binding,unit):
+def _hold_native_catalog_allocation_images(writer,token,binding,unit,*,_source_handoff=None):
     """Hold immutable native allocation/C6/events, never mutable K or outbox.
 
     Only an actual catalog HEADER selects this branch. An explicit old legacy
@@ -579,7 +1323,15 @@ def _hold_native_catalog_allocation_images(writer,token,binding,unit):
                 if name not in captured:
                     origin=held.directory(parent,name)
                     for entry in ('WITNESS','STARTED','ORIGIN'):held.file(origin,entry,local._MAX_MANIFEST)
-            rows,verify_c6=scope.enter_context(catalog._hold_project_c6_from_origins(token,binding,origins))
+            borrowed=scope.enter_context(_hold_source_count_c6(
+                writer,token,binding,units,_source_handoff=_source_handoff))
+            if borrowed is None:
+                rows,verify_c6=scope.enter_context(catalog._hold_project_c6_from_origins(token,binding,origins))
+            else:rows,verify_c6=borrowed
+            if (len(rows)!=len(origins) or any(
+                    (row.unit,row.project_identity,row.c6_facts)!=
+                    (origin.unit,origin.project_identity,origin.c6_facts)
+                    for row,origin in zip(rows,origins))):raise SettingsAuditHold()
             verify_origins();held.verify();verify_c6()
         selected=origins[units.index(unit)]
         if (selected.project_identity!=journal._identity(os.fstat(project.project_fd))[:2]
@@ -756,10 +1508,15 @@ def _prepare_native_catalog_allocation(prepared,writer,token,binding,unit):
 
 def _inspect_native_catalog_allocation(parent,name,unit,binding,origin,anchor,held):
     """Cold read of the catalog's external original anchor, never repair."""
-    folder=held.directory(parent,name)
+    # Only immutable ALL-delivery discovery requests storage reuse. Ordinary
+    # catalog/NV creators retain their established acquisition/write contract.
+    unique=getattr(held,'_native_delivery_semantic_capture',False) is True
+    folder=(_native_delivery_directory(held,parent,name) if unique else held.directory(parent,name))
     if set(os.listdir(folder))!={'HEADER','ASSIGNMENTS','INITIALIZED'}: raise SettingsAuditHold()
-    images={entry:held.file(folder,entry,_LIMIT) for entry in ('HEADER','ASSIGNMENTS','INITIALIZED')}
-    witness,witness_identity=held.file(parent,name+'-started',_LIMIT)
+    def file(p,n,limit):
+        return _native_delivery_file(held,p,n,limit) if unique else held.file(p,n,limit)
+    images={entry:file(folder,entry,_LIMIT) for entry in ('HEADER','ASSIGNMENTS','INITIALIZED')}
+    witness,witness_identity=file(parent,name+'-started',_LIMIT)
     header=_native_header(unit,binding,origin['project_identity'],origin['tracker_identity'])
     assignments=_native_assignments(unit)
     expected={'directory_identity':list(journal._identity(os.fstat(folder))),
@@ -1247,6 +2004,68 @@ def _native_delivery_locator(raw):
     except (UnicodeError,ValueError,TypeError,KeyError):raise SettingsAuditHold() from None
 
 
+def _native_delivery_original(held,parent,name,limit=None):
+    """Unique immutable capture in one actual LIVE graph, never eligibility.
+
+    Reuse retains the original FD/stat/raw/names/flags and capacity record.
+    Every request performs fresh I/O; missing/rebound records cannot renew an
+    expectation. Never use for catalog append, COUNT or mutable projections.
+    """
+    from monitor import issue_tracker_unit_catalog as catalog
+    if type(held) is not catalog._Originals:raise SettingsAuditHold()
+    directories=limit is None
+    records=held.directories if directories else held.files
+    parent_identity=journal._identity(os.fstat(parent))[:2]
+    matches=[row for row in records if row[1]==name
+        and journal._identity(os.fstat(row[0]))[:2]==parent_identity]
+    if len(matches)>1:raise SettingsAuditHold()
+    flags=getattr(held,'_native_delivery_original_flags',None)
+    if flags is None:
+        flags={};held._native_delivery_original_flags=flags
+    key=(directories,parent_identity,name)
+    if not matches:
+        if key in flags:raise SettingsAuditHold()
+        if directories:held.directory(parent,name)
+        else:held.file(parent,name,limit)
+        record=records[-1]
+        flags[key]=(record[2],record[3],fcntl.fcntl(record[2],fcntl.F_GETFL),
+            fcntl.fcntl(record[2],fcntl.F_GETFD))
+    else:record=matches[0]
+    original_parent,original_name,fd,identity,image=record
+    budget=held._image_budget
+    def original_capacity_and_flags():
+        if (flags.get(key)!=(fd,identity,fcntl.fcntl(fd,fcntl.F_GETFL),fcntl.fcntl(fd,fcntl.F_GETFD))
+                or held._image_budget is not budget or budget is not None and
+                (budget.failed or not directories and budget.images.get(identity[:2])!=(identity,image))):
+            raise SettingsAuditHold()
+    original_capacity_and_flags()
+    journal._named(original_parent,original_name,fd,directory=directories)
+    journal._named(parent,name,fd,directory=directories)
+    if journal._identity(os.fstat(fd))!=identity:raise SettingsAuditHold()
+    if directories:
+        actual=tuple(sorted(os.listdir(fd)))
+        if actual!=image:raise SettingsAuditHold()
+    else:
+        if image is None or not 1<=len(image)<=limit:raise SettingsAuditHold()
+        actual=os.pread(fd,len(image)+1,0)
+        if actual!=image:raise SettingsAuditHold()
+    if journal._identity(os.fstat(fd))!=identity:raise SettingsAuditHold()
+    journal._named(original_parent,original_name,fd,directory=directories)
+    journal._named(parent,name,fd,directory=directories)
+    original_capacity_and_flags()
+    return fd if directories else (actual,identity)
+
+
+def _native_delivery_directory(held,parent,name):
+    try:return _native_delivery_original(held,parent,name)
+    except Exception as refused:raise SettingsAuditHold() from refused
+
+
+def _native_delivery_file(held,parent,name,limit):
+    try:return _native_delivery_original(held,parent,name,limit)
+    except Exception as refused:raise SettingsAuditHold() from refused
+
+
 @contextmanager
 def _hold_native_completed_delivery_originals(writer,sheet,bound,unit,*,_tail_scope=None,
         _c6_handoff=None,_delivery_handoff=None,_allocation_handoff=None,_source_handoff=None):
@@ -1272,6 +2091,7 @@ def _hold_native_completed_delivery_originals(writer,sheet,bound,unit,*,_tail_sc
     if not global_journal._catalog_present(sheet_owner):raise SettingsAuditHold()
     ancestors=[];project_originals=[];held=(catalog._originals(sheet,bound)
         if _allocation_handoff is not None else catalog._Originals());ready=False
+    held._native_delivery_semantic_capture=True
     def verify_raw():
         if local._owner(writer) is not owner or ownership._validated_owner(sheet,bound) is not sheet_owner:
             raise SettingsAuditHold()
@@ -1352,7 +2172,7 @@ def _hold_native_completed_delivery_originals(writer,sheet,bound,unit,*,_tail_sc
         verify_raw()
         return descriptors
     def original_file(parent,name,limit,expected):
-        raw,identity=held.file(parent,name,limit)
+        raw,identity=_native_delivery_file(held,parent,name,limit)
         if (list(identity)!=expected['identity']
                 or hashlib.sha256(raw).hexdigest()!=expected['sha256']):raise SettingsAuditHold()
         return raw
@@ -1369,7 +2189,18 @@ def _hold_native_completed_delivery_originals(writer,sheet,bound,unit,*,_tail_sc
             if unit not in units:raise SettingsAuditHold()
             origins,origins_verify=scope.enter_context(catalog.hold_pending_project_origins(sheet,bound))
             if tuple(row.unit for row in origins)!=units:raise SettingsAuditHold()
-            c6_rows,c6_verify=scope.enter_context(catalog._hold_project_c6_from_origins(sheet,bound,origins))
+            borrowed=scope.enter_context(_hold_source_count_c6(
+                writer,sheet,bound,units,_source_handoff=_source_handoff))
+            if borrowed is None:
+                c6_rows,c6_verify=scope.enter_context(catalog._hold_project_c6_from_origins(sheet,bound,origins))
+                if _source_handoff is not None:
+                    c6_verify=scope.enter_context(_hold_source_original_verifier(
+                        writer,sheet,bound,_source_handoff,c6_verify))
+            else:c6_rows,c6_verify=borrowed
+            if (len(c6_rows)!=len(origins) or any(
+                    (row.unit,row.project_identity,row.c6_facts)!=
+                    (origin.unit,origin.project_identity,origin.c6_facts)
+                    for row,origin in zip(c6_rows,origins))):raise SettingsAuditHold()
             if tuple(row.unit for row in c6_rows)!=units:raise SettingsAuditHold()
             for origin,row in zip(origins,c6_rows):
                 origins_verify();c6_verify()
@@ -1378,8 +2209,8 @@ def _hold_native_completed_delivery_originals(writer,sheet,bound,unit,*,_tail_sc
                 if len(active)!=1 or row.c6_facts!=origin.c6_facts:raise SettingsAuditHold()
                 _project,root,published,_lock=pin_project(active[0])
                 facts=local._json(row.c6_facts)
-                generations=held.directory(root,'generations')
-                generation=held.directory(generations,facts['generation_id'])
+                generations=_native_delivery_directory(held,root,'generations')
+                generation=_native_delivery_directory(held,generations,facts['generation_id'])
                 if list(journal._identity(os.fstat(generation)))!=facts['generation_directory_identity']:
                     raise SettingsAuditHold()
                 files=facts['files'];receipt=None
@@ -1390,7 +2221,8 @@ def _hold_native_completed_delivery_originals(writer,sheet,bound,unit,*,_tail_sc
                 if set(files)!={'STATE','MANIFEST','INTENT','RECEIPT',published_name}:raise SettingsAuditHold()
                 original_file(published,published_name,local._MAX_XLSX,files[published_name])
                 origins_verify();c6_verify();verify_raw()
-            native=scope.enter_context(_hold_native_catalog_allocation_images(writer,sheet,bound,unit))
+            native=scope.enter_context(_hold_native_catalog_allocation_images(
+                writer,sheet,bound,unit,_source_handoff=_source_handoff))
             if native is None:raise SettingsAuditHold()
             actual,header,assignments,allocation_verify=native
             if actual is not owner:raise SettingsAuditHold()
@@ -1400,6 +2232,9 @@ def _hold_native_completed_delivery_originals(writer,sheet,bound,unit,*,_tail_sc
             if seen.state!='COMPLETE-PRESENT-NOT-APPLIED' or seen.unit_id!=unit.unit_id:raise SettingsAuditHold()
             _sheet,parent,name,_binding=global_journal._inputs(sheet,bound,unit)
             prefix=name[:-len('.journal')]
+            # Cold GLOBAL replay synchronizes this independent original too;
+            # completion-started is a different witness, never a substitute.
+            held.file(parent,prefix+'.journal-started',16384)
             match();proof()
             expected_names={prefix+'.journal',prefix+'.history',sheet_owner.lock_name[:-5]+'.enrollment'}
             if set(witness)!=expected_names:raise SettingsAuditHold()
@@ -1431,17 +2266,36 @@ def _hold_native_completed_delivery_originals(writer,sheet,bound,unit,*,_tail_sc
                 event,_identity=held.file(events_fd,str(row['revision'])+'.json',16384)
                 if event!=(row['audit']['details']+'\n').encode('utf-8'):raise SettingsAuditHold()
             events=tuple(row['audit']['event_id'] for row in selected)
-            def verify():
+            completion_loan_ready=False
+            def verify(*,final=False):
                 verify_raw();replay();origins_verify();c6_verify();allocation_verify();match();proof()
                 completion_start();start_verify();delivery_verify()
-                if completion.inspect_completion_evidence(sheet,bound,unit)!=seen:raise SettingsAuditHold()
+                if completion_loan_ready and not final:
+                    # The genuine source/C6 loan is checked above on every
+                    # call. These same complete raw proof/match originals stay
+                    # held and unchanged; do not recursively decode C19 again
+                    # for every independent K read. Retain every real recovery
+                    # barrier and raw check, not just the earlier observation.
+                    _sync_completed_source_leaf_originals(held,parent,
+                        completion_folder=completed,match_folders=tuple(witness))
+                    c6_verify()
+                elif completion.inspect_completion_evidence(sheet,bound,unit)!=seen:
+                    raise SettingsAuditHold()
                 verify_raw()
             ready=True;verify()
             if handoff is not None:
-                handoff.retain(held, ancestors, project_originals)
+                if _source_handoff is not None:
+                    _source_handoff.retain_completed_leaf(held,ancestors,project_originals,
+                        unit,parent,completed,tuple(witness))
+                else:handoff.retain(held, ancestors, project_originals)
                 verify()
+            # Both genuine source domains (FIRST and creator's prior-source
+            # read before retirement) retain their actual strict/COUNT C6.
+            # Every c6_verify checks the same registered source relation. No
+            # caller switch; absent source domains keep the cold inspector.
+            completion_loan_ready=_source_handoff is not None
             yield owner,events,verify
-            verify()
+            verify(final=True)
     except Exception as exc:raise SettingsAuditHold() from exc
 
 
@@ -1520,6 +2374,7 @@ def _hold_discovered_native_completed_settings(writer,*,_c6_handoff=None,_delive
         if type(_source_handoff) is not _OwnedPriorSourceOriginals or _source_handoff.writer is not writer:
             raise SettingsAuditHold()
         handoff=_source_handoff
+    held._native_delivery_semantic_capture=True
     markers={_DELIVERY_FOLDER,_DELIVERY_STARTED}
     def claimed_names():
         return {name for name in os.listdir(owner.root_fd) if name in markers
@@ -1533,8 +2388,8 @@ def _hold_discovered_native_completed_settings(writer,*,_c6_handoff=None,_delive
         locators=[]
         for name in sorted(claimed):
             if name==_DELIVERY_FOLDER or name.startswith(_DELIVERY_FOLDER+'-'):
-                folder=held.directory(owner.root_fd,name)
-                header=_native_delivery_locator(held.file(folder,'HEADER',16384)[0])
+                folder=_native_delivery_directory(held,owner.root_fd,name)
+                header=_native_delivery_locator(_native_delivery_file(held,folder,'HEADER',16384)[0])
                 if header is None:raise SettingsAuditHold()
                 locators.append(header)
         if not locators:raise SettingsAuditHold()
@@ -1571,7 +2426,14 @@ def _hold_discovered_native_completed_settings(writer,*,_c6_handoff=None,_delive
         if len(selected)!=1:raise SettingsAuditHold()
         replay=scope.enter_context(_hold_delivery_catalog_replay(sheet,bound,selected[0]))
         states,counts_verify=scope.enter_context(global_journal._hold_catalog_attempts(sheet,bound))
-        rows,c6_verify=scope.enter_context(catalog.hold_pending_project_c6_units(sheet,bound))
+        borrowed_c6 = None
+        if _source_handoff is not None:
+            borrowed_c6 = scope.enter_context(
+                _hold_source_count_c6(writer,sheet,bound,units,_source_handoff=_source_handoff))
+        if borrowed_c6 is None:
+            rows,c6_verify=scope.enter_context(catalog.hold_pending_project_c6_units(sheet,bound))
+        else:
+            rows,c6_verify=borrowed_c6
         if tuple(unit for unit,_state in states)!=units or tuple(row.unit for row in rows)!=units:
             raise SettingsAuditHold()
         # Retain raw count images past their semantic scope's last finalizer.
@@ -1590,9 +2452,9 @@ def _hold_discovered_native_completed_settings(writer,*,_c6_handoff=None,_delive
             if row.project_identity!=project:continue
             unit=row.unit;name=stem+'.unit-'+unit.unit_id+'.settings-audit'
             if name not in os.listdir(parent):continue
-            allocation=held.directory(parent,name)
-            native_header=held.file(allocation,'HEADER',16384)[0]
-            assignments=held.file(allocation,'ASSIGNMENTS',_LIMIT)[0]
+            allocation=_native_delivery_directory(held,parent,name)
+            native_header=_native_delivery_file(held,allocation,'HEADER',16384)[0]
+            assignments=_native_delivery_file(held,allocation,'ASSIGNMENTS',_LIMIT)[0]
             audits=json.loads(assignments.decode('utf-8'))
             if not audits:raise SettingsAuditHold()
             folder_name,started_name=(_DELIVERY_FOLDER,_DELIVERY_STARTED)
@@ -1601,7 +2463,8 @@ def _hold_discovered_native_completed_settings(writer,*,_c6_handoff=None,_delive
             pair_names={folder_name,started_name}
             if not claimed & pair_names:continue
             if not pair_names<=claimed:raise SettingsAuditHold()
-            if _native_delivery_locator(held.file(held.directory(owner.root_fd,folder_name),'HEADER',16384)[0])!=json.loads(native_header):
+            delivery=_native_delivery_directory(held,owner.root_fd,folder_name)
+            if _native_delivery_locator(_native_delivery_file(held,delivery,'HEADER',16384)[0])!=json.loads(native_header):
                 raise SettingsAuditHold()
             actual,events,check=scope.enter_context(
                 _hold_native_completed_delivery_originals(writer,sheet,bound,unit,_tail_scope=tail,
@@ -1676,6 +2539,39 @@ def _hold_owned_native_prior_source_read(writer,sheet,bound):
     Settings originals and the received actual preparation delivery raw tail
     remain live through the outer source holders' last finalizers.
     """
+    with _hold_owned_completed_source_read_originals(writer,sheet,bound) as bridge:
+        yield bridge
+        packet=_owned_prior_source_packet(bridge,sheet,bound)
+        if packet['received'] is not True or packet['attached'] is not True:
+            raise SettingsAuditHold()
+
+
+@contextmanager
+def _hold_owned_native_completed_source_k(writer,sheet,bound):
+    """Fixed FIRST source read only; no preparation handoff or write grant.
+
+    Prove actual ALL completed deliveries under the already-held exact owners.
+    Keep their original semantic/settings/raw scopes through source cleanup;
+    the ordinary K reader outside this scope remains strict. No selected unit,
+    event list, caller verifier or late receipt can provide this allowance.
+    """
+    from monitor import issue_tracker_state_owner as state
+    with _hold_owned_completed_source_read_originals(writer,sheet,bound) as bridge:
+        yield
+        packet=_owned_prior_source_packet(bridge,sheet,bound)
+        if any(packet[name] is not False for name in ('retired','received','attached')):
+            raise SettingsAuditHold()
+        state.current_k(writer)
+
+
+@contextmanager
+def _hold_owned_completed_source_read_originals(writer,sheet,bound):
+    """Internal original ALL/settings/K acquisition shared by two fixed readers.
+
+    This is the original acquisition/cleanup body, not a caller-selectable
+    mode or new permission type. The creator must still receive its actual
+    preparation tail; the FIRST reader cannot retire or transfer this scope.
+    """
     from monitor import issue_tracker_state_owner as state
     try:
         owner=local._owner(writer);sheet_owner=ownership._validated_owner(sheet,bound)
@@ -1727,15 +2623,17 @@ def _hold_owned_native_prior_source_read(writer,sheet,bound):
                 state._NATIVE_CATALOG_K_READ_CONTEXT.pop(writer,None)
                 _LIVE_NATIVE_CATALOG_K_CONTEXTS.pop(issued,None);_NATIVE_CATALOG_K_CONTEXT.reset(reset)
             semantic.callback(revoke)
-            _LIVE_NATIVE_CATALOG_K_CONTEXTS[issued]={'token':writer,'owner':owner,'pid':os.getpid(),
+            k_packet={'token':writer,'owner':owner,'pid':os.getpid(),
                 'thread':threading.get_ident(),'images':images,'verify':verify}
+            _LIVE_NATIVE_CATALOG_K_CONTEXTS[issued]=k_packet
             state._NATIVE_CATALOG_K_READ_CONTEXT[writer]=issued
+            _publish_owned_source_k_settings(bridge,packet,native,actual,issued,k_packet,images,settings_scope,settings_verify,verify)
             yield bridge
             # This is raw/settings closure only. No closed K/ALL verifier is
             # called or revived after retirement or preparation revocation.
             _owned_prior_source_packet(bridge,sheet,bound)
-            if not packet['received'] or not packet['attached']:raise SettingsAuditHold()
     finally:
+        _LIVE_SOURCE_K_SETTINGS.pop(bridge,None)
         _LIVE_OWNED_PRIOR_SOURCE_READS.pop(bridge,None)
 
 
@@ -1767,6 +2665,44 @@ def _receive_owned_native_prior_source_graph(bridge,sheet,bound,old):
     if not matches:raise SettingsAuditHold()
     raw.verify();old.verify();packet['raw_scope'].close();old.verify();packet['settings_verify']()
     packet['received']=True;packet['receiving_old']=old
+    if ('native_pre_read_manifest' in packet or 'native_pre_read_manifest_issued' in packet):
+        intent=packet['native_pre_read_manifest']
+        if (intent is not packet['native_pre_read_manifest_issued'] or type(intent) is not tuple
+                or len(intent)!=3 or type(intent[0]) is not bytes or not intent[0]
+                or type(intent[1]) is not str or hashlib.sha256(intent[0]).hexdigest()!=intent[1]
+                or type(intent[2]) is not tuple or not intent[2]):raise SettingsAuditHold()
+        # Plain intent only: this existing raw overlap does not transfer K,
+        # qualification, nonce or network/mutation permission.
+        return intent
+
+
+def _native_received_prior_source_manifest(prepared,writer,sheet,bound):
+    """Plain intent from this preparation's actual live graph reception.
+
+    Missing both record slots cannot convert a received graph into standalone.
+    No caller migration flag, event list, source qualification or new issuer.
+    """
+    from monitor import issue_tracker_nv_reservation as nv
+    try:
+        record=nv._verify_catalog_preparation(prepared)
+        if record['token'] is not sheet or record['binding']!=bound:raise SettingsAuditHold()
+        matches=[(bridge,packet) for bridge,packet in _LIVE_OWNED_PRIOR_SOURCE_READS.items()
+            if packet.get('receiving_old') is record['old']]
+        if not matches:
+            if 'native_pre_read_manifest' in record or 'native_pre_read_manifest_issued' in record:
+                raise SettingsAuditHold()
+            return None
+        if len(matches)!=1:raise SettingsAuditHold()
+        bridge,original=matches[0];packet=_owned_prior_source_packet(bridge,sheet,bound)
+        if (packet is not original or packet['writer'] is not writer or packet['sheet'] is not sheet
+                or packet['bound']!=bound or packet['retired'] is not True
+                or packet['received'] is not True or packet['attached'] is not False):raise SettingsAuditHold()
+        intent=packet['native_pre_read_manifest']
+        if (intent is None or intent is not packet['native_pre_read_manifest_issued']
+                or intent is not record['native_pre_read_manifest']
+                or intent is not record['native_pre_read_manifest_issued']):raise SettingsAuditHold()
+        return intent
+    except Exception:raise SettingsAuditHold() from None
 
 
 def _retain_owned_native_prior_source_tail(bridge,sheet,bound,prepared,record,delivery_scope,*,owner_tail):
@@ -1798,21 +2734,31 @@ class _DeliveryCreatorOriginals:
         self.sheet=sheet;self.bound=bound;self.sheet_owner=ownership._validated_owner(sheet,bound)
         self.slots=[];self.duplicates={};self.files=[];self.directories=[]
         self.anchors=[];self.projects=[];self.namespaces=[]
+        self._retained_edges={}
         self.original_claims=self.claims();self.created_claims=set();self.created_files=[]
         self.created_folder=None;self.creation=None;self.tail_scope=None
 
     def claims(self):
-        return {name for name in os.listdir(self.owner.root_fd)
+        return self._claim_names(os.listdir(self.owner.root_fd))
+
+    @staticmethod
+    def _claim_names(names):
+        return {name for name in names
             if name in (_DELIVERY_FOLDER,_DELIVERY_STARTED)
             or name.startswith(_DELIVERY_FOLDER+'-') or name.startswith(_DELIVERY_STARTED+'-')}
 
     def _dup(self,source,expected=None):
         before=journal._identity(os.fstat(source))
         if expected is not None and before!=expected:raise SettingsAuditHold()
-        key=(source,before)
+        # Different LIVE readers may own separate FDs of this exact original.
+        # Reuse only the still-held duplicate with the same FULL inode image;
+        # both incoming and retained FD stats are checked, never a path/digest
+        # lookup or reacquisition after the original holder has closed.
+        key=(before,fcntl.fcntl(source,fcntl.F_GETFL))
         if key in self.duplicates:
             result=self.duplicates[key]
-            if journal._identity(os.fstat(result))!=before:raise SettingsAuditHold()
+            if (journal._identity(os.fstat(result))!=before
+                    or fcntl.fcntl(result,fcntl.F_GETFL)!=key[1]):raise SettingsAuditHold()
             return result
         result=os.dup(source);self.slots.append((result,before))
         if journal._identity(os.fstat(result))!=before:raise SettingsAuditHold()
@@ -1821,19 +2767,48 @@ class _DeliveryCreatorOriginals:
 
     def retain(self,held,ancestors=(),projects=()):
         held.verify()
+        def named(kind,parent,name,fd,identity,image,destination):
+            key=(kind,journal._identity(os.fstat(parent))[:2],name)
+            expected=(identity,image)
+            old=self._retained_edges.get(key)
+            if old is not None and old!=expected:raise SettingsAuditHold()
+            # Incoming FDs are checked by _dup; coherent original images share
+            # one continuously held duplicate. Source readers still own their
+            # conditional cleanup. No expected stat/bytes/names is refreshed.
+            actual_parent=self._dup(parent);actual=self._dup(fd,identity)
+            if old is None:
+                self._retained_edges[key]=expected
+                destination.append((actual_parent,name,actual,identity,image))
         for parent,name,fd,identity,names in held.directories:
-            self.directories.append((self._dup(parent),name,self._dup(fd,identity),identity,names))
+            named('directory',parent,name,fd,identity,names,self.directories)
         for parent,name,fd,identity,raw in held.files:
-            self.files.append((self._dup(parent),name,self._dup(fd,identity),identity,raw))
+            named('file',parent,name,fd,identity,raw,self.files)
         if held.namespace is not None:
             parent,prefix,names=held.namespace
-            self.namespaces.append((self._dup(parent),prefix,frozenset(names)))
+            key=('namespace',journal._identity(os.fstat(parent))[:2],prefix)
+            expected=frozenset(names);old=self._retained_edges.get(key)
+            if old is not None and old!=expected:raise SettingsAuditHold()
+            actual=self._dup(parent)
+            if old is None:
+                self._retained_edges[key]=expected
+                self.namespaces.append((actual,prefix,expected))
         for parent,name,fd,identity in ancestors:
             if journal._identity(os.fstat(fd))[:5]!=identity:raise SettingsAuditHold()
-            self.anchors.append((self._dup(parent),name,self._dup(fd),identity))
+            key=('anchor',journal._identity(os.fstat(parent))[:2],name)
+            old=self._retained_edges.get(key)
+            if old is not None and old!=identity:raise SettingsAuditHold()
+            actual_parent=self._dup(parent);actual=self._dup(fd)
+            if old is None:
+                self._retained_edges[key]=identity
+                self.anchors.append((actual_parent,name,actual,identity))
         for path,published,descriptors,identities in projects:
-            self.projects.append((path,published,
-                tuple(self._dup(fd,identity) for fd,identity in zip(descriptors,identities)),identities))
+            key=('project',path,published);expected=tuple(identity[:5] for identity in identities)
+            old=self._retained_edges.get(key)
+            if old is not None and old!=expected:raise SettingsAuditHold()
+            actual=tuple(self._dup(fd,identity) for fd,identity in zip(descriptors,identities))
+            if old is None:
+                self._retained_edges[key]=expected
+                self.projects.append((path,published,actual,identities))
         held.verify();self.verify()
 
     def _issued(self):
@@ -1893,9 +2868,32 @@ class _DeliveryCreatorOriginals:
     def _verify_raw_graph(self):
         if (local._owner(self.writer) is not self.owner
                 or ownership._validated_owner(self.sheet,self.bound) is not self.sheet_owner):raise SettingsAuditHold()
-        if self.claims()!=self.original_claims|self.created_claims:raise SettingsAuditHold()
-        for parent,prefix,names in self.namespaces:
-            if {name for name in os.listdir(parent) if name.startswith(prefix)}!=names:raise SettingsAuditHold()
+        for fd,identity in self.slots:
+            # Duplicate slots cannot hide a reused/closed FD merely because
+            # one other reader of the same inode remains valid. Mutable parent
+            # timestamps retain their existing contract; named edges below
+            # still check each exact full immutable identity/raw image.
+            if journal._identity(os.fstat(fd))[:5]!=identity[:5]:raise SettingsAuditHold()
+        # One coherent names observation per exact original parent/image in
+        # THIS verification phase. Every use still checks its actual FD and
+        # flags; a changed full image gets a fresh enumeration. Never retain
+        # a successful view across calls, or refresh an expected namespace.
+        views={}
+        def name_view(fd):
+            before=journal._identity(os.fstat(fd));flags=fcntl.fcntl(fd,fcntl.F_GETFL)
+            key=(before,flags)
+            if key not in views:
+                names=frozenset(os.listdir(fd))
+                if (journal._identity(os.fstat(fd))!=before
+                        or fcntl.fcntl(fd,fcntl.F_GETFL)!=flags):raise SettingsAuditHold()
+                views[key]=names
+            return views[key]
+        def verify_names():
+            if self._claim_names(name_view(self.owner.root_fd))!=self.original_claims|self.created_claims:
+                raise SettingsAuditHold()
+            for parent,prefix,names in self.namespaces:
+                if {name for name in name_view(parent) if name.startswith(prefix)}!=names:raise SettingsAuditHold()
+        verify_names()
         for parent,name,fd,identity in self.anchors:
             journal._named(parent,name,fd,directory=True)
             if journal._identity(os.fstat(fd))[:5]!=identity:raise SettingsAuditHold()
@@ -1915,7 +2913,7 @@ class _DeliveryCreatorOriginals:
             journal._named(root,'LOCK',lock,directory=False)
         for parent,name,fd,identity,names in self.directories:
             journal._named(parent,name,fd,directory=True)
-            if journal._identity(os.fstat(fd))!=identity or tuple(sorted(os.listdir(fd)))!=names:raise SettingsAuditHold()
+            if journal._identity(os.fstat(fd))!=identity or tuple(sorted(name_view(fd)))!=names:raise SettingsAuditHold()
         for parent,name,fd,identity,raw in self.files+self.created_files:
             journal._named(parent,name,fd,directory=False)
             if raw is None or journal._identity(os.fstat(fd))!=identity or os.pread(fd,len(raw)+1,0)!=raw:raise SettingsAuditHold()
@@ -1923,7 +2921,11 @@ class _DeliveryCreatorOriginals:
             fd,identity=self.created_folder
             journal._named(self.owner.root_fd,self.creation['names'][0],fd,directory=True)
             if (journal._identity(os.fstat(fd))[:5]!=identity[:5]
-                    or set(os.listdir(fd))!={name for _p,name,*_rest in self.created_files[1:]}):raise SettingsAuditHold()
+                    or name_view(fd)!={name for _p,name,*_rest in self.created_files[1:]}):raise SettingsAuditHold()
+        # The second phase is genuinely fresh AFTER every real file/project
+        # delegate. A mid-read inserted claim/prefix must refuse before return;
+        # unrelated names remain outside their existing filtered contracts.
+        views.clear();verify_names()
 
     def close(self):
         problem=None
@@ -1946,6 +2948,244 @@ class _DeliveryCreatorOriginals:
         return False
 
 
+class _CountSourceRawOriginals:
+    """Independently retained raw data under one actual Count creator.
+
+    This is NOT a native K issuer, source qualification or permission to write.
+    Capture must precede Count while the strict source and all three receiving
+    graphs overlap. Every old file, project/ancestor and unshared namespace
+    remains strict. Only the receiving creator's exact mutable directory and
+    shared namespace checks are delegated to its still-live original closure.
+    No current names, copied record or closed verifier can supply that join.
+    """
+    def __init__(self,writer,sheet,bound,unit,source):
+        self.writer,self.sheet,self.bound,self.unit=writer,sheet,bound,unit
+        self.closed=False;self.raw=None;self.mutable=[];self.namespaces=[];self._count_tail_owner=None
+        self.source_failed=False
+        self.key=global_journal._HELD_COUNT_CLAIM_ORIGINALS.get()
+        self.packet=global_journal._count_claim_original_packet()
+        self.record=global_journal._LIVE_COUNT_SOURCE_GRAPHS.get(self.key)
+        try:
+            if (type(source) is not _DeliveryCreatorOriginals or source.writer is not writer
+                    or source.sheet is not sheet or source.bound!=bound
+                    or self.packet is None or type(self.record) is not tuple or len(self.record)!=2
+                    or self.record[0] is not self.packet):raise SettingsAuditHold()
+            self.graphs=self.record[1];self.verify_count=self.packet['verify']
+            self.originals=tuple(self.packet[name] for name in
+                ('writer','token','binding','unit','project','owner','context','verify'))
+            self._current();self.verify_count();source.verify()
+            from monitor import issue_tracker_unit_catalog as catalog
+            if (type(self.graphs) is not tuple or len(self.graphs)!=3
+                    or any(type(graph) is not catalog._Originals for graph in self.graphs)
+                    or len({id(graph) for graph in self.graphs})!=3):raise SettingsAuditHold()
+            namespace=self.graphs[0].namespace
+            if namespace is None:raise SettingsAuditHold()
+            self.namespace_original=namespace
+            root,prefix,names=namespace;root_identity=journal._identity(os.fstat(root))[:2]
+            self.namespace_names=frozenset(names)
+            shared=[row for row in source.namespaces
+                if journal._identity(os.fstat(row[0]))[:2]==root_identity and row[1]==prefix]
+            if len(shared)!=1 or frozenset(shared[0][2])!=self.namespace_names:raise SettingsAuditHold()
+            # Complete original root coverage; a removed parent record cannot
+            # relabel open children as unrelated project originals.
+            def root_names(graphs):
+                return {row[1] for graph in graphs for row in (*graph.directories,*graph.files)
+                    if journal._identity(os.fstat(row[0]))[:2]==root_identity}
+            owner=self.packet['owner'];journal._named(root,owner.lock_name,owner.lock_fd,directory=False)
+            if (root_names((source,))|{owner.lock_name}!=self.namespace_names
+                    or root_names(self.graphs)|{owner.lock_name}!=self.namespace_names):raise SettingsAuditHold()
+            # Actual project roots/ancestor edges, not "anything unshared".
+            # This necessary raw condition is not ALL semantic admission: the
+            # fixed source receiver must still match its genuine ALL/C6 set.
+            project=self.packet['project']
+            known={root_identity,*(journal._identity(os.fstat(fd))[:2] for fd in
+                (project.project_fd,project.root_fd,project.publication_fd))}
+            c6=global_journal._LIVE_COUNT_PROJECT_C6.get(self.key)
+            if c6 is None or c6[0] is not self.packet:raise SettingsAuditHold()
+            approved_projects={journal._identity(os.fstat(project.project_fd))[:2]}
+            if c6[2] is not None:approved_projects.update(row.project_identity for row in c6[2])
+            for _path,_published,descriptors,identities in source.projects:
+                if identities[0][:2] not in approved_projects:raise SettingsAuditHold()
+                known.update(journal._identity(os.fstat(fd))[:2] for fd in descriptors[:3])
+            pending=list(source.anchors)
+            while pending:
+                progressed=[]
+                for edge in pending:
+                    parent,_name,fd,_identity=edge
+                    a=journal._identity(os.fstat(parent))[:2];b=journal._identity(os.fstat(fd))[:2]
+                    if a in known or b in known:known.update((a,b));progressed.append(edge)
+                if not progressed:raise SettingsAuditHold()
+                pending=[edge for edge in pending if edge not in progressed]
+            pending=list(source.directories)
+            while pending:
+                progressed=[]
+                for edge in pending:
+                    if journal._identity(os.fstat(edge[0]))[:2] in known:
+                        known.add(journal._identity(os.fstat(edge[2]))[:2]);progressed.append(edge)
+                if not progressed:raise SettingsAuditHold()
+                pending=[edge for edge in pending if edge not in progressed]
+            if (any(journal._identity(os.fstat(edge[0]))[:2] not in known for edge in source.files)
+                    or any(journal._identity(os.fstat(row[0]))[:2] not in known for row in source.namespaces)):
+                raise SettingsAuditHold()
+            raw=self.raw=_DeliveryCreatorOriginals(writer,sheet,bound)
+            raw.original_claims=frozenset(source.original_claims)
+            view=SimpleNamespace(directories=source.directories,files=source.files,
+                namespace=None,verify=source.verify)
+            raw.retain(view,tuple(source.anchors),tuple(source.projects))
+            for parent,name_prefix,entries in source.namespaces:
+                raw.namespaces.append((raw._dup(parent),name_prefix,frozenset(entries)))
+            # Match original FD lineage/full images, never a filename family.
+            for row in tuple(raw.directories):
+                parent,name,fd,identity,entries=row
+                matches=[(graph,edge) for graph in self.graphs[1:] for edge in graph.directories
+                    if journal._identity(os.fstat(edge[0]))[:2]==journal._identity(os.fstat(parent))[:2]
+                    and edge[1]==name]
+                if not matches:continue
+                if (len(matches)!=1 or matches[0][1][3]!=identity or matches[0][1][4]!=entries
+                        or journal._identity(os.fstat(matches[0][1][2]))!=journal._identity(os.fstat(fd))):
+                    raise SettingsAuditHold()
+                self.mutable.append((row,*matches[0]));raw.directories.remove(row)
+            for row in tuple(raw.namespaces):
+                parent,name_prefix,entries=row
+                if journal._identity(os.fstat(parent))[:2]==root_identity and name_prefix==prefix:
+                    self.namespaces.append(row);raw.namespaces.remove(row)
+            if len(self.namespaces)!=1:raise SettingsAuditHold()
+            self.raw_fields=tuple((name,getattr(raw,name),tuple(getattr(raw,name))) for name in
+                ('slots','files','directories','anchors','projects','namespaces'))
+            self.owned_slots=tuple(raw.slots)
+            self.original_flags=tuple((fd,fcntl.fcntl(fd,fcntl.F_GETFL)) for fd,_identity in self.owned_slots)
+            self.mutable=tuple(self.mutable);self.namespaces=tuple(self.namespaces)
+            source.verify();self.verify()
+        except BaseException as primary:
+            self.closed=True
+            cleanup_problem=None
+            if self.raw is not None:
+                for fd,identity in reversed(self.raw.slots):
+                    try:local._close_written_original(fd,identity)
+                    except BaseException as cleanup:
+                        if (cleanup_problem is None or (isinstance(cleanup_problem,Exception)
+                                and not isinstance(cleanup,Exception))):cleanup_problem=cleanup
+                self.raw.slots.clear()
+            # An interrupt must not bypass the other already acquired slots.
+            # Preserve the incoming interrupt over ordinary secondary refusal;
+            # a new cleanup interrupt takes priority over an ordinary failure.
+            if cleanup_problem is not None:
+                if isinstance(primary,Exception) and not isinstance(cleanup_problem,Exception):
+                    raise cleanup_problem from primary
+                raise primary from cleanup_problem
+            raise
+
+    def _current(self):
+        try:
+            if (self.closed or self.source_failed or global_journal._HELD_COUNT_CLAIM_ORIGINALS.get() is not self.key
+                    or global_journal._count_claim_original_packet() is not self.packet
+                    or global_journal._LIVE_COUNT_SOURCE_GRAPHS.get(self.key) is not self.record
+                    or self.packet.get('_source_graphs') is not self.record
+                    or self.record[1] is not self.graphs or self.packet['verify'] is not self.verify_count
+                    or self.packet['writer'] is not self.writer or self.packet['token'] is not self.sheet
+                    or self.packet['binding']!=self.bound or self.packet['unit'] is not self.unit):
+                raise SettingsAuditHold()
+            global_journal._same_first_count_original_fields(self.packet,self.originals)
+        except Exception as error:raise SettingsAuditHold() from error
+
+    def _verify_records(self):
+        # Standalone contract is unchanged: full raw originals on BOTH sides
+        # of the exact mutable/named/namespace edges, not a cached PASS.
+        self._verify_record_bindings_flags()
+        self.raw.verify()
+        self._verify_mutable_namespace_edges()
+        self.raw.verify()
+
+    def _verify_record_bindings_flags(self):
+        if self.closed:raise SettingsAuditHold()
+        for name,original,rows in self.raw_fields:
+            current=getattr(self.raw,name)
+            if (current is not original or len(current)!=len(rows)
+                    or any(actual is not held for actual,held in zip(current,rows))):raise SettingsAuditHold()
+        for fd,flags in self.original_flags:
+            if fcntl.fcntl(fd,fcntl.F_GETFL)!=flags:raise SettingsAuditHold()
+
+    def _verify_mutable_namespace_edges(self):
+        if (self.graphs[0].namespace is not self.namespace_original
+                or frozenset(self.namespace_original[2])!=self.namespace_names):raise SettingsAuditHold()
+        for row,graph,original in self.mutable:
+            parent,name,fd,identity,_entries=row
+            if sum(edge is original for edge in graph.directories)!=1:raise SettingsAuditHold()
+            journal._named(parent,name,fd,directory=True)
+            if (journal._identity(os.fstat(fd))[:5]!=identity[:5]
+                    or journal._identity(os.fstat(original[2]))[:5]!=identity[:5]):raise SettingsAuditHold()
+        for parent,prefix,names in self.namespaces:
+            if (prefix!=self.namespace_original[1] or names!=self.namespace_names
+                    or journal._identity(os.fstat(parent))[:2]
+                    !=journal._identity(os.fstat(self.namespace_original[0]))[:2]):raise SettingsAuditHold()
+
+    def verify(self):
+        try:
+            self._current();self.verify_count();self._current()
+            self._verify_records()
+            self._current();self.verify_count();self._current()
+        except Exception as error:raise SettingsAuditHold() from error
+
+    def _close_owned(self,primary,*,originals=None):
+        raw,slots=(self.raw,self.owned_slots) if originals is None else originals
+        self.closed=True
+        # Cleanup is bound to our acquired slots, not an exposed/mutated list.
+        # A refused foreign substitution neither leaks the original nor gives
+        # permission to close the substituted descriptor.
+        for fd,identity in reversed(slots):
+            try:local._close_written_original(fd,identity)
+            except BaseException as error:
+                if primary is None or (isinstance(primary,Exception) and not isinstance(error,Exception)):primary=error
+        raw.slots.clear()
+        if primary is not None:raise primary
+
+    def close(self):
+        if self.closed or self._count_tail_owner is not None:raise SettingsAuditHold()
+        primary=None
+        try:self.verify()
+        except BaseException as error:primary=error
+        self._close_owned(primary)
+
+    def _finish_from_count_tail(self,anchor):
+        # A supplied verifier/callback cannot authorize cleanup or revive K.
+        # Only the original issuer's live tail phase calls its captured method.
+        if (type(anchor) is not global_journal._CountSourceRawTail
+                or global_journal._COUNT_SOURCE_RAW_TAIL_CONTEXT.get() is not anchor
+                or anchor._binding is None or anchor._binding[0] is not self or not anchor.closing):
+            raise SettingsAuditHold()
+        primary=None
+        original_relation=anchor._binding[5] if len(anchor._binding)==6 else None
+        metadata=None
+        if original_relation is not None:
+            relation=_LIVE_COUNT_RECEIVED_SOURCES.pop(self.key,None)
+            if relation is not original_relation or anchor._received_source is not original_relation or self.source_failed:
+                primary=SettingsAuditHold()
+            try:
+                metadata=original_relation[2]
+                if type(metadata) is not _ReceivedCountSourceSettings or metadata.receiver is not self:
+                    raise SettingsAuditHold()
+                metadata._same_source_refs()
+            except BaseException as error:
+                if primary is None or (isinstance(primary,Exception) and not isinstance(error,Exception)):primary=error
+        try:
+            anchor.check_tail(self)
+        except BaseException as error:
+            if primary is None or (isinstance(primary,Exception) and not isinstance(error,Exception)):primary=error
+        # Original settings finalize while all Count/raw/project FDs remain
+        # live, even when an exposed owner/receiver slot has drifted.
+        try:anchor._binding[4].close()
+        except BaseException as error:
+            if primary is None or (isinstance(primary,Exception) and not isinstance(error,Exception)):primary=error
+        try:
+            anchor.check_tail(self);anchor.verify_raw()
+            self._verify_records()
+            anchor.verify_raw();anchor.check_tail(self)
+            if metadata is not None:metadata._same_source_refs()
+        except BaseException as error:
+            if primary is None or (isinstance(primary,Exception) and not isinstance(error,Exception)):primary=error
+        self._close_owned(primary,originals=anchor._binding[2:4])
+
+
 class _NativeAllocationPriorOriginals:
     """Raw prior delivery join, never an issuer carried across NV/ENTRY.
 
@@ -1959,6 +3199,7 @@ class _NativeAllocationPriorOriginals:
         self.sheet=sheet;self.bound=bound;self.old=old
         self.raw=_DeliveryCreatorOriginals(writer,sheet,bound)
         self.catalog_edges=[];self.namespaces=[];self.events=None;self.record=None;self.frozen=None
+        self._retained_catalog_edges={};self._retained_namespaces={}
 
     def retain(self,held,ancestors=(),projects=()):
         held.verify();self.old.verify()
@@ -1973,7 +3214,13 @@ class _NativeAllocationPriorOriginals:
                     if row[1]==name and journal._identity(os.fstat(row[0]))[:2]==journal._identity(os.fstat(p))[:2]]
                 if len(original)!=1 or original[0][3]!=identity or original[0][4]!=names:
                     raise SettingsAuditHold()
-                self.catalog_edges.append((self.raw._dup(p),name,self.raw._dup(fd,identity),identity[:5],frozenset(names)))
+                key=(journal._identity(os.fstat(p))[:2],name);expected=(identity[:5],frozenset(names))
+                prior=self._retained_catalog_edges.get(key)
+                if prior is not None and prior!=expected:raise SettingsAuditHold()
+                actual_parent=self.raw._dup(p);actual_folder=self.raw._dup(fd,identity)
+                if prior is None:
+                    self._retained_catalog_edges[key]=expected
+                    self.catalog_edges.append((actual_parent,name,actual_folder,*expected))
             else:directories.append(edge)
         if held.namespace is not None:
             p,prefix,names=held.namespace
@@ -1981,7 +3228,13 @@ class _NativeAllocationPriorOriginals:
             if (original is None or original[1:]!=(prefix,names)
                     or journal._identity(os.fstat(original[0]))[:2]!=journal._identity(os.fstat(p))[:2]):
                 raise SettingsAuditHold()
-            self.namespaces.append((self.raw._dup(p),prefix,frozenset(names)))
+            key=(journal._identity(os.fstat(p))[:2],prefix);expected=frozenset(names)
+            prior=self._retained_namespaces.get(key)
+            if prior is not None and prior!=expected:raise SettingsAuditHold()
+            actual_parent=self.raw._dup(p)
+            if prior is None:
+                self._retained_namespaces[key]=expected
+                self.namespaces.append((actual_parent,prefix,expected))
         captured=SimpleNamespace(directories=directories,files=held.files,namespace=None,verify=held.verify)
         self.raw.retain(captured,ancestors,projects)
         self.old.verify();self.verify()
@@ -2180,6 +3433,21 @@ def _read_native_catalog_k(writer,context):
                 or _NATIVE_CATALOG_K_CONTEXT.get() is not context or packet['token'] is not writer
                 or packet['pid']!=os.getpid() or packet['thread']!=threading.get_ident()
                 or state._NATIVE_CATALOG_K_READ_CONTEXT.get(writer) is not context):raise SettingsAuditHold()
+        # Received short-K admission uses its independently anchored original
+        # checker, never the mutable packet callback to attest itself. Other
+        # existing native K issuers keep their original contracts unchanged.
+        relation=_LIVE_COUNT_RECEIVED_SOURCES.get(global_journal._HELD_COUNT_CLAIM_ORIGINALS.get())
+        short=None if relation is None else relation[2]._short_k_original
+        if relation is not None and (short is not None and short[0] is context
+                or context is not relation[2].original.issued):
+            try:
+                received=relation[1]
+                original=_received_count_k_original(writer,received.sheet,received.bound,received.unit)
+                if original[0] is not packet:
+                    raise SettingsAuditHold()
+            except BaseException:
+                relation[1].source_failed=True
+                raise
     admitted(); packet['verify'](); admitted()
     events,current,initialized,_outbox=packet['images']
     result=chain.validate_k_chain_snapshot(events,current,initialized)

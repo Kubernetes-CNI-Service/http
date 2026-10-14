@@ -694,6 +694,19 @@ def _project_observed_stage_l_source_candidates(
     source, store, *, http_root, settings, whitelist_snapshot,
     whitelist_path, writer_token=None,
 ):
+    """Original projection API: make its own two fresh Switch queries."""
+    projection, _windows = _project_observed_stage_l_source_candidates_with_windows(
+        source, store, http_root=http_root, settings=settings,
+        whitelist_snapshot=whitelist_snapshot, whitelist_path=whitelist_path,
+        writer_token=writer_token,
+    )
+    return projection
+
+
+def _project_observed_stage_l_source_candidates_with_windows(
+    source, store, *, http_root, settings, whitelist_snapshot,
+    whitelist_path, writer_token=None,
+):
     """Project an observed HOLD snapshot, not provenance or qualification.
 
     The public preview still reopens its caller's sources. Native qualification
@@ -701,7 +714,9 @@ def _project_observed_stage_l_source_candidates(
     projection/source replay at its final boundary. This removes a redundant
     recursive walk, without caching paths, accepting a caller witness as C5,
     relaxing read freshness, or omitting the final IB and cycle-chain checks.
-    Switch matched-rule inputs below are still reopened and compared.
+    Switch matched-rule inputs below are still reopened and compared. Return
+    those actual windows alongside the HOLD projection for the same call's
+    next pure derivation only; no caller window or successful K is accepted.
     """
     if (type(source) is not ProdStageLComposedSourceSnapshot
             or source.qualified is not False or source.state != 'hold'
@@ -795,7 +810,7 @@ def _project_observed_stage_l_source_candidates(
             or len({item.operation_id for item in candidates}) != len(candidates)
             or any(item.qualified is not False for item in candidates)):
         raise StageLConsumerHold("Stage L source candidate identities collide")
-    skips = []
+    skips = []; switch_windows = []
     for slot in ("ethernet/prod", "nvlink/prod"):
         window = read_prod_switch_k_window(
             store, http_root=http_root, settings=settings,
@@ -811,6 +826,7 @@ def _project_observed_stage_l_source_candidates(
                 or tuple(record_id for record_id, _ in window.whitelist_skip_matches)
                 != window.whitelist_skips):
             raise StageLConsumerHold("Switch W1 skip source disagrees with K/W1")
+        switch_windows.append(window)
         for record_id, rule in window.whitelist_skip_matches:
             if (type(record_id) is not str
                     or not record_id.startswith("switch:")
@@ -833,7 +849,7 @@ def _project_observed_stage_l_source_candidates(
         skips.append(StageLSourceSkip(
             "ib_cabling", skip.row.expected_endpoints, skip.matched_rule,
         ))
-    return ProdStageLSourceProjection(
+    projection = ProdStageLSourceProjection(
         cycle_ids=switch.cycle_ids,
         completion_sha256=switch.completion_sha256,
         k_event_sha256=switch.k_event_sha256,
@@ -849,6 +865,7 @@ def _project_observed_stage_l_source_candidates(
         reason=("fabric_identity_unresolved" if unresolved_fabric
                 else "qualification_not_implemented"),
     )
+    return projection, tuple(switch_windows)
 
 
 def validate_prod_stage_l_source_projection(
@@ -889,7 +906,7 @@ def qualify_prod_stage_l(
             whitelist_snapshot=whitelist_snapshot,
             whitelist_path=whitelist_path, writer_token=writer_token,
         )
-        projection = _project_observed_stage_l_source_candidates(
+        projection, switch_windows = _project_observed_stage_l_source_candidates_with_windows(
             source, store, http_root=root, settings=settings,
             whitelist_snapshot=whitelist_snapshot,
             whitelist_path=whitelist_path, writer_token=writer_token,
@@ -959,12 +976,10 @@ def qualify_prod_stage_l(
         ))
         if projected_ib_skips != bound_ib_skips:
             raise StageLConsumerHold("projected IB W1 matched rules disagree")
-        switch_windows = tuple(read_prod_switch_k_window(
-            store, http_root=root, settings=settings,
-            whitelist_snapshot=whitelist_snapshot,
-            whitelist_path=whitelist_path, source_slot=slot,
-            writer_token=writer_token,
-        ) for slot in ("ethernet/prod", "nvlink/prod"))
+        # The projection itself just queried and checked both actual windows.
+        # No I/O occurs between that return and these pure comparisons. The
+        # independent public projection/IB/cycle replay below still reopens
+        # every source before return; this is not a retained eligibility cache.
         projected_switch_skips = tuple(sorted(
             (skip.record_id, skip.matched_rule)
             for skip in projection.whitelist_skips if skip.source == "switch"

@@ -95,40 +95,61 @@ def _bound_source_file(path, parent_fd):
     finally:os.close(fd)
 
 
+@contextmanager
+def _bound_digest_originals(path):
+    pipeline = sys.modules.get('tools.ufm_collection_pipeline')
+    scope = getattr(pipeline, '_HELD_SOURCE_READS', None)
+    if scope is not None and scope.get() is not None:
+        try:
+            with pipeline._borrow_current_source_originals(path) as (parent_fd, source_fd):
+                before_name = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+                if not stat.S_ISREG(before_name.st_mode):
+                    raise ProvenanceError(f"source is not a regular file: {path}")
+                yield parent_fd, source_fd, True, before_name
+        except (OSError, ValueError) as exc:
+            if isinstance(exc, ProvenanceError): raise
+            raise ProvenanceError('original digest source cannot be verified') from exc
+        return
+    with _bound_parent(path) as parent_fd:
+        # Preserve the ordinary pre-open type check: opening a FIFO first
+        # could block. The fused original-file acquisition is scope-only.
+        before_name = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+        if not stat.S_ISREG(before_name.st_mode):
+            raise ProvenanceError(f"source is not a regular file: {path}")
+        with _bound_source_file(path, parent_fd) as (source_fd, borrowed):
+            yield parent_fd, source_fd, borrowed, before_name
+
+
 def _regular_digest(path: Path) -> str:
     try:
-        with _bound_parent(path) as parent_fd:
+        with _bound_digest_originals(path) as (parent_fd, source_fd, borrowed, before_name):
             nofollow = getattr(os, "O_NOFOLLOW", 0)
-            before_name = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
-            if not stat.S_ISREG(before_name.st_mode):
-                raise ProvenanceError(f"source is not a regular file: {path}")
-            with _bound_source_file(path,parent_fd) as (source_fd,borrowed):
-                before_fd = os.fstat(source_fd)
-                if (before_name.st_dev, before_name.st_ino) != (
-                    before_fd.st_dev, before_fd.st_ino
+            before_fd = os.fstat(source_fd)
+            if (before_name.st_dev, before_name.st_ino) != (
+                before_fd.st_dev, before_fd.st_ino
+            ):
+                raise ProvenanceError(f"source changed before read: {path}")
+            digest = hashlib.sha256()
+            offset=0
+            while True:
+                # pread does not share/rewind the held original's offset.
+                # Every invocation still hashes the actual current bytes.
+                chunk = (os.pread(source_fd,1024*1024,offset) if borrowed
+                         else os.read(source_fd,1024*1024))
+                if not chunk:
+                    break
+                digest.update(chunk)
+                offset+=len(chunk)
+            after_fd = os.fstat(source_fd)
+            after_name = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+            for after in (after_fd, after_name):
+                if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns,
+                    after.st_ctime_ns) != (
+                    before_fd.st_dev, before_fd.st_ino, before_fd.st_size,
+                    before_fd.st_mtime_ns, before_fd.st_ctime_ns,
                 ):
-                    raise ProvenanceError(f"source changed before read: {path}")
-                digest = hashlib.sha256()
-                offset=0
-                while True:
-                    # pread does not share/rewind the held original's offset.
-                    # Every invocation still hashes the actual current bytes.
-                    chunk = (os.pread(source_fd,1024*1024,offset) if borrowed
-                             else os.read(source_fd,1024*1024))
-                    if not chunk:
-                        break
-                    digest.update(chunk)
-                    offset+=len(chunk)
-                after_fd = os.fstat(source_fd)
-                after_name = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
-                for after in (after_fd, after_name):
-                    if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns,
-                        after.st_ctime_ns) != (
-                        before_fd.st_dev, before_fd.st_ino, before_fd.st_size,
-                        before_fd.st_mtime_ns, before_fd.st_ctime_ns,
-                    ):
-                        raise ProvenanceError(f"source changed during read: {path}")
-                return digest.hexdigest()
+                    raise ProvenanceError(f"source changed during read: {path}")
+            return digest.hexdigest()
     except OSError as exc:
         raise ProvenanceError(f"source cannot be read: {path}: {exc}") from exc
 

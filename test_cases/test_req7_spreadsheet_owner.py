@@ -44,7 +44,7 @@ def fixture(root, fault=None):
     # path, UID, TTL, repair or lock override argument. Native flock is real.
     real_open, real_fstat, real_stat = os.open, os.fstat, os.stat
     def metadata(value):
-        fields = ('st_dev', 'st_ino', 'st_mode', 'st_uid', 'st_gid', 'st_nlink', 'st_size', 'st_mtime_ns', 'st_ctime_ns')
+        fields = ('st_dev', 'st_ino', 'st_mode', 'st_uid', 'st_gid', 'st_nlink', 'st_size', 'st_atime_ns', 'st_mtime_ns', 'st_ctime_ns')
         result = SimpleNamespace(**{name: getattr(value, name) for name in fields})
         result.st_uid = 0
         if fault == 'uid': result.st_uid = 501
@@ -70,8 +70,14 @@ def scoped_fixture(root, module):
     """
     facade = SimpleNamespace(**{name: getattr(os, name) for name in dir(os)})
     def metadata(value):
-        fields = ('st_dev','st_ino','st_mode','st_uid','st_gid','st_nlink','st_size','st_mtime_ns','st_ctime_ns')
-        result = SimpleNamespace(**{name: getattr(value,name) for name in fields}); result.st_uid = 0
+        # Keep every original field access, in its original order. Explicit
+        # copying avoids the repeated dictionary/getattr loop in this scoped
+        # fixture without caching native metadata or omitting an OS check.
+        result = SimpleNamespace(st_dev=value.st_dev, st_ino=value.st_ino,
+            st_mode=value.st_mode, st_uid=value.st_uid, st_gid=value.st_gid,
+            st_nlink=value.st_nlink, st_size=value.st_size,
+            st_mtime_ns=value.st_mtime_ns, st_ctime_ns=value.st_ctime_ns)
+        result.st_uid = 0
         return result
     facade.geteuid = lambda: 0
     facade.open = lambda name, flags, *args, **kwargs: os.open(root if name == '/' else name, flags, *args, **kwargs)
@@ -81,6 +87,27 @@ def scoped_fixture(root, module):
 
 
 class Req7SpreadsheetOwnerTests(unittest.TestCase):
+    def test_global_root_metadata_fixture_preserves_native_atime_for_fault_restoration(self):
+        # Independent native stat is the expectation, before synthetic root
+        # metadata is installed. The fixture cannot invent or omit timestamps
+        # needed by an actual owned-file fault/restoration operation.
+        path=self.root/'owned-atime-source';path.write_bytes(b'literal native timestamp source\n')
+        fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW)
+        try:
+            # Native open may advance atime. Capture the independent original
+            # after that real acquisition, not a stale pre-open timestamp.
+            original=os.fstat(fd)
+            with fixture(self.root):
+                named=os.stat(path,follow_symlinks=False);held=os.fstat(fd)
+                self.assertTrue(hasattr(named,'st_atime_ns'),'synthetic named metadata must keep native access timestamp')
+                self.assertTrue(hasattr(held,'st_atime_ns'),'synthetic held metadata must keep native access timestamp')
+                self.assertEqual(original.st_atime_ns,named.st_atime_ns)
+                self.assertEqual(original.st_atime_ns,held.st_atime_ns)
+                self.assertEqual((original.st_ino,original.st_mtime_ns,original.st_ctime_ns),
+                    (held.st_ino,held.st_mtime_ns,held.st_ctime_ns))
+                self.assertEqual(0,named.st_uid)
+        finally:os.close(fd)
+
     def setUp(self):
         self.module = load(); self.temp = tempfile.TemporaryDirectory(prefix='req7-sheet-owner-')
         self.addCleanup(self.temp.cleanup); self.root = Path(self.temp.name).resolve()
@@ -113,6 +140,22 @@ class Req7SpreadsheetOwnerTests(unittest.TestCase):
             self.assertIsNot(self.module.os, os)
             with self.assertRaises(self.module.SpreadsheetOwnerHold):
                 with self.module.spreadsheet_owner(binding()): self.fail('native flock exclusion bypassed')
+        self.assertIs(self.module.os, os)
+
+    def test_scoped_root_metadata_copies_every_literal_native_field_and_only_overrides_uid(self):
+        """Equivalence control for fixture cost, not root/real-environment proof."""
+        literal = SimpleNamespace(st_dev=11, st_ino=12, st_mode=0o100600,
+            st_uid=501, st_gid=20, st_nlink=1, st_size=655,
+            st_mtime_ns=111111, st_ctime_ns=222222)
+        expected = {'st_dev':11, 'st_ino':12, 'st_mode':0o100600,
+            'st_uid':0, 'st_gid':20, 'st_nlink':1, 'st_size':655,
+            'st_mtime_ns':111111, 'st_ctime_ns':222222}
+        with mock.patch.object(os, 'fstat', return_value=literal) as original:
+            with scoped_fixture(self.root, self.module):
+                observed = self.module.os.fstat(12345)
+            original.assert_called_once_with(12345)
+        self.assertEqual(expected, vars(observed))
+        self.assertEqual(501, literal.st_uid)
         self.assertIs(self.module.os, os)
 
     def test_fixed_root_missing_or_nonroot_never_creates_repairs_or_uses_environment_override(self):

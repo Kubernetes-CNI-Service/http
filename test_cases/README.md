@@ -3411,3 +3411,1488 @@ become accepted production tokens. Actual current fourteen-sheet identity
 requires Whitelist 112 (Dashboard 104); decoder equality and original tests
 are not relaxed. This local composition is not complete terminal/bootstrap/
 archive proof, nor current formal full/check or REAL_ENV acceptance.
+
+Archived delivery raw reception retains each exact named edge once across
+LIVE readers, with continuously held duplicates keyed by full original stat
+and descriptor flags. Equal bytes on different inodes/names do not merge;
+conflicting captured expectations or changed retained flags refuse before
+reuse. Namespace additions, original deadlines and every semantic admission
+remain unchanged. Independent RED/direct and C25 allocation regressions cover
+this storage-only deduplication. The actual archived NEW-to-FIRST workflow is
+still OPEN: its original template-identity read exceeded its unchanged deadline
+before FIRST. Local regression PASS is not that workflow or full/check proof.
+
+The genuine native preparation K reader preserves the existing four-graph
+contract: P-S-P-parser-P-S-P, including settings-return drift. A proposed
+two-pass pure-parser reduction was rejected because it contradicts the
+original independent workflow expectation. Its local candidate observations
+are not current-tree closure. Direct and real archived-preparation workflows
+retain original/budget/issuer/finalizer refusal checks; no existing expectation,
+deadline, namespace allowance or verification boundary is reduced.
+
+Native NV replay reuses only an exact directory/file capture in the same LIVE
+catalog graph; it still rereads current bytes and checks full stat and names.
+Catalog's initial marker-only capture acquires other existing members normally,
+never refreshing or repairing the marker. The independent retained-inventory
+BorrowedOriginals reader keeps its original path. Actual complete/partial-capture
+tests and the entire NV module guard this storage change, including unchanged
+creation, cold lineage, count, inventory and same-byte-replacement expectations.
+
+Native ALL-delivery semantic discovery also keeps one immutable capture for
+each same-graph named edge. Actual initial RED observed 15 stored directory
+records for 13 edges and 58 file records for 54 edges. The fixed discovery
+captures delivery HEADER, anchored allocation originals and admitted C6 files
+once, but each repeated request freshly checks original named/fullstat/names/
+bytes, descriptor flags before and after I/O, and the original sealed budget.
+An absent, conflicting, removed or changed original is not reacquired or
+refreshed. Ordinary catalog/NV capture and mutable append, COUNT and settings
+paths do not opt into this immutable storage mode. The original four K graph
+checks and all semantic/finalizer boundaries remain unchanged. Independent
+direct and real archived-creator discovery tests cover this storage slice;
+their success cannot establish complete NEW-to-FIRST, full/check or REAL_ENV.
+
+Fixed NEW original preparation now owns one actual original source/ancestor
+FD scope across locator acquisition, receiver, preparation finalizers and
+independent preread creation. The inner receiver only borrows that same live
+PID/thread/ContextVar pair; partial, foreign or revoked holders refuse. Ordinary
+standalone receiver issuance and pipeline nested-issuer refusal are unchanged.
+Each digest still reads current bytes, and current named/held original checks,
+descriptor bounds, qualification, four K graphs and original read deadlines
+remain intact. After owned source and directory cleanup, both WIRE and NO_SEND
+recheck the actual original initial/selection/receiver reads and authentication;
+no closed preparation/K callback or renewed observation is adopted. Independent
+direct RED and actual archive-to-NEW entry RED cover the missing scope; control
+order tests are not genuine issued-response proof. The first workflow attempt's
+obsolete-module fixture ERROR is retained separately, not counted as valid RED.
+Complete archived NEW-to-FIRST and current full/check remain OPEN.
+
+Native qualification now uses the exact Switch windows just queried by its
+own observed projection for the following response-independent pure derivation.
+The original projection API still queries both families itself; the final
+public projection, protected IB and completed-cycle replays remain independent.
+Four composed Switch/IB legs, original per-K four-graph verification, actual
+archive role/completion hashes and source deadlines are unchanged. No caller
+window, cached eligibility, permission or renewed source observation is accepted.
+Independent direct RED and actual worker/emitter/IB three-panel workflow RED
+precede this change. A real archive changed after the initial projection pair
+must be refused by the final genuine source reader, not just an object comparison.
+This query reduction is not proof of timing closure, complete archived FIRST,
+formal full/check or REAL_ENV acceptance.
+
+The live source-file borrower now makes one complete fresh ancestor walk per
+acquisition. Its directory chain already checks every named/held ancestor on
+both first acquisition and reuse; only the immediately repeated walk after
+pure tuple unpacking is removed. Original parent and leaf checks, actual byte
+reads, borrow/chain exits, scope verification, revocation and conditional FD
+cleanup remain unchanged. New independent direct and real analyzer/receipt
+workflow tests first fail on the duplicate walk; both complete pipeline test
+modules then pass (65 tests). This is not a qualification cache, deadline
+renewal, reduction of any K graph or proof that archived NEW-to-FIRST has closed.
+
+Archived FIRST source input reception now has a fixed internal read-only K
+scope under the actual existing project and spreadsheet owners. It acquires
+the same genuine ALL completed-delivery, settings and raw original holders as
+creator discovery, but yields no creator bridge and rejects any retired,
+received or attached creator state. Its last K/settings/raw checks outlive
+source and C6 finalizers; no-claims discovery and ordinary K remain strict.
+Two independent direct tests first fail on the missing entry; the 59-test
+direct related run passes. These control-order tests do not prove genuine ALL
+or actual FIRST reception. The new real archived FIRST input-core workflow
+still errors in its preceding NEW phase: the original initial identity read
+expires after business preread (1.173422416 seconds past the original deadline).
+FIRST is not reached, so its acceptance and subsequent COUNT-aware K/source
+reception remain OPEN. Original reads are not renewed, and no unchanged full
+rerun, approval ledger or formal full/check proof results from these tests.
+
+Archived creator local manifest derivation is now moved before its earliest
+bounded identity read, while the actual creation-locator K/C5/C6 holders are
+LIVE. Only immutable plain manifest bytes/id and current receipt relations
+cross the existing raw bridge into the genuine preparation record. This is
+not a qualified-set cache, K/nonce issuer, caller manifest parameter or skip
+flag. The receiver independently acquires/requalifies actual current inputs
+and checks exact canonical bytes, SHA, metadata, all source fields, operations
+and selected receipt relation. Partial/replaced/drifted migrated slots refuse,
+not fall back. Standalone no-bridge compilation keeps its original order.
+The actual compiler's two fresh manifest freezes and original receipt/nonce,
+four K graph, source/finalizer/read/authentication checks remain unchanged.
+Two pure-data direct tests first fail; a 61-test direct/control regression then
+passes on its recorded tree. These are not real issuer acceptance or deadline
+closure; the strengthened archived NEW-to-FIRST workflow must verify that
+plain intent was produced before the first actual read, without any renewal.
+
+The actual received bridge/old-graph relation, not presence of optional record
+fields, now selects the migrated branch. ENTRY and END require the same live
+registry, owners and exact intent object in both bridge and preparation slots;
+deleting both slots cannot downgrade to standalone. Independent registry/control
+RED and related tests cover that selection; a real archived bridge/preparation
+fault workflow removes both slots before compiler reads or registration.
+FIRST typed refusal also retains its original exception as suppressed internal
+context for bounded diagnostics: public message/cause/traceback suppression stay
+unchanged. Its independent direct RED reproduces the prior information loss.
+The previous actual NEW returned and FIRST input failed before yield; that error
+is unresolved and cannot become PASS from direct/control results. No ordinary
+full proof, current approval or REAL_ENV success is implied.
+The intent tail is registered before the source borrower so LIFO closes the
+actual compiler K/C6/source and source borrower before checking intent and then
+the original issued reads. A static order test first fails on reversed order;
+65 direct/control tests subsequently pass. An additional real archived workflow
+changes both intent slots after the actual source borrower exits while prep and
+bridge remain live. Static/control results alone do not prove that last boundary.
+
+On the recorded exact dirty tree, the three real archived workflows completed
+with two PASS and one ERROR: whole intent loss at receiver entry and intent loss
+after the actual source borrower exits both refuse as required. FIRST input-core
+reception still errors during a new original read acquisition, before issuing
+that response; its root cause is not established by the launcher’s sanitized
+exception. The complete 1061.165-second log and unchanged BEGIN/END identities
+are retained. This is not whole FIRST/COUNT, runner approval or full proof.
+The synthetic archived FIRST read fixture now delegates the same original
+read/supervisor once and temporarily observes exception positions in only those
+two original code objects, with line/opcode tracing disabled and at most eight
+role/line/type entries. It retains no messages, locals, traceback objects or child
+bytes. Nonsecret launch/supervisor/owned-child/TLS/elapsed facts locate failures;
+the observer is restored in finally, and clocks, deadlines, assertions and native
+responses are unchanged. A bounded diagnostic run, not a full retry, must resolve
+the acquisition stage before claiming its cause or modifying any implementation.
+
+The bounded FIRST acquisition diagnostic subsequently records original
+supervisor deadline expiry with zero HTTP requests and a TLS-fixture ValueError.
+An independent actual high-descriptor test first errors, then exposes a specific
+RED: the server's select() rejects original descriptors above its fd-set range.
+The fixture now uses DefaultSelector for the same listener/cancellation sockets,
+without changing connected handshake/body limits, native client deadlines or
+cleanup assertions. Four targeted cases pass: genuine high-descriptor TLS,
+preconnection startup, idle cancellation and the original connected-without-TLS
+timeout. This deterministic fixture repair does not establish the previous
+FIRST's exact failing descriptor or replace a rerun of its actual full workflow.
+
+The archived FIRST observer must be installed at the actual post-reload
+dispatch boundary, after the native read fixture is installed. Earlier
+pre-reload hooks were replaced by fixture reload; their unexecuted source-order
+claims are corrected in the retained evidence, not counted as acceptance.
+The corrected actual case records nine original local images before identity,
+nine successful native reads, and final freshness refusal. Four source
+qualifications each take about eighteen seconds; bounded pre-read profiling
+locates most cost in the actual read-only K's four ALL-original graphs.
+Neither budgets nor these graphs are relaxed.
+
+All actual current-source scopes now remain LIVE until every unit's fresh
+business/continuity and last capacity/originals IO completes. Their original
+second source qualifications and complete receipt/cycle/target/owner tails
+occupy the last source-replay boundary, after complete original K/W1 comparison.
+Only-older selection still executes the independent current-source qualifier.
+No early suffix, closed verifier or cached qualification can replace this tail.
+New order controls first RED, then related tests PASS; actual archived CORE and
+late Switch-archive drift with unchanged K/W1 must independently verify this
+composition. COUNT/send, whole REQ7, runner/full/check and REAL_ENV remain open.
+
+The actual archived FIRST input core subsequently passes with nine native
+reads and ordinary K still strict after its issuer closes. Whole FIRST then
+exposes a distinct positive-fixture defect: historical quota was created by
+the legacy constructor without authenticated project provenance. Only that
+positive archived-FIRST scenario now creates its quota initially from genuine
+OAuth/TLS identity and metadata reads; its literal project-origin assertion
+precedes archive. Legacy quota refusal and original-byte preservation remain
+unchanged. The corrected whole scenario receives actual dedicated G1, then
+refuses before COUNT because the independent source replay uses ordinary K
+after outbox archival. The actual late-archive-drift negative still passes.
+
+Each short COUNT/source facts domain now joins the exact LIVE original
+COUNT/CLAIM packet before acquiring the original ALL completed-settings K
+reader. No original join preserves ordinary strict K; foreign identities
+refuse. Both source qualifications, receipt/cycle tails and all K graph checks
+remain. The short read domain closes before any ATTEMPT/CLAIM write, so no
+strict count snapshot crosses that mutation. Its last original join check
+follows issuer revocation and all original finalizers; an interrupted caller
+retains its original BaseException if the join is simultaneously revoked.
+Three direct controls first FAIL on the absent entry; the interruption case
+first ERROR on replacement of the original exception. The resulting 107
+GLOBAL/remote direct tests pass on their recorded dirty tree. These controls
+do not prove actual ALL intermediate-UNKNOWN reception, complete FIRST or
+timing closure; the original whole scenario must still pass. No full/check,
+approval ledger or REAL_ENV success is implied.
+
+The subsequent complete FIRST diagnostic observes the second continuity
+rejecting an expired original read while all recorded non-clock predicates
+remain true and the retained count is still zero. Its traced facts duration
+is diagnostic, not an uninstrumented performance measurement. The narrow
+completed-source K factory now borrows the actual COUNT issuer's still-held
+ALL-project C6 rows and original verifier, rather than constructing that same
+graph again. The loan is private, owner/context/record bound and revoked before
+the issuer's semantic/raw finalizers; absent joins keep the cold path. Both
+source qualifications, strict K graphs and fresh original checks remain.
+Four independent registry/lifetime controls first fail on the absent API,
+then pass; 113 GLOBAL/remote direct tests pass on their recorded dirty tree.
+An initial diagnostic command used a nonexistent test class and reports its
+original ERROR; the corrected explicit selection is separately retained.
+These are not actual C6, timing or complete-FIRST closure. The real archived
+workflow additionally forbids duplicate top-level C6 reconstruction under a
+live COUNT join and must independently pass all original count/wire/cleanup
+assertions. Full/check, main approval and REAL_ENV remain open.
+
+The first real workflow with that narrow loan still reports one ERROR: the
+second continuity check observes deadline expiry, count remains zero, and the
+traced facts domain takes 52.795 seconds. This does not close timing or justify
+a larger deadline. Independent controls additionally reproduce a tail operator
+interruption being hidden by an ordinary body error, and eleven unrelated COUNT
+graph checks for eight C6-only rechecks. The loan now preserves operator
+interruption priority and checks the original COUNT graph at entry and final
+boundary, while every C6 recheck still validates the live join and real original
+C6. The new control's two-boundary assertion is evaluated after lexical exit,
+not before its final boundary runs; its original premature assertion failure is
+retained, with no reduction in required boundary checks. The resulting 115
+GLOBAL/remote direct tests pass. Actual whole-FIRST timing is still unproved;
+no repeated full, approval-ledger update or REAL_ENV result follows from this.
+
+The source factory and its two immutable delivery/allocation leaves now borrow
+that same original ALL C6 only through a genuine registered prior-source
+issuer. Every call checks its unique bridge/raw/owner/context relationship,
+including after the delegated original verifier; a second bridge inserted by
+that verifier refuses. ORIGIN holders and row unit/project/C6-fact alignment,
+DELIVERED/C19/settings images, all four K graphs and late raw-only finalizers
+remain. No handoff keeps the cold path; the selected COUNT unit is not changed
+when an older delivery leaf reads ALL C6. Three absent-entry controls first
+FAIL, and a separate second-bridge behavioral control first FAIL; 135 related
+direct tests pass. The real workflow additionally refuses cold reconstruction
+in those two source leaves. Real FIRST and its unchanged read期限 must still
+pass on this candidate; controls do not constitute actual graph/timing proof.
+
+The subsequent three-scope real FIRST still reports one ERROR after its second
+continuity check: the issued-read deadline has expired, Count remains zero,
+and the facts domain takes 45.945 seconds with global exception tracing active.
+A bounded compile-only/literal-call control measures observer overhead but does
+not identify how much of that real duration it explains. Normal behavior runs
+now leave both acquisition and COUNT tracing off; the existing exception
+observers are retained behind an explicit test-only diagnostic option. A new
+control initially FAILs on the missing observer scope, then proves default-off,
+explicit opt-in, preservation of an external observer and original exception,
+and restoration after exit. The synthetic expired-read diagnostic still runs
+with opt-in and refuses; it is not actual read evidence. Production deadlines,
+all Count/WIRE/cold-reconstruction assertions and original owner checks are
+unchanged. One original normal workflow without this fixture's global tracing
+is the next bounded comparison, not a full rerun or a claimed timing closure.
+
+That ordinary no-trace run completes with one ERROR and zero Count, with a
+35.814-second facts observation. Its public boolean HOLD hides the earliest
+refusal, so the preceding traced expiry is not backfilled as this run's proven
+cause. Observer overhead is not the sole issue. The next explicit diagnostic
+profiles only the genuine facts entry through all its finalizers, retaining
+call counts plus cumulative/self times by source file and definition line.
+It does not profile normal runs by default, alter deadlines, omit tail checks,
+replace original results or constitute normal timing/acceptance evidence.
+
+The explicit facts profile localizes the repeated work: two original source
+qualifications cause 129 actual K reads, 527 C19 cold observations and 350516
+directory reads in that single profiled domain. The profiled duration is not
+normal timing evidence. The narrow repair only loans already-proved C19
+semantics inside a genuine COUNT/source/C6 leaf: all existing raw, catalog,
+origin, C6, allocation, match, proof, STARTED and DELIVERED checks remain on
+every verification. Its actual original graph sync preserves proof-file,
+completion-folder and enrollment/History INITIALIZED recovery barriers plus
+the original shared parent; entry/retention and final leaf verification still
+perform complete cold semantic proof. All other callers stay cold. Two new
+real-FD controls initially report three absent-helper FAILs, then prove native
+file/folder/parent barriers and refusal of failed sync or same-byte replacement.
+148 related GLOBAL/remote/allocation direct tests pass. The real normal workflow
+also requires actual C19 synchronization and forbids recursive cold decoding
+in the ready intermediate loan; unchanged Count/WIRE/freshness and every
+original tail assertion still must pass. No full/ledger/REAL_ENV closure follows.
+
+The next ordinary FIRST still reports one ERROR with Count zero. Its public
+HOLD does not identify the original refusal. The first boundary diagnostic
+installed hooks before the fixture reloaded GLOBAL; its missing hook markers
+make it invalid as cause evidence. The corrected diagnostic binds the current
+post-reload module and preserves all original delegates and tails. It observes
+the actual receipted facts returning, then the original template-identity read
+refusing on expiry while registry, raw input, owner and binding predicates are
+true. This is a diagnosed pre-COUNT expiry, not a justification to refresh or
+extend the original deadline.
+
+The following narrow repair retains complete cold C19 entry/retention/final
+proof but uses its exact recovery-barrier footprint between those boundaries:
+both original STARTED files, every GLOBAL journal file including all ATTEMPTs,
+History/enrollment INITIALIZED and their directories, six C19 originals and
+their completion directory, with the original shared-parent barriers. The
+entire held graph, including unrelated C6 images not synchronized in this
+subset, is still verified before and after. A genuine read-only prior-source
+leaf can use this same intermediate loan before COUNT; its actual cold C6
+verifier rechecks the unique original source bridge, owners and false roles
+on every delegated call. This also covers the creator's initial read-only
+prior-source domain, not a blanket claim that all NEW paths remain cold.
+Three independent controls first report missing-API FAIL/ERROR, then prove
+the exact FD barriers, sync-error and unsynchronized same-byte-replacement
+refusal, and source relation lifetime. 151 related direct tests pass on their
+recorded dirty tree. The actual workflow must observe both this pre-COUNT
+source domain and the existing COUNT domain, with unchanged wire, freshness,
+count, claim and cleanup assertions. Real FIRST, full/check, approval and
+REAL_ENV remain unclosed.
+
+That normal workflow reports one ERROR before issuing FIRST reads: its newly
+added observer incorrectly requires native K registration while the original
+source factory is still constructing its raw graph. The original traceback
+locates this assertion, not a production expiry; its shorter elapsed time is
+not performance-success evidence. A new observer control first FAILs on an
+absent helper, then separates raw source construction/finalization from an
+actually registered K with the same context, writer and owner. Three observer
+controls pass. The real workflow still requires nonempty observations from
+both genuine live pre-COUNT K and COUNT domains; construction alone cannot
+satisfy either assertion. All source, wire, deadlines and cleanup contracts
+remain unchanged. Its next normal rerun tests this corrected observation,
+not a blind full or a claim that FIRST already passes.
+
+The corrected ordinary run again reports one ERROR, now after all nine actual
+reads return with original child exit zero and the dedicated-project quota
+observation succeeds. Count remains zero; its receipted-facts timing is 14.437
+seconds. The public count HOLD still hides this run's earliest refusal, so the
+older diagnostic's expiry is not adopted as its proven cause. The observer
+phase error is no longer the refusal. A bounded post-reload, no-trace/profile
+diagnostic of these same original holders and issued reads is the next step;
+there is no full rerun, deadline extension or approval update.
+
+The post-reload diagnostic on that exact tree proves the next refusal: actual
+receipted facts return in 14.997 seconds, then the original template-identity
+read is expired by 5.027 seconds, while registry/data/writer/owner/binding still
+agree. Quota and COUNT are not entered. This is evidence for reordering local
+work, not a new deadline or an environmental excuse.
+
+The fixed FIRST receiver now starts an independent source/receipt body before
+the nine online reads. Its original core body and all its suffix checks remain.
+The existing COUNT graph still enters inside the live core prepared scope,
+overlapping its actual originals; it binds the SAME actual selected row/unit,
+dual owners, process/thread and original Count packet. A private lexical
+registry retains the one-use body, not a returned callback/DTO or cached facts.
+The FIRST initial facts consume it under a NEW short source K, execute its
+entire original source/receipt/cycle/target/owner suffix, and close that K before
+COUNT. Subsequent facts and R2 retain their independent full source reads.
+Missing/revoked/foreign or same-value substituted identities refuse; failed
+consumption is permanent. Exception cleanup revokes first, attempts cleanup,
+and preserves the original operator interruption over a secondary close error.
+
+Four independent order/lifetime controls first FAIL, then pass; a separate
+cleanup fault first produces an ERROR when it replaces KeyboardInterrupt,
+then the repaired cleanup preserves the original interruption. The full related
+175 direct controls pass on their recorded dirty tree. One initial command
+used a nonexistent allocation test-class name and reports ERROR; its output
+is retained, not counted as a suite PASS. The genuine FIRST workflow now also
+observes actual pre-read prefix acquisition and full suffix/new-K closure before
+the actual COUNT call, preserving every earlier read/wire/COUNT/CLAIM/cleanup
+assertion. Whole FIRST and formal full/check remain unclosed until their own
+exact-tree runs; no approval ledger or REAL_ENV status is changed here.
+
+The next genuine ordinary FIRST does cross the original pre-COUNT refusal:
+all nine native reads return with child exit zero, the initial receipted facts
+finish in 8.188 seconds, and actual COUNT durably returns one UNKNOWN intent.
+The following independent full facts take 14.001 seconds, then the lane
+refuses before CLAIM/send. The complete run remains one ERROR (406.137 seconds),
+not a FIRST PASS, and UNKNOWN is not rolled back. The public boolean HOLD
+does not prove this run's earliest post-COUNT cause; an old expiry diagnosis
+is not silently adopted for the new failure.
+
+Independent review of the new receiver finds two further lifecycle faults:
+used-but-failed prefixes or substituted state could fall back to cold facts,
+and a failed normal body exit could be attempted twice. Three controls first
+produce four behavioral FAILs. The issuer now retains an independent private
+identity anchor for its original packet, dual owners, row/unit, body/observer,
+argument references and Count packet, plus separate used/succeeded/failed and
+exit-attempted state. Only the complete original suffix, Count tail and NEW
+short-K normal exit establish success; failed consumption remains poisoned,
+and subsequent successful facts still perform their own full original reads.
+Missing fields, same-value substituted row/packet and source/context drift
+refuse, and cleanup uses the original anchor, not mutable packet cleanup slots.
+A deleted-row control first reports a KeyError ERROR, then exact field-set
+validation gives typed HOLD without a cold fallback. 180 related direct
+controls pass on their recorded tree. An initial workflow import failed with
+Python's static nesting limit; the two new observers were moved into the same
+existing ExitStack, preserving all assertions and restoration. That import
+failure is retained and not counted as a workflow execution or acceptance.
+
+The Count join also anchors its stable writer/token/binding/project/owner/unit/
+process-thread context and original verifier reference, rechecking them after
+the actual delegate and at every later getter. Independent END controls first
+FAIL on same-value unit, callback and context replacement, then refuse without
+calling the foreign observer. Legal append-aware directory/file additions are
+not frozen or weakened by this relationship check. The next bounded diagnostic
+targets the original post-COUNT refusal on this candidate, not a normal/full
+rerun or a deadline change.
+
+That exact-tree post-reload diagnostic completes with one ERROR in 393.357
+seconds. Its single valid hook covers seven original holders: initial facts
+return in 7.575 seconds; actual COUNT returns one UNKNOWN; the next independent
+full facts return in 13.896 seconds. The immediate original template-identity
+read then refuses on expiry (remaining -11.179 seconds) while registry, data,
+writer, owner and binding still agree. This is now a proved post-COUNT expiry,
+not an inferred load issue or a reason to refresh the original read. No CLAIM,
+send, rollback, full approval or REAL_ENV closure follows. The unchanged related
+runner preflight selects full fallback and exits 2 at EFF E-3 because this
+reviewed development tree still has dirty/untracked content; it starts no suite
+and changes no ledger. Its output is not counted as a test PASS or SKIP.
+
+### REQ7 actual Count/source raw overlap prerequisite (2026-10-13, OPEN)
+
+The complete FIRST path has six independent facts boundaries: before COUNT,
+after COUNT, CLAIM consumption, last pre-Popen, post-send and normal wire exit.
+Moving only a second body prefix cannot replace the last four real observations.
+The next necessary structural work is original graph acquisition before the
+nine native reads and a genuine Count-backed source receiver, not a deadline
+extension, cached qualification or resurrection of a closed K/ALL verifier.
+
+The actual Count issuer now retains its three original graph objects in an
+independent registry record; its own closure verifies the same record/objects
+before and after each delegate and revokes that record before finalizers.
+The new raw-overlap prerequisite compares every shared named file/directory
+edge by actual parent identity, complete original identity, bytes and names.
+Both source and receiver must cover the complete original shared namespace;
+only the actual OS-owner lock FD is separately bound, never ignored by suffix.
+Deleting a shared parent record cannot reclassify its children as project
+evidence. Unshared source originals remain untouched and strictly verified.
+The future fixed receiver must additionally prove their genuine project/root
+anchors and retain semantic/owner tails; this prerequisite returns no authority.
+
+Three initial controls report API-absence FAIL. The first implementation run
+reports three fixture ERRORs because its literal original files were not 0600;
+only fixture modes were corrected, without changing expected behavior. The
+actual catalog/dual-owner Count controls independently report two API-absence
+FAIL, then pass: same-value unit/registry replacement and stale context refuse;
+the genuine creator may append COUNT1 UNKNOWN, but the old strict source cannot
+then be refreshed or adopted. A shared-parent deletion control initially has
+one behavioral FAIL and a reused-fixture-path ERROR; a fresh owned fixture
+gives two behavioral FAILs, and complete-root coverage fixes both. Latest six
+controls pass. Earlier 238 related controls pass on their recorded pre-parent-
+fix tree only, not as proof of a later source tree. Continuous K transfer,
+whole FIRST, full/check and REAL_ENV remain OPEN. No ledger is edited.
+
+The actual FIRST coordinator now prefetches only the original read-only Count
+graph after strict source/business entry and before native read issuance. It
+anchors the same row/unit, Count key/packet/three graphs, verifier and owner
+references; IO-tail borrowing cannot acquire a new graph. Borrowers close before
+the prefix-owned Count issuer; failed prefetch is poisoned. Five lifecycle/order
+controls and a genuine dual-owner catalog/creator workflow retain independent
+expectations. The workflow's source body is explicitly a lifecycle stand-in,
+not native K or whole FIRST proof. The earlier recorded tree has 246 related
+PASS. The genuine whole workflow now also observes this boundary and the first
+actual read without dropping its existing prefix/Count/wire assertions; it has
+not been rerun because the continuous K receiver remains unfinished.
+
+The next data-only receiver independently duplicates complete raw source files,
+directories, ancestor/project FDs and namespaces while both sides are live.
+Only exact shared namespace and original Count creator mutable-directory checks
+delegate to the still-live original Count closure; old files, catalog .units,
+nonshared namespaces and project roots remain strict. Unknown unanchored parents
+refuse. Cleanup owns its independently captured slots and cannot adopt a foreign
+substituted list. It does not enroll K, use decoded values as source admission,
+or retain a closed semantic verifier. The eventual fixed factory still requires
+the genuine ALL project set, complete independently held settings/current/outbox/
+INITIALIZED originals, C19 recovery barriers and Count-internal tail ordering.
+
+Three API-absence controls first FAIL. The first implementation gives one PASS
+and two ERRORs from the fixture's stale reloaded sheet-owner module alias; the
+fixture now selects the actual canonical registry without replacing guards, and
+all three PASS. Cleanup and unknown-root negative controls initially report
+ERROR through the original Global finalizer's typed refusal; these are preserved
+as ERROR, not retrospectively relabelled behavioral FAIL. The cleanup/root fixes
+retain their original expectations. One related command initially requests a
+nonexistent remote test class and reports one loader ERROR (228 tests total).
+Correcting only that explicit command gives 277 PASS in 36.330 seconds, raw
+SHA256 `01578b66150e78ecb494424106bbb5c4641e411265b6e0ef330a0da5cc814528`,
+on diff `d8673021930eab4647b4a712e8f13bca374991ef9e019c901453a7ff6092bca0`.
+This is related/direct and actual raw-creator evidence, not full/check or later
+documentation-tree proof. No repeated unchanged FIRST/full, deadline extension,
+ledger update, real-device validation or ordinary release approval follows.
+
+### FIRST original Count/source reception checkpoint (2026-10-13)
+
+The fixed pre-IO receiver now joins the genuine LIVE source factory to its
+original Count key/packet/three graphs. Count first owns an independent settings
+tail stack; only then is the SAME settings scope moved with `pop_all`. Actual
+images, event/entry identities, ALL project set and original C19 recovery FD
+groups are captured before old semantic/K revocation. Barrier FDs must already
+belong to the independently retained graph; no unretained foreign FD is adopted.
+Later short read-only K scopes borrow these originals and Count-held C6, not a
+cold ALL reconstruction or closed source verifier. They cannot modify K, COUNT,
+CLAIM or source qualification. Full original source/receipt checks remain.
+
+Every metadata verification brackets real delegates with the same identity
+checks; failure permanently poisons reuse. Count's independently bound source
+relation drives its tail even if the exposed mirror is erased. Semantic tails
+close first, settings finalize next, original raw/Count graphs follow, and the
+actual owner tail closes last. All original cleanup slots are attempted, with
+operator-interruption priority preserved over secondary ordinary HOLD.
+
+Independent RED evidence remains unaltered: initial transfer controls were
+1 FAIL/2 ERROR (the original Global finalizer hid the inner missing-tail
+assertions); short-K API controls 2 FAIL; actual END-metadata drift 1 FAIL;
+unretained-barrier control first 1 ERROR from premature fixture restoration,
+then 1 behavioral FAIL with restoration deferred until closure; original
+metadata-tail erasure/interrupt controls 2 FAIL. The first 296-related run also
+had one lifecycle-fixture ERROR because its settings maps were tuples; that
+stand-in now uses the actual holder's map/bytes types without changing its
+enrollment/revocation assertions. A stale pre-fixture exception-class import
+caused one later ERROR; the test now asserts exact post-reload exception identity.
+The additional whole-workflow observer exceeded Python 3.9 static block nesting;
+moving only that observer into the existing private ExitStack fixes compilation.
+
+Actual native archive/second-unit workflows prove same-scope transfer, two short
+K lifetimes and read-only mutation refusal, actual Count=1 UNKNOWN without CLAIM,
+END drift poison, erased-mirror refusal and interrupt-safe original cleanup.
+The latest selected direct/related/native Count=1 command is 296 PASS in 65.011s,
+complete raw SHA256 `7e2a45914856fd3722143d81f2a23a3943d7d82a00deddcf70b2abd2e80e2a1b`,
+on diff `139a4ed31046b73cbbe0ca9614994a3d51504130ee98e08e3f69b665d0bff062`.
+That evidence predates this documentation update and is NOT full/check or whole
+FIRST proof. A new whole FIRST run is justified by this materially different
+original-scope path and bounded native Count=1 evidence, not by isolated PASS
+alone. Its six facts boundaries, source/receipt checks, four K reads, C19 barriers,
+COUNT/CLAIM/send and all tails still require actual acceptance. REAL_ENV NOT RUN;
+no ledger approval or ordinary formal-full success is claimed.
+
+The changed whole FIRST run then ended with 1 ERROR in 341.254s, complete raw
+SHA256 `17df5a254accb0b8a3f85c22ab9e9fef8add07bb339d8d6665c2f7ed0c3f82db`,
+on frozen diff `8f68439131329c50c08dcd3b443582e49d84ce988abe7fd174cd51920fb4bd4b`.
+Its earliest traceback is the new fixture's C19 observer, before first IO:
+it wrongly requires an independently decoded expected unit to be the same
+object as Count's actual issued unit. The observer now independently requires
+identity with Count's packet unit AND equality with the expected unit value.
+No production behavior, original sending/recovery assertion or deadline changed.
+The new literal observer contract has an initial 1 FAIL, followed by 3 PASS in
+29.115s including actual received Count=1/global short-K workflow; complete raw
+SHA256 `7e88e53c583d46ed43b62b30a53dd17035ba57ff04a4fc4e4d249a31057d29ab`,
+on diff `854989d0dabc9f7ee7a4af27224352a95fb764b3baf0dd55cc9ebb65e736b249`.
+These are diagnostic/related results, not whole FIRST acceptance. One whole
+FIRST rerun is now justified by the proved correction of its actual failing
+fixture condition, not isolated PASS or an assumed resource-load explanation.
+
+That ordinary whole FIRST rerun is still 1 ERROR in 386.491s: all nine actual
+reads exit 0, G1 capacity/inventory is present, Count becomes 1 UNKNOWN, and no
+CLAIM/send occurs. Complete raw SHA256
+`9017ca65d72cde91da3e36ee2786b1b96635ea211ecf3edb3a6639df27635cd9`
+binds frozen diff `01ab4495425dd16156fc3bfb73b07a7f4074d1a0e6abf5dd96f4b0f82d2736da`.
+The original lane suppresses the earliest cause; this ordinary log alone does
+not establish a timeout explanation. A single fixed post-reload diagnostic,
+with explicit facts profiling and no changed clock/deadline/assertions, then
+retains the original template-identity refusal: original registry, writer,
+owner, binding and response data all match, but the original read is expired.
+Complete diagnostic raw SHA256
+`5eff9c94fe8cecb00b8fdf96b6fb65f390dde99c80be5830d4636c7acdade091`
+has physical BEGIN 1 / END 329 and exit 1. It is not ordinary acceptance or
+unprofiled timing proof. The two profiles show 64/128 actual K reads producing
+792/1558 complete Count checks; the latter performs 4,384,202 fstat,
+2,652,729 stat and 130,302 listdir calls. The necessary next repair is this
+verification-domain amplification, not relaxed expiry, cached PASS, omitted
+original source checks, or another unchanged full run. Count/UNKNOWN is retained;
+whole FIRST, full/check, subsequent demands and REAL_ENV remain unclosed.
+
+The narrow repair keeps the existing original C6 loan around the ENTIRE
+metadata body, so its two full Count boundaries still check OTHER APPLIED/key/
+UNSENT originals and each project namespace. All five C6 checks remain; body
+checks still reread original settings, all retained raw data, the constructor-
+bound Count raw closure and every original C19 barrier. No old PASS is reused,
+no deadline changes, and the older receiver `verify()` contract is unchanged.
+Identity checks occur after real loan entry and after its complete finalizer;
+any refusal permanently poisons reuse and original tails still close.
+Two independent native controls initially FAIL: complete Count calls are 6
+instead of literal 2 (raw `cc3f60112f14364b59185e34705d3b700730aad1913ef4d445768ad12cdfff76`),
+and exposed raw-verifier substitution is accepted
+(raw `88418da4359f1ce7cb26830bb99e181b01faefd7fc4a2dac2a40821d5f9ad8b1`).
+After the repair these controls, last actual raw-delegate metadata drift and
+actual Count=1 UNKNOWN/no-CLAIM replay give 4 PASS in 89.829s, complete raw
+`dc0468d181776ca8356eb735ba2feb1370d64258b6b467e2a313e015bd843d6f`
+on diff `1e79dd12a334ff2048b96bada456e781a2beeeafe65a64634e2bdec189f5a06d`.
+The drift test observes the new actual raw delegate but retains its two-call,
+HOLD, permanent-poison and all-original-cleanup expectations. Related and
+ordinary whole FIRST acceptance of this repair are still required; this is not
+a timing result or runner/full/check approval.
+
+The first narrowed tree's direct/related command gives 297 PASS in 63.564s,
+raw `e3df2321466b6b421aa76fb77ba8e28d14988e9a358e4168360f96d412083693`.
+A necessary final source boundary was then independently reproduced: during
+the last actual full Count delegate return, the owned old delivery HEADER is
+replaced with the same bytes/new inode and its retained original is kept.
+Metadata previously returned before source refusal at Count terminal cleanup:
+1 FAIL in 18.406s, raw
+`d19b34c09141467cd63eed85c802c586b33e372d12e5296fc3fe58b3d39e0e70`.
+Same raw-source checks now follow each Count raw delegate and the completed
+original loan finalizer, before returning K; no reopened graph or shifted
+permission. The source fault, literal two full boundaries, END metadata drift
+and native Count=1 replay give 4 PASS in 88.177s, raw
+`e78d2af91f3c2295decd47b246aa5d148a0ea2fe97bb9d1b43ba4e22660bcb23`,
+on diff `4857c3f02300331235dd775aaa50dae16756ff28447505047d6e0cc9a4e511a6`.
+The 297 result predates this last repair; none is whole/full proof.
+
+On the final source-tail repair, 296 direct/related controls pass in 37.584s
+without rerunning the already separately proven native Count=1 case. The
+current code is justified for one ordinary whole FIRST acceptance attempt by
+the actual amplification diagnosis, two-boundary implementation and independent
+native refusals/cleanup proof, not just the selected test count. During that
+attempt source and tests stay frozen; an error requires its original cause
+analysis before any further whole/full run. No full attestation exists here.
+
+That ordinary attempt ends with 1 ERROR in 386.966s, exit 1, complete raw
+`158669e0ff239995d0f7c78857a5f4fee4cfcefbd087760f0af5fb4f89df8c54`,
+physical BEGIN 1 / END 268, on frozen diff
+`7f8661de80f16d509f309dcaaa2bf5caf516a7ae548974304443573f5821f9e1`.
+All nine real reads exit 0; initial/post-Count facts take 6.353s/12.129s;
+Count remains 1 UNKNOWN and no request is sent. The inner exception is still
+hidden by the lane's boolean finalizer. These timings do not prove the current
+failure is deadline expiry, nor does the related PASS close FIRST. Next is one
+bounded original-delegate/CLAIM-entry diagnosis, without profiling overhead,
+guard substitution or a new ordinary/full acceptance attempt. All original
+source checks, deadlines, cleanup and assertions stay unchanged.
+
+The bounded no-profile delegate diagnosis is complete: 1 ERROR in 383.452s,
+exit 1, raw `428133fd2990029cfb1804af4cebc6a004467ef187b85a042d3e25befbe86340`,
+physical BEGIN 1 / END 326, diff
+`1efd53d393117999ebdde497aaf63e4800e98c8bf8f11f3fc2e7489f006235e3`.
+Post-COUNT facts return before the original template-identity guard refuses:
+registry/writer/owner/binding/data match, but the same deadline is expired.
+CLAIM was never entered. This diagnosis retains ordinary UNKNOWN and is not
+an uninstrumented timing or full proof. Source inspection shows fixed fan-out
+times K reads, not an established recursive/exponential call cycle.
+
+The received short-K scope now retains ONE actual C6 loan over its complete
+read-only lifetime. Each K read still freshly verifies original settings,
+source/Count raw images, original C6, C19 barriers and identities. Full
+Count/OTHER/APPLIED/key/UNSENT checks dominate the loan ENTRY and complete EXIT;
+K revokes before that exit, followed by final original source checks. The
+standalone metadata verifier still owns its original two-boundary loan. No
+PASS, admission, counter or write capability is cached or transferred.
+
+Independent initial evidence is retained: original short scope traverses
+full Count 14 times instead of literal 2 (1 FAIL), and ordinary body refusal
+overrides a real cleanup interruption (1 ERROR), raw
+`267cfa24928258f2b2862936988fe9fedf7b6679d8abd9b75a0590c25ca6d297`.
+The first repair has six related PASS in 80.510s. Caught/restored metadata
+drift then independently gives 1 FAIL, raw
+`61dfc1b122dcf0d93f227586fd07eeab03f3b0be0fc4b40c4f6377ef7349734a`;
+the issued verifier now poisons immediately, even if its caller catches HOLD.
+Four native source/END/poison/boundary controls pass in 79.591s. A later
+selection has one loader ERROR from the misspelled UnitCatalogTests class;
+its 171 actual cases pass and the correctly named missing class gives 125 PASS
+separately. The failed command remains failed, not a successful suite.
+
+The short-K callback itself cannot attest its own substituted pointer/code.
+Two actual controls first FAIL, raw
+`ad0e2554ca73f416b7a28cd8a449dd8e86cfc12b7dea3783a88dda148c9d1561`.
+Admission now uses a separately anchored original scoped checker; final read,
+revocation and post-loan source boundaries independently check the same
+callback/code/images. Both controls and scope/source boundaries pass. Partial
+issuance interruption independently exposes a retained new registry record:
+1 FAIL, raw `7622875fe8e63d9614d7dbad1f06016014bfed00d2ede9e4bdcfb5dc1e1d1f68`.
+Protection now precedes the FIRST publication and always revokes the owned
+records/reset token actually acquired, preserving the original interruption.
+
+The final related command is 298 PASS in 107.015s, including all four selected
+direct classes, native partial issuance cleanup, literal two-boundary short K
+and actual Count=1 UNKNOWN/no-CLAIM workflow. This supports one new ordinary
+FIRST attempt on the changed verification mechanism; it does not substitute
+for that attempt, the whole REQ7 acceptance, runner/full/check or REAL_ENV.
+Source/tests freeze for the attempt; no unchanged full rerun, deadline
+extension, skipped assertion, manually edited ledger or ordinary release
+approval is authorized by these related results.
+
+The ordinary short-K attempt remains 1 ERROR in 376.280s, exit 1, raw
+`e0f73fef89a09a0e63dfa8c5e57d4386c2c9ddae96ff466a5289100703af3d39`.
+The no-profile original-delegate diagnosis then remains 1 ERROR in 373.291s,
+raw `01e67983536f703b3a7c232cbf56166084bf8b2f873147c3d2e14565a398cf75`;
+the genuine template_identity deadline is expired after post-Count facts,
+while registry/writer/owner/binding/data match. CLAIM is not entered. Both
+bind frozen diff `ad2ec25fbb37958da04629b511c5f01045ecae11afc76d4e413199de571a66a9`.
+One explicit current-path facts profile is 1 ERROR in 376.809s, complete raw
+`ebd96deceb731161b83121e2ff46a1155cc56f634ec2bb5f8c61dbdf6a1a6412`,
+physical BEGIN 1 / END 329. Its second facts invocation includes 2,076 raw
+graph verifications and 62,174 directory enumerations (2.753s self time).
+These diagnostic timings include observation overhead, not normal acceptance.
+
+The raw graph now shares a coherent directory names view only within ONE
+verification phase and only for identical full inode image/FD flags. Every
+actual FD use still stats/checks flags; changed images trigger fresh reads.
+Expected claims/prefixes/immutable identities remain original. A second fresh
+phase after all real file/project delegates rechecks claims and prefix sets;
+unrelated name additions do not become a new refusal rule. Nothing persists
+to the next verifier, and both receiver raw calls, all K/C6/barriers, named
+edges, original slots, file bytes, cleanup and deadline checks remain.
+
+Independent direct RED is 3 FAIL in 0.119s: literal two views per call gives
+18 instead of 4 across two calls, and a relevant namespace insertion during
+real pread returns without refusal. Raw
+`1e58534c3882bc32120d8b3cb79d18136f24f3739164ace932209b7d80346fb3`
+retains the failures. Repaired creator controls give 22 PASS in 0.268s; adding
+the unrelated-prefix control plus genuine short-K two-Count-boundary and
+post-revocation last-source replacement workflows gives 25 PASS in 46.870s,
+raw `9014ee5a71f569bc389e104ac23312887bd9cbf5f5cf6a00ec16115784455c67`,
+physical BEGIN 1 / END 33. This is a materially changed coherent-read mechanism
+supported by independent refusals and real workflow evidence, justifying ONE
+ordinary FIRST attempt, not an unchanged full retry or a total speed claim.
+The whole REQ7/full/check and every REAL_ENV result remain OPEN/NOT RUN.
+
+That coherent-view ordinary FIRST attempt is still 1 ERROR in 372.749s,
+raw `90b970df8f1b965136368a564259daf7bc9a003cb6be82d8c3cee6560bfd0635`,
+physical BEGIN 1 / END 268, diff
+`d4c5f48591b64ca105ec61f897926dc14dc381c4d572f85c91d5fcc19d83b866`.
+Facts take 3.806s/7.051s, Count is 1 UNKNOWN and no CLAIM/send occurs. This
+run's suppressed inner predicate remains UNKNOWN; the prior exact expiry
+diagnosis is not presented as a new exact-tree diagnosis.
+
+The next necessary amplification repair concerns the fixed receiver's own
+complete raw sweeps: the former nested order was raw/mutable/raw, Count raw,
+raw/mutable/raw. There is no intermediate result or permission boundary.
+One original raw sweep now precedes and one follows the complete mutable +
+original Count raw + mutable body. Original collection identities and FD
+flags are checked BEFORE the first sweep, again after Count and after the
+last raw delegate. No getter/Count/C6/OTHER boundary, original file/namespace,
+C19 fsync, source tail, deadline, standalone verifier or poison expectation
+is removed. The standalone record verifier keeps its original two sweeps.
+
+Independent actual receiver control first gives 1 FAIL (literal 2 versus 4
+complete raw sweeps); the source replacement control already PASS is retained.
+Two-case RED raw `80a11bfa879c39732ef77f892c1b76f4b457241bf258a0857f33601dae1d6143`,
+46.948s. The two controls, original metadata END refusal and short-K original
+loan boundaries then give 4 PASS in 93.736s, raw
+`b8d8078cbdf2b8cd86738eea3575fad8afdeba249578e862e916c55a05749196`.
+Five direct classes plus original Count raw pointer substitution, source
+replacement after K revocation/full loan exit and Count=1 UNKNOWN/no-CLAIM
+give 321 PASS in 99.601s, raw
+`ac1f9d6a0dc35aab694c47092346f7eef6041321ea7be122d86bb379581330d2`,
+physical BEGIN 1 / END 338, on changed diff
+`295eda7eef7883203fca86ae1627ec65fc9ebe0729bc66de3f7f02fb58e9f502`.
+
+One unchanged-behavior whole FIRST run will use only a bounded failure-only
+original read-guard observer: single original delegation, no success output,
+holder/Count/facts wrappers, trace/profile or guard/deadline substitution.
+It records non-secret original tuple equality and whether the actual deadline
+was already expired BEFORE the failing original call; its pure control checks
+single delegation, identical interruption and no success output. Observation
+is diagnostic, not ordinary timing or runner/full/check proof. Source/tests
+stay frozen; failed/partial results remain failed, not a reason for blind full.
+
+2026-10-14 continuation: that failure-only whole FIRST run completed with
+1 ERROR in 382.024s (raw `c3463e81acfc88dd2acf5e9df5e788776b17ec19f94792f62a91b4707b4d8f00`).
+It reached the fixed mutation-entry guard, but the original template identity
+was already expired before that guard by 3.874s; the other captured original
+tuple predicates matched. Count=1 UNKNOWN remains, not successful full proof.
+
+The next necessary repair encloses ONE complete actual qualifier (or the
+entire older replay) in a fixed Count-received source evaluator. Complete
+retained source/Count raw checks precede and follow that whole computation;
+each interior K still verifies fresh settings, original refs/code/FD flags/
+mutable edges, C6 twice and C19 barriers. No callback, caller witness, prior
+qualification, cache, renewed read deadline or intermediate permission enters
+this evaluator. Ordinary K, receipt verification, full Count/OTHER loan exit
+and the last original source check keep their previous contracts.
+
+Two structural controls initially FAIL before implementation. The first
+actual boundary probe then FAILs in 354.255s (raw
+`e0c3da29ef0e4b1dd4265c924c882153f4cee5df8a651577fa9fce576d8ae77c`):
+the prefetched Count receiver was selected before short K existed, so the
+factory refused before any qualifier returned. This is not successful native
+evaluation evidence. Routing now requires the actual received short K;
+original native K remains the path while only prefetch exists. Its independent
+structural control also first FAILs. A separate genuine owner workflow first
+FAILs for a self-attested registry tuple (raw
+`25274cfeef29f54b57d5c735e529a61580bbc5076764cdf884c76df10b91e6b1`).
+The factory now anchors its original tuple through the genuine Count/source
+metadata BEFORE invoking any callback, and refuses/poisons that genuine
+receiver even if the caller catches the refusal and restores the registry.
+Two direct classes plus this native refusal give 85 PASS in 21.144s (raw
+`e2e70e01561095da3407fbbfcb4c19a4f8ccd11bcb8208f27e2b3c19349502ce`).
+The next actual boundary probe is justified by these two verified repairs;
+whole FIRST, full/check approval and REAL_ENV remain unproved.
+
+The subsequent real-short-K probe (raw
+`23b40624d714e25636a82dae4a159bdb36145b53bfb433742ea77edf73a6daad`)
+remains 1 ERROR in 378.013s. Its observer was installed only in the original
+input scope, which ended before Count-wire evaluation; it therefore did not
+observe that evaluation. The unchanged whole workflow reached Count=1 UNKNOWN
+and a sanitized mutation-launch HOLD. The current underlying primitive is
+UNKNOWN; the earlier run's expiry cannot explain this new failure by itself.
+
+An independent observer-lifetime structural control first FAILs. Installing
+only the same evaluator observer in the actual post-reload Count-wire scope
+then gives 3 pure controls PASS in 0.223s (raw
+`70375035361e81b34f12ca4b58f3b07565bd66572f90117002aeb03ac6a213cc`).
+On unchanged production/test diff
+`227754cf7ae9b1b24a6f1016d033e110edabb537aecc099fd61e68d2d00ad196`,
+the actual positive boundary probe gives 1 PASS in 376.980s, raw
+`1c7e92b4b5a51d789b71709d625332da56741a80fd866239ee212ddddcf8239f`
+(BEGIN 1 / END 168). It independently requires four full raw checks enclosing
+the genuine qualifier return, followed by original resource and K-registry
+cleanup. Same-bytes DELIVERED inode replacement at that return and caught then
+restored original metadata drift give 2 PASS in 749.358s, raw
+`40d7f7367d7db7b883662007f64c3dd987ee3165389fed49747053351ca0d470`
+(BEGIN 1 / END 380). Both require refusal and permanent poison, never a source
+result. Each deliberately stops before mutation; these results are NOT whole
+FIRST, runner approval, formal full/check or REAL_ENV proof.
+
+The next single unchanged whole FIRST diagnosis retains the original sealed
+failure-only read observer and adds single original delegates for wire-launch,
+request preparation, the actual fixture Popen facade and supervision. It
+records only fixed stage counts and the first original exception type/code
+file/line, no credentials, child bytes, profile/trace, clock replacement or
+changed deadline. Three pure observer controls PASS (raw
+`ec2c5592e82a3c5b9d58280e8ba71868f23e8903dee6c0a8a54d7d415d17ac56`).
+This addresses the specific missing primitive evidence, not a reason to rerun
+formal full blindly. The whole workflow's original behavior assertions remain
+unchanged; source/tests freeze during that run, and approval remains OPEN.
+
+That single whole diagnosis completed with 1 ERROR in 379.340s (raw
+`38ae77f29a047624f6002be561657719aba325ec319a4ae341a52716ee78de7a`,
+BEGIN 1 / END 316, frozen diff
+`574e70685bd9acadd48390933f24d6e64067cb8bb39ae6ee6a580c9580547fcd`).
+The original consuming wire check returned; the second, non-consuming
+pre-Popen check refused. The sealed original read observer confirms that this
+run's template-identity deadline was already expired by 0.944s BEFORE its
+failing call, with the other eight captured original predicates matching.
+Actual mutation Popen and supervision counts are both zero, and Count=1 stays
+UNKNOWN. Facts durations were 1.508 / 2.949 / 2.775 / 2.723s. These observations
+explain this run, not older failures or a missing full proof. No unchanged
+whole/full rerun is justified; the next step is a tests-first necessary cost
+repair retaining original deadlines and every actual commit/IO boundary.
+
+The corrected exact-code/actual-parameter C19 observer gives a genuine native
+RED: expected ENTRY/EXIT (2 total, 1 before qualifier return), observed
+(126 total, 125 before return). Raw log SHA256
+`21ec56afd8003bdbd43ebc8dfa89c46c31e0f9c006643e4e9feb756a06ea086e`,
+BEGIN 1 / END 187, 1 FAIL in 376.005s; the earlier zero-count observer failure
+is not this behavioral RED. Only the private fixed non-yielding evaluator's
+interior K sync is removed: complete original C19 groups remain synchronized
+at evaluator ENTRY and complete EXIT before any result returns. Every interior
+K retains fresh original identities/code/FD flags/settings/namespace checks
+and both actual C6 calls. Ordinary K, complete loan finalizers and independent
+source checks remain unchanged. Native ENTRY/EXIT fsync-failure controls must
+prove refusal, permanent poison and owned-resource cleanup. No performance,
+whole FIRST, runner approval or full/check success is claimed from this change.
+
+After that narrow change, all 93 allocation-module tests PASS in 5.284s
+(raw `41bfede7b8adc96eb9ad93bed335aa34385c7fca7e4693259372b5c89f2a833d`).
+An earlier class-selection command has a preserved loader ERROR for a nonexistent
+class; it is not a production failure or a successful complete selection.
+The actual normal, ENTRY-fsync refusal and EXIT-fsync refusal probes then give
+3 PASS in 1097.638s, raw
+`cd63b170a0803016e545e04852b8630b7e7c6e0ba351457f5e73ae5082beea50`
+(BEGIN 1 / END 514), frozen diff
+`f1a2d21706c4306866acca23897f5a6698690794b19f202df2ceccc83fd38257`.
+The positive case requires exactly two complete C19 syncs and four full raw
+checks; both injected failures require refusal, permanent poison and original
+resource/K-registry cleanup. These deliberately stop at the source evaluator,
+before mutation. Existing DELIVERED/metadata refusals and whole FIRST still need
+the changed-tree regression; no full/check or REAL_ENV approval is implied.
+
+Both unchanged negative expectations on the changed source now PASS in
+732.042s (raw
+`cb0bfc64acd4a0937ac0b3e7e6df358a79e8d520766aa14ec7732fd194fa4436`,
+BEGIN 1 / END 380, frozen diff
+`4292be5212102213f8832f7995942240f0f19896298e276e59a57199633572c2`).
+Same-bytes DELIVERED inode replacement still refuses at the evaluator return;
+caught/restored metadata still refuses immediately and cannot revive K.
+Together with 93 direct and the three native C19 boundary controls, this
+justifies one changed-source whole FIRST development diagnosis, retaining the
+original failure-only observers, behavior assertions, deadlines and commit/IO
+checks. Its purpose is to measure whether the verified interior-sync removal
+also resolves the previously measured pre-Popen expiry, not to assume that it
+does. An unchanged retry or formal full is not authorized by these local PASSes.
+
+That changed-source whole FIRST diagnosis completed with 1 ERROR in 387.404s,
+raw `ad833839bc2f4f378835e4d76c96f3615dff382587b503c85a3a3084ea9b21fd`
+(BEGIN 1 / END 316; original session 18819 reaped exit 1). The second,
+non-consuming pre-Popen wire check again refuses: template identity was already
+expired by 1.210s BEFORE its original delegate, while the other eight observed
+identity predicates match. Count=1 remains UNKNOWN; request returned once,
+mutation Popen/supervision remain zero. Facts durations are
+1.505 / 2.828 / 2.781 / 2.791s. The verified C19 change therefore is not whole
+closure. No unchanged whole/full retry follows this failure. The bounded next
+repair examines the two genuine K reads inside the complete current receipt
+reader, outside the existing fixed source evaluator. Both receipt K reads and
+its original C6/XLSX/admission/cycle recovery checks must remain; an actual
+fixed non-yielding receipt computation must have independent full original
+ENTRY/EXIT and last-return drift controls. Ordinary/older paths, original
+deadlines and every Count/consume/pre-Popen/post-send/finalizer gate remain.
+
+The current receipt boundary probe gives a genuine native RED: both actual K
+reads and the entire original receipt function returned, but the independently
+expected four full raw checks observed eight. One FAIL in 378.953s, raw
+`5fed6e59f623dfa7ae71792d3046b9d70c7cd0c7658cb3a11677e704daca1fc2`
+(BEGIN 1 / END 183; original session 75898 reaped exit 1). This is not a
+fixture-observer failure and does not establish whole FIRST timing. Two direct
+contract tests also fail before implementation (raw
+`f81258aa76fb27da36212388db9136dc517583ca190077592d321649d8cd76cb`).
+The new fixed receipt computation retains the entire original receipt reader,
+both actual K reads, full current C6/XLSX/admission/cycle checks and the final
+generation recovery tuple. Complete original metadata bodies dominate ENTRY
+and EXIT; no data result, qualification or permission returns between them.
+Both fixed factories use the independently anchored original eight-tuple;
+missing received slots cannot silently select the ordinary path. The actual
+source prefetch retains its original issuer and ordinary path. Existing source
+and new receipt fake-tuple controls require zero forged callbacks, immediate
+poison and refusal after restoration. All 148 allocation/direct/these two
+actual registry controls PASS in 44.878s (ordinary module-only 95 also PASS
+before the final admission-route change). Actual receipt normal/last-return
+DELIVERED drift tests still require the changed-tree run; no whole FIRST,
+formal approval, full/check or REAL_ENV success is claimed.
+
+The changed-tree receipt normal and last-return DELIVERED controls completed
+with 2 PASS in 734.647s, raw
+`318a6a89633125513e55c08b036c61824be8b4d0564f18df21f26839f8c1623d`
+(BEGIN 1 / END 341; original session 72487 reaped exit 0). The new factory is
+also reached by the genuine local prefix before COUNT; both controls stopped
+there with Count=0. They prove complete computation boundaries, both original
+K returns, permanent refusal/poison and cleanup, but not post-Count safety or
+whole FIRST closure. The existing DELIVERED negative now delegates that actual
+prefix unchanged and selects only an independently observed persisted Count=1
+UNKNOWN. It retains the same inode-replacement fault at the entire receipt's
+last return and additionally requires Count=1 UNKNOWN after refusal. This is a
+stronger critical commit-boundary expectation, not removal of the earlier
+coverage or a new corner-case matrix. No formal full/check follows local PASS.
+
+The strengthened actual post-Count receipt negative PASSes in 378.779s,
+raw `a2127af4844426650a489a3e7202c09e6ca27a711fc2f981d750f318f338fb61`
+(BEGIN 1 / END 170; original session 8022 reaped exit 0), frozen diff
+`cb8e6ff0dbcc024ee0d39ffd6420b891990f9e677245091c739c35be6421124d`.
+The original Count returns 1 UNKNOWN, and independent observations immediately
+before the same last-receipt-return fault and after the factory refusal both
+remain 1 UNKNOWN. The actual two K returns, complete original receipt return,
+immediate poison, identical primary interruption, full original cleanup and
+empty K registries are required. Related allocation/observer contracts give
+96 PASS in 5.350s. Full physical logs, including expected cleanup tracebacks
+printed after the unittest summary but before END, are retained in their
+original order. No cleanup traceback is substituted for the factory refusal.
+Together with the genuine receipt RED and unchanged related admission controls,
+these changed-source computation and commit-boundary results justify one whole
+FIRST development run. That run checks whether the bounded receipt repair
+resolves the previously measured pre-Popen expiry; it does not assume it does.
+There is no changed deadline, omitted facts/IO gate, formal full retry or approval.
+
+That changed-source whole FIRST run completes with 1 ERROR in 390.360s,
+raw `5f5cb1537a76aaa7e6e83e052e091312744f65a2793e3eb0f4dd2526a6062b99`
+(BEGIN 1 / END 316; original session 23263 reaped exit 1), frozen diff
+`21667faf6a7c4a916ec62cf1c47b89f4eef80d194840739709c1e0de748989fb`.
+At the second non-consuming wire check the original template identity is
+already expired by 1.402s BEFORE the original delegate; all other recorded
+identity predicates match. Request preparation returns once, mutation Popen
+and supervision remain zero, and actual Count=1 UNKNOWN is retained. Facts
+take 1.515 / 2.774 / 2.774 / 2.764s; the receipt boundary repair is not timing
+closure. The first duration is the genuine previously-entered prefix's full
+suffix; later facts execute fresh source/receipt at both ENTRY and EXIT. They
+cannot reuse the consumed prefix or be expected to cost only one suffix.
+No unchanged whole/full retry follows. The next bounded diagnosis delegates
+the two fixed module factories and their actual qualifier/receipt cores once,
+records numeric durations only, and deliberately stops after their complete
+next ENTRY/EXIT pair with independently observed Count=1 UNKNOWN. It neither
+wraps captured C6/guards nor changes reads, deadlines or results. Its explicit
+DIAGNOSTIC_ONLY result is not whole FIRST, a send or runner/full approval.
+
+The bounded component diagnosis completes in 386.093s (original session 83400
+reaped exit 0), raw
+`e4d53aa648b860a31949813e465345278ae933ef43b84382c03d760641b38474`
+(BEGIN 1 / END 165), frozen diff
+`69f180617cac1d66f9bcf26193ea0b0e489de3d18e18e5a797e275dc7fdd0fb1`.
+Three actual qualifier cores take 1.206 / 1.176 / 1.212s inside source factories
+of 1.236 / 1.205 / 1.242s. Receipt cores take about 0.017s and complete receipt
+factories 0.044–0.049s. Persisted Count=1 UNKNOWN is independently observed.
+The original diagnostic interruption and cleanup refusals remain physically
+present; the intentional bounded stop is not a whole FIRST PASS.
+
+This identifies the core read chain, not the receipt shell, as the remaining
+cost. A narrow original-C6 file check now replaces three pre-read fstats with
+two fresh held samples enclosing the real pread. Both held samples and the
+nofollow named sample must equal the originally captured complete nine-field
+identity; exact 0600, owner/type/link checks and original bytes remain required.
+No owner, namespace, complete pre/post phase, two C6 calls or recovery barrier
+is removed. Independent actual-file tests first give 2 FAIL in 0.195s, raw
+`fcdeb9ae11532f1735f0d9b93c23c62870b44f9991ac51e147cd758c1bb2b911`:
+the old sequence has three samples before each read and detects mode drift
+only after two recovery fsyncs. The revised entire six-case original-C6 class,
+including unchanged barrier-failure, same-byte replacement and six capture-gap
+controls, gives 6 PASS in 0.529s, raw
+`b6ebb1e3592ba6430faa49a8f20aa4cab4d30c34f9a9fb30e53f7e9b089746e9`.
+Actual read-time mode drift is now refused before either recovery barrier.
+The related six C6 direct, two real COMPLETE/APPLIED workflow and allocation
+selection subsequently completes: 103 PASS in 11.140s, raw
+`5ca20173c869f5ece35d08027e004599b42bf4f290ef0fabb23120e0efd05f08`
+(BEGIN 1 / END 113). The earlier whole remote-module selection was deliberately
+interrupted after being found too broad for this development slice; its original
+KeyboardInterrupt and child exit -2 remain in raw
+`ef8eaa555f698b333858680c99c67c5d48164d6f09c943275ae0533f755fd1ff`.
+That interrupted run is NOT a completed suite or PASS; no existing case is removed.
+
+A single-core profile in the same bounded diagnostic completes in 380.052s,
+raw `748be848643a4db955ae864e2872ee7ea84b5c71e8e8dfa1713e193a3cf53055`
+(BEGIN 1 / END 166), with Count=1 UNKNOWN and no observer error. Only its first
+genuine qualifier core is profiled, adding measurement overhead: 1.609s versus
+the two unprofiled cores at 1.215/1.222s. It records 176,620 original ancestor
+entry checks, 233,188 stat and 268,547 fstat calls in that core; it does not prove
+ordinary timing, full FIRST closure or a runner approval.
+
+The actual IB provenance digest path now acquires the held original parent and
+file together BEFORE any digest-body stat/read, then checks the live leaf and
+the complete fresh ancestry again before return. Remembered parent descriptors
+are lookup data, not old verification results; the original file acquisition
+still performs its fresh complete entry walk. Every actual byte is reread and
+hashed, the ordinary pre-open regular-file check is retained, and no callback,
+deadline, FD ownership or qualification result is cached. Independent direct
+and real analyzer/receipt workflow initially give 2 FAIL (duplicate warm entry
+walk), raw `7d0afcbbd70d1d5d12e867ebf46cab146055e1853472846303b30a9e68ef695c`.
+Review catches and independently reproduces two initial refactor regressions:
+ordinary nonregular pre-open order (raw `bc17a2c45d0faee942864fd7f46d8598a9cb42e35b775fe28a5da821b532d09e`)
+and canonical-parent rejection (raw `0c87b57c66ea746e417e5642fb89315f2f17dab0f34539e0c612c21972a32e39`).
+Both are repaired without weakening their refusal expectations. Final pipeline
+direct, provenance direct/workflow and three real receipt scenarios give 52
+PASS in 4.266s, raw
+`9a3a3f514e2ad858abfe24c057f5bae34e2e1187bcf4979b725d68ea06827709`.
+The manifest explicitly connects the real pipeline/provenance workflow. This
+is local slice evidence, not the still-open original-read deadline, whole
+REQ7 or current formal full/check proof.
+
+The same original-component bounded diagnostic after this change completes in
+374.404s, raw
+`58235cca0e8d83ea4f6d405bb12113145a7e123f012fa84208c2aea50b06f948`
+(BEGIN 1 / END 165), frozen diff
+`3e984f2ed648784c60ed105cce3a9cc34676cea69dc9b9f07ffec7dbc23a0b81`.
+Three genuine source cores take 1.129 / 1.125 / 1.124s; their complete factories
+take 1.157 / 1.153 / 1.153s. Initial facts take 1.466s and the next ENTRY/EXIT
+facts 2.622s before the intentional stop. Count=1 UNKNOWN and original cleanup
+refusals remain physically present. This measures a modest improvement, not
+closure of the whole original-read deadline, a send, or a formal approval.
+
+Two remaining consecutive exit walks are independently reproduced: the archive
+witness and directory duplicate perform two identical ancestry checks after
+their last I/O. Their original context exit now supplies the one complete fresh
+exit walk; no earlier read/dup exit is reused. Initial two subcases FAIL (8
+ancestors expected, 16 observed), raw
+`45a3a7c92a895bcf20c9af4eed83c4f98f34be5c59ef2f925356a654322cab19`.
+A real ancestor replacement during dup is still refused and the duplicate
+closed. Pipeline/provenance direct and a real producer-to-receipt workflow
+complete 49 PASS in 4.561s, raw
+`0908b5e92dc981d1b1ad33f6681460304e541a58c4ef79ba943d67cc2f0a6764`.
+This is a related slice result, not whole FIRST or current formal full/check.
+
+One changed-tree ordinary original whole FIRST subsequently completes as one
+ERROR in 383.951s (original session 21669 reaped exit 1), raw
+`2011948b17fdf06da9cb10ce85ad86e32997b2f4aa19c52570b87278696f53bf`
+(BEGIN 1 / END 312); its known original 2362-byte prefix remains unchanged.
+Nine native reads return 0, G1 quota/inventory is present, Count reaches
+1 UNKNOWN, and complete facts take 1.463 / 2.660 / 2.609 / 2.617s. The ordinary
+run exposes the real sending refusal but not its innermost stage/predicate;
+the previous 1.402s-expired observation is historical, not this run's cause.
+No full retry follows. One bounded diagnosis reuses the sealed four-stage and
+failure-only read observers, delegates each original primitive once and keeps
+all clocks/deadlines/results unchanged. Its three pure controls check only the
+observer, not native behavior or an approval.
+
+The bounded original stage diagnosis completes as one ERROR in 375.084s,
+raw `e4352b6a5a3b7c57ee666d071475dbb6050e2b9ce5d824b79171e00ffc393d27`
+(BEGIN 1 / END 316). The second nonconsuming wire fence finds original
+template identity already expired by 0.337918s; all eight other identity
+predicates match, one request preparation returned, and Popen/supervision
+counts remain zero. Count remains 1 UNKNOWN. This is a proved failed
+boundary, not an inference from standalone PASS or a full proof.
+
+One-use consumption is now a private DATA-only mark at the same original
+preparation boundary. It returns no grant and calls no semantic verifier.
+The original complete fresh verifier still runs immediately before Popen,
+followed by the original request/token wall-expiry check, and after send;
+scope tails and the total 60-second budget remain unchanged. Startup or NI
+never rolls back consumption. Clear independent RED is two FAIL, zero ERROR
+(`7f74fc5cf90876bc15512d845579a4b30db446047901eb8e55fd28aec47fdd25`),
+then three PASS (`b2603f2b349673b41b8dbbcf02221c4eb0f646c6ec57b0c5e9673e4dd92c9027`).
+The first 167-case related run retains one FAIL: its old second-read ordinal
+injects drift at post-send after early semantic duplication is removed.
+The fixture now delegates the complete original at the actual nonconsuming
+pre-Popen fence and preserves zero Popen/child/request, original ctime drift,
+UNKNOWN and no second attempt assertions. All 167 related cases then pass
+in 75.942s (`77c23dba81b11bfd2ab220467263e27b208ba7e3458b2251a9fa720e24669253`).
+The three preparation/final-fence cases are additionally strengthened to
+require the actual sender exception outside original cleanup, and pass on
+those final test bytes (`6f5b6060434761c2f6999834dcf65d587e102b8bafed59a1d8571e5db837948f`).
+These related results do not prove cumulative whole FIRST, current full/check
+or real Cloud/device acceptance. No approval ledger is changed.
+
+One ordinary changed-tree whole FIRST recheck still fails: original session
+45580 is reaped exit 1, one ERROR in 393.498s, complete raw
+`0d0b38b8ea9c7cc77fbe8118b2871dbb425e07356b531ff09018106f1aeb4c6f`
+(BEGIN 1 / END 312, old 2455-byte prefix preserved). Nine native reads return
+0 and G1 quota/inventory is present; Count is 1 UNKNOWN, initial facts take
+1.479s and later facts 2.734 / 2.669 / 2.662s. The sender refuses, but this
+ordinary log does not expose whether the first failure is prelaunch, post-send,
+request, Popen or supervision. Do not inherit the previous second-wire expiry
+diagnosis after the sender's number of semantic wire calls changes.
+The unchanged sealed stage/failure-only observers remain applicable: the
+first observed wire now means actual pre-Popen, not the DATA mark; zero wire
+events means not observed, not successful admission. Three pure controls pass
+(`22ca62ec5d033a15962490cb018f3c254a3329e657d31ef027a2844092caaf83`).
+One bounded diagnostic follows to locate the actual earliest failure, not a
+blind full/whole retry, larger timeout or approval.
+
+### REQ7 fixed non-yield original-read groups (2026-10-14, development only)
+
+The bounded original stage diagnostic was reaped with one ERROR: actual
+pre-Popen verification, Popen and supervision returned, but post-send rejected
+the original template identity read already 0.899376583 seconds past its
+unchanged 30-second deadline. The separate explicit owned-TMPDIR whole test
+also remains one ERROR (371.548s, complete raw
+`73cd91aa7fde7350ff25efeb3b735ff173d72c292f0b92b9117df6ffe82f2953`).
+Neither failure is a PASS or evidence that changing temporary paths fixes it.
+
+The private fixed read group now freshly checks common target (and, for
+project reads, original credentials) at both boundaries of a non-yield
+evaluation. Every actual issued read keeps its exact original packet identity,
+shape, full body, path, owners and original deadline. After the last real
+token/owner operation, the actual target is rechecked, then all original token
+fields and read registry entries are checked again. One final monotonic sample
+checks EVERY original deadline, including the first item while the last item
+was evaluated. No cached PASS, new issuer, renewed deadline or send permission
+is produced; public single-read APIs remain unchanged.
+
+Only contiguous checks in the W1/template/nonce gate and the two business
+continuity tails are grouped. Decoding, original-file replay and per-row
+semantic work remain between separate fresh checks. Direct and actual owned
+OAuth/TLS multi-script tests independently reproduce missing groups; return
+boundary tests reproduce real target drift, equal token-object substitution
+and expiry after the last original authentication delegate (four FAILs before
+the boundary repair). All original assertions and raw failed logs are kept.
+Current direct/workflow mappings already cover the three production paths.
+Local groups do not close whole FIRST, REQ7, current full/check or real-device
+acceptance. No approval ledger is edited.
+
+The corrected return-boundary five direct/actual workflow cases pass in
+13.875s (`3b4a6e777d1f852778b61e90868be96204d9ca17ae95740155b12cd0b0af6705`).
+The unchanged public single-read suite plus related preread direct and real
+business-creation workflows then pass 58 tests in 46.718s
+(`f486971a17b376515d206484f13429b2b087024e8f1fd2d5443aaa9aa4878939`).
+These are local regressions, not an approval or completed cumulative FIRST.
+
+### REQ7 fixed read acquisition and observation windows — owner 2026-10-14
+
+Owner delegated the simple time contract to the main window. Read acquisition
+still has a total30s budget from `read_once` entry: preparation, child launch,
+real supervision, complete response, all stream cleanup and final original
+project token/target/dual-owner checks must finish within it. Mutation remains
+60s. Successful completion then issues the original process-local read once,
+with a separate fixed30s observation window. Getters, groups and finalizers
+check that original deadline without renewal. Existing source/credential/owner
+revocation checks remain; the observation is neither CAS nor a write permit.
+Compared with the historical shared deadline, maximum observation age from
+attempt start can now approach60s. This explicit contract change is not a
+larger transport timeout or a relaxed test timeout.
+
+Independent lifecycle direct tests and genuine owned OAuth/TLS read workflows
+first recorded4 methods/9 assertion FAILs (`1a71b452...523573`); issuance failure
+controls recorded3 methods/5 assertion FAILs (`91905af8...4b7f97`). Moving issuance
+after cleanup, checking final originals, retaining interruption and retracting
+partial registrations produced6 PASS/1.647s (`fdf33151...335698`), followed by50
+launcher/supervision regressions PASS/16.103s (`b28faf99...792840`).
+Review then found a final-auth RETURN boundary. The first fault hit the earlier
+supervisor cleanup and passed (`63c9c543...e49fb2`), so it is not the new boundary's
+RED. Targeting the fourth actual target check independently reproduced two
+FAILs (`c652c777...9743dd`); a pure recheck of the same original auth registry,
+token fields and expiry after the last source I/O repaired it. All direct cases
+and both genuine project/legacy lifecycle workflows pass13 cases/3.634s
+(`742a5148...37405b`). Old failures, old assertions and complete raw logs remain.
+Current manifest already binds this script to direct and multi-script workflows.
+This is local lifecycle evidence, not whole FIRST, current full/check, runner
+approval, actual Cloud/VM/SSH validation or overall REQ7 completion.
+
+### REQ7 adjacent catalog replays and a metadata-fixture failure (2026-10-14)
+
+The bounded original FIRST diagnostic remains one ERROR/357.480s (complete
+`394cd5e4...bd889`, 374 physical lines). Its failure-only group observer records
+the original template-identity observation already expired by0.042038s before
+the post-supervision wire check; the recorded raw/body/owner/binding/shape agree.
+Actual fixture Popen and supervision each entered/returned once. This proves
+this run's stage, not retrospective causes for other sanitized failures or a
+successful send/settlement. No observation or transport deadline was extended.
+
+Two same-checkpoint catalog replays are now removed: `_inputs` still returns
+only after its real original context ENTRY/EXIT, and the writer borrower still
+checks originals AFTER membership before yielding; only its adjacent extra
+exit replay is removed. All external source/facts/PRE/POST checks remain.
+Independent actual-owner/catalog controls first record2FAIL (2vs3 and3vs4)
+plus the already-correct real membership-rebind control PASS, then3PASS0.325s
+(`299a06b4...3c479` -> `2ef98b27...9fdc0`). The initial3ERROR fixture run
+(`2b1963e0...fc190`) is retained separately, not called behavioral RED.
+
+The first whole related global module records103 tests/oneFAIL9.287s
+(`75ec207a...a322`). A failure-only original injection observer establishes an
+AttributeError during mtime restoration (`4b7e184f...c4dd2`): the synthetic-root
+fixture omitted native `st_atime_ns`. An independent native-metadata expectation
+first FAILs (`e73ba4fe...46571`); only that fixture field is added. The new control's
+stale pre-open-atime assumption also FAILs (`266b035f...e19fd`, `f794ec0e...448d8`)
+and is retained; its independent native stat is captured after actual open,
+before the synthetic fixture. Original same-inode rewrite/restoration/rejection
+assertions remain unchanged. The control and original fault workflow then2PASS
+(`2305c1b1...e6089`), and complete global/owner modules119PASS8.789s
+(`32277b90...7f3a`). The failed119-case round was started before the immediately
+preceding targeted result was accepted; retain that sequencing mistake and do
+not describe it as a successful prerequisite or as full proof. Later runs
+explicitly require the targeted command's completed exit0 before dispatch.
+
+These are local current-slice regressions. No performance gain, completed
+ordinary FIRST, runner approval, current full/check or REAL_ENV PASS follows.
+
+### REQ7 one original C6 per fixed K checkpoint (2026-10-14)
+
+Only the fixed non-yielding evaluator's adjacent `c6_verify(); c6_verify()`
+becomes one complete original replay. Each real K getter retains separate
+PRE/POST checkpoints; standalone K and the evaluator's complete source/C19
+ENTRY/EXIT remain unchanged. There is no cached qualification or renewed clock.
+Independent direct RED is one FAIL (`e0cc87ad...dfa2`); the actual original
+Count/K checkpoint workflow also first FAILs `[1,1] != [2,2]`
+(`c276ec08...9dfa`). After the minimal implementation, direct and that real
+checkpoint control PASS. The newly written negative fixture FAILs separately
+(`7081ee87...556`): its deliberate primary poisoned the scope before the actual
+tail, so that result is not a successful tail refusal proof.
+
+The repaired negative uses the genuine protected qualifier return, original
+C6 closure, actual same-byte/new-inode DELIVERED replacement and complete EXIT
+refusal. Three intermediate fixture ERRORs are preserved: reading a mocked
+function's `__wrapped__` (`8fe20bfa...6c4`), intercepting the pre-Count prefix
+(`78c50915...dc2`), and observing an early-import code identity rather than the
+current retained callback (`244c72ff...820`). Only Count=1 is targeted; the real
+Count=0 prefix delegates unchanged. A short independent same-name reload/real
+closure control PASSs (`4dafaccd...9e5f`). Original callback code is now observed
+from the actual packet closure, never invoked or substituted by the observer.
+
+The actual native negative then PASSs1/313.894s (`6037fbf8...dd15f`), complete
+223 physical BEGIN/END lines, original4413-byte prefix preserved. The genuine
+qualifier returns while unpoisoned after an actual internal C6 delegate; full
+raw EXIT refuses the replaced original before any result escapes, original
+receiver/slots close and Count remains1/UNKNOWN before and after. The expected
+controlled stop occurs only after that refusal. Original diagnostic traceback
+output, including the later original global finalizer refusal, remains in the
+raw log. This is one scoped failure mechanism, not a successful ordinary FIRST,
+performance claim, full/check/approval or overall REQ7 completion.
+
+The complete settings-allocation direct module plus the observer control then
+97PASS4.787s (`f671021a...ab81`), original related process2150 reaped exit0,
+106 physical BEGIN/END lines with unchanged command/tree/diff identities.
+These direct regressions do not substitute for the remaining true Count/K
+workflow selection, ordinary complete FIRST or exact-tree runner full/check.
+
+The seven true Count/K/registry/restoration/last-delegate workflows also then
+PASS7/123.388s (`628302ac...b34e`), original71391 reaped exit0, 35 physical
+BEGIN/END lines and known8670-byte prefix unchanged. They preserve one real C6
+loan, complete Count boundaries, two independent actual K checkpoints, copied
+registry refusal and irreversible poison after caught drift. The next ordinary
+FIRST is justified by this substantive implementation change and these scoped
+regressions; an actual performance gain and normal complete send remain to be
+measured. It is not an unchanged retry or formal full proof.
+
+That changed ordinary FIRST did not complete: original process50138 was
+reaped exit1, one ERROR/327.845s, log `91f11f5d...5fd` (321 physical
+BEGIN/END lines, original3783-byte prefix preserved). Five actual source facts
+returned, but the Count lane's original EXIT refused; Count remains1/UNKNOWN.
+The raw traceback does not expose the earliest failed predicate or whether
+the real request/Popen/supervision/post-wire boundary completed. The older
+1.709s expiry diagnosis must not be retroactively assigned to this run.
+Next is one bounded failure-only original group/stage diagnosis, not another
+ordinary FIRST or full retry; clocks, original deadlines and guards remain
+unchanged. Scoped regression PASS does not close this failure.
+
+The one bounded current-tree group/stage diagnosis subsequently ERRORs1 in
+329.886s (`93cc1aa0...cd82`, original23972 reaped exit1, complete318 physical
+BEGIN/END lines, both2583/4416-byte prefixes preserved). In this diagnostic
+run only, the first failed single read is `template_identity`: its original
+registry/body/shape/writer/owner/binding match, but its fixed observation
+deadline has expired1.814629s before the original lane EXIT delegate.
+The actual request2, fixture Popen1, supervision1 and wire2 all returned.
+This does not retroactively identify the ordinary run's unknown predicate or
+turn a returned wire check into successful settlement/COMPLETE. Count remains
+1/UNKNOWN. Static review finds no same-boundary replay removable from the
+Count facts/source/wire checks across intervening real I/O; neither deadline
+relaxation nor deleting that EXIT gate is an accepted repair. Further work
+must address an evidenced mechanism, not repeat the same ordinary/full run.
+
+### Fixed four-template read acquisition (2026-10-14; core integration under verification)
+
+The fixed consumer boundary `_acquire_current_project_template_reads` now
+delegates once to the actual cohort and retains all four per-kind original
+read gates. Independent control and real TLS workflow tests first FAIL3 for
+the absent interface (`fbda7198...5650`), then PASS3 (`61b888d2...800a`): one
+actual owned child/four requests, and a partial fourth response returning no
+observations. The control-only test additionally rejects short/extra result
+tuples before consumer admission. At that boundary-only checkpoint the online
+core still selected its old single-read loop; those results did not prove
+worker selection or FIRST closure. Manifest explicitly binds this boundary.
+
+The subsequent actual-core routing oracle and genuine preparation workflow
+first FAIL2/34.423s (`de728533...0c84`): no cohort selected and four original
+scalar child acquisitions, respectively. After minimum routing to the fixed
+consumer, the unchanged independent expectations plus source-bound direct
+class PASS8/51.458s (`61c0f38c...42a4`). The three core fixtures record logical
+responses separately from one real cohort child/four actual TLS requests;
+metadata drift remains after its actual fourth completion. Entry and each
+original response's source/use checks, final source replay, POST/EXIT,
+deadlines and old scalar creator/reconciliation paths remain. No timing gain
+or repair of the older whole-FIRST CountEXIT expiry is claimed from this
+scoped preparation result. Its remaining negative scenarios and actual
+archived NEW→FIRST→Count/CLAIM/wire must still be verified.
+
+Original negative selection then PASS3/FAIL1 (`bd6eb6e4...53b4`,170.800s).
+Quota inode replacement, post-finalizer expiry and business-original finalizer
+replacement remain rejected. The postclose revoke failed because its old
+fixture patched the convenience `_reads` wrapper, while the core actually
+entered `_inputs` and bound fresh reads directly; no revoke was injected.
+Independent structural RED1 (`ed5e76dd...6039`) preceded the minimum fixture
+repair: delegate actual inputs/bind, wait for genuine CLOSED, revoke the exact
+row registry, restore only at outer cleanup. Production refusal is unchanged.
+The first paired run retains its new structural selector FAIL (it counted
+the two registry-lock `with` blocks as source holders) and genuine revoke
+PASS (`db6a8edd...a89c`). Selecting the literal source-holder `with`, without
+changing the expected count or refusal contract, then PASS2/50.539s
+(`5608e38d...85a1`). This is targeted closure of that fixture problem, not
+an unchanged full retry, whole-FIRST success or current full/check proof.
+
+The one changed-core ordinary archived NEW→FIRST run then ERRORs337.509s
+(`41c26bbd...2accb`), original10233 reaped exit1 and complete317 physical
+BEGIN/END lines read with the old3783-byte prefix/inode retained. Genuine
+business reads return and quota/inventory compose; Count1/UNKNOWN is retained.
+Five actual source-facts calls return in1.3285/2.3587/2.9784/2.3851/2.3880s,
+but the Count-lane EXIT still raises `GlobalAttemptHold`. Its exact original
+predicate is not revealed by that ordinary log; neither it nor the earlier
+one-C6 ordinary failure is retroactively called a proved expiry. Cohort/core
+integration is therefore not whole closure or successful settlement. No
+ordinary/full blind rerun follows; the existing sealed single-delegate
+failure-only group/stage diagnostic is statically compatible with the
+current eleven-field original registry, and its unchanged3 preservation
+controls PASS (`28a8eeb4...90bb`). Any next execution is a bounded diagnosis,
+not formal proof, and must retain the exact current source and complete END.
+
+The new internal `OwnedProjectTemplateReadCohort` performs only the original
+fixed identity/header/whitelist/metadata native shapes, once each in order,
+inside one owned supervised child. Metadata remains its original restricted
+read-only search POST. This is not a Google atomic snapshot or arbitrary batch.
+Acquisition30s starts at the single group entry; only complete correlated
+four-response bytes, confirmed child termination, all stdio cleanup and last
+original authentication/target/dual-owner checks allow one observation start.
+The four previously unissued originals receive that one fixed30s observation
+deadline. No existing observation is renewed; mutation60s and consumer
+source/POST/EXIT checks remain unchanged. Combined output retains2MiB and
+private input32768-byte caps. Partial/foreign/reordered/trailing frames,
+last-source failures and interrupted registration leave no cohort originals.
+
+Independent initial5FAIL are interface-absence RED (`ab2ddd...5370`); the same
+five codec/issuance/cleanup/final-owner/deadline/registration controls then
+PASS (`7d6d2b...71dc`). The previous one-reply TLS fixture initially ERRORs
+against an independent four-real-connection expectation (`6b6a3b77...0a26`),
+then its bounded1-or4 extension PASSs that control (`64078820...217a`), with
+old one-reply behavior and3s/4s bounds retained. Actual original project SDK
+authentication, one real child, four native TLS requests and complete cleanup
+PASS2/2.620s (`36f82d1d...c519`), including a partial fourth HTTP reply that
+issues nothing and cannot retry. These are scoped production/transport
+boundaries, not timing gain, ordinary FIRST, successful settlement, installed
+worker selection, full/check/approval or overall REQ7 completion. Existing
+single-read tests remain; integration must use the genuine cohort factory and
+actual four-request fixture, not bypass old scenarios or fabricate responses.
+
+Both complete existing read-launcher/native-TLS modules then PASS57/34.875s
+(`90d0c542...6d7d`), original41417 reaped exit0 with stable81 physical
+BEGIN/END lines. This includes all original single-read native/owner/cleanup
+scenarios and the new fixed-cohort cases. No failure, skip or weakened
+expectation is used to obtain this scoped result. Actual current FIRST
+integration, performance/whole completion and exact-tree full/check remain
+OPEN; the older exit-expiry failure is not declared repaired by this result.
+
+The subsequent current-core failure-only diagnostic is complete, not a full
+proof: original session3818 reaped exit1,335.413s, raw
+`e25bb36cddec28053beabe776f5209043da204271b20bff0cff28df036c74757`,
+physical BEGIN1/END314 with stable identity. In this diagnostic specifically,
+template_identity was already expired1.317174917s before the original Count
+EXIT check; original registry, writer/owner/binding/shape/data still matched.
+Actual request2/Popen1/supervision1/wire2 returned, Count1 remains UNKNOWN.
+This does not retroactively establish the predicate of earlier ordinary logs.
+No deadline extension, original finalizer removal, cached validation, Count
+reset or ordinary/full retry follows from a partial PASS. The next bounded
+change tests fresh grouped template checks at each unchanged pure guard-loop
+boundary; interleaved full original graph checks and all distinct cleanup
+boundaries must remain.
+
+The six pure four-template guard loops now each use one fresh existing project
+read-group check, with exact four keys and original response objects verified
+before and after delegation. No group result/PASS is retained. The original
+per-kind acquisition and interleaved `originals -> single read -> originals`
+loop remain unchanged, as do all separate yield/image-close/finalizer tails.
+Independent direct/routing/TLS initial REDs are `f29e80e0`, `8c809ec7`, and
+`67b0c51a`;12 current direct and genuine TLS/group-source controls PASS3.617s
+(`82307d65`). Five unchanged genuine core/business/quota/expiry/postclose
+scenarios PASS251.668s (`d1f0c768`), original52250 reaped exit0 with stable
+BEGIN1/END24. These scoped results do not establish a timing gain or complete
+FIRST/settlement/full/check. A bounded current changed whole scenario may now
+be tested once; another failure requires evidence-based diagnosis, not blind
+ordinary/full reruns or a longer deadline.
+
+That bounded changed ordinary scenario still ERRORs338.871s, original73400
+reaped exit1 and full stable317physical lines read (`cf281feb13c68cd42be0f7264af29d68b0a8c069ed0aee0fb2338248a7f312e8`).
+The actual five business children returned0; dedicated quota/complete inventory
+and Count1UNKNOWN remain, with five actual facts replays returning. The
+original Count-lane EXIT raises GlobalAttemptHold; this ordinary log does not
+expose its exact rejected predicate. The six-loop optimization is therefore
+not whole closure or proven timing gain. No formal full is launched. The
+sealed failure-only observer may be used once to identify this current tree's
+actual original deadline/identity predicate, preserving all deadlines and
+original delegates; results cannot be assigned retroactively to this log.
+
+The subsequent unchanged failure-only observer completes ERROR340.373s,
+original92028 reaped exit1, raw `7560bc581c8bc3fdd15b0888ddf6c99d23d08944d0bef154f7d2827dc2f5dad7`,
+stable physical BEGIN1/END314. In that diagnostic alone template_identity was
+expired0.399929542s before the original Count EXIT, other original relations
+matched, and request2/Popen1/supervision1/wire2 returned with Count1UNKNOWN.
+The separate ordinary log's exact predicate remains unassigned.
+
+The business binder's pure acquisition-current loop now groups only shared
+auth/target reads, freshly on each call. Exact original acquisition tuples,
+container identity, order, first identity plan and common provenance are
+retained. Every scalar HTTP acquisition and its original/inventory fences,
+1000-operation/16MiB business bounds,2MiB per read, dedup/None and CLOSED
+issued-only tail remain unchanged. This is not a business batch/cohort or a
+cached validation. Independent direct2API-absence RED (`9873b90d`) and actual
+prepare routing RED (`0c6d7fa7`,31.322s) precede implementation; the latter
+finishes actual old first-panel transport before rejecting zero group hits.
+Current24 direct/control/real prepare/postclose tests PASS103.060s
+(`ec491091`), followed by3 unchanged genuine quota-rebind/last-finalizer
+expiry/business-original-rebind cases PASS133.134s (`749886ff`). Actual
+group observations preserve each real response/auth object; all original
+logical/physical IO, zero COUNT and source/cleanup expectations stay. Manifest
+workflow `req7_default_original_business_reads_post_all_finalizers` already
+maps these production/test paths. No timing gain, complete FIRST, approval or
+full/check is inferred; a further bounded whole requires an explicit basis
+on this substantive code change, and another failure requires diagnosis.
+
+The subsequent code-changed original archived-delivery/new-originals/FIRST
+scenario passes323.056s (one existing test, original session3736 reaped exit0).
+Its complete log has stable BEGIN1/END29, SHA
+`665bc5016f85719048eeb0fae5dd79fdaa7aae73a7d43a2c25ae01e8633209b7`,
+and identical BEGIN/END source diff `cd02e3d2`. All five actual business
+children return0; dedicated quota, complete inventory, Count1UNKNOWN and
+the original final transport/source assertions remain intact. This is
+local workflow evidence on that recorded tree, not a full-suite proof,
+measured timing gain, real Cloud/device acceptance or authority to clear
+UNKNOWN. Earlier failed ordinary/diagnostic logs remain distinct. Formal
+related/full/check still require the reviewed clean-tree runner prerequisites.
+
+The six-module related regression completes707 tests in2308.222s with exactly
+one FAIL, not a successful related/full proof (raw
+`4e5dcedee78fa2b02aeb5ed28533cad5adbf617e1bc68a6366d317a3faa52905`,
+BEGIN1/END972). The second native delivery fixture observes the obsolete
+`_hold_delivery_authority` leaf, whereas creation after an existing original
+pair now uses `_hold_delivery_entry_authority` and the original native creator.
+An independent fixture-routing RED (`076c2d83`) precedes changing only those
+observer hooks. The genuine original second-delivery scenario and routing
+control then PASS23.937s (`aa6e226f`); original event bytes, first-pair inodes,
+outbox cleanup and both UNKNOWN counts remain mandatory. This diagnoses the
+specific fixture failure; it neither relabels the707 run nor replaces full.
+
+Count raw-tail phase acquisition has a separate real cleanup fix. Two literal
+direct lifecycle controls and two actual Count/settings/catalog workflows
+initially FAIL (`4d13b189`): phase set interruption/allocation failure leaves
+original settings/raw slots unclosed. The issuer now captures its original
+binding and fixed close function before guarded phase acquisition. Failed
+acquisition closes only those strong original resources, without a forged
+phase, semantic Count/C6 verifier or K/source permission; first NI is retained
+and only an actually obtained token is reset. The first revised selection
+still reports two fixture FAILs (`34b44aa6`); a bounded callback-only diagnostic
+(`6bc877c5`) proves its raw namespace check incorrectly omits the genuine
+Count1 append. The fixture now permits exactly literal ATTEMPT-1 in only the
+counted graph, retaining all raw checks and forbidding masked callback errors.
+Four new controls plus six unchanged tail controls PASS1.010s (`90aaaa18`).
+The actual workflow keeps Count1 UNKNOWN, no CLAIM, all original FD closure
+and registry revocation; no timeout or behavioral expectation is weakened.
+Manifest direct and `req7_native_c25_count_claim_original_replay` mappings
+already cover these existing modules. Exact-tree formal related/full/check,
+field acceptance and ordinary publication proof remain separate and OPEN.

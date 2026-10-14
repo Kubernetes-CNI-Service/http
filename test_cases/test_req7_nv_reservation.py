@@ -1037,6 +1037,49 @@ class Req7CatalogNvPreparationTests(unittest.TestCase):
         return self.module.hold_catalog_nv_preparation(token, binding(), self.identity,
             self.eth_plan, self.eth, self.ib_plan, self.ib, **args)
 
+    def test_already_pinned_native_nv_replay_keeps_one_live_original_capture_per_edge(self):
+        with self.native_c6_origin_fixture() as (module,writer,token,unit):
+            with self.preparation(token) as prepared:
+                self.catalog.register_pending_c6_unit(writer,token,binding(),unit,_nv_preparation=prepared)
+            parent,_legacy,base,keys,ids=module._inputs(token,binding(),self.identity,**self.kw)
+            name=module.ownership._validated_owner(token,binding()).lock_name[:-5]+'.unit-'+unit.unit_id+'.nv'
+            held=self.catalog._Originals()
+            try:
+                folder=held.directory(parent,name)
+                for entry in sorted(module._CATALOG_NAMES):
+                    held.file(folder,entry,2*module._LIMIT if entry in ('ETH-RAW','IB-RAW') else module._LIMIT)
+                held.file(parent,name+'-started',16384);held.verify()
+                original_directories=tuple(held.directories);original_files=tuple(held.files)
+                seen=module._native_original(parent,name,binding(),base,keys,ids,[],held)
+                self.assertEqual(((KEYS[0],'NV30102'),(KEYS[1],'NV30103')),seen.reservations)
+                self.assertEqual(original_directories,tuple(held.directories),
+                    'replay of an already-pinned exact original cannot multiply directory captures')
+                self.assertEqual(original_files,tuple(held.files),
+                    'retain the same LIVE original graph; reread bytes without another stored capture')
+                held.verify()
+            finally:held.close()
+
+    def test_native_nv_replay_completes_partial_live_catalog_capture_without_recapturing_marker(self):
+        with self.native_c6_origin_fixture() as (module,writer,token,unit):
+            with self.preparation(token) as prepared:
+                self.catalog.register_pending_c6_unit(writer,token,binding(),unit,_nv_preparation=prepared)
+            parent,_legacy,base,keys,ids=module._inputs(token,binding(),self.identity,**self.kw)
+            name=module.ownership._validated_owner(token,binding()).lock_name[:-5]+'.unit-'+unit.unit_id+'.nv'
+            held=self.catalog._Originals()
+            try:
+                self.catalog._inspect(token,binding(),held)
+                directories=tuple(held.directories)
+                folder=next(row[2] for row in directories if row[:2]==(parent,name))
+                marker=next(row for row in held.files if row[:2]==(folder,'INITIALIZED'))
+                seen=module._native_original(parent,name,binding(),base,keys,ids,[],held)
+                self.assertEqual(((KEYS[0],'NV30102'),(KEYS[1],'NV30103')),seen.reservations)
+                self.assertEqual(directories,tuple(held.directories))
+                self.assertEqual([marker],[row for row in held.files if row[:2]==(folder,'INITIALIZED')])
+                self.assertEqual(set(module._CATALOG_NAMES),{row[1] for row in held.files if row[0]==folder})
+                self.assertEqual(1,len([row for row in held.files if row[:2]==(parent,name+'-started')]))
+                held.verify()
+            finally:held.close()
+
     def compiled(self, nonces, *, generation='c' * 64, sheet='ETH Cabling', keys=KEYS, identifiers=('NV30102', 'NV30103')):
         from monitor.issue_tracker_send_unit import freeze_send_unit
         args = cabling_inputs(nonces, identifiers=identifiers)

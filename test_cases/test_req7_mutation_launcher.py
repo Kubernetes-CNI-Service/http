@@ -99,6 +99,65 @@ class Req7MutationLauncherWorkflowTests(unittest.TestCase):
     certificates = native.certificates
     server = native.server
 
+    def test_private_preparation_interruption_spends_original_before_fresh_launch_fence(self):
+        class PreparationInterrupted(BaseException): pass
+        primary = PreparationInterrupted(); facts = []; module = load()
+        with ExitStack() as stack:
+            _local, _ownership, journal, writer, owner, target, token, unit, image = self.owners(stack)
+            original_parse = module._parse_private; original_inspect = journal._inspect
+            with mock.patch.object(journal, '_inspect', wraps=original_inspect) as inspected:
+                def preparing(raw, nonce):
+                    original_parse(raw, nonce)
+                    facts.append((journal._LIVE_WIRE_CLAIMS[image][-1], inspected.call_count))
+                    raise primary
+                with mock.patch.object(module, '_parse_private', side_effect=preparing), \
+                        mock.patch.object(module.subprocess, 'Popen') as launch:
+                    with self.assertRaises(PreparationInterrupted) as caught:
+                        module._send_counted_original_once(writer, owner, target, token, unit, image)
+                    self.assertIs(primary, caught.exception)
+                    with self.assertRaises(module.MutationLauncherHold):
+                        module._send_counted_original_once(writer, owner, target, token, unit, image)
+                    launch.assert_not_called()
+            current = journal.inspect_global_unit(owner, target, unit)
+            outcome = (current.attempt_count, current.outcome)
+        self.assertEqual([(True, 0)], facts,
+            'original use is spent before preparation, but complete fresh verification belongs to final launch fence')
+        self.assertEqual((1, 'UNKNOWN'), outcome)
+
+    def test_private_preparation_wire_drift_is_refused_by_actual_final_fence_without_launch(self):
+        module = load(); changed = []; refusal = None
+        with ExitStack() as stack:
+            _local, _ownership, journal, writer, owner, target, token, unit, _image = self.owners(stack, claim=False)
+            with self.assertRaises(journal.GlobalAttemptHold):
+                with journal._hold_counted_original_wire(writer, owner, target, unit) as image:
+                    before = journal.inspect_global_unit(owner, target, unit)
+                    outcome = (before.attempt_count, before.outcome)
+                    actual_parse = module._parse_private
+                    def preparing(raw, nonce):
+                        result = actual_parse(raw, nonce)
+                        os.fchmod(image.fd, 0o400); changed.append(True)
+                        return result
+                    with mock.patch.object(module, '_parse_private', side_effect=preparing), \
+                            mock.patch.object(module.subprocess, 'Popen') as launch:
+                        try:
+                            module._send_counted_original_once(writer, owner, target, token, unit, image)
+                        except BaseException as error:
+                            refusal = error
+                        launch_count = launch.call_count
+                        spent = journal._LIVE_WIRE_CLAIMS[image][-1]
+                        retained_count = image.attempt_count
+                        mode = os.fstat(image.fd).st_mode & 0o777
+                        with self.assertRaises(journal.GlobalAttemptHold):
+                            journal.inspect_global_unit(owner, target, unit)
+        self.assertEqual([True], changed)
+        self.assertIs(type(refusal), module.MutationLauncherHold,
+            'the sender itself must refuse; original-scope cleanup HOLD is not a substitute')
+        self.assertEqual(0, launch_count)
+        self.assertIs(True, spent)
+        self.assertEqual(0o400, mode)
+        self.assertEqual((1, 'UNKNOWN'), outcome)
+        self.assertEqual(1, retained_count)
+
     def owners(self,stack,*,claim=True):
         from test_cases.test_req7_history_read_launcher import Req7HistoryReadLauncherWorkflowTests as reads
         from test_cases.test_req7_global_attempt_journal import load as load_global
@@ -237,10 +296,19 @@ raise SystemExit(result)
             local,ownership,journal,writer,owner,target,token,unit,_image=self.owners(stack,claim=False)
             path=self.root/'var/lib/http-ztp-container/issue-tracker'/(hashlib.sha256(target.spreadsheet_id.encode()).hexdigest()+'.journal')/'ATTEMPT-1'
             raw=path.read_bytes(); original=path.stat(); real_inspect=journal._inspect
-            read_counts=[]; injected=[]; rejected=[]
+            read_counts=[]; injected=[]; rejected=[]; at_prelaunch=[]
+            original_fence=journal._require_original_wire_launch
+            def at_actual_fence(*args,**kwargs):
+                # Locate the real nonconsuming pre-Popen boundary, not a
+                # global ordinal that also counts an earlier DATA mark or
+                # the post-send verifier. Delegate the complete original.
+                before_launch=not kwargs['consume'] and not calls
+                at_prelaunch.append(before_launch)
+                try:return original_fence(*args,**kwargs)
+                finally:at_prelaunch.pop()
             def after_read(*args):
                 result=real_inspect(*args); read_counts.append(result[0])
-                if len(read_counts)==2:
+                if at_prelaunch and at_prelaunch[-1] and not injected:
                     path.write_bytes(b'x'*len(raw)); path.write_bytes(raw)
                     os.utime(path,ns=(original.st_atime_ns,original.st_mtime_ns))
                     injected.append(result[0])
@@ -248,7 +316,8 @@ raise SystemExit(result)
             with self.assertRaises(journal.GlobalAttemptHold):
                 with journal._hold_counted_original_wire(writer,owner,target,unit) as image:
                     calls,children=self.intercept(stack,local,ownership,writer,owner,target,image,port)
-                    with mock.patch.object(journal,'_inspect',side_effect=after_read), self.assertRaises(module.MutationLauncherHold) as caught:
+                    with mock.patch.object(journal,'_require_original_wire_launch',side_effect=at_actual_fence), \
+                            mock.patch.object(journal,'_inspect',side_effect=after_read), self.assertRaises(module.MutationLauncherHold) as caught:
                         module._send_counted_original_once(writer,owner,target,token,unit,image)
                     if not caught.exception.termination_confirmed: rejected.append(True)
             self.assertEqual([1],injected)

@@ -16,6 +16,22 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class IbCvtProvenanceDirectTests(unittest.TestCase):
+    def test_standalone_digest_refuses_nonregular_leaf_before_attempting_open(self):
+        from ztp.config import ib_topology_provenance as provenance
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve(); source = root / 'owned-pipe'
+            os.mkfifo(source, mode=0o600)
+            original_open = os.open; attempts = []
+            def opening(path, flags, *args, **kwargs):
+                if str(path) in (str(source), source.name):
+                    attempts.append(str(path))
+                    raise AssertionError('a blocking nonregular leaf open was attempted')
+                return original_open(path, flags, *args, **kwargs)
+            with mock.patch.object(os, 'open', side_effect=opening):
+                with self.assertRaises(provenance.ProvenanceError):
+                    provenance._regular_digest(source)
+            self.assertEqual([], attempts)
+
     def test_regular_digest_borrows_live_ancestors_without_reopening_each_read(self):
         from tools import ufm_collection_pipeline as pipeline
         from ztp.config import ib_topology_provenance as provenance

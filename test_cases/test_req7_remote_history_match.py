@@ -39,7 +39,519 @@ def load():
     return module
 
 
+class Req7NativePreparationSourceReadsDirectTests(unittest.TestCase):
+    def test_core_pure_template_guard_boundaries_group_without_merging_interleaved_original_io(self):
+        import ast,inspect,textwrap
+        module=load()
+        expected={'_hold_current_project_online_inputs':2,
+                  '_hold_current_project_online_original_inputs':4}
+        for name,count in expected.items():
+            tree=ast.parse(textwrap.dedent(inspect.getsource(getattr(module,name))))
+            calls=[node for node in ast.walk(tree) if isinstance(node,ast.Call)
+                   and isinstance(node.func,ast.Name)]
+            self.assertEqual(count,sum(node.func.id=='_verify_current_project_template_reads' for node in calls))
+            self.assertEqual([], [node for node in ast.walk(tree) if isinstance(node,ast.For)
+                and ast.unparse(node.iter)=='responses.items()'])
+        tree=ast.parse(textwrap.dedent(inspect.getsource(module._hold_current_project_online_inputs)))
+        loops=[node for node in ast.walk(tree) if isinstance(node,ast.For)
+               and ast.unparse(node.iter)=="('template_identity', 'template_headers', 'whitelist', 'metadata')"]
+        self.assertEqual(1,len(loops))
+        self.assertEqual(['originals','require_current_owned_project_read','originals'],
+            [node.value.func.id for node in loops[0].body if isinstance(node,ast.Expr)
+             and isinstance(node.value,ast.Call) and isinstance(node.value.func,ast.Name)])
+
+    def test_fixed_template_group_checks_all_originals_once_per_boundary_without_retaining_result(self):
+        module=load()
+        verify=getattr(module,'_verify_current_project_template_reads',None)
+        self.assertTrue(callable(verify),'fixed template original group boundary is absent')
+        from monitor import issue_tracker_history_read_launcher as launcher
+        writer,owner,bound,auth=object(),object(),binding(),object()
+        kinds=('template_identity','template_headers','whitelist','metadata')
+        values=tuple(object() for _ in kinds);responses=dict(zip(kinds,values))
+        expected=tuple((kind,None,None,value) for kind,value in zip(kinds,values))
+        with mock.patch.object(launcher,'_require_current_owned_project_read_group',return_value=object()) as group:
+            self.assertIsNone(verify(writer,owner,bound,auth,responses))
+            self.assertIsNone(verify(writer,owner,bound,auth,responses))
+        self.assertEqual([mock.call(writer,owner,bound,auth,expected)]*2,group.call_args_list)
+        for wrong in ({},dict(list(responses.items())[:3]),{**responses,'row':object()}):
+            with mock.patch.object(launcher,'_require_current_owned_project_read_group') as group:
+                with self.assertRaises(module.RemoteHistoryHold):verify(writer,owner,bound,auth,wrong)
+                group.assert_not_called()
+        def replace_last(*args):responses['metadata']=object()
+        with mock.patch.object(launcher,'_require_current_owned_project_read_group',side_effect=replace_last):
+            with self.assertRaises(module.RemoteHistoryHold):verify(writer,owner,bound,auth,responses)
+
+    def test_actual_online_core_selects_fixed_cohort_without_scalar_template_fallback(self):
+        """Independent routing oracle, not a substitute for genuine FIRST."""
+        import ast,inspect,textwrap
+        module=load()
+        tree=ast.parse(textwrap.dedent(inspect.getsource(module._hold_current_project_online_inputs)))
+        calls=[node for node in ast.walk(tree) if isinstance(node,ast.Call) and isinstance(node.func,ast.Name)]
+        cohort=[node for node in calls if node.func.id=='_acquire_current_project_template_reads']
+        self.assertEqual(1,len(cohort),'actual core must acquire exactly one fixed template cohort')
+        self.assertEqual([], [node for node in calls if node.func.id=='OwnedProjectSheetsReadUnit'],
+            'no silent fallback to four old scalar template acquisitions')
+        self.assertEqual(('writer_token','owner_token','binding','authentication'),
+            tuple(ast.unparse(arg) for arg in cohort[0].args))
+        self.assertEqual([],cohort[0].keywords)
+
+    def test_fixed_template_receiver_uses_one_original_cohort_and_keeps_each_read_gate(self):
+        """Control-only boundary oracle; genuine transport is tested separately."""
+        module=load()
+        acquire=getattr(module,'_acquire_current_project_template_reads',None)
+        self.assertTrue(callable(acquire),'fixed consumer boundary for four original reads is absent')
+        from monitor import issue_tracker_history_read_launcher as launcher
+        writer,owner,bound,auth=object(),object(),binding(),object()
+        kinds=('template_identity','template_headers','whitelist','metadata')
+        results=tuple(object() for _ in kinds);events=[]
+        unit=SimpleNamespace(read_once=lambda:(events.append('actual delegate') or results))
+        def verify(*args,**kwargs):
+            index=len([item for item in events if isinstance(item,tuple)])
+            self.assertEqual((writer,owner,bound,results[index],auth),args)
+            self.assertEqual({'read_kind':kinds[index]},kwargs)
+            events.append((kinds[index],results[index]))
+        with mock.patch.object(launcher,'OwnedProjectTemplateReadCohort',return_value=unit) as factory, \
+                mock.patch.object(launcher,'require_current_owned_project_read',side_effect=verify):
+            actual=acquire(writer,owner,bound,auth)
+        factory.assert_called_once_with(writer,owner,bound,auth)
+        self.assertEqual(kinds,tuple(actual));self.assertEqual(results,tuple(actual.values()))
+        self.assertEqual(['actual delegate']+list(zip(kinds,results)),events)
+        for partial in (results[:3],results+(object(),)):
+            with mock.patch.object(launcher,'OwnedProjectTemplateReadCohort',
+                    return_value=SimpleNamespace(read_once=lambda:partial)), \
+                    mock.patch.object(launcher,'require_current_owned_project_read') as gate:
+                with self.assertRaises(module.RemoteHistoryHold):acquire(writer,owner,bound,auth)
+                gate.assert_not_called()
+
+    def _api(self):
+        module=load();api=getattr(module,'_hold_native_preparation_source_reads',None)
+        self.assertTrue(callable(api),'NEW must retain actual original source descriptors through its finalizers')
+        return module,api
+
+    def test_actual_scope_borrow_preserves_original_descriptors_and_reads_current_bytes(self):
+        _module,api=self._api()
+        from tools import ufm_collection_pipeline as pipeline
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory).resolve()/'source';path.write_bytes(b'first source\n')
+            with api():
+                source=pipeline._HELD_SOURCE_READS.get();ancestors=pipeline._HELD_DIRECTORY_READS.get()
+                source.require_live()
+                with pipeline._hold_real_dir_chain(path.parent) as (parent,_verify,_identities):
+                    with pipeline._borrow_current_source_file(path,parent) as first:
+                        self.assertEqual(b'first source\n',os.pread(first,100,0))
+                    with api():
+                        self.assertIs(source,pipeline._HELD_SOURCE_READS.get())
+                        self.assertIs(ancestors,pipeline._HELD_DIRECTORY_READS.get())
+                        with pipeline._borrow_current_source_file(path,parent) as second:
+                            self.assertEqual(first,second)
+                            # A held descriptor is not cached bytes or a
+                            # source qualification. Read the current image.
+                            path.write_bytes(b'current source\n')
+                            self.assertEqual(b'current source\n',os.pread(second,100,0))
+                    source.require_live();self.assertEqual(1,len(source.files))
+                self.assertFalse(source.closed);self.assertFalse(ancestors.closed)
+            self.assertTrue(source.closed);self.assertTrue(ancestors.closed)
+            self.assertIsNone(pipeline._HELD_SOURCE_READS.get())
+            self.assertIsNone(pipeline._HELD_DIRECTORY_READS.get())
+            with self.assertRaises(OSError):os.fstat(first)
+
+    def test_partial_foreign_or_revoked_scope_is_not_adopted_and_outer_owner_survives(self):
+        module,api=self._api()
+        from tools import ufm_collection_pipeline as pipeline
+        with pipeline._hold_reusable_directory_reads():
+            with self.assertRaises(module.RemoteHistoryHold):
+                with api():self.fail('partial source ownership was adopted')
+        with api():
+            original=pipeline._HELD_SOURCE_READS.get()
+            for alien in (None,object()):
+                reset=pipeline._HELD_SOURCE_READS.set(alien)
+                try:
+                    with self.assertRaises(module.RemoteHistoryHold):
+                        with api():self.fail('revoked or foreign source ownership was adopted')
+                finally:pipeline._HELD_SOURCE_READS.reset(reset)
+                original.require_live();self.assertFalse(original.closed)
+            with self.assertRaises(pipeline.PipelineError):
+                with pipeline._hold_reusable_directory_reads():self.fail('nested issuer became permitted')
+
+    def test_same_byte_source_replacement_at_tail_refuses_without_adopting_or_leaking_original(self):
+        module,api=self._api()
+        from tools import ufm_collection_pipeline as pipeline
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory).resolve()/'source';path.write_bytes(b'original\n')
+            with self.assertRaises(module.RemoteHistoryHold):
+                with api():
+                    source=pipeline._HELD_SOURCE_READS.get()
+                    with pipeline._hold_real_dir_chain(path.parent) as (parent,_verify,_identities):
+                        with pipeline._borrow_current_source_file(path,parent) as original:
+                            replacement=path.with_name('replacement');replacement.write_bytes(b'original\n')
+                            replacement.replace(path)
+            self.assertTrue(source.closed)
+            self.assertEqual(b'original\n',path.read_bytes())
+            with self.assertRaises(OSError):os.fstat(original)
+            self.assertIsNone(pipeline._HELD_SOURCE_READS.get())
+            self.assertIsNone(pipeline._HELD_DIRECTORY_READS.get())
+
+    def test_new_wrapper_checks_every_original_read_after_owned_cleanup_for_wire_and_no_send(self):
+        """Control order only; actual issued NEW images are proved by workflow."""
+        module,_api=self._api()
+        from tools import ufm_collection_pipeline as pipeline
+        from monitor import issue_tracker_history_read_launcher as launcher,issue_tracker_token_launcher as tokens
+        for outcome in ('WIRE_REGISTERED','NO_SEND'):
+            with self.subTest(outcome=outcome),tempfile.TemporaryDirectory() as directory:
+                path=Path(directory).resolve()/'source';path.write_bytes(b'actual owned source\n')
+                writer=object();owner=object();bound=binding();auth=object();facts={};checks=[]
+                images=(('template_identity',None,None,object()),
+                    ('activity','ETH Cabling',None,object()),('history_tail',None,None,object()))
+                result=(outcome,'original-unit')
+                def core(*args,**kwargs):
+                    self.assertEqual((writer,owner,bound,auth),args)
+                    source=pipeline._HELD_SOURCE_READS.get();source.require_live()
+                    facts.update(source=source,directories=pipeline._HELD_DIRECTORY_READS.get())
+                    with pipeline._hold_real_dir_chain(path.parent) as (parent,_verify,_identities):
+                        with pipeline._borrow_current_source_file(path,parent) as fd:facts['fd']=fd
+                    kwargs['_source_tail'].append((auth,images));return result
+                def token(*args):
+                    self.assertEqual((owner,bound,auth),args)
+                    self.assertTrue(facts['source'].closed);self.assertTrue(facts['directories'].closed)
+                    with self.assertRaises(OSError):os.fstat(facts['fd'])
+                    self.assertIsNone(pipeline._HELD_SOURCE_READS.get())
+                    self.assertIsNone(pipeline._HELD_DIRECTORY_READS.get());checks.append('auth')
+                def read(*args,**kwargs):
+                    self.assertIs(auth,args[4]);self.assertEqual((writer,owner,bound),args[:3])
+                    expected=images[len([item for item in checks if item!='auth'])]
+                    self.assertIs(expected[3],args[3])
+                    self.assertEqual(dict(read_kind=expected[0],sheet=expected[1],row=expected[2]),kwargs)
+                    self.assertTrue(facts['source'].closed);checks.append(expected[0])
+                with mock.patch.object(module,'_prepare_current_cycle_native_unit_unscoped',side_effect=core), \
+                        mock.patch.object(tokens,'require_current_owned_project_token',side_effect=token), \
+                        mock.patch.object(launcher,'require_current_owned_project_read',side_effect=read):
+                    actual=module._prepare_current_cycle_native_unit(writer,owner,bound,auth,
+                        _store=object(),http_root=ROOT,_sheet='ETH&IB Switch',_new_originals=True)
+                self.assertIs(result,actual)
+                self.assertEqual(['auth','template_identity','activity','history_tail','auth'],checks)
+
+    def test_new_wrapper_refuses_existing_source_issuer_without_entering_core(self):
+        module,api=self._api()
+        from tools import ufm_collection_pipeline as pipeline
+        with api():
+            original=pipeline._HELD_SOURCE_READS.get()
+            with mock.patch.object(module,'_prepare_current_cycle_native_unit_unscoped') as core:
+                with self.assertRaises(module.RemoteHistoryHold):
+                    module._prepare_current_cycle_native_unit(object(),object(),binding(),object(),
+                        _store=object(),http_root=ROOT,_sheet='ETH&IB Switch',_new_originals=True)
+            core.assert_not_called();original.require_live();self.assertFalse(original.closed)
+
+
 class Req7RemoteHistoryMatchDirectTests(unittest.TestCase):
+    def test_second_native_delivery_fixture_observes_real_creation_entry(self):
+        # Independent fixture-routing expectation; not proof of delivery.
+        # The behavioral case must still validate original COMPLETE, new
+        # event delivery, first-pair inode preservation and exact cleanup.
+        import ast
+        import inspect
+        import textwrap
+        method=Req7OwnedHistoryMatchWorkflowTests.test_same_project_second_native_audit_complete_delivers_without_overwriting_first_pair
+        tree=ast.parse(textwrap.dedent(inspect.getsource(method)))
+        targets=[node.args[1].value for node in ast.walk(tree)
+            if isinstance(node,ast.Call) and isinstance(node.func,ast.Attribute)
+            and node.func.attr=='object' and len(node.args)>=2
+            and isinstance(node.args[0],ast.Name) and node.args[0].id=='allocation'
+            and isinstance(node.args[1],ast.Constant)]
+        self.assertEqual(['_hold_delivery_entry_authority'],targets,
+            'second delivery must observe the real original creation entry, not the unused legacy leaf')
+
+    def test_count_received_source_uses_fixed_complete_evaluation_before_result_return(self):
+        import ast
+        tree=ast.parse((ROOT/'monitor/issue_tracker_global_attempt_journal.py').read_text())
+        body=next(node for node in tree.body if isinstance(node,ast.FunctionDef)
+            and node.name=='_hold_receipted_original_source_inputs_body')
+        source=next(node for node in body.body if isinstance(node,ast.FunctionDef) and node.name=='source')
+        fixed=[node for node in ast.walk(source) if isinstance(node,ast.Call)
+            and isinstance(node.func,ast.Name) and node.func.id=='_evaluate_received_count_source']
+        self.assertEqual(1,len(fixed),'same Count relation must enclose the entire fixed source evaluation')
+        self.assertTrue(any(isinstance(node,ast.Attribute) and node.attr=='_short_k_original'
+            for branch in ast.walk(source) if isinstance(branch,ast.If) for node in ast.walk(branch.test)),
+            'prefetched Count/source alone still has original native K; only actual received short K selects evaluation')
+        self.assertEqual([], [node for node in ast.walk(source) if isinstance(node,(ast.Yield,ast.YieldFrom))])
+        self.assertFalse(any(isinstance(node,ast.keyword) and node.arg in
+            {'verify','callback','evaluate','qualified_source','witness','mode'} for node in ast.walk(fixed[0])),
+            'no supplied evaluator, prior qualification or caller witness may enter this receiver')
+
+    def test_first_native_catalog_borrowers_close_before_issuer_and_raw_overlap_closes_last(self):
+        """Independent lifetime/order oracle; actual FD/core proof is workflow."""
+        import ast
+        tree = ast.parse((ROOT / 'monitor/issue_tracker_remote_history_match.py').read_text())
+        body = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
+                    and node.name == '_hold_current_project_online_inputs')
+        stacks = [node for node in ast.walk(body) if isinstance(node, ast.With)
+                  and [item.optional_vars.id for item in node.items
+                       if isinstance(item.optional_vars, ast.Name)] ==
+                  ['business_tail_scope', 'native_k_scope', 'business_scope', 'scope']]
+        self.assertEqual(1, len(stacks),
+            'exceptional and ordinary close must keep real business raw overlap after native issuer')
+        closes = {name: [] for name in ('scope', 'business_scope', 'native_k_scope', 'business_tail_scope')}
+        for node in ast.walk(body):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == 'close' and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id in closes):
+                closes[node.func.value.id].append(node.lineno)
+        self.assertTrue(all(len(lines) == 1 for lines in closes.values()))
+        self.assertEqual(sorted(lines[0] for lines in closes.values()),
+                         [closes[name][0] for name in closes])
+        native = [node for node in ast.walk(body) if isinstance(node, ast.Call)
+                  and isinstance(node.func, ast.Attribute)
+                  and node.func.attr == '_hold_owned_native_completed_source_k']
+        self.assertEqual(1, len(native))
+        captures = [node for node in ast.walk(body) if isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == '_hold_original_images']
+        yields = [node for node in ast.walk(body) if isinstance(node, ast.Yield)
+                  and isinstance(node.value, ast.Tuple)]
+        self.assertEqual((1, 1), (len(captures), len(yields)))
+        self.assertLess(captures[0].lineno, yields[0].lineno,
+            'genuine LIVE overlap must precede caller interruption and every source finalizer')
+
+    def test_first_source_suffix_follows_actual_business_acquisition_not_earlier_gate_only(self):
+        """Order control; genuine final archive drift is a workflow assertion."""
+        import ast,inspect,textwrap
+        module=load()
+        tree=ast.parse(textwrap.dedent(inspect.getsource(module._hold_current_project_online_inputs)))
+        business=[];closed=[]
+        for node in ast.walk(tree):
+            if not isinstance(node,ast.Call):continue
+            if isinstance(node.func,ast.Name) and node.func.id=='bind_business':business.append(node.lineno)
+            if (isinstance(node.func,ast.Attribute) and node.func.attr=='close'
+                    and isinstance(node.func.value,ast.Name) and node.func.value.id=='unit_scope'):
+                closed.append(node.lineno)
+        self.assertEqual(1,len(business));self.assertTrue(closed)
+        self.assertTrue(all(line>business[0] for line in closed),
+            'actual source suffix must follow fresh business acquisition, not only stored preread checks')
+
+    def test_first_business_original_capture_precedes_first_actual_read(self):
+        import ast,inspect,textwrap
+        module=load()
+        tree=ast.parse(textwrap.dedent(inspect.getsource(module._hold_current_project_online_inputs)))
+        positions={name:[] for name in ('_hold_owned_original_business_history_inputs','_acquire_current_project_template_reads')}
+        for node in ast.walk(tree):
+            if isinstance(node,ast.Call):
+                name=(node.func.id if isinstance(node.func,ast.Name) else
+                    node.func.attr if isinstance(node.func,ast.Attribute) else None)
+                if name in positions:positions[name].append(node.lineno)
+        self.assertEqual(1,len(positions['_hold_owned_original_business_history_inputs']))
+        self.assertEqual(1,len(positions['_acquire_current_project_template_reads']))
+        self.assertLess(positions['_hold_owned_original_business_history_inputs'][0],min(positions['_acquire_current_project_template_reads']))
+
+    def test_first_local_source_prefix_is_entered_before_first_actual_read(self):
+        import ast,inspect,textwrap
+        module=load()
+        tree=ast.parse(textwrap.dedent(inspect.getsource(module._hold_current_project_online_inputs)))
+        positions={name:[] for name in ('_hold_receipted_original_source_inputs','_acquire_current_project_template_reads','_receipted_original_facts')}
+        for node in ast.walk(tree):
+            if isinstance(node,ast.Call):
+                name=(node.func.id if isinstance(node.func,ast.Name) else
+                    node.func.attr if isinstance(node.func,ast.Attribute) else None)
+                if name in positions:positions[name].append(node.lineno)
+        self.assertEqual(1,len(positions['_hold_receipted_original_source_inputs']),
+            'FIRST must pre-enter its genuine local source/receipt scope, not store a qualification permit')
+        self.assertLess(positions['_hold_receipted_original_source_inputs'][0],
+            min(positions['_acquire_current_project_template_reads']))
+        self.assertEqual(1,len(positions['_acquire_current_project_template_reads']))
+        self.assertEqual([],positions['_receipted_original_facts'],
+            'do not replay the pre-read prefix again after issuing the first bounded read')
+
+    def test_first_independent_count_prefix_precedes_reads_and_binds_in_original_overlap(self):
+        # Structural boundary oracle complements the genuine native workflow;
+        # it cannot substitute for original FD/COUNT/read provenance.
+        import ast,inspect,textwrap
+        module=load()
+        core=ast.parse(textwrap.dedent(inspect.getsource(module._hold_current_project_online_inputs)))
+        receiver=ast.parse(textwrap.dedent(inspect.getsource(module._hold_current_project_online_original_inputs)))
+        def calls(tree,name):
+            return [node for node in ast.walk(tree) if isinstance(node,ast.Call)
+                and isinstance(node.func,ast.Attribute) and node.func.attr==name]
+        prefixes=calls(core,'_prepare_first_original_source_prefix')
+        reads=[node for node in ast.walk(core) if isinstance(node,ast.Call)
+            and isinstance(node.func,ast.Name) and node.func.id=='_acquire_current_project_template_reads']
+        self.assertEqual(1,len(reads))
+        self.assertEqual(1,len(prefixes));self.assertLess(prefixes[0].lineno,min(n.lineno for n in reads))
+        self.assertEqual(1,len(calls(receiver,'_hold_first_original_source_prefix')))
+        bindings=calls(receiver,'_bind_first_original_source_prefix')
+        self.assertEqual(1,len(bindings))
+        core_scopes=[node for node in ast.walk(receiver) if isinstance(node,ast.With)
+            and any(isinstance(item.context_expr,ast.Call)
+                and isinstance(item.context_expr.func,ast.Name)
+                and item.context_expr.func.id=='_hold_current_project_online_inputs' for item in node.items)]
+        self.assertEqual(1,len(core_scopes))
+        overlap=core_scopes[0]
+        self.assertIn(bindings[0],list(ast.walk(overlap)))
+        count=calls(overlap,'_hold_selected_last_catalog_write_originals')
+        self.assertEqual(1,len(count));self.assertLess(count[0].lineno,bindings[0].lineno)
+
+    def test_first_count_cold_prefetch_follows_source_entry_precedes_io_and_borrower_closes_first(self):
+        # Static sequencing, NOT an actual K/Count/source handoff proof.
+        import ast,inspect,textwrap
+        module=load()
+        core=ast.parse(textwrap.dedent(inspect.getsource(module._hold_current_project_online_inputs)))
+        receiver=ast.parse(textwrap.dedent(inspect.getsource(module._hold_current_project_online_original_inputs)))
+        def calls(tree,name):
+            return [node for node in ast.walk(tree) if isinstance(node,ast.Call)
+                and isinstance(node.func,ast.Attribute) and node.func.attr==name]
+        prefetched=calls(core,'_prefetch_first_original_count_graph')
+        self.assertEqual(1,len(prefetched),'cold graph acquisition must precede fresh IO exactly once')
+        entered=calls(core,'_hold_receipted_original_source_inputs')
+        business=[node for node in ast.walk(core) if isinstance(node,ast.Call)
+            and isinstance(node.func,ast.Name) and node.func.id=='_hold_owned_original_business_history_inputs']
+        reads=[node for node in ast.walk(core) if isinstance(node,ast.Call)
+            and isinstance(node.func,ast.Name) and node.func.id=='_acquire_current_project_template_reads']
+        self.assertEqual(1,len(reads))
+        self.assertTrue(entered);self.assertTrue(business);self.assertTrue(reads)
+        self.assertLess(max(node.lineno for node in entered+business),prefetched[0].lineno)
+        self.assertLess(prefetched[0].lineno,min(node.lineno for node in reads))
+        self.assertFalse(calls(core,'record_global_attempt_intent'))
+        contexts=[node for node in ast.walk(receiver) if isinstance(node,ast.With)
+            and any(isinstance(item.context_expr,ast.Call)
+                and isinstance(item.context_expr.func,ast.Attribute)
+                and item.context_expr.func.attr=='_hold_first_original_source_prefix' for item in node.items)]
+        self.assertEqual(1,len(contexts))
+        items=contexts[0].items
+        source_index=next(i for i,item in enumerate(items) if isinstance(item.context_expr,ast.Call)
+            and isinstance(item.context_expr.func,ast.Attribute)
+            and item.context_expr.func.attr=='_hold_first_original_source_prefix')
+        borrower_index=next(i for i,item in enumerate(items)
+            if isinstance(item.optional_vars,ast.Name) and item.optional_vars.id=='all_images')
+        self.assertLess(source_index,borrower_index,'Count borrower must exit before its original prefetched issuer')
+
+    def native_pre_read_intent_literal(self):
+        operation = {'operation_id': 'a' * 64, 'activity_key': ['switch', 'UFM01', 'port', 'peer'], 'action': 'upsert'}
+        qualified = SimpleNamespace(operations_json=json.dumps([operation], sort_keys=True, separators=(',', ':')).encode(),
+            cycle_ids=('cycle-current',), completion_sha256=('b' * 64,), source_authority_sha256='c' * 64,
+            observations_sha256='d' * 64, whitelist_sha256='e' * 64, k_event_sha256='f' * 64,
+            template_sha256='1' * 64, project_key='literal-project', scope='prod', k=7,
+            recorded_at_utc='2026-10-13T00:00:00Z', mode='prod-runtime-protected-v1', whitelist_skips=())
+        metadata = {'project_id': '/literal/project', 'schema_version': 1, 'producer_version': 'stage-l-runtime-v1',
+            'template_contract_version': 'local-xlsx-v1', 'template_sha256': '1' * 64}
+        source = {'cycle_ids': ['cycle-current'], 'completion_sha256': ['b' * 64], 'source_authority_sha256': 'c' * 64,
+            'observations_sha256': 'd' * 64, 'whitelist_sha256': 'e' * 64, 'k_event_sha256': 'f' * 64,
+            'project_key': 'literal-project', 'scope': 'prod', 'k': 7, 'recorded_at_utc': '2026-10-13T00:00:00Z',
+            'mode': 'prod-runtime-protected-v1', 'whitelist_skips': []}
+        raw = canonical({**metadata, 'operations': [operation], 'qualified_source': source})
+        digest = hashlib.sha256(raw).hexdigest()
+        relation = ('GEN00000000000000000002', '2' * 64, digest)
+        packet = (raw, digest, (relation,))
+        return qualified, metadata, relation, packet, operation
+
+    def test_native_pre_read_intent_is_plain_exact_data_not_qualification_or_permission(self):
+        module = load(); entry = getattr(module, '_native_pre_read_manifest_intent', None)
+        self.assertTrue(callable(entry), 'fixed NEW must receive its pre-read pure intent without cached qualification')
+        qualified, metadata, relation, packet, operation = self.native_pre_read_intent_literal()
+        record = {'native_pre_read_manifest': packet, 'native_pre_read_manifest_issued': packet}
+        with mock.patch('monitor.issue_tracker_stage_l_consumer.qualify_prod_stage_l') as replay, \
+                mock.patch.object(module.global_journal, 'prepare_global_unit') as writes:
+            self.assertEqual(packet[:2], entry(record, relation, qualified, metadata))
+        replay.assert_not_called(); writes.assert_not_called()
+        self.assertEqual([operation], json.loads(packet[0])['operations'])
+        self.assertEqual(3, len(packet)); self.assertNotIn(qualified, packet)
+
+    def test_native_pre_read_intent_refuses_partial_replaced_or_different_current_source(self):
+        module = load(); entry = getattr(module, '_native_pre_read_manifest_intent', None)
+        self.assertTrue(callable(entry), 'pre-read intent cannot silently fall back after drift')
+        for fault in ('partial', 'replacement', 'relation', 'raw', 'operations', 'source', 'metadata'):
+            with self.subTest(fault=fault):
+                qualified, metadata, relation, packet, _operation = self.native_pre_read_intent_literal()
+                record = {'native_pre_read_manifest': packet, 'native_pre_read_manifest_issued': packet}
+                if fault == 'partial': record.pop('native_pre_read_manifest_issued')
+                elif fault == 'replacement': record['native_pre_read_manifest'] = tuple(item for item in packet)
+                elif fault == 'relation': relation = (relation[0], '3' * 64, relation[2])
+                elif fault == 'raw':
+                    changed = (packet[0].rstrip(b'\n') + b' \n', packet[1], packet[2])
+                    record = {'native_pre_read_manifest': changed, 'native_pre_read_manifest_issued': changed}
+                elif fault == 'operations': qualified.operations_json = b'[]'
+                elif fault == 'source': qualified.k = 8
+                else: metadata['template_sha256'] = '4' * 64
+                with self.assertRaises(module.RemoteHistoryHold): entry(record, relation, qualified, metadata)
+
+    def test_actual_received_bridge_selects_intent_without_new_caller_flag(self):
+        """Registry/control oracle only; actual archived graph is separate."""
+        import inspect
+        module = load()
+        from monitor import issue_tracker_settings_audit_allocation as allocation, issue_tracker_nv_reservation as native
+        entry = getattr(allocation, '_native_received_prior_source_manifest', None)
+        self.assertTrue(callable(entry), 'actual received graph must distinguish migration from standalone')
+        self.assertEqual(('prepared', 'writer', 'sheet', 'bound'), tuple(inspect.signature(entry).parameters))
+        _qualified, _metadata, _relation, intent, _operation = self.native_pre_read_intent_literal()
+        prepared, writer, sheet, bound, bridge, old = (object() for _ in range(6))
+        packet = {'receiving_old': old, 'retired': True, 'received': True, 'attached': False,
+            'writer': writer, 'sheet': sheet, 'bound': bound,
+            'native_pre_read_manifest': intent, 'native_pre_read_manifest_issued': intent}
+        record = {'old': old, 'token': sheet, 'binding': bound,
+            'native_pre_read_manifest': intent, 'native_pre_read_manifest_issued': intent}
+        with mock.patch.object(native, '_verify_catalog_preparation', return_value=record), \
+                mock.patch.object(allocation, '_LIVE_OWNED_PRIOR_SOURCE_READS', {bridge: packet}), \
+                mock.patch.object(allocation, '_owned_prior_source_packet', return_value=packet) as actual_packet:
+            self.assertIs(intent, entry(prepared, writer, sheet, bound))
+            actual_packet.assert_called_with(bridge, sheet, bound)
+        with mock.patch.object(native, '_verify_catalog_preparation', return_value={'old': old, 'token': sheet, 'binding': bound}), \
+                mock.patch.object(allocation, '_LIVE_OWNED_PRIOR_SOURCE_READS', {}):
+            self.assertIsNone(entry(prepared, writer, sheet, bound))
+
+    def test_received_intent_whole_slot_loss_never_downgrades_to_standalone(self):
+        module = load()
+        from monitor import issue_tracker_settings_audit_allocation as allocation, issue_tracker_nv_reservation as native
+        entry = getattr(allocation, '_native_received_prior_source_manifest', None)
+        self.assertTrue(callable(entry), 'deleting both received slots must fail closed')
+        _qualified, _metadata, _relation, intent, _operation = self.native_pre_read_intent_literal()
+        for fault in ('both-record-slots', 'both-bridge-slots', 'equal-replacement', 'wrong-writer', 'duplicate-bridge'):
+            with self.subTest(fault=fault):
+                prepared, writer, sheet, bound, bridge, old = (object() for _ in range(6))
+                packet = {'receiving_old': old, 'retired': True, 'received': True, 'attached': False,
+                    'writer': writer, 'sheet': sheet, 'bound': bound,
+                    'native_pre_read_manifest': intent, 'native_pre_read_manifest_issued': intent}
+                record = {'old': old, 'token': sheet, 'binding': bound,
+                    'native_pre_read_manifest': intent, 'native_pre_read_manifest_issued': intent}
+                registry = {bridge: packet}
+                if fault == 'both-record-slots':
+                    record.pop('native_pre_read_manifest'); record.pop('native_pre_read_manifest_issued')
+                elif fault == 'both-bridge-slots':
+                    packet.pop('native_pre_read_manifest'); packet.pop('native_pre_read_manifest_issued')
+                elif fault == 'equal-replacement':
+                    record['native_pre_read_manifest'] = record['native_pre_read_manifest_issued'] = tuple(item for item in intent)
+                elif fault == 'wrong-writer': packet['writer'] = object()
+                else: registry[object()] = dict(packet)
+                with mock.patch.object(native, '_verify_catalog_preparation', return_value=record), \
+                        mock.patch.object(allocation, '_LIVE_OWNED_PRIOR_SOURCE_READS', registry), \
+                        mock.patch.object(allocation, '_owned_prior_source_packet', return_value=packet):
+                    with self.assertRaises(allocation.SettingsAuditHold): entry(prepared, writer, sheet, bound)
+
+    def test_first_input_refusal_keeps_hidden_original_fault_without_exposing_it(self):
+        module = load()
+        from monitor import issue_tracker_local_commit as local
+        fault = ValueError('controlled original input rejection')
+        with mock.patch.object(local, '_owner', side_effect=fault):
+            with self.assertRaises(module.RemoteHistoryHold) as rejected:
+                with module._hold_current_project_online_inputs(object(), object(), binding(), object(),
+                        _store=object(), http_root=ROOT): self.fail('foreign input entered FIRST')
+        self.assertEqual('req7_remote_history_unproved', str(rejected.exception))
+        self.assertIsNone(rejected.exception.__cause__)
+        self.assertTrue(rejected.exception.__suppress_context__)
+        self.assertIs(fault, rejected.exception.__context__, 'diagnosis lost the actual failure before typing the refusal')
+
+    def test_native_intent_tail_registration_makes_source_close_precede_last_intent_check(self):
+        """Static LIFO contract; not actual source/issuer execution proof."""
+        import ast
+        tree = ast.parse((ROOT / 'monitor/issue_tracker_remote_history_match.py').read_text())
+        function = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
+            and node.name == '_hold_native_current_cycle_observed_nonallocating_unit')
+        calls = [node for node in ast.walk(function) if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == 'read_scope']
+        tail = [node.lineno for node in calls if node.func.attr == 'callback' and node.args
+            and isinstance(node.args[0], ast.Name) and node.args[0].id == 'intent_tail']
+        source = [node.lineno for node in calls if node.func.attr == 'enter_context' and node.args
+            and isinstance(node.args[0], ast.Call) and isinstance(node.args[0].func, ast.Name)
+            and node.args[0].func.id == '_hold_native_preparation_source_reads']
+        self.assertEqual(1, len(tail)); self.assertEqual(1, len(source))
+        self.assertLess(tail[0], source[0], 'LIFO must finish actual source holder before intent tail')
+
     def test_next_current_native_new_has_no_caller_family_or_pending_backfill(self):
         import inspect
         module=load();api=getattr(module,'_prepare_next_current_cycle_native_originals',None)
@@ -157,7 +669,9 @@ class Req7RemoteHistoryMatchDirectTests(unittest.TestCase):
                 allocation._NATIVE_SETTINGS_CONTEXT.reset(reset)
         @contextmanager
         def settings(*args,**kwargs):
-            yield ((),None,None,()),lambda:steps.append('settings-original')
+            # Same lifecycle stand-in, with the real holder's map/bytes types.
+            # This does not authenticate events or grant native K permission.
+            yield ({},b'literal current',b'literal initialized',{}),lambda:steps.append('settings-original')
             steps.append('settings-close')
         with mock.patch.object(allocation.local,'_owner',return_value=owner), \
                 mock.patch.object(allocation.ownership,'_validated_owner',return_value=sheet_owner), \
@@ -897,6 +1411,51 @@ class Req7AppliedC6OriginalDirectTests(unittest.TestCase):
                 self.assertEqual(before,{p:(p.stat().st_ino,p.read_bytes()) for p in paths})
             self.temp.cleanup();self.setUp()
 
+    def test_held_c6_samples_each_original_file_before_and_after_each_fresh_read(self):
+        module=load()
+        with self.actual_c6() as (local,_composer,writer,generation,unit,publication):
+            folder=publication.parent/'.tracker/generations'/generation.generation_id
+            paths=[folder/name for name in ('STATE','MANIFEST','INTENT','RECEIPT')]
+            paths.append(next(path for path in publication.iterdir() if path.suffix=='.xlsx'))
+            originals={(path.stat().st_dev,path.stat().st_ino) for path in paths}
+            native_stat=os.fstat;native_read=os.pread;events={key:[] for key in originals}
+            def sample(fd):
+                actual=native_stat(fd);key=(actual.st_dev,actual.st_ino)
+                if key in events:events[key].append('stat')
+                return actual
+            def read(fd,size,offset):
+                actual=native_stat(fd);key=(actual.st_dev,actual.st_ino)
+                result=native_read(fd,size,offset)
+                if key in events:events[key].append('read')
+                return result
+            with module._hold_applied_generation(writer,generation,unit) as (_owner,verify,_facts,_sent):
+                with mock.patch.object(os,'fstat',side_effect=sample),mock.patch.object(os,'pread',side_effect=read):
+                    verify()
+            self.assertEqual(5,len(events))
+            for observations in events.values():
+                self.assertEqual(['stat','read','stat']*2,observations,
+                    'each complete pre/post-barrier phase encloses its real read in two fresh held samples')
+
+    def test_held_c6_refuses_mode_drift_during_real_read_before_any_recovery_barrier(self):
+        module=load()
+        with self.actual_c6() as (local,_composer,writer,generation,unit,publication):
+            path=publication.parent/'.tracker/generations'/generation.generation_id/'RECEIPT'
+            original=(path.stat().st_dev,path.stat().st_ino);native_read=os.pread;native_sync=os.fsync
+            changed=[];barriers=[]
+            def read(fd,size,offset):
+                actual=os.fstat(fd);raw=native_read(fd,size,offset)
+                if (actual.st_dev,actual.st_ino)==original and not changed:
+                    os.fchmod(fd,0o644);changed.append(True)
+                return raw
+            def sync(fd):
+                barriers.append(fd);return native_sync(fd)
+            with self.assertRaises(ValueError):
+                with module._hold_applied_generation(writer,generation,unit) as (_owner,verify,_facts,_sent):
+                    with mock.patch.object(os,'pread',side_effect=read),mock.patch.object(os,'fsync',side_effect=sync):
+                        verify()
+            self.assertEqual([True],changed)
+            self.assertEqual([],barriers,'changed original is refused before either real recovery fsync')
+
     def test_held_c6_refuses_same_bytes_rebound_after_recovery_barrier_before_return(self):
         module=load()
         for selected in ('RECEIPT','XLSX'):
@@ -1104,6 +1663,8 @@ print('context-revoked')
     # Reuse owned native fixtures, not inherited test methods/discovery.
     from test_cases.test_req7_history_read_launcher import Req7HistoryReadLauncherWorkflowTests as _Fixture
     certificates = _Fixture.certificates; server = _Fixture.server
+    prepared_server_certificate = _Fixture.prepared_server_certificate
+    _server_material_originals = _Fixture._server_material_originals
     def setUp(self):
         self._Fixture.setUp(self)
         # Earlier direct suites may reload the canonical owner and journal.
@@ -2083,7 +2644,7 @@ with scoped_fixture(root,sheet),state.tracker_settings_writer(project,project/'p
         self.assertFalse((tracker/'settings/outbox/0.json').exists())
 
     def native_second_audit_completed(self, stack, *, fixture_facts=None, archive_before_new=False,late_fault=None,
-                                     preparation_k_probe=None):
+                                     preparation_k_probe=None,before_count_probe=None):
         """Two real same-project native C6 units; first genuinely APPLIED/key.
 
         Retain outbox0 while constructing the second. This does not pretend
@@ -2180,6 +2741,8 @@ with scoped_fixture(root,sheet),state.tracker_settings_writer(project,project/'p
         original=self.read_owned(stack,writer,owner,bound,facts['auth'],'history_tail',facts['post'])
         plan=reads.require_current_owned_read(writer,owner,bound,original,read_kind='history_tail')
         preread.prepare_history_preread(owner,bound,second,plan,original)
+        if before_count_probe is not None:
+            before_count_probe(allocation,writer,owner,bound,first,second,tracker)
         journal.record_global_attempt_intent(owner,bound,second)
         common={'schema_version':1,'unit_id':second.unit_id,'manifest_id':arguments['manifest_id'],
             'generation_id':arguments['generation_id'],'publish_id':arguments['publish_id'],
@@ -2211,6 +2774,519 @@ with scoped_fixture(root,sheet),state.tracker_settings_writer(project,project/'p
             fixture_facts.update(facts)
             fixture_facts.update(generation=generation,post=post,metadata=metadata)
         return allocation,writer,owner,bound,first,second,first_projection,first_delivery
+
+    def _actual_source_settings_count_transfer_workflow(self,*,read_count_k=False,end_metadata_drift=False,tail_fault=None,
+                                                       append_count=False,count_boundary_budget=False,raw_count_pointer_drift=False,
+                                                       last_count_source_drift=False,short_k_boundary_budget=False,
+                                                       short_k_caught_drift=False,last_source_short_k=False,
+                                                       short_k_verifier_drift=None,short_k_issuance_interrupt=False,
+                                                       receiver_raw_boundary_budget=False,receiver_raw_source_drift=False,
+                                                       short_k_evaluation_registry_drift=False):
+        # Genuine native COMPLETE/APPLIED/DELIVERED, archived event0, pending
+        # event1 and original Count graphs. This proves scope transfer only;
+        # no claim that FIRST wire or continuous K reception is complete.
+        from monitor import issue_tracker_state_owner as state
+        captured=[];observed=[];metadata_count_calls=[];receiver_raw_calls=[]
+        primary=KeyboardInterrupt('literal original metadata tail interrupt')
+        class CountReplayFinished(BaseException):pass
+        def probe(allocation,writer,sheet,bound,first,second,tracker):
+            from monitor import issue_tracker_global_attempt_journal as journal
+            self.assertFalse((tracker/'settings/outbox/0.json').exists())
+            before=self._default_recovery_images(tracker)
+            with ExitStack() as count_scope:
+                with allocation._hold_owned_completed_source_read_originals(writer,sheet,bound) as bridge:
+                    original=allocation._owned_source_k_settings_originals(writer,sheet,bound)
+                    self.assertEqual(7,state.current_k(writer).k)
+                    self.assertEqual(1,state.current_k(writer).revision)
+                    self.assertEqual((0,1),tuple(sorted(original.images[0])))
+                    self.assertEqual((1,),tuple(sorted(original.images[3])))
+                    count_scope.enter_context(journal._hold_selected_last_catalog_write_originals(
+                        writer,sheet,bound,second))
+                    received=allocation._receive_first_original_count_source(writer,sheet,bound,second)
+                    captured.append(received)
+                    self.assertEqual(0,journal.inspect_global_unit(sheet,bound,second).attempt_count)
+                    self.assertIs(original.scope,original.packet['settings_scope'])
+                    self.assertFalse(original.scope._exit_callbacks)
+                    self.assertTrue(received._count_tail_owner._binding[4]._exit_callbacks)
+                    original.current();original.settings_verify();received.verify()
+                self.assertNotIn(bridge,allocation._LIVE_SOURCE_K_SETTINGS)
+                self.assertEqual({},allocation._LIVE_OWNED_PRIOR_SOURCE_READS)
+                self.assertEqual({},allocation._LIVE_NATIVE_CATALOG_K_CONTEXTS)
+                self.assertEqual({},state._NATIVE_CATALOG_K_READ_CONTEXT)
+                with self.assertRaises(state.TrackerStateHold):state.current_k(writer)
+                if append_count:
+                    count=journal.record_global_attempt_intent(sheet,bound,second)
+                    self.assertEqual((1,'UNKNOWN'),(count.attempt_count,count.outcome))
+                    self.assertEqual(1,journal.inspect_global_unit(sheet,bound,second).attempt_count)
+                # Retained actual holder still checks its original FDs; no
+                # old ALL/source/current() verifier is invoked after revocation.
+                original.settings_verify();received.verify()
+                if receiver_raw_boundary_budget:
+                    metadata=allocation._LIVE_COUNT_RECEIVED_SOURCES[received.key][2]
+                    code=type(received.raw)._verify_raw_graph.__code__;calls=[]
+                    previous=sys.getprofile();self.assertIsNone(previous)
+                    def count_raw_calls(frame,event,_argument):
+                        if (event=='call' and frame.f_code is code
+                                and frame.f_locals.get('self') is received.raw):calls.append(True)
+                    try:
+                        sys.setprofile(count_raw_calls)
+                        metadata._verify_receiver_raw()
+                    finally:sys.setprofile(previous)
+                    receiver_raw_calls.append(len(calls))
+                if receiver_raw_source_drift:
+                    metadata=allocation._LIVE_COUNT_RECEIVED_SOURCES[received.key][2]
+                    code=metadata.count_raw_original[1][0].__code__;changed=[]
+                    target=tracker/'settings-audit-delivery/HEADER'
+                    old_inode=target.stat().st_ino;old_bytes=target.read_bytes()
+                    previous=sys.getprofile();self.assertIsNone(previous)
+                    def replace_after_actual_count_raw(frame,event,_argument):
+                        if event=='return' and frame.f_code is code and not changed:
+                            target.rename(target.with_name('HEADER-original-raw-boundary'))
+                            target.write_bytes(old_bytes);target.chmod(0o600);changed.append(True)
+                    refused=False
+                    try:
+                        sys.setprofile(replace_after_actual_count_raw)
+                        try:metadata._verify_receiver_raw()
+                        except allocation.SettingsAuditHold:refused=True
+                    finally:sys.setprofile(previous)
+                    self.assertEqual([True],changed)
+                    self.assertNotEqual(old_inode,target.stat().st_ino)
+                    self.assertEqual(old_bytes,target.read_bytes())
+                    observed.append('Count raw delegate source drift refused' if refused
+                        else 'Count raw source replacement returned')
+                if count_boundary_budget:
+                    metadata=allocation._LIVE_COUNT_RECEIVED_SOURCES[received.key][2]
+                    code=received.packet['verify'].__code__;calls=[]
+                    previous=sys.getprofile()
+                    self.assertIsNone(previous)
+                    def count_original_calls(frame,event,_argument):
+                        if (event=='call' and frame.f_code is code
+                                and frame.f_locals.get('packet') is received.packet):calls.append(True)
+                    try:
+                        sys.setprofile(count_original_calls)
+                        metadata.verify()
+                    finally:sys.setprofile(previous)
+                    metadata_count_calls.append(len(calls))
+                if short_k_caught_drift:
+                    with allocation._hold_received_count_source_k(writer,sheet,bound,second):
+                        actual_events=original.actual['events']
+                        original.actual['events']=tuple(list(original.events))
+                        self.assertIsNot(actual_events,original.actual['events'])
+                        try:
+                            with self.assertRaises(state.TrackerStateHold):state.current_k(writer)
+                        finally:original.actual['events']=actual_events
+                        # Catching an original refusal and restoring equal
+                        # metadata cannot resurrect this same read domain.
+                        if received.source_failed:
+                            with self.assertRaises(state.TrackerStateHold):state.current_k(writer)
+                            observed.append('caught K drift permanently poisoned')
+                        else:
+                            state.current_k(writer)
+                            observed.append('caught K drift forgotten')
+                if short_k_evaluation_registry_drift:
+                    with allocation._hold_received_count_source_k(writer,sheet,bound,second):
+                        issued=allocation._NATIVE_CATALOG_K_CONTEXT.get()
+                        original_tuple=allocation._LIVE_RECEIVED_COUNT_K_ORIGINALS[issued]
+                        calls=[];returned=[];sentinel=object()
+                        def fake_check():calls.append('fake checker')
+                        def fake_evaluate(*args,**kwargs):calls.append('fake evaluator');return sentinel
+                        fake=(original_tuple[0],fake_check,fake_check.__code__,received,
+                            fake_evaluate,fake_evaluate.__code__,*original_tuple[6:])
+                        if short_k_evaluation_registry_drift=='receipt':
+                            fake=(*original_tuple[:6],fake_evaluate,fake_evaluate.__code__)
+                        allocation._LIVE_RECEIVED_COUNT_K_ORIGINALS[issued]=fake
+                        refused=False
+                        try:
+                            try:
+                                if short_k_evaluation_registry_drift=='receipt':
+                                    returned.append(allocation._evaluate_received_count_receipt(writer,sheet,bound,second,
+                                        object(),qualified_source=object(),generation_id='unissued',settings=object(),
+                                        whitelist_snapshot=object(),expected_template_sha256='0'*64))
+                                else:
+                                    returned.append(allocation._evaluate_received_count_source(writer,sheet,bound,second,
+                                        object(),http_root=self.root,settings=object(),whitelist_snapshot=object(),
+                                        whitelist_path=self.root/'unissued.xlsx'))
+                            except allocation.SettingsAuditHold:refused=True
+                        finally:allocation._LIVE_RECEIVED_COUNT_K_ORIGINALS[issued]=original_tuple
+                        if refused and not calls and not returned and received.source_failed:
+                            with self.assertRaises(state.TrackerStateHold):state.current_k(writer)
+                            observed.append('independent evaluation registry drift refused before callbacks and poisoned')
+                        else:
+                            observed.append('self-attested evaluation tuple returned or forgotten')
+                            # Keep the actual holder's original cleanup path;
+                            # this test never leaves a fake registry installed.
+                            received.source_failed=True
+                if short_k_verifier_drift:
+                    with allocation._hold_received_count_source_k(writer,sheet,bound,second):
+                        issued=allocation._NATIVE_CATALOG_K_CONTEXT.get()
+                        k_packet=allocation._LIVE_NATIVE_CATALOG_K_CONTEXTS[issued]
+                        actual_verify=k_packet['verify'];actual_code=actual_verify.__code__
+                        if short_k_verifier_drift=='callback':k_packet['verify']=lambda:None
+                        else:actual_verify.__code__=actual_code.replace()
+                        refused=False
+                        try:
+                            try:state.current_k(writer)
+                            except state.TrackerStateHold:refused=True
+                        finally:
+                            k_packet['verify']=actual_verify;actual_verify.__code__=actual_code
+                        if refused and received.source_failed:
+                            with self.assertRaises(state.TrackerStateHold):state.current_k(writer)
+                            observed.append('original short K verifier drift poisoned')
+                        else:
+                            observed.append('short K verifier drift accepted or forgotten')
+                if short_k_issuance_interrupt:
+                    original_context=allocation._NATIVE_CATALOG_K_CONTEXT
+                    class InterruptedIssuance:
+                        def get(self):return original_context.get()
+                        def set(self,value):raise primary
+                        def reset(self,reset):return original_context.reset(reset)
+                    observed.append('short K issuance interrupted')
+                    with mock.patch.object(allocation,'_NATIVE_CATALOG_K_CONTEXT',new=InterruptedIssuance()):
+                        with allocation._hold_received_count_source_k(writer,sheet,bound,second):
+                            self.fail('interrupted original issuance must not yield K')
+                if short_k_boundary_budget:
+                    code=received.packet['verify'].__code__;calls=[]
+                    previous=sys.getprofile();self.assertIsNone(previous)
+                    def count_short_scope_calls(frame,event,_argument):
+                        if (event=='call' and frame.f_code is code
+                                and frame.f_locals.get('packet') is received.packet):calls.append(True)
+                    try:
+                        sys.setprofile(count_short_scope_calls)
+                        with allocation._hold_received_count_source_k(writer,sheet,bound,second):
+                            for _read in range(2):
+                                current=state.current_k(writer)
+                                self.assertEqual((7,1),(current.k,current.revision))
+                        self.assertEqual({},state._NATIVE_CATALOG_K_READ_CONTEXT)
+                        self.assertEqual({},allocation._LIVE_NATIVE_CATALOG_K_CONTEXTS)
+                        with self.assertRaises(state.TrackerStateHold):state.current_k(writer)
+                    finally:sys.setprofile(previous)
+                    metadata_count_calls.append(len(calls))
+                if raw_count_pointer_drift:
+                    metadata=allocation._LIVE_COUNT_RECEIVED_SOURCES[received.key][2]
+                    # This changes only an exposed callback, never the
+                    # actual Count/C6 issuer or any original source bytes.
+                    with mock.patch.object(received._count_tail_owner,'verify_raw',new=lambda:None):
+                        try:metadata.verify()
+                        except allocation.SettingsAuditHold:observed.append('original Count raw verifier refused')
+                if last_count_source_drift:
+                    metadata=allocation._LIVE_COUNT_RECEIVED_SOURCES[received.key][2]
+                    code=received.packet['verify'].__code__;returns=[];changed=[]
+                    target=tracker/'settings-audit-delivery/HEADER'
+                    self.assertTrue(target.is_file());old_inode=target.stat().st_ino;old_bytes=target.read_bytes()
+                    previous=sys.getprofile();self.assertIsNone(previous)
+                    def replace_after_last_original_count(frame,event,_argument):
+                        if (event=='return' and frame.f_code is code
+                                and frame.f_locals.get('packet') is received.packet):
+                            returns.append(True)
+                            if len(returns)==2:
+                                if last_source_short_k:
+                                    self.assertEqual({},state._NATIVE_CATALOG_K_READ_CONTEXT,
+                                        'short K must revoke before original full loan EXIT')
+                                    self.assertEqual({},allocation._LIVE_NATIVE_CATALOG_K_CONTEXTS)
+                                target.rename(target.with_name('HEADER-original-final-boundary'))
+                                target.write_bytes(old_bytes);target.chmod(0o600);changed.append(True)
+                    refused=False
+                    try:
+                        sys.setprofile(replace_after_last_original_count)
+                        try:
+                            if last_source_short_k:
+                                with allocation._hold_received_count_source_k(writer,sheet,bound,second):
+                                    self.assertEqual(7,state.current_k(writer).k)
+                            else:metadata.verify()
+                        except allocation.SettingsAuditHold:refused=True
+                    finally:sys.setprofile(previous)
+                    self.assertEqual([True],changed)
+                    self.assertNotEqual(old_inode,target.stat().st_ino);self.assertEqual(old_bytes,target.read_bytes())
+                    observed.append('last original Count source change refused' if refused
+                        else 'metadata returned after source change')
+                if tail_fault:
+                    anchor=received._count_tail_owner
+                    metadata=allocation._LIVE_COUNT_RECEIVED_SOURCES[received.key][2]
+                    if tail_fault=='interrupt':
+                        def interrupt():raise primary
+                        metadata._same_source_refs=interrupt
+                    anchor._received_source=None
+                    observed.append('original metadata tail slot erased')
+                if end_metadata_drift:
+                    metadata=allocation._LIVE_COUNT_RECEIVED_SOURCES[received.key][2]
+                    actual_verify=metadata._verify_receiver_raw;calls=[]
+                    def delegate_then_change():
+                        result=actual_verify();calls.append(True)
+                        if len(calls)==2:
+                            original.actual['events']=tuple(list(original.events))
+                        return result
+                    with mock.patch.object(metadata,'_verify_receiver_raw',side_effect=delegate_then_change):
+                        try:metadata.verify()
+                        except allocation.SettingsAuditHold:observed.append('END original metadata refused')
+                    self.assertEqual(2,len(calls),'drift follows the last actual receiver delegate')
+                if read_count_k:
+                    for _boundary in range(2):
+                        with mock.patch.object(allocation,'_hold_owned_native_completed_source_k',
+                                side_effect=AssertionError('received Count must never reconstruct cold ALL')), \
+                                journal._hold_receipted_count_source_k(writer,sheet,bound,second):
+                            self.assertEqual(7,state.current_k(writer).k)
+                            self.assertEqual(1,state.current_k(writer).revision)
+                            with self.assertRaises(state.TrackerStateHold):
+                                state.set_k(writer,new_k=8,actor='operator:fixture',
+                                    recorded_at='2026-10-13T01:00:00Z',request_id='read-only-count',expected_revision=1)
+                        self.assertEqual({},state._NATIVE_CATALOG_K_READ_CONTEXT)
+                        self.assertEqual({},allocation._LIVE_NATIVE_CATALOG_K_CONTEXTS)
+                        with self.assertRaises(state.TrackerStateHold):state.current_k(writer)
+                if (not end_metadata_drift and not tail_fault and not raw_count_pointer_drift
+                        and not last_count_source_drift and not short_k_caught_drift and not short_k_verifier_drift
+                        and not receiver_raw_source_drift and not short_k_evaluation_registry_drift):
+                    observed.append('old K revoked; same actual settings holder still LIVE')
+            self.assertTrue(received.closed)
+            self.assertEqual(before,self._default_recovery_images(tracker))
+            if append_count:
+                self.assertFalse(tuple(self.root.rglob('CLAIM-*')))
+                raise CountReplayFinished()
+        if (end_metadata_drift or tail_fault or raw_count_pointer_drift or last_count_source_drift or receiver_raw_source_drift
+                or short_k_caught_drift or short_k_verifier_drift or short_k_issuance_interrupt or short_k_evaluation_registry_drift):
+            # The real fixture reloads this module. Assert the actual current
+            # exception identity, not a stale pre-fixture imported class.
+            caught=None
+            try:
+                with ExitStack() as stack:
+                    self.native_second_audit_completed(stack,archive_before_new=True,before_count_probe=probe)
+            except BaseException as error:caught=error
+            from monitor import issue_tracker_global_attempt_journal as journal
+            if tail_fault=='interrupt' or short_k_issuance_interrupt:self.assertIs(primary,caught)
+            else:self.assertIs(type(caught),journal.GlobalAttemptHold)
+            self.assertEqual(['original metadata tail slot erased'] if tail_fault
+                else ['original Count raw verifier refused'] if raw_count_pointer_drift
+                else ['last original Count source change refused'] if last_count_source_drift
+                else ['caught K drift permanently poisoned'] if short_k_caught_drift
+                else ['original short K verifier drift poisoned'] if short_k_verifier_drift
+                else ['short K issuance interrupted'] if short_k_issuance_interrupt
+                else ['independent evaluation registry drift refused before callbacks and poisoned'] if short_k_evaluation_registry_drift
+                else ['Count raw delegate source drift refused'] if receiver_raw_source_drift
+                else ['END original metadata refused'],observed)
+            if (end_metadata_drift or raw_count_pointer_drift or last_count_source_drift
+                    or short_k_caught_drift or short_k_verifier_drift):
+                self.assertTrue(captured[0].source_failed)
+            self.assertTrue(captured[0].closed);self.assertEqual([],captured[0].raw.slots)
+            from monitor import issue_tracker_settings_audit_allocation as allocation
+            self.assertEqual({},allocation._LIVE_RECEIVED_COUNT_K_ORIGINALS)
+            self.assertEqual({},allocation._LIVE_NATIVE_CATALOG_K_CONTEXTS)
+            self.assertEqual({},state._NATIVE_CATALOG_K_READ_CONTEXT)
+            return
+        if append_count:
+            with self.assertRaises(CountReplayFinished),ExitStack() as stack:
+                self.native_second_audit_completed(stack,archive_before_new=True,before_count_probe=probe)
+        else:
+            with ExitStack() as stack:
+                self.native_second_audit_completed(stack,archive_before_new=True,before_count_probe=probe)
+        self.assertEqual(['old K revoked; same actual settings holder still LIVE'],observed)
+        self.assertEqual(1,len(captured));self.assertEqual([],captured[0].raw.slots)
+        if receiver_raw_boundary_budget:
+            self.assertEqual([2],receiver_raw_calls,
+                'two fresh full raw sweeps bracket the complete mutable/Count raw delegate, not four nested sweeps')
+        if count_boundary_budget or short_k_boundary_budget:
+            # Literal mechanism requirement: the actual C6 loan's entry and
+            # exit retain full Count/OTHER semantics; raw/settings/C19 body
+            # checks must not recursively repeat that whole semantic graph.
+            # No elapsed-time threshold or previously successful result.
+            self.assertEqual([2],metadata_count_calls)
+
+    def test_actual_source_settings_moves_to_original_count_tail_without_reviving_old_k(self):
+        self._actual_source_settings_count_transfer_workflow()
+
+    def test_actual_received_count_source_replays_readonly_k_without_cold_all_or_mutation(self):
+        from monitor import issue_tracker_settings_audit_allocation as allocation
+        self.assertTrue(callable(getattr(allocation,'_hold_received_count_source_k',None)),
+            'same original received source must supply short read-only K')
+        self._actual_source_settings_count_transfer_workflow(read_count_k=True)
+
+    def test_actual_received_metadata_full_count_checks_dominate_only_original_loan_boundaries(self):
+        self._actual_source_settings_count_transfer_workflow(count_boundary_budget=True)
+
+    def test_actual_received_raw_sweeps_bracket_one_complete_count_delegate(self):
+        self._actual_source_settings_count_transfer_workflow(receiver_raw_boundary_budget=True)
+
+    def test_actual_received_source_evaluation_rejects_self_attested_registry_before_callback_and_restore(self):
+        self._actual_source_settings_count_transfer_workflow(short_k_evaluation_registry_drift=True)
+
+    def test_actual_received_receipt_evaluation_rejects_self_attested_registry_before_callback_and_restore(self):
+        self._actual_source_settings_count_transfer_workflow(short_k_evaluation_registry_drift='receipt')
+
+    def test_actual_received_raw_sweeps_refuse_same_bytes_replacement_after_count_delegate(self):
+        self._actual_source_settings_count_transfer_workflow(receiver_raw_source_drift=True)
+
+    def test_actual_received_short_k_retains_one_original_c6_loan_for_all_reads(self):
+        # Two real K reads and final K verification share ONE original loan;
+        # full Count/OTHER must dominate the lexical scope's two boundaries,
+        # not be repeated by every K getter. No time threshold or cached PASS.
+        self._actual_source_settings_count_transfer_workflow(short_k_boundary_budget=True)
+
+    def _actual_non_yield_k_checkpoint_probe(self,*,replace_after_last=False):
+        # Real COMPLETE/APPLIED/DELIVERED, source transfer, Count=1, actual K
+        # and original C6. The qualifier leaf intentionally stops; this is a
+        # K/checkpoint mechanism workflow, NOT a successful source/GO result.
+        class ProbeStopped(BaseException):pass
+        primary=ProbeStopped();samples=[];receivers=[];tail_refusals=[];changes=[]
+        def probe(allocation,writer,sheet,bound,first,second,tracker):
+            from monitor import issue_tracker_global_attempt_journal as journal
+            from monitor import issue_tracker_state_owner as state
+            from monitor import issue_tracker_stage_l_consumer as source
+            with ExitStack() as count_scope:
+                with allocation._hold_owned_completed_source_read_originals(writer,sheet,bound):
+                    count_scope.enter_context(journal._hold_selected_last_catalog_write_originals(
+                        writer,sheet,bound,second))
+                    received=allocation._receive_first_original_count_source(writer,sheet,bound,second)
+                    receivers.append(received)
+                count=journal.record_global_attempt_intent(sheet,bound,second)
+                self.assertEqual((1,'UNKNOWN'),(count.attempt_count,count.outcome))
+                target=tracker/'settings-audit-delivery/DELIVERED'
+                old=target.read_bytes();inode=target.stat().st_ino
+                metadata=allocation._LIVE_COUNT_RECEIVED_SOURCES[received.key][2]
+                body_code=type(metadata)._verify_original_c6_body.__code__
+                with allocation._hold_received_count_source_k(writer,sheet,bound,second):
+                    issued=allocation._NATIVE_CATALOG_K_CONTEXT.get()
+                    packet=allocation._LIVE_NATIVE_CATALOG_K_CONTEXTS[issued]
+                    verify_code=packet['verify'].__code__
+                    loan=journal._hold_count_claim_project_c6.__wrapped__.__code__
+                    from types import CodeType
+                    c6_code=next(value for value in loan.co_consts
+                        if isinstance(value,CodeType) and value.co_name=='verify')
+                    checkpoints=[];inside=[False];previous=sys.getprofile();previous_trace=sys.gettrace()
+                    self.assertIsNone(previous);self.assertIsNone(previous_trace)
+                    def observe(frame,event,argument):
+                        if frame.f_code is verify_code and frame.f_locals.get('evaluating') is True:
+                            if event=='call':checkpoints.append(0)
+                        caller=frame.f_back
+                        if (inside[0] and frame.f_code is c6_code and caller is not None
+                                and caller.f_code is verify_code and caller.f_locals.get('evaluating') is True):
+                            if event=='call':checkpoints[-1]+=1
+                            if event=='return' and replace_after_last and len(checkpoints)==2 and not changes:
+                                # Last POST K checkpoint, after its actual C6
+                                # delegate. Tail refusal, not our primary stop,
+                                # must prove this same-byte replacement unsafe.
+                                preserved=target.with_name('DELIVERED-original-checkpoint')
+                                target.rename(preserved);target.write_bytes(old);target.chmod(0o600)
+                                self.assertNotEqual(inode,target.stat().st_ino)
+                                self.assertEqual(old,preserved.read_bytes());changes.append(True)
+                    def stop_after_actual_k(*args,**kwargs):
+                        inside[0]=True
+                        try:
+                            actual=state.current_k(writer)
+                            self.assertEqual((7,1),(actual.k,actual.revision))
+                        finally:inside[0]=False
+                        raise primary
+                    # Do not substitute the body's bound original/code: the
+                    # observer sees its real refusal before outer sanitation.
+                    def exception_observer(frame,event,argument):
+                        if frame.f_code is not body_code:return None
+                        frame.f_trace_lines=False;frame.f_trace_opcodes=False
+                        if (event=='exception' and frame.f_code is body_code
+                                and frame.f_locals.get('self') is metadata
+                                and replace_after_last and changes
+                                and isinstance(argument[1],allocation.SettingsAuditHold)):
+                            tail_refusals.append(True)
+                        return exception_observer
+                    try:
+                        sys.settrace(exception_observer if replace_after_last else None)
+                        sys.setprofile(observe)
+                        with mock.patch.object(source,'qualify_prod_stage_l',new=stop_after_actual_k):
+                            allocation._evaluate_received_count_source(writer,sheet,bound,second,object(),
+                                http_root=self.root,settings=object(),whitelist_snapshot=object(),
+                                whitelist_path=self.root/'not-consumed.xlsx')
+                    finally:
+                        sys.settrace(previous_trace);sys.setprofile(previous);samples.append(checkpoints)
+                    self.fail('bounded qualifier must never return a synthetic success')
+        with self.assertRaises(ProbeStopped) as caught,ExitStack() as stack:
+            self.native_second_audit_completed(stack,archive_before_new=True,before_count_probe=probe)
+        self.assertIs(primary,caught.exception)
+        self.assertEqual(1,len(samples));self.assertEqual([1,1],samples[0],
+            'actual K retains independent PRE/POST checkpoints with one original C6 delegate in each')
+        self.assertEqual(1,len(receivers));self.assertTrue(receivers[0].closed)
+        self.assertEqual([],receivers[0].raw.slots)
+        self.assertFalse(tuple(self.root.rglob('CLAIM-*')))
+        if replace_after_last:
+            self.assertEqual([True],changes);self.assertTrue(tail_refusals,
+                'the genuine complete original tail must refuse independently of the bounded primary')
+            self.assertTrue(receivers[0].source_failed)
+
+    def test_actual_non_yield_k_keeps_two_checkpoints_without_adjacent_c6_replay(self):
+        self._actual_non_yield_k_checkpoint_probe()
+
+    def test_actual_non_yield_k_tail_refuses_original_replacement_after_last_c6_delegate(self):
+        # A controlled primary poisons the evaluator BEFORE its real tail,
+        # so it cannot prove the replacement is detected by that tail. Use
+        # the genuine qualifier-return workflow, with actual C6-return and
+        # complete tail observations; never return a mock qualification.
+        from test_cases.test_issue_tracker_stage_l_consumer_workflow import ProdStageLConsumerWorkflowTests
+        case=ProdStageLConsumerWorkflowTests(
+            'test_real_received_fixed_source_evaluation_refuses_same_bytes_delivered_replacement_at_last_source_return')
+        try:
+            case.setUp()
+            case._actual_received_fixed_source_evaluation_probe('delivered',c6_postreturn=True)
+        finally:case.doCleanups()
+
+    def test_actual_received_short_k_caught_drift_cannot_restore_read_domain(self):
+        self._actual_source_settings_count_transfer_workflow(short_k_caught_drift=True)
+
+    def test_actual_received_short_k_rechecks_source_after_revocation_and_last_loan_delegate(self):
+        self._actual_source_settings_count_transfer_workflow(last_count_source_drift=True,last_source_short_k=True)
+
+    def test_actual_received_short_k_rejects_copied_verifier_callback_before_read(self):
+        self._actual_source_settings_count_transfer_workflow(short_k_verifier_drift='callback')
+
+    def test_actual_received_short_k_rejects_same_bytecode_substitution_before_read(self):
+        self._actual_source_settings_count_transfer_workflow(short_k_verifier_drift='code')
+
+    def test_actual_received_short_k_partial_issuance_interrupt_revokes_every_original(self):
+        self._actual_source_settings_count_transfer_workflow(short_k_issuance_interrupt=True)
+
+    def test_actual_received_metadata_cannot_substitute_original_count_raw_verifier(self):
+        self._actual_source_settings_count_transfer_workflow(raw_count_pointer_drift=True)
+
+    def test_actual_received_metadata_rechecks_source_after_last_full_count_delegate(self):
+        self._actual_source_settings_count_transfer_workflow(last_count_source_drift=True)
+
+    def test_actual_received_source_metadata_end_drift_poisons_and_closes_originals(self):
+        self._actual_source_settings_count_transfer_workflow(end_metadata_drift=True)
+
+    def test_actual_count_source_metadata_tail_cannot_downgrade_to_unreceived(self):
+        self._actual_source_settings_count_transfer_workflow(tail_fault='slot')
+
+    def test_actual_count_source_metadata_tail_preserves_interrupt_over_secondary_hold(self):
+        self._actual_source_settings_count_transfer_workflow(tail_fault='interrupt')
+
+    def test_actual_received_count_one_keeps_same_original_k_and_unknown_without_claim(self):
+        # Bounded native workflow intentionally stops after actual Count=1,
+        # read-only K and all original cleanup. No completion/send is invented.
+        self._actual_source_settings_count_transfer_workflow(read_count_k=True,append_count=True)
+
+    def test_actual_count_source_barriers_cannot_adopt_unretained_foreign_fd(self):
+        observed=[]
+        def probe(allocation,writer,sheet,bound,first,second,tracker):
+            from monitor import issue_tracker_global_attempt_journal as journal
+            foreign=self.root/'foreign-barrier-data';foreign.write_bytes(b'literal foreign data\n');foreign.chmod(0o600)
+            fd=os.open(foreign,os.O_RDONLY)
+            try:
+                with ExitStack() as count_scope:
+                    with allocation._hold_owned_completed_source_read_originals(writer,sheet,bound):
+                        original=allocation._owned_source_k_settings_originals(writer,sheet,bound)
+                        source=original.originals[5];saved=source.completed_barriers[0]
+                        unit,parent,completed,witness,groups=saved
+                        source.completed_barriers[0]=(unit,parent,completed,witness,
+                            ((fd,*groups[0][1:]),*groups[1:]))
+                        count_scope.enter_context(journal._hold_selected_last_catalog_write_originals(
+                            writer,sheet,bound,second))
+                        caught=None
+                        try:allocation._receive_first_original_count_source(writer,sheet,bound,second)
+                        except allocation.SettingsAuditHold as error:caught=error
+                        observed.append(type(caught) is allocation.SettingsAuditHold)
+                # Do not introduce a second metadata-drift fault while the
+                # receiver is still LIVE: assess admission, then restore only
+                # after the original Count/source cleanup has completed.
+                source.completed_barriers[0]=saved
+                self.assertEqual(b'literal foreign data\n',os.pread(fd,64,0))
+            finally:os.close(fd)
+        with ExitStack() as stack:
+            self.native_second_audit_completed(stack,archive_before_new=True,before_count_probe=probe)
+        self.assertEqual([True],observed,'C19 barriers must use already-retained original graph FDs only')
 
     def test_actual_archived_delivery_native_preparation_reads_original_k_without_reacquiring_sheet(self):
         from monitor import issue_tracker_state_owner as state
@@ -2266,6 +3342,35 @@ with scoped_fixture(root,sheet),state.tracker_settings_writer(project,project/'p
         with ExitStack() as stack:
             self.native_second_audit_completed(stack,archive_before_new=True,preparation_k_probe=probe)
         self.assertEqual(['actual-preparation-original-k'],reached)
+
+    def test_native_preparation_k_read_keeps_original_graphs_around_settings_and_pure_chain(self):
+        from monitor import issue_tracker_state_owner as state
+        reached=[]
+        def probe(allocation,writer,sheet,bound,prepared,tracker):
+            from monitor import issue_tracker_nv_reservation as nv
+            with allocation._hold_native_catalog_k_read(prepared,writer,sheet,bound):
+                original_graph=nv._verify_catalog_preparation
+                original_chain=allocation.chain.validate_k_chain_snapshot
+                order=[]
+                def graph(actual):
+                    result=original_graph(actual)
+                    if actual is prepared:order.append('actual-original-graph')
+                    return result
+                def chain(*args,**kwargs):
+                    result=original_chain(*args,**kwargs)
+                    order.append('actual-pure-chain')
+                    return result
+                with mock.patch.object(nv,'_verify_catalog_preparation',graph), \
+                        mock.patch.object(allocation.chain,'validate_k_chain_snapshot',chain):
+                    actual=state.current_k(writer)
+                self.assertEqual((1,7),(actual.revision,actual.k))
+                self.assertEqual(['actual-original-graph','actual-original-graph','actual-pure-chain',
+                    'actual-original-graph','actual-original-graph'],order,
+                    'preserve the existing independent native K workflow four-graph contract')
+                reached.append('original-graphs-bracket-pure-chain')
+        with ExitStack() as stack:
+            self.native_second_audit_completed(stack,archive_before_new=True,preparation_k_probe=probe)
+        self.assertEqual(['original-graphs-bracket-pure-chain'],reached)
 
     def test_native_preparation_k_read_refuses_equal_prior_replacement_and_graph_tail_budget_failure(self):
         from monitor import issue_tracker_state_owner as state
@@ -2709,7 +3814,7 @@ with scoped_fixture(root,sheet),state.tracker_settings_writer(project,project/'p
         with ExitStack() as stack:
             allocation,writer,owner,bound,first,second,projection,first_delivery=self.native_second_audit_completed(stack)
             tracker=self.root/'project/.tracker'
-            actual=allocation._hold_delivery_authority;entered=[]
+            actual=allocation._hold_delivery_entry_authority;entered=[]
             @contextmanager
             def actual_authority(*args,**options):
                 with actual(*args,**options) as original:
@@ -2718,11 +3823,12 @@ with scoped_fixture(root,sheet),state.tracker_settings_writer(project,project/'p
                     yield original
             error=None
             try:
-                with mock.patch.object(allocation,'_hold_delivery_authority',side_effect=actual_authority):
+                with mock.patch.object(allocation,'_hold_delivery_entry_authority',side_effect=actual_authority):
                     delivered=allocation.record_completed_settings_delivery(writer,owner,bound,second)
             except Exception as exc:error=exc
             # Outside sanitizers: prove the actual second COMPLETE/allocation
-            # authority was reached before the fixed-name refusal.
+            # authority was reached through the real creation entry. The
+            # legacy leaf is intentionally not used after a first pair exists.
             self.assertEqual([(second.unit_id,True,True)],entered)
             if error is not None:raise error
             self.assertEqual((self.catalog_later_settings_audit_oracle()['event_id'],),delivered.event_ids)
@@ -4923,7 +6029,14 @@ with scoped_fixture(root,owner),owner.spreadsheet_owner(bound) as token:
             images={name:self.read_owned(stack,writer,owner,bound,auth,kind,value) for name,(kind,value) in
                     {'identity_response':docs['identity_response'],'headers_response':docs['headers_response'],
                      'metadata_response':('metadata',meta),'whitelist_response':('whitelist',whitelist_doc)}.items()}
-            observed=module.observe_owned_unit_read_gates(writer,owner,bound,unit,whitelist_snapshot=snapshot,**images)
+            from monitor import issue_tracker_history_read_launcher as reads
+            with mock.patch.object(reads,'_require_current_owned_read_group',wraps=reads._require_current_owned_read_group) as groups:
+                observed=module.observe_owned_unit_read_gates(writer,owner,bound,unit,whitelist_snapshot=snapshot,**images)
+            expected_group=(('template_identity',None,None,images['identity_response']),
+                ('template_headers',None,None,images['headers_response']),
+                ('whitelist',None,None,images['whitelist_response']),('metadata',None,None,images['metadata_response']))
+            self.assertEqual(2,groups.call_count,'before AND after full original gate decoding')
+            self.assertEqual([expected_group,expected_group],[call.args[3] for call in groups.call_args_list])
             self.assertEqual(snapshot.sha256,observed.whitelist_sha256)
             self.assertEqual('VISIBLE_ONLY_UNPROVED',observed.capacity_outcome)
             self.assertFalse(hasattr(observed,'permit')); self.assertFalse(hasattr(observed,'applied'))

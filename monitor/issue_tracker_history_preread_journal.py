@@ -372,44 +372,65 @@ def _read_preread(token, binding, unit):
     return result
 
 
+def _current_owned_business_read_plan(writer_token,owner_token,binding,authentication,acquisitions):
+    """Fresh issued originals in one non-yield boundary, never retained PASS.
+
+    Only shared auth/target reads are grouped. Every actual registry, shape,
+    response and deadline is rechecked after the last shared read. The binder
+    keeps all per-request original/inventory fences and scalar acquisition.
+    """
+    from monitor.issue_tracker_history_read_launcher import _require_current_owned_project_read_group
+    if type(acquisitions) not in (list,tuple) or not acquisitions:raise HistoryPrereadHold()
+    captured=tuple(acquisitions)
+    if (any(type(item) is not tuple or len(item)!=4 for item in captured)
+            or captured[0][1:]!=('template_identity',None,None)):raise HistoryPrereadHold()
+    observed=_require_current_owned_project_read_group(writer_token,owner_token,binding,authentication,
+        tuple((kind,sheet,row,response) for response,kind,sheet,row in captured))
+    if (len(acquisitions)!=len(captured)
+            or any(actual is not original for actual,original in zip(acquisitions,captured))
+            or type(observed) is not tuple or len(observed)!=len(captured)
+            or any(type(item) is not tuple or len(item)!=3 for item in observed)):
+        raise HistoryPrereadHold()
+    first=observed[0]
+    if any(item[1:]!=first[1:] for item in observed):raise HistoryPrereadHold()
+    return first[0]
+
+
 @contextmanager
 def _hold_owned_original_business_history_reads(writer_token, owner_token, binding, unit,
                                                 authentication, *, identity_response):
-    """Acquire fixed fresh reads from continuously held catalog originals.
+    """Unchanged read interface over one continuously held original graph."""
+    with _hold_owned_original_business_history_inputs(writer_token, owner_token, binding, unit) as bind:
+        with bind(authentication, identity_response=identity_response) as observed:
+            yield observed
 
-    ALL original operations (including NOOP/operator cells) determine reads.
-    No caller plan/coordinate/factory, recompilation, count, send or G1 GO.
-    Original project authentication/read deadlines dominate the whole scope;
-    original business/History descriptors survive inventory finalizers too.
-    This continuity observation does not authenticate the business source.
+
+@contextmanager
+def _hold_owned_original_business_history_inputs(writer_token, owner_token, binding, unit):
+    """Capture local originals before online identity; never issue early trust.
+
+    The same two directories and seven raw files survive actual issued reads
+    and ALL inventory finalizers. Only the fixed one-use binding operation can
+    decode the actual identity, acquire fresh reads and issue the original
+    guard. No supplied graph/plan/verifier or closed read is adopted.
     """
     failed = False; guard = None; completed = False
+    live = True; used = False; bound_completed = False; current_read = None
+    origin = (os.getpid(), threading.get_ident())
     try:
         from monitor import issue_tracker_retained_inventory as inventory
         from monitor import issue_tracker_unit_catalog as catalog
         from monitor.issue_tracker_history_read_launcher import (
             OwnedProjectSheetsReadUnit, require_current_owned_project_read)
-        acquisitions = [(identity_response, 'template_identity', None, None)]
-        def current():
-            result = None
-            for response, kind, sheet, row in acquisitions:
-                plan, project, digest = require_current_owned_project_read(
-                    writer_token, owner_token, binding, response, authentication,
-                    read_kind=kind, sheet=sheet, row=row)
-                if result is None:
-                    result = plan, project, digest
-                elif (project, digest) != result[1:]:
-                    raise HistoryPrereadHold()
-            return result[0]
-        identity = decode.decode_template_identity(current(), identity_response)
         owner = ownership._validated_owner(owner_token, binding)
         parent = owner.directories[-1][0]; stem = owner.lock_name[:-5]
         held = catalog._Originals()
         def verify_originals():
-            current()
+            if current_read is not None: current_read()
             if ownership._validated_owner(owner_token, binding) is not owner:
                 raise HistoryPrereadHold()
-            held.verify(); current()
+            held.verify()
+            if current_read is not None: current_read()
         def close_originals():
             try:
                 verify_originals()
@@ -437,63 +458,87 @@ def _hold_owned_original_business_history_reads(writer_token, owner_token, bindi
             history = held.directory(parent, name[:-9] + '.history')
             for entry in ('HISTORY-RAW', 'HEADER', 'INITIALIZED'):
                 held.file(history, entry, 2*1024*1024 if entry == 'HISTORY-RAW' else 16384)
-            original = _inspect_business(owner_token, binding, identity, unit,
-                                         parent, name, business, base)
             reads = _unpack_business(originals['BUSINESS-RAW'])
             sheet = json.loads(unit.action_preimage)['identity']['sheet']
-            verify_originals(); verify_inventory()
-            def acquire(kind, *, sheet=None, row=None):
-                current(); verify_originals(); verify_inventory()
-                response = OwnedProjectSheetsReadUnit(writer_token, owner_token, binding,
-                    authentication, read_kind=kind, sheet=sheet, row=row).read_once()
-                acquisitions.append((response, kind, sheet, row))
-                # Last native read may have replaced an original with same bytes.
-                verify_originals(); verify_inventory()
-                return response
-            history_response = acquire('history_tail')
-            shared = {}; fresh = []
-            for reading in reads:
-                observed = {'operation_id': reading['operation_id']}
-                for role, kind in (('discovery', 'activity'), ('occupancy', 'insertion'), ('row', 'row')):
-                    plan = reading[role+'_plan']
-                    if plan is None:
-                        if role != 'row': raise HistoryPrereadHold()
-                        observed[role+'_response'] = None
-                        continue
-                    row = None
-                    if kind == 'row':
-                        target, title, geometry = decode._geometry(plan)
-                        if target != binding.spreadsheet_id or title != sheet or len(geometry) != 1:
-                            raise HistoryPrereadHold()
-                        (first, _column), (last, _end) = next(iter(geometry.items()))
-                        if first != last: raise HistoryPrereadHold()
-                        row = first + 1
-                    key = kind, sheet, row
-                    if key not in shared:
-                        shared[key] = acquire(kind, sheet=sheet, row=row)
-                    observed[role+'_response'] = shared[key]
-                fresh.append(observed)
-            fresh = tuple(fresh)
-            def verify():
-                verify_originals(); verify_inventory()
-                result = observe_owned_business_continuity(writer_token, owner_token,
-                    binding, unit, identity_response=identity_response,
-                    history_response=history_response, business_reads=fresh)
-                if result != original or global_journal.inspect_global_unit(owner_token, binding, unit) != state:
+            @contextmanager
+            def bind(authentication, *, identity_response):
+                nonlocal guard, used, bound_completed, current_read
+                if not live or used or origin != (os.getpid(), threading.get_ident()):
                     raise HistoryPrereadHold()
-                verify_inventory(); verify_originals()
-            verify(); held.sync(); verify()
-            # Freeze only this helper's actual issued acquisitions. A later
-            # unit/finalizer cannot refresh or substitute these original reads.
-            acquisitions = tuple(acquisitions)
-            guard = _OriginalBusinessReadGuard()
-            with _BUSINESS_READ_GUARD_LOCK:
-                _BUSINESS_READ_GUARDS[guard] = ['LIVE', verify, current,
-                    (identity_response, history_response, tuple(tuple(item.items()) for item in fresh)), held]
-            yield original, guard
-            guard()
+                used = True
+                acquisitions = [(identity_response, 'template_identity', None, None)]
+                def current():
+                    original=acquisitions
+                    plan=_current_owned_business_read_plan(writer_token,owner_token,binding,authentication,original)
+                    if acquisitions is not original:raise HistoryPrereadHold()
+                    return plan
+                current_read = current
+                identity = decode.decode_template_identity(current(), identity_response)
+                try:
+                    original = _inspect_business(owner_token, binding, identity, unit,
+                                                 parent, name, business, base)
+                    verify_originals(); verify_inventory()
+                    def acquire(kind, *, sheet=None, row=None):
+                        current(); verify_originals(); verify_inventory()
+                        response = OwnedProjectSheetsReadUnit(writer_token, owner_token, binding,
+                            authentication, read_kind=kind, sheet=sheet, row=row).read_once()
+                        acquisitions.append((response, kind, sheet, row))
+                        # Last native read may have replaced an original with same bytes.
+                        verify_originals(); verify_inventory()
+                        return response
+                    history_response = acquire('history_tail')
+                    shared = {}; fresh = []
+                    for reading in reads:
+                        observed = {'operation_id': reading['operation_id']}
+                        for role, kind in (('discovery', 'activity'), ('occupancy', 'insertion'), ('row', 'row')):
+                            plan = reading[role+'_plan']
+                            if plan is None:
+                                if role != 'row': raise HistoryPrereadHold()
+                                observed[role+'_response'] = None
+                                continue
+                            row = None
+                            if kind == 'row':
+                                target, title, geometry = decode._geometry(plan)
+                                if target != binding.spreadsheet_id or title != sheet or len(geometry) != 1:
+                                    raise HistoryPrereadHold()
+                                (first, _column), (last, _end) = next(iter(geometry.items()))
+                                if first != last: raise HistoryPrereadHold()
+                                row = first + 1
+                            key = kind, sheet, row
+                            if key not in shared:
+                                shared[key] = acquire(kind, sheet=sheet, row=row)
+                            observed[role+'_response'] = shared[key]
+                        fresh.append(observed)
+                    fresh = tuple(fresh)
+                    def verify():
+                        verify_originals(); verify_inventory()
+                        result = observe_owned_business_continuity(writer_token, owner_token,
+                            binding, unit, identity_response=identity_response,
+                            history_response=history_response, business_reads=fresh)
+                        if result != original or global_journal.inspect_global_unit(owner_token, binding, unit) != state:
+                            raise HistoryPrereadHold()
+                        verify_inventory(); verify_originals()
+                    verify(); held.sync(); verify()
+                    # Freeze only this helper's actual issued acquisitions. A later
+                    # unit/finalizer cannot refresh or substitute these original reads.
+                    acquisitions = tuple(acquisitions)
+                    guard = _OriginalBusinessReadGuard()
+                    with _BUSINESS_READ_GUARD_LOCK:
+                        _BUSINESS_READ_GUARDS[guard] = ['LIVE', verify, current,
+                            (identity_response, history_response, tuple(tuple(item.items()) for item in fresh)), held]
+                    yield original, guard
+                    guard()
+                    bound_completed = True
+                finally:
+                    if guard is not None and not bound_completed:
+                        with _BUSINESS_READ_GUARD_LOCK:
+                            guard_state = _BUSINESS_READ_GUARDS.get(guard)
+                            if guard_state is not None: guard_state[:] = ['FAILED', None, None, None, None]
+            yield bind
+            if not bound_completed:
+                raise HistoryPrereadHold()
         # All finalizers have run; do not reuse a closed originals verifier.
-        current()
+        current_read()
         with _BUSINESS_READ_GUARD_LOCK:
             state = _BUSINESS_READ_GUARDS[guard]
             if state[0] != 'LIVE': raise HistoryPrereadHold()
@@ -502,6 +547,7 @@ def _hold_owned_original_business_history_reads(writer_token, owner_token, bindi
     except Exception:
         failed = True
     finally:
+        live = False
         # Consumer/finalizer interruption, including BaseException, can never
         # become a successfully CLOSED holder or revive after registry repair.
         if guard is not None and not completed:
@@ -1000,7 +1046,7 @@ def observe_owned_business_continuity(writer_token, owner_token, binding, unit, 
     """
     folder = None; history_folder = None; failed = False
     try:
-        from monitor.issue_tracker_history_read_launcher import require_current_owned_read
+        from monitor.issue_tracker_history_read_launcher import require_current_owned_read, _require_current_owned_read_group
         def issued(response, kind, *, sheet=None, row=None):
             return require_current_owned_read(writer_token,owner_token,binding,response,
                                               read_kind=kind,sheet=sheet,row=row)
@@ -1051,8 +1097,9 @@ def observe_owned_business_continuity(writer_token, owner_token, binding, unit, 
                         or document(response.data) != document(original[role+'_response'].data)): raise HistoryPrereadHold()
                 checks.append((response,kind,row))
         # Originals and acquisition identity must survive the entire observation.
-        for response,kind,row in checks: issued(response,kind,sheet=sheet,row=row)
-        issued(identity_response,'template_identity'); issued(history_response,'history_tail')
+        read_group=tuple((kind,sheet,row,response) for response,kind,row in checks)+(
+            ('template_identity',None,None,identity_response),('history_tail',None,None,history_response))
+        _require_current_owned_read_group(writer_token,owner_token,binding,read_group)
         if (_inspect_business(owner_token,binding,identity,unit,parent,name,folder,base) != result
                 or _read_preread(owner_token,binding,unit) != (old_history,old_tail)
                 or global_journal.inspect_global_unit(owner_token,binding,unit) != state
@@ -1062,8 +1109,7 @@ def observe_owned_business_continuity(writer_token, owner_token, binding, unit, 
             raise HistoryPrereadHold()
         journal._named(parent,name,folder,directory=True)
         journal._named(parent,history_name,history_folder,directory=True)
-        for response,kind,row in checks: issued(response,kind,sheet=sheet,row=row)
-        issued(identity_response,'template_identity'); issued(history_response,'history_tail')
+        _require_current_owned_read_group(writer_token,owner_token,binding,read_group)
     except Exception: failed = True
     finally:
         for handle in (folder,history_folder):

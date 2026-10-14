@@ -32,6 +32,138 @@ def load():
 
 
 class Req7HistoryPrereadJournalDirectTests(unittest.TestCase):
+    def test_business_current_group_delegates_fresh_originals_and_returns_only_first_plan(self):
+        """Literal control oracle, not native or source permission evidence."""
+        module=load();verify=getattr(module,'_current_owned_business_read_plan',None)
+        self.assertTrue(callable(verify),'fresh business acquisition group is absent')
+        from monitor import issue_tracker_history_read_launcher as launcher
+        writer,owner,bound,auth=object(),object(),binding(),object()
+        identity,history,row=object(),object(),object()
+        acquisitions=[(identity,'template_identity',None,None),
+                      (history,'history_tail',None,None),(row,'row','ETH Cabling',7)]
+        first,second,third,project=object(),object(),object(),object()
+        observed=((first,project,'a'*64),(second,project,'a'*64),(third,project,'a'*64))
+        reads=(('template_identity',None,None,identity),('history_tail',None,None,history),
+               ('row','ETH Cabling',7,row))
+        with mock.patch.object(launcher,'_require_current_owned_project_read_group',return_value=observed) as group:
+            self.assertIs(first,verify(writer,owner,bound,auth,acquisitions))
+            self.assertIs(first,verify(writer,owner,bound,auth,acquisitions))
+        self.assertEqual([mock.call(writer,owner,bound,auth,reads)]*2,group.call_args_list)
+        self.assertEqual((identity,history,row),tuple(item[0] for item in acquisitions))
+
+    def test_business_current_group_refuses_same_value_tuple_replacement_or_provenance_drift(self):
+        module=load();verify=getattr(module,'_current_owned_business_read_plan',None)
+        self.assertTrue(callable(verify),'fresh business acquisition group is absent')
+        from monitor import issue_tracker_history_read_launcher as launcher
+        writer,owner,bound,auth=object(),object(),binding(),object()
+        acquisition=(object(),'template_identity',None,None);plan,project=object(),object()
+        acquisitions=[acquisition]
+        def replace(*args):
+            acquisitions[0]=tuple(list(acquisition))
+            return ((plan,project,'a'*64),)
+        with mock.patch.object(launcher,'_require_current_owned_project_read_group',side_effect=replace):
+            with self.assertRaises(module.HistoryPrereadHold):verify(writer,owner,bound,auth,acquisitions)
+        for result in ((),((plan,project,'a'*64),(plan,object(),'a'*64)),
+                       ((plan,project,'a'*64),(plan,project,'b'*64))):
+            acquisitions=[acquisition,(object(),'history_tail',None,None)]
+            with mock.patch.object(launcher,'_require_current_owned_project_read_group',return_value=result):
+                with self.assertRaises(module.HistoryPrereadHold):verify(writer,owner,bound,auth,acquisitions)
+
+    def test_local_business_prefix_binding_keeps_original_count_and_closes_issued_guard(self):
+        """Control/lifecycle oracle; mocked reads are not actual FIRST evidence."""
+        from contextlib import contextmanager
+        from types import SimpleNamespace
+        from monitor import issue_tracker_retained_inventory as inventory, issue_tracker_unit_catalog as catalog
+        from monitor import issue_tracker_history_read_launcher as launcher
+        module=load();entry=getattr(module,'_hold_owned_original_business_history_inputs',None)
+        self.assertTrue(callable(entry))
+        owner=SimpleNamespace(directories=((123,),),lock_name='literal.lock')
+        count=SimpleNamespace(attempt_count=0)
+        row=SimpleNamespace(unit=self.value,families=('business','history'),attempt_count=0)
+        projected='independent literal business image';events=[];response=object();project=object()
+        class Originals:
+            def directory(self,parent,name):return name
+            def file(self,parent,name,limit):return b'literal raw',None
+            def verify(self):events.append('originals verified')
+            def sync(self):events.append('originals synced')
+            def close(self):events.append('originals closed')
+        @contextmanager
+        def retained(*args):
+            yield (row,),lambda:events.append('inventory verified')
+            events.append('inventory closed')
+        with mock.patch.object(module.ownership,'_validated_owner',return_value=owner), \
+                mock.patch.object(catalog,'_Originals',Originals), \
+                mock.patch.object(inventory,'_hold_catalog_retained_inventory',retained), \
+                mock.patch.object(module,'_business_inputs',return_value=(123,'literal.business',{},count)), \
+                mock.patch.object(module.os,'listdir',return_value=['literal.business','literal.history']), \
+                mock.patch.object(module,'_unpack_business',return_value=()), \
+                mock.patch.object(module,'_inspect_business',return_value=projected), \
+                mock.patch.object(module,'observe_owned_business_continuity',return_value=projected), \
+                mock.patch.object(module.global_journal,'inspect_global_unit',return_value=count), \
+                mock.patch.object(module.decode,'decode_template_identity',return_value=object()), \
+                mock.patch.object(launcher,'require_current_owned_project_read',return_value=('literal plan',project,'a'*64)), \
+                mock.patch.object(launcher,'_require_current_owned_project_read_group',
+                    side_effect=lambda _writer,_owner,_bound,_auth,reads:
+                        tuple(('literal plan',project,'a'*64) for _ in reads)), \
+                mock.patch.object(launcher,'OwnedProjectSheetsReadUnit') as reader:
+            reader.return_value.read_once.return_value=response
+            with entry(object(),object(),binding(),self.value) as bind:
+                with bind(object(),identity_response=object()) as (actual,guard):
+                    self.assertEqual(projected,actual);guard()
+                    self.assertEqual('LIVE',module._BUSINESS_READ_GUARDS[guard][0])
+                    self.assertNotIn('originals closed',events)
+                self.assertEqual('LIVE',module._BUSINESS_READ_GUARDS[guard][0])
+                with self.assertRaises(module.HistoryPrereadHold):
+                    with bind(object(),identity_response=object()):self.fail('a second binding entered')
+            self.assertLess(events.index('inventory closed'),events.index('originals closed'))
+            self.assertEqual('CLOSED',module._BUSINESS_READ_GUARDS[guard][0]);guard._verify_issued_only()
+            with self.assertRaises(module.HistoryPrereadHold):guard()
+            with self.assertRaises(module.HistoryPrereadHold):
+                with bind(object(),identity_response=object()):self.fail('closed prefix was reused')
+
+    def test_local_business_prefix_holds_nine_originals_before_identity_or_guard(self):
+        """Control-order oracle only; actual FD/read coverage is the archived CORE."""
+        from contextlib import contextmanager
+        from types import SimpleNamespace
+        from monitor import issue_tracker_retained_inventory as inventory, issue_tracker_unit_catalog as catalog
+        from monitor import issue_tracker_history_read_launcher as launcher
+        module=load(); entry=getattr(module,'_hold_owned_original_business_history_inputs',None)
+        self.assertTrue(callable(entry),'FIRST needs its actual local business capture before issuing bounded reads')
+        owner=SimpleNamespace(directories=((123,),),lock_name='literal.lock')
+        row=SimpleNamespace(unit=self.value,families=('business','history'),attempt_count=0)
+        events=[]
+        class Originals:
+            def directory(self,parent,name): events.append(('directory',name)); return name
+            def file(self,parent,name,limit): events.append(('file',parent,name)); return b'literal raw',None
+            def verify(self): events.append(('verify',))
+            def sync(self): events.append(('sync',))
+            def close(self): events.append(('close',))
+        @contextmanager
+        def retained(*args): yield (row,),lambda:None
+        with mock.patch.object(module.ownership,'_validated_owner',return_value=owner), \
+                mock.patch.object(catalog,'_Originals',Originals), \
+                mock.patch.object(inventory,'_hold_catalog_retained_inventory',retained), \
+                mock.patch.object(module,'_business_inputs',return_value=(123,'literal.business',{},SimpleNamespace(attempt_count=0))), \
+                mock.patch.object(module.os,'listdir',return_value=['literal.business','literal.history']), \
+                mock.patch.object(module,'_unpack_business',return_value=()), \
+                mock.patch.object(module,'_inspect_business') as inspect_business, \
+                mock.patch.object(launcher.OwnedProjectSheetsReadUnit,'read_once') as read:
+            before=set(module._BUSINESS_READ_GUARDS)
+            with self.assertRaises(module.HistoryPrereadHold):
+                with entry(object(),object(),binding(),self.value) as bind:
+                    self.assertTrue(callable(bind));self.assertEqual(before,set(module._BUSINESS_READ_GUARDS))
+                    self.assertEqual([
+                        ('directory','literal.business'),
+                        ('file','literal.business','MANIFEST'),('file','literal.business','BUSINESS-RAW'),
+                        ('file','literal.business','HEADER'),('file','literal.business','INITIALIZED'),
+                        ('directory','literal.history'),('file','literal.history','HISTORY-RAW'),
+                        ('file','literal.history','HEADER'),('file','literal.history','INITIALIZED')],
+                        [event for event in events if event[0] in ('directory','file')])
+                    inspect_business.assert_not_called();read.assert_not_called()
+                    # Unbound local originals cannot become a successful read
+                    # holder merely because the caller exits normally.
+            self.assertEqual(('close',),events[-1]);self.assertEqual(before,set(module._BUSINESS_READ_GUARDS))
+
     def test_owned_creation_accepts_only_actual_project_sources_before_any_durable_write(self):
         import inspect
         module=load(); api=getattr(module,'prepare_owned_project_history_preread',None)
@@ -1103,6 +1235,29 @@ class Req7OwnedBusinessPrereadCreationWorkflowTests(unittest.TestCase):
     setUp=_Fixture.setUp; certificates=_Fixture.certificates; server=_Fixture.server
     owners=_Fixture.owners; intercept=_Fixture.intercept; child_fixture=_Fixture.child_fixture
     project_auth=_Fixture.project_auth; read_project=_Fixture.read_project
+
+    def test_business_continuity_groups_only_non_yield_tail_checks_and_preserves_originals(self):
+        from contextlib import ExitStack
+        from monitor import issue_tracker_history_read_launcher as reads
+        prototype=Req7BusinessPrereadJournalDirectTests();prototype.setUp()
+        self.addCleanup(prototype.doCleanups)
+        with self.business_originals() as (module,api,writer,owner,bound,auth,generation,unit,
+                identity,identity_read,actual,_manifest,digest):
+            api(writer,owner,bound,auth,generation,unit,identity_response=identity_read,business_reads=actual)
+            with ExitStack() as read_scope:
+                history=self.read_project(read_scope,writer,owner,bound,auth,'history_tail',json.loads(prototype.raw.data))
+            expected=[]
+            for index,item in enumerate(actual):
+                expected.extend((('activity','ETH&IB Switch',None,item['discovery_response']),
+                    ('insertion','ETH&IB Switch',None,item['occupancy_response']),
+                    ('row','ETH&IB Switch',index+3,item['row_response'])))
+            expected.extend((('template_identity',None,None,identity_read),('history_tail',None,None,history)))
+            with mock.patch.object(reads,'_require_current_owned_read_group',wraps=reads._require_current_owned_read_group) as groups:
+                observed=module.observe_owned_business_continuity(writer,owner,bound,unit,
+                    identity_response=identity_read,history_response=history,business_reads=actual)
+            self.assertEqual((2,1,digest),(observed.operations_retained,observed.noop_operations,observed.preread_sha256))
+            self.assertEqual(2,groups.call_count,'separate groups before and after actual original-file replay')
+            self.assertEqual([tuple(expected),tuple(expected)],[call.args[3] for call in groups.call_args_list])
 
     def business_api(self):
         module=load(); api=getattr(module,'prepare_owned_project_business_preread',None)

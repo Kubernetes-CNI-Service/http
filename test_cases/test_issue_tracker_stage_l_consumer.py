@@ -59,6 +59,51 @@ class ProdStageLFixture(unittest.TestCase):
 
 
 class ProdStageLConsumerDirectTests(ProdStageLFixture):
+    def test_native_projection_returns_its_original_switch_pair_without_another_query(self):
+        from monitor import issue_tracker_stage_l_consumer as consumer
+        from monitor.issue_tracker_ib_runtime import IbKWindow, IbWhitelistedKWindow
+        from monitor.issue_tracker_switch_runtime import ProdEthActivityKWindow, ProdSwitchKWindow
+        core = getattr(consumer, '_project_observed_stage_l_source_candidates_with_windows', None)
+        self.assertTrue(callable(core), 'native pure derivation must retain its actual freshly queried Switch pair')
+        switch = consumer.ProdStageLSourceSnapshot(('cycle-one',), ('a'*64,), 'b'*64, 'c'*64, 'd'*64, ())
+        ib = IbWhitelistedKWindow(IbKWindow('history_sufficient', '', 1, 1,
+            ('cycle-one',), ('e'*64,), 'f'*64, (), recorded_at_utc='2026-09-26T04:20:00Z'),
+            'd'*64, 'c'*64, (), ())
+        eth = ProdEthActivityKWindow(('cycle-one',), ('a'*64,), ('0'*64,), (), (), 'b'*64, 'c'*64, 'd'*64)
+        source = consumer.ProdStageLComposedSourceSnapshot(consumer.ProdStageLBoundSourceSnapshot(switch, ib), eth, ())
+        windows = tuple(ProdSwitchKWindow(slot, ('cycle-one',), ('a'*64,), (), (),
+            (digest*64,), (), 'b'*64, 'c'*64, 'd'*64)
+            for slot, digest in (('ethernet/prod', '1'), ('nvlink/prod', '2')))
+        args = dict(http_root=self.root, settings=self.settings, whitelist_snapshot=self.snapshot,
+                    whitelist_path=self.template)
+        with mock.patch.object(consumer, 'read_prod_switch_k_window', side_effect=windows) as reads:
+            projection, originals = core(source, self.store, **args)
+        self.assertEqual(['ethernet/prod', 'nvlink/prod'], [call.kwargs['source_slot'] for call in reads.call_args_list])
+        self.assertEqual(2, len(originals))
+        for expected, actual in zip(windows, originals): self.assertIs(expected, actual)
+        self.assertEqual((), projection.candidates)
+        self.assertEqual((), projection.whitelist_skips)
+        self.assertFalse(projection.qualified)
+        self.assertEqual('hold', projection.state)
+        # The original projection API still makes its own two fresh queries.
+        with mock.patch.object(consumer, 'read_prod_switch_k_window', side_effect=windows) as reads:
+            public = consumer._project_observed_stage_l_source_candidates(source, self.store, **args)
+        self.assertEqual(projection, public)
+        self.assertEqual(2, reads.call_count)
+
+    def test_native_switch_pair_derivation_keeps_independent_final_projection_and_ib_replay(self):
+        import ast, inspect, textwrap
+        from monitor import issue_tracker_stage_l_consumer as consumer
+        tree = ast.parse(textwrap.dedent(inspect.getsource(consumer.qualify_prod_stage_l)))
+        calls = [node.func.id for node in ast.walk(tree)
+                 if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)]
+        self.assertEqual(1, calls.count('_project_observed_stage_l_source_candidates_with_windows'))
+        self.assertEqual(0, calls.count('read_prod_switch_k_window'),
+                         'pure native derivation must use the original pair just read by its projection')
+        self.assertEqual(1, calls.count('validate_prod_stage_l_source_projection'))
+        self.assertEqual(1, calls.count('validate_prod_ib_k_window'))
+        self.assertEqual(2, calls.count('read_completed_cycle_evidence'))
+
     def test_native_qualification_projects_its_own_ib_observation_and_keeps_final_replay(self):
         import ast, inspect, textwrap
         from monitor import issue_tracker_stage_l_consumer as consumer
