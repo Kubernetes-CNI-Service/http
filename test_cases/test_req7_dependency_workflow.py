@@ -4,6 +4,7 @@ from contextlib import ExitStack
 import hashlib
 import importlib.metadata
 import json
+import platform
 from pathlib import Path
 import sys
 import tempfile
@@ -49,7 +50,7 @@ class Req7DependencyWorkflowTests(unittest.TestCase):
                 self.assertEqual([f"{n}=={v}" for n, v in PINS], result["versions"])
                 self.assertEqual("aarch64", result["architecture"])
                 imports.assert_not_called()
-                with mock.patch("platform.machine", return_value="ppc64le"), self.assertRaises(activate.ActivationError):
+                with mock.patch.object(platform, "machine", return_value="ppc64le"), self.assertRaises(activate.ActivationError):
                     activate.validate_req7_python_runtime()
                 with mock.patch.object(activate.sys, "version_info", (3, 11, 9)), self.assertRaises(activate.ActivationError):
                     activate.validate_req7_python_runtime()

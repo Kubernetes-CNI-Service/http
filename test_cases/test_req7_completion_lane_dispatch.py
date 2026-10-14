@@ -64,6 +64,7 @@ class CompletionLaneDispatchDirectTests(unittest.TestCase):
 class CompletionLaneDispatchWorkflowTests(unittest.TestCase):
     make_layout = native.CollectionCycleHandoffWorkflowTests.make_layout
     run_workflow = native.CollectionCycleHandoffWorkflowTests.run_workflow
+    _fixture_environment = native.CollectionCycleHandoffWorkflowTests._fixture_environment
 
     def exercise(self, fault=None):
         marker = 'original_interruptible = worker["run_interruptible"]'

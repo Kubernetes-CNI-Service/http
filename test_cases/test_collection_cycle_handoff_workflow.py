@@ -776,6 +776,66 @@ worker["run_collection_slots"].__globals__["_canonical_json_line"] = large_conte
             self.assertEqual(identity, observed["runtime"])
             self.assertEqual(identity, observed["launcher"], "do not depend on a different platform launcher")
 
+    def test_fixture_environment_is_closed_and_current_runtime_bound_on_darwin(self):
+        root = Path('/literal/private-fixture')
+        expected = {
+            'BASH_ENV': '/literal/private-fixture/fixture-bash-env.sh',
+            'PATH': '/literal/private-fixture/fixture-bin:/usr/bin:/bin:/usr/sbin:/sbin',
+            'PYTHONDONTWRITEBYTECODE': '1',
+        }
+        with mock.patch.object(sys, 'platform', 'darwin'):
+            self.assertEqual({**expected, 'PYTHONEXECUTABLE': sys.executable},
+                             self._fixture_environment(root))
+        with mock.patch.object(sys, 'platform', 'linux'):
+            self.assertEqual(expected, self._fixture_environment(root))
+
+    def test_fixture_nested_python_alias_preserves_current_runtime_and_dependencies(self):
+        import encodings
+        import yaml
+        # Parent originals are independent expected values, not a child
+        # result copied back into assertions or a production success permit.
+        def key(path):
+            value = os.stat(path)
+            return [value.st_dev, value.st_ino]
+        expected = {
+            'runtime': key(sys.executable), 'launcher': key(sys.executable),
+            'prefix': sys.prefix, 'base_prefix': sys.base_prefix,
+            'stdlib': key(encodings.__file__), 'yaml': key(yaml.__file__),
+            'yaml_version': yaml.__version__,
+            'binding_preserved': sys.platform == 'darwin',
+        }
+        snapshot = """import encodings,json,os,shutil,sys,yaml
+def key(path):
+ value=os.stat(path)
+ return [value.st_dev,value.st_ino]
+def record():
+ return {'runtime':key(sys.executable),'launcher':key(shutil.which('python3')),
+  'prefix':sys.prefix,'base_prefix':sys.base_prefix,'stdlib':key(encodings.__file__),
+  'yaml':key(yaml.__file__),'yaml_version':yaml.__version__,
+  'binding_preserved':os.environ.get('PYTHONEXECUTABLE')==sys.executable}
+"""
+        leaf = snapshot + "\nprint(json.dumps(record()))\n"
+        first = snapshot + """import subprocess
+child=subprocess.run(['/usr/bin/env','python3','-B','-c',sys.argv[1]],
+ env=os.environ.copy(),text=True,capture_output=True,timeout=10,check=False)
+print(json.dumps({'first':record(),'nested_status':child.returncode,
+ 'nested_stdout':child.stdout,'nested_stderr':child.stderr}))
+"""
+        with tempfile.TemporaryDirectory(prefix='http-owned-fixture-nested-launcher-') as directory:
+            root = Path(directory)
+            (root / 'fixture-bin').mkdir()
+            (root / 'fixture-bin/python3').symlink_to(sys.executable)
+            observed = subprocess.run(
+                ['/usr/bin/env', 'python3', '-B', '-c', first, leaf],
+                env=self._fixture_environment(root), text=True,
+                capture_output=True, timeout=15, check=False,
+            )
+            self.assertEqual(0, observed.returncode, observed.stderr)
+            outer = json.loads(observed.stdout)
+            self.assertEqual(expected, outer['first'])
+            self.assertEqual(0, outer['nested_status'], outer['nested_stderr'])
+            self.assertEqual(expected, json.loads(outer['nested_stdout']))
+
     def test_workflow_timeout_preserves_phase_streams_and_original_exception(self):
         with tempfile.TemporaryDirectory() as directory:
             root = self.make_layout(directory)
@@ -807,11 +867,7 @@ worker["run_collection_slots"].__globals__["_canonical_json_line"] = large_conte
                     cwd=root / "infiniband/monitor", text=True,
                     capture_output=True, timeout=20,
                     pass_fds=(plan_file.fileno(),),
-                    env={
-                        "BASH_ENV": str(root / "fixture-bash-env.sh"),
-                        "PATH": str(root / "fixture-bin") + ":/usr/bin:/bin:/usr/sbin:/sbin",
-                        "PYTHONDONTWRITEBYTECODE": "1",
-                    },
+                    env=self._fixture_environment(root),
                 )
                 plan_file.seek(0)
                 plan = json.load(plan_file)
@@ -926,9 +982,7 @@ worker["run_collection_slots"].__globals__["_canonical_json_line"] = large_conte
             timeout=30,
             check=False,
             env={
-                "BASH_ENV": str(root / "fixture-bash-env.sh"),
-                "PATH": str(root / "fixture-bin") + ":/usr/bin:/bin:/usr/sbin:/sbin",
-                "PYTHONDONTWRITEBYTECODE": "1",
+                **self._fixture_environment(root),
                 "FIXTURE_TAR_MODE": "fail" if mode == "archive_failure" else "",
                 "DHCP_LEASES_FILE": str(root / "dhcpd.leases"),
                 "DHCP_RUNTIME_LOG_FILE": str(root / "dhcp-runtime.log"),
@@ -1520,11 +1574,14 @@ worker["run_collection_slots"].__globals__["_canonical_json_line"] = large_conte
             ))
 
     def _fixture_environment(self, root: Path) -> dict[str, str]:
-        return {
+        environment = {
             "BASH_ENV": str(root / "fixture-bash-env.sh"),
             "PATH": str(root / "fixture-bin") + ":/usr/bin:/bin:/usr/sbin:/sbin",
             "PYTHONDONTWRITEBYTECODE": "1",
         }
+        if sys.platform == "darwin":
+            environment["PYTHONEXECUTABLE"] = sys.executable
+        return environment
 
     def _direct_cron_result(
         self, root: Path,

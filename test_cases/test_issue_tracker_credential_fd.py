@@ -13,6 +13,19 @@ from test_cases.test_issue_tracker_credential_shape import info, load, SECRET
 
 
 class CredentialFdDirectTests(unittest.TestCase):
+    def test_synthetic_root_metadata_preserves_native_timestamp_fields_for_dependency_queries(self):
+        expected = os.stat(self.root)
+        fields = ("st_atime", "st_mtime", "st_ctime",
+                  "st_atime_ns", "st_mtime_ns", "st_ctime_ns")
+        with self.fixture():
+            actual = os.stat(self.root)
+            uid = actual.st_uid
+            observed = {field: getattr(actual, field, None) for field in fields}
+        self.assertEqual(0, uid)
+        for field in fields:
+            with self.subTest(field=field):
+                self.assertEqual(getattr(expected, field), observed[field])
+
     def setUp(self):
         self.module = load()
         self.assertTrue(callable(getattr(self.module, "read_service_account_info", None)),
@@ -30,7 +43,8 @@ class CredentialFdDirectTests(unittest.TestCase):
         """Only '/' open remaps; all relative openat/read/stat use real owned FDs."""
         real_open, real_fstat, real_stat, real_read = os.open, os.fstat, os.stat, os.read
         fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink",
-                  "st_size", "st_mtime_ns", "st_ctime_ns")
+                  "st_size", "st_atime", "st_mtime", "st_ctime",
+                  "st_atime_ns", "st_mtime_ns", "st_ctime_ns")
         opened, reads = [], []
         target_path = self.path if target_path is None else target_path
         def metadata(value):

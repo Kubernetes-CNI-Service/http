@@ -379,6 +379,110 @@ class OnlineExhaustionDirectTests(unittest.TestCase):
 
 
 class OnlineExhaustionWorkflowTests(unittest.TestCase):
+    def setUp(self):
+        import sys
+        import monitor
+        from monitor import issue_tracker_spreadsheet_owner as owner
+        from monitor import issue_tracker_global_attempt_journal as counter
+        from monitor import issue_tracker_unit_catalog as catalog
+        from test_cases.test_req7_unit_catalog import load as load_catalog
+        # Refresh this real consumer before any owner is issued. Preserve the
+        # current owner/counter objects, not their name/path or copied state.
+        self.assertEqual({},owner._ACTIVE)
+        self.assertEqual({},catalog.ownership._ACTIVE)
+        self.assertEqual({},catalog.local._ACTIVE)
+        self.assertIsNone(counter._HELD_COUNT_CLAIM_ORIGINALS.get())
+        names=('_LIVE_COUNT_CLAIM_ORIGINALS','_LIVE_COUNT_SOURCE_GRAPHS',
+            '_LIVE_COUNT_SOURCE_RAW_TAILS','_LIVE_WIRE_CLAIMS')
+        for name in names:self.assertEqual(0,len(getattr(counter,name)))
+        module_map=sys.modules;package_map=vars(monitor)
+        owner_registry=owner._ACTIVE
+        counter_registries=tuple(getattr(counter,name) for name in names)
+        actual=load_catalog(reset_dependencies=False)
+        self.assertIs(sys.modules,module_map);self.assertIs(vars(monitor),package_map)
+        self.assertIs(owner,sys.modules['monitor.issue_tracker_spreadsheet_owner'])
+        self.assertIs(owner,monitor.issue_tracker_spreadsheet_owner)
+        self.assertIs(counter,sys.modules['monitor.issue_tracker_global_attempt_journal'])
+        self.assertIs(counter,monitor.issue_tracker_global_attempt_journal)
+        self.assertIs(owner._ACTIVE,owner_registry)
+        for name,original in zip(names,counter_registries):
+            self.assertIs(getattr(counter,name),original);self.assertEqual(0,len(original))
+        self.assertIs(actual,sys.modules['monitor.issue_tracker_unit_catalog'])
+        self.assertIs(actual,monitor.issue_tracker_unit_catalog)
+        self.assertIs(actual.ownership,owner)
+
+    def test_exhaustion_fixture_refreshes_same_source_catalog_without_replacing_current_registries(self):
+        import sys
+        import monitor
+        from monitor import issue_tracker_spreadsheet_owner as owner0
+        from monitor import issue_tracker_global_attempt_journal as counter0
+        from monitor import issue_tracker_unit_catalog as catalog0
+        from test_cases.test_req7_spreadsheet_owner import load as load_owner
+        from test_cases.test_req7_global_attempt_journal import load as load_counter
+        # The selected test uses only real imports/loaders. No owner/Count,
+        # browser, SDK or child resource is created. Restoration is local to
+        # this isolated test process; it cannot repair an active production graph.
+        self.assertEqual({},owner0._ACTIVE);self.assertEqual({},catalog0.ownership._ACTIVE)
+        self.assertEqual({},catalog0.local._ACTIVE)
+        self.assertIsNone(counter0._HELD_COUNT_CLAIM_ORIGINALS.get())
+        names=('_LIVE_COUNT_CLAIM_ORIGINALS','_LIVE_COUNT_SOURCE_GRAPHS',
+            '_LIVE_COUNT_SOURCE_RAW_TAILS','_LIVE_WIRE_CLAIMS')
+        for name in names:self.assertEqual(0,len(getattr(counter0,name)))
+        module_map=sys.modules;package_map=vars(monitor)
+        modules={name:value for name,value in sys.modules.items()
+            if name=='monitor' or name.startswith('monitor.')}
+        aliases={name:value for name,value in vars(monitor).items() if name.startswith('issue_tracker_')}
+        original_owner_registry=owner0._ACTIVE
+        original_counter_registries=tuple(getattr(counter0,name) for name in names)
+        primary=cleanup=None;owner1=counter1=None
+        try:
+            owner1=load_owner();counter1=load_counter()
+            self.assertIsNot(owner0,owner1);self.assertIsNot(counter0,counter1)
+            self.assertEqual(Path(owner0.__file__).resolve(),Path(owner1.__file__).resolve())
+            self.assertIs(catalog0.ownership,owner0)
+            self.assertIsNot(catalog0.ownership,owner1)
+            live_owner_registry=owner1._ACTIVE
+            live_counter_registries=tuple(getattr(counter1,name) for name in names)
+            self.setUp()
+            from monitor import issue_tracker_unit_catalog as actual
+            self.assertIs(actual.ownership,owner1)
+            self.assertIs(owner1,sys.modules['monitor.issue_tracker_spreadsheet_owner'])
+            self.assertIs(owner1,monitor.issue_tracker_spreadsheet_owner)
+            self.assertIs(counter1,sys.modules['monitor.issue_tracker_global_attempt_journal'])
+            self.assertIs(counter1,monitor.issue_tracker_global_attempt_journal)
+            self.assertIs(sys.modules,module_map);self.assertIs(vars(monitor),package_map)
+            self.assertIs(owner1._ACTIVE,live_owner_registry);self.assertEqual({},live_owner_registry)
+            for name,original in zip(names,live_counter_registries):
+                self.assertIs(getattr(counter1,name),original);self.assertEqual(0,len(original))
+            self.assertIsNone(counter1._HELD_COUNT_CLAIM_ORIGINALS.get())
+        except BaseException as error:primary=error
+        finally:
+            try:
+                # Never restore a saved map over actual LIVE originals.
+                if owner1 is not None:self.assertEqual({},owner1._ACTIVE)
+                if counter1 is not None:
+                    self.assertIsNone(counter1._HELD_COUNT_CLAIM_ORIGINALS.get())
+                    for name in names:self.assertEqual(0,len(getattr(counter1,name)))
+                for name in tuple(sys.modules):
+                    if name.startswith('monitor.') and name not in modules:del sys.modules[name]
+                sys.modules.update(modules)
+                for name in tuple(vars(monitor)):
+                    if name.startswith('issue_tracker_') and name not in aliases:del vars(monitor)[name]
+                vars(monitor).update(aliases)
+                self.assertIs(sys.modules,module_map);self.assertIs(vars(monitor),package_map)
+                for name,original in modules.items():self.assertIs(sys.modules[name],original)
+                for name,original in aliases.items():self.assertIs(vars(monitor)[name],original)
+                self.assertIs(owner0._ACTIVE,original_owner_registry);self.assertEqual({},owner0._ACTIVE)
+                for name,original in zip(names,original_counter_registries):
+                    self.assertIs(getattr(counter0,name),original);self.assertEqual(0,len(original))
+            except BaseException as error:cleanup=error
+        if primary is not None:
+            if cleanup is not None and cleanup is not primary:
+                if isinstance(primary,Exception) and not isinstance(cleanup,Exception):raise cleanup from primary
+                raise primary from cleanup
+            raise primary
+        if cleanup is not None:raise cleanup
+
     def test_exhaustion_workflow_preserves_existing_canonical_owner_and_counter_registries(self):
         import sys
         from monitor import issue_tracker_spreadsheet_owner as owner

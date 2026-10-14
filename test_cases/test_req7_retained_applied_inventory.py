@@ -256,6 +256,11 @@ class RetainedAppliedInventoryTests(unittest.TestCase):
         try:
             match = remote_tests.load(); catalog = load_catalog(reset_dependencies=False)
             nv = nv_tests.load() if native_nv else None
+            if native_nv:
+                # Earlier fixtures may reload the canonical owner/counter.
+                # Refresh this actual consumer before issuing any originals.
+                from test_cases.test_req7_settings_audit_allocation import load as load_allocation
+                load_allocation()
             from monitor import issue_tracker_global_attempt_journal as globals_
             from monitor import issue_tracker_local_commit as local
             prepare = globals_.prepare_global_unit
@@ -268,7 +273,9 @@ class RetainedAppliedInventoryTests(unittest.TestCase):
                 return prepare(owner, bound, unit)
             with ExitStack() as scope:
                 with mock.patch.object(globals_, 'prepare_global_unit', side_effect=register_first):
-                    writer, owner, bound, auth, _config, first, docs = case.prepare_owned(scope, native_generation=True)
+                    writer, owner, bound, auth, _config, first, docs = case.prepare_owned(
+                        scope, native_generation=True,
+                        settings_audits=(case.settings_audit_oracle(),) if native_nv else None)
                 self.assertEqual([first.unit_id], registered)
                 responses = {name:case.read_owned(scope, writer, owner, bound, auth, kind, value)
                     for name, (kind, value) in docs.items()}
@@ -304,6 +311,27 @@ class RetainedAppliedInventoryTests(unittest.TestCase):
                     arguments = inputs()
                     arguments['business'][0]['observed_values'] = {'L': {'stringValue':'down'}}
                 arguments['audits'] = ({'event_id':'settings:002', 'recorded_at_utc':'2026-10-08T10:00:00Z', 'details':'K=3'},)
+                if native_nv:
+                    # Keep BOTH audits, now backed by the actual original
+                    # settings chain rather than synthetic event ID labels.
+                    # Author the successor EVENT independently of the writer.
+                    import hashlib
+                    from monitor import issue_tracker_k_store as settings
+                    payload = {'new_k':3,'actor':'operator:fixture',
+                        'expected_revision':0,'request_id':'successor-1'}
+                    predecessor = (case.settings_audit_oracle()['details']+'\n').encode()
+                    event = remote_tests.canonical({'schema_version':1,'revision':1,'type':'set_k',
+                        'old_k':3,'new_k':3,'actor':'operator:fixture',
+                        'recorded_at':'2026-10-08T10:01:00Z','request_id':'successor-1',
+                        'payload_sha256':hashlib.sha256(remote_tests.canonical(payload)).hexdigest(),
+                        'predecessor_sha256':hashlib.sha256(predecessor).hexdigest()})
+                    changed = settings.apply_local_k_change(case.root/'project/.tracker',token=writer,
+                        new_k=3,actor='operator:fixture',recorded_at='2026-10-08T10:01:00Z',
+                        request_id='successor-1',expected_revision=0)
+                    self.assertEqual(1,changed.revision)
+                    self.assertEqual(event,(case.root/'project/.tracker/settings/events/1.json').read_bytes())
+                    arguments['audits'] = ({'event_id':'settings:1:'+hashlib.sha256(event).hexdigest(),
+                        'recorded_at_utc':'2026-10-08T10:01:00Z','details':event.decode().rstrip('\n')},)
                 generation = local.begin_generation(writer, arguments['manifest'])
                 local.record_intent(writer, generation, literal_xlsx(), kind='xlsx')
                 receipt = local.commit(writer, generation)

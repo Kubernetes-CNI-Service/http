@@ -46,6 +46,19 @@ def public_ca():
 
 
 class Req7TlsInputsDirectTests(unittest.TestCase):
+    def test_synthetic_root_metadata_preserves_native_timestamp_fields_for_dependency_queries(self):
+        expected = os.stat(self.root)
+        fields = ("st_atime", "st_mtime", "st_ctime",
+                  "st_atime_ns", "st_mtime_ns", "st_ctime_ns")
+        with self.fixture():
+            actual = os.stat(self.root)
+            uid = actual.st_uid
+            observed = {field: getattr(actual, field, None) for field in fields}
+        self.assertEqual(0, uid)
+        for field in fields:
+            with self.subTest(field=field):
+                self.assertEqual(getattr(expected, field), observed[field])
+
     def test_original_mutation_fd_shape_is_readonly_bounded_and_consumed_on_metadata_failure(self):
         self.assertTrue(hasattr(self.module,'NativeOriginalSheetsMutationUnit'),'held original image native boundary missing')
         from test_cases.test_req7_send_unit import load as load_unit, inputs, TARGET
@@ -119,7 +132,9 @@ class Req7TlsInputsDirectTests(unittest.TestCase):
         real_open, real_stat, real_fstat, real_read = os.open, os.stat, os.fstat, os.read
         inode = self.path.stat().st_ino; reads = []; opened = []
         def metadata(value):
-            fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+            fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink",
+                      "st_size", "st_atime", "st_mtime", "st_ctime",
+                      "st_atime_ns", "st_mtime_ns", "st_ctime_ns")
             result = SimpleNamespace(**{name: getattr(value, name) for name in fields}); result.st_uid = 0
             if fault == "uid" and result.st_ino == inode: result.st_uid = 501
             if fault == "writable_ancestor" and stat.S_ISDIR(result.st_mode): result.st_mode |= 0o002

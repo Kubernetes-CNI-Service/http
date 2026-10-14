@@ -192,6 +192,31 @@ raise SystemExit(command_rc if command_rc >= 0 else 128-command_rc)' \
     return body.replace("/usr/bin/python3 -c", shlex.quote(os.path.realpath(sys.executable)) + " -B -c")
 
 
+def timeout_with_owned_pid_receipt(pid_file: Path) -> str:
+    """Publish the supervisor's original Popen PID inside its kill/reap scope."""
+    portable_timeout = test_timeout_shell()
+    checkpoint = "try:\n    deadline=time.monotonic()+2.0"
+    if portable_timeout.count(checkpoint) != 1:
+        raise AssertionError("portable supervisor receipt boundary changed")
+    # Hex literals cannot escape the shell's single-quoted Python program.
+    parent = str(pid_file.parent).encode("utf-8").hex()
+    destination = str(pid_file).encode("utf-8").hex()
+    receipt = "\n".join((
+        "try:",
+        "    import tempfile",
+        f'    receipt_fd,receipt_stage=tempfile.mkstemp(dir=bytes.fromhex("{parent}").decode("utf-8"),prefix=".readiness-pid-")',
+        "    try:",
+        '        with os.fdopen(receipt_fd,"wb") as receipt_stream:',
+        '            receipt_stream.write(str(command.pid).encode("ascii"))',
+        "            receipt_stream.flush();os.fsync(receipt_stream.fileno())",
+        f'        os.replace(receipt_stage,bytes.fromhex("{destination}").decode("utf-8"))',
+        "    finally:",
+        "        if os.path.exists(receipt_stage):os.unlink(receipt_stage)",
+        "    deadline=time.monotonic()+2.0",
+    ))
+    return portable_timeout.replace(checkpoint, receipt)
+
+
 def failed_capture_holder_cleanup_shell() -> str:
     return r'''
 terminate_monitor_authority_capture_holders() {
@@ -2826,41 +2851,52 @@ printf 'timeout=%s\\n' "$?"
         """A failed readiness barrier must not abandon a live command."""
         pid_file = self.sandbox / "readiness-command.pid"
         absent_ready = self.sandbox / "never-ready"
-        command = (
-            "import os,time; from pathlib import Path; "
-            f"Path({str(pid_file)!r}).write_text(str(os.getpid()), encoding='ascii'); "
-            "time.sleep(60)"
-        )
-        harness = test_timeout_shell() + f'''
+        command = "import time; time.sleep(60)"
+        # The supervisor owns Popen's original PID. Publish its receipt
+        # atomically inside the existing kill/reap finally, not in a child
+        # which the unchanged 0.1-second deadline can interrupt mid-write.
+        # Publication does not signal readiness or restart the timeout budget.
+        harness = timeout_with_owned_pid_receipt(pid_file) + f'''
 export HTTP_ZTP_TEST_TIMEOUT_READY_FILE={shlex.quote(str(absent_ready))}
-if timeout --signal=KILL 0.1 /usr/bin/python3 -c {shlex.quote(command)}; then
+if timeout --signal=KILL 0.1 {shlex.quote(os.path.realpath(sys.executable))} -B -c {shlex.quote(command)}; then
   timeout_rc=0
 else
   timeout_rc=$?
 fi
 printf 'timeout rc=%s\\n' "$timeout_rc"
 '''
+        command_reaped = False
         try:
             result = run_shell(harness, timeout_seconds=3)
             self.assertTrue(pid_file.exists(), result.stderr)
             command_pid = int(pid_file.read_text(encoding="ascii"))
+            self.assertFalse(absent_ready.exists())
             with self.assertRaises(ProcessLookupError):
                 os.kill(command_pid, 0)
+            command_reaped = True
             self.assertEqual(0, result.returncode, result.stderr)
             self.assertEqual("timeout rc=124\n", result.stdout)
             self.assertEqual("", result.stderr)
         finally:
-            cleanup_recorded_test_processes(pid_file)
+            if command_reaped:
+                pid_file.unlink(missing_ok=True)
+            else:
+                cleanup_recorded_test_processes(pid_file)
+
+    def test_timeout_receipt_cleanup_never_signals_a_verified_reaped_pid(self) -> None:
+        # Both actual supervisors already wait/reap their own Popen child.
+        # A bare historical PID must not be signalled after disappearance.
+        with mock.patch.object(sys.modules[__name__], "cleanup_recorded_test_processes",
+                               side_effect=AssertionError("verified reaped PID must not be signalled")) as cleanup:
+            self.test_portable_timeout_missing_readiness_kills_and_reaps_command()
+            self.test_portable_timeout_supervisor_fault_reaps_started_command()
+        cleanup.assert_not_called()
 
     def test_portable_timeout_supervisor_fault_reaps_started_command(self) -> None:
         """Even a timer/supervisor fault cannot orphan its private command."""
         pid_file = self.sandbox / "supervisor-fault-command.pid"
-        command = (
-            "import os,time; from pathlib import Path; "
-            f"Path({str(pid_file)!r}).write_text(str(os.getpid()), encoding='ascii'); "
-            "time.sleep(60)"
-        )
-        timeout = test_timeout_shell()
+        command = "import time; time.sleep(60)"
+        timeout = timeout_with_owned_pid_receipt(pid_file)
         checkpoint = "deadline=time.monotonic()+2.0"
         self.assertEqual(1, timeout.count(checkpoint))
         timeout = re.sub(
@@ -2874,24 +2910,29 @@ printf 'timeout rc=%s\\n' "$timeout_rc"
         )
         harness = timeout + f'''
 export HTTP_ZTP_TEST_TIMEOUT_READY_FILE={shlex.quote(str(pid_file))}
-if timeout --signal=KILL 0.1 /usr/bin/python3 -c {shlex.quote(command)}; then
+if timeout --signal=KILL 0.1 {shlex.quote(os.path.realpath(sys.executable))} -B -c {shlex.quote(command)}; then
   timeout_rc=0
 else
   timeout_rc=$?
 fi
 printf 'timeout rc=%s\\n' "$timeout_rc"
 '''
+        command_reaped = False
         try:
             result = run_shell(harness, timeout_seconds=3)
             self.assertTrue(pid_file.exists(), result.stderr)
             command_pid = int(pid_file.read_text(encoding="ascii"))
             with self.assertRaises(ProcessLookupError):
                 os.kill(command_pid, 0)
+            command_reaped = True
             self.assertEqual(0, result.returncode, result.stderr)
             self.assertEqual("timeout rc=125\n", result.stdout)
             self.assertEqual("", result.stderr)
         finally:
-            cleanup_recorded_test_processes(pid_file)
+            if command_reaped:
+                pid_file.unlink(missing_ok=True)
+            else:
+                cleanup_recorded_test_processes(pid_file)
 
     def test_portable_timeout_preserves_shell_function_io_and_status(self) -> None:
         """Real shell adapters keep their argument, pipe, diagnostic and status contract."""

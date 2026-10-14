@@ -2345,7 +2345,7 @@ function renderIssueTrackerStageLStatus(payload) {
 async function refreshIssueTrackerStageLStatus() {
   try {
     const response = await fetch(`${SWITCH_COLLECTION_URL}?view=issue_tracker_stage_l`, {
-      method:'GET', credentials:'same-origin', cache:'no-store'
+      method: 'GET', credentials: 'same-origin', cache: 'no-store'
     });
     if (!response.ok) throw new Error('observation unavailable');
     renderIssueTrackerStageLStatus(await response.json());

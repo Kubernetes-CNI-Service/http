@@ -375,15 +375,49 @@ class CatalogProjectAuthenticationHandoffDirectTests(unittest.TestCase):
         for interrupted in (False,True):
             with self.subTest(interrupted=interrupted),tempfile.TemporaryDirectory() as directory,ExitStack() as patches:
                 root=Path(directory).resolve();events=[];strict_live=[False];revoked=[False]
+                order_events=[]
+                last_live=[False];prefix_live=[False];all_live=[False];bound_rows=[]
                 writer=object();owner=object();binding=object();auth=object();identity=object();metadata=object()
+                headers=object();whitelist_response=object();unit=object()
+                responses={'template_identity':identity,'template_headers':headers,
+                    'whitelist':whitelist_response,'metadata':metadata}
                 stop=KeyboardInterrupt('owned quota finalizer interruption')
-                row=SimpleNamespace(unit=object(),project_identity=object(),c6_facts=object())
+                row=SimpleNamespace(unit=unit,project_identity=object(),c6_facts=object())
                 @contextmanager
                 def held(*args,**options):
                     yield lambda:None
                 @contextmanager
                 def last_owner(*args,**options):
-                    yield row
+                    last_live[0]=True
+                    try:yield row
+                    finally:last_live[0]=False;order_events.append('last-closed')
+                @contextmanager
+                def prefix(*args,**options):
+                    # Synthetic lexical composition only: no issued key,
+                    # registry, Count graph, K, source body or send permission.
+                    self.assertEqual((writer,owner,binding,row),args);self.assertEqual({},options)
+                    self.assertTrue(last_live[0]);self.assertFalse(strict_live[0])
+                    prefix_live[0]=True;order_events.append('prefix-enter')
+                    try:yield
+                    finally:
+                        self.assertFalse(strict_live[0]);self.assertFalse(all_live[0])
+                        self.assertTrue(last_live[0]);prefix_live[0]=False;order_events.append('prefix-closed')
+                @contextmanager
+                def selected_count(*args,**options):
+                    # The existing synthetic ALL-holder edge remains synthetic;
+                    # its independent real Count/FD proof is a workflow duty.
+                    self.assertEqual((writer,owner,binding,unit),args);self.assertEqual({},options)
+                    self.assertTrue(strict_live[0]);self.assertTrue(prefix_live[0]);self.assertTrue(last_live[0])
+                    all_live[0]=True;order_events.append('all-enter')
+                    try:yield lambda:None
+                    finally:
+                        self.assertFalse(strict_live[0]);self.assertTrue(prefix_live[0]);self.assertTrue(last_live[0])
+                        all_live[0]=False;order_events.append('all-closed')
+                def bind_prefix(selected):
+                    self.assertIs(selected,row);self.assertIs(selected.unit,unit)
+                    self.assertTrue(strict_live[0]);self.assertTrue(all_live[0])
+                    self.assertTrue(prefix_live[0]);self.assertTrue(last_live[0])
+                    bound_rows.append(selected);order_events.append('prefix-bound')
                 @contextmanager
                 def business_images():
                     yield (identity,None,None),lambda:None
@@ -391,20 +425,31 @@ class CatalogProjectAuthenticationHandoffDirectTests(unittest.TestCase):
                 @contextmanager
                 def core(*args,**options):
                     strict_live[0]=True
-                    try:yield (None,None,{'template_identity':identity,'metadata':metadata},((row,None,guard),),auth)
+                    try:yield (None,None,responses,((row,None,guard),),auth)
                     finally:strict_live[0]=False;events.append('strict-closed')
                 @contextmanager
                 def quota_images(*args,**options):
                     self.assertTrue(strict_live[0]);self.assertEqual((writer,owner,binding,auth),args)
                     self.assertEqual({'identity_response':identity,'metadata_response':metadata},options)
-                    events.append('quota-enter')
+                    self.assertTrue(prefix_live[0]);self.assertTrue(all_live[0]);self.assertTrue(last_live[0])
+                    events.append('quota-enter');order_events.append('quota-enter')
                     try:yield SimpleNamespace(inventory_complete=True,outcome='DEDICATED_PROJECT_CAPACITY'),lambda:events.append('quota-verify')
                     finally:
-                        events.append('quota-closed');revoked[0]=True
+                        events.append('quota-closed');order_events.append('quota-closed');revoked[0]=True
                         if interrupted:raise stop
                 def issued(*args,**options):
                     events.append('read-after-quota-close' if revoked[0] else 'live-read')
                     if revoked[0]:raise module.RemoteHistoryHold()
+                def issued_group(actual_writer,actual_owner,actual_binding,actual_auth,acquisitions):
+                    self.assertIs(actual_writer,writer);self.assertIs(actual_owner,owner)
+                    self.assertIs(actual_binding,binding);self.assertIs(actual_auth,auth)
+                    expected=(('template_identity',None,None,identity),('template_headers',None,None,headers),
+                        ('whitelist',None,None,whitelist_response),('metadata',None,None,metadata))
+                    self.assertIs(type(acquisitions),tuple);self.assertEqual(expected,acquisitions)
+                    for actual,original in zip(acquisitions,expected):
+                        self.assertIs(type(actual),tuple);self.assertIs(actual[3],original[3])
+                    # Same existing fault delegate; no shaped plan or permit is fabricated.
+                    return issued(actual_writer,actual_owner,actual_binding,actual_auth,acquisitions)
                 patches.enter_context(mock.patch.object(local,'_owner',return_value=SimpleNamespace(project=root)))
                 patches.enter_context(mock.patch.object(module.ownership,'_validated_owner'))
                 patches.enter_context(mock.patch.object(cycles,'_hold_current_completed_cycle_replay',held))
@@ -412,10 +457,13 @@ class CatalogProjectAuthenticationHandoffDirectTests(unittest.TestCase):
                 # Synthetic orchestration prerequisites only; genuine ALL-last
                 # selection, owners and raw tails remain real workflow duties.
                 patches.enter_context(mock.patch.object(module,'_hold_current_project_last_original_owners',last_owner))
-                patches.enter_context(mock.patch.object(module.global_journal,'_hold_selected_last_catalog_write_originals',held))
+                patches.enter_context(mock.patch.object(module.global_journal,'_hold_first_original_source_prefix',prefix))
+                patches.enter_context(mock.patch.object(module.global_journal,'_hold_selected_last_catalog_write_originals',selected_count))
+                patches.enter_context(mock.patch.object(module.global_journal,'_bind_first_original_source_prefix',side_effect=bind_prefix))
                 patches.enter_context(mock.patch.object(module,'_hold_current_project_online_inputs',core))
                 patches.enter_context(mock.patch.object(quota,'_hold_owned_project_dedicated_quota_images',quota_images))
                 patches.enter_context(mock.patch.object(reads,'require_current_owned_project_read',side_effect=issued))
+                patches.enter_context(mock.patch.object(reads,'_require_current_owned_project_read_group',side_effect=issued_group))
                 patches.enter_context(mock.patch.object(tokens,'require_current_owned_project_token'))
                 patches.enter_context(mock.patch.object(target,'inspect_project_online_target'))
                 no_count=patches.enter_context(mock.patch.object(module.global_journal,'record_global_attempt_intent'))
@@ -425,6 +473,14 @@ class CatalogProjectAuthenticationHandoffDirectTests(unittest.TestCase):
                 self.assertLess(events.index('quota-enter'),events.index('strict-closed'))
                 self.assertLess(events.index('strict-closed'),events.index('quota-closed'))
                 self.assertGreaterEqual(events.count('quota-verify'),3);no_count.assert_not_called()
+                self.assertEqual(1,len(bound_rows));self.assertIs(bound_rows[0],row)
+                self.assertLess(order_events.index('prefix-enter'),order_events.index('all-enter'))
+                self.assertLess(order_events.index('all-enter'),order_events.index('prefix-bound'))
+                self.assertLess(order_events.index('prefix-bound'),order_events.index('quota-enter'))
+                self.assertLess(order_events.index('quota-closed'),order_events.index('all-closed'))
+                self.assertLess(order_events.index('all-closed'),order_events.index('prefix-closed'))
+                self.assertLess(order_events.index('prefix-closed'),order_events.index('last-closed'))
+                self.assertEqual((False,False,False,False),(strict_live[0],all_live[0],prefix_live[0],last_live[0]))
                 if interrupted:self.assertIs(stop,caught.exception);self.assertNotIn('read-after-quota-close',events)
                 else:self.assertEqual('read-after-quota-close',events[-1])
 
@@ -550,35 +606,53 @@ class CatalogProjectAuthenticationHandoffDirectTests(unittest.TestCase):
             and isinstance(node.iter,ast.Tuple))
         self.assertEqual(('template_identity','template_headers','whitelist','metadata'),
             tuple(ast.literal_eval(item) for item in read_loop.iter.elts))
-        # The actual original business readers outlive all old source/C6
-        # finalizers. Pin their normal close order, then independently check
-        # every issued business response before the four original gate reads.
-        self.assertEqual('scope.close()',ast.unparse(holder.body[-3]))
-        live_business_loop=holder.body[-2]
+        # Issuance may be correlated, but each logical use retains its complete
+        # independent originals -> single-read -> originals IO fence.
+        self.assertEqual(['originals()', 'originals()'],
+            [ast.unparse(node) for node in (read_loop.body[0],read_loop.body[-1])])
+        scalar=read_loop.body[1].value
+        self.assertEqual('require_current_owned_project_read',scalar.func.id)
+        self.assertEqual(('writer_token','owner_token','binding','responses[kind]','authentication'),
+            tuple(ast.unparse(arg) for arg in scalar.args))
+        self.assertEqual([('read_kind','kind')],[(arg.arg,arg.value.id) for arg in scalar.keywords])
+        # Full semantic borrowers close while the native issuer remains LIVE;
+        # its separate raw images outlive even that issuer's last finalizer.
+        self.assertEqual('scope.close()',ast.unparse(holder.body[-5]))
+        live_business_loop=holder.body[-4]
         self.assertIsInstance(live_business_loop,ast.For)
         self.assertEqual('business_guards',ast.unparse(live_business_loop.iter))
         self.assertEqual(['verify_business()'],
             [ast.unparse(node) for node in live_business_loop.body])
-        self.assertEqual('business_scope.close()',ast.unparse(holder.body[-1]))
+        self.assertEqual(['business_scope.close()', 'native_k_scope.close()', 'business_tail_scope.close()'],
+            [ast.unparse(node) for node in holder.body[-3:]])
         final_business_loop=body[held_index+1]
         self.assertIsInstance(final_business_loop,ast.For,
             'actual issued business reads must be rechecked after their last finalizer')
         self.assertEqual('business_guards',ast.unparse(final_business_loop.iter))
         self.assertEqual(['verify_business._verify_issued_only()'],
             [ast.unparse(node) for node in final_business_loop.body])
-        final_read_loop=body[held_index+2]
-        self.assertIsInstance(final_read_loop,ast.For,
+        final_read_group=body[held_index+2]
+        self.assertIsInstance(final_read_group,ast.Expr,
             'actual read deadlines must be rechecked after every original-holder finalizer')
-        self.assertEqual('responses.items()',ast.unparse(final_read_loop.iter))
-        self.assertEqual(['require_current_owned_project_read'],
-            [node.func.id for node in ast.walk(final_read_loop) if isinstance(node,ast.Call)
-                and isinstance(node.func,ast.Name)])
-        call=final_read_loop.body[0].value
-        self.assertEqual(('writer_token','owner_token','binding','response','authentication'),
+        call=final_read_group.value
+        self.assertEqual('_verify_current_project_template_reads',call.func.id)
+        self.assertEqual(('writer_token','owner_token','binding','authentication','responses'),
             tuple(arg.id for arg in call.args))
-        self.assertEqual([('read_kind','kind')],[(arg.arg,arg.value.id) for arg in call.keywords])
+        self.assertEqual([],call.keywords)
         self.assertEqual(['require_current_owned_project_token','inspect_project_online_target'],
             [node.value.func.id for node in body[held_index+3:]])
+        # The fixed group must still enumerate all four exact originals and
+        # freshly delegate on both boundaries; no retained/cached group result.
+        group=ast.parse(textwrap.dedent(inspect.getsource(module._verify_current_project_template_reads))).body[0]
+        kinds=next(node.value for node in group.body if isinstance(node,ast.Assign)
+            and any(isinstance(target,ast.Name) and target.id=='kinds' for target in node.targets))
+        self.assertEqual(('template_identity','template_headers','whitelist','metadata'),ast.literal_eval(kinds))
+        grouped=[node for node in ast.walk(group) if isinstance(node,ast.Call)
+            and isinstance(node.func,ast.Name) and node.func.id=='_require_current_owned_project_read_group']
+        self.assertEqual(1,len(grouped))
+        self.assertEqual(('writer_token','owner_token','binding','authentication'),
+            tuple(arg.id for arg in grouped[0].args[:4]))
+        self.assertEqual([],grouped[0].keywords)
 
     def test_fixed_internal_handoff_accepts_no_caller_authentication_or_factory(self):
         import inspect

@@ -52,6 +52,91 @@ def _load_current_native_creator_fixture_modules():
 
 
 class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
+    def test_next_new_first_fixture_routes_current_cohort_after_reload_without_changing_scalar_creator(self):
+        """Source routing only; not an actual TLS/cohort/Count proof."""
+        import ast,inspect,textwrap
+        current=ast.parse(textwrap.dedent(inspect.getsource(self._verify_fresh_native_switch_no_send)))
+        nodes=list(ast.walk(current))
+        def calls(node):
+            return [ast.unparse(item) for item in ast.walk(node) if isinstance(item,ast.Call)]
+        capture=[node for node in nodes if isinstance(node,ast.Assign)
+            and any(isinstance(target,ast.Name) and target.id=='cohort_class' for target in node.targets)]
+        self.assertEqual(1,len(capture),'actual NEW FIRST fixture needs the current cohort class')
+        self.assertEqual('launcher.OwnedProjectTemplateReadCohort',ast.unparse(capture[0].value))
+        reloaded=[node for node in nodes if isinstance(node,ast.Call)
+            and ast.unparse(node.func)=='_load_current_native_creator_fixture_modules']
+        imported=[node for node in nodes if isinstance(node,ast.ImportFrom) and node.module=='monitor'
+            and any(alias.name=='issue_tracker_history_read_launcher' and alias.asname=='launcher'
+                    for alias in node.names)]
+        self.assertEqual(1,len(reloaded));self.assertEqual(1,len(imported))
+        self.assertLess(reloaded[0].lineno,imported[0].lineno)
+        self.assertLess(imported[0].lineno,capture[0].lineno)
+        original=[node for node in nodes if isinstance(node,ast.Assign)
+            and any(isinstance(target,ast.Name) and target.id=='real_cohort' for target in node.targets)]
+        self.assertEqual(1,len(original));self.assertEqual('cohort_class.read_once',ast.unparse(original[0].value))
+        first=next(node for node in nodes if isinstance(node,ast.If) and ast.unparse(node.test)=='_dispatch_new'
+            and any('WORKER._dispatch_current_project_online_originals' in call for call in calls(node)))
+        first_calls=calls(first)
+        for expected in (
+            "mock.patch.object(cohort_class, 'read_once', autospec=True, side_effect=read_cohort)",
+            "mock.patch.object(launcher.OwnedProjectSheetsReadUnit, 'read_once', autospec=True, side_effect=read)",
+            'self.assertEqual([(4, 1, 1, (), 0)], first_cohort_physical)',
+            'self.assertEqual([completion], sent)',
+            "self.assertEqual((1, 401, 'UNKNOWN', True), (completion.attempt_count, completion.status, completion.outcome, completion.termination_confirmed))",
+            'self.assertEqual(1, global_module.inspect_global_unit(sheet, binding, compiled[0]).attempt_count)',
+            "self.assertEqual(1, len(list(state.rglob('ATTEMPT-1'))))",
+            "self.assertEqual(1, len(list(state.rglob('CLAIM-1'))))",
+            'self.assertEqual(unit.wire_bytes, records[0][2])',
+            "self.assertFalse(list(state.rglob('COMPLETE')))",
+            "self.assertFalse(list((project / '.tracker').glob('REMOTE-APPLIED-*')))",
+        ):
+            self.assertIn(expected,first_calls)
+        creator=[node for node in nodes if isinstance(node,ast.With)
+            and any('mock.patch.object(compiler, compiler_name' in ast.unparse(item.context_expr) for item in node.items)
+            and any("mock.patch.object(global_module, 'prepare_global_unit'" in ast.unparse(item.context_expr)
+                    for item in node.items)]
+        self.assertEqual(1,len(creator))
+        creator_targets=[ast.unparse(item.context_expr) for item in creator[0].items]
+        self.assertTrue(any('launcher.OwnedProjectSheetsReadUnit' in value for value in creator_targets))
+        self.assertFalse(any('cohort_class' in value or 'OwnedProjectTemplateReadCohort' in value for value in creator_targets))
+        documents=next(node for node in nodes if isinstance(node,ast.If) and ast.unparse(node.test)=='_dispatch_new'
+            and any('documents.update' in call for call in calls(node)))
+        for expected in ('zipfile.ZipFile(self.template)',"workbook.read('xl/worksheets/sheet13.xml')",
+                         'documents.update(template_headers=header_response(), whitelist=whitelist_doc)'):
+            self.assertIn(expected,calls(documents))
+
+    def test_next_new_first_fixture_cohort_delegates_once_and_keeps_one_physical_child_fact(self):
+        """Literal fixture delegation only; no issuer or real HTTP evidence."""
+        import ast,inspect,textwrap
+        from types import SimpleNamespace
+        tree=ast.parse(textwrap.dedent(inspect.getsource(self._verify_fresh_native_switch_no_send)))
+        helpers=[node for node in ast.walk(tree) if isinstance(node,ast.FunctionDef) and node.name=='read_cohort']
+        self.assertEqual(1,len(helpers),'actual NEW FIRST fixture lacks its cohort hook')
+        class Reader:pass
+        reader=Reader();native=object();documents=object()
+        writer,owner,bound,original_read=(object() for _ in range(4))
+        original_values=tuple(object() for _ in range(4));physical=(4,1,1,(),0)
+        calls=[];issued=[];issued_objects=[];physical_records=[]
+        def original_transport(*arguments):
+            calls.append(arguments);return original_values,physical
+        fixture=SimpleNamespace(assertTrue=self.assertTrue,assertIs=self.assertIs,
+            _actual_fixed_template_transport=original_transport)
+        namespace={'self':fixture,'_dispatch_new':True,'cohort_class':Reader,
+            'launcher':SimpleNamespace(OwnedProjectTemplateReadCohort=Reader),
+            'native':native,'documents':documents,'writer':writer,'sheet':owner,'binding':bound,
+            'real_cohort':original_read,'issued':issued,'issued_objects':issued_objects,
+            'first_cohort_physical':physical_records}
+        exec(compile(ast.Module(body=helpers,type_ignores=[]),'<literal NEW FIRST fixture hook>','exec'),namespace)
+        actual=namespace['read_cohort'](reader)
+        self.assertIs(original_values,actual)
+        self.assertEqual([(native,reader,documents,writer,owner,bound,original_read)],calls)
+        self.assertEqual([('template_identity',None),('template_headers',None),
+                          ('whitelist',None),('metadata',None)],issued)
+        self.assertEqual(1,len(physical_records));self.assertIs(physical,physical_records[0])
+        self.assertEqual(1,sum(record[1] for record in physical_records))
+        self.assertEqual(4,len(issued_objects))
+        for original,received in zip(original_values,issued_objects):self.assertIs(original,received)
+
     def test_postclose_business_fault_wraps_actual_pre_read_input_scope(self):
         """Fixture routing control; real revoke/cleanup is a separate workflow."""
         import ast,inspect,textwrap
@@ -530,7 +615,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
 
     def test_actual_default_worker_all_write_originals_outlive_strict_input_finalizers(self):
         actual_worker=self._default_worker_original_images;received=[];post_strict=[];completed=[];packets=[]
-        tail_inputs=[];tail_errors=[]
+        tail_inputs=[];tail_errors=[];all_roles=[];issuer_records=[];borrower_records=[]
         def worker(**arguments):
             from monitor import issue_tracker_remote_history_match as remote
             from monitor import issue_tracker_global_attempt_journal as globals_
@@ -539,7 +624,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             original_core=remote._hold_current_project_online_inputs
             original_all=globals_._hold_selected_last_catalog_write_originals
             original_inputs=source._hold_original_replay_inputs
-            closed=[];active_inputs={};input_sequence=[]
+            closed=[];active_inputs={};input_sequence=[];issued_all=[]
             @contextmanager
             def inputs(*args,**options):
                 key=len(input_sequence);input_sequence.append(key)
@@ -553,12 +638,32 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                 closed.append(True)
             @contextmanager
             def all_originals(writer,token,bound,unit):
+                # Pure classification only. The original issuer/borrower
+                # delegate still authenticates all owners, packet and unit.
+                before=globals_._HELD_COUNT_CLAIM_ORIGINALS.get()
+                role='issuer' if before is None else 'borrower'
                 with original_all(writer,token,bound,unit) as original:
-                    received.append((arguments['sheet'],unit));original()
-                    def verify():
-                        original()
-                        if closed:post_strict.append(arguments['sheet'])
-                    yield verify
+                    if role=='issuer':
+                        received.append((arguments['sheet'],unit))
+                        issued_all.append((unit,original,globals_._HELD_COUNT_CLAIM_ORIGINALS.get()))
+                        issuer_records.append((arguments['sheet'],unit,original))
+                    all_roles.append(('ENTER',role,arguments['sheet']))
+                    original()
+                    yield original
+                # The original context's EXIT completed; do not substitute
+                # its verifier to observe later calls or infer an issuer EXIT
+                # from a borrowed graph's independent lexical close.
+                if role=='borrower':
+                    original()  # genuine issuer remains LIVE after borrow EXIT
+                    issuer_unit,issuer_verify,issuer_key=issued_all[0]
+                    borrower_records.append((arguments['sheet'],unit,original,
+                        unit is issuer_unit,original is issuer_verify,
+                        before is issuer_key and globals_._HELD_COUNT_CLAIM_ORIGINALS.get() is issuer_key,
+                        bool(closed)))
+                    if closed:post_strict.append(arguments['sheet'])
+                    all_roles.append(('EXIT',role,arguments['sheet']))
+                    return
+                all_roles.append(('EXIT',role,arguments['sheet']))
                 completed.append(arguments['sheet'])
                 active=cycles._HELD_CYCLE_REPLAY.get()
                 tail_inputs.append((arguments['sheet'],active is not None and active[0] is self.store,bool(active_inputs)))
@@ -581,6 +686,17 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         # request, original durable files/cycles and business-FD cleanup.
         self.assertEqual(['ETH Cabling','IB Cabling'],[sheet for sheet,_unit in received])
         self.assertEqual(['ETH Cabling','IB Cabling'],completed)
+        self.assertEqual([('ENTER','issuer','ETH Cabling'),('ENTER','borrower','ETH Cabling'),
+            ('EXIT','borrower','ETH Cabling'),('EXIT','issuer','ETH Cabling'),
+            ('ENTER','issuer','IB Cabling'),('ENTER','borrower','IB Cabling'),
+            ('EXIT','borrower','IB Cabling'),('EXIT','issuer','IB Cabling')],all_roles)
+        self.assertEqual(['ETH Cabling','IB Cabling'],[row[0] for row in issuer_records])
+        self.assertEqual(['ETH Cabling','IB Cabling'],[row[0] for row in borrower_records])
+        for issuer,borrower in zip(issuer_records,borrower_records):
+            self.assertEqual(issuer[0],borrower[0])
+            self.assertIs(issuer[1],borrower[1]);self.assertIs(issuer[2],borrower[2])
+            self.assertEqual((True,True,True,True),borrower[3:],
+                'borrow EXIT preserves same unit/verifier and LIVE issuer after actual strict input close')
         self.assertEqual({'ETH Cabling','IB Cabling'},set(post_strict));self.assertEqual(2,len(packets))
         self.assertEqual([('ETH Cabling',True,True),('IB Cabling',True,True)],tail_inputs,
             'actual cycle/policy/W1 originals must remain live through the LAST ALL finalizer')
@@ -798,7 +914,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             else:
                 self.assertTrue(projections, 'genuine qualified source must precede the first OAuth child')
                 self.assertEqual([] if retry_probe else [((), None, 0)], reconciled)
-            body = b'{"access_token":"owned-project-token","expires_in":3600}'
+            body = b'{"access_token":"sentinel","expires_in":3600}'
             reply = b'HTTP/1.1 200 OK\r\nContent-Length: '+str(len(body)).encode()+b'\r\nConnection: close\r\n\r\n'+body
             with native.server(reply) as (records, errors), ExitStack() as launched:
                 port = socket.getaddrinfo('oauth2.googleapis.com',443)[0][4][1]
@@ -4310,6 +4426,9 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             native.certificates=lambda hostname='oauth2.googleapis.com':certificates(native,hostname)
             issued=[];compiled=[];units=[];issued_objects=[]
             real_read=launcher.OwnedProjectSheetsReadUnit.read_once
+            cohort_class=launcher.OwnedProjectTemplateReadCohort
+            real_cohort=cohort_class.read_once
+            first_cohort_physical=[]
             compiler_name=('freeze_observed_receipted_switch_unit' if _sheet=='ETH&IB Switch'
                 else 'freeze_observed_receipted_cabling_unit')
             actual_compiler=getattr(compiler,compiler_name)
@@ -4389,6 +4508,16 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                     actual=real_read(reader)
                 self.assertEqual((1,1,(),0),(len(records),len(calls),tuple(errors),children[0].returncode))
                 issued.append((reader._kind,reader._row));issued_objects.append(actual);return actual
+            def read_cohort(reader):
+                self.assertTrue(_dispatch_new,'scalar creator must keep its original read path')
+                self.assertIs(cohort_class,launcher.OwnedProjectTemplateReadCohort)
+                self.assertIs(type(reader),cohort_class)
+                actual,physical=self._actual_fixed_template_transport(native,reader,documents,
+                    writer,sheet,binding,real_cohort)
+                first_cohort_physical.append(physical)
+                issued.extend((kind,None) for kind in ('template_identity','template_headers','whitelist','metadata'))
+                issued_objects.extend(actual)
+                return actual
             locator=AuthenticatedToken('synthetic.private-locator',time.time()+3600)
             identity=decode_template_identity(prepare_template_identity_read(binding,locator),response(identity_response()))
             with local.writer_owner(project,self.publication) as writer,scoped_fixture(global_root,owner_module), \
@@ -4578,6 +4707,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                             self.assertTrue(all(stream.closed for stream in (children[0].stdin,children[0].stdout,children[0].stderr)))
                             sent.append(actual);return actual
                         with mock.patch.object(launcher.OwnedProjectSheetsReadUnit,'read_once',autospec=True,side_effect=read), \
+                                mock.patch.object(cohort_class,'read_once',autospec=True,side_effect=read_cohort), \
                                 mock.patch.object(mutation,'_send_counted_original_once',side_effect=send), \
                                 mock.patch.object(inventory,'_hold_catalog_retained_inventory',side_effect=observed_inventory):
                             try:completion=WORKER._dispatch_current_project_online_originals(
@@ -4589,6 +4719,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                                     seen.add(id(cause));traceback.print_exception(type(cause),cause,cause.__traceback__)
                                     cause=cause.__context__
                                 raise
+                        self.assertEqual([(4,1,1,(),0)],first_cohort_physical)
                         self.assertEqual([completion],sent)
                         self.assertEqual((1,401,'UNKNOWN',True),(completion.attempt_count,completion.status,completion.outcome,completion.termination_confirmed))
                         self.assertEqual(1,global_module.inspect_global_unit(sheet,binding,compiled[0]).attempt_count)
