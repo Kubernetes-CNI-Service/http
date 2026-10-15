@@ -665,7 +665,7 @@ class Req7MetadataReservationProjectWorkflowTests(unittest.TestCase):
             def inspect_then_expire(*args,**kwargs):
                 result=native(*args,**kwargs); finished.append(True); return result
             with mock.patch.object(module,'_inspect',side_effect=inspect_then_expire), \
-                    mock.patch.object(reads,'_monotonic',side_effect=lambda:time.monotonic()+(31 if finished else 0)):
+                    mock.patch.object(reads,'_monotonic',side_effect=lambda:time.monotonic()+(61 if finished else 0)):
                 with self.assertRaises(module.MetadataReservationHold):
                     module.prepare_owned_project_metadata_reservation(writer,owner,bound,auth,unit,
                         identity_response=identity_read,metadata_response=metadata_read)
@@ -1292,7 +1292,7 @@ class Req7OwnedCatalogMetadataWorkflowTests(unittest.TestCase):
                 with api(writer,owner,bound,auth,identity_response=identity_read,
                          metadata_response=metadata_read) as (budget,verify):
                     entered.append(budget.outstanding_reservations)
-                    with mock.patch.object(reads,'_monotonic',side_effect=lambda:time.monotonic()+31):
+                    with mock.patch.object(reads,'_monotonic',side_effect=lambda:time.monotonic()+61):
                         verify()
             self.assertEqual([2],entered); self.assertEqual(before,original_read_files(self.root))
 
@@ -1323,7 +1323,7 @@ class Req7OwnedCatalogMetadataWorkflowTests(unittest.TestCase):
             values,metadata_read,_units=self.originals(stack,module)
             writer,owner,bound,auth,identity_read,*_rest=values
             before=original_read_files(self.root); consumed=[]
-            with mock.patch.object(reads,'_monotonic',side_effect=lambda:time.monotonic()+(31 if consumed else 0)):
+            with mock.patch.object(reads,'_monotonic',side_effect=lambda:time.monotonic()+(61 if consumed else 0)):
                 with self.assertRaises(module.MetadataReservationHold) as caught:
                     with api(writer,owner,bound,auth,identity_response=identity_read,
                              metadata_response=metadata_read) as (budget,_verify):
@@ -1678,7 +1678,7 @@ class Req7MixedOriginalQuotaTests(unittest.TestCase):
                     yield result
                 closed.append(True)
             with mock.patch.object(inventory, '_hold_all_project_mixed_settlements', side_effect=close_then_expire), \
-                    mock.patch.object(reads, '_monotonic', side_effect=lambda: time.monotonic()+(31 if closed else 0)):
+                    mock.patch.object(reads, '_monotonic', side_effect=lambda: time.monotonic()+(61 if closed else 0)):
                 try:
                     with self.api(module)(writer, owner, bound, auth, identity_response=identity, metadata_response=metadata) as (budget, _verify):
                         reached.append(budget.outstanding_reservations)
