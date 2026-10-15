@@ -96,20 +96,30 @@ class Req7HistoryReadLauncherDirectTests(unittest.TestCase):
                 authentication=authentication,clock=clock,issued=issued,closes=closes,
                 launches=launches,supervision=supervision,process=process)
 
-    def test_observation_has_fixed_thirty_seconds_after_successful_cleanup_without_renewal(self):
+    def test_observation_has_fixed_sixty_seconds_after_successful_cleanup_without_renewal(self):
         with self.issuance_fixture() as f:
             actual=f.unit.read_once()
             self.assertEqual([('stdin',False,False),('stdout',False,False),('stderr',False,False)],f.closes)
-            self.assertEqual(1041.0,f.module._READS[actual][-1],
-                '8 seconds reading + 3 cleanup seconds, then exactly 30 observation seconds')
+            self.assertEqual(1071.0,f.module._READS[actual][-1],
+                '8 seconds reading + 3 cleanup seconds, then exactly 60 observation seconds')
             self.assertEqual((1000.0,'read'),(f.supervision[0]['started_monotonic'],f.supervision[0]['kind']))
             self.assertEqual(30.0,f.module._BUDGETS['read']);self.assertEqual(60.0,f.module._BUDGETS['mutation'])
+            packet=f.module._READS[actual]
             f.clock[0]=1031.0
             f.module.require_current_owned_read(f.writer,f.owner,f.binding,actual,read_kind='metadata')
-            self.assertEqual(1041.0,f.module._READS[actual][-1])
-            f.clock[0]=1041.0
+            self.assertEqual(1071.0,f.module._READS[actual][-1])
+            group=(('metadata',None,None,actual),)
+            f.clock[0]=1070.0
+            plan=f.module.require_current_owned_read(f.writer,f.owner,f.binding,actual,read_kind='metadata')
+            self.assertIs(plan,f.module._require_current_owned_read_group(f.writer,f.owner,f.binding,group)[0])
+            self.assertIs(packet,f.module._READS[actual])
+            self.assertEqual(1071.0,packet[-1])
+            f.clock[0]=1071.0
             with self.assertRaises(f.module.HistoryReadLauncherHold):
                 f.module.require_current_owned_read(f.writer,f.owner,f.binding,actual,read_kind='metadata')
+            with self.assertRaises(f.module.HistoryReadLauncherHold):
+                f.module._require_current_owned_read_group(f.writer,f.owner,f.binding,group)
+            self.assertIs(packet,f.module._READS[actual])
             with self.assertRaises(f.module.HistoryReadLauncherHold):f.unit.read_once()
             self.assertEqual(1,len(f.launches));self.assertEqual(1,len(f.supervision))
 
@@ -317,18 +327,33 @@ class Req7HistoryReadLauncherWorkflowTests(unittest.TestCase):
                     with mock.patch.object(module,'time',SimpleNamespace(monotonic=lambda:started)), \
                             mock.patch.object(module,'_monotonic',side_effect=lambda:clock[0]):
                         actual=unit.read_once()
-                        self.assertEqual(started+38.0,module._READS[actual][-1],
-                            'observation is a fixed30s from successful completion, not initial read start')
+                        self.assertEqual(started+68.0,module._READS[actual][-1],
+                            'observation is a fixed60s from successful completion, not initial read start')
                         self.assertEqual((body,1,0),(actual.data,len(calls),children[0].returncode))
                         self.assertTrue(all(getattr(children[0],n).closed for n in ('stdin','stdout','stderr')))
                         clock[0]=started+31.0
                         module.require_current_owned_read(writer,owner,binding,actual,read_kind='metadata')
                         if project_auth:
                             module.require_current_owned_project_read(writer,owner,binding,actual,authentication,read_kind='metadata')
-                        self.assertEqual(started+38.0,module._READS[actual][-1])
-                        clock[0]=started+38.0
+                        packet=module._READS[actual]
+                        self.assertEqual(started+68.0,packet[-1])
+                        group=(('metadata',None,None,actual),)
+                        clock[0]=started+67.0
+                        for _ in range(2):
+                            module._require_current_owned_read_group(writer,owner,binding,group,
+                                _authentication=authentication)
+                            self.assertIs(packet,module._READS[actual])
+                            self.assertEqual(started+68.0,packet[-1])
+                        clock[0]=started+68.0
                         with self.assertRaises(module.HistoryReadLauncherHold):
                             module.require_current_owned_read(writer,owner,binding,actual,read_kind='metadata')
+                        with self.assertRaises(module.HistoryReadLauncherHold):
+                            module._require_current_owned_read_group(writer,owner,binding,group,
+                                _authentication=authentication)
+                        if project_auth:
+                            with self.assertRaises(module.HistoryReadLauncherHold):
+                                module.require_current_owned_project_read(writer,owner,binding,actual,authentication,read_kind='metadata')
+                        self.assertIs(packet,module._READS[actual])
                         with self.assertRaises(module.HistoryReadLauncherHold):unit.read_once()
                         self.assertEqual(1,len(calls))
                 self.assertEqual((1,[]),(len(records),errors))
@@ -707,7 +732,7 @@ raise SystemExit(result)
                 self.assertEqual(1,len(calls)); self.assertEqual(0,children[0].returncode)
             self.assertEqual([],errors); self.assertEqual(1,len(records)); self.assertEqual(b'{"dataFilters":[{"developerMetadataLookup":{}}]}',records[0][2])
             self.assertIn(b'Authorization: Bearer owned-project-token\r\n',records[0][1])
-            with mock.patch.object(module,'_monotonic',return_value=time.monotonic()+31),self.assertRaises(module.HistoryReadLauncherHold):
+            with mock.patch.object(module,'_monotonic',return_value=time.monotonic()+61),self.assertRaises(module.HistoryReadLauncherHold):
                 module.require_current_owned_project_read(writer,owner,binding,result,value,read_kind='metadata')
             with mock.patch.object(auth,'time',SimpleNamespace(time=lambda:value.token.expires_at)),self.assertRaises(module.HistoryReadLauncherHold):
                 module.require_current_owned_project_read(writer,owner,binding,result,value,read_kind='metadata')
@@ -995,7 +1020,7 @@ os.write(1,header+body)
                            'read_kind':'history_tail',**changed}
                 with self.subTest(changed=list(changed)),self.assertRaises(module.HistoryReadLauncherHold):
                     module.require_current_owned_read(**arguments)
-            with mock.patch.object(module,'_monotonic',return_value=time.monotonic()+31):
+            with mock.patch.object(module,'_monotonic',return_value=time.monotonic()+61):
                 with self.assertRaises(module.HistoryReadLauncherHold):
                     module.require_current_owned_read(writer,owner,binding,result,read_kind='history_tail')
             original=result.data
@@ -1140,16 +1165,28 @@ class Req7TemplateCohortDirectTests(unittest.TestCase):
             self.assertEqual((1000.0,'read'),(f.supervision[0]['started_monotonic'],f.supervision[0]['kind']))
             self.assertEqual([('stdin',False,False),('stdout',False,False),('stderr',False,False)],f.closes)
             for kind,result in zip(self.kinds,results):
-                self.assertEqual(1041.0,f.module._READS[result][-1])
+                self.assertEqual(1071.0,f.module._READS[result][-1])
                 self.assertIs(f.authentication,f.module._PROJECT_READS[result])
                 f.module.require_current_owned_project_read(f.writer,f.owner,f.binding,result,f.authentication,read_kind=kind)
-                self.assertEqual(1041.0,f.module._READS[result][-1])
+                self.assertEqual(1071.0,f.module._READS[result][-1])
+            packets=tuple(f.module._READS[result] for result in results)
+            group=tuple((kind,None,None,result) for kind,result in zip(self.kinds,results))
+            f.clock[0]=1070.0
+            for _ in range(2):
+                f.module._require_current_owned_project_read_group(
+                    f.writer,f.owner,f.binding,f.authentication,group)
+                for result,packet in zip(results,packets):
+                    self.assertIs(packet,f.module._READS[result])
+                    self.assertEqual(1071.0,packet[-1])
             with self.assertRaises(f.module.HistoryReadLauncherHold):unit.read_once()
             self.assertEqual(1,len(f.launches))
-            f.clock[0]=1041.0
+            f.clock[0]=1071.0
             for kind,result in zip(self.kinds,results):
                 with self.assertRaises(f.module.HistoryReadLauncherHold):
                     f.module.require_current_owned_read(f.writer,f.owner,f.binding,result,read_kind=kind)
+            with self.assertRaises(f.module.HistoryReadLauncherHold):
+                f.module._require_current_owned_project_read_group(
+                    f.writer,f.owner,f.binding,f.authentication,group)
             self.assertEqual((30.0,60.0),(f.module._BUDGETS['read'],f.module._BUDGETS['mutation']))
 
     def test_partial_final_response_or_final_owner_fault_issues_nothing(self):

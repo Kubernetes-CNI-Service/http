@@ -1054,7 +1054,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                     expired.append(counted.attempt_count)
                     return counted
                 boundary.enter_context(mock.patch.object(fixed_reads, '_monotonic',
-                    side_effect=lambda: actual_clock()+(31 if expired else 0)))
+                    side_effect=lambda: actual_clock()+(61 if expired else 0)))
                 import io
                 diagnostic = boundary.enter_context(mock.patch.object(worker.sys, 'stderr', io.StringIO()))
             boundary.enter_context(mock.patch.object(local,'try_writer_owner',side_effect=borrowed_writer))
@@ -4021,21 +4021,22 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                         '_prefetch_first_original_count_graph',side_effect=observe_first_prefetch))
                     private.enter_context(mock.patch.object(allocation._ReceivedCountSourceSettings,
                         '_sync_barriers',observe_received_sync))
-                    with mock.patch.object(state_owner,'current_k',side_effect=diagnosed_k), \
-                            mock.patch.object(remote,'_hold_current_project_online_inputs',side_effect=diagnosed_first_inputs), \
-                            mock.patch.object(remote,'_hold_current_project_online_original_inputs',side_effect=diagnosed_worker_inputs), \
-                            mock.patch.object(global_api,'_receipted_original_facts',side_effect=diagnosed_receipted_facts), \
-                            mock.patch.object(global_api,'record_global_attempt_intent',side_effect=diagnosed_count), \
-                            mock.patch.object(global_api,'_hold_count_claim_project_c6',side_effect=observe_c6_borrow), \
-                            mock.patch.object(allocation,'_sync_completed_source_leaf_originals',side_effect=observe_c19_sync), \
-                            mock.patch.object(remote,'inspect_completion_evidence',side_effect=reject_recursive_source_c19), \
-                            mock.patch.object(catalog,'hold_pending_project_c6_units',side_effect=reject_duplicate_source_c6), \
-                            mock.patch.object(catalog,'_hold_project_c6_from_origins',side_effect=reject_duplicate_source_leaf_c6), \
-                            mock.patch.object(global_api,'_hold_continuous_owned_attempt_wire',side_effect=diagnosed_count_wire), \
-                            mock.patch.object(launcher,'require_current_owned_project_read',side_effect=diagnosed_read_guard), \
-                            mock.patch.object(launcher.OwnedProjectSheetsReadUnit,'read_once',autospec=True,side_effect=read_first_with_prefetch), \
-                            mock.patch.object(launcher.OwnedProjectTemplateReadCohort,'read_once',autospec=True,side_effect=read_first_cohort_with_prefetch), \
-                            mock.patch.object(mutation,'_send_counted_original_once',side_effect=send):
+                    with ExitStack() as first_patches:
+                        first_patches.enter_context(mock.patch.object(state_owner,'current_k',side_effect=diagnosed_k))
+                        first_patches.enter_context(mock.patch.object(remote,'_hold_current_project_online_inputs',side_effect=diagnosed_first_inputs))
+                        first_patches.enter_context(mock.patch.object(remote,'_hold_current_project_online_original_inputs',side_effect=diagnosed_worker_inputs))
+                        first_patches.enter_context(mock.patch.object(global_api,'_receipted_original_facts',side_effect=diagnosed_receipted_facts))
+                        first_patches.enter_context(mock.patch.object(global_api,'record_global_attempt_intent',side_effect=diagnosed_count))
+                        first_patches.enter_context(mock.patch.object(global_api,'_hold_count_claim_project_c6',side_effect=observe_c6_borrow))
+                        first_patches.enter_context(mock.patch.object(allocation,'_sync_completed_source_leaf_originals',side_effect=observe_c19_sync))
+                        first_patches.enter_context(mock.patch.object(remote,'inspect_completion_evidence',side_effect=reject_recursive_source_c19))
+                        first_patches.enter_context(mock.patch.object(catalog,'hold_pending_project_c6_units',side_effect=reject_duplicate_source_c6))
+                        first_patches.enter_context(mock.patch.object(catalog,'_hold_project_c6_from_origins',side_effect=reject_duplicate_source_leaf_c6))
+                        first_patches.enter_context(mock.patch.object(global_api,'_hold_continuous_owned_attempt_wire',side_effect=diagnosed_count_wire))
+                        first_patches.enter_context(mock.patch.object(launcher,'require_current_owned_project_read',side_effect=diagnosed_read_guard))
+                        first_patches.enter_context(mock.patch.object(launcher.OwnedProjectSheetsReadUnit,'read_once',autospec=True,side_effect=read_first_with_prefetch))
+                        first_patches.enter_context(mock.patch.object(launcher.OwnedProjectTemplateReadCohort,'read_once',autospec=True,side_effect=read_first_cohort_with_prefetch))
+                        first_patches.enter_context(mock.patch.object(mutation,'_send_counted_original_once',side_effect=send))
                         try:
                             completion=WORKER._dispatch_current_project_online_originals(writer,sheet,binding,auth,
                                 _store=self.store,http_root=self.root)
@@ -5157,7 +5158,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                     mixed_observations.append((budget.outcome,budget.outstanding_reservations))
                     yield actual_budget
             def post_finalizer_clock():
-                return real_clock()+(31 if closed else 0)
+                return real_clock()+(61 if closed else 0)
             def fault_metadata():
                 if mode=='prepare-quota-rebind':
                     self.assertIn('metadata',actual_responses)
@@ -5339,7 +5340,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                     else:
                         if mode == 'read-expiry':
                             clock = fixed_reads._monotonic
-                            transport.enter_context(mock.patch.object(fixed_reads,'_monotonic',side_effect=lambda:clock()+31))
+                            transport.enter_context(mock.patch.object(fixed_reads,'_monotonic',side_effect=lambda:clock()+61))
                         with self.assertRaises(mutation.MutationLauncherHold) as caught:
                             mutation._send_counted_original_once(writer_token,spreadsheet_token,binding,credential,unit,image)
                         self.assertFalse(caught.exception.termination_confirmed); rejected.append('before-child')
@@ -7938,7 +7939,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                                                             self.assertNotEqual(inode,path.stat().st_ino)
                                                         if count==2 and retry_launch_probe=='read-expiry':
                                                             clock=fixed_reads._monotonic
-                                                            transport.enter_context(mock.patch.object(fixed_reads,'_monotonic',side_effect=lambda:clock()+31))
+                                                            transport.enter_context(mock.patch.object(fixed_reads,'_monotonic',side_effect=lambda:clock()+61))
                                                         if count==1 or retry_launch_probe in ('normal', 'old-cycle'):
                                                             result=mutation._send_counted_original_once(writer_token,spreadsheet_token,binding,credential,unit,image)
                                                             self.assertEqual((count,401,'UNKNOWN'),(result.attempt_count,result.status,result.outcome))
@@ -8031,7 +8032,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                                                             if continuous_launch_probe=='read-expiry':
                                                                 original_clock=fixed_reads._monotonic
                                                                 transport.enter_context(mock.patch.object(fixed_reads,'_monotonic',
-                                                                    side_effect=lambda:original_clock()+31))
+                                                                    side_effect=lambda:original_clock()+61))
                                                             with self.assertRaises(mutation.MutationLauncherHold) as caught:
                                                                 mutation._send_counted_original_once(writer_token,spreadsheet_token,binding,credential,unit,image)
                                                             self.assertFalse(caught.exception.termination_confirmed)
@@ -8209,7 +8210,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                                                 result = original_counter(*counter_args,**counter_kwargs)
                                                 expired[0] = True; return result
                                             with mock.patch.object(global_journal,'record_receipted_original_attempt_intent',side_effect=finish_after_read_deadline), \
-                                                    mock.patch.object(fixed_reads,'_monotonic',side_effect=lambda:time.monotonic()+(31 if expired[0] else 0)):
+                                                    mock.patch.object(fixed_reads,'_monotonic',side_effect=lambda:time.monotonic()+(61 if expired[0] else 0)):
                                                 with self.assertRaises(global_journal.GlobalAttemptHold): record_owned(bundle)
                                             intent = global_journal.inspect_global_unit(spreadsheet_token,binding,unit)
                                         elif receipted_intent_probe and (count in (2, 3, 4, 5) or allocation_fault):

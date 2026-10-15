@@ -365,9 +365,16 @@ class _ReceivedCountSourceSettings:
     def _sync_barriers(self):
         # Same exact C19 barriers as the original reader, without recursive
         # semantic decoding, refreshed namespace images or old issuer calls.
-        for groups in self.barriers:
-            for group in groups:
-                for fd in group:os.fsync(fd)
+        # This warm, read-only sweep has no intervening writes or yields.
+        # Repeated occurrences of the SAME retained FD need only its LAST
+        # synchronization, so shared parent directories still follow all
+        # their files/folders. Different FDs are never merged by inode/name.
+        # Rebuild per call; retain every original tuple and all surrounding
+        # raw/settings/C6 ENTRY/EXIT checks. Cold recovery order is unchanged.
+        ordered=tuple(fd for groups in self.barriers for group in groups for fd in group)
+        last={fd:index for index,fd in enumerate(ordered)}
+        for index,fd in enumerate(ordered):
+            if last[fd]==index:os.fsync(fd)
 
 
 @contextmanager

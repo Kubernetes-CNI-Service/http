@@ -61,6 +61,71 @@ def allocation_image_barrier(case, fd):
 
 
 class Req7NativeProjectAuditAssignmentTests(unittest.TestCase):
+    @contextmanager
+    def _warm_metadata_sync_owned_fds(self):
+        # Only the fixed warm synchronization primitive, not an issuer or
+        # source/COUNT permission. Cold recovery barriers stay independent.
+        module = load()
+        with tempfile.TemporaryDirectory(prefix='req7-warm-sync-') as temporary:
+            parent = os.open(temporary, os.O_RDONLY | os.O_DIRECTORY)
+            a = os.open(Path(temporary) / 'a', os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
+            b = os.open(Path(temporary) / 'b', os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
+            alias = os.dup(a)
+            owned = (parent, a, b, alias)
+            try:
+                yield module, (a, b, parent, alias)
+            finally:
+                for fd in reversed(owned):
+                    os.close(fd)
+
+    def test_warm_metadata_sync_keeps_literal_last_occurrence_and_repeats_fresh_each_call(self):
+        with self._warm_metadata_sync_owned_fds() as (module, (a, b, parent, _alias)):
+            barriers = (((a, parent), (b, parent), (a, parent)),)
+            holder = SimpleNamespace(barriers=barriers)
+            sync = module._ReceivedCountSourceSettings._sync_barriers
+            actual = []; original = os.fsync
+            def observed(fd):
+                os.fstat(fd)  # real owned descriptor, not a path-only stand-in
+                actual.append(fd)
+                return original(fd)
+            with mock.patch.object(module.os, 'fsync', side_effect=observed):
+                sync(holder)
+                self.assertEqual([b, a, parent], actual)
+                sync(holder)
+            self.assertEqual([b, a, parent, b, a, parent], actual)
+            self.assertIs(barriers, holder.barriers)
+
+    def test_warm_metadata_sync_never_merges_different_fds_of_same_inode(self):
+        with self._warm_metadata_sync_owned_fds() as (module, (a, _b, parent, alias)):
+            self.assertNotEqual(a, alias)
+            self.assertEqual((os.fstat(a).st_dev, os.fstat(a).st_ino),
+                (os.fstat(alias).st_dev, os.fstat(alias).st_ino))
+            holder = SimpleNamespace(barriers=(((a, parent), (alias, parent)),))
+            actual = []; original = os.fsync
+            def observed(fd):
+                actual.append(fd)
+                return original(fd)
+            with mock.patch.object(module.os, 'fsync', side_effect=observed):
+                module._ReceivedCountSourceSettings._sync_barriers(holder)
+            self.assertEqual([a, alias, parent], actual)
+
+    def test_warm_metadata_sync_propagates_same_original_error_without_retry(self):
+        with self._warm_metadata_sync_owned_fds() as (module, (a, b, parent, _alias)):
+            holder = SimpleNamespace(barriers=(((a, parent), (b, parent)),))
+            primary = OSError('literal owned synchronization failure')
+            actual = []; original = os.fsync
+            def fails(fd):
+                actual.append(fd)
+                if fd == b:
+                    raise primary
+                return original(fd)
+            with mock.patch.object(module.os, 'fsync', side_effect=fails):
+                with self.assertRaises(OSError) as caught:
+                    module._ReceivedCountSourceSettings._sync_barriers(holder)
+            self.assertIs(primary, caught.exception)
+            self.assertEqual(1, actual.count(b))
+            self.assertEqual(b, actual[-1])
+
     def test_fixed_non_yield_k_checkpoint_replays_its_original_c6_once(self):
         import ast,inspect,textwrap
         module=load()

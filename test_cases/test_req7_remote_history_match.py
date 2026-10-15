@@ -4969,7 +4969,7 @@ with local.writer_owner(root/'project',root/'project/publication') as writer, sc
             finally:
                 if rebound[0]: os.replace(preserved,business_path)  # restore only this owned synthetic original
             from monitor import issue_tracker_history_read_launcher as fixed_reads
-            with mock.patch.object(fixed_reads,'_monotonic',return_value=__import__('time').monotonic()+31):
+            with mock.patch.object(fixed_reads,'_monotonic',return_value=__import__('time').monotonic()+61):
                 with self.assertRaises(before.HistoryPrereadHold):
                     before.observe_owned_business_continuity(writer,owner,bound,unit,**options)
             self.assertEqual((1,'UNKNOWN'),(journal.inspect_global_unit(owner,bound,unit).attempt_count,
@@ -5899,7 +5899,7 @@ with scoped_fixture(root,owner),owner.spreadsheet_owner(bound) as token:
                         changed.append(True)
                         if fault=='count-after-header': journal.record_global_attempt_intent(owner,bound,unit)
                 with mock.patch.object(local,'_write_new',side_effect=after_header), \
-                        mock.patch.object(reads,'_monotonic',side_effect=lambda:time.monotonic()+(31 if changed and fault=='deadline-after-header' else 0)):
+                        mock.patch.object(reads,'_monotonic',side_effect=lambda:time.monotonic()+(61 if changed and fault=='deadline-after-header' else 0)):
                     with self.assertRaises(module.RemoteHistoryHold):
                         module.record_owned_completion_evidence(writer,owner,bound,unit,**responses)
                 self.assertEqual([True],changed)
@@ -5930,7 +5930,7 @@ with scoped_fixture(root,owner),owner.spreadsheet_owner(bound) as token:
                             path=proof/name; path.write_bytes(raw); path.chmod(0o600)
                     return seen
                 with mock.patch.object(module,'inspect_completion_evidence',side_effect=finish_then_change), \
-                        mock.patch.object(reads,'_monotonic',side_effect=lambda:time.monotonic()+(31 if changed and fault=='deadline' else 0)):
+                        mock.patch.object(reads,'_monotonic',side_effect=lambda:time.monotonic()+(61 if changed and fault=='deadline' else 0)):
                     with self.assertRaises(module.RemoteHistoryHold):
                         module.record_owned_completion_evidence(writer,owner,bound,unit,**responses)
                 self.assertEqual([True],changed)
@@ -6003,7 +6003,7 @@ with scoped_fixture(root,owner),owner.spreadsheet_owner(bound) as token:
             def finish_after_deadline(*args,**kwargs):
                 seen=actual(*args,**kwargs); expired[0]=True; return seen
             with mock.patch.object(module,'observe_remote_history_unit',side_effect=finish_after_deadline), \
-                    mock.patch.object(reads,'_monotonic',side_effect=lambda:time.monotonic()+(31 if expired[0] else 0)):
+                    mock.patch.object(reads,'_monotonic',side_effect=lambda:time.monotonic()+(61 if expired[0] else 0)):
                 with self.assertRaises(module.RemoteHistoryHold): module.observe_owned_remote_history_unit(writer,owner,bound,unit,**responses)
             from test_cases.test_issue_tracker_online_target import document
             actual=module.observe_remote_history_unit

@@ -28,9 +28,9 @@ _SOURCE_ROOT = Path(__file__).resolve().parents[1]
 _NONCE = re.compile(r'[0-9a-f]{64}\Z')
 _LIMIT = 2*1024*1024
 # The read attempt keeps its original total30s acquisition budget. Only after
-# successful cleanup and final original checks is a fixed30s observation issued;
+# successful cleanup and final original checks is a fixed60s observation issued;
 # no getter, group check, finalizer or subsequent read renews this deadline.
-_READ_OBSERVATION_SECONDS = 30.0
+_READ_OBSERVATION_SECONDS = 60.0
 _READS = weakref.WeakKeyDictionary()
 _READ_GUARD = threading.Lock()
 _PROJECT_READS = weakref.WeakKeyDictionary()

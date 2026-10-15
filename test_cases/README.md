@@ -2434,7 +2434,9 @@ The post-finalizer native negative advances only the original issuer's clock
 after the actual last catalog holder has exited: all four real reads succeed
 first, but expired observations must HOLD without changing count/CLAIM/images.
 Removing the new final read checks makes both independent direct and native
-expectations fail. The fixed 30-second observation budget is unchanged.
+expectations fail. At the time of this evidence, the fixed30s observation
+budget was unchanged. This is historical evidence; the owner-approved current
+observation contract is documented under2026-10-15 below.
 
 REQ7 mixed settlement is an original-held read, not admission: the private
 fixed-owner reader joins ALL actual project C6/catalog/family/count originals.
@@ -4558,7 +4560,11 @@ business-creation workflows then pass 58 tests in 46.718s
 (`f486971a17b376515d206484f13429b2b087024e8f1fd2d5443aaa9aa4878939`).
 These are local regressions, not an approval or completed cumulative FIRST.
 
-### REQ7 fixed read acquisition and observation windows — owner 2026-10-14
+### REQ7 fixed read acquisition and observation windows — owner 2026-10-14 - historical / superseded
+
+This dated section records the previous30+30 contract and its original test
+evidence. The owner approval on2026-10-15 below supersedes only its read
+observation duration; historical results are not relabeled as60s proof.
 
 Owner delegated the simple time contract to the main window. Read acquisition
 still has a total30s budget from `read_once` entry: preparation, child launch,
@@ -4588,6 +4594,34 @@ and both genuine project/legacy lifecycle workflows pass13 cases/3.634s
 Current manifest already binds this script to direct and multi-script workflows.
 This is local lifecycle evidence, not whole FIRST, current full/check, runner
 approval, actual Cloud/VM/SSH validation or overall REQ7 completion.
+
+### REQ7 fixed60s observation approval — owner 2026-10-15
+
+Owner explicitly approved successful-read observation30s ->60s. Acquisition
+remains a total30s from `read_once` entry, including real supervision, complete
+response, confirmed termination, all stream cleanup and final actual
+token/target/dual-owner verification. Only after all of that succeeds is one
+observation sample taken, issuing an original fixed60s deadline. Getters,
+groups, source checks and finalizers never renew or replace it. Existing
+issued records are not retimed. Mutation60s, token wall expiry and original
+source/owner/credential revocation checks remain unchanged. From acquisition
+entry to observation expiry the maximum can approach90s; this does not
+increase the transport/acquisition budget or prove remote atomicity/CAS.
+
+The independently updated literal direct, actual TLS project/legacy and
+cohort expectations first recorded3 methods/4 assertion FAILs,0 ERROR in
+3.211s against the old30s implementation. After the observation constant
+alone changed to60s, the complete launcher module passed41 tests in33.598s.
+All acquisition/final-source/cleanup/interrupt/partial-registration/exact-
+expiry rejection scenarios remain. These are local scoped results, not
+whole FIRST, full/check, approval or actual Cloud/field verification.
+
+Earlier notes that describe a fixed30s successful-read observation remain
+historical evidence under their original source identities. Current
+successful-read consumers, including the one-child/four-original cohort,
+use the approved60s contract without renewal. Any old30s reference to
+acquisition, supervision or cleanup still denotes the unchanged30s budget.
+No test or field scenario is removed and no new field permission is granted.
 
 ### REQ7 adjacent catalog replays and a metadata-fixture failure (2026-10-14)
 
@@ -4761,7 +4795,7 @@ read-only search POST. This is not a Google atomic snapshot or arbitrary batch.
 Acquisition30s starts at the single group entry; only complete correlated
 four-response bytes, confirmed child termination, all stdio cleanup and last
 original authentication/target/dual-owner checks allow one observation start.
-The four previously unissued originals receive that one fixed30s observation
+The four previously unissued originals receive that one fixed60s observation
 deadline. No existing observation is renewed; mutation60s and consumer
 source/POST/EXIT checks remain unchanged. Combined output retains2MiB and
 private input32768-byte caps. Partial/foreign/reordered/trailing frames,
