@@ -273,6 +273,80 @@ def run_shell(
                     stream.close()
             process.wait(timeout=2.0)
         raise timeout_error
+    except BaseException as interruption:
+        # All post-construction failures must finish owned cleanup. Preserve
+        # the existing TimeoutExpired branch and its separate stale-PID rule.
+        first_cleanup_interrupt = None
+        cleanup_failures = None
+        capture_complete = False
+        try:
+            cleanup_failures = []
+            capture_complete = True
+        except BaseException:
+            # Python could not allocate the diagnostic collection. Continue
+            # cleanup, but never publish an empty tuple as captured evidence.
+            pass
+
+        def record_failure(phase, error):
+            nonlocal capture_complete, first_cleanup_interrupt
+            # Priority cannot depend on successful diagnostic allocation.
+            if not isinstance(error, Exception) and first_cleanup_interrupt is None:
+                first_cleanup_interrupt = error
+            try:
+                cleanup_failures.append((phase, error))
+            except BaseException:
+                capture_complete = False
+
+        try:
+            interruption._run_shell_cleanup_failures = None
+        except BaseException:
+            capture_complete = False
+        try:
+            running = process.poll() is None
+        except BaseException as error:
+            record_failure("poll", error)
+            running = False  # an unknown leader is not group authority
+        if running:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except BaseException as error:
+                record_failure("group", error)
+        try:
+            process.communicate(timeout=2.0)
+        except BaseException as error:
+            record_failure("communicate", error)
+            try:
+                process.kill()
+            except BaseException as error:
+                record_failure("objectkill", error)
+        for phase, stream in (
+            ("stdin", process.stdin), ("stdout", process.stdout),
+            ("stderr", process.stderr),
+        ):
+            if stream is not None:
+                try:
+                    stream.close()
+                except BaseException as error:
+                    record_failure(phase, error)
+        try:
+            process.wait(timeout=2.0)
+        except BaseException as error:
+            record_failure("wait", error)
+        try:
+            interruption._run_shell_cleanup_failures = (
+                tuple(cleanup_failures) if capture_complete else None
+            )
+        except BaseException:
+            # None/missing is NOT_CAPTURED, never evidence of no failures.
+            # If Python also refuses this clearing assignment, diagnostic
+            # metadata is unavailable/untrustworthy; the primary still wins.
+            try:
+                interruption._run_shell_cleanup_failures = None
+            except BaseException:
+                pass
+        if isinstance(interruption, Exception) and first_cleanup_interrupt is not None:
+            raise first_cleanup_interrupt
+        raise
     return subprocess.CompletedProcess(
         process.args, process.returncode, stdout=stdout, stderr=stderr,
     )
@@ -398,6 +472,426 @@ class MonitorAuthoritySemanticWorkflowTests(unittest.TestCase):
         )
         self.assertIsNotNone(exact_cli)
         self.assertRegex(exact_cli.group(1), r"\btimeout\s*=\s*10\b")
+
+    def test_shell_communicate_interrupt_preserves_object_and_cleanup_bound(self) -> None:
+        """Independent direct: interrupt, cleanup, then the SAME exception."""
+        cause = ValueError("owned interruption cause")
+        interruption = KeyboardInterrupt("owned interruption")
+        interruption.__cause__ = cause
+        process = mock.MagicMock()
+        process.args = ["/bin/bash"]
+        process.pid = 4242
+        process.returncode = -signal.SIGKILL
+        process.poll.return_value = None
+        process.communicate.side_effect = (interruption, ("", ""))
+
+        with mock.patch.object(
+            subprocess, "Popen", return_value=process,
+        ) as popen, mock.patch.object(os, "killpg") as killpg, \
+                mock.patch.object(os, "getpgid", return_value=4242):
+            with self.assertRaises(KeyboardInterrupt) as caught:
+                run_shell("exit 91\n", timeout_seconds=0.25)
+
+        self.assertIs(interruption, caught.exception)
+        self.assertIs(cause, caught.exception.__cause__)
+        self.assertEqual((), getattr(caught.exception, "_run_shell_cleanup_failures", None))
+        popen.assert_called_once()
+        self.assertEqual(["/bin/bash"], popen.call_args.args[0])
+        self.assertIs(True, popen.call_args.kwargs["start_new_session"])
+        self.assertEqual(2, process.communicate.call_count)
+        self.assertEqual(
+            {"input": "exit 91\n", "timeout": 0.25},
+            process.communicate.call_args_list[0].kwargs,
+        )
+        self.assertEqual(
+            {"timeout": 2.0}, process.communicate.call_args_list[1].kwargs,
+        )
+        killpg.assert_called_once_with(4242, signal.SIGKILL)
+
+    def test_actual_owned_bash_communicate_interrupt_closes_before_return(self) -> None:
+        """Actual helper -> one Bash; no input/body reaches the child."""
+        cause = ValueError("owned Bash interruption cause")
+        interruption = KeyboardInterrupt("owned Bash interruption")
+        interruption.__cause__ = cause
+        real_popen = subprocess.Popen
+        real_getpgid = os.getpgid
+        real_killpg = os.killpg
+        owned = []
+        calls = []
+        cleanup_errors = []
+        # Cleanup facts are not cleared/ignored to turn an unexpected fixture
+        # failure into the intended behavioral RED. unittest reports them even
+        # if a behavioral assertion below already failed.
+        self.addCleanup(self.assertEqual, [], cleanup_errors)
+        clean_environment = {
+            "PATH": "/usr/bin:/bin",
+            "HOME": os.fspath(self.sandbox),
+            "LANG": "C",
+            "LC_ALL": "C",
+        }
+
+        def create_actual_owned_bash(*args, **kwargs):
+            self.assertEqual((["/bin/bash"],), args)
+            self.assertEqual(ROOT, kwargs["cwd"])
+            self.assertIs(True, kwargs["start_new_session"])
+            self.assertEqual(
+                {**clean_environment, "PYTHONDONTWRITEBYTECODE": "1"},
+                kwargs["env"],
+            )
+            for name in ("stdin", "stdout", "stderr"):
+                self.assertEqual(subprocess.PIPE, kwargs[name])
+            process = real_popen(*args, **kwargs)  # one real construction
+            # Scope is explicitly POST-construction. A constructor that raises
+            # before returning remains a separate unresolved startup case.
+            original_communicate = process.communicate
+            original_wait = process.wait
+            streams = (process.stdin, process.stdout, process.stderr)
+            owned.append((process, process.pid, original_communicate,
+                          original_wait, streams))
+
+            def interrupt_before_first_input(*call_args, **call_kwargs):
+                calls.append((call_args, dict(call_kwargs)))
+                if len(calls) == 1:
+                    # Do not delegate or write stdin. Clean ENV excludes
+                    # BASH_ENV/ENV; noninteractive Bash has no script to run.
+                    raise interruption
+                self.assertNotIn("input", call_kwargs)
+                return original_communicate(*call_args, **call_kwargs)
+
+            process.communicate = interrupt_before_first_input
+            return process  # SAME actual Popen, not a substituted result
+
+        try:
+            with mock.patch.dict(os.environ, clean_environment, clear=True), \
+                    mock.patch.object(subprocess, "Popen", side_effect=create_actual_owned_bash) as constructor:
+                with self.assertRaises(KeyboardInterrupt) as caught:
+                    run_shell("exit 91\n", timeout_seconds=0.25)
+            self.assertIs(interruption, caught.exception)
+            self.assertIs(cause, caught.exception.__cause__)
+            self.assertEqual((), getattr(caught.exception, "_run_shell_cleanup_failures", None))
+            constructor.assert_called_once()
+            self.assertEqual(1, len(owned))
+            process, pid, original_communicate, original_wait, streams = owned[0]
+            self.assertEqual(pid, process.pid)
+            self.assertEqual(
+                ((), {"input": "exit 91\n", "timeout": 0.25}), calls[0],
+            )
+            # This assertion is BEFORE this test's fallback. On the old helper
+            # it is a genuine FAIL: the real child is still waiting for stdin.
+            self.assertIsNotNone(process.poll())
+            self.assertEqual(-signal.SIGKILL, process.returncode)
+            self.assertEqual(2, len(calls))
+            self.assertEqual(((), {"timeout": 2.0}), calls[1])
+            self.assertTrue(all(stream.closed for stream in streams))
+        finally:
+            primary = sys.exc_info()[1]
+            cleanup_interrupt = None
+            for process, pid, original_communicate, original_wait, streams in owned:
+                try:
+                    if process.pid != pid or not getattr(process, "_child_created", False):
+                        raise AssertionError("UNKNOWN original Popen ownership")
+                    # No stale PID/group receipt is reused. Only this same
+                    # original, unreaped leader with a fresh matching PGID may
+                    # be signalled. No external PID scan and no descendants.
+                    if process.poll() is None:
+                        if real_getpgid(pid) != pid:
+                            raise AssertionError("UNKNOWN original live process group")
+                        real_killpg(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass  # still attempt object-owned communicate/wait below
+                except BaseException as error:
+                    cleanup_errors.append(("owned-signal", type(error).__name__))
+                    if not isinstance(error, Exception) and cleanup_interrupt is None:
+                        cleanup_interrupt = error
+                try:
+                    stdout, stderr = original_communicate(timeout=2.0)
+                    if stdout != "" or stderr != "":
+                        raise AssertionError("unexpected child output; no body may run")
+                except BaseException as error:
+                    cleanup_errors.append(("owned-communicate", type(error).__name__))
+                    if not isinstance(error, Exception) and cleanup_interrupt is None:
+                        cleanup_interrupt = error
+                for stream in streams:
+                    try:
+                        stream.close()  # captured original stream objects only
+                    except BaseException as error:
+                        cleanup_errors.append(("owned-stream-close", type(error).__name__))
+                        if not isinstance(error, Exception) and cleanup_interrupt is None:
+                            cleanup_interrupt = error
+                try:
+                    original_wait(timeout=2.0)
+                except BaseException as error:
+                    cleanup_errors.append(("owned-wait", type(error).__name__))
+                    if not isinstance(error, Exception) and cleanup_interrupt is None:
+                        cleanup_interrupt = error
+            # All cleanup attempts happen first. Original non-Exception wins;
+            # a new cleanup NI wins only over an ordinary/no primary. Ordinary
+            # cleanup errors remain independently reported by addCleanup.
+            if cleanup_interrupt is not None and (
+                primary is None or isinstance(primary, Exception)
+            ):
+                raise cleanup_interrupt
+
+    def test_shell_interrupt_cleanup_errors_do_not_skip_owned_tail_or_replace_primary(self) -> None:
+        cause = ValueError("primary owned interruption cause")
+        interruption = KeyboardInterrupt("primary owned interruption")
+        interruption.__cause__ = cause
+        group_error = OSError("owned group kill")
+        communicate_error = OSError("owned cleanup communicate")
+        objectkill_error = OSError("owned object kill")
+        stdin_error = OSError("owned stdin close")
+        stdout_error = SystemExit("secondary cleanup interruption")
+        wait_error = OSError("owned wait")
+        events = []
+        process = mock.MagicMock()
+        process.args = ["/bin/bash"]
+        process.pid = 4242
+        process.poll.return_value = None
+
+        def fail(label, error):
+            def operation(*args, **kwargs):
+                events.append(label)
+                raise error
+            return operation
+
+        communication_count = 0
+
+        def communicate(*args, **kwargs):
+            nonlocal communication_count
+            communication_count += 1
+            events.append("communicate-primary" if communication_count == 1 else "communicate-cleanup")
+            if communication_count == 1:
+                raise interruption
+            raise communicate_error
+
+        process.communicate.side_effect = communicate
+        process.kill.side_effect = fail("object-kill", objectkill_error)
+        process.stdin.close.side_effect = fail("stdin-close", stdin_error)
+        process.stdout.close.side_effect = fail("stdout-close", stdout_error)
+        process.stderr.close.side_effect = lambda: events.append("stderr-close")
+        process.wait.side_effect = fail("wait", wait_error)
+        caught = None
+        with mock.patch.object(subprocess, "Popen", return_value=process) as popen, \
+                mock.patch.object(os, "killpg", side_effect=fail("group-kill", group_error)) as killpg, \
+                mock.patch.object(os, "getpgid", return_value=4242):
+            try:
+                run_shell("exit 91\n", timeout_seconds=0.25)
+            except BaseException as error:
+                caught = error
+
+        self.assertIs(interruption, caught)
+        self.assertIs(cause, caught.__cause__)
+        recorded = getattr(caught, "_run_shell_cleanup_failures", None)
+        self.assertIs(tuple, type(recorded))
+        expected = (
+            ("group", group_error),
+            ("communicate", communicate_error),
+            ("objectkill", objectkill_error),
+            ("stdin", stdin_error),
+            ("stdout", stdout_error),
+            ("wait", wait_error),
+        )
+        self.assertEqual(6, len(recorded))
+        for actual_item, expected_item in zip(recorded, expected):
+            self.assertIs(tuple, type(actual_item))
+            self.assertEqual(2, len(actual_item))
+            self.assertEqual(expected_item[0], actual_item[0])
+            self.assertIs(expected_item[1], actual_item[1])
+        popen.assert_called_once()
+        killpg.assert_called_once_with(4242, signal.SIGKILL)
+        self.assertEqual(
+            [
+                "communicate-primary", "group-kill", "communicate-cleanup",
+                "object-kill", "stdin-close", "stdout-close", "stderr-close", "wait",
+            ],
+            events,
+        )
+        self.assertEqual(2, process.communicate.call_count)
+        self.assertEqual(
+            {"input": "exit 91\n", "timeout": 0.25},
+            process.communicate.call_args_list[0].kwargs,
+        )
+        self.assertEqual({"timeout": 2.0}, process.communicate.call_args_list[1].kwargs)
+        process.kill.assert_called_once_with()
+        for stream in (process.stdin, process.stdout, process.stderr):
+            stream.close.assert_called_once_with()
+        process.wait.assert_called_once_with(timeout=2.0)
+
+    def test_shell_ordinary_error_cleanup_preserves_primary_or_first_cleanup_ni(self) -> None:
+        for mode in ("clean", "cleanup-ni"):
+            with self.subTest(mode=mode):
+                primary_cause = ValueError("owned ordinary cause")
+                primary = OSError(5, "owned primary communicate")
+                primary.__cause__ = primary_cause
+                cleanup_cause = ValueError("owned cleanup interruption cause")
+                cleanup_ni = KeyboardInterrupt("first cleanup interruption")
+                cleanup_ni.__cause__ = cleanup_cause
+                group_error = OSError("owned group kill")
+                objectkill_error = OSError("owned object kill")
+                stdin_error = OSError("owned stdin close")
+                stdout_error = SystemExit("later cleanup interruption")
+                wait_error = OSError("owned wait")
+                process = mock.MagicMock()
+                process.args = ["/bin/bash"]
+                process.pid = 4242
+                process.poll.return_value = None
+                process.communicate.side_effect = (
+                    primary, ("", "") if mode == "clean" else cleanup_ni,
+                )
+                if mode == "cleanup-ni":
+                    process.kill.side_effect = objectkill_error
+                    process.stdin.close.side_effect = stdin_error
+                    process.stdout.close.side_effect = stdout_error
+                    process.wait.side_effect = wait_error
+                caught = None
+                with mock.patch.object(subprocess, "Popen", return_value=process) as constructor, \
+                        mock.patch.object(os, "killpg", side_effect=None if mode == "clean" else group_error) as killpg, \
+                        mock.patch.object(os, "getpgid", return_value=4242):
+                    try:
+                        run_shell("exit 91\n", timeout_seconds=0.25)
+                    except BaseException as error:
+                        caught = error
+                constructor.assert_called_once()
+                self.assertIs(primary_cause, primary.__cause__)
+                if mode == "clean":
+                    self.assertIs(primary, caught)
+                    expected = ()
+                    process.kill.assert_not_called()
+                else:
+                    self.assertIs(cleanup_ni, caught)
+                    self.assertIs(cleanup_cause, caught.__cause__)
+                    self.assertIs(primary, caught.__context__)
+                    expected = (
+                        ("group", group_error),
+                        ("communicate", cleanup_ni),
+                        ("objectkill", objectkill_error),
+                        ("stdin", stdin_error),
+                        ("stdout", stdout_error),
+                        ("wait", wait_error),
+                    )
+                    process.kill.assert_called_once_with()
+                recorded = getattr(primary, "_run_shell_cleanup_failures", None)
+                self.assertIs(tuple, type(recorded))
+                self.assertEqual(len(expected), len(recorded))
+                for actual_item, expected_item in zip(recorded, expected):
+                    self.assertIs(tuple, type(actual_item))
+                    self.assertEqual(2, len(actual_item))
+                    self.assertEqual(expected_item[0], actual_item[0])
+                    self.assertIs(expected_item[1], actual_item[1])
+                killpg.assert_called_once_with(4242, signal.SIGKILL)
+                self.assertEqual(2, process.communicate.call_count)
+                self.assertEqual(
+                    {"input": "exit 91\n", "timeout": 0.25},
+                    process.communicate.call_args_list[0].kwargs,
+                )
+                self.assertEqual({"timeout": 2.0}, process.communicate.call_args_list[1].kwargs)
+                for stream in (process.stdin, process.stdout, process.stderr):
+                    stream.close.assert_called_once_with()
+                process.wait.assert_called_once_with(timeout=2.0)
+
+    def test_actual_owned_bash_ordinary_communicate_error_closes_before_return(self) -> None:
+        """Actual helper/Bash, ordinary failure before any input reaches it."""
+        cause = ValueError("owned ordinary Bash cause")
+        primary = OSError(5, "owned Bash communicate")
+        primary.__cause__ = cause
+        real_popen = subprocess.Popen
+        real_getpgid = os.getpgid
+        real_killpg = os.killpg
+        owned = []
+        calls = []
+        cleanup_errors = []
+        self.addCleanup(self.assertEqual, [], cleanup_errors)
+        clean_environment = {
+            "PATH": "/usr/bin:/bin", "HOME": os.fspath(self.sandbox),
+            "LANG": "C", "LC_ALL": "C",
+        }
+
+        def create_actual_owned_bash(*args, **kwargs):
+            self.assertEqual((["/bin/bash"],), args)
+            self.assertEqual(ROOT, kwargs["cwd"])
+            self.assertIs(True, kwargs["start_new_session"])
+            self.assertEqual(
+                {**clean_environment, "PYTHONDONTWRITEBYTECODE": "1"}, kwargs["env"],
+            )
+            for name in ("stdin", "stdout", "stderr"):
+                self.assertEqual(subprocess.PIPE, kwargs[name])
+            process = real_popen(*args, **kwargs)
+            original_communicate = process.communicate
+            original_wait = process.wait
+            streams = (process.stdin, process.stdout, process.stderr)
+            owned.append((process, process.pid, original_communicate, original_wait, streams))
+
+            def fail_before_first_input(*call_args, **call_kwargs):
+                calls.append((call_args, dict(call_kwargs)))
+                if len(calls) == 1:
+                    raise primary  # no delegate and no stdin write
+                self.assertNotIn("input", call_kwargs)
+                return original_communicate(*call_args, **call_kwargs)
+
+            process.communicate = fail_before_first_input
+            return process  # SAME real Popen; construction must have succeeded
+
+        try:
+            with mock.patch.dict(os.environ, clean_environment, clear=True), \
+                    mock.patch.object(subprocess, "Popen", side_effect=create_actual_owned_bash) as constructor:
+                with self.assertRaises(OSError) as caught:
+                    run_shell("exit 91\n", timeout_seconds=0.25)
+            self.assertIs(primary, caught.exception)
+            self.assertIs(cause, caught.exception.__cause__)
+            constructor.assert_called_once()
+            self.assertEqual(1, len(owned))
+            process, pid, original_communicate, original_wait, streams = owned[0]
+            self.assertEqual(pid, process.pid)
+            self.assertEqual(((), {"input": "exit 91\n", "timeout": 0.25}), calls[0])
+            # BEFORE test fallback: current NI-only helper genuinely fails here.
+            self.assertIsNotNone(process.poll())
+            self.assertEqual(-signal.SIGKILL, process.returncode)
+            self.assertEqual((), getattr(primary, "_run_shell_cleanup_failures", None))
+            self.assertEqual(2, len(calls))
+            self.assertEqual(((), {"timeout": 2.0}), calls[1])
+            self.assertTrue(all(stream.closed for stream in streams))
+        finally:
+            pending = sys.exc_info()[1]
+            cleanup_interrupt = None
+            for process, pid, original_communicate, original_wait, streams in owned:
+                try:
+                    if process.pid != pid or not getattr(process, "_child_created", False):
+                        raise AssertionError("UNKNOWN original Popen ownership")
+                    if process.poll() is None:
+                        if real_getpgid(pid) != pid:
+                            raise AssertionError("UNKNOWN original live process group")
+                        real_killpg(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                except BaseException as error:
+                    cleanup_errors.append(("owned-signal", type(error).__name__))
+                    if not isinstance(error, Exception) and cleanup_interrupt is None:
+                        cleanup_interrupt = error
+                try:
+                    stdout, stderr = original_communicate(timeout=2.0)
+                    if stdout != "" or stderr != "":
+                        raise AssertionError("unexpected output; no body may run")
+                except BaseException as error:
+                    cleanup_errors.append(("owned-communicate", type(error).__name__))
+                    if not isinstance(error, Exception) and cleanup_interrupt is None:
+                        cleanup_interrupt = error
+                for stream in streams:
+                    try:
+                        stream.close()
+                    except BaseException as error:
+                        cleanup_errors.append(("owned-stream-close", type(error).__name__))
+                        if not isinstance(error, Exception) and cleanup_interrupt is None:
+                            cleanup_interrupt = error
+                try:
+                    original_wait(timeout=2.0)
+                except BaseException as error:
+                    cleanup_errors.append(("owned-wait", type(error).__name__))
+                    if not isinstance(error, Exception) and cleanup_interrupt is None:
+                        cleanup_interrupt = error
+            if cleanup_interrupt is not None and (
+                pending is None or isinstance(pending, Exception)
+            ):
+                raise cleanup_interrupt
 
     def test_specialized_capture_harnesses_cannot_bypass_group_cleanup(self) -> None:
         tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
