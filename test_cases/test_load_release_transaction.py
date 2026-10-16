@@ -226,6 +226,12 @@ def write_valid_nvos_image(path: Path) -> None:
         stream.truncate(1024 * 1024)
 
 
+def write_shared_receipt_image_fixture(path: Path) -> None:
+    """Public image premise for receipt tests; unrelated image attacks stay raw."""
+    write_valid_nvos_image(path)
+    path.chmod(0o644)
+
+
 def write_shared_artifact_receipt(
     root: Path, project: Path, inputs, image: Path, *,
     project_name: str | None = None,
@@ -238,6 +244,7 @@ def write_shared_artifact_receipt(
 ) -> Path:
     receipt_dir = root / ".shared-artifact-receipts"
     receipt_dir.mkdir(mode=0o755)
+    receipt_dir.chmod(0o755)
     input_files = {
         inputs.global_file.name: inputs.global_file,
         inputs.devices_file.name: inputs.devices_file,
@@ -3257,6 +3264,20 @@ class ReleaseTransactionTests(unittest.TestCase):
             ),
         )
 
+    def test_shared_receipt_fixture_modes_are_explicit_under_private_umask(self) -> None:
+        image = self.root / "image/cumulus-linux-5.18.1-mlx-amd64.bin"
+        previous = os.umask(0o077)
+        try:
+            write_shared_receipt_image_fixture(image)
+            self.assertEqual(0o644, stat.S_IMODE(image.stat().st_mode))
+            receipt = write_shared_artifact_receipt(
+                self.root, self.project, self.inputs, image,
+            )
+            self.assertEqual(0o755, stat.S_IMODE(receipt.parent.stat().st_mode))
+            self.assertEqual(0o600, stat.S_IMODE(receipt.stat().st_mode))
+        finally:
+            os.umask(previous)
+
     def test_shared_artifact_receipt_binds_selected_image_and_project_inputs(self) -> None:
         settings = LOAD.replace(
             self.inputs.settings, versions={"eth": "5.18.1"},
@@ -3267,7 +3288,7 @@ class ReleaseTransactionTests(unittest.TestCase):
         )
         self.root.chmod(0o755)
         image = self.root / "image/cumulus-linux-5.18.1-mlx-amd64.bin"
-        write_valid_nvos_image(image)
+        write_shared_receipt_image_fixture(image)
 
         # Legacy/manual shared files remain supported when no receipt namespace
         # has ever been installed on this management server.
@@ -3297,7 +3318,7 @@ class ReleaseTransactionTests(unittest.TestCase):
         )
         self.root.chmod(0o755)
         image = self.root / "image/cumulus-linux-5.18.1-mlx-amd64.bin"
-        write_valid_nvos_image(image)
+        write_shared_receipt_image_fixture(image)
 
         cases = (
             {"project_name": "other-project"},
@@ -3387,8 +3408,8 @@ class ReleaseTransactionTests(unittest.TestCase):
         )
         eth = self.root / "image/cumulus-linux-5.18.1-mlx-amd64.bin"
         ib = self.root / "image/nvos-amd64-25.03.1010.bin"
-        write_valid_nvos_image(eth)
-        write_valid_nvos_image(ib)
+        write_shared_receipt_image_fixture(eth)
+        write_shared_receipt_image_fixture(ib)
         write_shared_artifact_receipt(
             self.root, self.project, inputs, eth,
             deployment_scope="prod", switch_scope="all",
@@ -3409,7 +3430,7 @@ class ReleaseTransactionTests(unittest.TestCase):
         )
         self.root.chmod(0o755)
         image = self.root / "image/cumulus-linux-5.18.1-mlx-amd64.bin"
-        write_valid_nvos_image(image)
+        write_shared_receipt_image_fixture(image)
         write_shared_artifact_receipt(
             self.root, self.project, inputs, image,
             artifact_size=16 * 1024 * 1024 * 1024 + 1,
