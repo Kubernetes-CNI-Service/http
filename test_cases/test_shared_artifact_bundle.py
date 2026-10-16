@@ -62,6 +62,24 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def create_public_directory_fixture(path: Path) -> None:
+    """Create a positive public-directory premise, not an attack directory."""
+    path.mkdir(mode=0o755)
+    path.chmod(0o755)
+
+
+class PublicDirectoryFixtureTests(unittest.TestCase):
+    def test_public_directory_mode_is_explicit_under_private_umask(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary) / "public"
+            previous = os.umask(0o077)
+            try:
+                create_public_directory_fixture(directory)
+                self.assertEqual(0o755, stat.S_IMODE(directory.stat().st_mode))
+            finally:
+                os.umask(previous)
+
+
 def global_yaml() -> str:
     return """\
 schema_version: 1
@@ -791,8 +809,9 @@ class InstallerDirectTests(unittest.TestCase):
             )
             record = verified.artifacts[0]
             live = base / "live"
+            create_public_directory_fixture(live)
             destination = live / record.target
-            destination.parent.mkdir(parents=True)
+            create_public_directory_fixture(destination.parent)
             with tarfile.open(bundle.archive, "r:gz") as archive:
                 destination.write_bytes(
                     archive.extractfile("payload/" + record.target).read(),
@@ -831,7 +850,7 @@ class InstallerDirectTests(unittest.TestCase):
             base = Path(temporary).resolve()
             _repository, bundle = self.make_bundle(base)
             live = base / "live"
-            live.mkdir(mode=0o755)
+            create_public_directory_fixture(live)
             displaced = base / "displaced-live"
             attacker = base / "attacker-live"
             (attacker / "image").mkdir(parents=True, mode=0o755)
@@ -886,7 +905,7 @@ class InstallerDirectTests(unittest.TestCase):
             base = Path(temporary).resolve()
             _repository, bundle = self.make_bundle(base)
             live = base / "live"
-            live.mkdir(mode=0o755)
+            create_public_directory_fixture(live)
             displaced_image = base / "displaced-image"
             calls = 0
 
@@ -896,7 +915,7 @@ class InstallerDirectTests(unittest.TestCase):
                 if calls != 2:
                     return
                 (live / "image").rename(displaced_image)
-                (live / "image").mkdir(mode=0o755)
+                create_public_directory_fixture(live / "image")
 
             with mock.patch.object(
                 self.installer, "_TEST_BEFORE_PUBLISH",
@@ -929,7 +948,7 @@ class InstallerDirectTests(unittest.TestCase):
             self.assertEqual(1, len(verified.artifacts))
             record = verified.artifacts[0]
             live = base / "live"
-            live.mkdir(mode=0o755)
+            create_public_directory_fixture(live)
             calls = 0
 
             def mutate_artifact_before_receipt_publish():
@@ -1013,7 +1032,7 @@ class InstallerDirectTests(unittest.TestCase):
             base = Path(temporary).resolve()
             _repository, bundle = self.make_bundle(base)
             live = base / "live"
-            live.mkdir()
+            create_public_directory_fixture(live)
             parent = base / "private-parent"
             parent.mkdir(mode=0o700)
             displaced = base / "displaced-parent"
@@ -1074,7 +1093,7 @@ class InstallerDirectTests(unittest.TestCase):
             base = Path(temporary).resolve()
             _repository, bundle = self.make_bundle(base)
             live = base / "live"
-            live.mkdir()
+            create_public_directory_fixture(live)
             parent = base / "private-parent"
             parent.mkdir(mode=0o700)
             moved_stage = base / "moved-private-stage"
@@ -1380,9 +1399,9 @@ class SharedArtifactWorkflowTests(unittest.TestCase):
                 installer_path=INSTALLER_PATH, load_script_path=LOAD_PATH,
             )
             live = base / "live"
-            live.mkdir()
+            create_public_directory_fixture(live)
             unrelated = live / "image/unrelated.bin"
-            unrelated.parent.mkdir()
+            create_public_directory_fixture(unrelated.parent)
             unrelated.write_bytes(b"keep")
 
             first = self.installer.deploy_archive(
@@ -1477,7 +1496,7 @@ class SharedArtifactWorkflowTests(unittest.TestCase):
                 installer_path=INSTALLER_PATH, load_script_path=LOAD_PATH,
             )
             live = base / "live"
-            live.mkdir()
+            create_public_directory_fixture(live)
             real_publish = self.installer._publish_staged_link
             calls = 0
 
