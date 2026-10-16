@@ -4228,7 +4228,7 @@ def _run_historical_p_test(
         [sys.executable, "-B", "-m", "unittest", "-v", fqn],
         cwd=checkout, env=environment, text=True,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        check=False, timeout=1500,
+        check=False, timeout=1500, umask=0o022,
     )
     if replay.returncode:
         raise AssertionError(replay.stdout + replay.stderr)
@@ -18562,6 +18562,106 @@ class HistoricalPublicCheckoutCreationTests(unittest.TestCase):
                 if outer is not None:
                     outer.cleanup()
 
+
+class HistoricalPythonReplayCreationTests(unittest.TestCase):
+    """Launch-contract units only; no real historical child or authority proof."""
+
+    def test_only_historical_replay_uses_child022_and_keeps_parent_private(self):
+        previous = os.umask(0o077)
+        try:
+            owner = tempfile.TemporaryDirectory(prefix="http-p-v2-history-", dir="/private/tmp")
+            with owner as temporary:
+                root = Path(temporary)
+                self.assertEqual(0o700, stat.S_IMODE(root.stat().st_mode))
+                checkout = root / "repository"
+                checkout.mkdir(mode=0o755)
+                checkout.chmod(0o755)  # Explicit public fixture, not subject repair.
+                record_path = "test_cases/test_public_publication_contract.py"
+                materialized = checkout / record_path
+                materialized.parent.mkdir(mode=0o700)
+                materialized.write_bytes(b"published-replay-forwarding-literal\n")
+                literal_sha = "6af5122f34e0a86f02b6be60ac6c7273c983b47fff45a52dcb4b4720e49c9d80"
+                ledger = b"replay-ledger-fixture\n"
+                (checkout / P_LEDGER_PATH).write_bytes(ledger)
+                anchor = "1" * 40
+                fqn = (
+                    "test_cases.test_public_publication_contract.PublicPublicationDirectTests."
+                    "test_p_phase_static_documents_and_html_seed_are_literal"
+                )
+                result = subprocess.CompletedProcess("unit-only", 0, "", "Ran 1 test in 0.001s\n\nOK\n")
+                environment = {"H_REPLAY_LITERAL": "kept", "GIT_DIR": "/not-read/git",
+                    "PYTHONPATH": "/not-read/python", "PYTHONPYCACHEPREFIX": "/not-read/cache"}
+                with mock.patch.dict(globals(), {"_P_HISTORY_TEMP": owner,
+                        "_P_HISTORY_CHECKOUT": checkout, "_P_HISTORY_ANCHOR": anchor}), \
+                        mock.patch.dict(os.environ, environment, clear=True), \
+                        mock.patch.object(sys.modules[__name__], "_historical_module_path",
+                            return_value=materialized) as module_authority, \
+                        mock.patch.object(sys.modules[__name__], "_assert_clean_and_ledger") as clean_tail, \
+                        mock.patch.object(subprocess, "run", return_value=result) as delegated:
+                    self.assertIsNone(_run_historical_p_test(
+                        ROOT, anchor, fqn, record_path, literal_sha))
+                    module_authority.assert_called_once_with(checkout, record_path, literal_sha)
+                    clean_tail.assert_called_once_with(checkout, ledger, anchor)
+                    self.assertEqual(0o700, stat.S_IMODE(root.stat().st_mode))
+                    self.assertEqual(0o700, stat.S_IMODE((root / "pycache").stat().st_mode))
+                    observed = os.umask(0o077)
+                    os.umask(observed)
+                    self.assertEqual(0o077, observed)
+                    self.assertEqual(1, delegated.call_count)
+                    self.assertEqual([sys.executable, "-B", "-m", "unittest", "-v", fqn],
+                        delegated.call_args.args[0])
+                    options = delegated.call_args.kwargs
+                    self.assertEqual({"cwd", "env", "text", "stdout", "stderr", "check", "timeout", "umask"},
+                        set(options))
+                    self.assertIs(options["cwd"], checkout)
+                    self.assertEqual({"H_REPLAY_LITERAL": "kept",
+                        "PYTHONPYCACHEPREFIX": str(root / "pycache")}, options["env"])
+                    self.assertIs(options["text"], True)
+                    self.assertIs(options["stdout"], subprocess.PIPE)
+                    self.assertIs(options["stderr"], subprocess.PIPE)
+                    self.assertIs(options["check"], False)
+                    self.assertEqual(1500, options["timeout"])
+                    self.assertIs(type(options["umask"]), int)
+                    self.assertEqual(0o022, options["umask"])
+        finally:
+            os.umask(previous)
+
+    def test_other_python_launch_remains_original_and_replay_is_only_literal_site(self):
+        process = mock.Mock()
+        process.returncode = 0
+        process.communicate.return_value = ("literal-out\n", "")
+        command = [sys.executable, "-I", "-S", "-B", "-c", "print('not-executed')"]
+        environment = {"H_BOUND_LITERAL": "kept"}
+        with mock.patch.object(subprocess, "Popen", return_value=process) as opened:
+            result = _run_bounded_process(command, cwd=ROOT, environment=environment,
+                pass_fds=(), timeout=180)
+        self.assertEqual((0, "literal-out\n", ""),
+            (result.returncode, result.stdout, result.stderr))
+        opened.assert_called_once_with(command, cwd=ROOT, env=environment,
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, start_new_session=True, pass_fds=())
+        process.communicate.assert_called_once_with(timeout=180)
+        self.assertNotIn("umask", opened.call_args.kwargs)
+
+        tree = ast.parse(textwrap.dedent(inspect.getsource(_run_historical_p_test)))
+        launches = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute) and node.func.attr == "run"
+            and isinstance(node.func.value, ast.Name) and node.func.value.id == "subprocess"]
+        self.assertEqual(1, len(launches))
+        options = {keyword.arg: keyword.value for keyword in launches[0].keywords}
+        self.assertIn("umask", options)  # Explicit FAIL, never a missing-key API ERROR.
+        self.assertEqual("Constant(value=18)", ast.dump(options["umask"], include_attributes=False))
+        self.assertEqual("Constant(value=1500)", ast.dump(options["timeout"], include_attributes=False))
+        self.assertEqual([], [node for node in ast.walk(tree) if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute) and node.func.attr == "umask"
+            and isinstance(node.func.value, ast.Name) and node.func.value.id == "os"])
+        for function in (_python_run, _run_bounded_process, _run_capsule_sandbox,
+                _formal_test_harness_run, _run_formal_harness_process):
+            with self.subTest(unchanged_python_entry=function.__name__):
+                original_tree = ast.parse(textwrap.dedent(inspect.getsource(function)))
+                self.assertEqual([], [keyword for node in ast.walk(original_tree)
+                    if isinstance(node, ast.Call) for keyword in node.keywords
+                    if keyword.arg in {"umask", "_history_checkout_creation"}])
 
 if __name__ == "__main__":
     unittest.main()
