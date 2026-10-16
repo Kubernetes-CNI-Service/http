@@ -967,6 +967,8 @@ class InstallerDirectTests(unittest.TestCase):
             _repository, bundle = self.make_bundle(base)
             live = base / "live"
             live.mkdir(mode=0o755)
+            live.chmod(0o755)
+            self.assertEqual(0o755, stat.S_IMODE(live.stat().st_mode))
             first = self.installer.deploy_archive(
                 bundle.archive, root=live, verify_only=False,
                 installer_path=bundle.installer,
@@ -1307,6 +1309,8 @@ class SharedArtifactWorkflowTests(unittest.TestCase):
             )
             live = base / "live"
             live.mkdir(mode=0o755)
+            live.chmod(0o755)
+            self.assertEqual(0o755, stat.S_IMODE(live.stat().st_mode))
             installed = self.installer.deploy_archive(
                 bundle.archive, root=live, verify_only=False,
                 installer_path=bundle.installer,
