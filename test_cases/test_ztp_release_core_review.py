@@ -2363,6 +2363,89 @@ class OptimizeAndTopologySafetyTests(unittest.TestCase):
             self.assertFalse(any((root / "output-p2p").glob("*.dot")))
 
 
+class BackupUnsafeRootFixtureTests(unittest.TestCase):
+    """The unsafe-mode fixture must remain unsafe under a private umask."""
+
+    def test_original_root_fixture_modes_are_literal_under_both_umasks(self):
+        source = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+        original_class = next(
+            node for node in source.body
+            if isinstance(node, ast.ClassDef)
+            and node.name == "BackupAuthenticationContractTests"
+        )
+        original_method = next(
+            node for node in original_class.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "test_unsafe_configured_roots_and_missing_supervisor_root_fail_pre_spawn"
+        )
+        fixture = original_method.body[0]
+        self.assertIsInstance(fixture, ast.With)
+        boundary = next(
+            index for index, node in enumerate(fixture.body)
+            if isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id == "cases"
+                    for target in node.targets)
+        )
+        # Execute only the original local filesystem construction, never the
+        # production collector, SSH capability probes or password machinery.
+        fixture.body = fixture.body[:boundary] + ast.parse(
+            "return (stat.S_IMODE(safe.stat().st_mode), "
+            "stat.S_IMODE(wrong_mode.stat().st_mode), "
+            "regular.is_file(), alias.is_symlink(), alias.resolve() == safe)"
+        ).body
+        probe = ast.FunctionDef(
+            name="fixture_only", args=ast.arguments(
+                posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[],
+                defaults=[]), body=[fixture], decorator_list=[],
+        )
+        module = ast.fix_missing_locations(ast.Module(body=[probe], type_ignores=[]))
+        namespace = {"tempfile": tempfile, "Path": Path, "stat": stat}
+        exec(compile(module, str(__file__), "exec"), namespace)
+        for mask in (0o077, 0o022):
+            with self.subTest(umask=oct(mask)):
+                previous = os.umask(mask)
+                try:
+                    actual = namespace["fixture_only"]()
+                finally:
+                    os.umask(previous)
+                self.assertEqual((0o700, 0o755, True, True, True), actual)
+
+    def test_original_exec_root_validator_accepts_0700_and_rejects_0755(self):
+        production_path = ROOT / "ztp/backup/yaml-collect.py"
+        source = ast.parse(production_path.read_text(encoding="utf-8"))
+        original = next(
+            node for node in source.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "_validated_exec_root"
+        )
+        namespace = {"os": os, "Path": Path, "stat": stat}
+        exec(compile(ast.fix_missing_locations(ast.Module(
+            body=[original], type_ignores=[])), str(production_path), "exec"), namespace)
+        for mask in (0o077, 0o022):
+            with self.subTest(umask=oct(mask)):
+                previous = os.umask(mask)
+                try:
+                    with tempfile.TemporaryDirectory() as directory:
+                        root = Path(directory).resolve()
+                        safe = root / "safe"
+                        safe.mkdir(mode=0o700)
+                        unsafe = root / "unsafe"
+                        unsafe.mkdir(mode=0o755)
+                        unsafe.chmod(0o755)
+                        self.assertEqual(0o700, stat.S_IMODE(safe.stat().st_mode))
+                        self.assertEqual(0o755, stat.S_IMODE(unsafe.stat().st_mode))
+                        with mock.patch.dict(os.environ, {
+                            "HTTP_ZTP_RUNTIME_BACKEND": "supervisor",
+                            "HTTP_ZTP_ASKPASS_TMPDIR": str(safe),
+                        }):
+                            self.assertEqual(safe, namespace["_validated_exec_root"]())
+                            os.environ["HTTP_ZTP_ASKPASS_TMPDIR"] = str(unsafe)
+                            with self.assertRaisesRegex(ValueError, "0700"):
+                                namespace["_validated_exec_root"]()
+                finally:
+                    os.umask(previous)
+
+
 class BackupAuthenticationContractTests(unittest.TestCase):
     """Direct, implementation-independent oracles for BACKUP-AUTH-R1."""
 
@@ -2624,6 +2707,7 @@ class BackupAuthenticationContractTests(unittest.TestCase):
             safe.mkdir(mode=0o700)
             wrong_mode = root / "wrong-mode"
             wrong_mode.mkdir(mode=0o755)
+            wrong_mode.chmod(0o755)
             regular = root / "regular"
             regular.write_text("not a directory\n", encoding="utf-8")
             alias = root / "alias"
