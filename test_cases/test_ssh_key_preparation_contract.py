@@ -372,6 +372,8 @@ class ExistingProjectKeyNoTouchContract(unittest.TestCase):
                  "-C", "root@management-server", "-f", str(ssh / "id_ed25519")],
                 check=True, capture_output=True,
             )
+            (ssh / "id_ed25519.pub").chmod(0o644)
+            self.assertEqual(0o644, stat.S_IMODE((ssh / "id_ed25519.pub").stat().st_mode))
             selected = (ssh / "id_ed25519.pub").read_bytes()
             laptop = public_line("ssh-ed25519", 103, "laptop")
             foreign = public_line("ssh-ed25519", 104, "other-server")

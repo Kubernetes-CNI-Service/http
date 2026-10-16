@@ -11,6 +11,7 @@ import importlib.util
 import io
 import os
 from pathlib import Path
+import stat
 import subprocess
 import sys
 import tempfile
@@ -627,6 +628,8 @@ class SshKeyPreparationWorkflow(unittest.TestCase):
                  "-C", "root@management-server", "-f", str(server_ssh / "id_ed25519")],
                 check=True, capture_output=True,
             )
+            (server_ssh / "id_ed25519.pub").chmod(0o644)
+            self.assertEqual(0o644, stat.S_IMODE((server_ssh / "id_ed25519.pub").stat().st_mode))
             stale_management = public_line("ssh-ed25519", 106, "foreign-server")
             project = project_with_marker(root / "project", b"", stale_management)
             laptop = project / "laptop.pub"
@@ -843,6 +846,8 @@ class SshKeyPreparationWorkflow(unittest.TestCase):
                  "root@management-server", "-f", str(server_ssh / "id_ed25519")],
                 check=True, capture_output=True,
             )
+            (server_ssh / "id_ed25519.pub").chmod(0o644)
+            self.assertEqual(0o644, stat.S_IMODE((server_ssh / "id_ed25519.pub").stat().st_mode))
             server_key = (server_ssh / "id_ed25519.pub").read_bytes()
             self.assertNotEqual(laptop_key, server_key)
             self.assertNotEqual(stale_management_key, server_key)
@@ -1041,6 +1046,8 @@ class SshKeyPreparationWorkflow(unittest.TestCase):
                  "root@management-server", "-f", str(service / "id_ed25519")],
                 check=True, capture_output=True,
             )
+            (service / "id_ed25519.pub").chmod(0o644)
+            self.assertEqual(0o644, stat.S_IMODE((service / "id_ed25519.pub").stat().st_mode))
             for index, static_key in enumerate(static_keys):
                 with self.subTest(key_type=static_key.split(b" ", 1)[0]):
                     project = project_with_marker(root / f"project-{index}", static_key, b"")
@@ -1210,6 +1217,8 @@ class SshKeyPreparationWorkflow(unittest.TestCase):
                  "root@management-server", "-f", str(service / "id_ed25519")],
                 check=True, capture_output=True,
             )
+            (service / "id_ed25519.pub").chmod(0o644)
+            self.assertEqual(0o644, stat.S_IMODE((service / "id_ed25519.pub").stat().st_mode))
             service_public = (service / "id_ed25519.pub").read_bytes()
             old = public_line("ssh-ed25519", 51, "old-server")
             project = project_with_marker(
@@ -1243,6 +1252,8 @@ class SshKeyPreparationWorkflow(unittest.TestCase):
                  "root@management-server", "-f", str(service / "id_ed25519")],
                 check=True, capture_output=True,
             )
+            (service / "id_ed25519.pub").chmod(0o644)
+            self.assertEqual(0o644, stat.S_IMODE((service / "id_ed25519.pub").stat().st_mode))
             old = public_line("ssh-ed25519", 61, "old-server")
             project = project_with_marker(
                 root / "project", public_line("ssh-ed25519", 62, "laptop"), old,
