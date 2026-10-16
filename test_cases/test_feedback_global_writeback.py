@@ -545,6 +545,9 @@ class FeedbackGlobalWritebackTests(unittest.TestCase):
             with self.subTest(attack=attack), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 authority = self._authority(root, original)
+                authority.chmod(0o644)
+                # The chmod attack below must change the candidate's mode.
+                self.assertEqual(0o644, stat.S_IMODE(authority.stat().st_mode))
                 canary = root / "operator-canary"
                 canary.write_bytes(b"KEEP")
                 transaction = self._transaction(authority, root)
