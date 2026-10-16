@@ -50,6 +50,12 @@ BOOTSTRAP_LABELS = {
 }
 
 
+def create_public_bootstrap_directory_fixture(path: Path) -> None:
+    """Make a public positive premise before any deliberate metadata attack."""
+    path.mkdir(mode=0o755)
+    path.chmod(0o755)
+
+
 def bootstrap_tool_hashes() -> dict[str, str]:
     return {
         name: hashlib.sha256(path.read_bytes()).hexdigest()
@@ -298,6 +304,20 @@ class ProjectImageBundleTests(unittest.TestCase):
     def setUp(self):
         self.tool = load_module("project_image_bundle_contract", PROJECT_IMAGE_PATH)
 
+    def test_public_bootstrap_fixture_modes_are_explicit_under_private_umask(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "live"
+            previous = os.umask(0o077)
+            try:
+                create_public_bootstrap_directory_fixture(root)
+                for name in ("image", "apps", "firmware"):
+                    create_public_bootstrap_directory_fixture(root / name)
+                for path in (root, root / "image", root / "apps", root / "firmware"):
+                    with self.subTest(path=path.name):
+                        self.assertEqual(0o755, stat.S_IMODE(path.stat().st_mode))
+            finally:
+                os.umask(previous)
+
     def test_cli_separates_host_build_from_in_image_install(self):
         base_id = "sha256:" + "a" * 64
         build = self.tool.parser().parse_args([
@@ -539,9 +559,9 @@ class ProjectImageBundleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory).resolve()
             root = base / "live"
-            root.mkdir(mode=0o755)
+            create_public_bootstrap_directory_fixture(root)
             for name in ("image", "apps", "firmware"):
-                (root / name).mkdir(mode=0o755)
+                create_public_bootstrap_directory_fixture(root / name)
             lock = root / ".deployment.lock"
             lock.write_bytes(b"")
             lock.chmod(0o600)
@@ -570,9 +590,9 @@ class ProjectImageBundleTests(unittest.TestCase):
             for label, name, mutation in mutations:
                 with self.subTest(label=label):
                     candidate = base / ("case-" + mutation + "-" + name.strip("."))
-                    candidate.mkdir(mode=0o755)
+                    create_public_bootstrap_directory_fixture(candidate)
                     for directory_name in ("image", "apps", "firmware"):
-                        (candidate / directory_name).mkdir(mode=0o755)
+                        create_public_bootstrap_directory_fixture(candidate / directory_name)
                     candidate_lock = candidate / ".deployment.lock"
                     candidate_lock.write_bytes(b"")
                     candidate_lock.chmod(0o600)
@@ -2307,7 +2327,7 @@ class ProjectImageBundleTests(unittest.TestCase):
             )
             (bundled / "project-payload.json").chmod(0o600)
             live = base / "live"
-            live.mkdir(mode=0o755)
+            create_public_bootstrap_directory_fixture(live)
             before = list(live.iterdir())
             result = self.tool.install_bundled_project(
                 bundled_root=bundled,
