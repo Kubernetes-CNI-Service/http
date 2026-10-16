@@ -169,7 +169,9 @@ class DisposableKeyFixture:
         )
         if result.returncode != 0:
             raise AssertionError(result.stderr)
-        return private.read_bytes(), private.with_suffix(".pub").read_bytes()
+        public = private.with_suffix(".pub")
+        public.chmod(0o644)
+        return private.read_bytes(), public.read_bytes()
 
     @staticmethod
     def pair(directory: Path) -> tuple[Path, Path]:
@@ -266,6 +268,20 @@ class DockerManagementSshKeyDirectTests(unittest.TestCase):
         self.assertEqual(0o644, stat.S_IMODE(public.stat().st_mode))
         self.assertEqual(1, private.stat().st_nlink)
         self.assertEqual(1, public.stat().st_nlink)
+
+    def test_disposable_pair_fixture_has_literal_modes_under_private_umask(self) -> None:
+        # A valid fixture must reach the intended product phase even when the
+        # evidence launcher keeps its own newly created files private.
+        directory = self.root / "restricted-fixture"
+        previous = os.umask(0o077)
+        try:
+            self.fixture.generate(directory)
+            private, public = self.fixture.pair(directory)
+            self.assertEqual(0o700, stat.S_IMODE(directory.stat().st_mode))
+            self.assertEqual(0o600, stat.S_IMODE(private.stat().st_mode))
+            self.assertEqual(0o644, stat.S_IMODE(public.stat().st_mode))
+        finally:
+            os.umask(previous)
 
     def test_cli_has_only_fixed_root_reconcile_and_check_subcommands(self) -> None:
         helper = self.helper()
@@ -2665,10 +2681,13 @@ class DockerManagementSshKeyWorkflowTests(unittest.TestCase):
             fixture = DisposableKeyFixture(root)
             _laptop_private, laptop_public = fixture.generate(root / "laptop-key")
             (project / "laptop.pub").write_bytes(laptop_public)
+            (project / "laptop.pub").chmod(0o644)
             (project / "mgmt-server.pub").write_bytes(b"")
+            (project / "mgmt-server.pub").chmod(0o644)
             (project / ".management-pubkeys").write_text(
                 "mgmt-server.pub\n", encoding="ascii",
             )
+            (project / ".management-pubkeys").chmod(0o644)
             observed = loader.prepare_pubkeys(
                 project,
                 ssh_dir=service,
