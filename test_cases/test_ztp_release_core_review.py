@@ -2446,6 +2446,131 @@ class BackupUnsafeRootFixtureTests(unittest.TestCase):
                     os.umask(previous)
 
 
+    def test_original_unsafe_fixture_output_parents_are_case_owned(self):
+        """Only evaluate original fixture paths; never call its collector."""
+        source = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+        original_class = next(node for node in source.body
+                              if isinstance(node, ast.ClassDef)
+                              and node.name == "BackupAuthenticationContractTests")
+        original = next(node for node in original_class.body
+                        if isinstance(node, ast.FunctionDef)
+                        and node.name == "test_unsafe_configured_roots_and_missing_supervisor_root_fail_pre_spawn")
+        fixture = original.body[0]
+        self.assertIsInstance(fixture, ast.With)
+        cases_index = next(i for i, node in enumerate(fixture.body)
+                           if isinstance(node, ast.Assign)
+                           and any(isinstance(target, ast.Name)
+                                   and target.id == "cases"
+                                   for target in node.targets))
+        loop_index = next(i for i, node in enumerate(fixture.body)
+                          if isinstance(node, ast.For))
+        loop = fixture.body[loop_index]
+        self.assertEqual("cases", loop.iter.id)
+        subtest = loop.body[0]
+        self.assertIsInstance(subtest, ast.With)
+        boundary = next(i for i, node in enumerate(subtest.body)
+                        if isinstance(node, ast.Assign)
+                        and any(isinstance(target, ast.Name)
+                                and target.id == "password_spawns"
+                                for target in node.targets))
+        # Keep only the original owned construction before password_spawns.
+        # No recorder, environment patches, validator or collector is executed.
+        local_construction = subtest.body[:boundary]
+        calls = sorted((node for node in ast.walk(original)
+                        if isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Attribute)
+                        and node.func.attr == "collect_device"),
+                       key=lambda node: node.lineno)
+        self.assertEqual(2, len(calls))
+        self.assertTrue(all(len(node.args) == 5 for node in calls))
+        derived = []
+        for call in calls:
+            # Preserve the actual original out_dir expression, but not Call.
+            derived.append(ast.Call(
+                func=ast.Attribute(value=ast.Call(
+                    func=ast.Name(id="Path", ctx=ast.Load()),
+                    args=[call.args[1]], keywords=[]), attr="resolve",
+                    ctx=ast.Load()), args=[],
+                keywords=[ast.keyword(arg="strict", value=ast.Constant(True))]))
+        capture = ast.Expr(value=ast.Call(
+            func=ast.Attribute(value=ast.Name(id="snapshots", ctx=ast.Load()),
+                               attr="append", ctx=ast.Load()),
+            args=[ast.Tuple(elts=[ast.Name(id="label", ctx=ast.Load()),
+                                  ast.Name(id="root", ctx=ast.Load())] + derived,
+                            ctx=ast.Load())], keywords=[]))
+        subtest.body = local_construction + [capture]
+        loop.body = [subtest]
+        fixture.body = fixture.body[:cases_index + 1] + [loop]
+        probe = ast.FunctionDef(name="fixture_paths_only", args=ast.arguments(
+            posonlyargs=[], args=[ast.arg(arg="self")], kwonlyargs=[],
+            kw_defaults=[], defaults=[]), decorator_list=[], body=[
+                ast.Assign(targets=[ast.Name(id="snapshots", ctx=ast.Store())],
+                           value=ast.List(elts=[], ctx=ast.Load())),
+                fixture, ast.Return(value=ast.Name(id="snapshots", ctx=ast.Load()))])
+        namespace = {"tempfile": tempfile, "Path": Path, "os": os, "stat": stat}
+        exec(compile(ast.fix_missing_locations(ast.Module(
+            body=[probe], type_ignores=[])), str(__file__), "exec"), namespace)
+        expected_labels = ["relative", "missing", "regular", "symlink",
+                           "wrong-mode", "wrong-owner", "supervisor-unset"]
+        for mask in (0o077, 0o022):
+            with self.subTest(umask=oct(mask)):
+                previous = os.umask(mask)
+                try:
+                    snapshots = namespace["fixture_paths_only"](self)
+                finally:
+                    os.umask(previous)
+                self.assertEqual(expected_labels, [item[0] for item in snapshots])
+                for label, root, first, second in snapshots:
+                    with self.subTest(label=label):
+                        expected_project = root / "projects" / label
+                        expected_output = expected_project / "backup"
+                        self.assertEqual(expected_output, first)
+                        self.assertEqual(expected_output, second)
+                        self.assertEqual(expected_project, first.parent)
+                        self.assertEqual(expected_project, second.parent)
+                        self.assertTrue(first.is_relative_to(root))
+                        self.assertTrue(second.is_relative_to(root))
+
+    def test_original_exec_root_wrong_owner_rejects_only_in_validator_scope(self):
+        """Real validator AST, real owned0700, no authority/authentication."""
+        production_path = ROOT / "ztp/backup/yaml-collect.py"
+        source = ast.parse(production_path.read_text(encoding="utf-8"))
+        original = next(node for node in source.body
+                        if isinstance(node, ast.FunctionDef)
+                        and node.name == "_validated_exec_root")
+        namespace = {"os": os, "Path": Path, "stat": stat}
+        exec(compile(ast.fix_missing_locations(ast.Module(
+            body=[original], type_ignores=[])), str(production_path), "exec"), namespace)
+        real_geteuid = os.geteuid
+        real_uid = real_geteuid()
+        for mask in (0o077, 0o022):
+            with self.subTest(umask=oct(mask)):
+                previous = os.umask(mask)
+                try:
+                    with tempfile.TemporaryDirectory() as directory:
+                        safe = Path(directory).resolve() / "safe"
+                        safe.mkdir(mode=0o700)
+                        before = safe.lstat()
+                        self.assertEqual(0o700, stat.S_IMODE(before.st_mode))
+                        self.assertEqual(real_uid, before.st_uid)
+                        with mock.patch.dict(os.environ, {
+                            "HTTP_ZTP_RUNTIME_BACKEND": "supervisor",
+                            "HTTP_ZTP_ASKPASS_TMPDIR": str(safe),
+                        }):
+                            self.assertEqual(safe, namespace["_validated_exec_root"]())
+                            with mock.patch.object(os, "geteuid", return_value=real_uid + 1):
+                                with self.assertRaisesRegex(ValueError, "当前有效用户"):
+                                    namespace["_validated_exec_root"]()
+                            self.assertIs(real_geteuid, os.geteuid)
+                            self.assertEqual(safe, namespace["_validated_exec_root"]())
+                        after = safe.lstat()
+                        self.assertEqual((before.st_dev, before.st_ino,
+                                          before.st_mode, before.st_uid),
+                                         (after.st_dev, after.st_ino,
+                                          after.st_mode, after.st_uid))
+                finally:
+                    os.umask(previous)
+
 class BackupAuthenticationContractTests(unittest.TestCase):
     """Direct, implementation-independent oracles for BACKUP-AUTH-R1."""
 
@@ -2721,9 +2846,19 @@ class BackupAuthenticationContractTests(unittest.TestCase):
                 ("wrong-owner", str(safe), os.geteuid() + 1),
                 ("supervisor-unset", None, None),
             ]
+            original_validator = self.backup._validated_exec_root
+            real_uid = os.geteuid()
+            scan_record = (
+                "192.0.2.10 ssh-ed25519 "
+                "AAAAC3NzaC1lZDI1NTE5AAAAIBERERERERERERERERERERERERERERERERERERERERER"
+            )
             for label, configured, fake_uid in cases:
                 with self.subTest(label=label):
+                    case_project = root / "projects" / label
+                    case_output = case_project / "backup"
+                    case_output.mkdir(parents=True)
                     password_spawns = []
+                    validator_events = []
 
                     def recorder(_user, _ip, _command, _timeout, options,
                                  env=None, **_kwargs):
@@ -2732,6 +2867,29 @@ class BackupAuthenticationContractTests(unittest.TestCase):
                             return subprocess.CompletedProcess([], 255, "", "key rejected")
                         password_spawns.append(True)
                         return subprocess.CompletedProcess([], 255, "", "auth rejected")
+
+                    def fixed_scan(target, timeout, password, key_type=None):
+                        self.assertEqual("192.0.2.10", target)
+                        self.assertEqual(30, timeout)
+                        self.assertTrue(password == self.SECRET)
+                        self.assertEqual("ssh-ed25519", key_type)
+                        return scan_record
+
+                    def observing_validator():
+                        validator_events.append(("ENTER", os.environ.get(
+                            "HTTP_ZTP_ASKPASS_TMPDIR")))
+                        try:
+                            if fake_uid is not None:
+                                with mock.patch.object(self.backup.os, "geteuid",
+                                                       return_value=fake_uid):
+                                    result = original_validator()
+                            else:
+                                result = original_validator()
+                        except (OSError, RuntimeError, ValueError) as error:
+                            validator_events.append(("REJECT", type(error)))
+                            raise
+                        validator_events.append(("RETURN", result))
+                        return result
 
                     environment = dict(os.environ)
                     environment["HTTP_ZTP_RUNTIME_BACKEND"] = "supervisor"
@@ -2742,20 +2900,19 @@ class BackupAuthenticationContractTests(unittest.TestCase):
                         mock.patch.dict(os.environ, environment, clear=True),
                         mock.patch.object(self.backup, "_run_ssh", side_effect=recorder),
                     ]
-                    if fake_uid is not None:
-                        patches.append(mock.patch.object(
-                            self.backup.os, "geteuid", return_value=fake_uid,
-                        ))
                     try:
-                        with patches[0], patches[1]:
-                            if len(patches) == 3:
-                                with patches[2]:
-                                    self.backup.collect_device(
-                                        self._device(), str(root), self.SECRET, "", "",
-                                    )
+                        with patches[0], patches[1], mock.patch.object(
+                                self.backup, "_scan_offered_host_key",
+                                side_effect=fixed_scan) as scan, mock.patch.object(
+                                    self.backup, "_validated_exec_root",
+                                    side_effect=observing_validator):
+                            if fake_uid is not None:
+                                self.backup.collect_device(
+                                    self._device(), str(case_output), self.SECRET, "", "",
+                                )
                             else:
                                 self.backup.collect_device(
-                                    self._device(), str(root), self.SECRET, "", "",
+                                    self._device(), str(case_output), self.SECRET, "", "",
                                 )
                     except (OSError, RuntimeError, ValueError):
                         pass
@@ -2763,6 +2920,22 @@ class BackupAuthenticationContractTests(unittest.TestCase):
                         [], password_spawns,
                         f"{label} reached a password-bearing SSH child",
                     )
+                    rejection = RuntimeError if label == "supervisor-unset" else ValueError
+                    self.assertEqual([("ENTER", configured), ("REJECT", rejection)],
+                                     validator_events)
+                    self.assertEqual(1, scan.call_count)
+                    self.assertEqual(case_project, case_output.resolve(strict=True).parent)
+                    self.assertTrue(case_project.is_relative_to(root))
+                    authority = case_project / ".ssh-known-hosts"
+                    authority_stat = authority.lstat()
+                    self.assertTrue(stat.S_ISDIR(authority_stat.st_mode))
+                    self.assertEqual(0o700, stat.S_IMODE(authority_stat.st_mode))
+                    self.assertEqual(real_uid, authority_stat.st_uid)
+                    self.assertEqual(
+                        [self._expected_pin_name(self.backup._ENVIRONMENT, "192.0.2.10")],
+                        sorted(path.name for path in authority.iterdir()),
+                    )
+                    self.assertIsNone(self.backup._ASKPASS_PATH)
                     self.backup._AUTH_MODES.clear()
                     self.backup._ASKPASS_PATH = None
 
