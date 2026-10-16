@@ -2839,7 +2839,31 @@ def _python_run(
                         shutil.rmtree(owned)
 
 
-def _git_run(repository: Path, arguments, *, text=False, check=False):
+def _git_run(repository: Path, arguments, *, text=False, check=False,
+             _history_checkout_creation=None):
+    history_creation_options = {}
+    if _history_checkout_creation is not None:
+        if (type(_history_checkout_creation) is not tuple or len(_history_checkout_creation) != 2
+                or _history_checkout_creation[0] is not _P_HISTORY_TEMP
+                or type(_history_checkout_creation[0]) is not tempfile.TemporaryDirectory
+                or type(_history_checkout_creation[1]) is not str
+                or not re.fullmatch(r"[0-9a-f]{40}", _history_checkout_creation[1])):
+            raise AssertionError("invalid public history checkout creation context")
+        owner, anchor = _history_checkout_creation
+        private_root = Path(owner.name)
+        metadata = private_root.lstat()
+        checkout = private_root / "repository"
+        clone = (repository is ROOT and arguments == [
+            "clone", "--quiet", "--no-local", str(ROOT), str(checkout)])
+        detach = (repository == checkout and arguments == [
+            "checkout", "--quiet", "--detach", anchor])
+        if (private_root.parent != Path("/private/tmp")
+                or not private_root.name.startswith("http-p-v2-history-")
+                or not stat.S_ISDIR(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o700
+                or metadata.st_uid != os.getuid() or text is not True or check is not False
+                or not (clone or detach)):
+            raise AssertionError("public history checkout creation requires exact clone/detach")
+        history_creation_options = {"umask": 0o022}  # Child-only; parent umask is untouched.
     if "commit" in arguments and arguments.index("commit") % 2 == 0:
         commit_index = arguments.index("commit")
         prefix = arguments[:commit_index]
@@ -2978,7 +3002,7 @@ def _git_run(repository: Path, arguments, *, text=False, check=False):
         [GIT_BINARY, "--no-replace-objects", "-c", f"core.hooksPath={os.devnull}",
          "-C", str(repository), *arguments],
         env=_canonical_git_environment(), stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE, text=text, check=check,
+        stderr=subprocess.PIPE, text=text, check=check, **history_creation_options,
     )
 
 
@@ -4143,12 +4167,13 @@ def _historical_p_checkout(repository: Path, anchor: str) -> Path:
     cloned = _git_run(
         repository,
         ["clone", "--quiet", "--no-local", str(repository), str(checkout)],
-        text=True,
+        text=True, _history_checkout_creation=(_P_HISTORY_TEMP, anchor),
     )
     if cloned.returncode or cloned.stdout or cloned.stderr:
         raise AssertionError("cannot create historical P checkout: " + cloned.stderr)
     detached = _git_run(
         checkout, ["checkout", "--quiet", "--detach", anchor], text=True,
+        _history_checkout_creation=(_P_HISTORY_TEMP, anchor),
     )
     if detached.returncode or detached.stdout or detached.stderr:
         raise AssertionError("cannot detach historical P checkout: " + detached.stderr)
@@ -18363,6 +18388,179 @@ runpy.run_module('unittest', run_name='__main__', alter_sys=True)
                 self.assertEqual(
                     ledger_before, (corrupt_history / P_LEDGER_PATH).read_bytes(),
                 )
+
+
+class HistoricalPublicCheckoutCreationTests(unittest.TestCase):
+    """New fixture controls; original Pdoc methods/assertions are not replaced."""
+
+    def test_two_exact_history_commands_use_child022_without_parent_change(self):
+        owner = tempfile.TemporaryDirectory(prefix="http-p-v2-history-", dir="/private/tmp")
+        previous = os.umask(0o077)
+        try:
+            checkout = Path(owner.name) / "repository"
+            anchor = "1" * 40
+            commands = (
+                (ROOT, ["clone", "--quiet", "--no-local", str(ROOT), str(checkout)]),
+                (checkout, ["checkout", "--quiet", "--detach", anchor]),
+            )
+            with mock.patch.dict(globals(), {"_P_HISTORY_TEMP": owner}):
+                for repository, arguments in commands:
+                    with self.subTest(command=arguments[0]):
+                        returned = subprocess.CompletedProcess("literal", 0, "", "")
+                        with mock.patch.object(subprocess, "run", return_value=returned) as delegated:
+                            error = None
+                            answer = None
+                            try:
+                                answer = _git_run(repository, arguments, text=True,
+                                    _history_checkout_creation=(owner, anchor))
+                            except Exception as caught:
+                                error = caught
+                            self.assertIsNone(error, "creation-context API absent or original call rejected")
+                            self.assertIs(answer, returned)
+                            self.assertEqual(1, delegated.call_count)
+                            self.assertEqual([GIT_BINARY, "--no-replace-objects", "-c",
+                                "core.hooksPath=" + os.devnull, "-C", str(repository), *arguments],
+                                delegated.call_args.args[0])
+                            options = delegated.call_args.kwargs
+                            self.assertEqual({"env", "stdout", "stderr", "text", "check", "umask"}, set(options))
+                            self.assertEqual(0o022, options["umask"])
+                            self.assertIs(options["stdout"], subprocess.PIPE)
+                            self.assertIs(options["stderr"], subprocess.PIPE)
+                            self.assertIs(options["text"], True)
+                            self.assertIs(options["check"], False)
+                            expected = {name: value for name, value in os.environ.items()
+                                if not name.startswith("GIT_")}
+                            expected.update({"GIT_CONFIG": os.devnull, "GIT_CONFIG_GLOBAL": os.devnull,
+                                "GIT_CONFIG_NOSYSTEM": "1", "GIT_NO_REPLACE_OBJECTS": "1"})
+                            self.assertTrue(options["env"] == expected, "original canonical env differs")
+                        current = os.umask(0o077)
+                        os.umask(current)
+                        self.assertEqual(0o077, current)
+        finally:
+            os.umask(previous)
+            owner.cleanup()
+
+    def test_creation_context_rejects_other_git_and_default_status_stays_original(self):
+        owner = tempfile.TemporaryDirectory(prefix="http-p-v2-history-", dir="/private/tmp")
+        try:
+            with mock.patch.dict(globals(), {"_P_HISTORY_TEMP": owner}):
+                for arguments in (["add", "--", "literal"], ["commit", "-m", "literal"],
+                        ["cat-file", "--batch"], ["status", "--porcelain=v1"]):
+                    with self.subTest(command=arguments[0]):
+                        with mock.patch.object(subprocess, "run", side_effect=AssertionError("must not delegate")) as delegated:
+                            error = None
+                            try:
+                                _git_run(ROOT, arguments, text=True,
+                                    _history_checkout_creation=(owner, "1" * 40))
+                            except Exception as caught:
+                                error = caught
+                            self.assertIsInstance(error, AssertionError,
+                                "wrong API/type error is not the required fail-closed branch")
+                            self.assertIn("public history checkout creation", str(error))
+                            self.assertEqual(0, delegated.call_count)
+            returned = subprocess.CompletedProcess("literal", 0, "", "")
+            with mock.patch.object(subprocess, "run", return_value=returned) as delegated:
+                self.assertIs(returned, _git_run(ROOT, ["status", "--porcelain=v1"], text=True))
+                self.assertEqual(1, delegated.call_count)
+                self.assertEqual([GIT_BINARY, "--no-replace-objects", "-c",
+                    "core.hooksPath=" + os.devnull, "-C", str(ROOT), "status", "--porcelain=v1"],
+                    delegated.call_args.args[0])
+                options = delegated.call_args.kwargs
+                self.assertEqual({"env", "stdout", "stderr", "text", "check"}, set(options))
+                self.assertNotIn("umask", options)
+                self.assertIs(options["stdout"], subprocess.PIPE)
+                self.assertIs(options["stderr"], subprocess.PIPE)
+                self.assertIs(options["text"], True)
+                self.assertIs(options["check"], False)
+        finally:
+            owner.cleanup()
+
+    def test_historical_fixture_wires_only_two_original_creation_calls(self):
+        tree = ast.parse(textwrap.dedent(inspect.getsource(_historical_p_checkout)))
+        calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name) and node.func.id == "_git_run"]
+        self.assertEqual(2, len(calls))
+        self.assertEqual(["clone", "checkout"], [call.args[1].elts[0].value for call in calls])
+        expected = ast.dump(ast.parse("(_P_HISTORY_TEMP, anchor)", mode="eval").body,
+            include_attributes=False)
+        for call in calls:
+            with self.subTest(command=call.args[1].elts[0].value):
+                options = {keyword.arg: keyword.value for keyword in call.keywords}
+                self.assertIn("_history_checkout_creation", options)
+                self.assertEqual(expected, ast.dump(options["_history_checkout_creation"],
+                    include_attributes=False))
+                self.assertEqual("Constant(value=True)", ast.dump(options["text"],
+                    include_attributes=False))
+
+    def test_real_owned_git_clone_and_detach_create_public_modes_not_parent_umask(self):
+        """Optional real-Git mechanism case; NOT the original P authority proof."""
+        previous = os.umask(0o077)
+        outer = None
+        owner = None
+        try:
+            outer = tempfile.TemporaryDirectory(prefix="http-p-public-mode-fixture-", dir="/private/tmp")
+            owner = tempfile.TemporaryDirectory(prefix="http-p-v2-history-", dir="/private/tmp")
+            source = Path(outer.name) / "source"
+            source.mkdir(mode=0o700)
+            regular = source / "plain.txt"
+            executable = source / "program.sh"
+            environment = {name: value for name, value in os.environ.items()
+                if not name.startswith("GIT_")}
+            environment.update({"GIT_CONFIG": os.devnull, "GIT_CONFIG_GLOBAL": os.devnull,
+                "GIT_CONFIG_NOSYSTEM": "1", "GIT_NO_REPLACE_OBJECTS": "1"})
+
+            def fixture_git(arguments):
+                result = subprocess.run([GIT_BINARY, "--no-replace-objects", "-c",
+                    "core.hooksPath=" + os.devnull, "-C", str(source), *arguments],
+                    env=environment, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE, check=False, timeout=10)
+                self.assertEqual(0, result.returncode)
+                return result.stdout
+
+            fixture_git(["init", "--quiet"])
+            for label in (b"first\n", b"second\n"):
+                regular.write_bytes(label)
+                regular.chmod(0o644)
+                executable.write_bytes(b"#!/bin/sh\n# " + label)
+                executable.chmod(0o755)  # Tracked blob only; never executed.
+                fixture_git(["add", "--", "plain.txt", "program.sh"])
+                fixture_git(["-c", "user.name=P fixture", "-c", "user.email=p-fixture@example.invalid",
+                    "commit", "--quiet", "-m", label.decode("ascii").strip()])
+                if label == b"first\n":
+                    anchor = fixture_git(["rev-parse", "HEAD"]).decode("ascii").strip()
+            checkout = Path(owner.name) / "repository"
+            with mock.patch.dict(globals(), {"ROOT": source, "_P_HISTORY_TEMP": owner}):
+                error = None
+                try:
+                    cloned = _git_run(source, ["clone", "--quiet", "--no-local", str(source), str(checkout)],
+                        text=True, _history_checkout_creation=(owner, anchor))
+                except Exception as caught:
+                    error = caught
+                self.assertIsNone(error, "creation API missing is feature-contract FAIL, not mode proof")
+                self.assertEqual(0, cloned.returncode)
+                self.assertEqual(b"second\n", (checkout / "plain.txt").read_bytes())
+                self.assertEqual(0o644, stat.S_IMODE((checkout / "plain.txt").stat().st_mode))
+                self.assertEqual(0o755, stat.S_IMODE((checkout / "program.sh").stat().st_mode))
+                detached = _git_run(checkout, ["checkout", "--quiet", "--detach", anchor],
+                    text=True, _history_checkout_creation=(owner, anchor))
+                self.assertEqual(0, detached.returncode)
+            self.assertEqual(b"first\n", (checkout / "plain.txt").read_bytes())
+            self.assertEqual(b"#!/bin/sh\n# first\n", (checkout / "program.sh").read_bytes())
+            self.assertEqual(0o644, stat.S_IMODE((checkout / "plain.txt").stat().st_mode))
+            self.assertEqual(0o755, stat.S_IMODE((checkout / "program.sh").stat().st_mode))
+            self.assertEqual(0o755, stat.S_IMODE(checkout.stat().st_mode))
+            self.assertEqual(0o700, stat.S_IMODE(Path(owner.name).stat().st_mode))
+            current = os.umask(0o077)
+            os.umask(current)
+            self.assertEqual(0o077, current)
+        finally:
+            os.umask(previous)
+            try:
+                if owner is not None:
+                    owner.cleanup()
+            finally:
+                if outer is not None:
+                    outer.cleanup()
 
 
 if __name__ == "__main__":
