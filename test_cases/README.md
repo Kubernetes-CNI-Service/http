@@ -4945,3 +4945,22 @@ and registry revocation; no timeout or behavioral expectation is weakened.
 Manifest direct and `req7_native_c25_count_claim_original_replay` mappings
 already cover these existing modules. Exact-tree formal related/full/check,
 field acceptance and ordinary publication proof remain separate and OPEN.
+
+Native TLS response ownership has an independently reproduced cleanup defect:
+a `Connection: close` response can own a detached socket makefile after the
+connection has released it. An ordinary caller retaining a denial traceback
+must not keep that response open. Three independent literal direct controls
+and one genuine owned TLS/Sheets read workflow initially FAIL4/ERROR0
+(`2e266a0a`); the minimal fix closes response then connection, attempts both
+independently and preserves the first original BaseException and its cause.
+The unchanged four controls PASS (`0700c766`), followed by all46 cases in the
+TLS-input, native-wire and Sheets-read-plan modules PASS21.063s (`37c59831`).
+Each case is followed by the unchanged original parent FD census; no forced
+GC, adopted numeric FD or arbitrary socket close is used. The workflow holds
+only a weak response reference before its assertion; its own finally rescue
+does not count as product cleanup evidence. Existing direct and
+`req7_exact_native_business_read` mappings cover this change. This is a real
+local cleanup fix, not proof of the specific six FD failures in the prior
+full run (their original FD/field remains UNKNOWN), current full/check,
+Cloud/device acceptance or broader permission. Acquisition30s, read-only
+observation60s and mutation60s are unchanged; prior failed logs are retained.

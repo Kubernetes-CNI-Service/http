@@ -2708,3 +2708,15 @@ generation/publish 及 UNKNOWN 下改 action/wire 均 HOLD，不计作 COMPLETE 
 - 证据/清理：精确 HEAD/tree/dirty/diff/manifest/Python平台命令、完整物理 BEGIN/END和退出码；四份真实请求/原响应关联（秘密脱敏）、实际原 FD/来源 stat/inode/SHA、原 child kernel wait/双 EOF/stdio与仅本轮拥有的资源回收。不得捕获无关 PID、真实服务、SSH、cron 或设备。
 - 本地自动化：`test_req7_history_read_launcher.Req7TemplateCohortDirectTests` 独立 RED/codec/登记与末次来源；`Req7HistoryReadLauncherWorkflowTests.test_fixed_template_cohort_*` 真实项目 OAuth/单 child/四 TLS及第四项断流；`test_req7_native_tls_wire` 四实际连接夹具。direct/跨多真实脚本登记沿用现有 fixed-owned-history-read manifest，未新增生产路径。当前真实 Cloud/设备/断电及完整 worker/full/check均未由这些测试证明。
 - 缩减/残余风险/确认：没有删除、跳过或合并既有自动化/现场场景，没有新增剩余风险接受。顺序多读不保证远端原子一致性，原业务一致性及发送门禁仍须复核；不改变原现场授权、研发确认和发布门禁。
+
+## TC-REQ7-NATIVE-RESPONSE-CLEANUP-001 — 原生响应独立收尾
+
+- 名称/类型/需求/平台：原生 TLS 拒绝响应与 caller traceback 生命周期；contract、integration、real-environment；REQ7；local/management-server/AIR。现场 **NOT RUN**。
+- 风险与目标：`Connection: close` 后响应可能独自持有 socket makefile；不能只关闭 connection，也不能让收尾异常覆盖首要操作者中断。成功必须先响应后连接、两者独立尝试关闭，失败零有效读取发行。不得延长30秒取得、60秒观察或60秒 mutation。
+- 自动化：`test_req7_tls_inputs.Req7TlsInputsDirectTests.test_denied_native_response_is_closed_before_connection_and_sanitized_hold`、`test_native_response_close_interruption_keeps_identity_and_still_closes_connection`、`test_native_original_interruption_wins_over_two_independent_cleanup_interruptions`；真实多脚本 `test_req7_sheets_read_plan.Req7SheetsNativeReadWorkflowTests.test_failed_native_read_closes_real_response_while_caller_retains_exception_traceback`。已加入 discovery 与原有 manifest；独立初始4FAIL0ERROR后同4PASS、三个完整相关模块46PASS，不等于 full/check。
+- 前置/权限/输入：现场需原精确项目、原目标和凭据、双 owner、固定 CA/依赖身份及另有现场/Cloud读取授权；本卡不授予这些权限。本地仅新建自有 CA、127.0.0.1 临时 TLS endpoint 和固定401响应，无真实设备、SSH、服务或系统 PID 操作。初始无有效读取观察。
+- 步骤：保留正常完整响应；固定拒绝响应后由普通 caller 捕获并保留真实异常 traceback；在 caller 返回边界验证原 response 已关闭，再验证 connection 收尾。分别注入响应关闭中断与原读取中断加两个独立收尾中断；确认原中断对象/cause、完整关闭次序和零发行。现场关键边界、中断、正常重启后的冷读取及失败安全状态均保留；重启不冒充断电。
+- 预期/副作用：普通错误仍脱敏 HOLD；第一原始 BaseException/cause 不被后续收尾覆盖。不得为验证强持有 socket、强制GC、关闭不明 FD、刷新观察或再次请求/刷新凭据。弱引用 None/response.isclosed 不是现场内核 FD 全集证明，也不证明历史 full 六项失败来源。
+- 证据：精确 HEAD/tree/dirty/diff、manifest/ledger身份、Python/平台/依赖与命令、完整物理 BEGIN/END/退出码、日志前后 stat/inode/旧前缀与完整SHA；记录真实响应关闭/连接关闭/中断顺序及请求数，秘密脱敏。保留失败原日志，当前完整 full/check 仍单独要求。
+- 清理/重复：只清理本次原 response/connection、已确认自有 TLS server/thread与临时目录；测试 finally 对原响应救援不能当产品关闭 PASS。未知资源保持拒绝并记录，不按数字槽关闭。每次新建完整独立 fixture，不沿用旧观察/许可。
+- 范围/残余风险/确认：未删、跳、弱化、合并或省略原自动化/现场核心场景；无新增剩余风险接受人。真实 Cloud/设备、Linux/AIR、现场中断/冷恢复和断电仍 NOT RUN，本地模拟不替代；原现场授权、研发确认与普通发布门禁不变。

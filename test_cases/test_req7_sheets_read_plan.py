@@ -194,5 +194,32 @@ class Req7SheetsNativeReadWorkflowTests(unittest.TestCase):
                 self.assertEqual([], errors); self.assertEqual(1, len(records))
                 self.assertIsNone(caught.exception.__context__)
 
+    def test_failed_native_read_closes_real_response_while_caller_retains_exception_traceback(self):
+        import http.client
+        import weakref
+        original=http.client.HTTPSConnection.getresponse;responses=[];retained=None
+        def observed(connection):
+            response=original(connection)
+            responses.append(weakref.ref(response))  # Never keep the socket/response alive ourselves.
+            return response
+        unit=self.read_unit()
+        reply=b'HTTP/1.1 401 Denied\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}'
+        try:
+            with self.server(reply,hostname='sheets.googleapis.com',destination='sheets.googleapis.com') as (records,errors):
+                with self.fixture(),mock.patch.object(http.client.HTTPSConnection,'getresponse',observed):
+                    try:unit.send_once()
+                    except self.module.TlsInputHold as error:retained=error
+                self.assertIsNotNone(retained)
+                self.assertIsNotNone(retained.__traceback__,'caller keeps ordinary exception evidence, without GC')
+                self.assertEqual(1,len(responses));self.assertEqual((1,[]),(len(records),errors))
+                self.assertTrue(responses[0]() is None or responses[0]().isclosed(),
+                    'original HTTP response must close before denial reaches a traceback-retaining caller')
+        finally:
+            # Failure of this new assertion must not poison later tests. Only
+            # this exact request's original weakly observed object is touched.
+            for reference in responses:
+                response=reference()
+                if response is not None:response.close()
+
 
 if __name__ == "__main__": unittest.main()

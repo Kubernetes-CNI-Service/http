@@ -173,7 +173,7 @@ def _native_complete_read(prepared):
     Uninstalled callers construct their immutable fixed shapes themselves.
     Complete here means intact bounded HTTP, not a valid Sheets observation.
     """
-    connection = None; failed = False; mutation = False
+    connection = response = None; failed = False; mutation = False; interruption = None
     try:
         from monitor.issue_tracker_sheets_read_plan import PreparedSheetsMutation
         if type(prepared) is PreparedSheetsMutation:
@@ -223,10 +223,19 @@ def _native_complete_read(prepared):
         result = CompleteTokenResponse(status, pairs, data)
     except Exception:
         failed = True
+    except BaseException as error:
+        interruption = error
     finally:
-        if connection is not None:
-            try: connection.close()
+        # A Connection: close response may own a detached socket makefile.
+        # Release it even when a caller retains the denial's traceback; the
+        # connection alone no longer necessarily owns that descriptor.
+        for resource in (response, connection):
+            if resource is None: continue
+            try: resource.close()
             except Exception: failed = True
+            except BaseException as error:
+                if interruption is None: interruption = error
+    if interruption is not None: raise interruption
     if failed: raise TlsInputHold()
     return result
 

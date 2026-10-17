@@ -171,6 +171,57 @@ class Req7TlsInputsDirectTests(unittest.TestCase):
         self.assertEqual("/etc/ssl/certs/ca-certificates.crt", identity.path)
         self.assertEqual(original, self.path.read_bytes())
 
+    def _literal_native_cleanup_fixture(self, *, body_error=None, response_error=None, connection_error=None):
+        """Only the resource interface is fake; expected cleanup stays literal."""
+        events=[]
+        def headers():
+            if body_error is not None:raise body_error
+            return ()
+        def response_close():
+            events.append('response.close')
+            if response_error is not None:raise response_error
+        def connection_close():
+            events.append('connection.close')
+            if connection_error is not None:raise connection_error
+        response=SimpleNamespace(status=401,getheaders=headers,close=response_close)
+        connection=SimpleNamespace(set_debuglevel=lambda value:None,request=lambda *a,**k:None,
+            getresponse=lambda:response,close=connection_close)
+        prepared=SimpleNamespace(host='oauth2.googleapis.com',method='POST',path='/token',
+            body=b'literal-owned-request',headers=(),budget_seconds=0.5)
+        return prepared,connection,events
+
+    def test_denied_native_response_is_closed_before_connection_and_sanitized_hold(self):
+        prepared,connection,events=self._literal_native_cleanup_fixture()
+        with mock.patch.object(self.module,'controlled_tls_context',return_value=(object(),object())), \
+                mock.patch('http.client.HTTPSConnection',return_value=connection):
+            with self.assertRaises(self.module.TlsInputHold) as caught:
+                self.module._native_complete_read(prepared)
+        self.assertEqual(['response.close','connection.close'],events)
+        self.assertIsNone(caught.exception.__context__)
+
+    def test_native_response_close_interruption_keeps_identity_and_still_closes_connection(self):
+        interrupted=KeyboardInterrupt('literal response close interruption')
+        original_cause=ValueError('literal original cause');interrupted.__cause__=original_cause
+        prepared,connection,events=self._literal_native_cleanup_fixture(response_error=interrupted)
+        with mock.patch.object(self.module,'controlled_tls_context',return_value=(object(),object())), \
+                mock.patch('http.client.HTTPSConnection',return_value=connection):
+            with self.assertRaises(BaseException) as caught:self.module._native_complete_read(prepared)
+        self.assertIs(caught.exception,interrupted)
+        self.assertIs(caught.exception.__cause__,original_cause)
+        self.assertEqual(['response.close','connection.close'],events)
+
+    def test_native_original_interruption_wins_over_two_independent_cleanup_interruptions(self):
+        interrupted=KeyboardInterrupt('literal original response interruption')
+        original_cause=ValueError('literal body cause');interrupted.__cause__=original_cause
+        prepared,connection,events=self._literal_native_cleanup_fixture(body_error=interrupted,
+            response_error=SystemExit('literal response cleanup'),connection_error=SystemExit('literal connection cleanup'))
+        with mock.patch.object(self.module,'controlled_tls_context',return_value=(object(),object())), \
+                mock.patch('http.client.HTTPSConnection',return_value=connection):
+            with self.assertRaises(BaseException) as caught:self.module._native_complete_read(prepared)
+        self.assertIs(caught.exception,interrupted)
+        self.assertIs(caught.exception.__cause__,original_cause)
+        self.assertEqual(['response.close','connection.close'],events)
+
     def test_ca_authority_drift_and_short_read_are_sanitized_without_repair_or_fallback(self):
         for fault in ("uid", "writable_ancestor", "short", "rebind"):
             with self.subTest(fault=fault), self.fixture(fault), self.assertRaises(self.module.TlsInputHold) as caught:
