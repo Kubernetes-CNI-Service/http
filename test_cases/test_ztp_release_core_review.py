@@ -4740,6 +4740,27 @@ class BackupAuthenticationContractTests(unittest.TestCase):
                 if displaced.exists():
                     displaced.unlink()
 
+    def test_native_askpass_fixture_uses_bound_probe_without_relaxing_deadline(self):
+        # Literal fixture contract: the native-root test must exercise the real
+        # helper using the reviewed interpreter, not ambient PATH selection.
+        source = Path(__file__).read_text(encoding="utf-8")
+        match = re.search(
+            r"(?ms)^    def test_native_unset_exec_root_uses_private_platform_temp_without_fallback_on_unsafe_config\(self\):\n.*?(?=^    def |\Z)",
+            source,
+        )
+        self.assertIsNotNone(match)
+        native = ast.parse("class NativeFixture:\n" + match.group(0)).body[0].body[0]
+        fake = next(node for node in native.body if isinstance(node, ast.With))
+        calls = [node for node in ast.walk(fake) if isinstance(node, ast.Call)
+                 and ast.unparse(node.func) == "subprocess.run"]
+        self.assertEqual(1, len(calls))
+        self.assertEqual(ast.dump(ast.parse("_askpass_identity_probe_argv(helper)", mode="eval").body),
+                         ast.dump(calls[0].args[0]))
+        keywords = {item.arg: item.value for item in calls[0].keywords}
+        self.assertEqual({"env", "text", "capture_output", "timeout", "check"}, set(keywords))
+        self.assertEqual(2, ast.literal_eval(keywords["timeout"]))
+        self.assertIs(ast.literal_eval(keywords["check"]), False)
+
     def test_native_unset_exec_root_uses_private_platform_temp_without_fallback_on_unsafe_config(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
@@ -4759,8 +4780,11 @@ class BackupAuthenticationContractTests(unittest.TestCase):
                 helper = Path(env["SSH_ASKPASS"])
                 self.assertTrue(helper.is_relative_to(platform_temp))
                 self.assertEqual(0o700, stat.S_IMODE(helper.parent.stat().st_mode))
+                self.assertEqual(0o700, stat.S_IMODE(helper.lstat().st_mode))
+                self.assertTrue(os.access(helper, os.X_OK))
                 asked = subprocess.run(
-                    [str(helper)], env=env, text=True, capture_output=True,
+                    _askpass_identity_probe_argv(helper),
+                    env=env, text=True, capture_output=True,
                     timeout=2, check=False,
                 )
                 self.assertEqual(self.SECRET + "\n", asked.stdout)
