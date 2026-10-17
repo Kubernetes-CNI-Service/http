@@ -895,6 +895,11 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 ## TC-REAL-BUNDLE-PROJECT-001 — bootstrap-only project image
 
+- 本地自动化边界（不替代下述现场步骤）：正常/重试流程只在本次工具拥有的私有目录中运行
+  真实 shared/upload installer 与完整 guard；state/proc 指向空的隔离目录，不扫描宿主 PID，
+  不执行 Docker、服务切换或真实 SSH。固定原解释器、原 snapshot FD/命名原件和内核 waitpid
+  证据由测试夹具核验；失败/UNKNOWN/收尾救援不能作为成功。真实 Docker、真实设备、实际
+  服务中断及下述恢复验收仍 **NOT RUN**；macOS/CP39 的本地证据不追认为其他平台证据。
 - 前置条件：同架构 Ubuntu rootful Docker 主机已加载并验证 generic immutable ID；准备由
   `--runtime docker --relay-bundle` 生成的精确 `2026-12-vb-gb300` upload bundle，以及可选的同项目、
   同 scope/input hash shared bundle。源码先完成全量测试与 `--check`，目标 `/var/www/html` 为 fresh

@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 import hashlib
 import importlib.util
 import io
@@ -21,6 +21,10 @@ from types import SimpleNamespace
 import unittest
 from unittest import mock
 import zipfile
+
+from test_cases.project_image_owned_guard_outer import (
+    HeldGuardInputs, borrowed_snapshot_path, parent_launch_boundary,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -248,55 +252,495 @@ def write_bundled_payload(
     return bundled
 
 
-def trusted_installer_loader_for_workflow(
-    tool, *, fail_upload_guard_times: int = 0,
-):
-    """Use both real installers while making the embedded guard host-neutral."""
-    original_loader = tool._load_module
-    state = {
-        "upload_guard_calls": 0,
-        "shared_staging_parents": [],
-        "upload_staging_parents": [],
-        "upload_guard_environments": [],
-    }
+OWNED_NATIVE_GUARD_BOOTSTRAP_SHA256 = 'cd1802da572565c837228ca21a294584d073369d2e4eacf34579f1c0509db120'
+OWNED_NATIVE_GUARD_SOURCE_SHA256 = '46af60b5b4ed3c3df6e3ad0f0a0b1fee5c8af60ceea8c6e60e08de5580481256'
+OWNED_NATIVE_GUARD_BOOTSTRAP_SOURCE = r'''# SOURCE-ONLY TEST BOOTSTRAP. NOT INSTALLED, IMPORTED OR EXECUTED.
+# The parent test supplies a separately frozen literal bootstrap SHA.
+import builtins
+import hashlib
+import importlib.abc
+import importlib.util
+import inspect
+import json
+import os
+from pathlib import Path
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+import threading
 
+GUARD_SHA256 = '46af60b5b4ed3c3df6e3ad0f0a0b1fee5c8af60ceea8c6e60e08de5580481256'
+MODULE_NAME = '_test_owned_complete_verified_guard'
+FILE_FIELDS = ('st_dev', 'st_ino', 'st_mode', 'st_nlink', 'st_uid', 'st_gid',
+               'st_size', 'st_mtime_ns', 'st_ctime_ns')
+RAW_CLOSE = os.close
+FACTS = dict(main_calls=0, archive_calls=0, archive_delegates=0,
+             quiesce_calls=0, quiesce_delegates=0, stop_calls=0, stop_delegates=0,
+             state_owned=[], proc_owned=[], quiesce_results=[], stop_empty=[],
+             forbidden=[], closed=[], cleanup_errors=[], restored=[],
+             initial_guard_main_reached=False, original_domain_argv=False)
+
+class IsolationHold(RuntimeError):
+    pass
+
+def require(value, label):
+    if not value:
+        raise IsolationHold(label)
+
+def directory_key(value):
+    return (value.st_dev, value.st_ino, stat.S_IFMT(value.st_mode),
+            value.st_uid, value.st_gid, stat.S_IMODE(value.st_mode))
+
+def file_key(value):
+    return tuple(str(getattr(value, name)) for name in FILE_FIELDS)
+
+class HeldFixture:
+    # Only these fixed fixture sources/parents are owned; never the archive FD.
+    def __init__(self):
+        self.directories = {}
+        self.files = []
+        self.order = []
+    def directory(self, path, mode=None):
+        path = Path(path)
+        require(path.is_absolute() and '..' not in path.parts and len(path.parts) < 64,
+                'fixture directory spelling')
+        if path not in self.directories:
+            parent = None if path == Path('/') else self.directory(path.parent)
+            before = os.lstat(path) if parent is None else os.stat(
+                path.name, dir_fd=parent['fd'], follow_symlinks=False)
+            require(stat.S_ISDIR(before.st_mode), 'fixture directory type')
+            flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+            fd = os.open(str(path) if parent is None else path.name, flags,
+                         **({} if parent is None else {'dir_fd': parent['fd']}))
+            record = dict(fd=fd, path=path, key=directory_key(before), parent=parent,
+                          kind='directory', closed=False)
+            self.order.append(record)  # acquisition registered before post-open fstat
+            require(directory_key(os.fstat(fd)) == record['key'], 'fixture directory FD')
+            self.directories[path] = record
+        record = self.directories[path]
+        if mode is not None:
+            require(record['key'][3] == os.geteuid() and record['key'][5] == mode,
+                    'fixture directory owner/mode')
+        return record
+    def file(self, path, expected_sha):
+        path = Path(path);parent = self.directory(path.parent, 0o700)
+        before = os.stat(path.name, dir_fd=parent['fd'], follow_symlinks=False)
+        require(stat.S_ISREG(before.st_mode) and before.st_nlink == 1
+                and before.st_uid == os.geteuid() and stat.S_IMODE(before.st_mode) == 0o600
+                and 0 < before.st_size <= 524288, 'fixed fixture file metadata')
+        fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent['fd'])
+        record = dict(fd=fd, path=path, key=file_key(before), parent=parent,
+                      kind='file', closed=False)
+        self.order.append(record)
+        require(file_key(os.fstat(fd)) == record['key'], 'fixed fixture file FD')
+        raw = os.pread(fd, 524289, 0)
+        require(len(raw) == before.st_size and hashlib.sha256(raw).hexdigest() == expected_sha,
+                'fixed fixture source pin')
+        record['raw'] = raw;self.files.append(record)
+        self.verify()
+        return record
+    def verify(self):
+        for record in self.order:
+            current = os.fstat(record['fd'])
+            parent = record['parent']
+            named = os.lstat(record['path']) if parent is None else os.stat(
+                record['path'].name, dir_fd=parent['fd'], follow_symlinks=False)
+            key = directory_key if record['kind'] == 'directory' else file_key
+            require(key(current) == record['key'] == key(named), 'held original changed')
+            if record['kind'] == 'file':
+                require(os.pread(record['fd'], 524289, 0) == record['raw'], 'held source bytes')
+    def close(self):
+        errors = []
+        for record in reversed(self.order):
+            try:
+                key = directory_key if record['kind'] == 'directory' else file_key
+                require(key(os.fstat(record['fd'])) == record['key'], 'cleanup original UNKNOWN')
+                RAW_CLOSE(record['fd']);record['closed'] = True
+                FACTS['closed'].append(record['kind'])
+            except BaseException as error:
+                errors.append(error)  # UNKNOWN slot is never adopted or blindly closed
+        return errors
+
+def select_primary(primary, errors):
+    if primary is not None and not isinstance(primary, Exception):
+        return primary
+    return next((error for error in errors if not isinstance(error, Exception)),
+                primary if primary is not None else (errors[0] if errors else None))
+
+def run():
+    held = HeldFixture();primary = None;cleanup = [];patches = []
+    result = 2;binding = None
+    def patch(obj, name, replacement):
+        original = getattr(obj, name)
+        patches.append((obj, name, original));setattr(obj, name, replacement)
+        return original
+    def deny(label):
+        def reject(*args, **kwargs):
+            FACTS['forbidden'].append(label)
+            raise IsolationHold('test child forbidden ' + label)
+        return reject
+    try:
+        binding = json.loads(os.environ['HTTP_TEST_GUARD_BINDING'])
+        require(set(binding) == {'parent', 'root', 'directory', 'bootstrap_sha256',
+                'guard_sha256', 'archive_key', 'domain_argv', 'phase'}, 'fixed binding fields')
+        require(binding['phase'] in ('OBSERVE_DEFAULTS', 'OWNED_PARAMETERS'), 'fixed phase')
+        require(binding['guard_sha256'] == GUARD_SHA256, 'fixed original guard pin')
+        parent = Path(binding['parent']);root = Path(binding['root'])
+        directory = Path(binding['directory'])
+        require(root == parent/'live' and directory.parent == parent
+                and directory.name.startswith('owned-native-guard.'), 'fixed local namespace')
+        require(sys.argv[0] == '-c', 'fixed literal bootstrap activation')
+        held.directory(parent, 0o700);held.directory(root, 0o755)
+        held.directory(directory, 0o700)
+        state, proc, temporary, emptybin = (directory/name for name in ('state', 'proc', 'tmp', 'bin'))
+        for path in (state, proc, temporary, emptybin):
+            held.directory(path, 0o700)
+            require(list(path.iterdir()) == [], 'fixture directory must start empty')
+        held.file(directory/'bootstrap.py', binding['bootstrap_sha256'])
+        guard = held.file(directory/'verified-guard.py', GUARD_SHA256)
+        domain = tuple(sys.argv[1:])
+        require(list(domain) == binding['domain_argv'], 'original domain argv changed')
+        FACTS['original_domain_argv'] = True
+        for flag in ('--root', '--lock', '--runtime', '--archive-fd',
+                     '--archive-sha256', '--source-manifest-sha256'):
+            require(domain.count(flag) == 1, 'fixed original argv multiplicity')
+        value = lambda flag: domain[domain.index(flag)+1]
+        require(Path(value('--root')) == root and Path(value('--lock')) == root/'.deployment.lock'
+                and value('--runtime') == 'native' and '--archive' not in domain, 'fixed original argv')
+        archive_fd = int(value('--archive-fd'));first = os.fstat(archive_fd)
+        require(file_key(first) == tuple(binding['archive_key']) and stat.S_ISREG(first.st_mode)
+                and first.st_uid == os.geteuid() and first.st_nlink == 1
+                and stat.S_IMODE(first.st_mode) == 0o600, 'original inherited snapshot identity')
+        digest = hashlib.sha256();offset = 0
+        while offset < first.st_size:
+            block = os.pread(archive_fd, min(65536, first.st_size-offset), offset)
+            require(bool(block), 'original snapshot truncated');digest.update(block);offset += len(block)
+        require(digest.hexdigest() == value('--archive-sha256')
+                and file_key(os.fstat(archive_fd)) == tuple(binding['archive_key']),
+                'original snapshot digest')
+        require(Path(tempfile.gettempdir()) == temporary, 'owned child tempfile selection')
+        def audit(event, args):
+            if event.startswith('socket.') or event in ('subprocess.Popen', 'os.system',
+                    'os.posix_spawn', 'os.posix_spawnp', 'os.fork', 'os.forkpty',
+                    'os.kill', 'os.killpg', 'os.chown', 'os.fchown'):
+                deny(event)()
+        sys.addaudithook(audit)
+        for obj, name in ((os, 'kill'), (os, 'waitpid'), (os, 'system'),
+                          (os, 'chown'), (os, 'fchown'),
+                          (subprocess, 'Popen'), (subprocess, 'run'),
+                          (threading.Thread, '__init__'), (threading.Thread, 'start')):
+            patch(obj, name, deny(name))
+        def outside_system(path):
+            if isinstance(path, (str, bytes, os.PathLike)):
+                parts = Path(os.fsdecode(path)).parts
+                return (parts[:2] == ('/', 'proc')
+                        or parts[:4] == ('/', 'var', 'lib', 'http-ztp-container')
+                        or parts[:5] == ('/', 'private', 'var', 'lib', 'http-ztp-container'))
+            return False
+        for name in ('open', 'stat', 'lstat', 'listdir', 'scandir', 'access'):
+            original = getattr(os, name)
+            def wrapped(path, *args, _original=original, **kwargs):
+                if outside_system(path):deny('system-state-or-proc')()
+                return _original(path, *args, **kwargs)
+            patch(os, name, wrapped)
+        original_builtin_open = builtins.open
+        def safe_open(path, *args, **kwargs):
+            if outside_system(path):deny('system-state-or-proc')()
+            return original_builtin_open(path, *args, **kwargs)
+        patch(builtins, 'open', safe_open)
+        class WholeHeldGuardLoader(importlib.abc.SourceLoader):
+            def get_filename(self, fullname):
+                require(fullname == MODULE_NAME, 'fixed guard module');return str(guard['path'])
+            def get_data(self, path):
+                require(path == str(guard['path']), 'no alternate module/cache source')
+                held.verify();return guard['raw']
+        loader = WholeHeldGuardLoader()
+        spec = importlib.util.spec_from_loader(MODULE_NAME, loader)
+        module = importlib.util.module_from_spec(spec);loader.exec_module(module)
+        original_main = module.main
+        original_archive = module.run_locked_archive
+        original_quiesce = module.quiesce_for_source_update
+        original_stop = module.stop_native_ztp_monitors
+        def archive(*args, **kwargs):
+            FACTS['archive_calls'] += 1
+            parameters = inspect.signature(original_archive).bind(*args, **kwargs)
+            parameters.apply_defaults()
+            require(parameters.arguments['http_root'] == root
+                    and parameters.arguments['_archive_fd'] == archive_fd
+                    and parameters.arguments['_ownership_target'] == (0, 0), 'original archive arguments')
+            if binding['phase'] == 'OWNED_PARAMETERS':kwargs['state_root'] = state
+            FACTS['archive_delegates'] += 1
+            return original_archive(*args, **kwargs)
+        def quiesce(*args, **kwargs):
+            FACTS['quiesce_calls'] += 1
+            parameters = inspect.signature(original_quiesce).bind(*args, **kwargs)
+            parameters.apply_defaults();owned = parameters.arguments['state_root'] == state
+            FACTS['state_owned'].append(owned)
+            if not owned:raise module.GuardError('test isolation refused nonowned state before IO')
+            require(parameters.arguments['http_root'] == root
+                    and parameters.arguments['native_requested'] is True
+                    and parameters.arguments['docker_requested'] is False, 'original quiesce arguments')
+            held.verify();kwargs['runner'] = deny('Docker-runner')
+            kwargs['which'] = lambda name: shutil.which(name, path=str(emptybin))
+            FACTS['quiesce_delegates'] += 1
+            result = original_quiesce(*args, **kwargs)
+            FACTS['quiesce_results'].append(result);require(result is False, 'unexpected managed Docker state')
+            return result
+        def stop(http_root):
+            FACTS['stop_calls'] += 1;require(http_root == root, 'original monitor root')
+            FACTS['proc_owned'].append(True);held.verify();FACTS['stop_delegates'] += 1
+            result = original_stop(http_root, proc_root=proc, kill=deny('monitor-kill'))
+            FACTS['stop_empty'].append(result == ());require(result == (), 'unexpected fixture monitor')
+            return result
+        patch(module, 'run_locked_archive', archive)
+        patch(module, 'quiesce_for_source_update', quiesce)
+        patch(module, 'stop_native_ztp_monitors', stop)
+        held.verify();FACTS['initial_guard_main_reached'] = True;FACTS['main_calls'] += 1
+        result = original_main(list(domain))  # original parser/main/domain argv, not a fake status
+        require(type(result) is int, 'original main status unknown')
+        held.verify()
+        require(file_key(os.fstat(archive_fd)) == tuple(binding['archive_key']), 'snapshot after guard')
+    except BaseException as error:
+        primary = error
+    finally:
+        for obj, name, original in reversed(patches):
+            try:
+                setattr(obj, name, original);FACTS['restored'].append(getattr(obj, name) is original)
+            except BaseException as error:cleanup.append(error)
+        cleanup.extend(held.close())
+        FACTS['cleanup_errors'] = [type(error).__name__ for error in cleanup]
+        FACTS['main_returncode'] = result
+        FACTS['owned_originals'] = len(held.order)
+        FACTS['all_owned_closed'] = all(record['closed'] for record in held.order)
+        FACTS['primary_type'] = type(primary).__name__ if primary is not None else None
+        try:
+            print('OWNED_GUARD_FACTS ' + json.dumps(FACTS, sort_keys=True), flush=True)
+        except BaseException as error:
+            cleanup.append(error)  # no log failure may cover an original NI
+    selected = select_primary(primary, cleanup)
+    if selected is not None:
+        if selected is not primary and primary is not None and selected.__cause__ is None:
+            raise selected from primary
+        raise selected
+    return result if not cleanup else 2
+
+if __name__ == '__main__':
+    raise SystemExit(run())
+'''
+
+def trusted_installer_loader_for_workflow(
+    tool, *, owned_parent: Path, fail_upload_guard_times: int = 0,
+    isolation_phase: str = 'OWNED_PARAMETERS',
+):
+    """Test-only full guard child, exact held source, owned state/proc only."""
+    original_loader = tool._load_module
+    owned_parent = Path(owned_parent)
+    parent = owned_parent.lstat()
+    if (owned_parent.resolve(strict=True) != owned_parent or not stat.S_ISDIR(parent.st_mode)
+            or parent.st_uid != os.geteuid() or stat.S_IMODE(parent.st_mode) != 0o700):
+        raise AssertionError('explicit owned fixture parent required')
+    if isolation_phase not in ('OBSERVE_DEFAULTS', 'OWNED_PARAMETERS'):
+        raise AssertionError('unknown fixed test phase')
+    if hashlib.sha256(OWNED_NATIVE_GUARD_BOOTSTRAP_SOURCE.encode()).hexdigest() != OWNED_NATIVE_GUARD_BOOTSTRAP_SHA256:
+        raise AssertionError('bootstrap differs from independently frozen literal pin')
+    state = dict(upload_guard_calls=0, shared_staging_parents=[], upload_staging_parents=[],
+                 upload_guard_environments=[], actual_child_receipts=[])
+    fields = ('st_dev', 'st_ino', 'st_mode', 'st_nlink', 'st_uid', 'st_gid',
+              'st_size', 'st_mtime_ns', 'st_ctime_ns')
+    file_key = lambda value: tuple(str(getattr(value, field)) for field in fields)
+    physical = lambda value: (value.st_dev, value.st_ino, stat.S_IFMT(value.st_mode), value.st_uid, value.st_gid)
+    def choose(primary, errors):
+        if primary is not None and not isinstance(primary, Exception):return primary
+        return next((error for error in errors if not isinstance(error, Exception)),
+                    primary if primary is not None else (errors[0] if errors else None))
     def loader(name, path, **kwargs):
         module = original_loader(name, path, **kwargs)
         canonical = Path(path).resolve()
         if canonical == SHARED_INSTALLER_PATH.resolve():
             original_deploy = module.deploy_archive
-
             def deploy_shared(*args, **kwargs):
-                state["shared_staging_parents"].append(kwargs.get("staging_parent"))
+                state['shared_staging_parents'].append(kwargs.get('staging_parent'))
                 return original_deploy(*args, **kwargs)
-
             module.deploy_archive = deploy_shared
         elif canonical == UPLOAD_INSTALLER_PATH.resolve():
-            original_deploy = module.deploy_archive
-            original_guard = module.run_guard
-
+            original_deploy = module.deploy_archive;original_guard = module.run_guard
+            original_snapshot = module._private_archive_snapshot
+            @contextmanager
+            def held_original_snapshot(*args, **keywords):
+                manager = original_snapshot(*args, **keywords)
+                with manager as descriptor:
+                    archive_path = borrowed_snapshot_path(
+                        manager, original_snapshot, descriptor, owned_parent)
+                    if state.get('borrowed_snapshot') is not None:
+                        raise AssertionError('overlapping original snapshot context')
+                    record = (descriptor, archive_path)
+                    state['borrowed_snapshot'] = record
+                    primary = None;errors = []
+                    try:
+                        yield descriptor
+                    except BaseException as error:
+                        primary = error
+                    finally:
+                        if state.get('borrowed_snapshot') is record:
+                            state.pop('borrowed_snapshot')
+                        else:
+                            errors.append(AssertionError('original snapshot registration changed'))
+                    selected = choose(primary, errors)
+                    if selected is not None:
+                        raise selected  # Preserve original object/cause; original context owns cleanup.
+            module._private_archive_snapshot = held_original_snapshot
             def deploy_upload(*args, **kwargs):
-                state["upload_staging_parents"].append(kwargs.get("staging_parent"))
-                state["upload_guard_environments"].append(
-                    kwargs.get("guard_environment")
-                )
+                state['upload_staging_parents'].append(kwargs.get('staging_parent'))
+                state['upload_guard_environments'].append(kwargs.get('guard_environment'))
                 return original_deploy(*args, **kwargs)
-
-            def run_native_guard(command, **_kwargs):
-                state["upload_guard_calls"] += 1
-                if state["upload_guard_calls"] <= fail_upload_guard_times:
-                    return SimpleNamespace(
-                        returncode=74, stdout=b"", stderr=b"injected upload failure",
-                    )
+            def run_native_guard(command, **kwargs):
+                state['upload_guard_calls'] += 1
+                if state['upload_guard_calls'] <= fail_upload_guard_times:
+                    # Retain the existing explicit fault lane, not a fake success.
+                    return SimpleNamespace(returncode=74, stdout=b'', stderr=b'injected upload failure')
+                if set(kwargs) - {'env', 'archive_fd', 'timeout'}:
+                    raise AssertionError('unknown original guard keyword')
                 command = list(command)
-                runtime_index = command.index("--runtime") + 1
-                command[runtime_index] = "native"
-                return original_guard(command, env={"PATH": "/nonexistent"})
-
-            module.run_guard = run_native_guard
-            module.deploy_archive = deploy_upload
+                if command[:2] != [sys.executable, '-c']:
+                    raise AssertionError('original fixed interpreter activation differs')
+                guard_source = command[2].encode('utf-8')
+                if hashlib.sha256(guard_source).hexdigest() != OWNED_NATIVE_GUARD_SOURCE_SHA256:
+                    raise AssertionError('embedded source differs from frozen original guard')
+                command[command.index('--runtime')+1] = 'native'  # existing test premise
+                domain = command[3:]
+                root = Path(domain[domain.index('--root')+1])
+                if root != owned_parent/'live' or root.resolve(strict=True) != root:
+                    raise AssertionError('guard root is not this explicit local fixture')
+                if stat.S_IMODE(root.lstat().st_mode) != 0o755:
+                    raise AssertionError('public root0755 premise not satisfied')
+                archive_fd = module._guard_archive_fd(command, kwargs.get('archive_fd'))
+                if type(archive_fd) is not int:
+                    raise AssertionError('original inherited snapshot FD absent')
+                archive_before = os.fstat(archive_fd)
+                directory = Path(tempfile.mkdtemp(prefix='owned-native-guard.', dir=owned_parent))
+                directory_before = directory.lstat();directory_fd = None
+                primary = None;errors = [];result = None;source_records = []
+                try:
+                    directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                    if physical(os.fstat(directory_fd)) != physical(directory_before):
+                        raise AssertionError('owned bootstrap directory identity')
+                    for label in ('state', 'proc', 'tmp', 'bin'):
+                        (directory/label).mkdir(mode=0o700)
+                    def write_original(name, raw):
+                        fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                                     0o600, dir_fd=directory_fd)
+                        key = None;body = None;cleanup = []
+                        try:
+                            value = os.fstat(fd);key = physical(value)
+                            view = memoryview(raw)
+                            while view:
+                                count = os.write(fd, view)
+                                if count <= 0:raise OSError('fixture source write made no progress')
+                                view = view[count:]
+                            os.fsync(fd)
+                        except BaseException as error:body = error
+                        finally:
+                            try:
+                                if key is None or physical(os.fstat(fd)) != key:
+                                    raise AssertionError('source cleanup original FD UNKNOWN')
+                                os.close(fd)
+                            except BaseException as error:cleanup.append(error)
+                        selected = choose(body, cleanup)
+                        if selected is not None:
+                            if selected is not body and body is not None and selected.__cause__ is None:
+                                raise selected from body
+                            raise selected
+                    write_original('bootstrap.py', OWNED_NATIVE_GUARD_BOOTSTRAP_SOURCE.encode())
+                    write_original('verified-guard.py', guard_source)
+                    os.fsync(directory_fd)
+                    for name, expected in (('bootstrap.py', OWNED_NATIVE_GUARD_BOOTSTRAP_SHA256),
+                            ('verified-guard.py', OWNED_NATIVE_GUARD_SOURCE_SHA256)):
+                        before = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+                        row = dict(fd=fd, name=name, key=file_key(before), expected=expected)
+                        source_records.append(row)
+                        if (file_key(os.fstat(fd)) != row['key'] or hashlib.sha256(
+                                os.pread(fd, 524289, 0)).hexdigest() != expected):
+                            raise AssertionError('parent held source differs from literal pin')
+                    binding = dict(parent=str(owned_parent), root=str(root), directory=str(directory),
+                        bootstrap_sha256=OWNED_NATIVE_GUARD_BOOTSTRAP_SHA256,
+                        guard_sha256=OWNED_NATIVE_GUARD_SOURCE_SHA256,
+                        archive_key=list(file_key(archive_before)), domain_argv=domain,
+                        phase=isolation_phase)
+                    environment = {'PATH':str(directory/'bin'), 'TMPDIR':str(directory/'tmp'),
+                        'PYTHONDONTWRITEBYTECODE':'1',
+                        'HTTP_TEST_GUARD_BINDING':json.dumps(binding, sort_keys=True)}
+                    # Execute the parent's fixed literal, not a raceable named source.
+                    # The -c program changes; the original guard-domain argv is intact.
+                    activated = [command[0], '-I', '-S', '-B', '-c', OWNED_NATIVE_GUARD_BOOTSTRAP_SOURCE, *domain]
+                    if 'timeout' in kwargs and kwargs['timeout'] != 5:
+                        raise AssertionError('fixed original guard API timeout5 required')
+                    snapshot = state.get('borrowed_snapshot')
+                    if (type(snapshot) is not tuple or len(snapshot) != 2
+                            or snapshot[0] != archive_fd):
+                        raise AssertionError('original staged snapshot yield not retained')
+                    authority = HeldGuardInputs(parent=owned_parent, directory=directory,
+                        directory_fd=directory_fd, archive=snapshot[1], archive_fd=archive_fd)
+                    with parent_launch_boundary(authority) as activate:
+                        activate.bind_helper(run_native_guard.__code__)
+                        result = activate(original_guard, activated,
+                            env=environment, archive_fd=archive_fd, timeout=5)
+                    # No fabricated CompletedProcess/returncode: this is the original Popen result.
+                    lines = [line.partition(b'OWNED_GUARD_FACTS ')[2] for line in result.stdout.splitlines()
+                             if line.startswith(b'OWNED_GUARD_FACTS ')]
+                    if len(lines) != 1:raise AssertionError('original child final receipt absent')
+                    facts = json.loads(lines[0]);state['actual_child_receipts'].append(facts)
+                    if (not facts['initial_guard_main_reached'] or not facts['original_domain_argv']
+                            or facts['main_calls'] != 1 or facts['archive_delegates'] != 1
+                            or facts['forbidden'] or facts['cleanup_errors']
+                            or not facts['all_owned_closed'] or not facts['restored']
+                            or not all(facts['restored'])):
+                        raise AssertionError('original child isolation/cleanup not proved')
+                    if result.returncode == 0 and (facts['main_returncode'] != 0
+                            or facts['primary_type'] is not None):
+                        raise AssertionError('child success is not original main success')
+                    if isolation_phase == 'OWNED_PARAMETERS' and (
+                            facts['state_owned'] != [True] or facts['proc_owned'] != [True]
+                            or facts['quiesce_results'] != [False] or facts['stop_empty'] != [True]
+                            or facts['quiesce_delegates'] != 1 or facts['stop_delegates'] != 1):
+                        raise AssertionError('original quiesce/stop owned delegation absent')
+                    if file_key(os.fstat(archive_fd)) != file_key(archive_before):
+                        raise AssertionError('original parent snapshot changed')
+                    for row in source_records:
+                        if (file_key(os.fstat(row['fd'])) != row['key']
+                                or file_key(os.stat(row['name'], dir_fd=directory_fd,
+                                    follow_symlinks=False)) != row['key']
+                                or hashlib.sha256(os.pread(row['fd'], 524289, 0)).hexdigest() != row['expected']):
+                            raise AssertionError('parent held source changed during actual guard')
+                except BaseException as error:primary = error
+                finally:
+                    for row in reversed(source_records):
+                        try:
+                            if file_key(os.fstat(row['fd'])) != row['key']:
+                                raise AssertionError('parent source FD cleanup UNKNOWN')
+                            os.close(row['fd'])
+                        except BaseException as error:errors.append(error)
+                    if directory_fd is not None:
+                        try:
+                            if physical(os.fstat(directory_fd)) != physical(directory_before):
+                                raise AssertionError('bootstrap directory FD cleanup UNKNOWN')
+                            os.close(directory_fd)
+                        except BaseException as error:errors.append(error)
+                    try:
+                        if physical(directory.lstat()) != physical(directory_before):
+                            raise AssertionError('bootstrap directory cleanup UNKNOWN')
+                        shutil.rmtree(directory)
+                    except BaseException as error:errors.append(error)
+                selected = choose(primary, errors)
+                if selected is not None:
+                    if selected is not primary and primary is not None and selected.__cause__ is None:
+                        raise selected from primary
+                    raise selected
+                return result
+            module.run_guard = run_native_guard;module.deploy_archive = deploy_upload
         return module
-
     return loader, state
 
 
@@ -2063,8 +2507,9 @@ class ProjectImageBundleTests(unittest.TestCase):
                 base / "embedded", upload, shared_bundle=shared.output,
             )
             live = base / "live"
-            live.mkdir(mode=0o755)
-            loader, state = trusted_installer_loader_for_workflow(self.tool)
+            create_public_bootstrap_directory_fixture(live)
+            self.assertEqual(0o755, stat.S_IMODE(live.lstat().st_mode))
+            loader, state = trusted_installer_loader_for_workflow(self.tool, owned_parent=base)
             with mock.patch.object(self.tool, "_load_module", side_effect=loader):
                 installed = self.tool.install_bundled_project(
                     bundled_root=bundled,
@@ -2234,9 +2679,10 @@ class ProjectImageBundleTests(unittest.TestCase):
                 base / "embedded", upload, shared_bundle=shared.output,
             )
             live = base / "live"
-            live.mkdir(mode=0o755)
+            create_public_bootstrap_directory_fixture(live)
+            self.assertEqual(0o755, stat.S_IMODE(live.lstat().st_mode))
             loader, state = trusted_installer_loader_for_workflow(
-                self.tool, fail_upload_guard_times=1,
+                self.tool, owned_parent=base, fail_upload_guard_times=1,
             )
             with mock.patch.object(self.tool, "_load_module", side_effect=loader):
                 with self.assertRaisesRegex(

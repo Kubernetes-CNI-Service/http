@@ -7,6 +7,13 @@
 本目录中的自动化测试不连接设备、不修改项目运行数据，重点检查跨目录接口，而不是替代
 真实交换机、Docker 或端到端部署测试。
 
+`test_project_image_owned_guard.py` 独立约束项目镜像测试夹具的固定解释器、两个借用原始 FD
+及真实 snapshot context 来源。原项目镜像正常/重试 workflow 使用真实 shared/upload installer，
+但其 guard 子进程仅消费本次私有目录中的 state/proc；不读取宿主服务状态、不扫描真实 PID，
+也不调用 Docker。成功要求原 guard 的真实返回、一次原始 waitpid 见证及无救援的收尾；
+目录0755前提显式设置，不依赖启动者的 umask。此夹具不是文件系统沙箱，也不把本机流程
+通过当作 Docker/设备验收；现场仍见 `TC-REAL-BUNDLE-PROJECT-001`。
+
 备份命令的固定辅助脚本由 `test_backup_bounded_process.py` 的独立 direct、
 `test_backup_bounded_protocol.py` 的原状态/期限/中断合同，以及
 `test_backup_bounded_process_workflow.py` 的真实三脚本私有 FD alias census 共同覆盖。

@@ -54,6 +54,7 @@
         "test_cases.test_password_update",
         "test_cases.test_predeploy_test_gate",
         "test_cases.test_project_image_bundle",
+        "test_cases.test_project_image_owned_guard",
         "test_cases.test_public_project_fixture_contract",
         "test_cases.test_public_project_fixture_workflow",
         "test_cases.test_shared_artifact_bundle",
@@ -380,6 +381,7 @@
     "test_cases/public_project_fixture.py",
     "test_cases/splitter_profile_fixture.py",
     "test_cases/module_loader.py",
+    "test_cases/project_image_owned_guard_outer.py",
     "test_cases/run_monitor_authority_entrypoints.sh",
     "test_cases/run_related_tests.py",
     "test_cases/run_vm_validation.py",
@@ -933,6 +935,7 @@
       ],
       "tests": [
         "test_cases.test_project_image_bundle",
+        "test_cases.test_project_image_owned_guard",
         "test_cases.test_shared_artifact_bundle",
         "test_cases.test_deploy_upload_archive",
         "test_cases.test_upload_package_contract",
@@ -3710,6 +3713,15 @@
         "test_cases.test_mlag_evpn_generation",
         "test_cases.test_qos_evpn_uplink_generation",
         "test_cases.test_cumulus_snippet_rendering"
+      ]
+    },
+    {
+      "paths": [
+        "test_cases/project_image_owned_guard_outer.py"
+      ],
+      "tests": [
+        "test_cases.test_project_image_owned_guard",
+        "test_cases.test_project_image_bundle"
       ]
     },
     {
