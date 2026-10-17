@@ -3,6 +3,11 @@
 `yaml-collect.py` 读取 setup 建立的设备 CSV，连接交换机并备份 startup YAML，同时回收
 管理地址、MAC 和序列号，用于部署后的配置核对。
 
+部署时必须保留同目录的 `_bounded_process.py` 和 `_bounded_process_launcher.py` 原件；
+不能只复制 `yaml-collect.py`。collector 在加载及每次有界调用前核验固定辅助源码，缺失或
+改变时失败关闭，不搜索其他目录、不降级到旧执行方式。两个辅助脚本不是操作员 CLI，
+不要独立运行或手工拼装内部 FD／nonce 参数；正常调用仍使用下文的 collector 入口。
+
 ## 在整体架构中的位置
 
 备份属于部署后验证面，不参与配置生成或 ZTP 发布。它使用与持续监控相同的 AIR/Production
