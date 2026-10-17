@@ -495,6 +495,19 @@ def script_profile(root: Path, relative: str) -> dict[str, str]:
         success = "链接身份、canonical target、direct test 和 workflow 映射全部一致。"
         recovery = "链接断裂或目标变化时停止发布；按 manifest 和 setup 合同修复，禁止复制文件替代链接。"
         example = f"readlink {relative}  # 预期解析到 {target}"
+    elif relative in {"ztp/backup/_bounded_process.py",
+                       "ztp/backup/_bounded_process_launcher.py"}:
+        direct = "否；这是备份命令的固定内部进程边界，不是操作员入口。"
+        environment = "随 yaml-collect.py 的受管备份流程运行，不单独取得设备访问或发布权限。"
+        scenario = "collector 通过同目录原件加载边界；固定 launcher 监督单次命令并分别报告原命令与锚点状态。"
+        prerequisite = "同目录辅助原件、摘要、调用者和私有管道身份有效；内部 launcher 固定使用 -I -B，禁止独立拼装调用。"
+        syntax = "仅由 ztp/backup/yaml-collect.py 加载并通过固定同目录 launcher 编排。"
+        parameters = "无独立 CLI；内部 FD、nonce 和期限参数不是操作员输入。"
+        inputs = "collector 已核验的命令、环境、期限和私有 FD；不接收操作员替换的辅助脚本。"
+        outputs = "有界输出、真实命令状态与独立锚点收尾事实；未知或收尾失败不得报告成功。"
+        success = "上层备份流程完成原件与收尾检查；单个内部返回码不是备份完成或发布证明。"
+        recovery = "保留原始失败和日志，由 collector 失败关闭；不单独执行 launcher 或按裸 PID 清理。"
+        example = "python3 -B -m unittest -v test_cases.test_backup_bounded_process_workflow  # 仅本地开发验证"
     elif is_library:
         direct = "否；这是共享库/安全边界，由其列出的生产入口导入。"
         environment = "随所属 Native、Docker、打包、监控或分析流程运行，不单独取得运行权限。"

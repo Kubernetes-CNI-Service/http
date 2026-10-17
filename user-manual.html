@@ -456,7 +456,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
         <p>本目录由 <code>tools/update-user-manual.py</code> 从 Git tracked 与非忽略文件生成；每个受维护文件必须有独立说明。大量项目数据、镜像、缓存与运行输出按路径模式说明，不把二进制内容嵌入网页。</p>
         <!-- BEGIN GENERATED USER MANUAL FILE CATALOG -->
         <div class="catalog-summary">
-          <span><strong>621</strong> 个受维护文件</span>
+          <span><strong>628</strong> 个受维护文件</span>
           <span><strong>24</strong> 个根级分组</span>
           <span>清单范围：Git tracked + untracked/nonignored</span>
         </div>
@@ -722,7 +722,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           </tbody></table></div>
         </details>
         <details id="v2-file-group-test-cases" data-nav-title="test_cases/ 文件" class="catalog-group">
-          <summary><code>test_cases/</code> — 291 个文件</summary>
+          <summary><code>test_cases/</code> — 296 个文件</summary>
           <div><table class="file-catalog"><thead><tr><th>文件</th><th>说明</th></tr></thead><tbody>
             <tr data-file-path="test_cases/CASE_TEMPLATE.md"><td><code>test_cases/CASE_TEMPLATE.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>新增真机/破坏性验证案例时必须填写的证据模板。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/CHANGE_AWARE_TESTING.md"><td><code>test_cases/CHANGE_AWARE_TESTING.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>文档：脚本变更影响测试。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
@@ -730,6 +730,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <tr data-file-path="test_cases/REAL_ENVIRONMENT.md"><td><code>test_cases/REAL_ENVIRONMENT.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>无法在本机安全自动化的 VM、AIR、Docker、服务和物理设备验收案例。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/__init__.py"><td><code>test_cases/__init__.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Canonical executable regression and integration test case package。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/audit_public_tree.py"><td><code>test_cases/audit_public_tree.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Fail closed when a Git publication candidate crosses the public boundary。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/fixtures/bounded_inner_fd_fixture.py"><td><code>test_cases/fixtures/bounded_inner_fd_fixture.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>NOT RUN. Fixed local command fixture, never an SSH/device executable。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/module_loader.py"><td><code>test_cases/module_loader.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Shared source loader: remove only helper-owned paths, not module authority。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/monitor_authority_root_warden.py"><td><code>test_cases/monitor_authority_root_warden.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>PID-1 warden for the Linux Monitor authority lifecycle proof。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/monitor_authority_source_guard.py"><td><code>test_cases/monitor_authority_source_guard.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Export and attest one immutable Git tree for the root authority workflow。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
@@ -745,6 +746,10 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <tr data-file-path="test_cases/test_all_script_entrypoints.py"><td><code>test_cases/test_all_script_entrypoints.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Repository-wide source-script syntax and non-mutating entrypoint contracts。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_apache_publication_boundary.py"><td><code>test_cases/test_apache_publication_boundary.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Apache static publication boundary and load activation contracts。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_backup_auth_transport_workflow.py"><td><code>test_cases/test_backup_auth_transport_workflow.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Hermetic real-script workflow contracts for BACKUP-AUTH-R1。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_backup_bounded_delivery.py"><td><code>test_cases/test_backup_bounded_delivery.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Independent delivery expectation for both fixed backup peers。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_backup_bounded_process.py"><td><code>test_cases/test_backup_bounded_process.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Independent direct contracts for the fixed backup process boundary。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_backup_bounded_process_workflow.py"><td><code>test_cases/test_backup_bounded_process_workflow.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Real fixed-sibling backup adapter and private-FD workflow。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_backup_bounded_protocol.py"><td><code>test_cases/test_backup_bounded_protocol.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Independent literal contracts for the canonical bounded backup peers。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_backup_permission_convergence_workflow.py"><td><code>test_cases/test_backup_permission_convergence_workflow.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>REQ6: a historical sweep and later collection share one private backup tree。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_backup_zero_target_contract.py"><td><code>test_cases/test_backup_zero_target_contract.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Direct fail-closed contract for an empty YAML backup target set。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_bootstrap_config_fetch_contract.py"><td><code>test_cases/test_bootstrap_config_fetch_contract.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Direct contract tests for required per-device bootstrap configuration fetches。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
@@ -1116,9 +1121,11 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           </tbody></table></div>
         </details>
         <details id="v2-file-group-ztp" data-nav-title="ztp/ 文件" class="catalog-group">
-          <summary><code>ztp/</code> — 69 个文件</summary>
+          <summary><code>ztp/</code> — 71 个文件</summary>
           <div><table class="file-catalog"><thead><tr><th>文件</th><th>说明</th></tr></thead><tbody>
             <tr data-file-path="ztp/backup/README.md"><td><code>ztp/backup/README.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>文档：交换机配置备份。 <strong>维护/生成责任：</strong>文档维护者随行为变更同步更新；生成索引不得手工改写生成块。</td></tr>
+            <tr data-file-path="ztp/backup/_bounded_process.py"><td><code>ztp/backup/_bounded_process.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Fixed bounded command boundary for the backup collector。 <strong>维护/生成责任：</strong>项目输入由项目维护者编辑；发布链接、receipt、状态和输出只允许对应事务/worker 生成。</td></tr>
+            <tr data-file-path="ztp/backup/_bounded_process_launcher.py"><td><code>ztp/backup/_bounded_process_launcher.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Fixed sibling launcher for the backup bounded command boundary。 <strong>维护/生成责任：</strong>项目输入由项目维护者编辑；发布链接、receipt、状态和输出只允许对应事务/worker 生成。</td></tr>
             <tr data-file-path="ztp/backup/permission-sweep.py"><td><code>ztp/backup/permission-sweep.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Inventory and narrowly tighten an existing managed backup tree。 <strong>维护/生成责任：</strong>项目输入由项目维护者编辑；发布链接、receipt、状态和输出只允许对应事务/worker 生成。</td></tr>
             <tr data-file-path="ztp/backup/yaml-collect.py"><td><code>ztp/backup/yaml-collect.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>读取当前目录下 *devices_config*.csv 文件，SSH 进每台设备备份 startup.yaml、收集 MAC 和序列号。 <strong>维护/生成责任：</strong>项目输入由项目维护者编辑；发布链接、receipt、状态和输出只允许对应事务/worker 生成。</td></tr>
             <tr data-file-path="ztp/config/cumulus/README.md"><td><code>ztp/config/cumulus/README.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>文档：Cumulus 配置发布。 <strong>维护/生成责任：</strong>文档维护者随行为变更同步更新；生成索引不得手工改写生成块。</td></tr>
@@ -1253,7 +1260,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
         <p>以下参考覆盖当前工作树中的每个 Python、Shell 与 CGI 文件，包括操作入口、内部库、worker、设备端脚本和开发测试。先看“是否直接运行”，再复制示例；内部组件不得脱离所属事务单独执行。</p>
         <!-- BEGIN GENERATED USER MANUAL SCRIPT REFERENCE -->
         <div class="catalog-summary">
-          <span><strong>482</strong> 个脚本型文件</span>
+          <span><strong>489</strong> 个脚本型文件</span>
           <span><strong>9</strong> 个功能分组</span>
           <span>每项均含运行、输入输出、示例与恢复合同</span>
         </div>
@@ -3046,7 +3053,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           <p><strong>示例：</strong></p>
           <pre><code>readlink nvlink/monitor/sw-link.sh  # 预期解析到 ../../ethernet/monitor/sw-link.sh</code></pre></div>
         </details>
-        <h4 id="v2-script-group-test-cases" data-nav-title="test_cases/ 脚本">test_cases/ — 284 个脚本</h4>
+        <h4 id="v2-script-group-test-cases" data-nav-title="test_cases/ 脚本">test_cases/ — 289 个脚本</h4>
         <details data-script-reference="test_cases/__init__.py" class="script-reference">
           <summary><code>test_cases/__init__.py</code> — Canonical executable regression and integration test case package。</summary>
           <div class="script-body"><dl>
@@ -3082,6 +3089,24 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           </dl>
           <p><strong>示例：</strong></p>
           <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.audit_public_tree</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/fixtures/bounded_inner_fd_fixture.py" class="script-reference">
+          <summary><code>test_cases/fixtures/bounded_inner_fd_fixture.py</code> — NOT RUN. Fixed local command fixture, never an SSH/device executable。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>NOT RUN. Fixed local command fixture, never an SSH/device executable。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.fixtures.bounded_inner_fd_fixture</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.fixtures.bounded_inner_fd_fixture</code></pre></div>
         </details>
         <details data-script-reference="test_cases/module_loader.py" class="script-reference">
           <summary><code>test_cases/module_loader.py</code> — Shared source loader: remove only helper-owned paths, not module authority。</summary>
@@ -3316,6 +3341,78 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           </dl>
           <p><strong>示例：</strong></p>
           <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_backup_auth_transport_workflow</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/test_backup_bounded_delivery.py" class="script-reference">
+          <summary><code>test_cases/test_backup_bounded_delivery.py</code> — Independent delivery expectation for both fixed backup peers。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>Independent delivery expectation for both fixed backup peers。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_backup_bounded_delivery</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_backup_bounded_delivery</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/test_backup_bounded_process.py" class="script-reference">
+          <summary><code>test_cases/test_backup_bounded_process.py</code> — Independent direct contracts for the fixed backup process boundary。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>Independent direct contracts for the fixed backup process boundary。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_backup_bounded_process</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_backup_bounded_process</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/test_backup_bounded_process_workflow.py" class="script-reference">
+          <summary><code>test_cases/test_backup_bounded_process_workflow.py</code> — Real fixed-sibling backup adapter and private-FD workflow。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>Real fixed-sibling backup adapter and private-FD workflow。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_backup_bounded_process_workflow</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_backup_bounded_process_workflow</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/test_backup_bounded_protocol.py" class="script-reference">
+          <summary><code>test_cases/test_backup_bounded_protocol.py</code> — Independent literal contracts for the canonical bounded backup peers。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>Independent literal contracts for the canonical bounded backup peers。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_backup_bounded_protocol</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_backup_bounded_protocol</code></pre></div>
         </details>
         <details data-script-reference="test_cases/test_backup_permission_convergence_workflow.py" class="script-reference">
           <summary><code>test_cases/test_backup_permission_convergence_workflow.py</code> — REQ6: a historical sweep and later collection share one private backup tree。</summary>
@@ -9564,7 +9661,43 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           <p><strong>示例：</strong></p>
           <pre><code>rg -n &quot;ztp_service_runtime&quot; DAY0-Prepare infra monitor tools ztp  # 查找受支持调用者</code></pre></div>
         </details>
-        <h4 id="v2-script-group-ztp" data-nav-title="ztp/ 脚本">ztp/ — 21 个脚本</h4>
+        <h4 id="v2-script-group-ztp" data-nav-title="ztp/ 脚本">ztp/ — 23 个脚本</h4>
+        <details data-script-reference="ztp/backup/_bounded_process.py" class="script-reference">
+          <summary><code>ztp/backup/_bounded_process.py</code> — Fixed bounded command boundary for the backup collector。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>Fixed bounded command boundary for the backup collector。</dd>
+            <dt>是否直接运行：</dt><dd>否；这是备份命令的固定内部进程边界，不是操作员入口。</dd>
+            <dt>运行环境：</dt><dd>随 yaml-collect.py 的受管备份流程运行，不单独取得设备访问或发布权限。</dd>
+            <dt>使用场景：</dt><dd>collector 通过同目录原件加载边界；固定 launcher 监督单次命令并分别报告原命令与锚点状态。</dd>
+            <dt>前置条件：</dt><dd>同目录辅助原件、摘要、调用者和私有管道身份有效；内部 launcher 固定使用 -I -B，禁止独立拼装调用。</dd>
+            <dt>语法/调用方式：</dt><dd>仅由 ztp/backup/yaml-collect.py 加载并通过固定同目录 launcher 编排。</dd>
+            <dt>主要参数：</dt><dd>无独立 CLI；内部 FD、nonce 和期限参数不是操作员输入。</dd>
+            <dt>输入：</dt><dd>collector 已核验的命令、环境、期限和私有 FD；不接收操作员替换的辅助脚本。</dd>
+            <dt>输出/状态：</dt><dd>有界输出、真实命令状态与独立锚点收尾事实；未知或收尾失败不得报告成功。</dd>
+            <dt>成功判据：</dt><dd>上层备份流程完成原件与收尾检查；单个内部返回码不是备份完成或发布证明。</dd>
+            <dt>失败恢复：</dt><dd>保留原始失败和日志，由 collector 失败关闭；不单独执行 launcher 或按裸 PID 清理。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>python3 -B -m unittest -v test_cases.test_backup_bounded_process_workflow  # 仅本地开发验证</code></pre></div>
+        </details>
+        <details data-script-reference="ztp/backup/_bounded_process_launcher.py" class="script-reference">
+          <summary><code>ztp/backup/_bounded_process_launcher.py</code> — Fixed sibling launcher for the backup bounded command boundary。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>Fixed sibling launcher for the backup bounded command boundary。</dd>
+            <dt>是否直接运行：</dt><dd>否；这是备份命令的固定内部进程边界，不是操作员入口。</dd>
+            <dt>运行环境：</dt><dd>随 yaml-collect.py 的受管备份流程运行，不单独取得设备访问或发布权限。</dd>
+            <dt>使用场景：</dt><dd>collector 通过同目录原件加载边界；固定 launcher 监督单次命令并分别报告原命令与锚点状态。</dd>
+            <dt>前置条件：</dt><dd>同目录辅助原件、摘要、调用者和私有管道身份有效；内部 launcher 固定使用 -I -B，禁止独立拼装调用。</dd>
+            <dt>语法/调用方式：</dt><dd>仅由 ztp/backup/yaml-collect.py 加载并通过固定同目录 launcher 编排。</dd>
+            <dt>主要参数：</dt><dd>无独立 CLI；内部 FD、nonce 和期限参数不是操作员输入。</dd>
+            <dt>输入：</dt><dd>collector 已核验的命令、环境、期限和私有 FD；不接收操作员替换的辅助脚本。</dd>
+            <dt>输出/状态：</dt><dd>有界输出、真实命令状态与独立锚点收尾事实；未知或收尾失败不得报告成功。</dd>
+            <dt>成功判据：</dt><dd>上层备份流程完成原件与收尾检查；单个内部返回码不是备份完成或发布证明。</dd>
+            <dt>失败恢复：</dt><dd>保留原始失败和日志，由 collector 失败关闭；不单独执行 launcher 或按裸 PID 清理。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>python3 -B -m unittest -v test_cases.test_backup_bounded_process_workflow  # 仅本地开发验证</code></pre></div>
+        </details>
         <details data-script-reference="ztp/backup/permission-sweep.py" class="script-reference">
           <summary><code>ztp/backup/permission-sweep.py</code> — Inventory and narrowly tighten an existing managed backup tree。</summary>
           <div class="script-body"><dl>

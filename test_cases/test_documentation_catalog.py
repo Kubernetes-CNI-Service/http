@@ -800,6 +800,40 @@ class DocumentationCatalogTests(unittest.TestCase):
                 else:
                     self.assertIn("候选", profile["outputs"])
 
+    def test_backup_bounded_peers_are_not_advertised_as_operator_clis(self):
+        updater = load_path("manual_backup_fixed_peers", USER_MANUAL_SCRIPT)
+        for relative in ("ztp/backup/_bounded_process.py",
+                         "ztp/backup/_bounded_process_launcher.py"):
+            with self.subTest(module=relative):
+                profile = updater.script_profile(ROOT, relative)
+                self.assertTrue(profile["direct"].startswith("否"))
+                self.assertIn("yaml-collect.py", profile["syntax"])
+                self.assertIn("无独立 CLI", profile["parameters"])
+                self.assertIn("FD", profile["inputs"])
+                self.assertIn("-I -B", profile["prerequisite"])
+                self.assertNotIn(f"python3 -B {relative}", profile["syntax"])
+                self.assertNotIn(f"python3 -B {relative}", profile["example"])
+                self.assertIn("test_backup_bounded_process_workflow", profile["example"])
+
+    def test_generated_backup_peer_entries_preserve_internal_boundary(self):
+        updater = load_path("manual_backup_fixed_peer_render", USER_MANUAL_SCRIPT)
+        rendered = updater.render_manual(ROOT)
+        for relative in ("ztp/backup/_bounded_process.py",
+                         "ztp/backup/_bounded_process_launcher.py"):
+            with self.subTest(module=relative):
+                match = re.search(
+                    rf'<details[^>]*data-script-reference="{re.escape(relative)}"[^>]*>'
+                    r'(.*?)</details>', rendered, flags=re.DOTALL,
+                )
+                self.assertIsNotNone(match, relative)
+                body = html.unescape(" ".join(re.sub(r"<[^>]+>", " ", match.group(1)).split()))
+                for literal in ("是否直接运行： 否", "yaml-collect.py", "无独立 CLI",
+                                "FD", "-I -B", "test_backup_bounded_process_workflow"):
+                    self.assertIn(literal, body)
+                self.assertNotIn(f"python3 -B {relative}", body)
+        self.assertEqual((ROOT / "user-manual.html").read_text(encoding="utf-8"),
+                         rendered, "generated manual must be current")
+
     def test_req7_fixed_launchers_and_audit_library_are_not_operator_clis(self):
         updater = load_path("manual_req7_fixed_library_boundaries", USER_MANUAL_SCRIPT)
         for name in ("history_read_launcher", "mutation_launcher",
