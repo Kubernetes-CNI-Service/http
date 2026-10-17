@@ -874,6 +874,7 @@ class ImpactManifestTests(unittest.TestCase):
         self.assertNotIn("test_cases/run_related_tests.py", actual)
         self.assertEqual(
             [
+                "test_cases/fixtures/bounded_inner_fd_fixture.py",
                 ".dockerignore",
                 ".gitattributes",
                 ".github/workflows/monitor-authority-root.yml",
