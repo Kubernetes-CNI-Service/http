@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import base64
 import ast
+import contextlib
 import datetime as dt
+import errno
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import ExitStack, redirect_stderr, redirect_stdout
 import hashlib
 import importlib
 import importlib.util
@@ -18,6 +20,7 @@ from pathlib import Path
 import re
 import shlex
 import shutil
+import signal
 import socket
 import stat
 import subprocess
@@ -58,6 +61,703 @@ def _fixture_interpreter_popen(spawn, fixture, interpreter):
             argv = [interpreter, *argv]
         return spawn(argv, *args, **kwargs)
     return execute
+
+
+# SOURCE ONLY: proposed additions to test_ztp_release_core_review.py.
+# No production callbacks. No PID-file value is a cleanup capability.
+_LEGACY_BOUNDED_OWNED = []
+
+
+def _legacy_inner_fd_contract(backup):
+    """Execute one original pure kwargs definition, NOT observe child kwargs.
+
+    The separate real canonical alias-census workflow is also mandatory.
+    """
+    backup._verify_bounded_sources()
+    source = Path(backup.__file__).with_name("_bounded_process_launcher.py")
+    tree = ast.parse(source.read_bytes(), filename=str(source))
+    nodes = [node for node in tree.body if isinstance(node, ast.FunctionDef)
+             and node.name == "command_kwargs"]
+    if len(nodes) != 1:
+        raise AssertionError("FEATURE_CONTRACT_API_ABSENT: original inner kwargs")
+    namespace = {}
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), str(source), "exec"), namespace)
+    return namespace["command_kwargs"]({"env": {"PATH": "/usr/bin:/bin", "LC_ALL": "C"}})
+
+
+def _legacy_fixed_exec(fixture, interpreter):
+    """Keep the original body/arguments, select only its test-owned runtime."""
+    fixture = Path(fixture)
+    body = fixture.with_name(fixture.name + ".owned-body")
+    original = fixture.read_bytes()
+    with body.open("xb") as stream:
+        stream.write(original)
+    body.chmod(0o600)
+    fixed = os.path.realpath(interpreter)
+    flags = " -I -B" if fixed == os.path.realpath(sys.executable) else ""
+    fixture.write_text(
+        "#!/bin/sh\nexec " + shlex.quote(fixed) + flags + " "
+        + shlex.quote(str(body)) + ' "$@"\n', encoding="utf-8",
+    )
+    fixture.chmod(0o700)
+    return body
+
+
+class _LegacyBoundedFixture:
+    """One test-owned root and exact original backend observation boundaries.
+
+    Default execution remains real. Constructor failure is injected before its
+    original delegate; a stream failure comes only after actual _drive.select
+    sees this own ready file. Unknown ownership retains strong objects/root.
+    """
+    def __init__(self, case, backup):
+        self.case, self.backup = case, backup
+        self.records, self.spawned, self.spawn_kwargs = [], [], []
+        self.spawn_failure = None
+        self.stream_failure = None
+        self.ready_file = None
+        self.current = None
+
+    def __enter__(self):
+        case = self.case
+        parent = getattr(self.backup, "_BOUNDED_PROCESS", None)
+        case.assertIsNotNone(parent, "FEATURE_CONTRACT_API_ABSENT: canonical backend")
+        expected = Path(self.backup.__file__).with_name("_bounded_process.py")
+        case.assertEqual(Path(parent.__file__), expected)
+        self.backup._verify_bounded_sources()
+        case.assertIs(parent._Popen, subprocess.Popen)
+        self.parent = parent
+        self.real_init = parent._Popen.__init__
+        self.real_get_handles = parent._Popen._get_handles
+        self.real_execute_child = parent._Popen._execute_child
+        self.real_close_pipe_fds = parent._Popen._close_pipe_fds
+        self.real_close = os.close
+        self.real_backend = parent.run_bounded_anchored
+        self.real_drive = parent._drive
+        self.real_signal = parent.signal_original_group
+        self.real_wait = parent.wait_original_anchor
+        self.real_pipe = os.pipe
+        self.real_selector = parent.selectors.DefaultSelector
+        for function in (self.real_backend, self.real_drive,
+                         self.real_signal, self.real_wait):
+            case.assertEqual(Path(function.__code__.co_filename), expected)
+        case.assertEqual(Path(self.real_init.__code__.co_filename), Path(subprocess.__file__))
+        for function in (self.real_get_handles, self.real_execute_child, self.real_close_pipe_fds):
+            case.assertEqual(Path(function.__code__.co_filename), Path(subprocess.__file__))
+        self.directory = tempfile.mkdtemp(prefix="http-bounded-legacy-")
+        self.root = Path(self.directory).resolve()
+        metadata = self.root.lstat()
+        self.root_identity = (metadata.st_dev, metadata.st_ino, metadata.st_uid)
+        self.retained = {"root": self.root, "root_identity": self.root_identity,
+                         "records": self.records, "state": "PENDING", "tails": []}
+        _LEGACY_BOUNDED_OWNED.append(self.retained)
+        self._parent_census_owner = object()
+        self._parent_census_captures = []
+        replacements = ((parent._Popen, "__init__", self._init),
+                        (parent, "run_bounded_anchored", self._backend),
+                        (parent, "_drive", self._drive),
+                        (parent, "signal_original_group", self._signal),
+                        (parent, "wait_original_anchor", self._wait),
+                        (os, "pipe", self._pipe))
+        self.bindings = [(obj, name, getattr(obj, name)) for obj, name, _ in replacements]
+        self.stack = ExitStack()
+        self._executable_cache_before = tuple(
+            (name, name in vars(self.backup), vars(self.backup).get(name))
+            for name in ("_SSH_BINARY", "_SSH_BINARY_IDENTITY"))
+        try:
+            for obj, name, replacement in replacements:
+                # Functions on the real class require a real unbound wrapper,
+                # not Mock descriptor binding or a replacement Popen class.
+                if obj is parent._Popen:
+                    owner = self
+                    def init(process, *args, **kwargs):
+                        return owner._init(process, *args, **kwargs)
+                    replacement = init
+                self.stack.enter_context(mock.patch.object(obj, name, replacement))
+            self._capture_parent_fd_census()
+        except BaseException as primary:
+            self.retained["state"] = "UNKNOWN_ENTER_FAILURE"
+            cleanup_NI = None
+            try:
+                self.stack.close()
+            except BaseException as cleanup:
+                self.retained["tails"].append(("enter_binding_restore", cleanup))
+                if not isinstance(cleanup, Exception):
+                    cleanup_NI = cleanup
+            try:
+                namespace = vars(self.backup)
+                for name, present, original in self._executable_cache_before:
+                    if present:
+                        namespace[name] = original
+                    else:
+                        namespace.pop(name, None)
+            except BaseException as cleanup:
+                self.retained["tails"].append(("enter_cache_restore", cleanup))
+                if cleanup_NI is None and not isinstance(cleanup, Exception):
+                    cleanup_NI = cleanup
+            if isinstance(primary, Exception) and cleanup_NI is not None:
+                raise cleanup_NI
+            raise
+        return self
+
+    @staticmethod
+    def _identity(value):
+        return (value.st_dev, value.st_ino, value.st_mode, value.st_uid, value.st_gid)
+
+    def _pipe(self):
+        frame = sys._getframe(1)
+        source = None
+        if frame.f_code is self.real_backend.__code__:
+            target = self.current["pipes"]
+        else:
+            self.case.assertTrue(frame.f_code is self.real_get_handles.__code__
+                or frame.f_code is self.real_execute_child.__code__, "UNKNOWN pipe caller")
+            self.case.assertIsInstance(self.current, dict)
+            self.case.assertEqual(self.current["phase"], "ENTERED_UNADMITTED")
+            process = self.current["process"]
+            self.case.assertIs(type(process), self.parent._Popen)
+            self.case.assertIs(frame.f_locals.get("self"), process)
+            source = ("POPEN_GET_HANDLES" if frame.f_code is self.real_get_handles.__code__
+                      else "POPEN_EXEC_ERROR")
+            target = self.current.setdefault("stdlib_pipes", [])
+        ends = self.real_pipe()
+        rows = [{"fd": fd, "identity": None} for fd in ends]
+        if source is not None:
+            for row in rows:
+                row["source"] = source
+        target.extend(rows)  # Both original slots held before any fstat.
+        for row in rows:
+            row["identity"] = self._identity(os.fstat(row["fd"]))
+        return ends
+
+    def _close(self, fd):
+        # Deliberately not globally installed yet: only this tested original
+        # ExitStack -> _close_pipe_fds route is admitted, not every close path.
+        callback_frame = sys._getframe(1)
+        wrapper_codes = [value for value in contextlib.ExitStack._create_cb_wrapper.__code__.co_consts
+                         if type(value) is type(self.real_close_pipe_fds.__code__)]
+        self.case.assertEqual(len(wrapper_codes), 1)
+        self.case.assertIs(callback_frame.f_code, wrapper_codes[0])
+        callback = callback_frame.f_locals.get("callback")
+        self.case.assertIs(getattr(callback, "__self__", None), self)
+        self.case.assertIs(getattr(callback, "__func__", None), type(self)._close)
+        self.case.assertEqual(callback_frame.f_locals.get("args"), (fd,))
+        self.case.assertEqual(callback_frame.f_locals.get("kwds"), {})
+        exit_frame = callback_frame.f_back
+        self.case.assertIsNotNone(exit_frame)
+        self.case.assertIs(exit_frame.f_code, contextlib.ExitStack.__exit__.__code__)
+        original_frame = exit_frame.f_back
+        self.case.assertIsNotNone(original_frame)
+        self.case.assertIs(original_frame.f_code, self.real_close_pipe_fds.__code__)
+        record = self.current
+        self.case.assertIsInstance(record, dict)
+        self.case.assertEqual(record["phase"], "ENTERED_UNADMITTED")
+        process = record["process"]
+        self.case.assertIs(type(process), self.parent._Popen)
+        self.case.assertIs(original_frame.f_locals.get("self"), process)
+        rows = [row for row in record["stdlib_pipes"] if row["fd"] == fd]
+        self.case.assertTrue(rows, "UNKNOWN unrecorded original stdlib FD")
+        original = rows[-1]  # Latest captured allocation object, never just metadata.
+        self.case.assertNotIn("close_before_reuse", original)
+        self.case.assertEqual(self._identity(os.fstat(fd)), original["identity"])
+        # A delegate exception propagates as the same object/cause. Neither
+        # later EBADF nor a C exception means this call returned successfully.
+        answer = self.real_close(fd)
+        try:
+            os.fstat(fd)
+        except OSError as error:
+            if error.errno != errno.EBADF:
+                raise
+        else:
+            self.case.fail("UNKNOWN close return without immediate absent slot")
+        self.case.assertIs(self.current, record)
+        self.case.assertEqual(record["phase"], "ENTERED_UNADMITTED")
+        self.case.assertIs(record["process"], process)
+        latest = [row for row in record["stdlib_pipes"] if row["fd"] == fd]
+        self.case.assertIs(latest[-1], original)
+        original["close_before_reuse"] = (
+            "OS_CLOSE_RETURN", original, process, self.real_close_pipe_fds.__code__, original["identity"])
+        return answer
+
+    def _init(self, process, argv, **kwargs):
+        # Caller is the tiny unbound wrapper; its caller must be exact backend.
+        self.case.assertIs(sys._getframe(2).f_code, self.real_backend.__code__)
+        record = self.current
+        record["process"] = process  # Strong object before original __init__.
+        record["phase"] = "ENTERED_UNADMITTED"
+        self.case.assertEqual(argv[:4], [sys.executable, "-I", "-B", str(self.parent.LAUNCHER)])
+        self.case.assertEqual(len(argv), 8)
+        pipes = record["pipes"]
+        self.case.assertEqual(len(pipes), 4)
+        self.case.assertEqual(tuple(kwargs["pass_fds"]), (pipes[0]["fd"], pipes[3]["fd"]))
+        self.case.assertIs(kwargs["close_fds"], True)
+        self.case.assertIs(kwargs["start_new_session"], True)
+        self.spawn_kwargs.append(dict(kwargs))
+        if self.spawn_failure is not None:
+            record["phase"] = "TEST_FAILURE_BEFORE_ORIGINAL_INIT"
+            raise self.spawn_failure
+        answer = self.real_init(process, argv, **kwargs)
+        record["phase"] = "ORIGINAL_INIT_RETURNED"
+        record["pid"] = process.pid
+        self.spawned.append(process)
+        for name in ("stdin", "stdout", "stderr"):
+            stream = getattr(process, name, None)
+            if stream is not None:
+                row = {"stream": stream, "fd": stream.fileno(), "identity": None}
+                record["streams"].append(row)
+                row["identity"] = self._identity(os.fstat(row["fd"]))
+        return answer
+
+    def _backend(self, *args, **kwargs):
+        record = {"process": None, "phase": "BEFORE_CONSTRUCTOR", "reservation": None,
+                  "pipes": [], "stdlib_pipes": [], "streams": [], "events": [], "rescues": [], "errors": []}
+        self.records.append(record)
+        self.current = record
+        primary = None
+        try:
+            return self.real_backend(*args, **kwargs)
+        except BaseException as error:
+            primary = error
+            raise
+        finally:
+            # Measure before another command/root operation can reuse a slot.
+            # Later EBADF on a recycled number is not proof for this original.
+            # Stdlib constructor pipes can close/reuse slots before return.
+            # No late slot observation may manufacture their product proof.
+            for row in record["streams"] + record["pipes"]:
+                try:
+                    os.fstat(row["fd"])
+                except OSError as error:
+                    if error.errno == errno.EBADF:
+                        row["product_closed_EBADF_at_return"] = True
+                    else:
+                        record["errors"].append(("product_fd_readback", error))
+                except BaseException as error:
+                    record["errors"].append(("product_fd_readback", error))
+                else:
+                    row["product_closed_EBADF_at_return"] = False
+            try:
+                process = record["process"]
+                known_preinit = (primary is not None and primary is self.spawn_failure
+                    and record["phase"] == "TEST_FAILURE_BEFORE_ORIGINAL_INIT"
+                    and type(process) is self.parent._Popen
+                    and not getattr(process, "_child_created", False)
+                    and getattr(process, "pid", None) is None
+                    and record["reservation"] is None
+                    and not record["stdlib_pipes"] and not record["streams"]
+                    and not record["events"] and not record["errors"] and not record["rescues"]
+                    and len(record["pipes"]) == 4
+                    and all(row.get("product_closed_EBADF_at_return") is True for row in record["pipes"]))
+                if known_preinit:
+                    record["known_preinit_proof"] = (
+                        record, self, primary, process, type(self)._backend.__code__)
+                else:
+                    self._capture_parent_fd_census()
+            except BaseException as error:
+                record["errors"].append(("parent_fd_census_return", error))
+                if (primary is None or isinstance(primary, Exception)) and not isinstance(error, Exception):
+                    raise
+            finally:
+                self.current = None
+
+    def _signal(self, reservation):
+        record = self.current
+        self.case.assertIs(reservation.process, record["process"])
+        record["reservation"] = reservation
+        self.case.assertFalse(reservation.wait_started)
+        self.case.assertFalse(reservation.reaped)
+        record["events"].append("SIGNAL_BEFORE_REAP")
+        return self.real_signal(reservation)
+
+    def _wait(self, reservation, timeout=1):
+        record = self.current
+        self.case.assertIs(reservation, record["reservation"])
+        self.case.assertEqual(timeout, 1)
+        self.case.assertEqual(record["events"][-1], "SIGNAL_BEFORE_REAP")
+        result = self.real_wait(reservation, timeout=timeout)
+        record["events"].append("ORIGINAL_WAIT_RETURN")
+        return result
+
+    def _ready(self):
+        path = self.ready_file
+        if path is None:
+            return False
+        self.case.assertEqual(path.parent, self.root)
+        try:
+            first = path.lstat()
+        except FileNotFoundError:
+            return False
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        try:
+            held = os.fstat(fd)
+            self.case.assertEqual(self._identity(first), self._identity(held))
+            self.case.assertTrue(stat.S_ISREG(held.st_mode) and held.st_nlink == 1)
+            value = os.read(fd, 64)
+            if not value:
+                return False  # The fixture may have opened before write.
+            self.case.assertTrue(value.isdigit() and 0 < len(value) < 32)
+            self.current["ready_original"] = (self._identity(held), hashlib.sha256(value).hexdigest())
+            return True  # Bytes are readiness evidence, never PID authority.
+        finally:
+            os.close(fd)
+
+    def _drive(self, process, reservation, *args):
+        self.case.assertIs(process, self.current["process"])
+        self.current["reservation"] = reservation
+        if self.stream_failure is None:
+            return self.real_drive(process, reservation, *args)
+        # args: request_write/status_read/request/stdin/deadline/state/log.
+        deadline = args[4]
+        ready_deadline = min(deadline, time.monotonic() + 1.0)
+        owner = self
+        class Selector:
+            def __init__(self):
+                owner.case.assertIs(sys._getframe(1).f_code, owner.real_drive.__code__)
+                self.original = owner.real_selector()
+            def register(self, *a, **k):
+                return self.original.register(*a, **k)
+            def unregister(self, *a, **k):
+                return self.original.unregister(*a, **k)
+            def select(self, timeout):
+                events = self.original.select(timeout)
+                if time.monotonic() < ready_deadline and owner._ready():
+                    owner.case.assertLess(time.monotonic(), ready_deadline)
+                    owner.current["events"].append("READY_ORIGINAL_SELECT_FAULT")
+                    raise owner.stream_failure
+                return events
+            def close(self):
+                owner.current["selector_close_called"] = True
+                return self.original.close()
+        with mock.patch.object(self.parent.selectors, "DefaultSelector", Selector):
+            return self.real_drive(process, reservation, *args)
+
+    def _read_parent_fd_census(self):
+        # Only this process, with the original iterator held through every stat.
+        # The local result is not usable until the original context exit succeeds.
+        iterator = os.scandir("/dev/fd")
+        primary = cleanup = recording_error = None
+        result = None
+        try:
+            self.case.assertIs(iterator.__enter__(), iterator)
+            names, rows, seen = [], [], set()
+            for entry in iterator:
+                name = entry.name
+                self.case.assertTrue(type(name) is str and name.isascii() and name.isdecimal()
+                                     and 0 < len(name) <= 10, "UNKNOWN census name")
+                fd = int(name)
+                self.case.assertEqual(str(fd), name, "UNKNOWN noncanonical census slot")
+                self.case.assertNotIn(fd, seen, "UNKNOWN duplicate census slot")
+                self.case.assertLess(len(rows), 128, "UNKNOWN overbound census")
+                seen.add(fd)
+                first = os.fstat(fd)
+                second = os.fstat(fd)
+                a = (first.st_dev, first.st_ino, first.st_mode, first.st_nlink, first.st_uid, first.st_gid)
+                b = (second.st_dev, second.st_ino, second.st_mode, second.st_nlink, second.st_uid, second.st_gid)
+                self.case.assertTrue(all(type(value) is int and value >= 0 for value in a + b))
+                self.case.assertEqual(a, b, "UNKNOWN unstable census original")
+                names.append(name)
+                rows.append((fd, a, b))
+            self.case.assertTrue({0, 1, 2} <= seen, "UNKNOWN missing baseline stdio")
+            result = {"listed": tuple(names), "rows": tuple(rows), "scan_exhausted": True}
+        except BaseException as error:
+            primary = error
+        try:
+            iterator.__exit__(type(primary) if primary is not None else None,
+                              primary, primary.__traceback__ if primary is not None else None)
+        except BaseException as error:
+            cleanup = error
+            try:
+                self.retained["tails"].append(("parent_fd_census_iterator_close", error))
+            except BaseException as error:
+                recording_error = error  # Metadata could not be captured; never return a sample.
+        chosen = (primary if primary is not None and not isinstance(primary, Exception)
+                  else cleanup if cleanup is not None and not isinstance(cleanup, Exception)
+                  else recording_error if recording_error is not None and not isinstance(recording_error, Exception)
+                  else primary if primary is not None
+                  else cleanup if cleanup is not None else recording_error)
+        if chosen is not None:
+            raise chosen  # Same object/cause; no raise-from replacement.
+        return result
+
+    def _capture_parent_fd_census(self):
+        # No public table, phase or PASS input. Fake frames in pure controls test
+        # this predicate only; actual source-chain/observer proof is still required.
+        frame = sys._getframe(1)
+        enter, backend, exit_code = (type(self).__enter__.__code__, type(self)._backend.__code__,
+                                     type(self).__exit__.__code__)
+        self.case.assertIs(frame.f_locals.get("self"), self)
+        self.case.assertTrue(frame.f_code is enter or frame.f_code is backend or frame.f_code is exit_code)
+        self.case.assertIs(type(self.retained), dict)
+        self.case.assertIs(type(self.records), list)
+        self.case.assertIs(self.retained["records"], self.records)
+        self.case.assertIs(type(self._parent_census_owner), object)
+        captures, nonce = self._parent_census_captures, self._parent_census_owner
+        self.case.assertIs(type(captures), list)
+        def original(sample, code, record):
+            return (type(sample) is dict and sum(type(proof) is tuple and len(proof) == 5
+                and proof[0] is sample and proof[1] is self and proof[2] is nonce
+                and proof[3] is code and proof[4] is record for proof in captures) == 1)
+        def known_preinit(item):
+            proof = item.get("known_preinit_proof")
+            process = item.get("process")
+            return (type(proof) is tuple and len(proof) == 5
+                and proof[0] is item and proof[1] is self
+                and isinstance(proof[2], BaseException) and proof[3] is process
+                and proof[4] is backend and type(process) is self.parent._Popen
+                and not getattr(process, "_child_created", False)
+                and getattr(process, "pid", None) is None
+                and item.get("phase") == "TEST_FAILURE_BEFORE_ORIGINAL_INIT"
+                and item.get("reservation") is None
+                and not item.get("stdlib_pipes") and not item.get("streams")
+                and not item.get("events") and not item.get("errors") and not item.get("rescues")
+                and len(item.get("pipes", ())) == 4
+                and all(row.get("product_closed_EBADF_at_return") is True for row in item["pipes"])
+                and "parent_fd_final" not in item)
+        if frame.f_code is enter:
+            self.case.assertEqual(self.records, [])
+            self.case.assertIsNone(self.current)
+            self.case.assertEqual(captures, [])
+            target, key, record = self.retained, "parent_fd_baseline", None
+        else:
+            baseline = self.retained.get("parent_fd_baseline")
+            self.case.assertTrue(original(baseline, enter, None), "UNKNOWN baseline capture origin")
+            if frame.f_code is backend:
+                record = frame.f_locals.get("record")
+                self.case.assertIs(type(record), dict)
+                self.case.assertIs(self.current, record)
+                self.case.assertTrue(self.records and self.records[-1] is record)
+                self.case.assertEqual(sum(item is record for item in self.records), 1)
+                prior = self.records[:-1]
+                self.case.assertEqual(len(captures), 1 + sum(not known_preinit(item) for item in prior))
+                for item in prior:
+                    self.case.assertTrue(known_preinit(item)
+                        or original(item.get("parent_fd_final"), backend, item),
+                        "UNKNOWN prior backend or preinit origin")
+                self.case.assertEqual(record["phase"], "ORIGINAL_INIT_RETURNED")
+                process, reservation = record["process"], record["reservation"]
+                self.case.assertIs(type(process), self.parent._Popen)
+                self.case.assertIs(type(reservation), self.parent.Reservation)
+                self.case.assertIs(reservation.process, process)
+                self.case.assertTrue(type(record["pid"]) is int and record["pid"] > 0)
+                self.case.assertEqual(process.pid, record["pid"])
+                self.case.assertEqual(reservation.pid, record["pid"])
+                self.case.assertTrue(reservation.signal_attempted is True and reservation.wait_started is True
+                                     and reservation.reaped is True and reservation.lost is False)
+                self.case.assertEqual(process.returncode, -signal.SIGKILL)
+                self.case.assertEqual(record["events"][-2:], ["SIGNAL_BEFORE_REAP", "ORIGINAL_WAIT_RETURN"])
+                self.case.assertFalse(record["errors"] or record["rescues"])
+                self.case.assertEqual(len(record["pipes"]), 4)
+                self.case.assertTrue(all(row.get("product_closed_EBADF_at_return") is True
+                                         for row in record["streams"] + record["pipes"]))
+                self.case.assertTrue(all(row["stream"].closed for row in record["streams"]))
+                target, key = record, "parent_fd_final"
+            else:
+                self.case.assertIsNone(self.current)
+                completed = [item for item in self.records if not known_preinit(item)]
+                self.case.assertEqual(len(captures), len(completed) + 1)
+                for item in completed:
+                    self.case.assertTrue(original(item.get("parent_fd_final"), backend, item),
+                                         "UNKNOWN backend sample origin")
+                    self.case.assertTrue(self._final_parent_census_policy(item),
+                                         "UNKNOWN original end-state prerequisites")
+                target, key, record = self.retained, "parent_fd_context", None
+        self.case.assertNotIn(key, target, "UNKNOWN duplicate census capture")
+        sample = self._read_parent_fd_census()
+        self.case.assertIs(type(sample), dict)
+        self.case.assertEqual(set(sample), {"listed", "rows", "scan_exhausted"})
+        self.case.assertIs(sample["scan_exhausted"], True)
+        if frame.f_code is exit_code:
+            self.case.assertEqual({row[0]: row[1:] for row in sample["rows"]},
+                                 {row[0]: row[1:] for row in baseline["rows"]},
+                                 "UNKNOWN final context FD set drift")
+        proof = (sample, self, nonce, frame.f_code, record)
+        try:
+            captures.append(proof)
+            target[key] = sample
+        except BaseException:
+            if target.get(key) is sample:
+                del target[key]
+            if captures and captures[-1] is proof:
+                captures.pop()
+            raise
+
+    def _final_parent_census_policy(self, record):
+        # Pure raw-table predicate, NOT source provenance or caller permission.
+        # Real __exit__ also requires this context's private capture ledger;
+        # equal caller-created dictionaries cannot supply those originals.
+        if (type(self.retained) is not dict or type(self.records) is not list
+                or self.retained.get("records") is not self.records
+                or not any(item is record for item in self.records)
+                or type(record) is not dict or self.retained.get("tails")
+                or record.get("errors") or record.get("rescues")
+                or record.get("phase") != "ORIGINAL_INIT_RETURNED"):
+            return False
+        process, reservation = record.get("process"), record.get("reservation")
+        if (type(process) is not self.parent._Popen
+                or type(reservation) is not self.parent.Reservation
+                or reservation.process is not process
+                or type(record.get("pid")) is not int or record["pid"] <= 0
+                or reservation.pid != record["pid"] or process.pid != record["pid"]
+                or reservation.signal_attempted is not True or reservation.wait_started is not True
+                or reservation.reaped is not True or reservation.lost is not False
+                or process.returncode != -signal.SIGKILL
+                or record.get("events", [])[-2:] != ["SIGNAL_BEFORE_REAP", "ORIGINAL_WAIT_RETURN"]):
+            return False
+        private, streams = record.get("pipes"), record.get("streams")
+        if (type(private) is not list or len(private) != 4
+                or any(type(row) is not dict or row.get("product_closed_EBADF_at_return") is not True
+                       for row in private)
+                or type(streams) is not list
+                or any(type(row) is not dict or row.get("product_closed_EBADF_at_return") is not True
+                       or not any(row.get("stream") is value for value in
+                                  (process.stdin, process.stdout, process.stderr) if value is not None)
+                       or row["stream"].closed is not True for row in streams)
+                or len(streams) != sum(value is not None for value in
+                                      (process.stdin, process.stdout, process.stderr))):
+            return False
+
+        def table(sample):
+            # Exhaustion is a raw iterator observation, never an overall PASS.
+            if (type(sample) is not dict or any(type(key) is not str for key in sample)
+                    or set(sample) != {"listed", "rows", "scan_exhausted"}
+                    or sample["scan_exhausted"] is not True):
+                return None
+            listed, rows = sample["listed"], sample["rows"]
+            if (type(listed) is not tuple or type(rows) is not tuple
+                    or not 3 <= len(listed) <= 128 or len(rows) != len(listed)
+                    or any(type(name) is not str or not name.isascii() or not name.isdecimal()
+                           or len(name) > 10 for name in listed)
+                    or len(set(listed)) != len(listed)):
+                return None
+            result = {}
+            for row in rows:
+                if type(row) is not tuple or len(row) != 3:
+                    return None
+                fd, first, second = row
+                if (type(fd) is not int or fd < 0 or fd in result
+                        or type(first) is not tuple or type(second) is not tuple
+                        or len(first) != 6 or len(second) != 6
+                        or any(type(value) is not int or value < 0 for value in first + second)
+                        or first != second):
+                    return None
+                result[fd] = first  # Full st_mode, not S_IFMT or ignored permissions.
+            if {str(fd) for fd in result} != set(listed) or not {0, 1, 2} <= set(result):
+                return None
+            return result
+        baseline = table(self.retained.get("parent_fd_baseline"))
+        final = table(record.get("parent_fd_final"))
+        return baseline is not None and final is not None and baseline == final
+
+    def __exit__(self, exc_type, primary, traceback):
+        # Each owned original gets an attempt. Never poll/getpgid/adopt PID-file
+        # numbers. Any rescue is fixture-only and forbids product PASS.
+        for record in self.records:
+            reservation = record["reservation"]
+            process = record["process"]
+            if record["phase"] == "ORIGINAL_INIT_RETURNED" and not (
+                    reservation is not None and reservation.reaped and not reservation.lost):
+                try:
+                    if (type(reservation) is not self.parent.Reservation
+                            or reservation.process is not process
+                            or reservation.pid != record["pid"]
+                            or reservation.lost or reservation.reaped or reservation.wait_started
+                            or reservation.signal_attempted or process.returncode is not None):
+                        raise AssertionError("UNKNOWN original reservation; no cleanup adoption")
+                    record["rescues"].append("CONFIRMED_ORIGINAL_GROUP_SIGNAL_AND_WAIT")
+                    self.real_signal(reservation)
+                    self.real_wait(reservation, timeout=1)
+                except BaseException as error:
+                    record["errors"].append(("original_reservation_rescue", error))
+            elif record["phase"] == "ENTERED_UNADMITTED":
+                record["errors"].append(("constructor_unknown", AssertionError("UNKNOWN constructor")))
+            if (record["phase"] == "ORIGINAL_INIT_RETURNED" and not record["rescues"]
+                    and not record["errors"]):
+                if (record["events"][-2:] != ["SIGNAL_BEFORE_REAP", "ORIGINAL_WAIT_RETURN"]
+                        or process.returncode != -signal.SIGKILL
+                        or any(not row["stream"].closed for row in record["streams"])):
+                    record["errors"].append(("product_completion", AssertionError("product cleanup not confirmed")))
+            for row in record["streams"] + record["pipes"]:
+                if row.get("product_closed_EBADF_at_return") is True:
+                    continue  # Never inspect/close a later owner of that slot.
+                try:
+                    try:
+                        current = os.fstat(row["fd"])
+                    except OSError as error:
+                        if error.errno == errno.EBADF:
+                            record["errors"].append(("late_fd_EBADF_not_product_proof",
+                                AssertionError("UNKNOWN product FD close evidence missing at return")))
+                            continue
+                        raise
+                    if row["identity"] is None or self._identity(current) != row["identity"]:
+                        raise AssertionError("UNKNOWN reused FD; not closed")
+                    record["rescues"].append("OWNED_FD_CLOSE")
+                    if "stream" in row:
+                        row["stream"].close()
+                    else:
+                        os.close(row["fd"])
+                except BaseException as error:
+                    record["errors"].append(("original_fd_rescue", error))
+        try:
+            self.stack.close()
+        except BaseException as error:
+            self.retained["tails"].append(("binding_restore", error))
+        if hasattr(self, "_executable_cache_before"):
+            try:
+                namespace = vars(self.backup)
+                for name, present, original in self._executable_cache_before:
+                    if present:
+                        namespace[name] = original
+                    else:
+                        namespace.pop(name, None)
+            except BaseException as error:
+                self.retained["tails"].append(("cache_restore", error))
+        restored = [getattr(obj, name) is original for obj, name, original in self.bindings]
+        self.retained["restored"] = restored
+        context_captured = False
+        if any(record.get("stdlib_pipes") for record in self.records):
+            try:
+                self._capture_parent_fd_census()
+                context_captured = True
+            except BaseException as error:
+                self.retained["tails"].append(("parent_fd_census_context", error))
+        for record in self.records:
+            if record.get("stdlib_pipes"):
+                accepted = False
+                try:
+                    accepted = context_captured and self._final_parent_census_policy(record)
+                except BaseException as error:
+                    record["errors"].append(("final_parent_census_policy", error))
+                if accepted:
+                    record["stdio_end_state_evidence"] = "FINAL_PARENT_FD_SET_EQUALS_BASELINE"
+                    for row in record["stdlib_pipes"]:
+                        row["close_history"] = "OMITTED_NOT_OBSERVED"
+                else:
+                    record["errors"].append(("stdlib_close_not_observed",
+                        AssertionError("UNKNOWN stdlib final parent FD state")))
+        clean = (all(restored) and not self.retained["tails"]
+                 and all(not r["rescues"] and not r["errors"] for r in self.records))
+        self.retained["state"] = "PRODUCT_CLEAN" if clean else "UNKNOWN_OR_TEST_RESCUED"
+        if clean:
+            try:
+                metadata = self.root.lstat()
+                self.case.assertEqual((metadata.st_dev, metadata.st_ino, metadata.st_uid), self.root_identity)
+                shutil.rmtree(self.root)
+                with self.case.assertRaises(FileNotFoundError):
+                    self.root.lstat()
+            except BaseException as error:
+                clean = False
+                self.retained["state"] = "UNKNOWN_ROOT_CLEANUP"
+                self.retained["tails"].append(("owned_root_cleanup", error))
+        # Preserve an original NI/cause even if fixture evidence is incomplete.
+        # The module-global record/root is retained for the future controller.
+        cleanup_errors = [error for record in self.records for _phase, error in record["errors"]]
+        cleanup_errors += [error for _phase, error in self.retained["tails"]]
+        cleanup_NI = next((error for error in cleanup_errors if not isinstance(error, Exception)), None)
+        if (primary is None or isinstance(primary, Exception)) and cleanup_NI is not None:
+            raise cleanup_NI
+        if primary is None or isinstance(primary, Exception):
+            self.case.assertTrue(clean, "UNKNOWN or test-only rescue; not product PASS")
+        return False
 
 
 def _askpass_identity_probe_argv(helper):
@@ -4110,7 +4810,8 @@ class BackupAuthenticationContractTests(unittest.TestCase):
                 self.backup._cleanup_askpass()
 
     def test_ssh_subprocess_has_hard_group_deadline_fd_whitelist_and_output_cap(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with _LegacyBoundedFixture(self, self.backup) as legacy:
+            directory = legacy.directory
             root = Path(directory).resolve()
             fake_bin = root / "bin"
             fake_bin.mkdir()
@@ -4129,25 +4830,20 @@ class BackupAuthenticationContractTests(unittest.TestCase):
                 encoding="utf-8",
             )
             fake_ssh.chmod(0o755)
+            _legacy_fixed_exec(fake_ssh, sys.executable)
             environment = dict(os.environ)
             environment.update({
                 "PATH": str(fake_bin) + os.pathsep + environment.get("PATH", ""),
                 "PID_FILE": str(pid_file),
             })
-            spawn_kwargs = []
-            real_popen = _fixture_interpreter_popen(subprocess.Popen, fake_ssh, sys.executable)
-
-            def recording_popen(*args, **kwargs):
-                spawn_kwargs.append(dict(kwargs))
-                return real_popen(*args, **kwargs)
+            spawn_kwargs = legacy.spawn_kwargs
 
             started = time.monotonic()
             try:
-                with mock.patch.object(self.backup.subprocess, "Popen", side_effect=recording_popen):
-                    self.backup._run_ssh(
-                        "cumulus", self.TARGET, "true", 0.1,
-                        self.backup._KEY_AUTH_OPTS, env=environment,
-                    )
+                self.backup._run_ssh(
+                    "cumulus", self.TARGET, "true", 0.1,
+                    self.backup._KEY_AUTH_OPTS, env=environment,
+                )
             except subprocess.TimeoutExpired:
                 pass
             elapsed = time.monotonic() - started
@@ -4156,7 +4852,13 @@ class BackupAuthenticationContractTests(unittest.TestCase):
             first = spawn_kwargs[0]
             self.assertIs(first.get("close_fds"), True)
             self.assertTrue(first.get("start_new_session"))
-            self.assertEqual((), tuple(first.get("pass_fds", ())))
+            self.assertEqual(2, len(tuple(first.get("pass_fds", ()))))
+            # Empty inheritance belongs to original inner command_kwargs, not
+            # outer launcher. Actual no-alias proof is the separate workflow.
+            inner = _legacy_inner_fd_contract(self.backup)
+            self.assertEqual((), tuple(inner.get("pass_fds", ())))
+            self.assertIs(inner.get("close_fds"), True)
+            self.assertIs(inner.get("start_new_session"), False)
             if pid_file.exists():
                 descendant = int(pid_file.read_text(encoding="utf-8"))
                 deadline = time.monotonic() + 0.5
@@ -4182,7 +4884,8 @@ class BackupAuthenticationContractTests(unittest.TestCase):
             self.assertLessEqual(len(result.stderr.encode("utf-8")), limit)
 
     def test_ssh_flood_is_cut_off_before_timeout_and_descendant_is_reaped(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with _LegacyBoundedFixture(self, self.backup) as legacy:
+            directory = legacy.directory
             root = Path(directory).resolve()
             fake_bin = root / "bin"
             fake_bin.mkdir()
@@ -4203,6 +4906,7 @@ class BackupAuthenticationContractTests(unittest.TestCase):
                 encoding="utf-8",
             )
             fake_ssh.chmod(0o755)
+            _legacy_fixed_exec(fake_ssh, sys.executable)
             environment = dict(os.environ)
             environment.update({
                 "PATH": str(fake_bin) + os.pathsep + environment.get("PATH", ""),
@@ -4210,14 +4914,10 @@ class BackupAuthenticationContractTests(unittest.TestCase):
                 "CHILD_PID": str(child_file),
             })
             started = time.monotonic()
-            with mock.patch.object(
-                self.backup.subprocess, "Popen",
-                side_effect=_fixture_interpreter_popen(subprocess.Popen, fake_ssh, sys.executable),
-            ):
-                result = self.backup._run_ssh(
-                    "cumulus", self.TARGET, "true", 5,
-                    self.backup._KEY_AUTH_OPTS, env=environment,
-                )
+            result = self.backup._run_ssh(
+                "cumulus", self.TARGET, "true", 5,
+                self.backup._KEY_AUTH_OPTS, env=environment,
+            )
             elapsed = time.monotonic() - started
             self.assertLess(elapsed, 1.5, "output flood was buffered until timeout")
             self.assertEqual(125, result.returncode)
@@ -4244,7 +4944,8 @@ class BackupAuthenticationContractTests(unittest.TestCase):
                     self.fail(f"SSH process survived bounded-output stop: {pid}")
 
     def test_ssh_successful_leader_cannot_leave_pipe_holding_descendant(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with _LegacyBoundedFixture(self, self.backup) as legacy:
+            directory = legacy.directory
             root = Path(directory).resolve()
             fake_bin = root / "bin"
             fake_bin.mkdir()
@@ -4257,6 +4958,7 @@ class BackupAuthenticationContractTests(unittest.TestCase):
                 encoding="utf-8",
             )
             fake_ssh.chmod(0o755)
+            _legacy_fixed_exec(fake_ssh, "/bin/sh")
             environment = dict(os.environ)
             environment.update({
                 "PATH": str(fake_bin) + os.pathsep + environment.get("PATH", ""),
@@ -4264,14 +4966,10 @@ class BackupAuthenticationContractTests(unittest.TestCase):
             })
             before_fds = len(list(Path("/dev/fd").iterdir()))
             started = time.monotonic()
-            with mock.patch.object(
-                self.backup.subprocess, "Popen",
-                side_effect=_fixture_interpreter_popen(subprocess.Popen, fake_ssh, "/bin/sh"),
-            ):
-                result = self.backup._run_ssh(
-                    "cumulus", self.TARGET, "true", 1,
-                    self.backup._KEY_AUTH_OPTS, env=environment,
-                )
+            result = self.backup._run_ssh(
+                "cumulus", self.TARGET, "true", 1,
+                self.backup._KEY_AUTH_OPTS, env=environment,
+            )
             self.assertLess(time.monotonic() - started, 1.5)
             self.assertNotEqual(0, result.returncode)
             self.assertTrue(child_file.is_file())
@@ -4288,7 +4986,8 @@ class BackupAuthenticationContractTests(unittest.TestCase):
             self.assertEqual(before_fds, len(list(Path("/dev/fd").iterdir())))
 
     def test_ssh_successful_leader_cleans_detached_stdio_descendant(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with _LegacyBoundedFixture(self, self.backup) as legacy:
+            directory = legacy.directory
             root = Path(directory).resolve()
             fake_bin = root / "bin"
             fake_bin.mkdir()
@@ -4301,77 +5000,61 @@ class BackupAuthenticationContractTests(unittest.TestCase):
                 encoding="utf-8",
             )
             fake_ssh.chmod(0o755)
+            _legacy_fixed_exec(fake_ssh, "/bin/sh")
             environment = dict(os.environ)
             environment.update({
                 "PATH": str(fake_bin) + os.pathsep + environment.get("PATH", ""),
                 "CHILD_PID": str(child_file),
             })
-            real_popen = _fixture_interpreter_popen(subprocess.Popen, fake_ssh, "/bin/sh")
-            spawned = []
-
-            def recording_popen(*args, **kwargs):
-                process = real_popen(*args, **kwargs)
-                spawned.append(process)
-                return process
+            spawned = legacy.spawned
 
             before_fds = len(list(Path("/dev/fd").iterdir()))
             descendant = None
-            try:
-                started = time.monotonic()
-                with mock.patch.object(
-                    self.backup.subprocess, "Popen", side_effect=recording_popen,
-                ):
-                    result = self.backup._run_ssh(
-                        "cumulus", self.TARGET, "true", 1,
-                        self.backup._KEY_AUTH_OPTS, env=environment,
-                    )
-                elapsed = time.monotonic() - started
-                self.assertLess(elapsed, 1.5)
-                self.assertEqual(0, result.returncode)
-                self.assertEqual(1, len(spawned))
-                self.assertIsNotNone(spawned[0].poll(), "SSH leader was not reaped")
-                self.assertTrue(spawned[0].stdout.closed)
-                self.assertTrue(spawned[0].stderr.closed)
-                self.assertTrue(child_file.is_file())
-                descendant = int(child_file.read_text(encoding="utf-8"))
-                deadline = time.monotonic() + 0.5
-                while time.monotonic() < deadline:
-                    try:
-                        os.kill(descendant, 0)
-                    except ProcessLookupError:
-                        break
-                    time.sleep(0.02)
-                else:
-                    self.fail(
-                        f"successful SSH leader detached descendant: {descendant}"
-                    )
-                self.assertEqual(
-                    before_fds, len(list(Path("/dev/fd").iterdir())),
+            started = time.monotonic()
+            result = self.backup._run_ssh(
+                "cumulus", self.TARGET, "true", 1,
+                self.backup._KEY_AUTH_OPTS, env=environment,
+            )
+            elapsed = time.monotonic() - started
+            self.assertLess(elapsed, 1.5)
+            self.assertEqual(0, result.returncode)
+            self.assertEqual(1, len(spawned))
+            self.assertIsNotNone(spawned[0].poll(), "SSH leader was not reaped")
+            self.assertTrue(spawned[0].stdout.closed)
+            self.assertTrue(spawned[0].stderr.closed)
+            self.assertTrue(child_file.is_file())
+            descendant = int(child_file.read_text(encoding="utf-8"))
+            deadline = time.monotonic() + 0.5
+            while time.monotonic() < deadline:
+                try:
+                    os.kill(descendant, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.02)
+            else:
+                self.fail(
+                    f"successful SSH leader detached descendant: {descendant}"
                 )
-            finally:
-                if descendant is None and child_file.is_file():
-                    descendant = int(child_file.read_text(encoding="utf-8"))
-                if descendant is not None:
-                    try:
-                        os.kill(descendant, 9)
-                    except ProcessLookupError:
-                        pass
+            self.assertEqual(
+                before_fds, len(list(Path("/dev/fd").iterdir())),
+            )
 
     def test_ssh_spawn_and_stream_faults_reap_group_close_streams_and_fds(self):
         def fd_count():
             return len(list(Path("/dev/fd").iterdir()))
 
         before_constructor = fd_count()
-        with mock.patch.object(
-            self.backup.subprocess, "Popen", side_effect=OSError("spawn failed"),
-        ), self.assertRaises(OSError):
-            self.backup._run_ssh(
-                "cumulus", self.TARGET, "true", 1,
-                self.backup._KEY_AUTH_OPTS,
-            )
+        with _LegacyBoundedFixture(self, self.backup) as constructor:
+            constructor.spawn_failure = OSError("spawn failed")
+            with self.assertRaises(OSError) as rejected:
+                self.backup._run_ssh(
+                    "cumulus", self.TARGET, "true", 1,
+                    self.backup._KEY_AUTH_OPTS,
+                )
+            self.assertIs(rejected.exception, constructor.spawn_failure)
         self.assertEqual(before_constructor, fd_count())
 
-        drain = getattr(self.backup, "_drain_ssh_process", None)
+        drain = getattr(self.backup._BOUNDED_PROCESS, "_drive", None)
         self.assertTrue(callable(drain), "bounded SSH stream reader is absent")
         failures = (
             (OSError("stream read failed"), None),
@@ -4380,7 +5063,8 @@ class BackupAuthenticationContractTests(unittest.TestCase):
         )
         for failure, stdin_text in failures:
             with self.subTest(failure=type(failure).__name__), \
-                    tempfile.TemporaryDirectory() as directory:
+                    _LegacyBoundedFixture(self, self.backup) as legacy:
+                directory = legacy.directory
                 root = Path(directory).resolve()
                 fake_bin = root / "bin"
                 fake_bin.mkdir()
@@ -4396,41 +5080,32 @@ class BackupAuthenticationContractTests(unittest.TestCase):
                     encoding="utf-8",
                 )
                 fake_ssh.chmod(0o755)
+                _legacy_fixed_exec(fake_ssh, sys.executable)
                 environment = dict(os.environ)
                 environment["PATH"] = (
                     str(fake_bin) + os.pathsep + environment.get("PATH", "")
                 )
                 environment["FAULT_CHILD_PID"] = str(child_file)
-                spawned = []
-                real_popen = subprocess.Popen
-
-                def recording_popen(*args, **kwargs):
-                    process = real_popen(*args, **kwargs)
-                    spawned.append(process)
-                    return process
-
-                def fail_after_descendant(*_args, **_kwargs):
-                    deadline = time.monotonic() + 1
-                    while time.monotonic() < deadline and not child_file.exists():
-                        time.sleep(0.01)
-                    raise failure
+                spawned = legacy.spawned
+                legacy.stream_failure = failure
+                legacy.ready_file = child_file
+                original_cause = failure.__cause__
 
                 before = fd_count()
                 raised = None
                 try:
-                    with mock.patch.object(
-                        self.backup.subprocess, "Popen", side_effect=recording_popen,
-                    ), mock.patch.object(
-                        self.backup, "_drain_ssh_process",
-                        side_effect=fail_after_descendant,
-                    ):
-                        self.backup._run_ssh(
-                            "cumulus", self.TARGET, "true", 5,
-                            self.backup._KEY_AUTH_OPTS, env=environment,
-                            stdin_text=stdin_text,
-                        )
+                    self.backup._run_ssh(
+                        "cumulus", self.TARGET, "true", 5,
+                        self.backup._KEY_AUTH_OPTS, env=environment,
+                        stdin_text=stdin_text,
+                    )
                 except BaseException as exc:
                     raised = exc
+                self.assertIs(raised, failure)
+                self.assertIs(raised.__cause__, original_cause)
+                self.assertTrue(child_file.is_file())
+                self.assertIn("READY_ORIGINAL_SELECT_FAULT", legacy.records[-1]["events"])
+                self.assertTrue(legacy.records[-1]["selector_close_called"])
                 self.assertNotIn(self.SECRET, repr(raised))
                 self.assertEqual(1, len(spawned))
                 process = spawned[0]
@@ -4998,7 +5673,8 @@ class BackupAuthenticationContractTests(unittest.TestCase):
         mismatched_wire_blob = base64.b64encode(
             b"\x00\x00\x00\x07ssh-rsa\x01",
         ).decode("ascii")
-        with tempfile.TemporaryDirectory() as directory:
+        with _LegacyBoundedFixture(self, self.backup) as legacy:
+            directory = legacy.directory
             root = Path(directory).resolve()
             fake_bin = root / "bin"
             fake_bin.mkdir()
@@ -5044,6 +5720,7 @@ class BackupAuthenticationContractTests(unittest.TestCase):
                 encoding="utf-8",
             )
             fake_scan.chmod(0o755)
+            _legacy_fixed_exec(fake_scan, os.path.realpath(sys.executable))
             # The fake executable is Python code owned by this test, not stock
             # OpenSSH. Its behavior must not come from an ambient PATH Python.
             ambient_marker = root / "ambient-python-ran"
@@ -5064,9 +5741,6 @@ class BackupAuthenticationContractTests(unittest.TestCase):
                 "WRAPPED_SECRET": "prefix-" + self.SECRET + "-suffix",
                 "ZTP_BACKUP_PASSWORD": self.SECRET,
             })
-            spawn = _fixture_interpreter_popen(
-                subprocess.Popen, fake_scan, os.path.realpath(sys.executable),
-            )
             real_bounded = self.backup._run_bounded_process
 
             def recorded_bounded(*args, **kwargs):
@@ -5080,8 +5754,7 @@ class BackupAuthenticationContractTests(unittest.TestCase):
                 return completed
 
             def invoke_scan(*args, **kwargs):
-                with mock.patch.object(self.backup.subprocess, "Popen", side_effect=spawn), \
-                        mock.patch.object(self.backup, "_run_bounded_process", side_effect=recorded_bounded):
+                with mock.patch.object(self.backup, "_run_bounded_process", side_effect=recorded_bounded):
                     return self.backup._scan_offered_host_key(*args, **kwargs)
 
             with mock.patch.dict(os.environ, environment, clear=True):

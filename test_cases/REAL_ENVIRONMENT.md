@@ -1,5 +1,40 @@
 # Real-environment acceptance cases
 
+## TC-REAL-BACKUP-BOUNDED-ANCHOR-001 — 固定辅助脚本与原进程组监督
+
+- 类型：direct / integration / scenario / real-environment；对应 backup bounded-process
+  修复及 REQ7 当前完整验证的安全前置。现场状态 **NOT RUN / REAL_ENV REQUIRED**。
+  本卡不授权真实 SSH、设备、服务、root、cron 或生产项目操作，不替代已有 host-key/
+  BACKUP-AUTH 现场案例；普通发布门禁及 REQ10-C 三项实际 FAIL 的窄例外均不变。
+- 模块：`ztp/backup/yaml-collect.py`、同目录 `_bounded_process.py` 与
+  `_bounded_process_launcher.py`，以及真实 worker 到 collector 的交付与执行路径。
+  本地 direct/protocol/FD-alias、原六个 core 场景和 staged-worker workflow 是开发替代证据，
+  不能冒称当前 full/check、设备升级、真实备份成功或断电验收。
+- 前置：另行取得精确目标、维护窗口、凭据与现场操作授权及必要研发确认；先具备当前精确
+  源码/测试/manifest/Python/平台的完整验证证据。实际安装的两个辅助脚本必须是正确目录中的
+  single-link regular 原件，和 collector 固定源码摘要配对；缺失、变更或来源不明先拒绝命令。
+  使用默认 SIGCHLD、无竞争 reaper、无并发 FD 替换的受支持上下文；不把有限前置称为任意
+  native 线程/信号下的普遍证明。当前 macOS UID501 开发见证不等于 Linux/容器或其他 UID 验收。
+- 正常步骤：验证 standalone 与实际 worker 的逐文件交付；依次验证正确退出码（包括非零17）
+  与完整 stdout/stderr、原 argv/env/stdin、仅外层两个私有 FD/内层零继承，以及完整原件 alias
+  census。真实命令退出状态和持有组号的 anchor 状态分别记录，先信号原有未回收组，再回收原
+  anchor；不得通过 PID 文件、getpgid 或已回收组号重新取得清理权限。
+- 保留故障：原始短期限与64KiB输出界、洪泛、成功 leader 后仍持管道或分离 stdio 的后代；
+  原始构造前失败、读取普通异常/操作者中断和 cause 身份；部分初始化/丢失 anchor/收尾失败；
+  请求错序/截断/尾随、缺真实状态帧、单独 EOF、父进程丢失、源码或 inode 换件。失败、UNKNOWN
+  或未确认终止不得报成功；清理必须继续尝试其他确证自有资源，不能接管未知 FD/PID。
+- 现场补证：实际管理服务器/容器、正常真实备份及10 worker并发、代表性中断、独立冷恢复与失败
+  安全状态。保留关键命令提交及最后来源核验边界。SIGKILL/正常重启/模拟恢复不冒充断电；
+  断电等高成本实验若暂缓，须另记保留/省略、理由、替代证据、残余风险与确认人，未验证不记 PASS。
+- 证据：精确 HEAD/tree/dirty/diff/manifest、安装来源、Python及依赖身份、命令/退出码、完整
+  日志的前后 stat/inode/旧前缀及完整 SHA/物理 BEGIN/END；原 command wait status、anchor
+  signal-before-wait、原 FD/stream关闭、源文件身份、正常输出与脱敏错误。中间 stdlib FD 关闭
+  历史若未观察必须标 `OMITTED_NOT_OBSERVED`，最终完整 FD 集合等价不能伪称逐次关闭见证。
+- 清理/幂等性：只清理本轮仍强持有且来源/身份确证的进程、FD与私有目录；保留 UNKNOWN 与
+  失败原件，不自动重试信号或覆盖现场证据。独立重读安装原件后再开始下一轮，不复用已删除
+  路径的可执行缓存。现有正常、核心恢复及现场场景无删除、跳过、弱化或合并；没有新增剩余
+  风险接受确认人，全部现场项继续 NOT RUN。
+
 ## TC-REAL-REQ7-FIXED-SWITCH-NEW-ORIGINALS-001 — 同次真实创建到零计数原像
 
 - 固定完整 current receipt 求值补充（**NOT RUN / REAL_ENV REQUIRED**）：整个原 receipt 函数（两次真实 K、current C6/XLSX/admission/cycle 及末次 generation 恢复）只在同一真实短 K 的固定非 yield 区间求值；完整原 metadata body/C19 在 ENTRY/EXIT 保留，内部 K 的 fresh refs/code/FD flags/settings/可变边/C6×2 保留，结果仅在 EXIT 成功后返回。current source 前后真实重放及原 receipt 身份/manifest 投影检查不变；qualified 参数只是数据，不发行资格。保留 last receipt RETURN 后旧 DELIVERED 同字节换 inode拒绝、fake receipt closure/code 原 tuple 在任何伪回调前拒绝、捕获恢复仍永久 poison、缺槽不回退普通 issuer、全部中断和原清理/撤 K/完整 Count-OTHER 末核。ordinary/older receipt、原读期限不改，既有现场场景全部保留，无场景省略/合并、风险接受人或现场操作扩权；本地 RED/相关 PASS 不替代真实设备、断电、冷恢复或精确 full/check。

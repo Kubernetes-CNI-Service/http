@@ -403,6 +403,8 @@ print(TARGET + " ssh-ed25519 " + blob)
         backup.mkdir(parents=True)
         for relative in (
             "ztp/backup/yaml-collect.py",
+            "ztp/backup/_bounded_process.py",
+            "ztp/backup/_bounded_process_launcher.py",
             "ztp/environment_probe.py",
             "ztp/dynamic_air_inventory.py",
         ):
@@ -448,6 +450,112 @@ print(TARGET + " ssh-ed25519 " + blob)
                 ), redirect_stdout(stdout), redirect_stderr(stderr):
             result = self.worker.run_yaml_backup(password, scope, 30, 1)
         return result, statuses, stdout.getvalue(), stderr.getvalue()
+
+    def test_real_staged_worker_uses_fixed_bounded_siblings_before_collection(self):
+        # The existing class setUp imports the real worker FIRST. This source-
+        # contract assertion is only before staging/children, not worker import,
+        # not as FileNotFoundError or an accidentally contacted stock SSH.
+        for name in ("_bounded_process.py", "_bounded_process_launcher.py"):
+            self.assertTrue((ROOT / "ztp/backup" / name).is_file(),
+                            "FEATURE_CONTRACT_API_ABSENT: fixed backup sibling " + name)
+        self.assertFalse(os.path.lexists(ROOT / "project-a"),
+                         "synthetic worker project must not resolve a real inventory")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            collector, project_output = self._stage_real_collector(root)
+            for name in ("_bounded_process.py", "_bounded_process_launcher.py"):
+                self.assertTrue((collector.parent / name).is_file(),
+                                'staged helper original missing: ' + name)
+                self.assertEqual((collector.parent / name).read_bytes(),
+                                 (ROOT / "ztp/backup" / name).read_bytes())
+                self.assertFalse((collector.parent / name).is_symlink())
+            fake_bin = root / "fake-bin"
+            fake_bin.mkdir()
+            # Test-only exec shim, not a production provider/callback. The
+            # original fake bodies/arguments run under this exact interpreter,
+            # never a PATH python. exec does not add a surviving shell worker.
+            for name, writer in (("ssh", self._write_fake_ssh),
+                                 ("ssh-keyscan", self._write_fake_keyscan)):
+                executable = fake_bin / name
+                body = fake_bin / (name + "-body.py")
+                writer(body)
+                body.chmod(0o600)
+                executable.write_text("#!/bin/sh\nexec " + shlex.quote(os.path.realpath(sys.executable))
+                    + " -I -B " + shlex.quote(str(body)) + ' "$@"\n', encoding="utf-8")
+                executable.chmod(0o700)
+            record = root / "fake-ssh.jsonl"
+            askpass_root = root / "configured-askpass"
+            askpass_root.mkdir(mode=0o700)
+            askpass_root.chmod(0o700)
+            unusable_tmp = root / "no-global-temp-fallback"
+            unusable_tmp.write_text("not a directory\n", encoding="utf-8")
+            environment = {
+                "PATH": str(fake_bin) + os.pathsep + "/usr/bin:/bin",
+                "PYTHONDONTWRITEBYTECODE": "1",
+                "PYTHONPYCACHEPREFIX": str(root / "pyc"),
+                "HTTP_ZTP_RUNTIME_BACKEND": "supervisor",
+                "HTTP_ZTP_ASKPASS_TMPDIR": str(askpass_root),
+                "TMPDIR": str(unusable_tmp),
+                "TEST_SECRET_SHA256": hashlib.sha256(SECRET.encode()).hexdigest(),
+                "FAKE_SSH_RECORD": str(record), "FAKE_SSH_CHANGED": "0",
+            }
+            # Existing whole-worker fixture requires explicit public source
+            # creation prerequisites; this does not alter private output modes.
+            owned_collectors = []
+            original_init = subprocess.Popen.__init__
+            original_signal = self.worker._signal_collector_group
+
+            def capture_collector(process, command, **kwargs):
+                self.assertEqual(owned_collectors, [])
+                self.assertEqual(command[:2], [sys.executable, str(collector)])
+                self.assertEqual(kwargs['cwd'], collector.parent)
+                self.assertIs(kwargs['start_new_session'], True)
+                answer = original_init(process, command, **kwargs)
+                owned_collectors.append(process)
+                return answer
+
+            def signal_only_unreaped_original(process, sig):
+                self.assertEqual(len(owned_collectors), 1)
+                self.assertIs(process, owned_collectors[0])
+                self.assertIsNone(process.returncode,
+                                  'reaped numeric PID is not signal authority')
+                return original_signal(process, sig)
+
+            previous_umask = os.umask(0o022)
+            try:
+                with mock.patch.dict(os.environ, environment, clear=False), \
+                        mock.patch.object(subprocess.Popen, '__init__', capture_collector), \
+                        mock.patch.object(self.worker, '_signal_collector_group',
+                                          signal_only_unreaped_original):
+                    ok, statuses, stdout, stderr = self._run_worker(collector, SECRET, "prod")
+            finally:
+                os.umask(previous_umask)
+            self.assertEqual(len(owned_collectors), 1)
+            self.assertIsNotNone(owned_collectors[0].returncode)
+            self.assertIsNone(self.worker._ACTIVE_COLLECTORS[self.worker.BACKUP_LANE])
+            self.assertTrue(ok, stdout + stderr)
+            self.assertEqual(statuses[-1][0], "success")
+            self.assertNotIn(SECRET, stdout + stderr + repr(statuses))
+            events = self._events(record)
+            self.assertTrue(events, "real fixed local fake command body was not executed")
+            key = [e for e in events if e.get("options", {}).get("batchmode") == ["yes"]]
+            password = [e for e in events if e.get("options", {}).get("batchmode") == ["no"]]
+            scans = [e for e in events if e.get("event_type") == "keyscan"]
+            self.assertEqual(len(key), 1)
+            self.assertGreater(len(password), 1)
+            self.assertEqual(len(scans), 1)
+            self.assertTrue(all(e["target"] == TARGET for e in key + password))
+            self.assertTrue(all(e["secret_env_keys"] == [] for e in events))
+            self.assertTrue(all(e["askpass_invoked"] and e["known_hosts_command_invoked"]
+                                and e["known_hosts_command_rc"] == 0 for e in password))
+            self.assertTrue(all(not Path(e["fifo"]).exists() for e in password))
+            self.assertEqual(list(askpass_root.iterdir()), [])
+            self.assertNotIn(SECRET, record.read_text(encoding="utf-8"))
+            batches = [p for p in project_output.iterdir()
+                       if p.is_dir() and p.name.endswith("-prod-backup")]
+            self.assertEqual(len(batches), 1)
+            yaml_files = list(batches[0].rglob("*.yaml"))
+            self.assertEqual(len(yaml_files), 1)
 
     def test_real_zero_device_backup_is_rejected_by_the_worker(self):
         with tempfile.TemporaryDirectory() as directory:

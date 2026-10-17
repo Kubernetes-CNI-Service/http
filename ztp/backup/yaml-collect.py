@@ -46,6 +46,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import types
 import time
 from pathlib import Path, PurePosixPath
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -1777,66 +1778,136 @@ def _drain_ssh_process(process, stdin_text, timeout):
     )
 
 
-def _run_bounded_process(argv, timeout, env=None, stdin_text=None):
-    process = subprocess.Popen(
-        argv,
-        stdin=subprocess.DEVNULL if stdin_text is None else subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=False,
-        env=env,
-        start_new_session=True,
-        close_fds=True,
-        pass_fds=(),
-    )
+_BOUNDED_SOURCE_SHA256 = {
+    "_bounded_process.py": "3ec254c596423a0fc93ef895f6226c62584672ec37a878c068524b30f30d221e",
+    "_bounded_process_launcher.py": "2ef142cf049d1496d8d5321015529592576d6a724c4b9c6b5b50c5c551a8c1fa",
+}
+
+
+def _read_bounded_source(name):
+    if name not in {"_bounded_process.py", "_bounded_process_launcher.py"}:
+        raise ValueError("unrecognized fixed bounded-process source")
+    path = Path(__file__).resolve(strict=True).parent / name
+    fields = ("st_dev", "st_ino", "st_mode", "st_nlink", "st_uid", "st_gid",
+              "st_size", "st_mtime_ns", "st_ctime_ns")
+    first = path.lstat()
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    primary = None
+    closing = None
+    payload = None
     try:
-        stdout_bytes, stderr_bytes, stop_reason = _drain_ssh_process(
-            process, stdin_text, timeout,
-        )
-        if stop_reason is not None:
-            _kill_ssh_group(process)
-        try:
-            process.wait(timeout=1)
-        except subprocess.TimeoutExpired:
-            _kill_ssh_group(process)
-            process.wait(timeout=1)
-        else:
-            # A successful leader can close its captured streams and exit while
-            # leaving local helper descendants in the new process group.
-            _kill_ssh_group(process)
-        stdout = stdout_bytes.decode("utf-8", errors="ignore")
-        stderr = stderr_bytes.decode("utf-8", errors="ignore")
-        if stop_reason == "overflow":
-            returncode = 125
-            marker = b"\n[output exceeded 65536-byte limit]"
-            stdout = (
-                stdout_bytes[:MAX_SSH_OUTPUT_BYTES - len(marker)] + marker
-            ).decode("utf-8", errors="ignore")
-            stderr = (
-                stderr_bytes[:MAX_SSH_OUTPUT_BYTES - len(marker)] + marker
-            ).decode("utf-8", errors="ignore")
-        elif stop_reason == "timeout":
-            returncode = 124
-            if not stderr:
-                stderr = f"timeout after {timeout}s"
-        else:
-            returncode = process.returncode
-        return subprocess.CompletedProcess(argv, returncode, stdout, stderr)
-    except BaseException:
-        _kill_ssh_group(process)
-        try:
-            process.wait(timeout=1)
-        except (OSError, subprocess.TimeoutExpired):
-            _kill_ssh_group(process)
-            try:
-                process.wait(timeout=1)
-            except (OSError, subprocess.TimeoutExpired):
-                pass
-        raise
+        held = os.fstat(fd)
+        if (not stat.S_ISREG(held.st_mode) or held.st_nlink != 1
+                or held.st_uid not in {0, os.geteuid()} or held.st_mode & 0o022
+                or not 0 < held.st_size <= 256 * 1024):
+            raise ValueError("unsafe fixed bounded-process source")
+        parts = []
+        total = 0
+        while True:
+            part = os.read(fd, 65536)
+            if not part:
+                break
+            total += len(part)
+            if total > 256 * 1024:
+                raise ValueError("fixed bounded-process source exceeds bound")
+            parts.append(part)
+        last_held = os.fstat(fd)
+        last_named = path.lstat()
+        rows = [tuple(getattr(s, key) for key in fields)
+                for s in (first, held, last_held, last_named)]
+        payload = b"".join(parts)
+        if (rows != [rows[0]] * 4
+                or hashlib.sha256(payload).hexdigest() != _BOUNDED_SOURCE_SHA256[name]):
+            raise ValueError("fixed bounded-process source changed")
+    except BaseException as error:
+        primary = error
     finally:
-        for stream in (process.stdin, process.stdout, process.stderr):
-            if stream is not None and not stream.closed:
-                stream.close()
+        try:
+            os.close(fd)
+        except BaseException as error:
+            closing = error
+    if closing is not None:
+        if primary is None:
+            raise closing
+        # Best effort only: absent metadata means NOT_CAPTURED, never an empty
+        # success assertion. No secondary ordinary error replaces original NI.
+        try:
+            primary.bounded_source_cleanup_errors = (closing,)
+        except BaseException as attachment:
+            if isinstance(primary, Exception) and not isinstance(attachment, Exception):
+                if not isinstance(closing, Exception):
+                    raise closing
+                raise attachment
+        if isinstance(primary, Exception) and not isinstance(closing, Exception):
+            raise closing
+    if primary is not None:
+        raise primary
+    return payload
+
+
+def _verify_bounded_sources():
+    if (type(_BOUNDED_SOURCE_SHA256) is not dict
+            or set(_BOUNDED_SOURCE_SHA256) != {"_bounded_process.py", "_bounded_process_launcher.py"}):
+        raise ValueError("fixed bounded-process source map changed")
+    return {name: _read_bounded_source(name)
+            for name in ("_bounded_process.py", "_bounded_process_launcher.py")}
+
+
+def _load_bounded_process():
+    sources = _verify_bounded_sources()
+    path = Path(__file__).resolve(strict=True).parent / "_bounded_process.py"
+    module = types.ModuleType("_http_backup_bounded_pending")
+    # Temporary dataclass-definition registration only. Distinct live objects
+    # have distinct ids, so concurrent collector imports never replace one
+    # another's slot. No mainthread/signal/preexec/sys.path operation.
+    name = "_http_backup_bounded_" + str(id(module))
+    if name in sys.modules:
+        raise ValueError("fixed bounded-process module slot occupied")
+    module.__name__ = name
+    module.__file__ = str(path)
+    module.__package__ = ""
+    sys.modules[name] = module
+    primary = None
+    try:
+        exec(compile(sources["_bounded_process.py"], str(path), "exec"), module.__dict__)
+    except BaseException as error:
+        primary = error
+    finally:
+        if sys.modules.get(name) is module:
+            del sys.modules[name]
+        elif primary is None:
+            primary = ValueError("fixed bounded-process module identity lost")
+    if primary is not None:
+        raise primary
+    return module
+
+
+# Load once during collector initialization, before its worker pool. Every
+# later command still rereads and hashes both fixed source originals.
+_BOUNDED_PROCESS = _load_bounded_process()
+
+
+def _run_bounded_process(argv, timeout, env=None, stdin_text=None):
+    _verify_bounded_sources()
+    observed = _BOUNDED_PROCESS.run_bounded_anchored(
+        argv, timeout, env=env, stdin_text=stdin_text,
+    )
+    stdout_bytes, stderr_bytes = observed.stdout, observed.stderr
+    stop_reason = observed.stop_reason
+    stdout = stdout_bytes.decode("utf-8", errors="ignore")
+    stderr = stderr_bytes.decode("utf-8", errors="ignore")
+    if stop_reason == "overflow":
+        returncode = 125
+        marker = b"\n[output exceeded 65536-byte limit]"
+        stdout = (stdout_bytes[:MAX_SSH_OUTPUT_BYTES - len(marker)] + marker).decode("utf-8", errors="ignore")
+        stderr = (stderr_bytes[:MAX_SSH_OUTPUT_BYTES - len(marker)] + marker).decode("utf-8", errors="ignore")
+    elif stop_reason == "timeout":
+        returncode = 124
+        if not stderr:
+            stderr = f"timeout after {timeout}s"
+    else:
+        returncode = observed.returncode
+    return subprocess.CompletedProcess(argv, returncode, stdout, stderr)
 
 
 def _bound_executable(name, path_value, identity_value, environment=None):

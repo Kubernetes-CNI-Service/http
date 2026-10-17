@@ -151,6 +151,8 @@
       "description": "监控页面、采集 worker、IB 分析、手工比对和分组交接",
       "tests": [
         "test_cases.test_backup_auth_transport_workflow",
+        "test_cases.test_backup_bounded_process_workflow",
+        "test_cases.test_backup_bounded_delivery",
         "test_cases.test_backup_permission_convergence_workflow",
         "test_cases.test_backup_zero_target_contract",
         "test_cases.test_collection_cycle_contract",
@@ -176,6 +178,8 @@
       "id": "ztp-runtime",
       "description": "DHCP 租约、ZTP 身份、前缀边界、应用回执和端到端运行流",
       "tests": [
+        "test_cases.test_backup_bounded_process",
+        "test_cases.test_backup_bounded_protocol",
         "test_cases.test_bootstrap_config_fetch_contract",
         "test_cases.test_bootstrap_config_fetch_workflow",
         "test_cases.test_config_sync_authority",
@@ -343,6 +347,7 @@
     }
   ],
   "tracked_support": [
+    "test_cases/fixtures/bounded_inner_fd_fixture.py",
     ".dockerignore",
     ".gitattributes",
     ".github/workflows/monitor-authority-root.yml",
@@ -610,6 +615,8 @@
     "tools/update-root-readme.py": "tools/update-root-readme.py",
     "tools/update-user-manual.py": "tools/update-user-manual.py",
     "tools/ztp_service_runtime.py": "tools/ztp_service_runtime.py",
+    "ztp/backup/_bounded_process.py": "ztp/backup/_bounded_process.py",
+    "ztp/backup/_bounded_process_launcher.py": "ztp/backup/_bounded_process_launcher.py",
     "ztp/backup/permission-sweep.py": "ztp/backup/permission-sweep.py",
     "ztp/backup/yaml-collect.py": "ztp/backup/yaml-collect.py",
     "ztp/config/cumulus/d-hostname2mac.py": "ztp/config/cumulus/d-hostname2mac.py",
@@ -1138,6 +1145,19 @@
         "test_cases.test_monitor_stack_review",
         "test_cases.test_ztp_container_runtime"
       ]
+    },
+    {
+      "id": "backup_bounded_process_direct",
+      "paths": ["ztp/backup/yaml-collect.py"],
+      "tests": ["test_cases.test_backup_bounded_process"]
+    },
+    {
+      "id": "backup_bounded_protocol_direct",
+      "paths": [
+        "ztp/backup/_bounded_process.py",
+        "ztp/backup/_bounded_process_launcher.py"
+      ],
+      "tests": ["test_cases.test_backup_bounded_protocol"]
     },
     {
       "id": "topology_consistency",
@@ -2854,10 +2874,14 @@
       "members": [
         "monitor/switch-collection-control.cgi",
         "monitor/switch-collection-worker.py",
+        "ztp/backup/_bounded_process.py",
+        "ztp/backup/_bounded_process_launcher.py",
         "ztp/backup/yaml-collect.py"
       ],
       "tests": [
         "test_cases.test_backup_auth_transport_workflow",
+        "test_cases.test_backup_bounded_process_workflow",
+        "test_cases.test_backup_bounded_delivery",
         "test_cases.test_monitor_stack_review",
         "test_cases.test_ztp_container_runtime",
         "test_cases.test_ztp_release_core_review"
@@ -3647,6 +3671,10 @@
     }
   ],
   "path_rules": [
+    {
+      "paths": ["test_cases/fixtures/bounded_inner_fd_fixture.py"],
+      "tests": ["test_cases.test_backup_bounded_process_workflow"]
+    },
     {
       "paths": [
         "infra/docker/req7-dependency-policy.json",

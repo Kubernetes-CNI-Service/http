@@ -7,6 +7,14 @@
 本目录中的自动化测试不连接设备、不修改项目运行数据，重点检查跨目录接口，而不是替代
 真实交换机、Docker 或端到端部署测试。
 
+备份命令的固定辅助脚本由 `test_backup_bounded_process.py` 的独立 direct、
+`test_backup_bounded_protocol.py` 的原状态/期限/中断合同，以及
+`test_backup_bounded_process_workflow.py` 的真实三脚本私有 FD alias census 共同覆盖。
+`test_backup_bounded_delivery.py` 固定两辅助脚本的逐字节复制，原 auth workflow 另验证真实
+worker 到 collector 路径；文件复制或 isolated 候选通过不等于该业务流程或 full/check 通过。
+外层测试调用可使用正式 runner 的 `-B`，内层 launcher 与 Python 测试命令仍保留固定 `-I -B`、私有 FD、
+原环境与返回码断言。现场限制及未验证范围见 `TC-REAL-BACKUP-BOUNDED-ANCHOR-001`，仍 NOT RUN。
+
 `test_image_context_safety.py` 约束 H1–H4：三份 Docker ignore 的最终、任意深度凭据规则与
 DAY0 最小重包含；镜像专用入口扫描物理目录，不能用 manifest 的选择结果证明不存在项目或
 凭据文件。AM-1–AM-6 将 gate 的 generated 路径/前缀与最终 ignore 排除绑定，四个构建支持
