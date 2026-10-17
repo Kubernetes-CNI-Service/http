@@ -71,4 +71,3 @@ class BoundedStagedSiblingDeliveryTests(unittest.TestCase):
                                     (source.stat().st_dev, source.stat().st_ino))
                 self.assertEqual(target.read_bytes(), payload)
                 self.assertEqual(source.read_bytes(), payload)
-
