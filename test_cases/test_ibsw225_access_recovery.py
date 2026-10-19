@@ -465,6 +465,76 @@ def no_thread_phase(owners, deadline):
 
 
 class SftpInterruptionDirectTests(unittest.TestCase):
+    def test_successful_acquisition_leaves_one_close_to_the_consumer(self):
+        events = []
+        transport = object()
+        def settimeout(value):
+            self.assertGreater(value, 0)
+            self.assertLessEqual(value, 20)
+            events.append("settimeout")
+        channel = SimpleNamespace(settimeout=settimeout)
+        def get_channel():
+            events.append("get-channel")
+            return channel
+        client = SimpleNamespace(get_channel=get_channel, close=lambda: events.append("client-close"))
+        def acquire(actual):
+            self.assertIs(actual, transport)
+            events.append("factory-return")
+            return client
+        sdk = SimpleNamespace(SFTPClient=SimpleNamespace(from_transport=acquire))
+        with patch.object(observer, "_fixed_sdk", return_value=sdk), patch.object(observer, "_owned_phase", no_thread_phase):
+            returned = access._sftp(transport, time.monotonic() + 20)
+            self.assertIs(returned, client)
+            self.assertEqual(events, ["factory-return", "get-channel", "settimeout"])
+            try:
+                events.append("consumer-body")
+            finally:
+                access._close_sftp(returned, "AUTHORIZED_KEYS_READ_FAILED")
+        self.assertEqual(events, ["factory-return", "get-channel", "settimeout", "consumer-body", "client-close"])
+
+    def test_ordinary_channel_setup_errors_close_once_and_keep_open_failed(self):
+        for point in ("get_channel", "settimeout"):
+            with self.subTest(point=point):
+                events = []
+                def failure(*args):
+                    raise OSError("PRIVATE_CHANNEL_FAILURE")
+                channel = SimpleNamespace(settimeout=failure if point == "settimeout" else lambda value: None)
+                client = SimpleNamespace(
+                    get_channel=failure if point == "get_channel" else lambda: channel,
+                    close=lambda: events.append("client-close"))
+                sdk = SimpleNamespace(SFTPClient=SimpleNamespace(from_transport=lambda actual: client))
+                with patch.object(observer, "_fixed_sdk", return_value=sdk), patch.object(observer, "_owned_phase", no_thread_phase):
+                    with self.assertRaises(access.AccessHold) as caught:
+                        access._sftp(object(), time.monotonic() + 20)
+                self.assertIs(type(caught.exception), access.AccessHold)
+                self.assertEqual(caught.exception.reason_code, "AUTHORIZED_KEYS_READ_FAILED")
+                self.assertEqual(caught.exception.diagnostic["check_code"], "SFTP_CHANNEL_OPEN_FAILED")
+                self.assertEqual(caught.exception.diagnostic["role"], "SFTP_CHANNEL")
+                self.assertEqual(caught.exception.diagnostic["operation"], "OPEN_SFTP")
+                self.assertNotIn("PRIVATE_CHANNEL_FAILURE", str(caught.exception))
+                self.assertEqual(events, ["client-close"])
+
+    def test_deadline_reason_closes_once_and_keeps_open_timeout(self):
+        for point in ("get_channel", "settimeout"):
+            with self.subTest(point=point):
+                events = []
+                def failure(*args):
+                    raise observer._NativeObservationHold(reason_code="READONLY_DEADLINE_EXCEEDED")
+                channel = SimpleNamespace(settimeout=failure if point == "settimeout" else lambda value: None)
+                client = SimpleNamespace(
+                    get_channel=failure if point == "get_channel" else lambda: channel,
+                    close=lambda: events.append("client-close"))
+                sdk = SimpleNamespace(SFTPClient=SimpleNamespace(from_transport=lambda actual: client))
+                with patch.object(observer, "_fixed_sdk", return_value=sdk), patch.object(observer, "_owned_phase", no_thread_phase):
+                    with self.assertRaises(access.AccessHold) as caught:
+                        access._sftp(object(), time.monotonic() + 20)
+                self.assertIs(type(caught.exception), access.AccessHold)
+                self.assertEqual(caught.exception.reason_code, "AUTHORIZED_KEYS_READ_FAILED")
+                self.assertEqual(caught.exception.diagnostic["check_code"], "SFTP_CHANNEL_OPEN_TIMEOUT")
+                self.assertEqual(caught.exception.diagnostic["role"], "SFTP_CHANNEL")
+                self.assertEqual(caught.exception.diagnostic["operation"], "OPEN_SFTP")
+                self.assertEqual(events, ["client-close"])
+
     def test_acquired_client_cleanup_does_not_reclassify_shared_or_resource_stop(self):
         from ibsw_upgrade_contract import SharedUpgradeHold
         for stop in (SharedUpgradeHold("ORIGINAL_SHARED_HOLD"), OSError(errno.EMFILE, "ORIGINAL_RESOURCE_HOLD")):
