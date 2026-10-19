@@ -1,11 +1,12 @@
-"""Uninstalled spreadsheet-wide original nonce evidence, not enrollment sending.
+"""Spreadsheet-wide original nonce evidence with explicit manual initialization.
 
 Generate once under the actual global owner, persist before remote markers,
 never adopt/reset a partial store or trust a caller's replacement nonce. Four
 business/History sheet nonces remain SHEET-anchored and DOCUMENT-visible when
 observed remotely. Typed identity and matching metadata are necessary evidence,
 NOT format/source authority, live admission, COMPLETE or a mutation capability.
-No network, metadata creation/deletion, runtime provisioning or arbitrary path.
+The manual CLI delegates fresh-only creation; importing this library or running
+an ordinary worker never initializes, repairs, adopts or provisions state.
 """
 from dataclasses import dataclass, field
 import hashlib
@@ -128,6 +129,32 @@ def prepare_enrollment_journal(token,binding,identity):
     return result
 
 
+def _manual_main():
+    import argparse
+    import sys
+    from pathlib import Path
+    parser = argparse.ArgumentParser(formatter_class=argparse.RawTextHelpFormatter, description=(
+        'Explicit manual enrollment of new, conflict-free state only; no repair or adoption. '
+        'Ordinary workers never initialize. Automatic sending remains disabled.'))
+    parser.add_argument('--initialize-project', required=True, metavar='ABS_PROJECT',
+                        help='initialize a confirmed new project target once')
+    arguments = parser.parse_args()
+    project = Path(arguments.initialize_project)
+    if not project.is_absolute():
+        parser.error('--initialize-project requires an absolute project path')
+    failed = False
+    try:
+        from monitor.issue_tracker_enrollment_initialize import initialize_current_project
+        initialize_current_project(project)
+    except Exception:
+        failed = True
+    if failed:
+        sys.stderr.write('enrollment initialization refused; evidence retained\n')
+        return 3
+    sys.stdout.write('enrollment initialized; automatic sending remains disabled\n')
+    return 0
+
+
 def inspect_enrollment_journal(token,binding,identity):
     folder=None; failed=False
     try:
@@ -211,3 +238,7 @@ def _observe_enrollment_image(token,binding,identity,raw,*,sheet):
     except Exception: failed=True
     if failed: raise EnrollmentHold()
     return result
+
+
+if __name__ == '__main__':
+    raise SystemExit(_manual_main())

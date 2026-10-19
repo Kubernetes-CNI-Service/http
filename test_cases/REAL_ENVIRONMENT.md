@@ -2810,3 +2810,14 @@ generation/publish 及 UNKNOWN 下改 action/wire 均 HOLD，不计作 COMPLETE 
 - 失败/清理：备份失败零apply；未知认证、cleanup、截止或日志回收状态一律HOLD，不盲重试；仅本轮已强持有连接/原child可关闭，未知FD/PID/根不救援、不扫描、不清理。
 - 风险：这会真实修改受控节点HOME authorized_keys，可能影响访问。它不是七步vendor配置、改密、HA、升级或设备验收。自动OOB及stage-readonly在本CLI仍未支持。
 - 源测试风险：原durable/SFTP peer的pre-try acquisition和敌对diagnostic setter窗口尚未额外故障闭合；不能把普通路径成功扩称所有异常资源安全。
+
+## TC-REQ7-EXPLICIT-FRESH-ENROLLMENT-20261019 — NOT RUN
+
+- 类型/需求/平台：integration、scenario、real-environment；REQ7 首次人工初始化；管理服务器/Cloud。真实环境仍 **NOT RUN**，未授权本次访问真实 Cloud。
+- 合同：普通 worker 永不自动初始化。仅独立 `python3 -B -m monitor.issue_tracker_enrollment_journal --initialize-project /ABS/PROJECT`；首版只创建确认全新且无冲突的原件，不修复、不接管、不重生 nonce、不自动重试。
+- 前置：另有精确现场授权；已部署且受保护的项目 tracker、固定 root-only 共享状态根、凭据/CA/allowlist；真实项目与表身份一致、14 表和四业务/History 表头正确。本地目标家族只允许原 lock，无任何历史/loss witness 或既有 init attempt；完整可见 metadata 搜索必须为空。沿用 owner 已确认的表自创建即工具专用且元数据始终仅由同一 Cloud 项目写入的历史前提，不扩大为任意不可见 PROJECT scope 的证明。
+- 正常步骤：持有实际 project/target/spreadsheet 原 owner；一次真实 OAuth、原30秒四读 cohort 与固定60秒非续期观察；完整预检查后 fsync 持久四原 nonce，再一次固定 batchUpdate 创建四个 SHEET/DOCUMENT `http-ztp-enrollment-v1` 标记；固定60秒 mutation 总预算，真实进程回收、全部 pipe 收尾和原件/auth/双 owner 最终核验；再完整 metadata 回读核四个 assigned ID、sheet 和原 nonce。全部 owner/原件正常收尾后才可输出成功。
+- 失败预期：部分、本地丢失见证、任何既有/外来 metadata、原件/目标漂移、写入 UNKNOWN、错 nonce/ID、读取不完整、超时/未确认终止、收尾失败或中断均停止；保留独立 `enrollment-init-<stem>` 尝试证据及原 nonce，不删除或重放。本地 INITIALIZED 不冒称远端成功；匹配 DATA 不提供业务 COMPLETE、自动发送或发布许可。
+- 本地替代证据：独立 CLI/direct、真实私有 nonce journal→固定协议→现有 metadata 消费者、多真实脚本/自有 loopback TLS、真实隔离 child/监督和原 owner 收尾。普通 worker 缺 enrollment 与重复人工初始化独立受测。它们不代替真实 Google API、Linux/AIR、设备或完整 full/check。
+- 现场故障：保留正常、关键本地落盘/远端提交边界、代表性中断、冷启动后拒绝重做及失败安全状态；真实断电另需维护和风险授权，不用 SIGKILL 或正常重启冒充。未知状态禁止自动 reset/clear/adopt。不存在已获准省略的核心恢复能力场景或新的残余风险接受人。
+- 证据/清理：精确 HEAD/tree/dirty/diff、manifest/ledger、Python/平台、命令、完整日志/END/退出码、原文件 stat/inode/SHA、四次创建及回读对应关系和原进程收尾；不得记录 token/私钥。只关闭本轮已确认持有的资源；失败文件保留，未知 FD/PID/路径不扫描救援，不修改线上状态用于“清理”。

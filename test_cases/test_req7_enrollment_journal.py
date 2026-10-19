@@ -265,4 +265,57 @@ class Req7EnrollmentJournalNativeReadWorkflowTests(unittest.TestCase):
         self.assertFalse(hasattr(result,"complete")); self.assertFalse(hasattr(result,"permit"))
 
 
+class ExplicitEnrollmentEntryDirectTests(unittest.TestCase):
+    def invoke(self, arguments):
+        from contextlib import ExitStack, redirect_stdout, redirect_stderr
+        import io
+        import runpy
+        from monitor import issue_tracker_local_commit as local
+        from monitor import issue_tracker_spreadsheet_owner as ownership
+        output, errors = io.StringIO(), io.StringIO()
+        with ExitStack() as scope:
+            scope.enter_context(mock.patch.object(sys, 'argv', [str(SOURCE), *arguments]))
+            blocked = [scope.enter_context(mock.patch.object(module, name,
+                side_effect=AssertionError('argument handling must not initialize')))
+                for module, name in ((local, 'try_writer_owner'),
+                                     (ownership, 'spreadsheet_owner'))]
+            blocked.append(scope.enter_context(mock.patch('socket.socket',
+                side_effect=AssertionError('argument handling must not connect'))))
+            blocked.append(scope.enter_context(mock.patch('subprocess.Popen',
+                side_effect=AssertionError('argument handling must not launch'))))
+            with redirect_stdout(output), redirect_stderr(errors):
+                try:
+                    runpy.run_path(str(SOURCE), run_name='__main__')
+                except SystemExit as stop:
+                    code = stop.code
+                else:
+                    code = 0
+            for operation in blocked:
+                operation.assert_not_called()
+        return code, output.getvalue(), errors.getvalue()
+
+    def test_missing_explicit_initialization_action_is_usage_error_without_io(self):
+        code, output, errors = self.invoke([])
+        self.assertEqual(2, code, 'EXPLICIT_ENROLLMENT_ACTION_REQUIRED')
+        self.assertEqual('', output)
+        self.assertIn('--initialize-project', errors)
+
+    def test_help_explains_explicit_new_only_no_repair_without_io(self):
+        code, output, errors = self.invoke(['--help'])
+        self.assertEqual(0, code)
+        self.assertEqual('', errors)
+        self.assertIn('--initialize-project', output, 'EXPLICIT_ENROLLMENT_HELP_MISSING')
+        self.assertIn('new, conflict-free', output)
+        self.assertIn('no repair or adoption', output)
+
+    def test_repair_reset_and_transport_overrides_are_not_supported_actions(self):
+        for forbidden in ('--repair', '--reset', '--url', '--nonce', '--timeout', '--ca'):
+            with self.subTest(forbidden=forbidden):
+                code, output, errors = self.invoke([
+                    '--initialize-project', '/not-authorized/req7-init-project', forbidden, 'value'])
+                self.assertEqual(2, code, 'ENROLLMENT_OVERRIDE_MUST_BE_REFUSED')
+                self.assertEqual('', output)
+                self.assertIn('unrecognized arguments', errors)
+
+
 if __name__=="__main__": unittest.main()

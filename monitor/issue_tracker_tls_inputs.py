@@ -176,11 +176,15 @@ def _native_complete_read(prepared):
     connection = response = None; failed = False; mutation = False; interruption = None
     try:
         from monitor.issue_tracker_sheets_read_plan import PreparedSheetsMutation
+        from monitor.issue_tracker_enrollment_protocol import PreparedEnrollmentMutation
         if type(prepared) is PreparedSheetsMutation:
             # Check type FIRST: tampered host/method must not select the GET
             # or OAuth branch and escape the immutable mutation contract.
             from monitor.issue_tracker_send_unit import _validate_mutation_request
             _validate_mutation_request(prepared); mutation = True
+        elif type(prepared) is PreparedEnrollmentMutation:
+            from monitor.issue_tracker_enrollment_protocol import validate_prepared_enrollment_mutation
+            validate_prepared_enrollment_mutation(prepared); mutation = True
         elif (prepared.host, prepared.method) == ("sheets.googleapis.com", "POST"):
             # Every other Sheets POST must satisfy the separate exact typed
             # read-only search contract, never a generic mutation allowance.

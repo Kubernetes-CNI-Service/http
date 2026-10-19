@@ -9,6 +9,20 @@ CANDIDATE = Path(__file__).resolve().parents[1]
 
 
 class RetainedManualProfileTests(unittest.TestCase):
+    def test_explicit_enrollment_manual_entry_is_fresh_only_and_not_a_worker_action(self):
+        updater = self.load()
+        profile = updater.script_profile(ROOT, 'monitor/issue_tracker_enrollment_journal.py')
+        self.assertTrue(profile['direct'].startswith('仅显式人工'))
+        self.assertIn('--initialize-project', profile['parameters'])
+        self.assertIn('python3 -B -m monitor.issue_tracker_enrollment_journal', profile['syntax'])
+        for word in ('普通 worker 永不自动初始化', '全新', '无冲突'):
+            self.assertIn(word, profile['scenario'])
+        for word in ('部分', '丢失', '冲突', 'UNKNOWN', '不修复', '不接管'):
+            self.assertIn(word, profile['recovery'])
+        self.assertIn('不启用自动发送', profile['success'])
+        rendered = updater.render_script_reference(ROOT, ('monitor/issue_tracker_enrollment_journal.py',))
+        self.assertIn('--initialize-project', rendered)
+
     def test_shared_fifo_catalog_order_and_project_scoped_sequences_are_not_new_authority(self):
         profile = self.load().script_profile(ROOT, 'monitor/issue_tracker_retained_inventory.py')
         for word in ('跨项目 per-key FIFO', 'catalog 顺序', '序号只按原项目', '不释放 FIFO'):

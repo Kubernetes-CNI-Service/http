@@ -781,6 +781,27 @@ def script_profile(root: Path, relative: str) -> dict[str, str]:
                 example = f"sed -n '1,120p' {relative}  # 先读文件头 Usage/安全边界，再由所属流程调用"
             else:
                 example = f"python3 -B -m py_compile {relative}  # 仅语法验证；实际运行由上层流程负责"
+    if relative == 'monitor/issue_tracker_enrollment_journal.py':
+        direct = '仅显式人工初始化；导入库及普通 worker 不触发。'
+        environment = '受控管理环境；原项目 tracker、固定凭据/CA/allowlist 与双 owner 必须已存在；本地测试不授予真实 Cloud 权限。'
+        scenario = '仅确认全新且无冲突时人工首建四张表的原 nonce 标记；普通 worker 永不自动初始化。'
+        prerequisite = '原项目/目标/凭据身份有效、14 表与四表头匹配、完整可见 metadata 为空且本地没有历史家族或尝试证据；仍适用工具专用表及同一 Cloud 项目历史确认。'
+        syntax = 'python3 -B -m monitor.issue_tracker_enrollment_journal --initialize-project /ABS/PROJECT'
+        parameters = '仅 --initialize-project ABS_PROJECT；不支持 repair/reset/nonce/URL/CA/timeout 等覆盖。'
+        inputs = '实际固定当前项目、真实认证及四读原件；不接受调用者 token、nonce、任意远端地址或替换证据。'
+        outputs = '先持久本地原 nonce，再单次固定四标记写入及完整回读；独立私有尝试证据留存。INITIALIZED 只表示本地 nonce 已持久化。'
+        success = '只在远端原始四标记回读和所有原件/owner/进程收尾成功后 exit 0；不启用自动发送，不证明业务 COMPLETE 或发布通过。'
+        recovery = '部分、丢失、冲突及 UNKNOWN 保留证据并停止；首版不修复、不接管、不清理重置、不自动重试；已完成也不重复创建。'
+        example = syntax + '  # 需另有精确现场授权，不能用于修复已有状态'
+    elif relative in ('monitor/issue_tracker_enrollment_initialize.py', 'monitor/issue_tracker_enrollment_protocol.py'):
+        direct = '否；显式人工初始化入口的固定内部实现。'
+        environment = '只由受管 manual 入口调用，不单独取得真实 Cloud 或发送权限。'
+        scenario = '固定四标记协议和原件/真实监督边界；普通 worker 不调用初始化。'
+        syntax = '仅由 monitor.issue_tracker_enrollment_journal 的显式人工入口导入。'
+        parameters = '无独立 CLI；无端点、凭据、nonce、期限、修复或接管覆盖。'
+        success = 'typed DATA 不等于初始化成功、自动发送许可、业务 COMPLETE 或发布证明。'
+        recovery = '异常及 UNKNOWN 保留原证据，失败关闭，不自动修复或重试。'
+        example = 'python3 -B -m unittest test_cases.test_req7_enrollment_protocol test_cases.test_req7_enrollment_initialize_transport'
     return {
         "purpose": purpose,
         "direct": direct,
