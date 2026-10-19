@@ -110,6 +110,99 @@ class Req19InfraLogWorkflowTests(unittest.TestCase):
             with redirect_stdout(io.StringIO()):
                 SETUP.setup(str(project))
 
+    def test_manifest_failure_rollback_cross_device_preserves_pending_owner_and_blocks_consumers(self):
+        from test_cases import test_req19_infra_log_contract as direct_fixture
+        setup = direct_fixture.SETUP
+        with tempfile.TemporaryDirectory(prefix="req19-rollback-device-flow-") as tmp:
+            root, infra, project, _ = self.fixture(tmp)
+            logs = infra / "logs"
+            logs.mkdir()
+            payload = b"original preproject log survives manifest failure\n"
+            (logs / "owned.log").write_bytes(payload)
+            original_inode = logs.lstat().st_ino
+            destination = project / "99-output-infra"
+            backup = destination / ".logs-migration-source"
+            receipt = infra / ".logs-migration.json"
+            original_lstat, original_remove = os.lstat, os.remove
+            original_rename = setup._rename_infra_log_dir_noreplace
+            original_rollback = setup._rollback_infra_log_migration
+            snapshots, rollback_rename_attempts = [], []
+            changed_parent = False
+
+            def observe_real_rollback():
+                nonlocal changed_parent
+                # Reached only from real setup's manifest-failure handler,
+                # after the original tree was actually migrated and linked.
+                primary = sys.exc_info()[1]
+                self.assertIs(type(primary), OSError)
+                self.assertEqual(primary.args, ("injected manifest failure",))
+                state = setup._INFRA_LOG_MIGRATION
+                self.assertIsNotNone(state)
+                self.assertEqual(state[:3], (str(logs), str(backup), str(destination)))
+                self.assertEqual(state[3].get("phase", "pending"), "pending")
+                self.assertEqual(original_lstat(backup).st_ino, original_inode)
+                self.assertTrue(logs.is_symlink())
+                snapshots.append((state, original_lstat(logs), os.readlink(logs),
+                    original_lstat(backup), receipt.read_bytes(), original_lstat(receipt),
+                    original_lstat(backup / "owned.log")))
+                # Only the rollback target-parent metadata changes. Forward
+                # migration was real and stayed on its supported filesystem.
+                changed_parent = True
+                return original_rollback()
+
+            def different_device(path, *args, **kwargs):
+                info = original_lstat(path, *args, **kwargs)
+                if changed_parent and os.path.abspath(os.fspath(path)) == str(infra):
+                    values = list(info)
+                    values[2] = snapshots[0][3].st_dev + 100000
+                    return os.stat_result(values)
+                return info
+
+            def rename(source, target):
+                if (source, target) == (str(backup), str(logs)):
+                    rollback_rename_attempts.append((source, target))
+                    raise OSError(errno.EXDEV, "independent rollback cross-device rename sentinel")
+                return original_rename(source, target)
+
+            with mock.patch.multiple(setup, _INFRA_LOG_MIGRATION=None, _LINK_TRANSACTION=None), \
+                 mock.patch.object(setup.os, "lstat", side_effect=different_device), \
+                 mock.patch.object(setup.os, "remove", wraps=original_remove) as remove, \
+                 mock.patch.object(setup, "_rename_infra_log_dir_noreplace", side_effect=rename), \
+                 mock.patch.object(setup, "_rollback_infra_log_migration", side_effect=observe_real_rollback):
+                with self.assertRaises(OSError) as rejected:
+                    # Existing helper injects only manifest publication failure;
+                    # real setup/migration and the original rollback execute.
+                    direct_fixture.Req19InfraLogContractTests().bind(root, project, manifest_failure=True)
+                self.assertEqual(rejected.exception.errno, errno.EXDEV)
+                self.assertEqual(len(snapshots), 1)
+                self.assertIs(setup._INFRA_LOG_MIGRATION, snapshots[0][0])
+            state, link_before, link_target, backup_before, receipt_bytes, receipt_before, file_before = snapshots[0]
+
+            invoked = []
+            with mock.patch.object(DEPLOY, "SCRIPT_DIR", infra), redirect_stdout(io.StringIO()):
+                with self.assertRaisesRegex(DEPLOY.DeployError, "migration state pending"):
+                    DEPLOY.run_with_log("deploy_infra", lambda: invoked.append(True) or 0)
+            self.assertEqual(invoked, [])
+            with mock.patch.object(CHECK, "SCRIPT_DIR", infra), \
+                 mock.patch.object(CHECK.subprocess, "run",
+                    side_effect=AssertionError("pending rollback cannot start collector probe")) as probe, \
+                 redirect_stdout(io.StringIO()):
+                with self.assertRaisesRegex(CHECK.DeployError, "migration state pending"):
+                    CHECK.collect_local(Path(tmp) / "collected")
+                probe.assert_not_called()
+            self.assertEqual(receipt.read_bytes(), receipt_bytes)
+            self.assertEqual((receipt.lstat().st_dev, receipt.lstat().st_ino), (receipt_before.st_dev, receipt_before.st_ino))
+            self.assertEqual((backup.lstat().st_dev, backup.lstat().st_ino), (backup_before.st_dev, backup_before.st_ino))
+            self.assertEqual((backup / "owned.log").lstat().st_ino, file_before.st_ino)
+            self.assertEqual((backup / "owned.log").read_bytes(), payload)
+            self.assertEqual(remove.call_count, 0, "REQ19_SETUP_ROLLBACK_REMOVED_ORIGINAL_ENTRY_BEFORE_EXDEV")
+            self.assertEqual(rollback_rename_attempts, [], "REQ19_SETUP_ROLLBACK_ATTEMPTED_CROSS_DEVICE_RENAME")
+            self.assertTrue(logs.is_symlink())
+            self.assertEqual(os.readlink(logs), link_target)
+            self.assertEqual((logs.lstat().st_dev, logs.lstat().st_ino), (link_before.st_dev, link_before.st_ino))
+            self.assertEqual((logs / "owned.log").read_bytes(), payload)
+            self.assertEqual({p.name for p in destination.iterdir()}, {"owned.log", ".logs-migration-source"})
+
     def test_preproject_logs_real_setup_then_real_deploy_and_check(self):
         with tempfile.TemporaryDirectory(prefix="req19-flow-") as tmp:
             root, infra, a, _ = self.fixture(tmp)
@@ -180,6 +273,68 @@ class Req19InfraLogWorkflowTests(unittest.TestCase):
                 observed["infra_log_ownership"],
             )
             self.assertEqual([], list(destination.iterdir()))
+
+    def test_cross_device_pending_restore_keeps_original_link_and_real_consumers_on_hold(self):
+        from test_cases.test_req19_infra_log_contract import Req19InfraLogContractTests
+        with tempfile.TemporaryDirectory(prefix="req19-pending-device-flow-") as tmp:
+            root, infra, a, _ = self.fixture(tmp)
+            logs = infra / "logs"
+            payload = b"independent original project log before recovery\n"
+            backup, receipt = Req19InfraLogContractTests().seed_committing_backup(root, logs, a, payload)
+            original_lstat, original_remove = os.lstat, os.remove
+            link_before, backup_before = original_lstat(logs), original_lstat(backup)
+            lexical_before = os.readlink(logs)
+            receipt_before, file_before = original_lstat(receipt), original_lstat(backup / "owned.log")
+            receipt_bytes = receipt.read_bytes()
+
+            def different_device(path, *args, **kwargs):
+                info = original_lstat(path, *args, **kwargs)
+                if os.path.abspath(os.fspath(path)) == str(infra):
+                    values = list(info); values[2] = backup_before.st_dev + 100000
+                    return os.stat_result(values)
+                return info
+
+            with mock.patch.object(SETUP.os, "lstat", side_effect=different_device), \
+                    mock.patch.object(SETUP.os, "remove", wraps=original_remove) as remove, \
+                    mock.patch.object(SETUP, "_rename_infra_log_dir_noreplace",
+                        side_effect=OSError(errno.EXDEV, "independent cross-device rename sentinel")) as rename:
+                with self.assertRaises(OSError) as rejected:
+                    self.setup_project(root, a)
+                self.assertEqual(errno.EXDEV, rejected.exception.errno)
+
+            # The original pending receipt must continue blocking publication:
+            # keeping a readable link is NOT permission to use unsettled logs.
+            invoked = []
+            with mock.patch.object(DEPLOY, "SCRIPT_DIR", infra), redirect_stdout(io.StringIO()):
+                with self.assertRaisesRegex(DEPLOY.DeployError, "migration state pending"):
+                    DEPLOY.run_with_log("deploy_infra", lambda: invoked.append(True) or 0)
+            self.assertEqual([], invoked)
+            with mock.patch.object(CHECK, "SCRIPT_DIR", infra), \
+                    mock.patch.object(CHECK.subprocess, "run",
+                        side_effect=AssertionError("pending recovery must not start collector probe")) as run, \
+                    redirect_stdout(io.StringIO()):
+                with self.assertRaisesRegex(CHECK.DeployError, "migration state pending"):
+                    CHECK.collect_local(Path(tmp) / "collected")
+                run.assert_not_called()
+            self.assertEqual(receipt_bytes, receipt.read_bytes())
+            self.assertEqual((receipt_before.st_dev, receipt_before.st_ino),
+                             (receipt.lstat().st_dev, receipt.lstat().st_ino))
+            self.assertEqual((backup_before.st_dev, backup_before.st_ino),
+                             (backup.lstat().st_dev, backup.lstat().st_ino))
+            self.assertEqual(file_before.st_ino, (backup / "owned.log").lstat().st_ino)
+            self.assertEqual(payload, (backup / "owned.log").read_bytes())
+            self.assertEqual(0, remove.call_count,
+                'REQ19_SETUP_RECOVERY_UNLINKED_ORIGINAL_PROJECT_ENTRY')
+            self.assertEqual(0, rename.call_count,
+                'REQ19_SETUP_RECOVERY_CROSS_DEVICE_RENAME_ATTEMPTED')
+            self.assertTrue(logs.is_symlink())
+            self.assertEqual((link_before.st_dev, link_before.st_ino),
+                             (logs.lstat().st_dev, logs.lstat().st_ino))
+            self.assertEqual(lexical_before, os.readlink(logs))
+            self.assertEqual(a, SETUP.managed_infra_log_project(logs, root / "DAY0-Prepare"))
+            self.assertEqual(payload, (logs / "owned.log").read_bytes())
+            self.assertEqual({"owned.log", ".logs-migration-source"},
+                             {item.name for item in (a / "99-output-infra").iterdir()})
 
     def test_real_probe_follows_managed_link_but_not_foreign_link(self):
         with tempfile.TemporaryDirectory(prefix="req19-probe-") as tmp:

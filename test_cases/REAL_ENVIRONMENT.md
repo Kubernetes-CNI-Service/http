@@ -1993,6 +1993,16 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - 跨设备边界：在同一隔离 VM 的两个真实挂载文件系统上证明源与 `99-output-infra` 的 `st_dev` 不同，验证上述 fail closed 拒绝及源保留；不得用 mock 出的 `EXDEV` 或设备身份代替真实现场证据。本卡仍为 BLOCKED / NOT RUN / REAL_ENV REQUIRED，未运行。记录真实 errno、源与目标清单/SHA-256、凭据和链接状态，重试不得覆盖或误归属。跨设备正向迁移不在裁定后的支持范围内，拒绝证据不得称作跨设备正向成功；同设备断电恢复仍需按前述授权另行执行，不能手工复制、删凭据或以禁用错误掩盖缺口。
 - 证据、清理与风险：在私有 0700 证据目录保存脱敏 argv、退出码、时间线、HEAD/tree/manifest/proof、`st_dev`/inode/mode/owner、链接词法及解析目标、receipt 阶段、文件名与大小/SHA-256、服务/写者静默证明、快照恢复回执；不回传日志正文、客户配置或凭据。仅恢复隔离 VM 快照与合成项目，逐项核对目录、服务、挂载和链接前像；证据未充分封存前不得删除残留源或目标。任一同设备故障窗口、跨设备结果、项目归属、清理或 owner 授权缺失，均保持 **BLOCKED / NOT RUN / REAL_ENV REQUIRED**，不授权 AIR/prod 发布。
 
+- pending 备份 rename-back 的父文件系统补充（**NOT RUN / REAL_ENV REQUIRED**）：在上述另行
+  授权的一次性 VM 快照中保留原 receipt、备份(dev/inode/字节)和规范日志链接，再改变实际
+  `infra/logs` 父目录所在文件系统；冷恢复与真实 manifest 失败后的进程内 rollback 都必须在
+  删除链接或尝试 rename-back 前明确 EXDEV，
+  原链接 inode/词法目标、备份和 receipt 不变。待决证据仍阻断 deploy writer/check collector，
+  不把“链接仍可达”解释为允许新写入或已完成迁移。返回原受支持同文件系统后按原恢复合同
+  重试；已提交 finalizing 的清理分流不改作回滚，也不加跨设备复制兜底。仅注入 st_dev/EXDEV
+  的本地 direct 和真实 setup→deploy/check 流程不代替真实挂载或掉电；既有场景无省略/合并，
+  无新增风险接受确认人、真实挂载/服务操作授权或发布证明。
+
 ## TC-REAL-ISSUE-0001 — Cumulus 14 角色 DNS/NTP VRF 真机验证
 
 - Case ID：`TC-REAL-ISSUE-0001`；类型：real-environment / scenario；对应缺陷：ISSUE-0001；

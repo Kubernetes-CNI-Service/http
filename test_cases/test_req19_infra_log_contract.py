@@ -141,6 +141,53 @@ class Req19InfraLogContractTests(unittest.TestCase):
         logs.symlink_to(os.path.relpath(destination, logs.parent))
         return backup, receipt
 
+    def test_cross_device_rollback_keeps_original_link_backup_and_receipt(self):
+        with tempfile.TemporaryDirectory(prefix="req19-rollback-device-") as tmp:
+            root, logs, project, _ = self.fixture(tmp)
+            destination = project / "99-output-infra"
+            payload = b"independent rollback source bytes\n"
+            backup, receipt = self.seed_committing_backup(root, logs, project, payload)
+            original_lstat, original_remove = os.lstat, os.remove
+            link_before, backup_before = original_lstat(logs), original_lstat(backup)
+            link_target = os.readlink(logs)
+            receipt_bytes, receipt_before = receipt.read_bytes(), original_lstat(receipt)
+            file_before = original_lstat(backup / "owned.log")
+            document = json.loads(receipt_bytes)
+            state = (str(logs), str(backup), str(destination), document)
+
+            def different_device(path, *args, **kwargs):
+                info = original_lstat(path, *args, **kwargs)
+                if os.path.abspath(os.fspath(path)) == str(logs.parent):
+                    values = list(info)
+                    values[2] = backup_before.st_dev + 100000
+                    return os.stat_result(values)
+                return info
+
+            # Only this test's two setup globals and path roots are replaced;
+            # pending state must survive the rejected rollback, then patch
+            # restoration prevents it contaminating a later unittest.
+            with mock.patch.multiple(SETUP, HTTP_BASE=str(root), HERE=str(root / "DAY0-Prepare"),
+                    _INFRA_LOG_MIGRATION=state, _LINK_TRANSACTION=None), \
+                 mock.patch.object(SETUP.os, "lstat", side_effect=different_device), \
+                 mock.patch.object(SETUP.os, "remove", wraps=original_remove) as remove, \
+                 mock.patch.object(SETUP, "_rename_infra_log_dir_noreplace",
+                    side_effect=OSError(errno.EXDEV, "independent rollback cross-device rename sentinel")) as rename:
+                with self.assertRaises(OSError) as rejected:
+                    SETUP._rollback_infra_log_migration()
+                self.assertEqual(rejected.exception.errno, errno.EXDEV)
+                self.assertIs(SETUP._INFRA_LOG_MIGRATION, state)
+                self.assertEqual(remove.call_count, 0, "REQ19_ROLLBACK_REMOVED_ORIGINAL_ENTRY_BEFORE_EXDEV")
+                self.assertEqual(rename.call_count, 0, "REQ19_ROLLBACK_ATTEMPTED_CROSS_DEVICE_RENAME")
+            self.assertTrue(logs.is_symlink())
+            self.assertEqual(os.readlink(logs), link_target)
+            self.assertEqual((logs.lstat().st_dev, logs.lstat().st_ino), (link_before.st_dev, link_before.st_ino))
+            self.assertEqual((backup.lstat().st_dev, backup.lstat().st_ino), (backup_before.st_dev, backup_before.st_ino))
+            self.assertEqual((backup / "owned.log").lstat().st_ino, file_before.st_ino)
+            self.assertEqual((backup / "owned.log").read_bytes(), payload)
+            self.assertEqual((logs / "owned.log").read_bytes(), payload)
+            self.assertEqual(receipt.read_bytes(), receipt_bytes)
+            self.assertEqual((receipt.lstat().st_dev, receipt.lstat().st_ino), (receipt_before.st_dev, receipt_before.st_ino))
+
     def test_eight_output_skeleton_and_exact_managed_mapping(self):
         template = ROOT / "DAY0-Prepare/template"
         self.assertEqual(EXPECTED_OUTPUTS, {p.name for p in template.glob("99-output-*") if p.is_dir()})
@@ -292,6 +339,55 @@ class Req19InfraLogContractTests(unittest.TestCase):
             self.assertFalse(os.path.lexists(receipt))
             for name, payload in payloads.items():
                 self.assertEqual(payload, (destination / name).read_bytes())
+
+    def test_pending_link_restore_rejects_cross_device_before_unlink_or_rename(self):
+        with tempfile.TemporaryDirectory(prefix="req19-pending-device-") as tmp:
+            root, logs, a, _ = self.fixture(tmp)
+            payload = b"independent pending original log bytes\n"
+            backup, receipt = self.seed_committing_backup(root, logs, a, payload)
+            destination = a / "99-output-infra"
+            original_lstat, original_remove = os.lstat, os.remove
+            link_before = original_lstat(logs)
+            lexical_before = os.readlink(logs)
+            backup_before, receipt_before = original_lstat(backup), original_lstat(receipt)
+            file_before = original_lstat(backup / "owned.log")
+            receipt_bytes = receipt.read_bytes()
+            foreign_path = logs.parent
+
+            def different_device(path, *args, **kwargs):
+                info = original_lstat(path, *args, **kwargs)
+                if os.path.abspath(os.fspath(path)) == str(foreign_path):
+                    values = list(info); values[2] = backup_before.st_dev + 100000
+                    return os.stat_result(values)
+                return info
+
+            # The sentinel never performs a real rename or mount. On the
+            # old implementation it exposes the too-late EXDEV after unlink.
+            with mock.patch.multiple(SETUP, HTTP_BASE=str(root), HERE=str(root / "DAY0-Prepare")), \
+                    mock.patch.object(SETUP.os, "lstat", side_effect=different_device), \
+                    mock.patch.object(SETUP.os, "remove", wraps=original_remove) as remove, \
+                    mock.patch.object(SETUP, "_rename_infra_log_dir_noreplace",
+                        side_effect=OSError(errno.EXDEV, "independent cross-device rename sentinel")) as rename:
+                with self.assertRaises(OSError) as rejected:
+                    SETUP._restore_pending_infra_log_backup(str(logs), str(destination))
+                self.assertEqual(errno.EXDEV, rejected.exception.errno)
+                self.assertEqual(0, remove.call_count,
+                    'REQ19_RECOVERY_CROSS_DEVICE_UNLINKED_ORIGINAL_ENTRY')
+                self.assertEqual(0, rename.call_count,
+                    'REQ19_RECOVERY_CROSS_DEVICE_RENAME_ATTEMPTED')
+            self.assertTrue(logs.is_symlink())
+            self.assertEqual((link_before.st_dev, link_before.st_ino),
+                             (logs.lstat().st_dev, logs.lstat().st_ino))
+            self.assertEqual(lexical_before, os.readlink(logs))
+            self.assertEqual(a, CONTRACT.managed_infra_log_project(logs, root / "DAY0-Prepare"))
+            self.assertEqual((backup_before.st_dev, backup_before.st_ino),
+                             (backup.lstat().st_dev, backup.lstat().st_ino))
+            self.assertEqual(file_before.st_ino, (backup / "owned.log").lstat().st_ino)
+            self.assertEqual(payload, (backup / "owned.log").read_bytes())
+            self.assertEqual(payload, (logs / "owned.log").read_bytes())
+            self.assertEqual((receipt_before.st_dev, receipt_before.st_ino),
+                             (receipt.lstat().st_dev, receipt.lstat().st_ino))
+            self.assertEqual(receipt_bytes, receipt.read_bytes())
 
     def test_backup_name_collision_moves_zero_source_bytes(self):
         for variant in ("file", "directory", "symlink"):

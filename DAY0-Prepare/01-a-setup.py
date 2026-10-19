@@ -3587,6 +3587,12 @@ def _restore_pending_infra_log_backup(source, destination):
             or (info.st_dev, info.st_ino)
             != (receipt.get("source", {}).get("dev"), receipt.get("source", {}).get("ino"))):
         raise ValueError("日志迁移备份与原目录凭据身份不符")
+    restore_parent = os.path.dirname(source)
+    parent_info = os.lstat(restore_parent)
+    if not stat.S_ISDIR(parent_info.st_mode):
+        raise ValueError(f"日志恢复目标父路径必须是真实目录：{restore_parent}")
+    if parent_info.st_dev != info.st_dev:
+        raise OSError(errno.EXDEV, "日志恢复仅支持同文件系统，拒绝跨设备", restore_parent)
     if os.path.islink(source):
         if managed_infra_log_project(source, HERE) != Path(os.path.dirname(destination)):
             raise ValueError("待恢复日志链接不是所选项目的规范链接")
@@ -3670,6 +3676,13 @@ def _rollback_infra_log_migration():
         return
     if not os.path.lexists(backup):
         raise ValueError("日志迁移回滚时原目录备份已消失")
+    backup_info = os.lstat(backup)
+    restore_parent = os.path.dirname(source)
+    parent_info = os.lstat(restore_parent)
+    if not stat.S_ISDIR(parent_info.st_mode):
+        raise ValueError(f"日志恢复目标父路径必须是真实目录：{restore_parent}")
+    if parent_info.st_dev != backup_info.st_dev:
+        raise OSError(errno.EXDEV, "日志恢复仅支持同文件系统，拒绝跨设备", restore_parent)
     if os.path.islink(source):
         if managed_infra_log_project(source, HERE) != Path(os.path.dirname(destination)):
             raise ValueError("日志迁移回滚拒绝删除非所选项目链接")
