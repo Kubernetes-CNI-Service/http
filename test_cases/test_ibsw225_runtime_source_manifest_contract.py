@@ -49,6 +49,86 @@ FROZEN_SHA256 = {
     SHELLS[1]: "ad082ec6bbeafff9ab4921815b00a45769b65e14f1a211a1b34614df0fe3a635",
     SHELLS[2]: "cb9cc7d68fda9e24972e6335e58e5c6fa196e8d685532d949b78e290e654e1e2",
 }
+# Independent literal inverse of the two approved SFTP lifetime hunks.
+# FROZEN_SHA256 remains the upstream source oracle, including access aa05...;
+# this is not a hash whitelist for arbitrary composed implementations.
+ACCESS_APPROVED_COMPOSITION = (
+    (
+        b"    except SharedUpgradeHold:\n"
+        b"        raise\n"
+        b"    except Exception as error:\n"
+        b"        if isinstance(error,OSError) and error.errno in (errno.EMFILE,errno.ENFILE,errno.ENOMEM,errno.ENOBUFS): raise\n"
+        b"        if sftp is not None:\n"
+        b"            _close_sftp(sftp,'AUTHORIZED_KEYS_READ_FAILED')\n",
+        b"    except BaseException as error:\n"
+        b"        if sftp is not None:\n"
+        b"            _close_sftp(sftp,'AUTHORIZED_KEYS_READ_FAILED')\n"
+        b"        if not isinstance(error,Exception) or isinstance(error,SharedUpgradeHold):\n"
+        b"            raise\n"
+        b"        if isinstance(error,OSError) and error.errno in (errno.EMFILE,errno.ENFILE,errno.ENOMEM,errno.ENOBUFS): raise\n",
+    ),
+    (
+        b"        if not isinstance(cleanup, Exception):\n"
+        b"            raise\n"
+        b"        if original is not None and not isinstance(original,Exception): return\n",
+        b"        if original is not None and not isinstance(original,Exception): return\n"
+        b"        if not isinstance(cleanup, Exception):\n"
+        b"            raise\n",
+    ),
+)
+
+
+def _access_upstream_bytes_from_exact_composition(payload):
+    if type(payload) is not bytes:
+        raise TypeError("exact source bytes required")
+    # Check every new hunk before replacing any; absent/duplicate is not a
+    # partially admissible source. Outside these two regions no byte changes.
+    if any(payload.count(integrated) != 1 for original, integrated in ACCESS_APPROVED_COMPOSITION):
+        raise ValueError("missing or duplicate approved access source hunk")
+    for original, integrated in ACCESS_APPROVED_COMPOSITION:
+        payload = payload.replace(integrated, original, 1)
+    if any(payload.count(original) != 1 for original, integrated in ACCESS_APPROVED_COMPOSITION):
+        raise ValueError("restored access source hunk is not unique")
+    return payload
+
+
+class AccessExactSourceCompositionTests(unittest.TestCase):
+    def test_exact_two_literal_hunks_restore_only_the_original_regions(self):
+        first_old, first_new = ACCESS_APPROVED_COMPOSITION[0]
+        second_old, second_new = ACCESS_APPROVED_COMPOSITION[1]
+        integrated = b"prefix\n" + first_new + b"middle\n" + second_new + b"suffix\n"
+        expected = b"prefix\n" + first_old + b"middle\n" + second_old + b"suffix\n"
+        self.assertEqual(_access_upstream_bytes_from_exact_composition(integrated), expected)
+
+    def test_missing_unfixed_deleted_and_duplicate_hunks_are_refused(self):
+        first_old, first_new = ACCESS_APPROVED_COMPOSITION[0]
+        second_old, second_new = ACCESS_APPROVED_COMPOSITION[1]
+        for malformed in (
+            first_old + second_old,             # Upstream bytes without fix.
+            first_new + second_old,             # Only the first fix.
+            first_old + second_new,             # Only the second fix.
+            first_new + second_new[:-1],        # A deleted hunk byte.
+            first_new + first_new + second_new, # Duplicate acquisition fix.
+            first_new + second_new + second_new,# Duplicate close fix.
+            first_old + first_new + second_new, # Extra original hunk also refused.
+        ):
+            with self.subTest(source=malformed):
+                with self.assertRaises(ValueError):
+                    _access_upstream_bytes_from_exact_composition(malformed)
+
+    def test_bytes_outside_hunks_are_not_normalized_or_hidden(self):
+        first_old, first_new = ACCESS_APPROVED_COMPOSITION[0]
+        second_old, second_new = ACCESS_APPROVED_COMPOSITION[1]
+        expected = b"prefix\n" + first_old + second_old + b"suffix\n"
+        integrated = b"prefix\n" + first_new + second_new + b"suffix\n"
+        for drift in (b"extra\n" + integrated, integrated + b"extra\n",
+                      integrated.replace(b"prefix\n", b"changed-prefix\n", 1)):
+            with self.subTest(source=drift):
+                restored = _access_upstream_bytes_from_exact_composition(drift)
+                self.assertNotEqual(restored, expected)
+                self.assertNotEqual(hashlib.sha256(restored).hexdigest(), hashlib.sha256(expected).hexdigest())
+
+
 GLOBAL = """schema_version: 2
 common:
   mgmt:
@@ -93,7 +173,10 @@ class CanonicalRuntimeManifestContractTests(unittest.TestCase):
                     self.assertGreaterEqual(len(targets), 2)
         for relative, expected in FROZEN_SHA256.items():
             with self.subTest(original=relative):
-                self.assertEqual(hashlib.sha256((ROOT / relative).read_bytes()).hexdigest(), expected)
+                payload = (ROOT / relative).read_bytes()
+                if relative == "tools/ibsw_upgrade_access.py":
+                    payload = _access_upstream_bytes_from_exact_composition(payload)
+                self.assertEqual(hashlib.sha256(payload).hexdigest(), expected)
         self.assertIn(REQUIREMENTS, manifest["tracked_support"])
 
     def test_normal_modules_and_complete_real_helper_files_are_explicitly_hash_bound(self):
