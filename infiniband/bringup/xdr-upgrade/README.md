@@ -2,6 +2,8 @@
 
 ## 当前入口：IBSW 2.25 本地集成
 
+开发代码继承与独立测试见 [IBSW Upgrade 开发测试交接](HANDOFF-CODEX-TEST.md)。
+
 当前使用 `python3 -B upgrade.py --help` 或 `bash upgrade.sh --help`。
 `upgrade.sh` 已是兼容入口；必须与 Python 入口、`tools/ibsw_upgrade_*.py`、
 共同运行锁模块及三个 shell 文件成套使用，不可只复制一个 shell。
