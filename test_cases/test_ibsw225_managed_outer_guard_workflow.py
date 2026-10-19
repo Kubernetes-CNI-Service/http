@@ -171,10 +171,14 @@ class ManagedInitialOuterGuardWorkflowTests(unittest.TestCase):
         self.assertIs(sys.getprofile(), previous_profile)
 
     def test_real_managed_success_receipt_and_cleanup_remain_guarded(self):
+        self._managed_success_case()
+
+    def _managed_success_case(self, after_success=None):
         authority = load_script("ibsw_managed_success", ROOT / "ztp/config_sync_authority.py")
         guard = importlib.import_module("tools.ib_bringup_runtime_guard")
         deployment = importlib.import_module("tools.deployment_lock")
         real_run, real_popen, real_init = subprocess.run, subprocess.Popen, authority.ManagedInitialMethodCycle.__init__
+        original_thread_start = threading.Thread.start
         real_begin, real_finish = authority.begin_method, authority.finish_method
         real_close, real_release = authority.ManagedInitialMethodCycle.close, deployment.release_lock_descriptor
         previous_profile, previous_argv = sys.getprofile(), sys.argv
@@ -373,4 +377,158 @@ class ManagedInitialOuterGuardWorkflowTests(unittest.TestCase):
             self.assertIs(sys.modules.get("_http_managed_initial_setup"), previous_module)
             with guard._runtime_instance_guard():
                 pass
+            if after_success is not None:
+                after_success({"project": project, "tool": tool, "csv": csv_path, "p2p": p2p,
+                    "cache": cache, "private": private, "storage": storage, "wire": wire,
+                    "management": management, "receipt": receipt, "current": current,
+                    "thread_start": original_thread_start})
         self.assertIs(sys.getprofile(), previous_profile)
+
+    def test_real_managed_writer_receipt_is_consumed_by_next_monitor_and_drift_withdraws_only_its_era(self):
+        for fault in ("key", "profile", "new-writer"):
+            with self.subTest(fault=fault):
+                self._managed_success_case(
+                    lambda context: self._monitor_real_managed_receipt(context, fault))
+
+    def _monitor_real_managed_receipt(self, context, fault):
+        """Same-project producer -> real monitor cycle; only transports are fake."""
+        from importlib.machinery import SourceFileLoader
+        monitor = load_script("f02_real_managed_receipt_monitor", ROOT / "DAY0-Prepare/12-ztp-monitor.py")
+        html = load_script("f02_real_managed_receipt_html", ROOT / "monitor/generate-monitor-html.py")
+        project, storage = context["project"], context["storage"]
+        receipt_path = storage / ".authority/example-ib01.method.json"
+        original_receipt = receipt_path.read_bytes()
+        inventory = project / "02-devices_config.csv"
+        inventory.write_bytes(context["csv"].read_bytes())
+        # Independent input to the existing release parser, not a mocked parser
+        # or a claim that this test exercises the production release publisher.
+        global_bytes = (b"schema_version: 2\ncommon:\n  mgmt:\n"
+                        b"    dhcp-server:\n      status: disabled\n")
+        (project / "01-global.yaml").write_bytes(global_bytes)
+        basis = {"project": project.name, "deployment_scope": "all", "switch_scope": "all",
+                 "inputs": {"global": hashlib.sha256(global_bytes).hexdigest()},
+                 "input_sources": {}, "components": {}, "inventory": {},
+                 "dhcp_status": "disabled"}
+        release = {"schema_version": 2, **basis, "validation": "passed",
+                   "generated_at": "2026-10-19T00:00:00+00:00",
+                   "release_id": hashlib.sha256(json.dumps(
+                       basis, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()[:20]}
+        (project / "99-output-ztp/current-release.json").write_text(json.dumps(release))
+        apache, air = project / "apache.log", project / "air.json"
+        apache.write_text("")
+        air.write_text('{"nodes": {}}')
+        args = monitor.parser().parse_args([str(project), "--output-dir", str(project / "monitor-reports"),
+            "--apache-log", str(apache), "--identity", str(context["private"]), "--ssh-timeout", "5",
+            "--known-hosts", str(context["private"].parent / "known_hosts"),
+            "--initial-tool-inputs", str(context["tool"]), "--initial-target-cache", str(context["cache"]),
+            "--initial-device-csv", str(context["csv"]), "--initial-p2p", str(context["p2p"])])
+        original_exec = SourceFileLoader.exec_module
+        phase = "positive"
+        executor_objects, observed_frames, transport_calls, next_tickets = [], [], [], []
+
+        def observation_transport(command, timeout, *, pass_fds=()):
+            self.assertIn("BatchMode=yes", command)
+            self.assertIn("PasswordAuthentication=no", command)
+            self.assertEqual(command[-2], "admin@203.0.113.2")
+            self.assertEqual(timeout, 30)
+            self.assertEqual(len(pass_fds), 1)
+            self.assertEqual(command[2], "/dev/fd/" + str(pass_fds[0]))
+            self.assertEqual(os.fstat(pass_fds[0]).st_ino, context["private"].stat().st_ino)
+            # The existing consumer must have captured generation 1 before
+            # this original observer's independent transport boundary.
+            current = monitor.config_sync_authority.read_method_current(storage, "EXAMPLE-IB01")
+            self.assertEqual((1, "success", False),
+                             (current["generation"], current["state"], current["veto"]))
+            transport_calls.append(phase)
+            reply = context["wire"]
+            if phase == "fault":
+                if fault == "profile":
+                    profile = context["tool"] / "01-global.yaml"
+                    before = profile.read_text()
+                    self.assertIn("Asia/Taipei", before)
+                    profile.write_text(before.replace("Asia/Taipei", "Etc/UTC"))
+                else:
+                    # This is remote installed-key drift, not a changed local
+                    # key profile and not a substituted observer result.
+                    self.assertIn(context["management"] + "\n", reply)
+                    reply = reply.replace(context["management"] + "\n", "")
+                if fault == "new-writer":
+                    ticket = monitor.config_sync_authority.begin_method(
+                        storage, "EXAMPLE-IB01", "independent-new-writer",
+                        "independent-new-writer-IB01", "initial_setup_managed")
+                    self.assertEqual((2, "pending", True),
+                                     (ticket["generation"], ticket["state"], ticket["veto"]))
+                    next_tickets.append(ticket)
+            return subprocess.CompletedProcess(command, 0, reply, "")
+
+        def external_command(command, **kwargs):
+            if command[0] == "systemctl":
+                self.assertEqual(command[1:], ["is-active", "apache2"] if command[1] == "is-active"
+                                 else ["is-enabled", "apache2"])
+                return {"returncode": 0, "stdout": "active\n" if command[1] == "is-active" else "enabled\n", "stderr": ""}
+            self.assertEqual(command[0], "ssh")
+            self.assertIn("BatchMode=yes", command)
+            self.assertEqual(command[-2], "admin@203.0.113.2")
+            return {"returncode": 1, "stdout": "", "stderr": "independent collector unavailable"}
+
+        def bind_external_transport(loader, module):
+            original_exec(loader, module)
+            if module.__name__ == "_http_initial_monitor_executor":
+                self.assertEqual(Path(module.__file__), INITIAL)
+                executor_objects.append(module)
+                # No main/cycle/parser/observer/proof replacement: only the
+                # lowest external read-only command transport is substituted.
+                bindings.enter_context(mock.patch.object(
+                    module, "_run_initial_observation", side_effect=observation_transport))
+
+        def original_observer_frames(frame, event, argument):
+            if event == "call":
+                for executor in executor_objects:
+                    original = executor.observe_managed_initial_configuration
+                    if frame.f_code is original.__code__:
+                        self.assertIs(frame.f_globals, original.__globals__)
+                        self.assertEqual(frame.f_locals["target"].ib.hostname, "EXAMPLE-IB01")
+                        self.assertEqual(frame.f_locals["private_key"], context["private"])
+                        observed_frames.append(phase)
+                        break
+
+        previous_profile = sys.getprofile()
+        self.assertIsNone(previous_profile)
+        with ExitStack() as bindings:
+            bindings.enter_context(mock.patch.object(SourceFileLoader, "exec_module", bind_external_transport))
+            bindings.enter_context(mock.patch.object(monitor, "run_command", side_effect=external_command))
+            bindings.enter_context(mock.patch.object(monitor, "ACTIVE_AIR_JSON", air))
+            # The producer's unrelated worker prohibition stays intact outside
+            # this scope. Only the real pool for the controlled collector runs.
+            bindings.enter_context(mock.patch.object(threading.Thread, "start", context["thread_start"]))
+            try:
+                sys.setprofile(original_observer_frames)
+                for phase in ("positive", "fault"):
+                    output = monitor.monitor_once(args, project)
+                    report = json.loads((output / "report.json").read_text())
+                    matches = [row for row in report["devices"] if row["hostname"] == "EXAMPLE-IB01"]
+                    self.assertEqual(len(matches), 1)
+                    device = matches[0]
+                    current = monitor.config_sync_authority.read_method_current(storage, "EXAMPLE-IB01")
+                    self.assertEqual("success" if phase == "positive" else "warning",
+                                     device["stages"]["config_apply"]["status"])
+                    self.assertNotEqual(device["overall"], "success")
+                    self.assertFalse(monitor.completion_handoff_device_complete(device))
+                    self.assertFalse(html.ztp_completed(device))
+                    if phase == "positive":
+                        self.assertEqual((1, "success", False),
+                                         (current["generation"], current["state"], current["veto"]))
+                        self.assertEqual(context["receipt"], device["configuration_method_authority"])
+                    elif fault == "new-writer":
+                        self.assertEqual(next_tickets, [current], "the old observation must not revoke a new era")
+                        self.assertEqual((2, "pending", True),
+                                         (current["generation"], current["state"], current["veto"]))
+                    else:
+                        self.assertEqual((1, "failed", True),
+                                         (current["generation"], current["state"], current["veto"]))
+                    self.assertEqual(original_receipt, receipt_path.read_bytes())
+            finally:
+                sys.setprofile(previous_profile)
+        self.assertEqual(transport_calls, ["positive", "fault"])
+        self.assertEqual(observed_frames, ["positive", "fault"])
+        self.assertEqual(len(executor_objects), 2)
