@@ -4,7 +4,7 @@ Only DNS and root CA-file metadata are synthetic boundaries. HTTPSConnection,
 SSLContext, hostname verification, request generation and response parsing are
 not mocked. No real credential or installed CA is read or modified.
 """
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from datetime import datetime, timedelta
 import base64
 import json
@@ -166,63 +166,64 @@ class Req7NativeTlsWireTests(unittest.TestCase):
             self.assertEqual(prepared[2], self._server_material_originals(),
                              'prepared server originals cannot change')
             context = prepared[1]
-        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        listener.bind(("127.0.0.1", 0)); listener.listen(1); listener.settimeout(3)
-        address = listener.getsockname(); observations = []; errors = []
-        stop_read, stop_write = socket.socketpair()
-        # Non-authoritative diagnostic snapshot of this fixture's actual
-        # original readiness descriptors, before any close/reuse.
-        self._last_owned_tls_ready_fds=(listener.fileno(),stop_read.fileno())
-        def serve():
+        with ExitStack() as resources:
+            listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            resources.callback(listener.close)
+            listener.bind(("127.0.0.1", 0)); listener.listen(1); listener.settimeout(3)
+            address = listener.getsockname(); observations = []; errors = []
+            stop_read, stop_write = socket.socketpair()
+            resources.callback(stop_read.close)
+            resources.callback(stop_write.close)
+            # Non-authoritative diagnostic snapshot of this fixture's actual
+            # original readiness descriptors, before any close/reuse.
+            self._last_owned_tls_ready_fds=(listener.fileno(),stop_read.fileno())
+            def serve():
+                try:
+                    # Client startup/local validation belongs to the caller's
+                    # unchanged TOTAL budget, not a fake-server accept deadline.
+                    # Wait for an actual pending connection or explicit scope
+                    # cancellation. Accept/handshake/body retain their 3s bounds.
+                    # Original catalog/source graphs may hold high descriptors.
+                    # DefaultSelector uses the native scalable readiness backend;
+                    # retain the same two original sockets and cancellation path.
+                    for reply in replies:
+                        with selectors.DefaultSelector() as readiness:
+                            readiness.register(listener,selectors.EVENT_READ)
+                            readiness.register(stop_read,selectors.EVENT_READ)
+                            ready={key.fileobj for key,_event in readiness.select()}
+                        if stop_read in ready: return
+                        connection, _peer = listener.accept(); connection.settimeout(3)
+                        with connection:
+                            with context.wrap_socket(connection, server_side=True) as transport:
+                                with transport.makefile("rb") as incoming:
+                                    request_line = incoming.readline(8193); headers = []
+                                    for _ in range(100):
+                                        line = incoming.readline(8193)
+                                        if line == b"\r\n": break
+                                        if not line or len(line) > 8192: raise AssertionError("invalid owned-fixture request")
+                                        headers.append(line)
+                                    else: raise AssertionError("owned fixture header overflow")
+                                    lengths = [int(line.split(b":", 1)[1]) for line in headers if line.lower().startswith(b"content-length:")]
+                                    if request_line.startswith(b"GET "):
+                                        if lengths not in ([], [0]): raise AssertionError("GET fixture received a body")
+                                        body = b""
+                                    else:
+                                        if len(lengths) != 1 or not 0 <= lengths[0] <= request_limit: raise AssertionError("invalid owned fixture length")
+                                        body = incoming.read(lengths[0])
+                                    observations.append((request_line, tuple(headers), body))
+                                if callable(reply): reply(transport)
+                                else: transport.sendall(reply)
+                except Exception as error: errors.append(error)
+            thread = threading.Thread(target=serve, daemon=True); thread.start()
+            def resolve(host, port, *args, **kwargs):
+                if host != destination or port != 443:
+                    raise AssertionError("foreign/online DNS forbidden")
+                return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", address)]
             try:
-                # Client startup/local validation belongs to the caller's
-                # unchanged TOTAL budget, not a fake-server accept deadline.
-                # Wait for an actual pending connection or explicit scope
-                # cancellation. Accept/handshake/body retain their 3s bounds.
-                # Original catalog/source graphs may hold high descriptors.
-                # DefaultSelector uses the native scalable readiness backend;
-                # retain the same two original sockets and cancellation path.
-                for reply in replies:
-                    with selectors.DefaultSelector() as readiness:
-                        readiness.register(listener,selectors.EVENT_READ)
-                        readiness.register(stop_read,selectors.EVENT_READ)
-                        ready={key.fileobj for key,_event in readiness.select()}
-                    if stop_read in ready: return
-                    connection, _peer = listener.accept(); connection.settimeout(3)
-                    with connection:
-                        with context.wrap_socket(connection, server_side=True) as transport:
-                            with transport.makefile("rb") as incoming:
-                                request_line = incoming.readline(8193); headers = []
-                                for _ in range(100):
-                                    line = incoming.readline(8193)
-                                    if line == b"\r\n": break
-                                    if not line or len(line) > 8192: raise AssertionError("invalid owned-fixture request")
-                                    headers.append(line)
-                                else: raise AssertionError("owned fixture header overflow")
-                                lengths = [int(line.split(b":", 1)[1]) for line in headers if line.lower().startswith(b"content-length:")]
-                                if request_line.startswith(b"GET "):
-                                    if lengths not in ([], [0]): raise AssertionError("GET fixture received a body")
-                                    body = b""
-                                else:
-                                    if len(lengths) != 1 or not 0 <= lengths[0] <= request_limit: raise AssertionError("invalid owned fixture length")
-                                    body = incoming.read(lengths[0])
-                                observations.append((request_line, tuple(headers), body))
-                            if callable(reply): reply(transport)
-                            else: transport.sendall(reply)
-            except Exception as error: errors.append(error)
-        thread = threading.Thread(target=serve, daemon=True); thread.start()
-        def resolve(host, port, *args, **kwargs):
-            if host != destination or port != 443:
-                raise AssertionError("foreign/online DNS forbidden")
-            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", address)]
-        try:
-            with mock.patch("socket.getaddrinfo", side_effect=resolve): yield observations, errors
-        finally:
-            try:
+                with mock.patch("socket.getaddrinfo", side_effect=resolve): yield observations, errors
+            finally:
                 stop_write.sendall(b"x"); thread.join(4)
                 self.assertFalse(thread.is_alive(), "owned TLS fixture must terminate")
-            finally:
-                listener.close(); stop_read.close(); stop_write.close()
 
     def test_fixed_four_reply_fixture_really_accepts_four_original_connections(self):
         # The fixed cohort needs four actual native HTTP requests, not one
@@ -459,6 +460,116 @@ class Req7NativeTlsWireTests(unittest.TestCase):
                 self.assertEqual("https://www.googleapis.com/auth/spreadsheets", claims["scope"])
                 self.assertNotIn("sub", claims)
                 if status == 200: self.assertEqual("sentinel", credential.token)
+
+
+class _TlsAcquisitionError(RuntimeError):
+    pass
+
+
+class _OwnedAcquisitionSocket:
+    def __init__(self, name, fault, selected, events):
+        self.name = name
+        self.fault = fault
+        self.selected = selected
+        self.events = events
+        self.close_calls = 0
+
+    def bind(self, address):
+        if address != ("127.0.0.1", 0):
+            raise AssertionError("fixture attempted a non-owned listener")
+        self.events.append("bind")
+        if self.selected == "bind":
+            raise self.fault
+
+    def listen(self, count):
+        if count != 1:
+            raise AssertionError("fixture changed backlog")
+        self.events.append("listen")
+        if self.selected == "listen":
+            raise self.fault
+
+    def settimeout(self, timeout):
+        if timeout != 3:
+            raise AssertionError("fixture changed timeout")
+
+    def getsockname(self):
+        return ("127.0.0.1", 31415)
+
+    def fileno(self):
+        # Pure diagnostic values only; no operating-system FD is acquired.
+        return {"listener": 101, "stop_read": 102, "stop_write": 103}[self.name]
+
+    def close(self):
+        self.close_calls += 1
+        self.events.append("close:" + self.name)
+
+
+class Req7TlsFixtureAcquisitionCleanupDirectTests(unittest.TestCase):
+    def exercise(self, selected, expected_names, expected_acquisitions):
+        original = _TlsAcquisitionError("literal acquisition failure: " + selected)
+        events = []
+        returned = []
+        fixture = Req7NativeTlsWireTests(methodName="runTest")
+
+        def socket_factory(family, kind):
+            self.assertEqual((socket.AF_INET,
+                              socket.SOCK_STREAM), (family, kind))
+            item = _OwnedAcquisitionSocket("listener", original, selected, events)
+            returned.append(item)
+            events.append("socket")
+            return item
+
+        def pair_factory():
+            events.append("socketpair")
+            if selected == "socketpair":
+                raise original
+            left = _OwnedAcquisitionSocket("stop_read", original, selected, events)
+            right = _OwnedAcquisitionSocket("stop_write", original, selected, events)
+            returned.extend((left, right))
+            return left, right
+
+        class NotStartedThread:
+            def __init__(thread_self, *, target, daemon):
+                self.assertTrue(callable(target))
+                self.assertIs(daemon, True)
+                events.append("Thread")
+
+            def start(thread_self):
+                events.append("start")
+                if selected != "start":
+                    raise AssertionError("unexpected thread startup")
+                # The start call raises before any worker actually starts.
+                raise original
+
+        with mock.patch.object(fixture, "certificates", return_value=object()), \
+             mock.patch.object(socket, "socket", socket_factory), \
+             mock.patch.object(socket, "socketpair", pair_factory), \
+             mock.patch.object(threading, "Thread", NotStartedThread):
+            with self.assertRaises(_TlsAcquisitionError) as caught:
+                with fixture.server(b"unused"):
+                    self.fail("acquisition failure must not enter the body")
+
+        self.assertIs(original, caught.exception, "cleanup replaced original failure")
+        self.assertEqual(expected_names, tuple(item.name for item in returned))
+        self.assertEqual(expected_acquisitions,
+                         tuple(event for event in events if not event.startswith("close:")))
+        for item in returned:
+            self.assertEqual(1, item.close_calls,
+                             "successful original acquisition must close exactly once: " + item.name)
+
+    def test_listener_bind_failure_closes_returned_listener_and_preserves_error(self):
+        self.exercise("bind", ("listener",), ("socket", "bind"))
+
+    def test_listener_listen_failure_closes_returned_listener_and_preserves_error(self):
+        self.exercise("listen", ("listener",), ("socket", "bind", "listen"))
+
+    def test_socketpair_failure_closes_returned_listener_and_preserves_error(self):
+        self.exercise("socketpair", ("listener",),
+                      ("socket", "bind", "listen", "socketpair"))
+
+    def test_thread_start_failure_closes_all_returned_sockets_and_preserves_error(self):
+        self.exercise("start", ("listener", "stop_read", "stop_write"),
+                      ("socket", "bind", "listen", "socketpair", "Thread", "start"))
 
 
 if __name__ == "__main__": unittest.main()
