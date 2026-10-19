@@ -67,6 +67,7 @@ def _read_regular_no_follow(path: Path, *, limit: int, private: bool) -> bytes:
             or type(nofollow) is not int or not nofollow):
         raise IdentityBindingError("platform cannot enforce no-follow identity reads")
     fds: list[int] = []
+    body_operator = None
     try:
         parent = os.open("/", os.O_RDONLY | directory_flag)
         fds.append(parent)
@@ -97,9 +98,18 @@ def _read_regular_no_follow(path: Path, *, limit: int, private: bool) -> bytes:
         return bytes(blocks)
     except OSError:
         raise IdentityBindingError("identity source is unavailable or symlinked") from None
+    except BaseException as error:
+        if not isinstance(error, Exception):
+            body_operator = error
+        raise
     finally:
-        for fd in reversed(fds):
-            os.close(fd)
+        try:
+            for fd in reversed(fds):
+                os.close(fd)
+        except BaseException:
+            if body_operator is not None:
+                raise body_operator
+            raise
 
 
 def _pinned_hosts(data: bytes, jump_host: str, far_host: str) -> None:

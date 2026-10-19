@@ -335,6 +335,7 @@
         "test_cases.test_ufm_jump_transport_workflow",
         "test_cases.test_ufm_identity_binding",
         "test_cases.test_ufm_collection_archive_retrieval",
+        "test_cases.test_f01_identity_read_cleanup_priority",
         "test_cases.test_ufm_identity_binding_workflow",
         "test_cases.test_ufm_remote_producer",
         "test_cases.test_ufm_remote_producer_workflow",
@@ -1309,7 +1310,8 @@
         "tools/ufm_identity_binding.py"
       ],
       "tests": [
-        "test_cases.test_ufm_identity_binding"
+        "test_cases.test_ufm_identity_binding",
+        "test_cases.test_f01_identity_read_cleanup_priority"
       ]
     },
     {
@@ -3172,6 +3174,7 @@
       ],
       "tests": [
         "test_cases.test_ufm_identity_binding_workflow",
+        "test_cases.test_f01_identity_read_cleanup_priority",
         "test_cases.test_ufm_collection_archive_retrieval"
       ]
     },
