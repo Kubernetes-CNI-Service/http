@@ -41,6 +41,24 @@ def actual_source(name, path):
             del sys.modules[name]
 
 class HttpInitializerGuardProtocolTests(unittest.TestCase):
+    def test_upgrade_sole_help_states_current_modes_without_guard_or_runtime_load(self):
+        with actual_source("_ibsw_current_handoff_help", UPGRADE) as app:
+            output = io.StringIO()
+            with mock.patch.object(sys, "argv", [str(UPGRADE), "--help"]), \
+                 mock.patch.object(app, "_runtime_instance_guard", side_effect=AssertionError("Help cannot acquire a host lock")) as guard, \
+                 mock.patch.object(app, "_fixed_driver", side_effect=AssertionError("Help cannot load operational runtime")) as runtime, \
+                 mock.patch.object(sys, "stdout", output):
+                with self.assertRaises(SystemExit) as caught:
+                    app._guarded_main()
+            self.assertEqual(caught.exception.code, 0)
+            help_text = " ".join(output.getvalue().split())
+            for literal in ("--project", "--diagnose-inputs", "--inspect-only", "--scripts-only", "--upgrade", "--yes",
+                            "--os-only", "--bios-only", "--cpld-only", "HTTP only.",
+                            "inspection never upgrades devices.", "does not recover earlier UNKNOWN runs"):
+                self.assertIn(literal, help_text)
+            guard.assert_not_called()
+            runtime.assert_not_called()
+
     def initializer_capability(self, initial):
         self.assertTrue(callable(getattr(initial, "_guarded_main", None)),
             "The real HTTP initializer final standalone entry must expose its guarded wrapper")

@@ -16,6 +16,46 @@
 初始化和升级共用本机内核运行锁，忙时退出 75。不要删除锁文件、重放 UNKNOWN 请求，
 也不要把状态 JSON 当成授权。OS/BIOS/CPLD 各自保留组件状态和金丝雀结果。
 
+### 当前操作顺序（以下示例不自动执行）
+
+先完整保留本仓库布局，再用独立 Python 3.12 环境安装本目录依赖；不要只复制
+`upgrade.sh`，也不要安装到系统 Python。以下路径均须替换为操作者自己的绝对路径：
+
+```bash
+python3.12 -m venv /absolute/ibsw-venv
+/absolute/ibsw-venv/bin/python -m pip install -r /absolute/http/infiniband/bringup/xdr-upgrade/requirements.txt
+/absolute/ibsw-venv/bin/python -B /absolute/http/infiniband/bringup/xdr-upgrade/upgrade.py --help
+```
+
+requirements 固定八个 SSH 依赖版本；其中 PyYAML 原文未锁版本，不能称九包完整锁定。
+实际设备检查/升级会核对 SSH 版本，不匹配即拒绝，不自动安装或修复环境。
+
+先离线检查明确项目的输入；`--project` 使用该项目的 `02-devices_config.csv` 和
+`01-global.yaml`，无需先 load/setup。不会把样例 global 覆盖到项目：
+
+```bash
+/absolute/ibsw-venv/bin/python -B /absolute/http/infiniband/bringup/xdr-upgrade/upgrade.py --project /absolute/project --method http --diagnose-inputs
+```
+
+输入检查不访问 SSH、不问密码、不生成 run；它不是设备健康或升级验收。
+后续 `--inspect-only`（包括 `--dry-run`）会访问设备，可能提示隐藏密码，并写本地事实/报告；
+它不是离线 dry-run，也不会安装组件。应先由操作者独立核验目标的 known_hosts 信任；
+默认读取当前用户 `~/.ssh/known_hosts`，可用 `--known-hosts /absolute/known_hosts` 显式指定。
+
+```bash
+/absolute/ibsw-venv/bin/python -B /absolute/http/infiniband/bringup/xdr-upgrade/upgrade.py --project /absolute/project --method http --devices 'ew-spine*' --inspect-only
+```
+
+只想声明脚本用 `--scripts-only`，不会认证或执行安装；`NOT_EXECUTED` 不能写成升级成功。
+实际升级必须另行明确选择 `--upgrade --yes`，不要把以下历史命令的 `--all` 当作升级授权。
+`--os-only` / `--bios-only` / `--cpld-only` 只消费所选组件状态；只选 BIOS/CPLD 仍须每台
+现场确认最终 OS，不采用旧 OS 状态文件代替。某组件金丝雀失败阻止该组件其余目标；
+普通目标失败停止自身后续写入，不自动抹掉其他组件已取得的放行事实。
+
+保留失败/UNKNOWN 原 run、请求及证据；不要自动重试、删除锁文件、重置状态或以
+`--verify-only` 追认旧请求。HTTP 下载来源来自项目 global 的升级配置；不支持通过旧
+`--http-server` 参数补地址，也不回退到 SCP/local/HTTPS。实际操作前仍须满足现场授权。
+
 本次只执行定向本地 direct/workflow（外部设备 IO 为夹具），未跑 full，
 不产生正式发布证明或真机验收。现场用例见 `test_cases/REAL_ENVIRONMENT.md`。
 
