@@ -27,6 +27,15 @@ class RemoteHistoryHold(ValueError):
     def __init__(self): super().__init__('req7_remote_history_unproved')
 
 
+class _EnrollmentPreconditionHold(RemoteHistoryHold):
+    """Fixed read-only diagnosis after original verification and cleanup only."""
+    def __init__(self, state):
+        if type(state) is not str or state not in ('enrollment_missing', 'enrollment_incomplete'):
+            raise RemoteHistoryHold()
+        super().__init__()
+        self.diagnostic_state = state
+
+
 @dataclass(frozen=True)
 class RemoteHistoryObservation:
     state: str
@@ -754,7 +763,7 @@ def _reconcile_pending_project_units_and_project_auth(writer_token, owner_token,
     actual reads; this is not a snapshot, G1 or send capability.
     No current counted unit returns ((), None), without authenticating.
     """
-    failed = False
+    failed = False; diagnostic = None
     try:
         result, authentication = _reconcile_pending_project_units_with_authentication(
             writer_token, owner_token, binding, _store=_store)
@@ -764,10 +773,17 @@ def _reconcile_pending_project_units_and_project_auth(writer_token, owner_token,
             require_current_owned_project_token(owner_token, binding, authentication)
             inspect_project_online_target(writer_token, binding)
             require_current_owned_project_token(owner_token, binding, authentication)
+    except _EnrollmentPreconditionHold as error:
+        if type(error) is not _EnrollmentPreconditionHold:
+            failed = True
+        else:
+            diagnostic = error
     except Exception:
         failed = True
     if failed:
         raise RemoteHistoryHold() from None
+    if diagnostic is not None:
+        raise diagnostic from None
     return result, authentication
 
 
@@ -2059,40 +2075,51 @@ def _observe_original_first_catalog_absence(writer_token, owner_token, binding):
     from monitor import issue_tracker_enrollment_journal as enrollment
     from monitor import issue_tracker_local_commit as local
     from monitor.issue_tracker_sheets_read_decode import _TEMPLATE_SHEETS
-    held = None; failed = False; absent = False
+    held = None; failed = False; absent = False; diagnostic = None
     try:
         project = local._owner(writer_token)
         owner = ownership._validated_owner(owner_token, binding)
         parent = owner.directories[-1][0]; stem = owner.lock_name[:-5]
         names = {name for name in os.listdir(parent) if name.startswith(stem+'.')}
         if not names - {stem+'.lock', stem+'.enrollment'}:
-            if names != {stem+'.lock', stem+'.enrollment'}:
-                raise RemoteHistoryHold()
             held = catalog._originals(owner_token, binding)
             held.namespace = (parent, stem+'.', names)
-            folder = held.directory(parent, stem+'.enrollment')
-            if set(os.listdir(folder)) != {'HEADER', 'NONCES', 'INITIALIZED'}:
+            if names == {stem+'.lock'}:
+                diagnostic = 'enrollment_missing'
+            elif names == {stem+'.lock', stem+'.enrollment'}:
+                folder = held.directory(parent, stem+'.enrollment')
+                entries = set(os.listdir(folder))
+                expected = {'HEADER', 'NONCES', 'INITIALIZED'}
+                if entries - expected:
+                    raise RemoteHistoryHold()
+                originals = {name: held.file(folder, name, 16384)[0]
+                    for name in ('HEADER', 'NONCES', 'INITIALIZED') if name in entries}
+                if entries != expected:
+                    # Structural incompleteness is never nonce/initialization
+                    # authority. Pin every existing leaf and the complete
+                    # directory namespace before displaying this diagnosis.
+                    diagnostic = 'enrollment_incomplete'
+                else:
+                    header = local._json(originals['HEADER'],
+                        {'schema_version', 'spreadsheet_id', 'sheet_ids', 'nonces_sha256'})
+                    rows = header['sheet_ids']
+                    if (type(header['schema_version']) is not int or header['schema_version'] != 1
+                            or header['spreadsheet_id'] != binding.spreadsheet_id or type(rows) is not list
+                            or len(rows) != len(_TEMPLATE_SHEETS)
+                            or any(type(row) is not list or len(row) != 2
+                                or row[0] != title or type(row[1]) is not int or not 0 <= row[1] <= 2147483647
+                                for title, row in zip(_TEMPLATE_SHEETS, rows))
+                            or len({row[1] for row in rows}) != len(rows)):
+                        raise RemoteHistoryHold()
+                    base = {key: header[key] for key in ('schema_version', 'spreadsheet_id', 'sheet_ids')}
+                    # The semantic reader uses the same actual pinned directory;
+                    # no remote identity is fabricated from this local header.
+                    held.verify()
+                    enrollment._inspect(parent, folder, stem+'.enrollment', base)
+                    held.verify()
+                    absent = True
+            else:
                 raise RemoteHistoryHold()
-            originals = {name: held.file(folder, name, 16384)[0]
-                for name in ('HEADER', 'NONCES', 'INITIALIZED')}
-            header = local._json(originals['HEADER'],
-                {'schema_version', 'spreadsheet_id', 'sheet_ids', 'nonces_sha256'})
-            rows = header['sheet_ids']
-            if (type(header['schema_version']) is not int or header['schema_version'] != 1
-                    or header['spreadsheet_id'] != binding.spreadsheet_id or type(rows) is not list
-                    or len(rows) != len(_TEMPLATE_SHEETS)
-                    or any(type(row) is not list or len(row) != 2
-                        or row[0] != title or type(row[1]) is not int or not 0 <= row[1] <= 2147483647
-                        for title, row in zip(_TEMPLATE_SHEETS, rows))
-                    or len({row[1] for row in rows}) != len(rows)):
-                raise RemoteHistoryHold()
-            base = {key: header[key] for key in ('schema_version', 'spreadsheet_id', 'sheet_ids')}
-            # The semantic reader uses the same actual pinned directory; no
-            # typed remote identity is fabricated from this local header.
-            held.verify()
-            enrollment._inspect(parent, folder, stem+'.enrollment', base)
-            held.verify()
-            absent = True
         if (local._owner(writer_token) is not project
                 or ownership._validated_owner(owner_token, binding) is not owner):
             raise RemoteHistoryHold()
@@ -2105,6 +2132,8 @@ def _observe_original_first_catalog_absence(writer_token, owner_token, binding):
             try: held.close()
             except Exception: failed = True
     if failed: raise RemoteHistoryHold() from None
+    if diagnostic is not None:
+        raise _EnrollmentPreconditionHold(diagnostic) from None
     return absent
 
 

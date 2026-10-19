@@ -1021,7 +1021,7 @@
     },
     {
       "id": "req7_online_non_authority_observation_status",
-      "paths": ["monitor/switch-collection-worker.py", "monitor/switch-collection-control.cgi", "monitor/generate-monitor-html.py"],
+      "paths": ["monitor/switch-collection-worker.py", "monitor/switch-collection-control.cgi", "monitor/generate-monitor-html.py", "monitor/issue_tracker_remote_history_match.py"],
       "tests": ["test_cases.test_req7_online_observation_status"]
     },
     {

@@ -2258,14 +2258,16 @@ function renderIssueTrackerOnlineStatus(payload) {
     no_counted_units: 'Issue Tracker 最近对账未观察到已计数单元；不代表发送许可',
     attempted_unknown: 'Issue Tracker 最近发送尝试结果为 UNKNOWN；不代表远端完成或当前发送许可，请检查受保护证据',
     attempted_definite_rejection: 'Issue Tracker 最近发送尝试被明确拒绝；不代表远端完成或当前发送许可，请检查受保护证据',
-    attempt_unproved: 'Issue Tracker 在线准入或尝试未证明；不代表未发送、远端完成或当前发送许可，请检查受保护证据'
+    attempt_unproved: 'Issue Tracker 在线准入或尝试未证明；不代表未发送、远端完成或当前发送许可，请检查受保护证据',
+    enrollment_missing: 'Issue Tracker enrollment 缺失；仅只读诊断，未自动初始化或修补；自动发送禁用',
+    enrollment_incomplete: 'Issue Tracker enrollment 未完成；仅只读诊断，未自动初始化或修补；自动发送禁用'
   };
   const unproved = 'Issue Tracker 在线状态未证明；自动发送禁用，请检查并升级处理';
   if (!payload || Array.isArray(payload) || payload.schema_version !== 1
       || Object.keys(payload).some(key => !['schema_version', 'state', 'updated_at',
         'read_only', 'mutation_disabled', 'process_alive'].includes(key))
       || payload.read_only !== true || payload.mutation_disabled !== true
-      || !Object.hasOwn(messages, payload.state)
+      || typeof payload.state !== 'string' || !Object.hasOwn(messages, payload.state)
       || typeof payload.updated_at !== 'string'
       || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$/.test(payload.updated_at)) {
     label.textContent = unproved; return;

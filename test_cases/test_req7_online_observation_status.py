@@ -219,6 +219,185 @@ class OnlineObservationStatusDirectTests(unittest.TestCase):
 
 
 class OnlineObservationStatusWorkflowTests(unittest.TestCase):
+
+    def test_original_enrollment_refusal_reaches_worker_status_and_authenticated_cgi_only_after_cleanup(self):
+        from test_cases import test_req7_online_completion_runtime as runtime
+        from test_cases.test_req7_sheets_read_decode import identity_response
+        from test_cases.test_req7_history_read import response
+        import hashlib
+        import time
+        for fault in ('missing', 'partial', 'cleanup-error', 'cleanup-interrupt'):
+            with self.subTest(fault=fault):
+                # Reuse the existing registry-binding setup. Its private CA
+                # fixture is unused here: no TLS server or client is started.
+                fixture = runtime.OnlineCompletionRuntimeWorkflowTests()
+                fixture.setUp()
+                try:
+                    # Capture the canonical registries AFTER the existing
+                    # fixture's deliberate support-module reloads, before
+                    # issuing any original owner token.
+                    from monitor import issue_tracker_enrollment_journal as enrollment
+                    from monitor import issue_tracker_local_commit as local
+                    from monitor import issue_tracker_spreadsheet_owner as ownership
+                    from monitor import issue_tracker_online_target as target
+                    from monitor import issue_tracker_token_launcher as tokens
+                    from monitor import issue_tracker_history_read_launcher as reads
+                    from monitor import issue_tracker_global_attempt_journal as journal
+                    from monitor import issue_tracker_mutation_launcher as mutation
+                    from monitor import issue_tracker_sheets_read_plan as plans
+                    from monitor import issue_tracker_sheets_read_decode as decode
+                    from monitor.issue_tracker_sdk_authentication import AuthenticatedToken
+                    with tempfile.TemporaryDirectory(prefix='req7-enrollment-status-') as raw, ExitStack() as stack:
+                        root = Path(raw).resolve()
+                        fixture.root = root
+                        initial = stack.enter_context(ExitStack())
+                        fixture.initial_owners = initial
+                        store = runtime.cycle(stack, root)
+                        _local, _ownership, writer, owner, bound, _unused, _config = fixture.owners(stack)
+                        original_identity = identity_response()
+                        original_identity['spreadsheetId'] = bound.spreadsheet_id
+                        parsed_identity = decode.decode_template_identity(
+                            plans.prepare_template_identity_read(bound, AuthenticatedToken('fixture-only', time.time()+3600)),
+                            response(original_identity))
+                        state = root/'var/lib/http-ztp-container/issue-tracker'
+                        stem = hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()
+                        if fault == 'partial':
+                            with mock.patch('secrets.token_hex', side_effect=['a'*64, 'b'*64, 'c'*64, 'd'*64]):
+                                enrollment.prepare_enrollment_journal(owner, bound, parsed_identity)
+                            (state/(stem+'.enrollment')/'INITIALIZED').rename(root/'retained-original-marker')
+                        initial.close()
+                        before = {str(path.relative_to(state)): (path.stat().st_ino, path.read_bytes())
+                                  for path in state.rglob('*') if path.is_file()}
+                        old = snapshot('stalled')
+                        status = root/'monitor/status/issue-tracker-online.status.json'
+                        status.write_text(json.dumps(old)); status.chmod(0o644)
+                        closed = []
+                        ordinary = RuntimeError('fixture cleanup fault; not an enrollment reason')
+                        interrupt = KeyboardInterrupt('fixture cleanup interruption')
+                        preset = ValueError('independent preset cause')
+                        interrupt.__cause__ = preset
+                        actual_writer, actual_sheet = local.try_writer_owner, ownership.spreadsheet_owner
+                        actual_target, actual_write = target._hold_current_project_online_target, WORKER._write_status_file
+
+                        @contextmanager
+                        def original_role(factory, label, *args, **kwargs):
+                            body_error = None
+                            try:
+                                with factory(*args, **kwargs) as actual:
+                                    try:
+                                        yield actual
+                                    except BaseException as error:
+                                        body_error = error
+                                        raise
+                            except BaseException as error:
+                                if error is not body_error:
+                                    raise  # A different cleanup failure is never marked completed.
+                                closed.append(label)
+                                if label == 'sheet' and fault == 'cleanup-error':
+                                    raise ordinary
+                                if label == 'sheet' and fault == 'cleanup-interrupt':
+                                    raise interrupt
+                                raise
+                            else:
+                                closed.append(label)
+                                if label == 'sheet' and fault == 'cleanup-error':
+                                    raise ordinary
+                                if label == 'sheet' and fault == 'cleanup-interrupt':
+                                    raise interrupt
+
+                        def write_after_roles(*args, **kwargs):
+                            self.assertEqual(['sheet', 'writer', 'target'], closed,
+                                             'no known diagnostic before original owner finalizers')
+                            return actual_write(*args, **kwargs)
+
+                        stack.enter_context(mock.patch.object(local, 'try_writer_owner',
+                            side_effect=lambda *a, **k: original_role(actual_writer, 'writer', *a, **k)))
+                        stack.enter_context(mock.patch.object(ownership, 'spreadsheet_owner',
+                            side_effect=lambda *a, **k: original_role(actual_sheet, 'sheet', *a, **k)))
+                        stack.enter_context(mock.patch.object(target, '_hold_current_project_online_target',
+                            side_effect=lambda *a, **k: original_role(actual_target, 'target', *a, **k)))
+                        stack.enter_context(mock.patch.object(WORKER, 'STATUS_DIR', root/'monitor/status'))
+                        stack.enter_context(mock.patch.object(CGI, 'STATUS_DIR', root/'monitor/status'))
+                        stack.enter_context(mock.patch.object(WORKER, 'timestamp', return_value=STAMP))
+                        stack.enter_context(mock.patch.object(WORKER, '_write_status_file', side_effect=write_after_roles))
+                        # The independent Stage-L lanes are not subjects of this
+                        # workflow. The original online dispatcher/owner graph is.
+                        stack.enter_context(mock.patch.object(WORKER, '_publish_stage_l_status_after_completion'))
+                        stack.enter_context(mock.patch.object(WORKER, '_publish_stage_l_local_after_completion'))
+                        blocked = []
+                        for module, name in ((enrollment, 'prepare_enrollment_journal'),
+                                (tokens, 'OwnedProjectTokenRefreshUnit'), (reads, 'OwnedProjectSheetsReadUnit'),
+                                (journal, 'record_global_attempt_intent'), (mutation, '_send_counted_original_once'),
+                                (WORKER, '_dispatch_current_project_online_originals')):
+                            blocked.append(stack.enter_context(mock.patch.object(
+                                module, name, side_effect=AssertionError('read-only precondition must not execute ' + name))))
+                        network = stack.enter_context(mock.patch('socket.socket', side_effect=AssertionError('No network')))
+                        child = stack.enter_context(mock.patch('subprocess.Popen', side_effect=AssertionError('No child')))
+                        stack.enter_context(mock.patch.object(WORKER.sys, 'stderr', io.StringIO()))
+                        if fault == 'cleanup-interrupt':
+                            with self.assertRaises(KeyboardInterrupt) as caught:
+                                WORKER._publish_issue_tracker_lanes_after_completion(store)
+                            self.assertIs(interrupt, caught.exception)
+                            self.assertIs(preset, caught.exception.__cause__)
+                        else:
+                            WORKER._publish_issue_tracker_lanes_after_completion(store)
+                        for operation in (*blocked, network, child):
+                            operation.assert_not_called()
+                        after = {str(path.relative_to(state)): (path.stat().st_ino, path.read_bytes())
+                                 for path in state.rglob('*') if path.is_file()}
+                        self.assertEqual(before, after, 'diagnostics cannot initialize/adopt/repair enrollment')
+                        self.assertFalse(list(state.rglob('ATTEMPT-*')))
+                        self.assertFalse(list(state.rglob('CLAIM-*')))
+                        self.assertFalse(list(state.glob('*.units')))
+                        original_status = status.read_bytes()
+                        if fault.startswith('cleanup-'):
+                            self.assertEqual(old, json.loads(original_status),
+                                             'unknown cleanup must not publish a known enrollment reason')
+                            continue
+                        stack.enter_context(mock.patch.dict(os.environ, AUTH, clear=True))
+                        stack.enter_context(mock.patch.object(CGI, 'process_state', return_value=(False, None)))
+                        for name in ('collection_status', 'yaml_backup_status', 'continuous_collection_status', 'continuous_backup_status'):
+                            stack.enter_context(mock.patch.object(CGI, name, return_value={'state': 'idle'}))
+                        stack.enter_context(mock.patch.object(CGI, 'request_action', return_value=None))
+                        respond = stack.enter_context(mock.patch.object(CGI, 'respond'))
+                        request = stack.enter_context(mock.patch.object(CGI, 'write_request'))
+                        CGI.main()
+                        respond.assert_called_once(); request.assert_not_called()
+                        projected = respond.call_args.args[0]
+                        self.assertEqual(original_status, status.read_bytes(), 'authenticated read cannot mutate the snapshot')
+                        # Closed schema/type negatives for the two new fixed
+                        # states; they do not authorize arbitrary reason text.
+                        expected = 'enrollment_missing' if fault == 'missing' else 'enrollment_incomplete'
+                        for invalid in ({**snapshot(expected), 'reason': 'PRIVATE'},
+                                {**snapshot(expected), 'schema_version': True},
+                                {**snapshot(expected), 'read_only': 1},
+                                {**snapshot(expected), 'mutation_disabled': False},
+                                snapshot({'state': expected}), snapshot(expected + '_PRIVATE')):
+                            status.write_text(json.dumps(invalid)); status.chmod(0o644)
+                            self.assertEqual(unproved(), CGI.issue_tracker_online_status())
+                        self.assertEqual({**snapshot(expected), 'process_alive': False}, projected,
+                                         'ENROLLMENT_WORKER_FIXED_STATUS_MISSING')
+                finally:
+                    fixture.doCleanups()
+
+    def test_fixed_enrollment_browser_labels_are_read_only_not_initialization_or_send_permission(self):
+        for state, expected in (
+                ('enrollment_missing', 'Issue Tracker enrollment 缺失；仅只读诊断，未自动初始化或修补；自动发送禁用；最后观察：2026-01-01T00:00:00+00:00（非当前准入证明）'),
+                ('enrollment_incomplete', 'Issue Tracker enrollment 未完成；仅只读诊断，未自动初始化或修补；自动发送禁用；最后观察：2026-01-01T00:00:00+00:00（非当前准入证明）')):
+            with self.subTest(state=state):
+                rendered = browser(snapshot(state))
+                self.assertEqual(expected, rendered['text'], 'ENROLLMENT_BROWSER_FIXED_LABEL_MISSING')
+                self.assertEqual([{'url': '/monitor/control/switch-collection?view=issue_tracker_online',
+                    'options': {'method': 'GET', 'credentials': 'same-origin', 'cache': 'no-store'}}],
+                    rendered['calls'])
+                for invalid in ({**snapshot(state), 'reason': 'PRIVATE'},
+                        {**snapshot(state), 'schema_version': True},
+                        {**snapshot(state), 'read_only': 1},
+                        {**snapshot(state), 'mutation_disabled': False},
+                        snapshot([state]), snapshot({'state': state}), snapshot(state + '_PRIVATE')):
+                    self.assertEqual('Issue Tracker 在线状态未证明；自动发送禁用，请检查并升级处理',
+                        browser(invalid)['text'])
+
     def test_fixed_transport_browser_labels_cannot_claim_complete_or_permission(self):
         for state, text in (('attempted_unknown', 'UNKNOWN'),
                 ('attempted_definite_rejection', '明确拒绝'), ('attempt_unproved', '未证明')):

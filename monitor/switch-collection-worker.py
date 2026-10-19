@@ -1102,7 +1102,7 @@ def _hold_terminal_current_project_online_originals(store):
     from monitor.issue_tracker_online_target import _hold_current_project_online_target
     from monitor.issue_tracker_spreadsheet_owner import spreadsheet_owner
     from monitor.issue_tracker_remote_history_match import (
-        _reconcile_pending_project_units_and_project_auth,
+        _reconcile_pending_project_units_and_project_auth, _EnrollmentPreconditionHold,
     )
     from monitor.issue_tracker_retained_inventory import (
         RetainedInventoryHold, _record_all_project_unsent_dispositions,
@@ -1111,7 +1111,7 @@ def _hold_terminal_current_project_online_originals(store):
         SettingsAuditHold, _finalize_native_completed_settings_delivery,
     )
     from contextlib import ExitStack
-    failed = False
+    failed = False; enrollment_state = None
     observations = {'disposition_stopped': False, 'delivery_stopped': False}
     try:
         with _hold_completed_cycle_replay(store) as verify_cycles:
@@ -1124,29 +1124,45 @@ def _hold_terminal_current_project_online_originals(store):
                     verify_cycles()
                     with spreadsheet_owner(binding) as owner:
                         verify_cycles()
-                        result, authentication = _reconcile_pending_project_units_and_project_auth(
-                            writer, owner, binding, _store=store)
-                        verify_cycles()
                         try:
-                            _record_all_project_unsent_dispositions(owner, binding)
-                        except RetainedInventoryHold:
-                            # Unsettled inventory or stopped/partial append is
-                            # not successful disposition, FIFO release or GO.
-                            observations['disposition_stopped'] = True
+                            result, authentication = _reconcile_pending_project_units_and_project_auth(
+                                writer, owner, binding, _store=store)
+                        except _EnrollmentPreconditionHold as error:
+                            if (type(error) is not _EnrollmentPreconditionHold
+                                    or type(error.diagnostic_state) is not str
+                                    or error.diagnostic_state not in ('enrollment_missing', 'enrollment_incomplete')):
+                                raise CollectionCycleHoldError('online original reconciliation unavailable') from None
+                            # Keep only the fixed diagnosis INSIDE the owner
+                            # scopes. Ordinary owner exceptions retain their
+                            # original generic normalization; no diagnosis
+                            # escapes before every finalizer succeeds.
+                            enrollment_state = error.diagnostic_state
+                            result, authentication = (), None
+                        verify_cycles()
+                        if enrollment_state is None:
+                            try:
+                                _record_all_project_unsent_dispositions(owner, binding)
+                            except RetainedInventoryHold:
+                                # Unsettled inventory or stopped/partial append is
+                                # not successful disposition, FIFO release or GO.
+                                observations['disposition_stopped'] = True
                         verify_cycles()
                         observations.update(result=result, writer=writer, owner=owner,
                             binding=binding, authentication=authentication,
                             http_root=root.parent.parent)
+                        if enrollment_state is not None:
+                            observations['enrollment_state'] = enrollment_state
                         yield observations
                         verify_cycles()
                     verify_cycles()
                     # The OAuth/read owner has fully exited. Fresh actual
                     # sheet originals, never historical APPLIED labels, drive
                     # COMPLETE/DELIVERED and selected-only local archival.
-                    try:
-                        _finalize_native_completed_settings_delivery(writer,binding)
-                    except SettingsAuditHold:
-                        observations['delivery_stopped'] = True
+                    if enrollment_state is None:
+                        try:
+                            _finalize_native_completed_settings_delivery(writer,binding)
+                        except SettingsAuditHold:
+                            observations['delivery_stopped'] = True
                     verify_cycles()
                 verify_cycles()
             verify_cycles()
@@ -1164,6 +1180,15 @@ def _report_terminal_online_dispositions(observations):
         print('Issue Tracker C25 delivery disposition unavailable; mutation disabled', file=sys.stderr)
 
 
+def _publish_issue_tracker_enrollment_status(state):
+    """Fixed read-only precondition, never initialization or send authority."""
+    if type(state) is not str or state not in ('enrollment_missing', 'enrollment_incomplete'):
+        raise CollectionCycleHoldError('online enrollment observation unavailable')
+    _write_status_file(STATUS_DIR/'issue-tracker-online.status.json',
+        '.issue-tracker-online.', state, schema_version=1,
+        read_only=True, mutation_disabled=True)
+
+
 def _reconcile_issue_tracker_online_after_completion(store):
     """Compatibility read-only entry: consume actual originals, never COUNT."""
     from monitor.issue_tracker_remote_history_match import (
@@ -1172,13 +1197,17 @@ def _reconcile_issue_tracker_online_after_completion(store):
     with _hold_terminal_current_project_online_originals(store) as observations:
         if observations is None:
             return None
-        try:
-            _consume_current_project_online_original_inputs(observations['writer'],
-                observations['owner'], observations['binding'], observations['authentication'],
-                _store=store, http_root=observations['http_root'])
-        except RemoteHistoryHold:
-            pass
+        if observations.get('enrollment_state') is None:
+            try:
+                _consume_current_project_online_original_inputs(observations['writer'],
+                    observations['owner'], observations['binding'], observations['authentication'],
+                    _store=store, http_root=observations['http_root'])
+            except RemoteHistoryHold:
+                pass
     result = observations['result']
+    if observations.get('enrollment_state') is not None:
+        _publish_issue_tracker_enrollment_status(observations['enrollment_state'])
+        return result
     _report_issue_tracker_online_read_only_result(result)
     _publish_issue_tracker_online_observation_status(result)
     _report_terminal_online_dispositions(observations)
@@ -1203,7 +1232,7 @@ def _dispatch_issue_tracker_online_after_completion(store):
         blocked = any(type(item) is RemoteHistoryObservation
             and (item.state == 'CONFLICT' or item.state == 'UNKNOWN' and item.attempt_count == 6)
             for item in observations['result'])
-        if not blocked:
+        if not blocked and observations.get('enrollment_state') is None:
             try:
                 next_state, _unit_id, authentication = _prepare_next_current_cycle_native_originals(
                     observations['writer'], observations['owner'], observations['binding'],
@@ -1226,6 +1255,9 @@ def _dispatch_issue_tracker_online_after_completion(store):
                 or completion.termination_confirmed is not True):
             raise CollectionCycleHoldError('online transport observation unavailable')
     result = observations['result']
+    if observations.get('enrollment_state') is not None:
+        _publish_issue_tracker_enrollment_status(observations['enrollment_state'])
+        return result
     if completion is None:
         _report_issue_tracker_online_read_only_result(result)
         if any(type(item) is RemoteHistoryObservation for item in result):

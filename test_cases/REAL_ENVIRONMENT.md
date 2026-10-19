@@ -2563,6 +2563,16 @@ generation/publish 及 UNKNOWN 下改 action/wire 均 HOLD，不计作 COMPLETE 
 
 - 默认 G1 quota 原件接收补充（**NOT RUN / REAL_ENV REQUIRED**）：历史前提仅沿用 owner 确认“目标表从创建起专用、始终只有当前同一 Cloud 项目写 developerMetadata”，不把确认当 API／当前现场证明或新操作授权。保留真实 ETH/IB C6 正常流程、同认证原始 identity/metadata 读、strict input finalizers 前五个 quota 原 FD 的真实重叠及 strict 退出／九个业务图像关闭后完整 dev/inode/stat/字节保持；quota finalizer 后必须再验实际读身份，撤销／过期拒绝。legacy 无来源不能用当前凭据补写 HEADER，STOP 不授予 COUNT/CLAIM/send；原 UNKNOWN/count/cycle/catalog/WIRE 保留。关键边界保留同字节换 inode、代表性关闭中断且原中断对象不被替换、独立冷恢复和失败安全状态，不能采用关闭回调或缺 provenance 替代物。替代证据为独立 direct 和真实本地受保护多脚本 C6→OAuth/TLS→默认消费者的五／九 FD 与原读取、收尾见证；不代替真实 Cloud/设备、断电、默认 NEW/FIRST/R2 或当前 full/check。证据包括精确 HEAD/tree/dirty/manifest、Python/平台、命令和完整物理 END／退出码、原始 FD/dev/inode/fullstat/字节/SHA、实际 strict／quota／读检查顺序及零新增发送；只清理本轮确证自有夹具／子进程。保留／省略：上述及原卡核心场景均保留，无合并省略；原因：必要接收边界，不缩减合同；残余风险尚未新增接受，确认人仅沿用 owner 历史事实确认，不包含现场操作许可。原精确现场授权、必要研发确认和普通发布门禁继续有效。
 
+- 首次 enrollment 只读诊断补充（**NOT RUN / REAL_ENV REQUIRED**）：在另行授权的隔离
+  项目保留 missing、安全固定成员真子集 incomplete、完整但畸形、未知同族原件、原件替换及
+  原 owner/finalizer 普通失败/操作者中断。只有认证项目命名空间、实际持有目录/全部现存叶
+  原件、末次核验与全部收尾成功后，才可发布两个固定 schema1 诊断；危险、漂移或收尾失败
+  保持 generic HOLD，不写入已知原因。验证真实 worker→固定状态→authenticated GET→浏览器
+  标签全过程只读，保留 read_only/mutation_disabled；零初始化、adoption、修补、认证刷新、
+  NEW、COUNT 或发送，保留原请求与历史观察。已有中断对象及 cause 不被清理覆盖。
+  本地独立 direct、真实原 owner/worker/CGI 和 Node 测试不代替实际服务、Cloud、设备、断电
+  或 full/check；未省略/合并原场景，无新增风险接受确认人，也不从本补充推定首次初始化授权。
+
 ## TC-REAL-REQ7-DURABLE-ATTEMPT-JOURNAL-001 — 意图先落盘与跨重启总计数
 
 - UNSENT 后继计数/CLAIM 接线补充（**NOT RUN / REAL_ENV REQUIRED**）：保留真实旧 count=0、同项目每个 key 严格更晚 APPLIED/key 与固定 WITNESS/STARTED/final 三原件，以及真实最终后继 C6、六次原 wire 意图计数、原始 CLAIM 单次消费。必须见证原件连续持有跨首次 FIFO→ATTEMPT、CLAIM/末次 consumer，旧 count/wire 不变，UNKNOWN、未覆盖 pending、缺失/部分三原件、写边界原 inode 替换均 HOLD 并保留失败安全状态。保留正常、关键提交边界、代表性中断与冷恢复；省略/合并：无；替代证据仅本地独立 direct 与真实 C6/OAuth/四读/APPLIED/UNSENT/GLOBAL 脚本流程，不代替设备、Cloud、断电或当前 full/check。默认 NEW/R2、混项目 disposition writer、当前 source/freshness/G1 和整体闭合未证明；残余风险未新增接受，原现场授权、研发确认、证据/清理和生产门禁有效，无新增确认人。

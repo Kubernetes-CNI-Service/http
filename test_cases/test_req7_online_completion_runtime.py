@@ -269,7 +269,7 @@ class OnlineCompletionRuntimeWorkflowTests(unittest.TestCase):
     intercept = native.OnlineReconciliationWorkflowTests.intercept
     api = OnlineCompletionRuntimeDirectTests.api
 
-    def _exercise_first_catalog_observation(self, fault=None):
+    def _exercise_first_catalog_observation(self, fault=None, *, expected_diagnostic=None):
         from monitor import issue_tracker_remote_history_match as remote
         from monitor import issue_tracker_enrollment_journal as enrollment
         from monitor import issue_tracker_unit_catalog as catalog
@@ -297,7 +297,12 @@ class OnlineCompletionRuntimeWorkflowTests(unittest.TestCase):
                 with mock.patch('secrets.token_hex', side_effect=['a'*64, 'b'*64, 'c'*64, 'd'*64]):
                     enrollment.prepare_enrollment_journal(owner, bound, original_identity)
             folder = state/(stem+'.enrollment'); injected = []; captured = []
-            if fault == 'partial-enrollment': (folder/'INITIALIZED').rename(self.root/'preserved-enrollment-marker')
+            if fault in ('partial-enrollment', 'partial-unsafe-nonces', 'partial-extra-leaf'):
+                (folder/'INITIALIZED').rename(self.root/'preserved-enrollment-marker')
+            if fault == 'partial-unsafe-nonces': (folder/'NONCES').chmod(0o666)
+            if fault == 'partial-extra-leaf':
+                (folder/'UNEXPECTED').write_bytes(b'independent unknown enrollment leaf\n')
+                (folder/'UNEXPECTED').chmod(0o600)
             if fault == 'malformed-enrollment': (folder/'NONCES').write_bytes(b'[]\n')
             if fault == 'lost-catalog-witness':
                 (state/(stem+'.units-started')).write_bytes(b'original interrupted catalog witness\n')
@@ -336,6 +341,7 @@ class OnlineCompletionRuntimeWorkflowTests(unittest.TestCase):
             read = stack.enter_context(mock.patch.object(reads, 'OwnedProjectSheetsReadUnit'))
             count = stack.enter_context(mock.patch.object(journal, 'record_global_attempt_intent'))
             send = stack.enter_context(mock.patch.object(mutation, '_send_counted_original_once'))
+            diagnosed = None
             if fault is None:
                 self.assertEqual(((), None), remote._reconcile_pending_project_units_and_project_auth(writer, owner, bound))
                 self.assertEqual(3, len(captured))
@@ -343,10 +349,13 @@ class OnlineCompletionRuntimeWorkflowTests(unittest.TestCase):
                 if fault == 'final-owner-catalog-witness':
                     rejected = False
                     try: remote._reconcile_pending_project_units_and_project_auth(writer, owner, bound)
-                    except remote.RemoteHistoryHold: rejected = True
+                    except remote.RemoteHistoryHold as error:
+                        rejected = True
+                        diagnosed = error
                 else:
-                    with self.assertRaises(remote.RemoteHistoryHold):
+                    with self.assertRaises(remote.RemoteHistoryHold) as caught:
                         remote._reconcile_pending_project_units_and_project_auth(writer, owner, bound)
+                    diagnosed = caught.exception
             for operation in (authentication, read, count, send): operation.assert_not_called()
             for descriptor in captured:
                 with self.assertRaises(OSError) as caught: os.fstat(descriptor)
@@ -362,10 +371,38 @@ class OnlineCompletionRuntimeWorkflowTests(unittest.TestCase):
                     self.assertEqual(b'final owner boundary witness\n', after[witness][1])
                     self.assertEqual(before, {name: image for name, image in after.items() if name != witness})
             else: self.assertEqual(before, after)
+            if fault == 'partial-unsafe-nonces':
+                self.assertEqual(0o666, (folder/'NONCES').stat().st_mode & 0o777,
+                    'read-only diagnostic must not repair unsafe enrollment mode')
             self.assertFalse(list(state.rglob('ATTEMPT-*'))); self.assertFalse(list(state.rglob('CLAIM-*')))
             self.assertFalse(list(state.glob('*.units'))); self.assertFalse(list(state.glob('*.nv')))
             if fault == 'final-owner-catalog-witness':
                 self.assertTrue(rejected, 'final owner boundary witness must cause typed HOLD')
+            if expected_diagnostic is False:
+                self.assertNotIn(getattr(diagnosed, 'diagnostic_state', None),
+                    ('enrollment_missing', 'enrollment_incomplete'),
+                    'unsafe or semantically invalid evidence cannot become a known precondition')
+            elif expected_diagnostic is not None:
+                self.assertEqual(expected_diagnostic, getattr(diagnosed, 'diagnostic_state', None),
+                    'ENROLLMENT_READER_FIXED_DIAGNOSTIC_MISSING')
+
+    def test_missing_and_partial_enrollment_have_fixed_read_only_diagnostics(self):
+        for fault, expected in (('missing-enrollment', 'enrollment_missing'),
+                                ('partial-enrollment', 'enrollment_incomplete'),
+                                ('malformed-enrollment', False)):
+            with self.subTest(fault=fault):
+                self._exercise_first_catalog_observation(fault, expected_diagnostic=expected)
+
+    def test_unsafe_or_extra_partial_enrollment_leaf_never_becomes_a_known_diagnostic(self):
+        for fault in ('partial-unsafe-nonces', 'partial-extra-leaf'):
+            with self.subTest(fault=fault):
+                self._exercise_first_catalog_observation(fault, expected_diagnostic=False)
+
+    def test_changed_or_lost_originals_never_become_known_enrollment_diagnostics(self):
+        for fault in ('lost-catalog-witness', 'same-byte-rebind',
+                      'late-catalog-witness', 'final-owner-catalog-witness'):
+            with self.subTest(fault=fault):
+                self._exercise_first_catalog_observation(fault, expected_diagnostic=False)
 
     def test_first_catalog_original_enrollment_is_read_only_without_auth_or_new_unit(self):
         self._exercise_first_catalog_observation()
