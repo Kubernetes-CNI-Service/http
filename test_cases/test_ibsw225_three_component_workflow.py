@@ -611,5 +611,95 @@ class ThreeComponentWorkflowTests(unittest.TestCase):
             self.assertFalse((run/'bios-status.json').exists())
 
 
+    def test_cpld_only_never_opens_or_mutates_preexisting_unselected_status(self):
+        """Current run only; retained prior-run history keeps its strict contract.
+
+        Transparent initializer delegation seeds two untrusted files BEFORE the
+        real selected-component initializer. No production reader/result is
+        replaced. Device IO remains the original invoke fixture's simulation.
+        """
+        import builtins
+        import os
+
+        real_initialize = driver._PreparedRunScope.initialize_native_component_status_data
+        real_open = builtins.open
+        forbidden = {"os-status.json", "bios-status.json"}
+        attempts, seeded, preinstall_os_queries = [], [], []
+        active = False
+
+        def identity(info):
+            return (info.st_dev, info.st_ino, info.st_mode, info.st_uid,
+                    info.st_gid, info.st_nlink, info.st_size,
+                    info.st_mtime_ns, info.st_ctime_ns)
+
+        def check(operation, *paths):
+            for path in paths:
+                if isinstance(path, (str, bytes, os.PathLike)):
+                    if os.path.basename(os.fsdecode(os.fspath(path))) in forbidden and active:
+                        attempts.append(operation)
+                        raise AssertionError("Unselected component status IO: " + operation)
+
+        def watched(original, operation, count=1):
+            def delegate(*args, **kwargs):
+                check(operation, *args[:count])
+                # All selected APIs normally receive positional paths; retain
+                # keyword coverage rather than silently permitting a new form.
+                check(operation, *(kwargs[key] for key in ("file", "path", "src", "dst") if key in kwargs))
+                return original(*args, **kwargs)
+            return delegate
+
+        def initialize(scope):
+            nonlocal active
+            self.assertEqual(scope.parsed.selected, ("cpld",))
+            self.assertEqual(seeded, [], "Exactly one original initializer is expected")
+            for component, payload in (
+                ("os", b"UNTRUSTED OS STATUS: not JSON, never authority\n"),
+                ("bios", b"{\"state\":\"UNKNOWN\",\"manual_required\":true,INVALID}\n"),
+            ):
+                path = scope.run_directory / (component + "-status.json")
+                with real_open(path, "xb") as stream:
+                    stream.write(payload)
+                os.chmod(path, 0o600)
+                seeded.append((path, payload, identity(path.stat(follow_symlinks=False))))
+            active = True
+            return real_initialize(scope)
+
+        def original_query_notice(root, name, command, installs):
+            if command == "nv show system version" and not installs:
+                preinstall_os_queries.append(name)
+
+        with tempfile.TemporaryDirectory() as folder:
+            # Exact-name sentinels cover real opens plus every pathname
+            # mutation used by the production journal/status publication.
+            with contextlib.ExitStack() as stack:
+                for owner, attribute, count in (
+                    (builtins, "open", 1), (io, "open", 1), (os, "open", 1),
+                    (os, "replace", 2), (os, "rename", 2), (os, "link", 2), (os, "symlink", 2),
+                    (os, "unlink", 1), (os, "remove", 1), (os, "rmdir", 1),
+                    (os, "chmod", 1), (os, "chown", 1), (os, "utime", 1), (os, "truncate", 1),
+                ):
+                    stack.enter_context(patch.object(owner, attribute, watched(getattr(owner, attribute), attribute, count)))
+                stack.enter_context(patch.object(driver._PreparedRunScope,
+                    "initialize_native_component_status_data", initialize))
+                code, report, err, calls, installs = self.invoke(
+                    Path(folder).resolve(), selection=("--cpld-only",),
+                    old_os=False, bad_bios=True, os_branch_hook=original_query_notice)
+                self.assertEqual(code, 0, err + repr(report))
+                self.assertEqual(attempts, [])
+                self.assertEqual([component for _, component, _ in installs], ["cpld"])
+                self.assertIn(HOST, preinstall_os_queries,
+                              "CPLD-only still requires a real live OS query before dispatch")
+                self.assertTrue(any(command == "nv show system version" for _, command in calls))
+                run = Path(report["run_directory"])
+                self.assertEqual({path.parent for path, _, _ in seeded}, {run})
+                self.assertEqual(len(seeded), 2)
+                status = json.loads((run / "cpld-status.json").read_text())
+                self.assertEqual(status["targets"][0]["state"], "VERIFIED")
+            # Sentinels are now restored; only the independent test reads the
+            # original untrusted material to prove exact bytes and metadata.
+            for path, payload, original_identity in seeded:
+                self.assertEqual(path.read_bytes(), payload)
+                self.assertEqual(identity(path.stat(follow_symlinks=False)), original_identity)
+
 if __name__=='__main__':
     unittest.main()
