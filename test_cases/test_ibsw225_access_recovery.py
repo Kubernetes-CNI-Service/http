@@ -449,5 +449,163 @@ class ProgressTests(unittest.TestCase):
         self.assertEqual(set(writes),{parent})
 
 
+# New independent SFTP lifetime contracts; runtime/fixtures are the same
+# canonical modules already bound above, not substitute production APIs.
+import errno
+import ibsw_upgrade_access as access
+import ibsw_upgrade_observer as observer
+import test_manual_execution as manual
+runtime = _ibsw225_runtime
+
+
+@contextlib.contextmanager
+def no_thread_phase(owners, deadline):
+    """Direct-only seam; genuine observer deadline scopes run in workflow."""
+    yield threading.Event()
+
+
+class SftpInterruptionDirectTests(unittest.TestCase):
+    def test_acquired_client_cleanup_does_not_reclassify_shared_or_resource_stop(self):
+        from ibsw_upgrade_contract import SharedUpgradeHold
+        for stop in (SharedUpgradeHold("ORIGINAL_SHARED_HOLD"), OSError(errno.EMFILE, "ORIGINAL_RESOURCE_HOLD")):
+            with self.subTest(kind=type(stop).__name__):
+                events = []
+                def get_channel():
+                    raise stop
+                client = SimpleNamespace(get_channel=get_channel, close=lambda: events.append("client-close"))
+                sdk = SimpleNamespace(SFTPClient=SimpleNamespace(from_transport=lambda transport: client))
+                with patch.object(observer, "_fixed_sdk", return_value=sdk), patch.object(observer, "_owned_phase", no_thread_phase):
+                    try:
+                        access._sftp(object(), time.monotonic() + 20)
+                    except BaseException as observed:
+                        self.assertIs(observed, stop)
+                    else:
+                        self.fail("Shared/resource stop cannot become success")
+                self.assertEqual(events, ["client-close"])
+
+    def test_acquired_client_is_closed_when_channel_setup_is_interrupted(self):
+        for point in ("get_channel", "settimeout"):
+            for exception_type in (KeyboardInterrupt, SystemExit):
+                with self.subTest(point=point, kind=exception_type.__name__):
+                    stop = exception_type("ORIGINAL_STOP")
+                    events = []
+                    def stop_here(*args):
+                        raise stop
+                    channel = SimpleNamespace(settimeout=stop_here if point == "settimeout" else lambda value: None)
+                    client = SimpleNamespace(
+                        get_channel=stop_here if point == "get_channel" else lambda: channel,
+                        close=lambda: events.append("client-close"))
+                    sdk = SimpleNamespace(SFTPClient=SimpleNamespace(from_transport=lambda transport: client))
+                    with patch.object(observer, "_fixed_sdk", return_value=sdk), \
+                         patch.object(observer, "_owned_phase", no_thread_phase):
+                        try:
+                            access._sftp(object(), time.monotonic() + 20)
+                        except BaseException as observed:
+                            self.assertIs(observed, stop)
+                        else:
+                            self.fail("Interrupted acquisition cannot return a client")
+                    self.assertEqual(events, ["client-close"])
+
+    def test_pending_operator_interrupt_has_priority_over_cleanup_interrupt(self):
+        for exception_type, cleanup_type in ((KeyboardInterrupt, SystemExit), (SystemExit, KeyboardInterrupt)):
+            with self.subTest(kind=exception_type.__name__):
+                cause = ValueError("original-cause")
+                stop, cleanup = exception_type("ORIGINAL_STOP"), cleanup_type("CLEANUP_STOP")
+                def close():
+                    raise cleanup
+                client = SimpleNamespace(close=close)
+                try:
+                    try:
+                        raise stop from cause
+                    finally:
+                        access._close_sftp(client, "AUTHORIZED_KEYS_READ_FAILED")
+                except BaseException as observed:
+                    self.assertIs(observed, stop)
+                    self.assertIs(observed.__cause__, cause)
+                else:
+                    self.fail("Original operator interruption was lost")
+
+    def test_close_without_primary_failure_keeps_safe_failure_classification(self):
+        for cleanup in (OSError("PRIVATE_DETAIL"), KeyboardInterrupt("NEW_STOP")):
+            with self.subTest(kind=type(cleanup).__name__):
+                def close():
+                    raise cleanup
+                try:
+                    access._close_sftp(SimpleNamespace(close=close), "AUTHORIZED_KEYS_READ_FAILED")
+                except BaseException as observed:
+                    if isinstance(cleanup, Exception):
+                        self.assertIs(type(observed), access.AccessHold)
+                        self.assertEqual(observed.diagnostic["check_code"], "SFTP_CLOSE_FAILED")
+                        self.assertNotIn("PRIVATE_DETAIL", str(observed))
+                    else:
+                        self.assertIs(observed, cleanup)
+                else:
+                    self.fail("A failed close cannot be reported as success")
+
+
+class SftpInterruptionOwnerWorkflowTests(unittest.TestCase):
+    def test_real_signed_session_releases_all_original_owners_and_preserves_stop(self):
+        # Real driver private input scope -> real signed-session authentication,
+        # trust/identity checks -> real SFTP acquisition -> owner cleanup.
+        # Only socket/SDK/channel wire IO are doubles; no transport/session
+        # context manager or original input verification method is replaced.
+        for exception_type in (KeyboardInterrupt, SystemExit):
+            with self.subTest(kind=exception_type.__name__), tempfile.TemporaryDirectory() as raw:
+                root = Path(raw).resolve()
+                project, home, known = fixtures.WorkflowTests().fixture(root)
+                args = ("--project", str(project), "--os-only")
+                events = []
+                stop = exception_type("ORIGINAL_OPERATOR_STOP")
+                cleanup_stop = SystemExit("CLEANUP_OPERATOR_STOP")
+                def socket_close():
+                    events.append("socket-close")
+                connection = SimpleNamespace(connect=lambda address: None, settimeout=lambda value: None, close=socket_close)
+                def transport_close():
+                    events.append("transport-close")
+                    raise cleanup_stop
+                transport = SimpleNamespace(start_client=lambda **kwargs: None,
+                    get_remote_server_key=lambda: SimpleNamespace(asbytes=lambda: trust.WIRE),
+                    auth_password=lambda *args, **kwargs: events.append("password-auth"),
+                    is_authenticated=lambda: True, get_username=lambda: "admin", close=transport_close)
+                def get_channel():
+                    events.append("client-get-channel")
+                    raise stop
+                def client_close():
+                    events.append("client-close")
+                    raise OSError("PRIVATE_CLOSE_DETAIL")
+                client = SimpleNamespace(get_channel=get_channel, close=client_close)
+                class AuthenticationError(Exception):
+                    pass
+                class ProtocolError(Exception):
+                    pass
+                sdk = SimpleNamespace(Transport=lambda actual: transport,
+                    AuthenticationException=AuthenticationError, SSHException=ProtocolError,
+                    SFTPClient=SimpleNamespace(from_transport=lambda actual: client))
+                with manual.ManualTests().no_deployment_or_filesystem_locks():
+                    prepared = runtime.driver.prepare_manual_run(runtime.app.__file__, str(project), args)
+                    with runtime.driver.open_manual_run(runtime.app.__file__, str(project), args, prepared["run_directory"]) as scope:
+                        with scope.open_readonly_query_inputs("ew-spine01.example", known_hosts_path=str(known),
+                                identity_path=None, management_public_path=None, user="admin") as leaf:
+                            leaf._native_observation_consumed = True
+                            def identity(actual_leaf, actual_transport, command, deadline):
+                                self.assertIs(actual_leaf, leaf)
+                                self.assertIs(actual_transport, transport)
+                                self.assertEqual(command, "hostname; cat /sys/class/net/eth0/address")
+                                return b"ew-spine01.example\n02:00:00:00:00:01\n", b"", 0, True
+                            with patch.object(observer.socket, "socket", return_value=connection), \
+                                 patch.object(observer, "_fixed_sdk", return_value=sdk), \
+                                 patch.object(observer, "_read_channel", side_effect=identity):
+                                try:
+                                    with observer._signed_session_single(leaf, password="SYNTHETIC_ONLY") as (actual, deadline, *_):
+                                        self.assertIs(actual, transport)
+                                        access._sftp(actual, deadline)
+                                except BaseException as observed:
+                                    self.assertIs(observed, stop)
+                                else:
+                                    self.fail("Operator stop cannot become successful workflow completion")
+                            self.assertEqual(events, ["password-auth", "client-get-channel", "client-close",
+                                                      "transport-close", "socket-close"])
+                            leaf.verify()  # The original shared input scope remains valid.
+
 if __name__=='__main__':
     unittest.main()

@@ -29,6 +29,14 @@
   无法保存可靠记录不得宣称成功；不得保存口令/私钥，也不得把夹具结果回填为现场 PASS。
 - 清理/回滚：仅由获授权操作者在隔离目标按确认恢复方案执行；核对配置/服务/密钥及管理端
   原始证据保留，失败设备人工复核。重跑先观察真实状态，不删除原失败记录或用新 run 重置授权。
+- SFTP 已取得 client 后的中断清理补充（**NOT RUN / REAL_ENV REQUIRED**）：现场另行核验固定
+  Paramiko 版本下，通道获取/超时设置失败或操作者中断时先显式关闭已取得的 client，再由原
+  signed-session 收尾 transport/socket；外层 transport 关闭不冒称 client/channel 自有资源的
+  显式关闭。保留原 Shared/resource 停止分类，以及已有操作者中断的对象和 cause；清理中的
+  第二次中断不能替换原中断。没有原异常时的新中断仍传播，普通关闭失败仍安全 HOLD。
+  本地 direct 与真实 driver→signed-session→SFTP 所有者流程仅替换底层设备 IO，不证明真实
+  SDK/设备 FD 回收、断电或现场恢复。原期限、失败记录、重试及上述全部场景不变；没有省略
+  场景、新增风险接受确认人或现场操作授权。
 
 ## TC-REAL-BACKUP-BOUNDED-ANCHOR-001 — 固定辅助脚本与原进程组监督
 

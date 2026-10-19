@@ -280,12 +280,12 @@ def _sftp(transport, deadline):
             sftp = _fixed_sdk().SFTPClient.from_transport(transport)
         sftp.get_channel().settimeout(min(25.0, _remaining(deadline)))
         return sftp
-    except SharedUpgradeHold:
-        raise
-    except Exception as error:
-        if isinstance(error,OSError) and error.errno in (errno.EMFILE,errno.ENFILE,errno.ENOMEM,errno.ENOBUFS): raise
+    except BaseException as error:
         if sftp is not None:
             _close_sftp(sftp,'AUTHORIZED_KEYS_READ_FAILED')
+        if not isinstance(error,Exception) or isinstance(error,SharedUpgradeHold):
+            raise
+        if isinstance(error,OSError) and error.errno in (errno.EMFILE,errno.ENFILE,errno.ENOMEM,errno.ENOBUFS): raise
         raise AccessHold('AUTHORIZED_KEYS_READ_FAILED',check_code='SFTP_CHANNEL_OPEN_TIMEOUT' if
             (expired is not None and expired.is_set()) or getattr(error,'reason_code',None)=='READONLY_DEADLINE_EXCEEDED' else 'SFTP_CHANNEL_OPEN_FAILED',
             role='SFTP_CHANNEL',operation='OPEN_SFTP') from None
@@ -296,9 +296,9 @@ def _close_sftp(sftp, code):
     try:
         sftp.close()
     except BaseException as cleanup:
+        if original is not None and not isinstance(original,Exception): return
         if not isinstance(cleanup, Exception):
             raise
-        if original is not None and not isinstance(original,Exception): return
         if isinstance(cleanup,OSError) and cleanup.errno in (errno.EMFILE,errno.ENFILE,errno.ENOMEM,errno.ENOBUFS): raise
         if original is not None:
             return  # Preserve the original stop, especially a SharedUpgradeHold.
