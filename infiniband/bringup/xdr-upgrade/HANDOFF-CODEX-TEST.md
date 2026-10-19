@@ -55,6 +55,59 @@ tools/
 不能到另一棵树兜底导入。首次接收建议保留仓库布局。若另做 flat 制品，须重新核完整闭包、
 真实导入来源和相应测试，不把这份目录清单当成已经制作并验收的 flat 制品。
 
+## 共享 ABI 增量迁移补充
+
+接收方报告的 `SETUP_CORE_IDENTITY_LINKS` ImportError 表明共享 ABI 尚未接齐；
+不表示 DEV 全局失败，也不表示 TEST 已验证通过。本节只依据 DEV 当前源码。
+保留 TEST 已有 REQ23、BRINGUP、private-guard 修复及独立断言，不整体覆盖
+`tools/project_contract.py` / `tools/_package_common.py`，不以空 tuple 或忽略 import 兜底。
+
+`ibsw_upgrade_inputs.py` 需要共享 exports：
+`SETUP_CORE_IDENTITY_LINKS`、`parse_setup_manifest_layout`、
+`require_project_eligible`、`runtime_link_specs`；
+并导入 `_package_common._package_project_identity` / `_source_identity`。
+四个 core anchors 首列相对于 `workspace/ztp/`，第二列相对于同一直接项目：
+
+```python
+SETUP_CORE_IDENTITY_LINKS = (
+    ("config/cumulus/template/01-global.yaml", "01-global.yaml", "global", False),
+    ("config/cumulus/template/02-devices_config.csv", "02-devices_config.csv", "inventory", False),
+    ("config/isc-dhcp-server/02-subnet_config.csv", "02-dhcp-subnet_config.csv", "DHCP subnet", False),
+    ("status", "99-output-ztp", "status", True),
+)
+```
+
+`parse_setup_manifest_layout` 保留原 proj 首行、规范绝对链接与拒空行/重复名合同。
+managed reader 必须核真实 manifest、项目资格及这四项精确 lexical symlink 关系，
+不能只凭 resolve 后同字节、外置 CSV 或两个输入 aliases 取代 core identity。
+
+生产者与读者要一起接齐：`SETUP_WORKSPACE_INPUT_MAPPINGS` 保留
+`infiniband/01-global.yaml → 01-global.yaml`，增加
+`infiniband/bringup/xdr-upgrade/01-global.yaml → 01-global.yaml` 的 file 项。
+reader 同时保留历史 `xdr-upgrade/01-global.yaml → ../../01-global.yaml` 的两段绑定。
+`NETWORK_CSV_MAPPINGS` 保留 `infiniband/ib.csv → 02-devices_config.csv`；
+`NETWORK_INVENTORY_LINKS` 增加 `xdr-upgrade/ib.csv → infiniband/ib.csv`
+（完整键是 `infiniband/bringup/xdr-upgrade/ib.csv`，生成的本地 symlink target 为 `../../ib.csv`）。
+保留 xdr-upgrade-logs 的 `BRINGUP_OUTPUT_SPECS`；让 published/runtime specs 从原早期表
+派生，不能 EOF 重赋；非 monitor workspace global 不因此自动成为 published input。
+
+contract 继续用共享 safe YAML/schema、`normalize_redundancy_mac`、
+`validate_service_endpoint`、`parse_device_csv_layout` / `require_device_csv_row_width`。
+CSV 必须是完整 schema 1/2 positional 表，先验表头/行宽再过滤 IB；
+不接受只有 hostname/type/IP/MAC 的 reduced CSV。
+`config_method` 可选但唯一，位于业务列末端、完整的三列 source metadata 之前；
+schema 2 行宽严格一致，schema 1 保留原末尾空单元格容忍，不修改接收方 schema 修复。
+
+IB 增量包括 `validate_optional_ib_upgrade` 及
+`_ibsw_mapping/_ibsw_version/_ibsw_version_key/_ibsw_ssd_version/_ibsw_file/`
+`_ibsw_root/_ibsw_subdir/_ibsw_ib/_ibsw_cpld_targets/_ibsw_validate_upgrade`。
+无声明 global 保留旧合同；显式 null/空/非法 upgrade block 拒绝。
+`ibsw_upgrade_contract.load_global_text` 与包装的真实 `_validate_package_project_inputs` 都接该校验。
+包装 static managed 集纳入升级 local CSV/global，保留已有 initial/UFM 项；
+reserved upgrade global 存在却非 symlink 时拒绝，不把它作为普通代码打包。
+保留原归档、held-input、私钥排除与 private-guard；消除 ImportError 后仍须在 TEST 精确树
+独立重跑 ABI/alias/core anchors/完整 CSV/非法 block/包装回归，不能继承 PASS 标签。
+
 ## 已确认的运行合同
 
 - 仅 HTTP 包来源；HTTPS、SCP、local 明确拒绝，不静默降级。
