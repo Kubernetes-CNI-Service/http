@@ -22,12 +22,13 @@ from typing import Callable, Sequence
 
 from infra.ufm_jump_transport import (
     BoundFarEndpoint, CommandResult, JumpEndpoint, TransportError,
-    _default_runner, _run, jump_transit, retrieve_collection_archive,
+    _default_runner, _run, jump_transit, retrieve_collection_archive, direct_ipv4_read,
 )
 from ztp.dhcp_runtime_inventory import bind_ufm_current_leases
 from tools.project_contract import safe_load_global_yaml
 from tools.ufm_input_contract import (
     UfmInputError, bind_ufm_inventory_text, parse_ufm_servers,
+    plan_ufm_configured_declaration,
 )
 
 
@@ -397,3 +398,135 @@ def retrieve_project_collection_archive(
         clock=clock, expected_sha256=expected_sha256,
         _project_sources=sources,
     )
+
+
+def _project_declaration(project: Path):
+    """Parse exact no-follow global/CSV snapshots, not caller-constructed nodes."""
+    project = Path(project)
+    if not project.is_absolute():
+        raise IdentityBindingError("UFM project path must be absolute")
+    source_paths = (project / "01-global.yaml", project / "02-devices_config.csv")
+    raw = tuple(_read_regular_no_follow(path, limit=_MAX_PROJECT_SOURCE_BYTES,
+                                         private=False) for path in source_paths)
+    try:
+        document = safe_load_global_yaml(io.StringIO(raw[0].decode("utf-8")))
+        declaration = plan_ufm_configured_declaration(document, raw[1].decode("utf-8-sig"))
+        policy = parse_ufm_servers(document).get("ufm")
+        if not declaration.members or policy is None:
+            raise UfmInputError("UFM project has no declared nodes")
+        management_interface = policy["interfaces"]["alias"]["eth0"]
+    except Exception:
+        # YAML parser diagnostics can echo customer input. This public boundary
+        # reports the rejection without carrying that untrusted text forward.
+        raise IdentityBindingError("UFM project input is not a valid bound snapshot") from None
+    sources = tuple((path, hashlib.sha256(data).hexdigest())
+                    for path, data in zip(source_paths, raw))
+    return declaration, management_interface, sources
+
+
+@dataclass(frozen=True)
+class VerifiedDirectManagementIdentity:
+    """Read-only stage facts, not a lease, deployment approval or completion."""
+    hostname: str
+    expected_hostname: str
+    address: str
+    management_mac: str
+    observed_at: dt.datetime
+    known_hosts_sha256: str
+    interface: str
+    phase: str
+    address_source: str = "direct_csv_ipv4"
+    license_mac_verified: bool = False
+
+
+
+def verify_project_direct_management_identity(
+    project: Path, address: str, known_hosts: Path, identity: Path,
+    expected_known_hosts_sha256: str, *, phase: str, timeout: int,
+    now: dt.datetime | None = None,
+    runner: Callable[[list[str]], CommandResult] | None = None,
+) -> VerifiedDirectManagementIdentity:
+    """Observe one exact CSV IPv4 member directly, with no DHCP/OOB dependency.
+
+    The pin is an independent approved input; this reader never manufactures
+    it from the checked file. An explicit authorized read boundary is required.
+    Bootstrap records the real hostname; configured phase also checks its goal.
+    Neither phase issues permission, attempts another path or proves SSH when
+    the reader is synthetic. Legacy lease consumers remain separate.
+    """
+    current = now or dt.datetime.now(dt.timezone.utc)
+    if (type(phase) is not str or phase not in {"bootstrap", "configured"}
+            or not callable(runner)
+            or type(current) is not dt.datetime or current.tzinfo is None
+            or current.utcoffset() is None
+            or type(expected_known_hosts_sha256) is not str
+            or not _DIGEST.fullmatch(expected_known_hosts_sha256)):
+        raise IdentityBindingError("direct stage identity inputs are incomplete")
+    try:
+        if type(address) is not str or str(ipaddress.IPv4Address(address)) != address:
+            raise ValueError
+    except (ValueError, TypeError):
+        raise IdentityBindingError("direct endpoint must be canonical IPv4") from None
+    nodes, interface, sources = _project_inputs(Path(project))
+    selected = [node for node in nodes if node.address == address]
+    if len(selected) != 1:
+        raise IdentityBindingError("direct endpoint is not an exact CSV member")
+    node = selected[0]
+    known = _read_regular_no_follow(known_hosts, limit=_MAX_KNOWN_BYTES, private=True)
+    if hashlib.sha256(known).hexdigest() != expected_known_hosts_sha256:
+        raise IdentityBindingError("known_hosts differs from independent direct pin")
+    _pinned_hosts(known, address, address)
+    private_original = _read_regular_no_follow(identity, limit=65536, private=True)
+
+    def rebind() -> None:
+        if (not _project_sources_still_bound(sources)
+                or _read_regular_no_follow(known_hosts, limit=_MAX_KNOWN_BYTES,
+                                           private=True) != known
+                or _read_regular_no_follow(identity, limit=65536,
+                                           private=True) != private_original):
+            raise IdentityBindingError("direct project/key/pin changed during observation")
+
+    def read(argv: list[str]) -> str:
+        rebind()
+        try:
+            command = direct_ipv4_read(address, known_hosts, identity, argv, timeout=timeout)
+        except TransportError:
+            raise IdentityBindingError("direct identity read scope is invalid") from None
+        raw = _remote_result(runner, command, timeout)
+        rebind()
+        return raw
+
+    observed = _observe_direct_phase(node, interface, phase, current,
+                                     expected_known_hosts_sha256, read)
+    rebind()
+    return observed
+
+
+
+def _observe_direct_phase(node, interface, phase, current, pin, read):
+    """Shared internal read parsing; the closure owns the source/session gate.
+
+    Returned facts are not an authentication or deployment permission.
+    """
+    hostname = read(["hostname"]).strip()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,252}", hostname):
+        raise IdentityBindingError("direct hostname observation is invalid")
+    if phase == "configured" and hostname.casefold() != node.hostname.casefold():
+        raise IdentityBindingError("configured direct hostname differs from CSV")
+    link = _one_interface(read(["ip", "-j", "link", "show", "dev", interface]), interface)
+    mac = link.get("address")
+    if (type(mac) is not str or not _MAC.fullmatch(mac.casefold())
+            or mac.casefold() != node.management_mac.casefold().replace("-", ":")):
+        raise IdentityBindingError("direct management MAC differs from CSV")
+    observed = _one_interface(read(["ip", "-j", "address", "show", "dev", interface]), interface)
+    entries = observed.get("addr_info")
+    if type(entries) is not list:
+        raise IdentityBindingError("direct management address observation is absent")
+    addresses = [entry.get("local") for entry in entries
+                 if type(entry) is dict and entry.get("family") == "inet"]
+    if addresses.count(node.address) != 1:
+        raise IdentityBindingError("direct IPv4 is not uniquely present on its management interface")
+    return VerifiedDirectManagementIdentity(
+        hostname=hostname, expected_hostname=node.hostname, address=node.address,
+        management_mac=node.management_mac, observed_at=current,
+        known_hosts_sha256=pin, interface=interface, phase=phase)

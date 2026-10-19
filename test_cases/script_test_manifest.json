@@ -325,8 +325,21 @@
     },
     {
       "id": "ufm-local-source-bridge",
-      "description": "UFM 只读身份发现和本地归档合同；不构成远端或受保护周期验收",
+      "description": "UFM 本地输入、四阶段七步计划、固定只读脚本生成、身份发现与归档；不构成设备部署或受保护周期验收",
       "tests": [
+        "test_cases.test_f01_initial_setup_live_gate",
+        "test_cases.test_f01_restored_direct_ipv4_identity",
+        "test_cases.test_f01_recovery_project_key_install",
+        "test_cases.test_f01_recovery_project_key_install_bash_workflow",
+        "test_cases.test_f01_recovery_stage_script_builder",
+        "test_cases.test_f01_recovery_project_key_backup_durable_workflow",
+        "test_cases.test_f01_recovery_project_key_original_save",
+        "test_cases.test_f01_ssh_dependency_identity",
+        "test_cases.test_f01_recovery_staging_owner",
+        "test_cases.test_f01_recovery_staging_sftp",
+        "test_cases.test_f01_recovery_staging_sftp_encrypted_workflow",
+        "test_cases.test_f01_recovery_stage_script_syntax",
+        "test_cases.test_f01_initial_setup_entry",
         "test_cases.test_ufm_input_contract",
         "test_cases.test_ufm_collection_contract",
         "test_cases.test_ufm_collection_agent",
@@ -346,9 +359,33 @@
         "test_cases.test_collection_ib_producer",
         "test_cases.test_collection_ib_producer_workflow"
       ]
+    },
+    {
+      "id": "ibsw225-canonical-runtime",
+      "description": "IBSW2.25 canonical runtime, independent source contracts and original normal workflows; local targeted evidence is not full638/device proof.",
+      "tests": [
+        "test_cases.test_ibsw225_runtime_source_manifest_contract",
+        "test_cases.test_ibsw225_ib_alias_derivation_workflow",
+        "test_cases.test_ibsw225_device_globs",
+        "test_cases.test_ibsw225_input_isolation",
+        "test_cases.test_ibsw225_os_alternatives",
+        "test_cases.test_ibsw225_three_component_workflow",
+        "test_cases.test_ibsw225_known_hosts",
+        "test_cases.test_ibsw225_access_recovery",
+        "test_cases.test_ibsw225_os_canary_coverage",
+        "test_cases.test_ibsw225_cooperative_pipeline",
+        "test_cases.test_ibsw225_runtime_bootstrap_identity",
+        "test_cases.test_ibsw225_genuine_fixture_discovery_contract",
+        "test_cases.test_ibsw225_http_initializer_guard_protocol",
+        "test_cases.test_ibsw225_runtime_guard_exception_priority",
+        "test_cases.test_ibsw225_initializer_report_finally_direct",
+        "test_cases.test_ibsw225_initializer_help_guard",
+        "test_cases.test_ibsw225_managed_outer_guard_workflow"
+      ]
     }
   ],
   "tracked_support": [
+    "requirements-f01-ssh.lock",
     "test_cases/fixtures/bounded_inner_fd_fixture.py",
     ".dockerignore",
     ".gitattributes",
@@ -461,7 +498,28 @@
     "ztp/config/nvos/template/P2P/01-inventory.log",
     "ztp/config/nvos/template/P2P/02-port-mapping.log",
     "ztp/config/nvos/template/P2P/03-splitter.log",
-    "ztp/templates/ztp.json"
+    "ztp/templates/ztp.json",
+    "infiniband/bringup/xdr-upgrade/requirements.txt",
+    "test_cases/ibsw225_fixture_support/runtime_source_support.py",
+    "test_cases/ibsw225_fixture_support/_fixture_test_upgrade_cli.py",
+    "test_cases/fixtures/nvos-system-health.txt",
+    "test_cases/fixtures/nvos-25.02.8008-system-version.txt",
+    "test_cases/fixtures/nvos-six-cpld-firmware.txt",
+    "test_cases/ibsw225_fixture_support/_fixture_test_known_hosts.py",
+    "test_cases/ibsw225_fixture_support/_fixture_test_manual_execution.py",
+    "test_cases/ibsw225_fixture_support/_fixture_test_nvos_observations.py",
+    "test_cases/ibsw225_fixture_support/_fixture_test_three_component_workflow.py",
+    "test_cases/ibsw225_fixture_support/_fixture_test_access_recovery.py",
+    "test_cases/ibsw225_fixture_support/_fixture_test_grouped_summary.py",
+    "test_cases/ibsw225_fixture_support/_fixture_test_runtime_budgets.py",
+    "test_cases/ibsw225_fixture_support/_fixture_test_os_alternatives.py",
+    "test_cases/ibsw225_fixture_support/_fixture_test_input_isolation.py",
+    "test_cases/ibsw225_fixture_support/_fixture_test_health_upgrade_gate.py",
+    "test_cases/ibsw225_fixture_support/_fixture_test_compact_summary.py",
+    "test_cases/ibsw225_fixture_support/_fixture_test_os_download_telemetry.py",
+    "test_cases/ibsw225_fixture_support/_fixture_test_standalone_links.py",
+    "test_cases/ibsw225_fixture_support/fixed_fixture_registry.py",
+    "test_cases/ibsw225_fixture_support/legacy_shell_workflow.py"
   ],
   "scripts": {
     "DAY0-Prepare/01-a-setup.py": "DAY0-Prepare/01-a-setup.py",
@@ -604,6 +662,14 @@
     "tools/package-shared-artifacts.py": "tools/package-shared-artifacts.py",
     "tools/project_contract.py": "tools/project_contract.py",
     "tools/req7_dependency_contract.py": "tools/req7_dependency_contract.py",
+    "tools/ufm_bootstrap_auth_adapter.py": "tools/ufm_bootstrap_auth_adapter.py",
+    "tools/ufm_project_key_install.py": "tools/ufm_project_key_install.py",
+    "tools/f01_ssh_dependency_identity.py": "tools/f01_ssh_dependency_identity.py",
+    "tools/ufm_deployment_script_syntax.py": "tools/ufm_deployment_script_syntax.py",
+    "tools/ufm_deployment_staging_owner.py": "tools/ufm_deployment_staging_owner.py",
+    "tools/ufm_deployment_staging_sftp.py": "tools/ufm_deployment_staging_sftp.py",
+    "tools/ufm_initial_setup.py": "tools/ufm_initial_setup.py",
+    "tools/ufm_deployment_script_builder.py": "tools/ufm_deployment_script_builder.py",
     "tools/ufm_input_contract.py": "tools/ufm_input_contract.py",
     "tools/ufm-discover.py": "tools/ufm-discover.py",
     "tools/ufm_collection_contract.py": "tools/ufm_collection_contract.py",
@@ -663,9 +729,93 @@
     "monitor/issue_tracker_nv_reservation.py": "monitor/issue_tracker_nv_reservation.py",
     "monitor/issue_tracker_metadata_reservation.py": "monitor/issue_tracker_metadata_reservation.py",
     "monitor/issue_tracker_retained_inventory.py": "monitor/issue_tracker_retained_inventory.py",
-    "monitor/issue_tracker_unit_catalog.py": "monitor/issue_tracker_unit_catalog.py"
+    "monitor/issue_tracker_unit_catalog.py": "monitor/issue_tracker_unit_catalog.py",
+    "infiniband/bringup/xdr-upgrade/upgrade.py": "infiniband/bringup/xdr-upgrade/upgrade.py",
+    "infiniband/bringup/xdr-upgrade/upgrade-component.sh": "infiniband/bringup/xdr-upgrade/upgrade-component.sh",
+    "infiniband/bringup/xdr-upgrade/upgrade-owned-runner.sh": "infiniband/bringup/xdr-upgrade/upgrade-owned-runner.sh",
+    "tools/ib_bringup_runtime_guard.py": "tools/ib_bringup_runtime_guard.py",
+    "tools/ibsw_upgrade_contract.py": "tools/ibsw_upgrade_contract.py",
+    "tools/ibsw_upgrade_inputs.py": "tools/ibsw_upgrade_inputs.py",
+    "tools/ibsw_upgrade_schedule.py": "tools/ibsw_upgrade_schedule.py",
+    "tools/ibsw_upgrade_component.py": "tools/ibsw_upgrade_component.py",
+    "tools/ibsw_upgrade_driver.py": "tools/ibsw_upgrade_driver.py",
+    "tools/ibsw_upgrade_executor.py": "tools/ibsw_upgrade_executor.py",
+    "tools/ibsw_upgrade_observer.py": "tools/ibsw_upgrade_observer.py",
+    "tools/ibsw_upgrade_access.py": "tools/ibsw_upgrade_access.py",
+    "tools/ibsw_upgrade_pipeline.py": "tools/ibsw_upgrade_pipeline.py"
   },
   "test_rules": [
+    {
+      "id": "f01_project_public_keys_and_auth_refusal_direct",
+      "paths": [
+        "tools/ufm_project_key_install.py",
+        "tools/ufm_bootstrap_auth_adapter.py"
+      ],
+      "tests": [
+        "test_cases.test_f01_recovery_project_key_install",
+        "test_cases.test_f01_recovery_project_key_original_save"
+      ]
+    },
+    {
+      "id": "f01_dependency_identity_direct",
+      "paths": [
+        "tools/f01_ssh_dependency_identity.py"
+      ],
+      "tests": [
+        "test_cases.test_f01_ssh_dependency_identity"
+      ]
+    },
+    {
+      "id": "f01_stage_syntax_direct",
+      "paths": [
+        "tools/ufm_deployment_script_syntax.py"
+      ],
+      "tests": [
+        "test_cases.test_f01_recovery_stage_script_syntax"
+      ]
+    },
+    {
+      "id": "f01_staging_source_owner_direct",
+      "paths": [
+        "tools/ufm_deployment_staging_owner.py"
+      ],
+      "tests": [
+        "test_cases.test_f01_recovery_staging_owner"
+      ]
+    },
+    {
+      "id": "f01_original_sftp_staging_direct",
+      "paths": [
+        "tools/ufm_deployment_staging_sftp.py"
+      ],
+      "tests": [
+        "test_cases.test_f01_recovery_staging_sftp"
+      ]
+    },
+    {
+      "id": "f01_restored_direct_ipv4_identity_direct",
+      "paths": [
+        "infra/ufm_jump_transport.py",
+        "tools/ufm_identity_binding.py",
+        "tools/ufm_initial_setup.py"
+      ],
+      "tests": [
+        "test_cases.test_f01_restored_direct_ipv4_identity",
+        "test_cases.test_f01_initial_setup_live_gate"
+      ]
+    },
+    {
+      "id": "f01_initial_setup_and_generation_direct",
+      "paths": [
+        "tools/ufm_initial_setup.py",
+        "tools/ufm_deployment_script_builder.py",
+        "tools/ufm_input_contract.py",
+        "tools/ufm_identity_binding.py"
+      ],
+      "tests": [
+        "test_cases.test_f01_initial_setup_entry"
+      ]
+    },
     {
       "id": "req7_dependency_contract",
       "paths": [
@@ -1958,9 +2108,156 @@
       "id": "req7_pending_original_unit_catalog",
       "paths": ["monitor/issue_tracker_unit_catalog.py","monitor/issue_tracker_global_attempt_journal.py","monitor/issue_tracker_remote_history_match.py","monitor/issue_tracker_retained_inventory.py"],
       "tests": ["test_cases.test_req7_unit_catalog"]
+    },
+    {
+      "id": "ibsw225_entry_render_component_direct",
+      "paths": [
+        "infiniband/bringup/xdr-upgrade/upgrade.py",
+        "infiniband/bringup/xdr-upgrade/upgrade.sh",
+        "infiniband/bringup/xdr-upgrade/upgrade-component.sh",
+        "infiniband/bringup/xdr-upgrade/upgrade-owned-runner.sh",
+        "tools/ibsw_upgrade_contract.py",
+        "tools/ibsw_upgrade_component.py",
+        "tools/ibsw_upgrade_driver.py",
+        "tools/ibsw_upgrade_executor.py"
+      ],
+      "tests": [
+        "test_cases.test_ibsw225_runtime_source_manifest_contract",
+        "test_cases.test_ibsw225_os_alternatives",
+        "test_cases.test_ibsw225_three_component_workflow"
+      ]
+    },
+    {
+      "id": "ibsw225_inputs_hostpin_direct",
+      "paths": [
+        "tools/ibsw_upgrade_inputs.py",
+        "tools/ibsw_upgrade_observer.py",
+        "tools/ibsw_upgrade_access.py"
+      ],
+      "tests": [
+        "test_cases.test_ibsw225_input_isolation",
+        "test_cases.test_ibsw225_known_hosts",
+        "test_cases.test_ibsw225_access_recovery"
+      ]
+    },
+    {
+      "id": "ibsw225_schedule_pipeline_direct",
+      "paths": [
+        "tools/ibsw_upgrade_schedule.py",
+        "tools/ibsw_upgrade_pipeline.py"
+      ],
+      "tests": [
+        "test_cases.test_ibsw225_os_canary_coverage",
+        "test_cases.test_ibsw225_cooperative_pipeline"
+      ]
+    },
+    {
+      "id": "ibsw225_shared_guard_and_initializer_direct",
+      "paths": [
+        "tools/ib_bringup_runtime_guard.py",
+        "infiniband/bringup/xdr-initial-setup/initial-setup.py",
+        "ztp/config_sync_authority.py"
+      ],
+      "tests": [
+        "test_cases.test_ibsw225_http_initializer_guard_protocol",
+        "test_cases.test_ibsw225_runtime_guard_exception_priority",
+        "test_cases.test_ibsw225_initializer_report_finally_direct",
+        "test_cases.test_ibsw225_initializer_help_guard"
+      ]
+    },
+    {
+      "id": "ibsw225_composed_global_producer_direct",
+      "paths": [
+        "tools/project_contract.py"
+      ],
+      "tests": [
+        "test_cases.test_ibsw225_ib_alias_derivation_workflow",
+        "test_cases.test_ibsw225_os_alternatives"
+      ]
     }
   ],
   "workflows": [
+    {
+      "id": "f01_real_password_durable_backup_apply_fresh_key",
+      "members": [
+        "tools/ufm_project_key_install.py",
+        "tools/ufm_bootstrap_auth_adapter.py",
+        "tools/f01_ssh_dependency_identity.py",
+        "tools/ufm_identity_binding.py",
+        "infra/ufm_jump_transport.py",
+        "tools/ufm_deployment_script_builder.py",
+        "tools/ufm_deployment_staging_sftp.py"
+      ],
+      "tests": [
+        "test_cases.test_f01_recovery_project_key_backup_durable_workflow"
+      ]
+    },
+    {
+      "id": "f01_real_input_builder_syntax_original_child",
+      "members": [
+        "tools/ufm_deployment_script_builder.py",
+        "tools/ufm_deployment_script_syntax.py",
+        "tools/ufm_identity_binding.py",
+        "tools/ufm_input_contract.py"
+      ],
+      "tests": [
+        "test_cases.test_f01_recovery_stage_script_syntax"
+      ]
+    },
+    {
+      "id": "f01_original_held_source_owner_input",
+      "members": [
+        "tools/ufm_deployment_staging_owner.py",
+        "tools/ufm_deployment_script_builder.py",
+        "tools/ufm_identity_binding.py",
+        "tools/ufm_bootstrap_auth_adapter.py",
+        "tools/f01_ssh_dependency_identity.py"
+      ],
+      "tests": [
+        "test_cases.test_f01_recovery_staging_owner"
+      ]
+    },
+    {
+      "id": "f01_real_local_sftp_staging_protocol",
+      "members": [
+        "tools/ufm_deployment_staging_sftp.py",
+        "tools/ufm_deployment_staging_owner.py",
+        "tools/ufm_deployment_script_syntax.py",
+        "tools/ufm_deployment_script_builder.py",
+        "tools/ufm_bootstrap_auth_adapter.py",
+        "tools/f01_ssh_dependency_identity.py",
+        "tools/ufm_identity_binding.py"
+      ],
+      "tests": [
+        "test_cases.test_f01_recovery_staging_sftp_encrypted_workflow"
+      ]
+    },
+    {
+      "id": "f01_restored_direct_ipv4_input_identity_three_reads",
+      "members": [
+        "tools/ufm_identity_binding.py",
+        "tools/ufm_input_contract.py",
+        "tools/project_contract.py",
+        "infra/ufm_jump_transport.py"
+      ],
+      "tests": [
+        "test_cases.test_f01_restored_direct_ipv4_identity"
+      ]
+    },
+    {
+      "id": "f01_initial_setup_real_input_to_private_generation",
+      "members": [
+        "tools/ufm_initial_setup.py",
+        "tools/ufm_input_contract.py",
+        "tools/project_contract.py",
+        "tools/ufm_identity_binding.py",
+        "tools/ufm_deployment_script_builder.py",
+        "monitor/switch_collection_gate.py"
+      ],
+      "tests": [
+        "test_cases.test_f01_initial_setup_entry"
+      ]
+    },
     {
       "id": "req7_policy_to_activation_and_full_identity",
       "members": [
@@ -3674,9 +3971,67 @@
       "id": "req7_pending_catalog_shared_owner_native_originals",
       "members": ["monitor/issue_tracker_unit_catalog.py","monitor/issue_tracker_spreadsheet_owner.py","monitor/issue_tracker_local_commit.py","monitor/issue_tracker_attempt_journal.py","monitor/issue_tracker_send_intent.py","monitor/issue_tracker_send_unit.py","monitor/issue_tracker_remote_history_match.py","monitor/issue_tracker_manifest.py","monitor/issue_tracker_whitelist_workbook.py","monitor/issue_tracker_global_attempt_journal.py","monitor/issue_tracker_enrollment_journal.py","monitor/issue_tracker_retained_inventory.py"],
       "tests": ["test_cases.test_req7_unit_catalog"]
+    },
+    {
+      "id": "ibsw225_native_component_lifecycle",
+      "members": [
+        "infiniband/bringup/xdr-upgrade/upgrade.py",
+        "infiniband/bringup/xdr-upgrade/upgrade.sh",
+        "infiniband/bringup/xdr-upgrade/upgrade-component.sh",
+        "infiniband/bringup/xdr-upgrade/upgrade-owned-runner.sh",
+        "tools/project_contract.py",
+        "tools/ssh_key_preparation.py",
+        "tools/ibsw_upgrade_contract.py",
+        "tools/ibsw_upgrade_inputs.py",
+        "tools/ibsw_upgrade_schedule.py",
+        "tools/ibsw_upgrade_component.py",
+        "tools/ibsw_upgrade_driver.py",
+        "tools/ibsw_upgrade_executor.py",
+        "tools/ibsw_upgrade_observer.py",
+        "tools/ibsw_upgrade_access.py",
+        "tools/ibsw_upgrade_pipeline.py"
+      ],
+      "tests": [
+        "test_cases.test_ibsw225_three_component_workflow",
+        "test_cases.test_ibsw225_access_recovery",
+        "test_cases.test_ibsw225_os_alternatives"
+      ]
+    },
+    {
+      "id": "ibsw225_setup_alias_consumer_derivation",
+      "members": [
+        "DAY0-Prepare/01-a-setup.py",
+        "tools/project_contract.py",
+        "infra/docker/activate.py",
+        "infra/docker/hostlock.py"
+      ],
+      "tests": [
+        "test_cases.test_ibsw225_ib_alias_derivation_workflow"
+      ]
+    },
+    {
+      "id": "ibsw225_initial_upgrade_same_kernel_guard",
+      "members": [
+        "infiniband/bringup/xdr-initial-setup/initial-setup.py",
+        "infiniband/bringup/xdr-upgrade/upgrade.py",
+        "tools/ib_bringup_runtime_guard.py",
+        "ztp/config_sync_authority.py"
+      ],
+      "tests": [
+        "test_cases.test_ibsw225_http_initializer_guard_protocol",
+        "test_cases.test_ibsw225_managed_outer_guard_workflow"
+      ]
     }
   ],
   "path_rules": [
+    {
+      "paths": ["requirements-f01-ssh.lock"],
+      "tests": [
+        "test_cases.test_f01_ssh_dependency_identity",
+        "test_cases.test_f01_recovery_project_key_install",
+        "test_cases.test_f01_recovery_project_key_backup_durable_workflow"
+      ]
+    },
     {
       "paths": ["test_cases/fixtures/bounded_inner_fd_fixture.py"],
       "tests": ["test_cases.test_backup_bounded_process_workflow"]
@@ -3988,6 +4343,58 @@
         "test_cases.test_mlag_evpn_generation",
         "test_cases.test_project_contracts",
         "test_cases.test_ztp_release_core_review"
+      ]
+    },
+    {
+      "paths": ["test_cases/ibsw225_fixture_support/legacy_shell_workflow.py"],
+      "tests": ["test_cases.test_monitor_stack_review"]
+    },
+    {
+      "paths": [
+        "test_cases/ibsw225_fixture_support/*.py"
+      ],
+      "tests": [
+        "test_cases.test_ibsw225_runtime_source_manifest_contract",
+        "test_cases.test_ibsw225_ib_alias_derivation_workflow",
+        "test_cases.test_ibsw225_device_globs",
+        "test_cases.test_ibsw225_input_isolation",
+        "test_cases.test_ibsw225_os_alternatives",
+        "test_cases.test_ibsw225_three_component_workflow",
+        "test_cases.test_ibsw225_known_hosts",
+        "test_cases.test_ibsw225_access_recovery",
+        "test_cases.test_ibsw225_os_canary_coverage",
+        "test_cases.test_ibsw225_cooperative_pipeline",
+        "test_cases.test_ibsw225_runtime_bootstrap_identity",
+        "test_cases.test_ibsw225_genuine_fixture_discovery_contract",
+        "test_cases.test_ibsw225_http_initializer_guard_protocol",
+        "test_cases.test_ibsw225_runtime_guard_exception_priority",
+        "test_cases.test_ibsw225_initializer_report_finally_direct"
+      ],
+      "complete_tracked_support": true
+    },
+    {
+      "paths": [
+        "test_cases/fixtures/nvos-25.02.8008-system-version.txt",
+        "test_cases/fixtures/nvos-system-health.txt",
+        "test_cases/fixtures/nvos-six-cpld-firmware.txt",
+        "infiniband/bringup/xdr-upgrade/requirements.txt"
+      ],
+      "tests": [
+        "test_cases.test_ibsw225_runtime_source_manifest_contract",
+        "test_cases.test_ibsw225_ib_alias_derivation_workflow",
+        "test_cases.test_ibsw225_device_globs",
+        "test_cases.test_ibsw225_input_isolation",
+        "test_cases.test_ibsw225_os_alternatives",
+        "test_cases.test_ibsw225_three_component_workflow",
+        "test_cases.test_ibsw225_known_hosts",
+        "test_cases.test_ibsw225_access_recovery",
+        "test_cases.test_ibsw225_os_canary_coverage",
+        "test_cases.test_ibsw225_cooperative_pipeline",
+        "test_cases.test_ibsw225_runtime_bootstrap_identity",
+        "test_cases.test_ibsw225_genuine_fixture_discovery_contract",
+        "test_cases.test_ibsw225_http_initializer_guard_protocol",
+        "test_cases.test_ibsw225_runtime_guard_exception_priority",
+        "test_cases.test_ibsw225_initializer_report_finally_direct"
       ]
     }
   ]

@@ -1,0 +1,12 @@
+Name         Actual FW           Part Number                     FW Source
+-----------  ------------------  ------------------------------  ---------
+ASIC         35.2016.4060        920-9B310-00XX-9M_Ax            default
+BIOS         0ACQF_06.01.009     N/A                             default
+CPLD1        CPLD000232_REV0900  0x00e8                          N/A
+CPLD2        CPLD000383_REV0800  0x017f                          N/A
+CPLD3        CPLD000389_REV0600  0x0185                          N/A
+CPLD4        CPLD000368_REV0300  0x0170                          N/A
+CPLD5        CPLD000389_REV0600  0x0185                          N/A
+CPLD6        CPLD000368_REV0300  0x0170                          N/A
+SSD          CE00A400            Virtium VTPM24CEXI080-BM110006  N/A
+transceiver  N/A                 N/A                             N/A

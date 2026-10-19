@@ -975,3 +975,26 @@ def run_with_mandatory_retrieval(
             raise failure from primary_cause
         raise failure
     return result  # type: ignore[return-value]
+
+
+
+def direct_ipv4_read(address: str, known_hosts: Path, identity: Path,
+                     remote_argv: object, *, timeout: int) -> list[str]:
+    """Plan a server-originated admin identity read, not a connect/approval API."""
+    try:
+        if type(address) is not str or str(ipaddress.IPv4Address(address)) != address:
+            raise ValueError
+    except (ValueError, TypeError):
+        raise TransportError("direct UFM address must be canonical literal IPv4") from None
+    command = typed_argv(remote_argv, label="direct identity read")
+    if command != ["hostname"]:
+        if (len(command) != 6 or command[:2] != ["ip", "-j"]
+                or command[2] not in {"link", "address"}
+                or command[3:5] != ["show", "dev"]
+                or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]{0,63}", command[5])):
+            raise TransportError("direct command is outside the fixed identity read set")
+    # Reuse only validated SSH options, never the jump proxy builder.
+    endpoint = JumpEndpoint(address, "admin", known_hosts,
+                            _absolute_local_path(identity, label="direct identity"))
+    return ["ssh", "-4", *_ssh_options(endpoint, timeout),
+            endpoint.target, _join(command)]

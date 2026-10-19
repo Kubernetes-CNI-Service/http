@@ -1,5 +1,26 @@
 # InfiniBand 交换机统一升级脚本
 
+## 当前入口：IBSW 2.25 本地集成
+
+当前使用 `python3 -B upgrade.py --help` 或 `bash upgrade.sh --help`。
+`upgrade.sh` 已是兼容入口；必须与 Python 入口、`tools/ibsw_upgrade_*.py`、
+共同运行锁模块及三个 shell 文件成套使用，不可只复制一个 shell。
+依赖见本目录 `requirements.txt`，在独立 Python 环境安装，不自动修改系统 Python。
+
+当前仅支持 **HTTP** 包来源；`local`、`scp`、`https` 不再是支持的传输方式，
+不会静默降级。项目 CSV/global 可用显式 `--project` 指定，不依赖先 load/setup。
+身份、主机密钥、包来源、可靠备份、金丝雀、实际 OS 前置验证及失败保留门禁仍有效。
+`--inspect-only` 会访问目标执行只读查询，不是离线操作；本次开发没有执行设备访问。
+`--scripts-only` 只生成脚本，不能据此宣称升级完成；执行参数以当前 `--help` 为准。
+
+初始化和升级共用本机内核运行锁，忙时退出 75。不要删除锁文件、重放 UNKNOWN 请求，
+也不要把状态 JSON 当成授权。OS/BIOS/CPLD 各自保留组件状态和金丝雀结果。
+
+本次只执行定向本地 direct/workflow（外部设备 IO 为夹具），未跑 full，
+不产生正式发布证明或真机验收。现场用例见 `test_cases/REAL_ENVIRONMENT.md`。
+
+**以下正文保留旧 shell 版本历史，旧传输菜单、参数和输出目录不再是当前运行合同。**
+
 ## 在整体架构中的位置
 
 本目录是部署后的 IB 固件/系统专项维护模块，不参与 DHCP、配置生成或 ZTP 轮次。它读取明确

@@ -1,0 +1,11 @@
+# Exact native SSH pins required by this supplied backend. Use an isolated venv.
+# No installation is performed by upgrade.py.
+PyYAML
+paramiko==5.0.0
+bcrypt==5.0.0
+cryptography==50.0.1
+invoke==2.2.1
+PyNaCl==1.6.2
+cffi==2.0.0
+pycparser==2.23
+typing-extensions==4.16.0

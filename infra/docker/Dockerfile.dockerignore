@@ -57,6 +57,8 @@ infiniband/bringup/xdr-initial-setup/p2p.xlsx
 infiniband/bringup/xdr-initial-setup/p2p.xlsx/**
 infiniband/bringup/xdr-initial-setup/xdr-initial-setup-logs
 infiniband/bringup/xdr-initial-setup/xdr-initial-setup-logs/**
+infiniband/bringup/xdr-upgrade/01-global.yaml
+infiniband/bringup/xdr-upgrade/01-global.yaml/**
 infiniband/bringup/xdr-upgrade/ib.csv
 infiniband/bringup/xdr-upgrade/ib.csv/**
 infiniband/bringup/xdr-upgrade/xdr-upgrade-logs

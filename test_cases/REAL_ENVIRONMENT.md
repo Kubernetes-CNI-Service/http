@@ -1,5 +1,35 @@
 # Real-environment acceptance cases
 
+## TC-REAL-IBSW225-INTEGRATION-001 — IB2.25 成套运行、组件恢复及共同运行锁
+
+- Case ID：`TC-REAL-IBSW225-INTEGRATION-001`；类型：direct / integration / scenario / real-environment。
+  对应 IBSW-UPGRADE；状态 **NOT RUN / REAL_ENV REQUIRED**。适用 Linux 管理服务器及 NVOS。
+- 风险与目标：防止错误设备写入、来源漂移、无备份覆盖、失败设备被重试、状态文件冒授权、
+  初始化与升级并发写入及未验证固件放行。边界包含真实 entry/input/observer/executor/
+  scheduler/pipeline、独立组件状态、管理端备份和初始化/升级共同内核锁。
+- 本地证据：`test_ibsw225_http_initializer_guard_protocol.py`、
+  `test_ibsw225_runtime_guard_exception_priority.py`、
+  `test_ibsw225_initializer_report_finally_direct.py` 及
+  `test_ibsw225_three_component_workflow.py` 的定向用例；设备 IO 使用合成替身，
+  私有 inode 的互斥并不证明真实多 UID、跨进程、设备升级或断电验收。full 未执行。
+- 前置：另行获得精确测试设备、隔离项目、维护窗口、SSH 信任和升级/恢复权限；固定整套
+  入口/模块/shell/依赖的 SHA、Python/平台及实际版本，保留原 CSV/global 和包摘要。
+  不从本卡推定生产、root、真实 PID/cron 或当前升级任务的管理授权。
+- 步骤：先只读核对真实 hostname/管理 MAC/主机密钥、当前 OS 和配置健康；验证 HTTP 来源
+  与全部实际所需包。逐组件验证成功、已达目标、OS 有序链、独立金丝雀失败/UNKNOWN、
+  普通设备隔离以及 `--os-only`/固件单选的现场 OS 前置条件和未选组件零状态写入。
+  可靠管理端备份完成后才允许安装；重启后新 boot、NVUE/实际版本/配置/健康/密钥均独立核验。
+- 故障：保留断线、非零安装、未重启、服务未就绪、取回失败、报告/状态提交失败、来源变化、
+  权限错误以及代表性中断/冷恢复。UNKNOWN 保留原请求和证据，不自动重发；共同来源、归属或
+  可靠记录异常整批停止。SIGKILL/正常重启和模拟恢复不能替代断电。
+- 共同运行锁：在另行授权的同机隔离入口验证双向互斥、完整收尾期间仍持锁、跨 UID 可安全
+  参与及不安全类型/链接/权限拒绝；不删除持久锁 inode，不以 PID 文件清理未知进程。
+- 预期与证据：逐目标/组件报告事实、PASS/FAIL/UNKNOWN/NOT_EXECUTED 和批次部分结果，
+  保存脱敏完整命令/输出/退出码、状态与日志前后 stat/inode/SHA、包来源、备份、恢复见证。
+  无法保存可靠记录不得宣称成功；不得保存口令/私钥，也不得把夹具结果回填为现场 PASS。
+- 清理/回滚：仅由获授权操作者在隔离目标按确认恢复方案执行；核对配置/服务/密钥及管理端
+  原始证据保留，失败设备人工复核。重跑先观察真实状态，不删除原失败记录或用新 run 重置授权。
+
 ## TC-REAL-BACKUP-BOUNDED-ANCHOR-001 — 固定辅助脚本与原进程组监督
 
 - 类型：direct / integration / scenario / real-environment；对应 backup bounded-process
@@ -2720,3 +2750,35 @@ generation/publish 及 UNKNOWN 下改 action/wire 均 HOLD，不计作 COMPLETE 
 - 证据：精确 HEAD/tree/dirty/diff、manifest/ledger身份、Python/平台/依赖与命令、完整物理 BEGIN/END/退出码、日志前后 stat/inode/旧前缀与完整SHA；记录真实响应关闭/连接关闭/中断顺序及请求数，秘密脱敏。保留失败原日志，当前完整 full/check 仍单独要求。
 - 清理/重复：只清理本次原 response/connection、已确认自有 TLS server/thread与临时目录；测试 finally 对原响应救援不能当产品关闭 PASS。未知资源保持拒绝并记录，不按数字槽关闭。每次新建完整独立 fixture，不沿用旧观察/许可。
 - 范围/残余风险/确认：未删、跳、弱化、合并或省略原自动化/现场核心场景；无新增剩余风险接受人。真实 Cloud/设备、Linux/AIR、现场中断/冷恢复和断电仍 NOT RUN，本地模拟不替代；原现场授权、研发确认与普通发布门禁不变。
+
+## TC-F01-UFM-INITIAL-SETUP-DEVICE-20261019
+
+- 类型：real-environment；状态：NOT RUN / NOT DEPLOYED。
+- 需求：REQ-F01 四阶段七步、IPv4优先/OOB fallback、备份先于修改。
+- 自动化边界：test_f01_initial_setup_entry 只验证本地输入、计划、固定只读脚本生成和拒绝门；
+  不验证网络认证、上传、设备执行或硬件状态。execute 当前必须 HOLD。
+- 前置：另会话在隔离仓库检查当前脚本/测试/manifest/依赖；受控设备和维护窗口；
+  经独立渠道确认的 SSH known_hosts pin、CSV 管理 MAC/P2P/OOB/VRF；
+  可用且已确认的 UFM vendor 命令 grammar、shell/sudo 权限、镜像/许可证来源。
+  默认/新口令仅私有终端输入且确认，不进 argv/env/脚本/日志。
+- 步骤：先本地 validate/plan/generate；核对原输入和产物摘要、私有权限与 NOT_EXECUTED；
+  后续单独授权真实认证/备份/暂存上传/执行；实际状态查询和来源验证不可用 exit code 替代；
+  对升级与 HA 才使用规定长等待；单节点不进行 HA 切换。
+- 预期：未知身份/语义/备份/日志回收状态都停止，不自动重写配置或重试；
+  未确认命令不得执行，七步不得冒 DONE；OOB 不因密码拒绝而触发。
+- 证据：当前 source/test/manifest/runtime 身份、真实 endpoint/pin/MAC、
+  唯一 run-id、完整备份校验与 fsync、只脱敏的步骤结果和待回收日志状态。
+  不能使用历史候选 PASS 代替当前设备证明。
+- 清理：仅关闭本轮强持有会话/原子进程；保留本轮私有失败备份/日志；
+  未知对象/路径/PID 不扫描、不按数值救援、不盲删，不覆盖之前失败证据。
+- 风险：网络改址、重启、HA/SM/许可证修改可能失联或影响业务；当前未授权执行。
+
+### TC-F01-UFM-AUTH-KEY-LIVE-20261019 — NOT RUN
+
+- 对应模块：ufm_initial_setup authenticate/establish-keys → 原auth/key/E5/identity闭包。
+- 前置：完整固定8依赖ENV、实际CSV/global/P2P、外部known_hosts SHA与管理MAC；当前项目mgmt-server.pub/laptop.pub及相配私钥；独立0700私有日志根；维护许可。口令仅私有终端输入并确认。
+- 本地覆盖：CLI拒绝门、原public/Bash测试、原真实local协议workflow来源保留；本轮简单PASS不等于实际设备安装，正常native whole仍由root另行选择。
+- 真机步骤：独立确认pin/MAC后仅显式选择该节点；新密码先试，只有实际明确拒绝才可默认回退；default成功只能CHANGE_REQUIRED。可靠备份及原件fsync/readback完成前不得apply。成功后新key-only会话再验同节点；保留私有receipt与日志待回收状态。
+- 失败/清理：备份失败零apply；未知认证、cleanup、截止或日志回收状态一律HOLD，不盲重试；仅本轮已强持有连接/原child可关闭，未知FD/PID/根不救援、不扫描、不清理。
+- 风险：这会真实修改受控节点HOME authorized_keys，可能影响访问。它不是七步vendor配置、改密、HA、升级或设备验收。自动OOB及stage-readonly在本CLI仍未支持。
+- 源测试风险：原durable/SFTP peer的pre-try acquisition和敌对diagnostic setter窗口尚未额外故障闭合；不能把普通路径成功扩称所有异常资源安全。

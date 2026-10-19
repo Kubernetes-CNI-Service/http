@@ -1088,6 +1088,7 @@ SETUP_WORKSPACE_INPUT_MAPPINGS = (
     ("infra/logs", "99-output-infra", "dir"),
     ("monitor/01-global.yaml", "01-global.yaml", "file"),
     ("infiniband/01-global.yaml", "01-global.yaml", "file"),
+    ("infiniband/bringup/xdr-upgrade/01-global.yaml", "01-global.yaml", "file"),
 )
 
 
@@ -1201,7 +1202,9 @@ NETWORK_MONITOR_SPECS = (
 NETWORK_CSV_MAPPINGS = tuple((network + "/" + csv, "02-devices_config.csv")
                              for network, csv, *_outputs in NETWORK_MONITOR_SPECS)
 NETWORK_INVENTORY_LINKS = tuple((network + "/monitor/" + csv, network + "/" + csv)
-                               for network, csv, *_outputs in NETWORK_MONITOR_SPECS)
+                               for network, csv, *_outputs in NETWORK_MONITOR_SPECS) + (
+    ("infiniband/bringup/xdr-upgrade/ib.csv", "infiniband/ib.csv"),
+)
 # (repository name, project target, optional repository-internal alias target).
 MONITOR_RUNTIME_MAPPINGS = (
     ("monitor/02-devices_config.csv", "02-devices_config.csv", None),
@@ -2204,3 +2207,208 @@ def rsync_excludes() -> tuple[str, ...]:
         REHYDRATE_RECEIPT_NAME, REHYDRATE_READY_NAME, REHYDRATE_COMMIT_NAME,
         ZTP_PREFIX_PUBLICATION_MARKER,
     )
+
+
+# IB-only source proposal: original named function/class bodies preserved; producer mappings extended above.
+SETUP_CORE_IDENTITY_LINKS = (
+    ("config/cumulus/template/01-global.yaml", "01-global.yaml", "global", False),
+    ("config/cumulus/template/02-devices_config.csv", "02-devices_config.csv", "inventory", False),
+    ("config/isc-dhcp-server/02-subnet_config.csv", "02-dhcp-subnet_config.csv", "DHCP subnet", False),
+    ("status", "99-output-ztp", "status", True),
+)
+
+def parse_setup_manifest_layout(text):
+    """Parse the existing setup text layout without filesystem IO/authority."""
+    if not isinstance(text, str):
+        raise ValueError("setup manifest text required")
+    lines = text.splitlines()
+    prefix = "# setup manifest — proj: "
+    if not lines or not lines[0].startswith(prefix):
+        raise ValueError("活动项目身份无效：setup manifest header 缺失")
+    links = []
+    seen = set()
+    for value in lines[1:]:
+        if not value or value in seen:
+            raise ValueError("活动项目身份无效：setup manifest 含空行或重复链接")
+        if not Path(value).is_absolute() or os.path.normpath(value) != value:
+            raise ValueError(f"活动项目身份无效：manifest 链接不是规范绝对路径：{value}")
+        seen.add(value)
+        links.append(value)
+    return lines[0][len(prefix):], tuple(links)
+
+def _ibsw_mapping(value, label, allowed=None):
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} must be mapping")
+    if allowed is not None and set(value) - set(allowed):
+        raise ValueError(f"{label} contains unsupported fields")
+    return value
+
+def _ibsw_version(value):
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9]+[.-][0-9]+[.-][0-9]+", value):
+        raise ValueError("OS version must be a three-part string")
+    year, release, build = map(int, re.split(r"[.-]", value))
+    return f"{year}.{release:02d}.{build}"
+
+def _ibsw_version_key(value):
+    return tuple(map(int, value.split(".")))
+
+def _ibsw_ssd_version(value):
+    """Optional informational firmware target; never an installable package."""
+    if type(value) is not str or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", value) is None:
+        raise ValueError("SSD version must be a bounded literal string")
+    return value
+
+def _ibsw_file(value):
+    if not isinstance(value, str) or value in {"", ".", ".."} or not re.fullmatch(r"[A-Za-z0-9._-]+", value):
+        raise ValueError("file must be safe basename")
+    return value
+
+def _ibsw_root(value):
+    if not isinstance(value, str) or not value.startswith("/") or value == "/":
+        raise ValueError("package root must be explicit absolute directory")
+    if "\\" in value or "\x00" in value or any(p in {"", ".", ".."} for p in value[1:].split("/")):
+        raise ValueError("package root must be canonical absolute path")
+    return value
+
+def _ibsw_subdir(value):
+    if not isinstance(value, str):
+        raise ValueError("sub_dir must be string")
+    if value and (value.startswith("/") or "\\" in value or "\x00" in value or any(p in {"", ".", ".."} for p in value.split("/"))):
+        raise ValueError("sub_dir must be contained relative directory")
+    return value
+
+def _ibsw_ib(document):
+    _ibsw_mapping(document, "global")
+    switches = document.get("switches")
+    if not isinstance(switches, list):
+        raise ValueError("switches must be list")
+    seen = set()
+    ib = None
+    for section in switches:
+        if not isinstance(section, dict) or len(section) != 1:
+            raise ValueError("switches entry must contain one family")
+        family, config = next(iter(section.items()))
+        if family in seen:
+            raise ValueError("duplicate switch family")
+        seen.add(family)
+        _ibsw_mapping(config, f"switches.{family}")
+        if family == "ib":
+            ib = config
+    return ib
+
+def _ibsw_cpld_targets(file, action):
+    if not file.endswith(".vme") or f"_{action}_" not in file:
+        raise ValueError(f"CPLD {action} filename required")
+    identifiers = re.findall(r"FUI[0-9]+", file)
+    if len(identifiers) != 1:
+        raise ValueError("one CPLD FUI required")
+    pairs = re.findall(r"(CPLD[0-9]+)_(REV[0-9]+)", file)
+    if not pairs:
+        raise ValueError("CPLD ID/revision targets required")
+    targets = {}
+    for identifier, revision in pairs:
+        if identifier in targets and targets[identifier] != revision:
+            raise ValueError("conflicting revision for repeated CPLD ID")
+        targets[identifier] = revision
+    # Filename-derived targets are not proof of slot identity/compatibility.
+    return identifiers[0], tuple(sorted(targets.items()))
+
+def _ibsw_validate_upgrade(ib):
+    final = _ibsw_version(ib.get("version"))
+    upgrade = _ibsw_mapping(ib.get("upgrade"), "ib.upgrade", {"package_dir", "packages"})
+    root = _ibsw_root(upgrade.get("package_dir", "/var/www/html"))
+    packages = _ibsw_mapping(upgrade.get("packages"), "packages", {"os", "bios", "cpld", "ssd"})
+    validated = {}
+    if "os" in packages:
+        os = _ibsw_mapping(packages["os"], "os", {"sub_dir", "files"})
+        subdir = _ibsw_subdir(os.get("sub_dir", ""))
+        if not isinstance(os.get("files"), list) or not os["files"]:
+            raise ValueError("OS files must be nonempty ordered list")
+        entries, stages = [], []
+        previous = None
+        seen_versions, seen_files = set(), set()
+        has_alternatives = False
+        def os_entry(entry):
+            _ibsw_mapping(entry, "os file", {"file", "version"})
+            file = _ibsw_file(entry.get("file"))
+            match = re.fullmatch(r"nvosv([0-9]+-[0-9]+-[0-9]+)amd64\.bin|nvos-amd64-([0-9]+\.[0-9]+\.[0-9]+)\.bin", file)
+            inferred = _ibsw_version(next(part for part in match.groups() if part)) if match else None
+            explicit = _ibsw_version(entry["version"]) if "version" in entry else None
+            if inferred and explicit and inferred != explicit:
+                raise ValueError("filename/explicit OS target conflict")
+            version = inferred or explicit
+            if not version:
+                raise ValueError("OS path must be known and strictly increasing")
+            return file, version, subdir
+        for entry in os['files']:
+            if isinstance(entry, dict) and 'alternatives' in entry:
+                _ibsw_mapping(entry,'OS alternative stage',{'alternatives'})
+                candidates=entry['alternatives']
+                if not isinstance(candidates,list) or not 2 <= len(candidates) <= 64:
+                    raise ValueError('OS alternative stage requires 2 to 64 ordered candidates')
+                has_alternatives=True
+            else:
+                candidates=[entry]
+            parsed=[os_entry(item) for item in candidates]
+            keys=[_ibsw_version_key(item[1]) for item in parsed]
+            if previous is not None and min(keys) <= previous:
+                raise ValueError('OS path must be known and strictly increasing between stages')
+            group=[]
+            for item in parsed:
+                if item[0] in seen_files or item[1] in seen_versions:
+                    raise ValueError('duplicate OS filename or version across stages/candidates')
+                seen_files.add(item[0]); seen_versions.add(item[1])
+                group.append(len(entries)); entries.append(item)
+            stages.append(tuple(group)); previous=max(keys)
+        if len(stages[-1]) != 1 or entries[-1][1] != final:
+            raise ValueError("OS last path node must equal ib.version")
+        validated["os"] = tuple(entries)
+        if has_alternatives:
+            validated['os_stages']=tuple(stages)
+    if "bios" in packages:
+        bios = _ibsw_mapping(packages["bios"], "bios", {"sub_dir", "file", "version"})
+        file = _ibsw_file(bios.get("file"))
+        version = bios.get("version")
+        if file != "0ACQF.cab" or not isinstance(version, str) or not re.fullmatch(r"0ACQF_[0-9]+(?:\.[0-9]+)+", version):
+            raise ValueError("BIOS requires 0ACQF.cab and explicit target version")
+        validated["bios"] = (file, version, _ibsw_subdir(bios.get("sub_dir", "")))
+    if "cpld" in packages:
+        cpld = _ibsw_mapping(packages["cpld"], "cpld", {"sub_dir", "burn", "refresh"})
+        subdir = _ibsw_subdir(cpld.get("sub_dir", ""))
+        files = []
+        for action in ("burn", "refresh"):
+            entry = _ibsw_mapping(cpld.get(action), action, {"file"})
+            file = _ibsw_file(entry.get("file"))
+            files.append(file)
+        burn = _ibsw_cpld_targets(files[0], "BURN")
+        refresh = _ibsw_cpld_targets(files[1], "REFRESH")
+        if burn != refresh:
+            raise ValueError("CPLD BURN/REFRESH FUI and target sets must match")
+        validated["cpld"] = (files[0], files[1], subdir, burn[1])
+    if "ssd" in packages:
+        ssd = _ibsw_mapping(packages["ssd"], "ssd", {"version", "file", "sub_dir"})
+        # file/sub_dir are intentionally ignored: SSD has no package, source
+        # resolution, upgrade action or scheduler entry in this tool.
+        validated["ssd"] = _ibsw_ssd_version(ssd.get("version"))
+    return final, root, validated
+
+def validate_optional_ib_upgrade(document):
+    """Canonical pure optional metadata validation, never package IO.
+
+    No declaration means no extra whole-family validation: legacy raw globals
+    and existing non-IB consumers keep their own contracts. Presence, not
+    truthiness, admits a declared block so explicit null/empty/bad blocks fail.
+    A malformed mapping-form switches container with a visible IB declaration
+    is still sent to the strict declared-schema parser, never silently no-oped.
+    """
+    _ibsw_mapping(document, "global")
+    switches = document.get("switches")
+    entries = switches if isinstance(switches, list) else (switches,)
+    declared = any(
+        isinstance(entry, dict) and isinstance(entry.get("ib"), dict)
+        and "upgrade" in entry["ib"]
+        for entry in entries
+    )
+    if not declared:
+        return None
+    return _ibsw_validate_upgrade(_ibsw_ib(document))

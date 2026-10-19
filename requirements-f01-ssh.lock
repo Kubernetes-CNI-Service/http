@@ -1,0 +1,13 @@
+# Optional F01 authentication-observation dependency, not a deploy enablement.
+# Install only in a separately authorized isolated environment; never merge
+# this closure into REQ7's SDK lock or silently install into system Python.
+# Python >=3.9; the protocol adapter rejects any Paramiko version other than
+# the exact version below because it uses version-checked AuthHandler internals.
+paramiko==5.0.0
+bcrypt==5.0.0
+cryptography==50.0.1
+invoke==2.2.1
+PyNaCl==1.6.2
+cffi==2.0.0
+pycparser==2.23
+typing-extensions==4.16.0

@@ -11,7 +11,10 @@ import ipaddress
 from pathlib import Path
 import re
 
-from project_contract import safe_load_global_yaml
+if __package__:
+    from .project_contract import safe_load_global_yaml
+else:
+    from project_contract import safe_load_global_yaml
 
 
 class UfmInputError(ValueError):
@@ -275,3 +278,58 @@ def bind_ufm_inventory_text(document: object, csv_text: str) -> tuple[UfmNode, .
     bound = tuple(sorted(nodes, key=lambda node: node.hostname.casefold()))
     plan_ufm_vip(document, bound)
     return bound
+
+
+@dataclass(frozen=True)
+class UfmOperationVersionPlan:
+    """Declared upgrade intent only, never live version or deployment approval."""
+    version: str | None
+    upgrade: str
+
+
+
+@dataclass(frozen=True)
+class UfmConfiguredDeclaration:
+    """Complete CSV intent and frozen installation labels, not authority."""
+    members: tuple[UfmNode, ...]
+    installation_primary: UfmNode | None
+    installation_secondary: UfmNode | None
+    operation_version: UfmOperationVersionPlan
+
+    @property
+    def deployment_status(self) -> str:
+        # Configuration cannot supply or promote deployment approval.
+        return "NOT_APPROVED"
+
+
+
+def plan_ufm_operation_version(document: object) -> UfmOperationVersionPlan:
+    """Admit supported 2.5.* declarations; absent version skips upgrade."""
+    policy = parse_ufm_servers(document).get("ufm")
+    if policy is None:
+        raise UfmInputError("UFM operation planning requires declared UFM policy")
+    version = policy.get("version")
+    if version is None:
+        return UfmOperationVersionPlan(None, "SKIPPED")
+    if not re.fullmatch(r"2\.5\.[0-9]+(?:[._+-][A-Za-z0-9]+)*", version):
+        raise UfmInputError("UFM operation supports declared 2.5.* versions only")
+    return UfmOperationVersionPlan(version, "REQUESTED")
+
+
+
+def plan_ufm_configured_declaration(document: object, csv_text: str) -> UfmConfiguredDeclaration:
+    """Plan every CSV member; resolve D60 only for explicit frozen labels."""
+    operation_version = plan_ufm_operation_version(document)
+    members = bind_ufm_inventory_text(document, csv_text)
+    primary = secondary = None
+    labels_requested = "ipoib" in parse_ufm_servers(document)["ufm"]["interfaces"]
+    if labels_requested and len(members) == 2:
+        candidates = [node for node in members
+                      if re.search(r"(?:^|[-_])UFM01$", node.hostname, re.I)]
+        if len(candidates) != 1:
+            raise UfmInputError("UFM HA requires one identifiable installation UFM01")
+        primary = candidates[0]
+        secondary = next(node for node in members if node is not primary)
+    elif labels_requested:
+        raise UfmInputError("UFM installation labels require both configured members")
+    return UfmConfiguredDeclaration(members, primary, secondary, operation_version)

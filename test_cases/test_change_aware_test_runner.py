@@ -72,6 +72,7 @@ EXPECTED_TEST_SUITES = [
     "operator-cli-help",
     "issue-tracker-local",
     "ufm-local-source-bridge",
+    "ibsw225-canonical-runtime",
 ]
 
 
@@ -874,6 +875,7 @@ class ImpactManifestTests(unittest.TestCase):
         self.assertNotIn("test_cases/run_related_tests.py", actual)
         self.assertEqual(
             [
+                "requirements-f01-ssh.lock",
                 "test_cases/fixtures/bounded_inner_fd_fixture.py",
                 ".dockerignore",
                 ".gitattributes",
@@ -987,6 +989,27 @@ class ImpactManifestTests(unittest.TestCase):
                 "ztp/config/nvos/template/P2P/02-port-mapping.log",
                 "ztp/config/nvos/template/P2P/03-splitter.log",
                 "ztp/templates/ztp.json",
+                "infiniband/bringup/xdr-upgrade/requirements.txt",
+                "test_cases/ibsw225_fixture_support/runtime_source_support.py",
+                "test_cases/ibsw225_fixture_support/_fixture_test_upgrade_cli.py",
+                "test_cases/fixtures/nvos-system-health.txt",
+                "test_cases/fixtures/nvos-25.02.8008-system-version.txt",
+                "test_cases/fixtures/nvos-six-cpld-firmware.txt",
+                "test_cases/ibsw225_fixture_support/_fixture_test_known_hosts.py",
+                "test_cases/ibsw225_fixture_support/_fixture_test_manual_execution.py",
+                "test_cases/ibsw225_fixture_support/_fixture_test_nvos_observations.py",
+                "test_cases/ibsw225_fixture_support/_fixture_test_three_component_workflow.py",
+                "test_cases/ibsw225_fixture_support/_fixture_test_access_recovery.py",
+                "test_cases/ibsw225_fixture_support/_fixture_test_grouped_summary.py",
+                "test_cases/ibsw225_fixture_support/_fixture_test_runtime_budgets.py",
+                "test_cases/ibsw225_fixture_support/_fixture_test_os_alternatives.py",
+                "test_cases/ibsw225_fixture_support/_fixture_test_input_isolation.py",
+                "test_cases/ibsw225_fixture_support/_fixture_test_health_upgrade_gate.py",
+                "test_cases/ibsw225_fixture_support/_fixture_test_compact_summary.py",
+                "test_cases/ibsw225_fixture_support/_fixture_test_os_download_telemetry.py",
+                "test_cases/ibsw225_fixture_support/_fixture_test_standalone_links.py",
+                "test_cases/ibsw225_fixture_support/fixed_fixture_registry.py",
+                "test_cases/ibsw225_fixture_support/legacy_shell_workflow.py",
             ],
             manifest["tracked_support"],
         )

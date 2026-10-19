@@ -8136,73 +8136,22 @@ class BringupSafetyTests(unittest.TestCase):
                 module.load_devices(path)
 
     def test_xdr_upgrade_parses_both_supported_nvos_image_names(self):
-        original = ROOT / "infiniband/bringup/xdr-upgrade/upgrade.sh"
-        source = original.read_text(encoding="utf-8")
-        self.assertTrue(source.endswith("\nmain\n"))
-        harness_source = source[:-len("main\n")] + r'''printf 'modern=%s\n' "$(os_ver_from_file 'nvos-amd64-25.03.1010.bin')"
-printf 'legacy=%s\n' "$(os_ver_from_file 'nvosv25-03-1010amd64.bin')"
-'''
-        with tempfile.TemporaryDirectory() as directory:
-            script = Path(directory) / "upgrade-parser.sh"
-            script.write_text(harness_source, encoding="utf-8")
-            completed = subprocess.run(
-                ["bash", str(script), "--method", "scp", "--os"],
-                cwd=directory, text=True, capture_output=True, timeout=10,
-                check=False,
-            )
-
-        self.assertEqual(0, completed.returncode, completed.stderr)
-        self.assertEqual(
-            ["modern=25.03.1010", "legacy=25.03.1010"],
-            completed.stdout.splitlines(),
+        from test_cases.ibsw225_fixture_support.legacy_shell_workflow import (
+            LegacyShellCompatibilityWorkflowTests,
         )
+        LegacyShellCompatibilityWorkflowTests().test_both_literal_nvos_names_are_inferred_by_real_shell_cli()
 
     def test_xdr_upgrade_generates_new_name_script_and_upgrade_path(self):
-        original = ROOT / "infiniband/bringup/xdr-upgrade/upgrade.sh"
-        source = original.read_text(encoding="utf-8")
-        old_target = '    "nvosv25-02-8008amd64.bin"'
-        new_target = '    "nvos-amd64-25.03.1010.bin"'
-        self.assertEqual(1, source.count(old_target))
-        configured = source.replace(old_target, new_target, 1)
-
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            script = root / "upgrade.sh"
-            script.write_text(configured, encoding="utf-8")
-            completed = subprocess.run(
-                [
-                    "bash", str(script), "--method", "http", "--os",
-                    "--scripts-only",
-                ],
-                cwd=root, text=True, capture_output=True, timeout=10,
-                check=False,
-            )
-            generated = (
-                root / "xdr-upgrade-logs/upgrade_scripts/http"
-                / "os_upgrade_25.03.1010.sh"
-            )
-            generated_text = (
-                generated.read_text(encoding="utf-8") if generated.is_file() else ""
-            )
-
-        self.assertEqual(0, completed.returncode, completed.stderr)
-        self.assertRegex(completed.stdout, r"OS upgrade path:.*25[.]03[.]1010")
-        self.assertIn('LOCAL_FILE="nvos-amd64-25.03.1010.bin"', generated_text)
-        self.assertIn("Done. Reboot required to activate OS 25.03.1010.", generated_text)
+        from test_cases.ibsw225_fixture_support.legacy_shell_workflow import (
+            LegacyShellCompatibilityWorkflowTests,
+        )
+        LegacyShellCompatibilityWorkflowTests().test_real_shell_generates_ordered_os_chain_and_final_install_script()
 
     def test_xdr_upgrade_invalid_option_does_not_create_output_tree(self):
-        original = ROOT / "infiniband/bringup/xdr-upgrade/upgrade.sh"
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            script = root / "upgrade.sh"
-            shutil.copy2(original, script)
-            completed = subprocess.run([
-                "bash", str(script), "--method", "local", "--scripts-only",
-                "--parallel-limit", "not-a-number",
-            ], cwd=root, text=True, capture_output=True, timeout=10, check=False)
-            self.assertEqual(1, completed.returncode)
-            self.assertIn("Invalid --parallel-limit", completed.stderr)
-            self.assertFalse((root / "xdr-upgrade-logs").exists())
+        from test_cases.ibsw225_fixture_support.legacy_shell_workflow import (
+            LegacyShellCompatibilityWorkflowTests,
+        )
+        LegacyShellCompatibilityWorkflowTests().test_invalid_parallel_keeps_original_exit_and_unsupported_methods_never_fallback()
 
 
 if __name__ == "__main__":

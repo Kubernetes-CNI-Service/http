@@ -1578,52 +1578,59 @@ def managed_initial_main(argv=None):
     parser.add_argument("--tool-inputs", type=Path, help="explicit owned project directory containing global/publickey inputs; never executable code")
     parser.add_argument("initial_args", nargs=argparse.REMAINDER, help="after --, the original initial-setup arguments (requires --apply)")
     args = parser.parse_args(argv)
-    source = Path(__file__).resolve().parent.parent / "infiniband/bringup/xdr-initial-setup/initial-setup.py"
-    spec = importlib.util.spec_from_file_location("_http_managed_initial_setup", source)
-    if spec is None or spec.loader is None:
-        raise AuthorityError("managed initial executor is unavailable")
-    initial = importlib.util.module_from_spec(spec)
-    previous_module = sys.modules.get(spec.name)
-    previous_argv = sys.argv
-    sys.modules[spec.name] = initial
-    cycle = None
-    deployment_descriptor = None
+    from tools.ib_bringup_runtime_guard import _runtime_instance_guard, _InstanceGuardError
     try:
-        spec.loader.exec_module(initial)
-        cycle = ManagedInitialMethodCycle(args.project, initial, tool_input_root=args.tool_inputs)
-        from tools.deployment_lock import DeploymentLockError, acquire_lock_descriptor, release_lock_descriptor
-        try:
-            # Match manual-ztp's shared writer participation. Hold this through
-            # final receipt withdrawal/cleanup, not just device operations, so
-            # load/setup/unsetup cannot detach the project in between them.
-            deployment_descriptor = acquire_lock_descriptor(_HTTP_ROOT, exclusive=False, create=True)
-        except DeploymentLockError as exc:
-            raise AuthorityError("managed initial deployment lock is unavailable") from exc
-        forwarded = args.initial_args[1:] if args.initial_args[:1] == ["--"] else args.initial_args
-        sys.argv = [str(source), *forwarded]
-        return initial.main(method_cycle=cycle)
-    except (AuthorityError, OSError, ValueError, initial.SetupError) as exc:
-        # No remote output or credentials enter this local diagnostic.
-        print("managed initial-setup rejected: " + type(exc).__name__, file=sys.stderr)
-        return 2
-    finally:
-        try:
+        with _runtime_instance_guard():
+            source = Path(__file__).resolve().parent.parent / "infiniband/bringup/xdr-initial-setup/initial-setup.py"
+            spec = importlib.util.spec_from_file_location("_http_managed_initial_setup", source)
+            if spec is None or spec.loader is None:
+                raise AuthorityError("managed initial executor is unavailable")
+            initial = importlib.util.module_from_spec(spec)
+            previous_module = sys.modules.get(spec.name)
+            previous_argv = sys.argv
+            sys.modules[spec.name] = initial
+            cycle = None
+            deployment_descriptor = None
             try:
-                if cycle is not None and hasattr(cycle, "targets"):
-                    cycle.close()
+                spec.loader.exec_module(initial)
+                cycle = ManagedInitialMethodCycle(args.project, initial, tool_input_root=args.tool_inputs)
+                from tools.deployment_lock import DeploymentLockError, acquire_lock_descriptor, release_lock_descriptor
+                try:
+                    # Match manual-ztp's shared writer participation. Hold this through
+                    # final receipt withdrawal/cleanup, not just device operations, so
+                    # load/setup/unsetup cannot detach the project in between them.
+                    deployment_descriptor = acquire_lock_descriptor(_HTTP_ROOT, exclusive=False, create=True)
+                except DeploymentLockError as exc:
+                    raise AuthorityError("managed initial deployment lock is unavailable") from exc
+                forwarded = args.initial_args[1:] if args.initial_args[:1] == ["--"] else args.initial_args
+                sys.argv = [str(source), *forwarded]
+                return initial.main(method_cycle=cycle)
+            except (AuthorityError, OSError, ValueError, initial.SetupError) as exc:
+                # No remote output or credentials enter this local diagnostic.
+                print("managed initial-setup rejected: " + type(exc).__name__, file=sys.stderr)
+                return 2
             finally:
                 try:
-                    if getattr(initial, "REPORT_HANDLE", None) is not None:
-                        initial.REPORT_HANDLE.close()
+                    try:
+                        if cycle is not None and hasattr(cycle, "targets"):
+                            cycle.close()
+                    finally:
+                        try:
+                            if getattr(initial, "REPORT_HANDLE", None) is not None:
+                                initial.REPORT_HANDLE.close()
+                        finally:
+                            sys.argv = previous_argv
+                            if previous_module is None:
+                                sys.modules.pop(spec.name, None)
+                            else:
+                                sys.modules[spec.name] = previous_module
                 finally:
-                    sys.argv = previous_argv
-                    if previous_module is None:
-                        sys.modules.pop(spec.name, None)
-                    else:
-                        sys.modules[spec.name] = previous_module
-        finally:
-            if deployment_descriptor is not None:
-                release_lock_descriptor(deployment_descriptor)
+                    if deployment_descriptor is not None:
+                        release_lock_descriptor(deployment_descriptor)
+
+    except _InstanceGuardError as exc:
+        print(f"{exc.code}: {exc}", file=sys.stderr)
+        return 75 if exc.code == "ALREADY_RUNNING" else 2
 
 
 if __name__ == "__main__":

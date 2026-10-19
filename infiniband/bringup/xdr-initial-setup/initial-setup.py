@@ -17,6 +17,7 @@ import ast
 import base64
 import copy
 import csv
+import errno
 import fcntl
 import getpass
 import hashlib
@@ -3672,11 +3673,125 @@ def main(*, method_cycle=None) -> int:
     return 1 if failures else 0
 
 
-if __name__ == "__main__":
+_RUNTIME_GUARD_PATH = Path('/tmp/http-ib-bringup.runtime.lock')
+
+class _InstanceGuardError(RuntimeError):
+    def __init__(self, code, detail):
+        super().__init__(detail)
+        self.code = code
+
+@contextmanager
+def _runtime_instance_guard():
+    """Nonblocking kernel lock, not a PID/sentinel or deployment prerequisite.
+
+    The persistent empty regular inode is intentional: never unlink it when
+    releasing, which would allow two processes to lock different generations.
+    Existing files are opened read-only so another UID, including root, can
+    participate without rewriting/chmodding the original creator's file.
+    """
+    descriptor = None
     try:
-        raise SystemExit(main())
-    except SetupError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
+        flags = os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+        try:
+            descriptor = os.open(_RUNTIME_GUARD_PATH,
+                                 os.O_RDWR | os.O_CREAT | os.O_EXCL | flags, 0o644)
+            os.fchmod(descriptor, 0o644)
+        except FileExistsError:
+            descriptor = os.open(_RUNTIME_GUARD_PATH, os.O_RDONLY | flags)
+        os.set_inheritable(descriptor, False)
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_mode & 0o022:
+            raise _InstanceGuardError('INSTANCE_GUARD_UNAVAILABLE',
+                'Unsafe runtime guard type, links or permissions. No operations started. '
+                'Ask the administrator to inspect ' + str(_RUNTIME_GUARD_PATH))
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as error:
+            if error.errno not in (errno.EAGAIN, errno.EACCES):
+                raise
+            raise _InstanceGuardError('ALREADY_RUNNING',
+                'Another initialization or upgrade process is running on this management host. '
+                'No operations started. Wait for it to finish; do not delete the runtime guard: '
+                + str(_RUNTIME_GUARD_PATH)) from None
+        current = os.stat(_RUNTIME_GUARD_PATH, follow_symlinks=False)
+        if (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino):
+            raise _InstanceGuardError('INSTANCE_GUARD_UNAVAILABLE',
+                'Runtime guard changed while opening. No operations started. '
+                'Ask the administrator to inspect ' + str(_RUNTIME_GUARD_PATH))
+    except OSError as error:
+        if descriptor is not None:
+            os.close(descriptor)
+            descriptor = None
+        raise _InstanceGuardError('INSTANCE_GUARD_UNAVAILABLE',
+            'Cannot safely acquire the runtime guard (errno=' + str(error.errno) + '). '
+            'No operations started. Ask the administrator to inspect '
+            + str(_RUNTIME_GUARD_PATH)) from None
+    except BaseException:
+        if descriptor is not None:
+            os.close(descriptor)
+        raise
+    primary = None
+    try:
+        yield descriptor
+    except BaseException as exc:
+        primary = exc
+        raise
+    finally:
+        # Close, never LOCK_UN: retain the original owned-FD protocol.
+        try:
+            os.close(descriptor)
+        except BaseException as cleanup:
+            if primary is None or (
+                isinstance(primary, Exception) and not isinstance(cleanup, Exception)
+            ):
+                raise
+
+
+def _standalone_main_with_report_cleanup():
+    """Run the real algorithm and final diagnostic/close within the host guard."""
+    primary = None
+    try:
+        try:
+            return main()
+        except SetupError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            if REPORT_HANDLE is not None:
+                print(f"ERROR: {exc}", file=REPORT_HANDLE, flush=True)
+            return 2
+    except BaseException as exc:
+        primary = exc
+        raise
+    finally:
         if REPORT_HANDLE is not None:
-            print(f"ERROR: {exc}", file=REPORT_HANDLE, flush=True)
-        raise SystemExit(2)
+            try:
+                REPORT_HANDLE.close()
+            except BaseException as cleanup:
+                if primary is None or (
+                    isinstance(primary, Exception) and not isinstance(cleanup, Exception)
+                ):
+                    raise
+
+
+def _guarded_main():
+    # Only explicit sole help is exempt. Argparse also accepts long help
+    # abbreviations; these and mixed help must not escape operational locking.
+    argv = tuple(sys.argv[1:])
+    option_argv = argv[:argv.index("--")] if "--" in argv else argv
+    requests_help = any(
+        arg == "-h" or (len(arg) > 2 and arg.startswith("--")
+                        and "--help".startswith(arg))
+        for arg in option_argv
+    )
+    if argv in (("--help",), ("-h",)) or not requests_help:
+        # Pure syntax rejection does not read inputs/passwords/create the lock.
+        parse_args()
+    try:
+        with _runtime_instance_guard():
+            return _standalone_main_with_report_cleanup()
+    except _InstanceGuardError as exc:
+        print(f"{exc.code}: {exc}", file=sys.stderr)
+        return 75 if exc.code == "ALREADY_RUNNING" else 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(_guarded_main())

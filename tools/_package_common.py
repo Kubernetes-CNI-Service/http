@@ -41,6 +41,7 @@ from project_contract import (
     path_disposition,
     require_project_eligible,
     safe_load_global_yaml,
+    validate_optional_ib_upgrade,
     transfer_exclude_reason,
     validate_service_endpoint,
     ztp_prefix_publication_relative,
@@ -56,10 +57,17 @@ STATIC_SETUP_MANAGED_LINKS = frozenset({
     "infiniband/monitor/ib.csv",
     "nvlink/monitor/nvsw.csv",
     "infiniband/bringup/xdr-upgrade/ib.csv",
+    "infiniband/bringup/xdr-upgrade/01-global.yaml",
     "infiniband/bringup/xdr-initial-setup/ib.csv",
     "infiniband/bringup/xdr-initial-setup/01-global.yaml",
     "infiniband/bringup/xdr-initial-setup/publickey",
+    "infiniband/bringup/ufm/01-global.yaml",
+    "infiniband/bringup/ufm/ib.csv",
+    "infiniband/bringup/ufm/p2p.xlsx",
+    "infiniband/bringup/ufm/publickey",
+    "infiniband/bringup/ufm/ufm-setup-logs",
 })
+RESERVED_UPGRADE_GLOBAL_ALIAS = "infiniband/bringup/xdr-upgrade/01-global.yaml"
 DEPLOYMENT_PREWRITE_GUARD = TOOLS_DIR / "deployment_prewrite_guard.py"
 DEPLOYMENT_SOURCE_MANIFEST_RELATIVE = PurePosixPath(
     "infra/docker/deployment-source-manifest.json"
@@ -867,6 +875,14 @@ def project_directories() -> list[Path]:
 def setup_managed_links() -> set[str]:
     """Return manifest-owned and detectable project-runtime links."""
     result: set[str] = set(STATIC_SETUP_MANAGED_LINKS)
+    reserved = ROOT / RESERVED_UPGRADE_GLOBAL_ALIAS
+    try:
+        info = reserved.lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        if not stat.S_ISLNK(info.st_mode):
+            raise ValueError("reserved upgrade global must be a setup-managed symlink")
     root = ROOT.resolve()
     if MANIFEST.is_file():
         for line in MANIFEST.read_text(
@@ -1261,6 +1277,9 @@ class PackageFilter:
         path = PurePosixPath(name)
         parts = path.parts
         source_path = ROOT / name
+
+        if name == RESERVED_UPGRADE_GLOBAL_ALIAS and not info.issym():
+            raise ValueError("reserved upgrade global cannot be packaged as code")
 
         try:
             if source_path.resolve() in self.excluded_paths:
@@ -1840,6 +1859,7 @@ def _validate_package_project_inputs(
         raise ValueError(f"package global YAML is invalid: {exc}") from exc
     if not isinstance(data, dict):
         raise ValueError("package global YAML must be a mapping")
+    validate_optional_ib_upgrade(data)
     common = data.get("common")
     mgmt = common.get("mgmt") if isinstance(common, dict) else None
     if not isinstance(mgmt, dict):

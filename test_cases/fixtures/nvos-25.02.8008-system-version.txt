@@ -1,0 +1,9 @@
+                 operational
+---------------  -----------------------------------
+onie             2025.05-5.3.0017-115200
+kernel           6.1.0-22-2-amd64
+base-os          NVOS Debian GNU/Linux 12 (bookworm)
+product-release  25.02.8008
+image
+  build-id       nvos-25.02.8008
+  build-date     Sun May 31 14:10:17 UTC 2026
