@@ -746,6 +746,51 @@ class CurrentRoundCompletionTests(unittest.TestCase):
 
 
 class CurrentRoundGateWorkflowTests(unittest.TestCase):
+    def test_f02_infra_rows_never_enter_real_monitor_or_inventory_collection_domains(self):
+        # F02-7: deployment method and seven-step planning are not Switch
+        # completion authority. Literal expected domains are independent of
+        # both production mappings. No collector or device operation is run.
+        with tempfile.TemporaryDirectory(prefix="f02-infra-switch-boundary-") as directory:
+            project = Path(directory)
+            (project / "02-devices_config.csv").write_text(
+                "hostname,type,template\n"
+                "UFM01,server,ufm\n"
+                "UFM02,ufm,ib\n"
+                "JUMP01,eth_jump,oob-leaf\n"
+                "Leaf01,eth,oob-leaf\n"
+                "IB01,ib,ib\n"
+                "NVL01,nvl,nvl\n"
+                "AIR01,air,air\n", encoding="utf-8",
+            )
+            rows = [
+                round_device("UFM01", "server"),
+                round_device("UFM02", "ufm"),
+                round_device("JUMP01", "eth_jump"),
+                round_device("Leaf01", "eth"),
+                round_device("IB01", "ib"),
+                round_device("NVL01", "nvl"),
+                round_device("AIR01", "air"),
+            ]
+            expected = {
+                "air-ethernet": ["AIR01"],
+                "prod-ethernet": ["Leaf01"],
+                "prod-infiniband": ["IB01"],
+                "prod-nvlink": ["NVL01"],
+            }
+            ready = MONITOR.ready_completion_handoff_reports({"scope": "all", "devices": rows})
+            self.assertEqual(expected, {
+                key: [row["hostname"] for row in report["devices"]]
+                for key, report in ready.items()
+            })
+            self.assertEqual(("Leaf01", "IB01", "NVL01", "AIR01"),
+                             GATE.project_inventory_targets(str(project), "all"))
+            self.assertEqual(("Leaf01", "IB01", "NVL01"),
+                             GATE.project_inventory_targets(str(project), "prod"))
+            self.assertEqual(("AIR01",), GATE.project_inventory_targets(str(project), "air"))
+            # A complete-looking infra-only report does not open any domain.
+            self.assertEqual({}, MONITOR.ready_completion_handoff_reports(
+                {"scope": "all", "devices": rows[:3]}))
+
     def test_monitor_to_real_collection_gate_rejects_skipped_then_collects_success(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -837,6 +882,18 @@ class CurrentRoundGateWorkflowTests(unittest.TestCase):
 
 
 class CompletionGroupTests(unittest.TestCase):
+    def test_f02_infra_type_cannot_claim_switch_group_via_method_or_template(self):
+        for kind in ("server", "ufm", "eth_jump"):
+            for method in ("deploy_infra", "initial-setup", "ztp"):
+                with self.subTest(kind=kind, method=method):
+                    row = device("UFM01", kind, config_method=method,
+                                 template="ib", environment="production")
+                    self.assertIsNone(MONITOR.completion_handoff_group(row))
+                    self.assertEqual({}, MONITOR.ready_completion_handoff_reports(
+                        {"scope": "prod", "devices": [row]}))
+        self.assertEqual("prod-infiniband", MONITOR.completion_handoff_group(
+            device("IB01", "ib", config_method="initial-setup")))
+
     def test_completed_air_group_does_not_wait_for_other_types(self):
         report = {
             "scope": "all",
