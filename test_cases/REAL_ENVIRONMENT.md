@@ -2830,3 +2830,21 @@ generation/publish 及 UNKNOWN 下改 action/wire 均 HOLD，不计作 COMPLETE 
 - 现场保留：正常三组件、等长错误内容、缺摘要、CPLD 第二包失败零 NV、源/原件漂移、可靠记录或关键清理失败、OS 下载后确认前中断与冷恢复。HTTP 原无包摘要合同不追认为有 SHA 保证；现场和真实断电均不可由模拟或 SIGKILL 代替。
 - 证据：精确源码/测试/manifest、Python/平台、原请求与包原件身份、完整日志/退出码、关键 fsync/close 和 ACK 顺序。不得持久化口令、token 或私钥。
 - 清理/风险：只清理本轮确认持有的测试对象；FAIL/UNKNOWN 保留请求/原件和人工检查记录，零自动重试/刷新基线/接管。远端已派发写入、同 UID/root 并发与 helper 返回后换包风险仍须单独验证；无新增风险接受人，不能报告已可用。
+
+
+### TC-IBSW3-LOCAL-PACKAGE-COMPANION-20261020 — NOT RUN
+
+- Scope: actual management-server/NVOS parent/child originals, source companion,
+  source drift and reliable native download/ACK boundaries. Local DATA tests
+  do not grant SCP execution or stand in for real devices or power-loss tests.
+- Preconditions: separate precise maintenance authorization, independently
+  approved source host-key pin/original packages, backup and rollback owner;
+  the native request/dispatch/ACK bridge must first be implemented and reviewed.
+- Retain normal flow, commit boundaries, interruption/cold recovery, both CPLD
+  packages, source drift, fsync/critical-close failure and safe post-failure state.
+  No risk-based omission or new residual-risk acceptance is asserted here.
+- Evidence: exact HEAD/tree/dirty, source/test/manifest and runtime identities,
+  original requests/FD identities, complete logs/exit/END and sync/close/ACK order;
+  never store passwords, tokens or private keys. Only clean proven-owned objects;
+  retain UNKNOWN originals and do not retry numeric descriptors or reset state.
+- Status: NOT RUN. No real SSH/device/Cloud, full proof or publication authorized.

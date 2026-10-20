@@ -5017,3 +5017,24 @@ ACK are still OPEN. Unknown cleanup residues, asynchronous descriptor handoff,
 hard I/O supervision and simultaneous resource/cleanup-failure classification
 are not proved by these local cases. Existing REAL_ENV remains NOT RUN;
 no full/all/require-full or release proof was produced.
+
+
+### LOCAL original-package stage companion — 2026-10-20
+
+The reviewed driver extension holds one real package owner in the original
+parent scope and borrows that same object into real readiness children.
+An actual active namespace lease binds the five original request/script/runner
+objects to a file-fsynced, directory-fsynced, critically closed package-source
+companion. It remains LOCAL / NOT_EXECUTED / UNKNOWN DATA, never a dispatch,
+native observation, completion or ACK authority. File/directory sync, source
+acquisition, provider-source close and writer-finish failures revoke the group;
+later scopes, fresh baselines and repeated uncertain FD closes remain refused.
+Cached foreign/None providers cannot replace the held fixed sibling source.
+
+The seven new canonical modules cover 18 whole tests; uncertain FD cases run
+their unchanged assertions once in an owned child, not twice as unique coverage.
+Literal driver hunk inverses preserve the original frozen upstream source SHA,
+as do all existing access/layout/template source checks. This is not hard I/O
+supervision, a native SCP bridge, cold upgrade recovery or device acceptance.
+The CLI remains HTTP-only; SCP preflight/execution remains HOLD. Existing
+REAL_ENV cards stay NOT RUN and normal full/release gates are unchanged.

@@ -426,6 +426,19 @@
         "test_cases.test_ibsw225_initializer_help_guard",
         "test_cases.test_ibsw225_managed_outer_guard_workflow"
       ]
+    },
+    {
+      "id": "ibsw3-source-stage-related",
+      "description": "LOCAL package original/fork/source DATA lifecycle only; no SCP execution or ACK",
+      "tests": [
+        "test_cases.test_ibsw3_scp_stage_scope",
+        "test_cases.test_ibsw3_scp_stage_durability",
+        "test_cases.test_ibsw3_scp_stage_constructor",
+        "test_cases.test_ibsw3_scp_provider_source",
+        "test_cases.test_ibsw3_scp_provider_cache",
+        "test_cases.test_ibsw3_scp_provider_absent",
+        "test_cases.test_ibsw3_scp_provider_close"
+      ]
     }
   ],
   "tracked_support": [
@@ -563,7 +576,8 @@
     "test_cases/ibsw225_fixture_support/_fixture_test_os_download_telemetry.py",
     "test_cases/ibsw225_fixture_support/_fixture_test_standalone_links.py",
     "test_cases/ibsw225_fixture_support/fixed_fixture_registry.py",
-    "test_cases/ibsw225_fixture_support/legacy_shell_workflow.py"
+    "test_cases/ibsw225_fixture_support/legacy_shell_workflow.py",
+    "test_cases/ibsw3_scp_test_isolation.py"
   ],
   "scripts": {
     "DAY0-Prepare/01-a-setup.py": "DAY0-Prepare/01-a-setup.py",
@@ -2235,6 +2249,22 @@
       "tests": [
         "test_cases.test_ibsw225_ib_alias_derivation_workflow",
         "test_cases.test_ibsw225_os_alternatives"
+      ]
+    },
+    {
+      "id": "ibsw3_local_stage_source_scope_direct",
+      "paths": [
+        "tools/ibsw_upgrade_driver.py",
+        "tools/ibsw_upgrade_scp.py"
+      ],
+      "tests": [
+        "test_cases.test_ibsw3_scp_stage_scope",
+        "test_cases.test_ibsw3_scp_stage_durability",
+        "test_cases.test_ibsw3_scp_stage_constructor",
+        "test_cases.test_ibsw3_scp_provider_source",
+        "test_cases.test_ibsw3_scp_provider_cache",
+        "test_cases.test_ibsw3_scp_provider_absent",
+        "test_cases.test_ibsw3_scp_provider_close"
       ]
     }
   ],
@@ -4137,6 +4167,30 @@
         "test_cases.test_ibsw225_http_initializer_guard_protocol",
         "test_cases.test_ibsw225_managed_outer_guard_workflow"
       ]
+    },
+    {
+      "id": "ibsw3_local_scope_package_source_companion_workflow",
+      "members": [
+        "infiniband/bringup/xdr-upgrade/upgrade.py",
+        "infiniband/bringup/xdr-upgrade/upgrade-component.sh",
+        "infiniband/bringup/xdr-upgrade/upgrade-owned-runner.sh",
+        "tools/ibsw_upgrade_driver.py",
+        "tools/ibsw_upgrade_scp.py",
+        "tools/ibsw_upgrade_inputs.py",
+        "tools/ibsw_upgrade_contract.py",
+        "tools/ibsw_upgrade_component.py",
+        "tools/ibsw_upgrade_executor.py",
+        "tools/project_contract.py"
+      ],
+      "tests": [
+        "test_cases.test_ibsw3_scp_stage_scope",
+        "test_cases.test_ibsw3_scp_stage_durability",
+        "test_cases.test_ibsw3_scp_stage_constructor",
+        "test_cases.test_ibsw3_scp_provider_source",
+        "test_cases.test_ibsw3_scp_provider_cache",
+        "test_cases.test_ibsw3_scp_provider_absent",
+        "test_cases.test_ibsw3_scp_provider_close"
+      ]
     }
   ],
   "path_rules": [
@@ -4511,6 +4565,16 @@
         "test_cases.test_ibsw225_http_initializer_guard_protocol",
         "test_cases.test_ibsw225_runtime_guard_exception_priority",
         "test_cases.test_ibsw225_initializer_report_finally_direct"
+      ]
+    },
+    {
+      "paths": [
+        "test_cases/ibsw3_scp_test_isolation.py"
+      ],
+      "tests": [
+        "test_cases.test_ibsw3_scp_stage_scope",
+        "test_cases.test_ibsw3_scp_stage_durability",
+        "test_cases.test_ibsw3_scp_stage_constructor"
       ]
     }
   ]

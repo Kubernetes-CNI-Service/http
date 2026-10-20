@@ -129,6 +129,645 @@ class AccessExactSourceCompositionTests(unittest.TestCase):
                 self.assertNotEqual(hashlib.sha256(restored).hexdigest(), hashlib.sha256(expected).hexdigest())
 
 
+# Literal inverse of the twelve reviewed V7 LOCAL-source DATA hunks.
+# No new driver hash is accepted; the original 3c76 FROZEN entry remains.
+DRIVER_SOURCE_DATA_APPROVED_COMPOSITION = (
+    # package-source DATA graph validator
+    (
+        b'             else row["returncode"] == 0) for row in rows)\n'
+        b'\n'
+        b'\n'
+        b'def _validate_component_graph(files, binding, read, *, switch_dir):\n'
+        b'    """Separate schema2 byte graph. No file or JSON field grants dispatch."""\n'
+        b'    files = set(files)\n',
+        b'             else row["returncode"] == 0) for row in rows)\n'
+        b'\n'
+        b'\n'
+        b'def _validate_package_source_data_graph(files, binding, read):\n'
+        b'    """Strict persisted DATA only; never reconstruct a live package owner."""\n'
+        b"    if 'package-source.json' not in files:\n"
+        b'        return\n'
+        b"    names = ('request.json', 'step.sh', 'step-binding.json', 'runner.sh', 'runner-binding.json')\n"
+        b'    if not set(names).issubset(files):\n'
+        b"        raise ValueError('source DATA requires complete original request/runner')\n"
+        b"    raw = read('package-source.json')\n"
+        b'    document = json.loads(raw)\n'
+        b'    if (type(document) is not dict or set(document) != {\n'
+        b"            'schema_version', 'state', 'execution_state', 'activation_state',\n"
+        b"            'binding', 'declared_method', 'originals_sha256', 'packages'}\n"
+        b"            or type(document['schema_version']) is not int or document['schema_version'] != 1\n"
+        b"            or document['state'] != 'PACKAGE_SOURCE_PRELAUNCH_DATA_ONLY'\n"
+        b"            or document['execution_state'] != 'NOT_EXECUTED'\n"
+        b"            or document['activation_state'] != 'UNKNOWN'\n"
+        b"            or document['binding'] != binding or document['declared_method'] != 'local'\n"
+        b"            or re.findall(rb'(?m)^IBSW_METHOD=([a-z]+)$', read('step.sh')) != [b'local']\n"
+        b'            or raw != _json_bytes(document)\n'
+        b"            or document['originals_sha256'] != {name: hashlib.sha256(read(name)).hexdigest() for name in names}):\n"
+        b"        raise ValueError('original source DATA/hash graph changed')\n"
+        b"    request = json.loads(read('request.json'))\n"
+        b"    token = request.get('request_id') if type(request) is dict else None\n"
+        b"    if (type(token) is not str or not re.fullmatch(r'[0-9a-f]{32}', token)\n"
+        b"            or read('request.json') != _json_bytes(dict(schema_version=1, state='REQUESTED',\n"
+        b"                activation_state='UNKNOWN', execution_state='NOT_EXECUTED', binding=binding, request_id=token))):\n"
+        b"        raise ValueError('source DATA requires actual original request bytes')\n"
+        b"    packages = document['packages']\n"
+        b"    if type(packages) is not dict or len(packages) != (2 if binding['component'] == 'cpld' else 1):\n"
+        b"        raise ValueError('exact component package DATA set required')\n"
+        b'    for path, row in packages.items():\n'
+        b'        if (type(path) is not str or not posixpath.isabs(path) or posixpath.normpath(path) != path\n'
+        b'                or any(ord(c) < 32 or ord(c) == 127 for c in path)\n'
+        b"                or type(row) is not dict or set(row) != {'size', 'sha256'}\n"
+        b"                or type(row['size']) is not int or row['size'] <= 0\n"
+        b"                or type(row['sha256']) is not str or not re.fullmatch(r'[0-9a-f]{64}', row['sha256'])):\n"
+        b"            raise ValueError('strict package source DATA fields required')\n"
+        b'\n'
+        b'\n'
+        b'\n'
+        b'\n'
+        b'def _validate_component_graph(files, binding, read, *, switch_dir):\n'
+        b'    """Separate schema2 byte graph. No file or JSON field grants dispatch."""\n'
+        b'    files = set(files)\n',
+    ),
+    # component graph member plus validation
+    (
+        b'               "component-preflight.json", "request.json", "runner.sh", "runner-binding.json",\n'
+        b'               "component-dispatch.json", "component-completion.json", "after.commands", "missing.commands",\n'
+        b'               "component-repair.json", "component-repair-result.json", "observed-after.commands",\n'
+        b'               "repaired.commands", "configuration-diff.json", "versions.json", "execution.stdout", "execution.stderr"} | _NVUED_CHECK_FILES | _DOWNLOAD_FILES\n'
+        b'    if not files <= allowed or not {"step.sh", "step-binding.json", "before.commands", "before-binding.json",\n'
+        b'                                     "component-preflight.json"} <= files:\n'
+        b'        raise ValueError("partial/unknown component stage graph")\n'
+        b'    before, before_binding = read("before.commands"), read("before-binding.json")\n'
+        b'    if not before or before_binding != _json_bytes(_before_commands_binding(binding, before)):\n'
+        b'        raise ValueError("original component before hash graph changed")\n',
+        b'               "component-preflight.json", "request.json", "runner.sh", "runner-binding.json",\n'
+        b'               "component-dispatch.json", "component-completion.json", "after.commands", "missing.commands",\n'
+        b'               "component-repair.json", "component-repair-result.json", "observed-after.commands",\n'
+        b'               "repaired.commands", "configuration-diff.json", "versions.json", "execution.stdout", "execution.stderr"} | _NVUED_CHECK_FILES | _DOWNLOAD_FILES | {"package-source.json"}\n'
+        b'    if not files <= allowed or not {"step.sh", "step-binding.json", "before.commands", "before-binding.json",\n'
+        b'                                     "component-preflight.json"} <= files:\n'
+        b'        raise ValueError("partial/unknown component stage graph")\n'
+        b'    _validate_package_source_data_graph(files, binding, read)\n'
+        b'    before, before_binding = read("before.commands"), read("before-binding.json")\n'
+        b'    if not before or before_binding != _json_bytes(_before_commands_binding(binding, before)):\n'
+        b'        raise ValueError("original component before hash graph changed")\n',
+    ),
+    # historical stage member
+    (
+        b'\n'
+        b'def _stage_data_members(files):\n'
+        b'    remainder, phases = set(files), []\n'
+        b'    health = []\n'
+        b'    for phase in _STAGE_HEALTH_PHASES:\n'
+        b'        group = _stage_health_files(phase)\n',
+        b'\n'
+        b'def _stage_data_members(files):\n'
+        b'    remainder, phases = set(files), []\n'
+        b'    remainder.discard("package-source.json")\n'
+        b'    health = []\n'
+        b'    for phase in _STAGE_HEALTH_PHASES:\n'
+        b'        group = _stage_health_files(phase)\n',
+    ),
+    # historical graph validation
+    (
+        b'    if "component-preflight.json" in files:\n'
+        b'        return _validate_component_graph(files, step_binding, read, switch_dir=switch_dir)\n'
+        b'    remainder, phases, has_restore, has_patch = _stage_data_members(files)\n'
+        b'    originals = {}\n'
+        b'    for phase in phases:\n'
+        b'        raw_name, meta_name = phase + ".commands", phase + "-binding.json"\n',
+        b'    if "component-preflight.json" in files:\n'
+        b'        return _validate_component_graph(files, step_binding, read, switch_dir=switch_dir)\n'
+        b'    remainder, phases, has_restore, has_patch = _stage_data_members(files)\n'
+        b'    _validate_package_source_data_graph(files, step_binding, read)\n'
+        b'    originals = {}\n'
+        b'    for phase in phases:\n'
+        b'        raw_name, meta_name = phase + ".commands", phase + "-binding.json"\n',
+    ),
+    # fixed provider source/object audit
+    (
+        b'        self.closed = True\n'
+        b'\n'
+        b'\n'
+        b'class _PreparedRunScope:\n'
+        b'    """Live local DATA transaction only. No dispatcher or device-result writer."""\n'
+        b'    def __init__(self, entry, cwd, args, run_directory, *, manual_execution=False):\n',
+        b'        self.closed = True\n'
+        b'\n'
+        b'\n'
+        b'\n'
+        b'def _fixed_package_source_api(scope):\n'
+        b'    """Fresh fixed sibling source/object proof; never import by search path.\n'
+        b'\n'
+        b'    Existing no-follow input owners close before a package factory may run.\n'
+        b'    Compiled source is compared, not executed for an already loaded provider.\n'
+        b'    Missing providers execute only the held fixed bytes, never a foreign loader.\n'
+        b'    This is a fixed local source contract, not a hostile-interpreter sandbox.\n'
+        b'    """\n'
+        b'    import builtins\n'
+        b'    import errno as stdlib_errno\n'
+        b'    import importlib.machinery\n'
+        b'    import importlib.util\n'
+        b'    import math as stdlib_math\n'
+        b'    import time as stdlib_time\n'
+        b'    from types import CodeType, FunctionType, ModuleType\n'
+        b'    from ibsw_upgrade_inputs import _HeldDirectory\n'
+        b'\n'
+        b"    name = 'ibsw_upgrade_scp'\n"
+        b"    path = Path(__file__).absolute().parent / (name + '.py')\n"
+        b'    directory = source = None\n'
+        b'    module = created = result = None\n'
+        b'    primary = None\n'
+        b'    cleanup = []\n'
+        b'    try:\n'
+        b'        directory = _HeldDirectory(path.parent)\n'
+        b'        source = _HeldFile(path, directory)\n'
+        b'        info = os.fstat(source.fd)\n'
+        b'        if info.st_nlink != 1 or info.st_mode & 0o022:\n'
+        b"            raise SharedUpgradeHold('fixed package provider source is unsafe')\n"
+        b"        code = compile(source.payload, str(path), 'exec',\n"
+        b'                       dont_inherit=True, optimize=sys.flags.optimize)\n'
+        b'\n'
+        b'        def original_code(parent, selected):\n'
+        b'            matches = [item for item in parent.co_consts\n'
+        b'                       if type(item) is CodeType and item.co_name == selected]\n'
+        b'            if len(matches) != 1:\n'
+        b"                raise SharedUpgradeHold('fixed provider definition is not unique')\n"
+        b'            return matches[0]\n'
+        b'\n'
+        b'        module = sys.modules.get(name)\n'
+        b'        if name in sys.modules and module is None:\n'
+        b"            raise SharedUpgradeHold('cached absent provider marker is not import permission')\n"
+        b'        if module is None:\n'
+        b'            spec = importlib.util.spec_from_file_location(name, str(path))\n'
+        b'            module = importlib.util.module_from_spec(spec)\n'
+        b'            created = module\n'
+        b'            sys.modules[name] = module  # Dataclass declaration needs its own slot.\n'
+        b'            exec(code, module.__dict__)\n'
+        b'        if type(module) is not ModuleType or sys.modules.get(name) is not module:\n'
+        b"            raise SharedUpgradeHold('foreign package provider module')\n"
+        b'        namespace = vars(module)\n'
+        b"        spec, loader = namespace.get('__spec__'), namespace.get('__loader__')\n"
+        b"        if (namespace.get('__name__') != name or namespace.get('__file__') != str(path)\n"
+        b'                or type(spec) is not importlib.machinery.ModuleSpec\n'
+        b'                or type(loader) is not importlib.machinery.SourceFileLoader\n'
+        b'                or spec.name != name or spec.origin != str(path) or spec.loader is not loader\n'
+        b'                or loader.name != name or loader.path != str(path)\n'
+        b"                or namespace.get('__builtins__') is not builtins.__dict__):\n"
+        b"            raise SharedUpgradeHold('fixed package provider origin changed')\n"
+        b'\n'
+        b'        def function(value, expected):\n'
+        b'            if (type(value) is not FunctionType or value.__globals__ is not namespace\n'
+        b'                    or value.__module__ != name or value.__code__ != expected\n'
+        b'                    or value.__closure__ is not None or value.__defaults__ is not None\n'
+        b'                    or value.__kwdefaults__ is not None):\n'
+        b"                raise SharedUpgradeHold('foreign package provider function')\n"
+        b'            return value\n'
+        b'\n'
+        b"        factory = function(namespace.get('package_content_owner'),\n"
+        b"                           original_code(code, 'package_content_owner'))\n"
+        b"        for selected in ('_identity', '_directory_identity', '_object_key'):\n"
+        b'            function(namespace.get(selected), original_code(code, selected))\n'
+        b"        owner_class = namespace.get('_PackageContentOwner')\n"
+        b'        if (type(owner_class) is not type or owner_class.__bases__ != (object,)\n'
+        b'                or owner_class.__module__ != name):\n'
+        b"            raise SharedUpgradeHold('foreign package provider class')\n"
+        b"        class_code = original_code(code, '_PackageContentOwner')\n"
+        b'        methods = {item.co_name: item for item in class_code.co_consts if type(item) is CodeType}\n'
+        b'        members = vars(owner_class)\n'
+        b"        if (set(members) != set(methods) | {'__module__', '__doc__', '__dict__', '__weakref__'}\n"
+        b"                or members['__doc__'] is not None):\n"
+        b"            raise SharedUpgradeHold('package provider class namespace changed')\n"
+        b'        for selected, expected in methods.items():\n'
+        b'            function(members.get(selected), expected)\n'
+        b"        error_class = namespace.get('ContentHold')\n"
+        b'        if (type(error_class) is not type or error_class.__bases__ != (ValueError,)\n'
+        b'                or error_class.__module__ != name\n'
+        b"                or not set(vars(error_class)) <= {'__module__', '__doc__', '__weakref__'}):\n"
+        b"            raise SharedUpgradeHold('package provider error class changed')\n"
+        b'        for selected, expected in (\n'
+        b"                ('os', os), ('Path', Path), ('stat', stat), ('hashlib', hashlib),\n"
+        b"                ('threading', threading), ('time', stdlib_time),\n"
+        b"                ('math', stdlib_math), ('errno', stdlib_errno)):\n"
+        b'            if namespace.get(selected) is not expected:\n'
+        b"                raise SharedUpgradeHold('package provider original dependency changed')\n"
+        b'        source.verify()\n'
+        b'        if (sys.modules.get(name) is not module\n'
+        b"                or namespace.get('package_content_owner') is not factory\n"
+        b"                or namespace.get('_PackageContentOwner') is not owner_class):\n"
+        b"            raise SharedUpgradeHold('package provider original object joint changed')\n"
+        b'        result = module, factory, owner_class\n'
+        b'    except BaseException as error:\n'
+        b'        primary = error\n'
+        b'    finally:\n'
+        b'        for held in (source, directory):\n'
+        b'            if held is not None:\n'
+        b'                try:\n'
+        b'                    held.close()\n'
+        b'                except BaseException as error:\n'
+        b'                    cleanup.append(error)\n'
+        b'                    if primary is None or (isinstance(primary, Exception) and not isinstance(error, Exception)):\n'
+        b'                        primary = error\n'
+        b'        if cleanup:\n'
+        b'            # Unknown source cleanup poisons this actual scope; never retry FDs.\n'
+        b'            scope.cleanup_issues.extend(cleanup)\n'
+        b'            if scope._package_source_lifecycle_failure is None:\n'
+        b'                scope._package_source_lifecycle_failure = SharedUpgradeHold(\n'
+        b"                    'fixed package provider source cleanup uncertain; parent retained')\n"
+        b'        if primary is not None and created is not None and sys.modules.get(name) is created:\n'
+        b'            del sys.modules[name]\n'
+        b'    if primary is not None:\n'
+        b'        if not isinstance(primary, Exception):\n'
+        b'            raise primary\n'
+        b"        raise SharedUpgradeHold('fixed package source provider audit failed') from None\n"
+        b'    return result\n'
+        b'\n'
+        b'\n'
+        b'class _PreparedRunScope:\n'
+        b'    """Live local DATA transaction only. No dispatcher or device-result writer."""\n'
+        b'    def __init__(self, entry, cwd, args, run_directory, *, manual_execution=False):\n',
+    ),
+    # scope source ownership state
+    (
+        b'        self._native_schedule_started = False\n'
+        b'        self._cooperative_status_snapshots = False\n'
+        b'        self._native_completions = {}\n'
+        b'        self._native_component_canaries = {}\n'
+        b'        self.run_directory = Path(run_directory)\n'
+        b'        try:\n',
+        b'        self._native_schedule_started = False\n'
+        b'        self._cooperative_status_snapshots = False\n'
+        b'        self._native_completions = {}\n'
+        b'        self._package_source_owner = None\n'
+        b'        self._package_source_owner_class = None\n'
+        b'        self._package_source_parent = None\n'
+        b'        self._package_source_selection = None\n'
+        b'        self._package_source_owns = False\n'
+        b'        self._package_source_borrowers = set()\n'
+        b'        self._package_source_lifecycle_failure = None\n'
+        b'        self._native_component_canaries = {}\n'
+        b'        self.run_directory = Path(run_directory)\n'
+        b'        try:\n',
+    ),
+    # freeze/capture/borrow lifecycle
+    (
+        b'        if stat.S_IMODE(os.fstat(directory.fd).st_mode) != 0o700:\n'
+        b'            raise ValueError("private node/stage/run directory must be 0700")\n'
+        b'\n'
+        b'    def fork_readiness_scope(self, node, source_baselines=()):\n'
+        b'        """Independent startup owner; never concurrently mutate parent maps."""\n'
+        b'        if self.closed or self._native_schedule_started or node not in self.devices:\n'
+        b"            raise SharedUpgradeHold('startup scope is outside the original pre-upgrade selection')\n"
+        b'        child = _PreparedRunScope(*self._open_context, self.run_directory,\n'
+        b'                                  manual_execution=self.manual_execution)\n'
+        b'        try:\n',
+        b'        if stat.S_IMODE(os.fstat(directory.fd).st_mode) != 0o700:\n'
+        b'            raise ValueError("private node/stage/run directory must be 0700")\n'
+        b'\n'
+        b'    def freeze_package_sources(self, selections, *, deadline, max_fds):\n'
+        b'        """Freeze explicit LOCAL declaration sources, not device-current authority."""\n'
+        b'        self.verify()\n'
+        b'        provider, package_content_owner, owner_class = _fixed_package_source_api(self)\n'
+        b"        if (not self.manual_execution or self.parsed.method != 'local'\n"
+        b'                or self._native_schedule_started or self._package_source_owner is not None\n'
+        b'                or self._package_source_parent is not None\n'
+        b'                or type(selections) is not tuple or not selections):\n'
+        b"            raise SharedUpgradeHold('original parent LOCAL source DATA selection required')\n"
+        b'        selected, paths = [], set()\n'
+        b'        for row in selections:\n'
+        b'            if (type(row) is not tuple or len(row) != 2 or type(row[0]) is not str\n'
+        b'                    or type(row[1]) is not int or row[0] not in self.parsed.selected):\n'
+        b"                raise SharedUpgradeHold('original selected component/index required')\n"
+        b'            selected.append(row)\n'
+        b'            paths.update(Path(p.path) for p in self._package_source_packages(*row))\n'
+        b'        if len(set(selected)) != len(selected):\n'
+        b"            raise SharedUpgradeHold('duplicate source stage selection')\n"
+        b"        if (sys.modules.get('ibsw_upgrade_scp') is not provider\n"
+        b"                or vars(provider).get('package_content_owner') is not package_content_owner\n"
+        b"                or vars(provider).get('_PackageContentOwner') is not owner_class):\n"
+        b"            raise SharedUpgradeHold('original package provider changed before factory')\n"
+        b'        try:\n'
+        b'            owner = package_content_owner(self.policy.package_dir, tuple(sorted(paths)),\n'
+        b'                                          deadline=deadline, max_fds=max_fds)\n'
+        b'        except BaseException:\n'
+        b'            # The real constructor owns any partial originals/cleanup. No owner\n'
+        b'            # returned to adopt; revoke this parent group before another freeze.\n'
+        b'            if self._package_source_lifecycle_failure is None:\n'
+        b'                self._package_source_lifecycle_failure = SharedUpgradeHold(\n'
+        b"                    'original package source acquisition failed; parent group retained')\n"
+        b'            raise  # Preserve the original error/NI object and its existing cause.\n'
+        b'        # Register the actual owner before any later verification can fail.\n'
+        b'        self._package_source_owner = owner\n'
+        b'        self._package_source_owner_class = owner_class\n'
+        b'        self._package_source_owns = True\n'
+        b'        self._package_source_selection = (tuple(sorted(selected)), self.policy,\n'
+        b'                                         self.run_directory, self.plan_sha256)\n'
+        b'        try:\n'
+        b'            self.verify()\n'
+        b'        except BaseException as original:\n'
+        b'            try:\n'
+        b'                owner.close()\n'
+        b'            except BaseException as cleanup:\n'
+        b'                self.cleanup_issues.append(cleanup)\n'
+        b'                if isinstance(original, Exception) and not isinstance(cleanup, Exception):\n'
+        b'                    raise\n'
+        b'            raise\n'
+        b'        return owner\n'
+        b'\n'
+        b'    def _package_source_packages(self, component, index):\n'
+        b'        if component not in self.parsed.selected or type(index) is not int:\n'
+        b"            raise SharedUpgradeHold('foreign declared package source stage')\n"
+        b"        if component == 'os' and 0 <= index < len(self.policy.os):\n"
+        b'            return (self.policy.os[index],)\n'
+        b"        if index == 0 and component == 'bios' and self.policy.bios is not None:\n"
+        b'            return (self.policy.bios,)\n'
+        b"        if index == 0 and component == 'cpld' and self.policy.cpld_burn is not None and self.policy.cpld_refresh is not None:\n"
+        b'            return (self.policy.cpld_burn, self.policy.cpld_refresh)\n'
+        b"        raise SharedUpgradeHold('foreign declared source index')\n"
+        b'\n'
+        b'    def _verify_package_source_owner(self):\n'
+        b'        if self._package_source_lifecycle_failure is not None:\n'
+        b'            raise self._package_source_lifecycle_failure\n'
+        b'        owner = self._package_source_owner\n'
+        b'        if owner is None:\n'
+        b'            return\n'
+        b'        parent = self if self._package_source_owns else self._package_source_parent\n'
+        b'        if type(parent) is _PreparedRunScope and parent._package_source_lifecycle_failure is not None:\n'
+        b'            raise parent._package_source_lifecycle_failure\n'
+        b'        if (type(parent) is not _PreparedRunScope\n'
+        b'                or self._package_source_owner_class is not parent._package_source_owner_class\n'
+        b'                or type(owner) is not parent._package_source_owner_class\n'
+        b'                or parent.closed or parent.cleanup_issues or not parent._package_source_owns\n'
+        b'                or parent._package_source_owner is not owner\n'
+        b'                or self._package_source_selection is not parent._package_source_selection\n'
+        b'                or self._package_source_selection[1:] != (self.policy, self.run_directory, self.plan_sha256)\n'
+        b"                or (parent is not self and (getattr(self, '_readiness_parent', None) is not parent\n"
+        b"                    or getattr(self, '_readiness_node', None) not in self.devices))):\n"
+        b"            raise SharedUpgradeHold('original parent source owner/borrow changed')\n"
+        b'        # No parent.verify recursion and no source descriptor reopening.\n'
+        b'        owner.verify()\n'
+        b'\n'
+        b'    def _capture_package_source_data_locked(self, leaf, component, package_index):\n'
+        b'        """Persist original LOCAL prelaunch DATA. No SCP wire/launch/ACK."""\n'
+        b'        if (self._active_request_lease is None or self.closed or not self.manual_execution\n'
+        b"                or self.parsed.method != 'local' or type(leaf) is not _ReadonlyQueryInputs\n"
+        b'                or leaf.scope is not self or leaf._original_selection[0] is not self\n'
+        b'                or self._package_source_parent is None\n'
+        b"                or getattr(self, '_readiness_node', None) != leaf.node.hostname):\n"
+        b"            raise SharedUpgradeHold('original leased child DATA scope required')\n"
+        b'        try:\n'
+        b'            self._verify_package_source_owner()\n'
+        b'            if (component, package_index) not in self._package_source_selection[0]:\n'
+        b"                raise SharedUpgradeHold('unfrozen source stage')\n"
+        b'            stage, binding, args = self._owned_runner_stage(leaf, component, package_index)\n'
+        b"            names = ('request.json', 'step.sh', 'step-binding.json', 'runner.sh', 'runner-binding.json')\n"
+        b'            held = {name: self._hold(stage, name) for name in names}\n'
+        b'            packages = {}\n'
+        b'            for package in self._package_source_packages(component, package_index):\n'
+        b'                row = self._package_source_owner._files.get(Path(package.path))\n'
+        b'                if row is None or type(row[4]) is not str:\n'
+        b"                    raise SharedUpgradeHold('original package not retained by parent')\n"
+        b'                packages[package.path] = dict(size=row[3][6], sha256=row[4])\n'
+        b"            document = dict(schema_version=1, state='PACKAGE_SOURCE_PRELAUNCH_DATA_ONLY',\n"
+        b"                execution_state='NOT_EXECUTED', activation_state='UNKNOWN', binding=binding,\n"
+        b"                declared_method='local', originals_sha256={name: hashlib.sha256(obj.payload).hexdigest()\n"
+        b'                    for name, obj in held.items()}, packages=packages)\n'
+        b'            payload = _json_bytes(document)\n'
+        b'            originals = {name: obj.payload for name, obj in held.items()}\n'
+        b"            originals['package-source.json'] = payload\n"
+        b'            _validate_package_source_data_graph(set(originals), binding, originals.__getitem__)\n'
+        b'            self.verify(); leaf.verify()\n'
+        b"            if 'package-source.json' in os.listdir(stage.fd):\n"
+        b"                self._hold(stage, 'package-source.json', payload)\n"
+        b'            else:\n'
+        b"                self._commit_exclusive_binding(stage, payload, 'package-source.json')\n"
+        b'            self.verify(); leaf.verify()\n'
+        b'            return None\n'
+        b'\n'
+        b'        except BaseException:\n'
+        b'            # Revoke this entire original source group, without altering the\n'
+        b'            # primary exception object/cause or adopting any persisted DATA.\n'
+        b'            parent = self._package_source_parent\n'
+        b'            if (type(parent) is _PreparedRunScope\n'
+        b"                    and getattr(self, '_readiness_parent', None) is parent\n"
+        b'                    and self._package_source_owner is not None\n'
+        b'                    and self._package_source_owner is parent._package_source_owner):\n'
+        b'                if parent._package_source_lifecycle_failure is None:\n'
+        b'                    parent._package_source_lifecycle_failure = SharedUpgradeHold(\n'
+        b"                        'original source companion capture uncertain; shared group retained')\n"
+        b'                if self._package_source_lifecycle_failure is None:\n'
+        b'                    self._package_source_lifecycle_failure = parent._package_source_lifecycle_failure\n'
+        b'            raise\n'
+        b'\n'
+        b'    def fork_readiness_scope(self, node, source_baselines=()):\n'
+        b'        """Independent startup owner; never concurrently mutate parent maps."""\n'
+        b'        if self.closed or self._native_schedule_started or node not in self.devices:\n'
+        b"            raise SharedUpgradeHold('startup scope is outside the original pre-upgrade selection')\n"
+        b'        # A source-group failure rejects another borrower before any child FD opens.\n'
+        b'        self._verify_package_source_owner()\n'
+        b'        child = _PreparedRunScope(*self._open_context, self.run_directory,\n'
+        b'                                  manual_execution=self.manual_execution)\n'
+        b'        try:\n',
+    ),
+    # readiness child exact borrow
+    (
+        b"                raise SharedUpgradeHold('startup worker original inputs differ from parent')\n"
+        b'            child._readiness_parent, child._readiness_node = self, node\n'
+        b'            child._os_source_baselines = dict(source_baselines)\n'
+        b'            return child\n'
+        b'        except BaseException as original:\n'
+        b'            try:\n',
+        b"                raise SharedUpgradeHold('startup worker original inputs differ from parent')\n"
+        b'            child._readiness_parent, child._readiness_node = self, node\n'
+        b'            child._os_source_baselines = dict(source_baselines)\n'
+        b'            if self._package_source_owner is not None:\n'
+        b'                child._package_source_owner = self._package_source_owner\n'
+        b'                child._package_source_owner_class = self._package_source_owner_class\n'
+        b'                child._package_source_parent = self\n'
+        b'                child._package_source_selection = self._package_source_selection\n'
+        b'                self._package_source_borrowers.add(child)\n'
+        b'                child._verify_package_source_owner()\n'
+        b'            return child\n'
+        b'        except BaseException as original:\n'
+        b'            try:\n',
+    ),
+    # scope verification
+    (
+        b'            raise ValueError("prepared run scope is closed")\n'
+        b'        if self.cleanup_issues:\n'
+        b'            raise ValueError("HOLD: unknown journal cleanup residue; scope cannot be reused")\n'
+        b'        self.session.verify()\n'
+        b'        for held in self.files.values():\n'
+        b'            held.verify()\n',
+        b'            raise ValueError("prepared run scope is closed")\n'
+        b'        if self.cleanup_issues:\n'
+        b'            raise ValueError("HOLD: unknown journal cleanup residue; scope cannot be reused")\n'
+        b'        self._verify_package_source_owner()\n'
+        b'        self.session.verify()\n'
+        b'        for held in self.files.values():\n'
+        b'            held.verify()\n',
+    ),
+    # exclusive source companion member
+    (
+        b'        return self._commit_exclusive_binding(directory, payload, "query-binding.json")\n'
+        b'\n'
+        b'    def _commit_exclusive_binding(self, directory, payload, final_name):\n'
+        b'        if final_name not in _NVUED_CHECK_FILES | _DOWNLOAD_FILES | {"query-binding.json", "before-binding.json", "after-binding.json",\n'
+        b'                              "repaired-binding.json", "restore-binding.json", "pending-diff-binding.json", "os-dispatch.json", "post-binding.json",\n'
+        b'                              "runner-binding.json", "owned-exit-binding.json", "before-health-binding.json", "after-health-binding.json",\n'
+        b'                              "component-preflight.json", "component-dispatch.json", "component-completion.json",\n',
+        b'        return self._commit_exclusive_binding(directory, payload, "query-binding.json")\n'
+        b'\n'
+        b'    def _commit_exclusive_binding(self, directory, payload, final_name):\n'
+        b'        if final_name not in _NVUED_CHECK_FILES | _DOWNLOAD_FILES | {"package-source.json", "query-binding.json", "before-binding.json", "after-binding.json",\n'
+        b'                              "repaired-binding.json", "restore-binding.json", "pending-diff-binding.json", "os-dispatch.json", "post-binding.json",\n'
+        b'                              "runner-binding.json", "owned-exit-binding.json", "before-health-binding.json", "after-health-binding.json",\n'
+        b'                              "component-preflight.json", "component-dispatch.json", "component-completion.json",\n',
+    ),
+    # early/repeated close HOLD
+    (
+        b'\n'
+        b'    def close(self):\n'
+        b'        if self.closed:\n'
+        b'            return\n'
+        b'        self.closed = True\n'
+        b'        issues = list(self.cleanup_issues)\n'
+        b'        for held in reversed(tuple(self.files.values())):\n',
+        b'\n'
+        b'    def close(self):\n'
+        b'        if self.closed:\n'
+        b'            if self._package_source_owner is not None or self._package_source_lifecycle_failure is not None:\n'
+        b'                # Repeat calls report original source cleanup uncertainty but\n'
+        b'                # never touch or retry potentially reused numeric FD slots.\n'
+        b'                _raise_cleanup_issues(self.cleanup_issues)\n'
+        b'            if self._package_source_lifecycle_failure is not None:\n'
+        b'                raise self._package_source_lifecycle_failure\n'
+        b'            return\n'
+        b'        if self._package_source_owns and self._package_source_borrowers:\n'
+        b'            # Revocation only. Keep original FDs while children still own borrows.\n'
+        b'            # This marker is never cleared when the last borrower is released.\n'
+        b'            if self._package_source_lifecycle_failure is None:\n'
+        b'                self._package_source_lifecycle_failure = SharedUpgradeHold(\n'
+        b"                    'original package owner still has live or unknown child borrows')\n"
+        b'            raise self._package_source_lifecycle_failure\n'
+        b'        self.closed = True\n'
+        b'        issues = list(self.cleanup_issues)\n'
+        b'        for held in reversed(tuple(self.files.values())):\n',
+    ),
+    # actual holder cleanup and sticky issues
+    (
+        b'                held.close()\n'
+        b'            except BaseException as error:\n'
+        b'                issues.append(error)\n'
+        b'        if self.session is not None:\n'
+        b'            try:\n'
+        b'                self.session.close()\n'
+        b'            except BaseException as error:\n'
+        b'                issues.append(error)\n'
+        b'        for error in issues:\n'
+        b'            if not isinstance(error, Exception):\n'
+        b'                raise error  # After every owned cleanup attempt, retain NI exact.\n',
+        b'                held.close()\n'
+        b'            except BaseException as error:\n'
+        b'                issues.append(error)\n'
+        b'        if self._package_source_owns and self._package_source_owner is not None:\n'
+        b'            try:\n'
+        b'                self._package_source_owner.close()\n'
+        b'            except BaseException as error:\n'
+        b'                issues.append(error)\n'
+        b'        if self.session is not None:\n'
+        b'            try:\n'
+        b'                self.session.close()\n'
+        b'            except BaseException as error:\n'
+        b'                issues.append(error)\n'
+        b'        if self._package_source_parent is not None and not issues:\n'
+        b'            self._package_source_parent._package_source_borrowers.discard(self)\n'
+        b'        # A lifecycle failure does not skip actual owned cleanup after borrows\n'
+        b'        # release. Surface HOLD only after all files/holder/session were attempted.\n'
+        b'        if (self._package_source_lifecycle_failure is not None\n'
+        b'                and not any(issue is self._package_source_lifecycle_failure for issue in issues)):\n'
+        b'            issues.append(self._package_source_lifecycle_failure)\n'
+        b'        self.cleanup_issues = issues\n'
+        b'        for error in issues:\n'
+        b'            if not isinstance(error, Exception):\n'
+        b'                raise error  # After every owned cleanup attempt, retain NI exact.\n',
+    ),
+)
+
+
+def _driver_upstream_bytes_from_exact_composition(payload):
+    if type(payload) is not bytes:
+        raise TypeError('exact driver source bytes required')
+    spans = []
+    for original, integrated in DRIVER_SOURCE_DATA_APPROVED_COMPOSITION:
+        if payload.count(integrated) != 1 or payload.count(original) != 0:
+            raise ValueError('missing/duplicate/new-plus-old driver source hunk')
+        start = payload.index(integrated)
+        spans.append((start, start + len(integrated), original))
+    # The literal order is source order; do not sort malformed input into validity.
+    if any(left[1] > right[0] for left, right in zip(spans, spans[1:])):
+        raise ValueError('overlapping or reordered driver source hunks')
+    pieces, end = [], 0
+    for start, stop, original in spans:
+        pieces.extend((payload[end:start], original))
+        end = stop
+    pieces.append(payload[end:])
+    restored = b''.join(pieces)  # One reverse pass; no cascading replacement.
+    if any(restored.count(old) != 1 or restored.count(new) != 0
+           for old, new in DRIVER_SOURCE_DATA_APPROVED_COMPOSITION):
+        raise ValueError('restored driver source hunks are not unique')
+    return restored
+
+
+class DriverSourceDataExactCompositionTests(unittest.TestCase):
+    def test_twelve_literal_hunks_restore_original_regions_in_one_pass(self):
+        hunks = DRIVER_SOURCE_DATA_APPROVED_COMPOSITION
+        self.assertEqual(12, len(hunks))
+        source = b'prefix\n' + b'middle\n'.join(new for old, new in hunks) + b'suffix\n'
+        expected = b'prefix\n' + b'middle\n'.join(old for old, new in hunks) + b'suffix\n'
+        self.assertEqual(expected, _driver_upstream_bytes_from_exact_composition(source))
+        self.assertEqual('3c76f3bf02f2a41e2338bf78b38681dc5defb63a957d31155709de85f0eaffe2',
+                         FROZEN_SHA256['tools/ibsw_upgrade_driver.py'])
+
+    def test_missing_old_truncated_deleted_duplicate_and_extra_old_are_refused(self):
+        hunks = DRIVER_SOURCE_DATA_APPROVED_COMPOSITION
+        source = b'middle\n'.join(new for old, new in hunks)
+        for index, (old, new) in enumerate(hunks):
+            for label, replacement in (
+                ('missing', b''), ('old', old), ('truncated', new[:len(new)//2]),
+                ('deleted', new[:-1]), ('duplicate', new + new), ('extra-old', old + new),
+            ):
+                with self.subTest(hunk=index, fault=label):
+                    with self.assertRaises(ValueError):
+                        _driver_upstream_bytes_from_exact_composition(source.replace(new, replacement, 1))
+
+    def test_order_must_remain_literal_and_input_must_be_bytes(self):
+        hunks = DRIVER_SOURCE_DATA_APPROVED_COMPOSITION
+        with self.assertRaises(ValueError):
+            _driver_upstream_bytes_from_exact_composition(b'middle\n'.join(new for old, new in reversed(hunks)))
+        # Adjacent transposition also must not be normalized by sorting positions.
+        swapped = list(hunks)
+        swapped[5], swapped[6] = swapped[6], swapped[5]
+        with self.assertRaises(ValueError):
+            _driver_upstream_bytes_from_exact_composition(b'middle\n'.join(new for old, new in swapped))
+        with self.assertRaises(TypeError):
+            _driver_upstream_bytes_from_exact_composition('not bytes')
+
+    def test_prefix_middle_and_suffix_drift_remain_visible_to_frozen_hash(self):
+        hunks = DRIVER_SOURCE_DATA_APPROVED_COMPOSITION
+        source = b'prefix\n' + b'middle\n'.join(new for old, new in hunks) + b'suffix\n'
+        expected = b'prefix\n' + b'middle\n'.join(old for old, new in hunks) + b'suffix\n'
+        for label, drift in (
+            ('prefix', b'outside-prefix\n' + source),
+            ('middle', source.replace(b'middle\n', b'outside-middle\n', 1)),
+            ('suffix', source + b'outside-suffix\n'),
+        ):
+            with self.subTest(fault=label):
+                restored = _driver_upstream_bytes_from_exact_composition(drift)
+                self.assertNotEqual(expected, restored)
+                self.assertNotEqual(hashlib.sha256(expected).digest(), hashlib.sha256(restored).digest())
+
+
 GLOBAL = """schema_version: 2
 common:
   mgmt:
@@ -176,6 +815,8 @@ class CanonicalRuntimeManifestContractTests(unittest.TestCase):
                 payload = (ROOT / relative).read_bytes()
                 if relative == "tools/ibsw_upgrade_access.py":
                     payload = _access_upstream_bytes_from_exact_composition(payload)
+                elif relative == "tools/ibsw_upgrade_driver.py":
+                    payload = _driver_upstream_bytes_from_exact_composition(payload)
                 self.assertEqual(hashlib.sha256(payload).hexdigest(), expected)
         self.assertIn(REQUIREMENTS, manifest["tracked_support"])
 
