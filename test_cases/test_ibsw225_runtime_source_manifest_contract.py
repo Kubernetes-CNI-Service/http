@@ -839,6 +839,534 @@ class ComponentScpDeclarationExactCompositionTests(unittest.TestCase):
 
 
 
+# Independent literal inverse of seven reviewed SCP request-content DATA hunks.
+# Withdraw these first, then require the unchanged original LOCAL inverse.
+DRIVER_SCP_REQUEST_APPROVED_COMPOSITION = (
+    # schema2 SCP request validator
+    (
+        b"            raise ValueError('strict package source DATA fields required')\n"
+        b'\n'
+        b'\n'
+        b'\n'
+        b'\n'
+        b'def _validate_component_graph(files, binding, read, *, switch_dir):\n',
+        b"            raise ValueError('strict package source DATA fields required')\n"
+        b'\n'
+        b'\n'
+        b'def _validate_scp_request_content_graph(files, binding, read):\n'
+        b'    """Strict schema2 SCP request DATA only; never reconstruct a live owner."""\n'
+        b"    if 'scp-source-request.json' not in files:\n"
+        b'        return\n'
+        b"    names = ('request.json', 'step.sh', 'step-binding.json', 'runner.sh', 'runner-binding.json')\n"
+        b'    if not set(names).issubset(files):\n'
+        b"        raise ValueError('SCP request content DATA requires complete original request/runner')\n"
+        b"    raw = read('scp-source-request.json')\n"
+        b'    document = json.loads(raw)\n'
+        b'    if (type(document) is not dict or set(document) != {\n'
+        b"            'schema_version', 'state', 'execution_state', 'activation_state',\n"
+        b"            'binding', 'declared_method', 'request_id', 'originals_sha256', 'packages'}\n"
+        b"            or type(document['schema_version']) is not int or document['schema_version'] != 2\n"
+        b"            or document['state'] != 'SCP_REQUEST_CONTENT_DATA_ONLY'\n"
+        b"            or document['execution_state'] != 'NOT_EXECUTED'\n"
+        b"            or document['activation_state'] != 'UNKNOWN'\n"
+        b"            or type(binding) is not dict or binding.get('component') not in ('os', 'bios', 'cpld')\n"
+        b"            or document['binding'] != binding or document['declared_method'] != 'scp'\n"
+        b"            or re.findall(rb'(?m)^IBSW_METHOD=([a-z]+)$', read('step.sh')) != [b'scp']\n"
+        b'            or raw != _json_bytes(document)\n'
+        b"            or document['originals_sha256'] != {name: hashlib.sha256(read(name)).hexdigest() for name in names}):\n"
+        b"        raise ValueError('original SCP request content/hash graph changed')\n"
+        b"    request = json.loads(read('request.json'))\n"
+        b"    token = request.get('request_id') if type(request) is dict else None\n"
+        b"    if (type(token) is not str or not re.fullmatch(r'[0-9a-f]{32}', token)\n"
+        b"            or document['request_id'] != token\n"
+        b"            or read('request.json') != _json_bytes(dict(schema_version=1, state='REQUESTED',\n"
+        b"                activation_state='UNKNOWN', execution_state='NOT_EXECUTED', binding=binding, request_id=token))):\n"
+        b"        raise ValueError('SCP request content DATA requires actual original request bytes')\n"
+        b"    packages = document['packages']\n"
+        b"    if type(packages) is not dict or len(packages) != (2 if binding['component'] == 'cpld' else 1):\n"
+        b"        raise ValueError('exact SCP component package DATA set required')\n"
+        b'    for path, row in packages.items():\n'
+        b'        if (type(path) is not str or not posixpath.isabs(path) or posixpath.normpath(path) != path\n'
+        b'                or any(ord(c) < 32 or ord(c) == 127 for c in path)\n'
+        b"                or type(row) is not dict or set(row) != {'size', 'sha256'}\n"
+        b"                or type(row['size']) is not int or row['size'] <= 0\n"
+        b"                or type(row['sha256']) is not str or not re.fullmatch(r'[0-9a-f]{64}', row['sha256'])):\n"
+        b"            raise ValueError('strict SCP package source DATA fields required')\n"
+        b'\n'
+        b'\n'
+        b'\n'
+        b'def _validate_component_graph(files, binding, read, *, switch_dir):\n',
+    ),
+    # component graph member and validation
+    (
+        b'               "component-preflight.json", "request.json", "runner.sh", "runner-binding.json",\n'
+        b'               "component-dispatch.json", "component-completion.json", "after.commands", "missing.commands",\n'
+        b'               "component-repair.json", "component-repair-result.json", "observed-after.commands",\n'
+        b'               "repaired.commands", "configuration-diff.json", "versions.json", "execution.stdout", "execution.stderr"} | _NVUED_CHECK_FILES | _DOWNLOAD_FILES | {"package-source.json"}\n'
+        b'    if not files <= allowed or not {"step.sh", "step-binding.json", "before.commands", "before-binding.json",\n'
+        b'                                     "component-preflight.json"} <= files:\n'
+        b'        raise ValueError("partial/unknown component stage graph")\n'
+        b'    _validate_package_source_data_graph(files, binding, read)\n'
+        b'    before, before_binding = read("before.commands"), read("before-binding.json")\n'
+        b'    if not before or before_binding != _json_bytes(_before_commands_binding(binding, before)):\n'
+        b'        raise ValueError("original component before hash graph changed")\n',
+        b'               "component-preflight.json", "request.json", "runner.sh", "runner-binding.json",\n'
+        b'               "component-dispatch.json", "component-completion.json", "after.commands", "missing.commands",\n'
+        b'               "component-repair.json", "component-repair-result.json", "observed-after.commands",\n'
+        b'               "repaired.commands", "configuration-diff.json", "versions.json", "execution.stdout", "execution.stderr"} | _NVUED_CHECK_FILES | _DOWNLOAD_FILES | {"package-source.json", "scp-source-request.json"}\n'
+        b'    if not files <= allowed or not {"step.sh", "step-binding.json", "before.commands", "before-binding.json",\n'
+        b'                                     "component-preflight.json"} <= files:\n'
+        b'        raise ValueError("partial/unknown component stage graph")\n'
+        b'    _validate_package_source_data_graph(files, binding, read)\n'
+        b'    _validate_scp_request_content_graph(files, binding, read)\n'
+        b'    before, before_binding = read("before.commands"), read("before-binding.json")\n'
+        b'    if not before or before_binding != _json_bytes(_before_commands_binding(binding, before)):\n'
+        b'        raise ValueError("original component before hash graph changed")\n',
+    ),
+    # stage DATA member
+    (
+        b'def _stage_data_members(files):\n'
+        b'    remainder, phases = set(files), []\n'
+        b'    remainder.discard("package-source.json")\n'
+        b'    health = []\n'
+        b'    for phase in _STAGE_HEALTH_PHASES:\n'
+        b'        group = _stage_health_files(phase)\n',
+        b'def _stage_data_members(files):\n'
+        b'    remainder, phases = set(files), []\n'
+        b'    remainder.discard("package-source.json")\n'
+        b'    remainder.discard("scp-source-request.json")\n'
+        b'    health = []\n'
+        b'    for phase in _STAGE_HEALTH_PHASES:\n'
+        b'        group = _stage_health_files(phase)\n',
+    ),
+    # generic command graph validation
+    (
+        b'        return _validate_component_graph(files, step_binding, read, switch_dir=switch_dir)\n'
+        b'    remainder, phases, has_restore, has_patch = _stage_data_members(files)\n'
+        b'    _validate_package_source_data_graph(files, step_binding, read)\n'
+        b'    originals = {}\n'
+        b'    for phase in phases:\n'
+        b'        raw_name, meta_name = phase + ".commands", phase + "-binding.json"\n',
+        b'        return _validate_component_graph(files, step_binding, read, switch_dir=switch_dir)\n'
+        b'    remainder, phases, has_restore, has_patch = _stage_data_members(files)\n'
+        b'    _validate_package_source_data_graph(files, step_binding, read)\n'
+        b'    _validate_scp_request_content_graph(files, step_binding, read)\n'
+        b'    originals = {}\n'
+        b'    for phase in phases:\n'
+        b'        raw_name, meta_name = phase + ".commands", phase + "-binding.json"\n',
+    ),
+    # SCP parent source freeze insertion
+    (
+        b'    def freeze_package_sources(self, selections, *, deadline, max_fds):\n'
+        b'        """Freeze explicit LOCAL declaration sources, not device-current authority."""\n'
+        b'        self.verify()\n'
+        b'        provider, package_content_owner, owner_class = _fixed_package_source_api(self)\n'
+        b"        if (not self.manual_execution or self.parsed.method != 'local'\n"
+        b'                or self._native_schedule_started or self._package_source_owner is not None\n'
+        b'                or self._package_source_parent is not None\n'
+        b'                or type(selections) is not tuple or not selections):\n'
+        b"            raise SharedUpgradeHold('original parent LOCAL source DATA selection required')\n"
+        b'        selected, paths = [], set()\n'
+        b'        for row in selections:\n'
+        b'            if (type(row) is not tuple or len(row) != 2 or type(row[0]) is not str\n'
+        b'                    or type(row[1]) is not int or row[0] not in self.parsed.selected):\n'
+        b"                raise SharedUpgradeHold('original selected component/index required')\n"
+        b'            selected.append(row)\n'
+        b'            paths.update(Path(p.path) for p in self._package_source_packages(*row))\n'
+        b'        if len(set(selected)) != len(selected):\n'
+        b"            raise SharedUpgradeHold('duplicate source stage selection')\n"
+        b"        if (sys.modules.get('ibsw_upgrade_scp') is not provider\n"
+        b"                or vars(provider).get('package_content_owner') is not package_content_owner\n"
+        b"                or vars(provider).get('_PackageContentOwner') is not owner_class):\n"
+        b"            raise SharedUpgradeHold('original package provider changed before factory')\n"
+        b'        try:\n'
+        b'            owner = package_content_owner(self.policy.package_dir, tuple(sorted(paths)),\n'
+        b'                                          deadline=deadline, max_fds=max_fds)\n'
+        b'        except BaseException:\n'
+        b'            # The real constructor owns any partial originals/cleanup. No owner\n'
+        b'            # returned to adopt; revoke this parent group before another freeze.\n'
+        b'            if self._package_source_lifecycle_failure is None:\n'
+        b'                self._package_source_lifecycle_failure = SharedUpgradeHold(\n'
+        b"                    'original package source acquisition failed; parent group retained')\n"
+        b'            raise  # Preserve the original error/NI object and its existing cause.\n'
+        b'        # Register the actual owner before any later verification can fail.\n'
+        b'        self._package_source_owner = owner\n'
+        b'        self._package_source_owner_class = owner_class\n'
+        b'        self._package_source_owns = True\n'
+        b'        self._package_source_selection = (tuple(sorted(selected)), self.policy,\n'
+        b'                                         self.run_directory, self.plan_sha256)\n'
+        b'        try:\n'
+        b'            self.verify()\n'
+        b'        except BaseException as original:\n'
+        b'            try:\n'
+        b'                owner.close()\n'
+        b'            except BaseException as cleanup:\n'
+        b'                self.cleanup_issues.append(cleanup)\n'
+        b'                if isinstance(original, Exception) and not isinstance(cleanup, Exception):\n'
+        b'                    raise\n'
+        b'            raise\n'
+        b'        return owner\n'
+        b'\n'
+        b'    def _package_source_packages(self, component, index):\n',
+        b'    def freeze_package_sources(self, selections, *, deadline, max_fds):\n'
+        b'        """Freeze explicit LOCAL declaration sources, not device-current authority."""\n'
+        b'        self.verify()\n'
+        b'        provider, package_content_owner, owner_class = _fixed_package_source_api(self)\n'
+        b"        if (not self.manual_execution or self.parsed.method != 'local'\n"
+        b'                or self._native_schedule_started or self._package_source_owner is not None\n'
+        b'                or self._package_source_parent is not None\n'
+        b'                or type(selections) is not tuple or not selections):\n'
+        b"            raise SharedUpgradeHold('original parent LOCAL source DATA selection required')\n"
+        b'        selected, paths = [], set()\n'
+        b'        for row in selections:\n'
+        b'            if (type(row) is not tuple or len(row) != 2 or type(row[0]) is not str\n'
+        b'                    or type(row[1]) is not int or row[0] not in self.parsed.selected):\n'
+        b"                raise SharedUpgradeHold('original selected component/index required')\n"
+        b'            selected.append(row)\n'
+        b'            paths.update(Path(p.path) for p in self._package_source_packages(*row))\n'
+        b'        if len(set(selected)) != len(selected):\n'
+        b"            raise SharedUpgradeHold('duplicate source stage selection')\n"
+        b"        if (sys.modules.get('ibsw_upgrade_scp') is not provider\n"
+        b"                or vars(provider).get('package_content_owner') is not package_content_owner\n"
+        b"                or vars(provider).get('_PackageContentOwner') is not owner_class):\n"
+        b"            raise SharedUpgradeHold('original package provider changed before factory')\n"
+        b'        try:\n'
+        b'            owner = package_content_owner(self.policy.package_dir, tuple(sorted(paths)),\n'
+        b'                                          deadline=deadline, max_fds=max_fds)\n'
+        b'        except BaseException:\n'
+        b'            # The real constructor owns any partial originals/cleanup. No owner\n'
+        b'            # returned to adopt; revoke this parent group before another freeze.\n'
+        b'            if self._package_source_lifecycle_failure is None:\n'
+        b'                self._package_source_lifecycle_failure = SharedUpgradeHold(\n'
+        b"                    'original package source acquisition failed; parent group retained')\n"
+        b'            raise  # Preserve the original error/NI object and its existing cause.\n'
+        b'        # Register the actual owner before any later verification can fail.\n'
+        b'        self._package_source_owner = owner\n'
+        b'        self._package_source_owner_class = owner_class\n'
+        b'        self._package_source_owns = True\n'
+        b'        self._package_source_selection = (tuple(sorted(selected)), self.policy,\n'
+        b'                                         self.run_directory, self.plan_sha256)\n'
+        b'        try:\n'
+        b'            self.verify()\n'
+        b'        except BaseException as original:\n'
+        b'            try:\n'
+        b'                owner.close()\n'
+        b'            except BaseException as cleanup:\n'
+        b'                self.cleanup_issues.append(cleanup)\n'
+        b'                if isinstance(original, Exception) and not isinstance(cleanup, Exception):\n'
+        b'                    raise\n'
+        b'            raise\n'
+        b'        return owner\n'
+        b'\n'
+        b'    def freeze_scp_package_sources(self, selections, *, deadline, max_fds):\n'
+        b'        """Freeze explicit SCP declaration sources, never native dispatch permission."""\n'
+        b'        self.verify()\n'
+        b'        provider, package_content_owner, owner_class = _fixed_package_source_api(self)\n'
+        b"        if (not self.manual_execution or self.parsed.method != 'scp'\n"
+        b'                or self._native_schedule_started or self._package_source_owner is not None\n'
+        b'                or self._package_source_parent is not None\n'
+        b'                or type(selections) is not tuple or not selections):\n'
+        b"            raise SharedUpgradeHold('original parent SCP source DATA selection required')\n"
+        b'        selected, paths = [], set()\n'
+        b'        for row in selections:\n'
+        b'            if (type(row) is not tuple or len(row) != 2 or type(row[0]) is not str\n'
+        b'                    or type(row[1]) is not int or row[0] not in self.parsed.selected):\n'
+        b"                raise SharedUpgradeHold('original selected component/index required')\n"
+        b'            selected.append(row)\n'
+        b'            paths.update(Path(p.path) for p in self._package_source_packages(*row))\n'
+        b'        if len(set(selected)) != len(selected):\n'
+        b"            raise SharedUpgradeHold('duplicate source stage selection')\n"
+        b"        if (sys.modules.get('ibsw_upgrade_scp') is not provider\n"
+        b"                or vars(provider).get('package_content_owner') is not package_content_owner\n"
+        b"                or vars(provider).get('_PackageContentOwner') is not owner_class):\n"
+        b"            raise SharedUpgradeHold('original package provider changed before factory')\n"
+        b'        try:\n'
+        b'            owner = package_content_owner(self.policy.package_dir, tuple(sorted(paths)),\n'
+        b'                                          deadline=deadline, max_fds=max_fds)\n'
+        b'        except BaseException:\n'
+        b'            # The real constructor owns any partial originals/cleanup. No owner\n'
+        b'            # returned to adopt; revoke this parent group before another freeze.\n'
+        b'            if self._package_source_lifecycle_failure is None:\n'
+        b'                self._package_source_lifecycle_failure = SharedUpgradeHold(\n'
+        b"                    'original package source acquisition failed; parent group retained')\n"
+        b'            raise  # Preserve the original error/NI object and its existing cause.\n'
+        b'        # Register the actual owner before any later verification can fail.\n'
+        b'        self._package_source_owner = owner\n'
+        b'        self._package_source_owner_class = owner_class\n'
+        b'        self._package_source_owns = True\n'
+        b'        self._package_source_selection = (tuple(sorted(selected)), self.policy,\n'
+        b'                                         self.run_directory, self.plan_sha256)\n'
+        b'        try:\n'
+        b'            self.verify()\n'
+        b'        except BaseException as original:\n'
+        b'            try:\n'
+        b'                owner.close()\n'
+        b'            except BaseException as cleanup:\n'
+        b'                self.cleanup_issues.append(cleanup)\n'
+        b'                if isinstance(original, Exception) and not isinstance(cleanup, Exception):\n'
+        b'                    raise\n'
+        b'            raise\n'
+        b'        return owner\n'
+        b'\n'
+        b'    def _package_source_packages(self, component, index):\n',
+    ),
+    # SCP child request companion insertion
+    (
+        b'    def _capture_package_source_data_locked(self, leaf, component, package_index):\n'
+        b'        """Persist original LOCAL prelaunch DATA. No SCP wire/launch/ACK."""\n'
+        b'        if (self._active_request_lease is None or self.closed or not self.manual_execution\n'
+        b"                or self.parsed.method != 'local' or type(leaf) is not _ReadonlyQueryInputs\n"
+        b'                or leaf.scope is not self or leaf._original_selection[0] is not self\n'
+        b'                or self._package_source_parent is None\n'
+        b"                or getattr(self, '_readiness_node', None) != leaf.node.hostname):\n"
+        b"            raise SharedUpgradeHold('original leased child DATA scope required')\n"
+        b'        try:\n'
+        b'            self._verify_package_source_owner()\n'
+        b'            if (component, package_index) not in self._package_source_selection[0]:\n'
+        b"                raise SharedUpgradeHold('unfrozen source stage')\n"
+        b'            stage, binding, args = self._owned_runner_stage(leaf, component, package_index)\n'
+        b"            names = ('request.json', 'step.sh', 'step-binding.json', 'runner.sh', 'runner-binding.json')\n"
+        b'            held = {name: self._hold(stage, name) for name in names}\n'
+        b'            packages = {}\n'
+        b'            for package in self._package_source_packages(component, package_index):\n'
+        b'                row = self._package_source_owner._files.get(Path(package.path))\n'
+        b'                if row is None or type(row[4]) is not str:\n'
+        b"                    raise SharedUpgradeHold('original package not retained by parent')\n"
+        b'                packages[package.path] = dict(size=row[3][6], sha256=row[4])\n'
+        b"            document = dict(schema_version=1, state='PACKAGE_SOURCE_PRELAUNCH_DATA_ONLY',\n"
+        b"                execution_state='NOT_EXECUTED', activation_state='UNKNOWN', binding=binding,\n"
+        b"                declared_method='local', originals_sha256={name: hashlib.sha256(obj.payload).hexdigest()\n"
+        b'                    for name, obj in held.items()}, packages=packages)\n'
+        b'            payload = _json_bytes(document)\n'
+        b'            originals = {name: obj.payload for name, obj in held.items()}\n'
+        b"            originals['package-source.json'] = payload\n"
+        b'            _validate_package_source_data_graph(set(originals), binding, originals.__getitem__)\n'
+        b'            self.verify(); leaf.verify()\n'
+        b"            if 'package-source.json' in os.listdir(stage.fd):\n"
+        b"                self._hold(stage, 'package-source.json', payload)\n"
+        b'            else:\n'
+        b"                self._commit_exclusive_binding(stage, payload, 'package-source.json')\n"
+        b'            self.verify(); leaf.verify()\n'
+        b'            return None\n'
+        b'\n'
+        b'        except BaseException:\n'
+        b'            # Revoke this entire original source group, without altering the\n'
+        b'            # primary exception object/cause or adopting any persisted DATA.\n'
+        b'            parent = self._package_source_parent\n'
+        b'            if (type(parent) is _PreparedRunScope\n'
+        b"                    and getattr(self, '_readiness_parent', None) is parent\n"
+        b'                    and self._package_source_owner is not None\n'
+        b'                    and self._package_source_owner is parent._package_source_owner):\n'
+        b'                if parent._package_source_lifecycle_failure is None:\n'
+        b'                    parent._package_source_lifecycle_failure = SharedUpgradeHold(\n'
+        b"                        'original source companion capture uncertain; shared group retained')\n"
+        b'                if self._package_source_lifecycle_failure is None:\n'
+        b'                    self._package_source_lifecycle_failure = parent._package_source_lifecycle_failure\n'
+        b'            raise\n'
+        b'\n'
+        b'    def fork_readiness_scope(self, node, source_baselines=()):\n',
+        b'    def _capture_package_source_data_locked(self, leaf, component, package_index):\n'
+        b'        """Persist original LOCAL prelaunch DATA. No SCP wire/launch/ACK."""\n'
+        b'        if (self._active_request_lease is None or self.closed or not self.manual_execution\n'
+        b"                or self.parsed.method != 'local' or type(leaf) is not _ReadonlyQueryInputs\n"
+        b'                or leaf.scope is not self or leaf._original_selection[0] is not self\n'
+        b'                or self._package_source_parent is None\n'
+        b"                or getattr(self, '_readiness_node', None) != leaf.node.hostname):\n"
+        b"            raise SharedUpgradeHold('original leased child DATA scope required')\n"
+        b'        try:\n'
+        b'            self._verify_package_source_owner()\n'
+        b'            if (component, package_index) not in self._package_source_selection[0]:\n'
+        b"                raise SharedUpgradeHold('unfrozen source stage')\n"
+        b'            stage, binding, args = self._owned_runner_stage(leaf, component, package_index)\n'
+        b"            names = ('request.json', 'step.sh', 'step-binding.json', 'runner.sh', 'runner-binding.json')\n"
+        b'            held = {name: self._hold(stage, name) for name in names}\n'
+        b'            packages = {}\n'
+        b'            for package in self._package_source_packages(component, package_index):\n'
+        b'                row = self._package_source_owner._files.get(Path(package.path))\n'
+        b'                if row is None or type(row[4]) is not str:\n'
+        b"                    raise SharedUpgradeHold('original package not retained by parent')\n"
+        b'                packages[package.path] = dict(size=row[3][6], sha256=row[4])\n'
+        b"            document = dict(schema_version=1, state='PACKAGE_SOURCE_PRELAUNCH_DATA_ONLY',\n"
+        b"                execution_state='NOT_EXECUTED', activation_state='UNKNOWN', binding=binding,\n"
+        b"                declared_method='local', originals_sha256={name: hashlib.sha256(obj.payload).hexdigest()\n"
+        b'                    for name, obj in held.items()}, packages=packages)\n'
+        b'            payload = _json_bytes(document)\n'
+        b'            originals = {name: obj.payload for name, obj in held.items()}\n'
+        b"            originals['package-source.json'] = payload\n"
+        b'            _validate_package_source_data_graph(set(originals), binding, originals.__getitem__)\n'
+        b'            self.verify(); leaf.verify()\n'
+        b"            if 'package-source.json' in os.listdir(stage.fd):\n"
+        b"                self._hold(stage, 'package-source.json', payload)\n"
+        b'            else:\n'
+        b"                self._commit_exclusive_binding(stage, payload, 'package-source.json')\n"
+        b'            self.verify(); leaf.verify()\n'
+        b'            return None\n'
+        b'\n'
+        b'        except BaseException:\n'
+        b'            # Revoke this entire original source group, without altering the\n'
+        b'            # primary exception object/cause or adopting any persisted DATA.\n'
+        b'            parent = self._package_source_parent\n'
+        b'            if (type(parent) is _PreparedRunScope\n'
+        b"                    and getattr(self, '_readiness_parent', None) is parent\n"
+        b'                    and self._package_source_owner is not None\n'
+        b'                    and self._package_source_owner is parent._package_source_owner):\n'
+        b'                if parent._package_source_lifecycle_failure is None:\n'
+        b'                    parent._package_source_lifecycle_failure = SharedUpgradeHold(\n'
+        b"                        'original source companion capture uncertain; shared group retained')\n"
+        b'                if self._package_source_lifecycle_failure is None:\n'
+        b'                    self._package_source_lifecycle_failure = parent._package_source_lifecycle_failure\n'
+        b'            raise\n'
+        b'\n'
+        b'    def _capture_scp_request_content_locked(self, leaf, component, package_index):\n'
+        b'        """Persist original SCP request content DATA. No wire/launch/ACK."""\n'
+        b'        if (self._active_request_lease is None or self.closed or not self.manual_execution\n'
+        b"                or self.parsed.method != 'scp' or type(leaf) is not _ReadonlyQueryInputs\n"
+        b'                or leaf.scope is not self or leaf._original_selection[0] is not self\n'
+        b'                or self._package_source_parent is None\n'
+        b"                or getattr(self, '_readiness_node', None) != leaf.node.hostname):\n"
+        b"            raise SharedUpgradeHold('original leased SCP child DATA scope required')\n"
+        b'        try:\n'
+        b'            self._verify_package_source_owner()\n'
+        b'            if (component, package_index) not in self._package_source_selection[0]:\n'
+        b"                raise SharedUpgradeHold('unfrozen source stage')\n"
+        b'            stage, binding, args = self._owned_runner_stage(leaf, component, package_index)\n'
+        b"            names = ('request.json', 'step.sh', 'step-binding.json', 'runner.sh', 'runner-binding.json')\n"
+        b'            held = {name: self._hold(stage, name) for name in names}\n'
+        b'            packages = {}\n'
+        b'            for package in self._package_source_packages(component, package_index):\n'
+        b'                row = self._package_source_owner._files.get(Path(package.path))\n'
+        b'                if row is None or type(row[4]) is not str:\n'
+        b"                    raise SharedUpgradeHold('original package not retained by parent')\n"
+        b'                packages[package.path] = dict(size=row[3][6], sha256=row[4])\n'
+        b"            document = dict(schema_version=2, state='SCP_REQUEST_CONTENT_DATA_ONLY',\n"
+        b"                execution_state='NOT_EXECUTED', activation_state='UNKNOWN', binding=binding,\n"
+        b"                declared_method='scp', request_id=json.loads(held['request.json'].payload)['request_id'],\n"
+        b'                originals_sha256={name: hashlib.sha256(obj.payload).hexdigest()\n'
+        b'                    for name, obj in held.items()}, packages=packages)\n'
+        b'            payload = _json_bytes(document)\n'
+        b'            originals = {name: obj.payload for name, obj in held.items()}\n'
+        b"            originals['scp-source-request.json'] = payload\n"
+        b'            _validate_scp_request_content_graph(set(originals), binding, originals.__getitem__)\n'
+        b'            self.verify(); leaf.verify()\n'
+        b"            if 'scp-source-request.json' in os.listdir(stage.fd):\n"
+        b"                self._hold(stage, 'scp-source-request.json', payload)\n"
+        b'            else:\n'
+        b"                self._commit_exclusive_binding(stage, payload, 'scp-source-request.json')\n"
+        b'            self.verify(); leaf.verify()\n'
+        b'            return None\n'
+        b'\n'
+        b'        except BaseException:\n'
+        b'            # Revoke this entire original source group, without altering the\n'
+        b'            # primary exception object/cause or adopting any persisted DATA.\n'
+        b'            parent = self._package_source_parent\n'
+        b'            if (type(parent) is _PreparedRunScope\n'
+        b"                    and getattr(self, '_readiness_parent', None) is parent\n"
+        b'                    and self._package_source_owner is not None\n'
+        b'                    and self._package_source_owner is parent._package_source_owner):\n'
+        b'                if parent._package_source_lifecycle_failure is None:\n'
+        b'                    parent._package_source_lifecycle_failure = SharedUpgradeHold(\n'
+        b"                        'original SCP request content capture uncertain; shared group retained')\n"
+        b'                if self._package_source_lifecycle_failure is None:\n'
+        b'                    self._package_source_lifecycle_failure = parent._package_source_lifecycle_failure\n'
+        b'            raise\n'
+        b'\n'
+        b'    def fork_readiness_scope(self, node, source_baselines=()):\n',
+    ),
+    # exclusive companion member
+    (
+        b'        return self._commit_exclusive_binding(directory, payload, "query-binding.json")\n'
+        b'\n'
+        b'    def _commit_exclusive_binding(self, directory, payload, final_name):\n'
+        b'        if final_name not in _NVUED_CHECK_FILES | _DOWNLOAD_FILES | {"package-source.json", "query-binding.json", "before-binding.json", "after-binding.json",\n'
+        b'                              "repaired-binding.json", "restore-binding.json", "pending-diff-binding.json", "os-dispatch.json", "post-binding.json",\n'
+        b'                              "runner-binding.json", "owned-exit-binding.json", "before-health-binding.json", "after-health-binding.json",\n'
+        b'                              "component-preflight.json", "component-dispatch.json", "component-completion.json",\n',
+        b'        return self._commit_exclusive_binding(directory, payload, "query-binding.json")\n'
+        b'\n'
+        b'    def _commit_exclusive_binding(self, directory, payload, final_name):\n'
+        b'        if final_name not in _NVUED_CHECK_FILES | _DOWNLOAD_FILES | {"package-source.json", "scp-source-request.json", "query-binding.json", "before-binding.json", "after-binding.json",\n'
+        b'                              "repaired-binding.json", "restore-binding.json", "pending-diff-binding.json", "os-dispatch.json", "post-binding.json",\n'
+        b'                              "runner-binding.json", "owned-exit-binding.json", "before-health-binding.json", "after-health-binding.json",\n'
+        b'                              "component-preflight.json", "component-dispatch.json", "component-completion.json",\n',
+    ),
+)
+
+
+
+
+def _driver_upstream_bytes_from_exact_scp_request_content(payload):
+    if type(payload) is not bytes:
+        raise TypeError('exact SCP request source bytes required')
+    spans = []
+    for original, integrated in DRIVER_SCP_REQUEST_APPROVED_COMPOSITION:
+        if payload.count(integrated) != 1 or payload.count(original) != 0:
+            raise ValueError('missing/duplicate/new-plus-old SCP request source hunk')
+        start = payload.index(integrated)
+        spans.append((start, start + len(integrated), original))
+    if any(left[1] > right[0] for left, right in zip(spans, spans[1:])):
+        raise ValueError('overlapping or reordered SCP request source hunks')
+    pieces, end = [], 0
+    for start, stop, original in spans:
+        pieces.extend((payload[end:start], original))
+        end = stop
+    pieces.append(payload[end:])
+    restored = b''.join(pieces)
+    if any(restored.count(old) != 1 or restored.count(new) != 0
+           for old, new in DRIVER_SCP_REQUEST_APPROVED_COMPOSITION):
+        raise ValueError('restored SCP request source hunks are not unique')
+    return restored
+
+
+class DriverScpRequestExactCompositionTests(unittest.TestCase):
+    def test_seven_literal_regions_restore_before_unchanged_local_inverse(self):
+        hunks = DRIVER_SCP_REQUEST_APPROVED_COMPOSITION
+        self.assertEqual(7, len(hunks))
+        integrated = b'prefix\n' + b'middle\n'.join(new for old, new in hunks) + b'suffix\n'
+        original = b'prefix\n' + b'middle\n'.join(old for old, new in hunks) + b'suffix\n'
+        self.assertEqual(original, _driver_upstream_bytes_from_exact_scp_request_content(integrated))
+        self.assertEqual('3c76f3bf02f2a41e2338bf78b38681dc5defb63a957d31155709de85f0eaffe2',
+                         FROZEN_SHA256['tools/ibsw_upgrade_driver.py'])
+        self.assertEqual(12, len(DRIVER_SOURCE_DATA_APPROVED_COMPOSITION))
+
+    def test_each_missing_old_truncated_deleted_duplicate_and_extra_old_region_is_refused(self):
+        hunks = DRIVER_SCP_REQUEST_APPROVED_COMPOSITION
+        integrated = b'middle\n'.join(new for old, new in hunks)
+        for index, (old, new) in enumerate(hunks):
+            for label, replacement in (
+                ('missing', b''), ('old', old), ('truncated', new[:len(new)//2]),
+                ('deleted', new[:-1]), ('duplicate', new + new), ('extra-old', old + new),
+            ):
+                with self.subTest(region=index, fault=label):
+                    with self.assertRaises(ValueError):
+                        _driver_upstream_bytes_from_exact_scp_request_content(
+                            integrated.replace(new, replacement, 1))
+
+    def test_order_type_and_outside_bytes_cannot_be_normalized_into_approval(self):
+        hunks = DRIVER_SCP_REQUEST_APPROVED_COMPOSITION
+        reversed_source = b'middle\n'.join(new for old, new in reversed(hunks))
+        swapped = list(hunks)
+        swapped[4], swapped[5] = swapped[5], swapped[4]
+        for malformed in (reversed_source, b'middle\n'.join(new for old, new in swapped)):
+            with self.subTest(source=malformed):
+                with self.assertRaises(ValueError):
+                    _driver_upstream_bytes_from_exact_scp_request_content(malformed)
+        for nonbytes in ('source', bytearray(b'source'), None):
+            with self.subTest(type=type(nonbytes).__name__):
+                with self.assertRaises(TypeError):
+                    _driver_upstream_bytes_from_exact_scp_request_content(nonbytes)
+        integrated = b'prefix\n' + b'middle\n'.join(new for old, new in hunks) + b'suffix\n'
+        expected = b'prefix\n' + b'middle\n'.join(old for old, new in hunks) + b'suffix\n'
+        for label, drift, expected_drift in (
+            ('prefix', b'outside\n' + integrated, b'outside\n' + expected),
+            ('middle', integrated.replace(b'middle\n', b'outside\n', 1),
+             expected.replace(b'middle\n', b'outside\n', 1)),
+            ('suffix', integrated + b'outside\n', expected + b'outside\n'),
+        ):
+            with self.subTest(fault=label):
+                restored = _driver_upstream_bytes_from_exact_scp_request_content(drift)
+                self.assertEqual(expected_drift, restored)
+                self.assertNotEqual(hashlib.sha256(expected).digest(), hashlib.sha256(restored).digest())
+
 GLOBAL = """schema_version: 2
 common:
   mgmt:
@@ -887,6 +1415,7 @@ class CanonicalRuntimeManifestContractTests(unittest.TestCase):
                 if relative == "tools/ibsw_upgrade_access.py":
                     payload = _access_upstream_bytes_from_exact_composition(payload)
                 elif relative == "tools/ibsw_upgrade_driver.py":
+                    payload = _driver_upstream_bytes_from_exact_scp_request_content(payload)
                     payload = _driver_upstream_bytes_from_exact_composition(payload)
                 if relative == "tools/ibsw_upgrade_component.py":
                     payload = _component_upstream_bytes_from_exact_scp_declaration(payload)

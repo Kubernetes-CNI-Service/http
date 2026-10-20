@@ -5055,3 +5055,20 @@ remain HOLD. The shell/template bytes are unchanged; the renderer change is
 only a fixed method-set/message hunk with an independent literal inverse and
 the original frozen source hash. Declaration capability PASS is not a working
 SCP pull, manager ACK, device upgrade, full proof or release approval.
+
+
+### SCP original-request content DATA — 2026-10-20
+
+Explicit SCP declaration scopes retain their selected original package owner in
+the original parent, share it with real readiness children and persist the fixed
+scp-source-request.json under the original namespace lease. This separate schema2
+contains only request nonce, five original prerequisite hashes and needed-package
+size/digest DATA. LOCAL schema1 and its full source lifecycle remain unchanged.
+CPLD burn/refresh are one retained set; a changed second source poisons the shared
+parent/child group before any companion/dispatch/ACK. File/directory sync and the
+existing critical writer finish must all return; uncertainty revokes the group.
+
+These REQUESTED/NOT_EXECUTED/UNKNOWN facts cannot reconstruct live authority.
+CLI remains HTTP-only; native SCP, source preflight and nonempty execution payload
+still HOLD. Local synthetic-package DATA tests are not a transfer, manager ACK,
+device/power-loss acceptance, hard I/O supervision or full/release proof.

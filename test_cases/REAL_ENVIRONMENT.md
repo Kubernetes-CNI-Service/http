@@ -2860,3 +2860,18 @@ The existing TC-IBSW3-SCP-SOURCE-CONTENT-20261020 prerequisites, normal/commit/
 interruption/cold-recovery cases, retained failure evidence and cleanup rules
 remain required. No new real SSH/device/source permissions or risk waivers;
 REAL_ENV stays NOT RUN, CLI remains HTTP-only, ordinary release gates unchanged.
+
+
+### SCP original-request companion supplement — NOT RUN
+
+Existing TC-IBSW3-SCP-SOURCE-CONTENT-20261020 and
+TC-IBSW3-LOCAL-PACKAGE-COMPANION-20261020 maintenance authorization, independently
+approved source pin/packages, backup and rollback prerequisites remain mandatory.
+Retain normal/commit/interruption/cold recovery, both CPLD sources, source/request
+drift, required fsync/critical-close failure and safe retained UNKNOWN scenarios.
+Evidence must bind original parent/child owners, five request/runner originals,
+full logs/exit and real native download/ACK order; never store secrets. Clean only
+proven-owned test objects; retain failures, no unknown-FD retry, source-baseline
+refresh, reset or adoption. No cases waived or new residual-risk acceptance.
+Local dual-source DATA PASS is not SCP/device/firmware/power-loss/ACK proof.
+REAL_ENV NOT RUN; CLI HTTP-only, native HOLD, ordinary release gates unchanged.

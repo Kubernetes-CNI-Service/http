@@ -447,6 +447,14 @@
         "test_cases.test_ibsw3_scp_native_declaration_capability",
         "test_cases.test_ibsw3_scp_empty_wire_shell_boundary"
       ]
+    },
+    {
+      "id": "ibsw3-scp-request-content-related",
+      "description": "SCP parent/child original request durable DATA including CPLD two sources; no native dispatch/ACK",
+      "tests": [
+        "test_cases.test_ibsw3_scp_scope_request_content",
+        "test_cases.test_ibsw3_scp_request_cpld_sources"
+      ]
     }
   ],
   "tracked_support": [
@@ -585,7 +593,9 @@
     "test_cases/ibsw225_fixture_support/_fixture_test_standalone_links.py",
     "test_cases/ibsw225_fixture_support/fixed_fixture_registry.py",
     "test_cases/ibsw225_fixture_support/legacy_shell_workflow.py",
-    "test_cases/ibsw3_scp_test_isolation.py"
+    "test_cases/ibsw3_scp_test_isolation.py",
+    "test_cases/ibsw3_scp_request_test_isolation.py",
+    "test_cases/ibsw3_scp_cpld_test_isolation.py"
   ],
   "scripts": {
     "DAY0-Prepare/01-a-setup.py": "DAY0-Prepare/01-a-setup.py",
@@ -2283,6 +2293,17 @@
       "tests": [
         "test_cases.test_ibsw3_scp_native_declaration_capability",
         "test_cases.test_ibsw3_scp_empty_wire_shell_boundary"
+      ]
+    },
+    {
+      "id": "ibsw3_scp_request_content_scope_direct",
+      "paths": [
+        "tools/ibsw_upgrade_driver.py",
+        "tools/ibsw_upgrade_scp.py"
+      ],
+      "tests": [
+        "test_cases.test_ibsw3_scp_scope_request_content",
+        "test_cases.test_ibsw3_scp_request_cpld_sources"
       ]
     }
   ],
@@ -4224,6 +4245,25 @@
         "test_cases.test_ibsw3_scp_native_declaration_capability",
         "test_cases.test_ibsw3_scp_empty_wire_shell_boundary"
       ]
+    },
+    {
+      "id": "ibsw3_scp_original_request_content_companion_workflow",
+      "members": [
+        "infiniband/bringup/xdr-upgrade/upgrade.py",
+        "infiniband/bringup/xdr-upgrade/upgrade-component.sh",
+        "infiniband/bringup/xdr-upgrade/upgrade-owned-runner.sh",
+        "tools/ibsw_upgrade_driver.py",
+        "tools/ibsw_upgrade_scp.py",
+        "tools/ibsw_upgrade_component.py",
+        "tools/ibsw_upgrade_inputs.py",
+        "tools/ibsw_upgrade_contract.py",
+        "tools/ibsw_upgrade_executor.py",
+        "tools/project_contract.py"
+      ],
+      "tests": [
+        "test_cases.test_ibsw3_scp_scope_request_content",
+        "test_cases.test_ibsw3_scp_request_cpld_sources"
+      ]
     }
   ],
   "path_rules": [
@@ -4608,6 +4648,22 @@
         "test_cases.test_ibsw3_scp_stage_scope",
         "test_cases.test_ibsw3_scp_stage_durability",
         "test_cases.test_ibsw3_scp_stage_constructor"
+      ]
+    },
+    {
+      "paths": [
+        "test_cases/ibsw3_scp_request_test_isolation.py"
+      ],
+      "tests": [
+        "test_cases.test_ibsw3_scp_scope_request_content"
+      ]
+    },
+    {
+      "paths": [
+        "test_cases/ibsw3_scp_cpld_test_isolation.py"
+      ],
+      "tests": [
+        "test_cases.test_ibsw3_scp_request_cpld_sources"
       ]
     }
   ]
