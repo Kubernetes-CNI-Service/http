@@ -4965,6 +4965,28 @@ full run (their original FD/field remains UNKNOWN), current full/check,
 Cloud/device acceptance or broader permission. Acquisition30s, read-only
 observation60s and mutation60s are unchanged; prior failed logs are retained.
 
+### REQ7 confirmed publication versus reporting — owner 2026-10-20
+
+The owner approved only this narrow distinction: after required durability,
+original/target verification and critical owner/FD cleanup have all succeeded,
+a later stdout or explicitly non-critical logging failure may be reported as
+committed with reporting failure. It must not retry initialization or grant
+business sending. A visible final link alone is not confirmed durable commit;
+required fsync, identity-check and critical-close failures remain UNKNOWN/HOLD.
+
+A private publisher diagnostic candidate now records visibility separately
+and returns plain COMMITTED_CONFIRMED DATA only after all required closes.
+Independent diagnostic direct3 initially FAIL3, then the same3 PASS; original
+exclusive-link refusal and healthy source-reader controls PASS2. These are
+synthetic protocol DATA with native private filesystem operations, not TLS,
+Cloud, a worker permit or completion of the publication protocol. The old
+post-fsync/close cold-reader refusal failures and assertions are retained.
+Moving an in-memory flag does not distinguish otherwise identical cold
+on-disk states, so the publisher remains unintegrated. Actual confirmed
+publication followed by reporting failure, real TLS/cold-reader closure,
+current full/check and REAL_ENV remain unproved. No new residual risk for
+critical failures or power loss was accepted.
+
 ### H private native-lock/recovery workflow — 2026-10-20
 
 `test_h_feedback_real_lock_recovery_workflow` adds two independent controls

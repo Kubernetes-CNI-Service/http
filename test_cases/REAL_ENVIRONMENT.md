@@ -1344,6 +1344,16 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 ## TC-REAL-MONITOR-WRITER-QUIESCE-001 — Native writer 写前停止 Monitor
 
+- 本地分析器补充：原 owner/callsite 身份及显式容器携带 whole receiver 的拒绝已有独立 AST
+  正反例与真实 feedback/runtime 私有夹具回归；包括显式 `+= [receiver]` 和
+  `payload := [receiver]`，对应仅携带 DATA 字段的正控保持可接受。
+  拼接／条件表达式及本地别名包裹的 whole receiver 同样保守拒绝；未赋予 operator
+  执行语义；Call 结果在包含检测中保持 opaque，实际内层调用仍须通过原
+  receiver-call/handoff 验证，未扩成任意 Python 解释器。
+  comprehension 的原 `iter/ifs` 出现 whole 依赖时拒绝整个表达式；不解释 target、
+  item 或迭代过程，也不提供自动解包／接管能力。
+  仅限已登记的有限语法，不证明任意 Python
+  动态分派、真实 PID/服务切换或断电安全。现场步骤、证据、清理及下列 NOT RUN 状态不变。
 - 状态：**NOT RUN / REAL_ENV REQUIRED**。自动化只使用隔离目录与进程替身，未以 root 运行、未向
   真实 PID 发信号，也未启动或停止 systemd、Apache、DHCP 或真实 Monitor；不得把当前单元与 workflow
   结果当作真机证据。
@@ -2815,6 +2825,9 @@ generation/publish 及 UNKNOWN 下改 action/wire 均 HOLD，不计作 COMPLETE 
 
 - 类型/需求/平台：integration、scenario、real-environment；REQ7 首次人工初始化；管理服务器/Cloud。真实环境仍 **NOT RUN**，未授权本次访问真实 Cloud。
 - 合同：普通 worker 永不自动初始化。仅独立 `python3 -B -m monitor.issue_tracker_enrollment_journal --initialize-project /ABS/PROJECT`；首版只创建确认全新且无冲突的原件，不修复、不接管、不重生 nonce、不自动重试。
+- 2026-10-19 owner 确认方案 A：初始化成功后凭绑定当前项目、目标表及本次原件的最终完成记录解除初始化门，不另设人工激活；完成记录不是业务发送许可。普通 worker 首用、已有业务对账、NEW 和实际 count/send 原件作用域均须核完成原件，不因业务目录已存在或缺失整个 init attempt 而 grandfather。原 journal 三文件和 OBSERVED-DATA 单独存在均不能代替最终完成证明；所有原业务门禁保持。
+- 完成边界待验证：原初始化 owner/子进程/响应/原件收尾必须成功才允许发行；成功、缺失/篡改记录、同字节 nonce 换 inode、完整 INTENT 冲突、已有业务 UNKNOWN、原 owner/原件清理失败及冷恢复均保留独立案例。原子提交与发布器提交后 fsync/关闭异常须分开记录，不能把已提交但收尾异常虚报成未提交，也不能未经确认假定其允许后续 worker。该成功发行片段当前尚未整合，未接受此残余风险；现场、真实断电及发布均 NOT RUN。
+- 2026-10-20 owner 确认窄区分：仅在必要目录 fsync、原件/目标核验和关键 owner/FD 收尾全部成功、已确认持久提交之后，纯回显或明确非关键日志失败可记录为“已提交，但报告失败”，不得自动重新初始化；它不授予业务发送。记录可见不等于确认提交，发布器的必要 fsync、原件核验或关键 close 失败仍 UNKNOWN/HOLD，不能改称非关键报告失败。当前两 hardlink 与十三 DATA 原件格式尚不能让冷 reader 区分可见但关键收尾失败和全部成功；本进程诊断状态修正不补足该持久协议，不据此启用 publisher、改写原冷拒绝断言或宣称此窗口已闭合。正常真实 TLS→发行→冷读取及报告失败正控仍待合法发行协议验证；不以合成 DATA、状态字典或同进程观察代替。原失败证据、断电风险和现场 NOT RUN 保留。
 - 前置：另有精确现场授权；已部署且受保护的项目 tracker、固定 root-only 共享状态根、凭据/CA/allowlist；真实项目与表身份一致、14 表和四业务/History 表头正确。本地目标家族只允许原 lock，无任何历史/loss witness 或既有 init attempt；完整可见 metadata 搜索必须为空。沿用 owner 已确认的表自创建即工具专用且元数据始终仅由同一 Cloud 项目写入的历史前提，不扩大为任意不可见 PROJECT scope 的证明。
 - 正常步骤：持有实际 project/target/spreadsheet 原 owner；一次真实 OAuth、原30秒四读 cohort 与固定60秒非续期观察；完整预检查后 fsync 持久四原 nonce，再一次固定 batchUpdate 创建四个 SHEET/DOCUMENT `http-ztp-enrollment-v1` 标记；固定60秒 mutation 总预算，真实进程回收、全部 pipe 收尾和原件/auth/双 owner 最终核验；再完整 metadata 回读核四个 assigned ID、sheet 和原 nonce。全部 owner/原件正常收尾后才可输出成功。
 - 失败预期：部分、本地丢失见证、任何既有/外来 metadata、原件/目标漂移、写入 UNKNOWN、错 nonce/ID、读取不完整、超时/未确认终止、收尾失败或中断均停止；保留独立 `enrollment-init-<stem>` 尝试证据及原 nonce，不删除或重放。本地 INITIALIZED 不冒称远端成功；匹配 DATA 不提供业务 COMPLETE、自动发送或发布许可。
