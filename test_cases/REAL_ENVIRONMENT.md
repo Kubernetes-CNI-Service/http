@@ -2821,3 +2821,12 @@ generation/publish 及 UNKNOWN 下改 action/wire 均 HOLD，不计作 COMPLETE 
 - 本地替代证据：独立 CLI/direct、真实私有 nonce journal→固定协议→现有 metadata 消费者、多真实脚本/自有 loopback TLS、真实隔离 child/监督和原 owner 收尾。普通 worker 缺 enrollment 与重复人工初始化独立受测。它们不代替真实 Google API、Linux/AIR、设备或完整 full/check。
 - 现场故障：保留正常、关键本地落盘/远端提交边界、代表性中断、冷启动后拒绝重做及失败安全状态；真实断电另需维护和风险授权，不用 SIGKILL 或正常重启冒充。未知状态禁止自动 reset/clear/adopt。不存在已获准省略的核心恢复能力场景或新的残余风险接受人。
 - 证据/清理：精确 HEAD/tree/dirty/diff、manifest/ledger、Python/平台、命令、完整日志/END/退出码、原文件 stat/inode/SHA、四次创建及回读对应关系和原进程收尾；不得记录 token/私钥。只关闭本轮已确认持有的资源；失败文件保留，未知 FD/PID/路径不扫描救援，不修改线上状态用于“清理”。
+
+## TC-IBSW3-SCP-SOURCE-CONTENT-20261020 — NOT RUN
+
+- 类型/需求/平台：SCP 来源/接收端内容边界，management-server/Linux/NVOS；真实环境 NOT RUN，未授予真实 SSH、包源或设备操作权限。
+- 当前主树仅落来源/receiver 库；非空执行载荷和源端 preflight 明确 HOLD，CLI 仍 HTTP-only。独立 direct 与 source factory→driver endpoint→SSH public-key parser 真实跨脚本测试，以及实际 helper/PTY 配合私有外部命令的内容控制，不等于真实 SSH/安装或完整 SCP manager 链证明。
+- 前置：另获精确维护授权、可信独立核验的源指纹、获准原包和必要备份、真实原件/请求绑定及持久化/ACK 实现验收完成；不可用任意字典、同大小、格式正确摘要或旧报告授权。无需系统 host-key 文件读取来证明物理本机，不扩大第三方仓库支持。
+- 现场保留：正常三组件、等长错误内容、缺摘要、CPLD 第二包失败零 NV、源/原件漂移、可靠记录或关键清理失败、OS 下载后确认前中断与冷恢复。HTTP 原无包摘要合同不追认为有 SHA 保证；现场和真实断电均不可由模拟或 SIGKILL 代替。
+- 证据：精确源码/测试/manifest、Python/平台、原请求与包原件身份、完整日志/退出码、关键 fsync/close 和 ACK 顺序。不得持久化口令、token 或私钥。
+- 清理/风险：只清理本轮确认持有的测试对象；FAIL/UNKNOWN 保留请求/原件和人工检查记录，零自动重试/刷新基线/接管。远端已派发写入、同 UID/root 并发与 helper 返回后换包风险仍须单独验证；无新增风险接受人，不能报告已可用。
