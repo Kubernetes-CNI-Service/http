@@ -368,6 +368,7 @@
       "id": "ibsw225-canonical-runtime",
       "description": "IBSW2.25 canonical runtime, independent source contracts and original normal workflows; local targeted evidence is not full638/device proof.",
       "tests": [
+        "test_cases.test_ibsw3_scp_source_binding",
         "test_cases.test_ibsw225_runtime_source_manifest_contract",
         "test_cases.test_ibsw225_ib_alias_derivation_workflow",
         "test_cases.test_ibsw225_device_globs",
@@ -744,6 +745,7 @@
     "tools/ibsw_upgrade_inputs.py": "tools/ibsw_upgrade_inputs.py",
     "tools/ibsw_upgrade_schedule.py": "tools/ibsw_upgrade_schedule.py",
     "tools/ibsw_upgrade_component.py": "tools/ibsw_upgrade_component.py",
+    "tools/ibsw_upgrade_scp.py": "tools/ibsw_upgrade_scp.py",
     "tools/ibsw_upgrade_driver.py": "tools/ibsw_upgrade_driver.py",
     "tools/ibsw_upgrade_executor.py": "tools/ibsw_upgrade_executor.py",
     "tools/ibsw_upgrade_observer.py": "tools/ibsw_upgrade_observer.py",
@@ -2124,6 +2126,11 @@
       "id": "req7_pending_original_unit_catalog",
       "paths": ["monitor/issue_tracker_unit_catalog.py","monitor/issue_tracker_global_attempt_journal.py","monitor/issue_tracker_remote_history_match.py","monitor/issue_tracker_retained_inventory.py"],
       "tests": ["test_cases.test_req7_unit_catalog"]
+    },
+    {
+      "id": "ibsw3_scp_source_receiver_direct",
+      "paths": ["tools/ibsw_upgrade_scp.py"],
+      "tests": ["test_cases.test_ibsw3_scp_source_binding"]
     },
     {
       "id": "ibsw225_entry_render_component_direct",
@@ -3555,6 +3562,11 @@
       "tests": [
         "test_cases.test_issue_tracker_ib_runtime_workflow"
       ]
+    },
+    {
+      "id": "ibsw3_scp_source_key_endpoint_workflow",
+      "members": ["tools/ibsw_upgrade_scp.py", "tools/ibsw_upgrade_driver.py", "tools/ssh_key_preparation.py"],
+      "tests": ["test_cases.test_ibsw3_scp_source_binding"]
     },
     {
       "id": "req7_ib_expected_topology_byte_authority",
