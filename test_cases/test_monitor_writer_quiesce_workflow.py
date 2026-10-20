@@ -160,10 +160,49 @@ def called_name(call: ast.Call) -> str | None:
     return None
 
 
-def production_functions(tree: ast.AST) -> dict[str, ast.AST]:
+def _owned_function_definitions(tree: ast.AST) -> dict[ast.AST, tuple[ast.AST, tuple[ast.AST, ...]]]:
+    """Keep original definitions and lexical owners; presence is not authority."""
+    definitions = {}
+    scope_types = (
+        ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda,
+    )
+
+    def visit(node, owners):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if node in definitions:
+                raise AssertionError("WDISC_UNRESOLVED: shared function definition AST")
+            definitions[node] = (tree, owners)
+        child_owners = owners + (node,) if isinstance(node, scope_types) else owners
+        for child in ast.iter_child_nodes(node):
+            visit(child, child_owners)
+
+    visit(tree, ())
+    return definitions
+
+
+def _owned_function_labels(owned) -> dict[ast.AST, str]:
+    """Use the same original-definition label in discovery and call consumers."""
+    counts = {}
+    for function in owned:
+        counts[function.name] = counts.get(function.name, 0) + 1
     return {
-        node.name: node for node in ast.walk(tree)
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        function: function.name if counts[function.name] == 1 else (
+            '.'.join(getattr(owner, 'name', '<module>') for owner in owners)
+            + '.' + function.name + '@' + str(function.lineno)
+        )
+        for function, (_source, owners) in owned.items()
+    }
+
+
+def production_functions(tree: ast.AST) -> dict[str, ast.AST]:
+    """Project unique direct module declarations, not same-named owned methods."""
+    by_name = {}
+    if isinstance(tree, ast.Module):
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                by_name.setdefault(node.name, []).append(node)
+    return {
+        name: nodes[0] for name, nodes in by_name.items() if len(nodes) == 1
     }
 
 
@@ -321,7 +360,18 @@ def _literal_reflected_mutation(
 def _extend_mutation_aliases(
     nodes, seed: dict[str, str],
 ) -> dict[str, str]:
-    aliases = dict(seed)
+    # Facts grow only by union over a finite set of source-derived canonicals.
+    # The returned mapping is exact-only; ambiguous facts remain separate so
+    # real call consumers cannot mistake their absence for absence of a writer.
+    class AliasProjection(dict):
+        pass
+
+    possibilities = {
+        name: set(values)
+        for name, values in getattr(seed, "_mutation_possibilities", {}).items()
+    }
+    for name, canonical in seed.items():
+        possibilities.setdefault(name, set()).add(canonical)
     assignments = [
         node for root in nodes for node in _walk_local_scope(root)
         if isinstance(node, (ast.Assign, ast.AnnAssign))
@@ -330,31 +380,59 @@ def _extend_mutation_aliases(
     changed = True
     while changed:
         changed = False
+        exact = {
+            name: next(iter(values))
+            for name, values in possibilities.items() if len(values) == 1
+        }
         for node in assignments:
             value = node.value
-            canonical = None
+            candidates = set()
             if isinstance(value, ast.Name):
-                canonical = aliases.get(value.id)
+                candidates.update(possibilities.get(value.id, ()))
             elif (
                 isinstance(value, ast.Attribute)
                 and isinstance(value.value, ast.Name)
             ):
-                module = aliases.get(value.value.id, value.value.id)
-                if module in {"os", "shutil"} and (
-                    value.attr in MUTATION_CALL_NAMES
-                    or value.attr in {"open", "remove", "write"}
-                ):
-                    canonical = f"{module}.{value.attr}"
+                modules = possibilities.get(value.value.id, {value.value.id})
+                for module in modules:
+                    if module in {"os", "shutil"} and (
+                        value.attr in MUTATION_CALL_NAMES
+                        or value.attr in {"open", "remove", "write"}
+                    ):
+                        candidates.add(f"{module}.{value.attr}")
             elif isinstance(value, ast.Call):
-                canonical = _literal_reflected_mutation(value, aliases)
-            if canonical is None:
+                canonical = _literal_reflected_mutation(value, exact)
+                if canonical is not None:
+                    candidates.add(canonical)
+                if value.args and isinstance(value.args[0], ast.Name):
+                    root_name = value.args[0].id
+                    for module in possibilities.get(root_name, ()):
+                        view = dict(exact)
+                        view[root_name] = module
+                        canonical = _literal_reflected_mutation(value, view)
+                        if canonical is not None:
+                            candidates.add(canonical)
+            if not candidates:
                 continue
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
             for target in targets:
                 for target_name in _assigned_names(target):
-                    if aliases.get(target_name) != canonical:
-                        aliases[target_name] = canonical
-                        changed = True
+                    values = possibilities.setdefault(target_name, set())
+                    before = len(values)
+                    values.update(candidates)
+                    changed |= len(values) != before
+
+    aliases = AliasProjection(seed)
+    for name, values in possibilities.items():
+        if len(values) == 1:
+            canonical = next(iter(values))
+            if aliases.get(name) != canonical:
+                aliases[name] = canonical
+        else:
+            aliases.pop(name, None)
+    aliases._mutation_possibilities = {
+        name: frozenset(values) for name, values in possibilities.items()
+    }
     return aliases
 
 
@@ -432,6 +510,26 @@ def _ffi_module_reflection_innocent(tree: ast.AST) -> bool:
     return True
 
 
+def _reviewed_source_ast_sha256(tree: ast.AST) -> str | None:
+    """Preserve reviewed source identity across empty definition metadata only."""
+    # Python 3.12 adds empty type_params metadata to otherwise unchanged
+    # definitions. Normalize only that schema field on a private copy; any
+    # generic or unknown shape still withdraws the old whole-module proof.
+    reviewed_tree = copy.deepcopy(tree)
+    for definition in ast.walk(reviewed_tree):
+        if isinstance(definition, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            parameters = getattr(definition, "type_params", [])
+            if type(parameters) is not list or parameters:
+                return None
+            if "type_params" in definition._fields:
+                definition._fields = tuple(
+                    name for name in definition._fields if name != "type_params"
+                )
+    return hashlib.sha256(
+        ast.dump(reviewed_tree, include_attributes=False).encode(),
+    ).hexdigest()
+
+
 def _source_bound_native_rename_calls(
     tree: ast.AST, relative: str,
 ) -> dict[ast.Call, str]:
@@ -457,9 +555,7 @@ def _source_bound_native_rename_calls(
         # loses recognition rather than bypassing the byte-boundary rule.
         "7e8af383d72f5da6f6d0efa31a8d4fd281805de93fcd37b293435daade817265",
     }
-    observed_ast_sha256 = hashlib.sha256(
-        ast.dump(tree, include_attributes=False).encode(),
-    ).hexdigest()
+    observed_ast_sha256 = _reviewed_source_ast_sha256(tree)
     if observed_ast_sha256 not in reviewed_ast_sha256:
         return {}
     if not _ffi_module_reflection_innocent(tree):
@@ -587,7 +683,7 @@ def _source_bound_load_report_path(
         (load_tree, "d9c67b110d7a2ce6cc3c17bd956164e3906ae08d1807c889ab7786d47ca05ca6"),
         (report_tree, "d2b79619b2ace8c4ea96edcf0ad599001d8f78af6a569168bc4971770e0bca05"),
     )
-    if any(hashlib.sha256(ast.dump(tree, include_attributes=False).encode()).hexdigest()
+    if any(_reviewed_source_ast_sha256(tree)
            != expected for tree, expected in reviewed):
         return {}
     return _load_report_structural_path(load_tree, report_tree)
@@ -816,7 +912,7 @@ def _source_bound_feedback_recovery_path(
         (feedback_tree, "7e472596fc86a656465a8ba1361a553486decf71e996d9d71e891744e6f47216"),
         (runtime_tree, "0d11ab1cf74048380672b9bc30070040913d89ceddd7d54cae47e63f98044ed2"),
     )
-    if any(hashlib.sha256(ast.dump(tree, include_attributes=False).encode()).hexdigest()
+    if any(_reviewed_source_ast_sha256(tree)
            != expected for tree, expected in reviewed):
         return {}
     return _feedback_recovery_structural_path(feedback_tree, runtime_tree)
@@ -948,9 +1044,12 @@ def generic_mutation_parameter_summaries(
     tree: ast.AST, source_path: str | None = None,
 ) -> dict[str, set[int]]:
     """Summarize which positional parameters can reach a mutation destination."""
+    # A reused AST may be edited between analyses. Memoize only its current
+    # structural data, never admission/source authority or a previous epoch.
+    epoch = ast.dump(tree, include_attributes=True) if source_path is None else None
     cached = _GENERIC_MUTATION_SUMMARY_CACHE.get(tree) if source_path is None else None
-    if cached is not None:
-        return cached
+    if cached is not None and cached[0] == epoch:
+        return {name: set(indices) for name, indices in cached[1].items()}
     functions = production_functions(tree)
     module_aliases = _mutation_aliases(tree)
     native_calls = (
@@ -1012,6 +1111,13 @@ def generic_mutation_parameter_summaries(
         static_integers = _function_static_integers(function)
         direct = set()
         for call in calls:
+            if (
+                isinstance(call.func, ast.Name)
+                and len(getattr(aliases, "_mutation_possibilities", {}).get(call.func.id, ())) > 1
+            ):
+                raise AssertionError(
+                    "WDISC_UNRESOLVED: ambiguous mutation alias", call.func.id,
+                )
             destination = _mutation_destination(
                 call, aliases, static_integers,
                 native_identity=native_calls.get(call),
@@ -1057,7 +1163,9 @@ def generic_mutation_parameter_summaries(
             summaries[name].update(discovered)
             changed |= len(summaries[name]) != before
     if source_path is None:
-        _GENERIC_MUTATION_SUMMARY_CACHE[tree] = summaries
+        _GENERIC_MUTATION_SUMMARY_CACHE[tree] = (
+            epoch, {name: frozenset(indices) for name, indices in summaries.items()},
+        )
     return summaries
 
 
@@ -1902,6 +2010,76 @@ def _source_bound_setup_mapping_seed(
     return {"MAPPINGS"}
 
 
+def _owned_attribute_mutation_calls(tree: ast.AST) -> set[ast.Call]:
+    """Conservative field-to-sink discovery within one original class owner.
+
+    Field facts never become bare-name method summaries or authorization.
+    Project each immediate, undecorated instance method onto fresh field
+    symbols so a governed field cannot taint the entire receiver or an
+    unrelated class with the same method/field spelling.
+    """
+    by_owner = {}
+    for function, (_source, owners) in _owned_function_definitions(tree).items():
+        positional = list(function.args.posonlyargs) + list(function.args.args)
+        if (owners and isinstance(owners[-1], ast.ClassDef)
+                and positional and not function.decorator_list):
+            by_owner.setdefault(owners[-1], []).append((function, positional[0].arg))
+    result = set()
+    occupied = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
+    prefix = '_h_owned_field_'
+    while any(name.startswith(prefix) for name in occupied):
+        prefix += '_'
+    aliases = _mutation_aliases(tree)
+    for owner, methods in by_owner.items():
+        symbols = {}
+        projections = []
+        for function, receiver in methods:
+            clone = copy.deepcopy(function)
+            calls = dict(zip(
+                (node for node in _walk_local_scope(clone) if isinstance(node, ast.Call)),
+                (node for node in _walk_local_scope(function) if isinstance(node, ast.Call)),
+            ))
+
+            class FieldProjection(ast.NodeTransformer):
+                def visit_FunctionDef(self, node):
+                    return self.generic_visit(node) if node is clone else node
+
+                visit_AsyncFunctionDef = visit_FunctionDef
+
+                def visit_ClassDef(self, node):
+                    return node
+
+                def visit_Lambda(self, node):
+                    return node
+
+                def visit_Attribute(self, node):
+                    if isinstance(node.value, ast.Name) and node.value.id == receiver:
+                        symbol = symbols.setdefault(node.attr, prefix + str(len(symbols)))
+                        return ast.copy_location(ast.Name(id=symbol, ctx=node.ctx), node)
+                    return self.generic_visit(node)
+
+            clone = FieldProjection().visit(clone)
+            projections.append((clone, calls))
+        fields = set()
+        changed = True
+        while changed:
+            changed = False
+            for clone, _calls in projections:
+                discovered = _governed_locals(clone, fields, set()) & set(symbols.values())
+                if not discovered <= fields:
+                    fields.update(discovered)
+                    changed = True
+        for clone, calls in projections:
+            governed = _governed_locals(clone, fields, set())
+            local_aliases = _extend_mutation_aliases([clone], aliases)
+            integers = _function_static_integers(clone)
+            for call, original in calls.items():
+                destination = _mutation_destination(call, local_aliases, integers)
+                if destination is not None and _is_governed_destination(destination, governed):
+                    result.add(original)
+    return result
+
+
 def literal_governed_mutation_sinks(
     tree: ast.AST, source_path: str | None = None,
 ) -> set[str]:
@@ -1941,10 +2119,17 @@ def literal_governed_mutation_sinks(
                     target.id for target in targets if isinstance(target, ast.Name)
                 )
     governed_returns = _governed_return_summaries(tree, module_governed)
+    owned_attribute_calls = _owned_attribute_mutation_calls(tree)
     governed_by_function = {}
     semantic_governed_by_function = {}
     functions = production_functions(tree)
-    for function in functions.values():
+    owned_functions = _owned_function_definitions(tree)
+    owned_labels = _owned_function_labels(owned_functions)
+    owned_mutation_definitions = set()
+    unrepresented_mutations = {}
+    unrepresented_returns = {}
+    mutation_destinations = {}
+    for function in owned_functions:
         aliases = _extend_mutation_aliases([function], module_aliases)
         governed = _governed_locals(
             function, module_governed, governed_returns,
@@ -1953,21 +2138,40 @@ def literal_governed_mutation_sinks(
         delegated_governed = _governed_locals(
             function, delegated_script_constants, set(),
         ) if delegated_script_constants else set()
-        governed_by_function[function.name] = governed
-        semantic_governed_by_function[function.name] = _governed_locals(
+        governed_by_function[function] = governed
+        semantic_governed_by_function[function] = _governed_locals(
             function, module_governed, governed_returns,
             aggregate_flows=False,
         )
+        if functions.get(function.name) is not function:
+            returns = {
+                node for node in _walk_local_scope(function)
+                if isinstance(node, ast.Return) and node.value is not None
+                and _transparent_governed_expression(
+                    node.value, semantic_governed_by_function[function], governed_returns,
+                )
+            }
+            if returns:
+                unrepresented_returns[function] = returns
         for call in (
             node for node in _walk_local_scope(function)
             if isinstance(node, ast.Call)
         ):
+            if (
+                isinstance(call.func, ast.Name)
+                and len(getattr(aliases, "_mutation_possibilities", {}).get(call.func.id, ())) > 1
+            ):
+                raise AssertionError(
+                    "WDISC_UNRESOLVED: ambiguous mutation alias", call.func.id,
+                )
             destination = _mutation_destination(
                 call, aliases, static_integers,
                 native_identity=native_calls.get(call),
             )
             if destination is None:
                 continue
+            if functions.get(function.name) is not function:
+                unrepresented_mutations.setdefault(function, set()).add(call)
             governed_expression = destination
             if (call in native_calls and isinstance(destination, ast.Call)
                     and isinstance(destination.func, ast.Attribute)
@@ -1978,8 +2182,11 @@ def literal_governed_mutation_sinks(
                 # The source-bound ABI proof already verified this exact
                 # fsencode wrapper. Its argument is the filesystem path.
                 governed_expression = destination.args[0]
-            if _is_governed_destination(governed_expression, governed):
-                result.add(function.name)
+            mutation_destinations.setdefault(function, {})[call] = governed_expression
+            if call in owned_attribute_calls or _is_governed_destination(governed_expression, governed):
+                result.add(owned_labels[function])
+                if functions.get(function.name) is not function:
+                    owned_mutation_definitions.add(function)
         # A subprocess runner that consumes a command assembled from a
         # mechanically resolved governed-writer script is itself the mutation
         # boundary, even though the filesystem syscall lives in that child.
@@ -2000,10 +2207,123 @@ def literal_governed_mutation_sinks(
                 for node in ast.walk(argument) if isinstance(node, ast.Name)
             }
             if names & delegated_governed:
-                result.add(function.name)
+                result.add(owned_labels[function])
+                if functions.get(function.name) is not function:
+                    owned_mutation_definitions.add(function)
+    def call_scope_bindings(function, owners, name):
+        scopes = [function] + [
+            scope for scope in reversed(owners)
+            if isinstance(scope, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef))
+        ]
+        routed = False
+        visited = set()
+        while scopes:
+            scope = scopes.pop(0)
+            if scope in visited:
+                raise AssertionError("WDISC_UNRESOLVED: cyclic source scope route", name)
+            visited.add(scope)
+            bindings = _source_scope_bindings(scope).get(name, ())
+            if not bindings:
+                continue
+            directives = [
+                node for kind, node in bindings if kind == "scope-directive"
+            ]
+            if not directives:
+                return bindings
+            if (
+                routed or len(bindings) != 1 or len(directives) != 1
+                or not isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef))
+            ):
+                raise AssertionError("WDISC_UNRESOLVED: unsupported source scope directive", name)
+            source_tree, scope_owners = owned_functions[scope]
+            if source_tree is not tree:
+                raise AssertionError("WDISC_UNRESOLVED: foreign source scope route", name)
+            declaration = directives[0]
+            if isinstance(declaration, ast.Global):
+                modules = [owner for owner in scope_owners if isinstance(owner, ast.Module)]
+                if len(modules) != 1 or modules[0] is not tree:
+                    raise AssertionError("WDISC_UNRESOLVED: missing original global scope", name)
+                scopes = modules
+            elif isinstance(declaration, ast.Nonlocal):
+                scopes = [
+                    owner for owner in reversed(scope_owners)
+                    if isinstance(owner, (ast.FunctionDef, ast.AsyncFunctionDef))
+                ]
+            else:
+                raise AssertionError("WDISC_UNRESOLVED: unknown source scope directive", name)
+            routed = True
+        if routed:
+            raise AssertionError("WDISC_UNRESOLVED: unresolved declared source binding", name)
+        return ()
+
+    # A bare-name parameter summary cannot represent an owned definition.
+    # Preserve refusal on a concrete governed call rather than borrowing a
+    # same-named function from a different owner or silently losing its write.
+    for function, (source_tree, owners) in owned_functions.items():
+        governed = semantic_governed_by_function[function]
+        for call in (
+            node for node in _walk_local_scope(function)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        ):
+            if not any(
+                _is_governed_destination(argument, governed)
+                for argument in (*call.args, *(item.value for item in call.keywords))
+            ):
+                continue
+            bindings = call_scope_bindings(function, owners, call.func.id)
+            if any(kind == "parameter" for kind, _binding in bindings):
+                raise AssertionError(
+                    "WDISC_UNRESOLVED: unknown formal governed call", call.func.id,
+                )
+            if any(
+                kind == "definition" and (
+                    definition in unrepresented_mutations
+                    or (
+                        functions.get(function.name) is not function
+                        and bool(mutation_destinations.get(definition))
+                    )
+                )
+                for kind, definition in bindings
+            ):
+                raise AssertionError(
+                    "WDISC_UNRESOLVED: unrepresented owned mutation call", call.func.id,
+                )
+    # A returned governed value owned by a nested definition is not a
+    # module-global summary. Preserve refusal only on its original local
+    # assignment reaching an already recognized mutation destination.
+    for function, (source_tree, owners) in owned_functions.items():
+        for assignment in (
+            node for node in _walk_local_scope(function)
+            if isinstance(node, (ast.Assign, ast.AnnAssign))
+        ):
+            targets = assignment.targets if isinstance(assignment, ast.Assign) else [assignment.target]
+            value = assignment.value
+            if not (
+                len(targets) == 1 and isinstance(targets[0], ast.Name)
+                and isinstance(value, ast.Call) and isinstance(value.func, ast.Name)
+            ):
+                continue
+            reaches_destination = any(
+                isinstance(destination, (ast.Name, ast.Attribute, ast.Subscript))
+                and any(
+                    isinstance(node, ast.Name) and node.id == targets[0].id
+                    for node in ast.walk(destination)
+                )
+                for destination in mutation_destinations.get(function, {}).values()
+            )
+            if not reaches_destination:
+                continue
+            bindings = call_scope_bindings(function, owners, value.func.id)
+            if any(
+                kind == "definition" and definition in unrepresented_returns
+                for kind, definition in bindings
+            ):
+                raise AssertionError(
+                    "WDISC_UNRESOLVED: unrepresented owned governed return", value.func.id,
+                )
     summaries = generic_mutation_parameter_summaries(tree, source_path)
     for function in functions.values():
-        governed = semantic_governed_by_function[function.name]
+        governed = semantic_governed_by_function[function]
         for call in (
             node for node in _walk_local_scope(function)
             if isinstance(node, ast.Call)
@@ -2014,8 +2334,8 @@ def literal_governed_mutation_sinks(
                 if argument is None:
                     continue
                 if _is_governed_destination(argument, governed):
-                    result.add(function.name)
-                    result.add(callee)
+                    result.add(owned_labels[function])
+                    result.add(owned_labels[functions[callee]])
     # A validated deployment archive is an authority for the complete source
     # tree, not one fixed filename.  Discover that boundary from its source-
     # manifest vocabulary, archive API shape, and an http_root parameter that
@@ -2028,19 +2348,404 @@ def literal_governed_mutation_sinks(
                 and "http_root" in parameters
                 and parameters.index("http_root") in summaries.get(name, set())
             ):
-                result.add(name)
+                result.add(owned_labels[function])
+    if owned_mutation_definitions:
+        graph = local_call_graph(tree)
+        reached = {label for label, definition in graph.definitions.items()
+                   if definition in owned_mutation_definitions}
+        changed = True
+        while changed:
+            changed = False
+            for caller, callees in graph.items():
+                if caller not in reached and callees & reached:
+                    reached.add(caller)
+                    changed = True
+        for label in reached:
+            definition = graph.definitions[label]
+            if functions.get(definition.name) is definition:
+                result.add(label)
     return result
 
 
+class _OwnedCallGraph(dict):
+    """Display graph retaining original-node callsite and context evidence."""
+
+
 def local_call_graph(tree: ast.AST) -> dict[str, set[str]]:
-    functions = production_functions(tree)
-    return {
-        name: {
-            called_name(call) for call in ast.walk(function)
-            if isinstance(call, ast.Call) and called_name(call) in functions
-        }
-        for name, function in functions.items()
-    }
+    """Project original lexical definitions and resolved callsites, not basenames.
+
+    This graph is a candidate discovery model. Its per-call/context facts must
+    also be consumed by the ordering oracle before it can be integrated.
+    """
+    owned = _owned_function_definitions(tree)
+    labels = _owned_function_labels(owned)
+    graph = _OwnedCallGraph({label: set() for label in labels.values()})
+    graph.call_targets = {}
+    graph.context_targets = {}
+    graph.definitions = {label: node for node, label in labels.items()}
+    graph.original_owners = owned
+    bindings = {}
+    scope_walks = {}
+
+    def scopes(function):
+        return [function] + [
+            owner for owner in reversed(owned[function][1])
+            if isinstance(owner, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Module))
+        ]
+
+    def binding(function, name):
+        for scope in scopes(function):
+            if scope not in bindings:
+                bindings[scope] = _source_scope_bindings(scope)
+            table = bindings[scope]
+            entries = table.get(name, ())
+            if entries:
+                return scope, entries
+        return None, ()
+
+    def definition(function, name):
+        _scope, entries = binding(function, name)
+        if len(entries) == 1 and entries[0][0] == 'definition':
+            return entries[0][1]
+        return None
+
+    def constructor(function, expression):
+        if not (isinstance(expression, ast.Call)
+                and isinstance(expression.func, ast.Name)):
+            return None
+        target = definition(function, expression.func.id)
+        if isinstance(target, ast.ClassDef) and not target.decorator_list and not target.bases:
+            if target.keywords or any(
+                isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name in {'__new__', '__getattribute__', '__getattr__'}
+                for node in target.body
+            ):
+                raise AssertionError('WDISC_UNRESOLVED: custom class dispatch ' + target.name)
+            return target
+        return None
+
+    checked_dispatch = set()
+
+    def receiver_origin(function, name, seen=None):
+        seen = set() if seen is None else set(seen)
+        scope, entries = binding(function, name)
+        key = (scope, name)
+        if key in seen or len(entries) != 1:
+            return None
+        seen.add(key)
+        kind, _node = entries[0]
+        if kind == 'parameter' and scope in owned:
+            positional = list(scope.args.posonlyargs) + list(scope.args.args)
+            owners = owned[scope][1]
+            if (positional and positional[0].arg == name and owners
+                    and isinstance(owners[-1], ast.ClassDef) and not scope.decorator_list):
+                return owners[-1]
+        if kind != 'store':
+            return None
+        target = entries[0][1]
+        for statement in _walk_local_scope(scope):
+            if isinstance(statement, (ast.Assign, ast.AnnAssign)):
+                targets = statement.targets if isinstance(statement, ast.Assign) else [statement.target]
+                if len(targets) == 1 and targets[0] is target:
+                    if isinstance(statement.value, ast.Name):
+                        return receiver_origin(function, statement.value.id, seen)
+                    return constructor(function, statement.value)
+            elif isinstance(statement, ast.With):
+                for item in statement.items:
+                    if item.optional_vars is target:
+                        return constructor(function, item.context_expr)
+        return None
+
+    def finite_selectors(function, expression, seen=None):
+        literal = _literal_string(expression)
+        if literal is not None:
+            return {literal}
+        seen = set() if seen is None else set(seen)
+        if not isinstance(expression, ast.Name):
+            return None
+        scope, entries = binding(function, expression.id)
+        key = (scope, expression.id)
+        if key in seen or len(entries) != 1 or entries[0][0] != 'store':
+            return None
+        seen.add(key)
+        stored = entries[0][1]
+        for node in _walk_local_scope(scope):
+            if isinstance(node, ast.For) and node.target is stored:
+                if isinstance(node.iter, (ast.Tuple, ast.List, ast.Set)):
+                    values = [_literal_string(item) for item in node.iter.elts]
+                    if all(value is not None for value in values):
+                        return set(values)
+            if isinstance(node, (ast.Assign, ast.AnnAssign)):
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                if len(targets) == 1 and targets[0] is stored:
+                    return finite_selectors(function, node.value, seen)
+        return None
+
+    def receiver_container_argument(function, owner, aliases=()):
+        # This is containment refusal, not container access/expansion support.
+        # Attribute expressions are opaque DATA here: tx.ready is not tx.
+        whole = set(aliases)
+        for scope in scopes(function):
+            if scope not in scope_walks:
+                scope_walks[scope] = tuple(_walk_local_scope(scope))
+        scope_nodes = [node for scope in scopes(function)
+                       for node in scope_walks[scope]]
+        for scope in scopes(function):
+            if scope not in bindings:
+                bindings[scope] = _source_scope_bindings(scope)
+            for name in bindings[scope]:
+                if receiver_origin(function, name) is owner:
+                    whole.add(name)
+        contained = set()
+
+        def carries(expression):
+            if isinstance(expression, ast.Name):
+                return expression.id in whole or expression.id in contained
+            if isinstance(expression, (ast.List, ast.Tuple, ast.Set)):
+                return any(carries(item) for item in expression.elts)
+            if isinstance(expression, ast.Dict):
+                return any(carries(item) for item in (*expression.keys, *expression.values)
+                           if item is not None)
+            if isinstance(expression, ast.Starred):
+                return carries(expression.value)
+            if isinstance(expression, ast.NamedExpr):
+                return carries(expression.value)
+            if isinstance(expression, ast.comprehension):
+                return carries(expression.iter) or any(carries(condition)
+                                                      for condition in expression.ifs)
+            if isinstance(expression, ast.expr) and not isinstance(expression, (ast.Attribute, ast.Call)):
+                # Syntax dependence only: no operator/condition evaluation.
+                # Call results remain DATA here; the actual inner call still
+                # owes the original receiver-call/handoff proof below.
+                return any(carries(child) for child in ast.iter_child_nodes(expression)
+                           if isinstance(child, (ast.expr, ast.comprehension)))
+            return False
+
+        changed = True
+        while changed:
+            changed = False
+            for node in scope_nodes:
+                if not isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.NamedExpr)) or not carries(node.value):
+                    continue
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                for target in targets:
+                    for name in _assigned_names(target):
+                        if name not in whole and name not in contained:
+                            contained.add(name)
+                            changed = True
+
+        def nested(expression):
+            if isinstance(expression, ast.Name):
+                return expression.id in contained
+            return (isinstance(expression, ast.expr)
+                    and not isinstance(expression, (ast.Attribute, ast.Call))
+                    and carries(expression))
+
+        return nested
+
+    handoff_visited = set()
+
+    def prove_handoff(function, parameter, owner, slots):
+        key = (function, parameter, owner)
+        if key in handoff_visited:
+            return
+        entries = _source_scope_bindings(function).get(parameter, ())
+        if function.decorator_list or not (len(entries) == 1 and entries[0] == ('parameter', function)):
+            raise AssertionError('WDISC_UNRESOLVED: receiver handoff formal ' + parameter)
+        handoff_visited.add(key)
+        aliases = {parameter}
+        changed = True
+        while changed:
+            changed = False
+            for node in _walk_local_scope(function):
+                if not isinstance(node, (ast.Assign, ast.AnnAssign)) or not isinstance(node.value, ast.Name) or node.value.id not in aliases:
+                    continue
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                for target in targets:
+                    if isinstance(target, ast.Name) and target.id not in aliases:
+                        aliases.add(target.id)
+                        changed = True
+        nested_receiver = receiver_container_argument(function, owner, aliases)
+        for node in _walk_local_scope(function):
+            if (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+                    and node.value.id in aliases and (node.attr in {'__class__', '__dict__'}
+                    or isinstance(node.ctx, (ast.Store, ast.Del)) and node.attr in slots)):
+                raise AssertionError('WDISC_UNRESOLVED: helper receiver namespace ' + node.attr)
+            if isinstance(node, ast.Return) and isinstance(node.value, ast.Name) and node.value.id in aliases:
+                raise AssertionError('WDISC_UNRESOLVED: receiver returned from ordinary helper')
+            if isinstance(node, ast.Return) and nested_receiver(node.value):
+                raise AssertionError('WDISC_UNRESOLVED: receiver container returned from helper')
+            if not isinstance(node, ast.Call):
+                continue
+            arguments = [*node.args, *(item.value for item in node.keywords)]
+            if any(nested_receiver(argument) for argument in arguments):
+                raise AssertionError('WDISC_UNRESOLVED: helper receiver container escape')
+            receiver_args = [arg for arg in arguments if isinstance(arg, ast.Name) and arg.id in aliases]
+            if receiver_args:
+                prove_receiver_call(function, node, receiver_args, owner, slots)
+
+    def prove_receiver_call(function, call, receiver_args, owner, slots):
+        name = called_name(call)
+        if isinstance(call.func, ast.Name):
+            _scope, entries = binding(function, call.func.id)
+            if not entries and name in {'setattr', 'delattr', 'getattr'}:
+                selectors = finite_selectors(function, call.args[1]) if len(call.args) > 1 else None
+                if selectors is not None and not selectors & slots:
+                    return
+                raise AssertionError('WDISC_UNRESOLVED: receiver attribute selector ' + name)
+            if not entries and name == 'id':
+                return
+            target = definition(function, call.func.id)
+            if target in owned and not target.decorator_list:
+                matched = set()
+                for index, parameter in enumerate(_function_parameters(target)):
+                    argument = _call_argument(call, target, index)
+                    if argument in receiver_args:
+                        prove_handoff(target, parameter, owner, slots)
+                        matched.add(argument)
+                if set(receiver_args) <= matched:
+                    return
+        raise AssertionError('WDISC_UNRESOLVED: unknown whole-receiver escape ' + str(name))
+
+    def require_stable_dispatch(owner):
+        if owner in checked_dispatch:
+            return
+        slots = {node.name for node in owner.body
+                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        slots.update({'__class__', '__dict__'})
+        for function in owned:
+            nested_receiver = receiver_container_argument(function, owner)
+            for node in _walk_local_scope(function):
+                if (isinstance(node, ast.Attribute) and isinstance(node.ctx, (ast.Store, ast.Del))
+                        and node.attr in slots and isinstance(node.value, ast.Name)
+                        and receiver_origin(function, node.value.id) is owner):
+                    raise AssertionError('WDISC_UNRESOLVED: instance dispatch replacement ' + node.attr)
+                if (isinstance(node, ast.Attribute) and node.attr in {'__class__', '__dict__'}
+                        and isinstance(node.value, ast.Name) and receiver_origin(function, node.value.id) is owner):
+                    raise AssertionError('WDISC_UNRESOLVED: receiver namespace capture ' + node.attr)
+                if not isinstance(node, ast.Call):
+                    continue
+                args = [*node.args, *(keyword.value for keyword in node.keywords)]
+                if any(nested_receiver(argument) for argument in args):
+                    raise AssertionError('WDISC_UNRESOLVED: receiver container escape')
+                receiver_args = [argument for argument in args if isinstance(argument, ast.Name)
+                                 and receiver_origin(function, argument.id) is owner]
+                if not receiver_args:
+                    continue
+                prove_receiver_call(function, node, receiver_args, owner, slots)
+        checked_dispatch.add(owner)
+
+    def method(owner, name):
+        require_stable_dispatch(owner)
+        if any(
+            isinstance(node, ast.Attribute) and isinstance(node.ctx, (ast.Store, ast.Del))
+            and isinstance(node.value, ast.Name) and node.value.id == owner.name
+            for node in ast.walk(tree)
+        ):
+            raise AssertionError('WDISC_UNRESOLVED: class attribute rebinding ' + owner.name)
+        if owner not in bindings:
+            bindings[owner] = _source_scope_bindings(owner)
+        entries = bindings[owner].get(name, ())
+        if (len(entries) == 1 and entries[0][0] == 'definition'
+                and entries[0][1] in labels and not entries[0][1].decorator_list):
+            return entries[0][1]
+        return None
+
+    def receiver(function, name):
+        scope, entries = binding(function, name)
+        if scope is None:
+            return None
+        if len(entries) == 1 and entries[0][0] == 'parameter' and scope in owned:
+            positional = list(scope.args.posonlyargs) + list(scope.args.args)
+            owners = owned[scope][1]
+            if (positional and positional[0].arg == name and owners
+                    and isinstance(owners[-1], ast.ClassDef)
+                    and not scope.decorator_list):
+                return owners[-1]
+        if len(entries) != 1 or entries[0][0] != 'store':
+            return None
+        target = entries[0][1]
+        for statement in _walk_local_scope(scope):
+            if isinstance(statement, (ast.Assign, ast.AnnAssign)):
+                targets = statement.targets if isinstance(statement, ast.Assign) else [statement.target]
+                if len(targets) == 1 and targets[0] is target:
+                    return constructor(function, statement.value)
+            if isinstance(statement, ast.With):
+                for item in statement.items:
+                    if item.optional_vars is target:
+                        owner = constructor(function, item.context_expr)
+                        enter = method(owner, '__enter__') if owner is not None else None
+                        if enter is not None:
+                            parameters = _function_parameters(enter)
+                            formal = _source_scope_bindings(enter).get(parameters[0], ()) if parameters else ()
+                            returns = [node.value for node in _walk_local_scope(enter)
+                                       if isinstance(node, ast.Return)]
+                            if (parameters and returns and enter.body
+                                    and len(formal) == 1 and formal[0] == ('parameter', enter)
+                                    and isinstance(enter.body[-1], ast.Return) and all(
+                                isinstance(value, ast.Name) and value.id == parameters[0]
+                                for value in returns
+                            )):
+                                return owner
+                            raise AssertionError('WDISC_UNRESOLVED: unproved context entry receiver ' + name)
+                        return None
+        return None
+
+    def resolve(function, call):
+        if isinstance(call.func, ast.Name):
+            target = definition(function, call.func.id)
+            if target in labels and not target.decorator_list:
+                return target
+        elif isinstance(call.func, ast.Attribute) and isinstance(call.func.value, ast.Name):
+            owner = receiver(function, call.func.value.id)
+            if owner is not None:
+                return method(owner, call.func.attr)
+        return None
+
+    for function in owned:
+        edges = graph[labels[function]]
+        for call in (node for node in _walk_local_scope(function) if isinstance(node, ast.Call)):
+            target = resolve(function, call)
+            if target is not None:
+                edges.add(labels[target])
+                graph.call_targets.setdefault(call, set()).add(labels[target])
+                # Only a formal actually called by the original callee body
+                # supplies a callback edge; mere passing is not invocation.
+                invoked = {node.func.id for node in _walk_local_scope(target)
+                           if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)}
+                for index, parameter in enumerate(_function_parameters(target)):
+                    argument = _call_argument(call, target, index)
+                    if parameter in invoked and isinstance(argument, ast.Name):
+                        callback = definition(function, argument.id)
+                        if callback in labels and not callback.decorator_list:
+                            parameter_bindings = _source_scope_bindings(target).get(parameter, ())
+                            if not (len(parameter_bindings) == 1
+                                    and parameter_bindings[0] == ('parameter', target)):
+                                raise AssertionError('WDISC_UNRESOLVED: rebound callback formal ' + parameter)
+                            edges.add(labels[callback])
+                            graph.call_targets.setdefault(call, set()).add(labels[callback])
+            owner = constructor(function, call)
+            if owner is not None:
+                initializer = method(owner, '__init__')
+                if initializer is not None:
+                    edges.add(labels[initializer])
+                    graph.call_targets.setdefault(call, set()).add(labels[initializer])
+        for statement in _walk_local_scope(function):
+            if not isinstance(statement, ast.With):
+                continue
+            for item in statement.items:
+                owner = constructor(function, item.context_expr)
+                if owner is not None:
+                    phases = []
+                    for name in ('__enter__', '__exit__'):
+                        target = method(owner, name)
+                        if target is not None:
+                            edges.add(labels[target])
+                            phases.append({labels[target]})
+                        else:
+                            phases.append(set())
+                    graph.context_targets[item] = tuple(phases)
+    return graph
 
 
 def transitive_sink_callers(tree: ast.AST, sinks: set[str]) -> set[str]:
@@ -2603,6 +3308,136 @@ def structural_calls(
     return result
 
 
+def _owned_phase_structural_calls(tree, function, graph, reachable, accepted_stops,
+                                  suppress_aliases, terminal_functions, functions):
+    """Project resolved calls and implicit with phases for the ordering visitor.
+
+    This is an AST-only projection, not executable code. Original definitions
+    and the graph's original call/withitem nodes remain the evidence source.
+    """
+    memo = {}
+    projected = copy.deepcopy(function, memo)
+    original_calls = {memo[id(node)]: node for node in _walk_local_scope(function)
+                      if isinstance(node, ast.Call) and id(node) in memo}
+    original_items = {memo[id(item)]: item for node in _walk_local_scope(function)
+                      if isinstance(node, ast.With) for item in node.items
+                      if id(item) in memo}
+    module_bindings = _source_scope_bindings(tree)
+    local_bindings = _source_scope_bindings(function)
+
+    def trusted_stop(call):
+        if not isinstance(call.func, ast.Name) or call.func.id not in accepted_stops:
+            return False
+        if local_bindings.get(call.func.id):
+            return False
+        entries = module_bindings.get(call.func.id, ())
+        if len(entries) != 1:
+            return False
+        kind, definition = entries[0]
+        if kind == 'definition':
+            return definition in graph.original_owners and graph.original_owners[definition][1] == (tree,)
+        if kind == 'import-from':
+            return any(
+                isinstance(node, ast.ImportFrom) and definition in node.names
+                and node.module in {'tools.ztp_service_runtime', 'ztp_service_runtime'}
+                and definition.name == call.func.id and definition.asname is None
+                for node in tree.body
+            )
+        return False
+
+    class PhaseProjection(ast.NodeTransformer):
+        def __init__(self):
+            self.active_exits = []
+
+        def visit_FunctionDef(self, node):
+            return self.generic_visit(node) if node is projected else ast.copy_location(ast.Pass(), node)
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def visit_ClassDef(self, node):
+            return ast.copy_location(ast.Pass(), node)
+
+        def visit_Lambda(self, node):
+            return ast.copy_location(ast.Constant(value=None), node)
+
+        def event(self, label, source):
+            call = ast.Call(func=ast.Name(id=label, ctx=ast.Load()), args=[], keywords=[])
+            return ast.copy_location(ast.Expr(value=call), source)
+
+        def visit_Call(self, node):
+            original = original_calls.get(node)
+            self.generic_visit(node)
+            if original is None:
+                return node
+            targets = graph.call_targets.get(original, set())
+            if trusted_stop(original):
+                label = original.func.id
+            else:
+                matching = targets & reachable
+                if matching:
+                    label = sorted(matching)[0]
+                elif targets:
+                    label = sorted(targets)[0]
+                else:
+                    label = '_h_unresolved_call_'
+                    if called_name(original) in reachable:
+                        raise AssertionError('WDISC_UNRESOLVED: original governed call identity', called_name(original))
+                    if called_name(original) not in accepted_stops:
+                        # Preserve non-sink expression provenance used by the
+                        # existing terminal-handler and suppress-alias proof.
+                        # An unresolved callee is never promoted to a stop.
+                        return node
+            if called_name(original) in accepted_stops and not trusted_stop(original):
+                label = '_h_foreign_stop_'
+            node.func = ast.copy_location(ast.Name(id=label, ctx=ast.Load()), node.func)
+            return node
+
+        def visit_With(self, node):
+            records = [graph.context_targets.get(original_items.get(item)) for item in node.items]
+            if not any(records):
+                return self.generic_visit(node)
+            if not all(records):
+                raise AssertionError('WDISC_UNRESOLVED: mixed context-manager identity')
+            prefix = []
+            exits = []
+            for item, (enters, leaves) in zip(node.items, records):
+                prefix.append(ast.copy_location(ast.Expr(value=self.visit(item.context_expr)), node))
+                prefix.extend(self.event(label, node) for label in sorted(enters))
+                exits[0:0] = [self.event(label, node) for label in sorted(leaves)]
+            previous = self.active_exits
+            self.active_exits = exits + previous
+            body = []
+            for statement in node.body:
+                changed = self.visit(statement)
+                body.extend(changed if isinstance(changed, list) else [changed])
+            self.active_exits = previous
+            return prefix + body + copy.deepcopy(exits)
+
+        def visit_Return(self, node):
+            if not self.active_exits:
+                return self.generic_visit(node)
+            result = []
+            if node.value is not None:
+                result.append(ast.copy_location(ast.Expr(value=self.visit(node.value)), node))
+            result.extend(copy.deepcopy(self.active_exits))
+            result.append(ast.copy_location(ast.Return(value=None), node))
+            return result
+
+        def visit_Raise(self, node):
+            if not self.active_exits:
+                return self.generic_visit(node)
+            result = []
+            for expression in (node.exc, node.cause):
+                if expression is not None:
+                    result.append(ast.copy_location(ast.Expr(value=self.visit(expression)), node))
+            result.extend(copy.deepcopy(self.active_exits))
+            result.append(ast.copy_location(ast.Raise(exc=None, cause=None), node))
+            return result
+
+    projected = PhaseProjection().visit(projected)
+    return structural_calls(projected, suppress_aliases, reachable, terminal_functions, functions, {'parser'})
+
+
 def assert_quiesce_structurally_precedes_reachable_sink(
     testcase: unittest.TestCase, tree: ast.AST, entry_name: str,
     known_sinks: set[str], stop_names: set[str] | None = None,
@@ -2668,9 +3503,9 @@ def assert_quiesce_structurally_precedes_reachable_sink(
         return block_has_swallowed_stop
 
     reject_swallowed_stop_before_later_sink(function.body)
-    calls = structural_calls(
-        function, _suppress_aliases(tree, function), reachable,
-        terminal_functions, functions, {"parser"},
+    calls = _owned_phase_structural_calls(
+        tree, function, local_call_graph(tree), reachable, accepted_stops,
+        _suppress_aliases(tree, function), terminal_functions, functions,
     )
     stop_positions = [
         index for index, call in enumerate(calls)
@@ -3545,7 +4380,7 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
             "ztp/optimize/feedback.py": {"main"},
         }
         discovered = {}
-        for source in ROOT.rglob("*.py"):
+        for source in _tracked_production_python_paths(ROOT):
             relative = source.relative_to(ROOT)
             if relative.parts[0] in {"test_cases", ".git"}:
                 continue
@@ -4112,8 +4947,8 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
             "collect_dhcp", "read_tail", "write_report",
         }.issubset(cycle_calls))
 
-        all_functions = production_functions(monitor)
         graph = local_call_graph(monitor)
+        all_functions = graph.definitions
         reachable = {"monitor_once"}
         changed = True
         while changed:
@@ -5595,6 +6430,7 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
 
     def test_quiesce_oracle_rejects_swallowed_and_suppressed_stop_failures(self) -> None:
         """A stop whose failure is swallowed cannot dominate a later mutation."""
+        stop_binding = "from tools.ztp_service_runtime import stop_native_ztp_monitors\n"
         bodies = (
             (
                 "try-swallowed",
@@ -5725,7 +6561,7 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
                     else ""
                 )
                 tree = ast.parse(
-                    imports
+                    stop_binding + imports
                     + support
                     + "def write_authority():\n"
                     "    pass\n"
@@ -5760,7 +6596,7 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
         for name, body in propagating_bodies:
             with self.subTest(allowed_guard=name):
                 tree = ast.parse(
-                    "def write_authority():\n"
+                    stop_binding + "def write_authority():\n"
                     "    pass\n"
                     "def record_attempt():\n"
                     "    pass\n"
@@ -5816,7 +6652,7 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
         for name, support, handler_body in parser_terminal_bodies:
             with self.subTest(allowed_guard=name):
                 tree = ast.parse(
-                    support
+                    stop_binding + support
                     + "def write_authority():\n"
                     "    pass\n"
                     "def main(parser):\n"

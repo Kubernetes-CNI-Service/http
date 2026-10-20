@@ -4964,3 +4964,33 @@ local cleanup fix, not proof of the specific six FD failures in the prior
 full run (their original FD/field remains UNKNOWN), current full/check,
 Cloud/device acceptance or broader permission. Acquisition30s, read-only
 observation60s and mutation60s are unchanged; prior failed logs are retained.
+
+### H private native-lock/recovery workflow — 2026-10-20
+
+`test_h_feedback_real_lock_recovery_workflow` adds two independent controls
+using actual Feedback discovery/revalidation, deployment-lock acquisition,
+runtime stop and private global-writeback-state recovery. The lock and flock
+are not mocked: an independently opened descriptor must find the lock busy
+during revalidation, stop and recovery. The received original lock FD must
+be closed on exit and the same lock must then be independently available.
+The positive control really removes only its private validated published
+writeback state; the malformed-private-PID negative control must retain
+state, authority and PID identity/bytes, with no recovery or signal attempt.
+Its exception must be the original runtime contract error from the PID
+parser, not merely an arbitrary CLI-normalized exception. Only a private
+synthetic proc tree is used; every signal attempt is explicitly forbidden.
+
+Removing the sole stop call from an in-memory private Feedback AST makes
+both new literal controls fail. This is an oracle-mutation RED, not a product
+defect or production fix. The first private harness failed earlier on an
+existing non-root-owned finish-state fixture; that log is retained and is
+not counted as the oracle RED. The fixture now uses a nonexistent private
+finish-state leaf and the real absence check, without faking root ownership
+or writer authorization. The tightened private controls plus the original
+runtime direct control PASS3. The integrated run is recorded separately in
+the current work list/evidence receipt; repeated private/integrated cases
+are not additional unique coverage. Production scripts and original test
+assertions are unchanged. Manifest registration includes the actual lock
+and finish-state source members. This is not real process stopping,
+full FD census, injected-close safety, device acceptance or full/check;
+the existing REAL_ENV cases remain NOT RUN.
