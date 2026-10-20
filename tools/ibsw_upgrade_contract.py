@@ -531,6 +531,34 @@ def select_inventory_devices(snapshot, pattern=None):
 validate_optional_upgrade = validate_optional_ib_upgrade
 
 
+def _fixed_layout(module_file):
+    """One complete fixed bundle; canonical identity wins over local decoys."""
+    from pathlib import Path
+    directory = Path(module_file).resolve().parent
+    canonical = directory.parent / 'infiniband/bringup/xdr-upgrade'
+    if directory.name == 'tools' and (canonical / 'upgrade.py').is_file():
+        if (directory / 'upgrade.py').is_file():
+            raise ValueError('ambiguous fixed runtime layouts')
+        if (canonical / 'ibsw_upgrade_driver.py').is_file():
+            raise ValueError('fixed runtime layout/source disagreement')
+        scripts = canonical
+    else:
+        scripts = directory
+        if not (scripts / 'upgrade.py').is_file():
+            raise ValueError('complete fixed flat runtime entry required')
+    modules = ('ibsw_upgrade_driver', 'ibsw_upgrade_contract', 'ibsw_upgrade_inputs',
+               'ibsw_upgrade_component', 'ibsw_upgrade_schedule', 'ibsw_upgrade_observer',
+               'ibsw_upgrade_executor', 'ibsw_upgrade_access', 'ibsw_upgrade_pipeline',
+               '_package_common', 'project_contract', 'ssh_key_preparation',
+               'ib_bringup_runtime_guard')
+    if (any(not (directory / (name + '.py')).is_file() for name in modules)
+            or any(not (scripts / name).is_file() for name in
+                   ('upgrade.py', 'upgrade.sh', 'upgrade-component.sh',
+                    'upgrade-owned-runner.sh', 'requirements.txt'))):
+        raise ValueError('incomplete selected fixed runtime bundle')
+    return scripts
+
+
 def normalize_upgrade(document, *, selected, method, package_dir=None):
     if method not in {"local", "scp", "http"}:
         raise ValueError("supported transports: local, scp, http; no HTTPS")

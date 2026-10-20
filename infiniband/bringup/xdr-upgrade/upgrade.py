@@ -317,10 +317,30 @@ def _fixed_driver():
     if tools not in sys.path:
         sys.path.insert(0, tools)
     import ibsw_upgrade_driver
+    modules = {}
     for name in required:
         module = importlib.import_module(name)
         if Path(module.__file__).resolve().parent != Path(tools):
             raise _InspectionHold("mixed module sources refused; use one complete matching upgrade bundle")
+        modules[name] = module
+    # Audit only the already fixed local registry, never resolve a caller name
+    # or import a module from an object's metadata. Aliases/re-exports retain
+    # their actual defining name, so equality of names alone cannot pass.
+    from types import ModuleType, FunctionType
+    for consumer_name, consumer in modules.items():
+        for value in tuple(vars(consumer).values()):
+            if type(value) is ModuleType:
+                provider_name = value.__name__
+                if provider_name in modules and value is not modules[provider_name]:
+                    raise _InspectionHold("mixed runtime module binding refused")
+            elif type(value) is FunctionType or type(value) is type:
+                provider_name = value.__module__
+                if provider_name in modules and provider_name != consumer_name:
+                    if vars(modules[provider_name]).get(value.__name__) is not value:
+                        raise _InspectionHold("mixed runtime imported object binding refused")
+    contract = importlib.import_module("ibsw_upgrade_contract")
+    if contract._fixed_layout(ibsw_upgrade_driver.__file__) != directory:
+        raise _InspectionHold("fixed runtime layout does not match selected entry")
     return ibsw_upgrade_driver
 
 

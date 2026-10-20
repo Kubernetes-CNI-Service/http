@@ -1,6 +1,7 @@
 """Per-device input isolation: fixed expectations, temporary data, no device IO."""
 
-# NEW canonical test-header binding; original named bodies below are unchanged.
+# Canonical test-header binding; original behavior assertions are retained.
+# Readonly IO fixture keeps provider and consumer test doubles identity-coherent.
 import unittest as _ibsw225_unittest
 from test_cases.ibsw225_fixture_support.runtime_source_support import support as _ibsw225_support
 _ibsw225_runtime = _ibsw225_support(_ibsw225_unittest.TestCase())
@@ -157,6 +158,7 @@ class DeviceIsolationWorkflowTests(unittest.TestCase):
             self.assertEqual(len(list(run.glob("ew-spine*/os-*/step.sh"))), 4)
 
     def test_real_readonly_observation_never_authenticates_the_blocked_device(self):
+        import ibsw_upgrade_executor as executor
         attempted = []
         @contextlib.contextmanager
         def session(leaf, **kwargs):
@@ -165,8 +167,15 @@ class DeviceIsolationWorkflowTests(unittest.TestCase):
             yield object(), 99999999999, (identity, b"", 0), "password", "synthetic-pin"
         with tempfile.TemporaryDirectory() as directory:
             project, home, known = self.fixture(Path(directory).resolve())
-            with patch.object(observer, "_signed_session", session), \
-                 patch.object(observer, "_read_channel", return_value=(OS_TABLE, b"", 0, True)):
+            # The provider and explicit IO consumer share the same test double;
+            # do not leave executor holding an original provider function while
+            # replacing only observer before real entry identity admission.
+            with patch.object(observer, "_signed_session", side_effect=session) as session_io, \
+                 patch.object(executor, "_signed_session", session_io), \
+                 patch.object(observer, "_read_channel", return_value=(OS_TABLE, b"", 0, True)) as read_io, \
+                 patch.object(executor, "_read_channel", read_io):
+                self.assertIs(observer._signed_session, executor._signed_session)
+                self.assertIs(observer._read_channel, executor._read_channel)
                 code, out, err, prompts = fixtures.WorkflowTests().invoke(project, home)
             self.assertEqual(code, 3, err)
             self.assertEqual(attempted, [GOOD1[0], GOOD2[0]])

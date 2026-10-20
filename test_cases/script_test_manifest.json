@@ -411,6 +411,7 @@
         "test_cases.test_ibsw3_scp_parent_content_owner",
         "test_cases.test_ibsw3_scp_parent_cleanup_boundary",
         "test_cases.test_ibsw225_runtime_source_manifest_contract",
+        "test_cases.test_ibsw225_flat_tools_layout",
         "test_cases.test_ibsw225_ib_alias_derivation_workflow",
         "test_cases.test_ibsw225_device_globs",
         "test_cases.test_ibsw225_input_isolation",
@@ -2220,7 +2221,8 @@
       "tests": [
         "test_cases.test_ibsw225_runtime_source_manifest_contract",
         "test_cases.test_ibsw225_os_alternatives",
-        "test_cases.test_ibsw225_three_component_workflow"
+        "test_cases.test_ibsw225_three_component_workflow",
+        "test_cases.test_ibsw225_flat_tools_layout"
       ]
     },
     {
@@ -4181,7 +4183,8 @@
       "tests": [
         "test_cases.test_ibsw225_three_component_workflow",
         "test_cases.test_ibsw225_access_recovery",
-        "test_cases.test_ibsw225_os_alternatives"
+        "test_cases.test_ibsw225_os_alternatives",
+        "test_cases.test_ibsw225_flat_tools_layout"
       ]
     },
     {

@@ -24,6 +24,9 @@ from ibsw_upgrade_observer import (
 )
 
 
+from ibsw_upgrade_contract import _fixed_layout
+_RUNNER = _fixed_layout(__file__) / "upgrade-owned-runner.sh"
+
 _OS_COMMAND = "nv show system version"
 _UID_COMMAND = "id -u"
 _CAPABILITY_COMMAND = "test -x /bin/bash && test -x /usr/bin/nohup"
@@ -49,10 +52,9 @@ def _owned_runner_bytes(binding, remote):
         ("IBSW_EXIT_RECORD", posixpath.join(parent, "owned-exit.record")))
     if any(type(value) is not str or any(char in value for char in ("\n", "\r", "\x00")) for _key, value in values):
         raise ValueError("bounded single-line original runner fields required")
-    module_dir = Path(__file__).resolve().parent
-    runner = (module_dir.parent / "infiniband/bringup/xdr-upgrade/upgrade-owned-runner.sh"
-              if module_dir.name == "tools" else module_dir / "upgrade-owned-runner.sh")
-    body = runner.read_bytes()
+    if _fixed_layout(__file__) / "upgrade-owned-runner.sh" != _RUNNER:
+        raise ValueError("fixed owned runner layout changed")
+    body = _RUNNER.read_bytes()
     return ("#!/bin/bash\n" + "".join(key + "=" + shlex.quote(value) + "\n" for key, value in values)).encode() + body
 
 

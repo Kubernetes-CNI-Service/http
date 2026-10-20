@@ -129,6 +129,153 @@ class AccessExactSourceCompositionTests(unittest.TestCase):
                 self.assertNotEqual(hashlib.sha256(restored).hexdigest(), hashlib.sha256(expected).hexdigest())
 
 
+# Reviewed layout fix only. Original FROZEN_SHA256/access inverse stay unchanged.
+# These are independent literal preimage/postimage hunks, not runtime-derived.
+LAYOUT_APPROVED_COMPOSITION = {
+    'tools/ibsw_upgrade_contract.py': (
+        b'def normalize_upgrade(document, *, selected, method, package_dir=None):\n',
+        b'''def _fixed_layout(module_file):
+    """One complete fixed bundle; canonical identity wins over local decoys."""
+    from pathlib import Path
+    directory = Path(module_file).resolve().parent
+    canonical = directory.parent / 'infiniband/bringup/xdr-upgrade'
+    if directory.name == 'tools' and (canonical / 'upgrade.py').is_file():
+        if (directory / 'upgrade.py').is_file():
+            raise ValueError('ambiguous fixed runtime layouts')
+        if (canonical / 'ibsw_upgrade_driver.py').is_file():
+            raise ValueError('fixed runtime layout/source disagreement')
+        scripts = canonical
+    else:
+        scripts = directory
+        if not (scripts / 'upgrade.py').is_file():
+            raise ValueError('complete fixed flat runtime entry required')
+    modules = ('ibsw_upgrade_driver', 'ibsw_upgrade_contract', 'ibsw_upgrade_inputs',
+               'ibsw_upgrade_component', 'ibsw_upgrade_schedule', 'ibsw_upgrade_observer',
+               'ibsw_upgrade_executor', 'ibsw_upgrade_access', 'ibsw_upgrade_pipeline',
+               '_package_common', 'project_contract', 'ssh_key_preparation',
+               'ib_bringup_runtime_guard')
+    if (any(not (directory / (name + '.py')).is_file() for name in modules)
+            or any(not (scripts / name).is_file() for name in
+                   ('upgrade.py', 'upgrade.sh', 'upgrade-component.sh',
+                    'upgrade-owned-runner.sh', 'requirements.txt'))):
+        raise ValueError('incomplete selected fixed runtime bundle')
+    return scripts
+
+
+def normalize_upgrade(document, *, selected, method, package_dir=None):
+'''),
+    'tools/ibsw_upgrade_component.py': (
+        b'''_MODULE_DIR = Path(__file__).resolve().parent
+_TEMPLATE = (_MODULE_DIR.parent / "infiniband/bringup/xdr-upgrade/upgrade-component.sh"
+             if _MODULE_DIR.name == "tools" else _MODULE_DIR / "upgrade-component.sh")
+''',
+        b'''from ibsw_upgrade_contract import _fixed_layout
+_MODULE_DIR = Path(__file__).resolve().parent
+_TEMPLATE = _fixed_layout(__file__) / "upgrade-component.sh"
+'''),
+    'tools/ibsw_upgrade_executor.py': (
+        b'''    module_dir = Path(__file__).resolve().parent
+    runner = (module_dir.parent / "infiniband/bringup/xdr-upgrade/upgrade-owned-runner.sh"
+              if module_dir.name == "tools" else module_dir / "upgrade-owned-runner.sh")
+    body = runner.read_bytes()
+''',
+        b'''    if _fixed_layout(__file__) / "upgrade-owned-runner.sh" != _RUNNER:
+        raise ValueError("fixed owned runner layout changed")
+    body = _RUNNER.read_bytes()
+'''),
+}
+
+
+COMPONENT_TEMPLATE_READ_COMPOSITION = (
+    b'    template = _TEMPLATE.read_text(encoding="utf-8")\n',
+    b'    if _fixed_layout(__file__) / "upgrade-component.sh" != _TEMPLATE:\n'
+    b'        raise ValueError("fixed component template layout changed")\n'
+    b'    template = _TEMPLATE.read_text(encoding="utf-8")\n',
+)
+
+
+EXECUTOR_RUNNER_INITIAL_COMPOSITION = (
+    b'_OS_COMMAND = "nv show system version"\n',
+    b'from ibsw_upgrade_contract import _fixed_layout\n'
+    b'_RUNNER = _fixed_layout(__file__) / "upgrade-owned-runner.sh"\n'
+    b'\n'
+    b'_OS_COMMAND = "nv show system version"\n',
+)
+
+
+def _layout_composition_hunks(relative):
+    if type(relative) is not str or relative not in LAYOUT_APPROVED_COMPOSITION:
+        raise ValueError('unapproved layout composition source')
+    hunks = (LAYOUT_APPROVED_COMPOSITION[relative],)
+    if relative == 'tools/ibsw_upgrade_component.py':
+        hunks += (COMPONENT_TEMPLATE_READ_COMPOSITION,)
+    if relative == 'tools/ibsw_upgrade_executor.py':
+        hunks += (EXECUTOR_RUNNER_INITIAL_COMPOSITION,)
+    return hunks
+
+
+def _layout_upstream_bytes_from_exact_composition(relative, payload):
+    if type(payload) is not bytes:
+        raise TypeError('exact source bytes required')
+    hunks = _layout_composition_hunks(relative)
+    if any(payload.count(integrated) != 1 for original, integrated in hunks):
+        raise ValueError('missing or duplicate approved layout source hunk')
+    for original, integrated in hunks:
+        payload = payload.replace(integrated, original, 1)
+    if any(payload.count(original) != 1 for original, integrated in hunks):
+        raise ValueError('restored layout source hunk is not unique')
+    return payload
+
+
+class FixedLayoutExactSourceCompositionTests(unittest.TestCase):
+    def test_literal_exact_replacements_restore_only_original_regions(self):
+        self.assertEqual(2, len(_layout_composition_hunks('tools/ibsw_upgrade_executor.py')),
+                         'executor requires both initial binding and read-site composition')
+        self.assertEqual({
+            'tools/ibsw_upgrade_contract.py', 'tools/ibsw_upgrade_component.py',
+            'tools/ibsw_upgrade_executor.py',
+        }, set(LAYOUT_APPROVED_COMPOSITION))
+        for relative in LAYOUT_APPROVED_COMPOSITION:
+            hunks = _layout_composition_hunks(relative)
+            expected = b'prefix\n' + b'middle\n'.join(old for old, new in hunks) + b'suffix\n'
+            integrated = b'prefix\n' + b'middle\n'.join(new for old, new in hunks) + b'suffix\n'
+            with self.subTest(source=relative):
+                self.assertEqual(expected, _layout_upstream_bytes_from_exact_composition(relative, integrated))
+
+    def test_missing_old_partial_deleted_duplicate_and_extra_original_are_refused(self):
+        for relative in LAYOUT_APPROVED_COMPOSITION:
+            hunks = _layout_composition_hunks(relative)
+            whole = b'middle\n'.join(new for old, new in hunks)
+            for index, (original, integrated) in enumerate(hunks):
+                for label, replacement in (
+                    ('missing', b''), ('unfixed', original),
+                    ('partial', integrated[:len(integrated)//2]),
+                    ('deleted-byte', integrated[:-1]),
+                    ('duplicated', integrated + integrated),
+                    ('extra-old', original + integrated),
+                ):
+                    malformed = whole.replace(integrated, replacement, 1)
+                    with self.subTest(source=relative, hunk=index, fault=label):
+                        with self.assertRaises(ValueError):
+                            _layout_upstream_bytes_from_exact_composition(relative, malformed)
+
+    def test_outside_hunk_drift_is_preserved_and_changes_the_restored_hash(self):
+        for relative in LAYOUT_APPROVED_COMPOSITION:
+            hunks = _layout_composition_hunks(relative)
+            expected = b'prefix\n' + b'middle\n'.join(old for old, new in hunks) + b'suffix\n'
+            source = b'prefix\n' + b'middle\n'.join(new for old, new in hunks) + b'suffix\n'
+            for drift in (b'extra\n' + source, source + b'extra\n',
+                          source.replace(b'prefix\n', b'changed-prefix\n', 1)):
+                with self.subTest(source=relative, drift=drift):
+                    restored = _layout_upstream_bytes_from_exact_composition(relative, drift)
+                    self.assertNotEqual(expected, restored)
+                    self.assertNotEqual(hashlib.sha256(expected).digest(), hashlib.sha256(restored).digest())
+        with self.assertRaises(ValueError):
+            _layout_upstream_bytes_from_exact_composition('tools/foreign.py', b'')
+        with self.assertRaises(TypeError):
+            _layout_upstream_bytes_from_exact_composition('tools/ibsw_upgrade_contract.py', 'not bytes')
+
+
 # Literal inverse of the twelve reviewed V7 LOCAL-source DATA hunks.
 # No new driver hash is accepted; the original 3c76 FROZEN entry remains.
 DRIVER_SOURCE_DATA_APPROVED_COMPOSITION = (
@@ -1417,6 +1564,8 @@ class CanonicalRuntimeManifestContractTests(unittest.TestCase):
                 elif relative == "tools/ibsw_upgrade_driver.py":
                     payload = _driver_upstream_bytes_from_exact_scp_request_content(payload)
                     payload = _driver_upstream_bytes_from_exact_composition(payload)
+                elif relative in LAYOUT_APPROVED_COMPOSITION:
+                    payload = _layout_upstream_bytes_from_exact_composition(relative, payload)
                 if relative == "tools/ibsw_upgrade_component.py":
                     payload = _component_upstream_bytes_from_exact_scp_declaration(payload)
                 self.assertEqual(hashlib.sha256(payload).hexdigest(), expected)

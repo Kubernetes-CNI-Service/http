@@ -19,9 +19,9 @@ from ibsw_upgrade_contract import InventoryDevice, UpgradePolicy, _cpld_targets,
 from project_contract import normalize_redundancy_mac, validate_service_endpoint
 
 
+from ibsw_upgrade_contract import _fixed_layout
 _MODULE_DIR = Path(__file__).resolve().parent
-_TEMPLATE = (_MODULE_DIR.parent / "infiniband/bringup/xdr-upgrade/upgrade-component.sh"
-             if _MODULE_DIR.name == "tools" else _MODULE_DIR / "upgrade-component.sh")
+_TEMPLATE = _fixed_layout(__file__) / "upgrade-component.sh"
 
 
 def parse_download_results(raw):
@@ -116,6 +116,8 @@ def _render(policy, device, *, run_id, method, switch_dir, component,
                       IBSW_REFRESH_LOCAL=str(Path(switch_dir) / refresh.file))
     header = "#!/bin/bash\n# Generated IB NVOS component plan artifact; not execution permission.\n"
     header += "\n".join(key + "=" + shlex.quote(value) for key, value in values.items()) + "\n"
+    if _fixed_layout(__file__) / "upgrade-component.sh" != _TEMPLATE:
+        raise ValueError("fixed component template layout changed")
     template = _TEMPLATE.read_text(encoding="utf-8")
     # Fixed repository-owned section markers, not caller-provided code or eval.
     sections = {}

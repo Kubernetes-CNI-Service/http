@@ -166,8 +166,12 @@ class WorkflowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
             project, home, known = self.fixture(root)
-            with patch.object(observer, "_signed_session", session), \
-                 patch.object(observer, "_read_channel", side_effect=[(OS_TABLE, b"", 0, True), (HEALTH_TABLE, b"", 0, True)]):
+            with patch.object(observer, "_signed_session", side_effect=session) as session_io, \
+                 patch.object(executor, "_signed_session", session_io), \
+                 patch.object(observer, "_read_channel", side_effect=[(OS_TABLE, b"", 0, True), (HEALTH_TABLE, b"", 0, True)]) as read_io, \
+                 patch.object(executor, "_read_channel", read_io):
+                self.assertIs(observer._signed_session, executor._signed_session)
+                self.assertIs(observer._read_channel, executor._read_channel)
                 code, out, err, prompts = self.invoke(project, home, "--devices", "ew-spine01*", "--dry-run")
             self.assertEqual(code, 0, err)
             result = json.loads(out)
@@ -263,9 +267,11 @@ class WorkflowTests(unittest.TestCase):
             out, err = io.StringIO(), io.StringIO()
             with patch.object(Path, "home", return_value=home), patch.object(app, "_check_runtime"), \
                  patch.object(app, "_read_password", return_value="PRIVATE_TEST_PASSWORD"), \
-                 patch.object(observer, "_fixed_sdk", return_value=object()), \
+                 patch.object(observer, "_fixed_sdk", return_value=object()) as sdk_io, \
+                 patch.object(executor, "_fixed_sdk", sdk_io), \
                  patch.object(socket, "socket", return_value=RefusedSocket()), \
                  contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                self.assertIs(observer._fixed_sdk, executor._fixed_sdk)
                 code = app.main(["--project", str(project), "--devices", "ew-spine01*", "--os-only", "--password"])
             self.assertEqual(code, 3)
             self.assertIn("SSH_CONNECT_FAILED", err.getvalue())

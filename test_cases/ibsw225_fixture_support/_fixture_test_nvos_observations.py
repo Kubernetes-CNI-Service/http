@@ -125,11 +125,16 @@ class ObservationWorkflowTests(unittest.TestCase):
                     fixtures.HEALTH_TABLE if command == 'nv show system health' else fw_bytes)
             return (data, b"", 1 if command == failed_query else 0, True)
         out, err = io.StringIO(), io.StringIO()
-        with patch.object(observer,"_signed_session",session), patch.object(observer,"_read_channel",side_effect=query), \
+        with patch.object(observer,"_signed_session",side_effect=session) as session_io, \
+             patch.object(executor,"_signed_session",session_io), \
+             patch.object(observer,"_read_channel",side_effect=query) as read_io, \
+             patch.object(executor,"_read_channel",read_io), \
              patch.object(Path,"home",return_value=home), patch.object(app,"_check_runtime"), \
              patch.object(app,"_read_password",return_value="PRIVATE_PASSWORD") as prompt, \
              patch.object(socket,"socket",side_effect=AssertionError("No network")), \
              contextlib.redirect_stdout(out),contextlib.redirect_stderr(err):
+            self.assertIs(observer._signed_session, executor._signed_session)
+            self.assertIs(observer._read_channel, executor._read_channel)
             code=app.main(["--project",str(project),"--devices","ew-spine01*","--all"])
         return code,out.getvalue(),err.getvalue(),prompt.call_count
 
