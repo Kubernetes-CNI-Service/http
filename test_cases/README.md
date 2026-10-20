@@ -5072,3 +5072,20 @@ These REQUESTED/NOT_EXECUTED/UNKNOWN facts cannot reconstruct live authority.
 CLI remains HTTP-only; native SCP, source preflight and nonempty execution payload
 still HOLD. Local synthetic-package DATA tests are not a transfer, manager ACK,
 device/power-loss acceptance, hard I/O supervision or full/release proof.
+
+### REQ7 initialization safety gates — partial implementation, 2026-10-20
+
+The ordinary worker and initialization CLI require the actual bound final
+record and thirteen original evidence files, not INITIALIZED/OBSERVED-DATA,
+None, a DTO, PASS or DONE. The read-only reader retains original project,
+target and spreadsheet owners, source identities and cleanup checks. It is
+not an issuer, repair path, second activation or business-send permission.
+
+The canonical reporting module includes a producer-only UNIT seam and an
+actual owned TLS/readback-to-normal-worker negative; the separate return-value
+module is UNIT only and does not prove a completed-project positive. The
+existing real completed-record positives and their loss/tamper/rebound tests
+remain unchanged and OPEN/FAIL without a legal final publisher. Refusal tests
+do not close the final commit/cold-reader protocol; critical fsync/close errors
+remain UNKNOWN/HOLD and old cold-reader failure assertions remain intact.
+No full proof, ledger approval, Cloud/field acceptance or release is implied.

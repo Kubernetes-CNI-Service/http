@@ -129,6 +129,22 @@ def prepare_enrollment_journal(token,binding,identity):
     return result
 
 
+def _require_project_initialization_completion(project):
+    """Reopen the fixed original owners; DATA/return values never authorize a report.
+
+    This read-only completion gate is not a publisher and grants no business
+    sending authority. Any required owner/FD verification or cleanup failure
+    propagates to the fixed refusal diagnostic.
+    """
+    from monitor import issue_tracker_online_target as targets
+    from monitor.issue_tracker_enrollment_initialize import _hold_initialization_completion
+    with local.try_writer_owner(project, project / '99-output-monitor') as writer:
+        with targets._hold_current_project_online_target(writer) as binding:
+            with ownership.spreadsheet_owner(binding) as owner:
+                with _hold_initialization_completion(writer, owner, binding) as verify:
+                    verify()
+
+
 def _manual_main():
     import argparse
     import sys
@@ -146,6 +162,7 @@ def _manual_main():
     try:
         from monitor.issue_tracker_enrollment_initialize import initialize_current_project
         initialize_current_project(project)
+        _require_project_initialization_completion(project)
     except Exception:
         failed = True
     if failed:

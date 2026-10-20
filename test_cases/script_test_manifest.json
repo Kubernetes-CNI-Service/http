@@ -353,6 +353,8 @@
         "test_cases.test_req7_enrollment_initialize_transport",
         "test_cases.test_req7_enrollment_initialize_cleanup",
         "test_cases.test_req7_explicit_enrollment_initialize_workflow",
+        "test_cases.test_req7_data_only_initialization_reporting",
+        "test_cases.test_req7_initialization_return_value_is_not_completion",
         "test_cases.test_req7_history_preread_journal",
         "test_cases.test_req7_remote_history_match",
         "test_cases.test_req7_online_reconciliation",
@@ -2140,8 +2142,8 @@
     },
     {
       "id": "req7_explicit_enrollment_initialize",
-      "paths": ["monitor/issue_tracker_enrollment_initialize.py"],
-      "tests": ["test_cases.test_req7_enrollment_initialize_transport", "test_cases.test_req7_enrollment_initialize_cleanup", "test_cases.test_req7_explicit_enrollment_initialize_workflow"]
+      "paths": ["monitor/issue_tracker_enrollment_initialize.py", "monitor/issue_tracker_enrollment_journal.py", "monitor/issue_tracker_remote_history_match.py", "monitor/switch-collection-worker.py"],
+      "tests": ["test_cases.test_req7_enrollment_initialize_transport", "test_cases.test_req7_enrollment_initialize_cleanup", "test_cases.test_req7_enrollment_journal", "test_cases.test_req7_explicit_enrollment_initialize_workflow", "test_cases.test_req7_data_only_initialization_reporting", "test_cases.test_req7_initialization_return_value_is_not_completion"]
     },
     {
       "id": "req7_history_preread_journal",
@@ -3999,8 +4001,8 @@
     },
     {
       "id": "req7_explicit_enrollment_original_owners_native_tls",
-      "members": ["monitor/issue_tracker_enrollment_initialize.py", "monitor/issue_tracker_enrollment_journal.py", "monitor/issue_tracker_enrollment_protocol.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_online_target.py", "monitor/issue_tracker_token_launcher.py", "monitor/issue_tracker_history_read_launcher.py", "monitor/issue_tracker_attempt_supervision.py", "monitor/issue_tracker_tls_inputs.py", "monitor/issue_tracker_unit_catalog.py", "monitor/issue_tracker_sheets_read_decode.py"],
-      "tests": ["test_cases.test_req7_explicit_enrollment_initialize_workflow"]
+      "members": ["monitor/issue_tracker_enrollment_initialize.py", "monitor/issue_tracker_enrollment_journal.py", "monitor/issue_tracker_enrollment_protocol.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_online_target.py", "monitor/issue_tracker_token_launcher.py", "monitor/issue_tracker_history_read_launcher.py", "monitor/issue_tracker_attempt_supervision.py", "monitor/issue_tracker_tls_inputs.py", "monitor/issue_tracker_unit_catalog.py", "monitor/issue_tracker_sheets_read_decode.py", "monitor/issue_tracker_remote_history_match.py", "monitor/switch-collection-worker.py"],
+      "tests": ["test_cases.test_req7_explicit_enrollment_initialize_workflow", "test_cases.test_req7_data_only_initialization_reporting"]
     },
     {
       "id": "req7_global_history_preread_cold_process",

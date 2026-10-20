@@ -189,6 +189,208 @@ def initialize_current_project(project):
             raise primary
         raise EnrollmentInitializeHold() from None
 
+from contextlib import contextmanager
+import stat
+
+_STAGING = ".COMPLETED-STAGED"
+_FINAL = "COMPLETED"
+_ATTEMPT_EVIDENCE = frozenset(("INTENT", "PREFLIGHT-template_identity", "PREFLIGHT-template_headers",
+    "PREFLIGHT-whitelist", "PREFLIGHT-metadata", "WIRE", "RESPONSE", "RESPONSE-STATUS", "READBACK", "OBSERVED-DATA"))
+
+def _completed_metadata_ids(rows, entries, *, ordered):
+    from monitor.issue_tracker_metadata_capacity import _entry
+    if type(entries) is not list or len(entries) != 4: raise EnrollmentInitializeHold()
+    expected = {sid: nonce for _title, sid, nonce in rows}
+    found = {}; ids = set()
+    for index, value in enumerate(entries):
+        if type(value) is not dict or set(value) != {"metadataId", "metadataKey", "metadataValue", "visibility", "location"}:
+            raise EnrollmentInitializeHold()
+        mid, _pool, _size, image = _entry(value, set(expected))
+        key, nonce, visibility, kind, sid, _coordinate = image
+        if (key != "http-ztp-enrollment-v1" or visibility != "DOCUMENT" or kind != "SHEET"
+                or sid not in expected or nonce != expected[sid] or sid in found or mid in ids
+                or ordered and sid != rows[index][1]):
+            raise EnrollmentInitializeHold()
+        found[sid] = mid; ids.add(mid)
+    return tuple((sid, found[sid]) for _title, sid, _nonce in rows)
+
+
+def _check_completion_evidence(binding, value, raw):
+    """Strict original-data binding, no OAuth or invented AuthenticatedToken."""
+    from monitor import issue_tracker_local_commit as local
+    from monitor import issue_tracker_enrollment_journal as enrollment
+    from monitor import issue_tracker_enrollment_protocol as protocol
+    from monitor.issue_tracker_sheets_read_decode import _TEMPLATE_SHEETS
+    from types import SimpleNamespace
+    header = local._json(raw[("journal", "HEADER")], {"schema_version", "spreadsheet_id", "sheet_ids", "nonces_sha256"})
+    if (type(header["schema_version"]) is not int or header["schema_version"] != 1
+            or header["spreadsheet_id"] != binding.spreadsheet_id or type(header["sheet_ids"]) is not list
+            or len(header["sheet_ids"]) != 14): raise EnrollmentInitializeHold()
+    ids = set()
+    for title, row in zip(_TEMPLATE_SHEETS, header["sheet_ids"]):
+        if (type(row) is not list or len(row) != 2 or type(row[0]) is not str or row[0] != title
+                or type(row[1]) is not int or not 0 <= row[1] <= 2147483647 or row[1] in ids):
+            raise EnrollmentInitializeHold()
+        ids.add(row[1])
+    nonces_raw = raw[("journal", "NONCES")]
+    nonces_json = json.loads(nonces_raw.decode("utf-8"))
+    if local._canonical(nonces_json) != nonces_raw: raise EnrollmentInitializeHold()
+    base = {key: header[key] for key in ("schema_version", "spreadsheet_id", "sheet_ids")}
+    rows = enrollment._nonce_rows(nonces_json, base)
+    if (header["nonces_sha256"] != hashlib.sha256(nonces_raw).hexdigest()
+            or raw[("journal", "INITIALIZED")] != enrollment._marker(raw[("journal", "HEADER")])
+            or value["sheet_ids"] != header["sheet_ids"]
+            or value["journal_sha256"] != hashlib.sha256(raw[("journal", "HEADER")]).hexdigest()
+            or raw[("attempt", "WIRE")] != protocol._body(rows)):
+        raise EnrollmentInitializeHold()
+    intent = local._json(raw[("attempt", "INTENT")], {"schema_version", "state", "spreadsheet_id", "policy_sha256", "allowlist_sha256"})
+    if (type(intent["schema_version"]) is not int or intent["schema_version"] != 1
+            or intent["state"] != "UNKNOWN_UNTIL_OBSERVED" or intent["spreadsheet_id"] != binding.spreadsheet_id
+            or any(type(intent[name]) is not str or re.fullmatch(r"[0-9a-f]{64}", intent[name]) is None
+                   for name in ("policy_sha256", "allowlist_sha256"))):
+        raise EnrollmentInitializeHold()
+    status = local._json(raw[("attempt", "RESPONSE-STATUS")], {"status"})
+    if type(status["status"]) is not int or status["status"] != 200: raise EnrollmentInitializeHold()
+    reply = protocol._document(SimpleNamespace(status=200, complete=True, data=raw[("attempt", "RESPONSE")]))
+    if (set(reply) != {"spreadsheetId", "replies"} or reply["spreadsheetId"] != binding.spreadsheet_id
+            or type(reply["replies"]) is not list or len(reply["replies"]) != 4):
+        raise EnrollmentInitializeHold()
+    entries = []
+    for row in reply["replies"]:
+        if type(row) is not dict or set(row) != {"createDeveloperMetadata"}: raise EnrollmentInitializeHold()
+        created = row["createDeveloperMetadata"]
+        if type(created) is not dict or set(created) != {"developerMetadata"}: raise EnrollmentInitializeHold()
+        entries.append(created["developerMetadata"])
+    assigned = _completed_metadata_ids(rows, entries, ordered=True)
+    metadata = protocol._document(SimpleNamespace(status=200, complete=True, data=raw[("attempt", "READBACK")]))
+    if set(metadata) != {"matchedDeveloperMetadata"} or type(metadata["matchedDeveloperMetadata"]) is not list:
+        raise EnrollmentInitializeHold()
+    entries = []
+    for row in metadata["matchedDeveloperMetadata"]:
+        if type(row) is not dict or set(row) != {"developerMetadata"}: raise EnrollmentInitializeHold()
+        entries.append(row["developerMetadata"])
+    if (_completed_metadata_ids(rows, entries, ordered=False) != assigned
+            or value["metadata_ids"] != [list(row) for row in assigned]): raise EnrollmentInitializeHold()
+    observed = local._json(raw[("attempt", "OBSERVED-DATA")], {"schema_version", "outcome", "metadata_sha256", "wire_sha256", "automatic_sending_enabled"})
+    if (type(observed["schema_version"]) is not int or observed["schema_version"] != 1
+            or observed["outcome"] != "ENROLLMENT_READBACK_DATA" or observed["automatic_sending_enabled"] is not False
+            or observed["metadata_sha256"] != hashlib.sha256(raw[("attempt", "READBACK")]).hexdigest()
+            or observed["wire_sha256"] != hashlib.sha256(raw[("attempt", "WIRE")]).hexdigest()):
+        raise EnrollmentInitializeHold()
+
+
+@contextmanager
+def _hold_initialization_completion(writer, owner, binding):
+    """Original final record + source images through actual worker writes.
+
+    Missing entire attempt is HOLD, never legacy/grandfather admission. This
+    context alone grants no business permission and never authenticates/sends.
+    """
+    from monitor import issue_tracker_spreadsheet_owner as ownership
+    from monitor import issue_tracker_unit_catalog as catalog
+    from monitor import issue_tracker_local_commit as local
+    from monitor import issue_tracker_attempt_journal as journal
+    graph = catalog._Originals(); marker_fds = []; primary = None
+    try:
+        actual = ownership._validated_owner(owner, binding)
+        project = local._owner(writer)
+        project_info = os.fstat(project.project_fd)
+        parent = actual.directories[-1][0]; stem = actual.lock_name[:-5]
+        name = "enrollment-init-" + stem
+        folder = graph.directory(parent, name)  # Missing is not absence success.
+        if set(os.listdir(folder)) != _ATTEMPT_EVIDENCE | {_STAGING, _FINAL}:
+            raise EnrollmentInitializeHold()
+        marker_rows = []
+        for leaf in (_STAGING, _FINAL):
+            named = ownership.os.stat(leaf, dir_fd=folder, follow_symlinks=False)
+            expected = journal._identity(named)
+            fd = os.open(leaf, local._flags(), dir_fd=folder)
+            marker_fds.append((fd, expected))  # Raw return before metadata.
+            held = ownership.os.fstat(fd)
+            if (journal._identity(held) != expected or not stat.S_ISREG(held.st_mode)
+                    or held.st_uid != 0 or stat.S_IMODE(held.st_mode) != 0o600
+                    or held.st_nlink != 2 or not 1 <= held.st_size <= 131072):
+                raise EnrollmentInitializeHold()
+            image = os.pread(fd, held.st_size + 1, 0)
+            if len(image) != held.st_size or journal._identity(ownership.os.fstat(fd)) != expected:
+                raise EnrollmentInitializeHold()
+            marker_rows.append((leaf, fd, expected, image))
+        if marker_rows[0][2] != marker_rows[1][2] or marker_rows[0][3] != marker_rows[1][3]:
+            raise EnrollmentInitializeHold()
+        value = local._json(marker_rows[0][3], {"schema_version", "outcome", "automatic_sending_enabled",
+            "spreadsheet_id", "policy_sha256", "allowlist_sha256", "project_identity",
+            "sheet_ids", "journal_sha256", "metadata_ids", "ancestor_identities", "attempt_identity", "evidence"})
+        for key, count, width in (("ancestor_identities", 5, 5), ("metadata_ids", 4, 2)):
+            if (type(value[key]) is not list or len(value[key]) != count
+                    or any(type(row) is not list or len(row) != width
+                           or any(type(item) is not int for item in row) for row in value[key])):
+                raise EnrollmentInitializeHold()
+        for key, width in (("project_identity", 2), ("attempt_identity", 5)):
+            if (type(value[key]) is not list or len(value[key]) != width
+                    or any(type(item) is not int for item in value[key])):
+                raise EnrollmentInitializeHold()
+        if (type(value["sheet_ids"]) is not list or len(value["sheet_ids"]) != 14
+                or any(type(row) is not list or len(row) != 2 or type(row[0]) is not str
+                       or type(row[1]) is not int for row in value["sheet_ids"])):
+            raise EnrollmentInitializeHold()
+        ancestors = [list(ownership._identity(before)) for _fd, before, _private in actual.directories]
+        if (type(value["schema_version"]) is not int or value["schema_version"] != 1
+                or value["outcome"] != "INITIALIZATION_COMPLETED" or value["automatic_sending_enabled"] is not False
+                or value["spreadsheet_id"] != binding.spreadsheet_id or value["ancestor_identities"] != ancestors
+                or value["policy_sha256"] != binding.policy_sha256 or value["allowlist_sha256"] != binding.allowlist_sha256
+                or value["project_identity"] != [project_info.st_dev, project_info.st_ino]
+                or value["attempt_identity"] != list(ownership._identity(ownership.os.fstat(folder)))
+                or type(value["evidence"]) is not list or len(value["evidence"]) != 13):
+            raise EnrollmentInitializeHold()
+        nonce_folder = graph.directory(parent, stem + ".enrollment")
+        if set(os.listdir(nonce_folder)) != {"HEADER", "NONCES", "INITIALIZED"}: raise EnrollmentInitializeHold()
+        raw = {}; seen = set()
+        for row in value["evidence"]:
+            if type(row) is not dict or set(row) != {"scope", "name", "stat", "sha256"}:
+                raise EnrollmentInitializeHold()
+            scope, leaf = row["scope"], row["name"]
+            if (type(scope) is not str or type(leaf) is not str or (scope, leaf) in seen
+                    or scope not in ("attempt", "journal")
+                    or (scope == "attempt" and leaf not in _ATTEMPT_EVIDENCE)
+                    or (scope == "journal" and leaf not in ("HEADER", "NONCES", "INITIALIZED"))):
+                raise EnrollmentInitializeHold()
+            seen.add((scope, leaf))
+            data, captured = graph.file(folder if scope == "attempt" else nonce_folder, leaf, 2 * 1024 * 1024)
+            if (type(row["stat"]) is not list or len(row["stat"]) != 9
+                    or any(type(item) is not int for item in row["stat"])
+                    or row["stat"] != list(captured) or row["sha256"] != hashlib.sha256(data).hexdigest()):
+                raise EnrollmentInitializeHold()
+            raw[(scope, leaf)] = data
+        wanted = {("attempt", name) for name in _ATTEMPT_EVIDENCE}
+        wanted.update(("journal", name) for name in ("HEADER", "NONCES", "INITIALIZED"))
+        if seen != wanted: raise EnrollmentInitializeHold()
+        _check_completion_evidence(binding, value, raw)
+
+        def verify():
+            if ownership._validated_owner(owner, binding) is not actual: raise EnrollmentInitializeHold()
+            if local._owner(writer) is not project: raise EnrollmentInitializeHold()
+            graph.verify()
+            for leaf, fd, expected, image in marker_rows:
+                current = ownership.os.fstat(fd); named = ownership.os.stat(leaf, dir_fd=folder, follow_symlinks=False)
+                if (journal._identity(current) != expected or journal._identity(named) != expected
+                        or current.st_nlink != 2 or os.pread(fd, len(image) + 1, 0) != image):
+                    raise EnrollmentInitializeHold()
+        verify()
+        yield verify
+        verify()
+    except BaseException as error:
+        primary = error
+    finally:
+        for fd, expected in reversed(marker_fds):
+            try: _initializer_close_original(fd, expected)
+            except BaseException as error:
+                if primary is None or (isinstance(primary, Exception) and not isinstance(error, Exception)):
+                    primary = error
+        primary = _close_initialization_images(graph, None, None, primary)
+    if primary is not None:
+        if not isinstance(primary, Exception): raise primary
+        raise EnrollmentInitializeHold() from None
+
 _SOURCE_ROOT = Path(__file__).resolve().parents[1]
 _INITIALIZE_CHILD_PROGRAM = '''import sys
 sys.path[:0]=[sys.argv[1],sys.argv[1]+"/tools"]

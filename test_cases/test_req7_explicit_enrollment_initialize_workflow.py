@@ -80,7 +80,7 @@ class ExplicitEnrollmentInitializeWorkflowTests(unittest.TestCase):
             local, ownership, writer, owner, bound, _unused, _config = self.owners(stack)
             return project, local, ownership, writer, owner, bound
 
-    def _exercise_actual_initialize(self, fault=None, *, repeat_after_success=False):
+    def _exercise_actual_initialize(self, fault=None, *, repeat_after_success=False, after_initialize=None):
         from monitor import issue_tracker_enrollment_journal as enrollment
         from monitor import issue_tracker_token_launcher as auth
         from monitor import issue_tracker_history_read_launcher as reads
@@ -324,6 +324,238 @@ class ExplicitEnrollmentInitializeWorkflowTests(unittest.TestCase):
                 self.assertEqual(before_repeat, tree_images(state))
                 self.assertEqual(before_counts, (len(children), tuple(stages), len(prepared)))
 
+            if after_initialize is not None:
+                after_initialize(project, state, bound, real_writer, real_sheet, real_target)
+
+    def _assert_initialized_worker_gate(self, project, state, bound,
+            original_writer, original_sheet, original_target, *, expected_new_entries):
+        from monitor import issue_tracker_remote_history_match as remote
+        from monitor import issue_tracker_enrollment_initialize as initialize
+        from monitor import issue_tracker_enrollment_journal as enrollment
+        from monitor import issue_tracker_local_commit as local
+        from monitor import issue_tracker_spreadsheet_owner as ownership
+        from monitor import issue_tracker_online_target as target
+        from monitor import issue_tracker_token_launcher as auth
+        from monitor import issue_tracker_global_attempt_journal as counted
+        from monitor import issue_tracker_mutation_launcher as mutation
+        worker = runtime.persistence.WORKER
+        before = tree_images(state)
+        with ExitStack() as controls:
+            store = runtime.cycle(controls, self.root)
+            # Normal second use must not get another fixture cleanup fault.
+            controls.enter_context(mock.patch.object(local, 'try_writer_owner', original_writer))
+            controls.enter_context(mock.patch.object(ownership, 'spreadsheet_owner', original_sheet))
+            controls.enter_context(mock.patch.object(target, '_hold_current_project_online_target', original_target))
+            controls.enter_context(mock.patch.object(worker, 'STATUS_DIR', self.root / 'monitor/status'))
+            controls.enter_context(mock.patch.object(worker, '_publish_stage_l_status_after_completion'))
+            controls.enter_context(mock.patch.object(worker, '_publish_stage_l_local_after_completion'))
+            controls.enter_context(mock.patch.object(worker.sys, 'stderr', io.StringIO()))
+            gate_returns = []
+            original_gate = remote._observe_original_first_catalog_absence
+            def observe_gate(*args, **kwargs):
+                observed = original_gate(*args, **kwargs)
+                gate_returns.append(observed)
+                return observed
+            controls.enter_context(mock.patch.object(remote, '_observe_original_first_catalog_absence',
+                side_effect=observe_gate))
+            original_new = remote._prepare_current_cycle_native_unit
+            new_entry = controls.enter_context(mock.patch.object(remote, '_prepare_current_cycle_native_unit',
+                wraps=original_new))
+            manual = controls.enter_context(mock.patch.object(initialize, 'initialize_current_project',
+                side_effect=AssertionError('normal worker cannot repeat manual initialization')))
+            prepare = controls.enter_context(mock.patch.object(enrollment, 'prepare_enrollment_journal',
+                side_effect=AssertionError('normal worker cannot repair original nonces')))
+            authentication = controls.enter_context(mock.patch.object(auth, 'OwnedProjectTokenRefreshUnit',
+                side_effect=AssertionError('this fixture has no C6/online authority for OAuth')))
+            # Existing fixture module-local process facade, NOT the shared
+            # native subprocess class checked by the actual supervisor.
+            child = controls.enter_context(mock.patch.object(initialize.subprocess, 'Popen',
+                side_effect=AssertionError('no additional child authorized by initialization DATA')))
+            network = controls.enter_context(mock.patch('socket.socket',
+                side_effect=AssertionError('no network authority from initialization completion alone')))
+            count = controls.enter_context(mock.patch.object(counted, 'record_global_attempt_intent',
+                side_effect=AssertionError('initialization does not grant a business COUNT')))
+            business = controls.enter_context(mock.patch.object(mutation, '_send_counted_original_once',
+                side_effect=AssertionError('initialization does not grant business send authority')))
+            worker._publish_issue_tracker_lanes_after_completion(store)
+            self.assertEqual(expected_new_entries, new_entry.call_count,
+                'INITIALIZATION_COMPLETION_GATE_DID_NOT_MATCH_REAL_WORKER_NEW_BOUNDARY')
+            if expected_new_entries:
+                self.assertTrue(gate_returns)
+                self.assertTrue(all(value is True for value in gate_returns),
+                    'only the original complete initialization precondition may pass')
+            else:
+                self.assertEqual([], gate_returns,
+                    'unproved initialization must not return the first-catalog absence precondition')
+            for operation in (manual, prepare, authentication, child, network, count, business):
+                operation.assert_not_called()
+        self.assertEqual(before, tree_images(state), 'normal worker must not repair or consume initialization evidence')
+
+    def _require_original_completion_record(self, state, bound):
+        stem = hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()
+        attempt = state / ('enrollment-init-' + stem)
+        complete = attempt / 'COMPLETED'
+        self.assertTrue(complete.is_file(), 'MANUAL_SUCCESS_REQUIRES_FINAL_BOUND_COMPLETION_RECORD')
+        record = json.loads(complete.read_bytes())
+        self.assertIs(type(record), dict)
+        self.assertEqual(1, record.get('schema_version'))
+        self.assertEqual('INITIALIZATION_COMPLETED', record.get('outcome'))
+        self.assertEqual(bound.spreadsheet_id, record.get('spreadsheet_id'))
+        self.assertIs(False, record.get('automatic_sending_enabled'))
+        self.assertEqual({'HEADER', 'NONCES', 'INITIALIZED'},
+            {path.name for path in (state / (stem + '.enrollment')).iterdir()})
+        return complete
+
+    def test_real_tls_completed_initialization_unlocks_only_the_normal_worker_initialization_gate(self):
+        def after(project, state, bound, *owners):
+            self._require_original_completion_record(state, bound)
+            self._assert_initialized_worker_gate(project, state, bound, *owners, expected_new_entries=1)
+        self._exercise_actual_initialize(after_initialize=after)
+
+    def test_real_owner_cleanup_unknown_blocks_next_normal_worker_before_new_or_authentication(self):
+        def after(project, state, bound, *owners):
+            stem = hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()
+            attempt = state / ('enrollment-init-' + stem)
+            self.assertTrue((attempt / 'OBSERVED-DATA').is_file(),
+                'readback DATA is present before the failing owner finalizer, not a completion permit')
+            self.assertFalse((attempt / 'COMPLETED').exists(),
+                'OWNER_CLEANUP_UNKNOWN_CANNOT_PUBLISH_COMPLETION')
+            self._assert_initialized_worker_gate(project, state, bound, *owners, expected_new_entries=0)
+        self._exercise_actual_initialize('owner-cleanup', after_initialize=after)
+
+    def test_real_tls_completion_record_lost_is_retained_and_blocks_next_worker(self):
+        def after(project, state, bound, *owners):
+            complete = self._require_original_completion_record(state, bound)
+            raw, inode = complete.read_bytes(), complete.stat().st_ino
+            preserved = self.root / 'preserved-completion-record'
+            complete.rename(preserved)
+            self.assertFalse(complete.exists())
+            self._assert_initialized_worker_gate(project, state, bound, *owners, expected_new_entries=0)
+            self.assertEqual((raw, inode), (preserved.read_bytes(), preserved.stat().st_ino))
+        self._exercise_actual_initialize(after_initialize=after)
+
+    def test_real_tls_completion_record_tamper_is_not_repaired_or_accepted(self):
+        def after(project, state, bound, *owners):
+            complete = self._require_original_completion_record(state, bound)
+            raw, inode = complete.read_bytes(), complete.stat().st_ino
+            preserved = self.root / 'preserved-untampered-completion'
+            complete.rename(preserved)
+            complete.write_bytes(b'{}\n'); complete.chmod(0o600)
+            self._assert_initialized_worker_gate(project, state, bound, *owners, expected_new_entries=0)
+            self.assertEqual((raw, inode), (preserved.read_bytes(), preserved.stat().st_ino))
+            self.assertEqual(b'{}\n', complete.read_bytes())
+        self._exercise_actual_initialize(after_initialize=after)
+
+    def test_real_tls_completion_binding_rejects_same_bytes_replacement_of_original_nonces(self):
+        def after(project, state, bound, *owners):
+            complete = self._require_original_completion_record(state, bound)
+            completion_before = (complete.read_bytes(), complete.stat().st_ino)
+            stem = hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()
+            nonces = state / (stem + '.enrollment') / 'NONCES'
+            raw, original_inode = nonces.read_bytes(), nonces.stat().st_ino
+            preserved = self.root / 'preserved-completed-original-nonces'
+            nonces.rename(preserved)
+            nonces.write_bytes(raw); nonces.chmod(0o600)
+            self.assertNotEqual(original_inode, nonces.stat().st_ino)
+            self._assert_initialized_worker_gate(project, state, bound, *owners, expected_new_entries=0)
+            self.assertEqual((raw, original_inode), (preserved.read_bytes(), preserved.stat().st_ino))
+            self.assertEqual(completion_before, (complete.read_bytes(), complete.stat().st_ino))
+            self.assertEqual(raw, nonces.read_bytes())
+        self._exercise_actual_initialize(after_initialize=after)
+
+    def test_existing_real_business_catalog_cannot_bypass_unknown_manual_initialization_gate(self):
+        from test_cases import test_req7_unit_catalog as catalog_fixture
+        with catalog_fixture.CatalogAppliedNativeWorkflowTests.completed_and_pending(
+                self, project_origins=True) as (case, _catalog, remote, _inventory,
+                _old_api, writer, owner, bound, _originals):
+            state = case.root / 'var/lib/http-ztp-container/issue-tracker'
+            stem = hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()
+            self.assertTrue((state / (stem + '.units')).is_dir(),
+                'exercise the actual existing-business path, not empty first-catalog absence')
+            attempt = state / ('enrollment-init-' + stem)
+            attempt.mkdir(mode=0o700)
+            witness = attempt / 'PRESERVED'
+            witness.write_bytes(b'UNKNOWN independent initialization; no final completion\n')
+            witness.chmod(0o600)
+            before = tree_images(state)
+            with self.assertRaises(remote.RemoteHistoryHold,
+                    msg='EXISTING_BUSINESS_CATALOG_BYPASSED_UNKNOWN_INITIALIZATION'):
+                remote._current_cycle_native_new_pending(writer, owner, bound)
+            self.assertEqual(before, tree_images(state))
+
+    def test_real_pending_c6_catalog_unknown_initialization_blocks_both_normal_worker_entries(self):
+        # Real C6 + pending catalog, no APPLIED/remote-success substitute.
+        # Complements, never replaces, the original APPLIED+pending TLS case.
+        from test_cases.test_req7_send_unit import inputs as send_inputs
+        from test_cases.test_issue_tracker_whitelist_workbook import literal_xlsx
+        from monitor import issue_tracker_enrollment_journal as enrollment
+        from monitor import issue_tracker_sheets_read_plan as plans
+        from monitor import issue_tracker_sheets_read_decode as decode
+        from monitor import issue_tracker_online_target as target
+        from monitor import issue_tracker_unit_catalog as catalog
+        from monitor import issue_tracker_send_unit as composer
+        from monitor import issue_tracker_global_attempt_journal as journal
+        from monitor import issue_tracker_remote_history_match as remote
+        from monitor import issue_tracker_token_launcher as authentication
+        from monitor import issue_tracker_mutation_launcher as mutation
+        from monitor.issue_tracker_sdk_authentication import AuthenticatedToken
+        import time
+        with ExitStack() as controls:
+            project, local, ownership, _old_writer, _old_owner, bound = self.project(controls)
+            state = self.root / 'var/lib/http-ztp-container/issue-tracker'
+            stem = hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()
+            refusals = []
+            with local.try_writer_owner(project, project / '99-output-monitor') as writer:
+                with target._hold_current_project_online_target(writer) as actual:
+                    with ownership.spreadsheet_owner(actual) as owner:
+                        document = identity_response(); document['spreadsheetId'] = actual.spreadsheet_id
+                        identity = decode.decode_template_identity(plans.prepare_template_identity_read(
+                            actual, AuthenticatedToken('local-format-only', time.time() + 3600)), response(document))
+                        with mock.patch('secrets.token_hex', side_effect=NONCES):
+                            enrollment.prepare_enrollment_journal(owner, actual, identity)
+                        arguments = send_inputs()
+                        arguments.update(spreadsheet_id=actual.spreadsheet_id, sheet_id=101,
+                            history_sheet_id=105, target_nonce=NONCES[0], history_nonce=NONCES[3])
+                        generation = local.begin_generation(writer, arguments['manifest'])
+                        local.record_intent(writer, generation, literal_xlsx(), kind='xlsx')
+                        receipt = local.commit(writer, generation)
+                        arguments.update(generation_id=generation.generation_id,
+                            publish_id=receipt.published_sha256)
+                        unit = composer.freeze_send_unit(**arguments)
+                        catalog.register_pending_c6_unit(writer, owner, actual, unit)
+                        journal.prepare_global_unit(owner, actual, unit)
+                        before_count = journal.inspect_global_unit(owner, actual, unit).attempt_count
+                        attempt = state / ('enrollment-init-' + stem); attempt.mkdir(mode=0o700)
+                        witness = attempt / 'PRESERVED'
+                        witness.write_bytes(b'UNKNOWN initialization; retain existing pending C6\n')
+                        witness.chmod(0o600)
+                        before = tree_images(state)
+                        with mock.patch.object(authentication, 'OwnedProjectTokenRefreshUnit',
+                                side_effect=AssertionError('UNKNOWN must stop before OAuth')) as auth, \
+                                mock.patch.object(journal, 'record_global_attempt_intent',
+                                side_effect=AssertionError('UNKNOWN cannot create COUNT')) as count, \
+                                mock.patch.object(mutation, '_send_counted_original_once',
+                                side_effect=AssertionError('UNKNOWN cannot send')) as send, \
+                                mock.patch.object(subprocess, 'Popen',
+                                side_effect=AssertionError('UNKNOWN cannot launch')) as child, \
+                                mock.patch.object(socket, 'socket',
+                                side_effect=AssertionError('UNKNOWN cannot connect')) as network:
+                            for entry in (remote._current_cycle_native_new_pending,
+                                          remote._reconcile_pending_project_units_with_authentication):
+                                try:
+                                    entry(writer, owner, actual)
+                                except remote.RemoteHistoryHold:
+                                    refusals.append(True)
+                                else:
+                                    refusals.append(False)
+                        after_count = journal.inspect_global_unit(owner, actual, unit).attempt_count
+            # Independent assertions outside original owner normalization.
+            self.assertEqual([True, True], refusals)
+            self.assertTrue((state / (stem + '.units')).is_dir())
+            self.assertEqual((0, 0), (before_count, after_count))
+            self.assertEqual(before, tree_images(state))
+            for operation in (auth, count, send, child, network): operation.assert_not_called()
+
     def test_explicit_fresh_initialization_orders_real_local_journal_before_one_tls_batch_and_readback(self):
         self._exercise_actual_initialize()
 
@@ -414,3 +646,184 @@ class ExplicitEnrollmentInitializeWorkflowTests(unittest.TestCase):
                 self.assertEqual(before, tree_images(state))
                 self.assertEqual((3, '', REFUSED), (status, stdout, stderr),
                     'EXPLICIT_ENROLLMENT_UNSAFE_EVIDENCE_NOT_REFUSED')
+
+
+# Fixed DATA scopes, not a completion marker schema or send permission.
+_DATA_GRAPH_LEAVES = (
+    ('attempt', 'INTENT'),
+    ('attempt', 'PREFLIGHT-template_identity'),
+    ('attempt', 'PREFLIGHT-template_headers'),
+    ('attempt', 'PREFLIGHT-whitelist'),
+    ('attempt', 'PREFLIGHT-metadata'),
+    ('attempt', 'WIRE'),
+    ('attempt', 'RESPONSE'),
+    ('attempt', 'RESPONSE-STATUS'),
+    ('attempt', 'READBACK'),
+    ('attempt', 'OBSERVED-DATA'),
+    ('journal', 'HEADER'),
+    ('journal', 'NONCES'),
+    ('journal', 'INITIALIZED'),
+)
+
+
+class InitializationDataGraphWorkflowTests(unittest.TestCase):
+    def test_real_tls_data_graph_rejects_readback_replacement_without_completion(self):
+        # Use the normal canonical fixture even when this appended candidate is
+        # loaded from a private SOURCE path. Do not execute its copied old tests.
+        from test_cases import test_req7_explicit_enrollment_initialize_workflow as canonical
+        fixture = canonical.ExplicitEnrollmentInitializeWorkflowTests(methodName='runTest')
+        def cleanup_original_fixture():
+            self.assertTrue(fixture.doCleanups(),
+                            'AUTHENTIC_TLS_ORIGINAL_FIXTURE_CLEANUP_INCOMPLETE')
+        self.addCleanup(cleanup_original_fixture)
+        fixture.setUp()
+        observed = []
+
+        def after_initialize(project, state, bound, real_writer, real_sheet, real_target):
+            from monitor import issue_tracker_unit_catalog as catalog
+            from monitor import issue_tracker_enrollment_initialize as initialize
+            from monitor import issue_tracker_spreadsheet_owner as ownership
+            from monitor import issue_tracker_token_launcher as tokens
+            from monitor import issue_tracker_global_attempt_journal as counted
+            from monitor import issue_tracker_mutation_launcher as mutation
+
+            def stat9(info):
+                return (info.st_dev, info.st_ino, info.st_mode, info.st_uid,
+                        info.st_gid, info.st_nlink, info.st_size,
+                        info.st_mtime_ns, info.st_ctime_ns)
+
+            facts = {}
+            stem = hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()
+            attempt = state / ('enrollment-init-' + stem)
+            nonce = state / (stem + '.enrollment')
+            retained = fixture.root / 'retained-original-readback'
+            readback = attempt / 'READBACK'
+            # The real TLS helper has already completed all its original
+            # journal-before-request/readback/child-reap assertions and closed
+            # its manual owners. No new remote operation is allowed here.
+            with mock.patch.object(tokens, 'OwnedProjectTokenRefreshUnit',
+                    side_effect=AssertionError('DATA graph cannot authenticate')) as extra_auth, \
+                 mock.patch.object(counted, 'record_global_attempt_intent',
+                    side_effect=AssertionError('DATA graph cannot COUNT')) as extra_count, \
+                 mock.patch.object(mutation, '_send_counted_original_once',
+                    side_effect=AssertionError('DATA graph cannot send')) as extra_send:
+                with real_writer(project, project / '99-output-monitor') as writer:
+                    with real_target(writer) as actual_binding:
+                        with real_sheet(actual_binding) as sheet:
+                            facts['binding_equal'] = actual_binding == bound
+                            sheet_owner = ownership._validated_owner(sheet, actual_binding)
+                            parent = sheet_owner.directories[-1][0]  # Borrowed, never closed here.
+                            graph = catalog._Originals()
+                            primary = None
+                            try:
+                                attempt_fd = graph.directory(parent, 'enrollment-init-' + stem)
+                                nonce_fd = graph.directory(parent, stem + '.enrollment')
+                                directories = {'attempt': attempt_fd, 'journal': nonce_fd}
+                                scopes = {attempt_fd: 'attempt', nonce_fd: 'journal'}
+                                for scope, leaf in _DATA_GRAPH_LEAVES:
+                                    graph.file(directories[scope], leaf, 2 * 1024 * 1024)
+
+                                def snapshot():
+                                    return {
+                                        (scopes[parent_fd], leaf): {
+                                            'fd': fd, 'captured_stat9': identity,
+                                            'stat9': stat9(os.fstat(fd)),
+                                            'sha256': hashlib.sha256(
+                                                os.pread(fd, len(raw) + 1, 0)).hexdigest(),
+                                            'captured_sha256': hashlib.sha256(raw).hexdigest(),
+                                        }
+                                        for parent_fd, leaf, fd, identity, raw in graph.files
+                                    }
+
+                                facts['verify_globals_original'] = (
+                                    catalog._Originals.verify.__globals__ is catalog.__dict__)
+                                facts['first_verify_result'] = graph.verify()
+                                facts['verified_before'] = True
+                                facts['before'] = snapshot()
+                                facts['attempt_before'] = set(os.listdir(attempt_fd))
+                                facts['journal_before'] = set(os.listdir(nonce_fd))
+                                facts['retained_did_not_exist'] = not retained.exists()
+
+                                readback.rename(retained)
+                                with readback.open('xb') as replacement:
+                                    os.fchmod(replacement.fileno(), 0o600)
+                                    replacement.write(b'{}\n')
+                                facts['after'] = snapshot()
+                                facts['attempt_after'] = set(os.listdir(attempt_fd))
+                                facts['journal_after'] = set(os.listdir(nonce_fd))
+                                facts['replacement_inode'] = readback.stat().st_ino
+                                facts['replacement_bytes'] = readback.read_bytes()
+                                facts['retained_inode'] = retained.stat().st_ino
+                                facts['retained_bytes'] = retained.read_bytes()
+                                original_readback = next(row[4] for row in graph.files
+                                    if row[0] == attempt_fd and row[1] == 'READBACK')
+                                facts['original_readback_bytes'] = original_readback
+                                facts['refusal'] = None
+                                facts['verify_frame_original'] = False
+                                try:
+                                    graph.verify()
+                                except catalog.UnitCatalogHold as error:
+                                    facts['refusal'] = type(error)
+                                    trace = error.__traceback__
+                                    while trace is not None:
+                                        facts['verify_frame_original'] |= (
+                                            trace.tb_frame.f_code is catalog._Originals.verify.__code__
+                                            and trace.tb_frame.f_globals is catalog.__dict__)
+                                        trace = trace.tb_next
+                                # Verification checks directory identity before
+                                # file rows. This HOLD does not prove that the
+                                # later file-FD branch ran or all 13 revalidated.
+                            except BaseException as error:
+                                primary = error
+                            finally:
+                                primary = initialize._close_initialization_images(
+                                    graph, None, None, primary)
+                            if primary is not None:
+                                raise primary
+                            facts['graph_close_returned'] = True
+                facts['owners_returned'] = True
+                facts['additional_calls'] = (extra_auth.call_count,
+                    extra_count.call_count, extra_send.call_count)
+            facts['no_completion_markers'] = not any(
+                (attempt / name).exists() for name in ('.COMPLETED-STAGED', 'COMPLETED'))
+            observed.append((facts, catalog.UnitCatalogHold))
+
+        fixture._exercise_actual_initialize('data-only-without-final-completion',
+                                           after_initialize=after_initialize)
+        # Independent assertions stay outside all actual owner contexts;
+        # owner normalization cannot turn an assertion failure into HOLD.
+        self.assertEqual(len(observed), 1)
+        facts, expected_hold = observed[0]
+        self.assertIs(facts['binding_equal'], True)
+        self.assertIs(facts['verify_globals_original'], True)
+        self.assertIs(facts['verified_before'], True)
+        self.assertIsNone(facts['first_verify_result'])
+        self.assertIs(facts['retained_did_not_exist'], True)
+        self.assertEqual(set(facts['before']), set(_DATA_GRAPH_LEAVES))
+        self.assertEqual(set(facts['after']), set(_DATA_GRAPH_LEAVES))
+        for leaf in _DATA_GRAPH_LEAVES:
+            with self.subTest(original=leaf):
+                before, after = facts['before'][leaf], facts['after'][leaf]
+                self.assertEqual(before['fd'], after['fd'])
+                self.assertEqual(before['stat9'], before['captured_stat9'])
+                self.assertEqual(before['stat9'][:2], after['stat9'][:2])
+                self.assertEqual(before['sha256'], before['captured_sha256'])
+                self.assertEqual(before['sha256'], after['sha256'])
+                if leaf != ('attempt', 'READBACK'):
+                    self.assertEqual(before['stat9'], after['stat9'])
+        self.assertEqual(facts['attempt_before'], {name for scope, name in _DATA_GRAPH_LEAVES if scope == 'attempt'})
+        self.assertEqual(facts['attempt_after'], facts['attempt_before'])
+        self.assertEqual(facts['journal_before'], {'HEADER', 'NONCES', 'INITIALIZED'})
+        self.assertEqual(facts['journal_after'], facts['journal_before'])
+        original_inode = facts['before'][('attempt', 'READBACK')]['stat9'][1]
+        self.assertEqual(facts['retained_inode'], original_inode)
+        self.assertEqual(facts['retained_bytes'], facts['original_readback_bytes'])
+        self.assertNotEqual(facts['replacement_inode'], original_inode)
+        self.assertEqual(facts['replacement_bytes'], b'{}\n')
+        self.assertIs(facts['refusal'], expected_hold,
+                      'REAL_DATA_GRAPH_MUST_REFUSE_READBACK_ORIGINAL_REPLACEMENT')
+        self.assertIs(facts['verify_frame_original'], True)
+        self.assertIs(facts['graph_close_returned'], True)
+        self.assertIs(facts['owners_returned'], True)
+        self.assertIs(facts['no_completion_markers'], True)
+        self.assertEqual(facts['additional_calls'], (0, 0, 0))

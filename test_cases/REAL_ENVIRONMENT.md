@@ -2875,3 +2875,21 @@ proven-owned test objects; retain failures, no unknown-FD retry, source-baseline
 refresh, reset or adoption. No cases waived or new residual-risk acceptance.
 Local dual-source DATA PASS is not SCP/device/firmware/power-loss/ACK proof.
 REAL_ENV NOT RUN; CLI HTTP-only, native HOLD, ordinary release gates unchanged.
+
+### TC-REQ7-INITIALIZATION-COMPLETION-GATES-20261020 — NOT RUN
+
+- Scope: the explicit initializer, original completion reader, normal worker
+  and report boundary; extends TC-REQ7-EXPLICIT-FRESH-ENROLLMENT-20261019.
+- Preconditions: separately authorized isolated project/Cloud, protected
+  original owners and actual same target, lawful completed-record issuer,
+  current source/test/manifest/runtime identity and maintenance authorization.
+- Retain genuine successful initialization/worker initialization-only release,
+  missing/partial/lost/rebound records, source drift, critical fsync/close
+  failures, interruption, cold recovery and reporting-only failure. No
+  automatic repair, takeover, retry/reset or business-send permission.
+- Evidence: complete raw command/exit/END, original inode/stat/SHA and owner
+  cleanup order. Private UNIT and loopback TLS negatives are not field proof;
+  real publisher/cold success remains OPEN, not replaced by DATA or memory.
+- Cleanup: only confirmed owned resources; retain UNKNOWN and original
+  failure evidence. No scenario omission, residual-risk acceptance, real
+  Cloud/device/system privilege or publication authorization is added.

@@ -318,4 +318,219 @@ class ExplicitEnrollmentEntryDirectTests(unittest.TestCase):
                 self.assertIn('unrecognized arguments', errors)
 
 
+class ExplicitEnrollmentCompletionGateDirectTests(unittest.TestCase):
+    def real_success(self, callback):
+        # Module alias only: do not expose/import another TestCase into this
+        # module's unittest discovery. The original complete TLS workflow and
+        # all its original assertions run, not a hand-written success record.
+        from test_cases import test_req7_explicit_enrollment_initialize_workflow as workflow
+        case = workflow.ExplicitEnrollmentInitializeWorkflowTests()
+        case.setUp()
+        try:
+            case._exercise_actual_initialize(after_initialize=lambda project, state, bound, *owners:
+                callback(case, project, state, bound, owners))
+        finally:
+            case.doCleanups()
+
+    def original_gate(self, case, project, state, bound, owners, *, accept):
+        from test_cases import test_req7_explicit_enrollment_initialize_workflow as workflow
+        from monitor import issue_tracker_remote_history_match as remote
+        writer_scope, sheet_scope, target_scope = owners
+        before = workflow.tree_images(state)
+        refused = False; observed = None
+        with writer_scope(project, project / '99-output-monitor') as writer:
+            with target_scope(writer) as actual:
+                with sheet_scope(actual) as owner:
+                    try:
+                        observed = remote._observe_original_first_catalog_absence(writer, owner, actual)
+                    except remote.RemoteHistoryHold:
+                        refused = True
+        # Keep independent assertions outside real owner scopes: target
+        # normalization must not turn an assertion FAIL into fixture ERROR.
+        self.assertEqual(bound, actual)
+        if accept:
+            self.assertFalse(refused)
+            self.assertIs(True, observed)
+        else:
+            self.assertTrue(refused,
+                'UNPROVED_COMPLETION_MUST_NOT_PASS_ORIGINAL_INITIALIZATION_GATE')
+        self.assertEqual(before, workflow.tree_images(state))
+
+    def test_journal_only_or_attempt_without_completion_is_not_grandfathered(self):
+        from contextlib import ExitStack
+        from test_cases import test_req7_explicit_enrollment_initialize_workflow as workflow
+        import time
+        case = workflow.ExplicitEnrollmentInitializeWorkflowTests()
+        case.setUp()
+        try:
+            from monitor import issue_tracker_enrollment_journal as enrollment
+            from monitor import issue_tracker_online_target as target
+            from monitor import issue_tracker_sheets_read_plan as read_plan
+            from monitor import issue_tracker_sheets_read_decode as decode
+            from monitor.issue_tracker_sdk_authentication import AuthenticatedToken
+            with ExitStack() as stack:
+                project, local, ownership, _old_writer, _old_owner, bound = case.project(stack)
+                state = case.root / 'var/lib/http-ztp-container/issue-tracker'
+                stem = hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()
+                original_scopes = (local.try_writer_owner, ownership.spreadsheet_owner,
+                                   target._hold_current_project_online_target)
+                document = workflow.identity_response(); document['spreadsheetId'] = bound.spreadsheet_id
+                identity = decode.decode_template_identity(read_plan.prepare_template_identity_read(
+                    bound, AuthenticatedToken('fixture-only-local-format', time.time() + 3600)), workflow.response(document))
+                with local.try_writer_owner(project, project / '99-output-monitor') as writer:
+                    with target._hold_current_project_online_target(writer) as actual:
+                        with ownership.spreadsheet_owner(actual) as owner:
+                            with mock.patch('secrets.token_hex', side_effect=workflow.NONCES):
+                                enrollment.prepare_enrollment_journal(owner, actual, identity)
+                self.assertEqual({'HEADER', 'NONCES', 'INITIALIZED'},
+                    {path.name for path in (state / (stem + '.enrollment')).iterdir()})
+                for fault in ('lost-entire-attempt', 'missing-completion'):
+                    with self.subTest(fault=fault):
+                        attempt = state / ('enrollment-init-' + stem)
+                        if fault == 'lost-entire-attempt':
+                            self.assertFalse(attempt.exists())
+                        else:
+                            attempt.mkdir(mode=0o700)
+                            witness = attempt / 'PRESERVED'
+                            witness.write_bytes(b'UNKNOWN manual attempt; no completion\n'); witness.chmod(0o600)
+                        self.original_gate(case, project, state, bound, original_scopes, accept=False)
+        finally:
+            case.doCleanups()
+
+    def test_real_generated_completion_rejects_literal_field_type_outcome_permission_and_extra(self):
+        def after(case, project, state, bound, owners):
+            complete = case._require_original_completion_record(state, bound)
+            original = complete.read_bytes(); original_inode = complete.stat().st_ino
+            self.original_gate(case, project, state, bound, owners, accept=True)
+            base = json.loads(original)
+            faults = (
+                ('bool-schema', {'schema_version': True}),
+                ('data-only-outcome', {'outcome': 'ENROLLMENT_READBACK_DATA'}),
+                ('sending-permission', {'automatic_sending_enabled': True}),
+                ('unknown-field', {'unexpected_authority': 'forbidden'}),
+            )
+            for label, change in faults:
+                with self.subTest(fault=label):
+                    # Fault one real generated record in place; never create
+                    # an independently invented successful completion image.
+                    altered = {**base, **change}
+                    complete.write_bytes((json.dumps(altered, sort_keys=True, separators=(',', ':'),
+                        ensure_ascii=False, allow_nan=False) + '\n').encode('utf-8'))
+                    self.assertEqual(original_inode, complete.stat().st_ino)
+                    self.original_gate(case, project, state, bound, owners, accept=False)
+        self.real_success(after)
+
+    def test_real_completed_record_rejects_same_bytes_rebound_original_nonce_inode(self):
+        def after(case, project, state, bound, owners):
+            complete = case._require_original_completion_record(state, bound)
+            self.original_gate(case, project, state, bound, owners, accept=True)
+            completed = (complete.read_bytes(), complete.stat().st_ino)
+            stem = hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()
+            nonces = state / (stem + '.enrollment') / 'NONCES'
+            raw, inode = nonces.read_bytes(), nonces.stat().st_ino
+            preserved = case.root / 'preserved-direct-original-nonces'
+            nonces.rename(preserved); nonces.write_bytes(raw); nonces.chmod(0o600)
+            self.assertNotEqual(inode, nonces.stat().st_ino)
+            self.original_gate(case, project, state, bound, owners, accept=False)
+            self.assertEqual((raw, inode), (preserved.read_bytes(), preserved.stat().st_ino))
+            self.assertEqual(completed, (complete.read_bytes(), complete.stat().st_ino))
+        self.real_success(after)
+
+    def test_real_completed_record_binds_full_intent_not_only_known_projection(self):
+        def after(case, project, state, bound, owners):
+            complete = case._require_original_completion_record(state, bound)
+            self.original_gate(case, project, state, bound, owners, accept=True)
+            completed = (complete.read_bytes(), complete.stat().st_ino)
+            intent = complete.parent / 'INTENT'
+            original = json.loads(intent.read_bytes())
+            known = {key: original[key] for key in ('schema_version', 'state', 'spreadsheet_id',
+                                                   'policy_sha256', 'allowlist_sha256')}
+            altered = {**original, 'unexpected_intent': 'must-not-be-ignored'}
+            intent.write_bytes((json.dumps(altered, sort_keys=True, separators=(',', ':'),
+                ensure_ascii=False, allow_nan=False) + '\n').encode('utf-8'))
+            current = json.loads(intent.read_bytes())
+            self.assertEqual(known, {key: current[key] for key in known})
+            self.assertIn('unexpected_intent', current)
+            self.original_gate(case, project, state, bound, owners, accept=False)
+            self.assertEqual(completed, (complete.read_bytes(), complete.stat().st_ino))
+        self.real_success(after)
+
+class OriginalAbsenceLateWitnessWrapperDirectTests(unittest.TestCase):
+    def test_real_absence_is_recomputed_after_completion_handoff_creates_business_witness(self):
+        from contextlib import ExitStack, contextmanager
+        import socket
+        import time
+        from test_cases import test_req7_explicit_enrollment_initialize_workflow as workflow
+        from monitor import issue_tracker_remote_history_match as remote
+        from monitor import issue_tracker_enrollment_initialize as initialize
+        from monitor import issue_tracker_enrollment_journal as enrollment
+        from monitor import issue_tracker_online_target as target
+        from monitor import issue_tracker_sheets_read_plan as plans
+        from monitor import issue_tracker_sheets_read_decode as decode
+        from monitor import issue_tracker_token_launcher as auth
+        from monitor.issue_tracker_sdk_authentication import AuthenticatedToken
+        case = workflow.ExplicitEnrollmentInitializeWorkflowTests(methodName="runTest")
+        case.setUp(); self.addCleanup(case.doCleanups)
+        with ExitStack() as controls:
+            project, local, ownership, _old_writer, _old_owner, bound = case.project(controls)
+            state = case.root / "var/lib/http-ztp-container/issue-tracker"
+            stem = hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()
+            document = workflow.identity_response(); document["spreadsheetId"] = bound.spreadsheet_id
+            identity = decode.decode_template_identity(plans.prepare_template_identity_read(
+                bound, AuthenticatedToken("synthetic-local-format-only", time.time() + 3600)), workflow.response(document))
+            with local.try_writer_owner(project, project / "99-output-monitor") as writer:
+                with target._hold_current_project_online_target(writer) as actual:
+                    with ownership.spreadsheet_owner(actual) as owner:
+                        with mock.patch("secrets.token_hex", side_effect=workflow.NONCES):
+                            enrollment.prepare_enrollment_journal(owner, actual, identity)
+            folder = state / (stem + ".enrollment")
+            before = workflow.file_images(folder)
+            witness = state / (stem + ".units-started")
+            witness_bytes = b"independent late business-catalog witness; retain and stop\n"
+            inside = [False]; calls = []; context_arguments = []
+            original = remote._observe_original_first_catalog_absence_before_initialization_gate
+            def actual_old_absence(*args):
+                value = original(*args)  # NEVER substitute the old function's result.
+                calls.append((inside[0], value))
+                return value
+            @contextmanager
+            def TEST_ONLY_completion_handoff(*args):
+                context_arguments.append(args)
+                with witness.open("xb") as stream: stream.write(witness_bytes)
+                witness.chmod(0o600)
+                inside[0] = True
+                try:
+                    yield lambda: None  # Explicit direct-only context seam, NOT proof/permit.
+                finally:
+                    inside[0] = False
+            refused = False; observed = None; baseline = None
+            with mock.patch.object(initialize, "_hold_initialization_completion", TEST_ONLY_completion_handoff), \
+                    mock.patch.object(remote, "_observe_original_first_catalog_absence_before_initialization_gate", side_effect=actual_old_absence), \
+                    mock.patch.object(auth, "OwnedProjectTokenRefreshUnit", side_effect=AssertionError("No OAuth")) as authentication, \
+                    mock.patch.object(subprocess, "Popen", side_effect=AssertionError("No child")) as child, \
+                    mock.patch.object(socket, "socket", side_effect=AssertionError("No network")) as network:
+                with local.try_writer_owner(project, project / "99-output-monitor") as writer:
+                    with target._hold_current_project_online_target(writer) as actual:
+                        with ownership.spreadsheet_owner(actual) as owner:
+                            # Establish genuine initial True independently;
+                            # do NOT require the production wrapper to pre-read.
+                            baseline = original(writer, owner, actual)
+                            try:
+                                observed = remote._observe_original_first_catalog_absence(writer, owner, actual)
+                            except remote.RemoteHistoryHold:
+                                refused = True
+            # All independent assertions are AFTER genuine owner finalizers.
+            self.assertEqual(bound, actual)
+            self.assertIs(True, baseline, "Independent genuine initial old absence is actually True")
+            self.assertTrue(any(active for active, _value in calls),
+                "ORIGINAL_ABSENCE_NOT_RECOMPUTED_INSIDE_COMPLETION_HANDOFF")
+            self.assertTrue(refused or observed is False,
+                "LATE_BUSINESS_WITNESS_MUST_NOT_RETURN_OLD_TRUE_ABSENCE")
+            self.assertIsNot(observed, True)
+            self.assertEqual(1, len(context_arguments))
+            self.assertEqual(before, workflow.file_images(folder))
+            self.assertEqual(witness_bytes, witness.read_bytes())
+            self.assertFalse(list(state.glob("enrollment-init-*/COMPLETED")), "No completion proof fabricated")
+            authentication.assert_not_called(); child.assert_not_called(); network.assert_not_called()
+
 if __name__=="__main__": unittest.main()

@@ -10,6 +10,7 @@ neither observer grants a send, FIFO, quota or high-water mutation permit.
 """
 from dataclasses import dataclass, asdict
 from contextlib import contextmanager, ExitStack
+from functools import wraps
 import hashlib
 import json
 import os
@@ -963,7 +964,7 @@ def _read_current_cycle_native_receipt_locators(writer_token,*,_store,http_root)
 
 
 @contextmanager
-def _hold_current_cycle_native_creation_locators(writer_token,owner_token,binding,*,_store,http_root):
+def _hold_current_cycle_native_creation_locators_before_initialization_gate(writer_token,owner_token,binding,*,_store,http_root):
     """Current creator discovery after genuine audit archival, never adoption.
 
     Ordinary/no-delivery discovery retains the existing strict locator. Old
@@ -1942,7 +1943,7 @@ def _prepare_current_project_online_observation(writer_token, owner_token, bindi
 
 
 @contextmanager
-def _hold_current_project_online_original_inputs(writer_token, owner_token, binding, authentication, *,
+def _hold_current_project_online_original_inputs_before_initialization_gate(writer_token, owner_token, binding, authentication, *,
                                                  _store, http_root):
     """Fixed live input graph, never a returned closed permit or GO.
 
@@ -2064,7 +2065,76 @@ def _consume_current_project_online_original_inputs(writer_token, owner_token, b
     raise RemoteHistoryHold() from None
 
 
+@wraps(_hold_current_cycle_native_creation_locators_before_initialization_gate)
+@contextmanager
+def _hold_current_cycle_native_creation_locators(writer_token, owner_token, binding, *, _store, http_root):
+    from monitor.issue_tracker_enrollment_initialize import _hold_initialization_completion, EnrollmentInitializeHold
+    try:
+        with _hold_initialization_completion(writer_token, owner_token, binding) as verify:
+            verify()
+            with _hold_current_cycle_native_creation_locators_before_initialization_gate(
+                    writer_token, owner_token, binding, _store=_store, http_root=http_root) as values:
+                verify()
+                yield values
+                verify()
+            verify()
+    except EnrollmentInitializeHold:
+        raise RemoteHistoryHold() from None
+
+
+@wraps(_hold_current_project_online_original_inputs_before_initialization_gate)
+@contextmanager
+def _hold_current_project_online_original_inputs(writer_token, owner_token, binding, authentication, *, _store, http_root):
+    from monitor.issue_tracker_enrollment_initialize import _hold_initialization_completion, EnrollmentInitializeHold
+    try:
+        with _hold_initialization_completion(writer_token, owner_token, binding) as verify:
+            verify()
+            with _hold_current_project_online_original_inputs_before_initialization_gate(
+                    writer_token, owner_token, binding, authentication, _store=_store, http_root=http_root) as values:
+                verify()
+                yield values
+                verify()
+            verify()
+    except EnrollmentInitializeHold:
+        raise RemoteHistoryHold() from None
+
+
 def _observe_original_first_catalog_absence(writer_token, owner_token, binding):
+    from monitor.issue_tracker_enrollment_initialize import _hold_initialization_completion, EnrollmentInitializeHold
+    entered = False
+    try:
+        with _hold_initialization_completion(writer_token, owner_token, binding) as verify:
+            entered = True
+            verify()
+            result = _observe_original_first_catalog_absence_before_initialization_gate(writer_token, owner_token, binding)
+            verify()
+        return result
+    except EnrollmentInitializeHold:
+        if not entered:
+            # Preserve a specific missing/incomplete diagnosis only. A True
+            # observed here is discarded and can never bypass completion.
+            _observe_original_first_catalog_absence_before_initialization_gate(writer_token, owner_token, binding)
+        raise RemoteHistoryHold() from None
+
+
+def _reconcile_pending_project_units_with_authentication(writer_token, owner_token, binding, authentication=None, *, _store=None):
+    from monitor.issue_tracker_enrollment_initialize import _hold_initialization_completion, EnrollmentInitializeHold
+    entered = False
+    try:
+        with _hold_initialization_completion(writer_token, owner_token, binding) as verify:
+            entered = True
+            verify()
+            result = _reconcile_pending_project_units_with_authentication_before_initialization_gate(
+                writer_token, owner_token, binding, authentication, _store=_store)
+            verify()
+        return result
+    except EnrollmentInitializeHold:
+        if not entered:
+            _observe_original_first_catalog_absence_before_initialization_gate(writer_token, owner_token, binding)
+        raise RemoteHistoryHold() from None
+
+
+def _observe_original_first_catalog_absence_before_initialization_gate(writer_token, owner_token, binding):
     """Strict original enrollment plus no catalog is a read-only observation.
 
     It is not enrollment provisioning, remote nonce proof, a NEW permit or
@@ -2137,7 +2207,7 @@ def _observe_original_first_catalog_absence(writer_token, owner_token, binding):
     return absent
 
 
-def _reconcile_pending_project_units_with_authentication(writer_token, owner_token, binding, authentication=None, *, _store=None):
+def _reconcile_pending_project_units_with_authentication_before_initialization_gate(writer_token, owner_token, binding, authentication=None, *, _store=None):
     """Private fixed worker composition, never a caller cycle/verifier permit."""
     from monitor import issue_tracker_unit_catalog as catalog
     from monitor import issue_tracker_retained_inventory as inventory

@@ -390,3 +390,99 @@ class EnrollmentInitializeParentFolderCloseTests(unittest.TestCase):
             self.assertIs(failure, caught.exception)
             self.assertEqual(['HEADER', 'NONCES', 'INITIALIZED'], stat_calls)
             self.assertEqual(acquired, closed)
+
+
+class EnrollmentCompletionFifoOpenDirectTests(unittest.TestCase):
+    def fifo_marker(self, leaf):
+        import hashlib
+        from contextlib import ExitStack
+        from types import SimpleNamespace
+        from test_cases import test_req7_explicit_enrollment_initialize_workflow as workflow
+        case = workflow.ExplicitEnrollmentInitializeWorkflowTests()
+        case.setUp()
+        unknown = False
+        try:
+            from monitor import issue_tracker_enrollment_initialize as initialize
+            with ExitStack() as scope:
+                project, local, ownership, _old_writer, _old_owner, bound = case.project(scope)
+                state = case.root / 'var/lib/http-ztp-container/issue-tracker'
+                stem = hashlib.sha256(bound.spreadsheet_id.encode()).hexdigest()
+                attempt = state / ('enrollment-init-' + stem); attempt.mkdir(mode=0o700)
+                # Literal physical prelude only, NOT successful enrollment or
+                # a fake COMPLETED image. Marker type rejection must precede
+                # parsing/authority, without blocking on this real FIFO.
+                for name in ('INTENT', 'PREFLIGHT-template_identity', 'PREFLIGHT-template_headers',
+                        'PREFLIGHT-whitelist', 'PREFLIGHT-metadata', 'WIRE', 'RESPONSE',
+                        'RESPONSE-STATUS', 'READBACK', 'OBSERVED-DATA'):
+                    path = attempt / name; path.write_bytes(b'not completion authority\n'); path.chmod(0o600)
+                other = attempt / ('COMPLETED' if leaf == '.COMPLETED-STAGED' else '.COMPLETED-STAGED')
+                other.write_bytes(b'not successful completion\n'); other.chmod(0o600)
+                # The first regular staged image in the COMPLETED case needs
+                # its original two links merely to reach the second open.
+                os.link(other, case.root / 'owned-marker-second-link')
+                fifo = attempt / leaf; os.mkfifo(fifo, 0o600)
+                parent_info = attempt.stat(); fifo_info = fifo.lstat()
+                unsafe_flags, attempted, returned = [], [], []
+                raw_open, raw_fstat = os.open, os.fstat
+
+                def opened(name, flags, *args, **kwargs):
+                    nonlocal unknown
+                    if name == leaf:
+                        try:
+                            parent = raw_fstat(kwargs['dir_fd'])
+                        except BaseException as error:
+                            unknown = True
+                            raise FixtureUnknown('FIFO fixture parent identity unknown; retain tree') from error
+                        if (parent.st_dev, parent.st_ino) != (parent_info.st_dev, parent_info.st_ino):
+                            unknown = True
+                            raise FixtureUnknown('FIFO fixture received foreign parent; retain tree')
+                        attempted.append(flags)
+                        if not flags & os.O_NONBLOCK:
+                            # Crucially do NOT delegate a blocking FIFO open.
+                            unsafe_flags.append(flags)
+                            raise initialize.EnrollmentInitializeHold()
+                    result = raw_open(name, flags, *args, **kwargs)
+                    returned.append(result)
+                    return result
+
+                facade = SimpleNamespace(**{name: getattr(os, name) for name in dir(os)})
+                facade.open = opened
+                refused = False; yielded = False
+                with local.try_writer_owner(project, project / '99-output-monitor') as writer:
+                    with ownership.spreadsheet_owner(bound) as owner:
+                        with mock.patch.object(initialize, 'os', facade):
+                            try:
+                                with initialize._hold_initialization_completion(writer, owner, bound):
+                                    yielded = True
+                            except initialize.EnrollmentInitializeHold:
+                                refused = True
+                # All assertions occur AFTER genuine owner scopes, so a
+                # literal flag failure stays FAIL rather than normalization ERROR.
+                for descriptor in returned:
+                    try:
+                        raw_fstat(descriptor)
+                    except OSError as error:
+                        if error.errno == errno.EBADF:
+                            continue
+                        unknown = True
+                        raise FixtureUnknown('FIFO fixture returned descriptor closure unknown') from error
+                    unknown = True
+                    raise FixtureUnknown('FIFO fixture returned descriptor remained open')
+                self.assertEqual([], unsafe_flags,
+                    'INITIALIZATION_FIFO_OPEN_WITHOUT_NONBLOCK: ' + leaf)
+                self.assertEqual(1, len(attempted), 'reach the exact original selected FIFO open')
+                self.assertTrue(refused); self.assertFalse(yielded)
+                self.assertEqual((fifo_info.st_dev, fifo_info.st_ino),
+                                 (fifo.lstat().st_dev, fifo.lstat().st_ino))
+        finally:
+            if unknown:
+                # No numeric rescue or cleanup of an unconfirmed original.
+                case.temp._finalizer.detach()
+            else:
+                case.doCleanups()
+
+    def test_staging_fifo_is_opened_nonblocking_before_type_refusal(self):
+        self.fifo_marker('.COMPLETED-STAGED')
+
+    def test_completed_fifo_is_opened_nonblocking_before_type_refusal(self):
+        self.fifo_marker('COMPLETED')
