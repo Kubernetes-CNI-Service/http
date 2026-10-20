@@ -68,8 +68,8 @@ class RenderedStep:
 def _validate_plan(policy, device, run_id, method, switch_dir):
     if not isinstance(policy, UpgradePolicy) or not isinstance(device, InventoryDevice):
         raise ValueError("existing typed project plan and inventory required")
-    if method not in {"local", "http"}:
-        raise ValueError("component renderer currently covers local/http only; no HTTPS")
+    if method not in {"local", "http", "scp"}:
+        raise ValueError("component declarations cover local/http/scp only; no HTTPS")
     if not isinstance(run_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,95}", run_id):
         raise ValueError("safe run binding required")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", device.hostname):

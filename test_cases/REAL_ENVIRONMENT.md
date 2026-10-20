@@ -2848,3 +2848,15 @@ generation/publish 及 UNKNOWN 下改 action/wire 均 HOLD，不计作 COMPLETE 
   never store passwords, tokens or private keys. Only clean proven-owned objects;
   retain UNKNOWN originals and do not retry numeric descriptors or reset state.
 - Status: NOT RUN. No real SSH/device/Cloud, full proof or publication authorized.
+
+
+### SCP declaration-only supplement — NOT RUN
+
+The local renderer/request graph now admits lexical SCP, but actual source
+preflight, native SCP dispatch, content verification and real manager ACK
+remain unimplemented/HOLD. OS/BIOS/CPLD private Bash+EOF/no-wire exit64 is
+local negative evidence only, not a successful SCP transfer or device test.
+The existing TC-IBSW3-SCP-SOURCE-CONTENT-20261020 prerequisites, normal/commit/
+interruption/cold-recovery cases, retained failure evidence and cleanup rules
+remain required. No new real SSH/device/source permissions or risk waivers;
+REAL_ENV stays NOT RUN, CLI remains HTTP-only, ordinary release gates unchanged.

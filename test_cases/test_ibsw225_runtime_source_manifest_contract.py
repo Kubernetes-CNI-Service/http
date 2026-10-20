@@ -768,6 +768,77 @@ class DriverSourceDataExactCompositionTests(unittest.TestCase):
                 self.assertNotEqual(hashlib.sha256(expected).digest(), hashlib.sha256(restored).digest())
 
 
+# Independent literal inverse of the reviewed declaration-only SCP hunk.
+# No FROZEN hash changes; this is not native SCP/dispatch admission.
+COMPONENT_SCP_DECLARATION_COMPOSITION = (
+    b'    if method not in {"local", "http"}:\n'
+    b'        raise ValueError("component renderer currently covers local/http only; no HTTPS")\n',
+    b'    if method not in {"local", "http", "scp"}:\n'
+    b'        raise ValueError("component declarations cover local/http/scp only; no HTTPS")\n',
+)
+
+
+def _component_upstream_bytes_from_exact_scp_declaration(payload):
+    if type(payload) is not bytes:
+        raise TypeError('exact component source bytes required')
+    original, integrated = COMPONENT_SCP_DECLARATION_COMPOSITION
+    if payload.count(integrated) != 1 or payload.count(original) != 0:
+        raise ValueError('missing/duplicate/new-plus-old component declaration hunk')
+    start = payload.index(integrated)
+    restored = payload[:start] + original + payload[start + len(integrated):]
+    if restored.count(original) != 1 or restored.count(integrated) != 0:
+        raise ValueError('restored component declaration hunk is not unique')
+    return restored
+
+
+class ComponentScpDeclarationExactCompositionTests(unittest.TestCase):
+    def test_literal_declaration_inverse_preserves_original_bytes_and_frozen_hash(self):
+        source = (
+            b'prefix\n'
+            b'    if method not in {"local", "http", "scp"}:\n'
+            b'        raise ValueError("component declarations cover local/http/scp only; no HTTPS")\n'
+            b'suffix\n')
+        expected = (
+            b'prefix\n'
+            b'    if method not in {"local", "http"}:\n'
+            b'        raise ValueError("component renderer currently covers local/http only; no HTTPS")\n'
+            b'suffix\n')
+        self.assertEqual(expected, _component_upstream_bytes_from_exact_scp_declaration(source))
+        self.assertEqual('106ddd7095e28503a355e9637dfb4fbd7fa151a2d4198e951590233da02ec45a',
+                         FROZEN_SHA256['tools/ibsw_upgrade_component.py'])
+
+    def test_missing_partial_duplicate_extra_old_and_outside_drift_cannot_be_hidden(self):
+        # Independent literals, not output sampled from a component or inverse.
+        old = (b'    if method not in {"local", "http"}:\n'
+               b'        raise ValueError("component renderer currently covers local/http only; no HTTPS")\n')
+        new = (b'    if method not in {"local", "http", "scp"}:\n'
+               b'        raise ValueError("component declarations cover local/http/scp only; no HTTPS")\n')
+        for label, malformed in (
+                ('missing', b''), ('old', old),
+                ('only-method-line', new.splitlines(keepends=True)[0]),
+                ('only-message-line', new.splitlines(keepends=True)[1]),
+                ('deleted-byte', new[:-1]), ('duplicate', new + new),
+                ('old-before-new', old + new), ('old-after-new', new + old)):
+            with self.subTest(source=label):
+                with self.assertRaises(ValueError):
+                    _component_upstream_bytes_from_exact_scp_declaration(malformed)
+        with self.assertRaises(TypeError):
+            _component_upstream_bytes_from_exact_scp_declaration('not bytes')
+        source = b'prefix\n' + new + b'suffix\n'
+        expected = b'prefix\n' + old + b'suffix\n'
+        for label, drift, expected_drift in (
+                ('prefix', b'extra\n' + source, b'extra\n' + expected),
+                ('middle', source.replace(b'suffix\n', b'middle-drift\nsuffix\n', 1),
+                 expected.replace(b'suffix\n', b'middle-drift\nsuffix\n', 1)),
+                ('suffix', source + b'extra\n', expected + b'extra\n')):
+            with self.subTest(outside=label):
+                restored = _component_upstream_bytes_from_exact_scp_declaration(drift)
+                self.assertEqual(expected_drift, restored)
+                self.assertNotEqual(expected, restored)
+                self.assertNotEqual(hashlib.sha256(expected).digest(), hashlib.sha256(restored).digest())
+
+
+
 GLOBAL = """schema_version: 2
 common:
   mgmt:
@@ -817,6 +888,8 @@ class CanonicalRuntimeManifestContractTests(unittest.TestCase):
                     payload = _access_upstream_bytes_from_exact_composition(payload)
                 elif relative == "tools/ibsw_upgrade_driver.py":
                     payload = _driver_upstream_bytes_from_exact_composition(payload)
+                if relative == "tools/ibsw_upgrade_component.py":
+                    payload = _component_upstream_bytes_from_exact_scp_declaration(payload)
                 self.assertEqual(hashlib.sha256(payload).hexdigest(), expected)
         self.assertIn(REQUIREMENTS, manifest["tracked_support"])
 

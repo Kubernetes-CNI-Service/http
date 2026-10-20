@@ -439,6 +439,14 @@
         "test_cases.test_ibsw3_scp_provider_absent",
         "test_cases.test_ibsw3_scp_provider_close"
       ]
+    },
+    {
+      "id": "ibsw3-scp-declaration-related",
+      "description": "SCP declaration/request DATA and no-wire shell HOLD; not native dispatch or ACK",
+      "tests": [
+        "test_cases.test_ibsw3_scp_native_declaration_capability",
+        "test_cases.test_ibsw3_scp_empty_wire_shell_boundary"
+      ]
     }
   ],
   "tracked_support": [
@@ -2265,6 +2273,16 @@
         "test_cases.test_ibsw3_scp_provider_cache",
         "test_cases.test_ibsw3_scp_provider_absent",
         "test_cases.test_ibsw3_scp_provider_close"
+      ]
+    },
+    {
+      "id": "ibsw3_scp_declaration_only_direct",
+      "paths": [
+        "tools/ibsw_upgrade_component.py"
+      ],
+      "tests": [
+        "test_cases.test_ibsw3_scp_native_declaration_capability",
+        "test_cases.test_ibsw3_scp_empty_wire_shell_boundary"
       ]
     }
   ],
@@ -4190,6 +4208,21 @@
         "test_cases.test_ibsw3_scp_provider_cache",
         "test_cases.test_ibsw3_scp_provider_absent",
         "test_cases.test_ibsw3_scp_provider_close"
+      ]
+    },
+    {
+      "id": "ibsw3_scp_declaration_request_shell_hold_workflow",
+      "members": [
+        "infiniband/bringup/xdr-upgrade/upgrade.py",
+        "infiniband/bringup/xdr-upgrade/upgrade-component.sh",
+        "tools/ibsw_upgrade_contract.py",
+        "tools/ibsw_upgrade_component.py",
+        "tools/ibsw_upgrade_driver.py",
+        "tools/ibsw_upgrade_inputs.py"
+      ],
+      "tests": [
+        "test_cases.test_ibsw3_scp_native_declaration_capability",
+        "test_cases.test_ibsw3_scp_empty_wire_shell_boundary"
       ]
     }
   ],

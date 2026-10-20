@@ -5038,3 +5038,20 @@ as do all existing access/layout/template source checks. This is not hard I/O
 supervision, a native SCP bridge, cold upgrade recovery or device acceptance.
 The CLI remains HTTP-only; SCP preflight/execution remains HOLD. Existing
 REAL_ENV cards stay NOT RUN and normal full/release gates are unchanged.
+
+
+### SCP declaration/request DATA and empty-wire boundary — 2026-10-20
+
+The renderer now accepts the explicit lexical SCP method and can create an
+original REQUESTED/UNKNOWN/NOT_EXECUTED graph instead of rejecting its method.
+This is planning only: no source secret, package grant, native dispatch or ACK
+is created. The existing shell still rejects SCP without its unimplemented
+content bridge (exit64); actual OS/BIOS/CPLD Bash EOF controls verify zero
+nv/ssh/scp/curl calls and no fetch/install, ACK, package or switch-file output.
+HTTP remains a separate real request control, not a relabeled SCP workflow.
+
+The CLI remains HTTP-only and native SCP executor/preflight/nonempty payload
+remain HOLD. The shell/template bytes are unchanged; the renderer change is
+only a fixed method-set/message hunk with an independent literal inverse and
+the original frozen source hash. Declaration capability PASS is not a working
+SCP pull, manager ACK, device upgrade, full proof or release approval.
