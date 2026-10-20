@@ -3,6 +3,26 @@
 交出方：codex dev。接收方：由 owner 指定的 codex test 会话。
 日期：2026-10-19。源码基准：`9bf7abc84ec66001f6a51af104b23df56a7b7e64`。
 
+上述是原始集成基准，不包含全部后续修复。固定布局、缓存模板／runner 门及
+固定 registry 的 imported-object 身份修复已于 2026-10-20 随 `f7456dd` 进入主树。
+接收方须按该提交、后续工作列表及下列闭包逐文件核对，不能仅 checkout 原始基准
+便当作已经继承；这些修复不启用 SCP，也不构成设备或发布验收。精确 SHA、命令和本地证据登记在主树
+`outputs/req19-local-evidence-20261007/ROOT-IBSW-FIXED-LAYOUT-MAIN-LANDED-20261020.json`；
+下列旧收据各自保留其原始代码与测试 epoch，不追认为当前整树证明。
+此前逐步修复的历史记录见
+`outputs/req19-local-evidence-20261007/ROOT-H-CONTAINMENT-MEMO-IB-LAYOUT-V4-20261019.json`。
+随后 cached executor 原 runner 绑定修复及本轮证据另见
+`outputs/req19-local-evidence-20261007/ROOT-H-LITERAL-FORMS-IB-CACHED-RUNNER-20261019.json`。
+固定 registry 的 transitive cached-object 身份修复另见
+`outputs/req19-local-evidence-20261007/ROOT-H-EXPRESSION-IB-TRANSITIVE-CACHE-20261020.json`；
+包含真实 canonical/flat alias 正控、混合来源初始 RED 和原组件工作流回归。
+范围选择／known-hosts 及三个历史流程的 IO 夹具一致性修复另见
+`outputs/req19-local-evidence-20261007/ROOT-H-COMPREHENSION-IB-IO-COHERENCE-20261020.json`。
+NVOS 历史观察／派发前失败的 IO 夹具接线，以及新增测试的精确 discovery 登记见
+`outputs/req19-local-evidence-20261007/ROOT-H-OWNED-BOUNDARIES-IB-LEGACY-COMPAT-20261020.json`。
+当前入口下三组件／金丝雀／未选状态隔离，以及 OS 链与固件 OS 前置的五项原流程证据见
+`outputs/req19-local-evidence-20261007/ROOT-IBSW-CURRENT-COMPONENT-WORKFLOWS-PY312-20261020.json`。
+
 IBSW 2.25 的运行代码、HTTP-only 入口、共享运行锁和本地测试已集成进 http 主树。
 本交接供 codex test 继承到自己的代码目录并继续独立验证；不是发布许可或真机验收结论。
 本功能不依赖 REQ7 初始化完成，但使用共享 tools 模块，不能只复制 `upgrade.sh`。
@@ -54,6 +74,36 @@ tools/
 入口支持 canonical 仓库布局和完整 flat siblings 布局；选定布局缺依赖必须拒绝，
 不能到另一棵树兜底导入。首次接收建议保留仓库布局。若另做 flat 制品，须重新核完整闭包、
 真实导入来源和相应测试，不把这份目录清单当成已经制作并验收的 flat 制品。
+
+### 固定布局与模板 ABI 增量
+
+完整 flat 目录名可以是 `tools`；不能仅靠目录 basename 判断模板位置。
+当前 `ibsw_upgrade_contract._fixed_layout` 供 component、executor 和入口共享。
+继承时须逐项整合同一版本的 `upgrade.py`、contract、component、executor；
+不能只拿新 component 配旧 contract。入口每次返回 driver 前重核布局，component 每次
+读模板前核它与初次选择一致；executor 同样固定导入时的原 `_RUNNER`，每次读取前
+重核完整布局仍与原路径一致，不能缓存后静默切到另一套完整布局。
+这补上 V4 仅重算当前 runner 布局的缺口；严格源码 inverse 同时覆盖初始绑定与读取门，
+原 13 项冻结哈希不变，不能将旧 V4 executor 形态作为另一种通过条件。
+固定 canonical 入口与其 `tools/upgrade.py` 同时存在属于歧义，两个入口在加载运行包或渲染时都 HOLD；
+原 sole `--help` / `--version` 仍仅作本地信息查询，不构成操作放行。
+缺件或缓存后的布局变化也 HOLD，不自动删入口、补文件、切树或取备用模板。
+入口另核固定 runtime registry 的消费者保留的 module/function/class 对象身份，
+拒绝跨布局或重导入遗留的 stale bindings；真实 alias/re-export 必须仍是 provider 的
+同一原对象（`is`），不凭同名通过。该有限审计不等于任意 Python 对象或闭包安全证明。
+测试继承时，模拟 IO 须在明确的 provider／consumer 接缝共享同一对象；单边替换可能
+在真实入口前触发身份 HOLD，不能为恢复测试而给 mocks 加生产豁免。范围选择、
+known-hosts 和历史只读／连接失败／已达目标流程的原安全断言均保留。
+派发前失败流程仍须保留“观察会话成功、执行会话失败”的区别；只共享本来相同的
+SDK／读取模拟，不能为了身份一致而合并不同故障阶段。NVOS 历史观察也保留原始
+解析失败、命令失败和输出脱敏断言。fixture helper 不是正常 discovery suite；
+对 helper 的定向实际执行与仅发现正常测试身份必须分开记录，不混算验收数量。
+
+独立离线证据见 `test_cases/test_ibsw225_flat_tools_layout.py`；包含冷解释器真实
+entry→driver→executor 渲染、双入口、缺模板、缓存后冲突和布局变化，不调用 operational main。
+源码继承还须保留 runtime source contract 的严格 literal-hunk 逆变换：原 13 项
+`FROZEN_SHA256` 与 access inverse 未改，不接受增加新 hash、跳过文件或隐藏 hunk 外漂移。
+这些局部测试不是完整设备升级、远程安装或发布证明。
 
 ## 共享 ABI 增量迁移补充
 
@@ -110,6 +160,14 @@ reserved upgrade global 存在却非 symlink 时拒绝，不把它作为普通�
 
 ## 已确认的运行合同
 
+OS-only 的最小 global 字段、独立版本链与 HTTP URL 示例见
+[README：最小 os-only global 声明](README.md#最小-os-only-global-声明离线输入检查)。
+模板中只有 `ib.version` 不等于已声明升级 policy；该示例必须配
+`--os-only --diagnose-inputs`，无组件选择时仍要求 OS/BIOS/CPLD 三份 policy。
+HTTP 禁用时返回 `HTTP_POLICY`，只能检查并启用经批准的项目 HTTP 配置；
+HTTPS、SCP、local 均不是当前入口的备用传输。相关离线测试同时核验零外部调用。
+新增样例仅覆盖本地离线输入诊断，不是包可达、设备健康或升级验收证据。
+
 - 仅 HTTP 包来源；HTTPS、SCP、local 明确拒绝，不静默降级。
 - 可用 `--project ABS_PROJECT` 读取明确项目的 `02-devices_config.csv` 和
   `01-global.yaml`，不要求先 load/setup；不覆盖用户的 CSV/global。
@@ -128,6 +186,36 @@ reserved upgrade global 存在却非 symlink 时拒绝，不把它作为普通�
   不得用另一台服务器并发写相同目标，也不得删除锁文件“解除”冲突。
 - 密码不进入 argv/env/脚本/公开日志；身份、known_hosts、包来源、原配置备份和
   真实最终健康验证仍是必要条件。单个命令 exit 0 不等于组件升级成功。
+
+### 重启观察与安装退出记录的区别
+
+当前合作式重启观察路径不把 `owned-exit.record` 当作完成授权。记录缺失或不可信时，
+不得猜测安装退出码、补造记录或重新派发；只有实际新 boot、身份、目标版本、配置、
+健康及其余原安全门禁均通过，才可按现场观察完成组件，安装退出码仍为 `None`。
+这不是所有执行路径都可以忽略原安装退出码的通用豁免。未观察到重启或最终条件不足时，
+仍须在原期限内收尾并保留 `UNKNOWN`；退出码 0 也不能替代这些验证。
+
+本机保留三个原工作流的定向证据：未重启保持 UNKNOWN、退出记录缺失后真实验证、
+不可信退出记录不作为验证依据；后两项仍断言仅安装一次，缺失记录案例另断言零配置 patch。
+收据为 `outputs/req19-local-evidence-20261007/ROOT-IBSW-OWNED-EXIT-UNCERTAINTY-20261020.json`。
+设备 IO 与 boot 变化由原夹具模拟，不是实际设备重启、真实 SSH、断电、完整模块或 full 证明；
+接收方仍须在自己的精确代码和环境上验证。三个案例也不证明可选退出文件探测分支已执行。
+
+原延迟退出案例另有夹具可达性修正：仅在显式 `delayed_exit>0` 时，将本次模拟重启
+延后到原 `lstat` 真正消耗指定缺失次数；不改生产探测间隔、期限或原 19 个工作流断言。
+新增 `test_ibsw225_delayed_owned_exit_witness.py` 被动委托原 IO，独立要求两次缺失及
+前后均无全局请求 lease，之后仍须完整 live 验证、仅安装一次，不要求成功读取退出文件。
+它不提供真实 boot 字节见证或设备证明；本地初始失败、夹具修正与定向复验另见
+`outputs/req19-local-evidence-20261007/ROOT-IBSW-DELAYED-PROBE-REACHABILITY-20261020.json`。
+
+九目标并发原工作流另有本地定向收据
+`outputs/req19-local-evidence-20261007/ROOT-IBSW-NINE-TARGET-OWNED-CHILD-20261020.json`。
+原案例在该收据绑定的夹具及 585 项源码／监督脚本快照上单独运行，1 项 PASS，27.581 秒；
+生产时钟、期限及原断言未改，外层 60 秒诊断预算未触发超时或强制终止。
+原断言确认配置 5 个 in-flight、9 个模拟目标 COMPLETE 及 canary 先派发，
+不证明实际 5 线程峰值或 5 个设备安装进程；也不证明超时终止后的安全收尾。
+设备 IO 仍由原夹具模拟，不是真机或 full 证明；延迟探测可达性证据仍归属上一收据。
+本段只是维护交接说明，没有重跑案例或把此前通过追认为修改后整树的测试证明。
 
 `--help` / `--version` 是本地信息查询。`--diagnose-inputs` 是本地输入检查；
 `--inspect-only` 和 `--dry-run` 会访问设备并写本地检查结果，不能当成离线测试。
@@ -150,6 +238,10 @@ python3.12 -m venv /absolute/ibsw-test-venv
 交出方可复核的既有 SSH 环境为
 `/Users/joeyyang/Desktop/http/outputs/req19-local-evidence-20261007/f01-env-recovery-20261017.niMetv/venv/bin/python3.12`。
 这只是本机历史路径，不是接收方运行前提。不要复制 venv 后声称解释器/二进制依赖可移植。
+不要让裸 `python3` 静默选中系统 Python 3.9：现有未选状态哨兵使用
+`Path.stat(follow_symlinks=False)`。本轮 3.9 在该夹具行即 TypeError；保留失败原件，
+确认解释器前置后，源码／测试／原断言不变地在上述 3.12.14 环境完成定向复验。
+这不追认旧日志的解释器身份，也不表示 3.12 下已执行整个仓库或完成设备验收。
 
 ## 已保留的本地证据
 
@@ -191,7 +283,7 @@ sole-help 合同；不是整个 IBSW 回归，更不是设备升级验证。测�
 
 1. 记录接收仓 HEAD/tree、dirty/diff、源清单 SHA、Python/平台与依赖；先审已有修改，
    不覆盖冲突，不使用开发机旧临时目录作唯一原件。
-2. 先跑上述 13 项，确认真实模块来自接收目录，不混入旧树、外来 sys.modules 对象或同名模块。
+2. 先跑上述三个模块，按接收代码的实际测试数记录结果，确认真实模块来自接收目录，不混入旧树、外来 sys.modules 对象或同名模块。历史 13 项 PASS 不代表新增案例已执行。
 3. 按风险分批跑原 IBSW 测试，至少覆盖三组件真实多脚本流程、两次 OS hop、
    金丝雀隔离、普通设备失败、仅选组件、来源/身份/主机密钥拒绝、备份先于替换、
    SFTP 中断及清理、报告写失败、共享 guard 的失败与成功路径。

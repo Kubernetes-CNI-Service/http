@@ -404,7 +404,7 @@ _SAFE_BACKEND_HINTS = {
     "marked host trust entry needs actual native policy": ("KNOWN_HOSTS_POLICY", "A matching known_hosts entry uses a trust marker such as @revoked or @cert-authority; it cannot authorize this connection. Review its trust policy; do not delete it just to proceed"),
     "explicit IB upgrade policy required; no legacy constants": ("UPGRADE_POLICY", "global requires switches.ib.upgrade.packages; old fixed versions are not used as fallback"),
     "selected component requires explicit policy": ("UPGRADE_POLICY", "A selected component has no policy in global. Select only configured components, for example --os-only, or complete the intended policy"),
-    "project HTTP is not enabled": ("HTTP_POLICY", "HTTP is disabled in global; use an enabled approved method or correct global before selecting --method http"),
+    "project HTTP is not enabled": ("HTTP_POLICY", "HTTP is disabled in global; enable the approved project HTTP configuration before continuing. This entry supports HTTP only; HTTPS, SCP and local are not fallback transports."),
     "artifact parent must be an owned, non-group/other-writable real directory": ("OUTPUT_PERMISSIONS", "The output parent must belong to the current user and not be group/other writable. Check only the intended project output path; do not recursively change the shared HTTP tree"),
 }
 

@@ -23,6 +23,11 @@
 初始化和升级共用本机内核运行锁，忙时退出 75。不要删除锁文件、重放 UNKNOWN 请求，
 也不要把状态 JSON 当成授权。OS/BIOS/CPLD 各自保留组件状态和金丝雀结果。
 
+完整 flat bundle 可放在任意目录名下，包括 `tools`；模板必须来自同一选定布局。
+若固定 canonical 入口和其 `tools/upgrade.py` 同时存在，按布局歧义停止，不猜测来源。
+缺模块、shell 或 requirements 不尝试另一棵树；模块已缓存时仍重核入口与模板布局，
+布局改变即拒绝，不沿用旧模板或自动切换。程序不会替操作者删除冲突入口。
+
 ### 当前操作顺序（以下示例不自动执行）
 
 先完整保留本仓库布局，再用独立 Python 3.12 环境安装本目录依赖；不要只复制
@@ -41,10 +46,60 @@ requirements 固定八个 SSH 依赖版本；其中 PyYAML 原文未锁版本，
 `01-global.yaml`，无需先 load/setup。不会把样例 global 覆盖到项目：
 
 ```bash
-/absolute/ibsw-venv/bin/python -B /absolute/http/infiniband/bringup/xdr-upgrade/upgrade.py --project /absolute/project --method http --diagnose-inputs
+/absolute/ibsw-venv/bin/python -B /absolute/http/infiniband/bringup/xdr-upgrade/upgrade.py --project /absolute/project --method http --os-only --diagnose-inputs
 ```
 
 输入检查不访问 SSH、不问密码、不生成 run；它不是设备健康或升级验收。
+
+### 最小 os-only global 声明（离线输入检查）
+
+项目模板中的 `ib.version` 不是升级包声明。当前入口不再读取旧 shell 的
+`TARGET_OS_FILES` 常量，也不会自动为项目补 `upgrade`。缺少该块必须拒绝。
+下面是独立的最小 schema 2 示例；实际项目应将这些字段合并进已有 `common` 和
+`switches` 列表中唯一的 `ib` 项，保留其余业务字段，不要用这个最小示例覆盖完整 global。
+示例地址是文档地址，路径和版本链须由操作者核对；不会据此下载包或授予设备操作权限。
+
+<!-- IBSW_OS_ONLY_GLOBAL_BEGIN -->
+```yaml
+schema_version: 2
+common:
+  mgmt:
+    http:
+      status: enabled
+      address: 192.0.2.254
+      port: 8088
+      http_root: /srv/ibsw-http
+switches:
+- ib:
+    version: '25.02.8008'
+    upgrade:
+      package_dir: /srv/ibsw-http
+      packages:
+        os:
+          sub_dir: image
+          files:
+          - file: nvos-amd64-25.02.6077.bin
+          - file: nvos-amd64-25.02.7002.bin
+          - file: nvos-amd64-25.02.8008.bin
+```
+<!-- IBSW_OS_ONLY_GLOBAL_END -->
+
+`package_dir` 加 `sub_dir` 得到本地包路径；该路径必须处于 `http_root` 内，
+URL 才能按 `http://address:port/` 加相对路径构成。上例的最终包 URL 是
+`http://192.0.2.254:8088/image/nvos-amd64-25.02.8008.bin`。
+有序 OS 链的末项必须等于 `ib.version`。这只是配置声明，不证明包存在、HTTP可达、
+当前设备基线或健康，也不是升级成功记录。
+
+该示例只声明 OS，所以命令必须带 `--os-only`；若不选组件则默认选 OS、BIOS、CPLD，
+必须分别提供三个组件的完整 policy，不能以这个 os-only 示例满足。先做离线检查：
+
+```bash
+/absolute/ibsw-venv/bin/python -B /absolute/http/infiniband/bringup/xdr-upgrade/upgrade.py --project /absolute/project --method http --os-only --diagnose-inputs
+```
+
+离线检查保留 CSV/global 原件，不问密码、不做 SSH/HTTP 请求、不生成 run。
+`--inspect-only` / `--dry-run` 则会访问设备；`--upgrade --yes` 才是另行授权的安装入口。
+
 后续 `--inspect-only`（包括 `--dry-run`）会访问设备，可能提示隐藏密码，并写本地事实/报告；
 它不是离线 dry-run，也不会安装组件。应先由操作者独立核验目标的 known_hosts 信任；
 默认读取当前用户 `~/.ssh/known_hosts`，可用 `--known-hosts /absolute/known_hosts` 显式指定。

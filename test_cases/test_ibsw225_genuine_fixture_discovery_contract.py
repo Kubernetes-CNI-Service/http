@@ -29,13 +29,33 @@ FIXTURES = (
 )
 NORMAL_COUNTS = (
     ("test_cases.test_ibsw225_device_globs", 15),
-    ("test_cases.test_ibsw225_input_isolation", 19),
+    ("test_cases.test_ibsw225_input_isolation", 24),
     ("test_cases.test_ibsw225_os_alternatives", 28),
-    ("test_cases.test_ibsw225_three_component_workflow", 18),
+    ("test_cases.test_ibsw225_three_component_workflow", 19),
     ("test_cases.test_ibsw225_known_hosts", 17),
-    ("test_cases.test_ibsw225_access_recovery", 43),
+    ("test_cases.test_ibsw225_access_recovery", 51),
     ("test_cases.test_ibsw225_os_canary_coverage", 26),
     ("test_cases.test_ibsw225_cooperative_pipeline", 14),
+)
+# Independent additions to the original 180-method discovery contract:
+# OS-only operator schema/docs (2), HTTP-disabled diagnostics/mapping (3),
+# CPLD-only unselected-state isolation (1), SFTP lifetime/classification (8).
+# These literals are reviewed contracts, not generated from TestLoader output.
+ADDED_NORMAL_IDS = (
+    "test_cases.test_ibsw225_input_isolation.OperatorOsOnlyGlobalContractTests.test_literal_os_only_example_uses_real_contract_and_matches_current_readme",
+    "test_cases.test_ibsw225_input_isolation.OperatorOsOnlyGlobalContractTests.test_real_os_only_diagnostic_is_offline_immutable_and_still_rejects_missing_policy",
+    "test_cases.test_ibsw225_input_isolation.HttpDisabledOperatorDiagnosticTests.test_diagnostic_regressions_are_selected_for_the_upgrade_entry",
+    "test_cases.test_ibsw225_input_isolation.HttpDisabledOperatorDiagnosticTests.test_http_disabled_detail_does_not_offer_another_transport",
+    "test_cases.test_ibsw225_input_isolation.HttpDisabledOperatorDiagnosticTests.test_real_http_disabled_diagnostic_is_offline_and_preserves_project",
+    "test_cases.test_ibsw225_three_component_workflow.ThreeComponentWorkflowTests.test_cpld_only_never_opens_or_mutates_preexisting_unselected_status",
+    "test_cases.test_ibsw225_access_recovery.SftpInterruptionDirectTests.test_acquired_client_cleanup_does_not_reclassify_shared_or_resource_stop",
+    "test_cases.test_ibsw225_access_recovery.SftpInterruptionDirectTests.test_acquired_client_is_closed_when_channel_setup_is_interrupted",
+    "test_cases.test_ibsw225_access_recovery.SftpInterruptionDirectTests.test_pending_operator_interrupt_has_priority_over_cleanup_interrupt",
+    "test_cases.test_ibsw225_access_recovery.SftpInterruptionDirectTests.test_close_without_primary_failure_keeps_safe_failure_classification",
+    "test_cases.test_ibsw225_access_recovery.SftpInterruptionOwnerWorkflowTests.test_real_signed_session_releases_all_original_owners_and_preserves_stop",
+    "test_cases.test_ibsw225_access_recovery.SftpInterruptionDirectTests.test_successful_acquisition_leaves_one_close_to_the_consumer",
+    "test_cases.test_ibsw225_access_recovery.SftpInterruptionDirectTests.test_ordinary_channel_setup_errors_close_once_and_keep_open_failed",
+    "test_cases.test_ibsw225_access_recovery.SftpInterruptionDirectTests.test_deadline_reason_closes_once_and_keeps_open_timeout",
 )
 
 
@@ -95,7 +115,13 @@ class GenuineFixtureDiscoveryContractTests(unittest.TestCase):
             module = self.genuine_module(name, ROOT / (name.replace(".", "/") + ".py"))
             self.assertIs(module._ibsw225_runtime.app, runtime.app)
             all_ids.extend(ids)
-        self.assertEqual(len(all_ids), 180)
-        self.assertEqual(len(set(all_ids)), 180)
+        self.assertEqual(len(ADDED_NORMAL_IDS), 14)
+        self.assertEqual(len(set(ADDED_NORMAL_IDS)), 14)
+        for expected in ADDED_NORMAL_IDS:
+            with self.subTest(added_contract=expected):
+                self.assertEqual(all_ids.count(expected), 1)
+        self.assertEqual(len(all_ids), 194)
+        self.assertEqual(len(set(all_ids)), 194)
+        self.assertEqual(len(set(all_ids) - set(ADDED_NORMAL_IDS)), 180)
         self.assertFalse(any("._fixture_" in name for name in all_ids))
         self.assertTrue(all(sys.modules[name] is module for name, module in loaded.items()))

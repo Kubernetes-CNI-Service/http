@@ -211,11 +211,15 @@ class ManualTests(unittest.TestCase):
             from test_access_recovery import access_fixture
             _remote,sdk=access_fixture(home)
             with self.no_deployment_or_filesystem_locks(), \
-                 patch.object(observer,'_fixed_sdk',return_value=sdk), \
-                 patch.object(observer, "_signed_session", session), \
-                 patch.object(executor, "_signed_session", session), \
-                 patch.object(observer, "_read_channel", side_effect=query), \
-                 patch.object(executor, "_read_channel", side_effect=query):
+                 patch.object(observer,'_fixed_sdk',return_value=sdk) as sdk_io, \
+                 patch.object(executor,'_fixed_sdk',sdk_io), \
+                 patch.object(observer, "_signed_session", side_effect=session) as session_io, \
+                 patch.object(executor, "_signed_session", session_io), \
+                 patch.object(observer, "_read_channel", side_effect=query) as read_io, \
+                 patch.object(executor, "_read_channel", read_io):
+                self.assertIs(observer._fixed_sdk, executor._fixed_sdk)
+                self.assertIs(observer._signed_session, executor._signed_session)
+                self.assertIs(observer._read_channel, executor._read_channel)
                 code, out, err, prompts = fixtures.WorkflowTests().invoke(project, home,
                     "--devices", HOST, "--method", "http", "--upgrade", "--yes")
             self.assertEqual(code, 0, err + out)
@@ -248,11 +252,19 @@ class ManualTests(unittest.TestCase):
                 # This scenario exercises a real upgrade candidate, not the
                 # 2.13 no-change queue exclusion. The failure assertions stay.
                 return fixtures.OS_TABLE.replace(b'25.03.1010',b'25.02.8008'),b'',0,True
+            dispatch_failure = observer._NativeObservationHold(reason_code="SSH_CONNECT_FAILED")
             with self.no_deployment_or_filesystem_locks(), \
-                 patch.object(observer,'_fixed_sdk',return_value=sdk), \
+                 patch.object(observer,'_fixed_sdk',return_value=sdk) as sdk_io, \
+                 patch.object(executor,'_fixed_sdk',sdk_io), \
                  patch.object(observer,"_signed_session",session), \
-                 patch.object(observer,"_read_channel",side_effect=query), \
-                 patch.object(executor,"_signed_session",side_effect=observer._NativeObservationHold(reason_code="SSH_CONNECT_FAILED")):
+                 patch.object(observer,"_read_channel",side_effect=query) as read_io, \
+                 patch.object(executor,"_read_channel",read_io), \
+                 patch.object(executor,"_signed_session",side_effect=dispatch_failure):
+                self.assertIs(observer._fixed_sdk, executor._fixed_sdk)
+                self.assertIs(observer._read_channel, executor._read_channel)
+                self.assertIs(observer._signed_session, session)
+                self.assertIsNot(observer._signed_session, executor._signed_session)
+                self.assertIs(executor._signed_session.side_effect, dispatch_failure)
                 code, out, err, prompts = fixtures.WorkflowTests().invoke(project, home,
                     "--devices", HOST, "--method", "http", "--upgrade", "--yes")
             self.assertEqual(code, 3, err + out)

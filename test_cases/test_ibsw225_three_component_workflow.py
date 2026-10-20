@@ -166,6 +166,7 @@ class ThreeComponentWorkflowTests(unittest.TestCase):
             remote.close=close_access
         self._auth_attempts=[]
         delayed={}
+        delayed_boot={}
         original_lstat=remote.lstat
         def lstat(path):
             if parallel_barrier and path.endswith('/owned-exit.record') and HOST not in path and len(installs)<6:
@@ -315,6 +316,10 @@ class ThreeComponentWorkflowTests(unittest.TestCase):
                 payload=f'ActiveState={active}\nSubState={sub}\n'.encode()
             elif command==pipeline._BOOT_COMMAND:
                 number=1 if no_reboot else 1+sum(n==name for n,c,v in installs)-int(name in preboot_failures)
+                if not no_reboot and name in delayed_boot:
+                    exit_path,previous_boot=delayed_boot[name]
+                    if delayed[exit_path][0]>0:
+                        number=previous_boot
                 if name in download_waiting:
                     private,local=download_waiting[name]
                     ack=remote.files.get(private+'/download-ack',consumed_acks.get(private+'/download-ack'))
@@ -343,6 +348,8 @@ class ThreeComponentWorkflowTests(unittest.TestCase):
             elif command==executor._CAPABILITY_COMMAND: payload=b''
             elif command.startswith('/usr/bin/nohup '):
                 private=str(Path(shlex.split(command)[2]).parent)
+                previous_boot=(1+sum(n==name for n,c,v in installs)-int(name in preboot_failures)
+                               if delayed_exit>0 else None)
                 script=remote.files[private+'/step.sh'].decode()
                 declaration=next(line.split('=',1)[1] for line in script.splitlines() if line.startswith('IBSW_BINDING_JSON='))
                 binding=json.loads(shlex.split(declaration)[0])
@@ -375,6 +382,10 @@ class ThreeComponentWorkflowTests(unittest.TestCase):
                 remote.modes[private+'/owned-exit.record']=stat.S_IFREG|0o600
                 if unsafe_exit: remote.modes[private+'/owned-exit.record']=stat.S_IFREG|0o644
                 delayed[private+'/owned-exit.record']=(delayed_exit,leaf.scope)
+                if delayed_exit>0:
+                    # Keep this hop on its original boot until the original
+                    # lstat closure really consumes each delayed missing read.
+                    delayed_boot[name]=(private+'/owned-exit.record',previous_boot)
                 installs.append((name,component,target))
                 if child_exit==0:
                     if component=='os':

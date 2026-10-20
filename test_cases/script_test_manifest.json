@@ -417,6 +417,7 @@
         "test_cases.test_ibsw225_input_isolation",
         "test_cases.test_ibsw225_os_alternatives",
         "test_cases.test_ibsw225_three_component_workflow",
+        "test_cases.test_ibsw225_delayed_owned_exit_witness",
         "test_cases.test_ibsw225_known_hosts",
         "test_cases.test_ibsw225_access_recovery",
         "test_cases.test_ibsw225_os_canary_coverage",
@@ -2222,6 +2223,8 @@
         "test_cases.test_ibsw225_runtime_source_manifest_contract",
         "test_cases.test_ibsw225_os_alternatives",
         "test_cases.test_ibsw225_three_component_workflow",
+        "test_cases.test_ibsw225_delayed_owned_exit_witness",
+        "test_cases.test_ibsw225_input_isolation",
         "test_cases.test_ibsw225_flat_tools_layout"
       ]
     },
@@ -4182,8 +4185,10 @@
       ],
       "tests": [
         "test_cases.test_ibsw225_three_component_workflow",
+        "test_cases.test_ibsw225_delayed_owned_exit_witness",
         "test_cases.test_ibsw225_access_recovery",
         "test_cases.test_ibsw225_os_alternatives",
+        "test_cases.test_ibsw225_input_isolation",
         "test_cases.test_ibsw225_flat_tools_layout"
       ]
     },

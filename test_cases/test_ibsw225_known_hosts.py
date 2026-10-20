@@ -1,6 +1,7 @@
 """OpenSSH hashed endpoints: fixed vectors and offline real-module workflows."""
 
-# NEW canonical test-header binding; original named bodies below are unchanged.
+# Canonical source binding; original behavior assertions remain intact.
+# Readonly IO doubles are shared by provider and explicit consumer.
 import unittest as _ibsw225_unittest
 from test_cases.ibsw225_fixture_support.runtime_source_support import support as _ibsw225_support
 _ibsw225_runtime = _ibsw225_support(_ibsw225_unittest.TestCase())
@@ -102,6 +103,7 @@ class HostPinTests(unittest.TestCase):
 
 class HashedTrustWorkflowTests(unittest.TestCase):
     def invoke(self, project, home, server_wire=WIRE, *, connect_error=None):
+        import ibsw_upgrade_executor as executor
         # Real CLI -> driver input FD binding -> real native host-key comparison;
         # sockets/SDK/channel IO only are simulated, with no real network.
         connection = SimpleNamespace(settimeout=lambda value: None, connect=lambda endpoint: None,
@@ -131,9 +133,13 @@ class HashedTrustWorkflowTests(unittest.TestCase):
         with patch.object(Path, "home", return_value=home), patch.object(app, "_check_runtime"), \
              patch.object(app, "_read_password", return_value="PRIVATE_TEST_PASSWORD"), \
              patch.object(socket, "socket", return_value=connection) as network, \
-             patch.object(observer, "_fixed_sdk", return_value=SimpleNamespace(Transport=lambda value: transport)), \
-             patch.object(observer, "_read_channel", side_effect=read), \
+             patch.object(observer, "_fixed_sdk", return_value=SimpleNamespace(Transport=lambda value: transport)) as sdk_io, \
+             patch.object(executor, "_fixed_sdk", sdk_io), \
+             patch.object(observer, "_read_channel", side_effect=read) as read_io, \
+             patch.object(executor, "_read_channel", read_io), \
              contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            self.assertIs(observer._fixed_sdk, executor._fixed_sdk)
+            self.assertIs(observer._read_channel, executor._read_channel)
             code = app.main(["--project", str(project), "--os-only", "--devices", "ew-spine01*", "--password"])
         return code, json.loads(out.getvalue()) if out.getvalue() else {}, err.getvalue(), network.call_count, auth, commands
 

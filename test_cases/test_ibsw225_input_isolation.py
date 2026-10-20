@@ -297,5 +297,198 @@ class DeviceIsolationWorkflowTests(unittest.TestCase):
                 self.assertEqual(status["canary"], GOOD1[0])
 
 
+OPERATOR_OS_ONLY_GLOBAL = """schema_version: 2
+common:
+  mgmt:
+    http:
+      status: enabled
+      address: 192.0.2.254
+      port: 8088
+      http_root: /srv/ibsw-http
+switches:
+- ib:
+    version: '25.02.8008'
+    upgrade:
+      package_dir: /srv/ibsw-http
+      packages:
+        os:
+          sub_dir: image
+          files:
+          - file: nvos-amd64-25.02.6077.bin
+          - file: nvos-amd64-25.02.7002.bin
+          - file: nvos-amd64-25.02.8008.bin
+"""
+OPERATOR_NO_UPGRADE_GLOBAL = """schema_version: 2
+common:
+  mgmt:
+    http:
+      status: enabled
+      address: 192.0.2.254
+      port: 8088
+      http_root: /srv/ibsw-http
+switches:
+- ib:
+    version: '25.02.8008'
+"""
+
+
+class OperatorOsOnlyGlobalContractTests(unittest.TestCase):
+    def test_literal_os_only_example_uses_real_contract_and_matches_current_readme(self):
+        # Expected values are independent literals, not values copied out of
+        # normalize_upgrade or the current README.
+        parsed = contract.load_global_text(OPERATOR_OS_ONLY_GLOBAL)
+        policy = contract.normalize_upgrade(parsed, selected=('os',), method='http')
+        self.assertEqual('/srv/ibsw-http', policy.package_dir)
+        self.assertEqual('25.02.8008', policy.final_os)
+        self.assertEqual([
+            ('nvos-amd64-25.02.6077.bin', '25.02.6077',
+             '/srv/ibsw-http/image/nvos-amd64-25.02.6077.bin',
+             'http://192.0.2.254:8088/image/nvos-amd64-25.02.6077.bin'),
+            ('nvos-amd64-25.02.7002.bin', '25.02.7002',
+             '/srv/ibsw-http/image/nvos-amd64-25.02.7002.bin',
+             'http://192.0.2.254:8088/image/nvos-amd64-25.02.7002.bin'),
+            ('nvos-amd64-25.02.8008.bin', '25.02.8008',
+             '/srv/ibsw-http/image/nvos-amd64-25.02.8008.bin',
+             'http://192.0.2.254:8088/image/nvos-amd64-25.02.8008.bin'),
+        ], [(item.file, item.version, item.path, item.url) for item in policy.os])
+        self.assertIsNone(policy.bios)
+        self.assertIsNone(policy.cpld_burn)
+        self.assertIsNone(policy.cpld_refresh)
+        without = contract.load_global_text(OPERATOR_NO_UPGRADE_GLOBAL)
+        with self.assertRaisesRegex(ValueError, 'explicit IB upgrade policy required'):
+            contract.normalize_upgrade(without, selected=('os',), method='http')
+        with self.assertRaisesRegex(ValueError, 'selected component requires explicit policy'):
+            contract.normalize_upgrade(parsed, selected=('os', 'bios', 'cpld'), method='http')
+        readme = (fixtures._runtime.ROOT / 'infiniband/bringup/xdr-upgrade/README.md').read_text()
+        begin = '<!-- IBSW_OS_ONLY_GLOBAL_BEGIN -->\n```yaml\n'
+        end = '```\n<!-- IBSW_OS_ONLY_GLOBAL_END -->'
+        self.assertEqual(1, readme.count(begin), 'CURRENT_OPERATOR_GLOBAL_EXAMPLE_MISSING')
+        self.assertEqual(1, readme.count(end), 'CURRENT_OPERATOR_GLOBAL_EXAMPLE_BOUNDARY_INVALID')
+        documented = readme.split(begin, 1)[1].split(end, 1)[0]
+        self.assertEqual(OPERATOR_OS_ONLY_GLOBAL, documented)
+
+    def test_real_os_only_diagnostic_is_offline_immutable_and_still_rejects_missing_policy(self):
+        import hashlib
+        import subprocess
+        fields = ('st_dev', 'st_ino', 'st_mode', 'st_uid', 'st_gid',
+                  'st_nlink', 'st_size', 'st_mtime_ns', 'st_ctime_ns')
+        def image(path):
+            before = path.lstat()
+            raw = path.read_bytes()
+            return tuple(getattr(before, field) for field in fields), raw, hashlib.sha256(raw).hexdigest()
+
+        for label, text, expected_code, expected_state in (
+                ('explicit-os-policy', OPERATOR_OS_ONLY_GLOBAL, 0, 'INPUT_PREFLIGHT_PASSED'),
+                ('missing-upgrade', OPERATOR_NO_UPGRADE_GLOBAL, 2, 'INPUT_PREFLIGHT_FAILED')):
+            with self.subTest(case=label), tempfile.TemporaryDirectory(prefix='ibsw-operator-global-') as directory:
+                # Reuse the original full schema-2 CSV fixture, not a reduced
+                # inventory; this writes only this case's fresh private tree.
+                project, _home, _known = fixtures.WorkflowTests().fixture(Path(directory).resolve())
+                global_path = project / '01-global.yaml'
+                global_path.write_text(text)
+                paths = (global_path, project / '02-devices_config.csv')
+                before = {path.name: image(path) for path in paths}
+                out, err = io.StringIO(), io.StringIO()
+                with patch.object(app, '_read_password', side_effect=AssertionError('offline: no password')) as prompt, \
+                        patch.object(app, '_resolve_auth', side_effect=AssertionError('offline: no auth')) as auth, \
+                        patch.object(app, '_check_runtime', side_effect=AssertionError('offline: no SSH runtime')) as runtime_check, \
+                        patch.object(socket, 'socket', side_effect=AssertionError('offline: no socket')) as network, \
+                        patch.object(subprocess, 'Popen', side_effect=AssertionError('offline: no child')) as child, \
+                        patch.object(driver, 'prepare_not_executed_run', side_effect=AssertionError('offline: no run')) as prepare, \
+                        contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    result = app.main(['--project', str(project), '--method', 'http',
+                                       '--os-only', '--diagnose-inputs'])
+                self.assertEqual(expected_code, result, err.getvalue())
+                report = json.loads(out.getvalue())
+                self.assertEqual(expected_state, report['state'])
+                self.assertEqual(['os'], report['selected_components'])
+                self.assertEqual('http', report['method'])
+                self.assertIs(True, report['diagnostic_data_only'])
+                self.assertEqual('NOT_EXECUTED', report['execution_state'])
+                self.assertIs(False, report['ssh_attempted'])
+                self.assertIs(False, report['local_artifacts_created'])
+                if label == 'explicit-os-policy':
+                    self.assertEqual((2, 2, 0), (report['selected_ib_count'],
+                        report['eligible_ib_count'], report['skipped_ib_count']))
+                    self.assertEqual([], report['skipped_devices'])
+                else:
+                    self.assertEqual('UPGRADE_POLICY', report['error']['code'])
+                for forbidden in (prompt, auth, runtime_check, network, child, prepare):
+                    forbidden.assert_not_called()
+                self.assertEqual(before, {path.name: image(path) for path in paths})
+                self.assertEqual({'01-global.yaml', '02-devices_config.csv'},
+                                 {path.name for path in project.iterdir()})
+                self.assertFalse((project / '99-output-ib_nvl').exists())
+
+
+
+class HttpDisabledOperatorDiagnosticTests(unittest.TestCase):
+    def test_diagnostic_regressions_are_selected_for_the_upgrade_entry(self):
+        manifest_path = Path(__file__).resolve().with_name('script_test_manifest.json')
+        manifest = json.loads(manifest_path.read_text())
+        for section, rule_id, source_key in (
+            ('test_rules', 'ibsw225_entry_render_component_direct', 'paths'),
+            ('workflows', 'ibsw225_native_component_lifecycle', 'members'),
+        ):
+            with self.subTest(rule=rule_id):
+                rules = [rule for rule in manifest[section] if rule['id'] == rule_id]
+                self.assertEqual(1, len(rules))
+                self.assertIn('infiniband/bringup/xdr-upgrade/upgrade.py', rules[0][source_key])
+                self.assertIn('test_cases.test_ibsw225_input_isolation', rules[0]['tests'])
+
+    def test_http_disabled_detail_does_not_offer_another_transport(self):
+        self.assertEqual((
+            'HTTP_POLICY',
+            'HTTP is disabled in global; enable the approved project HTTP configuration before continuing. '
+            'This entry supports HTTP only; HTTPS, SCP and local are not fallback transports.',
+        ), app._failure_detail(ValueError('project HTTP is not enabled'), 'INPUT_PREFLIGHT'))
+
+    def test_real_http_disabled_diagnostic_is_offline_and_preserves_project(self):
+        import subprocess
+        text = OPERATOR_OS_ONLY_GLOBAL.replace('status: enabled', 'status: disabled')
+        self.assertEqual(1, OPERATOR_OS_ONLY_GLOBAL.count('status: enabled'))
+        fields = ('st_dev', 'st_ino', 'st_mode', 'st_uid', 'st_gid',
+                  'st_nlink', 'st_size', 'st_mtime_ns', 'st_ctime_ns')
+        def image(path):
+            info = path.lstat()
+            return tuple(getattr(info, field) for field in fields), path.read_bytes()
+        with tempfile.TemporaryDirectory(prefix='ibsw-http-disabled-') as directory:
+            project, _home, _known = fixtures.WorkflowTests().fixture(Path(directory).resolve())
+            global_path = project / '01-global.yaml'
+            global_path.write_text(text)
+            paths = (global_path, project / '02-devices_config.csv')
+            before = {path.name: image(path) for path in paths}
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.ExitStack() as stack:
+                forbidden = [stack.enter_context(patch.object(owner, name,
+                    side_effect=AssertionError('offline HTTP-policy failure must not enter ' + name)))
+                    for owner, name in ((app, '_read_password'), (app, '_resolve_auth'),
+                        (app, '_check_runtime'), (socket, 'socket'), (subprocess, 'Popen'),
+                        (driver, 'prepare_not_executed_run'))]
+                stack.enter_context(contextlib.redirect_stdout(out))
+                stack.enter_context(contextlib.redirect_stderr(err))
+                result = app.main(['--project', str(project), '--method', 'http',
+                                   '--os-only', '--diagnose-inputs'])
+            self.assertEqual(2, result, err.getvalue())
+            report = json.loads(out.getvalue())
+            self.assertEqual('INPUT_PREFLIGHT_FAILED', report['state'])
+            self.assertEqual('HTTP_POLICY', report['error']['code'])
+            self.assertEqual(
+                'HTTP is disabled in global; enable the approved project HTTP configuration before continuing. '
+                'This entry supports HTTP only; HTTPS, SCP and local are not fallback transports.',
+                report['error']['message'])
+            self.assertEqual(['os'], report['selected_components'])
+            self.assertEqual('http', report['method'])
+            self.assertIs(True, report['diagnostic_data_only'])
+            self.assertEqual('NOT_EXECUTED', report['execution_state'])
+            self.assertIs(False, report['ssh_attempted'])
+            self.assertIs(False, report['local_artifacts_created'])
+            for operation in forbidden:
+                operation.assert_not_called()
+            self.assertEqual(before, {path.name: image(path) for path in paths})
+            self.assertEqual({'01-global.yaml', '02-devices_config.csv'},
+                             {path.name for path in project.iterdir()})
+
+
 if __name__ == "__main__":
     unittest.main()

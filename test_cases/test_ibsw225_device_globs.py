@@ -4,7 +4,8 @@ Only synthetic temporary inputs and SSH observations are used. The expected
 device lists below are fixed independently of fnmatch and the selector.
 """
 
-# NEW canonical test-header binding; original named bodies below are unchanged.
+# Canonical source binding; original behavior assertions remain intact.
+# Readonly IO doubles are shared by provider and explicit consumer.
 import unittest as _ibsw225_unittest
 from test_cases.ibsw225_fixture_support.runtime_source_support import support as _ibsw225_support
 _ibsw225_runtime = _ibsw225_support(_ibsw225_unittest.TestCase())
@@ -159,6 +160,7 @@ class DeviceGlobWorkflowTests(unittest.TestCase):
             self.assertEqual(list((entry / "xdr-upgrade-logs").iterdir()), [])
 
     def test_real_cli_inspection_queries_only_range_selected_devices_and_preserves_selector(self):
+        import ibsw_upgrade_executor as executor
         attempted = []
         @contextlib.contextmanager
         def session(leaf, **kwargs):
@@ -171,8 +173,12 @@ class DeviceGlobWorkflowTests(unittest.TestCase):
             trust = known.read_text()
             known.write_text(trust.replace("192.0.2.1 ", "192.0.2.2 ") + trust.replace("192.0.2.1 ", "192.0.2.8 "))
             pattern = "EW-SPINE00[1-2].EXAMPLE"
-            with patch.object(observer, "_signed_session", session), \
-                 patch.object(observer, "_read_channel", return_value=(fixtures.OS_TABLE, b"", 0, True)):
+            with patch.object(observer, "_signed_session", side_effect=session) as session_io, \
+                 patch.object(executor, "_signed_session", session_io), \
+                 patch.object(observer, "_read_channel", return_value=(fixtures.OS_TABLE, b"", 0, True)) as read_io, \
+                 patch.object(executor, "_read_channel", read_io):
+                self.assertIs(observer._signed_session, executor._signed_session)
+                self.assertIs(observer._read_channel, executor._read_channel)
                 code, out, err, prompts = fixtures.WorkflowTests().invoke(project, home, "--devices", pattern, "--inspect-only")
             self.assertEqual(code, 0, err)
             self.assertEqual(attempted, ["ew-spine001.example", "EW-SPINE002.EXAMPLE"])
