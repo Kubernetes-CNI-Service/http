@@ -4994,3 +4994,26 @@ assertions are unchanged. Manifest registration includes the actual lock
 and finish-state source members. This is not real process stopping,
 full FD census, injected-close safety, device acceptance or full/check;
 the existing REAL_ENV cases remain NOT RUN.
+
+
+### SCP local package-source holder library — 2026-10-20
+
+The parent content holder freezes only explicitly needed local regular package
+originals using held ancestor/file descriptors and one streaming SHA per path.
+Repeated request DATA can reuse those hashes; source identity drift poisons
+the group without refreshing the baseline. Its total-FD cap and acquisition
+deadline are internal static/cooperative checks, not hard I/O supervision.
+Entry failure closes held originals without changing replacement files; an
+uncertain close remains HOLD on subsequent close calls without retrying slots.
+Original operator exception objects and existing causes survive cleanup faults.
+
+The associated direct and real planner/holder/receiver-PTY workflows use only
+private files and executable source stubs. Request/dispatch bytes and the
+returned record remain DATA, not authenticated native dispatch or fsynced
+companion evidence. The original main entry remains HTTP-only, and SCP
+preflight/nonempty execution payloads retain SCP_CONTENT_BINDING_REQUIRED.
+Native parent/fork source export, reliable request-content journal and manager
+ACK are still OPEN. Unknown cleanup residues, asynchronous descriptor handoff,
+hard I/O supervision and simultaneous resource/cleanup-failure classification
+are not proved by these local cases. Existing REAL_ENV remains NOT RUN;
+no full/all/require-full or release proof was produced.

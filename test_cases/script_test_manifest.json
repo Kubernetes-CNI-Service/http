@@ -406,6 +406,8 @@
       "description": "IBSW2.25 canonical runtime, independent source contracts and original normal workflows; local targeted evidence is not full638/device proof.",
       "tests": [
         "test_cases.test_ibsw3_scp_source_binding",
+        "test_cases.test_ibsw3_scp_parent_content_owner",
+        "test_cases.test_ibsw3_scp_parent_cleanup_boundary",
         "test_cases.test_ibsw225_runtime_source_manifest_contract",
         "test_cases.test_ibsw225_ib_alias_derivation_workflow",
         "test_cases.test_ibsw225_device_globs",
@@ -2167,7 +2169,7 @@
     {
       "id": "ibsw3_scp_source_receiver_direct",
       "paths": ["tools/ibsw_upgrade_scp.py"],
-      "tests": ["test_cases.test_ibsw3_scp_source_binding"]
+      "tests": ["test_cases.test_ibsw3_scp_source_binding", "test_cases.test_ibsw3_scp_parent_content_owner", "test_cases.test_ibsw3_scp_parent_cleanup_boundary"]
     },
     {
       "id": "ibsw225_entry_render_component_direct",
@@ -3602,8 +3604,8 @@
     },
     {
       "id": "ibsw3_scp_source_key_endpoint_workflow",
-      "members": ["tools/ibsw_upgrade_scp.py", "tools/ibsw_upgrade_driver.py", "tools/ssh_key_preparation.py"],
-      "tests": ["test_cases.test_ibsw3_scp_source_binding"]
+      "members": ["tools/ibsw_upgrade_scp.py", "tools/ibsw_upgrade_driver.py", "tools/ssh_key_preparation.py", "tools/ibsw_upgrade_contract.py", "tools/project_contract.py"],
+      "tests": ["test_cases.test_ibsw3_scp_source_binding", "test_cases.test_ibsw3_scp_parent_content_owner", "test_cases.test_ibsw3_scp_parent_cleanup_boundary"]
     },
     {
       "id": "req7_ib_expected_topology_byte_authority",

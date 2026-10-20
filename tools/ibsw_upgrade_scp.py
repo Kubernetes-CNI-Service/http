@@ -348,3 +348,206 @@ def verify_source_shared(source):
             from ibsw_upgrade_contract import SharedUpgradeHold
             raise SharedUpgradeHold('SCP_SOURCE_CHANGED: original source trust changed; no further dispatch') from error
         raise
+
+
+# Local source library only. Not connected to native dispatch or ACK.
+import errno
+import hashlib
+import json
+import math
+import os
+from pathlib import Path
+import stat
+import threading
+import time
+
+
+class ContentHold(ValueError):
+    pass
+
+
+def _identity(item):
+    return (item.st_dev,item.st_ino,item.st_mode,item.st_uid,item.st_gid,
+            item.st_nlink,item.st_size,item.st_mtime_ns,item.st_ctime_ns)
+
+
+def _directory_identity(item):
+    return (item.st_dev,item.st_ino,item.st_mode,item.st_uid,item.st_gid)
+
+
+def _object_key(item):
+    return (item.st_dev,item.st_ino,stat.S_IFMT(item.st_mode))
+
+
+class _PackageContentOwner:
+    def __init__(self,root,paths,*,deadline,max_fds):
+        self._lock=threading.RLock()
+        self._closed=False;self._poisoned=False
+        self._fds=[];self._directories={};self._files={}
+        self.cleanup_issues=[]
+        try:
+            if (type(max_fds) is not int or max_fds<1 or isinstance(deadline,bool)
+                    or not isinstance(deadline,(int,float)) or not math.isfinite(deadline)):
+                raise ContentHold('finite internal acquisition bounds required')
+            self._deadline=deadline
+            self._time_left()
+            self.root=Path(root)
+            if not self.root.is_absolute() or '..' in self.root.parts:
+                raise ContentHold('absolute non-traversing original root required')
+            if type(paths) not in (list,tuple) or not paths:
+                raise ContentHold('explicit nonempty needed package selection required')
+            selected=tuple(sorted({Path(p) for p in paths}))
+            directories={Path('/')}
+            for path in selected:
+                if not path.is_absolute() or '..' in path.parts:
+                    raise ContentHold('absolute non-traversing package required')
+                path.relative_to(self.root)
+                if path==self.root:
+                    raise ContentHold('package must be below original root')
+                directories.update(path.parents)
+            if len(directories)+len(selected)>max_fds:
+                raise ContentHold('entire original file/directory FD budget exceeded')
+            flags=os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC
+            for path in sorted(directories,key=lambda p:(len(p.parts),str(p))):
+                self._time_left()
+                parent=None if path==Path('/') else self._directories[path.parent][0]
+                name='/' if parent is None else path.name
+                fd,item=self._open_original(name,flags|os.O_DIRECTORY,parent)
+                if not stat.S_ISDIR(item.st_mode):
+                    raise ContentHold('original directory required')
+                self._directories[path]=(fd,parent,name,_directory_identity(item))
+            for path in selected:
+                self._time_left()
+                parent=self._directories[path.parent][0]
+                fd,item=self._open_original(path.name,flags,parent)
+                if (not stat.S_ISREG(item.st_mode) or item.st_nlink!=1
+                        or item.st_mode & 0o022 or item.st_size<=0):
+                    raise ContentHold('nonempty nonshared non-writable regular package required')
+                original=_identity(item)
+                self._files[path]=(fd,parent,path.name,original,None)
+                digest=hashlib.sha256();size=0
+                while True:
+                    self._time_left();self.verify()
+                    chunk=os.read(fd,1024*1024)
+                    self._time_left()
+                    if not chunk:break
+                    size+=len(chunk)
+                    if size>item.st_size:
+                        raise ContentHold('original package grew during digest')
+                    digest.update(chunk)
+                if size!=item.st_size:
+                    raise ContentHold('original package truncated during digest')
+                self._files[path]=(fd,parent,path.name,original,digest.hexdigest())
+                self.verify()
+            self._time_left();self.verify()
+        except BaseException as original:
+            self._poisoned=True
+            try:self.close()
+            except BaseException as cleanup:
+                # Retain the original operator object AND its existing cause.
+                # Cleanup facts remain on the holder; never relabel NI.
+                if not isinstance(original,Exception):raise original
+                raise cleanup from original
+            if isinstance(original,ContentHold) or not isinstance(original,Exception):raise
+            if isinstance(original,OSError) and original.errno in (errno.EMFILE,errno.ENFILE,errno.ENOMEM,errno.ENOSPC):raise
+            raise ContentHold('original package acquisition failed') from original
+
+    def _time_left(self):
+        if time.monotonic()>=self._deadline:
+            raise ContentHold('original package acquisition deadline exceeded')
+
+    def _open_original(self,name,flags,parent):
+        # Capture the original named object before open. Register that identity
+        # immediately on receiving the numeric slot, before the first fstat;
+        # cleanup never adopts an unproved replacement as the original.
+        named=os.stat(name,dir_fd=parent,follow_symlinks=False)
+        fd=os.open(name,flags,dir_fd=parent)
+        self._fds.append((fd,_object_key(named)))
+        item=os.fstat(fd)
+        identity=_directory_identity if flags & os.O_DIRECTORY else _identity
+        if identity(item)!=identity(named):
+            raise ContentHold('opened object differs from original named source')
+        return fd,item
+
+    def verify(self):
+        with self._lock:
+            if self._closed or self._poisoned:
+                raise ContentHold('original package group unavailable; no baseline refresh')
+            try:
+                for fd,parent,name,original in self._directories.values():
+                    if (_directory_identity(os.fstat(fd))!=original
+                            or _directory_identity(os.stat(name,dir_fd=parent,follow_symlinks=False))!=original):
+                        raise ContentHold('original directory/name changed')
+                for fd,parent,name,original,_digest in self._files.values():
+                    if (_identity(os.fstat(fd))!=original
+                            or _identity(os.stat(name,dir_fd=parent,follow_symlinks=False))!=original):
+                        raise ContentHold('original package/name changed')
+            except BaseException as error:
+                self._poisoned=True
+                if not isinstance(error,Exception) or isinstance(error,ContentHold):raise
+                if isinstance(error,OSError) and error.errno in (errno.EMFILE,errno.ENFILE,errno.ENOMEM,errno.ENOSPC):raise
+                raise ContentHold('original package group changed') from error
+
+    def bind(self,request,dispatch):
+        with self._lock:
+            self.verify()
+            if any(type(b) is not bytes or not b or len(b)>4*1024*1024 for b in (request,dispatch)):
+                self._poisoned=True
+                raise ContentHold('bounded request/dispatch DATA required')
+            packages={str(path):dict(size=row[3][6],sha256=row[4]) for path,row in self._files.items()}
+            document=dict(version=1,request_sha256=hashlib.sha256(request).hexdigest(),
+                dispatch_sha256=hashlib.sha256(dispatch).hexdigest(),packages=packages)
+            raw=json.dumps(document,sort_keys=True,separators=(',',':')).encode('ascii')
+            binding=hashlib.sha256(raw).hexdigest()
+            self.verify()
+            return dict(content_binding=dict(version=1,binding_sha256=binding,packages=packages),
+                        record=dict(document,binding_sha256=binding))
+
+    def close(self):
+        with self._lock:
+            if self._closed:
+                # No retry of potentially reused numeric slots. A previous
+                # uncertain close cannot become clean by a second call.
+                if self.cleanup_issues:self._raise_cleanup_issues()
+                return
+            self._closed=True
+            failures=[]
+            for fd,key in reversed(self._fds):
+                try:
+                    if _object_key(os.fstat(fd))!=key:
+                        raise ContentHold('borrowed descriptor cannot be closed as original')
+                    os.close(fd)
+                except BaseException as error:failures.append(error)
+            self.cleanup_issues.extend(failures)
+            if failures:
+                self._poisoned=True
+                self._raise_cleanup_issues()
+
+    def _raise_cleanup_issues(self):
+        critical=next((e for e in self.cleanup_issues if not isinstance(e,Exception)),None)
+        if critical is not None:raise critical
+        raise ContentHold('critical original descriptor cleanup uncertain') from self.cleanup_issues[0]
+
+    def __enter__(self):
+        try:
+            self.verify();return self
+        except BaseException as primary:
+            self._poisoned=True
+            try:self.close()
+            except BaseException as cleanup:
+                if not isinstance(primary,Exception):raise primary
+                if not isinstance(cleanup,Exception):raise
+                # Keep primary source failure; cleanup remains separately
+                # recorded, permanently invalidating this owner.
+                raise primary
+            raise
+
+    def __exit__(self,kind,error,traceback):
+        try:self.close()
+        except BaseException as cleanup:
+            if error is not None and not isinstance(error,Exception):raise error
+            raise
+
+
+def package_content_owner(root,paths,*,deadline,max_fds):
+    return _PackageContentOwner(root,paths,deadline=deadline,max_fds=max_fds)
