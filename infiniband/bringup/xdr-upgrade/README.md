@@ -4,19 +4,27 @@
 
 开发代码继承与独立测试见 [IBSW Upgrade 开发测试交接](HANDOFF-CODEX-TEST.md)。
 
+本节新增 SCP 合同须与同批 native 代码、来源 oracle、测试及 manifest 一起核准落地；
+不得单独套用到此前 HTTP-only 主树或仅来源库版本。本文不提供发布或设备操作许可。
+
 当前使用 `python3 -B upgrade.py --help` 或 `bash upgrade.sh --help`。
 `upgrade.sh` 已是兼容入口；必须与 Python 入口、`tools/ibsw_upgrade_*.py`、
 共同运行锁模块及三个 shell 文件成套使用，不可只复制一个 shell。
 依赖见本目录 `requirements.txt`，在独立 Python 环境安装，不自动修改系统 Python。
 
-当前仅支持 **HTTP** 包来源；`local`、`scp`、`https` 不再是支持的传输方式，
-不会静默降级。项目 CSV/global 可用显式 `--project` 指定，不依赖先 load/setup。
+当前默认 **HTTP**，可显式选择 **SCP** 由交换机通过 OpenSSH `scp -O` 拉包，
+不是 SFTP 传包。交互终端未指定方式时，回车或等待 15 秒均选 HTTP；非交互、
+离线输入检查及仅生成脚本不等待菜单。`--method http` / `--method scp` 固定选择，
+HTTPS 和 local 仍拒绝，失败不自动切换方式。
+项目 CSV/global 可用显式 `--project` 指定，不依赖先 load/setup。
 身份、主机密钥、包来源、可靠备份、金丝雀、实际 OS 前置验证及失败保留门禁仍有效。
 
-2026-10-20 已择项纳入 IB-upgrade3 的 `tools/ibsw_upgrade_scp.py` 来源/接收端库及独立测试。
-这不是 SCP 升级入口开放：非空安装载荷和源端预检均明确 HOLD，CLI 仍仅支持 HTTP。
-接收端验证与本轮包原件/请求的可靠绑定、父 scope 原件生命周期以及管理端 SCP-only OS
-确认签发尚未整体接通；私有 wire 或接收端通过不提供执行权限。真实设备验收仍 NOT RUN。
+2026-10-20 早期仅落来源/接收端库时的 HTTP-only、非空载荷 HOLD 收据仍按其历史
+源码阶段保留；不能据此否认同批 native SCP 接线，也不能将旧收据追认为当前整树证明。
+当前 SCP 路径限固定 OS、BIOS、CPLD 生产流程及其原 parent/child、包原件、请求和
+同 lease 的可靠伴随记录；不接受任意命令或调用者字典作为执行许可。public DATA 和
+`launch_payload` 非空包接口及 public `preflight_source` 仍 HOLD，不是 native 授权入口。
+真实设备验收仍 NOT RUN。
 `--inspect-only` 会访问目标执行只读查询，不是离线操作；本次开发没有执行设备访问。
 `--scripts-only` 只生成脚本，不能据此宣称升级完成；执行参数以当前 `--help` 为准。
 
@@ -27,6 +35,28 @@
 若固定 canonical 入口和其 `tools/upgrade.py` 同时存在，按布局歧义停止，不猜测来源。
 缺模块、shell 或 requirements 不尝试另一棵树；模块已缓存时仍重核入口与模板布局，
 布局改变即拒绝，不沿用旧模板或自动切换。程序不会替操作者删除冲突入口。
+
+### SCP 来源与失败边界
+
+SCP 的管理服务器账号与交换机账号分开。`--mgmt-server`、`--mgmt-user`、
+`--mgmt-port`（默认 22）及 `--scp-known-hosts` 只描述包来源，不替代目标设备的
+`--known-hosts`。需要升级时使用交互 TTY 隐藏输入独立源密码；回车仅尝试交换机已有
+源端密钥，不上传私钥。密码不进入 argv、env、生成脚本或公开日志。
+源信任文件须预先独立核准；`--scp-known-hosts` 未指定时使用所选 known_hosts 文件。
+源 host/port/public-key 精确 pin 到首次原件，提示前后及使用时不采纳被替换的信任文件，
+不 TOFU、不换代、不刷新基线、不关闭 host-key 检查。源与目标信任都必须由操作者确认。
+
+只对本次真正需要的本地原包 once-hash，并保持同一原件；接收端核对应路径、大小和
+SHA-256 内容绑定。相同大小不等于相同内容。操作者仍须确认源端实际读取的是这些
+获准原包；本地摘要及 SSH pin 不证明源端是物理本机，不提供数字签名或第三方包源的
+通用真实性保证，也不追认为 HTTP 原路径已经具有包摘要保证。无需新增系统密钥读取。
+CPLD 两包必须全部接收并验证后才允许任何 NV 安装；任一包失败必须零 NV。
+OS 下载的真实管理端记录须完成 file/dir fsync、关键 finish/close 及原 lease 尾核验后，
+才可发送绑定本次 marker/请求的 SCP V2 ACK；旧 HTTP V1 ACK 不替代它。
+
+保留原组件独立金丝雀、OS 有序链及固件前现场最终 OS 验证，不新增硬件/源版本兼容
+预检查。坏 peer 内容使本台 HOLD；原件、共享来源或可靠记录失败按共享停止处理。
+失败安装或 UNKNOWN 不自动重试、不释放未知槽以补派，不重放请求或 reset/adopt。
 
 ### 当前操作顺序（以下示例不自动执行）
 
@@ -116,10 +146,14 @@ URL 才能按 `http://address:port/` 加相对路径构成。上例的最终包 
 
 保留失败/UNKNOWN 原 run、请求及证据；不要自动重试、删除锁文件、重置状态或以
 `--verify-only` 追认旧请求。HTTP 下载来源来自项目 global 的升级配置；不支持通过旧
-`--http-server` 参数补地址，也不回退到 SCP/local/HTTPS。实际操作前仍须满足现场授权。
+`--http-server` 参数补地址；HTTP 策略失败不自动切 SCP，显式 SCP 也不是绕过其他门禁。
+local/HTTPS 仍不支持。实际操作前仍须满足现场授权。
 
-本次只执行定向本地 direct/workflow（外部设备 IO 为夹具），未跑 full，
-不产生正式发布证明或真机验收。现场用例见 `test_cases/REAL_ENVIRONMENT.md`。
+本地 direct/workflow 的外部设备 IO 为固定夹具。实际 Python/Bash/PTY/helper、
+请求落盘及管理端 ACK 观察不等于设备访问；私有 NV 桩 fetch exit 93 不是安装成功。
+未跑 full，不产生正式发布证明或真机验收；普通 load/sync/package 精确证明门禁不变，
+未映射源码等治理拒绝也不得忽略。REQ7 最终发行/冷成功仍 OPEN，F01/UFM 开发保持 STOP。
+现场用例见 `test_cases/REAL_ENVIRONMENT.md`，均不得由上述本地证据改为已完成。
 
 **以下正文保留旧 shell 版本历史，旧传输菜单、参数和输出目录不再是当前运行合同。**
 

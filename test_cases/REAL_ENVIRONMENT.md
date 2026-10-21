@@ -2838,7 +2838,7 @@ generation/publish 及 UNKNOWN 下改 action/wire 均 HOLD，不计作 COMPLETE 
 ## TC-IBSW3-SCP-SOURCE-CONTENT-20261020 — NOT RUN
 
 - 类型/需求/平台：SCP 来源/接收端内容边界，management-server/Linux/NVOS；真实环境 NOT RUN，未授予真实 SSH、包源或设备操作权限。
-- 当前主树仅落来源/receiver 库；非空执行载荷和源端 preflight 明确 HOLD，CLI 仍 HTTP-only。独立 direct 与 source factory→driver endpoint→SSH public-key parser 真实跨脚本测试，以及实际 helper/PTY 配合私有外部命令的内容控制，不等于真实 SSH/安装或完整 SCP manager 链证明。
+- 历史来源库阶段仅落来源/receiver，非空载荷和源端 preflight HOLD、CLI HTTP-only；该阶段收据不追认为后续 native 组证明。同批 native 组落地后的固定 OS/BIOS/CPLD 路径另按下列现场案例验收。独立 direct、真实跨脚本及 helper/PTY 配合私有命令都不等于真实 SSH/安装。
 - 前置：另获精确维护授权、可信独立核验的源指纹、获准原包和必要备份、真实原件/请求绑定及持久化/ACK 实现验收完成；不可用任意字典、同大小、格式正确摘要或旧报告授权。无需系统 host-key 文件读取来证明物理本机，不扩大第三方仓库支持。
 - 现场保留：正常三组件、等长错误内容、缺摘要、CPLD 第二包失败零 NV、源/原件漂移、可靠记录或关键清理失败、OS 下载后确认前中断与冷恢复。HTTP 原无包摘要合同不追认为有 SHA 保证；现场和真实断电均不可由模拟或 SIGKILL 代替。
 - 证据：精确源码/测试/manifest、Python/平台、原请求与包原件身份、完整日志/退出码、关键 fsync/close 和 ACK 顺序。不得持久化口令、token 或私钥。
@@ -2852,7 +2852,9 @@ generation/publish 及 UNKNOWN 下改 action/wire 均 HOLD，不计作 COMPLETE 
   do not grant SCP execution or stand in for real devices or power-loss tests.
 - Preconditions: separate precise maintenance authorization, independently
   approved source host-key pin/original packages, backup and rollback owner;
-  the native request/dispatch/ACK bridge must first be implemented and reviewed.
+  the exact native request/dispatch/ACK implementation must be reviewed and
+  separately qualified on the field deployment; local candidate evidence is not
+  a real-environment acceptance or permission.
 - Retain normal flow, commit boundaries, interruption/cold recovery, both CPLD
   packages, source drift, fsync/critical-close failure and safe post-failure state.
   No risk-based omission or new residual-risk acceptance is asserted here.
@@ -2865,14 +2867,15 @@ generation/publish 及 UNKNOWN 下改 action/wire 均 HOLD，不计作 COMPLETE 
 
 ### SCP declaration-only supplement — NOT RUN
 
-The local renderer/request graph now admits lexical SCP, but actual source
+Historical declaration-only source epoch: the renderer/request graph admitted lexical SCP, but actual source
 preflight, native SCP dispatch, content verification and real manager ACK
 remain unimplemented/HOLD. OS/BIOS/CPLD private Bash+EOF/no-wire exit64 is
 local negative evidence only, not a successful SCP transfer or device test.
 The existing TC-IBSW3-SCP-SOURCE-CONTENT-20261020 prerequisites, normal/commit/
 interruption/cold-recovery cases, retained failure evidence and cleanup rules
 remain required. No new real SSH/device/source permissions or risk waivers;
-REAL_ENV stays NOT RUN, CLI remains HTTP-only, ordinary release gates unchanged.
+That epoch's CLI remained HTTP-only; REAL_ENV stays NOT RUN and ordinary release
+gates are unchanged. This is not a current native-group implementation verdict.
 
 
 ### SCP original-request companion supplement — NOT RUN
@@ -2887,7 +2890,22 @@ full logs/exit and real native download/ACK order; never store secrets. Clean on
 proven-owned test objects; retain failures, no unknown-FD retry, source-baseline
 refresh, reset or adoption. No cases waived or new residual-risk acceptance.
 Local dual-source DATA PASS is not SCP/device/firmware/power-loss/ACK proof.
-REAL_ENV NOT RUN; CLI HTTP-only, native HOLD, ordinary release gates unchanged.
+At that DATA-only epoch CLI was HTTP-only and native was HOLD. REAL_ENV NOT RUN;
+ordinary release gates are unchanged; no historical PASS is promoted to a later epoch.
+
+## TC-IBSW3-NATIVE-SCP-LIFECYCLE-20261020 — NOT RUN
+
+- 名称/类型/对应需求：固定 OS、BIOS、CPLD 的 native SCP 来源、下载、可靠记录与故障保留；integration / scenario / real-environment。适用 management-server/Linux/NVOS；真实 SSH、SCP、设备安装、断电及现场验收全部 NOT RUN。
+- 风险与目标：只准固定原 parent/native child/包原件/request/schema 2 同 lease 链；源预检或 public DATA 不签发安装许可，非空 public `launch_payload` 及 public `preflight_source` 仍 HOLD。不能把内容摘要、状态字典、旧 ACK 或命令 exit 0 当作完成。
+- 前置与权限：另获精确设备/管理服务器维护授权、维护窗口、原备份及回滚负责人、受保护项目 CSV/global 与已批准原包；独立核准源端 endpoint/key 和目标 known_hosts 原件。源信任首次 pin 后不换代、不 TOFU、不自动刷新；source 与 switch 凭据分离且不落日志/argv/env/脚本。无需新增读取系统 host-key 或私钥的权限。
+- 输入与初态：默认 HTTP；交互未指定方式时回车或 15 秒超时选 HTTP，可显式 SCP，HTTPS/local 拒绝且无自动 fallback。操作者须确认获准本地原包与源端实际读取路径对应；needed 包 once-hash/同原件及接收端路径、大小、SHA 绑定不证明物理本机、数字签名或第三方源的通用真实性，不追认旧 HTTP 摘要保证。FAIL/UNKNOWN 不作为可重放初态。
+- 正常步骤：按明确组件选择及 policy 运行；先实际身份/源 pin/备份与固定 source preflight，再 OpenSSH `scp -O` 拉包，不以 SFTP 上传替代。OS 沿原有序版本链；每个固件步骤前实际确认最终 OS。组件金丝雀和独立状态继续有效，不增加硬件/源版本兼容预检查。
+- 正向验收：CPLD 两包全部接收验证前必须零 NV；OS 的真实 manager 记录完成 file/dir fsync、关键 finish/close 和同 lease 尾核验后才可 SFTP 发布本次 marker/request 的 SCP V2 ACK，之后才可继续 NV。HTTP V1 行为单独保留，不能伪造 HTTP 200/curl 字段通过 SCP 流程。安装/实际 boot、版本、配置及健康均须原现场验证，不由下载或 ACK 推导。
+- 拒绝/故障步骤：等长错误内容、缺摘要、第二 CPLD 包失败、重复/畸形 reserved marker、源 pin/包/request/companion/owner 漂移、file-sync/dir-sync/关键 close 失败、deadline/通道收尾不确定及安装中断均需保留。坏 peer 内容本台 HOLD；原件/共享来源或可靠记录错误共享停批。不得自动 retry 故障安装、重放、清 UNKNOWN 槽补派、reset/adopt 或刷新信任。
+- 中断与冷恢复：覆盖下载→可靠 record→ACK→NV 各边界及组件间断点；UNKNOWN 保留证据供人工判定。实际断电、失联和冷恢复另须精确现场授权，不能用 SIGKILL/正常重启/模拟 boot 宣称等价。无场景省略或新增残余风险接受。
+- 证据：当前 source/test/manifest、Python/平台/依赖、完整命令/原始日志/END/退出码、包 once-read 和请求六原件身份、真实 fsync/close/record-return/ACK/NV 顺序、最终版本与健康。不得保存密码/token/私钥。每次明确列出真正到达与 NOT_REACHED 阶段，保留历史 FAIL/UNKNOWN 及其原 epoch。
+- 清理与回滚：只关闭/清理明确本轮持有的资源，不扫描或重试未知 FD/PID/路径；保留失败原件，不自动重新初始化或接管。真实远端已生效后的恢复由现场负责人执行，须验证安全失败状态与备份回收。
+- 自动化/未验边界：本地 canonical cold-image、固定 SSH/SCP 可执行桩、真实 Python/Bash/PTY/helper、manager durable record/ACK 仅是定向本地证据；private NV fetch exit 93 不是安装成功/真机验收。自动化文件以同批 manifest 精确 direct/workflow/helper 映射为准，本文不预填 PASS 数。full NOT RUN，普通 load/sync/package 精确发布门不变；未映射源码等治理阻塞必须保留。REQ7 最终完成发行/冷成功 OPEN，F01/UFM 开发 STOP，不被本案例替代。
 
 ### TC-REQ7-INITIALIZATION-COMPLETION-GATES-20261020 — NOT RUN
 

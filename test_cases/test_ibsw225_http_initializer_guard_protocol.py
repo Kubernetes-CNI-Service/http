@@ -53,7 +53,9 @@ class HttpInitializerGuardProtocolTests(unittest.TestCase):
             self.assertEqual(caught.exception.code, 0)
             help_text = " ".join(output.getvalue().split())
             for literal in ("--project", "--diagnose-inputs", "--inspect-only", "--scripts-only", "--upgrade", "--yes",
-                            "--os-only", "--bios-only", "--cpld-only", "HTTP only.",
+                            "--os-only", "--bios-only", "--cpld-only",
+                            "HTTP is the default transfer; SCP requires explicit selection.",
+                            "HTTPS is unsupported; no automatic transport fallback.",
                             "inspection never upgrades devices.", "does not recover earlier UNKNOWN runs"):
                 self.assertIn(literal, help_text)
             guard.assert_not_called()

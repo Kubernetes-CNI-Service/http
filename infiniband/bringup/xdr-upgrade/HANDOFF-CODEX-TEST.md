@@ -23,7 +23,9 @@ NVOS 历史观察／派发前失败的 IO 夹具接线，以及新增测试的�
 当前入口下三组件／金丝雀／未选状态隔离，以及 OS 链与固件 OS 前置的五项原流程证据见
 `outputs/req19-local-evidence-20261007/ROOT-IBSW-CURRENT-COMPONENT-WORKFLOWS-PY312-20261020.json`。
 
-IBSW 2.25 的运行代码、HTTP-only 入口、共享运行锁和本地测试已集成进 http 主树。
+IBSW 2.25 的原 HTTP-only 入口、共享运行锁和本地测试已集成进 http 主树。
+本交接新增的 native SCP 合同只在同批生产、来源 oracle、测试和 manifest 经审定落地后
+适用，不可仅凭文档将旧主树宣布为已支持 SCP。HTTP-only 旧日志仍属其原源码阶段。
 本交接供 codex test 继承到自己的代码目录并继续独立验证；不是发布许可或真机验收结论。
 本功能不依赖 REQ7 初始化完成，但使用共享 tools 模块，不能只复制 `upgrade.sh`。
 
@@ -31,13 +33,14 @@ IBSW 2.25 的运行代码、HTTP-only 入口、共享运行锁和本地测试已
 
 当前主树为 `/Users/joeyyang/Desktop/http`。先阅读本仓 `AGENTS.md`、本目录
 `README.md` 顶部“当前入口”部分及本交接；README 分隔线以下是旧 shell 历史，
-其中 SCP/local/HTTPS 菜单和旧参数不是当前合同。
+其中旧 SCP/local/HTTPS 菜单、超时和参数不是当前合同；新增 SCP 使用下述固定入口，
+不是恢复旧 shell 的任意传输菜单。
 
 优先在接收方的新目录保留完整仓库布局和上述提交，再对照自己的修改逐项整合。
 不要把开发主树整体覆盖到已有脏目录，不要用旧 `ib-upgrade2` 原件倒盖当前修复。
 本轮没有创建或覆盖 codex test 的目录；接收目标由 owner 与该会话确定。
 
-运行闭包是原 17 个成员加共享 guard，共 18 个文件：
+运行闭包是原 17 个成员、共享 guard 及 SCP provider，共 19 个文件：
 
 ```text
 infiniband/bringup/xdr-upgrade/
@@ -54,6 +57,7 @@ tools/
   ibsw_upgrade_driver.py
   ibsw_upgrade_executor.py
   ibsw_upgrade_observer.py
+  ibsw_upgrade_scp.py
   ibsw_upgrade_access.py
   ibsw_upgrade_pipeline.py
   project_contract.py
@@ -66,6 +70,11 @@ tools/
 
 - 全部 `test_cases/test_ibsw225_*.py`，不要只拿本交接列出的抽样模块。
 - 整个 `test_cases/ibsw225_fixture_support/`、其导入的测试辅助模块与所需 fixtures。
+- 同批 manifest 登记的 `test_cases/test_ibsw3_*.py`、`test_native_*.py` 与明确列出的
+  source/CLI/parent/probe/context、cold-image/isolation/physical-IO 辅助文件；按当前
+  精确 mapping 取闭包，不以文件名前缀或本清单推导任意文件执行许可。
+  保留 `test_cases/fixtures/ibsw3-source-inverse/` 内十份固定文本 DATA 输入，
+  它们不是可执行脚本，不能换成私有 `/tmp` 包路径或当前产品反生成的内容。
 - `test_cases/script_test_manifest.json`、`REAL_ENVIRONMENT.md`、测试治理说明及必要的
   共享测试。批准 ledger 可以作为历史材料保留，但不能手改或当作新目录的有效证明。
 - 初始化入口 `infiniband/bringup/xdr-initial-setup/initial-setup.py` 及共享接线测试。
@@ -164,11 +173,16 @@ OS-only 的最小 global 字段、独立版本链与 HTTP URL 示例见
 [README：最小 os-only global 声明](README.md#最小-os-only-global-声明离线输入检查)。
 模板中只有 `ib.version` 不等于已声明升级 policy；该示例必须配
 `--os-only --diagnose-inputs`，无组件选择时仍要求 OS/BIOS/CPLD 三份 policy。
-HTTP 禁用时返回 `HTTP_POLICY`，只能检查并启用经批准的项目 HTTP 配置；
-HTTPS、SCP、local 均不是当前入口的备用传输。相关离线测试同时核验零外部调用。
+显式 HTTP 禁用时返回 `HTTP_POLICY`，应检查经批准的项目 HTTP 配置；
+不得自动切换方式。同批入口帮助明确 `HTTP is the default transfer; SCP requires explicit selection.`，
+错误提示明确 `HTTP mode does not fall back to SCP, HTTPS or local transport.`。
+两处文案变更保留独立预期及精确 wording2 来源逆变换，先还原旧 entry 再经过原 display2/19-pin 校验，
+不替换原 entry pin、不放宽授权；历史 “HTTP only” 提示仅属于旧日志源码阶段。
+HTTPS、local 仍拒绝。相关离线测试同时核验零外部调用。
 新增样例仅覆盖本地离线输入诊断，不是包可达、设备健康或升级验收证据。
 
-- 仅 HTTP 包来源；HTTPS、SCP、local 明确拒绝，不静默降级。
+- 默认 HTTP；交互未指定 method 时回车或 15 秒超时选 HTTP，可显式 `--method scp`。
+  非交互、离线输入检查和仅生成脚本不等待菜单；HTTPS、local 拒绝，不静默降级。
 - 可用 `--project ABS_PROJECT` 读取明确项目的 `02-devices_config.csv` 和
   `01-global.yaml`，不要求先 load/setup；不覆盖用户的 CSV/global。
 - OS 当前版本必须位于 global 的有序文件链；按链逐步升级到 final。
@@ -186,6 +200,37 @@ HTTPS、SCP、local 均不是当前入口的备用传输。相关离线测试同
   不得用另一台服务器并发写相同目标，也不得删除锁文件“解除”冲突。
 - 密码不进入 argv/env/脚本/公开日志；身份、known_hosts、包来源、原配置备份和
   真实最终健康验证仍是必要条件。单个命令 exit 0 不等于组件升级成功。
+
+### native SCP 的窄边界
+
+交换机经 OpenSSH `scp -O` 拉获准包，不把 SFTP 上传当作该传输。
+管理服务器来源使用 `--mgmt-server`、`--mgmt-user`、`--mgmt-port` 和
+`--scp-known-hosts`，与目标设备密码及 `--known-hosts` 分开；缺来源端口默认 22，
+缺来源信任路径沿用所选 known_hosts。交互隐藏输入源密码；空密码只尝试交换机已有
+源端密钥，不上传私钥，不将秘密写入 argv/env、生成脚本或公开日志。
+首次 source known_hosts 原件与精确 endpoint/key pin 跨提示、使用及收尾核验；
+不 TOFU、不换代、不刷新基线。operator 必须另行批准两端信任及源包。
+
+本次需要的本地原包 once-hash 并保持原件，原 parent/native borrow、请求及 schema 2
+伴随记录绑定实际包路径/大小/SHA。它不证明包源是物理本机，不是数字签名或通用
+第三方源证明，不追认旧 HTTP 的摘要保证，不需额外读取系统 SSH 密钥。
+CPLD 两包均验证后才有任何 NV 安装；第二包失败仍零 NV。OS 使用真实选中包索引，
+原管理端 file/dir fsync、关键 finish/close 与 lease 尾核验全部成功后才发本次 SCP V2 ACK；
+旧 HTTP V1 ACK、public DATA、状态字典或 `launch_payload` 非空接口不提供 native 许可；
+public `preflight_source` 仍 HOLD，不以它绕过固定 native 链。
+源预检事实不是安装权限；仅固定注册流程可使用活原件链，不接受任意命令加 stdin。
+OS 有序链、组件独立金丝雀和固件前实际最终 OS 验证不变；FAIL/UNKNOWN 不自动
+重试故障安装、不重放请求或 reset/adopt，UNKNOWN 占用的槽不能为补派而清除。
+
+### 本地证据与未执行范围
+
+新 native 组结果须以落地后精确 source/test/manifest/Python 和完整收据为准；
+本文不预填私有组合或主树测试 PASS 数。保留历史错误夹具、FAIL 和 UNKNOWN，
+不将替代 single 正控追认为旧双目标正控通过。冷 image/固定 SSH-SCP IO、实际
+Python/Bash/PTY/helper 及管理端 ACK 顺序只是本地定向证据；private NV fetch exit 93
+不是安装成功、实际交换机或断电验收。现场用例仍全部 NOT RUN，full 未跑，
+普通 load/sync/package 精确证明门禁不变；未映射源码等治理阻塞不得忽略。
+REQ7 最终完成发行/冷成功仍 OPEN，F01/UFM 开发 STOP；这不是两者的验收替代。
 
 ### 重启观察与安装退出记录的区别
 
@@ -311,5 +356,5 @@ codex dev 审阅，不能自动跨树覆盖或反向同步。
 可向 codex test 转交：
 
 > 继承本交接基准到你自己的代码目录，先核完整 IBSW 运行及测试闭包，再做独立本地验证。
-> 保持 HTTP-only、独立组件金丝雀/状态和全部失败安全合同。不要访问设备、修改生产、
+> 保持默认 HTTP／显式 SCP 的同批固定来源与原件合同、独立组件金丝雀/状态和全部失败安全合同。不要访问设备、修改生产、
 > 跑 full/check、手改 ledger 或覆盖开发主树。把真实失败与完整日志、最小修复回传给我审阅。

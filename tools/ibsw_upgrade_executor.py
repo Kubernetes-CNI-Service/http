@@ -1020,7 +1020,14 @@ def _execute_component_once(leaf, component, *, password=None):
             raise ValueError("unselected component")
         if not scope.manual_execution and "--exclusive-config-window" not in declared["argv"]:
             raise SharedUpgradeHold("explicit operator configuration maintenance window required")
-        if args.method not in ("local", "http"):
+        if args.method == "scp":
+            # Preserve the original pre-session source rejection. The fixed
+            # diagnostic rechecks fresh originals inside the signed session.
+            scope._native_scp_source(leaf, component, scope._native_package_indices[0])
+            with _signed_session(leaf, password=password) as (transport, deadline, _identity, _auth, _pin):
+                scope._preflight_native_scp_source(leaf, component, scope._native_package_indices[0],
+                                                   transport, deadline)
+        if args.method not in ("local", "http") and not (args.method == 'scp' and component in ('os', 'bios', 'cpld')):
             raise SharedUpgradeHold("selected transport has no fixed real component backend")
     except SharedUpgradeHold:
         raise
@@ -1134,12 +1141,29 @@ def _execute_component_once(leaf, component, *, password=None):
                 raise SharedUpgradeHold("shared stop before local original request")
             scope._request_prepared_step_locked(leaf.node.hostname,component,data["package_index"])
             request=scope._hold(directory,"request.json")
+            if args.method == 'scp':
+                # Same actual lease: reliably finish the original schema2
+                # companion before any bounded stdin send. No caller DTO/kind.
+                scope._capture_scp_request_content_locked(leaf, component, data['package_index'])
+                leaf.verify(); request.verify(); runner.verify()
+                if stop is not None and stop.is_set():
+                    raise SharedUpgradeHold('shared stop after SCP request capture; no secret sent')
+                from ibsw_upgrade_driver import _fixed_native_scp_cpld_api
+                joint = _fixed_native_scp_cpld_api(scope._native_parent)
+                if (type(joint) is not tuple or len(joint) != 3
+                        or type(joint[2]) is not tuple or len(joint[2]) <= 3
+                        or joint[2][3] is not type(scope)._launch_native_scp_cpld):
+                    raise SharedUpgradeHold('fixed native CPLD launcher wrapper changed')
+                _progress(leaf, component, 'INSTALL_REQUEST_DISPATCH')
+                command, observed = joint[2][3](scope, leaf, component, data['package_index'],
+                                               transport, time.monotonic() + _EXECUTION_SECONDS)
         leaf.verify(); request.verify(); runner.verify()
-        if stop is not None and stop.is_set():
+        if args.method != 'scp' and stop is not None and stop.is_set():
             raise SharedUpgradeHold('shared stop after retaining original request; installer was not dispatched')
-        command = _owned_launch_command(remote)
-        _progress(leaf, component, 'INSTALL_REQUEST_DISPATCH')
-        observed = _read_channel(leaf, transport, command, time.monotonic() + _EXECUTION_SECONDS)
+        if args.method != 'scp':
+            command = _owned_launch_command(remote)
+            _progress(leaf, component, 'INSTALL_REQUEST_DISPATCH')
+            observed = _read_channel(leaf, transport, command, time.monotonic() + _EXECUTION_SECONDS)
         chain.append(_raw_record(command, observed))
         try:
             with scope._request_namespace_lease():
@@ -1188,8 +1212,7 @@ def _bound_component_postcondition_inputs(leaf, dispatch):
         held = scope._hold(directory, "component-dispatch.json")
         document = json.loads(held.payload)
         if (document.get("schema_version") != 2 or document.get("binding") != binding
-                or document.get("request_sha256") != hashlib.sha256(request.payload).hexdigest()
-                or document.get("launch_kind") != "OWNED_RUNNER_V1"):
+                or document.get("request_sha256") != hashlib.sha256(request.payload).hexdigest()):
             raise ValueError("original component dispatch changed")
         remote = document["remote_script"]
         runner = _owned_runner_bytes(binding, remote)
@@ -1200,11 +1223,58 @@ def _bound_component_postcondition_inputs(leaf, dispatch):
         scope._hold(directory, "runner-binding.json", runner_binding)
         if document.get("runner_binding_sha256") != hashlib.sha256(runner_binding).hexdigest():
             raise ValueError("original runner binding changed")
+        if args.method == 'scp':
+            from ibsw_upgrade_driver import _fixed_native_scp_cpld_api, _validate_scp_request_content_graph
+            if (dispatch.component not in ('os', 'bios', 'cpld')
+                    or (dispatch.component in ('bios', 'cpld') and dispatch.package_index != 0)
+                    or document.get('launch_kind') != 'SCP_STDIN_OWNED_RUNNER_V2'):
+                raise ValueError('only original selected SCP OS/BIOS/CPLD V2 dispatch is supported')
+            source = scope._native_scp_source(leaf, dispatch.component, dispatch.package_index)
+            parent = scope._native_parent
+            joint = _fixed_native_scp_cpld_api(parent)
+            if (type(joint) is not tuple or len(joint) != 3
+                    or len(joint[0]) != 19
+                    or any(actual is not original for actual, original in zip(joint[0], parent._scp_source_binding[1]))
+                    or type(joint[2]) is not tuple or len(joint[2]) <= 3
+                    or joint[2][2] is not type(scope)._native_scp_launch_context
+                    or joint[2][3] is not type(scope)._launch_native_scp_cpld):
+                raise ValueError('original SCP dispatch producer joint changed')
+            names = ('request.json', 'step.sh', 'step-binding.json', 'runner.sh',
+                     'runner-binding.json', 'scp-source-request.json')
+            originals = tuple(scope._hold(directory, name) for name in names)
+            companion = originals[-1]
+            _validate_scp_request_content_graph(set(os.listdir(directory.fd)), binding,
+                lambda name: scope._hold(directory, name).payload)
+            if document.get('scp_companion_sha256') != hashlib.sha256(companion.payload).hexdigest():
+                raise ValueError('original SCP dispatch companion changed')
+            expected_command = joint[2][0](remote, hashlib.sha256(runner).hexdigest(),
+                                           hashlib.sha256(script).hexdigest())
+            if scope._native_scp_source(leaf, dispatch.component, dispatch.package_index) is not source:
+                raise ValueError('original SCP dispatch source instance changed')
+            current = _fixed_native_scp_cpld_api(parent)
+            if (len(current) != len(joint) or any(len(a) != len(b) or
+                    any(x is not y for x, y in zip(a, b)) for a, b in zip(current, joint))):
+                raise ValueError('original SCP dispatch producer joint changed at read tail')
+            for name, original in zip(names, originals):
+                if scope._hold(directory, name) is not original:
+                    raise ValueError('original SCP dispatch artifact owner changed')
+                original.verify()
+        else:
+            if (document.get('launch_kind') != 'OWNED_RUNNER_V1'
+                    or 'scp-source-request.json' in os.listdir(directory.fd)
+                    or 'scp_companion_sha256' in document):
+                raise ValueError('SCP companion cannot authorize an original V1 dispatch')
+            expected_command = _owned_launch_command(remote)
         records = document.get("records")
         if (type(records) is not list or not records
-                or records[-1].get("command") != _owned_launch_command(remote)
+                or records[-1].get("command") != expected_command
                 or tuple(records) != dispatch.raw_records):
             raise ValueError("original dispatch raw chain changed")
+        if args.method == 'scp' and (records[-1].get('stdout_base64') !=
+                base64.b64encode(b'IBSW_LAUNCH_REQUESTED\n').decode('ascii')
+                or records[-1].get('stderr_base64') != '' or records[-1].get('returncode') != 0
+                or records[-1].get('stream_complete') is not True):
+            raise ValueError('original SCP launch delivery fact changed')
         leaf.verify()
         return scope, directory, binding, document, remote
     except Exception as error:
@@ -1515,6 +1585,41 @@ def _collect_component_exit_and_logs(leaf, dispatch, transport, deadline):
                 "evidence_paths": (leaf.node.hostname + "/" + dispatch.stage + "/component-dispatch.json",)}
 
 
+def _scp_download_packet(snippet):
+    """Select all reserved public SCP records, never filter bad candidates."""
+    if type(snippet) is not bytes or len(snippet) > 512 * 1024:
+        raise ValueError('bounded original SCP log prefix required')
+    content = measurement = None
+    for line in snippet.splitlines(keepends=True):
+        if not line.startswith(b'IBSW_SCP_'):
+            continue
+        if not line.endswith(b'\n'):
+            return None  # Growing final candidate is never a complete fact.
+        if b'\r' in line:
+            raise ValueError('malformed reserved SCP log candidate')
+        value = line[:-1]
+        if value.startswith(b'IBSW_SCP_CONTENT_VERIFIED='):
+            if (content is not None or re.fullmatch(
+                    rb'IBSW_SCP_CONTENT_VERIFIED=1\|[0-9a-f]{64}\|[A-Za-z0-9_-]+\|[1-9][0-9]{0,18}\|[0-9a-f]{64}',
+                    value) is None):
+                raise ValueError('duplicate or malformed SCP content candidate')
+            content = value
+        elif value.startswith(b'IBSW_SCP_DOWNLOAD_RESULT='):
+            if (measurement is not None or re.fullmatch(
+                    rb'IBSW_SCP_DOWNLOAD_RESULT=1\|[0-9]{1,20}\|[0-9]{1,20}\|0\|0\|[1-9][0-9]{0,18}\|[0-9]{1,20}(?:\.[0-9]{1,9})?\|[0-9]{1,20}(?:\.[0-9]{1,9})?',
+                    value) is None):
+                raise ValueError('duplicate or malformed SCP measurement candidate')
+            measurement = value
+        else:
+            raise ValueError('unknown or failed reserved SCP log candidate')
+    if content is None or measurement is None:
+        return None
+    packet = content + b'\n' + measurement + b'\n'
+    if len(packet) > 4096:
+        raise ValueError('SCP download packet exceeded bound')
+    return packet
+
+
 def _probe_component_exit_once(leaf,dispatch,*,password,deadline,_read_only=False,_transport=None):
     """One original diagnostic/telemetry probe, never an installer retry.
 
@@ -1581,7 +1686,95 @@ def _probe_component_exit_once(leaf,dispatch,*,password,deadline,_read_only=Fals
                         if observed!=getattr(leaf,'_observed_component_stage',None):
                             leaf._observed_component_stage=observed
                             _progress(leaf,dispatch.component,observed)
-                    if dispatch.component=='os' and not getattr(leaf,'_download_acknowledged',False):
+                    if (dispatch.component == 'os' and scope.parsed.method == 'scp'
+                            and not getattr(leaf, '_download_acknowledged', False)):
+                        from ibsw_upgrade_driver import _fixed_native_scp_cpld_api
+                        parent = scope._package_source_parent
+                        joint = _fixed_native_scp_cpld_api(parent)
+                        try:
+                            packet = joint[2][28](snippet)
+                        except ValueError:
+                            raise _NativeObservationHold(reason_code='COMPONENT_EXIT_BINDING_INVALID',
+                                capture_raw={'safe_diagnostic': {'code': 'SCP_DOWNLOAD_CONTENT_INVALID'}}) from None
+                        if packet is not None:
+                            peer_failure = None
+                            try:
+                                with scope._request_namespace_lease():
+                                    inputs = joint[2][30](scope, leaf, dispatch)
+                                    try:
+                                        measurement = joint[2][26](packet, inputs[2])
+                                    except ValueError as error:
+                                        peer_failure = error
+                            except BaseException as error:
+                                if parent._package_source_lifecycle_failure is None:
+                                    parent._package_source_lifecycle_failure = SharedUpgradeHold(
+                                        'native SCP measurement input cleanup uncertain; group retained')
+                                if not isinstance(error, Exception) or isinstance(error, SharedUpgradeHold):
+                                    raise
+                                raise SharedUpgradeHold('native SCP measurement input lease failed') from error
+                            if peer_failure is not None:
+                                # Target content errors do not revoke a healthy
+                                # shared source owner or turn a DTO into a grant.
+                                raise _NativeObservationHold(reason_code='COMPONENT_EXIT_BINDING_INVALID',
+                                    capture_raw={'safe_diagnostic': {'code': 'SCP_DOWNLOAD_CONTENT_INVALID'}}) from None
+                            joint[2][32](scope, leaf, dispatch, [measurement])
+                            # The real record entry has returned after actual
+                            # writer.finish AND its request lease cleanup.
+                            try:
+                                with scope._request_namespace_lease():
+                                    after = joint[2][30](scope, leaf, dispatch)
+                                    if (after[0] is not inputs[0] or after[4] is not inputs[4]
+                                            or after[5] is not inputs[5] or after[8] is not parent
+                                            or after[2] != inputs[2]
+                                            or any(a is not b for a, b in zip(after[3], inputs[3]))):
+                                        raise SharedUpgradeHold('original native SCP ACK inputs changed')
+                                    saved = scope._hold(after[0], 'download-attempt-01.json')
+                                    document = joint[2][29](after[1], after[3][6].payload,
+                                        lambda name: scope._hold(after[0], name).payload, packet)
+                                    from ibsw_upgrade_driver import _json_bytes
+                                    if saved.payload != _json_bytes(document):
+                                        raise SharedUpgradeHold('original native SCP measurement record changed')
+                                    saved.verify()
+                                    ack = joint[2][27](binding['run_id'],
+                                        measurement['content_marker'], measurement['raw_line'])
+                            except BaseException as error:
+                                if parent._package_source_lifecycle_failure is None:
+                                    parent._package_source_lifecycle_failure = SharedUpgradeHold(
+                                        'native SCP ACK record/lease uncertain; shared group retained')
+                                if not isinstance(error, Exception) or isinstance(error, SharedUpgradeHold):
+                                    raise
+                                raise SharedUpgradeHold('native SCP ACK record verification failed') from error
+                            if scope._native_scp_source(leaf, 'os', dispatch.package_index) is not inputs[4]:
+                                raise SharedUpgradeHold('native SCP source changed before ACK publication')
+                            stop = getattr(scope, '_pipeline_stop_event', None)
+                            if stop is not None and stop.is_set():
+                                raise SharedUpgradeHold('shared stop withholds native SCP ACK')
+                            ack_path=posixpath.join(posixpath.dirname(remote),'download-ack')
+                            try: ack_item=sftp.lstat(ack_path)
+                            except FileNotFoundError: ack_item=None
+                            if ack_item is None:
+                                temporary_ack=ack_path+'-'+secrets.token_hex(16)
+                                handle=sftp.open(temporary_ack,'wx')
+                                try:
+                                    sftp.chmod(temporary_ack,0o600)
+                                    handle.write(ack); handle.flush()
+                                finally: handle.close()
+                                check=_read_stable_component_file(leaf,sftp,temporary_ack,int(uid_raw[0]),deadline,1024,nonempty=True)
+                                if check!=ack:
+                                    raise _NativeObservationHold(reason_code='COMPONENT_EXIT_BINDING_INVALID')
+                                # Final name becomes visible only after complete bytes.
+                                sftp.rename(temporary_ack,ack_path)
+                                # Rename response commits the already-verified bytes.
+                                # The installer can consume ACK and reboot immediately:
+                                # a post-commit reread must not be a success prerequisite.
+                            else:
+                                readback=_read_stable_component_file(leaf,sftp,ack_path,int(uid_raw[0]),deadline,1024,nonempty=True)
+                                if readback!=ack:
+                                    raise _NativeObservationHold(reason_code='COMPONENT_EXIT_BINDING_INVALID')
+                            leaf._download_acknowledged=True
+                            acknowledged_now=True
+                    if (dispatch.component=='os' and scope.parsed.method != 'scp'
+                            and not getattr(leaf,'_download_acknowledged',False)):
                         from ibsw_upgrade_component import parse_download_results,download_ack_bytes
                         measurements=parse_download_results(snippet)
                         if measurements:
@@ -1644,13 +1837,17 @@ def _probe_component_exit_once(leaf,dispatch,*,password,deadline,_read_only=Fals
         finally:
             try: sftp.close()
             except BaseException as cleanup:
-                if isinstance(cleanup,OSError) and cleanup.errno in _RESOURCE_ERRNOS:
-                    if failure is None or isinstance(failure,Exception): failure=cleanup
-                if failure is None:
-                    safe={'operation':'close','stage':dispatch.stage,'code':'COMPONENT_SFTP_FAILED'}
-                    if isinstance(cleanup,OSError) and cleanup.errno is not None: safe['errno']=cleanup.errno
-                    failure=(_NativeObservationHold(reason_code="COMPONENT_SFTP_FAILED",capture_raw={'safe_diagnostic':safe})
-                             if isinstance(cleanup,Exception) else cleanup)
+                if scope.parsed.method == 'scp' and not isinstance(cleanup, Exception):
+                    if failure is None or isinstance(failure, Exception):
+                        failure = cleanup
+                else:
+                    if isinstance(cleanup,OSError) and cleanup.errno in _RESOURCE_ERRNOS:
+                        if failure is None or isinstance(failure,Exception): failure=cleanup
+                    if failure is None:
+                        safe={'operation':'close','stage':dispatch.stage,'code':'COMPONENT_SFTP_FAILED'}
+                        if isinstance(cleanup,OSError) and cleanup.errno is not None: safe['errno']=cleanup.errno
+                        failure=(_NativeObservationHold(reason_code="COMPONENT_SFTP_FAILED",capture_raw={'safe_diagnostic':safe})
+                                 if isinstance(cleanup,Exception) else cleanup)
         if failure is not None: raise failure
         return result
 

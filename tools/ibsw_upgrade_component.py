@@ -56,6 +56,99 @@ def download_ack_bytes(run_id,raw_line):
     return b'IBSW_DOWNLOAD_ACK_V1|'+run_id.encode('ascii')+b'|'+raw_line+b'\n'
 
 
+def _scp_download_pair(content_marker, raw_line):
+    """Validate two public SCP DATA records, never an execution permission."""
+    import base64
+    if (type(content_marker) is not bytes or type(raw_line) is not bytes
+            or len(content_marker) + len(raw_line) + 2 > 4096
+            or any(char in content_marker or char in raw_line for char in (b'\n', b'\r'))):
+        raise ValueError('bounded complete SCP download pair required')
+    try:
+        marker = content_marker.decode('ascii').split('|')
+        fields = raw_line.decode('ascii').split('|')
+        if (len(marker) != 5 or marker[0] != 'IBSW_SCP_CONTENT_VERIFIED=1'
+                or re.fullmatch(r'[0-9a-f]{64}', marker[1]) is None
+                or re.fullmatch(r'[A-Za-z0-9_-]+', marker[2]) is None
+                or re.fullmatch(r'[1-9][0-9]{0,18}', marker[3]) is None
+                or re.fullmatch(r'[0-9a-f]{64}', marker[4]) is None):
+            raise ValueError()
+        decoded = base64.b64decode(marker[2] + '=' * (-len(marker[2]) % 4),
+                                   altchars=b'-_', validate=True)
+        if base64.urlsafe_b64encode(decoded).rstrip(b'=').decode('ascii') != marker[2]:
+            raise ValueError()
+        path = decoded.decode('utf-8')
+        if (not path.startswith('/') or len(decoded) > 4096
+                or any(ord(char) < 32 or ord(char) == 127 for char in path)):
+            raise ValueError()
+        size = int(marker[3])
+        if not 0 < size < 2**63:
+            raise ValueError()
+        if (len(fields) != 8 or fields[0] != 'IBSW_SCP_DOWNLOAD_RESULT=1'
+                or any(re.fullmatch(r'[0-9]{1,20}', value) is None for value in fields[1:6])
+                or fields[3:5] != ['0', '0']
+                or any(re.fullmatch(r'[0-9]{1,20}(?:\.[0-9]{1,9})?', value) is None
+                       for value in fields[6:])):
+            raise ValueError()
+        start, end, code, status, downloaded = map(int, fields[1:6])
+        elapsed, speed = map(float, fields[6:])
+        if (end < start or downloaded != size
+                or not all(math.isfinite(value) and value >= 0 for value in (elapsed, speed))):
+            raise ValueError()
+    except (ValueError, UnicodeError):
+        raise ValueError('invalid SCP download pair') from None
+    row = dict(attempt=1, started_epoch=start, finished_epoch=end,
+               scp_exit=code, reserved_status=status, bytes_downloaded=downloaded,
+               elapsed_seconds=elapsed, average_bytes_per_second=speed,
+               content_marker=content_marker, raw_line=raw_line)
+    return row, (marker[1], path, size, marker[4])
+
+
+def parse_scp_download_results(payload, expected_content):
+    """Exact two-record SCP DATA packet; caller must separately govern stdout."""
+    if (type(payload) is not bytes or len(payload) > 4096
+            or not payload.endswith(b'\n') or payload.count(b'\n') != 2
+            or b'\r' in payload
+            or type(expected_content) is not dict
+            or set(expected_content) != {'binding_sha256', 'path', 'size', 'sha256'}):
+        raise ValueError('exact SCP download packet and content DATA required')
+    binding, path, size, digest = (expected_content[key] for key in
+                                 ('binding_sha256', 'path', 'size', 'sha256'))
+    if (type(binding) is not str or re.fullmatch(r'[0-9a-f]{64}', binding) is None
+            or type(digest) is not str or re.fullmatch(r'[0-9a-f]{64}', digest) is None
+            or type(path) is not str or not path.startswith('/')
+            or type(size) is not int or not 0 < size < 2**63
+            or any(ord(char) < 32 or ord(char) == 127 for char in path)):
+        raise ValueError('invalid expected SCP content DATA')
+    try:
+        if len(path.encode('utf-8')) > 4096:
+            raise ValueError()
+    except UnicodeError:
+        raise ValueError('invalid expected SCP content DATA') from None
+    first, second, _tail = payload.split(b'\n')
+    if first.startswith(b'IBSW_SCP_CONTENT_VERIFIED='):
+        marker, line = first, second
+    elif second.startswith(b'IBSW_SCP_CONTENT_VERIFIED='):
+        marker, line = second, first
+    else:
+        raise ValueError('one SCP content marker required')
+    row, content = _scp_download_pair(marker, line)
+    if content != (binding, path, size, digest):
+        raise ValueError('SCP content DATA mismatch')
+    return row
+
+
+def scp_download_ack_bytes(run_id, content_marker, raw_line):
+    """Fixed V2 wire DATA; not an owner record, grant or ACK publication."""
+    import hashlib
+    if (type(run_id) is not str
+            or re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,95}', run_id) is None):
+        raise ValueError('safe SCP download acknowledgement run required')
+    _scp_download_pair(content_marker, raw_line)
+    return (b'IBSW_SCP_DOWNLOAD_ACK_V2|' + run_id.encode('ascii') + b'|'
+            + hashlib.sha256(content_marker).hexdigest().encode('ascii')
+            + b'|' + raw_line + b'\n')
+
+
 @dataclass(frozen=True)
 class RenderedStep:
     script: str
@@ -114,6 +207,15 @@ def _render(policy, device, *, run_id, method, switch_dir, component,
     if refresh is not None:
         values.update(IBSW_REFRESH_FILE=refresh.file, IBSW_REFRESH_URL=_package_url(refresh, method),
                       IBSW_REFRESH_LOCAL=str(Path(switch_dir) / refresh.file))
+    if method == "scp":
+        import base64
+        from ibsw_upgrade_scp import remote_helper_bytes
+        # Fixed stdin-only target helper, never the old environment launcher.
+        helper = b"import os\nos.environ.pop('IBSW_SCP_AUTH',None)\n" + remote_helper_bytes()
+        values.update(IBSW_SCP_HELPER_B64=base64.b64encode(helper).decode('ascii'),
+                      IBSW_SCP_PACKAGE_PATH=package.path)
+        if refresh is not None:
+            values['IBSW_SCP_REFRESH_PATH'] = refresh.path
     header = "#!/bin/bash\n# Generated IB NVOS component plan artifact; not execution permission.\n"
     header += "\n".join(key + "=" + shlex.quote(value) for key, value in values.items()) + "\n"
     if _fixed_layout(__file__) / "upgrade-component.sh" != _TEMPLATE:

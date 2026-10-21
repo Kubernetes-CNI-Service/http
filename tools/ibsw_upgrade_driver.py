@@ -15,14 +15,17 @@ import fcntl
 import hashlib
 import hmac
 import json
+import math
 import os
 from pathlib import Path
 import posixpath
 import re
 import secrets
+import shlex
 import stat
 import sys
 import threading
+import time
 
 from _package_common import _package_project_identity, _source_identity
 from ibsw_upgrade_contract import (
@@ -36,13 +39,86 @@ from ibsw_upgrade_inputs import (
     MAXIMUM_INPUT_BYTES, _CandidateDescriptor, _EvidenceIdentity, _HeldFile, _raise_cleanup_issues, open_managed_inputs,
     open_regular_inputs, open_standalone_inputs,
 )
-from ibsw_upgrade_component import render_declared_step
+from ibsw_upgrade_component import render_declared_step, _scp_download_pair as _SCP_DOWNLOAD_PAIR
+# Trusted-driver-import code/object anchor for graph-only DATA parsing. The
+# later live producer audit still independently holds/compiles the full source.
+_SCP_DOWNLOAD_PAIR_IMAGE = (_SCP_DOWNLOAD_PAIR, _SCP_DOWNLOAD_PAIR.__code__,
+                            _SCP_DOWNLOAD_PAIR.__globals__)
 from ibsw_upgrade_schedule import (declared_step_key, component_order, COMPONENT_REGISTRY,
     component_status_document, validate_component_status_document,
     native_component_status_document, validate_native_component_status_document)
 from project_contract import BRINGUP_OUTPUT_SPECS
 from ssh_key_preparation import public_key_identity_bytes
 
+
+# Finite probe-runtime baseline at trusted driver import, before any invocation
+# or test IO seam. This is not a whole-stdlib / prior-interpreter attestation.
+_SCP_PROBE_MODULES = (json, base64, shlex, math, time, threading)
+_SCP_PROBE_LEAVES = (json.loads, json.dumps, base64.b64encode, shlex.quote,
+    math.isfinite, time.monotonic, time.sleep, threading.Lock, threading.Timer, threading.Event)
+_SCP_PROBE_LEAF_STATE = tuple((type(value), getattr(value, '__code__', None),
+    getattr(value, '__globals__', None)) for value in _SCP_PROBE_LEAVES)
+_SCP_PROBE_CONTEXT = (contextmanager, contextmanager.__code__, contextmanager.__globals__,
+    contextmanager.__globals__['_GeneratorContextManager'], sys.modules['contextlib'])
+
+
+def _capture_native_scp_cpld_bootstrap():
+    """Trusted normal driver-import originals, never a runtime refresh.
+
+    This does not attest an interpreter already hostile before driver import.
+    Nothing is captured successfully unless every temporary owner closes.
+    """
+    from types import ModuleType
+    from ibsw_upgrade_inputs import _HeldDirectory
+    component = sys.modules.get('ibsw_upgrade_component')
+    if type(component) is not ModuleType or vars(component).get('render_declared_step') is not render_declared_step:
+        raise SharedUpgradeHold('fixed CPLD renderer bootstrap unavailable')
+    namespace = vars(component)
+    rendered = namespace.get('RenderedStep')
+    if type(rendered) is not type:
+        raise SharedUpgradeHold('fixed CPLD rendered class bootstrap unavailable')
+    class_members = tuple(vars(rendered).items())
+    layout = namespace['_fixed_layout'](__file__)
+    paths = (namespace['_TEMPLATE'], layout / 'upgrade-owned-runner.sh')
+    if any(type(path) is not type(Path()) for path in paths):
+        raise SharedUpgradeHold('fixed CPLD bootstrap paths unavailable')
+    directory = None
+    held = []
+    images = []
+    primary = None
+    try:
+        directory = _HeldDirectory(layout)
+        for path in paths:
+            if path.parent != layout:
+                raise SharedUpgradeHold('fixed CPLD bootstrap layout changed')
+            original = _HeldFile(path, directory)
+            held.append(original)
+            item = os.fstat(original.fd)
+            if item.st_nlink != 1 or item.st_mode & 0o022:
+                raise SharedUpgradeHold('fixed CPLD bootstrap template unsafe')
+            identity = (item.st_dev, item.st_ino, item.st_mode, item.st_uid, item.st_gid,
+                        item.st_nlink, item.st_size, item.st_mtime_ns, item.st_ctime_ns)
+            images.append((str(path), identity, original.payload))
+        for original in held:
+            original.verify()
+        directory.verify()
+    except BaseException as error:
+        primary = error
+    finally:
+        for original in tuple(reversed(held)) + ((directory,) if directory is not None else ()):
+            try:
+                original.close()
+            except BaseException as error:
+                if primary is None or isinstance(primary, Exception) and not isinstance(error, Exception):
+                    primary = error
+    if primary is not None:
+        if not isinstance(primary, Exception):
+            raise primary
+        raise SharedUpgradeHold('fixed CPLD bootstrap originals uncertain') from None
+    return component, rendered, class_members, tuple(images), paths
+
+
+_SCP_CPLD_BOOTSTRAP = _capture_native_scp_cpld_bootstrap()
 
 _LOCAL_REQUEST_LOCK = threading.RLock()
 
@@ -559,6 +635,61 @@ def _download_document(binding,dispatch_payload,lines):
         raw_lines_base64=base64.b64encode(lines).decode('ascii'),measurement=rows[-1])
 
 
+def _scp_download_document(binding, dispatch_payload, read, lines):
+    """Strict SCP measurement DATA; never infer a live owner from saved JSON."""
+    from types import FunctionType
+    image = _SCP_DOWNLOAD_PAIR_IMAGE
+    if (type(image) is not tuple or len(image) != 3 or type(image[0]) is not FunctionType
+            or _SCP_DOWNLOAD_PAIR is not image[0] or image[0].__code__ is not image[1]
+            or image[0].__globals__ is not image[2] or image[0].__defaults__ is not None
+            or image[0].__kwdefaults__ is not None or image[0].__closure__ is not None
+            or image[2].get('_scp_download_pair') is not image[0]
+            or image[2].get('re') is not re or image[2].get('math') is not math):
+        raise ValueError('original imported SCP DATA parser changed')
+    if type(binding) is not dict or binding.get('component') != 'os':
+        raise ValueError('only original OS SCP measurement DATA')
+    names = {'request.json', 'step.sh', 'step-binding.json', 'runner.sh',
+             'runner-binding.json', 'scp-source-request.json'}
+    _validate_scp_request_content_graph(names, binding, read)
+    if read('step-binding.json') != _json_bytes(binding):
+        raise ValueError('original SCP step binding bytes required')
+    request_payload = read('request.json')
+    companion_payload = read('scp-source-request.json')
+    companion = json.loads(companion_payload)
+    dispatch = json.loads(dispatch_payload)
+    if (type(dispatch) is not dict or dispatch.get('schema_version') != 2
+            or dispatch.get('state') != 'COMPONENT_DISPATCH_DATA_ONLY'
+            or dispatch.get('launch_kind') != 'SCP_STDIN_OWNED_RUNNER_V2'
+            or dispatch.get('binding') != binding
+            or dispatch.get('request_sha256') != hashlib.sha256(request_payload).hexdigest()
+            or dispatch.get('scp_companion_sha256') != hashlib.sha256(companion_payload).hexdigest()
+            or len(companion['packages']) != 1):
+        raise ValueError('original SCP dispatch/request/companion required')
+    path, package = next(iter(companion['packages'].items()))
+    expected = dict(binding_sha256=hashlib.sha256(read('step-binding.json')).hexdigest(),
+                    path=path, size=package['size'], sha256=package['sha256'])
+    if (type(lines) is not bytes or len(lines) > 4096 or not lines.endswith(b'\n')
+            or lines.count(b'\n') != 2 or b'\r' in lines):
+        raise ValueError('exact original SCP measurement packet required')
+    first, second, _tail = lines.split(b'\n')
+    if first.startswith(b'IBSW_SCP_CONTENT_VERIFIED='):
+        marker, numeric = first, second
+    else:
+        marker, numeric = second, first
+    parsed, content = image[0](marker, numeric)
+    if content != (expected['binding_sha256'], path, package['size'], package['sha256']):
+        raise ValueError('original SCP measurement content differs from companion')
+    measurement = dict(parsed)
+    measurement['content_marker'] = parsed['content_marker'].decode('ascii')
+    measurement['raw_line'] = parsed['raw_line'].decode('ascii')
+    return dict(schema_version=2, state='SCP_DOWNLOAD_MEASUREMENT_DATA_ONLY',
+        binding=binding, dispatch_sha256=hashlib.sha256(dispatch_payload).hexdigest(),
+        request_sha256=hashlib.sha256(request_payload).hexdigest(),
+        companion_sha256=hashlib.sha256(companion_payload).hexdigest(),
+        content_marker_sha256=hashlib.sha256(parsed['content_marker']).hexdigest(),
+        raw_lines_base64=base64.b64encode(lines).decode('ascii'), measurement=measurement)
+
+
 _MAX_COMPONENT_RAW_RECORDS = 512
 
 
@@ -688,6 +819,73 @@ def _validate_scp_request_content_graph(files, binding, read):
 
 
 
+def _scp_component_launch_command_data(remote, runner_sha256, step_sha256):
+    """Pure command DATA from the unique literal in the fixed original image.
+
+    Do not call a mutable cached provider function during graph validation.
+    Native writer/consumer separately require the live compiled producer joint.
+    """
+    import ast
+    directory = Path(__file__).resolve().parent
+    rows, primary, raw = [], None, None
+
+    def identity(info):
+        return info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode)
+
+    def facts(info):
+        return (info.st_dev, info.st_ino, info.st_mode, info.st_nlink,
+                info.st_uid, info.st_gid, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+    def opened(name, flags, parent=None):
+        named = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        fd = os.open(name, flags | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, 'O_CLOEXEC', 0), dir_fd=parent)
+        rows.append((fd, identity(named)))
+        if identity(os.fstat(fd)) != identity(named):
+            raise ValueError('fixed graph image original identity changed')
+        return fd, named
+
+    try:
+        parent, before_parent = opened(str(directory), os.O_RDONLY | os.O_DIRECTORY)
+        fd, before = opened('ibsw_upgrade_scp.py', os.O_RDONLY, parent)
+        if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+                or before.st_mode & 0o022 or not 0 < before.st_size <= MAXIMUM_INPUT_BYTES):
+            raise ValueError('bounded readonly original SCP image required')
+        chunks, count = [], 0
+        while count < before.st_size:
+            part = os.read(fd, min(65536, before.st_size - count))
+            if not part: raise ValueError('partial original SCP image')
+            chunks.append(part); count += len(part)
+        if (os.read(fd, 1) or facts(os.fstat(fd)) != facts(before)
+                or facts(os.stat('ibsw_upgrade_scp.py', dir_fd=parent, follow_symlinks=False)) != facts(before)
+                or identity(os.fstat(parent)) != identity(before_parent)
+                or identity(os.stat(directory, follow_symlinks=False)) != identity(before_parent)):
+            raise ValueError('original SCP image changed during graph read')
+        raw = b''.join(chunks)
+    except BaseException as error:
+        primary = error
+    finally:
+        for fd, original in reversed(rows):
+            try:
+                if identity(os.fstat(fd)) != original:
+                    raise ValueError('original graph source descriptor changed; no numeric retry')
+                os.close(fd)
+            except BaseException as error:
+                if primary is None or (isinstance(primary, Exception) and not isinstance(error, Exception)):
+                    primary = error
+    if primary is not None: raise primary
+    tree = ast.parse(raw)
+    matches = [node for node in tree.body if isinstance(node, (ast.Assign, ast.AnnAssign))
+        and any(isinstance(target, ast.Name) and target.id == '_STDIN_LAUNCHER'
+                for target in (node.targets if isinstance(node, ast.Assign) else (node.target,)))]
+    if (len(matches) != 1 or not isinstance(matches[0].value, ast.Constant)
+            or type(matches[0].value.value) is not str):
+        raise ValueError('unique literal fixed stdin launcher required')
+    expression = 'import base64;exec(base64.b64decode(' + repr(base64.b64encode(
+        matches[0].value.value.encode()).decode()) + '))'
+    return '/usr/bin/python3 -c ' + shlex.quote(expression) + ''.join(
+        ' ' + shlex.quote(value) for value in (remote, runner_sha256, step_sha256))
+
+
 def _validate_component_graph(files, binding, read, *, switch_dir):
     """Separate schema2 byte graph. No file or JSON field grants dispatch."""
     files = set(files)
@@ -733,20 +931,49 @@ def _validate_component_graph(files, binding, read, *, switch_dir):
         document = json.loads(read("component-dispatch.json"))
         if (document.get("schema_version") != 2 or document.get("binding") != binding
                 or document.get("request_sha256") != hashlib.sha256(read("request.json")).hexdigest()
-                or document.get("runner_binding_sha256") != hashlib.sha256(read("runner-binding.json")).hexdigest()
-                or document.get("launch_kind") != "OWNED_RUNNER_V1"):
+                or document.get("runner_binding_sha256") != hashlib.sha256(read("runner-binding.json")).hexdigest()):
             raise ValueError("original component dispatch binding changed")
         records = _component_raw_records(document["records"])
-        from ibsw_upgrade_executor import _owned_launch_command
-        if records[-1]["command"] != _owned_launch_command(document["remote_script"]):
+        if document.get('launch_kind') == 'SCP_STDIN_OWNED_RUNNER_V2':
+            if (set(document) != {'schema_version', 'state', 'binding', 'request_sha256',
+                    'remote_script', 'records', 'launch_kind', 'runner_binding_sha256', 'scp_companion_sha256'}
+                    or document.get('state') != 'COMPONENT_DISPATCH_DATA_ONLY'
+                    or binding['component'] not in ('os', 'bios', 'cpld')
+                    or (binding['component'] in ('bios', 'cpld') and binding['package_index'] != 0)
+                    or 'scp-source-request.json' not in files
+                    or 'package-source.json' in files
+                    or document.get('scp_companion_sha256') != hashlib.sha256(read('scp-source-request.json')).hexdigest()
+                    or posixpath.dirname(posixpath.dirname(document['remote_script'])) != switch_dir
+                    or runner_binding.get('remote_script') != document['remote_script']
+                    or records[-1]['stdout_base64'] != base64.b64encode(b'IBSW_LAUNCH_REQUESTED\n').decode('ascii')
+                    or records[-1]['stderr_base64'] != '' or records[-1]['returncode'] != 0
+                    or records[-1]['stream_complete'] is not True):
+                raise ValueError('original SCP-only CPLD companion/remote graph required')
+            expected = _scp_component_launch_command_data(document['remote_script'],
+                hashlib.sha256(read('runner.sh')).hexdigest(), hashlib.sha256(read('step.sh')).hexdigest())
+        elif document.get('launch_kind') == 'OWNED_RUNNER_V1':
+            if 'scp-source-request.json' in files or 'scp_companion_sha256' in document:
+                raise ValueError('SCP companion cannot authorize a V1 dispatch')
+            from ibsw_upgrade_executor import _owned_launch_command
+            expected = _owned_launch_command(document['remote_script'])
+        else:
+            raise ValueError('unknown original component launch kind')
+        if records[-1]["command"] != expected:
             raise ValueError("original component launch chain changed")
     repair_files = {"after.commands", "missing.commands", "component-repair.json"}
     for name in sorted(files & _DOWNLOAD_FILES):
         document=json.loads(read(name))
         number=int(name[len('download-attempt-'):-len('.json')])
-        if ('component-dispatch.json' not in files or document!=_download_document(binding,
-                read('component-dispatch.json'),base64.b64decode(document['raw_lines_base64'],validate=True))
-                or document['measurement']['attempt']!=number
+        if 'component-dispatch.json' not in files:
+            raise ValueError('original download measurement graph changed')
+        lines = base64.b64decode(document['raw_lines_base64'], validate=True)
+        if 'scp-source-request.json' in files:
+            expected_download = _scp_download_document(binding,
+                read('component-dispatch.json'), read, lines)
+        else:
+            expected_download = _download_document(binding, read('component-dispatch.json'), lines)
+        if ('component-dispatch.json' not in files or document != expected_download
+                or document['measurement']['attempt'] != number
                 or any(f'download-attempt-{i:02d}.json' not in files for i in range(1,number))):
             raise ValueError('original download measurement graph changed')
     for name in sorted(files & _NVUED_CHECK_FILES):
@@ -1732,6 +1959,951 @@ def _fixed_package_source_api(scope):
     return result
 
 
+def _fixed_scp_source_api(scope, *, probe=False):
+    """Fresh fixed-source/object joint, not source-instance or native authority.
+
+    Cached provider code is compiled for comparison, never re-executed. The
+    returned references are internal original-object anchors, not a permit.
+    The old package-source audit/default is deliberately independent/unchanged.
+    """
+    import ast
+    import base64 as std_base64
+    import builtins
+    import dataclasses
+    import importlib.machinery
+    import importlib.util
+    import ipaddress
+    import struct
+    from types import CodeType, FunctionType, GetSetDescriptorType, ModuleType
+    from ibsw_upgrade_inputs import _HeldDirectory
+
+    if type(probe) is not bool:
+        raise SharedUpgradeHold('fixed SCP source probe mode must be bool')
+    if type(scope) is not _PreparedRunScope:
+        raise SharedUpgradeHold('original SCP source scope required')
+    scope.verify()  # A poisoned/closed parent must not reopen audit sources.
+    if scope.closed or scope.cleanup_issues or scope._package_source_lifecycle_failure is not None:
+        raise SharedUpgradeHold('fixed SCP source scope is not reusable')
+    directory = None
+    held = []
+    created = module = result = primary = None
+    cleanup = []
+    name = 'ibsw_upgrade_scp'
+    root = Path(__file__).absolute().parent
+
+    def refuse():
+        raise SharedUpgradeHold('fixed SCP source provider joint changed')
+
+    def text(value, expected):
+        return type(value) is str and value == expected
+
+    def unique_code(parent, selected):
+        values = [value for value in parent.co_consts
+                  if type(value) is CodeType and value.co_name == selected]
+        if len(values) != 1:
+            refuse()
+        return values[0]
+
+    def function(value, expected, namespace, module_name, cells=(), annotations=None):
+        if (type(value) is not FunctionType or value.__globals__ is not namespace
+                or not text(value.__module__, module_name) or value.__code__ != expected
+                or value.__defaults__ is not None or value.__kwdefaults__ is not None
+                or type(value.__annotations__) is not dict):
+            refuse()
+        if annotations is not None:
+            actual_annotations = value.__annotations__
+            if (any(type(key) is not str for key in actual_annotations)
+                    or set(actual_annotations) != set(annotations)):
+                refuse()
+            for key, original in annotations.items():
+                if ((original is None and actual_annotations[key] is not None)
+                        or original is not None and not text(actual_annotations[key], original)):
+                    refuse()
+        actual = () if value.__closure__ is None else value.__closure__
+        if len(actual) != len(cells):
+            refuse()
+        for cell, original in zip(actual, cells):
+            if cell.cell_contents is not original:
+                refuse()
+        return value
+
+    def producer_function(value, expected, namespace, module_name, *, tuple_default=False,
+                          native_keywords=False, cells=()):
+        # Narrow additional signatures only. The default source19 function
+        # validator and all its old call sites remain byte-for-byte unchanged.
+        if (type(value) is not FunctionType or value.__globals__ is not namespace
+                or not text(value.__module__, module_name) or value.__code__ != expected
+                or type(value.__annotations__) is not dict or value.__annotations__):
+            refuse()
+        defaults = value.__defaults__
+        if tuple_default:
+            if (type(defaults) is not tuple or len(defaults) != 1
+                    or type(defaults[0]) is not tuple or defaults[0]):
+                refuse()
+        elif defaults is not None:
+            refuse()
+        keywords = value.__kwdefaults__
+        if native_keywords:
+            if (type(keywords) is not dict or any(type(key) is not str for key in keywords)
+                    or set(keywords) != {'capture_raw', 'reason_code'}
+                    or keywords['capture_raw'] is not None
+                    or not text(keywords['reason_code'], 'READONLY_QUERY_FAILED')):
+                refuse()
+        elif keywords is not None:
+            refuse()
+        actual = () if value.__closure__ is None else value.__closure__
+        if len(actual) != len(cells) or any(cell.cell_contents is not original
+                                         for cell, original in zip(actual, cells)):
+            refuse()
+        return value
+
+
+    def fixed_module(value, expected_name, path):
+        if type(value) is not ModuleType or sys.modules.get(expected_name) is not value:
+            refuse()
+        namespace = vars(value)
+        spec, loader = namespace.get('__spec__'), namespace.get('__loader__')
+        if (not text(namespace.get('__name__'), expected_name) or not text(namespace.get('__file__'), str(path))
+                or type(spec) is not importlib.machinery.ModuleSpec
+                or type(loader) is not importlib.machinery.SourceFileLoader
+                or not text(spec.name, expected_name) or not text(spec.origin, str(path)) or spec.loader is not loader
+                or not text(loader.name, expected_name) or not text(loader.path, str(path))
+                or namespace.get('__builtins__') is not builtins.__dict__):
+            refuse()
+        return namespace
+
+    def original_data(tree, selected):
+        values = [node.value for node in tree.body if isinstance(node, ast.Assign)
+                  and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)
+                  and node.targets[0].id == selected]
+        if len(values) != 1:
+            refuse()
+        return ast.literal_eval(values[0])
+
+    try:
+        directory = _HeldDirectory(root)
+        images = {}
+        filenames = ('ibsw_upgrade_scp.py', 'ssh_key_preparation.py', Path(__file__).name)
+        if probe:
+            filenames += ('ibsw_upgrade_observer.py',)
+        for filename in filenames:
+            original = _HeldFile(root / filename, directory)
+            held.append(original)  # Before any subsequent metadata/compile operation.
+            info = os.fstat(original.fd)
+            if info.st_nlink != 1 or info.st_mode & 0o022:
+                refuse()
+            images[filename] = (original, compile(original.payload, str(root / filename),
+                'exec', dont_inherit=True, optimize=sys.flags.optimize))
+        provider, code = images['ibsw_upgrade_scp.py']
+        module = sys.modules.get(name)
+        if name in sys.modules and module is None:
+            refuse()  # A cached None is not cold-import permission.
+        if module is None:
+            spec = importlib.util.spec_from_file_location(name, str(root / 'ibsw_upgrade_scp.py'))
+            module = importlib.util.module_from_spec(spec)
+            created = module
+            sys.modules[name] = module
+            exec(code, vars(module))  # Only genuinely absent fixed held source.
+        namespace = fixed_module(module, name, root / 'ibsw_upgrade_scp.py')
+        factory = function(namespace.get('source_from_known_hosts'),
+                           unique_code(code, 'source_from_known_hosts'), namespace, name)
+        read_trust = function(namespace.get('_read_trust'), unique_code(code, '_read_trust'), namespace, name)
+        shared_verify = function(namespace.get('verify_source_shared'),
+                                 unique_code(code, 'verify_source_shared'), namespace, name)
+        errors = namespace.get('ERRORS')
+        expected_errors = original_data(ast.parse(provider.payload), 'ERRORS')
+        if (type(errors) is not dict or type(expected_errors) is not dict
+                or any(type(key) is not str or type(value) is not str for key, value in errors.items())
+                or any(type(key) is not str or type(value) is not str for key, value in expected_errors.items())
+                or errors != expected_errors):
+            refuse()
+        error_class = namespace.get('ScpHold')
+        if (type(error_class) is not type or error_class.__bases__ != (ValueError,)
+                or not text(error_class.__module__, name)
+                or set(vars(error_class)) != {'__module__', '__doc__', '__init__', '__weakref__'}):
+            refuse()
+        error_init = function(vars(error_class)['__init__'],
+            unique_code(unique_code(code, 'ScpHold'), '__init__'), namespace, name, (error_class,))
+
+        # The genuine public-key and endpoint parsers are part of this actual
+        # factory call graph; a correct provider filename alone is insufficient.
+        key_module = sys.modules.get('ssh_key_preparation')
+        key_namespace = fixed_module(key_module, 'ssh_key_preparation', root / 'ssh_key_preparation.py')
+        key_code = images['ssh_key_preparation.py'][1]
+        key_parser = function(key_namespace.get('public_key_identity_bytes'),
+            unique_code(key_code, 'public_key_identity_bytes'), key_namespace, 'ssh_key_preparation')
+        key_error = key_namespace.get('SshKeyPreparationError')
+        if (type(key_error) is not type or key_error.__bases__ != (ValueError,)
+                or not text(key_error.__module__, 'ssh_key_preparation')
+                or set(vars(key_error)) != {'__module__', '__doc__', '__weakref__'}
+                or key_namespace.get('PUBLIC_KEY_LIMIT') != 65536
+                or type(key_namespace.get('PUBLIC_KEY_LIMIT')) is not int):
+            refuse()
+        for selected, expected in (('base64', std_base64), ('struct', struct)):
+            if key_namespace.get(selected) is not expected:
+                refuse()
+        driver_module = sys.modules.get(__name__)
+        driver_namespace = fixed_module(driver_module, __name__, root / Path(__file__).name)
+        if driver_namespace is not globals() or driver_namespace.get('public_key_identity_bytes') is not key_parser:
+            refuse()
+        endpoint_parser = function(driver_namespace.get('_known_host_endpoint_matches'),
+            unique_code(images[Path(__file__).name][1], '_known_host_endpoint_matches'),
+            driver_namespace, __name__)
+
+        source_class = namespace.get('ScpSource')
+        if (type(source_class) is not type or source_class.__bases__ != (object,)
+                or not text(source_class.__module__, name) or not text(source_class.__qualname__, 'ScpSource')):
+            refuse()
+        members = dict(vars(source_class))  # Original object snapshot, not a live mappingproxy alias.
+        field_names = ('host', 'user', 'port', 'known_hosts_path', 'host_keys', 'password', '_identity')
+        field_types = dict(zip(field_names, ('str', 'str', 'int', 'Path', 'bytes', 'str', 'tuple')))
+        model = sys.version_info[:2]
+        if model not in ((3, 9), (3, 12)):
+            refuse()  # Only these reviewed generator shapes; no name-only fallback.
+        expected_members = {'__module__', '__annotations__', '__dict__', '__weakref__', '__doc__',
+            'verify', 'public_document', '__dataclass_params__', '__dataclass_fields__',
+            '__init__', '__repr__', '__eq__', '__setattr__', '__delattr__', '__hash__'}
+        if model == (3, 12):
+            expected_members.add('__match_args__')
+        if (set(members) != expected_members or type(members['__annotations__']) is not dict
+                or any(type(key) is not str or type(value) is not str for key, value in members['__annotations__'].items())
+                or members['__annotations__'] != field_types
+                or model == (3, 12) and (type(members['__match_args__']) is not tuple
+                    or any(type(value) is not str for value in members['__match_args__'])
+                    or members['__match_args__'] != field_names)):
+            refuse()
+        for selected in ('__dict__', '__weakref__'):
+            descriptor = members[selected]
+            if (type(descriptor) is not GetSetDescriptorType
+                    or descriptor.__objclass__ is not source_class or descriptor.__name__ != selected):
+                refuse()
+        class_code = unique_code(code, 'ScpSource')
+        source_verify = function(members['verify'], unique_code(class_code, 'verify'), namespace, name)
+        source_document = function(members['public_document'],
+                                   unique_code(class_code, 'public_document'), namespace, name)
+        params, fields = members['__dataclass_params__'], members['__dataclass_fields__']
+        if (type(params) is not dataclasses._DataclassParams or type(fields) is not dict
+                or any(type(key) is not str for key in fields) or tuple(fields) != field_names):
+            refuse()
+        for selected, expected in (('init', True), ('repr', True), ('eq', True),
+                ('order', False), ('unsafe_hash', False), ('frozen', True)):
+            if getattr(params, selected) is not expected:
+                refuse()
+        if model == (3, 12):
+            for selected, expected in (('match_args', True), ('kw_only', False), ('slots', False), ('weakref_slot', False)):
+                if getattr(params, selected) is not expected:
+                    refuse()
+        for selected in field_names:
+            field = fields[selected]
+            if (type(field) is not dataclasses.Field or not text(field.name, selected)
+                    or not text(field.type, field_types[selected]) or field.default is not dataclasses.MISSING
+                    or field.default_factory is not dataclasses.MISSING or field.init is not True
+                    or field.compare is not True or field.hash is not None
+                    or field.repr is not (selected not in ('password', '_identity'))
+                    or field._field_type is not dataclasses._FIELD
+                    or field.metadata is not dataclasses._EMPTY_METADATA
+                    or model == (3, 12) and field.kw_only is not False):
+                refuse()
+
+        # Compiler inputs below come only from these reviewed fixed fields and
+        # the two original stdlib generator shapes, not candidate method output.
+        def generated(selected, args, body, local_names=(), returns=False):
+            local_names = list(local_names)
+            if model == (3, 9) and 'BUILTINS' not in local_names:
+                local_names.append('BUILTINS')  # Apple3.9 _create_fn source.
+            annotation = ''
+            if returns:
+                variable = '_return_type' if model == (3, 9) else '__dataclass_return_type__'
+                local_names.append(variable)
+                annotation = '->' + variable
+            text = ('def __create_fn__(' + ', '.join(local_names) + '):\n'
+                + ' def ' + selected + '(' + ','.join(args) + ')' + annotation + ':\n'
+                + '\n'.join('  ' + line for line in body) + '\n return ' + selected)
+            compiled = compile(text, '<string>', 'exec', dont_inherit=True, optimize=sys.flags.optimize)
+            return unique_code(unique_code(compiled, '__create_fn__'), selected)
+
+        type_names = [('_type_' + selected if model == (3, 9)
+                       else '__dataclass_type_' + selected + '__') for selected in field_names]
+        init_locals = type_names + (['MISSING', '_HAS_DEFAULT_FACTORY'] if model == (3, 9)
+                                  else ['__dataclass_HAS_DEFAULT_FACTORY__', '__dataclass_builtins_object__'])
+        target = 'BUILTINS.object' if model == (3, 9) else '__dataclass_builtins_object__'
+        init_code = generated('__init__', ['self'] + [selected + ':' + variable
+            for selected, variable in zip(field_names, type_names)],
+            [target + '.__setattr__(self,' + repr(selected) + ',' + selected + ')' for selected in field_names],
+            init_locals, returns=True)
+        init = function(members['__init__'], init_code, namespace, name,
+            (builtins,) if model == (3, 9) else (object,), dict(field_types, **{'return': None}))
+        self_tuple = '(' + ','.join('self.' + selected for selected in field_names) + ',)'
+        other_tuple = '(' + ','.join('other.' + selected for selected in field_names) + ',)'
+        equality = function(members['__eq__'], generated('__eq__', ('self', 'other'),
+            ['if other.__class__ is self.__class__:', ' return ' + self_tuple + '==' + other_tuple,
+             'return NotImplemented']), namespace, name, annotations={})
+        hashing = function(members['__hash__'], generated('__hash__', ('self',),
+            ['return hash(' + self_tuple + ')']), namespace, name, annotations={})
+        condition = ('type(self) is cls or name in (' + ','.join(repr(selected) for selected in field_names) + ',)'
+            if model == (3, 9) else 'type(self) is cls or name in {' + ', '.join(repr(selected) for selected in field_names) + '}')
+        frozen = []
+        for method, word in (('__setattr__', 'assign to'), ('__delattr__', 'delete')):
+            expected = generated(method, ('self', 'name', 'value') if method == '__setattr__' else ('self', 'name'),
+                ['if ' + condition + ':', ' raise FrozenInstanceError(f"cannot ' + word + ' field {name!r}")',
+                 'super(cls, self).' + method + '(name' + (', value)' if method == '__setattr__' else ')')],
+                ('cls', 'FrozenInstanceError'))
+            cells = {'cls': source_class, 'FrozenInstanceError': dataclasses.FrozenInstanceError}
+            frozen.append(function(members[method], expected, namespace, name,
+                tuple(cells[selected] for selected in expected.co_freevars), annotations={}))
+        representation = members['__repr__']
+        wrapper_code = unique_code(dataclasses._recursive_repr.__code__, 'wrapper')
+        if (type(representation) is not FunctionType or representation.__code__ != wrapper_code
+                or representation.__globals__ is not vars(dataclasses)
+                or not text(representation.__module__, name) or representation.__defaults__ is not None
+                or representation.__kwdefaults__ is not None or representation.__annotations__ != {}
+                or representation.__closure__ is None or len(representation.__closure__) != 2):
+            refuse()
+        repr_cells = dict(zip(wrapper_code.co_freevars,
+                              (cell.cell_contents for cell in representation.__closure__)))
+        if set(repr_cells) != {'repr_running', 'user_function'} or type(repr_cells['repr_running']) is not set:
+            refuse()
+        repr_names = field_names[:-2]
+        raw_repr = function(repr_cells['user_function'], generated('__repr__', ('self',),
+            ['return self.__class__.__qualname__ + f"(' + ', '.join(
+                selected + '={self.' + selected + '!r}' for selected in repr_names) + ')"']),
+            namespace, name, annotations={})
+        if vars(representation).get('__wrapped__') is not raw_repr:
+            refuse()
+
+        for selected, expected in (('os', os), ('Path', Path), ('stat', stat), ('hashlib', hashlib),
+                ('base64', std_base64), ('ipaddress', ipaddress), ('re', re),
+                ('dataclass', dataclasses.dataclass), ('field', dataclasses.field)):
+            if namespace.get(selected) is not expected:
+                refuse()
+        # Recheck the complete actually used namespace/object joint after all
+        # validation, before releasing the original source images.
+        anchors = {'source_from_known_hosts': factory, '_read_trust': read_trust,
+            'verify_source_shared': shared_verify, 'ScpSource': source_class, 'ScpHold': error_class,
+            'ERRORS': errors}
+        if (sys.modules.get(name) is not module or any(namespace.get(key) is not value for key, value in anchors.items())
+                or errors != expected_errors or vars(error_class).get('__init__') is not error_init
+                or sys.modules.get('ssh_key_preparation') is not key_module
+                or key_namespace.get('public_key_identity_bytes') is not key_parser
+                or driver_namespace.get('_known_host_endpoint_matches') is not endpoint_parser
+                or any(vars(source_class).get(key) is not members[key] for key in expected_members)):
+            refuse()
+        probe_refs = None
+        if probe:
+            # Only the finite new producer branch sees runtime leaves. In
+            # particular default source19 never rejects a legacy sleep IO mock.
+            runtime_modules = (json, std_base64, shlex, math, time, threading)
+            if (len(_SCP_PROBE_MODULES) != 6 or len(_SCP_PROBE_LEAVES) != 10
+                    or len(_SCP_PROBE_LEAF_STATE) != 10
+                    or any(type(value) is not ModuleType for value in runtime_modules)
+                    or any(actual is not original for actual, original in zip(runtime_modules, _SCP_PROBE_MODULES))):
+                refuse()
+            for selected, original in zip(('json', 'base64', 'shlex', 'math', 'time', 'threading'), runtime_modules):
+                if (sys.modules.get(selected) is not original or namespace.get(selected) is not original
+                        or driver_namespace.get(selected) is not original):
+                    refuse()
+            runtime_leaves = (json.loads, json.dumps, std_base64.b64encode, shlex.quote,
+                math.isfinite, time.monotonic, time.sleep, threading.Lock, threading.Timer, threading.Event)
+            if any(actual is not original for actual, original in zip(runtime_leaves, _SCP_PROBE_LEAVES)):
+                refuse()
+            for value, (kind, original_code, original_globals) in zip(runtime_leaves, _SCP_PROBE_LEAF_STATE):
+                if (type(value) is not kind or getattr(value, '__code__', None) is not original_code
+                        or getattr(value, '__globals__', None) is not original_globals):
+                    refuse()
+            fixed_probe = producer_function(namespace.get('_probe_source_channel'),
+                unique_code(code, '_probe_source_channel'), namespace, name)
+            payload = producer_function(namespace.get('launch_payload'),
+                unique_code(code, 'launch_payload'), namespace, name, tuple_default=True)
+            helper_bytes = producer_function(namespace.get('remote_helper_bytes'),
+                unique_code(code, 'remote_helper_bytes'), namespace, name)
+            python_command = producer_function(namespace.get('_python_command'),
+                unique_code(code, '_python_command'), namespace, name)
+            helper = namespace.get('_REMOTE_HELPER')
+            expected_helper = original_data(ast.parse(provider.payload), '_REMOTE_HELPER')
+            if type(helper) is not str or type(expected_helper) is not str or helper != expected_helper:
+                refuse()
+
+            observer_name = 'ibsw_upgrade_observer'
+            observer = sys.modules.get(observer_name)
+            observer_namespace = fixed_module(observer, observer_name, root / (observer_name + '.py'))
+            observer_original, observer_code = images[observer_name + '.py']
+            if (observer_namespace.get('time') is not runtime_modules[4]
+                    or observer_namespace.get('threading') is not runtime_modules[5]
+                    or observer_namespace.get('SharedUpgradeHold') is not SharedUpgradeHold):
+                refuse()
+            context, context_code, context_globals, generator_cm, context_module = _SCP_PROBE_CONTEXT
+            if (type(context) is not FunctionType or context is not contextmanager
+                    or context.__code__ is not context_code or context.__globals__ is not context_globals
+                    or type(context_module) is not ModuleType or sys.modules.get('contextlib') is not context_module
+                    or context_globals is not vars(context_module)
+                    or context_globals.get('contextmanager') is not context
+                    or context_globals.get('_GeneratorContextManager') is not generator_cm
+                    or observer_namespace.get('contextmanager') is not context):
+                refuse()
+            owned = observer_namespace.get('_owned_phase')
+            if type(owned) is not FunctionType or set(vars(owned)) != {'__wrapped__'}:
+                refuse()
+            owned_inner = producer_function(vars(owned)['__wrapped__'],
+                unique_code(observer_code, '_owned_phase'), observer_namespace, observer_name)
+            owned = producer_function(owned, unique_code(context_code, 'helper'),
+                context_globals, observer_name, cells=(owned_inner,))
+            remaining = producer_function(observer_namespace.get('_remaining'),
+                unique_code(observer_code, '_remaining'), observer_namespace, observer_name)
+            native_hold = observer_namespace.get('_NativeObservationHold')
+            if (type(native_hold) is not type or native_hold.__bases__ != (ValueError,)
+                    or not text(native_hold.__module__, observer_name)
+                    or not text(native_hold.__name__, '_NativeObservationHold')
+                    or not text(native_hold.__qualname__, '_NativeObservationHold')
+                    or set(vars(native_hold)) != {'__module__', '__doc__', '__init__', '__weakref__'}
+                    or vars(native_hold)['__doc__'] is not None):
+                refuse()
+            hold_init = producer_function(vars(native_hold)['__init__'],
+                unique_code(unique_code(observer_code, '_NativeObservationHold'), '__init__'),
+                observer_namespace, observer_name, tuple_default=True,
+                native_keywords=True, cells=(native_hold,))
+            hints = []
+            for selected in ('READONLY_FAILURE_HINTS', 'UPGRADE_FAILURE_HINTS'):
+                current_hints = observer_namespace.get(selected)
+                expected_hints = original_data(ast.parse(observer_original.payload), selected)
+                if (type(current_hints) is not dict or type(expected_hints) is not dict
+                        or any(type(key) is not str or type(value) is not str for key, value in current_hints.items())
+                        or current_hints != expected_hints):
+                    refuse()
+                hints.append(current_hints)
+            # These are source/object references, never a source/operation grant.
+            probe_refs = (fixed_probe, payload, helper_bytes, python_command, helper,
+                observer, owned, owned_inner, remaining, native_hold, hold_init,
+                hints[0], hints[1], context, generator_cm, context_module) + runtime_modules + runtime_leaves
+            if (any(namespace.get(selected) is not original for selected, original in (
+                    ('_probe_source_channel', fixed_probe), ('launch_payload', payload),
+                    ('remote_helper_bytes', helper_bytes), ('_python_command', python_command), ('_REMOTE_HELPER', helper)))
+                    or sys.modules.get(observer_name) is not observer
+                    or any(observer_namespace.get(selected) is not original for selected, original in (
+                        ('_owned_phase', owned), ('_remaining', remaining), ('_NativeObservationHold', native_hold),
+                        ('READONLY_FAILURE_HINTS', hints[0]), ('UPGRADE_FAILURE_HINTS', hints[1])))
+                    or vars(owned).get('__wrapped__') is not owned_inner
+                    or vars(native_hold).get('__init__') is not hold_init):
+                refuse()
+
+
+        for original in held:
+            original.verify()
+        directory.verify()
+        # Flat strong-reference joint; compare each item with is on reuse.
+        # No secret/source instance is returned or persisted by this audit.
+        result = (module, factory, source_class, shared_verify, read_trust, error_class,
+                  init, source_verify, source_document, errors, endpoint_parser, key_parser,
+                  error_init, equality, hashing, frozen[0], frozen[1], representation, raw_repr)
+        if probe:
+            result = (result, probe_refs)
+    except BaseException as error:
+        primary = error
+    finally:
+        for original in tuple(reversed(held)) + ((directory,) if directory is not None else ()):
+            try:
+                original.close()
+            except BaseException as error:
+                cleanup.append(error)
+                if primary is None or (isinstance(primary, Exception) and not isinstance(error, Exception)):
+                    primary = error
+        if cleanup:
+            scope.cleanup_issues.extend(cleanup)
+            if scope._package_source_lifecycle_failure is None:
+                scope._package_source_lifecycle_failure = SharedUpgradeHold(
+                    'fixed SCP source provider cleanup uncertain; original parent retained')
+        if primary is not None and created is not None and sys.modules.get(name) is created:
+            del sys.modules[name]
+    if primary is not None:
+        if not isinstance(primary, Exception):
+            raise primary
+        raise SharedUpgradeHold('fixed SCP source provider audit failed') from None
+    return result
+
+
+def _fixed_native_scp_cpld_api(scope):
+    """Finite original producer joint; no command/payload/native permission.
+
+    Default source19/probe32 are unchanged. Templates are checked against the
+    closed trusted-import original image, never this call's new baseline.
+    """
+    import ast
+    import builtins
+    import dataclasses
+    import importlib.machinery
+    from types import CodeType, FunctionType, ModuleType, GetSetDescriptorType
+    from ibsw_upgrade_inputs import _HeldDirectory
+
+    group = scope
+    if type(scope) is not _PreparedRunScope:
+        raise SharedUpgradeHold('fixed native CPLD source scope required')
+    for candidate in (getattr(scope, '_package_source_parent', None),
+                      getattr(scope, '_native_parent', None)):
+        if (type(candidate) is _PreparedRunScope and candidate is not scope
+                and type(candidate._package_source_borrowers) is set
+                and scope in candidate._package_source_borrowers):
+            group = candidate
+            break
+    held = []
+    directories = []
+    audited_functions = []
+    primary = result = None
+
+    def refuse():
+        raise SharedUpgradeHold('fixed native CPLD producer joint changed')
+
+    def text(value, expected):
+        return type(value) is str and value == expected
+
+    def unique_code(parent, name):
+        found = [value for value in parent.co_consts if type(value) is CodeType and value.co_name == name]
+        if len(found) != 1:
+            refuse()
+        return found[0]
+
+    def module(name, path):
+        value = sys.modules.get(name)
+        if type(value) is not ModuleType:
+            refuse()
+        namespace = vars(value)
+        spec, loader = namespace.get('__spec__'), namespace.get('__loader__')
+        if (not text(namespace.get('__name__'), name) or not text(namespace.get('__file__'), str(path))
+                or type(spec) is not importlib.machinery.ModuleSpec
+                or type(loader) is not importlib.machinery.SourceFileLoader
+                or not text(spec.name, name) or not text(spec.origin, str(path)) or spec.loader is not loader
+                or not text(loader.name, name) or not text(loader.path, str(path))
+                or namespace.get('__builtins__') is not builtins.__dict__):
+            refuse()
+        return value, namespace
+
+    def function(value, code, namespace, name, *, qualname=None, defaults=None, keywords=None,
+                 annotations=None, cells=()):
+        if (type(value) is not FunctionType or value.__code__ != code or value.__globals__ is not namespace
+                or not text(value.__module__, name) or not text(value.__name__, code.co_name)
+                or not text(value.__qualname__, qualname or code.co_name)
+                or type(value.__annotations__) is not dict):
+            refuse()
+        if defaults is None:
+            if value.__defaults__ is not None:
+                refuse()
+        else:
+            if (type(value.__defaults__) is not tuple or len(value.__defaults__) != len(defaults)
+                    or any(type(actual) is not type(expected) or actual != expected
+                           for actual, expected in zip(value.__defaults__, defaults))):
+                refuse()
+        actual_keywords = value.__kwdefaults__
+        if keywords is None:
+            if actual_keywords is not None:
+                refuse()
+        elif (type(actual_keywords) is not dict or any(type(key) is not str for key in actual_keywords)
+                or set(actual_keywords) != set(keywords)
+                or any(type(actual_keywords[key]) is not type(expected) or actual_keywords[key] != expected
+                       for key, expected in keywords.items())):
+            refuse()
+        expected_annotations = {} if annotations is None else annotations
+        actual_annotations = value.__annotations__
+        if (any(type(key) is not str for key in actual_annotations)
+                or set(actual_annotations) != set(expected_annotations)
+                or any(type(actual_annotations[key]) is not type(expected) or actual_annotations[key] != expected
+                       for key, expected in expected_annotations.items())):
+            refuse()
+        actual_cells = () if value.__closure__ is None else value.__closure__
+        if len(actual_cells) != len(cells) or any(cell.cell_contents is not expected
+                                                for cell, expected in zip(actual_cells, cells)):
+            refuse()
+        audited_functions.append((value, code, namespace, name, qualname, defaults, keywords,
+                                  annotations, cells))
+        return value
+
+    def original_data(tree, name):
+        values = [node.value for node in tree.body if isinstance(node, ast.Assign)
+                  and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)
+                  and node.targets[0].id == name]
+        if len(values) != 1:
+            refuse()
+        return ast.literal_eval(values[0])
+
+    def identity(info):
+        return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid,
+                info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+    try:
+        scope.verify(); group.verify()
+        if (not group.manual_execution or group.parsed.method != 'scp' or group.closed
+                or not group._package_source_owns or group._package_source_owner is None
+                or not set(group.parsed.selected).intersection(('os', 'bios', 'cpld'))):
+            refuse()
+        source19, probe32 = _fixed_scp_source_api(group, probe=True)
+        original_binding = group._scp_source_binding
+        if (type(original_binding) is not tuple or len(original_binding) != 3
+                or group._scp_source is not original_binding[0]
+                or type(original_binding[1]) is not tuple or len(original_binding[1]) != 19
+                or len(source19) != 19 or len(probe32) != 32
+                or any(actual is not old for actual, old in zip(source19, original_binding[1]))):
+            refuse()
+        bootstrap = _SCP_CPLD_BOOTSTRAP
+        if (type(bootstrap) is not tuple or len(bootstrap) != 5 or type(bootstrap[2]) is not tuple
+                or type(bootstrap[3]) is not tuple or len(bootstrap[3]) != 2
+                or type(bootstrap[4]) is not tuple or len(bootstrap[4]) != 2):
+            refuse()
+        root = Path(__file__).absolute().parent
+        tools_directory = _HeldDirectory(root)
+        directories.append(tools_directory)
+        images = {}
+        for filename in ('ibsw_upgrade_scp.py', 'ibsw_upgrade_component.py',
+                         'ibsw_upgrade_executor.py', 'ibsw_upgrade_contract.py', Path(__file__).name):
+            original = _HeldFile(root / filename, tools_directory)
+            held.append(original)
+            info = os.fstat(original.fd)
+            if info.st_nlink != 1 or info.st_mode & 0o022:
+                refuse()
+            images[filename] = (original, ast.parse(original.payload),
+                compile(original.payload, str(root / filename), 'exec', dont_inherit=True,
+                        optimize=sys.flags.optimize))
+        provider, p = module('ibsw_upgrade_scp', root / 'ibsw_upgrade_scp.py')
+        component, c = module('ibsw_upgrade_component', root / 'ibsw_upgrade_component.py')
+        executor, e = module('ibsw_upgrade_executor', root / 'ibsw_upgrade_executor.py')
+        contract, k = module('ibsw_upgrade_contract', root / 'ibsw_upgrade_contract.py')
+        driver, d = module(__name__, root / Path(__file__).name)
+        if (provider is not source19[0] or component is not bootstrap[0] or d is not globals()
+                or p.get('_python_command') is not probe32[3] or p.get('remote_helper_bytes') is not probe32[2]
+                or p.get('_REMOTE_HELPER') is not probe32[4]):
+            refuse()
+        provider_code = images['ibsw_upgrade_scp.py'][2]
+        command = function(p.get('_stdin_launch_command'), unique_code(provider_code, '_stdin_launch_command'),
+                           p, 'ibsw_upgrade_scp')
+        launcher = p.get('_STDIN_LAUNCHER')
+        expected_launcher = original_data(images['ibsw_upgrade_scp.py'][1], '_STDIN_LAUNCHER')
+        if type(launcher) is not str or type(expected_launcher) is not str or launcher != expected_launcher:
+            refuse()
+        component_code = images['ibsw_upgrade_component.py'][2]
+        render = function(c.get('_render'), unique_code(component_code, '_render'), c,
+            'ibsw_upgrade_component', keywords={'refresh': None, 'effect': 'REBOOT_EXPECTED'})
+        declared = function(c.get('render_declared_step'), unique_code(component_code, 'render_declared_step'),
+            c, 'ibsw_upgrade_component', keywords={'package_index': 0, 'switch_dir': '/home/admin'})
+        validate = function(c.get('_validate_plan'), unique_code(component_code, '_validate_plan'),
+                            c, 'ibsw_upgrade_component')
+        url = function(c.get('_package_url'), unique_code(component_code, '_package_url'), c,
+                       'ibsw_upgrade_component')
+        runner = function(e.get('_owned_runner_bytes'),
+            unique_code(images['ibsw_upgrade_executor.py'][2], '_owned_runner_bytes'), e,
+            'ibsw_upgrade_executor')
+        layout = function(k.get('_fixed_layout'), unique_code(images['ibsw_upgrade_contract.py'][2], '_fixed_layout'),
+                          k, 'ibsw_upgrade_contract')
+        class_code = unique_code(images[Path(__file__).name][2], '_PreparedRunScope')
+        context = function(vars(_PreparedRunScope).get('_native_scp_launch_context'),
+            unique_code(class_code, '_native_scp_launch_context'), d, __name__,
+            qualname='_PreparedRunScope._native_scp_launch_context')
+        # Missing composition is HOLD, never an optional bypass of an existing
+        # foreign method. Root must combine the original fixed wrapper first.
+        wrapper = function(vars(_PreparedRunScope).get('_launch_native_scp_cpld'),
+            unique_code(class_code, '_launch_native_scp_cpld'), d, __name__,
+            qualname='_PreparedRunScope._launch_native_scp_cpld')
+        # Finite OS measurement/manager callees. Original launch_refs[0:25]
+        # retain their meaning; these are actual objects from the held compiled
+        # images, not matching names or caller-supplied callbacks.
+        def driver_method(name):
+            return function(vars(_PreparedRunScope).get(name), unique_code(class_code, name),
+                d, __name__, qualname='_PreparedRunScope.' + name)
+        packet_pair = function(c.get('_scp_download_pair'),
+            unique_code(component_code, '_scp_download_pair'), c, 'ibsw_upgrade_component')
+        packet_parser = function(c.get('parse_scp_download_results'),
+            unique_code(component_code, 'parse_scp_download_results'), c, 'ibsw_upgrade_component')
+        scp_ack = function(c.get('scp_download_ack_bytes'),
+            unique_code(component_code, 'scp_download_ack_bytes'), c, 'ibsw_upgrade_component')
+        executor_code = images['ibsw_upgrade_executor.py'][2]
+        extractor = function(e.get('_scp_download_packet'),
+            unique_code(executor_code, '_scp_download_packet'), e, 'ibsw_upgrade_executor')
+        driver_code = images[Path(__file__).name][2]
+        measurement_document = function(d.get('_scp_download_document'),
+            unique_code(driver_code, '_scp_download_document'), d, __name__)
+        measurement_inputs = driver_method('_scp_download_inputs_locked')
+        measurement_record = driver_method('_record_scp_download_attempt')
+        record_entry = driver_method('_record_download_attempt')
+        component_graph = function(d.get('_validate_component_graph'),
+            unique_code(driver_code, '_validate_component_graph'), d, __name__)
+        scp_graph = function(d.get('_validate_scp_request_content_graph'),
+            unique_code(driver_code, '_validate_scp_request_content_graph'), d, __name__)
+        commit = driver_method('_commit_exclusive_binding')
+        journal_writer, output_scope = d.get('_JournalWriter'), d.get('_OutputScope')
+        if (type(journal_writer) is not type or type(output_scope) is not type
+                or journal_writer.__bases__ != (output_scope,) or output_scope.__bases__ != (object,)
+                or not text(journal_writer.__module__, __name__)
+                or not text(output_scope.__module__, __name__)
+                or not text(journal_writer.__qualname__, '_JournalWriter')
+                or not text(output_scope.__qualname__, '_OutputScope')
+                or any(name in vars(journal_writer) for name in ('__new__', 'write', 'close'))
+                or '__new__' in vars(output_scope)):
+            refuse()
+        writer_code = unique_code(driver_code, '_JournalWriter')
+        output_code = unique_code(driver_code, '_OutputScope')
+        writer_init = function(vars(journal_writer).get('__init__'),
+            unique_code(writer_code, '__init__'), d, __name__, qualname='_JournalWriter.__init__')
+        writer_verify = function(vars(journal_writer).get('verify'),
+            unique_code(writer_code, 'verify'), d, __name__,
+            qualname='_JournalWriter.verify', cells=(journal_writer,))
+        writer_finish = function(vars(journal_writer).get('finish'),
+            unique_code(writer_code, 'finish'), d, __name__, qualname='_JournalWriter.finish')
+        output_write = function(vars(output_scope).get('write'),
+            unique_code(output_code, 'write'), d, __name__, qualname='_OutputScope.write')
+        output_verify = function(vars(output_scope).get('verify'),
+            unique_code(output_code, 'verify'), d, __name__, qualname='_OutputScope.verify')
+        output_close = function(vars(output_scope).get('close'),
+            unique_code(output_code, 'close'), d, __name__, qualname='_OutputScope.close')
+        manager = function(e.get('_probe_component_exit_once'),
+            unique_code(executor_code, '_probe_component_exit_once'), e, 'ibsw_upgrade_executor',
+            keywords={'_read_only': False, '_transport': None})
+        bound_consumer = function(e.get('_bound_component_postcondition_inputs'),
+            unique_code(executor_code, '_bound_component_postcondition_inputs'), e, 'ibsw_upgrade_executor')
+        log_reader = function(e.get('_read_component_log_prefix'),
+            unique_code(executor_code, '_read_component_log_prefix'), e, 'ibsw_upgrade_executor')
+        canonical_json = function(d.get('_json_bytes'), unique_code(driver_code, '_json_bytes'), d, __name__)
+        packet_image = d.get('_SCP_DOWNLOAD_PAIR_IMAGE')
+        if (type(packet_image) is not tuple or len(packet_image) != 3
+                or packet_image[0] is not packet_pair or packet_image[1] is not packet_pair.__code__
+                or packet_image[2] is not c or d.get('_SCP_DOWNLOAD_PAIR') is not packet_pair
+                or c.get('math') is not math or e.get('json') is not json
+                or e.get('base64') is not base64 or e.get('hashlib') is not hashlib
+                or e.get('_NativeObservationHold') is not probe32[9]
+                or e.get('SharedUpgradeHold') is not SharedUpgradeHold):
+            refuse()
+        os_refs = (packet_pair, packet_parser, scp_ack, extractor, measurement_document,
+            measurement_inputs, measurement_record, record_entry, component_graph, scp_graph, commit,
+            journal_writer, output_scope, writer_init, writer_verify, writer_finish,
+            output_write, output_verify, output_close, manager, bound_consumer, log_reader, canonical_json,
+            packet_image)
+        capture = function(d.get('_capture_native_scp_cpld_bootstrap'),
+            unique_code(images[Path(__file__).name][2], '_capture_native_scp_cpld_bootstrap'), d, __name__)
+        if (d.get('render_declared_step') is not declared or c.get('_fixed_layout') is not layout
+                or e.get('_fixed_layout') is not layout or c.get('InventoryDevice') is not k.get('InventoryDevice')
+                or c.get('UpgradePolicy') is not k.get('UpgradePolicy') or c.get('dataclass') is not dataclasses.dataclass
+                or any(c.get(name) is not value for name, value in (('json', json), ('re', re),
+                    ('shlex', shlex), ('Path', Path)))
+                or any(e.get(name) is not value for name, value in (('hashlib', hashlib), ('re', re),
+                    ('posixpath', posixpath), ('shlex', shlex)))
+                or c.get('_file') is not k.get('_file') or c.get('_root') is not k.get('_root')):
+            refuse()
+        project = sys.modules.get('project_contract')
+        if type(project) is not ModuleType or any(c.get(name) is not vars(project).get(name)
+                for name in ('normalize_redundancy_mac', 'validate_service_endpoint')):
+            refuse()
+        # Exact import-time class identity plus independent five-field original
+        # generator schema. Capturing a late replacement at first audit is forbidden.
+        rendered = c.get('RenderedStep')
+        if type(rendered) is not type or rendered is not bootstrap[1] or rendered.__bases__ != (object,):
+            refuse()
+        members = dict(vars(rendered))
+        if (len(bootstrap[2]) != len(members) or any(type(row) is not tuple or len(row) != 2
+                or type(row[0]) is not str or members.get(row[0]) is not row[1] for row in bootstrap[2])
+                or not text(rendered.__module__, 'ibsw_upgrade_component')
+                or not text(rendered.__qualname__, 'RenderedStep')):
+            refuse()
+        names = ('script', 'target_version', 'binding', 'expected_install_effect', 'activation_state')
+        types = dict(zip(names, ('str', 'str', 'tuple[str, ...]', 'str', 'str')))
+        defaults = ('REBOOT_EXPECTED', 'UNKNOWN')
+        allowed = {'__module__', '__annotations__', '__dict__', '__weakref__', '__doc__',
+            '__dataclass_params__', '__dataclass_fields__', '__init__', '__repr__', '__eq__',
+            '__setattr__', '__delattr__', '__hash__', 'expected_install_effect', 'activation_state'}
+        model = sys.version_info[:2]
+        if model == (3, 12):
+            allowed.add('__match_args__')
+        if model not in ((3, 9), (3, 12)) or set(members) != allowed:
+            refuse()
+        if (type(members['__annotations__']) is not dict
+                or any(type(key) is not str or type(value) is not str
+                       for key, value in members['__annotations__'].items())
+                or members['__annotations__'] != types
+                or any(not text(members[name], value) for name, value in zip(names[-2:], defaults))
+                or model == (3, 12) and (type(members['__match_args__']) is not tuple
+                    or any(type(value) is not str for value in members['__match_args__'])
+                    or members['__match_args__'] != names)):
+            refuse()
+        for selected in ('__dict__', '__weakref__'):
+            value = members[selected]
+            if type(value) is not GetSetDescriptorType or value.__objclass__ is not rendered or value.__name__ != selected:
+                refuse()
+        params, fields = members['__dataclass_params__'], members['__dataclass_fields__']
+        if (type(params) is not dataclasses._DataclassParams or type(fields) is not dict
+                or any(type(name) is not str for name in fields) or tuple(fields) != names):
+            refuse()
+        for name, value in (('init', True), ('repr', True), ('eq', True), ('order', False),
+                            ('unsafe_hash', False), ('frozen', True)):
+            if getattr(params, name) is not value:
+                refuse()
+        if model == (3, 12) and any(getattr(params, name) is not value for name, value in
+                (('match_args', True), ('kw_only', False), ('slots', False), ('weakref_slot', False))):
+            refuse()
+        for index, name in enumerate(names):
+            field = fields[name]
+            expected = dataclasses.MISSING if index < 3 else defaults[index - 3]
+            if (type(field) is not dataclasses.Field or not text(field.name, name) or not text(field.type, types[name])
+                    or (field.default is not expected if index < 3 else not text(field.default, expected))
+                    or field.default_factory is not dataclasses.MISSING or field.init is not True
+                    or field.repr is not True or field.compare is not True or field.hash is not None
+                    or field._field_type is not dataclasses._FIELD or field.metadata is not dataclasses._EMPTY_METADATA
+                    or model == (3, 12) and field.kw_only is not False):
+                refuse()
+        type_names = [('_type_' + name if model == (3, 9) else '__dataclass_type_' + name + '__') for name in names]
+        default_names = [('_dflt_' + name if model == (3, 9) else '__dataclass_dflt_' + name + '__') for name in names[-2:]]
+        local_names = type_names + (['MISSING', '_HAS_DEFAULT_FACTORY'] if model == (3, 9)
+                                   else ['__dataclass_HAS_DEFAULT_FACTORY__', '__dataclass_builtins_object__'])
+        local_names += default_names
+        if model == (3, 9):
+            local_names.append('BUILTINS')
+        returns = '_return_type' if model == (3, 9) else '__dataclass_return_type__'
+        local_names.append(returns)
+        arguments = ['self'] + [name + ':' + variable + ('=' + default_names[index - 3] if index >= 3 else '')
+                                for index, (name, variable) in enumerate(zip(names, type_names))]
+        target = 'BUILTINS.object' if model == (3, 9) else '__dataclass_builtins_object__'
+        body = [target + '.__setattr__(self,' + repr(name) + ',' + name + ')' for name in names]
+        template = ('def __create_fn__(' + ', '.join(local_names) + '):\n def __init__(' + ','.join(arguments)
+            + ')->' + returns + ':\n' + '\n'.join('  ' + line for line in body) + '\n return __init__')
+        generated = unique_code(unique_code(compile(template, '<string>', 'exec', dont_inherit=True,
+                                                     optimize=sys.flags.optimize), '__create_fn__'), '__init__')
+        init = function(members['__init__'], generated, c, 'ibsw_upgrade_component',
+            qualname='__create_fn__.<locals>.__init__' if model == (3, 9) else 'RenderedStep.__init__', defaults=defaults,
+            annotations=dict(types, **{'return': None}), cells=(builtins,) if model == (3, 9) else (object,))
+        # CP3.12 adjusts the Function qualname; Apple3.9 preserves the factory
+        # name. Both code objects retain their modeled source-generator shape.
+        fixed_layout = layout(__file__)
+        actual_paths = (c.get('_TEMPLATE'), e.get('_RUNNER'))
+        template_directory = _HeldDirectory(fixed_layout)
+        directories.append(template_directory)
+        template_images = []
+        for path, saved in zip(actual_paths, bootstrap[3]):
+            if (type(path) is not type(Path()) or type(saved) is not tuple or len(saved) != 3
+                    or type(saved[0]) is not str or type(saved[1]) is not tuple or len(saved[1]) != 9
+                    or any(type(value) is not int for value in saved[1]) or type(saved[2]) is not bytes
+                    or str(path) != saved[0] or path.parent != fixed_layout):
+                refuse()
+            original = _HeldFile(path, template_directory)
+            held.append(original)
+            if identity(os.fstat(original.fd)) != saved[1] or original.payload != saved[2]:
+                refuse()
+            template_images.append(original)
+        if actual_paths[0] is not bootstrap[4][0]:
+            refuse()
+        # Stable namespace/class/path objects only. Fresh compile/payload bytes
+        # stay in this audit and never enter cross-audit identity comparisons.
+        launch_refs = (command, launcher, context, wrapper, probe32[3], provider, component, executor, contract,
+            render, declared, validate, url, rendered, init, runner, layout,
+            actual_paths[0], actual_paths[1], probe32[2], probe32[4], bootstrap,
+            members['__dataclass_params__'], members['__dataclass_fields__'], capture) + os_refs
+        current19, current32 = _fixed_scp_source_api(group, probe=True)
+        if (len(current19) != len(source19) or len(current32) != len(probe32)
+                or any(a is not b for a, b in zip(source19, current19))
+                or any(a is not b for a, b in zip(probe32, current32))
+                or group._scp_source_binding is not original_binding or _SCP_CPLD_BOOTSTRAP is not bootstrap
+                or any(sys.modules.get(name) is not value for name, value in
+                    (('ibsw_upgrade_scp', provider), ('ibsw_upgrade_component', component),
+                     ('ibsw_upgrade_executor', executor), ('ibsw_upgrade_contract', contract)))
+                or any(p.get(name) is not value for name, value in
+                    (('_stdin_launch_command', command), ('_STDIN_LAUNCHER', launcher),
+                     ('remote_helper_bytes', probe32[2]), ('_REMOTE_HELPER', probe32[4])))
+                or any(c.get(name) is not value for name, value in (('_render', render),
+                    ('render_declared_step', declared), ('_validate_plan', validate), ('_package_url', url),
+                    ('RenderedStep', rendered), ('_TEMPLATE', actual_paths[0]), ('_fixed_layout', layout)))
+                or e.get('_owned_runner_bytes') is not runner or e.get('_RUNNER') is not actual_paths[1]
+                or e.get('_fixed_layout') is not layout or k.get('_fixed_layout') is not layout
+                or d.get('render_declared_step') is not declared
+                or vars(_PreparedRunScope).get('_native_scp_launch_context') is not context
+                or vars(_PreparedRunScope).get('_launch_native_scp_cpld') is not wrapper
+                or any(vars(rendered).get(name) is not value for name, value in members.items())):
+            refuse()
+        for original in held:
+            original.verify()
+        for directory in directories:
+            directory.verify()
+        scope.verify(); group.verify()
+        # Recheck actual function attributes, not only namespace is, after the
+        # last original IO. The tuple is finite; do not iterate the growing log.
+        for value, code, namespace, name, qualified, default, keyword, annotation, cells in tuple(audited_functions):
+            function(value, code, namespace, name, qualname=qualified, defaults=default,
+                     keywords=keyword, annotations=annotation, cells=cells)
+        for name, value in (('ibsw_upgrade_scp', provider), ('ibsw_upgrade_component', component),
+                            ('ibsw_upgrade_executor', executor), ('ibsw_upgrade_contract', contract),
+                            (__name__, driver)):
+            if module(name, root / (name + '.py' if name != __name__ else Path(__file__).name))[0] is not value:
+                refuse()
+        if (type(vars(rendered).get('__annotations__')) is not dict
+                or any(type(name) is not str or type(value) is not str
+                       for name, value in vars(rendered)['__annotations__'].items())
+                or vars(rendered)['__annotations__'] != types
+                or any(getattr(params, name) is not value for name, value in (
+                    ('init', True), ('repr', True), ('eq', True), ('order', False),
+                    ('unsafe_hash', False), ('frozen', True)))):
+            refuse()
+        if model == (3, 12) and any(getattr(params, name) is not value for name, value in
+                (('match_args', True), ('kw_only', False), ('slots', False), ('weakref_slot', False))):
+            refuse()
+        for index, name in enumerate(names):
+            field = fields[name]
+            expected = dataclasses.MISSING if index < 3 else defaults[index - 3]
+            if (type(field) is not dataclasses.Field or not text(field.name, name) or not text(field.type, types[name])
+                    or (field.default is not expected if index < 3 else not text(field.default, expected))
+                    or field.default_factory is not dataclasses.MISSING or field.init is not True
+                    or field.repr is not True or field.compare is not True or field.hash is not None
+                    or field._field_type is not dataclasses._FIELD or field.metadata is not dataclasses._EMPTY_METADATA
+                    or model == (3, 12) and field.kw_only is not False):
+                refuse()
+        for namespace, name, value in (
+                (c, '_scp_download_pair', packet_pair), (c, 'parse_scp_download_results', packet_parser),
+                (c, 'scp_download_ack_bytes', scp_ack), (e, '_scp_download_packet', extractor),
+                (d, '_scp_download_document', measurement_document),
+                (d, '_validate_component_graph', component_graph),
+                (d, '_validate_scp_request_content_graph', scp_graph), (d, '_json_bytes', canonical_json),
+                (d, '_JournalWriter', journal_writer), (d, '_OutputScope', output_scope),
+                (e, '_probe_component_exit_once', manager),
+                (e, '_bound_component_postcondition_inputs', bound_consumer),
+                (e, '_read_component_log_prefix', log_reader)):
+            if namespace.get(name) is not value:
+                refuse()
+        for name, value in (('_scp_download_inputs_locked', measurement_inputs),
+                ('_record_scp_download_attempt', measurement_record), ('_record_download_attempt', record_entry),
+                ('_commit_exclusive_binding', commit)):
+            if vars(_PreparedRunScope).get(name) is not value:
+                refuse()
+        for cls, name, value in ((journal_writer, '__init__', writer_init),
+                (journal_writer, 'verify', writer_verify), (journal_writer, 'finish', writer_finish),
+                (output_scope, 'write', output_write), (output_scope, 'verify', output_verify),
+                (output_scope, 'close', output_close)):
+            if vars(cls).get(name) is not value:
+                refuse()
+        if (journal_writer.__bases__ != (output_scope,) or output_scope.__bases__ != (object,)
+                or any(name in vars(journal_writer) for name in ('__new__', 'write', 'close'))
+                or '__new__' in vars(output_scope)
+                or d.get('_SCP_DOWNLOAD_PAIR_IMAGE') is not packet_image
+                or d.get('_SCP_DOWNLOAD_PAIR') is not packet_pair
+                or packet_pair.__code__ is not packet_image[1] or packet_pair.__globals__ is not packet_image[2]
+                or c.get('math') is not math
+                or e.get('json') is not json or e.get('base64') is not base64
+                or e.get('hashlib') is not hashlib or e.get('_NativeObservationHold') is not probe32[9]):
+            refuse()
+        result = source19, probe32, launch_refs
+    except BaseException as error:
+        primary = error
+    finally:
+        failures = []
+        for original in tuple(reversed(held)) + tuple(reversed(directories)):
+            try:
+                original.close()
+            except BaseException as error:
+                failures.append(error)
+                if primary is None or isinstance(primary, Exception) and not isinstance(error, Exception):
+                    primary = error
+        if failures:
+            group.cleanup_issues.extend(failures)
+            if group._package_source_lifecycle_failure is None:
+                group._package_source_lifecycle_failure = SharedUpgradeHold(
+                    'fixed native CPLD producer cleanup uncertain; original group retained')
+    if primary is not None:
+        if group._package_source_lifecycle_failure is None:
+            group._package_source_lifecycle_failure = SharedUpgradeHold(
+                'fixed native CPLD producer source uncertain; original group retained')
+        if not isinstance(primary, Exception) or isinstance(primary, SharedUpgradeHold):
+            raise primary
+        raise SharedUpgradeHold('fixed native CPLD producer audit failed') from None
+    return result
+
 class _PreparedRunScope:
     """Live local DATA transaction only. No dispatcher or device-result writer."""
     def __init__(self, entry, cwd, args, run_directory, *, manual_execution=False):
@@ -1753,6 +2925,8 @@ class _PreparedRunScope:
         self._package_source_owns = False
         self._package_source_borrowers = set()
         self._package_source_lifecycle_failure = None
+        self._scp_source = None
+        self._scp_source_binding = None
         self._native_component_canaries = {}
         self.run_directory = Path(run_directory)
         try:
@@ -1924,6 +3098,673 @@ class _PreparedRunScope:
             return (self.policy.cpld_burn, self.policy.cpld_refresh)
         raise SharedUpgradeHold('foreign declared source index')
 
+    @staticmethod
+    def _scp_source_fields(source, source_class, expected=None):
+        """Immutable, in-memory seven-field snapshot; never diagnostic DATA."""
+        if type(source) is not source_class:
+            raise SharedUpgradeHold('original SCP source instance class required')
+        fields = object.__getattribute__(source, '__dict__')
+        names = ('host', 'user', 'port', 'known_hosts_path', 'host_keys', 'password', '_identity')
+        if (type(fields) is not dict or any(type(name) is not str for name in fields)
+                or set(fields) != set(names)):
+            raise SharedUpgradeHold('original SCP source instance fields changed')
+        def typed(host, user, port, path, keys, password, identity):
+            if (type(host) is not str or not host or type(user) is not str or not user
+                    or type(port) is not int or not 1 <= port <= 65535
+                    or type(path) is not type(Path()) or type(keys) is not bytes or not keys
+                    or type(password) is not str or type(identity) is not tuple or len(identity) != 7
+                    or any(type(value) is not int or value < 0 for value in identity[:6])
+                    or type(identity[6]) is not str or not re.fullmatch(r'[0-9a-f]{64}', identity[6])):
+                raise SharedUpgradeHold('typed original SCP source fields required')
+        host, user, port, path, keys, password, identity = (fields[name] for name in names)
+        typed(host, user, port, path, keys, password, identity)
+        # Hold the exact concrete Path as well as an independent string value.
+        # Compare that object only with is, never a replaceable Path.__eq__.
+        text = str(path)
+        snapshot = (host, user, port, (path, text), keys, password, identity)
+        if expected is not None:
+            if (type(expected) is not tuple or len(expected) != 7
+                    or type(expected[3]) is not tuple or len(expected[3]) != 2
+                    or type(expected[3][1]) is not str):
+                raise SharedUpgradeHold('original SCP source snapshot changed')
+            typed(expected[0], expected[1], expected[2], expected[3][0],
+                  expected[4], expected[5], expected[6])
+            if (path is not expected[3][0] or text != expected[3][1]
+                    or snapshot[:3] != expected[:3] or snapshot[4:] != expected[4:]):
+                raise SharedUpgradeHold('original SCP source field values changed')
+        return snapshot
+
+    def _bind_scp_source(self, source, api):
+        """Bind one actual pre-schedule parent configuration, not permission."""
+        try:
+            if (type(self) is not _PreparedRunScope or not self.manual_execution
+                    or self.parsed.method != 'scp' or self.closed or self.cleanup_issues
+                    or self._native_schedule_started or self._has_native_package_source_provenance()
+                    or self._package_source_parent is not None or self._package_source_owner is not None
+                    or self._package_source_owner_class is not None or self._package_source_owns
+                    or self._package_source_selection is not None or self._package_source_borrowers
+                    or self._scp_source is not None or self._scp_source_binding is not None
+                    or type(api) is not tuple or len(api) != 19):
+                raise SharedUpgradeHold('single original pre-schedule SCP parent binding required')
+            self.verify()
+            current = _fixed_scp_source_api(self)
+            if len(current) != 19 or any(left is not right for left, right in zip(api, current)):
+                raise SharedUpgradeHold('original SCP source API objects changed before binding')
+            snapshot = _PreparedRunScope._scp_source_fields(source, api[2])
+            api[3](source)  # The audited original trust verifier, not its return value.
+            current = _fixed_scp_source_api(self)
+            _PreparedRunScope._scp_source_fields(source, api[2], snapshot)
+            if (len(current) != 19 or any(left is not right for left, right in zip(api, current))
+                    or self._scp_source is not None or self._scp_source_binding is not None):
+                raise SharedUpgradeHold('original SCP source changed during binding')
+            self._scp_source_binding = (source, api, snapshot)
+            self._scp_source = source
+        except BaseException as error:
+            if self._package_source_lifecycle_failure is None:
+                self._package_source_lifecycle_failure = SharedUpgradeHold(
+                    'original SCP source binding failed; parent group retained')
+            if not isinstance(error, Exception) or isinstance(error, SharedUpgradeHold):
+                raise  # Preserve the first interruption/Shared object and preset cause.
+            raise SharedUpgradeHold('original SCP source binding failed') from None
+
+    def _native_scp_source(self, leaf, component, package_index):
+        """Revalidate the same parent source for one original native borrower.
+
+        No probe, secret wire, request, dispatch, ACK or positive permission.
+        Generic scope.verify never calls this method or the source API auditor.
+        """
+        group = self
+        try:
+            parent = getattr(self, '_native_parent', None)
+            # Either still-original edge can identify the registered group if
+            # the other edge has drifted. Never adopt an unregistered parent.
+            for original in (getattr(self, '_package_source_parent', None), parent):
+                if (type(original) is _PreparedRunScope and original is not self
+                        and type(original._package_source_borrowers) is set
+                        and self in original._package_source_borrowers):
+                    group = original
+                    break
+            if (type(self) is not _PreparedRunScope or group is self or parent is not group
+                    or self.closed or parent.closed or self.cleanup_issues or parent.cleanup_issues
+                    or type(leaf) is not _ReadonlyQueryInputs or leaf.closed
+                    or leaf.scope is not self or type(leaf._original_selection) is not tuple
+                    or len(leaf._original_selection) != 6 or leaf._original_selection[0] is not self
+                    or leaf._original_selection[1] != leaf.node.hostname
+                    or leaf._native_observation_consumed is not True
+                    or type(component) is not str or type(package_index) is not int
+                    or not self._is_native_package_source_child(parent, leaf.node.hostname, component)
+                    or package_index not in self._native_package_indices
+                    or (component, package_index) not in parent._package_source_selection[0]
+                    or self._scp_source is not None or self._scp_source_binding is not None):
+                raise SharedUpgradeHold('original native SCP leaf/parent/borrow/source selection required')
+            self.verify()
+            parent.verify()
+            leaf.verify()
+            binding = parent._scp_source_binding
+            if type(binding) is not tuple or len(binding) != 3:
+                raise SharedUpgradeHold('original parent SCP source binding missing')
+            source, api, snapshot = binding
+            if (type(api) is not tuple or len(api) != 19 or parent._scp_source is not source
+                    or type(snapshot) is not tuple or len(snapshot) != 7):
+                raise SharedUpgradeHold('original parent SCP source slot changed')
+            current = _fixed_scp_source_api(parent)
+            if len(current) != 19 or any(left is not right for left, right in zip(api, current)):
+                raise SharedUpgradeHold('original parent SCP source API or fields changed')
+            _PreparedRunScope._scp_source_fields(source, api[2], snapshot)
+            api[3](source)
+            leaf.verify()
+            parent.verify()
+            current = _fixed_scp_source_api(parent)
+            if (len(current) != 19 or any(left is not right for left, right in zip(api, current))
+                    or parent._scp_source_binding is not binding or parent._scp_source is not source
+                    or not self._is_native_package_source_child(parent, leaf.node.hostname, component)
+                    or package_index not in self._native_package_indices):
+                raise SharedUpgradeHold('original parent SCP source changed while being checked')
+            _PreparedRunScope._scp_source_fields(source, api[2], snapshot)
+            return source
+        except BaseException as error:
+            if group._package_source_lifecycle_failure is None:
+                group._package_source_lifecycle_failure = SharedUpgradeHold(
+                    'original native SCP source changed; parent group retained')
+            if not isinstance(error, Exception) or isinstance(error, SharedUpgradeHold):
+                raise
+            raise SharedUpgradeHold('original native SCP source cannot be verified') from None
+
+
+    def _native_scp_launch_context(self, leaf, component, package_index):
+        """Derive bounded private envelope DATA from live original native inputs.
+
+        No capture/write, package reread, wire, launch, dispatch or ACK. The
+        returned bytes are not a permit and must never be logged or persisted.
+        """
+        group = self
+        try:
+            if type(self) is not _PreparedRunScope:
+                raise SharedUpgradeHold('original native SCP DATA scope required')
+            # Either still-original edge can identify the registered group even
+            # when the child's owner slot or its other parent edge has drifted.
+            for original in (getattr(self, '_package_source_parent', None),
+                             getattr(self, '_native_parent', None)):
+                if (type(original) is _PreparedRunScope and original is not self
+                        and type(original._package_source_borrowers) is set
+                        and self in original._package_source_borrowers):
+                    group = original
+                    break
+            lease = self._active_request_lease
+            if group is self or type(lease) is not _ManualJournalTransaction:
+                raise SharedUpgradeHold('active original native SCP DATA lease required')
+            lease.verify()
+            source = self._native_scp_source(leaf, component, package_index)
+            owner = group._package_source_owner
+            binding_joint = group._scp_source_binding
+            fields = _PreparedRunScope._scp_source_fields(
+                source, binding_joint[1][2], binding_joint[2])
+            # No path discovery/adoption: all six artifact originals must
+            # already be held by this same native child before this call.
+            stage_name = declared_step_key(self.policy, component, package_index)
+            stage_path = self.run_directory / leaf.node.hostname / stage_name
+            directory = self.session._directories.get(str(stage_path))
+            if directory is None:
+                raise SharedUpgradeHold('original SCP request stage is not held')
+            self._private_directory(directory)
+            names = ('request.json', 'step.sh', 'step-binding.json',
+                     'runner.sh', 'runner-binding.json', 'scp-source-request.json')
+            held, payloads = {}, {}
+            for name in names:
+                original = self.files.get((str(stage_path), name))
+                if (type(original) is not _HeldFile or original.directory is not directory
+                        or original.name != name or original.cleanup_issues):
+                    raise SharedUpgradeHold('complete held SCP request originals required')
+                original.verify()
+                metadata = os.fstat(original.fd)
+                if (metadata.st_uid != os.geteuid() or metadata.st_nlink != 1
+                        or stat.S_IMODE(metadata.st_mode) != 0o600):
+                    raise SharedUpgradeHold('private original SCP request artifact required')
+                held[name], payloads[name] = original, original.payload
+            script, binding = self._candidate(leaf.node.hostname, component, package_index, stage_name)
+            if payloads['step.sh'] != script or payloads['step-binding.json'] != _json_bytes(binding):
+                raise SharedUpgradeHold('original SCP stage declaration changed')
+            _validate_scp_request_content_graph(set(payloads), binding, payloads.__getitem__)
+            companion = json.loads(payloads['scp-source-request.json'])
+            request = json.loads(payloads['request.json'])
+            runner_binding = json.loads(payloads['runner-binding.json'])
+            remote = runner_binding.get('remote_script') if type(runner_binding) is dict else None
+            prefix = '.ibsw-' + self.run_id + '-' + leaf.node.hostname + '-' + stage_name + '-'
+            from ibsw_upgrade_executor import _owned_runner_bytes
+            if (type(remote) is not str or posixpath.normpath(remote) != remote
+                    or posixpath.basename(remote) != 'step.sh'
+                    or posixpath.dirname(posixpath.dirname(remote)) != self.parsed.switch_dir
+                    or not re.fullmatch(re.escape(prefix) + '[0-9a-f]{32}',
+                                        posixpath.basename(posixpath.dirname(remote)))
+                    or payloads['runner.sh'] != _owned_runner_bytes(binding, remote)
+                    or payloads['runner-binding.json'] != _json_bytes(
+                        _owned_runner_binding(binding, remote, payloads['runner.sh']))):
+                raise SharedUpgradeHold('original SCP runner binding changed')
+            self._verify_package_source_owner()
+            packages, original_rows = {}, []
+            for package in self._package_source_packages(component, package_index):
+                path = Path(package.path)
+                row = owner._files.get(path)
+                if (type(row) is not tuple or len(row) != 5
+                        or type(row[3]) is not tuple or len(row[3]) != 9
+                        or type(row[3][6]) is not int or row[3][6] <= 0
+                        or type(row[4]) is not str or not re.fullmatch('[0-9a-f]{64}', row[4])):
+                    raise SharedUpgradeHold('original SCP package digest rows required')
+                packages[package.path] = dict(size=row[3][6], sha256=row[4])
+                original_rows.append((path, row))
+            if companion['packages'] != packages:
+                raise SharedUpgradeHold('SCP companion differs from live original packages')
+            content = dict(version=1,
+                binding_sha256=hashlib.sha256(payloads['step-binding.json']).hexdigest(),
+                request_id=request['request_id'],
+                request_sha256=hashlib.sha256(payloads['request.json']).hexdigest(),
+                companion_sha256=hashlib.sha256(payloads['scp-source-request.json']).hexdigest(),
+                packages=packages)
+            document = dict(host=fields[0], user=fields[1], port=fields[2],
+                host_keys=fields[4].decode('ascii'), password=fields[5],
+                paths={path: row['size'] for path, row in packages.items()},
+                timeout_seconds=600 if component == 'os' else 300, content_binding=content)
+            payload = (json.dumps(document, ensure_ascii=True, sort_keys=True,
+                                  separators=(',', ':')) + '\n').encode('utf-8')
+            if not 1 <= len(payload) <= 65536 or payload.count(b'\n') != 1:
+                raise SharedUpgradeHold('bounded single-frame SCP context DATA required')
+            # Recheck the SAME source/group/lease/artifact owners after all
+            # derivation. No fresh baseline or package digest is acquired.
+            if self._native_scp_source(leaf, component, package_index) is not source:
+                raise SharedUpgradeHold('original SCP source changed at DATA tail')
+            if (self._active_request_lease is not lease
+                    or group._scp_source_binding is not binding_joint
+                    or group._scp_source is not source
+                    or self._package_source_owner is not owner
+                    or group._package_source_owner is not owner
+                    or self.session._directories.get(str(stage_path)) is not directory):
+                raise SharedUpgradeHold('original SCP context owners changed at DATA tail')
+            lease.verify()
+            _PreparedRunScope._scp_source_fields(source, binding_joint[1][2], binding_joint[2])
+            self._verify_package_source_owner()
+            for path, row in original_rows:
+                if owner._files.get(path) is not row:
+                    raise SharedUpgradeHold('original SCP package digest row changed at DATA tail')
+            for name, original in held.items():
+                if (self.files.get((str(stage_path), name)) is not original
+                        or original.payload != payloads[name]):
+                    raise SharedUpgradeHold('original SCP request artifact changed at DATA tail')
+                original.verify()
+            self.verify(); leaf.verify(); group.verify()
+            _validate_scp_request_content_graph(set(payloads), binding, payloads.__getitem__)
+            return payload
+        except BaseException as error:
+            if (type(group) is _PreparedRunScope
+                    and group._package_source_lifecycle_failure is None):
+                group._package_source_lifecycle_failure = SharedUpgradeHold(
+                    'original native SCP context DATA uncertain; shared group retained')
+            if not isinstance(error, Exception) or isinstance(error, SharedUpgradeHold):
+                raise  # Keep the original NI/Shared object and preset cause.
+            raise SharedUpgradeHold('original native SCP context DATA could not be verified') from None
+
+    def _launch_native_scp_cpld(self, leaf, component, package_index, transport, deadline):
+        """Fixed native CPLD/index0 or actual selected OS stdin launch; no caller wire."""
+        primary = None
+        channel = None
+        source = joint = payload = command = None
+        lease = source_binding = package_owner = None
+        fields_check = None
+        originals = ()
+        function_states = ()
+        parent = getattr(self, '_native_parent', None)
+        group = parent if type(parent) is _PreparedRunScope else self
+        output, errors = bytearray(), bytearray()
+        complete, status = False, None
+        closed = False
+        close_error = None
+        lock = threading.Lock()
+
+        def remember(error):
+            nonlocal primary
+            if (primary is None or isinstance(primary, Exception) and not isinstance(error, Exception)
+                    or isinstance(primary, Exception) and not isinstance(primary, SharedUpgradeHold)
+                    and isinstance(error, SharedUpgradeHold)):
+                primary = error
+
+        class OwnedChannel:
+            def close(owner):
+                nonlocal closed, close_error
+                with lock:
+                    if closed:
+                        if close_error is not None:
+                            raise close_error
+                        return
+                    closed = True
+                try:
+                    channel.close()
+                except BaseException as error:
+                    close_error = error
+                    raise
+
+        owner = OwnedChannel()
+
+        def require_new_send():
+            stop = getattr(self, '_pipeline_stop_event', None)
+            if stop is not None and stop.is_set():
+                raise SharedUpgradeHold('shared stop forbids another native CPLD stdin fragment')
+
+        def verify_current(*, full=True):
+            # Same live child/parent/source, original six held files and fixed
+            # producers. A new source/companion or caller envelope is not adopted.
+            current = _fixed_native_scp_cpld_api(parent) if full else joint
+            if (type(current) is not tuple or len(current) != 3
+                    or any(type(old) is not tuple or type(new) is not tuple
+                        or len(old) != len(new)
+                        or any(left is not right for left, right in zip(old, new))
+                        for old, new in zip(joint, current))):
+                raise SharedUpgradeHold('fixed native CPLD launch producers changed')
+            if (self._native_parent is not parent or self._active_request_lease is not lease
+                    or parent._scp_source is not source or parent._scp_source_binding is not source_binding
+                    or self._package_source_owner is not package_owner
+                    or parent._package_source_owner is not package_owner):
+                raise SharedUpgradeHold('original native CPLD request/source changed before wire')
+            lease.verify()
+            for name, original, image in originals:
+                if self.files.get((str(directory), name)) is not original or original.payload is not image:
+                    raise SharedUpgradeHold('original native CPLD held request changed')
+                original.verify()
+            for function, code, namespace, defaults, keywords, keyword_items in function_states:
+                actual = function.__kwdefaults__
+                if (function.__code__ is not code or function.__globals__ is not namespace
+                        or function.__defaults__ is not defaults or actual is not keywords
+                        or keywords is not None and (set(actual) != set(keyword_items)
+                            or any(actual[name] is not value for name, value in keyword_items.items()))):
+                    raise SharedUpgradeHold('native CPLD producer code/default joint changed')
+            source_namespace = vars(current[0][0])
+            if (source_namespace.get('ScpSource') is not current[0][2]
+                    or source_namespace.get('verify_source_shared') is not current[0][3]
+                    or source_namespace.get('_read_trust') is not current[0][4]
+                    or source_namespace.get('ScpHold') is not current[0][5]
+                    or source_namespace.get('ERRORS') is not current[0][9]
+                    or vars(current[0][2]).get('verify') is not current[0][7]
+                    or vars(current[0][5]).get('__init__') is not current[0][12]
+                    or _PreparedRunScope._scp_source_fields is not fields_check):
+                raise SharedUpgradeHold('native CPLD source verifier slots changed before send')
+            fields_check(source, current[0][2], source_binding[2])
+            current[0][3](source)
+            self._verify_package_source_owner()
+            leaf.verify_io_identity()
+            if full and (self._native_scp_source(leaf, component, package_index) is not source
+                    or current[2][2](self, leaf, component, package_index) != payload):
+                raise SharedUpgradeHold('original native CPLD context changed at full wire gate')
+            current[1][8](deadline)
+
+        try:
+            if (type(self) is not _PreparedRunScope or type(parent) is not _PreparedRunScope
+                    or type(leaf) is not _ReadonlyQueryInputs
+                    or type(component) is not str or component not in ('os', 'bios', 'cpld')
+                    or type(package_index) is not int
+                    or (component in ('bios', 'cpld') and package_index != 0)
+                    or (component == 'os' and package_index not in self._native_package_indices)
+                    or self.parsed.method != 'scp' or self._active_request_lease is None
+                    or type(deadline) not in (int, float) or not math.isfinite(deadline)):
+                raise SharedUpgradeHold('original native CPLD launch scope/lease required')
+            # One bounded launch-response budget, independent of the receiver's
+            # per-package firmware budget. Never extend the caller deadline.
+            deadline = min(deadline, time.monotonic() + 25.0)
+            source = self._native_scp_source(leaf, component, package_index)
+            joint = _fixed_native_scp_cpld_api(parent)
+            if type(joint) is not tuple or len(joint) != 3 or len(joint[2]) < 3:
+                raise SharedUpgradeHold('fixed native CPLD producer joint required')
+            remaining, owned_phase = joint[1][8], joint[1][6]
+            remaining(deadline)
+            payload = joint[2][2](self, leaf, component, package_index)
+            stage = declared_step_key(self.policy, component, package_index)
+            directory = self.run_directory / leaf.node.hostname / stage
+            lease = self._active_request_lease
+            source_binding = parent._scp_source_binding
+            package_owner = self._package_source_owner
+            fields_check = _PreparedRunScope._scp_source_fields
+            names = ('request.json', 'step.sh', 'step-binding.json',
+                     'runner.sh', 'runner-binding.json', 'scp-source-request.json')
+            originals = tuple((name, self.files[(str(directory), name)],
+                               self.files[(str(directory), name)].payload) for name in names)
+            from types import FunctionType
+            function_states = tuple((function, function.__code__, function.__globals__,
+                    function.__defaults__, function.__kwdefaults__,
+                    {} if function.__kwdefaults__ is None else dict(function.__kwdefaults__))
+                for group_refs in joint + ((fields_check,),)
+                for function in group_refs if type(function) is FunctionType)
+            step = self.files[(str(directory), 'step.sh')]
+            runner = self.files[(str(directory), 'runner.sh')]
+            binding = self.files[(str(directory), 'runner-binding.json')]
+            binding.verify(); step.verify(); runner.verify()
+            remote = json.loads(binding.payload)['remote_script']
+            command = joint[2][0](remote, hashlib.sha256(runner.payload).hexdigest(),
+                                     hashlib.sha256(step.payload).hexdigest())
+            verify_current()
+            require_new_send()
+            channel = transport.open_session(timeout=remaining(deadline))
+            channel.settimeout(remaining(deadline))
+            with owned_phase((owner,), deadline):
+                try:
+                    verify_current()
+                    require_new_send()
+                    channel.exec_command(command)
+                    position = 0
+                    while position < len(payload):
+                        # No recompiling/refreezing per tiny partial send. Full
+                        # source/context gates bracket the wire; each fragment
+                        # still checks the same six held files/source/lease/
+                        # package owner plus code/default object anchors.
+                        verify_current(full=False)
+                        require_new_send()
+                        channel.settimeout(remaining(deadline))
+                        count = channel.send(payload[position:])
+                        if type(count) is not int or not 0 < count <= len(payload) - position:
+                            raise SharedUpgradeHold('native CPLD stdin delivery uncertain')
+                        position += count
+                    verify_current(full=False)
+                    channel.settimeout(remaining(deadline))
+                    channel.shutdown_write()
+                    while True:
+                        leaf.verify_io_identity()
+                        remaining(deadline)
+                        for ready, receive, target in (
+                                (channel.recv_ready, channel.recv, output),
+                                (channel.recv_stderr_ready, channel.recv_stderr, errors)):
+                            if ready():
+                                channel.settimeout(remaining(deadline))
+                                part = receive(65536)
+                                if type(part) is not bytes:
+                                    raise SharedUpgradeHold('native CPLD launch response uncertain')
+                                target.extend(part)
+                                if len(output) + len(errors) > 65536:
+                                    raise SharedUpgradeHold('bounded native CPLD launch response required')
+                        if channel.closed and not channel.recv_ready() and not channel.recv_stderr_ready():
+                            if channel.exit_status_ready():
+                                status = channel.recv_exit_status()
+                            complete = channel.eof_received is True and type(status) is int and status == 0
+                            break
+                        if not transport.is_active():
+                            break
+                        time.sleep(min(.005, remaining(deadline)))
+                except BaseException as error:
+                    remember(error)
+                finally:
+                    try:
+                        owner.close()
+                    except BaseException as error:
+                        remember(error)
+                    try:
+                        verify_current()
+                    except BaseException as error:
+                        remember(error)
+        except BaseException as error:
+            remember(error)
+        finally:
+            if channel is not None and not closed:
+                try:
+                    owner.close()
+                except BaseException as error:
+                    remember(error)
+            if joint is not None and payload is not None:
+                try:
+                    verify_current()
+                except BaseException as error:
+                    remember(error)
+            for verify in ((leaf.verify,) if type(leaf) is _ReadonlyQueryInputs else ()):
+                try:
+                    verify()
+                except BaseException as error:
+                    remember(error)
+        if (primary is not None or not complete or bytes(output) != b'IBSW_LAUNCH_REQUESTED\n'
+                or errors or time.monotonic() >= deadline):
+            if type(group) is _PreparedRunScope and group._package_source_lifecycle_failure is None:
+                group._package_source_lifecycle_failure = SharedUpgradeHold(
+                    'native CPLD launch uncertain; retain original request and shared parent')
+            if primary is not None and (not isinstance(primary, Exception)
+                                        or isinstance(primary, SharedUpgradeHold)):
+                raise primary
+            raise SharedUpgradeHold('native CPLD launch uncertain; no automatic retry') from None
+        # Public asynchronous raw launch fact only. Never return payload/secret,
+        # installer success, an ACK or a caller-created dispatch grant.
+        return command, (b'IBSW_LAUNCH_REQUESTED\n', b'', 0, True)
+
+    def _preflight_native_scp_source(self, leaf, component, package_index, transport, deadline):
+        """Fixed signed-session probe fact only; backend remains unsupported."""
+        parent, group = None, self
+        source = audited = refs = primary = binding = None
+
+        def remember(error):
+            nonlocal primary
+            if (primary is None or (isinstance(primary, Exception) and not isinstance(error, Exception))
+                    or (isinstance(primary, Exception) and not isinstance(primary, SharedUpgradeHold)
+                        and isinstance(error, SharedUpgradeHold))):
+                primary = error
+
+        try:
+            parent = getattr(self, '_native_parent', None)
+            for original in (getattr(self, '_package_source_parent', None), parent):
+                if (type(original) is _PreparedRunScope and original is not self
+                        and type(original._package_source_borrowers) is set
+                        and self in original._package_source_borrowers):
+                    group = original
+                    break
+            source = self._native_scp_source(leaf, component, package_index)
+            if (type(parent) is not _PreparedRunScope or parent is not self._native_parent
+                    or type(deadline) not in (int, float) or not _SCP_PROBE_LEAVES[4](deadline)):
+                raise SharedUpgradeHold('fixed native source probe original parent/deadline required')
+            binding = parent._scp_source_binding
+            audited, refs = _fixed_scp_source_api(parent, probe=True)
+            if (len(audited) != 19 or any(actual is not original for actual, original
+                    in zip(audited, parent._scp_source_binding[1]))):
+                raise SharedUpgradeHold('fixed native source probe binding/API differs')
+            refs[8](deadline)  # Audited original _remaining; no deadline extension.
+            result = refs[0](leaf, transport, deadline, source)
+            if result is not None:
+                raise SharedUpgradeHold('fixed native source probe returned unknown DATA')
+        except BaseException as error:
+            remember(error)
+        finally:
+            # These are fresh read-only tail checks, not a producer/factory
+            # retry. An ordinary wire error must not hide shared-source drift;
+            # a pending body NI must remain the same object/cause over any tail.
+            if source is not None:
+                try:
+                    if self._native_scp_source(leaf, component, package_index) is not source:
+                        raise SharedUpgradeHold('fixed native source original instance changed at tail')
+                except BaseException as error:
+                    remember(error)
+            try:
+                leaf.verify()
+            except BaseException as error:
+                remember(error)
+            if audited is not None and refs is not None:
+                try:
+                    current, current_refs = _fixed_scp_source_api(parent, probe=True)
+                    if (len(current) != len(audited) or len(current_refs) != len(refs)
+                            or any(actual is not original for actual, original in zip(current, audited))
+                            or any(actual is not original for actual, original in zip(current_refs, refs))):
+                        raise SharedUpgradeHold('fixed native source producer objects changed at tail')
+                    if parent._scp_source_binding is not binding or parent._scp_source is not source:
+                        raise SharedUpgradeHold('fixed native source binding changed at producer tail')
+                    _PreparedRunScope._scp_source_fields(source, audited[2], binding[2])
+                    current_refs[8](deadline)
+                except BaseException as error:
+                    remember(error)
+        if primary is not None:
+            if group._package_source_lifecycle_failure is None:
+                group._package_source_lifecycle_failure = SharedUpgradeHold(
+                    'fixed native source probe failed; original parent group retained')
+            # Same original body/first-tail NI/cause and batch Shared object.
+            # A genuine audited ordinary wire failure remains only a failure.
+            if (not isinstance(primary, Exception) or isinstance(primary, SharedUpgradeHold)
+                    or audited is not None and type(primary) is audited[5]
+                    or refs is not None and type(primary) is refs[9]):
+                raise primary
+            raise SharedUpgradeHold('fixed native source probe could not be verified') from None
+        return None
+
+    def _native_scp_needed_indices(self, node, component):
+        """Select from this parent's real startup rows, not dispatch permission."""
+        from ibsw_upgrade_contract import select_os_path
+        if (not self.manual_execution or self.parsed.method != 'scp'
+                or node not in self.devices or component not in self.parsed.selected):
+            raise SharedUpgradeHold('original native SCP node/component required')
+        rows = [row for row in getattr(self, '_version_plan', ())
+                if row.get('hostname') == node and row.get('component') == component]
+        if len(rows) != 1:
+            raise SharedUpgradeHold('unique original startup component row required')
+        row = rows[0]
+        if any(issue.get('hostname') == node and issue.get('component') == component
+               for issue in getattr(self, '_component_readiness_issues', ())):
+            return ()  # No source acquisition for a startup-blocked component.
+        if component == 'os':
+            path = row.get('path')
+            if (type(path) not in (list, tuple) or not path
+                    or path[0] != row.get('current') or path[-1] != self.policy.final_os
+                    or row.get('target') != self.policy.final_os):
+                raise SharedUpgradeHold('original native OS route is incomplete')
+            available = frozenset(package.path for package in self.policy.os
+                                  if package.version in path[1:])
+            selected = select_os_path(self.policy, row['current'], available=available)
+            if (tuple(path[1:]) != tuple(package.version for package in selected)
+                    or row.get('action') != ('UPGRADE_REQUIRED' if selected else 'AT_TARGET_NO_FLASH')):
+                raise SharedUpgradeHold('native OS route differs from original approved path')
+            return tuple(next(index for index, original in enumerate(self.policy.os)
+                              if original is package) for package in selected)
+        target = (self.policy.bios.version if component == 'bios' else
+                  '+'.join(name+'_'+version for name,version in self.policy.cpld_targets))
+        if row.get('target') != target or row.get('action') not in ('UPGRADE_REQUIRED','AT_TARGET_NO_FLASH'):
+            raise SharedUpgradeHold('original native firmware plan is incomplete')
+        return (0,) if row['action'] == 'UPGRADE_REQUIRED' else ()
+
+    def _has_native_package_source_provenance(self):
+        # Presence, including a damaged/None value, fixes the native branch.
+        # A failed native check must never fall back to readiness admission.
+        return any(name in vars(self) for name in (
+            '_native_parent', '_native_node', '_native_component', '_native_package_indices'))
+
+    def _is_native_package_source_child(self, parent, node=None, component=None):
+        """Fixed live native provenance, never a readiness impersonation."""
+        name = getattr(self, '_native_node', None)
+        selected = getattr(self, '_native_component', None)
+        return (not any(name in vars(self) for name in ('_readiness_parent', '_readiness_node'))
+                and type(parent) is _PreparedRunScope and parent is not self
+                and getattr(self, '_native_parent', None) is parent
+                and self.manual_execution and parent.manual_execution
+                and self.parsed.method == parent.parsed.method == 'scp'
+                and self._native_schedule_started and parent._native_schedule_started
+                and name in self.devices and name in parent.devices
+                and selected in self.parsed.selected and selected in parent.parsed.selected
+                and (node is None or node == name) and (component is None or component == selected)
+                and self in parent._package_source_borrowers
+                and self._package_source_parent is parent
+                and self._package_source_owner is parent._package_source_owner
+                and self._package_source_selection is parent._package_source_selection
+                and getattr(self, '_native_package_indices', None) ==
+                    parent._native_scp_needed_indices(name, selected)
+                and bool(self._native_package_indices)
+                and all((selected, index) in parent._package_source_selection[0]
+                        for index in self._native_package_indices))
+
+    def fork_native_component_scope(self, node, component):
+        """Borrow original frozen SCP sources after startup, never readiness."""
+        self.verify()
+        if (self.closed or not self._native_schedule_started
+                or not self.manual_execution or self.parsed.method != 'scp'
+                or self._package_source_parent is not None
+                or not self._package_source_owns or self._package_source_owner is None):
+            raise SharedUpgradeHold('original native SCP parent scope required')
+        indices = self._native_scp_needed_indices(node, component)
+        if not indices or any((component, index) not in self._package_source_selection[0] for index in indices):
+            raise SharedUpgradeHold('needed native source stage was not frozen by original parent')
+        child = None
+        try:
+            child = _PreparedRunScope(*self._open_context, self.run_directory,
+                                      manual_execution=self.manual_execution)
+            if (child.plan_sha256 != self.plan_sha256 or child.policy != self.policy
+                    or [(p.identity,p.payload) for p in child.session._files] !=
+                       [(p.identity,p.payload) for p in self.session._files]):
+                raise SharedUpgradeHold('native child original inputs differ from parent')
+            child._native_parent, child._native_node, child._native_component = self, node, component
+            child._native_package_indices = indices
+            child._native_schedule_started = True
+            child._package_source_owner = self._package_source_owner
+            child._package_source_owner_class = self._package_source_owner_class
+            child._package_source_parent = self
+            child._package_source_selection = self._package_source_selection
+            self._package_source_borrowers.add(child)
+            child._verify_package_source_owner()
+            return child
+        except BaseException as original:
+            if self._package_source_lifecycle_failure is None:
+                self._package_source_lifecycle_failure = SharedUpgradeHold(
+                    'native source child acquisition uncertain; original parent retained')
+            if child is not None:
+                try:
+                    child.close()
+                except BaseException as cleanup:
+                    if isinstance(original, Exception) and not isinstance(cleanup, Exception):
+                        raise
+            raise
+
     def _verify_package_source_owner(self):
         if self._package_source_lifecycle_failure is not None:
             raise self._package_source_lifecycle_failure
@@ -1940,8 +3781,11 @@ class _PreparedRunScope:
                 or parent._package_source_owner is not owner
                 or self._package_source_selection is not parent._package_source_selection
                 or self._package_source_selection[1:] != (self.policy, self.run_directory, self.plan_sha256)
-                or (parent is not self and (getattr(self, '_readiness_parent', None) is not parent
-                    or getattr(self, '_readiness_node', None) not in self.devices))):
+                or (parent is not self and
+                    (not self._is_native_package_source_child(parent)
+                     if self._has_native_package_source_provenance() else
+                     (getattr(self, '_readiness_parent', None) is not parent
+                      or getattr(self, '_readiness_node', None) not in self.devices)))):
             raise SharedUpgradeHold('original parent source owner/borrow changed')
         # No parent.verify recursion and no source descriptor reopening.
         owner.verify()
@@ -2004,7 +3848,12 @@ class _PreparedRunScope:
                 or self.parsed.method != 'scp' or type(leaf) is not _ReadonlyQueryInputs
                 or leaf.scope is not self or leaf._original_selection[0] is not self
                 or self._package_source_parent is None
-                or getattr(self, '_readiness_node', None) != leaf.node.hostname):
+                or not (self._is_native_package_source_child(self._package_source_parent,
+                                                            leaf.node.hostname, component)
+                        if self._has_native_package_source_provenance() else
+                        getattr(self, '_readiness_node', None) == leaf.node.hostname)
+                or (self._has_native_package_source_provenance()
+                    and package_index not in getattr(self, '_native_package_indices', ()))):
             raise SharedUpgradeHold('original leased SCP child DATA scope required')
         try:
             self._verify_package_source_owner()
@@ -2041,7 +3890,10 @@ class _PreparedRunScope:
             # primary exception object/cause or adopting any persisted DATA.
             parent = self._package_source_parent
             if (type(parent) is _PreparedRunScope
-                    and getattr(self, '_readiness_parent', None) is parent
+                    and ((getattr(self, '_native_parent', None) is parent
+                          and self in parent._package_source_borrowers)
+                         if self._has_native_package_source_provenance() else
+                         getattr(self, '_readiness_parent', None) is parent)
                     and self._package_source_owner is not None
                     and self._package_source_owner is parent._package_source_owner):
                 if parent._package_source_lifecycle_failure is None:
@@ -3116,7 +4968,39 @@ class _PreparedRunScope:
             self._hold(directory, "component-preflight.json")
             runner_binding = self._hold(directory, "runner-binding.json")
             rows = _component_raw_records(records)
-            if (rows[-1]["command"] != _owned_launch_command(remote)
+            scp_companion = None
+            if self.parsed.method == 'scp':
+                if (component not in ('os', 'bios', 'cpld')
+                        or (component in ('bios', 'cpld') and data['package_index'] != 0)):
+                    raise ValueError('only original selected OS, BIOS or CPLD has an SCP dispatch backend')
+                parent = self._native_parent
+                self._native_scp_source(leaf, component, data['package_index'])
+                joint = _fixed_native_scp_cpld_api(parent)
+                if (type(joint) is not tuple or len(joint) != 3
+                        or len(joint[0]) != 19
+                        or any(actual is not original for actual, original in zip(joint[0], parent._scp_source_binding[1]))
+                        or type(joint[2]) is not tuple or len(joint[2]) <= 3
+                        or joint[2][2] is not _PreparedRunScope._native_scp_launch_context
+                        or joint[2][3] is not _PreparedRunScope._launch_native_scp_cpld):
+                    raise ValueError('fixed native SCP dispatch producer joint changed')
+                step = self._hold(directory, 'step.sh')
+                runner = self._hold(directory, 'runner.sh')
+                scp_companion = self._hold(directory, 'scp-source-request.json')
+                if json.loads(runner_binding.payload).get('remote_script') != remote:
+                    raise ValueError('SCP dispatch differs from original runner remote')
+                _validate_scp_request_content_graph(set(os.listdir(directory.fd)), data['binding'],
+                    lambda name: self._hold(directory, name).payload)
+                expected_command = joint[2][0](remote, hashlib.sha256(runner.payload).hexdigest(),
+                                               hashlib.sha256(step.payload).hexdigest())
+                if (rows[-1]['stdout_base64'] != base64.b64encode(b'IBSW_LAUNCH_REQUESTED\n').decode('ascii')
+                        or rows[-1]['stderr_base64'] != '' or rows[-1]['returncode'] != 0
+                        or rows[-1]['stream_complete'] is not True):
+                    raise ValueError('complete fixed SCP launch delivery fact required')
+            else:
+                if 'scp-source-request.json' in os.listdir(directory.fd):
+                    raise ValueError('SCP companion cannot authorize a V1 dispatch')
+                expected_command = _owned_launch_command(remote)
+            if (rows[-1]["command"] != expected_command
                     or any((r["stream_complete"] is not True or r["returncode"] != 0 or r["stderr_base64"] != "")
                            and not (self.parsed.force_health and r['command']=='nv show system health')
                            for r in rows[:-1])):
@@ -3124,10 +5008,14 @@ class _PreparedRunScope:
             uid = [r for r in rows if r["command"] == "id -u"]
             if len(uid) != 1 or not re.fullmatch(rb"[0-9]+\n", base64.b64decode(uid[0]["stdout_base64"], validate=True)):
                 raise ValueError("one actual original uid required")
-            payload = _json_bytes({"schema_version": 2, "state": "COMPONENT_DISPATCH_DATA_ONLY",
+            document = {"schema_version": 2, "state": "COMPONENT_DISPATCH_DATA_ONLY",
                 "binding": data["binding"], "request_sha256": hashlib.sha256(request.payload).hexdigest(),
                 "remote_script": remote, "records": rows, "launch_kind": "OWNED_RUNNER_V1",
-                "runner_binding_sha256": hashlib.sha256(runner_binding.payload).hexdigest()})
+                "runner_binding_sha256": hashlib.sha256(runner_binding.payload).hexdigest()}
+            if scp_companion is not None:
+                document['launch_kind'] = 'SCP_STDIN_OWNED_RUNNER_V2'
+                document['scp_companion_sha256'] = hashlib.sha256(scp_companion.payload).hexdigest()
+            payload = _json_bytes(document)
             if len(payload) > MAXIMUM_INPUT_BYTES:
                 raise ValueError("bounded original component chain exceeded")
             self._commit_exclusive_binding(directory, payload, "component-dispatch.json")
@@ -3238,12 +5126,176 @@ class _PreparedRunScope:
         except Exception as error:
             raise SharedUpgradeHold('OS route evidence could not be recorded; no following task') from error
 
+    def _scp_download_inputs_locked(self, leaf, dispatch):
+        """Same live OS parent/lease/seven originals; returned DATA is no permit."""
+        group = self
+        try:
+            for candidate in (getattr(self, '_native_parent', None),
+                              getattr(self, '_package_source_parent', None)):
+                if (type(candidate) is _PreparedRunScope and candidate is not self
+                        and type(candidate._package_source_borrowers) is set
+                        and self in candidate._package_source_borrowers):
+                    group = candidate
+                    break
+            lease = self._active_request_lease
+            if (type(self) is not _PreparedRunScope or group is self
+                    or type(lease) is not _ManualJournalTransaction or not self.manual_execution
+                    or self.parsed.method != 'scp' or type(dispatch) is not ComponentDispatchResult
+                    or dispatch.component != 'os' or dispatch.state != 'DISPATCHED_UNKNOWN'
+                    or type(leaf) is not _ReadonlyQueryInputs or leaf.scope is not self
+                    or not getattr(leaf, '_cooperative_completion', False)
+                    or dispatch.hostname != leaf.node.hostname):
+                raise SharedUpgradeHold('original leased native SCP OS measurement scope required')
+            lease.verify()
+            source = self._native_scp_source(leaf, 'os', dispatch.package_index)
+            joint = _fixed_native_scp_cpld_api(group)
+            stage_name = declared_step_key(self.policy, 'os', dispatch.package_index)
+            if dispatch.stage != stage_name:
+                raise SharedUpgradeHold('original native SCP OS measurement stage changed')
+            stage_path = self.run_directory / leaf.node.hostname / stage_name
+            directory = self.session._directories.get(str(stage_path))
+            if directory is None:
+                raise SharedUpgradeHold('original native SCP OS stage is not held')
+            self._private_directory(directory)
+            names = ('request.json', 'step.sh', 'step-binding.json', 'runner.sh',
+                     'runner-binding.json', 'scp-source-request.json', 'component-dispatch.json')
+            originals = tuple(self.files.get((str(stage_path), name)) for name in names)
+            if any(type(obj) is not _HeldFile or obj.directory is not directory
+                   or obj.name != name or obj.cleanup_issues for name, obj in zip(names, originals)):
+                raise SharedUpgradeHold('complete original native SCP OS measurement files required')
+            for obj in originals:
+                obj.verify()
+            values = joint[2][45](leaf, dispatch)
+            if values[0] is not self or values[1] is not directory:
+                raise SharedUpgradeHold('original native SCP bound consumer changed')
+            binding = values[2]
+            if originals[2].payload != _json_bytes(binding):
+                raise SharedUpgradeHold('original native SCP measurement binding changed')
+            joint[2][34](set(names), binding,
+                         lambda name: self.files[(str(stage_path), name)].payload)
+            companion = json.loads(originals[5].payload)
+            owner = group._package_source_owner
+            self._verify_package_source_owner()
+            packages = self._package_source_packages('os', dispatch.package_index)
+            if len(packages) != 1 or type(companion['packages']) is not dict:
+                raise SharedUpgradeHold('one actual selected native SCP OS package required')
+            package = packages[0]
+            row = owner._files.get(Path(package.path))
+            if (type(row) is not tuple or len(row) != 5
+                    or type(row[3]) is not tuple or len(row[3]) != 9
+                    or type(row[3][6]) is not int or not 0 < row[3][6] < 2**63
+                    or type(row[4]) is not str or re.fullmatch('[0-9a-f]{64}', row[4]) is None
+                    or companion['packages'] != {package.path: dict(size=row[3][6], sha256=row[4])}):
+                raise SharedUpgradeHold('native SCP measurement companion differs from original package')
+            expected = dict(binding_sha256=hashlib.sha256(originals[2].payload).hexdigest(),
+                            path=package.path, size=row[3][6], sha256=row[4])
+            if self._native_scp_source(leaf, 'os', dispatch.package_index) is not source:
+                raise SharedUpgradeHold('original native SCP measurement source changed at tail')
+            current = _fixed_native_scp_cpld_api(group)
+            if (any(len(a) != len(b) or any(x is not y for x, y in zip(a, b))
+                    for a, b in zip(joint, current))
+                    or self._active_request_lease is not lease or self._native_parent is not group
+                    or self._package_source_owner is not owner or group._package_source_owner is not owner
+                    or owner._files.get(Path(package.path)) is not row
+                    or self.session._directories.get(str(stage_path)) is not directory):
+                raise SharedUpgradeHold('original native SCP measurement owners changed at tail')
+            lease.verify()
+            for name, obj in zip(names, originals):
+                if self.files.get((str(stage_path), name)) is not obj:
+                    raise SharedUpgradeHold('original native SCP measurement file owner changed')
+                obj.verify()
+            self.verify(); leaf.verify(); group.verify()
+            return directory, binding, expected, originals, source, owner, lease, joint, group
+        except BaseException as error:
+            if (type(group) is _PreparedRunScope
+                    and group._package_source_lifecycle_failure is None):
+                group._package_source_lifecycle_failure = SharedUpgradeHold(
+                    'original native SCP OS measurement inputs uncertain; group retained')
+            if not isinstance(error, Exception) or isinstance(error, SharedUpgradeHold):
+                raise
+            raise SharedUpgradeHold('original native SCP OS measurement inputs unavailable') from None
+
+    def _record_scp_download_attempt(self, leaf, dispatch, rows):
+        """Record one strict original SCP pair; critical finish precedes return."""
+        group = self
+        try:
+            for candidate in (getattr(self, '_native_parent', None),
+                              getattr(self, '_package_source_parent', None)):
+                if (type(candidate) is _PreparedRunScope and candidate is not self
+                        and type(candidate._package_source_borrowers) is set
+                        and self in candidate._package_source_borrowers):
+                    group = candidate
+                    break
+            record = None
+            with self._request_namespace_lease():
+                joint = _fixed_native_scp_cpld_api(group)
+                inputs = joint[2][30](self, leaf, dispatch)
+                directory, binding, expected, originals, source, owner, lease, _joint, parent = inputs
+                if (type(rows) is not list or len(rows) != 1 or type(rows[0]) is not dict
+                        or type(rows[0].get('content_marker')) is not bytes
+                        or type(rows[0].get('raw_line')) is not bytes):
+                    raise SharedUpgradeHold('one complete original SCP measurement pair required')
+                packet = rows[0]['content_marker'] + b'\n' + rows[0]['raw_line'] + b'\n'
+                parsed = joint[2][26](packet, expected)
+                if parsed != rows[0]:
+                    raise SharedUpgradeHold('foreign SCP measurement DATA')
+                read = lambda name: self._hold(directory, name).payload
+                document = joint[2][29](binding, originals[6].payload, read, packet)
+                payload = _json_bytes(document)
+                name = 'download-attempt-01.json'
+                if name in os.listdir(directory.fd):
+                    self._hold(directory, name, payload)
+                else:
+                    if 'component-completion.json' in os.listdir(directory.fd):
+                        raise SharedUpgradeHold('SCP measurement cannot be appended after completion')
+                    joint[2][35](self, directory, payload, name)
+                    record = dict(hostname=leaf.node.hostname, stage=dispatch.stage,
+                        target_version=dispatch.target_version, measurement=document['measurement'],
+                        path=str(directory.path / name))
+                # The actual original writer finally/finish has already returned.
+                # This second derivation cannot adopt a replacement/new package row.
+                after = joint[2][30](self, leaf, dispatch)
+                if (after[0] is not directory or after[4] is not source or after[5] is not owner
+                        or after[6] is not lease or after[8] is not parent
+                        or after[2] != expected
+                        or any(a is not b for a, b in zip(after[3], originals))):
+                    raise SharedUpgradeHold('original SCP measurement owners changed after commit')
+                saved = self._hold(directory, name, payload)
+                saved.verify(); leaf.verify()
+            # All required record and lease cleanup succeeded before callbacks
+            # or the observable _record_download_attempt return can occur.
+            if record is not None:
+                self._download_measurements = getattr(self, '_download_measurements', []) + [record]
+                callback = getattr(self, '_download_callback', None)
+                if callback:
+                    callback(record)
+            return None
+        except BaseException as error:
+            if (type(group) is _PreparedRunScope
+                    and group._package_source_lifecycle_failure is None):
+                group._package_source_lifecycle_failure = SharedUpgradeHold(
+                    'native SCP OS measurement commit uncertain; shared group retained')
+            if not isinstance(error, Exception) or isinstance(error, SharedUpgradeHold):
+                raise
+            raise SharedUpgradeHold('SCP OS measurement was not reliably committed; ACK withheld') from error
+
     def _record_download_attempt(self,leaf,dispatch,rows):
         """Durably save original pre-reboot numeric telemetry before remote ACK.
 
         Repeated polls may return identical measurements, never different bytes
         under an already committed attempt. No speed measurement admits success.
         """
+        if self.parsed.method == 'scp':
+            parent = self
+            for candidate in (getattr(self, '_native_parent', None),
+                              getattr(self, '_package_source_parent', None)):
+                if (type(candidate) is _PreparedRunScope and candidate is not self
+                        and type(candidate._package_source_borrowers) is set
+                        and self in candidate._package_source_borrowers):
+                    parent = candidate
+                    break
+            joint = _fixed_native_scp_cpld_api(parent)
+            return joint[2][31](self, leaf, dispatch, rows)
         try:
             with self._request_namespace_lease():
                 leaf.verify()

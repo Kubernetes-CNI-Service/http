@@ -20,9 +20,11 @@ import os
 import queue
 from pathlib import Path
 import re
+import select
 import socket
 import stat
 import sys
+import termios
 import threading
 import time
 import warnings
@@ -127,10 +129,11 @@ _PREPARE_FLAGS = (
     "--exclusive-config-window", "--force",
 )
 _AUTH_VALUES = ("--known-hosts", "--user", "--identity", "--management-public-key")
+_SCP_VALUES = ('--mgmt-server', '--mgmt-user', '--mgmt-port', '--scp-known-hosts')
 _RUNTIME_VALUES = ('--parallel-limit','--os-download-jitter')
-# These old options retain their meanings: they are NOT aliases for new auth.
+# Remaining legacy options are not aliases for target/source authentication.
 _UNMIGRATED_VALUES = (
-    "--ib-log", "--public-key", "--mgmt-server", "--mgmt-user",
+    "--ib-log", "--public-key",
     "--http-server", "--phase-wait",
 )
 
@@ -140,7 +143,9 @@ def _parse_cli(argv):
         description="IB read-only inspection or confirmed component upgrades with original SSH authorization preservation.",
         epilog=("Default: read-only inspection as admin, using the current user's ~/.ssh/known_hosts. "
                 "Default inputs are ib.csv and 01-global.yaml beside this entry script, independent of CWD. "
-                "Same-source input symlinks are supported; load/setup is not required. HTTP only. "
+                "Same-source input symlinks are supported; load/setup is not required. "
+                "HTTP is the default transfer; SCP requires explicit selection. "
+                "HTTPS is unsupported; no automatic transport fallback. "
                 "Manual runs do not inspect Git, deployment receipts or old runs. "
                 "A host-local runtime guard prevents concurrent initialization/upgrade entries. "
                 "Do not use another server or configuration writer against these switches at the same time. "
@@ -164,7 +169,7 @@ def _parse_cli(argv):
                         help="run selected OS/BIOS/CPLD through the fixed verified workflow; requires --yes")
     parser.add_argument("--password", action="store_true",
                         help="hidden existing password prompt; actual upgrades always verify BOTH key and password login")
-    for option in _AUTH_VALUES + _PREPARE_VALUES + _UNMIGRATED_VALUES + _RUNTIME_VALUES:
+    for option in _AUTH_VALUES + _SCP_VALUES + _PREPARE_VALUES + _UNMIGRATED_VALUES + _RUNTIME_VALUES:
         parser.add_argument(option, action=_Once,
                             help=("lower startup/upgrade worker capacity (1..32); never raises the default formula"
                                   if option=='--parallel-limit' else
@@ -240,8 +245,19 @@ def _parse_cli(argv):
     method = parsed.method
     if method is not None:
         method = {"1": "scp", "2": "http", "3": "local"}.get(method, method)
-        if method != "http":
-            raise _InspectionHold("HTTP-only upgrade entry; HTTPS, SCP and local transports are refused without fallback")
+        if method not in ("http", "scp"):
+            raise _InspectionHold("HTTP/SCP private entry; HTTPS and local transports are refused without fallback")
+    if method != 'scp' and any(getattr(parsed, option[2:].replace('-', '_')) is not None
+                               for option in _SCP_VALUES):
+        raise _InspectionHold('Management-server SCP options require --method scp')
+    if parsed.mgmt_port is not None:
+        if re.fullmatch(r'[0-9]{1,5}', parsed.mgmt_port) is None or not 1 <= int(parsed.mgmt_port) <= 65535:
+            raise _InspectionHold('SCP management SSH port must be 1..65535')
+        parsed.mgmt_port = int(parsed.mgmt_port)
+    if parsed.scp_known_hosts is not None:
+        path = parsed.scp_known_hosts
+        if not path or '\x00' in path or not os.path.isabs(path) or os.path.normpath(path) != path:
+            raise _InspectionHold('--scp-known-hosts must be an absolute normalized path')
     if parsed.http_scheme is not None:
         if parsed.http_scheme != "http" or method not in (None, "http"):
             raise _InspectionHold("HTTPS or conflicting HTTP selector refused")
@@ -263,13 +279,102 @@ def _parse_cli(argv):
             prepare_args.extend((option, value))
         elif token in _PREPARE_FLAGS or token == "--scripts-only":
             prepare_args.append(token)
-        elif option in _AUTH_VALUES + _RUNTIME_VALUES and not equal:
+        elif option in _AUTH_VALUES + _SCP_VALUES + _RUNTIME_VALUES and not equal:
             index += 1
         index += 1
     parsed.prepare_args = tuple(prepare_args)
     if hasattr(parsed, "_seen_values"):
         del parsed._seen_values
     return parsed
+
+
+def _configure_scp_source(scope, parsed):
+    """Pin original management-source trust across one hidden prompt.
+
+    Configuration only: no secret channel, source preflight or launch authority.
+    """
+    if scope.parsed.method != 'scp' or not any(row['action'] == 'UPGRADE_REQUIRED'
+            for row in getattr(scope, '_version_plan', ())):
+        return None
+    from ibsw_upgrade_driver import _fixed_scp_source_api
+    from ibsw_upgrade_contract import SharedUpgradeHold
+    api = _fixed_scp_source_api(scope)
+    source_from_known_hosts, source_class = api[1], api[2]
+    verify_source_shared, ScpHold = api[3], api[5]
+
+    def audit_joint():
+        current = _fixed_scp_source_api(scope)
+        if len(current) != len(api) or any(left is not right for left, right in zip(api, current)):
+            raise SharedUpgradeHold('SCP_SOURCE_CHANGED: fixed source API objects changed; no further dispatch')
+
+    if not sys.stdin.isatty():
+        raise _InspectionHold('SCP upgrades require a TTY for independent management-server credentials; passwords in argv/files are not accepted')
+    host = parsed.mgmt_server
+    if host is None:
+        sys.stderr.write('Management-server SSH IPv4 reachable from IB switches: ')
+        sys.stderr.flush()
+        host = sys.stdin.readline(128).strip()
+    user = parsed.mgmt_user
+    if user is None:
+        default = getpass.getuser()
+        sys.stderr.write('Management-server SCP username ['+default+']: ')
+        sys.stderr.flush()
+        entered = sys.stdin.readline(128).strip()
+        user = entered or default
+    port = parsed.mgmt_port or 22
+    trust = parsed.scp_known_hosts or parsed.known_hosts
+    first_source = source_from_known_hosts(host, user, port, trust, '')
+    if type(first_source) is not source_class:
+        raise SharedUpgradeHold('SCP_SOURCE_CHANGED: original source class required')
+    audit_joint()
+    sys.stderr.write('[SCP] This is the MANAGEMENT SERVER credential, not the IB switch password. '
+                     'Existing switch-side source keys may be used; no private key is uploaded.\n')
+    with warnings.catch_warnings():
+        warnings.simplefilter('error', getpass.GetPassWarning)
+        try:
+            password = getpass.getpass('Management-server SSH password (Enter: existing switch key only): ')
+        except (EOFError, getpass.GetPassWarning):
+            raise ScpHold('SCP_SOURCE_ARGUMENTS') from None
+    # Keep the first genuine source. Never silently adopt trust reread after
+    # prompting; validate it on both sides of the second actual factory call.
+    audit_joint()  # Audit dynamic dependencies before executing a post-prompt verifier.
+    verify_source_shared(first_source)
+    source = source_from_known_hosts(host, user, port, trust, password)
+    audit_joint()
+    verify_source_shared(first_source)
+    if (type(source) is not source_class or source._identity != first_source._identity
+            or source.host_keys != first_source.host_keys):
+        raise SharedUpgradeHold('SCP_SOURCE_CHANGED: original source trust changed; no further dispatch')
+    scope._bind_scp_source(source, api)
+    sys.stderr.write('[SCP] Source: '+user+'@'+host+':'+str(port)+'; pinned SSH trust; switch pulls packages.\n')
+    return source
+
+
+def _choose_transfer_method(parsed):
+    """Fixed nonsecret selector; does not grant source or native authority."""
+    method = parsed.method or ('http' if parsed.http_scheme is not None else None)
+    if method is None:
+        method = 'http'
+        if sys.stdin.isatty() and not (parsed.diagnose_inputs or parsed.scripts_only):
+            sys.stderr.write('[METHOD] Package transfer: http (default) or scp.\n'
+                'Transfer method [http/scp; Enter or 15s timeout = http]: ')
+            sys.stderr.flush()
+            readable,_,_ = select.select([sys.stdin],[],[],15.0)
+            if readable:
+                answer = sys.stdin.readline(32).strip().lower()
+                if answer not in ('','http','scp'):
+                    raise _InspectionHold('Select http or scp; no transport was started')
+                method = answer or 'http'
+            else:
+                try:
+                    termios.tcflush(sys.stdin.fileno(),termios.TCIFLUSH)
+                except (OSError,ValueError,AttributeError):
+                    pass
+            sys.stderr.write('\n[METHOD] Selected '+method.upper()+'\n')
+    if method == 'http' and any(getattr(parsed,option[2:].replace('-','_')) is not None
+                                for option in _SCP_VALUES):
+        raise _InspectionHold('Management-server SCP options require SCP selection')
+    return method
 
 
 def _read_password():
@@ -290,8 +395,8 @@ def _local_input_arguments(parsed, cwd):
     """Entry-directory defaults; explicit relative overrides retain caller CWD."""
     args = list(parsed.prepare_args)
     args.append("--standalone-inputs")
-    if parsed.method is None and parsed.http_scheme is None:
-        args.extend(("--method", "http"))
+    if '--method' not in args and parsed.http_scheme is None:
+        args.extend(("--method", parsed.method or 'http'))
     if parsed.project is not None:
         return tuple(args)
     root = Path(__file__).absolute().parent
@@ -404,7 +509,7 @@ _SAFE_BACKEND_HINTS = {
     "marked host trust entry needs actual native policy": ("KNOWN_HOSTS_POLICY", "A matching known_hosts entry uses a trust marker such as @revoked or @cert-authority; it cannot authorize this connection. Review its trust policy; do not delete it just to proceed"),
     "explicit IB upgrade policy required; no legacy constants": ("UPGRADE_POLICY", "global requires switches.ib.upgrade.packages; old fixed versions are not used as fallback"),
     "selected component requires explicit policy": ("UPGRADE_POLICY", "A selected component has no policy in global. Select only configured components, for example --os-only, or complete the intended policy"),
-    "project HTTP is not enabled": ("HTTP_POLICY", "HTTP is disabled in global; enable the approved project HTTP configuration before continuing. This entry supports HTTP only; HTTPS, SCP and local are not fallback transports."),
+    "project HTTP is not enabled": ("HTTP_POLICY", "HTTP is disabled in global; enable the approved project HTTP configuration before continuing. HTTP mode does not fall back to SCP, HTTPS or local transport."),
     "artifact parent must be an owned, non-group/other-writable real directory": ("OUTPUT_PERMISSIONS", "The output parent must belong to the current user and not be group/other writable. Check only the intended project output path; do not recursively change the shared HTTP tree"),
 }
 
@@ -910,10 +1015,12 @@ class _ProgressBus:
             except queue.Empty: break
             row=record['measurement']
             if not quiet:
+                transport=(f"scp-exit={row['scp_exit']} reserved-status={row['reserved_status']}"
+                    if 'scp_exit' in row else f"http={row['http_status']} curl-exit={row['curl_exit']}")
                 sys.stderr.write(f"[OS DOWNLOAD] {record['hostname']} {record['stage']} attempt={row['attempt']} "
                     f"bytes={row['bytes_downloaded']} elapsed={row['elapsed_seconds']:.3f}s "
                     f"avg={row['average_bytes_per_second']/1000000:.2f}MB/s "
-                    f"http={row['http_status']} curl-exit={row['curl_exit']}\n")
+                    f"{transport}\n")
         while True:
             try:
                 hostname, component, stage, stamp = self.queue.get_nowait()
@@ -1061,6 +1168,19 @@ def _parallel_component_upgrade(scope, ready, parsed, password, driver, entry, c
         raise SharedUpgradeHold("explicit exclusive configuration maintenance window required")
     scope.enable_cooperative_status_snapshots()
     scope.initialize_native_component_status_data()
+    if scope.parsed.method == 'scp':
+        # Private exploration: derive needed sources from real startup rows,
+        # not all declarations or caller-supplied current/permission DATA.
+        needed = set()
+        for node in ready:
+            if scope.devices.get(node.hostname) is not node:
+                raise SharedUpgradeHold('native SCP ready node is not an original target')
+            for component in component_order(scope.parsed.selected):
+                needed.update((component, index) for index in
+                              scope._native_scp_needed_indices(node.hostname, component))
+        if needed:
+            scope.freeze_scp_package_sources(tuple(sorted(needed)),
+                deadline=time.monotonic()+30.0, max_fds=64)
     scope._native_schedule_started = True
     bus = _ProgressBus()
     scope._access_required = True
@@ -1541,13 +1661,17 @@ def _render_summary(summary):
             measurements=summary['os_downloads']
             add('  OS image download measurements (not installation results):')
             add('    Attempts='+str(len(measurements))+' successful-transfers='+str(sum(
-                r['measurement']['curl_exit']==0 and r['measurement']['http_status']==200 for r in measurements)))
+                (r['measurement']['scp_exit']==0 and r['measurement']['reserved_status']==0
+                 if 'scp_exit' in r['measurement'] else
+                 r['measurement']['curl_exit']==0 and r['measurement']['http_status']==200) for r in measurements)))
             for record in sorted(measurements,key=lambda r:(r['hostname'].casefold(),r['stage'],r['measurement']['attempt'])):
                 row=record['measurement']
+                transport=(f"SCP-exit={row['scp_exit']} reserved-status={row['reserved_status']}"
+                    if 'scp_exit' in row else f"HTTP={row['http_status']} curl-exit={row['curl_exit']}")
                 detail('    '+device_name(record['hostname'],'os')+' '+record['stage']+': ',
                     f"attempt={row['attempt']} {row['bytes_downloaded']/1000000:.1f}MB "
                     f"{row['elapsed_seconds']:.3f}s avg={row['average_bytes_per_second']/1000000:.2f}MB/s "
-                    f"HTTP={row['http_status']} curl-exit={row['curl_exit']}")
+                    f"{transport}")
     if summary.get('ssd_checks') and not any(p['component']=='os' for p in view['component_groups']):
         ssd_results()
     section('04 HEALTH CHECKS')
@@ -1734,14 +1858,23 @@ def main(argv=None,*,_password_attempt=1,_password_history=()):
     parsed, prepare_arguments, entry, cwd = None, None, None, None
     prepared = None
     try:
-        parsed = _parse_cli(tuple(sys.argv[1:] if argv is None else argv))
+        argv = tuple(sys.argv[1:] if argv is None else argv)
+        parsed = _parse_cli(argv)
         is_upgrade = parsed.upgrade
         stage = "DEPENDENCIES"
         driver = _fixed_driver()
         entry, cwd = str(Path(__file__).resolve()), os.getcwd()
-        parsed.prepare_args = _local_input_arguments(parsed, cwd)
         # Pure argument validation precedes any prompt or private-output creation.
         stage = "INPUT_PREFLIGHT"
+        driver.parse_prepare_args(entry, cwd, _local_input_arguments(parsed, cwd))
+        method = _choose_transfer_method(parsed)
+        if parsed.method is None and parsed.http_scheme is None:
+            # Freeze only this public choice into the original argv. Recursive
+            # password correction must not reopen a menu or change transport;
+            # no credentials or prepared/source authority are carried forward.
+            argv = (*argv, '--method', method)
+            parsed.method = method
+        parsed.prepare_args = _local_input_arguments(parsed, cwd)
         prepare_arguments = driver.parse_prepare_args(entry, cwd, parsed.prepare_args)
         if parsed.scripts_only and prepare_arguments.method not in ("local", "http"):
             raise _InspectionHold("SCP script declarations are not implemented")
@@ -1813,6 +1946,9 @@ def main(argv=None,*,_password_attempt=1,_password_history=()):
                         previous_password_attempt_runs=list(_password_history)))
                     raise _PasswordReentry(prepared['run_directory'])
             if parsed.upgrade:
+                if prepare_arguments.method == 'scp':
+                    stage = "SCP_SOURCE"
+                    _configure_scp_source(scope, parsed)
                 stage = "UPGRADE"
                 sys.stderr.write("[NOTICE] Manual upgrade: no deployment or history gates. The CLI holds a "
                                  "host-local initialization/upgrade runtime guard; ensure no other server or "

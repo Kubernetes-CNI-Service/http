@@ -428,7 +428,46 @@
         "test_cases.test_ibsw225_runtime_guard_exception_priority",
         "test_cases.test_ibsw225_initializer_report_finally_direct",
         "test_cases.test_ibsw225_initializer_help_guard",
-        "test_cases.test_ibsw225_managed_outer_guard_workflow"
+        "test_cases.test_ibsw225_managed_outer_guard_workflow",
+        "test_cases.test_ibsw3_cpld_os22_template_gate",
+        "test_cases.test_ibsw3_main_transfer_choice",
+        "test_cases.test_ibsw3_native_bios_bridge",
+        "test_cases.test_ibsw3_native_borrow_hybrid_provenance",
+        "test_cases.test_ibsw3_native_borrow_phase_boundary",
+        "test_cases.test_ibsw3_native_cpld_bridge",
+        "test_cases.test_ibsw3_native_foreign_probe_regression",
+        "test_cases.test_ibsw3_native_os_canonical_carrier_contract",
+        "test_cases.test_ibsw3_native_os_event_clock",
+        "test_cases.test_ibsw3_native_os_manager_workflow",
+        "test_cases.test_ibsw3_native_scp_cli_borrow_capability",
+        "test_cases.test_ibsw3_native_scp_launch_context",
+        "test_cases.test_ibsw3_native_scp_no_write_capability",
+        "test_cases.test_ibsw3_native_source_preflight_workflow",
+        "test_cases.test_ibsw3_scp_component_data_protocol",
+        "test_cases.test_ibsw3_scp_download_display",
+        "test_cases.test_ibsw3_scp_parent_source_binding",
+        "test_cases.test_ibsw3_scp_probe_api_python_model",
+        "test_cases.test_ibsw3_scp_probe_shared_hold",
+        "test_cases.test_ibsw3_scp_source_api_close",
+        "test_cases.test_ibsw3_scp_source_api_python_model",
+        "test_cases.test_ibsw3_scp_source_cli_prompt_binding",
+        "test_cases.test_ibsw3_scp_source_constructor_semantics",
+        "test_cases.test_ibsw3_scp_source_dependency_faults",
+        "test_cases.test_ibsw3_scp_source_factory_provenance",
+        "test_cases.test_ibsw3_scp_source_probe_channel",
+        "test_cases.test_ibsw3_scp_stdout_packet_direct",
+        "test_cases.test_ibsw3_stdin_owned_cpld_protocol",
+        "test_cases.test_ibsw3_transfer_method_selector",
+        "test_cases.test_native_cpld_safe_image_fail_closed",
+        "test_cases.test_native_display_source_inverse",
+        "test_cases.test_native_os_cancel_boundary",
+        "test_cases.test_native_os_fixture_timeout",
+        "test_cases.test_native_os_source_inverse",
+        "test_cases.test_native_bios_shared_source_inverse",
+        "test_cases.test_ibsw3_source_inverse_fixture_portability",
+        "test_cases.test_native_bios_os22_consumer_compatibility",
+        "test_cases.test_ibsw3_native_probe_target_query_stop",
+        "test_cases.test_ibsw3_native_scp_landing_docs"
       ]
     },
     {
@@ -599,7 +638,41 @@
     "test_cases/ibsw225_fixture_support/legacy_shell_workflow.py",
     "test_cases/ibsw3_scp_test_isolation.py",
     "test_cases/ibsw3_scp_request_test_isolation.py",
-    "test_cases/ibsw3_scp_cpld_test_isolation.py"
+    "test_cases/ibsw3_scp_cpld_test_isolation.py",
+    "test_cases/fixtures/native-cpld-template-pre-os22.sh.txt",
+    "test_cases/fixtures/native-cpld-template-with-os22.sh.txt",
+    "test_cases/native_bios_flow.py",
+    "test_cases/native_bios_isolation.py",
+    "test_cases/native_bios_physical_io.py",
+    "test_cases/native_bios_safe_image.py",
+    "test_cases/native_bios_stub_sources.py",
+    "test_cases/native_cpld_physical_io.py",
+    "test_cases/native_cpld_safe_image.py",
+    "test_cases/native_cpld_stub_sources.py",
+    "test_cases/native_os_dual_channel.py",
+    "test_cases/native_os_physical_bridge.py",
+    "test_cases/native_os_safe_image.py",
+    "test_cases/native_os_stub_sources.py",
+    "test_cases/native_os_test_isolation.py",
+    "test_cases/scp_foreign_probe_fixture.py",
+    "test_cases/scp_main_selector_fixture.py",
+    "test_cases/scp_native_cli_fixture_v2.py",
+    "test_cases/scp_native_cpld_bridge_fixture.py",
+    "test_cases/scp_native_cpld_bridge_isolation.py",
+    "test_cases/scp_native_os_manager_fixture.py",
+    "test_cases/scp_native_source_preflight_fixture.py",
+    "test_cases/scp_source_cli_fixture.py",
+    "test_cases/scp_stdin_cpld_protocol_fixture.py",
+    "test_cases/fixtures/ibsw3-source-inverse/os22/before/tools/ibsw_upgrade_driver.py.txt",
+    "test_cases/fixtures/ibsw3-source-inverse/os22/before/tools/ibsw_upgrade_executor.py.txt",
+    "test_cases/fixtures/ibsw3-source-inverse/os22/before/tools/ibsw_upgrade_component.py.txt",
+    "test_cases/fixtures/ibsw3-source-inverse/os22/before/infiniband/bringup/xdr-upgrade/upgrade-component.sh.txt",
+    "test_cases/fixtures/ibsw3-source-inverse/display/before/infiniband/bringup/xdr-upgrade/upgrade.py.txt",
+    "test_cases/fixtures/ibsw3-source-inverse/os22/candidate/tools/ibsw_upgrade_driver.py.txt",
+    "test_cases/fixtures/ibsw3-source-inverse/os22/candidate/tools/ibsw_upgrade_executor.py.txt",
+    "test_cases/fixtures/ibsw3-source-inverse/os22/candidate/tools/ibsw_upgrade_component.py.txt",
+    "test_cases/fixtures/ibsw3-source-inverse/os22/candidate/infiniband/bringup/xdr-upgrade/upgrade-component.sh.txt",
+    "test_cases/fixtures/ibsw3-source-inverse/display/candidate/infiniband/bringup/xdr-upgrade/upgrade.py.txt"
   ],
   "scripts": {
     "DAY0-Prepare/01-a-setup.py": "DAY0-Prepare/01-a-setup.py",
@@ -2205,7 +2278,16 @@
     {
       "id": "ibsw3_scp_source_receiver_direct",
       "paths": ["tools/ibsw_upgrade_scp.py"],
-      "tests": ["test_cases.test_ibsw3_scp_source_binding", "test_cases.test_ibsw3_scp_parent_content_owner", "test_cases.test_ibsw3_scp_parent_cleanup_boundary"]
+      "tests": ["test_cases.test_ibsw3_scp_source_binding", "test_cases.test_ibsw3_scp_parent_content_owner", "test_cases.test_ibsw3_scp_parent_cleanup_boundary",
+        "test_cases.test_ibsw3_scp_source_constructor_semantics",
+        "test_cases.test_ibsw3_scp_source_factory_provenance",
+        "test_cases.test_ibsw3_scp_source_dependency_faults",
+        "test_cases.test_ibsw3_scp_source_api_python_model",
+        "test_cases.test_ibsw3_scp_probe_api_python_model",
+        "test_cases.test_ibsw3_scp_source_api_close",
+        "test_cases.test_ibsw3_scp_source_probe_channel",
+        "test_cases.test_ibsw3_scp_probe_shared_hold"
+      ]
     },
     {
       "id": "ibsw225_entry_render_component_direct",
@@ -2225,7 +2307,30 @@
         "test_cases.test_ibsw225_three_component_workflow",
         "test_cases.test_ibsw225_delayed_owned_exit_witness",
         "test_cases.test_ibsw225_input_isolation",
-        "test_cases.test_ibsw225_flat_tools_layout"
+        "test_cases.test_ibsw225_flat_tools_layout",
+        "test_cases.test_ibsw3_main_transfer_choice",
+        "test_cases.test_ibsw3_transfer_method_selector",
+        "test_cases.test_ibsw3_scp_source_cli_prompt_binding",
+        "test_cases.test_ibsw3_scp_download_display",
+        "test_cases.test_ibsw3_scp_component_data_protocol",
+        "test_cases.test_ibsw3_scp_stdout_packet_direct",
+        "test_cases.test_ibsw3_stdin_owned_cpld_protocol",
+        "test_cases.test_ibsw3_cpld_os22_template_gate",
+        "test_cases.test_native_cpld_safe_image_fail_closed",
+        "test_cases.test_native_os_source_inverse",
+        "test_cases.test_native_display_source_inverse",
+        "test_cases.test_ibsw3_native_cpld_bridge",
+        "test_cases.test_ibsw3_native_os_manager_workflow",
+        "test_cases.test_ibsw3_native_bios_bridge",
+        "test_cases.test_ibsw3_native_os_canonical_carrier_contract",
+        "test_cases.test_ibsw3_native_os_event_clock",
+        "test_cases.test_native_os_cancel_boundary",
+        "test_cases.test_native_os_fixture_timeout",
+        "test_cases.test_native_bios_shared_source_inverse",
+        "test_cases.test_ibsw3_source_inverse_fixture_portability",
+        "test_cases.test_native_bios_os22_consumer_compatibility",
+        "test_cases.test_ibsw3_native_probe_target_query_stop",
+        "test_cases.test_ibsw3_native_scp_landing_docs"
       ]
     },
     {
@@ -2238,7 +2343,8 @@
       "tests": [
         "test_cases.test_ibsw225_input_isolation",
         "test_cases.test_ibsw225_known_hosts",
-        "test_cases.test_ibsw225_access_recovery"
+        "test_cases.test_ibsw225_access_recovery",
+        "test_cases.test_ibsw3_native_probe_target_query_stop"
       ]
     },
     {
@@ -2249,7 +2355,12 @@
       ],
       "tests": [
         "test_cases.test_ibsw225_os_canary_coverage",
-        "test_cases.test_ibsw225_cooperative_pipeline"
+        "test_cases.test_ibsw225_cooperative_pipeline",
+        "test_cases.test_ibsw3_native_scp_cli_borrow_capability",
+        "test_cases.test_ibsw3_native_scp_no_write_capability",
+        "test_cases.test_ibsw3_native_borrow_phase_boundary",
+        "test_cases.test_ibsw3_native_borrow_hybrid_provenance",
+        "test_cases.test_ibsw3_native_probe_target_query_stop"
       ]
     },
     {
@@ -2306,11 +2417,17 @@
       "id": "ibsw3_scp_request_content_scope_direct",
       "paths": [
         "tools/ibsw_upgrade_driver.py",
-        "tools/ibsw_upgrade_scp.py"
+        "tools/ibsw_upgrade_scp.py",
+        "tools/ibsw_upgrade_executor.py"
       ],
       "tests": [
         "test_cases.test_ibsw3_scp_scope_request_content",
-        "test_cases.test_ibsw3_scp_request_cpld_sources"
+        "test_cases.test_ibsw3_scp_request_cpld_sources",
+        "test_cases.test_ibsw3_scp_parent_source_binding",
+        "test_cases.test_ibsw3_native_scp_launch_context",
+        "test_cases.test_ibsw3_native_source_preflight_workflow",
+        "test_cases.test_ibsw3_native_foreign_probe_regression",
+        "test_cases.test_ibsw3_native_probe_target_query_stop"
       ]
     }
   ],
@@ -3680,8 +3797,19 @@
     },
     {
       "id": "ibsw3_scp_source_key_endpoint_workflow",
-      "members": ["tools/ibsw_upgrade_scp.py", "tools/ibsw_upgrade_driver.py", "tools/ssh_key_preparation.py", "tools/ibsw_upgrade_contract.py", "tools/project_contract.py"],
-      "tests": ["test_cases.test_ibsw3_scp_source_binding", "test_cases.test_ibsw3_scp_parent_content_owner", "test_cases.test_ibsw3_scp_parent_cleanup_boundary"]
+      "members": ["tools/ibsw_upgrade_scp.py", "tools/ibsw_upgrade_driver.py", "tools/ssh_key_preparation.py", "tools/ibsw_upgrade_contract.py", "tools/project_contract.py",
+        "tools/ibsw_upgrade_observer.py"
+      ],
+      "tests": ["test_cases.test_ibsw3_scp_source_binding", "test_cases.test_ibsw3_scp_parent_content_owner", "test_cases.test_ibsw3_scp_parent_cleanup_boundary",
+        "test_cases.test_ibsw3_scp_source_constructor_semantics",
+        "test_cases.test_ibsw3_scp_source_factory_provenance",
+        "test_cases.test_ibsw3_scp_source_dependency_faults",
+        "test_cases.test_ibsw3_scp_source_api_python_model",
+        "test_cases.test_ibsw3_scp_probe_api_python_model",
+        "test_cases.test_ibsw3_scp_source_api_close",
+        "test_cases.test_ibsw3_scp_source_probe_channel",
+        "test_cases.test_ibsw3_scp_probe_shared_hold"
+      ]
     },
     {
       "id": "req7_ib_expected_topology_byte_authority",
@@ -4181,7 +4309,8 @@
         "tools/ibsw_upgrade_executor.py",
         "tools/ibsw_upgrade_observer.py",
         "tools/ibsw_upgrade_access.py",
-        "tools/ibsw_upgrade_pipeline.py"
+        "tools/ibsw_upgrade_pipeline.py",
+        "tools/ibsw_upgrade_scp.py"
       ],
       "tests": [
         "test_cases.test_ibsw225_three_component_workflow",
@@ -4189,7 +4318,32 @@
         "test_cases.test_ibsw225_access_recovery",
         "test_cases.test_ibsw225_os_alternatives",
         "test_cases.test_ibsw225_input_isolation",
-        "test_cases.test_ibsw225_flat_tools_layout"
+        "test_cases.test_ibsw225_flat_tools_layout",
+        "test_cases.test_ibsw3_main_transfer_choice",
+        "test_cases.test_ibsw3_transfer_method_selector",
+        "test_cases.test_ibsw3_scp_source_cli_prompt_binding",
+        "test_cases.test_ibsw3_scp_download_display",
+        "test_cases.test_ibsw3_scp_component_data_protocol",
+        "test_cases.test_ibsw3_scp_stdout_packet_direct",
+        "test_cases.test_ibsw3_stdin_owned_cpld_protocol",
+        "test_cases.test_ibsw3_cpld_os22_template_gate",
+        "test_cases.test_native_cpld_safe_image_fail_closed",
+        "test_cases.test_native_os_source_inverse",
+        "test_cases.test_native_display_source_inverse",
+        "test_cases.test_ibsw3_native_cpld_bridge",
+        "test_cases.test_ibsw3_native_os_manager_workflow",
+        "test_cases.test_ibsw3_native_bios_bridge",
+        "test_cases.test_ibsw3_native_os_canonical_carrier_contract",
+        "test_cases.test_ibsw3_native_os_event_clock",
+        "test_cases.test_native_os_cancel_boundary",
+        "test_cases.test_native_os_fixture_timeout",
+        "test_cases.test_ibsw3_native_scp_cli_borrow_capability",
+        "test_cases.test_ibsw3_native_scp_no_write_capability",
+        "test_cases.test_ibsw3_native_borrow_phase_boundary",
+        "test_cases.test_ibsw3_native_borrow_hybrid_provenance",
+        "test_cases.test_native_bios_shared_source_inverse",
+        "test_cases.test_ibsw3_source_inverse_fixture_portability",
+        "test_cases.test_native_bios_os22_consumer_compatibility"
       ]
     },
     {
@@ -4229,7 +4383,9 @@
         "tools/ibsw_upgrade_contract.py",
         "tools/ibsw_upgrade_component.py",
         "tools/ibsw_upgrade_executor.py",
-        "tools/project_contract.py"
+        "tools/project_contract.py",
+        "tools/ibsw_upgrade_observer.py",
+        "tools/ibsw_upgrade_pipeline.py"
       ],
       "tests": [
         "test_cases.test_ibsw3_scp_stage_scope",
@@ -4238,7 +4394,13 @@
         "test_cases.test_ibsw3_scp_provider_source",
         "test_cases.test_ibsw3_scp_provider_cache",
         "test_cases.test_ibsw3_scp_provider_absent",
-        "test_cases.test_ibsw3_scp_provider_close"
+        "test_cases.test_ibsw3_scp_provider_close",
+        "test_cases.test_ibsw3_scp_source_cli_prompt_binding",
+        "test_cases.test_ibsw3_scp_parent_source_binding",
+        "test_cases.test_ibsw3_native_scp_launch_context",
+        "test_cases.test_ibsw3_scp_source_factory_provenance",
+        "test_cases.test_ibsw3_scp_source_dependency_faults",
+        "test_cases.test_ibsw3_scp_source_api_close"
       ]
     },
     {
@@ -4268,11 +4430,18 @@
         "tools/ibsw_upgrade_inputs.py",
         "tools/ibsw_upgrade_contract.py",
         "tools/ibsw_upgrade_executor.py",
-        "tools/project_contract.py"
+        "tools/project_contract.py",
+        "tools/ibsw_upgrade_observer.py",
+        "tools/ibsw_upgrade_pipeline.py"
       ],
       "tests": [
         "test_cases.test_ibsw3_scp_scope_request_content",
-        "test_cases.test_ibsw3_scp_request_cpld_sources"
+        "test_cases.test_ibsw3_scp_request_cpld_sources",
+        "test_cases.test_ibsw3_scp_parent_source_binding",
+        "test_cases.test_ibsw3_native_scp_launch_context",
+        "test_cases.test_ibsw3_native_source_preflight_workflow",
+        "test_cases.test_ibsw3_native_foreign_probe_regression",
+        "test_cases.test_ibsw3_native_probe_target_query_stop"
       ]
     }
   ],
@@ -4674,6 +4843,240 @@
       ],
       "tests": [
         "test_cases.test_ibsw3_scp_request_cpld_sources"
+      ]
+    },
+    {
+      "paths": [
+        "test_cases/fixtures/native-cpld-template-pre-os22.sh.txt",
+        "test_cases/fixtures/native-cpld-template-with-os22.sh.txt"
+      ],
+      "tests": [
+        "test_cases.test_ibsw3_cpld_os22_template_gate"
+      ]
+    },
+    {
+      "paths": [
+        "test_cases/native_bios_flow.py",
+        "test_cases/native_bios_isolation.py",
+        "test_cases/native_bios_physical_io.py",
+        "test_cases/native_bios_safe_image.py",
+        "test_cases/native_bios_stub_sources.py"
+      ],
+      "tests": [
+        "test_cases.test_ibsw3_native_bios_bridge"
+      ]
+    },
+    {
+      "paths": [
+        "test_cases/native_cpld_physical_io.py",
+        "test_cases/native_cpld_safe_image.py",
+        "test_cases/native_cpld_stub_sources.py",
+        "test_cases/scp_native_cpld_bridge_fixture.py",
+        "test_cases/scp_native_cpld_bridge_isolation.py"
+      ],
+      "tests": [
+        "test_cases.test_ibsw3_cpld_os22_template_gate",
+        "test_cases.test_ibsw3_native_bios_bridge",
+        "test_cases.test_ibsw3_native_cpld_bridge",
+        "test_cases.test_ibsw3_native_os_canonical_carrier_contract",
+        "test_cases.test_ibsw3_native_os_manager_workflow",
+        "test_cases.test_native_cpld_safe_image_fail_closed",
+        "test_cases.test_native_display_source_inverse",
+        "test_cases.test_native_os_cancel_boundary",
+        "test_cases.test_native_os_fixture_timeout",
+        "test_cases.test_native_os_source_inverse"
+      ]
+    },
+    {
+      "paths": [
+        "test_cases/native_os_dual_channel.py",
+        "test_cases/native_os_physical_bridge.py",
+        "test_cases/native_os_safe_image.py",
+        "test_cases/native_os_test_isolation.py",
+        "test_cases/scp_native_os_manager_fixture.py"
+      ],
+      "tests": [
+        "test_cases.test_ibsw3_native_bios_bridge",
+        "test_cases.test_ibsw3_native_os_canonical_carrier_contract",
+        "test_cases.test_ibsw3_native_os_manager_workflow",
+        "test_cases.test_native_display_source_inverse",
+        "test_cases.test_native_os_cancel_boundary",
+        "test_cases.test_native_os_fixture_timeout",
+        "test_cases.test_native_os_source_inverse"
+      ]
+    },
+    {
+      "paths": [
+        "test_cases/native_os_stub_sources.py"
+      ],
+      "tests": [
+        "test_cases.test_ibsw3_native_bios_bridge",
+        "test_cases.test_ibsw3_native_os_canonical_carrier_contract",
+        "test_cases.test_ibsw3_native_os_event_clock",
+        "test_cases.test_ibsw3_native_os_manager_workflow",
+        "test_cases.test_native_display_source_inverse",
+        "test_cases.test_native_os_cancel_boundary",
+        "test_cases.test_native_os_fixture_timeout",
+        "test_cases.test_native_os_source_inverse"
+      ]
+    },
+    {
+      "paths": [
+        "test_cases/scp_foreign_probe_fixture.py"
+      ],
+      "tests": [
+        "test_cases.test_ibsw3_native_foreign_probe_regression"
+      ]
+    },
+    {
+      "paths": [
+        "test_cases/scp_main_selector_fixture.py"
+      ],
+      "tests": [
+        "test_cases.test_ibsw3_main_transfer_choice"
+      ]
+    },
+    {
+      "paths": [
+        "test_cases/scp_native_cli_fixture_v2.py"
+      ],
+      "tests": [
+        "test_cases.test_ibsw3_native_scp_no_write_capability"
+      ]
+    },
+    {
+      "paths": [
+        "test_cases/scp_native_source_preflight_fixture.py"
+      ],
+      "tests": [
+        "test_cases.test_ibsw3_native_foreign_probe_regression",
+        "test_cases.test_ibsw3_native_scp_launch_context",
+        "test_cases.test_ibsw3_native_source_preflight_workflow",
+        "test_cases.test_ibsw3_native_probe_target_query_stop"
+      ]
+    },
+    {
+      "paths": [
+        "test_cases/scp_source_cli_fixture.py"
+      ],
+      "tests": [
+        "test_cases.test_ibsw3_cpld_os22_template_gate",
+        "test_cases.test_ibsw3_native_bios_bridge",
+        "test_cases.test_ibsw3_native_borrow_hybrid_provenance",
+        "test_cases.test_ibsw3_native_cpld_bridge",
+        "test_cases.test_ibsw3_native_foreign_probe_regression",
+        "test_cases.test_ibsw3_native_os_canonical_carrier_contract",
+        "test_cases.test_ibsw3_native_os_manager_workflow",
+        "test_cases.test_ibsw3_native_scp_cli_borrow_capability",
+        "test_cases.test_ibsw3_native_scp_launch_context",
+        "test_cases.test_ibsw3_native_source_preflight_workflow",
+        "test_cases.test_ibsw3_scp_parent_source_binding",
+        "test_cases.test_ibsw3_scp_source_cli_prompt_binding",
+        "test_cases.test_ibsw3_scp_source_constructor_semantics",
+        "test_cases.test_ibsw3_scp_source_dependency_faults",
+        "test_cases.test_ibsw3_scp_source_factory_provenance",
+        "test_cases.test_ibsw3_transfer_method_selector",
+        "test_cases.test_native_cpld_safe_image_fail_closed",
+        "test_cases.test_native_display_source_inverse",
+        "test_cases.test_native_os_cancel_boundary",
+        "test_cases.test_native_os_fixture_timeout",
+        "test_cases.test_native_os_source_inverse",
+        "test_cases.test_ibsw3_native_probe_target_query_stop"
+      ]
+    },
+    {
+      "paths": [
+        "test_cases/scp_stdin_cpld_protocol_fixture.py"
+      ],
+      "tests": [
+        "test_cases.test_ibsw3_stdin_owned_cpld_protocol"
+      ]
+    },
+    {
+      "paths": [
+        "test_cases/test_ibsw225_runtime_source_manifest_contract.py"
+      ],
+      "tests": [
+        "test_cases.test_ibsw225_runtime_source_manifest_contract",
+        "test_cases.test_native_bios_shared_source_inverse",
+        "test_cases.test_ibsw3_native_cpld_bridge",
+        "test_cases.test_ibsw3_native_os_manager_workflow",
+        "test_cases.test_ibsw3_native_bios_bridge",
+        "test_cases.test_native_bios_os22_consumer_compatibility"
+      ]
+    },
+    {
+      "paths": [
+        "test_cases/native_os_safe_image.py"
+      ],
+      "tests": [
+        "test_cases.test_native_bios_shared_source_inverse"
+      ]
+    },
+    {
+      "paths": [
+        "test_cases/fixtures/ibsw3-source-inverse/os22/before/tools/ibsw_upgrade_driver.py.txt",
+        "test_cases/fixtures/ibsw3-source-inverse/os22/before/tools/ibsw_upgrade_executor.py.txt",
+        "test_cases/fixtures/ibsw3-source-inverse/os22/before/tools/ibsw_upgrade_component.py.txt",
+        "test_cases/fixtures/ibsw3-source-inverse/os22/before/infiniband/bringup/xdr-upgrade/upgrade-component.sh.txt",
+        "test_cases/fixtures/ibsw3-source-inverse/display/before/infiniband/bringup/xdr-upgrade/upgrade.py.txt",
+        "test_cases/fixtures/ibsw3-source-inverse/os22/candidate/tools/ibsw_upgrade_driver.py.txt",
+        "test_cases/fixtures/ibsw3-source-inverse/os22/candidate/tools/ibsw_upgrade_executor.py.txt",
+        "test_cases/fixtures/ibsw3-source-inverse/os22/candidate/tools/ibsw_upgrade_component.py.txt",
+        "test_cases/fixtures/ibsw3-source-inverse/os22/candidate/infiniband/bringup/xdr-upgrade/upgrade-component.sh.txt",
+        "test_cases/fixtures/ibsw3-source-inverse/display/candidate/infiniband/bringup/xdr-upgrade/upgrade.py.txt"
+      ],
+      "tests": [
+        "test_cases.test_native_os_source_inverse",
+        "test_cases.test_native_display_source_inverse",
+        "test_cases.test_ibsw3_source_inverse_fixture_portability"
+      ]
+    },
+    {
+      "paths": [
+        "test_cases/test_native_os_source_inverse.py",
+        "test_cases/test_native_display_source_inverse.py"
+      ],
+      "tests": [
+        "test_cases.test_native_os_source_inverse",
+        "test_cases.test_native_display_source_inverse",
+        "test_cases.test_ibsw3_source_inverse_fixture_portability"
+      ]
+    },
+    {
+      "paths": [
+        "test_cases/test_ibsw3_native_source_preflight_workflow.py"
+      ],
+      "tests": [
+        "test_cases.test_ibsw3_native_source_preflight_workflow",
+        "test_cases.test_ibsw3_native_foreign_probe_regression",
+        "test_cases.test_ibsw3_native_probe_target_query_stop"
+      ]
+    },
+    {
+      "paths": [
+        "test_cases/test_ibsw3_native_probe_target_query_stop.py"
+      ],
+      "tests": [
+        "test_cases.test_ibsw3_native_probe_target_query_stop"
+      ]
+    },
+    {
+      "paths": [
+        "infiniband/bringup/xdr-upgrade/README.md",
+        "infiniband/bringup/xdr-upgrade/HANDOFF-CODEX-TEST.md",
+        "test_cases/REAL_ENVIRONMENT.md"
+      ],
+      "tests": [
+        "test_cases.test_ibsw3_native_scp_landing_docs"
+      ]
+    },
+    {
+      "paths": [
+        "test_cases/test_ibsw3_native_scp_landing_docs.py"
+      ],
+      "tests": [
+        "test_cases.test_ibsw3_native_scp_landing_docs"
       ]
     }
   ]

@@ -10,10 +10,13 @@ set -euo pipefail
 
 temporary=""
 install_requested=false
+ibsw_scp_context=""
+ibsw_scp_context_read=false
 IBSW_OS_DOWNLOAD_TIMEOUT=600
 IBSW_FIRMWARE_DOWNLOAD_TIMEOUT=300
 finish_step() {
     rc=$?
+    unset ibsw_scp_context
     if [[ -n "$temporary" ]]; then
         rm -f -- "$temporary"
     fi
@@ -30,8 +33,23 @@ trap 'exit 143' TERM
 
 printf '%s\n' "$IBSW_BINDING_JSON"
 [[ -d "$IBSW_SWITCH_DIR" && ! -L "$IBSW_SWITCH_DIR" ]] || exit 65
+read_scp_context() {
+    $ibsw_scp_context_read && return
+    local deadline=$((SECONDS+10)) remaining extra="" rc=0
+    remaining=$((deadline-SECONDS))
+    (( remaining > 0 )) || exit 65
+    IFS= read -r -n 65537 -t "$remaining" ibsw_scp_context || exit 64
+    [[ -n "$ibsw_scp_context" && ${#ibsw_scp_context} -le 65535 ]] || exit 64
+    export -n ibsw_scp_context
+    remaining=$((deadline-SECONDS))
+    (( remaining > 0 )) || exit 65
+    IFS= read -r -n 1 -t "$remaining" extra || rc=$?
+    [[ "$rc" == 1 ]] || exit 65
+    exec 0</dev/null
+    ibsw_scp_context_read=true
+}
 prepare_package() {
-    local IBSW_LOCAL_PACKAGE="$1" IBSW_PACKAGE_URL="$2"
+    local IBSW_LOCAL_PACKAGE="$1" IBSW_PACKAGE_URL="$2" scp_source="${3:-}"
     printf '%s\n' 'IBSW_STAGE=PACKAGE_DOWNLOAD'
     [[ ! -L "$IBSW_LOCAL_PACKAGE" ]] || exit 65
     case "$IBSW_METHOD" in
@@ -88,6 +106,64 @@ prepare_package() {
         mv -- "$temporary" "$IBSW_LOCAL_PACKAGE"
         temporary=""
         ;;
+    scp)
+        # SCP OS waits for its exact content-bound manager V2 ACK below.
+        : "${scp_source:?bound source path required}"
+        : "${IBSW_SCP_HELPER_B64:?fixed stdin-only helper required}"
+        read_scp_context
+        temporary=$(mktemp "$IBSW_SWITCH_DIR/.ibsw-$IBSW_RUN_ID-XXXXXX")
+        local result rc=0 rest candidate content="" measurement=""
+        result=$(builtin printf '%s\n' "$ibsw_scp_context" | /usr/bin/python3 -c \
+            'import base64,sys;exec(base64.b64decode(sys.argv.pop(1)))' \
+            "$IBSW_SCP_HELPER_B64" fetch "$scp_source" "$temporary" 2>/dev/null) || rc=$?
+        if [[ "$rc" != 0 ]]; then
+            printf '%s\n' 'IBSW_SCP_ERROR=TRANSFER_FAILED'
+            exit "$rc"
+        fi
+        [[ -n "$result" && ${#result} -le 4096 ]] || exit 66
+        rest="$result"
+        while [[ -n "$rest" ]]; do
+            if [[ "$rest" == *$'\n'* ]]; then
+                candidate="${rest%%$'\n'*}"
+                rest="${rest#*$'\n'}"
+            else
+                candidate="$rest"
+                rest=""
+            fi
+            if [[ "$candidate" =~ ^IBSW_SCP_CONTENT_VERIFIED=1\|[0-9a-f]{64}\|[A-Za-z0-9_-]+\|[1-9][0-9]*\|[0-9a-f]{64}$ ]]; then
+                [[ -z "$content" ]] || exit 66
+                content="$candidate"
+            elif [[ "$candidate" =~ ^IBSW_SCP_DOWNLOAD_RESULT=1\|[0-9]+\|[0-9]+\|0\|0\|[1-9][0-9]*\|[0-9]+([.][0-9]+)?\|[0-9]+([.][0-9]+)?$ ]]; then
+                [[ -z "$measurement" ]] || exit 66
+                measurement="$candidate"
+            else
+                exit 66 # No arbitrary helper stdout/stderr reflection.
+            fi
+        done
+        [[ -n "$content" && -n "$measurement" && -s "$temporary" ]] || exit 66
+        printf '%s\n' "$content" "$measurement"
+        if [[ "$IBSW_COMPONENT" == os ]]; then
+            # Public content DATA alone cannot release installation. The real
+            # manager must finish its original reliable record before V2 ACK.
+            printf '%s\n' 'IBSW_STAGE=WAIT_DOWNLOAD_RECORD'
+            local content_digest
+            content_digest=$(/usr/bin/python3 -c 'import hashlib,sys;print(hashlib.sha256(sys.argv[1].encode("ascii")).hexdigest())' "$content") || exit 66
+            local ack_path="${BASH_SOURCE[0]%/*}/download-ack"
+            local expected="IBSW_SCP_DOWNLOAD_ACK_V2|$IBSW_RUN_ID|$content_digest|$measurement" ack="" waited=0
+            while :; do
+                if [[ -f "$ack_path" && ! -L "$ack_path" ]]; then
+                    IFS= read -r ack < "$ack_path" || exit 66
+                    [[ "$ack" == "$expected" ]] || exit 66
+                    break
+                fi
+                (( waited < 300 )) || exit 75
+                sleep 1
+                waited=$((waited+1))
+            done
+        fi
+        mv -- "$temporary" "$IBSW_LOCAL_PACKAGE"
+        temporary=""
+        ;;
     local) ;;
     *) exit 64 ;;
     esac
@@ -96,7 +172,7 @@ prepare_package() {
 }
 
 # IBSW_BODY_OS
-prepare_package "$IBSW_LOCAL_PACKAGE" "$IBSW_PACKAGE_URL"
+prepare_package "$IBSW_LOCAL_PACKAGE" "$IBSW_PACKAGE_URL" "${IBSW_SCP_PACKAGE_PATH:-}"
 # NVOS IB published FILE fetch, then default-reboot install. The latter can
 # disconnect SSH before any final marker returns; do not resend it on timeout.
 printf '%s\n' 'IBSW_STAGE=IMAGE_FETCH'
@@ -106,7 +182,7 @@ printf '%s\n' 'IBSW_STAGE=INSTALL_REQUESTED'
 nv action install system image files "$IBSW_PACKAGE_FILE" force
 
 # IBSW_BODY_BIOS
-prepare_package "$IBSW_LOCAL_PACKAGE" "$IBSW_PACKAGE_URL"
+prepare_package "$IBSW_LOCAL_PACKAGE" "$IBSW_PACKAGE_URL" "${IBSW_SCP_PACKAGE_PATH:-}"
 printf '%s\n' 'IBSW_STAGE=BIOS_FETCH'
 nv action fetch platform firmware BIOS "file://${IBSW_LOCAL_PACKAGE}"
 install_requested=true
@@ -117,8 +193,8 @@ nv action install platform firmware BIOS files "$IBSW_PACKAGE_FILE" force skip-v
 : "${IBSW_REFRESH_FILE:?bound REFRESH package required}"
 : "${IBSW_REFRESH_LOCAL:?bound REFRESH path required}"
 # Validate/prepare both files before any firmware write is attempted.
-prepare_package "$IBSW_LOCAL_PACKAGE" "$IBSW_PACKAGE_URL"
-prepare_package "$IBSW_REFRESH_LOCAL" "$IBSW_REFRESH_URL"
+prepare_package "$IBSW_LOCAL_PACKAGE" "$IBSW_PACKAGE_URL" "${IBSW_SCP_PACKAGE_PATH:-}"
+prepare_package "$IBSW_REFRESH_LOCAL" "$IBSW_REFRESH_URL" "${IBSW_SCP_REFRESH_PATH:-}"
 nv action fetch platform firmware CPLD1 "file://${IBSW_LOCAL_PACKAGE}"
 printf '%s\n' 'IBSW_COMPONENT_STAGE=BURN_REQUESTED'
 printf '%s\n' 'IBSW_STAGE=CPLD_BURN'

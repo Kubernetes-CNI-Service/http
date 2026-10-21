@@ -404,8 +404,11 @@ class NativeAdapter:
 
     def begin(self,name,component,canary,stop):
         stack=ExitStack()
-        scope=stack.enter_context(self.driver.open_manual_run(
-            self.entry,self.cwd,self.parsed.prepare_args,self.directory))
+        if self.parent.parsed.method == 'scp':
+            scope=stack.enter_context(self.parent.fork_native_component_scope(name,component))
+        else:
+            scope=stack.enter_context(self.driver.open_manual_run(
+                self.entry,self.cwd,self.parsed.prepare_args,self.directory))
         scope._access_required=True
         if self.parent.policy.os_stages:
             # Live in-process context, never reconstruct a route from saved JSON.

@@ -440,7 +440,7 @@ class HttpDisabledOperatorDiagnosticTests(unittest.TestCase):
         self.assertEqual((
             'HTTP_POLICY',
             'HTTP is disabled in global; enable the approved project HTTP configuration before continuing. '
-            'This entry supports HTTP only; HTTPS, SCP and local are not fallback transports.',
+            'HTTP mode does not fall back to SCP, HTTPS or local transport.',
         ), app._failure_detail(ValueError('project HTTP is not enabled'), 'INPUT_PREFLIGHT'))
 
     def test_real_http_disabled_diagnostic_is_offline_and_preserves_project(self):
@@ -475,7 +475,7 @@ class HttpDisabledOperatorDiagnosticTests(unittest.TestCase):
             self.assertEqual('HTTP_POLICY', report['error']['code'])
             self.assertEqual(
                 'HTTP is disabled in global; enable the approved project HTTP configuration before continuing. '
-                'This entry supports HTTP only; HTTPS, SCP and local are not fallback transports.',
+                'HTTP mode does not fall back to SCP, HTTPS or local transport.',
                 report['error']['message'])
             self.assertEqual(['os'], report['selected_components'])
             self.assertEqual('http', report['method'])

@@ -1,0 +1,1819 @@
+"""Fixed component dispatch and original readback, not completion permission.
+
+Remote support is cooperative private SFTP namespace only, not hostile same-UID
+NOFOLLOW/FD-exec atomicity. No caller DTO, callback or supplied connection is
+adopted as permission. Native tests require a root-owned loopback test window.
+"""
+import base64
+import errno
+import hashlib
+import json
+import os
+import posixpath
+import re
+import secrets
+import shlex
+import stat
+import time
+
+from ibsw_upgrade_contract import record_readonly_query, parse_readonly_query_data, select_os_path, _version, SharedUpgradeHold
+from ibsw_upgrade_observer import (
+    _live_plan_inputs, _signed_session, _read_channel, _validate_identity,
+    _IDENTITY_COMMAND, _remaining, _fixed_sdk,
+    _owned_phase, _NativeObservationHold,
+)
+
+
+from ibsw_upgrade_contract import _fixed_layout
+_RUNNER = _fixed_layout(__file__) / "upgrade-owned-runner.sh"
+
+_OS_COMMAND = "nv show system version"
+_UID_COMMAND = "id -u"
+_CAPABILITY_COMMAND = "test -x /bin/bash && test -x /usr/bin/nohup"
+_UPLOAD_SECONDS = 300.0
+_EXECUTION_SECONDS = 1500.0  # Finite observation, not an installation-time guarantee.
+_COMPONENT_PREFLIGHT_SECONDS = 120.0  # Separate from SSH authentication; each query remains capped at 25s.
+_RESOURCE_ERRNOS = (errno.EMFILE, errno.ENFILE, errno.ENOMEM, errno.ENOBUFS)
+
+
+def _owned_runner_bytes(binding, remote):
+    """Pure original-child artifact DATA, not a launch or completion authority."""
+    from pathlib import Path
+    parent, filename = posixpath.split(remote) if type(remote) is str else ("", "")
+    prefix = ".ibsw-" + binding["run_id"] + "-" + binding["node"]["hostname"] + "-" + binding["stage"] + "-"
+    if (filename != "step.sh" or not remote.startswith("/") or posixpath.normpath(remote) != remote
+            or not re.fullmatch(re.escape(prefix) + "[0-9a-f]{32}", posixpath.basename(parent))
+            or binding["component"] not in {"os", "bios", "cpld"}
+            or not re.fullmatch(r"[0-9a-f]{64}", binding["script_sha256"])):
+        raise ValueError("original private step/run/component binding required")
+    values = (("IBSW_RUN_ID", binding["run_id"]), ("IBSW_NODE", binding["node"]["hostname"]),
+        ("IBSW_COMPONENT", binding["component"]), ("IBSW_STAGE", binding["stage"]),
+        ("IBSW_SCRIPT_SHA256", binding["script_sha256"]), ("IBSW_ORIGINAL_STEP", remote),
+        ("IBSW_EXIT_RECORD", posixpath.join(parent, "owned-exit.record")))
+    if any(type(value) is not str or any(char in value for char in ("\n", "\r", "\x00")) for _key, value in values):
+        raise ValueError("bounded single-line original runner fields required")
+    if _fixed_layout(__file__) / "upgrade-owned-runner.sh" != _RUNNER:
+        raise ValueError("fixed owned runner layout changed")
+    body = _RUNNER.read_bytes()
+    return ("#!/bin/bash\n" + "".join(key + "=" + shlex.quote(value) + "\n" for key, value in values)).encode() + body
+
+
+def _owned_exit_data(binding, payload):
+    """Strict supplied record DATA; no PID/installer/kernel/native admission."""
+    if type(payload) is not bytes or len(payload) > 512:
+        raise ValueError("missing/bounded original child record required")
+    prefix = ("IBSW_OWNED_EXIT_V1\n" + binding["run_id"] + "\n" + binding["node"]["hostname"] + "\n" +
+        binding["component"] + "\n" + binding["stage"] + "\n" + binding["script_sha256"] + "\n").encode()
+    value = payload[len(prefix):] if payload.startswith(prefix) else b""
+    if not re.fullmatch(rb"(?:0|[1-9][0-9]{0,2})\n", value) or int(value) > 255:
+        raise ValueError("partial/foreign/noncanonical original child record")
+    return {"state": "OWNED_SCRIPT_EXIT_REPORTED", "child_exit_code": int(value),
+        "pending_state": "UNKNOWN", "component_state": "UNKNOWN", "activation_state": "UNKNOWN",
+        "attestation_state": "DATA_ONLY_UNATTESTED", "observation_source": "SUPPLIED_RAW_DATA_NOT_KERNEL_ATTESTATION"}
+
+
+def _preinstall_failure_phase(binding, exit_code, files):
+    """Classify only a complete bound fixed-script failure before ANY install.
+
+    Caller must additionally verify the unchanged original boot and stable owned
+    files. A return value is negative evidence, never retry or success authority.
+    Missing/malformed/post-install evidence deliberately remains unknown.
+    """
+    try:
+        if type(exit_code) is not int or not 1<=exit_code<=255 or type(files) is not dict:
+            return None
+        if _owned_exit_data(binding,files['owned-exit.record'])['child_exit_code']!=exit_code:
+            return None
+        stdout=files['execution.stdout']
+        if type(stdout) is not bytes or len(stdout)>512*1024:
+            return None
+        node=binding['node']
+        header=json.dumps((binding['run_id'],node['hostname'],node['address'],node['mac'],
+            binding['component'],binding['target_version']),ensure_ascii=True,separators=(',',':')).encode('ascii')+b'\n'
+        footer=f'IBSW_EXECUTION_RC={exit_code} IBSW_ACTIVATION_STATE=UNKNOWN\n'.encode('ascii')
+        if (not stdout.startswith(header) or not stdout.endswith(footer)
+                or stdout.count(b'IBSW_EXECUTION_RC=')!=1
+                or b'IBSW_EXPECTED_EFFECT=' in stdout or b'IBSW_COMPONENT_STAGE=' in stdout):
+            return None
+        markers=re.findall(rb'(?m)^IBSW_STAGE=([^\n]*)$',stdout)
+        if not markers or any(stage not in (b'PACKAGE_DOWNLOAD',b'WAIT_DOWNLOAD_RECORD') for stage in markers):
+            return None
+        return markers[-1].decode('ascii')
+    except (ValueError,KeyError,TypeError,UnicodeError):
+        return None
+
+
+def _os_step_data(leaf, record):
+    """Pure declared DATA helper; supplied records are never native permission."""
+    from ibsw_upgrade_driver import _declared_candidate_data
+    scope, _global, run_plan, declared, args, policy = _live_plan_inputs(leaf)
+    if "os" not in args.selected or args.method not in {"local", "http"}:
+        raise ValueError("ONE OS executor currently covers selected OS/local or HTTP only")
+    if record.argv != ("nv", "show", "system", "version"):
+        raise ValueError("only complete original OS query")
+    parsed = parse_readonly_query_data(record)
+    if parsed.state != "TEXT_DATA_PARSED":
+        raise ValueError("unknown OS text DATA")
+    current = dict(parsed.fields)["image_version_text"]
+    remaining = _selected_os_path(leaf, policy, current)
+    if not remaining:
+        return None
+    index = next(index for index, package in enumerate(policy.os) if package == remaining[0])
+    stage = "os-" + format(index, "04d")
+    script, binding = _declared_candidate_data(policy, leaf.node, run_id=declared["run_id"], method=args.method,
+        switch_dir=args.switch_dir, plan_sha256=hashlib.sha256(run_plan.payload).hexdigest(),
+        input_sha256=[hashlib.sha256(source.payload).hexdigest() for source in scope.session._files],
+        component="os", package_index=index, stage_key=stage)
+    leaf.verify()
+    return {"state": "OS_STEP_DATA_ONLY", "record": record, "current_text": current,
+            "target_version": remaining[0].version, "package_index": index, "stage": stage,
+            "script": script, "binding": binding, "switch_dir": args.switch_dir}
+
+
+def _original_os_files(leaf, data):
+    fresh = _os_step_data(leaf, data["record"])
+    if fresh is None or data != fresh:
+        raise ValueError("OS declared DATA changed; cannot adopt caller plan")
+    scope = leaf._original_selection[0]
+    directory = scope.session._directory(scope.directory.path / leaf.node.hostname / fresh["stage"])
+    scope._private_directory(directory)
+    from ibsw_upgrade_driver import _json_bytes
+    script = scope._hold(directory, "step.sh", fresh["script"])
+    scope._hold(directory, "step-binding.json", _json_bytes(fresh["binding"]))
+    leaf.verify()
+    return scope, directory, script
+
+
+def _remote_metadata(item, uid, *, directory):
+    if (not (stat.S_ISDIR(item.st_mode) if directory else stat.S_ISREG(item.st_mode))
+            or item.st_uid != uid or stat.S_IMODE(item.st_mode) != (0o700 if directory else 0o600)):
+        raise ValueError("unsupported/foreign remote private ownership")
+
+
+def _launch_command(remote):
+    directory = posixpath.dirname(remote)
+    return ("/usr/bin/nohup /bin/bash " + shlex.quote(remote) + " >>" +
+            shlex.quote(posixpath.join(directory, "execution.stdout")) + " 2>>" +
+            shlex.quote(posixpath.join(directory, "execution.stderr")) +
+            " </dev/null & printf 'IBSW_LAUNCH_REQUESTED\\n'")
+
+
+def _owned_launch_command(remote):
+    """Fixed new launch kind; old historical step command remains unchanged."""
+    return _launch_command(posixpath.join(posixpath.dirname(remote), "runner.sh"))
+
+
+def _upload_original_script(leaf, data, sftp, uid, deadline):
+    """Private transfer primitive, not signed/native authority or FD-exec proof."""
+    scope, directory, script = (_original_component_files(leaf, data)
+        if "component" in data else _original_os_files(leaf, data))
+    if type(uid) is not int or uid < 0:
+        raise ValueError("actual remote numeric uid required")
+    root = data["switch_dir"]
+    path = "/"
+    for component in root.strip("/").split("/"):
+        path = posixpath.join(path, component)
+        _remaining(deadline); leaf.verify()
+        metadata = sftp.lstat(path)
+        if not stat.S_ISDIR(metadata.st_mode) or metadata.st_mode & 0o022:
+            raise ValueError("remote root must be a non-writable real directory chain")
+    if metadata.st_uid != uid:
+        raise ValueError("remote package/script root is not the authenticated uid")
+    basename = ".ibsw-" + scope.run_id + "-" + leaf.node.hostname + "-" + data["stage"] + "-" + secrets.token_hex(16)
+    remote_dir = posixpath.join(root, basename)
+    _remaining(deadline); leaf.verify()
+    sftp.mkdir(remote_dir, 0o700)  # Existing nonce namespace is HOLD, never reused.
+    sftp.chmod(remote_dir, 0o700)
+    _remote_metadata(sftp.lstat(remote_dir), uid, directory=True)
+    remote = posixpath.join(remote_dir, "step.sh")
+    _upload_original_file(leaf, script, sftp, uid, deadline, remote)
+    for filename in ("execution.stdout", "execution.stderr"):
+        _remaining(deadline); leaf.verify()
+        log_name = posixpath.join(remote_dir, filename)
+        log, failure = None, None
+        try:
+            log = sftp.open(log_name, "w+x")
+            sftp.chmod(log_name, 0o600)
+            log.flush()
+            _remote_metadata(log.stat(), uid, directory=False)
+            named = sftp.lstat(log_name)
+            _remote_metadata(named, uid, directory=False)
+            if named.st_size != 0:
+                raise ValueError("private precreated log is not empty")
+        except BaseException as caught:
+            failure = caught
+        finally:
+            if log is not None:
+                try:
+                    log.close()
+                except BaseException as cleanup:
+                    if failure is None or (isinstance(failure, Exception) and not isinstance(cleanup, Exception)):
+                        failure = cleanup
+        if failure is not None:
+            raise failure
+    # No remove/repair/overwrite of uncertain remote files or directories.
+    return remote
+
+
+def _upload_original_file(leaf, script, sftp, uid, deadline, remote):
+    """Shared exclusive original-handle transfer, never an execution permission."""
+    handle, original = None, None
+    try:
+        _verify_component_leaf(leaf); script.verify()
+        handle = sftp.open(remote, "w+x")  # EXCL; one original read/write handle.
+        sftp.chmod(remote, 0o600)
+        _remote_metadata(handle.stat(), uid, directory=False)
+        for offset in range(0, len(script.payload), 65536):
+            _remaining(deadline); _verify_component_io(leaf); script.verify()
+            handle.write(script.payload[offset:offset + 65536])
+        handle.flush()
+        handle.seek(0)
+        received = bytearray()
+        while len(received) <= len(script.payload):
+            _remaining(deadline); _verify_component_io(leaf); script.verify()
+            chunk = handle.read(min(65536, len(script.payload) + 1 - len(received)))
+            if not chunk:
+                break
+            received.extend(chunk)
+        _remote_metadata(handle.stat(), uid, directory=False)
+        named = sftp.lstat(remote)
+        _remote_metadata(named, uid, directory=False)
+        if named.st_size != len(script.payload) or bytes(received) != script.payload:
+            raise ValueError("original remote uploaded script readback mismatch; retain residue")
+        script.verify(); leaf.verify()
+    except BaseException as caught:
+        original = caught
+    finally:
+        if handle is not None:
+            try:
+                handle.close()
+            except BaseException as cleanup:
+                if original is None or (isinstance(original, Exception) and not isinstance(cleanup, Exception)):
+                    original = cleanup
+    if original is not None:
+        raise original
+
+
+def _original_owned_runner(leaf, data, remote):
+    scope, directory, _script = (_original_component_files(leaf, data)
+        if "component" in data else _original_os_files(leaf, data))
+    stage, binding, _args = scope._owned_runner_stage(leaf, data.get("component", "os"), data["package_index"])
+    from ibsw_upgrade_driver import _json_bytes, _owned_runner_binding
+    runner = _owned_runner_bytes(binding, remote)
+    original = scope._hold(stage, "runner.sh", runner)
+    scope._hold(stage, "runner-binding.json", _json_bytes(_owned_runner_binding(binding, remote, runner)))
+    leaf.verify(); original.verify()
+    return original
+
+
+def _upload_owned_runner(leaf, data, sftp, uid, deadline, remote):
+    """Same signed-session SFTP selected by executor; pure primitive is DATA."""
+    if type(uid) is not int or uid < 0:
+        raise ValueError("actual remote numeric uid required")
+    runner = _original_owned_runner(leaf, data, remote)
+    _remaining(deadline); leaf.verify()
+    _remote_metadata(sftp.lstat(posixpath.dirname(remote)), uid, directory=True)
+    _upload_original_file(leaf, runner, sftp, uid, deadline, posixpath.join(posixpath.dirname(remote), "runner.sh"))
+    runner.verify(); leaf.verify()
+
+
+def _raw_record(command, observed):
+    stdout, stderr, status, complete = observed
+    return {"command": command, "stdout_base64": base64.b64encode(stdout).decode("ascii"),
+            "stderr_base64": base64.b64encode(stderr).decode("ascii"), "returncode": status, "stream_complete": complete}
+
+
+def _complete_query(leaf, transport, command, deadline):
+    result = _read_channel(leaf, transport, command, deadline)
+    if not result[3] or result[2] != 0 or result[1]:
+        diagnostic=dict(getattr(leaf,'_last_query_diagnostic',{}) or {})
+        diagnostic['command']=command
+        code=(diagnostic.get('reason_code') if diagnostic.get('reason_code') in
+              ('READONLY_QUERY_TIMEOUT','READONLY_QUERY_INCOMPLETE') else
+              'READONLY_QUERY_INCOMPLETE' if not result[3] or result[2] is None else
+              'READONLY_QUERY_NONZERO' if result[2]!=0 else 'READONLY_QUERY_STDERR')
+        from ibsw_upgrade_contract import _ReadonlyQueryRecord
+        record=_ReadonlyQueryRecord(tuple(shlex.split(command)),*result[:3])
+        raise _NativeObservationHold(reason_code=code,records=(record,),
+            capture_raw={'safe_diagnostic':diagnostic,'query_record':_raw_record(command,result)})
+    return result
+
+
+def _bound_os_postcondition_inputs(leaf, package_index):
+    """Original stage locator only. Historical request DATA is not execution proof."""
+    from ibsw_upgrade_driver import _declared_candidate_data, _json_bytes, _validate_commands_data_graph, _EMPTY_STAGE_DATA_RAW
+    scope, _global, run_plan, declared, args, policy = _live_plan_inputs(leaf)
+    if ("os" not in args.selected or type(package_index) is not int
+            or not 0 <= package_index < len(policy.os)):
+        raise ValueError("selected original OS stage locator required")
+    stage_key = "os-" + format(package_index, "04d")
+    directory = scope.session._directory(scope.run_directory / leaf.node.hostname / stage_key)
+    scope._private_directory(directory)
+    script, binding = _declared_candidate_data(policy, leaf.node, run_id=declared["run_id"], method=args.method,
+        switch_dir=args.switch_dir, plan_sha256=hashlib.sha256(run_plan.payload).hexdigest(),
+        input_sha256=[hashlib.sha256(source.payload).hexdigest() for source in scope.session._files],
+        component="os", package_index=package_index, stage_key=stage_key)
+    scope._hold(directory, "step.sh", script)
+    scope._hold(directory, "step-binding.json", _json_bytes(binding))
+    request = scope._hold(directory, "request.json")
+    document = json.loads(request.payload)
+    token = document.get("request_id") if type(document) is dict else None
+    if (type(token) is not str or not re.fullmatch(r"[0-9a-f]{32}", token)
+            or request.payload != _json_bytes({"schema_version": 1, "state": "REQUESTED", "activation_state": "UNKNOWN",
+                "execution_state": "NOT_EXECUTED", "binding": binding, "request_id": token})):
+        raise ValueError("original request/bound target changed")
+    dispatch = scope._hold(directory, "os-dispatch.json")
+    names = set(os.listdir(directory.fd))
+    _validate_commands_data_graph(names, binding,
+        lambda name: scope._hold(directory, name, allow_empty=name in _EMPTY_STAGE_DATA_RAW).payload,
+        read_postconditions=lambda: scope._read_live_postconditions(directory, binding, policy.final_os), switch_dir=args.switch_dir)
+    original = json.loads(dispatch.payload)
+    remote = original["remote_script"]
+    if posixpath.dirname(posixpath.dirname(remote)) != args.switch_dir:
+        raise ValueError("postcondition remote logs are outside original declared private root")
+    leaf.verify()
+    return scope, directory, binding, request, dispatch, policy.final_os, remote
+
+
+def _step_health_data_inputs(leaf, package_index, phase, post_round_id=None):
+    """Original held LOCAL declaration sources, not native baseline/permission."""
+    from ibsw_upgrade_driver import _ReadonlyQueryInputs, _stage_health_files
+    if type(leaf) is not _ReadonlyQueryInputs:
+        raise ValueError("original live leaf required")
+    leaf.verify()
+    scope = leaf._original_selection[0]
+    if scope._active_request_lease is None:
+        raise ValueError("original stage health lease required")
+    group = _stage_health_files(phase)
+    stage, stage_key = scope._stage(leaf.node.hostname, "os", package_index)
+    scope.inspect_step(leaf.node.hostname, "os", package_index)
+    names = set(os.listdir(stage.fd))
+    if names.intersection(group):
+        raise ValueError("existing local health DATA preserved; never overwrite")
+    script, binding = scope._candidate(leaf.node.hostname, "os", package_index, stage_key)
+    from ibsw_upgrade_driver import _json_bytes
+    scope._hold(stage, "step.sh", script)
+    scope._hold(stage, "step-binding.json", _json_bytes(binding))
+    request = scope._hold(stage, "request.json")
+    if phase == "before":
+        if post_round_id is not None or "os-dispatch.json" in names:
+            raise ValueError("before is only a local pre-dispatch declaration")
+        return scope, stage, binding, request, None, None
+    if type(post_round_id) is not str or not re.fullmatch(r"post-[0-9a-f]{32}", post_round_id):
+        raise ValueError("fixed same-stage original post round locator required")
+    _bound_os_postcondition_inputs(leaf, package_index)
+    before = scope._hold(stage, "before-health-binding.json")
+    verified = scope._read_live_postconditions(stage, binding)
+    if post_round_id not in verified:
+        raise ValueError("post round was not actually held/verified in this original stage")
+    # The map came from actual original nested directory/file FDs, not caller
+    # names or supplied SHA. Retain/recheck its exact original binding as well.
+    original = scope.session._directory(stage.path / "postconditions" / post_round_id)
+    scope._private_directory(original)
+    post = scope._hold(original, "post-binding.json")
+    if hashlib.sha256(post.payload).hexdigest() != verified[post_round_id]:
+        raise ValueError("original held health post binding changed")
+    leaf.verify()
+    return scope, stage, binding, request, before.payload, {
+        "round_id": post_round_id, "post_binding_sha256": verified[post_round_id]}
+
+
+def _os_postcondition_data(leaf, package_index, record):
+    """Pure source-bound VERSION match DATA; no completion/native admission."""
+    _scope, _directory, binding, _request, _dispatch, final_target, _remote = _bound_os_postcondition_inputs(leaf, package_index)
+    from ibsw_upgrade_driver import _post_version_data
+    return _post_version_data(binding, final_target, record)
+
+
+def _read_owned_os_logs(leaf, package_index, sftp, uid, deadline):
+    """Read original private handles only; stable snapshots are not job exit facts."""
+    _scope, _directory, _binding, _request, dispatch, _final, remote = _bound_os_postcondition_inputs(leaf, package_index)
+    from ibsw_upgrade_driver import _post_original_uid
+    if type(uid) is not int or uid != _post_original_uid(dispatch.payload):
+        raise ValueError("actual signed account uid differs from original dispatch")
+    remote_dir = posixpath.dirname(remote)
+    path = "/"
+    for name in remote_dir.strip("/").split("/"):
+        path = posixpath.join(path, name)
+        _remaining(deadline); leaf.verify()
+        item = sftp.lstat(path)
+        if not stat.S_ISDIR(item.st_mode) or item.st_mode & 0o022:
+            raise ValueError("remote log directory chain is not a real safe directory")
+    _remote_metadata(item, uid, directory=True)
+    raw, captured = [], {}
+    for name in ("execution.stdout", "execution.stderr"):
+        pathname = posixpath.join(remote_dir, name)
+        handle, failure, payload = None, None, bytearray()
+        try:
+            _remaining(deadline); leaf.verify()
+            named = sftp.lstat(pathname)
+            _remote_metadata(named, uid, directory=False)
+            if not 0 <= named.st_size <= 4 * 1024 * 1024:
+                raise ValueError("bounded original owned log required")
+            handle = sftp.open(pathname, "rb")
+            opened = handle.stat()
+            _remote_metadata(opened, uid, directory=False)
+            fields = lambda metadata: (metadata.st_mode, metadata.st_uid, metadata.st_gid,
+                                        metadata.st_size, metadata.st_mtime)
+            if fields(opened) != fields(named):
+                raise ValueError("original log handle/name metadata disagree")
+            while len(payload) <= named.st_size:
+                _remaining(deadline); leaf.verify()
+                chunk = handle.read(min(65536, named.st_size + 1 - len(payload)))
+                if not chunk:
+                    break
+                payload.extend(chunk)
+            if (len(payload) != named.st_size or fields(handle.stat()) != fields(opened)
+                    or fields(sftp.lstat(pathname)) != fields(opened)):
+                raise ValueError("owned log grew/changed; incomplete snapshot retained UNKNOWN")
+            raw.append(bytes(payload))
+        except BaseException as error:
+            failure = error
+        finally:
+            captured[name] = bytes(payload)
+            if handle is not None:
+                try:
+                    handle.close()
+                except BaseException as cleanup:
+                    if failure is None or (isinstance(failure, Exception) and not isinstance(cleanup, Exception)):
+                        failure = cleanup
+        if failure is not None:
+            if not isinstance(failure, Exception):
+                raise failure
+            raise _NativeObservationHold(capture_raw={"owned_logs": captured}) from None
+    leaf.verify()
+    return {"stdout": raw[0], "stderr": raw[1], "remote_directory": remote_dir,
+            "uid": uid, "observation_state": "LOG_SNAPSHOT_ONLY"}
+
+
+def _read_owned_exit_record(leaf, package_index, sftp, uid, deadline):
+    """Original stable file DATA, never vendor-job/kernel/activation authority.
+
+The actual caller is the still-live fixed signed dispatch factory. This file
+primitive alone cannot turn a supplied SFTP adapter or DTO into native proof.
+"""
+    scope, _directory, binding, _request, dispatch, _final, remote = _bound_os_postcondition_inputs(leaf, package_index)
+    from ibsw_upgrade_driver import _post_original_uid
+    if scope._active_request_lease is None:
+        raise ValueError("original active namespace lease required")
+    if json.loads(dispatch.payload).get("launch_kind") != "OWNED_RUNNER_V1":
+        raise ValueError("legacy step launch cannot become owned runner observation")
+    if type(uid) is not int or uid != _post_original_uid(dispatch.payload):
+        raise ValueError("actual signed account uid differs from original dispatch")
+    # _bound_os_postcondition_inputs verified actual held step/runner and
+    # dispatch graph. Historical query bytes are NOT a current OS selector.
+    path, remote_dir = "/", posixpath.dirname(remote)
+    for name in remote_dir.strip("/").split("/"):
+        path = posixpath.join(path, name)
+        _remaining(deadline); leaf.verify()
+        item = sftp.lstat(path)
+        if not stat.S_ISDIR(item.st_mode) or item.st_mode & 0o022:
+            raise ValueError("original exit directory chain is not a real safe directory")
+    _remote_metadata(item, uid, directory=True)
+    pathname = posixpath.join(remote_dir, "owned-exit.record")
+    handle, failure, captured = None, None, [b"", b""]
+    try:
+        _remaining(deadline); leaf.verify()
+        named = sftp.lstat(pathname)
+        _remote_metadata(named, uid, directory=False)
+        if not 0 < named.st_size <= 512:
+            raise ValueError("bounded nonempty original owned record required")
+        handle = sftp.open(pathname, "rb")
+        opened = handle.stat()
+        _remote_metadata(opened, uid, directory=False)
+        fields = lambda metadata: (metadata.st_mode, metadata.st_uid, metadata.st_gid, metadata.st_size, metadata.st_mtime)
+        if fields(named) != fields(opened):
+            raise ValueError("original record handle/name metadata disagree")
+        reads = []
+        for round_index in range(2):
+            payload = bytearray()
+            if round_index:
+                handle.seek(0)
+            while len(payload) <= named.st_size:
+                _remaining(deadline); leaf.verify()
+                chunk = handle.read(named.st_size + 1 - len(payload))
+                if not chunk:
+                    break
+                payload.extend(chunk)
+                captured[round_index] = bytes(payload)
+            if (len(payload) != named.st_size or fields(handle.stat()) != fields(opened)
+                    or fields(sftp.lstat(pathname)) != fields(opened)):
+                raise ValueError("owned record changed/truncated; preserve UNKNOWN")
+            reads.append(bytes(payload))
+        if reads[0] != reads[1]:
+            raise ValueError("original record stable reread disagrees")
+        _owned_exit_data(binding, reads[0])
+        _bound_os_postcondition_inputs(leaf, package_index)
+        leaf.verify()
+    except BaseException as error:
+        failure = error
+    finally:
+        if handle is not None:
+            try:
+                handle.close()
+            except BaseException as cleanup:
+                if failure is None or (isinstance(failure, Exception) and not isinstance(cleanup, Exception)):
+                    failure = cleanup
+    if failure is not None:
+        if not isinstance(failure, Exception):
+            raise failure
+        raise _NativeObservationHold(capture_raw={"owned_exit_record_reads": captured}) from None
+    return reads[0]
+
+
+def _write_post_configuration_data_locked(leaf, package_index, after, after_stderr, after_rc, pending, pending_stderr, pending_rc):
+    """Original held phase DATA only; supplied bytes never confer native gates."""
+    scope, directory, binding, _request, _dispatch, _final, _remote = _bound_os_postcondition_inputs(leaf, package_index)
+    if scope._active_request_lease is None:
+        raise ValueError("original active namespace lease required")
+    scope._check_commands_phase_data("after", after, after_stderr, after_rc)
+    scope._check_pending_diff_data(pending, pending_stderr, pending_rc)
+    scope._write_commands_phase_data_locked(leaf, "after", "os", package_index, after, after_stderr, after_rc)
+    scope._write_pending_diff_data_locked(leaf, "os", package_index, pending, pending_stderr, pending_rc)
+    from ibsw_upgrade_driver import _restore_data_plan
+    before = scope._hold(directory, "before.commands")
+    captured = scope._hold(directory, "after.commands", after)
+    plan, patch = _restore_data_plan(binding, before.payload, captured.payload)
+    leaf.verify()
+    return {"state": "POST_CONFIGURATION_DATA_COMMITTED", "configuration_state":
+        "CONFIG_DATA_UNCHANGED" if plan["difference_state"] == "PASS" else plan["difference_state"],
+        "missing_commands": patch.decode("utf-8"), "comparison": plan,
+        "pending_state": "UNKNOWN", "activation_state": "UNKNOWN", "health_state": "UNKNOWN",
+        "dispatch_state": "HOLD", "execution_state": "NOT_EXECUTED", "attestation_state": "DATA_ONLY_UNATTESTED"}
+
+
+def _write_step_health_observation_locked(leaf, package_index, phase, observed, deadline, *, post_round_id=None):
+    """Local raw DATA commit only, not native EOF/health or completion authority.
+
+    Fixed factories supply their own same-live channel tuple. A direct caller
+    can only obtain the existing untrusted LOCAL declaration; neither this
+    helper nor its return value can admit execution or release pending.
+    """
+    try:
+        _remaining(deadline); leaf.verify()
+        if (type(observed) is not tuple or len(observed) != 4
+                or type(observed[0]) is not bytes or type(observed[1]) is not bytes
+                or len(observed[0]) + len(observed[1]) > 4 * 1024 * 1024
+                or type(observed[2]) is not int or observed[2] != 0
+                or observed[1] or observed[3] is not True):
+            raise ValueError("incomplete fixed health raw observation; preserve UNKNOWN")
+        record = record_readonly_query(("nv", "show", "system", "health"), *observed[:3])
+        scope = leaf._original_selection[0]
+        result = scope._write_step_health_data_locked(leaf, package_index, phase, record, post_round_id=post_round_id)
+        _remaining(deadline); leaf.verify()
+        return result
+    except Exception:
+        raise _NativeObservationHold(capture_raw={phase + "_health": observed}) from None
+
+
+def _observe_os_postcondition_once(leaf, package_index, *, password=None, include_configuration=False):
+    """Actual fixed signed observation only, never PASS/OS_FINAL or a resend."""
+    from ibsw_upgrade_driver import _ReadonlyQueryInputs
+    if type(leaf) is not _ReadonlyQueryInputs or not leaf._native_observation_consumed:
+        raise ValueError("original consumed live leaf required")
+    if type(include_configuration) is not bool:
+        raise ValueError("fixed internal readonly collection mode required")
+    scope, _directory, _binding, _request, _dispatch, _final, _remote = _bound_os_postcondition_inputs(leaf, package_index)
+    if include_configuration:
+        scope._commands_capture_stage(leaf, "after", "os", package_index)
+    # Read an already-requested stage under its original namespace lease; do
+    # not run dispatch inventory/clear pending or acquire a nested writer lease.
+    with scope._request_namespace_lease():
+        _scope, original_stage, *_originals = _bound_os_postcondition_inputs(leaf, package_index)
+        # Exact original graph is verified above, including any health trio.
+        # Its presence selects DATA collection, never native baseline/admission.
+        # Historical stages without health retain the original readonly wire.
+        health_names = set(os.listdir(original_stage.fd))
+        health_before = "before-health-binding.json" in health_names
+        if health_before and "after-health-binding.json" in health_names:
+            raise ValueError("existing original after health DATA preserved; no recollection")
+        leaf.verify()
+        with _signed_session(leaf, password=password) as (transport, deadline, _identity, auth, pin):
+            uid_raw = _complete_query(leaf, transport, _UID_COMMAND, deadline)
+            if not re.fullmatch(rb"[0-9]+\n", uid_raw[0]):
+                raise ValueError("unknown actual postcondition account uid")
+            log_deadline = time.monotonic() + _UPLOAD_SECONDS
+            sftp, failure = None, None
+            try:
+                with _owned_phase((transport,), log_deadline):
+                    sftp = _fixed_sdk().SFTPClient.from_transport(transport)
+                    sftp.get_channel().settimeout(_remaining(log_deadline))
+                    logs = _read_owned_os_logs(leaf, package_index, sftp, int(uid_raw[0]), log_deadline)
+            except BaseException as error:
+                failure = error
+            finally:
+                if sftp is not None:
+                    try:
+                        sftp.close()
+                    except BaseException as cleanup:
+                        if failure is None or (isinstance(failure, Exception) and not isinstance(cleanup, Exception)):
+                            failure = cleanup
+            if failure is not None:
+                raise failure
+            query_deadline = time.monotonic() + 25.0
+            identity = _complete_query(leaf, transport, _IDENTITY_COMMAND, query_deadline)
+            _validate_identity(leaf, identity)
+            actual = _read_channel(leaf, transport, _OS_COMMAND, query_deadline)
+            record = record_readonly_query(("nv", "show", "system", "version"), *actual[:3])
+            source = {"server_host_key_fingerprint": pin, "authentication": auth,
+                "identity_stdout_base64": base64.b64encode(identity[0]).decode("ascii"),
+                "identity_stderr_base64": base64.b64encode(identity[1]).decode("ascii"), "identity_returncode": identity[2]}
+            metadata = {key: value for key, value in logs.items() if key not in {"stdout", "stderr"}}
+            metadata["connection_source"] = source  # No password/key data is serialized.
+            # Preserve actual partial/status/version/log bytes on failure, but
+            # never publish a successful binding from incomplete EOF or status.
+            after, pending, configuration, health = None, None, None, None
+            try:
+                if not actual[3] or actual[2] != 0 or actual[1]:
+                    raise ValueError("incomplete postcondition OS query")
+                data = _os_postcondition_data(leaf, package_index, record)
+                written = scope._write_os_postcondition_data_locked(leaf, package_index, record,
+                    logs["stdout"], logs["stderr"], metadata)
+                if include_configuration:
+                    after = _read_channel(leaf, transport, "nv config show -o commands", query_deadline)
+                    if not after[3] or after[2] != 0 or after[1] or not after[0]:
+                        raise ValueError("incomplete original after commands")
+                    pending = _read_channel(leaf, transport, "nv config diff -o commands", query_deadline)
+                    if not pending[3] or pending[2] != 0 or pending[1]:
+                        raise ValueError("incomplete original pending diff")
+                    configuration = _write_post_configuration_data_locked(leaf, package_index, *after[:3], *pending[:3])
+                if health_before:
+                    health = _read_channel(leaf, transport, "nv show system health", query_deadline)
+                    _write_step_health_observation_locked(leaf, package_index, "after", health, query_deadline,
+                        post_round_id=written["round_directory"].rsplit("/", 1)[-1])
+                leaf.verify()
+            except Exception:
+                raise _NativeObservationHold((record,), capture_raw={"version": _raw_record(_OS_COMMAND, actual),
+                    "owned_logs": {"execution.stdout": logs["stdout"], "execution.stderr": logs["stderr"]},
+                    "log_metadata": metadata, **({"after": after, "pending_diff": pending} if include_configuration else {}),
+                    **({"after_health": health} if health is not None else {})}) from None
+            result = {"state": "VERSION_TARGET_MATCH", "target_version": data["target_version"],
+                "target_scope": data["target_scope"], "round_directory": written["round_directory"],
+                "activation_state": "UNKNOWN", "attestation_state": "READONLY_VERSION_OBSERVATION_ONLY"}
+            if include_configuration:
+                result.update(configuration=configuration, pending_state="UNKNOWN", health_state="UNKNOWN")
+            elif health_before:
+                result.update(health_state="UNKNOWN", pending_state="UNKNOWN")
+            return result
+
+
+def _execute_os_once(leaf, *, password=None):
+    """Only the original live leaf; ONE dispatch, every outcome remains UNKNOWN."""
+    from ibsw_upgrade_driver import _ReadonlyQueryInputs
+    if type(leaf) is not _ReadonlyQueryInputs or not leaf._native_observation_consumed:
+        raise ValueError("original consumed native leaf required")
+    scope, _global, _plan, _declared, args, _policy = _live_plan_inputs(leaf)
+    if "os" not in args.selected or args.method not in {"local", "http"}:
+        raise ValueError("OS/local or HTTP only; other declared modes remain OPEN")
+    # Actual owned namespace inventory before SDK/connect, never a caller flag.
+    with scope._request_namespace_lease():
+        scope._check_retained_requests_locked(leaf.node.hostname)
+        scope._component_negative_preflight_locked(leaf.node.hostname, "os")
+        with _signed_session(leaf, password=password) as (transport, deadline, identity, _auth, _pin):
+            initial = _complete_query(leaf, transport, _OS_COMMAND, deadline)
+            record = record_readonly_query(("nv", "show", "system", "version"), *initial[:3])
+            data = _os_step_data(leaf, record)
+            if data is None:
+                return {"state": "NO_OS_WRITE", "execution_state": "NOT_EXECUTED", "activation_state": "UNKNOWN"}
+            capability = _complete_query(leaf, transport, _CAPABILITY_COMMAND, deadline)
+            scope._prepare_requested_step_locked(leaf.node.hostname, "os", data["package_index"])
+            before = _complete_query(leaf, transport, "nv config show -o commands", deadline)
+            scope._write_before_commands_data_locked(leaf, "os", data["package_index"], *before[:3])
+            uid_raw = _complete_query(leaf, transport, _UID_COMMAND, deadline)
+            if not re.fullmatch(rb"[0-9]+\n", uid_raw[0]):
+                raise ValueError("unknown actual remote uid response")
+            upload_deadline = time.monotonic() + _UPLOAD_SECONDS
+            sftp, original = None, None
+            try:
+                with _owned_phase((transport,), upload_deadline):
+                    sftp = _fixed_sdk().SFTPClient.from_transport(transport)
+                    sftp.get_channel().settimeout(_remaining(upload_deadline))
+                    remote = _upload_original_script(leaf, data, sftp, int(uid_raw[0]), upload_deadline)
+                    scope._prepare_owned_runner_data_locked(leaf, "os", data["package_index"], remote_script=remote)
+                    _upload_owned_runner(leaf, data, sftp, int(uid_raw[0]), upload_deadline, remote)
+            except BaseException as caught:
+                original = caught
+            finally:
+                if sftp is not None:
+                    try:
+                        sftp.close()
+                    except BaseException as cleanup:
+                        if original is None or (isinstance(original, Exception) and not isinstance(cleanup, Exception)):
+                            original = cleanup
+            if original is not None:
+                raise original
+            # Upload cannot make the initial version/identity snapshot fresh.
+            fresh_deadline = time.monotonic() + 25.0
+            fresh_identity = _complete_query(leaf, transport, _IDENTITY_COMMAND, fresh_deadline)
+            _validate_identity(leaf, fresh_identity)
+            fresh_os = _complete_query(leaf, transport, _OS_COMMAND, fresh_deadline)
+            fresh_record = record_readonly_query(("nv", "show", "system", "version"), *fresh_os[:3])
+            fresh_data = _os_step_data(leaf, fresh_record)
+            if fresh_data is None or fresh_data["target_version"] != data["target_version"] or fresh_data["current_text"] != data["current_text"]:
+                raise ValueError("actual current changed during upload; never dispatch stale choice")
+            _original_os_files(leaf, data)
+            runner = _original_owned_runner(leaf, data, remote)
+            scope._request_prepared_step_locked(leaf.node.hostname, "os", data["package_index"])
+            _scope, directory, _script = _original_os_files(leaf, data)
+            request = scope._hold(directory, "request.json")
+            scope.inspect_step(leaf.node.hostname, "os", data["package_index"])
+            leaf.verify(); request.verify(); runner.verify()
+            health = _read_channel(leaf, transport, "nv show system health", fresh_deadline)
+            _write_step_health_observation_locked(leaf, data["package_index"], "before", health, fresh_deadline)
+            leaf.verify(); request.verify(); runner.verify()
+            command = _owned_launch_command(remote)
+            # One actual exec request. status0/drop/timeout cannot mean booted.
+            dispatched = _read_channel(leaf, transport, command, time.monotonic() + _EXECUTION_SECONDS)
+            chain = [_raw_record(_IDENTITY_COMMAND, identity), _raw_record(_OS_COMMAND, initial),
+                     _raw_record(_CAPABILITY_COMMAND, capability), _raw_record("nv config show -o commands", before),
+                     _raw_record(_UID_COMMAND, uid_raw), _raw_record(_IDENTITY_COMMAND, fresh_identity),
+                     _raw_record(_OS_COMMAND, fresh_os), _raw_record(command, dispatched)]
+            try:
+                scope._write_os_dispatch_data_locked(leaf, data, request.payload, remote, chain, owned_runner=True)
+            except Exception:
+                # If source drift prevents disk publication, retain the actual
+                # received chain privately; never fabricate a committed file.
+                raise _NativeObservationHold(capture_raw={"os_dispatch_chain": chain}) from None
+            # The request/once-dispatch archive is committed BEFORE this
+            # optional file observation. Missing/reboot/drop stays UNKNOWN;
+            # no reconnection, retry, kill, or caller completion adoption.
+            record_deadline = time.monotonic() + _UPLOAD_SECONDS
+            sftp, failure = None, None
+            try:
+                with _owned_phase((transport,), record_deadline):
+                    sftp = _fixed_sdk().SFTPClient.from_transport(transport)
+                    sftp.get_channel().settimeout(_remaining(record_deadline))
+                    owned_raw = _read_owned_exit_record(leaf, data["package_index"], sftp, int(uid_raw[0]), record_deadline)
+            except BaseException as error:
+                failure = error
+            finally:
+                if sftp is not None:
+                    try:
+                        sftp.close()
+                    except BaseException as cleanup:
+                        if failure is None or (isinstance(failure, Exception) and not isinstance(cleanup, Exception)):
+                            failure = cleanup
+            if failure is not None:
+                raise failure
+            owned_data = scope._record_owned_script_exit_data_locked(leaf, "os", data["package_index"], owned_raw)
+            return {"state": "OS_DISPATCH_UNKNOWN", "activation_state": "UNKNOWN", "expected_effect": "REBOOT_EXPECTED",
+                    "execution_state": "POSSIBLY_DISPATCHED", "target_version": data["target_version"], "stage": data["stage"],
+                    "owned_child_observation": owned_data}
+
+
+def _component_step_data(leaf, component, os_record, firmware_record=None):
+    """Select one declared component from fixed query DATA, not an execution permit."""
+    from ibsw_upgrade_contract import _documented_table_lines, _documented_firmware_fields
+    from ibsw_upgrade_component import _bios_upgrade_needed, _cpld_upgrade_needed
+    from ibsw_upgrade_driver import _declared_candidate_data
+    from ibsw_upgrade_schedule import declared_step_key
+    from ibsw_upgrade_contract import SharedUpgradeHold
+    try:
+        scope, _global, plan, declared, args, policy = _live_plan_inputs(leaf)
+    except Exception as error:
+        raise SharedUpgradeHold("original shared component inputs changed") from error
+    if component not in args.selected or component not in ("os", "bios", "cpld"):
+        raise ValueError("original selected component required")
+    if os_record.argv != ("nv", "show", "system", "version"):
+        raise ValueError("fixed original OS query required")
+    parsed = parse_readonly_query_data(os_record)
+    if parsed.state != "TEXT_DATA_PARSED":
+        raise ValueError("unknown actual operational OS")
+    current_os = dict(parsed.fields)["image_version_text"]
+    if component == "os":
+        remaining = _selected_os_path(leaf, policy, current_os)
+        package = remaining[0] if remaining else policy.os[-1]
+        index = next(index for index, item in enumerate(policy.os) if item == package)
+        needed, current, target, record = bool(remaining), current_os, package.version, os_record
+    else:
+        if (firmware_record is None or firmware_record.argv != ("nv", "show", "platform", "firmware")
+                or firmware_record.returncode != 0 or firmware_record.stderr):
+            raise ValueError("complete actual firmware query required")
+        targets = ("BIOS",) if component == "bios" else ("CPLD",)
+        actual = dict(_documented_firmware_fields(_documented_table_lines(firmware_record.stdout), targets=targets))
+        index, record = 0, firmware_record
+        if component == "bios":
+            current, target = actual["BIOS"], policy.bios.version
+            needed = _bios_upgrade_needed(policy, current)
+        else:
+            slots = []
+            for slot in actual:
+                match = re.fullmatch(r"(CPLD[0-9]+)_(REV[0-9]+)", actual[slot])
+                if match is None:
+                    raise ValueError("unknown actual CPLD ID/revision")
+                slots.append((slot, match[1], match[2]))
+            needed = _cpld_upgrade_needed(policy, tuple(slots))
+            current = json.dumps(slots, separators=(",", ":"))
+            target = "+".join(identifier + "_" + revision for identifier, revision in policy.cpld_targets)
+    stage = declared_step_key(policy, component, index)
+    script, binding = _declared_candidate_data(policy, leaf.node, run_id=declared["run_id"], method=args.method,
+        switch_dir=args.switch_dir, plan_sha256=hashlib.sha256(plan.payload).hexdigest(),
+        input_sha256=[hashlib.sha256(source.payload).hexdigest() for source in scope.session._files],
+        component=component, package_index=index, stage_key=stage)
+    leaf.verify()
+    return {"state": "COMPONENT_STEP_DATA_ONLY", "component": component, "record": record,
+            "os_record": os_record, "current_text": current, "target_version": target,
+            "package_index": index, "stage": stage, "script": script, "binding": binding,
+            "switch_dir": args.switch_dir, "needed": needed}
+
+
+def _original_component_files(leaf, data):
+    """Rebind original declared bytes; supplied DATA never establishes freshness."""
+    from ibsw_upgrade_driver import _json_bytes
+    from ibsw_upgrade_contract import SharedUpgradeHold
+    try:
+        current = _component_step_data(leaf, data["component"], data["os_record"],
+                                      None if data["component"] == "os" else data["record"])
+        if current != data:
+            raise ValueError("component/source selection changed")
+        scope = leaf._original_selection[0]
+        directory = scope.session._directory(scope.run_directory / leaf.node.hostname / data["stage"])
+        scope._private_directory(directory)
+        original = scope._hold(directory, "step.sh", data["script"])
+        scope._hold(directory, "step-binding.json", _json_bytes(data["binding"]))
+        leaf.verify()
+        return scope, directory, original
+    except Exception as error:
+        raise SharedUpgradeHold("original shared component declaration changed") from error
+
+
+def _component_query(leaf, transport, component, deadline):
+    observed = _complete_query(leaf, transport, _OS_COMMAND, deadline)
+    os_record = record_readonly_query(("nv", "show", "system", "version"), *observed[:3])
+    records, firmware = [_raw_record(_OS_COMMAND, observed)], None
+    if component != "os":
+        command = "nv show platform firmware"
+        observed = _complete_query(leaf, transport, command, deadline)
+        firmware = record_readonly_query(("nv", "show", "platform", "firmware"), *observed[:3])
+        records.append(_raw_record(command, observed))
+    return _component_step_data(leaf, component, os_record, firmware), records
+
+
+class _PackageSourceHold(SharedUpgradeHold):
+    """Fixed local-source diagnosis; never arbitrary remote exception text."""
+    def __init__(self, code, path):
+        super().__init__(code)
+        self.reason_code, self.package_path = code, str(path)
+
+
+def _package_source_snapshot(root, package):
+    from pathlib import Path
+    import errno
+    path=Path(package.path)
+    try:
+        path.relative_to(Path(root))
+        current=Path(path.anchor)
+        for part in path.parts[1:-1]:
+            current /= part
+            parent=current.lstat()
+            if not stat.S_ISDIR(parent.st_mode) or stat.S_ISLNK(parent.st_mode):
+                raise _PackageSourceHold('PACKAGE_SOURCE_UNAPPROVED_LINK',path)
+        named=path.lstat()
+        if not stat.S_ISREG(named.st_mode):
+            raise _PackageSourceHold('PACKAGE_SOURCE_NOT_REGULAR',path)
+        if named.st_size <= 0:
+            raise _PackageSourceHold('PACKAGE_SOURCE_EMPTY',path)
+        if not os.access(path,os.R_OK):
+            raise _PackageSourceHold('PACKAGE_SOURCE_ACCESS_DENIED',path)
+        return (str(path),named.st_dev,named.st_ino,named.st_size,named.st_mtime_ns,named.st_ctime_ns)
+    except OSError as error:
+        code=('PACKAGE_SOURCE_MISSING' if error.errno==errno.ENOENT else
+              'PACKAGE_SOURCE_ACCESS_DENIED' if error.errno in (errno.EACCES,errno.EPERM) else
+              'PACKAGE_SOURCE_INVALID_PATH' if error.errno in (errno.ELOOP,errno.ENOTDIR) else 'PACKAGE_SOURCE_IO_FAILED')
+        raise _PackageSourceHold(code,path) from None
+
+
+def _component_package_snapshot(policy, component, index):
+    """Needed HTTP source availability only, not a checksum/authenticity proof."""
+    packages = ((policy.os[index],) if component == "os" else (policy.bios,)
+                if component == "bios" else (policy.cpld_burn, policy.cpld_refresh))
+    return tuple(_package_source_snapshot(policy.package_dir,package) for package in packages)
+
+
+def _checked_package_snapshot(leaf, policy, component, index):
+    expected=getattr(leaf.scope,'_os_source_baselines',{}).get(policy.os[index].path) if component=='os' else None
+    try:
+        actual=_component_package_snapshot(policy,component,index)
+    except _PackageSourceHold as error:
+        if expected is not None:
+            raise _PackageSourceHold('PACKAGE_SOURCE_CHANGED',error.package_path) from error
+        raise
+    if expected is not None and actual!=(expected,):
+        raise _PackageSourceHold('PACKAGE_SOURCE_CHANGED',policy.os[index].path)
+    return actual
+
+
+def _freeze_os_route(leaf):
+    """Parent local-source planning before access preparation, never dispatch."""
+    from ibsw_upgrade_contract import SharedUpgradeHold
+    scope, _global, _plan, _declared, args, policy=_live_plan_inputs(leaf)
+    if not policy.os_stages or 'os' not in args.selected:
+        raise ValueError('alternative OS policy required')
+    record=getattr(leaf,'_initial_os_record',None)
+    if record is None:
+        raise _NativeObservationHold(reason_code='OS_ROUTE_NOT_PREPARED')
+    parsed=parse_readonly_query_data(record)
+    if parsed.state!='TEXT_DATA_PARSED':
+        raise _NativeObservationHold(reason_code='OS_VERSION_PARSE_FAILED')
+    current=dict(parsed.fields)['image_version_text']
+    select_os_path(policy,current)  # Unknown source is never guessed.
+    position=next(i for i,group in enumerate(policy.os_stages)
+                  if any(policy.os[index].version==current for index in group))
+    selected, snapshots, issues=[],[],[]
+    for group in policy.os_stages[position+1:]:
+        stage_issues=[]
+        for index in group:
+            package=policy.os[index]
+            baseline=getattr(scope,'_os_source_baselines',{}).get(package.path)
+            try:
+                snapshot=_package_source_snapshot(policy.package_dir,package)
+                if baseline is not None and snapshot!=baseline:
+                    raise _PackageSourceHold('PACKAGE_SOURCE_CHANGED',package.path)
+            except _PackageSourceHold as error:
+                if baseline is not None or error.reason_code=='PACKAGE_SOURCE_CHANGED':
+                    raise _PackageSourceHold('PACKAGE_SOURCE_CHANGED',package.path) from error
+                stage_issues.append(dict(path=package.path,reason=error.reason_code))
+                continue
+            selected.append(index); snapshots.append(snapshot)
+            break
+        else:
+            issues.extend(stage_issues)
+    if len(selected)!=len(policy.os_stages)-position-1:
+        error=_NativeObservationHold(reason_code='OS_PACKAGE_ROUTE_UNAVAILABLE')
+        error.package_issues=issues
+        raise error
+    try:
+        scope._record_os_route_plan(leaf,current,tuple(selected),tuple(snapshots))
+    except Exception as error:
+        raise SharedUpgradeHold('OS route evidence unavailable; no following task') from error
+    return current,tuple(policy.os[index] for index in selected)
+
+
+def _selected_os_path(leaf, policy, current):
+    remaining = _planned_os_path(leaf, policy, current)
+    actual = tuple([current]+[p.version for p in remaining])
+    covered = getattr(leaf, '_covered_os_path', None)
+    if covered is not None and (len(actual)>len(covered) or covered[-len(actual):]!=actual):
+        raise _NativeObservationHold(reason_code='OS_COVERAGE_ROUTE_CHANGED')
+    expected = getattr(leaf, '_expected_os_canary_path', None)
+    if expected is not None and actual != expected:
+        raise _NativeObservationHold(reason_code='OS_CANARY_ROUTE_CHANGED')
+    return remaining
+
+
+def _planned_os_path(leaf, policy, current):
+    if not policy.os_stages:
+        return select_os_path(policy,current)
+    from ibsw_upgrade_driver import _json_bytes
+    from ibsw_upgrade_contract import SharedUpgradeHold
+    scope=leaf.scope
+    owner=getattr(scope,'_os_route_owner',scope)
+    owner.verify()
+    if owner.run_id!=scope.run_id or owner.plan_sha256!=scope.plan_sha256:
+        raise SharedUpgradeHold('foreign original OS route context')
+    route=getattr(scope,'_frozen_os_routes',{}).get(leaf.node.hostname)
+    if route is None:
+        raise _NativeObservationHold(reason_code='OS_ROUTE_NOT_PREPARED')
+    try:
+        directory=owner.session._directory(owner.run_directory/leaf.node.hostname)
+        owner._hold(directory,'os-route-plan.json',_json_bytes(route))
+        indices=tuple(route['indices'])
+        planned=select_os_path(policy,route['initial'],available=frozenset(row[0] for row in route['sources']))
+        if (tuple(policy.os.index(p) for p in planned)!=indices
+                or route['versions']!=[route['initial']]+[p.version for p in planned]):
+            raise ValueError('frozen original route changed')
+    except Exception as error:
+        raise SharedUpgradeHold('original OS route changed; no following task') from error
+    if current not in route['versions']:
+        raise _NativeObservationHold(reason_code='OS_ROUTE_CHANGED')
+    return planned[route['versions'].index(current):]
+
+
+def _verify_component_leaf(leaf):
+    from ibsw_upgrade_contract import SharedUpgradeHold
+    try:
+        leaf.verify()
+    except Exception as error:
+        raise SharedUpgradeHold("original shared component source changed") from error
+
+
+def _raise_component_failure(leaf, failure):
+    """Reclassify actual shared drift without losing the original NI priority."""
+    try:
+        _verify_component_leaf(leaf)
+    except BaseException as verification:
+        if isinstance(failure, Exception):
+            raise verification
+    raise failure
+
+
+def _execute_component_once(leaf, component, *, password=None):
+    """Fixed real three-component backend. Every dispatch remains UNKNOWN here."""
+    from ibsw_upgrade_driver import _ReadonlyQueryInputs
+    from ibsw_upgrade_contract import ComponentDispatchResult, SharedUpgradeHold, same_backup_snapshot
+    from ibsw_upgrade_observer import _preflight_component_on_session
+    if type(leaf) is not _ReadonlyQueryInputs or not leaf._native_observation_consumed:
+        raise ValueError("original one-shot live component leaf required")
+    try:
+        scope, _global, _plan, declared, args, policy = _live_plan_inputs(leaf)
+        if component not in args.selected or component not in ("os", "bios", "cpld"):
+            raise ValueError("unselected component")
+        if not scope.manual_execution and "--exclusive-config-window" not in declared["argv"]:
+            raise SharedUpgradeHold("explicit operator configuration maintenance window required")
+        if args.method == "scp":
+            # Preserve the original pre-session source rejection. The fixed
+            # diagnostic rechecks fresh originals inside the signed session.
+            scope._native_scp_source(leaf, component, scope._native_package_indices[0])
+            with _signed_session(leaf, password=password) as (transport, deadline, _identity, _auth, _pin):
+                scope._preflight_native_scp_source(leaf, component, scope._native_package_indices[0],
+                                                   transport, deadline)
+        if args.method not in ("local", "http") and not (args.method == 'scp' and component == 'cpld'):
+            raise SharedUpgradeHold("selected transport has no fixed real component backend")
+    except SharedUpgradeHold:
+        raise
+    except Exception as error:
+        raise SharedUpgradeHold("original shared upgrade plan cannot be verified") from error
+    with scope._request_namespace_lease():
+        scope._check_retained_requests_locked(leaf.node.hostname)
+        scope._component_negative_preflight_locked(leaf.node.hostname, component)
+        stop=getattr(scope,"_pipeline_stop_event",None)
+        if stop is not None and stop.is_set():
+            raise SharedUpgradeHold("shared stop forbids another component dispatch")
+    with _signed_session(leaf, password=password) as (transport, deadline, identity, _auth, _pin):
+        deadline = time.monotonic() + _COMPONENT_PREFLIGHT_SECONDS
+        data, selected_queries = _component_query(leaf, transport, component, deadline)
+        if data['needed'] and getattr(scope,'_pipeline_checks_only',False):
+            from ibsw_upgrade_observer import _NativeObservationHold
+            raise _NativeObservationHold(reason_code='COMPONENT_UPGRADE_PLAN_CHANGED')
+        if getattr(scope, '_access_required', False):
+            from ibsw_upgrade_access import verify_access_before_write
+            verify_access_before_write(leaf, transport, deadline)
+        from ibsw_upgrade_observer import _progress
+        if data['needed'] and getattr(scope, '_access_required', False):
+            from ibsw_upgrade_observer import _NativeObservationHold
+            from ibsw_upgrade_access import AccessHold
+            _progress(leaf,component,'VERIFY_RECOVERY_PASSWORD')
+            try:
+                with _signed_session(leaf,password=password,_authentication='password'):
+                    pass
+            except _NativeObservationHold as error:
+                if error.reason_code=='SSH_AUTHENTICATION_REJECTED':
+                    raise AccessHold('PASSWORD_PREWRITE_REJECTED') from None
+                raise
+        _progress(leaf, component, 'BACKUP_CONFIGURATION')
+        deadline = time.monotonic() + _COMPONENT_PREFLIGHT_SECONDS
+        # Declaration is not REQUESTED. No source package or remote installer
+        # is touched before actual identity/version/config/pending/health checks.
+        preflight = _preflight_component_on_session(leaf, component, transport, deadline,
+                                                   package_index=data["package_index"])
+        with scope._request_namespace_lease():
+            scope._prepare_requested_step_locked(leaf.node.hostname,component,data["package_index"])
+            scope._write_component_preflight_data_locked(leaf,component,data["package_index"],preflight)
+        evidence = (leaf.node.hostname + "/" + data["stage"] + "/component-preflight.json",)
+        chain = [_raw_record(_IDENTITY_COMMAND, identity)] + selected_queries + list(preflight["query_records"])
+        if not data["needed"]:
+            _progress(leaf, component, 'ALREADY_AT_TARGET')
+            return ComponentDispatchResult(component, leaf.node.hostname, data["package_index"], data["stage"],
+                data["target_version"], "NO_WRITE", "NONE", tuple(chain), evidence)
+        package_snapshot = (_checked_package_snapshot(leaf, policy, component, data["package_index"])
+                            if args.method == "http" else None)
+        if getattr(leaf,"_cooperative_completion",False):
+            from ibsw_upgrade_pipeline import _BOOT_COMMAND,_BOOT_RE
+            boot=_complete_query(leaf,transport,_BOOT_COMMAND,deadline)
+            if not _BOOT_RE.fullmatch(boot[0].decode("ascii").strip()):
+                raise _NativeObservationHold(reason_code="BOOT_ID_QUERY_FAILED")
+            chain.append(_raw_record(_BOOT_COMMAND,boot))
+        capability = _complete_query(leaf, transport, _CAPABILITY_COMMAND, deadline)
+        uid_raw = _complete_query(leaf, transport, _UID_COMMAND, deadline)
+        if not re.fullmatch(rb"[0-9]+\n", uid_raw[0]):
+            raise ValueError("unknown actual component account uid")
+        chain += [_raw_record(_CAPABILITY_COMMAND, capability), _raw_record(_UID_COMMAND, uid_raw)]
+        uid = int(uid_raw[0])
+        upload_deadline = time.monotonic() + _UPLOAD_SECONDS
+        _progress(leaf, component, 'UPLOAD_UPGRADE_SCRIPT')
+        sftp, failure = None, None
+        try:
+            with _owned_phase((transport,), upload_deadline):
+                sftp = _fixed_sdk().SFTPClient.from_transport(transport)
+                sftp.get_channel().settimeout(_remaining(upload_deadline))
+                remote = _upload_original_script(leaf, data, sftp, uid, upload_deadline)
+                with scope._request_namespace_lease():
+                    scope._prepare_owned_runner_data_locked(leaf,component,data["package_index"],remote_script=remote)
+                _upload_owned_runner(leaf, data, sftp, uid, upload_deadline, remote)
+        except BaseException as error:
+            failure = error
+        finally:
+            if sftp is not None:
+                try:
+                    sftp.close()
+                except BaseException as cleanup:
+                    if failure is None or (isinstance(failure, Exception) and not isinstance(cleanup, Exception)):
+                        failure = cleanup
+        if failure is not None:
+            _raise_component_failure(leaf, failure)
+        fresh_deadline = time.monotonic() + _COMPONENT_PREFLIGHT_SECONDS
+        fresh_identity = _complete_query(leaf, transport, _IDENTITY_COMMAND, fresh_deadline)
+        _validate_identity(leaf, fresh_identity)
+        fresh_data, fresh_queries = _component_query(leaf, transport, component, fresh_deadline)
+        if (fresh_data["current_text"], fresh_data["target_version"], fresh_data["package_index"], fresh_data["needed"]) != (
+                data["current_text"], data["target_version"], data["package_index"], True):
+            raise ValueError("actual component changed during upload; never dispatch stale choice")
+        fresh = _preflight_component_on_session(leaf, component, transport, fresh_deadline,
+                                               package_index=data["package_index"])
+        if not same_backup_snapshot(preflight["before_commands"], fresh["before_commands"]):
+            raise ValueError("configuration changed before install; maintenance window uncertain")
+        if (args.method == "http"
+                and _checked_package_snapshot(leaf, policy, component, data["package_index"]) != package_snapshot):
+            raise SharedUpgradeHold("needed shared HTTP package changed before dispatch")
+        chain += [_raw_record(_IDENTITY_COMMAND, fresh_identity)] + fresh_queries + list(fresh["query_records"])
+        _scope, directory, _script = _original_component_files(leaf, data)
+        runner = _original_owned_runner(leaf, data, remote)
+        if stop is not None and stop.is_set():
+            raise SharedUpgradeHold("shared stop before original request; no installation dispatched")
+        if getattr(leaf,"_cooperative_completion",False):
+            fresh_boot=_complete_query(leaf,transport,_BOOT_COMMAND,fresh_deadline)
+            if fresh_boot[0]!=boot[0]:
+                raise _NativeObservationHold(reason_code="BOOT_ID_QUERY_FAILED")
+            chain.append(_raw_record(_BOOT_COMMAND,fresh_boot))
+        with scope._request_namespace_lease():
+            scope._component_negative_preflight_locked(leaf.node.hostname,component)
+            if stop is not None and stop.is_set():
+                raise SharedUpgradeHold("shared stop before local original request")
+            scope._request_prepared_step_locked(leaf.node.hostname,component,data["package_index"])
+            request=scope._hold(directory,"request.json")
+            if args.method == 'scp':
+                # Same actual lease: reliably finish the original schema2
+                # companion before any bounded stdin send. No caller DTO/kind.
+                scope._capture_scp_request_content_locked(leaf, component, data['package_index'])
+                leaf.verify(); request.verify(); runner.verify()
+                if stop is not None and stop.is_set():
+                    raise SharedUpgradeHold('shared stop after SCP request capture; no secret sent')
+                from ibsw_upgrade_driver import _fixed_native_scp_cpld_api
+                joint = _fixed_native_scp_cpld_api(scope._native_parent)
+                if (type(joint) is not tuple or len(joint) != 3
+                        or type(joint[2]) is not tuple or len(joint[2]) <= 3
+                        or joint[2][3] is not type(scope)._launch_native_scp_cpld):
+                    raise SharedUpgradeHold('fixed native CPLD launcher wrapper changed')
+                _progress(leaf, component, 'INSTALL_REQUEST_DISPATCH')
+                command, observed = joint[2][3](scope, leaf, component, data['package_index'],
+                                               transport, time.monotonic() + _EXECUTION_SECONDS)
+        leaf.verify(); request.verify(); runner.verify()
+        if args.method != 'scp' and stop is not None and stop.is_set():
+            raise SharedUpgradeHold('shared stop after retaining original request; installer was not dispatched')
+        if args.method != 'scp':
+            command = _owned_launch_command(remote)
+            _progress(leaf, component, 'INSTALL_REQUEST_DISPATCH')
+            observed = _read_channel(leaf, transport, command, time.monotonic() + _EXECUTION_SECONDS)
+        chain.append(_raw_record(command, observed))
+        try:
+            with scope._request_namespace_lease():
+                scope._write_component_dispatch_data_locked(leaf,component,data,request.payload,remote,chain,owned_runner=True)
+        except Exception as error:
+            raise SharedUpgradeHold("component dispatch record uncertain; no further task") from error
+        effect = "POWER_CYCLE_EXPECTED" if component == "cpld" else "REBOOT_EXPECTED"
+        _progress(leaf, component, 'WAIT_INSTALLER')
+        return ComponentDispatchResult(component, leaf.node.hostname, data["package_index"], data["stage"],
+            data["target_version"], "DISPATCHED_UNKNOWN", effect, tuple(chain),
+            evidence + (leaf.node.hostname + "/" + data["stage"] + "/component-dispatch.json",))
+
+
+def _bound_component_postcondition_inputs(leaf, dispatch):
+    """Locate exact held schema2 originals; a DTO or saved state is not admission."""
+    from ibsw_upgrade_contract import ComponentDispatchResult, SharedUpgradeHold
+    from ibsw_upgrade_driver import _declared_candidate_data, _json_bytes, _owned_runner_binding
+    from ibsw_upgrade_schedule import declared_step_key
+    try:
+        if type(dispatch) is not ComponentDispatchResult or dispatch.state != "DISPATCHED_UNKNOWN":
+            raise ValueError("fixed actual dispatched component result required")
+        scope, _global, plan, declared, args, policy = _live_plan_inputs(leaf)
+        if dispatch.hostname != leaf.node.hostname or dispatch.component not in args.selected:
+            raise ValueError("foreign original component")
+        stage = declared_step_key(policy, dispatch.component, dispatch.package_index)
+        if dispatch.stage != stage:
+            raise ValueError("component stage mismatch")
+        directory = scope.session._directory(scope.run_directory / leaf.node.hostname / stage)
+        scope._private_directory(directory)
+        script, binding = _declared_candidate_data(policy, leaf.node, run_id=declared["run_id"], method=args.method,
+            switch_dir=args.switch_dir, plan_sha256=hashlib.sha256(plan.payload).hexdigest(),
+            input_sha256=[hashlib.sha256(source.payload).hexdigest() for source in scope.session._files],
+            component=dispatch.component, package_index=dispatch.package_index, stage_key=stage)
+        if binding["target_version"] != dispatch.target_version:
+            raise ValueError("original target differs")
+        scope._hold(directory, "step.sh", script)
+        scope._hold(directory, "step-binding.json", _json_bytes(binding))
+        request = scope._hold(directory, "request.json")
+        document = json.loads(request.payload)
+        token = document.get("request_id") if type(document) is dict else None
+        if (type(token) is not str or not re.fullmatch(r"[0-9a-f]{32}", token)
+                or request.payload != _json_bytes({"schema_version": 1, "state": "REQUESTED",
+                    "activation_state": "UNKNOWN", "execution_state": "NOT_EXECUTED",
+                    "binding": binding, "request_id": token})):
+            raise ValueError("original request binding changed")
+        held = scope._hold(directory, "component-dispatch.json")
+        document = json.loads(held.payload)
+        if (document.get("schema_version") != 2 or document.get("binding") != binding
+                or document.get("request_sha256") != hashlib.sha256(request.payload).hexdigest()):
+            raise ValueError("original component dispatch changed")
+        remote = document["remote_script"]
+        runner = _owned_runner_bytes(binding, remote)
+        if posixpath.dirname(posixpath.dirname(remote)) != args.switch_dir:
+            raise ValueError("original remote directory outside selected root")
+        scope._hold(directory, "runner.sh", runner)
+        runner_binding = _json_bytes(_owned_runner_binding(binding, remote, runner))
+        scope._hold(directory, "runner-binding.json", runner_binding)
+        if document.get("runner_binding_sha256") != hashlib.sha256(runner_binding).hexdigest():
+            raise ValueError("original runner binding changed")
+        if args.method == 'scp':
+            from ibsw_upgrade_driver import _fixed_native_scp_cpld_api, _validate_scp_request_content_graph
+            if dispatch.component != 'cpld' or document.get('launch_kind') != 'SCP_STDIN_OWNED_RUNNER_V2':
+                raise ValueError('only original SCP CPLD V2 dispatch is supported')
+            source = scope._native_scp_source(leaf, dispatch.component, dispatch.package_index)
+            parent = scope._native_parent
+            joint = _fixed_native_scp_cpld_api(parent)
+            if (type(joint) is not tuple or len(joint) != 3
+                    or len(joint[0]) != 19
+                    or any(actual is not original for actual, original in zip(joint[0], parent._scp_source_binding[1]))
+                    or type(joint[2]) is not tuple or len(joint[2]) <= 3
+                    or joint[2][2] is not type(scope)._native_scp_launch_context
+                    or joint[2][3] is not type(scope)._launch_native_scp_cpld):
+                raise ValueError('original SCP dispatch producer joint changed')
+            names = ('request.json', 'step.sh', 'step-binding.json', 'runner.sh',
+                     'runner-binding.json', 'scp-source-request.json')
+            originals = tuple(scope._hold(directory, name) for name in names)
+            companion = originals[-1]
+            _validate_scp_request_content_graph(set(os.listdir(directory.fd)), binding,
+                lambda name: scope._hold(directory, name).payload)
+            if document.get('scp_companion_sha256') != hashlib.sha256(companion.payload).hexdigest():
+                raise ValueError('original SCP dispatch companion changed')
+            expected_command = joint[2][0](remote, hashlib.sha256(runner).hexdigest(),
+                                           hashlib.sha256(script).hexdigest())
+            if scope._native_scp_source(leaf, dispatch.component, dispatch.package_index) is not source:
+                raise ValueError('original SCP dispatch source instance changed')
+            current = _fixed_native_scp_cpld_api(parent)
+            if (len(current) != len(joint) or any(len(a) != len(b) or
+                    any(x is not y for x, y in zip(a, b)) for a, b in zip(current, joint))):
+                raise ValueError('original SCP dispatch producer joint changed at read tail')
+            for name, original in zip(names, originals):
+                if scope._hold(directory, name) is not original:
+                    raise ValueError('original SCP dispatch artifact owner changed')
+                original.verify()
+        else:
+            if (document.get('launch_kind') != 'OWNED_RUNNER_V1'
+                    or 'scp-source-request.json' in os.listdir(directory.fd)
+                    or 'scp_companion_sha256' in document):
+                raise ValueError('SCP companion cannot authorize an original V1 dispatch')
+            expected_command = _owned_launch_command(remote)
+        records = document.get("records")
+        if (type(records) is not list or not records
+                or records[-1].get("command") != expected_command
+                or tuple(records) != dispatch.raw_records):
+            raise ValueError("original dispatch raw chain changed")
+        if args.method == 'scp' and (records[-1].get('stdout_base64') !=
+                base64.b64encode(b'IBSW_LAUNCH_REQUESTED\n').decode('ascii')
+                or records[-1].get('stderr_base64') != '' or records[-1].get('returncode') != 0
+                or records[-1].get('stream_complete') is not True):
+            raise ValueError('original SCP launch delivery fact changed')
+        leaf.verify()
+        return scope, directory, binding, document, remote
+    except Exception as error:
+        raise SharedUpgradeHold("original component postcondition sources cannot be verified") from error
+
+
+def _read_stable_component_file(leaf, sftp, path, uid, deadline, limit, *, nonempty):
+    bounded=min(deadline,time.monotonic()+25.0)
+    with _owned_phase((sftp.get_channel(),),bounded):
+        return _read_stable_component_file_bounded(leaf,sftp,path,uid,bounded,limit,nonempty=nonempty)
+
+
+def _read_stable_component_file_bounded(leaf, sftp, path, uid, deadline, limit, *, nonempty):
+    """Two full same-handle reads, each with real EOF and named/held checks."""
+    handle, failure, captures = None, None, [b"", b""]
+    phase="COMPONENT_FILE_MISSING"
+    diagnostic={"file":posixpath.basename(path),"operation":"lstat","check":"metadata"}
+    try:
+        _remaining(deadline); _verify_component_leaf(leaf)
+        named = sftp.lstat(path)
+        diagnostic.update(mode=oct(stat.S_IMODE(named.st_mode)),uid=named.st_uid,gid=named.st_gid,size=named.st_size)
+        phase="COMPONENT_FILE_UNSAFE"
+        _remote_metadata(named, uid, directory=False)
+        phase="COMPONENT_FILE_CHANGED"
+        if not (1 if nonempty else 0) <= named.st_size <= limit:
+            diagnostic['check']='size_limit'
+            raise ValueError("owned component file missing/over-limit")
+        diagnostic.update(operation='open',check='handle_metadata')
+        handle = sftp.open(path, "rb")
+        opened = handle.stat()
+        phase="COMPONENT_FILE_UNSAFE"
+        _remote_metadata(opened, uid, directory=False)
+        phase="COMPONENT_FILE_CHANGED"
+        fields = lambda item: (item.st_mode, item.st_uid, item.st_gid, item.st_size, item.st_mtime)
+        if fields(opened) != fields(named):
+            diagnostic['check']='handle_name_mismatch'
+            raise ValueError("owned component handle/name mismatch")
+        for index in range(2):
+            if index:
+                handle.seek(0)
+            payload, eof = bytearray(), False
+            while len(payload) <= named.st_size:
+                _remaining(deadline); _verify_component_io(leaf)
+                diagnostic.update(operation='read',check='stable_eof')
+                chunk = handle.read(min(65536, named.st_size + 1 - len(payload)))
+                if not chunk:
+                    eof = True
+                    break
+                payload.extend(chunk); captures[index] = bytes(payload)
+            diagnostic.update(operation='stat',check='stable_size_metadata')
+            if (not eof or len(payload) != named.st_size or fields(handle.stat()) != fields(opened)
+                    or fields(sftp.lstat(path)) != fields(opened)):
+                raise ValueError("owned component file changed/incomplete")
+        if captures[0] != captures[1]:
+            diagnostic['check']='stable_bytes'
+            raise ValueError("owned component stable reread differs")
+        _verify_component_leaf(leaf)
+    except BaseException as error:
+        failure = error
+        if isinstance(error,_NativeObservationHold):
+            phase=error.reason_code
+        if isinstance(error,OSError) and error.errno is not None: diagnostic['errno']=error.errno
+        if isinstance(error,(OSError,EOFError)):
+            phase='COMPONENT_FILE_MISSING' if isinstance(error,FileNotFoundError) or getattr(error,'errno',None)==errno.ENOENT else 'COMPONENT_SFTP_FAILED'
+    finally:
+        if handle is not None:
+            try:
+                handle.close()
+            except BaseException as cleanup:
+                if (failure is None or (isinstance(failure, Exception) and not isinstance(cleanup, Exception))
+                        or isinstance(cleanup,OSError) and cleanup.errno in _RESOURCE_ERRNOS):
+                    failure = cleanup
+                    phase='COMPONENT_SFTP_FAILED'
+                    diagnostic.update(operation='close',check='handle_close')
+                    if isinstance(cleanup,OSError) and cleanup.errno is not None: diagnostic['errno']=cleanup.errno
+    if failure is not None:
+        if not isinstance(failure, Exception):
+            raise failure
+        from ibsw_upgrade_contract import SharedUpgradeHold
+        if isinstance(failure, SharedUpgradeHold):
+            raise failure
+        if isinstance(failure,OSError) and failure.errno in _RESOURCE_ERRNOS:
+            raise failure
+        raise _NativeObservationHold(reason_code=phase,capture_raw={"component_file":path,
+            "stable_reads":tuple(captures),"safe_diagnostic":dict(diagnostic,code=phase)}) from None
+    return captures[0]
+
+
+def _verify_component_io(leaf):
+    """Cheap original-handle identity per chunk; full content checks at edges."""
+    try:
+        getattr(leaf,'verify_io_identity',leaf.verify)()
+    except SharedUpgradeHold:
+        raise
+    except Exception as error:
+        if isinstance(error,OSError) and error.errno in _RESOURCE_ERRNOS: raise
+        raise SharedUpgradeHold('original component source identity changed during IO') from error
+
+
+def _read_component_log_prefix(leaf,sftp,path,uid,deadline,limit,header):
+    """Read a bound immutable PREFIX of a mutable log; append is not tampering.
+
+    Never interpret a truncated final line. Only same-prefix rereads with safe
+    owner/type/mode are accepted. No full-log stability/success is claimed.
+    """
+    handle=None
+    operation='lstat'; check='metadata'; diagnostic={'file':posixpath.basename(path)}
+    try:
+        _remaining(deadline); _verify_component_leaf(leaf)
+        named=sftp.lstat(path)
+        diagnostic.update(mode=oct(stat.S_IMODE(named.st_mode)),uid=named.st_uid,gid=named.st_gid,size=named.st_size)
+        try: _remote_metadata(named,uid,directory=False)
+        except ValueError:
+            raise _NativeObservationHold(reason_code='COMPONENT_FILE_UNSAFE') from None
+        size=min(named.st_size,limit)
+        if size<0: raise _NativeObservationHold(reason_code='COMPONENT_FILE_UNSAFE')
+        identity=lambda item:(item.st_mode,item.st_uid,item.st_gid)
+        operation='open'; handle=sftp.open(path,'rb')
+        def metadata(item):
+            try: _remote_metadata(item,uid,directory=False)
+            except ValueError:
+                raise _NativeObservationHold(reason_code='COMPONENT_FILE_UNSAFE') from None
+            if identity(item)!=identity(named) or item.st_size<size:
+                raise _NativeObservationHold(reason_code='COMPONENT_FILE_CHANGED')
+        metadata(handle.stat())
+        reads=[]
+        for index in range(2):
+            if index: handle.seek(0)
+            data=bytearray(); operation='read'; check='bound_prefix'
+            while len(data)<size:
+                _remaining(deadline); _verify_component_io(leaf)
+                chunk=handle.read(min(65536,size-len(data)))
+                if not chunk: raise _NativeObservationHold(reason_code='COMPONENT_FILE_CHANGED')
+                data.extend(chunk)
+            reads.append(bytes(data)); operation='stat'
+            metadata(handle.stat()); metadata(sftp.lstat(path))
+        if reads[0]!=reads[1]:
+            check='prefix_bytes'
+            raise _NativeObservationHold(reason_code='COMPONENT_FILE_CHANGED')
+        if not reads[0].startswith(header):
+            if header.startswith(reads[0]):
+                _verify_component_leaf(leaf)
+                return b''  # Incomplete original header, no facts yet.
+            check='original_header'
+            raise _NativeObservationHold(reason_code='COMPONENT_EXIT_BINDING_INVALID')
+        _verify_component_leaf(leaf)
+        return reads[0]
+    except Exception as error:
+        if isinstance(error,SharedUpgradeHold) or isinstance(error,OSError) and error.errno in _RESOURCE_ERRNOS: raise
+        code=(error.reason_code if isinstance(error,_NativeObservationHold) else
+              'COMPONENT_FILE_MISSING' if isinstance(error,FileNotFoundError) or getattr(error,'errno',None)==errno.ENOENT else
+              'COMPONENT_SFTP_FAILED' if isinstance(error,(OSError,EOFError)) else 'COMPONENT_FILE_CHANGED')
+        diagnostic.update(operation=operation,check=check,code=code)
+        if isinstance(error,OSError) and error.errno is not None: diagnostic['errno']=error.errno
+        raise _NativeObservationHold(reason_code=code,capture_raw={'safe_diagnostic':diagnostic}) from None
+    finally:
+        if handle is not None:
+            import sys
+            active=sys.exc_info()[0] is not None
+            try: handle.close()
+            except BaseException as error:
+                if not isinstance(error,Exception): raise
+                if isinstance(error,OSError) and error.errno in _RESOURCE_ERRNOS: raise
+                # Do not replace an unsafe-file/binding failure with a retryable close error.
+                if not active:
+                    safe=dict(diagnostic,operation='close',check='handle_close',code='COMPONENT_SFTP_FAILED')
+                    if isinstance(error,OSError) and error.errno is not None: safe['errno']=error.errno
+                    raise _NativeObservationHold(reason_code='COMPONENT_SFTP_FAILED',capture_raw={'safe_diagnostic':safe}) from None
+
+
+def _await_component_exit(leaf, dispatch, *, password, deadline):
+    """Only wait/read this request's owned exit; never launch, reset or repair.
+
+    No journal transaction is held during SSH, reboot recovery or polling. A
+    missing record remains UNKNOWN at the overall deadline, even if OS changed.
+    """
+    from ibsw_upgrade_contract import SharedUpgradeHold
+    from ibsw_upgrade_observer import _progress
+    while True:
+        _remaining(deadline); leaf.verify()
+        try:
+            with _signed_session(leaf, password=password, _connection_deadline=deadline) as (transport, _end, _id, _auth, _pin):
+                with leaf.scope._request_namespace_lease():
+                    _scope, _directory, _binding, _original, remote = _bound_component_postcondition_inputs(leaf, dispatch)
+                uid_raw = _complete_query(leaf, transport, _UID_COMMAND, deadline)
+                if not re.fullmatch(rb"[0-9]+\n", uid_raw[0]):
+                    raise ValueError("unknown actual account uid during completion wait")
+                uid, sftp = int(uid_raw[0]), None
+                try:
+                    sftp = _fixed_sdk().SFTPClient.from_transport(transport)
+                    sftp.get_channel().settimeout(min(25.0, _remaining(deadline)))
+                    while True:
+                        _remaining(deadline); leaf.verify()
+                        # Fixed marker-only display; never stream arbitrary
+                        # installer output or treat progress as completion.
+                        log_path=posixpath.join(posixpath.dirname(remote),'execution.stdout')
+                        _remote_metadata(sftp.lstat(log_path),uid,directory=False)
+                        log=sftp.open(log_path,'rb')
+                        try:
+                            snippet=log.read(512*1024)
+                        finally:
+                            log.close()
+                        markers=re.findall(rb'(?m)^IBSW_STAGE=([A-Z_]+)$',snippet)
+                        if markers and markers[-1] in (b'PACKAGE_DOWNLOAD',b'PACKAGE_READY',b'IMAGE_FETCH',
+                                b'INSTALL_REQUESTED',b'BIOS_FETCH',b'CPLD_BURN',b'CPLD_REFRESH'):
+                            _progress(leaf,dispatch.component,markers[-1].decode())
+                        try:
+                            item = sftp.lstat(posixpath.join(posixpath.dirname(remote), "owned-exit.record"))
+                        except FileNotFoundError:
+                            item = None
+                        if item is not None:
+                            _remote_metadata(item, uid, directory=False)
+                            if item.st_size > 0:
+                                return  # Availability only; collector revalidates bytes, binding and EOF.
+                        time.sleep(min(3.0, _remaining(deadline)))
+                finally:
+                    if sftp is not None:
+                        sftp.close()
+        except SharedUpgradeHold:
+            raise
+        except (OSError, EOFError):
+            # Connection loss is expected during reboot. Only reconnect/read;
+            # a new authenticated session must again match host key and identity.
+            _progress(leaf,dispatch.component,'WAIT_REBOOT')
+            leaf.verify(); time.sleep(min(3.0, _remaining(deadline)))
+        except _NativeObservationHold as error:
+            if error.reason_code not in {"SSH_CONNECT_FAILED", "SSH_HANDSHAKE_FAILED", "SSH_AUTH_TRANSPORT_LOST"}:
+                raise
+            _progress(leaf,dispatch.component,'WAIT_REBOOT')
+            leaf.verify(); time.sleep(min(3.0, _remaining(deadline)))
+
+
+def _collect_component_exit_and_logs(leaf, dispatch, transport, deadline):
+    """Actual original signed SFTP readback only; no launch/retry/job assumption."""
+    from ibsw_upgrade_contract import SharedUpgradeHold
+    scope = leaf._original_selection[0]
+    with scope._request_namespace_lease():
+        _scope, directory, binding, original, remote = _bound_component_postcondition_inputs(leaf, dispatch)
+        actual_uid = _complete_query(leaf, transport, _UID_COMMAND, deadline)
+        if not re.fullmatch(rb"[0-9]+\n", actual_uid[0]):
+            raise ValueError("unknown actual original account uid")
+        uid = int(actual_uid[0])
+        prior = [row for row in original["records"] if row.get("command") == _UID_COMMAND]
+        if (len(prior) != 1 or prior[0].get("returncode") != 0 or prior[0].get("stream_complete") is not True
+                or prior[0].get("stderr_base64") != ""
+                or base64.b64decode(prior[0]["stdout_base64"], validate=True) != actual_uid[0]):
+            raise ValueError("actual signed uid differs from original dispatch")
+        remote_dir = posixpath.dirname(remote)
+        sftp, failure, captured = None, None, {}
+        phase="COMPONENT_SFTP_FAILED"
+        safe={"stage":dispatch.stage}
+        try:
+            with _owned_phase((transport,), deadline):
+                sftp = _fixed_sdk().SFTPClient.from_transport(transport)
+                sftp.get_channel().settimeout(min(25.0,_remaining(deadline)))
+                path = "/"
+                for name in remote_dir.strip("/").split("/"):
+                    path = posixpath.join(path, name)
+                    _remaining(deadline); leaf.verify()
+                    phase="COMPONENT_DIRECTORY_MISSING"
+                    item = sftp.lstat(path)
+                    phase="COMPONENT_DIRECTORY_UNSAFE"
+                    safe.update(directory=path,mode=oct(stat.S_IMODE(item.st_mode)),uid=item.st_uid,gid=item.st_gid)
+                    if not stat.S_ISDIR(item.st_mode) or item.st_mode & 0o022:
+                        raise ValueError("unsafe original component directory chain")
+                _remote_metadata(item, uid, directory=True)
+                for name, cap in (("owned-exit.record", 512), ("execution.stdout", 4*1024*1024),
+                                  ("execution.stderr", 4*1024*1024)):
+                    captured[name] = _read_stable_component_file(leaf, sftp, posixpath.join(remote_dir, name),
+                        uid, deadline, cap, nonempty=name == "owned-exit.record")
+                phase="COMPONENT_EXIT_BINDING_INVALID"
+                _owned_exit_data(binding, captured["owned-exit.record"])
+                _bound_component_postcondition_inputs(leaf, dispatch)
+        except BaseException as error:
+            failure = error
+        finally:
+            if sftp is not None:
+                try:
+                    sftp.close()
+                except BaseException as cleanup:
+                    if (failure is None or (isinstance(failure, Exception) and not isinstance(cleanup, Exception))
+                            or isinstance(cleanup,OSError) and cleanup.errno in _RESOURCE_ERRNOS
+                            and isinstance(failure,Exception)):
+                        failure = cleanup
+        if failure is not None:
+            if not isinstance(failure, Exception):
+                raise failure
+            if isinstance(failure, SharedUpgradeHold):
+                raise failure
+            if isinstance(failure,OSError) and failure.errno in _RESOURCE_ERRNOS:
+                raise failure
+            partial = failure.capture_raw if isinstance(failure, _NativeObservationHold) else None
+            reason=getattr(failure,"reason_code",phase)
+            if type(partial) is dict and type(partial.get("safe_diagnostic")) is dict:
+                safe.update(partial["safe_diagnostic"])
+            safe["code"]=reason
+            raise _NativeObservationHold(reason_code=reason,capture_raw={"component_owned_files":captured,
+                "partial_file":partial,"safe_diagnostic":safe}) from None
+        raw = [_raw_record(_UID_COMMAND, actual_uid)]
+        for name in ("owned-exit.record", "execution.stdout", "execution.stderr"):
+            # Explicit SFTP operation label, not an executed shell command or rc0.
+            raw.append(_raw_record("SFTP_READ " + posixpath.join(remote_dir, name),
+                                   (captured[name], b"", None, True)))
+        exit_code = _owned_exit_data(binding, captured["owned-exit.record"])["child_exit_code"]
+        leaf.verify()
+        return {"exit_code": exit_code, "stdout": captured["execution.stdout"],
+                "stderr": captured["execution.stderr"], "raw_records": tuple(raw),
+                "evidence_paths": (leaf.node.hostname + "/" + dispatch.stage + "/component-dispatch.json",)}
+
+
+def _probe_component_exit_once(leaf,dispatch,*,password,deadline,_read_only=False,_transport=None):
+    """One original diagnostic/telemetry probe, never an installer retry.
+
+    Before reboot only, acknowledge a successful OS download AFTER the manager
+    has fsynced its complete attempt measurements. Reboot success never requires
+    these switch-side files to survive.
+    """
+    from contextlib import ExitStack
+    from ibsw_upgrade_observer import _signed_session_single
+    with ExitStack() as stack:
+        if _transport is not None:
+            if not _read_only: raise SharedUpgradeHold('session reuse is diagnostic-only')
+            signed=(_transport,)
+        elif _read_only:
+            rejected=False
+            try:
+                signed=stack.enter_context(_signed_session_single(leaf,_connection_deadline=deadline,_minimal=True))
+            except _NativeObservationHold as error:
+                if error.reason_code!="SSH_AUTHENTICATION_REJECTED": raise
+                rejected=True
+            if rejected:
+                signed=stack.enter_context(_signed_session_single(leaf,password=password,_connection_deadline=deadline,_minimal=True))
+        else:
+            signed=stack.enter_context(_signed_session(leaf,password=password,_connection_deadline=deadline))
+        transport=signed[0]
+        scope=leaf._original_selection[0]
+        with scope._request_namespace_lease():
+            _scope,_directory,binding,document,remote=_bound_component_postcondition_inputs(leaf,dispatch)
+        uid_raw=_complete_query(leaf,transport,_UID_COMMAND,deadline)
+        prior=[r for r in document["records"] if r.get("command")==_UID_COMMAND]
+        if (not re.fullmatch(rb"[0-9]+\n",uid_raw[0]) or len(prior)!=1
+                or base64.b64decode(prior[0]["stdout_base64"],validate=True)!=uid_raw[0]):
+            raise _NativeObservationHold(reason_code="DEVICE_IDENTITY_MISMATCH")
+        stack.enter_context(_owned_phase((transport,),min(deadline,time.monotonic()+25.0)))
+        try: sftp=_fixed_sdk().SFTPClient.from_transport(transport)
+        except SharedUpgradeHold: raise
+        except Exception as error:
+            if isinstance(error,OSError) and error.errno in _RESOURCE_ERRNOS: raise
+            safe={'operation':'open','stage':dispatch.stage,'code':'COMPONENT_SFTP_FAILED'}
+            if isinstance(error,OSError) and error.errno is not None: safe['errno']=error.errno
+            raise _NativeObservationHold(reason_code='COMPONENT_SFTP_FAILED',capture_raw={'safe_diagnostic':safe}) from None
+        result,failure=False,None
+        acknowledged_now=False
+        try:
+            sftp.get_channel().settimeout(min(25.0,_remaining(deadline)))
+            path=posixpath.join(posixpath.dirname(remote),"owned-exit.record")
+            if _read_only:
+                log_path=posixpath.join(posixpath.dirname(remote),"execution.stdout")
+                node=binding['node']
+                header=json.dumps((binding['run_id'],node['hostname'],node['address'],node['mac'],
+                    binding['component'],binding['target_version']),ensure_ascii=True,separators=(',',':')).encode('ascii')+b'\n'
+                try:
+                    snippet=_read_component_log_prefix(leaf,sftp,log_path,int(uid_raw[0]),deadline,512*1024,header)
+                except _NativeObservationHold as error:
+                    if error.reason_code!='COMPONENT_FILE_MISSING': raise
+                    snippet=b''
+                if snippet:
+                    markers=re.findall(rb"(?m)^IBSW_STAGE=([A-Z_]+)$",snippet)
+                    allowed={b"PACKAGE_DOWNLOAD",b"WAIT_DOWNLOAD_RECORD",b"PACKAGE_READY",b"IMAGE_FETCH",b"INSTALL_REQUESTED",
+                             b"BIOS_FETCH",b"CPLD_BURN",b"CPLD_REFRESH"}
+                    if markers and markers[-1] in allowed:
+                        from ibsw_upgrade_observer import _progress
+                        observed=markers[-1].decode('ascii')
+                        if observed!=getattr(leaf,'_observed_component_stage',None):
+                            leaf._observed_component_stage=observed
+                            _progress(leaf,dispatch.component,observed)
+                    if dispatch.component=='os' and not getattr(leaf,'_download_acknowledged',False):
+                        from ibsw_upgrade_component import parse_download_results,download_ack_bytes
+                        measurements=parse_download_results(snippet)
+                        if measurements:
+                            scope._record_download_attempt(leaf,dispatch,measurements)
+                            last=measurements[-1]
+                            if last['curl_exit']==0 and last['http_status']==200 and last['bytes_downloaded']>0:
+                                ack=download_ack_bytes(binding['run_id'],last['raw_line'].encode('ascii'))
+                                ack_path=posixpath.join(posixpath.dirname(remote),'download-ack')
+                                try: ack_item=sftp.lstat(ack_path)
+                                except FileNotFoundError: ack_item=None
+                                if ack_item is None:
+                                    temporary_ack=ack_path+'-'+secrets.token_hex(16)
+                                    handle=sftp.open(temporary_ack,'wx')
+                                    try:
+                                        sftp.chmod(temporary_ack,0o600)
+                                        handle.write(ack); handle.flush()
+                                    finally: handle.close()
+                                    check=_read_stable_component_file(leaf,sftp,temporary_ack,int(uid_raw[0]),deadline,1024,nonempty=True)
+                                    if check!=ack:
+                                        raise _NativeObservationHold(reason_code='COMPONENT_EXIT_BINDING_INVALID')
+                                    # Final name becomes visible only after complete bytes.
+                                    sftp.rename(temporary_ack,ack_path)
+                                    # Rename response commits the already-verified bytes.
+                                    # The installer can consume ACK and reboot immediately:
+                                    # a post-commit reread must not be a success prerequisite.
+                                else:
+                                    readback=_read_stable_component_file(leaf,sftp,ack_path,int(uid_raw[0]),deadline,1024,nonempty=True)
+                                    if readback!=ack:
+                                        raise _NativeObservationHold(reason_code='COMPONENT_EXIT_BINDING_INVALID')
+                                leaf._download_acknowledged=True
+                                acknowledged_now=True
+            # Next observation checks live boot; no read-after-commit remote
+            # dependency. Keep cleanup failures visible (do not return in try).
+            if acknowledged_now:
+                item=None
+            else:
+                try: item=sftp.lstat(path)
+                except FileNotFoundError: item=None
+            if item is not None and item.st_size:
+                data=_read_stable_component_file(leaf,sftp,path,int(uid_raw[0]),deadline,512,nonempty=True)
+                try: result=_owned_exit_data(binding,data)
+                except ValueError:
+                    raise _NativeObservationHold(reason_code="COMPONENT_EXIT_BINDING_INVALID") from None
+                if _read_only and result['child_exit_code']!=0:
+                    captured={'owned-exit.record':data}
+                    for name in ('execution.stdout','execution.stderr'):
+                        try:
+                            captured[name]=_read_stable_component_file(leaf,sftp,
+                                posixpath.join(posixpath.dirname(remote),name),int(uid_raw[0]),deadline,512*1024,nonempty=False)
+                        except FileNotFoundError: pass
+                    result['diagnostic_files']=captured
+                    result['preinstall_failure_phase']=_preinstall_failure_phase(binding,result['child_exit_code'],captured)
+        except BaseException as error:
+            if isinstance(error,(OSError,EOFError)) and not (isinstance(error,OSError) and
+                    error.errno in _RESOURCE_ERRNOS):
+                safe={'operation':'read','stage':dispatch.stage,'code':'COMPONENT_SFTP_FAILED'}
+                if isinstance(error,OSError) and error.errno is not None: safe['errno']=error.errno
+                failure=_NativeObservationHold(reason_code='COMPONENT_SFTP_FAILED',capture_raw={'safe_diagnostic':safe})
+            else: failure=error
+        finally:
+            try: sftp.close()
+            except BaseException as cleanup:
+                if isinstance(cleanup,OSError) and cleanup.errno in _RESOURCE_ERRNOS:
+                    if failure is None or isinstance(failure,Exception): failure=cleanup
+                if failure is None:
+                    safe={'operation':'close','stage':dispatch.stage,'code':'COMPONENT_SFTP_FAILED'}
+                    if isinstance(cleanup,OSError) and cleanup.errno is not None: safe['errno']=cleanup.errno
+                    failure=(_NativeObservationHold(reason_code="COMPONENT_SFTP_FAILED",capture_raw={'safe_diagnostic':safe})
+                             if isinstance(cleanup,Exception) else cleanup)
+        if failure is not None: raise failure
+        return result
+
+
+def _upload_component_missing_once(leaf, dispatch, missing_original, transport, deadline):
+    """One bound missing-only transfer; never patch/apply/save or resend."""
+    from ibsw_upgrade_inputs import _HeldFile
+    from ibsw_upgrade_contract import SharedUpgradeHold
+    from ibsw_upgrade_driver import _component_repair_missing_bytes, _validate_component_graph
+    scope = leaf._original_selection[0]
+    with scope._request_namespace_lease():
+        _scope, directory, binding, document, remote_script = _bound_component_postcondition_inputs(leaf, dispatch)
+        # Exact original stage slot, not an arbitrary file-shaped caller value.
+        if (type(missing_original) is not _HeldFile or missing_original.directory is not directory
+                or missing_original.name != "missing.commands"
+                or missing_original is not scope._hold(directory, "missing.commands")):
+            raise ValueError("same original held stage missing file required")
+        try:
+            missing_original.verify()
+            before = scope._hold(directory, "before.commands").payload
+            after = scope._hold(directory, "after.commands").payload
+            _component_repair_missing_bytes(before, after, missing_original.payload)
+            names = set(os.listdir(directory.fd))
+            if names & {"component-repair-result.json", "component-completion.json"}:
+                raise ValueError("retained repair/completion outcome forbids another transfer")
+            _validate_component_graph(names, binding,
+                lambda name: scope._hold(directory, name).payload,
+                switch_dir=scope.parsed.switch_dir)
+            # The graph binds REQUESTED repair/before/after/missing to the
+            # original request, runner, dispatch and preflight hash graph.
+            scope._hold(directory, "component-repair.json")
+            leaf.verify()
+        except Exception as error:
+            raise SharedUpgradeHold("original missing-only repair sources changed") from error
+        uid_raw = _complete_query(leaf, transport, _UID_COMMAND, deadline)
+        prior = [row for row in document["records"] if row.get("command") == _UID_COMMAND]
+        if (not re.fullmatch(rb"[0-9]+\n", uid_raw[0]) or len(prior) != 1
+                or prior[0].get("returncode") != 0 or prior[0].get("stream_complete") is not True
+                or prior[0].get("stderr_base64") != ""
+                or base64.b64decode(prior[0]["stdout_base64"], validate=True) != uid_raw[0]):
+            raise ValueError("actual signed uid differs from original component dispatch")
+        uid = int(uid_raw[0])
+        # Recreate repair materials from management-server originals. The OS
+        # may have removed every file in the original installer directory.
+        repair_parent = posixpath.dirname(posixpath.dirname(remote_script))
+        remote_dir = posixpath.join(repair_parent, '.ibsw-repair-' + secrets.token_hex(16))
+        remote = posixpath.join(remote_dir, "missing.commands")
+        sftp, failure, readback, cleanup_errors = None, None, None, []
+        try:
+            with _owned_phase((transport,), deadline):
+                sftp = _fixed_sdk().SFTPClient.from_transport(transport)
+                sftp.get_channel().settimeout(_remaining(deadline))
+                current = "/"
+                for name in repair_parent.strip("/").split("/"):
+                    current = posixpath.join(current, name)
+                    _remaining(deadline); leaf.verify()
+                    metadata = sftp.lstat(current)
+                    if not stat.S_ISDIR(metadata.st_mode) or metadata.st_mode & 0o022:
+                        raise ValueError("unsafe original remote directory chain")
+                sftp.mkdir(remote_dir, mode=0o700)  # Exclusive fresh random directory; never reuse.
+                _remote_metadata(sftp.lstat(remote_dir), uid, directory=True)
+                _upload_original_file(leaf, missing_original, sftp, uid, deadline, remote)
+                # Actual bounded same-handle reread with real EOF, not a copy
+                # of caller text labelled as observed remote stdout.
+                readback = _read_stable_component_file(leaf, sftp, remote, uid, deadline,
+                    len(missing_original.payload), nonempty=True)
+                if readback != missing_original.payload:
+                    raise ValueError("original uploaded missing file differs")
+                missing_original.verify()
+        except BaseException as error:
+            failure = error
+        finally:
+            if sftp is not None:
+                try:
+                    sftp.close()
+                except BaseException as error:
+                    cleanup_errors.append(error)
+                    if failure is None or (isinstance(failure, Exception) and not isinstance(error, Exception)):
+                        failure = error
+            try:
+                _verify_component_leaf(leaf)
+            except BaseException as error:
+                cleanup_errors.append(error)
+                if failure is None or (isinstance(failure, Exception)
+                        and (not isinstance(error, Exception) or isinstance(error, SharedUpgradeHold))):
+                    failure = error
+        if failure is not None:
+            if not isinstance(failure, Exception) or isinstance(failure, SharedUpgradeHold):
+                raise failure
+            raise _NativeObservationHold(capture_raw={
+                "component_missing_upload": remote,
+                "uid_record": _raw_record(_UID_COMMAND, uid_raw),
+                "readback": readback,
+                "partial_readback": failure.capture_raw if isinstance(failure, _NativeObservationHold) else None,
+                "cleanup_error_types": tuple(type(error).__name__ for error in cleanup_errors),
+            }) from None
+        return remote, (_raw_record(_UID_COMMAND, uid_raw),
+                        _raw_record("SFTP_WRITE_READBACK " + remote, (readback, b"", None, True)))
