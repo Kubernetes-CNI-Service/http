@@ -1,5 +1,16 @@
 # Real-environment acceptance cases
 
+## TC-REAL-REQ7-CABLE-SDK-001 — 独立同步 SDK 依赖与原生接线
+
+- 类型：contract / integration / real-environment；状态 **NOT RUN / OPEN**。适用 Linux CPython 3.12 aarch64/x86_64、glibc >= 2.28；本卡不授予 Docker、真实 Cloud 或设备权限。
+- 范围：`REQ7-CABLE-SDK-V1` 独立于旧 `REQ7-C14-T6-A`。20 个分布、22 个精确 wheel；protobuf/charset-normalizer 明确选择 pure-Python wheel。公开 PyPI SHA 与 wheel METADATA/声明 tags 核对，不等于安装、二进制 ABI、目标执行或发送资格。
+- 本地案例：`test_req7_cable_dependency.py` direct；`test_req7_cable_dependency_workflow.py` 真实新 loader → 原 no-follow FD reader → 当前安装 metadata 联测。版本身份与公开 dataclass 不是凭据、项目目标或操作许可；旧 C14 不扩大、不更名、不冒用。
+- 前置：另行获批的两个隔离架构环境，冻结 HEAD/tree/dirty、源码/测试/manifest、policy/lock、原 wheel SHA、镜像和解释器/平台/venv 身份；只使用专门测试账户及显式 allowlist，密钥与令牌不进入证据。
+- 步骤：实际安装须 wheels-only/no-extras/no-deps/require-hashes；核目标 wheel 与共享旧 C14 六版本/八 artifact 无冲突、包文件均源于受管 venv。验证独立新 activation/runner/runtime 身份以及缺失、漂移、外源、错误架构/解释器拒绝，失败先于 SDK import/网络。当前切片不修改 Docker 安装或 activation/runner 新运行时门禁，仍待接线。
+- 原生后续：固定 held service-account、同项目当前目标/allowlist、原采集证据/K/N/白名单及本地先提交；HTML 与 REQ7 独立处理共同采集原件，不解析 monitor.html。真实 SDK 静态 discovery、401 refresh/replay 禁止、无同轮 mutation 重试、全操作 30/60 秒监督、完整响应与关键 close/owner 收尾须逐项核验；私有 HTTP 桩协议6 PASS 不替代此卡。
+- 预期/证据：线上失败保留本地工作簿，下一正常周期新读后合并；保留人工字段和目标自身 ID/坐标。多请求不是事务，不声称 CAS、exactly-once 或 History 完整性。保存脱敏完整命令/退出码、原件 held/named 前后 stat9/SHA、请求次数/顺序、失败阶段与清理结果；full 和现场独立，旧失败不重标。
+- 故障/清理：仅在隔离环境注入依赖漂移、policy/lock 替换、超时/401/503、关键关闭和报告错误；未知效果不伪造成功或同轮重发。只清理确证自有账户/文档/环境，保留原失败材料；无现场权限不执行本卡。
+
 ## TC-REAL-IBSW225-INTEGRATION-001 — IB2.25 成套运行、组件恢复及共同运行锁
 
 - Case ID：`TC-REAL-IBSW225-INTEGRATION-001`；类型：direct / integration / scenario / real-environment。

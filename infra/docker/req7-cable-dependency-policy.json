@@ -1,0 +1,239 @@
+{
+  "architectures": [
+    "aarch64",
+    "x86_64"
+  ],
+  "artifacts": [
+    {
+      "architecture": "any",
+      "filename": "certifi-2026.7.22-py3-none-any.whl",
+      "name": "certifi",
+      "sha256": "62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775"
+    },
+    {
+      "architecture": "aarch64",
+      "filename": "cffi-2.0.0-cp312-cp312-manylinux2014_aarch64.manylinux_2_17_aarch64.whl",
+      "name": "cffi",
+      "sha256": "b21e08af67b8a103c71a250401c78d5e0893beff75e28c53c98f4de42f774062"
+    },
+    {
+      "architecture": "x86_64",
+      "filename": "cffi-2.0.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+      "name": "cffi",
+      "sha256": "3e17ed538242334bf70832644a32a7aae3d83b57567f9fd60a26257e992b79ba"
+    },
+    {
+      "architecture": "any",
+      "filename": "charset_normalizer-3.5.1-py3-none-any.whl",
+      "name": "charset-normalizer",
+      "sha256": "6df0ec430f9a831772c23ca5a224cba36517a58a84bb32c32bb59a9fa67c47f6"
+    },
+    {
+      "architecture": "aarch64",
+      "filename": "cryptography-50.0.1-cp39-abi3-manylinux_2_28_aarch64.whl",
+      "name": "cryptography",
+      "sha256": "4c4188f7c0cf655be5c06342b817ed0f9595b69ffa2b12026e5353eed29dea88"
+    },
+    {
+      "architecture": "x86_64",
+      "filename": "cryptography-50.0.1-cp39-abi3-manylinux_2_28_x86_64.whl",
+      "name": "cryptography",
+      "sha256": "407fe2b6db00939c05c0e945e9914238f2f0a430974839429dafc82b1ee6bee5"
+    },
+    {
+      "architecture": "any",
+      "filename": "google_api_core-2.30.3-py3-none-any.whl",
+      "name": "google-api-core",
+      "sha256": "a85761ba72c444dad5d611c2220633480b2b6be2521eca69cca2dbb3ffd6bfe8"
+    },
+    {
+      "architecture": "any",
+      "filename": "google_api_python_client-2.198.0-py3-none-any.whl",
+      "name": "google-api-python-client",
+      "sha256": "fabac935474e817da5e662ff61bf7139439d6f92b32d332a7318a2d45931e03e"
+    },
+    {
+      "architecture": "any",
+      "filename": "google_auth_httplib2-0.3.1-py3-none-any.whl",
+      "name": "google-auth-httplib2",
+      "sha256": "682356a90ef4ba3d06548c37e9112eea6fc00395a11b0303a644c1a86abc275c"
+    },
+    {
+      "architecture": "any",
+      "filename": "google_auth-2.50.0-py3-none-any.whl",
+      "name": "google-auth",
+      "sha256": "04382175e28b94f49694977f0a792688b59a668def1499e9d8de996dc9ce5b15"
+    },
+    {
+      "architecture": "any",
+      "filename": "googleapis_common_protos-1.75.0-py3-none-any.whl",
+      "name": "googleapis-common-protos",
+      "sha256": "961ed60399c457ceb0ee8f285a84c870aabc9c6a832b9d37bb281b5bebde43ed"
+    },
+    {
+      "architecture": "any",
+      "filename": "httplib2-0.32.0-py3-none-any.whl",
+      "name": "httplib2",
+      "sha256": "dc6705cacdf3fb0a2aba7629fa33c90fd93e30035db0c157325826be177e4816"
+    },
+    {
+      "architecture": "any",
+      "filename": "idna-3.19-py3-none-any.whl",
+      "name": "idna",
+      "sha256": "815e7be7a7806d54abb586dc943addc79e8b2ee16915059658cbeff4b1b43bf4"
+    },
+    {
+      "architecture": "any",
+      "filename": "proto_plus-1.27.2-py3-none-any.whl",
+      "name": "proto-plus",
+      "sha256": "6432f75893d3b9e70b9c412f1d2f03f65b11fb164b793d14ae2ca01821d22718"
+    },
+    {
+      "architecture": "any",
+      "filename": "protobuf-6.33.6-py3-none-any.whl",
+      "name": "protobuf",
+      "sha256": "77179e006c476e69bf8e8ce866640091ec42e1beb80b213c3900006ecfba6901"
+    },
+    {
+      "architecture": "any",
+      "filename": "pyasn1_modules-0.4.2-py3-none-any.whl",
+      "name": "pyasn1-modules",
+      "sha256": "29253a9207ce32b64c3ac6600edc75368f98473906e8fd1043bd6b5b1de2c14a"
+    },
+    {
+      "architecture": "any",
+      "filename": "pyasn1-0.6.4-py3-none-any.whl",
+      "name": "pyasn1",
+      "sha256": "deda9277cfd454080ec40b207fb6df82206a3a2688735233cdcd8d3d565f088b"
+    },
+    {
+      "architecture": "any",
+      "filename": "pycparser-2.23-py3-none-any.whl",
+      "name": "pycparser",
+      "sha256": "e5c6e8d3fbad53479cab09ac03729e0a9faf2bee3db8208a550daf5af81a5934"
+    },
+    {
+      "architecture": "any",
+      "filename": "pyparsing-3.3.2-py3-none-any.whl",
+      "name": "pyparsing",
+      "sha256": "850ba148bd908d7e2411587e247a1e4f0327839c40e2e5e6d05a007ecc69911d"
+    },
+    {
+      "architecture": "any",
+      "filename": "requests-2.32.5-py3-none-any.whl",
+      "name": "requests",
+      "sha256": "2462f94637a34fd532264295e186976db0f5d453d1cdd31473c85a6a161affb6"
+    },
+    {
+      "architecture": "any",
+      "filename": "uritemplate-4.2.0-py3-none-any.whl",
+      "name": "uritemplate",
+      "sha256": "962201ba1c4edcab02e60f9a0d3821e82dfc5d2d6662a21abd533879bdb8a686"
+    },
+    {
+      "architecture": "any",
+      "filename": "urllib3-2.6.3-py3-none-any.whl",
+      "name": "urllib3",
+      "sha256": "bf272323e553dfb2e87d9bfd225ca7b0f467b919d7bbd355436d3fd37cb0acd4"
+    }
+  ],
+  "contract": "REQ7-CABLE-SDK-V1",
+  "development_conditional": {
+    "marker": "python_full_version < '3.11'",
+    "name": "typing_extensions",
+    "version": "4.16.0"
+  },
+  "distributions": [
+    {
+      "name": "certifi",
+      "version": "2026.7.22"
+    },
+    {
+      "name": "cffi",
+      "version": "2.0.0"
+    },
+    {
+      "name": "charset-normalizer",
+      "version": "3.5.1"
+    },
+    {
+      "name": "cryptography",
+      "version": "50.0.1"
+    },
+    {
+      "name": "google-api-core",
+      "version": "2.30.3"
+    },
+    {
+      "name": "google-api-python-client",
+      "version": "2.198.0"
+    },
+    {
+      "name": "google-auth-httplib2",
+      "version": "0.3.1"
+    },
+    {
+      "name": "google-auth",
+      "version": "2.50.0"
+    },
+    {
+      "name": "googleapis-common-protos",
+      "version": "1.75.0"
+    },
+    {
+      "name": "httplib2",
+      "version": "0.32.0"
+    },
+    {
+      "name": "idna",
+      "version": "3.19"
+    },
+    {
+      "name": "proto-plus",
+      "version": "1.27.2"
+    },
+    {
+      "name": "protobuf",
+      "version": "6.33.6"
+    },
+    {
+      "name": "pyasn1-modules",
+      "version": "0.4.2"
+    },
+    {
+      "name": "pyasn1",
+      "version": "0.6.4"
+    },
+    {
+      "name": "pycparser",
+      "version": "2.23"
+    },
+    {
+      "name": "pyparsing",
+      "version": "3.3.2"
+    },
+    {
+      "name": "requests",
+      "version": "2.32.5"
+    },
+    {
+      "name": "uritemplate",
+      "version": "4.2.0"
+    },
+    {
+      "name": "urllib3",
+      "version": "2.6.3"
+    }
+  ],
+  "extras": [],
+  "platform": "linux",
+  "python": "CPython-3.12",
+  "schema_version": 1,
+  "transport": {
+    "api_retries": 0,
+    "authentication_response_replays": 0,
+    "discovery": "static-only",
+    "http": "google-auth-httplib2",
+    "sdk": "google-api-python-client"
+  }
+}
