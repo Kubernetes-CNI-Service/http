@@ -17,6 +17,15 @@ from test_cases.test_req7_dependency_contract import (
 )
 from test_cases.test_ztp_container_runtime import load_script
 from test_cases.test_change_aware_test_runner import RUNNER
+from test_cases.test_req7_cable_dependency import (
+    POLICY_PATH as CABLE_POLICY_PATH, LOCK_PATH as CABLE_LOCK_PATH,
+    policy_bytes as cable_policy_bytes, lock_bytes as cable_lock_bytes,
+)
+
+CABLE_SUPPORT = {
+    CABLE_POLICY_PATH: hashlib.sha256(cable_policy_bytes()).hexdigest(),
+    CABLE_LOCK_PATH: hashlib.sha256(cable_lock_bytes()).hexdigest(),
+}
 
 
 class Req7DependencyWorkflowTests(unittest.TestCase):
@@ -99,6 +108,7 @@ class Req7DependencyWorkflowTests(unittest.TestCase):
     def test_full_attestation_rejects_missing_or_mixed_dependency_snapshot_hashes(self):
         environment = RUNNER.full_suite_environment()
         support = {"requirements-container-top-level.lock": environment["container_toplevel_lock_sha256"],
+                   **CABLE_SUPPORT,
                    POLICY_PATH: hashlib.sha256(policy_bytes()).hexdigest(),
                    LOCK_PATH: hashlib.sha256(lock_bytes()).hexdigest()}
         valid = RUNNER.Snapshot(manifest_sha256="a" * 64, scripts={}, tests={}, support=support)
@@ -115,6 +125,7 @@ class Req7DependencyWorkflowTests(unittest.TestCase):
     def test_full_approval_refuses_mixed_dependency_hashes_without_ledger_mutation(self):
         environment = RUNNER.full_suite_environment()
         support = {"requirements-container-top-level.lock": environment["container_toplevel_lock_sha256"],
+                   **CABLE_SUPPORT,
                    POLICY_PATH: hashlib.sha256(policy_bytes()).hexdigest(), LOCK_PATH: "0" * 64}
         snapshot = RUNNER.Snapshot(manifest_sha256="a" * 64, scripts={}, tests={}, support=support)
         with tempfile.TemporaryDirectory() as temp:

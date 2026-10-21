@@ -1134,6 +1134,45 @@ def req7_dependency_environment(root: Path) -> dict:
             "linux_artifacts_executed": False}
 
 
+def req7_cable_dependency_environment(root: Path) -> dict:
+    """Observe the separate Cable contract and local metadata, never the SDK."""
+    source_entry = os.fspath(TOOLS_DIRECTORY.parent)
+    sys.path.insert(0, source_entry)
+    try:
+        from tools.req7_cable_dependency_contract import (
+            CableDependencyContractError, load_cable_dependency_contract,
+            installed_cable_dependency_identity,
+        )
+    finally:
+        for index, entry in enumerate(sys.path):
+            if entry is source_entry:
+                del sys.path[index]
+                break
+    try:
+        contract = load_cable_dependency_contract(root)
+        identity = installed_cable_dependency_identity(contract)
+    except CableDependencyContractError:
+        raise ImpactError("REQ7 Cable dependency policy or installed identity is invalid") from None
+    return {"policy_sha256": identity.policy_sha256, "lock_sha256": identity.lock_sha256,
+            "versions": [f"{n}=={v}" for n, v in identity.versions],
+            "linux_artifacts_executed": False}
+
+
+def _verify_req7_cable_environment_snapshot(snapshot: Snapshot, environment: Mapping[str, object]) -> None:
+    """The new pair must be bound independently, never via old C14 identity."""
+    dependency = environment.get("req7_cable_dependencies")
+    if not isinstance(dependency, dict):
+        raise ImpactError("full-suite environment is missing REQ7 Cable dependency identity")
+    for path, field in (
+        ("infra/docker/req7-cable-dependency-policy.json", "policy_sha256"),
+        ("infra/docker/requirements-req7-cable-sync.txt", "lock_sha256"),
+    ):
+        expected = snapshot.support.get(path)
+        if (not isinstance(expected, str) or re.fullmatch(r"[0-9a-f]{64}", expected) is None
+                or dependency.get(field) != expected):
+            raise ImpactError("REQ7 Cable dependency identity does not match the tested source snapshot")
+
+
 def _verify_req7_environment_snapshot(snapshot: Snapshot, environment: Mapping[str, object]) -> None:
     """Never attest metadata from different policy/lock bytes than the snapshot."""
     dependency = environment.get("req7_dependencies")
@@ -1191,6 +1230,7 @@ def full_suite_environment(*, expected_lock_sha256: str | None = None) -> dict:
         "container_toplevel_versions": sorted(versions, key=str.casefold),
         "container_toplevel_lock_sha256": lock_sha256,
         "req7_dependencies": req7_dependency_environment(ROOT),
+        "req7_cable_dependencies": req7_cable_dependency_environment(ROOT),
     }
 
 
@@ -1220,6 +1260,7 @@ def full_suite_attestation(
             "full-suite environment lock does not match the tested source snapshot"
         )
     _verify_req7_environment_snapshot(snapshot, environment)
+    _verify_req7_cable_environment_snapshot(snapshot, environment)
     result = {
         "schema_version": 1,
         "snapshot_sha256": hashlib.sha256(canonical).hexdigest(),
@@ -1802,6 +1843,7 @@ def _one_cycle(args: argparse.Namespace, *, watch: bool = False) -> tuple[int, s
             expected_lock_sha256=_snapshot_toplevel_lock_sha256(before),
         )
         _verify_req7_environment_snapshot(before, before_environment)
+        _verify_req7_cable_environment_snapshot(before, before_environment)
     else:
         before_environment = None
     print_selection(selection)

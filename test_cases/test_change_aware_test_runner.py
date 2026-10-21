@@ -61,6 +61,22 @@ CONTAINER_TOPLEVEL_LOCK_SUPPORT.update({
     "infra/docker/req7-dependency-policy.json": EXPECTED_REQ7_IDENTITY["policy_sha256"],
     "infra/docker/requirements-req7-online.txt": EXPECTED_REQ7_IDENTITY["lock_sha256"],
 })
+from test_cases.test_req7_cable_dependency import (
+    PINS as EXPECTED_REQ7_CABLE_PINS,
+    policy_bytes as expected_req7_cable_policy_bytes,
+    lock_bytes as expected_req7_cable_lock_bytes,
+)
+EXPECTED_REQ7_CABLE_IDENTITY = {
+    "policy_sha256": hashlib.sha256(expected_req7_cable_policy_bytes()).hexdigest(),
+    "lock_sha256": hashlib.sha256(expected_req7_cable_lock_bytes()).hexdigest(),
+    "versions": [f"{n}=={v}" for n, v in EXPECTED_REQ7_CABLE_PINS]
+    + (["typing_extensions==4.16.0"] if sys.version_info[:2] < (3, 11) else []),
+    "linux_artifacts_executed": False,
+}
+CONTAINER_TOPLEVEL_LOCK_SUPPORT.update({
+    "infra/docker/req7-cable-dependency-policy.json": EXPECTED_REQ7_CABLE_IDENTITY["policy_sha256"],
+    "infra/docker/requirements-req7-cable-sync.txt": EXPECTED_REQ7_CABLE_IDENTITY["lock_sha256"],
+})
 EXPECTED_TEST_SUITES = [
     "repository-governance",
     "packaging-sync",
@@ -1851,6 +1867,7 @@ class ApprovalLedgerTests(unittest.TestCase):
                             CONTAINER_TOPLEVEL_LOCK.read_bytes()
                         ).hexdigest(),
                         "req7_dependencies": EXPECTED_REQ7_IDENTITY,
+                        "req7_cable_dependencies": EXPECTED_REQ7_CABLE_IDENTITY,
                     },
                     "scenario_coverage": {
                         "root-entrypoint-workflow": (
