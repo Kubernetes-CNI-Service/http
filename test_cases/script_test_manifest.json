@@ -596,6 +596,14 @@
         "test_cases.test_req7_cable_read_owner_core",
         "test_cases.test_req7_cable_lexical_repr"
       ]
+    },
+    {
+      "id": "req7-cable-fixed-public-code-prerequisite",
+      "description": "Finite held public SDK producer code/default/wrapper checks and real protected source/dual-owner NO_SEND composition, not SDK construction or send authority",
+      "tests": [
+        "test_cases.test_req7_cable_public_sdk_code",
+        "test_cases.test_req7_cable_sdk_code_owner_workflow"
+      ]
     }
   ],
   "tracked_support": [
@@ -2687,6 +2695,11 @@
         "test_cases.test_req7_cable_read_owner_core",
         "test_cases.test_req7_cable_lexical_repr"
       ]
+    },
+    {
+      "id": "req7_cable_fixed_public_code_direct",
+      "paths": ["monitor/issue_tracker_publish_runtime.py"],
+      "tests": ["test_cases.test_req7_cable_public_sdk_code"]
     }
   ],
   "workflows": [
@@ -4920,6 +4933,20 @@
       "tests": [
         "test_cases.test_req7_cable_read_owner_core"
       ]
+    },
+    {
+      "id": "req7_cable_code_originals_same_source_owners",
+      "members": [
+        "monitor/issue_tracker_publish_runtime.py",
+        "monitor/issue_tracker_local_commit.py",
+        "monitor/issue_tracker_online_target.py",
+        "monitor/issue_tracker_credential_shape.py",
+        "monitor/issue_tracker_spreadsheet_owner.py",
+        "monitor/switch_collection_gate.py",
+        "monitor/switch-collection-worker.py",
+        "tools/req7_cable_dependency_contract.py"
+      ],
+      "tests": ["test_cases.test_req7_cable_sdk_code_owner_workflow"]
     }
   ],
   "path_rules": [
@@ -5709,6 +5736,16 @@
       "tests": [
         "test_cases.test_req7_cable_read_owner_core",
         "test_cases.test_req7_cable_lexical_repr"
+      ]
+    },
+    {
+      "paths": [
+        "test_cases/test_req7_cable_public_sdk_code.py",
+        "test_cases/test_req7_cable_sdk_code_owner_workflow.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_cable_public_sdk_code",
+        "test_cases.test_req7_cable_sdk_code_owner_workflow"
       ]
     }
   ]

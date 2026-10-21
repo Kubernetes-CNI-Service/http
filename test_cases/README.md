@@ -5152,3 +5152,29 @@ qualification failures and initial capability/repr RED epochs stay historical;
 only complete canonical main-location receipts determine this slice's results.
 The old C14/Cable dependency split and full/release gates remain intact. Field
 scope is NOT RUN in `TC-REAL-REQ7-CABLE-READ-OWNER-CORE-001`.
+
+## REQ7 finite public SDK-code prerequisite (not a factory)
+
+The no-argument internal public-code context holds fifteen fixed installed
+public source originals. It checks selected actual function code/globals,
+source-derived defaults, real positional wrapper limits/body bindings, legal
+source class cells, class/module aliases and repeated held/named identity.
+Its revocable result is only NO_SEND: no credential/token/FD/SDK/transport export,
+credential construction, signing, request or worker activation. Default Cable
+package versions are observations, not a managed-native or old C14 grant.
+
+The separate source-owner composition enters original A/core itself and retains
+their actual same lexical source/original graph and local-before-sheet owners.
+Its protected C6 workflow checks real source health, literal current target,
+single account/allowlist acquisition, no constructor and first-result cleanup.
+The three independent direct oracles require healthy actual public providers
+before modified initial wrapper closures or SA defaults. They do not authorize
+all transitive/native crypto code, hostile interpreter tampering, every source
+role or cleanup-fault scenario, or SDK construction and network operations.
+
+Historical initial missing-API failures, static V1/V2 source qualification issues
+and later actual epochs remain separate, with NOT_REACHED stages preserved.
+Only complete canonical receipts establish local results. SDK factory, hard
+total-30/fixed-60 actor supervision, automatic/manual worker and pending recovery,
+full/release and real Cloud/device acceptance remain OPEN/NOT RUN. See
+TC-REAL-REQ7-CABLE-PUBLIC-CODE-001; this slice is not REQ7 completion.

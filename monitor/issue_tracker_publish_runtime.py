@@ -1755,12 +1755,14 @@ def _hold_current_cable_cycle_source(store, *, http_root):
         _CABLE_SOURCE_LEXICAL[registration] = _CableSourceLexical(
             result, store, store_binding, token, owner, binding,
             credential_raw, verify_credential, (os.getpid(), threading.get_ident()))
+        _CABLE_SOURCE_GRAPHS[registration] = (result, originals)
         result.verify()
         yield result
         result.verify()
     except BaseException as error:
         primary = error
     finally:
+        _CABLE_SOURCE_GRAPHS.pop(registration, None)
         _CABLE_SOURCE_LEXICAL.pop(registration, None)  # Revoke lexical borrow first.
         _CABLE_SOURCE_SCOPES.pop(registration, None)  # Revoke before any close.
         if policy_custody is not None:
@@ -1938,6 +1940,10 @@ def _hold_current_cable_read_owner_core(store, *, http_root):
                 or type(lexical.credential_raw) is not bytes
                 or type(lexical.verify_credential) is not FunctionType):
             raise CableSourceHold('Cable read owner requires its own original A')
+        graph = _CABLE_SOURCE_GRAPHS.get(source._registration)
+        if (graph is None or graph[0] is not source
+                or type(graph[1]) is not _CableOriginals or graph[1].closed):
+            raise CableSourceHold('Cable original A graph is unavailable')
         # The actual local owner exists BEFORE even entering sheet acquisition.
         if (local._owner(lexical.token) is not lexical.owner
                 or _cable_require_store(store, Path(http_root)) != lexical.store_binding):
@@ -1983,6 +1989,8 @@ def _hold_current_cable_read_owner_core(store, *, http_root):
         handle = _CableReadOwnerCore('NO_SEND', source.changes, source.binding,
             source.local_generation_id, source.local_published_sha256, registration)
         _CABLE_READ_OWNER_SCOPES[registration] = (handle, verify)
+        _CABLE_CORE_GRAPHS[registration] = (
+            handle, lexical, graph[1], sheet_token, sheet_original, execution)
         handle.verify()
         yield handle
         handle.verify()
@@ -1991,6 +1999,7 @@ def _hold_current_cable_read_owner_core(store, *, http_root):
     finally:
         # Revoke the core AND its internal lexical borrowing before sheet close.
         # Original A still performs its own independent final checks/teardown.
+        _CABLE_CORE_GRAPHS.pop(registration, None)
         _CABLE_READ_OWNER_SCOPES.pop(registration, None)
         if (source is not None and lexical is not None
                 and _CABLE_SOURCE_LEXICAL.get(source._registration) is lexical):
@@ -2006,6 +2015,480 @@ def _hold_current_cable_read_owner_core(store, *, http_root):
         if not isinstance(primary, Exception):
             raise primary
         raise CableSourceHold('Cable read owner scope is unavailable') from None
+
+
+# Private code-original prerequisite only. No caller callback or SDK operation.
+_CABLE_SOURCE_GRAPHS = {}
+_CABLE_CORE_GRAPHS = {}
+_CABLE_SDK_CODE_SCOPES = {}
+_CABLE_SDK_SOURCE_ROWS = (
+    ("google-auth", "google.oauth2.service_account", "google/oauth2/service_account.py",
+     "e753803b6d791e8b0d90f20735af078827fb1cdc56eb4f7d4f4ca1ddde0740b6", (("Credentials","__init__",),("Credentials","from_service_account_info",),("Credentials","_perform_refresh_token",),("Credentials","_make_authorization_grant_assertion",),)),
+    ("google-auth", "google.oauth2.credentials", "google/oauth2/credentials.py",
+     "061830897c133f2e36e3ad9fa57a7cf80dfd5e412a2c95d5f560916f3384529c", (("Credentials","__init__",),("Credentials","_is_regional_access_boundary_lookup_required",),)),
+    ("google-auth", "google.auth.credentials", "google/auth/credentials.py",
+     "fbdb3aefdd3f1940a461a2301ed8a8e72002752193e9f624af3a4373e7f89634", (("Credentials","before_request",),("CredentialsWithRegionalAccessBoundary","before_request",),("CredentialsWithRegionalAccessBoundary","refresh",),)),
+    ("google-auth", "google.auth._credentials_base", "google/auth/_credentials_base.py",
+     "2b1742672a05cafadf5a125b367b98929521c6cd1b99bc58bdc1fcfb1a79854b", (("_BaseCredentials","__init__",),("_BaseCredentials","_apply",),)),
+    ("google-auth", "google.auth.crypt.rsa", "google/auth/crypt/rsa.py",
+     "7282ebd05172b830260daa1779fa6b887fe768025b9a0c0539150355819d0585", (("RSASigner","__init__",),("RSASigner","from_string",),)),
+    ("google-auth-httplib2", "google_auth_httplib2", "google_auth_httplib2.py",
+     "fe4c985e6079f9465646a2336b814f2af0d80d8fc221dd4d3fc2ae676145dd4b", (("AuthorizedHttp","__init__",),("AuthorizedHttp","request",),("AuthorizedHttp","close",),)),
+    ("google-api-python-client", "googleapiclient.discovery", "googleapiclient/discovery.py",
+     "6872c47019ab87827ff7d5928bb32e67ebe073e120d4bad63c8f9df9e21e5eb7", (("build",),)),
+    ("google-api-python-client", "googleapiclient.http", "googleapiclient/http.py",
+     "213139d68a8306a375f800390fe4e7963dde80673fe4ed15e714b3070dd44ca2", (("HttpRequest","__init__",),("HttpRequest","execute",),)),
+    ("google-api-python-client", "googleapiclient._helpers", "googleapiclient/_helpers.py",
+     "88dc482c6ea234d16e92bee585a61f56a5f8a0533948446f72c53727178ea3a2", (("positional",),)),
+    ("google-auth", "google.auth.crypt._cryptography_rsa", "google/auth/crypt/_cryptography_rsa.py",
+     "a364134647c344bb44062abe7dba5b4d6ca9bf16b1503c33971d8da571bda34c", (("RSASigner","__init__",),("RSASigner","from_string",),("RSASigner","sign",),)),
+    ("google-auth", "google.auth.crypt.base", "google/auth/crypt/base.py",
+     "dc226b9d0b29a51ea1f969d346a4abb7584f1105641dcc0d21527f079334d216", (("FromServiceAccountMixin","from_service_account_info",),("Signer","sign",),)),
+    ("google-auth", "google.auth._helpers", "google/auth/_helpers.py",
+     "68b934284d93f1759ea709e07cf1aa48034e141d1ae0fca6f3414299374549ca", (("copy_docstring",),("to_bytes",),)),
+    ("google-auth", "google.auth._service_account_info", "google/auth/_service_account_info.py",
+     "11d38466a97dfe61b6709e782a62f74398cedc2df071a77094239b83880a8eeb", (("from_dict",),)),
+    ("google-auth", "google.auth.transport", "google/auth/transport/__init__.py",
+     "bd37565030425d617ac24dd7ceeecbe48d656ed1984f138d8be20a60e9837453", ()),
+    ("httplib2", "httplib2", "httplib2/__init__.py",
+     "a0bce58f4e262efc1d48acef3f087043ee00210660852e83a16f5cfee5032d69", ()),
+)
+
+
+class _CableSdkCodePins:
+    """Own fixed public-code FDs separately, never add native data roles late."""
+    def __init__(self):
+        self.execution = (os.getpid(), threading.get_ident())
+        self.directories = {}
+        self.files = []
+        self.slots = []
+        self.callables = []
+        self.modules = {}
+        self.classes = {}
+        self.paths = {}
+        self.nodes = {}
+        self.codes = {}
+        self.constants = {}
+        self.closed = False
+        self.failure = None
+
+    def _directory(self, path):
+        if path in self.directories:
+            return self.directories[path]
+        parent = None if path == Path('/') else self._directory(path.parent)[0]
+        before = os.stat('/' if parent is None else path.name,
+                         dir_fd=parent, follow_symlinks=False)
+        fd = os.open('/' if parent is None else path.name,
+                     os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                     dir_fd=parent)
+        self.slots.append((fd, (before.st_dev, before.st_ino)))
+        now = os.fstat(fd)
+        if (not stat.S_ISDIR(now.st_mode)
+                or _cable_identity(now) != _cable_identity(before)):
+            raise CableSourceHold('Cable SDK code ancestor differs')
+        self.directories[path] = (fd, parent, before)
+        return self.directories[path]
+
+    def acquire(self):
+        from importlib import metadata, import_module
+        from types import CodeType
+        import ast
+        from tools.req7_cable_dependency_contract import (
+            load_cable_dependency_contract, installed_cable_dependency_identity)
+        # Actual default metadata observation, not an injected native-runtime gate.
+        installed_cable_dependency_identity(load_cable_dependency_contract(
+            Path(__file__).parent.parent))
+        originals = []
+        for distribution, module_name, relative, expected, selectors in _CABLE_SDK_SOURCE_ROWS:
+            dist = metadata.distribution(distribution)
+            path = Path(dist.locate_file(relative))
+            if (not path.is_absolute() or '..' in path.parts
+                    or path.as_posix().split('/')[-len(Path(relative).parts):]
+                    != list(Path(relative).parts)):
+                raise CableSourceHold('Cable SDK code locator differs')
+            parent = self._directory(path.parent)[0]
+            before = os.stat(path.name, dir_fd=parent, follow_symlinks=False)
+            if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+                    or not 0 < before.st_size <= 1048576):
+                raise CableSourceHold('Cable SDK code is not fixed regular source')
+            fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                         dir_fd=parent)
+            self.slots.append((fd, (before.st_dev, before.st_ino)))
+            if _cable_identity(os.fstat(fd)) != _cable_identity(before):
+                raise CableSourceHold('Cable SDK code changed during acquisition')
+            def full():
+                raw = b''; offset = 0
+                while offset < before.st_size:
+                    block = os.pread(fd, min(1048576, before.st_size-offset), offset)
+                    if not block:
+                        raise CableSourceHold('Cable SDK code shortened')
+                    raw += block; offset += len(block)
+                if os.pread(fd, 1, offset):
+                    raise CableSourceHold('Cable SDK code grew')
+                return raw
+            raw = full()
+            if (full() != raw or hashlib.sha256(raw).hexdigest() != expected
+                    or _cable_identity(os.fstat(fd)) != _cable_identity(before)
+                    or _cable_identity(os.stat(path.name, dir_fd=parent,
+                                               follow_symlinks=False)) != _cable_identity(before)):
+                raise CableSourceHold('Cable SDK source image differs')
+            code = compile(raw, str(path), 'exec', dont_inherit=True)
+            tree = ast.parse(raw, filename=str(path))
+            def code_index(item, trail=()):
+                for value in item.co_consts:
+                    if type(value) is CodeType:
+                        key = trail + (value.co_name,)
+                        self.codes[(module_name, key)] = value
+                        code_index(value, key)
+            def node_index(node, trail=()):
+                for value in node.body:
+                    if isinstance(value, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                        key = trail + (value.name,)
+                        self.nodes[(module_name, key)] = value
+                        node_index(value, key)
+            code_index(code)
+            node_index(tree)
+            constants = {}
+            for node in tree.body:
+                if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+                    constants[node.targets[0].id] = node.value
+            self.constants[module_name] = constants
+            self.paths[module_name] = path
+            self.files.append((path, fd, parent, before, expected))
+            originals.append((module_name, path))
+        # All fifteen source originals are pinned before importing SDK modules.
+        # Other package/native dependencies remain outside this finite audit.
+        for module_name, path in originals:
+            module = import_module(module_name)
+            if Path(module.__file__) != path or module.__name__ != module_name:
+                raise CableSourceHold('Cable SDK module origin differs')
+            self.modules[module_name] = module
+        self._check_bindings(first=True)
+        self.verify()
+
+    @staticmethod
+    def _same(actual, expected):
+        if isinstance(expected, type):
+            return actual is expected
+        if type(expected) is tuple:
+            return (type(actual) is tuple and len(actual) == len(expected)
+                    and all(_CableSdkCodePins._same(a, b) for a, b in zip(actual, expected)))
+        return type(actual) is type(expected) and actual == expected
+
+    def _class(self, module_name, name):
+        cls = vars(self.modules[module_name]).get(name)
+        if (not isinstance(cls, type) or cls.__module__ != module_name
+                or cls.__qualname__ != name
+                or (module_name, (name,)) not in self.nodes):
+            raise CableSourceHold('Cable SDK original class differs')
+        key = module_name, name
+        if key in self.classes and self.classes[key] is not cls:
+            raise CableSourceHold('Cable SDK class was replaced')
+        self.classes[key] = cls
+        return cls
+
+    def _literal(self, node, module_name):
+        import ast
+        if isinstance(node, ast.Constant):
+            if type(node.value) not in (type(None), bool, int, float, str, bytes):
+                raise CableSourceHold('Cable SDK default literal differs')
+            return node.value
+        if isinstance(node, ast.Tuple):
+            return tuple(self._literal(n, module_name) for n in node.elts)
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+            value = self._literal(node.operand, module_name)
+            if type(value) not in (int, float):
+                raise CableSourceHold('Cable SDK numeric default differs')
+            return -value
+        if isinstance(node, ast.Name):
+            if module_name == 'googleapiclient.discovery' and node.id == 'HttpRequest':
+                value = self._class('googleapiclient.http', 'HttpRequest')
+            else:
+                assignments = self.constants[module_name]
+                if node.id not in assignments:
+                    raise CableSourceHold('Cable SDK default name is not fixed')
+                value = self._literal(assignments[node.id], module_name)
+            if not self._same(vars(self.modules[module_name]).get(node.id), value):
+                raise CableSourceHold('Cable SDK default name binding differs')
+            return value
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            alias, name = node.value.id, node.attr
+            mappings = {
+                ('google.oauth2.service_account', 'credentials'): 'google.auth.credentials',
+                ('google.oauth2.credentials', 'credentials'): 'google.auth.credentials',
+                ('google_auth_httplib2', 'transport'): 'google.auth.transport',
+                ('google_auth_httplib2', 'httplib2'): 'httplib2',
+            }
+            if module_name == 'google.auth.transport' and alias == 'http_client' and name == 'UNAUTHORIZED':
+                import http.client
+                from http import HTTPStatus
+                if (vars(self.modules[module_name]).get(alias) is not http.client
+                        or http.client.UNAUTHORIZED is not HTTPStatus.UNAUTHORIZED):
+                    raise CableSourceHold('Cable SDK HTTP status constant differs')
+                return HTTPStatus.UNAUTHORIZED
+            target = mappings.get((module_name, alias))
+            if (target is None or vars(self.modules[module_name]).get(alias)
+                    is not self.modules[target] or name not in self.constants[target]):
+                raise CableSourceHold('Cable SDK default alias is not fixed')
+            value = self._literal(self.constants[target][name], target)
+            if not self._same(vars(self.modules[target]).get(name), value):
+                raise CableSourceHold('Cable SDK default constant differs')
+            return value
+        raise CableSourceHold('Cable SDK default expression is not fixed')
+
+    def _defaults(self, function, node, module_name):
+        expected = tuple(self._literal(n, module_name) for n in node.args.defaults)
+        actual = function.__defaults__
+        if not self._same(() if actual is None else actual, expected):
+            raise CableSourceHold('Cable SDK source-derived defaults differ')
+        expected_kw = {arg.arg: self._literal(n, module_name)
+            for arg, n in zip(node.args.kwonlyargs, node.args.kw_defaults) if n is not None}
+        actual_kw = {} if function.__kwdefaults__ is None else function.__kwdefaults__
+        if (type(actual_kw) is not dict or set(actual_kw) != set(expected_kw)
+                or any(not self._same(actual_kw[k], v) for k, v in expected_kw.items())):
+            raise CableSourceHold('Cable SDK source-derived keyword defaults differ')
+
+    def _function(self, function, module_name, path):
+        if (type(function) is not FunctionType
+                or function.__globals__ is not self.modules[module_name].__dict__
+                or Path(function.__code__.co_filename) != self.paths[module_name]
+                or function.__code__ != self.codes[(module_name, path)]):
+            raise CableSourceHold('Cable SDK callable held source differs')
+        self._defaults(function, self.nodes[(module_name, path)], module_name)
+        expected_freevars = self.codes[(module_name, path)].co_freevars
+        if expected_freevars == ():
+            if function.__closure__ is not None:
+                raise CableSourceHold('Cable SDK unexpected body closure')
+        elif expected_freevars == ('__class__',) and len(path) == 2:
+            owner = self._class(module_name, path[0])
+            if (function.__code__.co_freevars != expected_freevars
+                    or function.__closure__ is None
+                    or len(function.__closure__) != 1
+                    or function.__closure__[0].cell_contents is not owner):
+                raise CableSourceHold('Cable SDK original class cell differs')
+        else:
+            raise CableSourceHold('Cable SDK source closure is not fixed')
+        return function
+
+    def _check_bindings(self, *, first=False):
+        from types import ModuleType
+        import ast
+        found = []
+        wrappers = {('googleapiclient.discovery', ('build',)): 2,
+            ('googleapiclient.http', ('HttpRequest', '__init__')): 4,
+            ('googleapiclient.http', ('HttpRequest', 'execute')): 1}
+        helpers = self.modules['googleapiclient._helpers']
+        wrapper_code = self.codes[('googleapiclient._helpers',
+            ('positional', 'positional_decorator', 'positional_wrapper'))]
+        for _dist, module_name, _relative, _expected, selectors in _CABLE_SDK_SOURCE_ROWS:
+            module = self.modules[module_name]
+            if (type(module) is not ModuleType or sys.modules.get(module_name) is not module
+                    or Path(module.__file__) != self.paths[module_name]):
+                raise CableSourceHold('Cable SDK original module changed')
+            for selector in selectors:
+                owner = module if len(selector) == 1 else self._class(module_name, selector[0])
+                descriptor = vars(owner).get(selector[-1])
+                fn = descriptor.__func__ if type(descriptor) in (classmethod, staticmethod) else descriptor
+                node = self.nodes[(module_name, selector)]
+                positional = wrappers.get((module_name, selector))
+                if positional is None:
+                    self._function(fn, module_name, selector)
+                    body = fn
+                else:
+                    if (type(fn) is not FunctionType or fn.__globals__ is not helpers.__dict__
+                            or Path(fn.__code__.co_filename) != self.paths['googleapiclient._helpers']
+                            or fn.__code__ != wrapper_code
+                            or fn.__defaults__ is not None or fn.__kwdefaults__ is not None
+                            or fn.__code__.co_freevars != ('max_positional_args', 'wrapped')
+                            or fn.__closure__ is None or len(fn.__closure__) != 2):
+                        raise CableSourceHold('Cable SDK positional wrapper differs')
+                    cells = dict(zip(fn.__code__.co_freevars, fn.__closure__))
+                    bound = cells['max_positional_args'].cell_contents
+                    body = cells['wrapped'].cell_contents
+                    if type(bound) is not int or bound != positional or vars(fn).get('__wrapped__') is not body:
+                        raise CableSourceHold('Cable SDK positional closure differs')
+                    self._function(body, module_name, selector)
+                    decorators = node.decorator_list
+                    if (len(decorators) != 1 or not isinstance(decorators[0], ast.Call)
+                            or len(decorators[0].args) != 1 or decorators[0].keywords
+                            or self._literal(decorators[0].args[0], module_name) != positional):
+                        raise CableSourceHold('Cable SDK positional source limit differs')
+                found.append((module_name, selector, owner, descriptor, fn, body))
+        # Source-named aliases used by the finite selected producers.
+        sa = self.modules['google.oauth2.service_account']
+        oa = self.modules['google.oauth2.credentials']
+        cred = self.modules['google.auth.credentials']
+        rsa = self.modules['google.auth.crypt.rsa']
+        impl = self.modules['google.auth.crypt._cryptography_rsa']
+        base = self.modules['google.auth.crypt.base']
+        auth_helpers = self.modules['google.auth._helpers']
+        info = self.modules['google.auth._service_account_info']
+        if (sa.credentials is not cred or oa.credentials is not cred
+                or sa._service_account_info is not info
+                or rsa._cryptography_rsa is not impl or rsa.base is not base or impl.base is not base
+                or rsa._helpers is not auth_helpers or impl._helpers is not auth_helpers
+                or self._class('google.auth.crypt.rsa', 'RSASigner').__bases__
+                    != (self._class('google.auth.crypt.base', 'Signer'),
+                        self._class('google.auth.crypt.base', 'FromServiceAccountMixin'))
+                or self._class('google.auth.crypt._cryptography_rsa', 'RSASigner').__bases__
+                    != (self.classes[('google.auth.crypt.base', 'Signer')],
+                        self.classes[('google.auth.crypt.base', 'FromServiceAccountMixin')])
+                or self._class('google.oauth2.service_account', 'Credentials').refresh
+                    is not self._class('google.auth.credentials', 'CredentialsWithRegionalAccessBoundary').refresh
+                or self._class('google.oauth2.credentials', 'Credentials').refresh
+                    is not self.classes[('google.auth.credentials', 'CredentialsWithRegionalAccessBoundary')].refresh
+                or self.modules['googleapiclient.discovery'].positional is not helpers.positional
+                or self.modules['googleapiclient.http'].util is not helpers):
+            raise CableSourceHold('Cable SDK producer alias differs')
+        if not first:
+            if len(found) != len(self.callables) or any(
+                    any(a is not b for a, b in zip(now[2:], old[2:]))
+                    for now, old in zip(found, self.callables)):
+                raise CableSourceHold('Cable SDK original callable was replaced')
+        else:
+            self.callables = found
+
+    def verify(self):
+        if (self.closed or self.failure is not None
+                or self.execution != (os.getpid(), threading.get_ident())):
+            raise CableSourceHold('Cable SDK code scope is unavailable')
+        try:
+            for path, (fd, parent, before) in self.directories.items():
+                now = os.fstat(fd)
+                if ((now.st_dev, now.st_ino, now.st_mode, now.st_uid, now.st_gid)
+                        != (before.st_dev, before.st_ino, before.st_mode, before.st_uid, before.st_gid)):
+                    raise CableSourceHold('Cable SDK code ancestor changed')
+                named = os.stat('/' if parent is None else path.name,
+                                dir_fd=parent, follow_symlinks=False)
+                if (named.st_dev, named.st_ino) != (before.st_dev, before.st_ino):
+                    raise CableSourceHold('Cable SDK named ancestor changed')
+            for path, fd, parent, before, expected in self.files:
+                if (_cable_identity(os.fstat(fd)) != _cable_identity(before)
+                        or _cable_identity(os.stat(path.name, dir_fd=parent,
+                            follow_symlinks=False)) != _cable_identity(before)
+                        or _CableOriginals._digest(os, fd, before.st_size) != expected):
+                    raise CableSourceHold('Cable SDK code original changed')
+            self._check_bindings()
+        except BaseException as error:
+            self.failure = error
+            raise
+
+    def close(self):
+        self.closed = True
+        failure = None
+        for fd, identity in reversed(self.slots):
+            try:
+                if (os.fstat(fd).st_dev, os.fstat(fd).st_ino) != identity:
+                    raise CableSourceHold('Cable SDK code slot is not original')
+                os.close(fd)
+            except BaseException as error:
+                if failure is None or (isinstance(failure, Exception) and not isinstance(error, Exception)):
+                    failure = error
+        if failure is not None:
+            raise failure
+
+
+@dataclass(frozen=True)
+class _CableSdkCodePrerequisite:
+    outcome: str
+    _registration: object
+
+    def verify(self):
+        entry = _CABLE_SDK_CODE_SCOPES.get(self._registration)
+        if entry is None or entry[0] is not self:
+            raise CableSourceHold('Cable SDK prerequisite is not active')
+        entry[1]()
+
+
+
+@contextmanager
+def _hold_cable_public_sdk_code():
+    """Finite public producer code only: no A, credential parse or SDK call."""
+    pins = _CableSdkCodePins()
+    registration = object()
+    primary = None
+    try:
+        pins.acquire()
+        result = _CableSdkCodePrerequisite('NO_SEND', registration)
+        _CABLE_SDK_CODE_SCOPES[registration] = (result, pins.verify)
+        result.verify()
+        yield result
+        result.verify()
+    except BaseException as error:
+        primary = error
+    finally:
+        _CABLE_SDK_CODE_SCOPES.pop(registration, None)
+        try:
+            pins.close()
+        except BaseException as error:
+            if primary is None or (isinstance(primary, Exception)
+                                   and not isinstance(error, Exception)):
+                primary = error
+    if primary is not None:
+        if not isinstance(primary, Exception):
+            raise primary
+        raise CableSourceHold('Cable public SDK code is unavailable') from None
+
+@contextmanager
+def _hold_current_cable_sdk_code_prerequisite(store, *, http_root):
+    """Only code-original NO_SEND prerequisite; no SDK object/secret export."""
+    code = _CableSdkCodePins()
+    context = None
+    primary = None
+    registration = object()
+    failure = None
+    try:
+        code.acquire()  # Before original A's credential parse, never after it.
+        pending = _hold_current_cable_read_owner_core(store, http_root=http_root)
+        core = pending.__enter__()
+        context = pending
+        record = _CABLE_CORE_GRAPHS.get(core._registration)
+        if (record is None or record[0] is not core
+                or record[-1] != (os.getpid(), threading.get_ident())):
+            raise CableSourceHold('Cable original dual-owner graph is unavailable')
+        result = _CableSdkCodePrerequisite('NO_SEND', registration)
+        def verify():
+            nonlocal failure
+            if failure is not None:
+                raise CableSourceHold('Cable SDK prerequisite has a prior failure') from None
+            try:
+                if (_CABLE_CORE_GRAPHS.get(core._registration) is not record
+                        or record[-1] != (os.getpid(), threading.get_ident())):
+                    raise CableSourceHold('Cable original dual-owner graph changed')
+                graph = _CABLE_SOURCE_GRAPHS.get(record[1].source._registration)
+                if (graph is None or graph[0] is not record[1].source
+                        or graph[1] is not record[2]):
+                    raise CableSourceHold('Cable original A graph registration changed')
+                code.verify()
+                core.verify()
+                record[2].verify()  # Actual A-owned _CableOriginals, not a path DTO.
+            except BaseException as error:
+                failure = error
+                raise
+        _CABLE_SDK_CODE_SCOPES[registration] = (result, verify)
+        result.verify()
+        yield result
+        result.verify()
+    except BaseException as error:
+        primary = error
+    finally:
+        _CABLE_SDK_CODE_SCOPES.pop(registration, None)
+        # Every known actual owner is attempted; no NI object/cause replacement.
+        if context is not None:
+            try:
+                context.__exit__(None, None, None)
+            except BaseException as error:
+                if primary is None or (isinstance(primary, Exception) and not isinstance(error, Exception)):
+                    primary = error
+        try:
+            code.close()
+        except BaseException as error:
+            if primary is None or (isinstance(primary, Exception) and not isinstance(error, Exception)):
+                primary = error
+    if primary is not None:
+        if not isinstance(primary, Exception):
+            raise primary
+        raise CableSourceHold('Cable SDK code prerequisite is unavailable') from None
 
 
 class AutoLocalCollectorAnomaly(StageLHold):
