@@ -328,6 +328,9 @@
         "test_cases.test_issue_tracker_local_workbook_commit_workflow",
         "test_cases.test_issue_tracker_source_adapter",
         "test_cases.test_issue_tracker_source_adapter_workflow",
+        "test_cases.test_issue_tracker_cable_merge",
+        "test_cases.test_issue_tracker_cable_cycle",
+        "test_cases.test_issue_tracker_cable_cycle_workflow",
         "test_cases.test_req7_sdk_authentication",
         "test_cases.test_req7_tls_inputs",
         "test_cases.test_req7_attempt_supervision",
@@ -744,6 +747,8 @@
     "monitor/issue_tracker_local_workbook_commit.py": "monitor/issue_tracker_local_workbook_commit.py",
     "monitor/issue_tracker_source_model.py": "monitor/issue_tracker_source_model.py",
     "monitor/issue_tracker_collected_source.py": "monitor/issue_tracker_collected_source.py",
+    "monitor/issue_tracker_cable_merge.py": "monitor/issue_tracker_cable_merge.py",
+    "monitor/issue_tracker_cable_cycle.py": "monitor/issue_tracker_cable_cycle.py",
     "monitor/generate-monitor-html.py": "monitor/generate-monitor-html.py",
     "monitor/manual-ztp-control.cgi": "monitor/manual-ztp-control.cgi",
     "monitor/manual-ztp-worker.py": "monitor/manual-ztp-worker.py",
@@ -1762,6 +1767,16 @@
       "tests": [
         "test_cases.test_issue_tracker_source_adapter"
       ]
+    },
+    {
+      "id": "issue_tracker_cable_merge",
+      "paths": ["monitor/issue_tracker_cable_merge.py"],
+      "tests": ["test_cases.test_issue_tracker_cable_merge"]
+    },
+    {
+      "id": "issue_tracker_cable_cycle",
+      "paths": ["monitor/issue_tracker_cable_cycle.py"],
+      "tests": ["test_cases.test_issue_tracker_cable_cycle"]
     },
     {
       "id": "issue_tracker_local_workbook",
@@ -2805,6 +2820,20 @@
       "tests": [
         "test_cases.test_issue_tracker_source_adapter_workflow"
       ]
+    },
+    {
+      "id": "issue_tracker_cable_local_first_current_cycle",
+      "members": [
+        "monitor/issue_tracker_collected_source.py",
+        "monitor/issue_tracker_source_model.py",
+        "monitor/issue_tracker_local_workbook.py",
+        "monitor/issue_tracker_local_commit.py",
+        "monitor/issue_tracker_online_cells.py",
+        "monitor/issue_tracker_online_rows.py",
+        "monitor/issue_tracker_cable_merge.py",
+        "monitor/issue_tracker_cable_cycle.py"
+      ],
+      "tests": ["test_cases.test_issue_tracker_cable_cycle_workflow"]
     },
     {
       "id": "issue_tracker_cabling_source_to_workbook",
