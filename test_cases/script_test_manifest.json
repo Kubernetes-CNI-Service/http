@@ -326,6 +326,8 @@
         "test_cases.test_issue_tracker_switch_projection",
         "test_cases.test_issue_tracker_local_workbook_commit",
         "test_cases.test_issue_tracker_local_workbook_commit_workflow",
+        "test_cases.test_issue_tracker_source_adapter",
+        "test_cases.test_issue_tracker_source_adapter_workflow",
         "test_cases.test_req7_sdk_authentication",
         "test_cases.test_req7_tls_inputs",
         "test_cases.test_req7_attempt_supervision",
@@ -740,6 +742,8 @@
     "monitor/issue_tracker_whitelist_workbook.py": "monitor/issue_tracker_whitelist_workbook.py",
     "monitor/issue_tracker_local_workbook.py": "monitor/issue_tracker_local_workbook.py",
     "monitor/issue_tracker_local_workbook_commit.py": "monitor/issue_tracker_local_workbook_commit.py",
+    "monitor/issue_tracker_source_model.py": "monitor/issue_tracker_source_model.py",
+    "monitor/issue_tracker_collected_source.py": "monitor/issue_tracker_collected_source.py",
     "monitor/generate-monitor-html.py": "monitor/generate-monitor-html.py",
     "monitor/manual-ztp-control.cgi": "monitor/manual-ztp-control.cgi",
     "monitor/manual-ztp-worker.py": "monitor/manual-ztp-worker.py",
@@ -1747,6 +1751,16 @@
       ],
       "tests": [
         "test_cases.test_issue_tracker_local_workbook_commit"
+      ]
+    },
+    {
+      "id": "issue_tracker_source_data_boundary",
+      "paths": [
+        "monitor/issue_tracker_source_model.py",
+        "monitor/issue_tracker_collected_source.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_source_adapter"
       ]
     },
     {
@@ -2778,6 +2792,18 @@
       ],
       "tests": [
         "test_cases.test_issue_tracker_local_workbook_commit_workflow"
+      ]
+    },
+    {
+      "id": "issue_tracker_collected_source_common_workbook",
+      "members": [
+        "monitor/issue_tracker_source_model.py",
+        "monitor/issue_tracker_collected_source.py",
+        "monitor/issue_tracker_local_workbook.py",
+        "monitor/issue_tracker_local_workbook_commit.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_source_adapter_workflow"
       ]
     },
     {

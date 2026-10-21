@@ -15,6 +15,8 @@ import os
 from pathlib import Path
 import zipfile
 
+from monitor.issue_tracker_collected_source import collected_changes
+from monitor.issue_tracker_source_model import PANEL_SHEETS as _MANUAL_PANEL_SHEETS
 from monitor.issue_tracker_local_commit import (
     Generation, LocalCommitHold, LocalReceipt, _GEN, _directory, _intent,
     _json, _owner, _prepared_limit, _published_name, _read,
@@ -35,46 +37,10 @@ from monitor.issue_tracker_whitelist_workbook import (
 )
 
 
-_MANUAL_PANEL_SHEETS = {
-    "Switch Status": ("ETH&IB Switch", "switch"),
-    "Eth Link Validation": ("ETH Cabling", "eth_cabling"),
-    "IB Link Validation": ("IB Cabling", "ib_cabling"),
-}
-
-
 def _source_rows(qualified, *, selected_panel=None):
-    """Convert fully requalified C5 values, selecting only a human panel."""
-    cabling = []
-    switch = []
-    for candidate in qualified.candidates:
-        expected = next((name for name, (_, family) in
-                         _MANUAL_PANEL_SHEETS.items()
-                         if family == candidate.activity_key[0]), None)
-        if candidate.panel != expected:
-            raise LocalCommitHold("C6 candidate panel differs from source family")
-        if selected_panel is not None and candidate.panel != selected_panel:
-            continue
-        if candidate.panel in {"Eth Link Validation", "IB Link Validation"}:
-            sheet = _MANUAL_PANEL_SHEETS[candidate.panel][0]
-            actual = (() if sheet == "IB Cabling"
-                      and candidate.source_status == "Link Down"
-                      else candidate.actual_endpoints)
-            cabling.append(CablingSourceRow(
-                sheet=sheet, activity_key=candidate.activity_key,
-                expected_endpoints=candidate.expected_endpoints,
-                actual_endpoints=actual,
-                source_status=candidate.source_status,
-                evidence_description=candidate.evidence_description,
-                recorded_at_utc=candidate.recorded_at_utc,
-            ))
-        else:
-            switch.append(SwitchSourceWorkbookRow(
-                activity_key=candidate.activity_key,
-                evidence_description=candidate.evidence_description,
-                fabric=candidate.fabric, fabric_source=candidate.fabric_source,
-                priority="P2", recorded_at_utc=candidate.recorded_at_utc,
-            ))
-    return tuple(cabling), tuple(switch)
+    """Compatibility bridge; source conversion is independent of C6 commit."""
+    changes = collected_changes(qualified.candidates, selected_panel=selected_panel)
+    return changes.cabling, changes.switch
 
 
 def project_manual_panel_preview(source, qualified, selected_panel, manifest_id):

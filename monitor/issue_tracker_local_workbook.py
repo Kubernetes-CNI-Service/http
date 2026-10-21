@@ -21,6 +21,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 
 from monitor.issue_tracker_manifest import freeze_qualified_manifest, _runtime_skip
+from monitor.issue_tracker_source_model import CablingSourceRow, SwitchSourceWorkbookRow
 from monitor.issue_tracker_qualification import QualifiedSet, _canonical_json, _operation
 from monitor.issue_tracker_whitelist import WhitelistHoldError, evaluate_whitelist
 from monitor.issue_tracker_whitelist_workbook import (
@@ -73,31 +74,6 @@ class CablingRowEdit:
     activity_key: tuple[str, str, str, str]
     sheet: str
     action: str
-
-
-@dataclass(frozen=True)
-class CablingSourceRow:
-    """Typed source values for a pure image; qualification belongs to the caller."""
-
-    sheet: str
-    activity_key: tuple[str, str, str, str]
-    expected_endpoints: tuple[str, str, str, str]
-    actual_endpoints: tuple[str, str, str, str] | tuple[()]
-    source_status: str
-    evidence_description: str
-    recorded_at_utc: str
-
-
-@dataclass(frozen=True)
-class SwitchSourceWorkbookRow:
-    """Typed Switch values; this image helper never grants commit authority."""
-
-    activity_key: tuple[str, str, str, str]
-    evidence_description: str
-    fabric: str
-    fabric_source: str
-    priority: str
-    recorded_at_utc: str
 
 
 @dataclass(frozen=True)
