@@ -508,3 +508,260 @@ class CollectionGate:
                 raise CollectionGateError(
                     f"cannot release collection gate: {release_error}"
                 ) from release_error
+
+# Distinct completed-evidence serialization; never collection admission.
+from contextlib import contextmanager as _completed_read_contextmanager
+import hashlib as _completed_read_hashlib
+import threading as _completed_read_threading
+
+
+class CompletedSourceReadHold(CollectionGateError):
+    """Existing completed-source originals cannot be borrowed safely."""
+
+
+_COMPLETED_SOURCE_READ_LEASES = {}
+
+
+def _completed_read_identity(info, *, directory=False):
+    fixed = (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid)
+    return fixed if directory else fixed + (
+        info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def _completed_read_registered(lease):
+    if type(lease) is not _CompletedSourceReadLease:
+        raise CompletedSourceReadHold('completed-source lease is not original')
+    record = _COMPLETED_SOURCE_READ_LEASES.get(getattr(lease, '_registration', None))
+    if (record is None or record['lease'] is not lease
+            or record['execution'] != (os.getpid(), _completed_read_threading.get_ident())
+            or record['failure'] is not None):
+        raise CompletedSourceReadHold('completed-source lease is unavailable')
+    return record
+
+
+def _completed_read_field(lease, key):
+    return _completed_read_registered(lease)['fields'][key]
+
+
+class _CompletedSourceReadLease:
+    __slots__ = ('_registration',)
+
+    def __init__(self, registration):
+        object.__setattr__(self, '_registration', registration)
+
+    def __setattr__(self, name, value):
+        raise AttributeError('completed-source lease bindings are immutable')
+
+    def __copy__(self):
+        # A copied shell is deliberately distinct and is NEVER registered.
+        return _CompletedSourceReadLease(self._registration)
+
+    project = property(lambda self: _completed_read_field(self, 'project'))
+    scope = property(lambda self: _completed_read_field(self, 'scope'))
+    status_dir = property(lambda self: _completed_read_field(self, 'status_dir'))
+    lane = property(lambda self: _completed_read_field(self, 'lane'))
+    collection_keys = property(lambda self: _completed_read_field(self, 'collection_keys'))
+    state_name = property(lambda self: _completed_read_field(self, 'state_name'))
+    lock_name = property(lambda self: _completed_read_field(self, 'lock_name'))
+    _lock_fd = property(lambda self: _completed_read_field(self, '_lock_fd'))
+
+    def verify(self):
+        record = _completed_read_registered(self)
+        try:
+            _completed_read_verify_record(record)
+        except BaseException as error:
+            record['failure'] = error
+            if not isinstance(error, Exception):
+                raise
+            raise CompletedSourceReadHold('completed-source originals changed') from None
+
+
+def _completed_read_open(record, parent, name, *, directory=False, maximum=65536):
+    # Every returned original is registered against the named preimage BEFORE
+    # the first fstat. No first-fstat failure may strand an unregistered FD.
+    before = os.stat(name, dir_fd=parent, follow_symlinks=False)
+    if directory:
+        if not stat.S_ISDIR(before.st_mode):
+            raise CompletedSourceReadHold('completed-source parent is not a directory')
+    elif (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+            or before.st_uid != os.geteuid() or stat.S_IMODE(before.st_mode) != 0o600
+            or not 0 <= before.st_size <= maximum):
+        raise CompletedSourceReadHold('completed-source file is unsafe')
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
+    if directory:
+        flags |= os.O_DIRECTORY
+    fd = os.open(name, flags, dir_fd=parent)
+    record['slots'].append((fd, before.st_dev, before.st_ino))
+    identity = _completed_read_identity(before, directory=directory)
+    if _completed_read_identity(os.fstat(fd), directory=directory) != identity:
+        raise CompletedSourceReadHold('completed-source open identity changed')
+    raw = None
+    if not directory:
+        raw = os.pread(fd, before.st_size + 1, 0)
+        if len(raw) != before.st_size:
+            raise CompletedSourceReadHold('completed-source read is incomplete')
+    record['originals'].append((parent, name, fd, directory, identity, raw))
+    return fd, raw
+
+
+def _completed_read_verify_record(record):
+    for parent, name, fd, directory, identity, raw in record['originals']:
+        if (_completed_read_identity(os.fstat(fd), directory=directory) != identity
+                or _completed_read_identity(os.stat(name, dir_fd=parent,
+                    follow_symlinks=False), directory=directory) != identity):
+            raise CompletedSourceReadHold('completed-source original identity differs')
+        if raw is not None and os.pread(fd, len(raw) + 1, 0) != raw:
+            raise CompletedSourceReadHold('completed-source original bytes differ')
+
+
+def _completed_read_json(raw, project):
+    def pairs(items):
+        value = {}
+        for key, item in items:
+            if key in value:
+                raise CompletedSourceReadHold('duplicate completed-source state key')
+            value[key] = item
+        return value
+    def nonfinite(_value):
+        raise CompletedSourceReadHold('nonfinite completed-source state')
+    payload = json.loads(raw.decode('utf-8'), object_pairs_hook=pairs,
+                         parse_constant=nonfinite)
+    if (type(payload) is not dict
+            or not {'schema_version', 'project', 'successes'}.issubset(payload)
+            or set(payload) - {'schema_version', 'project', 'successes', 'cooldown_seconds'}
+            or type(payload['schema_version']) is not int or payload['schema_version'] != 2
+            or payload['project'] != project or type(payload['successes']) is not dict
+            or any(key not in VALID_COLLECTION_KEYS for key in payload['successes'])):
+        raise CompletedSourceReadHold('completed-source state is not same-project schema2')
+    if 'cooldown_seconds' in payload and (type(payload['cooldown_seconds']) is not int
+            or payload['cooldown_seconds'] < 0):
+        raise CompletedSourceReadHold('completed-source cooldown shape differs')
+    for item in payload['successes'].values():
+        if (type(item) is not dict or set(item) != {'successful_epoch', 'successful_at'}
+                or type(item['successful_epoch']) not in (int, float)
+                or not math.isfinite(item['successful_epoch'])
+                or type(item['successful_at']) is not str
+                or not 1 <= len(item['successful_at']) <= 128):
+            raise CompletedSourceReadHold('completed-source success shape differs')
+        _iso_at(item['successful_epoch'])
+    if not all(key in payload['successes'] for key in COLLECTION_KEYS_BY_SCOPE['prod']):
+        raise CompletedSourceReadHold('completed-source prod successes are absent')
+
+
+def _require_completed_source_read_lease(lease):
+    _completed_read_registered(lease)
+    lease.verify()
+
+
+def _completed_source_reader_layout(lease):
+    """Open only this lease's fixed EXISTING completed namespace, once."""
+    _require_completed_source_read_lease(lease)
+    record = _completed_read_registered(lease)
+    if record['layout'] is not None:
+        return record['layout']
+    try:
+        root = record['fields']['status_dir']
+        project = record['fields']['project']
+        key = _completed_read_hashlib.sha256(project.encode('utf-8')).hexdigest()
+        current = record['status_fd']
+        for part in ('collection-cycles', key, 'prod', 'switch_collection'):
+            current, _raw = _completed_read_open(record, current, part, directory=True)
+        records_fd, _raw = _completed_read_open(record, current, 'records', directory=True)
+        _completed_read_open(record, current, 'high-water.json')
+        base = root / 'collection-cycles' / key / 'prod/switch_collection'
+        layout = (root, base, base / 'records', base / 'high-water.json',
+                  project, key, 'prod', 'switch_collection')
+        _completed_read_verify_record(record)
+        record['layout'] = layout
+        return layout
+    except BaseException as error:
+        record['failure'] = error
+        if not isinstance(error, Exception):
+            raise
+        raise CompletedSourceReadHold('completed-source reader namespace is unavailable') from None
+
+
+def _completed_read_cleanup(record):
+    errors = []
+    lock_fd = record['fields']['_lock_fd']
+    for fd, device, inode in reversed(record['slots']):
+        try:
+            current = os.fstat(fd)
+            if (current.st_dev, current.st_ino) != (device, inode):
+                raise CompletedSourceReadHold('completed-source close identity is unknown')
+        except BaseException as error:
+            errors.append(error)
+            continue  # Never close an unproved reused numeric slot.
+        if fd == lock_fd and record['locked']:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except BaseException as error:
+                errors.append(error)
+        try:
+            os.close(fd)  # Exactly one attempt; do not retry an unknown close.
+        except BaseException as error:
+            errors.append(error)
+    return errors
+
+
+@_completed_read_contextmanager
+def _hold_completed_source_read_lease(project, *, status_dir):
+    """Serialize existing prod evidence; no collection/cooldown/send grant."""
+    registration = object()
+    lease = _CompletedSourceReadLease(registration)
+    record = {'lease': lease, 'execution': (os.getpid(), _completed_read_threading.get_ident()),
+              'failure': None, 'slots': [], 'originals': [], 'locked': False,
+              'layout': None, 'fields': {'_lock_fd': -1}}
+    primary = None
+    body_entered = False
+    try:
+        if type(project) is not str or not project or len(project.encode('utf-8')) > 4096:
+            raise CompletedSourceReadHold('completed-source project locator is invalid')
+        path = Path(status_dir)
+        for locator in (Path(project), path):
+            if (not locator.is_absolute() or '..' in locator.parts
+                    or '\x00' in str(locator) or len(locator.parts) > 128
+                    or len(str(locator).encode('utf-8')) > 4096):
+                raise CompletedSourceReadHold('completed-source locator is not fixed absolute data')
+        record['fields'] = {'project': project, 'scope': 'prod', 'status_dir': path,
+            'lane': 'completed-source-read', 'collection_keys': COLLECTION_KEYS_BY_SCOPE['prod'],
+            'state_name': STATE_NAME, 'lock_name': LOCK_NAME, '_lock_fd': -1}
+        current, _raw = _completed_read_open(record, None, '/', directory=True)
+        for part in path.parts[1:]:
+            current, _raw = _completed_read_open(record, current, part, directory=True)
+        record['status_fd'] = current
+        status = os.fstat(current)
+        if status.st_uid != os.geteuid() or status.st_mode & 0o022:
+            raise CompletedSourceReadHold('completed-source status owner/mode is unsafe')
+        lock_fd, _raw = _completed_read_open(record, current, LOCK_NAME)
+        record['fields']['_lock_fd'] = lock_fd
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        record['locked'] = True
+        _state_fd, raw = _completed_read_open(record, current, STATE_NAME)
+        _completed_read_json(raw, project)
+        _completed_read_verify_record(record)
+        _COMPLETED_SOURCE_READ_LEASES[registration] = record
+        lease.verify()
+        body_entered = True
+        yield lease
+        lease.verify()
+    except BaseException as error:
+        if isinstance(error, Exception) and not body_entered and not isinstance(error, CompletedSourceReadHold):
+            primary = CompletedSourceReadHold('completed-source lease acquisition refused')
+        else:
+            primary = error
+    finally:
+        _COMPLETED_SOURCE_READ_LEASES.pop(registration, None)  # Revoke BEFORE IO.
+        if record['failure'] is None:
+            record['failure'] = primary
+        errors = _completed_read_cleanup(record)
+        for error in errors:
+            if primary is None:
+                primary = (CompletedSourceReadHold('completed-source cleanup was not confirmed')
+                           if isinstance(error, Exception) else error)
+            elif isinstance(primary, Exception) and not isinstance(error, Exception):
+                primary = error
+    if primary is not None:
+        if not isinstance(primary, Exception) or body_entered or isinstance(primary, CompletedSourceReadHold):
+            raise primary
+        raise CompletedSourceReadHold('completed-source cleanup was not confirmed') from None

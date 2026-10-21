@@ -823,6 +823,109 @@ class CollectionCycleStore:
         return summaries
 
 
+class CompletedCollectionCycleReader:
+    """Distinct existing-evidence reader; no collection/reconcile/write surface."""
+
+    __slots__ = ('__lease', '__binding')
+
+    def __init__(self, *, lease):
+        try:
+            provider = self._provider()
+            provider._require_completed_source_read_lease(lease)
+            binding = provider._completed_source_reader_layout(lease)
+            if (type(binding) is not tuple or len(binding) != 8
+                    or binding[4] != lease.project
+                    or binding[5] != collection_cycle_project_key(lease.project)
+                    or binding[6:] != ('prod', 'switch_collection')):
+                raise CollectionCycleHoldError('completed reader derivation differs')
+            object.__setattr__(self, '_CompletedCollectionCycleReader__lease', lease)
+            object.__setattr__(self, '_CompletedCollectionCycleReader__binding', binding)
+            self._require_gate()
+            if self._read_witness() is None:
+                raise CollectionCycleHoldError('completed reader has no original witness')
+        except Exception:
+            raise CollectionCycleHoldError('completed reader requires its original live lease') from None
+
+    def __setattr__(self, name, value):
+        raise AttributeError('completed reader bindings are immutable')
+
+    @staticmethod
+    def _provider():
+        # Exactly the gate provider actually captured by this worker. No import
+        # search, alternate spelling, caller module, DTO or class-name equality.
+        provider = sys.modules.get(CollectionGate.__module__)
+        if provider is None or getattr(provider, 'CollectionGate', None) is not CollectionGate:
+            raise CollectionCycleHoldError('completed reader gate provider differs')
+        return provider
+
+    gate = property(lambda self: self.__lease)
+    root_status_dir = property(lambda self: self.__binding[0])
+    status_dir = property(lambda self: self.__binding[1])
+    records_dir = property(lambda self: self.__binding[2])
+    witness_path = property(lambda self: self.__binding[3])
+    project_identity = property(lambda self: self.__binding[4])
+    project_key = property(lambda self: self.__binding[5])
+    scope = property(lambda self: self.__binding[6])
+    source = property(lambda self: self.__binding[7])
+
+    def _require_gate(self):
+        # Compatibility NAME only: never calls a collecting gate's allowed or
+        # decision check. The lease itself rechecks all its actual originals.
+        try:
+            provider = self._provider()
+            provider._require_completed_source_read_lease(self.__lease)
+            if provider._completed_source_reader_layout(self.__lease) != self.__binding:
+                raise CollectionCycleHoldError('completed reader layout changed')
+        except Exception:
+            raise CollectionCycleHoldError('completed reader lease is unavailable') from None
+
+    def _read(self, method, *arguments):
+        if not any(method is original for original in (
+                CollectionCycleStore.start_path, CollectionCycleStore.launch_path,
+                CollectionCycleStore.completion_path, CollectionCycleStore._read_witness,
+                CollectionCycleStore._record_groups, CollectionCycleStore._validate_identity_for_store,
+                CollectionCycleStore._validate_start_record, CollectionCycleStore._validate_launch_record,
+                CollectionCycleStore._validate_completion_record)):
+            raise CollectionCycleHoldError('completed reader method is not a fixed read')
+        self._require_gate()
+        result = method(self, *arguments)
+        self._require_gate()
+        return result
+
+    # Explicit finite delegation of existing PURE read/validation methods.
+    # No Store object is constructed; no inheritance or mutation API is exposed.
+    _sequence_name = staticmethod(CollectionCycleStore._sequence_name)
+
+    def start_path(self, sequence):
+        return self._read(CollectionCycleStore.start_path, sequence)
+
+    def launch_path(self, sequence):
+        return self._read(CollectionCycleStore.launch_path, sequence)
+
+    def completion_path(self, sequence):
+        return self._read(CollectionCycleStore.completion_path, sequence)
+
+    def _read_witness(self):
+        value = self._read(CollectionCycleStore._read_witness)
+        if value is None:
+            raise CollectionCycleHoldError('completed reader original witness is absent')
+        return value
+
+    def _record_groups(self):
+        return self._read(CollectionCycleStore._record_groups)
+
+    def _validate_identity_for_store(self, identity):
+        return self._read(CollectionCycleStore._validate_identity_for_store, identity)
+
+    def _validate_start_record(self, payload, sequence):
+        return self._read(CollectionCycleStore._validate_start_record, payload, sequence)
+
+    def _validate_launch_record(self, payload, identity):
+        return self._read(CollectionCycleStore._validate_launch_record, payload, identity)
+
+    def _validate_completion_record(self, payload, identity):
+        return self._read(CollectionCycleStore._validate_completion_record, payload, identity)
+
 def timestamp() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
 

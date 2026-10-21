@@ -508,6 +508,16 @@
         "test_cases.test_ibsw3_scp_scope_request_content",
         "test_cases.test_ibsw3_scp_request_cpld_sources"
       ]
+    },
+    {
+      "id": "req7-completed-source-read-related",
+      "description": "既存原件只读租约与独立 completed-cycle reader；不授予采集或发送权限",
+      "tests": [
+        "test_cases.test_completed_collection_source_read",
+        "test_cases.test_completed_collection_source_read_workflow",
+        "test_cases.test_post_c6_fixture_cleanup",
+        "test_cases.test_completed_collection_source_read_close"
+      ]
     }
   ],
   "tracked_support": [
@@ -684,7 +694,10 @@
     "test_cases/fixtures/ibsw3-source-inverse/os22/candidate/tools/ibsw_upgrade_executor.py.txt",
     "test_cases/fixtures/ibsw3-source-inverse/os22/candidate/tools/ibsw_upgrade_component.py.txt",
     "test_cases/fixtures/ibsw3-source-inverse/os22/candidate/infiniband/bringup/xdr-upgrade/upgrade-component.sh.txt",
-    "test_cases/fixtures/ibsw3-source-inverse/display/candidate/infiniband/bringup/xdr-upgrade/upgrade.py.txt"
+    "test_cases/fixtures/ibsw3-source-inverse/display/candidate/infiniband/bringup/xdr-upgrade/upgrade.py.txt",
+    "test_cases/completed_collection_source_read_fixture.py",
+    "test_cases/issue_tracker_cable_post_c6_fixture.py",
+    "test_cases/completed_read_close_isolation.py"
   ],
   "scripts": {
     "DAY0-Prepare/01-a-setup.py": "DAY0-Prepare/01-a-setup.py",
@@ -2475,6 +2488,17 @@
         "test_cases.test_ibsw3_native_source_preflight_workflow",
         "test_cases.test_ibsw3_native_foreign_probe_regression",
         "test_cases.test_ibsw3_native_probe_target_query_stop"
+      ]
+    },
+    {
+      "id": "req7_completed_source_read_existing_only",
+      "paths": [
+        "monitor/switch_collection_gate.py",
+        "monitor/switch-collection-worker.py"
+      ],
+      "tests": [
+        "test_cases.test_completed_collection_source_read",
+        "test_cases.test_completed_collection_source_read_close"
       ]
     }
   ],
@@ -4551,6 +4575,37 @@
         "test_cases.test_ibsw3_native_foreign_probe_regression",
         "test_cases.test_ibsw3_native_probe_target_query_stop"
       ]
+    },
+    {
+      "id": "req7_completed_source_read_real_parent_exit_c5",
+      "members": [
+        "monitor/switch_collection_gate.py",
+        "monitor/switch-collection-worker.py",
+        "monitor/issue_tracker_cycle_source.py",
+        "monitor/issue_tracker_stage_l_consumer.py",
+        "monitor/issue_tracker_local_commit.py",
+        "monitor/issue_tracker_local_workbook_commit.py",
+        "monitor/issue_tracker_state_owner.py",
+        "monitor/issue_tracker_whitelist_workbook.py",
+        "monitor/collection_ib_producer.py",
+        "monitor/issue_tracker_ib_runtime.py",
+        "monitor/issue_tracker_switch_runtime.py",
+        "ztp/config/ib_topology_provenance.py"
+      ],
+      "tests": [
+        "test_cases.test_completed_collection_source_read_workflow"
+      ]
+    },
+    {
+      "id": "req7_completed_source_read_owned_close_boundary",
+      "members": [
+        "monitor/switch_collection_gate.py",
+        "monitor/switch-collection-worker.py",
+        "monitor/issue_tracker_cycle_source.py"
+      ],
+      "tests": [
+        "test_cases.test_completed_collection_source_read_close"
+      ]
     }
   ],
   "path_rules": [
@@ -5197,6 +5252,49 @@
       ],
       "tests": [
         "test_cases.test_ibsw3_native_scp_landing_docs"
+      ]
+    },
+    {
+      "paths": [
+        "test_cases/completed_collection_source_read_fixture.py",
+        "test_cases/issue_tracker_cable_post_c6_fixture.py",
+        "test_cases/test_issue_tracker_stage_l_consumer_workflow.py"
+      ],
+      "tests": [
+        "test_cases.test_completed_collection_source_read",
+        "test_cases.test_completed_collection_source_read_workflow",
+        "test_cases.test_issue_tracker_stage_l_consumer_workflow",
+        "test_cases.test_post_c6_fixture_cleanup"
+      ]
+    },
+    {
+      "paths": [
+        "test_cases/test_completed_collection_source_read.py",
+        "test_cases/test_completed_collection_source_read_workflow.py"
+      ],
+      "tests": [
+        "test_cases.test_completed_collection_source_read",
+        "test_cases.test_completed_collection_source_read_workflow"
+      ]
+    },
+    {
+      "paths": [
+        "test_cases/test_post_c6_fixture_cleanup.py"
+      ],
+      "tests": [
+        "test_cases.test_post_c6_fixture_cleanup"
+      ]
+    },
+    {
+      "paths": [
+        "test_cases/completed_collection_source_read_fixture.py",
+        "test_cases/issue_tracker_cable_post_c6_fixture.py",
+        "test_cases/test_issue_tracker_stage_l_consumer_workflow.py",
+        "test_cases/test_completed_collection_source_read_close.py",
+        "test_cases/completed_read_close_isolation.py"
+      ],
+      "tests": [
+        "test_cases.test_completed_collection_source_read_close"
       ]
     }
   ]

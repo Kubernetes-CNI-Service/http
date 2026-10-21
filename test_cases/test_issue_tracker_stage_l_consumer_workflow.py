@@ -6020,6 +6020,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         qualification_replay_probe=None,
         complete_preview_source_race=False,
         complete_preview_cgi=False, native_current_no_send_probe=False,
+        post_c6_fixture=None, post_c6_parent_gate_exit=False,
     ):
         from monitor.collection_ib_producer import (
             IbProducerAuthoritySnapshot, parse_ib_producer_authority,
@@ -6055,15 +6056,29 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             RemoteCollectionObservation, VerifiedRetrievedObservation,
         )
 
+        if (type(post_c6_parent_gate_exit) is not bool
+                or (post_c6_parent_gate_exit and post_c6_fixture is None)):
+            raise AssertionError("completed-read parent exit requires its explicit post-C6 fixture")
         project = self.root / "DAY0-Prepare/fabric-a"
         project.mkdir(parents=True)
         self.gate.__exit__(None, None, None)
-        protected_gate = WORKER.CollectionGate(
-            str(project), "prod", status_dir=self.root / "monitor/status",
-            enforce_cooldown=False, lane="collection",
-        )
-        held_gate = protected_gate.__enter__()
-        self.addCleanup(lambda: protected_gate.__exit__(None, None, None))
+        if post_c6_parent_gate_exit:
+            # New opt-in: ordinary collection admission, never cooldown bypass.
+            import contextlib as _completed_read_contextlib
+            completed_source_parent_stack = _completed_read_contextlib.ExitStack()
+            self.addCleanup(completed_source_parent_stack.close)
+            protected_gate = WORKER.CollectionGate(
+                str(project), "prod", status_dir=self.root / "monitor/status",
+                lane="collection",
+            )
+            held_gate = completed_source_parent_stack.enter_context(protected_gate)
+        else:
+            protected_gate = WORKER.CollectionGate(
+                str(project), "prod", status_dir=self.root / "monitor/status",
+                enforce_cooldown=False, lane="collection",
+            )
+            held_gate = protected_gate.__enter__()
+            self.addCleanup(lambda: protected_gate.__exit__(None, None, None))
         self.store = WORKER.CollectionCycleStore(gate=held_gate)
         self.project = project
         setup = self.root / "ztp/config/nvos/template/P2P"
@@ -6124,6 +6139,13 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         )
         protected = self.root / "synthetic-root-attestation"
         protected.mkdir(mode=0o700)
+        import contextlib as _post_c6_contextlib
+        post_c6_ib_context = _post_c6_contextlib.ExitStack()
+        if post_c6_fixture is not None:
+            from test_cases.issue_tracker_cable_post_c6_fixture import post_c6_ib_original_io
+            # Capture original functions BEFORE the old Mock context enters;
+            # the post-only context enters LAST and stays through callback.
+            post_c6_ib_context = post_c6_ib_original_io(self.root, record, identity)
 
         def retrieved(plan, **_kwargs):
             archive = publish_local_archive(plan, vendor, incoming)
@@ -6141,7 +6163,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                         return_value=authority), \
              mock.patch("monitor.collection_ib_producer.recheck_ib_producer_authority"), \
              mock.patch("monitor.collection_ib_producer.observe_and_retrieve_remote_producer",
-                        side_effect=retrieved):
+                        side_effect=retrieved), post_c6_ib_context:
             binding = produce_worker_ib_analysis(
                 identity, project_root=project, http_root=self.root,
                 clock=lambda: dt.datetime(2026, 9, 26, 4, 20,
@@ -6196,7 +6218,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                     'complete-after-archive-local-c6-native-current-compiler-issued-reads',
                     'complete-after-archive-local-c6-native-current-compiler-issued-reads-issued-tail',
                     'complete-after-archive-local-c6-native-current-compiler-receipt-tail'))
-            if manual_channel_bridge or complete_preview_probe or default_preparation or native_current_no_send_probe:
+            if manual_channel_bridge or complete_preview_probe or default_preparation or native_current_no_send_probe or post_c6_fixture is not None:
                 root_template = self.root / "monitor/Issue_Tracker_Template_v1.xlsx"
                 root_template.parent.mkdir(parents=True, exist_ok=True)
                 root_template.write_bytes(self.template.read_bytes())
@@ -7113,7 +7135,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             (project / "01-global.yaml").write_text(
                 "schema_version: 2\ncommon:\n  mgmt:\n"
                 "    issue-tracker:\n" + ("      status: enabled\n      spreadsheet_id: synthetic_spreadsheet_id_0001\n"
-                    if receipted_intent_probe or native_current_no_send_probe else "      status: disabled\n")
+                    if receipted_intent_probe or native_current_no_send_probe or post_c6_fixture is not None else "      status: disabled\n")
                 + ("      publish_every_cycles: 3\n"
                    if manual_after_manual else ""),
                 encoding="utf-8",
@@ -7179,6 +7201,17 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             self.assertEqual(digest, committed.receipt.manifest_id)
             self.assertEqual(hashlib.sha256(committed.prepared.xlsx_bytes).hexdigest(),
                              committed.receipt.published_sha256)
+            if post_c6_fixture is not None:
+                # Test-only handoff AFTER real C6 owner exit and original
+                # receipt assertions. The observer is not a production permit.
+                if post_c6_parent_gate_exit:
+                    protected_gate.mark_success()
+                    # Propagate any actual unlock/close failure. Only a clean
+                    # ExitStack return precedes the new read observer. Later
+                    # registered close sees an EMPTY stack, no numeric retry.
+                    completed_source_parent_stack.close()
+                post_c6_fixture(self, committed, artifacts)
+                return
             if native_current_no_send_probe:
                 if native_current_no_send_probe in ('native-receipt-locators','native-receipt-locators-rebind','native-receipt-locators-late-rebind'):
                     from test_cases.test_req7_remote_history_match import load as load_remote

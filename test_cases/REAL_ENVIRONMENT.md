@@ -2937,3 +2937,17 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 - Cleanup: only confirmed owned resources; retain UNKNOWN and original
   failure evidence. No scenario omission, residual-risk acceptance, real
   Cloud/device/system privilege or publication authorization is added.
+
+## TC-REQ7-COMPLETED-SOURCE-EXISTING-READ-20261021 — NOT RUN
+
+- 名称/类型/需求：完成采集后的 existing-only 原件读取租约及独立 completed-cycle reader；direct / integration / scenario / real-environment。管理服务器/Linux/容器、真实并发采集、中断及冷恢复均 **NOT RUN / REAL_ENV REQUIRED**。
+- 自动化对应：`test_completed_collection_source_read` 的两项 direct、`test_completed_collection_source_read_workflow` 的真实本地 C6→原 parent gate 成功退出→新 lease→真实三面板 C5 workflow；支持文件按同批 manifest 精确登记。`test_completed_collection_source_read_close` 原独立 close1 目前仍须 root 的独占冷子解释器；不能将未资格验证的 canonical 自隔离载体的源码直接加入普通同解释器 discovery 并宣称安全。本卡不预填 PASS。
+- 风险与边界：新 lease 不继承/模拟 CollectionGate，不发 decision/allowed、采集、local admission、初始化、修复、A/SDK/worker 或网络许可。默认原 cooldown 及旧 Store 拒绝 read lease 的合同保留。原项目/C5/C6/原 protected IB source资格仍需自身完整核验，records-only 或成功借用不等于完整原件图或发送授权。
+- 前置与输入：另行取得精确管理服务器/项目/维护窗口和现场操作授权；具备当前 source/test/manifest/Python/平台身份与发布证明。由真实父采集及本地 C6 保留既存同项目 schema2 state、原 LOCK、records/witness。父先真实 mark_success 并成功 unlock/close 后再取得读取租约；不得以 `enforce_cooldown=False`、伪造 gate/token/FD、NotDue/NOOP 或回调结果替代资格。
+- 步骤：核原 LOCK/state/逐级 parent 的 nofollow named/held 身份；新 lease 仅 O_RDONLY 与同原 LOCK 的非阻塞排他 flock，无 mkdir/create/chmod、迁移/重置或 cooldown 写入。进入不同 reader 与实际 held completed replay，再执行真实 C5。已有原件变更必须拒绝且本租约 sticky，不续租、不刷新基线或 fallback。释放后才容许正常后续采集按原协议竞争。
+- 正向/拒绝验收：正常读取保持 cooldown、记录、C6 receipt/XLSX、mode/mtime/ctime 和 namespace 不变；atime 不作不读证明。忙锁、缺失/链接/错误属主权限、schema1/异项目 state、同字节换 inode、records/witness 替换及过期/复制 lease 均拒绝，无新 START/补文件/修复。目录身份核验不等于冻结无关 status 文件。真实硬件、根权限和非协作写者不由本地 synthetic 元数据证明。
+- 故障与清理：保留关键 unlock/close 不确定、原 body KI/SE 同对象与既有 cause、first-fstat/open 交接、中断及冷恢复场景。先撤销登记再对每个确证自有原件单次 unlock/close；未知或复用 FD 不接管/救援/重试，其他已知资源仍须收尾。close-after-real-close/EIO 的本地独立故障控制不替代所有真实 SDK/OS close 或进程崩溃。失败保留原件、完整 UNKNOWN 与现场路径，不扫描 PID/FD 或删除持久锁。
+- 证据：精确树/运行身份、原命令、完整原始日志/物理 END/退出码、named/held stat9（纳秒十进制字符串）/SHA/旧前缀、父成功退出和子真实锁竞争、源资格及资源关闭次序。明确每个真正到达/NOT_REACHED 阶段；subcase/child 不累计为额外 whole，不记录真实密码/token/私钥。
+- 清理/回滚/未证：仅操作本轮确证自有资源；不存在自动初始化、强制接管、重试 Cloud 或真实采集的新增权限。N>1 历史已 admission 源重取、A 接受新 reader、whole30/read TTL60/mutation60、native factory/worker、真实 Cloud、断电及 full/check 均仍 OPEN。全部既有案例与普通 load/sync/package、C14/新依赖身份和批准 ledger 合同不变；无场景省略/弱化或新增残余风险接受。
+
+- 容量/实现限界：64KiB 的 LOCK/state/witness、128 path parts、4KiB locator 是新保守静态限制，不是生产数据规模兼容或硬 IO 监督证明。Reader 仍通过固定原 Store 的 pathname 纯读与前后真实 lease 核验，不宣称整条 native 原件已 sealed；新 reader 未接任何 online lane。原202 test methods/1779 assert AST 的静态保留不是202项运行 PASS。
