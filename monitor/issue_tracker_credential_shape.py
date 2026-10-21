@@ -124,6 +124,7 @@ def _hold_private_file(basename):
     file_flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
     descriptors, directories, edges = [], [], []
     close_failed = False
+    primary = None
     try:
         parent = os.open("/", directory_flags)
         descriptors.append(parent)
@@ -170,12 +171,23 @@ def _hold_private_file(basename):
         verify()
     except (OSError, ValueError, TypeError, OverflowError):
         raise CredentialFileHold() from None
+    except BaseException as error:
+        primary = error
+        raise
     finally:
+        cleanup_error = None
         for fd in reversed(descriptors):
             try:
                 os.close(fd)
-            except OSError:
-                close_failed = True
+            except BaseException as error:
+                if isinstance(error, OSError):
+                    close_failed = True
+                elif (cleanup_error is None or (isinstance(cleanup_error, Exception)
+                        and not isinstance(error, Exception))):
+                    cleanup_error = error
+        if (cleanup_error is not None
+                and (primary is None or isinstance(primary, Exception))):
+            raise cleanup_error  # Complete all originals; preserve the first body NI/cause.
     if close_failed:
         raise CredentialFileHold()
 

@@ -209,6 +209,7 @@ def _hold_current_project_online_target(writer_token):
         return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid,
                 info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
     fd = None; key = None; failed = False; project_fds = []; project_edges = []
+    primary = None
     try:
         if (_HELD_CURRENT_TARGET.get() is not None or os.geteuid() != 0
                 or any(not hasattr(os, flag) for flag in ('O_NOFOLLOW', 'O_CLOEXEC', 'O_NONBLOCK'))):
@@ -262,12 +263,26 @@ def _hold_current_project_online_target(writer_token):
                 _HELD_CURRENT_TARGET.reset(key); key = None
     except Exception:
         failed = True
+    except BaseException as error:
+        primary = error
+        raise
     finally:
+        cleanup_error = None
         if fd is not None:
             try: os.close(fd)
-            except OSError: failed = True
+            except BaseException as error:
+                if isinstance(error, OSError): failed = True
+                else: cleanup_error = error
         for descriptor in reversed(project_fds):
             try: local.os.close(descriptor)
-            except OSError: failed = True
+            except BaseException as error:
+                if isinstance(error, OSError):
+                    failed = True
+                elif (cleanup_error is None or (isinstance(cleanup_error, Exception)
+                        and not isinstance(error, Exception))):
+                    cleanup_error = error
+        if (cleanup_error is not None
+                and (primary is None or isinstance(primary, Exception))):
+            raise cleanup_error  # Registration was revoked before these critical closes.
     if failed:
         raise OnlineTargetHold('current_target_binding_unproved')

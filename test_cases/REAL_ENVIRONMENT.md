@@ -2959,3 +2959,14 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 - 输入/权限：全部自有私有目录；sheet沿用原scoped OS IO视图仅该module合成UID0+固定系统路径重定向到私有root，真实fd/flock/stat/fsync/close；不是系统root部署/原生容器UID证明。无真实Cloud/SSH/设备或系统global锁根创建。初始化只测试fixture显式入口，不授予业务初始化/发送。
 - 证据：冻结源码/tests/manifest/Python/platform、命令与完整END；子例/child内部suite不额外计whole。所有final行为断言在owners/IO hooks外，先打印固定合成事实，若NI断言先FAIL则后续断言NOT_REACHED，原事实不是其PASS。实现未知时不预填RED/PASS。
 - 清理/风险：每public whole独立自有真实冷child；如旧helper留下三个FD，只记录原登记slot、让该child终态OS回收，不扫描或数字救援、不冒产品cleanup成功。夹具communicate30与必要kill/wait5仅诊断预算，不是业务30/内核硬墙。保原件root，不自动删除。真实系统lock root provisioning/跨进程共享OFD/native factory与双owner30/60另列HOLD，本例NOT RUN。
+
+
+## TC-REAL-REQ7-PRIVATE-INPUT-NI-001 — NOT RUN
+
+- 前置：明确现场授权、独立项目与私有service-account原件；本机仅自有合成根/UID视图，实际原FD与close。
+- 步骤：先实际健康held credential/target上下文，再正文原NI与关键原FD真实关闭后不同NI；检查第一NI及cause、全部已知FD各一次收尾和target先撤销。
+- 预期：保原中断，不采纳替换原件、不重试/接管/修复；清理异常不得假称完成或发送。
+- 证据：精确源码/测试/manifest/Python平台、原devino/EBADF、脱敏事实和完整END。
+- 清理及风险：仅本次自有冷child/文件；未关闭FD不数字救援，child退出非产品清理证明。现场设备/Cloud/断电NOT RUN。
+
+- 本切片另覆盖无正文异常的关键close NI与普通EIO：须完整关闭已知原件，首NI/cause不变，普通EIO仍脱敏typed HOLD；四冷child是1whole四子例，不是真机/断电验收。

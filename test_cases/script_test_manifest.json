@@ -525,6 +525,20 @@
       "tests": [
         "test_cases.test_req7_owner_ni_cleanup"
       ]
+    },
+    {
+      "id": "req7-private-input-first-ni-cleanup",
+      "description": "Held credential/target contexts preserve first body NI and finish known originals",
+      "tests": [
+        "test_cases.test_req7_private_input_ni_cleanup"
+      ]
+    },
+    {
+      "id": "req7-private-input-close-only-regression",
+      "description": "Actual close-only NI and typed EIO original cleanup compatibility",
+      "tests": [
+        "test_cases.test_req7_private_input_close_regression"
+      ]
     }
   ],
   "tracked_support": [
@@ -705,7 +719,9 @@
     "test_cases/completed_collection_source_read_fixture.py",
     "test_cases/issue_tracker_cable_post_c6_fixture.py",
     "test_cases/completed_read_close_isolation.py",
-    "test_cases/owner_ni_cleanup_fixture.py"
+    "test_cases/owner_ni_cleanup_fixture.py",
+    "test_cases/private_input_ni_fixture.py",
+    "test_cases/private_input_close_regression_fixture.py"
   ],
   "scripts": {
     "DAY0-Prepare/01-a-setup.py": "DAY0-Prepare/01-a-setup.py",
@@ -2518,6 +2534,26 @@
       ],
       "tests": [
         "test_cases.test_req7_owner_ni_cleanup"
+      ]
+    },
+    {
+      "id": "req7_private_input_first_ni_cleanup",
+      "paths": [
+        "monitor/issue_tracker_credential_shape.py",
+        "monitor/issue_tracker_online_target.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_private_input_ni_cleanup"
+      ]
+    },
+    {
+      "id": "req7_private_input_close_only_regression",
+      "paths": [
+        "monitor/issue_tracker_credential_shape.py",
+        "monitor/issue_tracker_online_target.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_private_input_close_regression"
       ]
     }
   ],
@@ -4636,6 +4672,30 @@
       "tests": [
         "test_cases.test_req7_owner_ni_cleanup"
       ]
+    },
+    {
+      "id": "req7_private_target_actual_owner_ni_cleanup",
+      "members": [
+        "monitor/issue_tracker_credential_shape.py",
+        "monitor/issue_tracker_online_target.py",
+        "monitor/issue_tracker_local_commit.py",
+        "monitor/issue_tracker_state_owner.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_private_input_ni_cleanup"
+      ]
+    },
+    {
+      "id": "req7_private_input_close_only_owner_workflow",
+      "members": [
+        "monitor/issue_tracker_credential_shape.py",
+        "monitor/issue_tracker_online_target.py",
+        "monitor/issue_tracker_local_commit.py",
+        "monitor/issue_tracker_state_owner.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_private_input_close_regression"
+      ]
     }
   ],
   "path_rules": [
@@ -5334,6 +5394,24 @@
       ],
       "tests": [
         "test_cases.test_req7_owner_ni_cleanup"
+      ]
+    },
+    {
+      "paths": [
+        "test_cases/test_req7_private_input_ni_cleanup.py",
+        "test_cases/private_input_ni_fixture.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_private_input_ni_cleanup"
+      ]
+    },
+    {
+      "paths": [
+        "test_cases/test_req7_private_input_close_regression.py",
+        "test_cases/private_input_close_regression_fixture.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_private_input_close_regression"
       ]
     }
   ]
