@@ -54,6 +54,7 @@ def _fixed_ca():
     """One bounded read; no pathname repair, second read or trust fallback."""
     descriptors, directories, edges = [], [], []
     failed = False
+    interruption = None
     try:
         if os.geteuid() != 0 or any(not hasattr(os, flag) for flag in (
             "O_DIRECTORY", "O_NOFOLLOW", "O_CLOEXEC", "O_NONBLOCK",
@@ -85,10 +86,15 @@ def _fixed_ca():
                 raise TlsInputHold()
     except Exception:
         failed = True
+    except BaseException as error:
+        interruption = error
     finally:
         for descriptor in reversed(descriptors):
             try: os.close(descriptor)
-            except OSError: failed = True
+            except Exception: failed = True
+            except BaseException as error:
+                if interruption is None: interruption = error
+    if interruption is not None: raise interruption
     if failed: raise TlsInputHold()
     return source, before
 

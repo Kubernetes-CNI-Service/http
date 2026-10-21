@@ -3024,3 +3024,14 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 - 故障注入与清理：只准自有选定archive和一个backup二路径；保留原件证据，未知失败停止，不扫描/救援FD。模拟子进程退出不冒产品关键close或断电。
 - 证据/自动化状态：精确源码和literal预期、完整命令/Python平台、真实pin/guard/语义FD见证、原断言分阶段NOTREACHED、held/named双全读EOF与十进制stat9/prefix/唯一END。修复前实际RED与修复后结果分别保留独立epoch完整收据，不以本地通过冒充现场验收；现场NOT RUN。
 
+## TC-REAL-REQ7-CA-CLOSE-INTERRUPTION-001 — NOT RUN
+
+- 名称/类型：固定 CA 原件的首中断及已知 FD 全部收尾；real-environment，REQ7 TLS 前置组件，不是完整在线同步验收。
+- 自动化：`test_cases/test_req7_ca_close.py` 的两个独立 direct 和 token-wire→TLS 两真实脚本 workflow；原 `test_req7_tls_inputs` 和定向本地 TLS wire 另作兼容，不累计跨 epoch 重复计数。
+- 风险与目标：一个关键 close 的中断不得跳过其余已取得的 FD，较晚 cleanup 中断不得覆盖较早读取/close 中断；普通 close 错误仍拒绝，不重试 close/read 或回退信任来源。
+- 前置/输入/权限：现场须另行授权受管 Linux CPython3.12、根属只读固定 CA 目录链和维护窗口，并保留正常发布证明。当前仅自有文件/合成 UID/私有 public CA 与回环服务，不读取宿主 `/etc/ssl` 或真实私有凭据，不授予 root、Cloud、SSH 或设备操作。
+- 步骤：先验证本轮固定 CA/完整目录链与真实 TLS 健康对照；仅对确证本次取得的 FD 注入读取中断、真实 close 后中断和尾部 EIO；从首次结果观察剩余 close、原异常/cause、零后续连接、同 unit 消耗和拒绝重用。
+- 预期/副作用：所有已知 close 按原逆序各尝试一次；任何必要 close 失败不得生成 trust/READY/发送许可。保留原中断及 cause，既有失败与收据不清除，不扫描/救援外部 FD 或 PID，不读取其他系统信任目录。
+- 证据：精确源码/独立预期/manifest/Python及平台、真实取得 FD 与首结果状态、完整响应及关键收尾、held/named 双全读 EOF、十进制 stat9、prefix SHA/物理顺序/唯一 END；合成 Python 异常不冒真实信号/内核中断。
+- 清理/风险：只由原 holder 回收本次已知资源并留存错误；不关闭未知或借用 FD。非协作 FD 换绑、内核阻塞 close、断电和实际系统 CA 撤换需独立现场验证；本地 timer/FD cap 不冒硬 I/O 监督。
+- 自动化状态：本地结果以实际独立完整收据为准；真实系统 CA/受管 Linux/真实服务/设备/Cloud/硬30秒与固定60秒/断电仍 NOT RUN；新 SDKfactory/defaultworker 与 REQ7 整体未完成。

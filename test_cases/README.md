@@ -5111,3 +5111,15 @@ remain unchanged and OPEN/FAIL without a legal final publisher. Refusal tests
 do not close the final commit/cold-reader protocol; critical fsync/close errors
 remain UNKNOWN/HOLD and old cold-reader failure assertions remain intact.
 No full proof, ledger approval, Cloud/field acceptance or release is implied.
+
+## REQ7 CA known-FD interruption cleanup
+
+`test_req7_ca_close.py` 保留两项独立 owned-file direct 的原方法与 helper 预期，
+仅把测试源定位改为 canonical 仓库路径。另以真实 `TokenWireRequest` 数据模型→
+TLS 单次原型的跨脚本 workflow，先建立真实私有 CA/SSLContext 健康对照，再注入
+已实际 delegated-close 后的中断和尾部 EIO。首结果必须已尝试全部五个已知 FD，
+原中断及 cause 身份不变，HTTP connection 零构造；同一 unit 不可重用或重新获取 CA。
+夹具首结果后的人工 known-FD 清理不算产品收尾，原始 RED 和阶段 NOT_REACHED 保留。
+这不是 Cable SDK factory、原始采集来源/账号许可、真实系统 CA、30 秒总获取预算或
+60 秒观察证明；旧 C14 开发身份与真实本地回环 TLS 兼容不能冒充新 Cable 权限。
+全量、部署和真实环境仍须独立验收，见 `TC-REAL-REQ7-CA-CLOSE-INTERRUPTION-001`。

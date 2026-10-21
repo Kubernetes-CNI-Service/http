@@ -581,6 +581,13 @@
       "tests": [
         "test_cases.test_req7_nv_info_original_window"
       ]
+    },
+    {
+      "id": "req7-ca-close-interruption",
+      "description": "Canonical owned CA first-interruption cleanup and actual token-wire no-connect workflow",
+      "tests": [
+        "test_cases.test_req7_ca_close"
+      ]
     }
   ],
   "tracked_support": [
@@ -2652,6 +2659,15 @@
       ],
       "tests": [
         "test_cases.test_req7_nv_info_original_window"
+      ]
+    },
+    {
+      "id": "req7_ca_close_known_fd_interruptions",
+      "paths": [
+        "monitor/issue_tracker_tls_inputs.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_ca_close"
       ]
     }
   ],
@@ -4861,6 +4877,16 @@
       "tests": [
         "test_cases.test_req7_nv_info_original_window"
       ]
+    },
+    {
+      "id": "req7_ca_close_token_wire_no_connection",
+      "members": [
+        "monitor/issue_tracker_tls_inputs.py",
+        "monitor/issue_tracker_sdk_authentication.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_ca_close"
+      ]
     }
   ],
   "path_rules": [
@@ -5632,6 +5658,14 @@
       ],
       "tests": [
         "test_cases.test_req7_nv_info_original_window"
+      ]
+    },
+    {
+      "paths": [
+        "test_cases/test_req7_ca_close.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_ca_close"
       ]
     }
   ]
