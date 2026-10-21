@@ -588,6 +588,14 @@
       "tests": [
         "test_cases.test_req7_ca_close"
       ]
+    },
+    {
+      "id": "req7-cable-held-dual-owner-no-send",
+      "description": "Actual protected C6/source local-before-sheet exclusion and revocable same-original NO_SEND library; separate literal repr DATA UNIT",
+      "tests": [
+        "test_cases.test_req7_cable_read_owner_core",
+        "test_cases.test_req7_cable_lexical_repr"
+      ]
     }
   ],
   "tracked_support": [
@@ -2668,6 +2676,16 @@
       ],
       "tests": [
         "test_cases.test_req7_ca_close"
+      ]
+    },
+    {
+      "id": "req7_cable_current_read_owner_core",
+      "paths": [
+        "monitor/issue_tracker_publish_runtime.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_cable_read_owner_core",
+        "test_cases.test_req7_cable_lexical_repr"
       ]
     }
   ],
@@ -4887,6 +4905,21 @@
       "tests": [
         "test_cases.test_req7_ca_close"
       ]
+    },
+    {
+      "id": "req7_cable_source_local_then_sheet_no_send",
+      "members": [
+        "monitor/issue_tracker_publish_runtime.py",
+        "monitor/issue_tracker_local_commit.py",
+        "monitor/issue_tracker_online_target.py",
+        "monitor/issue_tracker_credential_shape.py",
+        "monitor/issue_tracker_spreadsheet_owner.py",
+        "monitor/switch_collection_gate.py",
+        "monitor/switch-collection-worker.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_cable_read_owner_core"
+      ]
     }
   ],
   "path_rules": [
@@ -5666,6 +5699,16 @@
       ],
       "tests": [
         "test_cases.test_req7_ca_close"
+      ]
+    },
+    {
+      "paths": [
+        "test_cases/test_req7_cable_read_owner_core.py",
+        "test_cases/test_req7_cable_lexical_repr.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_cable_read_owner_core",
+        "test_cases.test_req7_cable_lexical_repr"
       ]
     }
   ]

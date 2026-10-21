@@ -5123,3 +5123,32 @@ TLS 单次原型的跨脚本 workflow，先建立真实私有 CA/SSLContext 健�
 这不是 Cable SDK factory、原始采集来源/账号许可、真实系统 CA、30 秒总获取预算或
 60 秒观察证明；旧 C14 开发身份与真实本地回环 TLS 兼容不能冒充新 Cable 权限。
 全量、部署和真实环境仍须独立验收，见 `TC-REAL-REQ7-CA-CLOSE-INTERRUPTION-001`。
+
+## REQ7 held current-source dual-owner NO_SEND library
+
+`test_req7_cable_read_owner_core.py` retains its independent literal four-key
+oracle: real protected C6 parent finish/exit, post-parent-exit Reader, original A health,
+then current local owner before actual target spreadsheet flock. The new
+internal context enters A itself and borrows that same held target/credential
+lexically; the public projection remains revocable NO_SEND without raw secrets,
+tokens, FDs, a caller checker or SDK export. No allowlist/credential reopen is
+used by repeated verification. Same-byte/new-inode cre, allowlist and global
+faults have sticky refusal, known-slot first-result cleanup and unchanged local
+receipt/XLSX assertions. Independent OFD contention is actual flock, not an
+in-memory flag. Named restoration, pre-C6 identity, other source roles, N>1,
+cleanup interruption and noncooperative FD substitution are not proved here.
+
+`test_req7_cable_lexical_repr.py` is a separate unqualified DATA UNIT with a
+literal noncredential marker. Only its source locator becomes canonical; all
+three original repr/str/container assertions remain. `repr=False` is not a
+serialization/debugger/logging guarantee or memory/secret sandbox. Existing A
+register/revoke hunks change; its whole AST is not claimed unchanged. Finite
+provider anchors are not a complete held provider/default/transitive SDK audit.
+
+This is an uninstalled internal library prerequisite, not the actual Cable SDK
+factory, send permission, worker activation, total-30/fixed-60 supervision,
+historical pending recovery or completion of REQ7. Incomplete private image
+qualification failures and initial capability/repr RED epochs stay historical;
+only complete canonical main-location receipts determine this slice's results.
+The old C14/Cable dependency split and full/release gates remain intact. Field
+scope is NOT RUN in `TC-REAL-REQ7-CABLE-READ-OWNER-CORE-001`.

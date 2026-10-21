@@ -47,6 +47,8 @@ class CableSourceHold(StageLHold):
 
 
 _CABLE_SOURCE_SCOPES = {}
+_CABLE_SOURCE_LEXICAL = {}
+_CABLE_READ_OWNER_SCOPES = {}
 _CABLE_NATIVE_BORROWS = {}
 _CABLE_NATIVE_CURRENT = ContextVar('req7_cable_native_originals', default=None)
 _CABLE_ETH_INFO_CUSTODIES = {}
@@ -1750,12 +1752,16 @@ def _hold_current_cable_cycle_source(store, *, http_root):
         result = _CableCycleSource('NO_SEND', changes, binding,
             event['generation_id'], event['published_sha256'], registration)
         _CABLE_SOURCE_SCOPES[registration] = (result, verify)
+        _CABLE_SOURCE_LEXICAL[registration] = _CableSourceLexical(
+            result, store, store_binding, token, owner, binding,
+            credential_raw, verify_credential, (os.getpid(), threading.get_ident()))
         result.verify()
         yield result
         result.verify()
     except BaseException as error:
         primary = error
     finally:
+        _CABLE_SOURCE_LEXICAL.pop(registration, None)  # Revoke lexical borrow first.
         _CABLE_SOURCE_SCOPES.pop(registration, None)  # Revoke before any close.
         if policy_custody is not None:
             policy_custody.active = False
@@ -1805,6 +1811,201 @@ def _hold_current_cable_cycle_source(store, *, http_root):
         if not isinstance(primary, Exception):
             raise primary
         raise CableSourceHold('Cable current source scope is unavailable') from None
+
+
+@dataclass(frozen=True, repr=False)
+class _CableSourceLexical:
+    """Internal original A acquisition; neither a public DTO nor a send grant."""
+    source: object
+    store: object
+    store_binding: tuple
+    token: object
+    owner: object
+    binding: object
+    credential_raw: bytes
+    verify_credential: object
+    execution: tuple
+
+
+@dataclass(frozen=True)
+class _CableReadOwnerCore:
+    """Revocable NO_SEND projection only; no credential/token/FD or SDK export."""
+    outcome: str
+    changes: object
+    binding: object
+    local_generation_id: str
+    local_published_sha256: str
+    _registration: object
+
+    def verify(self):
+        entry = _CABLE_READ_OWNER_SCOPES.get(self._registration)
+        if entry is None or entry[0] is not self:
+            raise CableSourceHold('Cable read owner core is not active')
+        entry[1]()
+
+
+# Finite anchors of this original module at import, not an SDK/source permit
+# or a defence against arbitrary Python tampering before the initial import.
+_CABLE_OWNER_SOURCE_ENTRY = _hold_current_cable_cycle_source
+_CABLE_OWNER_SOURCE_INNER = _hold_current_cable_cycle_source.__wrapped__
+_CABLE_OWNER_SOURCE_CODE = _CABLE_OWNER_SOURCE_INNER.__code__
+_CABLE_OWNER_SOURCE_VERIFY = _CableCycleSource.verify
+_CABLE_OWNER_SOURCE_VERIFY_CODE = _CableCycleSource.verify.__code__
+
+
+def _cable_owner_source_joint():
+    if (_hold_current_cable_cycle_source is not _CABLE_OWNER_SOURCE_ENTRY
+            or _hold_current_cable_cycle_source.__wrapped__ is not _CABLE_OWNER_SOURCE_INNER
+            or _CABLE_OWNER_SOURCE_INNER.__code__ is not _CABLE_OWNER_SOURCE_CODE
+            or _CABLE_OWNER_SOURCE_INNER.__globals__ is not globals()
+            or _CableCycleSource.verify is not _CABLE_OWNER_SOURCE_VERIFY
+            or _CableCycleSource.verify.__code__ is not _CABLE_OWNER_SOURCE_VERIFY_CODE
+            or _CableCycleSource.verify.__globals__ is not globals()):
+        raise CableSourceHold('Cable read owner source joint differs')
+
+
+def _cable_owner_provider_joint(modules):
+    """Capture only actual fixed owner/target providers, never caller checkers."""
+    rows = []
+    for module, basename, names in modules:
+        expected = Path(__file__).with_name(basename)
+        if Path(module.__file__) != expected:
+            raise CableSourceHold('Cable read owner provider source differs')
+        for name in names:
+            function = getattr(module, name, None)
+            inner = getattr(function, '__wrapped__', function)
+            if (type(function) is not FunctionType or type(inner) is not FunctionType
+                    or inner.__globals__ is not module.__dict__
+                    or Path(inner.__code__.co_filename) != expected):
+                raise CableSourceHold('Cable read owner provider binding differs')
+            rows.append((module, name, function, function.__code__, inner, inner.__code__))
+    return tuple(rows)
+
+
+def _cable_owner_check_providers(rows):
+    for module, name, function, code, inner, inner_code in rows:
+        if (getattr(module, name, None) is not function or function.__code__ is not code
+                or getattr(function, '__wrapped__', function) is not inner
+                or inner.__code__ is not inner_code
+                or inner.__globals__ is not module.__dict__):
+            raise CableSourceHold('Cable read owner provider changed')
+
+
+@contextmanager
+def _hold_current_cable_read_owner_core(store, *, http_root):
+    """Own original A then same-target spreadsheet exclusion, strictly NO_SEND.
+
+    A is entered here, not supplied by a caller. Its lexical record reuses the
+    actual held credential/target/local owner; no credential/allowlist reopen.
+    This is not SDK permission, a worker trigger, cold-child transfer, historical
+    pending selection or total-30/fixed-60 supervision.
+    """
+    from monitor import issue_tracker_local_commit as local
+    from monitor import issue_tracker_online_target as target
+    from monitor import issue_tracker_spreadsheet_owner as sheet
+
+    registration = object()
+    contexts = []
+    primary = None
+    failure = None
+    source = None
+    lexical = None
+    handle = None
+
+    def enter(context):
+        value = context.__enter__()
+        contexts.append(context)
+        return value
+
+    try:
+        _cable_owner_source_joint()
+        providers = _cable_owner_provider_joint((
+            (local, 'issue_tracker_local_commit.py', ('_owner',)),
+            (target, 'issue_tracker_online_target.py',
+             ('_require_held_current_project_online_target',)),
+            (sheet, 'issue_tracker_spreadsheet_owner.py',
+             ('spreadsheet_owner', '_validated_owner')),
+        ))
+        execution = (os.getpid(), threading.get_ident())
+        source = enter(_CABLE_OWNER_SOURCE_ENTRY(store, http_root=http_root))
+        lexical = _CABLE_SOURCE_LEXICAL.get(source._registration)
+        registered = _CABLE_SOURCE_SCOPES.get(source._registration)
+        if (type(source) is not _CableCycleSource
+                or type(lexical) is not _CableSourceLexical
+                or registered is None or registered[0] is not source
+                or lexical.source is not source or lexical.store is not store
+                or lexical.execution != execution or lexical.binding is not source.binding
+                or type(lexical.credential_raw) is not bytes
+                or type(lexical.verify_credential) is not FunctionType):
+            raise CableSourceHold('Cable read owner requires its own original A')
+        # The actual local owner exists BEFORE even entering sheet acquisition.
+        if (local._owner(lexical.token) is not lexical.owner
+                or _cable_require_store(store, Path(http_root)) != lexical.store_binding):
+            raise CableSourceHold('Cable read owner local original differs')
+        lexical.verify_credential()
+        target._require_held_current_project_online_target(lexical.token, lexical.binding)
+        _cable_owner_check_providers(providers)
+        sheet_token = enter(sheet.spreadsheet_owner(lexical.binding))
+        sheet_original = sheet._validated_owner(sheet_token, lexical.binding)
+
+        def verify():
+            nonlocal failure
+            if failure is not None:
+                raise CableSourceHold('Cable read owner core has a prior failure') from None
+            try:
+                _cable_owner_source_joint()
+                _cable_owner_check_providers(providers)
+                registered = _CABLE_READ_OWNER_SCOPES.get(registration)
+                if (registered is None or registered[0] is not handle
+                        or (os.getpid(), threading.get_ident()) != execution
+                        or _CABLE_SOURCE_LEXICAL.get(source._registration) is not lexical
+                        or _CABLE_SOURCE_SCOPES.get(source._registration, (None,))[0] is not source
+                        or local._owner(lexical.token) is not lexical.owner
+                        or _cable_require_store(store, Path(http_root)) != lexical.store_binding
+                        or sheet._validated_owner(sheet_token, lexical.binding) is not sheet_original):
+                    raise CableSourceHold('Cable read owner scope original differs')
+                # A's original verifier performs the real current C5/C6 replay.
+                # These closures check its SAME original credential and target,
+                # never a freshly opened file or an API-delivered replacement.
+                source.verify()
+                lexical.verify_credential()
+                target._require_held_current_project_online_target(
+                    lexical.token, lexical.binding)
+                if (local._owner(lexical.token) is not lexical.owner
+                        or sheet._validated_owner(sheet_token, lexical.binding) is not sheet_original):
+                    raise CableSourceHold('Cable read owner final original differs')
+            except BaseException as error:
+                failure = error
+                if not isinstance(error, Exception):
+                    raise
+                raise CableSourceHold('Cable read owner core is unavailable') from None
+
+        handle = _CableReadOwnerCore('NO_SEND', source.changes, source.binding,
+            source.local_generation_id, source.local_published_sha256, registration)
+        _CABLE_READ_OWNER_SCOPES[registration] = (handle, verify)
+        handle.verify()
+        yield handle
+        handle.verify()
+    except BaseException as error:
+        primary = error
+    finally:
+        # Revoke the core AND its internal lexical borrowing before sheet close.
+        # Original A still performs its own independent final checks/teardown.
+        _CABLE_READ_OWNER_SCOPES.pop(registration, None)
+        if (source is not None and lexical is not None
+                and _CABLE_SOURCE_LEXICAL.get(source._registration) is lexical):
+            _CABLE_SOURCE_LEXICAL.pop(source._registration, None)
+        for context in reversed(contexts):
+            try:
+                context.__exit__(None, None, None)
+            except BaseException as error:
+                if primary is None or (isinstance(primary, Exception)
+                                       and not isinstance(error, Exception)):
+                    primary = error
+    if primary is not None:
+        if not isinstance(primary, Exception):
+            raise primary
+        raise CableSourceHold('Cable read owner scope is unavailable') from None
 
 
 class AutoLocalCollectorAnomaly(StageLHold):

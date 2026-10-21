@@ -3035,3 +3035,15 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 - 证据：精确源码/独立预期/manifest/Python及平台、真实取得 FD 与首结果状态、完整响应及关键收尾、held/named 双全读 EOF、十进制 stat9、prefix SHA/物理顺序/唯一 END；合成 Python 异常不冒真实信号/内核中断。
 - 清理/风险：只由原 holder 回收本次已知资源并留存错误；不关闭未知或借用 FD。非协作 FD 换绑、内核阻塞 close、断电和实际系统 CA 撤换需独立现场验证；本地 timer/FD cap 不冒硬 I/O 监督。
 - 自动化状态：本地结果以实际独立完整收据为准；真实系统 CA/受管 Linux/真实服务/设备/Cloud/硬30秒与固定60秒/断电仍 NOT RUN；新 SDKfactory/defaultworker 与 REQ7 整体未完成。
+
+## TC-REAL-REQ7-CABLE-READ-OWNER-CORE-001 — NOT RUN
+
+- 名称/类型：同次原始 current source 的本地 owner→目标表 owner；real-environment，REQ7 内部 NO_SEND 前置库，不是完整同步或现场验收。
+- 需求/自动化：`test_req7_cable_read_owner_core.py` 两 whole（第二项三 role 子例）是真实 protected C6/Reader/A/本地与表锁跨脚本流程；`test_req7_cable_lexical_repr.py` 仅不合格 DATA 默认文本表示 UNIT。
+- 风险/目标：不得凭新开同字节文件、caller checker、DTO 或旧本地来源取得当前同步原件资格；核心进入原 A 并借其同一 held credential/target/local owner，再取得同 target 的真实表锁。此库不产生 SDK/业务发送授权。
+- 前置/输入/权限：现场另行明确受管 Linux/当前项目/固定只读私有 service account 和 target allowlist 的精确窗口；保正常发布全量证明。当前仅自有合成项目/UID 和不可签名测试 key，socket/Popen 拒绝不解除；不读取真实账号或设备。
+- 步骤：真实采集父 C6 成功且关键退出后，独立 Reader→原 A 健康；新核心实际本地锁先于表锁；独立 open OFD 应锁竞争。保持同原件见证，分别同字节更换 cre/allow/global inode，两次 verify 及退出必须拒绝，第一结果时核已知 FD 和 owner/token 撤销。
+- 预期/副作用：NO_SEND 不暴露 credential/token/FD/SDK；每次核心只开一次 allow/cre，verify 不重新采用替代原件；本地 receipt/XLSX 不变；scope 退出前撤销 lexical/core，再逆序收尾 sheet/A。不重试/修复/接管，不改默认 worker，不发网络请求。
+- 证据：精确六路径/独立预期/manifest、HEAD/tree/dirty/index/Python平台/退出码，原件来源及四业务键，真实 flock/首次收尾事实，完整日志 held-named 双全文 EOF、十进制 stat9、prefix SHA/唯一物理 END；初始缺 API 和 repr literal RED、私有 cohort 治理失败各自留原 epoch，未达阶段不冒 PASS。
+- 清理/风险：只清理本次已知自有 FD/owner/夹具目录；保原异常与本地记录，不扫描未知 FD/PID。非协作 FD 替换、必要 close 的真实中断/阻塞、pre-C6 身份、全部角色、N>1、命名恢复、硬 I/O 期限需独立资格测试；reprFalse 不保证序列化/日志/调试器或内存清除。
+- 自动化状态：以本地完整 canonical 收据为准；受管 Linux/真实 service account/SDKfactory/30秒总获取/60秒固定观察/automatic-manual worker/Cloud/设备/断电均 NOT RUN 或 OPEN；不把本库局部通过称 REQ7 完成或 full/发布证明。
