@@ -13,7 +13,9 @@ import os
 from pathlib import Path
 import re
 import stat
+import sys
 import time
+from types import FunctionType
 
 import yaml
 
@@ -65,38 +67,58 @@ _RETRY_COUNT_FIELDS = {
 
 def local_publish_interval(project):
     """Read independent N policy from one held regular global file."""
+    runtime = sys.modules.get('monitor.issue_tracker_publish_runtime')
+    held = None
+    if runtime is not None:
+        getter = vars(runtime).get('_read_cable_policy_if_current')
+        if (type(getter) is not FunctionType
+                or getter is not vars(runtime).get('_CABLE_N_READ_ORIGINAL')
+                or getter.__code__ is not vars(runtime).get('_CABLE_N_READ_CODE')
+                or getter.__globals__ is not vars(runtime)
+                or Path(getter.__code__.co_filename)
+                   != Path(__file__).with_name('issue_tracker_publish_runtime.py')):
+            raise AdmissionHold('Cable N fixed reader is unavailable')
+        held = getter(project)
     project = Path(project)
     if not project.is_absolute() or project.is_symlink():
         raise AdmissionHold("automatic local project path is unsafe")
     path = project / "01-global.yaml"
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        fd = os.open(path, flags)
-        try:
-            before = os.fstat(fd)
-            if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
-                    or before.st_size < 1 or before.st_size > _MAX_GLOBAL_BYTES):
-                raise AdmissionHold("automatic local policy file is unsafe")
-            raw = os.read(fd, before.st_size + 1)
-            after = os.fstat(fd)
-            named = path.lstat()
-            identity = lambda info: (info.st_dev, info.st_ino, info.st_size,
-                                     info.st_mtime_ns, info.st_ctime_ns)
-            if (len(raw) != before.st_size or identity(before) != identity(after)
-                    or identity(after) != identity(named)):
-                raise AdmissionHold("automatic local policy changed during read")
-        finally:
-            os.close(fd)
+        if held is None:
+            fd = os.open(path, flags)
+            try:
+                before = os.fstat(fd)
+                if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+                        or before.st_size < 1 or before.st_size > _MAX_GLOBAL_BYTES):
+                    raise AdmissionHold("automatic local policy file is unsafe")
+                raw = os.read(fd, before.st_size + 1)
+                after = os.fstat(fd)
+                named = path.lstat()
+                identity = lambda info: (info.st_dev, info.st_ino, info.st_size,
+                                         info.st_mtime_ns, info.st_ctime_ns)
+                if (len(raw) != before.st_size or identity(before) != identity(after)
+                        or identity(after) != identity(named)):
+                    raise AdmissionHold("automatic local policy changed during read")
+            finally:
+                os.close(fd)
+        else:
+            raw, _identity = held
         document = safe_load_global_yaml(raw.decode("utf-8"))
         policy = normalize_issue_tracker_policy(document)
         interval = policy["publish_every_cycles"]
         if type(interval) is not int or interval < 1:
             raise AdmissionHold("automatic local publish interval is invalid")
+        if held is not None and getter(project) != held:
+            raise AdmissionHold('Cable N held global changed during normalization')
         return interval, hashlib.sha256(raw).hexdigest()
     except (OSError, UnicodeError, yaml.YAMLError, TypeError, ValueError) as exc:
         if isinstance(exc, AdmissionHold):
             raise
         raise AdmissionHold("automatic local policy is unavailable or invalid") from exc
+
+
+_CABLE_N_CONSUMER_ORIGINAL = local_publish_interval
 
 
 def assess_shared_admission_step(prior: dict | None, current: dict,

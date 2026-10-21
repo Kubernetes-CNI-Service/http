@@ -539,6 +539,48 @@
       "tests": [
         "test_cases.test_req7_private_input_close_regression"
       ]
+    },
+    {
+      "id": "req7-cold-original-attach-qualification",
+      "description": "private cold-child same-original NO_SEND fixture qualification; not native SDK actor",
+      "tests": [
+        "test_cases.test_req7_cold_completed_original_attach"
+      ]
+    },
+    {
+      "id": "req7-cold-graph-json-identity-direct",
+      "description": "independent fixture JSON stat9 roundtrip and actual same-byte new inode",
+      "tests": [
+        "test_cases.test_req7_cold_graph_json_identity"
+      ]
+    },
+    {
+      "id": "req7-eth-info-held-original-window",
+      "description": "Actual pinned ETH info consumer window; one literal workflow, no SDK or full-role claim",
+      "tests": [
+        "test_cases.test_req7_eth_info_held_window"
+      ]
+    },
+    {
+      "id": "req7-w1-previous-original-window",
+      "description": "Actual cold W1 semantics bind previously held original, independent workflow",
+      "tests": [
+        "test_cases.test_req7_w1_original_window"
+      ]
+    },
+    {
+      "id": "req7-n-policy-previous-original-window",
+      "description": "Actual cold N policy fixed1 semantics bind previously held global original",
+      "tests": [
+        "test_cases.test_req7_n_policy_original_window"
+      ]
+    },
+    {
+      "id": "req7-nv-info-original-after-guard-window",
+      "description": "Actual NV semantic original archive after successful guard, one independent cold workflow",
+      "tests": [
+        "test_cases.test_req7_nv_info_original_window"
+      ]
     }
   ],
   "tracked_support": [
@@ -721,7 +763,12 @@
     "test_cases/completed_read_close_isolation.py",
     "test_cases/owner_ni_cleanup_fixture.py",
     "test_cases/private_input_ni_fixture.py",
-    "test_cases/private_input_close_regression_fixture.py"
+    "test_cases/private_input_close_regression_fixture.py",
+    "test_cases/cold_completed_original_attach_fixture.py",
+    "test_cases/eth_info_held_window_fixture.py",
+    "test_cases/w1_original_window_fixture.py",
+    "test_cases/n_policy_original_window_fixture.py",
+    "test_cases/nv_info_original_window_fixture.py"
   ],
   "scripts": {
     "DAY0-Prepare/01-a-setup.py": "DAY0-Prepare/01-a-setup.py",
@@ -2554,6 +2601,57 @@
       ],
       "tests": [
         "test_cases.test_req7_private_input_close_regression"
+      ]
+    },
+    {
+      "id": "req7_cold_attach_existing_originals",
+      "paths": [
+        "monitor/issue_tracker_publish_runtime.py",
+        "ztp/config/ib_topology_provenance.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_cold_completed_original_attach"
+      ]
+    },
+    {
+      "id": "req7_eth_info_held_original_window",
+      "paths": [
+        "monitor/issue_tracker_publish_runtime.py",
+        "monitor/issue_tracker_switch_runtime.py",
+        "monitor/issue_tracker_switch_info_source.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_eth_info_held_window"
+      ]
+    },
+    {
+      "id": "req7_w1_original_window",
+      "paths": [
+        "monitor/issue_tracker_publish_runtime.py",
+        "monitor/issue_tracker_whitelist_workbook.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_w1_original_window"
+      ]
+    },
+    {
+      "id": "req7_n_policy_original_window",
+      "paths": [
+        "monitor/issue_tracker_publish_runtime.py",
+        "monitor/issue_tracker_admission.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_n_policy_original_window"
+      ]
+    },
+    {
+      "id": "req7_nv_info_original_window",
+      "paths": [
+        "monitor/issue_tracker_publish_runtime.py",
+        "monitor/issue_tracker_switch_info_source.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_nv_info_original_window"
       ]
     }
   ],
@@ -4696,6 +4794,73 @@
       "tests": [
         "test_cases.test_req7_private_input_close_regression"
       ]
+    },
+    {
+      "id": "req7_cold_completed_three_panel_original_attach",
+      "members": [
+        "monitor/issue_tracker_publish_runtime.py",
+        "monitor/switch_collection_gate.py",
+        "monitor/switch-collection-worker.py",
+        "monitor/issue_tracker_stage_l_consumer.py",
+        "monitor/collection_ib_producer.py",
+        "ztp/config/ib_topology_provenance.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_cold_completed_original_attach"
+      ]
+    },
+    {
+      "id": "req7_eth_info_pinned_actual_consumer_window",
+      "members": [
+        "monitor/issue_tracker_publish_runtime.py",
+        "monitor/issue_tracker_switch_runtime.py",
+        "monitor/issue_tracker_switch_info_source.py",
+        "monitor/issue_tracker_stage_l_consumer.py",
+        "monitor/switch_collection_gate.py",
+        "monitor/switch-collection-worker.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_eth_info_held_window"
+      ]
+    },
+    {
+      "id": "req7_w1_completed_reader_template_original_workflow",
+      "members": [
+        "monitor/issue_tracker_publish_runtime.py",
+        "monitor/issue_tracker_whitelist_workbook.py",
+        "monitor/issue_tracker_whitelist.py",
+        "monitor/issue_tracker_local_commit.py",
+        "monitor/switch-collection-worker.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_w1_original_window"
+      ]
+    },
+    {
+      "id": "req7_n_policy_completed_reader_original_workflow",
+      "members": [
+        "monitor/issue_tracker_publish_runtime.py",
+        "monitor/issue_tracker_admission.py",
+        "tools/project_contract.py",
+        "monitor/issue_tracker_local_commit.py",
+        "monitor/switch-collection-worker.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_n_policy_original_window"
+      ]
+    },
+    {
+      "id": "req7_nv_info_completed_reader_original_workflow",
+      "members": [
+        "monitor/issue_tracker_publish_runtime.py",
+        "monitor/issue_tracker_switch_info_source.py",
+        "monitor/switch_collection_gate.py",
+        "monitor/switch-collection-worker.py",
+        "monitor/issue_tracker_local_commit.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_nv_info_original_window"
+      ]
     }
   ],
   "path_rules": [
@@ -5412,6 +5577,61 @@
       ],
       "tests": [
         "test_cases.test_req7_private_input_close_regression"
+      ]
+    },
+    {
+      "paths": [
+        "test_cases/cold_completed_original_attach_fixture.py",
+        "test_cases/test_req7_cold_completed_original_attach.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_cold_completed_original_attach"
+      ]
+    },
+    {
+      "paths": [
+        "test_cases/test_req7_cold_graph_json_identity.py",
+        "test_cases/cold_completed_original_attach_fixture.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_cold_graph_json_identity"
+      ]
+    },
+    {
+      "paths": [
+        "test_cases/eth_info_held_window_fixture.py",
+        "test_cases/test_req7_eth_info_held_window.py",
+        "test_cases/cold_completed_original_attach_fixture.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_eth_info_held_window"
+      ]
+    },
+    {
+      "paths": [
+        "test_cases/test_req7_w1_original_window.py",
+        "test_cases/w1_original_window_fixture.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_w1_original_window"
+      ]
+    },
+    {
+      "paths": [
+        "test_cases/test_req7_n_policy_original_window.py",
+        "test_cases/n_policy_original_window_fixture.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_n_policy_original_window"
+      ]
+    },
+    {
+      "paths": [
+        "test_cases/test_req7_nv_info_original_window.py",
+        "test_cases/nv_info_original_window_fixture.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_nv_info_original_window"
       ]
     }
   ]

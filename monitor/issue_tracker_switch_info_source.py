@@ -18,6 +18,10 @@ import os
 from pathlib import Path
 import re
 import stat
+import sys
+from types import FunctionType
+
+_CABLE_RUNTIME_ORIGINAL = sys.modules.get('monitor.issue_tracker_publish_runtime')
 import tarfile
 
 
@@ -95,6 +99,41 @@ def _exact_archive_bytes(path: Path, *, expected_sha256: str,
     _positive_bound(expected_size_bytes, name="archive size")
     if expected_size_bytes > maximum:
         raise SwitchInfoHoldError("archive exceeds byte limit")
+    runtime = sys.modules.get('monitor.issue_tracker_publish_runtime')
+    if (_CABLE_RUNTIME_ORIGINAL is not None
+            and runtime is not _CABLE_RUNTIME_ORIGINAL):
+        raise SwitchInfoHoldError("Cable ETH runtime module changed")
+    if runtime is not None:
+        getter = vars(runtime).get('_read_cable_eth_info_if_current')
+        if (type(getter) is not FunctionType
+                or getter is not vars(runtime).get('_CABLE_ETH_INFO_READ_ORIGINAL')
+                or getter.__code__ is not vars(runtime).get('_CABLE_ETH_INFO_READ_CODE')
+                or getter.__globals__ is not vars(runtime)
+                or Path(getter.__code__.co_filename)
+                   != Path(__file__).with_name('issue_tracker_publish_runtime.py')):
+            raise SwitchInfoHoldError("Cable ETH fixed reader is unavailable")
+        guard = vars(runtime).get('_cable_known_nv_info_reader')
+        if (type(guard) is not FunctionType
+                or guard is not vars(runtime).get('_CABLE_NV_INFO_GUARD_ORIGINAL')
+                or guard.__code__ is not vars(runtime).get('_CABLE_NV_INFO_GUARD_CODE')
+                or guard.__globals__ is not vars(runtime)
+                or Path(guard.__code__.co_filename)
+                   != Path(__file__).with_name('issue_tracker_publish_runtime.py')):
+            raise SwitchInfoHoldError("Cable NV fixed legacy guard is unavailable")
+        # Only the actual fixed NV preview can request this compatibility
+        # branch; the guard itself verifies its code/globals and held member.
+        previous = sys._getframe(1)
+        known_nv = (previous.f_globals is globals()
+                    and previous.f_code is read_switch_info_preview.__code__
+                    and previous.f_locals.get('source_slot') == 'nvlink/prod'
+                    and guard(path, expected_sha256=expected_sha256,
+                              expected_size_bytes=expected_size_bytes, maximum=maximum))
+        held = getter(path, expected_sha256=expected_sha256,
+                      expected_size_bytes=expected_size_bytes, maximum=maximum)
+        if known_nv and held is None:
+            raise SwitchInfoHoldError("Cable NV held original reader is unavailable")
+        if held is not None:
+            return held
     try:
         descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
         try:
@@ -434,3 +473,8 @@ def map_switch_source_rows(preview: SwitchInfoPreview) -> tuple[SwitchSourceRow,
     ) for (host, kind, name), value in zip(
         preview.abnormal_keys, preview.abnormal_values,
     ))
+
+
+# Trusted module-import anchors; not an SDK/native permission or a path grant.
+_CABLE_EXACT_ARCHIVE_ORIGINAL = _exact_archive_bytes
+_CABLE_INFO_PREVIEW_ORIGINAL = read_switch_info_preview

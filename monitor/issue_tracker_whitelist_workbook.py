@@ -13,6 +13,9 @@ import os
 import posixpath
 import re
 import stat
+import sys
+from pathlib import Path
+from types import FunctionType
 import xml.etree.ElementTree as ET
 import zipfile
 
@@ -217,6 +220,26 @@ def _parse_xlsx_bytes(raw):
 
 def read_whitelist_workbook(path):
     """Return exact held-workbook and normalized Whitelist digests or HOLD."""
+    runtime = sys.modules.get('monitor.issue_tracker_publish_runtime')
+    if runtime is not None:
+        getter = vars(runtime).get('_read_cable_w1_if_current')
+        if (type(getter) is not FunctionType
+                or getter is not vars(runtime).get('_CABLE_W1_READ_ORIGINAL')
+                or getter.__code__ is not vars(runtime).get('_CABLE_W1_READ_CODE')
+                or getter.__globals__ is not vars(runtime)
+                or Path(getter.__code__.co_filename)
+                   != Path(__file__).with_name('issue_tracker_publish_runtime.py')):
+            raise WhitelistHoldError('Cable W1 fixed reader is unavailable')
+        held = getter(path)
+        if held is not None:
+            raw, identity = held
+            whitelist = _parse_xlsx_bytes(raw)
+            # Recheck the same registered original after actual semantic parse.
+            if getter(path) != held:
+                raise WhitelistHoldError('Cable W1 held template changed during parse')
+            return WorkbookWhitelistSnapshot(
+                whitelist, hashlib.sha256(raw).hexdigest(), len(raw), identity[0], identity[1],
+            )
     flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
     try:
         fd = os.open(os.fspath(path), flags)
@@ -247,3 +270,7 @@ def read_whitelist_workbook(path):
         raise WhitelistHoldError("local workbook read failed") from exc
     finally:
         os.close(fd)
+
+
+_CABLE_W1_CONSUMER_ORIGINAL = read_whitelist_workbook
+_CABLE_W1_PARSER_ORIGINAL = _parse_xlsx_bytes

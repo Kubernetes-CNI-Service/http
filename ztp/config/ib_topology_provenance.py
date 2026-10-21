@@ -17,6 +17,8 @@ from contextlib import contextmanager
 from typing import Mapping
 from xml.etree import ElementTree as ET
 import zipfile
+from contextvars import ContextVar
+from io import BytesIO
 
 
 CVT_ROLES = frozenset({
@@ -29,6 +31,56 @@ WORKBOOK_NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
 
 class ProvenanceError(ValueError):
     """A required IB source or its byte identity cannot be verified."""
+
+
+_CABLE_ORIGINALS = ContextVar('ib_current_cable_originals', default=None)
+
+
+@contextmanager
+def _hold_current_cable_originals():
+    """Borrow the actual runtime registration; no caller checker/path/FD DTO.
+
+    This only changes read-only native source consumption. It grants no
+    source qualification, publication, factory, SDK or network authority.
+    """
+    if _CABLE_ORIGINALS.get() is not None:
+        raise ProvenanceError('native Cable original borrowers cannot nest')
+    runtime = sys.modules.get('monitor.issue_tracker_publish_runtime')
+    if runtime is None:
+        raise ProvenanceError('native Cable original runtime is unavailable')
+    actual = runtime._current_cable_native_borrow()
+    key = _CABLE_ORIGINALS.set(actual)
+    try:
+        yield
+    finally:
+        # Runtime revokes before original cleanup. Do not require a still-live
+        # borrower here or replace a pending original NI/cause with tail IO.
+        _CABLE_ORIGINALS.reset(key)
+
+
+def _current_cable_originals():
+    current = _CABLE_ORIGINALS.get()
+    if current is None:
+        runtime = sys.modules.get('monitor.issue_tracker_publish_runtime')
+        registered = getattr(runtime, '_CABLE_NATIVE_CURRENT', None)
+        if registered is not None and registered.get() is not None:
+            raise ProvenanceError('registered Cable native borrower is missing')
+        return None  # ONLY scope-absent standalone behavior may use path IO.
+    try:
+        runtime = sys.modules.get('monitor.issue_tracker_publish_runtime')
+        if runtime is None or runtime._current_cable_native_borrow() is not current:
+            raise ProvenanceError('native Cable original registration changed')
+        current.require_live()
+        return current
+    except Exception:
+        raise ProvenanceError('native Cable original registration is unavailable') from None
+
+
+def _cable_original_read(current, path, maximum):
+    try:
+        return current.read(path, maximum)
+    except Exception:
+        raise ProvenanceError('native Cable original read is unavailable') from None
 
 
 def sidecar_path(artifact: Path) -> Path:
@@ -121,6 +173,12 @@ def _bound_digest_originals(path):
 
 
 def _regular_digest(path: Path) -> str:
+    current = _current_cable_originals()
+    if current is not None:
+        try:
+            return current.identity(path)['sha256']
+        except Exception:
+            raise ProvenanceError('native Cable original digest is unavailable') from None
     try:
         with _bound_digest_originals(path) as (parent_fd, source_fd, borrowed, before_name):
             nofollow = getattr(os, "O_NOFOLLOW", 0)
@@ -242,6 +300,14 @@ def _directory_digest(root: Path) -> str:
 
 
 def _identity(path: Path, *, allow_directory: bool = False) -> dict[str, str]:
+    current = _current_cable_originals()
+    if current is not None:
+        try:
+            # The actual sealed provider validates membership BEFORE IO and
+            # hashes the held file now; never fresh resolve or cached success.
+            return current.identity(path)
+        except Exception:
+            raise ProvenanceError('native Cable original identity is unavailable') from None
     try:
         lexical = Path(os.path.abspath(path.expanduser()))
         canonical = lexical.resolve(strict=True)
@@ -292,6 +358,16 @@ def _object_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
 
 
 def _load(path: Path) -> dict[str, object]:
+    current = _current_cable_originals()
+    if current is not None:
+        raw = _cable_original_read(current, path, 16384)
+        try:
+            value = json.loads(raw, object_pairs_hook=_object_pairs)
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise ProvenanceError('invalid original provenance sidecar') from exc
+        if not isinstance(value, dict):
+            raise ProvenanceError('provenance sidecar must be an object')
+        return value
     try:
         with _bound_parent(path) as parent_fd:
             before = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
@@ -370,6 +446,25 @@ def _publish(path: Path, value: dict[str, object], parent_fd: int) -> None:
 
 
 def _check_report_sheets(report: Path) -> None:
+    current = _current_cable_originals()
+    if current is not None:
+        raw = _cable_original_read(current, report, 128 * 1024 * 1024)
+        try:
+            # BytesIO owns only these bounded actual bytes, NOT a borrowed FD.
+            with zipfile.ZipFile(BytesIO(raw)) as archive:
+                if archive.testzip() is not None:
+                    raise ProvenanceError('IB report contains a corrupt ZIP member')
+                workbook = ET.fromstring(archive.read('xl/workbook.xml'))
+                sheet_names = [sheet.attrib.get('name', '') for sheet in
+                    workbook.findall(f'{WORKBOOK_NS}sheets/{WORKBOOK_NS}sheet')]
+        except (OSError, KeyError, zipfile.BadZipFile, ET.ParseError) as exc:
+            raise ProvenanceError('invalid original IB report workbook') from exc
+        if len(sheet_names) != len(set(sheet_names)):
+            raise ProvenanceError('IB report has duplicate worksheet names')
+        missing = REQUIRED_IB_REPORT_SHEETS - set(sheet_names)
+        if missing:
+            raise ProvenanceError('IB report is missing required sheets')
+        return
     try:
         with _bound_parent(report) as parent_fd:
             before = os.stat(report.name, dir_fd=parent_fd, follow_symlinks=False)

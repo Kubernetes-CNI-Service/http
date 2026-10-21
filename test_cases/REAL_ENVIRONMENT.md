@@ -2970,3 +2970,57 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 - 清理及风险：仅本次自有冷child/文件；未关闭FD不数字救援，child退出非产品清理证明。现场设备/Cloud/断电NOT RUN。
 
 - 本切片另覆盖无正文异常的关键close NI与普通EIO：须完整关闭已知原件，首NI/cause不变，普通EIO仍脱敏typed HOLD；四冷child是1whole四子例，不是真机/断电验收。
+
+## TC-REAL-REQ7-COLD-ORIGINAL-ATTACH-001 — NOT RUN
+
+- 类型：real-environment；对应 REQ7 冷进程已完成原件接回。
+- 前置：operator 明确授权的部署项目、同批采集完成原件与固定 SA/target allowlist；本机仅私有合成 UID/root IO 夹具。
+- 步骤：保留完成原件与父采集退出见证，独立冷进程只读重新资格审查；分别保留原件同字节换 inode 和缺 role 反例。
+- 预期：healthy 真正资格通过、原件和本地工作簿不变；失败不授予发送，不修复/接管。
+- 证据：源码/manifest/平台、原件双读 stat9/SHA、实际 acquire/borrow/FD 撤销/清理。
+- 清理与风险：仅关闭自身原始 FD/进程，保留失败原件；共享锁、非协作替换与断电必须现场另核。
+- 状态：NOT RUN；本地 fixture preimage guard 不是 product 防换链证明，未运行 SDK/worker/Cloud/设备；30/60 硬监督仍 OPEN。
+
+## TC-REAL-REQ7-ETH-HELD-WINDOW-001 — NOT RUN
+
+- 类型：real-environment；REQ7 已pin的ETH info原件实际消费窗口。
+- 前置：owner明确现场授权、独立项目与备份；本机只用私有合成采集/C6/UID视图及真实FD。
+- 步骤：真实采集完成并退出后取得current-source原件；见证healthy实际资格，再于原件已pin后、真实消费者IO前由自有故障写者同字节换inode。
+- 预期：不读取外来inode，不用尾部HOLD抵销外来IO；必须真实原FD消费或在IO前拒绝，本地工作簿保留。
+- 证据：源/测试/manifest/平台、stat9十进制和原FD双读、实际open/read来源、owner撤销与已知FD收尾、完整最终END。
+- 清理/风险：仅恢复本次自有原inode且保ctime改变，不修复业务状态/重试/接管，不数字FD救援；非协作写者及断电另验。
+- 自动化状态：本地结果以绑定源码/测试/manifest的完整收据为准；现场/设备/SSH/Cloud NOT RUN，不证明全部role/nativeSDK/30秒获取或60秒观察。
+
+## TC-REAL-REQ7-ETH-HELD-CONTENT-001 — NOT RUN
+
+- 前置：现场明确授权、独立原始采集周期/本地工作簿/私有账号；本机仅自有合成冷进程。
+- 步骤：真实父周期完成退出后另冷进程读取ETH原件；健康用实际held FD解析，消费窗口同字节异inode替换须在新内容open/read前拒绝。
+- 证据：独立原literal workflow、真实pin/pread/原件身份、固定线上目标、清理/完整END；NO_SEND不能冒SDK权限。
+- 清理及风险：仅自有原件恢复/FD收尾；NV及其他roles、SDK/整轮30与60、断电/Cloud/设备验收NOT RUN。
+
+## TC-REAL-REQ7-W1-ORIGINAL-WINDOW-001 — NOT RUN
+
+- 前置：现场明确授权、独立项目/采集周期及模板；本机只用自有合成目录及冷child，无真实设备或Cloud。
+- 步骤：真实C6父进程收尾后，Reader/A先解析空Whitelist且关闭原件；只在本次自有模板已pin后的实际W1调用窗口换同bytes新inode并恢复原inode。
+- 预期：健康真实语义来自所持原FD；新内容open/read前拒绝换件，不能以尾部HOLD抵销已读；所有已知slots/lease/local token真实收尾，不救援FD。
+- 证据：精确源码/原literal/manifest/Python平台、真实pin和语义、同FD见证、phase/NOT_REACHED及完整END；本地一致性不是SDK/发送权限。
+- 清理及风险：仅精确自有二路径恢复和已知child生命周期；保失败fixture。其他角色/NV/N/SDK/整轮30和60/断电/真实环境NOT RUN。
+
+## TC-REAL-REQ7-N-POLICY-ORIGINAL-WINDOW-001 — NOT RUN
+
+- 前置：仅本地自有合成N=1默认策略项目/C6原件；现场需另行明确授权，不涉及真设备/Cloud/SSH。
+- 步骤：真实C6父owner退出后冷Reader/A，真实N消费者归一化语义/四literal活动键正常，关闭后仅在实际原global已pin的本次自有调用窗口换同bytes新inode并恢复原件。
+- 预期：健康语义来自原FD，换件必须早于任何新内容open/read拒绝；尾部HOLD不能追消IO；knownslots/owner/lease真实收尾，无FD救援。
+- 证据：精确源码/独立literal预期/manifest/解释器平台、pin及实际read/归一化见证、分阶段NOTREACHED、双读stat9和完整END。
+- 清理风险：仅固定自有global与backup二路径；保留失败原件。N>1/historypending/worker/SDK/整轮30-fixed60/断电与真实环境NOT RUN。
+
+## TC-REAL-REQ7-NV-INFO-ORIGINAL-WINDOW-001 — NOT RUN
+
+- 名称/类型：NV采集信息原件语义窗口，real-environment；本地独立测试为test_req7_nv_info_original_window，不代替真机/Cloud/断电验收。
+- 风险与目标：实际NV guard成功后仍可能按pathname读取替代文件；尾部HOLD不能追消已发生内容IO。只验证NV info一角色，不是全部source/nativeSDK/worker/30-60资格。
+- 前置条件与输入：另行取得精确管理服务器、当前项目和受控窗口授权；当前源码/独立test/helper/manifest/Python平台身份与正常发布证明。真实C6父mark_success/owner退出后已有Reader/A及同项目原NV archive/metadata。仅本机自有合成项目不访问现场。
+- 步骤：健康先真实解析nvsw01/ASIC1且fan/psu明确NA与四业务键/target/graph；仅在实际guard成功返回后的同次原pin活着窗口，或实际existing_record raw消费前，替换自有同bytes新inode，完成后恢复。
+- 预期结果：健康语义确实来自所持原FD；替代内容零open/read，typedHOLD、known slots/owner/token/lease/profile均真实收尾，本地C6工作簿不变。无网络、安装、自动修复或重试。
+- 故障注入与清理：只准自有选定archive和一个backup二路径；保留原件证据，未知失败停止，不扫描/救援FD。模拟子进程退出不冒产品关键close或断电。
+- 证据/自动化状态：精确源码和literal预期、完整命令/Python平台、真实pin/guard/语义FD见证、原断言分阶段NOTREACHED、held/named双全读EOF与十进制stat9/prefix/唯一END。修复前实际RED与修复后结果分别保留独立epoch完整收据，不以本地通过冒充现场验收；现场NOT RUN。
+
