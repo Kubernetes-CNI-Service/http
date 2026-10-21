@@ -121,6 +121,7 @@ def spreadsheet_owner(binding):
     if any(not hasattr(os, flag) for flag in ('O_NOFOLLOW', 'O_CLOEXEC', 'O_DIRECTORY', 'O_NONBLOCK')):
         raise SpreadsheetOwnerHold()
     descriptors = []; token = object(); failed = False
+    primary = None
     try:
         try:
             owner = _acquire(binding, name, descriptors)
@@ -129,13 +130,25 @@ def spreadsheet_owner(binding):
             failed = True
         if failed: raise SpreadsheetOwnerHold()
         yield token
+    except BaseException as error:
+        primary = error
+        raise
     finally:
         with _GUARD: _ACTIVE.pop(token, None)  # revoke strictly BEFORE close
-        close_failed = False
+        cleanup_error = None
         for fd in reversed(descriptors):
             try: os.close(fd)  # NEVER LOCK_UN; children may share this description.
-            except OSError: close_failed = True
-        if close_failed: raise SpreadsheetOwnerHold()
+            except BaseException as error:
+                if (cleanup_error is None or (isinstance(cleanup_error, Exception)
+                        and not isinstance(error, Exception))
+                        or (isinstance(cleanup_error, OSError) and isinstance(error, Exception)
+                            and not isinstance(error, OSError))):
+                    cleanup_error = error
+        if (cleanup_error is not None
+                and (primary is None or isinstance(primary, Exception))):
+            if isinstance(cleanup_error, OSError):
+                raise SpreadsheetOwnerHold()
+            raise cleanup_error  # No cause replacement or numeric close retry.
 
 
 def _validated_owner(token, binding):

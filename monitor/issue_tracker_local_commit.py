@@ -418,6 +418,7 @@ def _writer_owner(project, publication, *, nonblocking, original_identities=None
     root_fd = publication_fd = lock_fd = None
     held = False
     token = object()
+    primary = None
     try:
         project_info = _check(project_fd, directory=True, private=False)
         if original_identities is not None and (project_info.st_dev, project_info.st_ino) != original_identities[0]:
@@ -464,20 +465,35 @@ def _writer_owner(project, publication, *, nonblocking, original_identities=None
         if isinstance(exc, LocalCommitHold):
             raise
         raise LocalCommitHold("local writer ownership failed") from exc
+    except BaseException as error:
+        primary = error
+        raise
     else:
         # Exceptions from the caller's body are not ownership failures.
-        yield token
+        try:
+            yield token
+        except BaseException as error:
+            primary = error
+            raise
     finally:
         _ACTIVE.pop(token, None)  # REVOKE strictly before flock unlock and fd close.
-        if lock_fd is not None:
-            if held:
+        cleanup_error = None
+        if lock_fd is not None and held:
+            try:
                 fcntl.flock(lock_fd, fcntl.LOCK_UN)
-            os.close(lock_fd)
-        if publication_fd is not None:
-            os.close(publication_fd)
-        if root_fd is not None:
-            os.close(root_fd)
-        os.close(project_fd)
+            except BaseException as error:
+                cleanup_error = error
+        for descriptor in (lock_fd, publication_fd, root_fd, project_fd):
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)  # One attempt, even after unlock/close failure.
+                except BaseException as error:
+                    if (cleanup_error is None or (isinstance(cleanup_error, Exception)
+                            and not isinstance(error, Exception))):
+                        cleanup_error = error
+        if (cleanup_error is not None
+                and (primary is None or isinstance(primary, Exception))):
+            raise cleanup_error  # Never replace the first NI or its existing cause.
 
 
 def _owner(token):

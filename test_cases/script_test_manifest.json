@@ -518,6 +518,13 @@
         "test_cases.test_post_c6_fixture_cleanup",
         "test_cases.test_completed_collection_source_read_close"
       ]
+    },
+    {
+      "id": "req7-owner-body-ni-cleanup",
+      "description": "two whole actual local file owners, healthy then real closeEIO with bodyNI",
+      "tests": [
+        "test_cases.test_req7_owner_ni_cleanup"
+      ]
     }
   ],
   "tracked_support": [
@@ -697,7 +704,8 @@
     "test_cases/fixtures/ibsw3-source-inverse/display/candidate/infiniband/bringup/xdr-upgrade/upgrade.py.txt",
     "test_cases/completed_collection_source_read_fixture.py",
     "test_cases/issue_tracker_cable_post_c6_fixture.py",
-    "test_cases/completed_read_close_isolation.py"
+    "test_cases/completed_read_close_isolation.py",
+    "test_cases/owner_ni_cleanup_fixture.py"
   ],
   "scripts": {
     "DAY0-Prepare/01-a-setup.py": "DAY0-Prepare/01-a-setup.py",
@@ -2499,6 +2507,17 @@
       "tests": [
         "test_cases.test_completed_collection_source_read",
         "test_cases.test_completed_collection_source_read_close"
+      ]
+    },
+    {
+      "id": "req7_owner_body_ni_actual_cleanup",
+      "paths": [
+        "monitor/issue_tracker_state_owner.py",
+        "monitor/issue_tracker_local_commit.py",
+        "monitor/issue_tracker_spreadsheet_owner.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_owner_ni_cleanup"
       ]
     }
   ],
@@ -4606,6 +4625,17 @@
       "tests": [
         "test_cases.test_completed_collection_source_read_close"
       ]
+    },
+    {
+      "id": "req7_tracker_writer_local_owner_body_ni",
+      "members": [
+        "monitor/issue_tracker_state_owner.py",
+        "monitor/issue_tracker_local_commit.py",
+        "monitor/issue_tracker_k_store.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_owner_ni_cleanup"
+      ]
     }
   ],
   "path_rules": [
@@ -5295,6 +5325,15 @@
       ],
       "tests": [
         "test_cases.test_completed_collection_source_read_close"
+      ]
+    },
+    {
+      "paths": [
+        "test_cases/test_req7_owner_ni_cleanup.py",
+        "test_cases/owner_ni_cleanup_fixture.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_owner_ni_cleanup"
       ]
     }
   ]
