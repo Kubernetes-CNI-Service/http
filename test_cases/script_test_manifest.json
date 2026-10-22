@@ -604,6 +604,24 @@
         "test_cases.test_req7_cable_public_sdk_code",
         "test_cases.test_req7_cable_sdk_code_owner_workflow"
       ]
+    },
+    {
+      "id": "req7-cable-credential-construction-provider-origins",
+      "description": "Actual same-source SA construction and pre-entry caller/base/manager/RSA refusal; NO_SEND only, canonical source proposal NOT RUN",
+      "tests": [
+        "test_cases.test_req7_cable_credential_construction",
+        "test_cases.test_req7_cable_credential_construction_workflow",
+        "test_cases.test_req7_cable_credential_base_origin",
+        "test_cases.test_req7_cable_credential_manager_origin",
+        "test_cases.test_req7_cable_credential_rsa_allocation"
+      ]
+    },
+    {
+      "id": "req7-cable-constructor-code-resources-cold",
+      "description": "Constructor17 code-only import order and first-result FD cleanup; cold-order public method must self-isolate in a fresh owned child before selected SDK imports. Ordinary sorted/discovery module order is NOT a cold boundary. Canonical proposal NOT RUN.",
+      "tests": [
+        "test_cases.test_req7_cable_constructor_code_resources"
+      ]
     }
   ],
   "tracked_support": [
@@ -2700,6 +2718,16 @@
       "id": "req7_cable_fixed_public_code_direct",
       "paths": ["monitor/issue_tracker_publish_runtime.py"],
       "tests": ["test_cases.test_req7_cable_public_sdk_code"]
+    },
+    {
+      "id": "req7_cable_credential_constructor_prerequisite_direct",
+      "paths": [
+        "monitor/issue_tracker_publish_runtime.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_cable_credential_construction",
+        "test_cases.test_req7_cable_constructor_code_resources"
+      ]
     }
   ],
   "workflows": [
@@ -4947,6 +4975,36 @@
         "tools/req7_cable_dependency_contract.py"
       ],
       "tests": ["test_cases.test_req7_cable_sdk_code_owner_workflow"]
+    },
+    {
+      "id": "req7_cable_credential_constructor_same_source_owners_and_origins",
+      "members": [
+        "monitor/issue_tracker_publish_runtime.py",
+        "monitor/issue_tracker_credential_shape.py",
+        "monitor/issue_tracker_online_target.py",
+        "monitor/issue_tracker_state_owner.py",
+        "monitor/issue_tracker_local_commit.py",
+        "monitor/issue_tracker_spreadsheet_owner.py",
+        "monitor/switch_collection_gate.py",
+        "monitor/switch-collection-worker.py",
+        "tools/req7_cable_dependency_contract.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_cable_credential_construction_workflow",
+        "test_cases.test_req7_cable_credential_base_origin",
+        "test_cases.test_req7_cable_credential_manager_origin",
+        "test_cases.test_req7_cable_credential_rsa_allocation"
+      ]
+    },
+    {
+      "id": "req7_cable_constructor_code_gate_import_order_and_cleanup",
+      "members": [
+        "monitor/issue_tracker_publish_runtime.py",
+        "tools/req7_cable_dependency_contract.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_cable_constructor_code_resources"
+      ]
     }
   ],
   "path_rules": [
@@ -5746,6 +5804,37 @@
       "tests": [
         "test_cases.test_req7_cable_public_sdk_code",
         "test_cases.test_req7_cable_sdk_code_owner_workflow"
+      ]
+    },
+    {
+      "paths": [
+        "test_cases/test_req7_cable_credential_construction.py",
+        "test_cases/test_req7_cable_credential_construction_workflow.py",
+        "test_cases/test_req7_cable_credential_base_origin.py",
+        "test_cases/test_req7_cable_credential_manager_origin.py",
+        "test_cases/test_req7_cable_credential_rsa_allocation.py",
+        "test_cases/test_req7_cable_constructor_code_resources.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_cable_credential_construction",
+        "test_cases.test_req7_cable_credential_construction_workflow",
+        "test_cases.test_req7_cable_credential_base_origin",
+        "test_cases.test_req7_cable_credential_manager_origin",
+        "test_cases.test_req7_cable_credential_rsa_allocation",
+        "test_cases.test_req7_cable_constructor_code_resources"
+      ]
+    },
+    {
+      "paths": [
+        "test_cases/issue_tracker_cable_post_c6_fixture.py",
+        "test_cases/completed_collection_source_read_fixture.py",
+        "test_cases/test_req7_cable_read_owner_core.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_cable_credential_construction_workflow",
+        "test_cases.test_req7_cable_credential_base_origin",
+        "test_cases.test_req7_cable_credential_manager_origin",
+        "test_cases.test_req7_cable_credential_rsa_allocation"
       ]
     }
   ]

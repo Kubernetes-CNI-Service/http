@@ -5178,3 +5178,55 @@ Only complete canonical receipts establish local results. SDK factory, hard
 total-30/fixed-60 actor supervision, automatic/manual worker and pending recovery,
 full/release and real Cloud/device acceptance remain OPEN/NOT RUN. See
 TC-REAL-REQ7-CABLE-PUBLIC-CODE-001; this slice is not REQ7 completion.
+
+## REQ7 actual credential constructor origins / constructor17 resources — SOURCE proposal
+
+This additive canonical proposal keeps the original independent expected values
+and all TestCase bodies. The direct module
+`test_req7_cable_credential_construction` is root's stronger guard-outside V2
+oracle, not the earlier V1 whose assertion inside a product context could be
+caught as a refusal. The workflow, base-origin, manager-origin and RSA-allocation
+modules import the direct module as a module (`from test_cases import ... as
+direct`); they do not place imported TestCase classes in their own globals.
+Only private SourceFileLoader helper bridges change. Existing source packets,
+initial missing-API results, genuine provider-origin failures and qualification
+errors keep their original bytes/classification; no old FAIL or downstream
+NOT_REACHED is relabeled by this proposal.
+
+The protected workflow must actually complete/critically exit C6, reacquire the
+existing Reader, pass original A's four literal keys/current target and use real
+local-before-sheet owners. Only a locally generated synthetic RSA account is
+used. One actual from-info/SA construction, exact Sheets scope, googleapis.com,
+JWT false, no token/expiry, same held credential/allowlist acquisition, repeated
+verify without reconstruction, first-result cleanup and revocation are required.
+Separate guarded-outside counterfactuals require rejection before entry/yield of
+a modified base init, five manager/super-init roles and two RSA allocation slots.
+These subcases do not become independent whole-test counts.
+
+`test_req7_cable_constructor_code_resources` separately checks the fixed
+seventeen leaf originals before the first selected SDK module executes, and the
+extra two actual closes with first NI/cause preserved and all known closes
+attempted once. The cold-order method MUST use its own explicit fresh owned
+child/module boundary; ordinary sorted selection or discovery is not a cold
+execution guarantee. The parent public selector is counted once; internal child
+results are not extra whole coverage. Canonical wrapper/bootstrap/dependency
+qualification remains mandatory before this packet can be adopted; no skip or
+ordering-only workaround is authorized. The other resource method remains an
+independent known-FD first-result check, not a generic FD scanner/rescue.
+
+The manifest keeps all old fields/list prefixes, original 229 scripts and every
+canonical/support mapping unchanged. It appends two suites, one direct rule,
+two real multi-script workflows and two path rules. These mappings neither
+enable the production context nor alter default worker/collector behavior.
+
+Status at packet creation: SOURCE ONLY / NOT RUN / NOT MAIN-READY. The proposed
+runtime is referenced separately as constructor V3 `69a35ab5...`, not copied into
+this nine-path test/docs proposal. Finite constructor17/selected class slots,
+MRO/defaults/closures/aliases are not complete transitive crypto/native/stdlib,
+managed Linux or actual account qualification. No refresh/signing/service,
+Cloud/socket emission, SDKfactory/send permit, worker, whole30/fixed60,
+N>1/qualified NO_CHANGE/history-pending, full/release or REQ7 completion follows.
+See TC-REAL-REQ7-CABLE-CONSTRUCTOR-ORIGINS-002.
+
+
+采纳状态说明（2026-10-22）：以上 SOURCE ONLY / NOT RUN / 未采纳文字仅记录提案创建时点，不是后续主树状态。实际是否采纳和本地验证结果须以 ROOT-CURRENT-WORK-LIST-20261013.json 最新条目、精确 HEAD/dirty 与各完整 END 收条为准。真实环境/账号/Cloud/SDKfactory/发送/worker/whole30-fixed60/full-release 仍须各自验证，本段不宣告通过或 REQ7 完成。

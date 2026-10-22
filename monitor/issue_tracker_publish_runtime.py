@@ -2491,6 +2491,521 @@ def _hold_current_cable_sdk_code_prerequisite(store, *, http_root):
         raise CableSourceHold('Cable SDK code prerequisite is unavailable') from None
 
 
+_CABLE_SDK_CONSTRUCTOR_SOURCE_ROWS = (
+    ('google.auth._refresh_worker', 'google/auth/_refresh_worker.py',
+     'cd3da38fe3e33ed8c5dc1aa0fe7e2dd4274bdf6c815445213ca650c2836ef978'),
+    ('google.auth._regional_access_boundary_utils',
+     'google/auth/_regional_access_boundary_utils.py',
+     '8e9eefce87cc13ae4ab27f65ea8bea4bf6952286fed752d882f365aee55015f0'),
+)
+
+
+class _CableSdkConstructorCodePins(_CableSdkCodePins):
+    """Fixed constructor-code prerequisite, not a native or send permit.
+
+    The additional manager originals precede base.acquire's fifteen files and
+    SDK imports. The original public fifteen-file scope is unchanged. Selected
+    generated tuple/lock primitives use the declared trusted Python boundary;
+    this is not a complete typing/stdlib/crypto/native image attestation.
+    """
+    def acquire(self):
+        from importlib import metadata
+        from types import CodeType
+        import ast
+        if self.closed or self.failure is not None or self.slots:
+            raise CableSourceHold('Cable constructor code acquisition is unavailable')
+        try:
+            for module_name, relative, expected in _CABLE_SDK_CONSTRUCTOR_SOURCE_ROWS:
+                path = Path(metadata.distribution('google-auth').locate_file(relative))
+                if (not path.is_absolute() or '..' in path.parts
+                        or path.parts[-len(Path(relative).parts):] != Path(relative).parts):
+                    raise CableSourceHold('Cable constructor code locator differs')
+                parent = self._directory(path.parent)[0]
+                before = os.stat(path.name, dir_fd=parent, follow_symlinks=False)
+                if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+                        or not 0 < before.st_size <= 1048576):
+                    raise CableSourceHold('Cable constructor code is not regular source')
+                fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                             dir_fd=parent)
+                self.slots.append((fd, (before.st_dev, before.st_ino)))
+                def full():
+                    raw = b''
+                    while len(raw) < before.st_size:
+                        block = os.pread(fd, min(1048576, before.st_size-len(raw)), len(raw))
+                        if not block:
+                            raise CableSourceHold('Cable constructor source shortened')
+                        raw += block
+                    if os.pread(fd, 1, len(raw)):
+                        raise CableSourceHold('Cable constructor source grew')
+                    return raw
+                if _cable_identity(os.fstat(fd)) != _cable_identity(before):
+                    raise CableSourceHold('Cable constructor source acquisition changed')
+                raw = full()
+                if (full() != raw or hashlib.sha256(raw).hexdigest() != expected
+                        or _cable_identity(os.fstat(fd)) != _cable_identity(before)
+                        or _cable_identity(os.stat(path.name, dir_fd=parent,
+                                                  follow_symlinks=False)) != _cable_identity(before)):
+                    raise CableSourceHold('Cable constructor source image differs')
+                code = compile(raw, str(path), 'exec', dont_inherit=True)
+                tree = ast.parse(raw, filename=str(path))
+                def code_index(item, trail=()):
+                    for value in item.co_consts:
+                        if type(value) is CodeType:
+                            key = trail + (value.co_name,)
+                            self.codes[(module_name, key)] = value
+                            code_index(value, key)
+                def node_index(node, trail=()):
+                    for value in node.body:
+                        if isinstance(value, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                            key = trail + (value.name,)
+                            self.nodes[(module_name, key)] = value
+                            node_index(value, key)
+                code_index(code)
+                node_index(tree)
+                self.constants[module_name] = {
+                    node.targets[0].id: node.value for node in tree.body
+                    if isinstance(node, ast.Assign) and len(node.targets) == 1
+                    and isinstance(node.targets[0], ast.Name)}
+                self.paths[module_name] = path
+                self.files.append((path, fd, parent, before, expected))
+            # No SDK import above. Base holds all fifteen before its imports;
+            # its dispatch to this class binds constructors before any A/parse.
+            _CableSdkCodePins.acquire(self)
+        except BaseException as error:
+            self.failure = error
+            raise
+
+    def _constructor_classes(self):
+        import ast
+        c = 'google.auth.credentials'
+        b = 'google.auth._credentials_base'
+        s = 'google.oauth2.service_account'
+        r = 'google.auth._refresh_worker'
+        u = 'google.auth._regional_access_boundary_utils'
+        x = 'google.auth.crypt.base'
+        w = 'google.auth.crypt.rsa'
+        i = 'google.auth.crypt._cryptography_rsa'
+        rows = (
+            (b, '_BaseCredentials', (), ()),
+            (c, 'Signing', (), ()),
+            (c, 'ReadOnlyScoped', (), ()),
+            (c, 'Scoped', ('ReadOnlyScoped',), ((c, 'ReadOnlyScoped'),)),
+            (c, 'Credentials', ('_BaseCredentials',), ((b, '_BaseCredentials'),)),
+            (c, 'CredentialsWithQuotaProject', ('Credentials',), ((c, 'Credentials'),)),
+            (c, 'CredentialsWithTokenUri', ('Credentials',), ((c, 'Credentials'),)),
+            (c, 'CredentialsWithRegionalAccessBoundary', ('Credentials',), ((c, 'Credentials'),)),
+            (s, 'Credentials', ('credentials.Signing', 'credentials.Scoped',
+                'credentials.CredentialsWithQuotaProject', 'credentials.CredentialsWithTokenUri',
+                'credentials.CredentialsWithRegionalAccessBoundary'),
+                ((c, 'Signing'), (c, 'Scoped'), (c, 'CredentialsWithQuotaProject'),
+                 (c, 'CredentialsWithTokenUri'), (c, 'CredentialsWithRegionalAccessBoundary'))),
+            (r, 'RefreshThreadManager', (), ()),
+            (u, '_RegionalAccessBoundaryManager', ('object',), ()),
+            (u, '_RegionalAccessBoundaryRefreshManager', ('object',), ()),
+            (x, 'Signer', (), ()),
+            (x, 'FromServiceAccountMixin', (), ()),
+            (w, 'RSASigner', ('base.Signer', 'base.FromServiceAccountMixin'),
+                ((x, 'Signer'), (x, 'FromServiceAccountMixin'))),
+            (i, 'RSASigner', ('base.Signer', 'base.FromServiceAccountMixin'),
+                ((x, 'Signer'), (x, 'FromServiceAccountMixin'))),
+        )
+        found = {}
+        for module_name, name, source_bases, bases in rows:
+            cls = self._class(module_name, name)
+            node = self.nodes[(module_name, (name,))]
+            def spelling(value):
+                if isinstance(value, ast.Name):
+                    return value.id
+                if isinstance(value, ast.Attribute) and isinstance(value.value, ast.Name):
+                    return value.value.id + '.' + value.attr
+                raise CableSourceHold('Cable constructor base syntax differs')
+            expected = tuple(self._class(*pair) for pair in bases) or (object,)
+            if (tuple(spelling(value) for value in node.bases) != source_bases
+                    or cls.__bases__ != expected
+                    or cls.__new__ is not object.__new__
+                    or cls.__getattribute__ is not object.__getattribute__
+                    or cls.__setattr__ is not object.__setattr__
+                    or cls.__delattr__ is not object.__delattr__
+                    or type(cls).__call__ is not type.__call__):
+                raise CableSourceHold('Cable constructor class bases differ')
+            # Passive mixins must not acquire a new constructor bypass.
+            if name in ('Signing', 'Scoped', 'CredentialsWithQuotaProject',
+                        'CredentialsWithTokenUri', 'Signer',
+                        'FromServiceAccountMixin') and '__init__' in vars(cls):
+                raise CableSourceHold('Cable constructor passive mixin changed')
+            found[(module_name, name)] = cls
+        expected_mro = tuple(found[pair] for pair in (
+            (s, 'Credentials'), (c, 'Signing'), (c, 'Scoped'), (c, 'ReadOnlyScoped'),
+            (c, 'CredentialsWithQuotaProject'), (c, 'CredentialsWithTokenUri'),
+            (c, 'CredentialsWithRegionalAccessBoundary'), (c, 'Credentials'),
+            (b, '_BaseCredentials'))) + (object,)
+        if found[(s, 'Credentials')].__mro__ != expected_mro:
+            raise CableSourceHold('Cable constructor MRO differs')
+        # Both actual RSA construction paths must retain ordinary allocation
+        # and attribute slots, including their passive shared mixins. This is
+        # checked before from-info can parse a key or call cls.__new__/cls(...).
+        for module_name in (w, i):
+            cls = found[(module_name, 'RSASigner')]
+            if cls.__mro__ != (cls, found[(x, 'Signer')],
+                               found[(x, 'FromServiceAccountMixin')], object):
+                raise CableSourceHold('Cable constructor RSA MRO differs')
+        for key in ((x, 'Signer'), (x, 'FromServiceAccountMixin'),
+                    (w, 'RSASigner'), (i, 'RSASigner')):
+            if '__getattr__' in vars(found[key]):
+                raise CableSourceHold('Cable constructor RSA fallback attribute differs')
+        return found
+
+    def _constructor_tuple(self):
+        import ast
+        from types import CodeType
+        module_name = 'google.auth._regional_access_boundary_utils'
+        cls = self._class(module_name, '_RegionalAccessBoundaryData')
+        node = self.nodes[(module_name, ('_RegionalAccessBoundaryData',))]
+        fields = tuple(value.target.id for value in node.body
+            if isinstance(value, ast.AnnAssign) and isinstance(value.target, ast.Name)
+            and value.value is None)
+        if (fields != ('encoded_locations', 'expiry', 'cooldown_expiry', 'cooldown_duration')
+                or len(node.bases) != 1 or not isinstance(node.bases[0], ast.Name)
+                or node.bases[0].id != 'NamedTuple'
+                or cls.__bases__ != (tuple,) or type(cls) is not type
+                or cls._fields != fields or type(cls._fields) is not tuple
+                or type(cls._field_defaults) is not dict or cls._field_defaults
+                or cls.__slots__ != () or cls.__getattribute__ is not tuple.__getattribute__
+                or '__init__' in vars(cls) or cls.__init__ is not tuple.__init__):
+            raise CableSourceHold('Cable constructor tuple schema differs')
+        descriptor = vars(cls).get('__new__')
+        fn = descriptor.__func__ if type(descriptor) is staticmethod else descriptor
+        # CPython 3.9 collections.namedtuple's finite generated constructor,
+        # derived from held annotations, not the current generated function.
+        arguments = ', '.join(fields)
+        generated = compile('lambda _cls, ' + arguments + ': _tuple_new(_cls, ('
+                            + arguments + '))', '<string>', 'eval', dont_inherit=True)
+        codes = tuple(value for value in generated.co_consts if type(value) is CodeType)
+        if (len(codes) != 1 or type(fn) is not FunctionType or fn.__code__ != codes[0]
+                or fn.__closure__ is not None or fn.__defaults__ != ()
+                or type(fn.__defaults__) is not tuple or fn.__kwdefaults__ is not None
+                or set(fn.__globals__) != {'_tuple_new', '__builtins__', '__name__'}
+                or fn.__globals__['_tuple_new'] is not tuple.__new__
+                or type(fn.__globals__['__builtins__']) is not dict
+                or fn.__globals__['__builtins__']
+                or fn.__globals__['__name__'] != 'namedtuple__RegionalAccessBoundaryData'):
+            raise CableSourceHold('Cable constructor generated tuple body differs')
+        return cls, descriptor, fn
+
+    def _constructor_primitives(self):
+        import _thread
+        import _datetime
+        import builtins
+        import datetime
+        from types import BuiltinFunctionType
+        import ast
+        r = self.modules['google.auth._refresh_worker']
+        u = self.modules['google.auth._regional_access_boundary_utils']
+        for module_name in ('google.auth.credentials', 'google.auth._credentials_base',
+                            'google.oauth2.service_account', r.__name__, u.__name__):
+            namespace = vars(self.modules[module_name])
+            if (namespace.get('__builtins__') is not vars(builtins)
+                    or namespace.get('super', builtins.super) is not builtins.super):
+                raise CableSourceHold('Cable constructor builtin namespace differs')
+        lock = _thread.allocate_lock
+        if (sys.modules.get('_thread') is not _thread
+                or getattr(_thread.__spec__, 'origin', None) != 'built-in'
+                or type(lock) is not BuiltinFunctionType
+                or lock.__self__ is not _thread or lock.__module__ != '_thread'
+                or lock.__name__ != 'allocate_lock'
+                or sys.modules.get('threading') is not threading
+                or threading._allocate_lock is not lock or threading.Lock is not lock
+                or r.threading is not threading or u.threading is not threading):
+            raise CableSourceHold('Cable constructor lock primitive differs')
+        node = self.constants[u.__name__]['DEFAULT_REGIONAL_ACCESS_BOUNDARY_COOLDOWN']
+        if (not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute)
+                or not isinstance(node.func.value, ast.Name)
+                or node.func.value.id != 'datetime' or node.func.attr != 'timedelta'
+                or node.args or len(node.keywords) != 1
+                or node.keywords[0].arg != 'minutes'
+                or not isinstance(node.keywords[0].value, ast.Constant)
+                or type(node.keywords[0].value.value) is not int
+                or node.keywords[0].value.value != 15
+                or sys.modules.get('datetime') is not datetime or u.datetime is not datetime
+                or sys.modules.get('_datetime') is not _datetime
+                or datetime.timedelta is not _datetime.timedelta
+                or type(datetime.timedelta) is not type
+                or datetime.timedelta.__module__ != 'datetime'
+                or datetime.timedelta.__name__ != 'timedelta'
+                or type(datetime.timedelta.__new__) is not BuiltinFunctionType
+                or datetime.timedelta.__new__.__self__ is not datetime.timedelta
+                or type(u.DEFAULT_REGIONAL_ACCESS_BOUNDARY_COOLDOWN) is not datetime.timedelta
+                or u.DEFAULT_REGIONAL_ACCESS_BOUNDARY_COOLDOWN != datetime.timedelta(minutes=15)):
+            raise CableSourceHold('Cable constructor source cooldown differs')
+        return lock, datetime, datetime.timedelta
+
+    def _check_bindings(self, *, first=False):
+        from importlib import import_module
+        from types import ModuleType
+        _CableSdkCodePins._check_bindings(self, first=first)
+        for module_name, _relative, _expected in _CABLE_SDK_CONSTRUCTOR_SOURCE_ROWS:
+            if first:
+                module = import_module(module_name)
+                if module_name in self.modules:
+                    raise CableSourceHold('Cable constructor module selection overlaps')
+                self.modules[module_name] = module
+            module = self.modules[module_name]
+            if (type(module) is not ModuleType or sys.modules.get(module_name) is not module
+                    or module.__name__ != module_name
+                    or Path(module.__file__) != self.paths[module_name]):
+                raise CableSourceHold('Cable constructor original module changed')
+        classes = self._constructor_classes()
+        c = self.modules['google.auth.credentials']
+        b = self.modules['google.auth._credentials_base']
+        r = self.modules['google.auth._refresh_worker']
+        u = self.modules['google.auth._regional_access_boundary_utils']
+        if (c._BaseCredentials is not b._BaseCredentials
+                or c.RefreshThreadManager is not r.RefreshThreadManager
+                or c._regional_access_boundary_utils is not u):
+            raise CableSourceHold('Cable constructor manager alias differs')
+        found = []
+        for module_name, name in (
+                ('google.auth.credentials', 'ReadOnlyScoped'),
+                ('google.auth.credentials', 'CredentialsWithRegionalAccessBoundary'),
+                ('google.auth.credentials', 'Credentials'),
+                ('google.auth._refresh_worker', 'RefreshThreadManager'),
+                ('google.auth._regional_access_boundary_utils', '_RegionalAccessBoundaryManager'),
+                ('google.auth._regional_access_boundary_utils', '_RegionalAccessBoundaryRefreshManager')):
+            cls = classes[(module_name, name)]
+            fn = vars(cls).get('__init__')
+            self._function(fn, module_name, (name, '__init__'))
+            found.append(fn)
+        found += list(self._constructor_tuple()) + list(self._constructor_primitives())
+        if first:
+            self._constructor_bindings = tuple(found)
+        elif (len(found) != len(self._constructor_bindings)
+                or any(a is not b for a, b in zip(found, self._constructor_bindings))):
+            raise CableSourceHold('Cable constructor original provider was replaced')
+
+# Private construction custody is not a native/provider/send authorization.
+_CABLE_SDK_CREDENTIAL_CUSTODIES = {}
+
+
+@dataclass(frozen=True, repr=False)
+class _CableSdkCredentialCustody:
+    result: object
+    core_record: tuple
+    lexical: object
+    code: object
+    credential: object
+    signer: object
+    signer_implementation: object
+    execution: tuple
+
+
+@contextmanager
+def _hold_current_cable_sdk_credential_prerequisite(store, *, http_root):
+    """Construct exactly one actual SA credential from SAME A-held bytes.
+
+    NO_SEND only. No path/ADC fallback, refresh, signing, service, transport,
+    worker, managed-native gate or caller-supplied provider/checker is accepted.
+    The finite public-code audit is not complete crypto/native integrity.
+    """
+    from monitor import issue_tracker_credential_shape as shape
+
+    code = _CableSdkConstructorCodePins()
+    context = None
+    registration = object()
+    primary = None
+    failure = None
+    custody = None
+    credential = None
+    signer = None
+    signer_implementation = None
+    parsed = None
+    info = None
+
+    try:
+        # Fixed public originals/bindings before any A credential parse or SDK
+        # constructor. The real core rejects foreign stores/DTOs independently.
+        code.acquire()
+        shape_providers = _cable_owner_provider_joint((
+            (shape, 'issue_tracker_credential_shape.py',
+             ('parse_service_account_info',)),
+        ))
+        pending = _hold_current_cable_read_owner_core(store, http_root=http_root)
+        core = pending.__enter__()
+        context = pending
+        execution = (os.getpid(), threading.get_ident())
+        record = _CABLE_CORE_GRAPHS.get(core._registration)
+        if (record is None or record[0] is not core or record[-1] != execution
+                or type(record[1]) is not _CableSourceLexical
+                or record[1].store is not store):
+            raise CableSourceHold('Cable original credential graph is unavailable')
+        lexical = record[1]
+        graph = _CABLE_SOURCE_GRAPHS.get(lexical.source._registration)
+        if (graph is None or graph[0] is not lexical.source
+                or graph[1] is not record[2] or graph[1].closed
+                or _CABLE_SOURCE_LEXICAL.get(lexical.source._registration) is not lexical
+                or lexical.execution != execution):
+            raise CableSourceHold('Cable credential lexical original differs')
+
+        sa_name = 'google.oauth2.service_account'
+        sa = code.modules[sa_name]
+        credential_class = code._class(sa_name, 'Credentials')
+        signer_class = code._class('google.auth.crypt.rsa', 'RSASigner')
+        impl_class = code._class('google.auth.crypt._cryptography_rsa', 'RSASigner')
+        # The real factory has an additional actual classmethod edge. Audit its
+        # own held-source body, not a name, snapshot-success or caller callback.
+        factory_descriptor = vars(credential_class).get('_from_signer_and_info')
+        if type(factory_descriptor) is not classmethod:
+            raise CableSourceHold('Cable credential factory binding differs')
+        factory_body = factory_descriptor.__func__
+        code._function(factory_body, sa_name, ('Credentials', '_from_signer_and_info'))
+
+        def providers():
+            code.verify()
+            _cable_owner_check_providers(shape_providers)
+            if (vars(credential_class).get('_from_signer_and_info') is not factory_descriptor
+                    or sa.Credentials is not credential_class
+                    or code.modules['google.auth._service_account_info'].crypt.RSASigner
+                        is not signer_class):
+                raise CableSourceHold('Cable credential producer alias differs')
+            code._function(factory_body, sa_name,
+                           ('Credentials', '_from_signer_and_info'))
+
+        providers()
+        lexical.verify_credential()
+        record[2].verify()
+        # Reparse the SAME immutable held bytes with the fixed original parser,
+        # never a file open, caller mapping, environment/ADC or SDK file loader.
+        parsed = shape.parse_service_account_info(lexical.credential_raw)
+        info = dict(parsed.mapping)
+        if (info.get('universe_domain', 'googleapis.com') != 'googleapis.com'
+                or info.get('token_uri') != 'https://oauth2.googleapis.com/token'):
+            raise CableSourceHold('Cable credential fixed domain differs')
+        expected_email = info['client_email']
+        expected_project = info.get('project_id')
+        expected_key_id = info.get('private_key_id')
+        scopes = ('https://www.googleapis.com/auth/spreadsheets',)
+        providers()
+        # _from_signer_and_info already supplies universe_domain from info;
+        # duplicate universe_domain kwargs would reject a healthy real SDK.
+        credential = credential_class.from_service_account_info(
+            info, scopes=scopes, always_use_jwt_access=False)
+        parsed = None
+        info = None
+        if type(credential) is not credential_class:
+            raise CableSourceHold('Cable constructed credential is not original')
+        signer = vars(credential).get('_signer')
+        if type(signer) is not signer_class:
+            raise CableSourceHold('Cable constructed signer is not original')
+        signer_implementation = vars(signer).get('_impl')
+        if type(signer_implementation) is not impl_class:
+            raise CableSourceHold('Cable constructed signer implementation differs')
+        result = _CableSdkCodePrerequisite('NO_SEND', registration)
+        custody = _CableSdkCredentialCustody(result, record, lexical, code,
+            credential, signer, signer_implementation, execution)
+
+        def verify():
+            nonlocal failure
+            if failure is not None:
+                raise CableSourceHold('Cable credential prerequisite has a prior failure') from None
+            try:
+                if (custody is None
+                        or _CABLE_SDK_CREDENTIAL_CUSTODIES.get(registration) is not custody
+                        or _CABLE_SDK_CODE_SCOPES.get(registration, (None,))[0] is not result
+                        or custody.result is not result
+                        or custody.execution != (os.getpid(), threading.get_ident())
+                        or _CABLE_CORE_GRAPHS.get(core._registration) is not record
+                        or _CABLE_SOURCE_LEXICAL.get(lexical.source._registration) is not lexical):
+                    raise CableSourceHold('Cable credential custody is unavailable')
+                providers()
+                core.verify()
+                lexical.verify_credential()
+                record[2].verify()
+                state = vars(credential)
+                required_state = {
+                    '_signer', '_scopes', '_default_scopes',
+                    '_service_account_email', '_project_id', '_token_uri',
+                    '_universe_domain', '_always_use_jwt_access',
+                    '_jwt_credentials', '_subject', '_quota_project_id',
+                    '_trust_boundary', '_additional_claims', '_cred_file_path',
+                    'token', 'expiry',
+                }
+                if (custody.credential is not credential
+                        or not required_state <= set(state)
+                        or custody.signer is not signer
+                        or custody.signer_implementation is not signer_implementation
+                        or type(credential) is not credential_class
+                        or state.get('_signer') is not signer
+                        or type(signer) is not signer_class
+                        or vars(signer).get('_impl') is not signer_implementation
+                        or type(signer_implementation) is not impl_class
+                        or vars(signer_implementation).get('_key_id') != expected_key_id
+                        or type(state.get('_scopes')) is not tuple
+                        or state.get('_scopes') != scopes
+                        or state.get('_default_scopes') is not None
+                        or state.get('_service_account_email') != expected_email
+                        or state.get('_project_id') != expected_project
+                        or state.get('_token_uri') != 'https://oauth2.googleapis.com/token'
+                        or state.get('_universe_domain') != 'googleapis.com'
+                        or state.get('_always_use_jwt_access') is not False
+                        or state.get('_jwt_credentials') is not None
+                        or state.get('_subject') is not None
+                        or state.get('_quota_project_id') is not None
+                        or state.get('_trust_boundary') is not None
+                        or type(state.get('_additional_claims')) is not dict
+                        or state.get('_additional_claims') != {}
+                        or state.get('_cred_file_path') is not None
+                        or state.get('token') is not None
+                        or state.get('expiry') is not None):
+                    raise CableSourceHold('Cable credential original state differs')
+                # No credential reparse/reconstruction, refresh, signing or IO
+                # request here; core.verify retains original real C5 replay.
+                providers()
+            except BaseException as error:
+                failure = error
+            # Raise outside the handler so ordinary SDK/provider error payload
+            # is not retained as the visible verification exception context.
+            if failure is not None:
+                if not isinstance(failure, Exception):
+                    raise failure
+                raise CableSourceHold('Cable SDK credential verification is unavailable') from None
+
+        _CABLE_SDK_CREDENTIAL_CUSTODIES[registration] = custody
+        _CABLE_SDK_CODE_SCOPES[registration] = (result, verify)
+        result.verify()
+        yield result
+        result.verify()
+    except BaseException as error:
+        primary = error
+    finally:
+        # Revoke before ANY actual owner or code FD close; no public credential
+        # reference survives via the result. Memory zeroization is not claimed.
+        _CABLE_SDK_CODE_SCOPES.pop(registration, None)
+        _CABLE_SDK_CREDENTIAL_CUSTODIES.pop(registration, None)
+        custody = None
+        credential = None
+        signer = None
+        signer_implementation = None
+        parsed = None
+        info = None
+        if context is not None:
+            try:
+                context.__exit__(None, None, None)
+            except BaseException as error:
+                if primary is None or (isinstance(primary, Exception)
+                                       and not isinstance(error, Exception)):
+                    primary = error
+        try:
+            code.close()
+        except BaseException as error:
+            if primary is None or (isinstance(primary, Exception)
+                                   and not isinstance(error, Exception)):
+                primary = error
+    if primary is not None:
+        if not isinstance(primary, Exception):
+            raise primary
+        raise CableSourceHold('Cable SDK credential prerequisite is unavailable') from None
+
+
+
 class AutoLocalCollectorAnomaly(StageLHold):
     """Enough fresh cycles appeared before the shared publication floor."""
 

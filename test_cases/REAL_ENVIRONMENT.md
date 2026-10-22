@@ -3058,3 +3058,54 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 - Evidence: exact source/tests/manifest, HEAD/tree/dirty/index, Python/platform, actual constructor-free observation and real C6/owner facts; decimal stat9 and held/named double full EOF, prefix SHA, ordered child/outer exits and unique final END. Preserve original missing-API RED and static source findings without relabeling downstream NOT_REACHED as PASS.
 - Cleanup/risks: only actual owned original code/source/lock FDs and private fixture files; revoke before cleanup, do not close unknown/rebound numeric FDs. Complete transitive/native extension integrity, noncooperative replacement, blocking/NI cleanup, power loss and whole-operation hard deadlines need separate literal qualification; finite code pins and cooperative checks are not hard IO supervision.
 - Status: field/Cloud/device/power-loss/managed-native execution NOT RUN. Public-code direct tests are not source-owner workflows; neither proves factory, total30/fixed60, native transport, worker, N>1/NO_CHANGE/NotDue/history-pending recovery, full proof or completion of REQ7.
+
+## TC-REAL-REQ7-CABLE-CONSTRUCTOR-ORIGINS-002 — NOT RUN
+
+### 基本信息
+
+- 名称：实际同源 credential 构造前置、provider-origin 拒绝与 constructor17 资源。
+- 类型：contract / workflow / real-environment。
+- 自动化文件：test_req7_cable_credential_construction.py、test_req7_cable_credential_construction_workflow.py、test_req7_cable_credential_base_origin.py、test_req7_cable_credential_manager_origin.py、test_req7_cable_credential_rsa_allocation.py、test_req7_cable_constructor_code_resources.py。
+- 适用平台：本地自有合成 fixture 的 canonical 资格待运行；受管管理服务器、真实账号及实网 NOT RUN。
+
+### 风险与目标
+
+- 拒绝 caller/DTO、坏原 key、入场前已改 base/manager/RSA allocation；所有拒绝断言在产品 context 外，不能把 yield 后的 Hold 冒作入场前拒绝。
+- 实际 protected C6 父退出→existing Reader→原 A→local-before-sheet 双 owner→同 held account 构造一次，结果始终仅 NO_SEND+verify。
+- 固定17原件的第一次 SDK import 前持有和全部 known 原FD第一结果；不是 public15 已有观察的外推。
+
+### 前置条件与输入
+
+- 精确已审构造 V3 源码、六个独立 canonical 测试、manifest、原 carrier/helper 与实际 Cable 依赖/source 身份；SOURCE 提案不是批准或 native 成功标志。
+- 仅测试自有 protected 项目、allowlist 和本地生成 RSA 合成账号，不读取真实 secret/system key，不允许真实 Cloud/SSH/设备/外部存储。
+- root 逐件全文审阅，所有旧 initial 完整收尾，新增 frozen source 实测后才决定是否采纳；main 普通 load/full/release 门保持。
+
+### 步骤
+
+1. 直接拒绝无权 caller；真实 protected workflow 先 old A literal 四键/target，再实际 healthy SDK construction，随后 fresh non-signable key 拒绝。
+2. 各独立 workflow 先真实 healthy，再做原 base init、五个 manager/super init、两个 RSA allocation 的 benign delegation；记录事实后在 guard 外断言、恢复原 descriptor。
+3. code-resource 冷方法由自己的实际 owned cold child 执行原全部 profile/open/held17断言；不得靠 suite 排序、跳过或暖 module 伪造冷边界。child 完整退出/固定结果/父转录须另独立资格。
+4. 资源正常/NI方法核 fixed17 leaf、全部本次 known opens reverse once-close、首结果 EBADF；真实 close 后首 NI/cause 优先于后续 EIO，fixture 事后回收不得算产品收尾。
+
+### 预期结果与证据
+
+- scopes 仅 Sheets、universe googleapis.com、JWT false、token/expiry None；重复 verify 不再构造；不导出 raw/credential/signer/token/SDK/FD/owner。
+- 无网络、refresh、sign、service、worker；known owner/FD 首结果闭合、撤销、本地 C6 workbook/receipt 原样。
+- 保存精确源码/测试/manifest/HEAD-tree/dirty-index/环境、实际命令、独立计数、完整物理 END/child-outerexit、prefix SHA、十进制 stat9 与 held/named 双全读 EOF/prepost/blob。
+- 初缺 API、旧 V1 assertion trap、旧 private image 资格错误、原 provider FAIL 与后续 NOT_REACHED 均保留；本 SOURCE 不重标任何既有九项 FAIL 历史，也不从别的 epoch 累加通过数。
+
+### 故障注入、清理与风险
+
+- 只在本次 owned cold/process namespace 做明确 constructor descriptor 置换并恢复，不改安装库文件/资格结果/验证器，不传 caller checker 或授权 DTO。
+- 仅本次实际 known FD/devino 可观察；不盲 close/重试/扫 FD/PID。fixture 必要回收须在首结果之后并与产品 cleanup 分开记录。
+- 剩余 transitive crypto/parser/backend/native/stdlib、17FD rebound/body NI/内核阻塞/断电、源图初持有窗口/历史 pending 等不由本组证明。
+- 冷 child bootstrap/实际依赖/默认 canonical discover 兼容必须单独证实，不能让文案成为执行策略替身。
+
+### 自动化状态
+
+- [ ] 新九路径 canonical SOURCE 提案已获得采纳并按原 literal 运行（当前未采纳/NOT RUN）。
+- [ ] 新构造源在全部独立 oracle 上实证；本地结果只按各原收条分组，不重复计 child/subcase。
+- [ ] 完整受管 Linux/native provider/真实账号/Cloud/SDKfactory/发送/worker/whole30-fixed60/full-release 资格（全部 OPEN / NOT RUN）。
+
+
+采纳状态说明（2026-10-22）：以上 SOURCE ONLY / NOT RUN / 未采纳文字仅记录提案创建时点，不是后续主树状态。实际是否采纳和本地验证结果须以 ROOT-CURRENT-WORK-LIST-20261013.json 最新条目、精确 HEAD/dirty 与各完整 END 收条为准。真实环境/账号/Cloud/SDKfactory/发送/worker/whole30-fixed60/full-release 仍须各自验证，本段不宣告通过或 REQ7 完成。
