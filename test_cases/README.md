@@ -5335,3 +5335,40 @@ whole30/live60 and local-first automatic/manual next-cycle sync remain separate
 work. No ordinary runtime or release/full gate is bypassed. Creation-time
 SOURCE/NOT RUN comments in preserved test packets do not replace actual epoch
 receipts. See TC-REAL-REQ7-FIRST-READ-CODE-001.
+
+### REQ7 fixed-read v2 shared-clock process control
+
+`issue_tracker_read_live_protocol_v2.py` and `issue_tracker_read_live_session_v2.py`
+are separate DATA/owned-process prerequisites, not a native launcher, source or
+SA/SDK permission. Original v1 sources, tests and public entry points remain
+unchanged. READY carries canonical DATA once (up to 2 MiB); subsequent LIVE
+acknowledgments contain only the original digest and matching serial. Command
+and non-READY control traffic share a bounded budget with cleanup reserve.
+
+The retained real Popen must own its session/group and original three pipes.
+The future fixed launcher must supply honest prelaunch time in the same host's
+`time.clock_gettime(time.CLOCK_MONOTONIC)` domain as the child READY timestamp.
+Do not substitute process-relative `time.monotonic()` values, wall time, caller
+offsets or a fallback clock. An unavailable shared clock fails closed. Adoption
+itself does not establish argv/origin provenance or authorize a native worker.
+
+Original start+28 work/start+30 acquisition includes first-copy/return and
+known cleanup. First successful READY fixes observation at child ready+60,
+capped by parent publication+60; getters/CHECK never extend that interval.
+The real 1.2-second CHECK case is not subject to the old one-second deadline.
+Successful final close requires CLOSED, zero child exit, both pipe EOFs, reap,
+group gone and original streams closed. Ordinary failures sanitize; the first
+non-Exception/cause survives later ordinary close errors. Product first facts
+are recorded before any fixture fallback. Arbitrarily blocked kernel calls,
+escaped descendants or external reapers are not universally interruptible.
+
+Independent protocol and real codec/session/literal-child workflow tests retain
+all original assertions. Two whole methods include 13 actual child lifetimes;
+children/subcases and repeated private/main runs are not additional whole tests.
+Exact main receipts, not this documentation, determine passed epochs. Old
+missing-module/clock-origin failures and their untouched inputs are preserved.
+Same-SA authenticated health/faults, fixed origin-qualified child, generated
+Resource/static-discovery/native closure, mutation and local-first automatic/
+manual next-cycle/NO_CHANGE/pending worker integration remain separate OPEN
+work. This slice neither sends nor changes the default online worker lane.
+See TC-REAL-REQ7-LIVE-READ-V2-001. No full/release or real Cloud/device proof.

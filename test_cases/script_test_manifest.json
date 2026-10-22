@@ -651,9 +651,18 @@
         "test_cases.test_req7_cable_first_read_code"
       ],
       "description": "Finite actual21 public code-only first-read prerequisite, pre-entry method/default/alias refusal and original close cleanup; no SA/refresh/wire/native/worker authority"
+    },
+    {
+      "id": "req7-owned-live-read-v2-process",
+      "description": "Separate shared CLOCK_MONOTONIC DATA codec/owned-process control; no native/source/SA/SDK/worker authority",
+      "tests": [
+        "test_cases.test_req7_live_read_v2_protocol",
+        "test_cases.test_req7_live_read_v2_workflow"
+      ]
     }
   ],
   "tracked_support": [
+    "test_cases/live_read_v2_literal_child.py",
     "requirements-f01-ssh.lock",
     "test_cases/fixtures/bounded_inner_fd_fixture.py",
     ".dockerignore",
@@ -1075,7 +1084,9 @@
     "monitor/issue_tracker_cable_fixed_https.py": "monitor/issue_tracker_cable_fixed_https.py",
     "monitor/issue_tracker_read_live_protocol.py": "monitor/issue_tracker_read_live_protocol.py",
     "monitor/issue_tracker_read_live_session.py": "monitor/issue_tracker_read_live_session.py",
-    "monitor/issue_tracker_cable_first_read_code.py": "monitor/issue_tracker_cable_first_read_code.py"
+    "monitor/issue_tracker_cable_first_read_code.py": "monitor/issue_tracker_cable_first_read_code.py",
+    "monitor/issue_tracker_read_live_protocol_v2.py": "monitor/issue_tracker_read_live_protocol_v2.py",
+    "monitor/issue_tracker_read_live_session_v2.py": "monitor/issue_tracker_read_live_session_v2.py"
   },
   "test_rules": [
     {
@@ -2810,6 +2821,24 @@
       ],
       "tests": [
         "test_cases.test_req7_cable_first_read_code"
+      ]
+    },
+    {
+      "id": "req7_read_live_v2_protocol_direct",
+      "paths": [
+        "monitor/issue_tracker_read_live_protocol_v2.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_live_read_v2_protocol"
+      ]
+    },
+    {
+      "id": "req7_read_live_v2_session_direct",
+      "paths": [
+        "monitor/issue_tracker_read_live_session_v2.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_live_read_v2_workflow"
       ]
     }
   ],
@@ -5149,6 +5178,16 @@
       "tests": [
         "test_cases.test_req7_cable_first_read_code"
       ]
+    },
+    {
+      "id": "req7_owned_read_v2_real_codec_child_session",
+      "members": [
+        "monitor/issue_tracker_read_live_protocol_v2.py",
+        "monitor/issue_tracker_read_live_session_v2.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_live_read_v2_workflow"
+      ]
     }
   ],
   "path_rules": [
@@ -6027,6 +6066,23 @@
       ],
       "tests": [
         "test_cases.test_req7_cable_first_read_code"
+      ]
+    },
+    {
+      "paths": [
+        "test_cases/test_req7_live_read_v2_protocol.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_live_read_v2_protocol"
+      ]
+    },
+    {
+      "paths": [
+        "test_cases/test_req7_live_read_v2_workflow.py",
+        "test_cases/live_read_v2_literal_child.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_live_read_v2_workflow"
       ]
     }
   ]

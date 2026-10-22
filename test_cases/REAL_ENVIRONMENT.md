@@ -3262,3 +3262,52 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 - 本地有限direct/workflow的实际证据以对应主树收条为准，NOT RUN标题只指真实受管环境。
 - [ ] 受管Linux/真实同SA/Cloud/设备/worker验证（NOT RUN）。
 - [ ] 完整全量发布证明（本切片不执行或授予）。
+
+## TC-REAL-REQ7-LIVE-READ-V2-001 — NOT RUN (受管环境)
+
+### 基本信息
+
+- 名称：固定共享单调时钟、单次 DATA 和有限控制协议的真实 owned child 收尾。
+- 类型：contract / integration / scenario / real-environment；需求 REQ7。
+- 自动化：`test_req7_live_read_v2_protocol.py` 和 `test_req7_live_read_v2_workflow.py`，真实跨两个新增生产模块与独立 literal 测试子进程。
+- 平台：本地 POSIX `CLOCK_MONOTONIC`；受管 Linux/native launcher/真实账号/Cloud/设备/worker 及发布 NOT RUN。
+
+### 风险与目标
+
+- 不在每次 CHECK 重发近 2MiB DATA；控制帧有独立累计上限、serial/digest 和关闭预留。
+- 不混用进程相对时钟：父启动、子 READY 与观察均采用同一主机显式 `clock_gettime(CLOCK_MONOTONIC)`，缺失即拒绝，无 wall/offset/fallback。
+- 总获取预算仍为原 start+30（work28），首次复制迟延不变成延长观察；READY 之后固定60、CHECK/getter 不续期。
+- adopted Popen 不是完整 native 起源许可，测试 DATA 不冒充 SDK、原件或同SA完成。
+
+### 前置条件与输入
+
+- 原 manifest/canonical 映射、两个新 direct 和真实 codec/session workflow 有效；旧 v1 全部原件/断言保留。
+- 只允许精确独立 literal child、自有新 session/group 和三个真实管道，无网络、凭据、真实设备或任意子进程。
+- 测试期冻结源码/测试/manifest/docs/依赖；唯一 root 调度；近2MiB Unicode DATA 是独立 literal，不从实现反算预期。
+- 受管平台后续验证需共享 POSIX 单调时钟、进程权限和明确范围，不因本卡授予安装、Cloud 或原始数据操作。
+
+### 步骤
+
+1. 验证单 READY、固定 digest/serial ACK、重复键/额外帧/格式/容量拒绝。
+2. 真正冷启动独立 literal child，首 DATA 和真实1.2秒 CHECK 后观察原管道与进程。
+3. 真实错误 serial/digest、stderr 超限、未来/过期 READY、多余 READY/CLOSED 及累计控制耗尽必须拒绝并收尾。
+4. 真实29.15秒复制迟延与28秒静默获取必须在原30秒内拒绝/收尾；真实固定60秒观察中 CHECK 不续期。
+5. 原 stdin close 后注入同一 NI/cause、后续 stdout close 后 EIO；原三管道均尝试一次并记录首结果 EBADF。
+6. 当前主树执行、映射校验和提交以精确收条为准；后续 native/SA/worker 另行独立闭合，不复用 DATA 充当发送权限。
+
+### 预期与证据
+
+- 首结果在 fixture fallback 之前，保留真实 returncode/reap/groupgone、三个原 stream closed/EBADF、已读完整帧和实际持续时间。
+- 成功需要 CLOSED+零退出+双 EOF+原管道关闭；未知清理不得报成功，不能数字PID重追身份或数字FD rescue。
+- 原命令/Python/平台、HEAD/tree/dirty/index/manifest、stat9纳秒十进制、held/named前后双完整EOF、旧前缀SHA、物理唯一END、child/outer退出码。
+- whole、子例、child 和私有/主树分组不累计；原 clock-origin 失败与全部下游 NOT_REACHED 保留，不改断言追认 PASS。
+- 固定原件/双owner/同SA/SDKfactory/Resource与静态发现闭包、mutation、自动/手动 next-cycle、NO_CHANGE/historypending 不由本卡证明。
+
+### 故障注入、清理与自动化状态
+
+- 只观察或注入本次已知原管道 close、真实 deepcopy 迟延及独立受控子进程帧；不 mock 成功 owner/verifier/SDK。
+- fixture fallback 仅保留自有 handle，在产品首 facts 后执行，不能计产品清理或掩盖活资源。
+- 外部 reaper、逃逸后代、不可中断 kernel/Popen/close 等不在本有限本地证明内；未知保持失败。
+- 本地两个 whole 的实际结果仅见完整收条；不是重复跑旧 H/v1 或 full。
+- [ ] 受管 Linux/真实 native 同SA/Cloud/worker 验证（NOT RUN）。
+- [ ] 全量正式发布证明（未执行、不授予）。
