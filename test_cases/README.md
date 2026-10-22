@@ -5261,3 +5261,56 @@ Google apply/ACK, History existence/headers/permission/completeness, hard30/
 fixed60 or exactly-once. Multi-API errors never imply rollback. The accepted
 local-first/fresh-read next-normal-cycle contract still needs worker wiring.
 Full/REAL_ENV/release gates remain; tests here do not approve ordinary release.
+
+## REQ7 retained live-read process-control modules — development boundary 2026-10-22
+
+The two modules `monitor/issue_tracker_read_live_protocol.py` and
+`monitor/issue_tracker_read_live_session.py` govern finite protocol DATA and
+a caller's genuinely retained Popen/session/three original pipes only.
+`adopt_owned_read_session(process, started_monotonic=..., nonce=...)` is not
+a fixed public launcher: a controlled caller must supply the actual retained
+Popen and an honest prelaunch monotonic start. It is not a credential, source,
+service-account, SDK/provider, native factory, worker or Cloud permission.
+
+The codec admits nonce-bound READY/LIVE/CLOSED events and CHECK/CLOSE commands,
+bounded single-line JSON DATA, no arbitrary executable/URL/target/credential.
+Acquisition uses original start+28 work and start+30 total cleanup budget.
+Before the first DATA return, a slow caller copy must not extend acquisition
+into the live window: active owned cleanup is required at the original work
+boundary. These are explicit protocol contracts, not a universal promise to
+interrupt kernel/Popen/close, external reapers, PID reuse or escaped descendants.
+
+A healthy first DATA return intentionally retains the actual live child and
+its original pipes. The fixed60 interval starts at READY and CHECK/LIVE must
+not renew it. `read_once()` cannot yield DATA twice; `current_ready()` requires
+the live protocol check; close/revocation and failure cannot restart/adopt a
+new process. Final settled-state evidence must precede fixture fallback:
+all known original pipes close once, real retained child/group settles, and
+first non-Exception/cause is preserved despite later ordinary close failure.
+The frozen tests observe these facts outside product hooks/finalizers; any
+test fallback after the captured first facts is not product cleanup.
+
+The candidate adds four ordinary modules: direct
+`test_req7_read_live_session`, actual two-script codec-child/session workflow
+`test_req7_read_live_session_workflow`, two race controls in
+`test_req7_read_live_session_races`, and original-budget slow-copy regression
+`test_req7_read_live_session_copy_budget`. Their entire independent source and
+assertions are preserved. Five whole methods contain subcases/real children;
+neither subcases nor a child run is additional whole coverage. The
+manifest preserves every old array prefix/script/canonical mapping and adds
+two independent self-canonical scripts (231 to233), two direct rules, one
+real two-script workflow and explicit test-path consumers. Editing that
+mapping alone is not actual canonical validator or runtime qualification;
+each main validation and commit must have its own complete receipt.
+
+Acceptance remains tied to each completed exact source/test/manifest/runtime
+receipt and final physical END. In particular, historical missing-API cases,
+a slow-copy failure and subsequent pending runs are not silently relabeled.
+Root subsequently reported the unchanged fixed-work28 private five-method
+cohort complete: 5PASS117.844s, stable293 bindings and final END18/0. That
+private result has not been independently received by this SOURCE packet and
+is not main/canonical-governance validation or a new test execution here.
+The old attempt supervisor and p5 slice are unchanged. Same-source/SA/SDK
+actor, fixed native launcher, worker, actual Google/device/Linux deployment,
+source lease whole30/live60, N>1/history, full and release proof remain separate
+OPEN/NOT RUN boundaries. See TC-REAL-REQ7-LIVE-READ-PROCESS-001.

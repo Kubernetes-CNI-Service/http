@@ -3152,3 +3152,60 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
   only in explicitly isolated target. Preserve evidence/local result, no auto
   rollback/adopt/retry. Remove only explicitly approved synthetic rows after
   operator confirmation; never reset real data or release ordinary gates.
+
+## TC-REAL-REQ7-LIVE-READ-PROCESS-001 — NOT RUN
+
+### 基本信息
+
+- 名称：保留真实子进程的只读协议 DATA、原获取预算和固定 live60 资源边界。
+- 类型：contract / integration / scenario / real-environment。
+- 对应需求：REQ7 CableTracker 后续 actor 的过程控制前置，不是 source/SA/SDK 权限或发送入口。
+- 自动化文件：`test_req7_read_live_session.py`、`test_req7_read_live_session_workflow.py`、`test_req7_read_live_session_races.py`、`test_req7_read_live_session_copy_budget.py`。
+- 适用平台：本地受控 POSIX/Popen 协议测试；受管 Linux、实际账号、默认 worker、Cloud、设备和正式部署均 NOT RUN。
+- 状态：本卡本身不是主树或真实环境验证证明；实际私有及主树 run、提交状态由对应完整收据和最新工作列表确认，不预填 PASS。
+
+### 风险与目标
+
+- 首 READY 后非法已缓冲帧、启动线程真正开始后 NI、copy 仍在等待时原 work28 到期，不得返回过期 DATA 或把获取阶段冒充 live60。
+- 保留真实进程/session/group、原三管道身份；终止、EOF、预算或关键 close 不确定时只能拒绝，不能推断成功。
+- 真实 Popen 和 honest prelaunch started_monotonic 是 controlled-caller 前提；该过程对象/nonce/JSON 不构成原件、账号、SDK、native launcher 或业务许可。
+- 首个非 Exception 及其原 cause 不被后续 cleanup 普通故障覆盖；所有本次原 known stream 仍须尝试一次收尾。
+
+### 前置条件与输入
+
+- 已逐件审阅两生产模块、四原独立测试及本 manifest 增量；普通 load/full/release/ledger 门不变。
+- 只用测试自有 genuine Popen、真实 start_new_session/PIPE、固定独立 literal DATA 和可见原单调钟；不传 caller checker，不改时钟，不缩短28/30/60测试预算。
+- 无真实 secret/SDK/HTTP/SSH/Cloud/设备读取或请求；不扫描未知 PID/FD，不借名义同类对象作为身份。
+- 外部 reaper、PID复用、逃逸 descendants、不可中断 kernel/Popen/close 不在该有限本地自动化保证内；真实环境须另有明确授权和失败保留方案。
+- 原旧 supervisor/p5 和既有 source/owner/credential 模块不因本切片改变或获得 authority。
+
+### 步骤
+
+1. 由真实 retained Popen 和其三个原管道进入；实际 codec 子解释器发送精确 READY，父 session 返回相同独立 DATA，保留 child live 事实。
+2. 显式 CHECK/LIVE 验证后不延长首次固定60期限；重复 read_once/关闭后访问应拒绝，不再次 launch/adopt。
+3. 实际 prelaunch 延时、超界/错 nonce/部分帧及一次 atomic READY+坏帧、真实 thread.start 返回后 NI 均在真实健康前置后观察。
+4. 真实 deepcopy 完成但延至 started+29.15 才返回；原 pump 必须于 work28 主动处理自身资源，第一外侧结果在原 total30 内拒绝；不借第二次调用或 fixture fallback 补产品 cleanup。
+5. 完整受管 actor/native launcher/Cloud 联接另行授权验证；本卡不执行这些步骤或造业务完成。
+
+### 预期结果
+
+- 正向：健康 DATA 只证明过程协议，首次可保持原 child/pipe live；固定60不刷新。最终真实 settled/groupgone/三原 FD EBADF 均在 fallback 前记录。
+- 拒绝：首结果不能返回错误或已过期 DATA；普通错误仅固定脱敏 HOLD；原 NI 同一对象/cause，真实管道收尾事实与 observer 错误分开保留。
+- 不允许：新 process adoption/relaunch、自动恢复 UNKNOWN、扫描救援数字 FD/PID、fixture 代收尾算成功、SDK/SA/source/native/worker/Cloud 权限或写入。
+- 证据：完整命令/平台/Python、source/tests/manifest/HEAD-tree/dirty/index/ledger、真实 prelaunch 时间与 READY/firstreturn/cleanup、子进程终态及 raw prefix SHA/物理 END、held-named 双完整 EOF/十进制 stat9、每个实际 epoch 原失败与 NOT_REACHED。
+- 多 API/CAS/exactly-once/history/source图、通用硬 kernel wall、外部 reap/PID reuse/escaped descendants 不由这些观察完成证明。
+
+### 故障注入与清理
+
+- 注入仅针对本次原 close IO、实际启动线程返回、实际 deepcopy 延迟或精确 owned frame；不 mock 成功 verifier/owner/SDK。
+- 产品首结果 facts 必须先保存；fixture 只能随后对同一保留的自有 handle/stream 做明确收尾，不能计入产品 cleanup 或隐藏此前仍活资源。
+- 不按数字 PID 追新身份，不 rescue/retry/reopen 任意 FD；必要 kernel close/wait 可能阻塞/中断须留未知状态而非成功。
+- 不改本地 workbook、凭据、线上记录或普通 collection cooldown；不触 F01/UFM owner 验证树或设备。
+
+### 自动化状态
+
+- [x] 四个原独立测试模块逐字保留，未改测试方法/断言。
+- 本9路径的主树精确审批、治理、定向验证及提交，以最新工作列表和对应完整收据为准；本卡不替代证明。
+- 私有 work28 run 的结果和独立接收记录须与主树执行分开，不累计重复测试；本卡不预填。
+- [ ] 受管 Linux/native launcher/原件和同SA/SDKfactory/worker/真实Cloud/设备验证（NOT RUN）。
+- [ ] 全量正式发布证明（本切片不运行或授予）。

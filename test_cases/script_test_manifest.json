@@ -634,6 +634,16 @@
         "test_cases.test_req7_cable_fixed_writes",
         "test_cases.test_req7_cable_fixed_writes_workflow"
       ]
+    },
+    {
+      "id": "req7-owned-live-read-process-control",
+      "description": "Retained genuine Popen/pipe protocol DATA and fixed28/30 acquisition, fixed60 live observation; not source/SA/SDK/native launcher authority",
+      "tests": [
+        "test_cases.test_req7_read_live_session",
+        "test_cases.test_req7_read_live_session_workflow",
+        "test_cases.test_req7_read_live_session_races",
+        "test_cases.test_req7_read_live_session_copy_budget"
+      ]
     }
   ],
   "tracked_support": [
@@ -1055,7 +1065,9 @@
     "tools/ibsw_upgrade_access.py": "tools/ibsw_upgrade_access.py",
     "tools/ibsw_upgrade_pipeline.py": "tools/ibsw_upgrade_pipeline.py",
     "monitor/issue_tracker_cable_grid.py": "monitor/issue_tracker_cable_grid.py",
-    "monitor/issue_tracker_cable_fixed_https.py": "monitor/issue_tracker_cable_fixed_https.py"
+    "monitor/issue_tracker_cable_fixed_https.py": "monitor/issue_tracker_cable_fixed_https.py",
+    "monitor/issue_tracker_read_live_protocol.py": "monitor/issue_tracker_read_live_protocol.py",
+    "monitor/issue_tracker_read_live_session.py": "monitor/issue_tracker_read_live_session.py"
   },
   "test_rules": [
     {
@@ -2761,6 +2773,26 @@
       "tests": [
         "test_cases.test_req7_fixed_https_direct",
         "test_cases.test_req7_cable_fixed_writes"
+      ]
+    },
+    {
+      "id": "req7_read_live_protocol_direct",
+      "paths": [
+        "monitor/issue_tracker_read_live_protocol.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_read_live_session"
+      ]
+    },
+    {
+      "id": "req7_read_live_session_direct",
+      "paths": [
+        "monitor/issue_tracker_read_live_session.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_read_live_session",
+        "test_cases.test_req7_read_live_session_races",
+        "test_cases.test_req7_read_live_session_copy_budget"
       ]
     }
   ],
@@ -5079,6 +5111,16 @@
       "tests": [
         "test_cases.test_req7_cable_fixed_writes_workflow"
       ]
+    },
+    {
+      "id": "req7_owned_read_live_codec_child_session",
+      "members": [
+        "monitor/issue_tracker_read_live_protocol.py",
+        "monitor/issue_tracker_read_live_session.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_read_live_session_workflow"
+      ]
     }
   ],
   "path_rules": [
@@ -5935,6 +5977,20 @@
       "tests": [
         "test_cases.test_req7_cable_fixed_writes",
         "test_cases.test_req7_cable_fixed_writes_workflow"
+      ]
+    },
+    {
+      "paths": [
+        "test_cases/test_req7_read_live_session.py",
+        "test_cases/test_req7_read_live_session_workflow.py",
+        "test_cases/test_req7_read_live_session_races.py",
+        "test_cases/test_req7_read_live_session_copy_budget.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_read_live_session",
+        "test_cases.test_req7_read_live_session_workflow",
+        "test_cases.test_req7_read_live_session_races",
+        "test_cases.test_req7_read_live_session_copy_budget"
       ]
     }
   ]
