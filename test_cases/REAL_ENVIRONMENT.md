@@ -3122,3 +3122,33 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 清理：只关闭本次明确持有的自有socket/HTTP响应/TLS/监听线程/临时合成材料；不按PID/扫描FD清理、不自动重试/修复或读取真实密钥。保原始失败、收条和本地工作簿。
 
 风险：读取后人工并发修改、多API无事务/CAS/exactly-once，压缩/额外表列/大表可能被保守拒绝，原件/依赖/native/硬IO期限尚未完整闭合；不把此协议模块切片当默认worker上线或完整REQ7。
+
+
+## TC-REQ7-CABLE-FIXED-WRITE-REAL-20261022 — real authorized business/History API
+
+- Type: scenario / real-environment; requirement REQ7 CableTracker sync.
+- Automated counterpart: test_req7_cable_fixed_writes (direct) and
+  test_req7_cable_fixed_writes_workflow (real SDK/owned TLS, not real account).
+- Platform: authorized management server / isolated Cloud test spreadsheet.
+- Status: NOT RUN. No real account, Google request, install or device acceptance.
+- Risk/goal: business write may take effect before error; later History call
+  may fail or duplicate. No transaction/rollback/CAS/exactly-once or complete
+  History guarantee. Fixed grammar alone is not source/row authority.
+- Preconditions: explicit operator authorization for isolated target; current
+  project allowlist, genuine qualified source/K/N/whitelist and same held
+  credential/local+sheet owners; validated runtime/dependency/release proofs;
+  exact current business/template layout and History existence/headers/permission.
+- Steps: (1) finish same-changeset local XLSX; (2) freshly read target and merge
+  by business key preserving operator/formula/status cells and target row/IDs;
+  (3) issue fixed business and RAW History operations once; (4) separately record
+  each outcome and read actual target state on the next normal cycle after error.
+- Expected: no alternate target, ensure/create/format/delete, same-round replay,
+  token/JWT/private payload logging or local workbook loss; ambiguous mutation
+  is not relabeled untouched or complete. No inherited old UNKNOWN freeze.
+- Evidence: sanitized source/runtime/target bindings, local receipt/XLSX hash,
+  ordered separate business/History outcome and fresh-read reconciliation,
+  actual resource/owner cleanup and test commands/exits. No credential secrets.
+- Fault/cleanup: controlled timeout/partial response/permission/History failure
+  only in explicitly isolated target. Preserve evidence/local result, no auto
+  rollback/adopt/retry. Remove only explicitly approved synthetic rows after
+  operator confirmation; never reset real data or release ordinary gates.

@@ -630,7 +630,9 @@
         "test_cases.test_req7_cable_fullgrid",
         "test_cases.test_req7_cable_fullgrid_workflow",
         "test_cases.test_req7_fixed_https_direct",
-        "test_cases.test_req7_fixed_https_sdk_workflow"
+        "test_cases.test_req7_fixed_https_sdk_workflow",
+        "test_cases.test_req7_cable_fixed_writes",
+        "test_cases.test_req7_cable_fixed_writes_workflow"
       ]
     }
   ],
@@ -2757,7 +2759,8 @@
         "monitor/issue_tracker_cable_fixed_https.py"
       ],
       "tests": [
-        "test_cases.test_req7_fixed_https_direct"
+        "test_cases.test_req7_fixed_https_direct",
+        "test_cases.test_req7_cable_fixed_writes"
       ]
     }
   ],
@@ -5063,6 +5066,19 @@
       "tests": [
         "test_cases.test_req7_fixed_https_sdk_workflow"
       ]
+    },
+    {
+      "id": "req7_cable_fixed_business_history_sdk_protocol",
+      "members": [
+        "monitor/issue_tracker_cable_fixed_https.py",
+        "monitor/issue_tracker_cable_merge.py",
+        "monitor/issue_tracker_source_model.py",
+        "monitor/issue_tracker_online_cells.py",
+        "monitor/issue_tracker_tls_inputs.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_cable_fixed_writes_workflow"
+      ]
     }
   ],
   "path_rules": [
@@ -5908,6 +5924,17 @@
         "test_cases.test_req7_cable_fullgrid_workflow",
         "test_cases.test_req7_fixed_https_direct",
         "test_cases.test_req7_fixed_https_sdk_workflow"
+      ]
+    },
+    {
+      "paths": [
+        "test_cases/test_req7_cable_fixed_writes.py",
+        "test_cases/test_req7_cable_fixed_writes_workflow.py",
+        "test_cases/fixed_https_peer_fixture.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_cable_fixed_writes",
+        "test_cases.test_req7_cable_fixed_writes_workflow"
       ]
     }
   ]

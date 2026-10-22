@@ -5241,3 +5241,23 @@ See TC-REAL-REQ7-CABLE-CONSTRUCTOR-ORIGINS-002.
 Owner contract unchanged: HTML and tracker independently analyze shared monitor ethernet/infiniband/nvlink raw data; local same-changeset XLSX first; each normal online attempt reads current state before merge. Online failure keeps local work for a later normal-cycle fresh read. External CVT service is future-only. This small module slice does not complete native SDKfactory, current-source/current-SA actor, automatic/manual worker, pending/qualified NO_CHANGE/N>1 or full release.
 
 Local validation must use unchanged literal direct and actual SDK/ownedTLS workflow tests plus original metadata regression, complete END and identity receipts. Initial missing grid API and owned listener EPERM setup diagnostics are preserved separately; do not relabel them product vulnerabilities or PASS. Tests/manifest/HEAD/dirty identities at actual execution govern, not this note. Full/REAL_ENV/Cloud/device/Docker/install/powerloss NOT RUN. REQ10C historical3FAIL and ordinary release gates remain.
+
+
+## REQ7 fixed business/History write protocol — 2026-10-22
+
+The Cable protocol utility additionally accepts only fixed target batchUpdate
+and History!A3 RAW/INSERT_ROWS append requests. JSON str UTF-8 <=1MiB is DATA
+validation, not source/tool-column authority; the existing token bytes64KiB,
+metadata/fullgrid and cleanup code are preserved. Business grammar excludes
+create/ensure/clear/delete/format. Direct `_wire` validates large DATA only;
+the unchanged owned peer64KiB and actual TLS tests cover small bodies.
+
+Canonical direct test_req7_cable_fixed_writes and actual cross-script
+test_req7_cable_fixed_writes_workflow cover real merge -> real SDK JSONstr ->
+owned TLS business then History, first-result cleanup/NI and no second local
+emission. Original four grid/metadata SDK tests remain. Synthetic token DATA
+does not prove current held SA, protected factory, default worker, actual
+Google apply/ACK, History existence/headers/permission/completeness, hard30/
+fixed60 or exactly-once. Multi-API errors never imply rollback. The accepted
+local-first/fresh-read next-normal-cycle contract still needs worker wiring.
+Full/REAL_ENV/release gates remain; tests here do not approve ordinary release.

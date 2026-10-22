@@ -17,6 +17,7 @@ _TOKEN_URL = 'https://oauth2.googleapis.com/token'
 _TARGET = re.compile(r'[A-Za-z0-9_-]{20,160}\Z')
 _BEARER = re.compile(r'Bearer [A-Za-z0-9._~+/\-]+=*\Z')
 _MAX_BODY = 65536
+_MAX_WRITE_BODY = 1024 * 1024
 _MAX_RESPONSE = 2 * 1024 * 1024
 
 
@@ -57,12 +58,146 @@ def _fixed_spec(kind, target):
                            ('fields',FIELDS),('alt','json')])
         path = '/v4/spreadsheets/' + target + '?' + query
         return 'sheets.googleapis.com', path, 'GET', 'https://sheets.googleapis.com' + path
+    if (type(kind) is str and kind in ('sheets-business', 'sheets-history')
+            and type(target) is str and _TARGET.fullmatch(target) is not None):
+        if kind == 'sheets-business':
+            path = '/v4/spreadsheets/' + target + ':batchUpdate?alt=json'
+        else:
+            path = ('/v4/spreadsheets/' + target
+                    + '/values/History%21A3:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS&alt=json')
+        return 'sheets.googleapis.com', path, 'POST', 'https://sheets.googleapis.com' + path
     raise FixedHttpsHold()
 
 
 def _close_resource(resource):
     """Private IO action only; tests may delegate real close then observe it."""
     resource.close()
+
+def _write_text(value):
+    if (type(value) is not str or '\x00' in value
+            or len(value) > 32768 or len(value.encode('utf-8', 'strict')) > 32768):
+        raise FixedHttpsHold()
+
+
+def _write_pairs(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise FixedHttpsHold()
+        result[key] = value
+    return result
+
+
+def _write_constant(value):
+    raise FixedHttpsHold()
+
+
+def _write_rows(rows):
+    if (type(rows) is not list or len(rows) != 1 or type(rows[0]) is not dict
+            or set(rows[0]) != {'values'} or type(rows[0]['values']) is not list
+            or not 1 <= len(rows[0]['values']) <= 29):
+        raise FixedHttpsHold()
+    for cell in rows[0]['values']:
+        if type(cell) is not dict:
+            raise FixedHttpsHold()
+        if not cell:
+            continue
+        if (set(cell) != {'userEnteredValue'} or type(cell['userEnteredValue']) is not dict
+                or set(cell['userEnteredValue']) != {'stringValue'}):
+            raise FixedHttpsHold()
+        _write_text(cell['userEnteredValue']['stringValue'])
+
+
+def _fixed_write_body(kind, body):
+    # Real SDK JsonModel produces str. Preserve those exact UTF-8 bytes;
+    # parsing constrains DATA shape, not source identity or write permission.
+    import json
+    if type(body) is not str:
+        raise FixedHttpsHold()
+    raw = body.encode('utf-8', 'strict')
+    if not 1 <= len(raw) <= _MAX_WRITE_BODY:
+        raise FixedHttpsHold()
+    data = json.loads(body, object_pairs_hook=_write_pairs, parse_constant=_write_constant)
+    if kind == 'sheets-business':
+        if (type(data) is not dict or set(data) != {'requests'}
+                or type(data['requests']) is not list or not 1 <= len(data['requests']) <= 1000):
+            raise FixedHttpsHold()
+        for request in data['requests']:
+            if type(request) is not dict or len(request) != 1:
+                raise FixedHttpsHold()
+            operation, fields = next(iter(request.items()))
+            if type(fields) is not dict or fields.get('fields') != 'userEnteredValue':
+                raise FixedHttpsHold()
+            if operation == 'updateCells':
+                if set(fields) != {'start', 'rows', 'fields'} or type(fields['start']) is not dict:
+                    raise FixedHttpsHold()
+                start = fields['start']
+                if (set(start) != {'sheetId', 'rowIndex', 'columnIndex'}
+                        or type(start['sheetId']) is not int or not 0 <= start['sheetId'] < 2**31
+                        or type(start['rowIndex']) is not int or not 2 <= start['rowIndex'] < 2**31
+                        or type(start['columnIndex']) is not int or not 0 <= start['columnIndex'] < 29):
+                    raise FixedHttpsHold()
+                _write_rows(fields['rows'])
+                if start['columnIndex'] + len(fields['rows'][0]['values']) > 29:
+                    raise FixedHttpsHold()
+            elif operation == 'appendCells':
+                if (set(fields) != {'sheetId', 'rows', 'fields'}
+                        or type(fields['sheetId']) is not int or not 0 <= fields['sheetId'] < 2**31):
+                    raise FixedHttpsHold()
+                _write_rows(fields['rows'])
+            else:
+                # No ensure/create/clear/delete/format/repeatCell role.
+                raise FixedHttpsHold()
+    elif kind == 'sheets-history':
+        if (type(data) is not dict or set(data) != {'values'}
+                or type(data['values']) is not list or not 1 <= len(data['values']) <= 1000):
+            raise FixedHttpsHold()
+        for row in data['values']:
+            if type(row) is not list or len(row) != 5:
+                raise FixedHttpsHold()
+            for value in row:
+                _write_text(value)
+    else:
+        raise FixedHttpsHold()
+    return raw
+
+
+def _fixed_write_wire(owned, uri, method, body, headers, redirections, connection_type, kwargs):
+    host, path, fixed_method, fixed_uri = _fixed_spec(owned._kind, owned._target)
+    if (type(uri) is not str or uri != fixed_uri or type(method) is not str
+            or method != fixed_method or fixed_method != 'POST' or type(headers) is not dict
+            or len(headers) > 12 or type(redirections) is not int
+            or redirections not in (0, 5) or connection_type is not None or kwargs):
+        raise FixedHttpsHold()
+    raw = _fixed_write_body(owned._kind, body)
+    actual = {}
+    allowed = {'content-type','authorization','accept','accept-encoding',
+               'user-agent','x-goog-api-client','content-length'}
+    for key, value in headers.items():
+        if (type(key) is not str or key.lower() not in allowed
+                or key.lower() in actual or type(value) is not str
+                or not 1 <= len(value) <= (8199 if key.lower() == 'authorization' else 1024)
+                or any(not 32 <= ord(char) <= 126 for char in value)):
+            raise FixedHttpsHold()
+        actual[key.lower()] = value
+    if (actual.get('content-type') != 'application/json'
+            or _BEARER.fullmatch(actual.get('authorization', '')) is None
+            or actual.get('accept', 'application/json') != 'application/json'
+            or actual.get('accept-encoding', 'identity') not in ('identity','gzip','gzip, deflate')
+            or ('content-length' in actual and actual['content-length'] != str(len(raw)))):
+        raise FixedHttpsHold()
+    actual.pop('accept-encoding', None)
+    actual.pop('content-length', None)
+    lines = ['POST ' + path + ' HTTP/1.1', 'Host: ' + host,
+             'Connection: close', 'Accept-Encoding: identity', 'Content-Length: ' + str(len(raw))]
+    names = {'content-type':'Content-Type','authorization':'Authorization',
+             'accept':'Accept','user-agent':'User-Agent','x-goog-api-client':'x-goog-api-client'}
+    for key in sorted(actual):
+        lines.append(names[key] + ': ' + actual[key])
+    wire = ('\r\n'.join(lines) + '\r\n\r\n').encode('ascii')
+    if len(wire) > 16384:
+        raise FixedHttpsHold()
+    return host, fixed_method, wire + raw
 
 
 class _FixedHttps:
@@ -79,6 +214,9 @@ class _FixedHttps:
             self._used = True
 
     def _wire(self, uri, method, body, headers, redirections, connection_type, kwargs):
+        if type(self._kind) is str and self._kind in ('sheets-business', 'sheets-history'):
+            return _fixed_write_wire(self, uri, method, body, headers,
+                                     redirections, connection_type, kwargs)
         # Re-derive fixed values and retain locals through the whole IO call;
         # mutable instance attributes never become an arbitrary host/path.
         host, path, fixed_method, fixed_uri = _fixed_spec(self._kind, self._target)
