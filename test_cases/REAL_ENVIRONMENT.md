@@ -3209,3 +3209,56 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 - 私有 work28 run 的结果和独立接收记录须与主树执行分开，不累计重复测试；本卡不预填。
 - [ ] 受管 Linux/native launcher/原件和同SA/SDKfactory/worker/真实Cloud/设备验证（NOT RUN）。
 - [ ] 全量正式发布证明（本切片不运行或授予）。
+
+## TC-REAL-REQ7-FIRST-READ-CODE-001 — NOT RUN
+
+### 基本信息
+
+- 名称：固定21公开源码、选定认证调用边界和原资源关闭。
+- 类型：contract / integration / scenario / real-environment。
+- 对应需求：REQ7 同账号首次读取的有限代码前置；不是当前数据源/账号/发送许可。
+- 自动化文件：`test_req7_cable_first_read_code.py`；workflow实际跨新增模块、原publish_runtime和原Cable依赖合同。
+- 适用平台：本地固定依赖公开Python源码。受管Linux、真实账号/Cloud/设备/worker及正式发布均NOT RUN。
+- 状态：主树落地和实际测试结果仅见最新worklist/完整收据；本卡不预填PASS。
+
+### 风险与目标
+
+- 构造/首次请求路径会执行的真实Request方法、默认参数或SA._client引用被替换，不能仅凭文件SHA相同通过。
+- 四新增源码必须先持有，再运行原17源码加载；不改变原17空slots入口或旧NO_SEND凭据合同。
+- verify不重开源码；先撤销scope再逐一关闭已知原FD。首NI同一对象及cause不能被后续EIO覆盖。
+- 仅有限选定边界，不把lru_cache.__wrapped__、metadata locator、class同名或源码审计冒称完整native运行环境权威。
+
+### 前置条件与输入
+
+- 固定Cable独立依赖policy/lock及其身份门，真实公开安装源码和现有SDK版本必须匹配。
+- 测试期冻结生产/测试/manifest/docs/依赖，先独立literal测试RED，再同断言验证。
+- 无真实账号/私钥/项目内容/Cloud请求；仅模块本地IO观察器委托真实原件IO。独立外层治理禁止socket/子进程。
+- 现有core/source/SA、read监督和worker不被本模块替代；不触owner的F01/UFM验证。
+
+### 步骤
+
+1. 独立literal列出21文件，真实持有/两次verify；原runtime和dependency_contract均真实执行。
+2. 健康前置后分别更换Request方法、改默认值、改SA._client模块引用，要求构造/请求前拒绝；随后原样恢复。
+3. 真实backoff原FD关闭后注入同一NI，再于metrics原FD关闭后注入EIO；记录全部已知原slot一次反序尝试及首结果EBADF。
+4. 由根唯一调度执行当前manifest/canonical与定向验证；不得以普通sorted测试顺序冒称所有动态SDK依赖冷加载。
+5. 真实同SA refresh/受管child/固定HTTPS/完整在线worker另行资格验证，不在本卡执行或声称完成。
+
+### 预期结果与证据
+
+- 健康：21公开文件原件符合独立literal列表，verify无新增open；无SA构造、签名或Request调用。
+- 拒绝：被替换的选定调用绑定在执行前拒绝；scope关闭后不可verify，不能回退路径/ADC/换账号或重试。
+- 完整命令/Python/平台/源码测试manifest/HEAD-tree/dirty-index、stat9纳秒十进制、held-named前后双完整EOF、prefixSHA/物理唯一END/实际退出码。
+- 别名/角色计数与whole测试分开；独立RED缺模块表示下游NOT_REACHED，不是三个漏洞。私有/主树结果分开且不累计重叠。
+- 不提供完整RAB/native/stdlib/crypto闭包、Cloud验收、硬kernel总时限或正式full发布证明。
+
+### 故障注入与清理
+
+- 只注入本次已知原FD真实close之后的错误和进程内选定函数/别名替换；所有修改在finally恢复。
+- 不扫描/救援数字FD、PID或外树，不把fixture补救计为产品首结果清理。
+- 保留原失败源码/原日志，不删跳弱化断言或编辑ledger；真实部署所需安装/账号/目标操作必须另行明确授权。
+
+### 自动化状态
+
+- 本地有限direct/workflow的实际证据以对应主树收条为准，NOT RUN标题只指真实受管环境。
+- [ ] 受管Linux/真实同SA/Cloud/设备/worker验证（NOT RUN）。
+- [ ] 完整全量发布证明（本切片不执行或授予）。

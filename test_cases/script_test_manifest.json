@@ -644,6 +644,13 @@
         "test_cases.test_req7_read_live_session_races",
         "test_cases.test_req7_read_live_session_copy_budget"
       ]
+    },
+    {
+      "id": "req7-first-read-public-code",
+      "tests": [
+        "test_cases.test_req7_cable_first_read_code"
+      ],
+      "description": "Finite actual21 public code-only first-read prerequisite, pre-entry method/default/alias refusal and original close cleanup; no SA/refresh/wire/native/worker authority"
     }
   ],
   "tracked_support": [
@@ -1067,7 +1074,8 @@
     "monitor/issue_tracker_cable_grid.py": "monitor/issue_tracker_cable_grid.py",
     "monitor/issue_tracker_cable_fixed_https.py": "monitor/issue_tracker_cable_fixed_https.py",
     "monitor/issue_tracker_read_live_protocol.py": "monitor/issue_tracker_read_live_protocol.py",
-    "monitor/issue_tracker_read_live_session.py": "monitor/issue_tracker_read_live_session.py"
+    "monitor/issue_tracker_read_live_session.py": "monitor/issue_tracker_read_live_session.py",
+    "monitor/issue_tracker_cable_first_read_code.py": "monitor/issue_tracker_cable_first_read_code.py"
   },
   "test_rules": [
     {
@@ -2793,6 +2801,15 @@
         "test_cases.test_req7_read_live_session",
         "test_cases.test_req7_read_live_session_races",
         "test_cases.test_req7_read_live_session_copy_budget"
+      ]
+    },
+    {
+      "id": "req7-first-read-public-code",
+      "paths": [
+        "monitor/issue_tracker_cable_first_read_code.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_cable_first_read_code"
       ]
     }
   ],
@@ -5121,6 +5138,17 @@
       "tests": [
         "test_cases.test_req7_read_live_session_workflow"
       ]
+    },
+    {
+      "id": "req7-first-read-code-inherited-constructor-and-contract",
+      "members": [
+        "monitor/issue_tracker_cable_first_read_code.py",
+        "monitor/issue_tracker_publish_runtime.py",
+        "tools/req7_cable_dependency_contract.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_cable_first_read_code"
+      ]
     }
   ],
   "path_rules": [
@@ -5991,6 +6019,14 @@
         "test_cases.test_req7_read_live_session_workflow",
         "test_cases.test_req7_read_live_session_races",
         "test_cases.test_req7_read_live_session_copy_budget"
+      ]
+    },
+    {
+      "paths": [
+        "test_cases/test_req7_cable_first_read_code.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_cable_first_read_code"
       ]
     }
   ]

@@ -5314,3 +5314,24 @@ The old attempt supervisor and p5 slice are unchanged. Same-source/SA/SDK
 actor, fixed native launcher, worker, actual Google/device/Linux deployment,
 source lease whole30/live60, N>1/history, full and release proof remain separate
 OPEN/NOT RUN boundaries. See TC-REAL-REQ7-LIVE-READ-PROCESS-001.
+
+### REQ7 finite first-read public code prerequisite
+
+`monitor/issue_tracker_cable_first_read_code.py` adds a separate internal
+21-source code-only holder above the unchanged constructor17 holder. Four
+additional actual public source originals are held before inherited imports;
+verification reuses those FDs and source-derived callable/default/alias checks,
+not a preexisting mutable function snapshot. The independent literal direct
+tests also exercise the real inherited runtime and dependency-contract modules.
+Replacement Request methods/defaults and SA module aliases must refuse before
+constructor/request entry; all known original slots close in reverse order,
+with first NI identity/cause preserved across later ordinary close errors.
+
+This module does not create an SA, sign, refresh, send, read a target, qualify
+native origin, or change the worker. The exposed lru-cache wrapper surface is
+not its internal callable/cache proof. Transitive native/stdlib integrity,
+optional RAB/IAM branches, fixed child factory, same-SA first authenticated read,
+whole30/live60 and local-first automatic/manual next-cycle sync remain separate
+work. No ordinary runtime or release/full gate is bypassed. Creation-time
+SOURCE/NOT RUN comments in preserved test packets do not replace actual epoch
+receipts. See TC-REAL-REQ7-FIRST-READ-CODE-001.
