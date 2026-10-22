@@ -3109,3 +3109,16 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 
 
 采纳状态说明（2026-10-22）：以上 SOURCE ONLY / NOT RUN / 未采纳文字仅记录提案创建时点，不是后续主树状态。实际是否采纳和本地验证结果须以 ROOT-CURRENT-WORK-LIST-20261013.json 最新条目、精确 HEAD/dirty 与各完整 END 收条为准。真实环境/账号/Cloud/SDKfactory/发送/worker/whole30-fixed60/full-release 仍须各自验证，本段不宣告通过或 REQ7 完成。
+
+
+## TC-REAL-REQ7-CABLE-FIXED-GRID-001
+
+状态：NOT RUN / REAL_ENV REQUIRED。此卡不授权访问Cloud/真机/生产，也不是全量证明。
+
+前置条件：原current project/target allowlist、固定私有service account、真实原件/K/N/白名单和双owner必须由完整native actor另行资格核验；普通load/sync/package门禁保留。选择固定fullgrid字段/三范围，容量switch<=5002、cabling<=10002、列21/29、原JSON<=2MiB；超出则HOLD，不截断/换目标/降级。
+
+证据：实际Google返回完整字段/范围与trailing-empty语义、原始响应SHA及脱敏身份，严格duplicateJSON/格式/容量拒绝；目标自身sheetID/人工字段/公式/Closed行保留；同一原件/账号/owner存活与关键close，30秒总获取及一次固定60只读观察必须另证。私有本地TLS成功不是这些真实环境结果，也不是business/History写入。
+
+清理：只关闭本次明确持有的自有socket/HTTP响应/TLS/监听线程/临时合成材料；不按PID/扫描FD清理、不自动重试/修复或读取真实密钥。保原始失败、收条和本地工作簿。
+
+风险：读取后人工并发修改、多API无事务/CAS/exactly-once，压缩/额外表列/大表可能被保守拒绝，原件/依赖/native/硬IO期限尚未完整闭合；不把此协议模块切片当默认worker上线或完整REQ7。

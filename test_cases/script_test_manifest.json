@@ -622,6 +622,16 @@
       "tests": [
         "test_cases.test_req7_cable_constructor_code_resources"
       ]
+    },
+    {
+      "id": "req7-cable-fixed-grid-protocol",
+      "description": "Fixed one-emission HTTPS and bounded complete-grid original entered cells to current merge; protocol DATA only, not native/worker authority",
+      "tests": [
+        "test_cases.test_req7_cable_fullgrid",
+        "test_cases.test_req7_cable_fullgrid_workflow",
+        "test_cases.test_req7_fixed_https_direct",
+        "test_cases.test_req7_fixed_https_sdk_workflow"
+      ]
     }
   ],
   "tracked_support": [
@@ -809,7 +819,8 @@
     "test_cases/eth_info_held_window_fixture.py",
     "test_cases/w1_original_window_fixture.py",
     "test_cases/n_policy_original_window_fixture.py",
-    "test_cases/nv_info_original_window_fixture.py"
+    "test_cases/nv_info_original_window_fixture.py",
+    "test_cases/fixed_https_peer_fixture.py"
   ],
   "scripts": {
     "DAY0-Prepare/01-a-setup.py": "DAY0-Prepare/01-a-setup.py",
@@ -1040,7 +1051,9 @@
     "tools/ibsw_upgrade_executor.py": "tools/ibsw_upgrade_executor.py",
     "tools/ibsw_upgrade_observer.py": "tools/ibsw_upgrade_observer.py",
     "tools/ibsw_upgrade_access.py": "tools/ibsw_upgrade_access.py",
-    "tools/ibsw_upgrade_pipeline.py": "tools/ibsw_upgrade_pipeline.py"
+    "tools/ibsw_upgrade_pipeline.py": "tools/ibsw_upgrade_pipeline.py",
+    "monitor/issue_tracker_cable_grid.py": "monitor/issue_tracker_cable_grid.py",
+    "monitor/issue_tracker_cable_fixed_https.py": "monitor/issue_tracker_cable_fixed_https.py"
   },
   "test_rules": [
     {
@@ -2727,6 +2740,24 @@
       "tests": [
         "test_cases.test_req7_cable_credential_construction",
         "test_cases.test_req7_cable_constructor_code_resources"
+      ]
+    },
+    {
+      "id": "req7_cable_fullgrid_decode",
+      "paths": [
+        "monitor/issue_tracker_cable_grid.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_cable_fullgrid"
+      ]
+    },
+    {
+      "id": "req7_cable_fixed_https_protocol",
+      "paths": [
+        "monitor/issue_tracker_cable_fixed_https.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_fixed_https_direct"
       ]
     }
   ],
@@ -5005,6 +5036,33 @@
       "tests": [
         "test_cases.test_req7_cable_constructor_code_resources"
       ]
+    },
+    {
+      "id": "req7_cable_fullgrid_sdk_current_merge",
+      "members": [
+        "monitor/issue_tracker_cable_grid.py",
+        "monitor/issue_tracker_cable_fixed_https.py",
+        "monitor/issue_tracker_tls_inputs.py",
+        "monitor/issue_tracker_cable_merge.py",
+        "monitor/issue_tracker_source_model.py",
+        "monitor/issue_tracker_local_workbook.py",
+        "monitor/issue_tracker_sheets_read_decode.py",
+        "monitor/issue_tracker_online_cells.py",
+        "monitor/issue_tracker_online_rows.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_cable_fullgrid_workflow"
+      ]
+    },
+    {
+      "id": "req7_cable_fixed_https_actual_sdk_protocol",
+      "members": [
+        "monitor/issue_tracker_cable_fixed_https.py",
+        "monitor/issue_tracker_tls_inputs.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_fixed_https_sdk_workflow"
+      ]
     }
   ],
   "path_rules": [
@@ -5835,6 +5893,21 @@
         "test_cases.test_req7_cable_credential_base_origin",
         "test_cases.test_req7_cable_credential_manager_origin",
         "test_cases.test_req7_cable_credential_rsa_allocation"
+      ]
+    },
+    {
+      "paths": [
+        "test_cases/test_req7_cable_fullgrid.py",
+        "test_cases/test_req7_cable_fullgrid_workflow.py",
+        "test_cases/test_req7_fixed_https_direct.py",
+        "test_cases/test_req7_fixed_https_sdk_workflow.py",
+        "test_cases/fixed_https_peer_fixture.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_cable_fullgrid",
+        "test_cases.test_req7_cable_fullgrid_workflow",
+        "test_cases.test_req7_fixed_https_direct",
+        "test_cases.test_req7_fixed_https_sdk_workflow"
       ]
     }
   ]

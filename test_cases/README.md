@@ -5230,3 +5230,14 @@ See TC-REAL-REQ7-CABLE-CONSTRUCTOR-ORIGINS-002.
 
 
 采纳状态说明（2026-10-22）：以上 SOURCE ONLY / NOT RUN / 未采纳文字仅记录提案创建时点，不是后续主树状态。实际是否采纳和本地验证结果须以 ROOT-CURRENT-WORK-LIST-20261013.json 最新条目、精确 HEAD/dirty 与各完整 END 收条为准。真实环境/账号/Cloud/SDKfactory/发送/worker/whole30-fixed60/full-release 仍须各自验证，本段不宣告通过或 REQ7 完成。
+
+
+## REQ7 fixed HTTPS / full-grid protocol slice — 2026-10-22
+
+`monitor/issue_tracker_cable_fixed_https.py` exposes fixed token POST, metadata GET and bounded three-business-sheet grid GET protocol roles. It does not authorize a caller, expose arbitrary URL/CA/ranges, connect default worker, or implement whole30/fixed60 supervision. Source/target/service-account/dual-owner native qualification remains separate and OPEN. Real SDK and self-owned loopback TLS tests use synthetic credentials, never a real Cloud account.
+
+`monitor/issue_tracker_cable_grid.py` strictly decodes original JSON before SDK parsing can erase duplicate keys, preserves entered formulas/bools/human fields, and adapts exactly three current sheets into existing SheetImage for the current business-key merge. Row/column/2MiB bounds refuse rather than silently truncate. Target own sheet IDs are used, not local XLSX coordinates. A pure merge plan is not an executed business/History write or a transaction/CAS/exactly-once proof.
+
+Owner contract unchanged: HTML and tracker independently analyze shared monitor ethernet/infiniband/nvlink raw data; local same-changeset XLSX first; each normal online attempt reads current state before merge. Online failure keeps local work for a later normal-cycle fresh read. External CVT service is future-only. This small module slice does not complete native SDKfactory, current-source/current-SA actor, automatic/manual worker, pending/qualified NO_CHANGE/N>1 or full release.
+
+Local validation must use unchanged literal direct and actual SDK/ownedTLS workflow tests plus original metadata regression, complete END and identity receipts. Initial missing grid API and owned listener EPERM setup diagnostics are preserved separately; do not relabel them product vulnerabilities or PASS. Tests/manifest/HEAD/dirty identities at actual execution govern, not this note. Full/REAL_ENV/Cloud/device/Docker/install/powerloss NOT RUN. REQ10C historical3FAIL and ordinary release gates remain.
