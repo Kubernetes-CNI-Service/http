@@ -18663,5 +18663,221 @@ class HistoricalPythonReplayCreationTests(unittest.TestCase):
                     if isinstance(node, ast.Call) for keyword in node.keywords
                     if keyword.arg in {"umask", "_history_checkout_creation"}])
 
+# ---- C09: call-scoped closed-stdin prefetch behind the unchanged single-object primitive ----
+# The single-object reader above stays byte-identical and remains the only path that can
+# produce a verdict (exception or its 1 s timeout).  Inside one verified walk, objects the walk
+# is about to request are fetched in closed `cat-file --batch` runs of at most 32 ids; every
+# frame is re-verified exactly like the single path (echoed id, kind, canonical size,
+# delimiter, SHA-1) before a consumer sees it.  Any batch anomaly only means "not prefetched":
+# that request falls back to the single path.  Nothing outlives one walk call.
+import collections as _c09_collections
+import contextvars as _c09_contextvars
+
+_C09_BATCH_LIMIT = 32
+_C09_SCOPE = _c09_contextvars.ContextVar("p_raw_object_prefetch_scope", default=None)
+_read_raw_git_object_single = _read_raw_git_object
+_verified_commit_records_unscoped = _verified_commit_records
+_raw_v3_first_parent_chain_unscoped = _raw_v3_first_parent_chain
+
+
+class _RawObjectPrefetchScope:
+    def __init__(self, repository, *, plan_children):
+        self.repository = repository
+        self.plan_children = plan_children
+        self.disabled = False
+        self.plan = []
+        self.attempted = []
+        self.unattempted = _c09_collections.defaultdict(_c09_collections.deque)
+        self.verified = _c09_collections.defaultdict(_c09_collections.deque)
+
+    def add(self, object_id, kind):
+        if not re.fullmatch(r"[0-9a-f]{40}", object_id) or kind not in {"blob", "tree", "commit"}:
+            return
+        key = (object_id, kind)
+        self.unattempted[key].append(len(self.plan))
+        self.plan.append(key)
+        self.attempted.append(False)
+
+    def observe(self, kind, payload):
+        if not self.plan_children:
+            return
+        try:
+            if kind == "commit":
+                first = payload.split(b"\n", 1)[0]
+                if re.fullmatch(rb"tree [0-9a-f]{40}", first):
+                    self.add(first[5:].decode("ascii"), "tree")
+            elif kind == "tree":
+                offset = 0
+                while offset < len(payload):
+                    space = payload.find(b" ", offset)
+                    nul = payload.find(b"\0", space + 1 if space >= 0 else offset)
+                    if space <= offset or nul < 0 or nul + 21 > len(payload):
+                        return
+                    mode = payload[offset:space]
+                    child = payload[nul + 1:nul + 21].hex()
+                    offset = nul + 21
+                    if mode == b"40000":
+                        self.add(child, "tree")
+                    elif mode in {b"100644", b"100755", b"120000"}:
+                        self.add(child, "blob")
+        except Exception:
+            return
+
+    def take(self, key):
+        frames = self.verified.get(key)
+        return frames.popleft() if frames else None
+
+    def batch_for(self, key):
+        positions = self.unattempted.get(key)
+        if not positions:
+            return []
+        batch = []
+        for index in range(positions[0], len(self.plan)):
+            if self.attempted[index]:
+                continue
+            item = self.plan[index]
+            self.attempted[index] = True
+            queue = self.unattempted[item]
+            if queue and queue[0] == index:
+                queue.popleft()
+            else:
+                try:
+                    queue.remove(index)
+                except ValueError:
+                    pass
+            batch.append(item)
+            if len(batch) == _C09_BATCH_LIMIT:
+                break
+        return batch
+
+    def run_batch(self, batch):
+        environment = _canonical_git_environment()
+        for key in tuple(environment):
+            if key.startswith(("LD_", "DYLD_")):
+                environment.pop(key, None)
+        environment["PATH"] = SYSTEM_EXECUTABLE_PATH
+        command = (
+            GIT_BINARY, "--no-replace-objects", "-c",
+            f"core.hooksPath={os.devnull}", "-C", str(self.repository),
+            "cat-file", "--batch",
+        )
+        try:
+            result = subprocess.run(
+                command, env=environment,
+                input="".join(object_id + "\n" for object_id, _kind in batch).encode("ascii"),
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False,
+                check=False, timeout=RAW_OBJECT_TIMEOUT_SECONDS,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            self.disabled = True
+            return
+        if result.returncode != 0 or result.stderr != b"":
+            self.disabled = True
+            return
+        stream = result.stdout
+        offset = 0
+        frames = []
+        for object_id, expected_kind in batch:
+            newline = stream.find(b"\n", offset)
+            if newline < 0:
+                self.disabled = True
+                return
+            fields = stream[offset:newline].split(b" ")
+            if len(fields) != 3:
+                break
+            try:
+                echoed, kind, raw_size = (field.decode("ascii") for field in fields)
+            except UnicodeError:
+                break
+            if echoed != object_id or kind != expected_kind or not re.fullmatch(r"0|[1-9][0-9]*", raw_size):
+                break
+            size = int(raw_size)
+            start = newline + 1
+            end = start + size
+            if len(stream) < end + 1 or stream[end:end + 1] != b"\n":
+                break
+            payload = stream[start:end]
+            canonical = kind.encode("ascii") + b" " + str(len(payload)).encode("ascii") + b"\0" + payload
+            if hashlib.sha1(canonical).hexdigest() != object_id:
+                break
+            frames.append(((object_id, kind), (echoed, kind, size, payload)))
+            offset = end + 1
+        else:
+            if offset != len(stream):
+                self.disabled = True
+                return
+        if len(frames) != len(batch):
+            self.disabled = True
+        for key, frame in frames:
+            self.verified[key].append(frame)
+
+
+def _read_raw_git_object(
+    repository: Path, object_id: str, expected_kind: str,
+) -> tuple[str, str, int, bytes]:
+    scope = _C09_SCOPE.get()
+    if scope is not None and scope.repository == repository:
+        key = (object_id, expected_kind)
+        frame = scope.take(key)
+        if frame is None and not scope.disabled:
+            batch = scope.batch_for(key)
+            if len(batch) > 1:
+                scope.run_batch(batch)
+                frame = scope.take(key)
+        if frame is not None:
+            scope.observe(frame[1], frame[3])
+            return frame
+        result = _read_raw_git_object_single(repository, object_id, expected_kind)
+        scope.observe(result[1], result[3])
+        return result
+    return _read_raw_git_object_single(repository, object_id, expected_kind)
+
+
+def _verified_commit_records(repository: Path, object_id: str):
+    token = _C09_SCOPE.set(_RawObjectPrefetchScope(repository, plan_children=True))
+    try:
+        return _verified_commit_records_unscoped(repository, object_id)
+    finally:
+        _C09_SCOPE.reset(token)
+
+
+def _c09_first_parent_hint(repository: Path, head: str):
+    """Advisory prefetch order only: hardened, bounded, and any failure means no hint."""
+    environment = _canonical_git_environment()
+    for key in tuple(environment):
+        if key.startswith(("LD_", "DYLD_")):
+            environment.pop(key, None)
+    environment["PATH"] = SYSTEM_EXECUTABLE_PATH
+    command = (
+        GIT_BINARY, "--no-replace-objects", "-c", f"core.hooksPath={os.devnull}",
+        "-C", str(repository), "rev-list", "--first-parent",
+        f"--max-count={P_V3_FIRST_PARENT_LIMIT + 1}", head,
+    )
+    try:
+        result = subprocess.run(
+            command, env=environment, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, check=False, timeout=RAW_OBJECT_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    return tuple(line.strip() for line in result.stdout.splitlines())
+
+
+def _raw_v3_first_parent_chain(repository: Path, head: str, anchor: str) -> tuple[str, ...]:
+    if head == anchor:
+        return _raw_v3_first_parent_chain_unscoped(repository, head, anchor)
+    scope = _RawObjectPrefetchScope(repository, plan_children=False)
+    for commit in _c09_first_parent_hint(repository, head) or ():
+        if commit in (anchor, S_COMMIT):
+            break
+        scope.add(commit, "commit")
+    token = _C09_SCOPE.set(scope)
+    try:
+        return _raw_v3_first_parent_chain_unscoped(repository, head, anchor)
+    finally:
+        _C09_SCOPE.reset(token)
+
 if __name__ == "__main__":
     unittest.main()
