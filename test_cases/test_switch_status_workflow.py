@@ -8,6 +8,7 @@ planned list it passed then go through the real switch-status.py and the real pa
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 import unittest
@@ -65,10 +66,24 @@ class SwitchStatusCronWorkflowTest(UfmCronCase):
                              "--planned", str(self.root / "planned-ufm"))
         self.assertEqual((document["expected"], document["collected"]), (2, 2))
         self.assertEqual(document["source"]["archive"], archive.name)
+        # the fake UFM's systemctl never answers "active" and there is no HA state yet (VIP unanswered)
+        self.assertEqual({row["Host Name"]: (row["Priority"], row["Issue Description"]) for row in document["rows"]},
+                         {name: ("Medium", "UFM service ufm-enterprise: not active") for name in UFMS})
         for row in document["rows"]:
-            self.assertIn(row["Host Name"], UFMS)
             self.assertEqual((row["Submitor"], row["Status"], row["Fabric"]), ("CVT", "New", "Compute"))
-            self.assertNotIn("Not collected", row["Issue Description"])
+            self.assertEqual(row["OOB IP"], UFMS[row["Host Name"]][0])
+
+    def test_when_every_ufm_is_unreachable_both_are_reported_not_collected(self):
+        self.state["down"] = [ip for ip, _mac in UFMS.values()]
+        result = self.run_cron()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.archives(), [], "nothing was collected")
+        call = [call for call in self.status_calls() if call[call.index("--type") + 1] == "ufm"][0]
+        self.assertIn("--no-archive", call)
+        document = self.real("--type", "ufm", "--no-archive", "--planned", str(self.root / "planned-ufm"))
+        self.assertEqual((document["expected"], document["collected"]), (2, 0))
+        self.assertEqual({row["Host Name"] for row in document["rows"]}, set(UFMS))
+        self.assertTrue(all(row["Issue Description"].startswith("Not collected") for row in document["rows"]))
 
     def test_a_ufm_that_returned_nothing_is_reported_not_collected(self):
         self.state["down"] = [UFMS["ufm02.example.test"][0]]
@@ -88,6 +103,45 @@ class SwitchStatusCronWorkflowTest(UfmCronCase):
         result = self.run_cron()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("[SWITCH-STATUS] WARNING: missing", result.stdout)
+
+
+class CronWiringTest(unittest.TestCase):
+    """The switch-status call in cron.sh: production only, after the page, before the REQ7 sync, and each type
+    reads the archive its own collector published in this run."""
+
+    def setUp(self):
+        self.source = (ROOT / "ethernet/monitor/cron.sh").read_text(encoding="utf-8")
+
+    def function(self, name):
+        match = re.search(rf"^{name}\(\) \{{\n(.*?)^\}}", self.source, re.MULTILINE | re.DOTALL)
+        self.assertIsNotNone(match, name)
+        return match.group(1)
+
+    def test_each_collector_publishes_the_archive_its_type_is_given(self):
+        calls = dict(re.findall(r'^\s*(?:\[\[[^\]]*\]\] && )?switch_status (\w+) "\$(\w+)"', self.source, re.MULTILINE))
+        self.assertEqual(calls, {"eth": "ETH_ARCHIVE", "ib": "IB_INFO_ARCHIVE", "nvl": "NV_INFO_ARCHIVE",
+                                 "ufm": "UFM_INFO_ARCHIVE"})
+        for collector, variable in (("collect_eth_info", "ETH_ARCHIVE"), ("collect_ib_info", "IB_INFO_ARCHIVE"),
+                                    ("collect_nv_info", "NV_INFO_ARCHIVE"), ("ufm_info_fetch", "UFM_INFO_ARCHIVE")):
+            with self.subTest(collector=collector):
+                body = self.function(collector)
+                published = body.index('archive_collection_dir')
+                assigned = re.search(rf"^\s*{variable}=", body, re.MULTILINE)
+                self.assertIsNotNone(assigned, f"{collector} never sets {variable}")
+                self.assertGreater(assigned.start(), published, "set only once the archive is published")
+                self.assertEqual(len(re.findall(rf"^\s*{variable}=", self.source, re.MULTILINE)), 2,
+                                 f"{variable}: declared empty once, set by {collector} only")
+
+    def test_production_only_after_the_page_and_before_the_sync(self):
+        block = re.search(r'^if \[\[ "\$\{COLLECTION_ENV:-prod\}" == prod \]\]; then\n((?:    .*\n)+?)fi\n',
+                          self.source[self.source.index("switch_status() {"):], re.MULTILINE)
+        self.assertIsNotNone(block)
+        self.assertEqual(block.group(1).count("switch_status "), 4)
+        start = self.source.index("switch_status() {")
+        self.assertLess(self.source.index('python3 "$HTML_GENERATOR"'), start)
+        self.assertLess(start, self.source.index("ISSUE_TRACKER_SYNC="))
+        self.assertIn('[[ -s "$UFM_CANDIDATES" ]] && switch_status ufm', block.group(1),
+                      "every planned UFM, also when key preparation failed on all of them")
 
 
 if __name__ == "__main__":

@@ -10,13 +10,16 @@ A device has a problem when (parsed by the monitor page's own functions, monitor
   - it was expected but returned no information in this collection (not collected);
   - a PSU or FAN reports a state other than ok;
   - an ASIC or PSU temperature sensor reports a state other than ok/normal, or reads at or above its Crit or Max
-    threshold (a sensor without thresholds, such as a UFM HCA, counts by its state only);
-  - the system health is "not ok" (switch), or "error" or "warning" (UFM; a warning that only repeats a PSU/FAN
-    failure is not a second problem).
+    threshold; a sensor without thresholds (a UFM HCA) counts from 85 C, where the page turns it red;
+  - the system health is "not ok" (switch); for a UFM, the HA state read on the VIP holder is not ok, or without
+    it the ufm-enterprise service is failed / not active (a warning that only repeats a PSU/FAN failure is not a
+    second problem).
 One row per device; several problems share it and it takes the highest priority:
   Critical  temperature state not ok or at/above Crit
-  High      not collected, PSU or FAN not ok, temperature at/above Max, health not ok / error
-  Medium    UFM health warning
+  High      not collected, PSU or FAN not ok, temperature at/above Max (or 85 C without thresholds),
+            health not ok, UFM HA error, ufm-enterprise failed
+  Medium    UFM HA warning, ufm-enterprise not active
+RU and Model are formulas in the sheet (looked up by Host Name); rows never carry them ("formula_columns").
 
     python3 monitor/issue-tracker/switch-status.py [--project-dir DIR] [--type eth|ib|ufm|nvl ...]
                                                    [--archive TAR | --no-archive] [--planned FILE]
@@ -28,7 +31,9 @@ before any dropped out (one name per line; "name|host..." lines are read up to t
 that dropped out is reported as not collected. --archive and --no-archive take exactly one --type.
 
 Output: <project>/99-output-monitor/<network>/issue-tracker/<type>-switch-status.json (eth: ethernet, ib and
-ufm: infiniband, nvl: nvlink), replaced whole; nothing is written for a type with no expected device.
+ufm: infiniband, nvl: nvlink), replaced whole; nothing is written for a type with no expected device. With
+--planned, rows of devices of that type that this run did not plan (a run of one Ethernet sub-type) are kept
+from the previous file, marked with the archive they came from.
 Exit 0: written or nothing to do. Exit 2: usage or input error; nothing is written.
 """
 
@@ -70,8 +75,14 @@ TYPES = {
     "ufm": {"network": "infiniband", "info_dir": "ufm-info", "inventory": {"server_ufm"}, "ufm": True},
     "nvl": {"network": "nvlink", "info_dir": "nvsw-info", "inventory": {"nvl"}, "ufm": False},
 }
-COMPUTE_TYPES = {"ib", "nvl", "eth_spx", "spx", "server_ufm"}
-FABRIC_WORDS = (("OOB", {"border", "oob"}), ("Inband", {"tan"}), ("Storage", {"storage"}))
+FORMULA_COLUMNS = ("RU", "Model")                     # the sheet looks them up by Host Name
+# Compute by type: IB, NVLink, the separate SPX network and the UFMs. eth and eth_spx are inband/OOB switches
+# (ethernet/monitor/README.md), named by their Cumulus template families: border*, oob*, oobofoob* -> OOB,
+# tan* -> Inband (ztp/config/cumulus/template/03-templates-j2/).
+COMPUTE_TYPES = {"ib", "nvl", "spx", "server_ufm"}
+FABRIC_PREFIXES = (("OOB", ("border", "oob")), ("Inband", ("tan",)), ("Storage", ("storage",)))
+PAGE_RED_WITHOUT_THRESHOLD_C = 85.0                  # generate-monitor-html.py temperature_status_class
+UFM_HA_ROLES = {"主": "primary", "备": "standby", "离线": "offline", "在线": "online", "不在集群": "not in cluster"}
 
 
 class InputError(Exception):
@@ -84,8 +95,9 @@ def say(message: str) -> None:
 
 def monitor_parser():
     """The monitor page's parsing functions, loaded privately; the page's own log stays the page's."""
-    if str(PARSER.parent) not in sys.path:      # run as a script, the generator imports its neighbours
-        sys.path.insert(0, str(PARSER.parent))
+    neighbours = str(PARSER.resolve().parent)  # run as a script, the generator imports its neighbours
+    if neighbours not in sys.path:
+        sys.path.insert(0, neighbours)
     spec = importlib.util.spec_from_file_location("switch_status_monitor_parser", PARSER)
     if spec is None or spec.loader is None:
         raise InputError(f"cannot load {PARSER}")
@@ -134,14 +146,14 @@ def read_planned(path: Path) -> set[str]:
 
 
 def fabric(device_type: str, template: str, hostname: str) -> str:
-    """The sheet's Fabric: Compute by type, else OOB / Inband / Storage by a word of the template, then of the
-    hostname; empty when nothing says."""
+    """The sheet's Fabric: Compute by type, else OOB / Inband / Storage by the start of a word of the template,
+    then of the hostname; empty when nothing says."""
     if device_type.strip().casefold() in COMPUTE_TYPES:
         return "Compute"
     for value in (template, hostname):
-        words = set(re.split(r"[^a-z0-9]+", value.casefold()))
-        for name, keys in FABRIC_WORDS:
-            if words & keys:
+        words = [word for word in re.split(r"[^a-z0-9]+", value.casefold()) if word]
+        for name, prefixes in FABRIC_PREFIXES:
+            if any(word.startswith(prefix) for word in words for prefix in prefixes):
                 return name
     return ""
 
@@ -169,6 +181,35 @@ def temperature_issue(sensor: dict) -> dict | None:
         return dict(evidence, priority="Critical", text=f"{name}: {reading} >= Crit {critical:.1f}C")
     if current is not None and maximum is not None and current >= maximum:
         return dict(evidence, priority="High", text=f"{name}: {reading} >= Max {maximum:.1f}C ({limits.strip()})")
+    if (current is not None and maximum is None and critical is None
+            and current >= PAGE_RED_WITHOUT_THRESHOLD_C):
+        return dict(evidence, priority="High",
+                    text=f"{name}: {reading} >= {PAGE_RED_WITHOUT_THRESHOLD_C:.1f}C (no device threshold)")
+    return None
+
+
+def ufm_health_issue(info: dict, *, hardware: bool) -> dict | None:
+    """The HA state read on the VIP holder decides when it was collected (a standby's inactive ufm-enterprise is
+    normal); otherwise this UFM's own ufm-enterprise service does. The page turns a PSU/FAN failure into a
+    warning; that warning alone is not a second problem."""
+    health = str(info.get("health") or "").casefold()
+    summary = str(info.get("ha_summary") or "")
+    if summary and summary != "未就绪":                   # apply_ufm_ha_status ran for this UFM
+        if info.get("ha_ok"):
+            return None
+        state = health if health in ("error", "warning") else "warning"
+        role, _, online = summary.partition(" · ")
+        text = f"UFM HA {state}: {UFM_HA_ROLES.get(role.strip(), role.strip())}"
+        if online.strip():
+            text += ", " + online.strip().replace("在线", "online")
+        return dict(kind="ha", component="ufm-ha", state=state, priority="High" if state == "error" else "Medium",
+                    text=text, detail=str(info.get("ha_detail") or ""))
+    if health == "error":
+        return dict(kind="health", component="ufm-enterprise", state=health, priority="High",
+                    text="UFM service ufm-enterprise: failed")
+    if health == "warning" and not hardware:
+        return dict(kind="health", component="ufm-enterprise", state=health, priority="Medium",
+                    text="UFM service ufm-enterprise: not active")
     return None
 
 
@@ -188,12 +229,9 @@ def device_issues(info: dict, *, ufm: bool) -> list[dict]:
             issues.append(issue)
     health = str(info.get("health") or "").casefold()
     if ufm:
-        if health == "error":
-            issues.append(dict(kind="health", component="ufm", state=health, priority="High",
-                               text="UFM health: error"))
-        elif health == "warning" and not hardware:
-            issues.append(dict(kind="health", component="ufm", state=health, priority="Medium",
-                               text="UFM health: warning"))
+        issue = ufm_health_issue(info, hardware=hardware)
+        if issue is not None:
+            issues.append(issue)
     elif health == "not ok":
         issues.append(dict(kind="health", component="system", state=health, priority="High",
                            text="System health: not ok"))
@@ -222,32 +260,67 @@ def collected(parser, archive: Path, *, ufm: bool) -> tuple[list[dict], datetime
     return devices, when
 
 
+def find_device(parser, host: str, devices: list[dict], inventory_names: set[str]) -> dict | None:
+    """This host's snapshot: its exact name first; a rack-prefixed name (host_matched) only when that name is
+    not itself a device of the list and exactly one such snapshot exists."""
+    for device in devices:
+        if str(device.get("hostname") or "").casefold() == host.casefold():
+            return device
+    candidates = [device for device in devices
+                  if str(device.get("hostname") or "").casefold() not in inventory_names
+                  and parser.host_matched(host, [device["hostname"]])]
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def previous_reports(path: Path, kind: str) -> list[tuple[dict, dict]]:
+    """(row, device) pairs of the last document of this type; nothing when it is absent or unreadable."""
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(document, dict) or document.get("schema") != SCHEMA or document.get("device_type") != kind:
+        return []
+    rows, devices = document.get("rows"), document.get("devices")
+    if not isinstance(rows, list) or not isinstance(devices, list) or len(rows) != len(devices):
+        return []
+    archive = (document.get("source") or {}).get("archive")
+    pairs = []
+    for row, device in zip(rows, devices):
+        if isinstance(row, dict) and isinstance(device, dict) and isinstance(row.get("Host Name"), str):
+            device = dict(device)
+            device.setdefault("carried_from", archive)
+            pairs.append((row, device))
+    return pairs
+
+
 def build(parser, kind: str, *, inventory: list[dict], planned: set[str] | None, archive: Path | None,
-          zone) -> dict | None:
+          zone, previous: list[tuple[dict, dict]] = ()) -> dict | None:
     spec = TYPES[kind]
-    expected = [row for row in inventory if row.get("type", "").casefold() in spec["inventory"]
-                and (planned is None or row["hostname"].casefold() in planned)]
+    of_type = [row for row in inventory if row.get("type", "").casefold() in spec["inventory"]]
+    expected = [row for row in of_type if planned is None or row["hostname"].casefold() in planned]
     if not expected:
         return None
     devices, when = collected(parser, archive, ufm=spec["ufm"]) if archive is not None else ([], None)
     moment = when or datetime.now(timezone.utc)
     submit_date = moment.astimezone(zone).strftime("%Y-%m-%d")
     batch = moment.astimezone(zone).strftime("%Y-%m-%d %H:%M")
+    inventory_names = {row["hostname"].casefold() for row in inventory}
     reports, found = [], 0
-    for entry in sorted(expected, key=lambda row: row["hostname"].casefold()):
+    for entry in expected:
         host = entry["hostname"]
-        matches = [device for device in devices if parser.host_matched(host, [device["hostname"]])]
-        info = matches[0] if matches else None
+        info = find_device(parser, host, devices, inventory_names)
         if info is None:
+            reason = ("this collection returned no data for any device of this type" if archive is None
+                      else "no device information was returned")
             issues = [dict(kind="not_collected", component="", state="", priority="High",
-                           text=f"Not collected: no device information returned in the {batch} collection")]
+                           text=f"Not collected: {reason}", collection=batch)]
         else:
             found += 1
             issues = device_issues(info, ufm=spec["ufm"])
         if not issues:
             continue
         priority = min((issue["priority"] for issue in issues), key=PRIORITY_ORDER.index)
-        row = dict.fromkeys(COLUMNS, "")
+        row = {column: "" for column in COLUMNS if column not in FORMULA_COLUMNS}
         row.update({
             "Submit Date": submit_date, "Submitor": SUBMITOR, "Host Name": host,
             "OOB IP": entry.get("eth0_ip", ""), "SN": (info or {}).get("serial", "") or "",
@@ -257,6 +330,11 @@ def build(parser, kind: str, *, inventory: list[dict], planned: set[str] | None,
         })
         reports.append((row, dict(hostname=host, type=entry.get("type", ""), collected=info is not None,
                                   model=(info or {}).get("model", "") or "", issues=issues)))
+    # a run that planned only part of this type (cron.sh --type eth_spx) keeps the others' last rows
+    expected_names = {row["hostname"].casefold() for row in expected}
+    unplanned = {row["hostname"].casefold() for row in of_type} - expected_names
+    carried = [(row, device) for row, device in previous if row["Host Name"].casefold() in unplanned]
+    reports = sorted(reports + carried, key=lambda pair: pair[0]["Host Name"].casefold())
     return {
         "schema": SCHEMA, "sheet": SHEET, "device_type": kind, "network": spec["network"],
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -265,8 +343,8 @@ def build(parser, kind: str, *, inventory: list[dict], planned: set[str] | None,
             "collected_at_utc": when.strftime("%Y-%m-%dT%H:%M:%SZ") if when else None,
             "planned": planned is not None,
         },
-        "expected": len(expected), "collected": found, "with_problems": len(reports),
-        "columns": list(COLUMNS),
+        "expected": len(expected), "collected": found, "with_problems": len(reports), "carried": len(carried),
+        "columns": list(COLUMNS), "formula_columns": list(FORMULA_COLUMNS),
         "rows": [row for row, _device in reports],
         "devices": [device for _row, device in reports],
     }
@@ -326,16 +404,19 @@ def main(argv: Iterable[str] | None = None) -> int:
                 if archive is None:
                     say(f"{kind}: no {spec['info_dir']} archive; skipped")
                     continue
-            document = build(parser, kind, inventory=inventory, planned=planned, archive=archive, zone=zone)
+            relative = Path("99-output-monitor") / spec["network"] / OUTPUT_SUBDIR / f"{kind}-switch-status.json"
+            previous = previous_reports(project / relative, kind) if planned is not None else []
+            document = build(parser, kind, inventory=inventory, planned=planned, archive=archive, zone=zone,
+                             previous=previous)
             if document is None:
                 say(f"{kind}: no device expected; nothing written")
                 continue
-            documents.append((kind, document))
-        for kind, document in documents:
-            relative = Path("99-output-monitor") / TYPES[kind]["network"] / OUTPUT_SUBDIR / f"{kind}-switch-status.json"
+            documents.append((relative, document))
+        for relative, document in documents:
             write_json(document, project / relative)
-            say(f"{kind}: {document['expected']} expected, {document['collected']} collected, "
-                f"{document['with_problems']} with problems -> {relative}")
+            carried = f" ({document['carried']} kept from earlier runs)" if document["carried"] else ""
+            say(f"{document['device_type']}: {document['expected']} expected, {document['collected']} collected, "
+                f"{document['with_problems']} with problems{carried} -> {relative}")
     except InputError as exc:
         say(f"ERROR: {exc}")
         return 2

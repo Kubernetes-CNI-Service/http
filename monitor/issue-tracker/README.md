@@ -138,7 +138,7 @@ python3 monitor/issue-tracker/switch-status.py                  # 四类都按�
 python3 monitor/issue-tracker/switch-status.py --type ufm       # 只整理 UFM
 ```
 
-- 输出：`99-output-monitor/<网络>/issue-tracker/<设备类型>-switch-status.json`，设备类型为 `eth`（ethernet）、`ib` 与 `ufm`（infiniband）、`nvl`（nvlink）。每次整体替换；只有有问题的设备才有行。
+- 输出：`99-output-monitor/<网络>/issue-tracker/<设备类型>-switch-status.json`，设备类型为 `eth`（ethernet）、`ib` 与 `ufm`（infiniband）、`nvl`（nvlink）。只有有问题的设备才有行；本轮计划过的设备，其旧行整体替换。
 - 问题判定沿用监控页面自己的解析函数（`monitor/generate-monitor-html.py`），每台设备一行，多个问题合并到 Issue Description，Priority 取最高的一项：
 
 | 问题 | Priority |
@@ -146,12 +146,15 @@ python3 monitor/issue-tracker/switch-status.py --type ufm       # 只整理 UFM
 | 温度传感器（ASIC、PSU）状态不是 ok/normal，或读数达到 Crit | Critical |
 | 本轮应采集但没有返回设备信息（Not collected） | High |
 | PSU 或 FAN 状态不是 ok | High |
-| 温度读数达到 Max | High |
-| 交换机 system health 为 not ok；UFM 健康度为 error | High |
-| UFM 健康度为 warning（只是 PSU/FAN 故障引起的不重复计） | Medium |
+| 温度读数达到 Max；没有阈值的传感器（UFM 的 HCA）达到 85°C，即页面标红的位置 | High |
+| 交换机 system health 为 not ok | High |
+| UFM：经 VIP 读到的 HA 状态为 error（如节点离线）；没有 HA 状态时，ufm-enterprise 为 failed | High |
+| UFM：HA 状态为 warning（如在线 1/2、DRBD 断开）；没有 HA 状态时，ufm-enterprise 不是 active（只是 PSU/FAN 故障引起的 warning 不重复计） | Medium |
 
-- 列与取值（来自标准模版第 2 行表头和数据验证）：Submitor 为 `CVT`，Status 为 `New`（BasicData「HW - NV Status」），Priority 取自 `Critical,High,Medium,Low`，Fabric 取自 BasicData 的 `OOB/Inband/Compute/Storage`。RU 和 Model 在模版里是按 Host Name 查 Inventory 表的公式，数据里留空；Rack 没有数据来源，留空；OOB IP 取 `02-devices_config.csv` 的 `eth0_ip`，SN 取本轮采集。
-- Fabric：类型为 ib、nvl、eth_spx、spx、server_ufm 的是 Compute；其余按 template、再按 hostname 里的单词判断：border 或 oob 为 OOB，tan 为 Inband，storage 为 Storage；都没有时留空。
-- `cron.sh` 在页面刷新之后、REQ7 同步之前，对每种类型调用一次，传入本轮确切的归档（本轮没有该类型的归档时传 `--no-archive`），以及采集前计划的设备（`--planned`）。因此中途掉线的设备会被报为 Not collected。AIR 环境不整理；本轮没有计划某类设备时，不改动该类的文件。脚本的结果不影响采集结果。
+- 有阈值的传感器在 Max 以下不报；没有阈值的传感器在 85°C 以下不报（页面在 70–85°C 标黄，这一段不报）。
+- 列与取值（来自标准模版第 2 行表头和数据验证）：Submitor 为 `CVT`，Status 为 `New`（BasicData「HW - NV Status」），Priority 取自 `Critical,High,Medium,Low`，Fabric 取自 BasicData 的 `OOB/Inband/Compute/Storage`。RU 和 Model 在模版里是按 Host Name 查 Inventory 表的公式，行里**不出现**这两列（文件的 `formula_columns` 列出它们），同步时不得覆盖。Rack 没有数据来源，留空；OOB IP 取 `02-devices_config.csv` 的 `eth0_ip`，SN 取本轮采集。Issue Description 用英文；Not collected 的采集时间写在 `devices[].issues[].collection`，不进描述。
+- Fabric：类型为 ib、nvl、spx（独立 SPX 网络）、server_ufm 的是 Compute。eth 与 eth_spx 是 inband/OOB 交换机，按 Cumulus 模版族判断：`border`、`oob-*`、`oobofoob-*` 为 OOB，`tan-*` 为 Inband；模版不说明时再看 hostname 中以 oob/border、tan、storage 开头的词；都没有时留空。
+- 主机名匹配：先按 CSV 主机名精确匹配；只有归档里的名字本身不是清单设备时，才接受带机架前缀的名字（且只能有一个），一台设备不会拿到另一台的数据。
+- `cron.sh` 在页面刷新之后、REQ7 同步之前，对每种类型调用一次，传入本轮确切的归档（本轮没有该类型的归档时传 `--no-archive`），以及采集前计划的设备（`--planned`）。因此中途掉线的设备会被报为 Not collected；全部 UFM 在密钥准备阶段就失败时也一样。AIR 环境不整理；本轮没有计划某类设备时，不改动该类的文件；只采集了 Ethernet 某个子类型（`cron.sh --type eth_spx` 等）时，本轮没计划的同类设备保留上一份文件里的行，并在 `devices[].carried_from` 注明来自哪份归档。脚本的结果不影响采集结果。
 - 单独运行时（不带 `--archive`），读取该类型最新的生产归档，`02-devices_config.csv` 里该类型的全部设备都算应采集。
 - 退出码：0 表示已写入，或没有需要整理的内容；2 表示参数或输入错误，此时不写任何文件。

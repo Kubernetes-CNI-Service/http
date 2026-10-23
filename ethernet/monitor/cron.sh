@@ -2786,7 +2786,8 @@ if [[ "${COLLECTION_ENV:-prod}" == prod ]]; then
     switch_status eth "$ETH_ARCHIVE" "$PLANNED_DEVICES"
     switch_status ib "$IB_INFO_ARCHIVE" "$PLANNED_DEVICES"
     switch_status nvl "$NV_INFO_ARCHIVE" "$PLANNED_DEVICES"
-    (( ufm_active )) && switch_status ufm "$UFM_INFO_ARCHIVE" "$UFM_CANDIDATES"
+    # every UFM planned in this run, also when key preparation failed on all of them (ufm_active is then 0)
+    [[ -s "$UFM_CANDIDATES" ]] && switch_status ufm "$UFM_INFO_ARCHIVE" "$UFM_CANDIDATES"
 fi
 
 # REQ7 (owner 2026-10-23): collection, analysis and display are followed by preparing this run's

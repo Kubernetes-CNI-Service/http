@@ -30,7 +30,9 @@ COLUMNS = [
 ]
 PRIORITIES = {"Critical", "High", "Medium", "Low"}
 FABRICS = {"OOB", "Inband", "Compute", "Storage", ""}
+FORMULAS = ["RU", "Model"]          # VLOOKUP by Host Name in the template: a row must never carry them
 SEP = "#" * 60
+TEMPLATES = ROOT / "ztp/config/cumulus/template/03-templates-j2"
 
 
 def load_script():
@@ -159,6 +161,11 @@ class SwitchStatusCase(unittest.TestCase):
         path.write_text("".join(f"{name}\n" for name in names), encoding="utf-8")
         return path
 
+    def add_inventory(self, *rows):
+        with (self.project / "02-devices_config.csv").open("a", encoding="utf-8") as stream:
+            for name, kind, template, ip in rows:
+                stream.write(f"{name},{kind},{template},{ip},24,192.0.2.254,02:00:00:00:01:01\n")
+
     def row(self, document, host):
         rows = [row for row in document["rows"] if row["Host Name"] == host]
         self.assertEqual(len(rows), 1, document["rows"])
@@ -173,21 +180,22 @@ class SheetFormatTest(SwitchStatusCase):
             "leaf-spx-01.info": switch_info("leaf-spx-01"),
             "leaf-store-01.info": switch_info("leaf-store-01"),
             "leaf-misc-01.info": switch_info("leaf-misc-01"),
-        })
+        }, name="20261023-1700-prod.tar.gz")
         result = self.run_script("--type", "eth", "--archive", str(archive))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         document = self.document("eth")
         self.assertEqual(document["schema"], "switch-status-v1")
         self.assertEqual(document["sheet"], "ETH&IB Switch")
         self.assertEqual(document["columns"], COLUMNS)
+        self.assertEqual(document["formula_columns"], FORMULAS)
         row = self.row(document, "leaf-oob-01")
-        self.assertEqual(list(row), COLUMNS, "every row carries exactly the sheet's columns, in order")
+        self.assertEqual(list(row), [column for column in COLUMNS if column not in FORMULAS],
+                         "the sheet's columns in order, without the two formula columns")
         self.assertEqual(row["Submitor"], "CVT")
         self.assertEqual(row["Status"], "New")
-        self.assertEqual(row["Submit Date"], "2026-10-23", "03:00 UTC is 11:00 in the project's Asia/Shanghai")
+        self.assertEqual(row["Submit Date"], "2026-10-24", "17:00 UTC is already the next day in Asia/Shanghai")
         self.assertEqual(row["OOB IP"], "192.0.2.11")
         self.assertEqual(row["SN"], "SER-TEST-0001")
-        self.assertEqual((row["RU"], row["Model"]), ("", ""), "RU and Model are the template's formulas")
         self.assertEqual((row["Issue#"], row["NVEX Case ID"], row["Owner"], row["P-Status"]), ("", "", "", ""))
         self.assertEqual(row["Fabric"], "OOB")
         self.assertEqual(row["Priority"], "High")
@@ -197,17 +205,30 @@ class SheetFormatTest(SwitchStatusCase):
                          "healthy devices get no row")
         self.assertEqual((document["expected"], document["collected"], document["with_problems"]), (5, 5, 1))
         self.assertEqual(document["source"]["archive"], archive.name)
-        self.assertEqual(document["source"]["collected_at_utc"], "2026-10-23T03:00:00Z")
+        self.assertEqual(document["source"]["collected_at_utc"], "2026-10-23T17:00:00Z")
         for row in document["rows"]:
             self.assertIn(row["Priority"], PRIORITIES)
             self.assertIn(row["Fabric"], FABRICS)
 
-    def test_fabric_follows_type_then_template_then_hostname(self):
+    def test_every_cumulus_template_family_has_its_fabric(self):
+        # The Cumulus templates name the network: border, oob-*, oobofoob-* are the OOB network, tan-* the
+        # inband (TAN) network; eth and eth_spx switches use them (ethernet/monitor/README.md).
+        families = {"border": "OOB", "oob": "OOB", "oobofoob": "OOB", "tan": "Inband"}
+        templates = sorted(path.name[:-len(".yaml.j2")] for path in TEMPLATES.glob("*.yaml.j2")
+                           if not path.name.startswith("_"))
+        self.assertTrue(templates)
+        for template in templates:
+            family = template.split("-", 1)[0]
+            self.assertIn(family, families, f"a template family without a documented network: {template}")
+            for kind in ("eth", "eth_spx"):
+                with self.subTest(template=template, kind=kind):
+                    self.assertEqual(self.module.fabric(kind, template, "leaf-01"), families[family])
+
+    def test_fabric_by_type_then_hostname(self):
         cases = {("ib", "NA", "ib-leaf-01"): "Compute", ("nvl", "NA", "nvl-tray-01"): "Compute",
-                 ("eth_spx", "spx-leaf", "leaf-spx-01"): "Compute", ("server_ufm", "NA", "ufm01"): "Compute",
-                 ("eth", "border-leaf", "leaf-a"): "OOB", ("eth", "oob-mgmt", "leaf-b"): "OOB",
-                 ("eth", "tan-leaf", "leaf-c"): "Inband", ("eth", "storage-leaf", "leaf-d"): "Storage",
-                 ("eth", "misc", "rack1-oob-leaf"): "OOB", ("eth", "misc", "leaf-e"): ""}
+                 ("spx", "NA", "spx-leaf-01"): "Compute", ("server_ufm", "NA", "ufm01"): "Compute",
+                 ("eth", "NA", "rack1-oob-leaf"): "OOB", ("eth", "NA", "rack1-tan-leaf"): "Inband",
+                 ("eth", "NA", "storage-leaf-01"): "Storage", ("eth", "NA", "leaf-e"): ""}
         for (kind, template, host), fabric in cases.items():
             with self.subTest(host=host):
                 self.assertEqual(self.module.fabric(kind, template, host), fabric)
@@ -271,6 +292,53 @@ class ProblemTest(SwitchStatusCase):
         self.assertEqual(row["OOB IP"], "192.0.2.12")
         self.assertEqual(row["Fabric"], "Inband")
 
+    def test_a_device_never_takes_another_devices_snapshot(self):
+        # leaf-01 is a suffix of gpu-leaf-01; both are devices of the list
+        self.add_inventory(("leaf-01", "eth", "tan-leaf", "192.0.2.21"), ("gpu-leaf-01", "eth", "tan-leaf", "192.0.2.22"))
+        archive = self.eth_archive({"gpu-leaf-01.info": switch_info("gpu-leaf-01", serial="SER-GPU-0001",
+                                                                    health="Not OK")})
+        planned = self.planned("leaf-01", "gpu-leaf-01")
+        result = self.run_script("--type", "eth", "--archive", str(archive), "--planned", str(planned))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        document = self.document("eth")
+        self.assertIn("Not collected", self.row(document, "leaf-01")["Issue Description"])
+        self.assertEqual(self.row(document, "leaf-01")["SN"], "")
+        self.assertEqual(self.row(document, "gpu-leaf-01")["SN"], "SER-GPU-0001")
+        self.assertEqual(document["collected"], 1)
+
+    def test_a_rack_prefixed_snapshot_still_belongs_to_its_device(self):
+        archive = self.eth_archive({"r12-leaf-oob-01.info": switch_info("r12-leaf-oob-01", health="Not OK")})
+        planned = self.planned("leaf-oob-01")
+        result = self.run_script("--type", "eth", "--archive", str(archive), "--planned", str(planned))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        row = self.row(self.document("eth"), "leaf-oob-01")
+        self.assertIn("System health: not ok", row["Issue Description"])
+
+    def test_a_partial_run_keeps_the_last_rows_of_the_devices_it_did_not_plan(self):
+        first = self.eth_archive({
+            "leaf-oob-01.info": switch_info("leaf-oob-01", psus=(("PSU1", "fail"),)),
+            "leaf-spx-01.info": switch_info("leaf-spx-01", health="Not OK")})
+        planned = self.planned("leaf-oob-01", "leaf-spx-01")
+        self.assertEqual(self.run_script("--type", "eth", "--archive", str(first),
+                                         "--planned", str(planned)).returncode, 0)
+        # cron.sh --type eth_spx: only leaf-spx-01 is planned, and it is healthy now
+        second = self.eth_archive({"leaf-spx-01.info": switch_info("leaf-spx-01")},
+                                  name="20261023-0400-prod.tar.gz")
+        planned = self.planned("leaf-spx-01")
+        result = self.run_script("--type", "eth", "--archive", str(second), "--planned", str(planned))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        document = self.document("eth")
+        self.assertEqual([row["Host Name"] for row in document["rows"]], ["leaf-oob-01"])
+        self.assertEqual(document["carried"], 1)
+        self.assertEqual(document["devices"][0]["carried_from"], first.name)
+        self.assertIn("PSU1", self.row(document, "leaf-oob-01")["Issue Description"])
+        # a run that plans leaf-oob-01 again replaces its row
+        third = self.eth_archive({"leaf-oob-01.info": switch_info("leaf-oob-01")}, name="20261023-0500-prod.tar.gz")
+        planned = self.planned("leaf-oob-01")
+        self.assertEqual(self.run_script("--type", "eth", "--archive", str(third),
+                                         "--planned", str(planned)).returncode, 0)
+        self.assertEqual(self.document("eth")["rows"], [])
+
     def test_no_archive_in_this_run_makes_every_planned_device_not_collected(self):
         planned = self.planned("ib-leaf-01", "ib-leaf-02")
         result = self.run_script("--type", "ib", "--no-archive", "--planned", str(planned))
@@ -329,26 +397,52 @@ class UfmTest(SwitchStatusCase):
         self.assertEqual(first["Priority"], "High")
         self.assertIn("PSU2", first["Issue Description"])
         self.assertIn("Fan2A", first["Issue Description"])
-        self.assertNotIn("health", first["Issue Description"],
+        self.assertNotIn("ufm-enterprise", first["Issue Description"],
                          "the page's warning that only repeats the PSU/FAN failure is not a second problem")
+        self.assertNotIn("mlx5_0", first["Issue Description"], "64 C without thresholds is not red on the page")
         self.assertEqual(first["SN"], "SER-UFM-0001")
         self.assertEqual(first["OOB IP"], "203.0.113.41")
         self.assertEqual(first["Fabric"], "Compute")
         second = self.row(document, "ufm02")
         self.assertEqual(second["Priority"], "Critical")
         self.assertIn("PSU1 Temp", second["Issue Description"])
-        self.assertNotIn("mlx5_0", second["Issue Description"], "an HCA sensor without thresholds counts by state only")
+        self.assertIn("mlx5_0", second["Issue Description"], "88 C without thresholds is red on the page")
 
-    def test_ufm_service_health(self):
+    def test_ufm_service_without_ha_state(self):
         archive = self.archive({"ufm01.info": ufm_info("ufm01", enterprise="failed"),
                                 "ufm02.info": ufm_info("ufm02", enterprise="activating")})
         result = self.run_script("--type", "ufm", "--archive", str(archive))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         document = self.document("ufm")
         self.assertEqual(self.row(document, "ufm01")["Priority"], "High")
-        self.assertIn("health: error", self.row(document, "ufm01")["Issue Description"])
+        self.assertIn("ufm-enterprise: failed", self.row(document, "ufm01")["Issue Description"])
         self.assertEqual(self.row(document, "ufm02")["Priority"], "Medium")
-        self.assertIn("health: warning", self.row(document, "ufm02")["Issue Description"])
+        self.assertIn("ufm-enterprise: not active", self.row(document, "ufm02")["Issue Description"])
+
+    def test_ufm_ha_state_from_the_vip_holder(self):
+        # ufm02 is offline: the primary sees 1/2 online (warning), the offline node is an error. ufm01 also
+        # lost a PSU: the HA warning is still reported. A standby's inactive ufm-enterprise is normal.
+        from test_cases.test_monitor_ufm_status import ha_snapshot
+        archive = self.archive({
+            "ufm01.info": ufm_info("ufm01", psu_reading="Power Supply AC lost"),
+            "ufm02.info": ufm_info("ufm02", enterprise="inactive"),
+            "ufm01.example.test.ha": ha_snapshot(standby_online=False),
+        })
+        result = self.run_script("--type", "ufm", "--archive", str(archive))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        document = self.document("ufm")
+        first = self.row(document, "ufm01")
+        self.assertIn("PSU2", first["Issue Description"])
+        self.assertIn("UFM HA warning: primary, online 1/2", first["Issue Description"])
+        second = self.row(document, "ufm02")
+        self.assertEqual(second["Priority"], "High")
+        self.assertIn("UFM HA error: offline", second["Issue Description"])
+        self.assertNotIn("ufm-enterprise", second["Issue Description"])
+        # both online and healthy: no HA problem, and the standby's inactive service is no problem either
+        healthy = self.archive({"ufm01.info": ufm_info("ufm01"), "ufm02.info": ufm_info("ufm02", enterprise="inactive"),
+                                "ufm01.example.test.ha": ha_snapshot()})
+        self.assertEqual(self.run_script("--type", "ufm", "--archive", str(healthy)).returncode, 0)
+        self.assertEqual(self.document("ufm")["rows"], [])
 
 
 class IsolationTest(SwitchStatusCase):
@@ -360,14 +454,43 @@ class IsolationTest(SwitchStatusCase):
             return page_log.stat().st_mtime_ns if page_log.exists() else None
         before = stamp()
         parser.log("probe from test_switch_status")
+        # a whole run, with a not-collected device (the page itself logs a missing device)
+        archive = self.eth_archive({"leaf-oob-01.info": switch_info("leaf-oob-01")})
+        self.assertEqual(self.run_script("--type", "eth", "--archive", str(archive)).returncode, 0)
         self.assertEqual(stamp(), before, "the page's own log belongs to the page generator")
 
     def test_the_document_is_replaced_whole(self):
-        archive = self.eth_archive({"leaf-oob-01.info": switch_info("leaf-oob-01", health="Not OK")})
-        self.assertEqual(self.run_script("--type", "eth", "--archive", str(archive)).returncode, 0)
         directory = self.output / "ethernet/issue-tracker"
+        directory.mkdir()
+        stale = {"schema": "switch-status-v1", "device_type": "eth", "source": {"archive": "old.tar.gz"},
+                 "rows": [{"Host Name": "leaf-oob-01", "Issue Description": "stale"}],
+                 "devices": [{"hostname": "leaf-oob-01"}]}
+        (directory / "eth-switch-status.json").write_text(json.dumps(stale), encoding="utf-8")
+        archive = self.eth_archive({"leaf-oob-01.info": switch_info("leaf-oob-01")})
+        planned = self.planned("leaf-oob-01")
+        self.assertEqual(self.run_script("--type", "eth", "--archive", str(archive),
+                                         "--planned", str(planned)).returncode, 0)
+        self.assertEqual(self.document("eth")["rows"], [], "a planned device's old row is replaced, not kept")
         self.assertEqual(sorted(path.name for path in directory.iterdir()), ["eth-switch-status.json"],
                          "no temporary file is left behind")
+
+    def test_the_project_is_found_through_setups_monitor_link(self):
+        # a published tree: the script beside the real page parser, and setup's monitor/01-global.yaml link
+        tree = Path(self.tmp.name) / "http"
+        (tree / "monitor/issue-tracker").mkdir(parents=True)
+        (tree / "monitor/issue-tracker/switch-status.py").write_bytes(SCRIPT.read_bytes())
+        (tree / "monitor/generate-monitor-html.py").symlink_to(ROOT / "monitor/generate-monitor-html.py")
+        (tree / "monitor/01-global.yaml").symlink_to(self.project / "01-global.yaml")
+        archive = self.eth_archive({"leaf-oob-01.info": switch_info("leaf-oob-01", health="Not OK")})
+        result = subprocess.run([sys.executable, "-B", str(tree / "monitor/issue-tracker/switch-status.py"),
+                                 "--type", "eth", "--archive", str(archive)],
+                                capture_output=True, text=True, timeout=120)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("leaf-oob-01", {row["Host Name"] for row in self.document("eth")["rows"]})
+        (tree / "monitor/01-global.yaml").unlink()
+        result = subprocess.run([sys.executable, "-B", str(tree / "monitor/issue-tracker/switch-status.py"),
+                                 "--type", "eth"], capture_output=True, text=True, timeout=120)
+        self.assertEqual(result.returncode, 2, "without setup's link and without --project-dir")
 
     def test_input_errors_exit_2_and_write_nothing(self):
         result = self.run_script("--type", "eth", "--archive", str(self.output / "ethernet/eth-info/none.tar.gz"))
