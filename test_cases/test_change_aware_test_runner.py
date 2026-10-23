@@ -81,6 +81,50 @@ def load_runner():
 RUNNER = load_runner()
 
 
+# Literal census of the DEV tree before G1 (v3.1 work clone 29232ec, static AST census
+# scripts/shard/census_ast.py in the v3.1 docs): the three module-level TestCase re-exports
+# through which canonical discovery ran a borrowed class a second time (165 executions).
+# TEST's census of e769395 had seven; the other four borrowers do not exist on DEV.  The
+# fourth DEV borrower, test_switch_status_workflow, binds UfmCronCase, which has no test
+# methods and never ran twice, so it is not an edge.  After the re-exports became module
+# aliases, every non-full related selection that runs the borrower must keep running the
+# defining module, as the re-export used to do.  Deliberately NOT generalised to every
+# module-alias borrower: that would add selections that never ran before.
+FORMER_REEXPORT_EDGES = (
+    ("test_cases.test_p2p_selection_workflow", "test_cases.test_load_release_transaction"),
+    ("test_cases.test_private_documentation_contract", "test_cases.test_documentation_catalog"),
+    ("test_cases.test_finished_project_lifecycle", "test_cases.test_finished_project_rehydrate"),
+)
+
+
+def former_reexport_closure_violations(root, manifest, paths):
+    """(path, borrower, definer) for each non-full related selection that loses a definer."""
+    violations = []
+    for path in paths:
+        selection = RUNNER.select_tests(root, manifest, [path], RUNNER.PendingChanges())
+        if selection.full_suite:
+            continue
+        for borrower, definer in FORMER_REEXPORT_EDGES:
+            if borrower in selection.tests and definer not in selection.tests:
+                violations.append((path, borrower, definer))
+    return violations
+
+
+def former_reexport_manifest_gaps(manifest):
+    """(table, entry, borrower, definer) for each mapping entry that names a borrower alone."""
+    entries = [("baseline_tests", "baseline_tests", manifest.get("baseline_tests", []))]
+    for table in ("test_rules", "workflows", "path_rules"):
+        for index, entry in enumerate(manifest.get(table, [])):
+            label = entry.get("id") or f"{index}:{entry['paths'][0]}"
+            entries.append((table, label, entry.get("tests", [])))
+    return [
+        (table, label, borrower, definer)
+        for table, label, tests in entries
+        for borrower, definer in FORMER_REEXPORT_EDGES
+        if borrower in tests and definer not in tests
+    ]
+
+
 def load_repository_module(name: str, path: Path):
     spec = importlib.util.spec_from_file_location(name, path)
     if spec is None or spec.loader is None:
@@ -1789,6 +1833,53 @@ class ImpactManifestTests(unittest.TestCase):
                     {"template": "tan-new-role"},
                 )
             self.assertEqual("safe: true", rendered.strip())
+
+    def test_former_reexport_closure_detects_a_borrower_without_its_definer(self):
+        lifecycle = "test_cases.test_finished_project_lifecycle"
+        rehydrate = "test_cases.test_finished_project_rehydrate"
+        toy = {
+            "baseline_tests": [],
+            "scripts": {"tools/x.py": "tools/x.py"},
+            "test_rules": [{"id": "x", "paths": ["tools/x.py"], "tests": [lifecycle]}],
+            "workflows": [],
+            "path_rules": [{"paths": ["docs/y.md"], "tests": [lifecycle, rehydrate]}],
+        }
+        self.assertEqual(
+            [("tools/x.py", lifecycle, rehydrate)],
+            former_reexport_closure_violations(ROOT, toy, ["tools/x.py", "docs/y.md"]),
+        )
+        self.assertEqual(
+            [("test_rules", "x", lifecycle, rehydrate)], former_reexport_manifest_gaps(toy),
+        )
+        toy["path_rules"].append({"paths": ["docs/z.md"], "tests": [], "full_suite": True})
+        toy["baseline_tests"] = [lifecycle]
+        self.assertEqual(
+            [("tools/x.py", lifecycle, rehydrate)],
+            former_reexport_closure_violations(ROOT, toy, ["tools/x.py", "docs/z.md"]),
+        )
+        self.assertEqual(
+            [("baseline_tests", "baseline_tests", lifecycle, rehydrate),
+             ("test_rules", "x", lifecycle, rehydrate)],
+            former_reexport_manifest_gaps(toy),
+        )
+
+    def test_former_testcase_reexport_borrowers_keep_definers_in_related_selection(self):
+        manifest = RUNNER.load_and_validate_manifest(ROOT, MANIFEST_PATH)
+        listed = subprocess.run(
+            ["git", "-C", str(ROOT), "ls-files", "-z"],
+            env=dict(os.environ, GIT_OPTIONAL_LOCKS="0"),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
+        ).stdout.decode("utf-8").split("\0")
+        paths = sorted(
+            path for path in set(filter(None, listed)) | set(manifest["scripts"])
+            if not (path.startswith("test_cases/test_") and path.endswith(".py"))
+        )
+        self.assertGreater(len(paths), 0)
+        self.assertEqual([], former_reexport_closure_violations(ROOT, manifest, paths))
+
+    def test_manifest_entries_naming_a_former_borrower_also_name_its_definer(self):
+        manifest = RUNNER.load_and_validate_manifest(ROOT, MANIFEST_PATH)
+        self.assertEqual([], former_reexport_manifest_gaps(manifest))
 
 
 class ApprovalLedgerTests(unittest.TestCase):
