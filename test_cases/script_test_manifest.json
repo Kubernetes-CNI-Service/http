@@ -702,10 +702,12 @@
     },
     {
       "id": "issue-tracker-sync",
-      "description": "REQ7 在线 Issue Tracker 同步：原样复制的 CableTracker 引擎 + 包装层（IB/ETH 转换、配置与密钥检查、跳过未变输入），不联网",
+      "description": "REQ7 在线 Issue Tracker 同步：原样复制的 CableTracker 引擎 + 包装层（IB/ETH 转换、配置与密钥检查、跳过未变输入），以及按 ETH&IB Switch 列与取值规范整理的设备状态数据（cron 每轮调用，不写表），不联网",
       "tests": [
         "test_cases.test_issue_tracker_sync",
-        "test_cases.test_issue_tracker_sync_workflow"
+        "test_cases.test_issue_tracker_sync_workflow",
+        "test_cases.test_switch_status",
+        "test_cases.test_switch_status_workflow"
       ]
     }
   ],
@@ -943,6 +945,7 @@
     "monitor/issue-tracker/cabletracker/ibdiagnet/generate_report.py": "monitor/issue-tracker/cabletracker/ibdiagnet/generate_report.py",
     "monitor/issue-tracker/format_precheck.py": "monitor/issue-tracker/format_precheck.py",
     "monitor/issue-tracker/issue-tracker-sync.py": "monitor/issue-tracker/issue-tracker-sync.py",
+    "monitor/issue-tracker/switch-status.py": "monitor/issue-tracker/switch-status.py",
     "monitor/issue-tracker/update-engine.py": "monitor/issue-tracker/update-engine.py",
     "monitor/issue_tracker_qualification.py": "monitor/issue_tracker_qualification.py",
     "monitor/issue_tracker_manifest.py": "monitor/issue_tracker_manifest.py",
@@ -3170,6 +3173,16 @@
       "tests": [
         "test_cases.test_issue_tracker_sync",
         "test_cases.test_issue_tracker_sync_workflow"
+      ]
+    },
+    {
+      "id": "switch_status_direct",
+      "paths": [
+        "monitor/issue-tracker/switch-status.py"
+      ],
+      "tests": [
+        "test_cases.test_switch_status",
+        "test_cases.test_switch_status_workflow"
       ]
     },
     {
@@ -5746,6 +5759,20 @@
       "tests": [
         "test_cases.test_issue_tracker_sync_workflow",
         "test_cases.test_issue_tracker_sync"
+      ]
+    },
+    {
+      "id": "switch_status_flow",
+      "members": [
+        "monitor/issue-tracker/switch-status.py",
+        "monitor/generate-monitor-html.py",
+        "ethernet/monitor/cron.sh",
+        "infiniband/monitor/cron.sh",
+        "infiniband/monitor/ufm-info.sh"
+      ],
+      "tests": [
+        "test_cases.test_switch_status_workflow",
+        "test_cases.test_switch_status"
       ]
     }
   ],

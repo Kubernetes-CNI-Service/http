@@ -300,6 +300,23 @@ class InputSelectionTests(unittest.TestCase):
         self.assertEqual("20260831-2000-air.tar.gz",
                          self.sync.newest_eth_input(self.project, "air").name)
 
+    def test_the_collection_minute_in_an_archive_name_is_utc_whatever_the_server_zone(self):
+        # cron.sh names every archive with `date -u +%Y%m%d-%H%M`; 2026-08-31 19:00 UTC is 1788202800.
+        import time
+        saved = os.environ.get("TZ")
+        try:
+            for zone in ("Asia/Shanghai", "America/Los_Angeles", "UTC"):
+                with self.subTest(zone=zone):
+                    os.environ["TZ"] = zone
+                    time.tzset()
+                    self.assertEqual(self.sync.collected_epoch(Path("20260831-1900-prod.tar.gz")), 1788202800.0)
+        finally:
+            if saved is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = saved
+            time.tzset()
+
 
 class LldpqProjectionTests(unittest.TestCase):
     def setUp(self):

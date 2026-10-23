@@ -55,7 +55,7 @@ import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
@@ -313,11 +313,11 @@ def newest_eth_input(project: Path, environment: str) -> Path | None:
 
 
 def collected_epoch(archive: Path) -> float:
-    """The collection minute in the archive name, as local time on this server."""
+    """The collection minute in the archive name; cron.sh writes it in UTC (`date -u`)."""
     minute = re.match(r"(\d{8}-\d{4})", archive.name)
     if minute is None:
         raise SyncError(f"cannot read the collection time from {archive.name}")
-    return datetime.strptime(minute.group(1), "%Y%m%d-%H%M").astimezone().timestamp()
+    return datetime.strptime(minute.group(1), "%Y%m%d-%H%M").replace(tzinfo=timezone.utc).timestamp()
 
 
 def sha256(path: Path) -> str:

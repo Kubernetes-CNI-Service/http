@@ -161,6 +161,8 @@ CONTEXT_FILE=""
 UNQUALIFIED_CONTEXT_FILE=""
 RESULT_FILE=""
 INFO_ARCHIVE=""
+IB_INFO_ARCHIVE=""      # this run's exact IB / NV info archives (INFO_ARCHIVE keeps the last one)
+NV_INFO_ARCHIVE=""
 LINK_ARCHIVE=""
 LINK_CSV=""
 V2_EMITTER=${BASE}/../../monitor/collection_v2_emitter.py
@@ -1726,6 +1728,7 @@ collect_ib_info() {
 
     archive_collection_dir "$dir" "[IB]" || return 1
     INFO_ARCHIVE="${dir}.tar.gz"
+    IB_INFO_ARCHIVE=$INFO_ARCHIVE
     log "[IB]  done → ${dir}.tar.gz"
 }
 
@@ -1832,6 +1835,7 @@ collect_nv_info() {
 
     archive_collection_dir "$dir" "[NV]" || return 1
     INFO_ARCHIVE="${dir}.tar.gz"
+    NV_INFO_ARCHIVE=$INFO_ARCHIVE
     log "[NV]  done → ${dir}.tar.gz"
 }
 
@@ -1899,6 +1903,7 @@ collect_nv_link() {
 # after it. Isolated from the switch result: a UFM problem is logged and returned to main, never
 # written to PLANNED_DEVICES or DEVICE_FAILURES (infiniband/monitor/UFM-MONITOR.md).
 UFM_INFO_DIR=""
+UFM_INFO_ARCHIVE=""        # the exact ufm-info archive published in this run, for the switch status
 UFM_INFO_STARTED=0
 UFM_TRIGGERED=()
 UFM_IBDIAG_RUN_ID=""
@@ -2122,6 +2127,7 @@ ufm_info_fetch() {
     fi
     archive_collection_dir "$UFM_INFO_DIR" "[UFM]" || return 1
     UFM_COLLECTED=1
+    UFM_INFO_ARCHIVE="${UFM_INFO_DIR}.tar.gz"
     log "[UFM] done → ${UFM_INFO_DIR}.tar.gz (${count} UFM)"
     return "$failed"
 }
@@ -2756,6 +2762,31 @@ elif [[ -n "$INFO_ARCHIVE$LINK_ARCHIVE" ]] || (( UFM_COLLECTED )); then
     else
         log "[MONITOR-HTML] refreshed scope=${COLLECTION_ENV:-prod}"
     fi
+fi
+
+# Switch status (owner 2026-10-23): the production ETH/IB/NVL switches and UFM servers with a problem in
+# this run (not collected, PSU/FAN, ASIC/PSU temperature, system health) are prepared as rows of the
+# online Issue Tracker's ETH&IB Switch sheet, 99-output-monitor/<network>/issue-tracker/<type>-switch-status.json,
+# until CableTracker can sync that sheet; nothing is sent. Each type gets this run's exact archive, or
+# --no-archive, and the devices planned before any dropped out. Its result never changes this collection's.
+SWITCH_STATUS=${BASE}/../../monitor/issue-tracker/switch-status.py
+switch_status() {
+    local kind=$1 archive=$2 planned=$3 rc=0 output line
+    local source=(--no-archive)
+    [[ -f "$SWITCH_STATUS" ]] || { log "[SWITCH-STATUS] WARNING: missing $SWITCH_STATUS"; return 0; }
+    [[ -n "$archive" ]] && source=(--archive "$archive")
+    output=$(python3 "$SWITCH_STATUS" --type "$kind" "${source[@]}" --planned "$planned" 2>&1) || rc=$?
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && log "$line"
+    done <<< "$output"
+    (( rc == 0 )) || log "[SWITCH-STATUS] WARNING: ${kind} exited ${rc}"
+    return 0
+}
+if [[ "${COLLECTION_ENV:-prod}" == prod ]]; then
+    switch_status eth "$ETH_ARCHIVE" "$PLANNED_DEVICES"
+    switch_status ib "$IB_INFO_ARCHIVE" "$PLANNED_DEVICES"
+    switch_status nvl "$NV_INFO_ARCHIVE" "$PLANNED_DEVICES"
+    (( ufm_active )) && switch_status ufm "$UFM_INFO_ARCHIVE" "$UFM_CANDIDATES"
 fi
 
 # REQ7 (owner 2026-10-23): collection, analysis and display are followed by preparing this run's

@@ -59,7 +59,7 @@ python3 monitor/issue-tracker/issue-tracker-sync.py --force          # 输入没
 - 整理好的数据按网络放在项目的 `99-output-monitor/` 下（UFM 算 IB）：
   - `infiniband/issue-tracker/`：`ib-cvt.json`、`ib-cvt.summary.json`、`state.json`
   - `ethernet/issue-tracker/`：`eth-lldpq.json`、`state.json`
-  - 设备状态数据会命名为 `<设备类型>-switch-status.json`，见下文。
+  - 设备状态数据 `<设备类型>-switch-status.json` 由 `switch-status.py` 生成，见下文「设备状态」。
   - `state.json` 记录上次成功同步的输入。
 - 脚本日志写在 `99-output-monitor/issue-tracker-sync.log`，用 `tools/log_rotation.py` 轮转。同一项目同一时间只允许一个同步，锁文件是 `99-output-monitor/.issue-tracker-sync.lock`。
 - 与本目录同级的 `monitor/99-output-monitor` 是 setup 建立的链接，指向 `DAY0-Prepare/<项目>/99-output-monitor`（登记在 `tools/project_contract.py` 的 `MONITOR_RUNTIME_MAPPINGS`）。同步脚本默认通过这个链接写数据和日志，并核对链接确实指向当前项目；用 `--project-dir` 指定项目时，直接写到该项目的 `99-output-monitor/`。
@@ -131,4 +131,27 @@ python3 monitor/issue-tracker/issue-tracker-sync.py --precheck-only     # 只做
 
 ## 设备状态（ETH&IB Switch）
 
-当前版本的 CableTracker 只会填写 Cabling 两张表。Switch status 里有问题的设备（生产环境的 ETH、IB、NVL 交换机，以及 UFM 服务器），会按在线文档 `ETH&IB Switch` 表的列和取值规范（BasicData 的状态、Fabric，以及 Priority 下拉值）提前整理成数据文件 `99-output-monitor/<网络>/issue-tracker/<设备类型>-switch-status.json`（`eth`、`ib`、`ufm`、`nvl`，Submitor 为 `CVT`）；等 CableTracker 支持同步设备状态后，直接交给它同步。我们不自己写这张表。
+当前版本的 CableTracker 只会填写 Cabling 两张表。Switch status 里有问题的设备（生产环境的 ETH、IB、NVL 交换机，以及 UFM 服务器），由 `switch-status.py` 按在线文档 `ETH&IB Switch` 表的列和取值规范提前整理成数据文件；等 CableTracker 支持同步设备状态后，直接交给它同步。我们不自己写这张表，脚本也不联系 Google。
+
+```bash
+python3 monitor/issue-tracker/switch-status.py                  # 四类都按最新的生产归档整理
+python3 monitor/issue-tracker/switch-status.py --type ufm       # 只整理 UFM
+```
+
+- 输出：`99-output-monitor/<网络>/issue-tracker/<设备类型>-switch-status.json`，设备类型为 `eth`（ethernet）、`ib` 与 `ufm`（infiniband）、`nvl`（nvlink）。每次整体替换；只有有问题的设备才有行。
+- 问题判定沿用监控页面自己的解析函数（`monitor/generate-monitor-html.py`），每台设备一行，多个问题合并到 Issue Description，Priority 取最高的一项：
+
+| 问题 | Priority |
+|---|---|
+| 温度传感器（ASIC、PSU）状态不是 ok/normal，或读数达到 Crit | Critical |
+| 本轮应采集但没有返回设备信息（Not collected） | High |
+| PSU 或 FAN 状态不是 ok | High |
+| 温度读数达到 Max | High |
+| 交换机 system health 为 not ok；UFM 健康度为 error | High |
+| UFM 健康度为 warning（只是 PSU/FAN 故障引起的不重复计） | Medium |
+
+- 列与取值（来自标准模版第 2 行表头和数据验证）：Submitor 为 `CVT`，Status 为 `New`（BasicData「HW - NV Status」），Priority 取自 `Critical,High,Medium,Low`，Fabric 取自 BasicData 的 `OOB/Inband/Compute/Storage`。RU 和 Model 在模版里是按 Host Name 查 Inventory 表的公式，数据里留空；Rack 没有数据来源，留空；OOB IP 取 `02-devices_config.csv` 的 `eth0_ip`，SN 取本轮采集。
+- Fabric：类型为 ib、nvl、eth_spx、spx、server_ufm 的是 Compute；其余按 template、再按 hostname 里的单词判断：border 或 oob 为 OOB，tan 为 Inband，storage 为 Storage；都没有时留空。
+- `cron.sh` 在页面刷新之后、REQ7 同步之前，对每种类型调用一次，传入本轮确切的归档（本轮没有该类型的归档时传 `--no-archive`），以及采集前计划的设备（`--planned`）。因此中途掉线的设备会被报为 Not collected。AIR 环境不整理；本轮没有计划某类设备时，不改动该类的文件。脚本的结果不影响采集结果。
+- 单独运行时（不带 `--archive`），读取该类型最新的生产归档，`02-devices_config.csv` 里该类型的全部设备都算应采集。
+- 退出码：0 表示已写入，或没有需要整理的内容；2 表示参数或输入错误，此时不写任何文件。
