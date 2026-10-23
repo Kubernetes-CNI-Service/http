@@ -225,6 +225,25 @@ class CollectionV2EmitterContractTests(unittest.TestCase):
                 [role["role"] for role in json.loads(evidence)["roles"]],
             )
 
+    def test_child_context_cannot_supply_ib_role_paths_to_real_emitter(self) -> None:
+        # Moved from the retired test_collection_ib_producer_workflow (4583161:605-622; REQ7 retirement
+        # batch 1, review B2): the worker context key set is exact, an extra key is refused.
+        with tempfile.TemporaryDirectory(prefix="ib-emitter-role-injection-") as directory:
+            root = Path(directory)
+            args = self.fixture(root)
+            context = json.loads(args.context_file.read_bytes())
+            context["ib_analysis_roles"] = {
+                "validation_report": "/tmp/unrelated-topology-validation.xlsx",
+            }
+            args.context_file.write_bytes(EMITTER.canonical(context))
+            with mock.patch.object(EMITTER, "ROOT", root), self.assertRaises(ValueError):
+                EMITTER.build_result(args)
+            sidecar = (root / "monitor/status/collection-cycles"
+                       / context["identity"]["project_key"]
+                       / "prod/switch_collection/artifacts/00000000000000000007"
+                       / "infiniband-prod/evidence-manifest.json")
+            self.assertFalse(sidecar.exists())
+
     def test_publish_rejects_rebound_status_symlink_without_foreign_write(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

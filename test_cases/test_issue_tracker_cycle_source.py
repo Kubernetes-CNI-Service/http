@@ -217,5 +217,73 @@ class IssueTrackerCycleSourceTests(unittest.TestCase):
         self.assertIsNone(evidence[0].summary_sha256)
 
 
+class CycleReaderScopeGuardTests(unittest.TestCase):
+    """read_completed_cycle_evidence trusts a held replay scope only from its live original holder.
+
+    Moved from the retired test_req7_online_cycle_scope (4583161:176-204, 263-279; REQ7 retirement batch 1,
+    review S2): forged, malformed, other-store and copied-context scopes are refused by
+    _require_live_cycle_replay / the store check of read_completed_cycle_evidence."""
+
+    def setUp(self):
+        fixture = IssueTrackerCycleSourceTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        self.store = fixture.store
+        completed(self.store, TOKEN_1)
+
+    def test_public_reader_refuses_caller_verifier_before_invoking_it(self):
+        from monitor import issue_tracker_cycle_source as source
+        callbacks = []
+        token = source._HELD_CYCLE_REPLAY.set(
+            (self.store, lambda: callbacks.append(True), ('caller evidence',)))
+        try:
+            with self.assertRaises(source.CycleSourceHoldError):
+                source.read_completed_cycle_evidence(self.store)
+        finally:
+            source._HELD_CYCLE_REPLAY.reset(token)
+        self.assertEqual([], callbacks, 'a caller callback is not an original verifier')
+
+    def test_public_reader_refuses_malformed_scope_as_typed_hold(self):
+        from monitor import issue_tracker_cycle_source as source
+        for active in ((), (self.store,), [self.store, lambda: None, ()]):
+            with self.subTest(scope_type=type(active).__name__, fields=len(active)):
+                token = source._HELD_CYCLE_REPLAY.set(active)
+                try:
+                    with self.assertRaises(source.CycleSourceHoldError):
+                        source.read_completed_cycle_evidence(self.store)
+                finally:
+                    source._HELD_CYCLE_REPLAY.reset(token)
+
+    def test_live_scope_for_other_actual_store_does_not_supply_its_result(self):
+        from monitor import issue_tracker_cycle_source as source
+        other = IssueTrackerCycleSourceTests()
+        other.setUp()
+        self.addCleanup(other.doCleanups)
+        with source._hold_completed_cycle_replay(self.store):
+            self.assertEqual((), source.read_completed_cycle_evidence(other.store))
+            self.assertEqual((1,), tuple(item.sequence for item in
+                source.read_completed_cycle_evidence(self.store)))
+
+    def test_exited_worker_scope_in_copied_context_cannot_hide_next_real_cycle(self):
+        from contextvars import copy_context
+        from monitor import issue_tracker_cycle_source as source
+        fixture = IssueTrackerCycleSourceTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        first = completed(fixture.store, TOKEN_1)
+        with source._hold_completed_cycle_replay(fixture.store):
+            copied = copy_context()
+            self.assertEqual((first['cycle_id'],), tuple(item.cycle_id for item in
+                copied.run(source.read_completed_cycle_evidence, fixture.store)))
+        second = completed(fixture.store, TOKEN_2)
+        before = {path.name: path.read_bytes() for path in fixture.store.records_dir.iterdir()}
+        with self.assertRaises(source.CycleSourceHoldError):
+            copied.run(source.read_completed_cycle_evidence, fixture.store)
+        self.assertEqual((first['cycle_id'], second['cycle_id']), tuple(item.cycle_id for item in
+            source.read_completed_cycle_evidence(fixture.store)))
+        self.assertEqual(before, {path.name: path.read_bytes()
+            for path in fixture.store.records_dir.iterdir()}, 'read rejection cannot repair originals')
+
+
 if __name__ == "__main__":
     unittest.main()

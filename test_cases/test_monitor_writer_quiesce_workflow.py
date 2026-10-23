@@ -5076,6 +5076,104 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "WDISC_UNRESOLVED"):
             governed_external_sink_calls(ast.parse(rebound), summaries)
 
+    def test_real_online_target_close_retains_fd_identity_not_writer_basename(self) -> None:
+        """The real read-side close cannot borrow a foreign mutator's role."""
+        # Literal read-side shape of the retired monitor/issue_tracker_online_target.py (4583161:159-185;
+        # REQ7 retirement batch 1): native flag-existence reads, a governed read-only FD and its close.
+        source = (
+            "import os\n"
+            "import stat\n"
+            "def inspect_project_online_target(owner):\n"
+            "    fd = None; failed = False\n"
+            "    try:\n"
+            "        if any(not hasattr(os, flag) for flag in ('O_NOFOLLOW', 'O_CLOEXEC', 'O_NONBLOCK')):\n"
+            "            raise ValueError('current_target_binding_unproved')\n"
+            "        fd = os.open('01-global.yaml', os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK,\n"
+            "            dir_fd=owner.project_fd)\n"
+            "        before = os.fstat(fd)\n"
+            "        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:\n"
+            "            raise ValueError('current_target_binding_unproved')\n"
+            "        raw = os.read(fd, 1024*1024+1)\n"
+            "        if len(raw) != before.st_size: raise ValueError('current_target_binding_unproved')\n"
+            "    except Exception: failed = True\n"
+            "    finally:\n"
+            "        if fd is not None:\n"
+            "            try: os.close(fd)\n"
+            "            except OSError: failed = True\n"
+            "    if failed: raise ValueError('current_target_binding_unproved')\n"
+            "    return raw\n"
+        )
+        summaries = {"close": (["destination"], {0})}
+        self.assertEqual(set(), governed_external_sink_calls(ast.parse(source), summaries))
+        writer_source = ("import os\ndef close(destination):\n"
+                         "    os.replace('stage', destination)\n")
+        caller_source = ("from mwq_private_close_writer import close\n"
+                         "def publish():\n    close('01-global.yaml')\n")
+        self.assertEqual({0}, generic_mutation_parameter_summaries(ast.parse(writer_source))["close"])
+        self.assertEqual({("publish", "close")},
+                         governed_external_sink_calls(ast.parse(caller_source), summaries))
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary).resolve()
+            target = directory / "01-global.yaml"
+            original, replacement = b"independent read-only global bytes\n", b"independent imported writer bytes\n"
+            target.write_bytes(original)
+            descriptor = os.open(target, os.O_RDONLY)
+            try:
+                self.assertEqual(original, os.read(descriptor, 4096))
+            finally:
+                os.close(descriptor)
+            with self.assertRaises(OSError):
+                os.fstat(descriptor)
+            self.assertEqual(original, target.read_bytes())
+            stage = directory / "stage"
+            stage.write_bytes(replacement)
+            helper = directory / "mwq_private_close_writer.py"
+            entry = directory / "entry.py"
+            helper.write_text(writer_source, encoding="utf-8")
+            entry.write_text(caller_source, encoding="utf-8")
+            spec = importlib.util.spec_from_file_location("mwq_private_close_writer", helper)
+            writer = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(writer)
+            original_replace = writer.os.replace
+
+            def private_replace(source_path, destination_path):
+                self.assertEqual("stage", source_path)
+                self.assertEqual("01-global.yaml", destination_path)
+                return original_replace(stage, target)
+
+            with mock.patch.dict(sys.modules, {"mwq_private_close_writer": writer}), \
+                    mock.patch.object(writer.os, "replace", side_effect=OSError("independent close writer fault")):
+                caller_spec = importlib.util.spec_from_file_location("mwq_private_close_entry", entry)
+                caller = importlib.util.module_from_spec(caller_spec)
+                caller_spec.loader.exec_module(caller)
+                with self.assertRaisesRegex(OSError, "independent close writer fault"):
+                    caller.publish()
+                self.assertEqual(original, target.read_bytes())
+                self.assertEqual(replacement, stage.read_bytes())
+            with mock.patch.object(writer.os, "replace", side_effect=private_replace):
+                caller.publish()
+            self.assertFalse(stage.exists())
+            cold_reader = load_module("mwq_close_cold_bytes", "tools/_package_common.py")
+            self.assertEqual(replacement, cold_reader._read_frozen_regular_bytes(target, "private close fixture"))
+
+        # Imported aliases retain native identity, but any all-tree import
+        # rebinding loses that identity rather than receiving a close exemption.
+        alias_source = ("from os import open as read_fd, close as release_fd\nimport os\n"
+                        "def inspect():\n    fd = read_fd('01-global.yaml', os.O_RDONLY)\n"
+                        "    release_fd(fd)\n")
+        self.assertEqual(set(), governed_external_sink_calls(ast.parse(alias_source), summaries))
+        for mutant, changed in enumerate((
+            source + "\ndef rebind_online_os():\n    global os\n    import runtime_writer as os\n",
+            source + "\ndef rebind_online_os():\n    global os\n    from runtime_writer import writer as os\n",
+            alias_source + "\ndef rebind_release_fd():\n    global release_fd\n"
+                           "    from runtime_writer import close as release_fd\n",
+            source + "\nos.__dict__['close'] = runtime_writer\n",
+            source + "\ndef unknown_close_namespace():\n    runtime_mutator(os)\n",
+        ), 1):
+            with self.subTest(boundary="close-source-identity", mutant=mutant), \
+                    self.assertRaisesRegex(AssertionError, "WDISC_UNRESOLVED"):
+                governed_external_sink_calls(ast.parse(changed), summaries)
+
     def test_governed_writers_are_derived_from_real_mutation_sinks(self) -> None:
         """W-1 walks from governed mutations, never from existing stop callers."""
         # Each row names a real production mutation sink and the supported

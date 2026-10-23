@@ -15,6 +15,7 @@ old chain)."""
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import os
@@ -250,6 +251,42 @@ class SetupLinkedCollectionCycleWorkflowTest(ProdCycleFixture, unittest.TestCase
         with mock.patch.object(WORKER, "HTTP_ROOT", self.root):
             self.assertTrue(WORKER._collection_slot_artifacts_match(child, context["artifacts"], context),
                             "the IB base roles replay through the links")
+
+
+class CompletedCycleRoleSetWorkflowTest(ProdCycleFixture, unittest.TestCase):
+    """The worker accepts exactly the declared roles of a completed IB child, never an appended one.
+
+    Moved from the retired test_collection_ib_producer_workflow (4583161:581-603; REQ7 retirement batch 1,
+    review B2): it guards the retained exact role-list check of
+    switch-collection-worker._collection_validate_artifact_roles."""
+
+    def test_child_cannot_hand_fill_six_analysis_roles_into_worker_acceptance(self) -> None:
+        identity, artifacts = self._cycle()
+        outcome = self.store._validate_completion_record(
+            WORKER._read_private_json(self.store.completion_path(identity["sequence"])),
+            identity,
+        )["run_result"]["outcomes"][1]
+        child = outcome["child_result"]
+        ib = artifacts["infiniband/prod"]
+        evidence = json.loads(ib["envelope"].with_name("evidence-manifest.json").read_bytes())
+        frozen = (ib["envelope"].parent.parent / "inputs/infiniband-prod.csv").read_bytes()
+        self.assertTrue(WORKER._collection_validate_artifact_roles(
+            evidence, root=self.root, child=child, inventory=frozen,
+        ))
+        for label, names in (
+            ("the six analysis roles", ("ufm_actual_archive", "ufm_actual_log", "expected_cvt",
+                                        "validation_report", "report_provenance", "ufm_completion_receipt")),
+            ("one undeclared role", ("undeclared_role",)),
+        ):
+            with self.subTest(appended=label):
+                forged = copy.deepcopy(evidence)
+                forged["roles"].extend({
+                    "role": name, "state": "present", "relative_path": "infiniband/monitor/ib-link/fake.csv",
+                    "sha256": "a" * 64, "size_bytes": 1,
+                } for name in names)
+                self.assertFalse(WORKER._collection_validate_artifact_roles(
+                    forged, root=self.root, child=child, inventory=frozen,
+                ))
 
 
 if __name__ == "__main__":
