@@ -1,6 +1,6 @@
 # Apache 静态发布边界与信任模型
 
-`infra-setup.sh` 在管理服务器安装
+`infra-setup.py` 在管理服务器安装
 `/etc/apache2/conf-enabled/http-ztp-public-boundary.conf`。它关闭 DocumentRoot 目录枚举，并在
 URL 空间中拒绝以下静态读取：
 
@@ -15,7 +15,7 @@ URL 空间中拒绝以下静态读取：
 `/cgi-bin/` 下三个无扩展名控制入口。infra 先把配置写入临时文件并原子替换，再对完整 Apache
 配置执行 `apache2ctl configtest`；失败时恢复本次执行前的文件且不会进入服务 restart。load
 还会在服务启动门禁中验证该文件的精确 SHA-256，旧版、缺失或手工漂移的策略必须先重新运行
-当前 `infra-setup.sh`。`infra-teardown.sh` 根据 managed-files 恢复原配置或删除工具新建文件。
+当前 `infra-setup.py`。`infra-teardown.sh` 根据 managed-files 恢复原配置或删除工具新建文件。
 
 Apache 的 URL 规则会在任意深度保留 `DAY0-Prepare`、`status`、`backup`、`optimize` 路径段，
 以及 `monitor/ztp-status`、`config/isc-dhcp-server`、`config/cumulus/template`、

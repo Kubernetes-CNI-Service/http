@@ -97,6 +97,30 @@ def _ib_inventory(raw: bytes) -> tuple[str, ...]:
         raise IbCycleRoleHold("IB frozen inventory cannot be rebuilt") from exc
 
 
+def rebuild_ib_target_plan(raw: bytes) -> dict:
+    """The infiniband slot's frozen target plan, rebuilt from its frozen inventory.
+
+    Besides the IB switches it carries the server_ufm rows (owner 2026-10-21), selected exactly as
+    cron.sh selects them: named rows with an eth0_ip, in inventory order.
+    """
+    import csv
+    import io
+
+    selected = _ib_inventory(raw)
+    try:
+        ufm = [
+            f'{row["hostname"].strip()}|{row["eth0_ip"].strip()}'
+            for row in csv.DictReader(io.StringIO(raw.decode("utf-8")), strict=True)
+            if row["type"].strip().casefold() == "server_ufm"
+            and row["hostname"].strip() and not row["hostname"].strip().startswith("#")
+            and row["eth0_ip"].strip().casefold() not in {"", "na"}
+        ]
+    except (csv.Error, UnicodeError, TypeError, AttributeError) as exc:
+        raise IbCycleRoleHold("IB frozen inventory cannot be rebuilt") from exc
+    return {"eth": [], "spx": [], "ib": list(selected), "nv": [],
+            "dynamic_identities": [], "ufm": ufm}
+
+
 def _bound_base_roles(root: Path, roles: object) -> tuple[str, ...]:
     if (not isinstance(roles, list) or len(roles) != len(_BASE_ROLES)
             or tuple(item.get("role") if isinstance(item, dict) else None
@@ -184,12 +208,15 @@ def inspect_completed_ib_cycle_roles(
                 != child["input_inventory_sha256"]):
             raise IbCycleRoleHold("IB frozen inventory disagrees with child")
         # This worker version records the plan digest in the completion-bound
-        # envelope, not a separate plan file. Rebuild its static IB-only shape
-        # from the frozen inventory rather than trusting a caller-supplied plan.
-        plan_raw = canonical({
-            "eth": [], "spx": [], "ib": list(selected), "nv": [],
-            "dynamic_identities": [],
-        })
+        # envelope, not a separate plan file. Rebuild its static shape (IB
+        # switches plus UFM rows) from the frozen inventory rather than trusting
+        # a caller-supplied plan.
+        plan = rebuild_ib_target_plan(inventory)
+        plan_raw = canonical(plan)
+        # A cycle frozen before the UFM key existed planned no UFM and kept five keys; its recorded
+        # digest is never rewritten, so it binds as it was (codex review 2026-10-22).
+        legacy_plan_sha256 = hashlib.sha256(canonical(
+            {key: value for key, value in plan.items() if key != "ufm"})).hexdigest()
         evidence, evidence_raw = _private_json(
             root, private / "evidence-manifest.json",
         )
@@ -211,10 +238,18 @@ def inspect_completed_ib_cycle_roles(
             "target_plan_sha256": hashlib.sha256(plan_raw).hexdigest(),
             "runtime_input_hashes": {},
         }
+        if envelope.get("target_plan_sha256") == legacy_plan_sha256:
+            base_envelope["target_plan_sha256"] = legacy_plan_sha256
         protected = "ib_analysis_binding" in envelope
+        # REQ7 R1 (2026-10-23): the cron.sh UFM lane's run bound by the emitter; exclusive with D-70.
+        ufm_bound = "ufm_run_binding" in envelope
+        if protected and ufm_bound:
+            raise IbCycleRoleHold("IB envelope binds two UFM analyses")
         expected_keys = set(base_envelope)
         if protected:
             expected_keys.update(("ib_analysis_binding", "ib_analysis_context_sha256"))
+        if ufm_bound:
+            expected_keys.add("ufm_run_binding")
         if (set(envelope) != expected_keys
                 or any(envelope[key] != value for key, value in base_envelope.items())):
             raise IbCycleRoleHold("IB envelope does not bind this worker cycle")
@@ -224,8 +259,31 @@ def inspect_completed_ib_cycle_roles(
         all_roles = evidence.get("roles") if set(evidence) == {"roles"} else None
         if not isinstance(all_roles, list):
             raise IbCycleRoleHold("IB role inventory is malformed")
-        roles = _bound_base_roles(root, all_roles[:3] if protected else all_roles)
+        roles = _bound_base_roles(root, all_roles[:3] if protected or ufm_bound else all_roles)
         source = None
+        if ufm_bound:
+            from monitor.collection_ufm_run_binding import (
+                UFM_RUN_ROLE_NAMES, UfmRunBindingHold, validate_ufm_run_binding,
+            )
+            ufm_binding = envelope["ufm_run_binding"]
+            try:
+                observed = validate_ufm_run_binding(
+                    expected_identity, ufm_binding, all_roles[3:], http_root=root,
+                )
+            except UfmRunBindingHold as exc:
+                raise IbCycleRoleHold("IB UFM run binding does not replay") from exc
+            by_role = {role["role"]: role for role in observed}
+            source = IbCycleRoleSource(
+                cycle_id=cycle.cycle_id, sequence=sequence,
+                completion_sha256=completion_sha,
+                evidence_sha256=hashlib.sha256(evidence_raw).hexdigest(),
+                roles=roles + UFM_RUN_ROLE_NAMES,
+                report_relative_path=by_role["validation_report"]["relative_path"],
+                report_sha256=by_role["validation_report"]["sha256"],
+                expected_topology_sha256=ufm_binding["expected_topology_sha256"],
+                # the run record takes the place of D-70's root attestation
+                attestation_sha256=ufm_binding["run_record_sha256"],
+            )
         if protected:
             from monitor.collection_ib_producer import (
                 IB_ROLE_NAMES, validate_ib_completion_attestation,
@@ -278,6 +336,12 @@ def inspect_completed_ib_cycle_roles(
                 or _digest(_private_json(root, private / "identity-envelope.json")[1])
                 != _digest(envelope_raw)):
             raise IbCycleRoleHold("IB source changed during inspection")
+        if source is not None and ufm_bound:
+            try:
+                validate_ufm_run_binding(expected_identity, ufm_binding, all_roles[3:], http_root=root)
+            except UfmRunBindingHold as exc:
+                raise IbCycleRoleHold("IB UFM run binding changed during inspection") from exc
+            return source
         if source is not None:
             validate_ib_completion_attestation(identity, binding, http_root=root)
             return source

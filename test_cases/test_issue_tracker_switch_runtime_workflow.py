@@ -244,7 +244,7 @@ class ProdSwitchSourceWorkflowTests(unittest.TestCase):
                           f"{host},{typ},192.0.2.10,{chosen_template}\n").encode()
             inventory.write_bytes(frozen)
             plan = {"eth": [], "spx": [], "ib": [], "nv": [],
-                    "dynamic_identities": []}
+                    "dynamic_identities": [], "ufm": []}
             plan[{"ethernet": "eth", "infiniband": "ib", "nvlink": "nv"}[family]] = [
                 f"{host}|192.0.2.10"
             ]

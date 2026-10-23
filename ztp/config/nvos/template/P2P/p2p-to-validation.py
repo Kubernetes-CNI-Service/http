@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import os
 import re
 import secrets
@@ -245,23 +246,96 @@ def read_sheet_rows(
     return rows
 
 
-def find_endpoint_columns(rows: list[tuple[int, dict[int, str]]]) -> tuple[int, tuple[int, int, int, int]]:
-    """Return the header-list index and source/destination name/port columns."""
+# Headers that may hold an endpoint's device name: `Name`, `Hostname`, `Host name` (owner 2026-10-22:
+# the B300 P2P has a rack label under `name` and the device name under `Hostname`).
+NAME_HEADER_KEYS = frozenset({"name", "hostname"})
+
+
+def name_header_key(value: object) -> str:
+    return re.sub(r"[\s_-]+", "", clean(value)).casefold()
+
+
+def is_port_header(value: object) -> bool:
+    header = normalize_header(value)
+    return bool(header) and ("port" in header or bool(HEADER_PORT_RE.search(header)))
+
+
+@dataclass(frozen=True)
+class EndpointSide:
+    """The name-like columns directly before one endpoint's port column (left to right)."""
+    names: tuple
+    port: int
+
+
+def find_endpoint_sides(rows: list[tuple[int, dict[int, str]]]) -> tuple[int, tuple[EndpointSide, EndpointSide]]:
+    """Return the header-list index and the source and destination sides."""
     for row_index, (_number, values) in enumerate(rows):
-        name_columns = [
-            column for column, value in sorted(values.items())
-            if normalize_header(value) == "name"
-        ]
-        pairs: list[tuple[int, int]] = []
-        for name_column in name_columns:
-            port_column = name_column + 1
-            port_header = normalize_header(values.get(port_column, ""))
-            if port_header and ("port" in port_header or HEADER_PORT_RE.search(port_header)):
-                pairs.append((name_column, port_column))
-        if len(pairs) >= 2:
-            source, destination = pairs[0], pairs[1]
-            return row_index, (source[0], source[1], destination[0], destination[1])
+        sides: list[EndpointSide] = []
+        for column in sorted(values):
+            if not is_port_header(values[column]):
+                continue
+            names: list[int] = []
+            candidate = column - 1
+            while name_header_key(values.get(candidate, "")) in NAME_HEADER_KEYS:
+                names.insert(0, candidate)
+                candidate -= 1
+            if names:
+                sides.append(EndpointSide(tuple(names), column))
+        if len(sides) >= 2:
+            return row_index, (sides[0], sides[1])
     raise ConversionError("could not find two name/port column pairs")
+
+
+def find_endpoint_columns(rows: list[tuple[int, dict[int, str]]]) -> tuple[int, tuple[int, int, int, int]]:
+    """Return the header-list index and source/destination name/port columns, the name column being
+    the one next to each port column (the rule without 02-devices_config.csv)."""
+    row_index, (source, destination) = find_endpoint_sides(rows)
+    return row_index, (source.names[-1], source.port, destination.names[-1], destination.port)
+
+
+def device_name_key(value: object) -> str:
+    """Names compare by their first DNS label, case-insensitively: a P2P may write `ew-leaf001` for the
+    inventory's `ew-leaf001.site...`."""
+    return clean(value).split(".", 1)[0].casefold()
+
+
+def load_device_names(path: Path) -> set[str]:
+    """The hostname keys of 02-devices_config.csv (comment rows skipped)."""
+    with path.open(encoding="utf-8-sig", newline="") as stream:
+        reader = csv.DictReader(stream)
+        if not reader.fieldnames or "hostname" not in [name.strip().casefold() for name in reader.fieldnames]:
+            raise ConversionError(f"{path} has no hostname column")
+        column = next(name for name in reader.fieldnames if name.strip().casefold() == "hostname")
+        return {device_name_key(row[column]) for row in reader
+                if clean(row.get(column)) and not clean(row.get(column)).startswith("#")}
+
+
+def choose_name_label(sheets: list[tuple[str, list, int, tuple]], device_names: set[str]) -> tuple[str, int]:
+    """Owner 2026-10-22: the name column is the one whose values are the devices of 02-devices_config.csv;
+    every endpoint then takes its name from that column. Returns (header key, matches); ("", 0) when
+    no candidate column holds an inventory name."""
+    scores: Counter[str] = Counter()
+    for _sheet, rows, header_index, sides in sheets:
+        header = rows[header_index][1]
+        for side in sides:
+            for column in side.names:
+                key = name_header_key(header.get(column, ""))
+                scores[key] += sum(device_name_key(values.get(column, "")) in device_names
+                                   for _number, values in rows[header_index + 1:])
+    if not scores or max(scores.values()) == 0:
+        return "", 0
+    best = max(scores.values())
+    winners = sorted(key for key, score in scores.items() if score == best)
+    if len(winners) > 1:
+        raise ConversionError(f"02-devices_config.csv names match several P2P columns equally: {winners}")
+    return winners[0], best
+
+
+def side_name_column(side: EndpointSide, header: dict[int, str], label: str) -> int:
+    for column in side.names:
+        if label and name_header_key(header.get(column, "")) == label:
+            return column
+    return side.names[-1]
 
 
 def parse_inventory(path: Path) -> tuple[list[str], list[tuple[str, str]]]:
@@ -734,8 +808,18 @@ def write_cvt_workbook(
             )
 
 
+def _project_p2p_cvt(relative: Path) -> bool:
+    """``<project>/99-output-p2p/<name>-cvt.xlsx``: the one DAY0 place a CVT belongs.
+
+    Owner 2026-10-21: the CVT lives in the project's 99-output-p2p, beside Ethernet's
+    ``<p2p>-lldpq.dot``, as in the projects from before this guard (2026-08 staging).
+    """
+    return (len(relative.parts) == 3 and relative.parts[1] == "99-output-p2p"
+            and relative.name.casefold().endswith("-cvt.xlsx"))
+
+
 def _reject_governed_cvt_output(path: Path) -> None:
-    """A diagnostic CVT cannot replace a DAY0 project input or output."""
+    """A CVT cannot replace a DAY0 project input or any other project output."""
     repository = CONFIG_ROOT.resolve(strict=False).parents[1]
     day0 = repository / "DAY0-Prepare"
     destination = path.expanduser().resolve(strict=False)
@@ -744,7 +828,7 @@ def _reject_governed_cvt_output(path: Path) -> None:
     except ValueError:
         pass
     else:
-        if len(relative.parts) >= 2:
+        if len(relative.parts) >= 2 and not _project_p2p_cvt(relative):
             raise ConversionError(
                 f"CVT output cannot enter a DAY0 project authority: {path}"
             )
@@ -755,7 +839,8 @@ def _reject_governed_cvt_output(path: Path) -> None:
     for ancestor in lexical.parents:
         if ancestor.name != "DAY0-Prepare":
             continue
-        if len(lexical.relative_to(ancestor).parts) < 2:
+        inside = lexical.relative_to(ancestor)
+        if len(inside.parts) < 2 or _project_p2p_cvt(inside):
             continue
         if ancestor == lexical_day0 or ancestor.resolve(strict=False) == day0:
             raise ConversionError(
@@ -885,10 +970,23 @@ def source_workbook_stem(path: Path) -> str:
 def convert(args: argparse.Namespace) -> tuple[Path, int, int, list[tuple[str, int]]]:
     script_dir = runtime_dir()
     input_path = choose_input(script_dir)
+    expected_p2p = getattr(args, "expect_p2p_sha256", None)
+    if expected_p2p is not None:
+        # load binds this run to the P2P bytes it validated (owner 2026-10-21, as b-xlsx_to_dot.py
+        # is run for Ethernet); a different workbook behind p2p.xlsx publishes nothing.
+        actual_p2p = hashlib.sha256(input_path.read_bytes()).hexdigest()
+        if actual_p2p != expected_p2p:
+            raise ConversionError(
+                f"P2P input {input_path} is not the workbook this load validated "
+                f"(sha256 {actual_p2p}, expected {expected_p2p})"
+            )
+    # setup links output-p2p to the project's 99-output-p2p; the default target is published into
+    # that real directory, because the held-directory publish refuses a symlinked parent.
     workbook_path = (
         Path(args.output).expanduser().absolute()
         if args.output
-        else script_dir / "output-p2p" / f"{source_workbook_stem(input_path)}-cvt.xlsx"
+        else (script_dir / "output-p2p").resolve(strict=False)
+        / f"{source_workbook_stem(input_path)}-cvt.xlsx"
     )
     source_paths = {
         "p2p": input_path,
@@ -898,12 +996,23 @@ def convert(args: argparse.Namespace) -> tuple[Path, int, int, list[tuple[str, i
         "converter": Path(__file__),
         "topology_rules": CONFIG_ROOT / "topology_rules.py",
     }
+    # Owner 2026-10-22: 02-devices_config.csv (a setup link beside the converter) tells which P2P column
+    # holds the device names. Without it the column next to the port is used, as before.
+    requested = getattr(args, "devices", None)
+    devices_path = Path(requested) if requested else script_dir / "02-devices_config.csv"
+    device_names: Optional[set[str]] = None
+    if devices_path.is_file():
+        device_names = load_device_names(devices_path)
+        source_paths["devices"] = devices_path
+    elif requested:
+        raise ConversionError(f"devices inventory not found: {devices_path}")
     expected_sources = capture_sources(source_paths)
     rules = RuleSet(Path(args.inventory), Path(args.port_map), Path(args.splitter))
 
     extracted_links: list[ExtractedLink] = []
     malformed = 0
     matched_sheets: list[tuple[str, int]] = []
+    sheets: list[tuple[str, list, int, tuple]] = []
     try:
         with zipfile.ZipFile(input_path) as archive:
             validate_xlsx_archive(archive)
@@ -913,49 +1022,77 @@ def convert(args: argparse.Namespace) -> tuple[Path, int, int, list[tuple[str, i
                     continue
                 rows = read_sheet_rows(archive, part, shared_strings)
                 try:
-                    header_index, columns = find_endpoint_columns(rows)
+                    header_index, sides = find_endpoint_sides(rows)
                 except ConversionError as exc:
                     print(f"WARNING: sheet {sheet_name!r} skipped: {exc}", file=sys.stderr)
                     continue
-
-                header_values = rows[header_index][1]
-                source_floor_column, source_rack_column, source_unit_column = location_columns(
-                    header_values, columns[0]
-                )
-                destination_floor_column, destination_rack_column, destination_unit_column = location_columns(
-                    header_values, columns[2]
-                )
-
-                sheet_count = 0
-                for row_number, values in rows[header_index + 1:]:
-                    endpoints = [clean(values.get(column, "")) for column in columns]
-                    if not any(endpoints):
-                        continue
-                    if not all(endpoints):
-                        malformed += 1
-                        continue
-                    source_device, source_port, destination_device, destination_port = endpoints
-                    extracted_links.append(ExtractedLink(
-                        sheet=sheet_name,
-                        row=row_number,
-                        source_device=source_device,
-                        source_port=source_port,
-                        source_floor=clean(values.get(source_floor_column, "")) if source_floor_column is not None else "",
-                        source_rack=clean(values.get(source_rack_column, "")) if source_rack_column is not None else "",
-                        source_unit=clean(values.get(source_unit_column, "")) if source_unit_column is not None else "",
-                        destination_device=destination_device,
-                        destination_port=destination_port,
-                        destination_floor=clean(values.get(destination_floor_column, "")) if destination_floor_column is not None else "",
-                        destination_rack=clean(values.get(destination_rack_column, "")) if destination_rack_column is not None else "",
-                        destination_unit=clean(values.get(destination_unit_column, "")) if destination_unit_column is not None else "",
-                    ))
-                    sheet_count += 1
-                matched_sheets.append((sheet_name, sheet_count))
+                sheets.append((sheet_name, rows, header_index, sides))
     except (KeyError, ET.ParseError, zipfile.BadZipFile) as exc:
         raise ConversionError(f"invalid or unsupported XLSX structure: {exc}") from exc
 
-    if not matched_sheets:
+    if not sheets:
         raise ConversionError("no CL/CS sheet with two name/port header pairs was found")
+
+    label, matches = choose_name_label(sheets, device_names) if device_names else ("", 0)
+    if device_names is None:
+        print(f"Device-name column: next to the port ({devices_path.name} not found)")
+    elif not label:
+        print(f"Device-name column: next to the port (no P2P name is in {devices_path.name})")
+    for sheet_name, rows, header_index, sides in sheets:
+        header_values = rows[header_index][1]
+        columns = []
+        for side in sides:
+            columns += [side_name_column(side, header_values, label), side.port]
+        if label:
+            print(f"Device-name column: {header_values[columns[0]]!r} / {header_values[columns[2]]!r} in "
+                  f"{sheet_name!r} ({matches} name(s) found in {devices_path.name})")
+        source_floor_column, source_rack_column, source_unit_column = location_columns(
+            header_values, sides[0].names[0]
+        )
+        destination_floor_column, destination_rack_column, destination_unit_column = location_columns(
+            header_values, sides[1].names[0]
+        )
+
+        sheet_count = 0
+        for row_number, values in rows[header_index + 1:]:
+            endpoints = [clean(values.get(column, "")) for column in columns]
+            if not any(endpoints):
+                continue
+            if not all(endpoints):
+                malformed += 1
+                continue
+            source_device, source_port, destination_device, destination_port = endpoints
+            extracted_links.append(ExtractedLink(
+                sheet=sheet_name,
+                row=row_number,
+                source_device=source_device,
+                source_port=source_port,
+                source_floor=clean(values.get(source_floor_column, "")) if source_floor_column is not None else "",
+                source_rack=clean(values.get(source_rack_column, "")) if source_rack_column is not None else "",
+                source_unit=clean(values.get(source_unit_column, "")) if source_unit_column is not None else "",
+                destination_device=destination_device,
+                destination_port=destination_port,
+                destination_floor=clean(values.get(destination_floor_column, "")) if destination_floor_column is not None else "",
+                destination_rack=clean(values.get(destination_rack_column, "")) if destination_rack_column is not None else "",
+                destination_unit=clean(values.get(destination_unit_column, "")) if destination_unit_column is not None else "",
+            ))
+            sheet_count += 1
+        matched_sheets.append((sheet_name, sheet_count))
+
+    # An empty expected topology would make every live link "Undefined" and still look like a result.
+    if not extracted_links:
+        raise ConversionError("0 link records were extracted from the CL/CS sheets; no CVT is published")
+    if device_names:
+        # switches and UFMs are expected in 02-devices_config.csv (GPU servers are not)
+        absent = sorted({device for link in extracted_links
+                         for device in (link.source_device, link.destination_device)
+                         if device_name_key(device) not in device_names
+                         and (is_switch_type(rules.device_type(device))
+                              or rules.device_type(device).casefold() == "ufm")}, key=natural_key)
+        if absent:
+            shown = ", ".join(absent[:16]) + (f", ... (+{len(absent) - 16} more)" if len(absent) > 16 else "")
+            print(f"WARNING: {len(absent)} switch/UFM name(s) in the P2P are not in {devices_path.name}: {shown}",
+                  file=sys.stderr)
 
     validate_links(extracted_links)
 
@@ -1008,6 +1145,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--inventory", default=str(script_dir / "01-inventory.log"), help="设备清单日志路径")
     parser.add_argument("--port-map", default=str(script_dir / "02-port-mapping.log"), help="端口映射日志路径")
     parser.add_argument("--splitter", default=str(script_dir / "03-splitter.log"), help="分线器日志路径")
+    parser.add_argument(
+        "--devices", default=None,
+        help="02-devices_config.csv used to find the P2P device-name column; "
+             "default: 02-devices_config.csv beside this script when present",
+    )
+    parser.add_argument(
+        "--expect-p2p-sha256", type=lambda value: value if re.fullmatch(r"[0-9a-f]{64}", value)
+        else parser.error("--expect-p2p-sha256 needs 64 lowercase hex digits"),
+        help="only convert when p2p.xlsx has exactly these bytes (11-load.py passes the validated P2P)",
+    )
     return parser.parse_args()
 
 

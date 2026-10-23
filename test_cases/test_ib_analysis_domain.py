@@ -219,6 +219,45 @@ class IbInfoLinkPublicationTests(unittest.TestCase):
             self.assertEqual(b"foreign original", sentinel.read_bytes())
 
 
+class FqdnDeviceNameTests(unittest.TestCase):
+    """Owner 2026-10-22: the P2P (and so the CVT) may name a device by its short hostname while the fabric
+    reports the FQDN, or the other way round (the 2026-10 B300 fabric: switches report
+    `ew-leaf001.<domain>`, the P2P writes `ew-leaf001`). Names then compare by their first DNS label,
+    and only when that label belongs to exactly one planned device."""
+
+    @staticmethod
+    def frames(planned_rows, actual_rows):
+        planned = pd.DataFrame([{
+            "SrcDevice": src, "SrcPort_Alias": src_port, "SrcPort": src_port,
+            "DstDevice": dst, "DstPort_Alias": dst_port, "DstPort": dst_port,
+            "SrcType": "switch", "DstType": "switch", "Source-Ref": "fixture",
+        } for src, src_port, dst, dst_port in planned_rows])
+        actual = pd.DataFrame([{
+            "SrcDevice": src, "SrcPort": src_port, "DstDevice": dst, "DstPort": dst_port, "_dst_is_sw": True,
+        } for src, src_port, dst, dst_port in actual_rows])
+        return actual, planned
+
+    def test_short_and_fully_qualified_names_of_one_device_match_both_ways(self):
+        with isolated_tool_imports(IBDIAGNET_ROOT) as load:
+            topology = load("lib.topology")
+            actual, planned = self.frames(
+                [("ew-leaf001", "sw37p1", "gpu-001.site.example.test", "mlx5_0")],
+                [("ew-leaf001.site.example.test", "sw37p1", "GPU-001", "mlx5_0")])
+            compared = topology.compare_links(actual, planned)
+            self.assertEqual((1, 0, 0, 0), (len(compared.matching), len(compared.missing),
+                                            len(compared.undefined), len(compared.miswired)))
+
+    def test_a_label_shared_by_two_planned_devices_is_not_guessed(self):
+        with isolated_tool_imports(IBDIAGNET_ROOT) as load:
+            topology = load("lib.topology")
+            actual, planned = self.frames(
+                [("leaf01.a.example.test", "sw1p1", "spine01", "sw1p1"),
+                 ("leaf01.b.example.test", "sw1p1", "spine02", "sw1p1")],
+                [("leaf01", "sw1p1", "spine01", "sw1p1")])
+            compared = topology.compare_links(actual, planned)
+            self.assertEqual((0, 2, 1), (len(compared.matching), len(compared.missing), len(compared.undefined)))
+
+
 class SharedIbLibraryDomainTests(unittest.TestCase):
     def test_domain_inventory_accounts_for_every_python_module(self):
         shared = {"lib", "lib.parsers", *SHARED_MODULES, *SCRIPT_MODULES}

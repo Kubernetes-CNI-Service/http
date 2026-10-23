@@ -147,7 +147,14 @@
         "test_cases.test_ssh_key_preparation_contract",
         "test_cases.test_ssh_key_preparation_workflow",
         "test_cases.test_ztp_container_runtime",
-        "test_cases.test_ztp_service_runtime"
+        "test_cases.test_ztp_service_runtime",
+        "test_cases.test_infra_setup_py",
+        "test_cases.test_infra_setup_py_workflow",
+        "test_cases.test_ubuntu24_host",
+        "test_cases.test_ufm_setup_upgrade",
+        "test_cases.test_ufm_setup_upgrade_workflow",
+        "test_cases.test_setup_ufm_links_workflow",
+        "test_cases.test_ufm_ha_status_parity"
       ]
     },
     {
@@ -158,6 +165,8 @@
         "test_cases.test_dhcp_switch_scope_preservation",
         "test_cases.test_dhcp_switch_scope_preservation_workflow",
         "test_cases.test_eth_jump_duplicate_identity",
+        "test_cases.test_server_device_types",
+        "test_cases.test_server_device_types_workflow",
         "test_cases.test_eth_jump_zero_config_contract",
         "test_cases.test_eth_jump_zero_config_workflow",
         "test_cases.test_feedback_global_writeback",
@@ -186,7 +195,9 @@
         "test_cases.test_v2_generation_flow",
         "test_cases.test_v2_project_schema",
         "test_cases.test_xlsx_zero_row_fail_closed",
-        "test_cases.test_xlsx_zero_row_workflow"
+        "test_cases.test_xlsx_zero_row_workflow",
+        "test_cases.test_ib_cvt_project_output",
+        "test_cases.test_load_ib_cvt"
       ]
     },
     {
@@ -214,7 +225,19 @@
         "test_cases.test_ztp_collection_attribution",
         "test_cases.test_ztp_collection_attribution_workflow",
         "test_cases.test_ztp_group_handoff",
-        "test_cases.test_ztp_group_handoff_display"
+        "test_cases.test_ztp_group_handoff_display",
+        "test_cases.test_ufm_monitor_scripts",
+        "test_cases.test_ufm_monitor_cron_workflow",
+        "test_cases.test_collector_publication",
+        "test_cases.test_collector_retrieval",
+        "test_cases.test_monitor_ufm_status",
+        "test_cases.test_ufm_worker_collection",
+        "test_cases.test_collection_ufm_run_binding",
+        "test_cases.test_ufm_req7_ib_cycle_workflow",
+        "test_cases.test_setup_collection_link_evidence_workflow",
+        "test_cases.test_ib_post_collect",
+        "test_cases.test_log_rotation",
+        "test_cases.test_collection_archive"
       ]
     },
     {
@@ -863,6 +886,7 @@
     "infiniband/bringup/ndr/OS-CPLD-upgrade.sh": "infiniband/bringup/ndr/OS-CPLD-upgrade.sh",
     "infiniband/bringup/ndr/data-collect-IB.sh": "infiniband/bringup/ndr/data-collect-IB.sh",
     "infiniband/bringup/xdr-initial-setup/initial-setup.py": "infiniband/bringup/xdr-initial-setup/initial-setup.py",
+    "infiniband/bringup/ufm-setup-upgrade/ufm-setup-upgrade.py": "infiniband/bringup/ufm-setup-upgrade/ufm-setup-upgrade.py",
     "infiniband/bringup/xdr-upgrade/upgrade.sh": "infiniband/bringup/xdr-upgrade/upgrade.sh",
     "infiniband/monitor/cron.sh": "ethernet/monitor/cron.sh",
     "infiniband/monitor/sw-info.sh": "ethernet/monitor/sw-info.sh",
@@ -879,6 +903,8 @@
     "infra/infra-setup.sh": "infra/infra-setup.sh",
     "infra/infra-teardown.sh": "infra/infra-teardown.sh",
     "infra/ufm_jump_transport.py": "infra/ufm_jump_transport.py",
+    "infra/ubuntu24_host.py": "infra/ubuntu24_host.py",
+    "infra/infra-setup.py": "infra/infra-setup.py",
     "monitor/dot_to_html.py": "monitor/dot_to_html.py",
     "monitor/collection_v2_emitter.py": "monitor/collection_v2_emitter.py",
     "monitor/issue_tracker_qualification.py": "monitor/issue_tracker_qualification.py",
@@ -912,6 +938,7 @@
     "monitor/issue_tracker_publish_runtime.py": "monitor/issue_tracker_publish_runtime.py",
     "monitor/issue_tracker_ib_runtime.py": "monitor/issue_tracker_ib_runtime.py",
     "monitor/collection_ib_cycle_binding.py": "monitor/collection_ib_cycle_binding.py",
+    "monitor/collection_ufm_run_binding.py": "monitor/collection_ufm_run_binding.py",
     "monitor/collection_ib_producer.py": "monitor/collection_ib_producer.py",
     "monitor/issue_tracker_whitelist_workbook.py": "monitor/issue_tracker_whitelist_workbook.py",
     "monitor/issue_tracker_local_workbook.py": "monitor/issue_tracker_local_workbook.py",
@@ -933,6 +960,7 @@
     "nvlink/monitor/sw-link.sh": "ethernet/monitor/sw-link.sh",
     "tools/_package_common.py": "tools/_package_common.py",
     "tools/collect-ztp-diagnostics.py": "tools/collect-ztp-diagnostics.py",
+    "tools/collection_archive.py": "tools/collection_archive.py",
     "tools/control-auth.py": "tools/control-auth.py",
     "tools/deployment_prewrite_guard.py": "tools/deployment_prewrite_guard.py",
     "tools/deploy-shared-artifacts.py": "tools/deploy-shared-artifacts.py",
@@ -942,6 +970,7 @@
     "tools/finish-project.py": "tools/finish-project.py",
     "tools/finished_project_state.py": "tools/finished_project_state.py",
     "tools/generation_report.py": "tools/generation_report.py",
+    "tools/log_rotation.py": "tools/log_rotation.py",
     "tools/rehydrate-finished.py": "tools/rehydrate-finished.py",
     "tools/ib-tool-Jie/ib_tool_box/lib/__init__.py": "tools/ib-tool-Jie/ib_tool_box/lib/__init__.py",
     "tools/ib-tool-Jie/ib_tool_box/lib/connection.py": "tools/ib-tool-Jie/ib_tool_box/lib/connection.py",
@@ -1040,6 +1069,9 @@
     "ztp/optimize/feedback.py": "ztp/optimize/feedback.py",
     "ztp/optimize/sample_links.py": "ztp/optimize/sample_links.py",
     "ztp/templates/ztp-bootstrap.sh": "ztp/templates/ztp-bootstrap.sh",
+    "infiniband/monitor/ufm-info.sh": "infiniband/monitor/ufm-info.sh",
+    "infiniband/monitor/ufm-ibdiagnet.sh": "infiniband/monitor/ufm-ibdiagnet.sh",
+    "infiniband/monitor/post-collect.py": "infiniband/monitor/post-collect.py",
     "monitor/issue_tracker_sdk_authentication.py": "monitor/issue_tracker_sdk_authentication.py",
     "monitor/issue_tracker_tls_inputs.py": "monitor/issue_tracker_tls_inputs.py",
     "monitor/issue_tracker_attempt_supervision.py": "monitor/issue_tracker_attempt_supervision.py",
@@ -1270,7 +1302,9 @@
         "test_cases.test_monitor_stack_review",
         "test_cases.test_project_contracts",
         "test_cases.test_collector_inventory_pubkey",
-        "test_cases.test_collector_inventory_pubkey_workflow"
+        "test_cases.test_collector_inventory_pubkey_workflow",
+        "test_cases.test_collector_publication",
+        "test_cases.test_collector_retrieval"
       ]
     },
     {
@@ -1283,6 +1317,69 @@
         "test_cases.test_monitor_stack_review",
         "test_cases.test_req10b_services_keys_contract",
         "test_cases.test_req10c_auto_contract"
+      ]
+    },
+    {
+      "id": "ufm_setup_upgrade_direct",
+      "paths": [
+        "infiniband/bringup/ufm-setup-upgrade/*"
+      ],
+      "tests": [
+        "test_cases.test_ufm_setup_upgrade",
+        "test_cases.test_ufm_ha_status_parity"
+      ]
+    },
+    {
+      "id": "setup_ufm_inputs_direct",
+      "paths": [
+        "DAY0-Prepare/01-a-setup.py",
+        "DAY0-Prepare/02-unsetup.py",
+        "tools/project_contract.py",
+        "tools/_package_common.py"
+      ],
+      "tests": [
+        "test_cases.test_setup_ufm_links_workflow",
+        "test_cases.test_eth_jump_duplicate_identity"
+      ]
+    },
+    {
+      "id": "server_device_types_direct",
+      "paths": [
+        "DAY0-Prepare/11-load.py",
+        "ztp/config/cumulus/d-hostname2mac.py",
+        "ztp/config/isc-dhcp-server/c1-generate_dhcp.py",
+        "ztp/backup/yaml-collect.py",
+        "ztp/manual-ztp.py",
+        "DAY0-Prepare/12-ztp-monitor.py",
+        "tools/collect-ztp-diagnostics.py",
+        "monitor/generate-monitor-html.py",
+        "infra/deploy_infra.py",
+        "infra/check_infra.py"
+      ],
+      "tests": [
+        "test_cases.test_server_device_types"
+      ]
+    },
+    {
+      "id": "ubuntu24_host_direct",
+      "paths": [
+        "infra/ubuntu24_host.py"
+      ],
+      "tests": [
+        "test_cases.test_ubuntu24_host",
+        "test_cases.test_ufm_setup_upgrade",
+        "test_cases.test_infra_setup_py",
+        "test_cases.test_infra_setup_py_workflow"
+      ]
+    },
+    {
+      "id": "infra_setup_py_direct",
+      "paths": [
+        "infra/infra-setup.py"
+      ],
+      "tests": [
+        "test_cases.test_infra_setup_py",
+        "test_cases.test_infra_setup_py_workflow"
       ]
     },
     {
@@ -2011,7 +2108,8 @@
         "monitor/issue_tracker_ib_runtime.py"
       ],
       "tests": [
-        "test_cases.test_issue_tracker_ib_runtime"
+        "test_cases.test_issue_tracker_ib_runtime",
+        "test_cases.test_ufm_req7_ib_cycle_workflow"
       ]
     },
     {
@@ -2020,7 +2118,8 @@
         "monitor/collection_ib_cycle_binding.py"
       ],
       "tests": [
-        "test_cases.test_collection_ib_cycle_binding"
+        "test_cases.test_collection_ib_cycle_binding",
+        "test_cases.test_ufm_req7_ib_cycle_workflow"
       ]
     },
     {
@@ -2290,6 +2389,7 @@
         "DAY0-Prepare/01-a-setup.py",
         "infra/deploy_infra.py",
         "infra/check_infra.py",
+        "infra/infra-setup.py",
         "infra/infra-setup.sh",
         "tools/project_contract.py",
         ".gitignore"
@@ -2297,6 +2397,106 @@
       "tests": [
         "test_cases.test_req19_infra_log_contract",
         "test_cases.test_req19_infra_log_workflow"
+      ]
+    },
+    {
+      "id": "ufm_monitor_collectors_direct",
+      "paths": [
+        "infiniband/monitor/ufm-info.sh",
+        "infiniband/monitor/ufm-ibdiagnet.sh"
+      ],
+      "tests": [
+        "test_cases.test_ufm_monitor_scripts"
+      ]
+    },
+    {
+      "id": "ib_cvt_project_output_direct",
+      "paths": [
+        "ztp/config/nvos/template/P2P/p2p-to-validation.py"
+      ],
+      "tests": [
+        "test_cases.test_ib_cvt_project_output"
+      ]
+    },
+    {
+      "id": "load_ib_expected_topology_direct",
+      "paths": [
+        "DAY0-Prepare/11-load.py"
+      ],
+      "tests": [
+        "test_cases.test_load_ib_cvt"
+      ]
+    },
+    {
+      "id": "ib_post_collect_direct",
+      "paths": [
+        "infiniband/monitor/post-collect.py"
+      ],
+      "tests": [
+        "test_cases.test_ib_post_collect"
+      ]
+    },
+    {
+      "id": "ufm_worker_target_plan_direct",
+      "paths": [
+        "monitor/switch-collection-worker.py",
+        "monitor/collection_ib_cycle_binding.py"
+      ],
+      "tests": [
+        "test_cases.test_ufm_worker_collection",
+        "test_cases.test_log_rotation",
+        "test_cases.test_ufm_req7_ib_cycle_workflow"
+      ]
+    },
+    {
+      "id": "ufm_run_binding_direct",
+      "paths": [
+        "monitor/collection_ufm_run_binding.py"
+      ],
+      "tests": [
+        "test_cases.test_collection_ufm_run_binding"
+      ]
+    },
+    {
+      "id": "setup_collection_link_hop_direct",
+      "paths": [
+        "tools/project_contract.py",
+        "monitor/collection_v2_emitter.py",
+        "monitor/issue_tracker_switch_runtime.py",
+        "monitor/switch-collection-worker.py"
+      ],
+      "tests": [
+        "test_cases.test_setup_collection_link_evidence_workflow"
+      ]
+    },
+    {
+      "id": "monitor_ufm_status_ui",
+      "paths": [
+        "monitor/generate-monitor-html.py",
+        "infiniband/monitor/ufm-info.sh"
+      ],
+      "tests": [
+        "test_cases.test_monitor_ufm_status",
+        "test_cases.test_ufm_ha_status_parity",
+        "test_cases.test_log_rotation"
+      ]
+    },
+    {
+      "id": "log_rotation_direct",
+      "paths": [
+        "tools/log_rotation.py"
+      ],
+      "tests": [
+        "test_cases.test_log_rotation"
+      ]
+    },
+    {
+      "id": "collection_archive_direct",
+      "paths": [
+        "tools/collection_archive.py"
+      ],
+      "tests": [
+        "test_cases.test_collection_archive"
       ]
     },
     {
@@ -3465,6 +3665,7 @@
         "DAY0-Prepare/01-a-setup.py",
         "infra/deploy_infra.py",
         "infra/check_infra.py",
+        "infra/infra-setup.py",
         "infra/infra-setup.sh",
         "tools/project_contract.py"
       ],
@@ -3632,7 +3833,9 @@
       "members": [
         "tools/control-auth.py",
         "monitor/ztp-monitor-control.cgi",
+        "infra/infra-setup.py",
         "infra/infra-setup.sh",
+        "infra/ubuntu24_host.py",
         "infra/infra-teardown.sh",
         "infra/docker/deploy.sh",
         "infra/docker/hostlock.py",
@@ -4188,6 +4391,62 @@
       ]
     },
     {
+      "id": "infra_setup_py_global_to_host_check",
+      "members": [
+        "infra/deploy_infra.py",
+        "infra/infra-setup.py",
+        "infra/ubuntu24_host.py",
+        "infra/check_infra.py"
+      ],
+      "tests": [
+        "test_cases.test_infra_setup_py_workflow"
+      ]
+    },
+    {
+      "id": "ufm_setup_upgrade_setup_links",
+      "members": [
+        "infiniband/bringup/ufm-setup-upgrade/ufm-setup-upgrade.py",
+        "infra/ubuntu24_host.py",
+        "DAY0-Prepare/01-a-setup.py",
+        "DAY0-Prepare/02-unsetup.py",
+        "tools/project_contract.py"
+      ],
+      "tests": [
+        "test_cases.test_ufm_setup_upgrade_workflow"
+      ]
+    },
+    {
+      "id": "setup_ufm_links_lifecycle",
+      "members": [
+        "DAY0-Prepare/01-a-setup.py",
+        "DAY0-Prepare/02-unsetup.py",
+        "tools/project_contract.py",
+        "tools/_package_common.py"
+      ],
+      "tests": [
+        "test_cases.test_setup_ufm_links_workflow"
+      ]
+    },
+    {
+      "id": "server_device_types_flow",
+      "members": [
+        "DAY0-Prepare/11-load.py",
+        "ztp/config/cumulus/d-hostname2mac.py",
+        "ztp/config/isc-dhcp-server/c1-generate_dhcp.py",
+        "ztp/backup/yaml-collect.py",
+        "ztp/manual-ztp.py",
+        "DAY0-Prepare/12-ztp-monitor.py",
+        "tools/collect-ztp-diagnostics.py",
+        "monitor/generate-monitor-html.py",
+        "infra/deploy_infra.py",
+        "infra/check_infra.py"
+      ],
+      "tests": [
+        "test_cases.test_server_device_types_workflow",
+        "test_cases.test_server_device_types"
+      ]
+    },
+    {
       "id": "ufm_identity_binding_from_inventory_and_transport",
       "members": [
         "tools/ufm_identity_binding.py",
@@ -4404,6 +4663,88 @@
         "test_cases.test_h_aliased_receiver_escape",
         "test_cases.test_h_two_hop_receiver_handoff",
         "test_cases.test_h_feedback_real_lock_recovery_workflow"
+      ]
+    },
+    {
+      "id": "ufm_monitor_collection",
+      "members": [
+        "ethernet/monitor/cron.sh",
+        "infiniband/monitor/cron.sh",
+        "infiniband/monitor/ufm-info.sh",
+        "infiniband/monitor/ufm-ibdiagnet.sh",
+        "infiniband/monitor/post-collect.py",
+        "tools/log_rotation.py",
+        "tools/collection_archive.py"
+      ],
+      "tests": [
+        "test_cases.test_ufm_monitor_cron_workflow"
+      ]
+    },
+    {
+      "id": "ib_link_validation_closed_loop",
+      "members": [
+        "infiniband/monitor/post-collect.py",
+        "tools/ibdiagnet-analyze-tool/analyze.py",
+        "ztp/config/nvos/template/P2P/p2p-to-validation.py",
+        "monitor/generate-monitor-html.py"
+      ],
+      "tests": [
+        "test_cases.test_ib_post_collect"
+      ]
+    },
+    {
+      "id": "load_ib_expected_topology",
+      "members": [
+        "DAY0-Prepare/11-load.py",
+        "ztp/config/nvos/template/P2P/p2p-to-validation.py",
+        "ztp/config/ib_topology_provenance.py"
+      ],
+      "tests": [
+        "test_cases.test_load_ib_cvt",
+        "test_cases.test_ib_cvt_project_output"
+      ]
+    },
+    {
+      "id": "ufm_worker_collection",
+      "members": [
+        "monitor/switch-collection-worker.py",
+        "ethernet/monitor/cron.sh",
+        "infiniband/monitor/cron.sh",
+        "monitor/collection_v2_emitter.py",
+        "monitor/collection_ib_cycle_binding.py"
+      ],
+      "tests": [
+        "test_cases.test_ufm_worker_collection"
+      ]
+    },
+    {
+      "id": "ufm_run_binding_req7_ib_cycle",
+      "members": [
+        "ethernet/monitor/cron.sh",
+        "infiniband/monitor/post-collect.py",
+        "ztp/config/nvos/template/P2P/p2p-to-validation.py",
+        "monitor/collection_v2_emitter.py",
+        "monitor/switch-collection-worker.py",
+        "monitor/collection_ufm_run_binding.py",
+        "monitor/collection_ib_cycle_binding.py",
+        "monitor/issue_tracker_ib_runtime.py"
+      ],
+      "tests": [
+        "test_cases.test_ufm_req7_ib_cycle_workflow",
+        "test_cases.test_ufm_worker_collection"
+      ]
+    },
+    {
+      "id": "setup_linked_collection_evidence",
+      "members": [
+        "tools/project_contract.py",
+        "monitor/collection_v2_emitter.py",
+        "monitor/switch-collection-worker.py",
+        "monitor/issue_tracker_switch_runtime.py",
+        "monitor/collection_ib_cycle_binding.py"
+      ],
+      "tests": [
+        "test_cases.test_setup_collection_link_evidence_workflow"
       ]
     },
     {
@@ -5343,7 +5684,8 @@
         "test_cases.test_public_s_phase_workflow",
         "test_cases.test_public_publication_contract",
         "test_cases.test_public_publication_workflow",
-        "test_cases.test_public_publication_v3_overlap"
+        "test_cases.test_public_publication_v3_overlap",
+        "test_cases.test_setup_ufm_links_workflow"
       ]
     },
     {
@@ -5436,7 +5778,8 @@
       ],
       "tests": [
         "test_cases.test_ztp_release_core_review",
-        "test_cases.test_load_release_transaction"
+        "test_cases.test_load_release_transaction",
+        "test_cases.test_ib_cvt_project_output"
       ]
     },
     {

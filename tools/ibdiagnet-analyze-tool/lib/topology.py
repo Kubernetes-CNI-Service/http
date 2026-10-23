@@ -96,9 +96,16 @@ def _device_suffix_key(value: object) -> str:
     return _LOCATION_PREFIX_RE.sub("", device_key(value), count=1)
 
 
+def _device_label_key(value: object) -> str:
+    """The first DNS label: `ew-leaf001.site.example` and `ew-leaf001` name one device (owner 2026-10-22:
+    the P2P writes short names, switches report their FQDN). Comparison only, unique matches only."""
+    return device_key(value).split(".", 1)[0]
+
+
 def _actual_device_key_resolver(planned: pd.DataFrame):
     planned_keys: set[str] = set()
     suffix_candidates: dict[str, set[str]] = {}
+    label_candidates: dict[str, set[str]] = {}
     for column in ("SrcDevice", "DstDevice"):
         if column not in planned.columns:
             continue
@@ -108,10 +115,16 @@ def _actual_device_key_resolver(planned: pd.DataFrame):
                 continue
             planned_keys.add(key)
             suffix_candidates.setdefault(_device_suffix_key(key), set()).add(key)
+            label_candidates.setdefault(_device_label_key(key), set()).add(key)
 
     unique_suffixes = {
         suffix: next(iter(keys))
         for suffix, keys in suffix_candidates.items()
+        if len(keys) == 1
+    }
+    unique_labels = {
+        label: next(iter(keys))
+        for label, keys in label_candidates.items()
         if len(keys) == 1
     }
 
@@ -119,7 +132,10 @@ def _actual_device_key_resolver(planned: pd.DataFrame):
         key = device_key(value)
         if key in planned_keys:
             return key
-        return unique_suffixes.get(_device_suffix_key(key), key)
+        suffix = unique_suffixes.get(_device_suffix_key(key))
+        if suffix is not None:
+            return suffix
+        return unique_labels.get(_device_label_key(key), key)
 
     return resolve
 

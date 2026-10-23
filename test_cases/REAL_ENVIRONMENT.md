@@ -1084,6 +1084,9 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 ## TC-REAL-VM-ZTP-001 — Ubuntu 24.04 管理 VM 发布后只读验收
 
+- 2026-10-19：`infra/infra-setup.sh` 保留，当前入口为 `infra/infra-setup.py`。VM 验收器改为
+  以 AST 只读取出 `infra-setup.py` 的 `APACHE_PUBLIC_BOUNDARY` 常量（不导入、不执行），其字节须与
+  `infra/docker/apache-ztp.conf` 及 load 钉住的 SHA-256 一致；未在真实 VM 上重跑，状态 NOT RUN。
 - 前置条件：在隔离 Ubuntu 24.04 VM 中完成 upload、load 和所需服务启动；两个直连 DHCP
   shared-network 的 service IP 必须分别位于两个独立 vNIC。验收期间不得再次运行 load、
   sync、更新密码、重启服务或编辑项目输入。
@@ -1227,7 +1230,7 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
   host provision 必须在 container create 之前，image entrypoint 必须在 Supervisor/Apache 之前
   再 attest。任一失败均须保持 Apache 停止或阻止启动，且 CGI 请求不能创建/repair authority。
 - 显式恢复：只有 Apache 已确认 inactive 后才运行
-  `sudo ./infra/infra-setup.sh --recover-monitor-authority`；Docker 必须运行
+  `sudo ./infra/infra-setup.py --recover-monitor-authority --apply`；Docker 必须运行
   `sudo ./infra/docker/deploy.sh recover-monitor-authority`，并确认现有 writer 已按 stop→inspect→remove
   顺序消失。Docker 恢复成功后仍保持 stopped，只接受输出给出的正常恢复命令
   `sudo ./infra/docker/deploy.sh deploy`。恢复的任何非零、中断、结构化输出缺失/额外字节或
@@ -1267,7 +1270,7 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
   拒绝，但 `N=3 is not proof of an attacker`，不得启动自动修复；`automatic repair loops are forbidden`。
   取证只保存安全时间戳、classification、stopped state 和 inode/type/mode/owner/hash metadata，绝不
   保存 payload、credential 或 Authorization bytes。确认 Native Apache 已停止后仅运行一次
-  `sudo ./infra/infra-setup.sh --recover-monitor-authority` 并验收 exactly one fixed warning；Docker 仅运行
+  `sudo ./infra/infra-setup.py --recover-monitor-authority --apply` 并验收 exactly one fixed warning；Docker 仅运行
   `sudo ./infra/docker/deploy.sh recover-monitor-authority`，保持 stopped 后只按其打印的
   `sudo ./infra/docker/deploy.sh deploy` 恢复。随后再驱动同一 N=1/2/3，证明 re-wedging 仍然可能。
   此处机器可检索的固定结论是 `exactly one fixed warning` 与 `re-wedging remains possible`；
@@ -3311,3 +3314,68 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 - 本地两个 whole 的实际结果仅见完整收条；不是重复跑旧 H/v1 或 full。
 - [ ] 受管 Linux/真实 native 同SA/Cloud/worker 验证（NOT RUN）。
 - [ ] 全量正式发布证明（未执行、不授予）。
+
+## TC-REAL-INFRA-SETUP-PY-001 — infra-setup.py 在真实 Ubuntu 主机上的 setup 与 bash teardown 回滚
+
+- 类型：real-environment；平台：management-server（Ubuntu 22.04 与 24.04，amd64/arm64 各一）与经
+  `deploy_infra.py` 部署的 client。自动化部分：`test_cases.test_infra_setup_py`（direct，沙箱+假命令）与
+  `test_cases.test_infra_setup_py_workflow`（deploy_infra → infra-setup.py → check_infra）。
+- 风险与目标：本机测试只在沙箱中以假 systemctl/timedatectl/apt-get/dpkg/a2enmod 运行，无法证明真实
+  systemd、apt/dpkg、Apache configtest、`/proc` 描述符持有者扫描、`flock(2)` 与 bash teardown 的
+  `flock(1)` 互斥，以及 `sudo` 下 `python3 -B` 与 `ubuntu24_host.py` 同目录导入在真机上的行为。
+- 前置：可快照回滚的隔离主机；当前精确源码树；`infra/01-global.yaml` 为 setup 建立的项目链接；
+  已登记的 root/sudo 权限；不允许在 live 管理服务器上首次验证。
+- 步骤：1）记录 `/etc/hosts`、resolved/timesyncd.conf、时区、apt 包集、`/etc/apache2`、
+  `/usr/sbin/policy-rc.d` 原状；2）先不加 `--apply` 运行一次，核对 `WOULD APPLY` 与退出码 3（用法错误才是 2）且无任何写入，再加 `--apply --yes` 执行
+  `sudo python3 -B infra/infra-setup.py --mgmt --defer-services --install-apache --install-dhcp --skip-doca`，再在 client 上经 `deploy_infra.py` 执行 `--client`；
+  3）核对 DNS/NTP/时区等于 global（缺键回退 infra-neutral.conf）、managed-files/installed-packages/
+  run-info/infra-status 格式、Apache 边界 SHA-256、policy-rc.d 恢复、无 root 拥有的 `__pycache__`；
+  4）`check_infra.py` 判定；apply 后再不加 `--apply` 检查一次应退出 0：管理服务器上离线缓存只读核对
+  `apps/ubuntu-<ver>/<arch>/Packages.gz` 的必需顶层包（打印“离线缓存完整”，不核对依赖闭包），
+  删除其中一个必需包的 .deb 后再检查应退出 3 并列出包名；5）`sudo bash infra/infra-teardown.sh --non-interactive --yes` 回滚并比对原状；
+  6）`sudo ./infra/infra-setup.py --recover-monitor-authority --apply` 走 Native 恢复矩阵（亦见 root warden）。
+- 预期：setup exit 0、teardown 回到原状；任一失败都写 `status=failed` 且 policy-rc.d 已恢复；不得留下
+  `/run/http-ztp-monitor-decision.*`。
+- 清理与风险：恢复快照；删除测试日志与 client release 目录。未执行前状态为 NOT RUN，不得写 PASS。
+
+## TC-REAL-UFM-HA-SETUP-001 — ufm-setup-upgrade 的 ha-setup 与 ha-post-config 在真实 UFM 对上运行
+
+- Case ID：`TC-REAL-UFM-HA-SETUP-001`；类型：real-environment / destructive / HA；状态：**OPEN / NOT RUN（工具未在真机运行）**。
+- 本机先决：`test_cases.test_ufm_setup_upgrade` 中 `SimulatedUpgradeAndHaTest`、`HaPostConfigTest`、`HaPostConfigPureTest`、`HaStatusTest` 全部通过，以及 `test_cases.test_ufm_ha_status_parity` 通过。假设备 GREEN 不等于现场验收。
+- 依据：owner 2026-10-22 在 `ufm-manual.log` 第 698–2088 行手工完成同一流程（standby、master config，`drbdadm status`，`ufm_ha_cluster start`、`status`，license，gv.cfg，root_guid.conf，failover）。这是手工证据，不是工具运行。
+- 前置条件：
+  - 两台 UFM 已通过 `config-upgrade --apply`；
+  - owner 书面授权维护窗口：master config 会备份并清空 `/opt/ha_data`、格式化 DRBD、销毁两台原有集群；failover 会短暂中断 UFM 服务；
+  - 记录两台的 `ufm_ha_cluster status`、`/opt/ufm/files/conf/gv.cfg`、`root_guid.conf`、`licenses/`；
+  - 工具目录下有 setup 建的 `image` 链接，`ib.csv` 含 spine（或 core）。
+- 步骤与预期：
+  1. `check` 只读；HA 未配置时 `ha_config` 为 `WOULD_CHANGE`。
+  2. `ha-setup --apply` 只确认一次。依次为 standby、master config（输出写入 `/root/.setup/<运行目录>/ha-config-*.log`），每 100 秒一行 DRBD 进度，`start`，status 判定；接着自动 ha-post-config：license、gv.cfg、root_guid.conf，有改动则 failover 一次，结果 `HA_CONFIGURED`。
+  3. 再跑 `ha-setup --apply`：`HA_EXISTS`，不做任何事，最后提示清除或改用 ha-post-config。
+  4. `ha-post-config --apply`：`HA_POST_UP_TO_DATE`，不 failover。
+  5. 登录 VIP 全程不改 `~/.ssh/known_hosts`，failover 后能照常登录。
+- 证据：
+  - 部署服务器 `ufm-setup-upgrade-logs/<运行目录>/` 下的 `report.log`、`result.json`、`vip-known-hosts`；
+  - UFM 上 `/root/.setup/<运行目录>/` 的脚本和日志、`/root/ufm-setup-upgrade-backup/<运行目录>/post-ha/`；
+  - failover 前后的 `ufm_ha_cluster status`、`grep smi /opt/ufm/files/log/opensm-smdb.dump`、`docker exec ufm ufmlicense`。
+- 清理与风险：
+  - 部署本身不回滚；中途失败时按 owner 的方式清除 HA 后重跑；gv.cfg 和 root_guid.conf 可从备份恢复。
+  - `ufmlicense` 的实际输出格式待 owner 提供样本后核对：判据是新主机 eno8303 MAC 那一行为 Valid。
+  - 未执行前保持 NOT RUN，不得写 PASS。
+
+## TC-REAL-UFM-MONITOR-001 — UFM 监控采集、降级、failover 期间的取回、保留期与日志轮转
+
+- Case ID：`TC-REAL-UFM-MONITOR-001`；类型：real-environment / collection / failover；状态：**BLOCKED / NOT RUN**。前提是 setup 已建 `infiniband/monitor/{ufm-info,ufm-ibdiagnet,01-global.yaml,99-output-p2p}` 链接（2026-10-22 起 setup 会建立，见 `infiniband/monitor/UFM-MONITOR.md` 14.3；已部署的服务器要先重跑一次 setup）。
+- 本机先决：`test_cases.test_ufm_monitor_scripts`、`test_cases.test_ufm_monitor_cron_workflow`、`test_cases.test_ib_post_collect`、`test_cases.test_monitor_ufm_status` 全部通过。
+- 依据：owner 2026-10-22 实测 ibdiagnet 约 6 分钟（`ufm-manual.log` 第 2099–3100 行），归档约 100 MB；iblinkinfo 约 12 MB；failover 时经 VIP 的会话被重置（第 2009 行）。
+- 前置条件：HA 正常运行；owner 授权的采集窗口（ibdiagnet 会给 fabric 带来负载）；如测试 failover，需要另行授权。
+- 步骤与预期：
+  1. 页面发起一轮 IB 采集：`ufm-info/<UTC>.tar.gz` 含两台 `.info` 和主机 `.ha`；`ufm-ibdiagnet/<run-id>_<节点>_ibdiagnet2.tgz` 含 `ibdiagnet2/ibdiagnet2.net_dump`，旁边有 `.done`；`99-output-p2p` 有报告、provenance、收据；IB Link Validation 显示「采集：UFM <节点> · ibdiagnet · run-id …」。
+  2. 采集中途在 VIP 上执行 failover：本轮 HA 状态和 ibdiagnet 都从启动时的那台取回，不会取到另一台的旧文件，最多记一条 UFM 警告。
+  3. 人为让 ibdiagnet 连续失败 3 次（例如停掉 ufm 容器）：第 4 轮改采 iblinkinfo，页面标为降级；恢复后第 6 轮再试 ibdiagnet，成功即清零。
+  4. 跨日后：前两天的文件在 `YYYYMMDD-daily.tar.gz` 里，更早的被删除；CSV 不打包；`cronjob.log` 超过 10 MB 被压缩，最多保留 7 个。
+- 证据：各 lane 的 `cronjob.log` 片段、`ufm-ibdiagnet/` 目录清单、`.ibdiagnet-state`、页面截图、`du -sh` 磁盘占用。
+- 清理与风险：
+  - 采集对 UFM 只写 `/root/monitor/`；停容器制造失败需要维护窗口。
+  - 磁盘：每轮 100 MB 时，3 天约 43 GB。
+  - 未执行前保持 NOT RUN。

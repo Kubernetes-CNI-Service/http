@@ -96,6 +96,9 @@ _EXPECTED_DEVICE_CORE_PREFIX = (
 )
 BACKUP_RETENTION_CAP = 100
 _BACKUP_FAMILIES = frozenset({"eth", "spx", "ib", "nvl"})
+# 不做 YAML 备份的非交换机行：server_mgmt 是 server 的新写法；server_ufm 是 UFM，
+# 只填前 7 列（owner 2026-10-19..22）；eth_jump 只是跳板。
+_NON_SWITCH_TYPES = frozenset({"server", "server_mgmt", "server_ufm", "eth_jump"})
 _CANONICAL_BATCH_RE = re.compile(
     r"^(?P<date>\d{8})_(?P<time>\d{4})-(?:(?P<environment>prod|air)-)?backup$"
 )
@@ -1426,7 +1429,7 @@ def load_devices_csv(path):
             # 判断设备类型
             if type_col is not None and len(row) > type_col:
                 fmt = row[type_col].strip().lower()
-                if fmt in {"server", "eth_jump"}:
+                if fmt in _NON_SWITCH_TYPES:
                     continue
                 if fmt not in ("eth", "eth_spx", "spx", "air", "ib", "nvl"):
                     raise ValueError(

@@ -45,7 +45,7 @@ class ProdCycleFixture:
         self.addCleanup(lambda: gate.__exit__(None, None, None))
         self.store = WORKER.CollectionCycleStore(gate=self.gate)
 
-    def _cycle(self, *, ib_analysis=None):
+    def _cycle(self, *, ib_analysis=None, legacy_plan=False):
         token = TOKEN_1 if self.store._read_witness() is None else TOKEN_2
         with mock.patch.object(WORKER, "_mint_cycle_run_token", return_value=token):
             identity = self.store.allocate_start(
@@ -76,7 +76,7 @@ class ProdCycleFixture:
             inventory.parent.mkdir(parents=True, exist_ok=True)
             inventory.write_bytes(frozen)
             plan = {"eth": [], "spx": [], "ib": [], "nv": [],
-                    "dynamic_identities": []}
+                    "dynamic_identities": [], "ufm": []}
             plan[key] = [f"{host}|192.0.2.10"]
             private = area / leaf
             context = {
@@ -124,6 +124,14 @@ class ProdCycleFixture:
             with mock.patch.object(EMITTER, "ROOT", self.root):
                 child, evidence, envelope, sidecar = EMITTER.build_result(args)
                 EMITTER.publish(sidecar, evidence, envelope)
+            if legacy_plan and source_slot == "infiniband/prod":
+                # A cycle completed before the UFM key existed: its envelope bound a five-key plan.
+                old_plan = {key: value for key, value in plan.items() if key != "ufm"}
+                body = json.loads(envelope)
+                body["target_plan_sha256"] = hashlib.sha256(EMITTER.canonical(old_plan)).hexdigest()
+                envelope = EMITTER.canonical(body)
+                (sidecar / "identity-envelope.json").write_bytes(envelope)
+                child = {**child, "envelope": EMITTER.digest(envelope)}
             empty = {"sha256": hashlib.sha256(b"").hexdigest(), "size_bytes": 0}
             outcomes.append({
                 "source_slot": source_slot, "outcome": "accepted",
@@ -362,6 +370,15 @@ class IbCycleRoleWorkflowTests(ProdCycleFixture, unittest.TestCase):
         self.assertRegex(gap.completion_sha256, r"^[0-9a-f]{64}$")
         self.assertRegex(gap.evidence_sha256, r"^[0-9a-f]{64}$")
         self.assertFalse(gap.qualified)
+
+    def test_a_cycle_frozen_with_the_five_key_plan_still_binds(self) -> None:
+        # Codex review 2026-10-22: cycles completed before the UFM key are read as they were.
+        identity, _artifacts = self._cycle(legacy_plan=True)
+        gap = inspect_completed_ib_cycle_roles(
+            self.store, http_root=self.root, sequence=identity["sequence"],
+        )
+        self.assertEqual(identity["cycle_id"], gap.cycle_id)
+        self.assertEqual(("info_archive", "link_archive", "link_csv"), gap.roles)
 
     def test_hand_added_six_roles_and_same_mtime_do_not_gain_authority(self) -> None:
         identity, artifacts = self._cycle()

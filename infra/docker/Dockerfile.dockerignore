@@ -51,6 +51,12 @@ infiniband/bringup
 infiniband/bringup/**
 infiniband/bringup/ndr/ndr-upgrade-logs
 infiniband/bringup/ndr/ndr-upgrade-logs/**
+infiniband/bringup/ufm-setup-upgrade/ib.csv
+infiniband/bringup/ufm-setup-upgrade/ib.csv/**
+infiniband/bringup/ufm-setup-upgrade/p2p.xlsx
+infiniband/bringup/ufm-setup-upgrade/p2p.xlsx/**
+infiniband/bringup/ufm-setup-upgrade/ufm-setup-upgrade-logs
+infiniband/bringup/ufm-setup-upgrade/ufm-setup-upgrade-logs/**
 infiniband/bringup/xdr-initial-setup/ib.csv
 infiniband/bringup/xdr-initial-setup/ib.csv/**
 infiniband/bringup/xdr-initial-setup/p2p.xlsx
@@ -65,6 +71,10 @@ infiniband/bringup/xdr-upgrade/xdr-upgrade-logs
 infiniband/bringup/xdr-upgrade/xdr-upgrade-logs/**
 infiniband/ib.csv
 infiniband/ib.csv/**
+infiniband/monitor/01-global.yaml
+infiniband/monitor/01-global.yaml/**
+infiniband/monitor/99-output-p2p
+infiniband/monitor/99-output-p2p/**
 infiniband/monitor/cronjob.log
 infiniband/monitor/cronjob.log/**
 infiniband/monitor/ib-info
@@ -73,6 +83,10 @@ infiniband/monitor/ib-link
 infiniband/monitor/ib-link/**
 infiniband/monitor/ib.csv
 infiniband/monitor/ib.csv/**
+infiniband/monitor/ufm-ibdiagnet
+infiniband/monitor/ufm-ibdiagnet/**
+infiniband/monitor/ufm-info
+infiniband/monitor/ufm-info/**
 infiniband/p2p.xlsx
 infiniband/p2p.xlsx/**
 infra/.logs-migration.*
@@ -133,6 +147,10 @@ nvlink/nvsw.csv
 nvlink/nvsw.csv/**
 nvlink/p2p.xlsx
 nvlink/p2p.xlsx/**
+tools/cabletracker-lldpq
+tools/cabletracker-lldpq/**
+tools/cabletracker-lldpq.zip
+tools/cabletracker-lldpq.zip/**
 tools/ib-tool-Jie
 tools/ib-tool-Jie/**
 tools/ibdiagnet-analyze-tool
@@ -197,6 +215,8 @@ ztp/config/nvos/template/02-devices_config.csv
 ztp/config/nvos/template/02-devices_config.csv/**
 ztp/config/nvos/template/99-output-ib_nvl
 ztp/config/nvos/template/99-output-ib_nvl/**
+ztp/config/nvos/template/P2P/02-devices_config.csv
+ztp/config/nvos/template/P2P/02-devices_config.csv/**
 ztp/config/nvos/template/P2P/ib-info
 ztp/config/nvos/template/P2P/ib-info/**
 ztp/config/nvos/template/P2P/output-p2p

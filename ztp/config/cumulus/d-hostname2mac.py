@@ -98,6 +98,9 @@ _COL_ETH1_PFX = 8
 _COL_ETH1_GW  = 9
 _COL_ETH1_MAC = 10
 _NCOLS        = 11
+# 服务器行不是交换机，直接跳过：server_mgmt 是 server 的新写法；server_ufm 是 UFM，
+# 只填前 7 列，由 ufm-setup-upgrade 处理（owner 2026-10-19..22）。
+_SERVER_TYPES = frozenset({"server", "server_mgmt", "server_ufm"})
 _EXPECTED_HEADER_PREFIX = (
     "hostname", "type", "template", "eth0_ip", "netmask", "eth0_gw",
     "eth0_mac", "eth1_ip", "netmask", "eth1_gw", "eth1_mac",
@@ -203,12 +206,15 @@ def load_csv(csv_file, *, switch_scope="all"):
             row = [c.strip() for c in raw]
             if not any(row):
                 continue
+            dev_type = _row_type(row, type_col)
+            # 服务器行（server_ufm 可能只到 eth0_mac）先跳过，再检查交换机行的列数。
+            if dev_type in _SERVER_TYPES:
+                continue
             if len(row) < _NCOLS:
                 raise ValueError(
                     f"第 {lineno} 行列数不足（{len(row)} < {_NCOLS}）"
                 )
-            dev_type = _row_type(row, type_col)
-            if dev_type in {"server", "eth_jump"}:
+            if dev_type == "eth_jump":
                 continue
             if dev_type not in {"eth", "eth_spx", "spx", "air", "ib", "nvl"}:
                 raise ValueError(f"第 {lineno} 行 type={dev_type!r} 无效")

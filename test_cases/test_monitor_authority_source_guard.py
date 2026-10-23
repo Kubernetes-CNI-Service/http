@@ -417,7 +417,7 @@ class MonitorAuthoritySourceGuardTests(unittest.TestCase):
                 "test_cases/monitor_authority_root_warden.py",
                 "test_cases/run_monitor_authority_entrypoints.sh",
                 "tools/control-auth.py", "monitor/ztp-monitor-control.cgi",
-                "infra/infra-setup.sh", "infra/infra-teardown.sh",
+                "infra/infra-setup.py", "infra/ubuntu24_host.py", "infra/infra-teardown.sh",
                 "infra/docker/deploy.sh", "infra/docker/hostlock.py",
                 "infra/docker/activate.py", "infra/docker/healthcheck.py",
                 "infra/docker/apache-ztp.conf",

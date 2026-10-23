@@ -108,6 +108,10 @@ COMPLETION_HANDOFF_GROUP_TYPES = {
     "prod-nvlink": frozenset({"nvl", "pending_nvl"}),
 }
 COMPLETION_HANDOFF_KEYS = tuple(COMPLETION_HANDOFF_GROUP_TYPES)
+# Rows that are never ZTP targets and must never be SSHed as cumulus@/admin@:
+# server_mgmt is the new spelling of server; server_ufm is a UFM appliance that
+# fills only the first seven columns (owner 2026-10-19..22).
+SERVER_TYPES = frozenset({"server", "server_mgmt", "server_ufm"})
 _SNAPSHOT_NAME_RE = re.compile(r"^\d{8}_\d{6}(?:_\d+)?$")
 _ZTP_LOG_LINE_RE = re.compile(
     r"^\[\d{4}-\d{2}-\d{2}(?:T|\s)[^\]\r\n]+\]\s.*$"
@@ -408,7 +412,8 @@ def read_devices(
             key = (row.get("hostname") or "").strip().casefold()
             if key:
                 kind = (row.get("type") or "").strip().casefold()
-                if kind != "eth_jump":
+                # server_ufm (like eth_jump) has no configuration executor here.
+                if kind not in {"eth_jump", "server_ufm"}:
                     declared = padded[method_index] if method_index is not None else None
                     try:
                         configuration_methods[key] = resolve_device_config_method(kind, declared)
@@ -431,7 +436,7 @@ def read_devices(
         identity_macs = ({"eth0": eth0_mac_plain} if eth0_mac_plain else {})
         if device_type in {"ib", "nvl"} and eth1_mac_plain:
             identity_macs["eth1"] = eth1_mac_plain
-        if not hostname or device_type in {"server", "eth_jump"}:
+        if not hostname or device_type in SERVER_TYPES or device_type == "eth_jump":
             continue
         alternate_ssh_ips: list[str] = []
         alternate_ssh_interfaces: dict[str, str] = {}

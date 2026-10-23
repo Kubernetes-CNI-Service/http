@@ -15,6 +15,13 @@ import os
 import re
 import secrets
 
+if __name__ == "__main__" and not __package__:
+    # Run as a file (python3 monitor/issue_tracker_enrollment_journal.py --help) rather than with -m:
+    # the repository root must be importable for the `monitor` package below.
+    import sys as _sys
+    from pathlib import Path as _Path
+    _sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))
+
 from monitor import issue_tracker_spreadsheet_owner as ownership
 from monitor import issue_tracker_local_commit as local
 from monitor import issue_tracker_attempt_journal as journal

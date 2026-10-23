@@ -18,7 +18,9 @@ Docker/Supervisor 的完整命令和限制见 [`infra/docker/README.md`](../../i
 
 Native infra 的 DNS、NTP 与 timezone 中性值只有一个权威：
 [`infra/infra-neutral.conf`](../../infra/infra-neutral.conf)。该文件是严格的惰性 `KEY=VALUE`
-数据，不可执行也不可 `source`。`infra-setup.sh` 独立运行时使用其中的
+数据，不可执行也不可 `source`。`infra-setup.py`（`infra-setup.sh` 保留，当前入口为 infra-setup.py）不加 `--apply` 时只检查并列出 `WOULD APPLY`，加 `--apply` 后在第一次改动前确认一次（`--yes` 跳过）；退出码 0 = 已是期望状态，3 = 检查发现需改动，1 = 失败或未授权，2 = 用法错误。`--mgmt`（非 `--offline`）检查时只读核对 `apps/ubuntu-<ver>/<arch>/Packages.gz`：仓库缺失或不可读、或缺少任一必需顶层包才算待改动（只核对顶层包名，不核对依赖闭包）；`--apply` 仍每次刷新离线缓存。它默认只读取脚本自身目录：存在 `01-global.yaml`
+（setup 建立的项目链接）时以其 `common.switch.system` 为准，缺席的键回退到中性值；没有 global 时
+使用 `deploy_infra.py` 写入的 `infra-runtime.conf` 管理块（只解析、不执行），二者都没有时使用
 `8.8.8.8`、`ntp.ubuntu.com`、`Etc/UTC`；`deploy_infra.py` 读取同一文件，并只在 global
 中的整个 `dns`、`ntp` 或 `date-time` 可选键缺席时逐键回退。键一旦存在，其列表或值会完整
 替换中性值，不做追加、并集或逐元素补齐；存在但为空或结构错误会 fail closed。

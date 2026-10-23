@@ -32,6 +32,16 @@ CABLETRACKER_REFERENCE_PATHS = (
     "monitor/cabletracker-main/tests/test_offline_workflow.py",
     "monitor/cabletracker-main/tmp.json",
 )
+# The owner's CableTracker reference project (2026-10-23).  Its contents are
+# refreshed by the owner (a downloaded online tracker, instance files), so
+# only its disposition is pinned here, never its file list.
+CABLETRACKER_LLDPQ_ROOT = "tools/cabletracker-lldpq"
+CABLETRACKER_LLDPQ_SAMPLE_PATHS = (
+    "tools/cabletracker-lldpq/cabletracker_runner.py",
+    "tools/cabletracker-lldpq/ibdiagnet/generate_report.py",
+    "tools/cabletracker-lldpq/online_Issue_Tracker.xlsx",
+    "tools/cabletracker-lldpq/tests/test_lldpq_source.py",
+)
 
 
 def disposition(value: str) -> str:
@@ -58,11 +68,32 @@ class ReferenceOnlyPathDispositionTests(unittest.TestCase):
         else:
             self.assertEqual((), actual)
         self.assertEqual(
-            frozenset({"monitor/cabletracker-main"}),
+            frozenset({"monitor/cabletracker-main", CABLETRACKER_LLDPQ_ROOT}),
             getattr(CONTRACT, "REFERENCE_ONLY_SUBTREES", frozenset()),
         )
         self.assertEqual("reference-only", disposition("monitor/cabletracker-main"))
         for relative in CABLETRACKER_REFERENCE_PATHS:
+            with self.subTest(relative=relative):
+                self.assertEqual("reference-only", disposition(relative))
+                self.assertEqual(
+                    "reference-only input",
+                    CONTRACT.transfer_exclude_reason(relative),
+                )
+
+    def test_cabletracker_lldpq_reference_project_never_ships(self):
+        root = ROOT / CABLETRACKER_LLDPQ_ROOT
+        if root.exists():
+            self.assertTrue(root.is_dir())
+            self.assertFalse(root.is_symlink())
+        present = tuple(sorted(
+            path.relative_to(ROOT).as_posix()
+            for path in root.rglob("*")
+            if path.is_file() or path.is_symlink()
+        ))
+        self.assertEqual("reference-only", disposition(CABLETRACKER_LLDPQ_ROOT))
+        # Code, the downloaded workbook and the project's own tests alike:
+        # reference-only wins over the nondeployment test-directory rule.
+        for relative in CABLETRACKER_LLDPQ_SAMPLE_PATHS + present:
             with self.subTest(relative=relative):
                 self.assertEqual("reference-only", disposition(relative))
                 self.assertEqual(
@@ -78,6 +109,8 @@ class ReferenceOnlyPathDispositionTests(unittest.TestCase):
             "monitor/generate-monitor-html.py": "production",
             "monitor/cabletracker-mainline/runtime.py": "production",
             "monitor/cabletracker-main-sibling/runtime.py": "production",
+            "tools/cabletracker-lldpq-sync/runtime.py": "production",
+            "tools/cabletracker/runtime.py": "production",
         }
         self.assertEqual(
             expected,

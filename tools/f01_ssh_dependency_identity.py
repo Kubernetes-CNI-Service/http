@@ -324,7 +324,12 @@ def _inventory_headers(distribution):
         raise F01DependencyError()
     parsed = HeaderParser().parsestr(text)
     parsed.set_payload(None)  # opaque body is not inventory identity
-    return metadata._adapters.Message(parsed)  # original standard header repair
+    adapters = getattr(metadata, "_adapters", None)
+    if adapters is None:
+        # Python 3.9 (the macOS operator python3) has no header adapter; its own
+        # Distribution.metadata is this plain email Message, read the same way.
+        return parsed
+    return adapters.Message(parsed)  # original standard header repair
 
 
 def _visible_distributions(prefix):

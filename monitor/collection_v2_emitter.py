@@ -27,6 +27,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tools"))
 from project_contract import (  # noqa: E402
     _validate_collection_cycle_legacy_result,
+    setup_collection_link_hop,
     validate_collection_cycle_identity,
     validate_collection_cycle_result,
 )
@@ -60,9 +61,10 @@ def regular_member(path: Path, area: str, stem: str, suffix: str) -> tuple[str, 
     current = ROOT
     for part in pure.parts:
         current = current / part
-        if current.is_symlink():
+        # setup's own collection output link is the one walkable hop (R0, 2026-10-23)
+        if current.is_symlink() and not setup_collection_link_hop(ROOT, current):
             raise ValueError("collection artifact traverses a symlink")
-    if not current.is_file():
+    if not current.is_file() or current.is_symlink():
         raise ValueError("collection artifact is missing")
     return relative, current.read_bytes()
 
@@ -157,9 +159,12 @@ def build_result(args: argparse.Namespace) -> tuple[dict, bytes, bytes, Path]:
     if "target_plan" in context:
         plan = context["target_plan"]
         if not isinstance(plan, dict) or set(plan) != {
-            "eth", "spx", "ib", "nv", "dynamic_identities"
+            "eth", "spx", "ib", "nv", "dynamic_identities", "ufm"
         } or digest(canonical(plan))["sha256"] != context["target_plan_sha256"]:
             raise ValueError("frozen target plan is invalid")
+        # UFM rows (owner 2026-10-21) only ride on the infiniband slot and never count as devices.
+        if not isinstance(plan["ufm"], list) or (area != "infiniband" and plan["ufm"]):
+            raise ValueError("frozen target plan UFM rows are invalid")
         active_key = {"ethernet": "eth", "infiniband": "ib", "nvlink": "nv"}[area]
         entries = plan[active_key]
         if not isinstance(entries, list) or any(not isinstance(row, str) or "|" not in row
@@ -261,6 +266,27 @@ def build_result(args: argparse.Namespace) -> tuple[dict, bytes, bytes, Path]:
         roles.extend(validate_ib_completion_attestation(
             identity, ib_analysis, http_root=ROOT,
         ))
+    # REQ7 R1 (2026-10-23): the cron.sh UFM lane's run record binds its IB analysis to this cycle only
+    # when the record names this cycle and the run succeeded; otherwise the slot keeps its base roles,
+    # because a UFM problem never changes the switch result (infiniband/monitor/UFM-MONITOR.md 15).
+    ufm_binding = None
+    ufm_record = getattr(args, "ufm_run_record", None)
+    if ufm_record is not None:
+        if slot != "infiniband/prod" or ib_analysis is not None:
+            print("UFM IB analysis not bound: only a prod IB slot without D-70 analysis binds it",
+                  file=sys.stderr)
+        else:
+            try:
+                from monitor.collection_ufm_run_binding import UfmRunBindingHold, derive_ufm_run_roles
+            except ImportError as exc:   # a broken install must not fail the switch slot
+                print(f"UFM IB analysis not bound: binding module unavailable: {exc}", file=sys.stderr)
+            else:
+                try:
+                    ufm_roles, ufm_binding = derive_ufm_run_roles(identity, ufm_record, http_root=ROOT)
+                except UfmRunBindingHold as exc:
+                    print(f"UFM IB analysis not bound to this cycle: {exc}", file=sys.stderr)
+                else:
+                    roles.extend(ufm_roles)
     evidence = canonical({"roles": roles})
     envelope_body = {
         "identity": identity, "source_slot": slot, "state": legacy["state"],
@@ -282,6 +308,8 @@ def build_result(args: argparse.Namespace) -> tuple[dict, bytes, bytes, Path]:
                 "attestation_sha256",
             )
         }
+    if ufm_binding is not None:
+        envelope_body["ufm_run_binding"] = ufm_binding
     envelope = canonical(envelope_body)
     child = {
         **legacy, **identity, "schema_version": 2, "source_slot": slot,
@@ -414,6 +442,14 @@ def publish(sidecar_dir: Path, evidence: bytes, envelope: bytes) -> None:
             validate_ib_completion_attestation(
                 bound_envelope["identity"], binding, http_root=ROOT,
             )
+        elif len(roles) == 10:
+            from monitor.collection_ufm_run_binding import validate_ufm_run_binding
+            bound_envelope = json.loads(envelope)
+            # Replayed once more just before publication: the files may not change in between.
+            validate_ufm_run_binding(
+                bound_envelope["identity"], bound_envelope.get("ufm_run_binding"), roles[3:],
+                http_root=ROOT,
+            )
         elif len(roles) != 3:
             raise ValueError("collection evidence role count is invalid")
         for name, content in members:
@@ -488,6 +524,9 @@ def main() -> int:
                         help="Collector link CSV path when applicable.")
     parser.add_argument("--activity", type=Path,
                         help="Worker-bound Ethernet activity sidecar when applicable.")
+    parser.add_argument("--ufm-run-record", type=Path,
+                        help="The UFM lane's run record of this cycle (prod IB slot); bound only "
+                             "when it names this cycle and the run and its analysis succeeded.")
     args = parser.parse_args()
     try:
         child, evidence, envelope, sidecar_dir = build_result(args)

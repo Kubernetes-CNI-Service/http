@@ -24,6 +24,13 @@ from io import BytesIO
 CVT_ROLES = frozenset({
     "p2p", "inventory", "port_map", "splitter", "converter", "topology_rules",
 })
+# Owner 2026-10-22: 02-devices_config.csv decides which P2P column names the devices; a CVT built with it
+# records it as a seventh role. A CVT built without it keeps exactly the six roles.
+OPTIONAL_CVT_ROLES = frozenset({"devices"})
+
+
+def _cvt_role_set_ok(roles) -> bool:
+    return CVT_ROLES <= set(roles) <= CVT_ROLES | OPTIONAL_CVT_ROLES
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 REQUIRED_IB_REPORT_SHEETS = frozenset({"Summary", "Missing_Links", "Miswired_Links"})
 WORKBOOK_NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
@@ -505,9 +512,9 @@ def _check_report_sheets(report: Path) -> None:
 
 
 def capture_sources(sources: Mapping[str, Path]) -> dict[str, dict[str, str]]:
-    if set(sources) != CVT_ROLES:
-        raise ProvenanceError("CVT provenance requires exactly six named source roles")
-    return {role: _identity(Path(sources[role])) for role in sorted(CVT_ROLES)}
+    if not _cvt_role_set_ok(sources):
+        raise ProvenanceError("CVT provenance requires exactly six named source roles (plus optional devices)")
+    return {role: _identity(Path(sources[role])) for role in sorted(sources)}
 
 
 def write_cvt_provenance(
@@ -538,9 +545,9 @@ def read_cvt_provenance(cvt: Path) -> dict[str, object]:
     if _identity(cvt)["resolved_path"] != identity["resolved_path"]:
         raise ProvenanceError("CVT provenance belongs to another path")
     sources = record["sources"]
-    if not isinstance(sources, dict) or set(sources) != CVT_ROLES:
+    if not isinstance(sources, dict) or not _cvt_role_set_ok(sources):
         raise ProvenanceError("invalid CVT source roles")
-    for role in sorted(CVT_ROLES):
+    for role in sorted(sources):
         _same_file_identity(sources[role], role)
     return record
 

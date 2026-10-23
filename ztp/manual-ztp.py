@@ -71,6 +71,10 @@ DHCP_RELEASE_MANIFEST = (
 AIR_TOPOLOGY_POLICY_NAME = "03-air-topology-policy.json"
 MINI_AIR_DEVICES_NAME = "04-air-mini-devices.txt"
 SUPPORTED_TYPES = {"eth", "eth_spx", "spx", "air", "ib", "nvl"}
+# Rows that are never ZTP/reset targets: server_mgmt is the new spelling of
+# server; server_ufm is a UFM appliance that fills only the first seven columns
+# (owner 2026-10-19..22); eth_jump is transport only.
+NON_SWITCH_TYPES = {"server", "server_mgmt", "server_ufm", "eth_jump"}
 ETHERNET_TYPES = {"eth", "eth_spx", "spx", "air"}
 SAFE_HOSTNAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$")
 SAFE_OPERATION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9:._-]{0,511}$")
@@ -303,7 +307,7 @@ def read_devices(
             device_type = str(row.get("type") or "").strip().casefold()
             if not any(str(value or "").strip() for value in values):
                 continue
-            if device_type in {"server", "eth_jump"}:
+            if device_type in NON_SWITCH_TYPES:
                 continue
             if not hostname:
                 raise ManualZtpError(f"02-devices_config.csv 第 {lineno} 行 hostname 为空")

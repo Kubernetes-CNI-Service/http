@@ -423,7 +423,7 @@ ssh() {
 scp() {
     local last="${@: -1}"
     case "$last" in
-        /*.info) mkdir -p "$(dirname "$last")"; printf 'fixture-info\n' > "$last" ;;
+        /*.info) mkdir -p "$(dirname "$last")"; printf 'fixture-info\n# Collect complete\n' > "$last" ;;
         /*.link) mkdir -p "$(dirname "$last")"; printf 'port,peer\n1,fixture\n' > "$last" ;;
     esac
     return 0
@@ -899,6 +899,9 @@ print(json.dumps({'first':record(),'nested_status':child.returncode,
         for path in (tools, monitor, ethernet, infiniband, nvlink):
             path.mkdir(parents=True)
         shutil.copy2(ROOT / "tools/project_contract.py", tools / "project_contract.py")
+        # the worker rotates its own log and cron.sh archives its data dirs through these modules
+        for name in ("log_rotation.py", "collection_archive.py"):
+            shutil.copy2(ROOT / "tools" / name, tools / name)
         shutil.copy2(
             ROOT / "monitor/switch-collection-worker.py",
             monitor / "switch-collection-worker.py",
@@ -911,6 +914,10 @@ print(json.dumps({'first':record(),'nested_status':child.returncode,
             ROOT / "monitor/collection_v2_emitter.py",
             monitor / "collection_v2_emitter.py",
         )
+        # the emitter binds a successful UFM run of the cycle through this module (REQ7 R1); it replays
+        # the report provenance with the shared reader
+        shutil.copy2(ROOT / "monitor/collection_ufm_run_binding.py",
+                     monitor / "collection_ufm_run_binding.py")
         for name in ("cron.sh", "post-collect.py", "sw-info.sh", "sw-link.sh"):
             shutil.copy2(ROOT / "ethernet/monitor" / name, ethernet / name)
         ztp = root / "ztp"
@@ -919,6 +926,9 @@ print(json.dumps({'first':record(),'nested_status':child.returncode,
                      ztp / "dynamic_air_inventory.py")
         shutil.copy2(ROOT / "ztp/dhcp_runtime_inventory.py",
                      ztp / "dhcp_runtime_inventory.py")
+        (ztp / "config").mkdir()   # the shared report-provenance reader of the UFM binding
+        shutil.copy2(ROOT / "ztp/config/ib_topology_provenance.py",
+                     ztp / "config/ib_topology_provenance.py")
         (root / "dhcpd.leases").write_text("", encoding="utf-8")
         (root / "dhcp-runtime.log").write_text("", encoding="utf-8")
         air_json = ztp / "config/isc-dhcp-server/p2p-air.json"

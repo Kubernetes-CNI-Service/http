@@ -280,16 +280,20 @@ class ScopedSourceAndEntryPointTests(unittest.TestCase):
             Path(IMPORTER.__file__).resolve(),
         )
 
-    def test_infra_shell_entries_parse_and_show_help_without_root(self):
-        for path in (ROOT / "infra/infra-setup.sh", ROOT / "infra/infra-teardown.sh"):
-            with self.subTest(path=path.name):
-                syntax = subprocess.run(
-                    ["bash", "-n", str(path)], text=True, capture_output=True,
-                )
+    def test_infra_entries_parse_and_show_help_without_root(self):
+        for command, syntax_command in (
+            ([sys.executable, "-B", str(ROOT / "infra/infra-setup.py"), "--help"],
+             [sys.executable, "-B", "-c", "import ast, sys; ast.parse(open(sys.argv[1], 'rb').read())",
+              str(ROOT / "infra/infra-setup.py")]),
+            (["bash", str(ROOT / "infra/infra-setup.sh"), "--help"],
+             ["bash", "-n", str(ROOT / "infra/infra-setup.sh")]),
+            (["bash", str(ROOT / "infra/infra-teardown.sh"), "--help"],
+             ["bash", "-n", str(ROOT / "infra/infra-teardown.sh")]),
+        ):
+            with self.subTest(entry=Path(command[-2]).name):
+                syntax = subprocess.run(syntax_command, text=True, capture_output=True)
                 self.assertEqual(0, syntax.returncode, syntax.stderr)
-                help_result = subprocess.run(
-                    ["bash", str(path), "--help"], text=True, capture_output=True,
-                )
+                help_result = subprocess.run(command, text=True, capture_output=True)
                 self.assertEqual(0, help_result.returncode, help_result.stderr)
                 self.assertIn("usage", (help_result.stdout + help_result.stderr).casefold())
 
@@ -1593,9 +1597,15 @@ class SetupUnloadAndTransportTests(unittest.TestCase):
 
     def test_infra_teardown_can_restore_setup_managed_hosts(self):
         teardown = (ROOT / "infra/infra-teardown.sh").read_text(encoding="utf-8")
-        setup = (ROOT / "infra/infra-setup.sh").read_text(encoding="utf-8")
+        setup = (ROOT / "infra/infra-setup.py").read_text(encoding="utf-8")
+        # infra-setup.sh is kept (no caller runs it); its log-root contract stays covered.
+        shell_setup = (ROOT / "infra/infra-setup.sh").read_text(encoding="utf-8")
         self.assertIn("/etc/hosts|/etc/systemd/resolved.conf", teardown)
         self.assertIn("restore_file /etc/hosts", teardown)
+        # Setup records /etc/hosts in managed-files before the shared module appends the mapping.
+        resolution = setup[setup.index("    def ensure_local_hostname_resolution(self)"):]
+        self.assertLess(resolution.index('self.track_managed_file("/etc/hosts")'),
+                        resolution.index("self.run_host_script(script"))
 
         def assert_locked_log_root(script):
             for required in (
@@ -1618,7 +1628,7 @@ class SetupUnloadAndTransportTests(unittest.TestCase):
             self.assertLess(log_existing, log_create)
             self.assertLess(log_create, log_open)
 
-        for script in (teardown, setup):
+        for script in (teardown, shell_setup):
             assert_locked_log_root(script)
             for mutant in (
                 script.replace("flock -x 8", "# missing log-root lock", 1),
@@ -1631,6 +1641,41 @@ class SetupUnloadAndTransportTests(unittest.TestCase):
             ):
                 with self.assertRaises(AssertionError):
                     assert_locked_log_root(mutant)
+
+        def assert_python_locked_log_root(script):
+            host_lock = "fcntl.flock(descriptor, fcntl.LOCK_EX)"
+            root_lock = "fcntl.flock(lock_fd, fcntl.LOCK_EX)"
+            link_check = "if log_dir.is_symlink():"
+            existing = "elif os.path.lexists(log_dir):"
+            create = "os.mkdir(log_dir, 0o700)"
+            log_open = "self.log_fd = os.open(self.log_file"
+            for required in (
+                host_lock, root_lock, link_check, existing, create, log_open,
+                "if log_root_lock.is_symlink() or (os.path.lexists(log_root_lock) "
+                "and not log_root_lock.is_file()):",
+                "os.path.realpath(log_dir) != os.path.realpath(physical)",
+            ):
+                self.assertIn(required, script)
+            run = script[script.index("    def run_setup(self)"):]
+            self.assertLess(run.index("self.acquire_host_lock()"), run.index("self.open_log()"))
+            self.assertLess(script.index(host_lock), script.index(root_lock))
+            self.assertLess(script.index(root_lock), script.index(link_check))
+            self.assertLess(script.index(link_check), script.index(existing))
+            self.assertLess(script.index(existing), script.index(create))
+            self.assertLess(script.index(create), script.index(log_open))
+
+        assert_python_locked_log_root(setup)
+        for mutant in (
+            setup.replace("fcntl.flock(lock_fd, fcntl.LOCK_EX)", "# missing log-root lock", 1),
+            setup.replace("if log_dir.is_symlink():", "if os.path.lexists(log_dir):", 1),
+            setup.replace("os.mkdir(log_dir, 0o700)", "os.makedirs(log_dir, exist_ok=True)", 1),
+            setup.replace("            fcntl.flock(lock_fd, fcntl.LOCK_EX)\n", "", 1).replace(
+                "os.mkdir(log_dir, 0o700)\n",
+                "os.mkdir(log_dir, 0o700)\n                fcntl.flock(lock_fd, fcntl.LOCK_EX)\n", 1,
+            ),
+        ):
+            with self.assertRaises(AssertionError):
+                assert_python_locked_log_root(mutant)
 
 
 class InfraAndAnalysisParserTests(unittest.TestCase):

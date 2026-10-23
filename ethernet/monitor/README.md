@@ -26,18 +26,40 @@
    或 `unknown` 的租约不会误入 Cumulus collector。尚未完成 bootstrap 的设备 hostname 可能
    仍为 `cumulus`；采集器必须先严格匹配 DHCP chaddr/远端 eth0 MAC，匹配后才允许 hostname
    处于过渡状态，普通静态设备仍要求 hostname 完全一致。
-2. 验证 SSH 公钥登录，必要时在交互模式下使用密码安装共享公钥。
-3. 把采集脚本复制到交换机并异步执行。设备端脚本先在同目录临时文件生成完整内容，再原子
-   替换 `.info`/`.link`；未知平台、非法 hostname 或 NVLink 没有可解析端口时不会发布空快照。
-4. 拉取 `.info` 或 `.link`，写入带时区的 `collection.json`，归档为含 `-prod` 或
-   `-air` 环境后缀的时间戳文件。
+2. 验证 SSH 公钥登录，必要时在交互模式下使用密码安装共享公钥（owner 2026-10-21）。
+   - 先用部署服务器公钥登录；失败时按设备类型提示「Ethernet 交换机 / InfiniBand 交换机 /
+     NVLink 交换机 / UFM 服务器 <用户> 密码 (attempt N/3)」，登录后部署公钥。
+   - 同一步用管理口 MAC 核对身份：交换机远端 `eth0` 的 MAC 必须等于清单的 `eth0_mac`；
+     UFM 的管理口 MAC 必须出现在该设备上。清单没有 MAC 时退回原来的 hostname 核对；不符就跳过该设备。
+3. 把采集脚本复制到设备并异步执行。设备端脚本把临时文件写在输出目录 `./monitor/` 下的
+   隐藏目录（`.sw-info.XXXXXX`、`.sw-link.XXXXXX`、`.ufm-info.XXXXXX`）里，写完后在同一文件系统内
+   `mv` 成 `.info`/`.link`，因此文件一出现就是完整的；`.info` 结尾还有 `# Collect complete`。
+   未知平台、非法 hostname 或 NVLink 没有可解析端口时不会发布空快照，也不会留下空的 `./monitor/`。
+4. 取回（`retrieve_when_ready`，owner 2026-10-21 统一）：触发后先等 `RETRIEVE_FIRST_WAIT=60` 秒，
+   再每 `RETRIEVE_POLL=5` 秒检查一次，哪台的文件出现就取回哪台，直到各阶段原有上限
+   （info 120 秒、IB/NV link 180 秒、SPX 300 秒）。UFM 的 ibdiagnet/iblinkinfo 单独一组：启动后 5 分钟
+   第一次检查，之后每 30 秒一次，最长 17 分钟（owner 2026-10-22）。部署服务器侧也先写到目标目录下的隐藏子目录，
+   `.info` 核对 `# Collect complete` 后再改名。到上限仍没有完整文件的设备从本轮剔除并记录，
+   其余设备不受影响。之后写入带时区的 `collection.json`，归档为含 `-prod` 或 `-air` 环境后缀的时间戳文件。
 5. Ethernet info 归档成功后，`post-collect.py` 把本轮归档作为明确的 `--archive` 输入，
    AIR 明确使用当前 P2P 的 `*-air.dot`，Production 使用 `*-lldpq.dot`，调用 LLDP analyzer
    生成同名 `*-ethernet-topology-validation.xlsx`，再按本轮
    AIR/Production scope 刷新 `monitor.html`。它不会按目录中的“最新文件”猜测输入。
-6. IB/NVLink 的 info 归档以及 SPX/IB/NVLink link CSV 是统一页面的直接输入；成功采集后
-   `cron.sh` 直接刷新 HTML，不再调用格式不匹配的拓扑分析器。
-7. 清理超出保留期的数据。
+6. IB 车道（`infiniband/monitor/cron.sh`）同时采集清单中 `type=server_ufm` 的 UFM
+   （`ufm-info.sh` 与 IB `sw-info.sh` 并行，`ufm-ibdiagnet.sh` 与 IB `sw-link.sh` 并行，HA 状态经 VIP
+   在主机上采集）。UFM 结果与交换机结果隔离：UFM 的问题只记日志，最后一行为
+   `cron finish with UFM warnings`，退出码和机器结果不变。详见 `infiniband/monitor/UFM-MONITOR.md`。
+7. IB 链路校验闭环（owner 2026-10-21，参考 Ethernet）：本轮从 UFM 取回 ibdiagnet 归档
+   （或降级时的 iblinkinfo 日志）后，`infiniband/monitor/post-collect.py` 用这个确切文件和当前 P2P 的
+   `<p2p>-cvt.xlsx` 调用 `tools/ibdiagnet-analyze-tool/analyze.py`，生成
+   `<run-id>_<节点>-{ibdiagnet|iblinkinfo}-topology-validation.xlsx`，页面的 IB Link Validation 读取它。
+   报告必须带有指向本轮输入和 CVT 的 provenance，旁边再写一份收据。分析失败只算 UFM 告警。
+   ibdiagnet 连续失败 3 次后改采 iblinkinfo，每 6 轮再试一次 ibdiagnet（owner 2026-10-22）。
+8. 只要本轮采到了任何数据（info/link 归档或 UFM 数据），就刷新 `monitor.html`，不要求整轮成功
+   （owner 2026-10-21）。IB/NVLink 的 info 归档以及 SPX/IB/NVLink link CSV 是统一页面的直接输入。
+9. 清理超出保留期的数据（owner 2026-10-22：所有采集到的信息保留 3 天，当天原样，前两天按天打包，
+   CSV 不打包；计数和删除都用 `find -H`，跟随数据目录链接）。`cronjob.log` 到 10 MB 压缩，最多 7 个。
+   本 lane 的采集锁被占用时（上一轮还在跑），日志写明后本轮跳过。
 
 ## 文件
 
@@ -45,6 +67,11 @@
 - `post-collect.py`：Ethernet 采集闭环；只分析 `cron.sh` 本轮刚发布的归档，确认 XLSX
   已实际更新后才刷新 HTML。分析器返回 `1` 表示报告中存在链路不匹配，仍会刷新页面；
   分析器/依赖异常、报告未发布或 HTML 生成失败才使 cron 返回非零。
+- `infiniband/monitor/post-collect.py`（真实文件，不是链接）：IB 链路校验闭环。
+  - 只接受本轮的 `<run-id>_<节点>_ibdiagnet2.tgz` 或 `<run-id>_<节点>_iblinkinfo.log`；
+  - 选当前 P2P 的 CVT，调用 ibdiagnet 分析器，用报告的 provenance 确认它属于本轮输入和 CVT，再写收据；
+  - 不刷新 HTML，由 `cron.sh` 随后统一刷新。
+- `infiniband/monitor/ufm-info.sh`、`ufm-ibdiagnet.sh`、`UFM-MONITOR.md`：UFM 采集脚本与需求、流程、交接文档。
 - `sw-info.sh`：采集平台、温度、接口和协议状态，输出 `<hostname>.info`。
 - `sw-link.sh`：采集 SPX/IB/NVLink 链路，输出 `<hostname>.link`。SPX 的
   `Oper-Status` 取自 `nv show interface` 的 `Oper Status` 列，而不是
@@ -92,8 +119,10 @@ sudo apt-get install python3-xlsxwriter
 控制面先把统一 CSV 拆成临时 host 文件，
 对 hostname/IP 做字符校验，再通过有限并发的 SSH/SCP job 执行。SSH 准备会区分认证拒绝与
 网络不可达：只有 `Permission denied` 类错误才提示共享密码；无路由、超时或拒绝连接的设备
-从本轮临时清单移除，其余可达设备继续采集。每个阶段仍要求可达临时清单与实际文件数一致才
-发布归档，完整项目清单不会被修改，页面会把本轮未采集设备显示为 Missing。Ethernet AIR 批次使用
+从本轮临时清单移除，其余可达设备继续采集。取回阶段到上限仍没有完整文件的设备同样从临时清单
+剔除并记录，其余设备照常归档；完整项目清单不会被修改，页面会把本轮未采集设备显示为 Missing。
+页面触发的自动采集（worker 冻结目标计划）与手工运行走同一套阶段；目标计划自 2026-10-21 起
+为 6 个键 `{eth, spx, ib, nv, dynamic_identities, ufm}`，`ufm` 只在 infiniband 槽位非空。Ethernet AIR 批次使用
 `YYYYMMDD-HHMM-air.tar.gz`，Production 使用 `YYYYMMDD-HHMM-prod.tar.gz`；SPX/IB/NVL 链路
 CSV 使用 UTC 文件名，页面显示时转换为本地时区。
 
@@ -151,8 +180,16 @@ NVLink 分别有固定表头；修改字段时必须同步 monitor 的行规范�
 - SPX、IB 和 NVLink 的 `*.link` 已是监控页差异引擎的标准 CSV；页面直接比较多轮快照，
   不调用 LLDP 或 ibdiagnet 分析器。
 - `ibdiagnet-analyze-tool` 需要完整 `ibdiagnet2` 快照或原始 `iblinkinfo` 日志以及 CVT；日常
-  `sw-link.sh` 的 CSV 不包含这些数据，不能互换。用户把这类诊断文件放入项目后仍应显式
-  运行该工具，生成的 IB validation XLSX 会在下一次 HTML 刷新时自动展示。
+  `sw-link.sh` 的 CSV 不包含这些数据，不能互换。
+  - 自 2026-10-21 起，IB 车道从 UFM 取回的 ibdiagnet 归档由 `infiniband/monitor/post-collect.py`
+    自动分析（见工作流第 7 步），与 Ethernet 的 LLDP 闭环对应。
+  - 用户手工放入项目的诊断文件仍应显式运行该工具。生成的 IB validation XLSX 会在下一次 HTML 刷新时自动展示。
+  - CVT（`<P2P 源文件名>-cvt.xlsx` 加 `.provenance.json`）放在项目的 `99-output-p2p`，与 Ethernet 的
+    `<p2p>-lldpq.dot` 并列（owner 2026-10-21）。生成方式和 dot 一样：load 在设备类型含 `ib` 时运行
+    `ztp/config/nvos/template/P2P/p2p-to-validation.py` 并校验 provenance；也可以在该目录下不带参数单独运行。
+    缺失时 IB 闭环报错并记为 UFM 告警。详见 `infiniband/monitor/UFM-MONITOR.md` 第 13 节「CVT 的来源」。
+- 页面对 IB、NVLink、UFM 的清单对齐与 Ethernet 相同：归档里已不在当前清单的设备不显示；
+  清单中有、本批次没返回的设备显示为 Missing。
 
 ## 场景与排障
 

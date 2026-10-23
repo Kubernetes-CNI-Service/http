@@ -47,6 +47,7 @@ Examples:
   bash cron.sh --type eth      # ordinary ETH info only
   bash cron.sh --type eth_spx  # inband/OOB SPX: info + link
   bash cron.sh --type spx      # SPX-network SPX: info + link
+  bash infiniband/monitor/cron.sh --type server_ufm   # UFM only (ib.csv type=server_ufm)
 EOF
 }
 
@@ -151,6 +152,8 @@ ETH=$(mktemp)   # eth/eth_spx/spx (sw-info.sh)
 SPX=$(mktemp)   # eth_spx/spx only (sw-link.sh)
 IB=$(mktemp)    # populated from ib.csv: type=ib
 NV=$(mktemp)    # populated from nvsw.csv: type=nvl
+UFM=$(mktemp)   # populated from ib.csv: type=server_ufm (hostname|eth0_ip); never a switch target
+INVENTORY_MACS=$(mktemp)  # hostname|eth0_mac from the inventory: the identity checked at key preparation
 DYNAMIC_AIR_IDENTITIES=$(mktemp)  # runtime hostname|authoritative eth0 MAC|runtime source (AIR + unbound Production)
 PLANNED_DEVICES=$(mktemp)  # immutable hostname set before per-device filtering
 DEVICE_FAILURES=$(mktemp)  # hostname<TAB>operation<TAB>bounded reason
@@ -199,11 +202,12 @@ else
         lock_args=(-n)
     fi
     if ! flock "${lock_args[@]}" 200; then
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] 采集锁等待超时或另一实例正在运行（$LOCK_FILE）" >&2
+        # Owner 2026-10-22: an overlapping start is skipped; the log says the previous run still runs.
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] 上一轮采集仍在运行（采集锁 $LOCK_FILE 被占用${LOCK_WAIT:+，已等待 ${LOCK_WAIT}s}），本轮跳过" >&2
         exit 1
     fi
 fi
-trap 'rm -f "$ETH" "$SPX" "$IB" "$NV" "$DYNAMIC_AIR_IDENTITIES" "$PLANNED_DEVICES" "$DEVICE_FAILURES" ${CONTEXT_FILE:+"$CONTEXT_FILE"} ${UNQUALIFIED_CONTEXT_FILE:+"$UNQUALIFIED_CONTEXT_FILE"} ${RESULT_FILE:+"$RESULT_FILE"} ${ASKPASS_FILE:+"$ASKPASS_FILE"}' EXIT
+trap 'rm -f "$ETH" "$SPX" "$IB" "$NV" "$UFM" "$INVENTORY_MACS" ${UFM_CANDIDATES:+"$UFM_CANDIDATES"} "$DYNAMIC_AIR_IDENTITIES" "$PLANNED_DEVICES" "$DEVICE_FAILURES" ${CONTEXT_FILE:+"$CONTEXT_FILE"} ${UNQUALIFIED_CONTEXT_FILE:+"$UNQUALIFIED_CONTEXT_FILE"} ${RESULT_FILE:+"$RESULT_FILE"} ${ASKPASS_FILE:+"$ASKPASS_FILE"}' EXIT
 if [[ -n "$WORKER_CONTEXT_FD" ]]; then
     CONTEXT_FILE=$(mktemp) || exit 1
     if ! cat <&"$WORKER_CONTEXT_FD" > "$CONTEXT_FILE"; then
@@ -230,7 +234,13 @@ IB_WAIT=120     # seconds to wait for sw-info.sh   to finish on IB  switches
 IBL_WAIT=180    # seconds to wait for sw-link.sh   to finish on IB  switches
 NV_WAIT=120     # seconds to wait for sw-info.sh   to finish on NV  switches
 NVL_WAIT=180    # seconds to wait for sw-link.sh   to finish on NV  switches
-RETAIN_DAYS=7   # number of days of data to retain (older files are deleted), need to >=2
+RETRIEVE_FIRST_WAIT=60  # owner 2026-10-21: after triggering, wait this long before the first check,
+RETRIEVE_POLL=5         # then check every RETRIEVE_POLL seconds; the *_WAIT values above are the limits
+# Owner 2026-10-22: every collected file on the ztp server is kept 3 days: today as it is, the two days
+# before in one daily bundle each (CSVs stay unbundled for the page), older ones deleted.
+RETAIN_DAYS=3   # number of days of data to retain (older files are deleted), need to >=2
+CRON_LOG_MAX_BYTES=$((10 * 1024 * 1024))   # owner 2026-10-22: cronjob.log is compressed at 10 MB,
+CRON_LOG_KEEP=7                             # keeping at most 7 compressed copies
 MAX_PARALLEL=8  # conservative limit for NVOS sshd; avoids MaxStartups resets
 
 # Ethernet switches (Cumulus Linux)
@@ -244,6 +254,28 @@ IB_REMOTE_DIR="/home/${IB_SSH_USER}/monitor"
 # NVLink switches (NVOS)
 NV_SSH_USER="admin"
 NV_REMOTE_DIR="/home/${NV_SSH_USER}/monitor"
+
+# UFM appliances (ib.csv type=server_ufm; infiniband/monitor/UFM-MONITOR.md). ufm-setup-upgrade has
+# already installed the deployment key, so there is no key preparation, and a UFM never joins the
+# switch result (PLANNED_DEVICES / DEVICE_FAILURES / collection_failed).
+UFM_SSH_USER="root"
+UFM_REMOTE_DIR="/root/monitor"
+UFM_INFO_SH=${BASE}/ufm-info.sh
+UFM_IBDIAG_SH=${BASE}/ufm-ibdiagnet.sh
+UFM_WAIT=120    # at most this long for ufm-info.sh (counted from its start, alongside sw-info.sh)
+# Owner 2026-10-22: ibdiagnet runs up to 15 minutes (6 on ufm01), so its result is first checked 5
+# minutes after the start, then every 30 s, for at most 17 minutes (15 plus 2 for packing). The same
+# limits apply to iblinkinfo. Page-driven collection never overlaps (the next cycle is scheduled after
+# this one ends), so the long wait only stretches this cycle.
+UFM_IBDIAG_FIRST_WAIT=300
+UFM_IBDIAG_POLL=30
+UFM_IBDIAG_WAIT=1020
+# Owner 2026-10-22: ibdiagnet by default; after 3 consecutive failures iblinkinfo instead, trying
+# ibdiagnet again every 6th run. The count lives on this server, beside the data (a failover would
+# lose it on the UFM).
+UFM_IBDIAG_FAIL_LIMIT=3
+UFM_IBDIAG_RETRY_EVERY=6
+UFM_PLANNED=0
 
 # Shared public key deployed to all switch types.  It must come from the active
 # project; embedding a former management server's key would silently authorize
@@ -282,6 +314,10 @@ fi
 # At least one usable management-server private key must already be authorized on
 # each switch; this script then idempotently installs SSH_KEY as an additional key.
 SSH_OPTS="-C -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=10 -o ConnectionAttempts=2 -o BatchMode=yes -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no"
+# UFM sessions also detect a dead peer: during `ufm_ha_cluster failover` nobody may answer the VIP for a
+# while, and without keepalives an scp would wait for TCP retransmits (owner 2026-10-22). Host keys are
+# never pinned (UserKnownHostsFile=/dev/null), so the VIP changing hands does not stop a login.
+UFM_ALIVE_OPTS="-o ServerAliveInterval=10 -o ServerAliveCountMax=3"
 SSH_PASSWORD_OPTS="-C -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=10 -o ConnectionAttempts=2 -o BatchMode=no -o NumberOfPasswordPrompts=1 -o PasswordAuthentication=yes -o KbdInteractiveAuthentication=yes -o PreferredAuthentications=publickey,keyboard-interactive,password"
 
 LOG=${BASE}/$(basename "${BASH_SOURCE[0]}")-$(date '+%Y%m%d-%H%M').log
@@ -701,15 +737,22 @@ for item in payload.get("devices", []):
 
 archive_collection_dir() {
     local dir="$1" label="$2" archive="${1}.tar.gz"
-    if ! tar -czf "$archive" \
+    # Owner 2026-10-22: written as .part and renamed, so a reader (the page, REQ7) never sees half an
+    # archive; the retention cleanup leaves *.part alone.
+    if ! tar -czf "${archive}.part" \
         -C "$(dirname "$dir")" "$(basename "$dir")"; then
+        rm -f -- "${archive}.part"
         log "${label} ERROR: failed to create archive ${archive}"
         return 1
     fi
-    if [[ ! -s "$archive" ]]; then
-        log "${label} ERROR: archive is missing or empty: ${archive}"
+    # No clobber (codex review 2026-10-22): a second run in the same minute must not replace the
+    # first one's archive; ln fails when the name exists.
+    if [[ ! -s "${archive}.part" ]] || ! ln -- "${archive}.part" "$archive" 2>/dev/null; then
+        rm -f -- "${archive}.part"
+        log "${label} ERROR: archive is missing, empty or already exists (not replaced): ${archive}"
         return 1
     fi
+    rm -f -- "${archive}.part"
     rm -r -- "$dir"
 }
 
@@ -868,6 +911,108 @@ run_parallel() {
     return 0
 }
 
+# ── Wait, then fetch each device's file as soon as it is complete ─────────────
+# Owner 2026-10-21: wait RETRIEVE_FIRST_WAIT seconds after the trigger, then check every
+# RETRIEVE_POLL seconds up to the phase limit and fetch each device's file as soon as it exists.
+# The collectors rename a finished file into place on one filesystem, so a file that exists is
+# complete; an .info must also end with its "# Collect complete" marker. A device that is not ready
+# in time is dropped from the host list and recorded, exactly like run_parallel; the others are
+# unaffected.
+retrieve_when_ready() {
+    local hosts_file="$1" user="$2" remote_dir="$3" ext="$4" dest="$5" limit="$6" label="$7"
+    local started=$SECONDS pending ready round next entry name host first pid unsafe=0 checks=0 max_checks
+    local pids=()
+    pending=$(mktemp) || return 1
+    ready=$(mktemp) || { rm -f "$pending"; return 1; }
+    grep -vE '^[[:space:]]*(#|$)' "$hosts_file" > "$pending"
+    first=$RETRIEVE_FIRST_WAIT
+    (( first > limit )) && first=$limit
+    max_checks=$(( (limit - first) / RETRIEVE_POLL + 1 ))
+    log "${label} waiting ${first}s, then checking every ${RETRIEVE_POLL}s for *.${ext} (at most ${limit}s)"
+    sleep "$first"
+    while hosts_file_has_entries "$pending"; do
+        checks=$((checks + 1))
+        round=$(mktemp) || break
+        pids=()
+        while IFS= read -r entry; do
+            IFS='|' read -r name host _rest <<< "$entry"
+            [[ -n "$name" ]] || name="$host"
+            [[ -n "$host" ]] || host="$name"
+            if ! valid_host_entry "$name" "$host"; then
+                echo "[PARALLEL][REJECT] unsafe hostname/IP entry: ${name}|${host}" >&2
+                unsafe=1
+                continue
+            fi
+            (
+                # staged beside the destination under the device's own file name, then renamed in
+                stage=$(mktemp -d "${dest}/.fetch.XXXXXX") || exit 0
+                copy="${stage}/${name}.${ext}"
+                if scp $SSH_OPTS "${user}@${host}:${remote_dir}/*.${ext}" "$copy" </dev/null >/dev/null 2>&1 \
+                    && [[ -s "$copy" ]] \
+                    && { [[ "$ext" != "info" ]] || grep -q '^# Collect complete$' "$copy"; } \
+                    && mv "$copy" "${dest}/${name}.${ext}"; then
+                    printf '%s\n' "$entry" >> "$round"
+                fi
+                rm -f "$copy"
+                rmdir "$stage" 2>/dev/null
+                exit 0
+            ) &
+            pids+=("$!")
+            if (( ${#pids[@]} >= MAX_PARALLEL )); then
+                for pid in "${pids[@]}"; do wait "$pid"; done
+                pids=()
+            fi
+        done < "$pending"
+        for pid in "${pids[@]}"; do wait "$pid"; done
+        cat "$round" >> "$ready"
+        next=$(mktemp) || { rm -f "$round"; break; }
+        grep -vxF -f "$round" "$pending" > "$next"
+        mv "$next" "$pending"
+        rm -f "$round"
+        hosts_file_has_entries "$pending" || break
+        (( checks < max_checks && SECONDS - started < limit )) || break
+        sleep "$RETRIEVE_POLL"
+    done
+    while IFS= read -r entry; do
+        [[ -n "$entry" ]] || continue
+        IFS='|' read -r name host _rest <<< "$entry"
+        echo "[PARALLEL][FAIL] ${name} (${host}): no complete *.${ext} within ${limit}s" >&2
+        record_device_failure "collection" "$entry" "no complete ${ext} file within ${limit}s"
+    done < "$pending"
+    # keep the host list in its original order
+    next=$(mktemp) || { rm -f "$pending" "$ready"; return 1; }
+    grep -vE '^[[:space:]]*(#|$)' "$hosts_file" | grep -xF -f "$ready" > "$next"
+    mv "$next" "$hosts_file"
+    rm -f "$pending" "$ready"
+    (( unsafe == 0 ))
+}
+
+# load_inventory_macs <csv>: hostname|eth0_mac for every row that has a MAC (owner 2026-10-21:
+# every device is checked by its management MAC at key preparation).
+load_inventory_macs() {
+    awk -F',' '
+        NR == 1 {
+            for (i = 1; i <= NF; i++) {
+                gsub(/[[:space:]]/, "", $i)
+                if (tolower($i) == "hostname") hc = i
+                if (tolower($i) == "eth0_mac") mc = i
+            }
+            if (!hc || !mc) exit 0
+            next
+        }
+        {
+            h = $hc; m = tolower($mc)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", h)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", m)
+            if (h != "" && h !~ /^#/ && m ~ /^([0-9a-f][0-9a-f]:){5}[0-9a-f][0-9a-f]$/) print h "|" m
+        }
+    ' "$1" > "$INVENTORY_MACS"
+}
+
+inventory_mac() {
+    awk -F'|' -v expected="$1" 'tolower($1) == tolower(expected) { print $2; exit }' "${INVENTORY_MACS:-/dev/null}"
+}
+
 # parse_csv_hosts — find the *.csv in $BASE, select device types from its filename
 # or a --type override, and populate only the corresponding temp file.
 # eth.csv: eth|eth_spx|spx for info, eth_spx|spx for link; ib.csv: type==ib;
@@ -924,9 +1069,11 @@ A4_CSV_PY
         csv="$frozen_csv"
     fi
 
+    load_inventory_macs "$csv"
+
     if [[ -n "$TYPE_FILTER" ]]; then
         case "${mode}:${TYPE_FILTER}" in
-            eth:ethernet|eth:eth|eth:eth_spx|eth:spx|eth:air|ib:ib|nvl:nvl) ;;
+            eth:ethernet|eth:eth|eth:eth_spx|eth:spx|eth:air|ib:ib|ib:server_ufm|nvl:nvl) ;;
             *)
                 log "[CSV] ERROR: --type ${TYPE_FILTER} is incompatible with ${csv_name}"
                 return 1
@@ -951,6 +1098,7 @@ A4_CSV_PY
                 if (tolower($i) == "hostname") hc = i
                 if (tolower($i) == "type")     tc = i
                 if (tolower($i) == "eth0_ip")  ic = i
+                if (tolower($i) == "eth0_mac") mc = i
             }
             if (!hc || !tc || !ic) exit 2
             if (tolower($(ic + 1)) == "netmask") nc = ic + 1
@@ -985,6 +1133,9 @@ A4_CSV_PY
             row_type[row_count] = t
             row_target[row_count] = target
             row_fallback[row_count] = fallback
+            mac = mc ? $mc : ""
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", mac)
+            row_mac[row_count] = tolower(mac)
         }
         END {
             # Emit only after every row has been inspected.  AIR rows may
@@ -998,6 +1149,16 @@ A4_CSV_PY
                 fallback = row_fallback[row]
                 if (mode == "eth" && t == "air" && fallback_by_ip[target] != "") {
                     fallback = fallback_by_ip[target]
+                }
+                # A UFM is collected by its own phase (ufm-info.sh), never as a switch.
+                if (mode == "ib" && t == "server_ufm" && (filter == "" || filter == "server_ufm")) {
+                    # Skipped, not fatal: a UFM row never stops the IB switches.
+                    if (target == "" || tolower(target) == "na") {
+                        print "missing eth0_ip for UFM, not collected: " h > "/dev/stderr"
+                        continue
+                    }
+                    print h "|" target > ufm_file
+                    continue
                 }
                 selected = filter == "ethernet" ? (t == "eth" || t == "eth_spx" || t == "spx") \
                         : filter != "" ? t == filter \
@@ -1022,7 +1183,8 @@ A4_CSV_PY
             }
             if (bad) exit 3
         }
-    ' mode="$mode" filter="$TYPE_FILTER" eth_file="$ETH" spx_file="$SPX" ib_file="$IB" nv_file="$NV" "$csv"
+    ' mode="$mode" filter="$TYPE_FILTER" eth_file="$ETH" spx_file="$SPX" ib_file="$IB" nv_file="$NV" \
+      ufm_file="${UFM:-/dev/null}" "$csv"
     then
         :
     else
@@ -1055,8 +1217,10 @@ A4_CSV_PY
             ;;
         ib)
             selected_types=${TYPE_FILTER:-ib}
-            selected_count=$(wc -l < "$IB" | tr -d ' ')
-            log "[CSV] ${csv_name} selected type=${selected_types}; loaded ${selected_count} IB host(s)"
+            # UFMs selected from the same ib.csv are devices of this lane too (a --type server_ufm
+            # run selects no switch), so they keep the empty-lane guard below from firing.
+            selected_count=$(( $(wc -l < "$IB" | tr -d ' ') + $(wc -l < "${UFM:-/dev/null}" | tr -d ' ') ))
+            log "[CSV] ${csv_name} selected type=${selected_types}; loaded $(wc -l < "$IB" | tr -d ' ') IB host(s), $(wc -l < "${UFM:-/dev/null}" | tr -d ' ') UFM(s)"
             ;;
         nvl)
             selected_types=${TYPE_FILTER:-nvl}
@@ -1132,11 +1296,11 @@ deploy_ssh_keys_legacy() {
     for attempt in 1 2 3; do
         MONITOR_SSH_PASSWORD=""
         if [[ -t 0 ]]; then
-            IFS= read -r -s -p "Switch password for ${user} (${label}, attempt ${attempt}/3): " MONITOR_SSH_PASSWORD
+            IFS= read -r -s -p "$(key_device_kind "$label") ${user} 密码 (attempt ${attempt}/3): " MONITOR_SSH_PASSWORD
             read_status=$?
             printf '\n'
         else
-            IFS= read -r -s -p "Switch password for ${user} (${label}, attempt ${attempt}/3): " MONITOR_SSH_PASSWORD </dev/tty
+            IFS= read -r -s -p "$(key_device_kind "$label") ${user} 密码 (attempt ${attempt}/3): " MONITOR_SSH_PASSWORD </dev/tty
             read_status=$?
             printf '\n' >/dev/tty
         fi
@@ -1171,7 +1335,7 @@ deploy_ssh_keys_legacy() {
 prepare_ssh_host_resilient() {
     local entry="$1" user="$2" remote_dir="$3" ssh_options="$4"
     local name host fallback candidate output rc remote_command auth_failed=0
-    local identity_record expected_mac expected_mac_plain identity_source
+    local identity_record expected_mac expected_mac_plain identity_source mac_probe
     local candidates=()
     PREPARED_ENTRY=""
     IFS='|' read -r name host fallback <<< "$entry"
@@ -1189,18 +1353,32 @@ prepare_ssh_host_resilient() {
         tolower($1) == tolower(expected) { print $2 "|" $3; exit }
     ' "$DYNAMIC_AIR_IDENTITIES")
     IFS='|' read -r expected_mac identity_source <<< "$identity_record"
+    if [[ -z "$identity_record" ]]; then
+        # Owner 2026-10-21: every inventory device is identified by its management MAC when the CSV has one.
+        expected_mac=$(inventory_mac "$name")
+        [[ -n "$expected_mac" ]] && identity_source="inventory eth0_mac"
+    fi
     expected_mac_plain=$(printf '%s' "$expected_mac" \
         | tr -cd '[:xdigit:]' | tr '[:upper:]' '[:lower:]')
     if [[ -n "$identity_record" && ! "$expected_mac_plain" =~ ^[0-9a-f]{12}$ ]]; then
         echo "[KEY][UNREACHABLE] ${name} (${host}): invalid authoritative runtime eth0 MAC" >&2
         return 11
     fi
+    [[ "$expected_mac_plain" =~ ^[0-9a-f]{12}$ ]] || expected_mac_plain=""
+    # A switch is checked on eth0; a UFM's management port has another name, so any interface counts.
+    if [[ "${KEY_MAC_SCOPE:-eth0}" == "any" ]]; then
+        mac_probe="remote_mac_raw=\$(cat /sys/class/net/*/address 2>/dev/null | tr '\n' ' ')
+remote_macs=\" \$(printf '%s' \"\$remote_mac_raw\" | tr -d ':' | tr '[:upper:]' '[:lower:]') \"
+case \"\$remote_macs\" in *' ${expected_mac_plain} '*) remote_mac='${expected_mac_plain}' ;; *) remote_mac='' ;; esac"
+    else
+        mac_probe="remote_mac_raw=\$(cat /sys/class/net/eth0/address 2>/dev/null || true)
+remote_mac=\$(printf '%s' \"\$remote_mac_raw\" | tr -cd '[:xdigit:]' | tr '[:upper:]' '[:lower:]')"
+    fi
     remote_command="actual_raw=\$(hostname -s 2>/dev/null || hostname)
 actual=\$(printf '%s' \"\$actual_raw\" | tr '[:upper:]' '[:lower:]')
 expected=\$(printf '%s' '${name}' | tr '[:upper:]' '[:lower:]')
 expected_mac='${expected_mac_plain}'
-remote_mac_raw=\$(cat /sys/class/net/eth0/address 2>/dev/null || true)
-remote_mac=\$(printf '%s' \"\$remote_mac_raw\" | tr -cd '[:xdigit:]' | tr '[:upper:]' '[:lower:]')
+${mac_probe}
 if [[ -n \"\$expected_mac\" && \"\$remote_mac\" != \"\$expected_mac\" ]]; then
   echo '[KEY][ETH0-MAC-MISMATCH][ERROR] ${host}: expected=${expected_mac_plain}, switch='\"\$remote_mac_raw\"'; rejecting target' >&2
   exit 43
@@ -1209,7 +1387,7 @@ if [[ \"\$expected\" != \"\$actual\" && -z \"\$expected_mac\" ]]; then
   echo '[KEY][HOSTNAME-MISMATCH][ERROR] ${host}: CSV=${name}, switch='\"\$actual_raw\"'; rejecting target' >&2
   exit 42
 fi
-if [[ \"\$expected\" != \"\$actual\" ]]; then
+if [[ \"\${expected%%.*}\" != \"\${actual%%.*}\" ]]; then
   echo '[KEY][MAC-VERIFIED-HOSTNAME-TRANSITION][WARN] ${host}: inventory=${name}, switch='\"\$actual_raw\"', eth0_mac='\"\$remote_mac_raw\"', source=${identity_source}' >&2
 fi
 mkdir -p ~/.ssh && chmod 700 ~/.ssh
@@ -1240,7 +1418,7 @@ mkdir -p '${remote_dir}'"
             return 11
         fi
         if (( rc == 43 )) || [[ "$output" == *"[ETH0-MAC-MISMATCH][ERROR]"* ]]; then
-            echo "[KEY][UNREACHABLE] ${name} (${candidate}): eth0 MAC identity mismatch" >&2
+            echo "[KEY][UNREACHABLE] ${name} (${candidate}): management MAC identity mismatch" >&2
             return 11
         fi
         if [[ "$output" == *"Permission denied"* \
@@ -1291,11 +1469,21 @@ retain_prepared_hosts() {
     mv "$filtered" "$dependent"
 }
 
+key_device_kind() {
+    case "$1" in
+        ETH) printf 'Ethernet 交换机' ;;
+        IB)  printf 'InfiniBand 交换机' ;;
+        NV)  printf 'NVLink 交换机' ;;
+        UFM) printf 'UFM 服务器' ;;
+        *)   printf '%s' "$1" ;;
+    esac
+}
+
 # Resilient replacement for deploy_ssh_keys. It prompts only for genuine
 # authentication rejection, removes unavailable targets from this collection,
 # and succeeds as long as at least one target remains reachable.
 deploy_ssh_keys() {
-    local hosts_file="$1" label="$2" user="$3" remote_dir="$4"
+    local hosts_file="$1" label="$2" user="$3" remote_dir="$4" extra_opts="${5:-}"
     local ready auth_failed unavailable next_auth attempt read_status
     local prepared_count unavailable_count
     log "[KEY] ── ${label}: validating key login and deploying shared key ──"
@@ -1303,7 +1491,7 @@ deploy_ssh_keys() {
     auth_failed=$(mktemp) || { rm -f "$ready"; return 1; }
     unavailable=$(mktemp) || { rm -f "$ready" "$auth_failed"; return 1; }
     prepare_ssh_batch_resilient "$hosts_file" "$ready" "$auth_failed" "$unavailable" \
-        "$user" "$remote_dir" "$SSH_OPTS"
+        "$user" "$remote_dir" "$SSH_OPTS${extra_opts:+ $extra_opts}"
 
     if hosts_file_has_entries "$auth_failed"; then
         log "[KEY] WARN: $(hosts_file_entry_count "$auth_failed") ${label} host(s) rejected public-key authentication"
@@ -1328,11 +1516,11 @@ deploy_ssh_keys() {
         hosts_file_has_entries "$auth_failed" || break
         MONITOR_SSH_PASSWORD=""
         if [[ -t 0 ]]; then
-            IFS= read -r -s -p "Switch password for ${user} (${label}, attempt ${attempt}/3): " MONITOR_SSH_PASSWORD
+            IFS= read -r -s -p "$(key_device_kind "$label") ${user} 密码 (attempt ${attempt}/3): " MONITOR_SSH_PASSWORD
             read_status=$?
             printf '\n'
         else
-            IFS= read -r -s -p "Switch password for ${user} (${label}, attempt ${attempt}/3): " MONITOR_SSH_PASSWORD </dev/tty
+            IFS= read -r -s -p "$(key_device_kind "$label") ${user} 密码 (attempt ${attempt}/3): " MONITOR_SSH_PASSWORD </dev/tty
             read_status=$?
             printf '\n' >/dev/tty
         fi
@@ -1347,7 +1535,7 @@ deploy_ssh_keys() {
         export MONITOR_SSH_PASSWORD
         next_auth=$(mktemp) || break
         prepare_ssh_batch_resilient "$auth_failed" "$ready" "$next_auth" "$unavailable" \
-            "$user" "$remote_dir" "$SSH_PASSWORD_OPTS"
+            "$user" "$remote_dir" "$SSH_PASSWORD_OPTS${extra_opts:+ $extra_opts}"
         mv "$next_auth" "$auth_failed"
         if hosts_file_has_entries "$auth_failed"; then
             log "[KEY] WARN: password attempt ${attempt} still rejected for $(hosts_file_entry_count "$auth_failed") host(s)"
@@ -1363,7 +1551,11 @@ deploy_ssh_keys() {
     unavailable_count=$(hosts_file_entry_count "$unavailable")
     while IFS= read -r entry; do
         [[ -z "$entry" || "$entry" =~ ^[[:space:]]*# ]] && continue
-        record_device_failure "ssh_prepare" "$entry" "SSH authentication or transport unavailable"
+        if [[ "${KEY_FAILURE_SINK:-result}" == "log" ]]; then
+            log "[KEY] ERROR: ${label} ${entry%%|*}: SSH authentication or transport unavailable"
+        else
+            record_device_failure "ssh_prepare" "$entry" "SSH authentication or transport unavailable"
+        fi
     done < "$unavailable"
     rm -f "$auth_failed" "$unavailable"
     if (( unavailable_count > 0 )); then
@@ -1409,14 +1601,9 @@ collect_eth_info() {
         log "[ETH] WARN: no device survived collection trigger"; rm -r -- "$dir"; return 0
     fi
 
-    log "[ETH] waiting ${ETH_WAIT}s for remote jobs"
-    sleep "$ETH_WAIT"
-
-    log "[ETH] retrieving *.info files"
-    if ! run_parallel "$ETH" \
-        "scp $SSH_OPTS ${ETH_SSH_USER}@__HOST__:${ETH_REMOTE_DIR}/*.info ${dir}/__NAME__.info 2>&1" \
-        "collection" \
-    ; then log "[ETH] ERROR: some hosts returned no *.info files"; return 1; fi
+    if ! retrieve_when_ready "$ETH" "${ETH_SSH_USER}" "${ETH_REMOTE_DIR}" info "$dir" "$ETH_WAIT" "[ETH]"; then
+        log "[ETH] ERROR: unsafe host entry while retrieving *.info files"; return 1
+    fi
     if ! hosts_file_has_entries "$ETH"; then
         log "[ETH] WARN: no device returned an info file"; rm -r -- "$dir"; return 0
     fi
@@ -1466,14 +1653,9 @@ collect_spx_link() {
         log "[SPX] WARN: no device survived collection trigger"; rm -r -- "$dir"; return 0
     fi
 
-    log "[SPX] waiting ${SPX_WAIT}s for remote jobs"
-    sleep "$SPX_WAIT"
-
-    log "[SPX] retrieving *.link files"
-    if ! run_parallel "$SPX" \
-        "scp $SSH_OPTS ${ETH_SSH_USER}@__HOST__:${ETH_REMOTE_DIR}/*.link ${dir}/__NAME__.link 2>&1" \
-        "collection" \
-    ; then log "[SPX] ERROR: some hosts returned no *.link files"; return 1; fi
+    if ! retrieve_when_ready "$SPX" "${ETH_SSH_USER}" "${ETH_REMOTE_DIR}" link "$dir" "$SPX_WAIT" "[SPX]"; then
+        log "[SPX] ERROR: unsafe host entry while retrieving *.link files"; return 1
+    fi
     if ! hosts_file_has_entries "$SPX"; then
         log "[SPX] WARN: no device returned a link file"; rm -r -- "$dir"; return 0
     fi
@@ -1486,9 +1668,12 @@ collect_spx_link() {
 
     # Merge all .link files into one CSV; keep only the first header line
     csv="${dir}.csv"
-    cat "${dir}"/*.link 2>/dev/null > "$csv"
-    awk 'NR==1 { h=$0; print; next } $0 != h { print }' "$csv" \
-        > "${csv}.tmp" && mv "${csv}.tmp" "$csv"
+    # Owner 2026-10-22: a reader (the page, REQ7) only ever sees a complete CSV: built as .part, renamed.
+    cat "${dir}"/*.link 2>/dev/null > "${csv}.raw.part"
+    awk 'NR==1 { h=$0; print; next } $0 != h { print }' "${csv}.raw.part" \
+        > "${csv}.part" && ln "${csv}.part" "$csv" 2>/dev/null \
+        || { rm -f "${csv}.raw.part" "${csv}.part"; log "ERROR: ${csv} already exists or could not be written (not replaced)"; return 1; }
+    rm -f "${csv}.raw.part" "${csv}.part"
 
     archive_collection_dir "$dir" "[SPX]" || return 1
     LINK_ARCHIVE="${dir}.tar.gz"
@@ -1526,14 +1711,9 @@ collect_ib_info() {
         log "[IB] WARN: no device survived collection trigger"; rm -r -- "$dir"; return 0
     fi
 
-    log "[IB]  waiting ${IB_WAIT}s for remote jobs"
-    sleep "$IB_WAIT"
-
-    log "[IB]  retrieving *.info files"
-    if ! run_parallel "$IB" \
-        "scp $SSH_OPTS ${IB_SSH_USER}@__HOST__:${IB_REMOTE_DIR}/*.info ${dir}/__NAME__.info 2>&1" \
-        "collection" \
-    ; then log "[IB]  ERROR: some hosts returned no *.info files"; return 1; fi
+    if ! retrieve_when_ready "$IB" "${IB_SSH_USER}" "${IB_REMOTE_DIR}" info "$dir" "$IB_WAIT" "[IB]"; then
+        log "[IB]  ERROR: unsafe host entry while retrieving *.info files"; return 1
+    fi
     if ! hosts_file_has_entries "$IB"; then
         log "[IB] WARN: no device returned an info file"; rm -r -- "$dir"; return 0
     fi
@@ -1579,14 +1759,9 @@ collect_ib_link() {
         log "[IBL] WARN: no device survived collection trigger"; rm -r -- "$dir"; return 0
     fi
 
-    log "[IBL] waiting ${IBL_WAIT}s for remote jobs"
-    sleep "$IBL_WAIT"
-
-    log "[IBL] retrieving *.link files"
-    if ! run_parallel "$IB" \
-        "scp $SSH_OPTS ${IB_SSH_USER}@__HOST__:${IB_REMOTE_DIR}/*.link ${dir}/__NAME__.link 2>&1" \
-        "collection" \
-    ; then log "[IBL] ERROR: some hosts returned no *.link files"; return 1; fi
+    if ! retrieve_when_ready "$IB" "${IB_SSH_USER}" "${IB_REMOTE_DIR}" link "$dir" "$IBL_WAIT" "[IBL]"; then
+        log "[IBL] ERROR: unsafe host entry while retrieving *.link files"; return 1
+    fi
     if ! hosts_file_has_entries "$IB"; then
         log "[IBL] WARN: no device returned a link file"; rm -r -- "$dir"; return 0
     fi
@@ -1599,9 +1774,12 @@ collect_ib_link() {
 
     # Merge all .link files into one CSV; keep only the first header line
     csv="${dir}.csv"
-    cat "${dir}"/*.link 2>/dev/null > "$csv"
-    awk 'NR==1 { h=$0; print; next } $0 != h { print }' "$csv" \
-        > "${csv}.tmp" && mv "${csv}.tmp" "$csv"
+    # Owner 2026-10-22: a reader (the page, REQ7) only ever sees a complete CSV: built as .part, renamed.
+    cat "${dir}"/*.link 2>/dev/null > "${csv}.raw.part"
+    awk 'NR==1 { h=$0; print; next } $0 != h { print }' "${csv}.raw.part" \
+        > "${csv}.part" && ln "${csv}.part" "$csv" 2>/dev/null \
+        || { rm -f "${csv}.raw.part" "${csv}.part"; log "ERROR: ${csv} already exists or could not be written (not replaced)"; return 1; }
+    rm -f "${csv}.raw.part" "${csv}.part"
 
     archive_collection_dir "$dir" "[IBL]" || return 1
     LINK_ARCHIVE="${dir}.tar.gz"
@@ -1639,14 +1817,9 @@ collect_nv_info() {
         log "[NV] WARN: no device survived collection trigger"; rm -r -- "$dir"; return 0
     fi
 
-    log "[NV]  waiting ${NV_WAIT}s for remote jobs"
-    sleep "$NV_WAIT"
-
-    log "[NV]  retrieving *.info files"
-    if ! run_parallel "$NV" \
-        "scp $SSH_OPTS ${NV_SSH_USER}@__HOST__:${NV_REMOTE_DIR}/*.info ${dir}/__NAME__.info 2>&1" \
-        "collection" \
-    ; then log "[NV]  ERROR: some hosts returned no *.info files"; return 1; fi
+    if ! retrieve_when_ready "$NV" "${NV_SSH_USER}" "${NV_REMOTE_DIR}" info "$dir" "$NV_WAIT" "[NV]"; then
+        log "[NV]  ERROR: unsafe host entry while retrieving *.info files"; return 1
+    fi
     if ! hosts_file_has_entries "$NV"; then
         log "[NV] WARN: no device returned an info file"; rm -r -- "$dir"; return 0
     fi
@@ -1692,14 +1865,9 @@ collect_nv_link() {
         log "[NVL] WARN: no device survived collection trigger"; rm -r -- "$dir"; return 0
     fi
 
-    log "[NVL] waiting ${NVL_WAIT}s for remote jobs"
-    sleep "$NVL_WAIT"
-
-    log "[NVL] retrieving *.link files"
-    if ! run_parallel "$NV" \
-        "scp $SSH_OPTS ${NV_SSH_USER}@__HOST__:${NV_REMOTE_DIR}/*.link ${dir}/__NAME__.link 2>&1" \
-        "collection" \
-    ; then log "[NVL] ERROR: some hosts returned no *.link files"; return 1; fi
+    if ! retrieve_when_ready "$NV" "${NV_SSH_USER}" "${NV_REMOTE_DIR}" link "$dir" "$NVL_WAIT" "[NVL]"; then
+        log "[NVL] ERROR: unsafe host entry while retrieving *.link files"; return 1
+    fi
     if ! hosts_file_has_entries "$NV"; then
         log "[NVL] WARN: no device returned a link file"; rm -r -- "$dir"; return 0
     fi
@@ -1712,9 +1880,12 @@ collect_nv_link() {
 
     # Merge all .link files into one CSV; keep only the first header line
     csv="${dir}.csv"
-    cat "${dir}"/*.link 2>/dev/null > "$csv"
-    awk 'NR==1 { h=$0; print; next } $0 != h { print }' "$csv" \
-        > "${csv}.tmp" && mv "${csv}.tmp" "$csv"
+    # Owner 2026-10-22: a reader (the page, REQ7) only ever sees a complete CSV: built as .part, renamed.
+    cat "${dir}"/*.link 2>/dev/null > "${csv}.raw.part"
+    awk 'NR==1 { h=$0; print; next } $0 != h { print }' "${csv}.raw.part" \
+        > "${csv}.part" && ln "${csv}.part" "$csv" 2>/dev/null \
+        || { rm -f "${csv}.raw.part" "${csv}.part"; log "ERROR: ${csv} already exists or could not be written (not replaced)"; return 1; }
+    rm -f "${csv}.raw.part" "${csv}.part"
 
     archive_collection_dir "$dir" "[NVL]" || return 1
     LINK_ARCHIVE="${dir}.tar.gz"
@@ -1722,111 +1893,628 @@ collect_nv_link() {
     log "[NVL] done → ${dir}.tar.gz  |  CSV → ${csv}"
 }
 
-# ── Cleanup: retain last RETAIN_DAYS days, bundle prior-day files into daily archives ───
-# cleanup_data_dirs <dir> [<dir> ...]
-# Retention window is controlled by RETAIN_DAYS. For each directory:
-#   - Files from today                        → keep as-is
-#   - Files from past 1–(RETAIN_DAYS-1) days → bundle *.tar.gz per-day into
-#                                               YYYYMMDD-daily.tar.gz, then delete originals;
-#                                               *.csv files are kept as-is (not bundled)
-#   - Files older than RETAIN_DAYS days       → delete all (tar.gz, csv, and
-#                                               failed/interrupted batch dirs)
-# Skips files already named *-daily.tar.gz (already bundled).
-cleanup_data_dirs() {
-    local today cutoff_ts dir date file date_ts bundle count_gz count_csv count_dirs dates
-    local batch_dir batch_name
-    today=$(date -u '+%Y%m%d')
-    # cutoff: midnight RETAIN_DAYS days ago as seconds-since-epoch
-    cutoff_ts=$(date -u -d "${RETAIN_DAYS} days ago" '+%s' 2>/dev/null \
-             || date -u -v-${RETAIN_DAYS}d '+%s' 2>/dev/null)   # Linux / macOS fallback
+# ── UFM collection (ib.csv type=server_ufm) ───────────────────────────────────
+# Same flow as the switch collectors and run alongside them (owner 2026-10-21): ufm-info.sh with
+# sw-info.sh, ufm-ibdiagnet.sh with sw-link.sh. Each is started before the switch phase and fetched
+# after it. Isolated from the switch result: a UFM problem is logged and returned to main, never
+# written to PLANNED_DEVICES or DEVICE_FAILURES (infiniband/monitor/UFM-MONITOR.md).
+UFM_INFO_DIR=""
+UFM_INFO_STARTED=0
+UFM_TRIGGERED=()
+UFM_IBDIAG_RUN_ID=""
+UFM_IBDIAG_VIP=""
+UFM_IBDIAG_STARTED=0
+UFM_IBDIAG_ARCHIVE=""      # the exact archive fetched in this run, for the IB closed loop
+UFM_CANDIDATES=$(mktemp)   # every server_ufm row: the VIP holder may be one that failed key preparation
 
-    for dir in "$@"; do
-        [[ -d "$dir" ]] || continue
-        log "[CLN] ── ${dir} ──"
+ufm_ssh() {
+    local host="$1"; shift
+    ssh $SSH_OPTS $UFM_ALIVE_OPTS "${UFM_SSH_USER}@${host}" "$@" </dev/null 2>&1
+}
 
-        count_gz=$(find "$dir" -maxdepth 1 -name '*.tar.gz' ! -name '*-daily.tar.gz' | wc -l)
-        count_csv=$(find "$dir" -maxdepth 1 -name '*.csv' | wc -l)
-        count_dirs=$(find "$dir" -mindepth 1 -maxdepth 1 -type d | wc -l)
-        log "[CLN] found ${count_gz} tar.gz + ${count_csv} csv + ${count_dirs} batch dir(s)"
+# The server_ufm row whose management MAC is in the text (`ip -br link` from the VIP holder): "name|host".
+# Owner 2026-10-22: a failover moves the VIP at any moment, so the holder is named in the same session
+# that starts the collector, and everything after that talks to the node by its own address.
+ufm_vip_holder() {
+    local text="$1" name host mac
+    while IFS='|' read -r name host _rest; do
+        mac=$(inventory_mac "$name")
+        if [[ "$mac" =~ ^([0-9a-f]{2}:){5}[0-9a-f]{2}$ ]] && printf '%s' "$text" | grep -qiF -- "$mac"; then
+            valid_host_entry "$name" "$host" || return 1
+            printf '%s|%s\n' "$name" "$host"
+            return 0
+        fi
+    done < "$UFM_CANDIDATES"
+    return 1
+}
 
-        # A successful collection is archived and its source directory is
-        # removed immediately.  Directories that remain are failed or
-        # interrupted batches.  Keep recent ones for troubleshooting, but
-        # apply the same retention boundary as archives.  Only exact collector
-        # batch names are eligible; symlinks and unrelated directories are
-        # never traversed or removed.
-        for batch_dir in "$dir"/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9]*; do
-            [[ -d "$batch_dir" && ! -L "$batch_dir" ]] || continue
-            batch_name=${batch_dir##*/}
-            if [[ ! "$batch_name" =~ ^([0-9]{8})-[0-9]{4}(-(air|prod))?$ ]]; then
-                log "[CLN] WARN: unrelated directory retained: ${batch_name}"
-                continue
-            fi
-            date=${BASH_REMATCH[1]}
-            date_ts=$(date -u -d "${date}" '+%s' 2>/dev/null \
-                   || date -u -j -f '%Y%m%d' "${date}" '+%s' 2>/dev/null \
-                   || true)
-            if [[ ! "$date_ts" =~ ^[0-9]+$ ]]; then
-                log "[CLN] WARN: invalid batch date retained: ${batch_name}"
-                continue
-            fi
-            if (( date_ts < cutoff_ts )); then
-                if find "$batch_dir" -xdev -depth -delete; then
-                    log "[CLN] deleted stale batch directory ${batch_name} (> ${RETAIN_DAYS} days old)"
-                else
-                    log "[CLN] WARN: could not delete stale batch directory ${batch_name}"
-                fi
-            fi
-        done
+file_sha256() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    else
+        shasum -a 256 "$1" | awk '{print $1}'
+    fi
+}
 
-        # Collect unique YYYYMMDD date prefixes present in the directory
-        dates=""
-        for file in "$dir"/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9]*.{tar.gz,csv}; do
-            [[ -f "$file" ]] || continue
-            date="${file##*/}"       # basename
-            date="${date:0:8}"       # first 8 chars = YYYYMMDD
-            case " $dates " in
-                *" $date "*) ;;
-                *) dates="${dates}${dates:+ }${date}" ;;
-            esac
-        done
+# Drop one rejected file, and only inside the two UFM data directories of this collector.
+ufm_discard() {
+    local path="$1"
+    case "$path" in
+        "${BASE}/ufm-info/"?*|"${BASE}/ufm-ibdiagnet/"?*) ;;
+        *) log "[UFM] WARN: refusing to remove ${path:-<empty>} outside the UFM data directories"; return 1 ;;
+    esac
+    [[ "$path" != *..* && -n "${BASE}" ]] || return 1
+    [[ ! -e "$path" ]] || rm -f -- "$path"
+}
 
-        for date in $dates; do
-            date_ts=$(date -u -d "${date}" '+%s' 2>/dev/null \
-                   || date -u -j -f '%Y%m%d' "${date}" '+%s' 2>/dev/null)
+ufm_info_start() {
+    local ts name host mac out
+    local failed=0
+    UFM_TRIGGERED=()
+    UFM_INFO_DIR=""
+    if [[ ! -d "${BASE}/ufm-info" ]]; then
+        log "[UFM] ERROR: ${BASE}/ufm-info 不存在：UFM 数据目录链接应由 setup 预先创建；本次不采集 UFM"
+        return 1
+    fi
+    if [[ ! -s "$UFM_INFO_SH" ]]; then
+        log "[UFM] ERROR: missing collector ${UFM_INFO_SH}"
+        return 1
+    fi
+    ts=$(date -u "+%Y%m%d-%H%M")
+    UFM_INFO_DIR=${BASE}/ufm-info/${ts}
+    mkdir -p "$UFM_INFO_DIR" || return 1
+    log "[UFM] ── info start ── ${ts}"
+    while IFS='|' read -r name host _rest; do
+        [[ -z "$name" || "$name" =~ ^[[:space:]]*# ]] && continue
+        mac=$(inventory_mac "$name")
+        if ! valid_host_entry "$name" "$host"; then
+            log "[UFM][REJECT] unsafe hostname/IP entry: ${name}|${host}"
+            failed=1; continue
+        fi
+        if [[ ! "$mac" =~ ^([0-9a-f]{2}:){5}[0-9a-f]{2}$ ]]; then
+            log "[UFM] ERROR: ${name} (${host}): ib.csv 没有有效的 eth0_mac，无法核对身份，跳过"
+            failed=1; continue
+        fi
+        if ! out=$(ufm_ssh "$host" "mkdir -p ${UFM_REMOTE_DIR} && rm -f ${UFM_REMOTE_DIR}/*.info") \
+            || ! out=$(scp $SSH_OPTS $UFM_ALIVE_OPTS "$UFM_INFO_SH" "${UFM_SSH_USER}@${host}:${UFM_REMOTE_DIR}/" </dev/null 2>&1) \
+            || ! out=$(ufm_ssh "$host" "cd ${UFM_REMOTE_DIR%/*} || exit 1
+                 test -s monitor/ufm-info.sh || exit 1
+                 nohup bash monitor/ufm-info.sh </dev/null >/dev/null 2>&1 &"); then
+            log "[UFM] ERROR: ${name} (${host}): 部署或启动 ufm-info.sh 失败: $(printf '%s' "$out" | tail -n 1)"
+            failed=1; continue
+        fi
+        UFM_TRIGGERED+=("${name}|${host}|${mac}")
+    done < "$UFM"
+    ufm_ha_start || failed=1
+    UFM_INFO_STARTED=$SECONDS
+    return "$failed"
+}
 
-            # Older than RETAIN_DAYS days → delete
-            if (( date_ts < cutoff_ts )); then
-                find "$dir" -maxdepth 1 -type f \
-                    \( -name "${date}-*.tar.gz" -o -name "${date}-*.csv" \) \
-                    -delete
-                log "[CLN] deleted files for ${date} (> ${RETAIN_DAYS} days old)"
-                continue
-            fi
+# HA state (owner 2026-10-21): read only on the primary, through the VIP, next to the node snapshots.
+# The node collector may still be running from monitor/ufm-info.sh on that machine, so the VIP copy
+# goes to monitor/ha/ and never overwrites it. No answer on the VIP means HA is not set up yet.
+UFM_HA_VIP=""
+UFM_HA_NODE=""
+UFM_HA_HOST=""
+ufm_ha_start() {
+    local vip rc out holder
+    UFM_HA_VIP=""
+    UFM_HA_NODE=""
+    UFM_HA_HOST=""
+    vip=$(ufm_vip); rc=$?
+    if (( rc == 2 )); then
+        log "[UFM] ERROR: ${BASE}/01-global.yaml 不存在：global 链接应由 setup 预先创建；不采集 HA 状态"
+        return 1
+    fi
+    if (( rc != 0 )) || [[ -z "$vip" ]]; then
+        log "[UFM] SKIPPED: global 中没有 servers.ufm.vip，不采集 HA 状态"
+        return 0
+    fi
+    if ! out=$(ufm_ssh "$vip" "true"); then
+        if printf '%s' "$out" | grep -qiE 'timed out|no route|refused|unreachable'; then
+            log "[UFM] SKIPPED: VIP ${vip} 无应答（HA 未就绪），不采集 HA 状态"
+            return 0
+        fi
+        log "[UFM] ERROR: 登录 VIP ${vip} 失败: $(printf '%s' "$out" | tail -n 1)"
+        return 1
+    fi
+    if ! out=$(ufm_ssh "$vip" "mkdir -p ${UFM_REMOTE_DIR}/ha && rm -f ${UFM_REMOTE_DIR}/*.ha") \
+        || ! out=$(scp $SSH_OPTS $UFM_ALIVE_OPTS "$UFM_INFO_SH" "${UFM_SSH_USER}@${vip}:${UFM_REMOTE_DIR}/ha/" </dev/null 2>&1) \
+        || ! out=$(ufm_ssh "$vip" "cd ${UFM_REMOTE_DIR%/*} || exit 1
+             test -s monitor/ha/ufm-info.sh || exit 1
+             nohup bash monitor/ha/ufm-info.sh --ha </dev/null >/dev/null 2>&1 &
+             ip -br link"); then
+        log "[UFM] ERROR: 在 VIP ${vip} 上部署或启动 ufm-info.sh --ha 失败: $(printf '%s' "$out" | tail -n 1)"
+        return 1
+    fi
+    if ! holder=$(ufm_vip_holder "$out"); then
+        log "[UFM] ERROR: VIP ${vip} 所在设备不是 ib.csv 中的 UFM（管理口 MAC 不符），HA 状态不收录"
+        return 1
+    fi
+    UFM_HA_VIP=$vip
+    UFM_HA_NODE=${holder%%|*}
+    UFM_HA_HOST=${holder#*|}
+    log "[UFM] HA state: started on ${UFM_HA_NODE} (VIP ${vip})；之后经 ${UFM_HA_HOST} 取回，VIP 中途切换不影响"
+}
 
-            # Today → leave alone
-            [[ "$date" == "$today" ]] && continue
-
-            # Previous day within RETAIN_DAYS days → bundle into daily archive
-            bundle="${dir}/${date}-daily.tar.gz"
-            if [[ -e "$bundle" ]]; then
-                log "[CLN] ${date}: daily bundle already exists, skipping"
-                continue
-            fi
-
-            # Collect only *.tar.gz files for bundling (csv files are kept as-is)
-            local files=()
-            for file in "$dir"/${date}-*.tar.gz; do
-                [[ -f "$file" ]] && files+=("$file")
-            done
-            (( ${#files[@]} == 0 )) && continue
-
-            tar -czf "$bundle" -C "$dir" "${files[@]##*/}" \
-                && rm -f "${files[@]}" \
-                && log "[CLN] ${date}: bundled ${#files[@]} file(s) → $(basename "$bundle")" \
-                || log "[CLN] ${date}: WARN bundle failed, originals kept"
-        done
+# The HA state is kept under the UFM whose management MAC it shows (the VIP moves between them),
+# fetched within the same info phase limit.
+ufm_ha_fetch() {
+    local part mac node="$UFM_HA_NODE" host="$UFM_HA_HOST" out checks=0 max_checks
+    [[ -n "$UFM_HA_VIP" ]] || return 0   # skipped or not started: already reported
+    part="${UFM_INFO_DIR}/.vip.ha.part"
+    max_checks=$(( (UFM_WAIT - RETRIEVE_FIRST_WAIT) / RETRIEVE_POLL + 1 ))
+    # From the node that ran it, by its own address: after a failover the VIP answers from the other
+    # UFM, which may still keep the state it wrote when it was the primary.
+    until ufm_ssh "$host" "ls ${UFM_REMOTE_DIR}/*.ha" >/dev/null; do
+        checks=$((checks + 1))
+        if (( checks >= max_checks || SECONDS - UFM_INFO_STARTED >= UFM_WAIT )); then
+            log "[UFM] ERROR: ${UFM_WAIT}s 内 ${node} (${host}) 上没有生成 HA 状态"
+            return 1
+        fi
+        sleep "$RETRIEVE_POLL"
     done
+    mac=$(inventory_mac "$node")
+    if ! out=$(scp $SSH_OPTS $UFM_ALIVE_OPTS "${UFM_SSH_USER}@${host}:${UFM_REMOTE_DIR}/*.ha" "$part" </dev/null 2>&1) \
+        || ! grep -q '^# Collect complete$' "$part"; then
+        log "[UFM] ERROR: 从 ${node} (${host}) 取回 HA 状态失败或不完整: $(printf '%s' "$out" | tail -n 1)"
+        ufm_discard "$part"; return 1
+    fi
+    if [[ ! "$node" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || ! grep -qiF -- "$mac" "$part"; then
+        log "[UFM] ERROR: 从 ${host} 取回的 HA 状态里没有 ${node} 的管理口 MAC，不收录"
+        ufm_discard "$part"; return 1
+    fi
+    mv -- "$part" "${UFM_INFO_DIR}/${node}.ha" || { ufm_discard "$part"; return 1; }
+    log "[UFM] HA state from ${node} (VIP ${UFM_HA_VIP}) collected"
+}
+
+ufm_info_fetch() {
+    local entry name host mac out count snapshot checks=0 max_checks
+    local failed=0
+    local -a pending=() still=()
+    [[ -n "$UFM_INFO_DIR" && -d "$UFM_INFO_DIR" ]] || return 1
+    pending=("${UFM_TRIGGERED[@]}")
+    # Owner 2026-10-21: one minute after the start, then every RETRIEVE_POLL seconds.
+    (( SECONDS - UFM_INFO_STARTED < RETRIEVE_FIRST_WAIT )) \
+        && sleep $(( RETRIEVE_FIRST_WAIT - (SECONDS - UFM_INFO_STARTED) ))
+    max_checks=$(( (UFM_WAIT - RETRIEVE_FIRST_WAIT) / RETRIEVE_POLL + 1 ))
+    while (( ${#pending[@]} )); do
+        checks=$((checks + 1))
+        still=()
+        for entry in "${pending[@]}"; do
+            IFS='|' read -r name host mac <<< "$entry"
+            snapshot="${UFM_INFO_DIR}/${name}.info"
+            if ! ufm_ssh "$host" "ls ${UFM_REMOTE_DIR}/*.info" >/dev/null; then
+                still+=("$entry"); continue
+            fi
+            if ! out=$(scp $SSH_OPTS $UFM_ALIVE_OPTS "${UFM_SSH_USER}@${host}:${UFM_REMOTE_DIR}/*.info" "$snapshot" \
+                    </dev/null 2>&1); then
+                log "[UFM] ERROR: ${name} (${host}): 取回 ufm-info 快照失败: $(printf '%s' "$out" | tail -n 1)"
+                ufm_discard "$snapshot"; failed=1; continue
+            fi
+            # cron.sh does not pin host keys, so the snapshot itself must show the CSV management MAC.
+            if ! grep -qiF -- "$mac" "$snapshot" || ! grep -q '^# Collect complete$' "$snapshot"; then
+                log "[UFM] ERROR: ${name} (${host}): 快照中没有 ib.csv 的 eth0_mac ${mac} 或不完整：连到的可能不是这台 UFM，不收录"
+                ufm_discard "$snapshot"; failed=1; continue
+            fi
+            log "[UFM] ${name} (${host}): snapshot collected"
+        done
+        pending=("${still[@]}")
+        (( ${#pending[@]} )) || break
+        (( checks < max_checks && SECONDS - UFM_INFO_STARTED < UFM_WAIT )) || break
+        sleep "$RETRIEVE_POLL"
+    done
+    for entry in "${pending[@]}"; do
+        IFS='|' read -r name host mac <<< "$entry"
+        log "[UFM] ERROR: ${name} (${host}): ${UFM_WAIT}s 内没有生成 ufm-info 快照"
+        failed=1
+    done
+    ufm_ha_fetch || failed=1
+
+    count=$(find "$UFM_INFO_DIR" -name '*.info' 2>/dev/null | wc -l | tr -d '[:space:]')
+    if (( count == 0 )); then
+        for snapshot in "$UFM_INFO_DIR"/*.ha; do
+            [[ -e "$snapshot" ]] && ufm_discard "$snapshot"
+        done
+        rmdir -- "$UFM_INFO_DIR" 2>/dev/null
+        log "[UFM] ERROR: 没有取回任何 UFM 快照"
+        return 1
+    fi
+    archive_collection_dir "$UFM_INFO_DIR" "[UFM]" || return 1
+    UFM_COLLECTED=1
+    log "[UFM] done → ${UFM_INFO_DIR}.tar.gz (${count} UFM)"
+    return "$failed"
+}
+
+# The VIP from the project global (setup link); exit 2 when the link is missing.
+ufm_vip() {
+    local global="${BASE}/01-global.yaml"
+    [[ -f "$global" ]] || return 2
+    python3 - "$global" <<'UFM_VIP_PY'
+import ipaddress
+import sys
+
+import yaml
+
+data = yaml.safe_load(open(sys.argv[1], encoding="utf-8")) or {}
+for item in data.get("servers") or []:
+    ufm = item.get("ufm") if isinstance(item, dict) else None
+    if isinstance(ufm, dict) and ufm.get("vip"):
+        print(ipaddress.IPv4Address(str(ufm["vip"]).strip()))
+        break
+UFM_VIP_PY
+}
+
+UFM_IBDIAG_NODE=""
+UFM_IBDIAG_HOST=""
+UFM_IBDIAG_KIND=ibdiagnet
+UFM_IBDIAG_OUTCOME=""      # skipped | pending | ok | failed: what this run adds to the failure count
+UFM_IBDIAG_STATE=""
+UFM_RUN_STATUS=""          # skipped | failed | ok: what the run record says (an error before the start counts)
+UFM_RUN_REASON=""
+UFM_IBDIAG_DONE_FILE=""    # the UFM's .done kept beside the data, also when it says failed
+UFM_IB_ANALYSIS=not_run    # ok | failed | not_run: infiniband/monitor/post-collect.py
+
+ufm_ibdiag_error() {
+    UFM_RUN_STATUS=failed
+    UFM_RUN_REASON=$1
+    log "[UFM-IBDIAG] ERROR: $1"
+}
+
+ufm_ibdiag_skip() {
+    UFM_RUN_STATUS=skipped
+    UFM_RUN_REASON=$1
+    log "[UFM-IBDIAG] SKIPPED: $1"
+}
+
+# The consecutive-failure count: "failures since_probe" (both 0 when there is no state yet).
+ufm_ibdiag_state() {
+    local failures since
+    failures=$(sed -n 's/^failures=//p' "$UFM_IBDIAG_STATE" 2>/dev/null | head -n 1)
+    since=$(sed -n 's/^since_probe=//p' "$UFM_IBDIAG_STATE" 2>/dev/null | head -n 1)
+    [[ "$failures" =~ ^[0-9]+$ ]] || failures=0
+    [[ "$since" =~ ^[0-9]+$ ]] || since=0
+    printf '%s %s\n' "$failures" "$since"
+}
+
+# After this run: ibdiagnet success clears the count, failure adds one; an iblinkinfo run only
+# advances the countdown to the next ibdiagnet try. A skipped run (no VIP answer) changes nothing.
+ufm_ibdiag_record() {
+    local failures since part
+    # pending: started on the VIP holder but never fetched, a failure like any other
+    [[ -n "$UFM_IBDIAG_STATE" && "$UFM_IBDIAG_OUTCOME" =~ ^(ok|failed|pending)$ ]] || return 0
+    [[ "$UFM_IBDIAG_OUTCOME" == pending ]] && UFM_IBDIAG_OUTCOME=failed
+    read -r failures since < <(ufm_ibdiag_state)
+    if [[ "$UFM_IBDIAG_KIND" == iblinkinfo ]]; then
+        since=$((since + 1))
+    elif [[ "$UFM_IBDIAG_OUTCOME" == ok ]]; then
+        (( failures >= UFM_IBDIAG_FAIL_LIMIT )) && log "[UFM-IBDIAG] ibdiagnet 恢复成功：失败计数清零，之后仍采集 ibdiagnet"
+        failures=0; since=0
+    else
+        failures=$((failures + 1)); since=0
+        if (( failures == UFM_IBDIAG_FAIL_LIMIT )); then
+            log "[UFM-IBDIAG] WARNING: ibdiagnet 已连续失败 ${failures} 次：之后改采 iblinkinfo，每 ${UFM_IBDIAG_RETRY_EVERY} 轮再试一次 ibdiagnet"
+        else
+            log "[UFM-IBDIAG] ibdiagnet 连续失败 ${failures} 次（达到 ${UFM_IBDIAG_FAIL_LIMIT} 次后改采 iblinkinfo）"
+        fi
+    fi
+    part="${UFM_IBDIAG_STATE}.part"
+    printf 'failures=%s\nsince_probe=%s\nupdated=%s\n' "$failures" "$since" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+        > "$part" && mv -f "$part" "$UFM_IBDIAG_STATE"
+}
+
+ufm_ibdiag_start() {
+    local vip rc out nonce holder failures since kind_arg=""
+    UFM_IBDIAG_RUN_ID=""
+    UFM_IBDIAG_NODE=""
+    UFM_IBDIAG_HOST=""
+    UFM_IBDIAG_KIND=ibdiagnet
+    UFM_IBDIAG_OUTCOME=skipped
+    UFM_IBDIAG_STATE=""
+    UFM_RUN_STATUS=skipped
+    UFM_RUN_REASON="本轮没有启动 ibdiagnet/iblinkinfo"
+    UFM_IBDIAG_DONE_FILE=""
+    UFM_IB_ANALYSIS=not_run
+    if [[ ! -d "${BASE}/ufm-ibdiagnet" ]]; then
+        ufm_ibdiag_error "${BASE}/ufm-ibdiagnet 不存在：数据目录链接应由 setup 预先创建"
+        return 1
+    fi
+    UFM_IBDIAG_STATE="${BASE}/ufm-ibdiagnet/.ibdiagnet-state"
+    if [[ ! -s "$UFM_IBDIAG_SH" ]]; then
+        ufm_ibdiag_error "missing collector ${UFM_IBDIAG_SH}"
+        return 1
+    fi
+    vip=$(ufm_vip); rc=$?
+    if (( rc == 2 )); then
+        ufm_ibdiag_error "${BASE}/01-global.yaml 不存在：global 链接应由 setup 预先创建"
+        return 1
+    fi
+    if (( rc != 0 )) || [[ -z "$vip" ]]; then
+        ufm_ibdiag_skip "global 中没有 servers.ufm.vip"
+        return 0
+    fi
+    # Only the UFM that holds the VIP runs ibdiagnet; no answer means HA is not set up yet.
+    if ! out=$(ufm_ssh "$vip" "true"); then
+        if printf '%s' "$out" | grep -qiE 'timed out|no route|refused|unreachable'; then
+            ufm_ibdiag_skip "VIP ${vip} 无应答（HA 未就绪）"
+            return 0
+        fi
+        ufm_ibdiag_error "登录 VIP ${vip} 失败: $(printf '%s' "$out" | tail -n 1)"
+        return 1
+    fi
+    nonce=$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
+    UFM_IBDIAG_RUN_ID="$(date -u "+%Y%m%d-%H%M")-${COLLECTION_ENV:-prod}-${nonce}"
+    if [[ ! "$UFM_IBDIAG_RUN_ID" =~ ^[0-9]{8}-[0-9]{4}-(prod|air)-[0-9a-f]{16}$ ]]; then
+        ufm_ibdiag_error "invalid run-id ${UFM_IBDIAG_RUN_ID}"
+        UFM_IBDIAG_RUN_ID=""
+        return 1
+    fi
+    read -r failures since < <(ufm_ibdiag_state)
+    if (( failures >= UFM_IBDIAG_FAIL_LIMIT && since < UFM_IBDIAG_RETRY_EVERY - 1 )); then
+        UFM_IBDIAG_KIND=iblinkinfo
+        kind_arg=" --iblinkinfo"
+        log "[UFM-IBDIAG] ibdiagnet 已连续失败 ${failures} 次：本轮采集 iblinkinfo（第 $((since + 1)) 轮；第 ${UFM_IBDIAG_RETRY_EVERY} 轮再试 ibdiagnet）"
+    elif (( failures >= UFM_IBDIAG_FAIL_LIMIT )); then
+        log "[UFM-IBDIAG] ibdiagnet 已连续失败 ${failures} 次：本轮再试一次 ibdiagnet"
+    fi
+    UFM_IBDIAG_OUTCOME=failed   # from here on any error counts against this kind
+    if ! out=$(ufm_ssh "$vip" "mkdir -p ${UFM_REMOTE_DIR}") \
+        || ! out=$(scp $SSH_OPTS $UFM_ALIVE_OPTS "$UFM_IBDIAG_SH" "${UFM_SSH_USER}@${vip}:${UFM_REMOTE_DIR}/" </dev/null 2>&1) \
+        || ! out=$(ufm_ssh "$vip" "cd ${UFM_REMOTE_DIR%/*} || exit 1
+             test -s monitor/ufm-ibdiagnet.sh || exit 1
+             nohup bash monitor/ufm-ibdiagnet.sh ${UFM_IBDIAG_RUN_ID}${kind_arg} </dev/null >/dev/null 2>&1 &
+             ip -br link"); then
+        ufm_ibdiag_error "在 VIP ${vip} 上部署或启动 ufm-ibdiagnet.sh 失败: $(printf '%s' "$out" | tail -n 1)"
+        UFM_IBDIAG_RUN_ID=""
+        return 1
+    fi
+    if ! holder=$(ufm_vip_holder "$out"); then
+        ufm_ibdiag_error "VIP ${vip} 所在设备不是 ib.csv 中的 UFM（管理口 MAC 不符），不收录"
+        UFM_IBDIAG_RUN_ID=""
+        return 1
+    fi
+    UFM_IBDIAG_VIP=$vip
+    UFM_IBDIAG_NODE=${holder%%|*}
+    UFM_IBDIAG_HOST=${holder#*|}
+    UFM_IBDIAG_STARTED=$SECONDS
+    UFM_IBDIAG_OUTCOME=pending
+    log "[UFM-IBDIAG] ${UFM_IBDIAG_KIND} started on ${UFM_IBDIAG_NODE} (VIP ${vip}): run-id ${UFM_IBDIAG_RUN_ID}；之后经 ${UFM_IBDIAG_HOST} 取回"
+}
+
+ufm_ibdiag_fetch() {
+    local remote done_text node_text result kind run_id artifact sum reason rc size mac node local_path out
+    local host="$UFM_IBDIAG_HOST" checks=0 max_checks prefix expected suffix
+    [[ -n "$UFM_IBDIAG_RUN_ID" ]] || return 0   # skipped or not started: already reported
+    if [[ "$UFM_IBDIAG_KIND" == iblinkinfo ]]; then
+        prefix=iblinkinfo; expected="iblinkinfo_${UFM_IBDIAG_RUN_ID}.log"; suffix=iblinkinfo.log
+        remote="${UFM_REMOTE_DIR}/iblinkinfo/iblinkinfo_${UFM_IBDIAG_RUN_ID}"
+    else
+        prefix=ibdiagnet; expected="ibdiagnet2_${UFM_IBDIAG_RUN_ID}.tgz"; suffix=ibdiagnet2.tgz
+        remote="${UFM_REMOTE_DIR}/ibdiagnet/ibdiagnet2_${UFM_IBDIAG_RUN_ID}"
+    fi
+    # Owner 2026-10-22: the first check 5 minutes after the start, then every 30 s, at most 17 minutes;
+    # the .done marker is written last, after the output is complete.
+    max_checks=$(( (UFM_IBDIAG_WAIT - UFM_IBDIAG_FIRST_WAIT) / UFM_IBDIAG_POLL + 1 ))
+    (( SECONDS - UFM_IBDIAG_STARTED < UFM_IBDIAG_FIRST_WAIT )) \
+        && sleep $(( UFM_IBDIAG_FIRST_WAIT - (SECONDS - UFM_IBDIAG_STARTED) ))
+    # From the node that runs it, by its own address: a failover may move the VIP meanwhile.
+    while ! done_text=$(ufm_ssh "$host" "cat ${remote}.done"); do
+        checks=$((checks + 1))
+        if (( checks >= max_checks || SECONDS - UFM_IBDIAG_STARTED >= UFM_IBDIAG_WAIT )); then
+            ufm_ibdiag_error "${UFM_IBDIAG_WAIT}s 内 ${UFM_IBDIAG_KIND} 没有完成（run-id ${UFM_IBDIAG_RUN_ID}）"
+            return 1
+        fi
+        sleep "$UFM_IBDIAG_POLL"
+    done
+    field() { printf '%s\n' "$done_text" | sed -n "s/^$1=//p" | head -n 1; }
+    result=$(field result); kind=$(field kind); run_id=$(field run_id); artifact=$(field artifact)
+    sum=$(field sha256); reason=$(field reason); rc=$(field rc); size=$(field size)
+    node=${UFM_IBDIAG_NODE%%.*}
+    # Codex review 2026-10-22: a failed run is recorded too, never mistaken for "no fault": the UFM's
+    # own .done is kept beside the data whatever it says (named like the data it would have described).
+    if [[ "$node" =~ ^[A-Za-z0-9][A-Za-z0-9-]*$ && "$run_id" == "$UFM_IBDIAG_RUN_ID" ]]; then
+        UFM_IBDIAG_DONE_FILE="${BASE}/ufm-ibdiagnet/${UFM_IBDIAG_RUN_ID}_${node}_${suffix%.*}.done"
+        printf '%s\n' "$done_text" > "${UFM_IBDIAG_DONE_FILE}.part" \
+            && mv -f "${UFM_IBDIAG_DONE_FILE}.part" "$UFM_IBDIAG_DONE_FILE" || UFM_IBDIAG_DONE_FILE=""
+    fi
+    if [[ "$result" != "ok" ]]; then
+        # the collector's reason already carries its exit code
+        ufm_ibdiag_error "${reason:-${UFM_IBDIAG_KIND} 采集失败（exit ${rc:-?}）}（run-id ${UFM_IBDIAG_RUN_ID}）"
+        return 1
+    fi
+    if [[ "$kind" != "$UFM_IBDIAG_KIND" || "$run_id" != "$UFM_IBDIAG_RUN_ID" || "$artifact" != "$expected" \
+          || ! "$sum" =~ ^[0-9a-f]{64}$ ]]; then
+        ufm_ibdiag_error "完成标记内容无效（run-id ${UFM_IBDIAG_RUN_ID}）"
+        return 1
+    fi
+    # The run records the node it ran on; it must be the one named at the start.
+    if ! node_text=$(ufm_ssh "$host" "cat ${remote}.node"); then
+        ufm_ibdiag_error "读不到执行节点身份 ${remote}.node"
+        return 1
+    fi
+    mac=$(inventory_mac "$UFM_IBDIAG_NODE")
+    if [[ ! "$node" =~ ^[A-Za-z0-9][A-Za-z0-9-]*$ ]] || ! printf '%s' "$node_text" | grep -qiF -- "$mac"; then
+        ufm_ibdiag_error "${host} 上的执行记录不是 ${UFM_IBDIAG_NODE} 的（管理口 MAC 不符），不收录"
+        return 1
+    fi
+    # Owner 2026-10-22: run-id (minute timestamp included) first, so the retention cleanup bundles it
+    # per day; then the real node, not the VIP; the UFM's completion record is kept beside it.
+    local_path="${BASE}/ufm-ibdiagnet/${UFM_IBDIAG_RUN_ID}_${node}_${suffix}"
+    if ! out=$(scp $SSH_OPTS $UFM_ALIVE_OPTS "${UFM_SSH_USER}@${host}:${remote%/*}/${artifact}" \
+            "${local_path}.part" </dev/null 2>&1); then
+        ufm_ibdiag_error "取回 ${artifact} 失败: $(printf '%s' "$out" | tail -n 1)"
+        ufm_discard "${local_path}.part"
+        return 1
+    fi
+    if [[ "$(file_sha256 "${local_path}.part")" != "$sum" \
+          || "$(wc -c < "${local_path}.part" | tr -d ' ')" != "$size" ]]; then
+        ufm_ibdiag_error "${artifact} 的 sha256 或大小与完成标记不符"
+        ufm_discard "${local_path}.part"
+        return 1
+    fi
+    if [[ "$prefix" == ibdiagnet ]] && ! tar -tzf "${local_path}.part" 2>/dev/null | grep -q '/ibdiagnet2\.net_dump$'; then
+        ufm_ibdiag_error "${artifact} 里没有 ibdiagnet2.net_dump"
+        ufm_discard "${local_path}.part"
+        return 1
+    fi
+    # No clobber: a file of that name is never replaced (ln fails when it exists).
+    if ! ln -- "${local_path}.part" "$local_path" 2>/dev/null; then
+        ufm_discard "${local_path}.part"
+        ufm_ibdiag_error "${local_path##*/} 已存在，不覆盖"
+        return 1
+    fi
+    rm -f -- "${local_path}.part"
+    UFM_COLLECTED=1
+    UFM_IBDIAG_ARCHIVE=$local_path
+    UFM_IBDIAG_OUTCOME=ok
+    UFM_RUN_STATUS=ok
+    UFM_RUN_REASON=""
+    log "[UFM-IBDIAG] done → ${local_path}（${UFM_IBDIAG_KIND}，执行节点 ${node}）"
+}
+
+# ── UFM run record (codex review 2026-10-22) ──────────────────────────────────
+# One record per IB-lane run that has server_ufm rows: what this run did with ibdiagnet/iblinkinfo,
+# bound to the worker cycle when there is one. It names this run's own files only, so an older report
+# can never stand in for a run that produced none. Written last, as .part and then renamed.
+ufm_run_record_write() {
+    local dir="${BASE}/ufm-ibdiagnet" record_id record
+    [[ -d "$dir" ]] || return 0
+    record_id=${UFM_IBDIAG_RUN_ID:-$(date -u "+%Y%m%d-%H%M")-${COLLECTION_ENV:-prod}-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')}
+    record="${dir}/${record_id}.ufm-run.json"
+    if ! python3 - "$record.part" "${CONTEXT_FILE:-}" "$UFM_RUN_STATUS" "$UFM_RUN_REASON" "$UFM_IBDIAG_RUN_ID" \
+            "${UFM_IBDIAG_NODE%%.*}" "$UFM_IBDIAG_KIND" "$UFM_IBDIAG_DONE_FILE" "$UFM_IBDIAG_ARCHIVE" \
+            "$UFM_IB_ANALYSIS" "${BASE}/99-output-p2p" "$UFM_IBDIAG_STATE" <<'UFM_RUN_RECORD_PY'
+import datetime, hashlib, json, os, sys
+
+(target, context_file, status, reason, run_id, node, kind, done_file, data_file, analysis, reports,
+ state_file) = sys.argv[1:]
+
+
+def identity(path):
+    if not path or not os.path.isfile(path):
+        return None
+    with open(path, "rb") as handle:
+        content = handle.read()
+    return {"name": os.path.basename(path), "sha256": hashlib.sha256(content).hexdigest(), "size": len(content)}
+
+
+cycle = None
+if context_file and os.path.isfile(context_file):
+    with open(context_file, encoding="utf-8") as stream:
+        cycle = json.load(stream).get("identity")
+report = receipt = None
+if analysis == "ok" and run_id and node:
+    stem = f"{run_id}_{node}-{kind}-topology-validation"
+    report = identity(os.path.join(reports, stem + ".xlsx"))
+    receipt = identity(os.path.join(reports, stem + ".receipt.json"))
+    if report is None or receipt is None:
+        analysis = "failed"
+failures = None
+if state_file and os.path.isfile(state_file):
+    for line in open(state_file, encoding="utf-8"):
+        if line.startswith("failures="):
+            failures = int(line.split("=", 1)[1]) if line.split("=", 1)[1].strip().isdigit() else None
+record = {
+    "schema": "ufm-ib-run-record-v1",
+    "cycle": cycle,
+    "recorded_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+    "outcome": status or "skipped",
+    "reason": reason,
+    "run_id": run_id or None,
+    "node": node if run_id else None,
+    "kind": kind if run_id else None,
+    "done": identity(done_file),
+    "input": identity(data_file) if status == "ok" else None,
+    "analysis": analysis if status == "ok" else "not_run",
+    "report": report,
+    "receipt": receipt,
+    "ibdiagnet_failures_in_a_row": failures,
+}
+with open(target, "w", encoding="utf-8") as stream:
+    json.dump(record, stream, ensure_ascii=False, indent=2)
+    stream.write("\n")
+UFM_RUN_RECORD_PY
+    then
+        rm -f -- "${record}.part"
+        log "[UFM-IBDIAG] ERROR: 写运行记录失败: ${record}"
+        return 1
+    fi
+    mv -f -- "${record}.part" "$record" && log "[UFM-IBDIAG] 运行记录 → ${record}（${UFM_RUN_STATUS}）" \
+        && UFM_RUN_RECORD_FILE=$record
+}
+UFM_RUN_RECORD_FILE=""   # this run's record; the v2 emitter binds it to the worker cycle (REQ7 R1)
+
+# ── Logs (owner 2026-10-22): whoever writes a log rotates it, with the shared tools/log_rotation.py ──
+# cron.sh rotates only the log it writes, its lane's cronjob.log (a setup link into
+# 99-output-monitor/<lane>/; the copies sit beside the real file). The page generator and the
+# switch-collection worker rotate their own logs.
+LOG_ROTATION="${BASE}/../../tools/log_rotation.py"
+
+rotate_log() {   # rotate_log <file or link>
+    local link="$1" size message
+    [[ -f "$link" ]] || return 0
+    size=$(wc -c < "$link" | tr -d ' ')
+    (( size >= CRON_LOG_MAX_BYTES )) || return 0
+    if message=$(python3 "$LOG_ROTATION" --max-bytes "$CRON_LOG_MAX_BYTES" --keep "$CRON_LOG_KEEP" "$link" 2>&1); then
+        [[ -n "$message" ]] && log "[LOG] $message"
+    else
+        log "[LOG] WARN: ${message:-${link##*/} 压缩失败，原文件保留}"
+    fi
+}
+
+# ── Shared report directory (codex review 2026-10-22) ─────────────────────────
+# 99-output-p2p is written by the post-collect of every lane (Ethernet and IB reports with their
+# provenance and receipts; the analysers write a report under its final name) and cleaned by whichever
+# lane finishes. Its lock file sits inside the real directory, so every lane and every caller uses the
+# same lock whatever its TMPDIR: writers hold it shared from the analysis to the receipt, the cleanup
+# takes it exclusive and skips the round while anyone is writing.
+REPORT_LOCK_WAIT=600   # seconds a writer waits for a cleanup in progress (bundling takes seconds)
+
+report_lock_file() {   # report_lock_file <99-output-p2p path>
+    local real
+    real=$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$1") || return 1
+    [[ -d "$real" ]] || return 1
+    printf '%s/.report-writer.lock\n' "$real"
+}
+
+with_report_writer() {   # with_report_writer <99-output-p2p path> <command> [args...]
+    local lock
+    if ! lock=$(report_lock_file "$1"); then
+        shift
+        "$@"   # no such directory: the post-collect reports it
+        return
+    fi
+    shift
+    ( flock -s -w "$REPORT_LOCK_WAIT" 9 || {
+          log "[CLN] ERROR: 99-output-p2p 的清理在 ${REPORT_LOCK_WAIT}s 内没有结束，本轮不写报告"; exit 1; }
+      "$@" ) 9>>"$lock"
+}
+
+cleanup_shared_reports() {   # cleanup_shared_reports <99-output-p2p path>
+    local lock
+    [[ -d "$1" ]] || return 0
+    lock=$(report_lock_file "$1") || return 0
+    ( flock -n 9 || { log "[CLN] 99-output-p2p 正在写报告（或另一个 lane 正在清理），本轮跳过清理"; exit 0; }
+      cleanup_data_dirs "$1" ) 9>>"$lock"
+}
+
+# ── Archiving of the data directories (owner 2026-10-22: one module, tools/collection_archive.py) ──
+# cleanup_data_dirs <dir> [<dir> ...]: every file named YYYYMMDD-... follows one rule (RETAIN_DAYS):
+# today's stay, the previous days are bundled per day into YYYYMMDD-daily.tar.gz with an index (CSVs
+# stay loose for the page), older days are deleted; a file arriving after its day was bundled stays
+# beside the bundle; failed collector batch directories past the window are removed. The module prints
+# one line per action and they go to this run's log.
+COLLECTION_ARCHIVE="${BASE}/../../tools/collection_archive.py"
+
+cleanup_data_dirs() {
+    local output line
+    if ! output=$(python3 "$COLLECTION_ARCHIVE" --retain-days "$RETAIN_DAYS" "$@" 2>&1); then
+        log "[CLN] WARN: ${COLLECTION_ARCHIVE##*/} 失败，本轮未整理: ${output##*$'\n'}"
+        return 0
+    fi
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && log "$line"
+    done <<< "$output"
 }
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -1838,7 +2526,7 @@ if ! detect_eth_environment; then
 fi
 
 if [[ -n "$CONTEXT_FILE" && -z "$EMIT_TARGET_PLAN_FD" ]] && \
-    python3 - "$CONTEXT_FILE" "$ETH" "$SPX" "$IB" "$NV" "$DYNAMIC_AIR_IDENTITIES" <<'A4_SNAPSHOT_PY'
+    python3 - "$CONTEXT_FILE" "$ETH" "$SPX" "$IB" "$NV" "$DYNAMIC_AIR_IDENTITIES" "$UFM" <<'A4_SNAPSHOT_PY'
 import hashlib, ipaddress, json, re, sys
 from pathlib import Path
 context = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
@@ -1849,9 +2537,10 @@ content = (json.dumps(plan, sort_keys=True, separators=(",", ":"),
                       ensure_ascii=False, allow_nan=False) + "\n").encode()
 if hashlib.sha256(content).hexdigest() != context.get("target_plan_sha256"):
     raise SystemExit("target plan digest mismatch")
-if not isinstance(plan, dict) or set(plan) != {"eth", "spx", "ib", "nv", "dynamic_identities"}:
+# "ufm": the server_ufm rows of the infiniband slot (owner 2026-10-21); empty in the other slots.
+if not isinstance(plan, dict) or set(plan) != {"eth", "spx", "ib", "nv", "dynamic_identities", "ufm"}:
     raise SystemExit("target plan shape mismatch")
-for key, filename in zip(("eth", "spx", "ib", "nv", "dynamic_identities"), sys.argv[2:]):
+for key, filename in zip(("eth", "spx", "ib", "nv", "dynamic_identities", "ufm"), sys.argv[2:]):
     rows = plan[key]
     if not isinstance(rows, list) or len(rows) > 10000:
         raise SystemExit("invalid target plan rows")
@@ -1870,6 +2559,23 @@ for key, filename in zip(("eth", "spx", "ib", "nv", "dynamic_identities"), sys.a
 A4_SNAPSHOT_PY
 then
     log "[A4] loaded frozen target plan without re-reading target sources"
+    # The identity table comes from the worker's immutable inventory copy, digest-checked.
+    if frozen_csv=$(python3 - "$CONTEXT_FILE" <<'A4_MACS_PY'
+import hashlib
+import json
+from pathlib import Path
+import sys
+context = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+path = Path(context["artifacts"]["input_inventory"])
+if hashlib.sha256(path.read_bytes()).hexdigest() != context["input_inventory_sha256"]:
+    raise SystemExit("frozen input inventory digest mismatch")
+print(path)
+A4_MACS_PY
+    ); then
+        load_inventory_macs "$frozen_csv"
+    else
+        log "[A4] WARN: frozen inventory unavailable for MAC identity; hostname identity is used"
+    fi
 else
     if [[ -n "$CONTEXT_FILE" && -z "$EMIT_TARGET_PLAN_FD" ]] && \
        python3 - "$CONTEXT_FILE" <<'A4_PLAN_PY'
@@ -1888,11 +2594,11 @@ A4_PLAN_PY
     fi
 fi
 if [[ -n "$EMIT_TARGET_PLAN_FD" ]]; then
-    if ! python3 - "$ETH" "$SPX" "$IB" "$NV" "$DYNAMIC_AIR_IDENTITIES" \
+    if ! python3 - "$ETH" "$SPX" "$IB" "$NV" "$DYNAMIC_AIR_IDENTITIES" "$UFM" \
             >&"$EMIT_TARGET_PLAN_FD" <<'A4_TARGET_PY'
 import json, sys
 from pathlib import Path
-names = ("eth", "spx", "ib", "nv", "dynamic_identities")
+names = ("eth", "spx", "ib", "nv", "dynamic_identities", "ufm")
 plan = {name: Path(path).read_text(encoding="utf-8").splitlines()
         for name, path in zip(names, sys.argv[1:])}
 print(json.dumps(plan, sort_keys=True, separators=(",", ":"), ensure_ascii=False))
@@ -1904,6 +2610,22 @@ A4_TARGET_PY
     exit 0
 fi
 record_planned_devices
+
+# UFM appliances (ib.csv type=server_ufm) run alongside the IB switches: ufm-info.sh with
+# sw-info.sh, ufm-ibdiagnet.sh with sw-link.sh. Their problems never touch the switch result.
+ufm_failed=0
+ufm_active=0
+UFM_COLLECTED=0
+if hosts_file_has_entries "$UFM"; then
+    if [[ ! -d "${BASE}/ufm-info" && ! -d "${BASE}/ufm-ibdiagnet" ]]; then
+        log "[UFM] ERROR: ${BASE}/ufm-info 与 ufm-ibdiagnet 都不存在：数据目录链接应由 setup 预先创建；本次不连接任何 UFM"
+        ufm_failed=1
+    else
+        ufm_active=1
+        UFM_PLANNED=$(wc -l < "$UFM" | tr -d ' ')
+        cp "$UFM" "$UFM_CANDIDATES"
+    fi
+fi
 
 # Validate key login and prepare remote directories before starting any timed job.
 # Abort on failure so the script does not wait for jobs that could not be deployed.
@@ -1921,6 +2643,19 @@ fi
 if (( key_prepare_failed )); then
     log "[KEY] ERROR: SSH preparation failed; aborting collection"
     exit 1
+fi
+# UFM: the same key preparation (key first, then a password on an interactive run, then the key is
+# deployed) and the management-MAC identity check; its problems stay out of the switch result.
+if (( ufm_active )); then
+    KEY_MAC_SCOPE=any
+    KEY_FAILURE_SINK=log
+    deploy_ssh_keys "$UFM" "UFM" "$UFM_SSH_USER" "$UFM_REMOTE_DIR" "$UFM_ALIVE_OPTS" || ufm_failed=1
+    KEY_MAC_SCOPE=eth0
+    KEY_FAILURE_SINK=result
+    if [[ "$(wc -l < "$UFM" | tr -d ' ')" -lt "$UFM_PLANNED" ]]; then
+        ufm_failed=1
+    fi
+    hosts_file_has_entries "$UFM" || ufm_active=0
 fi
 
 # AIR Cumulus VX nodes still participate in ETH information collection, but
@@ -1941,8 +2676,13 @@ if hosts_file_has_entries "$ETH"; then collect_eth_info || collection_failed=1; 
 if hosts_file_has_entries "$SPX"; then collect_spx_link || collection_failed=1; fi
 
 # IB switches → IB info + IB link collection
+(( ufm_active )) && { ufm_info_start || ufm_failed=1; }
 if hosts_file_has_entries "$IB"; then collect_ib_info || collection_failed=1; fi
+(( ufm_active )) && { ufm_info_fetch || ufm_failed=1; }
+(( ufm_active )) && { ufm_ibdiag_start || ufm_failed=1; }
 if hosts_file_has_entries "$IB"; then collect_ib_link || collection_failed=1; fi
+(( ufm_active )) && { ufm_ibdiag_fetch || ufm_failed=1; }
+(( ufm_active )) && ufm_ibdiag_record
 
 # NV switches → NV info + NV link collection
 if hosts_file_has_entries "$NV"; then collect_nv_info || collection_failed=1; fi
@@ -1972,22 +2712,40 @@ ACTIVITY_CONTEXT_PY
             activity_context=1
         fi
         post_rc=0
+        # its report goes into the shared 99-output-p2p (through the lldp tool's setup link)
+        eth_reports="${BASE}/../../tools/lldp-analyze-tool/99-output-p2p"
         if (( activity_context )); then
-            python3 "$POST_COLLECT" "${post_args[@]}" <&"$WORKER_CONTEXT_FD" || post_rc=$?
+            with_report_writer "$eth_reports" python3 "$POST_COLLECT" "${post_args[@]}" <&"$WORKER_CONTEXT_FD" \
+                || post_rc=$?
         else
-            python3 "$POST_COLLECT" "${post_args[@]}" || post_rc=$?
+            with_report_writer "$eth_reports" python3 "$POST_COLLECT" "${post_args[@]}" || post_rc=$?
         fi
         if (( post_rc )); then
             log "[ETH-CLOSED-LOOP] ERROR: validation report or monitor.html refresh failed"
             collection_failed=1
         fi
     fi
-elif (( collection_failed == 0 )) && \
-    { hosts_file_has_entries "$IB" || hosts_file_has_entries "$NV"; }
-then
+elif [[ -n "$INFO_ARCHIVE$LINK_ARCHIVE" ]] || (( UFM_COLLECTED )); then
     # IB/NV switch info and link CSVs are already the monitor page's canonical
     # inputs.  They need no second analyzer, but a standalone cron run must
-    # still publish the newly collected state into monitor.html.
+    # still publish the newly collected state into monitor.html.  Owner
+    # 2026-10-21: many collectors run (eth/ib/nvl info and link, UFM), so any
+    # data collected in this run is published even when another part failed.
+    # IB closed loop (owner 2026-10-21, modelled on Ethernet): this run's exact
+    # UFM ibdiagnet archive becomes the IB Link Validation report first.  A
+    # failed analysis is a UFM warning; the page is refreshed regardless.
+    if [[ -n "$UFM_IBDIAG_ARCHIVE" ]]; then
+        UFM_IB_ANALYSIS=failed
+        if [[ ! -f "$POST_COLLECT" ]]; then
+            log "[IB-CLOSED-LOOP] ERROR: missing post-collection script: $POST_COLLECT"
+            ufm_failed=1
+        elif ! with_report_writer "${BASE}/99-output-p2p" python3 "$POST_COLLECT" --archive "$UFM_IBDIAG_ARCHIVE"; then
+            log "[IB-CLOSED-LOOP] ERROR: IB validation report failed; monitor.html is refreshed without it"
+            ufm_failed=1
+        else
+            UFM_IB_ANALYSIS=ok
+        fi
+    fi
     if [[ ! -f "$HTML_GENERATOR" ]]; then
         log "[MONITOR-HTML] ERROR: missing generator: $HTML_GENERATOR"
         collection_failed=1
@@ -1999,13 +2757,22 @@ then
     fi
 fi
 
+(( ufm_active )) && { ufm_run_record_write || ufm_failed=1; }
+
 cleanup_data_dirs \
     "${BASE}/eth-info"  \
     "${BASE}/spx-link"  \
     "${BASE}/ib-info"   \
     "${BASE}/ib-link"   \
     "${BASE}/nvsw-info" \
-    "${BASE}/nvsw-link"
+    "${BASE}/nvsw-link" \
+    "${BASE}/ufm-info"  \
+    "${BASE}/ufm-ibdiagnet"
+rotate_log "${BASE}/cronjob.log"   # only the log cron.sh writes; the others rotate their own
+# Owner 2026-10-22: the dated reports in 99-output-p2p follow the same retention; the CVT and the P2P
+# outputs carry no date and are never touched.
+MONITOR_DIR=${BASE}/../../monitor
+cleanup_shared_reports "${MONITOR_DIR}/99-output-p2p"
 
 if (( collection_failed )); then
     emit_failed_collection_result
@@ -2032,6 +2799,8 @@ if [[ -n "$CONTEXT_FILE" ]]; then
     [[ -z "$INFO_ARCHIVE" ]] || emitter_args+=(--info "$INFO_ARCHIVE")
     [[ -z "$LINK_ARCHIVE" ]] || emitter_args+=(--link "$LINK_ARCHIVE")
     [[ -z "$LINK_CSV" ]] || emitter_args+=(--csv "$LINK_CSV")
+    # The emitter binds the UFM run only when it names this cycle and succeeded (UFM-MONITOR.md 15).
+    [[ -z "$UFM_RUN_RECORD_FILE" ]] || emitter_args+=(--ufm-run-record "$UFM_RUN_RECORD_FILE")
     if [[ -n "$ETH_ARCHIVE" ]] && python3 - "$CONTEXT_FILE" <<'ACTIVITY_EMIT_PY'
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as stream:
@@ -2060,6 +2829,10 @@ else
 fi
 if [[ -s "$DEVICE_FAILURES" ]]; then
     log "========== cron finish with device warnings =========="
+    exit 0
+fi
+if (( ufm_failed )); then
+    log "========== cron finish with UFM warnings =========="
     exit 0
 fi
 log "========== cron finish =========="

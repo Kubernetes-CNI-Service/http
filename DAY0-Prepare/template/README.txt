@@ -46,6 +46,8 @@ setup 会把它们链接到 ztp/image/cumulus/ 和 ztp/image/nvos/。
 可能创建的连接：
   ztp/image/cumulus/<Cumulus镜像名>.bin -----> http/image/<Cumulus镜像名>.bin
   ztp/image/nvos/<NVOS镜像名>.bin       -----> http/image/<NVOS镜像名>.bin
+  infiniband/bringup/ufm-setup-upgrade/image -----> ../../../image（UFM license *.lic 也放在 http/image/；
+                                                    该目录不存在时 setup 跳过此链接）
 NVOS 镜像精确支持 `nvos-amd64-<A.B.C>.bin` 和
 `nvosv<A-B-C>amd64.bin` 两种名称；同版本两种名称内容不同时 load 会拒绝，内容相同时
 固定优先前一种新名称。镜像归属由文件名识别；无法识别为 Cumulus 或 NVOS 的 .bin
@@ -82,11 +84,17 @@ NVOS 镜像精确支持 `nvos-amd64-<A.B.C>.bin` 和
     ztp/config/nvos/template/01-global.yaml -----> DAY0-Prepare/<项目>/01-global.yaml
     infra/01-global.yaml -----> DAY0-Prepare/<项目>/01-global.yaml
     monitor/01-global.yaml -----> DAY0-Prepare/<项目>/01-global.yaml
+    infiniband/01-global.yaml -----> DAY0-Prepare/<项目>/01-global.yaml
+    infiniband/monitor/01-global.yaml -----> ../01-global.yaml（UFM 采集读取 servers.ufm.vip）
+    infiniband/bringup/ufm-setup-upgrade/01-global.yaml -----> ../../01-global.yaml（仓库内固定桥接，不由 setup 创建）
   monitor 从 common.switch.system.date-time.timezone 读取页面显示时区；
   也可临时使用 MONITOR_TIMEZONE 环境变量覆盖。
 
 02-devices_config.csv
-  作用：统一保存 eth、eth_spx、spx、ib、nvl、server、air 设备及其 hostname、类型、管理IP、MAC、模板和网络参数。
+  作用：统一保存 eth、eth_spx、spx、ib、nvl、server、server_mgmt、server_ufm、air 设备及其 hostname、类型、管理IP、MAC、模板和网络参数。
+  server_mgmt 是 server 的新写法；server_ufm 是 UFM 设备，只填前 7 列
+  （hostname,type,template,eth0_ip,netmask,eth0_gw,eth0_mac，netmask 写 23 或 /23），
+  其余列留空但逗号不能省，eth0_gw、eth0_mac 必填。
   非 AIR 行由用户维护；DHCP 生成器每次原子重建全部 type=air 行并放在文件末尾。
   AIR 名称先精确匹配 Production；带站点/机柜前缀时只采用最长、最具体且唯一的
   Production hostname 后缀，最长候选并列时停止生成，避免相似短名称错误继承地址。
@@ -166,7 +174,12 @@ NVOS 镜像精确支持 `nvos-amd64-<A.B.C>.bin` 和
     nvlink/nvsw.csv -----> DAY0-Prepare/<项目>/02-devices_config.csv
     monitor/02-devices_config.csv -----> DAY0-Prepare/<项目>/02-devices_config.csv
     infra/02-devices_config.csv -----> DAY0-Prepare/<项目>/02-devices_config.csv
-  监控、ZTP、backup、Feedback 统一读取本文件并按 type 过滤；infra 只选择 type=server 行。
+    ztp/config/nvos/template/P2P/02-devices_config.csv -----> DAY0-Prepare/<项目>/02-devices_config.csv
+    infiniband/bringup/ufm-setup-upgrade/ib.csv -----> ../../ib.csv
+  p2p-to-validation.py 用 P2P 目录下这份清单的设备名选出 P2P 的名称列。
+  监控、ZTP、backup、Feedback 统一读取本文件并按 type 过滤；infra 只选择 type=server 或
+  type=server_mgmt 行；type=server_ufm 不进入 infra 部署，只由
+  infiniband/bringup/ufm-setup-upgrade/ufm-setup-upgrade.py 和监控处理，其余脚本直接跳过服务器行。
 
 02-dhcp-subnet_config.csv
   作用：ISC DHCP 的 shared-network、subnet、地址池、网关和 ZTP URL 配置。
@@ -193,6 +206,7 @@ p2p.xlsx
     ethernet/p2p.xlsx                        -----> DAY0-Prepare/<项目>/p2p.xlsx
     infiniband/p2p.xlsx                      -----> DAY0-Prepare/<项目>/p2p.xlsx
     nvlink/p2p.xlsx                          -----> DAY0-Prepare/<项目>/p2p.xlsx
+    infiniband/bringup/ufm-setup-upgrade/p2p.xlsx -----> ../../p2p.xlsx
     ztp/config/cumulus/template/P2P/output-p2p -----> DAY0-Prepare/<项目>/99-output-p2p/
     ztp/config/nvos/template/P2P/output-p2p    -----> DAY0-Prepare/<项目>/99-output-p2p/
   P2P 派生结果统一写入项目的 99-output-p2p/。
@@ -254,6 +268,7 @@ README.txt
     infiniband/bringup/ndr/ndr-upgrade-logs -----> DAY0-Prepare/<项目>/99-output-ib_nvl/bringup/ndr-upgrade-logs
     infiniband/bringup/xdr-initial-setup/xdr-initial-setup-logs -----> DAY0-Prepare/<项目>/99-output-ib_nvl/bringup/xdr-initial-setup-logs
     infiniband/bringup/xdr-upgrade/xdr-upgrade-logs -----> DAY0-Prepare/<项目>/99-output-ib_nvl/bringup/xdr-upgrade-logs
+    infiniband/bringup/ufm-setup-upgrade/ufm-setup-upgrade-logs -----> DAY0-Prepare/<项目>/99-output-ib_nvl/bringup/ufm-setup-upgrade-logs
   latest_yaml 是固定 HTTP 入口；项目内 latest 优先指向同一时间戳的 -combine 目录。
 
 99-output-dhcp/
@@ -276,6 +291,7 @@ README.txt
     ztp/config/cumulus/template/P2P/output-p2p -----> DAY0-Prepare/<项目>/99-output-p2p
     ztp/config/nvos/template/P2P/output-p2p -----> DAY0-Prepare/<项目>/99-output-p2p
     monitor/99-output-p2p -----> DAY0-Prepare/<项目>/99-output-p2p
+    infiniband/monitor/99-output-p2p -----> DAY0-Prepare/<项目>/99-output-p2p（IB 链路校验读 CVT、写报告）
   90-c2-generate_configs.py 直接扫描上述 output-p2p 目录，不再创建单文件 DOT 软链接。
 
 99-output-monitor/
@@ -310,6 +326,8 @@ README.txt
     infiniband/monitor/ib-info -----> DAY0-Prepare/<项目>/99-output-monitor/infiniband/ib-info
     ztp/config/nvos/template/P2P/ib-info -----> DAY0-Prepare/<项目>/99-output-monitor/infiniband/ib-info
     infiniband/monitor/ib-link -----> DAY0-Prepare/<项目>/99-output-monitor/infiniband/ib-link
+    infiniband/monitor/ufm-info -----> DAY0-Prepare/<项目>/99-output-monitor/infiniband/ufm-info
+    infiniband/monitor/ufm-ibdiagnet -----> DAY0-Prepare/<项目>/99-output-monitor/infiniband/ufm-ibdiagnet
     infiniband/monitor/cronjob.log -----> DAY0-Prepare/<项目>/99-output-monitor/infiniband/cronjob.log
     monitor/infiniband -----> DAY0-Prepare/<项目>/99-output-monitor/infiniband
 

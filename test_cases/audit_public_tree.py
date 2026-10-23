@@ -66,6 +66,17 @@ SETUP_RUNTIME_BRIDGE = "infiniband/bringup/xdr-initial-setup/01-global.yaml"
 SETUP_RUNTIME_BRIDGE_TARGET = "../../01-global.yaml"
 SETUP_PUBLICKEY_BRIDGE = "infiniband/bringup/xdr-initial-setup/publickey"
 SETUP_PUBLICKEY_BRIDGE_TARGET = "../../publickey"
+# bridge -> (exact indexed target, setup-managed runtime target).  ufm-setup-upgrade reads the same two
+# inputs from its own directory (owner principle 1, 2026-10-22), through the same kind of bridge.
+SETUP_RUNTIME_BRIDGES = {
+    SETUP_RUNTIME_BRIDGE: (SETUP_RUNTIME_BRIDGE_TARGET, "infiniband/01-global.yaml"),
+    SETUP_PUBLICKEY_BRIDGE: (SETUP_PUBLICKEY_BRIDGE_TARGET, "infiniband/publickey"),
+    "infiniband/bringup/ufm-setup-upgrade/01-global.yaml": ("../../01-global.yaml", "infiniband/01-global.yaml"),
+    "infiniband/bringup/ufm-setup-upgrade/publickey": ("../../publickey", "infiniband/publickey"),
+}
+# A public-key bridge never takes another target, not even one that would otherwise be publishable.
+SETUP_PUBLICKEY_BRIDGES = frozenset(name for name, (target, _runtime) in SETUP_RUNTIME_BRIDGES.items()
+                                    if target == SETUP_PUBLICKEY_BRIDGE_TARGET)
 
 PUBLIC_DAY0_TEMPLATE_FILES = frozenset(
     {
@@ -859,11 +870,7 @@ def index_symlink_target_is_candidate(
 def exact_setup_runtime_bridge(
     root: Path, relative: str, target: str, entry: IndexEntry | None,
 ) -> bool:
-    runtime_targets = {
-        SETUP_RUNTIME_BRIDGE: (SETUP_RUNTIME_BRIDGE_TARGET, "infiniband/01-global.yaml"),
-        SETUP_PUBLICKEY_BRIDGE: (SETUP_PUBLICKEY_BRIDGE_TARGET, "infiniband/publickey"),
-    }
-    bridge = runtime_targets.get(relative)
+    bridge = SETUP_RUNTIME_BRIDGES.get(relative)
     if bridge is None or target != bridge[0] or entry is None or entry.mode != "120000":
         return False
     # The setup-managed target may be absent in a source checkout.  A present
@@ -893,11 +900,11 @@ def inspect_index_candidate(
     if size > MAX_BLOB_BYTES:
         return [Finding("large-blob", relative, "indexed blob exceeds the 5 MiB public limit")]
     assert data is not None
-    if relative in {SETUP_RUNTIME_BRIDGE, SETUP_PUBLICKEY_BRIDGE} and entry.mode != "120000":
+    if relative in SETUP_RUNTIME_BRIDGES and entry.mode != "120000":
         return [Finding("invalid-runtime-bridge", relative, "setup bridge must be an indexed symlink")]
     if entry.mode == "120000":
         target = os.fsdecode(data)
-        if relative == SETUP_PUBLICKEY_BRIDGE and target != SETUP_PUBLICKEY_BRIDGE_TARGET:
+        if relative in SETUP_PUBLICKEY_BRIDGES and target != SETUP_PUBLICKEY_BRIDGE_TARGET:
             return [Finding("invalid-runtime-bridge", relative, "public-key bridge target changed")]
         if exact_setup_runtime_bridge(root, relative, target, entry):
             return []
@@ -939,7 +946,7 @@ def inspect_candidate(
         findings.append(Finding("missing-candidate", relative, "Git candidate is absent"))
         return findings
 
-    if relative in {SETUP_RUNTIME_BRIDGE, SETUP_PUBLICKEY_BRIDGE} and not stat.S_ISLNK(info.st_mode):
+    if relative in SETUP_RUNTIME_BRIDGES and not stat.S_ISLNK(info.st_mode):
         findings.append(Finding("invalid-runtime-bridge", relative, "setup bridge must be a symlink"))
         return findings
 
@@ -949,7 +956,7 @@ def inspect_candidate(
         except OSError:
             findings.append(Finding("broken-symlink", relative, "symlink target cannot be read"))
             return findings
-        if relative == SETUP_PUBLICKEY_BRIDGE and target != SETUP_PUBLICKEY_BRIDGE_TARGET:
+        if relative in SETUP_PUBLICKEY_BRIDGES and target != SETUP_PUBLICKEY_BRIDGE_TARGET:
             findings.append(Finding("invalid-runtime-bridge", relative, "public-key bridge target changed"))
             return findings
         if exact_setup_runtime_bridge(root, relative, target, entry):

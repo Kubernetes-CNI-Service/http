@@ -212,15 +212,21 @@ def main(argv=None):
     parser = _Parser(
         description="UFM initial setup: local preparation and explicit live gates; NOT DEPLOYED")
     parser.add_argument("command", choices=(
-        "validate", "plan", "generate", "authenticate", "establish-keys", "execute"))
-    parser.add_argument("--project", type=Path, required=True)
-    parser.add_argument("--address")
-    parser.add_argument("--private-logs-root", type=Path)
-    parser.add_argument("--known-hosts", type=Path)
-    parser.add_argument("--known-hosts-sha256")
-    parser.add_argument("--management-identity", type=Path)
-    parser.add_argument("--allow-device-access", action="store_true")
-    parser.add_argument("--allow-key-change", action="store_true")
+        "validate", "plan", "generate", "authenticate", "establish-keys", "execute"),
+        help="validate/plan are local only; execute always HOLDs (no vendor write recipe)")
+    parser.add_argument("--project", type=Path, required=True,
+                        help="DAY0-Prepare project directory holding the UFM inventory and global")
+    parser.add_argument("--address", help="UFM management IPv4; must be a node of the project plan")
+    parser.add_argument("--private-logs-root", type=Path,
+                        help="private xdr-initial-setup-logs root for generated probes and key evidence")
+    parser.add_argument("--known-hosts", type=Path, help="pinned known_hosts file for live commands")
+    parser.add_argument("--known-hosts-sha256", help="expected SHA-256 of --known-hosts")
+    parser.add_argument("--management-identity", type=Path,
+                        help="management SSH private identity whose public key establish-keys installs")
+    parser.add_argument("--allow-device-access", action="store_true",
+                        help="explicit gate for authenticate/establish-keys to contact the device")
+    parser.add_argument("--allow-key-change", action="store_true",
+                        help="explicit gate for establish-keys to change the device password and keys")
     args = parser.parse_args(argv)
     try:
         plan = build_plan(args.project)

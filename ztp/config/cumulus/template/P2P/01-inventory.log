@@ -10,6 +10,8 @@ IB-Leaf*
 IB-*-Leaf*
 *IBL*
 *IBS*
+*ew-spine*
+*ew-leaf*
 
 [NVL-SW]
 *NVSW*
@@ -32,6 +34,7 @@ IB-*-Leaf*
 [SMC-B300]
 *HGX*
 *gpusrv*
+*gpu-b300*
 
 [GB300-GPU]
 *GPU*

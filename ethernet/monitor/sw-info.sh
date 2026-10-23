@@ -26,7 +26,11 @@ if ! mkdir "$LOCK_DIR" 2>/dev/null; then
 fi
 printf '%s\n' "$$" > "$LOCK_DIR/pid"
 
-TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/sw-info.XXXXXX") || {
+# The working copy lives next to the final file, so the closing mv is a rename on one filesystem:
+# a info file that exists is complete (cron.sh fetches it as soon as it appears). cron.sh only
+# fetches *.info, never this hidden directory.
+mkdir -p "$BASEDIR" || exit 1
+TMP_DIR=$(mktemp -d "${BASEDIR}/.sw-info.XXXXXX") || {
     rm -f "$LOCK_DIR/pid"
     rmdir "$LOCK_DIR" 2>/dev/null || true
     exit 1
@@ -36,6 +40,7 @@ OUT="${TMP_DIR}/${HOSTNAME}.info"
 cleanup() {
     rm -f "$OUT" "$LOCK_DIR/pid"
     rmdir "$TMP_DIR" "$LOCK_DIR" 2>/dev/null || true
+    rmdir "$BASEDIR" 2>/dev/null || true   # only removed when empty: nothing was published
 }
 trap cleanup EXIT INT TERM
 

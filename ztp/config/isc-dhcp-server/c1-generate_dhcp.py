@@ -80,6 +80,10 @@ _AUTO_YES = False
 _CONFIRM_TIMEOUT = 15
 
 _LEGACY_SUBNET_COLUMNS = {"bootfile_name", "cumulus_provision_url"}
+# 服务器行不生成 DHCP 条目：server_mgmt 是 server 的新写法（由 infra 部署）；
+# server_ufm 是 UFM，只填前 7 列，由 ufm-setup-upgrade 处理（owner 2026-10-19..22）。
+_SERVER_TYPES = frozenset({"server", "server_mgmt", "server_ufm"})
+_CSV_TYPES = frozenset({"eth", "eth_spx", "spx", "ib", "nvl", "air", "eth_jump"}) | _SERVER_TYPES
 _CUMULUS_BOOTSTRAP_BY_PROFILE = {
     "oob": "ztp-bootstrap_oob.sh",
     "oobofoob": "ztp-bootstrap_oobofoob.sh",
@@ -210,7 +214,8 @@ def _fallback_fmt(hostname):
 
 def load_csv(path, schema_version=1):
     """
-    统一读取 devices_config CSV，每行按 type 列判断 eth/eth_spx/spx/air/ib/nvl；server 供 infra 使用并跳过。
+    统一读取 devices_config CSV，每行按 type 列判断 eth/eth_spx/spx/air/ib/nvl；
+    server/server_mgmt 供 infra 使用、server_ufm 供 ufm-setup-upgrade 使用，均跳过。
     无 type 列时用表头兜底（lo_ip 存在 → eth，否则 ib）。
     列结构：hostname=0, type=1, template=2, eth0_ip=3, eth0_mac=6, eth1_ip=7, eth1_mac=10
     """
@@ -238,19 +243,22 @@ def load_csv(path, schema_version=1):
             require_device_csv_row_width(
                 raw, len(header), schema_version, lineno=lineno,
             )
-            if len(row) < 11:
-                raise ValueError(
-                    f"{os.path.basename(path)} 第 {lineno} 行列数不足（{len(row)} < 11）"
-                )
-
             if type_col is not None and len(row) > type_col:
                 fmt = row[type_col].strip().lower()
-                if fmt not in ("eth", "eth_spx", "spx", "ib", "nvl", "air", "server", "eth_jump"):
+                if fmt not in _CSV_TYPES:
                     raise ValueError(
                         f"{os.path.basename(path)} 第 {lineno} 行 type={fmt!r} 无效"
                     )
             else:
                 fmt = _fallback_fmt(row[0])
+            # server_ufm 只填到 eth0_mac，也没有 infra 执行者：在列数与
+            # config_method 检查之前跳过。
+            if fmt == "server_ufm":
+                continue
+            if len(row) < 11:
+                raise ValueError(
+                    f"{os.path.basename(path)} 第 {lineno} 行列数不足（{len(row)} < 11）"
+                )
             method = None
             if method_col is not None:
                 if len(row) <= method_col:
@@ -270,7 +278,7 @@ def load_csv(path, schema_version=1):
                     raise ValueError(
                         f"{os.path.basename(path)} 第 {lineno} 行 {row[0]} {exc}"
                     ) from exc
-            if fmt in {"server", "eth_jump"}:
+            if fmt in _SERVER_TYPES or fmt == "eth_jump":
                 continue
 
             records.append({

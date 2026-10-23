@@ -111,3 +111,16 @@ P2P 设备类型由 `template/P2P/01-inventory.log` 的 section 顺序决定：�
 胜出，不按 glob 长度猜测优先级。共享解析器位于 `ztp/config/topology_rules.py`，Cumulus、
 NVOS 和 LLDP 分析使用同一规则；PDU 必须保持早于 `Eth-SW`，`SMC-B300` 必须保持早于
 `GB300-GPU`，因此同时含 `gpusrv` 与 `GPU` 的名称仍归类为 `SMC-B300`。
+
+**项目的设备命名（owner 2026-10-22）**：设备按名字中的模式归类。新项目的设备命名不在已有模式里时，
+要在对应 section 下加模式。否则 IB 转换器 `p2p-to-validation.py` 把这些设备判为 `unknown`，
+CVT 里就没有它们的链路，IB Link Validation 全部报为 Undefined。
+- 2026-10 的 B300 项目中，IB 交换机叫 `ew-spineNNN` / `ew-leafNNN`（P2P 写短名，设备上是 FQDN），
+  为此在 `[IB-SW]` 下加了 `*ew-spine*`、`*ew-leaf*`。GPU 服务器在 P2P 的 Hostname 列里叫
+  `suNN-gpu-b300l-NNN…`，原有模式会把它们误判为 `GB300-GPU`（`*GPU*`），所以在 `[SMC-B300]` 下加了
+  `*gpu-b300*`（`[SMC-B300]` 排在 `[GB300-GPU]` 之前）。
+- IB 转换器用 `02-devices_config.csv` 的设备名在 P2P 中找出名字列（owner 2026-10-22），所有设备都用这一列的名字，
+  所以这里的模式要按那一列的写法来加。
+- 加模式前先确认它不会匹配到其它类型的设备名。例如以太网 Leaf 叫 `TAN-…` / `OOB-…`，不受这两条影响。
+- 测试 `test_ib_cvt_project_output.py::ShippedInventoryRulesTest` 钉住了随仓库发布的分类结果。
+  新项目加了模式，要在那里补上对应的名字。

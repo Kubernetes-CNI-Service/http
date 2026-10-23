@@ -1070,6 +1070,8 @@ SETUP_ZTP_MAPPINGS = (
     ("config/cumulus/template/99-output", "99-output-eth", "dir"),
     ("config/nvos/template/01-global.yaml", "01-global.yaml", "file"),
     ("config/nvos/template/02-devices_config.csv", "02-devices_config.csv", "file_csv"),
+    # p2p-to-validation.py picks the P2P name column by the inventory beside it (owner 2026-10-22).
+    ("config/nvos/template/P2P/02-devices_config.csv", "02-devices_config.csv", "file_csv"),
     ("config/nvos/template/99-output-ib_nvl", "99-output-ib_nvl", "dir"),
     ("config/isc-dhcp-server/01-global.yaml", "01-global.yaml", "file"),
     ("config/isc-dhcp-server/02-subnet_config.csv", "02-dhcp-subnet_config.csv", "file"),
@@ -1182,8 +1184,19 @@ BRINGUP_OUTPUT_SPECS = tuple(
     ("infiniband/bringup/" + tool + "/" + name, "99-output-ib_nvl/bringup/" + name)
     for tool, name in (("ndr", "ndr-upgrade-logs"),
                        ("xdr-initial-setup", "xdr-initial-setup-logs"),
-                       ("xdr-upgrade", "xdr-upgrade-logs"))
+                       ("xdr-upgrade", "xdr-upgrade-logs"),
+                       ("ufm-setup-upgrade", "ufm-setup-upgrade-logs"))
 )
+# (tool input link, repository alias it points at, project file behind the alias).  The deployment
+# tool reads only its own directory; setup binds it to the active inventory and P2P aliases.
+BRINGUP_INPUT_SPECS = (
+    ("infiniband/bringup/ufm-setup-upgrade/ib.csv", "infiniband/ib.csv", "02-devices_config.csv"),
+    ("infiniband/bringup/ufm-setup-upgrade/p2p.xlsx", "infiniband/p2p.xlsx", "p2p.xlsx"),
+)
+# Tool links to the shared, project-independent http/image directory (ha-post-config finds *.lic there).
+# Not a project producer binding, so not in runtime_link_specs(); image builds deny the whole
+# infiniband/bringup subtree (IMAGE_HOST_STATE_SUBTREES).
+BRINGUP_IMAGE_LINKS = ("infiniband/bringup/ufm-setup-upgrade/image",)
 ANALYZER_INPUT_SPECS = (
     ("ztp/config/cumulus/template/P2P/eth-info", "99-output-monitor/ethernet/eth-info"),
     ("ztp/config/nvos/template/P2P/ib-info", "99-output-monitor/infiniband/ib-info"),
@@ -1196,7 +1209,8 @@ ANALYZER_OUTPUT_SPECS = (
 )
 NETWORK_MONITOR_SPECS = (
     ("ethernet", "eth.csv", "eth-info", "spx-link"),
-    ("infiniband", "ib.csv", "ib-info", "ib-link"),
+    # ufm-info / ufm-ibdiagnet: the UFM lane of the same cron.sh (infiniband/monitor/UFM-MONITOR.md).
+    ("infiniband", "ib.csv", "ib-info", "ib-link", "ufm-info", "ufm-ibdiagnet"),
     ("nvlink", "nvsw.csv", "nvsw-info", "nvsw-link"),
 )
 NETWORK_CSV_MAPPINGS = tuple((network + "/" + csv, "02-devices_config.csv")
@@ -1216,7 +1230,48 @@ MONITOR_RUNTIME_MAPPINGS = (
     for network, _csv, *outputs in NETWORK_MONITOR_SPECS
     for name in (*outputs, "cronjob.log")
 ) + tuple(("monitor/" + network, "99-output-monitor/" + network, None)
-          for network, *_rest in NETWORK_MONITOR_SPECS)
+          for network, *_rest in NETWORK_MONITOR_SPECS) + (
+    # The UFM lane reads servers.ufm.vip and writes the IB link reports (UFM-MONITOR.md 14.3).
+    ("infiniband/monitor/01-global.yaml", "01-global.yaml", "infiniband/01-global.yaml"),
+    ("infiniband/monitor/99-output-p2p", "99-output-p2p", None),
+)
+SETUP_COLLECTION_LINKS = {
+    network + "/monitor/" + output: (network, output)
+    for network, _csv, *outputs in NETWORK_MONITOR_SPECS for output in outputs
+}
+
+
+def setup_collection_link_hop(root: str | os.PathLike[str], path: str | os.PathLike[str]) -> bool:
+    """Whether evidence readers may walk ``path``: one of setup's collection output links.
+
+    cron.sh writes its archives below <network>/monitor/<output>, which setup links to
+    ../../DAY0-Prepare/<project>/99-output-monitor/<network>/<output>. Only that exact link text,
+    reaching a real directory without another symlink, is walkable; the evidence bytes stay bound
+    by sha256 (R0, 2026-10-23: without this every worker slot failed v2 publication on a real
+    management server).
+    """
+    root, path = Path(root), Path(path)
+    try:
+        relative = path.relative_to(root).as_posix()
+    except ValueError:
+        return False
+    names = SETUP_COLLECTION_LINKS.get(relative)
+    if names is None or not path.is_symlink():
+        return False
+    network, output = names
+    parts = PurePosixPath(os.readlink(path)).parts
+    if (len(parts) != 7 or parts[:3] != ("..", "..", "DAY0-Prepare")
+            or parts[4:] != ("99-output-monitor", network, output)
+            or parts[3] in {"", ".", ".."} or "/" in parts[3]):
+        return False
+    current = root
+    for part in parts[2:]:
+        current = current / part
+        if current.is_symlink() or not current.is_dir():
+            return False
+    return True
+
+
 LATEST_YAML_SPECS = (("cumulus", "99-output"), ("nvos", "99-output-ib_nvl"))
 PUBLISHED_RUNTIME_FILE_PATHS = (
     "ztp/ztp-bootstrap_oob.sh", "ztp/ztp-bootstrap_oobofoob.sh", "ztp/ztp.json",
@@ -1257,6 +1312,10 @@ def runtime_link_specs():
     project_mappings += [(name, "99-output-p2p") for name in P2P_OUTPUT_PATHS]
     project_mappings += [(P2P_AIR_PATH, "99-output-p2p/p2p-air.json")]
     specs.update((name, _runtime_relative_target(name, target)) for name, target in project_mappings)
+    specs.update(
+        (name, _runtime_relative_target(name, project_target, alias))
+        for name, alias, project_target in BRINGUP_INPUT_SPECS
+    )
     specs.update(("ztp/config/" + platform + "/latest_yaml", "template/" + output + "/latest")
                  for platform, output in LATEST_YAML_SPECS)
     return tuple(sorted(specs.items()))
@@ -1353,11 +1412,12 @@ DEVICE_SOURCE_METADATA_COLUMNS = (
 DEVICE_CONFIG_METHOD_TYPES = {
     "ztp": frozenset({"eth", "eth_spx", "spx", "ib", "nvl", "air"}),
     "initial-setup": frozenset({"ib"}),
-    "deploy_infra": frozenset({"server"}),
+    "deploy_infra": frozenset({"server", "server_mgmt"}),
 }
 DEVICE_DEFAULT_CONFIG_METHODS = {
     "eth": "ztp", "eth_spx": "ztp", "spx": "ztp", "air": "ztp",
     "ib": "ztp", "nvl": "ztp", "server": "deploy_infra",
+    "server_mgmt": "deploy_infra",
 }
 
 
@@ -1863,7 +1923,9 @@ NON_DEPLOYMENT_DIR_NAMES = frozenset({
     "test", "tests", "test_cases", "test-results", "__pycache__", ".pytest_cache",
     "node_modules",
 })
-REFERENCE_ONLY_SUBTREES = frozenset({"monitor/cabletracker-main"})
+# tools/cabletracker-lldpq: the owner's CableTracker reference project (2026-10-23) with a downloaded
+# online Issue Tracker and instance files; REQ7 copies its sync code, the directory itself never ships.
+REFERENCE_ONLY_SUBTREES = frozenset({"monitor/cabletracker-main", "tools/cabletracker-lldpq"})
 
 # Image-only host state. Do not use this vocabulary to decide live transfers.
 # Each pattern denies its entry AND descendants, including symlink objects;
@@ -1880,6 +1942,8 @@ IMAGE_HOST_STATE_PATHS = frozenset(name for name, _target in runtime_link_specs(
     "infiniband/bringup/xdr-upgrade/ib.csv",
     "infiniband/bringup/xdr-initial-setup/ib.csv",
     "infiniband/bringup/xdr-initial-setup/p2p.xlsx",
+    "infiniband/bringup/ufm-setup-upgrade/ib.csv",
+    "infiniband/bringup/ufm-setup-upgrade/p2p.xlsx",
 }) | frozenset(name + ".zip" for name in REFERENCE_ONLY_SUBTREES)
 IMAGE_HOST_STATE_SUBTREES = frozenset({
     "Finished-projects", "infra/logs", "infiniband/bringup", "monitor/status",

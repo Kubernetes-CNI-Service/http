@@ -1413,6 +1413,9 @@ class UploadPackageContractTests(unittest.TestCase):
                     "infiniband/bringup/xdr-upgrade/ib.csv",
                     "infiniband/bringup/xdr-initial-setup/ib.csv",
                     "infiniband/bringup/xdr-initial-setup/01-global.yaml",
+                    "infiniband/bringup/ufm-setup-upgrade/ib.csv",
+                    "infiniband/bringup/ufm-setup-upgrade/p2p.xlsx",
+                    "infiniband/bringup/ufm-setup-upgrade/01-global.yaml",
                 ):
                     with self.subTest(runtime_path=runtime_path):
                         self.assertNotIn(runtime_path, packaged_names)

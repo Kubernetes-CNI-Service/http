@@ -126,7 +126,7 @@ sudo python3 ./deploy-shared-artifacts.py ./shared-artifacts.tar.gz
 
 installer 只能写 `image/`、`apps/` 和 `firmware/` 命名空间。它不安装项目 release，也不启动服务。
 firmware 在当前实现中只是运输/安装文件，不能写成会自动刷写设备；apps 安装完成后，Native 离线
-主机仍需按 infra 合同显式执行 `infra-setup.sh --mgmt --offline --all`，统一 load 不会自动追加
+主机仍需按 infra 合同显式执行 `infra-setup.py --mgmt --offline --all --apply`，统一 load 不会自动追加
 `--offline`。
 
 ## `BUNDLE-4-PROJECT-IMAGE`：可选且仅用于 bootstrap 的项目镜像

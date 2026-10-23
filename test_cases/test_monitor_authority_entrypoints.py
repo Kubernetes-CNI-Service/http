@@ -132,9 +132,13 @@ ROOT_ABSOLUTE_EXECUTABLE_LITERALS = {
         "/usr/bin/env", "/usr/bin/python3", "/usr/sbin/logrotate",
     },
     "infra/docker/hostlock.py": {"/usr/bin/env", "/usr/bin/python3"},
+    "infra/infra-setup.py": {
+        "/bin/sh", "/usr/bin/env", "/usr/sbin/policy-rc.d",
+    },
     "infra/infra-setup.sh": {
         "/bin/bash", "/bin/sh", "/usr/bin/timeout", "/usr/sbin/policy-rc.d",
     },
+    "infra/ubuntu24_host.py": {"/bin/sh"},
     "infra/infra-teardown.sh": {"/bin/bash", "/usr/bin/timeout"},
     "monitor/ztp-monitor-control.cgi": {"/usr/bin/env", "/usr/bin/python3"},
     "test_cases/monitor_authority_root_warden.py": {
@@ -454,7 +458,7 @@ def independent_operation_result_specs():
         specs.append({
             "operation": f"marker-{phase}",
             "returncode": 0,
-            "argv": ("./infra/infra-setup.sh", "--recover-monitor-authority"),
+            "argv": ("./infra/infra-setup.py", "--recover-monitor-authority", "--apply", "--yes"),
             "artifacts": (
                 ("authority-tree-observations", f"authority-marker-{phase}.jsonl"),
                 ("classification-stdout", f"marker-{phase}.out"),
@@ -469,7 +473,7 @@ def independent_operation_result_specs():
         specs.append({
             "operation": f"stop-{mode}",
             "returncode": 1,
-            "argv": ("./infra/infra-setup.sh", "--recover-monitor-authority"),
+            "argv": ("./infra/infra-setup.py", "--recover-monitor-authority", "--apply", "--yes"),
             "artifacts": (
                 ("authority-tree-observations", f"authority-stop-{mode}.jsonl"),
                 ("recovery-stdout", f"stop-{mode}.out"),
@@ -481,7 +485,7 @@ def independent_operation_result_specs():
         specs.append({
             "operation": f"native-{state}",
             "returncode": 0,
-            "argv": ("./infra/infra-setup.sh", "--recover-monitor-authority"),
+            "argv": ("./infra/infra-setup.py", "--recover-monitor-authority", "--apply", "--yes"),
             "artifacts": (
                 ("authority-tree-observations", f"authority-native-{state}.jsonl"),
                 ("recovery-stdout", f"native-{state}.out"),
@@ -1003,7 +1007,7 @@ class MonitorAuthorityEntrypointRunnerContracts(unittest.TestCase):
     def test_runner_executes_three_exact_repository_entrypoints(self):
         source = RUNNER.read_text(encoding="utf-8")
         for invocation in (
-            "./infra/infra-setup.sh --recover-monitor-authority",
+            "./infra/infra-setup.py --recover-monitor-authority --apply --yes",
             "./infra/infra-teardown.sh --non-interactive --yes",
             "./infra/docker/deploy.sh recover-monitor-authority",
         ):
@@ -1102,17 +1106,17 @@ class MonitorAuthorityEntrypointRunnerContracts(unittest.TestCase):
 
         expected = tuple(sorted((
             ("python3", "-B", "infra/docker/healthcheck.py"),
-            ("./infra/infra-setup.sh", "--recover-monitor-authority"),
-            ("./infra/infra-setup.sh", "--recover-monitor-authority"),
-            ("./infra/infra-setup.sh", "--recover-monitor-authority"),
+            ("./infra/infra-setup.py", "--recover-monitor-authority", "--apply", "--yes"),
+            ("./infra/infra-setup.py", "--recover-monitor-authority", "--apply", "--yes"),
+            ("./infra/infra-setup.py", "--recover-monitor-authority", "--apply", "--yes"),
             ("./infra/docker/deploy.sh", "recover-monitor-authority"),
             ("./infra/infra-teardown.sh", "--non-interactive", "--yes"),
         )))
         self.assertEqual(expected, observed_invocations(source))
         self.assertIn('"${RECORDED_OPERATION_ARGV[@]}"', source)
         mutated = source.replace(
-            "./infra/infra-setup.sh --recover-monitor-authority\n",
-            "./infra/infra-setup.sh --recover-monitor-authority extra\n",
+            "./infra/infra-setup.py --recover-monitor-authority --apply --yes\n",
+            "./infra/infra-setup.py --recover-monitor-authority --apply --yes extra\n",
             1,
         )
         self.assertNotEqual(expected, observed_invocations(mutated))
@@ -2774,7 +2778,7 @@ class MonitorAuthorityWardenContracts(unittest.TestCase):
             recovery_decision_tokens=ROOT_RECOVERY_DECISION_TOKENS,
             recovery_decision_matrix=independent_recovery_decision_facts(),
             entrypoint_counts=(
-                (("./infra/infra-setup.sh", "--recover-monitor-authority"), 8),
+                (("./infra/infra-setup.py", "--recover-monitor-authority", "--apply", "--yes"), 8),
                 (("./infra/docker/deploy.sh", "recover-monitor-authority"), 1),
                 (("./infra/infra-teardown.sh", "--non-interactive", "--yes"), 1),
             ),
@@ -2853,8 +2857,8 @@ class MonitorAuthorityWardenContracts(unittest.TestCase):
             "entrypoint_counts": [
                 {
                     "argv": [
-                        "./infra/infra-setup.sh",
-                        "--recover-monitor-authority",
+                        "./infra/infra-setup.py",
+                        "--recover-monitor-authority", "--apply", "--yes",
                     ],
                     "count": 8,
                 },
@@ -2874,7 +2878,7 @@ class MonitorAuthorityWardenContracts(unittest.TestCase):
                 },
             ],
             "entrypoints": [
-                ["./infra/infra-setup.sh", "--recover-monitor-authority"],
+                ["./infra/infra-setup.py", "--recover-monitor-authority", "--apply", "--yes"],
                 ["./infra/docker/deploy.sh", "recover-monitor-authority"],
                 ["./infra/infra-teardown.sh", "--non-interactive", "--yes"],
             ],

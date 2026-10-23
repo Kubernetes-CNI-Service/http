@@ -191,10 +191,13 @@ def _safe_child(root: Path, relative: str) -> Path:
     if (pure.is_absolute() or str(pure) != relative
             or any(part in {"", ".", ".."} for part in relative.split("/"))):
         raise SwitchRuntimeHoldError("artifact path is not canonical relative")
+    from tools.project_contract import setup_collection_link_hop
+
     path = root
     for part in pure.parts:
         path = path / part
-        if path.is_symlink():
+        # setup's own collection output link is the one walkable hop (R0, 2026-10-23)
+        if path.is_symlink() and not setup_collection_link_hop(root, path):
             raise SwitchRuntimeHoldError("artifact path crosses a symlink")
     return path
 
@@ -271,7 +274,7 @@ def _static_air_hosts(inventory: bytes) -> tuple[tuple[str, ...], dict, str]:
         if not names or len({name.casefold() for name in names}) != len(names):
             raise SwitchRuntimeHoldError("frozen selected host set is empty or ambiguous")
         plan = {"eth": [f"{host}|{ip}" for host, ip in selected],
-                "spx": [], "ib": [], "nv": [], "dynamic_identities": []}
+                "spx": [], "ib": [], "nv": [], "dynamic_identities": [], "ufm": []}
         return names, plan, hashlib.sha256(_canonical(plan)).hexdigest()
     except (csv.Error, UnicodeError, TypeError, ValueError) as exc:
         if isinstance(exc, SwitchRuntimeHoldError):
@@ -655,8 +658,9 @@ def _static_prod_plan(inventory: bytes, source_slot: str) -> tuple[tuple[str, ..
         hosts = tuple(row[0] for row in selected)
         if not hosts or len({host.casefold() for host in hosts}) != len(hosts):
             raise SwitchRuntimeHoldError("prod selected host set is empty or ambiguous")
+        # "ufm" rides only on the infiniband slot (owner 2026-10-21).
         plan = {"eth": [], "spx": [], "ib": [], "nv": [],
-                "dynamic_identities": []}
+                "dynamic_identities": [], "ufm": []}
         key = "eth" if family == "ethernet" else "nv"
         plan[key] = [f"{host}|{ip}" for host, ip, _kind in selected]
         if family == "ethernet":

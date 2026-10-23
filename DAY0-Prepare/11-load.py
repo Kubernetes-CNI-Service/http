@@ -181,7 +181,13 @@ SHARED_ARTIFACT_RECEIPT_MAX_ENTRIES = 10_000
 SHARED_ARTIFACT_MAX_BYTES = 16 * 1024 * 1024 * 1024
 VALID_TYPES = {
     "eth", "eth_spx", "spx", "ib", "nvl", "server", "air", "eth_jump",
+    "server_mgmt", "server_ufm",
 }
+# Server rows are never switches (owner 2026-10-19..22): server_mgmt is the new
+# spelling of server (deployed by infra/); server_ufm is a UFM appliance that
+# fills only the first seven columns and is handled by
+# infiniband/bringup/ufm-setup-upgrade and the monitor, never by this load.
+SERVER_TYPES = frozenset({"server", "server_mgmt", "server_ufm"})
 BOOTSTRAP_BY_ROLE = {
     "air_oobofoob": "ztp-bootstrap_oobofoob.sh",
     "air_oob": "ztp-bootstrap_oob.sh",
@@ -1330,7 +1336,11 @@ def load_device_types(
                 seen_hostnames.add(hostname_key)
                 if kind not in VALID_TYPES:
                     raise LoadError(f"devices_config.csv 第 {lineno} 行 type={kind!r} 无效")
-                if method_index is not None:
+                # server_ufm leaves every column after eth0_mac empty and has no
+                # executor in this repo, so (like eth_jump) it declares no method.
+                if kind == "server_ufm":
+                    pass
+                elif method_index is not None:
                     if len(row) <= method_index:
                         raise LoadError(
                             f"devices_config.csv 第 {lineno} 行 {hostname} config_method 列缺失"
@@ -1348,7 +1358,7 @@ def load_device_types(
                         raise LoadError(
                             f"devices_config.csv 第 {lineno} 行 {hostname} {exc}"
                         ) from exc
-                if kind != "eth_jump":
+                if kind not in {"eth_jump", "server_ufm"}:
                     methods[hostname_key] = method
                 selected_kind = (
                     selected_scope == "all"
@@ -4034,8 +4044,12 @@ def prepare_infra(
         cwd=INFRA_DIR,
         dry_run=dry_run,
     )
+    # infra-setup.py only checks unless --apply.  Running load is the operator's authorization for
+    # the local infra step, and load is non-interactive, so it applies with --yes; its own --dry-run
+    # never executes this command.
     setup_command = sudo_command(
-        "bash", str(INFRA_DIR / "infra-setup.sh"), "--mgmt", "--defer-services"
+        sys.executable, "-B", str(INFRA_DIR / "infra-setup.py"), "--mgmt",
+        "--defer-services", "--apply", "--yes",
     )
     if skip_doca:
         setup_command.append("--skip-doca")
@@ -4412,12 +4426,14 @@ def _release_inventory(path: Path) -> list[dict[str, object]]:
             row = [str(item or "").strip() for item in row]
             if not any(row):
                 continue
+            # Server rows are not release devices; a server_ufm row may stop
+            # after eth0_mac, so skip them before the identity-width check.
+            device_type = row[type_col].casefold() if type_col < len(row) else ""
+            if device_type in SERVER_TYPES:
+                continue
             if max(hostname_col, type_col, eth0_mac_col, eth1_mac_col) >= len(row):
                 raise LoadError(f"统一 release：devices_config.csv 第 {lineno} 行列数不足")
             hostname = row[hostname_col]
-            device_type = row[type_col].casefold()
-            if device_type == "server":
-                continue
             key = hostname.casefold()
             if not hostname or key in seen:
                 raise LoadError(f"统一 release：hostname 为空或重复：{hostname!r}")
@@ -5772,6 +5788,68 @@ class DeferredDHCPOutput:
         self.discard()
 
 
+IB_CVT_CONVERTER = "p2p-to-validation.py"
+
+
+def _ib_topology_provenance():
+    """The CVT provenance reader shipped with the converter (ztp/config)."""
+    path = ZTP_DIR / "config/ib_topology_provenance.py"
+    name = f"_http_ib_topology_provenance_{abs(hash(os.fspath(path)))}"
+    existing = sys.modules.get(name)
+    if existing is not None:
+        return existing
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise LoadError(f"cannot load IB CVT provenance reader: {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(name, None)
+        raise
+    return module
+
+
+def verify_ib_cvt(source_identities: dict[str, str] | None = None) -> dict[str, str]:
+    """Bind the CVT that p2p-to-validation.py published to this load's P2P.
+
+    Owner 2026-10-21: load treats IB devices as it treats Ethernet. Ethernet's b-xlsx_to_dot.py output
+    is checked through its splitter sidecar at the parent release; the IB expected topology
+    <p2p>-cvt.xlsx (in the project's 99-output-p2p, beside <p2p>-lldpq.dot) is checked through its
+    provenance sidecar. generate_configs already makes the converter refuse another P2P
+    (--expect-p2p-sha256); this check is for the parent release step (UFM-MONITOR.md section 13):
+    - the fixed nvos/template/P2P/p2p.xlsx link still resolves to the workbook the CVT was made from,
+      and its bytes are the ones this load validated (source_identities["p2p"]);
+    - the CVT and its sidecar are single-link regular files;
+    - every source the converter recorded (P2P, inventory, port map, splitter, converter, rules) still
+      has the recorded bytes, and the CVT bytes match the record (read_cvt_provenance).
+    """
+    p2p_dir = ZTP_DIR / "config/nvos/template/P2P"
+    try:
+        selected = (p2p_dir / "p2p.xlsx").resolve(strict=True)
+        cvt = (p2p_dir / "output-p2p").resolve(strict=True) / f"{selected.stem}-cvt.xlsx"
+        provenance = _ib_topology_provenance()
+        sidecar = provenance.sidecar_path(cvt)
+        for path in (cvt, sidecar):
+            metadata = path.lstat()
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+                raise LoadError(f"IB CVT 不是单链接普通文件：{path}")
+        record = provenance.read_cvt_provenance(cvt)
+        p2p = record["sources"]["p2p"]
+        if p2p.get("resolved_path") != os.fspath(selected):
+            raise LoadError("IB CVT 的 P2P 来源与本次选择不一致")
+        expected = (source_identities or {}).get("p2p")
+        if expected is not None and p2p.get("sha256") != expected:
+            raise LoadError("IB CVT 的 P2P 字节与本次 load 校验的输入不一致")
+        return {"cvt": os.fspath(cvt), "cvt_sha256": str(record["cvt_sha256"]),
+                "provenance_sha256": _sha256_path(sidecar)}
+    except LoadError:
+        raise
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise LoadError(f"IB CVT 校验失败：{exc}") from exc
+
+
 def _generate_configs_impl(
     device_types: frozenset[str], *, install_dhcp: bool, dry_run: bool = False,
     dhcp_enabled: bool = True,
@@ -5900,6 +5978,16 @@ def _generate_configs_impl(
 
     if deployment_scope != "air" and device_types & {"ib", "nvl"}:
         template_dir = ZTP_DIR / "config/nvos/template"
+        if "ib" in device_types:
+            # Like b-xlsx_to_dot.py for Ethernet (owner 2026-10-21): the project P2P becomes the IB
+            # expected topology <p2p>-cvt.xlsx in 99-output-p2p before IB configs are generated. The
+            # converter runs from its own directory with its default inputs (self-contained) and
+            # refuses to publish unless p2p.xlsx has the bytes this load validated.
+            converter = [sys.executable, IB_CVT_CONVERTER]
+            expected_p2p = (source_identities or {}).get("p2p")
+            if expected_p2p:
+                converter += ["--expect-p2p-sha256", expected_p2p]
+            run(converter, cwd=template_dir / "P2P", dry_run=dry_run)
         run(
             [sys.executable, "90-c2-generate_configs.py", "--branch", "ib", "-y",
              *scope_args, *switch_args],
@@ -7297,7 +7385,7 @@ def verify_monitor_authority(
             classification = str(payload["classification"])
             recovery_command = {
                 "systemd": (
-                    "sudo ./infra/infra-setup.sh --recover-monitor-authority"
+                    "sudo ./infra/infra-setup.py --recover-monitor-authority --apply"
                 ),
                 "supervisor": (
                     "sudo ./infra/docker/deploy.sh recover-monitor-authority"
@@ -7332,7 +7420,7 @@ def verify_apache_publication_boundary(*, dry_run: bool = False) -> None:
         payload = APACHE_PUBLIC_BOUNDARY_CONF.read_bytes()
     except OSError as exc:
         raise LoadError(
-            "缺少 Apache 静态发布边界；请先运行当前 infra-setup.sh："
+            "缺少 Apache 静态发布边界；请先运行当前 infra-setup.py --mgmt --apply："
             f"{APACHE_PUBLIC_BOUNDARY_CONF}: {exc}"
         ) from exc
     actual = hashlib.sha256(payload).hexdigest()
@@ -7340,7 +7428,7 @@ def verify_apache_publication_boundary(*, dry_run: bool = False) -> None:
         raise LoadError(
             "Apache 静态发布边界与当前 load 版本不一致："
             f"{APACHE_PUBLIC_BOUNDARY_CONF} sha256={actual}，"
-            f"期望={APACHE_PUBLIC_BOUNDARY_SHA256}；请重新运行当前 infra-setup.sh"
+            f"期望={APACHE_PUBLIC_BOUNDARY_SHA256}；请重新运行当前 infra-setup.py --mgmt --apply"
         )
     ok(f"Apache 静态发布边界已验证：{APACHE_PUBLIC_BOUNDARY_CONF}")
 

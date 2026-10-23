@@ -59,7 +59,12 @@ _AUTO_YES = False  # 由 -y 参数设置
 # The downstream branch whitelists already keep these rows from rendering.
 # This explicit set is a future-proofing/counting signal: if a later whitelist
 # widens, these types must remain deliberately configuration-inert.
-_EXCLUDED_CONFIG_TYPES = frozenset({"air", "eth_jump"})
+# server_ufm (a UFM appliance) has no configuration executor in this repo: the
+# operator runs infiniband/bringup/ufm-setup-upgrade.  Its row fills only the
+# first seven columns, so it is skipped before any config_method check
+# (owner 2026-10-19..22).
+_NO_EXECUTOR_CONFIG_TYPES = frozenset({"server_ufm"})
+_EXCLUDED_CONFIG_TYPES = frozenset({"air", "eth_jump"}) | _NO_EXECUTOR_CONFIG_TYPES
 _SAFE_HOSTNAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$")
 _SAFE_AAA_USERNAME_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 _MAC_SCALAR_RE = re.compile(r"^(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$")
@@ -2862,6 +2867,9 @@ def _triage_device_csv_row(
         if type_col is not None and len(row) > type_col
         else "ib" if row[0].strip().lower().startswith("ib") else "eth"
     )
+    if row_type in _NO_EXECUTOR_CONFIG_TYPES:
+        skipped_excluded[row_type] = skipped_excluded.get(row_type, 0) + 1
+        return None
     config_method = None
     if method_index is not None:
         if len(raw) <= method_index:
@@ -7704,6 +7712,9 @@ def _load_csv_ib():
                 errors.append(f"  {exc}")
                 continue
             dev_type = _row_type_ib(row, type_col)
+            if dev_type in _NO_EXECUTOR_CONFIG_TYPES:
+                skipped_excluded[dev_type] = skipped_excluded.get(dev_type, 0) + 1
+                continue
             config_method = None
             if method_col is not None:
                 if len(row) <= method_col:

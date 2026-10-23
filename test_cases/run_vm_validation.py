@@ -9,6 +9,7 @@ non-zero when a required acceptance check fails.
 from __future__ import annotations
 
 import argparse
+import ast
 import base64
 import csv
 from dataclasses import asdict, dataclass
@@ -862,21 +863,24 @@ def command_result(argv: list[str], *, timeout: int = 30) -> tuple[bool, str]:
 
 
 def expected_apache_boundary(source: Path) -> bytes:
-    """Extract the exact infra-managed Apache boundary heredoc."""
+    """Read infra-setup.py's APACHE_PUBLIC_BOUNDARY string literal without importing or running it."""
     payload = read_regular_bytes(source, max_bytes=2 * 1024 * 1024)
-    marker = b"cat <<'APACHE_PUBLIC_BOUNDARY_EOF'"
-    start = payload.find(marker)
-    if start < 0:
-        raise ValueError("infra-setup.sh 缺少 Apache publication boundary heredoc")
-    start = payload.find(b"\n", start)
-    if start < 0:
-        raise ValueError("Apache publication boundary heredoc 起始行不完整")
-    start += 1
-    end_marker = b"\nAPACHE_PUBLIC_BOUNDARY_EOF\n"
-    end = payload.find(end_marker, start)
-    if end < 0:
-        raise ValueError("Apache publication boundary heredoc 结束标记缺失")
-    result = payload[start:end] + b"\n"
+    try:
+        tree = ast.parse(payload, filename=str(source))
+    except SyntaxError as exc:
+        raise ValueError(f"infra-setup.py 无法解析: {exc}") from exc
+    values = [
+        node.value.value
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and [getattr(target, "id", None) for target in node.targets] == ["APACHE_PUBLIC_BOUNDARY"]
+        and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)
+    ]
+    if len(values) != 1:
+        raise ValueError("infra-setup.py 缺少唯一的 APACHE_PUBLIC_BOUNDARY 字符串常量")
+    result = values[0].encode("utf-8")
+    if not result.endswith(b"\n"):
+        raise ValueError("Apache publication boundary 结尾不完整")
     if b"HTTP-ZTP-PUBLIC-BOUNDARY-V1" not in result:
         raise ValueError("Apache publication boundary 缺少版本标记")
     return result
@@ -1854,7 +1858,7 @@ def main(argv: list[str] | None = None) -> int:
             boundary = recorder.guarded(
                 "apache-public-boundary",
                 lambda: (
-                    expected_apache_boundary(root / "infra/infra-setup.sh"),
+                    expected_apache_boundary(root / "infra/infra-setup.py"),
                     read_regular_bytes(Path(
                         "/etc/apache2/conf-enabled/http-ztp-public-boundary.conf"
                     ), max_bytes=2 * 1024 * 1024),
@@ -1865,12 +1869,12 @@ def main(argv: list[str] | None = None) -> int:
                 if expected_boundary == installed_boundary:
                     recorder.passed(
                         "apache-public-boundary",
-                        "安装配置与当前 infra-setup.sh 逐字匹配",
+                        "安装配置与当前 infra-setup.py 逐字匹配",
                     )
                 else:
                     recorder.fail(
                         "apache-public-boundary",
-                        "安装配置与当前 infra-setup.sh 不匹配",
+                        "安装配置与当前 infra-setup.py 不匹配",
                     )
             cgi_errors = recorder.guarded(
                 "installed-control-cgi",

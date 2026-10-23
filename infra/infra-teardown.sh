@@ -333,7 +333,7 @@ preserve_apache_control_boundary() {
         "$(stat -c '%h' "$apache_public_boundary_conf" 2>/dev/null || true)" != "1" ]]; then
     stop_apache_for_auth_failure
     error "Authenticated Apache boundary V2 is missing/unsafe while protected Monitor content is ${content_state}."
-    error "Teardown stopped Apache; rerun current infra-setup.sh --mgmt --install-apache before retrying."
+    error "Teardown stopped Apache; rerun current infra-setup.py --mgmt --install-apache --apply before retrying."
     return 1
   fi
   boundary_actual=$(sha256sum "$apache_public_boundary_conf" | awk '{print $1}')
@@ -365,12 +365,12 @@ preserve_apache_control_boundary() {
       ;;
     'recovery-in-progress')
       stop_apache_for_auth_failure
-      error "classification=recovery-in-progress; Monitor authority recovery has not been committed; Apache remains stopped. Run exactly: sudo ./infra/infra-setup.sh --recover-monitor-authority"
+      error "classification=recovery-in-progress; Monitor authority recovery has not been committed; Apache remains stopped. Run exactly: sudo ./infra/infra-setup.py --recover-monitor-authority --apply"
       return 1
       ;;
     'recovery-committed-cleanup-pending')
       stop_apache_for_auth_failure
-      error "classification=recovery-committed-cleanup-pending; previous Monitor authority recovery COMPLETED and the repaired authority itself is not in question; Apache remains stopped. Re-run exactly to reattest and finish marker cleanup: sudo ./infra/infra-setup.sh --recover-monitor-authority"
+      error "classification=recovery-committed-cleanup-pending; previous Monitor authority recovery COMPLETED and the repaired authority itself is not in question; Apache remains stopped. Re-run exactly to reattest and finish marker cleanup: sudo ./infra/infra-setup.py --recover-monitor-authority --apply"
       return 1
       ;;
     *)

@@ -66,6 +66,12 @@ STATIC_SETUP_MANAGED_LINKS = frozenset({
     "infiniband/bringup/ufm/p2p.xlsx",
     "infiniband/bringup/ufm/publickey",
     "infiniband/bringup/ufm/ufm-setup-logs",
+    "infiniband/bringup/ufm-setup-upgrade/ib.csv",
+    "infiniband/bringup/ufm-setup-upgrade/p2p.xlsx",
+    "infiniband/bringup/ufm-setup-upgrade/01-global.yaml",
+    "infiniband/bringup/ufm-setup-upgrade/publickey",
+    "infiniband/bringup/ufm-setup-upgrade/ufm-setup-upgrade-logs",
+    "infiniband/bringup/ufm-setup-upgrade/image",
 })
 RESERVED_UPGRADE_GLOBAL_ALIAS = "infiniband/bringup/xdr-upgrade/01-global.yaml"
 DEPLOYMENT_PREWRITE_GUARD = TOOLS_DIR / "deployment_prewrite_guard.py"

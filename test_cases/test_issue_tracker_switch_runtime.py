@@ -116,7 +116,7 @@ class RuntimeWorkerFixture:
         inventory.write_bytes(frozen)
         plan = {
             "eth": ["leaf-a|192.0.2.10"], "spx": [], "ib": [], "nv": [],
-            "dynamic_identities": [],
+            "dynamic_identities": [], "ufm": [],
         }
         dynamic_rows: list[str] = []
         names = ("leaf-a",)

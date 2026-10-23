@@ -950,7 +950,7 @@ class PublicRepositoryWorkflowContractTest(unittest.TestCase):
             "N=3 is not proof of an attacker",
             "same-identity breaker N=1→2→3",
             "automatic repair loops are forbidden",
-            "sudo ./infra/infra-setup.sh --recover-monitor-authority",
+            "sudo ./infra/infra-setup.py --recover-monitor-authority --apply",
             "sudo ./infra/docker/deploy.sh recover-monitor-authority",
             "never manually unlink/chmod/rewrite",
             "exactly one fixed warning",

@@ -89,6 +89,30 @@ EXPECTED_TEST_SUITES = [
     "issue-tracker-local",
     "ufm-local-source-bridge",
     "ibsw225-canonical-runtime",
+    # Added by codex 6eb4a97 (2026-10-20) .. 7c44779 (2026-10-22) without updating this pin;
+    # brought up to the committed manifest on 2026-10-23 (owner approval).
+    "ibsw3-source-stage-related",
+    "ibsw3-scp-declaration-related",
+    "ibsw3-scp-request-content-related",
+    "req7-completed-source-read-related",
+    "req7-owner-body-ni-cleanup",
+    "req7-private-input-first-ni-cleanup",
+    "req7-private-input-close-only-regression",
+    "req7-cold-original-attach-qualification",
+    "req7-cold-graph-json-identity-direct",
+    "req7-eth-info-held-original-window",
+    "req7-w1-previous-original-window",
+    "req7-n-policy-previous-original-window",
+    "req7-nv-info-original-after-guard-window",
+    "req7-ca-close-interruption",
+    "req7-cable-held-dual-owner-no-send",
+    "req7-cable-fixed-public-code-prerequisite",
+    "req7-cable-credential-construction-provider-origins",
+    "req7-cable-constructor-code-resources-cold",
+    "req7-cable-fixed-grid-protocol",
+    "req7-owned-live-read-process-control",
+    "req7-first-read-public-code",
+    "req7-owned-live-read-v2-process",
 ]
 
 
@@ -137,6 +161,7 @@ DEFAULT_AUTHORITY_PATTERNS = (
     "ztp/config/cumulus/default*.yaml",
     "ztp/config/nvos/default*.yaml",
 )
+IBSW225_FIXTURE_SUPPORT_PATTERN = "test_cases/ibsw225_fixture_support/*.py"
 EXPECTED_TEMPLATE_AUTHORITY_NAMES = {
     "_bridge_l2vlans.yaml.j2",
     "_dhcp_relay.yaml.j2",
@@ -891,6 +916,7 @@ class ImpactManifestTests(unittest.TestCase):
         self.assertNotIn("test_cases/run_related_tests.py", actual)
         self.assertEqual(
             [
+                "test_cases/live_read_v2_literal_child.py",
                 "requirements-f01-ssh.lock",
                 "test_cases/fixtures/bounded_inner_fd_fixture.py",
                 ".dockerignore",
@@ -965,6 +991,8 @@ class ImpactManifestTests(unittest.TestCase):
                 "infra/docker/runtime-contract.json",
                 "infra/docker/req7-dependency-policy.json",
                 "infra/docker/requirements-req7-online.txt",
+                "infra/docker/req7-cable-dependency-policy.json",
+                "infra/docker/requirements-req7-cable-sync.txt",
                 "infra/docker/supervisord.conf",
                 "tools/lldp-analyze-tool/04-lldp-device-aliases.json",
                 "ztp/config/cumulus/ar_profile_custom.conf",
@@ -1026,6 +1054,55 @@ class ImpactManifestTests(unittest.TestCase):
                 "test_cases/ibsw225_fixture_support/_fixture_test_standalone_links.py",
                 "test_cases/ibsw225_fixture_support/fixed_fixture_registry.py",
                 "test_cases/ibsw225_fixture_support/legacy_shell_workflow.py",
+                "test_cases/ibsw3_scp_test_isolation.py",
+                "test_cases/ibsw3_scp_request_test_isolation.py",
+                "test_cases/ibsw3_scp_cpld_test_isolation.py",
+                "test_cases/fixtures/native-cpld-template-pre-os22.sh.txt",
+                "test_cases/fixtures/native-cpld-template-with-os22.sh.txt",
+                "test_cases/native_bios_flow.py",
+                "test_cases/native_bios_isolation.py",
+                "test_cases/native_bios_physical_io.py",
+                "test_cases/native_bios_safe_image.py",
+                "test_cases/native_bios_stub_sources.py",
+                "test_cases/native_cpld_physical_io.py",
+                "test_cases/native_cpld_safe_image.py",
+                "test_cases/native_cpld_stub_sources.py",
+                "test_cases/native_os_dual_channel.py",
+                "test_cases/native_os_physical_bridge.py",
+                "test_cases/native_os_safe_image.py",
+                "test_cases/native_os_stub_sources.py",
+                "test_cases/native_os_test_isolation.py",
+                "test_cases/scp_foreign_probe_fixture.py",
+                "test_cases/scp_main_selector_fixture.py",
+                "test_cases/scp_native_cli_fixture_v2.py",
+                "test_cases/scp_native_cpld_bridge_fixture.py",
+                "test_cases/scp_native_cpld_bridge_isolation.py",
+                "test_cases/scp_native_os_manager_fixture.py",
+                "test_cases/scp_native_source_preflight_fixture.py",
+                "test_cases/scp_source_cli_fixture.py",
+                "test_cases/scp_stdin_cpld_protocol_fixture.py",
+                "test_cases/fixtures/ibsw3-source-inverse/os22/before/tools/ibsw_upgrade_driver.py.txt",
+                "test_cases/fixtures/ibsw3-source-inverse/os22/before/tools/ibsw_upgrade_executor.py.txt",
+                "test_cases/fixtures/ibsw3-source-inverse/os22/before/tools/ibsw_upgrade_component.py.txt",
+                "test_cases/fixtures/ibsw3-source-inverse/os22/before/infiniband/bringup/xdr-upgrade/upgrade-component.sh.txt",
+                "test_cases/fixtures/ibsw3-source-inverse/display/before/infiniband/bringup/xdr-upgrade/upgrade.py.txt",
+                "test_cases/fixtures/ibsw3-source-inverse/os22/candidate/tools/ibsw_upgrade_driver.py.txt",
+                "test_cases/fixtures/ibsw3-source-inverse/os22/candidate/tools/ibsw_upgrade_executor.py.txt",
+                "test_cases/fixtures/ibsw3-source-inverse/os22/candidate/tools/ibsw_upgrade_component.py.txt",
+                "test_cases/fixtures/ibsw3-source-inverse/os22/candidate/infiniband/bringup/xdr-upgrade/upgrade-component.sh.txt",
+                "test_cases/fixtures/ibsw3-source-inverse/display/candidate/infiniband/bringup/xdr-upgrade/upgrade.py.txt",
+                "test_cases/completed_collection_source_read_fixture.py",
+                "test_cases/issue_tracker_cable_post_c6_fixture.py",
+                "test_cases/completed_read_close_isolation.py",
+                "test_cases/owner_ni_cleanup_fixture.py",
+                "test_cases/private_input_ni_fixture.py",
+                "test_cases/private_input_close_regression_fixture.py",
+                "test_cases/cold_completed_original_attach_fixture.py",
+                "test_cases/eth_info_held_window_fixture.py",
+                "test_cases/w1_original_window_fixture.py",
+                "test_cases/n_policy_original_window_fixture.py",
+                "test_cases/nv_info_original_window_fixture.py",
+                "test_cases/fixed_https_peer_fixture.py",
             ],
             manifest["tracked_support"],
         )
@@ -1192,10 +1269,12 @@ class ImpactManifestTests(unittest.TestCase):
             rule for rule in manifest["path_rules"]
             if rule.get("complete_tracked_support") is True
         ]
-        self.assertEqual(2, len(complete))
+        # The third rule, the IBSW 2.25 fixture support, came with codex 4693d8d (2026-10-19).
+        self.assertEqual(3, len(complete))
         by_paths = {tuple(rule["paths"]): rule for rule in complete}
         self.assertEqual(
-            {TEMPLATE_AUTHORITY_PATTERN, *DEFAULT_AUTHORITY_PATTERNS},
+            {TEMPLATE_AUTHORITY_PATTERN, *DEFAULT_AUTHORITY_PATTERNS,
+             IBSW225_FIXTURE_SUPPORT_PATTERN},
             {path for paths in by_paths for path in paths},
         )
         template_rule = by_paths[(TEMPLATE_AUTHORITY_PATTERN,)]

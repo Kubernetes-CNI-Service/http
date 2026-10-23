@@ -18,6 +18,20 @@
 3. 生成器按 `ib`、`nvl` 设备形成带时间戳批次并写入项目 `99-output-ib_nvl`。
 4. NVOS `d-hostname2mac.py`（位于父目录、共享 Cumulus 发布实现）创建 MAC 发布链接并更新 latest。
 5. `P2P/` 的 CVT、ibdiagnet 和 iblinkinfo 工具验证实际 fabric。
+   - 设备类型含 `ib` 时，load 在 IB 配置生成之前运行 `P2P/p2p-to-validation.py`（owner 2026-10-21，对应
+     Ethernet 的 `cumulus/template/P2P/b-xlsx_to_dot.py`）。
+   - 输出 `<P2P 源文件名>-cvt.xlsx` 加 `.provenance.json`，经 setup 的 `P2P/output-p2p` 链接写入项目的
+     `99-output-p2p`，与 `<p2p>-lldpq.dot` 并列。
+   - load 运行时传入 `--expect-p2p-sha256 <本次 load 已校验的 P2P sha>`，`p2p.xlsx` 不是这份字节时转换器不发布，load 失败。
+     provenance 的整体复核（`11-load.py::verify_ib_cvt`）留给父 release 阶段。
+   - 转换器只允许写项目 `99-output-p2p` 下的 `*-cvt.xlsx`，其它 DAY0 路径一律拒绝。
+   - IB 闭环（`infiniband/monitor/post-collect.py`）用这份 CVT 校验 UFM 取回的 ibdiagnet。
+
+   单独运行（自包含，所有输入都取本目录的链接）：
+
+   ```bash
+   cd ztp/config/nvos/template/P2P && python3 p2p-to-validation.py
+   ```
 
 ```bash
 cd ztp/config/nvos/template

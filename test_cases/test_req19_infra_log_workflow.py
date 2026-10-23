@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from contextlib import ExitStack, redirect_stdout
+from contextlib import ExitStack, redirect_stderr, redirect_stdout
 import fcntl
 import errno
 import io
@@ -24,6 +24,14 @@ ROOT = Path(__file__).resolve().parents[1]
 SETUP = load_script("req19_flow_setup", ROOT / "DAY0-Prepare/01-a-setup.py")
 DEPLOY = load_script("req19_flow_deploy", ROOT / "infra/deploy_infra.py")
 CHECK = load_script("req19_flow_check", ROOT / "infra/check_infra.py")
+INFRA_SETUP = load_script("req19_flow_infra_setup", ROOT / "infra/infra-setup.py")
+
+
+def setup_bound_to(infra: Path):
+    """A real InfraSetup whose script location (and so runtime/log root) is `infra`."""
+    options = INFRA_SETUP.parse_arguments(["--client", "--non-interactive"])
+    with mock.patch.object(INFRA_SETUP, "SCRIPT_PATH", str(infra / "infra-setup.py")):
+        return INFRA_SETUP.InfraSetup(options)
 MAPPING = ("infra/logs", "99-output-infra", "dir")
 
 
@@ -599,6 +607,26 @@ class Req19InfraLogWorkflowTests(unittest.TestCase):
             self.assertIn(b"SHELL-TEE-OLD-OWNER", (first / log_name).read_bytes())
             self.assertFalse((second / log_name).exists())
 
+    def test_python_setup_live_output_keeps_log_owner_after_link_repoint(self):
+        with tempfile.TemporaryDirectory(prefix="req19-setup-tee-") as tmp:
+            _root, infra, a, b = self.fixture(tmp)
+            logs = infra / "logs"
+            first = a / "99-output-infra"
+            second = b / "99-output-infra"
+            logs.symlink_to(os.path.relpath(first, infra))
+            setup = setup_bound_to(infra)
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                setup.open_log()
+                replacement = infra / ".logs-test-repoint"
+                replacement.symlink_to(os.path.relpath(second, infra))
+                os.replace(replacement, logs)
+                self.assertEqual(0, setup.apt_log(["bash", "-c", "printf PY-TEE-OLD-OWNER"]))
+            os.close(setup.log_fd)
+            written = list(first.glob("infra-setup-*.log"))
+            self.assertEqual(1, len(written))
+            self.assertIn(b"PY-TEE-OLD-OWNER", written[0].read_bytes())
+            self.assertEqual([], list(second.iterdir()))
+
     def test_real_shell_log_open_rejects_foreign_link_and_accepts_managed_owner(self):
         with tempfile.TemporaryDirectory(prefix="req19-shell-owner-") as tmp:
             _root, infra, a, _b = self.fixture(tmp)
@@ -618,6 +646,7 @@ class Req19InfraLogWorkflowTests(unittest.TestCase):
             flock.chmod(0o700)
             env = os.environ.copy()
             env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
+            self.assert_python_setup_log_open_rules(infra, outside, a / "99-output-infra")
             for script_name in ("infra-setup.sh", "infra-teardown.sh"):
                 source = (ROOT / "infra" / script_name).read_text(encoding="utf-8")
                 start = source.index('log_dir="${runtime_dir}/logs"')
@@ -676,6 +705,81 @@ class Req19InfraLogWorkflowTests(unittest.TestCase):
                 finally:
                     orphan.unlink()
                 logs.unlink()
+
+    def assert_python_setup_log_open_rules(self, infra: Path, outside: Path, owned: Path) -> None:
+        logs = infra / "logs"
+
+        def open_log():
+            setup = setup_bound_to(infra)
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                try:
+                    setup.open_log()
+                except INFRA_SETUP.SetupExit as exc:
+                    return exc.code
+            setup.to_log("OWNED-ONLY")
+            os.close(setup.log_fd)
+            return 0
+
+        logs.symlink_to(os.path.relpath(outside, infra))
+        self.assertNotEqual(0, open_log())
+        self.assertEqual([], list(outside.iterdir()))
+        logs.unlink()
+        logs.symlink_to(os.path.relpath(owned, infra))
+        self.assertEqual(0, open_log())
+        self.assertTrue(any(b"OWNED-ONLY" in p.read_bytes() for p in owned.glob("infra-setup-*.log")))
+        before = {p.name: p.read_bytes() for p in owned.glob("infra-*.log")}
+        for pending, payload in ((".logs-migration.json", b"{}"),
+                                 (".logs-migration.ABC123", b"unpublished receipt bytes\n")):
+            receipt = infra / pending
+            receipt.write_bytes(payload)
+            try:
+                self.assertNotEqual(0, open_log(), pending)
+                self.assertEqual(before, {p.name: p.read_bytes() for p in owned.glob("infra-*.log")})
+                self.assertEqual(payload, receipt.read_bytes())
+            finally:
+                receipt.unlink()
+        logs.unlink()
+
+    def test_python_setup_log_open_waits_for_independent_log_root_lock(self):
+        with tempfile.TemporaryDirectory(prefix="req19-setup-lock-") as tmp:
+            _root, infra, _a, _b = self.fixture(tmp)
+            descriptor = os.open(infra / ".logs.lock", os.O_CREAT | os.O_RDWR, 0o600)
+            process = None
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX)
+                child_code = "\n".join((
+                    "from pathlib import Path",
+                    "import sys",
+                    f"sys.path.insert(0, {str(ROOT)!r})",
+                    "from test_cases.module_loader import load_script",
+                    f"module = load_script('req19_setup_lock_child', Path({str(ROOT / 'infra/infra-setup.py')!r}))",
+                    "module.SCRIPT_PATH = str(Path(sys.argv[1]) / 'infra-setup.py')",
+                    "setup = module.InfraSetup(module.parse_arguments(['--client']))",
+                    "print('READY', flush=True)",
+                    "setup.open_log()",
+                ))
+                process = subprocess.Popen(
+                    [sys.executable, "-B", "-c", child_code, str(infra)],
+                    cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                )
+                ready, _, _ = select.select([process.stdout], [], [], 10)
+                self.assertTrue(ready, "setup did not reach the log-root lock gate")
+                self.assertEqual("READY\n", process.stdout.readline())
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    process.wait(timeout=0.4)
+                self.assertEqual([], list(infra.glob("logs/infra-setup-*.log")))
+            finally:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+                os.close(descriptor)
+                if process is not None:
+                    try:
+                        _out, error = process.communicate(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.communicate(timeout=5)
+                        raise
+                    self.assertEqual(0, process.returncode, error)
+            self.assertEqual(1, len(list(infra.glob("logs/infra-setup-*.log"))))
 
     def test_real_shell_log_open_waits_for_independent_log_root_lock(self):
         with tempfile.TemporaryDirectory(prefix="req19-shell-lock-") as tmp:
@@ -777,7 +881,7 @@ class Req19InfraLogWorkflowTests(unittest.TestCase):
             args = SimpleNamespace(
                 teardown=True, prepare_only=False, dry_run=False,
                 max_workers=1, devices_file=root / "devices.csv", hosts=None,
-                user="root", identity=None, setup_script=ROOT / "infra/infra-setup.sh",
+                user="root", identity=None, setup_script=ROOT / "infra/infra-setup.py",
                 teardown_script=ROOT / "infra/infra-teardown.sh",
                 http_server_ip=None,
             )

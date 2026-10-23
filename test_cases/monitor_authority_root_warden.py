@@ -275,7 +275,8 @@ HOST_SENTINEL_PATHS = (
     "test_cases/run_monitor_authority_entrypoints.sh",
     "tools/control-auth.py",
     "monitor/ztp-monitor-control.cgi",
-    "infra/infra-setup.sh",
+    "infra/infra-setup.py",
+    "infra/ubuntu24_host.py",
     "infra/infra-teardown.sh",
     "infra/docker/deploy.sh",
     "infra/docker/hostlock.py",
@@ -1261,7 +1262,7 @@ def _expected_operation_specs() -> tuple[dict[str, object], ...]:
         specs.append({
             "operation": f"marker-{phase}",
             "returncode": 0,
-            "argv": ("./infra/infra-setup.sh", "--recover-monitor-authority"),
+            "argv": ("./infra/infra-setup.py", "--recover-monitor-authority", "--apply", "--yes"),
             "artifacts": (
                 ("authority-tree-observations", f"authority-marker-{phase}.jsonl"),
                 ("classification-stdout", f"marker-{phase}.out"),
@@ -1276,7 +1277,7 @@ def _expected_operation_specs() -> tuple[dict[str, object], ...]:
         specs.append({
             "operation": f"stop-{mode}",
             "returncode": 1,
-            "argv": ("./infra/infra-setup.sh", "--recover-monitor-authority"),
+            "argv": ("./infra/infra-setup.py", "--recover-monitor-authority", "--apply", "--yes"),
             "artifacts": (
                 ("authority-tree-observations", f"authority-stop-{mode}.jsonl"),
                 ("recovery-stdout", f"stop-{mode}.out"),
@@ -1287,7 +1288,7 @@ def _expected_operation_specs() -> tuple[dict[str, object], ...]:
         specs.append({
             "operation": f"native-{state}",
             "returncode": 0,
-            "argv": ("./infra/infra-setup.sh", "--recover-monitor-authority"),
+            "argv": ("./infra/infra-setup.py", "--recover-monitor-authority", "--apply", "--yes"),
             "artifacts": (
                 ("authority-tree-observations", f"authority-native-{state}.jsonl"),
                 ("recovery-stdout", f"native-{state}.out"),

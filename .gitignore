@@ -177,12 +177,20 @@ core.*
 /infiniband/monitor/ib.csv
 /infiniband/monitor/ib-info
 /infiniband/monitor/ib-link
+/infiniband/monitor/ufm-info
+/infiniband/monitor/ufm-ibdiagnet
+/infiniband/monitor/01-global.yaml
+/infiniband/monitor/99-output-p2p
 /infiniband/bringup/ndr/ndr-upgrade-logs
 /infiniband/bringup/xdr-initial-setup/ib.csv
 /infiniband/bringup/xdr-initial-setup/p2p.xlsx
 /infiniband/bringup/xdr-initial-setup/xdr-initial-setup-logs
 /infiniband/bringup/xdr-upgrade/ib.csv
 /infiniband/bringup/xdr-upgrade/xdr-upgrade-logs
+/infiniband/bringup/ufm-setup-upgrade/ib.csv
+/infiniband/bringup/ufm-setup-upgrade/p2p.xlsx
+/infiniband/bringup/ufm-setup-upgrade/ufm-setup-upgrade-logs
+/infiniband/bringup/ufm-setup-upgrade/image
 
 /nvlink/nvsw.csv
 /nvlink/p2p.xlsx
@@ -207,6 +215,8 @@ core.*
 /monitor/monitor.html
 # Owner-held Cabletracker tool is not part of the V3 source checkout.
 /monitor/cabletracker-main/
+# Owner's CableTracker reference project with a downloaded online tracker (2026-10-23); reference only.
+/tools/cabletracker-lldpq/
 
 # ZTP data and links populated from the active DAY0 project
 /ztp/image/
@@ -236,6 +246,7 @@ core.*
 /ztp/config/nvos/template/02-devices_config.csv
 /ztp/config/nvos/template/99-output-ib_nvl
 /ztp/config/nvos/template/P2P/p2p.xlsx
+/ztp/config/nvos/template/P2P/02-devices_config.csv
 /ztp/config/nvos/template/P2P/ib-info
 /ztp/config/nvos/template/P2P/output-p2p
 

@@ -79,7 +79,7 @@ capability。private mount namespace is not used；不要把该边界解释为�
 日常 provision/setup/load/health/guardian/CGI 只能 attest 且不清 breaker。取证只保存安全时间戳、
 classification、stopped state 和 inode/type/mode/owner/hash metadata；绝不保存 payload、credential 或
 Authorization bytes。确认 Apache 已停止后，Native 唯一入口是
-`sudo ./infra/infra-setup.sh --recover-monitor-authority`；Docker 唯一入口是
+`sudo ./infra/infra-setup.py --recover-monitor-authority --apply`；Docker 唯一入口是
 `sudo ./infra/docker/deploy.sh recover-monitor-authority`，成功后仍保持容器停止，只能按其打印的
 `sudo ./infra/docker/deploy.sh deploy` 后续指令恢复。操作员必须
 `never manually unlink/chmod/rewrite` authority、breaker 或 recovery marker；若再次 wedging，保持

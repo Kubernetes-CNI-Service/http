@@ -64,6 +64,9 @@ REMOTE_TIMEOUT = 45
 
 SAFE_PROJECT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 SAFE_HOSTNAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$")
+# Never diagnostic SSH targets: eth_jump is transport only; server/server_mgmt
+# are management servers; server_ufm is a UFM appliance (owner 2026-10-19..22).
+NON_SWITCH_TYPES = frozenset({"eth_jump", "server", "server_mgmt", "server_ufm"})
 SENSITIVE_KEY = re.compile(
     r"(?:^|[_-])(?:password|passwd|passphrase|hashed[_-]?password|secret|token|"
     r"credential|private[_-]?key|shared[_-]?key|preshared[_-]?key|psk|"
@@ -968,7 +971,7 @@ def select_devices(
     devices = [
         item for item in report.get("devices", [])
         if isinstance(item, dict)
-        and str(item.get("type") or "").strip().casefold() != "eth_jump"
+        and str(item.get("type") or "").strip().casefold() not in NON_SWITCH_TYPES
     ]
     selected = []
     for hostname in hostnames:

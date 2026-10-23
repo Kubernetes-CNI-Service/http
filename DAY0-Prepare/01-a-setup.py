@@ -61,7 +61,8 @@ from project_contract import (
     managed_infra_log_project,
     infra_log_root_lock, infra_log_pending_state_names,
     P2P_INPUT_PATHS, P2P_OUTPUT_PATHS, P2P_AIR_PATH,
-    BRINGUP_OUTPUT_SPECS, ANALYZER_INPUT_SPECS, ANALYZER_OUTPUT_SPECS,
+    BRINGUP_OUTPUT_SPECS, BRINGUP_INPUT_SPECS, BRINGUP_IMAGE_LINKS,
+    ANALYZER_INPUT_SPECS, ANALYZER_OUTPUT_SPECS,
     NETWORK_MONITOR_SPECS, NETWORK_CSV_MAPPINGS, NETWORK_INVENTORY_LINKS,
     MONITOR_RUNTIME_MAPPINGS, LATEST_YAML_SPECS,
     detect_global_schema_version,
@@ -614,6 +615,33 @@ def _process_bringup_links(proj_dir):
                 print(_c(CYAN, f"  [DRY] mkdir {os.path.relpath(target_path, HERE)}/"))
         else:
             os.makedirs(target_path, exist_ok=True)
+        _make_link(link_path, target_path)
+
+
+def _bringup_input_pairs(_proj_dir):
+    """返回 bringup 工具的 (自己目录下的固定输入, 当前清单/P2P 的仓库别名)。"""
+    return [(os.path.join(HTTP_BASE, name), os.path.join(HTTP_BASE, alias))
+            for name, alias, _project_target in BRINGUP_INPUT_SPECS]
+
+
+def _process_bringup_input_links(proj_dir):
+    """ufm-setup-upgrade 只读自己目录的 ib.csv、p2p.xlsx；指向 infiniband/ 下的当前别名。"""
+    for link_path, target_path in _bringup_input_pairs(proj_dir):
+        _make_link(link_path, target_path)
+
+
+def _bringup_image_pairs():
+    """返回 bringup 工具指向共享 http/image 目录的固定链接（与项目无关）。"""
+    return [(os.path.join(HTTP_BASE, name), IMAGE_DIR) for name in BRINGUP_IMAGE_LINKS]
+
+
+def _process_bringup_image_links():
+    """ufm-setup-upgrade 在自己目录的 image/ 里找 license；没有 http/image 时跳过，不留断链。"""
+    for link_path, target_path in _bringup_image_pairs():
+        if not os.path.isdir(target_path):
+            print(_c(YELLOW, f"  [MISS] {os.path.relpath(target_path, HTTP_BASE)}/ 不存在，"
+                             f"跳过 {os.path.relpath(link_path, HTTP_BASE)}"))
+            continue
         _make_link(link_path, target_path)
 
 
@@ -1968,11 +1996,13 @@ def _validate_eth_csv(path):
     # ETH 设备类型集合
     _ETH_TYPES  = {"eth", "eth_spx", "spx"}
     _NVOS_TYPES = {"ib", "nvl"}
-    _SERVER_TYPES = {"server"}
+    # server_mgmt 是 server 的新写法；server_ufm 只用前 7 列，由 ufm-setup-upgrade 读取（owner 2026-10-19）
+    _SERVER_TYPES = {"server", "server_mgmt"}
+    _UFM_TYPES = {"server_ufm"}
     _AIR_TYPES = {"air"}
     _JUMP_TYPES = {"eth_jump"}
     _SUPPORTED_TYPES = (
-        _ETH_TYPES | _NVOS_TYPES | _SERVER_TYPES | _AIR_TYPES | _JUMP_TYPES
+        _ETH_TYPES | _NVOS_TYPES | _SERVER_TYPES | _UFM_TYPES | _AIR_TYPES | _JUMP_TYPES
     )
 
     def e(row_n, hn, msg):
@@ -2050,10 +2080,12 @@ def _validate_eth_csv(path):
                 # 确定设备类型
                 row_type = row[type_col].strip().lower() if (type_col is not None and len(row) > type_col) else "eth"
                 if row_type not in _SUPPORTED_TYPES:
-                    e(row_n, hn, f"type 无效：'{row_type}'（仅支持 eth/eth_spx/spx/ib/nvl/server/air/eth_jump）")
+                    e(row_n, hn, f"type 无效：'{row_type}'（仅支持 eth/eth_spx/spx/ib/nvl/server/"
+                                 f"server_mgmt/server_ufm/air/eth_jump）")
                     continue
                 is_nvos  = row_type in _NVOS_TYPES
                 is_server = row_type in _SERVER_TYPES
+                is_ufm = row_type in _UFM_TYPES
                 is_air = row_type in _AIR_TYPES
                 is_jump = row_type in _JUMP_TYPES
 
@@ -2117,6 +2149,27 @@ def _validate_eth_csv(path):
                                 e(row_n, hn, f"eth0_mac 重复（首次行{seen_eth0_mac[key]}）")
                             else:
                                 seen_eth0_mac[key] = row_n
+                    continue
+
+                if is_ufm:
+                    # ufm-setup-upgrade 读取前 7 列并做完整校验；这里只核对格式与重复。
+                    # netmask 写前缀长度，也接受 /23 的写法。
+                    try:
+                        ipaddress.IPv4Address(eth0_ip_raw)
+                    except ValueError:
+                        e(row_n, hn, f"eth0_ip 无效（server_ufm 必填不带前缀的 IPv4）：'{eth0_ip_raw}'")
+                    if _vna(eth0_nm) or not _valid_mask(eth0_nm.removeprefix("/")):
+                        e(row_n, hn, f"netmask 无效（server_ufm 必填）：'{eth0_nm}'")
+                    if _vna(eth0_gw) or not _valid_ip(eth0_gw):
+                        e(row_n, hn, f"eth0_gw 无效（server_ufm 必填）：'{eth0_gw}'")
+                    if _vna(eth0_mac) or not _valid_mac(eth0_mac):
+                        e(row_n, hn, f"eth0_mac 无效（server_ufm 必填）：'{eth0_mac}'")
+                    else:
+                        key = eth0_mac.lower().replace("-", ":")
+                        if key in seen_eth0_mac:
+                            e(row_n, hn, f"eth0_mac 重复（首次行{seen_eth0_mac[key]}）")
+                        else:
+                            seen_eth0_mac[key] = row_n
                     continue
 
                 if is_server:
@@ -3089,6 +3142,7 @@ def _managed_ztp_link_candidates():
     ])
     paths.extend(P2P_INPUT_LINKS)
     paths.extend(link_path for link_path, _project_rel in BRINGUP_OUTPUT_MAPPINGS)
+    paths.extend(link_path for link_path, _target in _bringup_input_pairs(None))
     paths.extend(link_path for link_path, _project_rel in ANALYZER_INPUT_MAPPINGS)
     paths.extend(link_path for link_path, _project_rel in ANALYZER_OUTPUT_MAPPINGS)
     patterns = [
@@ -3233,12 +3287,14 @@ def _collect_expected_links(proj_dir):
 
     # 项目无关的共享镜像
     links.extend(link_path for link_path, _src in _shared_image_pairs())
+    links.extend(link_path for link_path, _src in _bringup_image_pairs())
 
     # P2P 输入统一使用固定名称，两个生成器共享同一输出目录。
     links.extend(P2P_INPUT_LINKS)
     links.extend(P2P_OUTPUT_LINKS)
     links.append(P2P_AIR_JSON_LINK)
     links.extend(link_path for link_path, _target in _bringup_link_pairs(proj_dir))
+    links.extend(link_path for link_path, _target in _bringup_input_pairs(proj_dir))
     links.extend(link_path for link_path, _target in _analyzer_input_pairs(proj_dir))
     links.extend(link_path for link_path, _target in _analyzer_output_pairs(proj_dir))
 
@@ -3959,6 +4015,8 @@ def _setup_impl(proj_dir, *, server_delegated=False):
 
     print("\n── InfiniBand bringup 输出链接 ──────────────────────────────────")
     _process_bringup_links(proj_dir)
+    _process_bringup_input_links(proj_dir)
+    _process_bringup_image_links()
 
     print("\n── P2P 拓扑分析输入和报告链接 ──────────────────────────────────")
     _process_analyzer_links(proj_dir)

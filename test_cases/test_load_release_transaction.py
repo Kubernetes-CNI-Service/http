@@ -2523,12 +2523,16 @@ class ReleaseTransactionTests(unittest.TestCase):
         commands = [call.args[0] for call in run_command.call_args_list]
         setup = next(
             command for command in commands
-            if any(str(item).endswith("infra-setup.sh") for item in command)
+            if any(str(item).endswith("infra-setup.py") for item in command)
         )
+        script_at = [str(item) for item in setup].index(str(LOAD.INFRA_DIR / "infra-setup.py"))
+        self.assertEqual([LOAD.sys.executable, "-B"], [str(item) for item in setup[script_at - 2:script_at]])
         self.assertIn("--mgmt", setup)
         self.assertIn("--defer-services", setup)
         self.assertIn("--install-apache", setup)
         self.assertIn("--install-dhcp", setup)
+        # load is the authorized, non-interactive apply step for infra-setup.py.
+        self.assertEqual(["--apply", "--yes"], [str(item) for item in setup if str(item) in ("--apply", "--yes")])
 
     def test_service_start_failure_restores_entry_enabled_and_active_state(self) -> None:
         states = {
@@ -3712,6 +3716,10 @@ class ReleaseTransactionTests(unittest.TestCase):
         self.assertTrue(any("b-xlsx_to_dot.py" in command for command in eth_commands))
         self.assertFalse(any("b-xlsx_to_dot.py" in command for command in ib_commands))
         self.assertFalse(any("b-xlsx_to_dot.py" in command for command in nvl_commands))
+        # The IB counterpart of b-xlsx_to_dot.py (owner 2026-10-21): only IB runs it.
+        self.assertTrue(any("p2p-to-validation.py" in command for command in ib_commands))
+        self.assertFalse(any("p2p-to-validation.py" in command for command in eth_commands))
+        self.assertFalse(any("p2p-to-validation.py" in command for command in nvl_commands))
         for selected, commands in (
             ("eth", eth_commands), ("ib", ib_commands), ("nvl", nvl_commands),
         ):
@@ -3721,7 +3729,7 @@ class ReleaseTransactionTests(unittest.TestCase):
                     "--switch" in command
                     and command[command.index("--switch") + 1] == selected
                     for command in commands
-                    if command[1] != "b-xlsx_to_dot.py"
+                    if command[1] not in {"b-xlsx_to_dot.py", "p2p-to-validation.py"}
                 ), commands)
                 branches = [
                     command[command.index("--branch") + 1]
@@ -3899,6 +3907,13 @@ class ReleaseTransactionTests(unittest.TestCase):
         self.assertTrue(all(
             "--deployment-scope" not in command for command in all_commands
         ))
+        # The IB expected-topology converter (owner 2026-10-21) has no environment axis: IB is
+        # Production-only, so it runs in all/prod and never in air.
+        converter = [sys.executable, "p2p-to-validation.py"]
+        self.assertIn(converter, all_commands)
+        self.assertIn(converter, prod_commands)
+        self.assertNotIn(converter, air_commands)
+        prod_commands = [command for command in prod_commands if command != converter]
         for command in prod_commands:
             self.assertEqual(
                 "prod", command[command.index("--deployment-scope") + 1],

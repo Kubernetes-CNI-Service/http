@@ -690,11 +690,16 @@ class TemplateContractTests(unittest.TestCase):
             )
 
     def test_infra_common_packages_include_jq(self):
-        source = (ROOT / "infra/infra-setup.sh").read_text(encoding="utf-8")
-        match = re.search(r"^common_packages=\(([^)]*)\)$", source, re.MULTILINE)
+        source = (ROOT / "infra/infra-setup.py").read_text(encoding="utf-8")
+        match = re.search(r"^COMMON_PACKAGES = \(([^)]*)\)$", source, re.MULTILINE)
+        self.assertIsNotNone(match)
+        self.assertIn('"jq"', [item.strip() for item in match.group(1).split(",")])
+        self.assertIn("self.install_missing(COMMON_PACKAGES,", source)
+        shell = (ROOT / "infra/infra-setup.sh").read_text(encoding="utf-8")
+        match = re.search(r"^common_packages=\(([^)]*)\)$", shell, re.MULTILINE)
         self.assertIsNotNone(match)
         self.assertIn("jq", match.group(1).split())
-        self.assertIn('"${common_packages[@]}"', source)
+        self.assertIn('"${common_packages[@]}"', shell)
 
     def test_public_documentation_boundary_has_safe_entrypoints(self):
         public_paths = (
@@ -1517,7 +1522,7 @@ class TemplateContractTests(unittest.TestCase):
         source = (ROOT / "DAY0-Prepare/11-load.py").read_text(encoding="utf-8")
         main = source.split("def main(", 1)[1]
         self.assertLess(main.index("prepare_infra("), main.index("generate_configs("))
-        self.assertIn('"bash", str(INFRA_DIR / "infra-setup.sh"), "--mgmt"', source)
+        self.assertIn('sys.executable, "-B", str(INFRA_DIR / "infra-setup.py"), "--mgmt"', source)
 
     def test_all_cumulus_lacp_templates_enable_bypass(self):
         templates = ROOT / "ztp/config/cumulus/template/03-templates-j2"
@@ -4351,7 +4356,9 @@ exit 0
             'python3 "$HTML_GENERATOR" --type "${COLLECTION_ENV:-prod}"',
             script,
         )
-        self.assertIn('hosts_file_has_entries "$IB" || hosts_file_has_entries "$NV"', script)
+        # Owner 2026-10-21: publish whatever this run collected (info/link archives or UFM data),
+        # even when another part of the run failed.
+        self.assertIn('elif [[ -n "$INFO_ARCHIVE$LINK_ARCHIVE" ]] || (( UFM_COLLECTED )); then', script)
 
     def test_ethernet_post_collect_accepts_mismatch_report_and_refreshes_scope(self):
         module = load_module(
@@ -5278,10 +5285,7 @@ class MonitorContractTests(unittest.TestCase):
         self.assertEqual(str(zone), "Asia/Taipei")
 
     def test_collection_retention_removes_only_expired_batch_directories(self):
-        source = (ROOT / "ethernet/monitor/cron.sh").read_text(encoding="utf-8")
-        function = "cleanup_data_dirs() {" + source.split(
-            "cleanup_data_dirs() {", 1,
-        )[1].split("# ── Main", 1)[0]
+        # Owner 2026-10-22: the retention rule cron.sh applies lives in tools/collection_archive.py.
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             data = root / "eth-info"
@@ -5306,15 +5310,9 @@ class MonitorContractTests(unittest.TestCase):
             (data / f"{old_day}-1200-air.tar.gz").write_bytes(b"old archive")
             (data / f"{old_day}-1200-air.csv").write_text("old\n", encoding="utf-8")
 
-            harness = root / "cleanup.sh"
-            harness.write_text(
-                "#!/bin/bash\nset -euo pipefail\nRETAIN_DAYS=7\n"
-                "log() { printf '%s\\n' \"$*\"; }\n"
-                + function + f"\ncleanup_data_dirs {str(data)!r}\n",
-                encoding="utf-8",
-            )
             result = subprocess.run(
-                ["bash", str(harness)], text=True, capture_output=True, check=False,
+                [sys.executable, "-B", str(ROOT / "tools/collection_archive.py"), "--retain-days", "7", str(data)],
+                text=True, capture_output=True, check=False,
             )
             self.assertEqual(0, result.returncode, result.stderr)
             self.assertFalse(old_batch.exists())
@@ -6183,7 +6181,7 @@ PSU1-Temp-Sensor           28.0           85         63.0      5         ok
                 "tools/collect-ztp-diagnostics.py", "tools/password-update.py",
                 "tools/package-project-image.py", "tools/package-shared-artifacts.py",
                 "tools/deploy-shared-artifacts.py", "infra/deploy_infra.py",
-                "infra/check_infra.py", "infra/infra-setup.sh",
+                "infra/check_infra.py", "infra/infra-setup.py",
                 "infra/infra-teardown.sh", "infra/docker/deploy.sh",
                 "ztp/manual-ztp.py", "ztp/manual-reset.py",
                 "ztp/backup/yaml-collect.py", "test_cases/run_related_tests.py",

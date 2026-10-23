@@ -38,9 +38,11 @@ def row(hostname: str, kind: str, address: str, mac: str = "NA") -> list[str]:
 
 class EthJumpDuplicateIdentityTests(unittest.TestCase):
     _MAC_EMIT_TEXT = 'e(row_n, hn, f"eth0_mac 重复（首次行{seen_eth0_mac[key]}）")'
+    # server_ufm (owner 2026-10-19) requires a MAC that no other row uses: a fifth emitter, between
+    # the jump and server branches.
     _MAC_REPORT_SITES = (
-        "jump_mac_report", "server_mac_report", "air_mac_report",
-        "common_mac_report",
+        "jump_mac_report", "ufm_mac_report", "server_mac_report",
+        "air_mac_report", "common_mac_report",
     )
     _SETUP_SITES = {
         "census": "previous = seen_eth0_addr.setdefault(eth0_addr, [])",
@@ -74,12 +76,12 @@ class EthJumpDuplicateIdentityTests(unittest.TestCase):
             if line.strip() == self._MAC_EMIT_TEXT
         ]
         self.assertEqual(
-            4, len(mac_lines),
+            5, len(mac_lines),
             f"_validate_eth_csv MAC emit sites {self._MAC_EMIT_TEXT!r}",
         )
         for name, line in zip(self._MAC_REPORT_SITES, mac_lines):
             site_lines[line] = name
-        # Four emitters have identical text and one deepest function frame;
+        # Five emitters have identical text and one deepest function frame;
         # their enclosing branch anchors distinguish the actual emit site.
         def unique_line(text):
             matches = [
@@ -92,12 +94,14 @@ class EthJumpDuplicateIdentityTests(unittest.TestCase):
         self.assertLess(
             unique_line("if is_jump:"), mac_lines[0],
         )
-        self.assertLess(mac_lines[0], unique_line("if is_server:"))
-        self.assertLess(unique_line("if is_server:"), mac_lines[1])
-        self.assertLess(mac_lines[1], unique_line("if is_air:"))
-        self.assertLess(unique_line("if is_air:"), mac_lines[2])
-        self.assertLess(mac_lines[2], unique_line("# eth0_mac（共有）"))
-        self.assertLess(unique_line("# eth0_mac（共有）"), mac_lines[3])
+        self.assertLess(mac_lines[0], unique_line("if is_ufm:"))
+        self.assertLess(unique_line("if is_ufm:"), mac_lines[1])
+        self.assertLess(mac_lines[1], unique_line("if is_server:"))
+        self.assertLess(unique_line("if is_server:"), mac_lines[2])
+        self.assertLess(mac_lines[2], unique_line("if is_air:"))
+        self.assertLess(unique_line("if is_air:"), mac_lines[3])
+        self.assertLess(mac_lines[3], unique_line("# eth0_mac（共有）"))
+        self.assertLess(unique_line("# eth0_mac（共有）"), mac_lines[4])
         self.assertLess(
             next(line for line, name in site_lines.items() if name == "census"),
             next(line for line, name in site_lines.items() if name == "jump_branch"),
@@ -239,7 +243,11 @@ class EthJumpDuplicateIdentityTests(unittest.TestCase):
         production = row("EXAMPLE-SW01", "eth", "192.0.2.40",
                          "02-00-00-00-00-aa")
         production[2] = "oob-leaf"
+        ufm = ["NA"] * len(HEADER)
+        ufm[:7] = ["ufm01.example.test", "server_ufm", "", "192.0.2.50", "24", "192.0.2.1",
+                   "02-00-00-00-00-aa"]
         cases = (
+            ([jump, ufm], "ufm_mac_report"),
             ([jump, server], "server_mac_report"),
             ([server, jump], "jump_mac_report"),
             ([jump, air], "air_mac_report"),

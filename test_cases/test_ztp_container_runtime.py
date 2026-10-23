@@ -33,10 +33,11 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 DOCKER_ROOT = ROOT / "infra/docker"
 # Reviewed AM-1..AM-6 plus PK1/M1/M2, strict DNS-domain, and admission-evidence
-# contracts; prior trust-boundary prose retained.
-PUBLISHED_DOCKER_README_SIZE = 45277
+# contracts; prior trust-boundary prose retained. 2026-10-19: the native recovery
+# command matches infra-setup.py RECOVERY_COMMAND (--recover-monitor-authority --apply).
+PUBLISHED_DOCKER_README_SIZE = 45285
 PUBLISHED_DOCKER_README_SHA256 = (
-    "494905f7e7ba0ef8ec88038236b2a744f4c3116a1b9f495fef6378e2557c3c27"
+    "831420b98323b19121d9073b54521c3319333de08c14de7a9db5f3776aa9492b"
 )
 
 

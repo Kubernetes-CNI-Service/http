@@ -401,14 +401,14 @@ def validate_flat_apt_repository(repository: Path, platform: str) -> None:
     if missing_roots:
         raise ValueError(
             f"apps/{platform} 缺少 infra 管理服务器必需包："
-            f"{', '.join(missing_roots)}；请用当前 infra-setup.sh 重新构建仓库"
+            f"{', '.join(missing_roots)}；请用当前 infra-setup.py --mgmt --apply 重新构建仓库"
         )
     expected_os, expected_arch = platform.split("/", 1)
     expected_version = expected_os.removeprefix("ubuntu-")
     metadata_path = repository / "repository.meta"
     if not metadata_path.is_file():
         raise ValueError(
-            f"apps/{platform}/repository.meta 不存在；请用当前 infra-setup.sh 重新构建仓库"
+            f"apps/{platform}/repository.meta 不存在；请用当前 infra-setup.py --mgmt --apply 重新构建仓库"
         )
     metadata = {}
     for line in metadata_path.read_text(encoding="utf-8", errors="strict").splitlines():
@@ -488,7 +488,7 @@ def resolve_apps_policy(args: argparse.Namespace) -> None:
             if not (repository / "Packages.gz").is_file():
                 raise ValueError(
                     f"选择了离线部署，但缺少 apps/{platform}/Packages.gz；"
-                    "请先在相同 Ubuntu 版本/架构的联网服务器运行 infra-setup.sh --mgmt"
+                    "请先在相同 Ubuntu 版本/架构的联网服务器运行 infra-setup.py --mgmt --apply"
                 )
             if not any(repository.glob("*.deb")):
                 raise ValueError(f"apps/{platform} 没有 .deb，离线仓库不完整")

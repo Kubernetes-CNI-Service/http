@@ -67,7 +67,7 @@ sidecar，再从 last-good 报告重建带告警的 `monitor.html`，不会推�
 日常 provision/deploy/load/health/guardian/CGI 只能 attest 且不清 breaker。取证只保存安全时间戳、
 classification、stopped state 和 inode/type/mode/owner/hash metadata；绝不保存 payload、credential 或
 Authorization bytes。Native 如需恢复，只能在 Apache 已确认停止后运行
-`sudo ./infra/infra-setup.sh --recover-monitor-authority`；Docker 唯一恢复入口是
+`sudo ./infra/infra-setup.py --recover-monitor-authority --apply`；Docker 唯一恢复入口是
 `sudo ./infra/docker/deploy.sh recover-monitor-authority`，完成后容器仍保持 stopped，只能按其打印的
 `sudo ./infra/docker/deploy.sh deploy` 后续指令恢复。操作员必须
 `never manually unlink/chmod/rewrite` authority、breaker 或 recovery marker；若再次 wedging，保持

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare infra shell scripts and deploy them to CSV devices of type=server."""
+"""Prepare the infra setup/teardown entries and deploy them to CSV devices of type=server."""
 
 from __future__ import annotations
 
@@ -44,12 +44,25 @@ from project_contract import (  # noqa: E402
 
 DEFAULT_GLOBAL = SCRIPT_DIR / "01-global.yaml"
 DEFAULT_DEVICES = SCRIPT_DIR / "02-devices_config.csv"
-DEFAULT_SETUP = SCRIPT_DIR / "infra-setup.sh"
+DEFAULT_SETUP = SCRIPT_DIR / "infra-setup.py"
+# infra-setup.py imports the shared Ubuntu host module from its own directory.
+HOST_MODULE_NAME = "ubuntu24_host.py"
+REMOTE_PYTHON_SYNTAX_CHECK = (
+    "import ast, sys\n"
+    "for path in sys.argv[1:]:\n"
+    "    with open(path, 'rb') as handle:\n"
+    "        ast.parse(handle.read(), path)\n"
+)
 DEFAULT_TEARDOWN = SCRIPT_DIR / "infra-teardown.sh"
 DEFAULT_NEUTRAL = SCRIPT_DIR / "infra-neutral.conf"
 MANAGED_BEGIN = "# BEGIN managed by deploy_infra.py"
 MANAGED_END = "# END managed by deploy_infra.py"
 NA_VALUES = {"", "na", "n/a", "none", "null", "-"}
+# Infra deploys management servers only: server_mgmt is the new spelling of
+# server.  server_ufm (a UFM appliance, handled by
+# infiniband/bringup/ufm-setup-upgrade) is never an infra target
+# (owner 2026-10-19..22).
+INFRA_SERVER_TYPES = frozenset({"server", "server_mgmt"})
 
 
 class DeployError(RuntimeError):
@@ -454,6 +467,23 @@ def update_runtime_config(runtime_config: Path, managed_block: str,
     return True
 
 
+def validate_entry_syntax(script: Path) -> None:
+    """Compile Python entries in memory (no bytecode written) and `bash -n` shell entries."""
+    if script.suffix == ".py":
+        try:
+            source = script.read_bytes()
+        except OSError as exc:
+            raise DeployError(f"无法读取待上传脚本 {script}：{exc}") from exc
+        try:
+            compile(source, str(script), "exec", dont_inherit=True)
+        except (SyntaxError, ValueError) as exc:
+            raise DeployError(f"Python 语法检查失败 {script}：{exc}") from exc
+        return
+    syntax = subprocess.run(["bash", "-n", str(script)], text=True, capture_output=True)
+    if syntax.returncode != 0:
+        raise DeployError(f"shell 语法检查失败 {script}：{syntax.stderr.strip()}")
+
+
 def load_servers(devices_file: Path, only_hosts: set[str] | None = None) -> list[dict[str, str]]:
     try:
         stream = devices_file.open(newline="", encoding="utf-8-sig")
@@ -468,7 +498,7 @@ def load_servers(devices_file: Path, only_hosts: set[str] | None = None) -> list
         servers: list[dict[str, str]] = []
         seen: set[str] = set()
         for line_no, row in enumerate(reader, 2):
-            if _clean(row.get("type")).lower() != "server":
+            if _clean(row.get("type")).lower() not in INFRA_SERVER_TYPES:
                 continue
             hostname = _clean(row.get("hostname"))
             raw_address = _clean(row.get("eth0_ip"))
@@ -737,45 +767,58 @@ def deploy_server(
         remote_dir = f"{remote_home}/http-infra"
         release_name = f"{int(time.time())}-{os.getpid()}"
         release_dir = f"{remote_dir}/releases/{release_name}"
-        setup_stage = f"{release_dir}/infra-setup.sh"
+        setup_stage = f"{release_dir}/infra-setup.py"
+        host_module_stage = f"{release_dir}/{HOST_MODULE_NAME}"
         teardown_stage = f"{release_dir}/infra-teardown.sh"
         runtime_stage = f"{release_dir}/infra-runtime.conf"
         neutral_stage = f"{release_dir}/infra-neutral.conf"
         if action == "setup":
+            host_module = setup_script.with_name(HOST_MODULE_NAME)
             setup_hash = hashlib.sha256(setup_script.read_bytes()).hexdigest()
+            host_module_hash = hashlib.sha256(host_module.read_bytes()).hexdigest()
             teardown_hash = hashlib.sha256(teardown_script.read_bytes()).hexdigest()
             runtime_hash = hashlib.sha256(runtime_config.read_bytes()).hexdigest()
             neutral_hash = hashlib.sha256(neutral_config.read_bytes()).hexdigest()
             logged_run([*ssh_base, target, f"install -d -m 0755 -- {shlex.quote(release_dir)}"])
             logged_run([*scp_base, str(setup_script), f"{target}:{setup_stage}"])
+            logged_run([*scp_base, str(host_module), f"{target}:{host_module_stage}"])
             logged_run([*scp_base, str(teardown_script), f"{target}:{teardown_stage}"])
             logged_run([*scp_base, str(runtime_config), f"{target}:{runtime_stage}"])
             logged_run([*scp_base, str(neutral_config), f"{target}:{neutral_stage}"])
             current_stage = f"{remote_dir}/.current-{os.getpid()}"
             current_link = f"{remote_dir}/current"
-            setup_link = f"{remote_dir}/infra-setup.sh"
+            setup_link = f"{remote_dir}/infra-setup.py"
+            legacy_setup_link = f"{remote_dir}/infra-setup.sh"
             teardown_link = f"{remote_dir}/infra-teardown.sh"
             neutral_link = f"{remote_dir}/infra-neutral.conf"
             setup_check = shlex.quote(f"{setup_hash}  {setup_stage}")
+            host_module_check = shlex.quote(f"{host_module_hash}  {host_module_stage}")
             teardown_check = shlex.quote(f"{teardown_hash}  {teardown_stage}")
             runtime_check = shlex.quote(f"{runtime_hash}  {runtime_stage}")
             neutral_check = shlex.quote(f"{neutral_hash}  {neutral_stage}")
             activate_command = (
-                f"bash -n {shlex.quote(setup_stage)} && bash -n {shlex.quote(teardown_stage)} && "
+                f"python3 -B -c {shlex.quote(REMOTE_PYTHON_SYNTAX_CHECK)} "
+                f"{shlex.quote(setup_stage)} {shlex.quote(host_module_stage)} && "
+                f"bash -n {shlex.quote(teardown_stage)} && "
                 f"bash -n {shlex.quote(runtime_stage)} && "
-                f"printf '%s\\n' {setup_check} {teardown_check} {runtime_check} {neutral_check} | sha256sum -c - && "
+                f"printf '%s\\n' {setup_check} {host_module_check} {teardown_check} {runtime_check} "
+                f"{neutral_check} | sha256sum -c - && "
                 f"chmod 0755 -- {shlex.quote(setup_stage)} {shlex.quote(teardown_stage)} && "
+                f"chmod 0644 -- {shlex.quote(host_module_stage)} && "
                 f"chmod 0600 -- {shlex.quote(runtime_stage)} && "
                 f"chmod 0644 -- {shlex.quote(neutral_stage)} && "
-                f"ln -sfn -- current/infra-setup.sh {shlex.quote(setup_link)} && "
+                f"ln -sfn -- current/infra-setup.py {shlex.quote(setup_link)} && "
+                f"{{ [ ! -L {shlex.quote(legacy_setup_link)} ] || rm -f -- {shlex.quote(legacy_setup_link)}; }} && "
                 f"ln -sfn -- current/infra-teardown.sh {shlex.quote(teardown_link)} && "
                 f"ln -sfn -- current/infra-neutral.conf {shlex.quote(neutral_link)} && "
                 f"ln -sfn -- {shlex.quote('releases/' + release_name)} {shlex.quote(current_stage)} && "
                 f"mv -Tf -- {shlex.quote(current_stage)} {shlex.quote(current_link)}"
             )
             logged_run([*ssh_base, target, activate_command])
-            action_script = "./current/infra-setup.sh"
-            action_args = " --client --non-interactive --enable-bluefield-nic"
+            interpreter = "python3 -B"
+            action_script = "./current/infra-setup.py"
+            # A real deploy is the authorized apply step; dry-run and --prepare-only never get here.
+            action_args = " --client --non-interactive --enable-bluefield-nic --apply --yes"
             action_log_pattern = "infra-setup-*.log"
         elif action == "teardown":
             teardown_hash = hashlib.sha256(teardown_script.read_bytes()).hexdigest()
@@ -793,17 +836,18 @@ def deploy_server(
                 f"mv -Tf -- {shlex.quote(teardown_link_stage)} {shlex.quote(teardown_link)}"
             )
             logged_run([*ssh_base, target, activate_command])
+            interpreter = "bash"
             action_script = "./infra-teardown.sh"
             action_args = " --non-interactive --yes"
             action_log_pattern = "infra-teardown-*.log"
         else:
             raise DeployError(f"未知部署动作：{action}")
         if username == "root":
-            action_command = f"bash {action_script}{action_args}"
+            action_command = f"{interpreter} {action_script}{action_args}"
         elif sudo_password is not None:
-            action_command = f"sudo -S -k -p '' bash {action_script}{action_args}"
+            action_command = f"sudo -S -k -p '' {interpreter} {action_script}{action_args}"
         else:
-            action_command = f"sudo -n bash {action_script}{action_args}"
+            action_command = f"sudo -n {interpreter} {action_script}{action_args}"
         remote_command = (
             f"cd {shlex.quote(remote_dir)} || exit 1; "
             f"{action_command}; rc=$?; "
@@ -835,7 +879,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--setup-script", type=Path, default=DEFAULT_SETUP,
-        help="要上传的 setup 脚本路径；不决定执行动作",
+        help="要上传的 setup 入口（infra-setup.py，同目录须有 ubuntu24_host.py）；不决定执行动作",
     )
     parser.add_argument(
         "--teardown-script", type=Path, default=DEFAULT_TEARDOWN,
@@ -889,9 +933,9 @@ def main() -> int:
             matched = {item for server in servers for item in (server["hostname"], server["address"])}
             unmatched = sorted(set(args.hosts).difference(matched))
             if unmatched:
-                raise DeployError(f"--host 未匹配到有效的 type=server：{', '.join(unmatched)}")
+                raise DeployError(f"--host 未匹配到有效的 type=server/server_mgmt：{', '.join(unmatched)}")
         if not servers and not args.prepare_only:
-            raise DeployError("devices CSV 中没有可部署的 type=server 设备")
+            raise DeployError("devices CSV 中没有可部署的 type=server/server_mgmt 设备")
         local_http_enabled = False
         http_ip: str | None = None
         if action == "setup":
@@ -921,14 +965,16 @@ def main() -> int:
                 args.setup_script.resolve().with_name("infra-runtime.conf"),
                 managed_block, args.dry_run,
             )
-            scripts_to_validate = (args.setup_script.resolve(), args.teardown_script.resolve())
+            scripts_to_validate = (
+                args.setup_script.resolve(),
+                args.setup_script.resolve().with_name(HOST_MODULE_NAME),
+                args.teardown_script.resolve(),
+            )
         else:
             scripts_to_validate = (args.teardown_script.resolve(),)
 
         for script in scripts_to_validate:
-            syntax = subprocess.run(["bash", "-n", str(script)], text=True, capture_output=True)
-            if syntax.returncode != 0:
-                raise DeployError(f"shell 语法检查失败 {script}：{syntax.stderr.strip()}")
+            validate_entry_syntax(script)
         if action == "teardown":
             print(f"[OK] teardown 脚本验证通过：{args.teardown_script.resolve()}")
         if args.prepare_only:
@@ -951,7 +997,7 @@ def main() -> int:
                     + (
                         "infra-teardown.sh --non-interactive --yes"
                         if action == "teardown" else
-                        "infra-setup.sh --client --non-interactive --enable-bluefield-nic"
+                        "infra-setup.py --client --non-interactive --enable-bluefield-nic --apply --yes"
                     )
                 )
             print(f"[DRY] 最大并行数：{min(args.max_workers, len(servers))}")

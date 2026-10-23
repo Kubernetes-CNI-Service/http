@@ -319,6 +319,16 @@ def read_completed_ib_cycle_report(
             recorded_at_utc = datetime.strptime(
                 run_id[:13], "%Y%m%d-%H%M",
             ).strftime("%Y-%m-%dT%H:%M:00Z")
+        elif (len(parts) == 4 and parts[:2] == project_parts
+              and parts[2] == "99-output-p2p"):
+            # REQ7 R1: the cron.sh UFM lane names its report <run_id>_<node>-<kind>-...; the run-id
+            # carries the UTC minute the UFM run started.
+            run_id = parts[3].split("_", 1)[0]
+            if re.fullmatch(r"[0-9]{8}-[0-9]{4}-prod-[0-9a-f]{16}", run_id) is None:
+                raise IbRuntimeHoldError("IB UFM run time is malformed")
+            recorded_at_utc = datetime.strptime(
+                run_id[:13], "%Y%m%d-%H%M",
+            ).strftime("%Y-%m-%dT%H:%M:00Z")
         if (inspect_completed_ib_cycle_roles(
                 store, http_root=root, sequence=sequence,
             ) != source or _read_bound(root, report, maximum=64 * 1024 * 1024) != raw):

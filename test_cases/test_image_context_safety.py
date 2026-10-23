@@ -174,7 +174,8 @@ class ImageContextSafetyDirectTests(unittest.TestCase):
         names.update(Path(path).relative_to(ROOT).as_posix()
                      for path in setup.P2P_INPUT_LINKS + setup.P2P_OUTPUT_LINKS)
         names.add(Path(setup.P2P_AIR_JSON_LINK).relative_to(ROOT).as_posix())
-        for pairs in (setup._monitor_inventory_link_pairs(), setup._monitor_link_paths(str(ROOT / "DAY0-Prepare/site-a"))):
+        for pairs in (setup._monitor_inventory_link_pairs(), setup._monitor_link_paths(str(ROOT / "DAY0-Prepare/site-a")),
+                      setup._bringup_input_pairs(None)):
             names.update(Path(path).relative_to(ROOT).as_posix() for path, _target in pairs)
         # Independent acceptance cases for the publication-pointer family.
         names.update(("ztp/config/cumulus/latest_yaml", "ztp/config/nvos/latest_yaml"))

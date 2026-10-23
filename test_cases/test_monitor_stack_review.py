@@ -7374,8 +7374,13 @@ class PublicationAndCollectorTests(unittest.TestCase):
                 "AIR-EXAMPLE-Leaf01|203.0.113.10|203.0.113.20\n",
                 outputs["eth"].read_text(encoding="utf-8"),
             )
-        self.assertEqual(6, source.count('ts=$(date -u "+%Y%m%d-%H%M")'))
-        self.assertIn("today=$(date -u '+%Y%m%d')", source)
+        # six switch collectors plus UFM info (infiniband/monitor/UFM-MONITOR.md), all named in UTC
+        self.assertEqual(7, source.count('ts=$(date -u "+%Y%m%d-%H%M")'))
+        # the daily archive moved to tools/collection_archive.py (owner 2026-10-22); its days stay UTC
+        self.assertIn('COLLECTION_ARCHIVE="${BASE}/../../tools/collection_archive.py"', source)
+        archive = (ROOT / "tools/collection_archive.py").read_text(encoding="utf-8")
+        self.assertIn("now = now or datetime.now(timezone.utc)", archive)
+        self.assertIn('today = now.strftime("%Y%m%d")', archive)
 
     def test_ssh_askpass_uses_a_dedicated_executable_runtime_directory(self):
         source = (ROOT / "ethernet/monitor/cron.sh").read_text(encoding="utf-8")
@@ -7918,6 +7923,8 @@ class SwitchWorkerProcessLifecycleTests(unittest.TestCase):
                 ROOT / "tools/project_contract.py",
                 tools / "project_contract.py",
             )
+            # the worker rotates its own log through this module
+            shutil.copy2(ROOT / "tools/log_rotation.py", tools / "log_rotation.py")
             inventory = project / "02-devices_config.csv"
             inventory.write_text("hostname,type\n", encoding="utf-8")
             (monitor / "02-devices_config.csv").symlink_to(inventory)

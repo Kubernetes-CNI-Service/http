@@ -84,10 +84,19 @@ class InfraNeutralDefaultsTests(unittest.TestCase):
                 with self.subTest(payload=payload), self.assertRaises(DEPLOY.DeployError):
                     DEPLOY.load_neutral_defaults(malformed)
 
-        setup_source = (ROOT / "infra/infra-setup.sh").read_text(encoding="utf-8")
-        self.assertIn('neutral_config="${source_dir}/infra-neutral.conf"', setup_source)
-        self.assertIn('while IFS="=" read -r key value', setup_source)
-        self.assertNotIn('source "$neutral_config"', setup_source)
+        setup_source = (ROOT / "infra/infra-setup.py").read_text(encoding="utf-8")
+        # The setup entry reads the same sibling authority as inert lines; it never executes it.
+        self.assertIn('neutral = self.source_dir / "infra-neutral.conf"', setup_source)
+        self.assertIn('key, _, value = line.partition("=")', setup_source)
+        for executor in ("exec(", "eval(", '"source"', "runpy"):
+            self.assertNotIn(executor, setup_source)
+        # The kept infra-setup.sh keeps the same inert-read contract.
+        shell_source = (ROOT / "infra/infra-setup.sh").read_text(encoding="utf-8")
+        self.assertIn('neutral_config="${source_dir}/infra-neutral.conf"', shell_source)
+        self.assertIn('while IFS="=" read -r key value', shell_source)
+        self.assertNotIn('source "$neutral_config"', shell_source)
+        for site_value in ("208.67.220.220", "118.163.81.61", "time.stdtime.gov.tw"):
+            self.assertNotIn(site_value, shell_source)
         for site_value in ("208.67.220.220", "118.163.81.61", "time.stdtime.gov.tw"):
             self.assertNotIn(site_value, setup_source)
         deploy_source = (ROOT / "infra/deploy_infra.py").read_text(encoding="utf-8")
@@ -103,7 +112,7 @@ class InfraNeutralDefaultsTests(unittest.TestCase):
         base_args = dict(
             global_file=ROOT / "DAY0-Prepare/template/01-global.yaml",
             devices_file=ROOT / "DAY0-Prepare/template/02-devices_config.csv",
-            setup_script=ROOT / "infra/infra-setup.sh",
+            setup_script=ROOT / "infra/infra-setup.py",
             teardown_script=ROOT / "infra/infra-teardown.sh",
             teardown=False,
             http_server_ip="192.0.2.10",
@@ -132,9 +141,10 @@ class InfraNeutralDefaultsTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             temp = Path(directory)
-            setup = temp / "infra-setup.sh"
+            setup = temp / "infra-setup.py"
             teardown = temp / "infra-teardown.sh"
-            setup.write_text("#!/bin/bash\n", encoding="utf-8")
+            setup.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+            (temp / "ubuntu24_host.py").write_text("", encoding="utf-8")
             teardown.write_text("#!/bin/bash\n", encoding="utf-8")
             (temp / "infra-neutral.conf").write_text(
                 "DNS=8.8.8.8\nNTP=ntp.ubuntu.com\nTIMEZONE=Etc/UTC\n",

@@ -300,6 +300,7 @@ class SyncDeploymentLockTests(unittest.TestCase):
             "nvlink/monitor/nvsw.csv",
             "infiniband/bringup/xdr-upgrade/ib.csv",
             "infiniband/bringup/xdr-initial-setup/ib.csv",
+            "infiniband/bringup/ufm-setup-upgrade/ib.csv",
         ):
             with self.subTest(runtime_path=runtime_path):
                 self.assertNotIn(runtime_path, transmitted)

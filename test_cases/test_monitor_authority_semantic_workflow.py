@@ -5,11 +5,13 @@ from __future__ import annotations
 
 from contextlib import ExitStack
 from contextlib import redirect_stderr
+from contextlib import redirect_stdout
 from contextlib import contextmanager
 import ast
 import hashlib
 import importlib.util
 from importlib.machinery import SourceFileLoader
+import inspect
 import io
 import json
 import os
@@ -50,6 +52,9 @@ def load_python(name: str, path: Path):
 CONTROL_AUTH = load_python("monitor_authority_r4_helper", HELPER_PATH)
 MONITOR_CGI = load_python("monitor_authority_r4_cgi", CGI_PATH)
 HELPER_SHA256 = hashlib.sha256(HELPER_PATH.read_bytes()).hexdigest()
+INFRA_SETUP_PATH = ROOT / "infra/infra-setup.py"
+INFRA_SETUP = load_python("monitor_authority_r4_infra_setup", INFRA_SETUP_PATH)
+NATIVE_RECOVERY_COMMAND = "sudo ./infra/infra-setup.py --recover-monitor-authority --apply"
 
 
 def canonical(payload: dict[str, object]) -> bytes:
@@ -215,6 +220,45 @@ def timeout_with_owned_pid_receipt(pid_file: Path) -> str:
         "    deadline=time.monotonic()+2.0",
     ))
     return portable_timeout.replace(checkpoint, receipt)
+
+
+def darwin_python_holder_terminator(holder_path: str, identities: set) -> bool:
+    """Test-only macOS stand-in for infra-setup.py's /proc holder scan (lsof on the holder file)."""
+    del identities
+    clean = True
+    for _attempt in range(4):
+        listed = subprocess.run(
+            ["/usr/sbin/lsof", "-t", "--", holder_path], text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False,
+        )
+        holders = [int(value) for value in listed.stdout.split()
+                   if value.isdigit() and int(value) != os.getpid()]
+        if not holders:
+            break
+        clean = False
+        for holder in holders:
+            try:
+                os.kill(holder, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+    return clean
+
+
+@contextmanager
+def python_capture_holder_scan():
+    """Use the production /proc scan on Linux and the lsof stand-in where /proc is absent."""
+    if os.path.isdir("/proc/self/fd"):
+        yield
+        return
+    with mock.patch.object(INFRA_SETUP, "terminate_descriptor_holders", darwin_python_holder_terminator):
+        yield
+
+
+def python_native_setup(root: Path, *argv: str):
+    """A real InfraSetup whose host paths live under `root` (authorized unattended by default)."""
+    options = INFRA_SETUP.parse_arguments(["--recover-monitor-authority", *(argv or ("--apply", "--yes"))])
+    with mock.patch.object(INFRA_SETUP, "HOST_ROOT", root):
+        return INFRA_SETUP.InfraSetup(options)
 
 
 def failed_capture_holder_cleanup_shell() -> str:
@@ -1765,7 +1809,7 @@ class MonitorAuthoritySemanticWorkflowTests(unittest.TestCase):
         )
         payload = b"same-helper\n"
         for backend, command in (
-            ("systemd", "sudo ./infra/infra-setup.sh --recover-monitor-authority"),
+            ("systemd", NATIVE_RECOVERY_COMMAND),
             ("supervisor", "sudo ./infra/docker/deploy.sh recover-monitor-authority"),
         ):
             with self.subTest(backend=backend), mock.patch.object(
@@ -2471,6 +2515,32 @@ class MonitorAuthoritySemanticWorkflowTests(unittest.TestCase):
             with self.subTest(teardown_managed=managed):
                 self.assertIn(managed, teardown)
 
+    def test_python_setup_removes_default_wildcard_http_and_https_listeners(
+        self,
+    ) -> None:
+        setup = INFRA_SETUP_PATH.read_text(encoding="utf-8")
+        teardown = (ROOT / "infra/infra-teardown.sh").read_text(encoding="utf-8")
+        self.assertNotIn("<VirtualHost *:443>", setup)
+        self.assertNotRegex(setup, r"(?m)^\s*Listen\s+(?:80|443|\*:80|\*:443)\s*$")
+        self.assertNotRegex(INFRA_SETUP.APACHE_PORTS_CONTENT, r"(?m)^\s*Listen\b")
+        self.assertIn("self.track_managed_file(APACHE_PORTS_CONF)", setup)
+        self.assertRegex(setup, r"\ba2dissite\b[^\n]*\b000-default\b")
+        self.assertEqual(
+            "/etc/apache2/conf-enabled/http-ztp-listeners.conf", INFRA_SETUP.APACHE_LISTENER_CONF,
+        )
+        configure_at = setup.index('self.info("Configuring apache2...")')
+        setup_gate = setup.index('"apache2ctl", "configtest"', configure_at)
+        self.assertLess(setup.index("a2dissite", configure_at), setup_gate)
+        self.assertLess(setup.index("APACHE_PORTS_CONF", configure_at), setup_gate)
+        self.assertLess(setup.index("os.unlink(listener)", configure_at), setup_gate)
+        for managed in (
+            "/etc/apache2/ports.conf",
+            "/etc/apache2/sites-enabled/000-default.conf",
+            "/etc/apache2/conf-enabled/http-ztp-listeners.conf",
+        ):
+            with self.subTest(teardown_managed=managed):
+                self.assertIn(managed, teardown)
+
     def test_real_environment_registers_exact_listener_proof_as_not_run(
         self,
     ) -> None:
@@ -2732,6 +2802,141 @@ recover_monitor_authority_action
         self.assertEqual(2, exact_cli.returncode)
         self.assertIn("--recover-monitor-authority must be the only option", exact_cli.stderr)
 
+    def test_python_native_recovery_executes_stop_attest_start_and_never_repairs_a_live_writer(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source-helper"
+            installed = root / INFRA_SETUP.CONTROL_AUTH_HELPER.lstrip("/")
+            installed.parent.mkdir(parents=True)
+            (root / "run").mkdir()
+            event_log = root / "events"
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            helper_script = (
+                "#!/bin/bash\n"
+                "printf 'helper:%s\\n' \"$1\" >> \"$EVENT_LOG\"\n"
+                "if [[ \"${HELPER_FAILURE:-}\" == \"$1\" ]]; then exit 1; fi\n"
+                "case \"$1\" in\n"
+                "  monitor-authority-recover-decision)\n"
+                "    printf '%s' \"${RECOVERY_DECISION:-restart-allowed:complete;reset-invalid-cache=false}\"\n"
+                "    exit \"${DECISION_RC:-0}\" ;;\n"
+                "  monitor-authority-attest-decision|monitor-authority-provision-decision)\n"
+                "    printf '%s' attest-valid ;;\n"
+                "esac\n"
+            )
+            source.write_text(helper_script, encoding="utf-8")
+            installed.write_text(helper_script, encoding="utf-8")
+            source.chmod(0o755)
+            installed.chmod(0o755)
+            digest = hashlib.sha256(source.read_bytes()).hexdigest()
+            systemctl = fake_bin / "systemctl"
+            systemctl.write_text(
+                "#!/bin/bash\n"
+                "printf 'systemctl:%s\\n' \"$*\" >> \"$EVENT_LOG\"\n"
+                "case \"$1\" in\n"
+                "  show)\n"
+                "    if [[ -e \"$EVENT_LOG.started\" ]]; then printf '%s\\n' \"${AFTER_START_STATE:-active}\"\n"
+                "    elif [[ -e \"$EVENT_LOG.stopped\" ]]; then printf '%s\\n' \"${AFTER_STOP_STATE:-inactive}\"\n"
+                "    else printf '%s\\n' \"${INITIAL_STATE:-active}\"; fi ;;\n"
+                "  stop) : > \"$EVENT_LOG.stopped\"; exit \"${STOP_RC:-0}\" ;;\n"
+                "  start) : > \"$EVENT_LOG.started\"; exit \"${START_RC:-0}\" ;;\n"
+                "  *) exit 90 ;;\n"
+                "esac\n",
+                encoding="utf-8",
+            )
+            systemctl.chmod(0o755)
+
+            def recover(variables, *argv):
+                for suffix in ("", ".stopped", ".started"):
+                    Path(os.fspath(event_log) + suffix).unlink(missing_ok=True)
+                systemd_dir = root / "run/systemd/system"
+                if variables.get("SYSTEMD_OK", "1") == "1":
+                    systemd_dir.mkdir(parents=True, exist_ok=True)
+                elif systemd_dir.exists():
+                    systemd_dir.rmdir()
+                environment = {
+                    "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+                    "EVENT_LOG": os.fspath(event_log),
+                    **variables,
+                }
+                setup = python_native_setup(root, *argv)
+                setup.control_auth_source = source
+                stderr = io.StringIO()
+                with mock.patch.dict(os.environ, environment, clear=False), \
+                        mock.patch.object(INFRA_SETUP, "HOST_ROOT", root), \
+                        mock.patch.object(INFRA_SETUP, "CONTROL_AUTH_SOURCE_SHA256", digest), \
+                        redirect_stderr(stderr):
+                    code = setup.recover_monitor_authority()
+                events = event_log.read_text(encoding="utf-8").splitlines() \
+                    if event_log.exists() else []
+                return code == 0, events, stderr.getvalue(), code
+
+            for label, variables in (
+                ("no-systemd", {"SYSTEMD_OK": "0"}),
+                ("stop-failed", {"STOP_RC": "1"}),
+                ("still-active", {"AFTER_STOP_STATE": "active"}),
+            ):
+                with self.subTest(case=label):
+                    accepted, events, _stderr, _code = recover(variables)
+                    self.assertFalse(accepted)
+                    self.assertFalse(
+                        any(event.startswith("helper:") for event in events), events,
+                    )
+
+            accepted, events, stderr, _code = recover({})
+            self.assertTrue(accepted, stderr)
+            self.assertEqual(
+                [
+                    "systemctl:show --property=ActiveState --value apache2",
+                    "systemctl:stop apache2",
+                    "systemctl:show --property=ActiveState --value apache2",
+                    "helper:validate",
+                    "helper:monitor-authority-recover-decision",
+                    "helper:monitor-authority-attest-decision",
+                    "systemctl:start apache2",
+                    "systemctl:show --property=ActiveState --value apache2",
+                ],
+                events,
+            )
+            self.assertEqual(
+                "[WARN] Apache stopped for explicit Monitor cache authority recovery.\n"
+                "[OK] explicit Monitor cache authority recovery completed.\n",
+                stderr,
+            )
+
+            # Without --apply the recovery only verifies its prerequisites read-only and asks for --apply.
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                accepted, events, stderr, code = recover({}, "--recover-monitor-authority")
+            self.assertEqual((False, 3), (accepted, code))  # 3: check mode found a pending change
+            self.assertEqual(["systemctl:show --property=ActiveState --value apache2", "helper:validate"], events)
+            self.assertIn("WOULD APPLY: stop apache2 (ActiveState=active)", stdout.getvalue())
+            self.assertFalse(Path(os.fspath(event_log) + ".stopped").exists())
+
+            for recovery_decision, decision_rc in (
+                ("restart-blocked:marker-retained;reset-invalid-cache=false", "0"),
+                ("restart-blocked:marker-authority-uncertain;reset-invalid-cache=true", "0"),
+                ("restart-allowed", "0"),
+                ("restart-allowed:complete;reset-invalid-cache=false", "7"),
+            ):
+                with self.subTest(recovery_decision=recovery_decision):
+                    accepted, events, _stderr, _code = recover(
+                        {"RECOVERY_DECISION": recovery_decision, "DECISION_RC": decision_rc},
+                    )
+                    self.assertFalse(accepted)
+                    self.assertIn("helper:monitor-authority-recover-decision", events)
+                    self.assertNotIn("helper:monitor-authority-attest-decision", events)
+                    self.assertNotIn("systemctl:start apache2", events)
+
+        exact_cli = subprocess.run(
+            [sys.executable, "-B", os.fspath(INFRA_SETUP_PATH), "--recover-monitor-authority", "--client"],
+            cwd=ROOT, text=True, capture_output=True, check=False, timeout=10,
+        )
+        self.assertEqual(2, exact_cli.returncode)
+        self.assertIn("--recover-monitor-authority must be the only option", exact_cli.stderr)
+
     def test_native_teardown_executes_read_only_attestation_before_preservation(
         self,
     ) -> None:
@@ -2832,10 +3037,7 @@ preserve_apache_control_boundary
                     log = events.read_text(encoding="utf-8")
                     self.assertIn("service:stop", log)
                     self.assertIn(phrase, log)
-                    self.assertIn(
-                        "sudo ./infra/infra-setup.sh --recover-monitor-authority",
-                        log,
-                    )
+                    self.assertIn(NATIVE_RECOVERY_COMMAND, log)
 
     def test_native_setup_routine_adapter_never_repairs_marker_state(self) -> None:
         setup = ROOT / "infra/infra-setup.sh"
@@ -2863,6 +3065,36 @@ run_native_monitor_authority_routine {shlex.quote(operation)}
                         "sudo ./infra/infra-setup.sh --recover-monitor-authority",
                         result.stderr,
                     )
+
+    def test_python_setup_routine_adapter_never_repairs_marker_state(self) -> None:
+        for operation in ("monitor-authority-provision", "monitor-authority-attest"):
+            for phase, phrase in (
+                ("recovery-in-progress", "not been committed"),
+                ("recovery-committed-cleanup-pending", "COMPLETED"),
+            ):
+                with self.subTest(operation=operation, phase=phase), \
+                        tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    (root / "run").mkdir()
+                    helper = root / INFRA_SETUP.CONTROL_AUTH_HELPER.lstrip("/")
+                    helper.parent.mkdir(parents=True)
+                    calls = root / "calls"
+                    helper.write_text(
+                        "#!/bin/bash\n"
+                        f"printf '%s\\n' \"$1\" >> {shlex.quote(os.fspath(calls))}\n"
+                        f"printf '%s' {shlex.quote(phase)}\n",
+                        encoding="utf-8",
+                    )
+                    helper.chmod(0o755)
+                    setup = python_native_setup(root)
+                    stderr = io.StringIO()
+                    with mock.patch.object(INFRA_SETUP, "HOST_ROOT", root), redirect_stderr(stderr):
+                        self.assertFalse(setup.run_native_monitor_authority_routine(operation))
+                    self.assertIn(phrase, stderr.getvalue())
+                    self.assertIn(NATIVE_RECOVERY_COMMAND, stderr.getvalue())
+                    # The routine adapter only asks for a decision; it never repairs.
+                    self.assertEqual([f"{operation}-decision"],
+                                     calls.read_text(encoding="utf-8").splitlines())
 
     def test_docker_deploy_executes_recovery_and_doctor_is_attest_only(self) -> None:
         deploy = ROOT / "infra/docker/deploy.sh"
@@ -3452,6 +3684,211 @@ printf 'timeout rc=%s\n' "$timeout_rc"
         )
         self.assertEqual("function diagnostic\n", result.stderr)
 
+    def test_python_setup_decision_capture_is_binary_exact_and_bounded(self) -> None:
+        token = "restart-allowed:complete;reset-invalid-cache=false"
+        cases = (
+            ("exact", f"printf '%s' {shlex.quote(token)}", 0, True),
+            ("extra-lf", f"printf '%s\\n' {shlex.quote(token)}", 0, False),
+            ("extra-blank", f"printf '%s\\n\\n' {shlex.quote(token)}", 0, False),
+            ("truncated", "printf '%s' restart-allowed", 0, False),
+            ("nul", f"printf '%s\\0' {shlex.quote(token)}", 0, False),
+            ("wrong-rc", f"printf '%s' {shlex.quote(token)}", 7, False),
+            ("stderr", f"printf '%s' {shlex.quote(token)}; printf noise >&2", 0, False),
+            ("oversize-stdout", "i=0; while [[ $i -lt 5000 ]]; do printf x; i=$((i+1)); done", 0, False),
+            (
+                "oversize-stderr",
+                f"printf '%s' {shlex.quote(token)}; "
+                "i=0; while [[ $i -lt 5000 ]]; do printf x >&2; i=$((i+1)); done",
+                0,
+                False,
+            ),
+            ("unknown-token", "printf '%s' attest-valid-but-longer", 0, False),
+        )
+        self.assertEqual(4097, INFRA_SETUP.MONITOR_DECISION_LIMIT)
+        self.assertEqual(11.0, INFRA_SETUP.MONITOR_DECISION_TIMEOUT)
+        self.assertEqual(
+            set(CONTROL_AUTH.MONITOR_AUTHORITY_DECISION_TOKENS),
+            set(INFRA_SETUP.MONITOR_DECISION_TOKENS),
+        )
+        for label, producer, producer_rc, expected in cases:
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as temporary:
+                producer_path = Path(temporary) / f"producer-{label}.sh"
+                producer_path.write_text(
+                    "#!/bin/bash\n" + producer + f"\nexit {producer_rc}\n", encoding="utf-8",
+                )
+                producer_path.chmod(0o755)
+                decision = INFRA_SETUP.capture_decision(producer_path, "decision", Path(temporary))
+                self.assertEqual(token if expected else "", decision)
+                self.assertEqual([], list(Path(temporary).glob("http-ztp-monitor-decision.*")))
+
+    def test_python_setup_decision_capture_rejects_and_cleans_detached_holders(self) -> None:
+        token = "restart-allowed:complete;reset-invalid-cache=false"
+        with tempfile.TemporaryDirectory() as temporary:
+            result_root = Path(temporary)
+            helper = result_root / "detached-holder.py"
+            holder_pid_file = result_root / "holder.pid"
+            helper.write_text(
+                f"#!{sys.executable}\n"
+                "import os\n"
+                "from pathlib import Path\n"
+                "import signal\n"
+                "import sys\n"
+                "import time\n"
+                f"os.write(1, {token.encode()!r})\n"
+                "ready_read, ready_write = os.pipe()\n"
+                "first = os.fork()\n"
+                "if first:\n"
+                "    os.close(ready_write)\n"
+                "    os.read(ready_read, 1)\n"
+                "    os._exit(0)\n"
+                "os.close(ready_read)\n"
+                "os.setsid()\n"
+                "second = os.fork()\n"
+                "if second:\n"
+                "    os._exit(0)\n"
+                "Path(sys.argv[1]).write_text(str(os.getpid()), encoding='ascii')\n"
+                "os.write(ready_write, b'1')\n"
+                "os.close(ready_write)\n"
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                "while True:\n"
+                "    time.sleep(60)\n",
+                encoding="utf-8",
+            )
+            helper.chmod(0o755)
+            started = time.monotonic()
+            try:
+                with python_capture_holder_scan():
+                    decision = INFRA_SETUP.capture_decision(helper, os.fspath(holder_pid_file), result_root)
+                elapsed = time.monotonic() - started
+                holder_pid = int(holder_pid_file.read_text(encoding="ascii"))
+                deadline = time.monotonic() + 1.0
+                holder_alive = True
+                while holder_alive and time.monotonic() < deadline:
+                    try:
+                        os.kill(holder_pid, 0)
+                        time.sleep(0.02)
+                    except ProcessLookupError:
+                        holder_alive = False
+            finally:
+                cleanup_recorded_test_processes(holder_pid_file)
+            self.assertEqual("", decision)
+            self.assertFalse(holder_alive, "the escaped holder must be killed")
+            self.assertLess(elapsed, 5.0)
+            self.assertEqual([], list(result_root.glob("http-ztp-monitor-decision.*")))
+
+    def test_python_setup_decision_deadline_kills_and_reaps_process_group(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            result_root = Path(temporary)
+            helper = result_root / "stalled-group.py"
+            process_file = result_root / "processes"
+            helper.write_text(
+                f"#!{sys.executable}\n"
+                "import os\n"
+                "from pathlib import Path\n"
+                "import signal\n"
+                "import sys\n"
+                "import time\n"
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                "child = os.fork()\n"
+                "if child:\n"
+                "    target = Path(sys.argv[1])\n"
+                "    temporary = target.with_name(f'.{target.name}.tmp')\n"
+                "    temporary.write_text(f'{os.getpid()} {child}', encoding='ascii')\n"
+                "    os.replace(temporary, target)\n"
+                "while True:\n"
+                "    time.sleep(60)\n",
+                encoding="utf-8",
+            )
+            helper.chmod(0o755)
+            started = time.monotonic()
+            alive = []
+            try:
+                with mock.patch.object(INFRA_SETUP, "MONITOR_DECISION_TIMEOUT", 1.5):
+                    decision = INFRA_SETUP.capture_decision(helper, os.fspath(process_file), result_root)
+                elapsed = time.monotonic() - started
+                self.assertTrue(process_file.exists())
+                process_ids = tuple(int(value) for value in process_file.read_text(encoding="ascii").split())
+                self.assertEqual(2, len(set(process_ids)))
+                deadline = time.monotonic() + 2
+                alive = list(process_ids)
+                while alive and time.monotonic() < deadline:
+                    still = []
+                    for process_id in alive:
+                        try:
+                            os.kill(process_id, 0)
+                        except ProcessLookupError:
+                            continue
+                        still.append(process_id)
+                    alive = still
+                    if alive:
+                        time.sleep(0.02)
+            finally:
+                cleanup_recorded_test_processes(process_file)
+            self.assertEqual("", decision)
+            self.assertGreaterEqual(elapsed, 1.4)
+            self.assertLess(elapsed, 12.0)
+            self.assertEqual([], alive)
+            self.assertEqual([], list(result_root.glob("http-ztp-monitor-decision.*")))
+
+    def test_python_setup_reader_deadline_survives_holder_kill_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            result_root = Path(temporary)
+            helper = result_root / "unkillable-holder.py"
+            holder_pid_file = result_root / "holder.pid"
+            helper.write_text(
+                f"#!{sys.executable}\n"
+                "import os\n"
+                "from pathlib import Path\n"
+                "import signal\n"
+                "import sys\n"
+                "import time\n"
+                "os.write(1, b'restart-allowed:complete;reset-invalid-cache=false')\n"
+                "ready_read, ready_write = os.pipe()\n"
+                "if os.fork():\n"
+                "    os.close(ready_write)\n"
+                "    os.read(ready_read, 1)\n"
+                "    os._exit(0)\n"
+                "os.setsid()\n"
+                "Path(sys.argv[1]).write_text(str(os.getpid()), encoding='ascii')\n"
+                "os.write(ready_write, b'1')\n"
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                "while True:\n"
+                "    time.sleep(60)\n",
+                encoding="utf-8",
+            )
+            helper.chmod(0o755)
+            failed_kills = []
+
+            def failed_holder_kill(holder_path, identities):
+                failed_kills.append(holder_path)
+                return False
+
+            started = time.monotonic()
+            try:
+                with mock.patch.object(INFRA_SETUP, "MONITOR_DECISION_TIMEOUT", 0.75), \
+                        mock.patch.object(INFRA_SETUP, "terminate_descriptor_holders", failed_holder_kill):
+                    decision = INFRA_SETUP.capture_decision(helper, os.fspath(holder_pid_file), result_root)
+                elapsed = time.monotonic() - started
+                os.kill(int(holder_pid_file.read_text(encoding="ascii")), 0)
+            finally:
+                cleanup_recorded_test_processes(holder_pid_file)
+            self.assertEqual("", decision)
+            self.assertTrue(failed_kills)
+            self.assertGreaterEqual(elapsed, 0.20)
+            self.assertLess(elapsed, 2.0)
+            self.assertEqual([], list(result_root.glob("http-ztp-monitor-decision.*")))
+
+    def test_python_setup_capture_bounds_bytes_and_isolates_the_helper(self) -> None:
+        source = inspect.getsource(INFRA_SETUP.capture_decision)
+        for required in (
+            "start_new_session=True", "pass_fds=(holder_fd,)", "MONITOR_DECISION_LIMIT",
+            "kill_process_group(process.pid)", "terminate_descriptor_holders(holder_path, identities)",
+            "reader.drain(deadline)", 'prefix="http-ztp-monitor-decision."',
+        ):
+            self.assertIn(required, source)
+        self.assertIn('glob.glob("/proc/[0-9]*/fd/[0-9]*")', inspect.getsource(INFRA_SETUP.terminate_descriptor_holders))
+        self.assertNotIn("shell=True", source)
+
     def test_shared_helper_alone_maps_structured_recovery_decisions(self) -> None:
         warning = CONTROL_AUTH.MONITOR_AUTHORITY_RECOVERY_WARNING + "\n"
         cleanup_warning = (
@@ -3575,6 +4012,17 @@ printf 'timeout rc=%s\n' "$timeout_rc"
             r'printf .*MONITOR_AUTHORITY_RECOVERY_WARNING.*>&2',
         )
 
+    def test_python_setup_publishes_the_exact_reset_warning_once(self) -> None:
+        warning = CONTROL_AUTH.MONITOR_AUTHORITY_RECOVERY_WARNING
+        setup = INFRA_SETUP_PATH.read_text(encoding="utf-8")
+        self.assertEqual(1, setup.count(warning))
+        self.assertEqual(warning, INFRA_SETUP.MONITOR_AUTHORITY_RECOVERY_WARNING)
+        self.assertIn("reset-invalid-cache=true", setup)
+        # Published once, to the operator (stderr) and the setup log alike.
+        self.assertEqual(1, setup.count("self.both_streams(MONITOR_AUTHORITY_RECOVERY_WARNING)"))
+        self.assertIn("print(text, file=sys.stderr", inspect.getsource(INFRA_SETUP.InfraSetup.both_streams))
+        self.assertIn("self.to_log(text)", inspect.getsource(INFRA_SETUP.InfraSetup.both_streams))
+
     def test_cgi_has_no_second_serializer_or_semantic_constant_owner(self) -> None:
         source = CGI_PATH.read_text(encoding="utf-8")
         tree = ast.parse(source)
@@ -3608,7 +4056,7 @@ printf 'timeout rc=%s\n' "$timeout_rc"
             "N=3 is not proof of an attacker",
             "same-identity breaker N=1→2→3",
             "automatic repair loops are forbidden",
-            "sudo ./infra/infra-setup.sh --recover-monitor-authority",
+            NATIVE_RECOVERY_COMMAND,
             "sudo ./infra/docker/deploy.sh recover-monitor-authority",
             "never manually unlink/chmod/rewrite",
             "exactly one fixed warning",
@@ -3633,7 +4081,8 @@ printf 'timeout rc=%s\n' "$timeout_rc"
         )
         required_members = {
             "tools/control-auth.py", "monitor/ztp-monitor-control.cgi",
-            "infra/infra-setup.sh", "infra/infra-teardown.sh",
+            "infra/infra-setup.py", "infra/infra-setup.sh", "infra/ubuntu24_host.py",
+            "infra/infra-teardown.sh",
             "infra/docker/deploy.sh", "infra/docker/hostlock.py",
             "infra/docker/entrypoint.py", "infra/docker/activate.py",
             "infra/docker/hostctl.py",

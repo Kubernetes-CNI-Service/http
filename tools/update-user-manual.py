@@ -170,7 +170,7 @@ OPERATOR_EXAMPLES = {
     "tools/deploy-shared-artifacts.py": "sudo python3 -B tools/deploy-shared-artifacts.py <bundle.tar> --verify-only",
     "infra/check_infra.py": "python3 -B infra/check_infra.py --host <management-server>",
     "infra/deploy_infra.py": "python3 -B infra/deploy_infra.py --help",
-    "infra/infra-setup.sh": "sudo bash infra/infra-setup.sh --help",
+    "infra/infra-setup.py": "sudo python3 -B infra/infra-setup.py --help",
     "infra/infra-teardown.sh": "sudo bash infra/infra-teardown.sh --help",
     "infra/docker/deploy.sh": "sudo ./infra/docker/deploy.sh doctor",
     "ztp/manual-ztp.py": "sudo python3 -B ztp/manual-ztp.py <device> -p <project> --prod",

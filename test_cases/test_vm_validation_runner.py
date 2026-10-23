@@ -1129,18 +1129,19 @@ class VmFullSystemdProfileTests(unittest.TestCase):
             self.assertIn("broken.py", "\n".join(errors))
             self.assertIn("broken.sh", "\n".join(errors))
 
-    def test_apache_boundary_is_extracted_from_managed_heredoc(self) -> None:
+    def test_apache_boundary_is_read_from_the_setup_constant_without_running_it(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            source = Path(temporary) / "infra-setup.sh"
+            source = Path(temporary) / "infra-setup.py"
+            marker = Path(temporary) / "executed"
             source.write_text(
-                "before\n"
-                "  cat <<'APACHE_PUBLIC_BOUNDARY_EOF'\n"
-                "# HTTP-ZTP-PUBLIC-BOUNDARY-V1\n"
+                f"open({str(marker)!r}, 'w').write('ran')\n"
+                "BEFORE = 1\n"
+                "APACHE_PUBLIC_BOUNDARY = r\'\'\'# HTTP-ZTP-PUBLIC-BOUNDARY-V1\n"
                 "<Directory \"/var/www/html\">\n"
                 "    Options -Indexes\n"
                 "</Directory>\n"
-                "APACHE_PUBLIC_BOUNDARY_EOF\n"
-                "after\n",
+                "\'\'\'\n"
+                "AFTER = 2\n",
                 encoding="utf-8",
             )
 
@@ -1153,6 +1154,7 @@ class VmFullSystemdProfileTests(unittest.TestCase):
                 b'</Directory>\n',
                 payload,
             )
+            self.assertFalse(marker.exists())
 
     def test_installed_cgi_contract_requires_hash_and_executable_mode(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

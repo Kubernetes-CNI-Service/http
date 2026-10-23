@@ -327,9 +327,10 @@ def generate_stage_script(*,address,private_logs_root,stage=_STAGE):
 
 def main(argv=None):
     parser=argparse.ArgumentParser(description="Generate only one fixed UFM read-only stage probe")
-    parser.add_argument("--address",required=True)
-    parser.add_argument("--private-logs-root",required=True,type=Path)
-    parser.add_argument("--stage",default=_STAGE)
+    parser.add_argument("--address",required=True,help="UFM management IPv4 of one current CSV member")
+    parser.add_argument("--private-logs-root",required=True,type=Path,
+        help="private xdr-initial-setup-logs root that receives the generated script and manifest")
+    parser.add_argument("--stage",default=_STAGE,help="fixed stage name; only the read-only preflight is accepted")
     args=parser.parse_args(argv)
     try:
         result=generate_stage_script(address=args.address,private_logs_root=args.private_logs_root,stage=args.stage)

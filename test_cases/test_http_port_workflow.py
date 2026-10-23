@@ -168,9 +168,10 @@ class HttpPortWorkflowTests(unittest.TestCase):
             global_yaml = root / "01-global.yaml"
             subnet_csv = root / "02-dhcp-subnet_config.csv"
             subnet_csv.write_text(SUBNET, encoding="utf-8")
-            setup = root / "infra-setup.sh"
+            setup = root / "infra-setup.py"
             teardown = root / "infra-teardown.sh"
-            setup.write_text("#!/bin/bash\n", encoding="utf-8")
+            setup.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+            (root / "ubuntu24_host.py").write_text("", encoding="utf-8")
             teardown.write_text("#!/bin/bash\n", encoding="utf-8")
             (root / "infra-neutral.conf").write_text(
                 "DNS=8.8.8.8\nNTP=ntp.ubuntu.com\nTIMEZONE=Etc/UTC\n",

@@ -47,6 +47,7 @@ SHELL_HELP_ENTRYPOINTS = (
 # parser instead of argparse.  Their help paths still form part of the same
 # non-mutating CLI contract and therefore need explicit coverage.
 MANUAL_HELP_ENTRYPOINTS = (
+    "infra/infra-setup.py",
     "tools/lldp-analyze-tool/build_report.py",
     "ztp/backup/yaml-collect.py",
     "ztp/config/cumulus/d-hostname2mac.py",

@@ -141,7 +141,7 @@ class IbProducerAuthorityWorkflowTests(ProdCycleFixture, unittest.TestCase):
                 "hostname,type,eth0_ip\nleaf01,ib,192.0.2.11\n", encoding="utf-8",
             )
             plan = {"eth": [], "spx": [], "ib": ["leaf01|192.0.2.11"],
-                    "nv": [], "dynamic_identities": []}
+                    "nv": [], "dynamic_identities": [], "ufm": []}
             binding = {"authority_sha256": "a" * 64, "roles": []}
             observed = []
 
@@ -332,7 +332,7 @@ class IbProducerAuthorityWorkflowTests(ProdCycleFixture, unittest.TestCase):
                 "ib_analysis": binding,
             }
             plan = {"eth": [], "spx": [], "ib": ["leaf01|192.0.2.11"],
-                    "nv": [], "dynamic_identities": []}
+                    "nv": [], "dynamic_identities": [], "ufm": []}
             context.update({
                 "target_plan": plan,
                 "target_plan_sha256": hashlib.sha256(EMITTER.canonical(plan)).hexdigest(),

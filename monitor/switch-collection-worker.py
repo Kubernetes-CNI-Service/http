@@ -57,6 +57,7 @@ from project_contract import (
     COLLECTION_CYCLE_MAX_FAILED_DEVICE_TEXT_BYTES,
     YAML_BACKUP_FAILED_DEVICE_OPERATIONS,
     _validate_collection_cycle_legacy_result,
+    setup_collection_link_hop,
     build_collection_cycle_identity,
     canonical_collection_cycle_json,
     collection_cycle_project_key,
@@ -66,9 +67,12 @@ from project_contract import (
     validate_collection_cycle_identity,
     validate_collection_cycle_result,
 )
+from tools.log_rotation import rotate as rotate_log_file
 
 
 STATUS_DIR = HTTP_ROOT / "monitor/status"
+# 11-load.py starts the worker with stdout appended to this file; under Docker supervisord writes it
+WORKER_LOG = STATUS_DIR / "switch-collection.log"
 REQUEST_FILE = STATUS_DIR / "switch-collection.request"
 STATUS_FILE = STATUS_DIR / "switch-collection.status.json"
 PID_FILE = STATUS_DIR / "switch-collection.pid"
@@ -2348,9 +2352,10 @@ def _collection_artifact_path(root: Path, relative: object) -> Path:
     candidate = root
     for part in pure.parts:
         candidate = candidate / part
-        if candidate.is_symlink():
+        # setup's own collection output link is the one walkable hop (R0, 2026-10-23)
+        if candidate.is_symlink() and not setup_collection_link_hop(root, candidate):
             raise ValueError("collection artifact path traverses a symlink")
-    if not candidate.is_file():
+    if not candidate.is_file() or candidate.is_symlink():
         raise ValueError("collection artifact is missing")
     return candidate
 
@@ -2403,6 +2408,18 @@ def _collection_target_plan_matches_sources(
             ):
                 return False
         if len({name.casefold() for name, _ip in parsed}) != len(parsed):
+            return False
+        # UFMs (owner 2026-10-21) belong to the infiniband slot only, exactly as the frozen
+        # inventory lists them; cron.sh keeps their results out of the switch result.
+        expected_ufm = [
+            f'{row["hostname"].strip()}|{row["eth0_ip"].strip()}' for row in rows
+            if row.get("type", "").strip().lower() == "server_ufm"
+            and row["hostname"].strip() and not row["hostname"].strip().startswith("#")
+            and row.get("eth0_ip", "").strip().lower() not in {"", "na"}
+        ] if area == "infiniband" else []
+        # A plan frozen before the UFM key existed (five keys) planned no UFM; its recorded digest is
+        # never rewritten, so it is checked as it was (codex review 2026-10-22).
+        if "ufm" in plan and plan["ufm"] != expected_ufm:
             return False
         if area == "ethernet":
             expected_links = [row["hostname"].strip() for row in static
@@ -2545,7 +2562,7 @@ def _collection_frozen_plan_sources_match(
 
 def _collection_validate_artifact_roles(
     evidence: dict, *, root: Path, child: dict, inventory: bytes,
-    context: dict | None = None,
+    context: dict | None = None, ufm_run_binding: dict | None = None,
 ) -> bool:
     if set(evidence) != {"roles"} or not isinstance(evidence["roles"], list):
         return False
@@ -2554,12 +2571,17 @@ def _collection_validate_artifact_roles(
     ib_analysis = context is not None and "ib_analysis" in context
     if activity and ib_analysis:
         return False
+    if ufm_run_binding is not None and (context is None or activity or ib_analysis):
+        return False
     expected_roles = [*_COLLECTION_ARTIFACT_ROLES]
     if activity:
         expected_roles.append("activity_observation")
     if ib_analysis:
         from monitor.collection_ib_producer import IB_ROLE_NAMES
         expected_roles.extend(IB_ROLE_NAMES)
+    if ufm_run_binding is not None:
+        from monitor.collection_ufm_run_binding import UFM_RUN_ROLE_NAMES
+        expected_roles.extend(UFM_RUN_ROLE_NAMES)
     if len(roles) != len(expected_roles) or [
         item.get("role") if isinstance(item, dict) else None for item in roles
     ] != expected_roles:
@@ -2678,6 +2700,19 @@ def _collection_validate_artifact_roles(
             return False
         if verified_ib_roles != roles[3:]:
             return False
+    if ufm_run_binding is not None:
+        # REQ7 R1: the emitter bound this cycle's UFM run; replay it from the files, never trust it.
+        from monitor.collection_ufm_run_binding import (
+            UfmRunBindingHold, validate_ufm_run_binding,
+        )
+        if slot != "infiniband/prod":
+            return False
+        try:
+            validate_ufm_run_binding(
+                context["identity"], ufm_run_binding, roles[3:], http_root=root,
+            )
+        except UfmRunBindingHold:
+            return False
     return True
 
 
@@ -2704,12 +2739,19 @@ def _collection_slot_artifacts_match(
             "identity", "source_slot", "state", "planned", "succeeded",
             "failed_count", "input_inventory_sha256", "evidence"
         }
+        # Present only when the UFM lane's run of this cycle succeeded (REQ7 R1); replayed below.
+        ufm_run_binding = (identity_envelope.get("ufm_run_binding")
+                           if isinstance(identity_envelope, dict) else None)
+        if ufm_run_binding is not None:
+            expected_envelope_keys.add("ufm_run_binding")
         if context is not None:
             plan = context["target_plan"]
             plan_raw = _canonical_json_line(plan)
-            if (not isinstance(plan, dict) or set(plan) != {
-                "eth", "spx", "ib", "nv", "dynamic_identities"
-            } or hashlib.sha256(plan_raw).hexdigest()
+            # Six keys since 2026-10-21; a cycle recorded before that keeps its five-key plan.
+            if (not isinstance(plan, dict) or set(plan) not in (
+                {"eth", "spx", "ib", "nv", "dynamic_identities", "ufm"},
+                {"eth", "spx", "ib", "nv", "dynamic_identities"},
+            ) or hashlib.sha256(plan_raw).hexdigest()
                     != context["target_plan_sha256"]):
                 return False
             expected_envelope_keys.add("target_plan_sha256")
@@ -2752,11 +2794,13 @@ def _collection_slot_artifacts_match(
                         "expected_topology_sha256", "attestation_sha256",
                     )
                 }
+        if ufm_run_binding is not None:
+            expected_envelope["ufm_run_binding"] = ufm_run_binding
         if identity_envelope != expected_envelope:
             return False
         if not _collection_validate_artifact_roles(
             manifest, root=HTTP_ROOT, child=child, inventory=inventory_content,
-            context=context,
+            context=context, ufm_run_binding=ufm_run_binding,
         ):
             return False
     except (OSError, TypeError, ValueError, KeyError, UnicodeError, json.JSONDecodeError):
@@ -3335,7 +3379,7 @@ def run_collection_slots(
                     if _canonical_json_line(plan) != plan_raw:
                         raise ValueError("collector target plan is noncanonical")
                     if not isinstance(plan, dict) or set(plan) != {
-                        "eth", "spx", "ib", "nv", "dynamic_identities"
+                        "eth", "spx", "ib", "nv", "dynamic_identities", "ufm"
                     }:
                         raise ValueError("collector target plan shape is invalid")
                     context["target_plan"] = plan
@@ -4372,6 +4416,25 @@ def parser() -> argparse.ArgumentParser:
     return result
 
 
+def rotate_own_log(stdout_fd: int | None = None) -> None:
+    """Owner 2026-10-22: whoever writes a log rotates it (tools/log_rotation.py). The worker rotates
+    switch-collection.log only when its own stdout is that file (started by 11-load.py, appending);
+    under Docker its stdout is supervisord's pipe and supervisord rotates the log."""
+    try:
+        written = os.fstat(sys.stdout.fileno() if stdout_fd is None else stdout_fd)
+        log_file = os.stat(WORKER_LOG)
+    except (OSError, ValueError, AttributeError):
+        return
+    if (written.st_dev, written.st_ino) != (log_file.st_dev, log_file.st_ino):
+        return
+    try:
+        message = rotate_log_file(WORKER_LOG)
+    except OSError as exc:
+        message = f"{WORKER_LOG.name} 压缩失败，原文件保留: {exc}"
+    if message:
+        print(f"[{timestamp()}] [LOG] {message}", flush=True)
+
+
 def main() -> int:
     global _SHUTDOWN_SIGNAL
     _SHUTDOWN_SIGNAL = None
@@ -4407,6 +4470,7 @@ def main() -> int:
     memory_socket, socket_identity = open_memory_socket()
     try:
         while not _shutdown_requested():
+            rotate_own_log()
             try:
                 messages = receive_memory_requests(memory_socket)
             except ValueError as exc:

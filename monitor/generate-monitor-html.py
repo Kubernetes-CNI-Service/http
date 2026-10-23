@@ -22,6 +22,7 @@ from contextlib import contextmanager
 import csv
 from decimal import Decimal, InvalidOperation
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -59,6 +60,7 @@ from ztp.dynamic_air_inventory import dynamic_air_devices
 from ztp.config_sync_authority import monitor_observation_allows_completion
 from tools.ufm_collection_pipeline import validated_receipts as validated_ufm_receipts
 from tools.ufm_collection_contract import CollectionError, collection_plan as ufm_collection_plan
+from tools.log_rotation import rotate as rotate_log_file
 
 # ── 路径配置 ──────────────────────────────────────────────────────────────────
 BASE_DIR     = Path(os.path.dirname(os.path.abspath(__file__)))
@@ -70,6 +72,7 @@ ETH_INFO_DIR = ETH_MON_DIR / "eth-info"
 SPX_LINK_DIR = ETH_MON_DIR / "spx-link"
 IB_INFO_DIR  = IB_MON_DIR  / "ib-info"
 IBL_LINK_DIR = IB_MON_DIR  / "ib-link"
+UFM_INFO_DIR = IB_MON_DIR  / "ufm-info"
 NV_INFO_DIR  = NV_MON_DIR  / "nvsw-info"
 NVL_LINK_DIR = NV_MON_DIR  / "nvsw-link"
 OUTPUT       = BASE_DIR / "monitor.html"
@@ -273,6 +276,16 @@ def log(msg: str) -> None:
     print(line, flush=True)
     with open(LOG_FILE, "a") as f:
         f.write(line + "\n")
+
+
+def rotate_own_log() -> None:
+    """Owner 2026-10-22: whoever writes a log rotates it (tools/log_rotation.py: 10 MB, 7 copies)."""
+    try:
+        message = rotate_log_file(LOG_FILE)
+    except OSError as exc:
+        message = f"{LOG_FILE.name} 压缩失败，原文件保留: {exc}"
+    if message:
+        log(f"[LOG] {message}")
 
 
 @contextmanager
@@ -1482,6 +1495,31 @@ def read_host_csv(path: Path, types: set) -> list:
     return hosts
 
 
+# ZTP 报告只展示交换机：eth_jump 是跳板；server/server_mgmt 是管理服务器；
+# server_ufm 是 UFM，由 UFM 区块展示，不进 ZTP 报告（owner 2026-10-19..22）。
+ZTP_REPORT_EXCLUDED_TYPES = frozenset({"eth_jump", "server", "server_mgmt", "server_ufm"})
+
+
+def ztp_report_excluded_hostnames(devices_csv: Path) -> set[str]:
+    """Return casefolded CSV hostnames whose rows never belong in the ZTP report."""
+    return {
+        hostname.casefold()
+        for hostname in read_host_csv(devices_csv, set(ZTP_REPORT_EXCLUDED_TYPES))
+    }
+
+
+def ztp_report_devices(devices, excluded_hostnames: set[str]) -> list[dict]:
+    """Keep ZTP report rows that are switches by report type and by CSV hostname."""
+    return [
+        device for device in devices
+        if isinstance(device, dict)
+        and str(device.get("type") or "").strip().casefold()
+        not in ZTP_REPORT_EXCLUDED_TYPES
+        and str(device.get("hostname") or "").strip().casefold()
+        not in excluded_hostnames
+    ]
+
+
 def match_inventory_metadata(
     hostname: str, inventory: dict[str, dict[str, str]],
 ) -> dict[str, str]:
@@ -1510,6 +1548,39 @@ def host_matched(log_host: str, info_hostnames) -> bool:
         if hu == lh or hu.endswith("-" + lh):
             return True
     return False
+
+
+def align_with_inventory(
+    devices: list[dict], inventory_path: Path, types: set, sw_type: str, label: str,
+    attempt_time: str, *, device_kind: str = "",
+) -> list[dict]:
+    """IB/NVL/UFM 按 Ethernet 的清单规则对齐一个已读取的归档（owner 2026-10-21）。
+
+    归档中已不在当前清单里的设备不显示；清单中有而本批次没有返回的设备显示为缺失。
+    清单文件不存在时保持归档原样，不把所有设备当成旧设备。
+    """
+    if not inventory_path.is_file():
+        return devices
+    expected = read_host_csv(inventory_path, types)
+    current = {hostname.casefold() for hostname in expected}
+    kept = []
+    for device in devices:
+        if str(device.get("hostname") or "").casefold() not in current:
+            log(f"[{label}] 忽略不在当前清单中的旧归档设备: {device.get('hostname', '')}")
+            continue
+        kept.append(device)
+    found = {device["hostname"] for device in kept}
+    for hostname in expected:
+        if host_matched(hostname, found):
+            continue
+        log(f"[{label}] 缺失设备: {hostname}")
+        missing = make_missing_switch(hostname, sw_type)
+        missing["collection_attempt_time"] = attempt_time
+        if device_kind:
+            missing["device_kind"] = device_kind
+        kept.append(missing)
+        found.add(hostname)
+    return kept
 
 
 def make_missing_switch(hostname: str, sw_type: str) -> dict:
@@ -1648,7 +1719,8 @@ def group_switches_by_role(switches: list[dict]) -> list[tuple[str, list[dict]]]
     """Group a network category by role with stable network-layer ordering."""
     grouped: dict[str, list[dict]] = {}
     for switch in switches:
-        grouped.setdefault(switch_role_group(switch["hostname"]), []).append(switch)
+        role = "UFM" if switch.get("device_kind") == "ufm" else switch_role_group(switch["hostname"])
+        grouped.setdefault(role, []).append(switch)
     return sorted(
         grouped.items(),
         key=lambda item: (_ROLE_ORDER.get(item[0], 98), _nat_key(item[0])),
@@ -1943,6 +2015,24 @@ def topology_report_environments(report: dict) -> set[str]:
     return {"production"}
 
 
+def ufm_report_collection(report_path: Path) -> str:
+    """The UFM run behind an IB report, from the receipt infiniband/monitor/post-collect.py writes beside
+    it (owner 2026-10-22: which run, which UFM, whether iblinkinfo stood in). Only a receipt naming this
+    report's bytes counts; anything else shows nothing."""
+    receipt_path = report_path.with_name(report_path.name[:-len(".xlsx")] + ".receipt.json")
+    try:
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        report = receipt["report"]
+        if (receipt.get("schema") != "ufm-ib-report-receipt-v1" or report.get("name") != report_path.name
+                or report.get("sha256") != hashlib.sha256(report_path.read_bytes()).hexdigest()):
+            return ""
+        kind = ("iblinkinfo（降级：ibdiagnet 连续失败）" if receipt.get("degraded")
+                else str(receipt.get("kind", "")))
+        return f"UFM {receipt['node']} · {kind} · run-id {receipt['run_id']}"
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return ""
+
+
 def load_topology_validation(directory: Path, network: str, scope: str = "all") -> dict:
     """分别选取 AIR/Production 最新报告并合并环境内的结果。"""
     paths = find_topology_reports(directory, network)
@@ -2041,8 +2131,11 @@ def load_topology_validation(directory: Path, network: str, scope: str = "all") 
             "href": report["href"],
         })
     first_report = unique_reports[0] if unique_reports else None
+    collection = "；".join(filter(None, (ufm_report_collection(Path(report["path"])) for report in unique_reports
+                                         if report.get("path"))))
     return {
         "path": first_report["path"] if first_report else None,
+        "collection": collection,
         "source": source or "（无数据）",
         "generated": generated or "—",
         "result": result,
@@ -2683,6 +2776,7 @@ def render_topology_panel(
       <strong>{escape(title)}</strong>
       &nbsp;·&nbsp; 最新报告：<strong>{escape(topology.get('source', '（无数据）'))}</strong>
       &nbsp;·&nbsp; 生成时间：<strong>{escape(topology.get('generated', '—'))}</strong>
+      {f"&nbsp;·&nbsp; 采集：<strong>{escape(topology['collection'])}</strong>" if topology.get('collection') else ""}
     </span>
     <span class="topo-result {result_cls}">{escape(result)}</span>
     <span class="topo-count topo-matching">Matching {counts.get('Matching', 0)}</span>
@@ -2807,14 +2901,14 @@ def find_latest_eth_tars(info_dir: Path) -> dict[str, Path]:
     return result
 
 
-def extract_info_files(tar_path: Path) -> dict[str, str]:
-    """返回 {hostname: content} ── 来自 tar.gz 内所有 *.info 文件。"""
+def extract_info_files(tar_path: Path, suffix: str = ".info") -> dict[str, str]:
+    """返回 {hostname: content} ── 来自 tar.gz 内所有 *<suffix> 文件（默认 .info）。"""
     result = {}
     with tarfile.open(tar_path, "r:gz") as tf:
         for member in tf.getmembers():
-            if not member.name.endswith(".info"):
+            if not member.name.endswith(suffix):
                 continue
-            hostname = os.path.basename(member.name)[:-5]  # 去掉 .info
+            hostname = os.path.basename(member.name)[:-len(suffix)]  # 去掉后缀
             f = tf.extractfile(member)
             if f:
                 result[hostname] = f.read().decode("utf-8", errors="replace")
@@ -3645,8 +3739,410 @@ def parse_info_file(
     return info
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# UFM-INFO 解析（infiniband/monitor/ufm-info.sh；列对照见 UFM-MONITOR.md 第 8 节）
+# ══════════════════════════════════════════════════════════════════════════════
+
+# 只统计承载业务地址的以太网口；容器网桥、带外 idrac 虚拟口不计入 Interfaces。
+_UFM_HIDDEN_INTERFACES = re.compile(r"^(?:lo|docker\d*|br-\S+|veth\S+|virbr\S+|idrac)$")
+
+
+def _ufm_section(secs: dict[str, str], command: str) -> str:
+    """单条命令输出；最后一节去掉快照结尾的 Collect complete 页脚。"""
+    return re.split(r"\n={10,}\n", secs.get(command, ""), maxsplit=1)[0].strip()
+
+
+def _ufm_count_label(values: list[str]) -> str:
+    """相同取值折叠为 ``值 ×N``，不同取值逐个列出。"""
+    values = [value for value in values if value]
+    distinct = list(dict.fromkeys(values))
+    return " / ".join(
+        f"{value} ×{values.count(value)}" if values.count(value) > 1 else value
+        for value in distinct
+    )
+
+
+def _ufm_sdr_rows(text: str) -> list[tuple[str, str, str, str]]:
+    """``ipmitool sdr type …`` 行 → (名称, 状态, entity, 读数)。"""
+    rows = []
+    for line in text.splitlines():
+        parts = [part.strip() for part in line.split("|")]
+        if len(parts) == 5 and parts[0]:
+            rows.append((parts[0], parts[2].casefold(), parts[3], parts[4]))
+    return rows
+
+
+def _ufm_ibstat(text: str) -> tuple[list[dict], list[dict]]:
+    """解析 ibstat 的 HCA 与端口；smi* 是同一 HCA 的管理视图，不重复统计。"""
+    hcas: list[dict] = []
+    ports: list[dict] = []
+    hca: Optional[dict] = None
+    port: Optional[dict] = None
+    for line in text.splitlines():
+        match = re.match(r"^CA '([^']+)'", line)
+        if match:
+            name = match.group(1)
+            hca = None if name.startswith("smi") else {"name": name, "type": "", "firmware": ""}
+            if hca is not None:
+                hcas.append(hca)
+            port = None
+            continue
+        if hca is None:
+            continue
+        stripped = line.strip()
+        match = re.match(r"^Port (\d+):$", stripped)
+        if match:
+            port = {"name": f'{hca["name"]}/{match.group(1)}', "state": "", "physical": "", "sm_lid": ""}
+            ports.append(port)
+            continue
+        key, separator, value = stripped.partition(":")
+        if not separator:
+            continue
+        value = value.strip()
+        if port is None and key == "CA type":
+            hca["type"] = value
+        elif port is None and key == "Firmware version":
+            hca["firmware"] = value
+        elif port is not None and key == "State":
+            port["state"] = value
+        elif port is not None and key == "Physical state":
+            port["physical"] = value
+        elif port is not None and key == "SM lid":
+            port["sm_lid"] = value
+    return hcas, ports
+
+
+def _ufm_disk_revisions(text: str) -> list[str]:
+    """``lsblk -d -o NAME,MODEL,SERIAL,REV,SIZE,TYPE`` 中每块 disk 的固件 REV。
+
+    MODEL 含空格，按表头 REV 的起始列取值（lsblk 文本列左对齐）。
+    """
+    lines = [line for line in text.splitlines() if line.strip()]
+    if not lines or "REV" not in lines[0].split():
+        return []
+    column = re.search(r"(?<!\S)REV(?!\S)", lines[0]).start()
+    revisions = []
+    for line in lines[1:]:
+        parts = line.split()
+        if not parts or parts[-1] != "disk":
+            continue
+        starts_here = len(line) > column and not line[column].isspace() and (
+            column == 0 or line[column - 1].isspace()
+        )
+        revisions.append(line[column:].split()[0] if starts_here else "")
+    return revisions
+
+
+def _ufm_with_hardware(info: dict, health: str) -> str:
+    """电源/风扇故障把 OK 降为 WARNING。"""
+    return "warning" if health == "ok" and (info["psu_fail"] or info["fan_fail"]) else health
+
+
+def parse_ufm_ha_status(content: str) -> dict:
+    """解析主机经 VIP 采集的 ``ufm_ha_cluster status`` 与 ``ufm_enterprise_sanity.sh``。"""
+    secs = split_sections(content)
+    text = _ufm_section(secs, "ufm_ha_cluster status")
+    sanity = _ufm_section(secs, "ufm_enterprise_sanity.sh")
+
+    def names(*labels: str) -> list[str]:
+        for label in labels:
+            match = re.search(rf"^[\s*]*{label}:\s*\[([^\]]*)\]", text, re.MULTILINE)
+            if match:
+                return match.group(1).split()
+        return []
+
+    status: dict = {
+        "online": names("Online"), "offline": names("OFFLINE"),
+        "masters": names("Masters", "Promoted"), "slaves": names("Slaves", "Unpromoted"),
+        "nodes": 0, "dc": "", "quorum": None, "resources": [], "daemons": {}, "drbd": {},
+        "sanity": None, "sanity_text": sanity,
+    }
+    configured = re.search(r"^[\s*]*(\d+) nodes? configured", text, re.MULTILINE)
+    status["nodes"] = max(int(configured.group(1)) if configured else 0,
+                          len(status["online"]) + len(status["offline"]))
+    dc = re.search(r"^[\s*]*Current DC:\s*(\S+).*partition (with|WITHOUT) quorum", text, re.MULTILINE)
+    if dc:
+        status["dc"], status["quorum"] = dc.group(1), dc.group(2) == "with"
+    for match in re.finditer(r"^\s+(?:\*\s+)?(\S+)\s+\(([^)]*)\):\s+(\S+)(?:\s+(\S+))?\s*$",
+                             text, re.MULTILINE):
+        status["resources"].append(
+            {"name": match.group(1), "state": match.group(3), "node": match.group(4) or ""}
+        )
+    for match in re.finditer(r"^\s+(corosync|pacemaker|pcsd):\s+(\S+)", text, re.MULTILINE):
+        status["daemons"][match.group(1)] = match.group(2)
+    # Older UFM prints `DRBD_CONNECTIVITY: Connected` at the line start; the Pacemaker 2 release on
+    # ufm01 (owner 2026-10-22) indents these lines and brackets the value: `  DRBD_CONNECTIVITY: [Connected]`.
+    for match in re.finditer(
+            r"^[ \t]*(DRBD_CONNECTIVITY|DISK_STATE|DRBD_ROLE|PEER_DISK_STATE|PEER_DRBD_ROLE|VIRTUAL_IP):"
+            r"[ \t]*\[?[ \t]*([^\]\s]+)",
+            text, re.MULTILINE):
+        status["drbd"][match.group(1)] = match.group(2)
+    if sanity:
+        status["sanity"] = bool(re.search(r"Sanity tests completed successfully", sanity))
+    return status
+
+
+def apply_ufm_ha_status(servers: list[dict], content: str) -> None:
+    """用主机上的 HA 状态给每台 UFM 定角色与健康度（owner 2026-10-21：只经 VIP 在主机上采集）。
+
+    主机：资源都 Started、ufm-enterprise 在本机、sanity 通过才是 OK；sanity 失败或资源未运行为 ERROR。
+    备机：ufm-enterprise 在备机上 inactive 是正常的，在 Slaves 中且在线即 OK；离线为 ERROR。
+    DRBD、守护进程、quorum、在线数等集群问题让两台都显示 WARNING。
+    """
+    status = parse_ufm_ha_status(content)
+
+    def short(name: object) -> str:
+        return str(name).split(".", 1)[0].casefold()
+
+    online = {short(name) for name in status["online"]}
+    offline = {short(name) for name in status["offline"]}
+    masters = {short(name) for name in status["masters"]}
+    slaves = {short(name) for name in status["slaves"]}
+    drbd = status["drbd"]
+    cluster_issues: list[str] = []
+    primary_errors: list[str] = []
+    if status["quorum"] is False:
+        cluster_issues.append("集群没有 quorum")
+    if len(online) < status["nodes"]:
+        cluster_issues.append(f'在线 {len(online)}/{status["nodes"]}')
+    for name, state in status["daemons"].items():
+        if not state.startswith("active"):
+            cluster_issues.append(f"{name} {state}")
+    if drbd.get("DRBD_CONNECTIVITY", "Connected") != "Connected":
+        cluster_issues.append(f'DRBD {drbd["DRBD_CONNECTIVITY"]}')
+    for key, label in (("DISK_STATE", "主机"), ("PEER_DISK_STATE", "备机")):
+        if drbd.get(key, "UpToDate") != "UpToDate":
+            cluster_issues.append(f"DRBD {label}磁盘 {drbd[key]}")
+    for resource in status["resources"]:
+        if resource["state"] != "Started":
+            primary_errors.append(f'{resource["name"]} {resource["state"]}')
+    # Owner 2026-10-22: HA is judged by `ufm_ha_cluster status` alone; a failed (or silent)
+    # ufm_enterprise_sanity.sh is only pointed out and changes no health.
+    sanity_note = {False: "提示：ufm_enterprise_sanity 未通过",
+                   None: "提示：ufm_enterprise_sanity 没有输出"}.get(status["sanity"], "")
+
+    sanity_lines = status["sanity_text"].splitlines()
+    details = [
+        f'Current DC: {status["dc"] or "—"}'
+        + {True: "（有 quorum）", False: "（没有 quorum）"}.get(status["quorum"], ""),
+        f'Online: {" ".join(status["online"]) or "—"}'
+        + (f'；OFFLINE: {" ".join(status["offline"])}' if status["offline"] else ""),
+        f'Masters: {" ".join(status["masters"]) or "—"}；Slaves: {" ".join(status["slaves"]) or "—"}',
+        *(f'{item["name"]}: {item["state"]} {item["node"]}'.rstrip() for item in status["resources"]),
+        "守护进程: " + (", ".join(f"{name} {state}" for name, state in status["daemons"].items()) or "—"),
+        "DRBD: " + (", ".join(f"{key}={value}" for key, value in drbd.items() if key != "VIRTUAL_IP") or "—"),
+        f'VIRTUAL_IP: {drbd.get("VIRTUAL_IP", "—")}',
+        f'sanity: {sanity_lines[-1] if sanity_lines else "—"}',
+    ]
+    for server in servers:
+        if server.get("device_kind") != "ufm" or server.get("health") == "missing":
+            continue
+        node = short(server.get("os_hostname") or server["hostname"])
+        problems = list(cluster_issues)
+        if node in offline:
+            role, health = "离线", "error"
+        elif node in masters:
+            role = "主"
+            errors = list(primary_errors)
+            for resource in status["resources"]:
+                if (resource["name"] == "ufm-enterprise" and resource["state"] == "Started"
+                        and short(resource["node"]) != node):
+                    errors.append(f'ufm-enterprise 运行在 {resource["node"]}')
+            problems = errors + problems
+            health = "error" if errors else ("warning" if problems else "ok")
+        elif node in slaves:
+            role, health = "备", "warning" if problems else "ok"
+        elif node in online:
+            role, health = "在线", "warning"
+            problems.append("在线但不是 DRBD 主或备")
+        else:
+            role, health = "不在集群", "warning"
+        server["ha_summary"] = f'{role} · 在线 {len(online)}/{status["nodes"]}'
+        server["ha_ok"] = health == "ok"
+        server["ha_detail"] = "\n".join(details + (["问题: " + "；".join(problems)] if problems else [])
+                                        + ([sanity_note] if sanity_note and role == "主" else []))
+        server["health"] = _ufm_with_hardware(server, health)
+
+
+def parse_ufm_info_file(
+    hostname: str,
+    content: str,
+    expected_collect_utc: Optional[datetime] = None,
+) -> dict:
+    """解析单台 UFM 的 .info，返回与交换机相同键集的 Switch Status 字典。"""
+    info = make_missing_switch(hostname, "UFM")
+    info.update({
+        "device_kind": "ufm", "health": "unknown", "collection_error": "",
+        "collection_attempt_time": "", "inventory_components": [],
+        "ha_summary": "未就绪", "ufm_release": "",
+    })
+    secs = split_sections(content)
+    device_tz = parse_timedate_timezone(_ufm_section(secs, "timedatectl"))
+    match = re.search(r"Collect Time:\s+(.+)", content)
+    if match:
+        info["collect_time"] = convert_collect_time(match.group(1), expected_collect_utc, device_tz)
+
+    manufacturer = _ufm_section(secs, "dmidecode -s system-manufacturer")
+    product = _ufm_section(secs, "dmidecode -s system-product-name")
+    info["system_type"] = product
+    info["model"] = " ".join(value for value in (manufacturer, product) if value)
+    info["serial"] = _ufm_section(secs, "dmidecode -s system-serial-number")
+    info["bios_version"] = _ufm_section(secs, "dmidecode -s bios-version")
+    release = _ufm_section(secs, "cat /etc/ufm-release")
+    info["ufm_release"] = release
+    release_kv = dict(
+        line.split("=", 1) for line in release.splitlines() if "=" in line
+    )
+    info["version"] = release_kv.get("UFM_APPLIANCE") or release_kv.get("UFM_ENTERPRISE", "")
+    info["ssd_version"] = _ufm_count_label(
+        _ufm_disk_revisions(_ufm_section(secs, "lsblk -d -o NAME,MODEL,SERIAL,REV,SIZE,TYPE"))
+    )
+
+    hcas, ports = _ufm_ibstat(_ufm_section(secs, "ibstat"))
+    info["asic"] = hcas[0]["type"] if hcas else ""
+    info["asic_version"] = _ufm_count_label(
+        [f'{hca["type"]} {hca["firmware"]}'.strip() for hca in hcas]
+    )
+    info["ib_asic_count"] = len(hcas)
+    info["ib_asic_type"] = info["asic"]
+
+    # HCA 温度（mget_temp）列入 ASIC Temp；BMC 温度传感器只进卡片的 Temperature。
+    for command in secs:
+        match = re.fullmatch(r"mget_temp -d (mlx5_\d+)", command)
+        reading = re.match(r"\s*(-?\d+(?:\.\d+)?)\s*$", _ufm_section(secs, command))
+        if match and reading:
+            sensor = {"name": match.group(1), "current": float(reading.group(1)),
+                      "critical": None, "maximum": None, "state": ""}
+            info["asic_temperature_details"].append(sensor)
+            info["asic_temperatures"].append(sensor["current"])
+    bmc_sensors = []
+    for name, status, _entity, reading in _ufm_sdr_rows(
+            _ufm_section(secs, "ipmitool sdr type Temperature")):
+        value = re.match(r"(-?\d+(?:\.\d+)?) degrees C", reading)
+        if value and status != "ns":
+            bmc_sensors.append({"name": name, "current": float(value.group(1)),
+                                "critical": None, "maximum": None, "state": status})
+    info["psu_temperature_details"] = [
+        sensor for sensor in bmc_sensors if re.search(r"\bPSU?\d*\b", sensor["name"], re.IGNORECASE)
+    ]
+    info["psu_temperatures"] = [sensor["current"] for sensor in info["psu_temperature_details"]]
+    info["temperature_details"] = info["asic_temperature_details"] + bmc_sensors
+    info["temperature"] = [(sensor["name"], sensor["current"]) for sensor in info["temperature_details"]]
+    if info["temperature"]:
+        info["temp_max"] = max(value for _name, value in info["temperature"])
+
+    # entity 10.N 是第 N 个电源；Fan 只统计有转速读数的风扇（不含 Redundancy 汇总行）。
+    for name, status, entity, reading in _ufm_sdr_rows(
+            _ufm_section(secs, "ipmitool sdr type 'Power Supply'")):
+        if not entity.startswith("10."):
+            continue
+        failed = status != "ok" or re.search(r"fail|lost|error|absent", reading, re.IGNORECASE)
+        info["psu_fail" if failed else "psu_ok"] += 1
+        info["inventory_components"].append({
+            "type": "psu", "name": f'PSU{entity.split(".", 1)[1]}',
+            "state": "ok" if not failed else (reading or status),
+        })
+    for name, status, _entity, reading in _ufm_sdr_rows(_ufm_section(secs, "ipmitool sdr type Fan")):
+        if not reading.endswith("RPM"):
+            continue
+        info["fan_ok" if status == "ok" else "fan_fail"] += 1
+        info["inventory_components"].append({"type": "fan", "name": name, "state": status})
+
+    info["cpu_use"] = parse_cpu_use(_ufm_section(secs, "top -bn2 -d 1"))
+    info["disk_use"] = {
+        path: use for path, use in parse_disk_filesystems(_ufm_section(secs, "df -PT")).items()
+        if not path.startswith(("/var/lib/docker/", "/run/"))
+    }
+    info["mem_use"] = parse_memory_use(_ufm_section(secs, "free -b"))
+    info["ntp_sync"] = parse_ntp_sync(_ufm_section(secs, "timedatectl"))
+    uptime = _ufm_section(secs, "uptime -p")
+    info["uptime"] = uptime.splitlines()[0] if uptime else ""
+
+    # Interfaces：有 IPv4 的以太网口 + 真实 HCA 的 IB 端口。与交换机一致，
+    # 人为关闭（Disabled）的 IB 端口计入总数但不标红。
+    up = 0
+    total = 0
+    downs: list[str] = []
+    for line in _ufm_section(secs, "ip -br addr").splitlines():
+        parts = line.split()
+        if len(parts) < 3 or _UFM_HIDDEN_INTERFACES.match(parts[0].split("@", 1)[0]):
+            continue
+        if not any(re.fullmatch(r"\d+\.\d+\.\d+\.\d+/\d+", part) for part in parts[2:]):
+            continue
+        total += 1
+        if parts[1] in {"UP", "UNKNOWN"}:
+            up += 1
+        else:
+            downs.append(f"{parts[0]} ({parts[1]})")
+    for port in ports:
+        total += 1
+        if port["state"] == "Active":
+            up += 1
+        elif port["physical"] == "LinkUp":
+            # Link up but not Active, e.g. Initializing before any SM assigned a LID; UFM is the SM,
+            # so this is what a UFM shows while ufm-enterprise is not running (owner 2026-10-22).
+            note = "，SM 未分配 LID" if port["sm_lid"] == "0" else ""
+            downs.append(f'{port["name"]} ({port["state"]} / LinkUp{note})')
+        elif port["physical"] != "Disabled":
+            downs.append(f'{port["name"]} ({port["physical"] or port["state"]})')
+    info["interfaces_up"] = up
+    info["interfaces_total"] = total
+    info["interfaces_down_count"] = len(downs)
+    info["interfaces_down"] = downs[:20]
+
+    hostname_lines = _ufm_section(secs, "hostname").splitlines()
+    info["os_hostname"] = hostname_lines[0].strip() if hostname_lines else ""
+    # HA 状态只经 VIP 在主机上采集（apply_ufm_ha_status）；没有时（VIP 无应答）显示「未就绪」，
+    # 健康度按本机 ufm-enterprise 服务：active=ok、failed=error、其他=warning。
+    info["ha_summary"] = "未就绪"
+    info["ha_ok"] = False
+    info["ha_detail"] = "VIP 无应答或未采集到 HA 状态（HA 未就绪）"
+    service = _ufm_section(secs, "systemctl is-active ufm-enterprise").split()
+    state = service[0].casefold() if service else ""
+    info["health"] = _ufm_with_hardware(
+        info, {"active": "ok", "failed": "error"}.get(state, "warning" if state else "unknown")
+    )
+    return info
+
+
+def load_ufm_status(archive_dir: Path) -> tuple[list[dict], str]:
+    """读取最新 ufm-info 归档并补齐 CSV 中缺失的 server_ufm；返回 (列表, 来源名)。"""
+    if not archive_dir.is_dir():
+        log(f"[UFM] 目录不存在: {archive_dir}")
+        return [], ""
+    tar_path = find_latest_tar(archive_dir)
+    if tar_path is None:
+        log("[UFM] 未找到 tar.gz 文件")
+        return [], ""
+    log(f"[UFM] 读取最新归档: {tar_path.name}")
+    archive_time_utc = parse_archive_time_utc(tar_path)
+    attempt_time = format_collection_batch_time(archive_time_utc)
+    servers = []
+    for hostname, content in extract_info_files(tar_path).items():
+        server = parse_ufm_info_file(hostname, content, archive_time_utc)
+        server["collection_attempt_time"] = attempt_time
+        servers.append(server)
+    log(f"[UFM] 找到 {len(servers)} 个 .info 文件")
+    servers = align_with_inventory(
+        servers, IB_LOG, {"server_ufm"}, "UFM", "UFM", attempt_time, device_kind="ufm",
+    )
+    for server in servers:
+        if server["health"] == "missing":
+            server["collection_error"] = "本批次未返回 UFM 采集文件"
+    for reporter, content in sorted(extract_info_files(tar_path, ".ha").items()):
+        log(f"[UFM] HA 状态来自 {reporter}（经 VIP 采集）")
+        apply_ufm_ha_status(servers, content)
+    return servers, tar_path.name
+
+
 def render_bond_multihoming_summary(sw: dict, *, compact: bool = False) -> str:
     """Render EVPN-MH and MLAG bond health without conflating the two sources."""
+    if sw.get("device_kind") == "ufm":
+        # UFM 没有 EVPN/MLAG Bond；同一列显示 HA 状态（owner 2026-10-21）。
+        summary = str(sw.get("ha_summary") or "未就绪")
+        css_class = "i-ok" if sw.get("ha_ok") else ("na" if summary == "未就绪" else "i-warn")
+        return (f'<span class="{css_class}" title="{escape(str(sw.get("ha_detail") or ""))}">'
+                f'HA: {escape(summary)}</span>')
     if sw.get("sw_type") != "ETH":
         return '<span class="na">N/A</span>'
 
@@ -3707,7 +4203,7 @@ def render_eth_card(sw: dict) -> str:
         attempted = bool(sw.get("collection_attempted", True))
         collection_label = "失败" if attempted else "未发起"
         collection_class = "collect-fail" if attempted else "collect-pending"
-        if sw["sw_type"] == "IB":
+        if sw["sw_type"] in {"IB", "UFM"}:
             hdr_cls = "sw-hdr-ib"
         elif sw["sw_type"] == "NVL":
             hdr_cls = "sw-hdr-nv"
@@ -3715,7 +4211,7 @@ def render_eth_card(sw: dict) -> str:
             hdr_cls = ""
         cat_key, _ = classify_host(
             sw["hostname"], sw["sw_type"], sw["health"], sw.get("template", ""),
-            bool(sw.get("dynamic_dhcp")),
+            bool(sw.get("dynamic_dhcp")), device_kind=sw.get("device_kind", ""),
         )
         return f"""
 <div class="sw-card sw-card-miss" style="--hostname-ch:{hostname_chars}"
@@ -3787,13 +4283,18 @@ def render_eth_card(sw: dict) -> str:
     else:
         cnt = sw.get("ib_asic_count", 0)
         typ = escape(sw.get("ib_asic_type", ""))
-        extra_lbl  = "IB ASICs"
+        extra_lbl  = "IB HCAs" if sw.get("device_kind") == "ufm" else "IB ASICs"
         extra_html = f"{cnt} × {typ}" if cnt else "—"
 
     bond_row = ""
     if sw["sw_type"] == "ETH":
         bond_row = (
             '<div class="sw-r"><span class="sw-k">EVPN/MLAG Bond</span>'
+            f'<span>{render_bond_multihoming_summary(sw)}</span></div>'
+        )
+    elif sw.get("device_kind") == "ufm":
+        bond_row = (
+            '<div class="sw-r"><span class="sw-k">HA</span>'
             f'<span>{render_bond_multihoming_summary(sw)}</span></div>'
         )
 
@@ -3812,8 +4313,8 @@ def render_eth_card(sw: dict) -> str:
     else:
         psu_html = "—"
 
-    # 卡片头颜色：ETH 深蓝，IB 紫色，NV 深维
-    if sw["sw_type"] == "IB":
+    # 卡片头颜色：ETH 深蓝，IB（含 UFM）紫色，NV 深维
+    if sw["sw_type"] in {"IB", "UFM"}:
         hdr_cls = "sw-hdr-ib"
     elif sw["sw_type"] == "NVL":
         hdr_cls = "sw-hdr-nv"
@@ -3822,7 +4323,7 @@ def render_eth_card(sw: dict) -> str:
 
     cat_key, _ = classify_host(
         sw["hostname"], sw["sw_type"], sw["health"], sw.get("template", ""),
-        bool(sw.get("dynamic_dhcp")),
+        bool(sw.get("dynamic_dhcp")), device_kind=sw.get("device_kind", ""),
     )
     return f"""
 <div class="sw-card" style="--hostname-ch:{hostname_chars}"
@@ -3863,6 +4364,7 @@ _ETH_CATEGORIES: list[tuple[str, str]] = [
 SWITCH_LIST_COLUMN_COUNT = 21
 
 _IB_CATEGORIES: list[tuple[str, str]] = [
+    ("ib-ufm", "UFM Servers"),          # owner 2026-10-21: IB 组的最上面；无 UFM 时不显示
     ("missing", "未采集 · 可能掉线"),
     ("ib-spine", "Spine"),
     ("ib-leaf",  "Leaf"),
@@ -3910,10 +4412,13 @@ def build_nvlink_categories(switches: list[dict]) -> list[tuple[str, str]]:
 
 def classify_host(
     hostname: str, sw_type: str = "ETH", health: str = "", template: str = "",
-    dynamic_dhcp: bool = False,
+    dynamic_dhcp: bool = False, *, device_kind: str = "",
 ) -> tuple[str, str]:
     """根据主机名和交换机类型返回 (cat_key, cat_label)。"""
     hn = hostname.upper()
+    if device_kind == "ufm":
+        # 未采集到的 UFM 也留在 UFM Servers 内，以 MISSING 行显示。
+        return ("ib-ufm", "UFM Servers")
     if health == "missing" and not dynamic_dhcp:
         return ("missing", "未采集 · 可能掉线")
     role = infer_device_role(hostname)
@@ -4154,7 +4659,7 @@ def render_sw_list_row(sw: dict) -> str:
         )
         cat_key, _ = classify_host(
             sw["hostname"], sw["sw_type"], sw["health"], sw.get("template", ""),
-            bool(sw.get("dynamic_dhcp")),
+            bool(sw.get("dynamic_dhcp")), device_kind=sw.get("device_kind", ""),
         )
         return (
             f'<tr class="lst-row lst-row-miss" data-hn="{hostname.lower()}" data-cat="{cat_key}">'
@@ -4227,7 +4732,7 @@ def render_sw_list_row(sw: dict) -> str:
 
     cat_key, _ = classify_host(
         sw["hostname"], sw["sw_type"], sw["health"], sw.get("template", ""),
-        bool(sw.get("dynamic_dhcp")),
+        bool(sw.get("dynamic_dhcp")), device_kind=sw.get("device_kind", ""),
     )
     return (
         f'<tr class="lst-row" data-hn="{hostname.lower()}" data-cat="{cat_key}">'
@@ -4267,7 +4772,7 @@ def build_switch_list_html(
     for sw in switches:
         key, _ = classify_host(
             sw["hostname"], sw_type, sw.get("health", ""), sw.get("template", ""),
-            bool(sw.get("dynamic_dhcp")),
+            bool(sw.get("dynamic_dhcp")), device_kind=sw.get("device_kind", ""),
         )
         groups.setdefault(key, []).append(sw)
 
@@ -4294,7 +4799,7 @@ def build_switch_list_html(
             sws = [
                 sw for sw in groups.get(cat_key, []) if sw in environment_switches
             ]
-            if cat_key == "missing" and not sws:
+            if cat_key in {"missing", "ib-ufm"} and not sws:
                 continue
             sws_sorted = sorted(sws, key=lambda s: air_first_hostname_key(s["hostname"]))
             cat_cls = "lst-cat lst-cat-miss" if cat_key == "missing" else "lst-cat"
@@ -4324,7 +4829,7 @@ def build_switch_cards_html(
     for sw in switches:
         key, _ = classify_host(
             sw["hostname"], sw_type, sw.get("health", ""), sw.get("template", ""),
-            bool(sw.get("dynamic_dhcp")),
+            bool(sw.get("dynamic_dhcp")), device_kind=sw.get("device_kind", ""),
         )
         groups.setdefault(key, []).append(sw)
 
@@ -4354,7 +4859,7 @@ def build_switch_cards_html(
                 (sw for sw in groups.get(cat_key, []) if sw in environment_switches),
                 key=lambda sw: air_first_hostname_key(sw["hostname"]),
             )
-            if cat_key == "missing" and not sws:
+            if cat_key in {"missing", "ib-ufm"} and not sws:
                 continue
             cat_class = "card-cat card-cat-miss" if cat_key == "missing" else "card-cat"
             html += (
@@ -8357,23 +8862,17 @@ filterTopology('itop-topo');
 def _generate_monitor_html(scope: str = "all") -> None:
     global ENVIRONMENT_SCOPE
     ENVIRONMENT_SCOPE = scope
+    rotate_own_log()
     log("=== generate-monitor-html start ===")
     log(f"[ENV] 页面数据范围: {scope}")
 
-    excluded_monitor_hostnames = {
-        hostname.casefold()
-        for hostname in read_host_csv(DEVICES_CSV, {"eth_jump"})
-    }
+    excluded_monitor_hostnames = ztp_report_excluded_hostnames(DEVICES_CSV)
     ztp_status = load_ztp_status(scope=scope)
     if isinstance(ztp_status, dict):
         ztp_status = dict(ztp_status)
-        ztp_status["devices"] = [
-            device for device in ztp_status.get("devices", [])
-            if isinstance(device, dict)
-            and str(device.get("type") or "").strip().casefold() != "eth_jump"
-            and str(device.get("hostname") or "").strip().casefold()
-            not in excluded_monitor_hostnames
-        ]
+        ztp_status["devices"] = ztp_report_devices(
+            ztp_status.get("devices", []), excluded_monitor_hostnames,
+        )
     if ztp_status.get("available"):
         log(f"[ZTP] 读取最新报告: {ztp_status['source']}")
     else:
@@ -8701,6 +9200,9 @@ def _generate_monitor_html(scope: str = "all") -> None:
     ib_list   = ""
     ib_source = "（无数据）"
     ib_count  = 0
+    ib_error  = ""
+    ib_parsed = False
+    ib_switch_infos: list[dict] = []
     ib_transceiver_temps: dict[
         str, dict[str, tuple[float, Optional[float]]]
     ] = {}
@@ -8723,31 +9225,41 @@ def _generate_monitor_html(scope: str = "all") -> None:
                     switch["collection_attempt_time"] = format_collection_batch_time(
                         archive_time_utc
                     )
+                switch_infos = align_with_inventory(
+                    switch_infos, IB_LOG, {"ib"}, "IB", "IB",
+                    format_collection_batch_time(archive_time_utc),
+                )
                 ib_transceiver_temps = {
                     sw["hostname"]: sw["transceiver_temps"]
                     for sw in switch_infos if sw["transceiver_temps"]
                 }
-                ib_log_hosts = read_host_csv(IB_LOG, {"ib"}) if info_files else []
-                found_names = {sw["hostname"] for sw in switch_infos}
-                for lh in ib_log_hosts:
-                    if not host_matched(lh, found_names):
-                        log(f"[IB] 缺失设备: {lh}")
-                        missing = make_missing_switch(lh, "IB")
-                        missing["collection_attempt_time"] = format_collection_batch_time(
-                            archive_time_utc
-                        )
-                        switch_infos.append(missing)
-                switch_infos.sort(key=lambda s: air_first_hostname_key(s["hostname"]))
-                ib_count = len(switch_infos)
-                ib_cards = build_switch_cards_html(switch_infos, _IB_CATEGORIES, "IB")
-                ib_list  = build_switch_list_html(switch_infos, _IB_CATEGORIES, "IB")
+                ib_switch_infos = switch_infos
+                ib_parsed = True
             except Exception as e:
                 log(f"[IB] 解析失败: {e}")
-                ib_cards = f'<p style="padding:20px;color:#c0392b">解析 ib-info 时出错: {escape(str(e))}</p>'
+                ib_error = f'<p style="padding:20px;color:#c0392b">解析 ib-info 时出错: {escape(str(e))}</p>'
         else:
             log("[IB] 未找到 tar.gz 文件")
     else:
         log(f"[IB] 目录不存在: {IB_INFO_DIR}")
+
+    # UFM Servers 位于 InfiniBand Switches 组的最上面；IB 归档缺失或解析失败都不影响它。
+    try:
+        ufm_infos, ufm_source = load_ufm_status(UFM_INFO_DIR)
+    except Exception as e:
+        log(f"[UFM] 解析失败: {e}")
+        ufm_infos, ufm_source = [], ""
+        ib_error += f'<p style="padding:20px;color:#c0392b">解析 ufm-info 时出错: {escape(str(e))}</p>'
+    if ufm_source:
+        ib_source = f"{ib_source}；UFM: {ufm_source}" if ib_parsed or ib_error else ufm_source
+    if ib_parsed or ufm_infos:
+        switch_infos = sorted(
+            ufm_infos + ib_switch_infos, key=lambda s: air_first_hostname_key(s["hostname"])
+        )
+        ib_count = len(switch_infos)
+        ib_cards = build_switch_cards_html(switch_infos, _IB_CATEGORIES, "IB")
+        ib_list  = build_switch_list_html(switch_infos, _IB_CATEGORIES, "IB")
+    ib_cards = ib_error + ib_cards
 
     # ── SPX-LINK ──────────────────────────────────────────────────────────────
     spx_thead      = "<tr><th>（无数据）</th></tr>"
@@ -8870,16 +9382,10 @@ def _generate_monitor_html(scope: str = "all") -> None:
                     switch["collection_attempt_time"] = format_collection_batch_time(
                         archive_time_utc
                     )
-                nv_log_hosts = read_host_csv(NV_LOG, {"nvl"}) if info_files else []
-                found_names = {sw["hostname"] for sw in switch_infos}
-                for lh in nv_log_hosts:
-                    if not host_matched(lh, found_names):
-                        log(f"[NV] 缺失设备: {lh}")
-                        missing = make_missing_switch(lh, "NVL")
-                        missing["collection_attempt_time"] = format_collection_batch_time(
-                            archive_time_utc
-                        )
-                        switch_infos.append(missing)
+                switch_infos = align_with_inventory(
+                    switch_infos, NV_LOG, {"nvl"}, "NVL", "NV",
+                    format_collection_batch_time(archive_time_utc),
+                )
                 switch_infos.sort(key=lambda s: air_first_hostname_key(s["hostname"]))
                 nv_count = len(switch_infos)
                 nv_categories = build_nvlink_categories(switch_infos)

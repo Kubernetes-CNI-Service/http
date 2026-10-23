@@ -131,7 +131,8 @@ required = {
     "test_cases/monitor_authority_root_warden.py",
     "test_cases/monitor_authority_source_guard.py",
     "tools/control-auth.py",
-    "infra/infra-setup.sh",
+    "infra/infra-setup.py",
+    "infra/ubuntu24_host.py",
     "infra/infra-teardown.sh",
     "infra/docker/deploy.sh",
 }
@@ -406,7 +407,7 @@ attest_with_evidence() {
 capture_infra_audit_before() {
   local operation=$1 command=$2 prefix
   case "$command" in
-    ./infra/infra-setup.sh) prefix=infra-setup- ;;
+    ./infra/infra-setup.py) prefix=infra-setup- ;;
     ./infra/infra-teardown.sh) prefix=infra-teardown- ;;
     *) return 0 ;;
   esac
@@ -444,7 +445,7 @@ PY
 capture_infra_audit_after() {
   local operation=$1 command=$2
   case "$command" in
-    ./infra/infra-setup.sh|./infra/infra-teardown.sh) ;;
+    ./infra/infra-setup.py|./infra/infra-teardown.sh) ;;
     *) return 0 ;;
   esac
   python3 -B - "$operation" <<'PY'
@@ -872,7 +873,7 @@ exercise_recovery_marker_routine_rejection() {
     execute_recorded_operation \
       "marker-$phase" "$EVIDENCE_ROOT/marker-reset-$phase.out" \
       "$EVIDENCE_ROOT/marker-reset-$phase.err" \
-      ./infra/infra-setup.sh --recover-monitor-authority
+      ./infra/infra-setup.py --recover-monitor-authority --apply --yes
     rc=$RECORDED_OPERATION_RETURN_CODE
     [[ $rc == 0 ]] || fail "explicit marker recovery failed"
     snapshot_protected_paths \
@@ -906,7 +907,7 @@ exercise_native_matrix() {
     execute_recorded_operation \
       "native-$initial" "$EVIDENCE_ROOT/native-$initial.out" \
       "$EVIDENCE_ROOT/native-$initial.err" \
-      ./infra/infra-setup.sh --recover-monitor-authority
+      ./infra/infra-setup.py --recover-monitor-authority --apply --yes
     rc=$RECORDED_OPERATION_RETURN_CODE
     [[ $rc == 0 ]] || fail "Native explicit recovery failed"
     snapshot_protected_paths \
@@ -951,7 +952,7 @@ exercise_native_stop_failures() {
     execute_recorded_operation \
       "stop-$mode" "$EVIDENCE_ROOT/stop-$mode.out" \
       "$EVIDENCE_ROOT/stop-$mode.err" \
-      ./infra/infra-setup.sh --recover-monitor-authority
+      ./infra/infra-setup.py --recover-monitor-authority --apply --yes
     rc=$RECORDED_OPERATION_RETURN_CODE
     [[ $rc == 1 ]] || fail "Native stopped-writer proof did not reject $mode with rc=1"
     snapshot_protected_paths \

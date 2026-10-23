@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import ast
 import contextlib
 import hashlib
 import importlib.util
@@ -18,6 +19,8 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SETUP = ROOT / "infra/infra-setup.sh"
+# The active entry; infra-setup.sh is kept but no caller runs it any more.
+PY_SETUP = ROOT / "infra/infra-setup.py"
 TEARDOWN = ROOT / "infra/infra-teardown.sh"
 LOAD_PATH = ROOT / "DAY0-Prepare/11-load.py"
 PROJECT_SETUP_PATH = ROOT / "DAY0-Prepare/01-a-setup.py"
@@ -75,6 +78,28 @@ def rendered_boundary() -> str:
     if match is None:
         raise AssertionError("Apache publication boundary heredoc is missing")
     return match.group(1)
+
+
+def rendered_python_boundary() -> str:
+    """The APACHE_PUBLIC_BOUNDARY literal of infra-setup.py, read without executing the script."""
+    tree = ast.parse(PY_SETUP.read_text(encoding="utf-8"))
+    values = [
+        node.value.value for node in tree.body
+        if isinstance(node, ast.Assign)
+        and [getattr(target, "id", None) for target in node.targets] == ["APACHE_PUBLIC_BOUNDARY"]
+        and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)
+    ]
+    if len(values) != 1:
+        raise AssertionError("Apache publication boundary constant is missing")
+    return values[0]
+
+
+def setup_method(name: str) -> str:
+    """Source of one InfraSetup method of infra-setup.py."""
+    source = PY_SETUP.read_text(encoding="utf-8")
+    start = source.index(f"    def {name}(self")
+    end = source.find("\n    def ", start + 1)
+    return source[start:end if end >= 0 else len(source)]
 
 
 def location_patterns(config: str) -> tuple[re.Pattern[str], ...]:
@@ -167,6 +192,9 @@ class ApachePublicationBoundaryTests(unittest.TestCase):
             "/.ztp-prefix-publication.json",
             "/.deployment.lock",
             "/infra/logs/infra-setup.log",
+            # The Python entry and its shared module are sources: never served.
+            "/infra/infra-setup.py",
+            "/infra/ubuntu24_host.py",
             # ztp_url_prefix may be any one or more URL segments pointing at
             # the real ztp/ tree.  These must not depend on the literal /ztp.
             "/custom/status/latest/report.json",
@@ -674,6 +702,129 @@ class ApachePublicationBoundaryTests(unittest.TestCase):
             teardown,
             r"rm\s+-[^\n]*\s/var/lib/http-ztp-monitor-auth(?:\s|$)",
         )
+
+    def test_python_entry_configtests_before_restart_and_teardown_tracks_policy(self) -> None:
+        apache_step = setup_method("configure_apache")
+        install_call = apache_step.index("        self.install_apache_publication_boundary()\n")
+        configtest_call = apache_step.index('self.run(["apache2ctl", "configtest"]', install_call)
+        deferred_call = apache_step.index(
+            "apache2 wildcard listeners disabled; service activation deferred until load",
+            configtest_call,
+        )
+        self.assertLess(install_call, configtest_call)
+        self.assertLess(configtest_call, deferred_call)
+        self.assertNotRegex(
+            apache_step,
+            r"restart_systemd_service\(\s*\"apache2|\"systemctl\", \"(?:start|restart)\", \"apache2",
+        )
+        installer = setup_method("install_apache_publication_boundary")
+        self.assertIn('self.run(["apache2ctl", "configtest"]', installer)
+        self.assertIn("previous configuration restored", installer)
+        self.assertIn("--defer-services", PY_SETUP.read_text(encoding="utf-8"))
+
+        teardown = TEARDOWN.read_text(encoding="utf-8")
+        self.assertIn(
+            "/etc/apache2/conf-enabled/http-ztp-public-boundary.conf",
+            teardown,
+        )
+
+    def test_python_entry_binds_helper_dependencies_modules_and_order(self) -> None:
+        setup = PY_SETUP.read_text(encoding="utf-8")
+        tree = ast.parse(setup)
+        constants = {
+            node.targets[0].id: node.value
+            for node in tree.body
+            if isinstance(node, ast.Assign) and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+        }
+        self.assertEqual(CONTROL_AUTH_SHA256, ast.literal_eval(constants["CONTROL_AUTH_SOURCE_SHA256"]))
+        self.assertIn('self.mgmt_http_root / "tools/control-auth.py"', setup)
+        run = setup_method("run_setup")
+        self.assertLess(run.index("Control auth helper source hash mismatch"), run.index("if not is_root():"))
+        self.assertEqual(
+            ("apache2", "apache2-utils", "ssl-cert", "isc-dhcp-server"),
+            ast.literal_eval(constants["OPTIONAL_SERVICE_PACKAGES"]),
+        )
+        self.assertEqual(
+            (
+                "auth_basic", "authn_file", "authn_core", "authz_user",
+                "authz_core", "env", "alias", "cgid", "headers",
+            ),
+            ast.literal_eval(constants["APACHE_AUTH_MODULES"]),
+        )
+        self.assertEqual(
+            "/usr/local/lib/http-ztp/control-auth.py",
+            ast.literal_eval(constants["CONTROL_AUTH_HELPER"]),
+        )
+        install_helper = setup_method("install_control_auth_helper")
+        self.assertIn("os.replace(candidate, helper)", install_helper)
+        self.assertLess(
+            install_helper.index('self.run([helper, "ensure"])'),
+            install_helper.index('self.run([helper, "validate"])'),
+        )
+        apache_step = setup_method("configure_apache")
+        self.assertLess(
+            apache_step.index("if not self.mgmt:"),
+            apache_step.index("self.install_recorded(missing)"),
+        )
+        self.assertLess(
+            apache_step.index('self.run(["systemctl", "stop", "apache2"])'),
+            apache_step.index("self.install_control_auth_helper()"),
+        )
+        self.assertLess(
+            apache_step.index("self.install_control_auth_helper()"),
+            apache_step.index('self.run(["a2enmod", module]'),
+        )
+        self.assertLess(
+            install_helper.index('"monitor-authority-provision"'),
+            install_helper.index('"monitor-authority-attest"'),
+        )
+        self.assertLess(
+            apache_step.index('self.run(["a2enmod", module]'),
+            apache_step.index("self.install_apache_publication_boundary()"),
+        )
+        self.assertLess(
+            apache_step.index("self.install_apache_publication_boundary()"),
+            apache_step.index('self.run(["apache2ctl", "configtest"]'),
+        )
+        self.assertLess(
+            apache_step.index('self.run(["apache2ctl", "configtest"]'),
+            apache_step.index(
+                "apache2 wildcard listeners disabled; service activation deferred until load"
+            ),
+        )
+        self.assertNotRegex(
+            apache_step,
+            r"restart_systemd_service\(\s*\"apache2|\"systemctl\", \"(?:start|restart)\", \"apache2",
+        )
+        boundary_installer = setup_method("install_apache_publication_boundary")
+        failure = boundary_installer[boundary_installer.index('if self.run(["apache2ctl", "configtest"]'):]
+        self.assertIn('self.run(["systemctl", "stop", "apache2"]', failure)
+        self.assertIn("Apache remains stopped", failure)
+
+    def test_python_entry_boundary_is_the_shell_heredoc_and_load_pin(self) -> None:
+        python_boundary = rendered_python_boundary()
+        self.assertEqual(rendered_boundary(), python_boundary)
+        self.assertEqual(APACHE_CONFIG.read_text(encoding="utf-8"), python_boundary)
+        self.assertEqual(APACHE_CONFIG_SHA256, hashlib.sha256(python_boundary.encode("utf-8")).hexdigest())
+
+    def test_python_entry_validates_credentials_before_publishing_the_boundary(self) -> None:
+        compile(PY_SETUP.read_bytes(), str(PY_SETUP), "exec", dont_inherit=True)
+        self.assertIn('self.run([helper, "validate"])', setup_method("install_control_auth_helper"))
+        self.assertNotIn("APACHE_PUBLIC_BOUNDARY", setup_method("install_control_auth_helper"))
+        apache_step = setup_method("configure_apache")
+        self.assertLess(
+            apache_step.index('self.run(["systemctl", "stop", "apache2"])'),
+            apache_step.index("self.install_control_auth_helper()"),
+        )
+        self.assertLess(
+            apache_step.index("self.install_control_auth_helper()"),
+            apache_step.index("self.install_apache_publication_boundary()"),
+        )
+        self.assertIn("handle.write(APACHE_PUBLIC_BOUNDARY)", setup_method("install_apache_publication_boundary"))
+        helper_install = setup_method("install_control_auth_helper")
+        self.assertIn("monitor-authority-provision", helper_install)
+        self.assertIn("monitor-authority-attest", helper_install)
 
 
 if __name__ == "__main__":

@@ -209,7 +209,17 @@ else
   printf 'public.status=not_run\n'
   status_http_server=""
 fi
-if [ -n "$status_http_server" ]; then
+status_host=${status_http_server#*://}
+status_host=${status_host%%/*}
+case "$status_host" in
+  \[*) status_host=${status_host#\[}; status_host=${status_host%%]*} ;;
+  *) status_host=${status_host%%:*} ;;
+esac
+# Connectivity is probed by IP/IPv6 literal only, never by host name.
+if [ -n "$status_http_server" ] && ! printf '%s\n' "$status_host" |
+    grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$|^[0-9A-Fa-f.]*:[0-9A-Fa-f:.]*$'; then
+  reachable=not_ip_literal
+elif [ -n "$status_http_server" ]; then
   if command -v wget >/dev/null 2>&1; then
     if wget -q --spider "${status_http_server}/Packages.gz" 2>/dev/null; then reachable=true; else reachable=false; fi
   elif command -v curl >/dev/null 2>&1; then
@@ -639,9 +649,9 @@ def main() -> int:
             matched = {item for server in servers for item in (server["hostname"], server["address"])}
             unmatched = sorted(set(args.hosts).difference(matched))
             if unmatched:
-                raise DeployError(f"--host 未匹配到有效的 type=server：{', '.join(unmatched)}")
+                raise DeployError(f"--host 未匹配到有效的 type=server/server_mgmt：{', '.join(unmatched)}")
         if not servers and args.clients_only:
-            print("[WARN] devices CSV 中没有可检查的 type=server 设备")
+            print("[WARN] devices CSV 中没有可检查的 type=server/server_mgmt 设备")
             return 0
 
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
