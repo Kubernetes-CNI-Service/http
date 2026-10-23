@@ -937,6 +937,7 @@
     "monitor/issue-tracker/cabletracker/cabletracker_runner.py": "monitor/issue-tracker/cabletracker/cabletracker_runner.py",
     "monitor/issue-tracker/cabletracker/ibdiagnet/__init__.py": "monitor/issue-tracker/cabletracker/ibdiagnet/__init__.py",
     "monitor/issue-tracker/cabletracker/ibdiagnet/generate_report.py": "monitor/issue-tracker/cabletracker/ibdiagnet/generate_report.py",
+    "monitor/issue-tracker/format_precheck.py": "monitor/issue-tracker/format_precheck.py",
     "monitor/issue-tracker/issue-tracker-sync.py": "monitor/issue-tracker/issue-tracker-sync.py",
     "monitor/issue_tracker_qualification.py": "monitor/issue_tracker_qualification.py",
     "monitor/issue_tracker_manifest.py": "monitor/issue_tracker_manifest.py",
@@ -3156,7 +3157,8 @@
     {
       "id": "issue_tracker_sync_direct",
       "paths": [
-        "monitor/issue-tracker/issue-tracker-sync.py"
+        "monitor/issue-tracker/issue-tracker-sync.py",
+        "monitor/issue-tracker/format_precheck.py"
       ],
       "tests": [
         "test_cases.test_issue_tracker_sync",
@@ -5723,6 +5725,7 @@
       "id": "issue_tracker_sync_flow",
       "members": [
         "monitor/issue-tracker/issue-tracker-sync.py",
+        "monitor/issue-tracker/format_precheck.py",
         "monitor/issue-tracker/cabletracker/cabletracker_runner.py",
         "monitor/issue-tracker/cabletracker/ibdiagnet/__init__.py",
         "monitor/issue-tracker/cabletracker/ibdiagnet/generate_report.py",

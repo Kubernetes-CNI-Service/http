@@ -19,6 +19,7 @@ from pathlib import Path
 import sys
 import tarfile
 import tempfile
+import types
 import unittest
 from contextlib import redirect_stdout
 from unittest import mock
@@ -35,12 +36,21 @@ VENDORED_SHA256 = {
     "ibdiagnet/generate_report.py": "58abe6c983d3372d26f79c3f75a04930bdb596cd0dd0f98c4aaa0df8c5978e5d",
 }
 SPREADSHEET = "1" + "A" * 43
+PRECHECK = ROOT / "monitor/issue-tracker/format_precheck.py"
+
+# Header rows of the standard Issue Tracker template (owner 2026-10-23), the contract the engine must match.
+TEMPLATE_CVT_IMPORT_GS = ["Circuit ID", "Status", "Status Cycles", "Protocol", "A SU Number", "A Rack", "A RU", "A Node Type", "A Node", "A Port", "A Custom NIC Name", "A RDMA Name", "A Actual Node", "A Actual Port", "A Port Status", "A Link Down Counter", "A Module Temperature (C)", "A Raw BER", "A Effective BER", "A Symbol BER", "A BER Status", "A RX Power Lanes (dBm)", "A TX Power Lanes (dBm)", "A RX Power Low Threshold", "A RX Power High Threshold", "A TX Power Low Threshold", "A TX Power High Threshold", "A Power Data Stale", "A Cable Serial", "A Cable PN", "A Report", "A Recommended Action", "Z SU Number", "Z Rack", "Z RU", "Z Node Type", "Z Node", "Z Port", "Z Custom NIC Name", "Z RDMA Name", "Z Actual Node", "Z Actual Port", "Z Port Status", "Z Link Down Counter", "Z Module Temperature (C)", "Z Raw BER", "Z Effective BER", "Z Symbol BER", "Z BER Status", "Z RX Power Lanes (dBm)", "Z TX Power Lanes (dBm)", "Z RX Power Low Threshold", "Z RX Power High Threshold", "Z TX Power Low Threshold", "Z TX Power High Threshold", "Z Power Data Stale", "Z Cable Serial", "Z Cable PN", "Z Report", "Z Recommended Action", "Last Update (UTC)", "Tracking Status", "Instance"]
+TEMPLATE_LLDPQ_IMPORT_GS = ["Circuit ID", "Status", "Status Cycles", "Protocol", "A SU Number", "A Node Type", "A Node", "A Rack", "A Port", "A Custom NIC Name", "A RDMA Name", "A RU", "A Actual Node", "A Actual Port", "A Port Status", "A Cable Serial", "A Cable PN", "A Link Down Counter", "A Module Temperature (C)", "A RX Power Lanes (dBm)", "A TX Power Lanes (dBm)", "A RX Power Low Threshold", "A RX Power High Threshold", "A TX Power Low Threshold", "A TX Power High Threshold", "A Power Data Stale", "A Report", "A Recommended Action", "Z SU Number", "Z Node Type", "Z Node", "Z Rack", "Z Port", "Z Custom NIC Name", "Z RDMA Name", "Z RU", "Z Actual Node", "Z Actual Port", "Z Port Status", "Z Cable Serial", "Z Cable PN", "Z Link Down Counter", "Z Module Temperature (C)", "Z RX Power Lanes (dBm)", "Z TX Power Lanes (dBm)", "Z RX Power Low Threshold", "Z RX Power High Threshold", "Z TX Power Low Threshold", "Z TX Power High Threshold", "Z Power Data Stale", "Z Report", "Z Recommended Action", "Last Update (UTC)", "Source Line", "A Raw BER", "A Effective BER", "A Symbol BER", "A BER Status", "Z Raw BER", "Z Effective BER", "Z Symbol BER", "Z BER Status", "Tracking Status", "Instance"]
+TEMPLATE_CABLING = ["Fault ID", "Source", "Reported by", "Opened At", "Link Type", "Issue Type", "Issue Desc", "A-SU", "A-Rack", "A-RU", "A-Node", "A-Port", "A Actual Node", "A Actual Port", "Z-Rack", "Z-RU", "Z-Node", "Z-Port", "Z Actual Node", "Z Actual Port", "Status", "Notes", "AI Recommendation (Refer only)", "NV Comments", "Assigned to", "Engineer Assigned", "Action Description", "P-status", "CVT", "Closed At", "Instance"]
+TEMPLATE_WHITELIST = ["Submit Date", "Submitor", "Datahalll", "Instance", "Filter Type", "Filter"]
 SECRET_MARKER = "secret-value"
 
 
 def load_wrapper():
     spec = importlib.util.spec_from_file_location("issue_tracker_sync_under_test", WRAPPER)
     module = importlib.util.module_from_spec(spec)
+    # dataclasses resolve string annotations through sys.modules[cls.__module__]
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -102,9 +112,9 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(SPREADSHEET, config.spreadsheet_id)
         self.assertEqual("Asia/Shanghai", config.timezone)
         ib, eth = config.domains["ib"], config.domains["eth"]
-        self.assertEqual((True, "prod", "CVT_Import", "IB Cabling", False),
+        self.assertEqual((True, "prod", "CVT_Import_GS", "IB Cabling", False),
                          (ib.enabled, ib.environment, ib.import_sheet, ib.cabling_sheet, ib.include_warnings))
-        self.assertEqual((True, "prod", "LLDPQ_Import", "ETH Cabling", False),
+        self.assertEqual((True, "prod", "LLDPQ_Import_GS", "ETH Cabling", False),
                          (eth.enabled, eth.environment, eth.import_sheet, eth.cabling_sheet, eth.include_warnings))
 
     def test_invalid_configurations_are_rejected_before_anything_runs(self):
@@ -119,7 +129,7 @@ class ConfigurationTests(unittest.TestCase):
             "enabled not bool": {**base, "ib": {"enabled": "yes"}},
             "warnings not bool": {**base, "eth": {"include_warnings": 1}},
             "empty sheet": {**base, "ib": {"cabling_sheet": " "}},
-            "same import sheet": {**base, "eth": {"import_sheet": "cvt_import"}},
+            "same import sheet": {**base, "eth": {"import_sheet": "cvt_import_gs"}},
         }
         for label, document in cases.items():
             with self.subTest(case=label):
@@ -321,8 +331,106 @@ class EngineCommandTests(unittest.TestCase):
         self.assertNotIn("--ib-cabling-sheet", command)
 
 
+PRECHECK_CHILD = r'''
+import importlib.util, json, sys, types
+for name in ("openai", "httpx"):
+    try:
+        __import__(name)
+    except ImportError:
+        stub = types.ModuleType(name)
+        stub.OpenAI = stub.Client = object
+        sys.modules[name] = stub
+def load(name, path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+precheck = load("format_precheck_child", sys.argv[1])
+wrapper = load("issue_tracker_sync_child", sys.argv[2])
+config = wrapper.Config(sys.argv[3], "Asia/Shanghai", {
+    name: wrapper.Domain(name, True, "prod", wrapper.DOMAIN_DEFAULTS[name]["import_sheet"],
+                         wrapper.DOMAIN_DEFAULTS[name]["cabling_sheet"], False) for name in ("ib", "eth")})
+engine = precheck.load_engine()
+import tempfile
+work = wrapper.Path(tempfile.mkdtemp())
+source, key = work / "source.json", work / "cre.json"
+source.write_text("[]")
+key.write_text("{}")
+result = {}
+for name in ("ib", "eth"):
+    command = wrapper.engine_command(sys.executable, config, config.domains[name], source, key)
+    result[name] = precheck.expected_layout(engine, command[2:])
+print(json.dumps(result))
+'''
+
+
+class FormatPrecheckTests(unittest.TestCase):
+    """The read-only gate that keeps the standard Issue Tracker format unchanged."""
+
+    def setUp(self):
+        spec = importlib.util.spec_from_file_location("format_precheck_under_test", PRECHECK)
+        self.precheck = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = self.precheck
+        spec.loader.exec_module(self.precheck)
+
+    def test_engine_with_default_sheets_enforces_exactly_the_standard_template(self):
+        import subprocess
+        completed = subprocess.run([sys.executable, "-B", "-c", PRECHECK_CHILD, str(PRECHECK), str(WRAPPER),
+                                    SPREADSHEET], capture_output=True, text=True, timeout=300, check=False)
+        self.assertEqual(0, completed.returncode, completed.stderr[-3000:])
+        layout = json.loads(completed.stdout.strip().splitlines()[-1])
+        self.assertEqual({"sheet": "CVT_Import_GS", "headers": TEMPLATE_CVT_IMPORT_GS}, layout["ib"]["import"])
+        self.assertEqual([{"sheet": "IB Cabling", "headers": TEMPLATE_CABLING}], layout["ib"]["cabling"])
+        self.assertEqual({"sheet": "LLDPQ_Import_GS", "headers": TEMPLATE_LLDPQ_IMPORT_GS}, layout["eth"]["import"])
+        self.assertEqual([{"sheet": "ETH Cabling", "headers": TEMPLATE_CABLING}], layout["eth"]["cabling"])
+        self.assertEqual(("Whitelist", SPREADSHEET), (layout["ib"]["whitelist"], layout["ib"]["spreadsheet_id"]))
+        self.assertEqual([], self.precheck.whitelist_changes([TEMPLATE_WHITELIST]))
+
+    def layout(self):
+        return {"import": {"sheet": "CVT_Import_GS", "headers": ["A", "B", "C"]},
+                "cabling": [{"sheet": "IB Cabling", "headers": ["F", "G"]}], "whitelist": "Whitelist"}
+
+    def reader(self, sheets):
+        return lambda tab, last: sheets[tab][:last]
+
+    def test_matching_document_has_no_format_change(self):
+        sheets = {"CVT_Import_GS": [["Imported at: x"], ["A", "B", "C", ""]],
+                  "IB Cabling": [["Updated at: x"], ["F", "G"]],
+                  "Whitelist": [["Submit Date", "Instance", "Filter Type", "Filter"]]}
+        self.assertEqual([], self.precheck.compare(self.layout(), sheets, self.reader(sheets)))
+
+    def test_every_kind_of_format_change_is_reported(self):
+        sheets = {"CVT_Import_GS": [["Imported at: x"], ["A", "C", "B"]],
+                  "Whitelist": [["Submit Date", "Datahalll", "Rack", "Device Name", "Comments"]]}
+        problems = self.precheck.compare(self.layout(), sheets, self.reader(sheets))
+        self.assertEqual(6, len(problems), problems)
+        text = "\n".join(problems)
+        self.assertIn("'CVT_Import_GS' header row 2 would be rewritten: same columns in a different order", text)
+        self.assertIn("cabling worksheet 'IB Cabling' does not exist and would be created", text)
+        for change in ("rename Device Name to Filter", "delete the Rack column",
+                       "rename Comments to Filter Type", "insert an Instance column"):
+            self.assertIn(change, text)
+        sheets["IB Cabling"] = [["Updated at: x"], ["F", "G", "H"]]
+        problems = self.precheck.compare(self.layout(), sheets, self.reader(sheets))
+        self.assertIn("'IB Cabling' header row 2 would be rewritten: only in the document ['H']; "
+                      "only in the engine []", problems)
+
+    def test_options_that_write_other_worksheets_are_refused(self):
+        class Engine:
+            @staticmethod
+            def parse_args():
+                return types.SimpleNamespace(refresh_cabling_sum=True)
+
+            @staticmethod
+            def normalize_and_validate_instance_args(args):
+                return None
+        with self.assertRaises(ValueError):
+            self.precheck.expected_layout(Engine, [])
+
+
 class MainFlowTests(unittest.TestCase):
-    """main() with the real LLDP analyzer and a recording stand-in for the engine."""
+    """main() with the real LLDP analyzer and recording stand-ins for the format gate and the engine."""
 
     def setUp(self):
         self.sync = load_wrapper()
@@ -362,6 +470,21 @@ class MainFlowTests(unittest.TestCase):
         patcher = mock.patch.object(self.sync, "RUNNER", self.engine)
         patcher.start()
         self.addCleanup(patcher.stop)
+        self.gate_calls = base / "gate-calls.jsonl"
+        self.gate_exit = base / "gate-exit"
+        gate = base / "fake_precheck.py"
+        gate.write_text(
+            "import json, sys\n"
+            "from pathlib import Path\n"
+            "command = json.loads(Path(sys.argv[sys.argv.index('--engine-command-json') + 1]).read_text())\n"
+            f"Path({str(self.gate_calls)!r}).open('a').write(json.dumps(command) + '\\n')\n"
+            f"exit_file = Path({str(self.gate_exit)!r})\n"
+            "code = int(exit_file.read_text()) if exit_file.exists() else 0\n"
+            "print(json.dumps({'ok': code == 0, 'changes': ['IB Cabling header row 2 would be rewritten'] if code == 3 else []}))\n"
+            "raise SystemExit(code)\n", encoding="utf-8")
+        gate_patcher = mock.patch.object(self.sync, "FORMAT_PRECHECK", gate)
+        gate_patcher.start()
+        self.addCleanup(gate_patcher.stop)
 
     def run_main(self, *extra):
         stream = io.StringIO()
@@ -392,6 +515,9 @@ class MainFlowTests(unittest.TestCase):
         self.assertEqual("20261023-0900-prod.tar.gz", state["eth"]["inputs"]["input"]["name"])
         self.assertNotIn("ib", state)
         self.assertNotIn(SECRET_MARKER, text + (output / "issue-tracker-sync.log").read_text())
+        gate_commands = [json.loads(line) for line in self.gate_calls.read_text().splitlines()]
+        self.assertEqual([calls[0]["argv"]], gate_commands)
+        self.assertIn("format pre-check: document matches the engine", text)
 
         code, text = self.run_main()
         self.assertEqual(0, code, text)
@@ -412,6 +538,19 @@ class MainFlowTests(unittest.TestCase):
         code, text = self.run_main()
         self.assertEqual(0, code, text)
         self.assertEqual(2, len(self.engine_calls()))
+
+    def test_a_format_change_stops_the_run_before_the_engine_writes(self):
+        self.gate_exit.write_text("3")
+        code, text = self.run_main()
+        self.assertEqual(2, code, text)
+        self.assertIn("format change refused: IB Cabling header row 2 would be rewritten", text)
+        self.assertIn("nothing was written", text)
+        self.assertEqual([], self.engine_calls())
+        self.assertFalse((self.project / "99-output-p2p/issue-tracker/state.json").exists())
+        self.gate_exit.write_text("2")
+        code, text = self.run_main()
+        self.assertEqual(1, code, text)
+        self.assertEqual([], self.engine_calls())
 
     def test_convert_only_needs_no_key_and_never_runs_the_engine(self):
         (self.project / "cre.json").unlink()

@@ -23,9 +23,13 @@ send it again); a domain without any input is skipped with a note.
     python3 monitor/issue-tracker/issue-tracker-sync.py [--project-dir DIR] [--only ib|eth]
                                                          [--convert-only] [--force]
 
+Before every engine run, format_precheck.py checks read-only that the document already has exactly the
+worksheets and header rows the engine enforces (owner 2026-10-23: the online Issue Tracker is a standard
+format; a sync fills rows and never changes the format); any difference stops the run before a write.
+
 Exit 0: every enabled domain synced, was unchanged, or had no input. Exit 1: a conversion, the
-engine or Google failed for a domain. Exit 2: configuration or input error, nothing was sent.
-Exit 75: another sync of the same project is running.
+engine or Google failed for a domain. Exit 2: configuration or input error, or the document's format
+differs from the engine's; nothing was sent. Exit 75: another sync of the same project is running.
 """
 
 from __future__ import annotations
@@ -53,6 +57,7 @@ ENGINE_DIR = BASE / "cabletracker"
 RUNNER = ENGINE_DIR / "cabletracker_runner.py"
 MAPPING = ENGINE_DIR / "mapping_v4.json"
 GENERATE_REPORT = ENGINE_DIR / "ibdiagnet/generate_report.py"
+FORMAT_PRECHECK = BASE / "format_precheck.py"
 LLDP_ANALYZER = HTTP_ROOT / "tools/lldp-analyze-tool/analyze_lldp.py"
 IB_POST_COLLECT = HTTP_ROOT / "infiniband/monitor/post-collect.py"
 ETH_POST_COLLECT = HTTP_ROOT / "ethernet/monitor/post-collect.py"
@@ -79,8 +84,9 @@ ENGINE_TIMEOUT = 3600
 DOMAINS = ("ib", "eth")
 DOMAIN_KEYS = frozenset({"enabled", "environment", "import_sheet", "cabling_sheet", "include_warnings"})
 DOMAIN_DEFAULTS = {
-    "ib": {"import_sheet": "CVT_Import", "cabling_sheet": "IB Cabling"},
-    "eth": {"import_sheet": "LLDPQ_Import", "cabling_sheet": "ETH Cabling"},
+    # the standard Issue Tracker template (owner 2026-10-23) imports into these two worksheets
+    "ib": {"import_sheet": "CVT_Import_GS", "cabling_sheet": "IB Cabling"},
+    "eth": {"import_sheet": "LLDPQ_Import_GS", "cabling_sheet": "ETH Cabling"},
 }
 # analyze_lldp statuses -> LLDPQ schema-v1 status and the A-side report text. The engine tags a
 # report containing "wrong device" or "port mismatch" as Mis-wiring and one containing "link down"
@@ -465,6 +471,35 @@ def engine_command(python: str, config: Config, domain: Domain, source: Path,
     return command
 
 
+def format_gate(python: str, command: list, credentials: Path, work: Path, log: Log) -> None:
+    """The online Issue Tracker is a standard format: the engine may only fill rows. Read-only check
+    that this exact engine command would not create a worksheet or rewrite any header row."""
+    command_file = work / "engine-command.json"
+    command_file.write_text(json.dumps(command[2:]), encoding="utf-8")
+    try:
+        completed = subprocess.run(
+            [python, str(FORMAT_PRECHECK), "--credentials", str(credentials),
+             "--engine-command-json", str(command_file)],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=STEP_TIMEOUT, check=False)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise StepError(f"format pre-check could not run: {exc}") from None
+    lines = (completed.stdout or "").strip().splitlines()
+    try:
+        report = json.loads(lines[-1]) if lines else {}
+    except ValueError:
+        report = {}
+    if completed.returncode == 3:
+        for change in report.get("changes", []):
+            log(f"  format change refused: {change}")
+        raise SyncError("the online document does not match the engine's format; nothing was written "
+                        "(fix the document or the sheet names in 03-issue-tracker.json)")
+    if completed.returncode != 0 or report.get("ok") is not True:
+        for line in (completed.stderr or "").splitlines()[-5:]:
+            log(f"  [format_precheck.py stderr] {line}")
+        raise StepError(f"format pre-check failed: {report.get('error') or completed.returncode}")
+    log("format pre-check: document matches the engine; only rows will be written")
+
+
 def read_state(path: Path) -> dict:
     try:
         state = json.loads(path.read_text(encoding="utf-8"))
@@ -533,9 +568,10 @@ def handle_domain(domain: Domain, *, project: Path, output: Path, config: Config
         log(f"{domain.name.upper()}: wrote {destination.name} (no sync: --convert-only)")
         return "converted"
     log(f"{domain.name.upper()}: syncing into '{domain.import_sheet}' and '{domain.cabling_sheet}'")
+    command = engine_command(args.engine_python, config, domain, destination, credentials)
     with tempfile.TemporaryDirectory(prefix=".engine-", dir=output) as engine_cwd:
-        returncode = _run(engine_command(args.engine_python, config, domain, destination, credentials),
-                          log, ENGINE_TIMEOUT, cwd=Path(engine_cwd))
+        format_gate(args.engine_python, command, credentials, Path(engine_cwd), log)
+        returncode = _run(command, log, ENGINE_TIMEOUT, cwd=Path(engine_cwd))
     if returncode != 0:
         raise StepError(f"cabletracker_runner.py exited {returncode}")
     state[domain.name] = {"inputs": inputs, "target": target,

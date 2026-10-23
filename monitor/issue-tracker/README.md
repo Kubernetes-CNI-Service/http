@@ -8,6 +8,7 @@
   - `mapping_v4.json`
   - `ibdiagnet/__init__.py`
   - `ibdiagnet/generate_report.py`
+- `format_precheck.py` 是写表前的只读格式关卡：用引擎自己的函数算出它要求的标签页和表头，与在线文档逐列比对；有任何不同就不写入（退出码 3，包装层随之以 2 退出）。没有跳过它的参数。
 - `issue-tracker-sync.py` 是我们写的包装层。它只负责两件事：把我们自己的采集结果转换成引擎能读的两种格式，然后每个域各运行一次引擎。
 
 | 域 | 输入（项目目录内） | 转换 | 交给引擎 |
@@ -28,12 +29,14 @@
   "schema": "issue-tracker-sync-v1",
   "spreadsheet_id": "<表格 URL 中 /d/ 与 /edit 之间的部分>",
   "timezone": "Asia/Shanghai",
-  "ib":  {"enabled": true, "environment": "prod", "import_sheet": "CVT_Import",   "cabling_sheet": "IB Cabling",  "include_warnings": false},
-  "eth": {"enabled": true, "environment": "prod", "import_sheet": "LLDPQ_Import", "cabling_sheet": "ETH Cabling", "include_warnings": false}
+  "ib":  {"enabled": true, "environment": "prod", "import_sheet": "CVT_Import_GS",   "cabling_sheet": "IB Cabling",  "include_warnings": false},
+  "eth": {"enabled": true, "environment": "prod", "import_sheet": "LLDPQ_Import_GS", "cabling_sheet": "ETH Cabling", "include_warnings": false}
 }
 ```
 
-除 `schema` 和 `spreadsheet_id` 外，其余键都可省略，省略时取上面的值。IB 与 ETH 必须导入不同的工作表；工作表不存在时，引擎会自动创建。
+除 `schema` 和 `spreadsheet_id` 外，其余键都可省略，省略时取上面的值。上面的表名就是标准 Issue Tracker 模版里的表名。IB 与 ETH 必须导入不同的工作表。
+
+**在线文档是统一的规范格式，同步只填数据，不改格式。** 换用新文档前，先用只读预检确认引擎期望的表头和文档完全一致：导入表、IB/ETH Cabling 的第 2 行、Whitelist 的版式。表名对不上时，引擎会自动新建工作表；表头对不上时，引擎会重写表头。这两种情况都算改格式，不得写入。
 
 这两个文件不会被链接进 `monitor/`。Apache 会对外提供 `monitor/` 下的静态文件，所以包装层直接从项目目录读取它们：默认按 setup 建立的 `monitor/01-global.yaml` 链接找到项目目录，也可以用 `--project-dir` 指定。
 

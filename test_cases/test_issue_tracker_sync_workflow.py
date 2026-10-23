@@ -54,6 +54,8 @@ print(json.dumps([{
 def load_wrapper():
     spec = importlib.util.spec_from_file_location("issue_tracker_sync_workflow_subject", WRAPPER)
     module = importlib.util.module_from_spec(spec)
+    # dataclasses resolve string annotations through sys.modules[cls.__module__]
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
