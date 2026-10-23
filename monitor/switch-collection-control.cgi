@@ -13,7 +13,6 @@ import socket
 import stat
 import sys
 import time
-from datetime import datetime
 from urllib.parse import parse_qs
 
 
@@ -125,196 +124,6 @@ def collection_status():
         return status_with_remaining(value) if isinstance(value, dict) else {"state": "idle"}
     except (OSError, json.JSONDecodeError):
         return {"state": "idle"}
-
-
-def issue_tracker_online_status():
-    """Fixed bounded last-observation cache; no admission or journal reader."""
-    unproved = {'schema_version': 1, 'state': 'unproved', 'updated_at': None,
-        'read_only': True, 'mutation_disabled': True}
-    parent = descriptor = None
-    owned = {}
-    named_before_open = {}
-    name = 'issue-tracker-online.status.json'
-    keys = ('st_dev', 'st_ino', 'st_mode', 'st_uid', 'st_gid', 'st_nlink',
-            'st_size', 'st_mtime_ns', 'st_ctime_ns')
-    identity = lambda value: tuple(getattr(value, key) for key in keys)
-    def pairs(items):
-        value = {}
-        for key, item in items:
-            if key in value: raise ValueError('duplicate diagnostic field')
-            value[key] = item
-        return value
-    try:
-        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
-        named_parent = STATUS_DIR.lstat()
-        parent = os.open(STATUS_DIR, flags | os.O_DIRECTORY)
-        named_before_open[parent] = (named_parent.st_dev, named_parent.st_ino)
-        directory = os.fstat(parent); owned[parent] = (directory.st_dev, directory.st_ino)
-        named_parent = STATUS_DIR.lstat()
-        if (not stat.S_ISDIR(named_parent.st_mode)
-                or (named_parent.st_dev, named_parent.st_ino) != owned[parent]
-                or directory.st_mode & 0o022 or directory.st_uid not in (0, os.geteuid())):
-            raise ValueError('untrusted diagnostic directory')
-        named_image = os.stat(name, dir_fd=parent, follow_symlinks=False)
-        descriptor = os.open(name, flags, dir_fd=parent)
-        named_before_open[descriptor] = (named_image.st_dev, named_image.st_ino)
-        before = os.fstat(descriptor); owned[descriptor] = (before.st_dev, before.st_ino)
-        if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
-                or before.st_mode & 0o022 or before.st_uid != directory.st_uid
-                or not 1 <= before.st_size <= 4096
-                or identity(before) != identity(os.stat(name, dir_fd=parent, follow_symlinks=False))):
-            raise ValueError('untrusted diagnostic image')
-        raw = os.pread(descriptor, 4097, 0)
-        if (len(raw) != before.st_size or identity(os.fstat(descriptor)) != identity(before)
-                or identity(os.stat(name, dir_fd=parent, follow_symlinks=False)) != identity(before)
-                or (STATUS_DIR.lstat().st_dev, STATUS_DIR.lstat().st_ino) != owned[parent]):
-            raise ValueError('diagnostic image changed')
-        value = json.loads(raw.decode('utf-8', 'strict'), object_pairs_hook=pairs)
-        if (type(value) is not dict or set(value) != set(unproved)
-                or type(value['schema_version']) is not int or value['schema_version'] != 1
-                or value['read_only'] is not True or value['mutation_disabled'] is not True
-                or type(value['state']) is not str or value['state'] not in (
-                    'stalled', 'retry_exhausted', 'conflict', 'historical_applied', 'no_counted_units',
-                    'attempted_unknown', 'attempted_definite_rejection', 'attempt_unproved',
-                    'enrollment_missing', 'enrollment_incomplete')
-                or type(value['updated_at']) is not str
-                or re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}', value['updated_at']) is None):
-            raise ValueError('invalid diagnostic shape')
-        observed = datetime.fromisoformat(value['updated_at'])
-        if observed.tzinfo is None or observed.timestamp() > time.time():
-            raise ValueError('invalid observation time')
-        return value
-    except (OSError, ValueError, UnicodeError, OverflowError):
-        return unproved
-    finally:
-        for fd in (descriptor, parent):
-            if fd is not None:
-                try:
-                    current = os.fstat(fd)
-                    # A first fstat fault must not leak the unchanged named object.
-                    # A rebound numeric FD is not evidence of ownership: keep it
-                    # open unless the independently captured identity still matches.
-                    expected = owned.get(fd, named_before_open.get(fd))
-                    if expected == (current.st_dev, current.st_ino): os.close(fd)
-                except OSError:
-                    pass
-
-
-def issue_tracker_stage_l_status():
-    """Fixed last-observation projection, never a local/online permission.
-
-    The worker's private cache includes evidence and device identities. Only
-    these literal display fields cross the authenticated GET boundary; counts
-    are decimal text so an uncapped K/N is not rounded by a browser.
-    """
-    names = ('Switch Status', 'Eth Link Validation', 'IB Link Validation')
-    no_send = 'disabled_no_send_authority'
-    unknown = {'published': None, 'skipped': None, 'pending': None,
-               'pending_count_complete': False}
-    unproved = {'schema_version': 1, 'state': 'unproved', 'updated_at': None,
-        'k': None, 'k_revision': None, 'publish_every_cycles': None,
-        'panels': {name: {'state': 'unproved', 'progress_text': None} for name in names},
-        'cycle_summary': unknown, 'online': no_send, 'read_only': True,
-        'mutation_disabled': True}
-    parent = descriptor = None
-    owned = {}; named_before_open = {}
-    fields = ('st_dev', 'st_ino', 'st_mode', 'st_uid', 'st_gid', 'st_nlink',
-              'st_size', 'st_mtime_ns', 'st_ctime_ns')
-    identity = lambda value: tuple(getattr(value, field) for field in fields)
-    def pairs(items):
-        result = {}
-        for key, value in items:
-            if key in result: raise ValueError('duplicate cache field')
-            result[key] = value
-        return result
-    def decimal(value, minimum=0):
-        if value is None: return None
-        if type(value) is not int or value < minimum: raise ValueError('invalid count')
-        return str(value)
-    def progress(value, k):
-        if value is None: return None
-        if type(value) is not str: raise ValueError('invalid progress')
-        if value == 'unknown — source authority changed; confirm input change': return value
-        gap = re.fullmatch(r'pending \?/([1-9][0-9]*) — archive sequence gap', value)
-        if gap and gap[1] == k: return value
-        match = re.fullmatch(r'(pending|qualified|qualified subset; pending) (0|[1-9][0-9]*)/([1-9][0-9]*)', value)
-        if (not match or match[3] != k or int(match[2]) > int(match[3])
-                or (match[1] == 'qualified' and match[2] != match[3])):
-            raise ValueError('invalid progress')
-        return value
-    try:
-        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
-        named = STATUS_DIR.lstat()
-        parent = os.open(STATUS_DIR, flags | os.O_DIRECTORY)
-        named_before_open[parent] = (named.st_dev, named.st_ino)
-        directory = os.fstat(parent); owned[parent] = (directory.st_dev, directory.st_ino)
-        if (identity(STATUS_DIR.lstat()) != identity(directory)
-                or not stat.S_ISDIR(directory.st_mode) or directory.st_mode & 0o022
-                or directory.st_uid not in (0, os.geteuid())):
-            raise ValueError('untrusted status directory')
-        image_name = 'issue-tracker-stage-l.status.json'
-        named = os.stat(image_name, dir_fd=parent, follow_symlinks=False)
-        descriptor = os.open(image_name, flags, dir_fd=parent)
-        named_before_open[descriptor] = (named.st_dev, named.st_ino)
-        before = os.fstat(descriptor); owned[descriptor] = (before.st_dev, before.st_ino)
-        if (identity(named) != identity(before) or not stat.S_ISREG(before.st_mode)
-                or before.st_nlink != 1 or before.st_mode & 0o022
-                or before.st_uid != directory.st_uid or not 1 <= before.st_size <= 1024*1024):
-            raise ValueError('untrusted status image')
-        raw = os.pread(descriptor, 1024*1024+1, 0)
-        if len(raw) != before.st_size: raise ValueError('incomplete status')
-        value = json.loads(raw.decode('utf-8', 'strict'), object_pairs_hook=pairs,
-            parse_constant=lambda _value: (_ for _ in ()).throw(ValueError('nonfinite cache')))
-        if (type(value) is not dict or type(value.get('schema_version')) is not int
-                or value['schema_version'] != 1 or value.get('state') not in (
-                    'pending', 'hold', 'qualified', 'local_applied', 'local_no_change', 'local_no_candidates')
-                or value.get('online') != no_send or type(value.get('updated_at')) is not str
-                or re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}', value['updated_at']) is None):
-            raise ValueError('invalid status shape')
-        if datetime.fromisoformat(value['updated_at']).timestamp() > time.time():
-            raise ValueError('future observation')
-        k = decimal(value.get('k'), 1)
-        revision = decimal(value.get('k_revision'))
-        if (k is None) != (revision is None): raise ValueError('incomplete K')
-        if k is None and value['state'] != 'hold': raise ValueError('missing K')
-        panels = value.get('panels')
-        if panels is None and value['state'] == 'hold':
-            panels = {name: {'state': 'hold'} for name in names}
-        if type(panels) is not dict or set(panels) != set(names): raise ValueError('invalid panels')
-        public_panels = {}
-        for name in names:
-            panel = panels[name]
-            if type(panel) is not dict or panel.get('state') not in ('pending', 'hold', 'qualified'):
-                raise ValueError('invalid panel')
-            public_panels[name] = {'state': panel['state'], 'progress_text': progress(panel.get('progress_text'), k)}
-        summary = value.get('cycle_summary', unknown)
-        if (type(summary) is not dict or set(summary) != set(unknown)
-                or type(summary['pending_count_complete']) is not bool):
-            raise ValueError('invalid summary')
-        public = {**unproved, 'state': value['state'], 'updated_at': value['updated_at'],
-            'k': k, 'k_revision': revision, 'publish_every_cycles': decimal(value.get('publish_every_cycles'), 1),
-            'panels': public_panels, 'cycle_summary': {
-                **{key: decimal(summary[key]) for key in ('published', 'skipped', 'pending')},
-                'pending_count_complete': summary['pending_count_complete']}}
-        # Include parsing/projection in the held image boundary. Same-byte
-        # replacement or a rebound FD cannot become a genuine observation.
-        if (identity(os.fstat(descriptor)) != identity(before)
-                or identity(os.stat(image_name, dir_fd=parent, follow_symlinks=False)) != identity(before)
-                or identity(os.fstat(parent)) != identity(directory)
-                or identity(STATUS_DIR.lstat()) != identity(directory)):
-            raise ValueError('status changed')
-        return public
-    except (OSError, ValueError, TypeError, UnicodeError, OverflowError):
-        return unproved
-    finally:
-        for fd in (descriptor, parent):
-            if fd is not None:
-                try:
-                    current = os.fstat(fd)
-                    if owned.get(fd, named_before_open.get(fd)) == (current.st_dev, current.st_ino):
-                        os.close(fd)
-                except OSError:
-                    pass
 
 
 def yaml_backup_status():
@@ -493,11 +302,6 @@ def main():
     elif method != "GET":
         respond({"error": "method not allowed"}, "405 Method Not Allowed")
         return
-    if method == 'GET':
-        views = parse_qs(os.environ.get('QUERY_STRING', ''), keep_blank_values=True).get('view', [''])
-        if views == ['issue_tracker_stage_l']:
-            respond(issue_tracker_stage_l_status())
-            return
     alive, pid = process_state()
     status = collection_status()
     backup_status = yaml_backup_status()
@@ -512,12 +316,8 @@ def main():
         if len(view_values) != 1 or view_values[0] not in {
             "", "switch", "yaml_backup", "continuous",
             "continuous_collection", "continuous_backup",
-            "issue_tracker_online",
         }:
             respond({"error": "invalid status view"}, "400 Bad Request")
-            return
-        if view_values[0] == 'issue_tracker_online':
-            respond({**issue_tracker_online_status(), 'process_alive': alive})
             return
         selected = {
             "yaml_backup": backup_status,

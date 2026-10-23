@@ -23,7 +23,6 @@
         "test_cases.test_all_script_entrypoints",
         "test_cases.test_change_aware_test_runner",
         "test_cases.test_documentation_catalog",
-        "test_cases.test_req7_retained_manual_profile",
         "test_cases.test_req9_manual_preservation_workflow",
         "test_cases.test_private_documentation_contract",
         "test_cases.test_public_clean_clone_contract",
@@ -35,9 +34,7 @@
         "test_cases.test_public_s_phase_workflow",
         "test_cases.test_public_publication_contract",
         "test_cases.test_public_publication_workflow",
-        "test_cases.test_public_publication_v3_overlap",
-        "test_cases.test_req7_auth_documentation_candidate",
-        "test_cases.test_req7_transport_manifest"
+        "test_cases.test_public_publication_v3_overlap"
       ]
     },
     {
@@ -237,7 +234,9 @@
         "test_cases.test_setup_collection_link_evidence_workflow",
         "test_cases.test_ib_post_collect",
         "test_cases.test_log_rotation",
-        "test_cases.test_collection_archive"
+        "test_cases.test_collection_archive",
+        "test_cases.test_monitor_legacy_tracker_retirement",
+        "test_cases.test_monitor_legacy_tracker_retirement_workflow"
       ]
     },
     {
@@ -276,127 +275,11 @@
       "id": "issue-tracker-local",
       "description": "REQ-7 本地 qualified-set 与不可变 manifest 的直接及双脚本流程合同",
       "tests": [
-        "test_cases.test_req7_completion_lane_dispatch",
-        "test_cases.test_req7_online_completion_runtime",
-        "test_cases.test_req7_terminal_unsent_dispatch",
-        "test_cases.test_req7_online_observation_status",
-        "test_cases.test_req7_stage_l_readonly_display",
-        "test_cases.test_req7_online_cycle_scope",
-        "test_cases.test_issue_tracker_qualification",
-        "test_cases.test_issue_tracker_manifest",
-        "test_cases.test_issue_tracker_manifest_workflow",
         "test_cases.test_issue_tracker_cycle_source",
         "test_cases.test_issue_tracker_cycle_source_workflow",
-        "test_cases.test_issue_tracker_k_chain",
-        "test_cases.test_issue_tracker_k_chain_workflow",
-        "test_cases.test_issue_tracker_per_key_status_contract",
-        "test_cases.test_issue_tracker_per_key_status_contract_workflow",
-        "test_cases.test_issue_tracker_per_key_source",
-        "test_cases.test_issue_tracker_per_key_source_workflow",
-        "test_cases.test_issue_tracker_switch_per_key_source",
-        "test_cases.test_issue_tracker_switch_per_key_source_workflow",
-        "test_cases.test_issue_tracker_ib_per_key_source",
-        "test_cases.test_issue_tracker_ib_per_key_source_workflow",
-        "test_cases.test_issue_tracker_receipt_snapshot",
-        "test_cases.test_issue_tracker_receipt_snapshot_workflow",
-        "test_cases.test_issue_tracker_stage_l_status_per_key_contract",
-        "test_cases.test_issue_tracker_stage_l_status_per_key_contract_workflow",
-        "test_cases.test_issue_tracker_whitelist",
-        "test_cases.test_issue_tracker_whitelist_workflow",
-        "test_cases.test_issue_tracker_online_target",
-        "test_cases.test_issue_tracker_online_target_workflow",
-        "test_cases.test_req7_initial_target_binding",
-        "test_cases.test_issue_tracker_credential_shape",
-        "test_cases.test_issue_tracker_credential_fd",
-        "test_cases.test_issue_tracker_online_cells",
-        "test_cases.test_issue_tracker_online_nv_ids",
-        "test_cases.test_issue_tracker_online_rows",
-        "test_cases.test_issue_tracker_k_store",
-        "test_cases.test_issue_tracker_k_store_workflow",
-        "test_cases.test_issue_tracker_local_commit",
-        "test_cases.test_issue_tracker_local_commit_workflow",
-        "test_cases.test_issue_tracker_local_recovery",
-        "test_cases.test_issue_tracker_local_recovery_workflow",
-        "test_cases.test_issue_tracker_state_owner",
-        "test_cases.test_issue_tracker_state_owner_workflow",
         "test_cases.test_issue_tracker_activity_source",
         "test_cases.test_issue_tracker_activity_source_workflow",
-        "test_cases.test_eth_activity_cycle_handoff_workflow",
-        "test_cases.test_issue_tracker_topology_derivation",
-        "test_cases.test_issue_tracker_topology_derivation_workflow",
-        "test_cases.test_issue_tracker_switch_info_source",
-        "test_cases.test_issue_tracker_switch_info_source_workflow",
-        "test_cases.test_issue_tracker_switch_runtime",
-        "test_cases.test_issue_tracker_switch_runtime_workflow",
-        "test_cases.test_issue_tracker_stage_l_consumer",
-        "test_cases.test_issue_tracker_stage_l_consumer_workflow",
-        "test_cases.test_issue_tracker_admission",
-        "test_cases.test_issue_tracker_manual_preview",
-        "test_cases.test_issue_tracker_manual_preview_workflow",
-        "test_cases.test_issue_tracker_manual_panel_workflow",
-        "test_cases.test_issue_tracker_manual_channel",
-        "test_cases.test_issue_tracker_manual_channel_workflow",
-        "test_cases.test_issue_tracker_manual_listener",
-        "test_cases.test_issue_tracker_manual_listener_workflow",
-        "test_cases.test_issue_tracker_manual_ui",
-        "test_cases.test_issue_tracker_manual_ui_workflow",
-        "test_cases.test_issue_tracker_publish_runtime",
-        "test_cases.test_issue_tracker_publish_runtime_workflow",
-        "test_cases.test_issue_tracker_ib_runtime",
-        "test_cases.test_issue_tracker_ib_runtime_workflow",
-        "test_cases.test_collection_ib_cycle_binding",
-        "test_cases.test_collection_ib_cycle_binding_workflow",
-        "test_cases.test_issue_tracker_whitelist_workbook",
-        "test_cases.test_issue_tracker_whitelist_workbook_workflow",
-        "test_cases.test_issue_tracker_local_workbook",
-        "test_cases.test_issue_tracker_local_workbook_workflow",
-        "test_cases.test_issue_tracker_cabling_projection",
-        "test_cases.test_issue_tracker_switch_projection",
-        "test_cases.test_issue_tracker_local_workbook_commit",
-        "test_cases.test_issue_tracker_local_workbook_commit_workflow",
-        "test_cases.test_issue_tracker_source_adapter",
-        "test_cases.test_issue_tracker_source_adapter_workflow",
-        "test_cases.test_issue_tracker_cable_merge",
-        "test_cases.test_issue_tracker_cable_cycle",
-        "test_cases.test_issue_tracker_cable_cycle_workflow",
-        "test_cases.test_req7_sdk_authentication",
-        "test_cases.test_req7_tls_inputs",
-        "test_cases.test_req7_attempt_supervision",
-        "test_cases.test_req7_token_launcher",
-        "test_cases.test_req7_history_read_launcher",
-        "test_cases.test_req7_mutation_launcher",
-        "test_cases.test_req7_shared_retry_admission",
-        "test_cases.test_req7_sheets_read_plan",
-        "test_cases.test_req7_sheets_read_decode",
-        "test_cases.test_req7_online_whitelist_read",
-        "test_cases.test_req7_native_tls_wire",
-        "test_cases.test_req7_native_supervised_workflow",
-        "test_cases.test_req7_mutation_rejection",
-        "test_cases.test_req7_attempt_journal",
-        "test_cases.test_req7_metadata_capacity",
-        "test_cases.test_req7_send_unit",
-        "test_cases.test_req7_send_intent",
-        "test_cases.test_req7_history_read",
-        "test_cases.test_req7_spreadsheet_owner",
-        "test_cases.test_req7_global_attempt_journal",
-        "test_cases.test_req7_settings_audit_allocation",
-        "test_cases.test_req7_activity_discovery",
-        "test_cases.test_req7_enrollment_journal",
-        "test_cases.test_req7_enrollment_protocol",
-        "test_cases.test_req7_enrollment_initialize_transport",
-        "test_cases.test_req7_enrollment_initialize_cleanup",
-        "test_cases.test_req7_explicit_enrollment_initialize_workflow",
-        "test_cases.test_req7_data_only_initialization_reporting",
-        "test_cases.test_req7_initialization_return_value_is_not_completion",
-        "test_cases.test_req7_history_preread_journal",
-        "test_cases.test_req7_remote_history_match",
-        "test_cases.test_req7_online_reconciliation",
-        "test_cases.test_req7_catalog_reconciliation",
-        "test_cases.test_req7_nv_reservation",
-        "test_cases.test_req7_metadata_reservation",
-        "test_cases.test_req7_retained_global_inventory",
-        "test_cases.test_req7_retained_applied_inventory",
-        "test_cases.test_req7_unit_catalog"
+        "test_cases.test_eth_activity_cycle_handoff_workflow"
       ]
     },
     {
@@ -432,8 +315,7 @@
         "test_cases.test_ufm_collection_pipeline_workflow",
         "test_cases.test_ufm_ibdiagnet_pipeline",
         "test_cases.test_ufm_ibdiagnet_pipeline_workflow",
-        "test_cases.test_collection_ib_producer",
-        "test_cases.test_collection_ib_producer_workflow"
+        "test_cases.test_collection_ib_producer"
       ]
     },
     {
@@ -535,157 +417,6 @@
       ]
     },
     {
-      "id": "req7-completed-source-read-related",
-      "description": "既存原件只读租约与独立 completed-cycle reader；不授予采集或发送权限",
-      "tests": [
-        "test_cases.test_completed_collection_source_read",
-        "test_cases.test_completed_collection_source_read_workflow",
-        "test_cases.test_post_c6_fixture_cleanup",
-        "test_cases.test_completed_collection_source_read_close"
-      ]
-    },
-    {
-      "id": "req7-owner-body-ni-cleanup",
-      "description": "two whole actual local file owners, healthy then real closeEIO with bodyNI",
-      "tests": [
-        "test_cases.test_req7_owner_ni_cleanup"
-      ]
-    },
-    {
-      "id": "req7-private-input-first-ni-cleanup",
-      "description": "Held credential/target contexts preserve first body NI and finish known originals",
-      "tests": [
-        "test_cases.test_req7_private_input_ni_cleanup"
-      ]
-    },
-    {
-      "id": "req7-private-input-close-only-regression",
-      "description": "Actual close-only NI and typed EIO original cleanup compatibility",
-      "tests": [
-        "test_cases.test_req7_private_input_close_regression"
-      ]
-    },
-    {
-      "id": "req7-cold-original-attach-qualification",
-      "description": "private cold-child same-original NO_SEND fixture qualification; not native SDK actor",
-      "tests": [
-        "test_cases.test_req7_cold_completed_original_attach"
-      ]
-    },
-    {
-      "id": "req7-cold-graph-json-identity-direct",
-      "description": "independent fixture JSON stat9 roundtrip and actual same-byte new inode",
-      "tests": [
-        "test_cases.test_req7_cold_graph_json_identity"
-      ]
-    },
-    {
-      "id": "req7-eth-info-held-original-window",
-      "description": "Actual pinned ETH info consumer window; one literal workflow, no SDK or full-role claim",
-      "tests": [
-        "test_cases.test_req7_eth_info_held_window"
-      ]
-    },
-    {
-      "id": "req7-w1-previous-original-window",
-      "description": "Actual cold W1 semantics bind previously held original, independent workflow",
-      "tests": [
-        "test_cases.test_req7_w1_original_window"
-      ]
-    },
-    {
-      "id": "req7-n-policy-previous-original-window",
-      "description": "Actual cold N policy fixed1 semantics bind previously held global original",
-      "tests": [
-        "test_cases.test_req7_n_policy_original_window"
-      ]
-    },
-    {
-      "id": "req7-nv-info-original-after-guard-window",
-      "description": "Actual NV semantic original archive after successful guard, one independent cold workflow",
-      "tests": [
-        "test_cases.test_req7_nv_info_original_window"
-      ]
-    },
-    {
-      "id": "req7-ca-close-interruption",
-      "description": "Canonical owned CA first-interruption cleanup and actual token-wire no-connect workflow",
-      "tests": [
-        "test_cases.test_req7_ca_close"
-      ]
-    },
-    {
-      "id": "req7-cable-held-dual-owner-no-send",
-      "description": "Actual protected C6/source local-before-sheet exclusion and revocable same-original NO_SEND library; separate literal repr DATA UNIT",
-      "tests": [
-        "test_cases.test_req7_cable_read_owner_core",
-        "test_cases.test_req7_cable_lexical_repr"
-      ]
-    },
-    {
-      "id": "req7-cable-fixed-public-code-prerequisite",
-      "description": "Finite held public SDK producer code/default/wrapper checks and real protected source/dual-owner NO_SEND composition, not SDK construction or send authority",
-      "tests": [
-        "test_cases.test_req7_cable_public_sdk_code",
-        "test_cases.test_req7_cable_sdk_code_owner_workflow"
-      ]
-    },
-    {
-      "id": "req7-cable-credential-construction-provider-origins",
-      "description": "Actual same-source SA construction and pre-entry caller/base/manager/RSA refusal; NO_SEND only, canonical source proposal NOT RUN",
-      "tests": [
-        "test_cases.test_req7_cable_credential_construction",
-        "test_cases.test_req7_cable_credential_construction_workflow",
-        "test_cases.test_req7_cable_credential_base_origin",
-        "test_cases.test_req7_cable_credential_manager_origin",
-        "test_cases.test_req7_cable_credential_rsa_allocation"
-      ]
-    },
-    {
-      "id": "req7-cable-constructor-code-resources-cold",
-      "description": "Constructor17 code-only import order and first-result FD cleanup; cold-order public method must self-isolate in a fresh owned child before selected SDK imports. Ordinary sorted/discovery module order is NOT a cold boundary. Canonical proposal NOT RUN.",
-      "tests": [
-        "test_cases.test_req7_cable_constructor_code_resources"
-      ]
-    },
-    {
-      "id": "req7-cable-fixed-grid-protocol",
-      "description": "Fixed one-emission HTTPS and bounded complete-grid original entered cells to current merge; protocol DATA only, not native/worker authority",
-      "tests": [
-        "test_cases.test_req7_cable_fullgrid",
-        "test_cases.test_req7_cable_fullgrid_workflow",
-        "test_cases.test_req7_fixed_https_direct",
-        "test_cases.test_req7_fixed_https_sdk_workflow",
-        "test_cases.test_req7_cable_fixed_writes",
-        "test_cases.test_req7_cable_fixed_writes_workflow"
-      ]
-    },
-    {
-      "id": "req7-owned-live-read-process-control",
-      "description": "Retained genuine Popen/pipe protocol DATA and fixed28/30 acquisition, fixed60 live observation; not source/SA/SDK/native launcher authority",
-      "tests": [
-        "test_cases.test_req7_read_live_session",
-        "test_cases.test_req7_read_live_session_workflow",
-        "test_cases.test_req7_read_live_session_races",
-        "test_cases.test_req7_read_live_session_copy_budget"
-      ]
-    },
-    {
-      "id": "req7-first-read-public-code",
-      "tests": [
-        "test_cases.test_req7_cable_first_read_code"
-      ],
-      "description": "Finite actual21 public code-only first-read prerequisite, pre-entry method/default/alias refusal and original close cleanup; no SA/refresh/wire/native/worker authority"
-    },
-    {
-      "id": "req7-owned-live-read-v2-process",
-      "description": "Separate shared CLOCK_MONOTONIC DATA codec/owned-process control; no native/source/SA/SDK/worker authority",
-      "tests": [
-        "test_cases.test_req7_live_read_v2_protocol",
-        "test_cases.test_req7_live_read_v2_workflow"
-      ]
-    },
-    {
       "id": "fleet-upgrade-v2",
       "description": "交换机批量作业引擎（IB 升级 v2，可复用于 nvl-sw）：速率检测、分发、探测、SSH、主进程、IB 适配器与入口；模拟交换机，不连真机",
       "tests": [
@@ -712,7 +443,6 @@
     }
   ],
   "tracked_support": [
-    "test_cases/live_read_v2_literal_child.py",
     "requirements-f01-ssh.lock",
     "test_cases/fixtures/bounded_inner_fd_fixture.py",
     ".dockerignore",
@@ -887,18 +617,6 @@
     "test_cases/fixtures/ibsw3-source-inverse/os22/candidate/tools/ibsw_upgrade_component.py.txt",
     "test_cases/fixtures/ibsw3-source-inverse/os22/candidate/infiniband/bringup/xdr-upgrade/upgrade-component.sh.txt",
     "test_cases/fixtures/ibsw3-source-inverse/display/candidate/infiniband/bringup/xdr-upgrade/upgrade.py.txt",
-    "test_cases/completed_collection_source_read_fixture.py",
-    "test_cases/issue_tracker_cable_post_c6_fixture.py",
-    "test_cases/completed_read_close_isolation.py",
-    "test_cases/owner_ni_cleanup_fixture.py",
-    "test_cases/private_input_ni_fixture.py",
-    "test_cases/private_input_close_regression_fixture.py",
-    "test_cases/cold_completed_original_attach_fixture.py",
-    "test_cases/eth_info_held_window_fixture.py",
-    "test_cases/w1_original_window_fixture.py",
-    "test_cases/n_policy_original_window_fixture.py",
-    "test_cases/nv_info_original_window_fixture.py",
-    "test_cases/fixed_https_peer_fixture.py",
     "test_cases/ibsw_v2_switch_sim.py",
     "monitor/issue-tracker/cabletracker/mapping_v4.json",
     "test_cases/issue_tracker_template.py",
@@ -947,46 +665,10 @@
     "monitor/issue-tracker/issue-tracker-sync.py": "monitor/issue-tracker/issue-tracker-sync.py",
     "monitor/issue-tracker/switch-status.py": "monitor/issue-tracker/switch-status.py",
     "monitor/issue-tracker/update-engine.py": "monitor/issue-tracker/update-engine.py",
-    "monitor/issue_tracker_qualification.py": "monitor/issue_tracker_qualification.py",
-    "monitor/issue_tracker_manifest.py": "monitor/issue_tracker_manifest.py",
     "monitor/issue_tracker_cycle_source.py": "monitor/issue_tracker_cycle_source.py",
-    "monitor/issue_tracker_k_chain.py": "monitor/issue_tracker_k_chain.py",
-    "monitor/issue_tracker_per_key_source.py": "monitor/issue_tracker_per_key_source.py",
-    "monitor/issue_tracker_switch_per_key_source.py": "monitor/issue_tracker_switch_per_key_source.py",
-    "monitor/issue_tracker_ib_per_key_source.py": "monitor/issue_tracker_ib_per_key_source.py",
-    "monitor/issue_tracker_receipt_snapshot.py": "monitor/issue_tracker_receipt_snapshot.py",
-    "monitor/issue_tracker_whitelist.py": "monitor/issue_tracker_whitelist.py",
-    "monitor/issue_tracker_online_target.py": "monitor/issue_tracker_online_target.py",
-    "monitor/issue_tracker_credential_shape.py": "monitor/issue_tracker_credential_shape.py",
-    "monitor/issue_tracker_online_cells.py": "monitor/issue_tracker_online_cells.py",
-    "monitor/issue_tracker_online_nv_ids.py": "monitor/issue_tracker_online_nv_ids.py",
-    "monitor/issue_tracker_online_rows.py": "monitor/issue_tracker_online_rows.py",
-    "monitor/issue_tracker_k_store.py": "monitor/issue_tracker_k_store.py",
-    "monitor/issue_tracker_local_commit.py": "monitor/issue_tracker_local_commit.py",
-    "monitor/issue_tracker_local_recovery.py": "monitor/issue_tracker_local_recovery.py",
-    "monitor/issue_tracker_state_owner.py": "monitor/issue_tracker_state_owner.py",
     "monitor/issue_tracker_activity_source.py": "monitor/issue_tracker_activity_source.py",
-    "monitor/issue_tracker_topology_derivation.py": "monitor/issue_tracker_topology_derivation.py",
-    "monitor/issue_tracker_switch_info_source.py": "monitor/issue_tracker_switch_info_source.py",
-    "monitor/issue_tracker_switch_runtime.py": "monitor/issue_tracker_switch_runtime.py",
-    "monitor/issue_tracker_stage_l_consumer.py": "monitor/issue_tracker_stage_l_consumer.py",
-    "monitor/issue_tracker_admission.py": "monitor/issue_tracker_admission.py",
-    "monitor/issue_tracker_manual_preview.py": "monitor/issue_tracker_manual_preview.py",
-    "monitor/issue_tracker_manual_channel.py": "monitor/issue_tracker_manual_channel.py",
-    "monitor/issue_tracker_manual_listener.py": "monitor/issue_tracker_manual_listener.py",
-    "monitor/issue-tracker-control.cgi": "monitor/issue-tracker-control.cgi",
-    "monitor/issue_tracker_publish_runtime.py": "monitor/issue_tracker_publish_runtime.py",
-    "monitor/issue_tracker_ib_runtime.py": "monitor/issue_tracker_ib_runtime.py",
-    "monitor/collection_ib_cycle_binding.py": "monitor/collection_ib_cycle_binding.py",
     "monitor/collection_ufm_run_binding.py": "monitor/collection_ufm_run_binding.py",
     "monitor/collection_ib_producer.py": "monitor/collection_ib_producer.py",
-    "monitor/issue_tracker_whitelist_workbook.py": "monitor/issue_tracker_whitelist_workbook.py",
-    "monitor/issue_tracker_local_workbook.py": "monitor/issue_tracker_local_workbook.py",
-    "monitor/issue_tracker_local_workbook_commit.py": "monitor/issue_tracker_local_workbook_commit.py",
-    "monitor/issue_tracker_source_model.py": "monitor/issue_tracker_source_model.py",
-    "monitor/issue_tracker_collected_source.py": "monitor/issue_tracker_collected_source.py",
-    "monitor/issue_tracker_cable_merge.py": "monitor/issue_tracker_cable_merge.py",
-    "monitor/issue_tracker_cable_cycle.py": "monitor/issue_tracker_cable_cycle.py",
     "monitor/generate-monitor-html.py": "monitor/generate-monitor-html.py",
     "monitor/manual-ztp-control.cgi": "monitor/manual-ztp-control.cgi",
     "monitor/manual-ztp-worker.py": "monitor/manual-ztp-worker.py",
@@ -1119,32 +801,6 @@
     "infiniband/monitor/ufm-info.sh": "infiniband/monitor/ufm-info.sh",
     "infiniband/monitor/ufm-ibdiagnet.sh": "infiniband/monitor/ufm-ibdiagnet.sh",
     "infiniband/monitor/post-collect.py": "infiniband/monitor/post-collect.py",
-    "monitor/issue_tracker_sdk_authentication.py": "monitor/issue_tracker_sdk_authentication.py",
-    "monitor/issue_tracker_tls_inputs.py": "monitor/issue_tracker_tls_inputs.py",
-    "monitor/issue_tracker_attempt_supervision.py": "monitor/issue_tracker_attempt_supervision.py",
-    "monitor/issue_tracker_token_launcher.py": "monitor/issue_tracker_token_launcher.py",
-    "monitor/issue_tracker_history_read_launcher.py": "monitor/issue_tracker_history_read_launcher.py",
-    "monitor/issue_tracker_sheets_read_plan.py": "monitor/issue_tracker_sheets_read_plan.py",
-    "monitor/issue_tracker_sheets_read_decode.py": "monitor/issue_tracker_sheets_read_decode.py",
-    "monitor/issue_tracker_online_whitelist_read.py": "monitor/issue_tracker_online_whitelist_read.py",
-    "monitor/issue_tracker_mutation_rejection.py": "monitor/issue_tracker_mutation_rejection.py",
-    "monitor/issue_tracker_attempt_journal.py": "monitor/issue_tracker_attempt_journal.py",
-    "monitor/issue_tracker_metadata_capacity.py": "monitor/issue_tracker_metadata_capacity.py",
-    "monitor/issue_tracker_send_unit.py": "monitor/issue_tracker_send_unit.py",
-    "monitor/issue_tracker_send_intent.py": "monitor/issue_tracker_send_intent.py",
-    "monitor/issue_tracker_spreadsheet_owner.py": "monitor/issue_tracker_spreadsheet_owner.py",
-    "monitor/issue_tracker_global_attempt_journal.py": "monitor/issue_tracker_global_attempt_journal.py",
-    "monitor/issue_tracker_mutation_launcher.py": "monitor/issue_tracker_mutation_launcher.py",
-    "monitor/issue_tracker_settings_audit_allocation.py": "monitor/issue_tracker_settings_audit_allocation.py",
-    "monitor/issue_tracker_enrollment_journal.py": "monitor/issue_tracker_enrollment_journal.py",
-    "monitor/issue_tracker_enrollment_protocol.py": "monitor/issue_tracker_enrollment_protocol.py",
-    "monitor/issue_tracker_enrollment_initialize.py": "monitor/issue_tracker_enrollment_initialize.py",
-    "monitor/issue_tracker_history_preread_journal.py": "monitor/issue_tracker_history_preread_journal.py",
-    "monitor/issue_tracker_remote_history_match.py": "monitor/issue_tracker_remote_history_match.py",
-    "monitor/issue_tracker_nv_reservation.py": "monitor/issue_tracker_nv_reservation.py",
-    "monitor/issue_tracker_metadata_reservation.py": "monitor/issue_tracker_metadata_reservation.py",
-    "monitor/issue_tracker_retained_inventory.py": "monitor/issue_tracker_retained_inventory.py",
-    "monitor/issue_tracker_unit_catalog.py": "monitor/issue_tracker_unit_catalog.py",
     "infiniband/bringup/xdr-upgrade/upgrade.py": "infiniband/bringup/xdr-upgrade/upgrade.py",
     "infiniband/bringup/xdr-upgrade/upgrade-component.sh": "infiniband/bringup/xdr-upgrade/upgrade-component.sh",
     "infiniband/bringup/xdr-upgrade/upgrade-owned-runner.sh": "infiniband/bringup/xdr-upgrade/upgrade-owned-runner.sh",
@@ -1158,14 +814,7 @@
     "tools/ibsw_upgrade_executor.py": "tools/ibsw_upgrade_executor.py",
     "tools/ibsw_upgrade_observer.py": "tools/ibsw_upgrade_observer.py",
     "tools/ibsw_upgrade_access.py": "tools/ibsw_upgrade_access.py",
-    "tools/ibsw_upgrade_pipeline.py": "tools/ibsw_upgrade_pipeline.py",
-    "monitor/issue_tracker_cable_grid.py": "monitor/issue_tracker_cable_grid.py",
-    "monitor/issue_tracker_cable_fixed_https.py": "monitor/issue_tracker_cable_fixed_https.py",
-    "monitor/issue_tracker_read_live_protocol.py": "monitor/issue_tracker_read_live_protocol.py",
-    "monitor/issue_tracker_read_live_session.py": "monitor/issue_tracker_read_live_session.py",
-    "monitor/issue_tracker_cable_first_read_code.py": "monitor/issue_tracker_cable_first_read_code.py",
-    "monitor/issue_tracker_read_live_protocol_v2.py": "monitor/issue_tracker_read_live_protocol_v2.py",
-    "monitor/issue_tracker_read_live_session_v2.py": "monitor/issue_tracker_read_live_session_v2.py"
+    "tools/ibsw_upgrade_pipeline.py": "tools/ibsw_upgrade_pipeline.py"
   },
   "test_rules": [
     {
@@ -1473,7 +1122,6 @@
         "monitor/*"
       ],
       "tests": [
-        "test_cases.test_issue_tracker_publish_runtime",
         "test_cases.test_collection_cycle_persistence",
         "test_cases.test_collection_cycle_worker_contract",
         "test_cases.test_collection_v2_emitter_contract",
@@ -1487,45 +1135,6 @@
         "test_cases.test_ztp_monitor_watch_resilience",
         "test_cases.test_ztp_monitor_watch_runtime_workflow"
       ]
-    },
-    {
-      "id": "req7_completion_lane_dispatch",
-      "paths": [
-        "monitor/switch-collection-worker.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_completion_lane_dispatch"
-      ]
-    },
-    {
-      "id": "req7_online_completion_originals",
-      "paths": ["monitor/switch-collection-worker.py", "monitor/issue_tracker_cycle_source.py", "monitor/issue_tracker_online_target.py", "monitor/issue_tracker_credential_shape.py", "monitor/issue_tracker_remote_history_match.py"],
-      "tests": ["test_cases.test_req7_online_completion_runtime"]
-    },
-    {
-      "id": "req7_terminal_unsent_dispatch",
-      "paths": ["monitor/switch-collection-worker.py"],
-      "tests": ["test_cases.test_req7_terminal_unsent_dispatch"]
-    },
-    {
-      "id": "req7_default_actual_source_and_project_read_preparation",
-      "paths": ["monitor/switch-collection-worker.py", "monitor/issue_tracker_remote_history_match.py"],
-      "tests": ["test_cases.test_req7_catalog_reconciliation", "test_cases.test_req7_terminal_unsent_dispatch", "test_cases.test_issue_tracker_stage_l_consumer_workflow"]
-    },
-    {
-      "id": "req7_online_actual_cycle_scope_composition",
-      "paths": ["monitor/issue_tracker_cycle_source.py", "monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_stage_l_consumer.py"],
-      "tests": ["test_cases.test_req7_online_cycle_scope"]
-    },
-    {
-      "id": "req7_online_non_authority_observation_status",
-      "paths": ["monitor/switch-collection-worker.py", "monitor/switch-collection-control.cgi", "monitor/generate-monitor-html.py", "monitor/issue_tracker_remote_history_match.py"],
-      "tests": ["test_cases.test_req7_online_observation_status"]
-    },
-    {
-      "id": "req7_stage_l_fixed_readonly_display",
-      "paths": ["monitor/switch-collection-control.cgi", "monitor/generate-monitor-html.py"],
-      "tests": ["test_cases.test_req7_stage_l_readonly_display"]
     },
     {
       "id": "finished_project_lifecycle",
@@ -1766,8 +1375,7 @@
         "test_cases.test_terminal_l2_stp_generation",
         "test_cases.test_v2_project_schema",
         "test_cases.test_v2_generation_flow",
-        "test_cases.test_reference_only_path_disposition",
-        "test_cases.test_req7_auth_documentation_candidate"
+        "test_cases.test_reference_only_path_disposition"
       ]
     },
     {
@@ -2083,90 +1691,12 @@
       ]
     },
     {
-      "id": "issue_tracker_local_workbook_commit",
-      "paths": [
-        "monitor/issue_tracker_local_workbook_commit.py"
-      ],
-      "tests": [
-        "test_cases.test_issue_tracker_local_workbook_commit"
-      ]
-    },
-    {
-      "id": "issue_tracker_source_data_boundary",
-      "paths": [
-        "monitor/issue_tracker_source_model.py",
-        "monitor/issue_tracker_collected_source.py"
-      ],
-      "tests": [
-        "test_cases.test_issue_tracker_source_adapter"
-      ]
-    },
-    {
-      "id": "issue_tracker_cable_merge",
-      "paths": ["monitor/issue_tracker_cable_merge.py"],
-      "tests": ["test_cases.test_issue_tracker_cable_merge"]
-    },
-    {
-      "id": "issue_tracker_cable_cycle",
-      "paths": ["monitor/issue_tracker_cable_cycle.py"],
-      "tests": ["test_cases.test_issue_tracker_cable_cycle"]
-    },
-    {
-      "id": "issue_tracker_local_workbook",
-      "paths": [
-        "monitor/issue_tracker_local_workbook.py"
-      ],
-      "tests": [
-        "test_cases.test_issue_tracker_local_workbook",
-        "test_cases.test_issue_tracker_cabling_projection",
-        "test_cases.test_issue_tracker_switch_projection"
-      ]
-    },
-    {
-      "id": "issue_tracker_whitelist_workbook",
-      "paths": [
-        "monitor/issue_tracker_whitelist_workbook.py"
-      ],
-      "tests": [
-        "test_cases.test_issue_tracker_whitelist_workbook"
-      ]
-    },
-    {
       "id": "issue_tracker_activity_source",
       "paths": [
         "monitor/issue_tracker_activity_source.py"
       ],
       "tests": [
         "test_cases.test_issue_tracker_activity_source"
-      ]
-    },
-    {
-      "id": "issue_tracker_topology_derivation",
-      "paths": [
-        "monitor/issue_tracker_topology_derivation.py"
-      ],
-      "tests": [
-        "test_cases.test_issue_tracker_topology_derivation"
-      ]
-    },
-    {
-      "id": "issue_tracker_ib_runtime_direct",
-      "paths": [
-        "monitor/issue_tracker_ib_runtime.py"
-      ],
-      "tests": [
-        "test_cases.test_issue_tracker_ib_runtime",
-        "test_cases.test_ufm_req7_ib_cycle_workflow"
-      ]
-    },
-    {
-      "id": "collection_ib_cycle_binding_direct",
-      "paths": [
-        "monitor/collection_ib_cycle_binding.py"
-      ],
-      "tests": [
-        "test_cases.test_collection_ib_cycle_binding",
-        "test_cases.test_ufm_req7_ib_cycle_workflow"
       ]
     },
     {
@@ -2179,255 +1709,12 @@
       ]
     },
     {
-      "id": "issue_tracker_stage_l_consumer",
-      "paths": [
-        "monitor/issue_tracker_stage_l_consumer.py"
-      ],
-      "tests": [
-        "test_cases.test_issue_tracker_stage_l_consumer"
-      ]
-    },
-    {
-      "id": "issue_tracker_admission",
-      "paths": [
-        "monitor/issue_tracker_admission.py"
-      ],
-      "tests": [
-        "test_cases.test_issue_tracker_admission",
-        "test_cases.test_req7_shared_retry_admission"
-      ]
-    },
-    {
-      "id": "issue_tracker_manual_preview",
-      "paths": [
-        "monitor/issue_tracker_manual_preview.py"
-      ],
-      "tests": [
-        "test_cases.test_issue_tracker_manual_preview"
-      ]
-    },
-    {
-      "id": "issue_tracker_manual_channel",
-      "paths": [
-        "monitor/issue_tracker_manual_channel.py",
-        "monitor/issue-tracker-control.cgi"
-      ],
-      "tests": [
-        "test_cases.test_issue_tracker_manual_channel"
-      ]
-    },
-    {
-      "id": "issue_tracker_manual_ui",
-      "paths": [
-        "monitor/generate-monitor-html.py"
-      ],
-      "tests": [
-        "test_cases.test_issue_tracker_manual_ui"
-      ]
-    },
-    {
-      "id": "issue_tracker_manual_listener",
-      "paths": [
-        "monitor/issue_tracker_manual_listener.py"
-      ],
-      "tests": [
-        "test_cases.test_issue_tracker_manual_listener"
-      ]
-    },
-    {
-      "id": "issue_tracker_online_target",
-      "paths": [
-        "monitor/issue_tracker_online_target.py"
-      ],
-      "tests": [
-        "test_cases.test_issue_tracker_online_target",
-        "test_cases.test_req7_initial_target_binding"
-      ]
-    },
-    {
-      "id": "issue_tracker_credential_shape",
-      "paths": [
-        "monitor/issue_tracker_credential_shape.py"
-      ],
-      "tests": [
-        "test_cases.test_issue_tracker_credential_shape",
-        "test_cases.test_issue_tracker_credential_fd"
-      ]
-    },
-    {
-      "id": "issue_tracker_online_cells",
-      "paths": [
-        "monitor/issue_tracker_online_cells.py"
-      ],
-      "tests": [
-        "test_cases.test_issue_tracker_online_cells"
-      ]
-    },
-    {
-      "id": "issue_tracker_online_nv_ids",
-      "paths": [
-        "monitor/issue_tracker_online_nv_ids.py"
-      ],
-      "tests": [
-        "test_cases.test_issue_tracker_online_nv_ids"
-      ]
-    },
-    {
-      "id": "issue_tracker_online_rows",
-      "paths": [
-        "monitor/issue_tracker_online_rows.py"
-      ],
-      "tests": [
-        "test_cases.test_issue_tracker_online_rows"
-      ]
-    },
-    {
-      "id": "issue_tracker_publish_runtime",
-      "paths": [
-        "monitor/issue_tracker_publish_runtime.py"
-      ],
-      "tests": [
-        "test_cases.test_issue_tracker_publish_runtime",
-        "test_cases.test_issue_tracker_stage_l_status_per_key_contract"
-      ]
-    },
-    {
-      "id": "issue_tracker_switch_runtime",
-      "paths": [
-        "monitor/issue_tracker_switch_runtime.py"
-      ],
-      "tests": [
-        "test_cases.test_issue_tracker_switch_runtime",
-        "test_cases.test_issue_tracker_per_key_source"
-      ]
-    },
-    {
-      "id": "issue_tracker_eth_per_key_source",
-      "paths": [
-        "monitor/issue_tracker_per_key_source.py"
-      ],
-      "tests": [
-        "test_cases.test_issue_tracker_per_key_source"
-      ]
-    },
-    {
-      "id": "issue_tracker_switch_per_key_source",
-      "paths": [
-        "monitor/issue_tracker_switch_per_key_source.py"
-      ],
-      "tests": [
-        "test_cases.test_issue_tracker_switch_per_key_source"
-      ]
-    },
-    {
-      "id": "issue_tracker_ib_per_key_source",
-      "paths": [
-        "monitor/issue_tracker_ib_per_key_source.py"
-      ],
-      "tests": [
-        "test_cases.test_issue_tracker_ib_per_key_source"
-      ]
-    },
-    {
-      "id": "issue_tracker_current_cycle_receipt_snapshot",
-      "paths": [
-        "monitor/issue_tracker_receipt_snapshot.py"
-      ],
-      "tests": [
-        "test_cases.test_issue_tracker_receipt_snapshot",
-        "test_cases.test_req7_shared_retry_admission"
-      ]
-    },
-    {
-      "id": "issue_tracker_switch_info_source",
-      "paths": [
-        "monitor/issue_tracker_switch_info_source.py"
-      ],
-      "tests": [
-        "test_cases.test_issue_tracker_switch_info_source"
-      ]
-    },
-    {
-      "id": "issue_tracker_state_owner",
-      "paths": [
-        "monitor/issue_tracker_state_owner.py"
-      ],
-      "tests": [
-        "test_cases.test_issue_tracker_state_owner"
-      ]
-    },
-    {
-      "id": "issue_tracker_local_commit",
-      "paths": [
-        "monitor/issue_tracker_local_commit.py"
-      ],
-      "tests": [
-        "test_cases.test_issue_tracker_local_commit"
-      ]
-    },
-    {
-      "id": "issue_tracker_local_recovery",
-      "paths": [
-        "monitor/issue_tracker_local_recovery.py"
-      ],
-      "tests": [
-        "test_cases.test_issue_tracker_local_recovery"
-      ]
-    },
-    {
-      "id": "issue_tracker_k_store",
-      "paths": [
-        "monitor/issue_tracker_k_store.py"
-      ],
-      "tests": [
-        "test_cases.test_issue_tracker_k_store"
-      ]
-    },
-    {
-      "id": "issue_tracker_whitelist",
-      "paths": [
-        "monitor/issue_tracker_whitelist.py"
-      ],
-      "tests": [
-        "test_cases.test_issue_tracker_whitelist"
-      ]
-    },
-    {
-      "id": "issue_tracker_k_chain",
-      "paths": [
-        "monitor/issue_tracker_k_chain.py"
-      ],
-      "tests": [
-        "test_cases.test_issue_tracker_k_chain",
-        "test_cases.test_issue_tracker_per_key_status_contract"
-      ]
-    },
-    {
       "id": "issue_tracker_cycle_source",
       "paths": [
         "monitor/issue_tracker_cycle_source.py"
       ],
       "tests": [
-        "test_cases.test_issue_tracker_cycle_source",
-        "test_cases.test_issue_tracker_stage_l_status_per_key_contract"
-      ]
-    },
-    {
-      "id": "issue_tracker_local_qualified_set",
-      "paths": [
-        "monitor/issue_tracker_qualification.py"
-      ],
-      "tests": [
-        "test_cases.test_issue_tracker_qualification"
-      ]
-    },
-    {
-      "id": "issue_tracker_local_manifest",
-      "paths": [
-        "monitor/issue_tracker_manifest.py"
-      ],
-      "tests": [
-        "test_cases.test_issue_tracker_manifest"
+        "test_cases.test_issue_tracker_cycle_source"
       ]
     },
     {
@@ -2486,8 +1773,7 @@
     {
       "id": "ufm_worker_target_plan_direct",
       "paths": [
-        "monitor/switch-collection-worker.py",
-        "monitor/collection_ib_cycle_binding.py"
+        "monitor/switch-collection-worker.py"
       ],
       "tests": [
         "test_cases.test_ufm_worker_collection",
@@ -2509,11 +1795,22 @@
       "paths": [
         "tools/project_contract.py",
         "monitor/collection_v2_emitter.py",
-        "monitor/issue_tracker_switch_runtime.py",
         "monitor/switch-collection-worker.py"
       ],
       "tests": [
         "test_cases.test_setup_collection_link_evidence_workflow"
+      ]
+    },
+    {
+      "id": "monitor_legacy_tracker_retirement_direct",
+      "paths": [
+        "monitor/switch-collection-worker.py",
+        "monitor/switch-collection-control.cgi",
+        "monitor/generate-monitor-html.py"
+      ],
+      "tests": [
+        "test_cases.test_monitor_legacy_tracker_retirement",
+        "test_cases.test_monitor_legacy_tracker_retirement_workflow"
       ]
     },
     {
@@ -2545,200 +1842,6 @@
       "tests": [
         "test_cases.test_collection_archive"
       ]
-    },
-    {
-      "id": "issue_tracker_sdk_authentication",
-      "paths": [
-        "monitor/issue_tracker_sdk_authentication.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_sdk_authentication"
-      ]
-    },
-    {
-      "id": "issue_tracker_tls_inputs",
-      "paths": [
-        "monitor/issue_tracker_tls_inputs.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_tls_inputs"
-      ]
-    },
-    {
-      "id": "issue_tracker_attempt_supervision",
-      "paths": [
-        "monitor/issue_tracker_attempt_supervision.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_attempt_supervision"
-      ]
-    },
-    {
-      "id": "issue_tracker_fixed_owned_token_launcher",
-      "paths": ["monitor/issue_tracker_token_launcher.py"],
-      "tests": ["test_cases.test_req7_token_launcher"]
-    },
-    {
-      "id": "issue_tracker_fixed_owned_history_read_launcher",
-      "paths": ["monitor/issue_tracker_history_read_launcher.py"],
-      "tests": ["test_cases.test_req7_history_read_launcher"]
-    },
-    {
-      "id": "issue_tracker_fixed_counted_original_mutation_launcher",
-      "paths": ["monitor/issue_tracker_mutation_launcher.py"],
-      "tests": ["test_cases.test_req7_mutation_launcher"]
-    },
-    {
-      "id": "issue_tracker_sheets_read_plan",
-      "paths": [
-        "monitor/issue_tracker_sheets_read_plan.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_sheets_read_plan"
-      ]
-    },
-    {
-      "id": "issue_tracker_original_insertion_position",
-      "paths": ["monitor/issue_tracker_sheets_read_plan.py", "monitor/issue_tracker_sheets_read_decode.py", "monitor/issue_tracker_tls_inputs.py"],
-      "tests": ["test_cases.test_req7_activity_discovery"]
-    },
-    {
-      "id": "issue_tracker_sheets_read_decode",
-      "paths": [
-        "monitor/issue_tracker_sheets_read_decode.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_sheets_read_decode"
-      ]
-    },
-    {
-      "id": "issue_tracker_online_whitelist_read",
-      "paths": [
-        "monitor/issue_tracker_online_whitelist_read.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_online_whitelist_read"
-      ]
-    },
-    {
-      "id": "issue_tracker_mutation_rejection",
-      "paths": ["monitor/issue_tracker_mutation_rejection.py"],
-      "tests": ["test_cases.test_req7_mutation_rejection"]
-    },
-    {
-      "id": "issue_tracker_attempt_journal",
-      "paths": ["monitor/issue_tracker_attempt_journal.py"],
-      "tests": ["test_cases.test_req7_attempt_journal"]
-    },
-    {
-      "id": "issue_tracker_metadata_capacity",
-      "paths": ["monitor/issue_tracker_metadata_capacity.py"],
-      "tests": ["test_cases.test_req7_metadata_capacity"]
-    },
-    {
-      "id": "issue_tracker_send_unit",
-      "paths": ["monitor/issue_tracker_send_unit.py"],
-      "tests": ["test_cases.test_req7_send_unit"]
-    },
-    {
-      "id": "issue_tracker_send_intent",
-      "paths": ["monitor/issue_tracker_send_intent.py"],
-      "tests": ["test_cases.test_req7_send_intent"]
-    },
-    {
-      "id": "req7_bounded_history_read",
-      "paths": ["monitor/issue_tracker_sheets_read_plan.py", "monitor/issue_tracker_sheets_read_decode.py", "monitor/issue_tracker_tls_inputs.py"],
-      "tests": ["test_cases.test_req7_history_read"]
-    },
-    {
-      "id": "req7_spreadsheet_wide_owner",
-      "paths": ["monitor/issue_tracker_spreadsheet_owner.py"],
-      "tests": ["test_cases.test_req7_spreadsheet_owner"]
-    },
-    {
-      "id": "req7_global_attempt_journal",
-      "paths": ["monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_spreadsheet_owner.py"],
-      "tests": ["test_cases.test_req7_global_attempt_journal", "test_cases.test_req7_metadata_reservation", "test_cases.test_req7_history_preread_journal", "test_cases.test_req7_shared_retry_admission", "test_cases.test_req7_unit_catalog"]
-    },
-    {
-      "id": "req7_settings_audit_allocation",
-      "paths": ["monitor/issue_tracker_settings_audit_allocation.py"],
-      "tests": ["test_cases.test_req7_settings_audit_allocation", "test_cases.test_req7_nv_reservation", "test_cases.test_issue_tracker_state_owner", "test_cases.test_req7_online_completion_runtime"]
-    },
-    {
-      "id": "req7_active_closed_discovery",
-      "paths": ["monitor/issue_tracker_sheets_read_plan.py", "monitor/issue_tracker_sheets_read_decode.py", "monitor/issue_tracker_tls_inputs.py"],
-      "tests": ["test_cases.test_req7_activity_discovery"]
-    },
-    {
-      "id": "req7_enrollment_journal",
-      "paths": ["monitor/issue_tracker_enrollment_journal.py"],
-      "tests": ["test_cases.test_req7_enrollment_journal"]
-    },
-    {
-      "id": "req7_enrollment_fixed_protocol",
-      "paths": ["monitor/issue_tracker_enrollment_protocol.py"],
-      "tests": ["test_cases.test_req7_enrollment_protocol"]
-    },
-    {
-      "id": "req7_explicit_enrollment_initialize",
-      "paths": ["monitor/issue_tracker_enrollment_initialize.py", "monitor/issue_tracker_enrollment_journal.py", "monitor/issue_tracker_remote_history_match.py", "monitor/switch-collection-worker.py"],
-      "tests": ["test_cases.test_req7_enrollment_initialize_transport", "test_cases.test_req7_enrollment_initialize_cleanup", "test_cases.test_req7_enrollment_journal", "test_cases.test_req7_explicit_enrollment_initialize_workflow", "test_cases.test_req7_data_only_initialization_reporting", "test_cases.test_req7_initialization_return_value_is_not_completion"]
-    },
-    {
-      "id": "req7_history_preread_journal",
-      "paths": ["monitor/issue_tracker_history_preread_journal.py"],
-      "tests": ["test_cases.test_req7_history_preread_journal"]
-    },
-    {
-      "id": "req7_remote_history_match",
-      "paths": ["monitor/issue_tracker_remote_history_match.py", "monitor/issue_tracker_history_preread_journal.py"],
-      "tests": ["test_cases.test_req7_remote_history_match", "test_cases.test_req7_online_reconciliation", "test_cases.test_req7_catalog_reconciliation"]
-    },
-    {
-      "id": "req7_durable_nv_reservation",
-      "paths": ["monitor/issue_tracker_nv_reservation.py", "monitor/issue_tracker_sheets_read_decode.py"],
-      "tests": ["test_cases.test_req7_nv_reservation", "test_cases.test_req7_settings_audit_allocation"]
-    },
-    {
-      "id": "req7_actual_unit_metadata_reservation",
-      "paths": ["monitor/issue_tracker_metadata_reservation.py"],
-      "tests": ["test_cases.test_req7_metadata_reservation"]
-    },
-    {
-      "id": "req7_retained_original_inventory",
-      "paths": ["monitor/issue_tracker_retained_inventory.py", "monitor/issue_tracker_remote_history_match.py", "monitor/issue_tracker_global_attempt_journal.py"],
-      "tests": ["test_cases.test_req7_retained_global_inventory", "test_cases.test_req7_retained_applied_inventory", "test_cases.test_req7_nv_reservation"]
-    },
-    {
-      "id": "req7_original_unsent_successor_count_claim",
-      "paths": ["monitor/issue_tracker_global_attempt_journal.py"],
-      "tests": ["test_cases.test_req7_retained_applied_inventory"]
-    },
-    {
-      "id": "req7_all_project_original_unsent_disposition",
-      "paths": ["monitor/issue_tracker_retained_inventory.py"],
-      "tests": ["test_cases.test_req7_retained_applied_inventory"]
-    },
-    {
-      "id": "req7_all_project_mixed_original_settlement",
-      "paths": ["monitor/issue_tracker_retained_inventory.py"],
-      "tests": ["test_cases.test_req7_retained_applied_inventory"]
-    },
-    {
-      "id": "req7_mixed_original_permanent_quota",
-      "paths": ["monitor/issue_tracker_metadata_reservation.py", "monitor/issue_tracker_unit_catalog.py"],
-      "tests": ["test_cases.test_req7_metadata_reservation", "test_cases.test_req7_unit_catalog"]
-    },
-    {
-      "id": "req7_retained_library_manual_profile",
-      "paths": ["tools/update-user-manual.py"],
-      "tests": ["test_cases.test_req7_retained_manual_profile"]
-    },
-    {
-      "id": "req7_pending_original_unit_catalog",
-      "paths": ["monitor/issue_tracker_unit_catalog.py","monitor/issue_tracker_global_attempt_journal.py","monitor/issue_tracker_remote_history_match.py","monitor/issue_tracker_retained_inventory.py"],
-      "tests": ["test_cases.test_req7_unit_catalog"]
     },
     {
       "id": "ibsw3_scp_source_receiver_direct",
@@ -2894,199 +1997,6 @@
         "test_cases.test_ibsw3_native_source_preflight_workflow",
         "test_cases.test_ibsw3_native_foreign_probe_regression",
         "test_cases.test_ibsw3_native_probe_target_query_stop"
-      ]
-    },
-    {
-      "id": "req7_completed_source_read_existing_only",
-      "paths": [
-        "monitor/switch_collection_gate.py",
-        "monitor/switch-collection-worker.py"
-      ],
-      "tests": [
-        "test_cases.test_completed_collection_source_read",
-        "test_cases.test_completed_collection_source_read_close"
-      ]
-    },
-    {
-      "id": "req7_owner_body_ni_actual_cleanup",
-      "paths": [
-        "monitor/issue_tracker_state_owner.py",
-        "monitor/issue_tracker_local_commit.py",
-        "monitor/issue_tracker_spreadsheet_owner.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_owner_ni_cleanup"
-      ]
-    },
-    {
-      "id": "req7_private_input_first_ni_cleanup",
-      "paths": [
-        "monitor/issue_tracker_credential_shape.py",
-        "monitor/issue_tracker_online_target.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_private_input_ni_cleanup"
-      ]
-    },
-    {
-      "id": "req7_private_input_close_only_regression",
-      "paths": [
-        "monitor/issue_tracker_credential_shape.py",
-        "monitor/issue_tracker_online_target.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_private_input_close_regression"
-      ]
-    },
-    {
-      "id": "req7_cold_attach_existing_originals",
-      "paths": [
-        "monitor/issue_tracker_publish_runtime.py",
-        "ztp/config/ib_topology_provenance.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_cold_completed_original_attach"
-      ]
-    },
-    {
-      "id": "req7_eth_info_held_original_window",
-      "paths": [
-        "monitor/issue_tracker_publish_runtime.py",
-        "monitor/issue_tracker_switch_runtime.py",
-        "monitor/issue_tracker_switch_info_source.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_eth_info_held_window"
-      ]
-    },
-    {
-      "id": "req7_w1_original_window",
-      "paths": [
-        "monitor/issue_tracker_publish_runtime.py",
-        "monitor/issue_tracker_whitelist_workbook.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_w1_original_window"
-      ]
-    },
-    {
-      "id": "req7_n_policy_original_window",
-      "paths": [
-        "monitor/issue_tracker_publish_runtime.py",
-        "monitor/issue_tracker_admission.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_n_policy_original_window"
-      ]
-    },
-    {
-      "id": "req7_nv_info_original_window",
-      "paths": [
-        "monitor/issue_tracker_publish_runtime.py",
-        "monitor/issue_tracker_switch_info_source.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_nv_info_original_window"
-      ]
-    },
-    {
-      "id": "req7_ca_close_known_fd_interruptions",
-      "paths": [
-        "monitor/issue_tracker_tls_inputs.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_ca_close"
-      ]
-    },
-    {
-      "id": "req7_cable_current_read_owner_core",
-      "paths": [
-        "monitor/issue_tracker_publish_runtime.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_cable_read_owner_core",
-        "test_cases.test_req7_cable_lexical_repr"
-      ]
-    },
-    {
-      "id": "req7_cable_fixed_public_code_direct",
-      "paths": ["monitor/issue_tracker_publish_runtime.py"],
-      "tests": ["test_cases.test_req7_cable_public_sdk_code"]
-    },
-    {
-      "id": "req7_cable_credential_constructor_prerequisite_direct",
-      "paths": [
-        "monitor/issue_tracker_publish_runtime.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_cable_credential_construction",
-        "test_cases.test_req7_cable_constructor_code_resources"
-      ]
-    },
-    {
-      "id": "req7_cable_fullgrid_decode",
-      "paths": [
-        "monitor/issue_tracker_cable_grid.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_cable_fullgrid"
-      ]
-    },
-    {
-      "id": "req7_cable_fixed_https_protocol",
-      "paths": [
-        "monitor/issue_tracker_cable_fixed_https.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_fixed_https_direct",
-        "test_cases.test_req7_cable_fixed_writes"
-      ]
-    },
-    {
-      "id": "req7_read_live_protocol_direct",
-      "paths": [
-        "monitor/issue_tracker_read_live_protocol.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_read_live_session"
-      ]
-    },
-    {
-      "id": "req7_read_live_session_direct",
-      "paths": [
-        "monitor/issue_tracker_read_live_session.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_read_live_session",
-        "test_cases.test_req7_read_live_session_races",
-        "test_cases.test_req7_read_live_session_copy_budget"
-      ]
-    },
-    {
-      "id": "req7-first-read-public-code",
-      "paths": [
-        "monitor/issue_tracker_cable_first_read_code.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_cable_first_read_code"
-      ]
-    },
-    {
-      "id": "req7_read_live_v2_protocol_direct",
-      "paths": [
-        "monitor/issue_tracker_read_live_protocol_v2.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_live_read_v2_protocol"
-      ]
-    },
-    {
-      "id": "req7_read_live_v2_session_direct",
-      "paths": [
-        "monitor/issue_tracker_read_live_session_v2.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_live_read_v2_workflow"
       ]
     },
     {
@@ -3339,198 +2249,6 @@
       ]
     },
     {
-      "id": "issue_tracker_manual_ui_to_cgi",
-      "members": [
-        "monitor/generate-monitor-html.py",
-        "monitor/issue-tracker-control.cgi",
-        "monitor/issue_tracker_manual_channel.py",
-        "monitor/issue_tracker_manual_preview.py",
-        "monitor/issue_tracker_state_owner.py",
-        "monitor/issue_tracker_k_store.py"
-      ],
-      "tests": [
-        "test_cases.test_issue_tracker_manual_ui_workflow"
-      ]
-    },
-    {
-      "id": "issue_tracker_manual_cgi_to_private_listener",
-      "members": [
-        "monitor/issue-tracker-control.cgi",
-        "monitor/issue_tracker_manual_channel.py",
-        "monitor/issue_tracker_manual_listener.py",
-        "monitor/issue_tracker_manual_preview.py",
-        "monitor/issue_tracker_state_owner.py",
-        "monitor/issue_tracker_k_store.py"
-      ],
-      "tests": [
-        "test_cases.test_issue_tracker_manual_listener_workflow"
-      ]
-    },
-    {
-      "id": "issue_tracker_manual_cgi_to_broker",
-      "members": [
-        "monitor/issue-tracker-control.cgi",
-        "monitor/issue_tracker_manual_channel.py",
-        "monitor/issue_tracker_manual_preview.py"
-      ],
-      "tests": [
-        "test_cases.test_issue_tracker_manual_channel_workflow"
-      ]
-    },
-    {
-      "id": "issue_tracker_manual_preview_to_stage_l_writer",
-      "members": [
-        "monitor/generate-monitor-html.py",
-        "monitor/issue-tracker-control.cgi",
-        "monitor/issue_tracker_manual_channel.py",
-        "monitor/issue_tracker_manual_preview.py",
-        "monitor/issue_tracker_state_owner.py",
-        "monitor/issue_tracker_k_store.py",
-        "monitor/issue_tracker_manifest.py",
-        "monitor/issue_tracker_publish_runtime.py",
-        "monitor/issue_tracker_stage_l_consumer.py",
-        "monitor/issue_tracker_local_workbook_commit.py",
-        "monitor/issue_tracker_local_workbook.py"
-      ],
-      "tests": [
-        "test_cases.test_issue_tracker_manual_preview_workflow",
-        "test_cases.test_issue_tracker_manual_panel_workflow",
-        "test_cases.test_issue_tracker_stage_l_consumer_workflow"
-      ]
-    },
-    {
-      "id": "issue_tracker_cold_generation_recovery",
-      "members": [
-        "monitor/issue_tracker_local_commit.py",
-        "monitor/issue_tracker_state_owner.py",
-        "monitor/issue_tracker_local_recovery.py"
-      ],
-      "tests": [
-        "test_cases.test_issue_tracker_local_recovery_workflow"
-      ]
-    },
-    {
-      "id": "issue_tracker_stage_l_consumer_from_worker_emitter_sources",
-      "members": [
-        "monitor/switch-collection-worker.py",
-        "monitor/collection_v2_emitter.py",
-        "monitor/issue_tracker_switch_runtime.py",
-        "monitor/issue_tracker_stage_l_consumer.py",
-        "monitor/issue_tracker_admission.py",
-        "monitor/issue_tracker_ib_runtime.py",
-        "monitor/issue_tracker_state_owner.py",
-        "monitor/issue_tracker_whitelist_workbook.py"
-      ],
-      "tests": [
-        "test_cases.test_issue_tracker_stage_l_consumer_workflow"
-      ]
-    },
-    {
-      "id": "issue_tracker_online_target_from_project_policy",
-      "members": [
-        "monitor/issue_tracker_online_target.py",
-        "monitor/issue_tracker_credential_shape.py",
-        "monitor/issue_tracker_local_commit.py",
-        "tools/project_contract.py"
-      ],
-      "tests": [
-        "test_cases.test_issue_tracker_online_target_workflow",
-        "test_cases.test_req7_initial_target_binding"
-      ]
-    },
-    {
-      "id": "issue_tracker_fixed_fd_inputs_to_exact_target",
-      "members": [
-        "monitor/issue_tracker_credential_shape.py",
-        "monitor/issue_tracker_online_target.py",
-        "tools/project_contract.py"
-      ],
-      "tests": [
-        "test_cases.test_issue_tracker_credential_fd"
-      ]
-    },
-    {
-      "id": "issue_tracker_source_rows_to_literal_cells",
-      "members": [
-        "monitor/issue_tracker_online_cells.py",
-        "monitor/issue_tracker_local_workbook.py"
-      ],
-      "tests": [
-        "test_cases.test_issue_tracker_online_cells"
-      ]
-    },
-    {
-      "id": "issue_tracker_two_cabling_sheets_to_shared_nv_plan",
-      "members": [
-        "monitor/issue_tracker_online_nv_ids.py",
-        "monitor/issue_tracker_online_cells.py",
-        "monitor/issue_tracker_local_workbook.py"
-      ],
-      "tests": [
-        "test_cases.test_issue_tracker_online_nv_ids"
-      ]
-    },
-    {
-      "id": "issue_tracker_reserved_switch_rows_and_postimage",
-      "members": [
-        "monitor/issue_tracker_online_rows.py",
-        "monitor/issue_tracker_online_cells.py",
-        "monitor/issue_tracker_local_workbook.py"
-      ],
-      "tests": [
-        "test_cases.test_issue_tracker_online_rows"
-      ]
-    },
-    {
-      "id": "issue_tracker_publish_runtime_from_worker_sources",
-      "members": [
-        "monitor/switch-collection-worker.py",
-        "monitor/issue_tracker_publish_runtime.py",
-        "monitor/issue_tracker_admission.py",
-        "monitor/issue_tracker_stage_l_consumer.py",
-        "monitor/issue_tracker_local_workbook_commit.py",
-        "monitor/issue_tracker_state_owner.py"
-      ],
-      "tests": [
-        "test_cases.test_issue_tracker_publish_runtime_workflow"
-      ]
-    },
-    {
-      "id": "issue_tracker_switch_runtime_from_worker_emitter_info",
-      "members": [
-        "monitor/switch-collection-worker.py",
-        "monitor/collection_v2_emitter.py",
-        "monitor/issue_tracker_switch_info_source.py",
-        "monitor/issue_tracker_switch_runtime.py",
-        "monitor/issue_tracker_whitelist_workbook.py"
-      ],
-      "tests": [
-        "test_cases.test_issue_tracker_switch_runtime_workflow"
-      ]
-    },
-    {
-      "id": "issue_tracker_p2p_to_lldpq_derivation",
-      "members": [
-        "ztp/config/cumulus/template/P2P/b-xlsx_to_dot.py",
-        "monitor/switch-collection-worker.py",
-        "monitor/issue_tracker_activity_source.py",
-        "monitor/issue_tracker_topology_derivation.py"
-      ],
-      "tests": [
-        "test_cases.test_issue_tracker_topology_derivation_workflow"
-      ]
-    },
-    {
-      "id": "issue_tracker_switch_info_from_v2_emitter",
-      "members": [
-        "monitor/collection_v2_emitter.py",
-        "monitor/issue_tracker_switch_info_source.py"
-      ],
-      "tests": [
-        "test_cases.test_issue_tracker_switch_info_source_workflow"
-      ]
-    },
-    {
       "id": "issue_tracker_eth_activity_cycle_handoff",
       "members": [
         "tools/lldp-analyze-tool/analyze_lldp.py",
@@ -3557,221 +2275,6 @@
       ]
     },
     {
-      "id": "issue_tracker_shared_state_owner",
-      "members": [
-        "monitor/issue_tracker_state_owner.py",
-        "monitor/issue_tracker_k_store.py",
-        "monitor/issue_tracker_local_commit.py"
-      ],
-      "tests": [
-        "test_cases.test_issue_tracker_state_owner_workflow"
-      ]
-    },
-    {
-      "id": "issue_tracker_workbook_local_commit_chain",
-      "members": [
-        "monitor/issue_tracker_whitelist_workbook.py",
-        "monitor/issue_tracker_qualification.py",
-        "monitor/issue_tracker_manifest.py",
-        "monitor/issue_tracker_local_workbook.py",
-        "monitor/issue_tracker_local_workbook_commit.py",
-        "monitor/issue_tracker_local_commit.py",
-        "monitor/issue_tracker_state_owner.py"
-      ],
-      "tests": [
-        "test_cases.test_issue_tracker_local_workbook_commit_workflow"
-      ]
-    },
-    {
-      "id": "issue_tracker_collected_source_common_workbook",
-      "members": [
-        "monitor/issue_tracker_source_model.py",
-        "monitor/issue_tracker_collected_source.py",
-        "monitor/issue_tracker_local_workbook.py",
-        "monitor/issue_tracker_local_workbook_commit.py"
-      ],
-      "tests": [
-        "test_cases.test_issue_tracker_source_adapter_workflow"
-      ]
-    },
-    {
-      "id": "issue_tracker_cable_local_first_current_cycle",
-      "members": [
-        "monitor/issue_tracker_collected_source.py",
-        "monitor/issue_tracker_source_model.py",
-        "monitor/issue_tracker_local_workbook.py",
-        "monitor/issue_tracker_local_commit.py",
-        "monitor/issue_tracker_online_cells.py",
-        "monitor/issue_tracker_online_rows.py",
-        "monitor/issue_tracker_cable_merge.py",
-        "monitor/issue_tracker_cable_cycle.py"
-      ],
-      "tests": ["test_cases.test_issue_tracker_cable_cycle_workflow"]
-    },
-    {
-      "id": "issue_tracker_cabling_source_to_workbook",
-      "members": [
-        "monitor/issue_tracker_whitelist_workbook.py",
-        "monitor/issue_tracker_local_workbook.py"
-      ],
-      "tests": [
-        "test_cases.test_issue_tracker_cabling_projection"
-      ]
-    },
-    {
-      "id": "issue_tracker_local_workbook_to_frozen_manifest",
-      "members": [
-        "monitor/issue_tracker_local_workbook.py",
-        "monitor/issue_tracker_whitelist_workbook.py",
-        "monitor/issue_tracker_qualification.py",
-        "monitor/issue_tracker_manifest.py"
-      ],
-      "tests": [
-        "test_cases.test_issue_tracker_local_workbook_workflow"
-      ]
-    },
-    {
-      "id": "issue_tracker_whitelist_workbook_to_rules",
-      "members": [
-        "monitor/issue_tracker_whitelist_workbook.py",
-        "monitor/issue_tracker_whitelist.py"
-      ],
-      "tests": [
-        "test_cases.test_issue_tracker_whitelist_workbook_workflow"
-      ]
-    },
-    {
-      "id": "issue_tracker_manifest_to_local_commit",
-      "members": [
-        "monitor/issue_tracker_local_commit.py",
-        "monitor/issue_tracker_manifest.py"
-      ],
-      "tests": [
-        "test_cases.test_issue_tracker_local_commit_workflow"
-      ]
-    },
-    {
-      "id": "issue_tracker_k_store_to_chain_source",
-      "members": [
-        "monitor/issue_tracker_k_store.py",
-        "monitor/issue_tracker_k_chain.py",
-        "monitor/issue_tracker_cycle_source.py"
-      ],
-      "tests": [
-        "test_cases.test_issue_tracker_k_store_workflow"
-      ]
-    },
-    {
-      "id": "issue_tracker_whitelist_to_qualification_manifest",
-      "members": [
-        "monitor/issue_tracker_whitelist.py",
-        "monitor/issue_tracker_qualification.py",
-        "monitor/issue_tracker_manifest.py"
-      ],
-      "tests": [
-        "test_cases.test_issue_tracker_whitelist_workflow"
-      ]
-    },
-    {
-      "id": "issue_tracker_k_chain_from_collection",
-      "members": [
-        "monitor/issue_tracker_k_chain.py",
-        "monitor/issue_tracker_cycle_source.py",
-        "monitor/switch-collection-worker.py"
-      ],
-      "tests": [
-        "test_cases.test_issue_tracker_k_chain_workflow",
-        "test_cases.test_issue_tracker_per_key_status_contract_workflow"
-      ]
-    },
-    {
-      "id": "issue_tracker_eth_per_key_from_protected_collection",
-      "members": [
-        "monitor/issue_tracker_per_key_source.py",
-        "monitor/issue_tracker_k_chain.py",
-        "monitor/issue_tracker_switch_runtime.py",
-        "monitor/issue_tracker_cycle_source.py",
-        "monitor/collection_v2_emitter.py",
-        "monitor/switch-collection-worker.py",
-        "monitor/issue_tracker_state_owner.py"
-      ],
-      "tests": [
-        "test_cases.test_issue_tracker_per_key_source_workflow"
-      ]
-    },
-    {
-      "id": "issue_tracker_switch_per_key_from_protected_collection",
-      "members": [
-        "monitor/issue_tracker_switch_per_key_source.py",
-        "monitor/issue_tracker_switch_info_source.py",
-        "monitor/issue_tracker_switch_runtime.py",
-        "monitor/issue_tracker_k_chain.py",
-        "monitor/issue_tracker_cycle_source.py",
-        "monitor/collection_v2_emitter.py",
-        "monitor/switch-collection-worker.py",
-        "monitor/issue_tracker_state_owner.py"
-      ],
-      "tests": [
-        "test_cases.test_issue_tracker_switch_per_key_source_workflow"
-      ]
-    },
-    {
-      "id": "issue_tracker_ib_per_key_from_protected_collection",
-      "members": [
-        "monitor/issue_tracker_ib_per_key_source.py",
-        "monitor/issue_tracker_publish_runtime.py",
-        "monitor/issue_tracker_ib_runtime.py",
-        "monitor/collection_ib_producer.py",
-        "monitor/collection_ib_cycle_binding.py",
-        "monitor/issue_tracker_k_chain.py",
-        "monitor/issue_tracker_cycle_source.py",
-        "monitor/collection_v2_emitter.py",
-        "monitor/switch-collection-worker.py",
-        "monitor/issue_tracker_state_owner.py"
-      ],
-      "tests": [
-        "test_cases.test_issue_tracker_ib_per_key_source_workflow"
-      ]
-    },
-    {
-      "id": "issue_tracker_receipt_snapshot_from_protected_local_publication",
-      "members": [
-        "monitor/issue_tracker_receipt_snapshot.py",
-        "monitor/issue_tracker_admission.py",
-        "monitor/issue_tracker_local_workbook_commit.py",
-        "monitor/issue_tracker_stage_l_consumer.py",
-        "monitor/issue_tracker_publish_runtime.py",
-        "monitor/issue_tracker_cycle_source.py",
-        "monitor/issue_tracker_ib_runtime.py",
-        "monitor/collection_ib_cycle_binding.py",
-        "monitor/collection_ib_producer.py",
-        "monitor/issue_tracker_switch_runtime.py",
-        "monitor/issue_tracker_state_owner.py",
-        "monitor/issue_tracker_whitelist_workbook.py",
-        "monitor/switch-collection-worker.py"
-      ],
-      "tests": [
-        "test_cases.test_issue_tracker_receipt_snapshot_workflow"
-      ]
-    },
-    {
-      "id": "issue_tracker_per_key_status_from_protected_worker_sources",
-      "members": [
-        "monitor/issue_tracker_publish_runtime.py",
-        "monitor/issue_tracker_per_key_source.py",
-        "monitor/issue_tracker_switch_per_key_source.py",
-        "monitor/issue_tracker_ib_per_key_source.py",
-        "monitor/issue_tracker_receipt_snapshot.py",
-        "monitor/issue_tracker_stage_l_consumer.py",
-        "monitor/issue_tracker_state_owner.py",
-        "monitor/issue_tracker_local_workbook_commit.py",
-        "monitor/switch-collection-worker.py"
-      ],
-      "tests": [
-        "test_cases.test_issue_tracker_stage_l_status_per_key_contract_workflow"
-      ]
-    },
-    {
       "id": "issue_tracker_cycle_source_from_collection",
       "members": [
         "monitor/collection_v2_emitter.py",
@@ -3779,19 +2282,7 @@
         "monitor/issue_tracker_cycle_source.py"
       ],
       "tests": [
-        "test_cases.test_issue_tracker_cycle_source_workflow",
-        "test_cases.test_issue_tracker_stage_l_status_per_key_contract_workflow"
-      ]
-    },
-    {
-      "id": "issue_tracker_local_qualification_to_manifest",
-      "members": [
-        "tools/project_contract.py",
-        "monitor/issue_tracker_qualification.py",
-        "monitor/issue_tracker_manifest.py"
-      ],
-      "tests": [
-        "test_cases.test_issue_tracker_manifest_workflow"
+        "test_cases.test_issue_tracker_cycle_source_workflow"
       ]
     },
     {
@@ -4247,7 +2738,6 @@
         "tools/lldp-analyze-tool/analyze_lldp.py"
       ],
       "tests": [
-        "test_cases.test_req7_completion_lane_dispatch",
         "test_cases.test_collection_cycle_contract",
         "test_cases.test_collection_cycle_handoff_workflow",
         "test_cases.test_collection_cycle_persistence",
@@ -4645,44 +3135,6 @@
       ]
     },
     {
-      "id": "collection_ib_cycle_binding_real_worker_emitter",
-      "members": [
-        "monitor/collection_ib_cycle_binding.py",
-        "monitor/issue_tracker_cycle_source.py",
-        "monitor/issue_tracker_switch_runtime.py",
-        "monitor/collection_v2_emitter.py",
-        "monitor/switch-collection-worker.py"
-      ],
-      "tests": [
-        "test_cases.test_collection_ib_cycle_binding_workflow"
-      ]
-    },
-    {
-      "id": "collection_ib_producer_real_worker_emitter",
-      "members": [
-        "monitor/collection_ib_producer.py",
-        "monitor/switch-collection-worker.py",
-        "monitor/collection_v2_emitter.py",
-        "tools/ufm_remote_producer.py",
-        "tools/ufm_collection_pipeline.py"
-      ],
-      "tests": [
-        "test_cases.test_collection_ib_producer_workflow"
-      ]
-    },
-    {
-      "id": "issue_tracker_ib_local_report_from_real_converter_validator",
-      "members": [
-        "monitor/issue_tracker_ib_runtime.py",
-        "ztp/config/ib_topology_provenance.py",
-        "ztp/config/nvos/template/P2P/p2p-to-validation.py",
-        "tools/ibdiagnet-analyze-tool/scripts/validate_ib_topology.py"
-      ],
-      "tests": [
-        "test_cases.test_issue_tracker_ib_runtime_workflow"
-      ]
-    },
-    {
       "id": "ibsw3_scp_source_key_endpoint_workflow",
       "members": ["tools/ibsw_upgrade_scp.py", "tools/ibsw_upgrade_driver.py", "tools/ssh_key_preparation.py", "tools/ibsw_upgrade_contract.py", "tools/project_contract.py",
         "tools/ibsw_upgrade_observer.py"
@@ -4866,8 +3318,7 @@
         "monitor/switch-collection-worker.py",
         "ethernet/monitor/cron.sh",
         "infiniband/monitor/cron.sh",
-        "monitor/collection_v2_emitter.py",
-        "monitor/collection_ib_cycle_binding.py"
+        "monitor/collection_v2_emitter.py"
       ],
       "tests": [
         "test_cases.test_ufm_worker_collection"
@@ -4881,9 +3332,7 @@
         "ztp/config/nvos/template/P2P/p2p-to-validation.py",
         "monitor/collection_v2_emitter.py",
         "monitor/switch-collection-worker.py",
-        "monitor/collection_ufm_run_binding.py",
-        "monitor/collection_ib_cycle_binding.py",
-        "monitor/issue_tracker_ib_runtime.py"
+        "monitor/collection_ufm_run_binding.py"
       ],
       "tests": [
         "test_cases.test_ufm_req7_ib_cycle_workflow",
@@ -4895,371 +3344,25 @@
       "members": [
         "tools/project_contract.py",
         "monitor/collection_v2_emitter.py",
-        "monitor/switch-collection-worker.py",
-        "monitor/issue_tracker_switch_runtime.py",
-        "monitor/collection_ib_cycle_binding.py"
+        "monitor/switch-collection-worker.py"
       ],
       "tests": [
         "test_cases.test_setup_collection_link_evidence_workflow"
       ]
     },
     {
-      "id": "req7_fixed_fd_public_sdk_one_callback",
+      "id": "monitor_legacy_tracker_retirement_cycle_cgi_page",
       "members": [
-        "monitor/issue_tracker_sdk_authentication.py",
-        "monitor/issue_tracker_credential_shape.py",
-        "tools/req7_dependency_contract.py"
+        "monitor/switch-collection-worker.py",
+        "monitor/switch_collection_gate.py",
+        "monitor/collection_v2_emitter.py",
+        "monitor/switch-collection-control.cgi",
+        "monitor/generate-monitor-html.py"
       ],
       "tests": [
-        "test_cases.test_req7_sdk_authentication"
+        "test_cases.test_monitor_legacy_tracker_retirement_workflow",
+        "test_cases.test_monitor_legacy_tracker_retirement"
       ]
-    },
-    {
-      "id": "req7_native_tls_public_sdk_no_retry",
-      "members": [
-        "monitor/issue_tracker_tls_inputs.py",
-        "monitor/issue_tracker_sdk_authentication.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_tls_inputs",
-        "test_cases.test_req7_native_tls_wire"
-      ]
-    },
-    {
-      "id": "req7_fixed_native_immutable_batch_rejection_observation",
-      "members": ["monitor/issue_tracker_send_unit.py", "monitor/issue_tracker_send_intent.py", "monitor/issue_tracker_sheets_read_plan.py", "monitor/issue_tracker_sdk_authentication.py", "monitor/issue_tracker_tls_inputs.py", "monitor/issue_tracker_mutation_rejection.py"],
-      "tests": ["test_cases.test_req7_send_unit", "test_cases.test_req7_tls_inputs", "test_cases.test_req7_native_tls_wire", "test_cases.test_req7_mutation_rejection"]
-    },
-    {
-      "id": "req7_fixed_owned_auth_launcher",
-      "members": ["monitor/issue_tracker_token_launcher.py", "monitor/issue_tracker_attempt_supervision.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_credential_shape.py", "monitor/issue_tracker_sdk_authentication.py", "monitor/issue_tracker_tls_inputs.py", "tools/req7_dependency_contract.py"],
-      "tests": ["test_cases.test_req7_token_launcher"]
-    },
-    {
-      "id": "req7_original_settings_audit_unit_allocation",
-      "members": ["monitor/issue_tracker_settings_audit_allocation.py", "monitor/issue_tracker_k_store.py", "monitor/issue_tracker_k_chain.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_send_unit.py", "monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_attempt_journal.py"],
-      "tests": ["test_cases.test_req7_settings_audit_allocation", "test_cases.test_issue_tracker_stage_l_consumer_workflow"]
-    },
-    {
-      "id": "req7_actual_complete_to_original_settings_delivery",
-      "members": ["monitor/issue_tracker_settings_audit_allocation.py", "monitor/issue_tracker_unit_catalog.py", "monitor/issue_tracker_k_store.py", "monitor/issue_tracker_state_owner.py", "monitor/issue_tracker_manual_preview.py", "monitor/issue_tracker_publish_runtime.py", "monitor/switch-collection-worker.py", "monitor/issue_tracker_k_chain.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_remote_history_match.py", "monitor/issue_tracker_history_preread_journal.py", "monitor/issue_tracker_history_read_launcher.py", "monitor/issue_tracker_enrollment_journal.py", "monitor/issue_tracker_send_unit.py", "monitor/issue_tracker_attempt_journal.py", "monitor/issue_tracker_sheets_read_decode.py", "monitor/issue_tracker_sheets_read_plan.py", "monitor/issue_tracker_tls_inputs.py"],
-      "tests": ["test_cases.test_req7_remote_history_match", "test_cases.test_req7_settings_audit_allocation", "test_cases.test_issue_tracker_state_owner"]
-    },
-    {
-      "id": "req7_supervised_native_owned_child_lock",
-      "members": [
-        "monitor/issue_tracker_attempt_supervision.py",
-        "monitor/issue_tracker_tls_inputs.py",
-        "monitor/issue_tracker_sdk_authentication.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_attempt_supervision",
-        "test_cases.test_req7_native_supervised_workflow"
-      ]
-    },
-    {
-      "id": "req7_fixed_owned_history_read_launcher",
-      "members": ["monitor/issue_tracker_history_read_launcher.py", "monitor/issue_tracker_token_launcher.py", "monitor/issue_tracker_online_target.py", "monitor/issue_tracker_credential_shape.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_attempt_supervision.py", "monitor/issue_tracker_sheets_read_plan.py", "monitor/issue_tracker_sheets_read_decode.py", "monitor/issue_tracker_online_whitelist_read.py", "monitor/issue_tracker_metadata_capacity.py", "monitor/issue_tracker_sdk_authentication.py", "monitor/issue_tracker_tls_inputs.py", "tools/project_contract.py"],
-      "tests": ["test_cases.test_req7_history_read_launcher", "test_cases.test_req7_token_launcher", "test_cases.test_req7_sdk_authentication", "test_cases.test_issue_tracker_online_target_workflow", "test_cases.test_req7_attempt_supervision"]
-    },
-    {
-      "id": "req7_fixed_template_cohort_consumer_boundary",
-      "members": ["monitor/issue_tracker_remote_history_match.py", "monitor/issue_tracker_history_read_launcher.py", "monitor/issue_tracker_token_launcher.py", "monitor/issue_tracker_attempt_supervision.py", "monitor/issue_tracker_tls_inputs.py", "monitor/issue_tracker_online_target.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_stage_l_consumer.py", "monitor/issue_tracker_global_attempt_journal.py", "tools/ufm_collection_pipeline.py"],
-      "tests": ["test_cases.test_req7_remote_history_match", "test_cases.test_req7_history_read_launcher", "test_cases.test_issue_tracker_stage_l_consumer_workflow"]
-    },
-    {
-      "id": "req7_exact_native_business_read",
-      "members": [
-        "monitor/issue_tracker_sheets_read_plan.py",
-        "monitor/issue_tracker_online_target.py",
-        "monitor/issue_tracker_sdk_authentication.py",
-        "monitor/issue_tracker_tls_inputs.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_sheets_read_plan"
-      ]
-    },
-    {
-      "id": "req7_native_grid_decode_to_switch_row",
-      "members": [
-        "monitor/issue_tracker_sheets_read_decode.py",
-        "monitor/issue_tracker_sheets_read_plan.py",
-        "monitor/issue_tracker_tls_inputs.py",
-        "monitor/issue_tracker_local_workbook.py",
-        "monitor/issue_tracker_online_rows.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_sheets_read_decode"
-      ]
-    },
-    {
-      "id": "req7_native_whitelist_matches_frozen_local",
-      "members": [
-        "monitor/issue_tracker_online_whitelist_read.py",
-        "monitor/issue_tracker_sheets_read_plan.py",
-        "monitor/issue_tracker_sheets_read_decode.py",
-        "monitor/issue_tracker_tls_inputs.py",
-        "monitor/issue_tracker_whitelist.py",
-        "monitor/issue_tracker_whitelist_workbook.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_online_whitelist_read"
-      ]
-    },
-    {
-      "id": "req7_literal_intent_to_sticky_unknown_observation",
-      "members": ["monitor/issue_tracker_online_cells.py", "monitor/issue_tracker_mutation_rejection.py"],
-      "tests": ["test_cases.test_req7_mutation_rejection"]
-    },
-    {
-      "id": "req7_local_owner_immutable_attempt_journal_cold_processes",
-      "members": ["monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_online_cells.py", "monitor/issue_tracker_mutation_rejection.py", "monitor/issue_tracker_attempt_journal.py"],
-      "tests": ["test_cases.test_req7_attempt_journal"]
-    },
-    {
-      "id": "req7_native_visible_metadata_budget_no_permission",
-      "members": ["monitor/issue_tracker_metadata_capacity.py", "monitor/issue_tracker_tls_inputs.py", "monitor/issue_tracker_sheets_read_plan.py", "monitor/issue_tracker_sheets_read_decode.py"],
-      "tests": ["test_cases.test_req7_metadata_capacity"]
-    },
-    {
-      "id": "req7_real_cell_composer_immutable_journal",
-      "members": ["monitor/issue_tracker_send_unit.py", "monitor/issue_tracker_online_cells.py", "monitor/issue_tracker_attempt_journal.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_manifest.py"],
-      "tests": ["test_cases.test_req7_send_unit"]
-    },
-    {
-      "id": "req7_protected_three_panel_source_to_literal_frozen_unit",
-      "members": ["monitor/issue_tracker_send_unit.py", "monitor/issue_tracker_online_cells.py", "monitor/issue_tracker_local_workbook_commit.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_manifest.py", "monitor/issue_tracker_stage_l_consumer.py", "monitor/issue_tracker_state_owner.py", "monitor/issue_tracker_cycle_source.py", "monitor/issue_tracker_ib_runtime.py", "monitor/issue_tracker_switch_runtime.py", "monitor/issue_tracker_whitelist_workbook.py", "monitor/issue_tracker_receipt_snapshot.py", "monitor/issue_tracker_admission.py"],
-      "tests": ["test_cases.test_issue_tracker_stage_l_consumer_workflow"]
-    },
-    {
-      "id": "req7_compiled_action_wire_journal_cold_processes",
-      "members": ["monitor/issue_tracker_send_intent.py", "monitor/issue_tracker_send_unit.py", "monitor/issue_tracker_attempt_journal.py", "monitor/issue_tracker_local_commit.py"],
-      "tests": ["test_cases.test_req7_send_intent"]
-    },
-    {
-      "id": "req7_native_bounded_history_typed_read",
-      "members": ["monitor/issue_tracker_sheets_read_plan.py", "monitor/issue_tracker_sheets_read_decode.py", "monitor/issue_tracker_tls_inputs.py"],
-      "tests": ["test_cases.test_req7_history_read"]
-    },
-    {
-      "id": "req7_cross_project_owner_action_journal_native_inheritance",
-      "members": ["monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_send_intent.py", "monitor/issue_tracker_local_commit.py"],
-      "tests": ["test_cases.test_req7_spreadsheet_owner"]
-    },
-    {
-      "id": "req7_global_unknown_barrier_cold_process_action_journal",
-      "members": ["monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_send_intent.py", "monitor/issue_tracker_local_commit.py"],
-      "tests": ["test_cases.test_req7_global_attempt_journal"]
-    },
-    {
-      "id": "req7_original_count_once_claim_cold_owner_coherence",
-      "members": ["monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_send_unit.py", "monitor/issue_tracker_send_intent.py", "monitor/issue_tracker_attempt_journal.py", "monitor/issue_tracker_local_commit.py"],
-      "tests": ["test_cases.test_req7_global_attempt_journal", "test_cases.test_req7_transport_manifest", "test_cases.test_req7_send_unit", "test_cases.test_req7_send_intent"]
-    },
-    {
-      "id": "req7_original_immutable_fd_native_mutation_total_budget",
-      "members": ["monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_send_unit.py", "monitor/issue_tracker_send_intent.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_tls_inputs.py", "monitor/issue_tracker_attempt_supervision.py", "monitor/issue_tracker_sheets_read_plan.py", "monitor/issue_tracker_mutation_rejection.py"],
-      "tests": ["test_cases.test_req7_global_attempt_journal", "test_cases.test_req7_native_supervised_workflow", "test_cases.test_req7_tls_inputs", "test_cases.test_req7_send_unit", "test_cases.test_req7_transport_manifest"]
-    },
-    {
-      "id": "req7_fixed_counted_original_mutation_native_supervision",
-      "members": ["monitor/issue_tracker_mutation_launcher.py", "monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_online_target.py", "monitor/issue_tracker_send_unit.py", "monitor/issue_tracker_send_intent.py", "monitor/issue_tracker_sheets_read_plan.py", "monitor/issue_tracker_sdk_authentication.py", "monitor/issue_tracker_tls_inputs.py", "monitor/issue_tracker_attempt_supervision.py", "monitor/issue_tracker_mutation_rejection.py"],
-      "tests": ["test_cases.test_req7_mutation_launcher", "test_cases.test_req7_global_attempt_journal", "test_cases.test_req7_native_supervised_workflow", "test_cases.test_req7_transport_manifest"]
-    },
-    {
-      "id": "req7_shared_retry_original_count_and_protected_c6",
-      "members": ["monitor/issue_tracker_admission.py", "monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_receipt_snapshot.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_local_workbook_commit.py", "monitor/issue_tracker_stage_l_consumer.py", "monitor/issue_tracker_cycle_source.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_remote_history_match.py", "monitor/issue_tracker_history_preread_journal.py", "monitor/issue_tracker_history_read_launcher.py", "monitor/issue_tracker_tls_inputs.py", "monitor/issue_tracker_send_unit.py", "monitor/collection_ib_producer.py", "monitor/collection_ib_cycle_binding.py", "monitor/issue_tracker_ib_runtime.py", "monitor/issue_tracker_switch_runtime.py", "monitor/issue_tracker_state_owner.py", "monitor/issue_tracker_whitelist_workbook.py", "monitor/issue_tracker_mutation_launcher.py", "monitor/issue_tracker_attempt_supervision.py", "tools/ufm_collection_pipeline.py", "ztp/config/ib_topology_provenance.py"],
-      "tests": ["test_cases.test_req7_shared_retry_admission", "test_cases.test_issue_tracker_stage_l_consumer_workflow", "test_cases.test_req7_transport_manifest", "test_cases.test_req7_global_attempt_journal", "test_cases.test_req7_mutation_launcher", "test_cases.test_ufm_collection_pipeline", "test_cases.test_ufm_collection_pipeline_workflow", "test_cases.test_req7_ib_provenance", "test_cases.test_req7_ib_provenance_workflow", "test_cases.test_issue_tracker_local_commit", "test_cases.test_issue_tracker_local_commit_workflow"]
-    },
-    {
-      "id": "req7_native_active_closed_discovery",
-      "members": ["monitor/issue_tracker_sheets_read_plan.py", "monitor/issue_tracker_sheets_read_decode.py", "monitor/issue_tracker_tls_inputs.py", "monitor/issue_tracker_online_cells.py", "monitor/issue_tracker_send_unit.py", "monitor/issue_tracker_manifest.py", "monitor/issue_tracker_local_workbook_commit.py", "monitor/issue_tracker_receipt_snapshot.py", "monitor/issue_tracker_admission.py", "monitor/issue_tracker_local_commit.py"],
-      "tests": ["test_cases.test_req7_activity_discovery", "test_cases.test_issue_tracker_stage_l_consumer_workflow"]
-    },
-    {
-      "id": "req7_native_original_insertion_position",
-      "members": ["monitor/issue_tracker_sheets_read_plan.py", "monitor/issue_tracker_sheets_read_decode.py", "monitor/issue_tracker_tls_inputs.py", "monitor/issue_tracker_online_cells.py"],
-      "tests": ["test_cases.test_req7_activity_discovery"]
-    },
-    {
-      "id": "req7_original_owner_source_switch_insert",
-      "members": ["monitor/issue_tracker_send_unit.py", "monitor/issue_tracker_manifest.py", "monitor/issue_tracker_local_workbook_commit.py", "monitor/issue_tracker_receipt_snapshot.py", "monitor/issue_tracker_admission.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_sheets_read_plan.py", "monitor/issue_tracker_sheets_read_decode.py", "monitor/issue_tracker_enrollment_journal.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_online_cells.py"],
-      "tests": ["test_cases.test_issue_tracker_stage_l_consumer_workflow", "test_cases.test_req7_send_unit", "test_cases.test_req7_spreadsheet_owner"]
-    },
-    {
-      "id": "req7_original_owner_source_cabling_insert",
-      "members": ["monitor/issue_tracker_send_unit.py", "monitor/issue_tracker_manifest.py", "monitor/issue_tracker_local_workbook_commit.py", "monitor/issue_tracker_receipt_snapshot.py", "monitor/issue_tracker_admission.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_sheets_read_plan.py", "monitor/issue_tracker_sheets_read_decode.py", "monitor/issue_tracker_enrollment_journal.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_nv_reservation.py", "monitor/issue_tracker_online_nv_ids.py", "monitor/issue_tracker_online_cells.py"],
-      "tests": ["test_cases.test_issue_tracker_stage_l_consumer_workflow", "test_cases.test_issue_tracker_switch_runtime_workflow", "test_cases.test_req7_send_unit", "test_cases.test_req7_nv_reservation"]
-    },
-    {
-      "id": "req7_global_original_nonce_composer_action_journal",
-      "members": ["monitor/issue_tracker_enrollment_journal.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_send_intent.py", "monitor/issue_tracker_metadata_capacity.py", "monitor/issue_tracker_tls_inputs.py"],
-      "tests": ["test_cases.test_req7_enrollment_journal"]
-    },
-    {
-      "id": "req7_enrollment_journal_fixed_four_marker_protocol",
-      "members": ["monitor/issue_tracker_enrollment_protocol.py", "monitor/issue_tracker_enrollment_journal.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_metadata_capacity.py", "monitor/issue_tracker_sheets_read_plan.py", "monitor/issue_tracker_sheets_read_decode.py"],
-      "tests": ["test_cases.test_req7_enrollment_protocol"]
-    },
-    {
-      "id": "req7_explicit_enrollment_original_owners_native_tls",
-      "members": ["monitor/issue_tracker_enrollment_initialize.py", "monitor/issue_tracker_enrollment_journal.py", "monitor/issue_tracker_enrollment_protocol.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_online_target.py", "monitor/issue_tracker_token_launcher.py", "monitor/issue_tracker_history_read_launcher.py", "monitor/issue_tracker_attempt_supervision.py", "monitor/issue_tracker_tls_inputs.py", "monitor/issue_tracker_unit_catalog.py", "monitor/issue_tracker_sheets_read_decode.py", "monitor/issue_tracker_remote_history_match.py", "monitor/switch-collection-worker.py"],
-      "tests": ["test_cases.test_req7_explicit_enrollment_initialize_workflow", "test_cases.test_req7_data_only_initialization_reporting"]
-    },
-    {
-      "id": "req7_global_history_preread_cold_process",
-      "members": ["monitor/issue_tracker_history_preread_journal.py", "monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_attempt_journal.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_sheets_read_plan.py", "monitor/issue_tracker_sheets_read_decode.py", "monitor/issue_tracker_tls_inputs.py"],
-      "tests": ["test_cases.test_req7_history_preread_journal"]
-    },
-    {
-      "id": "req7_original_business_preread_source_and_unknown",
-      "members": ["monitor/issue_tracker_history_preread_journal.py", "monitor/issue_tracker_send_unit.py", "monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_attempt_journal.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_local_workbook_commit.py", "monitor/issue_tracker_manifest.py", "monitor/issue_tracker_receipt_snapshot.py", "monitor/issue_tracker_enrollment_journal.py", "monitor/issue_tracker_nv_reservation.py", "monitor/issue_tracker_online_cells.py", "monitor/issue_tracker_sheets_read_plan.py", "monitor/issue_tracker_sheets_read_decode.py"],
-      "tests": ["test_cases.test_req7_history_preread_journal", "test_cases.test_issue_tracker_stage_l_consumer_workflow"]
-    },
-    {
-      "id": "req7_fixed_original_business_history_project_read_acquisition",
-      "members": ["monitor/issue_tracker_history_preread_journal.py", "monitor/issue_tracker_retained_inventory.py", "monitor/issue_tracker_unit_catalog.py", "monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_history_read_launcher.py", "monitor/issue_tracker_token_launcher.py", "monitor/issue_tracker_sheets_read_decode.py", "monitor/issue_tracker_tls_inputs.py"],
-      "tests": ["test_cases.test_req7_history_preread_journal", "test_cases.test_issue_tracker_stage_l_consumer_workflow"]
-    },
-    {
-      "id": "req7_native_history_nonce_fence_actual_journal_match",
-      "members": ["monitor/issue_tracker_remote_history_match.py", "monitor/issue_tracker_history_read_launcher.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_online_target.py", "monitor/issue_tracker_attempt_supervision.py", "monitor/issue_tracker_history_preread_journal.py", "monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_enrollment_journal.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_metadata_capacity.py", "monitor/issue_tracker_send_unit.py", "monitor/issue_tracker_sheets_read_plan.py", "monitor/issue_tracker_sheets_read_decode.py", "monitor/issue_tracker_tls_inputs.py", "monitor/issue_tracker_online_whitelist_read.py"],
-      "tests": ["test_cases.test_req7_remote_history_match"]
-    },
-    {
-      "id": "req7_protected_source_native_nv_catalog_c6_originals",
-      "members": ["monitor/issue_tracker_nv_reservation.py", "monitor/issue_tracker_unit_catalog.py", "monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_retained_inventory.py", "monitor/issue_tracker_send_unit.py", "monitor/issue_tracker_send_intent.py", "monitor/issue_tracker_remote_history_match.py", "monitor/issue_tracker_manifest.py", "monitor/issue_tracker_local_workbook_commit.py", "monitor/issue_tracker_receipt_snapshot.py", "monitor/issue_tracker_admission.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_sheets_read_plan.py", "monitor/issue_tracker_sheets_read_decode.py", "monitor/issue_tracker_enrollment_journal.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_online_nv_ids.py", "monitor/issue_tracker_online_cells.py", "monitor/issue_tracker_history_preread_journal.py", "monitor/issue_tracker_metadata_reservation.py", "monitor/issue_tracker_metadata_capacity.py", "monitor/issue_tracker_online_target.py", "monitor/issue_tracker_credential_shape.py", "monitor/issue_tracker_history_read_launcher.py", "monitor/issue_tracker_mutation_launcher.py", "monitor/issue_tracker_attempt_supervision.py", "monitor/issue_tracker_tls_inputs.py", "monitor/issue_tracker_mutation_rejection.py"],
-      "tests": ["test_cases.test_req7_send_unit", "test_cases.test_req7_nv_reservation", "test_cases.test_issue_tracker_stage_l_consumer_workflow", "test_cases.test_req7_history_preread_journal", "test_cases.test_req7_metadata_reservation", "test_cases.test_req7_history_read_launcher", "test_cases.test_req7_mutation_launcher"]
-    },
-    {
-      "id": "req7_native_c25_original_project_scoped_assignment",
-      "members": ["monitor/issue_tracker_settings_audit_allocation.py", "monitor/issue_tracker_unit_catalog.py", "monitor/issue_tracker_nv_reservation.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_k_store.py", "monitor/issue_tracker_send_unit.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_remote_history_match.py"],
-      "tests": ["test_cases.test_req7_nv_reservation", "test_cases.test_req7_settings_audit_allocation", "test_cases.test_req7_unit_catalog"]
-    },
-    {
-      "id": "req7_native_c25_count_claim_original_replay",
-      "members": ["monitor/issue_tracker_settings_audit_allocation.py", "monitor/issue_tracker_unit_catalog.py", "monitor/issue_tracker_nv_reservation.py", "monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_stage_l_consumer.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_remote_history_match.py", "monitor/issue_tracker_history_read_launcher.py", "monitor/issue_tracker_mutation_launcher.py", "monitor/issue_tracker_send_unit.py", "monitor/issue_tracker_send_intent.py", "monitor/issue_tracker_tls_inputs.py"],
-      "tests": ["test_cases.test_req7_unit_catalog", "test_cases.test_req7_nv_reservation", "test_cases.test_req7_settings_audit_allocation", "test_cases.test_req7_global_attempt_journal", "test_cases.test_issue_tracker_stage_l_consumer_workflow"]
-    },
-    {
-      "id": "req7_native_c25_global_retained_original_handoff",
-      "members": ["monitor/issue_tracker_settings_audit_allocation.py", "monitor/issue_tracker_nv_reservation.py", "monitor/issue_tracker_unit_catalog.py", "monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_retained_inventory.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_k_store.py", "monitor/issue_tracker_send_unit.py", "monitor/issue_tracker_send_intent.py"],
-      "tests": ["test_cases.test_req7_nv_reservation", "test_cases.test_req7_retained_global_inventory"]
-    },
-    {
-      "id": "req7_native_c25_creator_catalog_outside_anchor",
-      "members": ["monitor/issue_tracker_settings_audit_allocation.py", "monitor/issue_tracker_nv_reservation.py", "monitor/issue_tracker_unit_catalog.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_k_store.py", "monitor/issue_tracker_k_chain.py", "monitor/issue_tracker_send_unit.py", "monitor/issue_tracker_send_intent.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_remote_history_match.py"],
-      "tests": ["test_cases.test_req7_nv_reservation", "test_cases.test_req7_settings_audit_allocation", "test_cases.test_req7_unit_catalog", "test_cases.test_req7_remote_history_match"]
-    },
-    {
-      "id": "req7_native_catalog_audit_complete_delivery_original_archive",
-      "members": ["monitor/issue_tracker_settings_audit_allocation.py", "monitor/issue_tracker_state_owner.py", "monitor/issue_tracker_unit_catalog.py", "monitor/issue_tracker_nv_reservation.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_k_store.py", "monitor/issue_tracker_k_chain.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_remote_history_match.py", "monitor/issue_tracker_history_preread_journal.py", "monitor/issue_tracker_history_read_launcher.py", "monitor/issue_tracker_enrollment_journal.py", "monitor/issue_tracker_send_unit.py", "monitor/issue_tracker_send_intent.py", "monitor/issue_tracker_tls_inputs.py", "monitor/issue_tracker_publish_runtime.py", "monitor/issue_tracker_manual_preview.py", "monitor/issue_tracker_stage_l_consumer.py", "monitor/issue_tracker_local_workbook_commit.py"],
-      "tests": ["test_cases.test_issue_tracker_local_commit", "test_cases.test_issue_tracker_state_owner", "test_cases.test_req7_settings_audit_allocation", "test_cases.test_req7_nv_reservation", "test_cases.test_req7_remote_history_match", "test_cases.test_issue_tracker_publish_runtime", "test_cases.test_issue_tracker_stage_l_consumer_workflow"]
-    },
-    {
-      "id": "req7_native_both_cabling_durable_nv_cold_process",
-      "members": ["monitor/issue_tracker_nv_reservation.py", "monitor/issue_tracker_unit_catalog.py", "monitor/issue_tracker_online_nv_ids.py", "monitor/issue_tracker_enrollment_journal.py", "monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_attempt_journal.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_sheets_read_decode.py", "monitor/issue_tracker_sheets_read_plan.py", "monitor/issue_tracker_tls_inputs.py", "monitor/issue_tracker_send_unit.py", "monitor/issue_tracker_send_intent.py", "monitor/issue_tracker_online_cells.py"],
-      "tests": ["test_cases.test_req7_nv_reservation"]
-    },
-    {
-      "id": "req7_original_reservations_dominate_counted_intent",
-      "members": ["monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_enrollment_journal.py", "monitor/issue_tracker_history_preread_journal.py", "monitor/issue_tracker_metadata_reservation.py", "monitor/issue_tracker_metadata_capacity.py", "monitor/issue_tracker_nv_reservation.py", "monitor/issue_tracker_send_unit.py", "monitor/issue_tracker_send_intent.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_attempt_journal.py", "monitor/issue_tracker_sheets_read_plan.py", "monitor/issue_tracker_sheets_read_decode.py", "monitor/issue_tracker_tls_inputs.py"],
-      "tests": ["test_cases.test_req7_metadata_reservation", "test_cases.test_req7_nv_reservation", "test_cases.test_req7_history_preread_journal"]
-    },
-    {
-      "id": "req7_original_business_source_reservations_count",
-      "members": ["monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_history_preread_journal.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_enrollment_journal.py", "monitor/issue_tracker_metadata_reservation.py", "monitor/issue_tracker_metadata_capacity.py", "monitor/issue_tracker_nv_reservation.py", "monitor/issue_tracker_send_unit.py", "monitor/issue_tracker_send_intent.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_attempt_journal.py", "monitor/issue_tracker_local_workbook_commit.py", "monitor/issue_tracker_manifest.py", "monitor/issue_tracker_receipt_snapshot.py", "monitor/issue_tracker_sheets_read_plan.py", "monitor/issue_tracker_sheets_read_decode.py"],
-      "tests": ["test_cases.test_req7_history_preread_journal", "test_cases.test_issue_tracker_stage_l_consumer_workflow"]
-    },
-    {
-      "id": "req7_protected_original_receipt_business_count",
-      "members": ["monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_history_preread_journal.py", "monitor/issue_tracker_send_unit.py", "monitor/issue_tracker_manifest.py", "monitor/issue_tracker_receipt_snapshot.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_local_workbook_commit.py", "monitor/issue_tracker_local_workbook.py", "monitor/issue_tracker_online_cells.py", "monitor/issue_tracker_online_target.py", "monitor/issue_tracker_credential_shape.py", "tools/project_contract.py", "monitor/issue_tracker_admission.py", "monitor/issue_tracker_cycle_source.py", "monitor/issue_tracker_stage_l_consumer.py", "monitor/issue_tracker_state_owner.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_enrollment_journal.py", "monitor/issue_tracker_metadata_reservation.py", "monitor/issue_tracker_nv_reservation.py", "monitor/issue_tracker_sheets_read_plan.py", "monitor/issue_tracker_sheets_read_decode.py", "monitor/issue_tracker_remote_history_match.py", "monitor/issue_tracker_history_read_launcher.py", "monitor/issue_tracker_online_whitelist_read.py", "monitor/issue_tracker_attempt_supervision.py", "monitor/issue_tracker_tls_inputs.py", "monitor/issue_tracker_mutation_launcher.py"],
-      "tests": ["test_cases.test_req7_history_preread_journal", "test_cases.test_issue_tracker_stage_l_consumer_workflow" , "test_cases.test_req7_global_attempt_journal", "test_cases.test_req7_mutation_launcher"]
-    },
-    {
-      "id": "req7_native_metadata_actual_unit_durable_quota_cold_process",
-      "members": ["monitor/issue_tracker_metadata_reservation.py", "monitor/issue_tracker_metadata_capacity.py", "monitor/issue_tracker_unit_catalog.py", "monitor/issue_tracker_retained_inventory.py", "monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_enrollment_journal.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_send_intent.py", "monitor/issue_tracker_history_preread_journal.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_attempt_journal.py", "monitor/issue_tracker_sheets_read_decode.py", "monitor/issue_tracker_tls_inputs.py", "monitor/issue_tracker_token_launcher.py", "monitor/issue_tracker_history_read_launcher.py", "monitor/issue_tracker_sdk_authentication.py", "monitor/issue_tracker_credential_shape.py", "monitor/issue_tracker_online_target.py"],
-      "tests": ["test_cases.test_req7_metadata_reservation", "test_cases.test_req7_history_read_launcher", "test_cases.test_req7_token_launcher"]
-    },
-    {
-      "id": "req7_retained_enrollment_global_history_originals",
-      "members": ["monitor/issue_tracker_retained_inventory.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_attempt_journal.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_enrollment_journal.py", "monitor/issue_tracker_history_preread_journal.py", "monitor/issue_tracker_manifest.py", "monitor/issue_tracker_sheets_read_decode.py", "monitor/issue_tracker_sheets_read_plan.py", "monitor/issue_tracker_remote_history_match.py", "monitor/issue_tracker_unit_catalog.py", "monitor/issue_tracker_send_unit.py", "monitor/issue_tracker_nv_reservation.py", "monitor/issue_tracker_history_read_launcher.py"],
-      "tests": ["test_cases.test_req7_retained_global_inventory", "test_cases.test_req7_retained_applied_inventory"]
-    },
-    {
-      "id": "req7_actual_c6_applied_unsent_originals_to_successor_count_claim",
-      "members": ["monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_unit_catalog.py", "monitor/issue_tracker_retained_inventory.py", "monitor/issue_tracker_remote_history_match.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_spreadsheet_owner.py"],
-      "tests": ["test_cases.test_req7_retained_applied_inventory", "test_cases.test_req7_unit_catalog"]
-    },
-    {
-      "id": "req7_all_project_c6_applied_unsent_append_cold_recovery",
-      "members": ["monitor/issue_tracker_retained_inventory.py", "monitor/issue_tracker_unit_catalog.py", "monitor/issue_tracker_remote_history_match.py", "monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_spreadsheet_owner.py"],
-      "tests": ["test_cases.test_req7_retained_applied_inventory", "test_cases.test_req7_unit_catalog"]
-    },
-    {
-      "id": "req7_all_project_mixed_c6_complete_applied_key_originals",
-      "members": ["monitor/issue_tracker_retained_inventory.py", "monitor/issue_tracker_unit_catalog.py", "monitor/issue_tracker_remote_history_match.py", "monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_spreadsheet_owner.py"],
-      "tests": ["test_cases.test_req7_retained_applied_inventory", "test_cases.test_req7_unit_catalog"]
-    },
-    {
-      "id": "req7_mixed_c6_settlement_all_permanent_fences_fresh_project_reads",
-      "members": ["monitor/issue_tracker_metadata_reservation.py", "monitor/issue_tracker_metadata_capacity.py", "monitor/issue_tracker_retained_inventory.py", "monitor/issue_tracker_unit_catalog.py", "monitor/issue_tracker_remote_history_match.py", "monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_enrollment_journal.py", "monitor/issue_tracker_history_preread_journal.py", "monitor/issue_tracker_history_read_launcher.py", "monitor/issue_tracker_token_launcher.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_spreadsheet_owner.py"],
-      "tests": ["test_cases.test_req7_metadata_reservation", "test_cases.test_req7_unit_catalog", "test_cases.test_req7_retained_applied_inventory"]
-    },
-    {
-      "id": "req7_protected_shared_counter_native_receipt_retry",
-      "members": ["monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_stage_l_consumer.py", "monitor/issue_tracker_unit_catalog.py", "monitor/issue_tracker_retained_inventory.py", "monitor/issue_tracker_remote_history_match.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_metadata_reservation.py", "monitor/issue_tracker_history_preread_journal.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_local_workbook_commit.py", "monitor/issue_tracker_manifest.py", "monitor/issue_tracker_send_unit.py", "monitor/issue_tracker_history_read_launcher.py", "monitor/issue_tracker_mutation_launcher.py", "monitor/issue_tracker_ib_runtime.py", "monitor/issue_tracker_switch_runtime.py"],
-      "tests": ["test_cases.test_req7_global_attempt_journal", "test_cases.test_req7_retained_applied_inventory", "test_cases.test_issue_tracker_stage_l_consumer_workflow"]
-    },
-    {
-      "id": "req7_default_owner_auth_current_source_and_fresh_project_reads",
-      "members": ["monitor/switch-collection-worker.py", "monitor/issue_tracker_remote_history_match.py", "monitor/issue_tracker_stage_l_consumer.py", "monitor/issue_tracker_cycle_source.py", "monitor/issue_tracker_state_owner.py", "monitor/issue_tracker_whitelist_workbook.py", "monitor/issue_tracker_metadata_reservation.py", "monitor/issue_tracker_history_read_launcher.py", "monitor/issue_tracker_token_launcher.py", "monitor/issue_tracker_unit_catalog.py", "monitor/issue_tracker_retained_inventory.py", "monitor/issue_tracker_receipt_snapshot.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_online_target.py"],
-      "tests": ["test_cases.test_req7_catalog_reconciliation", "test_cases.test_req7_terminal_unsent_dispatch", "test_cases.test_req7_online_completion_runtime", "test_cases.test_issue_tracker_stage_l_consumer_workflow"]
-    },
-    {
-      "id": "req7_default_original_business_reads_post_all_finalizers",
-      "members": ["monitor/switch-collection-worker.py", "monitor/issue_tracker_remote_history_match.py", "monitor/issue_tracker_history_preread_journal.py", "monitor/issue_tracker_stage_l_consumer.py", "monitor/issue_tracker_cycle_source.py", "monitor/issue_tracker_receipt_snapshot.py", "monitor/issue_tracker_retained_inventory.py", "monitor/issue_tracker_unit_catalog.py", "monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_metadata_reservation.py", "monitor/issue_tracker_history_read_launcher.py", "monitor/issue_tracker_token_launcher.py", "monitor/issue_tracker_sheets_read_decode.py", "monitor/issue_tracker_tls_inputs.py"],
-      "tests": ["test_cases.test_req7_history_preread_journal", "test_cases.test_issue_tracker_stage_l_consumer_workflow"]
-    },
-    {
-      "id": "req7_original_project_authenticated_reconciliation",
-      "members": ["monitor/issue_tracker_remote_history_match.py", "monitor/issue_tracker_history_read_launcher.py", "monitor/issue_tracker_token_launcher.py", "monitor/issue_tracker_sdk_authentication.py", "monitor/issue_tracker_online_target.py", "monitor/issue_tracker_credential_shape.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_history_preread_journal.py", "monitor/issue_tracker_enrollment_journal.py", "monitor/issue_tracker_sheets_read_decode.py", "monitor/issue_tracker_sheets_read_plan.py", "monitor/issue_tracker_tls_inputs.py", "monitor/issue_tracker_attempt_supervision.py"],
-      "tests": ["test_cases.test_req7_online_reconciliation"]
-    },
-    {
-      "id": "req7_all_catalog_project_original_reconciliation",
-      "members": ["monitor/issue_tracker_remote_history_match.py", "monitor/issue_tracker_unit_catalog.py", "monitor/issue_tracker_retained_inventory.py", "monitor/issue_tracker_history_read_launcher.py", "monitor/issue_tracker_token_launcher.py", "monitor/issue_tracker_sdk_authentication.py", "monitor/issue_tracker_online_target.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_history_preread_journal.py", "monitor/issue_tracker_enrollment_journal.py"],
-      "tests": ["test_cases.test_req7_catalog_reconciliation"]
-    },
-    {
-      "id": "req7_default_terminal_cycle_original_reconciliation",
-      "members": ["monitor/switch-collection-worker.py", "monitor/switch_collection_gate.py", "monitor/collection_v2_emitter.py", "ethernet/monitor/cron.sh", "infiniband/monitor/cron.sh", "nvlink/monitor/cron.sh", "monitor/issue_tracker_cycle_source.py", "monitor/issue_tracker_online_target.py", "monitor/issue_tracker_credential_shape.py", "monitor/issue_tracker_remote_history_match.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_unit_catalog.py", "monitor/issue_tracker_retained_inventory.py", "monitor/issue_tracker_history_read_launcher.py", "monitor/issue_tracker_token_launcher.py", "monitor/issue_tracker_sdk_authentication.py", "monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_history_preread_journal.py", "monitor/issue_tracker_enrollment_journal.py", "monitor/issue_tracker_tls_inputs.py", "tools/project_contract.py", "monitor/issue_tracker_settings_audit_allocation.py", "monitor/issue_tracker_state_owner.py", "monitor/issue_tracker_k_store.py", "monitor/issue_tracker_nv_reservation.py"],
-      "tests": ["test_cases.test_req7_online_completion_runtime"]
-    },
-    {
-      "id": "req7_terminal_original_reconciliation_unsent_disposition",
-      "members": ["monitor/switch-collection-worker.py", "monitor/switch_collection_gate.py", "monitor/issue_tracker_cycle_source.py", "monitor/issue_tracker_online_target.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_unit_catalog.py", "monitor/issue_tracker_retained_inventory.py", "monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_remote_history_match.py", "monitor/issue_tracker_history_read_launcher.py", "monitor/issue_tracker_token_launcher.py"],
-      "tests": ["test_cases.test_req7_terminal_unsent_dispatch", "test_cases.test_req7_online_completion_runtime"]
-    },
-    {
-      "id": "req7_actual_observation_writer_protected_get_default_display",
-      "members": ["monitor/switch-collection-worker.py", "monitor/switch-collection-control.cgi", "monitor/generate-monitor-html.py", "monitor/issue_tracker_remote_history_match.py", "monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_spreadsheet_owner.py"],
-      "tests": ["test_cases.test_req7_online_observation_status", "test_cases.test_req7_online_completion_runtime"]
-    },
-    {
-      "id": "req7_actual_stage_l_worker_fixed_cache_authenticated_get_and_default_js",
-      "members": ["monitor/switch-collection-worker.py", "monitor/collection_v2_emitter.py", "monitor/issue_tracker_publish_runtime.py", "monitor/issue_tracker_local_workbook_commit.py", "monitor/switch-collection-control.cgi", "monitor/generate-monitor-html.py"],
-      "tests": ["test_cases.test_req7_stage_l_readonly_display", "test_cases.test_issue_tracker_stage_l_status_per_key_contract_workflow"]
-    },
-    {
-      "id": "req7_terminal_scope_actual_first_and_original_retry",
-      "members": ["monitor/issue_tracker_cycle_source.py", "monitor/switch-collection-worker.py", "monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_stage_l_consumer.py", "monitor/issue_tracker_mutation_launcher.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_admission.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_local_workbook_commit.py", "monitor/issue_tracker_nv_reservation.py", "monitor/issue_tracker_remote_history_match.py", "monitor/issue_tracker_history_read_launcher.py", "monitor/issue_tracker_send_unit.py", "monitor/issue_tracker_ib_runtime.py", "monitor/issue_tracker_switch_runtime.py"],
-      "tests": ["test_cases.test_req7_online_cycle_scope"]
-    },
-    {
-      "id": "req7_pending_catalog_shared_owner_native_originals",
-      "members": ["monitor/issue_tracker_unit_catalog.py","monitor/issue_tracker_spreadsheet_owner.py","monitor/issue_tracker_local_commit.py","monitor/issue_tracker_attempt_journal.py","monitor/issue_tracker_send_intent.py","monitor/issue_tracker_send_unit.py","monitor/issue_tracker_remote_history_match.py","monitor/issue_tracker_manifest.py","monitor/issue_tracker_whitelist_workbook.py","monitor/issue_tracker_global_attempt_journal.py","monitor/issue_tracker_enrollment_journal.py","monitor/issue_tracker_retained_inventory.py"],
-      "tests": ["test_cases.test_req7_unit_catalog"]
     },
     {
       "id": "ibsw225_native_component_lifecycle",
@@ -5412,279 +3515,6 @@
         "test_cases.test_ibsw3_native_source_preflight_workflow",
         "test_cases.test_ibsw3_native_foreign_probe_regression",
         "test_cases.test_ibsw3_native_probe_target_query_stop"
-      ]
-    },
-    {
-      "id": "req7_completed_source_read_real_parent_exit_c5",
-      "members": [
-        "monitor/switch_collection_gate.py",
-        "monitor/switch-collection-worker.py",
-        "monitor/issue_tracker_cycle_source.py",
-        "monitor/issue_tracker_stage_l_consumer.py",
-        "monitor/issue_tracker_local_commit.py",
-        "monitor/issue_tracker_local_workbook_commit.py",
-        "monitor/issue_tracker_state_owner.py",
-        "monitor/issue_tracker_whitelist_workbook.py",
-        "monitor/collection_ib_producer.py",
-        "monitor/issue_tracker_ib_runtime.py",
-        "monitor/issue_tracker_switch_runtime.py",
-        "ztp/config/ib_topology_provenance.py"
-      ],
-      "tests": [
-        "test_cases.test_completed_collection_source_read_workflow"
-      ]
-    },
-    {
-      "id": "req7_completed_source_read_owned_close_boundary",
-      "members": [
-        "monitor/switch_collection_gate.py",
-        "monitor/switch-collection-worker.py",
-        "monitor/issue_tracker_cycle_source.py"
-      ],
-      "tests": [
-        "test_cases.test_completed_collection_source_read_close"
-      ]
-    },
-    {
-      "id": "req7_tracker_writer_local_owner_body_ni",
-      "members": [
-        "monitor/issue_tracker_state_owner.py",
-        "monitor/issue_tracker_local_commit.py",
-        "monitor/issue_tracker_k_store.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_owner_ni_cleanup"
-      ]
-    },
-    {
-      "id": "req7_private_target_actual_owner_ni_cleanup",
-      "members": [
-        "monitor/issue_tracker_credential_shape.py",
-        "monitor/issue_tracker_online_target.py",
-        "monitor/issue_tracker_local_commit.py",
-        "monitor/issue_tracker_state_owner.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_private_input_ni_cleanup"
-      ]
-    },
-    {
-      "id": "req7_private_input_close_only_owner_workflow",
-      "members": [
-        "monitor/issue_tracker_credential_shape.py",
-        "monitor/issue_tracker_online_target.py",
-        "monitor/issue_tracker_local_commit.py",
-        "monitor/issue_tracker_state_owner.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_private_input_close_regression"
-      ]
-    },
-    {
-      "id": "req7_cold_completed_three_panel_original_attach",
-      "members": [
-        "monitor/issue_tracker_publish_runtime.py",
-        "monitor/switch_collection_gate.py",
-        "monitor/switch-collection-worker.py",
-        "monitor/issue_tracker_stage_l_consumer.py",
-        "monitor/collection_ib_producer.py",
-        "ztp/config/ib_topology_provenance.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_cold_completed_original_attach"
-      ]
-    },
-    {
-      "id": "req7_eth_info_pinned_actual_consumer_window",
-      "members": [
-        "monitor/issue_tracker_publish_runtime.py",
-        "monitor/issue_tracker_switch_runtime.py",
-        "monitor/issue_tracker_switch_info_source.py",
-        "monitor/issue_tracker_stage_l_consumer.py",
-        "monitor/switch_collection_gate.py",
-        "monitor/switch-collection-worker.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_eth_info_held_window"
-      ]
-    },
-    {
-      "id": "req7_w1_completed_reader_template_original_workflow",
-      "members": [
-        "monitor/issue_tracker_publish_runtime.py",
-        "monitor/issue_tracker_whitelist_workbook.py",
-        "monitor/issue_tracker_whitelist.py",
-        "monitor/issue_tracker_local_commit.py",
-        "monitor/switch-collection-worker.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_w1_original_window"
-      ]
-    },
-    {
-      "id": "req7_n_policy_completed_reader_original_workflow",
-      "members": [
-        "monitor/issue_tracker_publish_runtime.py",
-        "monitor/issue_tracker_admission.py",
-        "tools/project_contract.py",
-        "monitor/issue_tracker_local_commit.py",
-        "monitor/switch-collection-worker.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_n_policy_original_window"
-      ]
-    },
-    {
-      "id": "req7_nv_info_completed_reader_original_workflow",
-      "members": [
-        "monitor/issue_tracker_publish_runtime.py",
-        "monitor/issue_tracker_switch_info_source.py",
-        "monitor/switch_collection_gate.py",
-        "monitor/switch-collection-worker.py",
-        "monitor/issue_tracker_local_commit.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_nv_info_original_window"
-      ]
-    },
-    {
-      "id": "req7_ca_close_token_wire_no_connection",
-      "members": [
-        "monitor/issue_tracker_tls_inputs.py",
-        "monitor/issue_tracker_sdk_authentication.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_ca_close"
-      ]
-    },
-    {
-      "id": "req7_cable_source_local_then_sheet_no_send",
-      "members": [
-        "monitor/issue_tracker_publish_runtime.py",
-        "monitor/issue_tracker_local_commit.py",
-        "monitor/issue_tracker_online_target.py",
-        "monitor/issue_tracker_credential_shape.py",
-        "monitor/issue_tracker_spreadsheet_owner.py",
-        "monitor/switch_collection_gate.py",
-        "monitor/switch-collection-worker.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_cable_read_owner_core"
-      ]
-    },
-    {
-      "id": "req7_cable_code_originals_same_source_owners",
-      "members": [
-        "monitor/issue_tracker_publish_runtime.py",
-        "monitor/issue_tracker_local_commit.py",
-        "monitor/issue_tracker_online_target.py",
-        "monitor/issue_tracker_credential_shape.py",
-        "monitor/issue_tracker_spreadsheet_owner.py",
-        "monitor/switch_collection_gate.py",
-        "monitor/switch-collection-worker.py",
-        "tools/req7_cable_dependency_contract.py"
-      ],
-      "tests": ["test_cases.test_req7_cable_sdk_code_owner_workflow"]
-    },
-    {
-      "id": "req7_cable_credential_constructor_same_source_owners_and_origins",
-      "members": [
-        "monitor/issue_tracker_publish_runtime.py",
-        "monitor/issue_tracker_credential_shape.py",
-        "monitor/issue_tracker_online_target.py",
-        "monitor/issue_tracker_state_owner.py",
-        "monitor/issue_tracker_local_commit.py",
-        "monitor/issue_tracker_spreadsheet_owner.py",
-        "monitor/switch_collection_gate.py",
-        "monitor/switch-collection-worker.py",
-        "tools/req7_cable_dependency_contract.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_cable_credential_construction_workflow",
-        "test_cases.test_req7_cable_credential_base_origin",
-        "test_cases.test_req7_cable_credential_manager_origin",
-        "test_cases.test_req7_cable_credential_rsa_allocation"
-      ]
-    },
-    {
-      "id": "req7_cable_constructor_code_gate_import_order_and_cleanup",
-      "members": [
-        "monitor/issue_tracker_publish_runtime.py",
-        "tools/req7_cable_dependency_contract.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_cable_constructor_code_resources"
-      ]
-    },
-    {
-      "id": "req7_cable_fullgrid_sdk_current_merge",
-      "members": [
-        "monitor/issue_tracker_cable_grid.py",
-        "monitor/issue_tracker_cable_fixed_https.py",
-        "monitor/issue_tracker_tls_inputs.py",
-        "monitor/issue_tracker_cable_merge.py",
-        "monitor/issue_tracker_source_model.py",
-        "monitor/issue_tracker_local_workbook.py",
-        "monitor/issue_tracker_sheets_read_decode.py",
-        "monitor/issue_tracker_online_cells.py",
-        "monitor/issue_tracker_online_rows.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_cable_fullgrid_workflow"
-      ]
-    },
-    {
-      "id": "req7_cable_fixed_https_actual_sdk_protocol",
-      "members": [
-        "monitor/issue_tracker_cable_fixed_https.py",
-        "monitor/issue_tracker_tls_inputs.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_fixed_https_sdk_workflow"
-      ]
-    },
-    {
-      "id": "req7_cable_fixed_business_history_sdk_protocol",
-      "members": [
-        "monitor/issue_tracker_cable_fixed_https.py",
-        "monitor/issue_tracker_cable_merge.py",
-        "monitor/issue_tracker_source_model.py",
-        "monitor/issue_tracker_online_cells.py",
-        "monitor/issue_tracker_tls_inputs.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_cable_fixed_writes_workflow"
-      ]
-    },
-    {
-      "id": "req7_owned_read_live_codec_child_session",
-      "members": [
-        "monitor/issue_tracker_read_live_protocol.py",
-        "monitor/issue_tracker_read_live_session.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_read_live_session_workflow"
-      ]
-    },
-    {
-      "id": "req7-first-read-code-inherited-constructor-and-contract",
-      "members": [
-        "monitor/issue_tracker_cable_first_read_code.py",
-        "monitor/issue_tracker_publish_runtime.py",
-        "tools/req7_cable_dependency_contract.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_cable_first_read_code"
-      ]
-    },
-    {
-      "id": "req7_owned_read_v2_real_codec_child_session",
-      "members": [
-        "monitor/issue_tracker_read_live_protocol_v2.py",
-        "monitor/issue_tracker_read_live_session_v2.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_live_read_v2_workflow"
       ]
     },
     {
@@ -6422,255 +4252,6 @@
       ],
       "tests": [
         "test_cases.test_ibsw3_native_scp_landing_docs"
-      ]
-    },
-    {
-      "paths": [
-        "test_cases/completed_collection_source_read_fixture.py",
-        "test_cases/issue_tracker_cable_post_c6_fixture.py",
-        "test_cases/test_issue_tracker_stage_l_consumer_workflow.py"
-      ],
-      "tests": [
-        "test_cases.test_completed_collection_source_read",
-        "test_cases.test_completed_collection_source_read_workflow",
-        "test_cases.test_issue_tracker_stage_l_consumer_workflow",
-        "test_cases.test_post_c6_fixture_cleanup"
-      ]
-    },
-    {
-      "paths": [
-        "test_cases/test_completed_collection_source_read.py",
-        "test_cases/test_completed_collection_source_read_workflow.py"
-      ],
-      "tests": [
-        "test_cases.test_completed_collection_source_read",
-        "test_cases.test_completed_collection_source_read_workflow"
-      ]
-    },
-    {
-      "paths": [
-        "test_cases/test_post_c6_fixture_cleanup.py"
-      ],
-      "tests": [
-        "test_cases.test_post_c6_fixture_cleanup"
-      ]
-    },
-    {
-      "paths": [
-        "test_cases/completed_collection_source_read_fixture.py",
-        "test_cases/issue_tracker_cable_post_c6_fixture.py",
-        "test_cases/test_issue_tracker_stage_l_consumer_workflow.py",
-        "test_cases/test_completed_collection_source_read_close.py",
-        "test_cases/completed_read_close_isolation.py"
-      ],
-      "tests": [
-        "test_cases.test_completed_collection_source_read_close"
-      ]
-    },
-    {
-      "paths": [
-        "test_cases/test_req7_owner_ni_cleanup.py",
-        "test_cases/owner_ni_cleanup_fixture.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_owner_ni_cleanup"
-      ]
-    },
-    {
-      "paths": [
-        "test_cases/test_req7_private_input_ni_cleanup.py",
-        "test_cases/private_input_ni_fixture.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_private_input_ni_cleanup"
-      ]
-    },
-    {
-      "paths": [
-        "test_cases/test_req7_private_input_close_regression.py",
-        "test_cases/private_input_close_regression_fixture.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_private_input_close_regression"
-      ]
-    },
-    {
-      "paths": [
-        "test_cases/cold_completed_original_attach_fixture.py",
-        "test_cases/test_req7_cold_completed_original_attach.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_cold_completed_original_attach"
-      ]
-    },
-    {
-      "paths": [
-        "test_cases/test_req7_cold_graph_json_identity.py",
-        "test_cases/cold_completed_original_attach_fixture.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_cold_graph_json_identity"
-      ]
-    },
-    {
-      "paths": [
-        "test_cases/eth_info_held_window_fixture.py",
-        "test_cases/test_req7_eth_info_held_window.py",
-        "test_cases/cold_completed_original_attach_fixture.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_eth_info_held_window"
-      ]
-    },
-    {
-      "paths": [
-        "test_cases/test_req7_w1_original_window.py",
-        "test_cases/w1_original_window_fixture.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_w1_original_window"
-      ]
-    },
-    {
-      "paths": [
-        "test_cases/test_req7_n_policy_original_window.py",
-        "test_cases/n_policy_original_window_fixture.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_n_policy_original_window"
-      ]
-    },
-    {
-      "paths": [
-        "test_cases/test_req7_nv_info_original_window.py",
-        "test_cases/nv_info_original_window_fixture.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_nv_info_original_window"
-      ]
-    },
-    {
-      "paths": [
-        "test_cases/test_req7_ca_close.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_ca_close"
-      ]
-    },
-    {
-      "paths": [
-        "test_cases/test_req7_cable_read_owner_core.py",
-        "test_cases/test_req7_cable_lexical_repr.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_cable_read_owner_core",
-        "test_cases.test_req7_cable_lexical_repr"
-      ]
-    },
-    {
-      "paths": [
-        "test_cases/test_req7_cable_public_sdk_code.py",
-        "test_cases/test_req7_cable_sdk_code_owner_workflow.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_cable_public_sdk_code",
-        "test_cases.test_req7_cable_sdk_code_owner_workflow"
-      ]
-    },
-    {
-      "paths": [
-        "test_cases/test_req7_cable_credential_construction.py",
-        "test_cases/test_req7_cable_credential_construction_workflow.py",
-        "test_cases/test_req7_cable_credential_base_origin.py",
-        "test_cases/test_req7_cable_credential_manager_origin.py",
-        "test_cases/test_req7_cable_credential_rsa_allocation.py",
-        "test_cases/test_req7_cable_constructor_code_resources.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_cable_credential_construction",
-        "test_cases.test_req7_cable_credential_construction_workflow",
-        "test_cases.test_req7_cable_credential_base_origin",
-        "test_cases.test_req7_cable_credential_manager_origin",
-        "test_cases.test_req7_cable_credential_rsa_allocation",
-        "test_cases.test_req7_cable_constructor_code_resources"
-      ]
-    },
-    {
-      "paths": [
-        "test_cases/issue_tracker_cable_post_c6_fixture.py",
-        "test_cases/completed_collection_source_read_fixture.py",
-        "test_cases/test_req7_cable_read_owner_core.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_cable_credential_construction_workflow",
-        "test_cases.test_req7_cable_credential_base_origin",
-        "test_cases.test_req7_cable_credential_manager_origin",
-        "test_cases.test_req7_cable_credential_rsa_allocation"
-      ]
-    },
-    {
-      "paths": [
-        "test_cases/test_req7_cable_fullgrid.py",
-        "test_cases/test_req7_cable_fullgrid_workflow.py",
-        "test_cases/test_req7_fixed_https_direct.py",
-        "test_cases/test_req7_fixed_https_sdk_workflow.py",
-        "test_cases/fixed_https_peer_fixture.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_cable_fullgrid",
-        "test_cases.test_req7_cable_fullgrid_workflow",
-        "test_cases.test_req7_fixed_https_direct",
-        "test_cases.test_req7_fixed_https_sdk_workflow"
-      ]
-    },
-    {
-      "paths": [
-        "test_cases/test_req7_cable_fixed_writes.py",
-        "test_cases/test_req7_cable_fixed_writes_workflow.py",
-        "test_cases/fixed_https_peer_fixture.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_cable_fixed_writes",
-        "test_cases.test_req7_cable_fixed_writes_workflow"
-      ]
-    },
-    {
-      "paths": [
-        "test_cases/test_req7_read_live_session.py",
-        "test_cases/test_req7_read_live_session_workflow.py",
-        "test_cases/test_req7_read_live_session_races.py",
-        "test_cases/test_req7_read_live_session_copy_budget.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_read_live_session",
-        "test_cases.test_req7_read_live_session_workflow",
-        "test_cases.test_req7_read_live_session_races",
-        "test_cases.test_req7_read_live_session_copy_budget"
-      ]
-    },
-    {
-      "paths": [
-        "test_cases/test_req7_cable_first_read_code.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_cable_first_read_code"
-      ]
-    },
-    {
-      "paths": [
-        "test_cases/test_req7_live_read_v2_protocol.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_live_read_v2_protocol"
-      ]
-    },
-    {
-      "paths": [
-        "test_cases/test_req7_live_read_v2_workflow.py",
-        "test_cases/live_read_v2_literal_child.py"
-      ],
-      "tests": [
-        "test_cases.test_req7_live_read_v2_workflow"
       ]
     },
     {

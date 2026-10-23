@@ -2339,406 +2339,11 @@ def render_topology_tables(
     return "".join(blocks), sorted(statuses, key=str.casefold)
 
 
-_ISSUE_TRACKER_ONLINE_STATUS_SCRIPT = r'''
-function renderIssueTrackerOnlineStatus(payload) {
-  const label = document.getElementById('issue-tracker-online-state');
-  if (!label) return;
-  const messages = {
-    stalled: 'Issue Tracker 在线停滞（UNKNOWN）；请检查受保护证据并升级处理；自动发送禁用',
-    retry_exhausted: 'Issue Tracker 在线停滞（UNKNOWN），持久计数 6 次已耗尽；只读对账并升级处理；自动发送禁用',
-    conflict: 'Issue Tracker 在线冲突（CONFLICT）；硬停止，请升级处理；自动发送禁用',
-    historical_applied: 'Issue Tracker 历史完成观察；不代表当前发送许可',
-    no_counted_units: 'Issue Tracker 最近对账未观察到已计数单元；不代表发送许可',
-    attempted_unknown: 'Issue Tracker 最近发送尝试结果为 UNKNOWN；不代表远端完成或当前发送许可，请检查受保护证据',
-    attempted_definite_rejection: 'Issue Tracker 最近发送尝试被明确拒绝；不代表远端完成或当前发送许可，请检查受保护证据',
-    attempt_unproved: 'Issue Tracker 在线准入或尝试未证明；不代表未发送、远端完成或当前发送许可，请检查受保护证据',
-    enrollment_missing: 'Issue Tracker enrollment 缺失；仅只读诊断，未自动初始化或修补；自动发送禁用',
-    enrollment_incomplete: 'Issue Tracker enrollment 未完成；仅只读诊断，未自动初始化或修补；自动发送禁用'
-  };
-  const unproved = 'Issue Tracker 在线状态未证明；自动发送禁用，请检查并升级处理';
-  if (!payload || Array.isArray(payload) || payload.schema_version !== 1
-      || Object.keys(payload).some(key => !['schema_version', 'state', 'updated_at',
-        'read_only', 'mutation_disabled', 'process_alive'].includes(key))
-      || payload.read_only !== true || payload.mutation_disabled !== true
-      || typeof payload.state !== 'string' || !Object.hasOwn(messages, payload.state)
-      || typeof payload.updated_at !== 'string'
-      || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$/.test(payload.updated_at)) {
-    label.textContent = unproved; return;
-  }
-  const observed = Date.parse(payload.updated_at);
-  if (!Number.isFinite(observed) || observed > Date.now()) {
-    label.textContent = unproved; return;
-  }
-  label.textContent = `${messages[payload.state]}；最后观察：${payload.updated_at}（非当前准入证明）`;
-}
-async function refreshIssueTrackerOnlineStatus() {
-  try {
-    const response = await fetch(`${SWITCH_COLLECTION_URL}?view=issue_tracker_online`, {
-      method: 'GET', credentials: 'same-origin', cache: 'no-store'
-    });
-    if (!response.ok) throw new Error('diagnostic unavailable');
-    renderIssueTrackerOnlineStatus(await response.json());
-  } catch (_error) { renderIssueTrackerOnlineStatus(null); }
-}
-'''
-
-
-_ISSUE_TRACKER_STAGE_L_STATUS_SCRIPT = r'''
-function renderIssueTrackerStageLStatus(payload) {
-  const panels = {'eth':'Switch Status', 'etop':'Eth Link Validation', 'itop':'IB Link Validation'};
-  const states = {pending:'等待源窗口', hold:'HOLD', qualified:'源合格（非发送许可）',
-    local_applied:'本地完成（非远端提交证明）', local_no_change:'本地无变化', local_no_candidates:'本地无候选'};
-  const object = value => value && typeof value === 'object' && !Array.isArray(value);
-  const exact = (value, keys) => object(value) && Object.keys(value).length === keys.length
-    && keys.every(key => Object.hasOwn(value, key));
-  const decimal = (value, positive=false) => value === null || (typeof value === 'string'
-    && (positive ? /^[1-9][0-9]*$/ : /^(0|[1-9][0-9]*)$/).test(value));
-  const progress = (value, k) => {
-    if (value === null) return true;
-    if (typeof value !== 'string') return false;
-    if (value === 'unknown — source authority changed; confirm input change') return true;
-    const gap = /^pending \?\/([1-9][0-9]*) — archive sequence gap$/.exec(value);
-    if (gap) return gap[1] === k;
-    const match = /^(pending|qualified|qualified subset; pending) (0|[1-9][0-9]*)\/([1-9][0-9]*)$/.exec(value);
-    return !!match && match[3] === k && BigInt(match[2]) <= BigInt(match[3])
-      && (match[1] !== 'qualified' || match[2] === match[3]);
-  };
-  let valid = exact(payload, ['schema_version','state','updated_at','k','k_revision',
-      'publish_every_cycles','panels','cycle_summary','online','read_only','mutation_disabled'])
-    && payload.schema_version === 1 && Object.hasOwn(states, payload.state)
-    && payload.read_only === true && payload.mutation_disabled === true
-    && payload.online === 'disabled_no_send_authority'
-    && typeof payload.updated_at === 'string'
-    && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$/.test(payload.updated_at)
-    && Number.isFinite(Date.parse(payload.updated_at)) && Date.parse(payload.updated_at) <= Date.now()
-    && decimal(payload.k, true) && decimal(payload.k_revision)
-    && ((payload.k === null) === (payload.k_revision === null))
-    && (payload.k !== null || payload.state === 'hold')
-    && decimal(payload.publish_every_cycles, true)
-    && exact(payload.panels, Object.values(panels))
-    && exact(payload.cycle_summary, ['published','skipped','pending','pending_count_complete']);
-  if (valid) {
-    const summary = payload.cycle_summary;
-    valid = typeof summary.pending_count_complete === 'boolean'
-      && ['published','skipped','pending'].every(key => decimal(summary[key]))
-      && Object.values(panels).every(name => exact(payload.panels[name], ['state','progress_text'])
-        && ['pending','hold','qualified'].includes(payload.panels[name].state)
-        && progress(payload.panels[name].progress_text, payload.k));
-  }
-  for (const [id, name] of Object.entries(panels)) {
-    const label = document.getElementById(`issue-tracker-${id}-stage-l-state`);
-    if (!label) continue;
-    if (!valid) { label.textContent = 'Issue Tracker 本地状态未证明；只读，自动发送禁用'; continue; }
-    const summary = payload.cycle_summary, panel = payload.panels[name];
-    const show = value => value === null ? '未知' : value;
-    label.textContent = `Issue Tracker ${states[payload.state]}；${panel.state === 'hold' ? 'HOLD；' : ''}`
-      + `${panel.progress_text === null ? '进度未知' : panel.progress_text}；K ${show(payload.k)}；N ${show(payload.publish_every_cycles)}；`
-      + `本地 published ${show(summary.published)} / skipped ${show(summary.skipped)} / pending ${show(summary.pending)}`
-      + `${summary.pending_count_complete ? '' : '（计数未完整证明）'}；最后观察：${payload.updated_at}（非当前准入证明）；自动发送禁用`;
-  }
-}
-async function refreshIssueTrackerStageLStatus() {
-  try {
-    const response = await fetch(`${SWITCH_COLLECTION_URL}?view=issue_tracker_stage_l`, {
-      method: 'GET', credentials: 'same-origin', cache: 'no-store'
-    });
-    if (!response.ok) throw new Error('observation unavailable');
-    renderIssueTrackerStageLStatus(await response.json());
-  } catch (_error) { renderIssueTrackerStageLStatus(null); }
-}
-'''
-
-
-def _issue_tracker_stage_l_label(panel_id: str) -> str:
-    if panel_id not in ('eth', 'etop', 'itop'):
-        raise ValueError('unsupported Stage L display panel')
-    return (f'<span id="issue-tracker-{panel_id}-stage-l-state" role="status">'
-            'Issue Tracker 本地状态未证明；只读，自动发送禁用</span>')
-
-
-def _issue_tracker_manual_controls(panel_id: str, panel: str) -> str:
-    """Test-only local controls; the installed generator never enables them."""
-    if (panel_id, panel) not in (
-        ("eth", "Switch Status"),
-        ("etop", "Eth Link Validation"),
-        ("itop", "IB Link Validation"),
-    ):
-        raise ValueError("unsupported manual Issue Tracker panel")
-    return (
-        f'<span class="issue-tracker-manual" data-issue-tracker-panel="{panel}">'
-        f'<button id="issue-tracker-{panel_id}-preview" type="button" '
-        f'onclick="issueTrackerManualPreview(\'{panel}\')">发布到 Issue Tracker</button>'
-        f'<label>合格窗口 K <input id="issue-tracker-{panel_id}-k" '
-        'type="text" inputmode="numeric" pattern="[1-9][0-9]*" value="" disabled '
-        'title="先查询受保护的 K 设置"></label>'
-        f'<button id="issue-tracker-{panel_id}-k-load" type="button" '
-        f'onclick="issueTrackerSettingsRead(\'{panel}\')">查询 K</button>'
-        f'<button id="issue-tracker-{panel_id}-k-save" type="button" disabled '
-        f'onclick="issueTrackerSettingsSave(\'{panel}\')">保存 K</button>'
-        '<small>仅本地预览；Stage O 在线发布未启用；K 尚未核验</small>'
-        '</span>'
-    )
-
-
-_ISSUE_TRACKER_MANUAL_DIALOG = '''<dialog id="issue-tracker-manual-dialog" class="issue-tracker-manual-dialog">
-  <section>
-    <h2>Issue Tracker 本地发布预览</h2>
-    <pre id="issue-tracker-preview-detail"></pre>
-    <p id="issue-tracker-preview-state" role="status" aria-live="polite">未知</p>
-    <menu>
-      <button id="issue-tracker-cancel" type="button" onclick="issueTrackerManualCancel()">取消</button>
-      <button id="issue-tracker-confirm" type="button" onclick="issueTrackerManualConfirm()" disabled>确认本地发布</button>
-    </menu>
-  </section>
-</dialog>'''
-
-
-_ISSUE_TRACKER_MANUAL_CSS = '''.issue-tracker-manual { display:inline-flex; align-items:center; gap:6px; flex-wrap:wrap; }
-.issue-tracker-manual input { width:52px; }
-.issue-tracker-manual small { color:#805800; }
-.issue-tracker-manual-dialog { border:0; border-radius:8px; max-width:min(92vw,800px); }
-.issue-tracker-manual-dialog pre { overflow:auto; white-space:pre-wrap; word-break:break-all; }
-.issue-tracker-manual-dialog menu { display:flex; justify-content:flex-end; gap:8px; }
-'''
-
-
-_ISSUE_TRACKER_MANUAL_SCRIPT = '''
-// Explicit test-only seam: production build_html() omits this whole block.
-const ISSUE_TRACKER_MANUAL_URL = '/monitor/control/issue-tracker';
-const ISSUE_TRACKER_SHEETS = {
-  'Switch Status': 'ETH&IB Switch',
-  'Eth Link Validation': 'ETH Cabling',
-  'IB Link Validation': 'IB Cabling',
-};
-let pendingIssueTrackerPreview = null;
-let issueTrackerRequestSequence = 0;
-let issueTrackerManualBusy = false;
-let issueTrackerSettings = null;
-const ISSUE_TRACKER_PANEL_IDS = {
-  'Switch Status': 'eth', 'Eth Link Validation': 'etop', 'IB Link Validation': 'itop',
-};
-
-function validIssueTrackerSettings(payload, state) {
-  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false;
-  const keys = ['settings', 'k', 'revision', 'event_sha256', 'online'];
-  if (state === 'committed') keys.push('replay');
-  return Object.keys(payload).length === keys.length
-    && keys.every(key => Object.prototype.hasOwnProperty.call(payload, key))
-    && payload.settings === state
-    && typeof payload.k === 'string' && /^[1-9][0-9]*$/.test(payload.k)
-    && typeof payload.revision === 'string' && /^(0|[1-9][0-9]*)$/.test(payload.revision)
-    && typeof payload.event_sha256 === 'string' && /^[0-9a-f]{64}$/.test(payload.event_sha256)
-    && payload.online === 'disabled_no_send_authority'
-    && (state !== 'committed' || typeof payload.replay === 'boolean');
-}
-
-function issueTrackerSettingsRender(receipt) {
-  issueTrackerSettings = receipt;
-  for (const id of Object.values(ISSUE_TRACKER_PANEL_IDS)) {
-    const input = document.getElementById(`issue-tracker-${id}-k`);
-    const save = document.getElementById(`issue-tracker-${id}-k-save`);
-    if (input) {input.value = receipt ? receipt.k : ''; input.disabled = !receipt;}
-    if (save) save.disabled = !receipt;
-  }
-}
-
-function issueTrackerSettingsNotice(panel, text) {
-  const notice = document.querySelector(
-    `.issue-tracker-manual[data-issue-tracker-panel="${panel}"] small`);
-  if (notice) notice.textContent = text;
-}
-
-async function issueTrackerSettingsRead(panel) {
-  if (!Object.prototype.hasOwnProperty.call(ISSUE_TRACKER_PANEL_IDS, panel)
-      || issueTrackerManualBusy) return;
-  issueTrackerManualCancel();
-  const sequence = issueTrackerRequestSequence;
-  issueTrackerSettingsRender(null);
-  issueTrackerManualBusy = true;
-  try {
-    const receipt = await issueTrackerManualPost(new URLSearchParams({action: 'settings', panel}));
-    if (sequence !== issueTrackerRequestSequence) return;
-    if (!validIssueTrackerSettings(receipt, 'current')) throw new Error('invalid settings');
-    issueTrackerSettingsRender(receipt);
-    issueTrackerSettingsNotice(panel, `K=${receipt.k}；版本=${receipt.revision}；在线发布未启用`);
-  } catch (_error) {
-    issueTrackerSettingsNotice(panel, 'K 状态未知；请检查受保护状态，勿重试写入');
-  } finally {issueTrackerManualBusy = false;}
-}
-
-async function issueTrackerSettingsSave(panel) {
-  if (!Object.prototype.hasOwnProperty.call(ISSUE_TRACKER_PANEL_IDS, panel)
-      || issueTrackerManualBusy || !issueTrackerSettings) return;
-  const newK = document.getElementById(`issue-tracker-${ISSUE_TRACKER_PANEL_IDS[panel]}-k`)?.value;
-  if (typeof newK !== 'string' || !/^[1-9][0-9]*$/.test(newK)) {
-    issueTrackerSettingsNotice(panel, 'K 必须为不带前导零的正整数');
-    return;
-  }
-  const prior = issueTrackerSettings;
-  const bytes = new Uint8Array(16);
-  crypto.getRandomValues(bytes);
-  const requestId = Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
-  issueTrackerManualCancel();
-  const sequence = issueTrackerRequestSequence;
-  // Consume the verified revision before sending. Lost replies never resend.
-  issueTrackerSettingsRender(null);
-  issueTrackerManualBusy = true;
-  try {
-    const receipt = await issueTrackerManualPost(new URLSearchParams({
-      action: 'set_k', panel, new_k: newK, expected_revision: prior.revision, request_id: requestId,
-    }));
-    if (sequence !== issueTrackerRequestSequence) return;
-    if (!validIssueTrackerSettings(receipt, 'committed') || receipt.k !== newK
-        || receipt.revision !== (BigInt(prior.revision) + 1n).toString())
-      throw new Error('unbound settings receipt');
-    issueTrackerSettingsRender(receipt);
-    issueTrackerSettingsNotice(panel, `K=${receipt.k} 已持久化；在线发布未启用`);
-  } catch (_error) {
-    issueTrackerSettingsNotice(panel, 'K 保存结果未知；请检查受保护状态，勿重试');
-  } finally {issueTrackerManualBusy = false;}
-}
-
-function validIssueTrackerPreview(payload, panel) {
-  const hex = value => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
-  if (!payload || payload.panel !== panel
-      || payload.online !== "disabled_no_send_authority") return false;
-  return payload && typeof payload === 'object'
-    && payload.target_sheet === ISSUE_TRACKER_SHEETS[panel]
-    && typeof payload.token === 'string' && /^[A-Za-z0-9_-]{43}$/.test(payload.token)
-    && Number.isInteger(payload.expires_in_seconds)
-    && payload.expires_in_seconds > 0 && payload.expires_in_seconds <= 120
-    && typeof payload.latest_cycle_id === 'string' && payload.latest_cycle_id.length > 0
-    && hex(payload.source_authority_sha256)
-    && hex(payload.selected_decision_sha256)
-    && hex(payload.observations_sha256)
-    && Number.isInteger(payload.qualified_operation_count)
-    && payload.qualified_operation_count >= 0
-    && Number.isInteger(payload.whitelist_skip_count)
-    && payload.whitelist_skip_count >= 0
-    // Current broker lacks these required details. Until the protected
-    // worker supplies them, preview is incomplete and confirm stays closed.
-    && Array.isArray(payload.source_files) && payload.source_files.length > 0
-    && payload.source_files.every(source => source && typeof source.path === 'string'
-      && source.path.length > 0 && typeof source.recorded_at_utc === 'string'
-      && source.recorded_at_utc.length > 0 && hex(source.sha256))
-    && Number.isInteger(payload.new_count) && payload.new_count >= 0
-    && Number.isInteger(payload.update_count) && payload.update_count >= 0
-    && Number.isInteger(payload.skip_count) && payload.skip_count >= 0
-    && Array.isArray(payload.row_digests)
-    && payload.row_digests.every(hex)
-    && payload.row_digests.length === payload.qualified_operation_count;
-}
-
-function issueTrackerManualCancel() {
-  issueTrackerRequestSequence += 1;
-  pendingIssueTrackerPreview = null;
-  const confirm = document.getElementById('issue-tracker-confirm');
-  if (confirm) confirm.disabled = true;
-  const detail = document.getElementById('issue-tracker-preview-detail');
-  if (detail) detail.textContent = '';
-  const dialog = document.getElementById('issue-tracker-manual-dialog');
-  if (dialog?.open) dialog.close();
-}
-
-async function issueTrackerManualPost(body) {
-  const response = await fetch(ISSUE_TRACKER_MANUAL_URL, {
-    credentials: 'same-origin', cache: 'no-store', method: 'POST',
-    headers: {
-      'Content-Type': 'application/x-www-form-urlencoded',
-      'X-Requested-With': 'IssueTrackerManualControl',
-      'Accept': 'application/vnd.http.issue-tracker.settings+json',
-    }, body,
-  });
-  const payload = await response.json();
-  if (!response.ok || !payload || typeof payload !== 'object')
-    throw new Error('服务端未提供可核验的本地预览/结果');
-  return payload;
-}
-
-async function issueTrackerManualPreview(panel) {
-  if (!Object.prototype.hasOwnProperty.call(ISSUE_TRACKER_SHEETS, panel)
-      || issueTrackerManualBusy)
-    return;
-  issueTrackerManualCancel();
-  const sequence = issueTrackerRequestSequence;
-  issueTrackerManualBusy = true;
-  try {
-    const payload = await issueTrackerManualPost(
-      new URLSearchParams({action: "preview", panel})
-    );
-    if (sequence !== issueTrackerRequestSequence) return;
-    if (!validIssueTrackerPreview(payload, panel))
-      throw new Error('预览缺少来源、计数或行摘要；禁止确认');
-    const detail = document.getElementById('issue-tracker-preview-detail');
-    const sourceLines = payload.source_files.map(source =>
-      `${source.path}  ${source.recorded_at_utc}  SHA256 ${source.sha256}`);
-    if (detail) detail.textContent = [
-      `面板：${panel}`, `目标表：${payload.target_sheet}`,
-      `最新周期：${payload.latest_cycle_id}`,
-      `可操作：${payload.qualified_operation_count}；新增：${payload.new_count}；更新：${payload.update_count}；跳过：${payload.skip_count}`,
-      `Whitelist 跳过：${payload.whitelist_skip_count}`,
-      `来源摘要：${payload.source_authority_sha256}`,
-      `选择判定：${payload.selected_decision_sha256}`,
-      ...sourceLines, ...payload.row_digests.map(digest => `行 SHA256 ${digest}`),
-    ].join('\\n');
-    pendingIssueTrackerPreview = {
-      panel, token: payload.token,
-      deadline: Date.now() + payload.expires_in_seconds * 1000,
-    };
-    const confirm = document.getElementById('issue-tracker-confirm');
-    if (confirm) confirm.disabled = false;
-    const state = document.getElementById('issue-tracker-preview-state');
-    if (state) state.textContent = '预览已核验；仅本地发布，需再次确认';
-    document.getElementById('issue-tracker-manual-dialog')?.showModal();
-  } catch (_error) {
-    issueTrackerManualCancel();
-    const state = document.querySelector(
-      `.issue-tracker-manual[data-issue-tracker-panel="${panel}"] small`);
-    if (state) state.textContent = '本地预览不可用或不完整；未发布';
-  } finally {
-    issueTrackerManualBusy = false;
-  }
-}
-
-async function issueTrackerManualConfirm() {
-  const preview = pendingIssueTrackerPreview;
-  pendingIssueTrackerPreview = null;
-  const confirm = document.getElementById('issue-tracker-confirm');
-  if (confirm) confirm.disabled = true;
-  if (!preview || Date.now() >= preview.deadline || issueTrackerManualBusy)
-    return;
-  issueTrackerManualBusy = true;
-  try {
-    const result = await issueTrackerManualPost(new URLSearchParams({
-      action: "confirm", panel: preview.panel, token: preview.token,
-      confirmation: "publish_local",
-    }));
-    const state = document.getElementById('issue-tracker-preview-state');
-    if (state) state.textContent = result.local_applied === true
-      ? '本地发布已由 worker 确认；在线发布仍禁用'
-      : '本地结果未获确认；请检查受保护状态，勿重试';
-  } catch (_error) {
-    const state = document.getElementById('issue-tracker-preview-state');
-    if (state) state.textContent = '本地结果未知；请检查受保护状态，勿重试';
-  } finally {
-    issueTrackerManualBusy = false;
-  }
-}
-
-document.getElementById('tabs')?.addEventListener('click', event => {
-  if (event.target.closest?.('.tab')) issueTrackerManualCancel();
-});
-document.getElementById('issue-tracker-manual-dialog')?.addEventListener(
-  'cancel', () => issueTrackerManualCancel());
-'''
-
-
 def render_topology_panel(
     topology: dict,
     panel_name: str,
     title: str,
     hidden_headers: tuple[str, ...] = (),
-    manual_controls: str = "",
 ) -> str:
     """渲染一个网络的拓扑验证页签，四类结果在同一页内连续展示。"""
     prefix = f"{panel_name}-topo"
@@ -2763,7 +2368,6 @@ def render_topology_panel(
         f'download>⬇ 下载{escape(item.get("label", ""))} XLSX</a>'
         for item in downloads
     )
-    manual_controls_fragment = f"\n    {manual_controls}" if manual_controls else ""
     if not tables:
         tables = (
             f'<div class="topo-no-data">99-output-p2p/ 下没有 {escape(title)} '
@@ -2783,7 +2387,7 @@ def render_topology_panel(
     <span class="topo-count topo-miswired">Miswired {counts.get('Miswired', 0)}</span>
     <span class="topo-count topo-missing">Missing {counts.get('Missing', 0)}</span>
     <span class="topo-count topo-undefined">Undefined {counts.get('Undefined', 0)}</span>
-    {download}{manual_controls_fragment}
+    {download}
   </div>
   <div class="topo-toolbar">
     <label>搜索：
@@ -5331,28 +4935,7 @@ def build_html(
     air_diagram: dict,
     ztp_status: dict,
     ufm_panel: str = "",
-    issue_tracker_local_ui: bool = False,
 ) -> str:
-    if type(issue_tracker_local_ui) is not bool:
-        raise ValueError("local Issue Tracker UI flag must be explicit")
-    manual_controls = (
-        {panel: _issue_tracker_manual_controls(panel_id, panel)
-         for panel_id, panel in (
-             ("eth", "Switch Status"),
-             ("etop", "Eth Link Validation"),
-             ("itop", "IB Link Validation"),
-         )} if issue_tracker_local_ui else {}
-    )
-    issue_tracker_dialog = (_ISSUE_TRACKER_MANUAL_DIALOG + "\n"
-                            if issue_tracker_local_ui else "")
-    issue_tracker_css = (_ISSUE_TRACKER_MANUAL_CSS
-                         if issue_tracker_local_ui else "")
-    issue_tracker_script = (_ISSUE_TRACKER_MANUAL_SCRIPT
-                            if issue_tracker_local_ui else "")
-    issue_tracker_eth_controls = _issue_tracker_stage_l_label('eth') + '\n    ' + (
-        manual_controls["Switch Status"] + "\n    "
-        if issue_tracker_local_ui else ""
-    )
     gen_time      = datetime.now(DISPLAY_TZ).strftime("%Y-%m-%d %H:%M:%S")
     spx_ts_str    = spx_latest_ts.strftime("%Y-%m-%d %H:%M") if spx_latest_ts else "—"
     ibl_ts_str    = ibl_latest_ts.strftime("%Y-%m-%d %H:%M") if ibl_latest_ts else "—"
@@ -5365,11 +4948,9 @@ def build_html(
         "etop",
         "Ethernet",
         hidden_headers=("B Oper", "B Remote Host", "B Remote Port"),
-        manual_controls=_issue_tracker_stage_l_label('etop') + manual_controls.get("Eth Link Validation", ""),
     )
     infiniband_topology_panel = render_topology_panel(
         infiniband_topology, "itop", "InfiniBand",
-        manual_controls=_issue_tracker_stage_l_label('itop') + manual_controls.get("IB Link Validation", ""),
     )
     ethernet_diagram_panel = render_diagram_panel(
         ethernet_diagram, "p2p", "最新 Ethernet 拓扑图", "*-lldpq.html"
@@ -6185,7 +5766,7 @@ tr.grp-hidden {{ display: none; }}
 .monitor-control-actions {{ display:flex; align-items:center; gap:6px; min-height:30px; }}
 .monitor-control-help {{ color:#667085; font-size:10px; line-height:1.25; white-space:nowrap; }}
 .monitor-control-item .ztp-monitor-state {{ max-width:260px; white-space:normal; }}
-{issue_tracker_css}.ztp-monitor-control button {{ border:1px solid #8290a3; border-radius:4px; padding:6px 10px;
+.ztp-monitor-control button {{ border:1px solid #8290a3; border-radius:4px; padding:6px 10px;
   background:#fff; color:#26364a; cursor:pointer; font-weight:600; }}
 .ztp-monitor-control button.running {{ border-color:#c33; color:#a31515; }}
 .ztp-monitor-control button.paused {{ border-color:#27834c; color:#176b39; }}
@@ -6317,7 +5898,6 @@ tr.grp-hidden {{ display: none; }}
         </span>
         <small class="monitor-control-help">单次执行；开始后不可中断</small>
         <span id="switch-collect-state" class="ztp-monitor-state" aria-live="polite">未知</span>
-        <span id="issue-tracker-online-state" class="ztp-monitor-state" aria-live="polite">Issue Tracker 在线状态未证明；自动发送禁用</span>
       </span>
       <span class="monitor-control-item">
         <span class="monitor-control-actions">
@@ -6347,7 +5927,7 @@ tr.grp-hidden {{ display: none; }}
         <span id="continuous-backup-state" class="ztp-monitor-state" aria-live="polite">持续备份：未知</span>
       </span>
     </span>
-    {issue_tracker_eth_controls}{auto_refresh_control('eth')}
+    {auto_refresh_control('eth')}
     <input id="eth-search" type="text" placeholder="按主机名筛选…" oninput="filterCards()">
     <div class="view-toggle">
       <button id="btn-card" class="vtbtn active" onclick="setView('card')">卡片</button>
@@ -6561,9 +6141,8 @@ tr.grp-hidden {{ display: none; }}
 {ethernet_diagram_panel}
 {air_diagram_panel}
 {ufm_panel}
-{issue_tracker_dialog}
 <script>
-{issue_tracker_script}// ── Auto-Refresh（两个 Status + 三个 Monitor 页面）──────────────────────────
+// ── Auto-Refresh（两个 Status + 三个 Monitor 页面）──────────────────────────
 const TAB_NAMES = ['ztp','eth','etop','spx','itop','ibl','nvl','p2p','air','ufm'];
 const AUTO_REFRESH_TABS = new Set(['ztp','eth','spx','ibl','nvl']);
 const AUTO_REFRESH_KEY = 'network-monitor:auto-refresh';
@@ -8822,10 +8401,6 @@ function initColumnResize() {{
 // ── 初始化 ────────────────────────────────────────────────────────────────────
 initAutoRefresh();
 setView(storageGet(SWITCH_VIEW_KEY) === 'list' ? 'list' : 'card', false);
-{_ISSUE_TRACKER_ONLINE_STATUS_SCRIPT}
-refreshIssueTrackerOnlineStatus();
-{_ISSUE_TRACKER_STAGE_L_STATUS_SCRIPT}
-refreshIssueTrackerStageLStatus();
 refreshZtpMonitorControl();
 refreshSwitchCollectionControl();
 refreshYamlBackupControl();

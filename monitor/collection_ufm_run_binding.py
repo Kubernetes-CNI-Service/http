@@ -6,9 +6,10 @@ loop (``infiniband/monitor/post-collect.py``) published a report, its receipt
 (``ufm-ib-report-receipt-v1``) sits beside the report in the project's ``99-output-p2p/``
 (infiniband/monitor/UFM-MONITOR.md 13, 14.6; REQ7 R1, 2026-10-23).
 
-``derive_ufm_run_roles`` is the single check shared by the collection emitter, the worker and REQ7's
-completed-cycle reader. It binds a run only when the record names exactly this worker cycle and the UFM
-run and its analysis succeeded, and it reopens every file the record and the receipt name:
+``derive_ufm_run_roles`` is the single check shared by the collection emitter and the worker (the old
+REQ7 completed-cycle reader was retired on 2026-10-23; the binding stays as collection evidence). It binds
+a run only when the record names exactly this worker cycle and the UFM run and its analysis succeeded, and
+it reopens every file the record and the receipt name:
 
     run record -> .done, input -> receipt -> report, report provenance, CVT
 

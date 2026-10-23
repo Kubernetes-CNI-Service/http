@@ -178,41 +178,6 @@ def read_completed_cycle_evidence(store):
 
 
 @contextmanager
-def _hold_current_completed_cycle_replay(store):
-    """Compose protected FIRST/R2 inside the identical actual original scope.
-
-    Only an original live holder may issue reuse. Borrowing neither installs
-    a ContextVar nor closes/revokes its owner, and checks originals at both
-    boundaries. No caller callback, copied store, persisted cache or GO.
-    The independently acquiring holder below remains strictly non-nestable.
-    """
-    active = _HELD_CYCLE_REPLAY.get()
-    if active is None:
-        with _hold_completed_cycle_replay(store) as verify:
-            yield verify
-        return
-
-    def require_original_scope():
-        _require_live_cycle_replay(active)
-        if active[0] is not store:
-            raise CycleSourceHoldError('cycle composition requires its live original owner')
-
-    def verify_original_scope():
-        require_original_scope()
-        try:
-            active[1]()
-        except Exception as exc:
-            raise CycleSourceHoldError('borrowed cycle originals are unsafe') from exc
-        require_original_scope()
-
-    verify_original_scope()
-    try:
-        yield active[1]
-    finally:
-        verify_original_scope()
-
-
-@contextmanager
 def _hold_completed_cycle_replay(store):
     """One semantic replay while ALL actual worker inputs remain original.
 

@@ -1,11 +1,18 @@
-"""Workflow (REQ7 R1, 2026-10-23): one worker cycle's UFM IB analysis reaches REQ7's completed-cycle reader.
+"""Workflow (REQ7 R1, 2026-10-23): one worker cycle's UFM IB analysis is bound into that cycle's evidence.
+
+The R1 run binding (monitor/collection_ufm_run_binding.py) stays as collection evidence: the emitter binds
+the UFM run that names this worker cycle, the worker replays it from the files before accepting the IB
+slot, and the completion record keeps exactly that slot. No REQ7 reader consumes it any more: the old
+completed-cycle reader (collection_ib_cycle_binding.py, issue_tracker_ib_runtime.py) was retired with the
+codex REQ7 chain (batch 1, 2026-10-23), and the online Issue Tracker sync reads the project's
+ufm-ibdiagnet output directly.
 
 Real scripts: the P2P->CVT converter, infiniband/monitor/post-collect.py with the real analyzer, the v2
-emitter (build_result + publish) and the worker's slot check, the worker's completion store,
-monitor/collection_ib_cycle_binding.py and monitor/issue_tracker_ib_runtime.py. The run record is written
-in the format of cron.sh's UFM lane (ufm_run_record_write, exercised end to end by
-test_ufm_worker_collection), naming the cycle the worker allocated. The worker/emitter cycle scaffold
-follows test_collection_ib_cycle_binding_workflow.ProdCycleFixture."""
+emitter (build_result + publish), the worker's slot check and completion store, and
+monitor/collection_ufm_run_binding.py. The run record is written in the format of cron.sh's UFM lane
+(ufm_run_record_write, exercised end to end by test_ufm_worker_collection), naming the cycle the worker
+allocated. The worker/emitter cycle scaffold follows
+test_setup_collection_link_evidence_workflow.ProdCycleFixture."""
 
 from __future__ import annotations
 
@@ -25,12 +32,10 @@ from unittest import mock
 
 import xlsxwriter
 
-from monitor.collection_ib_cycle_binding import (
-    IbCycleRoleGap, IbCycleRoleHold, IbCycleRoleSource, inspect_completed_ib_cycle_roles,
+from monitor.collection_ufm_run_binding import (
+    UFM_RUN_ROLE_NAMES, UfmRunBindingHold, validate_ufm_run_binding,
 )
-from monitor.collection_ufm_run_binding import UFM_RUN_ROLE_NAMES, validate_ufm_run_binding
 from monitor.issue_tracker_cycle_source import read_completed_cycle_evidence
-from monitor.issue_tracker_ib_runtime import read_completed_ib_cycle_report
 from test_cases.test_collection_cycle_persistence import WORKER, TOKEN_1
 from test_cases.test_collection_v2_emitter_contract import EMITTER
 from test_cases.test_ib_post_collect import ibdiagnet_archive
@@ -48,7 +53,7 @@ def sha(raw: bytes) -> str:
 def make_real_cvt(root: Path, project: Path, reports: Path, test: unittest.TestCase) -> Path:
     """The project CVT from the real p2p-to-validation.py. leaf01 sw1p1 <-> server01 mlx5_0 is cabled in
     the ibdiagnet fixture (test_ib_analysis_domain.write_ibdiagnet_fixture); leaf01 sw1p2 <-> server02
-    mlx5_0 is not, so the report has one Missing link for REQ7."""
+    mlx5_0 is not, so the report has one Missing link."""
     p2p = project / "site-p2p.xlsx"
     book = xlsxwriter.Workbook(str(p2p))
     sheet = book.add_worksheet("CL links")
@@ -220,7 +225,15 @@ class UfmReq7IbCycleWorkflowTest(unittest.TestCase):
         self.store.publish_completion(identity, {"identity": identity, "outcomes": outcomes, "summary": summary})
         return identity, chain, record, ib_slot, emitter_errors
 
-    def test_the_cycles_ufm_report_reaches_the_req7_ib_reader_through_the_run_record(self):
+    def completed_ib_child(self, identity: dict) -> dict:
+        """The IB child result exactly as the cycle's completion record keeps it."""
+        completion = self.store._validate_completion_record(
+            WORKER._read_private_json(self.store.completion_path(identity["sequence"])), identity)
+        [outcome] = [item for item in completion["run_result"]["outcomes"]
+                     if item["source_slot"] == "infiniband/prod"]
+        return outcome["child_result"]
+
+    def test_the_cycles_ufm_report_is_bound_into_the_completed_cycle_through_the_run_record(self):
         identity, chain, record, (child, context, evidence, envelope), errors = self.complete_cycle()
         self.assertEqual("", errors)
         self.assertEqual(["info_archive", "link_archive", "link_csv", *UFM_RUN_ROLE_NAMES],
@@ -230,37 +243,33 @@ class UfmReq7IbCycleWorkflowTest(unittest.TestCase):
         self.assertEqual((RUN_ID, NODE, "ibdiagnet", False), (
             binding["run_id"], binding["node"], binding["kind"], binding["degraded"]))
         self.assertEqual(sha(record.read_bytes()), binding["run_record_sha256"])
+        # The completed cycle keeps exactly the IB child the worker accepted, and its UFM binding replays
+        # from the files alone: this run's report of this CVT, named by this record.
+        self.assertEqual(child, self.completed_ib_child(identity))
+        replayed = validate_ufm_run_binding(identity, binding, evidence["roles"][3:], http_root=self.root)
+        self.assertEqual(evidence["roles"][3:], replayed)
+        by_role = {role["role"]: role for role in replayed}
+        self.assertEqual(
+            f"DAY0-Prepare/site/99-output-p2p/{RUN_ID}_{NODE}-ibdiagnet-topology-validation.xlsx",
+            by_role["validation_report"]["relative_path"])
+        self.assertEqual(sha(chain["report"].read_bytes()), by_role["validation_report"]["sha256"])
+        self.assertEqual(sha(chain["cvt"].read_bytes()), binding["expected_topology_sha256"])
+        self.assertEqual(sha(chain["cvt"].read_bytes()), by_role["expected_cvt"]["sha256"])
+        self.assertEqual(sha(record.read_bytes()), by_role["ufm_run_record"]["sha256"])
 
         [cycle] = read_completed_cycle_evidence(self.store)
         self.assertTrue(cycle.qualifying)
-        source = inspect_completed_ib_cycle_roles(self.store, http_root=self.root,
-                                                  sequence=identity["sequence"])
-        self.assertIsInstance(source, IbCycleRoleSource)
-        self.assertFalse(source.qualified, "a protected source is never a publish permit")
-        self.assertEqual(
-            f"DAY0-Prepare/site/99-output-p2p/{RUN_ID}_{NODE}-ibdiagnet-topology-validation.xlsx",
-            source.report_relative_path)
-        self.assertEqual(sha(chain["report"].read_bytes()), source.report_sha256)
-        self.assertEqual(sha(chain["cvt"].read_bytes()), source.expected_topology_sha256)
-        self.assertEqual(sha(record.read_bytes()), source.attestation_sha256)
-
-        report = read_completed_ib_cycle_report(self.store, http_root=self.root, sequence=identity["sequence"])
-        self.assertEqual("2026-10-23T01:10:00Z", report.recorded_at_utc)
-        self.assertEqual(source.report_sha256, report.report_sha256)
-        missing = [row for row in report.rows if row.issue_type == "Link Down"]
-        self.assertEqual(1, len(missing), report.rows)
-        self.assertEqual(("leaf01", "sw1p2"), missing[0].expected_endpoints[:2])
 
         # Bytes changed after completion: the replay holds instead of returning a stale source.
         chain["report"].write_bytes(chain["report"].read_bytes() + b"\0")
-        with self.assertRaises(IbCycleRoleHold):
-            inspect_completed_ib_cycle_roles(self.store, http_root=self.root, sequence=identity["sequence"])
+        with self.assertRaises(UfmRunBindingHold):
+            validate_ufm_run_binding(identity, binding, evidence["roles"][3:], http_root=self.root)
         with mock.patch.object(WORKER, "HTTP_ROOT", self.root):
             self.assertFalse(WORKER._collection_slot_artifacts_match(child, context["artifacts"], context),
                              "the worker replays the UFM files instead of trusting the envelope")
 
     def test_a_ufm_run_of_another_cycle_leaves_the_switch_cycle_qualifying_without_ib_analysis(self):
-        identity, _chain, _record, (_child, _context, evidence, envelope), errors = self.complete_cycle(
+        identity, _chain, _record, (child, context, evidence, envelope), errors = self.complete_cycle(
             record_cycle=None)
         self.assertIn("does not name this worker cycle", errors)
         self.assertEqual(["info_archive", "link_archive", "link_csv"],
@@ -268,8 +277,12 @@ class UfmReq7IbCycleWorkflowTest(unittest.TestCase):
         self.assertNotIn("ufm_run_binding", envelope)
         [cycle] = read_completed_cycle_evidence(self.store)
         self.assertTrue(cycle.qualifying, "a UFM problem never changes the switch result")
-        gap = inspect_completed_ib_cycle_roles(self.store, http_root=self.root, sequence=identity["sequence"])
-        self.assertIsInstance(gap, IbCycleRoleGap)
+        # The completed cycle keeps the three-role IB child, and the worker replays it from the files.
+        completed = self.completed_ib_child(identity)
+        self.assertEqual(child, completed)
+        with mock.patch.object(WORKER, "HTTP_ROOT", self.root):
+            self.assertTrue(WORKER._collection_slot_artifacts_match(completed, context["artifacts"], context),
+                            "the IB base roles replay without a UFM binding")
 
 
 class UfmReq7RealCronCycleTest(unittest.TestCase):
@@ -343,7 +356,7 @@ class UfmReq7RealCronCycleTest(unittest.TestCase):
             self.assertEqual(f"DAY0-Prepare/site/99-output-p2p/{record['run_id']}_{record['node']}"
                              "-ibdiagnet-topology-validation.xlsx", report_role["relative_path"])
             # The harness does not persist completion records; ProdCycle-based
-            # UfmReq7IbCycleWorkflowTest carries the same evidence on to REQ7's completed-cycle reader.
+            # UfmReq7IbCycleWorkflowTest carries the same evidence on into the completion record.
 
 
 if __name__ == "__main__":

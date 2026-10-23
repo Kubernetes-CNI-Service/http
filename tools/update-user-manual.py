@@ -23,51 +23,6 @@ FILE_END = "        <!-- END GENERATED USER MANUAL FILE CATALOG -->"
 SCRIPT_BEGIN = "        <!-- BEGIN GENERATED USER MANUAL SCRIPT REFERENCE -->"
 SCRIPT_END = "        <!-- END GENERATED USER MANUAL SCRIPT REFERENCE -->"
 SCRIPT_SUFFIXES = {".py", ".sh", ".cgi"}
-UNINSTALLED_RUNTIME_COMPONENTS = frozenset({
-    "monitor/issue_tracker_manual_channel.py",
-    "monitor/issue_tracker_manual_listener.py",
-    "monitor/issue-tracker-control.cgi",
-})
-REQ7_ONLINE_PRIMITIVE_LIBRARIES = frozenset({
-    "monitor/issue_tracker_credential_shape.py",
-    "monitor/issue_tracker_online_cells.py",
-    "monitor/issue_tracker_online_nv_ids.py",
-    "monitor/issue_tracker_online_rows.py",
-})
-
-REQ7_READ_ONLY_LIBRARIES = frozenset({
-    "monitor/issue_tracker_ib_per_key_source.py",
-    "monitor/issue_tracker_per_key_source.py",
-    "monitor/issue_tracker_switch_per_key_source.py",
-    "monitor/issue_tracker_receipt_snapshot.py",
-})
-
-REQ7_CONTROLLED_TRANSPORT_LIBRARIES = frozenset({
-    "monitor/issue_tracker_sdk_authentication.py",
-    "monitor/issue_tracker_tls_inputs.py",
-    "monitor/issue_tracker_attempt_supervision.py",
-    "monitor/issue_tracker_sheets_read_plan.py",
-    "monitor/issue_tracker_sheets_read_decode.py",
-    "monitor/issue_tracker_online_whitelist_read.py",
-    "monitor/issue_tracker_mutation_rejection.py",
-    "monitor/issue_tracker_attempt_journal.py",
-    "monitor/issue_tracker_metadata_capacity.py",
-    "monitor/issue_tracker_send_unit.py",
-    "monitor/issue_tracker_send_intent.py",
-    "monitor/issue_tracker_spreadsheet_owner.py",
-    "monitor/issue_tracker_global_attempt_journal.py",
-    "monitor/issue_tracker_retained_inventory.py",
-    "monitor/issue_tracker_unit_catalog.py",
-    "monitor/issue_tracker_enrollment_journal.py",
-    "monitor/issue_tracker_history_preread_journal.py",
-    "monitor/issue_tracker_history_read_launcher.py",
-    "monitor/issue_tracker_mutation_launcher.py",
-    "monitor/issue_tracker_remote_history_match.py",
-    "monitor/issue_tracker_nv_reservation.py",
-    "monitor/issue_tracker_metadata_reservation.py",
-    "monitor/issue_tracker_settings_audit_allocation.py",
-    "monitor/issue_tracker_token_launcher.py",
-})
 
 RUNTIME_PATTERNS = (
     (
@@ -408,12 +363,7 @@ def script_profile(root: Path, relative: str) -> dict[str, str]:
     is_validation_report_helper = relative == "test_cases/validation_unittest.py"
     is_library = (
         path.name == "__init__.py" or "/lib/" in f"/{relative}"
-        or relative in REQ7_READ_ONLY_LIBRARIES
-        or relative in REQ7_ONLINE_PRIMITIVE_LIBRARIES
-        or relative == "monitor/issue_tracker_online_target.py"
         or relative == "tools/req7_dependency_contract.py"
-        or relative in REQ7_CONTROLLED_TRANSPORT_LIBRARIES
-        or (relative in UNINSTALLED_RUNTIME_COMPONENTS and path.suffix.lower() == ".py")
         or path.name in {
             "_package_common.py", "deployment_lock.py", "deployment_prewrite_guard.py",
             "project_contract.py", "ztp_service_runtime.py", "switch_collection_gate.py",
@@ -422,7 +372,6 @@ def script_profile(root: Path, relative: str) -> dict[str, str]:
         }
     )
     is_cgi = path.suffix.lower() == ".cgi"
-    is_uninstalled = relative in UNINSTALLED_RUNTIME_COMPONENTS
     is_worker = path.name.endswith("-worker.py") or path.name.endswith("_worker.py")
     is_docker_internal = relative.startswith("infra/docker/") and path.name != "deploy.sh"
     is_docker_operator = relative == "infra/docker/deploy.sh"
@@ -521,14 +470,6 @@ def script_profile(root: Path, relative: str) -> dict[str, str]:
         success = "调用者完成后置校验且整个上层事务提交；单个函数返回不等于部署成功。"
         recovery = "让异常向上层 fail closed；保留锁、marker 和原始输入证据，不在库外手工补写。"
         example = f"rg -n \"{path.stem}\" DAY0-Prepare infra monitor tools ztp  # 查找受支持调用者"
-        if relative in REQ7_READ_ONLY_LIBRARIES:
-            environment = "由受管 monitor worker/Stage L 状态流程导入；只读库不单独取得运行或写入权限。"
-            scenario = "读取受保护的当前 K 窗口、逐键连续性或当前周期 C6 receipt 事实，供本地状态投影。"
-            prerequisite = "调用者持有同一项目 owner 锁，并核对当前 K、周期顺序、来源身份和原始受保护证据；不可用时 fail closed。"
-            inputs = "当前 K 链、受保护的已完成周期、Switch/ETH/IB 来源绑定或当前周期的 C6 INTENT/RECEIPT。"
-            outputs = "只读逐键观察计数、最新业务值或周期绑定的本地 receipt 事实；不修补历史、不写源数据或在线项目。"
-            success = "来源与周期复核完成，返回值仅供状态展示；不授予在线发布资格，不替代 C5/C6 或真机验收。"
-            recovery = "证据缺失、顺序断裂、K 或来源身份变化时交由调用者 HOLD；保留原始证据，不伪造零值或手工补写 receipt。"
         if relative == "tools/req7_dependency_contract.py":
             scenario = "REQ7 C-14 公开依赖策略和精确锁校验；不导入 SDK、不安装、不访问网络或启用服务。"
             prerequisite = "调用方冻结受测源码；固定相对路径无链接、单链接普通文件、有界读取且名字/字节身份复核一致。"
@@ -536,169 +477,6 @@ def script_profile(root: Path, relative: str) -> dict[str, str]:
             outputs = "不可变策略/锁 SHA256、平台 wheel 清单与精确版本元数据身份，或脱敏拒绝；不写文件。"
             success = "仅表示公开依赖合同和元数据一致；不授予发送许可、不证明 Linux wheel 已执行、SDK 鉴权或整个 REQ7。"
             recovery = "缺包、版本/路径/架构/锁漂移时 fail closed；保留证据，不能自动安装、猜测依赖或手改批准 ledger。"
-        if relative == "monitor/issue_tracker_online_target.py":
-            scenario = "本地验证精确 JSON 字符串枚举及每次项目策略重核；不从配置推导白名单。"
-            prerequisite = "纯函数只检查调用方提供的字节；真实文件权威必须另由固定路径 root held-FD 加载器建立，发送仍须完整准入与传输证明。"
-            inputs = "有界原始白名单字节、schema v2 项目策略和可选旧目标绑定；不读取凭据或真实文件。"
-            outputs = "纯内存精确目标/策略/枚举字节绑定或脱敏 HOLD；无文件修改、网络或发送许可。"
-            success = "通过只表示本次纯校验一致，不授予发送资格，不证明凭据、文件来源、在线写入或整个 REQ7。"
-            recovery = "空白名单、禁用、撤销或身份变化拒绝；保留来源证据，不重定向、不猜测授权。"
-        if relative in REQ7_ONLINE_PRIMITIVE_LIBRARIES:
-            scenario = "REQ7 本地输入与纯候选校验；不是在线发布入口，不启动服务。"
-            prerequisite = "调用方另证来源、模板、目标、持久化预留和发送合同；本地测试不构成 Stage O 许可。"
-            inputs = "已验证的来源行、typed userEnteredValue 精确矩形、所有保留序号／行预留；不会从局部差异重建未知发送单元。"
-            outputs = "不可变字面单元格／序号／空闲行候选或 HOLD／CONFLICT；不发生文件修改或网络发送。"
-            success = "通过仅表示本次候选校验一致，不授予发送资格，不证明原子提交、完整回执或整个 REQ7。"
-            recovery = "占用、位移、歧义、容量耗尽或 UNKNOWN 拒绝；不覆盖人工／公式列、不回收预留、不伪造回滚。"
-            if relative == "monitor/issue_tracker_credential_shape.py":
-                prerequisite = "未来仅 root worker 调用固定路径 held-FD 读取；目录 root 0700、文件 root 0600、无链接；原生身份／RO bind 尚须单独验证。"
-                inputs = "固定路径 /var/lib/http-ztp-container/service-account/cre.json 与 issue-tracker-spreadsheet-whitelist.json；无 argv／环境路径覆盖。"
-                outputs = "单次 FD 字节解析的私有映射／精确枚举或脱敏 HOLD；不导入认证 SDK、不签名、不刷新令牌或打开网络。"
-                success = "本地 fake held-FD 测试不授予发送资格，也不证明真机身份、SDK 认证、线上发布或整个 REQ7。"
-                recovery = "身份、权限、大小、单读或名字绑定变化拒绝；不自动创建／修复文件，不向日志／异常输出凭据。"
-        if relative == "monitor/issue_tracker_sdk_authentication.py":
-            direct = "否；这是未安装、未启用的公共 SDK 桥接库，不是操作员 CLI。"
-            environment = "当前未安装、未启用；未来仅由受管 root worker 导入，当前仅做隔离开发验证。"
-            scenario = "用公共 SDK 构造固定 scope 凭据并通过一次回调适配器刷新令牌；不使用 ADC、委托或自签 access JWT。"
-            prerequisite = "SDK 导入前通过精确依赖校验；凭据由 C11 单次固定路径 held-FD 读取；受控 CA、完整传输、监督预算及发送准入须另证。"
-            syntax = "开发测试导入公开函数；无已安装操作员入口。"
-            parameters = "无独立 CLI，也无凭据路径、目标 host/port、代理或 CA 覆盖参数。"
-            inputs = "单次 held-FD 验证后的私有凭据映射和受控请求单元；固定 Sheets scope。"
-            outputs = "私有不可变 token/到期时间或脱敏 HOLD；不是在线写入许可。"
-            success = "本地 fake/direct/workflow 通过不授予发送资格，不证明完整传输、线上可用或整个 REQ7。"
-            recovery = "非 200、不完整响应、异常或第二次回调拒绝；不允许 SDK 隐藏重试，不向日志或异常输出凭据。"
-            example = "python3 -B -m unittest -v test_cases.test_req7_sdk_authentication  # 仅开发测试"
-        elif relative in REQ7_CONTROLLED_TRANSPORT_LIBRARIES:
-            direct = "否；这是未安装、未启用的受控传输／只读库，不是操作员 CLI 或在线发布入口。"
-            environment = "当前未安装、未启用；仅在本地隔离候选中验证，不启动受管服务。"
-            prerequisite = "未来发送须受固定 root launcher、精确部署 Python/SSL/CA 身份、完整总预算监督和每次新鲜准入支配；本地对象不是授权。"
-            syntax = "开发测试导入函数；无已安装操作员入口。"
-            parameters = "无独立 CLI；不提供目标 URL、代理、凭据路径、CA 或重试覆盖开关。"
-            inputs = "严格不可变请求形状、受控响应或本案隔离子进程；不会从旧成功或调用方声明推导发送资格。"
-            outputs = "必要的本地只读观察、不可变 HTTP 字节或已确认／未确认终止状态；不是完整远程结果。"
-            success = "本地 direct/workflow 通过不授予在线发送或写入资格，不证明部署环境、完整准入或整个 REQ7。"
-            recovery = "任何身份、坐标、响应或终止不确定时 HOLD；保留锁和证据，不刷新重放、不伪造 APPLIED。"
-            if relative == "monitor/issue_tracker_tls_inputs.py":
-                scenario = "验证固定 held-FD 受控 CA、原生 TLS/hostname 与一次 OAuth POST／Sheets GET／固定只读 metadata search POST；固定插入占用列和 History 全尾均与实际容量同 GET，超过 5002 拒绝；只读观察不是 COMPLETE，部分响应、非 200 和重定向拒绝且不重发。"
-                inputs = "固定 /etc/ssl/certs/ca-certificates.crt 的持有字节及受控请求；不加载环境信任目录或代理。"
-                example = "python3 -B -m unittest -v test_cases.test_req7_tls_inputs  # 仅开发测试"
-            elif relative == "monitor/issue_tracker_attempt_supervision.py":
-                scenario = "监督调用方已经启动的自有隔离子进程；固定单调总预算覆盖启动、DNS 和慢速读取。"
-                inputs = "固定受审 launcher 创建的 Popen、启动前单调时钟和类型；子进程须继承已持有的 spreadsheet 锁。"
-                recovery = "未确认终止时 HOLD／升级处置，绝不解锁重发；不接受任意 PID 或启动命令，不清除外来进程。"
-                example = "python3 -B -m unittest -v test_cases.test_req7_attempt_supervision  # 仅开发测试"
-            elif relative == "monitor/issue_tracker_sheets_read_plan.py":
-                scenario = "构造含 Switch N／Cabling U 原始 Status 的精确发现列、单行矩形、十四表身份、四张 tracker 表头及最多 5000 行 History A:E 的纯 Sheets GET 请求；业务固定各列 3:5002 与实际容量同 GET，History 固定 A3:E5002 与实际容量同 GET；有限窗口和容量内完整体分开，不接收任意 A1 范围、不读宽列、不自动分页。"
-                inputs = "typed 目标绑定、私有 token、固定业务 sheet 名和有限行坐标；插入固定 Switch A/B/C/F/J..U 与 Cabling 全部 A..AC 逐列读取原始容量；对象纪律不证明活的来源或准入。"
-                example = "python3 -B -m unittest -v test_cases.test_req7_sheets_read_plan  # 仅开发测试"
-            elif relative == "monitor/issue_tracker_online_whitelist_read.py":
-                scenario = "完整有界 Whitelist 只读结果必须匹配冻结本地规则；不得重筛已应用的本地 manifest。"
-                inputs = "固定六列、原始文本、实际 sheet 行容量和冻结本地 Whitelist；容量超过 10000 行拒绝，不分页掩盖截断。"
-                recovery = "缺失／不可读、规则不同、公式或容量超限时 HOLD；不修改本地快照、不从比较成功推导新鲜准入。"
-                example = "python3 -B -m unittest -v test_cases.test_req7_online_whitelist_read  # 仅开发测试"
-            elif relative == "monitor/issue_tracker_attempt_journal.py":
-                scenario = "在现有本地 owner 锁内持久保存不可变字节及六次意图计数；重启／进程死亡不重置 UNKNOWN。"
-                inputs = "ACTIVE 本地 writer token、单元标识和不超过 1 MiB 的冻结字节；它们不是合格 Sheets batch 或发送能力。"
-                recovery = "计数耗尽、部分／外来文件、字节变化或 fsync 失败均 HOLD，保留证据；无清理、重置或新单元接管。"
-                example = "python3 -B -m unittest -v test_cases.test_req7_attempt_journal  # 仅开发测试"
-            elif relative == "monitor/issue_tracker_metadata_reservation.py":
-                scenario = "原始 nonce、全表 owner 与 global action/wire 内，首个 intent 前持久预留实际永久 fence 的字符预算。"
-                inputs = "固定完整 metadata 原回应与真实冻结 batch；不接收任意 quota、替换 ID、路径或凭据存储。"
-                outputs = "八个图像屏障后保存 RAW／HEADER／RESERVATION／INITIALIZED，冷进程 UNKNOWN 保持原配额；隐藏 PROJECT 不可见，始终 VISIBLE_ONLY_UNPROVED，不是 COMPLETE 或发送许可。"
-                recovery = "溢出、已有 fence、错 nonce、部分图像、链接、原绑定漂移 HOLD；不回填、采用、释放或重分配；未安装，准入／结算／launcher 仍需集成。"
-                example = "python3 -B -m unittest -v test_cases.test_req7_metadata_reservation  # 仅开发测试"
-            elif relative == "monitor/issue_tracker_nv_reservation.py":
-                scenario = "实际全表 owner 与原始 enrollment 内持久预留两张 Cabling 的共享 NV 编号；Closed／无关行参与最大值，原始编号不重写。"
-                inputs = "两份固定完整容量原始只读响应（各最多 2 MiB 且全部字节持久保留）、同一 generation/publish/目标表和活动键；不接收调用方计数器、种子、路径或替换编号。"
-                outputs = "十个图像屏障后保存原 RAW／绑定／编号及 INITIALIZED，冷进程保持原预留；冻结 batch 的全部新增 literal key/NV 和原 nonce 须一致，UNKNOWN 仍绑定原 action/wire；不是 COMPLETE 或在线发送许可。"
-                recovery = "空种子、重复、容量耗尽、部分屏障、原绑定漂移 HOLD；全局 journal 阻止新预留，UNKNOWN 不重分配；未安装，结算与实际 launcher 仍需集成。"
-                example = "python3 -B -m unittest -v test_cases.test_req7_nv_reservation  # 仅开发测试"
-            elif relative == "monitor/issue_tracker_remote_history_match.py":
-                scenario = "实际全局 journal、发送前完整原像、两份原始 nonce、精确永久 fence、全部实际业务及审计 History 同时对账；typed 旧前缀与精确新尾保持不变。"
-                inputs = "ACTIVE 全表 owner、原 action/wire/nonce、固定完整 metadata 与全尾回应；结构对象不证明受保护来源、新鲜准入或发送许可。"
-                outputs = "MATCHED_OBSERVATION／UNKNOWN／CONFLICT 必要观察，不是 COMPLETE、APPLIED、结算或 UNKNOWN 清除。"
-                recovery = "缺 journal、部分响应、外来路径、重复 metadata HOLD；缺 fence UNKNOWN，错栅或缺／多／错序／伪造 NOOP 行 CONFLICT；禁止重置、清除预留或单凭标记重发。"
-                example = "python3 -B -m unittest -v test_cases.test_req7_remote_history_match  # 仅开发测试"
-            elif relative == "monitor/issue_tracker_history_preread_journal.py":
-                scenario = "在真实全表 owner 及全局不可变 journal 内、首个意图前保存完整 History 原始响应与发送前尾边界，以及整个家族 manifest／全部原始业务读像（含 NOOP）；冷进程重新解码，UNKNOWN 后不可补建或替换。"
-                inputs = "ACTIVE 全局 owner、同一 action/wire、原始 nonce／适用 NV／History、完整键／占用／精确行；不接收可选路径、裸尾行号、修复或发送许可。不保存认证 header；单回应 2 MiB、去重后的业务 envelope 16 MiB，wire／manifest 仍 1 MiB。"
-                outputs = "私有原始字节、history_last_row_before_send 及全部实际业务／ALL 审计的原始 append 行预留（NOOP 不虚构行），metadata 预留前校验并绑定；原始业务坐标、literal／NOOP typed 意图与组合摘要核冻结 action／wire，最终屏障内改写或同字节新 inode HOLD；UNKNOWN／冷进程保持同一窗口，不是 COMPLETE、新鲜准入或发送能力。"
-                recovery = "缺 marker、部分屏障、别名、篡改、重哈希外来目标或全局计数链变化 HOLD，禁止回填、重置或清除 UNKNOWN；尚未集成实际 launcher 与完整对账。"
-                example = "python3 -B -m unittest -v test_cases.test_req7_history_preread_journal  # 仅开发测试"
-            elif relative == "monitor/issue_tracker_enrollment_journal.py":
-                scenario = "在实际 spreadsheet owner 内一次生成四张业务／History 表的原始 nonce；原像屏障全部完成后才写 INITIALIZED，匹配远端原始 SHEET/DOCUMENT pair。"
-                inputs = "ACTIVE 全局 owner、14 表 typed 只读身份与受保护固定私有目录；不接受调用方 nonce、路径、修复或在线权限。"
-                outputs = "私有不可变 nonce journal 与必要匹配观察；缺 History、重复／外来锚点或 nonce 漂移 HOLD，没有远端写入、COMPLETE 或发送能力。"
-                recovery = "部分落盘、marker 缺失、链接／权限／身份变化保留 HOLD；禁止重生 nonce 或从远端标记反向采纳，配额预留、固定 launcher 与新鲜准入仍需集成。"
-                example = "python3 -B -m unittest -v test_cases.test_req7_enrollment_journal  # 仅开发测试"
-            elif relative == "monitor/issue_tracker_global_attempt_journal.py":
-                scenario = "在跨项目 spreadsheet owner 内持久绑定 action、wire 与原策略白名单，六次全局 UNKNOWN 意图跨冷启动计数；已有单元保守阻断所有新单元。"
-                inputs = "ACTIVE 全局 owner、typed 原绑定与完整冻结单元；结构一致不证明受保护作业来源、准入或真实发送许可。"
-                outputs = "不可变共享持久原像、链式意图计数或 HOLD；reserved 入口计数前后重核原 enrollment／History 行预算／永久 metadata quota，Cabling 新增还须绑定原 NV 预留；catalog 已计数 WIRE 持续持有所有原始项目来源 ORIGIN／WITNESS 至 CLAIM 消费与交接结束，来源替换不被重新采用；没有清理、重置、解除屏障、COMPLETE 或发送能力。"
-                recovery = "部分 fsync、缺记录、链接／位移、原像漂移或六次耗尽均 HOLD；不补建／接管／回收，六次意图不是六次真实尝试。"
-                example = "python3 -B -m unittest -v test_cases.test_req7_global_attempt_journal  # 仅开发测试"
-            elif relative == "monitor/issue_tracker_retained_inventory.py":
-                scenario = "持有单个 legacy unit 的全部原件、完整命名空间和原始文件身份；另有 catalog 诊断接口同时持有所有 unit 的原 count／family／共享 nonce 与历史 C6 原件，跨项目观察另重核全部原始来源及真实项目锁，消费者期间不重新采用新路径；未知未来或 archive 家族保持 HOLD。"
-                inputs = "实际共享 spreadsheet owner；单项目 APPLIED-key 观察另需实际 C6 writer owner，跨项目只从 held 原始项目来源内部取得真实非阻塞 owner，并核原始 COMPLETE／APPLIED／key-high-water 配对；无调用方路径、caller unit／generation／keys 覆盖。"
-                outputs = "原始 UNKNOWN 计数、历史 COMPLETE／APPLIED-key 必要只读观察；跨项目原始 C6 与已计数原始 COMPLETE／APPLIED／key 配对整体持有，缺任一证明全部 HOLD；catalog 中未尝试 unit 不贡献 APPLIED keys，已计数 unit 必须具备真实 COMPLETE／APPLIED／key 配对；原件持续持有的单项目逐 key 最大值与 pending 顺序观察不跨项目比较序号；跨项目 per-key FIFO 只读分区按 catalog 顺序保留重叠 key 屏障，APPLIED 与 UNSENT 序号只按原项目解释；仅未尝试且更晚 APPLIED 覆盖全部实际候选 key 时可追加不可变 UNSENT disposition，不释放 FIFO，不证明多个 unit 的完整结算、global maximum、FIFO、G1 或 NEW 权限。"
-                recovery = "部分、外来原件、同字节替换、未识别家族或原 nonce／History／C6 配对不一致均 HOLD，不 yield 部分前缀；UNSENT 写前见证与双原 inode 配对持续保留，整对丢失仍 HOLD；所有原项目 disposition 命名空间持续持有，消费后新出现 partial 也拒绝；不修复、不回填、不清除 UNKNOWN。"
-                example = "python3 -B -m unittest -v test_cases.test_req7_retained_global_inventory test_cases.test_req7_retained_applied_inventory test_cases.test_req7_unit_catalog  # 仅开发测试"
-            elif relative == "monitor/issue_tracker_unit_catalog.py":
-                scenario = "在同一真实共享 owner 内追加多个 pending unit 原件及永久位置见证；不计数发送意图、不创建 CLAIM，不覆盖 legacy 原件。"
-                inputs = "真实 issued spreadsheet owner 与完整 coherent frozen action／wire；原始项目来源登记另需真实 ACTIVE C6 writer，固定配对与首写见证只定位原项目，不接受调用方路径；结构一致不是原始 C6、APPLIED、实际准入或发送证明。"
-                outputs = "按不可变索引恢复全部原件或 HOLD；历史 C6 关联必须实际持有全部原始项目／tracker／publication／LOCK 与 generation 文件，冷 owner 在 flock 前逐项核原始身份，不锁住替换件，非阻塞取得且不补发历史 mutation handle；不是完整结算库存，不授予 NEW、FIFO 释放或发送权限。"
-                recovery = "部分落盘、丢失尾目录／位置、额外项、同字节替换或重复 unit 均 HOLD；原始项目／LOCK／C6 原件丢失、漂移或其他 owner 忙时全部 HOLD，不 yield 部分前缀；保留证据、不修复、不回收、不重新采用。"
-                example = "python3 -B -m unittest -v test_cases.test_req7_unit_catalog  # 仅开发测试"
-            elif relative == "monitor/issue_tracker_spreadsheet_owner.py":
-                scenario = "同一 spreadsheet 的跨项目非阻塞 OS 锁；固定私有路径、持有祖先身份、无过期接管，父退出后继承 FD 继续互斥。"
-                inputs = "typed 目标绑定与已独立授权预置的 /var/lib/http-ztp-container/issue-tracker 目录；不接受路径／UID／TTL 覆盖，不创建或修复祖先。"
-                outputs = "短生命周期 opaque owner token 和仅固定受审 launcher 可借用的 CLOEXEC 锁 FD；不是在线发送能力。"
-                recovery = "身份位移、链接、外来字节／权限或锁忙时 HOLD；不删除锁、不显式解锁，不以 mtime 接管；UNKNOWN/FIFO 与真实 launcher 仍须另证。"
-                example = "python3 -B -m unittest -v test_cases.test_req7_spreadsheet_owner  # 仅开发测试"
-            elif relative == "monitor/issue_tracker_send_intent.py":
-                scenario = "在实际本地 owner 内先持久保存非递归 ACTION-PREIMAGE 和 action/wire 摘要，再保存不可变 wire，最后记录 UNKNOWN 意图。"
-                inputs = "ACTIVE C-6 token 与冻结单表组合；摘要一致不证明 protected 准入、跨项目 spreadsheet 锁或发送许可。"
-                recovery = "旧 wire store、部分记录、篡改、位移、fsync 失败或计数耗尽时 HOLD；保留原像，不补建、不修复、不重置 UNKNOWN。"
-                example = "python3 -B -m unittest -v test_cases.test_req7_send_intent  # 仅开发测试"
-            elif relative == "monitor/issue_tracker_send_unit.py":
-                scenario = "冻结单表业务变更、全部对应 History 与一个永久 fence；非递归 action_digest 绑定完整 outcome 和审计集合，原样绑定 C-6 正序号 native generation 名。"
-                inputs = "受保护 C-5 三类来源在实际 C-6 owner 内前后重核，原始当前周期工作簿 RECEIPT／共享准入决定 generation 和发布摘要；拒绝 caller manifest／业务／时间／receipt 覆盖。全活动更新入口从完整发现、精确行和 History 派生坐标／typed before-image／combined preread 摘要。Switch 混合新增／更新入口另在实际双 owner 内使用原始十四表 enrollment 的 ID／nonce，共用原始键／占用像并分配不同预置空闲行，同表已有未决命名空间拒绝；不接受 caller placements／nonce／preread。Cabling 混合组批另核当前真实 generation／publication 的原始两表 NV 预留及共用完整键／A..AC 占用像，活动更新保持原 ID，新行在全部占用之后追加，原始容量须容纳全部新增；不接受 caller ID／坐标。durable 业务原像／行预留、远端模板／新鲜准入／发送未证明。"
-                recovery = "缺项、重复、坐标冲突、marker 投影碰撞或 1000 请求／1 MiB 上界越界均 HOLD；不分批、不换 ID；全 NOOP 时审计 pending。"
-                example = "python3 -B -m unittest -v test_cases.test_req7_send_unit  # 仅开发测试"
-            elif relative == "monitor/issue_tracker_metadata_capacity.py":
-                scenario = "有界只读 metadata search；按各 sheet 与独立 spreadsheet 池核永久栅、enrollment、其他元数据及未决预留。"
-                inputs = "同一目标的十四表身份、完整可见查询与显式预留；UTF-8 字节保守计量，不从不可见 PROJECT 元数据推导空池。"
-                recovery = "溢出 STOP_CAPACITY，非溢出仍 VISIBLE_ONLY_UNPROVED／HOLD；不是发送许可，不清除预留、不回收栅、不承诺剩余天数。"
-                example = "python3 -B -m unittest -v test_cases.test_req7_metadata_capacity  # 仅开发测试"
-            elif relative == "monitor/issue_tracker_mutation_rejection.py":
-                scenario = "只观察四类完整一致 HTTP/JSON 错误，其他情况 UNKNOWN；六次内的任一 UNKNOWN 不被后续拒绝清除。"
-                inputs = "有界原始响应和完整性声明；它们不证明响应来自承载请求的原生连接，也不是 durable journal。"
-                recovery = "不完整、格式不符、前次 UNKNOWN 均 HOLD；不允许重发，不清除预留或证明 APPLIED。"
-                example = "python3 -B -m unittest -v test_cases.test_req7_mutation_rejection  # 仅开发测试"
-            else:
-                scenario = "按精确目标、sheetId 和坐标解码 userEnteredValue；按完整活动键和原始 Status 分类，精确 Closed 排除活动、重复活动键 CONFLICT、已有 NV ID 不改；有限窗口未匹配不是全表不存在或插入许可。History 全尾按同一响应原始行容量拒绝截断，last_data_row_index 为全部 A:E 最后占用行，不推导事务快照、发送许可或 COMPLETE。"
-                inputs = "固定读取形状与完整有界 HTTP 200；插入观察核完整键和占用共有列一致，Switch 首个无业务／操作员值且不在已知预留集合的行再读精确矩形、原预置 ID 与公式；Cabling 所有原始列决定追加尾和容量。预留集合不是原始 journal 权威；不得用 formatted/effectiveValue 替代原值或用缺失 grid 制造空行。"
-                example = "python3 -B -m unittest -v test_cases.test_req7_sheets_read_decode  # 仅开发测试"
-        if is_uninstalled:
-            direct = "否；这是未安装、未启用的库级接点，不是可直接运行的生产入口。"
-            environment = "当前未安装、未启用；未来仅在经真机验收的受管 Linux 环境中按正确身份导入，不是操作员 CLI。"
-            scenario = "仅供本地 direct/workflow 验证；未来受管 CGI/root worker 接入后才可处理手工请求。"
-            prerequisite = "启用前须完成真机验收，并配置独占 CGI UID/GID、受保护 socket、独立 root launcher 和私有队列。"
-            syntax = f"开发测试导入 {relative}；未来受管组件可按真机验收后的合同导入，当前无操作员 CLI。"
-            success = "本地测试只证明库级接点行为；不构成服务已启动、CGI 已发布或生产可用的证据。"
-            example = f"python3 -B -m unittest -v test_cases.test_{path.stem}  # 仅开发测试"
-    elif is_cgi and is_uninstalled:
-        direct = "否；这是未安装、未发布的 CGI 接点，不能作为当前可用的 HTTP 路由调用。"
-        environment = "当前 Apache/Native/Docker 均未发布此路由；未来身份和服务生命周期仍待真机验证。"
-        scenario = "仅在开发测试中验证 HTTP 边界与本地中继；不提供现行生产操作入口。"
-        prerequisite = "启用前须完成真机验收，并为该路由配置独占 CGI UID/GID、受保护 Unix socket 和 root worker。"
-        syntax = f"开发测试导入 {relative} 的 handle()/main() 并注入环境；当前无已安装 HTTP 调用方式。"
-        parameters = "未来 HTTP method、Content-Length、字段和身份边界以 direct/workflow 测试为准；当前无操作员参数。"
-        inputs = "开发测试中校验的有界 HTTP 请求；当前无生产请求入口。"
-        outputs = "测试中仅向受保护 Unix socket 转发规范请求并返回受限 HTTP/JSON；CGI 自身不写队列或控制文件。"
-        success = "本地测试验证失败关闭和中继协议；不证明 Apache 路由已发布或 root worker 已运行。"
-        recovery = "未安装状态保持不可用；未来接入失败时保留证据并按真机计划回退，不手工补写私有队列。"
-        example = "python3 -B -m unittest -v test_cases.test_issue_tracker_manual_channel  # 仅开发测试"
     elif is_cgi:
         direct = "否；由 Apache CGI 环境调用，不能在 shell 中伪造为生产成功。"
         environment = "Native Apache 或 Docker 容器 Apache，以受限请求方法和 www-data 权限运行。"
@@ -781,27 +559,6 @@ def script_profile(root: Path, relative: str) -> dict[str, str]:
                 example = f"sed -n '1,120p' {relative}  # 先读文件头 Usage/安全边界，再由所属流程调用"
             else:
                 example = f"python3 -B -m py_compile {relative}  # 仅语法验证；实际运行由上层流程负责"
-    if relative == 'monitor/issue_tracker_enrollment_journal.py':
-        direct = '仅显式人工初始化；导入库及普通 worker 不触发。'
-        environment = '受控管理环境；原项目 tracker、固定凭据/CA/allowlist 与双 owner 必须已存在；本地测试不授予真实 Cloud 权限。'
-        scenario = '仅确认全新且无冲突时人工首建四张表的原 nonce 标记；普通 worker 永不自动初始化。'
-        prerequisite = '原项目/目标/凭据身份有效、14 表与四表头匹配、完整可见 metadata 为空且本地没有历史家族或尝试证据；仍适用工具专用表及同一 Cloud 项目历史确认。'
-        syntax = 'python3 -B -m monitor.issue_tracker_enrollment_journal --initialize-project /ABS/PROJECT'
-        parameters = '仅 --initialize-project ABS_PROJECT；不支持 repair/reset/nonce/URL/CA/timeout 等覆盖。'
-        inputs = '实际固定当前项目、真实认证及四读原件；不接受调用者 token、nonce、任意远端地址或替换证据。'
-        outputs = '先持久本地原 nonce，再单次固定四标记写入及完整回读；独立私有尝试证据留存。INITIALIZED 只表示本地 nonce 已持久化。'
-        success = '只在远端原始四标记回读和所有原件/owner/进程收尾成功后 exit 0；不启用自动发送，不证明业务 COMPLETE 或发布通过。'
-        recovery = '部分、丢失、冲突及 UNKNOWN 保留证据并停止；首版不修复、不接管、不清理重置、不自动重试；已完成也不重复创建。'
-        example = syntax + '  # 需另有精确现场授权，不能用于修复已有状态'
-    elif relative in ('monitor/issue_tracker_enrollment_initialize.py', 'monitor/issue_tracker_enrollment_protocol.py'):
-        direct = '否；显式人工初始化入口的固定内部实现。'
-        environment = '只由受管 manual 入口调用，不单独取得真实 Cloud 或发送权限。'
-        scenario = '固定四标记协议和原件/真实监督边界；普通 worker 不调用初始化。'
-        syntax = '仅由 monitor.issue_tracker_enrollment_journal 的显式人工入口导入。'
-        parameters = '无独立 CLI；无端点、凭据、nonce、期限、修复或接管覆盖。'
-        success = 'typed DATA 不等于初始化成功、自动发送许可、业务 COMPLETE 或发布证明。'
-        recovery = '异常及 UNKNOWN 保留原证据，失败关闭，不自动修复或重试。'
-        example = 'python3 -B -m unittest test_cases.test_req7_enrollment_protocol test_cases.test_req7_enrollment_initialize_transport'
     return {
         "purpose": purpose,
         "direct": direct,

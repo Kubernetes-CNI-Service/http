@@ -577,49 +577,6 @@ class DocumentationCatalogTests(unittest.TestCase):
                 updater.atomic_write(link, "replacement\n")
             self.assertEqual("original\n", target.read_text(encoding="utf-8"))
 
-    def test_req7_source_and_receipt_profiles_are_read_only_libraries_not_cli(self):
-        updater = load_path("manual_req7_read_only_profiles", USER_MANUAL_SCRIPT)
-        paths = (
-            "monitor/issue_tracker_ib_per_key_source.py",
-            "monitor/issue_tracker_per_key_source.py",
-            "monitor/issue_tracker_switch_per_key_source.py",
-            "monitor/issue_tracker_receipt_snapshot.py",
-        )
-        for relative in paths:
-            with self.subTest(path=relative):
-                profile = updater.script_profile(ROOT, relative)
-                self.assertTrue(profile["direct"].startswith("否"))
-                self.assertIn("无受支持的独立 CLI", profile["parameters"])
-                self.assertIn("只读", profile["outputs"])
-                self.assertIn("K", profile["inputs"])
-                self.assertIn("owner", profile["prerequisite"])
-                self.assertIn("不授予在线发布资格", profile["success"])
-                self.assertNotIn("[options]", profile["syntax"])
-                self.assertNotIn("未安装", profile["environment"])
-
-    def test_real_manual_render_preserves_req7_read_only_source_boundaries(self):
-        updater = load_path("manual_req7_read_only_render", USER_MANUAL_SCRIPT)
-        rendered = updater.render_manual(ROOT)
-        for relative in (
-            "monitor/issue_tracker_ib_per_key_source.py",
-            "monitor/issue_tracker_per_key_source.py",
-            "monitor/issue_tracker_switch_per_key_source.py",
-            "monitor/issue_tracker_receipt_snapshot.py",
-        ):
-            with self.subTest(path=relative):
-                match = re.search(
-                    rf'<details[^>]*data-script-reference="{re.escape(relative)}"[^>]*>'
-                    r'(.*?)</details>', rendered, flags=re.DOTALL,
-                )
-                self.assertIsNotNone(match)
-                plain = html.unescape(" ".join(
-                    re.sub(r"<[^>]+>", " ", match.group(1)).split(),
-                ))
-                self.assertIn("是否直接运行： 否", plain)
-                self.assertIn("无受支持的独立 CLI", plain)
-                self.assertIn("不授予在线发布资格", plain)
-                self.assertIn("只读", plain)
-
     def test_user_manual_exhaustively_describes_maintained_files_and_scripts(self):
         from test_cases import test_public_publication_contract as publication
 
@@ -770,36 +727,6 @@ class DocumentationCatalogTests(unittest.TestCase):
         self.assertIn("JSON", helper["outputs"])
         self.assertNotIn("-m unittest -v test_cases.validation_unittest", helper["example"])
 
-    def test_req7_exact_online_target_profile_has_no_file_or_send_authority(self):
-        updater = load_path("manual_req7_target_binding", USER_MANUAL_SCRIPT)
-        profile = updater.script_profile(ROOT, "monitor/issue_tracker_online_target.py")
-        self.assertTrue(profile["direct"].startswith("否"))
-        self.assertIn("无受支持的独立 CLI", profile["parameters"])
-        self.assertIn("纯", profile["outputs"])
-        self.assertIn("不授予", profile["success"])
-        self.assertIn("held-FD", profile["prerequisite"])
-        self.assertNotIn("python3 -B monitor/issue_tracker_online_target.py", profile["example"])
-
-    def test_req7_online_primitives_do_not_advertise_cli_or_send_authority(self):
-        case_guide = (ROOT / "test_cases/README.md").read_text(encoding="utf-8")
-        for name in ("credential_shape", "credential_fd", "online_cells", "online_nv_ids", "online_rows"):
-            self.assertIn(f"test_issue_tracker_{name}.py", case_guide)
-        self.assertIn("不代表 REQ7 整体完成", case_guide)
-        updater = load_path("manual_req7_online_primitives", USER_MANUAL_SCRIPT)
-        for name in ("credential_shape", "online_cells", "online_nv_ids", "online_rows"):
-            relative = f"monitor/issue_tracker_{name}.py"
-            with self.subTest(module=relative):
-                profile = updater.script_profile(ROOT, relative)
-                self.assertTrue(profile["direct"].startswith("否"))
-                self.assertIn("无受支持的独立 CLI", profile["parameters"])
-                self.assertIn("不授予", profile["success"])
-                self.assertNotIn(f"python3 -B {relative}", profile["example"])
-                if name == "credential_shape":
-                    self.assertIn("held-FD", profile["prerequisite"])
-                    self.assertIn("固定路径", profile["inputs"])
-                else:
-                    self.assertIn("候选", profile["outputs"])
-
     def test_backup_bounded_peers_are_not_advertised_as_operator_clis(self):
         updater = load_path("manual_backup_fixed_peers", USER_MANUAL_SCRIPT)
         for relative in ("ztp/backup/_bounded_process.py",
@@ -834,41 +761,6 @@ class DocumentationCatalogTests(unittest.TestCase):
         self.assertEqual((ROOT / "user-manual.html").read_text(encoding="utf-8"),
                          rendered, "generated manual must be current")
 
-    def test_req7_fixed_launchers_and_audit_library_are_not_operator_clis(self):
-        updater = load_path("manual_req7_fixed_library_boundaries", USER_MANUAL_SCRIPT)
-        for name in ("history_read_launcher", "mutation_launcher",
-                     "settings_audit_allocation", "token_launcher"):
-            relative = f"monitor/issue_tracker_{name}.py"
-            with self.subTest(module=relative):
-                profile = updater.script_profile(ROOT, relative)
-                self.assertTrue(profile["direct"].startswith("否"))
-                for required in ("未安装", "未启用"):
-                    self.assertIn(required, profile["environment"])
-                self.assertIn("无独立 CLI", profile["parameters"])
-                self.assertIn("不授予", profile["success"])
-                self.assertNotIn(f"python3 -B {relative}", profile["syntax"])
-                self.assertNotIn(f"python3 -B {relative}", profile["example"])
-
-    def test_req7_generated_fixed_library_entries_retain_uninstalled_boundaries(self):
-        updater = load_path("manual_req7_fixed_library_render", USER_MANUAL_SCRIPT)
-        rendered = updater.render_manual(ROOT)
-        for name in ("history_read_launcher", "mutation_launcher",
-                     "settings_audit_allocation", "token_launcher"):
-            relative = f"monitor/issue_tracker_{name}.py"
-            with self.subTest(module=relative):
-                match = re.search(
-                    rf'<details[^>]*data-script-reference="{re.escape(relative)}"[^>]*>'
-                    r'(.*?)</details>', rendered, flags=re.DOTALL,
-                )
-                self.assertIsNotNone(match, relative)
-                body = html.unescape(" ".join(re.sub(r"<[^>]+>", " ", match.group(1)).split()))
-                for required in ("是否直接运行： 否", "未安装", "未启用",
-                                 "无独立 CLI", "不授予"):
-                    self.assertIn(required, body)
-                self.assertNotIn(f"python3 -B {relative} [options]", body)
-        self.assertEqual((ROOT / "user-manual.html").read_text(encoding="utf-8"),
-                         rendered, "generated manual must be current")
-
     def test_req7_sdk_dependency_profile_and_evidence_do_not_claim_sdk_or_image_execution(self):
         updater = load_path("manual_req7_sdk_dependencies", USER_MANUAL_SCRIPT)
         relative = "tools/req7_dependency_contract.py"
@@ -895,68 +787,6 @@ class DocumentationCatalogTests(unittest.TestCase):
         self.assertIn("无受支持的独立 CLI", profile["parameters"])
         self.assertIn("由上层 Python 模块导入", profile["syntax"])
         self.assertNotIn("python3 -B ztp/config_sync_authority.py", profile["syntax"])
-
-    def test_uninstalled_manual_channel_profiles_do_not_claim_runtime_authority(self):
-        updater = load_path("manual_uninstalled_channel", USER_MANUAL_SCRIPT)
-        channel = updater.script_profile(ROOT, "monitor/issue_tracker_manual_channel.py")
-        self.assertTrue(channel["direct"].startswith("否"))
-        self.assertIn("未安装", channel["environment"])
-        self.assertIn("无操作员 CLI", channel["syntax"])
-
-        listener = updater.script_profile(ROOT, "monitor/issue_tracker_manual_listener.py")
-        self.assertTrue(listener["direct"].startswith("否"))
-        self.assertIn("未安装", listener["environment"])
-        self.assertIn("独占 CGI UID", listener["prerequisite"])
-        self.assertIn("导入", listener["syntax"])
-        self.assertNotIn("python3 -B monitor/issue_tracker_manual_listener.py", listener["example"])
-
-        cgi = updater.script_profile(ROOT, "monitor/issue-tracker-control.cgi")
-        self.assertTrue(cgi["direct"].startswith("否"))
-        self.assertIn("未发布", cgi["environment"])
-        self.assertIn("独占 CGI UID", cgi["prerequisite"])
-        self.assertIn("Unix socket", cgi["outputs"])
-        self.assertNotIn("已发布", cgi["syntax"])
-        self.assertNotIn("www-data", cgi["environment"])
-        self.assertNotIn("request 文件", cgi["outputs"])
-        self.assertNotIn("request 原子发布", cgi["success"])
-
-        # The existing installed CGI contract must not change with this correction.
-        existing = updater.script_profile(ROOT, "monitor/ztp-monitor-control.cgi")
-        self.assertIn("www-data", existing["environment"])
-        self.assertIn("已发布", existing["syntax"])
-
-    def test_real_manual_generator_renders_uninstalled_manual_channel_contract(self):
-        updater = load_path("manual_uninstalled_channel_workflow", USER_MANUAL_SCRIPT)
-        rendered = updater.render_manual(ROOT)
-        self.assertEqual(
-            (ROOT / "user-manual.html").read_text(encoding="utf-8"), rendered,
-            "generated manual must be current",
-        )
-
-        def entry(relative: str) -> str:
-            match = re.search(
-                rf'<details[^>]*data-script-reference="{re.escape(relative)}"[^>]*>'
-                r'(.*?)</details>', rendered, flags=re.DOTALL,
-            )
-            self.assertIsNotNone(match, relative)
-            return html.unescape(" ".join(re.sub(r"<[^>]+>", " ", match.group(1)).split()))
-
-        listener = entry("monitor/issue_tracker_manual_listener.py")
-        self.assertIn("是否直接运行： 否", listener)
-        self.assertIn("未安装", listener)
-        self.assertIn("独占 CGI UID", listener)
-        channel = entry("monitor/issue_tracker_manual_channel.py")
-        self.assertIn("是否直接运行： 否", channel)
-        self.assertIn("未安装", channel)
-        self.assertIn("无操作员 CLI", channel)
-        cgi = entry("monitor/issue-tracker-control.cgi")
-        self.assertIn("未发布", cgi)
-        self.assertIn("独占 CGI UID", cgi)
-        self.assertIn("Unix socket", cgi)
-        self.assertNotIn("www-data", cgi)
-        self.assertIn("不证明 Apache 路由已发布", cgi)
-        self.assertNotIn("由网页通过 HTTP 请求已发布", cgi)
-        self.assertNotIn("request 原子发布", cgi)
 
     def test_v3_generated_load_guidance_declares_the_real_host_role(self):
         updater = load_path("manual_v3_host_role", USER_MANUAL_SCRIPT)

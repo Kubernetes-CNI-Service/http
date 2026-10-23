@@ -19,9 +19,8 @@ from test_cases.test_ufm_monitor_scripts import FAKE_DOCKER, FAKES
 
 ROOT = Path(__file__).resolve().parents[1]
 MONITOR = ROOT / "monitor"
-if str(MONITOR) not in sys.path:
+if str(MONITOR) not in sys.path:   # the worker imports switch_collection_gate by its bare name
     sys.path.insert(0, str(MONITOR))
-import collection_ib_cycle_binding as IB_BINDING  # noqa: E402
 
 UFM_ROW = "ufm01,server_ufm,198.51.100.30\n"
 INVENTORY = b"hostname,type,eth0_ip\nleaf-ib,ib,192.0.2.11\nufm01,server_ufm,198.51.100.30\n"
@@ -102,8 +101,6 @@ class UfmWorkerCollectionWorkflowTest(unittest.TestCase):
             completed, payload, traces = harness.run_workflow(root, "prod")
             ssh_calls = calls.read_text(encoding="utf-8") if calls.exists() else ""
             by_slot = {trace["source_slot"]: trace for trace in traces}
-            frozen_inventory = Path(
-                by_slot["infiniband/prod"]["context"]["artifacts"]["input_inventory"]).read_bytes()
             records = [json.loads(path.read_text(encoding="utf-8"))
                        for path in (root / "infiniband/monitor/ufm-ibdiagnet").glob("*.ufm-run.json")]
 
@@ -122,9 +119,6 @@ class UfmWorkerCollectionWorkflowTest(unittest.TestCase):
         self.assertEqual(1, ib["child_result"]["planned"], "UFMs stay out of the switch result")
         self.assertIsNotNone(result["summary"])
         self.assertTrue(result["summary"]["qualifying"])
-        # The REQ7 IB cycle reader rebuilds the plan from the frozen inventory instead of trusting it;
-        # it must arrive at the plan the real planner froze, or every IB cycle with a UFM is held.
-        self.assertEqual(frozen, IB_BINDING.rebuild_ib_target_plan(frozen_inventory))
         # Codex review 2026-10-22: the run record names the cycle the worker completed. Here the device
         # answering the VIP cannot be matched to the inventory (no eth0_mac), so the run fails closed.
         [record] = records
@@ -301,14 +295,6 @@ class UfmWorkerIbdiagnetSuccessWorkflowTest(unittest.TestCase):
             self.assertEqual(record["done"]["sha256"], receipt["done"]["sha256"], "the receipt names this .done")
             self.assertEqual((record["input"]["name"], record["input"]["sha256"]),
                              (receipt["input"]["name"], receipt["input"]["sha256"]), "the report is of this input")
-
-
-class UfmIbCycleBindingPlanTest(unittest.TestCase):
-    def test_the_ib_reader_rebuilds_the_ufm_rows_from_the_frozen_inventory(self):
-        self.assertEqual(plan(ib=["leaf-ib|192.0.2.11"], ufm=["ufm01|198.51.100.30"]),
-                         IB_BINDING.rebuild_ib_target_plan(INVENTORY))
-        without = b"hostname,type,eth0_ip\nleaf-ib,ib,192.0.2.11\n"
-        self.assertEqual(plan(ib=["leaf-ib|192.0.2.11"]), IB_BINDING.rebuild_ib_target_plan(without))
 
 
 if __name__ == "__main__":
