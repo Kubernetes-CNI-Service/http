@@ -18822,7 +18822,12 @@ def _read_raw_git_object(
         if frame is None and not scope.disabled:
             batch = scope.batch_for(key)
             if len(batch) > 1:
-                scope.run_batch(batch)
+                try:
+                    scope.run_batch(batch)
+                except Exception:
+                    # A batch never decides: whatever escapes it is a failed batch (R2), and the
+                    # unchanged single read below is the only path that can raise.
+                    scope.disabled = True
                 frame = scope.take(key)
         if frame is not None:
             scope.observe(frame[1], frame[3])
