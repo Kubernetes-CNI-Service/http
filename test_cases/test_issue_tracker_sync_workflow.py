@@ -94,8 +94,8 @@ class IssueTrackerSyncWorkflowTests(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         self.project = Path(self.directory.name) / "project"
         (self.project / "99-output-p2p").mkdir(parents=True)
-        (self.project / "03-issue-tracker.json").write_text(json.dumps({
-            "schema": "issue-tracker-sync-v1", "spreadsheet_id": SPREADSHEET}), encoding="utf-8")
+        # conversion needs a set-up project; the online sync itself stays disabled here
+        (self.project / "01-global.yaml").write_text("schema_version: 2\n", encoding="utf-8")
 
     def convert(self, only: str) -> str:
         stream = io.StringIO()
@@ -115,7 +115,7 @@ class IssueTrackerSyncWorkflowTests(unittest.TestCase):
         })
         text = self.convert("eth")
         self.assertIn("ETH: 2 rows (FAILED 1, SUCCESS 1)", text)
-        links = engine_read(self.project / "99-output-p2p/issue-tracker/eth-lldpq.json", "lldpq")
+        links = engine_read(self.project / "99-output-monitor/ethernet/issue-tracker/eth-lldpq.json", "lldpq")
         by_a = {tuple(link["a"]): link for link in links}
         self.assertEqual({("leaf-a", "swp1"), ("leaf-b", "swp3")}, set(by_a))
         self.assertEqual(("Pass", "ethernet", ["leaf-z", "swp2"], ["leaf-z", "swp2"], ""),
@@ -177,10 +177,10 @@ class IssueTrackerSyncWorkflowTests(unittest.TestCase):
         })
         text = self.convert("ib")
         self.assertIn("IB: 1 records", text)
-        circuits = json.loads((self.project / "99-output-p2p/issue-tracker/ib-cvt.json").read_text())
+        circuits = json.loads((self.project / "99-output-monitor/infiniband/issue-tracker/ib-cvt.json").read_text())
         self.assertEqual(1, len(circuits))
         self.assertEqual("ib", circuits[0]["protocol"])
-        links = engine_read(self.project / "99-output-p2p/issue-tracker/ib-cvt.json", "cvt")
+        links = engine_read(self.project / "99-output-monitor/infiniband/issue-tracker/ib-cvt.json", "cvt")
         self.assertEqual(1, len(links))
         self.assertEqual(("ib", ["spine-1", "1"], ["leaf-1", "1"]),
                          (links[0]["protocol"], links[0]["a"], links[0]["z"]))

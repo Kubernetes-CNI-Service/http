@@ -4,9 +4,12 @@
 schema_version: 2
 common:
   mgmt:
-    # Optional online publishing policy. It is disabled by default.
-    # publish_every_cycles defaults to 1; enabled also requires a
-    # spreadsheet_id matching [A-Za-z0-9_-]{20,}.
+    # Optional online Issue Tracker sync, disabled by default. When enabled,
+    # every collection is followed by syncing its link results into the online
+    # document: spreadsheet_id is the ID in the document URL (matching
+    # [A-Za-z0-9_-]{20,}); credentials names the Google service account JSON
+    # kept in this project directory (default cre.json, mode 600), never in git.
+    # publish_every_cycles defaults to 1.
     issue-tracker:
       status: disabled
     dhcp-server:

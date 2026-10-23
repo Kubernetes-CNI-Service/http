@@ -38,6 +38,10 @@ AIR_OUTBOUND_ENDPOINT = "outbound"
 _MAC_ADDRESS = re.compile(r"^[0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5}$")
 _ISSUE_TRACKER_SPREADSHEET_ID = re.compile(r"^[A-Za-z0-9_-]{20,}$")
 _ISSUE_TRACKER_PATH = "common.mgmt.issue-tracker"
+# REQ7 (owner 2026-10-23): the Google service account key the online sync uses, a plain .json file
+# name inside the project directory; never a path, never linked into the published tree.
+_ISSUE_TRACKER_CREDENTIALS = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\.json$")
+DEFAULT_ISSUE_TRACKER_CREDENTIALS = "cre.json"
 
 # One shared authority for switch families whose schema contains a managed
 # bootstrap credential. The ordered tuple is operator-facing; the schema set
@@ -1234,6 +1238,9 @@ MONITOR_RUNTIME_MAPPINGS = (
     # The UFM lane reads servers.ufm.vip and writes the IB link reports (UFM-MONITOR.md 14.3).
     ("infiniband/monitor/01-global.yaml", "01-global.yaml", "infiniband/01-global.yaml"),
     ("infiniband/monitor/99-output-p2p", "99-output-p2p", None),
+    # REQ7 (owner 2026-10-23): the online Issue Tracker sync keeps its prepared data and its log in
+    # the project's monitor output, through a link in its own directory.
+    ("monitor/issue-tracker/99-output-monitor", "99-output-monitor", None),
 )
 SETUP_COLLECTION_LINKS = {
     network + "/monitor/" + output: (network, output)
@@ -1546,7 +1553,7 @@ def normalize_issue_tracker_policy(
     if not isinstance(block, dict):
         raise ValueError(f"{path}: block must be a mapping")
 
-    allowed = {"status", "spreadsheet_id", "publish_every_cycles"}
+    allowed = {"status", "spreadsheet_id", "credentials", "publish_every_cycles"}
     unexpected = set(block) - allowed
     if unexpected:
         names = sorted(repr(key) for key in unexpected)
@@ -1564,8 +1571,18 @@ def normalize_issue_tracker_policy(
     if status == "disabled":
         if "spreadsheet_id" in block:
             raise ValueError(f"{path}.spreadsheet_id is forbidden when disabled")
+        if "credentials" in block:
+            raise ValueError(f"{path}.credentials is forbidden when disabled")
         spreadsheet_id = None
     else:
+        credentials = block.get("credentials", DEFAULT_ISSUE_TRACKER_CREDENTIALS)
+        if (
+            not isinstance(credentials, str)
+            or _ISSUE_TRACKER_CREDENTIALS.fullmatch(credentials) is None
+        ):
+            raise ValueError(
+                f"{path}.credentials must be a .json file name in the project directory"
+            )
         spreadsheet_id = block.get("spreadsheet_id")
         if (
             not isinstance(spreadsheet_id, str)
@@ -1581,6 +1598,18 @@ def normalize_issue_tracker_policy(
         "spreadsheet_id": spreadsheet_id,
         "publish_every_cycles": cycles,
     }
+
+
+def issue_tracker_credentials_name(global_document: object) -> str | None:
+    """The service account file name of an enabled online Issue Tracker sync, else None.
+
+    Validates the whole block first (same rules as normalize_issue_tracker_policy); the file itself is
+    checked where the project directory is known (monitor/issue-tracker/issue-tracker-sync.py).
+    """
+    if normalize_issue_tracker_policy(global_document)["status"] != "enabled":
+        return None
+    block = global_document["common"]["mgmt"]["issue-tracker"]
+    return block.get("credentials", DEFAULT_ISSUE_TRACKER_CREDENTIALS)
 
 
 def normalize_v2_vrr_policy(eth_config: object) -> dict[str, object]:

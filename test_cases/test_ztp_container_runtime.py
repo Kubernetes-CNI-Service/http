@@ -272,6 +272,10 @@ REQUIRED_PUBLISHED_LINKS = {
     "infiniband/monitor/99-output-p2p": (
         "../../DAY0-Prepare/{project}/99-output-p2p", "99-output-p2p", "dir",
     ),
+    # REQ7 online Issue Tracker sync: prepared data and log (owner 2026-10-23).
+    "monitor/issue-tracker/99-output-monitor": (
+        "../../DAY0-Prepare/{project}/99-output-monitor", "99-output-monitor", "dir",
+    ),
     # IBSW 2.25 upgrade inventory alias (NETWORK_INVENTORY_LINKS).
     "infiniband/bringup/xdr-upgrade/ib.csv": ("../../ib.csv", "02-devices_config.csv", "file"),
     "nvlink/monitor/nvsw-info": (

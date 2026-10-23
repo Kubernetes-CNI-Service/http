@@ -127,6 +127,8 @@ monitor/generate-monitor.log
 monitor/generate-monitor.log/**
 monitor/infiniband
 monitor/infiniband/**
+monitor/issue-tracker/99-output-monitor
+monitor/issue-tracker/99-output-monitor/**
 monitor/monitor.html
 monitor/monitor.html/**
 monitor/nvlink

@@ -835,6 +835,27 @@ class SchemaSelectionAndIssueTrackerPolicyContractTests(unittest.TestCase):
                     tuple(CONTRACT.normalize_issue_tracker_policy(document)),
                 )
 
+    def test_enabled_sync_names_its_service_account_file_in_the_project(self):
+        """REQ7 (owner 2026-10-23): the online sync reads a service account file kept in the project
+        directory; enabled defaults to cre.json, a path or another suffix is refused."""
+        enabled = {"status": "enabled", "spreadsheet_id": "A" * 20}
+        self.assertEqual("cre.json", CONTRACT.issue_tracker_credentials_name(self.document(enabled)))
+        self.assertEqual("team-sync.json", CONTRACT.issue_tracker_credentials_name(
+            self.document({**enabled, "credentials": "team-sync.json"})))
+        self.assertIsNone(CONTRACT.issue_tracker_credentials_name(self.document()))
+        self.assertIsNone(CONTRACT.issue_tracker_credentials_name(self.document({"status": "disabled"})))
+        self.assertEqual(
+            {"status": "enabled", "presence": "explicit", "spreadsheet_id": "A" * 20,
+             "publish_every_cycles": 1},
+            CONTRACT.normalize_issue_tracker_policy(self.document({**enabled, "credentials": "cre.json"})))
+        for block in ({**enabled, "credentials": "../cre.json"}, {**enabled, "credentials": "keys/cre.json"},
+                      {**enabled, "credentials": ".cre.json"}, {**enabled, "credentials": "cre.txt"},
+                      {**enabled, "credentials": 7}, {"status": "disabled", "credentials": "cre.json"}):
+            with self.subTest(block=block), self.assertRaisesRegex(ValueError, re.escape(self.PATH)):
+                CONTRACT.normalize_issue_tracker_policy(self.document(block))
+            with self.subTest(block=block), self.assertRaisesRegex(ValueError, re.escape(self.PATH)):
+                CONTRACT.issue_tracker_credentials_name(self.document(block))
+
     def test_twenty_character_spreadsheet_id_is_the_boundary(self):
         accepted = "Ab_0123456789-cdefgh"
         self.assertEqual(20, len(accepted))

@@ -2758,6 +2758,31 @@ elif [[ -n "$INFO_ARCHIVE$LINK_ARCHIVE" ]] || (( UFM_COLLECTED )); then
     fi
 fi
 
+# REQ7 (owner 2026-10-23): collection, analysis and display are followed by preparing this run's
+# production link results for the online Issue Tracker and syncing them through the CableTracker
+# engine. issue-tracker-sync.py itself checks the project's 01-global.yaml (common.mgmt.issue-tracker:
+# status, spreadsheet_id, credentials) and does nothing when the sync is not enabled; an unchanged
+# input is skipped in seconds. It keeps its own log (99-output-monitor/issue-tracker-sync.log) and
+# its result never changes this collection's result.
+ISSUE_TRACKER_SYNC=${BASE}/../../monitor/issue-tracker/issue-tracker-sync.py
+issue_tracker_sync() {
+    local domain=$1 engine_python=python3 rc=0
+    [[ -f "$ISSUE_TRACKER_SYNC" ]] || { log "[ISSUE-TRACKER] WARNING: missing $ISSUE_TRACKER_SYNC"; return 0; }
+    # the container image keeps the engine's Google/OpenAI client libraries in its venv
+    [[ -x /opt/http-ztp/venv/bin/python ]] && engine_python=/opt/http-ztp/venv/bin/python
+    python3 "$ISSUE_TRACKER_SYNC" --only "$domain" --engine-python "$engine_python" >/dev/null 2>&1 || rc=$?
+    case "$rc" in
+        0) log "[ISSUE-TRACKER] ${domain}: done (see 99-output-monitor/issue-tracker-sync.log)" ;;
+        75) log "[ISSUE-TRACKER] ${domain}: another sync is running; skipped" ;;
+        *) log "[ISSUE-TRACKER] WARNING: ${domain} sync exited ${rc} (see 99-output-monitor/issue-tracker-sync.log)" ;;
+    esac
+    return 0
+}
+if [[ "${COLLECTION_ENV:-prod}" == prod ]]; then
+    [[ -n "$ETH_ARCHIVE" ]] && issue_tracker_sync eth
+    [[ -n "$UFM_IBDIAG_ARCHIVE" ]] && issue_tracker_sync ib
+fi
+
 (( ufm_active )) && { ufm_run_record_write || ufm_failed=1; }
 
 cleanup_data_dirs \

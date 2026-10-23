@@ -162,51 +162,59 @@ class VendoredEngineTests(unittest.TestCase):
                 self.assertIn("mapping_v4.json differs", out.getvalue())
 
 
+GLOBAL_ENABLED = (
+    "schema_version: 2\n"
+    "common:\n"
+    "  mgmt:\n"
+    "    issue-tracker:\n"
+    "      status: enabled\n"
+    f"      spreadsheet_id: {SPREADSHEET}\n"
+)
+
+
 class ConfigurationTests(unittest.TestCase):
+    """The sync is enabled per project in 01-global.yaml common.mgmt.issue-tracker (owner 2026-10-23)."""
+
     def setUp(self):
         self.sync = load_wrapper()
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
-        self.path = Path(self.directory.name) / "03-issue-tracker.json"
+        self.project = Path(self.directory.name)
 
-    def write(self, document):
-        self.path.write_text(json.dumps(document), encoding="utf-8")
-        return self.path
+    def write(self, text):
+        (self.project / "01-global.yaml").write_text(text, encoding="utf-8")
 
-    def test_minimal_configuration_takes_the_documented_defaults(self):
-        config = self.sync.load_config(self.write({"schema": "issue-tracker-sync-v1",
-                                                    "spreadsheet_id": SPREADSHEET}))
-        self.assertEqual(SPREADSHEET, config.spreadsheet_id)
-        self.assertEqual("Asia/Shanghai", config.timezone)
+    def test_enabled_block_gives_the_standard_template_targets(self):
+        self.write(GLOBAL_ENABLED)
+        config, credentials = self.sync.load_global_config(self.project)
+        self.assertEqual(("cre.json", SPREADSHEET, "Asia/Shanghai"),
+                         (credentials, config.spreadsheet_id, config.timezone))
         ib, eth = config.domains["ib"], config.domains["eth"]
         self.assertEqual((True, "prod", "CVT_Import_GS", "IB Cabling", False),
                          (ib.enabled, ib.environment, ib.import_sheet, ib.cabling_sheet, ib.include_warnings))
         self.assertEqual((True, "prod", "LLDPQ_Import_GS", "ETH Cabling", False),
                          (eth.enabled, eth.environment, eth.import_sheet, eth.cabling_sheet, eth.include_warnings))
+        self.write(GLOBAL_ENABLED + "      credentials: team-sync.json\n")
+        self.assertEqual("team-sync.json", self.sync.load_global_config(self.project)[1])
 
-    def test_invalid_configurations_are_rejected_before_anything_runs(self):
-        base = {"schema": "issue-tracker-sync-v1", "spreadsheet_id": SPREADSHEET}
-        cases = {
-            "schema": {**base, "schema": "other"},
-            "unknown key": {**base, "sheet": "x"},
-            "short id": {**base, "spreadsheet_id": "abc"},
-            "url instead of id": {**base, "spreadsheet_id": "https://docs.google.com/x"},
-            "unknown domain key": {**base, "ib": {"sheet": "x"}},
-            "environment": {**base, "eth": {"environment": "lab"}},
-            "enabled not bool": {**base, "ib": {"enabled": "yes"}},
-            "warnings not bool": {**base, "eth": {"include_warnings": 1}},
-            "empty sheet": {**base, "ib": {"cabling_sheet": " "}},
-            "same import sheet": {**base, "eth": {"import_sheet": "cvt_import_gs"}},
-        }
-        for label, document in cases.items():
-            with self.subTest(case=label):
+    def test_absent_or_disabled_block_means_no_sync(self):
+        for text in ("schema_version: 2\n", "schema_version: 2\ncommon:\n  mgmt:\n    issue-tracker:\n"
+                     "      status: disabled\n"):
+            with self.subTest(text=text):
+                self.write(text)
+                self.assertEqual((None, None), self.sync.load_global_config(self.project))
+
+    def test_invalid_or_missing_global_is_a_configuration_error(self):
+        with self.assertRaises(self.sync.SyncError):
+            self.sync.load_global_config(self.project)
+        for text in (GLOBAL_ENABLED + "      credentials: ../cre.json\n",
+                     GLOBAL_ENABLED.replace(SPREADSHEET, "short"),
+                     "schema_version: 2\ncommon:\n  mgmt:\n    issue-tracker:\n      status: on\n",
+                     "schema_version: [\n"):
+            with self.subTest(text=text):
+                self.write(text)
                 with self.assertRaises(self.sync.SyncError):
-                    self.sync.load_config(self.write(document))
-        self.path.write_text("{not json", encoding="utf-8")
-        with self.assertRaises(self.sync.SyncError):
-            self.sync.load_config(self.path)
-        with self.assertRaises(self.sync.SyncError):
-            self.sync.load_config(self.path.with_name("missing.json"))
+                    self.sync.load_global_config(self.project)
 
 
 class CredentialTests(unittest.TestCase):
@@ -551,9 +559,8 @@ class MainFlowTests(unittest.TestCase):
             "leaf-a.info": info_text("swp1", "leaf-z", "swp2"),
             "leaf-z.info": info_text("swp2", "leaf-a", "swp1"),
         })
-        (self.project / "03-issue-tracker.json").write_text(json.dumps({
-            "schema": "issue-tracker-sync-v1", "spreadsheet_id": SPREADSHEET,
-            "ib": {"enabled": False}}), encoding="utf-8")
+        (self.project / "01-global.yaml").write_text(GLOBAL_ENABLED, encoding="utf-8")
+        self.output = self.project / "99-output-monitor/ethernet/issue-tracker"
         key = self.project / "cre.json"
         key.write_text(json.dumps({"type": "service_account", "client_email": "sync@example.test",
                                    "private_key": SECRET_MARKER,
@@ -616,7 +623,7 @@ class MainFlowTests(unittest.TestCase):
         return [json.loads(line) for line in self.calls.read_text().splitlines()]
 
     def test_sync_once_then_skip_unchanged_then_force(self):
-        output = self.project / "99-output-p2p/issue-tracker"
+        output = self.output
         code, text = self.run_main()
         self.assertEqual(0, code, text)
         calls = self.engine_calls()
@@ -631,7 +638,8 @@ class MainFlowTests(unittest.TestCase):
         self.assertEqual("issue-tracker-sync-state-v1", state["schema"])
         self.assertEqual("20261023-0900-prod.tar.gz", state["eth"]["inputs"]["input"]["name"])
         self.assertNotIn("ib", state)
-        self.assertNotIn(SECRET_MARKER, text + (output / "issue-tracker-sync.log").read_text())
+        self.assertNotIn(SECRET_MARKER, text + (self.project / "99-output-monitor/issue-tracker-sync.log").read_text())
+        self.assertIn("IB: no prod ibdiagnet2.tgz", text)
         gate_commands = [json.loads(line) for line in self.gate_calls.read_text().splitlines()]
         self.assertEqual([calls[0]["argv"]], gate_commands)
         self.assertIn("format pre-check: document matches the engine", text)
@@ -652,7 +660,7 @@ class MainFlowTests(unittest.TestCase):
         code, text = self.run_main()
         self.assertEqual(1, code, text)
         self.assertIn("cabletracker_runner.py exited 2", text)
-        self.assertFalse((self.project / "99-output-p2p/issue-tracker/state.json").exists())
+        self.assertFalse((self.output / "state.json").exists())
         self.engine_exit.unlink()
         code, text = self.run_main()
         self.assertEqual(0, code, text)
@@ -665,7 +673,7 @@ class MainFlowTests(unittest.TestCase):
         self.assertIn("format change refused: IB Cabling header row 2 would be rewritten", text)
         self.assertIn("nothing was written", text)
         self.assertEqual([], self.engine_calls())
-        self.assertFalse((self.project / "99-output-p2p/issue-tracker/state.json").exists())
+        self.assertFalse((self.output / "state.json").exists())
         self.gate_exit.write_text("2")
         code, text = self.run_main()
         self.assertEqual(1, code, text)
@@ -678,7 +686,7 @@ class MainFlowTests(unittest.TestCase):
         self.assertEqual(1, len(self.engine_calls()))
         self.assertIn("FORMAT CHANGED BY THE ENGINE: header rows of IB Cabling changed", text)
         self.assertIn("restore it from the document's version history", text)
-        self.assertFalse((self.project / "99-output-p2p/issue-tracker/state.json").exists())
+        self.assertFalse((self.output / "state.json").exists())
 
     def test_precheck_only_runs_the_gate_but_never_the_engine(self):
         code, text = self.run_main("--precheck-only")
@@ -686,7 +694,7 @@ class MainFlowTests(unittest.TestCase):
         self.assertEqual(1, len(self.gate_calls.read_text().splitlines()))
         self.assertEqual([], self.engine_calls())
         self.assertIn("pre-check passed; nothing written", text)
-        self.assertFalse((self.project / "99-output-p2p/issue-tracker/state.json").exists())
+        self.assertFalse((self.output / "state.json").exists())
         code, text = self.run_main("--precheck-only", "--convert-only")
         self.assertEqual(2, code, text)
 
@@ -695,7 +703,8 @@ class MainFlowTests(unittest.TestCase):
         code, text = self.run_main("--convert-only")
         self.assertEqual(0, code, text)
         self.assertEqual([], self.engine_calls())
-        document = json.loads((self.project / "99-output-p2p/issue-tracker/eth-lldpq.json").read_text())
+        self.assertTrue((self.output / "eth-lldpq.json").is_file())
+        document = json.loads((self.output / "eth-lldpq.json").read_text())
         self.assertEqual(1, document["row_count"])
         self.assertEqual("SUCCESS", document["rows"][0]["status"])
         code, text = self.run_main()
@@ -703,8 +712,6 @@ class MainFlowTests(unittest.TestCase):
         self.assertIn("service account key not found", text)
 
     def test_only_a_domain_without_input_is_a_configuration_error(self):
-        (self.project / "03-issue-tracker.json").write_text(json.dumps({
-            "schema": "issue-tracker-sync-v1", "spreadsheet_id": SPREADSHEET}), encoding="utf-8")
         code, text = self.run_main("--only", "ib")
         self.assertEqual(2, code, text)
         self.assertIn("no input to sync", text)
@@ -714,13 +721,44 @@ class MainFlowTests(unittest.TestCase):
         self.assertEqual(1, len(self.engine_calls()))
 
     def test_a_second_sync_of_the_same_project_waits_its_turn(self):
-        output = self.project / "99-output-p2p/issue-tracker"
-        output.mkdir()
-        with (output / ".sync.lock").open("a") as holder:
+        with (self.project / "99-output-monitor/.issue-tracker-sync.lock").open("a") as holder:
             fcntl.flock(holder, fcntl.LOCK_EX)
             code, text = self.run_main()
         self.assertEqual(75, code, text)
         self.assertEqual([], self.engine_calls())
+
+    def test_not_enabled_in_global_does_nothing(self):
+        (self.project / "01-global.yaml").write_text("schema_version: 2\n", encoding="utf-8")
+        (self.project / "cre.json").unlink()
+        code, text = self.run_main()
+        self.assertEqual(0, code, text)
+        self.assertIn("not enabled in 01-global.yaml", text)
+        self.assertEqual([], self.engine_calls())
+        self.assertFalse((self.project / "99-output-monitor/ethernet/issue-tracker").exists())
+
+    def test_the_key_named_in_global_is_the_one_passed_to_the_engine(self):
+        (self.project / "cre.json").rename(self.project / "team-sync.json")
+        (self.project / "01-global.yaml").write_text(GLOBAL_ENABLED + "      credentials: team-sync.json\n",
+                                                     encoding="utf-8")
+        code, text = self.run_main()
+        self.assertEqual(0, code, text)
+        argv = self.engine_calls()[0]["argv"]
+        self.assertEqual(str((self.project / "team-sync.json").resolve()), argv[argv.index("--credentials") + 1])
+
+    def test_output_goes_through_the_setup_link_to_the_same_project(self):
+        link = Path(self.directory.name) / "issue-tracker-99-output-monitor"
+        with mock.patch.object(self.sync, "MONITOR_LINK", link):
+            with self.assertRaises(self.sync.SyncError):
+                self.sync.monitor_output(self.project, False)
+            other = Path(self.directory.name) / "other/99-output-monitor"
+            other.mkdir(parents=True)
+            link.symlink_to(other)
+            with self.assertRaises(self.sync.SyncError):
+                self.sync.monitor_output(self.project, False)
+            link.unlink()
+            link.symlink_to(self.project / "99-output-monitor")
+            self.assertEqual(link, self.sync.monitor_output(self.project, False))
+        self.assertEqual(self.project / "99-output-monitor", self.sync.monitor_output(self.project, True))
 
     def test_project_comes_from_the_setup_link_when_not_given(self):
         anchor = Path(self.directory.name) / "monitor-01-global.yaml"

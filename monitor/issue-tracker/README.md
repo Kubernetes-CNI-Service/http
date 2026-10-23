@@ -17,46 +17,53 @@
 | IB | `99-output-monitor/infiniband/ufm-ibdiagnet/` 里最新的 `<run-id>_<node>_ibdiagnet2.tgz`，以及 `99-output-p2p/*-cvt.xlsx` | `cabletracker/ibdiagnet/generate_report.py` | `ib-cvt.json`，`--source-type cvt` |
 | ETH | `99-output-monitor/ethernet/eth-info/` 里最新的 `<YYYYMMDD-HHMM>-<env>.tar.gz`，以及 `99-output-p2p/*-lldpq.dot`（AIR 用 `*-air.dot`） | `tools/lldp-analyze-tool/analyze_lldp.py --payload-json`，再投影成 LLDPQ schema v1 | `eth-lldpq.json`，`--source-type lldpq` |
 
-## 项目文件（只放在 `DAY0-Prepare/<项目>/`，不进 git、不进镜像）
+## 启用（项目 `01-global.yaml`，owner 2026-10-23）
 
-- **`cre.json`**：Google 服务账号密钥。
-  - 权限必须是 `600`，必须是普通文件，不能是链接。
-  - 包装层只检查它的形状，并把路径交给引擎；不打印、不记录其中任何值。
-  - 该服务账号必须是目标表格的编辑者。表格里如果有受保护范围，也要把它加进这些范围的编辑者，至少包括 `Whitelist` 和 `IB Cabling` 的 `Fault ID` 列。
-- **`03-issue-tracker.json`**：
-
-```json
-{
-  "schema": "issue-tracker-sync-v1",
-  "spreadsheet_id": "<表格 URL 中 /d/ 与 /edit 之间的部分>",
-  "timezone": "Asia/Shanghai",
-  "ib":  {"enabled": true, "environment": "prod", "import_sheet": "CVT_Import_GS",   "cabling_sheet": "IB Cabling",  "include_warnings": false},
-  "eth": {"enabled": true, "environment": "prod", "import_sheet": "LLDPQ_Import_GS", "cabling_sheet": "ETH Cabling", "include_warnings": false}
-}
+```yaml
+common:
+  mgmt:
+    issue-tracker:
+      status: enabled             # 默认 disabled：采集后不整理也不同步
+      spreadsheet_id: <表格 URL 中 /d/ 与 /edit 之间的部分>
+      credentials: cre.json       # 服务账号 JSON 的文件名，放在同一项目目录（缺省 cre.json）
 ```
 
-除 `schema` 和 `spreadsheet_id` 外，其余键都可省略，省略时取上面的值。上面的表名就是标准 Issue Tracker 模版里的表名。IB 与 ETH 必须导入不同的工作表。
+- setup 和 load 用 `tools/project_contract.py` 里的同一套规则校验这个配置块：
+  - `spreadsheet_id` 必须匹配 `[A-Za-z0-9_-]{20,}`；
+  - `credentials` 只能是一个 `.json` 文件名，不能写成路径；
+  - `disabled` 时不得出现这两个键。
+- 服务账号文件（如 `cre.json`）放在 `DAY0-Prepare/<项目>/`，不进 git，不进镜像：
+  - 权限必须是 `600`，必须是普通文件，不能是链接；
+  - 包装层只检查它的形状，并把路径交给引擎，不打印、不记录其中任何值；
+  - 该服务账号必须是目标表格的编辑者。
+- 各工作表的名字固定使用标准 Issue Tracker 模版里的名字：`CVT_Import_GS`、`IB Cabling`、`LLDPQ_Import_GS`、`ETH Cabling`。
 
-**在线文档是统一的规范格式，同步只填数据，不改格式。** 换用新文档前，先用只读预检确认引擎期望的表头和文档完全一致：导入表、IB/ETH Cabling 的第 2 行、Whitelist 的版式。表名对不上时，引擎会自动新建工作表；表头对不上时，引擎会重写表头。这两种情况都算改格式，不得写入。
+**在线文档是统一的规范格式，同步只填数据，不改格式。** 详见下文「兼容引擎与文档的变化」。
 
-这两个文件不会被链接进 `monitor/`。Apache 会对外提供 `monitor/` 下的静态文件，所以包装层直接从项目目录读取它们：默认按 setup 建立的 `monitor/01-global.yaml` 链接找到项目目录，也可以用 `--project-dir` 指定。
+`01-global.yaml` 和服务账号文件都不会被链接进 `monitor/`。Apache 会对外提供 `monitor/` 下的静态文件，所以包装层直接从项目目录读取它们：默认按 setup 建立的 `monitor/01-global.yaml` 链接找到项目目录，也可以用 `--project-dir` 指定。
 
 ## 运行
 
+`cron.sh` 在每次采集、分析、页面刷新之后自动调用；也可以单独执行：
+
 ```bash
-python3 monitor/issue-tracker/issue-tracker-sync.py                  # 两个域都转换并同步
+python3 monitor/issue-tracker/issue-tracker-sync.py                  # 两个域都转换并同步（未启用时什么都不做）
 python3 monitor/issue-tracker/issue-tracker-sync.py --only eth       # 只处理 ETH
-python3 monitor/issue-tracker/issue-tracker-sync.py --convert-only   # 只生成 JSON，不联系 Google，不需要 cre.json
+python3 monitor/issue-tracker/issue-tracker-sync.py --convert-only   # 只整理数据，不联系 Google，不需要启用
+python3 monitor/issue-tracker/issue-tracker-sync.py --precheck-only  # 整理数据并做格式预检，不写表
 python3 monitor/issue-tracker/issue-tracker-sync.py --force          # 输入没变也重新同步
 ```
 
 - 引擎在顶层就导入 Google 库和 openai、httpx。运行它的解释器必须装齐这些包；可以用 `--engine-python` 指定解释器。AI、BCM、Agent 功能都没有开启，引擎只访问 Google OAuth 和 Sheets。
 - 某个域的最新输入（文件名加 sha256）、规划文件和目标表都与上次成功同步时相同，就跳过这个域。失败的运行不会被记成已同步，下次照常重试。
-- 结果写在 `<项目>/99-output-p2p/issue-tracker/`：
-  - `ib-cvt.json`、`ib-cvt.summary.json`、`eth-lldpq.json`：转换结果，每次覆盖；
-  - `state.json`：上次成功同步的输入；
-  - `issue-tracker-sync.log`：本脚本的日志，用 `tools/log_rotation.py` 轮转；
-  - `.sync.lock`：同一项目同一时间只允许一个同步。
+- 整理好的数据按网络放在项目的 `99-output-monitor/` 下（UFM 算 IB）：
+  - `infiniband/issue-tracker/`：`ib-cvt.json`、`ib-cvt.summary.json`、`state.json`
+  - `ethernet/issue-tracker/`：`eth-lldpq.json`、`state.json`
+  - 设备状态数据会命名为 `<设备类型>-switch-status.json`，见下文。
+  - `state.json` 记录上次成功同步的输入。
+- 脚本日志写在 `99-output-monitor/issue-tracker-sync.log`，用 `tools/log_rotation.py` 轮转。同一项目同一时间只允许一个同步，锁文件是 `99-output-monitor/.issue-tracker-sync.lock`。
+- 本目录下的 `99-output-monitor` 是 setup 建立的链接，指向 `DAY0-Prepare/<项目>/99-output-monitor`（登记在 `tools/project_contract.py` 的 `MONITOR_RUNTIME_MAPPINGS`）。同步脚本默认通过这个链接写数据和日志，并核对链接确实指向当前项目；用 `--project-dir` 指定项目时，直接写到该项目的 `99-output-monitor/`。
+- 所有 Issue Tracker 相关脚本都在 `monitor/issue-tracker/`；CableTracker 原项目在 `tools/cabletracker/`，只作为 `update-engine.py` 的来源。
 - 退出码：
   - 0：成功、输入未变，或没有输入；
   - 1：某个域的转换、引擎或 Google 出错；
@@ -124,4 +131,4 @@ python3 monitor/issue-tracker/issue-tracker-sync.py --precheck-only     # 只做
 
 ## 设备状态（ETH&IB Switch）
 
-当前版本的 CableTracker 只会填写 Cabling 两张表。Switch status 里有问题的设备，会按在线文档 `ETH&IB Switch` 表的列和取值规范（BasicData 的状态、Fabric，以及 Priority 下拉值）提前整理成数据文件；等 CableTracker 支持同步设备状态后，直接交给它同步。我们不自己写这张表。
+当前版本的 CableTracker 只会填写 Cabling 两张表。Switch status 里有问题的设备（生产环境的 ETH、IB、NVL 交换机，以及 UFM 服务器），会按在线文档 `ETH&IB Switch` 表的列和取值规范（BasicData 的状态、Fabric，以及 Priority 下拉值）提前整理成数据文件 `99-output-monitor/<网络>/issue-tracker/<设备类型>-switch-status.json`（`eth`、`ib`、`ufm`、`nvl`，Submitor 为 `CVT`）；等 CableTracker 支持同步设备状态后，直接交给它同步。我们不自己写这张表。

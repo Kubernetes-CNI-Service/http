@@ -11,11 +11,20 @@ formats the engine reads, then runs the engine once per domain:
        -> tools/lldp-analyze-tool/analyze_lldp.py --payload-json -> eth-lldpq.json
                                                                            (engine --source-type lldpq)
 
-Project inputs stay in DAY0-Prepare/<project>/ and are read there; they are never linked into the
-web-served tree: 03-issue-tracker.json (spreadsheet ID and sheet names) and cre.json (the Google
-service account key; only its path is passed to the engine, its content is never logged). Results,
-the state of the last successful sync and this script's log are kept in
-<project>/99-output-p2p/issue-tracker/.
+The sync is enabled per project in DAY0-Prepare/<project>/01-global.yaml (owner 2026-10-23):
+
+    common:
+      mgmt:
+        issue-tracker:
+          status: enabled
+          spreadsheet_id: <the ID in the document URL>
+          credentials: cre.json      # the Google service account key in the project directory
+
+Not enabled: nothing is done (cron.sh calls this after every collection). The key file is read in the
+project directory and never linked into the web-served tree; only its path is passed to the engine,
+its content is never logged. Prepared data and each network's sync state are kept with that network's
+monitor output, <project>/99-output-monitor/{infiniband,ethernet}/issue-tracker/ (UFM belongs to IB);
+this script's log is <project>/99-output-monitor/issue-tracker-sync.log.
 
 A domain whose newest input is unchanged since its last successful sync is skipped (use --force to
 send it again); a domain without any input is skipped with a note.
@@ -63,14 +72,17 @@ IB_POST_COLLECT = HTTP_ROOT / "infiniband/monitor/post-collect.py"
 ETH_POST_COLLECT = HTTP_ROOT / "ethernet/monitor/post-collect.py"
 # setup link -> DAY0-Prepare/<project>/01-global.yaml; its directory is the project
 PROJECT_ANCHOR = HTTP_ROOT / "monitor/01-global.yaml"
+# setup link (owner 2026-10-23) -> DAY0-Prepare/<project>/99-output-monitor: prepared data and the log
+MONITOR_LINK = BASE / "99-output-monitor"
 if str(HTTP_ROOT) not in sys.path:
     sys.path.insert(0, str(HTTP_ROOT))
 from tools.log_rotation import rotate  # noqa: E402
 
-CONFIG_NAME = "03-issue-tracker.json"
-CREDENTIALS_NAME = "cre.json"
+GLOBAL_NAME = "01-global.yaml"
 OUTPUT_SUBDIR = "issue-tracker"
-CONFIG_SCHEMA = "issue-tracker-sync-v1"
+DEFAULT_TIMEZONE = "Asia/Shanghai"
+# owner 2026-10-23: prepared data lives with each network's monitor output (UFM belongs to IB)
+NETWORK_DIRS = {"ib": "infiniband", "eth": "ethernet"}
 STATE_SCHEMA = "issue-tracker-sync-state-v1"
 LOG_NAME = "issue-tracker-sync.log"
 SPREADSHEET_ID = re.compile(r"[A-Za-z0-9_-]{20,128}")
@@ -168,52 +180,36 @@ def _boolean(value: object, label: str) -> bool:
     return value
 
 
-def load_config(path: Path) -> Config:
+def load_global_config(project: Path):
+    """(Config, credentials file name) of an enabled sync, or (None, None) when the project's
+    01-global.yaml does not enable common.mgmt.issue-tracker (owner 2026-10-23)."""
+    from tools.project_contract import (
+        issue_tracker_credentials_name, normalize_issue_tracker_policy, safe_load_global_yaml,
+    )
+    path = project / GLOBAL_NAME
     try:
-        raw = path.read_text(encoding="utf-8")
+        with path.open(encoding="utf-8") as stream:
+            document = safe_load_global_yaml(stream)
     except FileNotFoundError:
-        raise SyncError(f"project configuration not found: {path} (see monitor/issue-tracker/README.md)") from None
-    except OSError as exc:
-        raise SyncError(f"cannot read {path}: {exc.strerror or exc}") from None
+        raise SyncError(f"{path} is missing") from None
+    except Exception as exc:  # YAML errors carry no secret
+        raise SyncError(f"{path.name} cannot be read: {exc}") from None
     try:
-        data = json.loads(raw)
+        policy = normalize_issue_tracker_policy(document)
+        credentials = issue_tracker_credentials_name(document)
     except ValueError as exc:
-        raise SyncError(f"{path.name} is not valid JSON: {exc}") from None
-    if not isinstance(data, dict) or data.get("schema") != CONFIG_SCHEMA:
-        raise SyncError(f'{path.name} must be a JSON object with "schema": "{CONFIG_SCHEMA}"')
-    unknown = sorted(set(data) - {"schema", "spreadsheet_id", "timezone", *DOMAINS})
-    if unknown:
-        raise SyncError(f"{path.name} has unknown keys: {', '.join(unknown)}")
-    spreadsheet_id = data.get("spreadsheet_id")
-    if not isinstance(spreadsheet_id, str) or not SPREADSHEET_ID.fullmatch(spreadsheet_id):
-        raise SyncError(f"{path.name}: spreadsheet_id must be the ID part of the Google Sheets URL")
-    timezone = _string(data.get("timezone", "Asia/Shanghai"), f"{path.name}: timezone")
-    domains = {}
-    for name in DOMAINS:
-        section = data.get(name, {})
-        if not isinstance(section, dict):
-            raise SyncError(f"{path.name}: {name} must be an object")
-        unknown = sorted(set(section) - DOMAIN_KEYS)
-        if unknown:
-            raise SyncError(f"{path.name}: {name} has unknown keys: {', '.join(unknown)}")
-        environment = section.get("environment", "prod")
-        if environment not in ("prod", "air"):
-            raise SyncError(f"{path.name}: {name}.environment must be prod or air")
-        domains[name] = Domain(
-            name=name,
-            enabled=_boolean(section.get("enabled", True), f"{path.name}: {name}.enabled"),
-            environment=environment,
-            import_sheet=_string(section.get("import_sheet", DOMAIN_DEFAULTS[name]["import_sheet"]),
-                                 f"{path.name}: {name}.import_sheet"),
-            cabling_sheet=_string(section.get("cabling_sheet", DOMAIN_DEFAULTS[name]["cabling_sheet"]),
-                                  f"{path.name}: {name}.cabling_sheet"),
-            include_warnings=_boolean(section.get("include_warnings", False),
-                                      f"{path.name}: {name}.include_warnings"),
-        )
-    # the engine keeps one import worksheet per source; two sources in one sheet would overwrite
-    if domains["ib"].import_sheet.casefold() == domains["eth"].import_sheet.casefold():
-        raise SyncError(f"{path.name}: ib and eth must import into different sheets")
-    return Config(spreadsheet_id, timezone, domains)
+        raise SyncError(f"{path.name}: {exc}") from None
+    if policy["status"] != "enabled":
+        return None, None
+    return default_config(policy["spreadsheet_id"]), credentials
+
+
+def default_config(spreadsheet_id: str) -> Config:
+    """Worksheet names of the standard Issue Tracker template; production data only."""
+    return Config(spreadsheet_id, DEFAULT_TIMEZONE, {
+        name: Domain(name, True, "prod", DOMAIN_DEFAULTS[name]["import_sheet"],
+                     DOMAIN_DEFAULTS[name]["cabling_sheet"], False)
+        for name in DOMAINS})
 
 
 def check_credentials(path: Path) -> None:
@@ -250,6 +246,21 @@ def project_directory(explicit: Path | None) -> Path:
     if not directory.is_dir():
         raise SyncError(f"project directory does not exist: {directory}")
     return directory
+
+
+def monitor_output(project: Path, explicit: bool) -> Path:
+    """Where prepared data and the log go: this directory's setup link to the project's
+    99-output-monitor, or that directory itself when --project-dir names the project."""
+    target = project / "99-output-monitor"
+    if explicit:
+        if not target.is_dir():
+            raise SyncError(f"{target} is missing; rerun DAY0-Prepare/01-a-setup.py")
+        return target
+    if not MONITOR_LINK.is_dir():
+        raise SyncError(f"{MONITOR_LINK} is missing; rerun DAY0-Prepare/01-a-setup.py")
+    if MONITOR_LINK.resolve() != target.resolve():
+        raise SyncError(f"{MONITOR_LINK} does not point to {target}; rerun DAY0-Prepare/01-a-setup.py")
+    return MONITOR_LINK
 
 
 def _load_module(path: Path, name: str):
@@ -498,7 +509,7 @@ def format_gate(python: str, command: list, credentials: Path, work: Path, log: 
         for change in report.get("changes", []):
             log(f"  format change refused: {change}")
         raise SyncError("the online document does not match the engine's format; nothing was written "
-                        "(fix the document or the sheet names in 03-issue-tracker.json)")
+                        "(the document must follow the standard Issue Tracker template)")
     if completed.returncode != 0 or report.get("ok") is not True:
         for line in (completed.stderr or "").splitlines()[-5:]:
             log(f"  [format_precheck.py stderr] {line}")
@@ -548,7 +559,7 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def handle_domain(domain: Domain, *, project: Path, output: Path, config: Config, credentials: Path,
+def handle_domain(domain: Domain, *, project: Path, output: Path, config: Config, credentials,
                   state: dict, args: argparse.Namespace, log: Log) -> str:
     """Return 'synced', 'converted', 'prechecked', 'unchanged' or 'no-input'; raise StepError on failure."""
     p2p = project / "99-output-p2p"
@@ -615,19 +626,24 @@ def main(argv: Iterable[str] | None = None) -> int:
         if args.convert_only and args.precheck_only:
             raise SyncError("--convert-only and --precheck-only exclude each other")
         project = project_directory(args.project_dir)
-        config = load_config(project / CONFIG_NAME)
-        credentials = project / CREDENTIALS_NAME
+        config, credentials_name = load_global_config(project)
+        if config is None:
+            if not args.convert_only:
+                log("online Issue Tracker sync is not enabled in 01-global.yaml "
+                    "(common.mgmt.issue-tracker); nothing to do")
+                return 0
+            config = default_config("")
+        credentials = project / credentials_name if credentials_name else None
         if not args.convert_only:
             check_credentials(credentials)
+        monitor = monitor_output(project, args.project_dir is not None)
         if not (project / "99-output-p2p").is_dir():
             raise SyncError(f"{project / '99-output-p2p'} is missing; rerun DAY0-Prepare/01-a-setup.py")
-        output = project / "99-output-p2p" / OUTPUT_SUBDIR
-        output.mkdir(mode=0o750, exist_ok=True)
     except SyncError as exc:
         log(f"ERROR: {exc}")
         return 2
-    log.attach(output / LOG_NAME)
-    lock = (output / ".sync.lock").open("a")
+    log.attach(monitor / LOG_NAME)
+    lock = (monitor / ".issue-tracker-sync.lock").open("a")
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
@@ -635,16 +651,15 @@ def main(argv: Iterable[str] | None = None) -> int:
         lock.close()
         return 75
     try:
-        state_path = output / "state.json"
-        state = read_state(state_path)
         selected = [config.domains[name] for name in DOMAINS
                     if (args.only in (None, name)) and config.domains[name].enabled]
-        if not selected:
-            log("no enabled domain selected; nothing to do")
-            return 0
         failed = False
         for domain in selected:
+            output = monitor / NETWORK_DIRS[domain.name] / OUTPUT_SUBDIR
             try:
+                output.mkdir(mode=0o750, parents=True, exist_ok=True)
+                state_path = output / "state.json"
+                state = read_state(state_path)
                 outcome = handle_domain(domain, project=project, output=output, config=config,
                                         credentials=credentials, state=state, args=args, log=log)
             except SyncError as exc:
@@ -658,8 +673,7 @@ def main(argv: Iterable[str] | None = None) -> int:
                 log(f"ERROR: {domain.name.upper()}: no input to sync")
                 return 2
             if outcome == "synced":
-                _write_json({"schema": STATE_SCHEMA, **{k: v for k, v in state.items() if k in DOMAINS}},
-                            state_path)
+                _write_json({"schema": STATE_SCHEMA, domain.name: state[domain.name]}, state_path)
                 log(f"{domain.name.upper()}: sync complete")
         return 1 if failed else 0
     finally:

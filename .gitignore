@@ -208,6 +208,7 @@ core.*
 /monitor/01-global.yaml
 /monitor/02-devices_config.csv
 /monitor/99-output-p2p
+/monitor/issue-tracker/99-output-monitor
 /monitor/ethernet
 /monitor/infiniband
 /monitor/nvlink
