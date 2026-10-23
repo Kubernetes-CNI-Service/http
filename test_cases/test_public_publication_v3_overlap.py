@@ -588,3 +588,108 @@ class PublicPublicationV3OverlapWorkflowTests(unittest.TestCase):
                         self.assertEqual(expected, publication._verified_commit_records(repository, head))
                     self.assertTrue(singles)
                     self.assertIsNone(publication._C09_SCOPE.get())
+
+    # ---- C09 guards added on landing: the chain hint is advisory, and the dispatcher hands out
+    # exactly the tuples of the unchanged single-object primitive ----
+    def test_failed_or_untrusted_first_parent_hint_leaves_single_reads_and_the_raw_chain(self):
+        with tempfile.TemporaryDirectory(prefix="q01-v3-chain-no-hint-") as directory:
+            repository = Path(directory) / "repository"
+            repository.mkdir()
+            self._git(repository, "init", "-q")
+            commits = []
+            for index in range(12):
+                (repository / "n.txt").write_bytes(f"{index}\n".encode())
+                self._git(repository, "add", "-A")
+                self._git(repository, "-c", "commit.gpgsign=false", "commit", "-qm", f"c{index}")
+                commits.append(self._git(repository, "rev-parse", "HEAD").decode().strip())
+            literal_chain = tuple(reversed(commits[2:]))
+            hint_outcomes = {
+                "oserror": OSError("injected"),
+                "timeout": subprocess.TimeoutExpired("git rev-list", 1),
+                "nonzero-exit": (128, "", "fatal: injected\n"),
+                "foreign-or-malformed-ids": (0,"not-an-object-id\n" + "g" * 40 + "\n" + "f" * 40 + "\n", ""),
+                "anchor-first": (0, "".join(f"{commit}\n" for commit in (commits[1], *literal_chain)), ""),
+            }
+            real_run = subprocess.run
+            for name, outcome in hint_outcomes.items():
+                with self.subTest(hint=name):
+                    hints, runs = [], []
+
+                    def scripted(*args, **kwargs):
+                        argv = tuple(os.fspath(value) for value in (args[0] if args else kwargs["args"]))
+                        if "rev-list" in argv:
+                            hints.append((argv, kwargs))
+                            if isinstance(outcome, BaseException):
+                                raise outcome
+                            returncode, stdout, stderr = outcome
+                            return subprocess.CompletedProcess(argv, returncode, stdout, stderr)
+                        if argv[-2:] == ("cat-file", "--batch"):
+                            runs.append(kwargs.get("input"))
+                        return real_run(*args, **kwargs)
+
+                    with mock.patch.object(publication, "S_COMMIT", commits[0]), mock.patch.object(
+                        subprocess, "run", side_effect=scripted,
+                    ):
+                        self.assertEqual(
+                            literal_chain,
+                            publication._raw_v3_first_parent_chain(repository, commits[-1], commits[1]),
+                        )
+                    # One bounded, closed, hardened hint process per chain walk.
+                    self.assertEqual(1, len(hints))
+                    argv, kwargs = hints[0]
+                    self.assertEqual(subprocess.DEVNULL, kwargs.get("stdin"))
+                    self.assertEqual(publication.RAW_OBJECT_TIMEOUT_SECONDS, kwargs.get("timeout"))
+                    self.assertEqual(publication.GIT_BINARY, argv[0])
+                    self.assertIn("--no-replace-objects", argv)
+                    self.assertIn(f"core.hooksPath={os.devnull}", argv)
+                    self.assertIn("--first-parent", argv)
+                    bounds = [int(value.split("=", 1)[1]) for value in argv if value.startswith("--max-count=")]
+                    self.assertEqual(1, len(bounds))
+                    self.assertLessEqual(bounds[0], publication.P_V3_FIRST_PARENT_LIMIT + 1)
+                    environment = kwargs.get("env")
+                    self.assertEqual(publication.SYSTEM_EXECUTABLE_PATH, environment["PATH"])
+                    self.assertEqual([], [key for key in environment if key.startswith(("LD_", "DYLD_"))])
+                    self.assertEqual(
+                        {"GIT_CONFIG": os.devnull, "GIT_CONFIG_GLOBAL": os.devnull,
+                         "GIT_CONFIG_NOSYSTEM": "1", "GIT_NO_REPLACE_OBJECTS": "1"},
+                        {key: value for key, value in environment.items() if key.startswith("GIT_")},
+                    )
+                    # Failed, foreign/malformed or anchor-truncated hints mean no prefetch: every raw
+                    # commit read is the original one-OID closed run, 10 for the literal 12-commit chain.
+                    self.assertEqual(10, len(runs))
+                    self.assertEqual([1] * 10, [payload.count(b"\n") for payload in runs])
+                    requested = b"".join(runs)
+                    self.assertNotIn(commits[1].encode(), requested)
+                    self.assertNotIn(commits[0].encode(), requested)
+                    self.assertIsNone(publication._C09_SCOPE.get())
+
+    def test_dispatcher_returns_exactly_the_unchanged_single_primitive_tuples(self):
+        with tempfile.TemporaryDirectory(prefix="q01-v3-batch-identity-") as directory:
+            repository, head, expected = self._literal_tree_repository(directory)
+            dispatcher = publication._read_raw_git_object
+            served = []
+
+            def recorded(repo, object_id, kind):
+                result = dispatcher(repo, object_id, kind)
+                served.append(((object_id, kind), result))
+                return result
+
+            runs, observe = self._observed_cat_file_runs()
+            with mock.patch.object(publication, "_read_raw_git_object", side_effect=recorded), mock.patch.object(
+                subprocess, "run", side_effect=observe,
+            ):
+                self.assertEqual(expected, publication._verified_commit_records(repository, head))
+            # 1 commit + 1 root + 3 entries + 43 grandchildren, each requested once.
+            self.assertEqual(48, len(served))
+            self.assertEqual(48, len({key for key, _result in served}))
+            literal_blobs = {record[2]: record[3] for record in expected.values()}
+            for (object_id, kind), (echoed, served_kind, size, payload) in served:
+                self.assertEqual((object_id, kind, len(payload)), (echoed, served_kind, size))
+                canonical = kind.encode("ascii") + b" %d\0" % len(payload) + payload
+                self.assertEqual(object_id, hashlib.sha1(canonical).hexdigest())
+                if kind == "blob":
+                    self.assertEqual(literal_blobs[object_id], payload)
+            # Outside a walk the name is the original one-OID read; the walk's tuples must match it.
+            for (object_id, kind), result in served:
+                self.assertEqual(result, publication._read_raw_git_object(repository, object_id, kind))
+            self.assertTrue(any(run["input"].count(b"\n") > 1 for run in runs))
