@@ -2546,6 +2546,9 @@ def worker_spec(name: str, settings: Settings) -> WorkerSpec:
             os.fspath(settings.project_dir),
             "--watch", str(settings.monitor_interval),
             "--generate-html",
+            # owner 2026-10-23: a completed type asks the switch-collection worker
+            # (the container's only collection writer) for one collection cycle.
+            "--request-collection-on-complete",
             "--known-hosts", os.fspath(status / "ztp-known-hosts"),
             "--dhcp-leases", os.fspath(settings.dhcp_leases),
             "--scope", settings.scope,

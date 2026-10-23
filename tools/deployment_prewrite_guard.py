@@ -831,7 +831,7 @@ def _native_monitor_project_from_argv(cmdline, expected_script):
     }
     flag_options = {
         "--offline", "--no-ssh", "--air", "--prod", "--generate-html",
-        "--collect-on-complete", "--exit-on-complete",
+        "--collect-on-complete", "--exit-on-complete", "--request-collection-on-complete",
     }
     environment_options = {"--scope", "--type", "--air", "--prod"}
     seen = set()

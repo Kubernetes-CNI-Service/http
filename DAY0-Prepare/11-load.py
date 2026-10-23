@@ -6672,6 +6672,34 @@ def _terminate_failed_ztp_monitor_start(process: subprocess.Popen) -> None:
         pass
 
 
+def reset_completion_handoff_state(*, dry_run: bool = False) -> None:
+    """Owner 2026-10-23: after every successful load the monitor collects again.
+
+    12-ztp-monitor.py remembers the ZTP completion rounds it already handed to
+    collection (.ztp-completion-handoff.json), so a monitor restart alone never
+    collects twice. A new load forgets them: the restarted monitor then collects,
+    analyses and refreshes the page for every type that is, or becomes, fully
+    provisioned (native: cron.sh; Docker: one switch-collection worker cycle).
+    """
+    status_dir, _pid_file, _log_file = _ztp_monitor_paths()
+    state = status_dir / ".ztp-completion-handoff.json"
+    if dry_run:
+        print(f"[DRY] 清除 ZTP→Switch 交接签名：{state}")
+        return
+    try:
+        metadata = os.lstat(state)
+    except FileNotFoundError:
+        return
+    if not stat.S_ISREG(metadata.st_mode):
+        warn(f"ZTP→Switch 交接签名不是普通文件，未处理：{state}")
+        return
+    try:
+        state.unlink()
+    except PermissionError:
+        run(sudo_command("rm", "-f", "--", str(state)))
+    info("已清除 ZTP→Switch 交接签名：各类型达到 100% 时会重新采集、分析并刷新页面")
+
+
 def start_ztp_monitor(
     project: Path, *, interval: int = DEFAULT_ZTP_MONITOR_INTERVAL,
     scope: str = "all",
@@ -8756,6 +8784,7 @@ def main(argv: list[str] | None = None) -> int:
 
         if local_services_supported:
             section("ZTP 状态后台监控")
+            reset_completion_handoff_state(dry_run=args.dry_run)
             if not (http_service_available and dhcp_service_available):
                 warn("当前 runtime plan 不同时具备 HTTP endpoint 与 DHCP listener，不启动 ZTP 后台监控")
             else:

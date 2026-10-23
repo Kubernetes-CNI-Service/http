@@ -108,6 +108,131 @@ class MonitorWatchRuntimeWorkflowTests(unittest.TestCase):
                 self.assertIsNone(parsed.dhcp_log)
         self.assertTrue(native.collect_on_complete)
         self.assertFalse(docker.collect_on_complete)
+        # owner 2026-10-23: under Docker a completed type asks the collection worker instead.
+        self.assertFalse(native.request_collection_on_complete)
+        self.assertTrue(docker.request_collection_on_complete)
+
+    def _worker(self, status_dir: Path):
+        worker = load_script("ztp_monitor_watch_workflow_worker", ROOT / "monitor/switch-collection-worker.py")
+        patches = [mock.patch.object(worker, "STATUS_DIR", status_dir),
+                   mock.patch.object(worker, "REQUEST_FILE", status_dir / "switch-collection.request"),
+                   mock.patch.object(worker, "STATUS_FILE", status_dir / "switch-collection.status.json")]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+        (status_dir / "switch-collection.request").write_text("idle\n", encoding="utf-8")
+        return worker
+
+    def _serve_one_request(self, worker, outcome: str):
+        import threading
+        import time
+
+        def serve():
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline and worker.claim_request() != "collect":
+                time.sleep(0.02)
+            started = worker.timestamp()
+            worker.write_status("queued", scope="prod", queued_at=started)
+            time.sleep(0.1)
+            worker.write_status("collecting", scope="prod", started_at=started)
+            time.sleep(0.2)
+            if outcome == "success":
+                worker.write_status("success", scope="prod", started_at=started, finished_at=worker.timestamp())
+            else:
+                worker.write_status("failed", scope="prod", started_at=started, finished_at=worker.timestamp(),
+                                    reason="ETH analysis failed")
+        thread = threading.Thread(target=serve, daemon=True)
+        thread.start()
+        return thread
+
+    def test_docker_handoff_asks_the_real_worker_and_waits_for_its_cycle(self):
+        import time
+        report = {"handoff_group": "prod-infiniband", "scope": "prod", "devices": [{"type": "ib"}]}
+        quick = lambda _seconds: time.sleep(0.05)  # noqa: E731
+        with tempfile.TemporaryDirectory() as directory:
+            status_dir = Path(directory)
+            worker = self._worker(status_dir)
+            (status_dir / "switch-collection.status.json").write_text(
+                json.dumps({"state": "success", "started_at": "2026-01-01T00:00:00+00:00"}), encoding="utf-8")
+            os.utime(status_dir / "switch-collection.status.json", (1, 1))       # an old cycle is not ours
+            thread = self._serve_one_request(worker, "success")
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertTrue(MONITOR.request_worker_collection(report, 60, status_dir=status_dir, sleep=quick))
+            thread.join(5)
+            self.assertIn("已请求采集 worker 运行一轮", output.getvalue())
+            self.assertEqual("idle", (status_dir / "switch-collection.request").read_text().strip(),
+                             "the worker consumed the request")
+
+            thread = self._serve_one_request(worker, "failed")
+            with redirect_stdout(io.StringIO()), mock.patch("sys.stderr", io.StringIO()) as errors:
+                self.assertFalse(MONITOR.request_worker_collection(report, 60, status_dir=status_dir, sleep=quick))
+            thread.join(5)
+            self.assertIn("ETH analysis failed", errors.getvalue())
+
+            os.utime(status_dir / "switch-collection.status.json", (1, 1))       # the failed cycle is old now
+            clock = iter(range(10 ** 7, 10 ** 7 + 10_000, 30))
+            with redirect_stdout(io.StringIO()), mock.patch("sys.stderr", io.StringIO()) as errors:
+                self.assertFalse(MONITOR.request_worker_collection(
+                    report, 60, status_dir=status_dir, sleep=lambda _s: None, clock=lambda: float(next(clock))))
+            self.assertIn("请求保留", errors.getvalue())
+            self.assertEqual("collect", (status_dir / "switch-collection.request").read_text().strip(),
+                             "no worker answered: the request stays for when it is back")
+
+    def test_worker_handoff_replaces_cron_and_persists_only_after_success(self):
+        report = {"scope": "prod", "devices": [
+            {"type": "ib", "hostname": "ib01", "progress": 100, "status": "done"}]}
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            project = base / "site-a"
+            project.mkdir()
+            state = base / ".ztp-completion-handoff.json"
+            groups = {"prod-infiniband": dict(report, handoff_group="prod-infiniband")}
+            with mock.patch.object(MONITOR, "ready_completion_handoff_reports", return_value=groups), \
+                    mock.patch.object(MONITOR, "completion_signature", return_value=(("ib01", "a", "b"),)), \
+                    mock.patch.object(MONITOR, "run_completion_handoff_with_gate") as cron, \
+                    mock.patch.object(MONITOR, "request_worker_collection", side_effect=[False, True]) as ask, \
+                    redirect_stdout(io.StringIO()):
+                done, retry, after = MONITOR.process_ready_completion_handoffs(
+                    report, Path("/nonexistent"), 60, project, state, {}, {}, {}, 30,
+                    status_dir=base, via_worker=True, monotonic=lambda: 0.0)
+                self.assertEqual(({}, ["prod-infiniband"]), (done, list(retry)))
+                self.assertFalse(state.exists(), "nothing is remembered after a failed request")
+                done, retry, after = MONITOR.process_ready_completion_handoffs(
+                    report, Path("/nonexistent"), 60, project, state, done, {}, {}, 30,
+                    status_dir=base, via_worker=True, monotonic=lambda: 0.0)
+            cron.assert_not_called()
+            self.assertEqual(2, ask.call_count)
+            self.assertEqual(["prod-infiniband"], list(done))
+            self.assertEqual(done, MONITOR.load_completion_handoff_signatures(state, project))
+
+    def test_a_successful_load_forgets_the_handoff_signatures(self):
+        with tempfile.TemporaryDirectory() as directory:
+            status_dir = Path(directory)
+            state = status_dir / ".ztp-completion-handoff.json"
+            paths = (status_dir, status_dir / "ztp-monitor.pid", status_dir / "ztp-monitor.log")
+            with mock.patch.object(LOAD, "_ztp_monitor_paths", return_value=paths):
+                LOAD.reset_completion_handoff_state()                         # nothing to forget
+                state.write_text("{}", encoding="utf-8")
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    LOAD.reset_completion_handoff_state(dry_run=True)
+                self.assertTrue(state.exists(), "dry run only prints")
+                self.assertIn("[DRY] 清除 ZTP→Switch 交接签名", output.getvalue())
+                with redirect_stdout(io.StringIO()):
+                    LOAD.reset_completion_handoff_state()
+                self.assertFalse(state.exists())
+                target = status_dir / "elsewhere"
+                target.write_text("keep", encoding="utf-8")
+                state.symlink_to(target)
+                with redirect_stdout(io.StringIO()), mock.patch("sys.stderr", io.StringIO()):
+                    LOAD.reset_completion_handoff_state()
+                self.assertTrue(state.is_symlink() and target.read_text() == "keep", "links are never followed")
+        source = (ROOT / "DAY0-Prepare/11-load.py").read_text(encoding="utf-8")
+        section = source.index('section("ZTP 状态后台监控")')
+        reset = source.index("reset_completion_handoff_state(dry_run=args.dry_run)", section)
+        self.assertLess(reset, source.index("start_ztp_monitor(", section),
+                        "forgotten before the monitor starts, so the native monitor cannot restore them")
 
     def test_both_launch_paths_recover_transient_inside_one_main_call(self):
         with tempfile.TemporaryDirectory() as directory:

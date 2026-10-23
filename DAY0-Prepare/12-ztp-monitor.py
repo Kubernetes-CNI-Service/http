@@ -6045,6 +6045,79 @@ def run_completion_handoff_with_cooldown(
     )
 
 
+WORKER_REQUEST_NAME = "switch-collection.request"
+WORKER_STATUS_NAME = "switch-collection.status.json"
+WORKER_POLL_SECONDS = 2.0
+
+
+def request_worker_collection(
+    report: dict[str, Any], timeout: int, *,
+    status_dir: Path = SWITCH_COLLECTION_STATUS_DIR,
+    clock=time.time, sleep=time.sleep,
+) -> bool:
+    """Hand a completed type to the switch-collection worker (owner 2026-10-23).
+
+    Under Docker the worker is the only collection writer, so instead of running
+    cron.sh this writes the same request as the page's collect button and waits for
+    the worker: True only for a cycle that started after the request and succeeded
+    (collection, LLDP/IB analysis, page). Busy, failed or timed out returns False and
+    the caller's per-type retry asks again later; a still-pending request is kept.
+    """
+    import fcntl
+    group = str(report.get("handoff_group") or "当前类型")
+    request, status = status_dir / WORKER_REQUEST_NAME, status_dir / WORKER_STATUS_NAME
+    asked_at = clock()
+    flags = os.O_RDWR | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(request, flags)
+    except OSError as exc:
+        log(f"[WARN] 无法向采集 worker 发起请求（{request}）：{exc}", file=sys.stderr)
+        return False
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1 or metadata.st_size > 64:
+            log("[WARN] 采集请求文件不是单链接普通文件，未发起请求", file=sys.stderr)
+            return False
+        if os.read(descriptor, 64).decode("ascii", "replace").strip() != "collect":
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            os.ftruncate(descriptor, 0)
+            os.write(descriptor, b"collect\n")
+            os.fsync(descriptor)
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+    log(f"[INFO] {group} 的 ZTP 设备已全部达到 100%，已请求采集 worker 运行一轮（采集、分析、刷新页面）")
+    started = False
+    deadline = asked_at + max(timeout, 60)
+    while clock() < deadline:
+        sleep(WORKER_POLL_SECONDS)
+        try:
+            item = os.stat(status, follow_symlinks=False)
+            if not stat.S_ISREG(item.st_mode) or item.st_mtime < asked_at:
+                continue
+            payload = json.loads(status.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        state = payload.get("state") if isinstance(payload, dict) else None
+        if state in ("queued", "collecting"):
+            started = True
+        elif state == "success":
+            try:
+                began = dt.datetime.fromisoformat(str(payload.get("started_at"))).timestamp()
+            except ValueError:
+                began = 0.0
+            if started or began >= asked_at - 1:
+                log("[OK] 采集 worker 已完成本轮采集、分析和页面刷新")
+                return True
+        elif state == "failed":
+            reason = str(payload.get("reason") or "")[:500]
+            log(f"[WARN] 采集 worker 本轮失败，稍后重试：{reason}", file=sys.stderr)
+            return False
+    log("[WARN] 等待采集 worker 超时；请求保留，worker 空闲后仍会执行", file=sys.stderr)
+    return False
+
+
 def process_ready_completion_handoffs(
     report: dict[str, Any], html_script: Path, collector_timeout: int,
     project: Path, handoff_state_path: Path,
@@ -6053,6 +6126,7 @@ def process_ready_completion_handoffs(
     retry_after: dict[str, float], watch_seconds: Optional[int],
     *, monotonic=time.monotonic,
     status_dir: Path = SWITCH_COLLECTION_STATUS_DIR,
+    via_worker: bool = False,
 ) -> tuple[
     dict[str, tuple[tuple[str, str, str], ...]],
     dict[str, tuple[tuple[str, str, str], ...]],
@@ -6068,9 +6142,13 @@ def process_ready_completion_handoffs(
         if signature == handed_off_signatures.get(collection_key) or retry_deferred:
             continue
         try:
-            handoff_succeeded = run_completion_handoff_with_gate(
-                group_report, html_script, collector_timeout, project,
-                collection_key, status_dir=status_dir,
+            handoff_succeeded = (
+                request_worker_collection(group_report, collector_timeout, status_dir=status_dir)
+                if via_worker else
+                run_completion_handoff_with_gate(
+                    group_report, html_script, collector_timeout, project,
+                    collection_key, status_dir=status_dir,
+                )
             )
         except OSError as exc:
             # A permission, disk, or state-file failure belongs to this
@@ -6437,6 +6515,8 @@ def _path_within(path: Path, root: Path) -> bool:
 
 def validate_monitor_mode(args: argparse.Namespace, project: Path) -> None:
     """Separate active live observation from explicit, inert offline analysis."""
+    if getattr(args, "collect_on_complete", False) and getattr(args, "request_collection_on_complete", False):
+        raise ValueError("--collect-on-complete 与 --request-collection-on-complete 只能选一个")
     if not args.offline:
         if args.dhcp_log is not None or args.air_json is not None:
             raise ValueError("自定义 DHCP/AIR 证据必须使用 --offline")
@@ -6506,7 +6586,7 @@ def completion_handoff_requested(args: argparse.Namespace) -> bool:
     """Support older embedders while exposing one canonical CLI destination."""
     return bool(getattr(
         args, "collect_on_complete", getattr(args, "exit_on_complete", False),
-    ))
+    ) or getattr(args, "request_collection_on_complete", False))
 
 
 def _positive_minutes(value: str) -> int:
@@ -6589,6 +6669,12 @@ def parser() -> argparse.ArgumentParser:
         "--exit-on-complete", action="store_true",
         dest="collect_on_complete",
         help="废弃别名；等价于 --collect-on-complete",
+    )
+    result.add_argument(
+        "--request-collection-on-complete", action="store_true",
+        dest="request_collection_on_complete",
+        help=("每个采集类型各自全部达到 100%% 后，请求 switch-collection worker 运行一轮"
+              "（Docker 用；worker 负责采集、分析和刷新页面），等待结果，失败仅重试该类型"),
     )
     result.add_argument(
         "--collector-timeout", type=int, default=1200, metavar="SECONDS",
@@ -6798,6 +6884,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                     report, args.html_script, max(args.collector_timeout, 60),
                     project, handoff_state_path, handed_off_signatures,
                     handoff_retry_signatures, handoff_retry_after, args.watch,
+                    via_worker=bool(getattr(args, "request_collection_on_complete", False)),
                 )
             if not args.watch:
                 return 0

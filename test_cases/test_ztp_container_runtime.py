@@ -259,6 +259,21 @@ REQUIRED_PUBLISHED_LINKS = {
         "../../DAY0-Prepare/{project}/99-output-monitor/infiniband/cronjob.log",
         "99-output-monitor/infiniband/cronjob.log", "file",
     ),
+    # UFM lane of the IB collector (2026-10-23 integration, UFM-MONITOR.md 14.3).
+    "infiniband/monitor/ufm-info": (
+        "../../DAY0-Prepare/{project}/99-output-monitor/infiniband/ufm-info",
+        "99-output-monitor/infiniband/ufm-info", "dir",
+    ),
+    "infiniband/monitor/ufm-ibdiagnet": (
+        "../../DAY0-Prepare/{project}/99-output-monitor/infiniband/ufm-ibdiagnet",
+        "99-output-monitor/infiniband/ufm-ibdiagnet", "dir",
+    ),
+    "infiniband/monitor/01-global.yaml": ("../01-global.yaml", "01-global.yaml", "file"),
+    "infiniband/monitor/99-output-p2p": (
+        "../../DAY0-Prepare/{project}/99-output-p2p", "99-output-p2p", "dir",
+    ),
+    # IBSW 2.25 upgrade inventory alias (NETWORK_INVENTORY_LINKS).
+    "infiniband/bringup/xdr-upgrade/ib.csv": ("../../ib.csv", "02-devices_config.csv", "file"),
     "nvlink/monitor/nvsw-info": (
         "../../DAY0-Prepare/{project}/99-output-monitor/nvlink/nvsw-info",
         "99-output-monitor/nvlink/nvsw-info", "dir",
@@ -6826,6 +6841,8 @@ class ActivationContractTests(QuietContractTest):
                     dynamic_file.symlink_to(workbook.name)
                 else:
                     dynamic_file.write_text("{}\n", encoding="utf-8")
+            # setup's own bridge (not a published link) that infiniband/monitor/01-global.yaml goes through
+            (http_root / "infiniband/01-global.yaml").symlink_to("../DAY0-Prepare/site-a/01-global.yaml")
             settings = activate.Settings(
                 project_name="site-a", scope="air", http_root=http_root,
             )

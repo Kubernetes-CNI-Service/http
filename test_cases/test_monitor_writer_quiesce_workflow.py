@@ -681,7 +681,8 @@ def _source_bound_load_report_path(
     """
     # 2026-10-23 fixlist #9: 11-load.py changed with the UFM integration (was d9c67b110d7a…); _load_report_structural_path holds on the current file.
     reviewed = (
-        (load_tree, "e3ef9185a8f0f10f64b3cfad79280e02700487795b16dca707d41bffbf92297b"),
+        # 2026-10-23 owner load->collection handoff: 11-load.py changed (was e3ef9185a8f0…); its structural path still holds.
+        (load_tree, "39c48c3c879164cc08f66546ef59e86c0b3dffea0f274eac7ce20177815590ee"),
         (report_tree, "d2b79619b2ace8c4ea96edcf0ad599001d8f78af6a569168bc4971770e0bca05"),
     )
     if any(_reviewed_source_ast_sha256(tree)
@@ -911,7 +912,8 @@ def _source_bound_feedback_recovery_path(
     """Accept this bounded path only in both exactly reviewed source ASTs."""
     reviewed = (
         (feedback_tree, "7e472596fc86a656465a8ba1361a553486decf71e996d9d71e891744e6f47216"),
-        (runtime_tree, "0d11ab1cf74048380672b9bc30070040913d89ceddd7d54cae47e63f98044ed2"),
+        # 2026-10-23 owner load->collection handoff: ztp_service_runtime.py changed (was 0d11ab1cf740…); its structural path still holds.
+        (runtime_tree, "f40fa82b425085c5859e9dc8d3b47230d958a3781744d048f79fabda6db8a3eb"),
     )
     if any(_reviewed_source_ast_sha256(tree)
            != expected for tree, expected in reviewed):

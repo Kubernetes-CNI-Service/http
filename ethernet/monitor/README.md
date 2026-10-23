@@ -92,11 +92,42 @@
 bash cron.sh
 ```
 
-建议由 cron 显式调用 Bash：
+setup 和 load 都**不安装 crontab**。周期采集由页面上的「持续采集」控制（switch-collection worker，
+10–240 分钟一轮，worker 或 load 重启后需要重新开启）。需要额外的 crontab 时手工添加，例如：
 
 ```cron
 0 * * * * bash /var/www/html/ethernet/monitor/cron.sh >> /var/www/html/ethernet/monitor/cronjob.log 2>&1
 ```
+
+### load 之后的自动链路（owner 2026-10-23）
+
+`DAY0-Prepare/11-load.py` 成功后，ZTP 后台监控（`12-ztp-monitor.py`）每轮刷新 `monitor.html`。
+每个采集类型（air-ethernet、prod-ethernet、prod-infiniband、prod-nvlink）的 ZTP 设备全部达到 100% 时，
+监控自动交接一次「采集 → 分析 → 页面」：
+
+| 运行环境 | 交接方式 | 包含 |
+|---|---|---|
+| 本机（native） | `--collect-on-complete`：直接运行对应的 `cron.sh` | 采集；ETH 由 `post-collect.py` 做 LLDP 分析；IB 由 `infiniband/monitor/post-collect.py` 做链路校验（需要 CVT 和 UFM）；刷新页面 |
+| Docker | `--request-collection-on-complete`：向 switch-collection worker 写一个与页面「采集」按钮相同的请求，并等待这一轮结束 | worker 按自己的 scope 跑全部通道（ETH、IB 加 UFM、NVL），完成分析、刷新页面、Issue Tracker 发布 |
+
+- 交接成功的完成轮次会被记住，单独重启监控不会重复采集。**每次 load 成功都会清除这份记录**，
+  所以重新 load 之后，已经达到 100% 的类型会立即再采集一轮，未达到的在达到时采集。
+- 交接失败（采集出错、worker 正忙、超时）只重试该类型；Docker 下未被处理的请求保留在请求文件中。
+- IB 链路校验需要 load 生成的 CVT（`99-output-p2p/` 下与当前 `p2p.xlsx` 同名的 `<名>-cvt.xlsx`，非 air 且含 `ib` 设备时生成）和
+  `servers.ufm.vip`；缺少时采集照常，分析记为 UFM 警告。
+
+### 单独运行每一步
+
+| 步骤 | 命令 | 说明 |
+|---|---|---|
+| 采集 | `bash ethernet/monitor/cron.sh --air\|--prod`；`bash infiniband/monitor/cron.sh [--type ib\|server_ufm]`；`bash nvlink/monitor/cron.sh` | 会连接交换机、修改其 `authorized_keys`；`--wait-lock` 等待其他采集 |
+| ETH 分析 | `python3 ethernet/monitor/post-collect.py --archive <归档> --environment air\|prod` | LLDP 分析后刷新页面 |
+| IB 分析 | `python3 infiniband/monitor/post-collect.py [--archive <ibdiagnet 或 iblinkinfo 文件>]` | 不带参数时取最新的一份 |
+| CVT | `python3 ztp/config/nvos/template/P2P/p2p-to-validation.py` | load 时自动生成；可单独重建 |
+| 归档清理 | `python3 tools/collection_archive.py [--retain-days N] <目录>...` | cron.sh 每轮末尾自动运行 |
+| 页面 | `python3 monitor/generate-monitor-html.py [--type all\|prod\|air]` | |
+| ZTP 状态（只读） | `python3 DAY0-Prepare/12-ztp-monitor.py <项目> --offline --no-ssh` | 不连设备 |
+| 页面按钮等价操作 | 向 `monitor/status/switch-collection.request` 写入 `collect` | worker 认领后跑一轮 |
 
 首次在管理服务器启用 Ethernet 验证前，安装报表生成器依赖（infra 通常已完成）：
 
