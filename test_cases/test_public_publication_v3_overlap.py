@@ -606,9 +606,13 @@ class PublicPublicationV3OverlapWorkflowTests(unittest.TestCase):
             hint_outcomes = {
                 "oserror": OSError("injected"),
                 "timeout": subprocess.TimeoutExpired("git rev-list", 1),
-                "nonzero-exit": (128, "", "fatal: injected\n"),
-                "foreign-or-malformed-ids": (0,"not-an-object-id\n" + "g" * 40 + "\n" + "f" * 40 + "\n", ""),
-                "anchor-first": (0, "".join(f"{commit}\n" for commit in (commits[1], *literal_chain)), ""),
+                # rc=0 outputs are bytes, as the hardened hint reads them with text=False; str outputs would
+                # make the hint raise and so never exercise the planning loop (fourth round).
+                "nonzero-exit": (128, b"", b"fatal: injected\n"),
+                "foreign-or-malformed-ids": (0, b"not-an-object-id\n" + b"g" * 40 + b"\n" + b"f" * 40 + b"\n", b""),
+                "anchor-first": (
+                    0, "".join(f"{commit}\n" for commit in (commits[1], *literal_chain)).encode("ascii"), b"",
+                ),
             }
             real_run = subprocess.run
             for name, outcome in hint_outcomes.items():
