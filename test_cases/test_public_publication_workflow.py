@@ -18843,36 +18843,40 @@ def _verified_commit_records(repository: Path, object_id: str):
 
 def _c09_first_parent_hint(repository: Path, head: str):
     """Advisory prefetch order only: hardened, bounded, and any failure means no hint."""
-    environment = _canonical_git_environment()
-    for key in tuple(environment):
-        if key.startswith(("LD_", "DYLD_")):
-            environment.pop(key, None)
-    environment["PATH"] = SYSTEM_EXECUTABLE_PATH
-    command = (
-        GIT_BINARY, "--no-replace-objects", "-c", f"core.hooksPath={os.devnull}",
-        "-C", str(repository), "rev-list", "--first-parent",
-        f"--max-count={P_V3_FIRST_PARENT_LIMIT + 1}", head,
-    )
     try:
+        environment = _canonical_git_environment()
+        for key in tuple(environment):
+            if key.startswith(("LD_", "DYLD_")):
+                environment.pop(key, None)
+        environment["PATH"] = SYSTEM_EXECUTABLE_PATH
+        command = (
+            GIT_BINARY, "--no-replace-objects", "-c", f"core.hooksPath={os.devnull}",
+            "-C", str(repository), "rev-list", "--first-parent",
+            f"--max-count={P_V3_FIRST_PARENT_LIMIT + 1}", "--end-of-options", head,
+        )
         result = subprocess.run(
             command, env=environment, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, text=True, check=False, timeout=RAW_OBJECT_TIMEOUT_SECONDS,
+            stderr=subprocess.PIPE, text=False, check=False, timeout=RAW_OBJECT_TIMEOUT_SECONDS,
         )
-    except (OSError, subprocess.TimeoutExpired):
+        if result.returncode != 0:
+            return None
+        return tuple(line.strip() for line in result.stdout.decode("ascii").splitlines())
+    except Exception:
         return None
-    if result.returncode != 0:
-        return None
-    return tuple(line.strip() for line in result.stdout.splitlines())
 
 
 def _raw_v3_first_parent_chain(repository: Path, head: str, anchor: str) -> tuple[str, ...]:
     if head == anchor:
         return _raw_v3_first_parent_chain_unscoped(repository, head, anchor)
     scope = _RawObjectPrefetchScope(repository, plan_children=False)
-    for commit in _c09_first_parent_hint(repository, head) or ():
-        if commit in (anchor, S_COMMIT):
-            break
-        scope.add(commit, "commit")
+    # The hint is started only when head and anchor are both exact object ids; otherwise there is
+    # no hint and the raw walk alone decides (a non-object-id head is then rejected by the primitive
+    # before any process starts, exactly as without C09).
+    if all(isinstance(value, str) and re.fullmatch(r"[0-9a-f]{40}", value) for value in (head, anchor)):
+        for commit in _c09_first_parent_hint(repository, head) or ():
+            if commit in (anchor, S_COMMIT):
+                break
+            scope.add(commit, "commit")
     token = _C09_SCOPE.set(scope)
     try:
         return _raw_v3_first_parent_chain_unscoped(repository, head, anchor)
