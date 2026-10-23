@@ -682,6 +682,21 @@
         "test_cases.test_req7_live_read_v2_protocol",
         "test_cases.test_req7_live_read_v2_workflow"
       ]
+    },
+    {
+      "id": "fleet-upgrade-v2",
+      "description": "交换机批量作业引擎（IB 升级 v2，可复用于 nvl-sw）：速率检测、分发、探测、SSH、主进程、IB 适配器与入口；模拟交换机，不连真机",
+      "tests": [
+        "test_cases.test_fleet_link",
+        "test_cases.test_fleet_distribution",
+        "test_cases.test_fleet_probe",
+        "test_cases.test_fleet_ssh",
+        "test_cases.test_fleet_engine",
+        "test_cases.test_ibsw_v2_device_scripts",
+        "test_cases.test_ibsw_v2_device",
+        "test_cases.test_ibsw_v2_workflow",
+        "test_cases.test_ibsw_v2_entry"
+      ]
     }
   ],
   "tracked_support": [
@@ -871,7 +886,8 @@
     "test_cases/w1_original_window_fixture.py",
     "test_cases/n_policy_original_window_fixture.py",
     "test_cases/nv_info_original_window_fixture.py",
-    "test_cases/fixed_https_peer_fixture.py"
+    "test_cases/fixed_https_peer_fixture.py",
+    "test_cases/ibsw_v2_switch_sim.py"
   ],
   "scripts": {
     "DAY0-Prepare/01-a-setup.py": "DAY0-Prepare/01-a-setup.py",
@@ -887,7 +903,9 @@
     "infiniband/bringup/ndr/data-collect-IB.sh": "infiniband/bringup/ndr/data-collect-IB.sh",
     "infiniband/bringup/xdr-initial-setup/initial-setup.py": "infiniband/bringup/xdr-initial-setup/initial-setup.py",
     "infiniband/bringup/ufm-setup-upgrade/ufm-setup-upgrade.py": "infiniband/bringup/ufm-setup-upgrade/ufm-setup-upgrade.py",
+    "infiniband/bringup/xdr-upgrade/ibsw-v2-check.sh": "infiniband/bringup/xdr-upgrade/ibsw-v2-check.sh",
     "infiniband/bringup/xdr-upgrade/upgrade.sh": "infiniband/bringup/xdr-upgrade/upgrade.sh",
+    "infiniband/bringup/xdr-upgrade/upgrade2.py": "infiniband/bringup/xdr-upgrade/upgrade2.py",
     "infiniband/monitor/cron.sh": "ethernet/monitor/cron.sh",
     "infiniband/monitor/sw-info.sh": "ethernet/monitor/sw-info.sh",
     "infiniband/monitor/sw-link.sh": "ethernet/monitor/sw-link.sh",
@@ -950,6 +968,13 @@
     "monitor/generate-monitor-html.py": "monitor/generate-monitor-html.py",
     "monitor/manual-ztp-control.cgi": "monitor/manual-ztp-control.cgi",
     "monitor/manual-ztp-worker.py": "monitor/manual-ztp-worker.py",
+    "tools/fleet_distribution.py": "tools/fleet_distribution.py",
+    "tools/fleet_engine.py": "tools/fleet_engine.py",
+    "tools/fleet_fetch_helper.py": "tools/fleet_fetch_helper.py",
+    "tools/fleet_link.py": "tools/fleet_link.py",
+    "tools/fleet_probe.py": "tools/fleet_probe.py",
+    "tools/fleet_ssh.py": "tools/fleet_ssh.py",
+    "tools/ibsw_v2_device.py": "tools/ibsw_v2_device.py",
     "ztp/config_sync_authority.py": "ztp/config_sync_authority.py",
     "monitor/switch-collection-control.cgi": "monitor/switch-collection-control.cgi",
     "monitor/switch-collection-worker.py": "monitor/switch-collection-worker.py",
@@ -3039,6 +3064,80 @@
       ],
       "tests": [
         "test_cases.test_req7_live_read_v2_workflow"
+      ]
+    },
+    {
+      "id": "fleet_link_direct",
+      "paths": [
+        "tools/fleet_link.py"
+      ],
+      "tests": [
+        "test_cases.test_fleet_link"
+      ]
+    },
+    {
+      "id": "fleet_distribution_direct",
+      "paths": [
+        "tools/fleet_distribution.py"
+      ],
+      "tests": [
+        "test_cases.test_fleet_distribution"
+      ]
+    },
+    {
+      "id": "fleet_probe_direct",
+      "paths": [
+        "tools/fleet_probe.py"
+      ],
+      "tests": [
+        "test_cases.test_fleet_probe"
+      ]
+    },
+    {
+      "id": "fleet_ssh_direct",
+      "paths": [
+        "tools/fleet_ssh.py"
+      ],
+      "tests": [
+        "test_cases.test_fleet_ssh"
+      ]
+    },
+    {
+      "id": "fleet_engine_direct",
+      "paths": [
+        "tools/fleet_engine.py"
+      ],
+      "tests": [
+        "test_cases.test_fleet_engine"
+      ]
+    },
+    {
+      "id": "fleet_fetch_helper_direct",
+      "paths": [
+        "tools/fleet_fetch_helper.py"
+      ],
+      "tests": [
+        "test_cases.test_ibsw_v2_device_scripts"
+      ]
+    },
+    {
+      "id": "ibsw_v2_device_direct",
+      "paths": [
+        "tools/ibsw_v2_device.py",
+        "infiniband/bringup/xdr-upgrade/ibsw-v2-check.sh"
+      ],
+      "tests": [
+        "test_cases.test_ibsw_v2_device",
+        "test_cases.test_ibsw_v2_device_scripts"
+      ]
+    },
+    {
+      "id": "ibsw_v2_entry_direct",
+      "paths": [
+        "infiniband/bringup/xdr-upgrade/upgrade2.py"
+      ],
+      "tests": [
+        "test_cases.test_ibsw_v2_entry"
       ]
     }
   ],
@@ -5529,6 +5628,61 @@
       "tests": [
         "test_cases.test_req7_live_read_v2_workflow"
       ]
+    },
+    {
+      "id": "fleet_engine_generic_flow",
+      "members": [
+        "tools/fleet_engine.py",
+        "tools/fleet_probe.py",
+        "tools/fleet_distribution.py",
+        "tools/fleet_link.py",
+        "tools/fleet_ssh.py"
+      ],
+      "tests": [
+        "test_cases.test_fleet_engine"
+      ]
+    },
+    {
+      "id": "ibsw_v2_upgrade_flow",
+      "members": [
+        "tools/fleet_link.py",
+        "tools/fleet_distribution.py",
+        "tools/fleet_probe.py",
+        "tools/fleet_ssh.py",
+        "tools/fleet_engine.py",
+        "tools/fleet_fetch_helper.py",
+        "tools/ibsw_v2_device.py",
+        "infiniband/bringup/xdr-upgrade/upgrade2.py",
+        "infiniband/bringup/xdr-upgrade/ibsw-v2-check.sh",
+        "infiniband/bringup/xdr-upgrade/upgrade-component.sh",
+        "infiniband/bringup/xdr-upgrade/upgrade-owned-runner.sh",
+        "tools/ibsw_upgrade_component.py",
+        "tools/ibsw_upgrade_contract.py",
+        "tools/ibsw_upgrade_executor.py",
+        "tools/ibsw_upgrade_observer.py",
+        "tools/ibsw_upgrade_access.py",
+        "tools/ibsw_upgrade_schedule.py",
+        "tools/ibsw_upgrade_driver.py",
+        "tools/project_contract.py",
+        "tools/ssh_key_preparation.py",
+        "infiniband/bringup/xdr-initial-setup/initial-setup.py"
+      ],
+      "tests": [
+        "test_cases.test_ibsw_v2_device",
+        "test_cases.test_ibsw_v2_workflow",
+        "test_cases.test_ibsw_v2_entry",
+        "test_cases.test_ibsw_v2_device_scripts"
+      ]
+    },
+    {
+      "id": "ibsw_v2_same_kernel_guard",
+      "members": [
+        "infiniband/bringup/xdr-upgrade/upgrade2.py",
+        "tools/ib_bringup_runtime_guard.py"
+      ],
+      "tests": [
+        "test_cases.test_ibsw_v2_entry"
+      ]
     }
   ],
   "path_rules": [
@@ -6426,6 +6580,16 @@
       ],
       "tests": [
         "test_cases.test_req7_live_read_v2_workflow"
+      ]
+    },
+    {
+      "paths": [
+        "test_cases/ibsw_v2_switch_sim.py"
+      ],
+      "tests": [
+        "test_cases.test_ibsw_v2_device",
+        "test_cases.test_ibsw_v2_workflow",
+        "test_cases.test_ibsw_v2_entry"
       ]
     }
   ]

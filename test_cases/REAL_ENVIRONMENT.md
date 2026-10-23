@@ -3379,3 +3379,35 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
   - 采集对 UFM 只写 `/root/monitor/`；停容器制造失败需要维护窗口。
   - 磁盘：每轮 100 MB 时，3 天约 43 GB。
   - 未执行前保持 NOT RUN。
+
+## TC-REAL-IBSW-V2-001 — IB 交换机升级 v2（upgrade2.py）在真实 ib-sw 与 ztp-server 上运行
+
+- Case ID：`TC-REAL-IBSW-V2-001`；类型：real-environment / destructive / reboot；状态：**OPEN / NOT RUN（v2 未在真机运行）**。
+- 本机先决：测试域 `fleet-upgrade-v2` 的 9 个模块全部通过（速率检测、分发、探测、SSH、主进程、设备端脚本、IB 适配器、IB 流程、入口）。模拟交换机 GREEN 不等于现场验收。
+- 依据：owner 2026-10-23 的引擎设计（三类 worker、两个探测队列、按 ztp-server 接口速率分发）；2026-10-22/23 CPLD 批量升级中 v1 的全局锁排队（推断，见设计文档第 0 节）。
+- 前置条件：
+  - owner 书面授权维护窗口：OS/BIOS 安装和 CPLD 烧写会重启交换机；
+  - 记录每台的 `nv show system version`、`nv show platform firmware`、`nv show system health`、`nv config show -o commands`；
+  - ztp-server 上 `ip -o addr`、`ip route get <交换机IP>`、`/sys/class/net/<出口>/` 的实际内容，用来核对 `[LINK]` 判定；
+  - 管理密钥对、`~/.ssh/known_hosts` 里每台交换机的条目、P2P 文件。
+- 步骤与预期：
+  1. `upgrade2.py --project <项目> --plan`：打印 `[LINK]`、`[GROUPS]`、`[PREFLIGHT PROGRESS]` 和汇总，不在任何交换机上留下 `.ibsw-*` 目录，也不改 authorized_keys。
+  2. 选 2–3 台用 `--devices` 做小批量 `--upgrade -y`：金丝雀先完成全部跳数；其余设备的镜像在金丝雀运行期间分发；探测按 upgrading Q 30 秒 ping、2 分钟 SSH，rebooting Q 15 秒 ping → TCP/22 → SSH boot_id → nvued → `nv show system version` 推进；验证通过后记 UPGRADED。
+  3. 扩大到一个 OOB leaf 的全部交换机。
+  4. ztp-server 是 1G 时：每个 OOB leaf 只从服务器拉一次，其余由同组持有者用 scp + 密码接力；持有者在服务期间不重启。
+- 需要现场确认的事项（设计文档 15.15）：
+  - `/home/admin` 在 OS 重启后是否保留，以及 CPLD、BIOS 重启后是否保留；
+  - NVOS sshd 用 password 还是 keyboard-interactive；交换机上的 `scp -O` 和 `/usr/bin/python3` 是否可用；
+  - CPLD 烧写的实际耗时与 30 分钟停留上限的关系；
+  - OS 安装后主机密钥是否变化；
+  - `nv action fetch system image file://…` 把镜像复制到哪里、需要多少磁盘；
+  - ztp-server 的实际接口栈（物理口、bond、bridge）是否与 `[LINK]` 判定一致；
+  - ztp-server 的 sshd `MaxStartups`（`--method scp` 时）。
+- 证据：
+  - 运行目录 `xdr-upgrade-v2-logs/<运行编号>/` 下的 `plan.json`、`packages.json`、`events.jsonl`、`run-report.json`；
+  - 每台的 `precheck.json`、`distribution-*.json`、`dispatch.json`、`timeline.jsonl`、`verify-*.json`、`before-*.commands`；
+  - stderr 的进度块；每台升级前后的版本、健康和配置导出。
+- 清理与风险：
+  - 已安装的版本不回滚；没有升级成功的设备上暂存的镜像保留在 `/home/admin`，重跑时直接复用，需要时手工删除；
+  - 第一次 Ctrl-C 只停止新的下发，正在升级的设备继续被跟踪直到有结果；第二次 Ctrl-C 立即退出，在途设备记 UNKNOWN，需要人工确认；
+  - 未执行前保持 NOT RUN，不得写 PASS。

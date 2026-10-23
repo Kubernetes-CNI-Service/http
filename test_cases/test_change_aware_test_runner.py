@@ -113,6 +113,7 @@ EXPECTED_TEST_SUITES = [
     "req7-owned-live-read-process-control",
     "req7-first-read-public-code",
     "req7-owned-live-read-v2-process",
+    "fleet-upgrade-v2",
 ]
 
 
@@ -1103,6 +1104,7 @@ class ImpactManifestTests(unittest.TestCase):
                 "test_cases/n_policy_original_window_fixture.py",
                 "test_cases/nv_info_original_window_fixture.py",
                 "test_cases/fixed_https_peer_fixture.py",
+                "test_cases/ibsw_v2_switch_sim.py",
             ],
             manifest["tracked_support"],
         )

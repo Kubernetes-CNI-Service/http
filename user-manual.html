@@ -456,7 +456,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
         <p>本目录由 <code>tools/update-user-manual.py</code> 从 Git tracked 与非忽略文件生成；每个受维护文件必须有独立说明。大量项目数据、镜像、缓存与运行输出按路径模式说明，不把二进制内容嵌入网页。</p>
         <!-- BEGIN GENERATED USER MANUAL FILE CATALOG -->
         <div class="catalog-summary">
-          <span><strong>955</strong> 个受维护文件</span>
+          <span><strong>975</strong> 个受维护文件</span>
           <span><strong>27</strong> 个根级分组</span>
           <span>清单范围：Git tracked + untracked/nonignored</span>
         </div>
@@ -565,7 +565,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           </tbody></table></div>
         </details>
         <details id="v2-file-group-infiniband" data-nav-title="infiniband/ 文件" class="catalog-group">
-          <summary><code>infiniband/</code> — 26 个文件</summary>
+          <summary><code>infiniband/</code> — 29 个文件</summary>
           <div><table class="file-catalog"><thead><tr><th>文件</th><th>说明</th></tr></thead><tbody>
             <tr data-file-path="infiniband/bringup/ndr/OS-CPLD-upgrade.sh"><td><code>infiniband/bringup/ndr/OS-CPLD-upgrade.sh</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Guarded MLNX-OS image/CPLD upgrade for an explicit, validated switch list。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="infiniband/bringup/ndr/README.md"><td><code>infiniband/bringup/ndr/README.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>文档：NDR bringup 工具。 <strong>维护/生成责任：</strong>文档维护者随行为变更同步更新；生成索引不得手工改写生成块。</td></tr>
@@ -580,11 +580,14 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <tr data-file-path="infiniband/bringup/xdr-initial-setup/publickey"><td><code>infiniband/bringup/xdr-initial-setup/publickey</code></td><td><strong>类别：</strong>仓库支持文件；<strong>作用：</strong>相对软链接入口，canonical target 为 ../../publickey。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="infiniband/bringup/xdr-upgrade/HANDOFF-CODEX-TEST.md"><td><code>infiniband/bringup/xdr-upgrade/HANDOFF-CODEX-TEST.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>文档：IBSW Upgrade 开发测试交接。 <strong>维护/生成责任：</strong>文档维护者随行为变更同步更新；生成索引不得手工改写生成块。</td></tr>
             <tr data-file-path="infiniband/bringup/xdr-upgrade/README.md"><td><code>infiniband/bringup/xdr-upgrade/README.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>文档：InfiniBand 交换机统一升级脚本。 <strong>维护/生成责任：</strong>文档维护者随行为变更同步更新；生成索引不得手工改写生成块。</td></tr>
+            <tr data-file-path="infiniband/bringup/xdr-upgrade/V2-DESIGN.md"><td><code>infiniband/bringup/xdr-upgrade/V2-DESIGN.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>文档：IB 交换机升级 v2：落地设计（2026-10-23）。 <strong>维护/生成责任：</strong>文档维护者随行为变更同步更新；生成索引不得手工改写生成块。</td></tr>
+            <tr data-file-path="infiniband/bringup/xdr-upgrade/ibsw-v2-check.sh"><td><code>infiniband/bringup/xdr-upgrade/ibsw-v2-check.sh</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Generic read-only fact collector for the v2 IB switch upgrade (owner 2026-10-23)。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="infiniband/bringup/xdr-upgrade/requirements.txt"><td><code>infiniband/bringup/xdr-upgrade/requirements.txt</code></td><td><strong>类别：</strong>仓库支持文件；<strong>作用：</strong>文档：Exact native SSH pins required by this supplied backend. Use an isolated venv。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="infiniband/bringup/xdr-upgrade/upgrade-component.sh"><td><code>infiniband/bringup/xdr-upgrade/upgrade-component.sh</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Fixed IB NVOS component sections, composed by ibsw_upgrade_component.py。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="infiniband/bringup/xdr-upgrade/upgrade-owned-runner.sh"><td><code>infiniband/bringup/xdr-upgrade/upgrade-owned-runner.sh</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Only the original direct child shell is observed, never an installer job。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="infiniband/bringup/xdr-upgrade/upgrade.py"><td><code>infiniband/bringup/xdr-upgrade/upgrade.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Manual IB switch inspection and explicitly confirmed component upgrades。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="infiniband/bringup/xdr-upgrade/upgrade.sh"><td><code>infiniband/bringup/xdr-upgrade/upgrade.sh</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Compatibility entry only: the fixed sibling Python entry owns orchestration。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
+            <tr data-file-path="infiniband/bringup/xdr-upgrade/upgrade2.py"><td><code>infiniband/bringup/xdr-upgrade/upgrade2.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>IB switch upgrade v2: OS/BIOS/CPLD with the fleet engine (owner 2026-10-23)。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="infiniband/monitor/README.md"><td><code>infiniband/monitor/README.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>相对软链接入口，canonical target 为 ../../ethernet/monitor/README.md。 <strong>维护/生成责任：</strong>文档维护者随行为变更同步更新；生成索引不得手工改写生成块。</td></tr>
             <tr data-file-path="infiniband/monitor/UFM-MONITOR.md"><td><code>infiniband/monitor/UFM-MONITOR.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>文档：UFM（server_ufm）运行态监控采集：需求与流程。 <strong>维护/生成责任：</strong>文档维护者随行为变更同步更新；生成索引不得手工改写生成块。</td></tr>
             <tr data-file-path="infiniband/monitor/cron.sh"><td><code>infiniband/monitor/cron.sh</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>相对软链接入口，canonical target 为 ../../ethernet/monitor/cron.sh。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
@@ -759,7 +762,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           </tbody></table></div>
         </details>
         <details id="v2-file-group-test-cases" data-nav-title="test_cases/ 文件" class="catalog-group">
-          <summary><code>test_cases/</code> — 567 个文件</summary>
+          <summary><code>test_cases/</code> — 577 个文件</summary>
           <div><table class="file-catalog"><thead><tr><th>文件</th><th>说明</th></tr></thead><tbody>
             <tr data-file-path="test_cases/CASE_TEMPLATE.md"><td><code>test_cases/CASE_TEMPLATE.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>新增真机/破坏性验证案例时必须填写的证据模板。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/CHANGE_AWARE_TESTING.md"><td><code>test_cases/CHANGE_AWARE_TESTING.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>文档：脚本变更影响测试。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
@@ -808,6 +811,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <tr data-file-path="test_cases/ibsw3_scp_cpld_test_isolation.py"><td><code>test_cases/ibsw3_scp_cpld_test_isolation.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Test-only, fixed-roster one-whole child isolation; no production authority。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/ibsw3_scp_request_test_isolation.py"><td><code>test_cases/ibsw3_scp_request_test_isolation.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Test-only, fixed-roster one-whole child isolation; no production authority。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/ibsw3_scp_test_isolation.py"><td><code>test_cases/ibsw3_scp_test_isolation.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Test-only, fixed-roster one-whole child isolation; no production authority。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/ibsw_v2_switch_sim.py"><td><code>test_cases/ibsw_v2_switch_sim.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Local simulated NVOS IB switches for the v2 upgrade tests (test support, not a test module)。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/issue_tracker_cable_post_c6_fixture.py"><td><code>test_cases/issue_tracker_cable_post_c6_fixture.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>SOURCE test carrier proposal; no permission, network or SDK mock success。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/live_read_v2_literal_child.py"><td><code>test_cases/live_read_v2_literal_child.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>TEST DATA child, not a production launcher or SDK/source provider。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/module_loader.py"><td><code>test_cases/module_loader.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Shared source loader: remove only helper-owned paths, not module authority。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
@@ -929,6 +933,11 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <tr data-file-path="test_cases/test_finished_project_import.py"><td><code>test_cases/test_finished_project_import.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Direct contracts for reviewing and publishing V3 finished bundles。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_finished_project_lifecycle.py"><td><code>test_cases/test_finished_project_lifecycle.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Workflow contracts for finished-record import and deployment isolation。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_finished_project_rehydrate.py"><td><code>test_cases/test_finished_project_rehydrate.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Direct contract for explicit finished-record rehydration。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_fleet_distribution.py"><td><code>test_cases/test_fleet_distribution.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Fleet jobs (IB upgrade v2): package distribution (owner 2026-10-23, review 15.6-15.8)。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_fleet_engine.py"><td><code>test_cases/test_fleet_engine.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Fleet engine (IB upgrade v2; reusable for nvl-sw): the main loop with a simulated fleet。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_fleet_link.py"><td><code>test_cases/test_fleet_link.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Fleet jobs (IB upgrade v2): ztp-server egress speed decides the OS distribution mode (owner 2026-10-23)。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_fleet_probe.py"><td><code>test_cases/test_fleet_probe.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Fleet jobs (IB upgrade v2): reboot probing (owner 2026-10-23; review 15.4, 15.5, 15.12)。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_fleet_ssh.py"><td><code>test_cases/test_fleet_ssh.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Fleet jobs (IB upgrade v2): SSH sessions (review 15.1, 15.13, 15.14)。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_flow_release_platform_matrix.py"><td><code>test_cases/test_flow_release_platform_matrix.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Isolated producer-to-consumer release flow for every managed ZTP platform。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_full_flow_integration.py"><td><code>test_cases/test_full_flow_integration.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Cross-module integration scenarios built from real ISC/Apache log formats。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_generation_report_contract.py"><td><code>test_cases/test_generation_report_contract.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>REQ-16 R16-9 direct contract for the first governed generation report。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
@@ -1027,6 +1036,10 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <tr data-file-path="test_cases/test_ibsw3_source_inverse_fixture_portability.py"><td><code>test_cases/test_ibsw3_source_inverse_fixture_portability.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Independent local DATA fixtures; no ambient private SOURCE packet required。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_ibsw3_stdin_owned_cpld_protocol.py"><td><code>test_cases/test_ibsw3_stdin_owned_cpld_protocol.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>UNRUN one protocol whole; request/companion bindings are synthetic DATA。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_ibsw3_transfer_method_selector.py"><td><code>test_cases/test_ibsw3_transfer_method_selector.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>UNRUN: fixed nonsecret selector/prepare chain + real local Python/PTY。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_ibsw_v2_device.py"><td><code>test_cases/test_ibsw_v2_device.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>IB adapter of the v2 upgrade (owner 2026-10-23; review 15.2, 15.3, 15.5, 15.10, 15.13)。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_ibsw_v2_device_scripts.py"><td><code>test_cases/test_ibsw_v2_device_scripts.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>v2 upgrade: the two scripts that run ON the switch (owner 2026-10-23; review 15.3, 15.8, 15.13)。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_ibsw_v2_entry.py"><td><code>test_cases/test_ibsw_v2_entry.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>IB upgrade v2 entry (upgrade2.py; owner 2026-10-23)。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_ibsw_v2_workflow.py"><td><code>test_cases/test_ibsw_v2_workflow.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>IB upgrade v2 end to end: fleet engine + IB adapter + switch scripts on simulated switches。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_image_context_safety.py"><td><code>test_cases/test_image_context_safety.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>H1-H4: independent synthetic image membership and live/image separation。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_import_from_download_target.py"><td><code>test_cases/test_import_from_download_target.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Archive project selection and local import-target consistency contracts。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_infra_check_and_manual_reset.py"><td><code>test_cases/test_infra_check_and_manual_reset.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Functional cases for infra health collection and the reset wrapper。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
@@ -1331,7 +1344,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           </tbody></table></div>
         </details>
         <details id="v2-file-group-tools" data-nav-title="tools/ 文件" class="catalog-group">
-          <summary><code>tools/</code> — 109 个文件</summary>
+          <summary><code>tools/</code> — 116 个文件</summary>
           <div><table class="file-catalog"><thead><tr><th>文件</th><th>说明</th></tr></thead><tbody>
             <tr data-file-path="tools/_package_common.py"><td><code>tools/_package_common.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Internal shared archive implementation for tar-for-upload/download。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="tools/collect-ztp-diagnostics.py"><td><code>tools/collect-ztp-diagnostics.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Create a bounded, redacted support bundle for the ZTP management stack。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
@@ -1345,6 +1358,12 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <tr data-file-path="tools/finish-project.py"><td><code>tools/finish-project.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Create a resumable, fail-closed finished-project bundle。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="tools/finished_bundle.py"><td><code>tools/finished_bundle.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Deterministic, fail-closed finished-project bundle construction。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="tools/finished_project_state.py"><td><code>tools/finished_project_state.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Strict shared authority for finished-project deployment interlocks。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
+            <tr data-file-path="tools/fleet_distribution.py"><td><code>tools/fleet_distribution.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Package distribution for switch fleet jobs (IB upgrade v2; reusable for nvl-sw; owner 2026-10-23)。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
+            <tr data-file-path="tools/fleet_engine.py"><td><code>tools/fleet_engine.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Main process for switch fleet jobs (owner 2026-10-23; design: ibsw-upgrade-v2 DESIGN.md)。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
+            <tr data-file-path="tools/fleet_fetch_helper.py"><td><code>tools/fleet_fetch_helper.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Package fetch helper for switch fleet jobs; runs ON the switch (owner 2026-10-23)。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
+            <tr data-file-path="tools/fleet_link.py"><td><code>tools/fleet_link.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>ztp-server egress link speed for switch fleet jobs (IB upgrade v2; reusable for nvl-sw; owner 2026-10-23)。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
+            <tr data-file-path="tools/fleet_probe.py"><td><code>tools/fleet_probe.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Reboot probing for switch fleet jobs (IB upgrade v2; reusable for nvl-sw; owner 2026-10-23, review 15.4-15.5, 15.12)。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
+            <tr data-file-path="tools/fleet_ssh.py"><td><code>tools/fleet_ssh.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>SSH sessions for switch fleet jobs (IB upgrade v2 first; nvl-sw later; owner 2026-10-23)。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="tools/generation_report.py"><td><code>tools/generation_report.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>REQ-16 R16-9: record the public keys actually published for a release。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="tools/ib-tool-Jie/ib_tool_box/lib/README.md"><td><code>tools/ib-tool-Jie/ib_tool_box/lib/README.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>文档：IB Tool Box 共享库。 <strong>维护/生成责任：</strong>文档维护者随行为变更同步更新；生成索引不得手工改写生成块。</td></tr>
             <tr data-file-path="tools/ib-tool-Jie/ib_tool_box/lib/__init__.py"><td><code>tools/ib-tool-Jie/ib_tool_box/lib/__init__.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>属于“跨主机打包、同步、导入、诊断、制品与分析工具”的 __init__.py；具体边界由当前文件、已跟踪的上层入口和测试合同共同约束。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
@@ -1409,6 +1428,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <tr data-file-path="tools/ibsw_upgrade_pipeline.py"><td><code>tools/ibsw_upgrade_pipeline.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Bounded two-pool coordinator. No deployment/Git/history/file-lock gates。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="tools/ibsw_upgrade_schedule.py"><td><code>tools/ibsw_upgrade_schedule.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Component ordering, status lists and one-device verified upgrade execution。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="tools/ibsw_upgrade_scp.py"><td><code>tools/ibsw_upgrade_scp.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>SCP source/receiver library; main operational entry remains HTTP-only。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
+            <tr data-file-path="tools/ibsw_v2_device.py"><td><code>tools/ibsw_v2_device.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>IB switch (NVOS ib-sw) adapter for the fleet engine: upgrade v2 (owner 2026-10-23; review 15.1-15.13)。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="tools/import-from-download.py"><td><code>tools/import-from-download.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Safely review/import legacy downloads and immutable V3 finished bundles。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="tools/lldp-analyze-tool/04-lldp-device-aliases.json"><td><code>tools/lldp-analyze-tool/04-lldp-device-aliases.json</code></td><td><strong>类别：</strong>数据/合同；<strong>作用：</strong>跨主机打包、同步、导入、诊断、制品与分析工具使用的机器可读合同、状态或夹具；字段身份由生产脚本或测试严格验证。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="tools/lldp-analyze-tool/analyze_lldp.py"><td><code>tools/lldp-analyze-tool/analyze_lldp.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Compare expected LLDPq DOT links with the latest Ethernet collection archive。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
@@ -1602,7 +1622,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
         <p>以下参考覆盖当前工作树中的每个 Python、Shell 与 CGI 文件，包括操作入口、内部库、worker、设备端脚本和开发测试。先看“是否直接运行”，再复制示例；内部组件不得脱离所属事务单独执行。</p>
         <!-- BEGIN GENERATED USER MANUAL SCRIPT REFERENCE -->
         <div class="catalog-summary">
-          <span><strong>790</strong> 个脚本型文件</span>
+          <span><strong>809</strong> 个脚本型文件</span>
           <span><strong>9</strong> 个功能分组</span>
           <span>每项均含运行、输入输出、示例与恢复合同</span>
         </div>
@@ -1771,7 +1791,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           <p><strong>示例：</strong></p>
           <pre><code>sed -n &#x27;1,120p&#x27; ethernet/monitor/sw-link.sh  # 先读文件头 Usage/安全边界，再由所属流程调用</code></pre></div>
         </details>
-        <h4 id="v2-script-group-infiniband" data-nav-title="infiniband/ 脚本">infiniband/ — 14 个脚本</h4>
+        <h4 id="v2-script-group-infiniband" data-nav-title="infiniband/ 脚本">infiniband/ — 16 个脚本</h4>
         <details data-script-reference="infiniband/bringup/ndr/OS-CPLD-upgrade.sh" class="script-reference">
           <summary><code>infiniband/bringup/ndr/OS-CPLD-upgrade.sh</code> — Guarded MLNX-OS image/CPLD upgrade for an explicit, validated switch list。</summary>
           <div class="script-body"><dl>
@@ -1844,6 +1864,24 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           <p><strong>示例：</strong></p>
           <pre><code>python3 -B infiniband/bringup/xdr-initial-setup/initial-setup.py --help</code></pre></div>
         </details>
+        <details data-script-reference="infiniband/bringup/xdr-upgrade/ibsw-v2-check.sh" class="script-reference">
+          <summary><code>infiniband/bringup/xdr-upgrade/ibsw-v2-check.sh</code> — Generic read-only fact collector for the v2 IB switch upgrade (owner 2026-10-23)。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>Generic read-only fact collector for the v2 IB switch upgrade (owner 2026-10-23)。</dd>
+            <dt>是否直接运行：</dt><dd>是，但仅在本节场景和权限边界内；先运行 --help、dry-run、verify-only、doctor 或 status（若提供）。</dd>
+            <dt>运行环境：</dt><dd>具备对应 NVIDIA/Mellanox 工具和设备访问的受控 bring-up 主机。</dd>
+            <dt>使用场景：</dt><dd>执行“InfiniBand 采集、分析、初始化与升级”中的明确操作步骤；不要把一次子步骤当作完整发布。</dd>
+            <dt>前置条件：</dt><dd>项目、设备范围、运行后端、权限和输入身份已确认；任何 destructive/remote 动作先完成本地 proof 和只读检查。</dd>
+            <dt>语法/调用方式：</dt><dd>bash infiniband/bringup/xdr-upgrade/ibsw-v2-check.sh [options]</dd>
+            <dt>主要参数：</dt><dd>--property, --no-pager</dd>
+            <dt>输入：</dt><dd>所属场景的项目输入、设备清单、受信 archive/制品或运行日志；正式写入前必须完成 preflight。</dd>
+            <dt>输出/状态：</dt><dd>命令日志、退出码以及该脚本声明的配置、报告、归档或运行状态；输出需按 receipt/SHA/health 复核。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，并且脚本打印的后置检查、receipt、状态或生成清单全部通过；仅生成文件不等于部署完成。</dd>
+            <dt>失败恢复：</dt><dd>在第一个失败处停止，保留原日志和 marker；按脚本给出的 NEXT/README 修复后从完整受支持入口重试。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>sed -n &#x27;1,120p&#x27; infiniband/bringup/xdr-upgrade/ibsw-v2-check.sh  # 先读文件头 Usage/安全边界，再由所属流程调用</code></pre></div>
+        </details>
         <details data-script-reference="infiniband/bringup/xdr-upgrade/upgrade-component.sh" class="script-reference">
           <summary><code>infiniband/bringup/xdr-upgrade/upgrade-component.sh</code> — Fixed IB NVOS component sections, composed by ibsw_upgrade_component.py。</summary>
           <div class="script-body"><dl>
@@ -1915,6 +1953,24 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           </dl>
           <p><strong>示例：</strong></p>
           <pre><code>sed -n &#x27;1,120p&#x27; infiniband/bringup/xdr-upgrade/upgrade.sh  # 先读文件头 Usage/安全边界，再由所属流程调用</code></pre></div>
+        </details>
+        <details data-script-reference="infiniband/bringup/xdr-upgrade/upgrade2.py" class="script-reference">
+          <summary><code>infiniband/bringup/xdr-upgrade/upgrade2.py</code> — IB switch upgrade v2: OS/BIOS/CPLD with the fleet engine (owner 2026-10-23)。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>IB switch upgrade v2: OS/BIOS/CPLD with the fleet engine (owner 2026-10-23)。</dd>
+            <dt>是否直接运行：</dt><dd>是，但仅在本节场景和权限边界内；先运行 --help、dry-run、verify-only、doctor 或 status（若提供）。</dd>
+            <dt>运行环境：</dt><dd>具备对应 NVIDIA/Mellanox 工具和设备访问的受控 bring-up 主机。</dd>
+            <dt>使用场景：</dt><dd>执行“InfiniBand 采集、分析、初始化与升级”中的明确操作步骤；不要把一次子步骤当作完整发布。</dd>
+            <dt>前置条件：</dt><dd>项目、设备范围、运行后端、权限和输入身份已确认；任何 destructive/remote 动作先完成本地 proof 和只读检查。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B infiniband/bringup/xdr-upgrade/upgrade2.py [options]</dd>
+            <dt>主要参数：</dt><dd>--plan, --upgrade, -y, --yes, --version, --all, -A, --skip-canary, --force, --project, --ib-csv, --global, --devices, --p2p, --package-dir, --local-dir, --known-hosts, --user, --identity, --management-public-key, --password, --method, --mgmt-server, --mgmt-user, --mgmt-port, --scp-known-hosts, --server-link, --in-flight, --check-workers, --upgrade-workers, --probe-workers, --relay-fanout, --relay-transfers, --progress-seconds</dd>
+            <dt>输入：</dt><dd>所属场景的项目输入、设备清单、受信 archive/制品或运行日志；正式写入前必须完成 preflight。</dd>
+            <dt>输出/状态：</dt><dd>命令日志、退出码以及该脚本声明的配置、报告、归档或运行状态；输出需按 receipt/SHA/health 复核。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，并且脚本打印的后置检查、receipt、状态或生成清单全部通过；仅生成文件不等于部署完成。</dd>
+            <dt>失败恢复：</dt><dd>在第一个失败处停止，保留原日志和 marker；按脚本给出的 NEXT/README 修复后从完整受支持入口重试。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>python3 -B infiniband/bringup/xdr-upgrade/upgrade2.py --help</code></pre></div>
         </details>
         <details data-script-reference="infiniband/monitor/cron.sh" class="script-reference">
           <summary><code>infiniband/monitor/cron.sh</code> — 相对软链接入口，canonical target 为 ../../ethernet/monitor/cron.sh。</summary>
@@ -3809,7 +3865,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           <p><strong>示例：</strong></p>
           <pre><code>readlink nvlink/monitor/sw-link.sh  # 预期解析到 ../../ethernet/monitor/sw-link.sh</code></pre></div>
         </details>
-        <h4 id="v2-script-group-test-cases" data-nav-title="test_cases/ 脚本">test_cases/ — 545 个脚本</h4>
+        <h4 id="v2-script-group-test-cases" data-nav-title="test_cases/ 脚本">test_cases/ — 555 个脚本</h4>
         <details data-script-reference="test_cases/__init__.py" class="script-reference">
           <summary><code>test_cases/__init__.py</code> — Canonical executable regression and integration test case package。</summary>
           <div class="script-body"><dl>
@@ -4313,6 +4369,24 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           </dl>
           <p><strong>示例：</strong></p>
           <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.ibsw3_scp_test_isolation</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/ibsw_v2_switch_sim.py" class="script-reference">
+          <summary><code>test_cases/ibsw_v2_switch_sim.py</code> — Local simulated NVOS IB switches for the v2 upgrade tests (test support, not a test module)。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>Local simulated NVOS IB switches for the v2 upgrade tests (test support, not a test module)。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.ibsw_v2_switch_sim</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.ibsw_v2_switch_sim</code></pre></div>
         </details>
         <details data-script-reference="test_cases/issue_tracker_cable_post_c6_fixture.py" class="script-reference">
           <summary><code>test_cases/issue_tracker_cable_post_c6_fixture.py</code> — SOURCE test carrier proposal; no permission, network or SDK mock success。</summary>
@@ -6456,6 +6530,96 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           <p><strong>示例：</strong></p>
           <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_finished_project_rehydrate</code></pre></div>
         </details>
+        <details data-script-reference="test_cases/test_fleet_distribution.py" class="script-reference">
+          <summary><code>test_cases/test_fleet_distribution.py</code> — Fleet jobs (IB upgrade v2): package distribution (owner 2026-10-23, review 15.6-15.8)。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>Fleet jobs (IB upgrade v2): package distribution (owner 2026-10-23, review 15.6-15.8)。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_fleet_distribution</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_fleet_distribution</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/test_fleet_engine.py" class="script-reference">
+          <summary><code>test_cases/test_fleet_engine.py</code> — Fleet engine (IB upgrade v2; reusable for nvl-sw): the main loop with a simulated fleet。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>Fleet engine (IB upgrade v2; reusable for nvl-sw): the main loop with a simulated fleet。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_fleet_engine</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_fleet_engine</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/test_fleet_link.py" class="script-reference">
+          <summary><code>test_cases/test_fleet_link.py</code> — Fleet jobs (IB upgrade v2): ztp-server egress speed decides the OS distribution mode (owner 2026-10-23)。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>Fleet jobs (IB upgrade v2): ztp-server egress speed decides the OS distribution mode (owner 2026-10-23)。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_fleet_link</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_fleet_link</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/test_fleet_probe.py" class="script-reference">
+          <summary><code>test_cases/test_fleet_probe.py</code> — Fleet jobs (IB upgrade v2): reboot probing (owner 2026-10-23; review 15.4, 15.5, 15.12)。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>Fleet jobs (IB upgrade v2): reboot probing (owner 2026-10-23; review 15.4, 15.5, 15.12)。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_fleet_probe</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_fleet_probe</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/test_fleet_ssh.py" class="script-reference">
+          <summary><code>test_cases/test_fleet_ssh.py</code> — Fleet jobs (IB upgrade v2): SSH sessions (review 15.1, 15.13, 15.14)。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>Fleet jobs (IB upgrade v2): SSH sessions (review 15.1, 15.13, 15.14)。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_fleet_ssh</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_fleet_ssh</code></pre></div>
+        </details>
         <details data-script-reference="test_cases/test_flow_release_platform_matrix.py" class="script-reference">
           <summary><code>test_cases/test_flow_release_platform_matrix.py</code> — Isolated producer-to-consumer release flow for every managed ZTP platform。</summary>
           <div class="script-body"><dl>
@@ -8219,6 +8383,78 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           </dl>
           <p><strong>示例：</strong></p>
           <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_ibsw3_transfer_method_selector</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/test_ibsw_v2_device.py" class="script-reference">
+          <summary><code>test_cases/test_ibsw_v2_device.py</code> — IB adapter of the v2 upgrade (owner 2026-10-23; review 15.2, 15.3, 15.5, 15.10, 15.13)。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>IB adapter of the v2 upgrade (owner 2026-10-23; review 15.2, 15.3, 15.5, 15.10, 15.13)。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_ibsw_v2_device</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_ibsw_v2_device</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/test_ibsw_v2_device_scripts.py" class="script-reference">
+          <summary><code>test_cases/test_ibsw_v2_device_scripts.py</code> — v2 upgrade: the two scripts that run ON the switch (owner 2026-10-23; review 15.3, 15.8, 15.13)。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>v2 upgrade: the two scripts that run ON the switch (owner 2026-10-23; review 15.3, 15.8, 15.13)。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_ibsw_v2_device_scripts</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_ibsw_v2_device_scripts</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/test_ibsw_v2_entry.py" class="script-reference">
+          <summary><code>test_cases/test_ibsw_v2_entry.py</code> — IB upgrade v2 entry (upgrade2.py; owner 2026-10-23)。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>IB upgrade v2 entry (upgrade2.py; owner 2026-10-23)。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_ibsw_v2_entry</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_ibsw_v2_entry</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/test_ibsw_v2_workflow.py" class="script-reference">
+          <summary><code>test_cases/test_ibsw_v2_workflow.py</code> — IB upgrade v2 end to end: fleet engine + IB adapter + switch scripts on simulated switches。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>IB upgrade v2 end to end: fleet engine + IB adapter + switch scripts on simulated switches。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_ibsw_v2_workflow</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_ibsw_v2_workflow</code></pre></div>
         </details>
         <details data-script-reference="test_cases/test_image_context_safety.py" class="script-reference">
           <summary><code>test_cases/test_image_context_safety.py</code> — H1-H4: independent synthetic image membership and live/image separation。</summary>
@@ -13620,7 +13856,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           <p><strong>示例：</strong></p>
           <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.w1_original_window_fixture</code></pre></div>
         </details>
-        <h4 id="v2-script-group-tools" data-nav-title="tools/ 脚本">tools/ — 100 个脚本</h4>
+        <h4 id="v2-script-group-tools" data-nav-title="tools/ 脚本">tools/ — 107 个脚本</h4>
         <details data-script-reference="tools/_package_common.py" class="script-reference">
           <summary><code>tools/_package_common.py</code> — Internal shared archive implementation for tar-for-upload/download。</summary>
           <div class="script-body"><dl>
@@ -13836,6 +14072,114 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           </dl>
           <p><strong>示例：</strong></p>
           <pre><code>python3 -B -m py_compile tools/finished_project_state.py  # 仅语法验证；实际运行由上层流程负责</code></pre></div>
+        </details>
+        <details data-script-reference="tools/fleet_distribution.py" class="script-reference">
+          <summary><code>tools/fleet_distribution.py</code> — Package distribution for switch fleet jobs (IB upgrade v2; reusable for nvl-sw; owner 2026-10-23)。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>Package distribution for switch fleet jobs (IB upgrade v2; reusable for nvl-sw; owner 2026-10-23)。</dd>
+            <dt>是否直接运行：</dt><dd>是，但仅在本节场景和权限边界内；先运行 --help、dry-run、verify-only、doctor 或 status（若提供）。</dd>
+            <dt>运行环境：</dt><dd>通常在 canonical 项目电脑；deploy/import/diagnostic 类按说明在目标服务器运行。</dd>
+            <dt>使用场景：</dt><dd>执行“跨主机打包、同步、导入、诊断、制品与分析工具”中的明确操作步骤；不要把一次子步骤当作完整发布。</dd>
+            <dt>前置条件：</dt><dd>项目、设备范围、运行后端、权限和输入身份已确认；任何 destructive/remote 动作先完成本地 proof 和只读检查。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B tools/fleet_distribution.py [options]</dd>
+            <dt>主要参数：</dt><dd>该入口没有可静态提取的长选项；以文件头、所属 README 和实际 --help 为准。</dd>
+            <dt>输入：</dt><dd>所属场景的项目输入、设备清单、受信 archive/制品或运行日志；正式写入前必须完成 preflight。</dd>
+            <dt>输出/状态：</dt><dd>命令日志、退出码以及该脚本声明的配置、报告、归档或运行状态；输出需按 receipt/SHA/health 复核。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，并且脚本打印的后置检查、receipt、状态或生成清单全部通过；仅生成文件不等于部署完成。</dd>
+            <dt>失败恢复：</dt><dd>在第一个失败处停止，保留原日志和 marker；按脚本给出的 NEXT/README 修复后从完整受支持入口重试。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>python3 -B -m py_compile tools/fleet_distribution.py  # 仅语法验证；实际运行由上层流程负责</code></pre></div>
+        </details>
+        <details data-script-reference="tools/fleet_engine.py" class="script-reference">
+          <summary><code>tools/fleet_engine.py</code> — Main process for switch fleet jobs (owner 2026-10-23; design: ibsw-upgrade-v2 DESIGN.md)。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>Main process for switch fleet jobs (owner 2026-10-23; design: ibsw-upgrade-v2 DESIGN.md)。</dd>
+            <dt>是否直接运行：</dt><dd>是，但仅在本节场景和权限边界内；先运行 --help、dry-run、verify-only、doctor 或 status（若提供）。</dd>
+            <dt>运行环境：</dt><dd>通常在 canonical 项目电脑；deploy/import/diagnostic 类按说明在目标服务器运行。</dd>
+            <dt>使用场景：</dt><dd>执行“跨主机打包、同步、导入、诊断、制品与分析工具”中的明确操作步骤；不要把一次子步骤当作完整发布。</dd>
+            <dt>前置条件：</dt><dd>项目、设备范围、运行后端、权限和输入身份已确认；任何 destructive/remote 动作先完成本地 proof 和只读检查。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B tools/fleet_engine.py [options]</dd>
+            <dt>主要参数：</dt><dd>该入口没有可静态提取的长选项；以文件头、所属 README 和实际 --help 为准。</dd>
+            <dt>输入：</dt><dd>所属场景的项目输入、设备清单、受信 archive/制品或运行日志；正式写入前必须完成 preflight。</dd>
+            <dt>输出/状态：</dt><dd>命令日志、退出码以及该脚本声明的配置、报告、归档或运行状态；输出需按 receipt/SHA/health 复核。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，并且脚本打印的后置检查、receipt、状态或生成清单全部通过；仅生成文件不等于部署完成。</dd>
+            <dt>失败恢复：</dt><dd>在第一个失败处停止，保留原日志和 marker；按脚本给出的 NEXT/README 修复后从完整受支持入口重试。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>python3 -B -m py_compile tools/fleet_engine.py  # 仅语法验证；实际运行由上层流程负责</code></pre></div>
+        </details>
+        <details data-script-reference="tools/fleet_fetch_helper.py" class="script-reference">
+          <summary><code>tools/fleet_fetch_helper.py</code> — Package fetch helper for switch fleet jobs; runs ON the switch (owner 2026-10-23)。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>Package fetch helper for switch fleet jobs; runs ON the switch (owner 2026-10-23)。</dd>
+            <dt>是否直接运行：</dt><dd>是，但仅在本节场景和权限边界内；先运行 --help、dry-run、verify-only、doctor 或 status（若提供）。</dd>
+            <dt>运行环境：</dt><dd>通常在 canonical 项目电脑；deploy/import/diagnostic 类按说明在目标服务器运行。</dd>
+            <dt>使用场景：</dt><dd>执行“跨主机打包、同步、导入、诊断、制品与分析工具”中的明确操作步骤；不要把一次子步骤当作完整发布。</dd>
+            <dt>前置条件：</dt><dd>项目、设备范围、运行后端、权限和输入身份已确认；任何 destructive/remote 动作先完成本地 proof 和只读检查。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B tools/fleet_fetch_helper.py [options]</dd>
+            <dt>主要参数：</dt><dd>该入口没有可静态提取的长选项；以文件头、所属 README 和实际 --help 为准。</dd>
+            <dt>输入：</dt><dd>所属场景的项目输入、设备清单、受信 archive/制品或运行日志；正式写入前必须完成 preflight。</dd>
+            <dt>输出/状态：</dt><dd>命令日志、退出码以及该脚本声明的配置、报告、归档或运行状态；输出需按 receipt/SHA/health 复核。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，并且脚本打印的后置检查、receipt、状态或生成清单全部通过；仅生成文件不等于部署完成。</dd>
+            <dt>失败恢复：</dt><dd>在第一个失败处停止，保留原日志和 marker；按脚本给出的 NEXT/README 修复后从完整受支持入口重试。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>python3 -B tools/fleet_fetch_helper.py --help</code></pre></div>
+        </details>
+        <details data-script-reference="tools/fleet_link.py" class="script-reference">
+          <summary><code>tools/fleet_link.py</code> — ztp-server egress link speed for switch fleet jobs (IB upgrade v2; reusable for nvl-sw; owner 2026-10-23)。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>ztp-server egress link speed for switch fleet jobs (IB upgrade v2; reusable for nvl-sw; owner 2026-10-23)。</dd>
+            <dt>是否直接运行：</dt><dd>是，但仅在本节场景和权限边界内；先运行 --help、dry-run、verify-only、doctor 或 status（若提供）。</dd>
+            <dt>运行环境：</dt><dd>通常在 canonical 项目电脑；deploy/import/diagnostic 类按说明在目标服务器运行。</dd>
+            <dt>使用场景：</dt><dd>执行“跨主机打包、同步、导入、诊断、制品与分析工具”中的明确操作步骤；不要把一次子步骤当作完整发布。</dd>
+            <dt>前置条件：</dt><dd>项目、设备范围、运行后端、权限和输入身份已确认；任何 destructive/remote 动作先完成本地 proof 和只读检查。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B tools/fleet_link.py [options]</dd>
+            <dt>主要参数：</dt><dd>该入口没有可静态提取的长选项；以文件头、所属 README 和实际 --help 为准。</dd>
+            <dt>输入：</dt><dd>所属场景的项目输入、设备清单、受信 archive/制品或运行日志；正式写入前必须完成 preflight。</dd>
+            <dt>输出/状态：</dt><dd>命令日志、退出码以及该脚本声明的配置、报告、归档或运行状态；输出需按 receipt/SHA/health 复核。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，并且脚本打印的后置检查、receipt、状态或生成清单全部通过；仅生成文件不等于部署完成。</dd>
+            <dt>失败恢复：</dt><dd>在第一个失败处停止，保留原日志和 marker；按脚本给出的 NEXT/README 修复后从完整受支持入口重试。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>python3 -B -m py_compile tools/fleet_link.py  # 仅语法验证；实际运行由上层流程负责</code></pre></div>
+        </details>
+        <details data-script-reference="tools/fleet_probe.py" class="script-reference">
+          <summary><code>tools/fleet_probe.py</code> — Reboot probing for switch fleet jobs (IB upgrade v2; reusable for nvl-sw; owner 2026-10-23, review 15.4-15.5, 15.12)。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>Reboot probing for switch fleet jobs (IB upgrade v2; reusable for nvl-sw; owner 2026-10-23, review 15.4-15.5, 15.12)。</dd>
+            <dt>是否直接运行：</dt><dd>是，但仅在本节场景和权限边界内；先运行 --help、dry-run、verify-only、doctor 或 status（若提供）。</dd>
+            <dt>运行环境：</dt><dd>通常在 canonical 项目电脑；deploy/import/diagnostic 类按说明在目标服务器运行。</dd>
+            <dt>使用场景：</dt><dd>执行“跨主机打包、同步、导入、诊断、制品与分析工具”中的明确操作步骤；不要把一次子步骤当作完整发布。</dd>
+            <dt>前置条件：</dt><dd>项目、设备范围、运行后端、权限和输入身份已确认；任何 destructive/remote 动作先完成本地 proof 和只读检查。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B tools/fleet_probe.py [options]</dd>
+            <dt>主要参数：</dt><dd>该入口没有可静态提取的长选项；以文件头、所属 README 和实际 --help 为准。</dd>
+            <dt>输入：</dt><dd>所属场景的项目输入、设备清单、受信 archive/制品或运行日志；正式写入前必须完成 preflight。</dd>
+            <dt>输出/状态：</dt><dd>命令日志、退出码以及该脚本声明的配置、报告、归档或运行状态；输出需按 receipt/SHA/health 复核。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，并且脚本打印的后置检查、receipt、状态或生成清单全部通过；仅生成文件不等于部署完成。</dd>
+            <dt>失败恢复：</dt><dd>在第一个失败处停止，保留原日志和 marker；按脚本给出的 NEXT/README 修复后从完整受支持入口重试。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>python3 -B -m py_compile tools/fleet_probe.py  # 仅语法验证；实际运行由上层流程负责</code></pre></div>
+        </details>
+        <details data-script-reference="tools/fleet_ssh.py" class="script-reference">
+          <summary><code>tools/fleet_ssh.py</code> — SSH sessions for switch fleet jobs (IB upgrade v2 first; nvl-sw later; owner 2026-10-23)。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>SSH sessions for switch fleet jobs (IB upgrade v2 first; nvl-sw later; owner 2026-10-23)。</dd>
+            <dt>是否直接运行：</dt><dd>是，但仅在本节场景和权限边界内；先运行 --help、dry-run、verify-only、doctor 或 status（若提供）。</dd>
+            <dt>运行环境：</dt><dd>通常在 canonical 项目电脑；deploy/import/diagnostic 类按说明在目标服务器运行。</dd>
+            <dt>使用场景：</dt><dd>执行“跨主机打包、同步、导入、诊断、制品与分析工具”中的明确操作步骤；不要把一次子步骤当作完整发布。</dd>
+            <dt>前置条件：</dt><dd>项目、设备范围、运行后端、权限和输入身份已确认；任何 destructive/remote 动作先完成本地 proof 和只读检查。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B tools/fleet_ssh.py [options]</dd>
+            <dt>主要参数：</dt><dd>该入口没有可静态提取的长选项；以文件头、所属 README 和实际 --help 为准。</dd>
+            <dt>输入：</dt><dd>所属场景的项目输入、设备清单、受信 archive/制品或运行日志；正式写入前必须完成 preflight。</dd>
+            <dt>输出/状态：</dt><dd>命令日志、退出码以及该脚本声明的配置、报告、归档或运行状态；输出需按 receipt/SHA/health 复核。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，并且脚本打印的后置检查、receipt、状态或生成清单全部通过；仅生成文件不等于部署完成。</dd>
+            <dt>失败恢复：</dt><dd>在第一个失败处停止，保留原日志和 marker；按脚本给出的 NEXT/README 修复后从完整受支持入口重试。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>python3 -B -m py_compile tools/fleet_ssh.py  # 仅语法验证；实际运行由上层流程负责</code></pre></div>
         </details>
         <details data-script-reference="tools/generation_report.py" class="script-reference">
           <summary><code>tools/generation_report.py</code> — REQ-16 R16-9: record the public keys actually published for a release。</summary>
@@ -14844,6 +15188,24 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           </dl>
           <p><strong>示例：</strong></p>
           <pre><code>python3 -B -m py_compile tools/ibsw_upgrade_scp.py  # 仅语法验证；实际运行由上层流程负责</code></pre></div>
+        </details>
+        <details data-script-reference="tools/ibsw_v2_device.py" class="script-reference">
+          <summary><code>tools/ibsw_v2_device.py</code> — IB switch (NVOS ib-sw) adapter for the fleet engine: upgrade v2 (owner 2026-10-23; review 15.1-15.13)。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>IB switch (NVOS ib-sw) adapter for the fleet engine: upgrade v2 (owner 2026-10-23; review 15.1-15.13)。</dd>
+            <dt>是否直接运行：</dt><dd>是，但仅在本节场景和权限边界内；先运行 --help、dry-run、verify-only、doctor 或 status（若提供）。</dd>
+            <dt>运行环境：</dt><dd>通常在 canonical 项目电脑；deploy/import/diagnostic 类按说明在目标服务器运行。</dd>
+            <dt>使用场景：</dt><dd>执行“跨主机打包、同步、导入、诊断、制品与分析工具”中的明确操作步骤；不要把一次子步骤当作完整发布。</dd>
+            <dt>前置条件：</dt><dd>项目、设备范围、运行后端、权限和输入身份已确认；任何 destructive/remote 动作先完成本地 proof 和只读检查。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B tools/ibsw_v2_device.py [options]</dd>
+            <dt>主要参数：</dt><dd>该入口没有可静态提取的长选项；以文件头、所属 README 和实际 --help 为准。</dd>
+            <dt>输入：</dt><dd>所属场景的项目输入、设备清单、受信 archive/制品或运行日志；正式写入前必须完成 preflight。</dd>
+            <dt>输出/状态：</dt><dd>命令日志、退出码以及该脚本声明的配置、报告、归档或运行状态；输出需按 receipt/SHA/health 复核。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，并且脚本打印的后置检查、receipt、状态或生成清单全部通过；仅生成文件不等于部署完成。</dd>
+            <dt>失败恢复：</dt><dd>在第一个失败处停止，保留原日志和 marker；按脚本给出的 NEXT/README 修复后从完整受支持入口重试。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>python3 -B -m py_compile tools/ibsw_v2_device.py  # 仅语法验证；实际运行由上层流程负责</code></pre></div>
         </details>
         <details data-script-reference="tools/import-from-download.py" class="script-reference">
           <summary><code>tools/import-from-download.py</code> — Safely review/import legacy downloads and immutable V3 finished bundles。</summary>

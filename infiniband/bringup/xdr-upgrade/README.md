@@ -1,5 +1,46 @@
 # InfiniBand 交换机统一升级脚本
 
+## v2 入口：upgrade2.py（2026-10-23，与下面的 upgrade.py 并存）
+
+`upgrade2.py` 是新的升级引擎。输入、凭据、金丝雀规则、预检和验证标准与 `upgrade.py` 相同，
+`upgrade.py` 本身不变；只读巡检仍用 `upgrade.py --inspect-only`。真实设备验收 NOT RUN，
+见 `test_cases/REAL_ENVIRONMENT.md` 的 `TC-REAL-IBSW-V2-001`。
+
+```bash
+python3 -B upgrade2.py --project <项目目录>                       # 只出计划，不写交换机
+python3 -B upgrade2.py --project <项目目录> --os --upgrade -y      # 升级 OS
+python3 -B upgrade2.py --project <项目目录> --devices 'spine*' --upgrade -y
+```
+
+- **先判定 ztp-server 接口速率**（问密码、连设备之前），打印一行 `[LINK]`：
+  - 低于 10G：OS 镜像按 OOB leaf 接力。每组只从 ztp-server 拉一份，其余由已拿到的交换机用 scp + 密码传给同组，每台同时最多供 4 台；
+  - 10G 到 100G 以下：每台直接从 ztp-server 拉，错峰窗口 `60 × ceil(N/16)` 秒，同时下载不超过接口 Gbps × 0.8；
+  - 100G 及以上：错峰窗口 `60 × ceil(N/32)` 秒，不设并发上限；
+  - 判定不了的接口栈按 1G 处理（接力）；`--server-link` 可以指定。
+- **OOB 分组**来自 `--p2p`（默认项目里的 `p2p.xlsx`）中每台 eth0/mgmt 的对端，打印一行 `[GROUPS]`。
+- **所有包都先暂存再安装**：OS、BIOS、CPLD 都先放到 `/home/admin` 并在交换机上校验 sha256，
+  再用 `local` 方法安装。`--method http|scp` 只决定交换机从 ztp-server 拉包的方式。
+- **主进程加三类 worker**：检查（预检、验证，验证优先）、升级（OS/BIOS/CPLD 各一池，脚本启动即交出设备）、
+  探测。探测分两个队列：
+  - upgrading Q：每 30 秒 ping，每 2 分钟 SSH 读 boot_id 和脚本状态；
+  - rebooting Q：每 15 秒 ping → TCP/22 → SSH 读 boot_id → nvued → `nv show system version`；
+  - 第 5 步成功后交回主进程，安排验证。
+- **超时只算设备时间**：下发到就绪 60 分钟、upgrading Q 停留 30 分钟、就绪检查 10 分钟，都从下发起累计；
+  在本机排队的时间只记录，不计入。
+- **进度**每 30 秒一块：`main` 显示未处理的事件数，`check`、`upgrade`、`probe`、`distrib` 各显示忙碌数、排队数和最长等待；
+  另外列出停留过久的设备。
+- **防重复下发**：下发前在同一会话内复查。设备上还有升级步骤在跑记 BUSY；本次开机以来请求过安装记
+  `PREVIOUS_INSTALL_PENDING`。两者都不下发，记 REVIEW_REQUIRED。发出启动命令前先写 `dispatch.json`（REQUESTED）。
+- **Ctrl-C**：第一次停止新的分发和下发，继续跟踪在途设备直到有结果；第二次立即退出，在途设备记 UNKNOWN。
+- **证据**在 `<项目>/99-output-ib_nvl/bringup/xdr-upgrade-v2-logs/<运行编号>/`，与 v1 的运行目录分开。
+- **退出码**：0 全部完成，3 有未完成的设备，2 整批停止（HOLD），75 另一个升级或初始化正在运行，130 中止。
+- **模块分层**（以后 nvl-sw 的配置和升级可以直接复用）：
+  - 通用部分：`tools/fleet_engine.py`（主进程、worker 池、证据、进度）、`fleet_probe.py`、`fleet_distribution.py`、
+    `fleet_link.py`、`fleet_ssh.py`、`fleet_fetch_helper.py`（交换机上的取包助手）；
+  - IB 专用部分：`tools/ibsw_v2_device.py`（`IbFamily` 和 `LiveOps`）、本目录的 `ibsw-v2-check.sh`（通过 SSH stdin 执行，不留文件）；
+  - 新设备族只需提供自己的 Family、ops 和检查脚本；不重启的作业（如只改配置）走同一套探测，脚本退出 0 即就绪。
+- 落地设计见 [V2-DESIGN.md](V2-DESIGN.md)。测试域 `fleet-upgrade-v2` 用本机模拟交换机，不连真机。
+
 ## 当前入口：IBSW 2.25 本地集成
 
 开发代码继承与独立测试见 [IBSW Upgrade 开发测试交接](HANDOFF-CODEX-TEST.md)。
