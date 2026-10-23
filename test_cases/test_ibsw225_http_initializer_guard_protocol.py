@@ -14,6 +14,7 @@ import io
 import os
 from pathlib import Path
 import sys
+import sysconfig
 import tempfile
 from types import ModuleType
 import unittest
@@ -21,6 +22,24 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 INITIAL = ROOT / "infiniband/bringup/xdr-initial-setup/initial-setup.py"
+
+
+def _is_standard_library(name):
+    """sys.stdlib_module_names where it exists (3.10+); on 3.9, built-in or
+    found under the interpreter's own stdlib directory outside site-packages."""
+    names = getattr(sys, "stdlib_module_names", None)
+    if names is not None:
+        return name in names
+    if not name:
+        return False
+    if name in sys.builtin_module_names:
+        return True
+    spec = importlib.util.find_spec(name)
+    if spec is None or not spec.origin or spec.origin in {"built-in", "frozen"}:
+        return spec is not None and spec.origin in {"built-in", "frozen"}
+    stdlib = Path(sysconfig.get_paths()["stdlib"]).resolve()
+    origin = Path(spec.origin).resolve()
+    return stdlib in origin.parents and "site-packages" not in origin.parts
 UPGRADE = ROOT / "infiniband/bringup/xdr-upgrade/upgrade.py"
 FIXED_SYSTEM_LOCK = Path("/tmp/http-ib-bringup.runtime.lock")
 
@@ -91,7 +110,7 @@ class HttpInitializerGuardProtocolTests(unittest.TestCase):
                 roots.add((statement.module or "").split(".")[0])
         self.assertNotIn("tools", roots)
         self.assertFalse(any(name.startswith("ibsw") for name in roots))
-        self.assertTrue(roots <= sys.stdlib_module_names,
+        self.assertEqual(set(), {root for root in roots if not _is_standard_library(root)},
             "Supported Leaf single-file initializer must retain standard-library-only imports")
 
     def test_literal_portable_initializer_entry_and_unchanged_method_cycle_signature(self):

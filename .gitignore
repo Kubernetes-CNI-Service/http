@@ -63,6 +63,7 @@ id_ecdsa*
 *.log
 *.lock
 !requirements-container-top-level.lock
+!requirements-f01-ssh.lock
 
 # Working design documents kept at repository root.  Sibling *.log files are
 # covered above by extension; a .md working document is not, so it is named

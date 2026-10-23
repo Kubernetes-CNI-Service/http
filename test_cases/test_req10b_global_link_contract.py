@@ -29,6 +29,8 @@ EXPECTED_WORKSPACE_INPUTS = {
     ("infra/logs", "99-output-infra", "dir"),
     ("monitor/01-global.yaml", "01-global.yaml", "file"),
     GLOBAL_MAPPING,
+    # IBSW 2.25 (4693d8d): upgrade.py reads 01-global.yaml next to itself.
+    ("infiniband/bringup/xdr-upgrade/01-global.yaml", "01-global.yaml", "file"),
 }
 
 

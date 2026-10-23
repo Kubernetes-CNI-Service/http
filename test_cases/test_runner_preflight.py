@@ -64,11 +64,14 @@ class PreflightFixture(unittest.TestCase):
                          "PYTHONPYCACHEPREFIX": str(self.base / "pycache"),
                          "PF_CHILD_MARKER": str(self.marker)})
         self.write("test_cases/__init__.py", "")
-        for relative in ("tools/project_contract.py", "tools/req7_dependency_contract.py", "test_cases/run_related_tests.py",
+        for relative in ("tools/project_contract.py", "tools/req7_dependency_contract.py",
+                         "tools/req7_cable_dependency_contract.py", "test_cases/run_related_tests.py",
                          "test_cases/test_public_publication_workflow.py",
                          "requirements-container-top-level.lock",
                          "infra/docker/req7-dependency-policy.json",
-                         "infra/docker/requirements-req7-online.txt"):
+                         "infra/docker/requirements-req7-online.txt",
+                         "infra/docker/req7-cable-dependency-policy.json",
+                         "infra/docker/requirements-req7-cable-sync.txt"):
             self.write(relative, (ROOT / relative).read_bytes())
         marker_test = (
             "import os, unittest\nfrom pathlib import Path\n"
@@ -86,7 +89,8 @@ class PreflightFixture(unittest.TestCase):
                    "def image_source_paths(root): return ()\n")
         self.write("tools/_package_common.py",
                    "def deployment_archive_source_paths(root): return ()\n")
-        scripts = {p: p for p in ("tools/project_contract.py", "tools/req7_dependency_contract.py", "tools/sync-code.py",
+        scripts = {p: p for p in ("tools/project_contract.py", "tools/req7_dependency_contract.py",
+                                  "tools/req7_cable_dependency_contract.py", "tools/sync-code.py",
                                   "infra/docker/activate.py", "tools/_package_common.py")}
         manifest = {
             "schema_version": 1, "baseline_tests": [D], "scripts": scripts,
@@ -98,9 +102,13 @@ class PreflightFixture(unittest.TestCase):
             "test_rules": [{"id": "fixture-direct", "paths": list(scripts), "tests": [D]}],
             "workflows": [{"id": "fixture-workflow", "members": list(scripts), "tests": [D]}],
             "tracked_support": ["test_cases/run_related_tests.py", "requirements-container-top-level.lock",
-                                "infra/docker/req7-dependency-policy.json", "infra/docker/requirements-req7-online.txt"],
+                                "infra/docker/req7-dependency-policy.json", "infra/docker/requirements-req7-online.txt",
+                                "infra/docker/req7-cable-dependency-policy.json",
+                                "infra/docker/requirements-req7-cable-sync.txt"],
             "path_rules": [{"paths": ["test_cases/run_related_tests.py", "requirements-container-top-level.lock",
-                                     "infra/docker/req7-dependency-policy.json", "infra/docker/requirements-req7-online.txt"],
+                                     "infra/docker/req7-dependency-policy.json", "infra/docker/requirements-req7-online.txt",
+                                     "infra/docker/req7-cable-dependency-policy.json",
+                                     "infra/docker/requirements-req7-cable-sync.txt"],
                             "full_suite": True}],
         }
         self.write("test_cases/script_test_manifest.json", json.dumps(manifest))

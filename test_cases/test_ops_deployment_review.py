@@ -1052,6 +1052,8 @@ class SetupUnloadAndTransportTests(unittest.TestCase):
             "ethernet/monitor/eth.csv",
             "infiniband/monitor/ib.csv",
             "nvlink/monitor/nvsw.csv",
+            # IBSW 2.25 (4693d8d): the upgrade's inventory alias is one more NETWORK_INVENTORY_LINKS entry.
+            "infiniband/bringup/xdr-upgrade/ib.csv",
         )
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1067,7 +1069,7 @@ class SetupUnloadAndTransportTests(unittest.TestCase):
                 SETUP._process_monitor_links(str(project))
                 errors = SETUP._LINK_ERRORS
 
-            self.assertEqual(3, errors)
+            self.assertEqual(len(expected), errors)
             for relative in expected:
                 with self.subTest(alias=relative):
                     self.assertFalse(os.path.lexists(root / relative))

@@ -15,7 +15,7 @@ LEGACY = '**以下正文保留旧 shell 版本历史，旧传输菜单、参数�
 
 class NativeScpLandingDocumentationTests(unittest.TestCase):
     def test_current_operator_and_handoff_preserve_fixed_source_contract(self):
-        readme = (DOC_ROOT / UPGRADE / 'README.md').read_text()
+        readme = (DOC_ROOT / 'infiniband/bringup/xdr-upgrade/README.md').read_text()
         self.assertEqual(readme.count(LEGACY), 1)
         current = readme.split(LEGACY)[0]
         handoff = (DOC_ROOT / UPGRADE / 'HANDOFF-CODEX-TEST.md').read_text()
@@ -44,7 +44,7 @@ class NativeScpLandingDocumentationTests(unittest.TestCase):
         self.assertIn('FROZEN_SHA256', handoff)
 
     def test_field_evidence_and_release_limits_are_not_promoted_to_acceptance(self):
-        readme = (DOC_ROOT / UPGRADE / 'README.md').read_text().split(LEGACY)[0]
+        readme = (DOC_ROOT / 'infiniband/bringup/xdr-upgrade/README.md').read_text().split(LEGACY)[0]
         handoff = (DOC_ROOT / UPGRADE / 'HANDOFF-CODEX-TEST.md').read_text()
         real = (DOC_ROOT / 'test_cases/REAL_ENVIRONMENT.md').read_text()
         heading = '## TC-IBSW3-NATIVE-SCP-LIFECYCLE-20261020 — NOT RUN'

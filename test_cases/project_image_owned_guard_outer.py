@@ -32,8 +32,8 @@ def _exact_launch(argv, env, archive_fd, archive_key):
     if (type(python) is not str or not posixpath.isabs(python)
             or posixpath.normpath(python) != python or '\0' in python):
         raise GuardOuterHold('original runtime interpreter identity required')
-    bootstrap_sha = 'cd1802da572565c837228ca21a294584d073369d2e4eacf34579f1c0509db120'
-    guard_sha = '46af60b5b4ed3c3df6e3ad0f0a0b1fee5c8af60ceea8c6e60e08de5580481256'
+    bootstrap_sha = '79f0c06d882ae3d337a26b27f944566731c3f6964ccad80e028a03e74202802d'
+    guard_sha = '0b293410b466ce5fd41d63faa51b9843b7adec42b1379eca292fc17a0171ad33'
     if (len(argv) != 18 or any(type(s) is not str for s in argv)
             or argv[:5] != [python, '-I', '-S', '-B', '-c']
             or hashlib.sha256(argv[5].encode()).hexdigest() != bootstrap_sha

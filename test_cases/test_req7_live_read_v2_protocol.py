@@ -1,3 +1,5 @@
+"""REQ7 fixed-read v2: direct contract of the live-read protocol codec (capacity ack shape, strict framing)."""
+
 import hashlib
 import importlib
 import importlib.util

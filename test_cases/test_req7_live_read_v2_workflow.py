@@ -1,3 +1,5 @@
+"""REQ7 fixed-read v2: workflow over a real owned child process with shared clocks, failures and cleanup."""
+
 import copy
 import errno
 import hashlib

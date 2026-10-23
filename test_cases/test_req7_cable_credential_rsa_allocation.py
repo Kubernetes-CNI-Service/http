@@ -2,7 +2,9 @@
 import importlib.machinery
 import importlib.util
 import json
+import os
 from pathlib import Path
+import subprocess
 import sys
 import unittest
 from test_cases import issue_tracker_cable_post_c6_fixture as old
@@ -11,11 +13,44 @@ from test_cases import test_req7_cable_read_owner_core as core_test
 from test_cases import test_req7_cable_credential_construction as direct
 
 
+ROOT = Path(__file__).resolve().parents[1]
+# Assigning __new__ on a class leaves CPython's tp_new at slot_tp_new even after
+# the descriptor is deleted or restored (update_one_slot reuses the current
+# tp_new for object.__new__), so later RSASigner(...) calls in the same process
+# hit object.__new__ with arguments.  The mutating phase therefore runs only in
+# a fresh child interpreter; the parent asserts the child's full result.
+_CHILD = 'HTTP_TEST_REQ7_RSA_ALLOCATION_CHILD'
+_TEST_ID = (__name__ + '.RsaAllocationOriginWorkflowTests.'
+            'test_healthy_then_two_changed_RSA_allocation_slots_refuse_before_entry')
+
+
 class RsaAllocationOriginWorkflowTests(unittest.TestCase):
     healthy_source = core_test.CableReadOwnerCoreTests.healthy_source
     observed_owners = core_test.CableReadOwnerCoreTests.observed_owners
 
     def test_healthy_then_two_changed_RSA_allocation_slots_refuse_before_entry(self):
+        if os.environ.get(_CHILD) == '1':
+            return self._mutating_phase_in_this_interpreter()
+        child = subprocess.run(
+            [sys.executable, '-B', '-m', 'unittest', '-v', _TEST_ID],
+            cwd=ROOT, env={**os.environ, _CHILD: '1'},
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=900)
+        report = child.stdout + child.stderr
+        self.assertEqual(0, child.returncode, report)
+        self.assertIn('Ran 1 test', report)
+        self.assertRegex(report, r'(?m)^OK$')
+        self.assertEqual(1, report.count('ACTUAL_RSA_ALLOCATION_HEALTHY_CONTROL='), report)
+        observations = [json.loads(line.split('=', 1)[1]) for line in report.splitlines()
+                        if line.startswith('MODIFIED_RSA_ALLOCATION_OBSERVATION=')]
+        self.assertEqual(['RSA_WRAPPER_NEW', 'RSA_IMPLEMENTATION_NEW'],
+                         [item['provider'] for item in observations], report)
+        for item in observations:
+            self.assertEqual((0, False, True, True, 0, 0, 0),
+                             (item['modified_entries'], item['handle_yielded'], item['refused'],
+                              item['known_fds_closed'], item['sheet_active'],
+                              item['network_calls'], item['child_calls']), item)
+
+    def _mutating_phase_in_this_interpreter(self):
         direct.entry(self)
         def body(runtime, _core, reader, sheet, case, inputs):
             function = runtime._hold_current_cable_sdk_credential_prerequisite

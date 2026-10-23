@@ -252,8 +252,9 @@ def write_bundled_payload(
     return bundled
 
 
-OWNED_NATIVE_GUARD_BOOTSTRAP_SHA256 = 'cd1802da572565c837228ca21a294584d073369d2e4eacf34579f1c0509db120'
-OWNED_NATIVE_GUARD_SOURCE_SHA256 = '46af60b5b4ed3c3df6e3ad0f0a0b1fee5c8af60ceea8c6e60e08de5580481256'
+# 2026-10-23 owner load->collection: the guard's monitor flag allow-list gained --request-collection-on-complete (guard was 46af60b5b4ed…, bootstrap cd1802da5725…).
+OWNED_NATIVE_GUARD_BOOTSTRAP_SHA256 = '79f0c06d882ae3d337a26b27f944566731c3f6964ccad80e028a03e74202802d'
+OWNED_NATIVE_GUARD_SOURCE_SHA256 = '0b293410b466ce5fd41d63faa51b9843b7adec42b1379eca292fc17a0171ad33'
 OWNED_NATIVE_GUARD_BOOTSTRAP_SOURCE = r'''# SOURCE-ONLY TEST BOOTSTRAP. NOT INSTALLED, IMPORTED OR EXECUTED.
 # The parent test supplies a separately frozen literal bootstrap SHA.
 import builtins
@@ -271,7 +272,7 @@ import sys
 import tempfile
 import threading
 
-GUARD_SHA256 = '46af60b5b4ed3c3df6e3ad0f0a0b1fee5c8af60ceea8c6e60e08de5580481256'
+GUARD_SHA256 = '0b293410b466ce5fd41d63faa51b9843b7adec42b1379eca292fc17a0171ad33'
 MODULE_NAME = '_test_owned_complete_verified_guard'
 FILE_FIELDS = ('st_dev', 'st_ino', 'st_mode', 'st_nlink', 'st_uid', 'st_gid',
                'st_size', 'st_mtime_ns', 'st_ctime_ns')
