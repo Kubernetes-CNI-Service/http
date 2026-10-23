@@ -376,6 +376,29 @@ class PublicRepositoryAuditContractTest(unittest.TestCase):
         self.write("config/.env.production", "MODE=example\n")
         self.assert_rejected(self.audit(), "sensitive-path")
 
+    def test_python_names_after_credential_keywords_are_code_not_literals(self):
+        """Owner 2026-10-23: a keyword argument that passes a variable named like a credential
+        (the password or api key keyword given a Python name) carries no secret value."""
+        call = ("connect(host, pass" + "word=pass" + "word, api" + "_key=self.api" + "_key, "
+                "timeout=5)\n")
+        self.write("src/client.py", "self.pass" + "word = pass" + "word\n" + call)
+        result = self.audit()
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        literal = "Correct" + "Horse" + "Battery9"
+        for name, text in (
+            ("src/embedded.py", 'CONFIG = """\n' + "pass" + "word=" + literal + '\n"""\n'),
+            ("src/comment.py", "# pass" + "word=" + literal + "\n"),
+            ("src/number.py", "connect(pass" + "word=12345678, timeout=5)\n"),
+            ("src/settings.cfg", "pass" + "word=" + literal + "\n"),
+            ("src/mixed.py", "connect(pass" + "word=pass" + "word, api" + "_key=" + literal + ", x=1)\n"),
+        ):
+            with self.subTest(file=name):
+                path = self.write(name, text)
+                result = self.audit()
+                self.assert_rejected(result, "cleartext-credential")
+                self.assertNotIn(literal, result.stdout + result.stderr)
+                path.unlink()
+
     def test_cleartext_credential_and_rounds_password_hash_are_rejected(self):
         credential = "correct-" + "horse-battery-staple"
         assignment = "pass" + "word = " + repr(credential) + "\n"

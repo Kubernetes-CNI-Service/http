@@ -13,6 +13,7 @@ import argparse
 import base64
 from dataclasses import dataclass
 import hashlib
+import io
 import ipaddress
 import json
 import os
@@ -23,6 +24,7 @@ import stat
 import struct
 import subprocess
 import sys
+import tokenize
 from typing import Iterable, Sequence
 
 
@@ -315,6 +317,17 @@ PATH_CREDENTIAL_RE = re.compile(
     rb"(?i)(?<![A-Za-z0-9_-])"
     rb"(?:password|passwd|secret|api[_-]?key|access[_-]?token)="
     rb"[^/\\]{6,}"
+)
+
+# Owner-authorized 2026-10-23: in Python source an unquoted value after
+# "password=" / "api_key=" is code, never a literal: a variable or attribute
+# (``password=password``, ``api_key=self.api_key``) carries no secret.  It is
+# exempt only when the tokenizer places a NAME token exactly at the value, so a
+# value inside a string, a comment or embedded config text, a number, and every
+# non-Python file are still rejected.
+PYTHON_SOURCE_SUFFIXES = (".py", ".py.txt")
+PYTHON_NAME_CHAIN_RE = re.compile(
+    rb"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*"
 )
 
 DOCUMENTATION_SUFFIXES = frozenset({".md", ".rst"})
@@ -674,8 +687,33 @@ def _public_factory_verifier_file_exact(
     return True
 
 
+def python_name_positions(relative: str, data: bytes) -> frozenset | None:
+    """(line, character column) of every NAME token, or None when the path is
+    not Python source or does not tokenize (then nothing is exempt)."""
+    if not relative.lower().endswith(PYTHON_SOURCE_SUFFIXES):
+        return None
+    try:
+        return frozenset(
+            token.start
+            for token in tokenize.tokenize(io.BytesIO(data).readline)
+            if token.type == tokenize.NAME
+        )
+    except (tokenize.TokenError, SyntaxError, UnicodeDecodeError, LookupError):
+        return None
+
+
+def unquoted_value_is_python_name(
+    line: bytes, match: re.Match, line_number: int, names: frozenset | None,
+) -> bool:
+    if names is None or not PYTHON_NAME_CHAIN_RE.fullmatch(match.group(1)):
+        return False
+    column = len(line[: match.start(1)].decode("utf-8", errors="replace"))
+    return (line_number, column) in names
+
+
 def scan_content(relative: str, data: bytes) -> list[Finding]:
     _validate_factory_verifier_authority()
+    python_names = python_name_positions(relative, data)
     findings: list[Finding] = []
     lines_with_endings = data.splitlines(keepends=True)
     factory_file_changed = (
@@ -721,7 +759,15 @@ def scan_content(relative: str, data: bytes) -> list[Finding]:
         if any(pattern.search(line) for pattern in TOKEN_RES):
             findings.append(Finding("token", relative, "access token is not public", line_number))
         credential = CLEARTEXT_CREDENTIAL_RE.search(line)
-        unquoted_credential = CLEARTEXT_UNQUOTED_CREDENTIAL_RE.search(line)
+        unquoted_credential = next(
+            (
+                match for match in CLEARTEXT_UNQUOTED_CREDENTIAL_RE.finditer(line)
+                if not unquoted_value_is_python_name(
+                    line, match, line_number, python_names,
+                )
+            ),
+            None,
+        )
         if credential is not None or unquoted_credential is not None:
             value = (
                 credential.group(2)
