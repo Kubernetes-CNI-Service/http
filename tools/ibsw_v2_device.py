@@ -840,7 +840,21 @@ class LiveOps:
         return result
 
     def verify(self, device, step, *, boot_after, before, baseline_health, backup, journal):
-        """VERIFIED / UNKNOWN / REBOOTED. Repairs only missing configuration, after a durable request."""
+        """VERIFIED / UNKNOWN / REBOOTED. Repairs only missing configuration, after a durable request.
+
+        An SshError leaving here carries `repair_requested`: whether this attempt had already asked for
+        repair-requested.json to be written. The engine retries a timed-out verification only when it had
+        not (owner 2026-10-23), so a repair is never resent automatically."""
+        attempt = {"repair_requested": False}
+        try:
+            return self._verify_once(device, step, boot_after=boot_after, before=before,
+                                     baseline_health=baseline_health, backup=backup, journal=journal,
+                                     attempt=attempt)
+        except ssh.SshError as error:
+            error.repair_requested = attempt["repair_requested"]
+            raise
+
+    def _verify_once(self, device, step, *, boot_after, before, baseline_health, backup, journal, attempt):
         record_restore = (lambda current, merged: journal("access-restore-requested.json", dict(
             state="RESTORE_REQUESTED", current_base64=base64.b64encode(current).decode(),
             desired_sha256=hashlib.sha256(merged).hexdigest())))
@@ -855,6 +869,7 @@ class LiveOps:
             state, reason, difference = assess(self.policy, step, facts, before=before,
                                                baseline_health=baseline_health, force_health=self.force_health)
             if state == "REPAIR":
+                attempt["repair_requested"] = True                 # set before the write: never under-reported
                 journal("repair-requested.json", dict(state="REPAIR_REQUESTED", missing=list(difference.missing)))
                 rows = []
                 try:

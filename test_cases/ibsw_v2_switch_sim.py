@@ -6,7 +6,8 @@ tools/ibsw_v2_device.py sends run for real with bash on this machine: the check 
 the fetch helper, the v1 component step and the v1 owned runner. `nv action install`
 records the request; the next probe sees the switch go down, come back with a new boot
 id and the new version, then nvued becomes ready. The key login is accepted only when the
-management key is in the switch's authorized_keys file, like a real sshd.
+management key is in the switch's authorized_keys file, like a real sshd. `fail_command`
+makes the n-th matching command raise an SshError (a timed-out query) instead of running.
 """
 import json
 import os
@@ -157,6 +158,23 @@ class LocalSwitch:
         (self.state / "nvued").write_text("running")
         self.lock = threading.Lock()
         self.rebooting_until, self.nvue_at, self.pending_version = None, None, None
+        self.faults = []                                        # [marker, SshError code, occurrences left]
+
+    def fail_command(self, marker, code, *, occurrence=1):
+        """The occurrence-th command whose text contains marker raises SshError(code) instead of running."""
+        with self.lock:
+            self.faults.append([marker, code, occurrence])
+
+    def take_fault(self, command):
+        with self.lock:
+            for fault in self.faults:
+                if fault[0] in command:
+                    fault[2] -= 1
+                    if fault[2] == 0:
+                        self.faults.remove(fault)
+                        return fault[1]
+                    return None
+        return None
 
     def _boot(self, value):
         (self.sysroot / "proc/sys/kernel/random/boot_id").write_text(value + "\n")
@@ -277,6 +295,9 @@ class LocalSession:
         switch = self.switch
         if switch.tick():
             raise ssh.SshError("COMMAND_INCOMPLETE")
+        fault = switch.take_fault(command)
+        if fault is not None:
+            raise ssh.SshError(fault)
         command = (command.replace("/proc/sys/kernel/random/boot_id", str(switch.sysroot / "proc/sys/kernel/random/boot_id"))
                    .replace("/sys/class/net/eth0/address", str(switch.sysroot / "sys/class/net/eth0/address"))
                    .replace("/usr/bin/python3", sys.executable))

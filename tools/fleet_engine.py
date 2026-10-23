@@ -16,11 +16,17 @@ pulls from the ztp-server); a staged switch upgrades
 once the canaries passed and an in-flight slot is free; after the upgrade script starts
 the probe takes over; READY goes to a check worker for verification. Budgets count switch
 time only; time spent queued here is recorded, never charged.
+
+A verification that loses a query to COMMAND_TIMEOUT or CHANNEL_FAILED runs once more per
+step after `verify_retry_seconds`, kept as a main-loop timer (no worker waits), but only when
+the ops said that attempt had not requested a configuration repair: ops.verify sets
+`repair_requested` on the SshError it raises, and an error without it is not retried.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 import hashlib
+import heapq
 import itertools
 import json
 import os
@@ -48,6 +54,7 @@ CATEGORIES = (
 )
 IN_FLIGHT_STATES = {"DISPATCHING", "PROBING", "VERIFYING"}
 WAITING_STATES = {"READY", "NEED_STAGE", "STAGING", "STAGED", "WAIT_SLOT"}
+VERIFY_RETRY_CODES = {"COMMAND_TIMEOUT", "CHANNEL_FAILED"}   # one slow query, not a reboot (owner 2026-10-23)
 
 
 @dataclass(frozen=True)
@@ -69,6 +76,7 @@ class Options:
     progress_seconds: float = 30.0
     later_hop_batch_seconds: float = 60.0
     stall_fraction: float = 2 / 3
+    verify_retry_seconds: float = 30.0
 
 
 @dataclass(frozen=True)
@@ -283,6 +291,7 @@ class Dev:
     performed: list = field(default_factory=list)
     completed: set = field(default_factory=set)
     holds_slot: bool = False
+    verify_retried: bool = False       # this step already used its one verification retry
     need_since: float | None = None
     state_since: float = 0.0
     session: object = None
@@ -318,6 +327,7 @@ class Engine:
         self.started = self.clock()
         self.last_progress = self.started
         self.outstanding = 0
+        self.timers, self.timer_order = [], itertools.count()   # heap of (due, order, action), main loop only
         mode = options.link.mode
         speed = options.link.speed_mbps
         server_cap = (options.link.cap if mode == "direct" else max(1, (speed or 1000) // 1000))
@@ -343,6 +353,15 @@ class Engine:
     def _submit(self, pool, dev, kind, function, *, priority=1, **info):
         self.outstanding += 1
         self.pools[pool].submit(dev.host if dev else "", kind, function, priority=priority, **info)
+
+    def _later(self, delay, action):
+        """Run action() in the main loop once delay seconds have passed."""
+        heapq.heappush(self.timers, (self.clock() + delay, next(self.timer_order), action))
+
+    def _run_timers(self, now):
+        while self.timers and self.timers[0][0] <= now:
+            _due, _order, action = heapq.heappop(self.timers)
+            action()
 
     def _in_flight(self):
         return sum(1 for dev in self.devs.values() if dev.state in IN_FLIGHT_STATES or dev.holds_slot)
@@ -429,6 +448,8 @@ class Engine:
             tracker_wake = self.tracker.next_wake()
             if tracker_wake is not None:
                 wake.append(tracker_wake)
+            if self.timers:
+                wake.append(self.timers[0][0])
             for session in self.sessions:
                 if not session.relay:
                     nxt = session.scheduler.next_wake(now)
@@ -529,7 +550,8 @@ class Engine:
         def settled(dev):
             return (dev.category is not None or dev.state == "READY"
                     or ((self.stopping or self.hold or self.phase_blocked) and dev.state in WAITING_STATES))
-        self._pump(lambda: self.outstanding == 0 and not self.tracker.devices and all(settled(dev) for dev in members))
+        self._pump(lambda: self.outstanding == 0 and not self.tracker.devices and not self.timers
+                   and all(settled(dev) for dev in members))
         for dev in members:
             if dev.category is None and dev.state != "READY":
                 reason = "CANARY_FAILED" if self.phase_blocked else self.hold or "STOPPED"
@@ -539,6 +561,7 @@ class Engine:
     # ------------------------------------------------------------ advance
     def _advance(self):
         now = self.clock()
+        self._run_timers(now)
         if self.phase in self.family.components:
             self._check_packages()
             canary_waiting = self._start_canary_pull(now)
@@ -771,13 +794,7 @@ class Engine:
         if handback.outcome == probe.READY:
             dev.boot_after = handback.boot_id
             self._set(dev, "VERIFYING", boot_id=handback.boot_id, version=handback.version)
-            journal = self.evidence.journal(dev.host)
-            before = dev.dispatch["before_commands"]
-            baseline = dev.dispatch["health_record"]
-            self._submit("check", dev, "verify", lambda: self.ops.verify(
-                dev.device, dev.step, boot_after=dev.boot_after, before=before, baseline_health=baseline,
-                backup=dev.backup, journal=journal), priority=0)
-            return
+            return self._submit_verify(dev)
         if handback.outcome == probe.FAILED:
             self._final(dev, "FAILED", handback.reason)
         elif handback.outcome == probe.REVIEW:
@@ -786,11 +803,39 @@ class Engine:
             self._final(dev, "UNKNOWN", handback.reason, keep_slot=True)
         self._canary_failed(dev)
 
+    def _submit_verify(self, dev):
+        journal = self.evidence.journal(dev.host)
+        before = dev.dispatch["before_commands"]
+        baseline = dev.dispatch["health_record"]
+        self._submit("check", dev, "verify", lambda: self.ops.verify(
+            dev.device, dev.step, boot_after=dev.boot_after, before=before, baseline_health=baseline,
+            backup=dev.backup, journal=journal), priority=0)
+
+    def _retry_verify(self, dev, code):
+        """One more whole verification after a pause, kept as a main-loop timer; the switch keeps its
+        in-flight slot (state VERIFYING) and no check worker waits for it."""
+        dev.verify_retried = True
+        if "VERIFY_RETRIED" not in dev.warnings:
+            dev.warnings.append("VERIFY_RETRIED")
+        delay = self.options.verify_retry_seconds
+        self._set(dev, "VERIFYING", verify_retry=dict(reason=code, delay_seconds=delay))
+        step = dev.step
+
+        def again():
+            if dev.category is None and dev.state == "VERIFYING" and dev.step is step:
+                self._submit_verify(dev)
+        self._later(delay, again)
+
     def _on_verify(self, dev, event):
         if event.error is not None:
-            if isinstance(event.error, SshError) and event.error.reboot_like:
+            error = event.error
+            if isinstance(error, SshError) and error.reboot_like:
                 return self._requeue(dev, "VERIFY_CONNECTION_LOST")
-            self._final(dev, "UNKNOWN", "VERIFY_" + (getattr(event.error, "code", None) or type(event.error).__name__))
+            code = getattr(error, "code", None) or type(error).__name__
+            if (isinstance(error, SshError) and code in VERIFY_RETRY_CODES and not dev.verify_retried
+                    and getattr(error, "repair_requested", True) is False):   # unsaid counts as requested
+                return self._retry_verify(dev, code)
+            self._final(dev, "UNKNOWN", "VERIFY_" + code)
             return self._canary_failed(dev) if dev.canary else None
         result = event.result
         self.evidence.journal(dev.host)(f"verify-{dev.step.stage}.json", dict(
@@ -813,7 +858,7 @@ class Engine:
 
     def _step_done(self, dev, *, performed):
         dev.step_index += 1
-        dev.dispatch, dev.step = None, None
+        dev.dispatch, dev.step, dev.verify_retried = None, None, False
         if dev.current is not None:
             dev.need_since = self.clock()
             self._set(dev, "NEED_STAGE", step=dev.current.key[1:])

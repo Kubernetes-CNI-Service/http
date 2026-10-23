@@ -78,7 +78,13 @@ owner 的判断是：ztp-server 上的并发不是问题，大部分时间花在
   - 配置比对 PASS；只缺少可安全重放的行时，先写 `repair-requested.json`，再 patch → apply → save，然后复核；
   - 健康不变差；
   - 最后新开一个密钥会话，复核 boot_id（FINAL_KEY_ACCESS_CHECK）。
-- 验证不通过记 UNKNOWN，与 v1 一样。
+- 验证不通过记 UNKNOWN，与 v1 一样。只有一个例外：某条查询报 `COMMAND_TIMEOUT` 或 `CHANNEL_FAILED`，而且该次尝试还没写
+  `repair-requested.json` 时，主循环计时 30 秒后把整个验证重跑一次。规则如下：
+  - 每一跳最多重试一次；等待期间不占检查 worker，设备仍占在途名额；
+  - 设备带 `VERIFY_RETRIED` 警告，timeline 记一条 `verify_retry`；
+  - 第二次仍失败记 UNKNOWN（`VERIFY_<code>`）；
+  - 以下情况都不重试：已请求修复、其他错误码（AUTH_REJECTED、HOST_KEY_*、OUTPUT_LIMIT 等）、判定不通过、
+    ops 没有给出 `repair_requested`（按已请求处理）。
 
 ## 5. 防重复下发
 
@@ -191,9 +197,9 @@ owner 的判断是：ztp-server 上的并发不是问题，大部分时间花在
 | `test_fleet_distribution` | P2P 分组；48 台一组四轮且只拉一次服务器；新持有者立即服务；闸门上限与间隔；重试、退役、熔断；排空后放行；直拉错峰与轮转 |
 | `test_fleet_probe` | 安装中、首次 ping 失败、两次 ping 之间重启、误判打回不重置停留、各类状态、三个上限、过期结果、不重启作业 |
 | `test_fleet_ssh` | 进程内 paramiko 服务端：密钥、密码回退、主机密钥固定（含哈希条目、@revoked）、命令超时、与 v1 规则一致 |
-| `test_fleet_engine` | 中性 Family + 模拟设备群：金丝雀先行、组内接力、持有者服务期间不重启、直拉、在途上限、预检分类、只出计划、写前记录失败 HOLD、停止、不重启作业和两跳 |
+| `test_fleet_engine` | 中性 Family + 模拟设备群：金丝雀先行、组内接力、持有者服务期间不重启、直拉、在途上限、预检分类、只出计划、写前记录失败 HOLD、停止、不重启作业和两跳；验证超时重试一次（默认 30 秒、等待期间检查池空闲；已请求修复、未说明、其他错误码和判定不通过都不重试；类重启错误仍回 rebooting Q） |
 | `test_ibsw_v2_device_scripts` | 检查脚本（stdin 执行、读 stdin 的命令吃不掉脚本、步骤目录状态）；取包助手（HTTP 重试、内容不符、空间、目录不安全、scp 只用密码） |
-| `test_ibsw_v2_device` | 安装前失败白名单；BUSY/PENDING；规划与渲染；单台模拟交换机从预检到验证（导入密钥、真实 v1 组件脚本和 runner、重启丢密钥后恢复、修复缺失配置、证据无密码） |
+| `test_ibsw_v2_device` | 安装前失败白名单；BUSY/PENDING；规划与渲染；单台模拟交换机从预检到验证（导入密钥、真实 v1 组件脚本和 runner、重启丢密钥后恢复、修复缺失配置、证据无密码）；验证查询超时或通道失败时异常带 `repair_requested`（修复请求前为假、之后为真） |
 | `test_ibsw_v2_workflow` | 6 台模拟交换机、1G 接力、两跳 OS、v1 金丝雀规则、不可达与已在目标 |
 | `test_ibsw_v2_entry` | `--help`；参数检查；运行守卫；`--plan` 只读；经入口完整升级；证据无密码 |
 
@@ -204,7 +210,15 @@ owner 的判断是：ztp-server 上的并发不是问题，大部分时间花在
 
 - `/home/admin` 在 OS、BIOS、CPLD 重启后是否保留；
 - NVOS sshd 用 password 还是 keyboard-interactive；交换机上的 `scp -O` 和 `/usr/bin/python3` 是否可用；
-- CPLD 烧写的实际耗时与 30 分钟停留上限的关系；
+- CPLD 烧写的实际耗时与 30 分钟停留上限的关系（v1 日志的结果见下面的实测）；
 - OS 安装后主机密钥是否变化；
 - `nv action fetch … file://` 的去向和磁盘需求（预检按镜像大小的 2 倍检查）；
 - ztp-server 的实际接口栈与 `[LINK]` 判定是否一致；`--method scp` 时 sshd 的 `MaxStartups`。
+
+### 2026-10-23 v1 现场日志实测
+
+- CPLD 从下发到观察到重启约 11 分钟（三台分别为 674 s、678 s、652 s），30 分钟停留上限够用；
+- 重启到 nvued 运行约 80–120 s；nvued 到 NVUE 就绪约 2–4 分钟，10 分钟就绪检查上限够用；
+- 下发到就绪约 15 分钟；
+- 每台 CPLD 重启后管理公钥都被拒，需要走密码回退并恢复 authorized_keys；
+- `/home/admin` 是否保留，日志无法判断，仍待确认。

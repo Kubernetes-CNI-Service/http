@@ -5,11 +5,13 @@ install, go down, come back with a new boot and get nvued ready on real (shorten
 time. Checks the owner's flow (2026-10-23) and review 15.x: canaries first; relay inside
 each OOB leaf with one server pull per queue and no holder rebooting while it serves;
 small packages pulled directly; in-flight cap; precheck classification; plan-only does
-not touch switches; stop, write-ahead failure, a job without reboot, multi-hop; and the
-progress block showing every queue.
+not touch switches; stop, write-ahead failure, a job without reboot, multi-hop; the
+progress block showing every queue; and the single verification retry after a timed-out
+query (owner 2026-10-23).
 """
 import hashlib
 import io
+import json
 import sys
 import tempfile
 import threading
@@ -121,6 +123,7 @@ class FakeOps:
         self.install, self.down, self.nvue = install, down, nvue
         self.log = []                         # (time, kind, host, detail)
         self.precheck_behaviour, self.verify_behaviour, self.fetch_fail = {}, {}, set()
+        self.verify_errors = {}               # host -> [exception], one raised per verify call
         self.dispatch_journal_error = set()
         self.plans = {}
 
@@ -214,6 +217,11 @@ class FakeOps:
 
     def verify(self, device, step, *, boot_after, before, baseline_health, backup, journal):
         self.note("verify", device.hostname, step.stage)
+        errors = self.verify_errors.get(device.hostname)
+        if errors:
+            error = errors.pop(0)
+            self.note("verify-error", device.hostname, error.code)
+            raise error
         if self.verify_behaviour.get(device.hostname) == "unknown":
             return dict(state="UNKNOWN", reason="COMPONENT_VERSION_NOT_VERIFIED")
         sim = self._refresh(self.sims[device.hostname])
@@ -236,7 +244,7 @@ class QuickLink(link.LinkDecision):
 
 class World:
     def __init__(self, test, hosts, *, speed=1000, groups=None, needs=None, in_flight=32, versions=None,
-                 upgrade=True, selected=("os", "fw"), **ops):
+                 upgrade=True, selected=("os", "fw"), verify_retry_seconds=None, **ops):
         self.tmp = tempfile.TemporaryDirectory()
         test.addCleanup(self.tmp.cleanup)
         base = Path(self.tmp.name)
@@ -256,7 +264,9 @@ class World:
         self.out = io.StringIO()
         self.options = engine.Options(run_id="r1", selected=selected, upgrade=upgrade, link=decision,
                                       groups=groups or {}, in_flight=in_flight, timings=FAST,
-                                      progress_seconds=0.2, later_hop_batch_seconds=0.05)
+                                      progress_seconds=0.2, later_hop_batch_seconds=0.05,
+                                      **({} if verify_retry_seconds is None
+                                         else {"verify_retry_seconds": verify_retry_seconds}))
         self.engine = engine.Engine(self.devices, self.family, self.ops, self.options,
                                     engine.Evidence(base / "run"), out=self.out)
 
@@ -397,6 +407,140 @@ class EngineTest(unittest.TestCase):
         sessions = world.out.getvalue().count("[DISTRIBUTE] os")
         self.assertEqual(sessions, 2, "each hop gets its own distribution round")
         self.assertEqual(world.ops.sims["h1"].version, "cfg")
+
+
+def ssh_error(code, repair_requested=False):
+    """An SshError as an ops.verify raises it. `repair_requested` tells whether that attempt already
+    wrote repair-requested.json; None models an ops that does not say."""
+    error = SshError(code)
+    if repair_requested is not None:
+        error.repair_requested = repair_requested
+    return error
+
+
+class VerifyRetryTest(unittest.TestCase):
+    """Owner 2026-10-23. On the v1 field run five switches were left UNKNOWN by one timed-out query
+    during verification and were at target on the next run. Contract: a verification that fails
+    with COMMAND_TIMEOUT or CHANNEL_FAILED, and whose attempt has not requested a configuration
+    repair, runs once more after a 30-second pause kept by the main loop (no check worker held);
+    the switch carries VERIFY_RETRIED and a second failure is UNKNOWN with the usual reason. Every
+    other error and a failed judgement keep their behaviour; reboot-like errors still go back to
+    the rebooting queue."""
+
+    def world(self, **kwargs):
+        return World(self, ["s0"], needs={"s0": {"os": [["os-2.bin"]]}}, selected=("os",), **kwargs)
+
+    @staticmethod
+    def verifies(world):
+        return [t for t, host, _stage in world.events("verify") if host == "s0"]
+
+    @staticmethod
+    def row(world):
+        return next(row for row in world.report["devices"] if row["hostname"] == "s0")
+
+    @staticmethod
+    def timeline(world):
+        path = world.engine.evidence.directory("s0") / "timeline.jsonl"
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+    def test_the_pause_is_thirty_seconds_by_default(self):
+        options = engine.Options(run_id="r1", selected=("os",), upgrade=True, link=None, groups={})
+        self.assertEqual(options.verify_retry_seconds, 30.0)
+
+    def test_a_timed_out_verification_runs_once_more_after_the_pause_and_passes(self):
+        for code in ("COMMAND_TIMEOUT", "CHANNEL_FAILED"):
+            with self.subTest(code=code):
+                world = self.world(verify_retry_seconds=1.0)
+                world.ops.verify_errors["s0"] = [ssh_error(code)]
+                samples, stop = [], threading.Event()
+
+                def sample():
+                    while not stop.is_set():
+                        pool = world.engine.pools.get("check")
+                        if pool is not None:
+                            now = time.monotonic()
+                            samples.append((now,) + tuple(pool.stats(now)[:2]))
+                        time.sleep(0.02)
+                sampler = threading.Thread(target=sample, daemon=True)
+                sampler.start()
+                try:
+                    results = world.run()
+                finally:
+                    stop.set()
+                    sampler.join()
+                self.assertEqual(results["s0"], ("UPGRADED", None), world.out.getvalue())
+                self.assertIn("VERIFY_RETRIED", self.row(world)["warnings"])
+                verifies = self.verifies(world)
+                self.assertEqual(len(verifies), 2, "the whole verification ran exactly once more")
+                (failed_at, _host, _code), = world.events("verify-error")
+                self.assertGreaterEqual(verifies[1] - failed_at, 1.0, "the retry waits for the pause")
+                pause = [(busy, queued) for t, busy, queued in samples if failed_at + 0.2 < t < verifies[1] - 0.2]
+                self.assertTrue(pause, "the check pool was sampled during the pause")
+                self.assertEqual(set(pause), {(0, 0)}, "no check worker is held or queued during the pause")
+                retries = [record for record in self.timeline(world) if "verify_retry" in record]
+                self.assertEqual(len(retries), 1, "one timeline record per retry")
+                self.assertEqual(retries[0]["verify_retry"]["reason"], code)
+                self.assertEqual(engine.exit_code(world.report), 0)
+
+    def test_a_second_failure_is_unknown_with_the_usual_reason_and_the_retry_warning(self):
+        for first, second in (("COMMAND_TIMEOUT", "COMMAND_TIMEOUT"), ("COMMAND_TIMEOUT", "CHANNEL_FAILED")):
+            with self.subTest(first=first, second=second):
+                world = self.world(verify_retry_seconds=0.3)
+                world.ops.verify_errors["s0"] = [ssh_error(first), ssh_error(second), ssh_error("COMMAND_TIMEOUT")]
+                results = world.run()
+                self.assertEqual(results["s0"], ("UNKNOWN", "VERIFY_" + second))
+                self.assertIn("VERIFY_RETRIED", self.row(world)["warnings"])
+                self.assertEqual(len(self.verifies(world)), 2, "one retry only")
+                self.assertEqual(len(world.ops.verify_errors["s0"]), 1, "no third attempt")
+                self.assertEqual(engine.exit_code(world.report), 3)
+
+    def test_no_retry_once_the_attempt_requested_a_repair_or_does_not_say(self):
+        for marker in (True, None):
+            with self.subTest(repair_requested=marker):
+                world = self.world()
+                world.ops.verify_errors["s0"] = [ssh_error("COMMAND_TIMEOUT", marker)]
+                results = world.run()
+                self.assertEqual(results["s0"], ("UNKNOWN", "VERIFY_COMMAND_TIMEOUT"))
+                self.assertNotIn("VERIFY_RETRIED", self.row(world)["warnings"])
+                self.assertEqual(len(self.verifies(world)), 1)
+                self.assertEqual([record for record in self.timeline(world) if "verify_retry" in record], [])
+
+    def test_other_errors_and_a_failed_judgement_are_not_retried(self):
+        for code in ("AUTH_REJECTED", "HOST_KEY_MISMATCH", "HOST_KEY_UNKNOWN", "OUTPUT_LIMIT"):
+            with self.subTest(code=code):
+                world = self.world()
+                world.ops.verify_errors["s0"] = [ssh_error(code)]
+                results = world.run()
+                self.assertEqual(results["s0"], ("UNKNOWN", "VERIFY_" + code))
+                self.assertNotIn("VERIFY_RETRIED", self.row(world)["warnings"])
+                self.assertEqual(len(self.verifies(world)), 1)
+        with self.subTest(judgement="UNKNOWN"):
+            world = self.world()
+            world.ops.verify_behaviour["s0"] = "unknown"
+            results = world.run()
+            self.assertEqual(results["s0"], ("UNKNOWN", "COMPONENT_VERSION_NOT_VERIFIED"))
+            self.assertNotIn("VERIFY_RETRIED", self.row(world)["warnings"])
+            self.assertEqual(len(self.verifies(world)), 1)
+
+    def test_a_reboot_like_error_still_goes_back_to_the_rebooting_queue(self):
+        for code in ("CONNECT_FAILED", "COMMAND_INCOMPLETE"):
+            with self.subTest(code=code):
+                world = self.world()
+                world.ops.verify_errors["s0"] = [ssh_error(code)]
+                results = world.run()
+                self.assertEqual(results["s0"], ("UPGRADED", None))
+                warnings = self.row(world)["warnings"]
+                self.assertIn("VERIFY_CONNECTION_LOST", warnings)
+                self.assertNotIn("VERIFY_RETRIED", warnings)
+                self.assertEqual(len(self.verifies(world)), 2)
+                timeline = self.timeline(world)
+                requeued = [index for index, record in enumerate(timeline)
+                            if record.get("requeued") == "VERIFY_CONNECTION_LOST"]
+                self.assertEqual(len(requeued), 1)
+                self.assertEqual(timeline[requeued[0]]["state"], "PROBING")
+                self.assertIn("ladder", [record.get("probe") for record in timeline[requeued[0]:]],
+                              "the rebooting queue's SSH step ran again before the second verification")
+                self.assertEqual([record for record in timeline if "verify_retry" in record], [])
 
 
 if __name__ == "__main__":

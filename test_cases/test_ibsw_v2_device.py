@@ -6,7 +6,8 @@ one simulated switch end to end with the real scripts: the key is rejected so th
 password imports the management key, the image is pulled and verified, the v1 component
 step and owned runner run with the local method, the reboot drops the key (restored
 after readiness), a lost configuration line is repaired before verification, and the
-password never reaches any evidence file.
+password never reaches any evidence file. A verification that loses a query to a timeout
+tells the engine whether that attempt had already requested a repair (owner 2026-10-23).
 """
 import hashlib
 import json
@@ -213,6 +214,70 @@ class LiveSwitchTest(unittest.TestCase):
         for path in Path(self.tmp.name, "run").rglob("*"):
             if path.is_file():
                 self.assertNotIn(SENTINEL.encode(), path.read_bytes(), path)
+
+    # ------------------------------------------------------------ verification errors (owner 2026-10-23)
+    def ready_to_verify(self):
+        """Precheck, stage, dispatch and wait until the rebooted switch is ready; returns verify()."""
+        result = self.ops.precheck(self.device, upgrade=True, staged_names=["nvos-amd64-25.02.7002.bin"],
+                                   journal=self.journal)
+        backup = result["backup"]
+        info = fleet_engine.PackageInfo.read(self.policy.os[1])
+        fetched = self.ops.fetch(self.device, info, size=info.size, sha256=info.sha256)
+        self.assertTrue(fetched["ok"], fetched)
+        step = ib.render_step(self.policy, self.device, component="os", package_index=1, run_id="r1",
+                              switch_dir=str(self.switch.home))
+        dispatched = self.ops.dispatch(self.device, step, backup=backup,
+                                       staged={info.file: (info.size, info.sha256)}, journal=self.journal)
+        self.assertEqual(dispatched["state"], "DISPATCHED", dispatched)
+        step = ib.Step(**{**step.__dict__, "remote_dir": dispatched["remote_dir"]})
+        self.until(lambda: (Path(dispatched["remote_dir"]) / "owned-exit.record").exists())
+        ladder = self.until(lambda: (lambda r: r if r["kind"] == "ready" else None)(
+            self.ops.ladder(self.device, dispatched["boot_before"], backup=backup, journal=self.journal)))
+        return lambda: self.ops.verify(self.device, step, boot_after=ladder["boot_id"],
+                                       before=dispatched["before_commands"],
+                                       baseline_health=dispatched["health_record"], backup=backup,
+                                       journal=self.journal)
+
+    def evidence_file(self, name):
+        return self.evidence.directory("sw01") / name
+
+    def test_a_query_timeout_before_the_repair_request_is_marked_not_requested(self):
+        verify = self.ready_to_verify()
+        self.switch.fail_command("/bin/bash -s -- verify", "COMMAND_TIMEOUT")
+        with self.assertRaises(ssh.SshError) as caught:
+            verify()
+        self.assertEqual(caught.exception.code, "COMMAND_TIMEOUT")
+        self.assertIs(caught.exception.repair_requested, False)
+        self.assertFalse(self.evidence_file("repair-requested.json").exists())
+        verified = verify()                                 # what the engine's single retry runs
+        self.assertEqual((verified["state"], verified["os_version"], verified["repaired"]),
+                         ("VERIFIED", "25.02.7002", True), verified)
+        self.assertEqual(json.loads(self.evidence_file("repair-requested.json").read_text())["state"],
+                         "REPAIR_REQUESTED")
+
+    def test_a_query_timeout_after_the_repair_request_is_marked_requested(self):
+        verify = self.ready_to_verify()
+        self.switch.fail_command("/bin/bash -s -- verify", "COMMAND_TIMEOUT", occurrence=2)
+        with self.assertRaises(ssh.SshError) as caught:
+            verify()
+        self.assertEqual(caught.exception.code, "COMMAND_TIMEOUT")
+        self.assertIs(caught.exception.repair_requested, True)
+        self.assertEqual(json.loads(self.evidence_file("repair-requested.json").read_text())["state"],
+                         "REPAIR_REQUESTED")
+        self.assertEqual(json.loads(self.evidence_file("repair-result.json").read_text())["state"], "REPAIRED",
+                         "the repair ran; the re-check after it timed out")
+
+    def test_a_channel_failure_in_the_final_key_check_without_repair_is_marked_not_requested(self):
+        self.switch.lose_config_line = None                 # nothing to repair after the reboot
+        verify = self.ready_to_verify()
+        self.switch.fail_command("cat /proc/sys/kernel/random/boot_id", "CHANNEL_FAILED")
+        with self.assertRaises(ssh.SshError) as caught:
+            verify()
+        self.assertEqual(caught.exception.code, "CHANNEL_FAILED")
+        self.assertIs(caught.exception.repair_requested, False)
+        self.assertFalse(self.evidence_file("repair-requested.json").exists())
+        verified = verify()
+        self.assertEqual((verified["state"], verified["repaired"]), ("VERIFIED", False), verified)
 
 
 if __name__ == "__main__":
