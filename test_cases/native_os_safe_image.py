@@ -24,9 +24,12 @@ EXTRA_FILES = tuple('test_cases/' + name for name in (
 COPY_FILES = BASE_FILES + EXTRA_FILES
 # Baseline only. Root must independently review candidate implementation inverse
 # before extending this exact source roster; no adopt-current-hash fallback.
+# 2026-10-23: tools/_package_common.py and tools/project_contract.py re-pinned to the reviewed UFM/F01
+# integration (owner-approved setup links, reference-only subtree, server_ufm/server_mgmt types; was the
+# 7c44779 bytes). Both are compared whole only; no inverse layer covers them.
 PRODUCTION_PINS = {
-    'tools/_package_common.py': '4264c962b3360feea1100f53c66c226a4dcc45d9ace1b7fce5c278a4cdc74921',
-    'tools/project_contract.py': '609573a7317b6db184df578008aab01c70e720b860752dde357078c3c04ff550',
+    'tools/_package_common.py': 'a3c55bfe13a831d75e01516cbb238c44eb756166005a49c78adf76705b73e2ef',
+    'tools/project_contract.py': '15383738eaabfecc4020ad38bfaee0f1f88f887f69dd1d9601cc044f898ece03',
     'tools/ssh_key_preparation.py': '16a383dfff78cfb9410db50d63ae4b25ad885021445ce8567c9a6d95f2a36352',
     'tools/ib_bringup_runtime_guard.py': 'f8f7815ec8438d21749d1a0bda3bf3ae47d485cf40e81e98ddcf594fc447f594',
     'tools/ibsw_upgrade_contract.py': 'e9163ecf5363db5401377d1e044cc36750b0045168d119a9f40bf5dd9d1f616b',

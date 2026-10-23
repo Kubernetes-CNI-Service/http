@@ -206,6 +206,8 @@ python3 ufm-setup-upgrade.py ha-post-config --apply       # 在已有且正常�
        - `WOULD_CHANGE`：两台都没有集群（同时检查 HA 五项前提）。
        - `UNHEALTHY`：是这两台，但状态不正常（含已配置未启动）；`MISMATCH`：集群节点或 VIP 与输入不符。这两种都需要人工处理，`ha-setup` 不处理已有的 HA 配置。
        - `UNKNOWN`：读不到 status（例如设备上没有 `ufm_ha_cluster`）。
+       - 已有 HA（`OK`、`UNHEALTHY`、`MISMATCH`）时，互信只作提示：`ha-setup` 不改动已有 HA，也就不会建互信，
+         所以缺少的 root 密钥对、对端公钥记为 `NOT_NEEDED`，不计入需要改动（owner 2026-10-23；实验环境手工部署的 HA 即如此）。
 5. 结果：
    - 全部符合为 `COMPLIANT`，退出码 0。
    - 有需要改动的为 `NEEDS_CONFIGURATION`，或者有新设备 `NEW_DEVICE`，退出码 3。

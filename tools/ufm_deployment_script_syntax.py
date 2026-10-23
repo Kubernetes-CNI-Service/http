@@ -84,7 +84,7 @@ def _run_syntax_child(*, script_fd, cwd, deadline):
         "pass_fds": [script_fd], "close_fds": True,
         "actual_waitpid_return": None, "kernel_reap_confirmed": False,
         "stdout_eof": False, "stderr_eof": False, "stdout_bytes": 0,
-        "stderr_bytes": 0, "exit_code": None, "raw_pipe_cleanup_confirmed": False,
+        "stderr_bytes": 0, "exit_code": None, "owned_pipe_cleanup_confirmed": False,
         "cleanup_unconfirmed": [], "selector_cleanup_confirmed": False,
         "execution_permitted": False, "completion": False,
     }
@@ -212,7 +212,9 @@ def _run_syntax_child(*, script_fd, cwd, deadline):
         except BaseException as error:
             cleanup = cleanup or error
             facts["cleanup_unconfirmed"].append("original_pipe_close")
-        facts["raw_pipe_cleanup_confirmed"] = all(record["closed"] for record in owner.records)
+        # The fact name is the one test_f01_recovery_stage_script_syntax specified (both came in 4693d8d
+        # under different names; renamed 2026-10-23 to the test's contract).
+        facts["owned_pipe_cleanup_confirmed"] = all(record["closed"] for record in owner.records)
         for role, digest in digests.items():
             facts[role + "_sha256"] = digest.hexdigest()
         if cleanup is not None:

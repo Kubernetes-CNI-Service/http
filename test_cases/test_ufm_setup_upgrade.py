@@ -2900,6 +2900,25 @@ class HaPostConfigTest(ConfiguredPairCase):
                           ("post_ha_root_guid", "UNCHANGED"), ("post_ha_failover", "NOT_NEEDED")])
         self.assertEqual(state["ha"]["failovers"], 1)
 
+    def test_check_of_an_existing_ha_built_without_our_trust_counts_no_trust_change(self):
+        # Owner 2026-10-23 (lab check of an HA set up by hand): ha-setup never touches an existing HA, so it
+        # never builds trust for it, and config-upgrade does not either. A missing root key pair or peer key
+        # is shown but never counted as a change to make, or check could never reach COMPLIANT.
+        self.make_ha_running()
+        self.assertFalse((self.sandbox / "ufm01/root/.ssh/id_ed25519").exists(), "the HA has no trust of ours")
+        checked, _state, _calls, logs = self.run_login(action="check", apply=False)
+        # As in the lab: ufm01 has no root key pair, ufm02 has one but not ufm01's key.
+        self.assertEqual(dict(self.outcomes(checked["ufm01"]))["root_keypair"], "NOT_NEEDED")
+        self.assertEqual(dict(self.outcomes(checked["ufm02"]))["peer_key"], "NOT_NEEDED")
+        for name in ("ufm01", "ufm02"):
+            outcomes = dict(self.outcomes(checked[name]))
+            self.assertEqual(outcomes["ha_config"], "OK", name)
+            for step in ("root_keypair", "peer_key", "peer_login"):
+                self.assertIn(outcomes[step], {"UNCHANGED", "NOT_NEEDED", "NOT_TESTED", "OK"}, (name, step))
+                self.assertNotIn(step, checked[name].detail or "", name)
+        self.assertIn("已有 HA 配置：互信只作提示", logs)
+        self.assertFalse((self.sandbox / "ufm01/root/.ssh/id_ed25519").exists(), "check never creates a key")
+
     def test_without_a_license_and_with_a_spine_missing_from_the_fabric_only_notes_are_left(self):
         (self.inputs / "image/site.lic").unlink()
         self.add_ib_rows("ew-spine002.site01.example.test")

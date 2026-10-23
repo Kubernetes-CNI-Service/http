@@ -57,7 +57,10 @@ PARENT_SOURCE = SOURCE.parent / "_bounded_process.py"
 LAUNCHER_SOURCE = SOURCE.parent / "_bounded_process_launcher.py"
 FIXTURE = HERE / "fixtures/bounded_inner_fd_fixture.py"
 PINS = {
-    SOURCE: "066db88efd75d2a8c9b06383b345e08f3370128d1f9930eed7da42caf8e9c5bf",
+    # 2026-10-23: re-pinned after the owner-approved server_mgmt/server_ufm device types (2026-10-19..22)
+    # added _NON_SWITCH_TYPES to load_devices_csv (+4/-1 lines; was 066db88e… at 7c44779). The bounded
+    # process helpers below are unchanged.
+    SOURCE: "2f8185ae5f7fdfdbce299b554caab57a39d2b77330924c78975bb5c1fcebb86e",
     PARENT_SOURCE: "3ec254c596423a0fc93ef895f6226c62584672ec37a878c068524b30f30d221e",
     LAUNCHER_SOURCE: "2ef142cf049d1496d8d5321015529592576d6a724c4b9c6b5b50c5c551a8c1fa",
     FIXTURE: "bac0c68a18a313b60297c720d64d416a5d405c80c089b411b8a8fc6dbc1b64b9",

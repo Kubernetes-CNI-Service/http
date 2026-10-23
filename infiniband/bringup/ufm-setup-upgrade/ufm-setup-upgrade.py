@@ -4009,6 +4009,18 @@ class Session:
                 self.say(f"    {node.hostname} [ha_preconditions] {'OK' if not problems else '; '.join(problems)}")
             result.steps.append({"step": "ha_config", "outcome": outcome, "detail": note})
             self.say(f"    {node.hostname} [ha_config] {outcome}: {note}")
+        if outcome in {"OK", "UNHEALTHY", "MISMATCH"}:
+            # Owner 2026-10-23: ha-setup never touches an existing HA, so it never builds trust for it (nor does
+            # config-upgrade). A key pair or peer key it would add is shown, never counted as a change to make.
+            downgraded = False
+            for result in results.values():
+                for step in result.steps:
+                    if (step["step"] in {"root_keypair", "peer_key", "peer_login"}
+                            and step["outcome"].startswith(("WOULD", "UNVERIFIED"))):
+                        step["outcome"], step["detail"] = "NOT_NEEDED", "已有 HA 配置，ha-setup 不建互信"
+                        downgraded = True
+            if downgraded:
+                self.say("    已有 HA 配置：互信只作提示（ha-setup 不改动已有 HA，也不建互信），上面互信的 WOULD_CHANGE 不计入需要改动")
         for result in results.values():
             pending = [step["step"] for step in result.steps
                        if step["outcome"].startswith(("WOULD", "UNVERIFIED", "UNHEALTHY", "MISMATCH"))]

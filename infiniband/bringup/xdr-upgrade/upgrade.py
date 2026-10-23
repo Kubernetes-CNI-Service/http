@@ -162,8 +162,7 @@ def _parse_cli(argv):
                         help="collect selected fixed read-only queries; never changes device authorization")
     parser.add_argument("--diagnose-inputs", action="store_true",
                         help="report input paths/link chains and validation only; no SSH, password prompt or run artifacts")
-    parser.add_argument("--version", action="version", version=_DESKTOP_REVISION,
-                        help="print the desktop revision and exit")
+    parser.add_argument("--version", action="version", version=_DESKTOP_REVISION)
     parser.add_argument("--json", dest="output_json", action="store_true",
                         help="also emit machine-readable JSON on interactive stdout; redirected stdout keeps JSON by default")
     parser.add_argument("--upgrade", action="store_true",
