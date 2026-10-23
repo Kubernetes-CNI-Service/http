@@ -183,13 +183,14 @@ macOS dry-run 不运行开发测试。正式 `sync-code` 或 `tar-for-upload` �
 5. 计划（serve，R4）：只在帧交给消费者时才从该 commit/tree 计划子对象；不会读取消费者尚未接受的
    对象之下的对象，因此不需要 arrival 形态的额外裁定。
 6. 链提示（R1，修正轮更正）：只有 head 与 anchor 都是 str 且完全匹配 `[0-9a-f]{40}` 时才运行提示；
-   否则没有提示，原链逐提交读取单独判定（非 OID 的 head 由原语在启动任何进程前拒绝，异常类型与
-   消息与 37d2b35 相同）。提示是一次有界 `git rev-list --first-parent
+   否则没有提示，原链逐提交读取单独判定（非 OID 的 str head 由原语在启动任何进程前拒绝，异常类型与
+   消息与 37d2b35 相同；不可哈希的非 str head 在分派器取键时抛 TypeError，类型相同、消息不同）。提示是一次有界 `git rev-list --first-parent
    --max-count=P_V3_FIRST_PARENT_LIMIT+1 --end-of-options <head>`：环境与原语相同、stdin 为
    DEVNULL、超时 1 秒、`text=False`，stdout 按严格 ASCII 解码，stderr 不解码；在 anchor 或 S 处
    截断。非 0 退出以及函数内任何 Exception（超时、OSError、嵌入 NUL、解码失败等）都视为没有提示。
-   捕获范围取 `Exception` 而不是评审建议的 (OSError, ValueError, SubprocessError)：G-a 用 str
-   stdout 模拟 rc=0 的提示，在 `text=False` 下窄元组会让 AttributeError 逸出。`--end-of-options`
+   捕获范围取 `Exception`：提示只决定预取顺序，任何失败都只等于没有提示。修正轮当时的理由是「G-a
+   用 str stdout 模拟 rc=0 的提示」；第三轮复审指出这让 G-a 的两个 rc=0 子测试走了 AttributeError
+   路径、失去区分力，第四轮已把 G-a 的模拟输出改为 bytes（见下）。`--end-of-options`
    需要 git ≥ 2.24（本机 git 2.39.5 实测接受）；更旧的 git 会让提示失败，只等于没有提示。提示只
    决定预取顺序，链的每一步仍由原逐提交读取和原断言判定。
 
@@ -199,7 +200,7 @@ macOS dry-run 不运行开发测试。正式 `sync-code` 或 `tar-for-upload` �
   当前 V3 侧读取原始对象的方式。直接调用者：`_assert_v3_child_authority`，以及 s_phase 与
   v3_overlap 中直接调用这三个名字的测试。间接调用者：`_tree_records`、`_tree_modes`、
   `_assert_historical_p_anchor`（经 `_resolve_published_v2_anchor`），以及调用它们的 V3 测试，例如
-  s_phase:715-722。其他模块里同名的 `_tree_records`、`_tree_modes`、`_verified_commit_records` 是
+  `test_public_s_phase_workflow.py:715-722`。其他模块里同名的 `_tree_records`、`_tree_modes`、`_verified_commit_records` 是
   各自的定义，不受影响。
 - 「不能把同一次读取跨测试或提交边界复用」：作用域只活在一次遍历调用内；验证结束后再改写对象，
   下一次遍历会重新读取并拒绝（T3）。对 C09 批路径起作用的回归测试只在 v3_overlap：T3 及修正轮的
@@ -215,10 +216,18 @@ macOS dry-run 不运行开发测试。正式 `sync-code` 或 `tar-for-upload` �
   SHA-1：原语本身只接受 40 位 OID、只算 SHA-1，SHA-256 仓库中 C09 全部回退到原语，不引入新行为；
   (c) 批次可以含重复 OID 并收下重复帧（先例为「最多每批 32 个唯一完整 OID」并拒绝重复帧），每个
   重复帧单独复核，交出的元组与原语相同（DU）。32 上限、闭合 stdin、有限超时与先例一致。
-- 读取时机：一次遍历内对象可能先于请求被读取，最多提前一批（32 个）。若对象库在预取之后、消费之前
+- 读取时机：一次遍历内，对象最早在其父树交出后的批次中读取，到交给消费者之前可以隔任意多个批次
+  （例：T1 中 zz/ 隔 2 批；根下 32 个子树、各含 32 个 blob 时，已读未交出的帧可达 62 个；第三轮
+  复审的纯内存模型实测）。并发改写的窗口因此覆盖整个遍历，不是一批。若对象库在预取之后、消费之前
   被并发改写，原实现在请求时会拒绝，C09 交出的是更早读到并按 OID 复核过的真实字节；遍历中途失败时，
   已预取的兄弟对象是原实现不会读的。因此「判定与原语相同」以遍历期间对象库不被并发改写为前提；
   下一次遍历仍会重读并拒绝。
+
+第四轮（主线程，2026-10-23，依据第三轮复审）：G-a 的 `foreign-or-malformed-ids`、`anchor-first` 两个 rc=0 子测试
+改用 bytes 模拟输出，重新进入规划循环；对当前实现预期 GREEN，对「在 anchor/S 处 continue 而不是截断」的实现
+为 RED（修正前这种实现没有任何测试能区分）。另注：4e66b2c 提交信息说「bytearray 的 commit payload 已经会打断
+遍历」不准确——`partition`、`re`、`decode` 都接受 bytearray；链 API 只返回 str，外部观察不到差异，G-b 与 DU
+的 `type(payload) is bytes` 断言负责 blob 侧。
 
 tests-first：`test_public_publication_v3_overlap` 新增 23 个用例，模块共 27 个。
 - 前 12 个的字节等于 lab serve pin：批量上限与闭合 stdin、失败批次只回退原读取、作用域只在调用内、
@@ -226,7 +235,7 @@ tests-first：`test_public_publication_v3_overlap` 新增 23 个用例，模块�
   少、11 种畸形批输出回退后结果相同、FIFO 提交有界、第一次失败批次关闭预取、单键对象只来自原读取、
   正确提示不读 anchor/S、V2 原语语料在批次中回退相同。
 - 落地守卫 2 个：G-a（链提示失败、外来或以 anchor 开头时完全不预取且原链不变）、G-b（遍历内交出的
-  每个元组与遍历外原读取相同；修正轮在 G-b 内插入 3 行，断言 payload 为 bytes、其余三项为
+  每个元组与遍历外原读取相同；修正轮在 G-b 内插入 4 行（3 行断言、1 行注释），断言 payload 为 bytes、其余三项为
   str/str/int、结果为 tuple）。
 - 修正轮 9 个：G-c（head 或 anchor 不是精确 OID 时不启动提示进程，`--output=` 形 head 不触碰
   目标文件，含 NUL 的 head 抛与 37d2b35 相同的 AssertionError）、G-d（head 紧跟
@@ -303,7 +312,8 @@ cat-file」来自实现者的静态模型 `devC09-work/w1_model.out`，对应 d1
 整个文件的 sha256：
 - 112fd01 `29ac8cf032bf64eaeaeecf3e2e234f96fe8716dae7b4faa9d5d4785288121330`
 - be82506 `9564177ce52abfc526e0f2b11ae68067037880a8fe330dfd63663419b97c819d`
-v3_overlap 前 31865 字节仍等于 serve_e_ov pin；修正轮只在其后追加，并在 G-b 内插入 3 行。收益量值
+v3_overlap 前 31865 字节仍等于 serve_e_ov pin；修正轮只在其后追加，并在 G-b 内插入 4 行；第四轮把
+G-a 的 rc=0 模拟输出改为 bytes（G-a 从 :594 起，不在 pin 内）。收益量值
 只有 lab 读数：ABA-T 测的是 `d31a2a0`，每次串行 full 约 434 秒；serve 形态没有串行全量实测，按
 ABA-T 口径推断约 377–390 秒。这些都不是本树的 full 证明。
 
