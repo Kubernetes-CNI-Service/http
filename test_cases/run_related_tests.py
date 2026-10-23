@@ -1714,15 +1714,21 @@ def run_validation_selection(
 # parallel in private APFS clones, then the single phase-B (quiet) lane runs
 # alone.  Every canonical row must be executed exactly once in its assigned
 # lane (or be suppressed by a recognised class/module SkipTest holder, exactly
-# as serial unittest would not run it); any failure, missing record, deadline,
-# leftover, residue, gate or cleanup problem returns 1 before any approval.  On
-# success the caller writes the same attestation bytes as the serial path; the
-# execution form is recorded only in the external audit file.
+# as serial unittest would not run it); every skip entry must be a decorator
+# skip of the canonical enumeration (run in the coordinator's environment) or a
+# plan-allowed runtime skip with its exact reason; any failure, missing record,
+# deadline, leftover, residue, gate or cleanup problem returns 1 before any
+# approval.  On success the caller writes the same attestation bytes as the
+# serial path; the execution form is recorded only in the external audit file.
 # ---------------------------------------------------------------------------
 
 FULL_SHARD_PLAN_RELATIVE = "test_cases/full_shard_plan.json"
 FULL_SHARD_PLATFORMS = frozenset({"darwin"})
-FULL_SHARD_MIN_LANE_DEADLINE_SECONDS = 7800
+# Not below the most recent formal serial --all wall clock recorded in
+# CHANGE_AWARE_TESTING.md (8,816.975 s): a lane is never stopped for running as
+# long as that recorded serial suite; raise it before the serial wall clock grows
+# close to it.
+FULL_SHARD_MIN_LANE_DEADLINE_SECONDS = 9000
 FULL_SHARD_RESIDUE_GRACE_SECONDS = 20.0
 FULL_SHARD_TERMINATE_GRACE_SECONDS = 10.0
 FULL_SHARD_LANE_RE = re.compile(r"^w[0-9a-z]{1,8}$")
@@ -1732,17 +1738,31 @@ FULL_SHARD_PLAN_KEYS = frozenset({
     "schema_version", "description", "derivation", "lane_deadline_seconds",
     "phase_a", "phase_b", "slices", "same_lane", "phase_b_reasons",
 })
+# Optional plan keys; an absent runtime_skips allows no runtime skip at all.
+FULL_SHARD_PLAN_OPTIONAL_KEYS = frozenset({"runtime_skips"})
+# A serial skip entry id of a test (MODULE.Class.test) or of one of its
+# sub-tests (MODULE.Class.test (params)); fixture holders use FULL_SHARD_HOLDER_RE.
+FULL_SHARD_SKIP_ENTRY_RE = re.compile(
+    r"^test_cases\.test_[A-Za-z0-9_]+(?:\.[A-Za-z_][A-Za-z0-9_]*){2,}(?: .+)?$"
+)
 FULL_SHARD_ACCEPTED_OUTCOMES = frozenset({"success", "skipped", "expected_failure"})
 FULL_SHARD_GIT_FORBIDDEN = (
     "commondir", "shallow", "info/grafts", "objects/info/alternates",
     "objects/info/http-alternates", "index.lock",
 )
+# Absolute paths: an operator PATH may omit /usr/sbin (cp is /bin/cp as well).
+FULL_SHARD_PS = "/bin/ps"
+FULL_SHARD_LSOF = "/usr/sbin/lsof"
+# The only GIT_* variables kept for coordinator git and lanes (see _full_shard_environment).
+FULL_SHARD_GIT_CONFIG_SELECTORS = frozenset({"GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_GLOBAL"})
 
 # Executed by `sys.executable -B -c` in a lane checkout.  It reproduces
 # `python -m unittest discover -b -s test_cases -t . -p test_*.py [-v]`:
 # the same sys.path[0], argv, loader, discovery (every module imported),
 # TextTestRunner(buffer, verbosity, warnings) and exit status, and only runs the
-# canonical rows whose indices the coordinator assigned to this lane.
+# canonical rows whose indices the coordinator assigned to this lane.  Like the
+# serial TestSuite.run it keeps no test instance beyond the run suite, which
+# drops each test once it has run.
 FULL_SHARD_LANE_SOURCE = r'''
 import hashlib
 import json
@@ -1801,17 +1821,52 @@ def _module_fixture(name):
     return module is None or hasattr(module, "setUpModule") or hasattr(module, "tearDownModule")
 
 
-_suite = _FullShardLoader().discover("test_cases", pattern="test_*.py", top_level_dir=".")
-_pairs = []
-_walk(_suite, None, _pairs)
-_rows = []
-for _test, _tag in _pairs:
-    _cls = type(_test)
-    _rows.append({
-        "id": _test.id(), "module": _tag, "class_module": _cls.__module__,
-        "class": _cls.__qualname__, "class_fixture": _class_fixture(_cls),
-        "module_fixture": _module_fixture(_cls.__module__),
-    })
+def _decorator_skip(test):
+    """The reason TestCase.run skips this test before setUp (class or method skip), else None."""
+    cls = type(test)
+    method = getattr(test, getattr(test, "_testMethodName", ""), None)
+    if getattr(cls, "__unittest_skip__", False) or getattr(method, "__unittest_skip__", False):
+        return str(getattr(cls, "__unittest_skip_why__", "") or getattr(method, "__unittest_skip_why__", ""))
+    return None
+
+
+def _row(test, tag):
+    cls = type(test)
+    return {
+        "id": test.id(), "module": tag, "class_module": cls.__module__,
+        "class": cls.__qualname__, "class_fixture": _class_fixture(cls),
+        "module_fixture": _module_fixture(cls.__module__),
+    }
+
+
+def _discover():
+    """Canonical (test, loader module) pairs; the discovery suite itself is not kept."""
+    pairs = []
+    _walk(_FullShardLoader().discover("test_cases", pattern="test_*.py", top_level_dir="."), None, pairs)
+    return pairs
+
+
+def _decorator_skips(pairs):
+    found = []
+    for index, (test, _tag) in enumerate(pairs):
+        reason = _decorator_skip(test)
+        if reason is not None:
+            found.append({"index": index, "reason": reason})
+    return found
+
+
+def _selected_suite(pairs, indices):
+    """Only this lane's tests, each tagged with its canonical index, in canonical order."""
+    suite = unittest.TestSuite()
+    for index, (test, _tag) in enumerate(pairs):
+        if index in indices:
+            test._full_shard_index = index
+            suite.addTest(test)
+    return suite
+
+
+_pairs = _discover()
+_rows = [_row(_test, _tag) for _test, _tag in _pairs]
 _digest = hashlib.sha256(json.dumps(
     _rows, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
 ).encode("utf-8")).hexdigest()
@@ -1822,7 +1877,8 @@ _emit({"event": "start", "canonical_sha256": _digest, "count": len(_rows),
        "tmpdir": os.environ.get("TMPDIR", "")})
 _module_cleanups = len(getattr(unittest.case, "_module_cleanups", []))
 if _mode == "enumerate":
-    _emit({"event": "rows", "rows": _rows, "module_cleanups": _module_cleanups})
+    _emit({"event": "rows", "rows": _rows, "module_cleanups": _module_cleanups,
+           "decorator_skips": _decorator_skips(_pairs)})
     _emit({"event": "finished", "tests_run": 0, "successful": True})
     os.close(_out)
     sys.exit(0)
@@ -1834,9 +1890,8 @@ if _module_cleanups:
     _emit({"event": "fatal", "reason": "module cleanups were registered during discovery"})
     os.close(_out)
     sys.exit(3)
-_selected = sorted(set(int(_index) for _index in _spec["indices"]))
-_index_of = {id(_pairs[_index][0]): _index for _index in _selected}
-_run_suite = unittest.TestSuite([_pairs[_index][0] for _index in _selected])
+_run_suite = _selected_suite(_pairs, set(int(_index) for _index in _spec["indices"]))
+del _pairs
 _ORDER = ("success", "skipped", "expected_failure", "unexpected_success", "failure", "error")
 
 
@@ -1844,6 +1899,7 @@ class _FullShardResult(unittest.TextTestResult):
     def startTest(self, test):
         self._full_shard_started = time.perf_counter()
         self._full_shard_outcome = "success"
+        self._full_shard_index = getattr(test, "_full_shard_index", -1)
         super().startTest(test)
 
     def _full_shard_mark(self, outcome):
@@ -1863,10 +1919,13 @@ class _FullShardResult(unittest.TextTestResult):
         super().addFailure(test, err)
 
     def addSkip(self, test, reason):
+        # One record per serial skip entry: the test (or sub-test) id, or the holder.
         if isinstance(test, unittest.TestCase):
             self._full_shard_mark("skipped")
+            _emit({"event": "skip", "index": getattr(self, "_full_shard_index", -1),
+                   "id": test.id(), "reason": str(reason)})
         else:
-            _emit({"event": "holder", "kind": "skip", "description": str(test)})
+            _emit({"event": "holder", "kind": "skip", "description": str(test), "reason": str(reason)})
         super().addSkip(test, reason)
 
     def addExpectedFailure(self, test, err):
@@ -1884,7 +1943,7 @@ class _FullShardResult(unittest.TextTestResult):
 
     def stopTest(self, test):
         super().stopTest(test)
-        _emit({"event": "test", "index": _index_of.get(id(test), -1), "id": test.id(),
+        _emit({"event": "test", "index": getattr(test, "_full_shard_index", -1), "id": test.id(),
                "outcome": getattr(self, "_full_shard_outcome", "error"),
                "seconds": round(time.perf_counter() - getattr(self, "_full_shard_started", 0.0), 4)})
 
@@ -1970,9 +2029,10 @@ def validate_full_shard_plan(plan: object) -> None:
     if not isinstance(plan, dict):
         raise _full_shard_plan_error("root must be an object")
     keys = set(plan)
-    if keys != FULL_SHARD_PLAN_KEYS:
+    unknown = keys - FULL_SHARD_PLAN_KEYS - FULL_SHARD_PLAN_OPTIONAL_KEYS
+    if unknown or not FULL_SHARD_PLAN_KEYS <= keys:
         raise _full_shard_plan_error(
-            "unknown keys: " + ", ".join(sorted(keys - FULL_SHARD_PLAN_KEYS))
+            "unknown keys: " + ", ".join(sorted(unknown))
             + "; missing keys: " + ", ".join(sorted(FULL_SHARD_PLAN_KEYS - keys))
         )
     if type(plan["schema_version"]) is not int or plan["schema_version"] != 1:
@@ -2061,6 +2121,21 @@ def validate_full_shard_plan(plan: object) -> None:
         raise _full_shard_plan_error("phase_b_reasons must give exactly one reason per phase_b unit")
     if not all(isinstance(value, str) and value.strip() for value in reasons.values()):
         raise _full_shard_plan_error("phase_b_reasons must be non-empty strings")
+    runtime_skips = plan.get("runtime_skips", {})
+    if not isinstance(runtime_skips, dict):
+        raise _full_shard_plan_error(
+            "runtime_skips must map serial skip entry ids to their exact skip reasons"
+        )
+    for entry, reason in runtime_skips.items():
+        if not isinstance(entry, str) or not (
+            FULL_SHARD_SKIP_ENTRY_RE.fullmatch(entry) or FULL_SHARD_HOLDER_RE.fullmatch(entry)
+        ):
+            raise _full_shard_plan_error(
+                f"runtime_skips entry {entry!r} is neither a test id nor a "
+                "setUpClass/setUpModule holder"
+            )
+        if not isinstance(reason, str) or not reason.strip():
+            raise _full_shard_plan_error(f"runtime_skips reason of {entry} must be a non-empty string")
 
 
 def load_full_shard_plan(root: Path) -> dict:
@@ -2200,6 +2275,7 @@ def merge_full_shard_lane(
     seen: set[int] = set()
     non_success: list[dict] = []
     holders: list[Mapping] = []
+    skips: list[dict] = []
     finished = None
     if records is None:
         problems.append(f"lane {lane}: missing result file")
@@ -2236,6 +2312,22 @@ def merge_full_shard_lane(
             executed.append(index)
             if record.get("outcome") not in FULL_SHARD_ACCEPTED_OUTCOMES:
                 non_success.append({"id": rows[index]["id"], "outcome": record.get("outcome"), "lane": lane})
+        elif event == "skip":
+            index = record.get("index")
+            entry_id = str(record.get("id"))
+            if type(index) is not int or index not in assigned_set:
+                problems.append(
+                    f"lane {lane}: skip entry {record.get('id')!r} is outside its assigned rows"
+                )
+                continue
+            # The running test's id, or a sub-test id "<test id> <params>" of it.
+            if entry_id != rows[index]["id"] and not entry_id.startswith(rows[index]["id"] + " "):
+                problems.append(
+                    f"lane {lane}: skip entry {entry_id!r} does not belong to canonical row "
+                    f"{rows[index]['id']!r}"
+                )
+                continue
+            skips.append({"id": entry_id, "reason": record.get("reason")})
         elif event == "holder":
             holders.append(record)
         elif event == "fatal":
@@ -2255,6 +2347,7 @@ def merge_full_shard_lane(
             problems.append(f"lane {lane}: unrecognised holder record: {description!r}")
             continue
         kind, target = match.groups()
+        skips.append({"id": description, "reason": holder.get("reason")})
         for index in assigned:
             row = rows[index]
             owner = f"{row['class_module']}.{row['class']}" if kind == "setUpClass" else row["module"]
@@ -2286,7 +2379,7 @@ def merge_full_shard_lane(
         )
     return {
         "problems": problems, "executed": sorted(executed), "suppressed": sorted(suppressed),
-        "non_success": non_success, "tests_run": tests_run,
+        "non_success": non_success, "tests_run": tests_run, "skips": skips,
     }
 
 
@@ -2307,6 +2400,86 @@ def full_shard_coverage_problems(count: int, merged: Mapping[str, Mapping]) -> l
         problems.append(
             f"{len(missing)} canonical rows were neither executed nor suppressed by a recognised holder"
         )
+    return problems
+
+
+def full_shard_runtime_skip_problems(runtime_skips: Mapping[str, str], rows: Sequence[Mapping]) -> list[str]:
+    """Every plan runtime_skips entry must still name a canonical test, class or module."""
+    ids = {row["id"] for row in rows}
+    classes = {f"{row['class_module']}.{row['class']}" for row in rows}
+    modules = {row["module"] for row in rows}
+    problems = []
+    for entry in sorted(runtime_skips):
+        match = FULL_SHARD_HOLDER_RE.fullmatch(entry)
+        if match:
+            kind, target = match.groups()
+            known = target in (classes if kind == "setUpClass" else modules)
+        else:
+            known = entry.split(" ", 1)[0] in ids
+        if not known:
+            problems.append(
+                f"full shard plan is stale: runtime_skips entry {entry} names no canonical "
+                "test, class or module"
+            )
+    return problems
+
+
+def full_shard_skip_problems(
+    rows: Sequence[Mapping], decorator_skips: Sequence[Mapping],
+    runtime_skips: Mapping[str, str], merged: Mapping[str, Mapping],
+) -> list[str]:
+    """The lanes' skip entries must be the skips the serial run would make.
+
+    Decorator skips are facts of the canonical enumeration, which imports every
+    module in the coordinator's environment; each must be reported by its lane
+    with the same reason (unless a class/module holder skipped its whole fixture,
+    as in serial unittest).  Every other skip entry arises only at run time and
+    must be a plan runtime_skips entry with the exact reason.
+    """
+    problems: list[str] = []
+    observed: dict[str, dict] = {}
+    for lane, result in merged.items():
+        for entry in result["skips"]:
+            entry_id = entry["id"]
+            if entry_id in observed:
+                problems.append(
+                    f"skip entry {entry_id} is reported more than once "
+                    f"({observed[entry_id]['lane']} and {lane})"
+                )
+                continue
+            observed[entry_id] = {"reason": entry["reason"], "lane": lane}
+    suppressed = {index for result in merged.values() for index in result["suppressed"]}
+    decorated: dict[str, str] = {}
+    for item in decorator_skips:
+        index = item["index"]
+        decorated[rows[index]["id"]] = item["reason"]
+        if index in suppressed:
+            continue
+        entry = observed.get(rows[index]["id"])
+        if entry is None:
+            problems.append(
+                f"{rows[index]['id']} is skipped by a decorator at canonical enumeration but was "
+                "not skipped in its lane"
+            )
+        elif entry["reason"] != item["reason"]:
+            problems.append(
+                f"{rows[index]['id']}: skip reason {entry['reason']!r} in lane {entry['lane']} differs "
+                f"from the canonical enumeration's {item['reason']!r}"
+            )
+    for entry_id, entry in sorted(observed.items()):
+        if entry_id in decorated:
+            continue
+        allowed = runtime_skips.get(entry_id)
+        if allowed is None:
+            problems.append(
+                f"unexpected skip {entry_id} in lane {entry['lane']} ({entry['reason']!r}): neither a "
+                "decorator skip of the canonical enumeration nor a plan runtime_skips entry"
+            )
+        elif entry["reason"] != allowed:
+            problems.append(
+                f"{entry_id}: skip reason {entry['reason']!r} in lane {entry['lane']} differs from "
+                f"the plan runtime_skips reason {allowed!r}"
+            )
     return problems
 
 
@@ -2379,7 +2552,13 @@ def _full_shard_remove_tree(path: Path) -> str | None:
     """Remove one lane tree; return a problem instead of raising."""
     path = Path(path)
 
-    def retry(function, target, _error):
+    def retry(function, target, error):
+        # onexc passes the exception, onerror an exc_info triple.  Only a removal
+        # (unlink/rmdir) is retried after making its directory writable; any other
+        # failing step (os.open, os.scandir, os.lstat, ...) raises its original error.
+        original = error[1] if isinstance(error, tuple) else error
+        if function not in (os.unlink, os.rmdir, os.remove):
+            raise original
         try:
             os.chmod(os.path.dirname(target) or ".", stat.S_IRWXU)
             if not os.path.islink(target):
@@ -2402,10 +2581,25 @@ def _full_shard_remove_tree(path: Path) -> str | None:
     return None
 
 
+def _full_shard_environment() -> dict[str, str]:
+    """The coordinator's environment without GIT_* (a hook's GIT_DIR, GIT_INDEX_FILE,
+    GIT_WORK_TREE ... would bind `git -C <clone>` and lane tests to another repository).
+
+    Only the config-source selectors are kept: they name no repository, index or work
+    tree, and hermetic callers use them to keep user-global excludes or fsmonitor
+    settings out of the leftover and checkout gates.
+    """
+    return {
+        key: value for key, value in os.environ.items()
+        if not key.startswith("GIT_") or key in FULL_SHARD_GIT_CONFIG_SELECTORS
+    }
+
+
 def _full_shard_git(checkout: Path, *arguments: str) -> subprocess.CompletedProcess:
     return subprocess.run(
         ["git", "-C", str(checkout), *arguments], stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+        env=_full_shard_environment(),
     )
 
 
@@ -2519,7 +2713,7 @@ def _full_shard_residue(markers: Sequence[str], pgids: Iterable[int]) -> list[di
     groups = set(pgids)
     found: dict[int, dict] = {}
     listing = subprocess.run(
-        ["ps", "-axww", "-o", "pid=,pgid=,command="], stdin=subprocess.DEVNULL,
+        [FULL_SHARD_PS, "-axww", "-o", "pid=,pgid=,command="], stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False, timeout=120,
     )
     if listing.returncode != 0:
@@ -2540,7 +2734,7 @@ def _full_shard_residue(markers: Sequence[str], pgids: Iterable[int]) -> list[di
         if reasons:
             found[pid] = {"pid": pid, "pgid": pgid, "command": command[:200], "reasons": reasons}
     cwd = subprocess.run(
-        ["lsof", "-nP", "-w", "-a", "-d", "cwd", "-u", str(os.getuid()), "-Fpn"],
+        [FULL_SHARD_LSOF, "-nP", "-w", "-a", "-d", "cwd", "-u", str(os.getuid()), "-Fpn"],
         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True, check=False, timeout=120,
     )
@@ -2617,7 +2811,9 @@ def _full_shard_write_json(path: Path, value: object) -> None:
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(path, flags, 0o600)
     with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-        json.dump(value, handle, ensure_ascii=False, indent=1, sort_keys=True)
+        # ASCII: problem text carries os.fsdecode() paths whose undecodable bytes are
+        # lone surrogates, which a UTF-8 writer cannot encode.
+        json.dump(value, handle, ensure_ascii=True, indent=1, sort_keys=True)
         handle.write("\n")
         handle.flush()
         os.fsync(handle.fileno())
@@ -2647,10 +2843,14 @@ class _FullShardLane:
         self.ignored_before = _full_shard_ignored(self.clone)
         return problems
 
-    def launch(self, mode: str, spec: Mapping) -> tuple:
+    def launch(self, mode: str, spec: Mapping, *, private_tmpdir: bool = True) -> tuple:
+        """Start the lane.  The canonical enumeration passes private_tmpdir=False and
+        keeps the coordinator's TMPDIR, as the serial run does, so that its decorator
+        skip facts are evaluated in the serial environment, not in a lane's."""
         _full_shard_write_json(self.spec, spec)
-        environment = os.environ.copy()
-        environment["TMPDIR"] = str(self.tmpdir)
+        environment = _full_shard_environment()
+        if private_tmpdir:
+            environment["TMPDIR"] = str(self.tmpdir)
         environment["PYTHONPYCACHEPREFIX"] = str(self.pycache)
         log = open(self.log, "xb")
         try:
@@ -2734,6 +2934,8 @@ def _full_shard_run_phase(
         audit["lanes"][lane.name].update(info)
         audit["lanes"][lane.name]["rows"] = len(assignment[lane.name])
         audit["lanes"][lane.name]["suppressed"] = len(result["suppressed"])
+        audit["lanes"][lane.name]["suppressed_ids"] = [rows[index]["id"] for index in result["suppressed"]]
+        audit["lanes"][lane.name]["skips"] = result["skips"]
         audit["problems"].extend(result["problems"])
         audit["non_success"].extend(result["non_success"])
         audit["problems"].extend(lane.leftover_problems(main_digest))
@@ -2779,9 +2981,11 @@ def _full_shard_execute(
     if problems:
         audit["problems"].extend(problems)
         return
+    # The enumeration only imports; it keeps the coordinator's TMPDIR (as the serial
+    # child does) so its decorator skip facts are the serial run's, not a lane's.
     launched = {"enum": enumeration.launch("enumerate", {
         "verbose": False, "canonical_sha256": None, "count": None, "indices": [],
-    })}
+    }, private_tmpdir=False)}
     info = _full_shard_wait_lanes(launched, deadline)["enum"]
     audit["enumeration"].update(info)
     try:
@@ -2816,12 +3020,28 @@ def _full_shard_execute(
     canonical_sha256 = starts[0]["canonical_sha256"]
     audit["canonical_sha256"] = canonical_sha256
     audit["canonical_count"] = len(rows)
+    decorator_skips = row_records[0].get("decorator_skips")
+    if not isinstance(decorator_skips, list) or not all(
+        isinstance(item, dict) and type(item.get("index")) is int
+        and 0 <= item["index"] < len(rows) and isinstance(item.get("reason"), str)
+        for item in decorator_skips
+    ):
+        audit["problems"].append("canonical enumeration did not report valid decorator skip facts")
+        return
+    audit["decorator_skips"] = [
+        {"id": rows[item["index"]]["id"], "reason": item["reason"]} for item in decorator_skips
+    ]
     if audit["problems"]:
         return
+    runtime_skips = plan.get("runtime_skips", {})
     try:
         applied = apply_full_shard_plan(plan, rows)
     except ImpactError as exc:
         audit["problems"].append(str(exc))
+        return
+    stale_skips = full_shard_runtime_skip_problems(runtime_skips, rows)
+    if stale_skips:
+        audit["problems"].extend(stale_skips)
         return
     assignment = applied["lanes"]
     phase_a = [_FullShardLane(name, "A", work, lanes_dir, temp_parent) for name in applied["phase_a"]]
@@ -2853,8 +3073,14 @@ def _full_shard_execute(
     ))
     audit["run_wall_seconds"] = round(time.monotonic() - run_started, 1)
     audit["problems"].extend(full_shard_coverage_problems(len(rows), merged))
+    audit["problems"].extend(full_shard_skip_problems(rows, decorator_skips, runtime_skips, merged))
     audit["executed"] = sum(len(result["executed"]) for result in merged.values())
     audit["suppressed"] = sum(len(result["suppressed"]) for result in merged.values())
+    audit["skips"] = sorted(
+        ({"id": entry["id"], "reason": entry["reason"], "lane": lane}
+         for lane, result in merged.items() for entry in result["skips"]),
+        key=lambda item: (item["id"], item["lane"]),
+    )
 
 
 def _full_shard_cleanup(work: Path, audit: dict) -> None:
@@ -2904,6 +3130,7 @@ def run_sharded_selection(root: Path, selection: Selection, verbose: bool, evide
         "enumeration": {}, "lanes": {}, "lanes_prepared": [], "phase_a_seconds": None,
         "phase_b_seconds": None, "run_wall_seconds": None, "phase_b_skipped": False,
         "problems": [], "non_success": [], "residue": [], "ignored_inventory": None,
+        "decorator_skips": None, "runtime_skips": plan.get("runtime_skips", {}), "skips": None,
         "cleanup": {"removed": [], "problems": []}, "started_epoch": round(time.time(), 3),
     }
     started = time.monotonic()
@@ -2921,7 +3148,14 @@ def run_sharded_selection(root: Path, selection: Selection, verbose: bool, evide
         interrupted = exc
         audit["problems"].append(f"interrupted: {type(exc).__name__}")
     if not audit["problems"]:
-        _full_shard_cleanup(work, audit)
+        # Any exception here is a cleanup problem; the audit below is always written.
+        try:
+            _full_shard_cleanup(work, audit)
+        except Exception as exc:
+            audit["problems"].append(f"cleanup error: {type(exc).__name__}: {exc}")
+        except BaseException as exc:
+            interrupted = exc
+            audit["problems"].append(f"cleanup interrupted: {type(exc).__name__}")
     audit["status"] = "passed" if not audit["problems"] else "failed"
     audit["total_wall_seconds"] = round(time.monotonic() - started, 1)
     audit["ended_epoch"] = round(time.time(), 3)

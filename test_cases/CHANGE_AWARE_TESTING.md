@@ -356,16 +356,43 @@ macOS（APFS clonefile）提供。它执行与串行相同的 canonical discover
 unittest 不运行它们相同）；随后全局核对每个 canonical 行恰好被执行或抑制一次。结果判定与串行
 `wasSuccessful()` 相同：expected failure 不算失败，unexpected success、failure、error 都算失败。
 
+跳过等价（2026-10-23 复审 M2 补充）：跳过也必须是串行会做的跳过，不能因车道环境不同而被当作覆盖。
+canonical 枚举保留协调器的 TMPDIR（与串行子进程相同，不用私有 TMPDIR），在导入全部模块后记下每个
+被类或方法装饰器跳过的行及其原因；每个车道按串行 `result.skipped` 的口径逐条记录跳过项（用例或
+子用例 id，或 setUpClass/setUpModule holder）及原因，`audit.json` 逐车道写出 `skips` 与
+`suppressed_ids`，并写出全部 `decorator_skips` 与汇总的 `skips`。全部车道结束后核对：枚举得到的
+每个装饰器跳过都必须由其车道以相同原因报告（其类或模块 holder 已整体跳过时除外，与串行相同）；
+其余每个跳过项只在运行时产生，必须是计划可选键 `runtime_skips` 中以完全相同原因列出的条目
+（`runtime_skips` 缺省即不允许任何运行时跳过；条目必须仍指向 canonical 用例、类或模块，否则在车道
+运行前按计划陈旧 fail closed）；同一跳过项重复报告也失败。当前计划只列出私有文档层门禁
+`PrivateDocumentationContractTests.setUpClass` 这一处运行时跳过（全部测试模块静态普查的唯一运行时
+跳过点）：它在没有被忽略私有层的 checkout 中跳过，在有私有层的 checkout 中运行，两种情况都与串行
+一致。仍不能由本门禁发现的差异：枚举与车道共有、而串行没有的环境差异（clone 路径、独立会话、写入
+日志而非终端的 stdout、去掉的 `GIT_*`）只影响的装饰器跳过，以及在车道中以与
+`runtime_skips` 完全相同的原因出现、而串行不会出现的运行时跳过；这一部分由专用会话对照逐对比较串行
+`-v` 日志的跳过行与审计 `skips` 闭合。本门禁不支持、遇到即 fail closed（串行会如实记录，当前树没有
+实例）的跳过形态：同一跳过项被报告多次（例如参数相同的子用例跳过两次，或用例本体与 tearDown 各跳过
+一次），以及在 tearDownClass、tearDownModule 或类/模块清理阶段抛出的 SkipTest。枚举只导入，导入期
+写入的临时文件落在协调器 TMPDIR 而不受枚举的遗留门检查；各车道在私有 TMPDIR 中执行同样的导入，
+仍由车道遗留门检出。
+
 门禁（任何一项都返回 1，批准 ledger 不变，证据全部保留在 ABSOLUTE_NEW_DIR）：主 checkout 必须是
 干净的已提交树（clone 的 index/worktree/untracked、.git 形态与 HEAD/refs 逐项核对）；车道
 clone、私有 TMPDIR 与私有 0700 pyc 前缀的 gid 等于用户主 gid；车道解释器身份与协调器一致；
-每车道挂死守卫期限 `lane_deadline_seconds`（不得小于 7800 秒，即不小于同版串行全量实测墙钟；它
-不是任何测试的时限，到期后整进程组 TERM→KILL）；车道崩溃、提前退出、无 finished 记录、结果文件
+每车道挂死守卫期限 `lane_deadline_seconds`（不得小于 9000 秒，即不小于下文记录的最近正式串行全量
+墙钟 8,816.975 秒，车道不会因跑满该已记录的串行时长而被终止；套件增长使正式串行墙钟接近此下限时，
+须先提高下限与计划期限；它不是任何测试的时限，到期后整进程组 TERM→KILL）；车道崩溃、提前退出、无 finished 记录、结果文件
 缺失、fixture 错误、非成功结果；运行后 clone 的 tracked 字节变化、未跟踪遗留、新增被忽略遗留
 （只排除 `__pycache__/*.pyc`）与私有 TMPDIR 非空；以 lane 进程组、argv 中的 lane 路径、工作目录
 位于 lane 路径三种口径查到的残留进程（先在 20 秒内只观察不发信号，仍残留则记录后终止并判失败）；
 阶段 A 任一问题都不进入阶段 B。全部通过后先删除全部 clone、私有 TMPDIR 与 pyc 前缀并核实已删除，
-任一删除失败也返回 1；只有此后 runner 才按原流程复核 snapshot 与环境并原子写入批准。
+任一删除失败也返回 1；只有此后 runner 才按原流程复核 snapshot 与环境并原子写入批准。删除只对
+unlink/rmdir 失败放开目录权限后重试，其余失败原样报告；清理中的任何异常都记为一条问题并返回 1，
+`audit.json` 总会写出（ASCII 编码，非 UTF-8 文件名不会使其写入失败）。协调器的 git 调用与车道环境
+都去掉继承的 `GIT_*` 变量（钩子上下文中的 `GIT_DIR`、`GIT_INDEX_FILE` 等会把 `git -C <clone>` 与
+车道测试指向别的仓库；串行路径不变），只保留不指向任何仓库、只选择配置来源的
+`GIT_CONFIG_NOSYSTEM`、`GIT_CONFIG_SYSTEM`、`GIT_CONFIG_GLOBAL`；残留门以绝对路径调用 `/bin/ps` 与 `/usr/sbin/lsof`。车道与
+串行 `TestSuite.run` 一样在每个用例跑完后释放其实例，且从不持有未分配给本车道的用例实例。
 
 证明合同：分片成功写入的 `full_suite_attestation` 与串行 `--all` 逐字节相同，schema、
 `full_suite_attestation_is_current`、`--check --require-full`、11-load、sync、tar 与 pre-push

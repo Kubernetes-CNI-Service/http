@@ -122,7 +122,8 @@ PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B test_cases/run_related_tests.p
 macOS 上另有 opt-in 的两阶段分片全量（候选，见 `CHANGE_AWARE_TESTING.md` 2026-10-23
 「opt-in 两阶段分片全量」小节）：`--all --sharded ABSOLUTE_NEW_DIR [-v]` 按受管计划
 `test_cases/full_shard_plan.json` 在私有 APFS clone 中并行运行阶段 A 车道，再单独运行唯一的
-阶段 B 安静车道；每个 canonical 用例必须恰好执行一次，任何失败、遗留、残留、期限或清理问题都
+阶段 B 安静车道；每个 canonical 用例必须恰好执行一次，跳过项必须是 canonical 枚举（沿用协调器
+TMPDIR）得到的装饰器跳过、或计划 `runtime_skips` 以相同原因列出的运行时跳过，任何失败、遗留、残留、期限或清理问题都
 返回 1 并把证据留在仓库外的 `ABSOLUTE_NEW_DIR`。成功时写入与串行 `--all` 逐字节相同的证明，
 执行形态只记在 `ABSOLUTE_NEW_DIR/audit.json`。它不能与 `--validation-only` 等其他模式同用；
 与串行相同，主 checkout 须带有 `refs/remotes/origin/v2` 且第一父链无 merge，车道 clone 原样继承这些引用、从不 fetch。在 `TC-REAL-FULL-SHARD-001` 的专用会话同版对照完成前，不用于正式 load、同步或发布证明。

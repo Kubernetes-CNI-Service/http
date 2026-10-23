@@ -5,7 +5,8 @@
   "status": "provisional",
   "weights": "lab RA-PM p1..p3 per_test.json median seconds (c09fix, 7-lane contention)",
   "default_seconds_per_unmeasured_test": "module measured mean, else median module mean 0.0447",
-  "rerun": "re-derive with the O0 serial timing log before any timed comparison (B-6)"
+  "rerun": "re-derive with the O0 serial timing log before any timed comparison (B-6)",
+  "runtime_skips": "the suite's only runtime skip site (static AST census of every test module: PrivateDocumentationContractTests.setUpClass raises SkipTest(PRIVATE_TIER_SKIP_REASON) when the ignored private tier is absent); decorator skips are not listed because the canonical enumeration computes them"
  },
  "lane_deadline_seconds": 9000,
  "phase_a": [
@@ -376,5 +377,8 @@
   "test_cases.test_req10c_auto_workflow": "跨进程 crontab 串行化等待 8 s，V6 并发下失败（ISO-1:19）；含 REQ10C 三个 ISSUE-0016 用例（AGENTS.md:55）",
   "test_cases.test_ztp_monitor_watch_resilience": "V8a 审计安静清单（RV670:158）；逐模块理由未找到（P14 Q20）",
   "test_cases.test_ztp_release_core_review": "loopback 端口交接（ISO-1:13）；ssh ConnectTimeout=2 / _run_ssh 1 s / ssh-keyscan 5 s / askpass 2 s，BOPT、PHB o3 失败（QUEUE:238）"
+ },
+ "runtime_skips": {
+  "setUpClass (test_cases.test_private_documentation_contract.PrivateDocumentationContractTests)": "private documentation tier absent in public checkout"
  }
 }
