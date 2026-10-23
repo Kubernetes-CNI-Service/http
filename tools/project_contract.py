@@ -1923,9 +1923,10 @@ NON_DEPLOYMENT_DIR_NAMES = frozenset({
     "test", "tests", "test_cases", "test-results", "__pycache__", ".pytest_cache",
     "node_modules",
 })
-# tools/cabletracker-lldpq: the owner's CableTracker reference project (2026-10-23) with a downloaded
-# online Issue Tracker and instance files; REQ7 copies its sync code, the directory itself never ships.
-REFERENCE_ONLY_SUBTREES = frozenset({"monitor/cabletracker-main", "tools/cabletracker-lldpq"})
+# tools/cabletracker: where the owner drops the current CableTracker project (2026-10-23; it may hold a
+# downloaded online Issue Tracker and instance files). REQ7 copies its sync code with
+# monitor/issue-tracker/update-engine.py; the directory itself never ships.
+REFERENCE_ONLY_SUBTREES = frozenset({"monitor/cabletracker-main", "tools/cabletracker"})
 
 # Image-only host state. Do not use this vocabulary to decide live transfers.
 # Each pattern denies its entry AND descendants, including symlink objects;

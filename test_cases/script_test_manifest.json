@@ -896,7 +896,9 @@
     "test_cases/nv_info_original_window_fixture.py",
     "test_cases/fixed_https_peer_fixture.py",
     "test_cases/ibsw_v2_switch_sim.py",
-    "monitor/issue-tracker/cabletracker/mapping_v4.json"
+    "monitor/issue-tracker/cabletracker/mapping_v4.json",
+    "test_cases/issue_tracker_template.py",
+    "monitor/issue-tracker/engine.lock.json"
   ],
   "scripts": {
     "DAY0-Prepare/01-a-setup.py": "DAY0-Prepare/01-a-setup.py",
@@ -939,6 +941,7 @@
     "monitor/issue-tracker/cabletracker/ibdiagnet/generate_report.py": "monitor/issue-tracker/cabletracker/ibdiagnet/generate_report.py",
     "monitor/issue-tracker/format_precheck.py": "monitor/issue-tracker/format_precheck.py",
     "monitor/issue-tracker/issue-tracker-sync.py": "monitor/issue-tracker/issue-tracker-sync.py",
+    "monitor/issue-tracker/update-engine.py": "monitor/issue-tracker/update-engine.py",
     "monitor/issue_tracker_qualification.py": "monitor/issue_tracker_qualification.py",
     "monitor/issue_tracker_manifest.py": "monitor/issue_tracker_manifest.py",
     "monitor/issue_tracker_cycle_source.py": "monitor/issue_tracker_cycle_source.py",
@@ -3158,7 +3161,8 @@
       "id": "issue_tracker_sync_direct",
       "paths": [
         "monitor/issue-tracker/issue-tracker-sync.py",
-        "monitor/issue-tracker/format_precheck.py"
+        "monitor/issue-tracker/format_precheck.py",
+        "monitor/issue-tracker/update-engine.py"
       ],
       "tests": [
         "test_cases.test_issue_tracker_sync",
@@ -5726,6 +5730,7 @@
       "members": [
         "monitor/issue-tracker/issue-tracker-sync.py",
         "monitor/issue-tracker/format_precheck.py",
+        "monitor/issue-tracker/update-engine.py",
         "monitor/issue-tracker/cabletracker/cabletracker_runner.py",
         "monitor/issue-tracker/cabletracker/ibdiagnet/__init__.py",
         "monitor/issue-tracker/cabletracker/ibdiagnet/generate_report.py",
@@ -6650,6 +6655,24 @@
     {
       "paths": [
         "monitor/issue-tracker/cabletracker/mapping_v4.json"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_sync",
+        "test_cases.test_issue_tracker_sync_workflow"
+      ]
+    },
+    {
+      "paths": [
+        "test_cases/issue_tracker_template.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_sync",
+        "test_cases.test_issue_tracker_sync_workflow"
+      ]
+    },
+    {
+      "paths": [
+        "monitor/issue-tracker/engine.lock.json"
       ],
       "tests": [
         "test_cases.test_issue_tracker_sync",

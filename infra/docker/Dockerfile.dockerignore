@@ -147,10 +147,10 @@ nvlink/nvsw.csv
 nvlink/nvsw.csv/**
 nvlink/p2p.xlsx
 nvlink/p2p.xlsx/**
-tools/cabletracker-lldpq
-tools/cabletracker-lldpq/**
-tools/cabletracker-lldpq.zip
-tools/cabletracker-lldpq.zip/**
+tools/cabletracker
+tools/cabletracker/**
+tools/cabletracker.zip
+tools/cabletracker.zip/**
 tools/ib-tool-Jie
 tools/ib-tool-Jie/**
 tools/ibdiagnet-analyze-tool

@@ -1,0 +1,11 @@
+{
+ "schema": "cabletracker-engine-lock-v1",
+ "source": "cabletracker",
+ "updated_at": "2026-10-23T21:52:24+08:00",
+ "files": {
+  "cabletracker_runner.py": "3ae523fa8d3cecd2af387a1b57188a036cee807e52ac12e2f7dc194a11ac8f00",
+  "mapping_v4.json": "fa8ec80d39c6a968b74059cd79978fef5bee6ec823dd4a6b2321191acd4300f7",
+  "ibdiagnet/__init__.py": "6f626ffc9882ef74a66a34db0979249b4d10eb102aafab264653d0d1689088ad",
+  "ibdiagnet/generate_report.py": "58abe6c983d3372d26f79c3f75a04930bdb596cd0dd0f98c4aaa0df8c5978e5d"
+ }
+}

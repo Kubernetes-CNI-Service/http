@@ -21,7 +21,7 @@ A domain whose newest input is unchanged since its last successful sync is skipp
 send it again); a domain without any input is skipped with a note.
 
     python3 monitor/issue-tracker/issue-tracker-sync.py [--project-dir DIR] [--only ib|eth]
-                                                         [--convert-only] [--force]
+                                                         [--convert-only | --precheck-only] [--force]
 
 Before every engine run, format_precheck.py checks read-only that the document already has exactly the
 worksheets and header rows the engine enforces (owner 2026-10-23: the online Issue Tracker is a standard
@@ -471,23 +471,29 @@ def engine_command(python: str, config: Config, domain: Domain, source: Path,
     return command
 
 
-def format_gate(python: str, command: list, credentials: Path, work: Path, log: Log) -> None:
-    """The online Issue Tracker is a standard format: the engine may only fill rows. Read-only check
-    that this exact engine command would not create a worksheet or rewrite any header row."""
-    command_file = work / "engine-command.json"
-    command_file.write_text(json.dumps(command[2:]), encoding="utf-8")
+def _precheck(python: str, arguments: list) -> tuple:
     try:
-        completed = subprocess.run(
-            [python, str(FORMAT_PRECHECK), "--credentials", str(credentials),
-             "--engine-command-json", str(command_file)],
-            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=STEP_TIMEOUT, check=False)
+        completed = subprocess.run([python, str(FORMAT_PRECHECK), *arguments], stdin=subprocess.DEVNULL,
+                                   capture_output=True, text=True, timeout=STEP_TIMEOUT, check=False)
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise StepError(f"format pre-check could not run: {exc}") from None
+        raise StepError(f"format check could not run: {exc}") from None
     lines = (completed.stdout or "").strip().splitlines()
     try:
         report = json.loads(lines[-1]) if lines else {}
     except ValueError:
         report = {}
+    return completed, report
+
+
+def format_gate(python: str, command: list, credentials: Path, work: Path, log: Log) -> Path:
+    """The online Issue Tracker is a standard format: the engine may only fill rows. A shadow run of
+    this exact engine command (reads real, writes intercepted) must not create a worksheet, touch a
+    title/header row or another worksheet. Returns the snapshot of the header rows for the after-check."""
+    command_file = work / "engine-command.json"
+    command_file.write_text(json.dumps(command[2:]), encoding="utf-8")
+    snapshot = work / "format-before.json"
+    completed, report = _precheck(python, ["--credentials", str(credentials), "--engine-command-json",
+                                           str(command_file), "--snapshot", str(snapshot)])
     if completed.returncode == 3:
         for change in report.get("changes", []):
             log(f"  format change refused: {change}")
@@ -498,6 +504,20 @@ def format_gate(python: str, command: list, credentials: Path, work: Path, log: 
             log(f"  [format_precheck.py stderr] {line}")
         raise StepError(f"format pre-check failed: {report.get('error') or completed.returncode}")
     log("format pre-check: document matches the engine; only rows will be written")
+    return snapshot
+
+
+def format_after_check(python: str, credentials: Path, spreadsheet_id: str, snapshot: Path, log: Log) -> None:
+    """After the real run: the worksheets and header rows must be exactly as before."""
+    completed, report = _precheck(python, ["--credentials", str(credentials), "--spreadsheet-id",
+                                           spreadsheet_id, "--compare-snapshot", str(snapshot)])
+    if completed.returncode == 3:
+        for change in report.get("changes", []):
+            log(f"  FORMAT CHANGED BY THE ENGINE: {change}")
+        raise StepError("the engine changed the online document's format during the sync; "
+                        "restore it from the document's version history and update the engine")
+    if completed.returncode != 0:
+        raise StepError(f"format after-check failed: {report.get('error') or completed.returncode}")
 
 
 def read_state(path: Path) -> dict:
@@ -520,6 +540,9 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
                         help="write ib-cvt.json / eth-lldpq.json but do not contact Google")
     parser.add_argument("--force", action="store_true",
                         help="sync even when the newest input was already synced")
+    parser.add_argument("--precheck-only", action="store_true",
+                        help=("convert and run the read-only format pre-check against the online document, "
+                              "then stop without writing (use after the engine or the document changed)"))
     parser.add_argument("--engine-python", default=sys.executable,
                         help="interpreter with the engine's Google libraries (default: this one)")
     return parser.parse_args(argv)
@@ -527,7 +550,7 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
 
 def handle_domain(domain: Domain, *, project: Path, output: Path, config: Config, credentials: Path,
                   state: dict, args: argparse.Namespace, log: Log) -> str:
-    """Return 'synced', 'converted', 'unchanged' or 'no-input'; raise StepError on failure."""
+    """Return 'synced', 'converted', 'prechecked', 'unchanged' or 'no-input'; raise StepError on failure."""
     p2p = project / "99-output-p2p"
     if domain.name == "ib":
         source_input = newest_ib_input(project, domain.environment)
@@ -555,8 +578,8 @@ def handle_domain(domain: Domain, *, project: Path, output: Path, config: Config
     target = {"spreadsheet_id": config.spreadsheet_id, "import_sheet": domain.import_sheet,
               "cabling_sheet": domain.cabling_sheet, "include_warnings": domain.include_warnings}
     previous = state.get(domain.name) or {}
-    if (not args.force and not args.convert_only and previous.get("inputs") == inputs
-            and previous.get("target") == target):
+    if (not args.force and not args.convert_only and not args.precheck_only
+            and previous.get("inputs") == inputs and previous.get("target") == target):
         log(f"{domain.name.upper()}: {source_input.name} already synced at {previous.get('synced_at')}; skipped")
         return "unchanged"
     with tempfile.TemporaryDirectory(prefix=".work-", dir=output) as work:
@@ -567,11 +590,17 @@ def handle_domain(domain: Domain, *, project: Path, output: Path, config: Config
     if args.convert_only:
         log(f"{domain.name.upper()}: wrote {destination.name} (no sync: --convert-only)")
         return "converted"
-    log(f"{domain.name.upper()}: syncing into '{domain.import_sheet}' and '{domain.cabling_sheet}'")
     command = engine_command(args.engine_python, config, domain, destination, credentials)
+    if args.precheck_only:
+        with tempfile.TemporaryDirectory(prefix=".precheck-", dir=output) as work:
+            format_gate(args.engine_python, command, credentials, Path(work), log)
+        log(f"{domain.name.upper()}: pre-check passed; nothing written (--precheck-only)")
+        return "prechecked"
+    log(f"{domain.name.upper()}: syncing into '{domain.import_sheet}' and '{domain.cabling_sheet}'")
     with tempfile.TemporaryDirectory(prefix=".engine-", dir=output) as engine_cwd:
-        format_gate(args.engine_python, command, credentials, Path(engine_cwd), log)
+        snapshot = format_gate(args.engine_python, command, credentials, Path(engine_cwd), log)
         returncode = _run(command, log, ENGINE_TIMEOUT, cwd=Path(engine_cwd))
+        format_after_check(args.engine_python, credentials, config.spreadsheet_id, snapshot, log)
     if returncode != 0:
         raise StepError(f"cabletracker_runner.py exited {returncode}")
     state[domain.name] = {"inputs": inputs, "target": target,
@@ -583,6 +612,8 @@ def main(argv: Iterable[str] | None = None) -> int:
     args = parse_args(argv)
     log = Log()
     try:
+        if args.convert_only and args.precheck_only:
+            raise SyncError("--convert-only and --precheck-only exclude each other")
         project = project_directory(args.project_dir)
         config = load_config(project / CONFIG_NAME)
         credentials = project / CREDENTIALS_NAME

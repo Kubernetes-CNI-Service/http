@@ -9,6 +9,7 @@ the per-project lock.
 
 from __future__ import annotations
 
+import copy
 import fcntl
 import hashlib
 import importlib.util
@@ -28,21 +29,14 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 WRAPPER = ROOT / "monitor/issue-tracker/issue-tracker-sync.py"
 ENGINE = ROOT / "monitor/issue-tracker/cabletracker"
-REFERENCE = ROOT / "tools/cabletracker-lldpq"
-VENDORED_SHA256 = {
-    "cabletracker_runner.py": "3ae523fa8d3cecd2af387a1b57188a036cee807e52ac12e2f7dc194a11ac8f00",
-    "mapping_v4.json": "fa8ec80d39c6a968b74059cd79978fef5bee6ec823dd4a6b2321191acd4300f7",
-    "ibdiagnet/__init__.py": "6f626ffc9882ef74a66a34db0979249b4d10eb102aafab264653d0d1689088ad",
-    "ibdiagnet/generate_report.py": "58abe6c983d3372d26f79c3f75a04930bdb596cd0dd0f98c4aaa0df8c5978e5d",
-}
+REFERENCE = ROOT / "tools/cabletracker"
+UPDATE = ROOT / "monitor/issue-tracker/update-engine.py"
+LOCK = ROOT / "monitor/issue-tracker/engine.lock.json"
 SPREADSHEET = "1" + "A" * 43
 PRECHECK = ROOT / "monitor/issue-tracker/format_precheck.py"
+sys.path.insert(0, str(ROOT))
+from test_cases.issue_tracker_template import TEMPLATE  # noqa: E402
 
-# Header rows of the standard Issue Tracker template (owner 2026-10-23), the contract the engine must match.
-TEMPLATE_CVT_IMPORT_GS = ["Circuit ID", "Status", "Status Cycles", "Protocol", "A SU Number", "A Rack", "A RU", "A Node Type", "A Node", "A Port", "A Custom NIC Name", "A RDMA Name", "A Actual Node", "A Actual Port", "A Port Status", "A Link Down Counter", "A Module Temperature (C)", "A Raw BER", "A Effective BER", "A Symbol BER", "A BER Status", "A RX Power Lanes (dBm)", "A TX Power Lanes (dBm)", "A RX Power Low Threshold", "A RX Power High Threshold", "A TX Power Low Threshold", "A TX Power High Threshold", "A Power Data Stale", "A Cable Serial", "A Cable PN", "A Report", "A Recommended Action", "Z SU Number", "Z Rack", "Z RU", "Z Node Type", "Z Node", "Z Port", "Z Custom NIC Name", "Z RDMA Name", "Z Actual Node", "Z Actual Port", "Z Port Status", "Z Link Down Counter", "Z Module Temperature (C)", "Z Raw BER", "Z Effective BER", "Z Symbol BER", "Z BER Status", "Z RX Power Lanes (dBm)", "Z TX Power Lanes (dBm)", "Z RX Power Low Threshold", "Z RX Power High Threshold", "Z TX Power Low Threshold", "Z TX Power High Threshold", "Z Power Data Stale", "Z Cable Serial", "Z Cable PN", "Z Report", "Z Recommended Action", "Last Update (UTC)", "Tracking Status", "Instance"]
-TEMPLATE_LLDPQ_IMPORT_GS = ["Circuit ID", "Status", "Status Cycles", "Protocol", "A SU Number", "A Node Type", "A Node", "A Rack", "A Port", "A Custom NIC Name", "A RDMA Name", "A RU", "A Actual Node", "A Actual Port", "A Port Status", "A Cable Serial", "A Cable PN", "A Link Down Counter", "A Module Temperature (C)", "A RX Power Lanes (dBm)", "A TX Power Lanes (dBm)", "A RX Power Low Threshold", "A RX Power High Threshold", "A TX Power Low Threshold", "A TX Power High Threshold", "A Power Data Stale", "A Report", "A Recommended Action", "Z SU Number", "Z Node Type", "Z Node", "Z Rack", "Z Port", "Z Custom NIC Name", "Z RDMA Name", "Z RU", "Z Actual Node", "Z Actual Port", "Z Port Status", "Z Cable Serial", "Z Cable PN", "Z Link Down Counter", "Z Module Temperature (C)", "Z RX Power Lanes (dBm)", "Z TX Power Lanes (dBm)", "Z RX Power Low Threshold", "Z RX Power High Threshold", "Z TX Power Low Threshold", "Z TX Power High Threshold", "Z Power Data Stale", "Z Report", "Z Recommended Action", "Last Update (UTC)", "Source Line", "A Raw BER", "A Effective BER", "A Symbol BER", "A BER Status", "Z Raw BER", "Z Effective BER", "Z Symbol BER", "Z BER Status", "Tracking Status", "Instance"]
-TEMPLATE_CABLING = ["Fault ID", "Source", "Reported by", "Opened At", "Link Type", "Issue Type", "Issue Desc", "A-SU", "A-Rack", "A-RU", "A-Node", "A-Port", "A Actual Node", "A Actual Port", "Z-Rack", "Z-RU", "Z-Node", "Z-Port", "Z Actual Node", "Z Actual Port", "Status", "Notes", "AI Recommendation (Refer only)", "NV Comments", "Assigned to", "Engineer Assigned", "Action Description", "P-status", "CVT", "Closed At", "Instance"]
-TEMPLATE_WHITELIST = ["Submit Date", "Submitor", "Datahalll", "Instance", "Filter Type", "Filter"]
 SECRET_MARKER = "secret-value"
 
 
@@ -84,15 +78,88 @@ def record(status, a=("leaf-a", "swp1"), b=("leaf-z", "swp2"), detail="", observ
             "observation_b": {"admin": "", "oper": "", "remote_host": "", "remote_port": ""}}
 
 
+def load_updater():
+    spec = importlib.util.spec_from_file_location("update_engine_under_test", UPDATE)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+STUBBED_PYTHON = r'''
+import runpy, sys, types
+for name in ("openai", "httpx"):
+    try:
+        __import__(name)
+    except ImportError:
+        stub = types.ModuleType(name)
+        stub.OpenAI = stub.Client = object
+        sys.modules[name] = stub
+script = sys.argv[1]
+sys.argv = sys.argv[1:]
+runpy.run_path(script, run_name="__main__")
+'''
+
+
 class VendoredEngineTests(unittest.TestCase):
-    def test_engine_files_are_the_reference_bytes(self):
-        for relative, expected in VENDORED_SHA256.items():
+    def test_engine_copy_is_exactly_the_locked_version(self):
+        lock = json.loads(LOCK.read_text(encoding="utf-8"))
+        self.assertEqual("cabletracker-engine-lock-v1", lock["schema"])
+        self.assertEqual(sorted(["cabletracker_runner.py", "mapping_v4.json", "ibdiagnet/__init__.py",
+                                 "ibdiagnet/generate_report.py"]), sorted(lock["files"]))
+        for relative, expected in lock["files"].items():
             with self.subTest(file=relative):
                 data = (ENGINE / relative).read_bytes()
                 self.assertEqual(expected, hashlib.sha256(data).hexdigest())
-                reference = REFERENCE / relative
-                if reference.is_file():
-                    self.assertEqual(reference.read_bytes(), data)
+        self.assertNotIn("/Users/", lock["source"])
+
+    def test_update_takes_a_new_version_only_when_it_still_accepts_the_sync_options(self):
+        updater = load_updater()
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            live, source = base / "live", base / "source"
+            for relative in updater.SYNC_FILES:
+                for target in (live, source):
+                    (target / relative).parent.mkdir(parents=True, exist_ok=True)
+                    (target / relative).write_bytes((ENGINE / relative).read_bytes())
+            launcher = base / "python-with-stubs"
+            (base / "stubbed.py").write_text(STUBBED_PYTHON)
+            launcher.write_text(f"#!/bin/sh\nexec {sys.executable} -B {base / 'stubbed.py'} \"$@\"\n")
+            launcher.chmod(0o755)
+            lock = base / "engine.lock.json"
+            with mock.patch.multiple(updater, BASE=base, ENGINE_DIR=live, LOCK=lock, HTTP_ROOT=base):
+                run = lambda *extra: updater.main(["--from", str(source), "--engine-python", str(launcher), *extra])
+                with redirect_stdout(io.StringIO()) as out:
+                    self.assertEqual(0, run(), out.getvalue())
+                self.assertIn("already this version", out.getvalue())
+                self.assertEqual("source", json.loads(lock.read_text())["source"])
+                with redirect_stdout(io.StringIO()):
+                    self.assertEqual(0, updater.main(["--check"]))
+
+                (source / "mapping_v4.json").write_bytes(b'{"cvt_import": {}, "remediation": {}}\n')
+                with redirect_stdout(io.StringIO()) as out:
+                    self.assertEqual(0, run(), out.getvalue())
+                self.assertIn("updated mapping_v4.json", out.getvalue())
+                self.assertEqual((source / "mapping_v4.json").read_bytes(), (live / "mapping_v4.json").read_bytes())
+                self.assertEqual(hashlib.sha256((live / "mapping_v4.json").read_bytes()).hexdigest(),
+                                 json.loads(lock.read_text())["files"]["mapping_v4.json"])
+
+                runner = source / "cabletracker_runner.py"
+                runner.write_text(runner.read_text().replace('"--eth-cabling-sheet"', '"--ethernet-cabling-sheet"'))
+                before = (live / "cabletracker_runner.py").read_bytes()
+                with redirect_stdout(io.StringIO()) as out:
+                    self.assertEqual(2, run(), out.getvalue())
+                self.assertIn("--eth-cabling-sheet", out.getvalue())
+                self.assertIn("unchanged", out.getvalue())
+                self.assertEqual(before, (live / "cabletracker_runner.py").read_bytes())
+
+                (source / "ibdiagnet/__init__.py").unlink()
+                with redirect_stdout(io.StringIO()) as out:
+                    self.assertEqual(2, run(), out.getvalue())
+                (live / "mapping_v4.json").write_bytes(b"{}")
+                with redirect_stdout(io.StringIO()) as out:
+                    self.assertEqual(2, updater.main(["--check"]))
+                self.assertIn("mapping_v4.json differs", out.getvalue())
 
 
 class ConfigurationTests(unittest.TestCase):
@@ -331,8 +398,9 @@ class EngineCommandTests(unittest.TestCase):
         self.assertNotIn("--ib-cabling-sheet", command)
 
 
-PRECHECK_CHILD = r'''
+SHADOW_CHILD = r'''
 import importlib.util, json, sys, types
+from pathlib import Path
 for name in ("openai", "httpx"):
     try:
         __import__(name)
@@ -340,93 +408,131 @@ for name in ("openai", "httpx"):
         stub = types.ModuleType(name)
         stub.OpenAI = stub.Client = object
         sys.modules[name] = stub
-def load(name, path):
-    spec = importlib.util.spec_from_file_location(name, path)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
-precheck = load("format_precheck_child", sys.argv[1])
-wrapper = load("issue_tracker_sync_child", sys.argv[2])
-config = wrapper.Config(sys.argv[3], "Asia/Shanghai", {
-    name: wrapper.Domain(name, True, "prod", wrapper.DOMAIN_DEFAULTS[name]["import_sheet"],
-                         wrapper.DOMAIN_DEFAULTS[name]["cabling_sheet"], False) for name in ("ib", "eth")})
-engine = precheck.load_engine()
-import tempfile
-work = wrapper.Path(tempfile.mkdtemp())
-source, key = work / "source.json", work / "cre.json"
-source.write_text("[]")
-key.write_text("{}")
-result = {}
-for name in ("ib", "eth"):
-    command = wrapper.engine_command(sys.executable, config, config.domains[name], source, key)
-    result[name] = precheck.expected_layout(engine, command[2:])
-print(json.dumps(result))
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+root, scenario = Path(sys.argv[1]), json.loads(Path(sys.argv[2]).read_text())
+sys.path.insert(0, str(root))
+from test_cases.issue_tracker_template import FakeSheets
+spec = importlib.util.spec_from_file_location("format_precheck_shadow_child",
+                                              root / "monitor/issue-tracker/format_precheck.py")
+precheck = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = precheck
+spec.loader.exec_module(precheck)
+pem = rsa.generate_private_key(public_exponent=65537, key_size=2048).private_bytes(
+    serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()).decode()
+key = Path(scenario["work"]) / "cre.json"
+key.write_text(json.dumps({"type": "service_account", "client_email": "shadow@example.test",
+                           "private_key": pem, "token_uri": "https://oauth2.example.test/token"}))
+command = [item.replace("@KEY@", str(key)) for item in scenario["command"]]
+fake = FakeSheets(scenario["document"])
+report = precheck.shadow_run(command, service_factory=lambda real: fake)
+report["reads"] = len(fake.reads)
+print(json.dumps(report))
 '''
 
 
 class FormatPrecheckTests(unittest.TestCase):
-    """The read-only gate that keeps the standard Issue Tracker format unchanged."""
+    """The read-only gate: the real engine in a shadow run against the standard template."""
 
     def setUp(self):
         spec = importlib.util.spec_from_file_location("format_precheck_under_test", PRECHECK)
         self.precheck = importlib.util.module_from_spec(spec)
         sys.modules[spec.name] = self.precheck
         spec.loader.exec_module(self.precheck)
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.work = Path(self.directory.name)
 
-    def test_engine_with_default_sheets_enforces_exactly_the_standard_template(self):
+    def shadow(self, document):
+        sync = load_wrapper()
+        config = sync.Config(SPREADSHEET, "Asia/Shanghai", {
+            name: sync.Domain(name, True, "prod", sync.DOMAIN_DEFAULTS[name]["import_sheet"],
+                              sync.DOMAIN_DEFAULTS[name]["cabling_sheet"], False) for name in ("ib", "eth")})
+        source = self.work / "eth-lldpq.json"
+        source.write_text(json.dumps({"schema_version": 1, "domain": "lldp_results", "collection_status": "complete",
+                                      "generated_at": 1788178680.0, "row_count": 2, "rows": [
+            {"status": "SUCCESS", "local_device": "leaf-a", "local_port": "swp1", "expected_device": "leaf-z",
+             "expected_port": "swp2", "actual_device": "leaf-z", "actual_port": "swp2", "port_status": "up",
+             "connection_health": ""},
+            {"status": "FAILED", "local_device": "leaf-b", "local_port": "swp3", "expected_device": "leaf-z",
+             "expected_port": "swp4", "actual_device": None, "actual_port": None, "port_status": "down",
+             "connection_health": "Link Down: leaf-b:swp3 oper=down admin=up"}]}))
+        command = sync.engine_command(sys.executable, config, config.domains["eth"], source, Path("@KEY@"))
+        scenario = self.work / "scenario.json"
+        scenario.write_text(json.dumps({"work": str(self.work), "command": command[2:], "document": document}))
         import subprocess
-        completed = subprocess.run([sys.executable, "-B", "-c", PRECHECK_CHILD, str(PRECHECK), str(WRAPPER),
-                                    SPREADSHEET], capture_output=True, text=True, timeout=300, check=False)
+        completed = subprocess.run([sys.executable, "-B", "-c", SHADOW_CHILD, str(ROOT), str(scenario)],
+                                   capture_output=True, text=True, timeout=300, check=False)
         self.assertEqual(0, completed.returncode, completed.stderr[-3000:])
-        layout = json.loads(completed.stdout.strip().splitlines()[-1])
-        self.assertEqual({"sheet": "CVT_Import_GS", "headers": TEMPLATE_CVT_IMPORT_GS}, layout["ib"]["import"])
-        self.assertEqual([{"sheet": "IB Cabling", "headers": TEMPLATE_CABLING}], layout["ib"]["cabling"])
-        self.assertEqual({"sheet": "LLDPQ_Import_GS", "headers": TEMPLATE_LLDPQ_IMPORT_GS}, layout["eth"]["import"])
-        self.assertEqual([{"sheet": "ETH Cabling", "headers": TEMPLATE_CABLING}], layout["eth"]["cabling"])
-        self.assertEqual(("Whitelist", SPREADSHEET), (layout["ib"]["whitelist"], layout["ib"]["spreadsheet_id"]))
-        self.assertEqual([], self.precheck.whitelist_changes([TEMPLATE_WHITELIST]))
+        return json.loads(completed.stdout.strip().splitlines()[-1])
 
-    def layout(self):
-        return {"import": {"sheet": "CVT_Import_GS", "headers": ["A", "B", "C"]},
-                "cabling": [{"sheet": "IB Cabling", "headers": ["F", "G"]}], "whitelist": "Whitelist"}
+    def test_standard_template_is_only_filled(self):
+        report = self.shadow(copy.deepcopy(TEMPLATE))
+        self.assertEqual((True, "preparation leaves the format unchanged"), (report["ok"], report.get("verdict")),
+                         report)
+        self.assertEqual(["'LLDPQ_Import_GS' A1 timestamp", "'ETH Cabling' A1 timestamp"], report["allowed"])
+        self.assertGreater(report["reads"], 0)
 
-    def reader(self, sheets):
-        return lambda tab, last: sheets[tab][:last]
+    def test_old_cabling_header_is_refused_before_any_write(self):
+        document = copy.deepcopy(TEMPLATE)
+        headers = document["ETH Cabling"]["headers"]
+        headers[headers.index("Reported by")] = "Requested by"
+        report = self.shadow(document)
+        self.assertFalse(report["ok"], report)
+        self.assertEqual(1, len(report["changes"]), report)
+        self.assertIn("ETH Cabling", report["changes"][0])
 
-    def test_matching_document_has_no_format_change(self):
-        sheets = {"CVT_Import_GS": [["Imported at: x"], ["A", "B", "C", ""]],
-                  "IB Cabling": [["Updated at: x"], ["F", "G"]],
-                  "Whitelist": [["Submit Date", "Instance", "Filter Type", "Filter"]]}
-        self.assertEqual([], self.precheck.compare(self.layout(), sheets, self.reader(sheets)))
+    def test_missing_import_worksheet_is_refused(self):
+        document = copy.deepcopy(TEMPLATE)
+        del document["LLDPQ_Import_GS"]
+        report = self.shadow(document)
+        self.assertFalse(report["ok"], report)
+        self.assertIn("addSheet", report["changes"][0])
 
-    def test_every_kind_of_format_change_is_reported(self):
-        sheets = {"CVT_Import_GS": [["Imported at: x"], ["A", "C", "B"]],
-                  "Whitelist": [["Submit Date", "Datahalll", "Rack", "Device Name", "Comments"]]}
-        problems = self.precheck.compare(self.layout(), sheets, self.reader(sheets))
-        self.assertEqual(6, len(problems), problems)
-        text = "\n".join(problems)
-        self.assertIn("'CVT_Import_GS' header row 2 would be rewritten: same columns in a different order", text)
-        self.assertIn("cabling worksheet 'IB Cabling' does not exist and would be created", text)
-        for change in ("rename Device Name to Filter", "delete the Rack column",
-                       "rename Comments to Filter Type", "insert an Instance column"):
-            self.assertIn(change, text)
-        sheets["IB Cabling"] = [["Updated at: x"], ["F", "G", "H"]]
-        problems = self.precheck.compare(self.layout(), sheets, self.reader(sheets))
-        self.assertIn("'IB Cabling' header row 2 would be rewritten: only in the document ['H']; "
-                      "only in the engine []", problems)
+    def test_old_whitelist_layout_is_refused(self):
+        document = copy.deepcopy(TEMPLATE)
+        document["Whitelist"]["headers"] = ["Submit Date", "Submitor", "Datahalll", "Rack", "Device Name", "Comments"]
+        report = self.shadow(document)
+        self.assertFalse(report["ok"], report)
+        self.assertIn("Whitelist", report["changes"][0])
 
-    def test_options_that_write_other_worksheets_are_refused(self):
-        class Engine:
-            @staticmethod
-            def parse_args():
-                return types.SimpleNamespace(refresh_cabling_sum=True)
+    def test_write_judgement_by_location_only(self):
+        document = self.precheck.Document({"IB Cabling": 7, "Inventory": 8},
+                                          lambda title: "Updated at: x" if title == "IB Cabling" else "Type")
+        policy = self.precheck.Policy(document, ["IB Cabling"])
+        self.assertEqual("allowed", policy.judge_range("'IB Cabling'!A1", [["Updated at: 2026-10-23 22:00:00"]]))
+        self.assertEqual("data", policy.judge_range("'IB Cabling'!A3:AE40"))
+        for text, values in (("'IB Cabling'!A1", [["not a timestamp"]]), ("'IB Cabling'!A2:AE2", [["x"]]),
+                             ("'IB Cabling'!B1", [["Updated at: x"]]), ("Inventory!A2:C9", [["x"]]),
+                             ("'Absent'!A5", [["x"]])):
+            with self.subTest(range=text):
+                with self.assertRaises(self.precheck.FormatChange):
+                    policy.judge_range(text, values)
+        with self.assertRaises(self.precheck.ShadowFinished):
+            policy.values_write("append", {"range": "'IB Cabling'!A3", "body": {"values": [["x"]]}})
+        with self.assertRaises(self.precheck.FormatChange):
+            policy.values_write("batchClearByDataFilter", {})
+        for request in ({"addSheet": {"properties": {"title": "New"}}},
+                        {"insertDimension": {"range": {"sheetId": 7, "dimension": "COLUMNS", "startIndex": 3}}},
+                        {"repeatCell": {"range": {"sheetId": 7, "startRowIndex": 1, "endRowIndex": 2}}},
+                        {"updateSheetProperties": {"properties": {"sheetId": 7}}}):
+            with self.subTest(request=next(iter(request))):
+                with self.assertRaises(self.precheck.FormatChange):
+                    policy.batch_update({"body": {"requests": [request]}})
+        with self.assertRaises(self.precheck.ShadowFinished):
+            policy.batch_update({"body": {"requests": [
+                {"appendDimension": {"sheetId": 7, "dimension": "ROWS", "length": 100}},
+                {"repeatCell": {"range": {"sheetId": 7, "startRowIndex": 2}}}]}})
 
-            @staticmethod
-            def normalize_and_validate_instance_args(args):
-                return None
-        with self.assertRaises(ValueError):
-            self.precheck.expected_layout(Engine, [])
+    def test_range_reading_and_snapshot_comparison(self):
+        self.assertEqual(("IB Cabling", 3, None, 1, 31), self.precheck.parse_range("'IB Cabling'!A3:AE"))
+        self.assertEqual(("ETH&IB Switch", 1, 2, None, None), self.precheck.parse_range("'ETH&IB Switch'!1:2"))
+        self.assertEqual(("It's", None, None, None, None), self.precheck.parse_range("'It''s'"))
+        before = {"worksheets": ["A", "B"], "headers": {"A": [["x"]], "B": [["Updated at:"], ["h"]]}}
+        self.assertEqual([], self.precheck.snapshot_changes(before, copy.deepcopy(before)))
+        after = {"worksheets": ["A", "B", "C"], "headers": {"A": [["y"]], "B": [["Updated at:"], ["h"]], "C": []}}
+        self.assertEqual(["worksheet added: 'C'", "header rows of 'A' changed"],
+                         self.precheck.snapshot_changes(before, after))
 
 
 class MainFlowTests(unittest.TestCase):
@@ -472,11 +578,22 @@ class MainFlowTests(unittest.TestCase):
         self.addCleanup(patcher.stop)
         self.gate_calls = base / "gate-calls.jsonl"
         self.gate_exit = base / "gate-exit"
+        self.after_exit = base / "after-exit"
+        self.after_calls = base / "after-calls.jsonl"
         gate = base / "fake_precheck.py"
         gate.write_text(
             "import json, sys\n"
             "from pathlib import Path\n"
-            "command = json.loads(Path(sys.argv[sys.argv.index('--engine-command-json') + 1]).read_text())\n"
+            "argv = sys.argv\n"
+            "if '--compare-snapshot' in argv:\n"
+            "    snapshot = Path(argv[argv.index('--compare-snapshot') + 1])\n"
+            f"    Path({str(self.after_calls)!r}).open('a').write(json.dumps([snapshot.read_text(), argv[argv.index('--spreadsheet-id') + 1]]) + '\\n')\n"
+            f"    exit_file = Path({str(self.after_exit)!r})\n"
+            "    code = int(exit_file.read_text()) if exit_file.exists() else 0\n"
+            "    print(json.dumps({'ok': code == 0, 'changes': ['header rows of IB Cabling changed'] if code == 3 else []}))\n"
+            "    raise SystemExit(code)\n"
+            "command = json.loads(Path(argv[argv.index('--engine-command-json') + 1]).read_text())\n"
+            "Path(argv[argv.index('--snapshot') + 1]).write_text('before-snapshot')\n"
             f"Path({str(self.gate_calls)!r}).open('a').write(json.dumps(command) + '\\n')\n"
             f"exit_file = Path({str(self.gate_exit)!r})\n"
             "code = int(exit_file.read_text()) if exit_file.exists() else 0\n"
@@ -518,6 +635,8 @@ class MainFlowTests(unittest.TestCase):
         gate_commands = [json.loads(line) for line in self.gate_calls.read_text().splitlines()]
         self.assertEqual([calls[0]["argv"]], gate_commands)
         self.assertIn("format pre-check: document matches the engine", text)
+        self.assertEqual([["before-snapshot", SPREADSHEET]],
+                         [json.loads(line) for line in self.after_calls.read_text().splitlines()])
 
         code, text = self.run_main()
         self.assertEqual(0, code, text)
@@ -551,6 +670,25 @@ class MainFlowTests(unittest.TestCase):
         code, text = self.run_main()
         self.assertEqual(1, code, text)
         self.assertEqual([], self.engine_calls())
+
+    def test_a_format_change_during_the_run_fails_and_is_not_recorded_as_synced(self):
+        self.after_exit.write_text("3")
+        code, text = self.run_main()
+        self.assertEqual(1, code, text)
+        self.assertEqual(1, len(self.engine_calls()))
+        self.assertIn("FORMAT CHANGED BY THE ENGINE: header rows of IB Cabling changed", text)
+        self.assertIn("restore it from the document's version history", text)
+        self.assertFalse((self.project / "99-output-p2p/issue-tracker/state.json").exists())
+
+    def test_precheck_only_runs_the_gate_but_never_the_engine(self):
+        code, text = self.run_main("--precheck-only")
+        self.assertEqual(0, code, text)
+        self.assertEqual(1, len(self.gate_calls.read_text().splitlines()))
+        self.assertEqual([], self.engine_calls())
+        self.assertIn("pre-check passed; nothing written", text)
+        self.assertFalse((self.project / "99-output-p2p/issue-tracker/state.json").exists())
+        code, text = self.run_main("--precheck-only", "--convert-only")
+        self.assertEqual(2, code, text)
 
     def test_convert_only_needs_no_key_and_never_runs_the_engine(self):
         (self.project / "cre.json").unlink()

@@ -35,12 +35,12 @@ CABLETRACKER_REFERENCE_PATHS = (
 # The owner's CableTracker reference project (2026-10-23).  Its contents are
 # refreshed by the owner (a downloaded online tracker, instance files), so
 # only its disposition is pinned here, never its file list.
-CABLETRACKER_LLDPQ_ROOT = "tools/cabletracker-lldpq"
+CABLETRACKER_LLDPQ_ROOT = "tools/cabletracker"
 CABLETRACKER_LLDPQ_SAMPLE_PATHS = (
-    "tools/cabletracker-lldpq/cabletracker_runner.py",
-    "tools/cabletracker-lldpq/ibdiagnet/generate_report.py",
-    "tools/cabletracker-lldpq/online_Issue_Tracker.xlsx",
-    "tools/cabletracker-lldpq/tests/test_lldpq_source.py",
+    "tools/cabletracker/cabletracker_runner.py",
+    "tools/cabletracker/ibdiagnet/generate_report.py",
+    "tools/cabletracker/online_Issue_Tracker.xlsx",
+    "tools/cabletracker/tests/test_lldpq_source.py",
 )
 
 

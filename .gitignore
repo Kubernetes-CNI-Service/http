@@ -216,8 +216,8 @@ core.*
 /monitor/monitor.html
 # Owner-held Cabletracker tool is not part of the V3 source checkout.
 /monitor/cabletracker-main/
-# Owner's CableTracker reference project with a downloaded online tracker (2026-10-23); reference only.
-/tools/cabletracker-lldpq/
+# Owner's current CableTracker project (2026-10-23; update source of monitor/issue-tracker/cabletracker); reference only.
+/tools/cabletracker/
 
 # ZTP data and links populated from the active DAY0 project
 /ztp/image/

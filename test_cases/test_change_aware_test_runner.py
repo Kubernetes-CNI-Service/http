@@ -1107,6 +1107,8 @@ class ImpactManifestTests(unittest.TestCase):
                 "test_cases/fixed_https_peer_fixture.py",
                 "test_cases/ibsw_v2_switch_sim.py",
                 "monitor/issue-tracker/cabletracker/mapping_v4.json",
+                "test_cases/issue_tracker_template.py",
+                "monitor/issue-tracker/engine.lock.json",
             ],
             manifest["tracked_support"],
         )

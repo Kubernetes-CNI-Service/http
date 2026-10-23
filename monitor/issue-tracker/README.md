@@ -8,7 +8,8 @@
   - `mapping_v4.json`
   - `ibdiagnet/__init__.py`
   - `ibdiagnet/generate_report.py`
-- `format_precheck.py` 是写表前的只读格式关卡：用引擎自己的函数算出它要求的标签页和表头，与在线文档逐列比对；有任何不同就不写入（退出码 3，包装层随之以 2 退出）。没有跳过它的参数。
+- `format_precheck.py` 是写表前的只读格式关卡，详见下文「兼容引擎与文档的变化」。没有跳过它的参数。
+- `update-engine.py` 用于把新版引擎原样换进来；`engine.lock.json` 记录当前副本每个文件的 sha256。
 - `issue-tracker-sync.py` 是我们写的包装层。它只负责两件事：把我们自己的采集结果转换成引擎能读的两种格式，然后每个域各运行一次引擎。
 
 | 域 | 输入（项目目录内） | 转换 | 交给引擎 |
@@ -82,3 +83,45 @@ python3 monitor/issue-tracker/issue-tracker-sync.py --force          # 输入没
 
 - `generate_report.py` 要求 `-cvt.xlsx` 的 Server Profile 表至少有一行数据。我们的 `p2p-to-validation.py` 只在有 smc-b300 主机时才写这张表。没有这类主机时，IB 转换以退出码 1 报错，ETH 不受影响。
 - iblinkinfo 降级采集得到的 `.log` 不是 tgz，引擎读不了，不会被选作输入。
+
+## 兼容引擎与文档的变化
+
+CableTracker 的代码和在线文档都会演进。我们只复制它的同步部分，并且只通过两个公开接口使用它：
+
+- 命令行参数；
+- 两种输入格式：IB 用引擎自带 `generate_report.py` 产出的 CVT JSON，ETH 用引擎 README 公布的 LLDPQ schema v1。
+
+我们不调用引擎的内部函数。
+
+**格式关卡（影子运行）**：每次运行引擎前，`format_precheck.py` 先用引擎自己的入口完整跑一遍：
+
+- 读请求照常读真实文档；写请求全部拦截，不发出去。
+- 服务账号凭据被强制改成只读权限范围，所以即使有写请求漏过拦截，Google 也会拒绝。
+- 写请求只按它落在哪里判定：
+  - 导入表、Cabling 表 A1 的「… at:」时间戳：放行；
+  - 这两类表表头行以下的数据行：说明准备阶段已经结束，影子运行到此停止，判定通过；
+  - 其他一律判为改格式，拒绝：新建标签页、写标题行或表头行、增删列、写其他标签页、无法识别的请求。
+- 真正同步完成后，再把各标签页和表头行与同步前的快照比对。一旦发现被改，就报错并提示从文档的版本历史恢复。
+
+**更新引擎**：owner 把新版 CableTracker 项目放在 `tools/cabletracker/`（仅作参考，不进 git、不进镜像），然后执行：
+
+```bash
+python3 monitor/issue-tracker/update-engine.py --engine-python <装有引擎依赖的 python>
+python3 monitor/issue-tracker/issue-tracker-sync.py --precheck-only     # 只做转换和格式预检，不写表
+```
+
+`update-engine.py` 依次做三件事：
+
+1. 把同步需要的文件原样复制到暂存目录；
+2. 确认新版引擎的 `--help` 能运行，并且仍然接受我们用到的全部参数；
+3. 通过后才替换副本，并重写 `engine.lock.json`。
+
+如果新版拆出了新的本地模块，或者改了参数名，第 2 步就会拒绝，副本保持不变。测试按 `engine.lock.json` 校验副本，并用 `test_cases/issue_tracker_template.py` 中的标准模版，对真引擎做离线影子运行。
+
+## 时间说明
+
+`IB/ETH Cabling` 的 `Opened At` 由引擎在新建 Case 时按当前时间填写，不是数据的采集时间。采集时间写在导入表的 `Last Update (UTC)` 列，只精确到日期。所以同步应紧跟每次采集自动执行；补同步旧数据时，`Opened At` 会是补同步的时刻。
+
+## 设备状态（ETH&IB Switch）
+
+当前版本的 CableTracker 只会填写 Cabling 两张表。Switch status 里有问题的设备，会按在线文档 `ETH&IB Switch` 表的列和取值规范（BasicData 的状态、Fabric，以及 Priority 下拉值）提前整理成数据文件；等 CableTracker 支持同步设备状态后，直接交给它同步。我们不自己写这张表。
