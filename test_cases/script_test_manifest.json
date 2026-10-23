@@ -697,6 +697,14 @@
         "test_cases.test_ibsw_v2_workflow",
         "test_cases.test_ibsw_v2_entry"
       ]
+    },
+    {
+      "id": "issue-tracker-sync",
+      "description": "REQ7 在线 Issue Tracker 同步：原样复制的 CableTracker 引擎 + 包装层（IB/ETH 转换、配置与密钥检查、跳过未变输入），不联网",
+      "tests": [
+        "test_cases.test_issue_tracker_sync",
+        "test_cases.test_issue_tracker_sync_workflow"
+      ]
     }
   ],
   "tracked_support": [
@@ -887,7 +895,8 @@
     "test_cases/n_policy_original_window_fixture.py",
     "test_cases/nv_info_original_window_fixture.py",
     "test_cases/fixed_https_peer_fixture.py",
-    "test_cases/ibsw_v2_switch_sim.py"
+    "test_cases/ibsw_v2_switch_sim.py",
+    "monitor/issue-tracker/cabletracker/mapping_v4.json"
   ],
   "scripts": {
     "DAY0-Prepare/01-a-setup.py": "DAY0-Prepare/01-a-setup.py",
@@ -925,6 +934,10 @@
     "infra/infra-setup.py": "infra/infra-setup.py",
     "monitor/dot_to_html.py": "monitor/dot_to_html.py",
     "monitor/collection_v2_emitter.py": "monitor/collection_v2_emitter.py",
+    "monitor/issue-tracker/cabletracker/cabletracker_runner.py": "monitor/issue-tracker/cabletracker/cabletracker_runner.py",
+    "monitor/issue-tracker/cabletracker/ibdiagnet/__init__.py": "monitor/issue-tracker/cabletracker/ibdiagnet/__init__.py",
+    "monitor/issue-tracker/cabletracker/ibdiagnet/generate_report.py": "monitor/issue-tracker/cabletracker/ibdiagnet/generate_report.py",
+    "monitor/issue-tracker/issue-tracker-sync.py": "monitor/issue-tracker/issue-tracker-sync.py",
     "monitor/issue_tracker_qualification.py": "monitor/issue_tracker_qualification.py",
     "monitor/issue_tracker_manifest.py": "monitor/issue_tracker_manifest.py",
     "monitor/issue_tracker_cycle_source.py": "monitor/issue_tracker_cycle_source.py",
@@ -3138,6 +3151,28 @@
       ],
       "tests": [
         "test_cases.test_ibsw_v2_entry"
+      ]
+    },
+    {
+      "id": "issue_tracker_sync_direct",
+      "paths": [
+        "monitor/issue-tracker/issue-tracker-sync.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_sync",
+        "test_cases.test_issue_tracker_sync_workflow"
+      ]
+    },
+    {
+      "id": "issue_tracker_cabletracker_engine_direct",
+      "paths": [
+        "monitor/issue-tracker/cabletracker/cabletracker_runner.py",
+        "monitor/issue-tracker/cabletracker/ibdiagnet/__init__.py",
+        "monitor/issue-tracker/cabletracker/ibdiagnet/generate_report.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_sync",
+        "test_cases.test_issue_tracker_sync_workflow"
       ]
     }
   ],
@@ -5683,6 +5718,23 @@
       "tests": [
         "test_cases.test_ibsw_v2_entry"
       ]
+    },
+    {
+      "id": "issue_tracker_sync_flow",
+      "members": [
+        "monitor/issue-tracker/issue-tracker-sync.py",
+        "monitor/issue-tracker/cabletracker/cabletracker_runner.py",
+        "monitor/issue-tracker/cabletracker/ibdiagnet/__init__.py",
+        "monitor/issue-tracker/cabletracker/ibdiagnet/generate_report.py",
+        "tools/lldp-analyze-tool/analyze_lldp.py",
+        "ethernet/monitor/post-collect.py",
+        "infiniband/monitor/post-collect.py",
+        "tools/log_rotation.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_sync_workflow",
+        "test_cases.test_issue_tracker_sync"
+      ]
     }
   ],
   "path_rules": [
@@ -6590,6 +6642,15 @@
         "test_cases.test_ibsw_v2_device",
         "test_cases.test_ibsw_v2_workflow",
         "test_cases.test_ibsw_v2_entry"
+      ]
+    },
+    {
+      "paths": [
+        "monitor/issue-tracker/cabletracker/mapping_v4.json"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_sync",
+        "test_cases.test_issue_tracker_sync_workflow"
       ]
     }
   ]

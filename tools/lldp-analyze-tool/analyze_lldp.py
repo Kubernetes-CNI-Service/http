@@ -682,6 +682,7 @@ def write_report(
     activity_sources: dict[str, Path] | None = None,
     activity_source_sha256: dict[str, str] | None = None,
     activity_cycle_binding: dict | None = None,
+    payload_output: Path | None = None,
 ) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     archive_base = re.sub(r"\.tar\.gz$|\.tgz$", "", archive.name, flags=re.I)
@@ -808,6 +809,10 @@ def write_report(
         raise ValueError(f"XLSX generation failed: {detail}")
     if not output_path.is_file():
         raise ValueError(f"XLSX builder did not create: {output_path}")
+    if payload_output is not None:
+        # The machine-readable result of this analysis (same payload the XLSX was
+        # built from), kept for consumers such as the Issue Tracker sync.
+        write_payload_json(payload, payload_output)
     if activity_evidence_output is not None:
         if activity_sources is None or activity_source_sha256 is None:
             raise ValueError("activity evidence source snapshots are missing")
@@ -825,6 +830,21 @@ def write_report(
             cycle_binding=activity_cycle_binding,
         )
     return output_path
+
+
+def write_payload_json(payload: dict, destination: Path) -> None:
+    destination = destination.expanduser().absolute()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(prefix=".payload.", suffix=".json",
+                                             dir=destination.parent)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(payload, stream, ensure_ascii=False, indent=1)
+            stream.write("\n")
+        os.replace(temporary, destination)
+    except BaseException:
+        Path(temporary).unlink(missing_ok=True)
+        raise
 
 
 def default_output_directory() -> Path:
@@ -883,6 +903,11 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--worker-context-fd", type=int,
         help="inherited worker context FD for an ETH cycle-bound observation",
+    )
+    parser.add_argument(
+        "--payload-json", type=Path,
+        help=("also write the analysis result (the JSON the XLSX is built from) "
+              "to this file"),
     )
     return parser.parse_args(argv)
 
@@ -976,6 +1001,7 @@ def main(argv: Iterable[str] | None = None) -> int:
                 activity_sources=source_paths if source_sha256 is not None else None,
                 activity_source_sha256=source_sha256,
                 activity_cycle_binding=cycle_binding,
+                payload_output=args.payload_json,
             )
     except (OSError, ValueError, tarfile.TarError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)

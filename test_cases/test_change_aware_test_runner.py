@@ -114,6 +114,7 @@ EXPECTED_TEST_SUITES = [
     "req7-first-read-public-code",
     "req7-owned-live-read-v2-process",
     "fleet-upgrade-v2",
+    "issue-tracker-sync",
 ]
 
 
@@ -1105,6 +1106,7 @@ class ImpactManifestTests(unittest.TestCase):
                 "test_cases/nv_info_original_window_fixture.py",
                 "test_cases/fixed_https_peer_fixture.py",
                 "test_cases/ibsw_v2_switch_sim.py",
+                "monitor/issue-tracker/cabletracker/mapping_v4.json",
             ],
             manifest["tracked_support"],
         )
