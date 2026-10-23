@@ -1062,3 +1062,52 @@ class PublicPublicationV3OverlapWorkflowTests(unittest.TestCase):
                 self.assertIn(key + b"\n", single)
             self.assertEqual(47, len(single))
             self.assertIsNone(publication._C09_SCOPE.get())
+
+    # ---- C09 fix round (tests first): a batch never decides; whatever escapes it only means "not
+    # prefetched", and the unchanged single read is the one that raises ----
+    def test_any_exception_from_a_batch_only_falls_back_and_the_single_read_still_decides(self):
+        with tempfile.TemporaryDirectory(prefix="q01-v3-batch-exception-") as directory:
+            repository, head, expected = self._literal_tree_repository(directory)
+            real_run = subprocess.run
+            injected = {
+                "assertion-error": AssertionError("strict mock refused a multi-object read"),
+                "runtime-error": RuntimeError("strict mock refused a multi-object read"),
+                "text-stdout": None,
+            }
+            for name, error in injected.items():
+                with self.subTest(batch=name):
+                    multi, single = [], []
+
+                    def strict(*args, **kwargs):
+                        payload = kwargs.get("input") or b""
+                        if payload.count(b"\n") > 1:
+                            multi.append(payload)
+                            if error is not None:
+                                raise error
+                            return subprocess.CompletedProcess(args[0] if args else kwargs["args"], 0, "text\n", b"")
+                        if payload:
+                            single.append(payload)
+                        return real_run(*args, **kwargs)
+
+                    with mock.patch.object(subprocess, "run", side_effect=strict):
+                        self.assertEqual(expected, publication._verified_commit_records(repository, head))
+                    # Like a failed batch (T8): the first multi-key batch [a.txt bulk zz] escapes with the
+                    # injected failure, prefetch stops, and all 48 objects are read one by one.
+                    self.assertEqual(1, len(multi))
+                    self.assertEqual(48, len(single))
+                    self.assertIsNone(publication._C09_SCOPE.get())
+
+            refused = expected["bulk/f07"][2].encode()
+
+            def refuse(*args, **kwargs):
+                payload = kwargs.get("input") or b""
+                if refused in payload:
+                    raise AssertionError("strict mock refused a %d-object read" % payload.count(b"\n"))
+                return real_run(*args, **kwargs)
+
+            # A mock that refuses one object both inside a batch and alone: the batch refusal is
+            # swallowed as "not prefetched"; the verdict is the single read's own refusal.
+            with mock.patch.object(subprocess, "run", side_effect=refuse), self.assertRaises(AssertionError) as raised:
+                publication._verified_commit_records(repository, head)
+            self.assertEqual("strict mock refused a 1-object read", str(raised.exception))
+            self.assertIsNone(publication._C09_SCOPE.get())
