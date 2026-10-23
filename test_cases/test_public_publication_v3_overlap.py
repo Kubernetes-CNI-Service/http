@@ -693,3 +693,122 @@ class PublicPublicationV3OverlapWorkflowTests(unittest.TestCase):
             for (object_id, kind), result in served:
                 self.assertEqual(result, publication._read_raw_git_object(repository, object_id, kind))
             self.assertTrue(any(run["input"].count(b"\n") > 1 for run in runs))
+
+    # ---- C09 fix round (tests first): the advisory first-parent hint starts no process unless head
+    # and anchor are exact object ids, hands Git the head only after --end-of-options, and treats
+    # output it cannot decode as no hint; the chain and its verdicts stay those of the raw walk ----
+    def _literal_commit_chain(self, directory, count):
+        repository = Path(directory) / "repository"
+        repository.mkdir()
+        self._git(repository, "init", "-q")
+        commits = []
+        for index in range(count):
+            (repository / "n.txt").write_bytes(f"{index}\n".encode())
+            self._git(repository, "add", "-A")
+            self._git(repository, "-c", "commit.gpgsign=false", "commit", "-qm", f"c{index}")
+            commits.append(self._git(repository, "rev-parse", "HEAD").decode().strip())
+        return repository, commits
+
+    @staticmethod
+    def _completed_like_subprocess(argv, kwargs, returncode, stdout, stderr):
+        # What subprocess.run returns for these raw bytes under the caller's own decoding request:
+        # the bytes themselves without text mode; strictly decoded, newline-translated text with it.
+        if any(kwargs.get(name) for name in ("text", "universal_newlines", "encoding", "errors")):
+            import locale
+
+            encoding = kwargs.get("encoding") or locale.getpreferredencoding(False)
+            errors = kwargs.get("errors") or "strict"
+            stdout, stderr = (
+                data.decode(encoding, errors).replace("\r\n", "\n").replace("\r", "\n")
+                for data in (stdout, stderr)
+            )
+        return subprocess.CompletedProcess(argv, returncode, stdout, stderr)
+
+    def test_first_parent_hint_starts_no_process_unless_head_and_anchor_are_exact_object_ids(self):
+        with tempfile.TemporaryDirectory(prefix="q01-v3-chain-hint-gate-") as directory:
+            repository, commits = self._literal_commit_chain(directory, 12)
+            sentinel = Path(directory) / "sentinel"
+            sentinel_bytes = b"sentinel bytes that no Git option may touch\n"
+            option = f"--output={sentinel}"
+            nul_head = commits[-1][:39] + "\0"
+            # (head, anchor, the exact AssertionError of the raw walk at 37d2b35, its one-OID reads):
+            # a non-object-id head is rejected by the primitive before any process starts; with an
+            # option-shaped anchor the raw walk reads c11..c1 one by one and reaches S = c0.
+            cases = (
+                ("option-shaped-head", option, commits[1], f"invalid P object id: {option!r}", 0),
+                ("nul-in-head", nul_head, commits[1], f"invalid P object id: {nul_head!r}", 0),
+                ("option-shaped-anchor", commits[-1], option,
+                 "V3 history reached S without the published V2 anchor", 11),
+            )
+            real_run = subprocess.run
+            for name, head, anchor, message, reads in cases:
+                with self.subTest(case=name):
+                    sentinel.write_bytes(sentinel_bytes)
+                    hints, runs = [], []
+
+                    def recorded(*args, **kwargs):
+                        argv = tuple(os.fspath(value) for value in (args[0] if args else kwargs["args"]))
+                        if "rev-list" in argv:
+                            hints.append(argv)
+                        elif argv[-2:] == ("cat-file", "--batch"):
+                            runs.append(kwargs.get("input"))
+                        return real_run(*args, **kwargs)
+
+                    with mock.patch.object(publication, "S_COMMIT", commits[0]), mock.patch.object(
+                        subprocess, "run", side_effect=recorded,
+                    ), self.assertRaises(AssertionError) as raised:
+                        publication._raw_v3_first_parent_chain(repository, head, anchor)
+                    self.assertIs(AssertionError, type(raised.exception))
+                    self.assertEqual(message, str(raised.exception))
+                    self.assertEqual([], hints)
+                    self.assertEqual(sentinel_bytes, sentinel.read_bytes())
+                    self.assertEqual([1] * reads, [payload.count(b"\n") for payload in runs])
+                    self.assertIsNone(publication._C09_SCOPE.get())
+
+    def test_first_parent_hint_passes_head_after_end_of_options_and_undecodable_output_is_no_hint(self):
+        with tempfile.TemporaryDirectory(prefix="q01-v3-chain-hint-bytes-") as directory:
+            repository, commits = self._literal_commit_chain(directory, 12)
+            literal_chain = tuple(reversed(commits[2:]))
+            listed = b"".join(commit.encode("ascii") + b"\n" for commit in reversed(commits))
+            # None = the real rev-list; otherwise (returncode, stdout bytes, stderr bytes) of the hint.
+            outcomes = {
+                "real-rev-list": None,
+                "undecodable-stdout": (0, listed + b"\xff\n", b""),
+                "undecodable-stderr": (128, b"", b"fatal: \xff\n"),
+            }
+            real_run = subprocess.run
+            for name, outcome in outcomes.items():
+                with self.subTest(hint=name):
+                    hints, runs = [], []
+
+                    def scripted(*args, **kwargs):
+                        argv = tuple(os.fspath(value) for value in (args[0] if args else kwargs["args"]))
+                        if "rev-list" in argv:
+                            hints.append(argv)
+                            if outcome is not None:
+                                return self._completed_like_subprocess(argv, kwargs, *outcome)
+                        elif argv[-2:] == ("cat-file", "--batch"):
+                            runs.append(kwargs.get("input"))
+                        return real_run(*args, **kwargs)
+
+                    with mock.patch.object(publication, "S_COMMIT", commits[0]), mock.patch.object(
+                        subprocess, "run", side_effect=scripted,
+                    ):
+                        self.assertEqual(
+                            literal_chain,
+                            publication._raw_v3_first_parent_chain(repository, commits[-1], commits[1]),
+                        )
+                    self.assertEqual(1, len(hints))
+                    argv = hints[0]
+                    self.assertEqual(1, argv.count(commits[-1]))
+                    self.assertEqual("--end-of-options", argv[argv.index(commits[-1]) - 1])
+                    requested = b"".join(runs)
+                    self.assertNotIn(commits[1].encode(), requested)
+                    self.assertNotIn(commits[0].encode(), requested)
+                    if outcome is None:
+                        # A good hint is still used: the 10 raw commit reads share a closed batch.
+                        self.assertTrue(any(payload.count(b"\n") > 1 for payload in runs))
+                    else:
+                        # Output that is not strict ASCII (even with valid lines in it) is no hint at all.
+                        self.assertEqual([1] * 10, [payload.count(b"\n") for payload in runs])
+                    self.assertIsNone(publication._C09_SCOPE.get())
