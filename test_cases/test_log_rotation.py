@@ -17,6 +17,11 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULE = ROOT / "tools/log_rotation.py"
+# The page generator and the worker import siblings from monitor/ and tools/; set the paths here so this
+# module also runs on its own, not only after another test module has done it.
+for _root in (ROOT, ROOT / "tools", ROOT / "monitor"):
+    if str(_root) not in sys.path:
+        sys.path.insert(0, str(_root))
 
 
 def load(path: Path, name: str):
