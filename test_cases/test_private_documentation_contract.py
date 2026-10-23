@@ -4,12 +4,16 @@
 from pathlib import Path
 import importlib.util
 import json
+import re
+import subprocess
 import sys
 import tempfile
 import unittest
 
-from test_cases.test_documentation_catalog import *  # public catalog helpers
-from test_cases.test_documentation_catalog import DocumentationCatalogTests
+from test_cases import test_documentation_catalog as DOCUMENTATION_CATALOG
+from test_cases.test_documentation_catalog import (  # public catalog helpers
+    USER_MANUAL_SCRIPT, bash_commands, load_path,
+)
 from monitor.switch_collection_gate import COOLDOWN_SECONDS
 from tools.project_contract import MIN_CONTINUOUS_INTERVAL_MINUTES
 
@@ -78,7 +82,7 @@ class PrivateDocumentationContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         require_complete_private_document_tier(ROOT)
-        DocumentationCatalogTests.setUpClass.__func__(cls)
+        DOCUMENTATION_CATALOG.DocumentationCatalogTests.setUpClass.__func__(cls)
 
     def test_user_manual_scenario_two_uses_the_real_two_step_setup_flow(self):
         manual = (ROOT / "USER_MANUAL.md").read_text(encoding="utf-8")

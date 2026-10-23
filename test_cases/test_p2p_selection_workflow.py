@@ -20,7 +20,8 @@ from unittest import mock
 import zipfile
 
 from test_cases.test_upload_package_contract import REQUIRED_UPLOAD_SOURCES
-from test_cases.test_load_release_transaction import ReleaseTransactionTests, LOAD, MANUAL
+from test_cases import test_load_release_transaction as RELEASE_FIXTURE
+from test_cases.test_load_release_transaction import LOAD, MANUAL
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -337,7 +338,7 @@ class P2PSelectionWorkflowTests(unittest.TestCase):
                 self.assertEqual(source.read_bytes(), member.read())
 
     def test_parent_release_and_manual_gate_bind_selected_real_path_and_digest(self):
-        fixture = ReleaseTransactionTests(
+        fixture = RELEASE_FIXTURE.ReleaseTransactionTests(
             "test_manual_preflight_binds_parent_to_the_exact_current_child",
         )
         fixture.setUp()
@@ -378,7 +379,7 @@ class P2PSelectionWorkflowTests(unittest.TestCase):
             fixture.tearDown()
 
     def test_legacy_v1_parent_without_real_source_binding_requires_fresh_load(self):
-        fixture = ReleaseTransactionTests(
+        fixture = RELEASE_FIXTURE.ReleaseTransactionTests(
             "test_manual_preflight_binds_parent_to_the_exact_current_child",
         )
         fixture.setUp()

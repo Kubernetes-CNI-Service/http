@@ -20,7 +20,7 @@ import unittest
 from unittest import mock
 
 from test_cases.test_finished_project_import import build_finished_bundle
-from test_cases.test_finished_project_rehydrate import FinishedProjectRehydrateTests
+from test_cases import test_finished_project_rehydrate as REHYDRATE_FIXTURE
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -134,7 +134,7 @@ class FinishedProjectLifecycleWorkflowTests(unittest.TestCase):
             workspace = Path(directory) / "http"
             day0 = workspace / "DAY0-Prepare"
             day0.mkdir(parents=True)
-            record, _record_id = FinishedProjectRehydrateTests(
+            record, _record_id = REHYDRATE_FIXTURE.FinishedProjectRehydrateTests(
                 "test_default_materializes_only_working_inputs_and_source_receipt"
             )._record(workspace, global_text=global_text, subnet_text=subnet_text)
             rehydrate = load_module(
@@ -229,7 +229,7 @@ class FinishedProjectLifecycleWorkflowTests(unittest.TestCase):
             workspace = Path(directory) / "http"
             day0 = workspace / "DAY0-Prepare"
             day0.mkdir(parents=True)
-            record, _record_id = FinishedProjectRehydrateTests(
+            record, _record_id = REHYDRATE_FIXTURE.FinishedProjectRehydrateTests(
                 "test_default_materializes_only_working_inputs_and_source_receipt"
             )._record(workspace)
             rehydrate = load_module(
@@ -303,7 +303,7 @@ class FinishedProjectLifecycleWorkflowTests(unittest.TestCase):
             workspace = Path(directory) / "http"
             day0 = workspace / "DAY0-Prepare"
             day0.mkdir(parents=True)
-            record, _record_id = FinishedProjectRehydrateTests(
+            record, _record_id = REHYDRATE_FIXTURE.FinishedProjectRehydrateTests(
                 "test_default_materializes_only_working_inputs_and_source_receipt"
             )._record(workspace)
             rehydrate = load_module(
@@ -378,7 +378,7 @@ class FinishedProjectLifecycleWorkflowTests(unittest.TestCase):
             workspace = Path(directory) / "http"
             day0 = workspace / "DAY0-Prepare"
             day0.mkdir(parents=True)
-            record, _record_id = FinishedProjectRehydrateTests(
+            record, _record_id = REHYDRATE_FIXTURE.FinishedProjectRehydrateTests(
                 "test_default_materializes_only_working_inputs_and_source_receipt"
             )._record(workspace)
             rehydrate = load_module(
