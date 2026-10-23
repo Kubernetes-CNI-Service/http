@@ -350,7 +350,8 @@ def build(parser, kind: str, *, inventory: list[dict], planned: set[str] | None,
     }
 
 
-def write_json(document: dict, destination: Path) -> None:
+def write_status_document(document: dict, destination: Path) -> None:
+    """Replace the status file whole (temporary file in the same directory, then os.replace)."""
     destination.parent.mkdir(parents=False, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(prefix=f".{destination.name}.", dir=destination.parent)
     try:
@@ -413,7 +414,7 @@ def main(argv: Iterable[str] | None = None) -> int:
                 continue
             documents.append((relative, document))
         for relative, document in documents:
-            write_json(document, project / relative)
+            write_status_document(document, project / relative)
             carried = f" ({document['carried']} kept from earlier runs)" if document["carried"] else ""
             say(f"{document['device_type']}: {document['expected']} expected, {document['collected']} collected, "
                 f"{document['with_problems']} with problems{carried} -> {relative}")
