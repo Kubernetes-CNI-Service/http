@@ -679,8 +679,9 @@ def _source_bound_load_report_path(
     source edit. This is a narrow path certificate, not WDISC completeness or
     a general permission to discharge unknown destinations in either module.
     """
+    # 2026-10-23 fixlist #9: 11-load.py changed with the UFM integration (was d9c67b110d7a…); _load_report_structural_path holds on the current file.
     reviewed = (
-        (load_tree, "d9c67b110d7a2ce6cc3c17bd956164e3906ae08d1807c889ab7786d47ca05ca6"),
+        (load_tree, "e3ef9185a8f0f10f64b3cfad79280e02700487795b16dca707d41bffbf92297b"),
         (report_tree, "d2b79619b2ace8c4ea96edcf0ad599001d8f78af6a569168bc4971770e0bca05"),
     )
     if any(_reviewed_source_ast_sha256(tree)

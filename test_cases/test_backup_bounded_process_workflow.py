@@ -36,10 +36,12 @@ _RUNTIME_ORIGINALS = (
         "subprocess_relative": "lib/python3.9/subprocess.py",
         "subprocess_sha256": "d2f73c7128a3931f74411b46352146ba85322a8dc8f12a721d4801dc43d9766e",
     },
+    # 2026-10-23 fixlist #8: the 10-21 codex runtime bundle re-signed this binary (was 7a314947596f…);
+    # subprocess.py still equals its pin.
     {
         "version": (3, 12, 14),
         "executable": "/Users/joeyyang/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3.12",
-        "runtime_sha256": "7a314947596fc484d4ec36ffc28e843b78d6d749c68736f8b5c24e7333f418eb",
+        "runtime_sha256": "536e86a21ddcb95ab3cebfa38bfe0a429708c7a74682edcadb44e9c7eac19a2d",
         "subprocess_relative": "lib/python3.12/subprocess.py",
         "subprocess_sha256": "85d29b2bf0249f5436838298c9a60ee93508b1102e9ac43b001f8a7e7ae8f375",
     },
